@@ -72,6 +72,23 @@ Status: deviation
 
 A reset lock and its state are replaced on first use in a new fork
 generation; the parent's copy is forgotten, never released or waited on.
+In the runtime a reset value is declared `Reset`: a slot holding the
+current instance tagged with the generation that built it, replaced by
+compare-and-swap, so a child never waits on a lock and threads of one
+generation share one instance. A thread forking while it holds a reset
+lock would keep the parent's instance in the child, so prepare aborts then
+too. Model: `tla/ResetPublish.tla`
+(`ResetPublish` passes; the `store`, `no_generation` and `free_observed`
+variants fail). Tests: a_child_forked_while_a_thread_holds_a_reset_lock_gets_a_fresh_one,
+a_fork_from_a_thread_holding_a_reset_lock_aborts,
+a_forked_child_never_resolves_its_parents_cell,
+a_forked_child_leaves_its_parents_spooled_inputs,
+a_forked_child_leaves_its_parents_temp_files,
+a_forked_child_starts_its_own_sweeper_when_its_parent_had_one. A fresh
+value that depends on the parent's state is seeded from it: the temp
+registry's dispatch count starts at the forking thread's dispatch depth,
+and a child restarts the sweeper when its parent had started one. The
+emitted Futhark context lock is not yet reset.
 
 ### FORK-9 A lazily initialised value cannot be mid-initialisation at fork
 Status: deviation
@@ -109,8 +126,8 @@ continue as an uncounted worker taking the parent's scheduler locks.
 Status: deviation
 
 A value derived from the process id and cached on first use names the
-parent in a child that inherits it: logging reports the parent's pid and
-fold cells carry the parent's tag.
+parent in a child that inherits it: logging reports the parent's pid. Fold
+cells draw a new tag in the child, never equal to the parent's.
 
 ## Classes and ranks
 

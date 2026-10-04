@@ -1356,11 +1356,11 @@ struct BorrowEntry {
 // registry lock, and an entry is removed before its block is released.
 unsafe impl Send for BorrowEntry {}
 
-static BORROWABLE: std::sync::Mutex<Vec<BorrowEntry>> = std::sync::Mutex::new(Vec::new());
+static BORROWABLE: crate::fork_policy::Reset<Vec<BorrowEntry>> = crate::fork_policy::Reset::new(Vec::new);
 
 /// A poisoned registry is not a reason to abort: the lock is taken inside
 /// release callbacks, which are `extern "C"` and cannot unwind.
-fn borrowable() -> std::sync::MutexGuard<'static, Vec<BorrowEntry>> {
+fn borrowable() -> crate::fork_policy::ResetGuard<'static, Vec<BorrowEntry>> {
     BORROWABLE.lock().unwrap_or_else(|e| e.into_inner())
 }
 

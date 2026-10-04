@@ -1,8 +1,8 @@
 use std::cell::Cell;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Condvar, LockResult, Mutex, MutexGuard, PoisonError};
 
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -22,14 +22,6 @@ impl<T> ForkLocal<T> {
 
     pub(crate) fn is_inherited(&self) -> bool {
         self.generation != generation()
-    }
-
-    pub(crate) fn into_inner(self) -> Option<T> {
-        let mut this = ManuallyDrop::new(self);
-        if this.is_inherited() {
-            return None;
-        }
-        Some(unsafe { ManuallyDrop::take(&mut this.value) })
     }
 }
 
@@ -58,6 +50,7 @@ impl<T> Drop for ForkLocal<T> {
 
 thread_local! {
     static HELD_RANKS: Cell<u64> = const { Cell::new(0) };
+    static RESETS_HELD: Cell<usize> = const { Cell::new(0) };
 }
 
 // FORK-7: every thread takes these in ascending rank.
@@ -133,6 +126,87 @@ impl<T> Drop for HeldGuard<'_, T> {
     }
 }
 
+struct ResetBox<T> {
+    generation: u64,
+    mutex: Mutex<T>,
+}
+
+// FORK-8: tla/ResetPublish.tla.
+pub(crate) struct Reset<T> {
+    current: AtomicPtr<ResetBox<T>>,
+    init: fn() -> T,
+    _shared_as: std::marker::PhantomData<Mutex<T>>,
+}
+
+pub(crate) struct ResetGuard<'a, T> {
+    guard: MutexGuard<'a, T>,
+}
+
+impl<'a, T> ResetGuard<'a, T> {
+    fn new(guard: MutexGuard<'a, T>) -> Self {
+        RESETS_HELD.with(|n| n.set(n.get() + 1));
+        ResetGuard { guard }
+    }
+}
+
+impl<T> Deref for ResetGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> DerefMut for ResetGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for ResetGuard<'_, T> {
+    fn drop(&mut self) {
+        RESETS_HELD.with(|n| n.set(n.get() - 1));
+    }
+}
+
+impl<T> Reset<T> {
+    pub(crate) const fn new(init: fn() -> T) -> Self {
+        Reset { current: AtomicPtr::new(std::ptr::null_mut()), init, _shared_as: std::marker::PhantomData }
+    }
+
+    fn mutex(&self) -> &Mutex<T> {
+        let generation = generation();
+        loop {
+            let seen = self.current.load(Ordering::Acquire);
+            // SAFETY: FORK-8: a published box is never freed.
+            if let Some(b) = unsafe { seen.as_ref() } {
+                if b.generation == generation {
+                    return &b.mutex;
+                }
+            }
+            let fresh = Box::into_raw(Box::new(ResetBox { generation, mutex: Mutex::new((self.init)()) }));
+            match self.current.compare_exchange(seen, fresh, Ordering::AcqRel, Ordering::Acquire) {
+                // SAFETY: FORK-8: published, so never freed.
+                Ok(_) => return unsafe { &(*fresh).mutex },
+                // SAFETY: FORK-8: the loser frees only its own unpublished box.
+                Err(_) => drop(unsafe { Box::from_raw(fresh) }),
+            }
+        }
+    }
+
+    pub(crate) fn lock(&self) -> LockResult<ResetGuard<'_, T>> {
+        match self.mutex().lock() {
+            Ok(g) => Ok(ResetGuard::new(g)),
+            Err(p) => Err(PoisonError::new(ResetGuard::new(p.into_inner()))),
+        }
+    }
+}
+
+static INHERITED_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn inherited_dispatches() -> usize {
+    INHERITED_DISPATCHES.load(Ordering::Relaxed)
+}
+
 struct ForkHeld {
     _pass: HeldGuard<'static, ()>,
     map: HeldGuard<'static, Option<std::collections::HashMap<i64, crate::stream::LocalEntry>>>,
@@ -148,8 +222,7 @@ thread_local! {
 }
 
 extern "C" fn prepare_fork() {
-    let held = HELD_RANKS.with(Cell::get);
-    if held != 0 {
+    if HELD_RANKS.with(Cell::get) != 0 || RESETS_HELD.with(Cell::get) != 0 {
         let msg = b"morloc: fork from a thread holding a runtime lock\n";
         unsafe {
             libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
@@ -178,6 +251,8 @@ extern "C" fn after_fork_in_parent() {
 
 extern "C" fn after_fork_in_child() {
     GENERATION.fetch_add(1, Ordering::Relaxed);
+    INHERITED_DISPATCHES.store(crate::intrinsics::dispatch_depth(), Ordering::Relaxed);
+    crate::cell::after_fork_in_child();
     FORK_HELD.with(|h| {
         if let Some(mut held) = h.borrow_mut().take() {
             crate::stream::after_fork_in_child(&mut held.map, &mut held.locked_fds);
@@ -195,6 +270,20 @@ extern "C" fn register_fork_handlers() {
 #[cfg_attr(any(target_os = "linux", target_os = "android"), link_section = ".init_array")]
 #[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
 static REGISTER_AT_LOAD: extern "C" fn() = register_fork_handlers;
+
+#[cfg(test)]
+pub(crate) fn exits_cleanly_in_a_forked_child(work: impl FnOnce() -> bool) -> bool {
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0);
+    if pid == 0 {
+        unsafe { libc::alarm(5) };
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or(false);
+        unsafe { libc::_exit(if ok { 0 } else { 1 }) }
+    }
+    let mut status = 0;
+    unsafe { libc::waitpid(pid, &mut status, 0) };
+    libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+}
 
 #[cfg(test)]
 mod tests {
@@ -236,6 +325,53 @@ mod tests {
         assert_eq!(crate::ffi::morloc_fork_generation(), parent);
     }
 
+    static PROBE: Reset<u32> = Reset::new(|| 7);
+
+    #[test]
+    fn a_child_forked_while_a_thread_holds_a_reset_lock_gets_a_fresh_one() {
+        *PROBE.lock().unwrap() = 8;
+        let held = Arc::new(std::sync::Barrier::new(2));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let held = Arc::clone(&held);
+            std::thread::spawn(move || {
+                let guard = PROBE.lock().unwrap();
+                held.wait();
+                let _ = release_rx.recv();
+                drop(guard);
+            })
+        };
+        held.wait();
+        let ok = exits_cleanly_in_a_forked_child(|| {
+            let mut v = PROBE.lock().unwrap();
+            let fresh = *v == 7;
+            *v = 9;
+            fresh
+        });
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(ok, "a forked child blocked on, or saw, its parent's reset value");
+        assert_eq!(*PROBE.lock().unwrap(), 8);
+    }
+
+    #[test]
+    fn a_fork_from_a_thread_holding_a_reset_lock_aborts() {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe { libc::alarm(5) };
+            let _probe = PROBE.lock().unwrap();
+            let grandchild = unsafe { libc::fork() };
+            unsafe { libc::_exit(if grandchild == 0 { 0 } else { 1 }) };
+        }
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert!(
+            libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGABRT,
+            "the fork did not abort: status {status}"
+        );
+    }
+
     #[test]
     #[should_panic(expected = "lock of rank 4 taken while holding ranks")]
     fn a_lock_taken_below_a_held_rank_is_refused() {
@@ -259,20 +395,5 @@ mod tests {
             libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGABRT,
             "the fork neither aborted nor completed cleanly: status {status}"
         );
-    }
-
-    #[test]
-    fn a_forked_child_gets_nothing_back_from_into_inner() {
-        let local = ForkLocal::new(7u32);
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0);
-        if pid == 0 {
-            let none = ForkLocal::into_inner(local).is_none();
-            unsafe { libc::_exit(if none { 0 } else { 1 }) }
-        }
-        let mut status = 0;
-        unsafe { libc::waitpid(pid, &mut status, 0) };
-        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
-        assert_eq!(local.into_inner(), Some(7));
     }
 }

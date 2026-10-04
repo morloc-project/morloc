@@ -440,7 +440,7 @@ unsafe fn spool_stdin_to_temp() -> Result<String, MorlocError> {
 }
 
 /// Temporary files holding input spooled off a pipe, removed at exit.
-static SPOOLED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static SPOOLED: crate::fork_policy::Reset<Vec<String>> = crate::fork_policy::Reset::new(Vec::new);
 
 /// Remove every file spooled off a pipe during this run.
 pub fn remove_spooled_inputs() {
@@ -3957,6 +3957,23 @@ pub unsafe extern "C" fn make_call_packet_from_cli(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forked_child_leaves_its_parents_spooled_inputs() {
+        let path = std::env::temp_dir().join(format!("morloc-spool-fork-test-{}", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let p = path.to_string_lossy().into_owned();
+        SPOOLED.lock().unwrap_or_else(|e| e.into_inner()).push(p.clone());
+        let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            remove_spooled_inputs();
+            true
+        });
+        let survived = path.exists();
+        SPOOLED.lock().unwrap_or_else(|e| e.into_inner()).retain(|q| *q != p);
+        let _ = std::fs::remove_file(&path);
+        assert!(ok);
+        assert!(survived, "a forked child removed a file its parent spooled");
+    }
 
     /// A data file whose header says its payload is a shared-memory
     /// reference cannot be loaded: the reference meant something only in

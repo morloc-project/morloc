@@ -308,8 +308,10 @@ struct TempRegistry {
     active: usize,
 }
 
-static TEMP_REGISTRY: std::sync::Mutex<TempRegistry> =
-    std::sync::Mutex::new(TempRegistry { entries: Vec::new(), active: 0 });
+static TEMP_REGISTRY: crate::fork_policy::Reset<TempRegistry> = crate::fork_policy::Reset::new(|| TempRegistry {
+    entries: Vec::new(),
+    active: crate::fork_policy::inherited_dispatches(),
+});
 
 /// Source of dispatch identities for the temp registry.
 ///
@@ -330,6 +332,11 @@ pub(crate) const TEMP_OWNER_NONE: u64 = 0;
 thread_local! {
     static CURRENT_TEMP_OWNER: std::cell::Cell<u64> =
         const { std::cell::Cell::new(TEMP_OWNER_NONE) };
+    static DISPATCH_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn dispatch_depth() -> usize {
+    DISPATCH_DEPTH.with(|d| d.get())
 }
 
 /// The dispatch this thread is running. Shared with the cell registry,
@@ -348,6 +355,7 @@ pub fn begin_dispatch() -> (u64, u64) {
         c.set(id);
         old
     });
+    DISPATCH_DEPTH.with(|d| d.set(d.get() + 1));
     if let Ok(mut reg) = TEMP_REGISTRY.lock() {
         reg.active += 1;
     }
@@ -454,6 +462,7 @@ pub unsafe extern "C" fn mlc_unlink_tmp(
 /// moment the file is taken out of the registry.
 pub fn end_dispatch(call_id: u64, prev: u64) {
     CURRENT_TEMP_OWNER.with(|c| c.set(prev));
+    DISPATCH_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
     let mut last_dispatch = false;
     let doomed: Vec<std::path::PathBuf> = match TEMP_REGISTRY.lock() {
         Ok(mut reg) => {
@@ -2220,4 +2229,46 @@ pub unsafe extern "C" fn mlc_materialize_subpacket_from_bytes(
         let p = crate::stream::shared_materialize_subpacket_from_bytes(slice, &rs)?;
         Ok(p as *mut c_void)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe fn tmpfile() -> String {
+        let mut err: *mut c_char = ptr::null_mut();
+        let p = mlc_tmpfile(&mut err);
+        assert!(!p.is_null());
+        CString::from_raw(p).into_string().unwrap()
+    }
+
+    #[test]
+    fn a_forked_child_leaves_its_parents_temp_files() {
+        let (id, prev) = begin_dispatch();
+        let path = unsafe { tmpfile() };
+        let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            end_dispatch(id, prev);
+            true
+        });
+        let survived = std::path::Path::new(&path).exists();
+        end_dispatch(id, prev);
+        assert!(ok);
+        assert!(survived, "a forked child removed a temp file its parent's dispatch owns");
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    #[test]
+    fn a_dispatch_in_a_forked_child_keeps_the_temps_of_the_dispatch_it_forked_inside() {
+        let (id, prev) = begin_dispatch();
+        let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let path = std::thread::spawn(|| unsafe { tmpfile() }).join().unwrap();
+            let (inner, outer) = begin_dispatch();
+            end_dispatch(inner, outer);
+            let kept = std::path::Path::new(&path).exists();
+            let _ = std::fs::remove_file(&path);
+            kept
+        });
+        end_dispatch(id, prev);
+        assert!(ok, "a nested dispatch in a forked child swept an unowned temp while its outer dispatch ran");
+    }
 }

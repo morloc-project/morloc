@@ -39,7 +39,7 @@ library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::SCHEMA_TABLE	
 morloc-runtime/arrow_ffi.rs::stats_enabled::FLAG	startup		FORK-9
 morloc-runtime/arrow_shm.rs::-::COPIED_BYTES	counter		
 morloc-runtime/arrow_shm.rs::-::LIVE_VIEW_BYTES	counter		
-morloc-runtime/arrow_shm.rs::-::BORROWABLE	reset		FORK-8
+morloc-runtime/arrow_shm.rs::-::BORROWABLE	reset		
 morloc-runtime/arrow_shm.rs::borrowing_disabled::FLAG	startup		FORK-9
 morloc-runtime/cache.rs::pool_hash::CACHED	startup		FORK-9
 morloc-runtime/cache.rs::cache_base::CACHED	startup		FORK-9
@@ -47,10 +47,10 @@ morloc-runtime/cache.rs::-::CACHE_HITS	counter
 morloc-runtime/cache.rs::-::CACHE_MISSES	counter		
 morloc-runtime/cache.rs::-::CACHE_STORES	counter		
 morloc-runtime/cache.rs::read_cache_compression_level::CACHED	startup		FORK-9
-morloc-runtime/cell.rs::proc_tag::TAG	fork-scoped		FORK-13
-morloc-runtime/cell.rs::-::CELL_REGISTRY	reset		FORK-8
+morloc-runtime/cell.rs::-::TAG	fork-scoped		
+morloc-runtime/cell.rs::-::CELL_REGISTRY	reset		
 morloc-runtime/cli.rs::-::STDIN_CLAIMED	counter		
-morloc-runtime/cli.rs::-::SPOOLED	reset		FORK-8
+morloc-runtime/cli.rs::-::SPOOLED	reset		
 morloc-runtime/crash.rs::-::LANG	startup		
 morloc-runtime/crash.rs::-::FRAME_FN	startup		
 morloc-runtime/crash.rs::-::PENDING	counter		
@@ -86,11 +86,16 @@ morloc-runtime/eval_arena.rs::-::ARENA	thread
 morloc-runtime/eval_arena.rs::-::TEARDOWN_PROBE	test-only		
 morloc-runtime/fork_policy.rs::-::GENERATION	counter		
 morloc-runtime/fork_policy.rs::-::HELD_RANKS	thread		
+morloc-runtime/fork_policy.rs::-::RESETS_HELD	thread		
 morloc-runtime/fork_policy.rs::-::Held.mutex	instance		
 morloc-runtime/fork_policy.rs::-::FORK_HELD	thread		
-morloc-runtime/intrinsics.rs::-::TEMP_REGISTRY	reset		FORK-8
+morloc-runtime/fork_policy.rs::-::ResetBox.mutex	instance		
+morloc-runtime/fork_policy.rs::-::INHERITED_DISPATCHES	fork-scoped		
+morloc-runtime/fork_policy.rs::-::PROBE	test-only		
+morloc-runtime/intrinsics.rs::-::TEMP_REGISTRY	reset		
 morloc-runtime/intrinsics.rs::-::TEMP_OWNER_COUNTER	counter		
 morloc-runtime/intrinsics.rs::-::CURRENT_TEMP_OWNER	thread		
+morloc-runtime/intrinsics.rs::-::DISPATCH_DEPTH	thread		
 morloc-runtime/ipc_ffi.rs::-::PING_PEEK_ACTIVE	counter		
 morloc-runtime/ipc_ffi.rs::trace_close_enabled::T	startup		FORK-9
 morloc-runtime/ipc_ffi.rs::-::SELF_SOCKET	held	12	FORK-5
@@ -158,13 +163,13 @@ morloc-runtime/stream.rs::-::PROCESS_LOCAL_RETURNED	paired
 morloc-runtime/stream.rs::-::LOCKED_FDS	held	3	
 morloc-runtime/stream.rs::slot_probe_seed::SEED	counter		
 morloc-runtime/stream.rs::-::RELEASE_PASS	held	1	FORK-10
-morloc-runtime/stream.rs::-::RELEASE_SERVICE	reset		FORK-8
+morloc-runtime/stream.rs::-::RELEASE_SERVICE	reset		
 morloc-runtime/stream.rs::-::BEFORE_STREAM_LOCK	test-only		
 morloc-runtime/stream.rs::-::CURRENT_CALL_ID	thread		
 morloc-runtime/stream.rs::-::STDIO_SOCK	thread		
 morloc-runtime/stream.rs::-::DRAIN_GAP_HOOK	test-only		
-morloc-runtime/stream.rs::-::SWEEPER_TX	reset		FORK-8
-morloc-runtime/stream.rs::-::SWEEPER_HANDLE	reset		FORK-8
+morloc-runtime/stream.rs::-::SWEEPER	reset		
+morloc-runtime/stream.rs::-::SWEEPER_STARTED	counter		
 morloc-runtime/stream.rs::generate_call_id::FALLBACK_COUNTER	counter		
 morloc-runtime/stream.rs::a_forked_child_leaves_its_parents_cached_reads_alone::HANDLE	test-only		
 morloc-runtime/stream.rs::channel_depth::DEPTH	startup		FORK-9
@@ -175,8 +180,8 @@ morloc-runtime/write_behind.rs::-::Job.result	instance
 morloc-runtime/write_behind.rs::-::Job.done	instance		
 morloc-runtime/write_behind.rs::-::Service.queue	instance		
 morloc-runtime/write_behind.rs::-::Service.ready	instance		
-morloc-runtime/write_behind.rs::-::SERVICE	reset		FORK-8
-morloc-runtime/write_behind.rs::-::SEALED	reset		FORK-8
+morloc-runtime/write_behind.rs::-::SERVICE	reset		
+morloc-runtime/write_behind.rs::-::SEALED	reset		
 morloc-runtime/write_behind.rs::-::THREAD_SEALED	thread		
 morloc-runtime-types/compression.rs::frame_workers::CACHED	startup		FORK-9
 morloc-runtime-types/owner_word.rs::-::HELD	thread		

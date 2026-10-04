@@ -5,7 +5,7 @@ use syn::visit::Visit;
 
 const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc", "morloc-nexus"];
 const PREPARE_HANDLERS: &[&str] = &["prepare_fork"];
-const MAX_DEVIATING_ROWS: usize = 60;
+const MAX_DEVIATING_ROWS: usize = 47;
 const MAX_ENV_READS: usize = 67;
 const CLASSES: &[&str] = &[
     "held", "reset", "unreachable", "exec-only", "startup", "lazy", "fork-scoped", "counter", "thread",
@@ -158,8 +158,13 @@ fn is_held(ty: &str) -> bool {
     ty.starts_with("Held <")
 }
 
+fn is_reset(ty: &str) -> bool {
+    ty.starts_with("Reset <") || ty.contains(":: Reset <")
+}
+
 fn interior_mutable(ty: &str) -> bool {
     is_held(ty)
+        || is_reset(ty)
         || (!ty.contains("Guard")
         && ["Mutex", "RwLock", "Condvar", "Atomic", "Once", "LazyLock", "Cell", "RefCell", "UnsafeCell"]
             .iter()
@@ -167,7 +172,7 @@ fn interior_mutable(ty: &str) -> bool {
 }
 
 fn is_lock(ty: &str) -> bool {
-    is_held(ty) || (!ty.contains("Guard") && ["Mutex", "RwLock", "Condvar"].iter().any(|w| ty.contains(w)))
+    is_held(ty) || is_reset(ty) || (!ty.contains("Guard") && !ty.contains("PhantomData") && ["Mutex", "RwLock", "Condvar"].iter().any(|w| ty.contains(w)))
 }
 
 fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
@@ -646,6 +651,12 @@ fn registry_rows_obey_their_class() {
         }
         if r.class != "held" && is_held(&f.ty) {
             problems.push(format!("{}: declared Held but its class is {}", r.id, r.class));
+        }
+        if !["reset", "test-only"].contains(&r.class.as_str()) && is_reset(&f.ty) {
+            problems.push(format!("{}: declared Reset but its class is {}", r.id, r.class));
+        }
+        if r.class == "reset" && !r.cites.iter().any(|c| c == "FORK-8") && !is_reset(&f.ty) {
+            problems.push(format!("{}: reset but not declared Reset", r.id));
         }
         if r.class == "held" && !r.cites.iter().any(|c| c == "FORK-5") {
             let name = r.id.rsplit("::").next().unwrap();

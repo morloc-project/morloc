@@ -1894,13 +1894,12 @@ fn wait_release_doorbell(bell: &std::sync::atomic::AtomicU32, seen: u32) {
 }
 
 struct ReleaseService {
-    pid: u32,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// The release service of the process that started it.
-static RELEASE_SERVICE: Mutex<Option<ReleaseService>> = Mutex::new(None);
+static RELEASE_SERVICE: crate::fork_policy::Reset<Option<ReleaseService>> =
+    crate::fork_policy::Reset::new(|| None);
 
 /// Start this process's release service, once, before it first holds a
 /// stream file's lock. A forked child starts its own.
@@ -1908,17 +1907,10 @@ fn ensure_release_service() -> Result<(), MorlocError> {
     // The service waits on the registry's doorbell, so the registry must be
     // attached first; a pool's first stream operation may be this one.
     registry_init()?;
-    let pid = std::process::id();
     let mut service = RELEASE_SERVICE.lock().unwrap_or_else(|p| p.into_inner());
-    let running = |s: &ReleaseService| {
-        s.pid == pid && s.thread.as_ref().is_some_and(|t| !t.is_finished())
-    };
+    let running = |s: &ReleaseService| s.thread.as_ref().is_some_and(|t| !t.is_finished());
     if service.as_ref().is_some_and(running) {
         return Ok(());
-    }
-    if let Some(parent) = service.take() {
-        // The parent's thread does not exist in this process.
-        std::mem::forget(parent);
     }
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stopped = stop.clone();
@@ -1929,7 +1921,7 @@ fn ensure_release_service() -> Result<(), MorlocError> {
         .map_err(|e| MorlocError::Other(format!(
             "cannot start the thread that releases ended streams' files: {e}"
         )))?;
-    *service = Some(ReleaseService { pid, stop, thread: Some(thread) });
+    *service = Some(ReleaseService { stop, thread: Some(thread) });
     Ok(())
 }
 
@@ -1951,10 +1943,6 @@ fn release_service_shutdown() -> bool {
     use std::sync::atomic::Ordering;
     let taken = RELEASE_SERVICE.lock().unwrap_or_else(|p| p.into_inner()).take();
     let Some(mut service) = taken else { return true };
-    if service.pid != std::process::id() {
-        std::mem::forget(service);
-        return true;
-    }
     service.stop.store(true, Ordering::Release);
     ring_release_doorbell();
     // A pass may be blocked on a slot a stopped process holds; exit must
@@ -6193,47 +6181,46 @@ pub enum SweepRequest {
     PerPid(u32, u64),
 }
 
-/// Sender half of the sweeper queue. Cloned to every daemon worker
-/// that needs to enqueue a sweep. Initialised by `sweeper_init`;
-/// dropped by `sweeper_shutdown` to wake the sweeper thread.
-static SWEEPER_TX: Mutex<Option<crate::fork_policy::ForkLocal<std::sync::mpsc::Sender<SweepRequest>>>> =
-    Mutex::new(None);
-
-/// Sweeper thread handle, retained so `sweeper_shutdown` can join it.
-static SWEEPER_HANDLE: Mutex<Option<crate::fork_policy::ForkLocal<std::thread::JoinHandle<()>>>> =
-    Mutex::new(None);
-
-/// Spawn the dedicated sweeper thread and install its `Sender` in
-/// `SWEEPER_TX`. Idempotent: subsequent calls observe the existing
-/// sender and return immediately.
-pub fn sweeper_init() {
-    let mut guard = SWEEPER_TX.lock().unwrap();
-    if guard.as_ref().is_some_and(|tx| !tx.is_inherited()) {
-        return;
-    }
-    start_sweeper(&mut guard);
+struct Sweeper {
+    tx: std::sync::mpsc::Sender<SweepRequest>,
+    thread: std::thread::JoinHandle<()>,
 }
 
-fn start_sweeper(slot: &mut Option<crate::fork_policy::ForkLocal<std::sync::mpsc::Sender<SweepRequest>>>) {
+static SWEEPER: crate::fork_policy::Reset<Option<Sweeper>> = crate::fork_policy::Reset::new(|| None);
+
+static SWEEPER_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn sweeper_init() {
+    let mut guard = SWEEPER.lock().unwrap_or_else(|p| p.into_inner());
+    SWEEPER_STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    if guard.is_none() {
+        *guard = Some(start_sweeper());
+    }
+}
+
+fn start_sweeper() -> Sweeper {
     let (tx, rx) = std::sync::mpsc::channel::<SweepRequest>();
-    *slot = Some(crate::fork_policy::ForkLocal::new(tx));
-    let h = std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("morloc-stream-sweeper".into())
         .spawn(move || sweeper_main(rx))
         .expect("morloc-stream-sweeper: thread spawn failed");
-    *SWEEPER_HANDLE.lock().unwrap() = Some(crate::fork_policy::ForkLocal::new(h));
+    Sweeper { tx, thread }
 }
 
+// FORK-8: a child of a process that started the sweeper starts its own.
 fn sweeper_send(req: SweepRequest) {
-    let mut guard = SWEEPER_TX.lock().unwrap();
-    if guard.as_ref().is_some_and(|tx| tx.is_inherited()) {
-        start_sweeper(&mut guard);
+    let mut guard = SWEEPER.lock().unwrap_or_else(|p| p.into_inner());
+    if guard.is_none() && SWEEPER_STARTED.load(std::sync::atomic::Ordering::Relaxed) {
+        *guard = Some(start_sweeper());
     }
-    if let Some(tx) = guard.as_ref() {
-        // Errors mean the receiver has been dropped (process is
-        // shutting down). Discard silently.
-        let _ = tx.send(req);
+    if let Some(sweeper) = guard.as_ref() {
+        let _ = sweeper.tx.send(req);
     }
+}
+
+#[cfg(test)]
+fn sweeper_running() -> bool {
+    SWEEPER.lock().unwrap_or_else(|p| p.into_inner()).as_ref().is_some_and(|s| !s.thread.is_finished())
 }
 
 /// Stop the sweeper thread. Called before `registry_teardown` unmaps
@@ -6244,10 +6231,14 @@ fn sweeper_send(req: SweepRequest) {
 /// the loop exits cleanly. Then join. Idempotent: no-op if the sweeper
 /// was never started or was already shut down.
 pub fn sweeper_shutdown() {
-    // Drop the sender to unblock the sweeper's next recv().
-    { *SWEEPER_TX.lock().unwrap() = None; }
-    if let Some(h) = SWEEPER_HANDLE.lock().unwrap().take().and_then(|h| h.into_inner()) {
-        let _ = h.join();
+    let taken = {
+        let mut guard = SWEEPER.lock().unwrap_or_else(|p| p.into_inner());
+        SWEEPER_STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
+        guard.take()
+    };
+    if let Some(Sweeper { tx, thread }) = taken {
+        drop(tx);
+        let _ = thread.join();
     }
 }
 
@@ -10655,6 +10646,17 @@ mod tests {
         shm::shfree(ptr).unwrap();
         assert_eq!(v, 2);
         shared_close_handle(f).unwrap();
+    }
+
+    #[test]
+    fn a_forked_child_starts_its_own_sweeper_when_its_parent_had_one() {
+        let _shm = crate::own_test_registry();
+        sweeper_init();
+        let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            sweeper_enqueue_pid(1, u64::MAX);
+            sweeper_running()
+        });
+        assert!(ok, "a forked child dropped its sweep requests");
     }
 
     #[test]

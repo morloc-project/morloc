@@ -95,29 +95,17 @@ struct ServiceQueue {
     idle: usize,
 }
 
-/// The service of the current process. A forked child starts its own: the
-/// parent's threads do not exist in it.
-static SERVICE: Mutex<Option<(u32, Arc<Service>)>> = Mutex::new(None);
+static SERVICE: crate::fork_policy::Reset<Option<Arc<Service>>> = crate::fork_policy::Reset::new(|| None);
 
 fn service() -> Arc<Service> {
-    let pid = std::process::id();
     let mut g = SERVICE.lock().unwrap();
-    match g.as_ref() {
-        Some((p, s)) if *p == pid => s.clone(),
-        _ => {
-            let s = Arc::new(Service {
-                queue: Mutex::new(ServiceQueue { jobs: VecDeque::new(), threads: 0, idle: 0 }),
-                ready: Condvar::new(),
-            });
-            if let Some(old) = g.take() {
-                // The parent's service belongs to threads this process
-                // does not have; its locks may be held forever.
-                std::mem::forget(old);
-            }
-            *g = Some((pid, s.clone()));
-            s
-        }
-    }
+    g.get_or_insert_with(|| {
+        Arc::new(Service {
+            queue: Mutex::new(ServiceQueue { jobs: VecDeque::new(), threads: 0, idle: 0 }),
+            ready: Condvar::new(),
+        })
+    })
+    .clone()
 }
 
 fn submit(input: Input, level: CompressionLevel) -> Arc<Job> {
@@ -360,7 +348,7 @@ impl Drop for WriteBehind {
 /// Streams this process holds sealed batches of, whichever thread sealed
 /// them: every point where another process may take over a stream drains
 /// them all.
-static SEALED: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+static SEALED: crate::fork_policy::Reset<Vec<i64>> = crate::fork_policy::Reset::new(Vec::new);
 
 thread_local! {
     /// The subset this thread sealed: a failure to write one of these is the

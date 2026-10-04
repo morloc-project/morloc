@@ -92,21 +92,43 @@ const MAX_CELLS: usize = 1 << SLOT_BITS;
 const MAX_SLOTS: usize = 4096;
 
 fn proc_tag() -> i64 {
-    static TAG: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-    *TAG.get_or_init(|| {
-        let pid = std::process::id() as u64;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
-            .unwrap_or(0);
-        // Any spread over the tag's range will do; this only has to make a
-        // collision between two live pool processes unlikely.
-        let mixed = pid
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .rotate_left(31)
-            ^ now.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        ((mixed ^ (mixed >> 29)) as i64) & PROC_MASK
-    })
+    let pid = std::process::id() as u64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+        .unwrap_or(0);
+    // Any spread over the tag's range will do; this only has to make a
+    // collision between two live pool processes unlikely.
+    let mixed = pid
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .rotate_left(31)
+        ^ now.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    ((mixed ^ (mixed >> 29)) as i64) & PROC_MASK
+}
+
+static TAG: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
+fn tag() -> i64 {
+    use std::sync::atomic::Ordering;
+    let t = TAG.load(Ordering::Acquire);
+    if t >= 0 {
+        return t;
+    }
+    match TAG.compare_exchange(-1, proc_tag(), Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => TAG.load(Ordering::Acquire),
+        Err(won) => won,
+    }
+}
+
+// FORK-13: a child's tag never equals the tag of the parent it was forked from.
+pub(crate) fn after_fork_in_child() {
+    use std::sync::atomic::Ordering;
+    let parent = TAG.load(Ordering::Relaxed);
+    let mut t = proc_tag();
+    if t == parent {
+        t = (t + 1) & PROC_MASK;
+    }
+    TAG.store(t, Ordering::Release);
 }
 
 struct CellEntry {
@@ -127,24 +149,20 @@ struct CellEntry {
 
 struct CellRegistry {
     cells: Vec<CellEntry>,
-    /// Dispatches currently executing, under the registry's own lock for
-    /// the same reason the temp registry keeps its count there: observing
-    /// the zero and collecting against it must be one step.
-    active: usize,
 }
 
-static CELL_REGISTRY: std::sync::Mutex<CellRegistry> =
-    std::sync::Mutex::new(CellRegistry { cells: Vec::new(), active: 0 });
+static CELL_REGISTRY: crate::fork_policy::Reset<CellRegistry> =
+    crate::fork_policy::Reset::new(|| CellRegistry { cells: Vec::new() });
 
 fn pack_handle(slot: usize, generation: i64) -> i64 {
     ((generation << (SLOT_BITS + PROC_BITS))
-        | (proc_tag() << SLOT_BITS)
+        | (tag() << SLOT_BITS)
         | (slot as i64))
         & i64::MAX
 }
 
 fn unpack_handle(h: i64) -> Option<(usize, i64)> {
-    if h < 0 || (h >> SLOT_BITS) & PROC_MASK != proc_tag() {
+    if h < 0 || (h >> SLOT_BITS) & PROC_MASK != tag() {
         return None;
     }
     Some(((h & SLOT_MASK) as usize, h >> (SLOT_BITS + PROC_BITS)))
@@ -273,7 +291,7 @@ pub unsafe fn cell_get(handle: i64, rs: &Schema) -> Result<AbsPtr, MorlocError> 
 /// Copied rather than lent because the caller releases what it is handed
 /// and the slot must survive to be folded into again.
 fn copy_out(
-    reg: std::sync::MutexGuard<'_, CellRegistry>,
+    reg: crate::fork_policy::ResetGuard<'_, CellRegistry>,
     src: RelPtr,
     rs: &Schema,
 ) -> Result<AbsPtr, MorlocError> {
@@ -446,13 +464,6 @@ unsafe fn require_schema(schema: *const CSchema, fn_name: &str) -> Result<Schema
 
 
 // -- dispatch bracketing ------------------------------------------------
-
-/// Count a dispatch in. Paired with [`sweep_dispatch`].
-pub fn begin_dispatch() {
-    if let Ok(mut reg) = CELL_REGISTRY.lock() {
-        reg.active += 1;
-    }
-}
 
 /// Release any cell still held by the dispatch that is ending, so a
 /// handler that raised before its merge cannot leak one. Cells made on a
@@ -676,6 +687,27 @@ mod tests {
             assert_eq!(refused, Some(MAX_SLOTS), "cap fired at the wrong slot");
             assert_eq!(cell_count(h).unwrap(), MAX_SLOTS as i64);
             cell_free(h).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_forked_child_never_resolves_its_parents_cell() {
+        let _shm = crate::own_test_registry();
+        let schema = parse_schema("as").unwrap();
+        unsafe {
+            let seed = mk("[\"x\"]", &schema);
+            let h = cell_new(&schema, seed).unwrap();
+            let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+                let inherited = cell_count(h).is_err();
+                let mine = cell_new(&schema, seed).unwrap();
+                let distinct = mine != h && cell_count(h).is_err() && cell_count(mine).is_ok();
+                cell_free(mine).unwrap();
+                inherited && distinct
+            });
+            shm::shfree(seed).unwrap();
+            assert!(cell_count(h).is_ok());
+            cell_free(h).unwrap();
+            assert!(ok, "a forked child resolved a fold accumulator its parent owns");
         }
     }
 
