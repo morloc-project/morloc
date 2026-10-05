@@ -386,12 +386,12 @@ impl VolumeTable {
     }
 }
 
-pub(crate) static VOLUMES: Held<VolumeTable> = Held::new(5, VolumeTable {
+pub(crate) static VOLUMES: Held<VolumeTable> = Held::new(6, VolumeTable {
     slots: [SendPtr::null(); MAX_VOLUME_NUMBER],
     used: Vec::new(),
 });
 
-pub(crate) static ALLOC_MUTEX: Held<()> = Held::new(4, ());
+pub(crate) static ALLOC_MUTEX: Held<()> = Held::new(5, ());
 
 /// Reference-count value marking a block whose last reference has been
 /// dropped and whose bytes are being scrubbed. It reads as in-use, so no
@@ -461,9 +461,9 @@ fn pick_free_slot(table: &VolumeTable) -> Option<usize> {
     None
 }
 
-pub(crate) static COMMON_BASENAME: Held<[u8; MAX_FILENAME_SIZE]> = Held::new(8, [0u8; MAX_FILENAME_SIZE]);
+pub(crate) static COMMON_BASENAME: Held<[u8; MAX_FILENAME_SIZE]> = Held::new(9, [0u8; MAX_FILENAME_SIZE]);
 
-pub(crate) static FALLBACK_DIR: Held<[u8; MAX_FILENAME_SIZE]> = Held::new(9, [0u8; MAX_FILENAME_SIZE]);
+pub(crate) static FALLBACK_DIR: Held<[u8; MAX_FILENAME_SIZE]> = Held::new(10, [0u8; MAX_FILENAME_SIZE]);
 
 /// Read the common SHM basename set by the first `shinit` call in
 /// this process. Returns an empty string if no `shinit` has been
@@ -483,7 +483,7 @@ static ATEXIT_REGISTERED: AtomicBool = AtomicBool::new(false);
 /// `shclose` doesn't need to know which subsystems are alive.
 pub type ShcloseHook = fn();
 
-pub(crate) static SHCLOSE_HOOKS: Held<Vec<ShcloseHook>> = Held::new(10, Vec::new());
+pub(crate) static SHCLOSE_HOOKS: Held<Vec<ShcloseHook>> = Held::new(11, Vec::new());
 
 /// Register a function to run when `shclose` is called. Hooks run in
 /// registration order, before the allocator volumes are unmapped.
@@ -1027,8 +1027,11 @@ pub fn live_block_stats(hist: &mut [usize]) -> (usize, usize) {
 /// stale pointer after `reset_all` (e.g. a worker that was holding an
 /// SHM ptr when its request was failed by the recovery quiesce).
 fn ptr_is_in_any_volume(ptr: AbsPtr) -> bool {
+    ptr_in_volumes(&VOLUMES.lock(), ptr)
+}
+
+fn ptr_in_volumes(vols: &VolumeTable, ptr: AbsPtr) -> bool {
     let p = ptr as usize;
-    let vols = VOLUMES.lock();
     for &slot_idx in &vols.used {
         let slot = vols.slots[slot_idx as usize];
         if slot.is_null() {
@@ -1155,6 +1158,46 @@ pub(crate) fn take_on_reference() {
     HELD_REFERENCES.fetch_add(1, Ordering::Relaxed);
 }
 
+pub(crate) fn hand_on_references(n: usize) {
+    HELD_REFERENCES.fetch_sub(n as i64, Ordering::Relaxed);
+}
+
+// FORK-15: a reference taken by the fork handler, which holds the volume
+// table; `ptr` names a block some view holds a reference on.
+pub(crate) unsafe fn incref_held(vols: &VolumeTable, ptr: AbsPtr) -> bool {
+    if !ptr_in_volumes(vols, ptr) {
+        return false;
+    }
+    let blk = &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader);
+    if blk.magic != BLK_MAGIC {
+        return false;
+    }
+    loop {
+        let cur = blk.reference_count.load(Ordering::Acquire);
+        if cur == 0 || cur == TEARING_DOWN {
+            return false;
+        }
+        if blk
+            .reference_count
+            .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            take_on_reference();
+            return true;
+        }
+    }
+}
+
+// SHM-8: release a block no process counts. No eval arena tracks it, so
+// none is consulted.
+pub(crate) fn free_uncounted(abs: AbsPtr) {
+    take_on_reference();
+    let _lock = ALLOC_MUTEX.lock();
+    if ptr_is_in_any_volume(abs) {
+        let _ = shfree_unlocked(abs);
+    }
+}
+
 // FORK-1: a child holds none of its parent's references.
 pub(crate) fn forget_held_references() {
     HELD_REFERENCES.store(0, Ordering::Relaxed);
@@ -1167,9 +1210,18 @@ pub extern "C" fn morloc_held_references() -> i64 {
 
 pub fn shmalloc(size: usize) -> Result<AbsPtr, MorlocError> {
     let size = if size == 0 { BLOCK_ALIGN } else { align_up(size, BLOCK_ALIGN) };
-    let ptr = {
+    let first = {
         let _lock = ALLOC_MUTEX.lock();
-        shmalloc_unlocked(size)?
+        shmalloc_unlocked(size)
+    };
+    let ptr = match first {
+        Ok(p) => p,
+        // FORK-15: blocks only gone children still lease may be released.
+        Err(e) if crate::lease::any_created() && crate::lease::reclaim() > 0 => {
+            let _lock = ALLOC_MUTEX.lock();
+            shmalloc_unlocked(size).map_err(|_| e)?
+        }
+        Err(e) => return Err(e),
     };
     take_on_reference();
     crate::eval_arena::record_if_active(ptr);

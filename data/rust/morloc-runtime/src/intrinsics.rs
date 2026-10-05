@@ -486,6 +486,7 @@ pub fn end_dispatch(call_id: u64, prev: u64) {
         let _ = std::fs::remove_file(&p);
     }
     crate::cell::sweep_dispatch(call_id, last_dispatch);
+    crate::lease::reclaim_if_due();
 }
 
 // ── mlc_save_voidstar: serialize to binary voidstar packet file ────────────

@@ -60,6 +60,7 @@ pub mod stream;
 mod write_behind;
 pub mod handle_scan;
 pub mod arrow_shm;
+pub mod lease;
 pub mod arrow_ffi;
 pub mod arrow_ipc_reader;
 pub mod pool_ffi;

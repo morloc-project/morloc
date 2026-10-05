@@ -64,13 +64,13 @@ static RUN: PublishOnce<Option<Run>> = PublishOnce::new();
 /// Per-label append handles for the log tee. Opened on first emission,
 /// kept open for the process lifetime, line-flushed so a crash can lose
 /// at most the in-flight line.
-pub(crate) static TEE_HANDLES: Held<Option<HashMap<String, Arc<std::fs::File>>>> = Held::new(14, None);
+pub(crate) static TEE_HANDLES: Held<Option<HashMap<String, Arc<std::fs::File>>>> = Held::new(15, None);
 
 /// Top-level (non-per-label) tee handle. Used for the prologue, the
 /// epilogue, and any future run-scope events the nexus emits. Written
 /// to `$MORLOC_RUN_DIR/log` so a single `tail -f` follows the whole
 /// run instead of having to glob per-label sub-files.
-pub(crate) static RUN_TEE_HANDLE: Held<Option<Arc<std::fs::File>>> = Held::new(15, None);
+pub(crate) static RUN_TEE_HANDLE: Held<Option<Arc<std::fs::File>>> = Held::new(16, None);
 
 /// Nexus-owned scratchpad consulted by [`morloc_run_finalize`] when
 /// writing `summary.json`. Pools never write here.
@@ -79,8 +79,8 @@ struct RunContext {
     started_at_iso: String,
 }
 
-pub(crate) static RUN_COMMAND: Held<Option<String>> = Held::new(16, None);
-pub(crate) static RUN_ERROR: Held<Option<String>> = Held::new(17, None);
+pub(crate) static RUN_COMMAND: Held<Option<String>> = Held::new(17, None);
+pub(crate) static RUN_ERROR: Held<Option<String>> = Held::new(18, None);
 
 // FORK-10: one write(2) outside any lock; O_APPEND keeps lines whole.
 fn append_line(file: &std::fs::File, text: &str) {

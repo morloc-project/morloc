@@ -207,6 +207,9 @@ struct ForkHeld {
     _pass: HeldGuard<'static, ()>,
     map: HeldGuard<'static, Option<std::collections::HashMap<i64, crate::stream::LocalEntry>>>,
     locked_fds: HeldGuard<'static, Vec<libc::c_int>>,
+    views: HeldGuard<'static, Vec<crate::arrow_shm::BorrowEntry>>,
+    lease: Option<crate::lease::Staged>,
+    lease_rels: Vec<crate::shm::RelPtr>,
     _alloc: HeldGuard<'static, ()>,
     _volumes: HeldGuard<'static, crate::shm::VolumeTable>,
     _basename: HeldGuard<'static, [u8; crate::shm::MAX_FILENAME_SIZE]>,
@@ -243,12 +246,22 @@ extern "C" fn prepare_fork() {
             libc::abort();
         }
     }
+    // FORK-15: staged now; the fork holds the locks guarding its paths below,
+    // and no file is written while they are held.
+    let staged = if crate::arrow_shm::any_views() {
+        crate::lease::paths().and_then(|p| crate::lease::stage(&p).ok())
+    } else {
+        None
+    };
     let pass = crate::stream::RELEASE_PASS.lock();
     crate::stream::drain_before_fork();
     let held = ForkHeld {
         _pass: pass,
         map: crate::stream::PROCESS_LOCAL_SLOTS.lock(),
         locked_fds: crate::stream::LOCKED_FDS.lock(),
+        views: crate::arrow_shm::BORROWABLE.lock(),
+        lease: None,
+        lease_rels: Vec::new(),
         _alloc: crate::shm::ALLOC_MUTEX.lock(),
         _volumes: crate::shm::VOLUMES.lock(),
         _registry: crate::stream::REGISTRY_SEGMENT.lock(),
@@ -264,12 +277,32 @@ extern "C" fn prepare_fork() {
         _command: crate::run::RUN_COMMAND.lock(),
         _error: crate::run::RUN_ERROR.lock(),
     };
+    let mut held = held;
+    // FORK-15: the child's views read blocks its lease holds references on.
+    let rels = crate::arrow_shm::fork_prepare_views(&held._volumes, &held.views);
+    if !rels.is_empty() {
+        crate::shm::hand_on_references(rels.len());
+        if staged.is_none() {
+            let msg = b"morloc: could not record a forked child's view references; they stay held until the run ends\n";
+            unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
+        }
+    }
+    held.lease = staged;
+    held.lease_rels = rels;
     // SAFETY: FORK-5: this thread now holds every held lock.
     unsafe { *FORK_HELD.0.get() = Some(held) };
 }
 
 extern "C" fn after_fork_in_parent() {
-    drop(take_fork_held());
+    if let Some(mut held) = take_fork_held() {
+        let (lease, rels) = (held.lease.take(), std::mem::take(&mut held.lease_rels));
+        drop(held);
+        // FORK-15: written and placed once the locks are released; closing
+        // this copy leaves the lock to the child.
+        if let Some(lease) = lease {
+            lease.place(&rels);
+        }
+    }
 }
 
 extern "C" fn after_fork_in_child() {
@@ -279,6 +312,12 @@ extern "C" fn after_fork_in_child() {
     crate::shm::forget_held_references();
     if let Some(mut held) = take_fork_held() {
         crate::stream::after_fork_in_child(&mut held.map, &mut held.locked_fds);
+        // FORK-15: the child keeps its lease locked for as long as it lives.
+        let lease = held.lease.take();
+        if let Some(l) = &lease {
+            l.mark_child();
+        }
+        std::mem::forget(lease);
     }
 }
 
@@ -689,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "lock of rank 4 taken while holding ranks")]
+    #[should_panic(expected = "lock of rank 5 taken while holding ranks")]
     fn a_lock_taken_below_a_held_rank_is_refused() {
         let _volumes = crate::shm::VOLUMES.lock();
         let _alloc = crate::shm::ALLOC_MUTEX.lock();

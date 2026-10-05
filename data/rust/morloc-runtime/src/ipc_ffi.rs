@@ -649,7 +649,7 @@ pub(crate) fn exit_if_forked_since(generation: u64) {
 
 /// The socket this process serves, when it is a pool. Set before any worker
 /// is forked, so forked workers inherit it.
-pub(crate) static SELF_SOCKET: crate::fork_policy::Held<Option<std::path::PathBuf>> = crate::fork_policy::Held::new(12, None);
+pub(crate) static SELF_SOCKET: crate::fork_policy::Held<Option<std::path::PathBuf>> = crate::fork_policy::Held::new(13, None);
 
 /// `MORLOC_FORBID_SELF_CALL`: a test guard. A pool sending a call to its own
 /// socket is a call between co-located code taking the serial path; with the

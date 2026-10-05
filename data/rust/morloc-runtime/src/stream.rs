@@ -232,7 +232,7 @@ static REGISTRY_SLOT_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 pub(crate) static REGISTRY_SEGMENT: crate::fork_policy::Held<Option<crate::shm_companion::CompanionSegment>> =
-    crate::fork_policy::Held::new(6, None);
+    crate::fork_policy::Held::new(7, None);
 
 /// Initialise the shared stream registry for this session. Wraps
 /// `registry_bootstrap`; kept as the public entry point for the FFI
@@ -1640,8 +1640,7 @@ fn slot_owns(rel: RelPtr) -> RelPtr {
 
 // SHM-8: release a block no process counts: a slot's, or one another process allocated.
 fn free_uncounted(abs: crate::shm::AbsPtr) {
-    crate::shm::take_on_reference();
-    let _ = crate::shm::shfree(abs);
+    crate::shm::free_uncounted(abs);
 }
 
 #[cfg(test)]

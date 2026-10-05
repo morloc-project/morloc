@@ -147,6 +147,42 @@ a child forked while another thread of the parent writes the environment
 blocks on its first read. CPython's buffered streams have the same hazard
 in the Python pool's forked workers.
 
+### FORK-15 A forked child's views keep their blocks until the child is gone
+Status: implemented
+Checked by: an_inherited_owning_view_keeps_its_block_until_the_child_is_gone, an_inherited_reading_view_keeps_its_block_until_the_child_is_gone, an_inherited_language_view_keeps_its_block_until_the_child_is_gone, a_child_that_closes_its_descriptors_keeps_its_blocks_while_it_lives, a_descendant_with_its_ancestors_pid_cannot_release_the_ancestors_reference, tla:ViewFork, tla:ViewFork_unlocked.bug, tla:ViewFork_no_child_ref.bug, tla:ViewFork_child_releases.bug, tla:Lease, tla:Lease_no_staging.bug, tla:Lease_no_lock_check.bug
+
+A forked child keeps every view its parent had: an Arrow view, owning or
+reading, or a language's view of a block (a NumPy array over shared
+memory). The parent may release its reference while the child still reads.
+Every view holds a reference of its own (a reading view takes one when its
+block is in a volume) and is recorded in one registry, a held lock, so the
+fork sees exactly the views the child gets and every recorded block is
+live. The fork handler takes one reference per recorded view for the
+child's lease and releases none of them in the parent; the child releases
+none of them either, so a block it read stays allocated until it is gone,
+however it ends.
+
+A lease is a file created and locked in a staging directory no reclaimer
+reads, before the fork takes its locks; after the fork, with the locks
+released, the parent writes the references and links the file into place,
+never over an existing one. The child holds the lock through the open file
+description it inherited and writes its process token into the file. A
+process that takes a lease's lock, finds the file still the one it opened,
+and finds its token's process gone, releases the references the lease lists
+for the current shared namespace and removes it. Leases live in the run
+directory, or else in the system temp directory, on a filesystem whose
+locks a forked child inherits; on a network filesystem neither is used. If
+no lease can be made, the references are kept and the fork says so. A
+process that made leases reclaims free ones at its dispatch ends and before
+giving up on an allocation, and an idle Python worker reclaims them too,
+each at most every 250 ms; the nexus removes leases outside the run
+directory at teardown and recovery, which discard the namespace.
+
+A child whose process token is not told apart from a live process's (a
+reused pid in another pid namespace started in the same clock tick) keeps
+its lease until that process is gone. Models: `tla/ViewFork.tla`,
+`tla/Lease.tla`.
+
 ### FORK-12 A forked child never returns into the dispatch loop
 Status: implemented
 Checked by: a_child_forked_during_a_dispatch_exits_instead_of_replying, a_child_forked_by_user_code_never_returns_from_the_dispatch, golden:fork-inside-call, tla:DispatchFork, tla:DispatchFork_unguarded.bug, tla:DispatchFork_by_pid.bug, tla:DispatchFork_reply_only.bug

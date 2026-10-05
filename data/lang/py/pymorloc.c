@@ -45,8 +45,10 @@ static void shm_view_owner_release(PyObject* capsule) {
         PyErr_Clear();
         return;
     }
+    morloc_view_released(o);
     // A forked child inherits the object but not the reference: the
-    // reference belongs to the process that took it (FORK-14).
+    // reference belongs to the process that took it (FORK-14); the child's
+    // lease holds one of its own (FORK-15).
     if (o->generation == morloc_fork_generation()) {
         char* err = NULL;
         shfree(o->block, &err);
@@ -76,8 +78,10 @@ static PyObject* shm_view_owner(void) {
     }
     o->block = shm_view_ctx.block;
     o->generation = morloc_fork_generation();
+    morloc_view_held(o->block, o);
     PyObject* capsule = PyCapsule_New(o, "morloc.shm_view", shm_view_owner_release);
     if (capsule == NULL) {
+        morloc_view_released(o);
         shfree(o->block, &err);
         if (err) { free(err); }
         free(o);
@@ -2370,6 +2374,12 @@ static PyObject* pybinding__held_references(PyObject* self, PyObject* args) {
     return PyLong_FromLongLong((long long)morloc_held_references());
 }
 
+// Release leases of forked children that are gone (FORK-15).
+static PyObject* pybinding__reclaim_leases(PyObject* self, PyObject* args) {
+    morloc_reclaim_leases();
+    Py_RETURN_NONE;
+}
+
 // Held references plus stream file locks (SHM-8).
 static PyObject* pybinding__retire_blockers(PyObject* self, PyObject* args) {
     return PyLong_FromLongLong((long long)morloc_retire_blockers());
@@ -4503,6 +4513,7 @@ static PyMethodDef Methods[] = {
     {"thread_count", pybinding__thread_count, METH_NOARGS, "The number of threads in this process, or -1"},
     {"held_references", pybinding__held_references, METH_NOARGS, "Shared-memory references this process holds"},
     {"retire_blockers", pybinding__retire_blockers, METH_NOARGS, "Held references plus stream file locks"},
+    {"reclaim_leases", pybinding__reclaim_leases, METH_NOARGS, "Release leases of forked children that are gone"},
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
     {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},

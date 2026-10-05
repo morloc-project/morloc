@@ -1063,8 +1063,8 @@ unsafe fn release_arena(private_data: *mut c_void) {
     // The entry must go before the block does: a candidate in the registry
     // is one some view still holds a reference on, which is what makes it
     // safe for `try_borrow` to read.
+    borrow_forget(arena as *const c_void);
     if !block.is_null() {
-        borrow_forget(arena);
         LIVE_VIEW_BYTES.fetch_sub((*arena).block_bytes, Ordering::Relaxed);
         if crate::fork_policy::generation() == (*arena).owner_generation {
             let _ = shm::shfree(block);
@@ -1166,8 +1166,9 @@ pub unsafe fn shm_to_ffi_owned(
     shm_to_ffi_inner(header, Some(acquire), out_schema, out_array)
 }
 
-/// `owns` is None for a view that only reads the block, Some(acquire) for
-/// one that owns a reference on it.
+/// `owns` is None for a view that only reads the block (it still takes a
+/// reference of its own when the block is in a volume), Some(acquire) for one
+/// that owns a reference on it.
 unsafe fn shm_to_ffi_inner(
     header: *const ArrowShmHeader,
     owns: Option<bool>,
@@ -1196,7 +1197,12 @@ unsafe fn shm_to_ffi_inner(
     // The reference comes before the allocation that could fail, so a
     // failure has nothing to give back.
     let block = match owns {
-        None => ptr::null_mut(),
+        // FORK-15: a reading view holds a reference too, so its registry
+        // entry never outlives its block; one outside every volume has none.
+        None => match shm::shincref(header as *mut u8) {
+            Ok(()) => header as *mut u8,
+            Err(_) => ptr::null_mut(),
+        },
         Some(true) => {
             // The sender donated a reference before the bytes left, so a
             // refusal means the block is already gone and the view would
@@ -1210,7 +1216,7 @@ unsafe fn shm_to_ffi_inner(
 
     let bytes = libc::calloc(1, len) as *mut u8;
     if bytes.is_null() {
-        if let Some(true) = owns {
+        if owns != Some(false) && !block.is_null() {
             let _ = shm::shfree(block);
         }
         return Err(err("out of memory importing arrow table"));
@@ -1230,8 +1236,10 @@ unsafe fn shm_to_ffi_inner(
     );
     if !block.is_null() {
         LIVE_VIEW_BYTES.fetch_add(h.total_size as usize, std::sync::atomic::Ordering::Relaxed);
+    }
+    if !block.is_null() {
         match shm::abs2rel(block) {
-            Ok(rel) => borrow_register(block, rel, arena),
+            Ok(rel) => borrow_register(block, rel, arena as *const c_void, true),
             // A block outside every mapped volume cannot be passed
             // through, but it can still be read.
             Err(_) => {}
@@ -1344,35 +1352,75 @@ pub unsafe fn shm_schema(header: *const ArrowShmHeader) -> Result<SchemaRef, Mor
 /// that built it. The invariant the readers depend on is that an entry
 /// exists only while some view holds a reference, so a candidate is never
 /// a block being scrubbed or rewritten under the reader.
-struct BorrowEntry {
+pub(crate) struct BorrowEntry {
     base: *const u8,
     rel: RelPtr,
-    arena: *const ImportArena,
+    /// The view's own identity: its import arena, or a language's view owner.
+    key: *const c_void,
+    /// An Arrow view, which a returned table may pass through.
+    borrowable: bool,
 }
 
 // SAFETY: the pointers are only ever compared and dereferenced under the
 // registry lock, and an entry is removed before its block is released.
 unsafe impl Send for BorrowEntry {}
 
-static BORROWABLE: crate::fork_policy::Reset<Vec<BorrowEntry>> = crate::fork_policy::Reset::new(Vec::new);
+// FORK-15: held across fork, so a child inherits exactly the views it has.
+pub(crate) static BORROWABLE: crate::fork_policy::Held<Vec<BorrowEntry>> = crate::fork_policy::Held::new(4, Vec::new());
 
-/// A poisoned registry is not a reason to abort: the lock is taken inside
-/// release callbacks, which are `extern "C"` and cannot unwind.
-fn borrowable() -> crate::fork_policy::ResetGuard<'static, Vec<BorrowEntry>> {
-    BORROWABLE.lock().unwrap_or_else(|e| e.into_inner())
+fn borrowable() -> crate::fork_policy::HeldGuard<'static, Vec<BorrowEntry>> {
+    BORROWABLE.lock()
 }
 
-/// Record a block a new view holds a reference on.
-fn borrow_register(base: *const u8, rel: RelPtr, arena: *const ImportArena) {
-    borrowable().push(BorrowEntry { base, rel, arena });
+/// Record a new view.
+// FORK-15: lets the fork handler know, before taking any lock, whether a
+// child will have views.
+static VIEW_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) fn any_views() -> bool {
+    VIEW_COUNT.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
+fn borrow_register(base: *const u8, rel: RelPtr, key: *const c_void, borrowable_view: bool) {
+    let mut reg = borrowable();
+    reg.push(BorrowEntry { base, rel, key, borrowable: borrowable_view });
+    VIEW_COUNT.store(reg.len(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Record a language's view of `block`, identified by `key` (FORK-15).
+///
+/// # Safety
+/// `block` must be a live block the view holds a reference on.
+#[no_mangle]
+pub unsafe extern "C" fn morloc_view_held(block: *const c_void, key: *const c_void) {
+    if let Ok(rel) = shm::abs2rel(block as *mut u8) {
+        borrow_register(block as *const u8, rel, key, false);
+    }
+}
+
+/// Forget the view recorded under `key`, before its reference is released.
+#[no_mangle]
+pub extern "C" fn morloc_view_released(key: *const c_void) {
+    borrow_forget(key);
+}
+
+// FORK-15: called with every held lock taken; one reference per view, for
+// a forked child's lease. Returns the views' blocks it took references on.
+pub(crate) fn fork_prepare_views(vols: &shm::VolumeTable, views: &[BorrowEntry]) -> Vec<RelPtr> {
+    views
+        .iter()
+        .filter(|e| unsafe { shm::incref_held(vols, e.base as *mut u8) })
+        .map(|e| e.rel)
+        .collect()
 }
 
 /// Forget the entry of a view that is being released, before its block is.
-fn borrow_forget(arena: *const ImportArena) {
+fn borrow_forget(key: *const c_void) {
     let mut reg = borrowable();
-    if let Some(i) = reg.iter().position(|e| std::ptr::eq(e.arena, arena)) {
+    if let Some(i) = reg.iter().position(|e| std::ptr::eq(e.key, key)) {
         reg.swap_remove(i);
     }
+    VIEW_COUNT.store(reg.len(), std::sync::atomic::Ordering::Relaxed);
 }
 
 fn borrowing_disabled() -> bool {
@@ -1461,7 +1509,10 @@ pub unsafe fn try_borrow(
     if trace {
         eprintln!("try_borrow: {} candidate(s)", reg.len());
     }
-    for &BorrowEntry { base, rel, .. } in reg.iter() {
+    for &BorrowEntry { base, rel, borrowable, .. } in reg.iter() {
+        if !borrowable {
+            continue;
+        }
         // The header alone rules out most candidates, before the block
         // is checked in full.
         let h = &*(base as *const ArrowShmHeader);
@@ -1860,6 +1911,158 @@ mod tests {
         }
     }
 
+    // FORK-15: the child reads after the parent released everything and a
+    // reclaim ran while the child lived; a reclaim after it exits frees the
+    // block.
+    fn inherited_view_outlives_the_parent(owning: bool) -> (Option<u32>, Option<u32>) {
+        let rel = write_batch(&fixture(), None).unwrap();
+        let base = shm::rel2abs(rel).unwrap();
+        let mut s = FFI_ArrowSchema::empty();
+        let mut a = FFI_ArrowArray::empty();
+        if owning {
+            unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, true, &mut s, &mut a) }.unwrap();
+        } else {
+            unsafe { shm_to_ffi(base as *const ArrowShmHeader, &mut s, &mut a) }.unwrap();
+        }
+        let mut go = [0 as libc::c_int; 2];
+        let mut back = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(go.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { libc::pipe(back.as_mut_ptr()) }, 0);
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            unsafe { libc::alarm(10) };
+            let mut b = [0u8; 1];
+            unsafe { libc::read(go[0], b.as_mut_ptr() as *mut c_void, 1) };
+            let rc = unsafe { shm::reference_count(base) }.unwrap_or(0);
+            release_roots(&mut s, &mut a, false);
+            unsafe {
+                libc::write(back[1], rc.to_ne_bytes().as_ptr() as *const c_void, 4);
+                libc::_exit(0)
+            };
+        }
+        release_roots(&mut s, &mut a, false);
+        let _ = shm::shfree(base);
+        crate::lease::reclaim();
+        unsafe { libc::write(go[1], b"x".as_ptr() as *const c_void, 1) };
+        let mut rc = [0u8; 4];
+        unsafe { libc::read(back[0], rc.as_mut_ptr() as *mut c_void, 4) };
+        let mut st = 0;
+        unsafe { libc::waitpid(child, &mut st, 0) };
+        crate::lease::reclaim();
+        (Some(u32::from_ne_bytes(rc)), unsafe { shm::reference_count(base) })
+    }
+
+    // FORK-15: run alone in a forked process, so no other test forks while
+    // the view is recorded and leases its block to a child of its own.
+    fn alone(work: impl FnOnce() -> bool) {
+        let _shm = crate::own_test_registry();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(work));
+    }
+
+    #[test]
+    fn an_inherited_owning_view_keeps_its_block_until_the_child_is_gone() {
+        alone(|| {
+            let (in_child, after) = inherited_view_outlives_the_parent(true);
+            if !(in_child.is_some_and(|n| n > 0) && after == Some(0)) {
+                eprintln!("in the child {in_child:?}, after its lease {after:?}");
+                return false;
+            }
+            true
+        });
+    }
+
+    #[test]
+    fn an_inherited_reading_view_keeps_its_block_until_the_child_is_gone() {
+        alone(|| {
+            let (in_child, after) = inherited_view_outlives_the_parent(false);
+            if !(in_child.is_some_and(|n| n > 0) && after == Some(0)) {
+                eprintln!("in the child {in_child:?}, after its lease {after:?}");
+                return false;
+            }
+            true
+        });
+    }
+
+    #[test]
+    fn a_child_that_closes_its_descriptors_keeps_its_blocks_while_it_lives() {
+        alone(closing_child_keeps_its_blocks);
+    }
+
+    fn closing_child_keeps_its_blocks() -> bool {
+        let base = shm::shmalloc(64).unwrap();
+        unsafe { shm::shincref(base) }.unwrap();
+        let owner = 9usize as *const c_void;
+        unsafe { morloc_view_held(base as *const c_void, owner) };
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            unsafe { libc::alarm(10) };
+            for fd in 3..1024 {
+                unsafe { libc::close(fd) };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let rc = unsafe { shm::reference_count(base) }.unwrap_or(0);
+            unsafe { libc::_exit(if rc > 0 { 0 } else { 1 }) };
+        }
+        morloc_view_released(owner);
+        let _ = shm::shfree(base);
+        let _ = shm::shfree(base);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        crate::lease::reclaim();
+        let mut st = 0;
+        unsafe { libc::waitpid(child, &mut st, 0) };
+        crate::lease::reclaim();
+        let read_live = libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0;
+        let after = unsafe { shm::reference_count(base) };
+        if !(read_live && after == Some(0)) {
+            eprintln!("the child read a live block: {read_live}, after its lease {after:?}");
+            return false;
+        }
+        true
+    }
+
+    #[test]
+    fn an_inherited_language_view_keeps_its_block_until_the_child_is_gone() {
+        alone(language_view_outlives_the_parent);
+    }
+
+    fn language_view_outlives_the_parent() -> bool {
+        let base = shm::shmalloc(64).unwrap();
+        unsafe { shm::shincref(base) }.unwrap();
+        let owner = 7usize as *const c_void;
+        unsafe { morloc_view_held(base as *const c_void, owner) };
+        let mut go = [0 as libc::c_int; 2];
+        let mut back = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(go.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { libc::pipe(back.as_mut_ptr()) }, 0);
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            unsafe { libc::alarm(10) };
+            let mut b = [0u8; 1];
+            unsafe { libc::read(go[0], b.as_mut_ptr() as *mut c_void, 1) };
+            let rc = unsafe { shm::reference_count(base) }.unwrap_or(0);
+            unsafe {
+                libc::write(back[1], rc.to_ne_bytes().as_ptr() as *const c_void, 4);
+                libc::_exit(0)
+            };
+        }
+        morloc_view_released(owner);
+        let _ = shm::shfree(base);
+        let _ = shm::shfree(base);
+        crate::lease::reclaim();
+        unsafe { libc::write(go[1], b"x".as_ptr() as *const c_void, 1) };
+        let mut rc = [0u8; 4];
+        unsafe { libc::read(back[0], rc.as_mut_ptr() as *mut c_void, 4) };
+        let mut st = 0;
+        unsafe { libc::waitpid(child, &mut st, 0) };
+        crate::lease::reclaim();
+        let (in_child, after) = (u32::from_ne_bytes(rc), unsafe { shm::reference_count(base) });
+        if !(in_child > 0 && after == Some(0)) {
+            eprintln!("in the child {in_child}, after its lease {after:?}");
+            return false;
+        }
+        true
+    }
+
     #[test]
     fn an_acquiring_view_holds_one_reference_until_both_roots_release() {
         with_shm(|| {
@@ -2000,7 +2203,9 @@ mod tests {
                     release_roots(&mut s, &mut a, false);
                     true
                 });
-                released && unsafe { shm::reference_count(base) } == before
+                // FORK-15: the intermediate child's lease and the descendant's
+                // each still hold one; the descendant's release took nothing.
+                released && unsafe { shm::reference_count(base) } == before.map(|n| n + 2)
             });
             assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid released the ancestor's reference");
         });

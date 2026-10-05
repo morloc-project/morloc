@@ -165,7 +165,7 @@ pub unsafe extern "C" fn morloc_log_emit(
 // being measured, and folding its duration into the mean would report a number
 // that describes nothing.
 
-pub(crate) static BENCH_FILE: crate::fork_policy::Held<Option<std::sync::Arc<std::fs::File>>> = crate::fork_policy::Held::new(13, None);
+pub(crate) static BENCH_FILE: crate::fork_policy::Held<Option<std::sync::Arc<std::fs::File>>> = crate::fork_policy::Held::new(14, None);
 
 // INIT-2: opened without the lock; FORK-10: written without it.
 pub(crate) fn shared_append_file(

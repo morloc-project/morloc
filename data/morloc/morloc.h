@@ -1497,6 +1497,14 @@ pid_t morloc_fork_worker(long* threads_at_fork, int* error);
 int64_t morloc_held_references(void);
 // Held references plus stream file locks: a worker retires only at zero.
 int64_t morloc_retire_blockers(void);
+// Record a language's view of a block it holds a reference on, under a key,
+// so a forked child keeps the block while it lives; forget it on release.
+void morloc_view_held(const void* block, const void* key);
+void morloc_view_released(const void* key);
+// Release the references of leases whose forked holder is gone (rate-limited).
+void morloc_reclaim_leases(void);
+// Remove the current namespace's leases kept outside the run directory.
+void morloc_remove_leases(void);
 const char* morloc_lifeline_child_env(int* read_fd);
 
 void close_socket(int socket_id);

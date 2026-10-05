@@ -144,6 +144,7 @@ extern "C" {
     fn morloc_take_noted_child_exit(pid: libc::c_int, since: u64, status: *mut libc::c_int) -> libc::c_int;
     fn morloc_stop_child_groups();
     fn morloc_claim_exit() -> bool;
+    fn morloc_remove_leases();
 }
 
 /// C-ABI callback wired into DaemonConfig.pool_check_fn.
@@ -264,6 +265,8 @@ extern "C" fn pool_check_and_recover(
     }
 
     // Step 3: tear down all SHM.
+    // FORK-15: the leases name the namespace being discarded.
+    unsafe { morloc_remove_leases() };
     unsafe {
         let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
         shclose(&mut err);
@@ -918,6 +921,8 @@ fn teardown(exit_code: i32, unmap: bool) -> ! {
 
     stop_pools();
 
+    // FORK-15: leases kept outside the run directory.
+    unsafe { morloc_remove_leases() };
     // Clean up shared memory segments
     extern "C" {
         fn shclose(errmsg: *mut *mut std::ffi::c_char) -> bool;

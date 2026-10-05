@@ -26,7 +26,7 @@ struct Counters {
 }
 
 static COUNTERS: AtomicPtr<Counters> = AtomicPtr::new(std::ptr::null_mut());
-pub(crate) static SEGMENT: crate::fork_policy::Held<Option<CompanionSegment>> = crate::fork_policy::Held::new(7, None);
+pub(crate) static SEGMENT: crate::fork_policy::Held<Option<CompanionSegment>> = crate::fork_policy::Held::new(8, None);
 
 /// Map the counters if `MORLOC_SHM_STATS` is set. Called once the program's
 /// basename is known; later calls are no-ops.

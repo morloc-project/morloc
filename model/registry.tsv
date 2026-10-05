@@ -40,8 +40,12 @@ library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::SCHEMA_TABLE	
 morloc-runtime/arrow_ffi.rs::stats_enabled::FLAG	lazy		
 morloc-runtime/arrow_shm.rs::-::COPIED_BYTES	counter		
 morloc-runtime/arrow_shm.rs::-::LIVE_VIEW_BYTES	counter		
-morloc-runtime/arrow_shm.rs::-::BORROWABLE	reset		
+morloc-runtime/arrow_shm.rs::-::BORROWABLE	held	4	
 morloc-runtime/arrow_shm.rs::borrowing_disabled::FLAG	lazy		
+morloc-runtime/arrow_shm.rs::-::VIEW_COUNT	counter		
+morloc-runtime/lease.rs::-::CREATED	counter		
+morloc-runtime/lease.rs::-::SEQ	counter		
+morloc-runtime/lease.rs::-::LAST_RECLAIM_MS	counter		
 morloc-runtime/cache.rs::pool_hash::CACHED	lazy		
 morloc-runtime/cache.rs::cache_base::CACHED	lazy		
 morloc-runtime/cache.rs::-::CACHE_HITS	counter		
@@ -102,7 +106,7 @@ morloc-runtime/intrinsics.rs::-::CURRENT_TEMP_OWNER	thread
 morloc-runtime/intrinsics.rs::-::DISPATCH_DEPTH	thread		
 morloc-runtime/ipc_ffi.rs::-::PING_PEEK_ACTIVE	counter		
 morloc-runtime/ipc_ffi.rs::trace_close_enabled::T	lazy		
-morloc-runtime/ipc_ffi.rs::-::SELF_SOCKET	held	12	
+morloc-runtime/ipc_ffi.rs::-::SELF_SOCKET	held	13	
 morloc-runtime/ipc_ffi.rs::-::REQUEST	thread		
 morloc-runtime/ipc_ffi.rs::forbid_self_call::FORBID	lazy		
 morloc-runtime/ipc_ffi.rs::-::HELD	test-only		
@@ -122,12 +126,12 @@ morloc-runtime/log.rs::-::CALL_COUNTER	counter
 morloc-runtime/log.rs::color_enabled::CACHED	lazy		
 morloc-runtime/log.rs::quiet::CACHED	lazy		
 morloc-runtime/log.rs::trace_enabled::CACHED	lazy		
-morloc-runtime/log.rs::-::BENCH_FILE	held	13	
+morloc-runtime/log.rs::-::BENCH_FILE	held	14	
 morloc-runtime/manifest_ffi.rs::-::NAMED_FUNCTIONS	thread		
 morloc-runtime/packet.rs::-::INLINE_THRESHOLD	startup		
 morloc-runtime/packet.rs::-::SHM_ENABLED	startup		
 morloc-runtime/packet.rs::-::TEST_CONFIG_LOCK	test-only		
-morloc-runtime/packet.rs::-::TMPDIR	held	11	
+morloc-runtime/packet.rs::-::TMPDIR	held	12	
 morloc-runtime/packet.rs::-::CONFIG_LOADED	counter		
 morloc-runtime/packet_ffi.rs::make_file_data_packet_voidstar::SEQ	counter		
 morloc-runtime/pool_ffi.rs::-::SHUTTING_DOWN	counter		
@@ -135,31 +139,31 @@ morloc-runtime/pool_ffi.rs::-::BUSY_COUNT	counter
 morloc-runtime/pool_ffi.rs::-::JobQueue.state	unreachable		
 morloc-runtime/pool_ffi.rs::-::JobQueue.cond	unreachable		
 morloc-runtime/run.rs::-::RUN	lazy		
-morloc-runtime/run.rs::-::TEE_HANDLES	held	14	
-morloc-runtime/run.rs::-::RUN_TEE_HANDLE	held	15	
-morloc-runtime/run.rs::-::RUN_COMMAND	held	16	
-morloc-runtime/run.rs::-::RUN_ERROR	held	17	
+morloc-runtime/run.rs::-::TEE_HANDLES	held	15	
+morloc-runtime/run.rs::-::RUN_TEE_HANDLE	held	16	
+morloc-runtime/run.rs::-::RUN_COMMAND	held	17	
+morloc-runtime/run.rs::-::RUN_ERROR	held	18	
 morloc-runtime/run.rs::-::CONTEXT	lazy		
 morloc-runtime/shm.rs::page_size::CACHED	lazy		
 morloc-runtime/shm.rs::-::CURRENT_VOLUME	counter		
-morloc-runtime/shm.rs::-::VOLUMES	held	5	FORK-10
+morloc-runtime/shm.rs::-::VOLUMES	held	6	FORK-10
 morloc-runtime/shm.rs::-::MORLOC_VOL_TABLE	counter		
-morloc-runtime/shm.rs::-::ALLOC_MUTEX	held	4	FORK-10
+morloc-runtime/shm.rs::-::ALLOC_MUTEX	held	5	FORK-10
 morloc-runtime/shm.rs::-::RNG_STATE	thread		
-morloc-runtime/shm.rs::-::COMMON_BASENAME	held	8	
-morloc-runtime/shm.rs::-::FALLBACK_DIR	held	9	
+morloc-runtime/shm.rs::-::COMMON_BASENAME	held	9	
+morloc-runtime/shm.rs::-::FALLBACK_DIR	held	10	
 morloc-runtime/shm.rs::-::ATEXIT_REGISTERED	counter		
-morloc-runtime/shm.rs::-::SHCLOSE_HOOKS	held	10	
+morloc-runtime/shm.rs::-::SHCLOSE_HOOKS	held	11	
 morloc-runtime/shm.rs::-::OWNER_GENERATION	startup		
 morloc-runtime/shm.rs::-::POISON	startup		
 morloc-runtime/shm.rs::-::HELD_REFERENCES	fork-scoped		
 morloc-runtime/shm_companion.rs::-::MORLOC_COMPANION_NAMES	startup		
 morloc-runtime/shm_companion.rs::-::COMPANION_TOTAL_BYTES	counter		
 morloc-runtime/shm_stats.rs::-::COUNTERS	startup		
-morloc-runtime/shm_stats.rs::-::SEGMENT	held	7	
+morloc-runtime/shm_stats.rs::-::SEGMENT	held	8	
 morloc-runtime/stream.rs::-::REGISTRY_BASE	lazy		
 morloc-runtime/stream.rs::-::REGISTRY_SLOT_COUNT	lazy		
-morloc-runtime/stream.rs::-::REGISTRY_SEGMENT	held	6	
+morloc-runtime/stream.rs::-::REGISTRY_SEGMENT	held	7	
 morloc-runtime/stream.rs::-::BOOTSTRAP_GAP_HOOK	test-only		
 morloc-runtime/stream.rs::first_uses_on_two_threads_build_one_registry::AT_GAP	test-only		
 morloc-runtime/stream.rs::first_uses_on_two_threads_build_one_registry::RESUME	test-only		

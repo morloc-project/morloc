@@ -63,7 +63,7 @@ pub(crate) struct Config {
 }
 
 pub(crate) static TMPDIR: crate::fork_policy::Held<Config> =
-    crate::fork_policy::Held::new(11, Config { loaded: false, tmpdir: None });
+    crate::fork_policy::Held::new(12, Config { loaded: false, tmpdir: None });
 
 static CONFIG_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 

@@ -686,7 +686,10 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
                     last_activity = time.monotonic()
                 except (EOFError, OSError):
                     break
-            elif total_workers.value > 1 and time.monotonic() - last_activity > WORKER_IDLE_TIMEOUT:
+            else:
+                # FORK-15: leases of user-forked children that are gone.
+                morloc.reclaim_leases()
+            if not events and total_workers.value > 1 and time.monotonic() - last_activity > WORKER_IDLE_TIMEOUT:
                 # SHM-8: a worker retires only holding no shared memory, and
                 # says so; any other exit ends the pool.
                 gc.collect()
