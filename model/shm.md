@@ -56,8 +56,27 @@ eval arena's own entry for the same address, so a non-arena release on a
 thread with an active arena leaks the arena's reference.
 
 ### SHM-8 A dead holder's references are recoverable
-Status: deviation
+Status: implemented
+Checked by: a_process_counts_the_references_it_holds, a_donated_reference_leaves_the_senders_count_and_joins_the_receivers, a_revoked_donation_returns_to_the_senders_count, a_closed_output_stream_leaves_no_reference_counted_to_its_process, a_settled_channel_leaves_no_reference_counted_to_its_process, an_open_output_stream_keeps_its_opener_from_retiring, tla:WorkerExit, tla:WorkerExit_status_inferred.bug, tla:WorkerExit_retire_holding.bug, tla:WorkerExit_no_recovery.bug
 
-References do not record their holder, so references held by a process
-that died cannot be told apart from live ones and leak until the program
-ends.
+A block's count is shared by all its holders and names none of them, so a
+dead holder's references are recovered by discarding the namespace, never
+one by one. Each process counts the references it holds: allocating or
+taking a reference adds one and releasing removes one, a donated reference
+leaves the sender's count when donated and joins the receiver's when its
+reply arrives, a reference a stream registry slot or channel queue holds
+belongs to no process, a block another process allocated for this one (a
+stdin batch from the nexus) is counted when it is released, and a forked
+child starts at zero. A pool worker
+that forks from a coordinator (Python fork mode, R) ends in one of two
+ways. It retires, which a Python worker does only when idle, after a
+garbage collection and its tracker flush, with its count at zero and no
+stream file lock held (a lock only its holder releases), after writing its
+pid to the coordinator; or it ends any other way, by a signal, an error, or an exit
+of any status without that token, and the coordinator then ends the pool.
+R workers never retire. When a pool ends, a daemon or MCP nexus runs its
+coordinated recovery (DAEMON-5), which discards the whole namespace, and a
+CLI run fails. A worker crash therefore restarts every pool of a daemon,
+and a client that repeatedly crashes a worker reaches the recovery loop
+guard, which stops the daemon. References held by children forked from user
+code are not covered. Model: `tla/WorkerExit.tla`.

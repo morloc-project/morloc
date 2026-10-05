@@ -2365,6 +2365,16 @@ static PyObject* pybinding__lifeline_adopt(PyObject* self, PyObject* args) {
     return PyLong_FromLong(morloc_lifeline_adopt());
 }
 
+// Shared-memory references this process holds (SHM-8).
+static PyObject* pybinding__held_references(PyObject* self, PyObject* args) {
+    return PyLong_FromLongLong((long long)morloc_held_references());
+}
+
+// Held references plus stream file locks (SHM-8).
+static PyObject* pybinding__retire_blockers(PyObject* self, PyObject* args) {
+    return PyLong_FromLongLong((long long)morloc_retire_blockers());
+}
+
 // The number of threads in this process, or -1 if it cannot be read.
 static PyObject* pybinding__thread_count(PyObject* self, PyObject* args) {
     return PyLong_FromLong(morloc_thread_count());
@@ -4491,6 +4501,8 @@ static PyMethodDef Methods[] = {
     {"lifeline_adopt", pybinding__lifeline_adopt, METH_NOARGS, "The lifeline descriptor to watch for the nexus's end, or -1"},
     {"lifeline_teardown", pybinding__lifeline_teardown, METH_NOARGS, "End this pool's process group after the nexus ended"},
     {"thread_count", pybinding__thread_count, METH_NOARGS, "The number of threads in this process, or -1"},
+    {"held_references", pybinding__held_references, METH_NOARGS, "Shared-memory references this process holds"},
+    {"retire_blockers", pybinding__retire_blockers, METH_NOARGS, "Held references plus stream file locks"},
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
     {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},

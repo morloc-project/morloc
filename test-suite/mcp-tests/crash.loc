@@ -1,0 +1,10 @@
+-- User code that kills the worker serving it. The MCP server must recover
+-- before its next call (SHM-8 in the compiler's model).
+module main (pyOk, pyDie)
+
+import root-py
+
+source Py from "crash.py" ("pyOk", "pyDie")
+
+pyOk :: Int -> Int
+pyDie :: Int -> Int

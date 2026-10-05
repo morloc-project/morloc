@@ -548,22 +548,18 @@ main <- function(socket_path, tmpdir, shm_basename) {
     pid
   }
 
-  # Reap dead workers (logging crashes), prune them from `pids`, and respawn up
-  # to `min_workers`. Without respawn a crashing pool decays toward zero live
-  # workers and nothing accepts. Pruning also keeps the shutdown kill loop from
-  # SIGKILLing a reaped-and-reused pid. (The in-flight job a crashed worker was
-  # serving fails: its connection closes with it.)
-  reap_and_respawn <- function(pids) {
-    alive <- integer(0)
+  # SHM-8: a worker never retires, so one that ended may have held shared
+  # memory no other process can release. The pool ends, and the nexus
+  # recovers the namespace. The ended pid leaves `pids` first, so the exit
+  # handler never signals a reused pid.
+  reap_or_end <- function(pids) {
     for (pid in pids) {
-      if (morloc_reap_worker(pid) == 0L) {
-        alive <- c(alive, pid)
+      if (morloc_reap_worker(pid) != 0L) {
+        pids <<- setdiff(pids, pid)
+        stop(sprintf("worker %d ended; ending the pool so its shared memory is recovered", pid))
       }
     }
-    while (length(alive) < min_workers) {
-      alive <- c(alive, spawn_worker())
-    }
-    alive
+    pids
   }
 
   pids <- integer(0)
@@ -591,7 +587,7 @@ main <- function(socket_path, tmpdir, shm_basename) {
   while (!morloc_is_shutting_down()) {
     # Reap dead workers, respawn to the floor, and keep the shared worker count
     # honest (a stale count would make the saturation gate below stop tripping).
-    pids <- reap_and_respawn(pids)
+    pids <- reap_or_end(pids)
     morloc_shared_counter_set(total_counter, length(pids))
 
     morloc_wait_wakeup(wakeup[1L], 100L)

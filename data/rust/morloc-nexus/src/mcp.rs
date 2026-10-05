@@ -584,6 +584,8 @@ impl DispatchCtx {
     /// recovery (a fast no-op when all pools are alive) before returning, so a
     /// subsequent call can succeed.
     fn dispatch(&self, request_str: &str, want_media: bool) -> Result<DispatchOutcome, String> {
+        // SHM-8: a pool that ended since the last call is recovered first.
+        process::mcp_recover_pools(self.n_pools);
         let req_c = CString::new(request_str).unwrap();
 
         let mut errmsg: *mut c_char = ptr::null_mut();
@@ -634,7 +636,7 @@ impl DispatchCtx {
                 let msg = cstr_to_string((*resp).error)
                     .unwrap_or_else(|| "dispatch failed".to_string());
                 if kind == DAEMON_ERROR_INTERNAL {
-                    process::mcp_recover_pools(self.n_pools);
+                    process::mcp_recover_pools_after_failure(self.n_pools);
                 }
                 Err(msg)
             }

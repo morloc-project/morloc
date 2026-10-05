@@ -1141,6 +1141,11 @@ fn run_remote_command(
             );
         }
     }
+    // A shared-memory result's donated reference is this process's now (SHM-8).
+    extern "C" {
+        fn morloc_inherit_reply(packet: *const u8);
+    }
+    unsafe { morloc_inherit_reply(full_packet.as_ptr()) };
 
     // Check for error
     match packet::get_error_message(&full_packet) {

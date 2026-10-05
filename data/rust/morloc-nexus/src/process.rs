@@ -368,6 +368,17 @@ pub fn mcp_recover_pools(n_pools: usize) {
     pool_check_and_recover(std::ptr::null_mut(), n_pools);
 }
 
+// SHM-8: a pool whose worker died ends within its coordinator's next reap.
+pub fn mcp_recover_pools_after_failure(n_pools: usize) {
+    let until = std::time::Instant::now() + POOL_END_WAIT;
+    while (0..n_pools).all(pool_is_alive) && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    mcp_recover_pools(n_pools);
+}
+
+const POOL_END_WAIT: Duration = Duration::from_millis(200);
+
 const INITIAL_PING_TIMEOUT: Duration = Duration::from_millis(10);
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(1);
 const RETRY_MULTIPLIER: f64 = 1.25;

@@ -152,6 +152,7 @@ morloc-runtime/shm.rs::-::ATEXIT_REGISTERED	counter
 morloc-runtime/shm.rs::-::SHCLOSE_HOOKS	held	10	
 morloc-runtime/shm.rs::-::OWNER_GENERATION	startup		
 morloc-runtime/shm.rs::-::POISON	startup		
+morloc-runtime/shm.rs::-::HELD_REFERENCES	fork-scoped		
 morloc-runtime/shm_companion.rs::-::MORLOC_COMPANION_NAMES	startup		
 morloc-runtime/shm_companion.rs::-::COMPANION_TOTAL_BYTES	counter		
 morloc-runtime/shm_stats.rs::-::COUNTERS	startup		

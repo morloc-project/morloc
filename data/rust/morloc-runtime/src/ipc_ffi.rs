@@ -818,6 +818,8 @@ pub unsafe extern "C" fn send_and_receive_over_socket_wait(
     }
 
     close_socket(client_fd);
+    // SHM-8
+    crate::packet_ffi::inherit_reply(result);
     result
 }
 
@@ -935,6 +937,8 @@ pub unsafe extern "C" fn mlc_spawn_watched(
         let mut err: *mut c_char = ptr::null_mut();
         let result = stream_from_client_wait(fd, 0, 0, &mut err);
         close_socket(fd);
+        // SHM-8
+        crate::packet_ffi::inherit_reply(result);
         if !err.is_null() {
             libc::free(err as *mut c_void);
             let _ = crate::stream::shared_channel_fail(

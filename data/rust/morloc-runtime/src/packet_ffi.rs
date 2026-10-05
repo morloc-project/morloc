@@ -888,15 +888,32 @@ pub(crate) unsafe fn donate_packet_reference(
     packet: *const u8,
 ) -> Result<(), MorlocError> {
     match packet_rptr_block(packet)? {
-        Some(abs) => crate::shm::shincref(abs),
+        Some(abs) => {
+            crate::shm::shincref(abs)?;
+            crate::shm::hand_on_reference();
+            Ok(())
+        }
         None => Ok(()),
     }
+}
+
+/// Count a reply's donated reference as this process's own (SHM-8).
+pub(crate) unsafe fn inherit_reply(packet: *const u8) {
+    if let Ok(Some(_)) = packet_rptr_block(packet) {
+        crate::shm::take_on_reference();
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn morloc_inherit_reply(packet: *const u8) {
+    inherit_reply(packet)
 }
 
 /// Give back a reference taken by `donate_packet_reference` when the packet
 /// it was taken for never reached anyone.
 pub(crate) unsafe fn revoke_packet_reference(packet: *const u8) {
     if let Ok(Some(abs)) = packet_rptr_block(packet) {
+        crate::shm::take_on_reference();
         let _ = crate::shm::shfree(abs);
     }
 }
@@ -2412,6 +2429,58 @@ mod donation_tests {
 
         unsafe { libc::free(packet as *mut libc::c_void) };
         unsafe { CSchema::free(cs) };
+    }
+
+    fn counted(tag: &str, want: i64) -> bool {
+        let got = crate::shm::held_references();
+        if got != want {
+            eprintln!("{tag}: this process counts {got} references, expected {want}");
+        }
+        got == want
+    }
+
+    #[test]
+    fn a_donated_reference_leaves_the_senders_count_and_joins_the_receivers() {
+        let _shm = crate::own_test_registry();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let abs = crate::shm::shmalloc(64).expect("allocate");
+            let rel = crate::shm::abs2rel(abs).expect("relptr");
+            let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
+            let cs = CSchema::from_rust(&schema);
+            let packet = unsafe { make_standard_data_packet(rel, cs) };
+            let mut ok = counted("allocated", 1);
+            unsafe { donate_packet_reference(packet) }.expect("donate");
+            ok &= counted("donated", 1);
+            crate::shm::shfree(abs).expect("sender release");
+            ok &= counted("sender released", 0);
+            unsafe { inherit_reply(packet) };
+            ok &= counted("received", 1);
+            crate::shm::shfree(abs).expect("receiver release");
+            ok &= counted("receiver released", 0);
+            unsafe { libc::free(packet as *mut libc::c_void) };
+            unsafe { CSchema::free(cs) };
+            ok
+        }));
+    }
+
+    #[test]
+    fn a_revoked_donation_returns_to_the_senders_count() {
+        let _shm = crate::own_test_registry();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let abs = crate::shm::shmalloc(64).expect("allocate");
+            let rel = crate::shm::abs2rel(abs).expect("relptr");
+            let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
+            let cs = CSchema::from_rust(&schema);
+            let packet = unsafe { make_standard_data_packet(rel, cs) };
+            unsafe { donate_packet_reference(packet) }.expect("donate");
+            unsafe { revoke_packet_reference(packet) };
+            let mut ok = counted("revoked", 1);
+            crate::shm::shfree(abs).expect("release");
+            ok &= counted("released", 0);
+            unsafe { libc::free(packet as *mut libc::c_void) };
+            unsafe { CSchema::free(cs) };
+            ok
+        }));
     }
 
     #[test]

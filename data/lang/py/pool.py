@@ -4,6 +4,7 @@ import sys
 import select
 import os # required for setting path to morloc dependencies
 import time
+import gc
 import copy
 import array
 import struct
@@ -647,7 +648,7 @@ def _recv_fd(sock):
 
 WORKER_IDLE_TIMEOUT = 5.0  # seconds before an idle worker exits
 
-def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w):
+def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w, retire_w):
     # Reset signal handlers inherited from main. If user code inside run_job
     # calls multiprocessing.Pool (or anything else that forks and later
     # SIGTERMs its own children), those grandchildren would otherwise inherit
@@ -686,7 +687,14 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
                 except (EOFError, OSError):
                     break
             elif total_workers.value > 1 and time.monotonic() - last_activity > WORKER_IDLE_TIMEOUT:
-                break
+                # SHM-8: a worker retires only holding no shared memory, and
+                # says so; any other exit ends the pool.
+                gc.collect()
+                morloc.shm_tracker_flush()
+                if morloc.retire_blockers() == 0:
+                    os.write(retire_w, struct.pack("i", os.getpid()))
+                    break
+                last_activity = time.monotonic()
     except BaseException as e:
         # Catch-all for errors that escape run_job's own exception handling:
         # MemoryError, KeyboardInterrupt, SystemExit, or bugs in the worker
@@ -750,6 +758,19 @@ def signal_handler(sig, frame):
     d = _take_daemon()
     if d is not None:
         morloc.close_daemon(d)
+
+
+def _read_retired(fd):
+    """The pids retired workers have written to `fd` so far."""
+    pids = set()
+    while True:
+        try:
+            data = os.read(fd, 4096)
+        except BlockingIOError:
+            return pids
+        if not data:
+            return pids
+        pids.update(p for (p,) in struct.iter_unpack("i", data[: len(data) // 4 * 4]))
 
 
 def _report_worker_death(w, shutting_down=False):
@@ -1056,10 +1077,16 @@ if __name__ == "__main__":
     # Keep a dup of the read end so we can spawn new workers later
     spare_read_fd = os.dup(read_sock.fileno())
 
+    # A worker that retires writes its pid here first (SHM-8).
+    retire_r, retire_w = os.pipe()
+    os.set_blocking(retire_r, False)
+    retired = set()
+    pool_failure = None
+
     for i in range(num_workers):
         worker = Process(target=worker_process,
                          args=(read_sock.fileno(), tmpdir, shm_basename, shutdown_flag,
-                               busy_count, total_workers, wakeup_w))
+                               busy_count, total_workers, wakeup_w, retire_w))
         _fork_single_threaded(workers)
         worker.start()
         workers.append(worker)
@@ -1094,23 +1121,39 @@ if __name__ == "__main__":
             except OSError:
                 pass
 
-        # Reap dead workers (idle timeout or error exit)
+        # Reap ended workers. A retired worker wrote its pid before it
+        # exited, so the pipe is read again once its exit is seen.
         alive = []
         for w in workers:
             if w.is_alive():
                 alive.append(w)
-            else:
-                w.join(timeout=0)
-                _report_worker_death(w, shutting_down=bool(shutdown_flag.value))
-                w.close()
+                continue
+            w.join(timeout=0)
+            if w.pid not in retired:
+                retired |= _read_retired(retire_r)
+            clean = w.pid in retired
+            retired.discard(w.pid)
+            _report_worker_death(w, shutting_down=bool(shutdown_flag.value))
+            if not clean and not shutdown_flag.value and pool_failure is None:
+                pool_failure = f"worker {w.pid} ended without retiring"
+            w.close()
         workers = alive
         total_workers.value = max(1, len(workers))
+        if pool_failure is None and not shutdown_flag.value and not listener_process.is_alive():
+            pool_failure = "the listener ended"
+        if pool_failure is not None:
+            # SHM-8: what the process held is recovered only by ending the
+            # pool, so the nexus recovers its shared memory.
+            print(f"morloc py pool: {pool_failure}; ending the pool so its shared memory is recovered",
+                  file=sys.stderr)
+            sys.stderr.flush()
+            break
 
         # Spawn a new worker if all are busy (or all have exited)
         if len(workers) == 0 or busy_count.value >= total_workers.value:
             w = Process(target=worker_process,
                         args=(spare_read_fd, tmpdir, shm_basename, shutdown_flag,
-                              busy_count, total_workers, wakeup_w))
+                              busy_count, total_workers, wakeup_w, retire_w))
             _fork_single_threaded(workers + [listener_process])
             w.start()
             workers.append(w)
@@ -1120,6 +1163,8 @@ if __name__ == "__main__":
     os.close(wakeup_r)
     os.close(wakeup_w)
     os.close(spare_read_fd)
+    os.close(retire_r)
+    os.close(retire_w)
 
     # 1. Stop listener first
     listener_process.terminate()
@@ -1139,4 +1184,4 @@ if __name__ == "__main__":
         p.join()  # Final blocking reap
         p.close()
 
-    sys.exit(0)
+    sys.exit(1 if pool_failure is not None else 0)

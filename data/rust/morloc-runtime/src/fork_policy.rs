@@ -276,6 +276,7 @@ extern "C" fn after_fork_in_child() {
     morloc_runtime_types::fork_generation::bump_in_child();
     INHERITED_DISPATCHES.store(crate::intrinsics::dispatch_depth(), Ordering::Relaxed);
     crate::cell::after_fork_in_child();
+    crate::shm::forget_held_references();
     if let Some(mut held) = take_fork_held() {
         crate::stream::after_fork_in_child(&mut held.map, &mut held.locked_fds);
     }

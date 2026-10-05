@@ -43,7 +43,8 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/ipc_ffi.rs::send_and_receive_over_socket_wait",
     "morloc-runtime/utility.rs::create_beside",
 ];
-const BINDER_PID_READS: &[(&str, usize)] = &[("data/lang/r/rmorloc.c", 1)];
+// SHM-8: pool.py's retiring worker names itself to its coordinator.
+const BINDER_PID_READS: &[(&str, usize)] = &[("data/lang/r/rmorloc.c", 1), ("data/lang/py/pool.py", 1)];
 const CLASSES: &[&str] = &[
     "held", "reset", "unreachable", "exec-only", "startup", "lazy", "fork-scoped", "counter", "thread",
     "instance", "paired", "test-only",

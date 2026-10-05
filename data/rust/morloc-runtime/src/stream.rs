@@ -1021,6 +1021,25 @@ pub(crate) enum LocalEntry {
 pub(crate) static PROCESS_LOCAL_SLOTS: Held<Option<std::collections::HashMap<i64, LocalEntry>>> =
     Held::new(2, None);
 
+// SHM-8: slots that hold a stream's file lock, which only this process releases.
+pub fn held_stream_locks() -> usize {
+    let guard = PROCESS_LOCAL_SLOTS.lock();
+    guard.as_ref().map_or(0, |map| {
+        map.values()
+            .filter(|e| match e {
+                LocalEntry::Idle(local) => local.holds_lock,
+                LocalEntry::InUse { .. } => true,
+            })
+            .count()
+    })
+}
+
+// SHM-8: what keeps a worker from retiring.
+#[no_mangle]
+pub extern "C" fn morloc_retire_blockers() -> i64 {
+    crate::shm::held_references() + held_stream_locks() as i64
+}
+
 /// Signalled whenever an `InUse` mark is replaced or removed.
 static PROCESS_LOCAL_RETURNED: std::sync::Condvar = std::sync::Condvar::new();
 
@@ -1608,13 +1627,21 @@ pub(crate) fn allocate_slot_cas(
 /// from here: its lifetime is the slot's, which spans dispatches and can
 /// be shared across processes, so it must not be released when the
 /// allocating eval scope exits. Returns the relptr for assignment.
+// SHM-8: the slot, not this process, holds the reference from here.
 fn slot_owns(rel: RelPtr) -> RelPtr {
     if rel != shm_types_crate::RELNULL {
         if let Ok(abs) = crate::shm::rel2abs(rel) {
             crate::eval_arena::forget_if_active(abs);
+            crate::shm::hand_on_reference();
         }
     }
     rel
+}
+
+// SHM-8: release a block no process counts: a slot's, or one another process allocated.
+fn free_uncounted(abs: crate::shm::AbsPtr) {
+    crate::shm::take_on_reference();
+    let _ = crate::shm::shfree(abs);
 }
 
 #[cfg(test)]
@@ -1714,13 +1741,13 @@ fn free_slot_blocks(slot: &RegistrySlot) {
     let path = slot.file_path;
     if path != shm_types_crate::RELNULL {
         if let Ok(abs) = crate::shm::rel2abs(path) {
-            let _ = crate::shm::shfree(abs);
+            free_uncounted(abs);
         }
     }
     let schema = slot.schema_str;
     if schema != shm_types_crate::RELNULL {
         if let Ok(abs) = crate::shm::rel2abs(schema) {
-            let _ = crate::shm::shfree(abs);
+            free_uncounted(abs);
         }
     }
     if slot.kind == MLC_KIND_CHANNEL {
@@ -1729,13 +1756,13 @@ fn free_slot_blocks(slot: &RegistrySlot) {
     let idx = slot.subpacket_entries;
     if idx != shm_types_crate::RELNULL {
         if let Ok(abs) = crate::shm::rel2abs(idx) {
-            let _ = crate::shm::shfree(abs);
+            free_uncounted(abs);
         }
     }
     let wbuf = slot.write_buffer;
     if wbuf != shm_types_crate::RELNULL {
         if let Ok(abs) = crate::shm::rel2abs(wbuf) {
-            let _ = crate::shm::shfree(abs);
+            free_uncounted(abs);
         }
     }
 }
@@ -3080,7 +3107,7 @@ fn stdio_next_via_rpc(handle: i64, stdio_kind: u8)
                 // an SHM Array<a> using the slot's cached element
                 // schema, then free the packet buffer.
                 let result = stdio_decode_packet(handle, packet_abs);
-                let _ = crate::shm::shfree(packet_abs);
+                free_uncounted(packet_abs);
                 result
             }
             STATUS_EOF => empty_shm_array(),
@@ -4092,7 +4119,7 @@ fn append_shared_subpacket_index(
     // Free the old block AFTER the publication. Readers under the
     // lock see the new relptr; no one is holding a pointer to the
     // old block.
-    let _ = crate::shm::shfree(idx_abs as *mut u8);
+    free_uncounted(idx_abs as *mut u8);
     Ok(())
 }
 
@@ -4389,6 +4416,7 @@ fn flush_full_buffer(
         None => crate::shm::shcalloc(1, buf_bytes)?,
     };
     let level = crate::compression::CompressionLevel::from_u8(slot.compression_level)?;
+    let fresh_rel = crate::shm::abs2rel(fresh)?;
     local.write_behind.seal_buffer(
         sealed,
         n,
@@ -4397,9 +4425,11 @@ fn flush_full_buffer(
         &local.elem_schema,
         level,
     );
+    // SHM-8: the sealed buffer is this process's from here.
+    crate::shm::take_on_reference();
     unsafe {
         let mp = slot as *const RegistrySlot as *mut RegistrySlot;
-        (*mp).write_buffer = slot_owns(crate::shm::abs2rel(fresh)?);
+        (*mp).write_buffer = slot_owns(fresh_rel);
         (*mp).write_buffer_index_count = 0;
         (*mp).write_buffer_data_used = 0;
     }
@@ -10412,6 +10442,45 @@ mod tests {
         assert!(strays.is_empty(), "left behind: {:?}", strays);
     }
 
+    #[test]
+    fn an_open_output_stream_keeps_its_opener_from_retiring() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("retire_lock");
+        let p = dir.join("out.idx").to_str().unwrap().to_string();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(move || {
+            let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
+            let open = held_stream_locks() == 1 && morloc_retire_blockers() > 0;
+            shared_close_handle(h).unwrap();
+            let closed = morloc_retire_blockers() == 0;
+            if !(open && closed) {
+                eprintln!("open: locks {} blockers; closed: {} blockers", held_stream_locks(), morloc_retire_blockers());
+            }
+            open && closed
+        }));
+    }
+
+    #[test]
+    fn a_closed_output_stream_leaves_no_reference_counted_to_its_process() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("held_refs");
+        let p = dir.join("out.idx").to_str().unwrap().to_string();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(move || {
+            let schema = parse_schema("ai4").unwrap();
+            let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
+            for _ in 0..3 {
+                let v = crate::json::read_json_with_schema("[1,2,3]", &schema).unwrap();
+                shared_write_subpacket(h, crate::compression::CompressionLevel::NONE, v).unwrap();
+                crate::shm::shfree(v).unwrap();
+            }
+            shared_close_handle(h).unwrap();
+            let held = crate::shm::held_references();
+            if held != 0 {
+                eprintln!("a closed output stream left {held} references counted");
+            }
+            held == 0
+        }));
+    }
+
     fn concat_test_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "morloc_concat_{}_{}", tag, std::process::id()
@@ -12932,7 +13001,7 @@ fn channel_enqueue(
     unsafe {
         let node = node_abs as *mut ChannelNode;
         (*node).next = shm_types_crate::RELNULL;
-        (*node).arr = crate::shm::abs2rel(arr)?;
+        (*node).arr = slot_owns(crate::shm::abs2rel(arr)?);
         let b = channel_block(slot)?;
         if (*b).tail == shm_types_crate::RELNULL {
             (*b).head = node_rel;
@@ -12940,7 +13009,7 @@ fn channel_enqueue(
             let tail = crate::shm::rel2abs((*b).tail)? as *mut ChannelNode;
             (*tail).next = node_rel;
         }
-        (*b).tail = node_rel;
+        (*b).tail = slot_owns(node_rel);
         (*b).count += 1;
     }
     Ok(())
@@ -12973,7 +13042,9 @@ fn channel_pop(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
                         (*b).tail = shm_types_crate::RELNULL;
                     }
                     (*b).count -= 1;
-                    let _ = crate::shm::shfree(node_abs);
+                    free_uncounted(node_abs);
+                    // SHM-8: the batch is this process's from here.
+                    crate::shm::take_on_reference();
                     return Ok(Some(arr));
                 }
                 match (*b).status {
@@ -13031,7 +13102,7 @@ pub fn shared_channel_fail(handle: i64, msg: &str) -> Result<(), MorlocError> {
             return Ok(());
         }
         let rel = shm_copy_bytes(msg.as_bytes())?;
-        (*b).fail_msg = rel;
+        (*b).fail_msg = slot_owns(rel);
         (*b).fail_len = msg.len() as u64;
         (*b).status = CHANNEL_FAILED;
     }
@@ -13100,17 +13171,17 @@ fn channel_free_queue(slot: &RegistrySlot) {
             let Ok(node_abs) = crate::shm::rel2abs(node_rel) else { break };
             let node = node_abs as *mut ChannelNode;
             if let Ok(arr) = crate::shm::rel2abs((*node).arr) {
-                let _ = crate::shm::shfree(arr);
+                free_uncounted(arr);
             }
             node_rel = (*node).next;
-            let _ = crate::shm::shfree(node_abs);
+            free_uncounted(node_abs);
         }
         (*b).head = shm_types_crate::RELNULL;
         (*b).tail = shm_types_crate::RELNULL;
         (*b).count = 0;
         if (*b).fail_msg != shm_types_crate::RELNULL {
             if let Ok(p) = crate::shm::rel2abs((*b).fail_msg) {
-                let _ = crate::shm::shfree(p);
+                free_uncounted(p);
             }
             (*b).fail_msg = shm_types_crate::RELNULL;
         }
@@ -13143,6 +13214,24 @@ mod channel_tests {
                 Ok(Some(s))
             }
         }
+    }
+
+    #[test]
+    fn a_settled_channel_leaves_no_reference_counted_to_its_process() {
+        let _shm = crate::own_test_registry();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let h = shared_open_channel("as").unwrap();
+            write(h, r#"["a"]"#).unwrap();
+            write(h, r#"["b"]"#).unwrap();
+            shared_close_handle(h).unwrap();
+            let _ = read(h).unwrap();
+            shared_settle_channel(h).unwrap();
+            let held = crate::shm::held_references();
+            if held != 0 {
+                eprintln!("a settled channel left {held} references counted");
+            }
+            held == 0
+        }));
     }
 
     #[test]

@@ -1493,6 +1493,10 @@ long morloc_thread_count(void);
 // Fork a worker, refusing (-2, child never runs) unless this process had one
 // thread at the fork; -1 with *error set if the fork failed.
 pid_t morloc_fork_worker(long* threads_at_fork, int* error);
+// Shared-memory references this process holds, net of those it handed on.
+int64_t morloc_held_references(void);
+// Held references plus stream file locks: a worker retires only at zero.
+int64_t morloc_retire_blockers(void);
 const char* morloc_lifeline_child_env(int* read_fd);
 
 void close_socket(int socket_id);

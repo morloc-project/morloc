@@ -1138,12 +1138,40 @@ fn remove_program_volumes(basename: &str, fallback: &str) {
 /// in the per-eval arena (which auto-shfrees at scope drop). The arena
 /// hook fires here unconditionally on success; callers outside the arena
 /// see no behavioral difference.
+// SHM-8: the references this process holds, net of those it has handed on.
+static HELD_REFERENCES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+pub fn held_references() -> i64 {
+    HELD_REFERENCES.load(Ordering::Relaxed)
+}
+
+// SHM-8: a reference leaves this process (a donation, a registry slot).
+pub(crate) fn hand_on_reference() {
+    HELD_REFERENCES.fetch_sub(1, Ordering::Relaxed);
+}
+
+// SHM-8: a reference arrives in this process (a reply, a block out of a slot).
+pub(crate) fn take_on_reference() {
+    HELD_REFERENCES.fetch_add(1, Ordering::Relaxed);
+}
+
+// FORK-1: a child holds none of its parent's references.
+pub(crate) fn forget_held_references() {
+    HELD_REFERENCES.store(0, Ordering::Relaxed);
+}
+
+#[no_mangle]
+pub extern "C" fn morloc_held_references() -> i64 {
+    held_references()
+}
+
 pub fn shmalloc(size: usize) -> Result<AbsPtr, MorlocError> {
     let size = if size == 0 { BLOCK_ALIGN } else { align_up(size, BLOCK_ALIGN) };
     let ptr = {
         let _lock = ALLOC_MUTEX.lock();
         shmalloc_unlocked(size)?
     };
+    take_on_reference();
     crate::eval_arena::record_if_active(ptr);
     Ok(ptr)
 }
@@ -1242,6 +1270,7 @@ pub unsafe fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
             .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
+            take_on_reference();
             return Ok(());
         }
     }
@@ -1866,6 +1895,7 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
         {
             continue;
         }
+        hand_on_reference();
         if next == TEARING_DOWN {
             // SAFETY: ptr points to blk.size bytes of SHM data. This process
             // held the last reference and has replaced it with a value that
@@ -2228,6 +2258,21 @@ mod calloc_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_process_counts_the_references_it_holds() {
+        let _shm = crate::own_test_registry();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let start = super::held_references() == 0;
+            let p = super::shmalloc(32).unwrap();
+            let one = super::held_references() == 1;
+            unsafe { super::shincref(p) }.unwrap();
+            let two = super::held_references() == 2;
+            super::shfree(p).unwrap();
+            super::shfree(p).unwrap();
+            start && one && two && super::held_references() == 0
+        }));
+    }
+
     use super::*;
 
     // Processes allocating from one volume at once must never be handed the

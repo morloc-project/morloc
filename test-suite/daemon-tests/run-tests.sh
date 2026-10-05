@@ -1466,6 +1466,61 @@ fi
 # Shutdown while a pool call never returns
 # ======================================================================
 
+if should_run "worker-crash"; then
+    echo "${BOLD}[worker-crash] a worker killed inside a call is recovered${RESET}"
+
+    CRASH_DIR=$(mktemp -d)
+    WORK_DIRS+=("$CRASH_DIR")
+    compile_program "crash.loc" "$CRASH_DIR"
+    HTTP_PORT=$(pick_port)
+    start_daemon "$CRASH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 15
+    local_pid=$LAST_DAEMON_PID
+
+    for lang in py r; do
+        result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/${lang}Ok" -d '[7]')
+        assert_test "worker-crash $lang: works before the crash" "7" "$(json_field "$result" "result")"
+        python3 "$SHM_PROBE" names "$local_pid" > "$CRASH_DIR/shm-names-$lang"
+        recoveries=$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)
+        curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/${lang}Die" -d '[7]' > /dev/null 2>&1 || true
+        recovered=no
+        for _ in $(seq 1 150); do
+            now=$(grep -c "recovery complete" "$LAST_DAEMON_LOG" || true)
+            if [ "$now" -gt "$recoveries" ]; then recovered=yes; break; fi
+            sleep 0.1
+        done
+        assert_test "worker-crash $lang: the daemon recovers" "yes" "$recovered"
+        result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/${lang}Ok" -d '[8]')
+        assert_test "worker-crash $lang: works after recovery" "8" "$(json_field "$result" "result")"
+        assert_test "worker-crash $lang: no shared memory of the dead worker remains" "0" \
+            "$(python3 "$SHM_PROBE" live "$CRASH_DIR/shm-names-$lang")"
+    done
+
+
+    # A worker started for a call blocked in another language retires once
+    # idle; a retirement ends nothing.
+    workers_of() { (pgrep -f "$CRASH_DIR/.*pools/py" 2>/dev/null || true) | wc -l | tr -d ' '; }
+    recoveries=$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)
+    curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/slowly" -d '[1]' > /dev/null 2>&1 &
+    S1=$!
+    curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/slowly" -d '[2]' > /dev/null 2>&1 &
+    S2=$!
+    sleep 1
+    peak=$(workers_of)
+    wait "$S1" "$S2" 2>/dev/null || true
+    sleep 9
+    after=$(workers_of)
+    assert_test "worker-crash: an idle extra worker retires" "yes" "$([ "$after" -lt "$peak" ] && echo yes || echo no)"
+    assert_test "worker-crash: a retirement starts no recovery" "$recoveries" \
+        "$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)"
+    result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/pyOk" -d '[9]')
+    assert_test "worker-crash: works after a retirement" "9" "$(json_field "$result" "result")"
+
+    stop_daemon "$local_pid"
+    pkill -9 -f "$CRASH_DIR" 2>/dev/null || true
+    echo ""
+fi
+
 if should_run "shutdown-wedged"; then
     echo "${BOLD}[shutdown-wedged] SIGTERM with calls inside a wedged pool${RESET}"
 
