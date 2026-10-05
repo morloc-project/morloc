@@ -220,8 +220,7 @@ unsafe fn try_answer_ping(fd: i32) -> PingPeek {
 // The env var is read once and cached, so a normal (untraced) close is one
 // atomic load. Off by default; enabled only by the close-trace diagnostic test.
 fn trace_close_enabled() -> bool {
-    use std::sync::OnceLock;
-    static T: OnceLock<bool> = OnceLock::new();
+    static T: morloc_runtime_types::publish_once::PublishOnce<bool> = morloc_runtime_types::publish_once::PublishOnce::new();
     *T.get_or_init(|| {
         std::env::var("MORLOC_TRACE_CLOSE").map(|v| v == "1").unwrap_or(false)
     })
@@ -648,7 +647,7 @@ pub(crate) static SELF_SOCKET: crate::fork_policy::Held<Option<std::path::PathBu
 /// socket is a call between co-located code taking the serial path; with the
 /// guard set that call fails instead.
 fn forbid_self_call() -> bool {
-    static FORBID: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static FORBID: morloc_runtime_types::publish_once::PublishOnce<bool> = morloc_runtime_types::publish_once::PublishOnce::new();
     *FORBID.get_or_init(|| std::env::var_os("MORLOC_FORBID_SELF_CALL").is_some())
 }
 

@@ -13,7 +13,7 @@
 //! process tree, is ignored.
 
 use std::ffi::CString;
-use std::sync::OnceLock;
+use morloc_runtime_types::publish_once::PublishOnce;
 use std::time::Duration;
 
 use crate::error::MorlocError;
@@ -33,7 +33,17 @@ pub struct Lifeline {
     token: String,
 }
 
-static OWN: OnceLock<Result<Lifeline, String>> = OnceLock::new();
+static OWN: PublishOnce<Result<Lifeline, String>> = PublishOnce::new();
+
+// INIT-3: only a lifeline that lost the race to be published is dropped.
+impl Drop for Lifeline {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.read_fd);
+            libc::close(self.write_fd);
+        }
+    }
+}
 
 impl Lifeline {
     /// This process's lifeline, created on first use.
@@ -137,7 +147,7 @@ fn validate_with(token: &str, snapshot: impl Fn(u32) -> Option<process::Snapshot
     ours.then_some(Adopted { fd, nexus_pgid })
 }
 
-static ADOPTED: OnceLock<Option<Adopted>> = OnceLock::new();
+static ADOPTED: PublishOnce<Option<Adopted>> = PublishOnce::new();
 
 /// Take up the lifeline this process was started with, if any: validate it
 /// and keep it from leaking into programs this process later runs. Returns
@@ -156,9 +166,9 @@ pub fn adopt() -> i32 {
 /// when the nexus is gone. For processes with no loop of their own to watch
 /// it in. Idempotent.
 pub fn guard() {
-    static WATCHING: OnceLock<()> = OnceLock::new();
+    static WATCHING: PublishOnce<()> = PublishOnce::new();
     let Some(a) = ({ adopt(); ADOPTED.get().copied().flatten() }) else { return };
-    WATCHING.get_or_init(|| {
+    WATCHING.get_or_init_then(|| (), |_| {
         spawn_masked(move || {
             if wait_for_end(a.fd) {
                 teardown(a.nexus_pgid, GRACE);
@@ -245,7 +255,7 @@ pub fn teardown(nexus_pgid: i32, grace: Duration) {
 /// `read_fd` must be writable.
 #[no_mangle]
 pub unsafe extern "C" fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const std::ffi::c_char {
-    static ENTRY: OnceLock<CString> = OnceLock::new();
+    static ENTRY: PublishOnce<CString> = PublishOnce::new();
     match Lifeline::get() {
         Ok(l) => {
             *read_fd = l.read_fd();

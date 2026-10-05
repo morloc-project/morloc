@@ -470,7 +470,7 @@ pub fn stdout_element_count() -> u64 {
 /// True when this process runs under a staging nexus, which captures the
 /// run's stdout stream batch by batch for replay (`MORLOC_STDOUT_STAGE`).
 fn stdout_staged() -> bool {
-    static STAGED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static STAGED: morloc_runtime_types::publish_once::PublishOnce<bool> = morloc_runtime_types::publish_once::PublishOnce::new();
     *STAGED.get_or_init(|| std::env::var_os("MORLOC_STDOUT_STAGE").is_some())
 }
 
@@ -12717,7 +12717,7 @@ struct ChannelNode {
 }
 
 fn channel_depth() -> u64 {
-    static DEPTH: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    static DEPTH: morloc_runtime_types::publish_once::PublishOnce<u64> = morloc_runtime_types::publish_once::PublishOnce::new();
     *DEPTH.get_or_init(|| {
         std::env::var("MORLOC_CHANNEL_DEPTH")
             .ok()

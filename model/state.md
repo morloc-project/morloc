@@ -38,6 +38,23 @@ segment, the benchmark and tee files, and the runtime configuration (whose
 environment reads can wait on a thread forking through the standard
 library, which holds the environment lock across prepare) follow it.
 
+### INIT-3 A value set on first use without a lock is published by compare-and-swap
+Status: implemented
+Checked by: first_uses_on_many_threads_share_one_value_and_one_side_effect, a_child_forked_while_another_thread_builds_gets_a_value_at_once, no_runtime_value_waits_for_another_thread_to_initialise_it, tla:OncePublish, tla:OncePublish_oncelock.bug, tla:OncePublish_effect_each.bug
+
+The standard library's once cells make later callers wait while one thread
+initialises; a fork in that window leaves the child waiting forever on a
+thread it does not have (FORK-9). A runtime value set on first use is
+instead built by each first caller without a lock and published by
+compare-and-swap: a caller that loses drops its own value and takes the
+published one, and only the caller that won performs the value's side
+effects, such as publishing the run directory to the environment or
+starting the lifeline's watcher. Nothing waits, so a child either inherits
+the published value or builds its own. Between the publication and the
+side effect another thread, or a child forked in that window, sees the
+value without the effect; a side effect that panics is not retried.
+Model: `tla/OncePublish.tla`.
+
 ## Classes
 
 - `held` -- taken by the prepare handler across fork, in `rank` order; the
@@ -49,8 +66,9 @@ library, which holds the environment lock across prepare) follow it.
   the daemon); the child runs async-signal-safe code until exec.
 - `startup` -- set once before the process starts threads; the child sees
   the same value.
-- `lazy` -- created on first use under a lock, checked again once the lock
-  is taken (INIT-1); fork-safe when that lock is held across fork.
+- `lazy` -- created on first use: under a lock held across fork and checked
+  again once taken (INIT-1), or built without one and published by
+  compare-and-swap (INIT-3).
 - `fork-scoped` -- describes one process; a child recomputes or forgets it.
 - `counter` -- an atomic whose inherited value is harmless in a child
   (statistics, sequence numbers, flags).

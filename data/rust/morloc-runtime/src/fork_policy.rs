@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Condvar, LockResult, Mutex, MutexGuard, PoisonError};
 
 pub(crate) use morloc_runtime_types::fork_generation::generation;

@@ -47,7 +47,8 @@ use std::ffi::CStr;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use morloc_runtime_types::publish_once::PublishOnce;
 use crate::fork_policy::Held;
 use std::time::Instant;
 
@@ -55,9 +56,10 @@ struct Run {
     base: PathBuf,
     id: String,
     dir: PathBuf,
+    started_here: bool,
 }
 
-static RUN: OnceLock<Option<Run>> = OnceLock::new();
+static RUN: PublishOnce<Option<Run>> = PublishOnce::new();
 
 /// Per-label append handles for the log tee. Opened on first emission,
 /// kept open for the process lifetime, line-flushed so a crash can lose
@@ -88,10 +90,10 @@ fn append_line(file: &std::fs::File, text: &str) {
     let _ = (&*file).write_all(line.as_bytes());
 }
 
-static CONTEXT: OnceLock<RunContext> = OnceLock::new();
+static CONTEXT: PublishOnce<RunContext> = PublishOnce::new();
 
 fn get_run() -> Option<&'static Run> {
-    RUN.get_or_init(init_run).as_ref()
+    RUN.get_or_init_then(init_run, publish_run).as_ref()
 }
 
 fn parent_of(pid: i32) -> Option<i32> {
@@ -145,7 +147,7 @@ fn init_run() -> Option<Run> {
                 .unwrap_or_default();
             let base = path.parent().map(PathBuf::from).unwrap_or_default();
             // No env republish: pools see the inherited values already.
-            return Some(Run { base, id, dir: path });
+            return Some(Run { base, id, dir: path, started_here: false });
         }
     }
 
@@ -155,17 +157,22 @@ fn init_run() -> Option<Run> {
         Some(d) if !d.is_empty() => PathBuf::from(d),
         _ => return None,
     };
-    let run = new_run(base);
-    env::set_var("MORLOC_RUN_DIR", &run.dir);
-    env::set_var("MORLOC_RUN_BASE", &run.base);
-    env::set_var("MORLOC_RUN_PARENT_PID", std::process::id().to_string());
-    Some(run)
+    Some(new_run(base))
+}
+
+// INIT-3: only the run that won publishes itself to the environment.
+fn publish_run(run: &Option<Run>) {
+    if let Some(run) = run.as_ref().filter(|r| r.started_here) {
+        std::env::set_var("MORLOC_RUN_DIR", &run.dir);
+        std::env::set_var("MORLOC_RUN_BASE", &run.base);
+        std::env::set_var("MORLOC_RUN_PARENT_PID", std::process::id().to_string());
+    }
 }
 
 fn new_run(base: PathBuf) -> Run {
     let id = gen_id();
     let dir = base.join(&id);
-    Run { base, id, dir }
+    Run { base, id, dir, started_here: true }
 }
 
 fn gen_id() -> String {

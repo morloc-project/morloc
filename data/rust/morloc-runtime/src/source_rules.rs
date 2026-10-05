@@ -5,7 +5,7 @@ use syn::visit::Visit;
 
 const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc", "morloc-nexus"];
 const PREPARE_HANDLERS: &[&str] = &["prepare_fork"];
-const MAX_DEVIATING_ROWS: usize = 34;
+const MAX_DEVIATING_ROWS: usize = 5;
 const MAX_ENV_READS: usize = 67;
 const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/cell.rs::proc_tag",
@@ -14,7 +14,7 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/lifeline.rs::teardown",
     "morloc-runtime/log.rs::pool_pid",
     "morloc-runtime/packet_ffi.rs::make_file_data_packet_voidstar",
-    "morloc-runtime/run.rs::init_run",
+    "morloc-runtime/run.rs::publish_run",
     "morloc-runtime/run.rs::gen_id",
     "morloc-runtime/stream.rs::with_process_local_slot",
     "morloc-runtime/stream.rs::allocate_slot_cas",
@@ -373,7 +373,9 @@ impl<'ast> Visit<'ast> for Scan<'_, 'ast> {
         self.note_pid_tokens(&tokens);
         if path.ends_with("thread_local") {
             self.scoped(&m.attrs, |s| s.push_thread_locals(&tokens));
-        } else if path.ends_with("macro_rules") && tokens.split_whitespace().any(|t| t == "static") {
+        } else if path.ends_with("lazy_static")
+            || (path.ends_with("macro_rules") && tokens.split_whitespace().any(|t| t == "static"))
+        {
             let name = m.ident.as_ref().map_or("?".to_string(), |i| i.to_string());
             self.out.macro_statics.push(format!("{}::{}", self.file, name));
         }
@@ -850,6 +852,39 @@ fn deviating_rows_only_decrease() {
         .filter(|c| !c.test_only && (c.path.ends_with("env::var") || c.path.ends_with("env::var_os")))
         .count();
     assert!(env_reads <= MAX_ENV_READS, "{env_reads} environment reads outside tests; the limit is {MAX_ENV_READS}");
+}
+
+#[test]
+fn no_runtime_value_waits_for_another_thread_to_initialise_it() {
+    const WAITING: [&str; 6] = ["OnceLock", "Once", "LazyLock", "OnceCell", "LazyCell", "Lazy"];
+    let scan = scan_rust();
+    let reaches_a_waiting_cell = |ty: &str| {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut todo: Vec<String> = idents(ty).into_iter().map(String::from).collect();
+        while let Some(t) = todo.pop() {
+            if WAITING.contains(&t.as_str()) {
+                return true;
+            }
+            if seen.insert(t.clone()) {
+                for part in scan.type_parts.get(&t).into_iter().flatten() {
+                    todo.extend(idents(part).into_iter().map(String::from));
+                }
+            }
+        }
+        false
+    };
+    let waiting: Vec<String> = all_found(scan)
+        .into_iter()
+        .filter(|f| !f.test_only && (f.id.starts_with("morloc-runtime/") || f.id.starts_with("morloc-runtime-types/")))
+        .filter(|f| reaches_a_waiting_cell(&f.ty))
+        .map(|f| format!("{} ({})", f.id, f.ty))
+        .collect();
+    assert!(
+        waiting.is_empty(),
+        "FORK-9: a fork while another thread initialises these leaves the child waiting forever; \
+         use morloc_runtime_types::publish_once::PublishOnce (INIT-3):\n{}",
+        waiting.join("\n")
+    );
 }
 
 #[test]

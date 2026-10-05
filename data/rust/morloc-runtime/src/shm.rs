@@ -56,7 +56,7 @@ unsafe fn preallocate_fd(fd: i32, size: i64) -> i32 {
 /// requires page-aligned offsets and lengths, and by the stream reader to
 /// hand back pages it has read.
 pub(crate) fn page_size() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    static CACHED: morloc_runtime_types::publish_once::PublishOnce<usize> = morloc_runtime_types::publish_once::PublishOnce::new();
     *CACHED.get_or_init(|| {
         let v = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         if v <= 0 { 4096 } else { v as usize }

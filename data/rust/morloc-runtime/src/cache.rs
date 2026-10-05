@@ -5,7 +5,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use morloc_runtime_types::publish_once::PublishOnce;
 
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
@@ -101,7 +101,7 @@ unsafe fn resolve_data_filename(
 /// that means the runtime keeps working (cache keys still derive from
 /// midx + args) but the source-edit-invalidation property is lost.
 fn pool_hash() -> u64 {
-    static CACHED: OnceLock<u64> = OnceLock::new();
+    static CACHED: PublishOnce<u64> = PublishOnce::new();
     *CACHED.get_or_init(|| {
         std::env::var("MORLOC_POOL_HASH")
             .ok()
@@ -128,7 +128,7 @@ pub extern "C" fn morloc_pool_hash() -> u64 {
 ///   3. `~/.cache/morloc/cache` default.
 ///   4. `/tmp/morloc/cache` if `HOME` is also unset.
 fn cache_base() -> PathBuf {
-    static CACHED: OnceLock<PathBuf> = OnceLock::new();
+    static CACHED: PublishOnce<PathBuf> = PublishOnce::new();
     CACHED
         .get_or_init(|| {
             if let Ok(s) = std::env::var("MORLOC_CACHE_BASE") {
@@ -1017,7 +1017,7 @@ pub unsafe extern "C" fn make_cache_filename(
 /// level is an error, never a silent 0.
 fn read_cache_compression_level() -> Result<crate::compression::CompressionLevel, MorlocError> {
     use crate::compression::CompressionLevel;
-    static CACHED: OnceLock<Result<CompressionLevel, String>> = OnceLock::new();
+    static CACHED: PublishOnce<Result<CompressionLevel, String>> = PublishOnce::new();
     CACHED
         .get_or_init(|| match std::env::var("MORLOC_CACHE_COMPRESSION_LEVEL") {
             Err(_) => Ok(CompressionLevel::NONE),

@@ -682,7 +682,7 @@ pub const MAX_FRAME_WORKERS: usize = 16;
 /// Cached on first call (matches the `MORLOC_TRACE` / `MORLOC_QUIET`
 /// pattern), so subsequent calls are a single atomic load.
 pub fn frame_workers() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    static CACHED: crate::publish_once::PublishOnce<usize> = crate::publish_once::PublishOnce::new();
     *CACHED.get_or_init(|| {
         if let Ok(s) = std::env::var("MORLOC_FRAME_WORKERS") {
             if let Ok(n) = s.parse::<usize>() {

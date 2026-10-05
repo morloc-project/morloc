@@ -1376,7 +1376,7 @@ fn borrow_forget(arena: *const ImportArena) {
 }
 
 fn borrowing_disabled() -> bool {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static FLAG: morloc_runtime_types::publish_once::PublishOnce<bool> = morloc_runtime_types::publish_once::PublishOnce::new();
     *FLAG.get_or_init(|| std::env::var_os("MORLOC_ARROW_NO_BORROW").is_some())
 }
 

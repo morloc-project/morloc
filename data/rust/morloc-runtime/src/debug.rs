@@ -61,7 +61,7 @@ use std::ffi::{CStr, CString};
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use morloc_runtime_types::publish_once::PublishOnce;
 
 /// NULL or empty C string -> `String::new()`; otherwise the borrowed
 /// UTF-8 (lossy). Used everywhere in this module to turn optional
@@ -120,9 +120,9 @@ thread_local! {
 
 // ── Limit resolution (process-wide, cached) ─────────────────────────────
 
-static CACHE_DEPTH: OnceLock<u64> = OnceLock::new();
-static CACHE_MAX: OnceLock<u64> = OnceLock::new();
-static RECURSION_CAP: OnceLock<u32> = OnceLock::new();
+static CACHE_DEPTH: PublishOnce<u64> = PublishOnce::new();
+static CACHE_MAX: PublishOnce<u64> = PublishOnce::new();
+static RECURSION_CAP: PublishOnce<u32> = PublishOnce::new();
 static OVERFLOW_REPORTED: AtomicU64 = AtomicU64::new(0);
 
 fn cache_depth() -> u64 {

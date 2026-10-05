@@ -95,7 +95,7 @@ unsafe fn arrow_to_shm_typed_impl(
 /// `MORLOC_ARROW_STATS=1` reports every table write to stderr: the bytes
 /// copied, or that the table was passed through.
 fn stats_enabled() -> bool {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static FLAG: morloc_runtime_types::publish_once::PublishOnce<bool> = morloc_runtime_types::publish_once::PublishOnce::new();
     *FLAG.get_or_init(|| std::env::var_os("MORLOC_ARROW_STATS").is_some())
 }
 

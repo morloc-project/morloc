@@ -95,11 +95,13 @@ and a child restarts the sweeper when its parent had started one. The
 emitted Futhark context lock is not yet reset.
 
 ### FORK-9 A lazily initialised value cannot be mid-initialisation at fork
-Status: deviation
+Status: implemented
+Checked by: no_runtime_value_waits_for_another_thread_to_initialise_it, a_child_forked_while_another_thread_builds_gets_a_value_at_once, tla:OncePublish_oncelock.bug
 
 A `Once` or `OnceLock` that another thread is initialising when the process
 forks stays "running" in the child, and the child's first use waits forever.
-About thirty such cells cache configuration lazily.
+The runtime's lazily set values are published by compare-and-swap instead
+(INIT-3), and its crates hold no standard once cell outside tests.
 
 ### FORK-10 No held lock is held across an unbounded wait
 Status: deviation
@@ -117,8 +119,12 @@ tee files are opened and written outside theirs. Model:
 Status: deviation
 
 Rust's standard streams and environment are guarded by locks of their own
-with no fork handling. A child that prints a diagnostic while another
-thread of the parent was printing at the moment of fork blocks forever.
+with no fork handling. The fork handler holds the standard output and error
+locks across fork, after every held lock, so a child inherits them
+unlocked. The environment's lock has no public handle and cannot be held:
+a child forked while another thread of the parent writes the environment
+blocks on its first read. CPython's buffered streams have the same hazard
+in the Python pool's forked workers.
 
 ### FORK-12 A forked child never returns into the dispatch loop
 Status: implemented

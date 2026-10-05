@@ -26,7 +26,7 @@ use libc::c_char;
 use std::ffi::CStr;
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use morloc_runtime_types::publish_once::PublishOnce;
 
 static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -42,7 +42,7 @@ fn pool_pid() -> i32 {
 /// Color is suppressed when stderr is redirected (pipe/file) OR when
 /// `NO_COLOR` is set (https://no-color.org/).
 fn color_enabled() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
+    static CACHED: PublishOnce<bool> = PublishOnce::new();
     *CACHED.get_or_init(|| {
         std::env::var_os("NO_COLOR").is_none() && io::stderr().is_terminal()
     })
@@ -54,7 +54,7 @@ fn color_enabled() -> bool {
 /// the source -- neither stderr nor the rundir tee receives them.
 /// Cached on first read so the env-var lookup is a one-time cost.
 fn quiet() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
+    static CACHED: PublishOnce<bool> = PublishOnce::new();
     *CACHED.get_or_init(|| {
         std::env::var_os("MORLOC_QUIET")
             .map(|v| !v.is_empty())
@@ -70,7 +70,7 @@ fn quiet() -> bool {
 /// `MORLOC_TRACE=1` when diagnosing where wall time is going.
 /// Cached on first read.
 pub fn trace_enabled() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
+    static CACHED: PublishOnce<bool> = PublishOnce::new();
     *CACHED.get_or_init(|| {
         std::env::var_os("MORLOC_TRACE")
             .map(|v| !v.is_empty())
