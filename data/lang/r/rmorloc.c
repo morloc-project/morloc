@@ -2165,8 +2165,8 @@ SEXP morloc_install_sigterm_handler(void) {
        terminates the R pool and the caller sees "Connection closed by peer". */
     signal(SIGPIPE, SIG_IGN);
 
-    /* End this pool's process group when the nexus ends, however it ends. */
-    morloc_lifeline_guard();
+    /* FORK-6: the lifeline is watched in morloc_wait_wakeup, not from a thread. */
+    morloc_lifeline_adopt();
 
     return R_NilValue;
 }
@@ -3912,9 +3912,14 @@ SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resou
 // {{{ fork and worker functions
 
 SEXP morloc_fork(void) {
-    pid_t pid = fork();
+    long threads = 0;
+    int err = 0;
+    pid_t pid = morloc_fork_worker(&threads, &err);
+    if (pid == -2) {
+        error("refusing to fork a worker from a process with %ld threads", threads);
+    }
     if (pid < 0) {
-        error("fork failed: %s", strerror(errno));
+        error("fork failed: %s", strerror(err));
     }
     return ScalarInteger((int)pid);
 }
@@ -4123,12 +4128,26 @@ SEXP morloc_set_nonblocking(SEXP fd_r) {
 
 // Wait up to `ms` for a byte on the wake-up pipe `fd` (non-blocking), then
 // drain it. Returns early on a signal, so shutdown stays prompt.
+/* Wait for a wake-up byte or the timeout; end the process group once the
+   nexus's lifeline reaches end of file. */
 SEXP morloc_wait_wakeup(SEXP fd_r, SEXP ms_r) {
+    static int lifeline_ended = 0;
     int fd = INTEGER(fd_r)[0];
-    struct pollfd p = {fd, POLLIN, 0};
-    if (poll(&p, 1, INTEGER(ms_r)[0]) > 0) {
-        char buf[256];
-        while (read(fd, buf, sizeof(buf)) > 0) {}
+    int life = lifeline_ended ? -1 : morloc_lifeline_adopt();
+    struct pollfd p[2] = {{fd, POLLIN, 0}, {life, POLLIN, 0}};
+    if (poll(p, life >= 0 ? 2 : 1, INTEGER(ms_r)[0]) > 0) {
+        if (p[0].revents) {
+            char buf[256];
+            while (read(fd, buf, sizeof(buf)) > 0) {}
+        }
+        if (life >= 0 && p[1].revents) {
+            char b;
+            ssize_t n = read(life, &b, 1);
+            if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) {
+                lifeline_ended = 1;
+                morloc_lifeline_teardown();
+            }
+        }
     }
     return R_NilValue;
 }

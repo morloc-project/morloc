@@ -1488,6 +1488,11 @@ char* voidstar_to_json_string(const void* voidstar, const Schema* schema, ERRMSG
 int morloc_lifeline_adopt(void);
 void morloc_lifeline_guard(void);
 void morloc_lifeline_teardown(void);
+// The number of threads in this process, or -1 if it cannot be read.
+long morloc_thread_count(void);
+// Fork a worker, refusing (-2, child never runs) unless this process had one
+// thread at the fork; -1 with *error set if the fork failed.
+pid_t morloc_fork_worker(long* threads_at_fork, int* error);
 const char* morloc_lifeline_child_env(int* read_fd);
 
 void close_socket(int socket_id);

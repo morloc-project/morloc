@@ -10,6 +10,7 @@ const MAX_ENV_READS: usize = 67;
 const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/cell.rs::proc_tag",
     "morloc-runtime/crash.rs::fatal",
+    "morloc-runtime/fork_policy.rs::thread_count",
     "morloc-runtime/lifeline.rs::create",
     "morloc-runtime/lifeline.rs::teardown",
     "morloc-runtime/log.rs::pool_pid",
@@ -663,6 +664,18 @@ fn the_registry_parser_rejects_malformed_rows() {
     }
 }
 
+// FORK-6: `site` is `crate/file.rs::function`; true if that function's body contains `needle`.
+fn site_body_calls(site: &str, needle: &str) -> bool {
+    let Some((file, func)) = site.split_once("::") else { return false };
+    let Some((krate, rel)) = file.split_once('/') else { return false };
+    let path = repo_root().join("data/rust").join(krate).join("src").join(rel);
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let Some(start) = text.find(&format!("fn {func}(")) else { return false };
+    let body = &text[start..];
+    let end = body[1..].find("\nfn ").or_else(|| body[1..].find("\npub ")).map_or(body.len(), |e| e + 1);
+    body[..end].contains(needle)
+}
+
 fn fork_sites() -> Vec<(String, String)> {
     table_after("## Fork sites").into_iter().map(|c| (c[0].clone(), c[1].clone())).collect()
 }
@@ -831,8 +844,11 @@ fn registry_rows_obey_their_class() {
         problems.push(format!("{site}: forks but is not in the fork sites table"));
     }
     for (site, child) in &sites {
-        if !["exec", "signal-safe"].contains(&child.as_str()) {
+        if !["exec", "signal-safe", "worker"].contains(&child.as_str()) {
             problems.push(format!("{site}: unknown child kind {child}"));
+        }
+        if child == "worker" && !site_body_calls(site, "thread_count()") {
+            problems.push(format!("{site}: forks a worker without counting its threads (FORK-6)"));
         }
         if !forking.contains(site.as_str()) {
             problems.push(format!("{site}: listed as a fork site but does not fork"));

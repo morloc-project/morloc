@@ -29,6 +29,7 @@ data/lang/r/rmorloc.c::-::r_shutting_down	thread
 data/lang/r/rmorloc.c::mlc_trace_ipc::cached	thread		
 data/lang/r/rmorloc.c::run_job_c::budget	thread		
 data/lang/r/rmorloc.c::run_job_c::budget_read	thread		
+data/lang/r/rmorloc.c::morloc_wait_wakeup::lifeline_ended	fork-scoped		
 data/lang/py/pool.py::-::stop	unreachable		
 data/lang/py/pool.py::-::job_q	unreachable		
 data/lang/py/pool.py::-::sched	unreachable		
@@ -173,7 +174,7 @@ morloc-runtime/stream.rs::-::CURRENT_CALL_ID	thread
 morloc-runtime/stream.rs::-::STDIO_SOCK	thread		
 morloc-runtime/stream.rs::-::DRAIN_GAP_HOOK	test-only		
 morloc-runtime/stream.rs::-::SWEEPER	reset		
-morloc-runtime/stream.rs::-::SWEEPER_STARTED	counter		
+morloc-runtime/stream.rs::-::SWEEPER_WANTED	counter		
 morloc-runtime/stream.rs::generate_call_id::FALLBACK_COUNTER	counter		
 morloc-runtime/stream.rs::a_forked_child_leaves_its_parents_cached_reads_alone::HANDLE	test-only		
 morloc-runtime/stream.rs::channel_depth::DEPTH	lazy		

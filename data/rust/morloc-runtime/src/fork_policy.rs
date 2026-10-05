@@ -292,6 +292,110 @@ extern "C" fn register_fork_handlers() {
 #[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
 static REGISTER_AT_LOAD: extern "C" fn() = register_fork_handlers;
 
+// FORK-6
+pub fn thread_count() -> Option<usize> {
+    // FORK-6: a thread past its join but not yet gone is not counted.
+    #[cfg(target_os = "linux")]
+    {
+        const PF_EXITING: u64 = 0x4;
+        let mut live = 0;
+        for task in std::fs::read_dir("/proc/self/task").ok()? {
+            let Ok(stat) = std::fs::read_to_string(task.ok()?.path().join("stat")) else { continue };
+            let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else { continue };
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            let exiting = matches!(fields.first(), Some(&"Z") | Some(&"X"))
+                || fields.get(6).and_then(|f| f.parse::<u64>().ok()).is_some_and(|f| f & PF_EXITING != 0);
+            if !exiting {
+                live += 1;
+            }
+        }
+        Some(live)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+        let got = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDTASKINFO,
+                0,
+                &mut info as *mut libc::proc_taskinfo as *mut libc::c_void,
+                size,
+            )
+        };
+        (got == size).then_some(info.pti_threadnum as usize)
+    }
+}
+
+// FORK-6: -1 when the count cannot be read.
+#[no_mangle]
+pub extern "C" fn morloc_thread_count() -> libc::c_long {
+    thread_count().map_or(-1, |n| n as libc::c_long)
+}
+
+pub const FORK_WORKER_REFUSED: libc::pid_t = -2;
+
+// FORK-6: the parent counts its threads once every prepare handler has run,
+// so a library that ends its threads at fork is not counted; the child runs
+// only once the count is one. Returns the child's pid, 0 in the child, -1
+// with `error` set on a failed fork, or FORK_WORKER_REFUSED with
+// `threads_at_fork` set.
+#[no_mangle]
+pub unsafe extern "C" fn morloc_fork_worker(threads_at_fork: *mut libc::c_long, error: *mut libc::c_int) -> libc::pid_t {
+    let mut gate = [0i32; 2];
+    if morloc_runtime_types::fd::pipe(gate.as_mut_ptr()) != 0 {
+        if !error.is_null() {
+            *error = crate::utility::errno_val();
+        }
+        return -1;
+    }
+    let pid = libc::fork();
+    if pid == 0 {
+        libc::close(gate[1]);
+        let mut go = 0u8;
+        let got = loop {
+            let n = libc::read(gate[0], &mut go as *mut u8 as *mut libc::c_void, 1);
+            if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break n;
+        };
+        libc::close(gate[0]);
+        if got != 1 {
+            libc::_exit(FORK_REFUSED_EXIT);
+        }
+        return 0;
+    }
+    libc::close(gate[0]);
+    if pid < 0 {
+        if !error.is_null() {
+            *error = crate::utility::errno_val();
+        }
+        libc::close(gate[1]);
+        return -1;
+    }
+    let n = thread_count().map_or(-1, |n| n as libc::c_long);
+    if !threads_at_fork.is_null() {
+        *threads_at_fork = n;
+    }
+    if n == 1 {
+        libc::write(gate[1], &1u8 as *const u8 as *const libc::c_void, 1);
+        libc::close(gate[1]);
+        return pid;
+    }
+    libc::close(gate[1]);
+    // FORK-6: the child may never reach its gate, or another fork may hold it open.
+    libc::kill(pid, libc::SIGKILL);
+    let mut st = 0;
+    while libc::waitpid(pid, &mut st, 0) < 0
+        && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+    {}
+    FORK_WORKER_REFUSED
+}
+
+const FORK_REFUSED_EXIT: libc::c_int = 70;
+
 #[cfg(test)]
 pub(crate) fn exits_cleanly_in_a_forked_child(work: impl FnOnce() -> bool) -> bool {
     let pid = unsafe { libc::fork() };
@@ -387,6 +491,58 @@ pub(crate) fn in_a_descendant_with_the_same_pid(work: impl FnOnce() -> bool) -> 
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn a_worker_forked_from_a_process_with_another_thread_never_runs() {
+        assert!(exits_cleanly_in_a_forked_child(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let t = std::thread::spawn(move || {
+                let _ = rx.recv();
+            });
+            let mut ran = [0i32; 2];
+            unsafe { morloc_runtime_types::fd::pipe(ran.as_mut_ptr()) };
+            let mut threads = 0;
+            let pid = unsafe { morloc_fork_worker(&mut threads, std::ptr::null_mut()) };
+            if pid == 0 {
+                unsafe {
+                    libc::write(ran[1], b"x".as_ptr() as *const libc::c_void, 1);
+                    libc::_exit(0)
+                };
+            }
+            unsafe { libc::close(ran[1]) };
+            let mut b = 0u8;
+            let child_wrote = unsafe { libc::read(ran[0], &mut b as *mut u8 as *mut libc::c_void, 1) } == 1;
+            drop(tx);
+            let _ = t.join();
+            pid == FORK_WORKER_REFUSED && threads == 2 && !child_wrote
+        }));
+    }
+
+    #[test]
+    fn a_worker_forked_from_a_lone_thread_runs() {
+        assert!(exits_cleanly_in_a_forked_child(|| {
+            let pid = unsafe { morloc_fork_worker(std::ptr::null_mut(), std::ptr::null_mut()) };
+            if pid == 0 {
+                unsafe { libc::_exit(7) };
+            }
+            pid > 0 && wait_status(pid) == 7
+        }));
+    }
+
+    #[test]
+    fn a_forked_child_counts_only_its_own_threads() {
+        assert!(exits_cleanly_in_a_forked_child(|| {
+            let alone = thread_count() == Some(1);
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let t = std::thread::spawn(move || {
+                let _ = rx.recv();
+            });
+            let two = thread_count() == Some(2);
+            drop(tx);
+            let _ = t.join();
+            alone && two
+        }));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

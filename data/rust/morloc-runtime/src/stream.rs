@@ -298,7 +298,7 @@ pub fn registry_bootstrap() -> Result<usize, MorlocError> {
     // runs on both nexus (via `clean_exit -> shclose`) and pool (via
     shm::register_shclose_hook(registry_teardown);
 
-    sweeper_init();
+    sweeper_want();
 
     Ok(slot_count)
 }
@@ -6141,34 +6141,57 @@ struct Sweeper {
 
 static SWEEPER: crate::fork_policy::Reset<Option<Sweeper>> = crate::fork_policy::Reset::new(|| None);
 
-static SWEEPER_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SWEEPER_WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+// FORK-6: the thread starts on the first request, so attaching starts none.
+pub fn sweeper_want() {
+    let _guard = SWEEPER.lock().unwrap_or_else(|p| p.into_inner());
+    SWEEPER_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
 pub fn sweeper_init() {
     let mut guard = SWEEPER.lock().unwrap_or_else(|p| p.into_inner());
-    SWEEPER_STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    SWEEPER_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
     if guard.is_none() {
-        *guard = Some(start_sweeper());
+        *guard = start_sweeper();
     }
 }
 
-fn start_sweeper() -> Sweeper {
+fn start_sweeper() -> Option<Sweeper> {
     let (tx, rx) = std::sync::mpsc::channel::<SweepRequest>();
     let thread = std::thread::Builder::new()
         .name("morloc-stream-sweeper".into())
         .spawn(move || sweeper_main(rx))
-        .expect("morloc-stream-sweeper: thread spawn failed");
-    Sweeper { tx, thread }
+        .ok()?;
+    Some(Sweeper { tx, thread })
 }
 
-// FORK-8: a child of a process that started the sweeper starts its own.
+fn sweep_now(req: SweepRequest) {
+    match req {
+        SweepRequest::PerCall(call_id) => sweep_per_call(call_id),
+        SweepRequest::PerPid(pid, start_time) => {
+            sweep_per_pid(pid, start_time);
+        }
+    }
+}
+
+// FORK-6: a process that wants a sweeper starts its own, a forked child included.
 fn sweeper_send(req: SweepRequest) {
     let mut guard = SWEEPER.lock().unwrap_or_else(|p| p.into_inner());
-    if guard.is_none() && SWEEPER_STARTED.load(std::sync::atomic::Ordering::Relaxed) {
-        *guard = Some(start_sweeper());
+    if !SWEEPER_WANTED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if guard.is_none() {
+        *guard = start_sweeper();
     }
     if let Some(sweeper) = guard.as_ref() {
         let _ = sweeper.tx.send(req);
+        return;
     }
+    drop(guard);
+    // FORK-6: no thread could be started; the request is served here.
+    sweep_now(req);
 }
 
 #[cfg(test)]
@@ -6186,7 +6209,7 @@ fn sweeper_running() -> bool {
 pub fn sweeper_shutdown() {
     let taken = {
         let mut guard = SWEEPER.lock().unwrap_or_else(|p| p.into_inner());
-        SWEEPER_STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
+        SWEEPER_WANTED.store(false, std::sync::atomic::Ordering::Relaxed);
         guard.take()
     };
     if let Some(Sweeper { tx, thread }) = taken {
@@ -6195,9 +6218,8 @@ pub fn sweeper_shutdown() {
     }
 }
 
-/// Enqueue a per-call sweep request. Non-blocking. Returns silently
-/// if the sweeper isn't initialised (which would be a runtime bug:
-/// the daemon path is supposed to call `sweeper_init` at startup).
+/// Enqueue a per-call sweep request. Non-blocking. Dropped in a process
+/// that never attached the registry.
 ///
 /// `CALL_ID_NO_SWEEP` (0) is filtered here: enqueueing a sweep for
 /// the sentinel value would needlessly walk the registry without
@@ -6220,12 +6242,7 @@ pub fn sweeper_enqueue_pid(pid: u32, start_time: u64) {
 /// somebody calls `sweeper_shutdown`).
 fn sweeper_main(rx: std::sync::mpsc::Receiver<SweepRequest>) {
     while let Ok(req) = rx.recv() {
-        match req {
-            SweepRequest::PerCall(call_id) => sweep_per_call(call_id),
-            SweepRequest::PerPid(pid, start_time) => {
-                sweep_per_pid(pid, start_time);
-            }
-        }
+        sweep_now(req);
     }
 }
 
@@ -10599,6 +10616,21 @@ mod tests {
         shm::shfree(ptr).unwrap();
         assert_eq!(v, 2);
         shared_close_handle(f).unwrap();
+    }
+
+    #[test]
+    fn wanting_a_sweeper_starts_no_thread_and_a_childs_first_request_starts_one() {
+        let _shm = crate::own_test_registry();
+        let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            sweeper_shutdown();
+            sweeper_want();
+            let idle = !sweeper_running() && crate::fork_policy::thread_count() == Some(1);
+            idle && crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+                sweeper_enqueue_pid(1, u64::MAX);
+                sweeper_running()
+            })
+        });
+        assert!(ok, "wanting a sweeper started a thread, or a child dropped its request");
     }
 
     #[test]

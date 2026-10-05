@@ -2365,6 +2365,11 @@ static PyObject* pybinding__lifeline_adopt(PyObject* self, PyObject* args) {
     return PyLong_FromLong(morloc_lifeline_adopt());
 }
 
+// The number of threads in this process, or -1 if it cannot be read.
+static PyObject* pybinding__thread_count(PyObject* self, PyObject* args) {
+    return PyLong_FromLong(morloc_thread_count());
+}
+
 // End this pool's process group once the watched lifeline reaches end of file.
 static PyObject* pybinding__lifeline_teardown(PyObject* self, PyObject* args) {
     morloc_lifeline_teardown();
@@ -4485,6 +4490,7 @@ static PyMethodDef Methods[] = {
     {"set_self_socket", pybinding__set_self_socket, METH_VARARGS, "Record the socket this pool serves"},
     {"lifeline_adopt", pybinding__lifeline_adopt, METH_NOARGS, "The lifeline descriptor to watch for the nexus's end, or -1"},
     {"lifeline_teardown", pybinding__lifeline_teardown, METH_NOARGS, "End this pool's process group after the nexus ended"},
+    {"thread_count", pybinding__thread_count, METH_NOARGS, "The number of threads in this process, or -1"},
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
     {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},

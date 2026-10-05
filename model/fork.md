@@ -53,10 +53,31 @@ Model: `tla/ForkLocks.tla` (`ForkLocks` passes;
 `ForkLocks_uncovered.bug` shows the child blocking).
 
 ### FORK-6 Workers fork from a process that has no other threads
-Status: deviation
+Status: implemented
+Checked by: a_worker_forked_from_a_process_with_another_thread_never_runs, a_worker_forked_from_a_lone_thread_runs, a_forked_child_counts_only_its_own_threads, wanting_a_sweeper_starts_no_thread_and_a_childs_first_request_starts_one, tla:PoolFork, tla:PoolFork_guard_thread.bug, tla:PoolFork_eager_sweeper.bug, tla:PoolFork_wanted_by_thread.bug, tla:PoolFork_unpolled.bug, tla:PoolFork_count_before_fork.bug, tla:PoolFork_no_kill.bug, tla:PoolFork_ungated.bug
 
-Python fork-mode and R pools fork workers after the runtime has started
-its sweeper (and, in R, lifeline) threads.
+A forked child has only the thread that forked, so a pool that runs user
+code in forked workers (Python fork mode, R) forks them from a coordinator
+that starts no thread of its own. The coordinator loads no user code; it
+watches the nexus's lifeline in its own wait loop rather than from a
+thread; and attaching the stream registry marks the sweeper as wanted
+without starting it, so the sweeper starts on the first sweep request in
+whichever process sends one, a forked worker included. If no thread can be
+started, the request is served by the thread that sent it.
+
+A library may run threads of its own that it ends in its fork handler and
+starts again later (OpenBLAS does), so the R coordinator forks through a
+gate: the child waits while the parent, past every fork handler, counts its
+live threads (on Linux, a thread already exiting is not counted), and runs
+only if there is one. Otherwise the parent kills the child, which may be
+stuck in a fork handler before its gate, and the fork fails loudly. The
+Python coordinator, which loads no such library, counts before each fork
+and on a refusal ends with every process it started.
+
+The count sees threads that exist at the fork and still exist when it is
+taken; a thread that ends in between is not seen. The guarantee is that the
+coordinator starts no thread, which the model checks; the count is how a
+change that breaks it is caught. Model: `tla/PoolFork.tla`.
 
 ### FORK-7 Held locks are taken in one global rank order
 Status: implemented

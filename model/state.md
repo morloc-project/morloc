@@ -89,9 +89,12 @@ comma-separated list.
 
 ## Fork sites
 
-Every call to `fork` outside tests, and what its child does. Processes are
-started with `posix_spawn`, which runs no fork handler; a new `fork` call
-must be listed here.
+Every call to `fork` outside tests, and what its child does: `exec`, code
+that is `signal-safe`, or a pool `worker` that runs any code, forked only
+through the thread-count gate (FORK-6). Processes are started with
+`posix_spawn`, which runs no fork handler; a new `fork` call must be listed
+here.
 
 | Site | Child |
 |---|---|
+| morloc-runtime/fork_policy.rs::morloc_fork_worker | worker |

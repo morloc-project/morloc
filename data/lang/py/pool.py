@@ -40,6 +40,23 @@ class _LocalFlag:
     value = False
 
 
+def _fork_single_threaded(started):
+    """FORK-6: a worker is forked only from a process with no other thread.
+    Otherwise the pool ends at once, taking the processes it started."""
+    n = morloc.thread_count()
+    if n == 1:
+        return
+    sys.stderr.write(f"morloc pool: refusing to fork a worker from a process with {n} threads\n")
+    sys.stderr.flush()
+    for p in started:
+        try:
+            p.kill()
+            p.join()
+        except Exception:
+            pass
+    os._exit(1)
+
+
 def _lifeline_ended():
     """After a poll reported the lifeline readable: whether the nexus is gone.
     Nothing is ever written to it, so readable means end of file."""
@@ -1043,6 +1060,7 @@ if __name__ == "__main__":
         worker = Process(target=worker_process,
                          args=(read_sock.fileno(), tmpdir, shm_basename, shutdown_flag,
                                busy_count, total_workers, wakeup_w))
+        _fork_single_threaded(workers)
         worker.start()
         workers.append(worker)
     read_sock.close()  # main/listener don't need the read end (spare_read_fd kept)
@@ -1052,6 +1070,7 @@ if __name__ == "__main__":
         target=client_listener,
         args=(write_sock.fileno(), socket_path, tmpdir, shm_basename, shutdown_flag)
     )
+    _fork_single_threaded(workers)
     listener_process.start()
     write_sock.close()  # main doesn't need the write end
 
@@ -1092,6 +1111,7 @@ if __name__ == "__main__":
             w = Process(target=worker_process,
                         args=(spare_read_fd, tmpdir, shm_basename, shutdown_flag,
                               busy_count, total_workers, wakeup_w))
+            _fork_single_threaded(workers + [listener_process])
             w.start()
             workers.append(w)
             total_workers.value = len(workers)
