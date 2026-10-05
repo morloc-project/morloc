@@ -263,3 +263,4 @@ morloc-runtime/stream.rs::-::READ_GAP_HOOK	test-only
 morloc-runtime/stream.rs::-::GAP_SLOT	test-only		
 morloc-runtime/stream.rs::-::AT_GAP	test-only		
 morloc-runtime/stream.rs::-::RESUME	test-only		
+morloc-runtime/stream.rs::-::RELEASES_SEEN	counter		

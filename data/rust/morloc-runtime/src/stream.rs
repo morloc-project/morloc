@@ -1037,6 +1037,7 @@ pub fn held_stream_locks() -> usize {
 // SHM-8: what keeps a worker from retiring.
 #[no_mangle]
 pub extern "C" fn morloc_retire_blockers() -> i64 {
+    drop_ended_unlocked_slots();
     crate::shm::held_references() + held_stream_locks() as i64
 }
 
@@ -1245,7 +1246,7 @@ pub fn with_process_local_slot<R>(
     })) {
         Ok(r) => r,
         Err(panic) => {
-            if holds_ended_lock(handle, &local) {
+            if has_ended(handle, &local) {
                 drop(claim);
                 finish_ended(handle, local);
             } else {
@@ -1265,7 +1266,7 @@ pub fn with_process_local_slot<R>(
         local.holds_lock = false;
         drop(claim);
         drop(local);
-    } else if holds_ended_lock(handle, &local) {
+    } else if has_ended(handle, &local) {
         drop(claim);
         finish_ended(handle, local);
     } else {
@@ -1734,6 +1735,11 @@ fn release_slot_locked(slot: &RegistrySlot) {
     // Finally: release the slot. State = FREE is the publication
     // gate that allows other allocators' CAS to succeed.
     slot.state.store(SLOT_STATE_FREE, Ordering::Release);
+    // SLOT-9: counted, not woken: each process drops its slot for the stream
+    // at its next dispatch end or release service tick.
+    if let Some(bell) = release_doorbell() {
+        bell.fetch_add(1, Ordering::Release);
+    }
 }
 
 fn free_slot_blocks(slot: &RegistrySlot) {
@@ -1830,11 +1836,10 @@ fn end_slot_locked(slot: &RegistrySlot) {
 }
 
 /// Whether `local` holds the file lock of a stream that has since ended.
-fn holds_ended_lock(handle: i64, local: &ProcessLocalSlot) -> bool {
+// SLOT-9: a slot for a stream that has ended, whether or not it holds the
+// file lock, is disposed of rather than kept.
+fn has_ended(handle: i64, local: &ProcessLocalSlot) -> bool {
     use std::sync::atomic::Ordering;
-    if !local.holds_lock {
-        return false;
-    }
     let (_, idx) = unpack_handle(handle);
     match slot_ref(idx) {
         Some(slot) => {
@@ -1873,6 +1878,52 @@ fn finish_ended(handle: i64, local: ProcessLocalSlot) {
 /// copies the allocator's lock mid-pass into a child without the thread.
 pub(crate) static RELEASE_PASS: Held<()> = Held::new(1, ());
 
+// SLOT-9: the doorbell's count when this process last released ended slots.
+static RELEASES_SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+// SLOT-9: run at dispatch ends; a pass only when some stream was released.
+pub(crate) fn release_ended_if_rung() {
+    use std::sync::atomic::Ordering;
+    let Some(bell) = release_doorbell() else { return };
+    let now = bell.load(Ordering::Acquire);
+    let seen = RELEASES_SEEN.swap(now, Ordering::AcqRel);
+    if seen != now && !drop_ended_unlocked_slots() {
+        // A pass already runs; a later dispatch end tries again.
+        let _ = RELEASES_SEEN.compare_exchange(now, seen, Ordering::AcqRel, Ordering::Relaxed);
+    }
+}
+
+// SLOT-9: never waits: a slot holding a file lock is left to the release
+// service, which every holder runs, and a running pass is left alone.
+// Returns false if a pass was running.
+pub(crate) fn drop_ended_unlocked_slots() -> bool {
+    let Some(_pass) = RELEASE_PASS.try_lock() else { return false };
+    let ended: Vec<ProcessLocalSlot> = {
+        let mut guard = PROCESS_LOCAL_SLOTS.lock();
+        let Some(map) = guard.as_mut() else { return true };
+        let handles: Vec<i64> = map
+            .iter()
+            .filter_map(|(h, e)| match e {
+                LocalEntry::Idle(l) if !l.holds_lock && has_ended(*h, l) => Some(*h),
+                _ => None,
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| match map.remove(&h) {
+                Some(LocalEntry::Idle(l)) => Some(l),
+                Some(mark) => {
+                    map.insert(h, mark);
+                    None
+                }
+                None => None,
+            })
+            .collect()
+    };
+    drop(ended);
+    true
+}
+
 fn release_ended_streams() {
     let _pass = RELEASE_PASS.lock();
     let ended: Vec<(i64, ProcessLocalSlot)> = {
@@ -1881,7 +1932,7 @@ fn release_ended_streams() {
         let handles: Vec<i64> = map
             .iter()
             .filter_map(|(h, e)| match e {
-                LocalEntry::Idle(l) if holds_ended_lock(*h, l) => Some(*h),
+                LocalEntry::Idle(l) if has_ended(*h, l) => Some(*h),
                 _ => None,
             })
             .collect();
@@ -4249,7 +4300,7 @@ fn with_idle_local_slot<R>(
         return IdleSlot::Closed;
     }
     let r = f(&mut local, slot);
-    if holds_ended_lock(handle, &local) {
+    if has_ended(handle, &local) {
         drop(claim);
         finish_ended(handle, local);
     } else {
@@ -10561,6 +10612,59 @@ mod tests {
             libc::close(release);
             libc::waitpid(pid, &mut status, 0);
         }
+    }
+
+    fn release_service_running() -> bool {
+        RELEASE_SERVICE.lock().unwrap_or_else(|p| p.into_inner()).as_ref().is_some_and(|s| s.thread.as_ref().is_some_and(|t| !t.is_finished()))
+    }
+
+    fn has_local_slot(handle: i64) -> bool {
+        PROCESS_LOCAL_SLOTS.lock().as_ref().is_some_and(|m| m.contains_key(&handle))
+    }
+
+    #[test]
+    fn a_readers_slot_for_a_stream_another_process_closed_is_released() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("stale_reader");
+        let p = dir.join("in.idx").to_str().unwrap().to_string();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(move || {
+            // The stream is written elsewhere, so this process only reads
+            // and runs no release service: only a dispatch end can drop it.
+            let writer = unsafe { libc::fork() };
+            if writer == 0 {
+                let schema = parse_schema("ai4").unwrap();
+                let w = shared_open_ostream_with_schema(&p, "ai4").unwrap();
+                for _ in 0..3 {
+                    let v = crate::json::read_json_with_schema("[1,2,3]", &schema).unwrap();
+                    shared_write_subpacket(w, crate::compression::CompressionLevel::NONE, v).unwrap();
+                    crate::shm::shfree(v).unwrap();
+                }
+                let ok = shared_close_handle(w).is_ok();
+                unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+            }
+            let mut wst = 0;
+            unsafe { libc::waitpid(writer, &mut wst, 0) };
+            let r = shared_open_istream(&p).unwrap();
+            if let Some(frame) = shared_next_frame(r).unwrap() {
+                crate::shm::shfree(frame).unwrap();
+            }
+            let had = has_local_slot(r) && !release_service_running();
+            let closer = unsafe { libc::fork() };
+            if closer == 0 {
+                let ok = shared_close_handle(r).is_ok();
+                unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+            }
+            let mut st = 0;
+            unsafe { libc::waitpid(closer, &mut st, 0) };
+            let (id, prev) = crate::intrinsics::begin_dispatch();
+            crate::intrinsics::end_dispatch(id, prev);
+            let released = !has_local_slot(r);
+            let held = crate::shm::held_references();
+            if !(had && released && held == 0) {
+                eprintln!("slot before {had}, released {released}, references held {held}");
+            }
+            had && released && held == 0
+        }));
     }
 
     #[test]

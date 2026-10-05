@@ -587,6 +587,7 @@ pub fn end_dispatch(call_id: u64, prev: u64) {
     }
     crate::cell::sweep_dispatch(call_id, oldest);
     crate::lease::reclaim_if_due();
+    crate::stream::release_ended_if_rung();
 }
 
 // ── mlc_save_voidstar: serialize to binary voidstar packet file ────────────

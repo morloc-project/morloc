@@ -69,3 +69,21 @@ seen ahead of the bump, and a reader that overlaps the release fails its
 second load instead of accepting cleared fields. Opening publishes fields
 then the new generation. Model: `tla/SlotSeqlock.tla`.
 
+### SLOT-9 A process drops its slot for a stream that has ended
+Status: implemented
+Checked by: a_readers_slot_for_a_stream_another_process_closed_is_released, tla:LocalSweep, tla:LocalSweep_lock_holders_only.bug, tla:LocalSweep_drop_in_use.bug, tla:LocalSweep_reinstall_stale.bug
+
+A process keeps a local slot per stream it uses: a mapping, a cache and
+write buffers for one generation of the stream. Another process may end the
+stream and never touch it again from here, so waiting for this process's
+next use would keep the slot for the life of the process. Every release of
+a registry slot advances the doorbell's count without waking anyone. The
+release service's pass, run when woken and at least once a second, drops
+every local slot not taken out by a thread whose generation is no longer
+its stream's, releasing a file lock it holds as before. At a dispatch end
+when the count has moved since the process last looked, and before a
+worker decides whether it can retire, a pass that never waits drops such
+slots that hold no file lock (a holder runs the release service), and is
+skipped and retried later if a pass is already running. A slot given back
+after its stream ended is dropped rather than kept. Model:
+`tla/LocalSweep.tla`.
