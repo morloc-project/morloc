@@ -72,7 +72,7 @@ In these files the only comments allowed are spec references:
   daemon_ffi.rs, pool_ffi.rs, ipc_ffi.rs, router_ffi.rs, arrow_shm.rs,
   lifeline.rs, fork_policy.rs
 - morloc-runtime-types/src: recoverable_lock.rs, shm_lock.rs,
-  owner_word.rs, stream_handle.rs, dispatch_guard.rs, fd.rs
+  owner_word.rs, stream_handle.rs, dispatch_guard.rs, fd.rs, panic.rs
 - morloc-nexus/src: process.rs
 
 The form is `// <ID>: <how this line applies it>`, with `// SAFETY: <ID>: ...`

@@ -533,18 +533,33 @@ extern "C" fn sigchld_handler(_sig: libc::c_int) {
 /// `summary.json` are the notable casualties; users who Ctrl-C don't
 /// expect them. A second signal skips even the pool-kill loop.
 extern "C" fn signal_exit_handler(sig: libc::c_int) {
-    if CLEANING_UP.swap(true, Ordering::SeqCst) {
-        unsafe { libc::_exit(128 + sig) };
+    if !CLEANING_UP.swap(true, Ordering::SeqCst) {
+        stop_everything();
     }
+    unsafe { libc::_exit(128 + sig) };
+}
+
+// PANIC-1
+pub fn panic_exit() -> ! {
+    CLEANING_UP.store(true, Ordering::SeqCst);
+    stop_everything();
+    unsafe { libc::_exit(morloc_runtime_types::panic::PANIC_EXIT_STATUS) };
+}
+
+// DAEMON-6
+fn stop_everything() {
     for i in 0..MAX_DAEMONS {
         let pgid = PGIDS[i].load(Ordering::Relaxed);
         if pgid > 0 {
             unsafe { libc::kill(-pgid, libc::SIGKILL) };
         }
     }
-    unsafe { sweep_shm_segments() };
-    unsafe { crate::sigrm::remove_registered() };
-    unsafe { libc::_exit(128 + sig) };
+    unsafe {
+        morloc_stop_child_groups();
+        crate::stop_frontend_children();
+        sweep_shm_segments();
+        crate::sigrm::remove_registered();
+    }
 }
 
 /// Crash handler for fatal program-error signals (SIGSEGV / SIGABRT /
@@ -930,6 +945,7 @@ fn teardown(exit_code: i32, unmap: bool) -> ! {
     }
 
     stop_pools();
+    crate::stop_frontend_children();
 
     // FORK-15: leases kept outside the run directory.
     unsafe { morloc_remove_leases() };
@@ -1002,6 +1018,56 @@ fn teardown(exit_code: i32, unmap: bool) -> ! {
 ///
 /// The BROKEN_PIPE flag it sets tells `clean_exit` to skip the stdout
 /// flush that would otherwise attempt to write into the dead pipe.
+static PANICKED: AtomicBool = AtomicBool::new(false);
+static IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+// DAEMON-6
+const PANIC_GRACE: Duration = Duration::from_secs(5);
+
+pub struct Request(());
+
+impl Drop for Request {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+// PANIC-3: no new work once a panic was caught.
+pub fn begin_request() -> Option<Request> {
+    IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+    let request = Request(());
+    if PANICKED.load(Ordering::SeqCst) {
+        return None;
+    }
+    Some(request)
+}
+
+// PANIC-3
+pub fn refuse_new_work() {
+    PANICKED.store(true, Ordering::SeqCst);
+}
+
+// PANIC-3: the daemon's own shutdown waits for its requests.
+pub fn fail_daemon() -> ! {
+    extern "C" {
+        fn morloc_daemon_fail();
+    }
+    refuse_new_work();
+    unsafe { morloc_daemon_fail() };
+    loop {
+        std::thread::park();
+    }
+}
+
+// PANIC-3
+pub fn end_after_panic() -> ! {
+    refuse_new_work();
+    let deadline = std::time::Instant::now() + PANIC_GRACE;
+    while IN_FLIGHT.load(Ordering::SeqCst) > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    exit_leaving_threads(morloc_runtime_types::panic::PANIC_EXIT_STATUS)
+}
+
 pub fn exit_broken_pipe() -> ! {
     BROKEN_PIPE.store(true, Ordering::SeqCst);
     clean_exit(141);
@@ -1362,18 +1428,8 @@ pub fn stop_pools() {
 // DAEMON-6: async-signal-safe, so it ends a teardown whatever locks are held.
 pub fn emergency_exit_ptr() -> *const std::ffi::c_void {
     extern "C" fn emergency_exit(code: libc::c_int) {
-        for i in 0..MAX_DAEMONS {
-            let pgid = PGIDS[i].load(Ordering::Relaxed);
-            if pgid > 0 {
-                unsafe { libc::kill(-pgid, libc::SIGKILL) };
-            }
-        }
-        unsafe {
-            morloc_stop_child_groups();
-            sweep_shm_segments();
-            crate::sigrm::remove_registered();
-            libc::_exit(code);
-        }
+        stop_everything();
+        unsafe { libc::_exit(code) };
     }
     emergency_exit as *const std::ffi::c_void
 }
@@ -1381,7 +1437,7 @@ pub fn emergency_exit_ptr() -> *const std::ffi::c_void {
 /// Return a C-compatible function pointer for stop_pools.
 pub fn stop_pools_ptr() -> *const std::ffi::c_void {
     extern "C" fn stop_pools_c() {
-        stop_pools()
+        morloc_runtime_types::panic::outside_scope(stop_pools)
     }
     stop_pools_c as *const std::ffi::c_void
 }
@@ -1389,7 +1445,7 @@ pub fn stop_pools_ptr() -> *const std::ffi::c_void {
 /// Return a C-compatible function pointer for pool_is_alive.
 pub fn pool_is_alive_ptr() -> *const std::ffi::c_void {
     extern "C" fn pool_alive_c(pool_index: usize) -> bool {
-        pool_is_alive(pool_index)
+        morloc_runtime_types::panic::outside_scope(|| pool_is_alive(pool_index))
     }
     pool_alive_c as *const std::ffi::c_void
 }

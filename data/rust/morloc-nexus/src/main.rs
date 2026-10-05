@@ -25,6 +25,8 @@ mod stdio_server;
 mod view;
 mod stage;
 mod orchestrate;
+#[cfg(test)]
+mod panic_tests;
 
 use dispatch::NexusConfig;
 
@@ -82,19 +84,8 @@ fn main() {
         std::env::remove_var("MORLOC_LIFELINE");
     }
 
-    // Install a panic hook so a Rust panic still runs the run-scope
-    // epilogue + summary.json + tee cleanup before the process dies.
-    // Without this, panic-unwound exits skip clean_exit entirely and
-    // leave operators with a half-written rundir. Restore the
-    // default hook for the panic message itself so stack traces keep
-    // working under RUST_BACKTRACE=1.
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let msg = format!("nexus panicked: {}", info);
-        runlog::record_error(&msg);
-        default_hook(info);
-        process::clean_exit(101);
-    }));
+    // PANIC-1
+    morloc_runtime_types::panic::install_hook(process::panic_exit);
 
     // Top-level argv parse. [`cli::parse_invocation`] handles the
     // pre-scan for `@` separator (run mode), loads the manifest from
@@ -540,7 +531,8 @@ fn main() {
 
         // Build DaemonConfig and call daemon_run in libmorloc.so
         run_daemon(&config, &mut sockets, &shm_basename, &payload);
-        process::clean_exit(daemon_exit_code());
+        // DAEMON-6: stdio server threads may still be copying into shared memory.
+        process::exit_leaving_threads(daemon_exit_code());
     }
 
     // Normal CLI mode
@@ -843,13 +835,13 @@ fn run_daemon(
     }
 }
 
-/// 1 once a request handler panicked (DAEMON-7), so a supervisor restarts
-/// the daemon; 0 otherwise.
+/// The internal-error status once a request panicked (DAEMON-7), so a
+/// supervisor restarts the daemon; 0 otherwise.
 fn daemon_exit_code() -> i32 {
     extern "C" {
         fn morloc_daemon_worker_panicked() -> bool;
     }
-    if unsafe { morloc_daemon_worker_panicked() } { 1 } else { 0 }
+    if unsafe { morloc_daemon_worker_panicked() } { morloc_runtime_types::panic::PANIC_EXIT_STATUS } else { 0 }
 }
 
 /// Run the multi-program router daemon.
@@ -939,14 +931,19 @@ static FRONTEND_ROUTER: std::sync::atomic::AtomicPtr<std::ffi::c_void> =
 /// SIGTERM/SIGINT handler for the serving front-end: async-signal-safe. Tells
 /// each child daemon to shut down (SIGTERM, so it sweeps its own SHM) and exits.
 extern "C" fn frontend_shutdown_handler(_sig: libc::c_int) {
+    stop_frontend_children();
+    unsafe { libc::_exit(0) };
+}
+
+/// Async-signal-safe; does nothing outside the serving front-end.
+fn stop_frontend_children() {
     extern "C" {
         fn router_terminate_children(router: *mut std::ffi::c_void);
     }
-    let r = FRONTEND_ROUTER.load(std::sync::atomic::Ordering::Relaxed);
     crate::mcp::FRONTEND_EVALS.stop_all();
-    unsafe {
-        router_terminate_children(r);
-        libc::_exit(0);
+    let r = FRONTEND_ROUTER.load(std::sync::atomic::Ordering::Relaxed);
+    if !r.is_null() {
+        unsafe { router_terminate_children(r) };
     }
 }
 

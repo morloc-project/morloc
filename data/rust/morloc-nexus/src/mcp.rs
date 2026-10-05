@@ -165,6 +165,7 @@ const JSONRPC_PARSE_ERROR: i32 = -32700;
 const JSONRPC_INVALID_REQUEST: i32 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i32 = -32601;
 const JSONRPC_INVALID_PARAMS: i32 = -32602;
+const JSONRPC_INTERNAL_ERROR: i32 = -32603;
 
 /// Layout-compatible view of `daemon_ffi::DaemonResponse`. We only read it.
 /// The trailing `result_bytes`/`result_len`/`mime` fields carry a raw-media
@@ -298,20 +299,38 @@ pub fn serve(
             }
         };
 
-        if let Some(response) = handle_message(
-            &msg,
-            &mut session,
-            &tools_list,
-            &by_name,
-            &ctx,
-            &server_name,
-            &server_version,
-        ) {
-            write_message(protocol_fd, &response);
-        }
+        answer_message(protocol_fd, msg.id.as_ref(), || {
+            handle_message(
+                &msg,
+                &mut session,
+                &tools_list,
+                &by_name,
+                &ctx,
+                &server_name,
+                &server_version,
+            )
+        });
     }
 
     process::clean_exit(0);
+}
+
+pub(crate) fn answer_message(
+    protocol_fd: RawFd,
+    id: Option<&Value>,
+    handle: impl FnOnce() -> Option<Value>,
+) {
+    match morloc_runtime_types::panic::catch(handle) {
+        Ok(Some(response)) => write_message(protocol_fd, &response),
+        Ok(None) => {}
+        Err(_) => {
+            // PANIC-3
+            if let Some(id) = id {
+                write_message(protocol_fd, &error_response(id.clone(), JSONRPC_INTERNAL_ERROR, "internal error"));
+            }
+            process::end_after_panic();
+        }
+    }
 }
 
 /// Per-connection handshake state.
@@ -1050,7 +1069,7 @@ pub fn serve_http(
 /// reply, delegating each request to `respond`. Shared by the single-program
 /// MCP server and the multi-module front-end, which differ only in how they
 /// build the response.
-fn serve_conn<F>(stream: TcpStream, mut respond: F)
+pub(crate) fn serve_conn<F>(stream: TcpStream, mut respond: F)
 where
     F: FnMut(&HttpRequest, bool) -> Vec<u8>,
 {
@@ -1070,11 +1089,26 @@ where
         let keep_alive = header_get(&req.headers, "connection")
             .map(|v| !v.eq_ignore_ascii_case("close"))
             .unwrap_or(true);
-        let resp = respond(&req, keep_alive);
+        let Some(request) = process::begin_request() else {
+            let _ = writer.write_all(&http_json(503, br#"{"error":"server is shutting down"}"#, false));
+            break;
+        };
+        let resp = match morloc_runtime_types::panic::catch(|| respond(&req, keep_alive)) {
+            Ok(resp) => resp,
+            Err(_) => {
+                // PANIC-3
+                process::refuse_new_work();
+                let _ = writer.write_all(&http_json(500, br#"{"error":"internal error"}"#, false));
+                let _ = writer.shutdown(std::net::Shutdown::Both);
+                drop(request);
+                process::end_after_panic();
+            }
+        };
         if writer.write_all(&resp).is_err() {
             break;
         }
         let _ = writer.flush();
+        drop(request);
         if !keep_alive {
             break;
         }
@@ -1083,9 +1117,9 @@ where
 
 /// A parsed HTTP request. Header names are lowercased for case-insensitive
 /// lookup; the body is the exact Content-Length bytes.
-struct HttpRequest {
+pub(crate) struct HttpRequest {
     method: String,
-    path: String,
+    pub(crate) path: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
@@ -1219,8 +1253,8 @@ fn handle_http_post(
     let method = msg.method.as_deref().unwrap_or("");
     let sid_hdr = header_get(&req.headers, "mcp-session-id").map(|s| s.to_string());
 
-    // Recover a poisoned lock so one panicking request cannot wedge the server.
-    let mut guard = state.lock().unwrap_or_else(|p| p.into_inner());
+    // PANIC-4
+    let Ok(mut guard) = state.lock() else { return poisoned_reply() };
 
     // Resolve (or, on initialize, create) the session.
     let now = Instant::now();
@@ -1311,7 +1345,8 @@ fn handle_http_delete(
 ) -> Vec<u8> {
     match header_get(&req.headers, "mcp-session-id") {
         Some(id) => {
-            let mut g = state.lock().unwrap_or_else(|p| p.into_inner());
+            // PANIC-4
+            let Ok(mut g) = state.lock() else { return poisoned_reply() };
             g.sessions.remove(id);
             http_json(200, br#"{"ok":true}"#, keep_alive)
         }
@@ -1424,6 +1459,8 @@ fn http_head(
         401 => "Unauthorized",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "OK",
     };
     let mut head = format!(
@@ -1465,8 +1502,12 @@ fn http_response(
     out
 }
 
+fn poisoned_reply() -> Vec<u8> {
+    http_json(503, br#"{"error":"server is shutting down"}"#, false)
+}
+
 /// A JSON response with no extra headers -- the common case.
-fn http_json(status: u16, body: &[u8], keep_alive: bool) -> Vec<u8> {
+pub(crate) fn http_json(status: u16, body: &[u8], keep_alive: bool) -> Vec<u8> {
     http_response(status, body, keep_alive, &[])
 }
 
@@ -1587,7 +1628,11 @@ impl Frontend {
         }
         let module_c = CString::new(module).unwrap_or_default();
         // Keep the guard alive across the forward (named binding, not `_`).
-        let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        // PANIC-4
+        let Ok(_guard) = lock.lock() else {
+            unsafe { daemon_free_request(req) };
+            return Err("the server is shutting down after an internal error".into());
+        };
         let mut ferr: *mut c_char = ptr::null_mut();
         let resp = unsafe { router_forward(self.router.0, module_c.as_ptr(), req, &mut ferr) };
         unsafe { daemon_free_request(req) };
@@ -2235,7 +2280,8 @@ fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) ->
     let now = Instant::now();
 
     let (session_id, prior_init) = {
-        let mut sessions = fe.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        // PANIC-4
+        let Ok(mut sessions) = fe.sessions.lock() else { return poisoned_reply() };
         if method == "initialize" {
             prune_sessions(&mut sessions, now);
             let id = new_session_id();
@@ -2267,7 +2313,8 @@ fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) ->
         // that ran while the forward was in flight (lock-free) must not be
         // undone by resurrecting the entry, and re-inserting would bypass the
         // MAX_SESSIONS cap enforced at initialize.
-        let mut sessions = fe.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        // PANIC-4
+        let Ok(mut sessions) = fe.sessions.lock() else { return poisoned_reply() };
         if let Some(s) = sessions.get_mut(&session_id) {
             s.initialized = session.initialized;
             s.last_seen = now;
@@ -2290,7 +2337,8 @@ fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) ->
 fn frontend_mcp_delete(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
     match header_get(&req.headers, "mcp-session-id") {
         Some(id) => {
-            let mut sessions = fe.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            // PANIC-4
+            let Ok(mut sessions) = fe.sessions.lock() else { return poisoned_reply() };
             sessions.remove(id);
             http_json(200, br#"{"ok":true}"#, keep_alive)
         }
@@ -2954,6 +3002,41 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    fn poisoned_state() -> Arc<Mutex<HttpState>> {
+        let state = Arc::new(Mutex::new(HttpState {
+            manifest_c: std::ptr::null_mut(),
+            sockets_ptr: std::ptr::null_mut(),
+            n_pools: 0,
+            shm: CString::new("x").unwrap(),
+            shapes: Vec::new(),
+            tools_list: Vec::new(),
+            server_name: String::new(),
+            server_version: String::new(),
+            sessions: HashMap::new(),
+        }));
+        let s = Arc::clone(&state);
+        let _ = std::thread::spawn(move || {
+            let _g = s.lock().unwrap();
+            panic!("torn");
+        })
+        .join();
+        assert!(state.is_poisoned());
+        state
+    }
+
+    #[test]
+    fn a_request_finding_the_server_state_poisoned_is_refused_without_using_it() {
+        let state = poisoned_state();
+        let req = HttpRequest {
+            method: "DELETE".into(),
+            path: "/mcp".into(),
+            headers: vec![("mcp-session-id".into(), "s".into())],
+            body: Vec::new(),
+        };
+        let resp = handle_http_delete(&req, &state, false);
+        assert!(String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 503"));
     }
 
     #[test]

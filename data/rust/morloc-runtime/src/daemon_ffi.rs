@@ -1440,81 +1440,95 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
         // guards bound /eval and /typecheck (this fork_morloc_command path);
         // /call/<command> dispatches into a pre-compiled pool worker
         // and is subject to neither.
-        let exited_with = |code: i32| libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == code;
-        let (errmsg, kind) = if libc::WIFSIGNALED(status) {
-            let sig = libc::WTERMSIG(status);
-            if sig == libc::SIGXCPU {
-                (
-                    format!(
-                        "morloc {} exceeded CPU budget ({}s); see --eval-timeout",
-                        subcmd,
-                        G_EVAL_TIMEOUT.load(Ordering::Relaxed),
-                    ),
-                    DAEMON_ERROR_TIMEOUT,
-                )
-            } else if !stderr_buf.is_empty() {
-                (
-                    String::from_utf8_lossy(&stderr_buf).into_owned(),
-                    DAEMON_ERROR_INTERNAL,
-                )
-            } else {
-                (
-                    format!("morloc {} killed by signal {}", subcmd, sig),
-                    DAEMON_ERROR_INTERNAL,
-                )
-            }
-        } else if exited_with(EXIT_HEAPOVERFLOW) {
-            // The child's own advice ("use +RTS -M<size>") is useless to an
-            // HTTP caller, who cannot set it; say who imposed the ceiling.
-            (
-                format!(
-                    "morloc {} exceeded the server's heap ceiling ({})",
-                    subcmd,
-                    EVAL_HEAP_LIMIT.trim_start_matches("-M"),
-                ),
-                DAEMON_ERROR_INTERNAL,
-            )
-        } else if exited_with(126) || exited_with(127) {
-            // DAEMON-6: the wrapper could not start `morloc`.
-            (
-                format!(
-                    "Failed to start morloc {}: {}",
-                    subcmd,
-                    String::from_utf8_lossy(&stderr_buf).trim()
-                ),
-                DAEMON_ERROR_INTERNAL,
-            )
-        } else if !stderr_buf.is_empty() {
-            (
-                String::from_utf8_lossy(&stderr_buf).into_owned(),
-                DAEMON_ERROR_BAD_REQUEST,
-            )
-        } else if !stdout_buf.is_empty() {
-            // A rejected expression is a diagnostic, and the compiler prints
-            // its diagnostics on stdout. Handing back the exit code alone
-            // would tell the caller their expression failed while withholding
-            // the sentence saying why.
-            (
-                String::from_utf8_lossy(&stdout_buf).into_owned(),
-                DAEMON_ERROR_BAD_REQUEST,
-            )
-        } else {
-            let code = if libc::WIFEXITED(status) {
-                libc::WEXITSTATUS(status)
-            } else {
-                -1
-            };
-            (
-                format!("morloc {} exited with code {}", subcmd, code),
-                DAEMON_ERROR_BAD_REQUEST,
-            )
-        };
+        let (errmsg, kind) = classify_failed_command(status, subcmd, &stdout_buf, &stderr_buf);
         (*resp).error_kind = kind;
         let c = CString::new(errmsg).unwrap_or_default();
         (*resp).error = libc::strdup(c.as_ptr());
     }
 
     resp
+}
+
+fn classify_failed_command(status: libc::c_int, subcmd: &str, stdout_buf: &[u8], stderr_buf: &[u8]) -> (String, i32) {
+    let exited_with = |code: i32| libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == code;
+    if libc::WIFSIGNALED(status) {
+        let sig = libc::WTERMSIG(status);
+        if sig == libc::SIGXCPU {
+            (
+                format!(
+                    "morloc {} exceeded CPU budget ({}s); see --eval-timeout",
+                    subcmd,
+                    G_EVAL_TIMEOUT.load(Ordering::Relaxed),
+                ),
+                DAEMON_ERROR_TIMEOUT,
+            )
+        } else if !stderr_buf.is_empty() {
+            (
+                String::from_utf8_lossy(stderr_buf).into_owned(),
+                DAEMON_ERROR_INTERNAL,
+            )
+        } else {
+            (
+                format!("morloc {} killed by signal {}", subcmd, sig),
+                DAEMON_ERROR_INTERNAL,
+            )
+        }
+    } else if exited_with(EXIT_HEAPOVERFLOW) {
+        // The child's own advice ("use +RTS -M<size>") is useless to an
+        // HTTP caller, who cannot set it; say who imposed the ceiling.
+        (
+            format!(
+                "morloc {} exceeded the server's heap ceiling ({})",
+                subcmd,
+                EVAL_HEAP_LIMIT.trim_start_matches("-M"),
+            ),
+            DAEMON_ERROR_INTERNAL,
+        )
+    } else if exited_with(morloc_runtime_types::panic::PANIC_EXIT_STATUS) {
+        // PANIC-1
+        (
+            format!(
+                "morloc {} failed with an internal error: {}",
+                subcmd,
+                String::from_utf8_lossy(stderr_buf).trim()
+            ),
+            DAEMON_ERROR_INTERNAL,
+        )
+    } else if exited_with(126) || exited_with(127) {
+        // DAEMON-6: the wrapper could not start `morloc`.
+        (
+            format!(
+                "Failed to start morloc {}: {}",
+                subcmd,
+                String::from_utf8_lossy(stderr_buf).trim()
+            ),
+            DAEMON_ERROR_INTERNAL,
+        )
+    } else if !stderr_buf.is_empty() {
+        (
+            String::from_utf8_lossy(stderr_buf).into_owned(),
+            DAEMON_ERROR_BAD_REQUEST,
+        )
+    } else if !stdout_buf.is_empty() {
+        // A rejected expression is a diagnostic, and the compiler prints
+        // its diagnostics on stdout. Handing back the exit code alone
+        // would tell the caller their expression failed while withholding
+        // the sentence saying why.
+        (
+            String::from_utf8_lossy(stdout_buf).into_owned(),
+            DAEMON_ERROR_BAD_REQUEST,
+        )
+    } else {
+        let code = if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else {
+            -1
+        };
+        (
+            format!("morloc {} exited with code {}", subcmd, code),
+            DAEMON_ERROR_BAD_REQUEST,
+        )
+    }
 }
 
 /// Read two pipes to end of file at once, so a child that fills one while
@@ -3007,7 +3021,7 @@ pub unsafe extern "C" fn daemon_run(
     binding_store().get_or_insert_with(|| BindingStore::new("/tmp/morloc-bindings"));
 
     // Install signal handlers
-    SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
+    begin_serving();
     let handler: libc::sighandler_t =
         std::mem::transmute::<extern "C" fn(i32), libc::sighandler_t>(daemon_signal_handler_fn);
     libc::signal(libc::SIGTERM, handler);
@@ -3252,7 +3266,7 @@ pub unsafe extern "C" fn daemon_run(
         if !morloc_claim_exit() {
             return;
         }
-        let code = if WORKER_PANICKED.load(Ordering::SeqCst) { 1 } else { 128 + libc::SIGTERM };
+        let code = if WORKER_PANICKED.load(Ordering::SeqCst) { morloc_runtime_types::panic::PANIC_EXIT_STATUS } else { 128 + libc::SIGTERM };
         match emergency {
             Some(exit) => exit(code),
             None => libc::_exit(code),
@@ -3384,6 +3398,21 @@ thread_local! {
 
 pub(crate) fn note_reply_started() {
     REPLY_STARTED.with(|r| r.set(true));
+}
+
+fn begin_serving() {
+    // DAEMON-7: a failure recorded before serving began still ends it.
+    SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+    if WORKER_PANICKED.load(Ordering::SeqCst) {
+        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    }
+}
+
+// DAEMON-7: a panic the nexus caught while serving the daemon.
+#[no_mangle]
+pub extern "C" fn morloc_daemon_fail() {
+    WORKER_PANICKED.store(true, Ordering::SeqCst);
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
 }
 
 #[no_mangle]
@@ -3717,6 +3746,15 @@ mod lp_message_tests {
 mod panic_tests {
     use super::*;
 
+    #[test]
+    fn a_command_that_exits_with_the_internal_error_status_is_an_internal_error() {
+        let status = morloc_runtime_types::panic::PANIC_EXIT_STATUS << 8;
+        let (_, kind) = classify_failed_command(status, "eval", b"", b"morloc: internal error");
+        assert_eq!(kind, DAEMON_ERROR_INTERNAL);
+        let (_, kind) = classify_failed_command(1 << 8, "eval", b"", b"type error");
+        assert_eq!(kind, DAEMON_ERROR_BAD_REQUEST);
+    }
+
     fn pair() -> [i32; 2] {
         use std::os::fd::IntoRawFd;
         let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -3805,6 +3843,15 @@ mod panic_tests {
             let panicked = serve_job(job, |_| ran.set(true));
             let reply = read_all(sv[1]);
             !panicked && !ran.get() && reply.is_empty()
+        }));
+    }
+
+    #[test]
+    fn a_failure_before_serving_starts_is_not_forgotten() {
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            morloc_daemon_fail();
+            begin_serving();
+            SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
         }));
     }
 

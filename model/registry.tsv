@@ -200,6 +200,8 @@ morloc-runtime/write_behind.rs::-::SEALED	reset
 morloc-runtime/write_behind.rs::-::THREAD_SEALED	thread		
 morloc-runtime-types/compression.rs::frame_workers::CACHED	lazy		
 morloc-runtime-types/owner_word.rs::-::HELD	thread		
+morloc-runtime-types/panic.rs::-::IN_SCOPE	thread		
+morloc-runtime-types/panic.rs::-::UNWINDING	thread		
 morloc-runtime-types/process.rs::token::CACHED	fork-scoped		
 morloc-runtime-types/process.rs::token::CACHED_GENERATION	fork-scoped		
 morloc-runtime-types/fork_generation.rs::-::GENERATION	counter		
@@ -233,6 +235,8 @@ morloc-nexus/process.rs::-::POOL_LANGS	exec-only
 morloc-nexus/process.rs::-::CLEANING_UP	exec-only		
 morloc-nexus/process.rs::-::EXIT_CODE	exec-only		
 morloc-nexus/process.rs::-::BROKEN_PIPE	exec-only		
+morloc-nexus/process.rs::-::PANICKED	exec-only		
+morloc-nexus/process.rs::-::IN_FLIGHT	exec-only		
 morloc-nexus/process.rs::-::SHM_BASENAME_PREFIX	exec-only		
 morloc-nexus/process.rs::-::RUN_TMPDIR	exec-only		
 morloc-nexus/process.rs::-::SPAWN_TO_RECORD_DELAY_MS	test-only		

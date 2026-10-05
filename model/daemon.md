@@ -84,7 +84,7 @@ are stopped, are answered as unavailable (HTTP 503). Daemon test
 
 ### DAEMON-7 A request handler's panic ends the daemon as failed
 Status: implemented
-Checked by: a_panicking_request_is_answered_500_and_the_daemon_shuts_down_as_failed, a_packet_request_that_panics_is_answered_with_a_fail_packet, a_handler_that_panics_after_replying_gets_no_second_reply, a_connection_with_no_descriptor_to_spare_is_closed_unserved, a_request_that_does_not_panic_is_closed_after_its_handler, tla:DaemonShutdown, tla:DaemonShutdown_panic_continues.bug
+Checked by: a_panicking_request_is_answered_500_and_the_daemon_shuts_down_as_failed, a_failure_before_serving_starts_is_not_forgotten, a_stdio_request_that_panics_in_the_daemon_fails_the_daemon_instead_of_exiting, a_packet_request_that_panics_is_answered_with_a_fail_packet, a_handler_that_panics_after_replying_gets_no_second_reply, a_connection_with_no_descriptor_to_spare_is_closed_unserved, a_request_that_does_not_panic_is_closed_after_its_handler, tla:DaemonShutdown, tla:DaemonShutdown_panic_continues.bug
 
 A panic in a request handler is a runtime bug and may leave state half
 updated, so the daemon does not go on taking requests. The worker hands the
@@ -95,10 +95,13 @@ reply has been written. When the handler panics, the worker answers that
 connection as failed -- HTTP 500, a FAIL packet to a packet client, an
 internal error otherwise -- unless a reply was begun, shuts the connection
 down, records the panic and asks for shutdown; it never touches the
-handler's descriptor, which may already be closed and reused. A binding the
+handler's descriptor, which may already be closed and reused. A panic the
+nexus catches while serving the daemon fails it the same way, and a failure
+recorded before the daemon starts serving still ends it. A binding the
 handler was compiling is finished as failed during the unwind, so requests
 waiting on it go on. The daemon then shuts down as DAEMON-6 says and exits
-with status 1, the watchdog's exit included, so a supervisor restarts it.
+with the internal-error status of PANIC-1, the watchdog's exit included, so
+a supervisor restarts it.
 Requests already running finish within the grace period. The job queue's
 lock is taken whether or not a panic poisoned it. Model:
 `tla/DaemonShutdown.tla`.

@@ -78,7 +78,8 @@ pub struct RouterProgram {
     pub name: *mut c_char,
     pub manifest_path: *mut c_char,
     pub manifest: *mut crate::manifest_ffi::Manifest,
-    pub daemon_pid: libc::pid_t,
+    // PANIC-1: read by the panic and signal exits on any thread.
+    pub daemon_pid: std::sync::atomic::AtomicI32,
     pub daemon_socket: [c_char; SUN_PATH_LEN],
 }
 
@@ -151,7 +152,7 @@ unsafe fn router_build(
             return ptr::null_mut();
         }
 
-        prog.daemon_pid = 0;
+        prog.daemon_pid.store(0, std::sync::atomic::Ordering::SeqCst);
         // Set socket path, refusing a program whose name makes it too long
         // to bind: a truncated path would collide or leave no terminator.
         let socket_path = format!("/tmp/morloc-router-{}.sock", name_str);
@@ -208,8 +209,9 @@ pub unsafe extern "C" fn router_terminate_children(router: *mut Router) {
     }
     for i in 0..(*router).n_programs {
         let prog = &*(*router).programs.add(i);
-        if prog.daemon_pid > 0 {
-            libc::kill(prog.daemon_pid, libc::SIGTERM);
+        let pid = prog.daemon_pid.load(std::sync::atomic::Ordering::SeqCst);
+        if pid > 0 {
+            libc::kill(pid, libc::SIGTERM);
         }
     }
 }
@@ -231,8 +233,9 @@ pub unsafe extern "C" fn router_free(router: *mut Router) {
         if !prog.manifest.is_null() {
             free_manifest(prog.manifest);
         }
-        if prog.daemon_pid > 0 {
-            libc::kill(prog.daemon_pid, libc::SIGTERM);
+        let pid = prog.daemon_pid.load(std::sync::atomic::Ordering::SeqCst);
+        if pid > 0 {
+            libc::kill(pid, libc::SIGTERM);
         }
     }
     libc::free((*router).programs as *mut c_void);
@@ -407,7 +410,7 @@ pub unsafe extern "C" fn router_start_program(
             return false;
         }
     };
-    (*prog).daemon_pid = pid;
+    (*prog).daemon_pid.store(pid, std::sync::atomic::Ordering::SeqCst);
 
     // Poll until the daemon socket is connectable (exponential backoff)
     let mut delay_ms = DAEMON_POLL_INITIAL_MS;
@@ -423,7 +426,7 @@ pub unsafe extern "C" fn router_start_program(
         let mut status: i32 = 0;
         let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
         if result == pid {
-            (*prog).daemon_pid = 0;
+            (*prog).daemon_pid.store(0, std::sync::atomic::Ordering::SeqCst);
             let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
             let msg = startup_death_msg(&prog_name, status, &stderr_log);
             set_errmsg(errmsg, &MorlocError::Other(msg));
@@ -458,7 +461,7 @@ pub unsafe extern "C" fn router_start_program(
         let mut status: i32 = 0;
         let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
         if result == pid {
-            (*prog).daemon_pid = 0;
+            (*prog).daemon_pid.store(0, std::sync::atomic::Ordering::SeqCst);
             let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
             let msg = startup_death_msg(&prog_name, status, &stderr_log);
             set_errmsg(errmsg, &MorlocError::Other(msg));
@@ -507,10 +510,11 @@ pub unsafe extern "C" fn router_forward(
     }
 
     // Check if a previously-started daemon has exited (crash recovery)
-    if (*prog).daemon_pid > 0 {
+    let pid = (*prog).daemon_pid.load(std::sync::atomic::Ordering::SeqCst);
+    if pid > 0 {
         let mut status: i32 = 0;
-        let result = libc::waitpid((*prog).daemon_pid, &mut status, libc::WNOHANG);
-        if result == (*prog).daemon_pid || result < 0 {
+        let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
+        if result == pid || result < 0 {
             let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
             // result < 0 means waitpid itself failed (e.g. ECHILD: the child was
             // already reaped elsewhere), so `status` is unset -- don't decode it
@@ -524,12 +528,12 @@ pub unsafe extern "C" fn router_forward(
                 "morloc-router: daemon for '{}' {}, will restart",
                 prog_name, reason
             );
-            (*prog).daemon_pid = 0;
+            (*prog).daemon_pid.store(0, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
     // Start daemon if not running
-    if (*prog).daemon_pid <= 0 {
+    if (*prog).daemon_pid.load(std::sync::atomic::Ordering::SeqCst) <= 0 {
         let mut child_err: *mut c_char = ptr::null_mut();
         if !router_start_program(prog, &mut child_err) {
             if !child_err.is_null() {
@@ -553,7 +557,7 @@ pub unsafe extern "C" fn router_forward(
     let sock = connect_to_daemon(prog, errmsg);
     let sock = if sock < 0 {
         // Try restarting daemon
-        (*prog).daemon_pid = 0;
+        (*prog).daemon_pid.store(0, std::sync::atomic::Ordering::SeqCst);
         // Clear previous error
         if !(*errmsg).is_null() {
             libc::free(*errmsg as *mut c_void);
@@ -807,8 +811,8 @@ pub unsafe extern "C" fn router_build_discovery(router: *mut Router) -> *mut c_c
     for i in 0..(*router).n_programs {
         let prog = &*(*router).programs.add(i);
         let name = CStr::from_ptr(prog.name).to_string_lossy().into_owned();
-        let running =
-            prog.daemon_pid > 0 && libc::kill(prog.daemon_pid, 0) == 0;
+        let pid = prog.daemon_pid.load(std::sync::atomic::Ordering::SeqCst);
+        let running = pid > 0 && libc::kill(pid, 0) == 0;
 
         let commands = if !prog.manifest.is_null() {
             let mv = prog.manifest as *const ManifestC;

@@ -21,6 +21,7 @@ pub mod process;
 pub mod fork_generation;
 pub mod publish_once;
 pub mod fd;
+pub mod panic;
 pub mod spawn;
 pub mod child_group;
 pub mod owner_word;

@@ -1516,6 +1516,7 @@ char* morloc_run_temp_root(const char* run_dir, const char* user_tmpdir);
 // True once a daemon request handler panicked; the daemon then shuts down
 // and exits as failed.
 bool morloc_daemon_worker_panicked(void);
+void morloc_daemon_fail(void);
 const char* morloc_lifeline_child_env(int* read_fd);
 
 void close_socket(int socket_id);
