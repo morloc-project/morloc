@@ -19,6 +19,8 @@ CONSTANT Variant
 \* "unmap_on_give_up": after the second wait, unmap even if workers remain.
 \* "recovery_unmaps": a recovery whose wait for requests runs out unmaps.
 \* "children_survive": stopping the pools leaves child groups running.
+\* "panic_continues": a worker that panics is replaced and the daemon
+\* serves on.
 
 Workers == {"w1", "w2"}
 Idle == "idle"
@@ -37,12 +39,16 @@ variables
     recovering = FALSE,
     unmapUnderAWorker = FALSE,
     exited = FALSE,
-    shutdown = FALSE;
+    shutdown = FALSE,
+    panicked = FALSE,
+    failed = FALSE,
+    servingOn = FALSE;
 
 define
     NoUnmapUnderARunningWorker == ~unmapUnderAWorker
     NoChildOutlivesTheDaemon == exited => \A w \in Workers : ~child[w]
     ShutdownFinishes == shutdown ~> exited
+    APanicEndsTheDaemonAsFailed == panicked ~> (exited /\ failed)
 end define;
 
 macro unmap() begin
@@ -71,18 +77,24 @@ begin
         state[self] := ChildWait;
         child[self] := TRUE;
       or
+        \* A runtime bug: the request is answered and the worker leaves.
+        panicked := TRUE;
+        if Variant /= "panic_continues" then
+          shutdown := TRUE;
+        end if;
+      or
         skip;
       end either;
     end if;
   Wait:
     if state[self] = PoolCall then
-      await exited \/ ~poolWedged \/ poolsKilled;
+      await exited \/ servingOn \/ ~poolWedged \/ poolsKilled;
     elsif state[self] = OtherWait then
-      await exited \/ otherEnds;
+      await exited \/ servingOn \/ otherEnds;
     elsif state[self] = ChildWait then
-      await exited \/ otherEnds \/ ~child[self];
+      await exited \/ servingOn \/ otherEnds \/ ~child[self];
     end if;
-    if exited then
+    if exited \/ servingOn then
       goto Done;
     end if;
   Return:
@@ -95,7 +107,11 @@ end process;
 fair process Signal = "signal"
 begin
   Request:
-    shutdown := TRUE;
+    either
+      shutdown := TRUE;
+    or
+      skip;
+    end either;
 end process;
 
 fair process Main = "main"
@@ -126,7 +142,14 @@ begin
     poolsKilled := FALSE;
     recovering := FALSE;
   Serve:
-    await shutdown;
+    \* With no shutdown asked for, the daemon serves on; the model stops.
+    either
+      await shutdown;
+    or
+      await ~shutdown /\ pc["signal"] = "Done" /\ \A w \in Workers : pc[w] /= "Pick";
+      servingOn := TRUE;
+      goto Done;
+    end either;
   Grace:
     if Variant = "join_first" then
       await joined = Workers;
@@ -157,22 +180,26 @@ begin
     stop_pools();
   Leave:
     exited := TRUE;
+    failed := panicked;
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "5958f08d" /\ chksum(tla) = "79071b0")
+\* BEGIN TRANSLATION (chksum(pcal) = "5231f2c4" /\ chksum(tla) = "2f4d3a01")
 VARIABLES poolWedged, otherEnds, state, child, joined, poolsKilled, 
-          recovering, unmapUnderAWorker, exited, shutdown, pc
+          recovering, unmapUnderAWorker, exited, shutdown, panicked, failed, 
+          servingOn, pc
 
 (* define statement *)
 NoUnmapUnderARunningWorker == ~unmapUnderAWorker
 NoChildOutlivesTheDaemon == exited => \A w \in Workers : ~child[w]
 ShutdownFinishes == shutdown ~> exited
+APanicEndsTheDaemonAsFailed == panicked ~> (exited /\ failed)
 
 VARIABLE gaveUp
 
 vars == << poolWedged, otherEnds, state, child, joined, poolsKilled, 
-           recovering, unmapUnderAWorker, exited, shutdown, pc, gaveUp >>
+           recovering, unmapUnderAWorker, exited, shutdown, panicked, failed, 
+           servingOn, pc, gaveUp >>
 
 ProcSet == (Workers) \cup {"signal"} \cup {"main"}
 
@@ -187,6 +214,9 @@ Init == (* Global variables *)
         /\ unmapUnderAWorker = FALSE
         /\ exited = FALSE
         /\ shutdown = FALSE
+        /\ panicked = FALSE
+        /\ failed = FALSE
+        /\ servingOn = FALSE
         (* Process Main *)
         /\ gaveUp = FALSE
         /\ pc = [self \in ProcSet |-> CASE self \in Workers -> "Pick"
@@ -196,34 +226,42 @@ Init == (* Global variables *)
 Pick(self) == /\ pc[self] = "Pick"
               /\ IF ~recovering /\ ~shutdown
                     THEN /\ \/ /\ state' = [state EXCEPT ![self] = PoolCall]
-                               /\ child' = child
+                               /\ UNCHANGED <<child, shutdown, panicked>>
                             \/ /\ state' = [state EXCEPT ![self] = OtherWait]
-                               /\ child' = child
+                               /\ UNCHANGED <<child, shutdown, panicked>>
                             \/ /\ state' = [state EXCEPT ![self] = ChildWait]
                                /\ child' = [child EXCEPT ![self] = TRUE]
-                            \/ /\ TRUE
+                               /\ UNCHANGED <<shutdown, panicked>>
+                            \/ /\ panicked' = TRUE
+                               /\ IF Variant /= "panic_continues"
+                                     THEN /\ shutdown' = TRUE
+                                     ELSE /\ TRUE
+                                          /\ UNCHANGED shutdown
                                /\ UNCHANGED <<state, child>>
+                            \/ /\ TRUE
+                               /\ UNCHANGED <<state, child, shutdown, panicked>>
                     ELSE /\ TRUE
-                         /\ UNCHANGED << state, child >>
+                         /\ UNCHANGED << state, child, shutdown, panicked >>
               /\ pc' = [pc EXCEPT ![self] = "Wait"]
               /\ UNCHANGED << poolWedged, otherEnds, joined, poolsKilled, 
-                              recovering, unmapUnderAWorker, exited, shutdown, 
-                              gaveUp >>
+                              recovering, unmapUnderAWorker, exited, failed, 
+                              servingOn, gaveUp >>
 
 Wait(self) == /\ pc[self] = "Wait"
               /\ IF state[self] = PoolCall
-                    THEN /\ exited \/ ~poolWedged \/ poolsKilled
+                    THEN /\ exited \/ servingOn \/ ~poolWedged \/ poolsKilled
                     ELSE /\ IF state[self] = OtherWait
-                               THEN /\ exited \/ otherEnds
+                               THEN /\ exited \/ servingOn \/ otherEnds
                                ELSE /\ IF state[self] = ChildWait
-                                          THEN /\ exited \/ otherEnds \/ ~child[self]
+                                          THEN /\ exited \/ servingOn \/ otherEnds \/ ~child[self]
                                           ELSE /\ TRUE
-              /\ IF exited
+              /\ IF exited \/ servingOn
                     THEN /\ pc' = [pc EXCEPT ![self] = "Done"]
                     ELSE /\ pc' = [pc EXCEPT ![self] = "Return"]
               /\ UNCHANGED << poolWedged, otherEnds, state, child, joined, 
                               poolsKilled, recovering, unmapUnderAWorker, 
-                              exited, shutdown, gaveUp >>
+                              exited, shutdown, panicked, failed, servingOn, 
+                              gaveUp >>
 
 Return(self) == /\ pc[self] = "Return"
                 /\ state' = [state EXCEPT ![self] = Idle]
@@ -231,23 +269,26 @@ Return(self) == /\ pc[self] = "Return"
                 /\ pc' = [pc EXCEPT ![self] = "Finish"]
                 /\ UNCHANGED << poolWedged, otherEnds, joined, poolsKilled, 
                                 recovering, unmapUnderAWorker, exited, 
-                                shutdown, gaveUp >>
+                                shutdown, panicked, failed, servingOn, gaveUp >>
 
 Finish(self) == /\ pc[self] = "Finish"
                 /\ joined' = (joined \union {self})
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
                 /\ UNCHANGED << poolWedged, otherEnds, state, child, 
                                 poolsKilled, recovering, unmapUnderAWorker, 
-                                exited, shutdown, gaveUp >>
+                                exited, shutdown, panicked, failed, servingOn, 
+                                gaveUp >>
 
 Worker(self) == Pick(self) \/ Wait(self) \/ Return(self) \/ Finish(self)
 
 Request == /\ pc["signal"] = "Request"
-           /\ shutdown' = TRUE
+           /\ \/ /\ shutdown' = TRUE
+              \/ /\ TRUE
+                 /\ UNCHANGED shutdown
            /\ pc' = [pc EXCEPT !["signal"] = "Done"]
            /\ UNCHANGED << poolWedged, otherEnds, state, child, joined, 
                            poolsKilled, recovering, unmapUnderAWorker, exited, 
-                           gaveUp >>
+                           panicked, failed, servingOn, gaveUp >>
 
 Signal == Request
 
@@ -258,7 +299,8 @@ Recover == /\ pc["main"] = "Recover"
                  /\ recovering' = TRUE
                  /\ pc' = [pc EXCEPT !["main"] = "Drain"]
            /\ UNCHANGED << poolWedged, otherEnds, state, child, joined, 
-                           unmapUnderAWorker, exited, shutdown, gaveUp >>
+                           unmapUnderAWorker, exited, shutdown, panicked, 
+                           failed, servingOn, gaveUp >>
 
 Drain == /\ pc["main"] = "Drain"
          /\ \/ /\ \A w \in Workers : state[w] = Idle
@@ -278,7 +320,8 @@ Drain == /\ pc["main"] = "Drain"
                /\ pc' = [pc EXCEPT !["main"] = "Teardown"]
                /\ UNCHANGED recovering
          /\ UNCHANGED << poolWedged, otherEnds, state, child, joined, 
-                         poolsKilled, exited, shutdown, gaveUp >>
+                         poolsKilled, exited, shutdown, panicked, failed, 
+                         servingOn, gaveUp >>
 
 Remap == /\ pc["main"] = "Remap"
          /\ IF \E w \in Workers : state[w] /= Idle
@@ -289,14 +332,18 @@ Remap == /\ pc["main"] = "Remap"
          /\ recovering' = FALSE
          /\ pc' = [pc EXCEPT !["main"] = "Serve"]
          /\ UNCHANGED << poolWedged, otherEnds, state, child, joined, exited, 
-                         shutdown, gaveUp >>
+                         shutdown, panicked, failed, servingOn, gaveUp >>
 
 Serve == /\ pc["main"] = "Serve"
-         /\ shutdown
-         /\ pc' = [pc EXCEPT !["main"] = "Grace"]
+         /\ \/ /\ shutdown
+               /\ pc' = [pc EXCEPT !["main"] = "Grace"]
+               /\ UNCHANGED servingOn
+            \/ /\ ~shutdown /\ pc["signal"] = "Done" /\ \A w \in Workers : pc[w] /= "Pick"
+               /\ servingOn' = TRUE
+               /\ pc' = [pc EXCEPT !["main"] = "Done"]
          /\ UNCHANGED << poolWedged, otherEnds, state, child, joined, 
                          poolsKilled, recovering, unmapUnderAWorker, exited, 
-                         shutdown, gaveUp >>
+                         shutdown, panicked, failed, gaveUp >>
 
 Grace == /\ pc["main"] = "Grace"
          /\ IF Variant = "join_first"
@@ -306,7 +353,7 @@ Grace == /\ pc["main"] = "Grace"
          /\ pc' = [pc EXCEPT !["main"] = "Kill"]
          /\ UNCHANGED << poolWedged, otherEnds, state, child, joined, 
                          poolsKilled, recovering, unmapUnderAWorker, exited, 
-                         shutdown, gaveUp >>
+                         shutdown, panicked, failed, servingOn, gaveUp >>
 
 Kill == /\ pc["main"] = "Kill"
         /\ IF joined /= Workers /\ Variant /= "no_kill"
@@ -319,7 +366,8 @@ Kill == /\ pc["main"] = "Kill"
                    /\ UNCHANGED << child, poolsKilled >>
         /\ pc' = [pc EXCEPT !["main"] = "Join"]
         /\ UNCHANGED << poolWedged, otherEnds, state, joined, recovering, 
-                        unmapUnderAWorker, exited, shutdown, gaveUp >>
+                        unmapUnderAWorker, exited, shutdown, panicked, failed, 
+                        servingOn, gaveUp >>
 
 Join == /\ pc["main"] = "Join"
         /\ IF Variant /= "no_kill"
@@ -331,7 +379,7 @@ Join == /\ pc["main"] = "Join"
         /\ pc' = [pc EXCEPT !["main"] = "Unmap"]
         /\ UNCHANGED << poolWedged, otherEnds, state, child, joined, 
                         poolsKilled, recovering, unmapUnderAWorker, exited, 
-                        shutdown >>
+                        shutdown, panicked, failed, servingOn >>
 
 Unmap == /\ pc["main"] = "Unmap"
          /\ IF ~gaveUp \/ Variant = "unmap_on_give_up"
@@ -343,7 +391,8 @@ Unmap == /\ pc["main"] = "Unmap"
                     /\ UNCHANGED unmapUnderAWorker
          /\ pc' = [pc EXCEPT !["main"] = "Teardown"]
          /\ UNCHANGED << poolWedged, otherEnds, state, child, joined, 
-                         poolsKilled, recovering, exited, shutdown, gaveUp >>
+                         poolsKilled, recovering, exited, shutdown, panicked, 
+                         failed, servingOn, gaveUp >>
 
 Teardown == /\ pc["main"] = "Teardown"
             /\ poolsKilled' = TRUE
@@ -353,14 +402,16 @@ Teardown == /\ pc["main"] = "Teardown"
                        /\ child' = child
             /\ pc' = [pc EXCEPT !["main"] = "Leave"]
             /\ UNCHANGED << poolWedged, otherEnds, state, joined, recovering, 
-                            unmapUnderAWorker, exited, shutdown, gaveUp >>
+                            unmapUnderAWorker, exited, shutdown, panicked, 
+                            failed, servingOn, gaveUp >>
 
 Leave == /\ pc["main"] = "Leave"
          /\ exited' = TRUE
+         /\ failed' = panicked
          /\ pc' = [pc EXCEPT !["main"] = "Done"]
          /\ UNCHANGED << poolWedged, otherEnds, state, child, joined, 
                          poolsKilled, recovering, unmapUnderAWorker, shutdown, 
-                         gaveUp >>
+                         panicked, servingOn, gaveUp >>
 
 Main == Recover \/ Drain \/ Remap \/ Serve \/ Grace \/ Kill \/ Join
            \/ Unmap \/ Teardown \/ Leave

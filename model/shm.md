@@ -80,3 +80,14 @@ CLI run fails. A worker crash therefore restarts every pool of a daemon,
 and a client that repeatedly crashes a worker reaches the recovery loop
 guard, which stops the daemon. References held by children forked from user
 code are not covered. Model: `tla/WorkerExit.tla`.
+
+### SHM-9 A lock released by an unwinding panic marks what it protects as damaged
+Status: deviation
+
+The volume lock is robust so that a holder's death inside the critical
+section reaches other processes as a dead owner, which poisons the volume.
+A panic that unwinds through the critical section instead drops the lock's
+guard, which unlocks normally: a half-updated block list is handed to
+sibling processes as sound. The stream slot guard already poisons its slot
+when dropped during a panic; the volume lock and the recoverable lock do
+not.

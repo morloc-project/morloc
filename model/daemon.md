@@ -82,3 +82,37 @@ first, and only the one that claims it ends the process. Requests refused, and r
 are stopped, are answered as unavailable (HTTP 503). Daemon test
 `shutdown-wedged`. Model: `tla/DaemonShutdown.tla`.
 
+### DAEMON-7 A request handler's panic ends the daemon as failed
+Status: implemented
+Checked by: a_panicking_request_is_answered_500_and_the_daemon_shuts_down_as_failed, a_packet_request_that_panics_is_answered_with_a_fail_packet, a_handler_that_panics_after_replying_gets_no_second_reply, a_connection_with_no_descriptor_to_spare_is_closed_unserved, a_request_that_does_not_panic_is_closed_after_its_handler, tla:DaemonShutdown, tla:DaemonShutdown_panic_continues.bug
+
+A panic in a request handler is a runtime bug and may leave state half
+updated, so the daemon does not go on taking requests. The worker hands the
+handler its own descriptor for the connection and keeps the one it
+accepted; with no descriptor to spare it closes the connection unserved.
+The handler records whether its reply is a packet and whether any of a
+reply has been written. When the handler panics, the worker answers that
+connection as failed -- HTTP 500, a FAIL packet to a packet client, an
+internal error otherwise -- unless a reply was begun, shuts the connection
+down, records the panic and asks for shutdown; it never touches the
+handler's descriptor, which may already be closed and reused. A binding the
+handler was compiling is finished as failed during the unwind, so requests
+waiting on it go on. The daemon then shuts down as DAEMON-6 says and exits
+with status 1, the watchdog's exit included, so a supervisor restarts it.
+Requests already running finish within the grace period. The job queue's
+lock is taken whether or not a panic poisoned it. Model:
+`tla/DaemonShutdown.tla`.
+
+This holds for a panic that unwinds through Rust frames to the worker. A
+panic inside an `extern "C"` function the handler calls cannot unwind out
+of it; DAEMON-8 covers that case. A lock the panic unwound through is
+released as sound (SHM-9), so requests that run during the grace period
+may see what it tore.
+
+### DAEMON-8 A panic below a C boundary in a request ends the daemon as failed
+Status: deviation
+
+The dispatch, request parsing and response writing functions a handler
+calls are `extern "C"`. A panic inside one aborts the process: the client
+gets no reply, shutdown is not graceful, and the exit status is 134 rather
+than 1.

@@ -1857,9 +1857,18 @@ unsafe fn dispatch_request(
                 }
                 BindClaim::Bound => true,
                 BindClaim::Compile(dir) => {
+                    // DAEMON-7: waiters are woken even if the compile panics.
+                    struct Unfinished(u64);
+                    impl Drop for Unfinished {
+                        fn drop(&mut self) {
+                            finish_binding(self.0, "", None, None);
+                        }
+                    }
+                    let unfinished = Unfinished(hv);
                     let timeout = G_EVAL_TIMEOUT.load(Ordering::Relaxed);
                     let artifact_dir = compile_binding(&dir, hv, &expr_str, timeout);
                     let ok = artifact_dir.is_some();
+                    std::mem::forget(unfinished);
                     finish_binding(hv, &expr_str, name.as_deref(), artifact_dir);
                     ok
                 }
@@ -2564,6 +2573,7 @@ unsafe fn write_lp_message(
     errmsg: *mut *mut c_char,
 ) -> bool {
     clear_errmsg(errmsg);
+    note_reply_started();
 
     let len_buf: [u8; 4] = [
         ((len >> 24) & 0xFF) as u8,
@@ -2649,6 +2659,7 @@ unsafe fn handle_lp_connection(
     // `daemon_dispatch` stays JSON for HTTP and control methods.
     let want_packet = G_DAEMON_OUTPUT_PACKET.load(Ordering::Relaxed)
         && (*req).method == DaemonMethod::Call;
+    REPLY_IS_PACKET.with(|r| r.set(want_packet));
     let prev = set_current_output_packet(want_packet);
     // The raw-media form (an `@mime` return as result_bytes+mime, conveyed as
     // base64 in the JSON envelope) is requested per-request by the serving
@@ -3225,7 +3236,7 @@ pub unsafe extern "C" fn daemon_run(
                 client_fd,
                 conn_type: fd_types[i],
             };
-            let mut q = ctx.queue.lock().unwrap();
+            let mut q = ctx.queue.lock().unwrap_or_else(|p| p.into_inner());
             q.jobs.push_back(job);
             ctx.cond.notify_one();
         }
@@ -3241,9 +3252,10 @@ pub unsafe extern "C" fn daemon_run(
         if !morloc_claim_exit() {
             return;
         }
+        let code = if WORKER_PANICKED.load(Ordering::SeqCst) { 1 } else { 128 + libc::SIGTERM };
         match emergency {
-            Some(exit) => exit(128 + libc::SIGTERM),
-            None => libc::_exit(128 + libc::SIGTERM),
+            Some(exit) => exit(code),
+            None => libc::_exit(code),
         }
     });
     if watchdog.is_err() {
@@ -3257,7 +3269,7 @@ pub unsafe extern "C" fn daemon_run(
     }
     // DAEMON-6: a queued request is refused, never started.
     {
-        let mut q = ctx.queue.lock().unwrap();
+        let mut q = ctx.queue.lock().unwrap_or_else(|p| p.into_inner());
         while let Some(job) = q.jobs.pop_front() {
             libc::close(job.client_fd);
         }
@@ -3323,7 +3335,7 @@ fn daemon_worker_fn(ctx: Arc<WorkerContext>) {
         }
 
         let job = {
-            let mut q = ctx.queue.lock().unwrap();
+            let mut q = ctx.queue.lock().unwrap_or_else(|p| p.into_inner());
             loop {
                 // DAEMON-6
                 if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
@@ -3336,7 +3348,7 @@ fn daemon_worker_fn(ctx: Arc<WorkerContext>) {
                 let (guard, _timeout) = ctx
                     .cond
                     .wait_timeout(q, std::time::Duration::from_millis(100))
-                    .unwrap();
+                    .unwrap_or_else(|p| p.into_inner());
                 q = guard;
             }
         };
@@ -3346,22 +3358,108 @@ fn daemon_worker_fn(ctx: Arc<WorkerContext>) {
             None => continue,
         };
 
-        unsafe {
+        let panicked = serve_job(job, |fd| unsafe {
             if job.conn_type == 2 {
-                handle_http_connection(
-                    job.client_fd,
-                    ctx.manifest,
-                    ctx.sockets,
-                    ctx.shm_basename,
-                );
+                handle_http_connection(fd, ctx.manifest, ctx.sockets, ctx.shm_basename);
             } else {
-                handle_lp_connection(
-                    job.client_fd,
-                    ctx.manifest,
-                    ctx.sockets,
-                    ctx.shm_basename,
-                );
+                handle_lp_connection(fd, ctx.manifest, ctx.sockets, ctx.shm_basename);
             }
+        });
+        if panicked {
+            return;
+        }
+    }
+}
+
+// DAEMON-7: set once a worker panicked; the daemon then shuts down and
+// exits as failed.
+static WORKER_PANICKED: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    // DAEMON-7: this thread's request: whether its reply is a packet, and
+    // whether any of a reply has been written.
+    static REPLY_IS_PACKET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REPLY_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn note_reply_started() {
+    REPLY_STARTED.with(|r| r.set(true));
+}
+
+#[no_mangle]
+pub extern "C" fn morloc_daemon_worker_panicked() -> bool {
+    WORKER_PANICKED.load(Ordering::SeqCst)
+}
+
+// DAEMON-7: the handler gets its own descriptor for the connection, so a
+// panic at any point leaves this one open to answer on and close. Returns
+// whether the handler panicked.
+fn serve_job(job: DaemonJob, handle: impl FnOnce(i32)) -> bool {
+    let own = unsafe { libc::fcntl(job.client_fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if own < 0 {
+        // DAEMON-7: no spare descriptor to serve guarded with; the client
+        // reads end of file, an error in either protocol.
+        say("morloc-daemon: out of file descriptors; closing a connection unserved\n");
+        unsafe { libc::close(job.client_fd) };
+        return false;
+    }
+    REPLY_IS_PACKET.with(|r| r.set(false));
+    REPLY_STARTED.with(|r| r.set(false));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(own)));
+    if outcome.is_ok() {
+        unsafe { libc::close(job.client_fd) };
+        return false;
+    }
+    say("morloc-daemon: a request handler panicked; shutting down\n");
+    // DAEMON-7: a reply already begun is not followed by a second.
+    if !REPLY_STARTED.with(|r| r.get()) {
+        unsafe { answer_panicked_request(job) };
+    }
+    // DAEMON-7: ends the connection however the handler left its own
+    // descriptor, which is never touched here: it may already be closed and
+    // its number reused.
+    unsafe {
+        libc::shutdown(job.client_fd, libc::SHUT_RDWR);
+        libc::close(job.client_fd);
+    }
+    WORKER_PANICKED.store(true, Ordering::SeqCst);
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    true
+}
+
+unsafe fn answer_panicked_request(job: DaemonJob) {
+    let message = "the daemon failed while serving this request and is restarting";
+    if job.conn_type != 2 && REPLY_IS_PACKET.with(|r| r.get()) {
+        let fail = morloc_runtime_types::packet::make_fail_packet_bytes(message);
+        let mut err: *mut c_char = ptr::null_mut();
+        write_lp_message(job.client_fd, fail.as_ptr() as *const c_char, fail.len(), &mut err);
+        if !err.is_null() {
+            libc::free(err as *mut c_void);
+        }
+    } else if job.conn_type == 2 {
+        let body = format!("{{\"status\":\"error\",\"error\":\"{}\"}}", message);
+        let ct = b"application/json\0";
+        crate::http_ffi::http_write_response(
+            job.client_fd,
+            500,
+            ct.as_ptr() as *const c_char,
+            body.as_ptr() as *const c_char,
+            body.len(),
+        );
+    } else {
+        let mut resp: DaemonResponse = std::mem::zeroed();
+        resp.success = false;
+        resp.error_kind = DAEMON_ERROR_INTERNAL;
+        let c = CString::new(message).unwrap_or_default();
+        resp.error = libc::strdup(c.as_ptr());
+        let mut len: usize = 0;
+        let json = daemon_serialize_response(&mut resp, &mut len);
+        let mut err: *mut c_char = ptr::null_mut();
+        write_lp_message(job.client_fd, json, len, &mut err);
+        libc::free(json as *mut c_void);
+        libc::free(resp.error as *mut c_void);
+        if !err.is_null() {
+            libc::free(err as *mut c_void);
         }
     }
 }
@@ -3612,6 +3710,116 @@ mod lp_message_tests {
             libc::close(writer);
             assert!(ok, "a signal during the read dropped the message");
         }
+    }
+}
+
+#[cfg(test)]
+mod panic_tests {
+    use super::*;
+
+    fn pair() -> [i32; 2] {
+        use std::os::fd::IntoRawFd;
+        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+        [a.into_raw_fd(), b.into_raw_fd()]
+    }
+
+    fn read_all(fd: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
+            if n <= 0 {
+                return out;
+            }
+            out.extend_from_slice(&buf[..n as usize]);
+        }
+    }
+
+    #[test]
+    fn a_panicking_request_is_answered_500_and_the_daemon_shuts_down_as_failed() {
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let sv = pair();
+            let job = DaemonJob { client_fd: sv[0], conn_type: 2 };
+            let panicked = serve_job(job, |_| panic!("a bug in a handler"));
+            let reply = String::from_utf8_lossy(&read_all(sv[1])).into_owned();
+            let ok = panicked
+                && reply.starts_with("HTTP/1.1 500")
+                && WORKER_PANICKED.load(Ordering::SeqCst)
+                && SHUTDOWN_REQUESTED.load(Ordering::SeqCst);
+            if !ok {
+                eprintln!("panicked {panicked}, reply {reply:?}");
+            }
+            ok
+        }));
+    }
+
+    fn lp_frame(body: &[u8]) -> Vec<u8> {
+        let mut out = (body.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(body);
+        out
+    }
+
+    #[test]
+    fn a_packet_request_that_panics_is_answered_with_a_fail_packet() {
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let sv = pair();
+            let job = DaemonJob { client_fd: sv[0], conn_type: 0 };
+            let panicked = serve_job(job, |_| {
+                REPLY_IS_PACKET.with(|r| r.set(true));
+                panic!("a bug in a handler")
+            });
+            let reply = read_all(sv[1]);
+            let want = lp_frame(&morloc_runtime_types::packet::make_fail_packet_bytes(
+                "the daemon failed while serving this request and is restarting",
+            ));
+            panicked && reply == want
+        }));
+    }
+
+    #[test]
+    fn a_handler_that_panics_after_replying_gets_no_second_reply() {
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let sv = pair();
+            let job = DaemonJob { client_fd: sv[0], conn_type: 0 };
+            let panicked = serve_job(job, |fd| unsafe {
+                let mut err: *mut c_char = ptr::null_mut();
+                write_lp_message(fd, b"done".as_ptr() as *const c_char, 4, &mut err);
+                panic!("a bug while cleaning up")
+            });
+            let reply = read_all(sv[1]);
+            panicked && reply == lp_frame(b"done")
+        }));
+    }
+
+    #[test]
+    fn a_connection_with_no_descriptor_to_spare_is_closed_unserved() {
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let sv = pair();
+            let highest = (0..4096).filter(|fd| unsafe { libc::fcntl(*fd, libc::F_GETFD) } >= 0).max().unwrap_or(0);
+            let limit = libc::rlimit { rlim_cur: (highest + 1) as libc::rlim_t, rlim_max: libc::RLIM_INFINITY };
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) };
+            // Every free number below the limit taken, so no dup can succeed.
+            while unsafe { libc::fcntl(0, libc::F_DUPFD_CLOEXEC, 0) } >= 0 {}
+            let job = DaemonJob { client_fd: sv[0], conn_type: 2 };
+            let ran = std::cell::Cell::new(false);
+            let panicked = serve_job(job, |_| ran.set(true));
+            let reply = read_all(sv[1]);
+            !panicked && !ran.get() && reply.is_empty()
+        }));
+    }
+
+    #[test]
+    fn a_request_that_does_not_panic_is_closed_after_its_handler() {
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let sv = pair();
+            let job = DaemonJob { client_fd: sv[0], conn_type: 2 };
+            let panicked = serve_job(job, |fd| unsafe {
+                libc::write(fd, b"ok".as_ptr() as *const c_void, 2);
+                libc::close(fd);
+            });
+            let reply = read_all(sv[1]);
+            !panicked && reply == b"ok" && !WORKER_PANICKED.load(Ordering::SeqCst)
+        }));
     }
 }
 

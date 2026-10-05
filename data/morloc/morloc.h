@@ -1513,6 +1513,9 @@ void morloc_remove_own_temps(void);
 // The temp root of the run whose directory is run_dir (user_tmpdir: the
 // user's --tmpdir, or NULL), as a malloc'd string the caller frees.
 char* morloc_run_temp_root(const char* run_dir, const char* user_tmpdir);
+// True once a daemon request handler panicked; the daemon then shuts down
+// and exits as failed.
+bool morloc_daemon_worker_panicked(void);
 const char* morloc_lifeline_child_env(int* read_fd);
 
 void close_socket(int socket_id);

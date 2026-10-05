@@ -280,6 +280,7 @@ pub unsafe extern "C" fn http_write_response_ex(
     body_len: usize,
     extra_headers: *const c_char,
 ) -> bool {
+    crate::daemon_ffi::note_reply_started();
     let ct = if content_type.is_null() {
         "application/json"
     } else {

@@ -85,6 +85,9 @@ morloc-runtime/daemon_ffi.rs::-::REAPED_NEXT	counter
 morloc-runtime/daemon_ffi.rs::-::WorkerContext.queue	exec-only		
 morloc-runtime/daemon_ffi.rs::-::WorkerContext.cond	exec-only		
 morloc-runtime/daemon_ffi.rs::-::EVAL_CHILDREN	exec-only		
+morloc-runtime/daemon_ffi.rs::-::WORKER_PANICKED	counter		
+morloc-runtime/daemon_ffi.rs::-::REPLY_IS_PACKET	thread		
+morloc-runtime/daemon_ffi.rs::-::REPLY_STARTED	thread		
 morloc-runtime/debug.rs::-::FRAMES	thread		
 morloc-runtime/debug.rs::-::DUMPED_COUNT	thread		
 morloc-runtime/debug.rs::-::MIDX_COUNTERS	thread		

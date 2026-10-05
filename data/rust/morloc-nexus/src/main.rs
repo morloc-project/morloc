@@ -540,7 +540,7 @@ fn main() {
 
         // Build DaemonConfig and call daemon_run in libmorloc.so
         run_daemon(&config, &mut sockets, &shm_basename, &payload);
-        process::clean_exit(0);
+        process::clean_exit(daemon_exit_code());
     }
 
     // Normal CLI mode
@@ -839,8 +839,17 @@ fn run_daemon(
     };
     if !all_returned {
         // DAEMON-6: a request still running reads these and shared memory.
-        process::exit_leaving_threads(0);
+        process::exit_leaving_threads(daemon_exit_code());
     }
+}
+
+/// 1 once a request handler panicked (DAEMON-7), so a supervisor restarts
+/// the daemon; 0 otherwise.
+fn daemon_exit_code() -> i32 {
+    extern "C" {
+        fn morloc_daemon_worker_panicked() -> bool;
+    }
+    if unsafe { morloc_daemon_worker_panicked() } { 1 } else { 0 }
 }
 
 /// Run the multi-program router daemon.
