@@ -708,6 +708,7 @@ mod tests {
 
     #[test]
     fn a_child_forked_by_user_code_never_returns_from_the_dispatch() {
+        let _shm = crate::init_test_shm();
         let mut err: *mut c_char = ptr::null_mut();
         let arg = unsafe { crate::packet_ffi::make_fail_packet(c"arg".as_ptr()) };
         let args = [arg as *const u8];

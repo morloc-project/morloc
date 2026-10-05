@@ -855,6 +855,64 @@ fn deviating_rows_only_decrease() {
 }
 
 #[test]
+fn every_versioned_read_rechecks_through_the_fence() {
+    struct Loads(Vec<String>);
+    impl<'ast> Visit<'ast> for Loads {
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            let body = f.block.to_token_stream().to_string();
+            if body.matches("generation . load").count() > 1 {
+                self.0.push(f.sig.ident.to_string());
+            }
+            syn::visit::visit_item_fn(self, f);
+        }
+        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+            let body = f.block.to_token_stream().to_string();
+            if body.matches("generation . load").count() > 1 {
+                self.0.push(f.sig.ident.to_string());
+            }
+            syn::visit::visit_impl_item_fn(self, f);
+        }
+    }
+    let text = std::fs::read_to_string(rust_root().join("morloc-runtime/src/stream.rs")).unwrap();
+    let mut loads = Loads(Vec::new());
+    loads.visit_file(&syn::parse_file(&text).unwrap());
+    assert!(
+        loads.0.is_empty(),
+        "SLOT-8: a second load of a slot's generation must go through generation_after_read, \
+         whose fence orders the reads before it: {:?}",
+        loads.0
+    );
+}
+
+#[test]
+fn every_test_that_runs_a_dispatch_holds_the_test_arena() {
+    struct Tests(Vec<String>);
+    impl<'ast> Visit<'ast> for Tests {
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            let is_test = f.attrs.iter().any(|a| a.path().is_ident("test"));
+            let body = f.block.to_token_stream().to_string().replace(' ', "");
+            let dispatches = ["begin_dispatch(", "end_dispatch(", "pool_dispatch_packet("].iter().any(|c| body.contains(c));
+            let guarded = ["init_test_shm(", "own_test_registry(", "own_test_shm("].iter().any(|g| body.contains(g));
+            if is_test && dispatches && !guarded {
+                self.0.push(f.sig.ident.to_string());
+            }
+            syn::visit::visit_item_fn(self, f);
+        }
+    }
+    let mut tests = Tests(Vec::new());
+    for f in walk(&rust_root().join("morloc-runtime/src"), &["rs"], &[]) {
+        let text = std::fs::read_to_string(&f).unwrap();
+        tests.visit_file(&syn::parse_file(&text).unwrap());
+    }
+    assert!(
+        tests.0.is_empty(),
+        "a dispatch ending collects every unowned fold cell and temp file in the process, so a test \
+         that runs one must hold the test arena, which the tests that own such values hold exclusively: {:?}",
+        tests.0
+    );
+}
+
+#[test]
 fn no_runtime_value_waits_for_another_thread_to_initialise_it() {
     const WAITING: [&str; 6] = ["OnceLock", "Once", "LazyLock", "OnceCell", "LazyCell", "Lazy"];
     let scan = scan_rust();

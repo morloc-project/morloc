@@ -496,16 +496,10 @@ pub(crate) fn registry_gen_salt() -> u64 {
 //   offset 64:                      RegistrySlot[0]
 //   offset 64 + N*STREAM_ENTRY_SIZE: RegistrySlot[N-1]
 //
-// All concurrent access goes through the atomic fields. The publication
-// protocol for immutable-after-@open fields (file_path, schema_str,
-// kind, final_footer, subpacket_entries, body_start) is:
-//
-//   Writer (in @open): write fields with plain stores, then
-//                      generation.store(new_gen, Release).
-//   Reader (any pool): generation.load(Acquire) = g0;
-//                      read fields;
-//                      generation.load(Acquire) = g1;
-//                      if g0 != g1, retry from the top.
+// SLOT-8: fields fixed while the slot is open (file_path, schema_str,
+// kind, final_footer, body_start, and subpacket_entries for IFile and
+// IStream) are read through versioned_read. An OStream's
+// subpacket_entries and compression_level change under the lock.
 //
 // Mutable-under-lock fields (cursor, element_count, diag) require
 // taking `lock` before read or write. Lockfree snapshot reads of
@@ -960,13 +954,13 @@ fn file_identity_of(f: &std::fs::File) -> (u64, u64) {
 /// A process joining a stream opens its file by path; refuse it unless that
 /// is still the file the stream was opened on. Another file renamed over
 /// the path would be read through the original's index, or written instead.
-fn check_file_identity(
+fn check_identity(
     handle: i64,
-    slot: &RegistrySlot,
+    expected: (u64, u64),
     path: &str,
     found: (u64, u64),
 ) -> Result<(), MorlocError> {
-    if slot.file_ino != 0 && (slot.file_dev, slot.file_ino) != found {
+    if expected.1 != 0 && expected != found {
         return Err(MorlocError::Other(format!(
             "stream handle {:#x}: the file '{}' was replaced after the stream was opened",
             handle, path,
@@ -1209,7 +1203,7 @@ pub fn with_process_local_slot<R>(
     // closed and reopened during attach, the second read catches
     // it; we error and let the caller retry rather than papering
     // over the race.
-    let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+    let gen_after = generation_after_read(slot) & GENERATION_MASK;
     if gen_after != gen_now {
         // The local slot is now stale; dispose of it.
         drop(claim);
@@ -1329,38 +1323,63 @@ fn attach_process_local_slot(
     slot: &'static RegistrySlot,
     cached_generation: u64,
 ) -> Result<ProcessLocalSlot, MorlocError> {
-    use std::sync::atomic::Ordering;
-
-    // Versioned-pointer read of immutable-after-open fields. Read
-    // `kind` and the path's RelPtr + length, then re-verify
-    // generation. The caller will re-verify again after we return,
-    // so a torn read manifests as a clean retry.
-    let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-    if gen_before != cached_generation {
-        return Err(MorlocError::Other(format!(
-            "stream handle {:#x}: slot raced during attach (gen went from \
-             {} to {})",
-            handle, cached_generation, gen_before,
-        )));
+    struct View {
+        is_stdio: u8,
+        stdio_kind: u8,
+        kind: u8,
+        path: Vec<u8>,
+        schema: Vec<u8>,
+        entries: Vec<morloc_runtime_types::packet::SubpacketEntry>,
+        body_start: u64,
+        identity: (u64, u64),
     }
+    let view = versioned_read(slot, cached_generation, |s| {
+        // SLOT-8: an open OStream's entry array grows under its lock.
+        let entries = if s.kind == MLC_KIND_IFILE || s.kind == MLC_KIND_ISTREAM {
+            let width = std::mem::size_of::<morloc_runtime_types::packet::SubpacketEntry>();
+            let extent = (s.subpacket_entries_len as usize).checked_mul(width).ok_or_else(|| {
+                MorlocError::Other(format!("stream handle {:#x}: sub-packet index length overflows", handle))
+            })?;
+            copy_slot_bytes(s.subpacket_entries, extent)?
+                .chunks_exact(width)
+                .map(|e| unsafe {
+                    std::ptr::read_unaligned(e.as_ptr() as *const morloc_runtime_types::packet::SubpacketEntry)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(View {
+            is_stdio: s.is_stdio,
+            stdio_kind: s.stdio_kind,
+            kind: s.kind,
+            path: copy_slot_bytes(s.file_path, s.file_path_len as usize)?,
+            schema: copy_slot_bytes(s.schema_str, s.schema_str_len as usize)?,
+            entries,
+            body_start: s.body_start,
+            identity: (s.file_dev, s.file_ino),
+        })
+    })?
+    .ok_or_else(|| MorlocError::Other(format!(
+        "stream handle {:#x}: slot raced during attach (the handle names generation {})",
+        handle, cached_generation,
+    )))?;
     // Stdio slots must be routed through the nexus RPC by every op
     // (write/next/flush/close). If we get here, an op forgot its
     // stdio short-circuit; fail loudly rather than trying to open
     // the sentinel path ("-", "-2") as a real file.
-    if slot.is_stdio != 0 {
+    if view.is_stdio != 0 {
         return Err(MorlocError::Other(format!(
             "stream handle {:#x}: attach_process_local_slot called on a \
              stdio slot (kind byte {}); the caller is missing its stdio \
              RPC short-circuit",
-            handle, slot.stdio_kind,
+            handle, view.stdio_kind,
         )));
     }
-    let kind = slot.kind;
+    let kind = view.kind;
     // A channel has no file: this process needs only its schemas.
     if kind == MLC_KIND_CHANNEL {
-        let schema_abs = crate::shm::rel2abs(slot.schema_str)?;
-        let schema_bytes = unsafe { std::slice::from_raw_parts(schema_abs, slot.schema_str_len as usize) };
-        let schema_str = std::str::from_utf8(schema_bytes).map_err(|e| MorlocError::Other(format!(
+        let schema_str = std::str::from_utf8(&view.schema).map_err(|e| MorlocError::Other(format!(
             "stream handle {:#x}: channel schema is not valid UTF-8: {}", handle, e,
         )))?;
         let schema = parse_schema(schema_str).map_err(|e| MorlocError::Schema(format!(
@@ -1368,32 +1387,25 @@ fn attach_process_local_slot(
         )))?;
         return Ok(channel_local(cached_generation, &schema));
     }
-    let path_rel = slot.file_path;
-    let path_len = slot.file_path_len as usize;
-
-    if path_rel == shm_types_crate::RELNULL || path_len == 0 {
+    if view.path.is_empty() {
         return Err(MorlocError::Other(format!(
             "stream handle {:#x}: slot has no file_path (corrupt slot \
              or partially-published @open)",
             handle,
         )));
     }
-    let path_abs = crate::shm::rel2abs(path_rel)?;
-    // SAFETY: path_abs + path_len are bounded by the SHM block that
-    // backs the path string; verified by rel2abs above.
-    let path_bytes = unsafe { std::slice::from_raw_parts(path_abs, path_len) };
-    let path_str = std::str::from_utf8(path_bytes).map_err(|e| {
+    let path_str = String::from_utf8(view.path).map_err(|e| {
         MorlocError::Other(format!(
             "stream handle {:#x}: file_path is not valid UTF-8: {}",
             handle, e,
         ))
-    })?.to_string();
+    })?;
 
     // Open + mmap depending on kind.
     let (fd, map_file, mmap_ptr, mmap_size) = match kind {
         x if x == MLC_KIND_IFILE || x == MLC_KIND_ISTREAM => {
             let (f, mp, sz) = mmap_file_readonly_keep(&path_str)?;
-            if let Err(e) = check_file_identity(handle, slot, &path_str, file_identity_of(&f)) {
+            if let Err(e) = check_identity(handle, view.identity, &path_str, file_identity_of(&f)) {
                 unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize); }
                 return Err(e);
             }
@@ -1416,7 +1428,7 @@ fn attach_process_local_slot(
             if fd < 0 {
                 return Err(MorlocError::Io(std::io::Error::last_os_error()));
             }
-            if let Err(e) = check_file_identity(handle, slot, &path_str, file_identity(fd)) {
+            if let Err(e) = check_identity(handle, view.identity, &path_str, file_identity(fd)) {
                 unsafe { libc::close(fd); }
                 return Err(e);
             }
@@ -1429,21 +1441,11 @@ fn attach_process_local_slot(
         }
     };
 
-    // Cache the parsed schema. For non-OStream (which always reads
-    // the schema from disk on open) we re-parse here.
-    let schema_rel = slot.schema_str;
-    let schema_len = slot.schema_str_len as usize;
-    let schema_str = if schema_rel == shm_types_crate::RELNULL || schema_len == 0 {
-        String::new()
-    } else {
-        let abs = crate::shm::rel2abs(schema_rel)?;
-        let bytes = unsafe { std::slice::from_raw_parts(abs, schema_len) };
-        std::str::from_utf8(bytes).map_err(|e| {
-            MorlocError::Other(format!(
-                "stream handle {:#x}: schema_str is not UTF-8: {}", handle, e,
-            ))
-        })?.to_string()
-    };
+    let schema_str = String::from_utf8(view.schema).map_err(|e| {
+        MorlocError::Other(format!(
+            "stream handle {:#x}: schema_str is not UTF-8: {}", handle, e,
+        ))
+    })?;
     let parsed_schema = if schema_str.is_empty() {
         Schema::primitive(SerialType::Nil)
     } else {
@@ -1462,31 +1464,13 @@ fn attach_process_local_slot(
         }
         s
     };
-    // Copy IFile sub-packet entry array from SHM into a process-local
-    // Vec. This is a one-time cost at attach; subsequent index lookups
-    // hit the local Vec without rel2abs.
-    let subpacket_entries_local: Vec<morloc_runtime_types::packet::SubpacketEntry> = {
-        let idx_rel = slot.subpacket_entries;
-        let idx_len = slot.subpacket_entries_len as usize;
-        if idx_rel == shm_types_crate::RELNULL || idx_len == 0 {
-            Vec::new()
-        } else {
-            let abs = crate::shm::rel2abs(idx_rel)?;
-            let raw = unsafe {
-                std::slice::from_raw_parts(
-                    abs as *const morloc_runtime_types::packet::SubpacketEntry,
-                    idx_len,
-                )
-            };
-            raw.to_vec()
-        }
-    };
+    let subpacket_entries_local = view.entries;
 
     // Detect DATA_PACKET shape (single sub-packet at offset 0, no
     // stream header). Convention from `parse_stream_file`:
     // is_data_packet => body_start == 0 AND the entry array is a
     // single (offset=0, elem_count=<Array size>) pair.
-    let is_data_packet = slot.body_start == 0
+    let is_data_packet = view.body_start == 0
         && subpacket_entries_local.len() == 1
         && subpacket_entries_local[0].offset == 0;
 
@@ -1633,6 +1617,52 @@ fn slot_owns(rel: RelPtr) -> RelPtr {
     rel
 }
 
+#[cfg(test)]
+static RELEASE_GAP_HOOK: Mutex<Option<fn(&RegistrySlot)>> = Mutex::new(None);
+#[cfg(test)]
+static READ_GAP_HOOK: Mutex<Option<fn(&RegistrySlot)>> = Mutex::new(None);
+
+// SLOT-8: the fields read since the first load are ordered before this one.
+fn generation_after_read(slot: &RegistrySlot) -> u64 {
+    std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+    slot.generation.load(std::sync::atomic::Ordering::Acquire)
+}
+
+// SLOT-8: `copy` only copies; its result is used only once the slot is
+// known to have held `claim` throughout. `None` means the handle is stale.
+fn versioned_read<T>(
+    slot: &RegistrySlot,
+    claim: u64,
+    copy: impl FnOnce(&RegistrySlot) -> Result<T, MorlocError>,
+) -> Result<Option<T>, MorlocError> {
+    let before = slot.generation.load(std::sync::atomic::Ordering::Acquire) & GENERATION_MASK;
+    if before != claim {
+        return Ok(None);
+    }
+    let copied = copy(slot);
+    #[cfg(test)]
+    {
+        let hook = *READ_GAP_HOOK.lock().unwrap();
+        if let Some(hook) = hook {
+            hook(slot);
+        }
+    }
+    if generation_after_read(slot) & GENERATION_MASK != before {
+        return Ok(None);
+    }
+    copied.map(Some)
+}
+
+// SLOT-8: bounds-checked against the volume, so a torn pointer and
+// length pair is an error rather than a read past the mapping.
+fn copy_slot_bytes(rel: RelPtr, len: usize) -> Result<Vec<u8>, MorlocError> {
+    if rel == shm_types_crate::RELNULL || len == 0 {
+        return Ok(Vec::new());
+    }
+    let abs = crate::shm::rel2abs_extent(rel, len)?;
+    Ok(unsafe { std::slice::from_raw_parts(abs, len) }.to_vec())
+}
+
 fn release_slot_locked(slot: &RegistrySlot) {
     use std::sync::atomic::Ordering;
 
@@ -1648,6 +1678,11 @@ fn release_slot_locked(slot: &RegistrySlot) {
         }
     }
 
+    // SLOT-8: the generation moves before any field or block changes.
+    let bump = registry_gen_salt() | 1;
+    slot.generation.fetch_add(bump, Ordering::AcqRel);
+    std::sync::atomic::fence(Ordering::Release);
+
     // Free path / schema / subpacket_entries / write_buffer SHM blocks.
     // Best-effort: a leaked block here is bounded by the registry's
     // lifetime (cleaned at nexus shclose), and erroring would obscure
@@ -1657,22 +1692,14 @@ fn release_slot_locked(slot: &RegistrySlot) {
         free_slot_blocks(slot);
     }
 
-    // Zero out the RelPtr fields so a future allocator sees a clean
-    // slot. The `state` and `generation` writes below close the
-    // publication window.
-    //
-    // SAFETY: we hold the slot lock AND `state` is about to become
-    // FREE (so no other thread is reading via the versioned-pointer
-    // pattern -- they'd fail the state check). The plain stores are
-    // visible to future allocators by happens-before via the Release
-    // store of `state` below.
     clear_slot_fields(slot);
-
-    // Bump generation by the salted random increment. Use fetch_add
-    // so concurrent attaches that snapshot the old generation still
-    // detect the change.
-    let bump = registry_gen_salt() | 1;
-    slot.generation.fetch_add(bump, Ordering::AcqRel);
+    #[cfg(test)]
+    {
+        let hook = *RELEASE_GAP_HOOK.lock().unwrap();
+        if let Some(hook) = hook {
+            hook(slot);
+        }
+    }
 
     // Reset call_id to the no-sweep sentinel (which is also the
     // logical "free slot" value -- the sweeper skips it anyway).
@@ -2214,7 +2241,7 @@ fn ending_stream_of(dev: u64, ino: u64) -> Option<(usize, u64, u32, u64)> {
         let gen_before = slot.generation.load(Ordering::Acquire);
         let seen = (slot.file_dev, slot.file_ino, slot.ended_gen.load(Ordering::Acquire),
                     slot.opener_pid, slot.opener_pid_start_time);
-        if slot.generation.load(Ordering::Acquire) != gen_before
+        if generation_after_read(slot) != gen_before
             || slot.state.load(Ordering::Acquire) != SLOT_STATE_ENDING
         {
             continue;
@@ -2876,22 +2903,15 @@ fn stdio_kind_name(k: u8) -> &'static str {
 /// opener. Callers on the pool side that need the fork-boundary gate
 /// must additionally call `verify_stdio_opener_pid`.
 pub fn shared_handle_stdio_kind(handle: i64) -> Result<Option<u8>, MorlocError> {
-    use std::sync::atomic::Ordering;
     let (gen_claim, slot_idx) = unpack_handle(handle);
     let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
         "shared_handle_stdio_kind: slot index {} out of range", slot_idx,
     )))?;
-    let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-    if gen_now != gen_claim {
-        return Err(MorlocError::Other(format!(
-            "shared_handle_stdio_kind: generation mismatch (claim {}, slot {})",
-            gen_claim, gen_now,
-        )));
-    }
-    if slot.is_stdio == 0 {
-        return Ok(None);
-    }
-    Ok(Some(slot.stdio_kind))
+    let (is_stdio, kind) = versioned_read(slot, gen_claim, |s| Ok((s.is_stdio, s.stdio_kind)))?
+        .ok_or_else(|| MorlocError::Other(format!(
+            "shared_handle_stdio_kind: handle {:#x} names a closed stream", handle,
+        )))?;
+    Ok((is_stdio != 0).then_some(kind))
 }
 
 /// Enforce the pool-side fork-boundary invariant: the caller's PID
@@ -5475,35 +5495,24 @@ fn collect_istream_into_array(handle: i64, path: &str) -> Result<AbsPtr, MorlocE
 /// and IStream (count comes from whichever footer was present).
 pub fn shared_handle_length(handle: i64) -> Result<u64, MorlocError> {
     use std::sync::atomic::Ordering;
-
     let (gen_claim, slot_idx) = unpack_handle(handle);
     let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
         "shared_handle_length: slot index {} out of range", slot_idx,
     )))?;
-    let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-    if gen_before != gen_claim {
-        return Err(MorlocError::Other(format!(
-            "shared_handle_length: generation mismatch (claim {}, slot {})",
-            gen_claim, gen_before,
-        )));
+    let (state, kind, count) = versioned_read(slot, gen_claim, |s| {
+        Ok((s.state.load(Ordering::Acquire), s.kind, s.element_count))
+    })?
+    .ok_or_else(|| MorlocError::Other(format!(
+        "shared_handle_length: handle {:#x} names a closed stream", handle,
+    )))?;
+    if state != SLOT_STATE_OPEN_SHARED {
+        return Err(MorlocError::Other("shared_handle_length: slot is not OPEN".into()));
     }
-    if slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
-        return Err(MorlocError::Other(
-            "shared_handle_length: slot is not OPEN".into(),
-        ));
-    }
-    if slot.kind != MLC_KIND_IFILE && slot.kind != MLC_KIND_ISTREAM {
+    if kind != MLC_KIND_IFILE && kind != MLC_KIND_ISTREAM {
         return Err(MorlocError::Other(format!(
             "@flen is only defined on IFile / IStream handles (got kind = {})",
-            handle_kind_name(slot.kind),
+            handle_kind_name(kind),
         )));
-    }
-    let count = slot.element_count;
-    let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-    if gen_after != gen_before {
-        return Err(MorlocError::Other(
-            "shared_handle_length: slot was closed mid-read; retry".into(),
-        ));
     }
     Ok(count)
 }
@@ -5618,26 +5627,13 @@ pub fn shared_stream_layout(handle: i64) -> Result<Vec<(u64, u64, u64)>, MorlocE
 /// cross-pool wire codec to know which `open_dispatch` arm to call on
 /// the receiving side.
 pub fn shared_handle_kind(handle: i64) -> Result<u8, MorlocError> {
-    use std::sync::atomic::Ordering;
     let (gen_claim, slot_idx) = unpack_handle(handle);
     let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
         "shared_handle_kind: slot index {} out of range", slot_idx,
     )))?;
-    let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-    if gen_before != gen_claim {
-        return Err(MorlocError::Other(format!(
-            "shared_handle_kind: generation mismatch (claim {}, slot {})",
-            gen_claim, gen_before,
-        )));
-    }
-    let kind = slot.kind;
-    let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-    if gen_after != gen_before {
-        return Err(MorlocError::Other(
-            "shared_handle_kind: slot was closed mid-read; retry".into(),
-        ));
-    }
-    Ok(kind)
+    versioned_read(slot, gen_claim, |s| Ok(s.kind))?.ok_or_else(|| MorlocError::Other(format!(
+        "shared_handle_kind: handle {:#x} names a closed stream", handle,
+    )))
 }
 
 /// Versioned-pointer read of the file path bound to an open handle.
@@ -5649,96 +5645,42 @@ pub fn shared_handle_path(handle: i64) -> Result<String, MorlocError> {
     let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
         "shared_handle_path: slot index {} out of range", slot_idx,
     )))?;
-    loop {
-        let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-        if gen_before != gen_claim {
-            return Err(MorlocError::Other(format!(
-                "shared_handle_path: generation mismatch (claim {}, slot {})",
-                gen_claim, gen_before,
-            )));
-        }
-        if slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
-            return Err(MorlocError::Other(
-                "shared_handle_path: slot is not OPEN".into(),
-            ));
-        }
-        if slot.kind == MLC_KIND_CHANNEL {
-            return Err(MorlocError::Other(CHANNEL_HAS_NO_PATH.into()));
-        }
-        let path_rel = slot.file_path;
-        let path_len = slot.file_path_len as usize;
-        if path_rel == shm_types_crate::RELNULL || path_len == 0 {
-            return Err(MorlocError::Other(
-                "shared_handle_path: slot has empty file_path".into(),
-            ));
-        }
-        let path_abs = crate::shm::rel2abs(path_rel)?;
-        // Snapshot bytes into an owned String, then re-verify
-        // generation. If a close raced, retry.
-        let path_bytes = unsafe {
-            std::slice::from_raw_parts(path_abs, path_len)
-        };
-        let path_string = match std::str::from_utf8(path_bytes) {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                // Could be a torn read; check generation before
-                // surfacing the UTF-8 error.
-                let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-                if gen_after != gen_before {
-                    continue;  // retry
-                }
-                return Err(MorlocError::Other(
-                    "shared_handle_path: file_path is not valid UTF-8".into(),
-                ));
-            }
-        };
-        let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-        if gen_after == gen_before {
-            return Ok(path_string);
-        }
-        // Raced; retry from the top.
+    let (state, kind, path) = versioned_read(slot, gen_claim, |s| {
+        Ok((s.state.load(Ordering::Acquire), s.kind, copy_slot_bytes(s.file_path, s.file_path_len as usize)?))
+    })?
+    .ok_or_else(|| MorlocError::Other(format!(
+        "shared_handle_path: handle {:#x} names a closed stream", handle,
+    )))?;
+    if state != SLOT_STATE_OPEN_SHARED {
+        return Err(MorlocError::Other("shared_handle_path: slot is not OPEN".into()));
     }
+    if kind == MLC_KIND_CHANNEL {
+        return Err(MorlocError::Other(CHANNEL_HAS_NO_PATH.into()));
+    }
+    if path.is_empty() {
+        return Err(MorlocError::Other("shared_handle_path: slot has empty file_path".into()));
+    }
+    String::from_utf8(path)
+        .map_err(|_| MorlocError::Other("shared_handle_path: file_path is not valid UTF-8".into()))
 }
 
 /// Snapshot the slot's `schema_str` UTF-8 string. Same versioned-
 /// pointer discipline as `shared_handle_path`. Used by the stdio
 /// server bridge to build the STREAM_PACKET header on first write.
 pub fn shared_handle_schema_str(handle: i64) -> Result<String, MorlocError> {
-    use std::sync::atomic::Ordering;
     let (gen_claim, slot_idx) = unpack_handle(handle);
     let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
         "shared_handle_schema_str: slot index {} out of range", slot_idx,
     )))?;
-    loop {
-        let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-        if gen_before != gen_claim {
-            return Err(MorlocError::Other(format!(
-                "shared_handle_schema_str: generation mismatch (claim {}, slot {})",
-                gen_claim, gen_before,
-            )));
-        }
-        let s_rel = slot.schema_str;
-        let s_len = slot.schema_str_len as usize;
-        if s_rel == shm_types_crate::RELNULL || s_len == 0 {
-            return Err(MorlocError::Other(
-                "shared_handle_schema_str: slot has empty schema_str".into(),
-            ));
-        }
-        let s_abs = crate::shm::rel2abs(s_rel)?;
-        let bytes = unsafe { std::slice::from_raw_parts(s_abs, s_len) };
-        let s = match std::str::from_utf8(bytes) {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-                if gen_after != gen_before { continue; }
-                return Err(MorlocError::Other(
-                    "shared_handle_schema_str: schema_str is not valid UTF-8".into(),
-                ));
-            }
-        };
-        let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-        if gen_after == gen_before { return Ok(s); }
+    let bytes = versioned_read(slot, gen_claim, |s| copy_slot_bytes(s.schema_str, s.schema_str_len as usize))?
+        .ok_or_else(|| MorlocError::Other(format!(
+            "shared_handle_schema_str: handle {:#x} names a closed stream", handle,
+        )))?;
+    if bytes.is_empty() {
+        return Err(MorlocError::Other("shared_handle_schema_str: slot has empty schema_str".into()));
     }
+    String::from_utf8(bytes)
+        .map_err(|_| MorlocError::Other("shared_handle_schema_str: schema_str is not valid UTF-8".into()))
 }
 
 /// Sentinel path for STDIN (IStream) / STDOUT (OStream). Matches the
@@ -5773,18 +5715,13 @@ pub fn shared_derive_istream(ifile_handle: i64) -> Result<i64, MorlocError> {
 
 /// The device and inode a handle's file had when it was opened.
 fn handle_file_identity(handle: i64) -> Result<(u64, u64), MorlocError> {
-    use std::sync::atomic::Ordering;
     let (gen_claim, slot_idx) = unpack_handle(handle);
     let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
         "stream handle {:#x}: slot index {} out of range", handle, slot_idx,
     )))?;
-    let identity = (slot.file_dev, slot.file_ino);
-    if slot.generation.load(Ordering::Acquire) & GENERATION_MASK != gen_claim {
-        return Err(MorlocError::Other(format!(
-            "stream handle {:#x}: the stream was closed", handle,
-        )));
-    }
-    Ok(identity)
+    versioned_read(slot, gen_claim, |s| Ok((s.file_dev, s.file_ino)))?.ok_or_else(|| {
+        MorlocError::Other(format!("stream handle {:#x}: the stream was closed", handle))
+    })
 }
 
 /// Batched suballoc-size lookup over a slice of shared-registry handles.
@@ -6372,7 +6309,7 @@ fn sweep_per_pid(pid: u32, start_time: u64) {
         let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
         let read_pid = slot.opener_pid;
         let read_start = slot.opener_pid_start_time;
-        let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+        let gen_after = generation_after_read(slot) & GENERATION_MASK;
         if gen_before != gen_after {
             continue;  // raced; next sweep iteration may catch it
         }
@@ -10716,6 +10653,69 @@ mod tests {
             claimed
         });
         assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid waited on its ancestor's thread");
+    }
+
+    static GAP_SLOT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static AT_GAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static RESUME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    fn pause_at_gap(slot: &RegistrySlot) {
+        use std::sync::atomic::Ordering;
+        if slot as *const RegistrySlot as usize != GAP_SLOT.load(Ordering::SeqCst) {
+            return;
+        }
+        AT_GAP.store(true, Ordering::SeqCst);
+        while !RESUME.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+    }
+
+    fn arm_gap(h: i64) {
+        use std::sync::atomic::Ordering;
+        GAP_SLOT.store(slot_ref(unpack_handle(h).1).unwrap() as *const RegistrySlot as usize, Ordering::SeqCst);
+        AT_GAP.store(false, Ordering::SeqCst);
+        RESUME.store(false, Ordering::SeqCst);
+    }
+
+    fn wait_at_gap() {
+        while !AT_GAP.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn a_read_during_a_release_never_accepts_the_cleared_slot() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("release_gap");
+        let p = dir.join("r.idx").to_str().unwrap().to_string();
+        let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
+        let before = shared_handle_kind(h).unwrap();
+        arm_gap(h);
+        *RELEASE_GAP_HOOK.lock().unwrap() = Some(pause_at_gap);
+        let closer = std::thread::spawn(move || shared_close_handle(h));
+        wait_at_gap();
+        let during = shared_handle_kind(h);
+        RESUME.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = closer.join().unwrap();
+        *RELEASE_GAP_HOOK.lock().unwrap() = None;
+        assert!(during.is_err(), "a read during the release accepted {during:?} (the slot held {before} before)");
+    }
+
+    #[test]
+    fn a_read_overlapping_a_release_reports_the_handle_stale() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("read_gap");
+        let p = dir.join("r.idx").to_str().unwrap().to_string();
+        let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
+        arm_gap(h);
+        *READ_GAP_HOOK.lock().unwrap() = Some(pause_at_gap);
+        let reader = std::thread::spawn(move || shared_handle_kind(h));
+        wait_at_gap();
+        *READ_GAP_HOOK.lock().unwrap() = None;
+        shared_close_handle(h).unwrap();
+        RESUME.store(true, std::sync::atomic::Ordering::SeqCst);
+        let read = reader.join().unwrap();
+        assert!(read.is_err(), "a read that overlapped a release accepted {read:?}");
     }
 
     #[test]

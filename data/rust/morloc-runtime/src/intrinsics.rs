@@ -2244,6 +2244,7 @@ mod tests {
 
     #[test]
     fn a_forked_child_leaves_its_parents_temp_files() {
+        let _shm = crate::init_test_shm();
         let (id, prev) = begin_dispatch();
         let path = unsafe { tmpfile() };
         let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
@@ -2259,6 +2260,7 @@ mod tests {
 
     #[test]
     fn a_dispatch_in_a_forked_child_keeps_the_temps_of_the_dispatch_it_forked_inside() {
+        let _shm = crate::init_test_shm();
         let (id, prev) = begin_dispatch();
         let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
             let path = std::thread::spawn(|| unsafe { tmpfile() }).join().unwrap();

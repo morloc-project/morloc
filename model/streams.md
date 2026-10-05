@@ -48,7 +48,24 @@ the nexus, and the release pass waits on other processes' slot locks with
 no deadline.
 
 ### SLOT-8 A versioned read is a correct seqlock
-Status: deviation
+Status: implemented
+Checked by: a_read_during_a_release_never_accepts_the_cleared_slot, a_read_overlapping_a_release_reports_the_handle_stale, every_versioned_read_rechecks_through_the_fence, tla:SlotSeqlock, tla:SlotSeqlock_clear_first.bug, tla:SlotSeqlock_no_fence.bug, tla:SlotSeqlock_no_writer_fence.bug
 
-Plain fields are read while another process may write them, with no fence
-before the second generation load; sound on x86, not guaranteed on ARM.
+A reader holding a handle loads the slot's generation, copies the fields
+it needs, then loads the generation again, and uses the copy only if both
+loads match its handle (a field that changes while the slot is open, such
+as the element count, is then merely a recent value); nothing it copied is parsed,
+opened or followed before that. A pointer and its length are copied
+together through a bounds check, so a torn pair is an error rather than a
+read past the mapping. An open OStream's entry array and compression level
+change under the slot lock and are never read this way. A reader with no
+handle (a scan for an ending or orphaned slot) checks again under the
+lock. An acquire load does not keep earlier reads
+before it, so the second load follows an acquire fence; on a weakly ordered
+processor the reads could otherwise complete after it. A writer moves the
+generation before it changes any field or frees any block: releasing a slot
+bumps the generation first and fences, so its clearing stores cannot be
+seen ahead of the bump, and a reader that overlaps the release fails its
+second load instead of accepting cleared fields. Opening publishes fields
+then the new generation. Model: `tla/SlotSeqlock.tla`.
+
