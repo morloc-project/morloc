@@ -190,11 +190,14 @@ fn reclaim_temp_dirs() {
     }
     let Ok(entries) = std::fs::read_dir(crate::intrinsics::temp_root()) else { return };
     let own = morloc_runtime_types::process::token();
+    let ns = crate::intrinsics::pid_namespace_tag();
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(hex) = name.to_str().and_then(|n| n.strip_prefix("tmp-")) else { continue };
+        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix("tmp-")) else { continue };
+        let Some((hex, tag)) = rest.split_once('-') else { continue };
         let Ok(token) = u64::from_str_radix(hex, 16) else { continue };
-        if hex.len() == 16 && token != own && !morloc_runtime_types::process::token_alive(token) {
+        // FORK-16: a process of another pid namespace looks gone from here.
+        if hex.len() == 16 && tag == ns && token != own && !morloc_runtime_types::process::token_alive(token) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }

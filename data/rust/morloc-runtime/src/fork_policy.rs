@@ -439,6 +439,13 @@ pub unsafe extern "C" fn morloc_fork_worker(threads_at_fork: *mut libc::c_long, 
 
 const FORK_REFUSED_EXIT: libc::c_int = 70;
 
+// Written directly: a forked test process's captured output dies with it.
+#[cfg(test)]
+fn report_status(what: &str, status: i32) {
+    let line = format!("{what} ended with status {status}\n");
+    unsafe { libc::write(2, line.as_ptr() as *const libc::c_void, line.len()) };
+}
+
 #[cfg(test)]
 pub(crate) fn exits_cleanly_in_a_forked_child(work: impl FnOnce() -> bool) -> bool {
     let pid = unsafe { libc::fork() };
@@ -475,7 +482,19 @@ extern "C" fn exit_on_alarm(_: libc::c_int) {
 fn run_in_child(seconds: u32, work: impl FnOnce() -> bool) -> ! {
     unsafe { libc::signal(libc::SIGALRM, exit_on_alarm as libc::sighandler_t) };
     unsafe { libc::alarm(seconds) };
-    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or(false);
+    let ok = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(ok) => ok,
+        Err(panic) => {
+            let what = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("a panic");
+            let line = format!("a forked test process panicked: {what}\n");
+            unsafe { libc::write(2, line.as_ptr() as *const libc::c_void, line.len()) };
+            false
+        }
+    };
     unsafe { libc::_exit(if ok { 0 } else { 1 }) }
 }
 
@@ -498,7 +517,13 @@ pub(crate) fn as_pid_one(body: impl FnOnce() -> bool) -> Option<bool> {
         }
         let one = unsafe { libc::fork() };
         if one == 0 {
-            run_in_child(10, || std::process::id() == 1 && body());
+            run_in_child(10, || {
+                let one = std::process::id() == 1;
+                if !one {
+                    report_status("a process meant to be pid one is not; its pid", std::process::id() as i32);
+                }
+                one && body()
+            });
         }
         unsafe { libc::_exit(wait_status(one)) };
     }
@@ -507,7 +532,12 @@ pub(crate) fn as_pid_one(body: impl FnOnce() -> bool) -> Option<bool> {
             eprintln!("skipped: unprivileged user and pid namespaces are unavailable");
             None
         }
-        code => Some(code == 0),
+        code => {
+            if code != 0 {
+                report_status("the pid-one process", code);
+            }
+            Some(code == 0)
+        }
     }
 }
 
@@ -527,7 +557,13 @@ pub(crate) fn in_a_descendant_with_the_same_pid(work: impl FnOnce() -> bool) -> 
         }
         unsafe { libc::_exit(wait_status(descendant)) };
     }
-    wait_status(child) == 0
+    // 78: no new pid namespace; 1: the work returned false; 114: timed out;
+    // over 100: killed by signal (status - 100).
+    let status = wait_status(child);
+    if status != 0 {
+        report_status("the same-pid descendant", status);
+    }
+    status == 0
 }
 
 #[cfg(test)]

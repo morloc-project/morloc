@@ -433,10 +433,22 @@ pub(crate) fn temp_root() -> std::path::PathBuf {
         .clone()
 }
 
-// FORK-16: each process's temps in a directory named by its token, removed
-// once that process is gone.
+// FORK-16: each process's temps in a directory named by its token and pid
+// namespace, removed once that process is gone.
 pub(crate) fn process_temp_dir() -> std::path::PathBuf {
-    temp_root().join(format!("tmp-{:016x}", morloc_runtime_types::process::token()))
+    temp_root().join(format!(
+        "tmp-{:016x}-{}",
+        morloc_runtime_types::process::token(),
+        pid_namespace_tag()
+    ))
+}
+
+// FORK-16: a pid is judged only in the namespace it was recorded in.
+pub(crate) fn pid_namespace_tag() -> String {
+    morloc_runtime_types::process::pid_namespace()
+        .map(|ns| ns.chars().filter(|c| c.is_ascii_digit()).collect::<String>())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "host".to_string())
 }
 
 /// Remove this process's temp directory, as a worker does when it retires.
@@ -2440,6 +2452,23 @@ mod tests {
         crate::lease::reclaim();
         assert!(kept_while_alive, "the temp directory of a live process was removed");
         assert!(!dir.exists(), "the temp directory of a process that is gone was kept");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_in_another_pid_namespace_leaves_live_temp_directories_alone() {
+        let _shm = crate::init_test_shm();
+        let path = unsafe { tmpfile() };
+        let dir = std::path::Path::new(&path).parent().unwrap().to_path_buf();
+        let ran = crate::fork_policy::as_pid_one(|| {
+            crate::lease::reclaim();
+            true
+        });
+        let kept = dir.exists();
+        let _ = std::fs::remove_file(&path);
+        if ran.is_some() {
+            assert!(kept, "a process in another pid namespace removed a live process's temp directory");
+        }
     }
 
     #[test]

@@ -185,7 +185,7 @@ its lease until that process is gone. Models: `tla/ViewFork.tla`,
 
 ### FORK-16 No temp file outlives what made it, and none goes early
 Status: implemented
-Checked by: a_child_forked_by_a_dispatch_helper_thread_keeps_its_temps, a_helper_temp_goes_once_the_dispatches_running_at_its_making_end, the_temp_directory_of_a_process_that_is_gone_is_removed, a_dispatch_in_a_forked_child_keeps_the_temps_of_the_dispatch_it_forked_inside, tla:TempEpoch, tla:TempEpoch_child, tla:TempEpoch_zero_rule.bug, tla:TempEpoch_no_phantom.bug
+Checked by: a_child_forked_by_a_dispatch_helper_thread_keeps_its_temps, a_helper_temp_goes_once_the_dispatches_running_at_its_making_end, the_temp_directory_of_a_process_that_is_gone_is_removed, a_process_in_another_pid_namespace_leaves_live_temp_directories_alone, a_dispatch_in_a_forked_child_keeps_the_temps_of_the_dispatch_it_forked_inside, tla:TempEpoch, tla:TempEpoch_child, tla:TempEpoch_zero_rule.bug, tla:TempEpoch_no_phantom.bug
 
 A dispatch removes the temp files it made when it ends. A temp file or
 fold cell made on a thread no dispatch owns (a helper thread user code
@@ -203,12 +203,13 @@ helper temp made while it runs, and a forked child's helper temps stay until
 it exits; both are what the rule asks.
 
 Every process keeps its temp files in its own directory, named by its
-process token, under its run's temp root, which every process derives from
+process token and pid namespace, under its run's temp root, which every process derives from
 its run directory: the run directory's `temps`, or `morloc-temps-<run>`
 under `--tmpdir`, which the nexus records in the run directory before it
 exists. A process that has forked or made leases removes, at its dispatch
-ends and before giving up on an allocation, the directories whose token
-names a process that is gone; the nexus does so in recovery; a retiring
+ends and before giving up on an allocation, the directories of its own
+pid namespace whose token names a process that is gone (a process of
+another namespace looks gone from here); the nexus does so in recovery; a retiring
 worker removes its own. The temp root goes when the run ends, and a later
 run's startup sweep removes a dead run's directory and the temp root it
 recorded. A process outside any run keeps its temps in a private directory

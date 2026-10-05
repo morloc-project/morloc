@@ -1891,7 +1891,7 @@ mod tests {
 
     #[test]
     fn ffi_round_trip() {
-        with_shm(|| {
+        alone_with_shm(|| {
             let batch = fixture();
             let (mut a, s) = arrow_array::ffi::to_ffi(&StructArray::from(batch.clone()).into_data()).unwrap();
             let adopted = unsafe { ffi_to_batch(&mut a as *mut _, &s as *const _) }.unwrap();
@@ -1954,6 +1954,15 @@ mod tests {
 
     // FORK-15: run alone in a forked process, so no other test forks while
     // the view is recorded and leases its block to a child of its own.
+    // FORK-15: a test that counts a view's references, run where no other
+    // test can fork and lease them.
+    fn alone_with_shm(work: impl FnOnce()) {
+        alone(|| {
+            work();
+            true
+        });
+    }
+
     fn alone(work: impl FnOnce() -> bool) {
         let _shm = crate::own_test_registry();
         assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(work));
@@ -2065,7 +2074,7 @@ mod tests {
 
     #[test]
     fn an_acquiring_view_holds_one_reference_until_both_roots_release() {
-        with_shm(|| {
+        alone_with_shm(|| {
             for array_first in [false, true] {
                 let rel = write_batch(&fixture(), None).unwrap();
                 let base = shm::rel2abs(rel).unwrap();
@@ -2085,7 +2094,7 @@ mod tests {
 
     #[test]
     fn a_view_released_on_another_thread_gives_its_reference_back() {
-        with_shm(|| {
+        alone_with_shm(|| {
             let rel = write_batch(&fixture(), None).unwrap();
             let base = shm::rel2abs(rel).unwrap();
             let mut s = FFI_ArrowSchema::empty();
@@ -2109,7 +2118,7 @@ mod tests {
 
     #[test]
     fn an_adopting_view_frees_the_block_it_was_given() {
-        with_shm(|| {
+        alone_with_shm(|| {
             let rel = write_batch(&fixture(), None).unwrap();
             let base = shm::rel2abs(rel).unwrap();
             let mut s = FFI_ArrowSchema::empty();
@@ -2125,7 +2134,7 @@ mod tests {
 
     #[test]
     fn a_third_root_release_is_a_no_op() {
-        with_shm(|| {
+        alone_with_shm(|| {
             let rel = write_batch(&fixture(), None).unwrap();
             let base = shm::rel2abs(rel).unwrap();
             let mut s = FFI_ArrowSchema::empty();
@@ -2144,7 +2153,7 @@ mod tests {
 
     #[test]
     fn a_borrow_candidate_lives_exactly_as_long_as_its_view() {
-        with_shm(|| {
+        alone_with_shm(|| {
             let rel = write_batch(&fixture(), None).unwrap();
             let base = shm::rel2abs(rel).unwrap();
             let mut s = FFI_ArrowSchema::empty();
@@ -2170,7 +2179,7 @@ mod tests {
 
     #[test]
     fn a_forked_child_cannot_release_its_parent_s_reference() {
-        with_shm(|| {
+        alone_with_shm(|| {
             let rel = write_batch(&fixture(), None).unwrap();
             let base = shm::rel2abs(rel).unwrap();
             let mut s = FFI_ArrowSchema::empty();
@@ -2191,7 +2200,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_descendant_with_its_ancestors_pid_cannot_release_the_ancestors_reference() {
-        with_shm(|| {
+        alone_with_shm(|| {
             let ran = crate::fork_policy::as_pid_one(|| {
                 let rel = write_batch(&fixture(), None).unwrap();
                 let base = shm::rel2abs(rel).unwrap();
