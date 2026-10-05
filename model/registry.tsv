@@ -55,6 +55,9 @@ morloc-runtime/crash.rs::-::LANG	startup
 morloc-runtime/crash.rs::-::FRAME_FN	startup		
 morloc-runtime/crash.rs::-::PENDING	counter		
 morloc-runtime/daemon_ffi.rs::-::SHUTDOWN_REQUESTED	counter		
+morloc-runtime/daemon_ffi.rs::-::SHUTDOWN_ESCALATED	counter		
+morloc-runtime/daemon_ffi.rs::-::POOLS_STOPPED	counter		
+morloc-runtime/daemon_ffi.rs::-::EXIT_CLAIMED	counter		
 morloc-runtime/daemon_ffi.rs::-::G_EVAL_TIMEOUT	startup		
 morloc-runtime/daemon_ffi.rs::-::G_DAEMON_OUTPUT_PACKET	startup		
 morloc-runtime/daemon_ffi.rs::-::G_DAEMON_COMPRESSION	startup		
@@ -75,6 +78,7 @@ morloc-runtime/daemon_ffi.rs::-::REAPED_SEQ	counter
 morloc-runtime/daemon_ffi.rs::-::REAPED_NEXT	counter		
 morloc-runtime/daemon_ffi.rs::-::WorkerContext.queue	exec-only		
 morloc-runtime/daemon_ffi.rs::-::WorkerContext.cond	exec-only		
+morloc-runtime/daemon_ffi.rs::-::EVAL_CHILDREN	exec-only		
 morloc-runtime/debug.rs::-::FRAMES	thread		
 morloc-runtime/debug.rs::-::DUMPED_COUNT	thread		
 morloc-runtime/debug.rs::-::MIDX_COUNTERS	thread		
@@ -202,6 +206,7 @@ morloc-nexus/main.rs::-::FRONTEND_ROUTER	exec-only
 morloc-nexus/mcp.rs::new_session_id::CTR	exec-only		
 morloc-nexus/mcp.rs::-::Frontend.locks	exec-only		
 morloc-nexus/mcp.rs::-::Frontend.sessions	exec-only		
+morloc-nexus/mcp.rs::-::FRONTEND_EVALS	exec-only		
 morloc-nexus/parse_arg.rs::-::NEXUS_READS_STDIN	exec-only		
 morloc-nexus/parse_arg.rs::-::CONTEXTS	exec-only		
 morloc-nexus/parse_arg.rs::-::STAGE_DIR	exec-only		

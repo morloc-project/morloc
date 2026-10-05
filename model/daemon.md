@@ -39,8 +39,46 @@ Status: deviation
 Process exit unmaps shared memory while detached threads may still be
 reading it.
 
-### DAEMON-6 Every wait on another process is bounded
-Status: deviation
+### DAEMON-6 Every wait on another process is bounded or ends when the peer dies
+Status: implemented
+Checked by: a_client_that_connects_and_never_sends_does_not_hold_the_reader, draining_a_writer_that_never_closes_stops_at_the_deadline, an_eval_past_its_wall_limit_is_stopped_with_everything_it_started, a_frontend_eval_past_its_wall_limit_is_stopped_with_everything_it_started, stopping_all_kills_registered_groups_and_every_group_added_later, a_killed_group_is_never_signalled_again, an_eval_leader_outlives_a_term_until_it_is_released, tla:DaemonShutdown, tla:DaemonShutdown_join_first.bug, tla:DaemonShutdown_no_kill.bug, tla:DaemonShutdown_unmap_on_give_up.bug, tla:DaemonShutdown_recovery_unmaps.bug, tla:DaemonShutdown_children_survive.bug
 
-Calls to pools carry no deadline; a wedged pool blocks its caller, and the
-daemon's shutdown, indefinitely.
+A call into a pool has no deadline: a program may run for days, and nothing
+tells the caller how long a call should take. Such a wait ends when the
+peer dies (end of file, the lifeline, an owner-dead lock, a liveness check)
+and otherwise lasts as long as the work. A wait that is never legitimately
+long is bounded: a request is read within a stall limit after its
+connection is accepted; a readiness ping waits a few seconds per attempt,
+and its retries end when shutdown is requested.
+
+A forked `morloc eval` runs in its own process group, limited in CPU time
+and in wall time; the wall limit stops the whole group. The group is
+registered in a table of child groups while it runs, and its leader (a
+shell that runs `morloc`, then ignores SIGTERM and waits on a pin the
+daemon closes after unregistering it) stays unreaped until it is
+unregistered, so the group id is never reused while anything may signal it; every signal goes through the table, none follows a
+SIGKILL, and a thread signalling a group blocks signals meanwhile so a
+signal handler that stops the table never waits on it. Stopping the pools
+also stops every registered group and every group registered later, so no
+eval outlives the daemon or the front-end. The pools of a program an eval
+runs live in their own groups and end with that program's nexus, by the
+lifeline.
+
+Shutdown closes the listeners, refuses queued requests and every request
+not yet admitted, waits a grace period for running ones, then stops the
+pools and child groups so a worker inside a call to a wedged pool returns,
+and waits again. If every worker returned, the daemon unmaps shared memory
+and exits. Otherwise a worker may still be inside a wait that stopping the
+pools does not end (a slow client, an evaluation in the daemon itself), so
+the daemon unlinks shared memory without unmapping it, frees nothing, and
+ends the process without running exit handlers. A pool crash recovery
+whose wait for running requests runs out exits the same way. A watchdog
+started with the shutdown ends the process with only async-signal-safe
+steps (kill pools and child groups, unlink shared memory and registered
+paths) if the shutdown has not finished in time, for instance because a
+worker holds a stdio lock the teardown needs; a second shutdown signal
+fires it at once. The watchdog and the normal exit each claim the exit
+first, and only the one that claims it ends the process. Requests refused, and requests that fail once the pools
+are stopped, are answered as unavailable (HTTP 503). Daemon test
+`shutdown-wedged`. Model: `tla/DaemonShutdown.tla`.
+

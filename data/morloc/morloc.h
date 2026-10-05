@@ -1015,6 +1015,10 @@ typedef struct daemon_config_s {
     bool output_packet;
     // zstd preset (0..=9) for `output_packet` results; 0 = no compression.
     unsigned char compression_level;
+    // Stops every pool; called when requests outlast the shutdown grace.
+    void (*stop_pools_fn)(void);
+    // Ends the process at once, from any thread, whatever locks are held.
+    void (*emergency_exit_fn)(int);
 } daemon_config_t;
 
 typedef enum {
@@ -1504,7 +1508,9 @@ int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRM
 int wait_for_client(language_daemon_t* daemon, ERRMSG);
 
 // Daemon event loop and dispatch.
-void daemon_run(daemon_config_t* config, manifest_t* manifest,
+// False when a request was still running at exit: the caller must then
+// exit without unmapping shared memory or freeing what the request uses.
+bool daemon_run(daemon_config_t* config, manifest_t* manifest,
                 morloc_socket_t* sockets, size_t n_pools,
                 const char* shm_basename);
 daemon_response_t* daemon_dispatch(manifest_t* manifest,

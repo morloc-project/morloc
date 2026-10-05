@@ -1463,6 +1463,135 @@ if should_run "shutdown"; then
 fi
 
 # ======================================================================
+# Shutdown while a pool call never returns
+# ======================================================================
+
+if should_run "shutdown-wedged"; then
+    echo "${BOLD}[shutdown-wedged] SIGTERM with calls inside a wedged pool${RESET}"
+
+    WEDGE_DIR=$(mktemp -d)
+    WORK_DIRS+=("$WEDGE_DIR")
+    compile_program "wedge.loc" "$WEDGE_DIR"
+
+    # One pool gives five workers. Five calls occupy them; a sixth waits in
+    # the queue and must be refused at shutdown, never started.
+    HTTP_PORT=$(pick_port)
+    start_daemon "$WEDGE_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+    local_pid=$LAST_DAEMON_PID
+    CALL_PIDS=()
+    for _ in 1 2 3 4 5 6; do
+        curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/hang" -d '[1]' > /dev/null 2>&1 &
+        CALL_PIDS+=($!)
+    done
+    sleep 2
+    python3 "$SHM_PROBE" names "$local_pid" > "$WEDGE_DIR/shm-names"
+
+    t0=$SECONDS
+    kill "$local_pid" 2>/dev/null
+    exited=no
+    for _ in $(seq 1 200); do
+        if ! kill -0 "$local_pid" 2>/dev/null; then exited=yes; break; fi
+        sleep 0.1
+    done
+    assert_test "daemon exits within 20 s of SIGTERM" "yes" "$exited"
+    if [ "$exited" = no ]; then kill -9 "$local_pid" 2>/dev/null || true; fi
+    status=0
+    wait "$local_pid" 2>/dev/null || status=$?
+    assert_test "daemon exits with status 0" "0" "$status"
+    stopped_in=$((SECONDS - t0))
+    assert_test "every worker returned, none was left behind" "0" \
+        "$(grep -c 'did not return' "$LAST_DAEMON_LOG" || true)"
+    assert_test "daemon stopped within 10 s" "yes" "$([ "$stopped_in" -le 10 ] && echo yes || echo no)"
+    assert_test "no shared memory outlives the daemon" "0" \
+        "$(python3 "$SHM_PROBE" live "$WEDGE_DIR/shm-names")"
+    new_pids=()
+    for p in ${DAEMON_PIDS[@]+"${DAEMON_PIDS[@]}"}; do
+        [[ "$p" != "$local_pid" ]] && new_pids+=("$p")
+    done
+    DAEMON_PIDS=("${new_pids[@]+"${new_pids[@]}"}")
+    for p in "${CALL_PIDS[@]}"; do kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done
+
+    leftover=$( (pgrep -f "$WEDGE_DIR" 2>/dev/null || true) | wc -l | tr -d ' ')
+    assert_test "no pool process outlives the daemon" "0" "$leftover"
+    pkill -9 -f "$WEDGE_DIR" 2>/dev/null || true
+
+    # A client that sends half a request holds its worker past the shutdown
+    # waits; the daemon exits without it, cleanly.
+    HTTP_PORT=$(pick_port)
+    start_daemon "$WEDGE_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+    local_pid=$LAST_DAEMON_PID
+    exec 7<>"/dev/tcp/127.0.0.1/${HTTP_PORT}"
+    printf 'POST /call/hang HTTP/1.1\r\nHost: x\r\n' >&7
+    sleep 1
+    python3 "$SHM_PROBE" names "$local_pid" > "$WEDGE_DIR/shm-names"
+    kill "$local_pid" 2>/dev/null
+    exited=no
+    for _ in $(seq 1 200); do
+        if ! kill -0 "$local_pid" 2>/dev/null; then exited=yes; break; fi
+        sleep 0.1
+    done
+    assert_test "daemon with a stalled client exits within 20 s" "yes" "$exited"
+    if [ "$exited" = no ]; then kill -9 "$local_pid" 2>/dev/null || true; fi
+    status=0
+    wait "$local_pid" 2>/dev/null || status=$?
+    exec 7>&-
+    assert_test "daemon with a stalled client exits with status 0" "0" "$status"
+    assert_test "the stalled client's worker was left behind" "1" \
+        "$(grep -c 'did not return' "$LAST_DAEMON_LOG" || true)"
+    assert_test "daemon with a stalled client leaves no shared memory" "0" \
+        "$(python3 "$SHM_PROBE" live "$WEDGE_DIR/shm-names")"
+    new_pids=()
+    for p in ${DAEMON_PIDS[@]+"${DAEMON_PIDS[@]}"}; do
+        [[ "$p" != "$local_pid" ]] && new_pids+=("$p")
+    done
+    DAEMON_PIDS=("${new_pids[@]+"${new_pids[@]}"}")
+    pkill -9 -f "$WEDGE_DIR" 2>/dev/null || true
+
+    # An /eval still compiling at shutdown is stopped with the daemon, not
+    # left to run out its own limits.
+    HTTP_PORT=$(pick_port)
+    start_daemon "$WEDGE_DIR" --http-port "$HTTP_PORT" --eval-timeout 120 \
+        --eval-allowed-modules root-py
+    wait_for_http "$HTTP_PORT" 10
+    local_pid=$LAST_DAEMON_PID
+    MARK=$((7000000 + RANDOM))
+    body=$(python3 -c "
+import json
+print(json.dumps({'expr': 'import root-py\n$MARK + ' + ' + '.join(['1'] * 4000)}))
+")
+    curl -s -o /dev/null --max-time 60 -X POST "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -H "Content-Type: application/json" -d "$body" > /dev/null 2>&1 &
+    EVAL_CALL=$!
+    started=no
+    for _ in $(seq 1 100); do
+        if pgrep -f "$MARK [+] 1" > /dev/null 2>&1; then started=yes; break; fi
+        sleep 0.1
+    done
+    assert_test "the eval is running before shutdown" "yes" "$started"
+    kill "$local_pid" 2>/dev/null
+    for _ in $(seq 1 200); do
+        if ! kill -0 "$local_pid" 2>/dev/null; then break; fi
+        sleep 0.1
+    done
+    kill -9 "$local_pid" 2>/dev/null || true
+    wait "$local_pid" 2>/dev/null || true
+    sleep 0.5
+    assert_test "no eval process outlives the daemon" "0" \
+        "$( (pgrep -f "$MARK [+] 1" 2>/dev/null || true) | wc -l | tr -d ' ')"
+    pkill -9 -f "$MARK [+] 1" 2>/dev/null || true
+    kill "$EVAL_CALL" 2>/dev/null || true
+    wait "$EVAL_CALL" 2>/dev/null || true
+    new_pids=()
+    for p in ${DAEMON_PIDS[@]+"${DAEMON_PIDS[@]}"}; do
+        [[ "$p" != "$local_pid" ]] && new_pids+=("$p")
+    done
+    DAEMON_PIDS=("${new_pids[@]+"${new_pids[@]}"}")
+    echo ""
+fi
+
+# ======================================================================
 # Test Group 10: Router
 # ======================================================================
 

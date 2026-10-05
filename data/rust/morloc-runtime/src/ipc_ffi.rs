@@ -599,11 +599,19 @@ pub unsafe extern "C" fn stream_from_client(
     client_fd: i32,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
-    let request = stream_from_client_wait(client_fd, 0, 0, errmsg);
+    let request = read_request_within(client_fd, REQUEST_STALL, errmsg);
     if !request.is_null() {
         REQUEST.with(|r| r.set((client_fd, crate::fork_policy::generation())));
     }
     request
+}
+
+// DAEMON-6: a request follows its connection at once; only its stalls are bounded.
+const REQUEST_STALL: std::time::Duration = std::time::Duration::from_secs(30);
+
+unsafe fn read_request_within(client_fd: i32, stall: std::time::Duration, errmsg: *mut *mut c_char) -> *mut u8 {
+    let us = stall.as_micros().min(i32::MAX as u128) as i32;
+    stream_from_client_wait(client_fd, us, us, errmsg)
 }
 
 thread_local! {
@@ -759,11 +767,12 @@ pub unsafe extern "C" fn send_and_receive_over_socket_wait(
                                 std::mem::size_of::<libc::sockaddr_un>() as u32);
         if retcode == 0 { break; }
         attempts += 1;
-        if crate::daemon_ffi::is_recovering() {
+        if crate::daemon_ffi::is_recovering() || crate::daemon_ffi::is_shutting_down() {
             close_socket(client_fd);
             set_errmsg(errmsg, &MorlocError::Ipc(format!(
-                "Failed to connect to pipe '{}': the daemon is recovering from a pool crash",
-                CStr::from_ptr(socket_path).to_string_lossy()
+                "Failed to connect to pipe '{}': the daemon is {}",
+                CStr::from_ptr(socket_path).to_string_lossy(),
+                if crate::daemon_ffi::is_recovering() { "recovering from a pool crash" } else { "shutting down" }
             )));
             return ptr::null_mut();
         }
@@ -1301,6 +1310,25 @@ mod tests {
 #[cfg(test)]
 mod dispatch_fork_tests {
     use super::*;
+
+    #[test]
+    fn a_client_that_connects_and_never_sends_does_not_hold_the_reader() {
+        let mut sv = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr()) }, 0);
+        let began = std::time::Instant::now();
+        let mut err: *mut c_char = ptr::null_mut();
+        let request = unsafe { read_request_within(sv[0], std::time::Duration::from_millis(200), &mut err) };
+        let waited = began.elapsed();
+        unsafe {
+            libc::close(sv[0]);
+            libc::close(sv[1]);
+            if !err.is_null() {
+                libc::free(err as *mut c_void);
+            }
+        }
+        assert!(request.is_null(), "a request appeared from a client that sent nothing");
+        assert!(waited < std::time::Duration::from_secs(5), "the reader waited {waited:?} for a silent client");
+    }
 
     fn drain(fd: i32) -> Vec<u8> {
         let mut out = Vec::new();

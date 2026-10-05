@@ -707,6 +707,8 @@ struct CDaemonConfig {
     eval_timeout: i32,
     output_packet: bool,
     compression_level: u8,
+    stop_pools_fn: *const std::ffi::c_void,   // Option<fn> as null
+    emergency_exit_fn: *const std::ffi::c_void,
 }
 
 /// Run the daemon event loop by calling daemon_run in libmorloc.so.
@@ -727,7 +729,7 @@ fn run_daemon(
             sockets: *mut c_void,        // *mut MorlocSocket
             n_pools: usize,
             shm_basename: *const c_char,
-        );
+        ) -> bool;
         fn parse_manifest(text: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
         fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char);
     }
@@ -792,6 +794,8 @@ fn run_daemon(
         // with the zstd preset from `-z`. HTTP results stay JSON.
         output_packet: config.output_format == dispatch::OutputFormat::Packet,
         compression_level: config.compression_level,
+        stop_pools_fn: process::stop_pools_ptr(),
+        emergency_exit_fn: process::emergency_exit_ptr(),
     };
 
     // Parse manifest via the C FFI (so daemon_run gets the C-layout manifest).
@@ -824,14 +828,18 @@ fn run_daemon(
         );
     }
 
-    unsafe {
+    let all_returned = unsafe {
         daemon_run(
             &mut daemon_config as *mut CDaemonConfig as *mut c_void,
             c_manifest,
             c_sockets.as_mut_ptr() as *mut c_void,
             n_pools,
             shm_c.as_ptr(),
-        );
+        )
+    };
+    if !all_returned {
+        // DAEMON-6: a request still running reads these and shared memory.
+        process::exit_leaving_threads(0);
     }
 }
 
@@ -897,9 +905,13 @@ fn run_router(config: &dispatch::NexusConfig) {
     // the signal as PID 1 and being SIGKILLed after the grace period (which would
     // orphan the children and leak /dev/shm/morloc-*).
     FRONTEND_ROUTER.store(router, std::sync::atomic::Ordering::Relaxed);
+    // Every signal is masked while the handler runs, so it never interrupts itself.
     unsafe {
-        libc::signal(libc::SIGTERM, frontend_shutdown_handler as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, frontend_shutdown_handler as *const () as libc::sighandler_t);
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = frontend_shutdown_handler as *const () as usize;
+        libc::sigfillset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
     }
 
     // The unified front-end owns the supervisor for the process lifetime and
@@ -922,6 +934,7 @@ extern "C" fn frontend_shutdown_handler(_sig: libc::c_int) {
         fn router_terminate_children(router: *mut std::ffi::c_void);
     }
     let r = FRONTEND_ROUTER.load(std::sync::atomic::Ordering::Relaxed);
+    crate::mcp::FRONTEND_EVALS.stop_all();
     unsafe {
         router_terminate_children(r);
         libc::_exit(0);

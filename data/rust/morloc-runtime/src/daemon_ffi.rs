@@ -21,6 +21,15 @@ const MAX_LP_MESSAGE: u32 = 64 * 1024 * 1024;
 // -- Global state -------------------------------------------------------------
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_ESCALATED: AtomicBool = AtomicBool::new(false);
+static POOLS_STOPPED: AtomicBool = AtomicBool::new(false);
+static EXIT_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+// DAEMON-6: one of the watchdog and the normal exit ends the process.
+#[no_mangle]
+pub extern "C" fn morloc_claim_exit() -> bool {
+    !EXIT_CLAIMED.swap(true, Ordering::SeqCst)
+}
 static G_EVAL_TIMEOUT: AtomicI32 = AtomicI32::new(30);
 
 // Daemon result-form policy (set in `daemon_run` from `DaemonConfig`).
@@ -233,7 +242,8 @@ impl Drop for InFlight {
 
 pub(crate) fn enter_request() -> Option<InFlight> {
     let mut n = requests_in_flight();
-    if RECOVERY_IN_PROGRESS.load(Ordering::SeqCst) {
+    // DAEMON-6
+    if RECOVERY_IN_PROGRESS.load(Ordering::SeqCst) || SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
         return None;
     }
     *n += 1;
@@ -365,6 +375,10 @@ pub struct DaemonConfig {
     pub output_packet: bool,
     /// zstd preset (0..=9) for `output_packet` results; 0 = no compression.
     pub compression_level: u8,
+    // DAEMON-6
+    pub stop_pools_fn: Option<unsafe extern "C" fn()>,
+    // DAEMON-6
+    pub emergency_exit_fn: Option<unsafe extern "C" fn(i32)>,
 }
 
 /// Error classification for a daemon dispatch failure.
@@ -541,32 +555,123 @@ unsafe fn two_pipes(a: &mut [i32; 2], b: &mut [i32; 2]) -> bool {
     true
 }
 
+// DAEMON-6: the leader stays unreaped until its pin closes, so its group id
+// stays its own while the group is signalled; it passes on its child's
+// end, by status or by signal.
+const EVAL_WRAPPER: &str = "trap : TERM
+if [ \"$1\" -gt 0 ]; then ulimit -t $(($1 + 5)) && ulimit -S -t \"$1\" || exit 126; fi
+shift
+\"$@\" 3<&- </dev/null
+s=$?
+trap '' TERM
+exec 1>&- 2>&-
+read _ <&3
+if [ \"$s\" -gt 128 ] && [ \"$s\" -le 192 ]; then ulimit -c 0; trap - TERM; kill -$((s - 128)) $$; fi
+exit \"$s\"";
+
+static EVAL_CHILDREN: morloc_runtime_types::child_group::ChildGroups =
+    morloc_runtime_types::child_group::ChildGroups::new();
+
+#[no_mangle]
+pub extern "C" fn morloc_stop_child_groups() {
+    EVAL_CHILDREN.stop_all();
+}
+
+struct EvalChild {
+    pid: libc::pid_t,
+    since: u64,
+    pin: i32,
+    group: Option<morloc_runtime_types::child_group::Registered<'static>>,
+}
+
+impl EvalChild {
+    fn signal(&self, sig: libc::c_int) {
+        if let Some(g) = &self.group {
+            g.signal(sig);
+        }
+    }
+
+    // DAEMON-6: unregistered before the pin closes, so no signal reaches a reaped leader.
+    fn release(&mut self) {
+        drop(self.group.take());
+        if self.pin >= 0 {
+            unsafe { libc::close(self.pin) };
+            self.pin = -1;
+        }
+    }
+
+    unsafe fn finish(mut self) -> Option<i32> {
+        self.release();
+        wait_child(self.pid, self.since)
+    }
+}
+
+impl Drop for EvalChild {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+// DAEMON-6: a source must not be overwritten by an earlier dup2 onto 1, 2 or 3.
+unsafe fn above_stdio(fd: i32) -> std::io::Result<i32> {
+    let moved = libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10);
+    if moved < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(moved)
+    }
+}
+
 unsafe fn spawn_morloc(
     argv: &[*const c_char],
     stdout_pipe: &[i32; 2],
     stderr_pipe: &[i32; 2],
     cpu_seconds: i32,
-) -> std::io::Result<libc::pid_t> {
-    let (_env, envp) = morloc_runtime_types::spawn::current_environment();
-    let mut spawn = morloc_runtime_types::spawn::Spawn::new()?;
-    spawn.dup2(stdout_pipe[1], libc::STDOUT_FILENO)?;
-    spawn.dup2(stderr_pipe[1], libc::STDERR_FILENO)?;
-    if cpu_seconds <= 0 {
-        return spawn.run(&CString::new("morloc").unwrap(), argv, &envp, true);
+) -> std::io::Result<EvalChild> {
+    let mut pin = [0i32; 2];
+    if morloc_runtime_types::fd::pipe(pin.as_mut_ptr()) != 0 {
+        return Err(std::io::Error::last_os_error());
     }
-    let fixed: Vec<CString> = [
-        "sh",
-        "-c",
-        "ulimit -t \"$1\" && ulimit -S -t \"$2\" && shift 2 && exec \"$@\"",
-        "sh",
-        &(cpu_seconds + 5).to_string(),
-        &cpu_seconds.to_string(),
-    ]
-    .iter()
-    .map(|a| CString::new(*a).unwrap())
-    .collect();
+    let (_env, envp) = morloc_runtime_types::spawn::current_environment();
+    let since = morloc_reaped_sequence();
+    let fixed: Vec<CString> = ["sh", "-c", EVAL_WRAPPER, "sh", &cpu_seconds.max(0).to_string()]
+        .iter()
+        .map(|a| CString::new(*a).unwrap())
+        .collect();
     let sh_argv: Vec<*const c_char> = fixed.iter().map(|a| a.as_ptr()).chain(argv.iter().copied()).collect();
-    spawn.run(&CString::new("/bin/sh").unwrap(), &sh_argv, &envp, false)
+    let mut moved: Vec<i32> = Vec::new();
+    let started = (|| {
+        for fd in [stdout_pipe[1], stderr_pipe[1], pin[0]] {
+            moved.push(above_stdio(fd)?);
+        }
+        let mut spawn = morloc_runtime_types::spawn::Spawn::new()?;
+        spawn.new_process_group()?;
+        spawn.dup2(moved[0], libc::STDOUT_FILENO)?;
+        spawn.dup2(moved[1], libc::STDERR_FILENO)?;
+        spawn.dup2(moved[2], 3)?;
+        spawn.run(&CString::new("/bin/sh").unwrap(), &sh_argv, &envp, false)
+    })();
+    for fd in moved {
+        libc::close(fd);
+    }
+    libc::close(pin[0]);
+    let pid = match started {
+        Ok(pid) => pid,
+        Err(e) => {
+            libc::close(pin[1]);
+            return Err(e);
+        }
+    };
+    match EVAL_CHILDREN.add(pid) {
+        Some(group) => Ok(EvalChild { pid, since, pin: pin[1], group: Some(group) }),
+        None => {
+            // DAEMON-6: the leader is pinned, so the group is still its own.
+            libc::kill(-pid, libc::SIGKILL);
+            libc::close(pin[1]);
+            let _ = wait_child(pid, since);
+            Err(std::io::Error::other("too many forked morloc processes at once"))
+        }
+    }
 }
 
 fn compile_binding(base_dir: &str, hv: u64, expr: &str, eval_timeout: i32) -> Option<String> {
@@ -620,9 +725,8 @@ fn compile_binding(base_dir: &str, hv: u64, expr: &str, eval_timeout: i32) -> Op
         argv.push(arg_expr.as_ptr());
         argv.push(ptr::null());
 
-        let since = morloc_reaped_sequence();
-        let pid = match spawn_morloc(&argv, &stdout_pipe, &stderr_pipe, eval_timeout) {
-            Ok(pid) => pid,
+        let child = match spawn_morloc(&argv, &stdout_pipe, &stderr_pipe, eval_timeout) {
+            Ok(child) => child,
             Err(_) => {
                 libc::close(stdout_pipe[0]);
                 libc::close(stdout_pipe[1]);
@@ -636,12 +740,20 @@ fn compile_binding(base_dir: &str, hv: u64, expr: &str, eval_timeout: i32) -> Op
         libc::close(stdout_pipe[1]);
         libc::close(stderr_pipe[1]);
 
-        let (_, stderr_buf) = drain_pair(stdout_pipe[0], stderr_pipe[0]);
+        let (_, stderr_buf, in_time) = drain_child(&child, stdout_pipe[0], stderr_pipe[0], eval_timeout);
         libc::close(stdout_pipe[0]);
         libc::close(stderr_pipe[0]);
 
-        let ok = wait_child(pid, since)
+        let ok = child
+            .finish()
             .is_some_and(|st| libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0);
+        if !in_time {
+            eprintln!(
+                "binding_store_bind: morloc eval --save ran past its time limit ({} s of wall time) and was stopped",
+                eval_timeout as u64 * EVAL_WALL_PER_CPU
+            );
+            return None;
+        }
         if !ok {
             let msg = String::from_utf8_lossy(&stderr_buf);
             eprintln!("binding_store_bind: morloc eval --save failed: {}", msg);
@@ -1251,9 +1363,8 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     argv.push(expr);
     argv.push(ptr::null());
 
-    let since = morloc_reaped_sequence();
-    let pid = match spawn_morloc(&argv, &stdout_pipe, &stderr_pipe, G_EVAL_TIMEOUT.load(Ordering::Relaxed)) {
-        Ok(pid) => pid,
+    let child = match spawn_morloc(&argv, &stdout_pipe, &stderr_pipe, G_EVAL_TIMEOUT.load(Ordering::Relaxed)) {
+        Ok(child) => child,
         Err(e) => {
             (*resp).success = false;
             (*resp).error_kind = DAEMON_ERROR_INTERNAL;
@@ -1271,11 +1382,25 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     libc::close(stdout_pipe[1]);
     libc::close(stderr_pipe[1]);
 
-    let (stdout_buf, stderr_buf) = drain_pair(stdout_pipe[0], stderr_pipe[0]);
+    let eval_timeout = G_EVAL_TIMEOUT.load(Ordering::Relaxed);
+    let (stdout_buf, stderr_buf, in_time) = drain_child(&child, stdout_pipe[0], stderr_pipe[0], eval_timeout);
     libc::close(stdout_pipe[0]);
     libc::close(stderr_pipe[0]);
+    let status = child.finish();
+    if !in_time {
+        (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_TIMEOUT;
+        let c = CString::new(format!(
+            "morloc {} ran past its time limit ({} s of wall time) and was stopped",
+            subcmd,
+            eval_timeout as u64 * EVAL_WALL_PER_CPU,
+        ))
+        .unwrap_or_default();
+        (*resp).error = libc::strdup(c.as_ptr());
+        return resp;
+    }
 
-    let status = match wait_child(pid, since) {
+    let status = match status {
         Some(st) => st,
         None => {
             (*resp).success = false;
@@ -1349,6 +1474,16 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
                 ),
                 DAEMON_ERROR_INTERNAL,
             )
+        } else if exited_with(126) || exited_with(127) {
+            // DAEMON-6: the wrapper could not start `morloc`.
+            (
+                format!(
+                    "Failed to start morloc {}: {}",
+                    subcmd,
+                    String::from_utf8_lossy(&stderr_buf).trim()
+                ),
+                DAEMON_ERROR_INTERNAL,
+            )
         } else if !stderr_buf.is_empty() {
             (
                 String::from_utf8_lossy(&stderr_buf).into_owned(),
@@ -1384,7 +1519,7 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
 
 /// Read two pipes to end of file at once, so a child that fills one while
 /// the other is being read cannot block forever. Returns both contents.
-unsafe fn drain_pair(a: i32, b: i32) -> (Vec<u8>, Vec<u8>) {
+unsafe fn drain_pair(a: i32, b: i32, deadline: Option<std::time::Instant>) -> (Vec<u8>, Vec<u8>, bool) {
     let mut out = (Vec::new(), Vec::new());
     let mut open = [a >= 0, b >= 0];
     let mut tmp = [0u8; 8192];
@@ -1393,7 +1528,17 @@ unsafe fn drain_pair(a: i32, b: i32) -> (Vec<u8>, Vec<u8>) {
             libc::pollfd { fd: if open[0] { a } else { -1 }, events: libc::POLLIN, revents: 0 },
             libc::pollfd { fd: if open[1] { b } else { -1 }, events: libc::POLLIN, revents: 0 },
         ];
-        if libc::poll(fds.as_mut_ptr(), 2, -1) < 0 {
+        let wait_ms = match deadline {
+            None => -1,
+            Some(d) => {
+                let left = d.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    return (out.0, out.1, false);
+                }
+                left.as_millis().clamp(1, i32::MAX as u128) as i32
+            }
+        };
+        if libc::poll(fds.as_mut_ptr(), 2, wait_ms) < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
@@ -1414,8 +1559,34 @@ unsafe fn drain_pair(a: i32, b: i32) -> (Vec<u8>, Vec<u8>) {
             }
         }
     }
-    out
+    (out.0, out.1, true)
 }
+
+// DAEMON-6: a forked `morloc` is limited in CPU time by ulimit, and in wall
+// time here, since a child blocked on I/O spends no CPU.
+unsafe fn drain_child(child: &EvalChild, a: i32, b: i32, cpu_seconds: i32) -> (Vec<u8>, Vec<u8>, bool) {
+    if cpu_seconds <= 0 {
+        return drain_pair(a, b, None);
+    }
+    let limit = std::time::Duration::from_secs(cpu_seconds as u64 * EVAL_WALL_PER_CPU);
+    let (mut out, mut err, finished) = drain_pair(a, b, Some(std::time::Instant::now() + limit));
+    if finished {
+        return (out, err, true);
+    }
+    for sig in [libc::SIGTERM, libc::SIGKILL] {
+        child.signal(sig);
+        let (o, e, done) = drain_pair(a, b, Some(std::time::Instant::now() + EVAL_DRAIN_AFTER_KILL));
+        out.extend(o);
+        err.extend(e);
+        if done {
+            break;
+        }
+    }
+    (out, err, false)
+}
+
+const EVAL_WALL_PER_CPU: u64 = 4;
+const EVAL_DRAIN_AFTER_KILL: std::time::Duration = std::time::Duration::from_secs(1);
 
 // -- Packet-mode result serialization -----------------------------------------
 
@@ -1546,6 +1717,28 @@ pub unsafe extern "C" fn daemon_dispatch(
     manifest: *mut crate::manifest_ffi::Manifest,
     request: *mut DaemonRequest,
     sockets: *mut MorlocSocket,
+    shm_basename: *const c_char,
+) -> *mut DaemonResponse {
+    let resp = dispatch_request(manifest, request, sockets, shm_basename);
+    if !(*resp).success && (*resp).error_kind == DAEMON_ERROR_INTERNAL && POOLS_STOPPED.load(Ordering::SeqCst) {
+        let cause = if (*resp).error.is_null() {
+            String::new()
+        } else {
+            format!(": {}", CStr::from_ptr((*resp).error).to_string_lossy())
+        };
+        libc::free((*resp).error as *mut c_void);
+        let c = CString::new(format!("the daemon is shutting down and stopped this request{}", cause))
+            .unwrap_or_default();
+        (*resp).error = libc::strdup(c.as_ptr());
+        (*resp).error_kind = DAEMON_ERROR_RECOVERING;
+    }
+    resp
+}
+
+unsafe fn dispatch_request(
+    manifest: *mut crate::manifest_ffi::Manifest,
+    request: *mut DaemonRequest,
+    sockets: *mut MorlocSocket,
     _shm_basename: *const c_char,
 ) -> *mut DaemonResponse {
     let resp = libc::calloc(1, std::mem::size_of::<DaemonResponse>()) as *mut DaemonResponse;
@@ -1565,9 +1758,12 @@ pub unsafe extern "C" fn daemon_dispatch(
     let Some(_in_flight) = enter_request() else {
         (*resp).success = false;
         (*resp).error_kind = DAEMON_ERROR_RECOVERING;
-        let c = CString::new(
+        let c = CString::new(if is_shutting_down() {
+            "Daemon shutting down."
+        } else {
             "Daemon recovering from a pool process crash; please retry."
-        ).unwrap();
+        })
+        .unwrap();
         (*resp).error = libc::strdup(c.as_ptr());
         return resp;
     };
@@ -2779,7 +2975,7 @@ pub unsafe extern "C" fn daemon_run(
     sockets: *mut MorlocSocket,
     n_pools: usize,
     shm_basename: *const c_char,
-) {
+) -> bool {
     // Widen the open-file ceiling: this process accepts and fans out to every
     // pool, so it can hold the most fds. poll() tolerates fds >= 1024 but only
     // if the soft limit permits them to exist.
@@ -2826,14 +3022,14 @@ pub unsafe extern "C" fn daemon_run(
         let sock_fd = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
         if sock_fd < 0 {
             eprintln!("morloc-daemon: failed to create unix socket");
-            return;
+            return true;
         }
         let addr = match crate::utility::unix_socket_addr(CStr::from_ptr((*config).unix_socket_path).to_bytes()) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("morloc-daemon: {}", e);
                 libc::close(sock_fd);
-                return;
+                return true;
             }
         };
         libc::unlink((*config).unix_socket_path);
@@ -2845,7 +3041,7 @@ pub unsafe extern "C" fn daemon_run(
         {
             eprintln!("morloc-daemon: failed to bind unix socket");
             libc::close(sock_fd);
-            return;
+            return true;
         }
         libc::listen(sock_fd, libc::SOMAXCONN);
         fds[nfds].fd = sock_fd;
@@ -2866,7 +3062,7 @@ pub unsafe extern "C" fn daemon_run(
         let tcp_fd = morloc_runtime_types::fd::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if tcp_fd < 0 {
             eprintln!("morloc-daemon: failed to create tcp socket");
-            return;
+            return true;
         }
         let opt: i32 = 1;
         libc::setsockopt(
@@ -2888,7 +3084,7 @@ pub unsafe extern "C" fn daemon_run(
         {
             eprintln!("morloc-daemon: failed to bind tcp port {}", requested);
             libc::close(tcp_fd);
-            return;
+            return true;
         }
         let actual = getsockname_port(tcp_fd).unwrap_or(requested);
         libc::listen(tcp_fd, libc::SOMAXCONN);
@@ -2906,7 +3102,7 @@ pub unsafe extern "C" fn daemon_run(
         let http_fd = morloc_runtime_types::fd::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if http_fd < 0 {
             eprintln!("morloc-daemon: failed to create http socket");
-            return;
+            return true;
         }
         let opt: i32 = 1;
         libc::setsockopt(
@@ -2930,7 +3126,7 @@ pub unsafe extern "C" fn daemon_run(
         {
             eprintln!("morloc-daemon: failed to bind http port {}", requested);
             libc::close(http_fd);
-            return;
+            return true;
         }
         let actual = getsockname_port(http_fd).unwrap_or(requested);
         libc::listen(http_fd, libc::SOMAXCONN);
@@ -2963,7 +3159,7 @@ pub unsafe extern "C" fn daemon_run(
 
     if nfds == 0 {
         eprintln!("morloc-daemon: no listeners configured, exiting");
-        return;
+        return true;
     }
 
     // Start worker thread pool
@@ -2994,6 +3190,8 @@ pub unsafe extern "C" fn daemon_run(
                 continue;
             }
             eprintln!("morloc-daemon: poll error");
+            // DAEMON-6
+            SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
             break;
         }
 
@@ -3033,27 +3231,88 @@ pub unsafe extern "C" fn daemon_run(
         }
     }
 
-    // Wake all workers and join
-    ctx.cond.notify_all();
-    for w in workers {
-        let _ = w.join();
+    // DAEMON-6: shutdown is bounded even if a worker holds a lock teardown needs.
+    let emergency = (*config).emergency_exit_fn;
+    let watchdog = std::thread::Builder::new().spawn(move || {
+        let until = std::time::Instant::now() + SHUTDOWN_WATCHDOG;
+        while std::time::Instant::now() < until && !SHUTDOWN_ESCALATED.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if !morloc_claim_exit() {
+            return;
+        }
+        match emergency {
+            Some(exit) => exit(128 + libc::SIGTERM),
+            None => libc::_exit(128 + libc::SIGTERM),
+        }
+    });
+    if watchdog.is_err() {
+        say("morloc-daemon: could not start the shutdown watchdog\n");
     }
-
-    // Drain remaining jobs
+    for i in 0..nfds {
+        libc::close(fds[i].fd);
+    }
+    if !(*config).unix_socket_path.is_null() {
+        libc::unlink((*config).unix_socket_path);
+    }
+    // DAEMON-6: a queued request is refused, never started.
     {
         let mut q = ctx.queue.lock().unwrap();
         while let Some(job) = q.jobs.pop_front() {
             libc::close(job.client_fd);
         }
     }
-
-    // Close listener sockets
-    for i in 0..nfds {
-        libc::close(fds[i].fd);
+    // DAEMON-6: a worker inside a call to a wedged pool returns only once
+    // the pools are stopped.
+    ctx.cond.notify_all();
+    let workers = join_within(workers, SHUTDOWN_GRACE);
+    let workers = if workers.is_empty() {
+        workers
+    } else {
+        say(&format!(
+            "morloc-daemon: {} request(s) still running {:?} after shutdown was requested; stopping the pools\n",
+            workers.len(),
+            SHUTDOWN_GRACE
+        ));
+        // DAEMON-6
+        POOLS_STOPPED.store(true, Ordering::SeqCst);
+        if let Some(stop) = (*config).stop_pools_fn {
+            stop();
+        }
+        join_within(workers, SHUTDOWN_AFTER_STOP)
+    };
+    let all_returned = workers.is_empty();
+    if !all_returned {
+        say(&format!("morloc-daemon: {} worker(s) did not return; exiting without them\n", workers.len()));
     }
 
-    if !(*config).unix_socket_path.is_null() {
-        libc::unlink((*config).unix_socket_path);
+    all_returned
+}
+
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+const SHUTDOWN_AFTER_STOP: std::time::Duration = std::time::Duration::from_secs(2);
+const SHUTDOWN_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(30);
+
+// DAEMON-6: no stdio lock, which a running worker may hold.
+fn say(line: &str) {
+    unsafe { libc::write(2, line.as_ptr() as *const c_void, line.len()) };
+}
+
+fn join_within(
+    mut workers: Vec<std::thread::JoinHandle<()>>,
+    limit: std::time::Duration,
+) -> Vec<std::thread::JoinHandle<()>> {
+    let began = std::time::Instant::now();
+    loop {
+        let (done, running): (Vec<_>, Vec<_>) = workers.into_iter().partition(|w| w.is_finished());
+        for w in done {
+            let _ = w.join();
+        }
+        if running.is_empty() || began.elapsed() >= limit {
+            return running;
+        }
+        workers = running;
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
@@ -3066,11 +3325,12 @@ fn daemon_worker_fn(ctx: Arc<WorkerContext>) {
         let job = {
             let mut q = ctx.queue.lock().unwrap();
             loop {
-                if let Some(job) = q.jobs.pop_front() {
-                    break Some(job);
-                }
+                // DAEMON-6
                 if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
                     break None;
+                }
+                if let Some(job) = q.jobs.pop_front() {
+                    break Some(job);
                 }
                 // Wait with timeout so we recheck shutdown
                 let (guard, _timeout) = ctx
@@ -3108,7 +3368,10 @@ fn daemon_worker_fn(ctx: Arc<WorkerContext>) {
 
 // Signal handler (must be async-signal-safe)
 extern "C" fn daemon_signal_handler_fn(_sig: i32) {
-    SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+    // DAEMON-6: a second signal ends the shutdown at once.
+    if SHUTDOWN_REQUESTED.swap(true, Ordering::SeqCst) {
+        SHUTDOWN_ESCALATED.store(true, Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
@@ -3390,12 +3653,96 @@ mod child_output_tests {
             }
             libc::close(o[1]);
             libc::close(e[1]);
-            let (out, err) = drain_pair(o[0], e[0]);
+            let (out, err, finished) = drain_pair(o[0], e[0], None);
+            assert!(finished);
             libc::close(o[0]);
             libc::close(e[0]);
             assert_eq!(wait_child(pid, since), Some(0));
             assert_eq!((out.len(), err.len()), (N, N));
             assert!(out.iter().all(|&b| b == b'o') && err.iter().all(|&b| b == b'e'));
         }
+    }
+
+    #[test]
+    fn draining_a_writer_that_never_closes_stops_at_the_deadline() {
+        let mut p = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { morloc_runtime_types::fd::pipe(p.as_mut_ptr()) }, 0);
+        let began = std::time::Instant::now();
+        let (_, _, finished) = unsafe {
+            drain_pair(p[0], -1, Some(began + std::time::Duration::from_millis(200)))
+        };
+        let waited = began.elapsed();
+        unsafe {
+            libc::close(p[0]);
+            libc::close(p[1]);
+        }
+        assert!(!finished);
+        assert!(waited < std::time::Duration::from_secs(5), "drained for {waited:?}");
+    }
+
+    #[test]
+    fn an_eval_leader_outlives_a_term_until_it_is_released() {
+        let mut out_pipe = [0i32; 2];
+        let mut err_pipe = [0i32; 2];
+        assert!(unsafe { two_pipes(&mut out_pipe, &mut err_pipe) });
+        let (sh, dash_c, script) =
+            (CString::new("sh").unwrap(), CString::new("-c").unwrap(), CString::new("exit 3").unwrap());
+        let argv = [sh.as_ptr(), dash_c.as_ptr(), script.as_ptr(), ptr::null()];
+        let child = unsafe { spawn_morloc(&argv, &out_pipe, &err_pipe, 0) }.expect("spawn");
+        unsafe {
+            libc::close(out_pipe[1]);
+            libc::close(err_pipe[1]);
+        }
+        let (_, _, finished) = unsafe { drain_child(&child, out_pipe[0], err_pipe[0], 0) };
+        assert!(finished);
+        child.signal(libc::SIGTERM);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut st = 0;
+        let alive = unsafe { libc::waitpid(child.pid, &mut st, libc::WNOHANG) } == 0;
+        let status = unsafe { child.finish() };
+        unsafe {
+            libc::close(out_pipe[0]);
+            libc::close(err_pipe[0]);
+        }
+        assert!(alive, "the leader ended while registered");
+        assert!(status.is_some_and(|st| libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 3), "status {status:?}");
+    }
+
+    #[test]
+    fn an_eval_past_its_wall_limit_is_stopped_with_everything_it_started() {
+        let mut out_pipe = [0i32; 2];
+        let mut err_pipe = [0i32; 2];
+        assert!(unsafe { two_pipes(&mut out_pipe, &mut err_pipe) });
+        let script = CString::new("sleep 600 & echo $!; exec sleep 600").unwrap();
+        let (sh, dash_c) = (CString::new("sh").unwrap(), CString::new("-c").unwrap());
+        let argv = [sh.as_ptr(), dash_c.as_ptr(), script.as_ptr(), ptr::null()];
+        let child = unsafe { spawn_morloc(&argv, &out_pipe, &err_pipe, 1) }.expect("spawn");
+        unsafe {
+            libc::close(out_pipe[1]);
+            libc::close(err_pipe[1]);
+        }
+        let began = std::time::Instant::now();
+        let (out, _, finished) = unsafe { drain_child(&child, out_pipe[0], err_pipe[0], 1) };
+        let waited = began.elapsed();
+        unsafe {
+            libc::close(out_pipe[0]);
+            libc::close(err_pipe[0]);
+        }
+        let status = unsafe { child.finish() };
+        assert!(status.is_some_and(|st| libc::WIFSIGNALED(st)), "status {status:?}");
+        let grandchild: i32 = String::from_utf8_lossy(&out).trim().parse().expect("grandchild pid");
+        let gone = (0..200).any(|_| {
+            if unsafe { libc::kill(grandchild, 0) } == -1 {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            false
+        });
+        if !gone {
+            unsafe { libc::kill(grandchild, libc::SIGKILL) };
+        }
+        assert!(!finished);
+        assert!(gone, "process {grandchild} started by the eval outlived its limit");
+        assert!(waited < std::time::Duration::from_millis(5500), "stopping took {waited:?}");
     }
 }

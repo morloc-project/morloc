@@ -2064,15 +2064,23 @@ fn frontend_eval(expr: &str, fe: &Frontend) -> Result<String, String> {
             });
         }
     }
-    let out = cmd
-        .output()
-        .map_err(|e| {
-            format!(
+    let wall = (cpu_secs > 0).then(|| Duration::from_secs(cpu_secs as u64 * EVAL_WALL_PER_CPU));
+    let out = match output_within(cmd, wall) {
+        Ok(Some(out)) => out,
+        Ok(None) => {
+            return Err(format!(
+                "eval ran past its time limit ({} s of wall time) and was stopped",
+                cpu_secs as u64 * EVAL_WALL_PER_CPU
+            ))
+        }
+        Err(e) => {
+            return Err(format!(
                 "failed to run eval: {} (the eval capability requires the `morloc` \
                  compiler on PATH in the serving environment)",
                 e
-            )
-        })?;
+            ))
+        }
+    };
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
     } else if out.status.code() == Some(EXIT_HEAPOVERFLOW) {
@@ -2087,6 +2095,94 @@ fn frontend_eval(expr: &str, fe: &Frontend) -> Result<String, String> {
         let err = err.trim();
         Err(if err.is_empty() { "eval failed".to_string() } else { err.to_string() })
     }
+}
+
+/// A blocked eval spends no CPU, so its CPU limit is backed by a wall limit
+/// of this many times as long (model/daemon.md DAEMON-6).
+const EVAL_WALL_PER_CPU: u64 = 4;
+
+/// Process groups of running evals, killed when the front-end exits.
+pub static FRONTEND_EVALS: morloc_runtime_types::child_group::ChildGroups =
+    morloc_runtime_types::child_group::ChildGroups::new();
+
+/// Whether child `pid` has ended, leaving it unreaped so its group id
+/// stays its own.
+fn ended_unreaped(pid: libc::pid_t) -> std::io::Result<bool> {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
+        };
+        if rc == 0 {
+            return Ok(info.si_signo == libc::SIGCHLD);
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+/// Run `cmd` in its own process group until it and everything holding its
+/// output have finished, or for at most `wall`; `None` when it ran out,
+/// after stopping the group.
+fn output_within(
+    mut cmd: std::process::Command,
+    wall: Option<Duration>,
+) -> std::io::Result<Option<std::process::Output>> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let mut child = cmd
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let pid = child.id() as libc::pid_t;
+    let Some(group) = FRONTEND_EVALS.add(pid) else {
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        let _ = child.wait();
+        return Err(std::io::Error::other("too many evals at once"));
+    };
+    let drain = |r: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let out = drain(child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let err = drain(child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let deadline = wall.map(|w| Instant::now() + w);
+    let in_time = loop {
+        if ended_unreaped(pid)? && out.is_finished() && err.is_finished() {
+            break true;
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if !in_time {
+        group.signal(libc::SIGTERM);
+        let grace = Instant::now() + Duration::from_secs(1);
+        while !ended_unreaped(pid)? && Instant::now() < grace {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        group.signal(libc::SIGKILL);
+    }
+    drop(group);
+    let status = child.wait()?;
+    if !in_time {
+        return Ok(None);
+    }
+    Ok(Some(std::process::Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    }))
 }
 
 /// `POST /eval`: the API-side eval capability. Body is `{"expr":"..."}` (or
@@ -2992,5 +3088,41 @@ mod tests {
         }
         prune_sessions(&mut full, base);
         assert!(full.len() < MAX_SESSIONS, "cap backstop should evict the oldest");
+    }
+
+    #[test]
+    fn a_frontend_eval_past_its_wall_limit_is_stopped_with_everything_it_started() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("sleep 600 & echo $! > \"$0\"; exec sleep 600");
+        let pidfile = std::env::temp_dir().join(format!("morloc-eval-wall-{}", std::process::id()));
+        cmd.arg(&pidfile);
+        let began = Instant::now();
+        let out = output_within(cmd, Some(Duration::from_millis(500))).expect("spawn");
+        let waited = began.elapsed();
+        let grandchild: i32 = std::fs::read_to_string(&pidfile).expect("pid file").trim().parse().unwrap();
+        let _ = std::fs::remove_file(&pidfile);
+        let gone = (0..200).any(|_| {
+            if unsafe { libc::kill(grandchild, 0) } == -1 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            false
+        });
+        if !gone {
+            unsafe { libc::kill(grandchild, libc::SIGKILL) };
+        }
+        assert!(out.is_none());
+        assert!(gone, "process {grandchild} started by the eval outlived its limit");
+        assert!(waited < Duration::from_secs(3), "stopping took {waited:?}");
+    }
+
+    #[test]
+    fn a_frontend_eval_within_its_limit_returns_its_output() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("echo out; echo err >&2; exit 3");
+        let out = output_within(cmd, Some(Duration::from_secs(30))).expect("spawn").expect("in time");
+        assert_eq!(out.stdout, b"out\n");
+        assert_eq!(out.stderr, b"err\n");
+        assert_eq!(out.status.code(), Some(3));
     }
 }
