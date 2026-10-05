@@ -145,6 +145,7 @@ extern "C" {
     fn morloc_stop_child_groups();
     fn morloc_claim_exit() -> bool;
     fn morloc_remove_leases();
+    fn morloc_reclaim_all();
 }
 
 /// C-ABI callback wired into DaemonConfig.pool_check_fn.
@@ -265,7 +266,9 @@ extern "C" fn pool_check_and_recover(
     }
 
     // Step 3: tear down all SHM.
-    // FORK-15: the leases name the namespace being discarded.
+    // FORK-16: the killed pools' temp directories; FORK-15: the leases name
+    // the namespace being discarded.
+    unsafe { morloc_reclaim_all() };
     unsafe { morloc_remove_leases() };
     unsafe {
         let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
@@ -704,6 +707,13 @@ pub fn init_shm() -> (String, String) {
     };
     set_tmpdir(tmpdir.clone());
     let _ = RUN_TMPDIR.set(tmpdir.clone());
+    match make_temp_root(&tmpdir) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
 
     // Point every pool at this run's benchmark record file. An env var
     // rather than a per-language setter because pools inherit it for
@@ -1589,6 +1599,10 @@ pub fn cleanup_stale_shm() {
         let other_boot = boot.as_deref().is_some_and(|b| b != *owner_boot);
         if other_boot || !proc_info::alive(pid, start) {
             unlink_marked_segments(&dir);
+            // FORK-16: a temp root kept outside the run directory goes with it.
+            if let Ok(temps) = std::fs::read_to_string(dir.join(TEMPS_FILE)) {
+                let _ = std::fs::remove_dir_all(temps.trim_end());
+            }
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
@@ -1597,6 +1611,35 @@ pub fn cleanup_stale_shm() {
 /// The run directory's record of its owner: pid, start stamp, boot and PID
 /// namespace.
 const OWNER_FILE: &str = ".owner";
+const TEMPS_FILE: &str = ".temps";
+
+// FORK-16: the run's temp root (the runtime derives the same path), under
+// `--tmpdir` when one is given, else in the run directory; one outside the
+// run directory is recorded there before it exists, so a later run's sweep
+// finds it however this run ends.
+fn make_temp_root(run_dir: &str) -> Result<String, String> {
+    extern "C" {
+        fn morloc_run_temp_root(run_dir: *const libc::c_char, user_tmpdir: *const libc::c_char) -> *mut libc::c_char;
+    }
+    let user = std::env::var("MORLOC_TMPDIR").ok().filter(|d| !d.is_empty());
+    let run_c = CString::new(run_dir).map_err(|e| e.to_string())?;
+    let user_c = user.as_deref().map(CString::new).transpose().map_err(|e| e.to_string())?;
+    let raw = unsafe { morloc_run_temp_root(run_c.as_ptr(), user_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr())) };
+    if raw.is_null() {
+        return Err("Failed to name the run's temp root".into());
+    }
+    let dir = unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().into_owned();
+    unsafe { libc::free(raw as *mut libc::c_void) };
+    if user.is_some() {
+        let marker = std::path::Path::new(run_dir);
+        std::fs::write(marker.join(".temps.tmp"), &dir)
+            .and_then(|_| std::fs::rename(marker.join(".temps.tmp"), marker.join(TEMPS_FILE)))
+            .map_err(|e| format!("Failed to record the temp root {}: {}", dir, e))?;
+        crate::sigrm::register(&dir)?;
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create {}: {}", dir, e))?;
+    Ok(dir)
+}
 
 /// Remove every shared-memory object a marker in `dir` names. Only morloc's
 /// own names are touched.

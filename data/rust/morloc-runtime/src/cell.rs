@@ -137,6 +137,8 @@ struct CellEntry {
     /// than silently addressing whatever took its place.
     generation: i64,
     owner: u64,
+    /// For an unowned cell, the next dispatch id when it was made (FORK-16).
+    born: u64,
     /// The seed. Also the answer for a cell no thread ever folded into,
     /// which is what an empty stream must fold to.
     ///
@@ -245,6 +247,7 @@ pub unsafe fn cell_new(rs: &Schema, init: *const u8) -> Result<i64, MorlocError>
             live: true,
             generation: gen,
             owner,
+            born: crate::intrinsics::next_dispatch_id(),
             init: seed,
             slots: Vec::new(),
         };
@@ -260,6 +263,7 @@ pub unsafe fn cell_new(rs: &Schema, init: *const u8) -> Result<i64, MorlocError>
         live: true,
         generation: 0,
         owner,
+        born: crate::intrinsics::next_dispatch_id(),
         init: seed,
         slots: Vec::new(),
     });
@@ -472,10 +476,13 @@ unsafe fn require_schema(schema: *const CSchema, fn_name: &str) -> Result<Schema
 /// `last` is the temp registry's count of in-flight dispatches reaching
 /// zero, which is the same count this registry would otherwise keep a
 /// second copy of.
-pub fn sweep_dispatch(call_id: u64, last: bool) {
+pub fn sweep_dispatch(call_id: u64, oldest: Option<u64>) {
     if let Ok(mut reg) = CELL_REGISTRY.lock() {
         for c in reg.cells.iter_mut() {
-            if c.live && (c.owner == call_id || (last && c.owner == TEMP_OWNER_NONE)) {
+            if c.live
+                && (c.owner == call_id
+                    || (c.owner == TEMP_OWNER_NONE && crate::intrinsics::unowned_collectable(c.born, oldest)))
+            {
                 release_entry(c);
             }
         }

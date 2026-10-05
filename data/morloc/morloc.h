@@ -1505,6 +1505,14 @@ void morloc_view_released(const void* key);
 void morloc_reclaim_leases(void);
 // Remove the current namespace's leases kept outside the run directory.
 void morloc_remove_leases(void);
+// Release every free lease and remove the temp directories of processes
+// that are gone, now.
+void morloc_reclaim_all(void);
+// Remove this process's temp directory (a retiring worker's).
+void morloc_remove_own_temps(void);
+// The temp root of the run whose directory is run_dir (user_tmpdir: the
+// user's --tmpdir, or NULL), as a malloc'd string the caller frees.
+char* morloc_run_temp_root(const char* run_dir, const char* user_tmpdir);
 const char* morloc_lifeline_child_env(int* read_fd);
 
 void close_socket(int socket_id);

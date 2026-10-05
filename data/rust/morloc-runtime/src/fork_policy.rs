@@ -294,6 +294,7 @@ extern "C" fn prepare_fork() {
 }
 
 extern "C" fn after_fork_in_parent() {
+    crate::lease::note_forked();
     if let Some(mut held) = take_fork_held() {
         let (lease, rels) = (held.lease.take(), std::mem::take(&mut held.lease_rels));
         drop(held);
@@ -307,7 +308,9 @@ extern "C" fn after_fork_in_parent() {
 
 extern "C" fn after_fork_in_child() {
     morloc_runtime_types::fork_generation::bump_in_child();
-    INHERITED_DISPATCHES.store(crate::intrinsics::dispatch_depth(), Ordering::Relaxed);
+    // FORK-16: the dispatches running anywhere in the parent, none of which
+    // the child has.
+    INHERITED_DISPATCHES.store(crate::intrinsics::dispatches_in_flight(), Ordering::Relaxed);
     crate::cell::after_fork_in_child();
     crate::shm::forget_held_references();
     if let Some(mut held) = take_fork_held() {

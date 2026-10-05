@@ -2374,6 +2374,12 @@ static PyObject* pybinding__held_references(PyObject* self, PyObject* args) {
     return PyLong_FromLongLong((long long)morloc_held_references());
 }
 
+// Remove this process's temp directory (FORK-16).
+static PyObject* pybinding__remove_own_temps(PyObject* self, PyObject* args) {
+    morloc_remove_own_temps();
+    Py_RETURN_NONE;
+}
+
 // Release leases of forked children that are gone (FORK-15).
 static PyObject* pybinding__reclaim_leases(PyObject* self, PyObject* args) {
     morloc_reclaim_leases();
@@ -4514,6 +4520,7 @@ static PyMethodDef Methods[] = {
     {"held_references", pybinding__held_references, METH_NOARGS, "Shared-memory references this process holds"},
     {"retire_blockers", pybinding__retire_blockers, METH_NOARGS, "Held references plus stream file locks"},
     {"reclaim_leases", pybinding__reclaim_leases, METH_NOARGS, "Release leases of forked children that are gone"},
+    {"remove_own_temps", pybinding__remove_own_temps, METH_NOARGS, "Remove this process's temp directory"},
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
     {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},

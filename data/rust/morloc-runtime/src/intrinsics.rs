@@ -281,37 +281,72 @@ unsafe fn write_data_packet_parts_to_fd(
 // also runs there.
 //
 // A thread the runtime did not start carries no call id (TEMP_OWNER_NONE),
-// so its temps are recorded unowned. Those are reclaimed when the in-flight
-// dispatch count falls to zero: a live unowned temp implies its creating thread
-// is running, which implies some dispatch is still in flight, so a zero
-// crossing can only find garbage. A detached thread that outlives its dispatch
-// is outside this contract -- it is already using call-scoped state after the
-// call is gone.
+// so its temps are recorded unowned, with the dispatch id current when they
+// were made (FORK-16). They belong to every dispatch then running, and are
+// reclaimed at the first dispatch end after which none of those is still
+// running, however busy the process stays. A detached thread that outlives
+// those dispatches is outside this contract -- it is already using
+// call-scoped state after the call is gone.
 
 struct TempEntry {
     /// Call that owns the file, or TEMP_OWNER_NONE when it was created on a
     /// thread the runtime did not start.
     owner: u64,
+    /// The next dispatch id when the file was made: every dispatch with a
+    /// smaller id was running or done then.
+    born: u64,
     path: std::path::PathBuf,
 }
 
 struct TempRegistry {
     entries: Vec<TempEntry>,
-    /// Dispatches currently executing in this process. Guards the reclamation
-    /// of unowned temps: they are only collectable while nothing is running.
-    ///
-    /// Kept under the registry's own lock rather than in an atomic so that
-    /// observing the zero and collecting against it are one step. A separate
-    /// counter lets a dispatch start, and its spawned thread register a temp,
-    /// between another dispatch reading zero and acting on it -- which deletes
-    /// a file that is in use.
-    active: usize,
+    /// Dispatches running in this process (FORK-16). Kept under the
+    /// registry's lock so that reading the oldest and collecting against it
+    /// are one step. A forked child whose parent had dispatches running
+    /// starts with dispatch 0, which never ends.
+    inflight: std::collections::BTreeSet<u64>,
 }
 
 static TEMP_REGISTRY: crate::fork_policy::Reset<TempRegistry> = crate::fork_policy::Reset::new(|| TempRegistry {
     entries: Vec::new(),
-    active: crate::fork_policy::inherited_dispatches(),
+    inflight: if crate::fork_policy::inherited_dispatches() > 0 {
+        std::collections::BTreeSet::from([PHANTOM_DISPATCH])
+    } else {
+        std::collections::BTreeSet::new()
+    },
 });
+
+// FORK-16: the dispatches a forked child did not inherit, which never end.
+const PHANTOM_DISPATCH: u64 = 0;
+
+// FORK-16: dispatches running across the process, read by a fork's child.
+static IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) fn dispatches_in_flight() -> usize {
+    IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The oldest dispatch running, if any; an unowned temp or cell born at or
+/// before it is garbage.
+pub(crate) fn oldest_dispatch(inflight: &std::collections::BTreeSet<u64>) -> Option<u64> {
+    inflight.first().copied()
+}
+
+pub(crate) fn unowned_collectable(born: u64, oldest: Option<u64>) -> bool {
+    oldest.is_none_or(|m| m >= born)
+}
+
+/// The id the next dispatch will take.
+pub(crate) fn next_dispatch_id() -> u64 {
+    TEMP_OWNER_COUNTER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+fn forget_dispatches_for_test() {
+    if let Ok(mut reg) = TEMP_REGISTRY.lock() {
+        reg.inflight.clear();
+    }
+}
 
 /// Source of dispatch identities for the temp registry.
 ///
@@ -332,11 +367,6 @@ pub(crate) const TEMP_OWNER_NONE: u64 = 0;
 thread_local! {
     static CURRENT_TEMP_OWNER: std::cell::Cell<u64> =
         const { std::cell::Cell::new(TEMP_OWNER_NONE) };
-    static DISPATCH_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-pub(crate) fn dispatch_depth() -> usize {
-    DISPATCH_DEPTH.with(|d| d.get())
 }
 
 /// The dispatch this thread is running. Shared with the cell registry,
@@ -345,20 +375,93 @@ pub(crate) fn current_temp_owner() -> u64 {
     CURRENT_TEMP_OWNER.with(|c| c.get())
 }
 
+/// The run directory this process belongs to, if any.
+pub(crate) fn run_dir() -> Option<std::path::PathBuf> {
+    crate::shm::get_fallback_dir().filter(|d| !d.is_empty()).map(std::path::PathBuf::from)
+}
+
+/// A run's temp root (FORK-16): `temps` in the run directory, or a directory
+/// named after the run under the user's `--tmpdir`. The nexus makes it and
+/// removes it with the run.
+pub fn run_temp_root(run_dir: &std::path::Path, user_tmpdir: Option<&str>) -> std::path::PathBuf {
+    match user_tmpdir.filter(|d| !d.is_empty()) {
+        Some(base) => {
+            let run = run_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            std::path::Path::new(base).join(format!("morloc-temps-{}", run))
+        }
+        None => run_dir.join("temps"),
+    }
+}
+
+/// The run temp root for `run_dir`, as a malloc'd string the caller frees.
+///
+/// # Safety
+/// `run_dir` must be a C string; `user_tmpdir` a C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn morloc_run_temp_root(run_dir: *const c_char, user_tmpdir: *const c_char) -> *mut c_char {
+    if run_dir.is_null() {
+        return ptr::null_mut();
+    }
+    let run = CStr::from_ptr(run_dir).to_string_lossy().into_owned();
+    let user = (!user_tmpdir.is_null()).then(|| CStr::from_ptr(user_tmpdir).to_string_lossy().into_owned());
+    let root = run_temp_root(std::path::Path::new(&run), user.as_deref());
+    match CString::new(root.to_string_lossy().into_owned()) {
+        Ok(c) => libc::strdup(c.as_ptr()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Where this process's temp files go: its run's temp root, or outside a
+/// run a private directory of its own.
+pub(crate) fn temp_root() -> std::path::PathBuf {
+    if let Some(run) = run_dir() {
+        return run_temp_root(&run, crate::packet::file_packet_tmpdir().as_deref());
+    }
+    static PRIVATE: morloc_runtime_types::publish_once::PublishOnce<std::path::PathBuf> =
+        morloc_runtime_types::publish_once::PublishOnce::new();
+    PRIVATE
+        .get_or_init(|| {
+            let template = std::env::temp_dir().join("morloc-temps.XXXXXX");
+            let mut buf = template.to_string_lossy().into_owned().into_bytes();
+            buf.push(0);
+            if unsafe { libc::mkdtemp(buf.as_mut_ptr() as *mut c_char) }.is_null() {
+                return std::env::temp_dir();
+            }
+            buf.pop();
+            std::path::PathBuf::from(String::from_utf8_lossy(&buf).into_owned())
+        })
+        .clone()
+}
+
+// FORK-16: each process's temps in a directory named by its token, removed
+// once that process is gone.
+pub(crate) fn process_temp_dir() -> std::path::PathBuf {
+    temp_root().join(format!("tmp-{:016x}", morloc_runtime_types::process::token()))
+}
+
+/// Remove this process's temp directory, as a worker does when it retires.
+#[no_mangle]
+pub extern "C" fn morloc_remove_own_temps() {
+    let _ = std::fs::remove_dir_all(process_temp_dir());
+}
+
 /// Mark the start of a dispatch. Returns `(this dispatch's id, the id to
 /// restore)`; the restore value matters because a pool dispatch can run
 /// underneath a daemon dispatch on the same thread.
 pub fn begin_dispatch() -> (u64, u64) {
+    // FORK-16: the id is taken and entered as running in one step.
+    let mut reg = TEMP_REGISTRY.lock();
     let id = TEMP_OWNER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(r) = reg.as_mut() {
+        r.inflight.insert(id);
+    }
+    drop(reg);
     let prev = CURRENT_TEMP_OWNER.with(|c| {
         let old = c.get();
         c.set(id);
         old
     });
-    DISPATCH_DEPTH.with(|d| d.set(d.get() + 1));
-    if let Ok(mut reg) = TEMP_REGISTRY.lock() {
-        reg.active += 1;
-    }
+    IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     (id, prev)
 }
 
@@ -367,10 +470,9 @@ pub fn begin_dispatch() -> (u64, u64) {
 #[no_mangle]
 pub unsafe extern "C" fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
     clear_errmsg(errmsg);
-    let dir = crate::packet::file_packet_tmpdir()
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
+    let dir = process_temp_dir();
     let _ = std::fs::create_dir_all(&dir);
-    let template = format!("{}/morloc-gather-XXXXXX\0", dir);
+    let template = format!("{}/morloc-gather-XXXXXX\0", dir.display());
     let mut buf: Vec<u8> = template.into_bytes();
     let fd = morloc_runtime_types::fd::mkstemp(buf.as_mut_ptr() as *mut c_char);
     if fd < 0 {
@@ -383,6 +485,7 @@ pub unsafe extern "C" fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
     if let Ok(mut reg) = TEMP_REGISTRY.lock() {
         reg.entries.push(TempEntry {
             owner: current_temp_owner(),
+            born: next_dispatch_id(),
             path: std::path::PathBuf::from(&path),
         });
     }
@@ -456,23 +559,20 @@ pub unsafe extern "C" fn mlc_unlink_tmp(
 /// pool_dispatch_packet after each dispatch returns, so a raising handler that
 /// skipped its @close(path) cannot leak the gather file.
 ///
-/// The retirement and the sweep share one critical section: an unowned temp --
-/// made on a thread the runtime did not start -- is only known to be garbage
-/// while no dispatch is running, so the count has to still read zero at the
-/// moment the file is taken out of the registry.
+/// The dispatch's retirement and the sweep share one critical section, so
+/// the oldest running dispatch read is the one collected against (FORK-16).
 pub fn end_dispatch(call_id: u64, prev: u64) {
     CURRENT_TEMP_OWNER.with(|c| c.set(prev));
-    DISPATCH_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
-    let mut last_dispatch = false;
+    IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    let mut oldest = None;
     let doomed: Vec<std::path::PathBuf> = match TEMP_REGISTRY.lock() {
         Ok(mut reg) => {
-            reg.active = reg.active.saturating_sub(1);
-            last_dispatch = reg.active == 0;
-            let last = last_dispatch;
+            reg.inflight.remove(&call_id);
+            oldest = oldest_dispatch(&reg.inflight);
             let mut out = Vec::new();
             reg.entries.retain(|e| {
-                let collect =
-                    e.owner == call_id || (last && e.owner == TEMP_OWNER_NONE);
+                let collect = e.owner == call_id
+                    || (e.owner == TEMP_OWNER_NONE && unowned_collectable(e.born, oldest));
                 if collect {
                     out.push(e.path.clone());
                 }
@@ -485,7 +585,7 @@ pub fn end_dispatch(call_id: u64, prev: u64) {
     for p in doomed {
         let _ = std::fs::remove_file(&p);
     }
-    crate::cell::sweep_dispatch(call_id, last_dispatch);
+    crate::cell::sweep_dispatch(call_id, oldest);
     crate::lease::reclaim_if_due();
 }
 
@@ -2257,6 +2357,88 @@ mod tests {
         assert!(ok);
         assert!(survived, "a forked child removed a temp file its parent's dispatch owns");
         assert!(!std::path::Path::new(&path).exists());
+    }
+
+    #[test]
+    fn a_child_forked_by_a_dispatch_helper_thread_keeps_its_temps() {
+        let _shm = crate::init_test_shm();
+        let (id, prev) = begin_dispatch();
+        let ok = std::thread::spawn(|| {
+            crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+                let path = unsafe { tmpfile() };
+                let (inner, outer) = begin_dispatch();
+                end_dispatch(inner, outer);
+                let kept = std::path::Path::new(&path).exists();
+                let _ = std::fs::remove_file(&path);
+                kept
+            })
+        })
+        .join()
+        .unwrap();
+        end_dispatch(id, prev);
+        assert!(ok, "a nested dispatch swept an unowned temp while the outer dispatch ran");
+    }
+
+    #[test]
+    fn a_helper_temp_goes_once_the_dispatches_running_at_its_making_end() {
+        let _shm = crate::init_test_shm();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            forget_dispatches_for_test();
+            let (a, pa) = begin_dispatch();
+            let path = std::thread::spawn(|| unsafe { tmpfile() }).join().unwrap();
+            let (go, wait) = std::sync::mpsc::channel::<()>();
+            let (started, started_rx) = std::sync::mpsc::channel::<()>();
+            let b = std::thread::spawn(move || {
+                let (b, pb) = begin_dispatch();
+                started.send(()).unwrap();
+                let _ = wait.recv();
+                end_dispatch(b, pb);
+            });
+            started_rx.recv().unwrap();
+            end_dispatch(a, pa);
+            let gone = !std::path::Path::new(&path).exists();
+            go.send(()).unwrap();
+            b.join().unwrap();
+            let _ = std::fs::remove_file(&path);
+            if !gone {
+                eprintln!("an unowned temp outlived the dispatch running when it was made");
+            }
+            gone
+        }));
+    }
+
+    #[test]
+    fn the_temp_directory_of_a_process_that_is_gone_is_removed() {
+        let _shm = crate::init_test_shm();
+        let mut out = [0i32; 2];
+        let mut go = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(out.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { libc::pipe(go.as_mut_ptr()) }, 0);
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            unsafe { libc::alarm(10) };
+            let path = unsafe { tmpfile() };
+            let mut b = [0u8; 1];
+            unsafe {
+                libc::write(out[1], path.as_ptr() as *const libc::c_void, path.len());
+                libc::close(out[1]);
+                libc::read(go[0], b.as_mut_ptr() as *mut libc::c_void, 1);
+                libc::_exit(0)
+            };
+        }
+        unsafe { libc::close(out[1]) };
+        let mut buf = vec![0u8; 4096];
+        let n = unsafe { libc::read(out[0], buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        let path = std::path::PathBuf::from(String::from_utf8_lossy(&buf[..n.max(0) as usize]).into_owned());
+        let dir = path.parent().unwrap().to_path_buf();
+        crate::lease::reclaim();
+        let kept_while_alive = dir.exists();
+        unsafe { libc::write(go[1], b"x".as_ptr() as *const libc::c_void, 1) };
+        let mut st = 0;
+        unsafe { libc::waitpid(child, &mut st, 0) };
+        crate::lease::reclaim();
+        assert!(kept_while_alive, "the temp directory of a live process was removed");
+        assert!(!dir.exists(), "the temp directory of a process that is gone was kept");
     }
 
     #[test]

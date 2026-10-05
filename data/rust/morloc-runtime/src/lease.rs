@@ -11,6 +11,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::shm::RelPtr;
 
 static CREATED: AtomicBool = AtomicBool::new(false);
+static FORKED: AtomicBool = AtomicBool::new(false);
+
+// FORK-16: a process that has forked reclaims what its children leave.
+pub(crate) fn note_forked() {
+    FORKED.store(true, Ordering::Relaxed);
+}
 static SEQ: AtomicU64 = AtomicU64::new(0);
 static LAST_RECLAIM_MS: AtomicU64 = AtomicU64::new(0);
 
@@ -157,9 +163,11 @@ impl Staged {
     }
 }
 
-/// Release the references of every lease whose holder is gone. Returns how
-/// many leases were released.
+/// Release the references of every lease whose holder is gone, and remove
+/// the temp directories of processes that are gone. Returns how many leases
+/// were released.
 pub fn reclaim() -> usize {
+    reclaim_temp_dirs();
     let Some(paths) = paths() else { return 0 };
     let Ok(entries) = std::fs::read_dir(&paths.dir) else { return 0 };
     let mut released = 0;
@@ -172,6 +180,24 @@ pub fn reclaim() -> usize {
         }
     }
     released
+}
+
+// FORK-16
+fn reclaim_temp_dirs() {
+    // Outside a run the root is a process's own.
+    if crate::intrinsics::run_dir().is_none() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(crate::intrinsics::temp_root()) else { return };
+    let own = morloc_runtime_types::process::token();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(hex) = name.to_str().and_then(|n| n.strip_prefix("tmp-")) else { continue };
+        let Ok(token) = u64::from_str_radix(hex, 16) else { continue };
+        if hex.len() == 16 && token != own && !morloc_runtime_types::process::token_alive(token) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 fn release_if_free(path: &Path, basename: &str) -> bool {
@@ -211,7 +237,7 @@ fn release_if_free(path: &Path, basename: &str) -> bool {
 // FORK-15: a process that made leases reclaims them at dispatch ends, when
 // idle, and before giving up on an allocation.
 pub fn reclaim_if_due() {
-    if !CREATED.load(Ordering::Relaxed) {
+    if !CREATED.load(Ordering::Relaxed) && !FORKED.load(Ordering::Relaxed) {
         return;
     }
     let now = std::time::SystemTime::now()
@@ -228,6 +254,11 @@ pub fn reclaim_if_due() {
 
 pub(crate) fn any_created() -> bool {
     CREATED.load(Ordering::Relaxed)
+}
+
+#[no_mangle]
+pub extern "C" fn morloc_reclaim_all() {
+    reclaim();
 }
 
 #[no_mangle]

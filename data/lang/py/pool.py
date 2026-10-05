@@ -695,6 +695,7 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
                 gc.collect()
                 morloc.shm_tracker_flush()
                 if morloc.retire_blockers() == 0:
+                    morloc.remove_own_temps()
                     os.write(retire_w, struct.pack("i", os.getpid()))
                     break
                 last_activity = time.monotonic()

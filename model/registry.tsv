@@ -46,6 +46,7 @@ morloc-runtime/arrow_shm.rs::-::VIEW_COUNT	counter
 morloc-runtime/lease.rs::-::CREATED	counter		
 morloc-runtime/lease.rs::-::SEQ	counter		
 morloc-runtime/lease.rs::-::LAST_RECLAIM_MS	counter		
+morloc-runtime/lease.rs::-::FORKED	counter		
 morloc-runtime/cache.rs::pool_hash::CACHED	lazy		
 morloc-runtime/cache.rs::cache_base::CACHED	lazy		
 morloc-runtime/cache.rs::-::CACHE_HITS	counter		
@@ -103,7 +104,8 @@ morloc-runtime/fork_policy.rs::-::PROBE	test-only
 morloc-runtime/intrinsics.rs::-::TEMP_REGISTRY	reset		
 morloc-runtime/intrinsics.rs::-::TEMP_OWNER_COUNTER	counter		
 morloc-runtime/intrinsics.rs::-::CURRENT_TEMP_OWNER	thread		
-morloc-runtime/intrinsics.rs::-::DISPATCH_DEPTH	thread		
+morloc-runtime/intrinsics.rs::-::IN_FLIGHT	counter		
+morloc-runtime/intrinsics.rs::temp_root::PRIVATE	lazy		
 morloc-runtime/ipc_ffi.rs::-::PING_PEEK_ACTIVE	counter		
 morloc-runtime/ipc_ffi.rs::trace_close_enabled::T	lazy		
 morloc-runtime/ipc_ffi.rs::-::SELF_SOCKET	held	13	

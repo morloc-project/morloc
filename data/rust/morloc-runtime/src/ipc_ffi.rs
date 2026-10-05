@@ -358,6 +358,10 @@ pub unsafe extern "C" fn start_daemon(
     (*daemon).tmpdir = libc::strdup(tmpdir);
     (*daemon).shm_basename = libc::strdup(shm_basename);
 
+    // FORK-16: the run directory, where this process's temp root lives.
+    if !tmpdir.is_null() && crate::shm::get_fallback_dir().is_none_or(|d| d.is_empty()) {
+        crate::shm::shm_set_fallback_dir(&CStr::from_ptr(tmpdir).to_string_lossy());
+    }
     if (*daemon).socket_path.is_null() || (*daemon).tmpdir.is_null() || (*daemon).shm_basename.is_null() {
         close_daemon(&mut (daemon as *mut LanguageDaemon));
         set_errmsg(errmsg, &MorlocError::Ipc("strdup failed in start_daemon".into()));
