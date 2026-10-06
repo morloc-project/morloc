@@ -57,7 +57,7 @@ thread with an active arena leaks the arena's reference.
 
 ### SHM-8 A dead holder's references are recoverable
 Status: implemented
-Checked by: a_process_counts_the_references_it_holds, a_donated_reference_leaves_the_senders_count_and_joins_the_receivers, a_revoked_donation_returns_to_the_senders_count, a_closed_output_stream_leaves_no_reference_counted_to_its_process, a_settled_channel_leaves_no_reference_counted_to_its_process, an_open_output_stream_keeps_its_opener_from_retiring, tla:WorkerExit, tla:WorkerExit_status_inferred.bug, tla:WorkerExit_retire_holding.bug, tla:WorkerExit_no_recovery.bug
+Checked by: a_process_counts_the_references_it_holds, a_donated_reference_leaves_the_senders_count_and_joins_the_receivers, a_revoked_donation_returns_to_the_senders_count, a_closed_output_stream_leaves_no_reference_counted_to_its_process, a_settled_channel_leaves_no_reference_counted_to_its_process, an_open_output_stream_keeps_its_opener_from_retiring, tla:WorkerExit, tla:WorkerExit_status_inferred.bug, tla:WorkerExit_retire_holding.bug, tla:WorkerExit_no_recovery.bug, tla:WorkerExit_flag_before_reap.bug
 
 A block's count is shared by all its holders and names none of them, so a
 dead holder's references are recovered by discarding the namespace, never
@@ -74,6 +74,10 @@ garbage collection and its tracker flush, with its count at zero and no
 stream file lock held (a lock only its holder releases), after writing its
 pid to the coordinator; or it ends any other way, by a signal, an error, or an exit
 of any status without that token, and the coordinator then ends the pool.
+The exception is shutdown: it signals the pool's whole process group, so
+the coordinator's shutdown flag is set before any worker can exit of it,
+and a coordinator that finds its flag set after reaping a worker ends
+normally rather than as failed; the namespace is discarded either way.
 R workers never retire. When a pool ends, a daemon or MCP nexus runs its
 coordinated recovery (DAEMON-5), which discards the whole namespace, and a
 CLI run fails. A worker crash therefore restarts every pool of a daemon,

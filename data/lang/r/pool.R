@@ -555,7 +555,10 @@ main <- function(socket_path, tmpdir, shm_basename) {
   reap_or_end <- function(pids) {
     for (pid in pids) {
       if (morloc_reap_worker(pid) != 0L) {
-        pids <<- setdiff(pids, pid)
+        kept <- setdiff(pids, pid)
+        pids <<- kept
+        # SHM-8: shutdown sets this flag before any worker can exit of it.
+        if (morloc_is_shutting_down()) return(kept)
         stop(sprintf("worker %d ended; ending the pool so its shared memory is recovered", pid))
       }
     }
