@@ -1506,10 +1506,11 @@ if should_run "worker-crash"; then
     threads_of() {
         tpid=$( (pgrep -f "$CRASH_DIR/.*pools/py" 2>/dev/null || true) | head -n 1)
         [ -z "$tpid" ] && { echo 0; return; }
-        tn=$(ps -o nlwp= -p "$tpid" 2>/dev/null | tr -d ' ')
-        if [ -n "$tn" ]; then echo "$tn"
-        else ps -M -p "$tpid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' '
-        fi
+        tn=$(ps -o nlwp= -p "$tpid" 2>/dev/null | tr -d ' \n')
+        case "$tn" in
+            ''|*[!0-9]*) ps -M -p "$tpid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ' ;;
+            *) echo "$tn" ;;
+        esac
     }
     retire_check() {
         rc_label=$1
