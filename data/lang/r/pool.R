@@ -154,6 +154,14 @@ morloc_mlc_internal_abort <- function(msg) {
     list(message = paste0("morloc internal error (R pool): ", msg), call = NULL)
   ))
 }
+# The downstream reader of a stream closed it: the call ends. Not an
+# "error" condition, so no error handler, @try's included, takes it.
+morloc_mlc_pipe_closed <- function() {
+  stop(structure(
+    class = c("MorlocPipeClosed", "condition"),
+    list(message = "@stdout: downstream pipe closed", call = NULL)
+  ))
+}
 # @catch: evaluate fallible; on any error EXCEPT MorlocInternalError,
 # evaluate fallback. MorlocInternalError bypasses -- genuine compiler
 # bugs propagate past user @catch and terminate the pool.

@@ -83,6 +83,8 @@ pub const PACKET_ENCRYPTION_NONE: u8 = 0x00;
 
 pub const PACKET_STATUS_PASS: u8 = 0x00;
 pub const PACKET_STATUS_FAIL: u8 = 0x01;
+/// A failure because the call's downstream reader closed its pipe.
+pub const PACKET_STATUS_PIPE_CLOSED: u8 = 0x02;
 
 // ── Entrypoint ─────────────────────────────────────────────────────────────
 
@@ -727,7 +729,11 @@ impl PacketHeader {
     }
 
     pub fn is_fail(&self) -> bool {
-        self.is_data() && unsafe { self.command.data.status } == PACKET_STATUS_FAIL
+        self.is_data() && matches!(unsafe { self.command.data.status }, PACKET_STATUS_FAIL | PACKET_STATUS_PIPE_CLOSED)
+    }
+
+    pub fn is_pipe_closed(&self) -> bool {
+        self.is_data() && unsafe { self.command.data.status } == PACKET_STATUS_PIPE_CLOSED
     }
 
     /// Serialize the header to bytes.

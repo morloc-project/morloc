@@ -245,23 +245,23 @@ unsafe fn build_voidstar_data_packet_parts(
 unsafe fn write_data_packet_parts_to_fd(
     fd: libc::c_int,
     parts: &VoidstarDataPacketParts,
-) -> Result<(), *mut c_char> {
-    use crate::utility::write_binary_fd;
-    let mut err: *mut c_char = ptr::null_mut();
-    if write_binary_fd(fd, parts.hdr_bytes.as_ptr() as *const c_char, parts.hdr_bytes.len(), &mut err) != 0 {
-        return Err(err);
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    use crate::packet_ffi::write_all_fd;
+    let pieces: [(*const u8, usize); 3] = [
+        (parts.hdr_bytes.as_ptr(), parts.hdr_bytes.len()),
+        (parts.metadata.as_ptr(), parts.metadata.len()),
+        (parts.payload_ptr(), parts.payload_len),
+    ];
+    for (buf, len) in pieces {
+        if len > 0 {
+            let n = write_all_fd(fd, buf, len, errmsg);
+            if n < 0 {
+                return n;
+            }
+        }
     }
-    if !parts.metadata.is_empty()
-        && write_binary_fd(fd, parts.metadata.as_ptr() as *const c_char, parts.metadata.len(), &mut err) != 0
-    {
-        return Err(err);
-    }
-    if parts.payload_len > 0
-        && write_binary_fd(fd, parts.payload_ptr() as *const c_char, parts.payload_len, &mut err) != 0
-    {
-        return Err(err);
-    }
-    Ok(())
+    0
 }
 
 // ── Temp-file gather (whole-form with:/render:) ────────────────────────────
@@ -633,10 +633,13 @@ pub unsafe extern "C" fn mlc_save_voidstar(
         return 1;
     }
 
-    if let Err(e) = write_data_packet_parts_to_fd(fd, &parts) {
+    let n = write_data_packet_parts_to_fd(fd, &parts, errmsg);
+    if n < 0 {
         libc::close(fd);
         libc::unlink(tmp_buf.as_ptr() as *const c_char);
-        set_errmsg(errmsg, &take_reason(e));
+        if n == morloc_runtime_types::PACKET_TO_FD_PIPE_CLOSED {
+            set_errmsg(errmsg, &MorlocError::PipeClosed);
+        }
         return 1;
     }
 
@@ -694,9 +697,9 @@ pub unsafe extern "C" fn mlc_write_voidstar_data_packet_to_fd(
         None => return -1,
     };
 
-    if let Err(e) = write_data_packet_parts_to_fd(fd, &parts) {
-        set_errmsg(errmsg, &take_reason(e));
-        return -1;
+    let n = write_data_packet_parts_to_fd(fd, &parts, errmsg);
+    if n < 0 {
+        return n;
     }
 
     (parts.hdr_bytes.len() + parts.metadata.len() + parts.payload_len) as i64
@@ -739,7 +742,8 @@ pub unsafe extern "C" fn mlc_load(
     match crate::cli::peek_packet_header_via_pread(path) {
         Some(h) if h.is_stream() => {
             let path_str = CStr::from_ptr(path).to_string_lossy().into_owned();
-            match crate::stream::shared_load_stream_file_as_array(&path_str) {
+            let requested = (!schema.is_null()).then(|| CSchema::to_rust(schema));
+            match crate::stream::shared_load_stream_file_as_array(&path_str, requested.as_ref()) {
                 Ok(ptr) => return ptr as *mut c_void,
                 Err(e) => {
                     set_errmsg(errmsg, &e);
@@ -2558,6 +2562,22 @@ mod tests {
         let rc = unsafe { mlc_save_voidstar(value, schema, 0, ptr::null(), &mut err) };
         assert_ne!(rc, 0);
         assert!(unsafe { reason(err) }.is_some());
+        unsafe { crate::ffi::free_schema(schema) };
+    }
+
+    #[test]
+    fn loading_malformed_json_keeps_the_json_reason() {
+        let _shm = crate::init_test_shm();
+        let schema = list_schema();
+        let path = std::env::temp_dir().join(format!("morloc-bad-json-{}.json", std::process::id()));
+        std::fs::write(&path, "[\"a\", 2").unwrap();
+        let cpath = CString::new(path.to_str().unwrap()).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let v = unsafe { mlc_load(cpath.as_ptr(), schema, &mut err) };
+        let _ = std::fs::remove_file(&path);
+        assert!(v.is_null());
+        let why = unsafe { reason(err) }.unwrap();
+        assert!(why.contains("JSON"), "{why}");
         unsafe { crate::ffi::free_schema(schema) };
     }
 }

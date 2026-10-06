@@ -476,6 +476,28 @@ pub unsafe extern "C" fn read_binary_fd(
     }
 }
 
+/// Write all of `bytes` to `fd`, retrying interrupted and partial writes.
+pub fn write_all_to_fd(fd: i32, bytes: &[u8]) -> Result<(), MorlocError> {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let n = unsafe { libc::write(fd, rest.as_ptr() as *const c_void, rest.len()) };
+        if n > 0 {
+            rest = &rest[n as usize..];
+            continue;
+        }
+        let e = std::io::Error::last_os_error();
+        match (n, e.kind()) {
+            (0, _) => return Err(MorlocError::Other("write failed: wrote nothing".into())),
+            (_, std::io::ErrorKind::Interrupted) => continue,
+            (_, std::io::ErrorKind::BrokenPipe) => return Err(MorlocError::PipeClosed),
+            _ => return Err(MorlocError::Other(format!("write failed: {e}"))),
+        }
+    }
+    Ok(())
+}
+
+/// Returns 0, or `MLC_RESULT_PIPE_CLOSED` when the reader closed `fd`, or -1;
+/// `errmsg` holds the reason for either failure.
 #[no_mangle]
 pub unsafe extern "C" fn write_binary_fd(
     fd: i32,
@@ -484,19 +506,14 @@ pub unsafe extern "C" fn write_binary_fd(
     errmsg: *mut *mut c_char,
 ) -> i32 {
     clear_errmsg(errmsg);
-    let mut total: usize = 0;
-    while total < count {
-        let written = libc::write(fd, buf.add(total) as *const c_void, count - total);
-        if written < 0 {
-            set_errmsg(
-                errmsg,
-                &MorlocError::Other(format!("write failed: {}", std::io::Error::last_os_error())),
-            );
-            return -1;
+    let bytes = if count == 0 { &[][..] } else { std::slice::from_raw_parts(buf as *const u8, count) };
+    match write_all_to_fd(fd, bytes) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            if matches!(e, MorlocError::PipeClosed) { morloc_runtime_types::MLC_RESULT_PIPE_CLOSED } else { -1 }
         }
-        total += written as usize;
     }
-    0
 }
 
 #[no_mangle]
@@ -648,5 +665,42 @@ mod socket_addr_tests {
         let addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
         assert_eq!(SUN_PATH_LEN, addr.sun_path.len());
     }
-}
 
+    fn pipe() -> (i32, i32) {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        (fds[0], fds[1])
+    }
+
+    #[test]
+    fn writing_to_a_closed_pipe_reports_it_apart_from_other_failures() {
+        let (r, w) = pipe();
+        unsafe { libc::close(r) };
+        let mut err: *mut c_char = ptr::null_mut();
+        let rc = unsafe { write_binary_fd(w, b"x".as_ptr() as *const c_char, 1, &mut err) };
+        assert_eq!(rc, morloc_runtime_types::MLC_RESULT_PIPE_CLOSED);
+        assert!(!err.is_null());
+        unsafe { libc::free(err as *mut c_void); libc::close(w) };
+    }
+
+    #[test]
+    fn a_write_larger_than_the_pipe_arrives_whole() {
+        let (r, w) = pipe();
+        let reader = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                let n = unsafe { libc::read(r, buf.as_mut_ptr() as *mut c_void, buf.len()) };
+                if n <= 0 { break; }
+                got.extend_from_slice(&buf[..n as usize]);
+            }
+            unsafe { libc::close(r) };
+            got
+        });
+        let data: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
+        write_all_to_fd(w, &data).unwrap();
+        unsafe { libc::close(w) };
+        assert_eq!(reader.join().unwrap(), data);
+    }
+}

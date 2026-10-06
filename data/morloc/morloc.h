@@ -340,6 +340,11 @@ typedef struct __attribute__((packed)) packet_command_call_s {
 
 #define PACKET_STATUS_PASS 0x00
 #define PACKET_STATUS_FAIL 0x01
+#define PACKET_STATUS_PIPE_CLOSED 0x02
+
+// The reader closed the pipe: mlc_write / mlc_flush / mlc_close return it
+// with no errmsg; write_binary_fd and print_binary with one.
+#define MLC_RESULT_PIPE_CLOSED 2
 
 typedef struct __attribute__((packed)) packet_command_data_s {
     command_type_t type;
@@ -1431,6 +1436,8 @@ int32_t file_is_stream_packet(const char* path);
 int get_data_packet_as_mpk(const uint8_t* packet, const Schema* schema, char** mpk_out, size_t* mpk_size_out, ERRMSG);
 char* read_schema_from_packet_meta(const uint8_t* packet, ERRMSG);
 uint8_t* make_fail_packet(const char* failure_message);
+uint8_t* make_pipe_closed_packet(const char* failure_message);
+bool morloc_packet_is_pipe_closed(const uint8_t* packet);
 char* get_morloc_data_packet_error_message(const uint8_t* data, ERRMSG);
 uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema, ERRMSG);
 

@@ -93,6 +93,8 @@ extern "C" {
     fn make_arrow_data_packet(relptr: isize, schema: *const CSchema) -> *mut u8;
     fn make_inline_data_packet(voidstar: *mut c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
     fn make_fail_packet(msg: *const c_char) -> *mut u8;
+    fn make_pipe_closed_packet(msg: *const c_char) -> *mut u8;
+    fn morloc_packet_is_pipe_closed(packet: *const u8) -> bool;
     // Cross-pool foreign call primitives (see `foreign_call`).
     fn make_morloc_local_call_packet(midx: u32, arg_packets: *const *const u8,
                                      nargs: usize, errmsg: *mut *mut c_char) -> *mut u8;
@@ -2918,6 +2920,10 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
 /// increfed + tracked so the peer's next dispatch flush cannot reclaim data
 /// this pool still references (I3).
 unsafe fn finalize_call_result(result: *mut u8) -> *mut u8 {
+    if morloc_packet_is_pipe_closed(result) {
+        libc::free(result as *mut c_void);
+        pipe_closed();
+    }
     let mut fail_err: *mut c_char = std::ptr::null_mut();
     let fail_msg = get_morloc_data_packet_error_message(result, &mut fail_err);
     discard_err(fail_err);
@@ -3624,7 +3630,8 @@ where
         Ok(p) => p,
         Err(payload) if payload.is::<MorlocPipeClosed>() => {
             TRACEBACK.with(|t| t.borrow_mut().clear());
-            unsafe { fail_packet(PIPE_CLOSED_MESSAGE) }
+            let msg = CString::new(PIPE_CLOSED_MESSAGE).unwrap();
+            unsafe { make_pipe_closed_packet(msg.as_ptr()) }
         }
         Err(payload) => {
             let msg = panic_message(payload.as_ref());
@@ -3910,7 +3917,19 @@ mod runtime_failure_tests {
         let msg = unsafe { get_morloc_data_packet_error_message(packet, &mut err) };
         assert!(err.is_null());
         assert_eq!(unsafe { cstr_take(msg) }, PIPE_CLOSED_MESSAGE);
+        assert!(unsafe { morloc_packet_is_pipe_closed(packet) });
         unsafe { libc::free(packet as *mut c_void) };
+    }
+
+    #[test]
+    fn a_callee_whose_pipe_closed_ends_the_callers_call_past_try() {
+        let msg = CString::new("closed downstream").unwrap();
+        let packet = unsafe { make_pipe_closed_packet(msg.as_ptr()) };
+        let escaped = std::panic::catch_unwind(|| {
+            mlc_try(|| -> usize { (unsafe { finalize_call_result(packet) }) as usize }, |_| 0, |_| 1)
+        })
+        .unwrap_err();
+        assert!(escaped.is::<MorlocPipeClosed>());
     }
 }
 

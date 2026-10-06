@@ -37,6 +37,17 @@
 
 #define MAYFAIL char* child_errmsg_ = NULL;
 
+// Set when a stream write found its reader gone during the current dispatch.
+static int r_pipe_closed = 0;
+
+// Raise the closed-pipe condition (pool.R), which ends the call.
+static void raise_pipe_closed(void) {
+    r_pipe_closed = 1;
+    SEXP call = PROTECT(Rf_lang1(Rf_install("morloc_mlc_pipe_closed")));
+    Rf_eval(call, R_GlobalEnv);
+    UNPROTECT(1);
+}
+
 // User-attributable failures carry the message alone -- no source file, line,
 // or function. Those locate the runtime, not the user's program, and the user
 // cannot act on them; the nexus already prints the manifold call chain, which
@@ -2531,7 +2542,8 @@ SEXP morloc_mlc_close(SEXP handle_r) { MAYFAIL
         MORLOC_INTERNAL_ABORT("mlc_close: handle must be a single number");
     }
     int64_t handle = i64_from_sexp(handle_r);
-    R_TRY(mlc_close, handle);
+    int rc = R_TRY(mlc_close, handle);
+    if (rc == MLC_RESULT_PIPE_CLOSED) raise_pipe_closed();
     return R_NilValue;
 }
 
@@ -3034,13 +3046,14 @@ SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle
     void* voidstar = R_TRY(shmalloc, bytes);
     void* cursor = (uint8_t*)voidstar + schema->width;
     to_voidstar_inner(voidstar, &cursor, value_r, schema);
-    R_TRY(mlc_write, level, handle, voidstar);
+    int rc = R_TRY(mlc_write, level, handle, voidstar);
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
     free_schema(schema);
+    if (rc == MLC_RESULT_PIPE_CLOSED) raise_pipe_closed();
     return R_NilValue;
 }
 
@@ -3174,7 +3187,8 @@ SEXP morloc_mlc_flush(SEXP handle_r) { MAYFAIL
         MORLOC_INTERNAL_ABORT("mlc_flush: handle must be a single number");
     }
     int64_t handle = i64_from_sexp(handle_r);
-    R_TRY(mlc_flush, handle);
+    int rc = R_TRY(mlc_flush, handle);
+    if (rc == MLC_RESULT_PIPE_CLOSED) raise_pipe_closed();
     return R_NilValue;
 }
 
@@ -3631,7 +3645,12 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
             char* msg_copy = strdup(fail_msg);
             free(fail_msg);
             free(packet);
+            bool pipe_closed = morloc_packet_is_pipe_closed((const uint8_t*)result);
             free(result);
+            if (pipe_closed) {
+                free(msg_copy);
+                raise_pipe_closed();
+            }
             if (msg_copy == NULL) {
                 error("morloc R foreign_call: OOM copying fail message");
             }
@@ -4316,13 +4335,20 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
 
     // Single crossing into R: evaluate the manifold
     int eval_err = 0;
+    r_pipe_closed = 0;
     SEXP result = R_tryEvalSilent(r_call, R_GlobalEnv, &eval_err);
     // A process forked by user code during this call exits here (FORK-12).
     morloc_exit_if_forked();
 
     if (eval_err || result == R_NilValue || TYPEOF(result) != RAWSXP) {
         UNPROTECT(nprotect);
-        if (eval_err) {
+        if (eval_err && r_pipe_closed) {
+            char* errmsg2 = NULL;
+            uint8_t* closed = make_pipe_closed_packet("@stdout: downstream pipe closed");
+            send_reply_to_foreign_server(client_fd, closed, shm_tracker_flush, &errmsg2);
+            free(closed);
+            free(errmsg2);
+        } else if (eval_err) {
             char* bare = r_error_message(R_curErrorBuf());
             send_fail_to_client(client_fd, bare != NULL ? bare : R_curErrorBuf());
             free(bare);

@@ -203,7 +203,7 @@ beside the pool would fix both.
 
 ### PANIC-13 A broken runtime invariant in the Rust pool ends the pool
 Status: implemented
-Checked by: loading_a_missing_file_fails_with_a_reason, loading_a_null_path_fails_with_a_reason, reading_malformed_json_fails_with_a_reason, reading_a_null_string_fails_with_a_reason, saving_to_a_null_path_fails_with_a_reason, a_runtime_value_failure_without_a_reason_ends_the_pool, a_runtime_handle_failure_without_a_reason_ends_the_pool, a_runtime_failure_with_a_reason_is_a_catchable_error, a_closed_pipe_passes_through_try, a_closed_pipe_fails_the_call_with_its_own_message, a_callee_failure_without_a_reason_ends_the_process_even_inside_a_catch_scope, golden:rust-thunk-capture
+Checked by: loading_a_missing_file_fails_with_a_reason, loading_a_null_path_fails_with_a_reason, reading_malformed_json_fails_with_a_reason, reading_a_null_string_fails_with_a_reason, saving_to_a_null_path_fails_with_a_reason, a_runtime_value_failure_without_a_reason_ends_the_pool, a_runtime_handle_failure_without_a_reason_ends_the_pool, a_runtime_failure_with_a_reason_is_a_catchable_error, a_closed_pipe_passes_through_try, a_closed_pipe_fails_the_call_with_its_own_message, a_callee_failure_without_a_reason_ends_the_process_even_inside_a_catch_scope, a_callee_whose_pipe_closed_ends_the_callers_call_past_try, a_pipe_closed_packet_is_a_failure_that_says_so, golden:rust-thunk-capture, golden:stdio-pipe-closed
 
 A check whose failing value can come from outside the runtime -- a client
 or peer packet, a file, a user value, handle or type mapping, bytes a user
@@ -214,8 +214,9 @@ give a reason for every failure input can cause; libmorloc's intrinsics
 treat a failure of their own callee without one as a defect. The Rust
 pool ends on such a call's failure that carries no reason, and on a write
 walk that leaves the block it allocated. A closed downstream pipe is
-neither: it ends the call, no catch holds it, and the nexus decides the
-exit status.
+neither: in every pool language it ends the call and no catch holds it; a
+callee answers it with a fail packet marked as a closed pipe, which its
+caller raises again; and the nexus decides the exit status.
 
 ### PANIC-14 A failed check on data the runtime built ends the pool
 Status: deviation

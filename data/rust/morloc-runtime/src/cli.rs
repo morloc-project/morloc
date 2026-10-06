@@ -10,7 +10,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::cschema::CSchema;
-use crate::error::{clear_errmsg, set_errmsg, MorlocError};
+use crate::error::{clear_errmsg, set_errmsg, take_reason, MorlocError};
 use crate::packet;
 use morloc_runtime_types::width;
 use crate::shm;
@@ -2548,14 +2548,23 @@ pub unsafe extern "C" fn load_morloc_data_file(
                 libc::free(json_buf as *mut c_void);
                 return result as *mut c_void;
             }
-            if !err.is_null() { libc::free(err as *mut c_void); err = ptr::null_mut(); }
-            // Fall through to try msgpack
-            // Note: data pointer may have been invalidated by realloc
-            // Use json_buf as the data pointer going forward
+            let json_reason = if err.is_null() {
+                "not a value of the requested type".to_string()
+            } else {
+                take_reason(err).to_string()
+            };
+            err = ptr::null_mut();
+            // realloc may have moved the bytes; json_buf holds them now.
             let mut result: *mut c_void = ptr::null_mut();
             unpack_with_schema(json_buf as *const c_char, data_size, schema, &mut result, &mut err);
             libc::free(json_buf as *mut c_void);
-            if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
+            if !err.is_null() {
+                let msgpack_reason = take_reason(err);
+                set_errmsg(errmsg, &MorlocError::Other(format!(
+                    "the data is neither JSON ({json_reason}) nor MessagePack ({msgpack_reason})"
+                )));
+                return ptr::null_mut();
+            }
             return result;
         }
     }

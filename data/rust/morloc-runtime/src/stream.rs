@@ -5170,9 +5170,9 @@ fn empty_shm_array() -> Result<AbsPtr, MorlocError> {
 /// fresh SHM blocks), the returned value is self-contained: the
 /// per-sub-packet chunk buffers are freed before returning and nothing in
 /// the result points back into them.
-pub fn shared_load_stream_file_as_array(path: &str) -> Result<AbsPtr, MorlocError> {
+pub fn shared_load_stream_file_as_array(path: &str, requested: Option<&Schema>) -> Result<AbsPtr, MorlocError> {
     let handle = shared_open_istream(path)?;
-    let result = collect_istream_into_array(handle, path);
+    let result = check_stream_schema(handle, path, requested).and_then(|()| collect_istream_into_array(handle, path));
     // The stream is fully consumed here; release the slot and munmap the
     // backing file regardless of success so the handle never leaks.
     let _ = shared_discard_handle(handle);
@@ -5400,6 +5400,19 @@ fn stream_payload_hint(handle: i64) -> Option<(u64, u64)> {
         }
         Ok((elems, payload))
     }).ok()
+}
+
+fn check_stream_schema(handle: i64, path: &str, requested: Option<&Schema>) -> Result<(), MorlocError> {
+    let Some(requested) = requested else { return Ok(()) };
+    let stored = shared_handle_schema_str(handle)?;
+    let wanted = morloc_runtime_types::schema::schema_to_string(requested);
+    if morloc_runtime_types::schema::schema_strings_compatible(&stored, &wanted) {
+        Ok(())
+    } else {
+        Err(MorlocError::UserThrow(format!(
+            "@load: schema mismatch reading '{path}': file has schema `{stored}`, requested `{wanted}`"
+        )))
+    }
 }
 
 /// Drain every sub-packet of an open IStream `handle` into one combined
@@ -12349,7 +12362,7 @@ mod tests {
         }));
 
         check("@load", Box::new(|| {
-            let v = shared_load_stream_file_as_array(p).unwrap();
+            let v = shared_load_stream_file_as_array(p, None).unwrap();
             shm::shfree(v).unwrap();
         }));
 
@@ -12820,7 +12833,7 @@ mod tests {
         let _ = shared_discard_handle(r);
         assert_eq!(frames, vec![r#"["abc"]"#, r#"["de","","fghij"]"#]);
 
-        assert_eq!(render(shared_load_stream_file_as_array(path).unwrap()), r#"["abc","de","","fghij"]"#);
+        assert_eq!(render(shared_load_stream_file_as_array(path, Some(&list)).unwrap()), r#"["abc","de","","fghij"]"#);
 
         let f = open_ifile(path).unwrap();
         let arg = crate::intrinsics::IFileWalkArg::opt;
@@ -12831,6 +12844,25 @@ mod tests {
         let run = shared_ifile_walk(f, ".[:]", &[arg(Some(1)), arg(Some(4)), arg(None)]).unwrap();
         assert_eq!(render(run), r#"["de","","fghij"]"#);
         close_handle(f).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loading_a_stream_file_as_another_type_is_refused() {
+        let _shm = crate::own_test_registry();
+        let dir = std::env::temp_dir().join(format!("morloc_stream_test_{}_retype", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("strs.stream");
+        let path = path.to_str().unwrap();
+        let list = parse_schema("as").unwrap();
+        let sub = build_str_voidstar_subpacket(&["ab", "cd"]);
+        std::fs::write(path, build_stream_file_from(&list, vec![sub], &[2])).unwrap();
+
+        let reals = parse_schema("af8").unwrap();
+        let err = shared_load_stream_file_as_array(path, Some(&reals)).unwrap_err();
+        assert!(err.to_string().contains("schema mismatch"), "{err}");
+        let p = shared_load_stream_file_as_array(path, Some(&list)).unwrap();
+        shm::shfree(p).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -12856,7 +12888,7 @@ mod tests {
         let r = shared_open_istream(path).unwrap();
         assert!(shared_next_frame(r).is_err(), "@next accepted an overlong string");
         let _ = shared_discard_handle(r);
-        assert!(shared_load_stream_file_as_array(path).is_err(), "@load accepted it");
+        assert!(shared_load_stream_file_as_array(path, Some(&list)).is_err(), "@load accepted it");
 
         let f = open_ifile(path).unwrap();
         let arg = crate::intrinsics::IFileWalkArg::opt;

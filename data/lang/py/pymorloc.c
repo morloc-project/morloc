@@ -236,6 +236,9 @@ char* get_prior_err(){
 // terminates the pool. Both set in PyInit_pymorloc.
 static PyObject* PyMorlocException = NULL;
 static PyObject* PyMorlocInternalError = NULL;
+static PyObject* PyMorlocPipeClosed = NULL;
+
+#define PIPE_CLOSED_MESSAGE "@stdout: downstream pipe closed"
 
 #define PyINTERNAL_ABORT(msg, ...) { \
     PyErr_Format(PyMorlocInternalError, \
@@ -3217,7 +3220,8 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
             (const uint8_t*)result, &fail_check_err);
         if (fail_check_err != NULL) { free(fail_check_err); }
         if (fail_msg != NULL) {
-            PyErr_Format(PyExc_RuntimeError, "%s", fail_msg);
+            PyErr_Format(morloc_packet_is_pipe_closed((const uint8_t*)result) ? PyMorlocPipeClosed : PyExc_RuntimeError,
+                         "%s", fail_msg);
             free(fail_msg);
             free(result);
             result = NULL;
@@ -3443,6 +3447,27 @@ static PyObject* pybinding__make_fail_packet(PyObject* self, PyObject* args) { M
     PARSE_ARGS_OR_ABORT(args, "s", &packet_errmsg);
 
     packet = make_fail_packet(packet_errmsg);
+
+    size_t packet_size = PyTRY(morloc_packet_size, packet);
+
+    {
+        PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
+        free(packet);
+        return retval;
+    }
+
+error:
+    FREE(packet)
+    return NULL;
+}
+
+static PyObject* pybinding__make_pipe_closed_packet(PyObject* self, PyObject* args) { MAYFAIL
+    const char* packet_errmsg;
+    uint8_t* packet = NULL;
+
+    PARSE_ARGS_OR_ABORT(args, "s", &packet_errmsg);
+
+    packet = make_pipe_closed_packet(packet_errmsg);
 
     size_t packet_size = PyTRY(morloc_packet_size, packet);
 
@@ -3804,7 +3829,10 @@ static PyObject* pybinding__mlc_close(PyObject* self, PyObject* args) { MAYFAIL
     PARSE_ARGS_OR_ABORT(args, "L", &handle_ll);
     int32_t rc_ = 0;
     PyTRY_NOGIL(rc_, mlc_close, (int64_t)handle_ll);
-    (void)rc_;
+    if (rc_ == MLC_RESULT_PIPE_CLOSED) {
+        PyErr_SetString(PyMorlocPipeClosed, PIPE_CLOSED_MESSAGE);
+        goto error;
+    }
     Py_RETURN_NONE;
 error:
     return NULL;
@@ -4119,7 +4147,10 @@ static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
     {
         int32_t rc_ = 0;
         PyTRY_NOGIL(rc_, mlc_write, level_ll, (int64_t)handle_ll, voidstar);
-        (void)rc_;
+        if (rc_ == MLC_RESULT_PIPE_CLOSED) {
+            PyErr_SetString(PyMorlocPipeClosed, PIPE_CLOSED_MESSAGE);
+            goto error;
+        }
     }
     {
         char* shfree_errmsg = NULL;
@@ -4273,7 +4304,10 @@ static PyObject* pybinding__mlc_flush(PyObject* self, PyObject* args) { MAYFAIL
     PARSE_ARGS_OR_ABORT(args, "L", &handle_ll);
     int32_t rc_ = 0;
     PyTRY_NOGIL(rc_, mlc_flush, (int64_t)handle_ll);
-    (void)rc_;
+    if (rc_ == MLC_RESULT_PIPE_CLOSED) {
+        PyErr_SetString(PyMorlocPipeClosed, PIPE_CLOSED_MESSAGE);
+        goto error;
+    }
     Py_RETURN_NONE;
 error:
     return NULL;
@@ -4457,9 +4491,7 @@ static PyObject* pybinding__mlc_cell_reduce(PyObject* self, PyObject* args) { MA
     PARSE_ARGS_OR_ABORT(args, "sOL", &schema_str, &combine, &handle_ll);
     int64_t n = PyTRY(mlc_cell_count, (int64_t)handle_ll);
     if (n < 1) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "mlc_cell_reduce: fold accumulator holds nothing to merge");
-        goto error;
+        PyINTERNAL_ABORT("mlc_cell_reduce: fold accumulator holds nothing to merge");
     }
     for (int64_t i = 0; i < n; i++) {
         // One schema per accumulator: from_voidstar may hand back a numpy
@@ -4546,6 +4578,7 @@ static PyMethodDef Methods[] = {
     {"is_remote_call", pybinding__is_remote_call, METH_VARARGS, "Packet is a remote call"},
     {"pong", pybinding__pong, METH_VARARGS, "Return a ping"},
     {"make_fail_packet", pybinding__make_fail_packet, METH_VARARGS, "Create a fail packet from an error message"},
+    {"make_pipe_closed_packet", pybinding__make_pipe_closed_packet, METH_VARARGS, "Create a fail packet for a closed downstream pipe"},
     {"remote_call", pybinding__remote_call, METH_VARARGS, "Make a call to a remote cluster"},
     {"mlc_hash", pybinding__mlc_hash, METH_VARARGS, "Hash a value using xxhash"},
     {"mlc_save", pybinding__mlc_save, METH_VARARGS, "Save a value to file in msgpack format"},
@@ -4627,6 +4660,17 @@ PyMODINIT_FUNC PyInit_pymorloc(void) {
     Py_INCREF(PyMorlocInternalError);
     if (PyModule_AddObject(m, "MorlocInternalError", PyMorlocInternalError) < 0) {
         Py_DECREF(PyMorlocInternalError);
+        Py_DECREF(m);
+        return NULL;
+    }
+    PyMorlocPipeClosed = PyErr_NewException("pymorloc.MorlocPipeClosed", PyExc_BaseException, NULL);
+    if (PyMorlocPipeClosed == NULL) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    Py_INCREF(PyMorlocPipeClosed);
+    if (PyModule_AddObject(m, "MorlocPipeClosed", PyMorlocPipeClosed) < 0) {
+        Py_DECREF(PyMorlocPipeClosed);
         Py_DECREF(m);
         return NULL;
     }

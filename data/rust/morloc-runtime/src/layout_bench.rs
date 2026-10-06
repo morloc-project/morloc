@@ -83,7 +83,7 @@ fn bench_case(case: &str, list_schema_str: &str, value: AbsPtr, n: usize, dir: &
     }));
 
     report(case, "@load", time(|| {
-        let p = shared_load_stream_file_as_array(path).unwrap();
+        let p = shared_load_stream_file_as_array(path, None).unwrap();
         shm::shfree(p).unwrap();
     }));
 

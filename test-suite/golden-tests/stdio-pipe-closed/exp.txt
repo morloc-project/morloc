@@ -7,3 +7,5 @@ catch count: 5
 catch first: 0
 catch status: 141
 full count: 100000
+packet status: 141
+voidstar status: 141

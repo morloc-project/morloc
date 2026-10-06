@@ -10,6 +10,7 @@ data/lang/py/pymorloc.c::-::shm_tracker_cap	thread
 data/lang/py/pymorloc.c::-::shm_tracker_gen	thread		
 data/lang/py/pymorloc.c::-::PyMorlocException	startup		
 data/lang/py/pymorloc.c::-::PyMorlocInternalError	startup		
+data/lang/py/pymorloc.c::-::PyMorlocPipeClosed	startup		
 data/lang/py/pymorloc.c::-::recur_env_stack	thread		
 data/lang/py/pymorloc.c::-::recur_env_depth	thread		
 data/lang/py/pymorloc.c::-::recur_env_cap	thread		
@@ -22,6 +23,7 @@ data/lang/r/rmorloc.c::-::shm_tracker_gen	fork-scoped
 data/lang/r/rmorloc.c::-::recur_env_stack	thread		
 data/lang/r/rmorloc.c::-::recur_env_depth	thread		
 data/lang/r/rmorloc.c::-::recur_env_cap	thread		
+data/lang/r/rmorloc.c::-::r_pipe_closed	thread		
 data/lang/r/rmorloc.c::-::r_frames	thread		
 data/lang/r/rmorloc.c::-::r_frames_cap	thread		
 data/lang/r/rmorloc.c::-::daemon_creator_generation	fork-scoped		

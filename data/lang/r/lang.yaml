@@ -96,6 +96,7 @@ ldBlockEnd: "}"
 ldErrorWrapOpen: "tryCatch({"
 ldErrorWrapClose:
   - "}, error = function(e) {"
+  - "    if (inherits(e, \"MorlocInternalError\")) stop(e)"
   - "    stop(paste0(conditionMessage(e), \"\\n  at {{name}} [r] (mid={{mid}}{{srcloc_suffix}})\"), call.=FALSE)"
   - "})"
 ldPatternStyle: concat_call

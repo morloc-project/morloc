@@ -1771,14 +1771,8 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
 /// Flatten voidstar and write to a file descriptor. Returns bytes written.
 pub fn write_binary_to_fd(fd: i32, data: AbsPtr, schema: &Schema) -> Result<usize, MorlocError> {
     let buf = flatten_to_buffer(data, schema)?;
-    // SAFETY: buf is a valid byte slice; fd is a valid file descriptor from the caller.
-    let written = unsafe {
-        libc::write(fd, buf.as_ptr() as *const std::ffi::c_void, buf.len())
-    };
-    if written < 0 {
-        return Err(MorlocError::Io(std::io::Error::last_os_error()));
-    }
-    Ok(written as usize)
+    crate::utility::write_all_to_fd(fd, &buf)?;
+    Ok(buf.len())
 }
 
 // ── Tests: write_flat_to_writer byte-equivalence with flatten_to_buffer ───

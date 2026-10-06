@@ -12,7 +12,8 @@ all:
 	printf 'catch first: ' >> obs.txt ; head -n 1 gotc.txt >> obs.txt
 	printf 'catch status: ' >> obs.txt ; cat rcc.txt >> obs.txt
 	printf 'full count: ' >> obs.txt ; ./nexus -f jsonl @ produceBig 2>> obs.err | wc -l | tr -d ' ' >> obs.txt
-	rm -f got.txt gotc.txt rc.txt rcc.txt
+	for f in packet voidstar ; do { ./nexus -f $$f bigList 2>> obs.err ; echo $$? > rcp.txt ; } | head -c 16 > /dev/null ; printf "$$f status: " >> obs.txt ; cat rcp.txt >> obs.txt ; done
+	rm -f got.txt gotc.txt rc.txt rcc.txt rcp.txt
 
 clean:
-	rm -rf nexus __pycache__ *.err got.txt gotc.txt rc.txt rcc.txt *-build *build.tmp*
+	rm -rf nexus __pycache__ *.err got.txt gotc.txt rc.txt rcc.txt rcp.txt *-build *build.tmp*

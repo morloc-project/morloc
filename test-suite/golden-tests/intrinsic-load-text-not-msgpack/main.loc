@@ -1,0 +1,11 @@
+-- A file that is neither JSON nor MessagePack of the requested type is
+-- refused by @load, not read from its first byte: "1.5" is not the Int 49.
+
+module main (loadInt)
+
+import root-py
+
+loadInt :: Str -> <IO> Int
+loadInt p = do
+  r <- @load p :: <IO> (Try Str Int)
+  match r | (Ok x) = x | (Err _) = -1

@@ -1768,7 +1768,15 @@ pub(crate) fn print_result_c(
                 }
             } else {
                 let mut errmsg2: *mut std::ffi::c_char = std::ptr::null_mut();
-                unsafe { print_morloc_data_packet(full_packet.as_ptr(), schema, &mut errmsg2) };
+                match unsafe { print_morloc_data_packet(full_packet.as_ptr(), schema, &mut errmsg2) } {
+                    0 => {}
+                    PRINT_RESULT_PIPE_CLOSED => process::exit_broken_pipe(),
+                    _ => {
+                        let msg = process::take_c_errmsg(errmsg2).unwrap_or_else(|| "unknown error".into());
+                        eprintln!("Error: voidstar output failed: {}", msg);
+                        process::clean_exit(1);
+                    }
+                }
             }
         }
         OutputFormat::Packet => {
@@ -1831,6 +1839,9 @@ pub(crate) fn print_result_c(
                 }
             };
             drop(lock);
+            if n == morloc_runtime_types::PACKET_TO_FD_PIPE_CLOSED {
+                process::exit_broken_pipe();
+            }
             if n < 0 {
                 let msg = process::take_c_errmsg(nerr)
                     .unwrap_or_else(|| "unknown error".into());

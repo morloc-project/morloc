@@ -569,6 +569,8 @@ def run_job(client_fd: int) -> None:
 
             try:
                 result = table[mid](*args)
+            except morloc.MorlocPipeClosed as e:
+                result = morloc.make_pipe_closed_packet(str(e))
             except Exception as e:
                 result = morloc.make_fail_packet(_with_debug_trace(str(e)))
             # A process forked by user code during this call exits as soon

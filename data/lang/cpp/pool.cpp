@@ -633,10 +633,6 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-// Reserved return code from mlc_write / mlc_flush / mlc_close: the write
-// hit EPIPE. The runtime returns this WITHOUT setting errmsg. Kept in
-// sync with morloc_runtime_types::MLC_RESULT_PIPE_CLOSED (= 2).
-static constexpr int MLC_RESULT_PIPE_CLOSED = 2;
 
 // Throw the distinguished broken-pipe exception when a stdio C-ABI call
 // returns the reserved pipe-closed code. Shared by @write/@flush/@close.
@@ -1129,7 +1125,11 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
         if (fail_msg != NULL) {
             std::string msg(fail_msg);
             free(fail_msg);
+            bool pipe_closed = morloc_packet_is_pipe_closed(result);
             free(result);
+            if (pipe_closed) {
+                throw MorlocPipeClosed(msg);
+            }
             throw MorlocException(msg);
         }
     }
@@ -1486,7 +1486,7 @@ uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
     } catch (const MorlocPipeClosed& e) {
         // Broken pipe: a distinguished, non-abort failure. The nexus owns
         // fd 1 and decides the pipeline exit status.
-        return make_fail_packet(e.what());
+        return make_pipe_closed_packet(e.what());
     } catch (const MorlocInfraError& e) {
         // Not recoverable and not the user's doing. Aborting rather than
         // returning a fail packet is what keeps it fatal across pools: a
@@ -1523,7 +1523,7 @@ uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
     } catch (const MorlocPipeClosed& e) {
         // Broken pipe: a distinguished, non-abort failure. The nexus owns
         // fd 1 and decides the pipeline exit status.
-        return make_fail_packet(e.what());
+        return make_pipe_closed_packet(e.what());
     } catch (const MorlocInfraError& e) {
         // Not recoverable and not the user's doing. Aborting rather than
         // returning a fail packet is what keeps it fatal across pools: a

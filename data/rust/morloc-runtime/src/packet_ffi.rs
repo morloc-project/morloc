@@ -637,6 +637,36 @@ pub unsafe extern "C" fn make_fail_packet(
     )
 }
 
+/// A fail packet saying the call ended because its downstream reader
+/// closed the pipe; a caller re-raises it rather than handing it to `@try`.
+#[no_mangle]
+pub unsafe extern "C" fn make_pipe_closed_packet(
+    failure_message: *const c_char,
+) -> *mut u8 {
+    if failure_message.is_null() { return ptr::null_mut(); }
+    let msg = CStr::from_ptr(failure_message).to_bytes();
+    make_data_packet_raw(
+        msg.as_ptr(),
+        msg.len(),
+        ptr::null(),
+        0,
+        PACKET_SOURCE_MESG,
+        PACKET_FORMAT_TEXT,
+        PACKET_COMPRESSION_NONE,
+        PACKET_ENCRYPTION_NONE,
+        morloc_runtime_types::packet::PACKET_STATUS_PIPE_CLOSED,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn morloc_packet_is_pipe_closed(packet: *const u8) -> bool {
+    if packet.is_null() { return false; }
+    let mut err: *mut c_char = ptr::null_mut();
+    let header = read_morloc_packet_header(packet, &mut err);
+    if !err.is_null() { libc::free(err as *mut c_void); }
+    !header.is_null() && (*header).is_pipe_closed()
+}
+
 // ── Error message extraction ─────────────────────────────────────────────────
 
 #[no_mangle]
@@ -806,7 +836,8 @@ pub unsafe extern "C" fn get_morloc_data_packet_value(
                 // A stream file is read whole, every sub-packet in order, into
                 // the list its elements make: the `[a]` receiver of a stream.
                 if crate::cli::file_is_stream_packet(filename_cstr.as_ptr()) == 1 {
-                    return match crate::stream::shared_load_stream_file_as_array(filename) {
+                    let requested = (!schema.is_null()).then(|| crate::cschema::CSchema::to_rust(schema));
+                    return match crate::stream::shared_load_stream_file_as_array(filename, requested.as_ref()) {
                         Ok(p) => p as *mut u8,
                         Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                     };
@@ -1626,7 +1657,7 @@ unsafe fn buffered_packet_to_fd(
 
 // Write `len` bytes from `buf` to `fd`, retrying on partial writes
 // and EINTR. Returns bytes written or -1 with errmsg set.
-unsafe fn write_all_fd(
+pub(crate) unsafe fn write_all_fd(
     fd: libc::c_int,
     buf: *const u8,
     len: usize,
@@ -1868,8 +1899,9 @@ unsafe fn stream_packet_to_fd(
     let mut hdr_bytes = new_header.to_bytes();
     hdr_bytes[24..32].copy_from_slice(&0u64.to_le_bytes());
 
-    if write_all_fd(fd, hdr_bytes.as_ptr(), 32, errmsg) < 0 {
-        return -1;
+    let n = write_all_fd(fd, hdr_bytes.as_ptr(), 32, errmsg);
+    if n < 0 {
+        return n;
     }
     // The frame-index body lives in `new_meta` at the offset right
     // after the entry header (mmh + type + u32 size). We'll pwrite
@@ -1892,8 +1924,9 @@ unsafe fn stream_packet_to_fd(
         None
     };
     if extended_offset > 0 {
-        if write_all_fd(fd, new_meta.as_ptr(), extended_offset, errmsg) < 0 {
-            return -1;
+        let n = write_all_fd(fd, new_meta.as_ptr(), extended_offset, errmsg);
+        if n < 0 {
+            return n;
         }
     }
 
@@ -2294,8 +2327,9 @@ pub unsafe extern "C" fn print_morloc_data_packet(
     match source {
         PACKET_SOURCE_MESG | PACKET_SOURCE_FILE => {
             // Print the raw packet bytes
-            if print_binary(packet, packet_size, errmsg) != 0 {
-                return 1;
+            let rc = print_binary(packet, packet_size, errmsg);
+            if rc != 0 {
+                return rc;
             }
         }
         PACKET_SOURCE_RPTR => {
@@ -2321,28 +2355,34 @@ pub unsafe extern "C" fn print_morloc_data_packet(
                     *(new_hdr_ptr.add(24) as *mut u64) = flat_size as u64;
 
                     // Print header
-                    if print_binary(&new_header as *const PacketHeader as *const u8, 32, errmsg) != 0 {
-                        return 1;
+                    let rc = print_binary(&new_header as *const PacketHeader as *const u8, 32, errmsg);
+                    if rc != 0 {
+                        return rc;
                     }
 
                     // Print metadata
                     let offset = (*header).offset as usize;
                     if offset > 0 {
-                        if print_binary(packet.add(32), offset, errmsg) != 0 {
-                            return 1;
+                        let rc = print_binary(packet.add(32), offset, errmsg);
+                        if rc != 0 {
+                            return rc;
                         }
                     }
 
                     // Write flattened voidstar data to stdout
                     match crate::voidstar::write_binary_to_fd(libc::STDOUT_FILENO, voidstar_ptr, &rs) {
                         Ok(_) => {}
-                        Err(e) => { set_errmsg(errmsg, &e); return 1; }
+                        Err(e) => {
+                            set_errmsg(errmsg, &e);
+                            return if matches!(e, MorlocError::PipeClosed) { morloc_runtime_types::MLC_RESULT_PIPE_CLOSED } else { 1 };
+                        }
                     }
                 }
                 _ => {
                     // Other formats: print raw packet
-                    if print_binary(packet, packet_size, errmsg) != 0 {
-                        return 1;
+                    let rc = print_binary(packet, packet_size, errmsg);
+                    if rc != 0 {
+                        return rc;
                     }
                 }
             }
@@ -2365,20 +2405,7 @@ unsafe fn print_binary(
     count: usize,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    let mut written: usize = 0;
-    while written < count {
-        let n = libc::write(
-            libc::STDOUT_FILENO,
-            buf.add(written) as *const c_void,
-            count - written,
-        );
-        if n < 0 {
-            set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
-            return 1;
-        }
-        written += n as usize;
-    }
-    0
+    crate::utility::print_binary(buf as *const c_char, count, errmsg)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -2527,6 +2554,24 @@ mod auto_routing_tests {
     //! becoming alignment-sensitive; the boundary itself is checked
     //! once each side.
     use super::*;
+
+    #[test]
+    fn a_pipe_closed_packet_is_a_failure_that_says_so() {
+        let msg = std::ffi::CString::new("closed").unwrap();
+        let p = unsafe { make_pipe_closed_packet(msg.as_ptr()) };
+        let f = unsafe { make_fail_packet(msg.as_ptr()) };
+        let mut err: *mut c_char = ptr::null_mut();
+        let text = unsafe { get_morloc_data_packet_error_message(p, &mut err) };
+        assert!(!text.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(text) }.to_str().unwrap(), "closed");
+        assert!(unsafe { morloc_packet_is_pipe_closed(p) });
+        assert!(!unsafe { morloc_packet_is_pipe_closed(f) });
+        unsafe {
+            libc::free(text as *mut c_void);
+            libc::free(p as *mut c_void);
+            libc::free(f as *mut c_void);
+        }
+    }
     use crate::packet::{
         MORLOC_INLINE_THRESHOLD, PACKET_SOURCE_MESG, PACKET_SOURCE_RPTR,
         TEST_CONFIG_LOCK,
