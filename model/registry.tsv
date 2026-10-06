@@ -202,6 +202,7 @@ morloc-runtime-types/compression.rs::frame_workers::CACHED	lazy
 morloc-runtime-types/owner_word.rs::-::HELD	thread		
 morloc-runtime-types/panic.rs::-::IN_SCOPE	thread		
 morloc-runtime-types/panic.rs::-::UNWINDING	thread		
+morloc-runtime-types/panic.rs::-::FATAL	thread		
 morloc-runtime-types/process.rs::token::CACHED	fork-scoped		
 morloc-runtime-types/process.rs::token::CACHED_GENERATION	fork-scoped		
 morloc-runtime-types/fork_generation.rs::-::GENERATION	counter		
@@ -240,6 +241,7 @@ morloc-nexus/process.rs::-::IN_FLIGHT	exec-only
 morloc-nexus/process.rs::-::SHM_BASENAME_PREFIX	exec-only		
 morloc-nexus/process.rs::-::RUN_TMPDIR	exec-only		
 morloc-nexus/process.rs::-::SPAWN_TO_RECORD_DELAY_MS	test-only		
+morloc-nexus/process.rs::-::NEXUS_GENERATION	startup		
 morloc-nexus/runlog.rs::-::State.command	exec-only		
 morloc-nexus/runlog.rs::-::State.error	exec-only		
 morloc-nexus/runlog.rs::-::STATE	exec-only		
@@ -259,6 +261,7 @@ morloc-nexus/view.rs::-::STDIN_TEMP_FILES	exec-only
 morloc-nexus/view.rs::-::STDIN_ATEXIT_REGISTERED	exec-only		
 morloc-runtime/fork_policy.rs::a_fork_from_a_thread_local_destructor_completes::LATE	test-only		
 morloc-runtime/lib.rs::-::SHM_TEST_ARENA	test-only		
+morloc-runtime/panic_ffi.rs::-::EXIT	startup		
 morloc-nexus/sigrm.rs::-::PATHS	exec-only		
 morloc-runtime/stream.rs::the_nexus_connection_works_from_a_thread_local_destructor::LATE	test-only		
 morloc-runtime/source_rules.rs::scan_rust::SCAN	test-only		

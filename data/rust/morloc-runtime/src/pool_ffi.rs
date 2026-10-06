@@ -657,6 +657,7 @@ pub unsafe extern "C" fn pool_main(
     argv: *mut *mut c_char,
     config: *mut PoolConfig,
 ) -> i32 {
+    crate::panic_ffi::install(None);
     tune_allocator();
     if argc != 4 {
         let prog = if argc > 0 { CStr::from_ptr(*argv).to_string_lossy() } else { "pool".into() };

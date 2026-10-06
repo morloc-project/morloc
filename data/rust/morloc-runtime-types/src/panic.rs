@@ -6,9 +6,23 @@ pub const PANIC_EXIT_STATUS: i32 = 70;
 thread_local! {
     static IN_SCOPE: Cell<bool> = const { Cell::new(false) };
     static UNWINDING: Cell<bool> = const { Cell::new(false) };
+    static FATAL: Cell<bool> = const { Cell::new(false) };
 }
 
-pub struct Caught;
+pub struct Caught {
+    pub message: String,
+}
+
+// PANIC-2: a panic no catch scope may hold.
+pub fn fatal(message: &str) -> ! {
+    let _ = FATAL.try_with(|f| f.set(true));
+    panic!("{message}")
+}
+
+// PANIC-4
+pub fn poisoned_lock() -> ! {
+    fatal("a lock is poisoned: a thread panicked while holding it")
+}
 
 // PANIC-2: the only place a panic is caught.
 pub fn catch<R>(body: impl FnOnce() -> R) -> Result<R, Caught> {
@@ -17,9 +31,15 @@ pub fn catch<R>(body: impl FnOnce() -> R) -> Result<R, Caught> {
     IN_SCOPE.with(|s| s.set(outer));
     match result {
         Ok(r) => Ok(r),
-        Err(_) => {
+        Err(payload) => {
             UNWINDING.with(|u| u.set(false));
-            Err(Caught)
+            FATAL.with(|f| f.set(false));
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".into());
+            Err(Caught { message })
         }
     }
 }
@@ -38,11 +58,17 @@ pub fn outside_scope<R>(body: impl FnOnce() -> R) -> R {
 
 // PANIC-1
 pub fn install_hook(panic_exit: fn() -> !) {
+    install_hook_unless(panic_exit, || true)
+}
+
+// PANIC-1: `may_unwind` says whether this thread's state lets a catch hold the panic.
+pub fn install_hook_unless(panic_exit: fn() -> !, may_unwind: fn() -> bool) {
     std::panic::set_hook(Box::new(move |info| {
         report(info);
         let in_scope = IN_SCOPE.try_with(|s| s.get()).unwrap_or(false);
+        let fatal = FATAL.try_with(|f| f.get()).unwrap_or(true);
         let unwinding = UNWINDING.try_with(|u| u.replace(true)).unwrap_or(true);
-        if in_scope && !unwinding {
+        if in_scope && !unwinding && !fatal && may_unwind() {
             return;
         }
         panic_exit()

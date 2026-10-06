@@ -2018,7 +2018,7 @@ fn ensure_release_service() -> Result<(), MorlocError> {
     // The service waits on the registry's doorbell, so the registry must be
     // attached first; a pool's first stream operation may be this one.
     registry_init()?;
-    let mut service = RELEASE_SERVICE.lock().unwrap_or_else(|p| p.into_inner());
+    let mut service = RELEASE_SERVICE.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
     let running = |s: &ReleaseService| s.thread.as_ref().is_some_and(|t| !t.is_finished());
     if service.as_ref().is_some_and(running) {
         return Ok(());
@@ -2052,7 +2052,7 @@ fn release_service_main(stop: &std::sync::atomic::AtomicBool) {
 /// Stop the release service. Returns false if it was left running.
 fn release_service_shutdown() -> bool {
     use std::sync::atomic::Ordering;
-    let taken = RELEASE_SERVICE.lock().unwrap_or_else(|p| p.into_inner()).take();
+    let taken = RELEASE_SERVICE.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock()).take();
     let Some(mut service) = taken else { return true };
     service.stop.store(true, Ordering::Release);
     ring_release_doorbell();
@@ -6225,13 +6225,13 @@ static SWEEPER_WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 
 // FORK-6: the thread starts on the first request, so attaching starts none.
 pub fn sweeper_want() {
-    let _guard = SWEEPER.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = SWEEPER.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
     SWEEPER_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(test)]
 pub fn sweeper_init() {
-    let mut guard = SWEEPER.lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = SWEEPER.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
     SWEEPER_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
     if guard.is_none() {
         *guard = start_sweeper();
@@ -6258,7 +6258,7 @@ fn sweep_now(req: SweepRequest) {
 
 // FORK-6: a process that wants a sweeper starts its own, a forked child included.
 fn sweeper_send(req: SweepRequest) {
-    let mut guard = SWEEPER.lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = SWEEPER.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
     if !SWEEPER_WANTED.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
@@ -6276,7 +6276,7 @@ fn sweeper_send(req: SweepRequest) {
 
 #[cfg(test)]
 fn sweeper_running() -> bool {
-    SWEEPER.lock().unwrap_or_else(|p| p.into_inner()).as_ref().is_some_and(|s| !s.thread.is_finished())
+    SWEEPER.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock()).as_ref().is_some_and(|s| !s.thread.is_finished())
 }
 
 /// Stop the sweeper thread. Called before `registry_teardown` unmaps
@@ -6288,7 +6288,7 @@ fn sweeper_running() -> bool {
 /// was never started or was already shut down.
 pub fn sweeper_shutdown() {
     let taken = {
-        let mut guard = SWEEPER.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = SWEEPER.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
         SWEEPER_WANTED.store(false, std::sync::atomic::Ordering::Relaxed);
         guard.take()
     };
@@ -10615,7 +10615,7 @@ mod tests {
     }
 
     fn release_service_running() -> bool {
-        RELEASE_SERVICE.lock().unwrap_or_else(|p| p.into_inner()).as_ref().is_some_and(|s| s.thread.as_ref().is_some_and(|t| !t.is_finished()))
+        RELEASE_SERVICE.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock()).as_ref().is_some_and(|s| s.thread.as_ref().is_some_and(|t| !t.is_finished()))
     }
 
     fn has_local_slot(handle: i64) -> bool {

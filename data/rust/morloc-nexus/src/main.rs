@@ -85,7 +85,17 @@ fn main() {
     }
 
     // PANIC-1
+    process::record_nexus_process();
     morloc_runtime_types::panic::install_hook(process::panic_exit);
+    {
+        extern "C" {
+            fn morloc_install_panic_hook(exit: Option<extern "C" fn() -> !>);
+        }
+        extern "C" fn libmorloc_panic_exit() -> ! {
+            process::panic_exit()
+        }
+        unsafe { morloc_install_panic_hook(Some(libmorloc_panic_exit)) };
+    }
 
     // Top-level argv parse. [`cli::parse_invocation`] handles the
     // pre-scan for `@` separator (run mode), loads the manifest from

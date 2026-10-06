@@ -16,43 +16,55 @@ exits with it only when a panic ended it.
 Status: deviation
 
 Each copy of the Rust standard library installs one hook when it is first
-entered: the nexus at start, libmorloc in the initialisation every host
-calls, and the Rust pool. The hook formats its report into a fixed buffer
-and writes it with write(2); only a backtrace, when one is asked for,
-allocates. If the panicking thread is inside a catch scope and is not
-already unwinding, the hook returns and the panic unwinds to the catch.
+entered: the nexus at start, libmorloc when its host starts (the nexus,
+the C++ and Rust pools' main, the Python module's initialisation and the R
+library's), and the Rust pool. The hook formats its report into a fixed
+buffer and writes it with write(2); naming the thread, or a backtrace when
+one is asked for, may allocate. If the panicking thread is inside a catch
+scope, is not already unwinding, holds no runtime lock, and the panic is
+not a fatal one (a poisoned lock or a lock-rank violation), the hook
+returns and the panic unwinds to the catch.
 Otherwise the hook runs the panic exit: it kills the process groups of the
 pools and child processes it started, removes the shared memory and paths
 it registered, and calls _exit(70), even when another thread is already
-tearing the process down. It writes no run summary, since that takes
-locks. A robust lock held at _exit reaches other processes as held by a
+tearing the process down. libmorloc's hook in the nexus process runs the
+nexus's panic exit; in a pool it calls _exit(70). It writes no run
+summary, since that takes locks. A robust lock held at _exit reaches other processes as held by a
 dead owner, so what it protects is treated as damaged. A second panic
 during unwinding also exits 70. A callback a C caller invokes runs outside
-any catch scope, since its panic could not unwind to one. The only nexus
-code that runs in a forked child is a spawn's step before exec, which makes
-only libc calls and cannot panic.
+any catch scope, since its panic could not unwind to one. A forked child of
+the nexus before exec, where a spawn's pre-exec step and libmorloc's fork
+handlers run, owns none of its parent's pools, shared memory or paths: the
+panic exit there only calls _exit(70).
 
-Missing: libmorloc installs no hook, so a panic in its code aborts (134)
-when it reaches an `extern "C"` function and kills only its thread
-otherwise.
+Missing: the Rust pool's own code keeps its own hook, which aborts on a
+panic that is not a morloc throw (PANIC-5, PANIC-6).
 
 ### PANIC-2 Only request frames catch a panic
 Status: deviation
 
 The catch scopes are the daemon's request worker, the MCP HTTP and front
 end connection threads, the stdio server's workers and the MCP stdio
-loop. Nothing else catches a panic; an `extern "C"` function is never a
-catch scope, since a panic cannot unwind out of one. A request frame calls
-the Rust functions behind the `extern "C"` wrappers, so a panic anywhere in
-its request reaches its catch. Decoding foreign bytes returns an error
-rather than catching a panic, since bad bytes are an expected failure.
+loop. The one other catch scope is a call into a third-party format library
+(Arrow IPC, Parquet, CSV, JSON) on bytes the program was handed: such a
+library may panic on malformed input and cannot be made not to, so the
+call returns a decode error and the process goes on. A panic there while
+holding a runtime lock, or a fatal one, still ends the process; a
+shared-memory allocation it was in is poisoned (SHM-9), and the eval arena
+frees its blocks during the unwind. Nothing
+else catches a panic; an `extern "C"` function is never a catch scope,
+since a panic cannot unwind out of one. A request frame calls the Rust
+functions behind the `extern "C"` wrappers it would otherwise use. A panic
+in libmorloc during a nexus request cannot reach the nexus's catch, since
+the two do not share a standard library, so it ends the process by
+PANIC-1 without a reply.
 
-Missing: request handlers call `extern "C"` wrappers (DAEMON-8); seventeen
-Arrow entry points catch panics and return them as errors.
+Missing: code below the daemon's handlers still calls libmorloc's own
+`extern "C"` functions (DAEMON-8).
 
 ### PANIC-3 A caught panic answers its request as failed, then ends the process
 Status: implemented
-Checked by: an_http_request_that_panics_is_answered_500_and_the_server_exits_with_the_internal_error_status, a_jsonrpc_call_that_panics_is_answered_with_an_internal_error_and_the_process_exits, a_stdio_request_that_panics_is_answered_as_failed_and_the_process_exits, a_panicking_request_is_answered_500_and_the_daemon_shuts_down_as_failed, a_command_that_exits_with_the_internal_error_status_is_an_internal_error, a_request_finding_the_server_state_poisoned_is_refused_without_using_it, a_stdio_request_that_panics_in_the_daemon_fails_the_daemon_instead_of_exiting, tla:PanicExit, tla:PanicExit_unlock_on_unwind.bug, tla:PanicExit_hook_exits_in_scope.bug, tla:PanicExit_continue_after_catch.bug, tla:PanicExit_reply_twice.bug
+Checked by: a_panic_in_a_forked_child_leaves_the_parents_run_alone, an_http_request_that_panics_is_answered_500_and_the_server_exits_with_the_internal_error_status, a_jsonrpc_call_that_panics_is_answered_with_an_internal_error_and_the_process_exits, a_stdio_request_that_panics_is_answered_as_failed_and_the_process_exits, a_panicking_request_is_answered_500_and_the_daemon_shuts_down_as_failed, a_command_that_exits_with_the_internal_error_status_is_an_internal_error, a_request_finding_the_server_state_poisoned_is_refused_without_using_it, a_stdio_request_that_panics_in_the_daemon_fails_the_daemon_instead_of_exiting, tla:PanicExit, tla:PanicExit_unlock_on_unwind.bug, tla:PanicExit_hook_exits_in_scope.bug, tla:PanicExit_continue_after_catch.bug, tla:PanicExit_reply_twice.bug
 
 The catch answers the request it was serving -- HTTP 500, JSON-RPC error
 -32603, a FAIL packet, or the daemon's internal error -- unless any of a
@@ -66,17 +78,13 @@ the daemon, whose own shutdown waits for its requests (DAEMON-7). The daemon's `
 error, not as a fault in the caller's expression.
 
 ### PANIC-4 A lock a panic unwinds through is marked damaged
-Status: deviation
+Status: implemented
+Checked by: a_poisoned_libmorloc_lock_ends_the_process, a_poisoned_lock_inside_a_format_library_call_still_ends_the_process, a_panic_holding_a_runtime_lock_inside_a_format_library_call_ends_the_process, a_request_finding_the_server_state_poisoned_is_refused_without_using_it, tla:PanicExit, tla:PanicExit_unlock_on_unwind.bug
 
 A guard of a lock shared within the process, dropped while its thread is
 panicking, poisons what the lock protects. A thread that finds a poisoned
 lock treats it as a failure and never uses the data. SHM-9 is the same
 rule for locks shared between processes.
-
-Missing: the nexus treats a poisoned lock as a failure everywhere; in
-libmorloc 29 sites recover a poisoned mutex and use its data. They become
-failures together with libmorloc's hook (PANIC-1), since until then a panic
-on a libmorloc thread ends only that thread.
 
 ### PANIC-5 A pool never answers a panic
 Status: deviation
@@ -105,16 +113,14 @@ Missing: the Rust pool aborts on any panic other than a morloc throw. C++,
 Python and R already answer user errors with a FAIL packet.
 
 ### PANIC-7 A background thread has no catch scope
-Status: deviation
+Status: implemented
+Checked by: a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_outside_a_catch_scope_exits_with_the_internal_error_status
 
 A thread that serves no request -- the stream sweeper, the lifeline, the
 shutdown watchdog, the release service, write-behind compression, a
 child's output reader -- catches nothing, so its panic ends the process by
 PANIC-1. It never dies alone, which would leak, orphan children, lose the
 shutdown bound or hang its consumer.
-
-Missing: these threads die alone; the release service is restarted;
-write-behind returns a panic as a job error.
 
 ### PANIC-8 The build unwinds on panic
 Status: deviation

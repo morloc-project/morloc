@@ -255,9 +255,11 @@ fn cschema_of(schema: &Schema) -> *mut CSchema {
 // ---------------------------------------------------------------------------
 pub struct MorlocThrow(pub String);
 
-/// Raise a catchable morloc error (`@throw`) from sourced Rust.
+/// Raise a catchable morloc error (`@throw`) from sourced Rust. It unwinds
+/// without the panic hook, which ends the process on a panic (PANIC-1); a
+/// throw is a result, not a panic.
 pub fn morloc_throw(msg: impl Into<String>) -> ! {
-    std::panic::panic_any(MorlocThrow(msg.into()));
+    std::panic::resume_unwind(Box::new(MorlocThrow(msg.into())));
 }
 
 /// `@throw` in a value position of generated code, typed as the value it
@@ -3436,19 +3438,6 @@ where
     }
 }
 
-/// Install a panic hook that suppresses the default backtrace for MorlocThrow
-/// (I2/E3), keeping obs.err readable when `@throw` fires in a loop. Genuine
-/// bug panics still print. Call once at pool startup.
-pub fn install_panic_hook() {
-    let default = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        if let Some(p) = info.payload().downcast_ref::<MorlocThrow>() {
-            let _ = p;
-            return; // user @throw: silent, surfaced as a fail packet
-        }
-        default(info);
-    }));
-}
 
 // ---------------------------------------------------------------------------
 // Tests: round-trip the identical walk against a local buffer (buffer-relative

@@ -68,7 +68,6 @@ fn main() {
         return;
     }
 
-    rustmorloc::install_panic_hook();
     rustmorloc::install_crash_handler();
     init_schemas();
     // argv is `<socket_path> <tmpdir> <shm_basename>`; record the tmpdir so

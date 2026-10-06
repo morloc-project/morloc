@@ -8,12 +8,23 @@ use std::time::Duration;
 use morloc_runtime_types::panic::{catch, install_hook, PANIC_EXIT_STATUS};
 
 const PEER_FD: i32 = 3;
+const CHILD_ENV: &str = "MORLOC_PANIC_TEST_CHILD";
+const CHILD_OK: i32 = 42;
+
+fn is_child() -> bool {
+    std::env::var_os(CHILD_ENV).is_some()
+}
+
+fn child_ok() -> ! {
+    unsafe { libc::_exit(CHILD_OK) }
+}
 
 fn run_child(name: &str) -> (std::process::Child, UnixStream) {
     let (ours, theirs) = UnixStream::pair().unwrap();
     let fd = theirs.as_raw_fd();
     let mut cmd = Command::new(std::env::current_exe().unwrap());
     cmd.args([&format!("panic_tests::{name}"), "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     unsafe {
@@ -52,6 +63,9 @@ fn a_panic_outside_a_catch_scope_exits_with_the_internal_error_status() {
 #[test]
 #[ignore]
 fn child_panics_outside_a_scope() {
+    if !is_child() {
+        return;
+    }
     install_hook(crate::process::panic_exit);
     panic!("outside");
 }
@@ -60,16 +74,20 @@ fn child_panics_outside_a_scope() {
 fn a_panic_inside_a_catch_scope_reaches_the_catch() {
     let (child, mut peer) = run_child("child_panics_inside_a_scope");
     assert_eq!(read_to_end(&mut peer), b"caught");
-    assert_eq!(exit_code(child), Some(0));
+    assert_eq!(exit_code(child), Some(CHILD_OK));
 }
 
 #[test]
 #[ignore]
 fn child_panics_inside_a_scope() {
+    if !is_child() {
+        return;
+    }
     install_hook(crate::process::panic_exit);
     if catch(|| panic!("inside")).is_err() {
         peer().write_all(b"caught").unwrap();
     }
+    child_ok();
 }
 
 #[test]
@@ -81,6 +99,9 @@ fn a_panic_while_unwinding_exits_with_the_internal_error_status() {
 #[test]
 #[ignore]
 fn child_panics_while_unwinding() {
+    if !is_child() {
+        return;
+    }
     struct PanicsOnDrop;
     impl Drop for PanicsOnDrop {
         fn drop(&mut self) {
@@ -125,6 +146,9 @@ fn an_http_request_that_panics_is_answered_500_and_the_server_exits_with_the_int
 #[test]
 #[ignore]
 fn child_serves_http() {
+    if !is_child() {
+        return;
+    }
     install_hook(crate::process::panic_exit);
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -156,6 +180,9 @@ fn a_jsonrpc_call_that_panics_is_answered_with_an_internal_error_and_the_process
 #[test]
 #[ignore]
 fn child_answers_jsonrpc() {
+    if !is_child() {
+        return;
+    }
     install_hook(crate::process::panic_exit);
     let id = serde_json::json!(7);
     crate::mcp::answer_message(PEER_FD, Some(&id), || panic!("handler"));
@@ -172,6 +199,9 @@ fn a_stdio_request_that_panics_is_answered_as_failed_and_the_process_exits() {
 #[test]
 #[ignore]
 fn child_serves_stdio_op() {
+    if !is_child() {
+        return;
+    }
     install_hook(crate::process::panic_exit);
     let mut stream = peer();
     let _ = crate::stdio_server::serve_op(&mut stream, |_| panic!("handler"));
@@ -182,12 +212,15 @@ fn a_stdio_request_that_panics_in_the_daemon_fails_the_daemon_instead_of_exiting
     let (child, mut peer) = run_child("child_serves_stdio_op_in_the_daemon");
     let reply = read_to_end(&mut peer);
     assert_eq!(reply.first(), Some(&morloc_runtime_types::stdio_proto::STATUS_ERR));
-    assert_eq!(exit_code(child), Some(0));
+    assert_eq!(exit_code(child), Some(CHILD_OK));
 }
 
 #[test]
 #[ignore]
 fn child_serves_stdio_op_in_the_daemon() {
+    if !is_child() {
+        return;
+    }
     extern "C" {
         fn morloc_daemon_worker_panicked() -> bool;
     }
@@ -202,5 +235,35 @@ fn child_serves_stdio_op_in_the_daemon() {
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(10));
     }
-    unsafe { libc::_exit(0) };
+    child_ok();
+}
+
+#[test]
+fn a_panic_in_a_forked_child_leaves_the_parents_run_alone() {
+    let (child, mut peer) = run_child("child_forks_and_panics_in_the_grandchild");
+    assert_eq!(read_to_end(&mut peer), b"intact");
+    assert_eq!(exit_code(child), Some(CHILD_OK));
+}
+
+#[test]
+#[ignore]
+fn child_forks_and_panics_in_the_grandchild() {
+    if !is_child() {
+        return;
+    }
+    crate::process::record_nexus_process();
+    let dir = std::env::temp_dir().join(format!("morloc-panic-fork-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::sigrm::register(dir.to_str().unwrap()).unwrap();
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        crate::process::panic_exit();
+    }
+    let mut status = 0;
+    unsafe { libc::waitpid(pid, &mut status, 0) };
+    if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == PANIC_EXIT_STATUS && dir.exists() {
+        peer().write_all(b"intact").unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    child_ok();
 }

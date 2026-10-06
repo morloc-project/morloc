@@ -551,8 +551,23 @@ pub fn panic_exit() -> ! {
     unsafe { libc::_exit(morloc_runtime_types::panic::PANIC_EXIT_STATUS) };
 }
 
+static NEXUS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+extern "C" {
+    fn morloc_fork_generation() -> u64;
+}
+
+// PANIC-1: also binds the symbol before any signal handler needs it.
+pub fn record_nexus_process() {
+    NEXUS_GENERATION.store(unsafe { morloc_fork_generation() }, Ordering::SeqCst);
+}
+
 // DAEMON-6
 fn stop_everything() {
+    // PANIC-1: a forked child before exec owns none of these.
+    if unsafe { morloc_fork_generation() } != NEXUS_GENERATION.load(Ordering::SeqCst) {
+        return;
+    }
     for i in 0..MAX_DAEMONS {
         let pgid = PGIDS[i].load(Ordering::Relaxed);
         if pgid > 0 {

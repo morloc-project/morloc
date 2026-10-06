@@ -61,7 +61,12 @@ pub(crate) struct HeldGuard<'a, T> {
 }
 
 fn rank_violation(rank: u32, held: u64) -> ! {
-    panic!("morloc: lock of rank {rank} taken while holding ranks {held:#b}");
+    morloc_runtime_types::panic::fatal(&format!("morloc: lock of rank {rank} taken while holding ranks {held:#b}"))
+}
+
+// PANIC-2: a panic holding a runtime lock may have torn what it guards.
+pub(crate) fn holds_no_runtime_lock() -> bool {
+    HELD_RANKS.try_with(Cell::get).unwrap_or(1) == 0 && RESETS_HELD.try_with(Cell::get).unwrap_or(1) == 0
 }
 
 impl<T> Held<T> {
@@ -76,7 +81,7 @@ impl<T> Held<T> {
         if held >= bit {
             rank_violation(self.rank, held);
         }
-        let guard = self.mutex.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.mutex.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
         HELD_RANKS.with(|r| r.set(held | bit));
         HeldGuard { guard: Some(guard), bit }
     }
@@ -84,7 +89,7 @@ impl<T> Held<T> {
     pub(crate) fn try_lock(&self) -> Option<HeldGuard<'_, T>> {
         let guard = match self.mutex.try_lock() {
             Ok(g) => g,
-            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(std::sync::TryLockError::Poisoned(_)) => morloc_runtime_types::panic::poisoned_lock(),
             Err(std::sync::TryLockError::WouldBlock) => return None,
         };
         let bit = 1u64 << self.rank;
@@ -96,7 +101,7 @@ impl<T> Held<T> {
 impl<T> HeldGuard<'_, T> {
     pub(crate) fn wait(mut self, condvar: &Condvar) -> Self {
         let guard = self.guard.take().unwrap();
-        let guard = condvar.wait(guard).unwrap_or_else(|p| p.into_inner());
+        let guard = condvar.wait(guard).unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
         self.guard = Some(guard);
         self
     }
@@ -239,6 +244,11 @@ fn take_fork_held() -> Option<ForkHeld> {
 }
 
 extern "C" fn prepare_fork() {
+    // PANIC-2
+    morloc_runtime_types::panic::outside_scope(prepare_fork_body)
+}
+
+fn prepare_fork_body() {
     if HELD_RANKS.with(Cell::get) != 0 || RESETS_HELD.with(Cell::get) != 0 {
         let msg = b"morloc: fork from a thread holding a runtime lock\n";
         unsafe {
@@ -294,6 +304,11 @@ extern "C" fn prepare_fork() {
 }
 
 extern "C" fn after_fork_in_parent() {
+    // PANIC-2
+    morloc_runtime_types::panic::outside_scope(after_fork_in_parent_body)
+}
+
+fn after_fork_in_parent_body() {
     crate::lease::note_forked();
     if let Some(mut held) = take_fork_held() {
         let (lease, rels) = (held.lease.take(), std::mem::take(&mut held.lease_rels));
@@ -307,6 +322,11 @@ extern "C" fn after_fork_in_parent() {
 }
 
 extern "C" fn after_fork_in_child() {
+    // PANIC-2
+    morloc_runtime_types::panic::outside_scope(after_fork_in_child_body)
+}
+
+fn after_fork_in_child_body() {
     morloc_runtime_types::fork_generation::bump_in_child();
     // FORK-16: the dispatches running anywhere in the parent, none of which
     // the child has.
@@ -437,7 +457,7 @@ pub unsafe extern "C" fn morloc_fork_worker(threads_at_fork: *mut libc::c_long, 
     FORK_WORKER_REFUSED
 }
 
-const FORK_REFUSED_EXIT: libc::c_int = 70;
+const FORK_REFUSED_EXIT: libc::c_int = 71;
 
 // Written directly: a forked test process's captured output dies with it.
 #[cfg(test)]
@@ -456,7 +476,7 @@ pub(crate) fn exits_cleanly_in_a_forked_child(work: impl FnOnce() -> bool) -> bo
 }
 
 #[cfg(test)]
-fn wait_status(pid: libc::pid_t) -> i32 {
+pub(crate) fn wait_status(pid: libc::pid_t) -> i32 {
     if pid < 0 {
         return 2;
     }
@@ -769,8 +789,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "lock of rank 5 taken while holding ranks")]
     fn a_lock_taken_below_a_held_rank_is_refused() {
-        let _volumes = crate::shm::VOLUMES.lock();
-        let _alloc = crate::shm::ALLOC_MUTEX.lock();
+        let outer = Held::new(6, ());
+        let inner = Held::new(5, ());
+        let _outer = outer.lock();
+        let _inner = inner.lock();
     }
 
     #[test]

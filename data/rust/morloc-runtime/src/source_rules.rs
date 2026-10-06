@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 
 const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc", "morloc-nexus"];
-const PREPARE_HANDLERS: &[&str] = &["prepare_fork"];
+const PREPARE_HANDLERS: &[&str] = &["prepare_fork_body"];
 const MAX_DEVIATING_ROWS: usize = 5;
 const MAX_ENV_READS: usize = 67;
 const PID_READ_SITES: &[&str] = &[
@@ -1003,4 +1003,37 @@ fn every_process_id_read_is_reviewed() {
         "FORK-14: state inherited across fork is owned by fork generation; a process id names a process \
          to others (shared memory, files, logs). Unreviewed reads: {new:?}; listed but gone: {stale:?}"
     );
+}
+
+#[test]
+fn every_host_installs_the_panic_hook() {
+    let repo = repo_root();
+    let hosts = [
+        ("data/rust/morloc-nexus/src/main.rs", "fn main(", "morloc_install_panic_hook(Some("),
+        ("data/rust/morloc-runtime/src/pool_ffi.rs", "fn pool_main(", "panic_ffi::install(None)"),
+        ("data/lang/py/pymorloc.c", "PyInit_pymorloc(void) {", "morloc_install_panic_hook(NULL)"),
+        ("data/lang/r/rmorloc.c", "static void _r_init_impl(DllInfo *info) {", "morloc_install_panic_hook(NULL)"),
+    ];
+    for (path, entry, call) in hosts {
+        let text = std::fs::read_to_string(repo.join(path)).unwrap();
+        let start = text.find(entry).unwrap_or_else(|| panic!("PANIC-1: {path} has no {entry}"));
+        let head: String = text[start..].lines().take(60).collect::<Vec<_>>().join("\n");
+        assert!(head.contains(call), "PANIC-1: {path} must call {call} at the start of {entry}");
+    }
+}
+
+#[test]
+fn only_catch_scopes_catch_a_panic() {
+    // PANIC-2: catch() is the only catch; stream.rs re-raises what it catches.
+    let allowed = ["morloc-runtime-types/panic.rs::catch", "morloc-runtime/stream.rs::with_process_local_slot"];
+    let ours = ["morloc-runtime/", "morloc-runtime-types/", "morloc-nexus/"];
+    let stray: Vec<String> = scan_rust()
+        .calls
+        .iter()
+        .filter(|c| !c.test_only && c.path.ends_with("catch_unwind"))
+        .filter(|c| ours.iter().any(|o| c.site.starts_with(o)))
+        .filter(|c| !allowed.iter().any(|a| c.site.starts_with(a)))
+        .map(|c| c.site.clone())
+        .collect();
+    assert!(stray.is_empty(), "PANIC-2: catch_unwind outside a catch scope: {stray:?}");
 }

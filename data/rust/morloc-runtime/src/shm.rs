@@ -502,26 +502,26 @@ pub fn register_shclose_hook(hook: ShcloseHook) {
 fn run_shclose_hooks() {
     let hooks: Vec<ShcloseHook> = SHCLOSE_HOOKS.lock().clone();
     for h in hooks {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h()));
+        h();
     }
 }
 
-/// Best-effort variant for the atexit path: `try_lock` so a
-/// panic-poisoned or contended mutex doesn't wedge process shutdown.
+/// Variant for the atexit path: `try_lock` so a contended mutex doesn't
+/// wedge process shutdown.
 fn run_shclose_hooks_atexit() {
     let hooks: Vec<ShcloseHook> = match SHCLOSE_HOOKS.try_lock() {
         Some(hs) => hs.clone(),
         None => return,
     };
     for h in hooks {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h()));
+        h();
     }
 }
 
 /// atexit callback: unmap the volumes, and remove them if this process owns
 /// the program (see `OWNER_GENERATION`). Catches normal exit() calls that bypass
-/// an explicit shclose. Uses try_lock so a poisoned or held mutex skips the
-/// cleanup instead of panicking inside atexit.
+/// an explicit shclose. Uses try_lock so a held mutex skips the cleanup
+/// instead of waiting inside atexit.
 extern "C" fn shclose_atexit() {
     // Run companion / subsystem hooks first so their teardown sees a
     // still-live allocator (safe ordering, and required by any hook

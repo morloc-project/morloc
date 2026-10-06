@@ -4598,6 +4598,7 @@ static struct PyModuleDef pymorloc = {
 };
 
 PyMODINIT_FUNC PyInit_pymorloc(void) {
+    morloc_install_panic_hook(NULL);
     PyObject* m = PyModule_Create(&pymorloc);
     if (m == NULL) return NULL;
     if (PyModule_AddIntConstant(m, "PRIMARY_VOLUME", MORLOC_PRIMARY_VOLUME) < 0) {

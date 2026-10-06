@@ -103,7 +103,7 @@ waiting on it go on. The daemon then shuts down as DAEMON-6 says and exits
 with the internal-error status of PANIC-1, the watchdog's exit included, so
 a supervisor restarts it.
 Requests already running finish within the grace period. The job queue's
-lock is taken whether or not a panic poisoned it. Model:
+lock is never held inside the catch, so a caught panic cannot poison it. Model:
 `tla/DaemonShutdown.tla`.
 
 This holds for a panic that unwinds through Rust frames to the worker. A
@@ -114,7 +114,11 @@ through is never handed on as sound (SHM-9).
 ### DAEMON-8 A panic below a C boundary in a request ends the daemon as failed
 Status: deviation
 
-The dispatch, request parsing and response writing functions a handler
-calls are `extern "C"`. A panic inside one aborts the process: the client
-gets no reply, shutdown is not graceful, and the exit status is 134 rather
-than 1.
+The handlers call the Rust functions behind the dispatch, request parsing
+and response writing wrappers, but code below them still calls about three
+hundred of libmorloc's own `extern "C"` functions directly (around nine
+hundred call sites). A panic below one of those aborts the process: the
+client gets no reply, shutdown is not graceful, and the exit status is 134
+rather than 70. A shared-memory allocation it interrupted is poisoned
+during the unwind (SHM-9). The fix is a rule that Rust code never calls a
+libmorloc `extern "C"` function, only the Rust function behind it.

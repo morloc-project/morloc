@@ -147,10 +147,7 @@ fn worker(svc: Arc<Service>) {
         };
         let input = job.input.lock().unwrap().take();
         let res = match input {
-            Some(input) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(&mut compressors, job.level, input)
-            }))
-            .unwrap_or_else(|_| Err(MorlocError::Other("stream compression panicked".into()))),
+            Some(input) => run(&mut compressors, job.level, input),
             None => Err(MorlocError::Other("stream compression job ran twice".into())),
         };
         *job.result.lock().unwrap() = Some(res);

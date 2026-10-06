@@ -225,7 +225,7 @@ static REQUESTS_IN_FLIGHT: Mutex<usize> = Mutex::new(0);
 static REQUESTS_DRAINED: Condvar = Condvar::new();
 
 fn requests_in_flight() -> std::sync::MutexGuard<'static, usize> {
-    REQUESTS_IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner())
+    REQUESTS_IN_FLIGHT.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock())
 }
 
 pub(crate) struct InFlight(());
@@ -254,7 +254,7 @@ pub fn wait_for_requests(timeout: std::time::Duration) -> bool {
     let n = requests_in_flight();
     let (n, _) = REQUESTS_DRAINED
         .wait_timeout_while(n, timeout, |n| *n > 0)
-        .unwrap_or_else(|p| p.into_inner());
+        .unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
     *n == 0
 }
 
@@ -309,7 +309,7 @@ static BINDING_STORE: Mutex<Option<BindingStore>> = Mutex::new(None);
 static BINDING_FINISHED: Condvar = Condvar::new();
 
 fn binding_store() -> std::sync::MutexGuard<'static, Option<BindingStore>> {
-    BINDING_STORE.lock().unwrap_or_else(|p| p.into_inner())
+    BINDING_STORE.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock())
 }
 
 enum BindClaim {
@@ -328,7 +328,7 @@ fn claim_binding(hv: u64, name: Option<&str>) -> BindClaim {
         if store.compiling.insert(hv) {
             return BindClaim::Compile(store.base_dir.clone());
         }
-        guard = BINDING_FINISHED.wait(guard).unwrap_or_else(|p| p.into_inner());
+        guard = BINDING_FINISHED.wait(guard).unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
     }
 }
 
@@ -796,7 +796,11 @@ struct JsonRequest {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn daemon_parse_request(
+pub unsafe extern "C" fn daemon_parse_request(json: *const c_char, len: usize, errmsg: *mut *mut c_char) -> *mut DaemonRequest {
+    parse_request(json, len, errmsg)
+}
+
+pub(crate) unsafe fn parse_request(
     json: *const c_char,
     len: usize,
     errmsg: *mut *mut c_char,
@@ -1071,7 +1075,11 @@ pub unsafe extern "C" fn daemon_free_response(resp: *mut DaemonResponse) {
 // -- Response serialization (serde_json) --------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn daemon_serialize_response(
+pub unsafe extern "C" fn daemon_serialize_response(response: *mut DaemonResponse, out_len: *mut usize) -> *mut c_char {
+    serialize_response(response, out_len)
+}
+
+pub(crate) unsafe fn serialize_response(
     response: *mut DaemonResponse,
     out_len: *mut usize,
 ) -> *mut c_char {
@@ -1727,7 +1735,11 @@ unsafe fn adopt_rptr_result(packet: *const u8) {
 // -- Dispatch -----------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn daemon_dispatch(
+pub unsafe extern "C" fn daemon_dispatch(manifest: *mut crate::manifest_ffi::Manifest, request: *mut DaemonRequest, sockets: *mut MorlocSocket, shm_basename: *const c_char) -> *mut DaemonResponse {
+    dispatch(manifest, request, sockets, shm_basename)
+}
+
+pub(crate) unsafe fn dispatch(
     manifest: *mut crate::manifest_ffi::Manifest,
     request: *mut DaemonRequest,
     sockets: *mut MorlocSocket,
@@ -1785,11 +1797,12 @@ unsafe fn dispatch_request(
     match (*request).method {
         DaemonMethod::Health => {
             (*resp).success = true;
-            let (alive, n_pools) = *POOL_STATUS.lock().unwrap_or_else(|p| p.into_inner());
+            let (alive, n_pools) = *POOL_STATUS.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
             if let Some(alive_fn) = alive {
                 let mut arr = Vec::with_capacity(n_pools);
                 for i in 0..n_pools {
-                    arr.push(serde_json::Value::Bool(alive_fn(i)));
+                    // PANIC-2
+                    arr.push(serde_json::Value::Bool(morloc_runtime_types::panic::outside_scope(|| alive_fn(i))));
                 }
                 // Named, not bare: a list of anonymous booleans tells a
                 // caller nothing about what is being reported, and leaves no
@@ -2648,7 +2661,7 @@ unsafe fn handle_lp_connection(
         return;
     }
 
-    let req = daemon_parse_request(msg, msg_len, &mut errmsg);
+    let req = parse_request(msg, msg_len, &mut errmsg);
     libc::free(msg as *mut c_void);
     if !errmsg.is_null() {
         let mut err_resp: DaemonResponse = std::mem::zeroed();
@@ -2656,7 +2669,7 @@ unsafe fn handle_lp_connection(
         err_resp.error_kind = DAEMON_ERROR_BAD_REQUEST;
         err_resp.error = errmsg;
         let mut resp_len: usize = 0;
-        let resp_json = daemon_serialize_response(&mut err_resp, &mut resp_len);
+        let resp_json = serialize_response(&mut err_resp, &mut resp_len);
         let mut write_err: *mut c_char = ptr::null_mut();
         write_lp_message(client_fd, resp_json, resp_len, &mut write_err);
         libc::free(resp_json as *mut c_void);
@@ -2681,7 +2694,7 @@ unsafe fn handle_lp_connection(
     // it off and keep the JSON `result`. Packet mode already returns raw bytes.
     let want_media = (*req).media && !want_packet;
     let prev_media = set_current_output_media_bytes(want_media);
-    let resp = daemon_dispatch(manifest as *mut crate::manifest_ffi::Manifest, req, sockets, shm_basename);
+    let resp = dispatch(manifest as *mut crate::manifest_ffi::Manifest, req, sockets, shm_basename);
     set_current_output_media_bytes(prev_media);
     set_current_output_packet(prev);
 
@@ -2711,7 +2724,7 @@ unsafe fn handle_lp_connection(
         );
     } else {
         let mut resp_len: usize = 0;
-        let resp_json = daemon_serialize_response(resp, &mut resp_len);
+        let resp_json = serialize_response(resp, &mut resp_len);
         write_lp_message(client_fd, resp_json, resp_len, &mut write_err);
         libc::free(resp_json as *mut c_void);
     }
@@ -2734,8 +2747,6 @@ unsafe fn handle_http_connection(
 ) {
     use crate::http_ffi::http_parse_request;
     use crate::http_ffi::http_free_request;
-    use crate::http_ffi::http_write_response;
-    use crate::http_ffi::http_write_response_ex;
     use crate::http_ffi::http_to_daemon_request;
 
     let mut errmsg: *mut c_char = ptr::null_mut();
@@ -2743,7 +2754,7 @@ unsafe fn handle_http_connection(
     if !errmsg.is_null() {
         let body = b"{\"status\":\"error\",\"error\":\"Bad request\"}\0";
         let ct = b"application/json\0";
-        http_write_response(
+        crate::http_ffi::write_response(
             client_fd,
             400,
             ct.as_ptr() as *const c_char,
@@ -2761,7 +2772,7 @@ unsafe fn handle_http_connection(
     // through the Health pipeline -- including the recovery gate).
     if (*http_req).method == HttpMethod::Options {
         let ct = b"application/json\0";
-        http_write_response(
+        crate::http_ffi::write_response(
             client_fd,
             204,
             ct.as_ptr() as *const c_char,
@@ -2788,7 +2799,7 @@ unsafe fn handle_http_connection(
         let body_c = CString::new(body.as_str()).unwrap_or_default();
         let status = daemon_error_kind_to_http_status(route_kind, false);
         let ct = b"application/json\0";
-        http_write_response(
+        crate::http_ffi::write_response(
             client_fd,
             status,
             ct.as_ptr() as *const c_char,
@@ -2808,7 +2819,7 @@ unsafe fn handle_http_connection(
     // `Content-Type` below.
     let prev_http = set_current_output_http(true);
     let prev_media = set_current_output_media_bytes(true);
-    let resp = daemon_dispatch(manifest as *mut crate::manifest_ffi::Manifest, req, sockets, shm_basename);
+    let resp = dispatch(manifest as *mut crate::manifest_ffi::Manifest, req, sockets, shm_basename);
     set_current_output_media_bytes(prev_media);
     set_current_output_http(prev_http);
 
@@ -2820,7 +2831,7 @@ unsafe fn handle_http_connection(
         // Media-typed return (`@mime`): send the raw content bytes with the
         // declared Content-Type instead of the JSON envelope, so an HTTP client
         // gets a real image/PDF/... it can save. Errors still go out as JSON.
-        http_write_response(
+        crate::http_ffi::write_response(
             client_fd,
             status,
             (*resp).mime,
@@ -2829,7 +2840,7 @@ unsafe fn handle_http_connection(
         );
     } else {
         let mut resp_len: usize = 0;
-        let resp_json = daemon_serialize_response(resp, &mut resp_len);
+        let resp_json = serialize_response(resp, &mut resp_len);
 
         // Append newline for terminal-friendly output
         let resp_body = libc::malloc(resp_len + 2) as *mut u8;
@@ -2843,7 +2854,7 @@ unsafe fn handle_http_connection(
         // during the brief pool-crash recovery window.
         if status == 503 {
             let extra = b"Retry-After: 1\r\n\0";
-            http_write_response_ex(
+            crate::http_ffi::write_response_ex(
                 client_fd,
                 status,
                 ct.as_ptr() as *const c_char,
@@ -2852,7 +2863,7 @@ unsafe fn handle_http_connection(
                 extra.as_ptr() as *const c_char,
             );
         } else {
-            http_write_response(
+            crate::http_ffi::write_response(
                 client_fd,
                 status,
                 ct.as_ptr() as *const c_char,
@@ -3007,7 +3018,7 @@ pub unsafe extern "C" fn daemon_run(
     crate::utility::raise_nofile_limit();
 
     // Set globals
-    *POOL_STATUS.lock().unwrap_or_else(|p| p.into_inner()) = ((*config).pool_alive_fn, n_pools);
+    *POOL_STATUS.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock()) = ((*config).pool_alive_fn, n_pools);
     let timeout = if (*config).eval_timeout > 0 {
         (*config).eval_timeout
     } else {
@@ -3250,7 +3261,7 @@ pub unsafe extern "C" fn daemon_run(
                 client_fd,
                 conn_type: fd_types[i],
             };
-            let mut q = ctx.queue.lock().unwrap_or_else(|p| p.into_inner());
+            let mut q = ctx.queue.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
             q.jobs.push_back(job);
             ctx.cond.notify_one();
         }
@@ -3283,7 +3294,7 @@ pub unsafe extern "C" fn daemon_run(
     }
     // DAEMON-6: a queued request is refused, never started.
     {
-        let mut q = ctx.queue.lock().unwrap_or_else(|p| p.into_inner());
+        let mut q = ctx.queue.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
         while let Some(job) = q.jobs.pop_front() {
             libc::close(job.client_fd);
         }
@@ -3349,7 +3360,7 @@ fn daemon_worker_fn(ctx: Arc<WorkerContext>) {
         }
 
         let job = {
-            let mut q = ctx.queue.lock().unwrap_or_else(|p| p.into_inner());
+            let mut q = ctx.queue.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
             loop {
                 // DAEMON-6
                 if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
@@ -3362,7 +3373,7 @@ fn daemon_worker_fn(ctx: Arc<WorkerContext>) {
                 let (guard, _timeout) = ctx
                     .cond
                     .wait_timeout(q, std::time::Duration::from_millis(100))
-                    .unwrap_or_else(|p| p.into_inner());
+                    .unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
                 q = guard;
             }
         };
@@ -3434,7 +3445,8 @@ fn serve_job(job: DaemonJob, handle: impl FnOnce(i32)) -> bool {
     }
     REPLY_IS_PACKET.with(|r| r.set(false));
     REPLY_STARTED.with(|r| r.set(false));
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(own)));
+    // PANIC-2
+    let outcome = morloc_runtime_types::panic::catch(|| handle(own));
     if outcome.is_ok() {
         unsafe { libc::close(job.client_fd) };
         return false;
@@ -3468,7 +3480,7 @@ unsafe fn answer_panicked_request(job: DaemonJob) {
     } else if job.conn_type == 2 {
         let body = format!("{{\"status\":\"error\",\"error\":\"{}\"}}", message);
         let ct = b"application/json\0";
-        crate::http_ffi::http_write_response(
+        crate::http_ffi::write_response(
             job.client_fd,
             500,
             ct.as_ptr() as *const c_char,
@@ -3482,7 +3494,7 @@ unsafe fn answer_panicked_request(job: DaemonJob) {
         let c = CString::new(message).unwrap_or_default();
         resp.error = libc::strdup(c.as_ptr());
         let mut len: usize = 0;
-        let json = daemon_serialize_response(&mut resp, &mut len);
+        let json = serialize_response(&mut resp, &mut len);
         let mut err: *mut c_char = ptr::null_mut();
         write_lp_message(job.client_fd, json, len, &mut err);
         libc::free(json as *mut c_void);
@@ -3507,7 +3519,7 @@ mod request_parse_tests {
 
     fn parse(text: &str) -> (*mut DaemonRequest, Option<String>) {
         let mut err: *mut c_char = ptr::null_mut();
-        let req = unsafe { daemon_parse_request(text.as_ptr() as *const c_char, text.len(), &mut err) };
+        let req = unsafe { parse_request(text.as_ptr() as *const c_char, text.len(), &mut err) };
         let msg = if err.is_null() {
             None
         } else {
@@ -3558,7 +3570,7 @@ mod media_wire_tests {
             let v = CString::new(value.as_str()).unwrap();
             resp.result_json = libc::strdup(v.as_ptr());
             let mut len: usize = 0;
-            let json = daemon_serialize_response(&mut resp, &mut len);
+            let json = serialize_response(&mut resp, &mut len);
             let text = CStr::from_ptr(json).to_str().unwrap();
             assert_eq!(text, format!("{{\"status\":\"ok\",\"result\":{value}}}"));
             let mut err: *mut c_char = ptr::null_mut();
@@ -3588,7 +3600,7 @@ mod media_wire_tests {
             resp.mime = libc::strdup(mime_c.as_ptr());
 
             let mut len: usize = 0;
-            let json = daemon_serialize_response(&mut resp, &mut len);
+            let json = serialize_response(&mut resp, &mut len);
             assert!(!json.is_null());
 
             let mut err: *mut c_char = ptr::null_mut();
