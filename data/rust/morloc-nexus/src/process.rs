@@ -170,9 +170,14 @@ extern "C" fn pool_check_and_recover(
     _sockets: *mut morloc_runtime_types::daemon_socket::MorlocSocket,
     n_pools: usize,
 ) {
+    morloc_runtime_types::panic::outside_scope(|| check_and_recover(n_pools))
+}
+
+fn check_and_recover(n_pools: usize) {
     let _checking = match POOL_CHECK.try_lock() {
         Ok(g) => g,
-        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        // PANIC-4
+        Err(std::sync::TryLockError::Poisoned(_)) => panic!("the pool recovery lock is poisoned"),
         Err(std::sync::TryLockError::WouldBlock) => return,
     };
     // First, enqueue PID-sweep requests for any pool that has died

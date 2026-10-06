@@ -8,7 +8,7 @@
 EXTENDS Naturals
 
 CONSTANTS Variant
-\* "design": the design.
+\* "design": the design; a lock unwound through is poisoned and released.
 \* "unlock_on_unwind": a guard dropped during a panic unlocks without poisoning.
 \* "hook_exits_in_scope": the hook ends the process even inside a catch scope.
 \* "continue_after_catch": the catch answers and A goes on serving.

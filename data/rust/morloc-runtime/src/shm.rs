@@ -2139,13 +2139,15 @@ fn find_free_block_in_volume(
             None
         };
 
-        match found {
+        let claimed = match found {
             Some(blk) => {
                 split_block(&held, shm, blk, size)?;
-                claim(&held, blk).map(Some)
+                Some(claim(&held, blk)?)
             }
-            None => Ok(None),
-        }
+            None => None,
+        };
+        held.release();
+        Ok(claimed)
     }
 }
 

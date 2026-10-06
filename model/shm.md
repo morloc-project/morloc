@@ -86,12 +86,20 @@ guard, which stops the daemon. References held by children forked from user
 code are not covered. Model: `tla/WorkerExit.tla`.
 
 ### SHM-9 A lock released by an unwinding panic marks what it protects as damaged
-Status: deviation
+Status: implemented
+Checked by: a_process_that_panics_inside_the_lock_poisons_it, a_thread_that_panics_inside_the_lock_poisons_it, a_thread_that_lives_on_after_a_caught_panic_does_not_wedge_the_lock, a_lock_taken_while_already_unwinding_is_released_normally, a_panic_caught_inside_a_section_entered_while_unwinding_poisons_the_lock, a_panic_inside_a_stream_poisons_it, tla:PanicExit, tla:PanicExit_unlock_on_unwind.bug
 
 The volume lock is robust so that a holder's death inside the critical
 section reaches other processes as a dead owner, which poisons the volume.
-A panic that unwinds through the critical section instead drops the lock's
-guard, which unlocks normally: a half-updated block list is handed to
-sibling processes as sound. The stream slot guard already poisons its slot
-when dropped during a panic; the volume lock and the recoverable lock do
-not.
+A section left any other way than by completing it -- a panic unwinding
+through it, or an error return that means the block list is inconsistent --
+must reach them the same way, never as a normal unlock. The section ends
+by releasing its guard explicitly; a guard dropped without that marks the
+lock poisoned and then unlocks, so every later taker, in any process or
+thread, skips the volume. The lock is never left held by a live thread,
+which a thread that catches the panic and goes on would otherwise keep
+forever. A section that a destructor enters and completes during an unwind
+releases normally; a panic inside it poisons, whatever the thread was doing
+before. The stream slot lock is a recoverable lock whose only user, the
+slot guard, marks its slot poisoned whenever it is dropped during an unwind
+and then releases it.

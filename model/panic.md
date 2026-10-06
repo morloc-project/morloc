@@ -73,8 +73,10 @@ panicking, poisons what the lock protects. A thread that finds a poisoned
 lock treats it as a failure and never uses the data. SHM-9 is the same
 rule for locks shared between processes.
 
-Missing: the MCP servers refuse a request that finds their state poisoned;
-about twenty sites elsewhere recover a poisoned mutex and use its data.
+Missing: the nexus treats a poisoned lock as a failure everywhere; in
+libmorloc 29 sites recover a poisoned mutex and use its data. They become
+failures together with libmorloc's hook (PANIC-1), since until then a panic
+on a libmorloc thread ends only that thread.
 
 ### PANIC-5 A pool never answers a panic
 Status: deviation

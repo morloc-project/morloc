@@ -108,9 +108,8 @@ lock is taken whether or not a panic poisoned it. Model:
 
 This holds for a panic that unwinds through Rust frames to the worker. A
 panic inside an `extern "C"` function the handler calls cannot unwind out
-of it; DAEMON-8 covers that case. A lock the panic unwound through is
-released as sound (SHM-9), so requests that run during the grace period
-may see what it tore.
+of it; DAEMON-8 covers that case. A shared-memory lock the panic unwound
+through is never handed on as sound (SHM-9).
 
 ### DAEMON-8 A panic below a C boundary in a request ends the daemon as failed
 Status: deviation

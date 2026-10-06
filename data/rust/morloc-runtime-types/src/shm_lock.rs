@@ -17,7 +17,6 @@ use crate::error::MorlocError;
 
 #[cfg(target_os = "linux")]
 use std::cell::UnsafeCell;
-#[cfg(not(target_os = "linux"))]
 use std::sync::atomic::{AtomicU32, Ordering};
 
 #[repr(C)]
@@ -26,7 +25,6 @@ pub struct ShmLock {
     mutex: UnsafeCell<libc::pthread_mutex_t>,
     #[cfg(not(target_os = "linux"))]
     holder: crate::owner_word::OwnerWord,
-    #[cfg(not(target_os = "linux"))]
     poisoned: AtomicU32,
 }
 
@@ -34,13 +32,24 @@ pub struct ShmLock {
 // pthread_mutex_* (Linux) or atomics (elsewhere).
 unsafe impl Sync for ShmLock {}
 
-/// Holds the lock until dropped.
+// SHM-9
 pub struct ShmGuard<'a> {
     lock: &'a ShmLock,
 }
 
+impl ShmGuard<'_> {
+    // SHM-9
+    pub fn release(self) {
+        // SAFETY: a guard exists only while this thread holds the lock.
+        unsafe { self.lock.unlock() };
+        std::mem::forget(self);
+    }
+}
+
 impl Drop for ShmGuard<'_> {
     fn drop(&mut self) {
+        // SHM-9: the section may be half-edited.
+        self.lock.poisoned.store(1, Ordering::Release);
         // SAFETY: a guard exists only while this thread holds the lock.
         unsafe { self.lock.unlock() }
     }
@@ -54,9 +63,9 @@ impl ShmLock {
 
 fn poisoned() -> MorlocError {
     MorlocError::Shm(
-        "a process died while allocating from this shared memory volume; \
-         its block list may be inconsistent, so the volume can no longer \
-         allocate"
+        "a process died, or a thread panicked, while allocating from this \
+         shared memory volume; its block list may be inconsistent, so the \
+         volume can no longer allocate"
             .into(),
     )
 }
@@ -96,6 +105,7 @@ impl ShmLock {
             if rc != 0 {
                 return Err(fail("pthread_mutex_init", rc));
             }
+            std::ptr::addr_of_mut!((*this).poisoned).write(AtomicU32::new(0));
             Ok(())
         })();
         libc::pthread_mutexattr_destroy(&mut attr);
@@ -107,6 +117,10 @@ impl ShmLock {
         // SAFETY: the mutex was initialised by `init` before the volume
         // became visible.
         match unsafe { libc::pthread_mutex_lock(self.mutex.get()) } {
+            0 if self.poisoned.load(Ordering::Acquire) != 0 => {
+                unsafe { self.unlock() };
+                Ok(None)
+            }
             0 => Ok(Some(ShmGuard { lock: self })),
             libc::EOWNERDEAD => {
                 // Unlocking without marking the mutex consistent makes it
@@ -205,7 +219,7 @@ mod tests {
                 if pid == 0 {
                     let me = libc::getpid() as u32;
                     for _ in 0..ROUNDS {
-                        let Ok(_g) = sh.lock.lock() else { libc::_exit(2) };
+                        let Ok(g) = sh.lock.lock() else { libc::_exit(2) };
                         if sh.owner.load(Ordering::SeqCst) != 0 {
                             sh.violations.fetch_add(1, Ordering::SeqCst);
                         }
@@ -217,6 +231,7 @@ mod tests {
                             sh.violations.fetch_add(1, Ordering::SeqCst);
                         }
                         sh.owner.store(0, Ordering::SeqCst);
+                        g.release();
                     }
                     libc::_exit(0);
                 }
@@ -248,7 +263,7 @@ mod tests {
                     libc::_exit(3);
                 }
                 sh.owner.store(0, Ordering::SeqCst);
-                drop(g);
+                g.release();
                 libc::_exit(0);
             }
             while sh.owner.load(Ordering::SeqCst) != 1 {
@@ -261,7 +276,7 @@ mod tests {
                 if sh.owner.load(Ordering::SeqCst) != 0 {
                     libc::_exit(4);
                 }
-                drop(g);
+                g.release();
                 libc::_exit(0);
             }
             wait_ok(holder);
@@ -317,6 +332,124 @@ mod tests {
             wait_ok(holder);
             let err = got.expect("the lock waited on an unreaped dead holder");
             assert!(err.is_some_and(|e| e.contains("died")), "a dead holder's lock was taken");
+        }
+    }
+
+    fn panic_holding(lock: &ShmLock) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = lock.lock().unwrap();
+            std::panic::resume_unwind(Box::new(()));
+        }));
+    }
+
+    fn lock_error_within(sh: &'static Shared) -> Option<String> {
+        let addr = sh as *const Shared as usize;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let sh = unsafe { &*(addr as *const Shared) };
+            let _ = tx.send(sh.lock.lock().err().map(|e| e.to_string()));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the lock was never handed on")
+    }
+
+    #[test]
+    fn a_process_that_panics_inside_the_lock_poisons_it() {
+        unsafe {
+            let sh = shared_map::<Shared>();
+            ShmLock::init(std::ptr::addr_of_mut!((*sh).lock)).unwrap();
+            let sh = &*sh;
+            let holder = libc::fork();
+            assert!(holder >= 0);
+            if holder == 0 {
+                panic_holding(&sh.lock);
+                libc::_exit(0);
+            }
+            wait_ok(holder);
+            let err = lock_error_within(sh);
+            assert!(err.is_some_and(|e| e.contains("died")), "a lock a panic unwound through was taken");
+        }
+    }
+
+    #[test]
+    fn a_thread_that_panics_inside_the_lock_poisons_it() {
+        unsafe {
+            let sh = shared_map::<Shared>();
+            ShmLock::init(std::ptr::addr_of_mut!((*sh).lock)).unwrap();
+            let sh: &'static Shared = &*sh;
+            let addr = sh as *const Shared as usize;
+            std::thread::spawn(move || panic_holding(&(*(addr as *const Shared)).lock)).join().unwrap();
+            let err = lock_error_within(sh);
+            assert!(err.is_some_and(|e| e.contains("died")), "a lock a panic unwound through was taken");
+        }
+    }
+
+    #[test]
+    fn a_lock_taken_while_already_unwinding_is_released_normally() {
+        struct FreesOnDrop(&'static ShmLock);
+        impl Drop for FreesOnDrop {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().release();
+            }
+        }
+        unsafe {
+            let sh = shared_map::<Shared>();
+            ShmLock::init(std::ptr::addr_of_mut!((*sh).lock)).unwrap();
+            let sh: &'static Shared = &*sh;
+            let addr = sh as *const Shared as usize;
+            std::thread::spawn(move || {
+                let _ = std::panic::catch_unwind(|| {
+                    let _frees = FreesOnDrop(&(*(addr as *const Shared)).lock);
+                    std::panic::resume_unwind(Box::new(()));
+                });
+            })
+            .join()
+            .unwrap();
+            assert_eq!(lock_error_within(sh), None, "a section completed during an unwind poisoned the lock");
+        }
+    }
+
+    #[test]
+    fn a_panic_caught_inside_a_section_entered_while_unwinding_poisons_the_lock() {
+        struct PanicsInsideOnDrop(&'static ShmLock);
+        impl Drop for PanicsInsideOnDrop {
+            fn drop(&mut self) {
+                panic_holding(self.0);
+            }
+        }
+        unsafe {
+            let sh = shared_map::<Shared>();
+            ShmLock::init(std::ptr::addr_of_mut!((*sh).lock)).unwrap();
+            let sh: &'static Shared = &*sh;
+            let addr = sh as *const Shared as usize;
+            std::thread::spawn(move || {
+                let _ = std::panic::catch_unwind(|| {
+                    let _inner = PanicsInsideOnDrop(&(*(addr as *const Shared)).lock);
+                    std::panic::resume_unwind(Box::new(()));
+                });
+            })
+            .join()
+            .unwrap();
+            let err = lock_error_within(sh);
+            assert!(err.is_some_and(|e| e.contains("died")), "a lock a panic unwound through was taken");
+        }
+    }
+
+    #[test]
+    fn a_thread_that_lives_on_after_a_caught_panic_does_not_wedge_the_lock() {
+        unsafe {
+            let sh = shared_map::<Shared>();
+            ShmLock::init(std::ptr::addr_of_mut!((*sh).lock)).unwrap();
+            let sh: &'static Shared = &*sh;
+            let addr = sh as *const Shared as usize;
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let survivor = std::thread::spawn(move || {
+                panic_holding(&(*(addr as *const Shared)).lock);
+                let _ = rx.recv();
+            });
+            let err = lock_error_within(sh);
+            let _ = tx.send(());
+            survivor.join().unwrap();
+            assert!(err.is_some_and(|e| e.contains("died")), "a lock a panic unwound through was taken");
         }
     }
 }
