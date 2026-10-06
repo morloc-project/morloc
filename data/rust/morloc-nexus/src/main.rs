@@ -4,6 +4,8 @@
 //! Reads a program's manifest.json, spawns language pool daemons, and
 //! routes function calls to them over Unix sockets.
 
+#[cfg(not(panic = "unwind"))]
+compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
 mod cli;
 mod convert;
 mod dispatch;

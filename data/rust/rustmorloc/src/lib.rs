@@ -26,6 +26,8 @@
 //!  * I6  Multi-limb `Int` is rejected on consume (i64 cap).
 //!  * I8  All scalar pokes through the byte cursor use unaligned access.
 
+#[cfg(not(panic = "unwind"))]
+compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_char, c_void, CString};
@@ -61,6 +63,8 @@ pub use arrow_schema;
 // NOT linked into this rlib; an rlib may carry undefined references.
 // ---------------------------------------------------------------------------
 extern "C" {
+    fn morloc_catch_scope(kind: u8) -> u8;
+    fn morloc_panic_caught();
     fn morloc_log_next_id() -> u64;
     fn morloc_log_emit(tmpl: *const c_char, group: *const c_char,
                        runtime_seconds: f64, call_id: u64);
@@ -255,6 +259,49 @@ fn cschema_of(schema: &Schema) -> *mut CSchema {
 // ---------------------------------------------------------------------------
 pub struct MorlocThrow(pub String);
 
+thread_local! {
+    static RUNTIME_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// libmorloc's scope kind for a host's catch around user code (PANIC-6).
+const MORLOC_SCOPE_HOST: u8 = 2;
+
+/// Marks a frame of this runtime's own code: a panic inside it is a bug in
+/// morloc, which ends the pool (PANIC-5), not a failure of the user's call
+/// (PANIC-6).
+pub struct RuntimeFrame(());
+
+impl RuntimeFrame {
+    pub fn enter() -> Self {
+        RUNTIME_DEPTH.with(|d| d.set(d.get() + 1));
+        RuntimeFrame(())
+    }
+}
+
+impl Drop for RuntimeFrame {
+    fn drop(&mut self) {
+        let _ = RUNTIME_DEPTH.try_with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
+/// A caught unwind's message: a throw's own, or the panic's.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(MorlocThrow(msg)) = payload.downcast_ref::<MorlocThrow>() {
+        msg.clone()
+    } else if let Some(s) = payload.downcast_ref::<&str>() {
+        format!("Rust code panicked: {s}")
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        format!("Rust code panicked: {s}")
+    } else {
+        "Rust code panicked".to_string()
+    }
+}
+
+/// The probe the pool registers with libmorloc (PANIC-6).
+pub extern "C" fn runtime_frame_probe() -> bool {
+    RUNTIME_DEPTH.try_with(|d| d.get() > 0).unwrap_or(true)
+}
+
 /// Raise a catchable morloc error (`@throw`) from sourced Rust. It unwinds
 /// without the panic hook, which ends the process on a panic (PANIC-1); a
 /// throw is a result, not a panic.
@@ -279,16 +326,17 @@ pub fn morloc_throw_as<T>(msg: impl Into<String>) -> T {
 /// which it classifies as infrastructure in turn.
 pub fn morloc_infra_abort(msg: impl AsRef<str>) -> ! {
     eprintln!("morloc internal error (Rust pool): {}", msg.as_ref());
-    std::process::abort()
+    // PANIC-5
+    unsafe { libc::_exit(morloc_runtime_types::panic::PANIC_EXIT_STATUS) }
 }
 
 /// `@try body`: run `body` and convert the outcome to data. `ok` wraps the
 /// value, `err` the caught message; codegen supplies both because only it
 /// knows how this `Try` is represented in Rust.
 ///
-/// Only a `MorlocThrow` payload becomes an `Err` arm. Any other panic is a
-/// genuine bug and resumes unwinding, which mirrors the C++ split between
-/// MorlocException and an internal abort.
+/// A throw or a panic in user code becomes an `Err` arm (PANIC-6), as a C++
+/// exception does; a panic in this runtime's own code ends the pool before
+/// it unwinds here (PANIC-5).
 pub fn mlc_try<T, R, F, OK, ERR>(body: F, ok: OK, err: ERR) -> R
 where
     F: MorlocFn0<T>,
@@ -300,15 +348,14 @@ where
     // variable alike, rather than only the former.
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.call0())) {
         Ok(v) => ok(v),
-        Err(payload) => match payload.downcast::<MorlocThrow>() {
-            Ok(thrown) => {
-                // The caught throw's partial trace must not leak into a
-                // later error's traceback.
-                TRACEBACK.with(|t| t.borrow_mut().clear());
-                err(thrown.0)
-            }
-            Err(other) => std::panic::resume_unwind(other),
-        },
+        Err(payload) => {
+            // PANIC-6: a runtime panic ended the pool before it reached here.
+            unsafe { morloc_panic_caught() };
+            // The caught error's partial trace must not leak into a later
+            // error's traceback.
+            TRACEBACK.with(|t| t.borrow_mut().clear());
+            err(panic_message(payload.as_ref()))
+        }
     }
 }
 
@@ -1995,7 +2042,9 @@ pub mod rec_drain {
                 while let Some((ptr, f)) = unsafe { (*p).pop() } {
                     // A panic in one block's drop must not escape a drop that
                     // may itself be running during unwinding.
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { f(ptr) }));
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { f(ptr) })).is_err() {
+                        unsafe { crate::morloc_panic_caught() };
+                    }
                 }
             });
             let _ = ACTIVE.try_with(|a| a.set(false));
@@ -2181,6 +2230,7 @@ pub type ClosureOrigin = (String, i64, Vec<Vec<u8>>);
 /// wholly native (those cross by the serial path instead). Every site that
 /// needs an origin goes through here, so the failure names its cause once.
 pub fn require_origin(origin: Option<&ClosureOrigin>) -> ClosureOrigin {
+    let _runtime = RuntimeFrame::enter();
     match origin {
         Some(o) => o.clone(),
         None => morloc_throw(
@@ -2457,6 +2507,7 @@ pub unsafe fn put_value<T: ToVoidstar>(value: &T, schema: &Schema) -> *mut u8 {
 /// # Safety
 /// `schema` must describe `value`'s wire type.
 pub unsafe fn put_value_as<T: ToVoidstar>(value: &T, schema: &Schema, self_contained: bool) -> *mut u8 {
+    let _runtime = RuntimeFrame::enter();
     let _recur = RecurScope::enter(schema);
     if schema.serial_type == SerialType::Table {
         return match arrow_put(value, schema) {
@@ -2543,6 +2594,7 @@ unsafe fn arrow_put<T: ToVoidstar>(value: &T, schema: &Schema) -> Result<isize, 
 /// own reference to any shared memory the packet names, tracked here like
 /// every other packet this pool returns.
 pub unsafe fn dup_packet(packet: *const u8) -> *mut u8 {
+    let _runtime = RuntimeFrame::enter();
     let mut block: *mut c_void = std::ptr::null_mut();
     let mut err: *mut c_char = std::ptr::null_mut();
     let copy = morloc_dup_packet(packet, &mut block, &mut err);
@@ -2558,6 +2610,7 @@ pub unsafe fn dup_packet(packet: *const u8) -> *mut u8 {
 /// # Safety
 /// `packet` must be a valid data packet whose schema matches `schema`.
 pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> T {
+    let _runtime = RuntimeFrame::enter();
     let _recur = RecurScope::enter(schema);
     let source = *packet.add(PKT_SOURCE_OFF);
     let format = *packet.add(PKT_FORMAT_OFF);
@@ -2688,6 +2741,7 @@ pub fn set_tmpdir(dir: &str) {
 /// `args` must be valid argument packets for manifold `mid` on the peer pool
 /// served at `socket_filename` (relative to the pool tmpdir).
 pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) -> *mut u8 {
+    let _runtime = RuntimeFrame::enter();
     let tmpdir = TMPDIR
         .get()
         .map(|s| s.to_string_lossy().into_owned())
@@ -2719,6 +2773,7 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
 /// increfed + tracked so the peer's next dispatch flush cannot reclaim data
 /// this pool still references (I3).
 unsafe fn finalize_call_result(result: *mut u8) -> *mut u8 {
+    let _runtime = RuntimeFrame::enter();
     let mut fail_err: *mut c_char = std::ptr::null_mut();
     let fail_msg = get_morloc_data_packet_error_message(result, &mut fail_err);
     discard_err(fail_err);
@@ -2762,6 +2817,7 @@ pub unsafe fn remote_call(
     gpus: i32,
     args: &[*const u8],
 ) -> *mut u8 {
+    let _runtime = RuntimeFrame::enter();
     let socket_c = match CString::new(socket_basename) {
         Ok(s) => s,
         Err(_) => morloc_throw("remote_call: socket name contains an interior NUL"),
@@ -2801,6 +2857,7 @@ pub unsafe fn remote_call(
 /// # Safety
 /// `packets` must be valid argument packets whose wire types match `schemas`.
 pub unsafe fn cache_key(mid: u32, packets: &[*const u8], schemas: &[&str]) -> u64 {
+    let _runtime = RuntimeFrame::enter();
     // Small per-call CString build of the arg schemas; negligible on a cache
     // path (the recompute it guards dominates), so kept simple over c"" literals.
     let schema_cs: Vec<CString> = schemas.iter().map(|s| cstr_arg(s, "@cache")).collect();
@@ -2817,6 +2874,7 @@ pub unsafe fn cache_key(mid: u32, packets: &[*const u8], schemas: &[&str]) -> u6
 /// # Safety
 /// Calls into the libmorloc C ABI.
 pub unsafe fn cache_lookup(key: u64, label: &str) -> *mut u8 {
+    let _runtime = RuntimeFrame::enter();
     let label_c = cstr_arg(label, "@cache");
     let mut size: usize = 0;
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -2835,6 +2893,7 @@ pub unsafe fn cache_lookup(key: u64, label: &str) -> *mut u8 {
 /// # Safety
 /// `data` must be a valid result packet whose wire type matches `schema`.
 pub unsafe fn cache_store(key: u64, label: &str, data: *const u8, schema: &str) {
+    let _runtime = RuntimeFrame::enter();
     let label_c = cstr_arg(label, "@cache");
     let schema_c = cstr_arg(schema, "@cache");
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -2859,6 +2918,7 @@ unsafe fn with_voidstar<T: ToVoidstar, R>(
     schema: &Schema,
     f: impl FnOnce(*mut c_void, *const CSchema, &mut *mut c_char) -> R,
 ) -> R {
+    let _runtime = RuntimeFrame::enter();
     let _recur = RecurScope::enter(schema);
     let total = value.shm_size(schema).max(1);
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -2897,6 +2957,7 @@ pub unsafe fn unpack<T: FromVoidstar>(packet: &[u8], schema: &Schema) -> T {
 /// @read: parse JSON text into a typed value; a parse failure is a catchable
 /// morloc error (so `@catch` can recover it).
 pub unsafe fn read<T: FromVoidstar>(s: &str, schema: &Schema) -> T {
+    let _runtime = RuntimeFrame::enter();
     let _recur = RecurScope::enter(schema);
     let json = match CString::new(s) {
         Ok(c) => c,
@@ -2967,6 +3028,7 @@ unsafe fn read_voidstar<T: FromVoidstar>(
     schema: &Schema,
     what: &str,
 ) -> T {
+    let _runtime = RuntimeFrame::enter();
     if !err.is_null() {
         morloc_throw(format!("{}: {}", what, cstr_take(err)));
     }
@@ -2987,6 +3049,7 @@ unsafe fn read_voidstar<T: FromVoidstar>(
 /// .. free(s)` and, like them, forwards the libc-owned pointer directly rather
 /// than copying it into a Rust-owned buffer.
 unsafe fn with_schema_str<R>(schema: &Schema, f: impl FnOnce(*const c_char) -> R) -> R {
+    let _runtime = RuntimeFrame::enter();
     let s = schema_to_string(cschema_of(schema));
     if s.is_null() {
         morloc_throw("morloc IO: schema_to_string returned null");
@@ -3281,6 +3344,7 @@ pub unsafe fn open_channel(schema: &Schema) -> u64 {
 /// pool, without waiting for it. The channel travels as the producer's
 /// OStream argument, after its captured values.
 pub unsafe fn spawn<R, F: MorlocFn1<u64, R>>(f: &F, handle: u64, schema: &Schema) {
+    let _runtime = RuntimeFrame::enter();
     let (home, mid, mut captured) = require_origin(f.reify1());
     captured.push(reify_capture(&handle, schema));
     let ptrs: Vec<*const u8> = captured.iter().map(|c| c.as_ptr()).collect();
@@ -3409,31 +3473,35 @@ pub unsafe fn fail_packet(msg: &str) -> *mut u8 {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch guard (I2): run a manifold body, converting a MorlocThrow panic to
-// a catchable fail packet and aborting on any other (bug) panic. Generated
-// dispatch arms wrap their body in this.
+// Dispatch guard (I2): run a manifold body, converting a MorlocThrow or a
+// panic in user code to a catchable fail packet (PANIC-6). A panic in this
+// runtime's own frames ends the pool before it unwinds here (PANIC-5).
+// Generated dispatch arms wrap their body in this.
 // ---------------------------------------------------------------------------
 pub fn dispatch_guard<F>(f: F) -> *mut u8
 where
     F: FnOnce() -> *mut u8 + std::panic::UnwindSafe,
 {
-    match std::panic::catch_unwind(f) {
+    // PANIC-6: libmorloc's hook lets a panic outside this runtime's own
+    // frames unwind to here.
+    let outer = unsafe { morloc_catch_scope(MORLOC_SCOPE_HOST) };
+    let depth = RUNTIME_DEPTH.with(|d| d.replace(0));
+    let result = std::panic::catch_unwind(f);
+    RUNTIME_DEPTH.with(|d| d.set(depth));
+    unsafe { morloc_catch_scope(outer) };
+    match result {
         Ok(p) => p,
         Err(payload) => {
-            if let Some(MorlocThrow(msg)) = payload.downcast_ref::<MorlocThrow>() {
-                // Append the manifold trace accumulated during unwind, so the
-                // message + traceback crosses the pool boundary as one string.
-                let full = TRACEBACK.with(|t| {
-                    let mut tb = t.borrow_mut();
-                    let s = format!("{}{}", msg, tb);
-                    tb.clear();
-                    s
-                });
-                unsafe { fail_packet(&full) }
-            } else {
-                eprintln!("MORLOC_INTERNAL_ABORT: Rust pool panicked (non-throw payload)");
-                std::process::abort();
-            }
+            let msg = panic_message(payload.as_ref());
+            // Append the manifold trace accumulated during unwind, so the
+            // message + traceback crosses the pool boundary as one string.
+            let full = TRACEBACK.with(|t| {
+                let mut tb = t.borrow_mut();
+                let s = format!("{}{}", msg, tb);
+                tb.clear();
+                s
+            });
+            unsafe { fail_packet(&full) }
         }
     }
 }

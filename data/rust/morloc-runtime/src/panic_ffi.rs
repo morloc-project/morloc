@@ -1,6 +1,21 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static EXIT: AtomicUsize = AtomicUsize::new(0);
+static RUNTIME_PROBE: AtomicUsize = AtomicUsize::new(0);
+
+// PANIC-6
+fn may_unwind(host: bool) -> bool {
+    if !crate::fork_policy::holds_no_runtime_lock() {
+        return false;
+    }
+    let p = RUNTIME_PROBE.load(Ordering::Acquire);
+    if !host || p == 0 {
+        return true;
+    }
+    // SAFETY: PANIC-6: only `morloc_set_runtime_frame_probe` stores here.
+    let in_runtime: extern "C" fn() -> bool = unsafe { std::mem::transmute::<usize, extern "C" fn() -> bool>(p) };
+    !in_runtime()
+}
 
 // PANIC-1
 fn panic_exit() -> ! {
@@ -16,12 +31,31 @@ fn panic_exit() -> ! {
 // PANIC-1
 pub(crate) fn install(exit: Option<extern "C" fn() -> !>) {
     EXIT.store(exit.map_or(0, |f| f as usize), Ordering::Release);
-    morloc_runtime_types::panic::install_hook_unless(panic_exit, crate::fork_policy::holds_no_runtime_lock);
+    morloc_runtime_types::panic::install_hook_unless(panic_exit, may_unwind);
 }
 
 #[no_mangle]
 pub extern "C" fn morloc_install_panic_hook(exit: Option<extern "C" fn() -> !>) {
     install(exit)
+}
+
+// PANIC-6: the host says whether the panicking thread is in its runtime's code.
+#[no_mangle]
+pub extern "C" fn morloc_set_runtime_frame_probe(probe: Option<extern "C" fn() -> bool>) {
+    RUNTIME_PROBE.store(probe.map_or(0, |f| f as usize), Ordering::Release);
+}
+
+// PANIC-6: `kind` 2 opens a host's scope around its user code, 0 closes it;
+// returns the scope to restore.
+#[no_mangle]
+pub extern "C" fn morloc_catch_scope(kind: u8) -> u8 {
+    morloc_runtime_types::panic::set_scope(kind)
+}
+
+// PANIC-6
+#[no_mangle]
+pub extern "C" fn morloc_panic_caught() {
+    morloc_runtime_types::panic::caught()
 }
 
 #[cfg(test)]
@@ -155,6 +189,25 @@ mod tests {
                 })
             };
             unsafe { libc::_exit(3) };
+        });
+    }
+
+    #[test]
+    fn a_second_user_panic_after_a_user_catch_is_still_the_users() {
+        assert_eq!(status_of_child("child_panics_twice_in_a_host_scope"), CHILD_OK);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_panics_twice_in_a_host_scope() {
+        in_child(|| {
+            let outer = morloc_runtime_types::panic::set_scope(morloc_runtime_types::panic::SCOPE_HOST);
+            let first = std::panic::catch_unwind(|| panic!("one")).is_err();
+            let second = std::panic::catch_unwind(|| panic!("two")).is_err();
+            morloc_runtime_types::panic::set_scope(outer);
+            if !(first && second) {
+                unsafe { libc::_exit(3) };
+            }
         });
     }
 }

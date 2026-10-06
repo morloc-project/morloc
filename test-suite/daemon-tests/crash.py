@@ -11,5 +11,9 @@ def pyDie(x):
     return x
 
 
+def pyExit(x):
+    raise SystemExit(3)
+
+
 def pyApply(f, x):
     return f(x)

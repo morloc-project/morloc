@@ -104,7 +104,9 @@ public:
         "morloc internal error (C++ pool, %s:%d in %s):\n  %s\n",
         file, line, func, msg
     );
-    std::abort();
+    // PANIC-5
+    std::fflush(stderr);
+    _exit(70);
 }
 
 #define MLC_INTERNAL_ABORT(msg) _mlc_internal_abort(__FILE__, __LINE__, __func__, (msg))

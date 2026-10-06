@@ -13,17 +13,23 @@ The internal-error status is exit status 70 (EX_SOFTWARE). A process
 exits with it only when a panic ended it.
 
 ### PANIC-1 A panic ends its process unless a catch scope holds it
-Status: deviation
+Status: implemented
+Checked by: a_panic_outside_a_catch_scope_exits_with_the_internal_error_status, a_panic_inside_a_catch_scope_reaches_the_catch, a_panic_while_unwinding_exits_with_the_internal_error_status, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_in_a_forked_child_leaves_the_parents_run_alone, every_host_installs_the_panic_hook, tla:PanicExit, tla:PanicExit_hook_exits_in_scope.bug
 
 Each copy of the Rust standard library installs one hook when it is first
 entered: the nexus at start, libmorloc when its host starts (the nexus,
 the C++ and Rust pools' main, the Python module's initialisation and the R
-library's), and the Rust pool. The hook formats its report into a fixed
+library's); the Rust pool shares libmorloc's standard library and so its
+hook. A morloc throw in the Rust pool is a result, not a panic: it unwinds
+without the hook. The hook formats its report into a fixed
 buffer and writes it with write(2); naming the thread, or a backtrace when
 one is asked for, may allocate. If the panicking thread is inside a catch
 scope, is not already unwinding, holds no runtime lock, and the panic is
-not a fatal one (a poisoned lock or a lock-rank violation), the hook
-returns and the panic unwinds to the catch.
+not a fatal one (a poisoned lock or a lock-rank violation) -- and, when
+the scope is a host's around its user code, the thread is not in the
+host runtime's own frames -- the hook returns and the panic unwinds to
+the catch. It reports a panic a request or library scope holds as an
+internal error, and leaves a user panic to the call's failure.
 Otherwise the hook runs the panic exit: it kills the process groups of the
 pools and child processes it started, removes the shared memory and paths
 it registered, and calls _exit(70), even when another thread is already
@@ -36,9 +42,6 @@ any catch scope, since its panic could not unwind to one. A forked child of
 the nexus before exec, where a spawn's pre-exec step and libmorloc's fork
 handlers run, owns none of its parent's pools, shared memory or paths: the
 panic exit there only calls _exit(70).
-
-Missing: the Rust pool's own code keeps its own hook, which aborts on a
-panic that is not a morloc throw (PANIC-5, PANIC-6).
 
 ### PANIC-2 Only request frames catch a panic
 Status: deviation
@@ -87,30 +90,35 @@ lock treats it as a failure and never uses the data. SHM-9 is the same
 rule for locks shared between processes.
 
 ### PANIC-5 A pool never answers a panic
-Status: deviation
+Status: implemented
+Checked by: golden:py-systemexit-ends-pool, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_holding_a_runtime_lock_inside_a_format_library_call_ends_the_process, tla:PanicExit_continue_after_catch.bug
 
 A panic in a pool's runtime code -- a Rust panic outside user code, a C++
 infrastructure error -- ends the pool by PANIC-1. It is never turned into
 a FAIL packet or an error return: user `@try` and `@catch`, Python
 `except Exception` and R `tryCatch` would catch it and the pool would go
-on serving with torn state. The nexus recovers from the pool's end as
-SHM-8 says, as it would from a crash.
-
-Missing: the Rust pool aborts (134); C++ infrastructure errors abort;
-Python thread mode loses one thread to a BaseException and keeps serving.
+on serving with torn state. The Rust pool marks its runtime's frames
+(decoding, encoding, foreign calls), and libmorloc's hook lets no catch
+hold a panic inside one. A C++ pool's internal error exits 70. A Python
+exception no handler catches (SystemExit, an interpreter error) ends the
+pool in either pool mode. The nexus recovers from the pool's end as SHM-8
+says, as it would from a crash.
 
 ### PANIC-6 An error in user code is the call's failure
-Status: deviation
+Status: implemented
+Checked by: golden:rust-user-panic, golden:rust-error
 
-An exception, error or condition raised by a foreign function, of any
-type, is that call's result: the pool answers with a FAIL packet carrying
-the message and goes on serving. A panic in a user Rust function is such
-an error. The Rust pool tells it from a panic in its own code by a
-per-thread count of runtime frames entered: a panic with no runtime frame
-entered since the user function was called is the user's.
-
-Missing: the Rust pool aborts on any panic other than a morloc throw. C++,
-Python and R already answer user errors with a FAIL packet.
+An exception, error or condition a foreign function raises that its
+language's error handling catches (a Python `Exception`, an R condition,
+a C++ exception, a panic in user Rust code) is that call's result: the
+pool answers with a FAIL packet carrying the message and goes on serving,
+and a `@try` in the same pool catches it as it would a throw. A panic on
+a thread the user's code started belongs to no call, and ends the pool. A
+panic in the destructor of a user value that the Rust pool drops after the
+call has made its result is ignored: the result stands. The Rust pool tells it from a panic in its own code by a
+per-thread count of its runtime's frames: a panic inside the dispatch
+guard with none of them active is the user's, and is answered with a FAIL
+packet naming the panic.
 
 ### PANIC-7 A background thread has no catch scope
 Status: implemented
@@ -123,10 +131,23 @@ PANIC-1. It never dies alone, which would leak, orphan children, lose the
 shutdown bound or hang its consumer.
 
 ### PANIC-8 The build unwinds on panic
-Status: deviation
+Status: implemented
+Checked by: every_crate_refuses_to_build_without_unwinding
 
 Catch scopes and the generated Rust pool need panics to unwind. The
-nexus, libmorloc and the Rust pool fail to compile under any other panic
-strategy.
+nexus, libmorloc, the Rust pool's runtime and the generated Rust pool
+fail to compile under any other panic strategy.
 
-Missing: nothing checks the strategy at build time.
+### PANIC-9 Every frame of the Rust pool's runtime is marked
+Status: deviation
+
+PANIC-5 and PANIC-6 tell a runtime panic from a user panic by the frames
+the Rust pool's runtime marks. Its decoding, encoding, foreign and remote
+calls, caching and spawning are marked. A panic in runtime code that is
+not marked becomes the call's failure instead of ending the pool.
+
+Missing: the generated glue between calls, recursive-schema scopes, the
+closure and partial-application machinery, and string interpolation are
+not marked. Marking the user's calls instead, which the compiler emits as
+a closed set, would make every other frame the runtime's.
+

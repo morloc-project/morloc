@@ -957,6 +957,13 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
             print(f"morloc pool worker thread fatal: {e!s}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             sys.stderr.flush()
+            # PANIC-5 / SHM-8: what the thread held is recovered only by
+            # ending the pool, as a fork-mode worker's death does.
+            try:
+                sys.stdout.flush()
+            except Exception:
+                pass
+            os._exit(1)
         finally:
             # A thread leaving by any route takes its deferred releases with
             # it, so perform them here as the surplus reap above does.

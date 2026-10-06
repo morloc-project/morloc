@@ -426,7 +426,7 @@ printProgram serialization signatures _extra prog =
         , "}"
         , "#[inline]"
         , "fn schema(id: usize) -> &'static Schema {"
-        , indent 4 "&SCHEMA_TABLE.get().expect(\"schemas not initialized\")[id]"
+        , indent 4 "SCHEMA_TABLE.get().and_then(|t| t.get(id)).unwrap_or_else(|| rustmorloc::morloc_infra_abort(\"a manifold asked for a schema the pool does not have\"))"
         , "}"
         ]
 

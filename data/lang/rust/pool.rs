@@ -29,7 +29,11 @@ use rustmorloc::{MorlocFn0, MorlocFn1, MorlocFn2, MorlocFn3, MorlocFn4, MorlocFn
 // has exactly two direct rlib dependencies (rustmorloc, morloc_runtime_types),
 // each pinned by path in the bare-rustc build -- avoiding `libc` crate-name
 // ambiguity across the many hashed rlibs staged in rust-deps.
+#[cfg(not(panic = "unwind"))]
+compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
+
 extern "C" {
+    fn morloc_set_runtime_frame_probe(probe: Option<extern "C" fn() -> bool>);
     fn pool_main(argc: c_int, argv: *mut *mut c_char, config: *mut PoolConfig) -> c_int;
     fn morloc_lifeline_guard();
 }
@@ -69,6 +73,8 @@ fn main() {
     }
 
     rustmorloc::install_crash_handler();
+    // PANIC-6
+    unsafe { morloc_set_runtime_frame_probe(Some(rustmorloc::runtime_frame_probe)) };
     init_schemas();
     // argv is `<socket_path> <tmpdir> <shm_basename>`; record the tmpdir so
     // foreign calls can resolve peer-pool socket paths.

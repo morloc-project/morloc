@@ -1,16 +1,17 @@
 -- User code that kills the worker serving it. A long-running daemon must
 -- recover the shared memory the dead worker held (SHM-8 in the compiler's
 -- model): the pool ends and the daemon runs its full recovery.
-module main (pyOk, pyDie, rOk, rDie, slowly)
+module main (pyOk, pyDie, pyExit, rOk, rDie, slowly)
 
 import root-py
 import root-r
 
-source Py from "crash.py" ("pyOk", "pyDie", "pyApply")
+source Py from "crash.py" ("pyOk", "pyDie", "pyExit", "pyApply")
 source R from "crash.R" ("rOk", "rDie", "rSleep")
 
 pyOk :: Int -> Int
 pyDie :: Int -> Int
+pyExit :: Int -> Int
 rOk :: Int -> Int
 rDie :: Int -> Int
 pyApply :: (Int -> Int) -> Int -> Int

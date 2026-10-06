@@ -1,0 +1,4 @@
+exit:1
+Pool process exited with status 1
+exit:1
+Pool process exited with status 1

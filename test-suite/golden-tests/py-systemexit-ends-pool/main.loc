@@ -1,0 +1,10 @@
+-- An exception no Python handler catches (SystemExit) ends the pool in
+-- either pool mode (model/panic.md PANIC-5), so the run fails and the
+-- nexus reports the pool's end.
+module main (pyExit)
+
+import root-py
+
+source Py from "p.py" ("py_exit" as pyExit)
+
+pyExit :: Int -> Int

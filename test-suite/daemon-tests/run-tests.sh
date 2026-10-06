@@ -1550,7 +1550,24 @@ if should_run "worker-crash"; then
         fork|thread) default_mode=$MORLOC_PY_POOL ;;
         *) if [ "$(uname)" = Darwin ]; then default_mode=thread; else default_mode=fork; fi ;;
     esac
+    # A worker leaving by an exception no handler catches (SystemExit) ends
+    # the pool in either mode, so the daemon recovers what it held.
+    exit_check() {
+        ec_label=$1
+        recoveries=$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)
+        curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/pyExit" -d '[7]' > /dev/null 2>&1 || true
+        recovered=no
+        for _ in $(seq 1 150); do
+            now=$(grep -c "recovery complete" "$LAST_DAEMON_LOG" || true)
+            if [ "$now" -gt "$recoveries" ]; then recovered=yes; break; fi
+            sleep 0.1
+        done
+        assert_test "worker-crash${ec_label}: a worker that raises SystemExit ends its pool" "yes" "$recovered"
+        result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/pyOk" -d '[5]')
+        assert_test "worker-crash${ec_label}: works after a SystemExit" "5" "$(json_field "$result" "result")"
+    }
     retire_check "" "$default_mode"
+    exit_check ""
 
     stop_daemon "$local_pid"
     pkill -9 -f "$CRASH_DIR" 2>/dev/null || true
@@ -1563,6 +1580,7 @@ if should_run "worker-crash"; then
         wait_for_http "$HTTP_PORT" 15
         local_pid=$LAST_DAEMON_PID
         retire_check " thread pool" thread
+        exit_check " thread pool"
         stop_daemon "$local_pid"
         pkill -9 -f "$CRASH_DIR" 2>/dev/null || true
     fi

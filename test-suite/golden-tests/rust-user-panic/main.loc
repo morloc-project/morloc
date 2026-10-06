@@ -1,0 +1,24 @@
+-- A panic in sourced Rust is the call's failure, not the pool's end
+-- (model/panic.md PANIC-6): the caller gets an error naming the panic, a
+-- @try catches it, and the call goes on.
+module main (nth, safeNth, afterPanic)
+
+import root
+import root-rust
+
+type Rust => Int = "i64"
+type Rust => (List a) = "Vec<$1>" a
+
+source Rust from "h.rs" ("rust_nth" as rustNth, "rust_add" as rustAdd)
+
+rustNth :: [Int] -> Int -> Int
+rustAdd :: Int -> Int -> Int
+
+nth :: [Int] -> Int -> Int
+nth xs i = rustNth xs i
+
+safeNth :: [Int] -> Int -> Int
+safeNth xs i = match (@try (rustNth xs i)) | (Ok v) = v | (Err _) = 99
+
+afterPanic :: [Int] -> Int
+afterPanic xs = rustAdd (safeNth xs 9) (rustNth xs 1)

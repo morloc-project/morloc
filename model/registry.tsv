@@ -216,6 +216,7 @@ rustmorloc/lib.rs::-::CURRENT_FRAME	thread
 rustmorloc/lib.rs::-::ACTIVE	thread		
 rustmorloc/lib.rs::-::QUEUE	thread		
 rustmorloc/lib.rs::-::TMPDIR	startup		
+rustmorloc/lib.rs::-::RUNTIME_DEPTH	thread		
 morloc-nexus/main.rs::-::FRONTEND_ROUTER	exec-only		
 morloc-nexus/mcp.rs::new_session_id::CTR	exec-only		
 morloc-nexus/mcp.rs::-::Frontend.locks	exec-only		
@@ -262,6 +263,7 @@ morloc-nexus/view.rs::-::STDIN_ATEXIT_REGISTERED	exec-only
 morloc-runtime/fork_policy.rs::a_fork_from_a_thread_local_destructor_completes::LATE	test-only		
 morloc-runtime/lib.rs::-::SHM_TEST_ARENA	test-only		
 morloc-runtime/panic_ffi.rs::-::EXIT	startup		
+morloc-runtime/panic_ffi.rs::-::RUNTIME_PROBE	startup		
 morloc-nexus/sigrm.rs::-::PATHS	exec-only		
 morloc-runtime/stream.rs::the_nexus_connection_works_from_a_thread_local_destructor::LATE	test-only		
 morloc-runtime/source_rules.rs::scan_rust::SCAN	test-only		

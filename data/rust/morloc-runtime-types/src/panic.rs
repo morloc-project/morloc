@@ -3,8 +3,13 @@ use std::cell::Cell;
 // PANIC-1
 pub const PANIC_EXIT_STATUS: i32 = 70;
 
+// PANIC-2: a request frame's or a format library call's catch.
+pub const SCOPE_RUNTIME: u8 = 1;
+// PANIC-6: a host's catch around its user code.
+pub const SCOPE_HOST: u8 = 2;
+
 thread_local! {
-    static IN_SCOPE: Cell<bool> = const { Cell::new(false) };
+    static IN_SCOPE: Cell<u8> = const { Cell::new(0) };
     static UNWINDING: Cell<bool> = const { Cell::new(false) };
     static FATAL: Cell<bool> = const { Cell::new(false) };
 }
@@ -26,13 +31,15 @@ pub fn poisoned_lock() -> ! {
 
 // PANIC-2: the only place a panic is caught.
 pub fn catch<R>(body: impl FnOnce() -> R) -> Result<R, Caught> {
-    let outer = IN_SCOPE.with(|s| s.replace(true));
+    let outer = set_scope(SCOPE_RUNTIME);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
-    IN_SCOPE.with(|s| s.set(outer));
     match result {
-        Ok(r) => Ok(r),
+        Ok(r) => {
+            set_scope(outer);
+            Ok(r)
+        }
         Err(payload) => {
-            UNWINDING.with(|u| u.set(false));
+            set_scope(outer);
             FATAL.with(|f| f.set(false));
             let message = payload
                 .downcast_ref::<&str>()
@@ -44,33 +51,58 @@ pub fn catch<R>(body: impl FnOnce() -> R) -> Result<R, Caught> {
     }
 }
 
+const UNWINDING_BIT: u8 = 0x80;
+
+// PANIC-6: opens scope `kind` with no panic unwinding in it; returns what
+// to pass back to restore the outer scope and its unwinding state.
+pub fn set_scope(kind: u8) -> u8 {
+    let unwinding = UNWINDING.with(|u| u.replace(kind & UNWINDING_BIT != 0));
+    let outer = IN_SCOPE.with(|s| s.replace(kind & !UNWINDING_BIT));
+    outer | if unwinding { UNWINDING_BIT } else { 0 }
+}
+
+// PANIC-6: a host's own catch caught the panic.
+pub fn caught() {
+    UNWINDING.with(|u| u.set(false));
+    FATAL.with(|f| f.set(false));
+}
+
 // PANIC-2: a panic below an `extern "C"` function cannot unwind to a catch.
 pub fn outside_scope<R>(body: impl FnOnce() -> R) -> R {
-    struct Restore(bool);
+    struct Restore(u8);
     impl Drop for Restore {
         fn drop(&mut self) {
             let _ = IN_SCOPE.try_with(|s| s.set(self.0));
         }
     }
-    let _restore = Restore(IN_SCOPE.with(|s| s.replace(false)));
+    let _restore = Restore(IN_SCOPE.with(|s| s.replace(0)));
     body()
 }
 
 // PANIC-1
 pub fn install_hook(panic_exit: fn() -> !) {
-    install_hook_unless(panic_exit, || true)
+    install_hook_unless(panic_exit, |_| true)
 }
 
-// PANIC-1: `may_unwind` says whether this thread's state lets a catch hold the panic.
-pub fn install_hook_unless(panic_exit: fn() -> !, may_unwind: fn() -> bool) {
+// PANIC-1: `may_unwind(host)` says whether this thread's state lets a catch
+// hold the panic; `host` when the innermost scope is a host's user code.
+pub fn install_hook_unless(panic_exit: fn() -> !, may_unwind: fn(bool) -> bool) {
     std::panic::set_hook(Box::new(move |info| {
-        report(info);
-        let in_scope = IN_SCOPE.try_with(|s| s.get()).unwrap_or(false);
+        let scope = IN_SCOPE.try_with(|s| s.get()).unwrap_or(0);
         let fatal = FATAL.try_with(|f| f.get()).unwrap_or(true);
         let unwinding = UNWINDING.try_with(|u| u.replace(true)).unwrap_or(true);
-        if in_scope && !unwinding && !fatal && may_unwind() {
+        // PANIC-6: user code may catch its own panics, so a host scope
+        // cannot tell a second panic from a nested one; Rust aborts a
+        // nested one itself.
+        let nested = unwinding && scope != SCOPE_HOST;
+        if scope != 0 && !nested && !fatal && may_unwind(scope == SCOPE_HOST) {
+            // PANIC-6: a user panic is reported by the call's failure.
+            if scope != SCOPE_HOST {
+                report(info);
+            }
             return;
         }
+        report(info);
         panic_exit()
     }));
 }
@@ -111,5 +143,23 @@ fn write_stderr(mut rest: &[u8]) {
         } else {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_scope_restores_the_outer_unwinding_state() {
+        let outer = set_scope(SCOPE_RUNTIME | UNWINDING_BIT);
+        let inner = set_scope(SCOPE_HOST);
+        assert_eq!(inner, SCOPE_RUNTIME | UNWINDING_BIT);
+        assert!(!UNWINDING.with(|u| u.get()));
+        let back = set_scope(inner);
+        assert_eq!(back, SCOPE_HOST);
+        assert!(UNWINDING.with(|u| u.get()));
+        set_scope(outer);
+        assert!(!UNWINDING.with(|u| u.get()));
     }
 }

@@ -442,10 +442,13 @@ mod tests {
             let sh: &'static Shared = &*sh;
             let addr = sh as *const Shared as usize;
             let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let (caught_tx, caught_rx) = std::sync::mpsc::channel::<()>();
             let survivor = std::thread::spawn(move || {
                 panic_holding(&(*(addr as *const Shared)).lock);
+                let _ = caught_tx.send(());
                 let _ = rx.recv();
             });
+            caught_rx.recv().unwrap();
             let err = lock_error_within(sh);
             let _ = tx.send(());
             survivor.join().unwrap();

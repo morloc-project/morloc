@@ -1025,8 +1025,14 @@ fn every_host_installs_the_panic_hook() {
 #[test]
 fn only_catch_scopes_catch_a_panic() {
     // PANIC-2: catch() is the only catch; stream.rs re-raises what it catches.
-    let allowed = ["morloc-runtime-types/panic.rs::catch", "morloc-runtime/stream.rs::with_process_local_slot"];
-    let ours = ["morloc-runtime/", "morloc-runtime-types/", "morloc-nexus/"];
+    let allowed = [
+        "morloc-runtime-types/panic.rs::catch",
+        "morloc-runtime/stream.rs::with_process_local_slot",
+        "rustmorloc/lib.rs::dispatch_guard",
+        "rustmorloc/lib.rs::mlc_try",
+        "rustmorloc/lib.rs::drop",
+    ];
+    let ours = ["morloc-runtime/", "morloc-runtime-types/", "morloc-nexus/", "rustmorloc/"];
     let stray: Vec<String> = scan_rust()
         .calls
         .iter()
@@ -1036,4 +1042,21 @@ fn only_catch_scopes_catch_a_panic() {
         .map(|c| c.site.clone())
         .collect();
     assert!(stray.is_empty(), "PANIC-2: catch_unwind outside a catch scope: {stray:?}");
+}
+
+#[test]
+fn every_crate_refuses_to_build_without_unwinding() {
+    let repo = repo_root();
+    for path in [
+        "data/rust/morloc-runtime/src/lib.rs",
+        "data/rust/rustmorloc/src/lib.rs",
+        "data/rust/morloc-nexus/src/main.rs",
+        "data/lang/rust/pool.rs",
+    ] {
+        let text = std::fs::read_to_string(repo.join(path)).unwrap();
+        assert!(
+            text.contains("#[cfg(not(panic = \"unwind\"))]\ncompile_error!("),
+            "PANIC-8: {path} must refuse to compile unless panics unwind"
+        );
+    }
 }
