@@ -902,12 +902,21 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
     sched = threading.Lock()
     counts = {"busy": 0, "total": 0}
 
+    trace_retire = os.environ.get("MORLOC_PY_TRACE_RETIRE") == "1"
+
+    def trace(what):
+        sys.stderr.write(f"morloc py worker thread {threading.get_ident()}: {what} "
+                         f"workers={counts['total']} busy={counts['busy']}\n")
+        sys.stderr.flush()
+
     def _spawn_worker():
         threading.Thread(target=_worker_loop, daemon=True).start()
 
     def _worker_loop():
         with sched:
             counts["total"] += 1
+            if trace_retire:
+                trace("started")
         released = False  # ensure this worker's slot is freed exactly once
         try:
             while not stop.is_set():
@@ -924,6 +933,8 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
                         if counts["total"] - counts["busy"] > 1:
                             counts["total"] -= 1
                             released = True
+                            if trace_retire:
+                                trace("retiring")
                             # shm_tracker is __thread; release anything this
                             # thread holds before it goes.
                             morloc.shm_tracker_flush()

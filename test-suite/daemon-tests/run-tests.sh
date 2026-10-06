@@ -1500,41 +1500,71 @@ if should_run "worker-crash"; then
 
 
     # A worker started for a call blocked in another language retires once
-    # idle; a retirement ends nothing.
+    # idle; a retirement ends nothing. Fork-mode workers are processes,
+    # thread-mode workers (the macOS default) are threads of one process.
     workers_of() { (pgrep -f "$CRASH_DIR/.*pools/py" 2>/dev/null || true) | wc -l | tr -d ' '; }
-    recoveries=$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)
-    base=$(workers_of)
-    log_mark=$(wc -l < "$LAST_DAEMON_LOG" | tr -d ' ')
-    t0=$SECONDS
-    curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/slowly" -d '[1]' > /dev/null 2>&1 &
-    S1=$!
-    curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/slowly" -d '[2]' > /dev/null 2>&1 &
-    S2=$!
-    timeline=""
-    for _ in 1 2; do sleep 0.5; timeline="$timeline $(workers_of)"; done
-    peak=$(workers_of)
-    wait "$S1" "$S2" 2>/dev/null || true
-    calls_took=$((SECONDS - t0))
-    for _ in $(seq 1 18); do sleep 0.5; timeline="$timeline $(workers_of)"; done
-    after=$(workers_of)
-    assert_test "worker-crash: an idle extra worker retires" "yes" "$([ "$after" -lt "$peak" ] && echo yes || echo no)"
-    if [ "$after" -ge "$peak" ]; then
-        echo "      py processes: base $base, peak $peak, after $after; calls took ${calls_took}s"
-        echo "      every 0.5 s:$timeline"
-        ps -axo pid,ppid,stat,etime,command 2>/dev/null | grep "$CRASH_DIR" | grep -v grep | cut -c1-200 | sed 's/^/      ps: /' || true
-        tail -n "+$((log_mark + 1))" "$LAST_DAEMON_LOG" | cut -c1-200 | sed 's/^/      log: /'
-        late=""
-        for _ in $(seq 1 30); do sleep 1; late="$late $(workers_of)"; done
-        echo "      30 more seconds, every 1 s:$late"
-        grep "py worker .*\(retiring\|cannot retire\)" "$LAST_DAEMON_LOG" | tail -n 5 | cut -c1-200 | sed 's/^/      late log: /' || true
-    fi
-    assert_test "worker-crash: a retirement starts no recovery" "$recoveries" \
-        "$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)"
-    result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/pyOk" -d '[9]')
-    assert_test "worker-crash: works after a retirement" "9" "$(json_field "$result" "result")"
+    threads_of() {
+        tpid=$( (pgrep -f "$CRASH_DIR/.*pools/py" 2>/dev/null || true) | head -n 1)
+        [ -z "$tpid" ] && { echo 0; return; }
+        tn=$(ps -o nlwp= -p "$tpid" 2>/dev/null | tr -d ' ')
+        if [ -n "$tn" ]; then echo "$tn"
+        else ps -M -p "$tpid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' '
+        fi
+    }
+    retire_check() {
+        rc_label=$1
+        if [ "$2" = thread ]; then rc_count=threads_of; else rc_count=workers_of; fi
+        recoveries=$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)
+        base=$($rc_count)
+        log_mark=$(wc -l < "$LAST_DAEMON_LOG" | tr -d ' ')
+        t0=$SECONDS
+        curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/slowly" -d '[1]' > /dev/null 2>&1 &
+        S1=$!
+        curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/slowly" -d '[2]' > /dev/null 2>&1 &
+        S2=$!
+        timeline=""
+        for _ in 1 2; do sleep 0.5; timeline="$timeline $($rc_count)"; done
+        peak=$($rc_count)
+        wait "$S1" "$S2" 2>/dev/null || true
+        calls_took=$((SECONDS - t0))
+        for _ in $(seq 1 18); do sleep 0.5; timeline="$timeline $($rc_count)"; done
+        after=$($rc_count)
+        assert_test "worker-crash${rc_label}: an idle extra worker retires" "yes" "$([ "$after" -lt "$peak" ] && echo yes || echo no)"
+        if [ "$after" -ge "$peak" ]; then
+            echo "      $2 pool, counting $rc_count: base $base, peak $peak, after $after; calls took ${calls_took}s"
+            echo "      every 0.5 s:$timeline"
+            ps -axo pid,ppid,stat,etime,command 2>/dev/null | grep "$CRASH_DIR" | grep -v grep | cut -c1-200 | sed 's/^/      ps: /' || true
+            tail -n "+$((log_mark + 1))" "$LAST_DAEMON_LOG" | cut -c1-200 | sed 's/^/      log: /'
+            late=""
+            for _ in $(seq 1 30); do sleep 1; late="$late $($rc_count)"; done
+            echo "      30 more seconds, every 1 s:$late"
+            grep "py worker .*\(retiring\|cannot retire\)" "$LAST_DAEMON_LOG" | tail -n 5 | cut -c1-200 | sed 's/^/      late log: /' || true
+        fi
+        assert_test "worker-crash${rc_label}: a retirement starts no recovery" "$recoveries" \
+            "$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)"
+        result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/pyOk" -d '[9]')
+        assert_test "worker-crash${rc_label}: works after a retirement" "9" "$(json_field "$result" "result")"
+    }
+    case "${MORLOC_PY_POOL:-}" in
+        fork|thread) default_mode=$MORLOC_PY_POOL ;;
+        *) if [ "$(uname)" = Darwin ]; then default_mode=thread; else default_mode=fork; fi ;;
+    esac
+    retire_check "" "$default_mode"
 
     stop_daemon "$local_pid"
     pkill -9 -f "$CRASH_DIR" 2>/dev/null || true
+
+    if [ "$default_mode" = fork ]; then
+        HTTP_PORT=$(pick_port)
+        MORLOC_PY_POOL=thread; MORLOC_PY_TRACE_RETIRE=1; export MORLOC_PY_POOL MORLOC_PY_TRACE_RETIRE
+        start_daemon "$CRASH_DIR" --http-port "$HTTP_PORT"
+        unset MORLOC_PY_POOL MORLOC_PY_TRACE_RETIRE
+        wait_for_http "$HTTP_PORT" 15
+        local_pid=$LAST_DAEMON_PID
+        retire_check " thread pool" thread
+        stop_daemon "$local_pid"
+        pkill -9 -f "$CRASH_DIR" 2>/dev/null || true
+    fi
     echo ""
 fi
 
