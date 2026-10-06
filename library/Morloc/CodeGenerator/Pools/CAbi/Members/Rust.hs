@@ -1272,7 +1272,8 @@ buildSrcTypeVarMask = do
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es = do
   let rustSrcs = unique $ mapMaybe srcPath [s | s <- srcs, srcLang s == rustLang]
-  includeDocs <- mapM rustSourceInclude rustSrcs
+  absSrcs <- liftIO $ mapM MS.canonicalizePath rustSrcs
+  let includeDocs = map rustSourceInclude absSrcs ++ [rustUserFiles absSrcs]
 
   debugInfo <- makeManifoldDebugInfoLookup
 
@@ -1384,10 +1385,19 @@ readLockIfPresent lockPath = do
 
 -- | Emit an @include!@ of a sourced Rust file at the pool crate root, so its
 -- @pub fn@s become directly callable by name (mirroring C++ @#include@).
-rustSourceInclude :: Path -> MorlocMonad MDoc
-rustSourceInclude p = do
-  absPath <- liftIO $ MS.canonicalizePath p
-  return $ "include!(" <> dquotes (pretty absPath) <> ");"
+rustSourceInclude :: Path -> MDoc
+rustSourceInclude absPath = "include!(" <> rustPathLiteral absPath <> ");"
+
+-- | A path as a Rust string literal; the include! and the user-file table
+-- must spell it alike.
+rustPathLiteral :: Path -> MDoc
+rustPathLiteral = dquotes . pretty . RP.rustEscape . MT.pack
+
+-- | The included user sources, spelled as panic locations name them, so the
+-- pool can tell a user panic from a runtime one (model/panic.md PANIC-9).
+rustUserFiles :: [Path] -> MDoc
+rustUserFiles absPaths =
+  "const MLC_USER_FILES: &[&str] = &[" <> hsep (punctuate "," (map rustPathLiteral absPaths)) <> "];"
 
 subVersion :: Text -> Text
 subVersion = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr)
@@ -2003,6 +2013,8 @@ makeCargoDocs crateName deps localCrates home profile =
           , "opt-level = " <> pretty (rpOptLevel profile)
           , "lto = " <> pretty (rpLto profile)
           , [idoc|panic = "unwind"|]
+          -- Line tables let the panic hook walk inlined frames (PANIC-9).
+          , [idoc|debug = "line-tables-only"|]
           ]
       -- No runtime rpath: the pool is relocatable and finds libmorloc via
       -- LD_LIBRARY_PATH exported by the nexus at launch. link-search is kept

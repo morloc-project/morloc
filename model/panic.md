@@ -97,9 +97,9 @@ A panic in a pool's runtime code -- a Rust panic outside user code, a C++
 infrastructure error -- ends the pool by PANIC-1. It is never turned into
 a FAIL packet or an error return: user `@try` and `@catch`, Python
 `except Exception` and R `tryCatch` would catch it and the pool would go
-on serving with torn state. The Rust pool marks its runtime's frames
-(decoding, encoding, foreign calls), and libmorloc's hook lets no catch
-hold a panic inside one. A C++ pool's internal error exits 70. A Python
+on serving with torn state. The Rust pool tells a panic in its runtime
+from one in user code as PANIC-9 says. A C++ pool's internal error exits
+70. A Python
 exception no handler catches (SystemExit, an interpreter error) ends the
 pool in either pool mode. The nexus recovers from the pool's end as SHM-8
 says, as it would from a crash.
@@ -115,10 +115,9 @@ pool answers with a FAIL packet carrying the message and goes on serving,
 and a `@try` in the same pool catches it as it would a throw. A panic on
 a thread the user's code started belongs to no call, and ends the pool. A
 panic in the destructor of a user value that the Rust pool drops after the
-call has made its result is ignored: the result stands. The Rust pool tells it from a panic in its own code by a
-per-thread count of its runtime's frames: a panic inside the dispatch
-guard with none of them active is the user's, and is answered with a FAIL
-packet naming the panic.
+call has made its result fails the call (PANIC-10). The Rust pool tells a
+user panic from one in its own code as PANIC-9 says, and answers it with
+a FAIL packet naming the panic.
 
 ### PANIC-7 A background thread has no catch scope
 Status: implemented
@@ -138,16 +137,81 @@ Catch scopes and the generated Rust pool need panics to unwind. The
 nexus, libmorloc, the Rust pool's runtime and the generated Rust pool
 fail to compile under any other panic strategy.
 
-### PANIC-9 Every frame of the Rust pool's runtime is marked
+### PANIC-9 The Rust pool tells a user panic from a runtime panic by where it was raised
+Status: implemented
+Checked by: a_source_belongs_to_the_user_the_runtime_or_neither, the_first_user_or_runtime_frame_below_the_panic_decides, frames_above_the_panic_machinery_do_not_decide, the_catch_below_the_panicking_code_is_not_the_panic_machinery, an_untrusted_trace_is_the_runtimes, a_trace_without_the_pools_classifier_frame_is_untrusted, an_unresolved_frame_of_unknown_code_is_the_runtimes, a_trace_without_files_is_the_runtimes, a_std_panic_raised_for_user_code_is_the_users, a_std_panic_raised_by_runtime_code_inside_a_user_generic_is_the_runtimes, a_panic_at_a_user_line_is_the_users, a_classification_does_not_depend_on_the_working_directory, golden:rust-panic-sites, golden:rust-runtime-panic, golden:rust-user-panic
+
+User Rust code and the Rust pool's runtime share one language, one panic
+mechanism and one standard library, so a panic inside the pool's catch
+around user code is the user's only if user code raised it. The hook
+decides from where it was raised, before anything unwinds, at no cost
+until a panic occurs. The pool registers its generated source file and the
+user sources it includes; the runtime's crates know their own source
+directories. A panic located in a user source is the user's; one in the
+runtime's crates is the runtime's. One located in the generated source, the
+standard library or a third-party crate is decided by its caller: the hook
+captures a backtrace and walks it from the frame below the panic machinery
+that raised the panic (not the catch further down), skipping standard
+library and third-party frames; the first frame in a user source or the
+runtime decides, and an unresolved frame of other code counts as the
+runtime's. The walk trusts its paths only if the pool's classifier frame,
+in the generated source, and the runtime's own frames, above the panic
+machinery, are recognised; otherwise, or
+with no deciding frame, as in a pool built without line tables, the panic
+is the runtime's. Rust pools build with line tables so inlined frames are
+named. Paths are compared as written and absolute; the backtrace is read in
+std's full format, which names files absolutely whatever the working
+directory. The walk costs time in proportion to the stack's depth, paid
+only by a panic whose location is ambiguous.
+
+### PANIC-10 A result built before a failing destructor is freed
 Status: deviation
 
-PANIC-5 and PANIC-6 tell a runtime panic from a user panic by the frames
-the Rust pool's runtime marks. Its decoding, encoding, foreign and remote
-calls, caching and spawning are marked. A panic in runtime code that is
-not marked becomes the call's failure instead of ending the pool.
+A panic in the destructor of a user value dropped after the Rust pool has
+built a call's result packet fails the call.
 
-Missing: the generated glue between calls, recursive-schema scopes, the
-closure and partial-application machinery, and string interpolation are
-not marked. Marking the user's calls instead, which the compiler emits as
-a closed set, would make every other frame the runtime's.
+Missing: the result packet's header, which no owner holds, leaks; its
+shared-memory block is tracked and freed with the dispatch.
+
+### PANIC-11 Every user panic is attributed to the user
+Status: deviation
+
+A panic raised by any code the user supplies is a user panic.
+
+Missing: some user code is not a registered user source, so its panic is
+attributed to the runtime and ends the pool: text the compiler places in
+the generated source (a sourced operator such as `"/" as div`, a
+backtick-quoted foreign name, a sourced name that is a re-export such as
+`pub use dep::f`), files a sourced file pulls in itself (`mod`, `#[path]`,
+`include!`), and local crates the user's code calls. Emitting each sourced
+call as a shim in a generated user file would attribute all but the last
+two at no runtime cost.
+
+### PANIC-12 A deployed Rust pool keeps its line tables
+Status: deviation
+
+The walk of PANIC-9 needs the pool's line tables wherever the pool runs.
+
+Missing: on macOS, cargo keeps debug information beside the build objects
+(split debuginfo), not in the binary copied out of the build directory, so
+once the build cache is pruned or the pool moves, ambiguous user panics
+end the pool. Without line tables a frame with a standard-library symbol
+is still skipped, so runtime code inlined into a standard-library generic
+could go unseen; the trust check shows only that the classifier's own code
+resolves. Building with packed debuginfo and copying the debug bundle
+beside the pool would fix both.
+
+### PANIC-13 A broken runtime invariant in the Rust pool ends the pool
+Status: deviation
+
+A Rust pool's runtime that finds one of its own invariants broken ends the
+pool rather than raising an error user code could catch.
+
+Missing: the runtime raises several such failures as catchable morloc
+throws: a pointer outside its payload, a handle or value the runtime
+should have returned, an empty fold accumulator, a packet shorter than its
+header, a value of the wrong type for its schema. Some of these sites also
+see malformed input -- a client's packet, a missing file, a mis-declared
+type mapping -- which must stay a catchable error, so each needs splitting
+by origin before it can end the pool.
 

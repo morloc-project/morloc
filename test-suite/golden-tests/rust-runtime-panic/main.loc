@@ -1,0 +1,19 @@
+-- A panic raised inside the Rust pool's runtime is a runtime fault, not the
+-- user's (model/panic.md PANIC-5, PANIC-9): it ends the pool with the
+-- internal-error status, and no @try can catch it.
+module main (weave, safeWeave)
+
+import root
+import root-rust
+
+type Rust => Int = "i64"
+
+source Rust from "h.rs" ("r_weave" as rWeave)
+
+rWeave :: Int -> Int
+
+weave :: Int -> Int
+weave n = rWeave n
+
+safeWeave :: Int -> Int
+safeWeave n = match (@try (rWeave n)) | (Ok v) = v | (Err _) = 99

@@ -28,6 +28,9 @@ lto = "thin"
 # worker thread panics. If a future release wants smaller binaries via abort,
 # also rework the arena to install a panic handler or use atexit-style cleanup.
 panic = "unwind"
+# Line tables let a Rust pool's panic hook walk inlined frames
+# (model/panic.md PANIC-9); pools build with the same profile.
+debug = "line-tables-only"
 
 [profile.dev]
 panic = "unwind"

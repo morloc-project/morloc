@@ -32,8 +32,16 @@ use rustmorloc::{MorlocFn0, MorlocFn1, MorlocFn2, MorlocFn3, MorlocFn4, MorlocFn
 #[cfg(not(panic = "unwind"))]
 compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
 
+// PANIC-9: a frame of the pool file above the panic machinery, which the
+// classifier needs to trust a backtrace's paths; black_box keeps the call
+// from becoming a tail call, which would leave no frame here.
+#[inline(never)]
+extern "C" fn mlc_classify_panic(file: *const u8, len: usize) -> bool {
+    std::hint::black_box(rustmorloc::panic_is_runtime(file, len))
+}
+
 extern "C" {
-    fn morloc_set_runtime_frame_probe(probe: Option<extern "C" fn() -> bool>);
+    fn morloc_set_panic_classifier(classify: Option<extern "C" fn(*const u8, usize) -> bool>);
     fn pool_main(argc: c_int, argv: *mut *mut c_char, config: *mut PoolConfig) -> c_int;
     fn morloc_lifeline_guard();
 }
@@ -73,8 +81,9 @@ fn main() {
     }
 
     rustmorloc::install_crash_handler();
-    // PANIC-6
-    unsafe { morloc_set_runtime_frame_probe(Some(rustmorloc::runtime_frame_probe)) };
+    // PANIC-9
+    rustmorloc::register_pool_files(&[file!(), concat!(env!("CARGO_MANIFEST_DIR"), "/", file!())], MLC_USER_FILES);
+    unsafe { morloc_set_panic_classifier(Some(mlc_classify_panic)) };
     init_schemas();
     // argv is `<socket_path> <tmpdir> <shm_basename>`; record the tmpdir so
     // foreign calls can resolve peer-pool socket paths.

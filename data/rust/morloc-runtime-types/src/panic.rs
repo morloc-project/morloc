@@ -81,12 +81,20 @@ pub fn outside_scope<R>(body: impl FnOnce() -> R) -> R {
 
 // PANIC-1
 pub fn install_hook(panic_exit: fn() -> !) {
-    install_hook_unless(panic_exit, |_| true)
+    install_hook_unless(panic_exit, |_, _| true)
 }
 
-// PANIC-1: `may_unwind(host)` says whether this thread's state lets a catch
-// hold the panic; `host` when the innermost scope is a host's user code.
-pub fn install_hook_unless(panic_exit: fn() -> !, may_unwind: fn(bool) -> bool) {
+// PANIC-9: the directory of this crate's sources as panic locations name
+// it, and as backtraces name it.
+pub fn source_dirs() -> [&'static str; 2] {
+    let f = file!();
+    [&f[..f.len() - "panic.rs".len()], concat!(env!("CARGO_MANIFEST_DIR"), "/src/")]
+}
+
+// PANIC-1: `may_unwind(host, file)` says whether this thread's state lets a
+// catch hold the panic; `host` when the innermost scope is a host's user
+// code, `file` the panic's location.
+pub fn install_hook_unless(panic_exit: fn() -> !, may_unwind: fn(bool, &str) -> bool) {
     std::panic::set_hook(Box::new(move |info| {
         let scope = IN_SCOPE.try_with(|s| s.get()).unwrap_or(0);
         let fatal = FATAL.try_with(|f| f.get()).unwrap_or(true);
@@ -95,7 +103,8 @@ pub fn install_hook_unless(panic_exit: fn() -> !, may_unwind: fn(bool) -> bool) 
         // cannot tell a second panic from a nested one; Rust aborts a
         // nested one itself.
         let nested = unwinding && scope != SCOPE_HOST;
-        if scope != 0 && !nested && !fatal && may_unwind(scope == SCOPE_HOST) {
+        let file = info.location().map(|l| l.file()).unwrap_or("");
+        if scope != 0 && !nested && !fatal && may_unwind(scope == SCOPE_HOST, file) {
             // PANIC-6: a user panic is reported by the call's failure.
             if scope != SCOPE_HOST {
                 report(info);

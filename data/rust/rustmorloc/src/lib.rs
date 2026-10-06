@@ -259,28 +259,162 @@ fn cschema_of(schema: &Schema) -> *mut CSchema {
 // ---------------------------------------------------------------------------
 pub struct MorlocThrow(pub String);
 
-thread_local! {
-    static RUNTIME_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
 /// libmorloc's scope kind for a host's catch around user code (PANIC-6).
 const MORLOC_SCOPE_HOST: u8 = 2;
 
-/// Marks a frame of this runtime's own code: a panic inside it is a bug in
-/// morloc, which ends the pool (PANIC-5), not a failure of the user's call
-/// (PANIC-6).
-pub struct RuntimeFrame(());
+static POOL_FILES: std::sync::OnceLock<(&'static [&'static str], &'static [&'static str])> = std::sync::OnceLock::new();
 
-impl RuntimeFrame {
-    pub fn enter() -> Self {
-        RUNTIME_DEPTH.with(|d| d.set(d.get() + 1));
-        RuntimeFrame(())
+/// Record the pool's generated source file (each spelling: as panic
+/// locations and as backtraces name it) and the user sources it includes
+/// (PANIC-9).
+pub fn register_pool_files(pool_files: &'static [&'static str], user_files: &'static [&'static str]) {
+    let _ = POOL_FILES.set((pool_files, user_files));
+}
+
+fn this_crate_dirs() -> [&'static str; 2] {
+    let f = file!();
+    [&f[..f.len() - "lib.rs".len()], concat!(env!("CARGO_MANIFEST_DIR"), "/src/")]
+}
+
+fn trim_dot(path: &str) -> &str {
+    path.strip_prefix("./").unwrap_or(path)
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Side {
+    User,
+    Runtime,
+    Neither,
+}
+
+/// Which side a source file belongs to: a user source, this runtime (its
+/// crates or the pool's generated code), or neither (std, third-party).
+fn side_of(file: &str, pool_files: &[&str], user_files: &[&str]) -> Side {
+    let f = trim_dot(file);
+    let runtime_dir = |d: &str| f.starts_with(trim_dot(d));
+    if user_files.iter().any(|u| trim_dot(u) == f) {
+        Side::User
+    } else if pool_files.iter().any(|p| trim_dot(p) == f)
+        || this_crate_dirs().iter().any(|d| runtime_dir(d))
+        || morloc_runtime_types::panic::source_dirs().iter().any(|d| runtime_dir(d))
+    {
+        Side::Runtime
+    } else {
+        Side::Neither
     }
 }
 
-impl Drop for RuntimeFrame {
-    fn drop(&mut self) {
-        let _ = RUNTIME_DEPTH.try_with(|d| d.set(d.get().saturating_sub(1)));
+/// One frame of a backtrace in std's full format: its symbol and, when line
+/// tables name it, its file.
+struct Frame<'a> {
+    symbol: &'a str,
+    file: Option<&'a str>,
+}
+
+/// Frames of `format!("{:#}", backtrace)`: "N: 0xADDR - symbol" lines, each
+/// followed by "at file:line:col" lines when the frame is resolved (an
+/// inlined callee gets its own numbered line). Full format never rewrites
+/// paths relative to the working directory.
+fn frames(trace: &str) -> Vec<Frame<'_>> {
+    let mut out: Vec<Frame<'_>> = Vec::new();
+    for line in trace.lines() {
+        let t = line.trim_start();
+        if let Some(at) = t.strip_prefix("at ") {
+            let file = at.rsplitn(3, ':').last().unwrap_or(at);
+            if let Some(f) = out.last_mut() {
+                if f.file.is_none() {
+                    f.file = Some(file);
+                }
+            }
+        } else if let Some((num, rest)) = t.split_once(':') {
+            if !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()) {
+                let symbol = rest.split_once(" - ").map(|(_, s)| s).unwrap_or(rest).trim();
+                out.push(Frame { symbol, file: None });
+            }
+        }
+    }
+    out
+}
+
+fn std_symbol(symbol: &str) -> bool {
+    let s = symbol.trim_start_matches('<');
+    ["std", "core", "alloc", "__rustc"].iter().any(|c| {
+        s.strip_prefix(c).is_some_and(|r| r.starts_with("::") || r.starts_with('['))
+    })
+}
+
+fn panic_machinery(f: &Frame<'_>) -> bool {
+    f.file.is_some_and(|p| p.ends_with("/panicking.rs"))
+        || (std_symbol(f.symbol) && f.symbol.contains("::panicking::"))
+        || f.symbol.contains("rust_begin_unwind")
+}
+
+fn std_frame(f: &Frame<'_>) -> bool {
+    std_symbol(f.symbol) || f.file.is_some_and(|p| p.starts_with("/rustc/")) || panic_machinery(f)
+}
+
+/// The last frame of the panic machinery that raised this panic: from its
+/// first frame, through the standard library frames that follow. Later
+/// machinery, such as the catch the panic will unwind to, lies below the
+/// panicking code and does not count.
+fn panic_gate(frames: &[Frame<'_>]) -> Option<usize> {
+    let first = frames.iter().position(panic_machinery)?;
+    let mut gate = first;
+    for (i, f) in frames.iter().enumerate().skip(first) {
+        if !std_frame(f) {
+            break;
+        }
+        if panic_machinery(f) {
+            gate = i;
+        }
+    }
+    Some(gate)
+}
+
+/// Walk a backtrace from the frame below the panic machinery: standard
+/// library and third-party frames are skipped, and the first user or
+/// runtime frame decides. Unless the pool's classifier frame and this
+/// runtime's own frames, above the panic machinery, are recognised, the
+/// paths cannot be trusted and the panic is the runtime's; so is one with no deciding frame, and one whose deciding
+/// frame has no file.
+fn walk_is_runtime(trace: &str, pool_files: &[&str], user_files: &[&str]) -> bool {
+    let frames = frames(trace);
+    let Some(gate) = panic_gate(&frames) else { return true };
+    let above = &frames[..gate];
+    let in_pool = |p: &str| pool_files.iter().any(|q| trim_dot(q) == trim_dot(p));
+    let trusted = above.iter().any(|f| f.file.is_some_and(|p| in_pool(p)))
+        && above.iter().any(|f| f.file.is_some_and(|p| !in_pool(p) && side_of(p, pool_files, user_files) == Side::Runtime));
+    if !trusted {
+        return true;
+    }
+    for f in &frames[gate + 1..] {
+        match f.file {
+            Some(p) => match side_of(p, pool_files, user_files) {
+                Side::User => return false,
+                Side::Runtime => return true,
+                Side::Neither => {}
+            },
+            None if std_symbol(f.symbol) => {}
+            None => return true,
+        }
+    }
+    true
+}
+
+/// The classifier the pool registers with libmorloc's hook (PANIC-9):
+/// whether a panic at `file` is a fault of this runtime rather than of the
+/// user's code. A user or runtime location decides at once; a location in
+/// the generated code, std or a third-party crate needs the caller, found by
+/// walking a backtrace captured now, while the panic has not unwound.
+pub extern "C" fn panic_is_runtime(file: *const u8, len: usize) -> bool {
+    let Some((pool_files, user_files)) = POOL_FILES.get() else { return true };
+    // SAFETY: PANIC-9: the hook passes the panic location's string.
+    let file = unsafe { std::str::from_utf8(std::slice::from_raw_parts(file, len)) }.unwrap_or("");
+    let in_pool_file = pool_files.iter().any(|p| trim_dot(p) == trim_dot(file));
+    match side_of(file, pool_files, user_files) {
+        Side::User => false,
+        Side::Runtime if !in_pool_file => true,
+        _ => walk_is_runtime(&format!("{:#}", std::backtrace::Backtrace::force_capture()), pool_files, user_files),
     }
 }
 
@@ -295,11 +429,6 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     } else {
         "Rust code panicked".to_string()
     }
-}
-
-/// The probe the pool registers with libmorloc (PANIC-6).
-pub extern "C" fn runtime_frame_probe() -> bool {
-    RUNTIME_DEPTH.try_with(|d| d.get() > 0).unwrap_or(true)
 }
 
 /// Raise a catchable morloc error (`@throw`) from sourced Rust. It unwinds
@@ -2230,7 +2359,6 @@ pub type ClosureOrigin = (String, i64, Vec<Vec<u8>>);
 /// wholly native (those cross by the serial path instead). Every site that
 /// needs an origin goes through here, so the failure names its cause once.
 pub fn require_origin(origin: Option<&ClosureOrigin>) -> ClosureOrigin {
-    let _runtime = RuntimeFrame::enter();
     match origin {
         Some(o) => o.clone(),
         None => morloc_throw(
@@ -2507,7 +2635,6 @@ pub unsafe fn put_value<T: ToVoidstar>(value: &T, schema: &Schema) -> *mut u8 {
 /// # Safety
 /// `schema` must describe `value`'s wire type.
 pub unsafe fn put_value_as<T: ToVoidstar>(value: &T, schema: &Schema, self_contained: bool) -> *mut u8 {
-    let _runtime = RuntimeFrame::enter();
     let _recur = RecurScope::enter(schema);
     if schema.serial_type == SerialType::Table {
         return match arrow_put(value, schema) {
@@ -2594,7 +2721,6 @@ unsafe fn arrow_put<T: ToVoidstar>(value: &T, schema: &Schema) -> Result<isize, 
 /// own reference to any shared memory the packet names, tracked here like
 /// every other packet this pool returns.
 pub unsafe fn dup_packet(packet: *const u8) -> *mut u8 {
-    let _runtime = RuntimeFrame::enter();
     let mut block: *mut c_void = std::ptr::null_mut();
     let mut err: *mut c_char = std::ptr::null_mut();
     let copy = morloc_dup_packet(packet, &mut block, &mut err);
@@ -2610,7 +2736,6 @@ pub unsafe fn dup_packet(packet: *const u8) -> *mut u8 {
 /// # Safety
 /// `packet` must be a valid data packet whose schema matches `schema`.
 pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> T {
-    let _runtime = RuntimeFrame::enter();
     let _recur = RecurScope::enter(schema);
     let source = *packet.add(PKT_SOURCE_OFF);
     let format = *packet.add(PKT_FORMAT_OFF);
@@ -2741,7 +2866,6 @@ pub fn set_tmpdir(dir: &str) {
 /// `args` must be valid argument packets for manifold `mid` on the peer pool
 /// served at `socket_filename` (relative to the pool tmpdir).
 pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) -> *mut u8 {
-    let _runtime = RuntimeFrame::enter();
     let tmpdir = TMPDIR
         .get()
         .map(|s| s.to_string_lossy().into_owned())
@@ -2773,7 +2897,6 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
 /// increfed + tracked so the peer's next dispatch flush cannot reclaim data
 /// this pool still references (I3).
 unsafe fn finalize_call_result(result: *mut u8) -> *mut u8 {
-    let _runtime = RuntimeFrame::enter();
     let mut fail_err: *mut c_char = std::ptr::null_mut();
     let fail_msg = get_morloc_data_packet_error_message(result, &mut fail_err);
     discard_err(fail_err);
@@ -2817,7 +2940,6 @@ pub unsafe fn remote_call(
     gpus: i32,
     args: &[*const u8],
 ) -> *mut u8 {
-    let _runtime = RuntimeFrame::enter();
     let socket_c = match CString::new(socket_basename) {
         Ok(s) => s,
         Err(_) => morloc_throw("remote_call: socket name contains an interior NUL"),
@@ -2857,7 +2979,6 @@ pub unsafe fn remote_call(
 /// # Safety
 /// `packets` must be valid argument packets whose wire types match `schemas`.
 pub unsafe fn cache_key(mid: u32, packets: &[*const u8], schemas: &[&str]) -> u64 {
-    let _runtime = RuntimeFrame::enter();
     // Small per-call CString build of the arg schemas; negligible on a cache
     // path (the recompute it guards dominates), so kept simple over c"" literals.
     let schema_cs: Vec<CString> = schemas.iter().map(|s| cstr_arg(s, "@cache")).collect();
@@ -2874,7 +2995,6 @@ pub unsafe fn cache_key(mid: u32, packets: &[*const u8], schemas: &[&str]) -> u6
 /// # Safety
 /// Calls into the libmorloc C ABI.
 pub unsafe fn cache_lookup(key: u64, label: &str) -> *mut u8 {
-    let _runtime = RuntimeFrame::enter();
     let label_c = cstr_arg(label, "@cache");
     let mut size: usize = 0;
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -2893,7 +3013,6 @@ pub unsafe fn cache_lookup(key: u64, label: &str) -> *mut u8 {
 /// # Safety
 /// `data` must be a valid result packet whose wire type matches `schema`.
 pub unsafe fn cache_store(key: u64, label: &str, data: *const u8, schema: &str) {
-    let _runtime = RuntimeFrame::enter();
     let label_c = cstr_arg(label, "@cache");
     let schema_c = cstr_arg(schema, "@cache");
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -2918,7 +3037,6 @@ unsafe fn with_voidstar<T: ToVoidstar, R>(
     schema: &Schema,
     f: impl FnOnce(*mut c_void, *const CSchema, &mut *mut c_char) -> R,
 ) -> R {
-    let _runtime = RuntimeFrame::enter();
     let _recur = RecurScope::enter(schema);
     let total = value.shm_size(schema).max(1);
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -2957,7 +3075,6 @@ pub unsafe fn unpack<T: FromVoidstar>(packet: &[u8], schema: &Schema) -> T {
 /// @read: parse JSON text into a typed value; a parse failure is a catchable
 /// morloc error (so `@catch` can recover it).
 pub unsafe fn read<T: FromVoidstar>(s: &str, schema: &Schema) -> T {
-    let _runtime = RuntimeFrame::enter();
     let _recur = RecurScope::enter(schema);
     let json = match CString::new(s) {
         Ok(c) => c,
@@ -3028,7 +3145,6 @@ unsafe fn read_voidstar<T: FromVoidstar>(
     schema: &Schema,
     what: &str,
 ) -> T {
-    let _runtime = RuntimeFrame::enter();
     if !err.is_null() {
         morloc_throw(format!("{}: {}", what, cstr_take(err)));
     }
@@ -3049,7 +3165,6 @@ unsafe fn read_voidstar<T: FromVoidstar>(
 /// .. free(s)` and, like them, forwards the libc-owned pointer directly rather
 /// than copying it into a Rust-owned buffer.
 unsafe fn with_schema_str<R>(schema: &Schema, f: impl FnOnce(*const c_char) -> R) -> R {
-    let _runtime = RuntimeFrame::enter();
     let s = schema_to_string(cschema_of(schema));
     if s.is_null() {
         morloc_throw("morloc IO: schema_to_string returned null");
@@ -3344,7 +3459,6 @@ pub unsafe fn open_channel(schema: &Schema) -> u64 {
 /// pool, without waiting for it. The channel travels as the producer's
 /// OStream argument, after its captured values.
 pub unsafe fn spawn<R, F: MorlocFn1<u64, R>>(f: &F, handle: u64, schema: &Schema) {
-    let _runtime = RuntimeFrame::enter();
     let (home, mid, mut captured) = require_origin(f.reify1());
     captured.push(reify_capture(&handle, schema));
     let ptrs: Vec<*const u8> = captured.iter().map(|c| c.as_ptr()).collect();
@@ -3485,9 +3599,7 @@ where
     // PANIC-6: libmorloc's hook lets a panic outside this runtime's own
     // frames unwind to here.
     let outer = unsafe { morloc_catch_scope(MORLOC_SCOPE_HOST) };
-    let depth = RUNTIME_DEPTH.with(|d| d.replace(0));
     let result = std::panic::catch_unwind(f);
-    RUNTIME_DEPTH.with(|d| d.set(depth));
     unsafe { morloc_catch_scope(outer) };
     match result {
         Ok(p) => p,
@@ -3512,6 +3624,183 @@ where
 // relptrs via TEST_BASE), so no libmorloc.so / SHM state is required (I: the
 // plan's Stage-1 standalone-testability note).
 // ---------------------------------------------------------------------------
+#[cfg(test)]
+mod panic_classifier_tests {
+    use super::*;
+
+    include!("panic_probe_user.rs");
+    include!("panic_probe_pool.rs");
+
+    const USER: &str = "/home/u/proj/h.rs";
+    const POOL: &str = "/pool/src/main.rs";
+
+    fn frame(i: usize, symbol: &str, file: Option<&str>) -> String {
+        let mut t = format!("  {i:2}:     0x{i:x} - {symbol}\n");
+        if let Some(f) = file {
+            t.push_str(&format!("                               at {f}:1:1\n"));
+        }
+        t
+    }
+
+    /// A trace in std's full format: the hook's frames (this runtime's
+    /// classifier among them unless `untrusted`, plus `above`), the panic
+    /// machinery, a panicking std function, then `below`.
+    fn trace(above: &[(&str, Option<&str>)], below: &[(&str, Option<&str>)], untrusted: bool) -> String {
+        let rt = format!("{}lib.rs", this_crate_dirs()[1]);
+        let mut fs: Vec<(String, Option<String>)> = vec![("std[h]::backtrace::Backtrace::force_capture".into(), Some("/rustc/H/library/std/src/backtrace.rs".into()))];
+        for (sym, f) in above {
+            fs.push((sym.to_string(), f.map(String::from)));
+        }
+        if !untrusted {
+            fs.push(("rustmorloc::panic_is_runtime".into(), Some(rt)));
+            fs.push(("pool::mlc_classify_panic".into(), Some(POOL.into())));
+        }
+        fs.push(("std[h]::panicking::panic_with_hook".into(), Some("/rustc/H/library/std/src/panicking.rs".into())));
+        fs.push(("std[h]::sys::backtrace::__rust_end_short_backtrace".into(), Some("/rustc/H/library/std/src/sys/backtrace.rs".into())));
+        fs.push(("core[h]::panicking::panic".into(), Some("/rustc/H/library/core/src/panicking.rs".into())));
+        fs.push(("core[h]::iter::adapters::step_by::new".into(), Some("/rustc/H/library/core/src/iter/adapters/step_by.rs".into())));
+        for (sym, f) in below {
+            fs.push((sym.to_string(), f.map(String::from)));
+        }
+        fs.iter().enumerate().map(|(i, (sym, f))| frame(i, sym, f.as_deref())).collect()
+    }
+
+    fn walk(t: &str) -> bool {
+        walk_is_runtime(t, &[POOL], &[USER])
+    }
+
+    #[test]
+    fn a_source_belongs_to_the_user_the_runtime_or_neither() {
+        let user = [USER];
+        let pool = ["src/main.rs", POOL];
+        let types = format!("{}schema.rs", morloc_runtime_types::panic::source_dirs()[1]);
+        assert_eq!(side_of(USER, &pool, &user), Side::User);
+        assert_eq!(side_of(POOL, &pool, &user), Side::Runtime);
+        assert_eq!(side_of("src/main.rs", &pool, &user), Side::Runtime);
+        for d in this_crate_dirs() {
+            assert_eq!(side_of(&format!("{d}x.rs"), &pool, &user), Side::Runtime);
+        }
+        assert_eq!(side_of(&types, &pool, &user), Side::Runtime);
+        assert_eq!(side_of("/rustc/H/library/core/src/x.rs", &pool, &user), Side::Neither);
+        assert_eq!(side_of("/home/u/.cargo/registry/src/x/arrow/lib.rs", &pool, &user), Side::Neither);
+    }
+
+    #[test]
+    fn the_first_user_or_runtime_frame_below_the_panic_decides() {
+        assert!(!walk(&trace(&[], &[("h::f", Some(USER)), ("pool::m1", Some(POOL))], false)));
+        assert!(walk(&trace(&[], &[("pool::m1", Some(POOL)), ("h::f", Some(USER))], false)));
+        assert!(!walk(&trace(&[], &[("dep::g", Some("/reg/dep/lib.rs")), ("h::f", Some(USER))], false)));
+        let rt = format!("{}x.rs", this_crate_dirs()[1]);
+        assert!(walk(&trace(&[], &[("arrow::a", Some("/reg/arrow/lib.rs")), ("rustmorloc::x", Some(&rt)), ("h::f", Some(USER))], false)));
+    }
+
+    #[test]
+    fn frames_above_the_panic_machinery_do_not_decide() {
+        assert!(walk(&trace(&[("h::hooked", Some(USER))], &[("pool::m1", Some(POOL))], false)));
+    }
+
+    #[test]
+    fn the_catch_below_the_panicking_code_is_not_the_panic_machinery() {
+        let catch = ("std[h]::panicking::catch_unwind::do_call", Some("/rustc/H/library/std/src/panicking.rs"));
+        assert!(!walk(&trace(&[], &[("h::f", Some(USER)), catch, ("pool::dispatch", Some(POOL))], false)));
+    }
+
+    #[test]
+    fn an_untrusted_trace_is_the_runtimes() {
+        assert!(walk(&trace(&[], &[("h::f", Some(USER))], true)));
+    }
+
+    #[test]
+    fn a_trace_without_the_pools_classifier_frame_is_untrusted() {
+        let rt = format!("{}lib.rs", this_crate_dirs()[1]);
+        let t = trace(&[("rustmorloc::panic_is_runtime", Some(&rt))], &[("h::f", Some(USER))], true);
+        assert!(walk(&t));
+    }
+
+    #[test]
+    fn an_unresolved_frame_of_unknown_code_is_the_runtimes() {
+        assert!(walk(&trace(&[], &[("glue::unresolved", None), ("h::f", Some(USER))], false)));
+        assert!(!walk(&trace(&[], &[("core[h]::option::unwrap", None), ("h::f", Some(USER))], false)));
+    }
+
+    #[test]
+    fn a_trace_without_files_is_the_runtimes() {
+        assert!(walk("   0: 0x1 - hook\n   1: 0x2 - core::panicking::panic\n   2: 0x3 - main\n"));
+    }
+
+    const CHILD_ENV: &str = "MORLOC_CLASSIFIER_TEST_CHILD";
+
+    fn verdict_of_child(name: &str) -> i32 {
+        verdict_of_child_in(name, std::env::current_dir().unwrap())
+    }
+
+    fn verdict_of_child_in(name: &str, dir: impl AsRef<std::path::Path>) -> i32 {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .current_dir(dir)
+            .args([&format!("panic_classifier_tests::{name}"), "--exact", "--ignored", "--test-threads=1"])
+            .env(CHILD_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .code()
+            .unwrap_or(-1)
+    }
+
+    fn classify_in_child(work: impl FnOnce()) {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        register_pool_files(&[POOL_FILE, POOL_FILE_ABS], &[USER_FILE, USER_FILE_ABS]);
+        std::panic::set_hook(Box::new(|info| {
+            let file = info.location().map(|l| l.file()).unwrap_or("");
+            let runtime = probe_classify_panic(file.as_ptr(), file.len());
+            unsafe { libc::_exit(if runtime { 11 } else { 10 }) };
+        }));
+        work();
+        unsafe { libc::_exit(3) };
+    }
+
+    #[test]
+    fn a_std_panic_raised_for_user_code_is_the_users() {
+        assert_eq!(verdict_of_child("child_user_steps"), 10);
+    }
+
+    #[test]
+    fn a_classification_does_not_depend_on_the_working_directory() {
+        assert_eq!(verdict_of_child_in("child_user_steps", env!("CARGO_MANIFEST_DIR")), 10);
+        assert_eq!(verdict_of_child_in("child_user_steps", "/"), 10);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_user_steps() {
+        classify_in_child(|| { user_steps(0); });
+    }
+
+    #[test]
+    fn a_std_panic_raised_by_runtime_code_inside_a_user_generic_is_the_runtimes() {
+        assert_eq!(verdict_of_child("child_runtime_steps_in_user_generic"), 11);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_runtime_steps_in_user_generic() {
+        classify_in_child(|| { user_apply(|| (0..10).step_by(std::hint::black_box(0)).count()); });
+    }
+
+    #[test]
+    fn a_panic_at_a_user_line_is_the_users() {
+        assert_eq!(verdict_of_child("child_user_index"), 10);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_user_index() {
+        classify_in_child(|| { user_index(&[1], std::hint::black_box(5)); });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

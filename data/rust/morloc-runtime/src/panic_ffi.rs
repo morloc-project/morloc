@@ -1,20 +1,21 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static EXIT: AtomicUsize = AtomicUsize::new(0);
-static RUNTIME_PROBE: AtomicUsize = AtomicUsize::new(0);
+static CLASSIFIER: AtomicUsize = AtomicUsize::new(0);
 
-// PANIC-6
-fn may_unwind(host: bool) -> bool {
+// PANIC-9
+fn may_unwind(host: bool, file: &str) -> bool {
     if !crate::fork_policy::holds_no_runtime_lock() {
         return false;
     }
-    let p = RUNTIME_PROBE.load(Ordering::Acquire);
-    if !host || p == 0 {
+    let c = CLASSIFIER.load(Ordering::Acquire);
+    if !host || c == 0 {
         return true;
     }
-    // SAFETY: PANIC-6: only `morloc_set_runtime_frame_probe` stores here.
-    let in_runtime: extern "C" fn() -> bool = unsafe { std::mem::transmute::<usize, extern "C" fn() -> bool>(p) };
-    !in_runtime()
+    // SAFETY: PANIC-9: only `morloc_set_panic_classifier` stores here.
+    let is_runtime: extern "C" fn(*const u8, usize) -> bool =
+        unsafe { std::mem::transmute::<usize, extern "C" fn(*const u8, usize) -> bool>(c) };
+    !is_runtime(file.as_ptr(), file.len())
 }
 
 // PANIC-1
@@ -39,10 +40,10 @@ pub extern "C" fn morloc_install_panic_hook(exit: Option<extern "C" fn() -> !>) 
     install(exit)
 }
 
-// PANIC-6: the host says whether the panicking thread is in its runtime's code.
+// PANIC-9: the host says whether a panic at a location is its runtime's.
 #[no_mangle]
-pub extern "C" fn morloc_set_runtime_frame_probe(probe: Option<extern "C" fn() -> bool>) {
-    RUNTIME_PROBE.store(probe.map_or(0, |f| f as usize), Ordering::Release);
+pub extern "C" fn morloc_set_panic_classifier(classify: Option<extern "C" fn(*const u8, usize) -> bool>) {
+    CLASSIFIER.store(classify.map_or(0, |f| f as usize), Ordering::Release);
 }
 
 // PANIC-6: `kind` 2 opens a host's scope around its user code, 0 closes it;
