@@ -668,7 +668,21 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
     _init_worker_tracking(busy_count, total_workers, wakeup_w)
     sock = _socket.fromfd(job_fd, _socket.AF_UNIX, _socket.SOCK_STREAM)
     os.close(job_fd)  # sock owns a dup'd copy
+    me = os.getpid()
     last_activity = time.monotonic()
+    warned_blocked = False
+    trace_retire = os.environ.get("MORLOC_PY_TRACE_RETIRE") == "1"
+    last_trace = 0.0
+
+    def trace(what):
+        refs = morloc.held_references()
+        sys.stderr.write(f"morloc py worker {me}: {what} idle={time.monotonic() - last_activity:.1f}s "
+                         f"workers={total_workers.value} busy={busy_count.value} refs={refs} "
+                         f"stream_locks={morloc.retire_blockers() - refs}\n")
+        sys.stderr.flush()
+
+    if trace_retire:
+        trace("started")
     try:
         # poll() (not select.select) avoids the FD_SETSIZE=1024 ceiling: a
         # job-queue fd >= 1024 makes select.select raise ValueError and kill the
@@ -684,20 +698,33 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
                     client_fd = _recv_fd(sock)
                     run_job(client_fd)
                     last_activity = time.monotonic()
+                    if trace_retire:
+                        trace("job done")
                 except (EOFError, OSError):
                     break
             else:
                 # FORK-15: leases of user-forked children that are gone.
                 morloc.reclaim_leases()
+            if trace_retire and not events and time.monotonic() - last_trace >= 1.0:
+                last_trace = time.monotonic()
+                trace("idle check")
             if not events and total_workers.value > 1 and time.monotonic() - last_activity > WORKER_IDLE_TIMEOUT:
                 # SHM-8: a worker retires only holding no shared memory, and
                 # says so; any other exit ends the pool.
                 gc.collect()
                 morloc.shm_tracker_flush()
-                if morloc.retire_blockers() == 0:
+                blockers = morloc.retire_blockers()
+                if blockers == 0:
+                    if trace_retire:
+                        trace("retiring")
                     morloc.remove_own_temps()
-                    os.write(retire_w, struct.pack("i", os.getpid()))
+                    os.write(retire_w, struct.pack("i", me))
                     break
+                if not warned_blocked:
+                    warned_blocked = True
+                    sys.stderr.write(f"morloc py worker {me}: idle but holding {blockers} "
+                                     "shared-memory references or stream locks; it cannot retire\n")
+                    sys.stderr.flush()
                 last_activity = time.monotonic()
     except BaseException as e:
         # Catch-all for errors that escape run_job's own exception handling:

@@ -1473,7 +1473,9 @@ if should_run "worker-crash"; then
     WORK_DIRS+=("$CRASH_DIR")
     compile_program "crash.loc" "$CRASH_DIR"
     HTTP_PORT=$(pick_port)
+    MORLOC_PY_TRACE_RETIRE=1; export MORLOC_PY_TRACE_RETIRE
     start_daemon "$CRASH_DIR" --http-port "$HTTP_PORT"
+    unset MORLOC_PY_TRACE_RETIRE
     wait_for_http "$HTTP_PORT" 15
     local_pid=$LAST_DAEMON_PID
 
@@ -1501,16 +1503,31 @@ if should_run "worker-crash"; then
     # idle; a retirement ends nothing.
     workers_of() { (pgrep -f "$CRASH_DIR/.*pools/py" 2>/dev/null || true) | wc -l | tr -d ' '; }
     recoveries=$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)
+    base=$(workers_of)
+    log_mark=$(wc -l < "$LAST_DAEMON_LOG" | tr -d ' ')
+    t0=$SECONDS
     curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/slowly" -d '[1]' > /dev/null 2>&1 &
     S1=$!
     curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/slowly" -d '[2]' > /dev/null 2>&1 &
     S2=$!
-    sleep 1
+    timeline=""
+    for _ in 1 2; do sleep 0.5; timeline="$timeline $(workers_of)"; done
     peak=$(workers_of)
     wait "$S1" "$S2" 2>/dev/null || true
-    sleep 9
+    calls_took=$((SECONDS - t0))
+    for _ in $(seq 1 18); do sleep 0.5; timeline="$timeline $(workers_of)"; done
     after=$(workers_of)
     assert_test "worker-crash: an idle extra worker retires" "yes" "$([ "$after" -lt "$peak" ] && echo yes || echo no)"
+    if [ "$after" -ge "$peak" ]; then
+        echo "      py processes: base $base, peak $peak, after $after; calls took ${calls_took}s"
+        echo "      every 0.5 s:$timeline"
+        ps -axo pid,ppid,stat,etime,command 2>/dev/null | grep "$CRASH_DIR" | grep -v grep | cut -c1-200 | sed 's/^/      ps: /' || true
+        tail -n "+$((log_mark + 1))" "$LAST_DAEMON_LOG" | cut -c1-200 | sed 's/^/      log: /'
+        late=""
+        for _ in $(seq 1 30); do sleep 1; late="$late $(workers_of)"; done
+        echo "      30 more seconds, every 1 s:$late"
+        grep "py worker .*\(retiring\|cannot retire\)" "$LAST_DAEMON_LOG" | tail -n 5 | cut -c1-200 | sed 's/^/      late log: /' || true
+    fi
     assert_test "worker-crash: a retirement starts no recovery" "$recoveries" \
         "$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)"
     result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/pyOk" -d '[9]')
@@ -1565,7 +1582,7 @@ if should_run "shutdown-wedged"; then
         [[ "$p" != "$local_pid" ]] && new_pids+=("$p")
     done
     DAEMON_PIDS=("${new_pids[@]+"${new_pids[@]}"}")
-    for p in "${CALL_PIDS[@]}"; do kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done
+    for p in ${CALL_PIDS[@]+"${CALL_PIDS[@]}"}; do kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done
 
     leftover=$( (pgrep -f "$WEDGE_DIR" 2>/dev/null || true) | wc -l | tr -d ' ')
     assert_test "no pool process outlives the daemon" "0" "$leftover"
