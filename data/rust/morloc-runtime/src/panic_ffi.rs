@@ -101,6 +101,20 @@ mod tests {
     }
 
     #[test]
+    fn a_callee_failure_without_a_reason_ends_the_process_even_inside_a_catch_scope() {
+        assert_eq!(status_of_child("child_takes_a_missing_reason"), morloc_runtime_types::panic::PANIC_EXIT_STATUS);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_takes_a_missing_reason() {
+        in_child(|| {
+            let _ = morloc_runtime_types::panic::catch(|| unsafe { crate::error::take_reason(std::ptr::null_mut()) });
+            unsafe { libc::_exit(3) };
+        });
+    }
+
+    #[test]
     fn a_libmorloc_panic_inside_a_catch_scope_is_caught() {
         assert_eq!(status_of_child("child_panics_inside_a_scope"), CHILD_OK);
     }

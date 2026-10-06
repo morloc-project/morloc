@@ -459,6 +459,31 @@ pub fn morloc_infra_abort(msg: impl AsRef<str>) -> ! {
     unsafe { libc::_exit(morloc_runtime_types::panic::PANIC_EXIT_STATUS) }
 }
 
+/// The reason libmorloc gave for a failure. It gives one for every failure
+/// outside input can cause, so a failure without one is this runtime's
+/// defect and ends the pool (PANIC-13).
+unsafe fn reason_or_abort(err: *mut c_char, what: &str) -> String {
+    if err.is_null() {
+        failed_without_reason(what)
+    }
+    cstr_take(err)
+}
+
+fn failed_without_reason(what: &str) -> ! {
+    morloc_infra_abort(format!("{what}: the runtime failed without giving a reason"))
+}
+
+/// The downstream reader of a stream closed it. The call ends, as an
+/// unrecoverable IO condition: `@try` does not catch it, and the nexus
+/// decides the exit status.
+pub struct MorlocPipeClosed;
+
+fn pipe_closed() -> ! {
+    std::panic::resume_unwind(Box::new(MorlocPipeClosed))
+}
+
+const PIPE_CLOSED_MESSAGE: &str = "@stdout: downstream pipe closed";
+
 /// `@try body`: run `body` and convert the outcome to data. `ok` wraps the
 /// value, `err` the caught message; codegen supplies both because only it
 /// knows how this `Try` is represented in Rust.
@@ -477,6 +502,7 @@ where
     // variable alike, rather than only the former.
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.call0())) {
         Ok(v) => ok(v),
+        Err(payload) if payload.is::<MorlocPipeClosed>() => std::panic::resume_unwind(payload),
         Err(payload) => {
             // PANIC-6: a runtime panic ended the pool before it reached here.
             unsafe { morloc_panic_caught() };
@@ -505,7 +531,9 @@ unsafe fn to_rel(ptr: *mut u8) -> RelPtr {
         let mut err: *mut c_char = std::ptr::null_mut();
         let rel = abs2rel(ptr as *mut c_void, &mut err);
         if !err.is_null() {
-            morloc_throw(cstr_take(err));
+            // PANIC-13: the write walk resolves only cursors into a block
+            // this pool allocated.
+            morloc_infra_abort(cstr_take(err));
         }
         rel
     }
@@ -1619,12 +1647,6 @@ fn handle_kind(t: SerialType) -> u8 {
     }
 }
 
-// A C-ABI handle-codec error message, or `fallback` when none was set.
-#[inline]
-unsafe fn handle_err(err: *mut c_char, fallback: &str) -> String {
-    if err.is_null() { fallback.to_string() } else { cstr_take(err) }
-}
-
 macro_rules! int_impl {
     ($t:ty) => {
         impl ToVoidstar for $t {
@@ -1647,7 +1669,7 @@ macro_rules! int_impl {
                             &mut err,
                         );
                         if rc != 0 {
-                            morloc_throw(handle_err(err, "mlc_write_handle_voidstar failed"));
+                            morloc_throw(reason_or_abort(err, "mlc_write_handle_voidstar"));
                         }
                     }
                     // Inline BigInt [size=1, value] (16 bytes); v1 never emits
@@ -1682,7 +1704,7 @@ macro_rules! int_impl {
                             &mut err,
                         );
                         if !err.is_null() || handle < 0 {
-                            morloc_throw(handle_err(err, "mlc_read_handle_voidstar failed"));
+                            morloc_throw(reason_or_abort(err, "mlc_read_handle_voidstar"));
                         }
                         handle as $t
                     }
@@ -2749,8 +2771,8 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         let cs = cschema_of(schema);
         let mut err: *mut c_char = std::ptr::null_mut();
         let block = get_morloc_data_packet_value(packet, cs, &mut err);
-        if !err.is_null() {
-            morloc_throw(cstr_take(err));
+        if block.is_null() || !err.is_null() {
+            morloc_throw(reason_or_abort(err, "reading a table argument"));
         }
         // A materialized block is released here unless the tracker takes
         // it; a referenced one belongs to its sender until acquired.
@@ -2766,7 +2788,7 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         let mut array = FFI_ArrowArray::empty();
         let acquire = if materialized { 0 } else { 1 };
         if arrow_from_shm_owned(block as *const c_void, acquire, &mut ffi_schema, &mut array, &mut err) != 0 {
-            morloc_throw(cstr_take(err));
+            morloc_throw(reason_or_abort(err, "viewing a table argument"));
         }
         guard.commit();
         return match <T as FromVoidstar>::arrow_import(array, &ffi_schema) {
@@ -2803,9 +2825,8 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     let cs = cschema_of(schema);
     let mut err: *mut c_char = std::ptr::null_mut();
     let voidstar = get_morloc_data_packet_value(packet, cs, &mut err);
-    if !err.is_null() {
-        let msg = cstr_take(err);
-        morloc_throw(msg);
+    if voidstar.is_null() || !err.is_null() {
+        morloc_throw(reason_or_abort(err, "reading an argument"));
     }
     if source == PKT_SOURCE_RPTR {
         // A value that arrived by reference is read under a reference of
@@ -3020,10 +3041,7 @@ pub unsafe fn cache_store(key: u64, label: &str, data: *const u8, schema: &str) 
     check_err(err);
     let ok = morloc_cache_store(key, label_c.as_ptr(), data, size, schema_c.as_ptr(), &mut err);
     if !ok {
-        if !err.is_null() {
-            morloc_throw(cstr_take(err));
-        }
-        morloc_throw("@cache: cache_store failed");
+        morloc_throw(reason_or_abort(err, "@cache"));
     }
     morloc_cache_record_store();
 }
@@ -3042,7 +3060,7 @@ unsafe fn with_voidstar<T: ToVoidstar, R>(
     let mut err: *mut c_char = std::ptr::null_mut();
     let root = shmalloc(total, &mut err) as *mut u8;
     if root.is_null() {
-        morloc_throw(cstr_take(err));
+        morloc_throw(reason_or_abort(err, "shmalloc"));
     }
     let guard = ShmGuard::new(root as *mut c_void);
     let mut cursor = root.add(schema.width);
@@ -3082,11 +3100,8 @@ pub unsafe fn read<T: FromVoidstar>(s: &str, schema: &Schema) -> T {
     };
     let mut err: *mut c_char = std::ptr::null_mut();
     let voidstar = mlc_read(json.as_ptr(), cschema_of(schema), &mut err);
-    if !err.is_null() {
-        morloc_throw(format!("@read: {}", cstr_take(err)));
-    }
-    if voidstar.is_null() {
-        morloc_throw(format!("@read: could not parse \"{}\"", s));
+    if !err.is_null() || voidstar.is_null() {
+        morloc_throw(format!("@read: {}", reason_or_abort(err, "@read")));
     }
     let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, MorlocSpace::SHM);
     let mut e2: *mut c_char = std::ptr::null_mut();
@@ -3131,7 +3146,7 @@ unsafe fn check_err(err: *mut c_char) {
 unsafe fn handle_or_throw(handle: i64, err: *mut c_char, what: &str) -> u64 {
     check_err(err);
     if handle < 0 {
-        morloc_throw(format!("{}: runtime returned an invalid handle", what));
+        failed_without_reason(what)
     }
     handle as u64
 }
@@ -3145,11 +3160,8 @@ unsafe fn read_voidstar<T: FromVoidstar>(
     schema: &Schema,
     what: &str,
 ) -> T {
-    if !err.is_null() {
-        morloc_throw(format!("{}: {}", what, cstr_take(err)));
-    }
-    if voidstar.is_null() {
-        morloc_throw(format!("{}: runtime returned a null value", what));
+    if !err.is_null() || voidstar.is_null() {
+        morloc_throw(format!("{}: {}", what, reason_or_abort(err, what)));
     }
     let _recur = RecurScope::enter(schema);
     let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, MorlocSpace::SHM);
@@ -3167,7 +3179,7 @@ unsafe fn read_voidstar<T: FromVoidstar>(
 unsafe fn with_schema_str<R>(schema: &Schema, f: impl FnOnce(*const c_char) -> R) -> R {
     let s = schema_to_string(cschema_of(schema));
     if s.is_null() {
-        morloc_throw("morloc IO: schema_to_string returned null");
+        failed_without_reason("morloc IO: schema_to_string");
     }
     let r = f(s);
     libc::free(s as *mut c_void);
@@ -3178,7 +3190,7 @@ unsafe fn with_schema_str<R>(schema: &Schema, f: impl FnOnce(*const c_char) -> R
 pub unsafe fn hash<T: ToVoidstar>(value: &T, schema: &Schema) -> String {
     let h = with_voidstar(value, schema, |vs, cs, err| mlc_hash(vs, cs, err));
     if h.is_null() {
-        morloc_throw("@hash: runtime returned null");
+        failed_without_reason("@hash");
     }
     cstr_take(h)
 }
@@ -3191,7 +3203,7 @@ pub unsafe fn save<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: 
         mlc_save(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
-        morloc_throw("@save: runtime write failed");
+        failed_without_reason("@save");
     }
 }
 
@@ -3202,7 +3214,7 @@ pub unsafe fn save_json<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, p
         mlc_save_json(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
-        morloc_throw("@savej: runtime write failed");
+        failed_without_reason("@savej");
     }
 }
 
@@ -3213,7 +3225,7 @@ pub unsafe fn save_voidstar<T: ToVoidstar>(value: &T, schema: &Schema, level: i6
         mlc_save_voidstar(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
-        morloc_throw("@savem: runtime write failed");
+        failed_without_reason("@savem");
     }
 }
 
@@ -3236,7 +3248,9 @@ pub unsafe fn open(path: &str, kind: u8) -> u64 {
 /// @close: close a stream/file handle.
 pub unsafe fn close(handle: u64) {
     let mut err: *mut c_char = std::ptr::null_mut();
-    mlc_close(handle as i64, &mut err);
+    if mlc_close(handle as i64, &mut err) == morloc_runtime_types::MLC_RESULT_PIPE_CLOSED {
+        pipe_closed()
+    }
     check_err(err);
 }
 
@@ -3314,8 +3328,11 @@ pub unsafe fn write<T: ToVoidstar>(schema: &Schema, level: i64, value: &T, handl
     let rc = with_voidstar(value, schema, |vs, _cs, err| {
         mlc_write(level, handle as i64, vs, err)
     });
+    if rc == morloc_runtime_types::MLC_RESULT_PIPE_CLOSED {
+        pipe_closed()
+    }
     if rc != 0 {
-        morloc_throw("@write: runtime write failed");
+        failed_without_reason("@write");
     }
 }
 
@@ -3338,14 +3355,16 @@ pub unsafe fn concat(paths: &[String], dest: &str) {
     let rc = mlc_concat(ptrs.as_ptr(), ptrs.len(), dest_c.as_ptr(), &mut err);
     check_err(err);
     if rc != 0 {
-        morloc_throw("@concat: runtime concat failed");
+        failed_without_reason("@concat");
     }
 }
 
 /// @flush: force buffered elements out as a sub-packet.
 pub unsafe fn flush(handle: u64) {
     let mut err: *mut c_char = std::ptr::null_mut();
-    mlc_flush(handle as i64, &mut err);
+    if mlc_flush(handle as i64, &mut err) == morloc_runtime_types::MLC_RESULT_PIPE_CLOSED {
+        pipe_closed()
+    }
     check_err(err);
 }
 
@@ -3363,7 +3382,7 @@ pub unsafe fn tmpfile() -> String {
     let s = mlc_tmpfile(&mut err);
     check_err(err);
     if s.is_null() {
-        morloc_throw("@tmpfile: runtime returned null");
+        failed_without_reason("@tmpfile");
     }
     cstr_take(s)
 }
@@ -3376,7 +3395,7 @@ pub unsafe fn cell_new<T: ToVoidstar>(schema: &Schema, init: &T) -> u64 {
         if handle < 0 { 1 } else { 0 }
     });
     if rc != 0 {
-        morloc_throw("@fold: could not create the accumulator");
+        failed_without_reason("@fold");
     }
     handle as u64
 }
@@ -3394,7 +3413,7 @@ pub unsafe fn cell_put<T: ToVoidstar>(schema: &Schema, handle: u64, value: &T) {
         mlc_cell_put(handle as i64, cs, vs, err)
     });
     if rc != 0 {
-        morloc_throw("@fold: could not store the accumulator");
+        failed_without_reason("@fold");
     }
 }
 
@@ -3414,7 +3433,7 @@ pub unsafe fn cell_reduce<T: FromVoidstar, F: MorlocFn2<T, T, T>>(
     let n = mlc_cell_count(handle as i64, &mut err);
     check_err(err);
     if n < 1 {
-        morloc_throw("@fold: the accumulator holds nothing to merge");
+        failed_without_reason("@fold");
     }
     let slot = |i: i64| -> T {
         let mut serr: *mut c_char = std::ptr::null_mut();
@@ -3603,6 +3622,10 @@ where
     unsafe { morloc_catch_scope(outer) };
     match result {
         Ok(p) => p,
+        Err(payload) if payload.is::<MorlocPipeClosed>() => {
+            TRACEBACK.with(|t| t.borrow_mut().clear());
+            unsafe { fail_packet(PIPE_CLOSED_MESSAGE) }
+        }
         Err(payload) => {
             let msg = panic_message(payload.as_ref());
             // Append the manifold trace accumulated during unwind, so the
@@ -3798,6 +3821,96 @@ mod panic_classifier_tests {
     #[ignore]
     fn child_user_index() {
         classify_in_child(|| { user_index(&[1], std::hint::black_box(5)); });
+    }
+}
+
+#[cfg(test)]
+mod runtime_failure_tests {
+    use super::*;
+    use morloc_runtime_types::panic::PANIC_EXIT_STATUS;
+    use morloc_runtime_types::schema::parse_schema;
+
+    const CHILD_ENV: &str = "MORLOC_RUNTIME_FAILURE_TEST_CHILD";
+
+    fn status_of_child(name: &str) -> i32 {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([&format!("runtime_failure_tests::{name}"), "--exact", "--ignored", "--test-threads=1"])
+            .env(CHILD_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .code()
+            .unwrap_or(-1)
+    }
+
+    fn in_child(work: impl FnOnce()) {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        work();
+        unsafe { libc::_exit(3) };
+    }
+
+    fn reason(text: &str) -> *mut c_char {
+        let c = CString::new(text).unwrap();
+        unsafe { libc::strdup(c.as_ptr()) }
+    }
+
+    #[test]
+    fn a_runtime_value_failure_without_a_reason_ends_the_pool() {
+        assert_eq!(status_of_child("child_reads_a_null_value_without_a_reason"), PANIC_EXIT_STATUS);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_reads_a_null_value_without_a_reason() {
+        in_child(|| {
+            let schema = parse_schema("as").unwrap();
+            let _: Vec<String> = unsafe { read_voidstar(std::ptr::null_mut(), std::ptr::null_mut(), &schema, "@load") };
+        });
+    }
+
+    #[test]
+    fn a_runtime_handle_failure_without_a_reason_ends_the_pool() {
+        assert_eq!(status_of_child("child_gets_a_bad_handle_without_a_reason"), PANIC_EXIT_STATUS);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_gets_a_bad_handle_without_a_reason() {
+        in_child(|| {
+            unsafe { handle_or_throw(-1, std::ptr::null_mut(), "@open") };
+        });
+    }
+
+    #[test]
+    fn a_runtime_failure_with_a_reason_is_a_catchable_error() {
+        let schema = parse_schema("as").unwrap();
+        let caught = std::panic::catch_unwind(|| {
+            let _: Vec<String> = unsafe { read_voidstar(std::ptr::null_mut(), reason("no such file"), &schema, "@load") };
+        })
+        .unwrap_err();
+        assert_eq!(panic_message(caught.as_ref()), "@load: no such file");
+    }
+
+    #[test]
+    fn a_closed_pipe_passes_through_try() {
+        let escaped = std::panic::catch_unwind(|| {
+            mlc_try(|| -> i64 { pipe_closed() }, |_| "ok".to_string(), |e| format!("caught {e}"))
+        })
+        .unwrap_err();
+        assert!(escaped.is::<MorlocPipeClosed>());
+    }
+
+    #[test]
+    fn a_closed_pipe_fails_the_call_with_its_own_message() {
+        let packet = dispatch_guard(|| -> *mut u8 { pipe_closed() });
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let msg = unsafe { get_morloc_data_packet_error_message(packet, &mut err) };
+        assert!(err.is_null());
+        assert_eq!(unsafe { cstr_take(msg) }, PIPE_CLOSED_MESSAGE);
+        unsafe { libc::free(packet as *mut c_void) };
     }
 }
 

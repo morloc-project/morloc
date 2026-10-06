@@ -196,8 +196,9 @@ fn no_such_cell(fn_name: &str) -> MorlocError {
     ))
 }
 
-fn poisoned(fn_name: &str) -> MorlocError {
-    MorlocError::Other(format!("{}: fold accumulator registry is poisoned", fn_name))
+fn registry() -> crate::fork_policy::ResetGuard<'static, CellRegistry> {
+    // PANIC-4
+    CELL_REGISTRY.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock())
 }
 
 /// Resolve a handle to a live cell index, rejecting a stale generation.
@@ -233,13 +234,7 @@ pub unsafe fn cell_new(rs: &Schema, init: *const u8) -> Result<i64, MorlocError>
         return Err(MorlocError::Other("mlc_cell_new: null init".into()));
     }
     let seed = cell_owns(voidstar::deep_copy_to_block(init, rs)?)?;
-    let mut reg = match CELL_REGISTRY.lock() {
-        Ok(r) => r,
-        Err(_) => {
-            free_block(seed);
-            return Err(poisoned("mlc_cell_new"));
-        }
-    };
+    let mut reg = registry();
     let owner = current_temp_owner();
     if let Some(i) = reg.cells.iter().position(|c| !c.live) {
         let gen = reg.cells[i].generation;
@@ -277,7 +272,7 @@ pub unsafe fn cell_new(rs: &Schema, init: *const u8) -> Result<i64, MorlocError>
 /// `rs` must describe the type the cell was created with.
 pub unsafe fn cell_get(handle: i64, rs: &Schema) -> Result<AbsPtr, MorlocError> {
     let me = std::thread::current().id();
-    let reg = CELL_REGISTRY.lock().map_err(|_| poisoned("mlc_cell_get"))?;
+    let reg = registry();
     let i = resolve(&reg, handle, "mlc_cell_get")?;
     let c = &reg.cells[i];
     let src = c.slots.iter().find(|(t, _)| *t == me).map(|(_, p)| *p).unwrap_or(c.init);
@@ -321,7 +316,7 @@ pub unsafe fn cell_put(handle: i64, rs: &Schema, value: *const u8) -> Result<(),
     // Copied before the lock is taken: a deep copy of a large
     // accumulator must not hold every other worker out of its own slot.
     let fresh = cell_owns(voidstar::deep_copy_to_block(value, rs)?)?;
-    let mut reg = CELL_REGISTRY.lock().map_err(|_| poisoned("mlc_cell_put"))?;
+    let mut reg = registry();
     let i = match resolve(&reg, handle, "mlc_cell_put") {
         Ok(i) => i,
         Err(e) => {
@@ -357,7 +352,7 @@ pub unsafe fn cell_put(handle: i64, rs: &Schema, value: *const u8) -> Result<(),
 /// thread touched answers with its seed, which is what an empty stream
 /// folds to.
 pub fn cell_count(handle: i64) -> Result<i64, MorlocError> {
-    let reg = CELL_REGISTRY.lock().map_err(|_| poisoned("mlc_cell_count"))?;
+    let reg = registry();
     let i = resolve(&reg, handle, "mlc_cell_count")?;
     Ok(std::cmp::max(1, reg.cells[i].slots.len() as i64))
 }
@@ -367,7 +362,7 @@ pub fn cell_count(handle: i64) -> Result<i64, MorlocError> {
 /// # Safety
 /// `rs` must describe the type the cell was created with.
 pub unsafe fn cell_slot(handle: i64, index: i64, rs: &Schema) -> Result<AbsPtr, MorlocError> {
-    let reg = CELL_REGISTRY.lock().map_err(|_| poisoned("mlc_cell_slot"))?;
+    let reg = registry();
     let i = resolve(&reg, handle, "mlc_cell_slot")?;
     let c = &reg.cells[i];
     let n = std::cmp::max(1, c.slots.len() as i64);
@@ -383,7 +378,7 @@ pub unsafe fn cell_slot(handle: i64, index: i64, rs: &Schema) -> Result<AbsPtr, 
 
 /// Release a cell and every accumulator in it.
 pub fn cell_free(handle: i64) -> Result<(), MorlocError> {
-    let mut reg = CELL_REGISTRY.lock().map_err(|_| poisoned("mlc_cell_free"))?;
+    let mut reg = registry();
     let i = resolve(&reg, handle, "mlc_cell_free")?;
     release_entry(&mut reg.cells[i]);
     Ok(())
@@ -477,21 +472,19 @@ unsafe fn require_schema(schema: *const CSchema, fn_name: &str) -> Result<Schema
 /// zero, which is the same count this registry would otherwise keep a
 /// second copy of.
 pub fn sweep_dispatch(call_id: u64, oldest: Option<u64>) {
-    if let Ok(mut reg) = CELL_REGISTRY.lock() {
-        for c in reg.cells.iter_mut() {
-            if c.live
-                && (c.owner == call_id
-                    || (c.owner == TEMP_OWNER_NONE && crate::intrinsics::unowned_collectable(c.born, oldest)))
-            {
-                release_entry(c);
-            }
+    for c in registry().cells.iter_mut() {
+        if c.live
+            && (c.owner == call_id
+                || (c.owner == TEMP_OWNER_NONE && crate::intrinsics::unowned_collectable(c.born, oldest)))
+        {
+            release_entry(c);
         }
     }
 }
 
 #[cfg(test)]
 pub fn live_cell_count() -> usize {
-    CELL_REGISTRY.lock().map(|r| r.cells.iter().filter(|c| c.live).count()).unwrap_or(0)
+    registry().cells.iter().filter(|c| c.live).count()
 }
 
 #[cfg(test)]

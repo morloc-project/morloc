@@ -2247,8 +2247,8 @@ rustLowerConfig mask =
     -- builds it. The only such position is a manifold return typed
     -- @impl MorlocFn0<T>@ ('rustReturnType'); every other renderer erases the
     -- effect row, so a closure reaching one is already a type error. A thunk in
-    -- any other frame is forced on the spot or handed to @mlc_catch@, which
-    -- consumes both arms before returning, so it borrows what it reads and
+    -- any other frame is forced on the spot or handed to @mlc_try@, which
+    -- runs it before returning, so it borrows what it reads and
     -- leaves the value usable afterwards. The C++ member captures by copy
     -- unconditionally, which is safe there because a copy leaves the original
     -- intact; @move@ does not.

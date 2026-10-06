@@ -202,16 +202,30 @@ resolves. Building with packed debuginfo and copying the debug bundle
 beside the pool would fix both.
 
 ### PANIC-13 A broken runtime invariant in the Rust pool ends the pool
+Status: implemented
+Checked by: loading_a_missing_file_fails_with_a_reason, loading_a_null_path_fails_with_a_reason, reading_malformed_json_fails_with_a_reason, reading_a_null_string_fails_with_a_reason, saving_to_a_null_path_fails_with_a_reason, a_runtime_value_failure_without_a_reason_ends_the_pool, a_runtime_handle_failure_without_a_reason_ends_the_pool, a_runtime_failure_with_a_reason_is_a_catchable_error, a_closed_pipe_passes_through_try, a_closed_pipe_fails_the_call_with_its_own_message, a_callee_failure_without_a_reason_ends_the_process_even_inside_a_catch_scope, golden:rust-thunk-capture
+
+A check whose failing value can come from outside the runtime -- a client
+or peer packet, a file, a user value, handle or type mapping, bytes a user
+parser produced -- is an input check, and its failure is an error user
+code can catch. A check only a defect in morloc can fail is an invariant,
+and its failure ends the pool. The libmorloc calls the Rust pool makes
+give a reason for every failure input can cause; libmorloc's intrinsics
+treat a failure of their own callee without one as a defect. The Rust
+pool ends on such a call's failure that carries no reason, and on a write
+walk that leaves the block it allocated. A closed downstream pipe is
+neither: it ends the call, no catch holds it, and the nexus decides the
+exit status.
+
+### PANIC-14 A failed check on data the runtime built ends the pool
 Status: deviation
 
-A Rust pool's runtime that finds one of its own invariants broken ends the
-pool rather than raising an error user code could catch.
+A structural check that fails on a value libmorloc or the pool built from
+its own schema -- a value `@read` or a JSON or msgpack `@load` produced, a
+fold accumulator, a stream layout -- is a runtime defect and ends the pool.
 
-Missing: the runtime raises several such failures as catchable morloc
-throws: a pointer outside its payload, a handle or value the runtime
-should have returned, an empty fold accumulator, a packet shorter than its
-header, a value of the wrong type for its schema. Some of these sites also
-see malformed input -- a client's packet, a missing file, a mis-declared
-type mapping -- which must stay a catchable error, so each needs splitting
-by origin before it can end the pool.
-
+Missing: the Rust read walk shares its checks between such values and
+input, and raises them all as catchable errors. Fold-accumulator failures
+on handles the compiler created (a stale handle, a slot out of range)
+carry a reason and are catchable too. Neither tears state: the guards free
+the value being read.

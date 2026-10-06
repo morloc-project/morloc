@@ -5,7 +5,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
 
 use crate::cschema::CSchema;
-use crate::error::{clear_errmsg, set_errmsg, MorlocError};
+use crate::error::{clear_errmsg, set_errmsg, take_reason, MorlocError};
 
 // ── FFI wrapper helpers ────────────────────────────────────────────────────
 
@@ -83,14 +83,14 @@ pub unsafe extern "C" fn mlc_save(
 
     let rc = pack_with_schema(data, schema, &mut mpk, &mut mpk_size, &mut err);
     if rc != 0 {
-        *errmsg = err;
+        set_errmsg(errmsg, &take_reason(err));
         return 1;
     }
 
     let wrc = write_atomic(path, mpk as *const u8, mpk_size, &mut err);
     libc::free(mpk as *mut c_void);
     if wrc != 0 {
-        *errmsg = err;
+        set_errmsg(errmsg, &take_reason(err));
         return 1;
     }
     0
@@ -118,7 +118,7 @@ pub unsafe extern "C" fn mlc_save_json(
     let mut err: *mut c_char = ptr::null_mut();
     let json = voidstar_to_json_string(data, schema, &mut err);
     if json.is_null() {
-        *errmsg = err;
+        set_errmsg(errmsg, &take_reason(err));
         return 1;
     }
 
@@ -126,7 +126,7 @@ pub unsafe extern "C" fn mlc_save_json(
     let wrc = write_atomic(path, json as *const u8, json_len, &mut err);
     libc::free(json as *mut c_void);
     if wrc != 0 {
-        *errmsg = err;
+        set_errmsg(errmsg, &take_reason(err));
         return 1;
     }
     0
@@ -191,7 +191,7 @@ unsafe fn build_voidstar_data_packet_parts(
     let mut blob_size: usize = 0;
     let mut err: *mut c_char = ptr::null_mut();
     if flatten_voidstar_to_buffer(data, schema, &mut blob, &mut blob_size, &mut err) != 0 {
-        *errmsg = err;
+        set_errmsg(errmsg, &take_reason(err));
         return None;
     }
     let blob = CBlob(blob);
@@ -316,6 +316,11 @@ static TEMP_REGISTRY: crate::fork_policy::Reset<TempRegistry> = crate::fork_poli
     },
 });
 
+fn temp_registry() -> crate::fork_policy::ResetGuard<'static, TempRegistry> {
+    // PANIC-4
+    TEMP_REGISTRY.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock())
+}
+
 // FORK-16: the dispatches a forked child did not inherit, which never end.
 const PHANTOM_DISPATCH: u64 = 0;
 
@@ -343,9 +348,7 @@ pub(crate) fn next_dispatch_id() -> u64 {
 
 #[cfg(test)]
 fn forget_dispatches_for_test() {
-    if let Ok(mut reg) = TEMP_REGISTRY.lock() {
-        reg.inflight.clear();
-    }
+    temp_registry().inflight.clear();
 }
 
 /// Source of dispatch identities for the temp registry.
@@ -462,11 +465,9 @@ pub extern "C" fn morloc_remove_own_temps() {
 /// underneath a daemon dispatch on the same thread.
 pub fn begin_dispatch() -> (u64, u64) {
     // FORK-16: the id is taken and entered as running in one step.
-    let mut reg = TEMP_REGISTRY.lock();
+    let mut reg = temp_registry();
     let id = TEMP_OWNER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if let Ok(r) = reg.as_mut() {
-        r.inflight.insert(id);
-    }
+    reg.inflight.insert(id);
     drop(reg);
     let prev = CURRENT_TEMP_OWNER.with(|c| {
         let old = c.get();
@@ -494,13 +495,11 @@ pub unsafe extern "C" fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
     libc::close(fd);
     buf.pop(); // drop the NUL mkstemp left in place
     let path = String::from_utf8_lossy(&buf).into_owned();
-    if let Ok(mut reg) = TEMP_REGISTRY.lock() {
-        reg.entries.push(TempEntry {
-            owner: current_temp_owner(),
-            born: next_dispatch_id(),
-            path: std::path::PathBuf::from(&path),
-        });
-    }
+    temp_registry().entries.push(TempEntry {
+        owner: current_temp_owner(),
+        born: next_dispatch_id(),
+        path: std::path::PathBuf::from(&path),
+    });
     match CString::new(path) {
         Ok(cs) => cs.into_raw(),
         Err(_) => {
@@ -535,20 +534,17 @@ pub unsafe extern "C" fn mlc_unlink_tmp(
     // mkstemp, so the only way to name one is to have been handed it.
     let me = current_temp_owner();
     let unowned = TEMP_OWNER_NONE;
-    let registered = match TEMP_REGISTRY.lock() {
-        Ok(mut reg) => {
-            match reg.entries.iter().position(|e| {
-                e.path == pb && (me == unowned || e.owner == unowned || e.owner == me)
-            }) {
-                Some(i) => {
-                    reg.entries.remove(i);
-                    true
-                }
-                None => false,
-            }
+    let mut reg = temp_registry();
+    let registered = match reg.entries.iter().position(|e| {
+        e.path == pb && (me == unowned || e.owner == unowned || e.owner == me)
+    }) {
+        Some(i) => {
+            reg.entries.remove(i);
+            true
         }
-        Err(_) => false,
+        None => false,
     };
+    drop(reg);
     if !registered {
         set_errmsg(errmsg, &MorlocError::Other(format!(
             "@close: '{}' is not a registered temp file; @close only removes \
@@ -577,22 +573,20 @@ pub fn end_dispatch(call_id: u64, prev: u64) {
     CURRENT_TEMP_OWNER.with(|c| c.set(prev));
     IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     let mut oldest = None;
-    let doomed: Vec<std::path::PathBuf> = match TEMP_REGISTRY.lock() {
-        Ok(mut reg) => {
-            reg.inflight.remove(&call_id);
-            oldest = oldest_dispatch(&reg.inflight);
-            let mut out = Vec::new();
-            reg.entries.retain(|e| {
-                let collect = e.owner == call_id
-                    || (e.owner == TEMP_OWNER_NONE && unowned_collectable(e.born, oldest));
-                if collect {
-                    out.push(e.path.clone());
-                }
-                !collect
-            });
-            out
-        }
-        Err(_) => Vec::new(),
+    let doomed: Vec<std::path::PathBuf> = {
+        let mut reg = temp_registry();
+        reg.inflight.remove(&call_id);
+        oldest = oldest_dispatch(&reg.inflight);
+        let mut out = Vec::new();
+        reg.entries.retain(|e| {
+            let collect = e.owner == call_id
+                || (e.owner == TEMP_OWNER_NONE && unowned_collectable(e.born, oldest));
+            if collect {
+                out.push(e.path.clone());
+            }
+            !collect
+        });
+        out
     };
     for p in doomed {
         let _ = std::fs::remove_file(&p);
@@ -612,6 +606,10 @@ pub unsafe extern "C" fn mlc_save_voidstar(
     errmsg: *mut *mut c_char,
 ) -> i32 {
     clear_errmsg(errmsg);
+    if path.is_null() {
+        set_errmsg(errmsg, &MorlocError::NullPointer);
+        return 1;
+    }
 
     // Resolve the level first so a bad value aborts before we allocate.
     let Some(clvl) = level_or_errmsg(level, errmsg) else { return 1 };
@@ -638,7 +636,7 @@ pub unsafe extern "C" fn mlc_save_voidstar(
     if let Err(e) = write_data_packet_parts_to_fd(fd, &parts) {
         libc::close(fd);
         libc::unlink(tmp_buf.as_ptr() as *const c_char);
-        *errmsg = e;
+        set_errmsg(errmsg, &take_reason(e));
         return 1;
     }
 
@@ -697,7 +695,7 @@ pub unsafe extern "C" fn mlc_write_voidstar_data_packet_to_fd(
     };
 
     if let Err(e) = write_data_packet_parts_to_fd(fd, &parts) {
-        *errmsg = e;
+        set_errmsg(errmsg, &take_reason(e));
         return -1;
     }
 
@@ -714,7 +712,6 @@ pub unsafe extern "C" fn mlc_load(
 ) -> *mut c_void {
     clear_errmsg(errmsg);
 
-    use crate::utility::file_exists;
     use crate::utility::read_binary_file;
     extern "C" {
         fn load_morloc_data_file(
@@ -723,7 +720,13 @@ pub unsafe extern "C" fn mlc_load(
         ) -> *mut c_void;
     }
 
-    if !file_exists(path) {
+    if path.is_null() {
+        set_errmsg(errmsg, &MorlocError::NullPointer);
+        return ptr::null_mut();
+    }
+    let shown = CStr::from_ptr(path).to_string_lossy();
+    if let Err(e) = std::fs::metadata(shown.as_ref()) {
+        set_errmsg(errmsg, &MorlocError::Other(format!("cannot load '{shown}': {e}")));
         return ptr::null_mut();
     }
 
@@ -782,9 +785,7 @@ pub unsafe extern "C" fn mlc_load(
         // Propagate the file-read error verbatim so the caller sees
         // (for example) "no such file or directory" rather than a
         // generic NULL return; @catch relies on this text.
-        if !err.is_null() {
-            *errmsg = err;
-        }
+        set_errmsg(errmsg, &take_reason(err));
         return ptr::null_mut();
     }
 
@@ -792,8 +793,8 @@ pub unsafe extern "C" fn mlc_load(
     // which is the single choke point all packet-load paths share.
     // Any error message it sets flows through to the caller's errmsg.
     let result = load_morloc_data_file(path, data, file_size, schema, &mut err);
-    if result.is_null() && !err.is_null() {
-        *errmsg = err;
+    if result.is_null() {
+        set_errmsg(errmsg, &take_reason(err));
     }
     result
 }
@@ -811,7 +812,7 @@ pub unsafe extern "C" fn mlc_hash(
     let mut err: *mut c_char = ptr::null_mut();
     let hash = crate::cache::hash_voidstar(data, schema, 0, &mut err);
     if !err.is_null() {
-        *errmsg = err;
+        set_errmsg(errmsg, &take_reason(err));
         return ptr::null_mut();
     }
 
@@ -852,6 +853,10 @@ pub unsafe extern "C" fn mlc_read(
 
     use crate::json_ffi::read_json_with_schema;
 
+    if json_str.is_null() {
+        set_errmsg(errmsg, &MorlocError::NullPointer);
+        return ptr::null_mut();
+    }
     let json_copy = libc::strdup(json_str);
     if json_copy.is_null() {
         set_errmsg(errmsg, &MorlocError::Other("strdup failed".into()));
@@ -862,9 +867,7 @@ pub unsafe extern "C" fn mlc_read(
     let result = read_json_with_schema(ptr::null_mut(), json_copy, schema, &mut err);
     libc::free(json_copy as *mut c_void);
     if result.is_null() {
-        if !err.is_null() {
-            libc::free(err as *mut c_void);
-        }
+        set_errmsg(errmsg, &take_reason(err));
     }
     result as *mut c_void
 }
@@ -890,13 +893,13 @@ unsafe fn _write_voidstar_binary_rust(
     let mut blob_size: usize = 0;
 
     if flatten_voidstar_to_buffer(data, schema, &mut blob, &mut blob_size, &mut err) != 0 {
-        *errmsg = err;
+        set_errmsg(errmsg, &take_reason(err));
         return -1;
     }
 
     if write_binary_fd(fd, blob as *const c_char, blob_size, &mut err) != 0 {
         libc::free(blob as *mut c_void);
-        *errmsg = err;
+        set_errmsg(errmsg, &take_reason(err));
         return -1;
     }
 
@@ -2485,5 +2488,76 @@ mod tests {
         });
         end_dispatch(id, prev);
         assert!(ok, "a nested dispatch in a forked child swept an unowned temp while its outer dispatch ran");
+    }
+
+    unsafe fn reason(err: *mut c_char) -> Option<String> {
+        (!err.is_null()).then(|| CString::from_raw(err).into_string().unwrap())
+    }
+
+    fn list_schema() -> *mut CSchema {
+        let mut err: *mut c_char = ptr::null_mut();
+        let s = unsafe { crate::ffi::parse_schema(c"as".as_ptr(), &mut err) };
+        assert!(!s.is_null());
+        s
+    }
+
+    #[test]
+    fn loading_a_missing_file_fails_with_a_reason() {
+        let _shm = crate::init_test_shm();
+        let schema = list_schema();
+        let mut err: *mut c_char = ptr::null_mut();
+        let v = unsafe { mlc_load(c"/nonexistent/morloc-missing.dat".as_ptr(), schema, &mut err) };
+        assert!(v.is_null());
+        let why = unsafe { reason(err) }.expect("a missing file must fail with a reason");
+        assert!(why.contains("/nonexistent/morloc-missing.dat"), "{why}");
+        unsafe { crate::ffi::free_schema(schema) };
+    }
+
+    #[test]
+    fn loading_a_null_path_fails_with_a_reason() {
+        let _shm = crate::init_test_shm();
+        let schema = list_schema();
+        let mut err: *mut c_char = ptr::null_mut();
+        let v = unsafe { mlc_load(ptr::null(), schema, &mut err) };
+        assert!(v.is_null());
+        assert!(unsafe { reason(err) }.is_some());
+        unsafe { crate::ffi::free_schema(schema) };
+    }
+
+    #[test]
+    fn reading_malformed_json_fails_with_a_reason() {
+        let _shm = crate::init_test_shm();
+        let schema = list_schema();
+        for text in [c"[1, 2", c"{\"a\": 1}", c"[1, 2]"] {
+            let mut err: *mut c_char = ptr::null_mut();
+            let v = unsafe { mlc_read(text.as_ptr(), schema, &mut err) };
+            assert!(v.is_null(), "{text:?} parsed as a list of strings");
+            assert!(unsafe { reason(err) }.is_some(), "{text:?} failed without a reason");
+        }
+        unsafe { crate::ffi::free_schema(schema) };
+    }
+
+    #[test]
+    fn reading_a_null_string_fails_with_a_reason() {
+        let _shm = crate::init_test_shm();
+        let schema = list_schema();
+        let mut err: *mut c_char = ptr::null_mut();
+        let v = unsafe { mlc_read(ptr::null(), schema, &mut err) };
+        assert!(v.is_null());
+        assert!(unsafe { reason(err) }.is_some());
+        unsafe { crate::ffi::free_schema(schema) };
+    }
+
+    #[test]
+    fn saving_to_a_null_path_fails_with_a_reason() {
+        let _shm = crate::init_test_shm();
+        let schema = list_schema();
+        let mut err: *mut c_char = ptr::null_mut();
+        let value = unsafe { mlc_read(c"[\"x\"]".as_ptr(), schema, &mut err) };
+        assert!(!value.is_null());
+        let rc = unsafe { mlc_save_voidstar(value, schema, 0, ptr::null(), &mut err) };
+        assert_ne!(rc, 0);
+        assert!(unsafe { reason(err) }.is_some());
+        unsafe { crate::ffi::free_schema(schema) };
     }
 }
