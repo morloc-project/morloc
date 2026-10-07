@@ -96,29 +96,66 @@ pub fn source_dirs() -> [&'static str; 2] {
 // code, `file` the panic's location.
 pub fn install_hook_unless(panic_exit: fn() -> !, may_unwind: fn(bool, &str) -> bool) {
     std::panic::set_hook(Box::new(move |info| {
-        let scope = IN_SCOPE.try_with(|s| s.get()).unwrap_or(0);
-        let fatal = FATAL.try_with(|f| f.get()).unwrap_or(true);
-        let unwinding = UNWINDING.try_with(|u| u.replace(true)).unwrap_or(true);
-        // PANIC-6: user code may catch its own panics, so a host scope
-        // cannot tell a second panic from a nested one; Rust aborts a
-        // nested one itself.
-        let nested = unwinding && scope != SCOPE_HOST;
         let file = info.location().map(|l| l.file()).unwrap_or("");
-        if scope != 0 && !nested && !fatal && may_unwind(scope == SCOPE_HOST, file) {
-            // PANIC-6: a user panic is reported by the call's failure.
-            if scope != SCOPE_HOST {
+        match decide(file, false, may_unwind) {
+            Outcome::Unwind => report(info),
+            Outcome::UnwindQuietly => {}
+            Outcome::Exit => {
                 report(info);
+                panic_exit()
             }
-            return;
         }
-        report(info);
-        panic_exit()
     }));
 }
 
-struct Report {
+/// What the hook does with a panic located at `file` on this thread.
+pub enum Outcome {
+    Unwind,
+    /// PANIC-6: a user panic is reported by the call's failure.
+    UnwindQuietly,
+    Exit,
+}
+
+/// PANIC-1: the hook's decision for a panic at `file`; `fatal` adds a fatal
+/// mark the panicking code set in another copy of this crate.
+pub fn decide(file: &str, fatal: bool, may_unwind: fn(bool, &str) -> bool) -> Outcome {
+    let scope = IN_SCOPE.try_with(|s| s.get()).unwrap_or(0);
+    let fatal = fatal || FATAL.try_with(|f| f.get()).unwrap_or(true);
+    let unwinding = UNWINDING.try_with(|u| u.replace(true)).unwrap_or(true);
+    // PANIC-6: user code may catch its own panics, so a host scope
+    // cannot tell a second panic from a nested one; Rust aborts a
+    // nested one itself.
+    let nested = unwinding && scope != SCOPE_HOST;
+    if scope != 0 && !nested && !fatal && may_unwind(scope == SCOPE_HOST, file) {
+        if scope == SCOPE_HOST { Outcome::UnwindQuietly } else { Outcome::Unwind }
+    } else {
+        Outcome::Exit
+    }
+}
+
+/// Whether this copy of the crate marked the panic in flight fatal.
+pub fn fatal_marked() -> bool {
+    FATAL.try_with(|f| f.get()).unwrap_or(true)
+}
+
+/// A panic's report line, formatted into a fixed buffer.
+pub struct Report {
     buf: [u8; 2048],
     len: usize,
+}
+
+impl Report {
+    pub fn of(info: &std::panic::PanicHookInfo<'_>) -> Report {
+        use std::fmt::Write;
+        let mut text = Report { buf: [0; 2048], len: 0 };
+        let thread = std::thread::current();
+        let _ = writeln!(text, "morloc: internal error: thread '{}' {}", thread.name().unwrap_or("<unnamed>"), info);
+        text
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
 }
 
 impl std::fmt::Write for Report {
@@ -131,11 +168,12 @@ impl std::fmt::Write for Report {
 }
 
 fn report(info: &std::panic::PanicHookInfo<'_>) {
-    use std::fmt::Write;
-    let mut text = Report { buf: [0; 2048], len: 0 };
-    let thread = std::thread::current();
-    let _ = writeln!(text, "morloc: internal error: thread '{}' {}", thread.name().unwrap_or("<unnamed>"), info);
-    write_stderr(&text.buf[..text.len]);
+    report_text(Report::of(info).as_bytes());
+}
+
+/// Write a panic's report line, and a backtrace when one is asked for.
+pub fn report_text(line: &[u8]) {
+    write_stderr(line);
     let trace = std::backtrace::Backtrace::capture();
     if trace.status() == std::backtrace::BacktraceStatus::Captured {
         write_stderr(format!("{trace}\n").as_bytes());

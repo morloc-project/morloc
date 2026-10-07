@@ -1628,6 +1628,37 @@ pub(crate) fn allocate_slot_cas(
 /// be shared across processes, so it must not be released when the
 /// allocating eval scope exits. Returns the relptr for assignment.
 // SHM-8: the slot, not this process, holds the reference from here.
+/// Blocks allocated for a slot being published, until the slot holds them:
+/// freed if publishing fails first.
+#[derive(Default)]
+struct Unpublished(Vec<RelPtr>);
+
+impl Unpublished {
+    fn hold(&mut self, rel: RelPtr) -> RelPtr {
+        if rel != shm_types_crate::RELNULL {
+            self.0.push(rel);
+        }
+        rel
+    }
+
+    /// `rel`, now held by the slot.
+    fn own(&mut self, rel: RelPtr) -> RelPtr {
+        self.0.retain(|r| *r != rel);
+        slot_owns(rel)
+    }
+}
+
+impl Drop for Unpublished {
+    fn drop(&mut self) {
+        for rel in self.0.drain(..) {
+            if let Ok(abs) = crate::shm::rel2abs(rel) {
+                crate::eval_arena::forget_if_active(abs);
+                let _ = crate::shm::shfree(abs);
+            }
+        }
+    }
+}
+
 fn slot_owns(rel: RelPtr) -> RelPtr {
     if rel != shm_types_crate::RELNULL {
         if let Ok(abs) = crate::shm::rel2abs(rel) {
@@ -2471,10 +2502,11 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
     // the slot via `release_slot_locked` (which itself shfree's any
     // partials we may have already published).
     let publish_result = (|| -> Result<u64, MorlocError> {
-        let path_rel = shm_copy_bytes(path.as_bytes())?;
-        let schema_rel = shm_copy_bytes(parsed.schema_str.as_bytes())?;
+        let mut pending = Unpublished::default();
+        let path_rel = pending.hold(shm_copy_bytes(path.as_bytes())?);
+        let schema_rel = pending.hold(shm_copy_bytes(parsed.schema_str.as_bytes())?);
         let idx_rel = if !parsed.subpacket_entries.is_empty() {
-            shm_copy_entries_slice(&parsed.subpacket_entries)?
+            pending.hold(shm_copy_entries_slice(&parsed.subpacket_entries)?)
         } else {
             shm_types_crate::RELNULL
         };
@@ -2487,11 +2519,11 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
             (*mp).kind = MLC_KIND_IFILE;
             (*mp).file_dev = file_dev;
             (*mp).file_ino = file_ino;
-            (*mp).file_path = slot_owns(path_rel);
+            (*mp).file_path = pending.own(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = slot_owns(schema_rel);
+            (*mp).schema_str = pending.own(schema_rel);
             (*mp).schema_str_len = parsed.schema_str.len() as u32;
-            (*mp).subpacket_entries = slot_owns(idx_rel);
+            (*mp).subpacket_entries = pending.own(idx_rel);
             (*mp).subpacket_entries_len = parsed.subpacket_entries.len() as u64;
             // IFile's sub-packet entry array is immutable -- set once
             // from the parsed final footer and never grown. cap = 0
@@ -2604,16 +2636,17 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
     };
 
     let publish_result = (|| -> Result<u64, MorlocError> {
-        let path_rel = shm_copy_bytes(path.as_bytes())?;
-        let schema_rel = shm_copy_bytes(parsed.schema_str.as_bytes())?;
+        let mut pending = Unpublished::default();
+        let path_rel = pending.hold(shm_copy_bytes(path.as_bytes())?);
+        let schema_rel = pending.hold(shm_copy_bytes(parsed.schema_str.as_bytes())?);
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_ISTREAM;
             (*mp).file_dev = file_dev;
             (*mp).file_ino = file_ino;
-            (*mp).file_path = slot_owns(path_rel);
+            (*mp).file_path = pending.own(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = slot_owns(schema_rel);
+            (*mp).schema_str = pending.own(schema_rel);
             (*mp).schema_str_len = parsed.schema_str.len() as u32;
             (*mp).subpacket_entries = shm_types_crate::RELNULL;
             (*mp).subpacket_entries_len = 0;
@@ -2838,16 +2871,17 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
     let want_write_buffer = kind == MLC_KIND_OSTREAM;
 
     let publish_result = (|| -> Result<u64, MorlocError> {
+        let mut pending = Unpublished::default();
         let sentinel = match stdio_kind {
             STDIO_KIND_STDERR => STDIO_SENTINEL_ERR,
             _ => STDIO_SENTINEL_STD,
         };
-        let path_rel = shm_copy_bytes(sentinel.as_bytes())?;
-        let schema_rel = shm_copy_bytes(schema_str.as_bytes())?;
+        let path_rel = pending.hold(shm_copy_bytes(sentinel.as_bytes())?);
+        let schema_rel = pending.hold(shm_copy_bytes(schema_str.as_bytes())?);
         let (buf_rel, buf_size) = if want_write_buffer {
             let buf_bytes = read_write_buffer_bytes_env();
             let buf_abs = crate::shm::shcalloc(1, buf_bytes)?;
-            (crate::shm::abs2rel(buf_abs)?, buf_bytes)
+            (pending.hold(crate::shm::abs2rel(buf_abs)?), buf_bytes)
         } else {
             (shm_types_crate::RELNULL, 0)
         };
@@ -2863,7 +2897,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             let bytes = (cap as usize)
                 * std::mem::size_of::<morloc_runtime_types::packet::SubpacketEntry>();
             let abs = crate::shm::shcalloc(1, bytes)?;
-            (crate::shm::abs2rel(abs)?, cap)
+            (pending.hold(crate::shm::abs2rel(abs)?), cap)
         } else {
             (shm_types_crate::RELNULL, 0)
         };
@@ -2873,11 +2907,11 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             (*mp).is_stdio = 1;
             (*mp).stdio_kind = stdio_kind;
             (*mp).staged = staged as u8;
-            (*mp).file_path = slot_owns(path_rel);
+            (*mp).file_path = pending.own(path_rel);
             (*mp).file_path_len = sentinel.len() as u32;
-            (*mp).schema_str = slot_owns(schema_rel);
+            (*mp).schema_str = pending.own(schema_rel);
             (*mp).schema_str_len = schema_str.len() as u32;
-            (*mp).subpacket_entries = slot_owns(idx_rel);
+            (*mp).subpacket_entries = pending.own(idx_rel);
             (*mp).subpacket_entries_len = 0;
             (*mp).subpacket_entries_cap = idx_cap;
             (*mp).body_start = stdio_body_start;
@@ -2886,7 +2920,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             (*mp).element_count = 0;
             (*mp).compression_level = 0;
             (*mp).diag = StreamDiag::new();
-            (*mp).write_buffer = slot_owns(buf_rel);
+            (*mp).write_buffer = pending.own(buf_rel);
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;
@@ -3324,14 +3358,15 @@ fn init_ostream_on_locked_fd(
     };
 
     let publish_result = (|| -> Result<u64, MorlocError> {
-        let path_rel = shm_copy_bytes(path.as_bytes())?;
-        let schema_rel = shm_copy_bytes(schema_str.as_bytes())?;
+        let mut pending = Unpublished::default();
+        let path_rel = pending.hold(shm_copy_bytes(path.as_bytes())?);
+        let schema_rel = pending.hold(shm_copy_bytes(schema_str.as_bytes())?);
         // Allocate the write buffer in SHM. shcalloc zero-fills, which
         // matches `_tail_pad`'s implicit zero start (no leaked bytes
         // from a previous slot use). Sized from MORLOC_WRITE_BUFFER_BYTES.
         let buf_bytes = read_write_buffer_bytes_env();
         let buf_abs = crate::shm::shcalloc(1, buf_bytes)?;
-        let buf_rel = crate::shm::abs2rel(buf_abs)?;
+        let buf_rel = pending.hold(crate::shm::abs2rel(buf_abs)?);
         // SHM-resident sub-packet entry array, shared across all writer
         // pools so the final footer at @close reflects every flush
         // regardless of which pool emitted it. Initial cap is small and
@@ -3341,18 +3376,18 @@ fn init_ostream_on_locked_fd(
         let idx_buf_bytes = (idx_cap_initial as usize)
             * std::mem::size_of::<morloc_runtime_types::packet::SubpacketEntry>();
         let idx_buf_abs = crate::shm::shcalloc(1, idx_buf_bytes)?;
-        let idx_buf_rel = crate::shm::abs2rel(idx_buf_abs)?;
+        let idx_buf_rel = pending.hold(crate::shm::abs2rel(idx_buf_abs)?);
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_OSTREAM;
             let (dev, ino) = file_identity(fd);
             (*mp).file_dev = dev;
             (*mp).file_ino = ino;
-            (*mp).file_path = slot_owns(path_rel);
+            (*mp).file_path = pending.own(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = slot_owns(schema_rel);
+            (*mp).schema_str = pending.own(schema_rel);
             (*mp).schema_str_len = schema_str.len() as u32;
-            (*mp).subpacket_entries = slot_owns(idx_buf_rel);
+            (*mp).subpacket_entries = pending.own(idx_buf_rel);
             (*mp).subpacket_entries_len = 0;
             (*mp).subpacket_entries_cap = idx_cap_initial;
             (*mp).body_start = body_start;
@@ -3364,7 +3399,7 @@ fn init_ostream_on_locked_fd(
             // Write buffer fields. index_cap is set lazily on first
             // @write -- elem_width isn't known until then since the
             // schema-string parse happens below.
-            (*mp).write_buffer = slot_owns(buf_rel);
+            (*mp).write_buffer = pending.own(buf_rel);
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;
@@ -6102,11 +6137,12 @@ pub fn shared_append_to_path(
         }
     };
     let publish_result = (|| -> Result<u64, MorlocError> {
-        let path_rel = shm_copy_bytes(path.as_bytes())?;
-        let schema_rel = shm_copy_bytes(schema_str_clone.as_bytes())?;
+        let mut pending = Unpublished::default();
+        let path_rel = pending.hold(shm_copy_bytes(path.as_bytes())?);
+        let schema_rel = pending.hold(shm_copy_bytes(schema_str_clone.as_bytes())?);
         let buf_bytes = read_write_buffer_bytes_env();
         let buf_abs = crate::shm::shcalloc(1, buf_bytes)?;
-        let buf_rel = crate::shm::abs2rel(buf_abs)?;
+        let buf_rel = pending.hold(crate::shm::abs2rel(buf_abs)?);
         let mut diag = StreamDiag::new();
         diag.subpacket_count = subpacket_entries_clone.len() as u64;
         diag.element_count = element_count_at_resume;
@@ -6123,7 +6159,7 @@ pub fn shared_append_to_path(
         let idx_buf_bytes = (idx_cap_initial as usize)
             * std::mem::size_of::<morloc_runtime_types::packet::SubpacketEntry>();
         let idx_buf_abs = crate::shm::shcalloc(1, idx_buf_bytes)?;
-        let idx_buf_rel = crate::shm::abs2rel(idx_buf_abs)?;
+        let idx_buf_rel = pending.hold(crate::shm::abs2rel(idx_buf_abs)?);
         if preseed_len > 0 {
             unsafe {
                 std::ptr::copy_nonoverlapping(
@@ -6139,11 +6175,11 @@ pub fn shared_append_to_path(
             let (dev, ino) = file_identity(fd);
             (*mp).file_dev = dev;
             (*mp).file_ino = ino;
-            (*mp).file_path = slot_owns(path_rel);
+            (*mp).file_path = pending.own(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = slot_owns(schema_rel);
+            (*mp).schema_str = pending.own(schema_rel);
             (*mp).schema_str_len = schema_str_clone.len() as u32;
-            (*mp).subpacket_entries = slot_owns(idx_buf_rel);
+            (*mp).subpacket_entries = pending.own(idx_buf_rel);
             (*mp).subpacket_entries_len = preseed_len as u64;
             (*mp).subpacket_entries_cap = idx_cap_initial;
             (*mp).body_start = body_start;
@@ -6152,7 +6188,7 @@ pub fn shared_append_to_path(
             (*mp).element_count = element_count_at_resume;
             (*mp).compression_level = 0;
             (*mp).diag = diag;
-            (*mp).write_buffer = slot_owns(buf_rel);
+            (*mp).write_buffer = pending.own(buf_rel);
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;
@@ -10167,10 +10203,11 @@ pub fn shared_open_ifile_recovered(
     };
 
     let publish_result = (|| -> Result<u64, MorlocError> {
-        let path_rel = shm_copy_bytes(path.as_bytes())?;
-        let schema_rel = shm_copy_bytes(parsed.schema_str.as_bytes())?;
+        let mut pending = Unpublished::default();
+        let path_rel = pending.hold(shm_copy_bytes(path.as_bytes())?);
+        let schema_rel = pending.hold(shm_copy_bytes(parsed.schema_str.as_bytes())?);
         let idx_rel = if !subpacket_entries.is_empty() {
-            shm_copy_entries_slice(&subpacket_entries)?
+            pending.hold(shm_copy_entries_slice(&subpacket_entries)?)
         } else {
             shm_types_crate::RELNULL
         };
@@ -10179,11 +10216,11 @@ pub fn shared_open_ifile_recovered(
             (*mp).kind = MLC_KIND_IFILE;
             (*mp).file_dev = file_dev;
             (*mp).file_ino = file_ino;
-            (*mp).file_path = slot_owns(path_rel);
+            (*mp).file_path = pending.own(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = slot_owns(schema_rel);
+            (*mp).schema_str = pending.own(schema_rel);
             (*mp).schema_str_len = parsed.schema_str.len() as u32;
-            (*mp).subpacket_entries = slot_owns(idx_rel);
+            (*mp).subpacket_entries = pending.own(idx_rel);
             (*mp).subpacket_entries_len = subpacket_entries.len() as u64;
             (*mp).subpacket_entries_cap = 0;
             (*mp).body_start = parsed.body_start;
@@ -12847,6 +12884,23 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_publish_frees_the_blocks_the_slot_never_took() {
+        let _shm = crate::own_test_registry();
+        let live = || shm::live_block_stats(&mut [0usize; 64]).0;
+        let before = live();
+        let taken;
+        {
+            let mut pending = Unpublished::default();
+            let _left = pending.hold(shm_copy_bytes(b"left behind").unwrap());
+            let held = pending.hold(shm_copy_bytes(b"taken").unwrap());
+            taken = pending.own(held);
+        }
+        assert_eq!(live(), before + 1);
+        shm::shfree(shm::rel2abs(taken).unwrap()).unwrap();
+        shm::forget_held_references();
+    }
+
+    #[test]
     fn loading_a_stream_file_as_another_type_is_refused() {
         let _shm = crate::own_test_registry();
         let dir = std::env::temp_dir().join(format!("morloc_stream_test_{}_retype", std::process::id()));
@@ -13019,9 +13073,10 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
 
     let (slot_idx, slot, guard) = allocate_slot_cas()?;
     let publish = (|| -> Result<u64, MorlocError> {
-        let schema_rel = shm_copy_bytes(schema_str.as_bytes())?;
+        let mut pending = Unpublished::default();
+        let schema_rel = pending.hold(shm_copy_bytes(schema_str.as_bytes())?);
         let buf_abs = crate::shm::shcalloc(1, read_write_buffer_bytes_env())?;
-        let buf_rel = crate::shm::abs2rel(buf_abs)?;
+        let buf_rel = pending.hold(crate::shm::abs2rel(buf_abs)?);
         let block_abs = crate::shm::shcalloc(1, std::mem::size_of::<ChannelBlock>())?;
         unsafe {
             let b = block_abs as *mut ChannelBlock;
@@ -13030,15 +13085,15 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
             (*b).tail = shm_types_crate::RELNULL;
             (*b).fail_msg = shm_types_crate::RELNULL;
         }
-        let block_rel = crate::shm::abs2rel(block_abs)?;
+        let block_rel = pending.hold(crate::shm::abs2rel(block_abs)?);
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_CHANNEL;
             (*mp).file_path = shm_types_crate::RELNULL;
             (*mp).file_path_len = 0;
-            (*mp).schema_str = slot_owns(schema_rel);
+            (*mp).schema_str = pending.own(schema_rel);
             (*mp).schema_str_len = schema_str.len() as u32;
-            (*mp).subpacket_entries = slot_owns(block_rel);
+            (*mp).subpacket_entries = pending.own(block_rel);
             (*mp).subpacket_entries_len = 0;
             (*mp).subpacket_entries_cap = 0;
             (*mp).body_start = 0;
@@ -13047,7 +13102,7 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
             (*mp).element_count = 0;
             (*mp).compression_level = 0;
             (*mp).diag = StreamDiag::new();
-            (*mp).write_buffer = slot_owns(buf_rel);
+            (*mp).write_buffer = pending.own(buf_rel);
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;

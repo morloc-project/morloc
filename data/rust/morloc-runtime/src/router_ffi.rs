@@ -201,6 +201,30 @@ pub(crate) unsafe fn router_init_explicit(
 // Async-signal-safe (only `libc::kill`, no allocation/free/stdio), so it is safe
 // to call from a signal handler; the serving front-end has no other shutdown
 // path (it never returns), so this is how children are told to exit gracefully.
+/// `pid`'s wait status if it has exited (or no status when it is not
+/// waitable), with `slot` cleared first: the child is reaped only after no
+/// signal sent through `slot` can reach its pid, which the kernel does not
+/// reissue until the reap.
+unsafe fn take_if_exited(slot: &std::sync::atomic::AtomicI32, pid: i32) -> Option<Result<i32, ()>> {
+    let mut info: libc::siginfo_t = std::mem::zeroed();
+    let rc = loop {
+        let rc = libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT);
+        if rc == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            break rc;
+        }
+    };
+    if rc == 0 && info.si_signo != libc::SIGCHLD {
+        return None;
+    }
+    let _ = slot.compare_exchange(pid, 0, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
+    if rc != 0 {
+        return Some(Err(()));
+    }
+    let mut status = 0;
+    while libc::waitpid(pid, &mut status, 0) < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {}
+    Some(Ok(status))
+}
+
 pub(crate) unsafe fn router_terminate_children(router: *mut Router) {
     if router.is_null() {
         return;
@@ -419,10 +443,8 @@ pub(crate) unsafe fn router_start_program(
         libc::nanosleep(&ts, ptr::null_mut());
 
         // Check if child died during startup
-        let mut status: i32 = 0;
-        let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
-        if result == pid {
-            (*prog).daemon_pid.store(0, std::sync::atomic::Ordering::SeqCst);
+        if let Some(waited) = take_if_exited(&(*prog).daemon_pid, pid) {
+            let status = waited.unwrap_or(0);
             let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
             let msg = startup_death_msg(&prog_name, status, &stderr_log);
             set_errmsg(errmsg, &MorlocError::Other(msg));
@@ -454,10 +476,8 @@ pub(crate) unsafe fn router_start_program(
 
     if !connected {
         // Final check: did the daemon die?
-        let mut status: i32 = 0;
-        let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
-        if result == pid {
-            (*prog).daemon_pid.store(0, std::sync::atomic::Ordering::SeqCst);
+        if let Some(waited) = take_if_exited(&(*prog).daemon_pid, pid) {
+            let status = waited.unwrap_or(0);
             let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
             let msg = startup_death_msg(&prog_name, status, &stderr_log);
             set_errmsg(errmsg, &MorlocError::Other(msg));
@@ -507,23 +527,18 @@ pub(crate) unsafe fn router_forward(
     // Check if a previously-started daemon has exited (crash recovery)
     let pid = (*prog).daemon_pid.load(std::sync::atomic::Ordering::SeqCst);
     if pid > 0 {
-        let mut status: i32 = 0;
-        let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
-        if result == pid || result < 0 {
+        if let Some(waited) = take_if_exited(&(*prog).daemon_pid, pid) {
             let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
-            // result < 0 means waitpid itself failed (e.g. ECHILD: the child was
-            // already reaped elsewhere), so `status` is unset -- don't decode it
-            // as an exit code.
-            let reason = if result < 0 {
-                "is no longer waitable".to_string()
-            } else {
-                describe_wait_status(status)
+            let reason = match waited {
+                Ok(status) => describe_wait_status(status),
+                // The child was already reaped elsewhere, so there is no
+                // status to decode.
+                Err(()) => "is no longer waitable".to_string(),
             };
             eprintln!(
                 "morloc-router: daemon for '{}' {}, will restart",
                 prog_name, reason
             );
-            (*prog).daemon_pid.store(0, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -850,6 +865,33 @@ pub(crate) unsafe fn router_build_discovery(router: *mut Router) -> *mut c_char 
 #[cfg(test)]
 mod forward_tests {
     use super::*;
+
+    #[test]
+    fn an_exited_daemon_leaves_its_slot_before_it_is_reaped() {
+        let child = std::process::Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap();
+        let pid = child.id() as i32;
+        let slot = std::sync::atomic::AtomicI32::new(pid);
+        let waited = loop {
+            if let Some(w) = unsafe { take_if_exited(&slot, pid) } {
+                break w;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(waited.map(|s| libc::WEXITSTATUS(s)), Ok(3));
+        assert_eq!(slot.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(unsafe { take_if_exited(&slot, pid) }.is_some_and(|w| w.is_err()));
+    }
+
+    #[test]
+    fn a_running_daemon_keeps_its_slot() {
+        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let pid = child.id() as i32;
+        let slot = std::sync::atomic::AtomicI32::new(pid);
+        assert!(unsafe { take_if_exited(&slot, pid) }.is_none());
+        assert_eq!(slot.load(std::sync::atomic::Ordering::SeqCst), pid);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 
     // A forwarded call carries its args as the text they arrived in.
     #[test]

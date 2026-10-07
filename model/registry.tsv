@@ -62,6 +62,7 @@ morloc-runtime/cli.rs::-::SPOOLED	reset
 morloc-runtime/crash.rs::-::LANG	startup		
 morloc-runtime/crash.rs::-::FRAME_FN	startup		
 morloc-runtime/crash.rs::-::PENDING	counter		
+morloc-runtime/daemon_ffi.rs::-::ENDPOINTS	startup		
 morloc-runtime/daemon_ffi.rs::-::SHUTDOWN_REQUESTED	counter		
 morloc-runtime/daemon_ffi.rs::-::SHUTDOWN_ESCALATED	counter		
 morloc-runtime/daemon_ffi.rs::-::POOLS_STOPPED	counter		

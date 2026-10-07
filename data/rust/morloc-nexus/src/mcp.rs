@@ -156,9 +156,6 @@ const DAEMON_ERROR_INTERNAL: i32 = 5;
 /// crate deliberately does not depend on that one.
 const EVAL_HEAP_LIMIT: &str = "-M2G";
 
-/// GHC's `EXIT_HEAPOVERFLOW`: the exit status of a child stopped by
-/// `EVAL_HEAP_LIMIT`.
-const EXIT_HEAPOVERFLOW: i32 = 251;
 
 // JSON-RPC 2.0 error codes.
 const JSONRPC_PARSE_ERROR: i32 = -32700;
@@ -2079,7 +2076,7 @@ fn morloc_on_path() -> bool {
 /// in eval cannot take down the front-end). `--eval-sandbox` bans IO intrinsics;
 /// `--eval-allowed-modules` bounds imports (empty => none). Returns eval's stdout
 /// on success, else its stderr.
-fn frontend_eval(expr: &str, fe: &Frontend) -> Result<String, String> {
+fn frontend_eval(expr: &str, fe: &Frontend) -> Result<String, (u16, String)> {
     let allow = fe.eval_allow.clone().unwrap_or_default();
     let mut cmd = std::process::Command::new("morloc");
     // Bound the child on both axes a runaway expression can exhaust
@@ -2115,32 +2112,44 @@ fn frontend_eval(expr: &str, fe: &Frontend) -> Result<String, String> {
     let out = match output_within(cmd, wall) {
         Ok(Some(out)) => out,
         Ok(None) => {
-            return Err(format!(
+            return Err((408, format!(
                 "eval ran past its time limit ({} s of wall time) and was stopped",
                 cpu_secs as u64 * EVAL_WALL_PER_CPU
-            ))
+            )))
         }
         Err(e) => {
-            return Err(format!(
+            return Err((500, format!(
                 "failed to run eval: {} (the eval capability requires the `morloc` \
                  compiler on PATH in the serving environment)",
                 e
-            ))
+            )))
         }
     };
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
-    } else if out.status.code() == Some(EXIT_HEAPOVERFLOW) {
+        return Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string());
+    }
+    Err(eval_failure_response(&out, cpu_secs))
+}
+
+/// The HTTP status and message of a failed eval child.
+fn eval_failure_response(out: &std::process::Output, cpu_secs: i32) -> (u16, String) {
+    use morloc_runtime_types::eval_status::{eval_failure, EvalFailure};
+    use std::os::unix::process::ExitStatusExt;
+    let said = || {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let text = if !stderr.trim().is_empty() { stderr } else { stdout };
+        if text.trim().is_empty() { "eval failed".to_string() } else { text.trim().to_string() }
+    };
+    match eval_failure(out.status.into_raw()) {
+        EvalFailure::Timeout => (408, format!("eval exceeded its CPU budget ({} s)", cpu_secs)),
         // The child's own advice ("use +RTS -M<size>") is useless to an HTTP
         // caller, who cannot set it; say who imposed the ceiling instead.
-        Err(format!(
-            "eval exceeded the server's heap ceiling ({})",
-            EVAL_HEAP_LIMIT.trim_start_matches("-M")
-        ))
-    } else {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let err = err.trim();
-        Err(if err.is_empty() { "eval failed".to_string() } else { err.to_string() })
+        EvalFailure::HeapCeiling => {
+            (500, format!("eval exceeded the server's heap ceiling ({})", EVAL_HEAP_LIMIT.trim_start_matches("-M")))
+        }
+        EvalFailure::Internal | EvalFailure::CouldNotStart => (500, said()),
+        EvalFailure::Rejected => (400, said()),
     }
 }
 
@@ -2256,9 +2265,9 @@ fn frontend_eval_api(req: &HttpRequest, fe: &Frontend, keep_alive: bool) -> Vec<
             let body = json!({ "status": "ok", "result": out }).to_string();
             http_json(200, body.as_bytes(), keep_alive)
         }
-        Err(message) => {
+        Err((status, message)) => {
             let body = json!({ "status": "error", "error": message }).to_string();
-            http_json(500, body.as_bytes(), keep_alive)
+            http_json(status, body.as_bytes(), keep_alive)
         }
     }
 }
@@ -2438,7 +2447,7 @@ fn frontend_tools_call(id: Value, msg: &RpcMessage, fe: &Frontend) -> Value {
         };
         return match frontend_eval(&expr, fe) {
             Ok(out) => result_response(id, json!({ "content": [ { "type": "text", "text": out } ] })),
-            Err(message) => result_response(
+            Err((_, message)) => result_response(
                 id,
                 json!({ "content": [ { "type": "text", "text": message } ], "isError": true }),
             ),
@@ -2551,6 +2560,20 @@ fn http_binary_response(status: u16, content_type: &str, body: &[u8], keep_alive
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_rejected_expression_is_a_bad_request_and_a_crash_is_an_internal_error() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |raw: i32, stderr: &str| std::process::Output {
+            status: std::process::ExitStatus::from_raw(raw),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        assert_eq!(super::eval_failure_response(&out(1 << 8, "type error"), 5), (400, "type error".to_string()));
+        assert_eq!(super::eval_failure_response(&out(70 << 8, "bug"), 5).0, 500);
+        assert_eq!(super::eval_failure_response(&out(libc::SIGSEGV, ""), 5).0, 500);
+        assert_eq!(super::eval_failure_response(&out(libc::SIGXCPU, ""), 5).0, 408);
+    }
+
     use super::*;
     use crate::json_help::RecordField;
     use std::collections::HashSet;

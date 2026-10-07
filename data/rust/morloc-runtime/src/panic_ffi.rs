@@ -39,6 +39,27 @@ pub(crate) fn morloc_install_panic_hook(exit: Option<extern "C" fn() -> !>) {
     install(exit)
 }
 
+// PANIC-1: the hook of another copy of the standard library -- the Rust
+// pool's own, where libmorloc does not share it -- asks for this one's
+// decision. Returns whether the panic may unwind; otherwise reports `line`
+// and ends the process.
+pub(crate) unsafe fn morloc_panic_decide(file: *const u8, file_len: usize, line: *const u8, line_len: usize, fatal: bool) -> bool {
+    use morloc_runtime_types::panic::{decide, report_text, Outcome};
+    let file = std::str::from_utf8(std::slice::from_raw_parts(file, file_len)).unwrap_or("");
+    let line = std::slice::from_raw_parts(line, line_len);
+    match decide(file, fatal, may_unwind) {
+        Outcome::Unwind => {
+            report_text(line);
+            true
+        }
+        Outcome::UnwindQuietly => true,
+        Outcome::Exit => {
+            report_text(line);
+            panic_exit()
+        }
+    }
+}
+
 // PANIC-9: the host says whether a panic at a location is its runtime's.
 pub(crate) fn morloc_set_panic_classifier(classify: Option<extern "C" fn(*const u8, usize) -> bool>) {
     CLASSIFIER.store(classify.map_or(0, |f| f as usize), Ordering::Release);
@@ -260,6 +281,11 @@ mod tests {
 }
 
 mod c_abi {
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_panic_decide(file: *const u8, file_len: usize, line: *const u8, line_len: usize, fatal: bool) -> bool {
+        super::morloc_panic_decide(file, file_len, line, line_len, fatal)
+    }
 
     #[no_mangle]
     pub extern "C" fn morloc_install_panic_hook(exit: Option<extern "C" fn() -> !>) {

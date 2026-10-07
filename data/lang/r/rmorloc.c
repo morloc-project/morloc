@@ -4023,28 +4023,25 @@ SEXP morloc_waitpid(SEXP pid_r) {
 // pid list precisely, so shutdown never SIGKILLs a reaped-and-reused pid.
 // Returns: 0 = still alive; WTERMSIG (>0) = died by signal; -1 = reaped
 // (clean/nonzero exit) or already gone.
+// 0 while worker `pid` runs; 1 once it has ended (reaped here, with any
+// abnormal end reported, or already gone).
 SEXP morloc_reap_worker(SEXP pid_r) {
     pid_t pid = (pid_t)INTEGER(pid_r)[0];
     int status;
     pid_t r = waitpid(pid, &status, WNOHANG);
     if (r == 0) {
-        return ScalarInteger(0);   // still running
+        return ScalarInteger(0);
     }
-    if (r < 0) {
-        return ScalarInteger(-1);  // ECHILD / already reaped
-    }
-    if (WIFSIGNALED(status)) {
+    if (r > 0 && WIFSIGNALED(status)) {
         fprintf(stderr, "morloc R pool: worker %d crashed with signal %d\n",
                 (int)pid, WTERMSIG(status));
         fflush(stderr);
-        return ScalarInteger(WTERMSIG(status));
-    }
-    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+    } else if (r > 0 && WIFEXITED(status) && WEXITSTATUS(status) != 0) {
         fprintf(stderr, "morloc R pool: worker %d exited with status %d\n",
                 (int)pid, WEXITSTATUS(status));
         fflush(stderr);
     }
-    return ScalarInteger(-1);      // reaped
+    return ScalarInteger(1);
 }
 
 SEXP morloc_waitpid_blocking(SEXP pid_r) {

@@ -14,13 +14,14 @@ exits with it only when a panic ended it.
 
 ### PANIC-1 A panic ends its process unless a catch scope holds it
 Status: implemented
-Checked by: a_panic_outside_a_catch_scope_exits_with_the_internal_error_status, a_panic_inside_a_catch_scope_reaches_the_catch, a_panic_while_unwinding_exits_with_the_internal_error_status, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_in_a_forked_child_leaves_the_parents_run_alone, every_host_installs_the_panic_hook, tla:PanicExit, tla:PanicExit_hook_exits_in_scope.bug
+Checked by: the_pools_own_hook_ends_the_process_on_a_panic_outside_a_catch, the_pools_own_hook_lets_a_panic_in_a_host_scope_unwind, a_panic_outside_a_catch_scope_exits_with_the_internal_error_status, a_panic_inside_a_catch_scope_reaches_the_catch, a_panic_while_unwinding_exits_with_the_internal_error_status, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_in_a_forked_child_leaves_the_parents_run_alone, every_host_installs_the_panic_hook, tla:PanicExit, tla:PanicExit_hook_exits_in_scope.bug
 
 Each copy of the Rust standard library installs one hook when it is first
 entered: the nexus at start, libmorloc when its host starts (the nexus,
 the C++ and Rust pools' main, the Python module's initialisation and the R
-library's); the Rust pool shares libmorloc's standard library and so its
-hook. A morloc throw in the Rust pool is a result, not a panic: it unwinds
+library's); the Rust pool, whose standard library is its own wherever it
+does not share libmorloc's, also installs one in its own that takes
+libmorloc's decision. A morloc throw in the Rust pool is a result, not a panic: it unwinds
 without the hook. The hook formats its report into a fixed
 buffer and writes it with write(2); naming the thread, or a backtrace when
 one is asked for, may allocate. If the panicking thread is inside a catch

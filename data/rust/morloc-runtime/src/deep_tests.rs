@@ -380,13 +380,17 @@ mod tests {
             }
             // Four times the depth must not cost far more than four times
             // the time: the load scans its text once.
+            // The fastest of several loads: contention only ever adds time.
             let time = |d: usize| {
                 let text = ll_json(d);
-                let t = std::time::Instant::now();
-                for _ in 0..3 {
-                    crate::json::read_json_with_schema(&text, &schema).unwrap();
-                }
-                t.elapsed()
+                (0..5)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        crate::json::read_json_with_schema(&text, &schema).unwrap();
+                        t.elapsed()
+                    })
+                    .min()
+                    .unwrap()
             };
             let small = time(20_000);
             let large = time(80_000);
@@ -416,14 +420,18 @@ mod tests {
             }
             // Four times the depth must not cost far more than four times
             // the time.
+            // The fastest of several writes: contention only ever adds time.
             let time = |d: usize| {
                 let (root, schema) = build_ll(d);
-                let t = std::time::Instant::now();
-                for _ in 0..3 {
-                    let mut w: Vec<u8> = Vec::new();
-                    crate::voidstar::write_flat_to_writer(&mut w, root, &schema).unwrap();
-                }
-                t.elapsed()
+                (0..5)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        let mut w: Vec<u8> = Vec::new();
+                        crate::voidstar::write_flat_to_writer(&mut w, root, &schema).unwrap();
+                        t.elapsed()
+                    })
+                    .min()
+                    .unwrap()
             };
             let small = time(20_000);
             let large = time(80_000);

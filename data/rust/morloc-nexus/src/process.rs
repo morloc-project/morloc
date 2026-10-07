@@ -144,6 +144,7 @@ extern "C" {
     fn morloc_take_noted_child_exit(pid: libc::c_int, since: u64, status: *mut libc::c_int) -> libc::c_int;
     fn morloc_stop_child_groups();
     fn morloc_claim_exit() -> bool;
+    fn morloc_daemon_remove_endpoints();
     fn morloc_remove_leases();
     fn morloc_reclaim_all();
 }
@@ -575,6 +576,8 @@ fn stop_everything() {
         }
     }
     unsafe {
+        // DAEMON-10
+        morloc_daemon_remove_endpoints();
         morloc_stop_child_groups();
         crate::stop_frontend_children();
         sweep_shm_segments();
@@ -919,6 +922,8 @@ fn teardown(exit_code: i32, unmap: bool) -> ! {
         park_until_exit();
     }
     EXIT_CODE.store(exit_code, Ordering::SeqCst);
+    // DAEMON-10
+    unsafe { morloc_daemon_remove_endpoints() };
 
     // A successful run completes its streamed stdout (a no-op when the
     // result printer already did). A failed run leaves it unterminated so

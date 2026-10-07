@@ -1526,6 +1526,8 @@ bool morloc_daemon_worker_panicked(void);
 void morloc_daemon_fail(void);
 void morloc_install_panic_hook(void (*exit_fn)(void));
 void morloc_set_panic_classifier(bool (*classify)(const uint8_t* file, size_t len));
+void morloc_daemon_remove_endpoints(void);
+bool morloc_panic_decide(const uint8_t* file, size_t file_len, const uint8_t* line, size_t line_len, bool fatal);
 uint8_t morloc_catch_scope(uint8_t kind);
 void morloc_panic_caught(void);
 const char* morloc_lifeline_child_env(int* read_fd);

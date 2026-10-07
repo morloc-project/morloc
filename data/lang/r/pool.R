@@ -531,11 +531,18 @@ main <- function(socket_path, tmpdir, shm_basename) {
   spawn_worker <- function() {
     pid <- morloc_fork()
     if (pid == 0L) {
-      listen_fd <- morloc_worker_listener(daemon)
-      morloc_close_fd(wakeup[1L])  # child doesn't read the wake-up pipe
-      morloc_close_fd(life[2L])    # nor hold the main process's lifeline
-      mlc_load_user_sources()      # load user sources post-fork
-      worker_loop(listen_fd, life[1L])
+      # A worker never unwinds into main's frames, whose exit handler would
+      # kill its siblings: an error that reaches here ends the worker alone.
+      tryCatch({
+        listen_fd <- morloc_worker_listener(daemon)
+        morloc_close_fd(wakeup[1L])  # child doesn't read the wake-up pipe
+        morloc_close_fd(life[2L])    # nor hold the main process's lifeline
+        mlc_load_user_sources()      # load user sources post-fork
+        worker_loop(listen_fd, life[1L])
+      }, error = function(e) {
+        cat(paste0("morloc R pool worker: ", conditionMessage(e), "\n"), file = stderr())
+        morloc_exit(70L)
+      }, interrupt = function(e) morloc_exit(70L))
       morloc_exit(0L)
     }
     pid

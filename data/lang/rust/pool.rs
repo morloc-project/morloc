@@ -81,6 +81,7 @@ fn main() {
     }
 
     rustmorloc::install_crash_handler();
+    rustmorloc::install_panic_hook();
     // PANIC-9
     rustmorloc::register_pool_files(&[file!(), concat!(env!("CARGO_MANIFEST_DIR"), "/", file!())], MLC_USER_FILES, MLC_USER_LINES);
     unsafe { morloc_set_panic_classifier(Some(mlc_classify_panic)) };

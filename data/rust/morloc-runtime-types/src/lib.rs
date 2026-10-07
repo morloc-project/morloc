@@ -36,6 +36,7 @@ pub mod stream_handle;
 pub mod stdio_proto;
 pub mod width;
 pub mod slice;
+pub mod eval_status;
 #[cfg(test)]
 mod dispatch_guard;
 

@@ -64,6 +64,7 @@ pub use arrow_schema;
 // ---------------------------------------------------------------------------
 extern "C" {
     fn morloc_catch_scope(kind: u8) -> u8;
+    fn morloc_panic_decide(file: *const u8, file_len: usize, line: *const u8, line_len: usize, fatal: bool) -> bool;
     fn morloc_panic_caught();
     fn morloc_log_next_id() -> u64;
     fn morloc_log_emit(tmpl: *const c_char, group: *const c_char,
@@ -980,6 +981,19 @@ unsafe extern "C" fn current_frame(len: *mut usize) -> *const c_char {
 }
 
 /// Report a fatal signal with the executing manifold, then die of it.
+/// PANIC-1: a hook in this binary's own standard library that takes
+/// libmorloc's decision, for a platform where the pool does not share
+/// libmorloc's standard library and so not the hook libmorloc installs.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let file = info.location().map(|l| l.file()).unwrap_or("");
+        let line = morloc_runtime_types::panic::Report::of(info);
+        let fatal = morloc_runtime_types::panic::fatal_marked();
+        let line = line.as_bytes();
+        unsafe { morloc_panic_decide(file.as_ptr(), file.len(), line.as_ptr(), line.len(), fatal) };
+    }));
+}
+
 pub fn install_crash_handler() {
     extern "C" {
         fn morloc_install_crash_handler(
@@ -4116,6 +4130,39 @@ mod runtime_failure_tests {
         let buf = [0u8; 8];
         let caught = std::panic::catch_unwind(|| unsafe { resolve(0, 64, MorlocSpace::payload(buf.as_ptr(), buf.len())) });
         assert!(panic_message(caught.unwrap_err().as_ref()).contains("runs past"));
+    }
+
+    #[test]
+    fn the_pools_own_hook_ends_the_process_on_a_panic_outside_a_catch() {
+        assert_eq!(status_of_child("child_panics_under_the_pools_hook"), PANIC_EXIT_STATUS);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_panics_under_the_pools_hook() {
+        in_child(|| {
+            install_panic_hook();
+            let _ = std::panic::catch_unwind(|| interweave_strings(&[], &["x"]));
+        });
+    }
+
+    #[test]
+    fn the_pools_own_hook_lets_a_panic_in_a_host_scope_unwind() {
+        assert_eq!(status_of_child("child_panics_in_a_host_scope_under_the_pools_hook"), 42);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_panics_in_a_host_scope_under_the_pools_hook() {
+        in_child(|| {
+            install_panic_hook();
+            let outer = unsafe { morloc_catch_scope(MORLOC_SCOPE_HOST) };
+            let caught = std::panic::catch_unwind(|| panic!("user")).is_err();
+            unsafe { morloc_catch_scope(outer) };
+            if caught {
+                unsafe { libc::_exit(42) };
+            }
+        });
     }
 
     #[test]

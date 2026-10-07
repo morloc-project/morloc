@@ -25,6 +25,52 @@ static SHUTDOWN_ESCALATED: AtomicBool = AtomicBool::new(false);
 static POOLS_STOPPED: AtomicBool = AtomicBool::new(false);
 static EXIT_CLAIMED: AtomicBool = AtomicBool::new(false);
 
+// DAEMON-10: the socket and port file this daemon made, by path and identity.
+static ENDPOINTS: [Endpoint; 2] = [const { Endpoint::new() }; 2];
+const SOCKET_ENDPOINT: usize = 0;
+const PORT_FILE_ENDPOINT: usize = 1;
+
+struct Endpoint {
+    path: std::sync::atomic::AtomicPtr<c_char>,
+    dev: std::sync::atomic::AtomicU64,
+    ino: std::sync::atomic::AtomicU64,
+}
+
+impl Endpoint {
+    const fn new() -> Endpoint {
+        Endpoint {
+            path: std::sync::atomic::AtomicPtr::new(ptr::null_mut()),
+            dev: std::sync::atomic::AtomicU64::new(0),
+            ino: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+unsafe fn identity(path: *const c_char) -> Option<(u64, u64)> {
+    let mut st: libc::stat = std::mem::zeroed();
+    (libc::lstat(path, &mut st) == 0).then_some((st.st_dev as u64, st.st_ino as u64))
+}
+
+// DAEMON-10: `path` must outlive the process.
+unsafe fn record_endpoint(which: usize, path: *const c_char) {
+    if let Some((dev, ino)) = identity(path) {
+        let e = &ENDPOINTS[which];
+        e.dev.store(dev, Ordering::SeqCst);
+        e.ino.store(ino, Ordering::SeqCst);
+        e.path.store(path as *mut c_char, Ordering::SeqCst);
+    }
+}
+
+// DAEMON-10: callable from a signal handler.
+pub(crate) unsafe fn morloc_daemon_remove_endpoints() {
+    for e in &ENDPOINTS {
+        let path = e.path.swap(ptr::null_mut(), Ordering::SeqCst);
+        if !path.is_null() && identity(path) == Some((e.dev.load(Ordering::SeqCst), e.ino.load(Ordering::SeqCst))) {
+            libc::unlink(path);
+        }
+    }
+}
+
 // DAEMON-6: one of the watchdog and the normal exit ends the process.
 pub(crate) fn morloc_claim_exit() -> bool {
     !EXIT_CLAIMED.swap(true, Ordering::SeqCst)
@@ -1167,10 +1213,6 @@ const EVAL_HEAP_LIMIT: &str = "-M2G";
 /// has to outlast a descheduled handler thread.
 const NOTED_EXIT_POLLS: usize = 100;
 
-/// GHC's `EXIT_HEAPOVERFLOW`: the exit status of a child stopped by
-/// `EVAL_HEAP_LIMIT`.
-const EXIT_HEAPOVERFLOW: i32 = 251;
-
 /// The RTS block bounding a forked `morloc`'s heap, as argv entries. The child
 /// runtime consumes and strips `+RTS ... -RTS` before the program sees argv, so
 /// it can sit anywhere; it goes first, keeping it clear of the expression.
@@ -1438,84 +1480,45 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
 }
 
 fn classify_failed_command(status: libc::c_int, subcmd: &str, stdout_buf: &[u8], stderr_buf: &[u8]) -> (String, i32) {
-    let exited_with = |code: i32| libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == code;
-    if libc::WIFSIGNALED(status) {
-        let sig = libc::WTERMSIG(status);
-        if sig == libc::SIGXCPU {
-            (
-                format!(
-                    "morloc {} exceeded CPU budget ({}s); see --eval-timeout",
-                    subcmd,
-                    G_EVAL_TIMEOUT.load(Ordering::Relaxed),
-                ),
-                DAEMON_ERROR_TIMEOUT,
-            )
-        } else if !stderr_buf.is_empty() {
-            (
-                String::from_utf8_lossy(stderr_buf).into_owned(),
-                DAEMON_ERROR_INTERNAL,
-            )
-        } else {
-            (
-                format!("morloc {} killed by signal {}", subcmd, sig),
-                DAEMON_ERROR_INTERNAL,
-            )
-        }
-    } else if exited_with(EXIT_HEAPOVERFLOW) {
+    use morloc_runtime_types::eval_status::{eval_failure, EvalFailure};
+    let stderr = String::from_utf8_lossy(stderr_buf);
+    match eval_failure(status) {
+        EvalFailure::Timeout => (
+            format!("morloc {} exceeded CPU budget ({}s); see --eval-timeout", subcmd, G_EVAL_TIMEOUT.load(Ordering::Relaxed)),
+            DAEMON_ERROR_TIMEOUT,
+        ),
         // The child's own advice ("use +RTS -M<size>") is useless to an
         // HTTP caller, who cannot set it; say who imposed the ceiling.
-        (
-            format!(
-                "morloc {} exceeded the server's heap ceiling ({})",
-                subcmd,
-                EVAL_HEAP_LIMIT.trim_start_matches("-M"),
-            ),
+        EvalFailure::HeapCeiling => (
+            format!("morloc {} exceeded the server's heap ceiling ({})", subcmd, EVAL_HEAP_LIMIT.trim_start_matches("-M")),
             DAEMON_ERROR_INTERNAL,
-        )
-    } else if exited_with(morloc_runtime_types::panic::PANIC_EXIT_STATUS) {
+        ),
+        EvalFailure::Internal if libc::WIFSIGNALED(status) => {
+            if stderr.is_empty() {
+                (format!("morloc {} killed by signal {}", subcmd, libc::WTERMSIG(status)), DAEMON_ERROR_INTERNAL)
+            } else {
+                (stderr.into_owned(), DAEMON_ERROR_INTERNAL)
+            }
+        }
         // PANIC-1
-        (
-            format!(
-                "morloc {} failed with an internal error: {}",
-                subcmd,
-                String::from_utf8_lossy(stderr_buf).trim()
-            ),
+        EvalFailure::Internal => (
+            format!("morloc {} failed with an internal error: {}", subcmd, stderr.trim()),
             DAEMON_ERROR_INTERNAL,
-        )
-    } else if exited_with(126) || exited_with(127) {
+        ),
         // DAEMON-6: the wrapper could not start `morloc`.
-        (
-            format!(
-                "Failed to start morloc {}: {}",
-                subcmd,
-                String::from_utf8_lossy(stderr_buf).trim()
-            ),
-            DAEMON_ERROR_INTERNAL,
-        )
-    } else if !stderr_buf.is_empty() {
-        (
-            String::from_utf8_lossy(stderr_buf).into_owned(),
-            DAEMON_ERROR_BAD_REQUEST,
-        )
-    } else if !stdout_buf.is_empty() {
+        EvalFailure::CouldNotStart => (format!("Failed to start morloc {}: {}", subcmd, stderr.trim()), DAEMON_ERROR_INTERNAL),
+        EvalFailure::Rejected if !stderr.is_empty() => (stderr.into_owned(), DAEMON_ERROR_BAD_REQUEST),
         // A rejected expression is a diagnostic, and the compiler prints
         // its diagnostics on stdout. Handing back the exit code alone
         // would tell the caller their expression failed while withholding
         // the sentence saying why.
-        (
-            String::from_utf8_lossy(stdout_buf).into_owned(),
-            DAEMON_ERROR_BAD_REQUEST,
-        )
-    } else {
-        let code = if libc::WIFEXITED(status) {
-            libc::WEXITSTATUS(status)
-        } else {
-            -1
-        };
-        (
-            format!("morloc {} exited with code {}", subcmd, code),
-            DAEMON_ERROR_BAD_REQUEST,
-        )
+        EvalFailure::Rejected if !stdout_buf.is_empty() => {
+            (String::from_utf8_lossy(stdout_buf).into_owned(), DAEMON_ERROR_BAD_REQUEST)
+        }
+        EvalFailure::Rejected => {
+            let code = if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) } else { -1 };
+            (format!("morloc {} exited with code {}", subcmd, code), DAEMON_ERROR_BAD_REQUEST)
+        }
     }
 }
 
@@ -3019,6 +3022,7 @@ pub(crate) unsafe fn daemon_run(
             return true;
         }
         libc::listen(sock_fd, libc::SOMAXCONN);
+        record_endpoint(SOCKET_ENDPOINT, (*config).unix_socket_path);
         fds[nfds].fd = sock_fd;
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 0;
@@ -3120,15 +3124,9 @@ pub(crate) unsafe fn daemon_run(
         let path = CStr::from_ptr((*config).port_file_path)
             .to_string_lossy()
             .into_owned();
-        if let Err(e) = write_port_file_atomic(
-            &path,
-            bound_http_port,
-            bound_tcp_port,
-            bound_unix_path.as_deref(),
-        ) {
-            eprintln!("morloc-daemon: failed to write port file {}: {}", path, e);
-            // non-fatal; the stderr ready lines above still convey the
-            // bound ports.
+        match write_port_file_atomic(&path, bound_http_port, bound_tcp_port, bound_unix_path.as_deref()) {
+            Ok(()) => record_endpoint(PORT_FILE_ENDPOINT, (*config).port_file_path),
+            Err(e) => eprintln!("morloc-daemon: failed to write port file {}: {}", path, e),
         }
     }
 
@@ -3216,6 +3214,7 @@ pub(crate) unsafe fn daemon_run(
         if !morloc_claim_exit() {
             return;
         }
+        morloc_daemon_remove_endpoints();
         let code = if WORKER_PANICKED.load(Ordering::SeqCst) { morloc_runtime_types::panic::PANIC_EXIT_STATUS } else { 128 + libc::SIGTERM };
         match emergency {
             Some(exit) => exit(code),
@@ -3228,9 +3227,7 @@ pub(crate) unsafe fn daemon_run(
     for i in 0..nfds {
         libc::close(fds[i].fd);
     }
-    if !(*config).unix_socket_path.is_null() {
-        libc::unlink((*config).unix_socket_path);
-    }
+    morloc_daemon_remove_endpoints();
     // DAEMON-6: a queued request is refused, never started.
     {
         let mut q = ctx.queue.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
@@ -3447,6 +3444,35 @@ extern "C" fn daemon_signal_handler_fn(_sig: i32) {
     // DAEMON-6: a second signal ends the shutdown at once.
     if SHUTDOWN_REQUESTED.swap(true, Ordering::SeqCst) {
         SHUTDOWN_ESCALATED.store(true, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn a_daemon_removes_only_the_endpoint_files_it_made() {
+        let dir = std::env::temp_dir().join(format!("morloc-endpoints-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ours = dir.join("ours.sock");
+        let taken = dir.join("taken.port");
+        std::fs::write(&ours, "").unwrap();
+        std::fs::write(&taken, "first").unwrap();
+        let path = |p: &std::path::Path| -> *const c_char {
+            Box::leak(std::ffi::CString::new(p.to_str().unwrap()).unwrap().into_boxed_c_str()).as_ptr()
+        };
+        unsafe {
+            record_endpoint(SOCKET_ENDPOINT, path(&ours));
+            record_endpoint(PORT_FILE_ENDPOINT, path(&taken));
+        }
+        let replacement = dir.join("replacement");
+        std::fs::write(&replacement, "another daemon's").unwrap();
+        std::fs::rename(&replacement, &taken).unwrap();
+        unsafe { morloc_daemon_remove_endpoints() };
+        assert!(!ours.exists());
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "another daemon's");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -3953,6 +3979,11 @@ mod child_output_tests {
 
 mod c_abi {
     use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_daemon_remove_endpoints() {
+        super::morloc_daemon_remove_endpoints()
+    }
 
     #[no_mangle]
     pub extern "C" fn morloc_claim_exit() -> bool {

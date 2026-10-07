@@ -130,3 +130,12 @@ Each libmorloc C entry point is a shell in its file's private `c_abi`
 module that calls the Rust function of the same name in the file; only
 the C entry points' own callers in other languages, and tests, reach the
 shells.
+
+### DAEMON-10 A daemon removes only the endpoint files it made
+Status: implemented
+Checked by: a_daemon_removes_only_the_endpoint_files_it_made
+
+On any exit -- a clean one, the shutdown watchdog's, a signal's, a panic's
+-- a daemon removes its unix socket and its port file only if the file at
+each path is still the one it created, so a daemon that has since taken
+over the path keeps its own.
