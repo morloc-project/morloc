@@ -1751,13 +1751,17 @@ generateRustVariants es = do
         [] -> return []
       Left msg -> error $ "Rust pool: " ++ T.unpack msg
 
+    -- A function field has no marshalling (as for a generated record), so a
+    -- type holding one is declared without impls.
     makeOne (FV gv (CV cvText), ps, arms) = do
       userMapped <- cscopeDeclaresVariant gv cvText
       arms' <- mapM (\(n, ts) -> (,) n <$> mapM rustFieldType ts) arms
       name <- rustTypeOf (VariantF (FV gv (CV cvText)) ps arms)
+      let hasFun = any (any containsFunF . snd) arms
+          impls box = [RP.printVariantImpls box name arms' | not hasFun]
       return $ if userMapped
-                 then [RP.printVariantImpls RP.userBox name arms']
-                 else [RP.printRustVariant name arms', RP.printVariantImpls RP.recBox name arms']
+                 then impls RP.userBox
+                 else RP.printRustVariant name arms' : impls RP.recBox
 
     cscopeDeclaresVariant :: TVar -> Text -> RustM Bool
     cscopeDeclaresVariant gv cvText = do

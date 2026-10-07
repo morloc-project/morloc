@@ -592,6 +592,12 @@ reduce ai (AnnoS g c (AppS headA es)) = do
       th' <- branch th es'
       el' <- branch el esCopy
       wrapLets g c (concat binds) (AnnoS g c (IfS cond th' el'))
+    -- A throw, applied: its arguments are evaluated, then it throws, at the
+    -- type of the application.
+    AnnoS (Idx ti _) tc (IntrinsicS IntrThrow msg) -> do
+      binds <- concat <$> mapM (fmap fst . bindArg ai) es
+      ix <- newPlainIndex ti
+      wrapLets g c binds (AnnoS (Idx ix (annT g)) tc (IntrinsicS IntrThrow msg))
     _ -> do
       es' <- mapM (reduce ai) es
       return $ case (headA', es') of

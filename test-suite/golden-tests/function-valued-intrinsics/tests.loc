@@ -1,0 +1,56 @@
+-- An intrinsic whose value is a function, applied or passed on: a @throw
+-- at function type (a guard arm, a match fallthrough) and a constructor
+-- field holding a function (issue #71). Arguments are evaluated before the
+-- function is applied, so a failing argument wins over a throwing head.
+module tests
+  ( guardArm
+  , matchArm
+  , boxField
+  , mapPartial
+  , argsFirst
+  , throwHead
+  , throwHeadArgsFirst
+  )
+
+import root
+
+data Rule = Above Int | Bad Str
+
+data Box = Box (Int -> Int)
+
+bad :: Int -> Int
+bad x = @throw "ARG-FAILED"
+
+pick :: Int -> Int -> Bool
+pick n ? n < 0 = @throw "NEG-GUARD"
+       : (\x -> x > n)
+
+rule :: Rule -> Int -> Bool
+rule r = match r
+  | (Above n) = (\x -> x > n)
+  | (Bad e) = (\_ -> False)
+
+unbox :: Box -> Int -> Int
+unbox b = match b
+  | (Box f) = f
+
+guardArm :: Int -> Bool
+guardArm n = pick n 5
+
+matchArm :: Int -> Bool
+matchArm x = rule (Above 2) x
+
+boxField :: Int -> Int
+boxField x = unbox (Box (\y -> y + 1)) x
+
+mapPartial :: Int -> [Bool]
+mapPartial n = map (pick n) [1, 2, 3]
+
+argsFirst :: Int -> Bool
+argsFirst n = pick n (bad n)
+
+throwHead :: Int -> Bool
+throwHead x = (@throw "HEAD-THROWN") x
+
+throwHeadArgsFirst :: Int -> Bool
+throwHeadArgsFirst x = (@throw "HEAD-THROWN") (bad x)

@@ -1752,17 +1752,14 @@ expressPolyExpr
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
 -- Implicit eta-abstraction of a bare function value passed where a function is
--- expected. Skipped for a function-typed COMPUTED THUNK ('LetS'/'EvalS'/
--- 'DoBlockS' -- e.g. a forced effectful generator's result): those are handled
--- by their own value clauses (below), which bind the native closure and let it
--- be applied via 'LocalCallP'. Eta-expanding them instead re-applies the thunk
--- through 'expressPolyApp', which cannot invoke a raw 'LetS'/'EvalS' head.
+-- expected. A computed value ('isComputedValue') is not eta-abstracted: its
+-- own value clause (below) binds the native closure for 'LocalCallP'.
 expressPolyExpr
   findRemote
   parentLang
   (val -> FunT pinputs poutput)
   e@(AnnoS (Idx midx (FunT callInputs _)) (Idx cidx callLang, _) inner)
-    | not (isComputedThunk inner), not (isLocalPartial inner), isLocal = do
+    | not (isComputedValue inner), not (isLocalPartial inner), isLocal = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
             lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map Just callInputs)
@@ -1779,7 +1776,7 @@ expressPolyExpr
               [] -> ManifoldPass lambdaTypedArgs
               _ -> ManifoldPart [Arg i None | i <- ctxIds] lambdaTypedArgs
         mkPolyManifold callLang midx form retapp
-    | not (isComputedThunk inner), not (isLocalPartial inner) = do
+    | not (isComputedValue inner), not (isLocalPartial inner) = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaArgs = [Arg i None | i <- ids]
             lambdaTypedArgs = map (`Arg` Nothing) ids
@@ -2230,12 +2227,16 @@ expressPolyApp callLang (AnnoS g@(Idx gi ft@(FunT _ _)) _ (ExeS (PatCall pat))) 
   in PolyReturn <$> dispatchPatCall callLang gi gi pat inputs out xs fallback
 expressPolyApp _ (AnnoS g _ (ExeS (PatCall pat))) xs =
   return . PolyReturn $ PolyApp (PolyExe g (PatCallP pat)) xs
-expressPolyApp lang f@(AnnoS g@(Idx i _) _ (AppS _ _)) es = do
-  fe <- expressPolyExprWrap lang g f
-  return
-    . PolyLet i fe
-    . PolyReturn
-    $ PolyApp (PolyLetVar g i) es
+-- A function value computed by an application or an intrinsic (a
+-- constructor's field, a throw), applied: bind it, then call it.
+expressPolyApp lang f@(AnnoS g@(Idx i _) _ e) es
+  | isComputedHead e = do
+      fe <- expressPolyExprWrap lang g f
+      return $ bindThenCall i g fe es
+  where
+    isComputedHead (AppS _ _) = True
+    isComputedHead (IntrinsicS _ _) = True
+    isComputedHead _ = False
 expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
   case [j | (Arg j u) <- args, u == v] of
     [j] -> return . PolyReturn $ PolyApp (PolyExe g (localApply g j xs)) xs
@@ -2251,21 +2252,19 @@ expressPolyApp _ (AnnoS g (_, args) (LetBndS v)) xs = do
 -- A function value produced by a runtime effect and applied. A `<-` bind
 -- leaves a forced function value ('EvalS') -- or an inline effectful block
 -- ('DoBlockS') -- in head position. Force/evaluate it, bind the resulting
--- native closure, and call it via 'PolyLetVar' -> 'LocalCallP', mirroring the
--- 'AppS'-head (computed-function) case below. We peel the wrapper and express
+-- native closure, and call it via 'PolyLetVar' -> 'LocalCallP', as the
+-- computed-head case above does. We peel the wrapper and express
 -- its INNER (effect-typed) expression directly, rather than re-expressing the
 -- function-typed wrapper node: the latter re-enters the eta-abstraction path
 -- ('expressPolyExpr' on a bare @FunT@ value), which calls back into
 -- 'expressPolyApp' and loops.
 expressPolyApp lang (AnnoS (Idx i t) (Idx cidx _, _) (EvalS x)) es = do
   x' <- expressPolyExprWrap lang (Idx cidx t) x
-  return . PolyLet i (PolyEval (Idx cidx t) x') . PolyReturn
-    $ PolyApp (PolyLetVar (Idx cidx t) i) es
+  return $ bindThenCall i (Idx cidx t) (PolyEval (Idx cidx t) x') es
 expressPolyApp lang (AnnoS (Idx i t) (Idx cidx _, _) (DoBlockS x)) es = do
   let innerT = case t of EffectT _ inner -> inner; _ -> t
   x' <- expressPolyExprWrap lang (mkIdx x innerT) x
-  return . PolyLet i (PolyDoBlock (Idx cidx t) x') . PolyReturn
-    $ PolyApp (PolyLetVar (Idx cidx t) i) es
+  return $ bindThenCall i (Idx cidx t) (PolyDoBlock (Idx cidx t) x') es
 -- A conditional that yields a function value, applied in head position (e.g. a
 -- let-bound @? c = f : g@ inlined at its single call site). Express each branch
 -- as a function value, bind the resulting conditional closure, and call it via
@@ -2279,8 +2278,7 @@ expressPolyApp _lang (AnnoS (Idx i t) (Idx cidx clang, _) (IfS cond thenE elseE)
   cond' <- expressPolyExprWrap clang (mkIdx cond boolType) cond
   thenE' <- expressPolyExprWrap clang (mkIdx thenE t) thenE
   elseE' <- expressPolyExprWrap clang (mkIdx elseE t) elseE
-  return . PolyLet i (PolyIf cond' thenE' elseE') . PolyReturn
-    $ PolyApp (PolyLetVar (Idx cidx t) i) es
+  return $ bindThenCall i (Idx cidx t) (PolyIf cond' thenE' elseE') es
 expressPolyApp parentLang (AnnoS (Idx i t) _ (CallS v)) xs = do
   (mid, crossLang) <- lookupRecursiveTarget parentLang v
   -- Serial manifolds force thunks before serializing, so strip EffectT from the
@@ -2527,11 +2525,13 @@ isLocalPartial (AppS (AnnoS g _ h) xs)
 isLocalPartial _ = False
 
 -- A computed function value that produces its result through evaluation rather
--- than being a bare callable: a let, a forced thunk, or an inline effectful
--- block. Such values are bound and applied via 'LocalCallP', never
--- eta-abstracted (see the eta clause in 'expressPolyExpr').
-isComputedThunk :: ExprS g One c -> Bool
-isComputedThunk (LetS {}) = True
-isComputedThunk (EvalS {}) = True
-isComputedThunk (DoBlockS {}) = True
-isComputedThunk _ = False
+-- than being a bare callable: a let, a forced thunk, an inline effectful
+-- block, or an intrinsic (a constructor's field, a throw). Such values are
+-- bound and applied via 'LocalCallP', never eta-abstracted (see the eta
+-- clause in 'expressPolyExpr').
+isComputedValue :: ExprS g One c -> Bool
+isComputedValue (LetS {}) = True
+isComputedValue (EvalS {}) = True
+isComputedValue (DoBlockS {}) = True
+isComputedValue (IntrinsicS {}) = True
+isComputedValue _ = False
