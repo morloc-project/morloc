@@ -1,4 +1,4 @@
-module batches (produceBatch, renderBatch, Batch, produceRows, Rows)
+module batches (produceBatch, renderBatch, produceRows)
 
 import root-py
 

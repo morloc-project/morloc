@@ -1,0 +1,15 @@
+-- An internal error in an R pool ends the pool (model/panic.md PANIC-5):
+-- @try does not catch it, and the nexus reports the pool's end.
+module main (tryAbort)
+
+import root
+import root-r
+
+type R => Int = "integer"
+
+source R from "r.R" ("r_abort" as rAbort)
+
+rAbort :: Int -> Int
+
+tryAbort :: Int -> Int
+tryAbort x = match (@try (rAbort x)) | (Ok v) = v | (Err _) = -1

@@ -112,10 +112,7 @@ pub fn pool_check_and_recover_ptr() -> *const std::ffi::c_void {
 /// pools rather than bursty user-driven crashes.
 const RECOVERY_MAX_ATTEMPTS: usize = 100;
 const RECOVERY_WINDOW: Duration = Duration::from_secs(60);
-/// Brief drain wait between marking recovery in progress and tearing
-/// down SHM, so any worker mid-request can fail back through its
-/// per-eval arena's Drop and release SHM before we munmap.
-const RECOVERY_DRAIN: Duration = Duration::from_millis(250);
+const RECOVERY_DRAIN_LIMIT: Duration = Duration::from_secs(60);
 /// Wait between SIGTERM and SIGKILL on remaining live pools.
 const RECOVERY_TERM_GRACE: Duration = Duration::from_millis(250);
 
@@ -137,11 +134,21 @@ extern "C" {
     fn morloc_daemon_is_shutting_down() -> bool;
     fn morloc_daemon_begin_recovery() -> bool;
     fn morloc_daemon_end_recovery();
+    fn morloc_daemon_wait_for_requests(timeout_ms: u64) -> bool;
     // Hands a reaped child's exit status to whoever forked it. The daemon
     // forks the compiler to serve an expression and then waits for it; the
     // drains below would otherwise consume the status first and leave that
     // wait with nothing to read.
     fn morloc_note_child_exit(pid: libc::c_int, status: libc::c_int);
+    fn morloc_reaped_sequence() -> u64;
+    fn morloc_take_noted_child_exit(pid: libc::c_int, since: u64, status: *mut libc::c_int) -> libc::c_int;
+    fn morloc_stop_child_groups();
+    fn morloc_child_group_leader_exited(pid: libc::c_int);
+    fn morloc_refuse_new_segments();
+    fn morloc_claim_exit() -> bool;
+    fn morloc_daemon_remove_endpoints();
+    fn morloc_remove_leases();
+    fn morloc_reclaim_all();
 }
 
 /// C-ABI callback wired into DaemonConfig.pool_check_fn.
@@ -149,9 +156,9 @@ extern "C" {
 /// Invoked once per daemon main-loop iteration (~1 s cadence).
 /// Detects dead pool processes via `pool_is_alive`. If any are dead,
 /// runs the coordinated recovery sequence:
-/// 1. Set `RECOVERY_IN_PROGRESS` so request handlers bail out.
-/// 2. Brief drain so in-flight workers' arenas release SHM.
-/// 3. SIGTERM -> SIGKILL all remaining live pools; reap each.
+/// 1. Close the request gate: no new request is admitted.
+/// 2. SIGTERM -> SIGKILL all remaining live pools; reap each.
+/// 3. Wait for every admitted request to finish; exit if they do not.
 /// 4. Drop the entire SHM namespace (shclose / reset_all).
 /// 5. Bump RECOVERY_GENERATION, compute new basename.
 /// 6. Re-shinit and respawn every pool with the new basename.
@@ -160,10 +167,22 @@ extern "C" {
 ///
 /// Loop guard: if more than RECOVERY_MAX_ATTEMPTS recoveries fire
 /// within RECOVERY_WINDOW, the daemon exits with a fatal error.
+static POOL_CHECK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 extern "C" fn pool_check_and_recover(
     _sockets: *mut morloc_runtime_types::daemon_socket::MorlocSocket,
     n_pools: usize,
 ) {
+    morloc_runtime_types::panic::outside_scope(|| check_and_recover(n_pools))
+}
+
+fn check_and_recover(n_pools: usize) {
+    let _checking = match POOL_CHECK.try_lock() {
+        Ok(g) => g,
+        // PANIC-4
+        Err(std::sync::TryLockError::Poisoned(_)) => panic!("the pool recovery lock is poisoned"),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
     // First, enqueue PID-sweep requests for any pool that has died
     // since our last visit. The sweeper thread releases the dead
     // pool's slots in the shared SHM registry off this latency path.
@@ -223,29 +242,39 @@ extern "C" fn pool_check_and_recover(
         }
     }
 
-    // Step 1: drain. Workers see RECOVERY_IN_PROGRESS at request entry
-    // and bail. In-flight workers' socket calls to dying pools fail
-    // with ECONNREFUSED; their per-eval arenas drop, releasing SHM.
-    std::thread::sleep(RECOVERY_DRAIN);
-
     // Step 2: SIGTERM remaining live pools; brief grace; SIGKILL the
     // holdouts; reap.
     for i in 0..n_pools {
-        let pgid = PGIDS[i].load(Ordering::Relaxed);
-        if pgid > 0 && pool_is_alive(i) {
-            unsafe { libc::kill(-pgid, libc::SIGTERM); }
+        if pool_is_alive(i) {
+            signal_pool_group(i, libc::SIGTERM);
         }
     }
     std::thread::sleep(RECOVERY_TERM_GRACE);
     for i in 0..n_pools {
-        let pgid = PGIDS[i].load(Ordering::Relaxed);
-        if pgid > 0 && pool_is_alive(i) {
-            unsafe { libc::kill(-pgid, libc::SIGKILL); }
-        }
+        signal_pool_group(i, libc::SIGKILL);
+        release_pool_group(i);
     }
-    while unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
+    reap_noting();
+
+    if !unsafe { morloc_daemon_wait_for_requests(RECOVERY_DRAIN_LIMIT.as_millis() as u64) } {
+        eprintln!(
+            "morloc daemon: requests still running {:?} into pool crash recovery; \
+             exiting rather than unmapping shared memory they may be reading",
+            RECOVERY_DRAIN_LIMIT
+        );
+        exit_leaving_threads(1);
+    }
+    // DAEMON-6: a shutdown requested during the drain needs no new pools.
+    if unsafe { morloc_daemon_is_shutting_down() } {
+        unsafe { morloc_daemon_end_recovery() };
+        return;
+    }
 
     // Step 3: tear down all SHM.
+    // FORK-16: the killed pools' temp directories; FORK-15: the leases name
+    // the namespace being discarded.
+    unsafe { morloc_reclaim_all() };
+    unsafe { morloc_remove_leases() };
     unsafe {
         let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
         shclose(&mut err);
@@ -350,10 +379,23 @@ pub fn mcp_recover_pools(n_pools: usize) {
     pool_check_and_recover(std::ptr::null_mut(), n_pools);
 }
 
+// SHM-8: a pool whose worker died ends within its coordinator's next reap.
+pub fn mcp_recover_pools_after_failure(n_pools: usize) {
+    let until = std::time::Instant::now() + POOL_END_WAIT;
+    while (0..n_pools).all(pool_is_alive) && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    mcp_recover_pools(n_pools);
+}
+
+const POOL_END_WAIT: Duration = Duration::from_millis(200);
+
 const INITIAL_PING_TIMEOUT: Duration = Duration::from_millis(10);
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(1);
 const RETRY_MULTIPLIER: f64 = 1.25;
 const MAX_RETRIES: usize = 16;
+// DAEMON-6
+const PING_REPLY_LIMIT: Duration = Duration::from_secs(5);
 
 // ── Global state for signal handlers ───────────────────────────────────────
 
@@ -363,11 +405,44 @@ static PIDS: [AtomicI32; MAX_DAEMONS] = {
     [INIT; MAX_DAEMONS]
 };
 
-/// Process group IDs for cleanup.
-static PGIDS: [AtomicI32; MAX_DAEMONS] = {
+/// The name a pool's pin runs under.
+pub const POOL_PIN_NAME: &str = "morloc-pool-pin";
+
+// DAEMON-11: each pool's process group, held by a pin until released.
+static POOL_GROUPS: morloc_runtime_types::child_group::ChildGroups =
+    morloc_runtime_types::child_group::ChildGroups::new();
+
+struct PoolPin {
+    group: morloc_runtime_types::child_group::Registered<'static>,
+    _pin: std::os::fd::OwnedFd,
+}
+
+static POOL_PINS: std::sync::Mutex<[Option<PoolPin>; MAX_DAEMONS]> =
+    std::sync::Mutex::new([const { None }; MAX_DAEMONS]);
+
+/// The pid each pool started with, kept after its exit for the crash sweep.
+static SPAWNED_PIDS: [AtomicI32; MAX_DAEMONS] = {
     const INIT: AtomicI32 = AtomicI32::new(0);
     [INIT; MAX_DAEMONS]
 };
+
+fn pool_pins() -> std::sync::MutexGuard<'static, [Option<PoolPin>; MAX_DAEMONS]> {
+    // PANIC-4
+    POOL_PINS.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock())
+}
+
+// DAEMON-11
+fn signal_pool_group(i: usize, sig: libc::c_int) {
+    if let Some(p) = pool_pins()[i].as_ref() {
+        p.group.signal(sig);
+    }
+}
+
+// DAEMON-11
+fn release_pool_group(i: usize) {
+    let released = pool_pins()[i].take();
+    drop(released);
+}
 
 /// Exit statuses saved by SIGCHLD handler.
 static EXIT_STATUSES: [AtomicI32; MAX_DAEMONS] = {
@@ -404,8 +479,8 @@ static CLEANING_UP: AtomicBool = AtomicBool::new(false);
 static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 /// Upper bound on how long a parked thread waits for the teardown owner to
-/// call `exit`. `clean_exit` is itself bounded (250 ms per pool group, at
-/// most MAX_DAEMONS groups), so reaching this means the owner is wedged;
+/// call `exit`. `clean_exit` is itself bounded (about 300 ms to stop the
+/// pools), so reaching this means the owner is wedged;
 /// staying alive with no thread making progress is worse than exiting with
 /// the status the owner already chose.
 const PARK_LIMIT: Duration = Duration::from_secs(60);
@@ -463,31 +538,18 @@ pub struct PoolSocket {
 
 /// SIGCHLD handler: reap terminated children.
 extern "C" fn sigchld_handler(_sig: libc::c_int) {
-    #[cfg(target_os = "linux")]
-    let saved_errno = unsafe { *libc::__errno_location() };
-    #[cfg(target_os = "macos")]
-    let saved_errno = unsafe { *libc::__error() };
-    loop {
-        let mut status: libc::c_int = 0;
-        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if pid <= 0 {
-            break;
-        }
-        // Publish before the pool bookkeeping: this reap may belong to a
-        // thread that forked its own child and is blocked waiting for it.
-        unsafe { morloc_note_child_exit(pid, status) };
-        for i in 0..MAX_DAEMONS {
-            if PIDS[i].load(Ordering::Relaxed) == pid {
-                EXIT_STATUSES[i].store(status, Ordering::Relaxed);
-                PIDS[i].store(-1, Ordering::Relaxed);
-                break;
-            }
-        }
-    }
-    #[cfg(target_os = "linux")]
-    unsafe { *libc::__errno_location() = saved_errno };
-    #[cfg(target_os = "macos")]
-    unsafe { *libc::__error() = saved_errno };
+    // PANIC-1
+    morloc_runtime_types::panic::signal_frame(|| {
+        #[cfg(target_os = "linux")]
+        let saved_errno = unsafe { *libc::__errno_location() };
+        #[cfg(target_os = "macos")]
+        let saved_errno = unsafe { *libc::__error() };
+        reap_from_handler();
+        #[cfg(target_os = "linux")]
+        unsafe { *libc::__errno_location() = saved_errno };
+        #[cfg(target_os = "macos")]
+        unsafe { *libc::__error() = saved_errno };
+    })
 }
 
 /// SIGTERM/SIGINT handler: fast, async-signal-safe shutdown. Any Rust
@@ -496,18 +558,70 @@ extern "C" fn sigchld_handler(_sig: libc::c_int) {
 /// `summary.json` are the notable casualties; users who Ctrl-C don't
 /// expect them. A second signal skips even the pool-kill loop.
 extern "C" fn signal_exit_handler(sig: libc::c_int) {
-    if CLEANING_UP.swap(true, Ordering::SeqCst) {
-        unsafe { libc::_exit(128 + sig) };
-    }
-    for i in 0..MAX_DAEMONS {
-        let pgid = PGIDS[i].load(Ordering::Relaxed);
-        if pgid > 0 {
-            unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    // PANIC-1
+    morloc_runtime_types::panic::signal_frame(|| {
+        if !CLEANING_UP.swap(true, Ordering::SeqCst) {
+            stop_everything();
         }
+        unsafe { libc::_exit(128 + sig) };
+    })
+}
+
+// PANIC-1
+pub fn panic_exit() -> ! {
+    CLEANING_UP.store(true, Ordering::SeqCst);
+    stop_everything();
+    unsafe { libc::_exit(morloc_runtime_types::panic::PANIC_EXIT_STATUS) };
+}
+
+static NEXUS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+extern "C" {
+    fn morloc_fork_generation() -> u64;
+}
+
+// PANIC-1: also binds the symbol before any signal handler needs it.
+pub fn record_nexus_process() {
+    NEXUS_GENERATION.store(unsafe { morloc_fork_generation() }, Ordering::SeqCst);
+}
+
+// FORK-11: the environment is written only while the process has one thread;
+// a count that cannot be read allows it.
+fn alone() {
+    extern "C" {
+        fn morloc_thread_count() -> libc::c_long;
     }
-    unsafe { sweep_shm_segments() };
-    unsafe { crate::sigrm::remove_registered() };
-    unsafe { libc::_exit(128 + sig) };
+    let n = unsafe { morloc_thread_count() };
+    if n > 1 {
+        morloc_runtime_types::panic::fatal(&format!("the environment was written with {n} threads running"));
+    }
+}
+
+pub(crate) fn set_startup_env(key: &str, value: impl AsRef<std::ffi::OsStr>) {
+    alone();
+    std::env::set_var(key, value);
+}
+
+pub(crate) fn remove_startup_env(key: &str) {
+    alone();
+    std::env::remove_var(key);
+}
+
+// DAEMON-6
+fn stop_everything() {
+    // PANIC-1: a forked child before exec owns none of these.
+    if unsafe { morloc_fork_generation() } != NEXUS_GENERATION.load(Ordering::SeqCst) {
+        return;
+    }
+    POOL_GROUPS.stop_all();
+    unsafe {
+        // DAEMON-10
+        morloc_daemon_remove_endpoints();
+        morloc_stop_child_groups();
+        crate::stop_frontend_children();
+        sweep_shm_segments();
+        crate::sigrm::remove_registered();
+    }
 }
 
 /// Crash handler for fatal program-error signals (SIGSEGV / SIGABRT /
@@ -523,10 +637,13 @@ extern "C" fn signal_exit_handler(sig: libc::c_int) {
 /// pool-kill loop -- those are not async-signal-safe. Orphaned pools
 /// are reaped by the nexus poll's dead-pool sweep on the next run.
 extern "C" fn crash_cleanup_handler(sig: libc::c_int) {
-    unsafe {
-        sweep_shm_segments();
-        libc::raise(sig);
-    }
+    // PANIC-1
+    morloc_runtime_types::panic::signal_frame(|| {
+        unsafe {
+            sweep_shm_segments();
+            libc::raise(sig);
+        }
+    })
 }
 
 /// Sweep every `<basename>-<idx>` segment via `shm_unlink`. Called
@@ -670,13 +787,20 @@ pub fn init_shm() -> (String, String) {
     };
     set_tmpdir(tmpdir.clone());
     let _ = RUN_TMPDIR.set(tmpdir.clone());
+    match make_temp_root(&tmpdir) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
 
     // Point every pool at this run's benchmark record file. An env var
     // rather than a per-language setter because pools inherit it for
     // free -- Python and R never enter libmorloc's pool_main, so a
     // C-ABI setter would have to be bound four times over. Unset means
     // "not benchmarking", and morloc_bench_record is then a no-op.
-    std::env::set_var(
+    crate::process::set_startup_env(
         "MORLOC_BENCH_RECORDS",
         std::path::Path::new(&tmpdir).join("benchmark.records"),
     );
@@ -824,6 +948,15 @@ pub fn path_to_cstring(p: &Path) -> Result<CString, String> {
 ///    (up from the previous 50ms, which was too short for Python's
 ///    atexit handlers and multiprocessing cleanup to flush buffers)
 pub fn clean_exit(exit_code: i32) -> ! {
+    teardown(exit_code, true)
+}
+
+// DAEMON-6: for a process whose other threads may still be running.
+pub fn exit_leaving_threads(exit_code: i32) -> ! {
+    teardown(exit_code, false)
+}
+
+fn teardown(exit_code: i32, unmap: bool) -> ! {
     // Exactly one thread runs the teardown. A second concurrent caller
     // would repeat the waitpid sweep, the SHM unlink and
     // morloc_run_finalize, and race the owner on the exit status.
@@ -831,6 +964,8 @@ pub fn clean_exit(exit_code: i32) -> ! {
         park_until_exit();
     }
     EXIT_CODE.store(exit_code, Ordering::SeqCst);
+    // DAEMON-10
+    unsafe { morloc_daemon_remove_endpoints() };
 
     // A successful run completes its streamed stdout (a no-op when the
     // result printer already did). A failed run leaves it unterminated so
@@ -876,62 +1011,27 @@ pub fn clean_exit(exit_code: i32) -> ! {
         libc::sigprocmask(libc::SIG_BLOCK, &block_chld, std::ptr::null_mut());
     }
 
-    // Send SIGTERM to all pool process groups
-    for i in 0..MAX_DAEMONS {
-        let pgid = PGIDS[i].load(Ordering::Relaxed);
-        if pgid > 0 {
-            unsafe { libc::kill(-pgid, libc::SIGTERM) };
-        }
-    }
+    stop_pools();
+    crate::stop_frontend_children();
 
-    // Wait for groups to exit (up to 200ms per group, then SIGKILL).
-    // The 200ms window serves two purposes:
-    // - Lets pool signal handlers run (Python's signal_handler in pool.py
-    //   calls close_daemon and cleans up shared memory)
-    // - Lets any pending stderr writes (tracebacks, error messages) drain
-    //   to the terminal before the process is force-killed
-    for i in 0..MAX_DAEMONS {
-        let pgid = PGIDS[i].load(Ordering::Relaxed);
-        if pgid <= 0 {
-            continue;
-        }
-
-        // Reap any available children
-        while unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
-        if unsafe { libc::kill(-pgid, 0) } == -1 {
-            continue;
-        }
-
-        let mut group_dead = false;
-        for _ in 0..100 {
-            while unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
-            if unsafe { libc::kill(-pgid, 0) } == -1 {
-                group_dead = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-
-        if !group_dead {
-            unsafe { libc::kill(-pgid, libc::SIGKILL) };
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    // Final reap
-    while unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
-
+    // FORK-15: leases kept outside the run directory.
+    unsafe { morloc_remove_leases() };
     // Clean up shared memory segments
     extern "C" {
-        fn shclose(errmsg: *mut *mut std::ffi::c_char) -> bool;
+        fn morloc_shretire(errmsg: *mut *mut std::ffi::c_char) -> bool;
     }
-    unsafe {
-        let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
-        shclose(&mut err);
-        if !err.is_null() {
-            libc::free(err as *mut libc::c_void);
+    // DAEMON-5: names only; no thread can find the memory unmapped.
+    if unmap {
+        unsafe {
+            let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+            morloc_shretire(&mut err);
+            if !err.is_null() {
+                libc::free(err as *mut libc::c_void);
+            }
         }
     }
+    // DAEMON-5
+    unsafe { morloc_refuse_new_segments() };
     // Every segment the run recorded, including those of earlier recovery
     // generations and companions whose own teardown did not run.
     if let Some(dir) = RUN_TMPDIR.get() {
@@ -963,6 +1063,19 @@ pub fn clean_exit(exit_code: i32) -> ! {
     }
     unsafe { morloc_run_finalize(exit_code) };
 
+    // DAEMON-6: the shutdown watchdog may already be ending the process.
+    if !unsafe { morloc_claim_exit() } {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+    if !unmap {
+        // DAEMON-6: exit handlers would unmap shared memory under the threads.
+        unsafe {
+            libc::fflush(std::ptr::null_mut());
+            libc::_exit(exit_code)
+        };
+    }
     std::process::exit(exit_code);
 }
 
@@ -974,6 +1087,56 @@ pub fn clean_exit(exit_code: i32) -> ! {
 ///
 /// The BROKEN_PIPE flag it sets tells `clean_exit` to skip the stdout
 /// flush that would otherwise attempt to write into the dead pipe.
+static PANICKED: AtomicBool = AtomicBool::new(false);
+static IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+// DAEMON-6
+const PANIC_GRACE: Duration = Duration::from_secs(5);
+
+pub struct Request(());
+
+impl Drop for Request {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+// PANIC-3: no new work once a panic was caught.
+pub fn begin_request() -> Option<Request> {
+    IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+    let request = Request(());
+    if PANICKED.load(Ordering::SeqCst) {
+        return None;
+    }
+    Some(request)
+}
+
+// PANIC-3
+pub fn refuse_new_work() {
+    PANICKED.store(true, Ordering::SeqCst);
+}
+
+// PANIC-3: the daemon's own shutdown waits for its requests.
+pub fn fail_daemon() -> ! {
+    extern "C" {
+        fn morloc_daemon_fail();
+    }
+    refuse_new_work();
+    unsafe { morloc_daemon_fail() };
+    loop {
+        std::thread::park();
+    }
+}
+
+// PANIC-3
+pub fn end_after_panic() -> ! {
+    refuse_new_work();
+    let deadline = std::time::Instant::now() + PANIC_GRACE;
+    while IN_FLIGHT.load(Ordering::SeqCst) > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    exit_leaving_threads(morloc_runtime_types::panic::PANIC_EXIT_STATUS)
+}
+
 pub fn exit_broken_pipe() -> ! {
     BROKEN_PIPE.store(true, Ordering::SeqCst);
     clean_exit(141);
@@ -1044,13 +1207,10 @@ pub fn setup_sockets(pools: &[Pool], tmpdir: &str, shm_basename: &str) -> Vec<Po
 /// nexus's RPC handler. The resulting stream on the wire may be
 /// corrupted -- the runtime cannot police fd sharing across pools
 /// and the nexus. Documented, not enforced.
-fn start_language_server(socket: &PoolSocket) -> Result<i32, String> {
+fn start_language_server(socket: &PoolSocket) -> Result<(i32, PoolPin), String> {
     extern "C" {
         fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const libc::c_char;
     }
-    // Everything the child needs is built here, before the fork: the nexus is
-    // multithreaded in serve and daemon modes, so between fork and exec the
-    // child may only make async-signal-safe calls.
     let cmd = socket.syscmd.first().ok_or_else(|| format!("pool '{}' has no command", socket.lang))?;
     let program = resolve_program(cmd)
         .ok_or_else(|| format!("cannot start pool '{}': '{}' was not found on PATH", socket.lang, cmd.to_string_lossy()))?;
@@ -1082,31 +1242,65 @@ fn start_language_server(socket: &PoolSocket) -> Result<i32, String> {
     }
     let envp: Vec<*const libc::c_char> =
         env.iter().map(|s| s.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
-    let exec_failed = format!(
-        "exec failed for pool '{}' running '{}': errno ",
-        socket.lang,
-        program.to_string_lossy()
-    );
 
-    let pid = unsafe { libc::fork() };
-
-    if pid == 0 {
-        unsafe {
-            libc::setpgid(0, 0);
-            if lifeline_fd >= 0 {
-                libc::fcntl(lifeline_fd, libc::F_SETFD, 0);
-            }
-            libc::execve(program.as_ptr(), argv.as_ptr(), envp.as_ptr());
-            write_errno_line(exec_failed.as_bytes(), std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
-            libc::_exit(127);
+    let fail = |e: std::io::Error| format!("cannot start pool '{}' running '{}': {e}", socket.lang, program.to_string_lossy());
+    let (pin_pid, pin) = start_pin().map_err(fail)?;
+    // DAEMON-11: refused, the pin ends with its pipe.
+    let group = POOL_GROUPS
+        .add(pin_pid)
+        .ok_or_else(|| format!("cannot start pool '{}': too many process groups", socket.lang))?;
+    let pinned = PoolPin { group, _pin: pin };
+    let started = pinned.group.while_held(|mask| {
+        let mut spawn = morloc_runtime_types::spawn::Spawn::new()?;
+        spawn.join_process_group(pin_pid)?;
+        spawn.signal_mask(mask)?;
+        if lifeline_fd >= 0 {
+            spawn.keep_across_exec(lifeline_fd)?;
         }
-    } else if pid > 0 {
-        // Parent: ensure child is in its own process group
-        unsafe { libc::setpgid(pid, pid) };
-        Ok(pid)
-    } else {
-        Err(format!("fork failed: {}", std::io::Error::last_os_error()))
+        spawn.run(&program, &argv, &envp, false)
+    });
+    match started {
+        Some(Ok(pid)) => Ok((pid, pinned)),
+        Some(Err(e)) => Err(fail(e)),
+        None => Err(format!("cannot start pool '{}': the pools are stopping", socket.lang)),
     }
+}
+
+/// A process leading a new group, which holds the group's id until the
+/// returned pipe end closes or it is killed.
+// DAEMON-11
+fn start_pin() -> std::io::Result<(libc::pid_t, std::os::fd::OwnedFd)> {
+    use std::os::fd::FromRawFd;
+    let mut fds = [0; 2];
+    if unsafe { morloc_runtime_types::fd::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let (read, write) = unsafe { (std::os::fd::OwnedFd::from_raw_fd(fds[0]), std::os::fd::OwnedFd::from_raw_fd(fds[1])) };
+    let sh = CString::new("/bin/sh").unwrap();
+    let name = CString::new(POOL_PIN_NAME).unwrap();
+    let flag = CString::new("-c").unwrap();
+    let script = CString::new("trap '' TERM INT HUP; read _; exit 0").unwrap();
+    let argv = [name.as_ptr(), flag.as_ptr(), script.as_ptr(), std::ptr::null()];
+    let envp = [std::ptr::null()];
+    let mut spawn = morloc_runtime_types::spawn::Spawn::new()?;
+    spawn.new_process_group()?;
+    // DAEMON-11: immune from birth, before the shell sets its traps.
+    let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::sigemptyset(&mut mask);
+        for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            libc::sigaddset(&mut mask, sig);
+        }
+    }
+    spawn.signal_mask(&mask)?;
+    use std::os::fd::AsRawFd;
+    spawn.dup2(read.as_raw_fd(), 0)?;
+    // DAEMON-11: not a writer of the nexus's output, so no reader of it waits on the pin.
+    let null = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
+    spawn.dup2(null.as_raw_fd(), 1)?;
+    spawn.dup2(null.as_raw_fd(), 2)?;
+    let pid = spawn.run(&sh, &argv, &envp, false)?;
+    Ok((pid, write))
 }
 
 /// The file `cmd` names: itself when it holds a `/`, otherwise the first
@@ -1126,26 +1320,8 @@ fn resolve_program(cmd: &CString) -> Option<CString> {
     })
 }
 
-/// Write `prefix`, the decimal `errno` and a newline to stderr, without
-/// allocating: for a child between fork and exec.
-fn write_errno_line(prefix: &[u8], errno: i32) {
-    let mut digits = [0u8; 12];
-    let mut n = errno.unsigned_abs();
-    let mut i = digits.len();
-    loop {
-        i -= 1;
-        digits[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    unsafe {
-        libc::write(2, prefix.as_ptr() as *const libc::c_void, prefix.len());
-        libc::write(2, digits[i..].as_ptr() as *const libc::c_void, digits.len() - i);
-        libc::write(2, b"\n".as_ptr() as *const libc::c_void, 1);
-    }
-}
+#[cfg(test)]
+static SPAWN_TO_RECORD_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Start pool daemons for the given socket indices and wait for them to respond to pings.
 pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<(), String> {
@@ -1153,7 +1329,11 @@ pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<()
         fn stream_pid_start_time(pid: u32) -> u64;
     }
     for &idx in indices {
-        let pid = start_language_server(&sockets[idx])?;
+        let since = unsafe { morloc_reaped_sequence() };
+        let (pid, pin) = start_language_server(&sockets[idx])?;
+        pool_pins()[idx] = Some(pin);
+        #[cfg(test)]
+        std::thread::sleep(Duration::from_millis(SPAWN_TO_RECORD_DELAY_MS.load(Ordering::Relaxed)));
         sockets[idx].pid = pid;
         // Capture the pool's start stamp at spawn so the PID-based crash
         // sweep can detect PID reuse. Zero if the read races a fast exit;
@@ -1164,8 +1344,13 @@ pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<()
         // Fresh incarnation: clear the sweep-done flag so the next
         // death of this pool is detected.
         POOL_SWEPT[idx].store(false, Ordering::Relaxed);
-        PIDS[idx].store(pid, Ordering::Relaxed);
-        PGIDS[idx].store(pid, Ordering::Relaxed);
+        PIDS[idx].store(pid, Ordering::SeqCst);
+        SPAWNED_PIDS[idx].store(pid, Ordering::Relaxed);
+        let mut status = 0;
+        if unsafe { morloc_take_noted_child_exit(pid, since, &mut status) } == 1 {
+            EXIT_STATUSES[idx].store(status, Ordering::Relaxed);
+            PIDS[idx].store(-1, Ordering::SeqCst);
+        }
         // Record the lang label for the post-mortem in report_dead_pools.
         {
             let mut langs = POOL_LANGS.lock().unwrap();
@@ -1184,7 +1369,7 @@ pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<()
     Ok(())
 }
 
-/// Walk the per-index PIDs/PGIDs/start-times arrays and enqueue a
+/// Walk the per-index PIDs/start-times arrays and enqueue a
 /// PID sweep for any pool that has died (`PIDS[i] == -1`) but hasn't
 /// been swept yet. Idempotent per pool index until the pool is
 /// respawned (which clears `POOL_SWEPT[i]`).
@@ -1207,10 +1392,7 @@ pub fn sweep_dead_pools(n_pools: usize) {
         if POOL_SWEPT[i].load(Ordering::Relaxed) { continue; }
         let pid = PIDS[i].load(Ordering::Relaxed);
         if pid != -1 { continue; }
-        // The PID stored before SIGCHLD cleared PIDS lives in
-        // PGIDS (process-group same as pid for the initial fork).
-        // We saved that on spawn and never clear it.
-        let dead_pid = PGIDS[i].load(Ordering::Relaxed);
+        let dead_pid = SPAWNED_PIDS[i].load(Ordering::Relaxed);
         if dead_pid <= 0 { continue; }
         let start_time = POOL_START_TIMES[i].load(Ordering::Acquire);
         if POOL_SWEPT[i]
@@ -1226,6 +1408,21 @@ pub fn sweep_dead_pools(n_pools: usize) {
 /// Ping a daemon with exponential backoff until it responds.
 /// Matches the C nexus behavior: initial delay 1ms, multiplier 1.25,
 /// plus socket timeout that doubles from 10ms to ~10s.
+// DAEMON-6: false once a daemon shutdown is requested.
+fn sleep_unless_shutting_down(d: Duration) -> bool {
+    let until = std::time::Instant::now() + d;
+    loop {
+        if unsafe { morloc_daemon_is_shutting_down() } {
+            return false;
+        }
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(50)));
+    }
+}
+
 fn wait_for_daemon(socket: &PoolSocket, pool_index: usize) -> Result<(), String> {
     use morloc_runtime_types::packet::PacketHeader;
     use std::os::unix::net::UnixStream;
@@ -1251,8 +1448,8 @@ fn wait_for_daemon(socket: &PoolSocket, pool_index: usize) -> Result<(), String>
         // Try to connect and ping
         match UnixStream::connect(&socket.socket_path) {
             Ok(mut stream) => {
-                let _ = stream.set_read_timeout(Some(ping_timeout));
-                let _ = stream.set_write_timeout(Some(ping_timeout));
+                let _ = stream.set_read_timeout(Some(ping_timeout.min(PING_REPLY_LIMIT)));
+                let _ = stream.set_write_timeout(Some(ping_timeout.min(PING_REPLY_LIMIT)));
 
                 if stream.write_all(&ping_bytes).is_ok() {
                     let mut resp = [0u8; 32];
@@ -1281,7 +1478,9 @@ fn wait_for_daemon(socket: &PoolSocket, pool_index: usize) -> Result<(), String>
         let wait = retry_delay.max(ping_timeout.as_secs_f64());
         let secs = wait as u64;
         let nanos = ((wait - secs as f64) * 1e9) as u32;
-        std::thread::sleep(Duration::new(secs, nanos));
+        if !sleep_unless_shutting_down(Duration::new(secs, nanos)) {
+            return Err(format!("the daemon is shutting down; pool '{}' was not started", socket.lang));
+        }
         retry_delay *= RETRY_MULTIPLIER;
         ping_timeout = ping_timeout * 2;
     }
@@ -1289,10 +1488,60 @@ fn wait_for_daemon(socket: &PoolSocket, pool_index: usize) -> Result<(), String>
     unreachable!()
 }
 
+/// Stop every pool process group: SIGTERM, up to 200 ms for the pools to
+/// exit, then SIGKILL; reap for up to 100 ms more.
+pub fn stop_pools() {
+    // DAEMON-6
+    unsafe { morloc_stop_child_groups() };
+    for i in 0..MAX_DAEMONS {
+        signal_pool_group(i, libc::SIGTERM);
+    }
+
+    // DAEMON-11: the grace ends when the pool processes have exited.
+    let until = std::time::Instant::now() + Duration::from_millis(200);
+    while (0..MAX_DAEMONS).any(pool_is_alive) && std::time::Instant::now() < until {
+        reap_noting();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // DAEMON-11: also ends the pins; no signal follows.
+    POOL_GROUPS.stop_all();
+    let until = std::time::Instant::now() + Duration::from_millis(100);
+    loop {
+        reap_noting();
+        if !has_children() || std::time::Instant::now() >= until {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn has_children() -> bool {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::waitid(libc::P_ALL, 0, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ECHILD)
+}
+
+// DAEMON-6: async-signal-safe, so it ends a teardown whatever locks are held.
+pub fn emergency_exit_ptr() -> *const std::ffi::c_void {
+    extern "C" fn emergency_exit(code: libc::c_int) {
+        stop_everything();
+        unsafe { libc::_exit(code) };
+    }
+    emergency_exit as *const std::ffi::c_void
+}
+
+/// Return a C-compatible function pointer for stop_pools.
+pub fn stop_pools_ptr() -> *const std::ffi::c_void {
+    extern "C" fn stop_pools_c() {
+        morloc_runtime_types::panic::outside_scope(stop_pools)
+    }
+    stop_pools_c as *const std::ffi::c_void
+}
+
 /// Return a C-compatible function pointer for pool_is_alive.
 pub fn pool_is_alive_ptr() -> *const std::ffi::c_void {
     extern "C" fn pool_alive_c(pool_index: usize) -> bool {
-        pool_is_alive(pool_index)
+        morloc_runtime_types::panic::outside_scope(|| pool_is_alive(pool_index))
     }
     pool_alive_c as *const std::ffi::c_void
 }
@@ -1326,9 +1575,68 @@ pub fn pool_death_info(pool_index: usize) -> Option<String> {
     }
 }
 
-/// Post-mortem for a failed single-shot run: reap any exited pool children
-/// and print one line per dead pool naming WHICH pool died and HOW.
-///
+static REAPING: AtomicBool = AtomicBool::new(false);
+
+// DAEMON-3: every reaped status is recorded for whoever waits on that child.
+fn reap_noting() {
+    reap(false)
+}
+
+// DAEMON-11: a handler may have interrupted the reaper's own thread, so it never waits for it.
+fn reap_from_handler() {
+    reap(true)
+}
+
+fn reap(in_handler: bool) {
+    loop {
+        // DAEMON-11: one reaper at a time, so a pid marked exited is never one reused since.
+        while REAPING.swap(true, Ordering::SeqCst) {
+            if in_handler {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        while let Some(pid) = exited_child() {
+            // DAEMON-11: the group's slot is dead before its leader's id is freed.
+            POOL_GROUPS.leader_exited(pid);
+            crate::mcp::FRONTEND_EVALS.leader_exited(pid);
+            unsafe { morloc_child_group_leader_exited(pid) };
+            let mut status: libc::c_int = 0;
+            if unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } != pid {
+                continue;
+            }
+            unsafe { morloc_note_child_exit(pid, status) };
+            for i in 0..MAX_DAEMONS {
+                if PIDS[i].load(Ordering::SeqCst) == pid {
+                    EXIT_STATUSES[i].store(status, Ordering::Relaxed);
+                    PIDS[i].store(-1, Ordering::Relaxed);
+                    break;
+                }
+            }
+        }
+        REAPING.store(false, Ordering::SeqCst);
+        // DAEMON-11: a reaper turned away meanwhile left its child to this one.
+        if exited_child().is_none() {
+            return;
+        }
+    }
+}
+
+/// An exited child, left unreaped.
+fn exited_child() -> Option<libc::pid_t> {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::waitid(libc::P_ALL, 0, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+        if rc == 0 {
+            let pid = unsafe { info.si_pid() };
+            return (pid > 0).then_some(pid);
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return None;
+        }
+    }
+}
+
 /// A cross-language "Connection closed by peer" only names the caller pool;
 /// the callee that actually died is invisible to the caller (they are
 /// siblings, both children of this nexus). This nexus is the parent, so
@@ -1337,24 +1645,31 @@ pub fn pool_death_info(pool_index: usize) -> Option<String> {
 /// leaves NO in-pool backtrace (no crash handler, no faulthandler, no log);
 /// only the parent's wait-status reveals it ("signal 9"). Called from the
 /// run-failed paths so that signal is surfaced instead of swallowed.
-pub fn report_dead_pools() {
+/// Wait up to `limit` for pool `pool_index`, which closed its connection on
+/// its way out, to exit and be reaped.
+pub fn wait_for_pool_exit(pool_index: usize, limit: Duration) {
+    let until = std::time::Instant::now() + limit;
+    loop {
+        reap_noting();
+        if pool_death_info(pool_index).is_some() || std::time::Instant::now() >= until {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// `dying` when a pool ended the call without a reply: it closed the
+/// connection on its way out, so its exit is waited for, briefly.
+pub fn report_dead_pools(dying: bool) {
     // Drain any child exits the SIGCHLD handler has not yet processed, so a
     // pool that died microseconds before the caller observed EOF is still
     // reported (avoids a report/reap race).
-    loop {
-        let mut status: libc::c_int = 0;
-        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if pid <= 0 {
-            break;
-        }
-        unsafe { morloc_note_child_exit(pid, status) };
-        for i in 0..MAX_DAEMONS {
-            if PIDS[i].load(Ordering::Relaxed) == pid {
-                EXIT_STATUSES[i].store(status, Ordering::Relaxed);
-                PIDS[i].store(-1, Ordering::Relaxed);
-                break;
-            }
-        }
+    reap_noting();
+    let n = POOL_LANGS.lock().unwrap().len().min(MAX_DAEMONS);
+    let until = std::time::Instant::now() + Duration::from_millis(500);
+    while dying && !(0..n).any(|i| pool_death_info(i).is_some()) && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+        reap_noting();
     }
     let langs = POOL_LANGS.lock().unwrap();
     for i in 0..langs.len().min(MAX_DAEMONS) {
@@ -1497,6 +1812,10 @@ pub fn cleanup_stale_shm() {
         let other_boot = boot.as_deref().is_some_and(|b| b != *owner_boot);
         if other_boot || !proc_info::alive(pid, start) {
             unlink_marked_segments(&dir);
+            // FORK-16: a temp root kept outside the run directory goes with it.
+            if let Ok(temps) = std::fs::read_to_string(dir.join(TEMPS_FILE)) {
+                let _ = std::fs::remove_dir_all(temps.trim_end());
+            }
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
@@ -1505,6 +1824,35 @@ pub fn cleanup_stale_shm() {
 /// The run directory's record of its owner: pid, start stamp, boot and PID
 /// namespace.
 const OWNER_FILE: &str = ".owner";
+const TEMPS_FILE: &str = ".temps";
+
+// FORK-16: the run's temp root (the runtime derives the same path), under
+// `--tmpdir` when one is given, else in the run directory; one outside the
+// run directory is recorded there before it exists, so a later run's sweep
+// finds it however this run ends.
+fn make_temp_root(run_dir: &str) -> Result<String, String> {
+    extern "C" {
+        fn morloc_run_temp_root(run_dir: *const libc::c_char, user_tmpdir: *const libc::c_char) -> *mut libc::c_char;
+    }
+    let user = std::env::var("MORLOC_TMPDIR").ok().filter(|d| !d.is_empty());
+    let run_c = CString::new(run_dir).map_err(|e| e.to_string())?;
+    let user_c = user.as_deref().map(CString::new).transpose().map_err(|e| e.to_string())?;
+    let raw = unsafe { morloc_run_temp_root(run_c.as_ptr(), user_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr())) };
+    if raw.is_null() {
+        return Err("Failed to name the run's temp root".into());
+    }
+    let dir = unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().into_owned();
+    unsafe { libc::free(raw as *mut libc::c_void) };
+    if user.is_some() {
+        let marker = std::path::Path::new(run_dir);
+        std::fs::write(marker.join(".temps.tmp"), &dir)
+            .and_then(|_| std::fs::rename(marker.join(".temps.tmp"), marker.join(TEMPS_FILE)))
+            .map_err(|e| format!("Failed to record the temp root {}: {}", dir, e))?;
+        crate::sigrm::register(&dir)?;
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create {}: {}", dir, e))?;
+    Ok(dir)
+}
 
 /// Remove every shared-memory object a marker in `dir` names. Only morloc's
 /// own names are touched.
@@ -1532,6 +1880,49 @@ pub fn set_child_subreaper() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_pool_group_outlives_its_pool_until_released() {
+        let (pgid, pin) = super::start_pin().unwrap();
+        let mut spawn = morloc_runtime_types::spawn::Spawn::new().unwrap();
+        spawn.join_process_group(pgid).unwrap();
+        let (sh, flag, script) = (CString::new("/bin/sh").unwrap(), CString::new("-c").unwrap(), CString::new("exit 0").unwrap());
+        let argv = [sh.as_ptr(), flag.as_ptr(), script.as_ptr(), std::ptr::null()];
+        let pool = spawn.run(&sh, &argv, &[std::ptr::null()], false).unwrap();
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pool, &mut status, 0) }, pool);
+        assert_eq!(unsafe { libc::kill(-pgid, 0) }, 0, "the group ended with its pool");
+        unsafe { libc::kill(-pgid, libc::SIGTERM) };
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(unsafe { libc::kill(-pgid, 0) }, 0, "the pin ended on SIGTERM");
+        drop(pin);
+        assert_eq!(unsafe { libc::waitpid(pgid, &mut status, 0) }, pgid);
+        assert_eq!(unsafe { libc::kill(-pgid, 0) }, -1, "the group outlived its pin");
+    }
+
+    #[test]
+    fn a_thread_that_reaps_waits_for_a_reap_in_progress() {
+        while REAPING.swap(true, Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        let reaper = std::thread::spawn(reap_noting);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!reaper.is_finished(), "returned before the reap in progress ended");
+        REAPING.store(false, Ordering::SeqCst);
+        reaper.join().unwrap();
+    }
+
+    #[test]
+    fn a_pin_ignores_sigterm_from_birth() {
+        let (pgid, pin) = super::start_pin().unwrap();
+        unsafe { libc::kill(-pgid, libc::SIGTERM) };
+        std::thread::sleep(Duration::from_millis(100));
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pgid, &mut status, libc::WNOHANG) }, 0, "the pin ended on SIGTERM");
+        drop(pin);
+        assert_eq!(unsafe { libc::waitpid(pgid, &mut status, 0) }, pgid);
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
+    }
+
     use super::*;
 
     fn hex4(val: u16) -> String {
@@ -1625,6 +2016,48 @@ mod tests {
         let registry = format!("{}.reg", base);
         assert!(volume.len() <= PSHMNAMLEN, "volume '{}' is {} chars", volume, volume.len());
         assert!(registry.len() <= PSHMNAMLEN, "registry '{}' is {} chars", registry, registry.len());
+    }
+
+    #[test]
+    fn pool_death_scenario() {
+        if std::env::var_os("MORLOC_POOL_DEATH_SCENARIO").is_none() {
+            return;
+        }
+        SPAWN_TO_RECORD_DELAY_MS.store(300, Ordering::Relaxed);
+        install_signal_handlers();
+        let mut sockets = [PoolSocket {
+            lang: "test".into(),
+            socket_path: "/nonexistent/morloc-test.sock".into(),
+            syscmd: vec![CString::new("true").unwrap()],
+            pid: 0,
+            pid_start_time: 0,
+            pool_hash: CString::new("").unwrap(),
+        }];
+        let died = matches!(start_daemons(&mut sockets, &[0]), Err(e) if e.contains("died"));
+        std::process::exit(if died { 0 } else { 1 });
+    }
+
+    #[test]
+    fn a_pool_that_dies_before_its_pid_is_recorded_is_reported_promptly() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "process::tests::pool_death_scenario", "--test-threads=1"])
+            .env("MORLOC_POOL_DEATH_SCENARIO", "1")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("a pool that died before its pid was recorded was not reported within 20 s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(status.success(), "{status}");
     }
 
     #[test]

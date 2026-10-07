@@ -351,7 +351,7 @@ fn check_case(
     }
 
     // @load of the whole stream file.
-    match shared_load_stream_file_as_array(path).and_then(|p| render_and_free(p, list_schema)) {
+    match shared_load_stream_file_as_array(path, Some(list_schema)).and_then(|p| render_and_free(p, list_schema)) {
         Ok(serde_json::Value::Array(xs)) if xs == expected => {}
         Ok(v) => bad.push(format!("{mode:?} @load: got {v}")),
         Err(e) => bad.push(format!("{mode:?} @load: error {e}")),
@@ -557,7 +557,7 @@ fn many_subpacket_round_trips() {
         if got != expected {
             failures.push(format!("{elem}: @next differs"));
         }
-        match shared_load_stream_file_as_array(path).and_then(|p| render_and_free(p, &list)) {
+        match shared_load_stream_file_as_array(path, Some(&list)).and_then(|p| render_and_free(p, &list)) {
             Ok(serde_json::Value::Array(xs)) if xs == expected => {}
             other => failures.push(format!("{elem}: @load differs: {:?}", other.map(|_| ()))),
         }

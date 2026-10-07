@@ -1,0 +1,23 @@
+-- @load of a stream file at a type other than the one it was written with
+-- raises Err (catchable) instead of reading the bytes as the wrong type.
+-- Writes an [Int] stream, then loads it as [Real] and as [Int].
+
+module main (writeInts, loadReals, loadInts)
+
+import root-py
+
+writeInts :: Str -> <IO> ()
+writeInts p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream Int))
+  @write 0 o [1, 2, 3]
+  @close o
+
+loadReals :: Str -> <IO> [Real]
+loadReals p = do
+  r <- @load p :: <IO> (Try Str [Real])
+  match r | (Ok xs) = xs | (Err _) = [-1.0]
+
+loadInts :: Str -> <IO> [Int]
+loadInts p = do
+  r <- @load p :: <IO> (Try Str [Int])
+  match r | (Ok xs) = xs | (Err _) = [-1]

@@ -24,11 +24,13 @@ module Morloc.CodeGenerator.LanguageDescriptor
   , loadLangDescriptorFromText
   , defaultLangDescriptor
   , matchNamePattern
+  , declaredNamePatterns
   ) where
 
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as KM
+import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -467,27 +469,46 @@ defaultLangDescriptor name ext =
     , ldClosureTableEntry = ""
     }
 
+-- | The identifier and operator patterns a lang.yaml declares
+-- (ldNamePattern, ldOperatorPattern). Both must be present, non-empty and
+-- valid patterns: a sourced name is emitted verbatim into the pool, so a
+-- language whose names cannot be checked is refused rather than trusted.
+declaredNamePatterns :: Text -> Either String (Text, Text)
+declaredNamePatterns content = do
+  v <- either (Left . Y.prettyPrintParseException) Right (Y.decodeEither' (TE.encodeUtf8 content))
+  (name, op) <-
+    AesonTypes.parseEither
+      (Aeson.withObject "lang.yaml" $ \o -> (,) <$> o Aeson..: "ldNamePattern" <*> o Aeson..: "ldOperatorPattern")
+      (v :: Aeson.Value)
+  mapM_ valid [("ldNamePattern", name), ("ldOperatorPattern", op)]
+  return (name, op)
+  where
+    valid (key, pat)
+      | T.null pat = Left (key <> " is empty")
+      | otherwise = either (\e -> Left (key <> ": " <> e)) (const (Right ())) (matchNamePattern pat "")
+
 -- Anchored regex-subset matcher. The pattern lives entirely in the
 -- language descriptor (lang.yaml); no language-specific identifier rule
 -- is hardcoded here. Supported subset: literal characters, '\'-escape,
 -- '.' (any char), character classes '[...]' / '[^...]' with 'a-z'
--- ranges, and the postfix quantifiers '*', '+', '?'. The whole input
--- must match (implicitly anchored at both ends). A pattern that fails
--- to parse is treated as "no constraint" (fail open) so a malformed
--- descriptor never wrongly rejects a user's program.
+-- ranges, groups '(...)', and the postfix quantifiers '*', '+', '?'. The
+-- whole input must match (implicitly anchored at both ends). A group
+-- matches at least one character. A pattern that fails to parse is an
+-- error.
 data RNode
   = RChar Char
   | RAny
   | RClass Bool [(Char, Char)]
+  | RGroup [RNode]
   | RStar RNode
   | RPlus RNode
   | ROpt RNode
 
-matchNamePattern :: Text -> Text -> Bool
+matchNamePattern :: Text -> Text -> Either String Bool
 matchNamePattern pat input =
   case P.parse (pRegex <* P.eof) "name-pattern" (T.unpack pat) of
-    Left _ -> True
-    Right ns -> any null (matchNodes ns (T.unpack input))
+    Left err -> Left ("invalid pattern " <> show (T.unpack pat) <> ": " <> show err)
+    Right ns -> Right (any null (matchNodes ns (T.unpack input)))
   where
     pRegex :: P.Parsec String () [RNode]
     pRegex = P.many pQuant
@@ -510,7 +531,8 @@ matchNamePattern pat input =
         [ P.char '\\' >> RChar <$> P.anyChar
         , RAny <$ P.char '.'
         , pClass
-        , RChar <$> P.noneOf "\\.[]*+?"
+        , RGroup <$> P.between (P.char '(') (P.char ')') pRegex
+        , RChar <$> P.noneOf "\\.[]()*+?"
         ]
 
     pClass :: P.Parsec String () RNode
@@ -530,8 +552,8 @@ matchNamePattern pat input =
 
 -- Match a node list against a string, returning every possible
 -- unconsumed suffix; the overall match succeeds iff some suffix is
--- empty. Atoms always consume exactly one character, so the RStar
--- recursion strictly shrinks the input and terminates.
+-- empty. Atoms and groups always consume at least one character, so the
+-- RStar recursion strictly shrinks the input and terminates.
 matchNodes :: [RNode] -> String -> [String]
 matchNodes [] s = [s]
 matchNodes (RStar n : rest) s =
@@ -550,6 +572,7 @@ stepAtom (RChar c) (x : xs) = [xs | x == c]
 stepAtom RAny (_ : xs) = [xs]
 stepAtom (RClass neg ranges) (x : xs) =
   [xs | any (\(a, b) -> a <= x && x <= b) ranges /= neg]
+stepAtom (RGroup ns) s = [r | r <- matchNodes ns s, length r < length s]
 stepAtom RStar {} _ = []
 stepAtom RPlus {} _ = []
 stepAtom ROpt {} _ = []

@@ -198,7 +198,7 @@ pub fn start(tmpdir: &str, output_format: OutputFormat, daemon: bool) {
             *g = RenderCfg { format: output_format };
         }
         NEXUS_PID.store(std::process::id() as i32, std::sync::atomic::Ordering::Release);
-        DAEMON_MODE.store(daemon, std::sync::atomic::Ordering::Release);
+        set_daemon_mode(daemon);
 
         // SIGPIPE ignore. One-liner but easy to miss; without it a
         // `write(1)` to a closed downstream pipe kills the nexus.
@@ -217,7 +217,7 @@ pub fn start(tmpdir: &str, output_format: OutputFormat, daemon: bool) {
             }
         };
         // Export to child pools via env.
-        std::env::set_var("MORLOC_NEXUS_STDIO_SOCK", &path);
+        crate::process::set_startup_env("MORLOC_NEXUS_STDIO_SOCK", &path);
         let socket_path = path.clone();
         std::thread::Builder::new()
             .name("morloc-stdio-server".into())
@@ -244,9 +244,7 @@ fn accept_loop(listener: UnixListener, _socket_path: String) {
                     })
                     .ok();
             }
-            Err(e) => {
-                eprintln!("stdio_server: accept error: {}", e);
-            }
+            Err(e) => crate::mcp::accept_failed("stdio_server", &e),
         }
     }
 }
@@ -263,8 +261,7 @@ fn handle_connection(mut stream: UnixStream) -> std::io::Result<()> {
                 let mut req = [0u8; 8];
                 stream.read_exact(&mut req)?;
                 let slot_id = i64::from_le_bytes(req);
-                let resp = do_next(slot_id);
-                write_response(&mut stream, resp)?;
+                serve_op(&mut stream, |_| Ok(do_next(slot_id)))?;
             }
             OP_WRITE_STDIO => {
                 let mut req = [0u8; 24];
@@ -272,12 +269,10 @@ fn handle_connection(mut stream: UnixStream) -> std::io::Result<()> {
                 let slot_id = i64::from_le_bytes(req[0..8].try_into().unwrap());
                 let relptr = i64::from_le_bytes(req[8..16].try_into().unwrap());
                 let size = u64::from_le_bytes(req[16..24].try_into().unwrap());
-                let resp = do_write(slot_id, relptr, size);
-                write_response(&mut stream, resp)?;
+                serve_op(&mut stream, |_| Ok(do_write(slot_id, relptr, size)))?;
             }
             OP_SPAWN => {
-                let resp = do_spawn(&mut stream)?;
-                write_response(&mut stream, resp)?;
+                serve_op(&mut stream, do_spawn)?;
             }
             other => {
                 write_response(
@@ -290,7 +285,29 @@ fn handle_connection(mut stream: UnixStream) -> std::io::Result<()> {
     }
 }
 
-enum Resp {
+pub(crate) fn set_daemon_mode(daemon: bool) {
+    DAEMON_MODE.store(daemon, std::sync::atomic::Ordering::Release);
+}
+
+pub(crate) fn serve_op(
+    stream: &mut UnixStream,
+    compute: impl FnOnce(&mut UnixStream) -> std::io::Result<Resp>,
+) -> std::io::Result<()> {
+    match morloc_runtime_types::panic::catch(|| compute(stream)) {
+        Ok(resp) => write_response(stream, resp?),
+        Err(_) => {
+            // PANIC-3
+            let _ = write_response(stream, Resp::Err("internal error".into()));
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            if DAEMON_MODE.load(std::sync::atomic::Ordering::Acquire) {
+                crate::process::fail_daemon();
+            }
+            crate::process::end_after_panic();
+        }
+    }
+}
+
+pub(crate) enum Resp {
     Ok(i64, u64), // relptr, size (NEXT_STDIO success)
     Ack,           // WRITE_STDIO success
     Eof,

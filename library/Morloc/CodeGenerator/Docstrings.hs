@@ -30,7 +30,6 @@ module Morloc.CodeGenerator.Docstrings
   -- * Schema-text predicates (used by emit helpers in Nexus.hs)
   , peelHint
   , resolveNestedTypes
-  , resolveDeclaredType
   , peelRecDecl
   , isStrWireSchema
   , isOptStrWireSchema
@@ -139,25 +138,11 @@ argLocPrefix i = do
 -- layout while still printing as @Hit@, which is what a caller wants to
 -- read once the fields are defined beneath the argument list. A
 -- transparent alias has no name worth keeping and becomes its target.
-resolveNestedTypes :: Int -> Type -> MorlocMonad Type
-resolveNestedTypes i t = do
-  scope <- MM.getGeneralScope i
-  resolveNestedTypesIn scope t
-
--- | 'resolveNestedTypes' for a type declaration. A declaration belongs to
--- no command, so only the universal scope is consulted.
-resolveDeclaredType :: Type -> MorlocMonad Type
-resolveDeclaredType = resolveNestedTypesIn Map.empty
-
--- | The walk behind 'resolveNestedTypes': a name is looked up in the given
--- scope first and in the universal scope after.
-resolveNestedTypesIn :: Scope -> Type -> MorlocMonad Type
-resolveNestedTypesIn scope = go []
+resolveNestedTypes :: Type -> MorlocMonad Type
+resolveNestedTypes = go []
   where
     lookupName :: TVar -> MorlocMonad (Maybe [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)])
-    lookupName v = do
-      uni <- MM.gets stateUniversalGeneralTypedefs
-      return (Map.lookup v scope <|> Map.lookup v uni)
+    lookupName v = Map.lookup v <$> MM.getGeneralScope
 
     go :: [Text] -> Type -> MorlocMonad Type
     go seen t = case t of
@@ -231,7 +216,7 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs0 retdoc) = do
   -- one doc per argument of the type: missing ones default, extras are dropped
   let argdocs = take (length ts) (argdocs0 <> repeat defaultValue)
   (ts0, argdocs') <- zipWithM (reduceArgDoc i) ts (map ArgDocAlias argdocs) |>> unzip
-  ts' <- mapM (resolveNestedTypes i) ts0
+  ts' <- mapM resolveNestedTypes ts0
   loc <- argLocPrefix i
   validateCommandLevelDirectives loc cmddoc
   mapM_ (rejectAuthoredMime loc) (cmddoc : retdoc : argdocs)
@@ -249,7 +234,7 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs0 retdoc) = do
   validateStdinArg loc cmdargs
   validateOptionalOrdering loc cmdargs
   (t0, retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
-  t' <- resolveNestedTypes i t0
+  t' <- resolveNestedTypes t0
   return $
     CmdDocSet
       { cmdDocDesc = docLines cmddoc
@@ -388,17 +373,8 @@ reduceArgDocFrom :: Set.Set TVar -> Int -> Type -> ArgDoc -> MorlocMonad (Type, 
 reduceArgDocFrom seen i t@(VarT v) arg
   | Set.member v seen = return (t, arg)
   | otherwise = do
-  scope <- MM.getGeneralScope i
-  -- The doc-processing index for an imported command carries the *importing*
-  -- module's typedef scope (empty for a bare re-export into the root), while
-  -- the argument's type alias is resolved in the command's OWN module. Fall
-  -- back to the universal scope (the union of every module's typedefs) so an
-  -- alias's docstrings -- description, check.path, stdin, arg/metavar/default
-  -- -- reach the use site even when the alias itself is not re-exported and
-  -- imported into the root. Local scope wins when present, so this only
-  -- rescues the otherwise-lost case.
-  uni <- MM.gets stateUniversalGeneralTypedefs
-  case Map.lookup v scope <|> Map.lookup v uni of
+  scope <- MM.getGeneralScope
+  case Map.lookup v scope of
     -- Record-newtype: declared via @record Foo where { ... }@. The body
     -- is a 'NamU' carrying the record-level and field-level
     -- docstrings; non-record newtypes are opaque (their docstring is
@@ -593,7 +569,7 @@ resolveAlt loc t r ctorDocs = do
       loc <> ": `@source`, `@form`, `@literal` and `@check` do not apply to an"
         <> " unrolled `data` argument; each constructor's values are read as"
         <> " arguments of their own types"
-  scope <- MM.gets stateUniversalGeneralTypedefs
+  scope <- MM.gets stateGeneralTypedefs
   let (isOpt, tv) = case t of
         OptionalT (VarT v) -> (True, Just v)
         VarT v -> (False, Just v)
@@ -814,7 +790,7 @@ reservedLongs = ["help", "version"]
 -- is what every reader of the manifest expects.
 canonicalCtorDefault :: Type -> Text -> MorlocMonad Text
 canonicalCtorDefault t def = do
-  scope <- MM.gets stateUniversalGeneralTypedefs
+  scope <- MM.gets stateGeneralTypedefs
   let bare = MT.strip def
       ctors = case t of
         VarT v -> scopeDataCtors scope v

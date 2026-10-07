@@ -518,6 +518,11 @@ if should_run "render"; then
     assert_http_status "POST /call/echo?render=nope -> 400" "400" \
         "http://127.0.0.1:${HTTP_PORT}/call/echo?render=nope" \
         -X POST -H "Content-Type: application/json" -d '["hi"]'
+
+    # An internal entry is reachable only through ?render=, never by name.
+    assert_http_status "POST /call/mlcp_echo_shout (internal) -> 404" "404" \
+        "http://127.0.0.1:${HTTP_PORT}/call/mlcp_echo_shout" \
+        -X POST -H "Content-Type: application/json" -d '["hi"]'
 fi
 
 # ======================================================================
@@ -966,6 +971,62 @@ if should_run "http-pure"; then
 fi
 
 # ======================================================================
+# A daemon HTTP listener off loopback requires a credential (NET-1)
+# ======================================================================
+
+if should_run "http-auth"; then
+    echo "${BOLD}[http-auth] Daemon HTTP credential${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+    assert_contains "the HTTP listener binds loopback by default" \
+        "http://127.0.0.1:${HTTP_PORT}" "$(cat "$LAST_DAEMON_LOG")"
+    stop_daemon "$LAST_DAEMON_PID"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --http-host 0.0.0.0
+    open_pid=$LAST_DAEMON_PID
+    for _ in $(seq 1 100); do
+        kill -0 "$open_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$open_pid" 2>/dev/null; then
+        refused=no
+        stop_daemon "$open_pid"
+    else
+        refused=yes
+        wait "$open_pid" 2>/dev/null || true
+    fi
+    assert_test "an open bind with no token is refused" "yes" "$refused"
+    assert_contains "the refusal names the token option" "auth-token /" "$(cat "$LAST_DAEMON_LOG")"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --http-host 0.0.0.0 --auth-token s3cret
+    wait_for_http "$HTTP_PORT" 10
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -H "Content-Type: application/json" -d '[3, 4]')
+    assert_test "a request with no token is refused" "401" "$code"
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -H "Authorization: Bearer nope" -H "Content-Type: application/json" -d '[3, 4]')
+    assert_test "a request with a wrong token is refused" "401" "$code"
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -H "Authorization: Bearer s3cret" -H "Content-Type: application/json" -d '[3, 4]')
+    assert_test "a request with the token is served" "7" "$(json_field "$result" "result")"
+    stop_daemon "$LAST_DAEMON_PID"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --http-host 0.0.0.0 --allow-no-auth
+    wait_for_http "$HTTP_PORT" 10
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -H "Content-Type: application/json" -d '[3, 4]')
+    assert_test "an open bind serves when explicitly allowed" "7" "$(json_field "$result" "result")"
+    assert_contains "an allowed open bind warns" "no auth token" "$(cat "$LAST_DAEMON_LOG")"
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
 # Test Group 4: Unix socket (length-prefixed JSON)
 # ======================================================================
 
@@ -1131,11 +1192,11 @@ if should_run "port-ephemeral"; then
     http_line=$(grep "listening on http://" "$LAST_DAEMON_LOG" | head -1 || true)
     tcp_line=$(grep "listening on tcp://"  "$LAST_DAEMON_LOG" | head -1 || true)
 
-    assert_contains "http ready line is URL form"  "http://0.0.0.0:"   "$http_line"
+    assert_contains "http ready line is URL form"  "http://127.0.0.1:"   "$http_line"
     assert_contains "tcp  ready line is URL form"  "tcp://127.0.0.1:"  "$tcp_line"
 
     # Extract the assigned ports.
-    HTTP_PORT=$(echo "$http_line" | sed -n 's#.*http://0\.0\.0\.0:\([0-9][0-9]*\).*#\1#p')
+    HTTP_PORT=$(echo "$http_line" | sed -n 's#.*http://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p')
     TCP_PORT=$( echo "$tcp_line"  | sed -n 's#.*tcp://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p')
 
     # Both should be in the ephemeral range (>1024) and not be 0.
@@ -1243,7 +1304,7 @@ if should_run "port-file"; then
     done
 
     http_line=$(grep "listening on http://" "$LAST_DAEMON_LOG" | head -1 || true)
-    HTTP_PORT_C=$(echo "$http_line" | sed -n 's#.*http://0\.0\.0\.0:\([0-9][0-9]*\).*#\1#p')
+    HTTP_PORT_C=$(echo "$http_line" | sed -n 's#.*http://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p')
 
     assert_test "unwritable port-file: daemon still binds"   "1" \
         "$([ -n "$HTTP_PORT_C" ] && [ "$HTTP_PORT_C" -gt 0 ] && echo 1 || echo 0)"
@@ -1458,6 +1519,256 @@ if should_run "shutdown"; then
 fi
 
 # ======================================================================
+# Shutdown while a pool call never returns
+# ======================================================================
+
+if should_run "worker-crash"; then
+    echo "${BOLD}[worker-crash] a worker killed inside a call is recovered${RESET}"
+
+    CRASH_DIR=$(mktemp -d)
+    WORK_DIRS+=("$CRASH_DIR")
+    compile_program "crash.loc" "$CRASH_DIR"
+    HTTP_PORT=$(pick_port)
+    MORLOC_PY_TRACE_RETIRE=1; export MORLOC_PY_TRACE_RETIRE
+    start_daemon "$CRASH_DIR" --http-port "$HTTP_PORT"
+    unset MORLOC_PY_TRACE_RETIRE
+    wait_for_http "$HTTP_PORT" 15
+    local_pid=$LAST_DAEMON_PID
+
+    for lang in py r; do
+        result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/${lang}Ok" -d '[7]')
+        assert_test "worker-crash $lang: works before the crash" "7" "$(json_field "$result" "result")"
+        python3 "$SHM_PROBE" names "$local_pid" > "$CRASH_DIR/shm-names-$lang"
+        recoveries=$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)
+        curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/${lang}Die" -d '[7]' > /dev/null 2>&1 || true
+        recovered=no
+        for _ in $(seq 1 150); do
+            now=$(grep -c "recovery complete" "$LAST_DAEMON_LOG" || true)
+            if [ "$now" -gt "$recoveries" ]; then recovered=yes; break; fi
+            sleep 0.1
+        done
+        assert_test "worker-crash $lang: the daemon recovers" "yes" "$recovered"
+        result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/${lang}Ok" -d '[8]')
+        assert_test "worker-crash $lang: works after recovery" "8" "$(json_field "$result" "result")"
+        assert_test "worker-crash $lang: no shared memory of the dead worker remains" "0" \
+            "$(python3 "$SHM_PROBE" live "$CRASH_DIR/shm-names-$lang")"
+    done
+
+
+    # A worker started for a call blocked in another language retires once
+    # idle; a retirement ends nothing. Fork-mode workers are processes,
+    # thread-mode workers (the macOS default) are threads of one process.
+    workers_of() { (pgrep -f "$CRASH_DIR/.*pools/py" 2>/dev/null || true) | wc -l | tr -d ' '; }
+    threads_of() {
+        tpid=$( (pgrep -f "$CRASH_DIR/.*pools/py" 2>/dev/null || true) | head -n 1)
+        [ -z "$tpid" ] && { echo 0; return; }
+        tn=$(ps -o nlwp= -p "$tpid" 2>/dev/null | tr -d ' \n')
+        case "$tn" in
+            ''|*[!0-9]*) ps -M -p "$tpid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ' ;;
+            *) echo "$tn" ;;
+        esac
+    }
+    retire_check() {
+        rc_label=$1
+        if [ "$2" = thread ]; then rc_count=threads_of; else rc_count=workers_of; fi
+        recoveries=$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)
+        base=$($rc_count)
+        log_mark=$(wc -l < "$LAST_DAEMON_LOG" | tr -d ' ')
+        t0=$SECONDS
+        curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/slowly" -d '[1]' > /dev/null 2>&1 &
+        S1=$!
+        curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/slowly" -d '[2]' > /dev/null 2>&1 &
+        S2=$!
+        timeline=""
+        for _ in 1 2; do sleep 0.5; timeline="$timeline $($rc_count)"; done
+        peak=$($rc_count)
+        wait "$S1" "$S2" 2>/dev/null || true
+        calls_took=$((SECONDS - t0))
+        for _ in $(seq 1 18); do sleep 0.5; timeline="$timeline $($rc_count)"; done
+        after=$($rc_count)
+        assert_test "worker-crash${rc_label}: an idle extra worker retires" "yes" "$([ "$after" -lt "$peak" ] && echo yes || echo no)"
+        if [ "$after" -ge "$peak" ]; then
+            echo "      $2 pool, counting $rc_count: base $base, peak $peak, after $after; calls took ${calls_took}s"
+            echo "      every 0.5 s:$timeline"
+            ps -axo pid,ppid,stat,etime,command 2>/dev/null | grep "$CRASH_DIR" | grep -v grep | cut -c1-200 | sed 's/^/      ps: /' || true
+            tail -n "+$((log_mark + 1))" "$LAST_DAEMON_LOG" | cut -c1-200 | sed 's/^/      log: /'
+            late=""
+            for _ in $(seq 1 30); do sleep 1; late="$late $($rc_count)"; done
+            echo "      30 more seconds, every 1 s:$late"
+            grep "py worker .*\(retiring\|cannot retire\)" "$LAST_DAEMON_LOG" | tail -n 5 | cut -c1-200 | sed 's/^/      late log: /' || true
+        fi
+        assert_test "worker-crash${rc_label}: a retirement starts no recovery" "$recoveries" \
+            "$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)"
+        result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/pyOk" -d '[9]')
+        assert_test "worker-crash${rc_label}: works after a retirement" "9" "$(json_field "$result" "result")"
+    }
+    case "${MORLOC_PY_POOL:-}" in
+        fork|thread) default_mode=$MORLOC_PY_POOL ;;
+        *) if [ "$(uname)" = Darwin ]; then default_mode=thread; else default_mode=fork; fi ;;
+    esac
+    # A worker leaving by an exception no handler catches (SystemExit) ends
+    # the pool in either mode, so the daemon recovers what it held.
+    exit_check() {
+        ec_label=$1
+        recoveries=$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)
+        curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/pyExit" -d '[7]' > /dev/null 2>&1 || true
+        recovered=no
+        for _ in $(seq 1 150); do
+            now=$(grep -c "recovery complete" "$LAST_DAEMON_LOG" || true)
+            if [ "$now" -gt "$recoveries" ]; then recovered=yes; break; fi
+            sleep 0.1
+        done
+        assert_test "worker-crash${ec_label}: a worker that raises SystemExit ends its pool" "yes" "$recovered"
+        result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/pyOk" -d '[5]')
+        assert_test "worker-crash${ec_label}: works after a SystemExit" "5" "$(json_field "$result" "result")"
+    }
+    retire_check "" "$default_mode"
+    exit_check ""
+
+    stop_daemon "$local_pid"
+    pkill -9 -f "$CRASH_DIR" 2>/dev/null || true
+
+    if [ "$default_mode" = fork ]; then
+        HTTP_PORT=$(pick_port)
+        MORLOC_PY_POOL=thread; MORLOC_PY_TRACE_RETIRE=1; export MORLOC_PY_POOL MORLOC_PY_TRACE_RETIRE
+        start_daemon "$CRASH_DIR" --http-port "$HTTP_PORT"
+        unset MORLOC_PY_POOL MORLOC_PY_TRACE_RETIRE
+        wait_for_http "$HTTP_PORT" 15
+        local_pid=$LAST_DAEMON_PID
+        retire_check " thread pool" thread
+        exit_check " thread pool"
+        stop_daemon "$local_pid"
+        pkill -9 -f "$CRASH_DIR" 2>/dev/null || true
+    fi
+    echo ""
+fi
+
+if should_run "shutdown-wedged"; then
+    echo "${BOLD}[shutdown-wedged] SIGTERM with calls inside a wedged pool${RESET}"
+
+    WEDGE_DIR=$(mktemp -d)
+    WORK_DIRS+=("$WEDGE_DIR")
+    compile_program "wedge.loc" "$WEDGE_DIR"
+
+    # One pool gives five workers. Five calls occupy them; a sixth waits in
+    # the queue and must be refused at shutdown, never started.
+    HTTP_PORT=$(pick_port)
+    start_daemon "$WEDGE_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+    local_pid=$LAST_DAEMON_PID
+    CALL_PIDS=()
+    for _ in 1 2 3 4 5 6; do
+        curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/hang" -d '[1]' > /dev/null 2>&1 &
+        CALL_PIDS+=($!)
+    done
+    sleep 2
+    python3 "$SHM_PROBE" names "$local_pid" > "$WEDGE_DIR/shm-names"
+
+    t0=$SECONDS
+    kill "$local_pid" 2>/dev/null
+    exited=no
+    for _ in $(seq 1 200); do
+        if ! kill -0 "$local_pid" 2>/dev/null; then exited=yes; break; fi
+        sleep 0.1
+    done
+    assert_test "daemon exits within 20 s of SIGTERM" "yes" "$exited"
+    if [ "$exited" = no ]; then kill -9 "$local_pid" 2>/dev/null || true; fi
+    status=0
+    wait "$local_pid" 2>/dev/null || status=$?
+    assert_test "daemon exits with status 0" "0" "$status"
+    stopped_in=$((SECONDS - t0))
+    assert_test "every worker returned, none was left behind" "0" \
+        "$(grep -c 'did not return' "$LAST_DAEMON_LOG" || true)"
+    assert_test "daemon stopped within 10 s" "yes" "$([ "$stopped_in" -le 10 ] && echo yes || echo no)"
+    assert_test "no shared memory outlives the daemon" "0" \
+        "$(python3 "$SHM_PROBE" live "$WEDGE_DIR/shm-names")"
+    new_pids=()
+    for p in ${DAEMON_PIDS[@]+"${DAEMON_PIDS[@]}"}; do
+        [[ "$p" != "$local_pid" ]] && new_pids+=("$p")
+    done
+    DAEMON_PIDS=("${new_pids[@]+"${new_pids[@]}"}")
+    for p in ${CALL_PIDS[@]+"${CALL_PIDS[@]}"}; do kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done
+
+    leftover=$( (pgrep -f "$WEDGE_DIR" 2>/dev/null || true) | wc -l | tr -d ' ')
+    assert_test "no pool process outlives the daemon" "0" "$leftover"
+    pkill -9 -f "$WEDGE_DIR" 2>/dev/null || true
+
+    # A client that sends half a request holds its worker past the shutdown
+    # waits; the daemon exits without it, cleanly.
+    HTTP_PORT=$(pick_port)
+    start_daemon "$WEDGE_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+    local_pid=$LAST_DAEMON_PID
+    exec 7<>"/dev/tcp/127.0.0.1/${HTTP_PORT}"
+    printf 'POST /call/hang HTTP/1.1\r\nHost: x\r\n' >&7
+    sleep 1
+    python3 "$SHM_PROBE" names "$local_pid" > "$WEDGE_DIR/shm-names"
+    kill "$local_pid" 2>/dev/null
+    exited=no
+    for _ in $(seq 1 200); do
+        if ! kill -0 "$local_pid" 2>/dev/null; then exited=yes; break; fi
+        sleep 0.1
+    done
+    assert_test "daemon with a stalled client exits within 20 s" "yes" "$exited"
+    if [ "$exited" = no ]; then kill -9 "$local_pid" 2>/dev/null || true; fi
+    status=0
+    wait "$local_pid" 2>/dev/null || status=$?
+    exec 7>&-
+    assert_test "daemon with a stalled client exits with status 0" "0" "$status"
+    assert_test "the stalled client's worker was left behind" "1" \
+        "$(grep -c 'did not return' "$LAST_DAEMON_LOG" || true)"
+    assert_test "daemon with a stalled client leaves no shared memory" "0" \
+        "$(python3 "$SHM_PROBE" live "$WEDGE_DIR/shm-names")"
+    new_pids=()
+    for p in ${DAEMON_PIDS[@]+"${DAEMON_PIDS[@]}"}; do
+        [[ "$p" != "$local_pid" ]] && new_pids+=("$p")
+    done
+    DAEMON_PIDS=("${new_pids[@]+"${new_pids[@]}"}")
+    pkill -9 -f "$WEDGE_DIR" 2>/dev/null || true
+
+    # An /eval still compiling at shutdown is stopped with the daemon, not
+    # left to run out its own limits.
+    HTTP_PORT=$(pick_port)
+    start_daemon "$WEDGE_DIR" --http-port "$HTTP_PORT" --eval-timeout 120 \
+        --eval-allowed-modules root-py
+    wait_for_http "$HTTP_PORT" 10
+    local_pid=$LAST_DAEMON_PID
+    MARK=$((7000000 + RANDOM))
+    body=$(python3 -c "
+import json
+print(json.dumps({'expr': 'import root-py\n$MARK + ' + ' + '.join(['1'] * 4000)}))
+")
+    curl -s -o /dev/null --max-time 60 -X POST "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -H "Content-Type: application/json" -d "$body" > /dev/null 2>&1 &
+    EVAL_CALL=$!
+    started=no
+    for _ in $(seq 1 100); do
+        if pgrep -f "$MARK [+] 1" > /dev/null 2>&1; then started=yes; break; fi
+        sleep 0.1
+    done
+    assert_test "the eval is running before shutdown" "yes" "$started"
+    kill "$local_pid" 2>/dev/null
+    for _ in $(seq 1 200); do
+        if ! kill -0 "$local_pid" 2>/dev/null; then break; fi
+        sleep 0.1
+    done
+    kill -9 "$local_pid" 2>/dev/null || true
+    wait "$local_pid" 2>/dev/null || true
+    sleep 0.5
+    assert_test "no eval process outlives the daemon" "0" \
+        "$( (pgrep -f "$MARK [+] 1" 2>/dev/null || true) | wc -l | tr -d ' ')"
+    pkill -9 -f "$MARK [+] 1" 2>/dev/null || true
+    kill "$EVAL_CALL" 2>/dev/null || true
+    wait "$EVAL_CALL" 2>/dev/null || true
+    new_pids=()
+    for p in ${DAEMON_PIDS[@]+"${DAEMON_PIDS[@]}"}; do
+        [[ "$p" != "$local_pid" ]] && new_pids+=("$p")
+    done
+    DAEMON_PIDS=("${new_pids[@]+"${new_pids[@]}"}")
+    echo ""
+fi
+
+# ======================================================================
 # Test Group 10: Router
 # ======================================================================
 
@@ -1558,7 +1869,7 @@ if should_run "router"; then
 
         # Verify child daemons are also cleaned up
         sleep 1
-        remaining=$(pgrep -f "morloc-router-arithmetic" 2>/dev/null | wc -l) || remaining=0
+        remaining=$(pgrep -f "router-arithmetic.sock" 2>/dev/null | wc -l) || remaining=0
 
         TOTAL=$((TOTAL + 1))
         printf "  %-50s " "router cleans up child daemons"

@@ -51,8 +51,6 @@ module Morloc.Monad
   , getDocStrings
   , getConcreteScope
   , getGeneralScope
-  , getConcreteUniversalScope
-  , getGeneralUniversalScope
 
     -- * handling tree depth
   , incDepth
@@ -536,35 +534,19 @@ getDocStrings i = do
     GMapNoSnd -> error "Compiler bug: Internal GMap key missing"
     _ -> error "Compiler bug: No entry found for index in stateSignatures"
 
-getConcreteScope :: Int -> Lang -> MorlocMonad Scope
-getConcreteScope i lang0 = do
+-- | The program's per-language type forms. Type names are resolved to the
+-- declaration they denote before these are built, so one table serves every
+-- module.
+getConcreteScope :: Lang -> MorlocMonad Scope
+getConcreteScope lang0 = do
   -- A guest member (e.g. futhark) has no concrete scope of its own; resolve
   -- against its pool host's scope (cpp). Identity for non-members.
   lang <- LR.poolOf <$> gets stateLangRegistry <*> pure lang0
-  p <- gets stateConcreteTypedefs
-  return $ case GMap.lookup i p of
-    (GMapJust langmap) -> case Map.lookup lang langmap of
-      (Just scope) -> scope
-      Nothing -> Map.empty
-    _ -> Map.empty
+  Map.findWithDefault Map.empty lang <$> gets stateConcreteTypedefs
 
-getGeneralScope :: Int -> MorlocMonad Scope
-getGeneralScope i = do
-  p <- gets stateGeneralTypedefs
-  return $ case GMap.lookup i p of
-    (GMapJust scope) -> scope
-    _ -> Map.empty
-
-getConcreteUniversalScope :: Lang -> MorlocMonad Scope
-getConcreteUniversalScope lang0 = do
-  lang <- LR.poolOf <$> gets stateLangRegistry <*> pure lang0
-  scopeMap <- gets stateUniversalConcreteTypedefs
-  case Map.lookup lang scopeMap of
-    (Just scope) -> return scope
-    Nothing -> return Map.empty
-
-getGeneralUniversalScope :: MorlocMonad Scope
-getGeneralUniversalScope = gets stateUniversalGeneralTypedefs
+-- | The program's general type declarations.
+getGeneralScope :: MorlocMonad Scope
+getGeneralScope = gets stateGeneralTypedefs
 
 {- | Get the module name from state, falling back to "nexus" if unset.
 This is the canonical name for pool subdirectories and manifest references.

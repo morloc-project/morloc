@@ -289,7 +289,18 @@ pub fn unpack_with_schema(
     let mut w = UnpackWalk { res: Resolver::new(schema), cursor: unsafe { base.add(schema.width) }, reader: &data[..] };
     let mut st = Stack::new();
     st.enter(schema, base, ());
-    walk::run(&mut w, &mut st)?;
+    let walked = walk::run(&mut w, &mut st);
+    let trailing = w.reader.len();
+    if let Err(e) = walked {
+        let _ = shm::shfree(base);
+        return Err(e);
+    }
+    if trailing != 0 {
+        let _ = shm::shfree(base);
+        return Err(MorlocError::Serialization(format!(
+            "{trailing} bytes follow the MessagePack value"
+        )));
+    }
     Ok(base)
 }
 
@@ -969,6 +980,15 @@ mod tests {
         ragged.extend_from_slice(&[0u8; 12]);
         let err = unpack_with_schema(&ragged, &schema).unwrap_err().to_string();
         assert!(err.contains("not a whole number of 64-bit limbs"), "{err}");
+    }
+
+    #[test]
+    fn bytes_after_the_value_are_refused() {
+        let _shm = setup_shm();
+        let int = parse_schema("i8").unwrap();
+        for text in [&b"1.5"[..], b"5x", b"[1"] {
+            assert!(unpack_with_schema(text, &int).is_err(), "{:?} read as an Int", std::str::from_utf8(text));
+        }
     }
 
     #[test]

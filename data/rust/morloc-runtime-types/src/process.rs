@@ -150,13 +150,21 @@ pub fn pid_namespace() -> Option<String> {
 pub fn token() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static CACHED: AtomicU64 = AtomicU64::new(0);
-    let pid = std::process::id();
-    let cached = CACHED.load(Ordering::Relaxed);
-    if cached != 0 && (cached >> 32) as u32 == pid {
-        return cached;
+    static CACHED_GENERATION: AtomicU64 = AtomicU64::new(u64::MAX);
+    // FORK-14: every writer in one generation stores the same token, before
+    // the generation that makes it visible; a token without a start stamp is
+    // never stored.
+    let generation = crate::fork_generation::generation();
+    if CACHED_GENERATION.load(Ordering::Acquire) == generation {
+        return CACHED.load(Ordering::Relaxed);
     }
-    let token = make_token(pid, start_time(pid));
-    CACHED.store(token, Ordering::Relaxed);
+    let pid = std::process::id();
+    let start = start_time(pid);
+    let token = make_token(pid, start);
+    if start != 0 {
+        CACHED.store(token, Ordering::Relaxed);
+        CACHED_GENERATION.store(generation, Ordering::Release);
+    }
     token
 }
 
@@ -257,7 +265,7 @@ mod tests {
     fn a_child_inherits_no_cached_token() {
         let parent = token();
         let mut fds = [0 as libc::c_int; 2];
-        unsafe { assert_eq!(libc::pipe(fds.as_mut_ptr()), 0) };
+        unsafe { assert_eq!(crate::fd::pipe(fds.as_mut_ptr()), 0) };
         let child = exited_child(|| unsafe {
             let t = token().to_le_bytes();
             libc::write(fds[1], t.as_ptr() as *const libc::c_void, 8);

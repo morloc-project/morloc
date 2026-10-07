@@ -682,7 +682,7 @@ pub const MAX_FRAME_WORKERS: usize = 16;
 /// Cached on first call (matches the `MORLOC_TRACE` / `MORLOC_QUIET`
 /// pattern), so subsequent calls are a single atomic load.
 pub fn frame_workers() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    static CACHED: crate::publish_once::PublishOnce<usize> = crate::publish_once::PublishOnce::new();
     *CACHED.get_or_init(|| {
         if let Ok(s) = std::env::var("MORLOC_FRAME_WORKERS") {
             if let Ok(n) = s.parse::<usize>() {
@@ -1149,7 +1149,7 @@ pub fn decompress_packet_if_needed(bytes: &[u8]) -> Result<Cow<'_, [u8]>, Morloc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::{make_mesg_data_packet, PACKET_FORMAT_MSGPACK};
+    use crate::packet::make_mesg_data_packet;
     use crate::schema::parse_schema;
 
     #[test]
@@ -1562,4 +1562,44 @@ mod tests {
             }
         }
     }
+}
+
+/// The element count of the data sub-packet starting at `off` in `file`:
+/// the array length its payload begins with. A compressed payload is
+/// decoded only as far as those first bytes.
+pub fn subpacket_elem_count(file: &[u8], off: u64) -> Result<u64, MorlocError> {
+    let off = off as usize;
+    let header_bytes: &[u8; 32] = file
+        .get(off..off + 32)
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| MorlocError::Packet("sub-packet header past the end of the file".into()))?;
+    let header = crate::packet::PacketHeader::from_bytes(header_bytes)?;
+    if !header.is_data() {
+        return Err(MorlocError::Packet("expected a data sub-packet".into()));
+    }
+    // SAFETY: is_data() implies the data variant of the command union.
+    let compression = unsafe { header.command.data.compression };
+    let start = off + 32 + header.offset as usize;
+    let payload = file
+        .get(start..start + header.length as usize)
+        .ok_or_else(|| MorlocError::Packet("sub-packet payload past the end of the file".into()))?;
+    let mut first = [0u8; 8];
+    match compression {
+        crate::packet::PACKET_COMPRESSION_NONE => {
+            first.copy_from_slice(payload.get(..8).ok_or_else(|| {
+                MorlocError::Packet("sub-packet payload shorter than its length".into())
+            })?);
+        }
+        crate::packet::PACKET_COMPRESSION_ZSTD => {
+            let mut decoder = zstd::stream::read::Decoder::with_buffer(payload)
+                .map_err(|e| MorlocError::Packet(format!("sub-packet payload: {e}")))?;
+            decoder
+                .read_exact(&mut first)
+                .map_err(|e| MorlocError::Packet(format!("sub-packet payload: {e}")))?;
+        }
+        other => {
+            return Err(MorlocError::Packet(format!("sub-packet has unknown compression byte {other}")));
+        }
+    }
+    Ok(u64::from_le_bytes(first))
 }

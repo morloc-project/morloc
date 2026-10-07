@@ -124,9 +124,9 @@ bracketSliceSteps = [WalkBracketSlice]
 -- | True if @t@'s outermost head is @IFile@ after walking alias chains
 -- and peeling @EffectT@ / @AppT@ wrappers. Used by both codegen paths
 -- to decide whether a pattern application routes to the walker.
-typeHeadIsIFile :: Int -> Type -> MorlocMonad Bool
-typeHeadIsIFile midx originalType = do
-  scope <- MM.getGeneralScope midx
+typeHeadIsIFile :: Type -> MorlocMonad Bool
+typeHeadIsIFile originalType = do
+  scope <- MM.getGeneralScope
   go scope (type2typeu (peel originalType))
   where
     peel (EffectT _ inner) = peel inner

@@ -2000,20 +2000,6 @@ mod tests {
 mod compat_tests {
     use super::*;
 
-    fn dump(label: &str, s: &Schema, depth: usize) {
-        let indent = "  ".repeat(depth);
-        print!("{}{}: type={} size={} width={}", indent, label, s.serial_type as u32, s.size, s.width);
-        if !s.offsets.is_empty() {
-            print!(" offsets={:?}", s.offsets);
-        }
-        if let Some(ref h) = s.hint { print!(" hint=\"{}\"", h); }
-        if !s.keys.is_empty() { print!(" keys={:?}", s.keys); }
-        println!();
-        for (i, p) in s.parameters.iter().enumerate() {
-            dump(&format!("param[{}]", i), p, depth + 1);
-        }
-    }
-
     #[test]
     fn test_schema_compat_with_c() {
         // Root-level metadata for representative schemas. Optional's

@@ -52,7 +52,7 @@ autoRequire = go
     go :: AnnoS (Indexed Type) Many Int
        -> MorlocMonad (AnnoS (Indexed Type) Many Int)
     go (AnnoS g c (LetS v bound body)) = do
-      bound' <- go bound
+      bound' <- go bound >>= throwErrPayload v
       body' <- go body
       mGuarded <- guardDiscarded v bound' body'
       return $ AnnoS g c (LetS v bound' (fromMaybe body' mGuarded))
@@ -70,7 +70,7 @@ autoRequire = go
     guardDiscarded v bound@(AnnoS (Idx i _) c _) body
       | not (BT.doDiscardPrefix `MT.isPrefixOf` unEVar v) = return Nothing
       | otherwise = do
-          t <- resolvedType i (typeSofAnnoS bound)
+          t <- resolvedType (typeSofAnnoS bound)
           case tryArms t of
             Nothing -> return Nothing
             Just (errT, okT) -> do
@@ -90,6 +90,35 @@ autoRequire = go
               return . Just $ AnnoS (idx (typeSofAnnoS body)) c
                 (LetS guardVar guardE body)
 
+    -- A refutable do-bind's guard throws the rendered subject (see
+    -- 'BT.doGuardPrefix'). When the subject is a @Try Str a@ on its Err
+    -- arm, throw the Err message itself instead, as @unwrap@ does.
+    throwErrPayload ::
+      EVar ->
+      AnnoS (Indexed Type) Many Int ->
+      MorlocMonad (AnnoS (Indexed Type) Many Int)
+    throwErrPayload v guardE@(AnnoS g c (IfS cond yes (AnnoS tg tc (IntrinsicS IntrThrow [AnnoS _ _ (IntrinsicS IntrShow [subject])]))))
+      | BT.doGuardPrefix `MT.isPrefixOf` unEVar v = do
+          t <- resolvedType (typeSofAnnoS subject)
+          case tryArms t of
+            Just (errT@(VarT e), _) | e == BT.str -> do
+              let AnnoS (Idx i _) sc _ = subject
+                  idx = Idx i
+                  nameOf n = AnnoS (idx (VarT BT.str)) sc (StrS n)
+                  fieldIdx = AnnoS (idx (VarT BT.int)) sc (IntS i 0)
+                  errMsg = AnnoS (idx errT) sc
+                    (IntrinsicS IntrCtorField [subject, nameOf BT.tryErrCtor, fieldIdx])
+                  isErr = AnnoS (idx (VarT BT.bool)) sc
+                    (IntrinsicS IntrTagTest [subject, nameOf BT.tryErrCtor])
+                  throwMsg = AnnoS tg tc (IntrinsicS IntrThrow [errMsg])
+                  shown = AnnoS tg tc (IfS isErr throwMsg (elseBranch guardE))
+              return (AnnoS g c (IfS cond yes shown))
+            _ -> return guardE
+    throwErrPayload _ guardE = return guardE
+
+    elseBranch (AnnoS _ _ (IfS _ _ e)) = e
+    elseBranch e = e
+
     typeSofAnnoS (AnnoS (Idx _ t) _ _) = t
 
     -- Expand aliases before inspecting the head, so a `type MyOutcome =
@@ -97,9 +126,9 @@ autoRequire = go
     -- rejected: it cannot be shown to be a Try, and failing the build on a
     -- type the evaluator cannot reduce would reject programs that compiled
     -- before this pass existed.
-    resolvedType :: Int -> Type -> MorlocMonad Type
-    resolvedType i t = do
-      scope <- MM.getGeneralScope i
+    resolvedType :: Type -> MorlocMonad Type
+    resolvedType t = do
+      scope <- MM.getGeneralScope
       return $ case TE.evaluateType scope (type2typeu t) of
         Right t' -> typeOf t'
         Left _ -> t

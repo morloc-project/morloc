@@ -1,17 +1,9 @@
--- Cross-module type-alias cycles must be rejected by the frontend,
--- not silently hang the compiler. Pre-fix, this program causes
--- `morloc make` to loop forever inside one of several reduce-and-retry
--- sites (Realize.handleMany; the six expressCore/expressPolyExpr
--- expand cases in Express.hs; or the alias-chase in pairEval) because
--- the cycle A -> ABody -> A never terminates and no visited-set
--- protects those walks.
---
--- The frontend's existing intra-module SCC check
--- (checkMutualRecursion) does not catch this shape because each
--- module's typedef looks acyclic in isolation; the cycle is only
--- visible after imports are resolved. The fix runs cycle detection
--- on the merged post-import typedef graph and reports a clear
--- "Mutual recursion between type definitions" error.
+-- A type-alias cycle spanning two modules must be rejected by the
+-- frontend, not hang the compiler in a reduce-and-retry loop
+-- (Realize.handleMany, the expand cases in Express.hs, the alias-chase in
+-- pairEval) that walks A -> ABody -> A forever. A type name resolves only
+-- to a declaration its module declares or imports, so such a cycle needs
+-- the two modules to import each other, and the import cycle is reported.
 
 module main (fooLiteral, fooTuple, fooList, fooRecord)
 import root

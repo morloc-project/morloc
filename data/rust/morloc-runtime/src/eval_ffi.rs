@@ -29,8 +29,7 @@ unsafe fn take_c_errmsg_or(err: *mut c_char, fallback: &str) -> String {
 
 // ── Constructor functions (called by manifest_ffi.rs and daemon.c) ───────────
 
-#[no_mangle]
-pub unsafe extern "C" fn make_morloc_bound_var(
+pub(crate) unsafe fn make_morloc_bound_var(
     schema_str: *const c_char,
     varname: *mut c_char,
     errmsg: *mut *mut c_char,
@@ -51,8 +50,7 @@ pub unsafe extern "C" fn make_morloc_bound_var(
     expr
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn make_morloc_literal(
+pub(crate) unsafe fn make_morloc_literal(
     schema_str: *const c_char,
     lit: Primitive,
     errmsg: *mut *mut c_char,
@@ -82,8 +80,7 @@ pub unsafe extern "C" fn make_morloc_literal(
     expr
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn make_morloc_pattern(
+pub(crate) unsafe fn make_morloc_pattern(
     schema_str: *const c_char,
     pattern: *mut MorlocPattern,
     errmsg: *mut *mut c_char,
@@ -104,8 +101,7 @@ pub unsafe extern "C" fn make_morloc_pattern(
     expr
 }
 
-#[no_mangle]
-pub extern "C" fn make_morloc_pattern_end() -> *mut MorlocPattern {
+pub(crate) fn make_morloc_pattern_end() -> *mut MorlocPattern {
     // SAFETY: calloc returns zeroed memory suitable for MorlocPattern.
     // We initialize all fields before returning.
     unsafe {
@@ -2130,8 +2126,7 @@ unsafe fn path_voidstar_to_cstr(
 
 // ── Public entry point ────���─────────────────────────────────��────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_eval(
+pub(crate) unsafe fn morloc_eval(
     expr: *mut MorlocExpression,
     return_schema: *mut CSchema,
     arg_voidstar: *mut *mut u8,
@@ -2221,5 +2216,34 @@ mod tests {
             assert_eq!(read_int_as_i64(&mut small as *mut u64 as AbsPtr, schema).unwrap(), 7);
             CSchema::free(schema);
         }
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_morloc_bound_var(schema_str: *const c_char, varname: *mut c_char, errmsg: *mut *mut c_char) -> *mut MorlocExpression {
+        super::make_morloc_bound_var(schema_str, varname, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_morloc_literal(schema_str: *const c_char, lit: Primitive, errmsg: *mut *mut c_char) -> *mut MorlocExpression {
+        super::make_morloc_literal(schema_str, lit, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_morloc_pattern(schema_str: *const c_char, pattern: *mut MorlocPattern, errmsg: *mut *mut c_char) -> *mut MorlocExpression {
+        super::make_morloc_pattern(schema_str, pattern, errmsg)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn make_morloc_pattern_end() -> *mut MorlocPattern {
+        super::make_morloc_pattern_end()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_eval(expr: *mut MorlocExpression, return_schema: *mut CSchema, arg_voidstar: *mut *mut u8, arg_schemas: *mut *mut CSchema, nargs: usize, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::morloc_eval(expr, return_schema, arg_voidstar, arg_schemas, nargs, errmsg)
     }
 }

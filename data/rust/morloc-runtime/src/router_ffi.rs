@@ -12,11 +12,14 @@ use crate::http_ffi::{DaemonMethod, DaemonRequest};
 
 use crate::utility::SUN_PATH_LEN;
 
-// Daemon startup polling (exponential backoff, ~5s total).
-// Sum of 100 * 1.25^i for i in 0..16 is ~4650ms.
+// Daemon startup polling: backoff from 100 ms by 1.25x, each wait at most
+// 1 s, until the start limit.
 const DAEMON_POLL_INITIAL_MS: f64 = 100.0;
 const DAEMON_POLL_MULTIPLIER: f64 = 1.25;
-const DAEMON_POLL_MAX_RETRIES: usize = 16;
+const DAEMON_POLL_MAX_MS: f64 = 1000.0;
+/// How long a daemon has to accept connections before it is stopped.
+const DAEMON_START_LIMIT: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 3 } else { 30 });
 
 // -- daemon-startup diagnostics -----------------------------------------------
 
@@ -71,6 +74,50 @@ fn startup_death_msg(prog_name: &str, status: i32, stderr_log: &str) -> String {
     }
 }
 
+// -- Daemon process groups ----------------------------------------------------
+
+// DAEMON-12: every daemon's group, signalled only through its slot.
+static ROUTER_GROUPS: morloc_runtime_types::child_group::ChildGroups =
+    morloc_runtime_types::child_group::ChildGroups::new();
+
+static ROUTER_DAEMONS: std::sync::Mutex<Vec<(i32, morloc_runtime_types::child_group::Registered<'static>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn router_daemons() -> std::sync::MutexGuard<'static, Vec<(i32, morloc_runtime_types::child_group::Registered<'static>)>> {
+    // PANIC-4
+    ROUTER_DAEMONS.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock())
+}
+
+// DAEMON-12
+fn signal_daemon(pid: i32, sig: libc::c_int) {
+    if let Some((_, group)) = router_daemons().iter().find(|(p, _)| *p == pid) {
+        group.signal(sig);
+    }
+}
+
+/// Grace a stopped daemon has to clean up its pools before it is killed.
+const DAEMON_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Stop and reap the program's daemon `pid`, unless another has replaced it.
+// DAEMON-12: no daemon outlives the slot that records it.
+unsafe fn stop_daemon(prog: *mut RouterProgram, pid: i32) {
+    if pid <= 0 || (*prog).daemon_pid.load(std::sync::atomic::Ordering::SeqCst) != pid {
+        return;
+    }
+    signal_daemon(pid, libc::SIGTERM);
+    let until = std::time::Instant::now() + DAEMON_STOP_GRACE;
+    while std::time::Instant::now() < until {
+        if take_if_exited(&(*prog).daemon_pid, pid).is_some() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    signal_daemon(pid, libc::SIGKILL);
+    while take_if_exited(&(*prog).daemon_pid, pid).is_none() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 // -- C-compatible types -------------------------------------------------------
 
 #[repr(C)]
@@ -78,7 +125,8 @@ pub struct RouterProgram {
     pub name: *mut c_char,
     pub manifest_path: *mut c_char,
     pub manifest: *mut crate::manifest_ffi::Manifest,
-    pub daemon_pid: libc::pid_t,
+    // PANIC-1: read by the panic and signal exits on any thread.
+    pub daemon_pid: std::sync::atomic::AtomicI32,
     pub daemon_socket: [c_char; SUN_PATH_LEN],
 }
 
@@ -103,6 +151,14 @@ unsafe fn router_build(
 ) -> *mut Router {
     use crate::manifest_ffi::read_manifest;
 
+    // NET-4
+    let runtime_dir = match morloc_runtime_types::private_dir::runtime_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Other(format!("no private directory for daemon sockets: {e}")));
+            return ptr::null_mut();
+        }
+    };
     let router = libc::calloc(1, std::mem::size_of::<Router>()) as *mut Router;
     (*router).fdb_path = libc::strdup(fdb_path);
     let cap = names.len().max(1);
@@ -151,10 +207,11 @@ unsafe fn router_build(
             return ptr::null_mut();
         }
 
-        prog.daemon_pid = 0;
+        prog.daemon_pid.store(0, std::sync::atomic::Ordering::SeqCst);
         // Set socket path, refusing a program whose name makes it too long
         // to bind: a truncated path would collide or leave no terminator.
-        let socket_path = format!("/tmp/morloc-router-{}.sock", name_str);
+        // NET-4
+        let socket_path = format!("{}/router-{}.sock", runtime_dir.display(), name_str);
         if let Err(e) = crate::utility::unix_socket_addr(socket_path.as_bytes()) {
             libc::free(prog.name as *mut c_void);
             libc::free(prog.manifest_path as *mut c_void);
@@ -178,8 +235,7 @@ unsafe fn router_build(
 // Serve exactly the named programs under `fdb_path`. A named program that is not
 // installed is an error. The only serve path: which modules are served is an
 // explicit decision, never "whatever happens to be installed".
-#[no_mangle]
-pub unsafe extern "C" fn router_init_explicit(
+pub(crate) unsafe fn router_init_explicit(
     fdb_path: *const c_char,
     names: *const *const c_char,
     n_names: usize,
@@ -201,23 +257,52 @@ pub unsafe extern "C" fn router_init_explicit(
 // Async-signal-safe (only `libc::kill`, no allocation/free/stdio), so it is safe
 // to call from a signal handler; the serving front-end has no other shutdown
 // path (it never returns), so this is how children are told to exit gracefully.
-#[no_mangle]
-pub unsafe extern "C" fn router_terminate_children(router: *mut Router) {
+/// `pid`'s wait status if it has exited (or no status when it is not
+/// waitable), with `slot` cleared first: the child is reaped only after no
+/// signal sent through `slot` can reach its pid, which the kernel does not
+/// reissue until the reap.
+unsafe fn take_if_exited(slot: &std::sync::atomic::AtomicI32, pid: i32) -> Option<Result<i32, ()>> {
+    let mut info: libc::siginfo_t = std::mem::zeroed();
+    let rc = loop {
+        let rc = libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT);
+        if rc == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            break rc;
+        }
+    };
+    if rc == 0 && info.si_signo != libc::SIGCHLD {
+        return None;
+    }
+    // DAEMON-12: the group's slot is dead before its leader's id is freed.
+    ROUTER_GROUPS.leader_exited(pid);
+    let _ = slot.compare_exchange(pid, 0, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
+    router_daemons().retain(|(p, _)| *p != pid);
+    if rc != 0 {
+        return Some(Err(()));
+    }
+    let mut status = 0;
+    while libc::waitpid(pid, &mut status, 0) < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {}
+    Some(Ok(status))
+}
+
+/// Whether child `pid` has exited (or is not this process's child), leaving
+/// it unreaped.
+fn has_exited(pid: i32) -> bool {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+    rc != 0 || info.si_signo == libc::SIGCHLD
+}
+
+pub(crate) unsafe fn router_terminate_children(router: *mut Router) {
     if router.is_null() {
         return;
     }
-    for i in 0..(*router).n_programs {
-        let prog = &*(*router).programs.add(i);
-        if prog.daemon_pid > 0 {
-            libc::kill(prog.daemon_pid, libc::SIGTERM);
-        }
-    }
+    // DAEMON-12
+    ROUTER_GROUPS.signal_all(libc::SIGTERM);
 }
 
 // -- router_free --------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn router_free(router: *mut Router) {
+pub(crate) unsafe fn router_free(router: *mut Router) {
     if router.is_null() {
         return;
     }
@@ -231,9 +316,8 @@ pub unsafe extern "C" fn router_free(router: *mut Router) {
         if !prog.manifest.is_null() {
             free_manifest(prog.manifest);
         }
-        if prog.daemon_pid > 0 {
-            libc::kill(prog.daemon_pid, libc::SIGTERM);
-        }
+        // DAEMON-12
+        signal_daemon(prog.daemon_pid.load(std::sync::atomic::Ordering::SeqCst), libc::SIGTERM);
     }
     libc::free((*router).programs as *mut c_void);
     libc::free((*router).fdb_path as *mut c_void);
@@ -308,8 +392,7 @@ unsafe fn find_morloc_nexus() -> Result<String, Vec<String>> {
 
 // -- router_start_program -----------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn router_start_program(
+pub(crate) unsafe fn router_start_program(
     prog: *mut RouterProgram,
     errmsg: *mut *mut c_char,
 ) -> bool {
@@ -334,16 +417,19 @@ pub unsafe extern "C" fn router_start_program(
     // surfaces the real cause (missing shared library, unreadable config, bad
     // manifest, ...) instead of only an exit status. The file lives under
     // MORLOC_STATE, which is the bind mount in the serve container (so it is also
-    // readable from the host); the /tmp socket dir is a per-container tmpfs and
-    // would not be. All allocation happens here in the parent -- the child does
-    // only async-signal-safe calls before exec.
+    // readable from the host).
     let prog_name_str = CStr::from_ptr((*prog).name).to_string_lossy().into_owned();
-    let log_dir = format!(
-        "{}/logs",
-        env_str("MORLOC_STATE")
-            .or_else(|| env_str("MORLOC_HOME"))
-            .unwrap_or_else(|| "/tmp".to_string())
-    );
+    // NET-4
+    let log_dir = match env_str("MORLOC_STATE").or_else(|| env_str("MORLOC_HOME")) {
+        Some(base) => format!("{base}/logs"),
+        None => match morloc_runtime_types::private_dir::runtime_dir() {
+            Ok(dir) => format!("{}/logs", dir.display()),
+            Err(e) => {
+                set_errmsg(errmsg, &MorlocError::Other(format!("no private directory for daemon logs: {e}")));
+                return false;
+            }
+        },
+    };
     let _ = std::fs::create_dir_all(&log_dir);
     let stderr_log = format!("{log_dir}/{prog_name_str}.err");
     let c_stderr_log = CString::new(stderr_log.as_str()).unwrap_or_default();
@@ -375,122 +461,114 @@ pub unsafe extern "C" fn router_start_program(
     let envp: Vec<*const c_char> =
         env.iter().map(|e| e.as_ptr()).chain(std::iter::once(ptr::null())).collect();
     let lifeline_fd = lifeline.map_or(-1, |l| l.read_fd());
-    let exec_failed = format!("morloc-router: failed to exec morloc-nexus for {prog_name_str}\n");
-
-    let pid = libc::fork();
-    if pid == 0 {
-        // Child: exec `morloc-nexus daemon <manifest> --socket <path>`.
-        // The post-CLI-overhaul nexus uses explicit subcommands;
-        // `daemon` is the only argv shape that brings up a long-
-        // lived server. The router relies on this child to bind the
-        // Unix socket at `daemon_socket` so subsequent router
-        // requests can connect.
-        libc::setpgid(0, 0);
-        // Redirect stderr to the startup log so the parent can read the failure
-        // reason after a crash. O_APPEND preserves the first crash across a
-        // restart loop. Best-effort: on open failure fall back to the inherited
-        // stderr rather than aborting the exec.
-        if !c_stderr_log.as_bytes().is_empty() {
-            let log_fd = libc::open(
-                c_stderr_log.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
-                0o644,
-            );
-            if log_fd >= 0 {
-                libc::dup2(log_fd, libc::STDERR_FILENO);
-                if log_fd > libc::STDERR_FILENO {
-                    libc::close(log_fd);
-                }
-            }
+    let log_fd = if c_stderr_log.as_bytes().is_empty() {
+        -1
+    } else {
+        libc::open(
+            c_stderr_log.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    let started = (|| {
+        let mut spawn = morloc_runtime_types::spawn::Spawn::new()?;
+        spawn.new_process_group()?;
+        if log_fd >= 0 {
+            spawn.dup2(log_fd, libc::STDERR_FILENO)?;
         }
         if lifeline_fd >= 0 {
-            crate::lifeline::keep_across_exec(lifeline_fd);
+            spawn.keep_across_exec(lifeline_fd)?;
         }
-        libc::execve(c_nexus.as_ptr(), argv.as_ptr(), envp.as_ptr());
-        libc::write(
-            libc::STDERR_FILENO,
-            exec_failed.as_ptr() as *const c_void,
-            exec_failed.len(),
-        );
-        libc::_exit(1);
-    } else if pid > 0 {
-        (*prog).daemon_pid = pid;
+        spawn.run(&c_nexus, &argv, &envp, false)
+    })();
+    if log_fd >= 0 {
+        libc::close(log_fd);
+    }
+    let pid = match started {
+        Ok(pid) => pid,
+        Err(e) => {
+            set_errmsg(
+                errmsg,
+                &MorlocError::Other(format!("cannot start morloc-nexus for {prog_name_str}: {e}")),
+            );
+            return false;
+        }
+    };
+    // DAEMON-12: the child is unreaped, so its group id is still its own.
+    match ROUTER_GROUPS.add(pid) {
+        Some(group) => router_daemons().push((pid, group)),
+        None => {
+            libc::kill(-pid, libc::SIGKILL);
+            libc::waitpid(pid, ptr::null_mut(), 0);
+            set_errmsg(errmsg, &MorlocError::Other(format!("cannot start a daemon for {prog_name_str}: too many daemons")));
+            return false;
+        }
+    }
+    (*prog).daemon_pid.store(pid, std::sync::atomic::Ordering::SeqCst);
 
-        // Poll until the daemon socket is connectable (exponential backoff)
-        let mut delay_ms = DAEMON_POLL_INITIAL_MS;
-        let mut connected = false;
-        for _attempt in 0..DAEMON_POLL_MAX_RETRIES {
-            let ts = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: (delay_ms * 1_000_000.0) as i64,
-            };
-            libc::nanosleep(&ts, ptr::null_mut());
+    // Poll until the daemon socket is connectable (exponential backoff)
+    let mut delay_ms = DAEMON_POLL_INITIAL_MS;
+    let mut connected = false;
+    let until = std::time::Instant::now() + DAEMON_START_LIMIT;
+    while std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
 
-            // Check if child died during startup
-            let mut status: i32 = 0;
-            let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
-            if result == pid {
-                (*prog).daemon_pid = 0;
-                let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
-                let msg = startup_death_msg(&prog_name, status, &stderr_log);
-                set_errmsg(errmsg, &MorlocError::Other(msg));
-                return false;
-            }
-
-            // Try connecting to the daemon socket
-            let test_sock = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
-            if test_sock >= 0 {
-                // The path was checked to fit when the program was registered.
-                let addr = crate::utility::unix_socket_addr(
-                    CStr::from_ptr((*prog).daemon_socket.as_ptr()).to_bytes(),
-                )
-                .expect("daemon socket path fits");
-                let rc = libc::connect(
-                    test_sock,
-                    &addr as *const libc::sockaddr_un as *const libc::sockaddr,
-                    std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
-                );
-                libc::close(test_sock);
-                if rc == 0 {
-                    connected = true;
-                    break;
-                }
-            }
-
-            delay_ms *= DAEMON_POLL_MULTIPLIER;
+        // Check if child died during startup
+        if let Some(waited) = take_if_exited(&(*prog).daemon_pid, pid) {
+            let status = waited.unwrap_or(0);
+            let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
+            let msg = startup_death_msg(&prog_name, status, &stderr_log);
+            set_errmsg(errmsg, &MorlocError::Other(msg));
+            return false;
         }
 
-        if !connected {
-            // Final check: did the daemon die?
-            let mut status: i32 = 0;
-            let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
-            if result == pid {
-                (*prog).daemon_pid = 0;
-                let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
-                let msg = startup_death_msg(&prog_name, status, &stderr_log);
-                set_errmsg(errmsg, &MorlocError::Other(msg));
-                return false;
+        // Try connecting to the daemon socket
+        let test_sock = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if test_sock >= 0 {
+            // The path was checked to fit when the program was registered.
+            let addr = crate::utility::unix_socket_addr(
+                CStr::from_ptr((*prog).daemon_socket.as_ptr()).to_bytes(),
+            )
+            .expect("daemon socket path fits");
+            let rc = libc::connect(
+                test_sock,
+                &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+            );
+            libc::close(test_sock);
+            if rc == 0 {
+                connected = true;
+                break;
             }
-            // Daemon alive but socket not yet connectable -- proceed anyway,
-            // router_forward() will retry on connect failure.
         }
 
-        true
-    } else {
-        let errno_msg = CStr::from_ptr(libc::strerror(crate::utility::errno_val()))
-            .to_string_lossy();
+        delay_ms = (delay_ms * DAEMON_POLL_MULTIPLIER).min(DAEMON_POLL_MAX_MS);
+    }
+
+    if !connected {
+        // Final check: did the daemon die?
+        if let Some(waited) = take_if_exited(&(*prog).daemon_pid, pid) {
+            let status = waited.unwrap_or(0);
+            let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
+            let msg = startup_death_msg(&prog_name, status, &stderr_log);
+            set_errmsg(errmsg, &MorlocError::Other(msg));
+            return false;
+        }
+        // DAEMON-12
+        stop_daemon(prog, pid);
         set_errmsg(
             errmsg,
-            &MorlocError::Other(format!("fork failed: {}", errno_msg)),
+            &MorlocError::Other(format!("the daemon for {prog_name_str} did not accept connections; it was stopped")),
         );
-        false
+        return false;
     }
+
+    true
 }
 
 // -- router_forward -----------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn router_forward(
+pub(crate) unsafe fn router_forward(
     router: *mut Router,
     program: *const c_char,
     request: *mut DaemonRequest,
@@ -523,29 +601,25 @@ pub unsafe extern "C" fn router_forward(
     }
 
     // Check if a previously-started daemon has exited (crash recovery)
-    if (*prog).daemon_pid > 0 {
-        let mut status: i32 = 0;
-        let result = libc::waitpid((*prog).daemon_pid, &mut status, libc::WNOHANG);
-        if result == (*prog).daemon_pid || result < 0 {
+    let pid = (*prog).daemon_pid.load(std::sync::atomic::Ordering::SeqCst);
+    if pid > 0 {
+        if let Some(waited) = take_if_exited(&(*prog).daemon_pid, pid) {
             let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
-            // result < 0 means waitpid itself failed (e.g. ECHILD: the child was
-            // already reaped elsewhere), so `status` is unset -- don't decode it
-            // as an exit code.
-            let reason = if result < 0 {
-                "is no longer waitable".to_string()
-            } else {
-                describe_wait_status(status)
+            let reason = match waited {
+                Ok(status) => describe_wait_status(status),
+                // The child was already reaped elsewhere, so there is no
+                // status to decode.
+                Err(()) => "is no longer waitable".to_string(),
             };
             eprintln!(
                 "morloc-router: daemon for '{}' {}, will restart",
                 prog_name, reason
             );
-            (*prog).daemon_pid = 0;
         }
     }
 
     // Start daemon if not running
-    if (*prog).daemon_pid <= 0 {
+    if (*prog).daemon_pid.load(std::sync::atomic::Ordering::SeqCst) <= 0 {
         let mut child_err: *mut c_char = ptr::null_mut();
         if !router_start_program(prog, &mut child_err) {
             if !child_err.is_null() {
@@ -566,17 +640,19 @@ pub unsafe extern "C" fn router_forward(
     let req_len = req_json.len();
 
     // Try to connect, retry once on failure
+    let tried = (*prog).daemon_pid.load(std::sync::atomic::Ordering::SeqCst);
     let sock = connect_to_daemon(prog, errmsg);
     let sock = if sock < 0 {
-        // Try restarting daemon
-        (*prog).daemon_pid = 0;
+        // DAEMON-12
+        stop_daemon(prog, tried);
         // Clear previous error
         if !(*errmsg).is_null() {
             libc::free(*errmsg as *mut c_void);
             *errmsg = ptr::null_mut();
         }
         let mut child_err: *mut c_char = ptr::null_mut();
-        if !router_start_program(prog, &mut child_err) {
+        // DAEMON-12: a daemon another request started meanwhile is used, not doubled.
+        if (*prog).daemon_pid.load(std::sync::atomic::Ordering::SeqCst) <= 0 && !router_start_program(prog, &mut child_err) {
             if !child_err.is_null() {
                 *errmsg = child_err;
             }
@@ -684,7 +760,7 @@ unsafe fn connect_to_daemon(
     prog: *mut RouterProgram,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    let sock = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+    let sock = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
     if sock < 0 {
         set_errmsg(
             errmsg,
@@ -792,8 +868,7 @@ unsafe fn serialize_request_to_json(request: *mut DaemonRequest) -> String {
 
 // -- router_build_discovery ---------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn router_build_discovery(router: *mut Router) -> *mut c_char {
+pub(crate) unsafe fn router_build_discovery(router: *mut Router) -> *mut c_char {
     // Walk the canonical Manifest C struct from manifest_ffi.rs. No
     // local mirror -- the in-memory layout is shared.
     use crate::manifest_ffi::Manifest as ManifestC;
@@ -823,8 +898,8 @@ pub unsafe extern "C" fn router_build_discovery(router: *mut Router) -> *mut c_c
     for i in 0..(*router).n_programs {
         let prog = &*(*router).programs.add(i);
         let name = CStr::from_ptr(prog.name).to_string_lossy().into_owned();
-        let running =
-            prog.daemon_pid > 0 && libc::kill(prog.daemon_pid, 0) == 0;
+        let pid = prog.daemon_pid.load(std::sync::atomic::Ordering::SeqCst);
+        let running = pid > 0 && !has_exited(pid);
 
         let commands = if !prog.manifest.is_null() {
             let mv = prog.manifest as *const ManifestC;
@@ -869,6 +944,65 @@ pub unsafe extern "C" fn router_build_discovery(router: *mut Router) -> *mut c_c
 mod forward_tests {
     use super::*;
 
+    #[test]
+    fn a_daemon_that_never_accepts_is_stopped_reaped_and_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("mlc-router-never-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-nexus");
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("MORLOC_NEXUS", &script);
+        let mut prog: RouterProgram = unsafe { std::mem::zeroed() };
+        prog.name = unsafe { libc::strdup(c"never".as_ptr()) };
+        prog.manifest_path = unsafe { libc::strdup(c"/nonexistent/manifest.json".as_ptr()) };
+        let sock = format!("{}/never.sock", dir.display());
+        for (d, b) in prog.daemon_socket.iter_mut().zip(sock.as_bytes()) {
+            *d = *b as c_char;
+        }
+        let mut err: *mut c_char = ptr::null_mut();
+        let started = unsafe { router_start_program(&mut prog, &mut err) };
+        std::env::remove_var("MORLOC_NEXUS");
+        assert!(!started, "a daemon that never accepted was used");
+        assert_eq!(prog.daemon_pid.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let msg = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
+        assert!(msg.contains("did not accept"), "{msg}");
+        assert!(router_daemons().is_empty(), "the stopped daemon is still registered");
+        unsafe {
+            libc::free(err as *mut c_void);
+            libc::free(prog.name as *mut c_void);
+            libc::free(prog.manifest_path as *mut c_void);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_exited_daemon_leaves_its_slot_before_it_is_reaped() {
+        let child = std::process::Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap();
+        let pid = child.id() as i32;
+        let slot = std::sync::atomic::AtomicI32::new(pid);
+        let waited = loop {
+            if let Some(w) = unsafe { take_if_exited(&slot, pid) } {
+                break w;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(waited.map(|s| libc::WEXITSTATUS(s)), Ok(3));
+        assert_eq!(slot.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(unsafe { take_if_exited(&slot, pid) }.is_some_and(|w| w.is_err()));
+    }
+
+    #[test]
+    fn a_running_daemon_keeps_its_slot() {
+        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let pid = child.id() as i32;
+        let slot = std::sync::atomic::AtomicI32::new(pid);
+        assert!(unsafe { take_if_exited(&slot, pid) }.is_none());
+        assert_eq!(slot.load(std::sync::atomic::Ordering::SeqCst), pid);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     // A forwarded call carries its args as the text they arrived in.
     #[test]
     fn forwarded_args_are_the_text_the_client_sent() {
@@ -882,5 +1016,39 @@ mod forward_tests {
         req.args_json = a.as_ptr() as *mut c_char;
         let json = unsafe { serialize_request_to_json(&mut req) };
         assert_eq!(json, format!("{{\"method\":\"call\",\"command\":\"f\",\"args\":{args},\"media\":true}}"));
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn router_init_explicit(fdb_path: *const c_char, names: *const *const c_char, n_names: usize, errmsg: *mut *mut c_char) -> *mut Router {
+        super::router_init_explicit(fdb_path, names, n_names, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn router_terminate_children(router: *mut Router) {
+        super::router_terminate_children(router)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn router_free(router: *mut Router) {
+        super::router_free(router)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn router_start_program(prog: *mut RouterProgram, errmsg: *mut *mut c_char) -> bool {
+        super::router_start_program(prog, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn router_forward(router: *mut Router, program: *const c_char, request: *mut DaemonRequest, errmsg: *mut *mut c_char) -> *mut DaemonResponse {
+        super::router_forward(router, program, request, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn router_build_discovery(router: *mut Router) -> *mut c_char {
+        super::router_build_discovery(router)
     }
 }

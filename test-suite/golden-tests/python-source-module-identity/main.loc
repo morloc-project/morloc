@@ -18,9 +18,10 @@
 -- and its own `import copy` still reaches the standard library. The top-level
 -- stdlib-name collision (a sourced copy.py, json.py) is pinned by
 -- python-source-name-collision; a file that must not take a real module's
--- name keeps the reserved key.
+-- name keeps the reserved key. A path with a `..` segment has no dotted name
+-- and is loaded by location alone.
 
-module main (plainState, appState, appCopy, rel, nsLeaf)
+module main (plainState, appState, appCopy, rel, nsLeaf, dotdot)
 
 import root-py
 
@@ -30,6 +31,7 @@ source Py from "app/rel.py" ("rel_kind")
 source Py from "app/copy.py" ("app_copy_kind")
 source Py from "ns/leaf.py" ("ns_kind")
 source Py from "reader.py" ("read_plain", "read_app", "read_app_copy")
+source Py from "ns/../dotdot.py" ("dotdot_kind")
 
 set_plain     :: Str -> Str
 set_state     :: Str -> Str
@@ -39,6 +41,7 @@ ns_kind       :: Str -> Str
 read_plain    :: Str -> Str
 read_app      :: Str -> Str
 read_app_copy :: Str -> Str
+dotdot_kind   :: Str -> Str
 
 plainState :: Str -> Str
 plainState x = read_plain (set_plain x)
@@ -54,3 +57,6 @@ rel = rel_kind
 
 nsLeaf :: Str -> Str
 nsLeaf = ns_kind
+
+dotdot :: Str -> Str
+dotdot = dotdot_kind

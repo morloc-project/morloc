@@ -22,7 +22,14 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
 
 import qualified Data.Map as Map
-import Morloc.Build.CargoLock (lockCoversCrates, mergeCargoLocks)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (SomeException, try)
+import Control.Monad (forM, forM_, replicateM_)
+import qualified Data.Text.IO as TIO
+import Morloc.Build.CargoLock (lockCoversCrates, mergeCargoLocks, mergeLockFiles)
+import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeDirectoryRecursive)
+import System.FilePath ((</>))
 import Morloc.Build.Params (LangParams, parseLangParamList)
 import Morloc.CodeGenerator.Pools.CAbi.Members.Rust (RustProfile (..), resolveRustProfile)
 
@@ -100,7 +107,8 @@ lockMergeTests :: TestTree
 lockMergeTests =
   testGroup
     "cargo lock merge"
-    [ testCase "a crate only the pool resolved is added" $
+    [ testCase "concurrent merges into one environment lock never collide" concurrentMerges
+    , testCase "a crate only the pool resolved is added" $
         mergeCargoLocks (lock [("libc", "0.2.1")]) (lock [("libc", "0.2.1"), ("ndarray", "0.16.1")])
           @?= lock [("libc", "0.2.1"), ("ndarray", "0.16.1")]
     , testCase "the base pin wins for a crate both name" $
@@ -144,3 +152,32 @@ lockCoverageTests =
     , testCase "empty lock covers nothing" $
         assertBool "" (not (lockCoversCrates "" ["libc"]))
     ]
+
+-- Builds of one environment merge their pool's pins into the same lock at
+-- once; each must replace it whole, not through a staging file another
+-- build is also writing.
+concurrentMerges :: Assertion
+concurrentMerges = do
+  tmp <- getTemporaryDirectory
+  let dir = tmp </> "morloc-cargolock-concurrent"
+  createDirectoryIfMissing True dir
+  let base = dir </> "base.lock"
+      env = dir </> "rust-env.lock"
+  TIO.writeFile base (lock [("libc", "0.2.1")])
+  pools <- forM [1 .. 4 :: Int] $ \i -> do
+    let pool = dir </> ("pool" <> show i <> ".lock")
+    TIO.writeFile pool (lock [("crate" <> T.pack (show i), "1.0.0")])
+    return pool
+  dones <- forM pools $ \pool -> do
+    done <- newEmptyMVar
+    _ <- forkIO $ do
+      r <- try (replicateM_ 50 (mergeLockFiles base env pool))
+      putMVar done (r :: Either SomeException ())
+    return done
+  results <- mapM takeMVar dones
+  forM_ results $ \r -> case r of
+    Left e -> assertFailure ("a concurrent merge failed: " <> show e)
+    Right () -> return ()
+  merged <- TIO.readFile env
+  assertBool "the merged lock lost the base's crates" (lockCoversCrates merged ["libc"])
+  removeDirectoryRecursive dir

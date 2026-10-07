@@ -1,10 +1,9 @@
---' MCP tool-surface EXCLUSION coverage for Arrow Table types.
+--' MCP tool-surface coverage for Arrow Table types.
 --'
---' Arrow `Table` values cannot be marshaled to/from JSON in either direction
---' (json.rs errors both ways), so any command with a Table argument or return
---' is dropped from `tools/list`. `plainAdd` is the control. run-tests.sh
---' asserts `tools/list` contains `plainAdd` but neither `readTable` (Table
---' return) nor `sumTable` (Table argument).
+--' A Table's row schema is known statically and renders as an array of
+--' typed row objects, so commands with a Table argument or return are
+--' served. run-tests.sh asserts `tools/list` contains `plainAdd`,
+--' `readTable` (Table return) and `sumTable` (Table argument).
 --'
 --' Requires pyarrow; the runner skips this group if the program fails to build.
 module main

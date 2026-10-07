@@ -53,3 +53,6 @@ cbindgen = "0.28"
 [dev-dependencies]
 # Generates prototypes the C-header agreement test compiles against morloc.h.
 cbindgen = "0.28"
+# Parse the workspace's sources for the process-wide state registry test.
+syn = { version = "2", features = ["full", "visit"] }
+quote = "1"

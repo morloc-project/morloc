@@ -35,8 +35,10 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
-import System.FilePath (takeDirectory, (<.>))
+import Control.Exception (onException)
+import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile, renameFile)
+import System.FilePath (takeDirectory, takeFileName)
+import System.IO (hClose, openTempFileWithDefaultPermissions)
 
 -- | A lock split into its header lines, its @[[package]]@ tables (crate name
 -- paired with the table's lines) and every other table, in file order.
@@ -71,20 +73,20 @@ mergeCargoLocks base extra =
 -- @base@ extended by the crates already in @env@ and then by those in the
 -- freshly built pool's lock. Re-basing on @base@ each time means an upgraded
 -- runtime lock takes effect at once and the environment lock never keeps a
--- pin the runtime has moved past. The file is replaced by rename, so a
--- concurrent build reads either the old or the new lock, never a torn one;
--- two builds merging at once may lose one's additions, which costs that
--- crate one more online resolution and nothing else.
+-- pin the runtime has moved past. Each merge stages its own file and renames
+-- it into place, so a concurrent build reads either the old or the new lock,
+-- never a torn one; two builds merging at once may lose one's additions,
+-- which costs that crate one more online resolution and nothing else.
 mergeLockFiles :: FilePath -> FilePath -> FilePath -> IO ()
 mergeLockFiles basePath envPath poolPath = do
   base <- TIO.readFile basePath
   env <- readIfPresent envPath
   pool <- readIfPresent poolPath
   let merged = mergeCargoLocks (mergeCargoLocks base env) pool
-      tmp = envPath <.> "tmp"
   createDirectoryIfMissing True (takeDirectory envPath)
-  TIO.writeFile tmp merged
-  renameFile tmp envPath
+  (tmp, h) <- openTempFileWithDefaultPermissions (takeDirectory envPath) (takeFileName envPath <> ".tmp")
+  (TIO.hPutStr h merged >> hClose h) `onException` (hClose h >> removeFile tmp)
+  renameFile tmp envPath `onException` removeFile tmp
   where
     readIfPresent p = do
       exists <- doesFileExist p

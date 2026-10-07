@@ -12,12 +12,21 @@
 //! crate -- it lives only in `morloc-runtime` so the nexus must reach
 //! it through libmorloc.so's C ABI.
 
+pub mod bearer;
+pub mod net_limits;
+pub mod private_dir;
 pub mod error;
 pub mod hash;
 pub mod shm_types;
 pub mod shm_lock;
 pub mod recoverable_lock;
 pub mod process;
+pub mod fork_generation;
+pub mod publish_once;
+pub mod fd;
+pub mod panic;
+pub mod spawn;
+pub mod child_group;
 pub mod owner_word;
 pub mod schema;
 pub mod cschema;
@@ -30,6 +39,7 @@ pub mod stream_handle;
 pub mod stdio_proto;
 pub mod width;
 pub mod slice;
+pub mod eval_status;
 #[cfg(test)]
 mod dispatch_guard;
 

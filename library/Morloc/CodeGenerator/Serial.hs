@@ -38,7 +38,6 @@ module Morloc.CodeGenerator.Serial
   , serialOuterName
   , serialAstToGeneralSchema
   , encode64
-  , decode64
   ) where
 
 import qualified Data.Char as C
@@ -246,17 +245,6 @@ encode64 i
   | i == 62 = "+"
   | i == 63 = "/"
   | otherwise = "=" <> (encode64 (mod i 64)) <> (encode64 (div i 64))
-
-decode64 :: String -> Int
-decode64 (x : xs)
-  | x >= '0' && x <= '9' = C.ord x - C.ord '0'
-  | x >= 'a' && x <= 'z' = C.ord x - C.ord 'a' + C.ord '0'
-  | x >= 'A' && x <= 'Z' = C.ord x - C.ord 'A' + C.ord 'a' + C.ord '0'
-  | x == '+' = 62
-  | x == '/' = 63
-  | x == '=' = decode64 [head xs] + 64 * decode64 (tail xs)
-  | otherwise = error "illegal character"
-decode64 [] = 0
 
 encode64D :: Int -> MDoc
 encode64D i = pretty (encode64 i)
@@ -798,7 +786,7 @@ makeSerialAST :: Int -> Lang -> TypeF -> MorlocMonad SerialAST
 makeSerialAST m lang t0 = do
   instances <- findPackerInstances
 
-  (_, gscope) <- getScope m lang
+  (_, gscope) <- getScope lang
 
   -- The instances this language can serialize with, grouped by the constructor
   -- they pack.
@@ -926,7 +914,7 @@ makeSerialAST m lang t0 = do
               -- Reached by its bare name, so it was applied to nothing.
               return $ SerialVariant v [] as
           | otherwise = do
-              (cscope, _) <- getScope m lang
+              (cscope, _) <- getScope lang
               case aliasShape of
                 -- @type X = [E]@: bare alias whose body is list-shaped.
                 -- The emitted SerialList carries an FVar whose GV is the
@@ -1156,7 +1144,7 @@ makeSerialAST m lang t0 = do
                 -- A type with a per-language form of its own keeps that form on
                 -- the head; one without it is its parent natively, and the
                 -- parent's own name is the right one to report.
-                (cscope, _) <- getScope m lang
+                (cscope, _) <- getScope lang
                 let ast' = if Map.member generalTypeName cscope
                              then setSerialHead fv ast
                              else ast
@@ -1436,7 +1424,7 @@ resolvePacker lang m0 resolvedType@(AppF _ _) pin = do
   -- wire form arrives as the record's name. 'inferConcreteTypeU' resolves the
   -- concrete side to the record body, so the general side has to be resolved
   -- too; weaving a name against an expanded body has no meaning.
-  (_, gscope) <- getScope m0 lang
+  (_, gscope) <- getScope lang
   let unpackedGeneralType = either (const (piWire pin)) id (TE.evaluateType gscope (piWire pin))
       packedGeneralType = piHead pin
   (srcPacked, srcUnpacked) <- packerSources lang m0 pin

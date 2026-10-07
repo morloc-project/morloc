@@ -20,7 +20,7 @@ mlc_closure_codec <- function(tuple_schema, arg_codecs, res_codec) {
 # each worker AFTER fork (see mlc_load_user_sources). Loading a package that
 # spins threads (an OpenMP / Accelerate-BLAS user library) in the parent and then
 # forking is unsafe on macOS (fork-after-threads deadlock/abort). Deferring keeps
-# the parent single-threaded; each worker loads its libraries in its own process,
+# user-library threads out of the parent; each worker loads its libraries in its own process,
 # preserving per-worker thread parallelism. Held as an unevaluated function body
 # and eval'd into globalenv post-fork, so sourced symbols land at global scope
 # exactly as if run at load time (R's source() targets globalenv by default).
@@ -143,35 +143,28 @@ morloc_mlc_throw <- function(msg) {
     list(message = msg, call = NULL)
   ))
 }
-# Raise a genuine morloc-invariant violation (compiler bug, contract
-# violation, unreachable branch). Uses the MorlocInternalError class;
-# morloc_mlc_try inspects and re-raises so @try cannot swallow it.
-# The condition still derives from "error" so R's default handling
-# prints a stacktrace; the class marker is what routes it past @catch.
+# A genuine morloc-invariant violation (compiler bug, contract violation,
+# unreachable branch) ends the pool (PANIC-5).
 morloc_mlc_internal_abort <- function(msg) {
+  cat(paste0("morloc internal error (R pool): ", msg, "\n"), file = stderr())
+  morloc_exit(70L)
+}
+# The downstream reader of a stream closed it: the call ends. Not an
+# "error" condition, so no error handler, @try's included, takes it.
+morloc_mlc_pipe_closed <- function() {
   stop(structure(
-    class = c("MorlocInternalError", "error", "condition"),
-    list(message = paste0("morloc internal error (R pool): ", msg), call = NULL)
+    class = c("MorlocPipeClosed", "condition"),
+    list(message = "@stdout: downstream pipe closed", call = NULL)
   ))
 }
-# @catch: evaluate fallible; on any error EXCEPT MorlocInternalError,
-# evaluate fallback. MorlocInternalError bypasses -- genuine compiler
-# bugs propagate past user @catch and terminate the pool.
 # @try body: run the thunk and convert the outcome to data. `ok` wraps the
 # value, `err` the message; codegen supplies both because only it knows how
-# this Try is represented in R.
-#
-# A MorlocInternalError is re-raised rather than becoming an Err arm: it
-# marks a compiler or infrastructure fault, which is not the user's to
-# recover from. An interrupt is not an "error" condition in R, so tryCatch
-# lets it past without help.
+# this Try is represented in R. An interrupt is not an "error" condition in
+# R, so tryCatch lets it past without help.
 morloc_mlc_try <- function(body, ok, err) {
   tryCatch(
     ok(body()),
-    error = function(e) {
-      if (inherits(e, "MorlocInternalError")) stop(e)
-      err(conditionMessage(e))
-    }
+    error = function(e) err(conditionMessage(e))
   )
 }
 morloc_fork                          <- function(...){ .Call("morloc_fork",                          ...) }
@@ -538,32 +531,38 @@ main <- function(socket_path, tmpdir, shm_basename) {
   spawn_worker <- function() {
     pid <- morloc_fork()
     if (pid == 0L) {
-      listen_fd <- morloc_worker_listener(daemon)
-      morloc_close_fd(wakeup[1L])  # child doesn't read the wake-up pipe
-      morloc_close_fd(life[2L])    # nor hold the main process's lifeline
-      mlc_load_user_sources()      # load user sources post-fork
-      worker_loop(listen_fd, life[1L])
+      # A worker never unwinds into main's frames, whose exit handler would
+      # kill its siblings: an error that reaches here ends the worker alone.
+      tryCatch({
+        listen_fd <- morloc_worker_listener(daemon)
+        morloc_close_fd(wakeup[1L])  # child doesn't read the wake-up pipe
+        morloc_close_fd(life[2L])    # nor hold the main process's lifeline
+        mlc_load_user_sources()      # load user sources post-fork
+        worker_loop(listen_fd, life[1L])
+      }, error = function(e) {
+        cat(paste0("morloc R pool worker: ", conditionMessage(e), "\n"), file = stderr())
+        morloc_exit(70L)
+      }, interrupt = function(e) morloc_exit(70L))
       morloc_exit(0L)
     }
     pid
   }
 
-  # Reap dead workers (logging crashes), prune them from `pids`, and respawn up
-  # to `min_workers`. Without respawn a crashing pool decays toward zero live
-  # workers and nothing accepts. Pruning also keeps the shutdown kill loop from
-  # SIGKILLing a reaped-and-reused pid. (The in-flight job a crashed worker was
-  # serving fails: its connection closes with it.)
-  reap_and_respawn <- function(pids) {
-    alive <- integer(0)
+  # SHM-8: a worker never retires, so one that ended may have held shared
+  # memory no other process can release. The pool ends, and the nexus
+  # recovers the namespace. The ended pid leaves `pids` first, so the exit
+  # handler never signals a reused pid.
+  reap_or_end <- function(pids) {
     for (pid in pids) {
-      if (morloc_reap_worker(pid) == 0L) {
-        alive <- c(alive, pid)
+      if (morloc_reap_worker(pid) != 0L) {
+        kept <- setdiff(pids, pid)
+        pids <<- kept
+        # SHM-8: shutdown sets this flag before any worker can exit of it.
+        if (morloc_is_shutting_down()) return(kept)
+        stop(sprintf("worker %d ended; ending the pool so its shared memory is recovered", pid))
       }
     }
-    while (length(alive) < min_workers) {
-      alive <- c(alive, spawn_worker())
-    }
-    alive
+    pids
   }
 
   pids <- integer(0)
@@ -591,7 +590,7 @@ main <- function(socket_path, tmpdir, shm_basename) {
   while (!morloc_is_shutting_down()) {
     # Reap dead workers, respawn to the floor, and keep the shared worker count
     # honest (a stale count would make the saturation gate below stop tripping).
-    pids <- reap_and_respawn(pids)
+    pids <- reap_or_end(pids)
     morloc_shared_counter_set(total_counter, length(pids))
 
     morloc_wait_wakeup(wakeup[1L], 100L)

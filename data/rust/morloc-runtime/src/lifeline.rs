@@ -13,7 +13,7 @@
 //! process tree, is ignored.
 
 use std::ffi::CString;
-use std::sync::OnceLock;
+use morloc_runtime_types::publish_once::PublishOnce;
 use std::time::Duration;
 
 use crate::error::MorlocError;
@@ -33,11 +33,20 @@ pub struct Lifeline {
     token: String,
 }
 
-static OWN: OnceLock<Result<Lifeline, String>> = OnceLock::new();
+static OWN: PublishOnce<Result<Lifeline, String>> = PublishOnce::new();
+
+// INIT-3: only a lifeline that lost the race to be published is dropped.
+impl Drop for Lifeline {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.read_fd);
+            libc::close(self.write_fd);
+        }
+    }
+}
 
 impl Lifeline {
-    /// This process's lifeline, created on first use. Both ends are
-    /// close-on-exec; `keep_across_exec` hands the read end to one child.
+    /// This process's lifeline, created on first use.
     pub fn get() -> Result<&'static Lifeline, MorlocError> {
         OWN.get_or_init(|| Self::create().map_err(|e| e.to_string()))
             .as_ref()
@@ -46,13 +55,10 @@ impl Lifeline {
 
     fn create() -> std::io::Result<Lifeline> {
         let mut fds = [0 as libc::c_int; 2];
-        // SAFETY: pipe and fcntl on descriptors this call owns.
+        // SAFETY: pipe into a local array.
         unsafe {
-            if libc::pipe(fds.as_mut_ptr()) != 0 {
+            if morloc_runtime_types::fd::pipe(fds.as_mut_ptr()) != 0 {
                 return Err(std::io::Error::last_os_error());
-            }
-            for fd in fds {
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
             }
         }
         let (dev, ino) = fifo_identity(fds[0])
@@ -84,15 +90,6 @@ impl Lifeline {
     pub fn token(&self) -> &str {
         &self.token
     }
-}
-
-/// In a child between fork and exec: let the read end survive the exec.
-/// Async-signal-safe.
-///
-/// # Safety
-/// Only `fcntl` is called; `fd` should be a `Lifeline::read_fd`.
-pub unsafe fn keep_across_exec(fd: i32) {
-    libc::fcntl(fd, libc::F_SETFD, 0);
 }
 
 fn fifo_identity(fd: i32) -> Option<(u64, u64)> {
@@ -150,7 +147,7 @@ fn validate_with(token: &str, snapshot: impl Fn(u32) -> Option<process::Snapshot
     ours.then_some(Adopted { fd, nexus_pgid })
 }
 
-static ADOPTED: OnceLock<Option<Adopted>> = OnceLock::new();
+static ADOPTED: PublishOnce<Option<Adopted>> = PublishOnce::new();
 
 /// Take up the lifeline this process was started with, if any: validate it
 /// and keep it from leaking into programs this process later runs. Returns
@@ -169,9 +166,9 @@ pub fn adopt() -> i32 {
 /// when the nexus is gone. For processes with no loop of their own to watch
 /// it in. Idempotent.
 pub fn guard() {
-    static WATCHING: OnceLock<()> = OnceLock::new();
+    static WATCHING: PublishOnce<()> = PublishOnce::new();
     let Some(a) = ({ adopt(); ADOPTED.get().copied().flatten() }) else { return };
-    WATCHING.get_or_init(|| {
+    WATCHING.get_or_init_then(|| (), |_| {
         spawn_masked(move || {
             if wait_for_end(a.fd) {
                 teardown(a.nexus_pgid, GRACE);
@@ -219,44 +216,45 @@ fn spawn_masked(f: impl FnOnce() + Send + 'static) {
 
 /// End what the nexus would have ended had it exited cleanly: this process
 /// group when this process has one apart from the nexus's (as the nexus
-/// arranges for pools), otherwise this process alone. A forked reaper sends
+/// arranges for pools), otherwise this process alone. A spawned reaper sends
 /// SIGTERM, waits `grace`, then sends SIGKILL; it ignores the SIGTERM it
 /// sends, so the escalation happens even after this process has exited.
 pub fn teardown(nexus_pgid: i32, grace: Duration) {
-    // SAFETY: only async-signal-safe calls after fork; the parent returns.
-    unsafe {
-        let group = libc::getpgrp();
-        let target = if group != nexus_pgid { -group } else { libc::getpid() };
-        let ts = libc::timespec {
-            tv_sec: grace.as_secs() as libc::time_t,
-            tv_nsec: grace.subsec_nanos() as libc::c_long,
-        };
-        let pid = libc::fork();
-        if pid == 0 {
-            // A live member keeps the group id from being reused during the
-            // grace period, so the SIGKILL cannot reach a stranger.
-            libc::signal(libc::SIGTERM, libc::SIG_IGN);
-            libc::kill(target, libc::SIGTERM);
-            libc::nanosleep(&ts, std::ptr::null_mut());
-            libc::kill(target, libc::SIGKILL);
-            libc::_exit(0);
-        }
-        if pid < 0 {
-            libc::kill(target, libc::SIGTERM);
-        }
+    // SAFETY: getpgrp and getpid cannot fail.
+    let group = unsafe { libc::getpgrp() };
+    let target = if group != nexus_pgid { -group } else { unsafe { libc::getpid() } };
+    let script = "trap '' TERM; kill -s TERM -- \"$1\"; sleep \"$2\"; kill -s KILL -- \"$1\"";
+    let args: Vec<CString> = [
+        "sh".to_string(),
+        "-c".to_string(),
+        script.to_string(),
+        "sh".to_string(),
+        target.to_string(),
+        format!("{}.{:03}", grace.as_secs(), grace.subsec_millis()),
+    ]
+    .into_iter()
+    .map(|a| CString::new(a).unwrap())
+    .collect();
+    let argv: Vec<*const libc::c_char> =
+        args.iter().map(|a| a.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
+    let (_env, envp) = morloc_runtime_types::spawn::current_environment();
+    let sh = CString::new("/bin/sh").unwrap();
+    let spawned = morloc_runtime_types::spawn::Spawn::new().and_then(|s| s.run(&sh, &argv, &envp, false));
+    if spawned.is_err() {
+        // SAFETY: kill takes plain integers.
+        unsafe { libc::kill(target, libc::SIGTERM) };
     }
 }
 
 /// The nexus side, for a child it starts: `MORLOC_LIFELINE=<token>` for the
-/// child's environment, with the read end to keep across its exec
-/// (`keep_across_exec`) stored in `read_fd`. Null, and -1, if this process
+/// child's environment, with the read end to keep across its exec stored in
+/// `read_fd`. Null, and -1, if this process
 /// could not make a lifeline.
 ///
 /// # Safety
 /// `read_fd` must be writable.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const std::ffi::c_char {
-    static ENTRY: OnceLock<CString> = OnceLock::new();
+pub(crate) unsafe fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const std::ffi::c_char {
+    static ENTRY: PublishOnce<CString> = PublishOnce::new();
     match Lifeline::get() {
         Ok(l) => {
             *read_fd = l.read_fd();
@@ -270,20 +268,17 @@ pub unsafe extern "C" fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const 
 }
 
 /// C entry points for the pool scaffolds.
-#[no_mangle]
-pub extern "C" fn morloc_lifeline_adopt() -> i32 {
+pub(crate) fn morloc_lifeline_adopt() -> i32 {
     adopt()
 }
 
-#[no_mangle]
-pub extern "C" fn morloc_lifeline_guard() {
+pub(crate) fn morloc_lifeline_guard() {
     guard()
 }
 
 /// End this process group (see `teardown`) once a lifeline the caller
 /// watched itself has reached end of file. Does nothing if none was adopted.
-#[no_mangle]
-pub extern "C" fn morloc_lifeline_teardown() {
+pub(crate) fn morloc_lifeline_teardown() {
     if let Some(a) = ADOPTED.get().copied().flatten() {
         teardown(a.nexus_pgid, GRACE);
     }
@@ -313,7 +308,7 @@ mod tests {
 
     fn pipe() -> [libc::c_int; 2] {
         let mut p = [0 as libc::c_int; 2];
-        assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { morloc_runtime_types::fd::pipe(p.as_mut_ptr()) }, 0);
         p
     }
 
@@ -360,7 +355,7 @@ mod tests {
                 g.join(":")
             };
             let not_a_fifo = unsafe {
-                libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDONLY)
+                libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDONLY | libc::O_CLOEXEC)
             };
             let refused = [
                 String::new(),
@@ -477,5 +472,28 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!process::alive(worker as u32, 0), "a worker ignoring SIGTERM outlived its nexus");
+    }
+}
+
+mod c_abi {
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const std::ffi::c_char {
+        super::morloc_lifeline_child_env(read_fd)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_lifeline_adopt() -> i32 {
+        super::morloc_lifeline_adopt()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_lifeline_guard() {
+        super::morloc_lifeline_guard()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_lifeline_teardown() {
+        super::morloc_lifeline_teardown()
     }
 }

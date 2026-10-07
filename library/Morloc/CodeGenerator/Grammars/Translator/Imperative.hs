@@ -38,6 +38,8 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , expandSerialize
   , expandDeserialize
   , containsClosure
+  , nativeToWire
+  , wireToNative
 
     -- * Expression lowering
   , lowerSerialExpr
@@ -50,6 +52,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 
     -- * Full lowering config
   , LowerConfig (..)
+  , infixOperator
   , LoopResult (..)
   , ArgSite (..)
   , IOwnership (..)
@@ -72,6 +75,7 @@ import Data.Binary (Binary)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
+import Data.Tuple (swap)
 import Data.Char (isAlphaNum)
 import qualified Data.Text as T
 import Data.Word (Word8)
@@ -96,7 +100,7 @@ import Morloc.CodeGenerator.Grammars.Common
   )
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..))
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (containsFunF, isSerializable, serialAstHasString, serialAstToMsgpackSchema)
+import Morloc.CodeGenerator.Serial (containsFunF, isSerializable, serialAstHasString, serialAstToMsgpackSchema, serialAstToType)
 import Morloc.Data.Doc
 import Morloc.Monad (IndexState)
 
@@ -441,9 +445,15 @@ data IOwnership
   -- value): moving it out needs a clone, but it is not itself a reference
   deriving (Eq, Show)
 
+-- | A sourced binary operator written between its operands.
+infixOperator :: Source -> MDoc -> MDoc -> MDoc
+infixOperator src l r = parens (l <+> pretty (unSrcName (srcName src)) <+> r)
+
 -- | Per-language configuration for lowering
 data LowerConfig m = LowerConfig
   { lcSrcName :: Source -> MDoc
+  , lcOperator :: Source -> MDoc -> MDoc -> MDoc
+  -- ^ Apply a sourced binary operator to its two operands.
   , lcApplySrcGroup :: MDoc -> [MDoc] -> MDoc
   -- ^ Apply one CONTINUATION group of a curried source call (@f(a)(b)@, the
   -- groups a source statement's @\@rsize@ declares). The first group is the
@@ -795,9 +805,13 @@ expandSerialize cfg v0 s0@(SerialClosure _ _) = do
   schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
   return (ISerCall schemaId (IRawExpr (render reified)), [])
 expandSerialize cfg v0 s0 = do
-  (stmts, vExpr) <- go v0 s0
+  (stmts, vExpr) <- nativeToWire cfg v0 s0
   schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
   return (ISerCall schemaId vExpr, stmts)
+
+-- | A native value as its wire form: closures reified, packers unpacked.
+nativeToWire :: (Monad m) => LowerConfig m -> MDoc -> SerialAST -> m ([IStmt], IExpr)
+nativeToWire cfg = go
   where
     go v s
       | isMsgpackLeaf cfg s = return ([], IRawExpr (render v))
@@ -856,7 +870,14 @@ expandSerialize cfg v0 s0 = do
         ( [IIfNotNull v' resultType (IRawExpr (render v)) uVar unwrappedType before x]
         , IVar v'
         )
-    construct _ _ = error "Unreachable in expandSerialize"
+    construct v var@(SerialVariant (FV _ cv) _ arms@(_ : _)) = do
+      ty <- nominalTypeDoc cfg (serialAstToType var) cv
+      resultType <- lcSerialAstType cfg var
+      byVariantArm cfg resultType ty v arms $ \n i ss -> do
+        results <- zipWithM (\j s -> go (lcCtorField cfg ty n i j v) s) [0 ..] ss
+        let (befores, exprs) = unzip results
+        return (concat befores, IRawExpr (render (lcVariantLit cfg ty n i (map (lcPrintExpr cfg) exprs))))
+    construct _ _ = error "Unreachable in nativeToWire"
 
 -- | A table always arrives as an Arrow record batch; when the module maps
 -- @Table@ to some other library type and the language has a converter,
@@ -888,8 +909,13 @@ expandDeserialize cfg v0 s0
       rawType <- lcRawDeserialAstType cfg s0
       let rawvar = render $ helperNamer idx
       schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
-      (x, befores) <- check (helperNamer idx) s0
+      (x, befores) <- wireToNative cfg (helperNamer idx) s0
       return (x, IAssign rawvar rawType (IDesCall schemaId rawType (serialAstHasString s0) (IRawExpr (render v0))) : befores)
+
+-- | A parsed wire value as its native form: closures reflected, packers
+-- applied.
+wireToNative :: (Monad m) => LowerConfig m -> MDoc -> SerialAST -> m (IExpr, [IStmt])
+wireToNative cfg = check
   where
     check v s
       | isMsgpackLeaf cfg s = return (IRawExpr (render v), [])
@@ -944,7 +970,40 @@ expandDeserialize cfg v0 s0
         ( IVar v'
         , [IIfNotNull v' resultType (IRawExpr (render v)) uVar unwrappedType before x]
         )
-    construct _ _ = error "Unreachable in expandDeserialize"
+    construct v var@(SerialVariant (FV _ cv) _ arms@(_ : _)) = do
+      ty <- nominalTypeDoc cfg (serialAstToType var) cv
+      resultType <- lcDeserialAstType cfg var
+      swap <$> byVariantArm cfg resultType ty v arms (\n i ss -> do
+        results <- zipWithM (\j s -> check (lcCtorField cfg ty n i j v) s) [0 ..] ss
+        let (exprs, befores) = unzip results
+        return (concat befores, IRawExpr (render (lcVariantLit cfg ty n i (map (lcPrintExpr cfg) exprs)))))
+    construct _ _ = error "Unreachable in wireToNative"
+
+-- | Branch on a variant's arm and rebuild the arms whose fields need
+-- conversion; the others pass through as they are.
+byVariantArm ::
+  (Monad m) =>
+  LowerConfig m ->
+  Maybe IType ->
+  MDoc ->
+  MDoc ->
+  [(Text, [SerialAST])] ->
+  (Text -> Int -> [SerialAST] -> m ([IStmt], IExpr)) ->
+  m ([IStmt], IExpr)
+byVariantArm cfg resultType ty v arms rebuild = chain (zip [0 ..] arms)
+  where
+    pass = return ([], IRawExpr (render v))
+    arm (i, (n, ss))
+      | all (isMsgpackLeaf cfg) ss = pass
+      | otherwise = rebuild n i ss
+    chain [] = pass
+    chain [a] = arm a
+    chain (a@(i, (n, _)) : rest) = do
+      (thenStmts, thenExpr) <- arm a
+      (elseStmts, elseExpr) <- chain rest
+      v' <- render . helperNamer <$> lcNewIndex cfg
+      let cond = IRawExpr (render (lcVariantTagTest cfg ty n i v))
+      return ([IIf v' resultType cond thenStmts thenExpr elseStmts elseExpr], IVar v')
 
 -- | What a tail loop's base leaves yield: a packet (a loop that is a pool's
 -- serial entry) or a native value of the given type (a loop's native entry).
@@ -1515,9 +1574,9 @@ lowerNativeExprRaw ::
   NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
   m PoolDocs
 -- Binary operator: emit (lhs op rhs) instead of function call
-lowerNativeExprRaw _ _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
+lowerNativeExprRaw cfg _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
   | srcOperator src =
-      return $ mergePoolDocs (\xs -> case xs of [l, r] -> parens (l <+> pretty (unSrcName (srcName src)) <+> r); _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
+      return $ mergePoolDocs (\xs -> case xs of [l, r] -> lcOperator cfg src l r; _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
 lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP src) es0) = do
   es <- bindCallArgs cfg origExpr es0
   owns <- argOwnerships cfg origExpr
@@ -1533,7 +1592,7 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP src) es0) = do
       handleFunctionArgs exprs =
         case provideClosure src (zipWith (\(i, t, own) e -> lcSourcedArg cfg (site i) own t e) (zip3 [0 ..] argTypes owns) exprs) of
           [] -> lcSrcName cfg src
-          (g0 : gs) -> foldl (lcApplySrcGroup cfg) (lcSrcName cfg src <> tupled g0) gs
+          (g0 : gs) -> foldl (lcApplySrcGroup cfg) (lcSrcName cfg src <> (if null g0 then tupled g0 else tupledNoFold g0)) gs
   return $ mergePoolDocs handleFunctionArgs (map snd es)
 lowerNativeExprRaw cfg _ (AppExeN_ t (PatCallP p) xs) = do
   let es = map snd xs

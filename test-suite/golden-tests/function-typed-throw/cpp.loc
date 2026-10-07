@@ -1,0 +1,24 @@
+-- A throw of function type is a bottom like any other: applying it raises,
+-- @try catches it, a strict let raises even if unused, and an unused where
+-- binding is never evaluated.
+module main (applied, caught, unusedLet, unusedWhere)
+
+import root-cpp
+
+escapable effect Err
+
+f :: Int -> Bool
+f = @throw "FT: applied"
+
+applied :: Int -> Bool
+applied x = not (f (x + 1))
+
+caught :: Int -> Bool
+caught x = match (@try (f (x + 1))) | (Ok b) = not b | (Err _) = False
+
+unusedLet :: Int -> Int
+unusedLet x = let g = (@throw "FT: let" :: Int -> Int) in x + 1
+
+unusedWhere :: Int -> Int
+unusedWhere x = x + 1 where
+  g = (@throw "FT: where" :: Int -> Int)

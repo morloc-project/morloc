@@ -1,0 +1,18 @@
+-- A `data` arm holding a custom-packed type crosses a pool boundary in both
+-- directions: the packer and unpacker run on the field.
+module main (mk, size)
+import root-py
+newtype MyMap a b
+type Py => (MyMap a b) = "dict" a b
+instance Packable (List (Tuple2 a b)) (MyMap a b) where
+  source Py from "main.py" ("pack_mymap" as pack, "unpack_mymap" as unpack)
+source Py from "main.py" ("size_map" as sizeMap, "build")
+sizeMap :: MyMap Str Int -> Int
+build :: Int -> MyMap Str Int
+data V = M (MyMap Str Int) Int | N
+mk :: Int -> V
+mk x = M (build x) x
+size :: V -> Int
+size v = match v
+  | (M m k) = k + sizeMap m
+  | N = 0

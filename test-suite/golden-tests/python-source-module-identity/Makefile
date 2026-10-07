@@ -11,6 +11,8 @@ all:
 	./nexus rel hi >> obs.txt 2>> obs.err
 	echo "--- nsLeaf ---" >> obs.txt
 	./nexus nsLeaf hi >> obs.txt 2>> obs.err
+	echo "--- dotdot ---" >> obs.txt
+	./nexus dotdot hi >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus *.err __pycache__ app/__pycache__ ns/__pycache__

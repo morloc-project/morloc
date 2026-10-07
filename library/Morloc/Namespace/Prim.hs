@@ -38,6 +38,9 @@ module Morloc.Namespace.Prim
   , MVar (..)
   , EVar (..)
   , TVar (..)
+  , tvarIdentifier
+  , nativeTypeName
+  , isTypeVariableName
   , ClassName (..)
   , CVar (..)
   , Key (..)
@@ -69,6 +72,7 @@ module Morloc.Namespace.Prim
   ) where
 
 import Data.Aeson (FromJSON (..))
+import Data.Char (isAlphaNum)
 import qualified Data.Aeson as Aeson
 import Data.Binary (Binary)
 import Data.Map.Strict (Map)
@@ -164,6 +168,40 @@ newtype EVar = EV {unEVar :: Text} deriving (Show, Eq, Ord)
 
 -- | Type variable name
 newtype TVar = TV {unTVar :: Text} deriving (Show, Eq, Ord)
+
+-- | A type name as a compiled language prints it. A name of the form of a
+-- module-qualified type (@lib.P@) is the generated type's name and is
+-- spelled as an identifier; anything else is the user's own spelling.
+nativeTypeName :: Text -> Text
+nativeTypeName t
+  | DT.any (== '.') t && DT.all (\c -> c == '.' || c == '-' || c == '_' || (c < '\x80' && isAlphaNum c)) t =
+      tvarIdentifier (TV t)
+  | otherwise = t
+
+-- | A type variable starts with a lowercase letter. A type name starts with
+-- an uppercase one, or is module-qualified (@lib.P@, @.lib.P@), and a
+-- qualified name always contains a dot, which no variable does.
+isTypeVariableName :: Text -> Bool
+isTypeVariableName t = case DT.uncons t of
+  Just (c, _) -> isLower c && not (DT.any (== '.') t)
+  Nothing -> False
+
+-- | A type name as an identifier in generated code. A name that is already
+-- an identifier is unchanged; a module-qualified name (@lib.P@, @.lib.P@) is
+-- escaped under a prefix no type name can start with, so distinct names stay
+-- distinct.
+tvarIdentifier :: TVar -> Text
+tvarIdentifier (TV t)
+  | DT.all plain t = t
+  | otherwise = "mlcq_" <> DT.concatMap esc t
+  where
+    plain c = c == '_' || (c < '\x80' && isAlphaNum c)
+    esc c
+      | c == '_' = "__"
+      | c == '.' = "_d"
+      | c == '-' = "_h"
+      | c < '\x80' && isAlphaNum c = DT.singleton c
+      | otherwise = "_u" <> DT.pack (show (fromEnum c)) <> "_"
 
 -- | Typeclass name
 newtype ClassName = ClassName {unClassName :: Text} deriving (Show, Eq, Ord)

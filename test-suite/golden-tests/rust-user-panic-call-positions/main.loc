@@ -1,0 +1,40 @@
+-- A panic in a sourced Rust function whose body lies outside the user's own
+-- source directory is the user's wherever the generated code calls it
+-- (model/panic.md PANIC-15): with another call as its argument, with a string
+-- argument, after non-ASCII text on the same line, and as the later
+-- argument group of a curried function. @try catches each and the pool
+-- keeps serving.
+module main (tryNested, tryText, tryAfterText, tryCurried, ok)
+
+import root
+import root-rust
+
+type Rust => Int = "i64"
+type Rust => Str = "String"
+
+source Rust from "src/h.rs" ("helper_panics" as helperPanics, "add_one" as addOne, "text_panics" as textPanics)
+
+source Rust from "src/h.rs" where
+  --' name: curried_panics
+  --' rsize: 1
+  curriedPanics
+
+helperPanics :: Int -> Int
+addOne :: Int -> Int
+textPanics :: Str -> Int -> Int
+curriedPanics :: Int -> Int -> Int
+
+tryNested :: Int -> Int
+tryNested x = match (@try (helperPanics (addOne x))) | (Ok v) = v | (Err _) = -2
+
+tryText :: Int -> Int
+tryText x = match (@try (textPanics "abc" x)) | (Ok v) = v | (Err _) = -2
+
+tryAfterText :: Int -> Int
+tryAfterText x = match (@try (textPanics "été" (helperPanics x))) | (Ok v) = v | (Err _) = -2
+
+tryCurried :: Int -> Int
+tryCurried x = match (@try (curriedPanics x 1)) | (Ok v) = v | (Err _) = -2
+
+ok :: Int -> Int
+ok x = helperPanics (addOne x)

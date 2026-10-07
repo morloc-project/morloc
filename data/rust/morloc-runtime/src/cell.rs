@@ -92,21 +92,43 @@ const MAX_CELLS: usize = 1 << SLOT_BITS;
 const MAX_SLOTS: usize = 4096;
 
 fn proc_tag() -> i64 {
-    static TAG: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-    *TAG.get_or_init(|| {
-        let pid = std::process::id() as u64;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
-            .unwrap_or(0);
-        // Any spread over the tag's range will do; this only has to make a
-        // collision between two live pool processes unlikely.
-        let mixed = pid
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .rotate_left(31)
-            ^ now.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        ((mixed ^ (mixed >> 29)) as i64) & PROC_MASK
-    })
+    let pid = std::process::id() as u64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+        .unwrap_or(0);
+    // Any spread over the tag's range will do; this only has to make a
+    // collision between two live pool processes unlikely.
+    let mixed = pid
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .rotate_left(31)
+        ^ now.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    ((mixed ^ (mixed >> 29)) as i64) & PROC_MASK
+}
+
+static TAG: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
+fn tag() -> i64 {
+    use std::sync::atomic::Ordering;
+    let t = TAG.load(Ordering::Acquire);
+    if t >= 0 {
+        return t;
+    }
+    match TAG.compare_exchange(-1, proc_tag(), Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => TAG.load(Ordering::Acquire),
+        Err(won) => won,
+    }
+}
+
+// FORK-13: a child's tag never equals the tag of the parent it was forked from.
+pub(crate) fn after_fork_in_child() {
+    use std::sync::atomic::Ordering;
+    let parent = TAG.load(Ordering::Relaxed);
+    let mut t = proc_tag();
+    if t == parent {
+        t = (t + 1) & PROC_MASK;
+    }
+    TAG.store(t, Ordering::Release);
 }
 
 struct CellEntry {
@@ -115,6 +137,8 @@ struct CellEntry {
     /// than silently addressing whatever took its place.
     generation: i64,
     owner: u64,
+    /// For an unowned cell, the next dispatch id when it was made (FORK-16).
+    born: u64,
     /// The seed. Also the answer for a cell no thread ever folded into,
     /// which is what an empty stream must fold to.
     ///
@@ -127,24 +151,20 @@ struct CellEntry {
 
 struct CellRegistry {
     cells: Vec<CellEntry>,
-    /// Dispatches currently executing, under the registry's own lock for
-    /// the same reason the temp registry keeps its count there: observing
-    /// the zero and collecting against it must be one step.
-    active: usize,
 }
 
-static CELL_REGISTRY: std::sync::Mutex<CellRegistry> =
-    std::sync::Mutex::new(CellRegistry { cells: Vec::new(), active: 0 });
+static CELL_REGISTRY: crate::fork_policy::Reset<CellRegistry> =
+    crate::fork_policy::Reset::new(|| CellRegistry { cells: Vec::new() });
 
 fn pack_handle(slot: usize, generation: i64) -> i64 {
     ((generation << (SLOT_BITS + PROC_BITS))
-        | (proc_tag() << SLOT_BITS)
+        | (tag() << SLOT_BITS)
         | (slot as i64))
         & i64::MAX
 }
 
 fn unpack_handle(h: i64) -> Option<(usize, i64)> {
-    if h < 0 || (h >> SLOT_BITS) & PROC_MASK != proc_tag() {
+    if h < 0 || (h >> SLOT_BITS) & PROC_MASK != tag() {
         return None;
     }
     Some(((h & SLOT_MASK) as usize, h >> (SLOT_BITS + PROC_BITS)))
@@ -176,8 +196,9 @@ fn no_such_cell(fn_name: &str) -> MorlocError {
     ))
 }
 
-fn poisoned(fn_name: &str) -> MorlocError {
-    MorlocError::Other(format!("{}: fold accumulator registry is poisoned", fn_name))
+fn registry() -> crate::fork_policy::ResetGuard<'static, CellRegistry> {
+    // PANIC-4
+    CELL_REGISTRY.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock())
 }
 
 /// Resolve a handle to a live cell index, rejecting a stale generation.
@@ -210,16 +231,11 @@ fn release_entry(c: &mut CellEntry) {
 /// `init` must point at a value laid out as `rs` describes.
 pub unsafe fn cell_new(rs: &Schema, init: *const u8) -> Result<i64, MorlocError> {
     if init.is_null() {
-        return Err(MorlocError::Other("mlc_cell_new: null init".into()));
+        // PANIC-14
+        morloc_runtime_types::panic::fatal("mlc_cell_new: null init");
     }
     let seed = cell_owns(voidstar::deep_copy_to_block(init, rs)?)?;
-    let mut reg = match CELL_REGISTRY.lock() {
-        Ok(r) => r,
-        Err(_) => {
-            free_block(seed);
-            return Err(poisoned("mlc_cell_new"));
-        }
-    };
+    let mut reg = registry();
     let owner = current_temp_owner();
     if let Some(i) = reg.cells.iter().position(|c| !c.live) {
         let gen = reg.cells[i].generation;
@@ -227,6 +243,7 @@ pub unsafe fn cell_new(rs: &Schema, init: *const u8) -> Result<i64, MorlocError>
             live: true,
             generation: gen,
             owner,
+            born: crate::intrinsics::next_dispatch_id(),
             init: seed,
             slots: Vec::new(),
         };
@@ -242,6 +259,7 @@ pub unsafe fn cell_new(rs: &Schema, init: *const u8) -> Result<i64, MorlocError>
         live: true,
         generation: 0,
         owner,
+        born: crate::intrinsics::next_dispatch_id(),
         init: seed,
         slots: Vec::new(),
     });
@@ -255,7 +273,7 @@ pub unsafe fn cell_new(rs: &Schema, init: *const u8) -> Result<i64, MorlocError>
 /// `rs` must describe the type the cell was created with.
 pub unsafe fn cell_get(handle: i64, rs: &Schema) -> Result<AbsPtr, MorlocError> {
     let me = std::thread::current().id();
-    let reg = CELL_REGISTRY.lock().map_err(|_| poisoned("mlc_cell_get"))?;
+    let reg = registry();
     let i = resolve(&reg, handle, "mlc_cell_get")?;
     let c = &reg.cells[i];
     let src = c.slots.iter().find(|(t, _)| *t == me).map(|(_, p)| *p).unwrap_or(c.init);
@@ -273,7 +291,7 @@ pub unsafe fn cell_get(handle: i64, rs: &Schema) -> Result<AbsPtr, MorlocError> 
 /// Copied rather than lent because the caller releases what it is handed
 /// and the slot must survive to be folded into again.
 fn copy_out(
-    reg: std::sync::MutexGuard<'_, CellRegistry>,
+    reg: crate::fork_policy::ResetGuard<'_, CellRegistry>,
     src: RelPtr,
     rs: &Schema,
 ) -> Result<AbsPtr, MorlocError> {
@@ -293,13 +311,14 @@ fn copy_out(
 /// `value` must point at a value laid out as `rs` describes.
 pub unsafe fn cell_put(handle: i64, rs: &Schema, value: *const u8) -> Result<(), MorlocError> {
     if value.is_null() {
-        return Err(MorlocError::Other("mlc_cell_put: null value".into()));
+        // PANIC-14
+        morloc_runtime_types::panic::fatal("mlc_cell_put: null value");
     }
     let me = std::thread::current().id();
     // Copied before the lock is taken: a deep copy of a large
     // accumulator must not hold every other worker out of its own slot.
     let fresh = cell_owns(voidstar::deep_copy_to_block(value, rs)?)?;
-    let mut reg = CELL_REGISTRY.lock().map_err(|_| poisoned("mlc_cell_put"))?;
+    let mut reg = registry();
     let i = match resolve(&reg, handle, "mlc_cell_put") {
         Ok(i) => i,
         Err(e) => {
@@ -335,7 +354,7 @@ pub unsafe fn cell_put(handle: i64, rs: &Schema, value: *const u8) -> Result<(),
 /// thread touched answers with its seed, which is what an empty stream
 /// folds to.
 pub fn cell_count(handle: i64) -> Result<i64, MorlocError> {
-    let reg = CELL_REGISTRY.lock().map_err(|_| poisoned("mlc_cell_count"))?;
+    let reg = registry();
     let i = resolve(&reg, handle, "mlc_cell_count")?;
     Ok(std::cmp::max(1, reg.cells[i].slots.len() as i64))
 }
@@ -345,15 +364,13 @@ pub fn cell_count(handle: i64) -> Result<i64, MorlocError> {
 /// # Safety
 /// `rs` must describe the type the cell was created with.
 pub unsafe fn cell_slot(handle: i64, index: i64, rs: &Schema) -> Result<AbsPtr, MorlocError> {
-    let reg = CELL_REGISTRY.lock().map_err(|_| poisoned("mlc_cell_slot"))?;
+    let reg = registry();
     let i = resolve(&reg, handle, "mlc_cell_slot")?;
     let c = &reg.cells[i];
     let n = std::cmp::max(1, c.slots.len() as i64);
     if index < 0 || index >= n {
-        return Err(MorlocError::Other(format!(
-            "mlc_cell_slot: index {} out of range (cell holds {})",
-            index, n
-        )));
+        // PANIC-14
+        morloc_runtime_types::panic::fatal(&format!("mlc_cell_slot: index {index} out of range (cell holds {n})"));
     }
     let src = c.slots.get(index as usize).map(|(_, p)| *p).unwrap_or(c.init);
     copy_out(reg, src, rs)
@@ -361,7 +378,7 @@ pub unsafe fn cell_slot(handle: i64, index: i64, rs: &Schema) -> Result<AbsPtr, 
 
 /// Release a cell and every accumulator in it.
 pub fn cell_free(handle: i64) -> Result<(), MorlocError> {
-    let mut reg = CELL_REGISTRY.lock().map_err(|_| poisoned("mlc_cell_free"))?;
+    let mut reg = registry();
     let i = resolve(&reg, handle, "mlc_cell_free")?;
     release_entry(&mut reg.cells[i]);
     Ok(())
@@ -371,8 +388,7 @@ pub fn cell_free(handle: i64) -> Result<(), MorlocError> {
 
 /// # Safety
 /// `init` must point at a value laid out as `schema` describes.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_cell_new(
+pub(crate) unsafe fn mlc_cell_new(
     schema: *const CSchema,
     init: *const c_void,
     errmsg: *mut *mut c_char,
@@ -385,8 +401,7 @@ pub unsafe extern "C" fn mlc_cell_new(
 
 /// # Safety
 /// `schema` must describe the type the cell was created with.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_cell_get(
+pub(crate) unsafe fn mlc_cell_get(
     handle: i64,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -399,8 +414,7 @@ pub unsafe extern "C" fn mlc_cell_get(
 
 /// # Safety
 /// `value` must point at a value laid out as `schema` describes.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_cell_put(
+pub(crate) unsafe fn mlc_cell_put(
     handle: i64,
     schema: *const CSchema,
     value: *const c_void,
@@ -412,15 +426,13 @@ pub unsafe extern "C" fn mlc_cell_put(
     })
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_cell_count(handle: i64, errmsg: *mut *mut c_char) -> i64 {
+pub(crate) unsafe fn mlc_cell_count(handle: i64, errmsg: *mut *mut c_char) -> i64 {
     wrap_c_call(errmsg, -1, || cell_count(handle))
 }
 
 /// # Safety
 /// `schema` must describe the type the cell was created with.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_cell_slot(
+pub(crate) unsafe fn mlc_cell_slot(
     handle: i64,
     index: i64,
     schema: *const CSchema,
@@ -432,27 +444,20 @@ pub unsafe extern "C" fn mlc_cell_slot(
     })
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_cell_free(handle: i64, errmsg: *mut *mut c_char) -> i32 {
+pub(crate) unsafe fn mlc_cell_free(handle: i64, errmsg: *mut *mut c_char) -> i32 {
     wrap_c_call(errmsg, 1, || cell_free(handle).map(|_| 0))
 }
 
 unsafe fn require_schema(schema: *const CSchema, fn_name: &str) -> Result<Schema, MorlocError> {
     if schema.is_null() {
-        return Err(MorlocError::Other(format!("{}: null schema", fn_name)));
+        // PANIC-14
+        morloc_runtime_types::panic::fatal(&format!("{fn_name}: null schema"));
     }
     Ok(CSchema::to_rust(schema))
 }
 
 
 // -- dispatch bracketing ------------------------------------------------
-
-/// Count a dispatch in. Paired with [`sweep_dispatch`].
-pub fn begin_dispatch() {
-    if let Ok(mut reg) = CELL_REGISTRY.lock() {
-        reg.active += 1;
-    }
-}
 
 /// Release any cell still held by the dispatch that is ending, so a
 /// handler that raised before its merge cannot leak one. Cells made on a
@@ -461,19 +466,20 @@ pub fn begin_dispatch() {
 /// `last` is the temp registry's count of in-flight dispatches reaching
 /// zero, which is the same count this registry would otherwise keep a
 /// second copy of.
-pub fn sweep_dispatch(call_id: u64, last: bool) {
-    if let Ok(mut reg) = CELL_REGISTRY.lock() {
-        for c in reg.cells.iter_mut() {
-            if c.live && (c.owner == call_id || (last && c.owner == TEMP_OWNER_NONE)) {
-                release_entry(c);
-            }
+pub fn sweep_dispatch(call_id: u64, oldest: Option<u64>) {
+    for c in registry().cells.iter_mut() {
+        if c.live
+            && (c.owner == call_id
+                || (c.owner == TEMP_OWNER_NONE && crate::intrinsics::unowned_collectable(c.born, oldest)))
+        {
+            release_entry(c);
         }
     }
 }
 
 #[cfg(test)]
 pub fn live_cell_count() -> usize {
-    CELL_REGISTRY.lock().map(|r| r.cells.iter().filter(|c| c.live).count()).unwrap_or(0)
+    registry().cells.iter().filter(|c| c.live).count()
 }
 
 #[cfg(test)]
@@ -679,6 +685,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_forked_child_never_resolves_its_parents_cell() {
+        let _shm = crate::own_test_registry();
+        let schema = parse_schema("as").unwrap();
+        unsafe {
+            let seed = mk("[\"x\"]", &schema);
+            let h = cell_new(&schema, seed).unwrap();
+            let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+                let inherited = cell_count(h).is_err();
+                let mine = cell_new(&schema, seed).unwrap();
+                let distinct = mine != h && cell_count(h).is_err() && cell_count(mine).is_ok();
+                cell_free(mine).unwrap();
+                inherited && distinct
+            });
+            shm::shfree(seed).unwrap();
+            assert!(cell_count(h).is_ok());
+            cell_free(h).unwrap();
+            assert!(ok, "a forked child resolved a fold accumulator its parent owns");
+        }
+    }
+
     /// A handler that raises before its merge leaves a live cell; the
     /// end-of-dispatch sweep reclaims it.
     #[test]
@@ -697,5 +724,39 @@ mod tests {
             assert_eq!(live_cell_count(), before);
             assert!(cell_count(h).is_err());
         }
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_cell_new(schema: *const CSchema, init: *const c_void, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_cell_new(schema, init, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_cell_get(handle: i64, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_cell_get(handle, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_cell_put(handle: i64, schema: *const CSchema, value: *const c_void, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_cell_put(handle, schema, value, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_cell_count(handle: i64, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_cell_count(handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_cell_slot(handle: i64, index: i64, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_cell_slot(handle, index, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_cell_free(handle: i64, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_cell_free(handle, errmsg)
     }
 }

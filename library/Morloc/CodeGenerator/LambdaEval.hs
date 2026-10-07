@@ -466,7 +466,7 @@ reduce ai (AnnoS g1@(Idx _ appT) c1 (AppS (AnnoS (Idx gLet _) cLet (LetS v e1 bo
     AnnoS (Idx gLet appT) cLet $
       LetS v e1 (AnnoS g1 c1 (AppS body es))
 -- Beta-reduce an applied lambda. An argument is evaluated once, at the
--- application (spec/types/effects.md, law 5), so only a value may be
+-- application (model/effects.md, law 5), so only a value may be
 -- substituted into the body: substituting anything else would evaluate it at
 -- each reference, or never if there is none. A value is substituted when its
 -- parameter is used at most once (a move: 'substituteAnnoS' reuses the
@@ -498,7 +498,9 @@ reduce ai
     -- The reduction's result is what the labeled application computes, so
     -- a label, cache or log setting on the application moves to its root.
     moveConfig i1n =<< wrapLets i1 tb1 hoisted =<< case () of
-      _ | isValue e1n && (ai || nrefs <= 1) ->
+      _ | isFunctionType tv, AnnoS (Idx ti _) tc (IntrinsicS IntrThrow msg) <- e1n ->
+            retypeThrow ti i1t tc msg
+        | isValue e1n && (ai || nrefs <= 1) ->
             substituteAnnoS v e1n e2 >>= reduce ai . rebuild
         | isValue e1n -> share normalized v e1n e2
         -- A function built by a computation, on the nexus path. The pure
@@ -592,6 +594,11 @@ reduce ai (AnnoS g c (AppS headA es)) = do
       th' <- branch th es'
       el' <- branch el esCopy
       wrapLets g c (concat binds) (AnnoS g c (IfS cond th' el'))
+    -- A throw, applied: its arguments are evaluated, then it throws, at the
+    -- type of the application.
+    AnnoS (Idx ti _) tc (IntrinsicS IntrThrow msg) -> do
+      binds <- concat <$> mapM (fmap fst . bindArg ai) es
+      wrapLets g c binds =<< retypeThrow ti (annT g) tc msg
     _ -> do
       es' <- mapM (reduce ai) es
       return $ case (headA', es') of
@@ -705,6 +712,12 @@ newPlainIndex parent = do
   i <- newIndex parent
   MM.modify (\s -> s {stateManifoldConfig = Map.delete i (stateManifoldConfig s)})
   return i
+
+-- | A throw at another type.
+retypeThrow :: Int -> Type -> c -> [AnnoS (Indexed Type) One c] -> MorlocMonad (AnnoS (Indexed Type) One c)
+retypeThrow from t c msg = do
+  ix <- newPlainIndex from
+  return (AnnoS (Idx ix t) c (IntrinsicS IntrThrow msg))
 
 -- | Split a suspension-building application into the arguments that are not
 -- values (to be bound by lets, returned in order) and the application of the

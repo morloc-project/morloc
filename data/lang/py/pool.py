@@ -4,6 +4,7 @@ import sys
 import select
 import os # required for setting path to morloc dependencies
 import time
+import gc
 import copy
 import array
 import struct
@@ -38,6 +39,23 @@ _lifeline_fd = -1
 class _LocalFlag:
     """The shutdown flag of a process that shares it with no other."""
     value = False
+
+
+def _fork_single_threaded(started):
+    """FORK-6: a worker is forked only from a process with no other thread.
+    Otherwise the pool ends at once, taking the processes it started."""
+    n = morloc.thread_count()
+    if n == 1:
+        return
+    sys.stderr.write(f"morloc pool: refusing to fork a worker from a process with {n} threads\n")
+    sys.stderr.flush()
+    for p in started:
+        try:
+            p.kill()
+            p.join()
+        except Exception:
+            pass
+    os._exit(1)
 
 
 def _lifeline_ended():
@@ -75,8 +93,9 @@ _MLC_CLOSURE_SCHEMA = "t3sjaau1"
 # in the parent and then forking is unsafe on macOS: e.g. numpy loads Apple's
 # Accelerate/libdispatch, which spins background threads, and forking a
 # multithreaded process then deadlocks/aborts in the child (fork-after-threads).
-# Deferring keeps the parent single-threaded, and each worker initializes its
-# libraries in its own process -- preserving full per-worker thread parallelism.
+# Deferring keeps user-library threads out of the parent (the runtime's own
+# threads are fork-aware), and each worker initializes its libraries in its own
+# process -- preserving full per-worker thread parallelism.
 # The block is held verbatim in a raw string and exec'd into module globals (so
 # the imports land at module scope exactly as if run at import time, past fork).
 _mlc_user_sources = r'''
@@ -126,6 +145,16 @@ def _mlc_import_source(module_path):
     # installed package, the runtime -- and the module is registered under a
     # reserved key, so it neither reads nor replaces that module: a plain
     # `import copy` from inside a user file still reaches the standard library.
+    #
+    # A path that has no dotted name (one reaching outside the program's tree
+    # through `..`, or an absolute one) arrives as the file path itself and is
+    # always loaded by location.
+    if module_path.endswith(".py"):
+        for root in _mlc_source_roots:
+            candidate = os.path.normpath(os.path.join(root, module_path))
+            if os.path.isfile(candidate):
+                return _mlc_load_source_file(module_path, candidate)
+        raise ImportError("sourced file not found: " + module_path)
     rel = module_path.replace(".", os.sep) + ".py"
     for root in _mlc_source_roots:
         candidate = os.path.join(root, rel)
@@ -135,14 +164,18 @@ def _mlc_import_source(module_path):
                 found = getattr(module, "__file__", None)
                 if found and os.path.realpath(found) == os.path.realpath(candidate):
                     return module
-            key = "_mlc_src_" + module_path.replace(".", "_")
-            spec = importlib.util.spec_from_file_location(key, candidate)
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[key] = module
-            spec.loader.exec_module(module)
-            return module
+            return _mlc_load_source_file(module_path, candidate)
     # Nothing on the search path: an installed package, imported by name.
     return importlib.import_module(module_path)
+
+
+def _mlc_load_source_file(module_path, candidate):
+    key = "_mlc_src_" + "".join(c if c.isalnum() else "_" for c in module_path)
+    spec = importlib.util.spec_from_file_location(key, candidate)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _mlc_load_user_sources():
@@ -516,7 +549,7 @@ def _with_debug_trace(msg: str) -> str:
 def run_job(client_fd: int) -> None:
     try:
         # Anything left on this thread outside a dispatch; a dispatch's own
-        # entries are released after its reply (see the finally below).
+        # entries are released as its reply is sent (send_reply).
         morloc.shm_tracker_flush()
         morloc.debug_flush_dispatch()
         client_data = morloc.stream_from_client(client_fd)
@@ -526,24 +559,23 @@ def run_job(client_fd: int) -> None:
         # fail packet rather than a cryptic dispatch error.
         if _mlc_source_error is not None and not morloc.is_ping(client_data):
             sys.stdout.flush()
-            morloc.send_packet_to_foreign_server(client_fd, morloc.make_fail_packet(_mlc_source_error))
+            morloc.send_reply(client_fd, morloc.make_fail_packet(_mlc_source_error))
             return
 
-        if(morloc.is_local_call(client_data)):
+        is_local = morloc.is_local_call(client_data)
+        if is_local or morloc.is_remote_call(client_data):
+            table = dispatch if is_local else remote_dispatch
             (mid, args) = morloc.read_morloc_call_packet(client_data)
 
             try:
-                result = dispatch[mid](*args)
+                result = table[mid](*args)
+            except morloc.MorlocPipeClosed as e:
+                result = morloc.make_pipe_closed_packet(str(e))
             except Exception as e:
                 result = morloc.make_fail_packet(_with_debug_trace(str(e)))
-
-        elif(morloc.is_remote_call(client_data)):
-            (mid, args) = morloc.read_morloc_call_packet(client_data)
-
-            try:
-                result = remote_dispatch[mid](*args)
-            except Exception as e:
-                result = morloc.make_fail_packet(_with_debug_trace(str(e)))
+            # A process forked by user code during this call exits as soon
+            # as the call returns in it (FORK-12).
+            morloc.exit_if_forked()
 
         elif(morloc.is_ping(client_data)):
             # The nexus abandons a readiness-ping connection when its probe
@@ -554,7 +586,7 @@ def run_job(client_fd: int) -> None:
             # C++/Rust pools already ignore pong-send failures the same way).
             sys.stdout.flush()
             try:
-                morloc.send_packet_to_foreign_server(client_fd, morloc.pong(client_data))
+                morloc.send_reply(client_fd, morloc.pong(client_data))
             except Exception:
                 pass
             return
@@ -568,27 +600,27 @@ def run_job(client_fd: int) -> None:
         # the nexus can print first, causing out-of-order output.
         sys.stdout.flush()
 
-        morloc.send_packet_to_foreign_server(client_fd, result)
+        morloc.send_reply(client_fd, result)
 
     except Exception as e:
         # Try to send a fail packet back to the caller before giving up.
         # This may fail (e.g., broken pipe from a timed-out ping), which is OK.
         try:
             result = morloc.make_fail_packet(str(e))
-            morloc.send_packet_to_foreign_server(client_fd, result)
+            morloc.send_reply(client_fd, result)
         except Exception:
             pass
         print(f"job failed: {e!s}", file=sys.stderr)
     finally:
+        morloc.exit_if_forked()
         # Reclaim any stdio singleton claim this dispatch left open (e.g. a
         # handler that raised past @close on a broken pipe). Runs on the
         # same worker thread that opened it, so the reclaim's call_id gate
         # matches. Without this a leaked @stdout claim wedges every later
         # open with "@stdout already open in this nexus".
         morloc.reclaim_stdio_after_dispatch()
-        # The reply carried the caller's own reference to its value, so
-        # what this dispatch still holds is released now rather than when
-        # this worker next runs.
+        # send_reply has released what the dispatch held; this covers a
+        # dispatch that ended without sending one.
         morloc.shm_tracker_flush()
         # Safety-net flush for any output from error handling paths
         sys.stdout.flush()
@@ -618,7 +650,11 @@ def _recv_fd(sock):
 
 WORKER_IDLE_TIMEOUT = 5.0  # seconds before an idle worker exits
 
-def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w):
+def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w, retire_w, inherited_write_fd=-1):
+    # The job socket's write end belongs to the listener; a worker holding a
+    # copy would never see end of file when the listener dies.
+    if inherited_write_fd >= 0:
+        os.close(inherited_write_fd)
     # Reset signal handlers inherited from main. If user code inside run_job
     # calls multiprocessing.Pool (or anything else that forks and later
     # SIGTERMs its own children), those grandchildren would otherwise inherit
@@ -638,7 +674,21 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
     _init_worker_tracking(busy_count, total_workers, wakeup_w)
     sock = _socket.fromfd(job_fd, _socket.AF_UNIX, _socket.SOCK_STREAM)
     os.close(job_fd)  # sock owns a dup'd copy
+    me = os.getpid()
     last_activity = time.monotonic()
+    warned_blocked = False
+    trace_retire = os.environ.get("MORLOC_PY_TRACE_RETIRE") == "1"
+    last_trace = 0.0
+
+    def trace(what):
+        refs = morloc.held_references()
+        sys.stderr.write(f"morloc py worker {me}: {what} idle={time.monotonic() - last_activity:.1f}s "
+                         f"workers={total_workers.value} busy={busy_count.value} refs={refs} "
+                         f"stream_locks={morloc.retire_blockers() - refs}\n")
+        sys.stderr.flush()
+
+    if trace_retire:
+        trace("started")
     try:
         # poll() (not select.select) avoids the FD_SETSIZE=1024 ceiling: a
         # job-queue fd >= 1024 makes select.select raise ValueError and kill the
@@ -654,10 +704,34 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
                     client_fd = _recv_fd(sock)
                     run_job(client_fd)
                     last_activity = time.monotonic()
+                    if trace_retire:
+                        trace("job done")
                 except (EOFError, OSError):
                     break
-            elif total_workers.value > 1 and time.monotonic() - last_activity > WORKER_IDLE_TIMEOUT:
-                break
+            else:
+                # FORK-15: leases of user-forked children that are gone.
+                morloc.reclaim_leases()
+            if trace_retire and not events and time.monotonic() - last_trace >= 1.0:
+                last_trace = time.monotonic()
+                trace("idle check")
+            if not events and total_workers.value > 1 and time.monotonic() - last_activity > WORKER_IDLE_TIMEOUT:
+                # SHM-8: a worker retires only holding no shared memory, and
+                # says so; any other exit ends the pool.
+                gc.collect()
+                morloc.shm_tracker_flush()
+                blockers = morloc.retire_blockers()
+                if blockers == 0:
+                    if trace_retire:
+                        trace("retiring")
+                    morloc.remove_own_temps()
+                    os.write(retire_w, struct.pack("i", me))
+                    break
+                if not warned_blocked:
+                    warned_blocked = True
+                    sys.stderr.write(f"morloc py worker {me}: idle but holding {blockers} "
+                                     "shared-memory references or stream locks; it cannot retire\n")
+                    sys.stderr.flush()
+                last_activity = time.monotonic()
     except BaseException as e:
         # Catch-all for errors that escape run_job's own exception handling:
         # MemoryError, KeyboardInterrupt, SystemExit, or bugs in the worker
@@ -721,6 +795,19 @@ def signal_handler(sig, frame):
     d = _take_daemon()
     if d is not None:
         morloc.close_daemon(d)
+
+
+def _read_retired(fd):
+    """The pids retired workers have written to `fd` so far."""
+    pids = set()
+    while True:
+        try:
+            data = os.read(fd, 4096)
+        except BlockingIOError:
+            return pids
+        if not data:
+            return pids
+        pids.update(p for (p,) in struct.iter_unpack("i", data[: len(data) // 4 * 4]))
 
 
 def _report_worker_death(w, shutting_down=False):
@@ -821,12 +908,21 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
     sched = threading.Lock()
     counts = {"busy": 0, "total": 0}
 
+    trace_retire = os.environ.get("MORLOC_PY_TRACE_RETIRE") == "1"
+
+    def trace(what):
+        sys.stderr.write(f"morloc py worker thread {threading.get_ident()}: {what} "
+                         f"workers={counts['total']} busy={counts['busy']}\n")
+        sys.stderr.flush()
+
     def _spawn_worker():
         threading.Thread(target=_worker_loop, daemon=True).start()
 
     def _worker_loop():
         with sched:
             counts["total"] += 1
+            if trace_retire:
+                trace("started")
         released = False  # ensure this worker's slot is freed exactly once
         try:
             while not stop.is_set():
@@ -843,10 +939,10 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
                         if counts["total"] - counts["busy"] > 1:
                             counts["total"] -= 1
                             released = True
-                            # shm_tracker is __thread and its SHM is freed lazily
-                            # on the NEXT dispatch; a reaped worker has none, so
-                            # flush its last job's SHM now rather than leak it
-                            # until pool shutdown.
+                            if trace_retire:
+                                trace("retiring")
+                            # shm_tracker is __thread; release anything this
+                            # thread holds before it goes.
                             morloc.shm_tracker_flush()
                             return
                     continue
@@ -867,6 +963,13 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
             print(f"morloc pool worker thread fatal: {e!s}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             sys.stderr.flush()
+            # PANIC-5 / SHM-8: what the thread held is recovered only by
+            # ending the pool, as a fork-mode worker's death does.
+            try:
+                sys.stdout.flush()
+            except Exception:
+                pass
+            os._exit(1)
         finally:
             # A thread leaving by any route takes its deferred releases with
             # it, so perform them here as the surplus reap above does.
@@ -960,8 +1063,7 @@ if __name__ == "__main__":
         pass
 
     # The nexus's lifeline: the main loops below poll it and end this pool's
-    # process group when the nexus ends, however it ends. Polled rather than
-    # watched from a thread, so a fork-model pool stays single-threaded.
+    # process group when the nexus ends, however it ends.
     _lifeline_fd = morloc.lifeline_adopt()
 
     # The SIGTERM/SIGINT handler sets this. A plain flag until the fork model
@@ -1030,10 +1132,18 @@ if __name__ == "__main__":
     # Keep a dup of the read end so we can spawn new workers later
     spare_read_fd = os.dup(read_sock.fileno())
 
+    # A worker that retires writes its pid here first (SHM-8).
+    retire_r, retire_w = os.pipe()
+    os.set_blocking(retire_r, False)
+    retired = set()
+    pool_failure = None
+
     for i in range(num_workers):
         worker = Process(target=worker_process,
                          args=(read_sock.fileno(), tmpdir, shm_basename, shutdown_flag,
-                               busy_count, total_workers, wakeup_w))
+                               busy_count, total_workers, wakeup_w, retire_w,
+                               write_sock.fileno()))
+        _fork_single_threaded(workers)
         worker.start()
         workers.append(worker)
     read_sock.close()  # main/listener don't need the read end (spare_read_fd kept)
@@ -1043,6 +1153,7 @@ if __name__ == "__main__":
         target=client_listener,
         args=(write_sock.fileno(), socket_path, tmpdir, shm_basename, shutdown_flag)
     )
+    _fork_single_threaded(workers)
     listener_process.start()
     write_sock.close()  # main doesn't need the write end
 
@@ -1066,23 +1177,40 @@ if __name__ == "__main__":
             except OSError:
                 pass
 
-        # Reap dead workers (idle timeout or error exit)
+        # Reap ended workers. A retired worker wrote its pid before it
+        # exited, so the pipe is read again once its exit is seen.
         alive = []
         for w in workers:
             if w.is_alive():
                 alive.append(w)
-            else:
-                w.join(timeout=0)
-                _report_worker_death(w, shutting_down=bool(shutdown_flag.value))
-                w.close()
+                continue
+            w.join(timeout=0)
+            if w.pid not in retired:
+                retired |= _read_retired(retire_r)
+            clean = w.pid in retired
+            retired.discard(w.pid)
+            _report_worker_death(w, shutting_down=bool(shutdown_flag.value))
+            if not clean and not shutdown_flag.value and pool_failure is None:
+                pool_failure = f"worker {w.pid} ended without retiring"
+            w.close()
         workers = alive
         total_workers.value = max(1, len(workers))
+        if pool_failure is None and not shutdown_flag.value and not listener_process.is_alive():
+            pool_failure = "the listener ended"
+        if pool_failure is not None:
+            # SHM-8: what the process held is recovered only by ending the
+            # pool, so the nexus recovers its shared memory.
+            print(f"morloc py pool: {pool_failure}; ending the pool so its shared memory is recovered",
+                  file=sys.stderr)
+            sys.stderr.flush()
+            break
 
         # Spawn a new worker if all are busy (or all have exited)
         if len(workers) == 0 or busy_count.value >= total_workers.value:
             w = Process(target=worker_process,
                         args=(spare_read_fd, tmpdir, shm_basename, shutdown_flag,
-                              busy_count, total_workers, wakeup_w))
+                              busy_count, total_workers, wakeup_w, retire_w))
+            _fork_single_threaded(workers + [listener_process])
             w.start()
             workers.append(w)
             total_workers.value = len(workers)
@@ -1091,6 +1219,8 @@ if __name__ == "__main__":
     os.close(wakeup_r)
     os.close(wakeup_w)
     os.close(spare_read_fd)
+    os.close(retire_r)
+    os.close(retire_w)
 
     # 1. Stop listener first
     listener_process.terminate()
@@ -1110,4 +1240,4 @@ if __name__ == "__main__":
         p.join()  # Final blocking reap
         p.close()
 
-    sys.exit(0)
+    sys.exit(1 if pool_failure is not None else 0)

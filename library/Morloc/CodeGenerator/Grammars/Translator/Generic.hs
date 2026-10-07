@@ -30,6 +30,7 @@ import qualified Data.Text.Encoding as TE
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( LoopResult (..)
+  , infixOperator
   , containsClosure
   , IAccessor (..)
   , IExpr (..)
@@ -60,6 +61,7 @@ import Morloc.Monad (asks, gets, newIndex, runIndex, getSchemaTable, registerSch
 import qualified Morloc.Monad as MM
 import Morloc.Quasi
 import qualified System.Directory as Dir
+import System.FilePath (isAbsolute, splitDirectories)
 import qualified System.Exit as Exit
 import System.IO (hClose, openBinaryTempFile)
 import qualified System.Process as Proc
@@ -335,7 +337,11 @@ translateSource desc p = do
       lib <- MT.pack <$> asks MC.configLibrary
       let tmpl = ldImportTemplate desc
           ns = render (makeNamespace (sourceNamespacePrefix desc) lib p)
-          modPath = render (makeImportPath lib p)
+          -- A file outside both the program's tree and the module plane has
+          -- no dotted module name, so the pool is given its path.
+          outside = ".." `elem` splitDirectories p
+            || (isAbsolute p && not (lib `T.isPrefixOf` MT.pack p))
+          modPath = if outside then p' else render (makeImportPath lib p)
       return . pretty $
         substituteT
           tmpl
@@ -424,6 +430,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
     cfg =
       LowerConfig
         { lcSrcName = srcNamer
+        , lcOperator = infixOperator
         , lcApplySrcGroup = \f as -> f <+> tupled as
         , lcSourcedArg = \_ _ _ x -> x
         , lcOwnership = \_ -> return Owned

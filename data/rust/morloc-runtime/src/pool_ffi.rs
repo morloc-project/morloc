@@ -31,10 +31,11 @@ pub struct PoolConfig {
     /// `initial_workers`, which must exceed the depth of calls back into the
     /// pool that can be waiting at once.
     pub dynamic_scaling: bool,
-    /// Run on the worker thread once a dispatch's reply has been sent (or
-    /// could not be). The reply carries the caller's own reference to its
-    /// value, so a pool releases what the dispatch still holds here.
-    pub after_reply: Option<unsafe extern "C" fn()>,
+    /// Release what a dispatch still holds. Runs on the worker thread once
+    /// the reply holds the caller's own reference to its value and before
+    /// the reply is sent (see `send_reply_to_foreign_server`), or after the
+    /// dispatch when there is no reply.
+    pub release_dispatch: Option<unsafe extern "C" fn()>,
 }
 
 // SAFETY: PoolConfig contains function pointers and a *mut c_void dispatch_ctx.
@@ -52,24 +53,24 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 // on it (see JobQueue); it is kept for inspection.
 static BUSY_COUNT: AtomicI32 = AtomicI32::new(0);
 
-#[no_mangle]
-pub extern "C" fn pool_mark_busy() {
+pub(crate) fn pool_mark_busy() {
     BUSY_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
-#[no_mangle]
-pub extern "C" fn pool_mark_idle() {
+pub(crate) fn pool_mark_idle() {
     BUSY_COUNT.fetch_sub(1, Ordering::Relaxed);
 }
 
 extern "C" fn pool_sigterm_handler(_sig: i32) {
-    SHUTTING_DOWN.store(true, Ordering::Relaxed);
+    // PANIC-1
+    morloc_runtime_types::panic::signal_frame(|| {
+        SHUTTING_DOWN.store(true, Ordering::Relaxed);
+    })
 }
 
 // ── Packet dispatch ──────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn pool_dispatch_packet(
+pub(crate) unsafe fn pool_dispatch_packet(
     packet: *const u8,
     local_dispatch: PoolDispatchFn,
     remote_dispatch: PoolDispatchFn,
@@ -116,7 +117,10 @@ pub unsafe extern "C" fn pool_dispatch_packet(
         let (temp_owner, prev_temp_owner) = crate::intrinsics::begin_dispatch();
 
         let dispatch_fn = if is_local { local_dispatch } else { remote_dispatch };
+        let started = crate::fork_policy::generation();
         let result = dispatch_fn(mid, args.cast_mut(), nargs, ctx);
+        // FORK-12: before anything of the worker's is touched.
+        crate::ipc_ffi::exit_if_forked_since(started);
 
         free_morloc_call(call);
 
@@ -389,7 +393,7 @@ unsafe fn spawn_worker(
 // before it exits; None keeps every worker.
 unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig, retire_after: Option<std::time::Duration>) {
     use crate::ipc_ffi::stream_from_client;
-    use crate::ipc_ffi::send_packet_to_foreign_server;
+    use crate::ipc_ffi::send_reply_to_foreign_server;
     use crate::ipc_ffi::close_socket;
 
     let min_workers = config.initial_workers.max(1) as usize;
@@ -430,12 +434,12 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig, retire_after: Optio
 
         // From here the worker counts as free, so nothing below may wait on
         // another thread of the program: only the send (which waits on the
-        // caller, already reading), the after-reply release and the close.
+        // caller, already reading), the dispatch's release and the close.
         queue.finishing();
         arriving = Arriving::Finishing;
 
         if !result.is_null() {
-            send_packet_to_foreign_server(client_fd, result, &mut errmsg);
+            send_reply_to_foreign_server(client_fd, result, config.release_dispatch, &mut errmsg);
             libc::free(result as *mut c_void);
             // A failed response send was previously freed silently, leaving the
             // caller with an unexplained "Connection closed" -- log the cause.
@@ -450,8 +454,8 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig, retire_after: Optio
             // closed by peer". This should not happen (dispatch always returns
             // at least a fail packet); log it to catch the case if it does.
             eprintln!("morloc pool: dispatch returned null result (no response sent)");
+            if let Some(f) = config.release_dispatch { f(); }
         }
-        if let Some(f) = config.after_reply { f(); }
 
         close_socket(client_fd);
         idle_since = std::time::Instant::now();
@@ -554,7 +558,7 @@ unsafe fn pool_main_single(config: &PoolConfig, socket_path: *const c_char, tmpd
     use crate::ipc_ffi::close_daemon;
     use crate::ipc_ffi::wait_for_client_with_timeout;
     use crate::ipc_ffi::stream_from_client;
-    use crate::ipc_ffi::send_packet_to_foreign_server;
+    use crate::ipc_ffi::send_reply_to_foreign_server;
     use crate::ipc_ffi::close_socket;
 
     let mut errmsg: *mut c_char = ptr::null_mut();
@@ -582,11 +586,12 @@ unsafe fn pool_main_single(config: &PoolConfig, socket_path: *const c_char, tmpd
         libc::free(data as *mut c_void);
 
         if !result.is_null() {
-            send_packet_to_foreign_server(client_fd, result, &mut errmsg);
+            send_reply_to_foreign_server(client_fd, result, config.release_dispatch, &mut errmsg);
             libc::free(result as *mut c_void);
             if !errmsg.is_null() { libc::free(errmsg as *mut c_void); errmsg = ptr::null_mut(); }
+        } else if let Some(f) = config.release_dispatch {
+            f();
         }
-        if let Some(f) = config.after_reply { f(); }
 
         libc::fflush(ptr::null_mut());
         close_socket(client_fd);
@@ -646,12 +651,12 @@ unsafe fn tune_allocator() {
 #[cfg(not(target_env = "gnu"))]
 unsafe fn tune_allocator() {}
 
-#[no_mangle]
-pub unsafe extern "C" fn pool_main(
+pub(crate) unsafe fn pool_main(
     argc: i32,
     argv: *mut *mut c_char,
     config: *mut PoolConfig,
 ) -> i32 {
+    crate::panic_ffi::install(None);
     tune_allocator();
     if argc != 4 {
         let prog = if argc > 0 { CStr::from_ptr(*argv).to_string_lossy() } else { "pool".into() };
@@ -692,6 +697,40 @@ pub unsafe extern "C" fn pool_main(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    unsafe extern "C" fn forks_and_returns(_: u32, _: *mut *const u8, _: usize, ctx: *mut c_void) -> *mut u8 {
+        let child = libc::fork();
+        if child > 0 {
+            *(ctx as *mut libc::pid_t) = child;
+        }
+        crate::packet_ffi::make_fail_packet(c"returned".as_ptr())
+    }
+
+    #[test]
+    fn a_child_forked_by_user_code_never_returns_from_the_dispatch() {
+        let _shm = crate::init_test_shm();
+        let mut err: *mut c_char = ptr::null_mut();
+        let arg = unsafe { crate::packet_ffi::make_fail_packet(c"arg".as_ptr()) };
+        let args = [arg as *const u8];
+        let call = unsafe { crate::packet_ffi::make_morloc_local_call_packet(0, args.as_ptr(), 1, &mut err) };
+        assert!(!call.is_null());
+        let mut child: libc::pid_t = 0;
+        let ctx = &mut child as *mut libc::pid_t as *mut c_void;
+        let watchdog = unsafe { libc::getpid() };
+        let reply = unsafe { pool_dispatch_packet(call, forks_and_returns, forks_and_returns, ctx) };
+        if unsafe { libc::getpid() } != watchdog {
+            unsafe { libc::_exit(0) };
+        }
+        assert!(!reply.is_null());
+        let mut status = 0;
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        unsafe {
+            libc::free(reply as *mut c_void);
+            libc::free(call as *mut c_void);
+            libc::free(arg as *mut c_void);
+        }
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 1, "the child returned from the dispatch: status {status}");
+    }
 
     // Every queued job has a free worker counted to take it.
     fn covered(q: &JobQueue) -> bool {
@@ -757,5 +796,29 @@ mod tests {
         assert!(q.reserve_start());
         assert!(!q.reserve_start());
         assert!(covered(&q));
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub extern "C" fn pool_mark_busy() {
+        super::pool_mark_busy()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn pool_mark_idle() {
+        super::pool_mark_idle()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn pool_dispatch_packet(packet: *const u8, local_dispatch: PoolDispatchFn, remote_dispatch: PoolDispatchFn, ctx: *mut c_void) -> *mut u8 {
+        super::pool_dispatch_packet(packet, local_dispatch, remote_dispatch, ctx)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn pool_main(argc: i32, argv: *mut *mut c_char, config: *mut PoolConfig) -> i32 {
+        super::pool_main(argc, argv, config)
     }
 }

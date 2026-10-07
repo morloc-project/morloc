@@ -1,4 +1,4 @@
-use std::ffi::{CString, c_char};
+use std::ffi::{CStr, CString, c_char};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MorlocError {
@@ -66,4 +66,19 @@ pub unsafe fn clear_errmsg(errmsg: *mut *mut c_char) {
     if !errmsg.is_null() {
         *errmsg = std::ptr::null_mut();
     }
+}
+
+/// The reason a callee wrote to `err` for its failure, taken over from the
+/// C allocation.
+///
+/// # Safety
+/// `err` must be null or a `malloc`ed NUL-terminated string.
+pub unsafe fn take_reason(err: *mut c_char) -> MorlocError {
+    // PANIC-13
+    if err.is_null() {
+        crate::panic::fatal("a runtime call failed without giving a reason")
+    }
+    let text = CStr::from_ptr(err).to_string_lossy().into_owned();
+    libc::free(err as *mut libc::c_void);
+    MorlocError::Other(text)
 }

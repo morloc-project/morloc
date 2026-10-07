@@ -99,12 +99,7 @@ public:
 [[noreturn]] static inline void _mlc_internal_abort(
     const char* file, int line, const char* func, const char* msg
 ) {
-    std::fprintf(
-        stderr,
-        "morloc internal error (C++ pool, %s:%d in %s):\n  %s\n",
-        file, line, func, msg
-    );
-    std::abort();
+    mlc_runtime_defect(std::string(file) + ":" + std::to_string(line) + " in " + func + ":\n  " + msg);
 }
 
 #define MLC_INTERNAL_ABORT(msg) _mlc_internal_abort(__FILE__, __LINE__, __func__, (msg))
@@ -154,8 +149,8 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
 // packets it built (_put_value, _dup_packet) or received as call results
 // (foreign_call_v). An entry ends when its packet is released
 // (_release_packet, mlc::Packet), and whatever remains is released once the
-// dispatch's reply is sent (after_reply): the reply carries the caller's own
-// reference to its value.
+// dispatch's reply holds the caller's own reference to its value, before the
+// reply is sent (release_dispatch).
 struct ShmEntry { absptr_t ptr; };
 // Releasing the entries is shared by the ordinary flush and by thread
 // teardown, so it is written once and takes the container explicitly.
@@ -170,17 +165,30 @@ static void _shm_release_entries(std::vector<ShmEntry>& entries) {
     entries.clear();
 }
 
-// The tracker releases what it still holds when its thread ends. A worker
-// is retired only after going idle for longer than the dispatch it would
-// otherwise have been flushed by, so this is never earlier than the flush
-// it stands in for -- it just happens on a thread that has no next
-// dispatch to do it. Making the container itself own the teardown avoids
-// depending on the destruction order of two thread-local objects.
+// The tracker releases what it still holds when its thread ends: entries
+// left by a non-dispatch use of the thread, which would otherwise wait for a
+// next dispatch the thread will never run. Making the container itself own
+// the teardown avoids depending on the destruction order of two thread-local
+// objects.
 struct ShmTracker : std::vector<ShmEntry> {
-    ~ShmTracker() { _shm_release_entries(*this); }
+    uint64_t gen = 0;
+    ~ShmTracker() {
+        if (gen == morloc_fork_generation()) {
+            _shm_release_entries(*this);
+        }
+    }
 };
 
-thread_local ShmTracker _shm_tracker;
+thread_local ShmTracker _shm_tracker_store;
+
+static ShmTracker& _shm_tracker_live() {
+    uint64_t g = morloc_fork_generation();
+    if (_shm_tracker_store.gen != g) {
+        _shm_tracker_store.clear();
+        _shm_tracker_store.gen = g;
+    }
+    return _shm_tracker_store;
+}
 
 // Owns a block this pool materialized from a packet, releasing it unless
 // ownership is handed elsewhere. Deserialization can throw, and a throwing
@@ -201,7 +209,7 @@ struct ShmOwned {
 };
 
 static void _shm_tracker_flush() {
-    _shm_release_entries(_shm_tracker);
+    _shm_release_entries(_shm_tracker_live());
 }
 
 // Drop one tracker entry matching ptr (swap-with-last) and shfree the
@@ -209,10 +217,11 @@ static void _shm_tracker_flush() {
 // a _put_value-tracked packet's SHM as soon as its codegen-determined
 // scope ends, rather than waiting for the next dispatch flush.
 static bool _shm_tracker_release_one(absptr_t ptr) {
-    for (size_t i = 0; i < _shm_tracker.size(); i++) {
-        if (_shm_tracker[i].ptr == ptr) {
-            _shm_tracker[i] = _shm_tracker.back();
-            _shm_tracker.pop_back();
+    ShmTracker& tracker = _shm_tracker_live();
+    for (size_t i = 0; i < tracker.size(); i++) {
+        if (tracker[i].ptr == ptr) {
+            tracker[i] = tracker.back();
+            tracker.pop_back();
             char* err = NULL;
             shfree(ptr, &err);
             if (err) { free(err); }
@@ -237,7 +246,7 @@ static uint8_t* _dup_packet(const uint8_t* packet) {
         MLC_INTERNAL_ABORT(msg.c_str());
     }
     if (block != NULL) {
-        _shm_tracker.push_back({block});
+        _shm_tracker_live().push_back({block});
     }
     return copy;
 }
@@ -318,7 +327,7 @@ uint8_t* _put_value(const T& value, Schema* schema, bool self_contained = false)
         } else {
             // The packet names the block, which is this pool's own until the
             // packet is released or the next dispatch begins.
-            if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr}); }
+            if (shm_ptr) { _shm_tracker_live().push_back({(absptr_t)shm_ptr}); }
             packet = make_arrow_data_packet(relptr, schema);
         }
         if (!packet) { MLC_INTERNAL_ABORT("failed to create arrow data packet"); }
@@ -347,7 +356,7 @@ uint8_t* _put_value(const T& value, Schema* schema, bool self_contained = false)
             const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
             if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
                 // SHM referenced by packet -- track for deferred cleanup
-                _shm_tracker.push_back({(absptr_t)voidstar});
+                _shm_tracker_live().push_back({(absptr_t)voidstar});
             } else {
                 // Data inlined in packet -- free SHM immediately. shfree
                 // zeros the block on final ref-drop.
@@ -387,7 +396,8 @@ T _get_value(const uint8_t* packet, Schema* schema){
         const arrow_shm_header_t* hdr = (const arrow_shm_header_t*)raw;
         char* verr = nullptr;
         if (arrow_validate(hdr, schema, &verr) != 0) {
-            std::string msg(verr ? verr : "arrow table failed validation");
+            if (verr == nullptr) MLC_INTERNAL_ABORT("arrow table validation failed without a reason");
+            std::string msg(verr);
             free(verr);
             throw MorlocException(msg);
         }
@@ -617,10 +627,6 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-// Reserved return code from mlc_write / mlc_flush / mlc_close: the write
-// hit EPIPE. The runtime returns this WITHOUT setting errmsg. Kept in
-// sync with morloc_runtime_types::MLC_RESULT_PIPE_CLOSED (= 2).
-static constexpr int MLC_RESULT_PIPE_CLOSED = 2;
 
 // Throw the distinguished broken-pipe exception when a stdio C-ABI call
 // returns the reserved pipe-closed code. Shared by @write/@flush/@close.
@@ -643,7 +649,7 @@ T _mlc_read(Schema* schema, const std::string& json_str) {
         throw MorlocException(std::string("@read: ") + msg);
     }
     if (voidstar == NULL) {
-        throw MorlocException("@read: parse failed on '" + json_str + "'");
+        MLC_INTERNAL_ABORT("@read: the runtime failed without giving a reason");
     }
     T* dummy = nullptr;
     T result = from_voidstar(schema, voidstar, dummy);
@@ -674,7 +680,7 @@ T _mlc_load(Schema* schema, const std::string& path) {
         throw MorlocException(std::string("@load: ") + msg);
     }
     if (voidstar == NULL) {
-        throw MorlocException("@load: failed to load '" + path + "'");
+        MLC_INTERNAL_ABORT("@load: the runtime failed without giving a reason");
     }
     T* dummy = nullptr;
     T result = from_voidstar(schema, voidstar, dummy);
@@ -731,8 +737,8 @@ T _mlc_throw_as(const std::string& msg) {
 // The return type is deduced from `err` rather than `ok`: a Unit-returning
 // intrinsic's body is `void`, so `ok(body())` is ill-formed as a deduction
 // context even though the void branch never evaluates it.
-template<typename FL, typename OK, typename ERR>
-auto _mlc_try(FL&& body, OK&& ok, ERR&& err) -> decltype(err(std::string())) {
+template<typename MlcBody, typename MlcOk, typename MlcErr>
+auto _mlc_try(MlcBody&& body, MlcOk&& ok, MlcErr&& err) -> decltype(err(std::string())) {
     try {
         if constexpr (std::is_void_v<decltype(body())>) {
             body();
@@ -1113,7 +1119,11 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
         if (fail_msg != NULL) {
             std::string msg(fail_msg);
             free(fail_msg);
+            bool pipe_closed = morloc_packet_is_pipe_closed(result);
             free(result);
+            if (pipe_closed) {
+                throw MorlocPipeClosed(msg);
+            }
             throw MorlocException(msg);
         }
     }
@@ -1130,7 +1140,7 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
             if (res_voidstar) {
                 // The callee took a reference before sending; it is ours
                 // now. Inherit it rather than adding another.
-                _shm_tracker.push_back({(absptr_t)res_voidstar});
+                _shm_tracker_live().push_back({(absptr_t)res_voidstar});
             }
         }
     }
@@ -1462,7 +1472,7 @@ uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
                                     size_t nargs, void* ctx) {
     (void)nargs; (void)ctx;
     // Anything a non-dispatch use of this thread left behind; a dispatch's
-    // own entries are released after its reply.
+    // own entries are released as its reply is sent (release_dispatch).
     _shm_tracker_flush();
     morloc_debug_flush_dispatch();
     try {
@@ -1470,7 +1480,7 @@ uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
     } catch (const MorlocPipeClosed& e) {
         // Broken pipe: a distinguished, non-abort failure. The nexus owns
         // fd 1 and decides the pipeline exit status.
-        return make_fail_packet(e.what());
+        return make_pipe_closed_packet(e.what());
     } catch (const MorlocInfraError& e) {
         // Not recoverable and not the user's doing. Aborting rather than
         // returning a fail packet is what keeps it fatal across pools: a
@@ -1507,7 +1517,7 @@ uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
     } catch (const MorlocPipeClosed& e) {
         // Broken pipe: a distinguished, non-abort failure. The nexus owns
         // fd 1 and decides the pipeline exit status.
-        return make_fail_packet(e.what());
+        return make_pipe_closed_packet(e.what());
     } catch (const MorlocInfraError& e) {
         // Not recoverable and not the user's doing. Aborting rather than
         // returning a fail packet is what keeps it fatal across pools: a
@@ -1539,6 +1549,6 @@ void cpp_register(pool_config_t* config, const char* tmpdir) {
     config->concurrency = POOL_THREADS;
     config->initial_workers = 1;
     config->dynamic_scaling = true;
-    config->after_reply = _shm_tracker_flush;
+    config->release_dispatch = _shm_tracker_flush;
     _init_schemas();
 }

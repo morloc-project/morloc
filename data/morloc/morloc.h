@@ -340,6 +340,11 @@ typedef struct __attribute__((packed)) packet_command_call_s {
 
 #define PACKET_STATUS_PASS 0x00
 #define PACKET_STATUS_FAIL 0x01
+#define PACKET_STATUS_PIPE_CLOSED 0x02
+
+// The reader closed the pipe: mlc_write / mlc_flush / mlc_close return it
+// with no errmsg; write_binary_fd and print_binary with one.
+#define MLC_RESULT_PIPE_CLOSED 2
 
 typedef struct __attribute__((packed)) packet_command_data_s {
     command_type_t type;
@@ -1015,6 +1020,10 @@ typedef struct daemon_config_s {
     bool output_packet;
     // zstd preset (0..=9) for `output_packet` results; 0 = no compression.
     unsigned char compression_level;
+    // Stops every pool; called when requests outlast the shutdown grace.
+    void (*stop_pools_fn)(void);
+    // Ends the process at once, from any thread, whatever locks are held.
+    void (*emergency_exit_fn)(int);
 } daemon_config_t;
 
 typedef enum {
@@ -1083,6 +1092,8 @@ typedef struct http_request_s {
     char path[256];
     char* body;
     size_t body_len;
+    char query[256];
+    bool authorized;
 } http_request_t;
 
 // -- Router types --
@@ -1124,9 +1135,9 @@ typedef struct {
     pool_concurrency_t concurrency;
     int initial_workers;
     bool dynamic_scaling;
-    // Run on the worker thread once a dispatch's reply has been sent (or
-    // could not be); NULL for none.
-    void (*after_reply)(void);
+    // Release what a dispatch still holds: run on the worker thread once the
+    // reply holds the caller's reference and before it is sent; NULL for none.
+    void (*release_dispatch)(void);
 } pool_config_t;
 
 typedef struct pool_state_s pool_state_t;
@@ -1272,6 +1283,8 @@ void* shmalloc(size_t size, ERRMSG);
 void* shmemcpy(void* src, size_t size, ERRMSG);
 bool shfree(absptr_t ptr, ERRMSG);
 bool shincref(absptr_t ptr, ERRMSG);
+uint64_t morloc_fork_generation(void);
+void morloc_exit_if_forked(void);
 void* shcalloc(size_t nmemb, size_t size, ERRMSG);
 size_t total_shm_size(void);
 volptr_t rel2vol(relptr_t ptr, ERRMSG);
@@ -1425,6 +1438,8 @@ int32_t file_is_stream_packet(const char* path);
 int get_data_packet_as_mpk(const uint8_t* packet, const Schema* schema, char** mpk_out, size_t* mpk_size_out, ERRMSG);
 char* read_schema_from_packet_meta(const uint8_t* packet, ERRMSG);
 uint8_t* make_fail_packet(const char* failure_message);
+uint8_t* make_pipe_closed_packet(const char* failure_message);
+bool morloc_packet_is_pipe_closed(const uint8_t* packet);
 char* get_morloc_data_packet_error_message(const uint8_t* data, ERRMSG);
 uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema, ERRMSG);
 
@@ -1482,6 +1497,41 @@ char* voidstar_to_json_string(const void* voidstar, const Schema* schema, ERRMSG
 int morloc_lifeline_adopt(void);
 void morloc_lifeline_guard(void);
 void morloc_lifeline_teardown(void);
+// The number of threads in this process, or -1 if it cannot be read.
+long morloc_thread_count(void);
+// Fork a worker, refusing (-2, child never runs) unless this process had one
+// thread at the fork; -1 with *error set if the fork failed.
+pid_t morloc_fork_worker(long* threads_at_fork, int* error);
+// Shared-memory references this process holds, net of those it handed on.
+int64_t morloc_held_references(void);
+// Held references plus stream file locks: a worker retires only at zero.
+int64_t morloc_retire_blockers(void);
+// Record a language's view of a block it holds a reference on, under a key,
+// so a forked child keeps the block while it lives; forget it on release.
+void morloc_view_held(const void* block, const void* key);
+void morloc_view_released(const void* key);
+// Release the references of leases whose forked holder is gone (rate-limited).
+void morloc_reclaim_leases(void);
+// Remove the current namespace's leases kept outside the run directory.
+void morloc_remove_leases(void);
+// Release every free lease and remove the temp directories of processes
+// that are gone, now.
+void morloc_reclaim_all(void);
+// Remove this process's temp directory (a retiring worker's).
+void morloc_remove_own_temps(void);
+// The temp root of the run whose directory is run_dir (user_tmpdir: the
+// user's --tmpdir, or NULL), as a malloc'd string the caller frees.
+char* morloc_run_temp_root(const char* run_dir, const char* user_tmpdir);
+// True once a daemon request handler panicked; the daemon then shuts down
+// and exits as failed.
+bool morloc_daemon_worker_panicked(void);
+void morloc_daemon_fail(void);
+void morloc_install_panic_hook(void (*exit_fn)(void));
+void morloc_set_panic_classifier(bool (*classify)(const uint8_t* file, size_t len));
+void morloc_daemon_remove_endpoints(void);
+bool morloc_panic_decide(const uint8_t* file, size_t file_len, const uint8_t* line, size_t line_len, bool fatal);
+uint8_t morloc_catch_scope(uint8_t kind);
+void morloc_panic_caught(void);
 const char* morloc_lifeline_child_env(int* read_fd);
 
 void close_socket(int socket_id);
@@ -1497,11 +1547,14 @@ uint8_t* send_and_receive_over_socket_wait(
 uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG);
 void mlc_set_self_socket(const char* socket_path);
 size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG);
+size_t send_reply_to_foreign_server(int client_fd, uint8_t* packet, void (*release)(void), ERRMSG);
 int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRMSG);
 int wait_for_client(language_daemon_t* daemon, ERRMSG);
 
 // Daemon event loop and dispatch.
-void daemon_run(daemon_config_t* config, manifest_t* manifest,
+// False when a request was still running at exit: the caller must then
+// exit without unmapping shared memory or freeing what the request uses.
+bool daemon_run(daemon_config_t* config, manifest_t* manifest,
                 morloc_socket_t* sockets, size_t n_pools,
                 const char* shm_basename);
 daemon_response_t* daemon_dispatch(manifest_t* manifest,

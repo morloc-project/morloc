@@ -1,0 +1,6 @@
+2
+99
+101
+exit:1
+Rust code panicked
+0

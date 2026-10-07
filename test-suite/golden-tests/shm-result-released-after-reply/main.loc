@@ -1,27 +1,43 @@
-module main (held, heldRust)
+module main (held, heldRust, heldPy, heldR)
 
 import root-py
 import root-cpp
 import root-rust
+import root-r
 
 -- A pool that answers a call with a value in shared memory hands the
--- caller its own reference along with the reply, so once the reply is sent
--- the answering worker has no further use for the value. A worker that kept
--- it until its next call would hold every large result it produced for as
--- long as it sat idle. Here Python asks C++ (and, separately, Rust) for a
--- large vector of integers, lets go of its own references, and reports how
--- much shared memory the program still holds.
+-- caller its own reference along with the reply, and must let go of its
+-- own before the caller can see the reply. A worker that kept it until its
+-- next call would hold every large result it produced for as long as it
+-- sat idle; one that let go only after sending would race the caller, which
+-- may already have asked the same pool for the next value, so that two are
+-- held at once.
+--
+-- Each case asks one pool for a large vector of integers, lets go of the
+-- caller's own reference, and reports how much shared memory the program
+-- still holds. Python also runs with thread workers, its default on macOS.
 
-source Cpp from "big.hpp" ("big")
+source Cpp from "big.hpp" ("big", "count", "heldAfterCount")
 source Rust from "big.rs" ("big_rust" as bigRust)
-source Py from "probe.py" ("heldAfter")
+source Py from "probe.py" ("heldAfter", "big_py" as bigPy)
+source R from "big.R" ("bigR")
 
 big :: Int -> [Int]
 bigRust :: Int -> [Int]
+bigPy :: Int -> [Int]
+bigR :: Int -> [Int]
 heldAfter :: [Int] -> Int
+count :: [Int] -> Int
+heldAfterCount :: Int -> Int
 
 held :: Int -> Int
 held n = heldAfter (big n)
 
 heldRust :: Int -> Int
 heldRust n = heldAfter (bigRust n)
+
+heldPy :: Int -> Int
+heldPy n = heldAfterCount (count (bigPy n))
+
+heldR :: Int -> Int
+heldR n = heldAfterCount (count (bigR n))

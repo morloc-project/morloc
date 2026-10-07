@@ -1,0 +1,8 @@
+6
+6
+7
+"hi"
+[{"z":"hi"},3]
+[["Magenta","Yellow"],[1,1]]
+[[{"Tri":[3,3]},{"Tri":[3,3]}],[2.5,2.5]]
+[[{"Fork":["Tip","Tip"]},{"Fork":["Tip",{"Fork":["Tip","Tip"]}]}],[false,false]]

@@ -15,27 +15,30 @@ per-language @init.sh@ scripts to compile language extensions.
 module Morloc.CodeGenerator.SystemConfig
   ( configure
   , configureAll
+  , withInitLock
   , pathIsWithin
   , Incoherence (..)
   , compilerIncoherence
   ) where
 
+import qualified System.Info as SI
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Platform as P
 import qualified Morloc.Completion as Completion
 import qualified Morloc.Config as Config
 import qualified Morloc.DataFiles as DF
+import qualified Morloc.System as MS
 import Morloc.Module (OverwriteProtocol (..))
 
 import qualified Data.List as DL
 import qualified Data.Text.IO as TIO
 
-import Control.Exception (SomeException, catch, displayException, fromException, onException, try)
+import Control.Exception (SomeException, bracket, catch, displayException, fromException, onException, try)
 import System.IO.Error (ioeGetErrorString)
 import System.Directory (canonicalizePath, copyFile, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameFile)
 import System.Environment (lookupEnv, setEnv)
 import System.FilePath (takeDirectory, takeFileName)
-import System.IO (IOMode (ReadWriteMode), hClose, hIsTerminalDevice, hPutStrLn, openTempFile, stderr, withFile)
+import System.IO (hClose, hIsTerminalDevice, hPutStrLn, openTempFile, stderr)
 import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hLock, hTryLock)
 import System.Exit (ExitCode(..))
 import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, readProcessWithExitCode, waitForProcess)
@@ -69,7 +72,7 @@ configureAll verbose force slurmSupport sanitize config = do
 withInitLock :: Bool -> FilePath -> IO a -> IO a
 withInitLock verbose homeDir act = do
   createDirectoryIfMissing True homeDir
-  withFile (homeDir </> ".init.lock") ReadWriteMode $ \h -> do
+  bracket (MS.openLockFile (homeDir </> ".init.lock")) hClose $ \h -> do
     held <- hTryLock h ExclusiveLock
     unless held $ do
       sayInfo verbose "Waiting for another morloc init to finish"
@@ -97,21 +100,9 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   incremental <- maybe False (`notElem` ["", "0", "false", "no"]) <$> lookupEnv "MORLOC_INIT_INCREMENTAL"
 
   -- Admission control FIRST, before any destructive step: a failed coherence
-  -- check must abort before the force-clean below wipes opt/ + init-owned libs,
+  -- check must abort before the runtime build and the force-clean below,
   -- otherwise a rejected env leaves MORLOC_HOME gutted (no libmorloc, no nexus).
   checkCondaCoherence verbose mStrictPrefix
-
-  -- When force is set, clean stale init-owned artifacts. Package-installed
-  -- subtrees (see Module.exposeDirsFor) live in include/<modName>/,
-  -- lib/python/<modName>/ and lib/R/<modName>/; those must not be wiped
-  -- here or every `morloc init -f` would force a reinstall of every module
-  -- that uses the `expose:` field. opt/ has no expose target, so it can
-  -- still be fully wiped.
-  when (force == ForceOverwrite) $ do
-    sayInfo verbose "Force rebuild: cleaning init-owned artifacts"
-    forM_ initOwnedLibPaths $ \p -> removePathIfExists (libDir </> p)
-    forM_ initOwnedIncludePaths $ \p -> removePathIfExists (includeDir </> p)
-    cleanDirectory optDir
 
   ensureDirectory verbose "morloc home directory" homeDir
   ensureDirectory verbose "morloc lib directory" libDir
@@ -184,6 +175,20 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   if force == ForceOverwrite || not runtimeBuilt || not incremental
     then provisionRustRuntime verbose config homeDir soPath nexusBinPath
     else sayInfo verbose "Runtime (libmorloc + morloc-nexus) already built; skipping"
+
+  -- When force is set, clean stale init-owned artifacts. This runs only once
+  -- the runtime has built, so a failed build leaves the installed one usable;
+  -- the runtime and morloc.h are already in place and are kept. Package-installed
+  -- subtrees (see Module.exposeDirsFor) live in include/<modName>/,
+  -- lib/python/<modName>/ and lib/R/<modName>/; those must not be wiped
+  -- here or every `morloc init -f` would force a reinstall of every module
+  -- that uses the `expose:` field. opt/ has no expose target, so it can
+  -- still be fully wiped.
+  when (force == ForceOverwrite) $ do
+    sayInfo verbose "Force rebuild: cleaning init-owned artifacts"
+    forM_ (filter (/= takeFileName soPath) initOwnedLibPaths) $ \p -> removePathIfExists (libDir </> p)
+    forM_ (filter (/= "morloc.h") initOwnedIncludePaths) $ \p -> removePathIfExists (includeDir </> p)
+    cleanDirectory optDir
 
   -- Symlink the newly installed binaries into a "user bin" directory so
   -- they end up on PATH. The directory is selected by the
@@ -447,12 +452,15 @@ provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
         sayInfo verbose "Persisting Rust workspace source to $MORLOC_HOME/rust"
         persistRustSource verbose srcAbs persistedRustDir destExists
     sayInfo verbose "Warming rustmorloc build cache (Rust pool marshaller)"
-    run verbose "cargo"
+    run verbose "cargo" $
       [ "build", "--release"
       , "--manifest-path", persistedRustDir </> "Cargo.toml"
       , "-p", "rustmorloc"
       , "--target-dir", poolTargetDir
       ]
+      -- The pool profile packs debug information on macOS (PANIC-12); the
+      -- warm-up must match it for pool builds to reuse these artifacts.
+      ++ (if SI.os == "darwin" then ["--config", "profile.release.split-debuginfo=\"packed\""] else [])
 
 -- | Search for a Rust workspace directory containing Cargo.toml
 findRustDir :: [FilePath] -> IO FilePath

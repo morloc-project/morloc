@@ -1,3 +1,5 @@
+#[cfg(not(panic = "unwind"))]
+compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
 // Modules that come entirely (error, hash, schema, cschema) or
 // partially (packet, null_check) from morloc-runtime-types live as
 // thin re-export shims in this crate so existing `crate::error::*`,
@@ -60,11 +62,13 @@ pub mod stream;
 mod write_behind;
 pub mod handle_scan;
 pub mod arrow_shm;
+pub mod lease;
 pub mod arrow_ffi;
 pub mod arrow_ipc_reader;
 pub mod pool_ffi;
 pub mod crash;
 pub mod daemon_ffi;
+pub mod panic_ffi;
 pub mod router_ffi;
 pub mod null_check;
 pub mod cli;
@@ -72,6 +76,7 @@ pub mod config_ffi;
 pub mod log;
 pub mod run;
 pub mod lifeline;
+mod fork_policy;
 pub mod debug;
 
 /// Serializes tests against the process-global SHM arena. There is one arena
@@ -141,6 +146,9 @@ impl Drop for ArenaOwned {
         SHM_TEST_ARENA.turn.notify_all();
     }
 }
+
+#[cfg(test)]
+mod source_rules;
 
 #[cfg(test)]
 mod test_arena_lock_tests {

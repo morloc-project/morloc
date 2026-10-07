@@ -242,6 +242,21 @@ pub struct DaemonArgs {
     #[arg(long = "http-port", value_name = "PORT")]
     pub http_port: Option<u16>,
 
+    /// IPv4 bind address for --http-port (default 127.0.0.1). Use 0.0.0.0 to
+    /// accept connections from other hosts/containers; that needs a token.
+    #[arg(long = "http-host", value_name = "ADDR")]
+    pub http_host: Option<String>,
+
+    /// Require this bearer token on every HTTP request (Authorization: Bearer
+    /// <token>). Falls back to the MORLOC_MCP_TOKEN environment variable.
+    #[arg(long = "auth-token", value_name = "TOKEN")]
+    pub auth_token: Option<String>,
+
+    /// Permit an HTTP bind other than loopback with no token. Without this,
+    /// such a bind is refused (it would be an open, unauthenticated endpoint).
+    #[arg(long = "allow-no-auth")]
+    pub allow_no_auth: bool,
+
     /// Write bound ports to PATH as JSON.
     #[arg(long = "port-file", value_name = "PATH")]
     pub port_file: Option<String>,
@@ -838,6 +853,12 @@ pub fn run_args_to_config(args: &RunArgs) -> (NexusConfig, String) {
     (cfg, args.target.clone())
 }
 
+/// The bearer token from MORLOC_MCP_TOKEN, which keeps it off the process
+/// argv (invisible to `ps`).
+fn token_from_environment() -> Option<String> {
+    std::env::var("MORLOC_MCP_TOKEN").ok().filter(|s| !s.is_empty())
+}
+
 /// Translate a parsed [`DaemonArgs`] block into a [`NexusConfig`].
 /// Returns the resolved config and the target path.
 pub fn daemon_args_to_config(args: &DaemonArgs) -> (NexusConfig, String) {
@@ -856,6 +877,9 @@ pub fn daemon_args_to_config(args: &DaemonArgs) -> (NexusConfig, String) {
     cfg.unix_socket_path = args.socket.clone();
     cfg.tcp_port = args.port.map(|p| p as i32);
     cfg.http_port = args.http_port.map(|p| p as i32);
+    cfg.mcp_http_host = args.http_host.clone();
+    cfg.mcp_auth_token = args.auth_token.clone().or_else(token_from_environment);
+    cfg.mcp_allow_no_auth = args.allow_no_auth;
     cfg.port_file_path = args.port_file.clone();
     cfg.eval_timeout = args.eval_timeout as i32;
     apply_eval_policy(&mut cfg, &args.eval_allowed_modules);
@@ -872,9 +896,7 @@ pub fn mcp_args_to_config(args: &McpArgs) -> (NexusConfig, String) {
     cfg.mcp_http_host = args.http_host.clone();
     // Explicit --auth-token wins; else the environment variable, which keeps
     // the token off the process argv (invisible to `ps`).
-    cfg.mcp_auth_token = args.auth_token.clone().or_else(|| {
-        std::env::var("MORLOC_MCP_TOKEN").ok().filter(|s| !s.is_empty())
-    });
+    cfg.mcp_auth_token = args.auth_token.clone().or_else(token_from_environment);
     cfg.mcp_allow_no_auth = args.allow_no_auth;
     (cfg, args.target.clone())
 }
@@ -907,9 +929,7 @@ pub fn router_args_to_config(args: &RouterArgs) -> NexusConfig {
     // to BOTH adapters). Explicit --auth-token wins; else MORLOC_MCP_TOKEN
     // (keeps the token off argv, matching the mcp mode).
     cfg.mcp_http_host = args.http_host.clone();
-    cfg.mcp_auth_token = args.auth_token.clone().or_else(|| {
-        std::env::var("MORLOC_MCP_TOKEN").ok().filter(|s| !s.is_empty())
-    });
+    cfg.mcp_auth_token = args.auth_token.clone().or_else(token_from_environment);
     cfg.mcp_allow_no_auth = args.allow_no_auth;
     apply_eval_policy(&mut cfg, &args.eval_allowed_modules);
     cfg.eval_enabled = args.eval;

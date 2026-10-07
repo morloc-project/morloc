@@ -31,6 +31,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , printRustEnum
   , printRustVariant
   , printVariantImpls
+  , ArmWire (..)
   , recBox
   , userBox
   , printEnumImpls
@@ -426,7 +427,7 @@ printProgram serialization signatures _extra prog =
         , "}"
         , "#[inline]"
         , "fn schema(id: usize) -> &'static Schema {"
-        , indent 4 "&SCHEMA_TABLE.get().expect(\"schemas not initialized\")[id]"
+        , indent 4 "SCHEMA_TABLE.get().and_then(|t| t.get(id)).unwrap_or_else(|| rustmorloc::morloc_infra_abort(\"a manifold asked for a schema the pool does not have\"))"
         , "}"
         ]
 
@@ -508,16 +509,6 @@ tupled1 :: [MDoc] -> MDoc
 tupled1 [t] = parens (t <> ",")
 tupled1 ts = tupled ts
 
--- | Emit @ToVoidstar@/@FromVoidstar@ for a payload-bearing @data@ type.
---
--- The slot layout -- a tag, padding, and a relative pointer to the arm's
--- fields written out of line -- lives in the runtime, not here. Generated
--- code names an arm and hands its payload to the walk; the runtime does the
--- allocation, alignment and pointer encoding. That is the same division the
--- other impls keep, and it is forced anyway: the relative-pointer helpers
--- are not part of the runtime crate's public surface.
---
--- A boxed payload marshals as the tuple inside it, since @Box@ delegates.
 -- | The path of the box a generated enum's arms sit behind.
 recBox :: MDoc
 recBox = "::rustmorloc::RecBox"
@@ -528,13 +519,26 @@ recBox = "::rustmorloc::RecBox"
 userBox :: MDoc
 userBox = "::std::boxed::Box"
 
+-- | An arm that crosses as its wire tuple: that tuple's type, the
+-- conversion from the payload tuple, and the conversion back.
+data ArmWire = ArmWire
+  { awType :: MDoc
+  , awReify :: MDoc -> MDoc
+  , awReflect :: MDoc -> MDoc
+  }
+
 -- | The marshalling impls of a payload-bearing @data@ type, with the box
 -- type its arms use (@recBox@ for an enum the pool generates, @userBox@ for
 -- one the user wrote).
-printVariantImpls :: MDoc -> MDoc -> [(T.Text, [MDoc])] -> MDoc
-printVariantImpls box name arms = vsep [toImpl, "", fromImpl]
+printVariantImpls :: MDoc -> MDoc -> [(T.Text, [MDoc], Maybe ArmWire)] -> MDoc
+printVariantImpls box name arms3 = vsep [toImpl, "", fromImpl]
   where
-    idxArms = zip [0 :: Int ..] arms
+    idxArms = zip [0 :: Int ..] arms3
+    payload = "(**mlc_b)"
+    readTy ts mw = maybe (armTy ts) awType mw
+    readArm i ts mw p = case mw of
+      Nothing -> "w.child_read::<" <> armTy ts <> ">(&schema.parameters[" <> pretty i <> "], " <> p <> ")"
+      Just aw -> box <> "::new" <> parens (awReflect aw ("w.child_read::<" <> awType aw <> ">(&schema.parameters[" <> pretty i <> "], " <> p <> ")"))
 
     -- Constructors are spelled through `Self` inside the impl: it is legal
     -- in expression and pattern position alike, for a plain name and for a
@@ -558,9 +562,12 @@ printVariantImpls box name arms = vsep [toImpl, "", fromImpl]
                     [ armPat c ts <+> "=>" <+>
                         (if null ts
                            then "w.total += schema.width as isize,"
-                           else "w.variant_payload(schema, &schema.parameters["
-                                  <> pretty i <> "], mlc_b),")
-                    | (i, (c, ts)) <- idxArms ]
+                           else case mw of
+                             Nothing -> "w.variant_payload(schema, &schema.parameters["
+                                          <> pretty i <> "], mlc_b),"
+                             Just aw -> "w.variant_payload_owned(schema, &schema.parameters["
+                                          <> pretty i <> "], " <> awReify aw payload <> "),")
+                    | (i, (c, ts, mw)) <- idxArms ]
                 , "}"
                 ]
             , "}"
@@ -571,9 +578,12 @@ printVariantImpls box name arms = vsep [toImpl, "", fromImpl]
                     [ armPat c ts <+> "=>" <+>
                         (if null ts
                            then "write_variant_nullary(dest, " <> pretty i <> "u8),"
-                           else "w.variant_payload(dest, &schema.parameters["
-                                  <> pretty i <> "], " <> pretty i <> "u8, mlc_b),")
-                    | (i, (c, ts)) <- idxArms ]
+                           else case mw of
+                             Nothing -> "w.variant_payload(dest, &schema.parameters["
+                                          <> pretty i <> "], " <> pretty i <> "u8, mlc_b),"
+                             Just aw -> "w.variant_payload_owned(dest, &schema.parameters["
+                                          <> pretty i <> "], " <> pretty i <> "u8, " <> awReify aw payload <> "),")
+                    | (i, (c, ts, mw)) <- idxArms ]
                 , "}"
                 ]
             , "}"
@@ -594,8 +604,8 @@ printVariantImpls box name arms = vsep [toImpl, "", fromImpl]
                           (if null ts
                              then "{}"
                              else "{ let p = w.payload_ptr(data, &schema.parameters[" <> pretty i <> "]); w.child_step::<"
-                                    <> armTy ts <> ">(&schema.parameters[" <> pretty i <> "], p); }")
-                      | (i, (_, ts)) <- idxArms ]
+                                    <> readTy ts mw <> ">(&schema.parameters[" <> pretty i <> "], p); }")
+                      | (i, (_, ts, mw)) <- idxArms ]
                       <> [badTag]
                     )
                 , "}"
@@ -609,9 +619,8 @@ printVariantImpls box name arms = vsep [toImpl, "", fromImpl]
                           (if null ts
                              then "Self::" <> pretty c <> ","
                              else "{ let p = w.payload_ptr(data, &schema.parameters[" <> pretty i <> "]); Self::" <> pretty c
-                                    <> parens ("w.child_read::<" <> armTy ts <> ">(&schema.parameters["
-                                                 <> pretty i <> "], p)") <> " }")
-                      | (i, (c, ts)) <- idxArms ]
+                                    <> parens (readArm i ts mw "p") <> " }")
+                      | (i, (c, ts, mw)) <- idxArms ]
                       <> [badTag]
                     )
                 , "}"

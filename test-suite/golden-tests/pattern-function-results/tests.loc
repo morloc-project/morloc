@@ -1,0 +1,46 @@
+-- Patterns whose result is a function value, applied or passed on. Under
+-- `a -> (b -> c) == a -> b -> c` such a pattern's type has more inputs than
+-- the pattern takes arguments (issue #144).
+module tests
+  ( index
+  , viaHelper
+  , twoArg
+  , curried
+  , partialTwoArg
+  , mapIndex
+  , sliceThenIndex
+  , tupleGet
+  , mapTupleGet
+  )
+
+import root
+
+second :: [a] -> a
+second xs = .[1] xs
+
+index :: Int -> Int
+index x = (.[1] [\i -> i + 1, \i -> i * 10]) x
+
+viaHelper :: Int -> Int
+viaHelper x = (second [\i -> i + 1, \i -> i * 10]) x
+
+twoArg :: Int -> Int
+twoArg x = (.[0] [\a b -> a + b]) 1 x
+
+curried :: Int -> Int
+curried x = (.[0] [\a -> \b -> a + b]) 1 x
+
+partialTwoArg :: Int -> [Int]
+partialTwoArg x = map ((.[0] [\a b -> a + b]) 1) [x, 10]
+
+mapIndex :: Int -> [Int]
+mapIndex x = map (\g -> g x) (map (.[0]) [[\i -> i + 1], [\i -> i * 10]])
+
+sliceThenIndex :: Int -> Int
+sliceThenIndex x = (.[1:2] [\i -> i + 1, \i -> i * 10] |> .[0]) x
+
+tupleGet :: Int -> Int
+tupleGet x = (.0 (\i -> i + 1, 1)) x
+
+mapTupleGet :: Int -> [Int]
+mapTupleGet x = map (\g -> g x) (map .0 [(\i -> i + 1, 1), (\i -> i * 10, 2)])

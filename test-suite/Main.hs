@@ -22,6 +22,7 @@ import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
 import RecSolverTests (recSolverTests)
 import RefutablePatternTests (refutablePatternTests)
+import LockFileTests (lockFileTests)
 import RustPoolBuildTests (rustPoolBuildTests)
 import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
@@ -53,6 +54,7 @@ unitTests =
   , infixOperatorTests
   , recordLiteralOrderTests
   , recordIdentityTests
+  , typeIdentityTests
   , aliasExpansionTests
   , accessorInWhereTests
   , solvedKindCheckTests
@@ -95,6 +97,7 @@ unitTests =
   , variantTests
   , evalSandboxTests
   , typeRenderParenTests
+  , sourceNameTests
   , suspensionLawTests
   , morlocDepsTests
   , versionConstraintTests
@@ -104,6 +107,7 @@ unitTests =
   , irrefutablePatternLexerTests
   , refutablePatternTests
   , rustPoolBuildTests
+  , lockFileTests
   , effectBoundaryTests
   , schemaHintTests
   , systemConfigTests

@@ -4,6 +4,8 @@
 //! Reads a program's manifest.json, spawns language pool daemons, and
 //! routes function calls to them over Unix sockets.
 
+#[cfg(not(panic = "unwind"))]
+compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
 mod cli;
 mod convert;
 mod dispatch;
@@ -25,6 +27,8 @@ mod stdio_server;
 mod view;
 mod stage;
 mod orchestrate;
+#[cfg(test)]
+mod panic_tests;
 
 use dispatch::NexusConfig;
 
@@ -43,6 +47,15 @@ fn morloc_home() -> String {
 /// immutable runtime under MORLOC_HOME.
 fn morloc_state() -> String {
     std::env::var("MORLOC_STATE").unwrap_or_else(|_| morloc_home())
+}
+
+/// Watch the lifeline adopted at start from a thread of its own; called once
+/// the environment is written (FORK-11).
+fn watch_lifeline() {
+    extern "C" {
+        fn morloc_lifeline_guard();
+    }
+    unsafe { morloc_lifeline_guard() };
 }
 
 fn main() {
@@ -76,25 +89,24 @@ fn main() {
     // lifeline, never this one.
     {
         extern "C" {
-            fn morloc_lifeline_guard();
+            fn morloc_lifeline_adopt() -> i32;
         }
-        unsafe { morloc_lifeline_guard() };
-        std::env::remove_var("MORLOC_LIFELINE");
+        unsafe { morloc_lifeline_adopt() };
+        crate::process::remove_startup_env("MORLOC_LIFELINE");
     }
 
-    // Install a panic hook so a Rust panic still runs the run-scope
-    // epilogue + summary.json + tee cleanup before the process dies.
-    // Without this, panic-unwound exits skip clean_exit entirely and
-    // leave operators with a half-written rundir. Restore the
-    // default hook for the panic message itself so stack traces keep
-    // working under RUST_BACKTRACE=1.
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let msg = format!("nexus panicked: {}", info);
-        runlog::record_error(&msg);
-        default_hook(info);
-        process::clean_exit(101);
-    }));
+    // PANIC-1
+    process::record_nexus_process();
+    morloc_runtime_types::panic::install_hook(process::panic_exit);
+    {
+        extern "C" {
+            fn morloc_install_panic_hook(exit: Option<extern "C" fn() -> !>);
+        }
+        extern "C" fn libmorloc_panic_exit() -> ! {
+            process::panic_exit()
+        }
+        unsafe { morloc_install_panic_hook(Some(libmorloc_panic_exit)) };
+    }
 
     // Top-level argv parse. [`cli::parse_invocation`] handles the
     // pre-scan for `@` separator (run mode), loads the manifest from
@@ -122,10 +134,12 @@ fn main() {
             if fargs.validate {
                 process::init_shm();
             }
+            watch_lifeline();
             file::run(fargs)
         }
         cli::Mode::View(ref vargs) => {
             process::init_shm();
+            watch_lifeline();
             view::run(vargs);
         }
         _ => {}
@@ -191,6 +205,7 @@ fn main() {
             match invocation.nexus.cmd {
                 cli::Mode::Router(rargs) => {
                     let cfg = cli::router_args_to_config(&rargs);
+                    watch_lifeline();
                     run_router(&cfg);
                     std::process::exit(0);
                 }
@@ -210,6 +225,7 @@ fn main() {
     match invocation.nexus.cmd {
         cli::Mode::Router(rargs) => {
             let cfg = cli::router_args_to_config(&rargs);
+            watch_lifeline();
             run_router(&cfg);
             std::process::exit(0);
         }
@@ -292,13 +308,13 @@ fn main() {
     // them too (its first read of the atomics will trip the Once and
     // pull these values in).
     if let Some(n) = manifest.inline_size {
-        std::env::set_var("MORLOC_INLINE_SIZE", n.to_string());
+        crate::process::set_startup_env("MORLOC_INLINE_SIZE", n.to_string());
     }
     if manifest.no_shm {
-        std::env::set_var("MORLOC_NO_SHM", "1");
+        crate::process::set_startup_env("MORLOC_NO_SHM", "1");
     }
     if let Some(ref dir) = manifest.tmpdir {
-        std::env::set_var("MORLOC_TMPDIR", dir);
+        crate::process::set_startup_env("MORLOC_TMPDIR", dir);
     }
 
     // Propagate nexus + manifest absolute paths to pools. SLURM remote
@@ -310,7 +326,7 @@ fn main() {
     // started by, which for a PATH lookup is often a link such as
     // ~/.local/bin/morloc-nexus, whose directory is not this install's.
     if let Ok(exe) = std::env::current_exe().map(|e| std::fs::canonicalize(&e).unwrap_or(e)) {
-        std::env::set_var("MORLOC_NEXUS_PATH", &exe);
+        crate::process::set_startup_env("MORLOC_NEXUS_PATH", &exe);
         // Point pools at this nexus's sibling lib dir so they load the SAME
         // libmorloc.so the nexus resolved, wherever the build tree lives (pools
         // carry no absolute rpath). Append, never prepend, so a conda-provided
@@ -347,7 +363,7 @@ fn main() {
                 }
             }
             if let Ok(joined) = std::env::join_paths(&entries) {
-                std::env::set_var(var, joined);
+                crate::process::set_startup_env(var, joined);
             }
         }
         // On macOS, the Python pool forks workers after numpy (via pymorloc)
@@ -357,13 +373,13 @@ fn main() {
         // child's environment BEFORE exec -- setting it from inside the
         // already-running interpreter is too late to take effect.
         #[cfg(target_os = "macos")]
-        std::env::set_var("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES");
+        crate::process::set_startup_env("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES");
     }
     // Canonicalize once; reused below to resolve relative pool exec paths.
     let abs_manifest = std::fs::canonicalize(&manifest_path).ok();
     match &abs_manifest {
-        Some(p) => std::env::set_var("MORLOC_MANIFEST_PATH", p),
-        None => std::env::set_var("MORLOC_MANIFEST_PATH", &manifest_path),
+        Some(p) => crate::process::set_startup_env("MORLOC_MANIFEST_PATH", p),
+        None => crate::process::set_startup_env("MORLOC_MANIFEST_PATH", &manifest_path),
     }
 
     // Publish the run-scope activation env vars NOW (after both option
@@ -381,25 +397,25 @@ fn main() {
     // CLI flags win over env vars. Env vars that pre-existed without
     // a matching flag are left untouched so pools inherit them.
     if let Some(ref d) = config.log_dir {
-        std::env::set_var("MORLOC_LOG_DIR", d);
+        crate::process::set_startup_env("MORLOC_LOG_DIR", d);
     }
     if let Some(ref p) = config.summary_path {
-        std::env::set_var("MORLOC_SUMMARY", p);
+        crate::process::set_startup_env("MORLOC_SUMMARY", p);
     }
     if config.quiet {
-        std::env::set_var("MORLOC_QUIET", "1");
+        crate::process::set_startup_env("MORLOC_QUIET", "1");
     }
     if let Some(z) = config.stdout_compression {
-        std::env::set_var("MORLOC_STDOUT_COMPRESSION_LEVEL", z.to_string());
+        crate::process::set_startup_env("MORLOC_STDOUT_COMPRESSION_LEVEL", z.to_string());
     }
     if let Some(n) = config.debug_cache_depth {
-        std::env::set_var("MORLOC_DEBUG_CACHE_DEPTH", n.to_string());
+        crate::process::set_startup_env("MORLOC_DEBUG_CACHE_DEPTH", n.to_string());
     }
     if let Some(n) = config.debug_cache_max {
-        std::env::set_var("MORLOC_DEBUG_CACHE_MAX", n.to_string());
+        crate::process::set_startup_env("MORLOC_DEBUG_CACHE_MAX", n.to_string());
     }
     if let Some(n) = config.debug_recursion_cap {
-        std::env::set_var("MORLOC_DEBUG_RECURSION_CAP", n.to_string());
+        crate::process::set_startup_env("MORLOC_DEBUG_RECURSION_CAP", n.to_string());
     }
 
     // Resolve the per-run identity now so pools inherit a fully-published
@@ -459,7 +475,11 @@ fn main() {
     // @stderr through this dedicated socket; the fork-side child fd
     // hygiene installed in start_language_server takes fd 0/1 away
     // from the pool so the nexus keeps its bytes clean.
+    if matches!(config.child, dispatch::ChildMode::Stage { .. }) {
+        crate::process::set_startup_env("MORLOC_STDOUT_STAGE", "1");
+    }
     stdio_server::start(&tmpdir, config.output_format, config.daemon_flag);
+    watch_lifeline();
 
     // Become subreaper for orphaned grandchildren
     process::set_child_subreaper();
@@ -521,6 +541,31 @@ fn main() {
 
     // Daemon mode
     if config.daemon_flag {
+        if config.mcp_auth_token.as_ref().is_some_and(|t| t.contains('\0')) {
+            eprintln!("Error: the auth token contains a NUL byte");
+            process::clean_exit(1);
+        }
+        if config.http_port.is_some() {
+            let host = config.mcp_http_host.as_deref().unwrap_or("127.0.0.1");
+            if let Err(e) = daemon_http_address(host) {
+                eprintln!("Error: {e}");
+                process::clean_exit(1);
+            }
+            // NET-1
+            if mcp::open_bind_refused(host, config.mcp_auth_token.is_some(), config.mcp_allow_no_auth) {
+                eprintln!(
+                    "morloc-daemon: refusing to serve HTTP on {host} with no auth token (bind is not \
+                     loopback). Set --auth-token / MORLOC_MCP_TOKEN, or pass --allow-no-auth to override."
+                );
+                process::clean_exit(1);
+            }
+            if config.mcp_auth_token.is_none() && !mcp::is_loopback(host) {
+                eprintln!(
+                    "morloc-daemon: no auth token set. Every caller that can reach {host} can call every \
+                     exported function. Set MORLOC_MCP_TOKEN to require a bearer token."
+                );
+            }
+        }
         let all_indices: Vec<usize> = (0..manifest.pools.len()).collect();
         if let Err(e) = process::start_daemons(&mut sockets, &all_indices) {
             eprintln!("Error: {}", e);
@@ -540,20 +585,12 @@ fn main() {
 
         // Build DaemonConfig and call daemon_run in libmorloc.so
         run_daemon(&config, &mut sockets, &shm_basename, &payload);
-        process::clean_exit(0);
+        // DAEMON-6: stdio server threads may still be copying into shared memory.
+        process::exit_leaving_threads(daemon_exit_code());
     }
 
     // Normal CLI mode
     if config.packet_path.is_none() {
-        // Scoped to normal CLI dispatch only: call-packet mode already
-        // honors output_path internally (writes a sibling .mpk file
-        // via write_atomic) and must not have its stdout hijacked.
-        // A child of a multi-output run already holds the `-o` file (if
-        // any) as fd 1, or was pointed elsewhere by its parent.
-        if matches!(config.child, dispatch::ChildMode::None) {
-            process::redirect_stdout_to(config.output_path.as_deref());
-        }
-
         if let dispatch::ChildMode::Replay { cmd, inputs } = config.child.clone() {
             // One action on a staged output: the inputs are packet files,
             // in the entry's argument order.
@@ -604,6 +641,14 @@ fn main() {
             format_explicit,
             config.output_path.as_deref(),
         );
+
+        // Opened only once the arguments parse, so a rejected command line
+        // leaves the file untouched. Call-packet mode writes its own output
+        // file; a child of a multi-output run already holds the `-o` file
+        // (if any) as fd 1, or was pointed elsewhere by its parent.
+        if matches!(config.child, dispatch::ChildMode::None) {
+            process::redirect_stdout_to(config.output_path.as_deref());
+        }
 
         if let dispatch::ChildMode::Stage { dir, args, tee } = config.child.clone() {
             // The stage of a multi-output run: the parent command, once.
@@ -708,6 +753,8 @@ struct CDaemonConfig {
     eval_timeout: i32,
     output_packet: bool,
     compression_level: u8,
+    stop_pools_fn: *const std::ffi::c_void,   // Option<fn> as null
+    emergency_exit_fn: *const std::ffi::c_void,
 }
 
 /// Run the daemon event loop by calling daemon_run in libmorloc.so.
@@ -728,9 +775,10 @@ fn run_daemon(
             sockets: *mut c_void,        // *mut MorlocSocket
             n_pools: usize,
             shm_basename: *const c_char,
-        );
+        ) -> bool;
         fn parse_manifest(text: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
         fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char);
+        fn daemon_set_http_access(address: u32, token: *const c_char);
     }
 
     // Build C MorlocSocket array (matches daemon_ffi::MorlocSocket layout)
@@ -793,6 +841,8 @@ fn run_daemon(
         // with the zstd preset from `-z`. HTTP results stay JSON.
         output_packet: config.output_format == dispatch::OutputFormat::Packet,
         compression_level: config.compression_level,
+        stop_pools_fn: process::stop_pools_ptr(),
+        emergency_exit_fn: process::emergency_exit_ptr(),
     };
 
     // Parse manifest via the C FFI (so daemon_run gets the C-layout manifest).
@@ -824,16 +874,37 @@ fn run_daemon(
             eval_allowed_cstr.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
         );
     }
-
+    let http_host = config.mcp_http_host.as_deref().unwrap_or("127.0.0.1");
+    let http_token = config.mcp_auth_token.as_ref().map(|t| CString::new(t.as_str()).unwrap());
     unsafe {
+        daemon_set_http_access(
+            daemon_http_address(http_host).unwrap_or(u32::from(std::net::Ipv4Addr::LOCALHOST)),
+            http_token.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+        );
+    }
+
+    let all_returned = unsafe {
         daemon_run(
             &mut daemon_config as *mut CDaemonConfig as *mut c_void,
             c_manifest,
             c_sockets.as_mut_ptr() as *mut c_void,
             n_pools,
             shm_c.as_ptr(),
-        );
+        )
+    };
+    if !all_returned {
+        // DAEMON-6: a request still running reads these and shared memory.
+        process::exit_leaving_threads(daemon_exit_code());
     }
+}
+
+/// The internal-error status once a request panicked (DAEMON-7), so a
+/// supervisor restarts the daemon; 0 otherwise.
+fn daemon_exit_code() -> i32 {
+    extern "C" {
+        fn morloc_daemon_worker_panicked() -> bool;
+    }
+    if unsafe { morloc_daemon_worker_panicked() } { morloc_runtime_types::panic::PANIC_EXIT_STATUS } else { 0 }
 }
 
 /// Run the multi-program router daemon.
@@ -898,9 +969,13 @@ fn run_router(config: &dispatch::NexusConfig) {
     // the signal as PID 1 and being SIGKILLed after the grace period (which would
     // orphan the children and leak /dev/shm/morloc-*).
     FRONTEND_ROUTER.store(router, std::sync::atomic::Ordering::Relaxed);
+    // Every signal is masked while the handler runs, so it never interrupts itself.
     unsafe {
-        libc::signal(libc::SIGTERM, frontend_shutdown_handler as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, frontend_shutdown_handler as *const () as libc::sighandler_t);
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = frontend_shutdown_handler as *const () as usize;
+        libc::sigfillset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
     }
 
     // The unified front-end owns the supervisor for the process lifetime and
@@ -919,13 +994,22 @@ static FRONTEND_ROUTER: std::sync::atomic::AtomicPtr<std::ffi::c_void> =
 /// SIGTERM/SIGINT handler for the serving front-end: async-signal-safe. Tells
 /// each child daemon to shut down (SIGTERM, so it sweeps its own SHM) and exits.
 extern "C" fn frontend_shutdown_handler(_sig: libc::c_int) {
+    // PANIC-1
+    morloc_runtime_types::panic::signal_frame(|| {
+        stop_frontend_children();
+        unsafe { libc::_exit(0) };
+    })
+}
+
+/// Async-signal-safe; does nothing outside the serving front-end.
+fn stop_frontend_children() {
     extern "C" {
         fn router_terminate_children(router: *mut std::ffi::c_void);
     }
+    crate::mcp::FRONTEND_EVALS.stop_all();
     let r = FRONTEND_ROUTER.load(std::sync::atomic::Ordering::Relaxed);
-    unsafe {
-        router_terminate_children(r);
-        libc::_exit(0);
+    if !r.is_null() {
+        unsafe { router_terminate_children(r) };
     }
 }
 
@@ -1050,7 +1134,7 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
             "unknown error".into()
         };
         eprintln!("Error: run failed: {}", msg);
-        process::report_dead_pools();
+        process::report_dead_pools(true);
         process::clean_exit(1);
     }
 
@@ -1060,7 +1144,7 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         let s = unsafe { std::ffi::CStr::from_ptr(run_err) }.to_string_lossy().into_owned();
         unsafe { libc::free(run_err as *mut c_void) };
         eprintln!("Error: run failed: {}", s);
-        process::report_dead_pools();
+        process::report_dead_pools(false);
         process::clean_exit(1);
     }
 
@@ -1210,4 +1294,14 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
     }
 
     unsafe { libc::free(result_packet as *mut c_void) };
+}
+
+/// The daemon's HTTP listener is IPv4; its bind address in host order.
+fn daemon_http_address(host: &str) -> Result<u32, String> {
+    if host == "localhost" {
+        return Ok(u32::from(std::net::Ipv4Addr::LOCALHOST));
+    }
+    host.parse::<std::net::Ipv4Addr>()
+        .map(u32::from)
+        .map_err(|_| format!("--http-host {host}: the daemon listens on an IPv4 address"))
 }

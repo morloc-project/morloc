@@ -1,5 +1,6 @@
 module main (foo)
 
+newtype Map a b
 type Cpp => Map a b = "std::map<$1,$2>" a b
 type Cpp => List a = "std::vector<$1>" a
 type Cpp => Tuple2 a b = "std::tuple<$1,$2>" a b

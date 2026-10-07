@@ -18,6 +18,7 @@ module main (setLast, setFirst, plainGet)
 
 import root-py
 
+newtype Box a
 type Py => (Box a) = "list" a
 
 source Py from "helpers.py" ("mkbox", "unbox")

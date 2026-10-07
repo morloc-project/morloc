@@ -15,8 +15,7 @@ pub use crate::cschema::CSchema;
 /// The ABI/wire-format version compiled into this libmorloc.so (see morloc.h's
 /// `MORLOC_ABI_VERSION`). Provisioning compares it fail-closed against the
 /// compiler's expected version so a mismatched prebuilt binary is refused.
-#[no_mangle]
-pub extern "C" fn morloc_abi_version() -> u32 {
+pub(crate) fn morloc_abi_version() -> u32 {
     morloc_runtime_types::MORLOC_ABI_VERSION
 }
 
@@ -42,8 +41,7 @@ macro_rules! ffi_try {
 
 // ── SHM functions ──────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn shinit(
+pub(crate) unsafe fn shinit(
     shm_basename: *const c_char,
     volume_index: usize,
     shm_size: usize,
@@ -53,8 +51,7 @@ pub unsafe extern "C" fn shinit(
     ffi_try!(errmsg, ptr::null_mut(), shm::shinit(&basename, volume_index, shm_size))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn shopen(
+pub(crate) unsafe fn shopen(
     volume_index: usize,
     errmsg: *mut *mut c_char,
 ) -> *mut ShmHeader {
@@ -65,9 +62,13 @@ pub unsafe extern "C" fn shopen(
     )
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn shclose(errmsg: *mut *mut c_char) -> bool {
+pub(crate) unsafe fn shclose(errmsg: *mut *mut c_char) -> bool {
     ffi_try!(errmsg, false, shm::shclose().map(|_| true))
+}
+
+// DAEMON-5
+pub(crate) unsafe fn morloc_shretire(errmsg: *mut *mut c_char) -> bool {
+    ffi_try!(errmsg, false, shm::shretire().map(|_| true))
 }
 
 /// Initialise the shared stream registry for the current nexus
@@ -81,8 +82,7 @@ pub unsafe extern "C" fn shclose(errmsg: *mut *mut c_char) -> bool {
 ///
 /// Returns the slot count in effect, or `usize::MAX` on error (with
 /// `errmsg` populated).
-#[no_mangle]
-pub unsafe extern "C" fn stream_registry_init(
+pub(crate) unsafe fn stream_registry_init(
     errmsg: *mut *mut c_char,
 ) -> usize {
     ffi_try!(errmsg, usize::MAX, crate::stream::registry_init())
@@ -101,8 +101,7 @@ pub unsafe extern "C" fn stream_registry_init(
 /// PID-reuse false positive).
 ///
 /// Non-blocking; the actual sweep runs on the sweeper thread.
-#[no_mangle]
-pub unsafe extern "C" fn stream_sweep_pid(
+pub(crate) unsafe fn stream_sweep_pid(
     pid: u32,
     start_time: u64,
 ) {
@@ -112,28 +111,24 @@ pub unsafe extern "C" fn stream_sweep_pid(
 /// The start stamp of `pid` (`process::start_time`), which the nexus pairs
 /// with a pool's pid when it enqueues a PID sweep. 0 when unreadable; the
 /// sweep then accepts a PID-only match.
-#[no_mangle]
-pub unsafe extern "C" fn stream_pid_start_time(
+pub(crate) unsafe fn stream_pid_start_time(
     pid: u32,
 ) -> u64 {
     morloc_runtime_types::process::start_time(pid)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn shm_set_fallback_dir(dir: *const c_char) {
+pub(crate) unsafe fn shm_set_fallback_dir(dir: *const c_char) {
     if !dir.is_null() {
         let d = CStr::from_ptr(dir).to_string_lossy();
         shm::shm_set_fallback_dir(&d);
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_void {
+pub(crate) unsafe fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_void {
     ffi_try!(errmsg, ptr::null_mut(), shm::shmalloc(size).map(|p| p as *mut c_void))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn shmemcpy(
+pub(crate) unsafe fn shmemcpy(
     src: *mut c_void,
     size: usize,
     errmsg: *mut *mut c_char,
@@ -145,8 +140,7 @@ pub unsafe extern "C" fn shmemcpy(
     )
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn shcalloc(
+pub(crate) unsafe fn shcalloc(
     nmemb: usize,
     size: usize,
     errmsg: *mut *mut c_char,
@@ -157,8 +151,7 @@ pub unsafe extern "C" fn shcalloc(
 /// Report blocks currently held across every mapped volume. Writes the
 /// block count and byte total through the out pointers, and prints a
 /// size-class breakdown to stderr.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_shm_live_report(
+pub(crate) unsafe fn mlc_shm_live_report(
     out_blocks: *mut usize,
     out_bytes: *mut usize,
 ) {
@@ -178,34 +171,32 @@ pub unsafe extern "C" fn mlc_shm_live_report(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn shfree(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool {
+pub(crate) unsafe fn shfree(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool {
     ffi_try!(errmsg, false, shm::shfree(ptr as AbsPtr).map(|_| true))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn shincref(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool {
+pub(crate) unsafe fn shincref(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool {
     ffi_try!(errmsg, false, shm::shincref(ptr as AbsPtr).map(|_| true))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn total_shm_size() -> usize {
+pub(crate) fn morloc_fork_generation() -> u64 {
+    crate::fork_policy::generation()
+}
+
+pub(crate) unsafe fn total_shm_size() -> usize {
     shm::total_shm_size()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rel2abs(ptr: RelPtr, errmsg: *mut *mut c_char) -> *mut c_void {
+pub(crate) unsafe fn rel2abs(ptr: RelPtr, errmsg: *mut *mut c_char) -> *mut c_void {
     ffi_try!(errmsg, ptr::null_mut(), shm::rel2abs(ptr).map(|p| p as *mut c_void))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rel2abs_extent(ptr: RelPtr, extent: usize, errmsg: *mut *mut c_char) -> *mut c_void {
+pub(crate) unsafe fn rel2abs_extent(ptr: RelPtr, extent: usize, errmsg: *mut *mut c_char) -> *mut c_void {
     ffi_try!(errmsg, ptr::null_mut(), shm::rel2abs_extent(ptr, extent).map(|p| p as *mut c_void))
 }
 
 /// The error C's inline payload resolve reports. Always returns null.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_payload_region_error(
+pub(crate) unsafe fn morloc_payload_region_error(
     relptr: RelPtr,
     extent: usize,
     len: usize,
@@ -215,18 +206,15 @@ pub unsafe extern "C" fn morloc_payload_region_error(
     ptr::null_mut()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> RelPtr {
+pub(crate) unsafe fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> RelPtr {
     ffi_try!(errmsg, shm::RELNULL, shm::abs2rel(ptr as AbsPtr))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn abs2shm(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut ShmHeader {
+pub(crate) unsafe fn abs2shm(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut ShmHeader {
     ffi_try!(errmsg, ptr::null_mut(), shm::abs2shm(ptr as AbsPtr))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn abs2blk(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut BlockHeader {
+pub(crate) unsafe fn abs2blk(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut BlockHeader {
     clear_errmsg(errmsg);
     if ptr.is_null() {
         set_errmsg(errmsg, &MorlocError::NullPointer);
@@ -240,20 +228,17 @@ pub unsafe extern "C" fn abs2blk(ptr: *mut c_void, errmsg: *mut *mut c_char) -> 
     blk
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn vol2rel(ptr: VolPtr, shm_ptr: *const ShmHeader) -> RelPtr {
+pub(crate) unsafe fn vol2rel(ptr: VolPtr, shm_ptr: *const ShmHeader) -> RelPtr {
     shm::vol2rel(ptr, &*shm_ptr)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn vol2abs(ptr: VolPtr, shm_ptr: *const ShmHeader) -> *mut c_void {
+pub(crate) unsafe fn vol2abs(ptr: VolPtr, shm_ptr: *const ShmHeader) -> *mut c_void {
     shm::vol2abs(ptr, shm_ptr) as *mut c_void
 }
 
 // ── Schema functions ───────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn parse_schema(
+pub(crate) unsafe fn parse_schema(
     schema_str: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> *mut CSchema {
@@ -262,9 +247,8 @@ pub unsafe extern "C" fn parse_schema(
         set_errmsg(errmsg, &MorlocError::NullPointer);
         return ptr::null_mut();
     }
-    let s = CStr::from_ptr(schema_str).to_string_lossy();
-    match schema::parse_schema(&s) {
-        Ok(schema) => CSchema::from_rust(&schema),
+    match c_schema(&CStr::from_ptr(schema_str).to_string_lossy()) {
+        Ok(schema) => schema,
         Err(e) => {
             set_errmsg(errmsg, &e);
             ptr::null_mut()
@@ -272,8 +256,12 @@ pub unsafe extern "C" fn parse_schema(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn schema_to_string(schema: *const CSchema) -> *mut c_char {
+/// A C schema for `text`, owned by the caller.
+pub(crate) fn c_schema(text: &str) -> Result<*mut CSchema, MorlocError> {
+    Ok(CSchema::from_rust(&schema::parse_schema(text)?))
+}
+
+pub(crate) unsafe fn schema_to_string(schema: *const CSchema) -> *mut c_char {
     if schema.is_null() {
         return ptr::null_mut();
     }
@@ -285,15 +273,13 @@ pub unsafe extern "C" fn schema_to_string(schema: *const CSchema) -> *mut c_char
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn free_schema(schema: *mut CSchema) {
+pub(crate) unsafe fn free_schema(schema: *mut CSchema) {
     CSchema::free(schema);
 }
 
 /// Narrow `v` to the nearest `f32` at `out`, for the pool marshallers: 0 on
 /// success, -1 when a finite `v` lies beyond the `f32` range.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_f32_from_f64(v: f64, out: *mut f32) -> i32 {
+pub(crate) unsafe fn morloc_f32_from_f64(v: f64, out: *mut f32) -> i32 {
     match morloc_runtime_types::width::f32_nearest(v) {
         Ok(f) => {
             *out = f;
@@ -307,8 +293,7 @@ pub unsafe extern "C" fn morloc_f32_from_f64(v: f64, out: *mut f32) -> i32 {
 
 // ── Serialization ──────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn pack_with_schema(
+pub(crate) unsafe fn pack_with_schema(
     mlc: *const c_void,
     schema: *const CSchema,
     mpkptr: *mut *mut c_char,
@@ -339,8 +324,7 @@ pub unsafe extern "C" fn pack_with_schema(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn pack(
+pub(crate) unsafe fn pack(
     mlc: *const c_void,
     schema_str: *const c_char,
     mpkptr: *mut *mut c_char,
@@ -362,8 +346,7 @@ pub unsafe extern "C" fn pack(
     result
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn unpack_with_schema(
+pub(crate) unsafe fn unpack_with_schema(
     mpk: *const c_char,
     mpk_size: usize,
     schema: *const CSchema,
@@ -392,8 +375,7 @@ pub unsafe extern "C" fn unpack_with_schema(
 
 // ── Schema utility functions needed by C code ──────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn calculate_voidstar_size(
+pub(crate) unsafe fn calculate_voidstar_size(
     data: *const c_void,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -739,8 +721,7 @@ impl<'a, 'r> crate::walk::Walker<bool> for SizeWalk<'a, 'r> {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn get_ptr(
+pub(crate) unsafe fn get_ptr(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
@@ -750,4 +731,178 @@ pub unsafe extern "C" fn get_ptr(
     }
     let rs = CSchema::to_rust(schema);
     ffi_try!(errmsg, ptr::null_mut(), shm::shmalloc(rs.width).map(|p| p as *mut c_void))
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub extern "C" fn morloc_abi_version() -> u32 {
+        super::morloc_abi_version()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn shinit(shm_basename: *const c_char, volume_index: usize, shm_size: usize, errmsg: *mut *mut c_char) -> *mut ShmHeader {
+        super::shinit(shm_basename, volume_index, shm_size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn shopen(volume_index: usize, errmsg: *mut *mut c_char) -> *mut ShmHeader {
+        super::shopen(volume_index, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn shclose(errmsg: *mut *mut c_char) -> bool {
+        super::shclose(errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_shretire(errmsg: *mut *mut c_char) -> bool {
+        super::morloc_shretire(errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn stream_registry_init(errmsg: *mut *mut c_char) -> usize {
+        super::stream_registry_init(errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn stream_sweep_pid(pid: u32, start_time: u64) {
+        super::stream_sweep_pid(pid, start_time)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn stream_pid_start_time(pid: u32) -> u64 {
+        super::stream_pid_start_time(pid)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn shm_set_fallback_dir(dir: *const c_char) {
+        super::shm_set_fallback_dir(dir)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::shmalloc(size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn shmemcpy(src: *mut c_void, size: usize, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::shmemcpy(src, size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn shcalloc(nmemb: usize, size: usize, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::shcalloc(nmemb, size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_shm_live_report(out_blocks: *mut usize, out_bytes: *mut usize) {
+        super::mlc_shm_live_report(out_blocks, out_bytes)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn shfree(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool {
+        super::shfree(ptr, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn shincref(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool {
+        super::shincref(ptr, errmsg)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_fork_generation() -> u64 {
+        super::morloc_fork_generation()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn total_shm_size() -> usize {
+        super::total_shm_size()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rel2abs(ptr: RelPtr, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::rel2abs(ptr, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn rel2abs_extent(ptr: RelPtr, extent: usize, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::rel2abs_extent(ptr, extent, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_payload_region_error(relptr: RelPtr, extent: usize, len: usize, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::morloc_payload_region_error(relptr, extent, len, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> RelPtr {
+        super::abs2rel(ptr, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn abs2shm(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut ShmHeader {
+        super::abs2shm(ptr, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn abs2blk(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut BlockHeader {
+        super::abs2blk(ptr, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn vol2rel(ptr: VolPtr, shm_ptr: *const ShmHeader) -> RelPtr {
+        super::vol2rel(ptr, shm_ptr)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn vol2abs(ptr: VolPtr, shm_ptr: *const ShmHeader) -> *mut c_void {
+        super::vol2abs(ptr, shm_ptr)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn parse_schema(schema_str: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema {
+        super::parse_schema(schema_str, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn schema_to_string(schema: *const CSchema) -> *mut c_char {
+        super::schema_to_string(schema)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn free_schema(schema: *mut CSchema) {
+        super::free_schema(schema)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_f32_from_f64(v: f64, out: *mut f32) -> i32 {
+        super::morloc_f32_from_f64(v, out)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn pack_with_schema(mlc: *const c_void, schema: *const CSchema, mpkptr: *mut *mut c_char, mpk_size: *mut usize, errmsg: *mut *mut c_char) -> i32 {
+        super::pack_with_schema(mlc, schema, mpkptr, mpk_size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn pack(mlc: *const c_void, schema_str: *const c_char, mpkptr: *mut *mut c_char, mpk_size: *mut usize, errmsg: *mut *mut c_char) -> i32 {
+        super::pack(mlc, schema_str, mpkptr, mpk_size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn unpack_with_schema(mpk: *const c_char, mpk_size: usize, schema: *const CSchema, mlcptr: *mut *mut c_void, errmsg: *mut *mut c_char) -> i32 {
+        super::unpack_with_schema(mpk, mpk_size, schema, mlcptr, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn calculate_voidstar_size(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> usize {
+        super::calculate_voidstar_size(data, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn get_ptr(schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::get_ptr(schema, errmsg)
+    }
 }

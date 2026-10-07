@@ -13,6 +13,31 @@ on:
     branches: [master, dev]
 
 jobs:
+  # The spec (model/) cites TLA+ runs as checks; check.sh runs every model,
+  # requires each <Module>.cfg to pass and each *.bug.cfg to fail, and checks
+  # each PlusCal translation is current.
+  model-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache TLA+ tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/morloc
+          key: tla2tools-1.7.4
+
+      - name: Model-check the spec
+        run: bash model/tla/check.sh
+
   build-and-test:
     strategy:
       fail-fast: false
@@ -226,9 +251,18 @@ jobs:
             p morloc --version
           } 2>&1 | tee system-info.txt
 
+      # The fork-ownership tests make a real pid collision with nested user
+      # and pid namespaces; Ubuntu's AppArmor forbids those to unprivileged
+      # processes by default, and on Linux a skipped test fails the run.
+      - name: Allow unprivileged user namespaces (Linux)
+        if: matrix.shard == 1 && runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Test rust runtime and nexus
         if: matrix.shard == 1
         run: cargo test --workspace --manifest-path data/rust/Cargo.toml
+        env:
+          MORLOC_REQUIRE_NAMESPACES: ${{ runner.os == 'Linux' && '1' || '' }}
         timeout-minutes: 20
 
       # The daemon, concurrency, packet and module-exposure suites. These
@@ -238,8 +272,13 @@ jobs:
       # concurrently, pools crashing and being rebuilt under load. Roughly
       # 90s, and run before the long golden sweep so a broken runtime is
       # reported in the first two minutes rather than the tenth.
+      # Released shared memory is filled with a marker byte instead of zeros,
+      # so a read of freed memory shows up as garbage rather than as
+      # plausible zeros.
       - name: Test the runtime suites
         if: matrix.shard == 1
+        env:
+          MORLOC_SHM_POISON: "1"
         run: ./test-suite/test.sh portability typecheck-benchmark concurrency daemon packet-io expose
         timeout-minutes: 20
 
@@ -281,13 +320,13 @@ jobs:
       - name: Dump failing golden-test stderr to log
         if: failure()
         run: |
-          # Print every non-empty obs.err / build.err under the golden tests
+          # Print every non-empty build.err / obs.err / make.err under the golden tests
           # straight to the CI log, so failure stderr (e.g. pool-crash
           # diagnostics) is visible even when the uploaded artifact is not
           # convenient to fetch. Cap each file so the log stays readable.
           echo "=== non-empty golden-test stderr ==="
           found=0
-          for f in $(find test-suite/golden-tests -name obs.err -o -name build.err 2>/dev/null); do
+          for f in $(find test-suite/golden-tests -name obs.err -o -name build.err -o -name make.err 2>/dev/null); do
             if [ -s "$f" ]; then
               found=1
               echo "----- $f -----"
@@ -295,7 +334,7 @@ jobs:
               echo
             fi
           done
-          [ "$found" = 0 ] && echo "(no non-empty obs.err/build.err found)"
+          [ "$found" = 0 ] && echo "(no non-empty build.err/obs.err/make.err found)"
           true
 
       - name: Collect macOS crash reports
@@ -323,6 +362,7 @@ jobs:
           path: |
             test-suite/golden-tests/**/build.err
             test-suite/golden-tests/**/obs.err
+            test-suite/golden-tests/**/make.err
             test-suite/golden-tests/**/obs.txt
             crash-reports/**
             system-info.txt

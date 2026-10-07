@@ -10,7 +10,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::cschema::CSchema;
-use crate::error::{clear_errmsg, set_errmsg, MorlocError};
+use crate::error::{clear_errmsg, set_errmsg, take_reason, MorlocError};
 use crate::packet;
 use morloc_runtime_types::width;
 use crate::shm;
@@ -210,8 +210,7 @@ pub struct ArgumentT {
     pub size: usize,
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn initialize_positional(value: *mut c_char) -> *mut ArgumentT {
+pub(crate) unsafe fn initialize_positional(value: *mut c_char) -> *mut ArgumentT {
     let arg = libc::calloc(1, std::mem::size_of::<ArgumentT>()) as *mut ArgumentT;
     if arg.is_null() {
         return ptr::null_mut();
@@ -225,8 +224,7 @@ pub unsafe extern "C" fn initialize_positional(value: *mut c_char) -> *mut Argum
     arg
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn initialize_unrolled(
+pub(crate) unsafe fn initialize_unrolled(
     size: usize,
     default_value: *mut c_char,
     fields: *mut *mut c_char,
@@ -263,8 +261,7 @@ pub unsafe extern "C" fn initialize_unrolled(
     arg
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn free_argument_t(arg: *mut ArgumentT) {
+pub(crate) unsafe fn free_argument_t(arg: *mut ArgumentT) {
     if arg.is_null() {
         return;
     }
@@ -304,7 +301,7 @@ pub(crate) unsafe fn peek_packet_header_via_pread(
     if path.is_null() {
         return None;
     }
-    let fd = libc::open(path, libc::O_RDONLY);
+    let fd = libc::open(path, libc::O_RDONLY | libc::O_CLOEXEC);
     if fd < 0 {
         return None;
     }
@@ -330,8 +327,7 @@ pub(crate) unsafe fn peek_packet_header_via_pread(
 /// is a `PACKET_TYPE_STREAM` file, 0 otherwise. Language runtimes call
 /// this from their FILE+DATA unwrap branches to choose between the
 /// legacy data-indirection path and the stream-ingest loop.
-#[no_mangle]
-pub unsafe extern "C" fn file_is_stream_packet(path: *const c_char) -> i32 {
+pub(crate) unsafe fn file_is_stream_packet(path: *const c_char) -> i32 {
     match peek_packet_header_via_pread(path) {
         Some(header) if header.is_stream() => 1,
         _ => 0,
@@ -416,14 +412,14 @@ unsafe fn spool_stdin_to_temp() -> Result<String, MorlocError> {
     let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
     let mut template: Vec<u8> = format!("{}/morloc-table-XXXXXX", dir.trim_end_matches('/')).into_bytes();
     template.push(0);
-    let fd = libc::mkstemp(template.as_mut_ptr() as *mut c_char);
+    let fd = morloc_runtime_types::fd::mkstemp(template.as_mut_ptr() as *mut c_char);
     if fd < 0 {
         return Err(MorlocError::Other("could not open a temporary file for the table on stdin".into()));
     }
     let path = String::from_utf8_lossy(&template[..template.len() - 1]).into_owned();
     // Unlinking now would take the name the pool needs, so the file is
     // removed at exit instead.
-    SPOOLED.lock().unwrap_or_else(|e| e.into_inner()).push(path.clone());
+    SPOOLED.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock()).push(path.clone());
     let mut out = {
         use std::os::fd::FromRawFd;
         std::fs::File::from_raw_fd(fd)
@@ -440,11 +436,11 @@ unsafe fn spool_stdin_to_temp() -> Result<String, MorlocError> {
 }
 
 /// Temporary files holding input spooled off a pipe, removed at exit.
-static SPOOLED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static SPOOLED: crate::fork_policy::Reset<Vec<String>> = crate::fork_policy::Reset::new(Vec::new);
 
 /// Remove every file spooled off a pipe during this run.
 pub fn remove_spooled_inputs() {
-    let mut files = SPOOLED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut files = SPOOLED.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
     for path in files.drain(..) {
         let _ = std::fs::remove_file(&path);
     }
@@ -580,7 +576,7 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
         return Ok(None);
     }
 
-    let fd = libc::open(path, libc::O_RDONLY);
+    let fd = libc::open(path, libc::O_RDONLY | libc::O_CLOEXEC);
     if fd < 0 {
         return Ok(None);
     }
@@ -741,7 +737,7 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
         return Ok(None);
     }
 
-    let fd = libc::open(path, libc::O_RDONLY);
+    let fd = libc::open(path, libc::O_RDONLY | libc::O_CLOEXEC);
     if fd < 0 {
         return Ok(None);
     }
@@ -1021,8 +1017,7 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
 /// produced by the Layer-3 emitter (`stream_packet_to_fd` for
 /// uncompressed RPTR+VOIDSTAR) will carry stale vol_idx bits that this
 /// reader cannot cancel.
-#[no_mangle]
-pub unsafe extern "C" fn read_voidstar_binary(
+pub(crate) unsafe fn read_voidstar_binary(
     blob: *const u8,
     blob_size: usize,
     schema: *const CSchema,
@@ -1039,8 +1034,7 @@ pub unsafe extern "C" fn read_voidstar_binary(
 /// so for `hint = 0` this reduces to the legacy "buffer-relative ->
 /// SHM-relative" add walk, and for `hint > 0` the hint bits cancel
 /// against the consumer's slot in a single pass.
-#[no_mangle]
-pub unsafe extern "C" fn read_voidstar_binary_with_hint(
+pub(crate) unsafe fn read_voidstar_binary_with_hint(
     blob: *const u8,
     blob_size: usize,
     schema: *const CSchema,
@@ -1072,8 +1066,7 @@ pub unsafe extern "C" fn read_voidstar_binary_with_hint(
 /// packet variant (MESG/RPTR, compressed/uncompressed).
 ///
 /// Takes ownership of `data` and frees it on every return path.
-#[no_mangle]
-pub unsafe extern "C" fn try_packet_strict(
+pub(crate) unsafe fn try_packet_strict(
     data: *mut u8,
     data_size: usize,
     schema: *const CSchema,
@@ -1386,8 +1379,7 @@ fn parse_delimited_rows(
 /// and feed the resulting JSON array through `read_json_with_schema`.
 /// See `try_list_with_config` for the underlying implementation that
 /// honors `list.source:` / `list.check.*:` overrides.
-#[no_mangle]
-pub unsafe extern "C" fn try_list(
+pub(crate) unsafe fn try_list(
     data: *mut u8,
     data_size: usize,
     schema: *const CSchema,
@@ -2089,7 +2081,6 @@ unsafe fn arrow_load_json(
     }
 }
 
-#[no_mangle]
 /// The single entry point that loads a morloc data file's bytes into
 /// SHM. Every caller that wants to *use* on-disk bytes as a morloc
 /// value (CLI argument parsing, @load intrinsic, bundle reader,
@@ -2110,7 +2101,7 @@ unsafe fn arrow_load_json(
 /// body and a voidstar format tag. Consumers therefore check the
 /// compression field before reading a payload where it lies, rather
 /// than trusting the format tag alone.
-pub unsafe extern "C" fn load_morloc_data_file(
+pub(crate) unsafe fn load_morloc_data_file(
     path: *const c_char,
     mut data: *mut u8,
     mut data_size: usize,
@@ -2548,14 +2539,23 @@ pub unsafe extern "C" fn load_morloc_data_file(
                 libc::free(json_buf as *mut c_void);
                 return result as *mut c_void;
             }
-            if !err.is_null() { libc::free(err as *mut c_void); err = ptr::null_mut(); }
-            // Fall through to try msgpack
-            // Note: data pointer may have been invalidated by realloc
-            // Use json_buf as the data pointer going forward
+            let json_reason = if err.is_null() {
+                "not a value of the requested type".to_string()
+            } else {
+                take_reason(err).to_string()
+            };
+            err = ptr::null_mut();
+            // realloc may have moved the bytes; json_buf holds them now.
             let mut result: *mut c_void = ptr::null_mut();
             unpack_with_schema(json_buf as *const c_char, data_size, schema, &mut result, &mut err);
             libc::free(json_buf as *mut c_void);
-            if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
+            if !err.is_null() {
+                let msgpack_reason = take_reason(err);
+                set_errmsg(errmsg, &MorlocError::Other(format!(
+                    "the data is neither JSON ({json_reason}) nor MessagePack ({msgpack_reason})"
+                )));
+                return ptr::null_mut();
+            }
             return result;
         }
     }
@@ -2596,7 +2596,7 @@ unsafe fn parse_cli_data_argument_singular(
 /// A stream over this process's stdin that may be closed when done: it reads
 /// a duplicate of fd 0, so closing it leaves fd 0 open. Null on failure.
 unsafe fn open_stdin_stream() -> *mut libc::FILE {
-    let fd = libc::dup(libc::STDIN_FILENO);
+    let fd = morloc_runtime_types::fd::dup(libc::STDIN_FILENO);
     if fd < 0 {
         return ptr::null_mut();
     }
@@ -2665,7 +2665,7 @@ unsafe fn parse_cli_data_argument_classified(
                     return ptr::null_mut();
                 }
             }
-            fd = libc::fopen(effective, b"rb\0".as_ptr() as *const c_char);
+            fd = morloc_runtime_types::fd::fopen(effective, b"rb\0".as_ptr() as *const c_char);
             if fd.is_null() {
                 set_errmsg(errmsg, &MorlocError::Other(
                     format!("The argument '{}' is a filename, but it can't be read",
@@ -2858,8 +2858,7 @@ unsafe fn load_bundle_partial(
 /// string and a literal all resolve -- and the value is written back out as
 /// JSON text for a caller that is assembling a larger value. The returned
 /// string and any error message are malloc'd; the caller frees them.
-#[no_mangle]
-pub unsafe extern "C" fn cli_token_to_json(
+pub(crate) unsafe fn cli_token_to_json(
     token: *const c_char,
     schema_str: *const c_char,
     errmsg: *mut *mut c_char,
@@ -3124,8 +3123,7 @@ unsafe fn parse_cli_data_argument_unrolled(
 ///
 /// The resulting packet wraps a morloc list whose element schema is
 /// `list_schema->parameters[0]`.
-#[no_mangle]
-pub unsafe extern "C" fn parse_cli_data_argument_list(
+pub(crate) unsafe fn parse_cli_data_argument_list(
     mut dest: *mut u8,
     args: *const *const ArgumentT,
     n: usize,
@@ -3276,7 +3274,7 @@ unsafe fn read_path_into_libc(path: *const c_char) -> Result<(*mut u8, usize), S
     if path.is_null() {
         return Err("null path".into());
     }
-    let fd = libc::fopen(path, b"rb\0".as_ptr() as *const c_char);
+    let fd = morloc_runtime_types::fd::fopen(path, b"rb\0".as_ptr() as *const c_char);
     if fd.is_null() {
         return Err(format!(
             "cannot open '{}'",
@@ -3329,7 +3327,7 @@ unsafe fn read_argv_bytes(
             fd
         }
         ArgSource::File => {
-            let fd = libc::fopen(effective, b"rb\0".as_ptr() as *const c_char);
+            let fd = morloc_runtime_types::fd::fopen(effective, b"rb\0".as_ptr() as *const c_char);
             if fd.is_null() {
                 set_errmsg(
                     errmsg,
@@ -3688,8 +3686,7 @@ impl FieldShape {
 ///
 /// `list_config_json` carries the per-element overrides when
 /// `form_code == 3`; null / empty means defaults.
-#[no_mangle]
-pub unsafe extern "C" fn parse_cli_data_argument_shaped(
+pub(crate) unsafe fn parse_cli_data_argument_shaped(
     _dest: *mut u8,
     arg: *const ArgumentT,
     schema: *const CSchema,
@@ -3756,8 +3753,7 @@ pub unsafe extern "C" fn parse_cli_data_argument_shaped(
 
 // ── parse_cli_data_argument ──────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn parse_cli_data_argument(
+pub(crate) unsafe fn parse_cli_data_argument(
     dest: *mut u8,
     arg: *const ArgumentT,
     schema: *const CSchema,
@@ -3839,8 +3835,7 @@ pub unsafe extern "C" fn parse_cli_data_argument(
 /// indexed by entry position (matching `arg->fields[i]`); a field's
 /// shape is "default" when both codes are 0 and the JSON pointer is
 /// NULL, in which case that field falls back to the classifier.
-#[no_mangle]
-pub unsafe extern "C" fn parse_cli_data_argument_group_shaped(
+pub(crate) unsafe fn parse_cli_data_argument_group_shaped(
     dest: *mut u8,
     arg: *const ArgumentT,
     schema: *const CSchema,
@@ -3892,8 +3887,7 @@ pub unsafe extern "C" fn parse_cli_data_argument_group_shaped(
 
 // ── make_call_packet_from_cli ────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn make_call_packet_from_cli(
+pub(crate) unsafe fn make_call_packet_from_cli(
     dest: *mut u8,
     mid: u32,
     args: *mut *mut ArgumentT,   // NULL-terminated
@@ -3958,6 +3952,23 @@ pub unsafe extern "C" fn make_call_packet_from_cli(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_forked_child_leaves_its_parents_spooled_inputs() {
+        let path = std::env::temp_dir().join(format!("morloc-spool-fork-test-{}", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let p = path.to_string_lossy().into_owned();
+        SPOOLED.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock()).push(p.clone());
+        let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            remove_spooled_inputs();
+            true
+        });
+        let survived = path.exists();
+        SPOOLED.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock()).retain(|q| *q != p);
+        let _ = std::fs::remove_file(&path);
+        assert!(ok);
+        assert!(survived, "a forked child removed a file its parent spooled");
+    }
+
     /// A data file whose header says its payload is a shared-memory
     /// reference cannot be loaded: the reference meant something only in
     /// the producing process. The loader must say so instead of reading
@@ -3994,7 +4005,7 @@ mod tests {
             assert!(child >= 0);
             if child == 0 {
                 let mut p = [0 as libc::c_int; 2];
-                libc::pipe(p.as_mut_ptr());
+                morloc_runtime_types::fd::pipe(p.as_mut_ptr());
                 libc::write(p[1], b"[1]".as_ptr() as *const c_void, 3);
                 libc::close(p[1]);
                 libc::dup2(p[0], 0);
@@ -4064,5 +4075,88 @@ mod tests {
         reset_stdin_claim();
         assert!(claim_stdin().is_ok(), "reset releases the claim");
         reset_stdin_claim();
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn initialize_positional(value: *mut c_char) -> *mut ArgumentT {
+        super::initialize_positional(value)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn initialize_unrolled(size: usize, default_value: *mut c_char, fields: *mut *mut c_char, default_fields: *mut *mut c_char) -> *mut ArgumentT {
+        super::initialize_unrolled(size, default_value, fields, default_fields)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn free_argument_t(arg: *mut ArgumentT) {
+        super::free_argument_t(arg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn file_is_stream_packet(path: *const c_char) -> i32 {
+        super::file_is_stream_packet(path)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_voidstar_binary(blob: *const u8, blob_size: usize, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::read_voidstar_binary(blob, blob_size, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_voidstar_binary_with_hint(blob: *const u8, blob_size: usize, schema: *const CSchema, vol_idx_hint: u16, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::read_voidstar_binary_with_hint(blob, blob_size, schema, vol_idx_hint, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn try_packet_strict(data: *mut u8, data_size: usize, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::try_packet_strict(data, data_size, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn try_list(data: *mut u8, data_size: usize, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::try_list(data, data_size, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn load_morloc_data_file(path: *const c_char, data: *mut u8, data_size: usize, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::load_morloc_data_file(path, data, data_size, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn cli_token_to_json(token: *const c_char, schema_str: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::cli_token_to_json(token, schema_str, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn parse_cli_data_argument_list(dest: *mut u8, args: *const *const ArgumentT, n: usize, list_schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::parse_cli_data_argument_list(dest, args, n, list_schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn parse_cli_data_argument_shaped(_dest: *mut u8, arg: *const ArgumentT, schema: *const CSchema, source_code: u8, form_code: u8, list_config_json: *const c_char, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::parse_cli_data_argument_shaped(_dest, arg, schema, source_code, form_code, list_config_json, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn parse_cli_data_argument(dest: *mut u8, arg: *const ArgumentT, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::parse_cli_data_argument(dest, arg, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn parse_cli_data_argument_group_shaped(dest: *mut u8, arg: *const ArgumentT, schema: *const CSchema, source_codes: *const u8, form_codes: *const u8, list_config_jsons: *const *const c_char, n_fields: usize, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::parse_cli_data_argument_group_shaped(dest, arg, schema, source_codes, form_codes, list_config_jsons, n_fields, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_call_packet_from_cli(dest: *mut u8, mid: u32, args: *mut *mut ArgumentT, // NULL-terminated
+    arg_schema_strs: *mut *mut c_char, // NULL-terminated
+    errmsg: *mut *mut c_char) -> *mut u8 {
+        super::make_call_packet_from_cli(dest, mid, args, // NULL-terminated
+    arg_schema_strs, // NULL-terminated
+    errmsg)
     }
 }

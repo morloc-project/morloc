@@ -57,11 +57,10 @@ findFunctorMap lang receiverType =
 resolveInstanceForType
   :: (Lang -> TypeU -> MorlocMonad (Maybe Source))
   -> Lang
-  -> Int                  -- midx, used to recover the source scope
   -> Type
   -> MorlocMonad (Maybe Source)
-resolveInstanceForType perTypeLookup lang midx originalType = do
-  scope <- MM.getGeneralScope midx
+resolveInstanceForType perTypeLookup lang originalType = do
+  scope <- MM.getGeneralScope
   go scope (type2typeu originalType)
   where
     go scope t = do

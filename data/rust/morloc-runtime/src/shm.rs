@@ -4,7 +4,7 @@
 
 use crate::error::MorlocError;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Mutex;
+use crate::fork_policy::Held;
 use morloc_runtime_types::shm_lock::{ShmGuard, ShmLock};
 
 // Wire-format types and constants live in `morloc-runtime-types::shm_types`
@@ -56,7 +56,7 @@ unsafe fn preallocate_fd(fd: i32, size: i64) -> i32 {
 /// requires page-aligned offsets and lengths, and by the stream reader to
 /// hand back pages it has read.
 pub(crate) fn page_size() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    static CACHED: morloc_runtime_types::publish_once::PublishOnce<usize> = morloc_runtime_types::publish_once::PublishOnce::new();
     *CACHED.get_or_init(|| {
         let v = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         if v <= 0 { 4096 } else { v as usize }
@@ -371,7 +371,7 @@ static CURRENT_VOLUME: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomi
 /// total_shm_size, etc) iterate `used` instead and visit only the
 /// active K, not 32 K nulls. Maintained as a no-order Vec; on free
 /// we swap_remove the slot's entry.
-struct VolumeTable {
+pub(crate) struct VolumeTable {
     slots: [SendPtr; MAX_VOLUME_NUMBER],
     used: Vec<u16>,
 }
@@ -386,53 +386,12 @@ impl VolumeTable {
     }
 }
 
-static VOLUMES: Mutex<VolumeTable> = Mutex::new(VolumeTable {
+pub(crate) static VOLUMES: Held<VolumeTable> = Held::new(6, VolumeTable {
     slots: [SendPtr::null(); MAX_VOLUME_NUMBER],
     used: Vec::new(),
 });
 
-static ALLOC_MUTEX: Mutex<()> = Mutex::new(());
-
-/// The allocator's process-local locks, held by the forking thread across a
-/// fork. A child has only that thread, so a lock another thread held at the
-/// fork would stay held in the child forever: its first allocation would
-/// hang. Taken in the order every other path takes them.
-struct AllocForkHeld {
-    _alloc: std::sync::MutexGuard<'static, ()>,
-    _volumes: std::sync::MutexGuard<'static, VolumeTable>,
-    _basename: std::sync::MutexGuard<'static, [u8; MAX_FILENAME_SIZE]>,
-    _fallback: std::sync::MutexGuard<'static, [u8; MAX_FILENAME_SIZE]>,
-}
-
-thread_local! {
-    static ALLOC_FORK_HELD: std::cell::RefCell<Option<AllocForkHeld>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Install the allocator's fork handlers, once. Prepare handlers run in the
-/// reverse of the order they were installed, so these must be installed no
-/// later than any handler whose prepare step allocates (the stream
-/// registry's): that one then runs while the allocator is still free.
-pub(crate) fn register_fork_handlers() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| unsafe {
-        libc::pthread_atfork(Some(alloc_prepare_fork), Some(alloc_after_fork), Some(alloc_after_fork));
-    });
-}
-
-extern "C" fn alloc_prepare_fork() {
-    let held = AllocForkHeld {
-        _alloc: ALLOC_MUTEX.lock().unwrap_or_else(|p| p.into_inner()),
-        _volumes: VOLUMES.lock().unwrap_or_else(|p| p.into_inner()),
-        _basename: COMMON_BASENAME.lock().unwrap_or_else(|p| p.into_inner()),
-        _fallback: FALLBACK_DIR.lock().unwrap_or_else(|p| p.into_inner()),
-    };
-    ALLOC_FORK_HELD.with(|h| *h.borrow_mut() = Some(held));
-}
-
-extern "C" fn alloc_after_fork() {
-    ALLOC_FORK_HELD.with(|h| drop(h.borrow_mut().take()));
-}
+pub(crate) static ALLOC_MUTEX: Held<()> = Held::new(5, ());
 
 /// Reference-count value marking a block whose last reference has been
 /// dropped and whose bytes are being scrubbed. It reads as in-use, so no
@@ -502,16 +461,16 @@ fn pick_free_slot(table: &VolumeTable) -> Option<usize> {
     None
 }
 
-static COMMON_BASENAME: Mutex<[u8; MAX_FILENAME_SIZE]> = Mutex::new([0u8; MAX_FILENAME_SIZE]);
+pub(crate) static COMMON_BASENAME: Held<[u8; MAX_FILENAME_SIZE]> = Held::new(9, [0u8; MAX_FILENAME_SIZE]);
 
-static FALLBACK_DIR: Mutex<[u8; MAX_FILENAME_SIZE]> = Mutex::new([0u8; MAX_FILENAME_SIZE]);
+pub(crate) static FALLBACK_DIR: Held<[u8; MAX_FILENAME_SIZE]> = Held::new(10, [0u8; MAX_FILENAME_SIZE]);
 
 /// Read the common SHM basename set by the first `shinit` call in
 /// this process. Returns an empty string if no `shinit` has been
 /// called yet. Used by callers that need to allocate additional
 /// volumes (e.g. the stream registry) under the same session.
 pub fn get_common_basename() -> String {
-    let cb = COMMON_BASENAME.lock().unwrap();
+    let cb = COMMON_BASENAME.lock();
     get_cstr_buf(&cb).to_string()
 }
 
@@ -524,56 +483,51 @@ static ATEXIT_REGISTERED: AtomicBool = AtomicBool::new(false);
 /// `shclose` doesn't need to know which subsystems are alive.
 pub type ShcloseHook = fn();
 
-static SHCLOSE_HOOKS: Mutex<Vec<ShcloseHook>> = Mutex::new(Vec::new());
+pub(crate) static SHCLOSE_HOOKS: Held<Vec<ShcloseHook>> = Held::new(11, Vec::new());
 
 /// Register a function to run when `shclose` is called. Hooks run in
 /// registration order, before the allocator volumes are unmapped.
 /// Deduped by function-pointer identity, so callers don't need their
 /// own "did I already register" guards.
 pub fn register_shclose_hook(hook: ShcloseHook) {
-    if let Ok(mut hs) = SHCLOSE_HOOKS.lock() {
-        let ptr = hook as usize;
-        if !hs.iter().any(|h| *h as usize == ptr) {
-            hs.push(hook);
-        }
+    let mut hs = SHCLOSE_HOOKS.lock();
+    let ptr = hook as usize;
+    if !hs.iter().any(|h| *h as usize == ptr) {
+        hs.push(hook);
     }
 }
 
 /// Run all registered `shclose` hooks. Blocking `lock`: normal-exit
 /// callers must not silently skip a poisoned mutex.
 fn run_shclose_hooks() {
-    let hooks: Vec<ShcloseHook> = match SHCLOSE_HOOKS.lock() {
-        Ok(hs) => hs.iter().copied().collect(),
-        Err(_) => return,
-    };
+    let hooks: Vec<ShcloseHook> = SHCLOSE_HOOKS.lock().clone();
     for h in hooks {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h()));
+        h();
     }
 }
 
-/// Best-effort variant for the atexit path: `try_lock` so a
-/// panic-poisoned or contended mutex doesn't wedge process shutdown.
+/// Variant for the atexit path: `try_lock` so a contended mutex doesn't
+/// wedge process shutdown.
 fn run_shclose_hooks_atexit() {
     let hooks: Vec<ShcloseHook> = match SHCLOSE_HOOKS.try_lock() {
-        Ok(hs) => hs.iter().copied().collect(),
-        Err(_) => return,
+        Some(hs) => hs.clone(),
+        None => return,
     };
     for h in hooks {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h()));
+        h();
     }
 }
 
-/// atexit callback: unmap the volumes, and remove them if this process owns
-/// the program (see `OWNER_PID`). Catches normal exit() calls that bypass
-/// an explicit shclose. Uses try_lock so a poisoned or held mutex skips the
-/// cleanup instead of panicking inside atexit.
+/// atexit callback: remove the volumes' names if this process owns the
+/// program (see `OWNER_GENERATION`). Catches normal exit() calls that bypass
+/// an explicit shretire. Uses try_lock so a held mutex skips the cleanup
+/// instead of waiting inside atexit.
+// DAEMON-5: names only; the mappings go with the last thread.
 extern "C" fn shclose_atexit() {
-    // Run companion / subsystem hooks first so their teardown sees a
-    // still-live allocator (safe ordering, and required by any hook
-    // that itself performs allocator ops on the way out).
+    EXITING.store(true, Ordering::SeqCst);
     run_shclose_hooks_atexit();
-    if let Ok(mut vols) = VOLUMES.try_lock() {
-        shclose_locked(&mut vols);
+    if let Some(_vols) = VOLUMES.try_lock() {
+        retire_names();
     }
 }
 
@@ -593,7 +547,7 @@ fn get_cstr(buf: &[u8]) -> &str {
 
 /// Set fallback directory for file-backed SHM when /dev/shm is too small.
 pub fn shm_set_fallback_dir(dir: &str) {
-    let mut fb = FALLBACK_DIR.lock().unwrap();
+    let mut fb = FALLBACK_DIR.lock();
     set_cstr(&mut *fb, dir);
 }
 
@@ -601,7 +555,7 @@ pub fn shm_set_fallback_dir(dir: &str) {
 /// Returns `None` if never set or empty. Used by companion-segment
 /// teardown to reach the file-backed path.
 pub fn get_fallback_dir() -> Option<String> {
-    let fb = FALLBACK_DIR.lock().unwrap();
+    let fb = FALLBACK_DIR.lock();
     let s = get_cstr_buf(&fb).to_string();
     if s.is_empty() { None } else { Some(s) }
 }
@@ -650,7 +604,7 @@ pub fn shinit(
     volume_index: usize,
     shm_size: usize,
 ) -> Result<*mut ShmHeader, MorlocError> {
-    register_fork_handlers();
+    crate::stream::registry_reopen();
     if volume_index == 0 || volume_index >= MAX_VOLUME_NUMBER {
         return Err(MorlocError::Shm(format!(
             "shinit: volume index {} is not usable (1..{})", volume_index, MAX_VOLUME_NUMBER
@@ -662,19 +616,19 @@ pub fn shinit(
         unsafe { libc::atexit(shclose_atexit) };
     }
     if get_common_basename() == shm_basename {
-        let mapped = VOLUMES.lock().unwrap().slots[volume_index].ptr();
+        let mapped = VOLUMES.lock().slots[volume_index].ptr();
         if !mapped.is_null() {
             return Ok(mapped);
         }
     }
     {
-        let mut cb = COMMON_BASENAME.lock().unwrap();
+        let mut cb = COMMON_BASENAME.lock();
         set_cstr(&mut *cb, shm_basename);
     }
     let shm_name = volume_name(shm_basename, volume_index);
     if let Some(shm) = create_and_register(&shm_name, volume_index, shm_size)? {
         if volume_index == PRIMARY_VOLUME {
-            OWNER_PID.store(std::process::id(), Ordering::SeqCst);
+            claim_program();
         }
         crate::shm_stats::init()?;
         return Ok(shm);
@@ -697,15 +651,20 @@ fn volume_name(basename: &str, volume_index: usize) -> String {
     format!("{}-{:04x}", basename, volume_index)
 }
 
-/// The process that created the program's primary volume, or 0. Only it
-/// removes volumes: a volume lives as long as the program, since any
+/// The fork generation of the process that created the program's primary
+/// volume, or `u64::MAX` (FORK-14). Only it removes volumes: a volume lives as long as the program, since any
 /// process may hold a pointer into one another process created, and a
 /// removed name can be created again as a different volume under the
 /// same index.
-static OWNER_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static OWNER_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+// FORK-14
+fn claim_program() {
+    OWNER_GENERATION.store(crate::fork_policy::generation(), Ordering::SeqCst);
+}
 
 pub(crate) fn owns_program() -> bool {
-    OWNER_PID.load(Ordering::SeqCst) == std::process::id()
+    OWNER_GENERATION.load(Ordering::SeqCst) == crate::fork_policy::generation()
 }
 
 /// Create volume `name` with `data_size` data bytes, initialise it, and
@@ -765,7 +724,7 @@ unsafe fn init_volume(
 
 fn register_volume(volume_index: usize, shm: *mut ShmHeader, data_size: usize) {
     {
-        let mut vols = VOLUMES.lock().unwrap();
+        let mut vols = VOLUMES.lock();
         vols.slots[volume_index].set(shm, data_size);
         vols.mark_used(volume_index);
     }
@@ -839,13 +798,13 @@ pub fn shopen_diag(
     volume_index: usize,
 ) -> Result<Result<*mut ShmHeader, ShopenMiss>, MorlocError> {
     {
-        let vols = VOLUMES.lock().unwrap();
+        let vols = VOLUMES.lock();
         if !vols.slots[volume_index].is_null() {
             return Ok(Ok(vols.slots[volume_index].ptr()));
         }
     }
     let basename = {
-        let cb = COMMON_BASENAME.lock().unwrap();
+        let cb = COMMON_BASENAME.lock();
         get_cstr_buf(&cb).to_string()
     };
     if basename.is_empty() {
@@ -882,7 +841,7 @@ pub(crate) fn open_segment(name: &str) -> Result<Result<(Fd, usize), ShopenMiss>
     }
     let path = std::ffi::CString::new(fallback_file(&fallback, name))
         .map_err(|_| MorlocError::Shm(format!("segment path for '{}' contains NUL", name)))?;
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR) };
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if fd == -1 {
         return Ok(Err(missing(fallback)));
     }
@@ -973,19 +932,51 @@ fn split_volume_name(name: &str) -> (String, usize) {
 }
 
 /// Unmap every SHM volume, and remove the program's volumes if this process
-/// owns them (see `OWNER_PID`). Runs registered `shclose` hooks
+/// owns them (see `OWNER_GENERATION`). Runs registered `shclose` hooks
 /// first (companion segment teardowns) so callers of `shclose` don't
 /// have to know which subsystems are alive. The allocator is then back in
 /// its pre-`shinit` state: allocating fails until `shinit` runs again,
 /// rather than growing a volume that no owner would ever remove.
 pub fn shclose() -> Result<(), MorlocError> {
     run_shclose_hooks();
-    let _lock = ALLOC_MUTEX.lock().unwrap();
-    let mut vols = VOLUMES.lock().unwrap();
+    let _lock = ALLOC_MUTEX.lock();
+    let mut vols = VOLUMES.lock();
     shclose_locked(&mut vols);
     CURRENT_VOLUME.store(0, Ordering::Release);
-    COMMON_BASENAME.lock().unwrap().fill(0);
+    COMMON_BASENAME.lock().fill(0);
     Ok(())
+}
+
+// DAEMON-5: set when the process starts to exit; teardown hooks then remove
+// names and keep their mappings.
+static EXITING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn exiting() -> bool {
+    EXITING.load(Ordering::SeqCst)
+}
+
+// DAEMON-5
+pub fn shretire() -> Result<(), MorlocError> {
+    EXITING.store(true, Ordering::SeqCst);
+    run_shclose_hooks();
+    let _lock = ALLOC_MUTEX.lock();
+    let vols = VOLUMES.lock();
+    retire_names();
+    drop(vols);
+    COMMON_BASENAME.lock().fill(0);
+    Ok(())
+}
+
+fn retire_names() {
+    if owns_program() {
+        if let Some(cb) = COMMON_BASENAME.try_lock() {
+            let basename = get_cstr_buf(&cb).to_string();
+            drop(cb);
+            let fallback = FALLBACK_DIR.try_lock().map(|fb| get_cstr_buf(&fb).to_string()).unwrap_or_default();
+            remove_program_volumes(&basename, &fallback);
+        }
+        OWNER_GENERATION.store(u64::MAX, Ordering::SeqCst);
+    }
 }
 
 /// Drop every SHM volume currently held by this process as `shclose` does,
@@ -1003,11 +994,11 @@ pub fn shclose() -> Result<(), MorlocError> {
 /// "address not inside any mapped volume" guard added to `shfree` and
 /// no-op rather than segfault.
 pub fn reset_all() -> Result<(), MorlocError> {
-    let _lock = ALLOC_MUTEX.lock().unwrap();
-    let mut vols = VOLUMES.lock().unwrap();
+    let _lock = ALLOC_MUTEX.lock();
+    let mut vols = VOLUMES.lock();
     shclose_locked(&mut vols);
     CURRENT_VOLUME.store(0, std::sync::atomic::Ordering::Release);
-    let mut cb = COMMON_BASENAME.lock().unwrap();
+    let mut cb = COMMON_BASENAME.lock();
     for b in cb.iter_mut() {
         *b = 0;
     }
@@ -1028,7 +1019,7 @@ pub fn live_block_stats(hist: &mut [usize]) -> (usize, usize) {
     let hdr_size = std::mem::size_of::<BlockHeader>();
     let mut blocks = 0usize;
     let mut bytes = 0usize;
-    let vols = VOLUMES.lock().unwrap();
+    let vols = VOLUMES.lock();
     for &slot_idx in &vols.used {
         let slot = vols.slots[slot_idx as usize];
         if slot.is_null() {
@@ -1068,8 +1059,11 @@ pub fn live_block_stats(hist: &mut [usize]) -> (usize, usize) {
 /// stale pointer after `reset_all` (e.g. a worker that was holding an
 /// SHM ptr when its request was failed by the recovery quiesce).
 fn ptr_is_in_any_volume(ptr: AbsPtr) -> bool {
+    ptr_in_volumes(&VOLUMES.lock(), ptr)
+}
+
+fn ptr_in_volumes(vols: &VolumeTable, ptr: AbsPtr) -> bool {
     let p = ptr as usize;
-    let vols = VOLUMES.lock().unwrap();
     for &slot_idx in &vols.used {
         let slot = vols.slots[slot_idx as usize];
         if slot.is_null() {
@@ -1109,15 +1103,7 @@ fn shclose_locked(vols: &mut VolumeTable) {
         }
         vols.slots[i] = SendPtr::null();
     }
-    if owns_program() {
-        if let Ok(cb) = COMMON_BASENAME.try_lock() {
-            let basename = get_cstr_buf(&cb).to_string();
-            drop(cb);
-            let fallback = FALLBACK_DIR.try_lock().map(|fb| get_cstr_buf(&fb).to_string()).unwrap_or_default();
-            remove_program_volumes(&basename, &fallback);
-        }
-        OWNER_PID.store(0, Ordering::SeqCst);
-    }
+    retire_names();
 }
 
 /// Remove every volume named for `basename`, whichever process created it:
@@ -1179,12 +1165,88 @@ fn remove_program_volumes(basename: &str, fallback: &str) {
 /// in the per-eval arena (which auto-shfrees at scope drop). The arena
 /// hook fires here unconditionally on success; callers outside the arena
 /// see no behavioral difference.
+// SHM-8: the references this process holds, net of those it has handed on.
+static HELD_REFERENCES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+pub fn held_references() -> i64 {
+    HELD_REFERENCES.load(Ordering::Relaxed)
+}
+
+// SHM-8: a reference leaves this process (a donation, a registry slot).
+pub(crate) fn hand_on_reference() {
+    HELD_REFERENCES.fetch_sub(1, Ordering::Relaxed);
+}
+
+// SHM-8: a reference arrives in this process (a reply, a block out of a slot).
+pub(crate) fn take_on_reference() {
+    HELD_REFERENCES.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn hand_on_references(n: usize) {
+    HELD_REFERENCES.fetch_sub(n as i64, Ordering::Relaxed);
+}
+
+// FORK-15: a reference taken by the fork handler, which holds the volume
+// table; `ptr` names a block some view holds a reference on.
+pub(crate) unsafe fn incref_held(vols: &VolumeTable, ptr: AbsPtr) -> bool {
+    if !ptr_in_volumes(vols, ptr) {
+        return false;
+    }
+    let blk = &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader);
+    if blk.magic != BLK_MAGIC {
+        return false;
+    }
+    loop {
+        let cur = blk.reference_count.load(Ordering::Acquire);
+        if cur == 0 || cur == TEARING_DOWN {
+            return false;
+        }
+        if blk
+            .reference_count
+            .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            take_on_reference();
+            return true;
+        }
+    }
+}
+
+// SHM-8: release a block no process counts. No eval arena tracks it, so
+// none is consulted.
+pub(crate) fn free_uncounted(abs: AbsPtr) {
+    take_on_reference();
+    let _lock = ALLOC_MUTEX.lock();
+    if ptr_is_in_any_volume(abs) {
+        let _ = shfree_unlocked(abs);
+    }
+}
+
+// FORK-1: a child holds none of its parent's references.
+pub(crate) fn forget_held_references() {
+    HELD_REFERENCES.store(0, Ordering::Relaxed);
+}
+
+pub(crate) fn morloc_held_references() -> i64 {
+    held_references()
+}
+
 pub fn shmalloc(size: usize) -> Result<AbsPtr, MorlocError> {
     let size = if size == 0 { BLOCK_ALIGN } else { align_up(size, BLOCK_ALIGN) };
-    let ptr = {
-        let _lock = ALLOC_MUTEX.lock().unwrap();
-        shmalloc_unlocked(size)?
+    let first = {
+        let _lock = ALLOC_MUTEX.lock();
+        shmalloc_unlocked(size)
     };
+    let ptr = match first {
+        Ok(p) => p,
+        // FORK-15: blocks only gone children still lease may be released.
+        Err(e) if crate::lease::any_created() && crate::lease::reclaim() > 0 => {
+            let _lock = ALLOC_MUTEX.lock();
+            shmalloc_unlocked(size).map_err(|_| e)?
+        }
+        Err(e) => return Err(e),
+    };
+    take_on_reference();
     crate::eval_arena::record_if_active(ptr);
     Ok(ptr)
 }
@@ -1204,7 +1266,9 @@ pub unsafe fn shmemcpy(src: *const u8, size: usize) -> Result<AbsPtr, MorlocErro
 
 /// Allocate and zero-fill.
 pub fn shcalloc(nmemb: usize, size: usize) -> Result<AbsPtr, MorlocError> {
-    let total = nmemb * size;
+    let total = nmemb.checked_mul(size).ok_or_else(|| {
+        MorlocError::Shm(format!("shcalloc: {nmemb} elements of {size} bytes overflows"))
+    })?;
     let ptr = shmalloc(total)?;
     // SAFETY: ptr is a freshly allocated SHM block of `total` bytes.
     unsafe { std::ptr::write_bytes(ptr, 0, total) };
@@ -1217,7 +1281,7 @@ pub fn shfree(ptr: AbsPtr) -> Result<(), MorlocError> {
     // guard-drop won't attempt a second free. No-op if no arena is active
     // or if `ptr` was never tracked.
     crate::eval_arena::forget_if_active(ptr);
-    let _lock = ALLOC_MUTEX.lock().unwrap();
+    let _lock = ALLOC_MUTEX.lock();
     // Pool-crash recovery: if `reset_all` has unmapped every volume since
     // this caller obtained `ptr`, dereferencing the (now-unmapped) header
     // would segfault. The recovery sequence is responsible for getting all
@@ -1281,6 +1345,7 @@ pub unsafe fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
             .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
+            take_on_reference();
             return Ok(());
         }
     }
@@ -1393,7 +1458,7 @@ pub fn rel2abs_extent(ptr: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError>
     // Not published: look the slot up under the lock (it may be mapped but
     // not yet published), then drop the lock before computing the address.
     let slot = {
-        let vols = VOLUMES.lock().unwrap();
+        let vols = VOLUMES.lock();
         vols.slots[vol_idx]
     };
     if !slot.is_null() {
@@ -1421,7 +1486,7 @@ pub fn rel2abs_extent(ptr: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError>
         Err(miss) => return Err(rel2abs_miss_error(ptr, vol_idx, 0, miss)),
     };
     let slot = {
-        let vols = VOLUMES.lock().unwrap();
+        let vols = VOLUMES.lock();
         vols.slots[vol_idx]
     };
     if slot.is_null() {
@@ -1464,7 +1529,7 @@ fn rel2abs_miss_error(
     miss: ShopenMiss,
 ) -> MorlocError {
     let basename_now = {
-        let cb = COMMON_BASENAME.lock().unwrap();
+        let cb = COMMON_BASENAME.lock();
         get_cstr_buf(&cb).to_string()
     };
     let offset = relptr_offset(ptr);
@@ -1521,7 +1586,7 @@ fn rel2abs_miss_error(
 /// (the packed list of K active slot indices) rather than scanning the
 /// 32 768-slot sparse `slots` array. Cost is O(K_active).
 pub fn abs2rel(ptr: AbsPtr) -> Result<RelPtr, MorlocError> {
-    let vols = VOLUMES.lock().unwrap();
+    let vols = VOLUMES.lock();
     for &slot_idx in &vols.used {
         let i = slot_idx as usize;
         let slot = vols.slots[i];
@@ -1551,7 +1616,7 @@ pub fn abs2rel(ptr: AbsPtr) -> Result<RelPtr, MorlocError> {
 
 /// Find the ShmHeader for a given absolute pointer.
 pub fn abs2shm(ptr: AbsPtr) -> Result<*mut ShmHeader, MorlocError> {
-    let vols = VOLUMES.lock().unwrap();
+    let vols = VOLUMES.lock();
     for &slot_idx in &vols.used {
         let slot = vols.slots[slot_idx as usize];
         if slot.is_null() {
@@ -1586,7 +1651,7 @@ pub fn abs2shm(ptr: AbsPtr) -> Result<*mut ShmHeader, MorlocError> {
 pub fn total_shm_size() -> usize {
     let mut total = 0;
     {
-        let vols = VOLUMES.lock().unwrap();
+        let vols = VOLUMES.lock();
         for &slot_idx in &vols.used {
             let slot = vols.slots[slot_idx as usize];
             if !slot.is_null() {
@@ -1643,7 +1708,40 @@ impl Drop for Fd {
 /// creator contends for the one namespace and at most one wins. Without a
 /// usable tmpfs, the fallback file is the only namespace and is created
 /// exclusively.
+// DAEMON-5: set once teardown begins, before its sweep of recorded segments.
+static SEGMENTS_CLOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn morloc_refuse_new_segments() {
+    SEGMENTS_CLOSED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn segments_closed() -> MorlocError {
+    MorlocError::Shm("the process is shutting down; no shared memory can be made".into())
+}
+
+// DAEMON-5: a segment made as teardown began is removed here; one made
+// before is recorded by then, so the teardown's sweep removes it.
 pub(crate) fn create_segment(name: &str, full_size: usize) -> Result<Option<Segment>, MorlocError> {
+    use std::sync::atomic::Ordering;
+    if SEGMENTS_CLOSED.load(Ordering::SeqCst) {
+        return Err(segments_closed());
+    }
+    let made = make_segment(name, full_size)?;
+    if let (Some(seg), true) = (&made, SEGMENTS_CLOSED.load(Ordering::SeqCst)) {
+        // SAFETY: DAEMON-5: the mapping was made just now and handed to no one.
+        unsafe { libc::munmap(seg.ptr as *mut libc::c_void, seg.len) };
+        if let Ok(c) = std::ffi::CString::new(name) {
+            unlink_segment(&c);
+        }
+        if seg.label != name {
+            let _ = std::fs::remove_file(&seg.label);
+        }
+        return Err(segments_closed());
+    }
+    Ok(made)
+}
+
+fn make_segment(name: &str, full_size: usize) -> Result<Option<Segment>, MorlocError> {
     let name_cstr = std::ffi::CString::new(name)
         .map_err(|_| MorlocError::Shm(format!("volume name '{}' contains NUL", name)))?;
     // Record the object before making it, so no object exists unrecorded. A
@@ -1760,7 +1858,7 @@ fn create_file_segment(name: &str, full_size: usize, why: &str) -> Result<Option
     let path_cstr = std::ffi::CString::new(file_path.as_str())
         .map_err(|_| MorlocError::Shm(format!("volume path '{}' contains NUL", file_path)))?;
     let fd = unsafe {
-        libc::open(path_cstr.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o666)
+        libc::open(path_cstr.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC, 0o666)
     };
     if fd == -1 {
         let e = std::io::Error::last_os_error();
@@ -1818,11 +1916,41 @@ fn create_file_segment(name: &str, full_size: usize, why: &str) -> Result<Option
     }
 }
 
+pub const POISON_BYTE: u8 = 0xDB;
+
+static POISON: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Whether released blocks are filled with `POISON_BYTE` instead of zeros
+/// (`MORLOC_SHM_POISON=1`), so a reader of freed memory sees a recognisable
+/// pattern. Allocation then zeroes what it hands out.
+pub fn poison_on_free() -> bool {
+    match POISON.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = std::env::var("MORLOC_SHM_POISON").is_ok_and(|v| v == "1");
+            POISON.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_poison_on_free(on: bool) {
+    POISON.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+}
+
 fn shmalloc_unlocked(size: usize) -> Result<AbsPtr, MorlocError> {
     let blk = find_free_block(size)?;
     // SAFETY: blk is a claimed BlockHeader in mapped SHM; its data starts
     // immediately after the header.
-    unsafe { Ok((blk as *mut u8).add(std::mem::size_of::<BlockHeader>())) }
+    unsafe {
+        let data = (blk as *mut u8).add(std::mem::size_of::<BlockHeader>());
+        if poison_on_free() {
+            std::ptr::write_bytes(data, 0, (*blk).size);
+        }
+        Ok(data)
+    }
 }
 
 fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
@@ -1875,13 +2003,15 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
         {
             continue;
         }
+        hand_on_reference();
         if next == TEARING_DOWN {
             // SAFETY: ptr points to blk.size bytes of SHM data. This process
             // held the last reference and has replaced it with a value that
             // reads as in-use, so the block cannot be handed to anyone until
             // the store below.
+            let scrub = if poison_on_free() { POISON_BYTE } else { 0 };
             unsafe {
-                std::ptr::write_bytes(ptr, 0, blk.size);
+                std::ptr::write_bytes(ptr, scrub, blk.size);
             }
             crate::shm_stats::on_release(blk.size);
             blk.reference_count.store(0, Ordering::Release);
@@ -1892,7 +2022,7 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
 
 fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
     let cv = CURRENT_VOLUME.load(Ordering::Relaxed);
-    let vols = VOLUMES.lock().unwrap();
+    let vols = VOLUMES.lock();
 
     // Try current volume first (allocation hint).
     let shm = vols.slots[cv].ptr();
@@ -1938,7 +2068,7 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
 
     drop(vols);
     let basename = {
-        let cb = COMMON_BASENAME.lock().unwrap();
+        let cb = COMMON_BASENAME.lock();
         get_cstr_buf(&cb).to_string()
     };
     // No program to grow: shared memory is not initialised, or was closed.
@@ -1955,7 +2085,7 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
     // search moves on.
     const ATTEMPTS: usize = 16;
     for _ in 0..ATTEMPTS {
-        let picked = pick_free_slot(&VOLUMES.lock().unwrap());
+        let picked = pick_free_slot(&VOLUMES.lock());
         let Some(idx) = picked else {
             return Err(MorlocError::Shm(format!(
                 "Could not find suitable block for {} bytes: all {} \
@@ -2027,7 +2157,9 @@ fn find_free_block_in_volume(
             .add(std::mem::size_of::<ShmHeader>())
             .add((*shm).volume_size);
 
-        let held = (*shm).lock.lock()?;
+        let Some(held) = (*shm).lock.lock_live()? else {
+            return Ok(None);
+        };
 
         let cursor = (*shm).cursor;
         let found = 'found: {
@@ -2035,7 +2167,7 @@ fn find_free_block_in_volume(
             if cursor != VOLNULL {
                 let blk = vol2abs_raw(cursor, shm) as *mut BlockHeader;
                 if (*blk).magic == BLK_MAGIC
-                    && (*blk).reference_count.load(Ordering::Relaxed) == 0
+                    && (*blk).reference_count.load(Ordering::Acquire) == 0
                     && (*blk).size >= size
                 {
                     break 'found Some(blk);
@@ -2063,13 +2195,15 @@ fn find_free_block_in_volume(
             None
         };
 
-        match found {
+        let claimed = match found {
             Some(blk) => {
                 split_block(&held, shm, blk, size)?;
-                claim(&held, blk).map(Some)
+                Some(claim(&held, blk)?)
             }
-            None => Ok(None),
-        }
+            None => None,
+        };
+        held.release();
+        Ok(claimed)
     }
 }
 
@@ -2090,14 +2224,14 @@ unsafe fn scan_volume(
         }
 
         // Merge adjacent free blocks
-        while (*blk).reference_count.load(Ordering::Relaxed) == 0 {
+        while (*blk).reference_count.load(Ordering::Acquire) == 0 {
             let next = (blk as *mut u8).add(hdr_size + (*blk).size) as *mut BlockHeader;
             // The whole header must lie inside the region: starting inside it
             // is not enough, since the next thing done is a 16-byte read.
             if (next as *const u8) >= end
                 || (end as usize) - (next as usize) < hdr_size
                 || (*next).magic != BLK_MAGIC
-                || (*next).reference_count.load(Ordering::Relaxed) != 0
+                || (*next).reference_count.load(Ordering::Acquire) != 0
             {
                 break;
             }
@@ -2111,7 +2245,7 @@ unsafe fn scan_volume(
             (*blk).size += hdr_size + next_size;
         }
 
-        if (*blk).reference_count.load(Ordering::Relaxed) == 0 && (*blk).size >= size {
+        if (*blk).reference_count.load(Ordering::Acquire) == 0 && (*blk).size >= size {
             return Some(blk);
         }
 
@@ -2201,7 +2335,54 @@ pub unsafe fn vol2abs(ptr: VolPtr, shm: *const ShmHeader) -> AbsPtr {
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+mod poison_tests {
+    use super::*;
+
+    #[test]
+    fn a_released_block_reads_as_poison_and_a_new_one_as_zero() {
+        let _shm = crate::own_test_registry();
+        set_poison_on_free(true);
+        let p = shmalloc(256).unwrap();
+        unsafe { std::ptr::write_bytes(p, 7, 256) };
+        let freed = unsafe { std::slice::from_raw_parts(p, 256).to_vec() };
+        shfree(p).unwrap();
+        let after = unsafe { std::slice::from_raw_parts(p, 256).to_vec() };
+        let q = shmalloc(256).unwrap();
+        let fresh = unsafe { std::slice::from_raw_parts(q, 256).to_vec() };
+        shfree(q).unwrap();
+        set_poison_on_free(false);
+        assert!(freed.iter().all(|&b| b == 7));
+        assert!(after.iter().all(|&b| b == POISON_BYTE), "a released block was not poisoned");
+        assert!(fresh.iter().all(|&b| b == 0), "a newly allocated block was not zeroed");
+    }
+}
+
+#[cfg(test)]
+mod calloc_tests {
+    #[test]
+    fn a_size_that_overflows_is_refused() {
+        let _shm = crate::init_test_shm();
+        assert!(super::shcalloc(usize::MAX / 2 + 1, 2).is_err());
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    #[test]
+    fn a_process_counts_the_references_it_holds() {
+        let _shm = crate::own_test_registry();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let start = super::held_references() == 0;
+            let p = super::shmalloc(32).unwrap();
+            let one = super::held_references() == 1;
+            unsafe { super::shincref(p) }.unwrap();
+            let two = super::held_references() == 2;
+            super::shfree(p).unwrap();
+            super::shfree(p).unwrap();
+            start && one && two && super::held_references() == 0
+        }));
+    }
+
     use super::*;
 
     // Processes allocating from one volume at once must never be handed the
@@ -2461,6 +2642,28 @@ mod tests {
     // Allocating with no shared memory initialised fails: growing would
     // otherwise make a volume named for no program, which nothing removes.
     #[test]
+    fn retiring_at_exit_leaves_memory_readable_to_threads_still_running() {
+        let _shm = crate::own_test_registry();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let Ok(p) = shmalloc(64) else { return false };
+            unsafe { *(p as *mut u64) = 0x5eed };
+            if shretire().is_err() {
+                return false;
+            }
+            unsafe { *(p as *const u64) == 0x5eed }
+        }));
+    }
+
+    #[test]
+    fn no_segment_is_made_once_teardown_begins() {
+        let _shm = crate::own_test_registry();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            morloc_refuse_new_segments();
+            create_segment("/mlc-refused-segment-test", 1 << 16).is_err()
+        }));
+    }
+
+    #[test]
     fn allocating_after_close_fails_without_making_a_volume() {
         let _arena = crate::own_test_shm();
         shclose().unwrap();
@@ -2476,6 +2679,29 @@ mod tests {
             unsafe { libc::shm_unlink(c.as_ptr()) };
         }
         assert!(got.is_err(), "an allocation with no shared memory initialised succeeded");
+    }
+
+    #[test]
+    fn a_volume_whose_lock_holder_died_does_not_stop_allocation() {
+        let _arena = crate::own_test_shm();
+        shclose().unwrap();
+        let basename = format!("/morloc-{}-test-poison", std::process::id());
+        let shm = shinit(&basename, PRIMARY_VOLUME, 0x10000).unwrap();
+        unsafe {
+            let holder = libc::fork();
+            assert!(holder >= 0);
+            if holder == 0 {
+                std::mem::forget((*shm).lock.lock());
+                libc::_exit(0);
+            }
+            libc::waitpid(holder, std::ptr::null_mut(), 0);
+        }
+        let got = shmalloc(64);
+        if let Ok(p) = got {
+            let _ = shfree(p);
+        }
+        shclose().unwrap();
+        assert!(got.is_ok(), "one dead process stopped all allocation: {:?}", got.err());
     }
 
     // A fork while another thread is inside the allocator hands the child a
@@ -2771,7 +2997,7 @@ mod tests {
             allocs.push(p);
         }
         // Confirm we actually exercised the multi-volume path.
-        let used_count = VOLUMES.lock().unwrap().used.len();
+        let used_count = VOLUMES.lock().used.len();
         assert!(
             used_count >= 2,
             "expected at least 2 volumes after 128 allocs of 2 KiB, got {}",
@@ -2872,5 +3098,28 @@ mod tests {
         }
         shfree(p).unwrap();
         shclose().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_descendant_with_its_ancestors_pid_does_not_own_the_program() {
+        let ran = crate::fork_policy::as_pid_one(|| {
+            claim_program();
+            crate::fork_policy::in_a_descendant_with_the_same_pid(|| !owns_program()) && owns_program()
+        });
+        assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid owned the program");
+    }
+}
+
+mod c_abi {
+
+    #[no_mangle]
+    pub extern "C" fn morloc_held_references() -> i64 {
+        super::morloc_held_references()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_refuse_new_segments() {
+        super::morloc_refuse_new_segments()
     }
 }

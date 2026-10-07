@@ -1,0 +1,48 @@
+--' A type name denotes the declaration in scope where it is written. The
+--' library's signatures name `Batch`, `P`, `Color`, `Shape` and `Tree`,
+--' which this module never imports, and this module declares different
+--' types of those names. Both declarations of each pass through one C++
+--' pool and one Rust pool, where each is a distinct generated type.
+module main (total, viaSink, field, own, both, colors, shapes, trees)
+
+import root-py
+import root-cpp
+import root-rust
+import .lib (mk, withSink, mkP, getx, red, circle, leafy, rank, area, isLeaf)
+
+record P where
+  z :: Str
+record Py => P = "dict"
+record Cpp => P = "struct"
+
+data Color = Cyan | Magenta | Yellow
+data Shape = Tri Int Int
+data Tree = Tip | Fork Tree Tree
+
+source Py from "main.py" ("mkz")
+
+mkz :: Str -> P
+
+total :: Int -> Int
+total n = sum (mk n)
+
+viaSink :: Int -> Int
+viaSink n = withSink n sum
+
+field :: Int -> Int
+field n = .y (idcpp (mkP n)) + getx (mkP n)
+
+own :: Str -> Str
+own s = .z (idcpp (mkz s))
+
+both :: Int -> Str -> (P, Int)
+both n s = (idcpp (mkz s), getx (idcpp (mkP n)))
+
+colors :: Int -> ([Color], [Int])
+colors n = ([idcpp Magenta, idrust Yellow], [rank (idcpp (red n)), rank (idrust (red n))])
+
+shapes :: Int -> Real -> ([Shape], [Real])
+shapes n r = ([idcpp (Tri n n), idrust (Tri n n)], [area (idcpp (circle r)), area (idrust (circle r))])
+
+trees :: Int -> ([Tree], [Bool])
+trees n = ([idcpp (Fork Tip Tip), idrust (Fork Tip (Fork Tip Tip))], [isLeaf (idcpp (leafy n)), isLeaf (idrust (leafy n))])

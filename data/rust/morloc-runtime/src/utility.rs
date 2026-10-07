@@ -95,8 +95,7 @@ pub unsafe fn set_nosigpipe(fd: i32) {
 
 // ── File operations ────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn file_exists(filename: *const c_char) -> bool {
+pub(crate) unsafe fn file_exists(filename: *const c_char) -> bool {
     if filename.is_null() {
         return false;
     }
@@ -104,8 +103,7 @@ pub unsafe extern "C" fn file_exists(filename: *const c_char) -> bool {
     std::path::Path::new(path.as_ref()).exists()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn mkdir_p(path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
+pub(crate) unsafe fn mkdir_p(path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
     clear_errmsg(errmsg);
     if path.is_null() {
         set_errmsg(errmsg, &MorlocError::Other("NULL path".into()));
@@ -124,8 +122,7 @@ pub unsafe extern "C" fn mkdir_p(path: *const c_char, errmsg: *mut *mut c_char) 
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn delete_directory(path: *const c_char) {
+pub(crate) unsafe fn delete_directory(path: *const c_char) {
     if path.is_null() {
         return;
     }
@@ -133,8 +130,7 @@ pub unsafe extern "C" fn delete_directory(path: *const c_char) {
     let _ = std::fs::remove_dir_all(p.as_ref());
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn has_suffix(x: *const c_char, suffix: *const c_char) -> bool {
+pub(crate) unsafe fn has_suffix(x: *const c_char, suffix: *const c_char) -> bool {
     if x.is_null() || suffix.is_null() {
         return false;
     }
@@ -192,27 +188,22 @@ impl AtomicFile {
     /// permissions are carried over, so replacing a file does not
     /// silently widen or narrow who can read it.
     pub fn create(dest: &std::path::Path) -> std::io::Result<Self> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = dest.parent().unwrap_or(std::path::Path::new("."));
-        let basename = dest
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| String::from("out"));
-        let tmp = dir.join(format!(
-            ".{}.tmp.{}.{}",
-            basename,
-            std::process::id(),
-            seq
-        ));
-        let file = std::fs::File::create(&tmp)?;
-        if let Ok(meta) = std::fs::metadata(dest) {
+        use std::os::unix::io::FromRawFd;
+        // A symbolic link stays a link: the file it names is replaced.
+        let dest = match std::fs::symlink_metadata(dest) {
+            Ok(m) if m.file_type().is_symlink() => {
+                std::fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf())
+            }
+            _ => dest.to_path_buf(),
+        };
+        let (tmp, fd) = create_beside(&dest, 0o666)?;
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        if let Ok(meta) = std::fs::metadata(&dest) {
             use std::os::unix::fs::PermissionsExt;
             let mode = meta.permissions().mode() & 0o7777;
             let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
         }
-        Ok(AtomicFile { tmp, dest: dest.to_path_buf(), file: Some(file) })
+        Ok(AtomicFile { tmp, dest, file: Some(file) })
     }
 
     /// The descriptor being built. Valid until `commit`.
@@ -228,9 +219,15 @@ impl AtomicFile {
     /// Flush the content to disk and move it onto the destination.
     pub fn commit(mut self) -> std::io::Result<()> {
         let file = self.file.take().expect("AtomicFile committed twice");
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&self.tmp, &self.dest)?;
+        let replaced = file.sync_all().and_then(|()| {
+            drop(file);
+            let guard = ReplaceGuard::take(&self.dest)?;
+            std::fs::rename(&self.tmp, &self.dest).map(|()| drop(guard))
+        });
+        if let Err(e) = replaced {
+            let _ = std::fs::remove_file(&self.tmp);
+            return Err(e);
+        }
         let dir = self.dest.parent().unwrap_or(std::path::Path::new("."));
         if let Ok(dir_f) = std::fs::File::open(dir) {
             let _ = dir_f.sync_all();
@@ -249,6 +246,102 @@ impl Drop for AtomicFile {
     }
 }
 
+/// Create a new file beside `target`, named `.<basename>.tmp.<pid>.<seq>`,
+/// to be renamed onto it. Every staging file of the process draws from one
+/// counter and is created exclusively, so two never share a file, nor take
+/// over one a crashed process left behind under a reused pid.
+pub fn create_beside(
+    target: &std::path::Path,
+    mode: libc::mode_t,
+) -> std::io::Result<(std::path::PathBuf, libc::c_int)> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = target.parent().unwrap_or(std::path::Path::new("."));
+    let basename = target
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("out"));
+    loop {
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = dir.join(format!(".{}.tmp.{}.{}", basename, std::process::id(), seq));
+        let c_tmp = std::ffi::CString::new(tmp.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let fd = unsafe {
+            libc::open(c_tmp.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC, mode as libc::c_uint)
+        };
+        if fd >= 0 {
+            return Ok((tmp, fd));
+        }
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EEXIST) {
+            return Err(e);
+        }
+    }
+}
+
+/// The lock of a file about to be replaced, held exclusively across the
+/// rename: a rename cannot check what it displaces, so whoever renames over a
+/// file must hold its lock. A stream writing the file holds that lock too,
+/// and replacing the file under it would leave the writer writing into a file
+/// nobody can reach. Replacements of one path (stores of one cache entry,
+/// say) therefore take turns: one finding the lock held waits, within
+/// `REPLACE_WAIT`, since a replacement holds it only across a rename. A
+/// stream holds it for as long as it writes, so the wait runs out and the
+/// replacement is refused.
+pub struct ReplaceGuard {
+    fd: Option<libc::c_int>,
+}
+
+const REPLACE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl ReplaceGuard {
+    pub fn take(dest: &std::path::Path) -> std::io::Result<Self> {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(dest.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let deadline = std::time::Instant::now() + REPLACE_WAIT;
+        // Retry until the locked file is still the one `dest` names, so the
+        // lock covers the file the rename replaces.
+        loop {
+            let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if fd < 0 {
+                let e = std::io::Error::last_os_error();
+                // Nothing there yet: no stream can be writing it.
+                if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) {
+                    return Ok(ReplaceGuard { fd: None });
+                }
+                return Err(e);
+            }
+            let refused = match crate::stream::lock_stream_file(fd) {
+                Err(why) => {
+                    unsafe { libc::close(fd); }
+                    format!("'{}' is open for writing as a stream: {}", dest.display(), why)
+                }
+                Ok(()) if crate::stream::path_names(&c_path, fd) => {
+                    return Ok(ReplaceGuard { fd: Some(fd) });
+                }
+                Ok(()) => {
+                    crate::stream::unlock_and_close(fd);
+                    format!("'{}' kept being replaced while it was locked", dest.display())
+                }
+            };
+            if std::time::Instant::now() >= deadline {
+                return Err(std::io::Error::new(std::io::ErrorKind::ResourceBusy, refused));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
+impl Drop for ReplaceGuard {
+    fn drop(&mut self) {
+        if let Some(fd) = self.fd.take() {
+            crate::stream::unlock_and_close(fd);
+        }
+    }
+}
+
 /// Rust-friendly entry point shared by every in-crate caller.
 pub fn write_atomic_path(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut staged = AtomicFile::create(path)?;
@@ -258,8 +351,7 @@ pub fn write_atomic_path(path: &std::path::Path, bytes: &[u8]) -> std::io::Resul
     staged.commit()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn write_atomic(
+pub(crate) unsafe fn write_atomic(
     filename: *const c_char,
     data: *const u8,
     size: usize,
@@ -288,8 +380,7 @@ pub unsafe extern "C" fn write_atomic(
 
 // ── Binary I/O ─────────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn read_binary_file(
+pub(crate) unsafe fn read_binary_file(
     filename: *const c_char,
     file_size: *mut usize,
     errmsg: *mut *mut c_char,
@@ -318,8 +409,7 @@ pub unsafe extern "C" fn read_binary_file(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn read_binary_fd(
+pub(crate) unsafe fn read_binary_fd(
     file: *mut libc::FILE,
     file_size: *mut usize,
     errmsg: *mut *mut c_char,
@@ -379,31 +469,46 @@ pub unsafe extern "C" fn read_binary_fd(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn write_binary_fd(
+/// Write all of `bytes` to `fd`, retrying interrupted and partial writes.
+pub fn write_all_to_fd(fd: i32, bytes: &[u8]) -> Result<(), MorlocError> {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let n = unsafe { libc::write(fd, rest.as_ptr() as *const c_void, rest.len()) };
+        if n > 0 {
+            rest = &rest[n as usize..];
+            continue;
+        }
+        let e = std::io::Error::last_os_error();
+        match (n, e.kind()) {
+            (0, _) => return Err(MorlocError::Other("write failed: wrote nothing".into())),
+            (_, std::io::ErrorKind::Interrupted) => continue,
+            (_, std::io::ErrorKind::BrokenPipe) => return Err(MorlocError::PipeClosed),
+            _ => return Err(MorlocError::Other(format!("write failed: {e}"))),
+        }
+    }
+    Ok(())
+}
+
+/// Returns 0, or `MLC_RESULT_PIPE_CLOSED` when the reader closed `fd`, or -1;
+/// `errmsg` holds the reason for either failure.
+pub(crate) unsafe fn write_binary_fd(
     fd: i32,
     buf: *const c_char,
     count: usize,
     errmsg: *mut *mut c_char,
 ) -> i32 {
     clear_errmsg(errmsg);
-    let mut total: usize = 0;
-    while total < count {
-        let written = libc::write(fd, buf.add(total) as *const c_void, count - total);
-        if written < 0 {
-            set_errmsg(
-                errmsg,
-                &MorlocError::Other(format!("write failed: {}", std::io::Error::last_os_error())),
-            );
-            return -1;
+    let bytes = if count == 0 { &[][..] } else { std::slice::from_raw_parts(buf as *const u8, count) };
+    match write_all_to_fd(fd, bytes) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            if matches!(e, MorlocError::PipeClosed) { morloc_runtime_types::MLC_RESULT_PIPE_CLOSED } else { -1 }
         }
-        total += written as usize;
     }
-    0
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn print_binary(
+pub(crate) unsafe fn print_binary(
     buf: *const c_char,
     count: usize,
     errmsg: *mut *mut c_char,
@@ -413,8 +518,7 @@ pub unsafe extern "C" fn print_binary(
 
 // ── Display ────────────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn hex(ptr: *const c_void, size: usize) {
+pub(crate) unsafe fn hex(ptr: *const c_void, size: usize) {
     if ptr.is_null() || size == 0 {
         return;
     }
@@ -430,8 +534,7 @@ pub unsafe extern "C" fn hex(ptr: *const c_void, size: usize) {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn print_hex_dump(
+pub(crate) unsafe fn print_hex_dump(
     data: *const u8,
     size: usize,
     errmsg: *mut *mut c_char,
@@ -465,8 +568,7 @@ pub unsafe extern "C" fn print_hex_dump(
 // ── xxHash wrapper and mix ─────────────────────────────────────────────────
 
 /// Mix two 64-bit hash values. Matches the C implementation in cache.c.
-#[no_mangle]
-pub extern "C" fn mix(a: u64, b: u64) -> u64 {
+pub(crate) fn mix(a: u64, b: u64) -> u64 {
     const PRIME64_1: u64 = 0x9E3779B185EBCA87;
     const PRIME64_2: u64 = 0xC2B2AE3D27D4EB4F;
     let mut a = a ^ b.wrapping_mul(PRIME64_1);
@@ -474,8 +576,7 @@ pub extern "C" fn mix(a: u64, b: u64) -> u64 {
     a.wrapping_mul(PRIME64_2)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_xxh64(
+pub(crate) unsafe fn morloc_xxh64(
     input: *const c_void,
     length: usize,
     seed: u64,
@@ -491,8 +592,7 @@ pub unsafe extern "C" fn morloc_xxh64(
 
 /// dirname - returns pointer into the input string (modifies it in-place)
 /// Matches the C behavior: returns "." for empty/NULL, strips trailing slashes
-#[no_mangle]
-pub unsafe extern "C" fn dirname(path: *mut c_char) -> *mut c_char {
+pub(crate) unsafe fn dirname(path: *mut c_char) -> *mut c_char {
     // Return a pointer to the static string "." for empty/null paths and paths with no slash.
     static DOT: [u8; 2] = [b'.', 0];
     let dot_ptr = DOT.as_ptr() as *mut c_char;
@@ -551,5 +651,116 @@ mod socket_addr_tests {
         let addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
         assert_eq!(SUN_PATH_LEN, addr.sun_path.len());
     }
+
+    fn pipe() -> (i32, i32) {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        (fds[0], fds[1])
+    }
+
+    #[test]
+    fn writing_to_a_closed_pipe_reports_it_apart_from_other_failures() {
+        let (r, w) = pipe();
+        unsafe { libc::close(r) };
+        let mut err: *mut c_char = ptr::null_mut();
+        let rc = unsafe { write_binary_fd(w, b"x".as_ptr() as *const c_char, 1, &mut err) };
+        assert_eq!(rc, morloc_runtime_types::MLC_RESULT_PIPE_CLOSED);
+        assert!(!err.is_null());
+        unsafe { libc::free(err as *mut c_void); libc::close(w) };
+    }
+
+    #[test]
+    fn a_write_larger_than_the_pipe_arrives_whole() {
+        let (r, w) = pipe();
+        let reader = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                let n = unsafe { libc::read(r, buf.as_mut_ptr() as *mut c_void, buf.len()) };
+                if n <= 0 { break; }
+                got.extend_from_slice(&buf[..n as usize]);
+            }
+            unsafe { libc::close(r) };
+            got
+        });
+        let data: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
+        write_all_to_fd(w, &data).unwrap();
+        unsafe { libc::close(w) };
+        assert_eq!(reader.join().unwrap(), data);
+    }
 }
 
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn file_exists(filename: *const c_char) -> bool {
+        super::file_exists(filename)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mkdir_p(path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
+        super::mkdir_p(path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn delete_directory(path: *const c_char) {
+        super::delete_directory(path)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn has_suffix(x: *const c_char, suffix: *const c_char) -> bool {
+        super::has_suffix(x, suffix)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn write_atomic(filename: *const c_char, data: *const u8, size: usize, errmsg: *mut *mut c_char) -> i32 {
+        super::write_atomic(filename, data, size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_binary_file(filename: *const c_char, file_size: *mut usize, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::read_binary_file(filename, file_size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_binary_fd(file: *mut libc::FILE, file_size: *mut usize, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::read_binary_fd(file, file_size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn write_binary_fd(fd: i32, buf: *const c_char, count: usize, errmsg: *mut *mut c_char) -> i32 {
+        super::write_binary_fd(fd, buf, count, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn print_binary(buf: *const c_char, count: usize, errmsg: *mut *mut c_char) -> i32 {
+        super::print_binary(buf, count, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn hex(ptr: *const c_void, size: usize) {
+        super::hex(ptr, size)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn print_hex_dump(data: *const u8, size: usize, errmsg: *mut *mut c_char) -> bool {
+        super::print_hex_dump(data, size, errmsg)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn mix(a: u64, b: u64) -> u64 {
+        super::mix(a, b)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_xxh64(input: *const c_void, length: usize, seed: u64) -> u64 {
+        super::morloc_xxh64(input, length, seed)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn dirname(path: *mut c_char) -> *mut c_char {
+        super::dirname(path)
+    }
+}

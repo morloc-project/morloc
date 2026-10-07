@@ -1,0 +1,29 @@
+-- Panics in sourced Rust are the call's failure wherever they are raised
+-- (model/panic.md PANIC-6): one reported at the user's own line, one raised
+-- inside the standard library on the user's behalf (found by walking the
+-- stack), and one in a user function the runtime applies through `map`.
+-- Built with thin LTO, so inlining across user and generated code is real.
+module main (idx, steps, safeSteps, mapSteps)
+
+import root
+import root-rust
+
+type Rust => Int = "i64"
+type Rust => (List a) = "Vec<$1>" a
+
+source Rust from "h.rs" ("r_index" as rIndex, "r_step_count" as rSteps)
+
+rIndex :: [Int] -> Int -> Int
+rSteps :: Int -> Int
+
+idx :: [Int] -> Int -> Int
+idx xs i = rIndex xs i
+
+steps :: Int -> Int
+steps n = rSteps n
+
+safeSteps :: Int -> Int
+safeSteps n = match (@try (rSteps n)) | (Ok v) = v | (Err _) = 99
+
+mapSteps :: [Int] -> [Int]
+mapSteps xs = map rSteps xs

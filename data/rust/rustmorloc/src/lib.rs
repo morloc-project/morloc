@@ -16,9 +16,9 @@
 //!        `make_*` call (the host frees it with `libc::free`). The
 //!        `morloc-runtime-types::packet` Vec builders are never used for a
 //!        returned value.
-//!  * I3  SHM allocated for a result outlives the socket send; freeing is
-//!        deferred until the reply is sent, via `dispatch_flush` (the pool's
-//!        after-reply hook). A per-alloc
+//!  * I3  SHM allocated for a result is released by `dispatch_flush` (the
+//!        pool's `release_dispatch`) only once the reply holds the caller's
+//!        own reference to it. A per-alloc
 //!        `ShmGuard` reclaims a half-built block if serialization panics.
 //!  * I4  The recur env is thread-local (THREAD concurrency runs manifolds in
 //!        one address space).
@@ -26,6 +26,8 @@
 //!  * I6  Multi-limb `Int` is rejected on consume (i64 cap).
 //!  * I8  All scalar pokes through the byte cursor use unaligned access.
 
+#[cfg(not(panic = "unwind"))]
+compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_char, c_void, CString};
@@ -61,6 +63,9 @@ pub use arrow_schema;
 // NOT linked into this rlib; an rlib may carry undefined references.
 // ---------------------------------------------------------------------------
 extern "C" {
+    fn morloc_catch_scope(kind: u8) -> u8;
+    fn morloc_panic_decide(file: *const u8, file_len: usize, line: *const u8, line_len: usize, fatal: bool) -> bool;
+    fn morloc_panic_caught();
     fn morloc_log_next_id() -> u64;
     fn morloc_log_emit(tmpl: *const c_char, group: *const c_char,
                        runtime_seconds: f64, call_id: u64);
@@ -68,6 +73,7 @@ extern "C" {
     fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_void;
     fn shfree(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool;
     fn shincref(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool;
+    fn morloc_fork_generation() -> u64;
     fn morloc_dup_packet(packet: *const u8, block_out: *mut *mut c_void,
                          errmsg: *mut *mut c_char) -> *mut u8;
     fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> isize;
@@ -88,6 +94,8 @@ extern "C" {
     fn make_arrow_data_packet(relptr: isize, schema: *const CSchema) -> *mut u8;
     fn make_inline_data_packet(voidstar: *mut c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
     fn make_fail_packet(msg: *const c_char) -> *mut u8;
+    fn make_pipe_closed_packet(msg: *const c_char) -> *mut u8;
+    fn morloc_packet_is_pipe_closed(packet: *const u8) -> bool;
     // Cross-pool foreign call primitives (see `foreign_call`).
     fn make_morloc_local_call_packet(midx: u32, arg_packets: *const *const u8,
                                      nargs: usize, errmsg: *mut *mut c_char) -> *mut u8;
@@ -254,9 +262,296 @@ fn cschema_of(schema: &Schema) -> *mut CSchema {
 // ---------------------------------------------------------------------------
 pub struct MorlocThrow(pub String);
 
-/// Raise a catchable morloc error (`@throw`) from sourced Rust.
+/// libmorloc's scope kind for a host's catch around user code (PANIC-6).
+const MORLOC_SCOPE_HOST: u8 = 2;
+
+struct Registered {
+    pool_files: &'static [&'static str],
+    user_files: &'static [&'static str],
+    /// The line and column of each call of a sourced function in the
+    /// generated source (PANIC-15).
+    user_calls: &'static [(u32, u32)],
+}
+
+static REGISTERED: std::sync::OnceLock<Registered> = std::sync::OnceLock::new();
+
+/// Record the pool's generated source file (each spelling: as panic
+/// locations and as backtraces name it), the user sources it includes
+/// (PANIC-9), and where it calls a sourced function (PANIC-15).
+pub fn register_pool_files(
+    pool_files: &'static [&'static str],
+    user_files: &'static [&'static str],
+    user_calls: &'static [(u32, u32)],
+) {
+    let _ = REGISTERED.set(Registered { pool_files, user_files, user_calls });
+}
+
+fn this_crate_dirs() -> [&'static str; 2] {
+    let f = file!();
+    [&f[..f.len() - "lib.rs".len()], concat!(env!("CARGO_MANIFEST_DIR"), "/src/")]
+}
+
+fn trim_dot(path: &str) -> &str {
+    path.strip_prefix("./").unwrap_or(path)
+}
+
+/// The workspace's other runtime crates, libmorloc and the nexus.
+fn sibling_runtime_dirs() -> [&'static str; 2] {
+    [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../morloc-runtime/src/"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../morloc-nexus/src/"),
+    ]
+}
+
+/// `path` with its `.` and `..` components resolved, as written.
+fn normalize(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for c in path.split('/') {
+        match c {
+            "." => {}
+            ".." if parts.last().is_some_and(|p| !p.is_empty() && *p != "..") => {
+                parts.pop();
+            }
+            _ => parts.push(c),
+        }
+    }
+    let joined = parts.join("/");
+    if path.ends_with('/') && !joined.ends_with('/') { joined + "/" } else { joined }
+}
+
+/// Code no user directory claims: the standard library and crates cargo
+/// fetched.
+fn fetched_code(path: &str) -> bool {
+    path.starts_with("/rustc/") || path.contains("/registry/src/") || path.contains("/git/checkouts/")
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Side {
+    User,
+    Runtime,
+    Neither,
+}
+
+/// Which side a source file belongs to: a user source, this runtime (its
+/// crates or the pool's generated code), or neither (std, third-party).
+/// `user_files` names files, and directories as entries ending in `/`: a
+/// file below one is the user's unless a runtime rule claims it first, it
+/// is the standard library or a fetched crate, or the path below the
+/// directory passes through a hidden one (a toolchain, an install under
+/// the user's home).
+fn side_of(file: &str, pool_files: &[&str], user_files: &[&str]) -> Side {
+    let f = normalize(trim_dot(file));
+    let f = f.as_str();
+    let under = |d: &str| f.starts_with(normalize(trim_dot(d)).as_str());
+    let in_user_dir = |d: &str| {
+        let d = normalize(trim_dot(d));
+        d.ends_with('/') && f.starts_with(d.as_str()) && !f[d.len()..].split('/').any(|c| c.starts_with('.'))
+    };
+    if user_files.iter().any(|u| normalize(trim_dot(u)) == f) {
+        Side::User
+    } else if pool_files.iter().any(|p| normalize(trim_dot(p)) == f)
+        || this_crate_dirs().iter().any(|d| under(d))
+        || sibling_runtime_dirs().iter().any(|d| under(d))
+        || morloc_runtime_types::panic::source_dirs().iter().any(|d| under(d))
+    {
+        Side::Runtime
+    } else if !fetched_code(f) && user_files.iter().any(|u| in_user_dir(u)) {
+        Side::User
+    } else {
+        Side::Neither
+    }
+}
+
+/// One frame of a backtrace in std's full format: its symbol and, when line
+/// tables name it, its file.
+struct Frame<'a> {
+    symbol: &'a str,
+    file: Option<&'a str>,
+    line: Option<u32>,
+    col: Option<u32>,
+}
+
+/// A backtrace location's file and line: `file:line:col`, or `file:line`
+/// when the column is unknown; the file may itself contain `:`.
+fn all_digits(t: &str) -> bool {
+    !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn split_location(at: &str) -> (&str, Option<u32>, Option<u32>) {
+    match at.rsplit_once(':') {
+        Some((rest, last)) if all_digits(last) => match rest.rsplit_once(':') {
+            Some((file, line)) if all_digits(line) => (file, line.parse().ok(), last.parse().ok()),
+            _ => (rest, last.parse().ok(), None),
+        },
+        _ => (at, None, None),
+    }
+}
+
+/// Frames of `format!("{:#}", backtrace)`: "N: 0xADDR - symbol" lines, each
+/// followed by "at file:line:col" lines when the frame is resolved (an
+/// inlined callee gets its own numbered line). Full format never rewrites
+/// paths relative to the working directory.
+fn frames(trace: &str) -> Vec<Frame<'_>> {
+    let mut out: Vec<Frame<'_>> = Vec::new();
+    for line in trace.lines() {
+        let t = line.trim_start();
+        if let Some(at) = t.strip_prefix("at ") {
+            let (file, line, col) = split_location(at);
+            if let Some(f) = out.last_mut() {
+                if f.file.is_none() {
+                    f.file = Some(file);
+                    f.line = line;
+                    f.col = col;
+                }
+            }
+        } else if let Some((num, rest)) = t.split_once(':') {
+            if all_digits(num) {
+                let symbol = rest.split_once(" - ").map(|(_, s)| s).unwrap_or(rest).trim();
+                out.push(Frame { symbol, file: None, line: None, col: None });
+            }
+        }
+    }
+    out
+}
+
+fn std_symbol(symbol: &str) -> bool {
+    let s = symbol.trim_start_matches('<');
+    ["std", "core", "alloc", "__rustc"].iter().any(|c| {
+        s.strip_prefix(c).is_some_and(|r| r.starts_with("::") || r.starts_with('['))
+    })
+}
+
+fn panic_machinery(f: &Frame<'_>) -> bool {
+    f.file.is_some_and(|p| p.ends_with("/panicking.rs"))
+        || (std_symbol(f.symbol) && f.symbol.contains("::panicking::"))
+        || f.symbol.contains("rust_begin_unwind")
+}
+
+fn std_frame(f: &Frame<'_>) -> bool {
+    std_symbol(f.symbol) || f.file.is_some_and(|p| p.starts_with("/rustc/")) || panic_machinery(f)
+}
+
+/// The last frame of the panic machinery that raised this panic: from its
+/// first frame, through the standard library frames that follow. Later
+/// machinery, such as the catch the panic will unwind to, lies below the
+/// panicking code and does not count.
+fn panic_gate(frames: &[Frame<'_>]) -> Option<usize> {
+    let first = frames.iter().position(panic_machinery)?;
+    let mut gate = first;
+    for (i, f) in frames.iter().enumerate().skip(first) {
+        if !std_frame(f) {
+            break;
+        }
+        if panic_machinery(f) {
+            gate = i;
+        }
+    }
+    Some(gate)
+}
+
+/// Walk a backtrace from the frame below the panic machinery: standard
+/// library and third-party frames are skipped, and the first user or
+/// runtime frame decides. Unless the pool's classifier frame and this
+/// runtime's own frames, above the panic machinery, are recognised, the
+/// paths cannot be trusted and the panic is the runtime's; so is one with no deciding frame, and one whose deciding
+/// frame has no file.
+/// `file` is one the user's files name, rather than one below a directory.
+fn is_user_file(file: &str, user_files: &[&str]) -> bool {
+    let f = normalize(trim_dot(file));
+    user_files.iter().any(|u| !u.ends_with('/') && normalize(trim_dot(u)) == f)
+}
+
+/// A symbol of one of the runtime's crates, whatever file it was built from.
+fn runtime_symbol(symbol: &str) -> bool {
+    let s = symbol.trim_start_matches('<');
+    ["rustmorloc", "morloc_runtime", "morloc_runtime_types", "morloc_nexus"].iter().any(|c| {
+        s.strip_prefix(c).is_some_and(|rest| rest.starts_with("::") || rest.starts_with('['))
+    })
+}
+
+/// A frame of this crate's closure convention (a `MorlocFnN::callN`), which
+/// only calls the function value it was given. Its symbol is a full path
+/// (`<F as rustmorloc::MorlocFn1<..>>::call1`) or, inlined, the bare method
+/// with its generics (`call1<..>`).
+fn applies_a_function_value(f: &Frame<'_>) -> bool {
+    let in_this_crate = f.file.is_some_and(|p| {
+        let p = normalize(trim_dot(p));
+        this_crate_dirs().iter().any(|d| p.starts_with(normalize(trim_dot(d)).as_str()))
+    });
+    let method = match f.symbol.rfind(">::") {
+        Some(i) if f.symbol.starts_with('<') => &f.symbol[i + 3..],
+        _ => {
+            let base = f.symbol.split('<').next().unwrap_or("");
+            base.rsplit("::").next().unwrap_or(base)
+        }
+    };
+    let method = method.split("::").next().unwrap_or(method);
+    in_this_crate && method.strip_prefix("call").is_some_and(all_digits)
+}
+
+fn walk_is_runtime(trace: &str, pool_files: &[&str], user_files: &[&str], user_calls: &[(u32, u32)]) -> bool {
+    let frames = frames(trace);
+    let Some(gate) = panic_gate(&frames) else { return true };
+    let above = &frames[..gate];
+    let in_pool = |p: &str| pool_files.iter().any(|q| trim_dot(q) == trim_dot(p));
+    let trusted = above.iter().any(|f| f.file.is_some_and(|p| in_pool(p)))
+        && above.iter().any(|f| f.file.is_some_and(|p| !in_pool(p) && side_of(p, pool_files, user_files) == Side::Runtime));
+    if !trusted {
+        return true;
+    }
+    for f in &frames[gate + 1..] {
+        match f.file {
+            Some(p) if in_pool(p) && f.line.zip(f.col).is_some_and(|at| user_calls.contains(&at)) => return false,
+            _ if applies_a_function_value(f) => {}
+            Some(p) if runtime_symbol(f.symbol) && !is_user_file(p, user_files) => return true,
+            None if runtime_symbol(f.symbol) => return true,
+            Some(p) => match side_of(p, pool_files, user_files) {
+                Side::User => return false,
+                Side::Runtime => return true,
+                Side::Neither => {}
+            },
+            None if std_symbol(f.symbol) => {}
+            None => return true,
+        }
+    }
+    true
+}
+
+/// The classifier the pool registers with libmorloc's hook (PANIC-9):
+/// whether a panic at `file` is a fault of this runtime rather than of the
+/// user's code. A user or runtime location decides at once; a location in
+/// the generated code, std or a third-party crate needs the caller, found by
+/// walking a backtrace captured now, while the panic has not unwound.
+pub extern "C" fn panic_is_runtime(file: *const u8, len: usize) -> bool {
+    let Some(&Registered { pool_files, user_files, user_calls }) = REGISTERED.get() else { return true };
+    // SAFETY: PANIC-9: the hook passes the panic location's string.
+    let file = unsafe { std::str::from_utf8(std::slice::from_raw_parts(file, len)) }.unwrap_or("");
+    let in_pool_file = pool_files.iter().any(|p| trim_dot(p) == trim_dot(file));
+    match side_of(file, pool_files, user_files) {
+        Side::User if is_user_file(file, user_files) => false,
+        Side::Runtime if !in_pool_file => true,
+        _ => walk_is_runtime(&format!("{:#}", std::backtrace::Backtrace::force_capture()), pool_files, user_files, user_calls),
+    }
+}
+
+/// A caught unwind's message: a throw's own, or the panic's.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(MorlocThrow(msg)) = payload.downcast_ref::<MorlocThrow>() {
+        msg.clone()
+    } else if let Some(s) = payload.downcast_ref::<&str>() {
+        format!("Rust code panicked: {s}")
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        format!("Rust code panicked: {s}")
+    } else {
+        "Rust code panicked".to_string()
+    }
+}
+
+/// Raise a catchable morloc error (`@throw`) from sourced Rust. It unwinds
+/// without the panic hook, which ends the process on a panic (PANIC-1); a
+/// throw is a result, not a panic.
 pub fn morloc_throw(msg: impl Into<String>) -> ! {
-    std::panic::panic_any(MorlocThrow(msg.into()));
+    std::panic::resume_unwind(Box::new(MorlocThrow(msg.into())));
 }
 
 /// `@throw` in a value position of generated code, typed as the value it
@@ -276,16 +571,42 @@ pub fn morloc_throw_as<T>(msg: impl Into<String>) -> T {
 /// which it classifies as infrastructure in turn.
 pub fn morloc_infra_abort(msg: impl AsRef<str>) -> ! {
     eprintln!("morloc internal error (Rust pool): {}", msg.as_ref());
-    std::process::abort()
+    // PANIC-5
+    unsafe { libc::_exit(morloc_runtime_types::panic::PANIC_EXIT_STATUS) }
 }
+
+/// The reason libmorloc gave for a failure. It gives one for every failure
+/// outside input can cause, so a failure without one is this runtime's
+/// defect and ends the pool (PANIC-13).
+unsafe fn reason_or_abort(err: *mut c_char, what: &str) -> String {
+    if err.is_null() {
+        failed_without_reason(what)
+    }
+    cstr_take(err)
+}
+
+fn failed_without_reason(what: &str) -> ! {
+    morloc_infra_abort(format!("{what}: the runtime failed without giving a reason"))
+}
+
+/// The downstream reader of a stream closed it. The call ends, as an
+/// unrecoverable IO condition: `@try` does not catch it, and the nexus
+/// decides the exit status.
+pub struct MorlocPipeClosed;
+
+fn pipe_closed() -> ! {
+    std::panic::resume_unwind(Box::new(MorlocPipeClosed))
+}
+
+const PIPE_CLOSED_MESSAGE: &str = "@stdout: downstream pipe closed";
 
 /// `@try body`: run `body` and convert the outcome to data. `ok` wraps the
 /// value, `err` the caught message; codegen supplies both because only it
 /// knows how this `Try` is represented in Rust.
 ///
-/// Only a `MorlocThrow` payload becomes an `Err` arm. Any other panic is a
-/// genuine bug and resumes unwinding, which mirrors the C++ split between
-/// MorlocException and an internal abort.
+/// A throw or a panic in user code becomes an `Err` arm (PANIC-6), as a C++
+/// exception does; a panic in this runtime's own code ends the pool before
+/// it unwinds here (PANIC-5).
 pub fn mlc_try<T, R, F, OK, ERR>(body: F, ok: OK, err: ERR) -> R
 where
     F: MorlocFn0<T>,
@@ -297,15 +618,15 @@ where
     // variable alike, rather than only the former.
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.call0())) {
         Ok(v) => ok(v),
-        Err(payload) => match payload.downcast::<MorlocThrow>() {
-            Ok(thrown) => {
-                // The caught throw's partial trace must not leak into a
-                // later error's traceback.
-                TRACEBACK.with(|t| t.borrow_mut().clear());
-                err(thrown.0)
-            }
-            Err(other) => std::panic::resume_unwind(other),
-        },
+        Err(payload) if payload.is::<MorlocPipeClosed>() => std::panic::resume_unwind(payload),
+        Err(payload) => {
+            // PANIC-6: a runtime panic ended the pool before it reached here.
+            unsafe { morloc_panic_caught() };
+            // The caught error's partial trace must not leak into a later
+            // error's traceback.
+            TRACEBACK.with(|t| t.borrow_mut().clear());
+            err(panic_message(payload.as_ref()))
+        }
     }
 }
 
@@ -326,7 +647,9 @@ unsafe fn to_rel(ptr: *mut u8) -> RelPtr {
         let mut err: *mut c_char = std::ptr::null_mut();
         let rel = abs2rel(ptr as *mut c_void, &mut err);
         if !err.is_null() {
-            morloc_throw(cstr_take(err));
+            // PANIC-13: the write walk resolves only cursors into a block
+            // this pool allocated.
+            morloc_infra_abort(cstr_take(err));
         }
         rel
     }
@@ -350,6 +673,33 @@ impl MorlocSpace {
     }
 }
 
+thread_local! {
+    static READING_RUNTIME_VALUE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// A read of a value libmorloc or this pool built from its own schema: a
+/// structural failure in it is this runtime's defect (PANIC-14).
+struct RuntimeValueRead(bool);
+
+impl RuntimeValueRead {
+    fn enter() -> RuntimeValueRead {
+        RuntimeValueRead(READING_RUNTIME_VALUE.with(|r| r.replace(true)))
+    }
+}
+
+impl Drop for RuntimeValueRead {
+    fn drop(&mut self) {
+        READING_RUNTIME_VALUE.with(|r| r.set(self.0));
+    }
+}
+
+fn malformed_value(msg: String) -> ! {
+    if READING_RUNTIME_VALUE.with(|r| r.get()) {
+        morloc_infra_abort(msg)
+    }
+    morloc_throw(msg)
+}
+
 /// Resolve `rel` to `extent` readable bytes in `space`, or throw.
 #[inline]
 unsafe fn resolve(rel: RelPtr, extent: usize, space: MorlocSpace) -> *const u8 {
@@ -358,7 +708,7 @@ unsafe fn resolve(rel: RelPtr, extent: usize, space: MorlocSpace) -> *const u8 {
         if rel >= 0 && off <= space.len && extent <= space.len - off {
             return space.base.add(off);
         }
-        morloc_throw(format!(
+        malformed_value(format!(
             "a {extent}-byte region at offset {off} runs past the {}-byte payload",
             space.len
         ));
@@ -366,7 +716,7 @@ unsafe fn resolve(rel: RelPtr, extent: usize, space: MorlocSpace) -> *const u8 {
     let mut err: *mut c_char = std::ptr::null_mut();
     let p = rel2abs_extent(rel, extent, &mut err) as *const u8;
     if !err.is_null() || p.is_null() {
-        morloc_throw(if err.is_null() { format!("relptr {rel} did not resolve") } else { cstr_take(err) });
+        malformed_value(if err.is_null() { format!("relptr {rel} did not resolve") } else { cstr_take(err) });
     }
     p
 }
@@ -376,7 +726,7 @@ unsafe fn resolve(rel: RelPtr, extent: usize, space: MorlocSpace) -> *const u8 {
 unsafe fn resolve_array(rel: RelPtr, n: usize, width: usize, space: MorlocSpace) -> *const u8 {
     match n.checked_mul(width) {
         Some(extent) => resolve(rel, extent, space),
-        None => morloc_throw(format!("an array of {n} {width}-byte elements overflows")),
+        None => malformed_value(format!("an array of {n} {width}-byte elements overflows")),
     }
 }
 
@@ -467,11 +817,23 @@ pub fn resolve_recur(schema: &Schema) -> &Schema {
 /// Holds the deferred-release list so that the blocks are released when the
 /// thread ends as well as after each reply, for what a thread holds outside
 /// any dispatch.
-struct ShmTracker(Cell<Vec<*mut c_void>>);
+struct ShmTracker(Cell<Vec<*mut c_void>>, Cell<u64>);
+
+impl ShmTracker {
+    fn take_live(&self) -> Vec<*mut c_void> {
+        let g = unsafe { morloc_fork_generation() };
+        let v = self.0.take();
+        if self.1.get() == g {
+            return v;
+        }
+        self.1.set(g);
+        Vec::new()
+    }
+}
 
 impl Drop for ShmTracker {
     fn drop(&mut self) {
-        let v = self.0.take();
+        let v = self.take_live();
         for ptr in &v {
             let mut err: *mut c_char = std::ptr::null_mut();
             unsafe {
@@ -483,12 +845,12 @@ impl Drop for ShmTracker {
 }
 
 thread_local! {
-    static SHM_TRACKER: ShmTracker = const { ShmTracker(Cell::new(Vec::new())) };
+    static SHM_TRACKER: ShmTracker = const { ShmTracker(Cell::new(Vec::new()), Cell::new(0)) };
 }
 
 fn track(ptr: *mut c_void) {
     SHM_TRACKER.with(|t| {
-        let mut v = t.0.take();
+        let mut v = t.take_live();
         v.push(ptr);
         t.0.set(v);
     });
@@ -552,7 +914,7 @@ impl Drop for Packet {
 /// Anything not tracked here belongs to someone else and is left alone.
 unsafe fn release_tracked(block: *mut c_void) {
     let found = SHM_TRACKER.with(|t| {
-        let mut v = t.0.take();
+        let mut v = t.take_live();
         let hit = v.iter().position(|p| *p == block);
         if let Some(i) = hit {
             v.swap_remove(i);
@@ -568,11 +930,11 @@ unsafe fn release_tracked(block: *mut c_void) {
 }
 
 /// Free all deferred SHM blocks. The pool runs this once a dispatch's reply
-/// is sent; generated `local_dispatch`/`remote_dispatch` also call it at
+/// holds the caller's reference, before sending it; generated `local_dispatch`/`remote_dispatch` also call it at
 /// entry, for anything the thread held outside a dispatch.
 pub fn dispatch_flush() {
     SHM_TRACKER.with(|t| {
-        let v = t.0.take();
+        let v = t.take_live();
         for ptr in &v {
             let mut err: *mut c_char = std::ptr::null_mut();
             unsafe {
@@ -642,6 +1004,19 @@ unsafe extern "C" fn current_frame(len: *mut usize) -> *const c_char {
 }
 
 /// Report a fatal signal with the executing manifold, then die of it.
+/// PANIC-1: a hook in this binary's own standard library that takes
+/// libmorloc's decision, for a platform where the pool does not share
+/// libmorloc's standard library and so not the hook libmorloc installs.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let file = info.location().map(|l| l.file()).unwrap_or("");
+        let line = morloc_runtime_types::panic::Report::of(info);
+        let fatal = morloc_runtime_types::panic::fatal_marked();
+        let line = line.as_bytes();
+        unsafe { morloc_panic_decide(file.as_ptr(), file.len(), line.as_ptr(), line.len(), fatal) };
+    }));
+}
+
 pub fn install_crash_handler() {
     extern "C" {
         fn morloc_install_crash_handler(
@@ -950,11 +1325,17 @@ impl SizeWalk {
         }
     }
 
+    fn keep_ref<T: 'static>(&mut self, v: T) -> *const T {
+        let b = Box::new(v);
+        let r: *const T = &*b;
+        self.keep.push(b);
+        r
+    }
+
     /// A child the step itself produced (a reified closure origin): the walk
     /// keeps it alive until it is reached.
     pub fn child_owned<T: ToVoidstar + 'static>(&mut self, v: T, schema: &Schema, inline_slot: bool) {
-        self.keep.push(Box::new(v));
-        let r: *const T = self.keep.last().and_then(|b| b.downcast_ref::<T>()).unwrap();
+        let r = self.keep_ref(v);
         // SAFETY: the box lives in `keep` for the rest of the walk.
         self.child(unsafe { &*r }, schema, inline_slot);
     }
@@ -973,6 +1354,12 @@ impl SizeWalk {
         let a = resolve_recur(arm);
         self.total += (schema.width + (a.alignment().max(1) - 1)) as isize;
         self.child(payload, a, false);
+    }
+
+    /// As `variant_payload`, for a payload the step itself produced.
+    pub fn variant_payload_owned<T: ToVoidstar + 'static>(&mut self, schema: &Schema, arm: &Schema, payload: T) {
+        let r = self.keep_ref(payload);
+        self.variant_payload(schema, arm, unsafe { &*r });
     }
 
     pub fn run(&mut self) -> usize {
@@ -1065,14 +1452,20 @@ impl<'a> WriteWalk<'a> {
         }
     }
 
+    fn keep_ref<T: 'static>(&mut self, v: T) -> *const T {
+        let b = Box::new(v);
+        let r: *const T = &*b;
+        self.keep.push(b);
+        r
+    }
+
     /// A child the step itself produced (a reified closure origin): the walk
     /// keeps it alive until it is reached.
     ///
     /// # Safety
     /// As for `child`.
     pub unsafe fn child_owned<T: ToVoidstar + 'static>(&mut self, v: T, dest: *mut u8, schema: &Schema) {
-        self.keep.push(Box::new(v));
-        let r: *const T = self.keep.last().and_then(|b| b.downcast_ref::<T>()).unwrap();
+        let r = self.keep_ref(v);
         self.child(&*r, dest, schema);
     }
 
@@ -1115,6 +1508,15 @@ impl<'a> WriteWalk<'a> {
         let slot = self.alloc(a);
         core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, to_rel(slot));
         self.child(payload, slot, a);
+    }
+
+    /// As `variant_payload`, for a payload the step itself produced.
+    ///
+    /// # Safety
+    /// As for `variant_payload`.
+    pub unsafe fn variant_payload_owned<T: ToVoidstar + 'static>(&mut self, dest: *mut u8, arm: &Schema, tag: u8, payload: T) {
+        let r = self.keep_ref(payload);
+        self.variant_payload(dest, arm, tag, &*r);
     }
 
     pub fn run(&mut self) {
@@ -1428,12 +1830,6 @@ fn handle_kind(t: SerialType) -> u8 {
     }
 }
 
-// A C-ABI handle-codec error message, or `fallback` when none was set.
-#[inline]
-unsafe fn handle_err(err: *mut c_char, fallback: &str) -> String {
-    if err.is_null() { fallback.to_string() } else { cstr_take(err) }
-}
-
 macro_rules! int_impl {
     ($t:ty) => {
         impl ToVoidstar for $t {
@@ -1456,7 +1852,7 @@ macro_rules! int_impl {
                             &mut err,
                         );
                         if rc != 0 {
-                            morloc_throw(handle_err(err, "mlc_write_handle_voidstar failed"));
+                            morloc_throw(reason_or_abort(err, "mlc_write_handle_voidstar"));
                         }
                     }
                     // Inline BigInt [size=1, value] (16 bytes); v1 never emits
@@ -1491,7 +1887,7 @@ macro_rules! int_impl {
                             &mut err,
                         );
                         if !err.is_null() || handle < 0 {
-                            morloc_throw(handle_err(err, "mlc_read_handle_voidstar failed"));
+                            morloc_throw(reason_or_abort(err, "mlc_read_handle_voidstar"));
                         }
                         handle as $t
                     }
@@ -1980,7 +2376,9 @@ pub mod rec_drain {
                 while let Some((ptr, f)) = unsafe { (*p).pop() } {
                     // A panic in one block's drop must not escape a drop that
                     // may itself be running during unwinding.
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { f(ptr) }));
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { f(ptr) })).is_err() {
+                        unsafe { crate::morloc_panic_caught() };
+                    }
                 }
             });
             let _ = ACTIVE.try_with(|a| a.set(false));
@@ -2434,6 +2832,20 @@ pub unsafe fn put_value<T: ToVoidstar>(value: &T, schema: &Schema) -> *mut u8 {
     put_value_as(value, schema, false)
 }
 
+thread_local! {
+    static REPLY: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// `put_value` for a dispatched manifold's result (PANIC-10).
+///
+/// # Safety
+/// `schema` must describe `value`'s wire type.
+pub unsafe fn put_reply<T: ToVoidstar>(value: &T, schema: &Schema) -> *mut u8 {
+    let packet = put_value(value, schema);
+    REPLY.with(|r| r.set(packet));
+    packet
+}
+
 /// `put_value`, with `self_contained` asking for a packet that carries
 /// the value inside it rather than a reference to a shared-memory block:
 /// for a value that must outlive this dispatch's blocks, such as a
@@ -2556,8 +2968,8 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         let cs = cschema_of(schema);
         let mut err: *mut c_char = std::ptr::null_mut();
         let block = get_morloc_data_packet_value(packet, cs, &mut err);
-        if !err.is_null() {
-            morloc_throw(cstr_take(err));
+        if block.is_null() || !err.is_null() {
+            morloc_throw(reason_or_abort(err, "reading a table argument"));
         }
         // A materialized block is released here unless the tracker takes
         // it; a referenced one belongs to its sender until acquired.
@@ -2573,7 +2985,7 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         let mut array = FFI_ArrowArray::empty();
         let acquire = if materialized { 0 } else { 1 };
         if arrow_from_shm_owned(block as *const c_void, acquire, &mut ffi_schema, &mut array, &mut err) != 0 {
-            morloc_throw(cstr_take(err));
+            morloc_throw(reason_or_abort(err, "viewing a table argument"));
         }
         guard.commit();
         return match <T as FromVoidstar>::arrow_import(array, &ffi_schema) {
@@ -2610,9 +3022,8 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     let cs = cschema_of(schema);
     let mut err: *mut c_char = std::ptr::null_mut();
     let voidstar = get_morloc_data_packet_value(packet, cs, &mut err);
-    if !err.is_null() {
-        let msg = cstr_take(err);
-        morloc_throw(msg);
+    if voidstar.is_null() || !err.is_null() {
+        morloc_throw(reason_or_abort(err, "reading an argument"));
     }
     if source == PKT_SOURCE_RPTR {
         // A value that arrived by reference is read under a reference of
@@ -2704,6 +3115,10 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
 /// increfed + tracked so the peer's next dispatch flush cannot reclaim data
 /// this pool still references (I3).
 unsafe fn finalize_call_result(result: *mut u8) -> *mut u8 {
+    if morloc_packet_is_pipe_closed(result) {
+        libc::free(result as *mut c_void);
+        pipe_closed();
+    }
     let mut fail_err: *mut c_char = std::ptr::null_mut();
     let fail_msg = get_morloc_data_packet_error_message(result, &mut fail_err);
     discard_err(fail_err);
@@ -2827,10 +3242,7 @@ pub unsafe fn cache_store(key: u64, label: &str, data: *const u8, schema: &str) 
     check_err(err);
     let ok = morloc_cache_store(key, label_c.as_ptr(), data, size, schema_c.as_ptr(), &mut err);
     if !ok {
-        if !err.is_null() {
-            morloc_throw(cstr_take(err));
-        }
-        morloc_throw("@cache: cache_store failed");
+        morloc_throw(reason_or_abort(err, "@cache"));
     }
     morloc_cache_record_store();
 }
@@ -2849,7 +3261,7 @@ unsafe fn with_voidstar<T: ToVoidstar, R>(
     let mut err: *mut c_char = std::ptr::null_mut();
     let root = shmalloc(total, &mut err) as *mut u8;
     if root.is_null() {
-        morloc_throw(cstr_take(err));
+        morloc_throw(reason_or_abort(err, "shmalloc"));
     }
     let guard = ShmGuard::new(root as *mut c_void);
     let mut cursor = root.add(schema.width);
@@ -2889,13 +3301,13 @@ pub unsafe fn read<T: FromVoidstar>(s: &str, schema: &Schema) -> T {
     };
     let mut err: *mut c_char = std::ptr::null_mut();
     let voidstar = mlc_read(json.as_ptr(), cschema_of(schema), &mut err);
-    if !err.is_null() {
-        morloc_throw(format!("@read: {}", cstr_take(err)));
+    if !err.is_null() || voidstar.is_null() {
+        morloc_throw(format!("@read: {}", reason_or_abort(err, "@read")));
     }
-    if voidstar.is_null() {
-        morloc_throw(format!("@read: could not parse \"{}\"", s));
-    }
-    let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, MorlocSpace::SHM);
+    let result = {
+        let _built = RuntimeValueRead::enter();
+        <T as FromVoidstar>::read(schema, voidstar as *const u8, MorlocSpace::SHM)
+    };
     let mut e2: *mut c_char = std::ptr::null_mut();
     shfree(voidstar, &mut e2);
     discard_err(e2);
@@ -2938,9 +3350,20 @@ unsafe fn check_err(err: *mut c_char) {
 unsafe fn handle_or_throw(handle: i64, err: *mut c_char, what: &str) -> u64 {
     check_err(err);
     if handle < 0 {
-        morloc_throw(format!("{}: runtime returned an invalid handle", what));
+        failed_without_reason(what)
     }
     handle as u64
+}
+
+/// `read_voidstar` for a value the runtime built from its own schema.
+unsafe fn read_runtime_voidstar<T: FromVoidstar>(
+    voidstar: *mut c_void,
+    err: *mut c_char,
+    schema: &Schema,
+    what: &str,
+) -> T {
+    let _built = RuntimeValueRead::enter();
+    read_voidstar(voidstar, err, schema, what)
 }
 
 /// Reconstruct a value from a runtime-returned SHM voidstar (the `@load`
@@ -2952,11 +3375,8 @@ unsafe fn read_voidstar<T: FromVoidstar>(
     schema: &Schema,
     what: &str,
 ) -> T {
-    if !err.is_null() {
-        morloc_throw(format!("{}: {}", what, cstr_take(err)));
-    }
-    if voidstar.is_null() {
-        morloc_throw(format!("{}: runtime returned a null value", what));
+    if !err.is_null() || voidstar.is_null() {
+        morloc_throw(format!("{}: {}", what, reason_or_abort(err, what)));
     }
     let _recur = RecurScope::enter(schema);
     let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, MorlocSpace::SHM);
@@ -2974,7 +3394,7 @@ unsafe fn read_voidstar<T: FromVoidstar>(
 unsafe fn with_schema_str<R>(schema: &Schema, f: impl FnOnce(*const c_char) -> R) -> R {
     let s = schema_to_string(cschema_of(schema));
     if s.is_null() {
-        morloc_throw("morloc IO: schema_to_string returned null");
+        failed_without_reason("morloc IO: schema_to_string");
     }
     let r = f(s);
     libc::free(s as *mut c_void);
@@ -2985,7 +3405,7 @@ unsafe fn with_schema_str<R>(schema: &Schema, f: impl FnOnce(*const c_char) -> R
 pub unsafe fn hash<T: ToVoidstar>(value: &T, schema: &Schema) -> String {
     let h = with_voidstar(value, schema, |vs, cs, err| mlc_hash(vs, cs, err));
     if h.is_null() {
-        morloc_throw("@hash: runtime returned null");
+        failed_without_reason("@hash");
     }
     cstr_take(h)
 }
@@ -2998,7 +3418,7 @@ pub unsafe fn save<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: 
         mlc_save(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
-        morloc_throw("@save: runtime write failed");
+        failed_without_reason("@save");
     }
 }
 
@@ -3009,7 +3429,7 @@ pub unsafe fn save_json<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, p
         mlc_save_json(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
-        morloc_throw("@savej: runtime write failed");
+        failed_without_reason("@savej");
     }
 }
 
@@ -3020,7 +3440,7 @@ pub unsafe fn save_voidstar<T: ToVoidstar>(value: &T, schema: &Schema, level: i6
         mlc_save_voidstar(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
-        morloc_throw("@savem: runtime write failed");
+        failed_without_reason("@savem");
     }
 }
 
@@ -3043,7 +3463,9 @@ pub unsafe fn open(path: &str, kind: u8) -> u64 {
 /// @close: close a stream/file handle.
 pub unsafe fn close(handle: u64) {
     let mut err: *mut c_char = std::ptr::null_mut();
-    mlc_close(handle as i64, &mut err);
+    if mlc_close(handle as i64, &mut err) == morloc_runtime_types::MLC_RESULT_PIPE_CLOSED {
+        pipe_closed()
+    }
     check_err(err);
 }
 
@@ -3104,7 +3526,7 @@ where
 pub unsafe fn stream_layout<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
     let mut err: *mut c_char = std::ptr::null_mut();
     let voidstar = mlc_stream_layout(handle as i64, &mut err);
-    read_voidstar(voidstar, err, schema, "@streamLayout")
+    read_runtime_voidstar(voidstar, err, schema, "@streamLayout")
 }
 
 /// @stream: derive an IStream handle from an IFile handle.
@@ -3121,8 +3543,11 @@ pub unsafe fn write<T: ToVoidstar>(schema: &Schema, level: i64, value: &T, handl
     let rc = with_voidstar(value, schema, |vs, _cs, err| {
         mlc_write(level, handle as i64, vs, err)
     });
+    if rc == morloc_runtime_types::MLC_RESULT_PIPE_CLOSED {
+        pipe_closed()
+    }
     if rc != 0 {
-        morloc_throw("@write: runtime write failed");
+        failed_without_reason("@write");
     }
 }
 
@@ -3145,14 +3570,16 @@ pub unsafe fn concat(paths: &[String], dest: &str) {
     let rc = mlc_concat(ptrs.as_ptr(), ptrs.len(), dest_c.as_ptr(), &mut err);
     check_err(err);
     if rc != 0 {
-        morloc_throw("@concat: runtime concat failed");
+        failed_without_reason("@concat");
     }
 }
 
 /// @flush: force buffered elements out as a sub-packet.
 pub unsafe fn flush(handle: u64) {
     let mut err: *mut c_char = std::ptr::null_mut();
-    mlc_flush(handle as i64, &mut err);
+    if mlc_flush(handle as i64, &mut err) == morloc_runtime_types::MLC_RESULT_PIPE_CLOSED {
+        pipe_closed()
+    }
     check_err(err);
 }
 
@@ -3170,7 +3597,7 @@ pub unsafe fn tmpfile() -> String {
     let s = mlc_tmpfile(&mut err);
     check_err(err);
     if s.is_null() {
-        morloc_throw("@tmpfile: runtime returned null");
+        failed_without_reason("@tmpfile");
     }
     cstr_take(s)
 }
@@ -3183,7 +3610,7 @@ pub unsafe fn cell_new<T: ToVoidstar>(schema: &Schema, init: &T) -> u64 {
         if handle < 0 { 1 } else { 0 }
     });
     if rc != 0 {
-        morloc_throw("@fold: could not create the accumulator");
+        failed_without_reason("@fold");
     }
     handle as u64
 }
@@ -3192,7 +3619,7 @@ pub unsafe fn cell_new<T: ToVoidstar>(schema: &Schema, init: &T) -> u64 {
 pub unsafe fn cell_get<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
     let mut err: *mut c_char = std::ptr::null_mut();
     let voidstar = mlc_cell_get(handle as i64, cschema_of(schema), &mut err);
-    read_voidstar(voidstar, err, schema, "@fold")
+    read_runtime_voidstar(voidstar, err, schema, "@fold")
 }
 
 /// @cellput: replace this thread's accumulator.
@@ -3201,7 +3628,7 @@ pub unsafe fn cell_put<T: ToVoidstar>(schema: &Schema, handle: u64, value: &T) {
         mlc_cell_put(handle as i64, cs, vs, err)
     });
     if rc != 0 {
-        morloc_throw("@fold: could not store the accumulator");
+        failed_without_reason("@fold");
     }
 }
 
@@ -3221,17 +3648,29 @@ pub unsafe fn cell_reduce<T: FromVoidstar, F: MorlocFn2<T, T, T>>(
     let n = mlc_cell_count(handle as i64, &mut err);
     check_err(err);
     if n < 1 {
-        morloc_throw("@fold: the accumulator holds nothing to merge");
+        failed_without_reason("@fold");
     }
     let slot = |i: i64| -> T {
         let mut serr: *mut c_char = std::ptr::null_mut();
         let vs = mlc_cell_slot(handle as i64, i, cschema_of(schema), &mut serr);
-        read_voidstar(vs, serr, schema, "@fold")
+        read_runtime_voidstar(vs, serr, schema, "@fold")
     };
+    struct FreeOnUnwind(i64);
+    impl Drop for FreeOnUnwind {
+        fn drop(&mut self) {
+            let mut err: *mut c_char = std::ptr::null_mut();
+            unsafe {
+                mlc_cell_free(self.0, &mut err);
+                discard_err(err);
+            }
+        }
+    }
+    let guard = FreeOnUnwind(handle as i64);
     let mut acc = slot(0);
     for i in 1..n {
         acc = combine.call2(&acc, &slot(i));
     }
+    std::mem::forget(guard);
     let mut ferr: *mut c_char = std::ptr::null_mut();
     mlc_cell_free(handle as i64, &mut ferr);
     check_err(ferr);
@@ -3394,54 +3833,474 @@ pub unsafe fn fail_packet(msg: &str) -> *mut u8 {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch guard (I2): run a manifold body, converting a MorlocThrow panic to
-// a catchable fail packet and aborting on any other (bug) panic. Generated
-// dispatch arms wrap their body in this.
+// Dispatch guard (I2): run a manifold body, converting a MorlocThrow or a
+// panic in user code to a catchable fail packet (PANIC-6). A panic in this
+// runtime's own frames ends the pool before it unwinds here (PANIC-5).
+// Generated dispatch arms wrap their body in this.
 // ---------------------------------------------------------------------------
 pub fn dispatch_guard<F>(f: F) -> *mut u8
 where
     F: FnOnce() -> *mut u8 + std::panic::UnwindSafe,
 {
-    match std::panic::catch_unwind(f) {
+    // PANIC-6: libmorloc's hook lets a panic outside this runtime's own
+    // frames unwind to here.
+    let outer = unsafe { morloc_catch_scope(MORLOC_SCOPE_HOST) };
+    let outer_reply = REPLY.with(|r| r.replace(std::ptr::null_mut()));
+    let result = std::panic::catch_unwind(f);
+    let built = REPLY.with(|r| r.replace(outer_reply));
+    unsafe { morloc_catch_scope(outer) };
+    if result.is_err() && !built.is_null() {
+        unsafe { libc::free(built as *mut c_void) };
+    }
+    match result {
         Ok(p) => p,
+        Err(payload) if payload.is::<MorlocPipeClosed>() => {
+            TRACEBACK.with(|t| t.borrow_mut().clear());
+            let msg = CString::new(PIPE_CLOSED_MESSAGE).unwrap();
+            unsafe { make_pipe_closed_packet(msg.as_ptr()) }
+        }
         Err(payload) => {
-            if let Some(MorlocThrow(msg)) = payload.downcast_ref::<MorlocThrow>() {
-                // Append the manifold trace accumulated during unwind, so the
-                // message + traceback crosses the pool boundary as one string.
-                let full = TRACEBACK.with(|t| {
-                    let mut tb = t.borrow_mut();
-                    let s = format!("{}{}", msg, tb);
-                    tb.clear();
-                    s
-                });
-                unsafe { fail_packet(&full) }
-            } else {
-                eprintln!("MORLOC_INTERNAL_ABORT: Rust pool panicked (non-throw payload)");
-                std::process::abort();
-            }
+            let msg = panic_message(payload.as_ref());
+            // Append the manifold trace accumulated during unwind, so the
+            // message + traceback crosses the pool boundary as one string.
+            let full = TRACEBACK.with(|t| {
+                let mut tb = t.borrow_mut();
+                let s = format!("{}{}", msg, tb);
+                tb.clear();
+                s
+            });
+            unsafe { fail_packet(&full) }
         }
     }
 }
 
-/// Install a panic hook that suppresses the default backtrace for MorlocThrow
-/// (I2/E3), keeping obs.err readable when `@throw` fires in a loop. Genuine
-/// bug panics still print. Call once at pool startup.
-pub fn install_panic_hook() {
-    let default = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        if let Some(p) = info.payload().downcast_ref::<MorlocThrow>() {
-            let _ = p;
-            return; // user @throw: silent, surfaced as a fail packet
-        }
-        default(info);
-    }));
-}
 
 // ---------------------------------------------------------------------------
 // Tests: round-trip the identical walk against a local buffer (buffer-relative
 // relptrs via TEST_BASE), so no libmorloc.so / SHM state is required (I: the
 // plan's Stage-1 standalone-testability note).
 // ---------------------------------------------------------------------------
+#[cfg(test)]
+mod panic_classifier_tests {
+    use super::*;
+
+    include!("panic_probe_user.rs");
+    include!("panic_probe_pool.rs");
+
+    const USER: &str = "/home/u/proj/h.rs";
+    const POOL: &str = "/pool/src/main.rs";
+
+    fn frame(i: usize, symbol: &str, file: Option<&str>) -> String {
+        let mut t = format!("  {i:2}:     0x{i:x} - {symbol}\n");
+        if let Some(f) = file {
+            let placed = f.rsplitn(3, ':').take(2).all(all_digits) && f.matches(':').count() >= 2;
+            let at = if placed { f.to_string() } else { format!("{f}:1:1") };
+            t.push_str(&format!("                               at {at}\n"));
+        }
+        t
+    }
+
+    /// A trace in std's full format: the hook's frames (this runtime's
+    /// classifier among them unless `untrusted`, plus `above`), the panic
+    /// machinery, a panicking std function, then `below`.
+    fn trace(above: &[(&str, Option<&str>)], below: &[(&str, Option<&str>)], untrusted: bool) -> String {
+        let rt = format!("{}lib.rs", this_crate_dirs()[1]);
+        let mut fs: Vec<(String, Option<String>)> = vec![("std[h]::backtrace::Backtrace::force_capture".into(), Some("/rustc/H/library/std/src/backtrace.rs".into()))];
+        for (sym, f) in above {
+            fs.push((sym.to_string(), f.map(String::from)));
+        }
+        if !untrusted {
+            fs.push(("rustmorloc::panic_is_runtime".into(), Some(rt)));
+            fs.push(("pool::mlc_classify_panic".into(), Some(POOL.into())));
+        }
+        fs.push(("std[h]::panicking::panic_with_hook".into(), Some("/rustc/H/library/std/src/panicking.rs".into())));
+        fs.push(("std[h]::sys::backtrace::__rust_end_short_backtrace".into(), Some("/rustc/H/library/std/src/sys/backtrace.rs".into())));
+        fs.push(("core[h]::panicking::panic".into(), Some("/rustc/H/library/core/src/panicking.rs".into())));
+        fs.push(("core[h]::iter::adapters::step_by::new".into(), Some("/rustc/H/library/core/src/iter/adapters/step_by.rs".into())));
+        for (sym, f) in below {
+            fs.push((sym.to_string(), f.map(String::from)));
+        }
+        fs.iter().enumerate().map(|(i, (sym, f))| frame(i, sym, f.as_deref())).collect()
+    }
+
+    fn walk(t: &str) -> bool {
+        walk_is_runtime(t, &[POOL], &[USER], &[])
+    }
+
+    #[test]
+    fn a_source_belongs_to_the_user_the_runtime_or_neither() {
+        let user = [USER];
+        let pool = ["src/main.rs", POOL];
+        let types = format!("{}schema.rs", morloc_runtime_types::panic::source_dirs()[1]);
+        assert_eq!(side_of(USER, &pool, &user), Side::User);
+        assert_eq!(side_of(POOL, &pool, &user), Side::Runtime);
+        assert_eq!(side_of("src/main.rs", &pool, &user), Side::Runtime);
+        for d in this_crate_dirs() {
+            assert_eq!(side_of(&format!("{d}x.rs"), &pool, &user), Side::Runtime);
+        }
+        assert_eq!(side_of(&types, &pool, &user), Side::Runtime);
+        assert_eq!(side_of("/rustc/H/library/core/src/x.rs", &pool, &user), Side::Neither);
+        assert_eq!(side_of("/home/u/.cargo/registry/src/x/arrow/lib.rs", &pool, &user), Side::Neither);
+    }
+
+    #[test]
+    fn a_file_below_a_user_directory_is_the_users_unless_claimed_or_hidden() {
+        let pool = ["/home/u/proj/b/pools/rust/src/main.rs"];
+        let user = [USER, "/home/u/proj/", "/home/u/"];
+        assert_eq!(side_of("/home/u/proj/sub/helper.rs", &pool, &user), Side::User);
+        assert_eq!(side_of(pool[0], &pool, &user), Side::Runtime);
+        assert_eq!(side_of("/home/u/.cargo/registry/src/x/arrow/lib.rs", &pool, &user), Side::Neither);
+        assert_eq!(side_of("/home/u/projx/a.rs", &pool, &["/home/u/proj/"]), Side::Neither);
+        for d in this_crate_dirs().iter().chain(sibling_runtime_dirs().iter()) {
+            assert_eq!(side_of(&format!("{d}x.rs"), &pool, &["/"]), Side::Runtime);
+        }
+        assert_eq!(side_of("/home/u/proj/sub/./b.rs", &pool, &user), Side::User);
+        assert_eq!(side_of("/home/u/proj/sub/../c.rs", &pool, &["/home/u/proj/sub/"]), Side::Neither);
+        assert_eq!(side_of("/home/u/proj/sub/../c.rs", &pool, &["/home/u/proj/"]), Side::User);
+        assert_eq!(side_of("/rustc/H/library/core/src/x.rs", &pool, &["/"]), Side::Neither);
+        assert_eq!(side_of("/usr/local/cargo/registry/src/x/arrow/lib.rs", &pool, &["/usr/"]), Side::Neither);
+    }
+
+    #[test]
+    fn a_runtime_crates_frame_is_the_runtimes_from_any_file() {
+        assert!(runtime_symbol("morloc_runtime[1a2b]::cell::cell_put"));
+        assert!(runtime_symbol("<rustmorloc::X as core::ops::Drop>::drop"));
+        assert!(!runtime_symbol("morloc_runtimex::f"));
+        assert!(!runtime_symbol("pool_ab12::m1"));
+        let t = trace(&[], &[("morloc_runtime[h]::cell::cell_put", Some("/elsewhere/cell.rs")), ("u", Some(USER))], false);
+        assert!(walk_is_runtime(&t, &[POOL], &[USER, "/"], &[]));
+    }
+
+    #[test]
+    fn a_location_names_its_line_with_or_without_a_column() {
+        assert_eq!(split_location("/x/src/main.rs:120:5"), ("/x/src/main.rs", Some(120), Some(5)));
+        assert_eq!(split_location("/x/src/main.rs:120"), ("/x/src/main.rs", Some(120), None));
+        assert_eq!(split_location("C:/a:b/main.rs:7:1"), ("C:/a:b/main.rs", Some(7), Some(1)));
+        assert_eq!(split_location("/x/src/main.rs"), ("/x/src/main.rs", None, None));
+    }
+
+    #[test]
+    fn a_frame_at_a_registered_call_of_the_generated_source_is_the_users() {
+        let at = format!("{POOL}:7:13");
+        let t = trace(&[], &[("dep::f", Some("/elsewhere/dep.rs")), ("pool::m1", Some(&at))], false);
+        assert!(!walk_is_runtime(&t, &[POOL], &[USER], &[(7, 13)]));
+        assert!(walk_is_runtime(&t, &[POOL], &[USER], &[(7, 14)]));
+        assert!(walk_is_runtime(&t, &[POOL], &[USER], &[(8, 13)]));
+    }
+
+    #[test]
+    fn a_closure_convention_frame_forwards_to_its_caller() {
+        let rt = format!("{}lib.rs", this_crate_dirs()[1]);
+        let call = format!("{POOL}:7:20");
+        let apply = ("<F as rustmorloc::MorlocFn1<i64, i64>>::call1", Some(rt.as_str()));
+        let inlined = ("call1<i64, i64, pool::curried::{closure_env#0}>", Some(rt.as_str()));
+        for frame in [apply, inlined] {
+            let t = trace(&[], &[("dep::f", Some("/elsewhere/dep.rs")), frame, ("pool::m1", Some(&call))], false);
+            assert!(!walk_is_runtime(&t, &[POOL], &[USER], &[(7, 20)]));
+            assert!(walk_is_runtime(&t, &[POOL], &[USER], &[]));
+        }
+        let elsewhere = ("call1<i64>", Some("/elsewhere/dep.rs"));
+        let t = trace(&[], &[("dep::f", Some("/elsewhere/dep.rs")), elsewhere, ("rustmorloc::x", Some(rt.as_str())), ("pool::m1", Some(&call))], false);
+        assert!(walk_is_runtime(&t, &[POOL], &[USER], &[(7, 20)]));
+        let generated = format!("{POOL}:3:5");
+        let t = trace(&[], &[("pool::m1::{{closure}}", Some(&generated)), apply, ("pool::m1", Some(&call))], false);
+        assert!(walk_is_runtime(&t, &[POOL], &[USER], &[(7, 20)]));
+    }
+
+    #[test]
+    fn the_first_user_or_runtime_frame_below_the_panic_decides() {
+        assert!(!walk(&trace(&[], &[("h::f", Some(USER)), ("pool::m1", Some(POOL))], false)));
+        assert!(walk(&trace(&[], &[("pool::m1", Some(POOL)), ("h::f", Some(USER))], false)));
+        assert!(!walk(&trace(&[], &[("dep::g", Some("/reg/dep/lib.rs")), ("h::f", Some(USER))], false)));
+        let rt = format!("{}x.rs", this_crate_dirs()[1]);
+        assert!(walk(&trace(&[], &[("arrow::a", Some("/reg/arrow/lib.rs")), ("rustmorloc::x", Some(&rt)), ("h::f", Some(USER))], false)));
+    }
+
+    #[test]
+    fn frames_above_the_panic_machinery_do_not_decide() {
+        assert!(walk(&trace(&[("h::hooked", Some(USER))], &[("pool::m1", Some(POOL))], false)));
+    }
+
+    #[test]
+    fn the_catch_below_the_panicking_code_is_not_the_panic_machinery() {
+        let catch = ("std[h]::panicking::catch_unwind::do_call", Some("/rustc/H/library/std/src/panicking.rs"));
+        assert!(!walk(&trace(&[], &[("h::f", Some(USER)), catch, ("pool::dispatch", Some(POOL))], false)));
+    }
+
+    #[test]
+    fn an_untrusted_trace_is_the_runtimes() {
+        assert!(walk(&trace(&[], &[("h::f", Some(USER))], true)));
+    }
+
+    #[test]
+    fn a_trace_without_the_pools_classifier_frame_is_untrusted() {
+        let rt = format!("{}lib.rs", this_crate_dirs()[1]);
+        let t = trace(&[("rustmorloc::panic_is_runtime", Some(&rt))], &[("h::f", Some(USER))], true);
+        assert!(walk(&t));
+    }
+
+    #[test]
+    fn an_unresolved_frame_of_unknown_code_is_the_runtimes() {
+        assert!(walk(&trace(&[], &[("glue::unresolved", None), ("h::f", Some(USER))], false)));
+        assert!(!walk(&trace(&[], &[("core[h]::option::unwrap", None), ("h::f", Some(USER))], false)));
+    }
+
+    #[test]
+    fn a_trace_without_files_is_the_runtimes() {
+        assert!(walk("   0: 0x1 - hook\n   1: 0x2 - core::panicking::panic\n   2: 0x3 - main\n"));
+    }
+
+    const CHILD_ENV: &str = "MORLOC_CLASSIFIER_TEST_CHILD";
+
+    fn verdict_of_child(name: &str) -> i32 {
+        verdict_of_child_in(name, std::env::current_dir().unwrap())
+    }
+
+    fn verdict_of_child_in(name: &str, dir: impl AsRef<std::path::Path>) -> i32 {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .current_dir(dir)
+            .args([&format!("panic_classifier_tests::{name}"), "--exact", "--ignored", "--test-threads=1"])
+            .env(CHILD_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .code()
+            .unwrap_or(-1)
+    }
+
+    fn classify_in_child(work: impl FnOnce()) {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        register_pool_files(&[POOL_FILE, POOL_FILE_ABS], &[USER_FILE, USER_FILE_ABS], &[]);
+        std::panic::set_hook(Box::new(|info| {
+            let file = info.location().map(|l| l.file()).unwrap_or("");
+            let runtime = probe_classify_panic(file.as_ptr(), file.len());
+            unsafe { libc::_exit(if runtime { 11 } else { 10 }) };
+        }));
+        work();
+        unsafe { libc::_exit(3) };
+    }
+
+    #[test]
+    fn a_std_panic_raised_for_user_code_is_the_users() {
+        assert_eq!(verdict_of_child("child_user_steps"), 10);
+    }
+
+    #[test]
+    fn a_classification_does_not_depend_on_the_working_directory() {
+        assert_eq!(verdict_of_child_in("child_user_steps", env!("CARGO_MANIFEST_DIR")), 10);
+        assert_eq!(verdict_of_child_in("child_user_steps", "/"), 10);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_user_steps() {
+        classify_in_child(|| { user_steps(0); });
+    }
+
+    #[test]
+    fn a_std_panic_raised_by_runtime_code_inside_a_user_generic_is_the_runtimes() {
+        assert_eq!(verdict_of_child("child_runtime_steps_in_user_generic"), 11);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_runtime_steps_in_user_generic() {
+        classify_in_child(|| { user_apply(|| (0..10).step_by(std::hint::black_box(0)).count()); });
+    }
+
+    #[test]
+    fn a_panic_at_a_user_line_is_the_users() {
+        assert_eq!(verdict_of_child("child_user_index"), 10);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_user_index() {
+        classify_in_child(|| { user_index(&[1], std::hint::black_box(5)); });
+    }
+}
+
+#[cfg(test)]
+mod runtime_failure_tests {
+    use super::*;
+    use morloc_runtime_types::panic::PANIC_EXIT_STATUS;
+    use morloc_runtime_types::schema::parse_schema;
+
+    const CHILD_ENV: &str = "MORLOC_RUNTIME_FAILURE_TEST_CHILD";
+
+    fn status_of_child(name: &str) -> i32 {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([&format!("runtime_failure_tests::{name}"), "--exact", "--ignored", "--test-threads=1"])
+            .env(CHILD_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .code()
+            .unwrap_or(-1)
+    }
+
+    fn in_child(work: impl FnOnce()) {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        work();
+        unsafe { libc::_exit(3) };
+    }
+
+    fn reason(text: &str) -> *mut c_char {
+        let c = CString::new(text).unwrap();
+        unsafe { libc::strdup(c.as_ptr()) }
+    }
+
+    #[test]
+    fn a_runtime_value_failure_without_a_reason_ends_the_pool() {
+        assert_eq!(status_of_child("child_reads_a_null_value_without_a_reason"), PANIC_EXIT_STATUS);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_reads_a_null_value_without_a_reason() {
+        in_child(|| {
+            let schema = parse_schema("as").unwrap();
+            let _: Vec<String> = unsafe { read_voidstar(std::ptr::null_mut(), std::ptr::null_mut(), &schema, "@load") };
+        });
+    }
+
+    #[test]
+    fn a_runtime_handle_failure_without_a_reason_ends_the_pool() {
+        assert_eq!(status_of_child("child_gets_a_bad_handle_without_a_reason"), PANIC_EXIT_STATUS);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_gets_a_bad_handle_without_a_reason() {
+        in_child(|| {
+            unsafe { handle_or_throw(-1, std::ptr::null_mut(), "@open") };
+        });
+    }
+
+    #[test]
+    fn a_region_outside_a_runtime_built_value_ends_the_pool() {
+        assert_eq!(status_of_child("child_reads_past_a_runtime_built_value"), PANIC_EXIT_STATUS);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_reads_past_a_runtime_built_value() {
+        in_child(|| {
+            let buf = [0u8; 8];
+            let _built = RuntimeValueRead::enter();
+            unsafe { resolve(0, 64, MorlocSpace::payload(buf.as_ptr(), buf.len())) };
+        });
+    }
+
+    #[test]
+    fn a_region_outside_an_input_value_is_a_catchable_error() {
+        let buf = [0u8; 8];
+        let caught = std::panic::catch_unwind(|| unsafe { resolve(0, 64, MorlocSpace::payload(buf.as_ptr(), buf.len())) });
+        assert!(panic_message(caught.unwrap_err().as_ref()).contains("runs past"));
+    }
+
+    #[test]
+    fn the_pools_own_hook_ends_the_process_on_a_panic_outside_a_catch() {
+        assert_eq!(status_of_child("child_panics_under_the_pools_hook"), PANIC_EXIT_STATUS);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_panics_under_the_pools_hook() {
+        in_child(|| {
+            install_panic_hook();
+            let _ = std::panic::catch_unwind(|| interweave_strings(&[], &["x"]));
+        });
+    }
+
+    #[test]
+    fn the_pools_own_hook_lets_a_panic_in_a_host_scope_unwind() {
+        assert_eq!(status_of_child("child_panics_in_a_host_scope_under_the_pools_hook"), 42);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_panics_in_a_host_scope_under_the_pools_hook() {
+        in_child(|| {
+            install_panic_hook();
+            let outer = unsafe { morloc_catch_scope(MORLOC_SCOPE_HOST) };
+            let caught = std::panic::catch_unwind(|| panic!("user")).is_err();
+            unsafe { morloc_catch_scope(outer) };
+            if caught {
+                unsafe { libc::_exit(42) };
+            }
+        });
+    }
+
+    #[test]
+    fn a_runtime_failure_with_a_reason_is_a_catchable_error() {
+        let schema = parse_schema("as").unwrap();
+        let caught = std::panic::catch_unwind(|| {
+            let _: Vec<String> = unsafe { read_voidstar(std::ptr::null_mut(), reason("no such file"), &schema, "@load") };
+        })
+        .unwrap_err();
+        assert_eq!(panic_message(caught.as_ref()), "@load: no such file");
+    }
+
+    #[test]
+    fn a_closed_pipe_passes_through_try() {
+        let escaped = std::panic::catch_unwind(|| {
+            mlc_try(|| -> i64 { pipe_closed() }, |_| "ok".to_string(), |e| format!("caught {e}"))
+        })
+        .unwrap_err();
+        assert!(escaped.is::<MorlocPipeClosed>());
+    }
+
+    #[test]
+    fn a_closed_pipe_fails_the_call_with_its_own_message() {
+        let packet = dispatch_guard(|| -> *mut u8 { pipe_closed() });
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let msg = unsafe { get_morloc_data_packet_error_message(packet, &mut err) };
+        assert!(err.is_null());
+        assert_eq!(unsafe { cstr_take(msg) }, PIPE_CLOSED_MESSAGE);
+        assert!(unsafe { morloc_packet_is_pipe_closed(packet) });
+        unsafe { libc::free(packet as *mut c_void) };
+    }
+
+    #[test]
+    fn a_reply_built_before_the_manifold_unwinds_is_released_by_the_dispatch() {
+        struct PanicsOnDrop;
+        impl Drop for PanicsOnDrop {
+            fn drop(&mut self) {
+                panic!("drop");
+            }
+        }
+        let outer = 0x10 as *mut u8;
+        REPLY.with(|r| r.set(outer));
+        let packet = dispatch_guard(|| -> *mut u8 {
+            let _d = PanicsOnDrop;
+            let msg = CString::new("built").unwrap();
+            let p = unsafe { make_fail_packet(msg.as_ptr()) };
+            REPLY.with(|r| r.set(p));
+            p
+        });
+        assert_eq!(REPLY.with(|r| r.replace(std::ptr::null_mut())), outer);
+        unsafe { libc::free(packet as *mut c_void) };
+    }
+
+    #[test]
+    fn a_callee_whose_pipe_closed_ends_the_callers_call_past_try() {
+        let msg = CString::new("closed downstream").unwrap();
+        let packet = unsafe { make_pipe_closed_packet(msg.as_ptr()) };
+        let escaped = std::panic::catch_unwind(|| {
+            mlc_try(|| -> usize { (unsafe { finalize_call_result(packet) }) as usize }, |_| 0, |_| 1)
+        })
+        .unwrap_err();
+        assert!(escaped.is::<MorlocPipeClosed>());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

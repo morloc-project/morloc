@@ -53,8 +53,26 @@ impl JobState {
     /// same as COMPLETED -- the result file (or its absence) is what
     /// the caller checks next.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, JobState::Completed | JobState::Failed | JobState::Cancelled)
+        match self {
+            JobState::Completed | JobState::Failed | JobState::Cancelled => true,
+            JobState::Unknown(s) => state_is_terminal(s),
+            JobState::Pending | JobState::Running => false,
+        }
     }
+}
+
+/// Job states after which a job makes no further progress.
+const TERMINAL_STATES: [&str; 9] =
+    ["COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "BOOT_FAIL", "DEADLINE", "PREEMPTED"];
+
+/// Whether a state as Slurm prints it (`CANCELLED by 1234`, `TIMEOUT`)
+/// is one after which the job makes no further progress.
+pub(crate) fn state_is_terminal(state: &str) -> bool {
+    state.split_whitespace().next().is_some_and(|s| match s.strip_suffix('+') {
+        // A state sacct cut to its column width, as `OUT_OF_ME+`.
+        Some(cut) => !cut.is_empty() && TERMINAL_STATES.iter().any(|t| t.starts_with(cut)),
+        None => TERMINAL_STATES.contains(&s),
+    })
 }
 
 /// SLURM resource request packed into the submit RPC.
@@ -185,5 +203,21 @@ pub fn socket_from_env() -> Option<String> {
     match std::env::var("MORLOC_BRIDGE_SOCKET") {
         Ok(p) if !p.is_empty() => Some(p),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod terminal_state_tests {
+    use super::*;
+
+    #[test]
+    fn a_job_that_timed_out_or_ran_out_of_memory_is_finished() {
+        for s in ["TIMEOUT", "OUT_OF_MEMORY", "OUT_OF_ME+", "NODE_FAIL", "CANCELLED by 1234", "COMPLETED"] {
+            assert!(JobState::parse(s).is_terminal(), "{s}");
+            assert!(state_is_terminal(s), "{s}");
+        }
+        for s in ["PENDING", "RUNNING", "REQUEUED", "RUNNIN+", ""] {
+            assert!(!JobState::parse(s).is_terminal(), "{s}");
+        }
     }
 }

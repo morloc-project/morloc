@@ -28,6 +28,7 @@ module Morloc.Module
 
     -- * Module installation
   , OverwriteProtocol (..)
+  , withModuleLock
   , GitProtocol (..)
   , InstallReason (..)
   , TypecheckFn
@@ -51,8 +52,11 @@ module Morloc.Module
   ) where
 
 import Control.Applicative (optional)
-import Control.Exception (IOException, catch, onException)
-import Control.Monad.Except (catchError, throwError)
+import Control.Exception (IOException, catch, finally, onException)
+import Control.Monad.Except (runExceptT, throwError)
+import Control.Monad.Reader (ask, runReaderT)
+import Control.Monad.State (get, put, runStateT)
+import Control.Monad.Writer (runWriterT, tell)
 import GHC.IO.Handle.Lock (LockMode(ExclusiveLock), hLock, hTryLock)
 import Text.Parsec (Parsec, try, parse, many, many1)
 import Text.Parsec.Char (char, string, alphaNum, digit, satisfy)
@@ -85,7 +89,7 @@ import qualified Network.HTTP.Simple as HTTP
 import System.Directory
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
-import System.IO (IOMode(ReadWriteMode), hClose, openFile, stderr)
+import System.IO (hClose, stderr)
 import System.Process
   ( callProcess
   , createProcess
@@ -198,25 +202,30 @@ runCleanup targetDir = do
 -- so concurrent @morloc make@/@morloc install@ processes installing the SAME
 -- module serialize (a waiter proceeds -- and hits the already-installed no-op --
 -- once the holder finishes), while different modules install in parallel. The
--- lock is an advisory @flock@ ('GHC.IO.Handle.Lock') on a lockfile under fdb, so
--- it is released on scope exit, on a MorlocError, and automatically on process
--- death. A "waiting" message is emitted only when the lock is actually
--- contended, so the common (uncontended) path stays quiet.
+-- lock is an advisory @flock@ ('GHC.IO.Handle.Lock') on a lockfile under fdb,
+-- released when the action ends however it ends, and on process death; no
+-- program the action starts inherits it. A "waiting" message is emitted only
+-- when the lock is actually contended, so the common (uncontended) path stays
+-- quiet.
 withModuleLock :: FilePath -> Text -> MorlocMonad a -> MorlocMonad a
 withModuleLock fdbDir name action = do
   let lockPath = fdbDir </> (map slashToUnderscore (MT.unpack name) ++ ".lock")
   liftIO $ createDirectoryIfMissing True fdbDir
-  h <- liftIO $ openFile lockPath ReadWriteMode
-  gotImmediately <- liftIO $ hTryLock h ExclusiveLock
+  h <- liftIO $ MS.openLockFile lockPath
+  gotImmediately <- liftIO $ hTryLock h ExclusiveLock `onException` hClose h
   unless gotImmediately $ do
     MM.say $ "Waiting for another process to finish installing"
       <+> squotes (pretty name) <> "..."
-    liftIO $ hLock h ExclusiveLock
-  -- Release on both normal completion and a MorlocError (throwError). An
-  -- uncaught IO exception unwinds past this, but flock releases on process death.
-  result <- action `catchError` \e -> liftIO (hClose h) >> throwError e
-  liftIO (hClose h)
-  return result
+    liftIO $ hLock h ExclusiveLock `onException` hClose h
+  -- The action runs as plain IO so the lock is released however it ends: a
+  -- MorlocError, or an IO exception that a caller may catch and go on from.
+  cfg <- ask
+  st <- get
+  ((r, logs), st') <-
+    liftIO $ runStateT (runWriterT (runExceptT (runReaderT action cfg))) st `finally` hClose h
+  put st'
+  tell logs
+  either throwError return r
   where
     slashToUnderscore c = if c == '/' then '_' else c
 

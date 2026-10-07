@@ -29,7 +29,7 @@
 
 typedef struct {
     absptr_t block;
-    pid_t pid;
+    uint64_t generation;
 } shm_view_owner_t;
 
 typedef struct {
@@ -45,9 +45,11 @@ static void shm_view_owner_release(PyObject* capsule) {
         PyErr_Clear();
         return;
     }
+    morloc_view_released(o);
     // A forked child inherits the object but not the reference: the
-    // reference belongs to the process that took it.
-    if (o->pid == getpid()) {
+    // reference belongs to the process that took it (FORK-14); the child's
+    // lease holds one of its own (FORK-15).
+    if (o->generation == morloc_fork_generation()) {
         char* err = NULL;
         shfree(o->block, &err);
         if (err) { free(err); }
@@ -75,9 +77,11 @@ static PyObject* shm_view_owner(void) {
         return NULL;
     }
     o->block = shm_view_ctx.block;
-    o->pid = getpid();
+    o->generation = morloc_fork_generation();
+    morloc_view_held(o->block, o);
     PyObject* capsule = PyCapsule_New(o, "morloc.shm_view", shm_view_owner_release);
     if (capsule == NULL) {
+        morloc_view_released(o);
         shfree(o->block, &err);
         if (err) { free(err); }
         free(o);
@@ -101,8 +105,24 @@ typedef struct {
 static __thread shm_entry_t* shm_tracker = NULL;
 static __thread size_t shm_tracker_count = 0;
 static __thread size_t shm_tracker_cap = 0;
+static __thread uint64_t shm_tracker_gen = 0;
+
+static void shm_tracker_forget_inherited(void) {
+    uint64_t g = morloc_fork_generation();
+    if (g == shm_tracker_gen) {
+        return;
+    }
+    for (size_t i = 0; i < shm_tracker_count; i++) {
+        if (shm_tracker[i].schema) {
+            free_schema(shm_tracker[i].schema);
+        }
+    }
+    shm_tracker_count = 0;
+    shm_tracker_gen = g;
+}
 
 static void shm_tracker_push(absptr_t ptr, Schema* schema) {
+    shm_tracker_forget_inherited();
     if (shm_tracker_count >= shm_tracker_cap) {
         size_t new_cap = shm_tracker_cap ? shm_tracker_cap * 2 : SHM_TRACKER_INIT_CAP;
         shm_entry_t* new_buf = (shm_entry_t*)realloc(shm_tracker, new_cap * sizeof(shm_entry_t));
@@ -121,6 +141,7 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
 }
 
 static void shm_tracker_flush(void) {
+    shm_tracker_forget_inherited();
     for (size_t i = 0; i < shm_tracker_count; i++) {
         char* err = NULL;
         // shm::shfree decrements the refcount and zeros the block on final
@@ -139,6 +160,7 @@ static void shm_tracker_flush(void) {
 // a put_value-tracked packet's SHM as soon as its codegen-determined
 // scope ends, rather than waiting for the next dispatch flush.
 static bool shm_tracker_release_one(absptr_t ptr) {
+    shm_tracker_forget_inherited();
     for (size_t i = 0; i < shm_tracker_count; i++) {
         if (shm_tracker[i].ptr == ptr) {
             Schema* schema = shm_tracker[i].schema;
@@ -214,6 +236,9 @@ char* get_prior_err(){
 // terminates the pool. Both set in PyInit_pymorloc.
 static PyObject* PyMorlocException = NULL;
 static PyObject* PyMorlocInternalError = NULL;
+static PyObject* PyMorlocPipeClosed = NULL;
+
+#define PIPE_CLOSED_MESSAGE "@stdout: downstream pipe closed"
 
 #define PyINTERNAL_ABORT(msg, ...) { \
     PyErr_Format(PyMorlocInternalError, \
@@ -2347,6 +2372,33 @@ static PyObject* pybinding__lifeline_adopt(PyObject* self, PyObject* args) {
     return PyLong_FromLong(morloc_lifeline_adopt());
 }
 
+// Shared-memory references this process holds (SHM-8).
+static PyObject* pybinding__held_references(PyObject* self, PyObject* args) {
+    return PyLong_FromLongLong((long long)morloc_held_references());
+}
+
+// Remove this process's temp directory (FORK-16).
+static PyObject* pybinding__remove_own_temps(PyObject* self, PyObject* args) {
+    morloc_remove_own_temps();
+    Py_RETURN_NONE;
+}
+
+// Release leases of forked children that are gone (FORK-15).
+static PyObject* pybinding__reclaim_leases(PyObject* self, PyObject* args) {
+    morloc_reclaim_leases();
+    Py_RETURN_NONE;
+}
+
+// Held references plus stream file locks (SHM-8).
+static PyObject* pybinding__retire_blockers(PyObject* self, PyObject* args) {
+    return PyLong_FromLongLong((long long)morloc_retire_blockers());
+}
+
+// The number of threads in this process, or -1 if it cannot be read.
+static PyObject* pybinding__thread_count(PyObject* self, PyObject* args) {
+    return PyLong_FromLong(morloc_thread_count());
+}
+
 // End this pool's process group once the watched lifeline reaches end of file.
 static PyObject* pybinding__lifeline_teardown(PyObject* self, PyObject* args) {
     morloc_lifeline_teardown();
@@ -2414,7 +2466,9 @@ error:
     return NULL;
 }
 
-static PyObject*  pybinding__send_packet_to_foreign_server(PyObject* self, PyObject* args){ MAYFAIL
+// Send a dispatch's reply. What the dispatch still holds on this thread is
+// released once the reply holds the caller's reference, before it is sent.
+static PyObject*  pybinding__send_reply(PyObject* self, PyObject* args){ MAYFAIL
     int client_fd = 0;
     uint8_t* packet = NULL;
     size_t packet_size = 0;
@@ -2429,7 +2483,7 @@ static PyObject*  pybinding__send_packet_to_foreign_server(PyObject* self, PyObj
     // just the syscall, mirroring the stream_from_client binding.)
     size_t bytes_sent = 0;
     Py_BEGIN_ALLOW_THREADS
-    bytes_sent = send_packet_to_foreign_server(client_fd, packet, &child_errmsg_);
+    bytes_sent = send_reply_to_foreign_server(client_fd, packet, shm_tracker_flush, &child_errmsg_);
     Py_END_ALLOW_THREADS
     if (child_errmsg_ != NULL) {
         char* prior_err = get_prior_err();
@@ -3166,7 +3220,8 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
             (const uint8_t*)result, &fail_check_err);
         if (fail_check_err != NULL) { free(fail_check_err); }
         if (fail_msg != NULL) {
-            PyErr_Format(PyExc_RuntimeError, "%s", fail_msg);
+            PyErr_Format(morloc_packet_is_pipe_closed((const uint8_t*)result) ? PyMorlocPipeClosed : PyExc_RuntimeError,
+                         "%s", fail_msg);
             free(fail_msg);
             free(result);
             result = NULL;
@@ -3273,6 +3328,12 @@ error:
     return NULL;
 }
 
+
+static PyObject* pybinding__exit_if_forked(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    morloc_exit_if_forked();
+    Py_RETURN_NONE;
+}
 
 static PyObject* pybinding__is_ping(PyObject* self, PyObject* args) { MAYFAIL
     char* packet;
@@ -3386,6 +3447,27 @@ static PyObject* pybinding__make_fail_packet(PyObject* self, PyObject* args) { M
     PARSE_ARGS_OR_ABORT(args, "s", &packet_errmsg);
 
     packet = make_fail_packet(packet_errmsg);
+
+    size_t packet_size = PyTRY(morloc_packet_size, packet);
+
+    {
+        PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
+        free(packet);
+        return retval;
+    }
+
+error:
+    FREE(packet)
+    return NULL;
+}
+
+static PyObject* pybinding__make_pipe_closed_packet(PyObject* self, PyObject* args) { MAYFAIL
+    const char* packet_errmsg;
+    uint8_t* packet = NULL;
+
+    PARSE_ARGS_OR_ABORT(args, "s", &packet_errmsg);
+
+    packet = make_pipe_closed_packet(packet_errmsg);
 
     size_t packet_size = PyTRY(morloc_packet_size, packet);
 
@@ -3633,13 +3715,14 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
 
     // @read :: Str -> <Err> a -- parse failure raises MorlocException
     // so _mlc_catch can intercept.
+    if (voidstar == NULL && read_err == NULL) {
+        PyINTERNAL_ABORT("@read: the runtime failed without giving a reason");
+    }
     if (voidstar == NULL) {
         if (PyMorlocException != NULL) {
-            PyErr_SetString(PyMorlocException,
-                            read_err != NULL ? read_err : "@read: parse failed");
+            PyErr_SetString(PyMorlocException, read_err);
         } else {
-            PyErr_SetString(PyExc_RuntimeError,
-                            read_err != NULL ? read_err : "@read: parse failed");
+            PyErr_SetString(PyExc_RuntimeError, read_err);
         }
         if (read_err != NULL) free(read_err);
         free_schema(schema);
@@ -3689,13 +3772,16 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
 
     // @load :: Str -> <IO, Err> a -- missing file / decode failure
     // raises MorlocException so _mlc_catch can intercept.
+    if (voidstar == NULL && load_err == NULL) {
+        PyINTERNAL_ABORT("@load: the runtime failed without giving a reason");
+    }
     if (voidstar == NULL) {
         if (PyMorlocException != NULL) {
             PyErr_SetString(PyMorlocException,
-                            load_err != NULL ? load_err : "@load: failed to load file");
+                            load_err);
         } else {
             PyErr_SetString(PyExc_RuntimeError,
-                            load_err != NULL ? load_err : "@load: failed to load file");
+                            load_err);
         }
         if (load_err != NULL) free(load_err);
         free_schema(schema);
@@ -3747,7 +3833,10 @@ static PyObject* pybinding__mlc_close(PyObject* self, PyObject* args) { MAYFAIL
     PARSE_ARGS_OR_ABORT(args, "L", &handle_ll);
     int32_t rc_ = 0;
     PyTRY_NOGIL(rc_, mlc_close, (int64_t)handle_ll);
-    (void)rc_;
+    if (rc_ == MLC_RESULT_PIPE_CLOSED) {
+        PyErr_SetString(PyMorlocPipeClosed, PIPE_CLOSED_MESSAGE);
+        goto error;
+    }
     Py_RETURN_NONE;
 error:
     return NULL;
@@ -4062,7 +4151,10 @@ static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
     {
         int32_t rc_ = 0;
         PyTRY_NOGIL(rc_, mlc_write, level_ll, (int64_t)handle_ll, voidstar);
-        (void)rc_;
+        if (rc_ == MLC_RESULT_PIPE_CLOSED) {
+            PyErr_SetString(PyMorlocPipeClosed, PIPE_CLOSED_MESSAGE);
+            goto error;
+        }
     }
     {
         char* shfree_errmsg = NULL;
@@ -4216,7 +4308,10 @@ static PyObject* pybinding__mlc_flush(PyObject* self, PyObject* args) { MAYFAIL
     PARSE_ARGS_OR_ABORT(args, "L", &handle_ll);
     int32_t rc_ = 0;
     PyTRY_NOGIL(rc_, mlc_flush, (int64_t)handle_ll);
-    (void)rc_;
+    if (rc_ == MLC_RESULT_PIPE_CLOSED) {
+        PyErr_SetString(PyMorlocPipeClosed, PIPE_CLOSED_MESSAGE);
+        goto error;
+    }
     Py_RETURN_NONE;
 error:
     return NULL;
@@ -4400,9 +4495,7 @@ static PyObject* pybinding__mlc_cell_reduce(PyObject* self, PyObject* args) { MA
     PARSE_ARGS_OR_ABORT(args, "sOL", &schema_str, &combine, &handle_ll);
     int64_t n = PyTRY(mlc_cell_count, (int64_t)handle_ll);
     if (n < 1) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "mlc_cell_reduce: fold accumulator holds nothing to merge");
-        goto error;
+        PyINTERNAL_ABORT("mlc_cell_reduce: fold accumulator holds nothing to merge");
     }
     for (int64_t i = 0; i < n; i++) {
         // One schema per accumulator: from_voidstar may hand back a numpy
@@ -4459,10 +4552,17 @@ static PyMethodDef Methods[] = {
     {"set_self_socket", pybinding__set_self_socket, METH_VARARGS, "Record the socket this pool serves"},
     {"lifeline_adopt", pybinding__lifeline_adopt, METH_NOARGS, "The lifeline descriptor to watch for the nexus's end, or -1"},
     {"lifeline_teardown", pybinding__lifeline_teardown, METH_NOARGS, "End this pool's process group after the nexus ended"},
+    {"thread_count", pybinding__thread_count, METH_NOARGS, "The number of threads in this process, or -1"},
+    {"held_references", pybinding__held_references, METH_NOARGS, "Shared-memory references this process holds"},
+    {"retire_blockers", pybinding__retire_blockers, METH_NOARGS, "Held references plus stream file locks"},
+    {"reclaim_leases", pybinding__reclaim_leases, METH_NOARGS, "Release leases of forked children that are gone"},
+    {"remove_own_temps", pybinding__remove_own_temps, METH_NOARGS, "Remove this process's temp directory"},
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
     {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},
-    {"send_packet_to_foreign_server", pybinding__send_packet_to_foreign_server, METH_VARARGS, "Send data to a foreign server"},
+    {"send_reply", pybinding__send_reply, METH_VARARGS, "Send a dispatch's reply, releasing what the dispatch holds first"},
+    // The name pools built by earlier compilers call.
+    {"send_packet_to_foreign_server", pybinding__send_reply, METH_VARARGS, "Same as send_reply"},
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
     {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
     {"shm_live_bytes", pybinding__shm_live_bytes, METH_NOARGS, "Bytes of shared memory the program holds now (-1 unless MORLOC_SHM_STATS is set)"},
@@ -4477,10 +4577,12 @@ static PyMethodDef Methods[] = {
     {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},
     {"is_ping", pybinding__is_ping, METH_VARARGS, "Packet is a ping"},
+    {"exit_if_forked", pybinding__exit_if_forked, METH_NOARGS, "Exit if this process was forked during the current call"},
     {"is_local_call", pybinding__is_local_call, METH_VARARGS, "Packet is a local call"},
     {"is_remote_call", pybinding__is_remote_call, METH_VARARGS, "Packet is a remote call"},
     {"pong", pybinding__pong, METH_VARARGS, "Return a ping"},
     {"make_fail_packet", pybinding__make_fail_packet, METH_VARARGS, "Create a fail packet from an error message"},
+    {"make_pipe_closed_packet", pybinding__make_pipe_closed_packet, METH_VARARGS, "Create a fail packet for a closed downstream pipe"},
     {"remote_call", pybinding__remote_call, METH_VARARGS, "Make a call to a remote cluster"},
     {"mlc_hash", pybinding__mlc_hash, METH_VARARGS, "Hash a value using xxhash"},
     {"mlc_save", pybinding__mlc_save, METH_VARARGS, "Save a value to file in msgpack format"},
@@ -4533,6 +4635,7 @@ static struct PyModuleDef pymorloc = {
 };
 
 PyMODINIT_FUNC PyInit_pymorloc(void) {
+    morloc_install_panic_hook(NULL);
     PyObject* m = PyModule_Create(&pymorloc);
     if (m == NULL) return NULL;
     if (PyModule_AddIntConstant(m, "PRIMARY_VOLUME", MORLOC_PRIMARY_VOLUME) < 0) {
@@ -4561,6 +4664,17 @@ PyMODINIT_FUNC PyInit_pymorloc(void) {
     Py_INCREF(PyMorlocInternalError);
     if (PyModule_AddObject(m, "MorlocInternalError", PyMorlocInternalError) < 0) {
         Py_DECREF(PyMorlocInternalError);
+        Py_DECREF(m);
+        return NULL;
+    }
+    PyMorlocPipeClosed = PyErr_NewException("pymorloc.MorlocPipeClosed", PyExc_BaseException, NULL);
+    if (PyMorlocPipeClosed == NULL) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    Py_INCREF(PyMorlocPipeClosed);
+    if (PyModule_AddObject(m, "MorlocPipeClosed", PyMorlocPipeClosed) < 0) {
+        Py_DECREF(PyMorlocPipeClosed);
         Py_DECREF(m);
         return NULL;
     }

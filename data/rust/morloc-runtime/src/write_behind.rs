@@ -26,13 +26,34 @@ use crate::shm::AbsPtr;
 /// oldest one. Each is at most one 16 MiB frame.
 const DEFAULT_DEPTH: usize = 8;
 
-/// `MORLOC_WRITE_BEHIND_DEPTH`, or the default. 0 compresses every
-/// sub-packet on the writing thread.
+/// `MORLOC_WRITE_BEHIND_DEPTH` as the process started, or the default. 0
+/// compresses every sub-packet on the writing thread.
+// FORK-9
 pub(crate) fn depth() -> usize {
-    std::env::var("MORLOC_WRITE_BEHIND_DEPTH")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_DEPTH)
+    #[cfg(test)]
+    {
+        let d = TEST_DEPTH.load(std::sync::atomic::Ordering::SeqCst);
+        if d != usize::MAX {
+            return d;
+        }
+    }
+    static DEPTH: morloc_runtime_types::publish_once::PublishOnce<usize> =
+        morloc_runtime_types::publish_once::PublishOnce::new();
+    *DEPTH.get_or_init(|| {
+        std::env::var("MORLOC_WRITE_BEHIND_DEPTH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_DEPTH)
+    })
+}
+
+#[cfg(test)]
+static TEST_DEPTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Override the depth for a test; `None` restores it.
+#[cfg(test)]
+pub(crate) fn set_test_depth(depth: Option<usize>) {
+    TEST_DEPTH.store(depth.unwrap_or(usize::MAX), std::sync::atomic::Ordering::SeqCst);
 }
 
 /// What a job compresses.
@@ -95,29 +116,17 @@ struct ServiceQueue {
     idle: usize,
 }
 
-/// The service of the current process. A forked child starts its own: the
-/// parent's threads do not exist in it.
-static SERVICE: Mutex<Option<(u32, Arc<Service>)>> = Mutex::new(None);
+static SERVICE: crate::fork_policy::Reset<Option<Arc<Service>>> = crate::fork_policy::Reset::new(|| None);
 
 fn service() -> Arc<Service> {
-    let pid = std::process::id();
     let mut g = SERVICE.lock().unwrap();
-    match g.as_ref() {
-        Some((p, s)) if *p == pid => s.clone(),
-        _ => {
-            let s = Arc::new(Service {
-                queue: Mutex::new(ServiceQueue { jobs: VecDeque::new(), threads: 0, idle: 0 }),
-                ready: Condvar::new(),
-            });
-            if let Some(old) = g.take() {
-                // The parent's service belongs to threads this process
-                // does not have; its locks may be held forever.
-                std::mem::forget(old);
-            }
-            *g = Some((pid, s.clone()));
-            s
-        }
-    }
+    g.get_or_insert_with(|| {
+        Arc::new(Service {
+            queue: Mutex::new(ServiceQueue { jobs: VecDeque::new(), threads: 0, idle: 0 }),
+            ready: Condvar::new(),
+        })
+    })
+    .clone()
 }
 
 fn submit(input: Input, level: CompressionLevel) -> Arc<Job> {
@@ -159,10 +168,7 @@ fn worker(svc: Arc<Service>) {
         };
         let input = job.input.lock().unwrap().take();
         let res = match input {
-            Some(input) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(&mut compressors, job.level, input)
-            }))
-            .unwrap_or_else(|_| Err(MorlocError::Other("stream compression panicked".into()))),
+            Some(input) => run(&mut compressors, job.level, input),
             None => Err(MorlocError::Other("stream compression job ran twice".into())),
         };
         *job.result.lock().unwrap() = Some(res);
@@ -265,8 +271,7 @@ impl Pending {
 pub(crate) struct WriteBehind {
     pending: VecDeque<Pending>,
     pub spare: Vec<AbsPtr>,
-    /// The process the contents belong to; 0 while empty.
-    pid: u32,
+    owner: Option<u64>,
 }
 
 // SAFETY: see `Pending`; spare buffers are unreferenced SHM blocks.
@@ -276,13 +281,14 @@ impl WriteBehind {
     /// Take ownership for this process, forgetting anything inherited
     /// from a parent across a fork.
     pub(crate) fn claim(&mut self) {
-        let me = std::process::id();
-        if self.pid != me {
-            if self.pid != 0 {
+        // FORK-14
+        let me = crate::fork_policy::generation();
+        if self.owner != Some(me) {
+            if self.owner.is_some() {
                 std::mem::forget(std::mem::take(&mut self.pending));
                 self.spare.clear();
             }
-            self.pid = me;
+            self.owner = Some(me);
         }
     }
 
@@ -360,7 +366,7 @@ impl Drop for WriteBehind {
 /// Streams this process holds sealed batches of, whichever thread sealed
 /// them: every point where another process may take over a stream drains
 /// them all.
-static SEALED: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+static SEALED: crate::fork_policy::Reset<Vec<i64>> = crate::fork_policy::Reset::new(Vec::new);
 
 thread_local! {
     /// The subset this thread sealed: a failure to write one of these is the
@@ -369,7 +375,6 @@ thread_local! {
 }
 
 pub(crate) fn note_sealed(handle: i64) {
-    crate::stream::register_fork_handlers();
     let mut all = SEALED.lock().unwrap();
     if !all.contains(&handle) {
         all.push(handle);
@@ -412,10 +417,30 @@ mod tests {
         let mut wb = WriteBehind::default();
         wb.spare.push(buf);
         wb.claim();
-        wb.pid = wb.pid.wrapping_add(1);
+        wb.owner = wb.owner.map(|g| g.wrapping_add(1));
         drop(wb);
         let rc = unsafe { crate::shm::reference_count(buf) };
         assert_eq!(rc, Some(1), "a copy in another process freed the parent's buffer");
         crate::shm::shfree(buf).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_descendant_with_its_ancestors_pid_leaves_the_ancestors_buffers() {
+        let _shm = crate::own_test_registry();
+        let ran = crate::fork_policy::as_pid_one(|| {
+            let buf = crate::shm::shcalloc(1, 4096).unwrap();
+            let mut wb = WriteBehind::default();
+            wb.spare.push(buf);
+            wb.claim();
+            let wb = std::mem::ManuallyDrop::new(wb);
+            let dropped = crate::fork_policy::in_a_descendant_with_the_same_pid(move || {
+                drop(std::mem::ManuallyDrop::into_inner(wb));
+                true
+            });
+            let kept = unsafe { crate::shm::reference_count(buf) } == Some(1);
+            dropped && kept
+        });
+        assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid freed the ancestor's buffer");
     }
 }

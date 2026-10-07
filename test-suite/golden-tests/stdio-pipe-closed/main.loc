@@ -7,7 +7,7 @@
 -- every later run failed "@stdout already open in this nexus".
 --
 -- Fixed behaviour: a broken pipe is an <IO> condition, not a recoverable
--- , so @catch does not swallow it. In one-shot CLI mode the nexus
+-- error, so @catch does not swallow it. In one-shot CLI mode the nexus
 -- detects the closed downstream pipe and exits with the conventional
 -- SIGPIPE status (141) after a full teardown -- silently, like any Unix
 -- producer in a `... | head` pipeline.
@@ -24,7 +24,7 @@
 -- closes. This one-shot golden covers the clean-exit, correct-truncation,
 -- no-hang, and still-usable-afterwards behaviour.
 
-module main (produceBig, produceInCatch)
+module main (produceBig, produceInCatch, bigList)
 
 import root-py
 
@@ -41,3 +41,8 @@ produceInCatch = do
     @write 0 o (range 0 100000)
     @close o)
   match _tr | (Ok _cv) = _cv | (Err _) = ()
+
+-- A large result printed as a raw packet into a closed pipe also ends with
+-- the SIGPIPE status, not a generic failure.
+bigList :: [Int]
+bigList = range 0 2000000

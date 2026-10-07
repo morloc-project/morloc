@@ -25,6 +25,7 @@ module UnitTypeTests
   , infixOperatorTests
   , recordLiteralOrderTests
   , recordIdentityTests
+  , typeIdentityTests
   , aliasExpansionTests
   , accessorInWhereTests
   , solvedKindCheckTests
@@ -65,12 +66,15 @@ module UnitTypeTests
   , variantTests
   , evalSandboxTests
   , typeRenderParenTests
+  , sourceNameTests
   , suspensionLawTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend, generatePools)
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc (pretty, render)
+import Morloc.CodeGenerator.LanguageDescriptor (declaredNamePatterns, matchNamePattern)
+import qualified Morloc.DataFiles as DF
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
@@ -718,6 +722,7 @@ typeAliasTests =
           "general type alias"
           [r|
         module main (f)
+        type A
         type Foo = A
         f :: Foo
         |]
@@ -733,6 +738,8 @@ typeAliasTests =
           "non-parametric, general type alias"
           [r|
         module main (f)
+        type A
+        type B
         type Foo = A
         f :: Foo -> B
         |]
@@ -741,6 +748,8 @@ typeAliasTests =
           "deep type substitution: `[Foo] -> B`"
           [r|
         module main (f)
+        type A
+        type B
         type Foo = A
         f :: [Foo] -> B
         |]
@@ -749,6 +758,7 @@ typeAliasTests =
           "deep type substitution: `[Foo] -> Foo`"
           [r|
         module main (f)
+        type A
         type Foo = A
         f :: [Foo] -> Foo
         |]
@@ -757,6 +767,9 @@ typeAliasTests =
           "parametric alias, general type alias"
           [r|
         module main (f)
+        type X
+        type Y
+        type Z
         type (Foo a b) = (a,b)
         f :: Foo X Y -> Z
         |]
@@ -765,6 +778,7 @@ typeAliasTests =
           "nested types"
           [r|
            module main (foo)
+           type C
            type A = B
            type B = C
            foo :: A -> B -> C
@@ -774,6 +788,7 @@ typeAliasTests =
           "state is preserved across binding"
           [r|
            module main (f)
+           type A
            type Foo = A
            g :: Foo -> Int
            f = g
@@ -783,6 +798,7 @@ typeAliasTests =
           "state is inherited across binding"
           [r|
            module main (f)
+           type A
            type Foo = A
            g :: a -> b
            f :: Foo -> Int
@@ -837,8 +853,10 @@ typeAliasTests =
           "non-parametric, general type alias, imported"
           [r|
            module m1 (Foo)
+             type A
              type Foo = A
            module main (f)
+             type B
              import m1 (Foo)
              f :: Foo -> B
         |]
@@ -847,12 +865,14 @@ typeAliasTests =
           "non-parametric, general type alias, reimported"
           [r|
            module m3 (Foo)
+             type A
              type Foo = A
            module m2 (Foo)
              import m3 (Foo)
            module m1 (Foo)
              import m2 (Foo)
            module main (f)
+             type B
              import m1 (Foo)
              f :: Foo -> B
         |]
@@ -861,8 +881,10 @@ typeAliasTests =
           "non-parametric, general type alias, imported aliased"
           [r|
            module m1 (Foo)
+             type A
              type Foo = A
            module main (f)
+             type B
              import m1 (Foo as Bar)
              f :: Bar -> B
         |]
@@ -871,6 +893,7 @@ typeAliasTests =
           "non-parametric, general type alias, reimported aliased"
           [r|
            module m3 (Foo1)
+             type A
              type Foo1 = A
 
            module m2 (Foo2)
@@ -880,27 +903,30 @@ typeAliasTests =
              import m2 (Foo2 as Foo3)
 
            module main (f)
+             type B
              import m1 (Foo3 as Foo4)
              f :: Foo4 -> B
         |]
           (fun [var "A", var "B"])
-      , assertGeneralType
-          "non-parametric, general type alias, duplicate import"
+      , expectError
+          "two imported aliases of one name are ambiguous"
           [r|
            module m2 (Foo)
+             type A
              type Foo = A
 
            module m1 (Foo)
+             type A
              type Foo = A
 
            module main (f)
+             type B
              import m1 (Foo)
              import m2 (Foo)
              f :: Foo -> B
         |]
-          (fun [var "A", var "B"])
-      , assertGeneralType
-          "parametric alias, general type alias, duplicate import"
+      , expectError
+          "two imported parametric aliases of one name are ambiguous"
           [r|
            module m2 (Foo)
              type (Foo a b) = (a,b)
@@ -909,11 +935,13 @@ typeAliasTests =
              type (Foo c d) = (c,d)
 
            module main (f)
+             type X
+             type Y
+             type Z
              import m1 (Foo)
              import m2 (Foo)
              f :: Foo X Y -> Z
         |]
-          (fun [tuple [var "X", var "Y"], var "Z"])
       -- Type-level record literals use `=` to bind fields (mirroring
       -- morloc's term-level `{x = 3, y = "a"}` syntax). Mistakenly using
       -- `::` (the declaration separator) raises a specific parser error
@@ -2546,6 +2574,7 @@ unitTypeTests =
       , assertGeneralType
           "t a -> a"
           [r|
+        type G a
         gify :: a -> G a
         out :: f a -> a
         out (gify 1)
@@ -2554,6 +2583,7 @@ unitTypeTests =
       , assertGeneralType
           "f a b -> b"
           [r|
+        type G a b
         gify :: a -> b -> G a b
         snd :: f a b -> b
         snd (gify 1 True)
@@ -2578,6 +2608,7 @@ unitTypeTests =
       , assertGeneralType
           "map fstG over (G a b) list"
           [r|
+        type G a b
         gify :: a -> b -> G a b
         map :: (a -> b) -> [a] -> [b]
         fstF :: f a b -> a
@@ -2587,6 +2618,7 @@ unitTypeTests =
       , assertGeneralType
           "fmap generic fst over functor"
           [r|
+        type G a
         gify :: a -> G a
         fmap :: (a -> b) -> f a -> f b
         out :: f a -> a
@@ -2597,6 +2629,11 @@ unitTypeTests =
           "generic parameter reordering"
           [r|
         module m (biz)
+        type R a b c
+        type N a b
+        type X
+        type Y
+        type Z
         type M a b c = R b a c
         foo :: M a b c -> N b c
         bar :: a -> b -> c -> R a b c
@@ -2612,6 +2649,7 @@ unitTypeTests =
           "variable annotation"
           [r|
         module main (f)
+        type Foo
         f :: Foo
         |]
           (var "Foo")
@@ -2620,6 +2658,9 @@ unitTypeTests =
           "function with parameterized types"
           [r|
         module main (f)
+        type A a
+        type B
+        type C
         f :: A B -> C
         |]
           (fun [arr "A" [var "B"], var "C"])
@@ -2751,6 +2792,8 @@ unitTypeTests =
           "parameterized type (n=1)"
           [r|
         module main (xs)
+        type Foo a
+        type A
         xs :: Foo A
         |]
           (arr "Foo" [var "A"])
@@ -2758,6 +2801,9 @@ unitTypeTests =
           "parameterized type (n=2)"
           [r|
         module main (xs)
+        type Foo a b
+        type A
+        type B
         xs :: Foo A B
         |]
           (arr "Foo" [var "A", var "B"])
@@ -2765,6 +2811,10 @@ unitTypeTests =
           "nested parameterized type"
           [r|
         module main (xs)
+        type Foo a b
+        type Bar a
+        type A
+        type B
         xs :: Foo (Bar A) [B]
         |]
           (arr "Foo" [arr "Bar" [var "A"], arr "List" [var "B"]])
@@ -4519,6 +4569,7 @@ complexityRegressionTests =
       , assertGeneralType
           "zipSubtype: Pair a a consistent with Pair Int Int"
           [r|
+          type Pair a b
           mkPair :: a -> Pair a a
           fst :: Pair a b -> a
           test = fst (mkPair 42)
@@ -4733,7 +4784,7 @@ effVar :: MT.Text -> TypeU -> TypeU
 effVar v = EffectU (EffectVar (TV v))
 
 -- | Effect subtyping covers four cases the spec lays out
--- ('spec/types/effects.md' under "Subtyping" and "Effect Checking"):
+-- ('model/effects.md' under "Subtyping" and "Effect Checking"):
 --
 --   1. Widening accepted: fewer effects can be used where more are
 --      expected.  This is the one direction the rule permits.
@@ -4858,7 +4909,7 @@ effectSubtypeTests =
 
 -- | Effect synthesis tests verify that the inferred effect set on a
 -- top-level export matches the spec's structural propagation rule
--- ('spec/types/effects.md' under "Effect Inference"):
+-- ('model/effects.md' under "Effect Inference"):
 effectSynthesisTests :: TestTree
 effectSynthesisTests =
   localOption (mkTimeout 100000) $ -- 0.1 second timeout
@@ -8029,6 +8080,7 @@ aliasConstructorTests =
           "two-parameter newtype with its own instance"
           [r|
         module main (f)
+        type Map a b
         class MyClass f where
           myMethod :: f a b -> f a b
         newtype MyMap a b = Map a b
@@ -10903,3 +10955,314 @@ suspensionLawTests =
         f k = next_int k
           |]
       ]
+
+-- A type name denotes the declaration in scope where it is written, wherever
+-- the type is later used; a module may not write a name it has not declared
+-- or imported.
+typeIdentityTests :: TestTree
+typeIdentityTests =
+  localOption (mkTimeout 2000000) $
+    testGroup
+      "Type identity across modules"
+      [ expectPass
+          "an imported signature's alias resolves without importing the alias"
+          [r|
+          module lib (mk, withSink)
+            type Batch = [Int]
+            mk :: Int -> Batch
+            withSink :: Int -> (Batch -> Int) -> Int
+          module main (total, viaSink)
+            import lib (mk, withSink)
+            sum :: [Int] -> Int
+            total :: Int -> Int
+            total n = sum (mk n)
+            viaSink :: Int -> Int
+            viaSink n = withSink n sum
+        |]
+      , expectPass
+          "an imported signature's record resolves without importing the record"
+          [r|
+          module lib (mk)
+            record P where
+              x :: Int
+              y :: Int
+            mk :: Int -> P
+          module main (f)
+            import lib (mk)
+            f :: Int -> Int
+            f n = .y (mk n)
+        |]
+      , expectPass
+          "a type reached through an imported alias resolves"
+          [r|
+          module lib (mk, Batch)
+            record P where
+              x :: Int
+              y :: Int
+            type Batch = [P]
+            mk :: Int -> Batch
+          module main (f)
+            import lib (mk, Batch)
+            map :: (a -> b) -> [a] -> [b]
+            f :: Int -> [Int]
+            f n = map .y (mk n)
+        |]
+      , expectPass
+          "a type imported under another name still resolves in signatures that use the original"
+          [r|
+          module lib (mk, Batch)
+            type Batch = [Int]
+            mk :: Int -> Batch
+          module main (f)
+            import lib (mk, Batch as B)
+            sum :: [Int] -> Int
+            f :: Int -> Int
+            f n = sum (mk n)
+            g :: B -> Int
+            g b = sum b
+        |]
+      , expectPass
+          "a class method signature resolves its alias where the class is declared"
+          [r|
+          module lib (Sized, mk)
+            type Batch = [Int]
+            class Sized a where
+              size :: a -> Batch
+            mk :: Int -> Int
+          module main (f)
+            import lib (Sized, mk)
+            sum :: [Int] -> Int
+            instance Sized Int where
+              size x = [x]
+            f :: Int -> Int
+            f n = sum (size n)
+        |]
+      , expectPass
+          "two modules may each declare a type of the same name"
+          [r|
+          module lib (mk, getx)
+            record P where
+              x :: Int
+            mk :: Int -> P
+            getx :: P -> Int
+          module main (f, g)
+            import lib (mk, getx)
+            record P where
+              z :: Str
+            mkq :: Str -> P
+            f :: Int -> Int
+            f n = getx (mk n)
+            g :: Str -> Str
+            g s = .z (mkq s)
+        |]
+      , expectError
+          "a local alias of the same name does not stand for an imported one"
+          [r|
+          module lib (mk)
+            type Batch = [Int]
+            mk :: Int -> Batch
+          module main (bad)
+            import lib (mk)
+            type Batch = Str
+            bad :: Int -> Str
+            bad n = mk n
+        |]
+      , expectError
+          "a local record of the same name does not stand for an imported one"
+          [r|
+          module lib (mk)
+            record P where
+              x :: Int
+            mk :: Int -> P
+          module main (bad)
+            import lib (mk)
+            record P where
+              z :: Str
+            bad :: Int -> Str
+            bad n = .z (mk n)
+        |]
+      , expectError
+          "a local record of the same name is a distinct type"
+          [r|
+          module lib (mk)
+            record P where
+              x :: Int
+            mk :: Int -> P
+          module main (bad)
+            import lib (mk)
+            record P where
+              x :: Int
+            bad :: Int -> P
+            bad n = mk n
+        |]
+      , expectError
+          "a type name that is neither declared nor imported is rejected"
+          [r|
+          module main (f)
+            f :: Int -> Foo
+        |]
+      , expectError
+          "a type name reachable only through an imported signature cannot be written"
+          [r|
+          module lib (mk)
+            record P where
+              x :: Int
+            mk :: Int -> P
+          module main (f)
+            import lib (mk)
+            f :: P -> Int
+            f p = .x p
+        |]
+      , expectError
+          "importing a type and declaring one of the same name is rejected"
+          [r|
+          module lib (Batch)
+            type Batch = [Int]
+          module main (f)
+            import lib (Batch)
+            type Batch = [Str]
+            f :: Batch -> Int
+        |]
+      , expectError
+          "importing a type the module does not export is rejected"
+          [r|
+          module lib (mk)
+            type Batch = [Int]
+            mk :: Int -> Batch
+          module main (f)
+            import lib (mk, Batch)
+            f :: Int -> Int
+        |]
+      , expectError
+          "a type cycle among qualified names is rejected"
+          [r|
+          module lib (x)
+            type A = Int
+            type B = Int
+            x :: A -> B
+          module main (f)
+            import lib (x)
+            type A = B
+            type B = A
+            f :: A -> Int
+        |]
+      , expectError
+          "two different declarations of a built-in type name are rejected"
+          [r|
+          module lib (x)
+            type Cell = Int
+            x :: Cell -> Int
+          module main (f)
+            import lib (x)
+            type Cell = Str
+            f :: Cell -> Int
+        |]
+      , expectError
+          "conflicting language forms for one type are rejected"
+          [r|
+          module lib (Box)
+            record Box where
+              v :: Int
+            record Py => Box = "dict"
+          module main (f)
+            import lib (Box)
+            record Py => Box = "MyBox"
+            f :: Box -> Int
+        |]
+      ]
+
+-- A sourced name is emitted verbatim into the pool, so a name that is not a
+-- name in its language would be code.
+sourceNameTests :: TestTree
+sourceNameTests =
+  testGroup "a sourced name is a name, not code"
+    [ expectError "C++: an expression is not a source name"
+          [r|
+          module main (f)
+          source Cpp from "m" ("plain(1)+ns::inc" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Rust: an expression is not a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("plain(1)+inc" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "C: an expression is not a source name"
+          [r|
+          module main (f)
+          source C from "m" ("plain(1)+inc" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Futhark: an expression is not a source name"
+          [r|
+          module main (f)
+          source Futhark from "m" ("f (1)" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "C++: a single colon is not a scope operator"
+          [r|
+          module main (f)
+          source Cpp from "m" ("ns:inc" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "C++: a trailing scope operator names nothing"
+          [r|
+          module main (f)
+          source Cpp from "m" ("ns::" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Rust: a leading scope operator is not a path"
+          [r|
+          module main (f)
+          source Rust from "m" ("::inc" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectPass "C++: a qualified name is a source name"
+          [r|
+          module main (f)
+          source Cpp from "m" ("ns::inc" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "C++: a leading scope operator is not a name"
+          [r|
+          module main (f)
+          source Cpp from "m" ("::plain" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectPass "Rust: a path is a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("a::b" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , testCase "every built-in language declares patterns that compile" $
+        mapM_
+          (\(n, f) -> case declaredNamePatterns (DF.embededFileText f) of
+              Left e -> assertFailure (n <> ": " <> e)
+              Right _ -> return ())
+          DF.langRegistryFiles
+    , testCase "a descriptor without a name pattern is refused" $
+        assertBool "accepted" . isLeft $
+          declaredNamePatterns "name: x\nldOperatorPattern: \"[+]+\"\n"
+    , testCase "an empty pattern is refused" $
+        assertBool "accepted" . isLeft $
+          declaredNamePatterns "ldNamePattern: \"\"\nldOperatorPattern: \"[+]+\"\n"
+    , testCase "a pattern that does not parse is refused" $
+        assertBool "accepted" . isLeft $
+          declaredNamePatterns "ldNamePattern: \"[a-\"\nldOperatorPattern: \"[+]+\"\n"
+    , testCase "a group repeats" $
+        matchNamePattern "a(::a)*" "a::a::a" @?= Right True
+    , testCase "a group must match whole" $
+        matchNamePattern "a(::a)*" "a::" @?= Right False
+    ]

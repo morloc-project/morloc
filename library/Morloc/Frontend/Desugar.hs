@@ -1203,7 +1203,7 @@ quantifyType t =
     -- Collect type variables (excluding NatVarU/StrVarU which are already promoted)
     collectGenVars :: TypeU -> [TVar]
     collectGenVars (VarU v@(TV name))
-      | not (T.null name), isLower (T.head name) = [v]
+      | isTypeVariableName name = [v]
       | otherwise = []
     collectGenVars (ForallU v inner) = filter (/= v) (collectGenVars inner)
     collectGenVars (AppU f args) = collectGenVars f ++ concatMap collectGenVars args
@@ -1225,7 +1225,7 @@ quantifyType t =
     collectNatVars = go False
       where
         go inNat (VarU v@(TV name))
-          | inNat, not (T.null name), isLower (T.head name) = Set.singleton v
+          | inNat, isTypeVariableName name = Set.singleton v
           | otherwise = Set.empty
         go _ (NatVarU v) = Set.singleton v
         go _ (ForallU _ inner) = go False inner
@@ -1250,7 +1250,7 @@ quantifyType t =
     collectStrVars = go False
       where
         go inStr (VarU v@(TV name))
-          | inStr, not (T.null name), isLower (T.head name) = Set.singleton v
+          | inStr, isTypeVariableName name = Set.singleton v
           | otherwise = Set.empty
         go _ (StrVarU v) = Set.singleton v
         go _ (ForallU _ inner) = go False inner
@@ -1274,7 +1274,7 @@ quantifyType t =
     collectRecVars = go False
       where
         go inRec (VarU v@(TV name))
-          | inRec, not (T.null name), isLower (T.head name) = Set.singleton v
+          | inRec, isTypeVariableName name = Set.singleton v
           | otherwise = Set.empty
         go _ (RecVarU v) = Set.singleton v
         go _ (ForallU _ inner) = go False inner
@@ -4338,7 +4338,7 @@ lambdaSpine _ = []
 isConcreteType :: TypeU -> Bool
 isConcreteType = go
   where
-    go (VarU (TV name)) = T.null name || not (isLower (T.head name))
+    go (VarU (TV name)) = not (isTypeVariableName name)
     go (ForallU _ _) = False
     go ExistU {} = False
     go (NatVarU _) = False

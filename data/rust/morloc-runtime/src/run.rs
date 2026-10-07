@@ -47,41 +47,53 @@ use std::ffi::CStr;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Arc;
+use morloc_runtime_types::publish_once::PublishOnce;
+use crate::fork_policy::Held;
 use std::time::Instant;
 
 struct Run {
     base: PathBuf,
     id: String,
     dir: PathBuf,
+    started_here: bool,
 }
 
-static RUN: OnceLock<Option<Run>> = OnceLock::new();
+static RUN: PublishOnce<Option<Run>> = PublishOnce::new();
 
 /// Per-label append handles for the log tee. Opened on first emission,
 /// kept open for the process lifetime, line-flushed so a crash can lose
 /// at most the in-flight line.
-static TEE_HANDLES: OnceLock<Mutex<HashMap<String, std::fs::File>>> = OnceLock::new();
+pub(crate) static TEE_HANDLES: Held<Option<HashMap<String, Arc<std::fs::File>>>> = Held::new(15, None);
 
 /// Top-level (non-per-label) tee handle. Used for the prologue, the
 /// epilogue, and any future run-scope events the nexus emits. Written
 /// to `$MORLOC_RUN_DIR/log` so a single `tail -f` follows the whole
 /// run instead of having to glob per-label sub-files.
-static RUN_TEE_HANDLE: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
+pub(crate) static RUN_TEE_HANDLE: Held<Option<Arc<std::fs::File>>> = Held::new(16, None);
 
 /// Nexus-owned scratchpad consulted by [`morloc_run_finalize`] when
 /// writing `summary.json`. Pools never write here.
 struct RunContext {
     started_at: Instant,
     started_at_iso: String,
-    command: Mutex<Option<String>>,
-    error: Mutex<Option<String>>,
 }
 
-static CONTEXT: OnceLock<RunContext> = OnceLock::new();
+pub(crate) static RUN_COMMAND: Held<Option<String>> = Held::new(17, None);
+pub(crate) static RUN_ERROR: Held<Option<String>> = Held::new(18, None);
+
+// FORK-10: one write(2) outside any lock; O_APPEND keeps lines whole.
+fn append_line(file: &std::fs::File, text: &str) {
+    let mut line = String::with_capacity(text.len() + 1);
+    line.push_str(text);
+    line.push('\n');
+    let _ = (&*file).write_all(line.as_bytes());
+}
+
+static CONTEXT: PublishOnce<RunContext> = PublishOnce::new();
 
 fn get_run() -> Option<&'static Run> {
-    RUN.get_or_init(init_run).as_ref()
+    RUN.get_or_init_then(init_run, publish_run).as_ref()
 }
 
 fn parent_of(pid: i32) -> Option<i32> {
@@ -135,7 +147,7 @@ fn init_run() -> Option<Run> {
                 .unwrap_or_default();
             let base = path.parent().map(PathBuf::from).unwrap_or_default();
             // No env republish: pools see the inherited values already.
-            return Some(Run { base, id, dir: path });
+            return Some(Run { base, id, dir: path, started_here: false });
         }
     }
 
@@ -145,17 +157,27 @@ fn init_run() -> Option<Run> {
         Some(d) if !d.is_empty() => PathBuf::from(d),
         _ => return None,
     };
-    let run = new_run(base);
-    env::set_var("MORLOC_RUN_DIR", &run.dir);
-    env::set_var("MORLOC_RUN_BASE", &run.base);
-    env::set_var("MORLOC_RUN_PARENT_PID", std::process::id().to_string());
-    Some(run)
+    Some(new_run(base))
+}
+
+// INIT-3: only the run that won publishes itself to the environment.
+// FORK-11: and only while this is the process's one thread; a child of a
+// process with others running starts a run of its own.
+fn publish_run(run: &Option<Run>) {
+    if crate::fork_policy::thread_count().is_some_and(|n| n > 1) {
+        return;
+    }
+    if let Some(run) = run.as_ref().filter(|r| r.started_here) {
+        std::env::set_var("MORLOC_RUN_DIR", &run.dir);
+        std::env::set_var("MORLOC_RUN_BASE", &run.base);
+        std::env::set_var("MORLOC_RUN_PARENT_PID", std::process::id().to_string());
+    }
 }
 
 fn new_run(base: PathBuf) -> Run {
     let id = gen_id();
     let dir = base.join(&id);
-    Run { base, id, dir }
+    Run { base, id, dir, started_here: true }
 }
 
 fn gen_id() -> String {
@@ -228,23 +250,25 @@ pub fn tee_log_line(label: &str, plain_text: &str) {
         None => return,
     };
     let path = dir.join("log");
-    let map = TEE_HANDLES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut handles = match map.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    if !handles.contains_key(label) {
-        match OpenOptions::new().append(true).create(true).open(&path) {
-            Ok(f) => {
-                handles.insert(label.to_string(), f);
-            }
-            Err(_) => return,
+    let existing = TEE_HANDLES.lock().as_ref().and_then(|m| m.get(label).cloned());
+    let file = match existing {
+        Some(f) => f,
+        None => {
+            // INIT-2: opened without the lock.
+            let Ok(opened) = OpenOptions::new().append(true).create(true).open(&path) else { return };
+            let opened = Arc::new(opened);
+            let installed = TEE_HANDLES
+                .lock()
+                .get_or_insert_with(HashMap::new)
+                .entry(label.to_string())
+                .or_insert_with(|| opened.clone())
+                .clone();
+            // FORK-10: a losing open is closed after the lock is released.
+            drop(opened);
+            installed
         }
-    }
-    if let Some(f) = handles.get_mut(label) {
-        let _ = writeln!(f, "{}", plain_text);
-        let _ = f.flush();
-    }
+    };
+    append_line(&file, plain_text);
 }
 
 /// Append a plain-text line to the run-level `log` file (no per-label
@@ -256,20 +280,8 @@ pub fn tee_run_log_line(plain_text: &str) {
         None => return,
     };
     let path = dir.join("log");
-    let cell = RUN_TEE_HANDLE.get_or_init(|| Mutex::new(None));
-    let mut slot = match cell.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    if slot.is_none() {
-        match OpenOptions::new().append(true).create(true).open(&path) {
-            Ok(f) => *slot = Some(f),
-            Err(_) => return,
-        }
-    }
-    if let Some(f) = slot.as_mut() {
-        let _ = writeln!(f, "{}", plain_text);
-        let _ = f.flush();
+    if let Some(file) = crate::log::shared_append_file(&RUN_TEE_HANDLE, || Some(path)) {
+        append_line(&file, plain_text);
     }
 }
 
@@ -309,8 +321,8 @@ fn write_summary_json(exit_code: i32) {
     let wall_ms = ctx
         .map(|c| c.started_at.elapsed().as_millis() as u64)
         .unwrap_or(0);
-    let command = ctx.and_then(|c| c.command.lock().ok().and_then(|g| g.clone()));
-    let recorded_error = ctx.and_then(|c| c.error.lock().ok().and_then(|g| g.clone()));
+    let command = ctx.and(RUN_COMMAND.lock().clone());
+    let recorded_error = ctx.and(RUN_ERROR.lock().clone());
     let run_id = get_run().map(|r| r.id.clone()).unwrap_or_default();
 
     let (status, error_field) = if exit_code == 0 {
@@ -343,24 +355,18 @@ fn write_summary_json(exit_code: i32) {
 /// processes never call it directly; they hit `get_run` lazily via the
 /// first log emission. Also seeds the [`RunContext`] used by the
 /// summary writer (started-at fields).
-#[no_mangle]
-pub extern "C" fn morloc_run_init() {
+pub(crate) fn morloc_run_init() {
     let _ = get_run();
     let _ = CONTEXT.get_or_init(|| RunContext {
         started_at: Instant::now(),
         started_at_iso: chrono::Utc::now().to_rfc3339(),
-        command: Mutex::new(None),
-        error: Mutex::new(None),
     });
 }
 
 /// Copy a C string into a `Mutex<Option<String>>` field of the
 /// [`RunContext`], or no-op if the context isn't ready or the input
 /// is NULL / non-UTF-8.
-unsafe fn store_ctx_field(
-    field: impl FnOnce(&RunContext) -> &Mutex<Option<String>>,
-    cstr: *const libc::c_char,
-) {
+unsafe fn store_ctx_field(field: &Held<Option<String>>, cstr: *const libc::c_char) {
     if cstr.is_null() {
         return;
     }
@@ -368,10 +374,8 @@ unsafe fn store_ctx_field(
         Ok(s) => s.to_string(),
         Err(_) => return,
     };
-    if let Some(ctx) = CONTEXT.get() {
-        if let Ok(mut g) = field(ctx).lock() {
-            *g = Some(s);
-        }
+    if CONTEXT.get().is_some() {
+        *field.lock() = Some(s);
     }
 }
 
@@ -379,9 +383,8 @@ unsafe fn store_ctx_field(
 /// `summary.json` and `{name}` in prologue/epilogue templates.
 ///
 /// Safety: `name` must be a NUL-terminated UTF-8 string or NULL.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_run_record_command(name: *const libc::c_char) {
-    store_ctx_field(|c| &c.command, name);
+pub(crate) unsafe fn morloc_run_record_command(name: *const libc::c_char) {
+    store_ctx_field(&RUN_COMMAND, name);
 }
 
 /// Record the most recent error message verbatim (multi-line OK).
@@ -389,9 +392,8 @@ pub unsafe extern "C" fn morloc_run_record_command(name: *const libc::c_char) {
 /// epilogue.
 ///
 /// Safety: `msg` must be a NUL-terminated UTF-8 string or NULL.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_run_record_error(msg: *const libc::c_char) {
-    store_ctx_field(|c| &c.error, msg);
+pub(crate) unsafe fn morloc_run_record_error(msg: *const libc::c_char) {
+    store_ctx_field(&RUN_ERROR, msg);
 }
 
 /// Copy the current run id into `buf` (NUL-terminated, truncated to
@@ -400,8 +402,7 @@ pub unsafe extern "C" fn morloc_run_record_error(msg: *const libc::c_char) {
 /// templates without reparsing `MORLOC_RUN_DIR`.
 ///
 /// Safety: `buf` must be writable for at least `len` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_run_id(buf: *mut libc::c_char, len: usize) -> usize {
+pub(crate) unsafe fn morloc_run_id(buf: *mut libc::c_char, len: usize) -> usize {
     if buf.is_null() || len == 0 {
         return 0;
     }
@@ -421,8 +422,7 @@ pub unsafe extern "C" fn morloc_run_id(buf: *mut libc::c_char, len: usize) -> us
 /// can render `{hostname}` without an independent gethostname dance.
 ///
 /// Safety: `buf` must be writable for at least `len` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_hostname(buf: *mut libc::c_char, len: usize) -> usize {
+pub(crate) unsafe fn morloc_hostname(buf: *mut libc::c_char, len: usize) -> usize {
     if buf.is_null() || len == 0 {
         return 0;
     }
@@ -438,20 +438,13 @@ pub unsafe extern "C" fn morloc_hostname(buf: *mut libc::c_char, len: usize) -> 
 /// tee handles. Called from the nexus's `clean_exit` after pools have been
 /// torn down so any in-flight log lines they wrote also land in the
 /// per-label files.
-#[no_mangle]
-pub extern "C" fn morloc_run_finalize(exit_code: i32) {
+pub(crate) fn morloc_run_finalize(exit_code: i32) {
     write_summary_json(exit_code);
     crate::cli::remove_spooled_inputs();
-    if let Some(m) = TEE_HANDLES.get() {
-        if let Ok(mut g) = m.lock() {
-            g.clear();
-        }
-    }
-    if let Some(m) = RUN_TEE_HANDLE.get() {
-        if let Ok(mut g) = m.lock() {
-            *g = None;
-        }
-    }
+    // FORK-10: the files are closed after the locks are released.
+    let tees = TEE_HANDLES.lock().take();
+    let run_tee = RUN_TEE_HANDLE.lock().take();
+    drop((tees, run_tee));
 }
 
 #[cfg(test)]
@@ -495,5 +488,38 @@ mod tests {
         // A pid that is not in our ancestry stands for the stale value a shell
         // exported from an earlier run.
         assert!(!descends_from(-1));
+    }
+}
+
+mod c_abi {
+
+    #[no_mangle]
+    pub extern "C" fn morloc_run_init() {
+        super::morloc_run_init()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_run_record_command(name: *const libc::c_char) {
+        super::morloc_run_record_command(name)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_run_record_error(msg: *const libc::c_char) {
+        super::morloc_run_record_error(msg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_run_id(buf: *mut libc::c_char, len: usize) -> usize {
+        super::morloc_run_id(buf, len)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_hostname(buf: *mut libc::c_char, len: usize) -> usize {
+        super::morloc_hostname(buf, len)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_run_finalize(exit_code: i32) {
+        super::morloc_run_finalize(exit_code)
     }
 }

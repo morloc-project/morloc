@@ -1,0 +1,10 @@
+-- A pool call that never returns. SIGTERM must still end the daemon: it
+-- waits a grace period for in-flight calls, then stops the pools so the
+-- worker inside the call returns (DAEMON-6 in the compiler's model).
+module main (hang)
+
+import root-py
+
+source Py from "wedge.py" ("hang")
+
+hang :: Int -> Int

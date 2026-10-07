@@ -15,7 +15,7 @@ use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 
 use crate::arrow_shm::{self, ArrowShmHeader};
 use crate::cschema::CSchema;
-use crate::error::{set_errmsg, MorlocError};
+use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use morloc_runtime_types::{PRINT_RESULT_ERR, PRINT_RESULT_OK, PRINT_RESULT_PIPE_CLOSED};
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, RelPtr};
@@ -28,8 +28,7 @@ pub use crate::arrow_shm::{ARROW_BUFFER_ALIGN, ARROW_SHM_MAGIC, ARROW_SHM_VERSIO
 /// its relative pointer. Takes ownership of `array` (its release callback
 /// is invoked once the copy is made); `schema` is only read. Returns
 /// RELNULL with `errmsg` set on failure.
-#[no_mangle]
-pub unsafe extern "C" fn arrow_to_shm(
+pub(crate) unsafe fn arrow_to_shm(
     array: *mut FFI_ArrowArray,
     schema: *const FFI_ArrowSchema,
     errmsg: *mut *mut c_char,
@@ -40,14 +39,14 @@ pub unsafe extern "C" fn arrow_to_shm(
 /// As `arrow_to_shm`, additionally bringing the table into agreement with
 /// the declared morloc column schema (`declared` may be NULL or a bare
 /// table schema, in which case nothing is declared).
-#[no_mangle]
-pub unsafe extern "C" fn arrow_to_shm_typed(
+pub(crate) unsafe fn arrow_to_shm_typed(
     array: *mut FFI_ArrowArray,
     schema: *const FFI_ArrowSchema,
     declared: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    crate::error::guarded(errmsg, shm::RELNULL, || arrow_to_shm_typed_impl(array, schema, declared, errmsg))
+    clear_errmsg(errmsg);
+    arrow_to_shm_typed_impl(array, schema, declared, errmsg)
 }
 
 unsafe fn arrow_to_shm_typed_impl(
@@ -63,16 +62,22 @@ unsafe fn arrow_to_shm_typed_impl(
     if let Some(rel) = arrow_shm::try_borrow(array, schema, declared_rs.as_ref()) {
         let raw = array as *mut arrow_shm::RawArray;
         if let Some(release) = (*raw).release {
-            release(array);
+            // PANIC-2: the producer's own code, never a catch scope's.
+            morloc_runtime_types::panic::outside_scope(|| release(array));
         }
         if stats_enabled() {
             eprintln!("arrow_to_shm: borrowed");
         }
         return rel;
     }
-    let batch = match arrow_shm::ffi_to_batch(array, schema) {
-        Ok(b) => b,
-        Err(e) => {
+    // PANIC-2
+    let batch = match crate::error::decode("importing an arrow table", || {
+        let batch = arrow_shm::ffi_to_batch(array, schema)?;
+        crate::arrow_ipc_reader::validate_batches(std::slice::from_ref(&batch), false)?;
+        Ok(batch)
+    }) {
+        Ok(Ok(b)) => b,
+        Ok(Err(e)) | Err(e) => {
             set_errmsg(errmsg, &e);
             return shm::RELNULL;
         }
@@ -95,20 +100,20 @@ unsafe fn arrow_to_shm_typed_impl(
 /// `MORLOC_ARROW_STATS=1` reports every table write to stderr: the bytes
 /// copied, or that the table was passed through.
 fn stats_enabled() -> bool {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static FLAG: morloc_runtime_types::publish_once::PublishOnce<bool> = morloc_runtime_types::publish_once::PublishOnce::new();
     *FLAG.get_or_init(|| std::env::var_os("MORLOC_ARROW_STATS").is_some())
 }
 
 /// As `arrow_to_shm_typed` for a C stream interface producer: every batch
 /// the stream yields is concatenated into one table. Takes ownership of
 /// the stream, which is released once drained.
-#[no_mangle]
-pub unsafe extern "C" fn arrow_stream_to_shm_typed(
+pub(crate) unsafe fn arrow_stream_to_shm_typed(
     stream: *mut arrow_array::ffi_stream::FFI_ArrowArrayStream,
     declared: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    crate::error::guarded(errmsg, shm::RELNULL, || arrow_stream_to_shm_typed_impl(stream, declared, errmsg))
+    clear_errmsg(errmsg);
+    arrow_stream_to_shm_typed_impl(stream, declared, errmsg)
 }
 
 unsafe fn arrow_stream_to_shm_typed_impl(
@@ -121,18 +126,35 @@ unsafe fn arrow_stream_to_shm_typed_impl(
         set_errmsg(errmsg, &MorlocError::Other("NULL arrow stream".into()));
         return shm::RELNULL;
     }
-    let reader = match ArrowArrayStreamReader::from_raw(stream) {
-        Ok(r) => r,
-        Err(e) => {
+    // PANIC-2
+    let mut reader = match crate::error::decode("importing an arrow stream", || ArrowArrayStreamReader::from_raw(stream)) {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             set_errmsg(errmsg, &MorlocError::Other(format!("importing arrow stream: {}", e)));
+            return shm::RELNULL;
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
             return shm::RELNULL;
         }
     };
     let schema = arrow_array::RecordBatchReader::schema(&reader);
-    let batches: Vec<RecordBatch> = match reader.collect::<Result<Vec<_>, _>>() {
-        Ok(v) => v,
-        Err(e) => {
+    // PANIC-2
+    let read = crate::error::decode("reading an arrow stream", || {
+        let batches = reader.by_ref().collect::<Result<Vec<RecordBatch>, _>>()?;
+        crate::arrow_ipc_reader::validate_batches(&batches, false).map_err(|e| arrow_schema::ArrowError::InvalidArgumentError(e.to_string()))?;
+        Ok::<_, arrow_schema::ArrowError>(batches)
+    });
+    // PANIC-2: dropping the reader runs the producer's release.
+    morloc_runtime_types::panic::outside_scope(|| drop(reader));
+    let batches = match read {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
             set_errmsg(errmsg, &MorlocError::Other(format!("reading arrow stream: {}", e)));
+            return shm::RELNULL;
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
             return shm::RELNULL;
         }
     };
@@ -141,10 +163,15 @@ unsafe fn arrow_stream_to_shm_typed_impl(
     } else if batches.is_empty() {
         RecordBatch::new_empty(schema)
     } else {
-        match arrow_select::concat::concat_batches(&schema, &batches) {
-            Ok(b) => b,
-            Err(e) => {
+        // PANIC-2
+        match crate::error::decode("concatenating an arrow stream", || arrow_select::concat::concat_batches(&schema, &batches)) {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => {
                 set_errmsg(errmsg, &MorlocError::Other(format!("concatenating arrow stream: {}", e)));
+                return shm::RELNULL;
+            }
+            Err(e) => {
+                set_errmsg(errmsg, &e);
                 return shm::RELNULL;
             }
         }
@@ -161,14 +188,14 @@ unsafe fn arrow_stream_to_shm_typed_impl(
 
 /// Build C Data Interface views over a block. Buffer pointers point into
 /// the block, which must outlive the view. Returns 0 on success.
-#[no_mangle]
-pub unsafe extern "C" fn arrow_from_shm(
+pub(crate) unsafe fn arrow_from_shm(
     header: *const ArrowShmHeader,
     out_schema: *mut FFI_ArrowSchema,
     out_array: *mut FFI_ArrowArray,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    crate::error::guarded(errmsg, 1, || arrow_from_shm_impl(header, out_schema, out_array, errmsg))
+    clear_errmsg(errmsg);
+    arrow_from_shm_impl(header, out_schema, out_array, errmsg)
 }
 
 unsafe fn arrow_from_shm_impl(
@@ -189,13 +216,13 @@ unsafe fn arrow_from_shm_impl(
 /// Check a block against the morloc column schema it is received under.
 /// Returns 0 when every declared column is present with an acceptable
 /// physical type and nullability, 1 otherwise with `errmsg` set.
-#[no_mangle]
-pub unsafe extern "C" fn arrow_validate(
+pub(crate) unsafe fn arrow_validate(
     header: *const ArrowShmHeader,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    crate::error::guarded(errmsg, 1, || arrow_validate_impl(header, schema, errmsg))
+    clear_errmsg(errmsg);
+    arrow_validate_impl(header, schema, errmsg)
 }
 
 unsafe fn arrow_validate_impl(
@@ -224,37 +251,33 @@ unsafe fn arrow_validate_impl(
 /// for itself, whose only reference the view adopts. Returns 0 on success;
 /// on failure nothing is taken and an adopted reference is still the
 /// caller's to release.
-#[no_mangle]
-pub unsafe extern "C" fn arrow_from_shm_owned(
+pub(crate) unsafe fn arrow_from_shm_owned(
     header: *const ArrowShmHeader,
     acquire: i32,
     out_schema: *mut FFI_ArrowSchema,
     out_array: *mut FFI_ArrowArray,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    crate::error::guarded(errmsg, 1, || {
-        match arrow_shm::shm_to_ffi_owned(header, acquire != 0, out_schema, out_array) {
-            Ok(()) => 0,
-            Err(e) => {
-                set_errmsg(errmsg, &e);
-                1
-            }
+    clear_errmsg(errmsg);
+    match arrow_shm::shm_to_ffi_owned(header, acquire != 0, out_schema, out_array) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            1
         }
-    })
+    }
 }
 
 /// Bytes of shared memory held by this process's open table views. A
 /// language whose garbage collector cannot see shared memory uses this to
 /// decide when a collection is worth running: its own heap accounting puts
 /// a batch at a few hundred bytes whatever the table behind it costs.
-#[no_mangle]
-pub extern "C" fn arrow_live_view_bytes() -> usize {
+pub(crate) fn arrow_live_view_bytes() -> usize {
     arrow_shm::LIVE_VIEW_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Bytes memcpy'd into SHM by table writes in this process so far.
-#[no_mangle]
-pub extern "C" fn arrow_copied_bytes() -> u64 {
+pub(crate) fn arrow_copied_bytes() -> u64 {
     arrow_shm::COPIED_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -386,9 +409,9 @@ unsafe fn write_stdout(s: &str, errmsg: *mut *mut c_char) -> i32 {
 }
 
 /// Print a block as a JSON array of row objects, one line.
-#[no_mangle]
-pub unsafe extern "C" fn print_arrow_as_json(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
-    crate::error::guarded(errmsg, PRINT_RESULT_ERR, || print_arrow_as_json_impl(data, errmsg))
+pub(crate) unsafe fn print_arrow_as_json(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
+    clear_errmsg(errmsg);
+    print_arrow_as_json_impl(data, errmsg)
 }
 
 unsafe fn print_arrow_as_json_impl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
@@ -427,8 +450,7 @@ unsafe fn print_arrow_as_json_impl(data: *const c_void, errmsg: *mut *mut c_char
 /// the generic voidstar serializer refuses a Table.
 ///
 /// Returns null and sets `errmsg` on failure. The caller owns the string.
-#[no_mangle]
-pub unsafe extern "C" fn arrow_to_json_string(
+pub(crate) unsafe fn arrow_to_json_string(
     data: *const c_void,
     errmsg: *mut *mut c_char,
 ) -> *mut c_char {
@@ -473,9 +495,9 @@ pub unsafe extern "C" fn arrow_to_json_string(
 /// Print a block as JSON-lines: one row object per line. Each row is
 /// written as it is built, so peak memory is one row's JSON body rather
 /// than the whole table -- the same reason `print_voidstar_jsonl` streams.
-#[no_mangle]
-pub unsafe extern "C" fn print_arrow_as_jsonl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
-    crate::error::guarded(errmsg, PRINT_RESULT_ERR, || print_arrow_as_jsonl_impl(data, errmsg))
+pub(crate) unsafe fn print_arrow_as_jsonl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
+    clear_errmsg(errmsg);
+    print_arrow_as_jsonl_impl(data, errmsg)
 }
 
 unsafe fn print_arrow_as_jsonl_impl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
@@ -510,9 +532,9 @@ unsafe fn print_arrow_as_jsonl_impl(data: *const c_void, errmsg: *mut *mut c_cha
 
 /// Print a block as a tab-separated table: a header line of column names,
 /// then one line per row with cells rendered as in the JSON form.
-#[no_mangle]
-pub unsafe extern "C" fn print_arrow_as_table(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
-    crate::error::guarded(errmsg, PRINT_RESULT_ERR, || print_arrow_as_table_impl(data, errmsg))
+pub(crate) unsafe fn print_arrow_as_table(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
+    clear_errmsg(errmsg);
+    print_arrow_as_table_impl(data, errmsg)
 }
 
 unsafe fn print_arrow_as_table_impl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
@@ -695,13 +717,13 @@ fn merge_table_schema_with_json(rs: &Schema, value: &serde_json::Value) -> Resul
 /// # Safety
 /// `json` must be a valid null-terminated UTF-8 string and `schema` a
 /// valid CSchema pointer.
-#[no_mangle]
-pub unsafe extern "C" fn read_json_to_arrow_shm(
+pub(crate) unsafe fn read_json_to_arrow_shm(
     json: *const c_char,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    crate::error::guarded(errmsg, shm::RELNULL, || read_json_to_arrow_shm_impl(json, schema, errmsg))
+    clear_errmsg(errmsg);
+    read_json_to_arrow_shm_impl(json, schema, errmsg)
 }
 
 unsafe fn read_json_to_arrow_shm_impl(
@@ -981,5 +1003,74 @@ mod tests {
         assert_eq!(ok.as_any().downcast_ref::<Int64Array>().unwrap().values(), &[i64::MIN]);
         let ok = column(SerialType::Float32, "[{\"c\": 0.1}]").unwrap();
         assert_eq!(ok.as_any().downcast_ref::<Float32Array>().unwrap().values(), &[0.1f32]);
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn arrow_to_shm(array: *mut FFI_ArrowArray, schema: *const FFI_ArrowSchema, errmsg: *mut *mut c_char) -> RelPtr {
+        super::arrow_to_shm(array, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn arrow_to_shm_typed(array: *mut FFI_ArrowArray, schema: *const FFI_ArrowSchema, declared: *const CSchema, errmsg: *mut *mut c_char) -> RelPtr {
+        super::arrow_to_shm_typed(array, schema, declared, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn arrow_stream_to_shm_typed(stream: *mut arrow_array::ffi_stream::FFI_ArrowArrayStream, declared: *const CSchema, errmsg: *mut *mut c_char) -> RelPtr {
+        super::arrow_stream_to_shm_typed(stream, declared, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn arrow_from_shm(header: *const ArrowShmHeader, out_schema: *mut FFI_ArrowSchema, out_array: *mut FFI_ArrowArray, errmsg: *mut *mut c_char) -> i32 {
+        super::arrow_from_shm(header, out_schema, out_array, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn arrow_validate(header: *const ArrowShmHeader, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32 {
+        super::arrow_validate(header, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn arrow_from_shm_owned(header: *const ArrowShmHeader, acquire: i32, out_schema: *mut FFI_ArrowSchema, out_array: *mut FFI_ArrowArray, errmsg: *mut *mut c_char) -> i32 {
+        super::arrow_from_shm_owned(header, acquire, out_schema, out_array, errmsg)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn arrow_live_view_bytes() -> usize {
+        super::arrow_live_view_bytes()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn arrow_copied_bytes() -> u64 {
+        super::arrow_copied_bytes()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn print_arrow_as_json(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
+        super::print_arrow_as_json(data, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn arrow_to_json_string(data: *const c_void, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::arrow_to_json_string(data, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn print_arrow_as_jsonl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
+        super::print_arrow_as_jsonl(data, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn print_arrow_as_table(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
+        super::print_arrow_as_table(data, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_json_to_arrow_shm(json: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> RelPtr {
+        super::read_json_to_arrow_shm(json, schema, errmsg)
     }
 }

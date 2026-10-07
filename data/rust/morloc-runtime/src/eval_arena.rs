@@ -370,8 +370,7 @@ pub fn is_active() -> bool {
 // ARENA while preserving RAII semantics on the nexus side via a small
 // Drop wrapper around the returned handle.
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_eval_arena_enter(
+pub(crate) unsafe fn morloc_eval_arena_enter(
     errmsg: *mut *mut std::ffi::c_char,
 ) -> *mut std::ffi::c_void {
     crate::error::clear_errmsg(errmsg);
@@ -384,8 +383,7 @@ pub unsafe extern "C" fn morloc_eval_arena_enter(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_eval_arena_exit(handle: *mut std::ffi::c_void) {
+pub(crate) unsafe fn morloc_eval_arena_exit(handle: *mut std::ffi::c_void) {
     if !handle.is_null() {
         drop(Box::from_raw(handle as *mut ArenaGuard));
     }
@@ -612,5 +610,18 @@ mod tests {
 
         // Parent's arena unaffected.
         assert!(is_active());
+    }
+}
+
+mod c_abi {
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_eval_arena_enter(errmsg: *mut *mut std::ffi::c_char) -> *mut std::ffi::c_void {
+        super::morloc_eval_arena_enter(errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_eval_arena_exit(handle: *mut std::ffi::c_void) {
+        super::morloc_eval_arena_exit(handle)
     }
 }

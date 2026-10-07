@@ -291,6 +291,27 @@ EOF
 fi
 
 # ===========================================================================
+# Group: worker-crash -- the call after a worker crash is served
+# ===========================================================================
+
+if should_run "worker-crash"; then
+    echo "${BOLD}[worker-crash] a worker killed inside a call${RESET}"
+    CRASH_DIR=$(mktemp -d); WORK_DIRS+=("$CRASH_DIR")
+    if compile_program "crash.loc" "$CRASH_DIR"; then
+        seq="$(mcp_raw "$CRASH_DIR/nexus" <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"pyDie","arguments":{"_1":1}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"pyOk","arguments":{"_1":8}}}
+EOF
+)"
+        assert_eq "the call after a worker crash -> 8" "8" "$(jget "$seq" "d['responses'][2]['result']['content'][0]['text']")"
+    else
+        fail "crash.loc compiles"
+    fi
+fi
+
+# ===========================================================================
 # Group: fd -- pool stdout must not corrupt the protocol stream
 # ===========================================================================
 
@@ -323,15 +344,16 @@ if should_run "exclude"; then
         cat "$EXCL_DIR"/build-*.err 2>/dev/null | head -20
     fi
 
-    # Table exclusion needs pyarrow; skip gracefully if the build fails.
+    # Tables are served (their row schema is known); needs pyarrow, so skip
+    # gracefully if the build fails.
     TBL_DIR=$(mktemp -d); WORK_DIRS+=("$TBL_DIR")
     cp "$SCRIPT_DIR/excluded_table.py" "$TBL_DIR/" 2>/dev/null || true
     if (cd "$TBL_DIR" && cp "$SCRIPT_DIR/excluded_table.loc" . && \
         morloc make -o nexus excluded_table.loc >/dev/null 2>build-table.err); then
         TOOLS="$(mcp_list "$TBL_DIR/nexus")"
         assert_contains "control 'plainAdd' present (table)" "plainAdd" "$TOOLS"
-        assert_not_contains "Table-return 'readTable' excluded" "readTable" "$TOOLS"
-        assert_not_contains "Table-arg 'sumTable' excluded"     "sumTable"  "$TOOLS"
+        assert_contains "Table-return 'readTable' served" "readTable" "$TOOLS"
+        assert_contains "Table-arg 'sumTable' served"     "sumTable"  "$TOOLS"
     else
         skip "excluded_table.loc failed to compile (needs pyarrow)"
     fi

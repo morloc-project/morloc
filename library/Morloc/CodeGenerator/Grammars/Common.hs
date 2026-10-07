@@ -51,8 +51,10 @@ module Morloc.CodeGenerator.Grammars.Common
   , papplyHeadSigs
   , crossingClosures
   , serialClosuresOf
+  , serialClosuresOutsideVariants
   , collectSerialObjects
   , serialObjectsOfAST
+  , variantWireArms
   , computeClosureSchemas
   , closureSchemaTexts
   , orNativeType
@@ -701,7 +703,7 @@ unifyRecords xs =
     $ [((v, map fst es), (m, es)) | (v, m, es) <- xs]
 
 structName :: Int -> FVar -> MDoc
-structName i (FV v (CV "struct")) = "mlc_" <> pretty v <> "_" <> pretty i
+structName i (FV v (CV "struct")) = "mlc_" <> pretty (tvarIdentifier v) <> "_" <> pretty i
 structName _ (FV _ v) = pretty v
 
 -- | Merge every occurrence of one `data` type in a pool into the one
@@ -901,7 +903,14 @@ collectSerializedClosures = runIdentity . surroundFoldSerialManifoldM defaultVal
 -- | All 'SerialClosure' nodes reachable within a 'SerialAST' (e.g. a list or
 -- record of closures crossing together, not only a bare closure).
 serialClosuresOf :: SerialAST -> [SerialAST]
-serialClosuresOf = go
+serialClosuresOf = closuresWithin True
+
+-- | As 'serialClosuresOf', without descending into a variant.
+serialClosuresOutsideVariants :: SerialAST -> [SerialAST]
+serialClosuresOutsideVariants = closuresWithin False
+
+closuresWithin :: Bool -> SerialAST -> [SerialAST]
+closuresWithin intoVariants = go
   where
     go c@(SerialClosure ins out) = c : concatMap go ins <> go out
     go (SerialPack _ (_, s)) = go s
@@ -909,6 +918,7 @@ serialClosuresOf = go
     go (SerialTuple _ ss) = concatMap go ss
     go (SerialObject _ _ _ rs) = concatMap (go . snd) rs
     go (SerialOptional _ s) = go s
+    go (SerialVariant _ _ as) | intoVariants = concatMap (concatMap go . snd) as
     go _ = []
 
 -- | Every 'SerialObject' (record) reachable at a (de)serialization site in the
@@ -920,9 +930,35 @@ serialClosuresOf = go
 -- deserialize ('DeserializeN') sites, and records nested in an outer aggregate.
 collectSerialObjects :: SerialManifold -> [(FVar, [(Key, SerialAST)])]
 collectSerialObjects = concatMap serialObjectsOfAST . allSerialASTs
+
+-- | The arms of every payload-bearing @data@ type that crosses in these
+-- manifolds or in a closure's wire forms, keyed by the type's rendered name.
+variantWireArms ::
+  Monad m =>
+  (TypeF -> m MDoc) ->
+  Map.Map Int ([SerialAST], [SerialAST], SerialAST) ->
+  [SerialManifold] ->
+  m (Map.Map Text [(Text, [SerialAST])])
+variantWireArms renderType closureAsts es =
+  Map.fromListWith (const id) <$> mapM keyed variants
   where
-    allSerialASTs :: SerialManifold -> [SerialAST]
-    allSerialASTs = runIdentity . surroundFoldSerialManifoldM defaultValue fw
+    asts = concatMap allSerialASTs es <> concat [cs <> bs <> [r] | (cs, bs, r) <- Map.elems closureAsts]
+    variants = [(sv, as) | sv@(SerialVariant _ _ as@(_ : _)) <- concatMap serialVariantsOfAST asts]
+    keyed (sv, as) = (\n -> (render n, as)) <$> renderType (serialAstToType sv)
+
+serialVariantsOfAST :: SerialAST -> [SerialAST]
+serialVariantsOfAST v@(SerialVariant _ _ as@(_ : _)) = v : concatMap (concatMap serialVariantsOfAST . snd) as
+serialVariantsOfAST (SerialClosure ins out) = concatMap serialVariantsOfAST (ins <> [out])
+serialVariantsOfAST (SerialObject _ _ _ rs) = concatMap (serialVariantsOfAST . snd) rs
+serialVariantsOfAST (SerialList _ _ s) = serialVariantsOfAST s
+serialVariantsOfAST (SerialTuple _ ss) = concatMap serialVariantsOfAST ss
+serialVariantsOfAST (SerialOptional _ s) = serialVariantsOfAST s
+serialVariantsOfAST (SerialPack _ (_, s)) = serialVariantsOfAST s
+serialVariantsOfAST _ = []
+
+allSerialASTs :: SerialManifold -> [SerialAST]
+allSerialASTs = runIdentity . surroundFoldSerialManifoldM defaultValue fw
+  where
     fw :: FoldWithManifoldM Identity [SerialAST] [SerialAST] [SerialAST] [SerialAST] [SerialAST] [SerialAST]
     fw =
       defaultValue
@@ -1070,6 +1106,7 @@ serialObjectsOfAST = go
         go (SerialTuple _ ss) = concatMap go ss
         go (SerialOptional _ s) = go s
         go (SerialPack _ (_, s)) = go s
+        go (SerialVariant _ _ as) = concatMap (concatMap go . snd) as
         go _ = []
 
 -- | For each nested closure in the given manifolds, compute its serial wire

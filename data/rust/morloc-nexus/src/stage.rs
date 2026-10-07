@@ -23,10 +23,9 @@ struct Stage {
 
 static STAGE: OnceLock<Stage> = OnceLock::new();
 
-/// Enter stage mode. Must run before any pool starts, since the pools read
-/// `MORLOC_STDOUT_STAGE` from their environment.
+/// Enter stage mode. The pools read `MORLOC_STDOUT_STAGE`, which main sets
+/// at startup for a stage child.
 pub fn init(dir: &str, args: &[usize], tee: bool, parent: &str) {
-    std::env::set_var("MORLOC_STDOUT_STAGE", "1");
     let _ = STAGE.set(Stage { dir: dir.to_string(), args: args.to_vec(), tee, parent: parent.to_string() });
 }
 

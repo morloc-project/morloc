@@ -18,8 +18,8 @@
 //! any command is evaluated: it saves the real stdout to a private high fd and
 //! aliases fd 1 onto fd 2, so every stray `print` / `std::cout` / `cat` lands on
 //! stderr. JSON-RPC is written only via raw `write(protocol_fd, ...)`, never
-//! `println!`. Commands whose types cannot be safely served (Arrow `Table`,
-//! stream handles, `@stdin`) are excluded from the tool surface upstream in
+//! `println!`. Commands whose types cannot be safely served (stream handles,
+//! `@stdin`) are excluded from the tool surface upstream in
 //! [`crate::json_help::build_tool_shapes`].
 
 use std::collections::HashMap;
@@ -156,15 +156,13 @@ const DAEMON_ERROR_INTERNAL: i32 = 5;
 /// crate deliberately does not depend on that one.
 const EVAL_HEAP_LIMIT: &str = "-M2G";
 
-/// GHC's `EXIT_HEAPOVERFLOW`: the exit status of a child stopped by
-/// `EVAL_HEAP_LIMIT`.
-const EXIT_HEAPOVERFLOW: i32 = 251;
 
 // JSON-RPC 2.0 error codes.
 const JSONRPC_PARSE_ERROR: i32 = -32700;
 const JSONRPC_INVALID_REQUEST: i32 = -32600;
 const JSONRPC_METHOD_NOT_FOUND: i32 = -32601;
 const JSONRPC_INVALID_PARAMS: i32 = -32602;
+const JSONRPC_INTERNAL_ERROR: i32 = -32603;
 
 /// Layout-compatible view of `daemon_ffi::DaemonResponse`. We only read it.
 /// The trailing `result_bytes`/`result_len`/`mime` fields carry a raw-media
@@ -221,7 +219,7 @@ pub fn rehome_stdout_for_protocol() -> RawFd {
     unsafe {
         libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO);
     }
-    std::env::set_var("MORLOC_QUIET", "1");
+    crate::process::set_startup_env("MORLOC_QUIET", "1");
     protocol_fd
 }
 
@@ -298,20 +296,38 @@ pub fn serve(
             }
         };
 
-        if let Some(response) = handle_message(
-            &msg,
-            &mut session,
-            &tools_list,
-            &by_name,
-            &ctx,
-            &server_name,
-            &server_version,
-        ) {
-            write_message(protocol_fd, &response);
-        }
+        answer_message(protocol_fd, msg.id.as_ref(), || {
+            handle_message(
+                &msg,
+                &mut session,
+                &tools_list,
+                &by_name,
+                &ctx,
+                &server_name,
+                &server_version,
+            )
+        });
     }
 
     process::clean_exit(0);
+}
+
+pub(crate) fn answer_message(
+    protocol_fd: RawFd,
+    id: Option<&Value>,
+    handle: impl FnOnce() -> Option<Value>,
+) {
+    match morloc_runtime_types::panic::catch(handle) {
+        Ok(Some(response)) => write_message(protocol_fd, &response),
+        Ok(None) => {}
+        Err(_) => {
+            // PANIC-3
+            if let Some(id) = id {
+                write_message(protocol_fd, &error_response(id.clone(), JSONRPC_INTERNAL_ERROR, "internal error"));
+            }
+            process::end_after_panic();
+        }
+    }
 }
 
 /// Per-connection handshake state.
@@ -584,6 +600,8 @@ impl DispatchCtx {
     /// recovery (a fast no-op when all pools are alive) before returning, so a
     /// subsequent call can succeed.
     fn dispatch(&self, request_str: &str, want_media: bool) -> Result<DispatchOutcome, String> {
+        // SHM-8: a pool that ended since the last call is recovered first.
+        process::mcp_recover_pools(self.n_pools);
         let req_c = CString::new(request_str).unwrap();
 
         let mut errmsg: *mut c_char = ptr::null_mut();
@@ -634,7 +652,7 @@ impl DispatchCtx {
                 let msg = cstr_to_string((*resp).error)
                     .unwrap_or_else(|| "dispatch failed".to_string());
                 if kind == DAEMON_ERROR_INTERNAL {
-                    process::mcp_recover_pools(self.n_pools);
+                    process::mcp_recover_pools_after_failure(self.n_pools);
                 }
                 Err(msg)
             }
@@ -904,14 +922,77 @@ fn read_lines_capped<R: BufRead>(mut reader: R) -> impl Iterator<Item = Result<S
 // (a pool-replication / worker model) is deliberately out of scope here.
 //
 // Because the endpoint is network-reachable, request reads are bounded (header
-// and body size caps + a per-read socket timeout) and the session table is
-// bounded (idle TTL + a hard cap), so a slow or abusive client cannot exhaust
-// memory or threads.
+// and body size caps, total read deadlines, a cap on open connections) and
+// the session table is bounded (idle TTL + a hard cap), so a slow or abusive
+// client cannot exhaust memory or threads (model/network.md NET-2, NET-3).
 
-/// Per-read socket timeout: a connection that sends nothing for this long is
-/// dropped, defusing idle/slowloris connections and freeing the thread. Also
-/// bounds keep-alive idle time between requests.
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cap on connections served at once; past it a connection is answered 503.
+const MAX_CONNECTIONS: usize = 128;
+
+static OPEN_CONNECTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A place among the connections served at once, given back on drop.
+pub(crate) struct ConnectionSlot;
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        OPEN_CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+// NET-3
+pub(crate) fn connection_slot() -> Option<ConnectionSlot> {
+    use std::sync::atomic::Ordering;
+    OPEN_CONNECTIONS
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < MAX_CONNECTIONS).then_some(n + 1))
+        .ok()
+        .map(|_| ConnectionSlot)
+}
+
+/// A failed accept: with the descriptor table full, wait for one to free
+/// instead of retrying at once; otherwise report it.
+pub(crate) fn accept_failed(server: &str, e: &std::io::Error) {
+    if matches!(e.raw_os_error(), Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)) {
+        std::thread::sleep(Duration::from_millis(50));
+    } else {
+        eprintln!("{server}: accept error: {e}");
+    }
+}
+
+/// Answer a connection past the cap without reading from it.
+pub(crate) fn refuse_busy(mut stream: TcpStream) {
+    let _ = stream.set_nonblocking(true);
+    let _ = stream.write_all(&http_json(503, br#"{"error":"too many connections"}"#, false));
+    // NET-3: unread request bytes at close would reset the connection and lose the reply.
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let mut buf = [0u8; 4096];
+    for _ in 0..16 {
+        if !matches!(stream.read(&mut buf), Ok(n) if n > 0) {
+            break;
+        }
+    }
+}
+
+/// A connection read under a deadline that holds however the bytes trickle
+/// in (NET-2): each read may wait only for the time left.
+struct DeadlineReader {
+    stream: TcpStream,
+    until: std::rc::Rc<std::cell::Cell<Instant>>,
+}
+
+impl Read for DeadlineReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.get().saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "the client took too long to send its request"));
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf).map_err(|e| match e.kind() {
+            std::io::ErrorKind::WouldBlock => std::io::Error::new(std::io::ErrorKind::TimedOut, e),
+            _ => e,
+        })
+    }
+}
 
 /// Cap on a single request-line / header line. Longer -> the request is
 /// rejected and the connection closed.
@@ -1010,8 +1091,7 @@ pub fn serve_http(
     // overridden (the manager passes --allow-no-auth for a loopback-only
     // publish, where the container nexus binds 0.0.0.0 but only loopback
     // reaches it).
-    let is_loopback = matches!(bind_host, "127.0.0.1" | "localhost" | "::1");
-    if auth_token.is_none() && !is_loopback && !allow_no_auth {
+    if open_bind_refused(bind_host, auth_token.is_some(), allow_no_auth) {
         eprintln!(
             "morloc mcp: refusing to serve on {} with no auth token (bind is not \
              loopback). Set --auth-token / MORLOC_MCP_TOKEN, or pass --allow-no-auth \
@@ -1029,13 +1109,18 @@ pub fn serve_http(
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
+                let Some(slot) = connection_slot() else {
+                    refuse_busy(stream);
+                    continue;
+                };
                 let st = Arc::clone(&state);
                 let tk = Arc::clone(&token);
                 std::thread::spawn(move || {
+                    let _slot = slot;
                     serve_conn(stream, |req, ka| build_response(req, &st, tk.as_ref().as_deref(), ka))
                 });
             }
-            Err(e) => eprintln!("morloc mcp: accept error: {}", e),
+            Err(e) => accept_failed("morloc mcp", &e),
         }
     }
     process::clean_exit(0);
@@ -1048,31 +1133,47 @@ pub fn serve_http(
 /// reply, delegating each request to `respond`. Shared by the single-program
 /// MCP server and the multi-module front-end, which differ only in how they
 /// build the response.
-fn serve_conn<F>(stream: TcpStream, mut respond: F)
+pub(crate) fn serve_conn<F>(stream: TcpStream, mut respond: F)
 where
     F: FnMut(&HttpRequest, bool) -> Vec<u8>,
 {
-    // Drop a connection that stalls mid-request or sits idle past the timeout,
-    // so a slow/silent client cannot pin this thread indefinitely.
-    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+    use morloc_runtime_types::net_limits::{body_limit, HEAD_LIMIT};
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(_) => return,
     };
-    let mut reader = BufReader::new(stream);
+    let until = std::rc::Rc::new(std::cell::Cell::new(Instant::now() + HEAD_LIMIT));
+    let mut reader = BufReader::new(DeadlineReader { stream, until: until.clone() });
     loop {
-        let req = match read_http_request(&mut reader) {
+        // NET-2: the wait for a request, its line and headers share one deadline.
+        until.set(Instant::now() + HEAD_LIMIT);
+        let req = match read_http_request(&mut reader, |len| until.set(Instant::now() + body_limit(len))) {
             Ok(Some(r)) => r,
             _ => break, // EOF, malformed, or IO error -> close
         };
         let keep_alive = header_get(&req.headers, "connection")
             .map(|v| !v.eq_ignore_ascii_case("close"))
             .unwrap_or(true);
-        let resp = respond(&req, keep_alive);
+        let Some(request) = process::begin_request() else {
+            let _ = writer.write_all(&http_json(503, br#"{"error":"server is shutting down"}"#, false));
+            break;
+        };
+        let resp = match morloc_runtime_types::panic::catch(|| respond(&req, keep_alive)) {
+            Ok(resp) => resp,
+            Err(_) => {
+                // PANIC-3
+                process::refuse_new_work();
+                let _ = writer.write_all(&http_json(500, br#"{"error":"internal error"}"#, false));
+                let _ = writer.shutdown(std::net::Shutdown::Both);
+                drop(request);
+                process::end_after_panic();
+            }
+        };
         if writer.write_all(&resp).is_err() {
             break;
         }
         let _ = writer.flush();
+        drop(request);
         if !keep_alive {
             break;
         }
@@ -1081,9 +1182,9 @@ where
 
 /// A parsed HTTP request. Header names are lowercased for case-insensitive
 /// lookup; the body is the exact Content-Length bytes.
-struct HttpRequest {
+pub(crate) struct HttpRequest {
     method: String,
-    path: String,
+    pub(crate) path: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
@@ -1093,7 +1194,7 @@ struct HttpRequest {
 /// the caller). Every line is size-capped and the body is read incrementally up
 /// to Content-Length, so a hostile Content-Length or header flood cannot force
 /// a large up-front allocation.
-fn read_http_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<HttpRequest>> {
+fn read_http_request<R: BufRead>(reader: &mut R, on_body: impl FnOnce(usize)) -> std::io::Result<Option<HttpRequest>> {
     let mut line = String::new();
     match read_capped_line(reader, &mut line)? {
         LineRead::Eof | LineRead::TooLong => return Ok(None),
@@ -1139,6 +1240,7 @@ fn read_http_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<HttpR
     }
     let mut body = Vec::new();
     if content_length > 0 {
+        on_body(content_length);
         reader.take(content_length as u64).read_to_end(&mut body)?;
     }
     Ok(Some(HttpRequest {
@@ -1217,8 +1319,8 @@ fn handle_http_post(
     let method = msg.method.as_deref().unwrap_or("");
     let sid_hdr = header_get(&req.headers, "mcp-session-id").map(|s| s.to_string());
 
-    // Recover a poisoned lock so one panicking request cannot wedge the server.
-    let mut guard = state.lock().unwrap_or_else(|p| p.into_inner());
+    // PANIC-4
+    let Ok(mut guard) = state.lock() else { return poisoned_reply() };
 
     // Resolve (or, on initialize, create) the session.
     let now = Instant::now();
@@ -1309,7 +1411,8 @@ fn handle_http_delete(
 ) -> Vec<u8> {
     match header_get(&req.headers, "mcp-session-id") {
         Some(id) => {
-            let mut g = state.lock().unwrap_or_else(|p| p.into_inner());
+            // PANIC-4
+            let Ok(mut g) = state.lock() else { return poisoned_reply() };
             g.sessions.remove(id);
             http_json(200, br#"{"ok":true}"#, keep_alive)
         }
@@ -1326,31 +1429,18 @@ fn header_get<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str
 }
 
 /// True when the request carries `Authorization: Bearer <token>` matching.
-/// The token comparison is constant-time so a network attacker cannot recover
-/// the token byte-by-byte from response timing.
 fn authorized(headers: &[(String, String)], token: &str) -> bool {
-    match header_get(headers, "authorization") {
-        Some(v) => match v.trim().strip_prefix("Bearer ") {
-            Some(t) => ct_eq(t.trim().as_bytes(), token.as_bytes()),
-            None => false,
-        },
-        None => false,
-    }
+    morloc_runtime_types::bearer::authorizes(header_get(headers, "authorization"), token)
 }
 
-/// Constant-time byte-slice equality. Length is compared first (the token's
-/// length is not the secret); equal-length inputs are compared without an
-/// early exit, so timing does not depend on the position of the first
-/// mismatch.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+/// Whether a bind address keeps a listener on this machine.
+pub(crate) fn is_loopback(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+// NET-1
+pub(crate) fn open_bind_refused(host: &str, has_token: bool, allow_no_auth: bool) -> bool {
+    !is_loopback(host) && !has_token && !allow_no_auth
 }
 
 /// A fresh, unguessable session id: 16 random bytes hex-encoded (from
@@ -1422,6 +1512,8 @@ fn http_head(
         401 => "Unauthorized",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "OK",
     };
     let mut head = format!(
@@ -1463,8 +1555,12 @@ fn http_response(
     out
 }
 
+fn poisoned_reply() -> Vec<u8> {
+    http_json(503, br#"{"error":"server is shutting down"}"#, false)
+}
+
 /// A JSON response with no extra headers -- the common case.
-fn http_json(status: u16, body: &[u8], keep_alive: bool) -> Vec<u8> {
+pub(crate) fn http_json(status: u16, body: &[u8], keep_alive: bool) -> Vec<u8> {
     http_response(status, body, keep_alive, &[])
 }
 
@@ -1585,7 +1681,11 @@ impl Frontend {
         }
         let module_c = CString::new(module).unwrap_or_default();
         // Keep the guard alive across the forward (named binding, not `_`).
-        let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        // PANIC-4
+        let Ok(_guard) = lock.lock() else {
+            unsafe { daemon_free_request(req) };
+            return Err("the server is shutting down after an internal error".into());
+        };
         let mut ferr: *mut c_char = ptr::null_mut();
         let resp = unsafe { router_forward(self.router.0, module_c.as_ptr(), req, &mut ferr) };
         unsafe { daemon_free_request(req) };
@@ -1819,9 +1919,8 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
         .unwrap_or_else(|_| addr.clone());
     // Fail closed: a non-loopback bind with no token would be an open,
     // unauthenticated endpoint (see the manager's loopback/expose logic).
-    let is_loopback = matches!(bind_host.as_str(), "127.0.0.1" | "localhost" | "::1");
     let auth_token = config.mcp_auth_token.clone();
-    if auth_token.is_none() && !is_loopback && !config.mcp_allow_no_auth {
+    if open_bind_refused(&bind_host, auth_token.is_some(), config.mcp_allow_no_auth) {
         eprintln!(
             "morloc serve: refusing to serve on {} with no auth token (bind is not loopback). \
              Set --auth-token / MORLOC_MCP_TOKEN, or pass --allow-no-auth to override.",
@@ -1833,7 +1932,7 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
     // the bind address says nothing about who can reach the process, and what
     // can is decided outside it by a published port or a network. Say so once,
     // because the caller who arrives is then whoever that decision let in.
-    if auth_token.is_none() && !is_loopback {
+    if auth_token.is_none() && !is_loopback(&bind_host) {
         eprintln!(
             "morloc serve: no auth token set. Every caller that can reach {} can call every \
              exposed function. Access control is the operator's: publish to loopback \
@@ -1874,15 +1973,20 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
+                let Some(slot) = connection_slot() else {
+                    refuse_busy(stream);
+                    continue;
+                };
                 let fe = Arc::clone(&fe);
                 let tk = Arc::clone(&token);
                 std::thread::spawn(move || {
+                    let _slot = slot;
                     serve_conn(stream, |req, ka| {
                         frontend_build_response(req, &fe, tk.as_ref().as_deref(), ka)
                     })
                 });
             }
-            Err(e) => eprintln!("morloc serve: accept error: {}", e),
+            Err(e) => accept_failed("morloc serve", &e),
         }
     }
     process::clean_exit(0);
@@ -2032,7 +2136,7 @@ fn morloc_on_path() -> bool {
 /// in eval cannot take down the front-end). `--eval-sandbox` bans IO intrinsics;
 /// `--eval-allowed-modules` bounds imports (empty => none). Returns eval's stdout
 /// on success, else its stderr.
-fn frontend_eval(expr: &str, fe: &Frontend) -> Result<String, String> {
+fn frontend_eval(expr: &str, fe: &Frontend) -> Result<String, (u16, String)> {
     let allow = fe.eval_allow.clone().unwrap_or_default();
     let mut cmd = std::process::Command::new("morloc");
     // Bound the child on both axes a runaway expression can exhaust
@@ -2064,29 +2168,137 @@ fn frontend_eval(expr: &str, fe: &Frontend) -> Result<String, String> {
             });
         }
     }
-    let out = cmd
-        .output()
-        .map_err(|e| {
-            format!(
+    let wall = (cpu_secs > 0).then(|| Duration::from_secs(cpu_secs as u64 * EVAL_WALL_PER_CPU));
+    let out = match output_within(cmd, wall) {
+        Ok(Some(out)) => out,
+        Ok(None) => {
+            return Err((408, format!(
+                "eval ran past its time limit ({} s of wall time) and was stopped",
+                cpu_secs as u64 * EVAL_WALL_PER_CPU
+            )))
+        }
+        Err(e) => {
+            return Err((500, format!(
                 "failed to run eval: {} (the eval capability requires the `morloc` \
                  compiler on PATH in the serving environment)",
                 e
-            )
-        })?;
+            )))
+        }
+    };
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
-    } else if out.status.code() == Some(EXIT_HEAPOVERFLOW) {
+        return Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string());
+    }
+    Err(eval_failure_response(&out, cpu_secs))
+}
+
+/// The HTTP status and message of a failed eval child.
+fn eval_failure_response(out: &std::process::Output, cpu_secs: i32) -> (u16, String) {
+    use morloc_runtime_types::eval_status::{eval_failure, EvalFailure};
+    use std::os::unix::process::ExitStatusExt;
+    let said = || {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let text = if !stderr.trim().is_empty() { stderr } else { stdout };
+        if text.trim().is_empty() { "eval failed".to_string() } else { text.trim().to_string() }
+    };
+    match eval_failure(out.status.into_raw()) {
+        EvalFailure::Timeout => (408, format!("eval exceeded its CPU budget ({} s)", cpu_secs)),
         // The child's own advice ("use +RTS -M<size>") is useless to an HTTP
         // caller, who cannot set it; say who imposed the ceiling instead.
-        Err(format!(
-            "eval exceeded the server's heap ceiling ({})",
-            EVAL_HEAP_LIMIT.trim_start_matches("-M")
-        ))
-    } else {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let err = err.trim();
-        Err(if err.is_empty() { "eval failed".to_string() } else { err.to_string() })
+        EvalFailure::HeapCeiling => {
+            (500, format!("eval exceeded the server's heap ceiling ({})", EVAL_HEAP_LIMIT.trim_start_matches("-M")))
+        }
+        EvalFailure::Internal | EvalFailure::CouldNotStart => (500, said()),
+        EvalFailure::Rejected => (400, said()),
     }
+}
+
+/// A blocked eval spends no CPU, so its CPU limit is backed by a wall limit
+/// of this many times as long (model/daemon.md DAEMON-6).
+const EVAL_WALL_PER_CPU: u64 = 4;
+
+/// Process groups of running evals, killed when the front-end exits.
+pub static FRONTEND_EVALS: morloc_runtime_types::child_group::ChildGroups =
+    morloc_runtime_types::child_group::ChildGroups::new();
+
+/// Whether child `pid` has ended, leaving it unreaped so its group id
+/// stays its own.
+fn ended_unreaped(pid: libc::pid_t) -> std::io::Result<bool> {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
+        };
+        if rc == 0 {
+            return Ok(info.si_signo == libc::SIGCHLD);
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}
+
+/// Run `cmd` in its own process group until it and everything holding its
+/// output have finished, or for at most `wall`; `None` when it ran out,
+/// after stopping the group.
+fn output_within(
+    mut cmd: std::process::Command,
+    wall: Option<Duration>,
+) -> std::io::Result<Option<std::process::Output>> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let mut child = cmd
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let pid = child.id() as libc::pid_t;
+    let Some(group) = FRONTEND_EVALS.add(pid) else {
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        let _ = child.wait();
+        return Err(std::io::Error::other("too many evals at once"));
+    };
+    let drain = |r: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut r) = r {
+                let _ = r.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let out = drain(child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let err = drain(child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let deadline = wall.map(|w| Instant::now() + w);
+    let in_time = loop {
+        if ended_unreaped(pid)? && out.is_finished() && err.is_finished() {
+            break true;
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if !in_time {
+        group.signal(libc::SIGTERM);
+        let grace = Instant::now() + Duration::from_secs(1);
+        while !ended_unreaped(pid)? && Instant::now() < grace {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        group.signal(libc::SIGKILL);
+    }
+    drop(group);
+    let status = child.wait()?;
+    if !in_time {
+        return Ok(None);
+    }
+    Ok(Some(std::process::Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    }))
 }
 
 /// `POST /eval`: the API-side eval capability. Body is `{"expr":"..."}` (or
@@ -2113,9 +2325,9 @@ fn frontend_eval_api(req: &HttpRequest, fe: &Frontend, keep_alive: bool) -> Vec<
             let body = json!({ "status": "ok", "result": out }).to_string();
             http_json(200, body.as_bytes(), keep_alive)
         }
-        Err(message) => {
+        Err((status, message)) => {
             let body = json!({ "status": "error", "error": message }).to_string();
-            http_json(500, body.as_bytes(), keep_alive)
+            http_json(status, body.as_bytes(), keep_alive)
         }
     }
 }
@@ -2137,7 +2349,8 @@ fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) ->
     let now = Instant::now();
 
     let (session_id, prior_init) = {
-        let mut sessions = fe.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        // PANIC-4
+        let Ok(mut sessions) = fe.sessions.lock() else { return poisoned_reply() };
         if method == "initialize" {
             prune_sessions(&mut sessions, now);
             let id = new_session_id();
@@ -2169,7 +2382,8 @@ fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) ->
         // that ran while the forward was in flight (lock-free) must not be
         // undone by resurrecting the entry, and re-inserting would bypass the
         // MAX_SESSIONS cap enforced at initialize.
-        let mut sessions = fe.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        // PANIC-4
+        let Ok(mut sessions) = fe.sessions.lock() else { return poisoned_reply() };
         if let Some(s) = sessions.get_mut(&session_id) {
             s.initialized = session.initialized;
             s.last_seen = now;
@@ -2192,7 +2406,8 @@ fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) ->
 fn frontend_mcp_delete(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
     match header_get(&req.headers, "mcp-session-id") {
         Some(id) => {
-            let mut sessions = fe.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            // PANIC-4
+            let Ok(mut sessions) = fe.sessions.lock() else { return poisoned_reply() };
             sessions.remove(id);
             http_json(200, br#"{"ok":true}"#, keep_alive)
         }
@@ -2292,7 +2507,7 @@ fn frontend_tools_call(id: Value, msg: &RpcMessage, fe: &Frontend) -> Value {
         };
         return match frontend_eval(&expr, fe) {
             Ok(out) => result_response(id, json!({ "content": [ { "type": "text", "text": out } ] })),
-            Err(message) => result_response(
+            Err((_, message)) => result_response(
                 id,
                 json!({ "content": [ { "type": "text", "text": message } ], "isError": true }),
             ),
@@ -2405,6 +2620,20 @@ fn http_binary_response(status: u16, content_type: &str, body: &[u8], keep_alive
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_rejected_expression_is_a_bad_request_and_a_crash_is_an_internal_error() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |raw: i32, stderr: &str| std::process::Output {
+            status: std::process::ExitStatus::from_raw(raw),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        assert_eq!(super::eval_failure_response(&out(1 << 8, "type error"), 5), (400, "type error".to_string()));
+        assert_eq!(super::eval_failure_response(&out(70 << 8, "bug"), 5).0, 500);
+        assert_eq!(super::eval_failure_response(&out(libc::SIGSEGV, ""), 5).0, 500);
+        assert_eq!(super::eval_failure_response(&out(libc::SIGXCPU, ""), 5).0, 408);
+    }
+
     use super::*;
     use crate::json_help::RecordField;
     use std::collections::HashSet;
@@ -2858,6 +3087,41 @@ mod tests {
             .collect()
     }
 
+    fn poisoned_state() -> Arc<Mutex<HttpState>> {
+        let state = Arc::new(Mutex::new(HttpState {
+            manifest_c: std::ptr::null_mut(),
+            sockets_ptr: std::ptr::null_mut(),
+            n_pools: 0,
+            shm: CString::new("x").unwrap(),
+            shapes: Vec::new(),
+            tools_list: Vec::new(),
+            server_name: String::new(),
+            server_version: String::new(),
+            sessions: HashMap::new(),
+        }));
+        let s = Arc::clone(&state);
+        let _ = std::thread::spawn(move || {
+            let _g = s.lock().unwrap();
+            panic!("torn");
+        })
+        .join();
+        assert!(state.is_poisoned());
+        state
+    }
+
+    #[test]
+    fn a_request_finding_the_server_state_poisoned_is_refused_without_using_it() {
+        let state = poisoned_state();
+        let req = HttpRequest {
+            method: "DELETE".into(),
+            path: "/mcp".into(),
+            headers: vec![("mcp-session-id".into(), "s".into())],
+            body: Vec::new(),
+        };
+        let resp = handle_http_delete(&req, &state, false);
+        assert!(String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 503"));
+    }
+
     #[test]
     fn http_response_frames_status_headers_and_body() {
         let extra = vec![("Mcp-Session-Id".to_string(), "abc".to_string())];
@@ -2878,6 +3142,48 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains("Connection: close\r\n"));
         assert!(text.contains("Content-Length: 0\r\n"));
+    }
+
+    #[test]
+    fn connections_past_the_cap_get_no_slot() {
+        let held: Vec<_> = (0..MAX_CONNECTIONS).map(|_| connection_slot().expect("a slot below the cap")).collect();
+        assert!(connection_slot().is_none());
+        drop(held);
+        assert!(connection_slot().is_some());
+    }
+
+    #[test]
+    fn a_request_trickling_in_ends_at_its_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dripper = std::thread::spawn(move || {
+            let mut c = TcpStream::connect(addr).unwrap();
+            for b in b"POST /mcp HTTP/1.1\r\nHost: x\r\nX-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n" {
+                if c.write_all(&[*b]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let start = Instant::now();
+        let until = std::rc::Rc::new(std::cell::Cell::new(start + Duration::from_millis(300)));
+        let mut reader = BufReader::new(DeadlineReader { stream, until });
+        let got = read_http_request(&mut reader, |_| {});
+        assert!(matches!(&got, Err(e) if e.kind() == std::io::ErrorKind::TimedOut), "{:?}", got.map(|r| r.is_some()));
+        assert!(start.elapsed() < Duration::from_millis(800));
+        drop(reader);
+        dripper.join().unwrap();
+    }
+
+    #[test]
+    fn an_open_bind_needs_a_token_or_an_explicit_waiver() {
+        assert!(open_bind_refused("0.0.0.0", false, false));
+        assert!(!open_bind_refused("0.0.0.0", true, false));
+        assert!(!open_bind_refused("0.0.0.0", false, true));
+        for host in ["127.0.0.1", "localhost", "::1"] {
+            assert!(!open_bind_refused(host, false, false));
+        }
     }
 
     #[test]
@@ -2930,7 +3236,7 @@ mod tests {
         });
         let (stream, _) = listener.accept().unwrap();
         let mut reader = BufReader::new(stream);
-        let parsed = read_http_request(&mut reader).unwrap().unwrap();
+        let parsed = read_http_request(&mut reader, |_| {}).unwrap().unwrap();
         assert_eq!(parsed.method, "POST");
         assert_eq!(parsed.path, "/mcp?x=1");
         assert_eq!(header_get(&parsed.headers, "mcp-session-id"), Some("sid"));
@@ -2946,7 +3252,7 @@ mod tests {
         let big = "a".repeat(MAX_HEADER_LINE_BYTES as usize + 1024);
         let raw = format!("GET /mcp HTTP/1.1\r\nX: {big}\r\n\r\n");
         let mut slice = raw.as_bytes();
-        assert!(read_http_request(&mut slice).unwrap().is_none());
+        assert!(read_http_request(&mut slice, |_| {}).unwrap().is_none());
     }
 
     #[test]
@@ -2958,7 +3264,7 @@ mod tests {
         }
         raw.push_str("\r\n");
         let mut slice = raw.as_bytes();
-        assert!(read_http_request(&mut slice).unwrap().is_none());
+        assert!(read_http_request(&mut slice, |_| {}).unwrap().is_none());
     }
 
     #[test]
@@ -2967,7 +3273,7 @@ mod tests {
         // next request) are left for the following read, not swallowed.
         let raw = b"POST /mcp HTTP/1.1\r\nContent-Length: 5\r\n\r\nHELLOEXTRA";
         let mut slice = &raw[..];
-        let parsed = read_http_request(&mut slice).unwrap().unwrap();
+        let parsed = read_http_request(&mut slice, |_| {}).unwrap().unwrap();
         assert_eq!(parsed.body, b"HELLO");
         assert_eq!(slice, b"EXTRA"); // remainder preserved
     }
@@ -2992,5 +3298,41 @@ mod tests {
         }
         prune_sessions(&mut full, base);
         assert!(full.len() < MAX_SESSIONS, "cap backstop should evict the oldest");
+    }
+
+    #[test]
+    fn a_frontend_eval_past_its_wall_limit_is_stopped_with_everything_it_started() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("sleep 600 & echo $! > \"$0\"; exec sleep 600");
+        let pidfile = std::env::temp_dir().join(format!("morloc-eval-wall-{}", std::process::id()));
+        cmd.arg(&pidfile);
+        let began = Instant::now();
+        let out = output_within(cmd, Some(Duration::from_millis(500))).expect("spawn");
+        let waited = began.elapsed();
+        let grandchild: i32 = std::fs::read_to_string(&pidfile).expect("pid file").trim().parse().unwrap();
+        let _ = std::fs::remove_file(&pidfile);
+        let gone = (0..200).any(|_| {
+            if unsafe { libc::kill(grandchild, 0) } == -1 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            false
+        });
+        if !gone {
+            unsafe { libc::kill(grandchild, libc::SIGKILL) };
+        }
+        assert!(out.is_none());
+        assert!(gone, "process {grandchild} started by the eval outlived its limit");
+        assert!(waited < Duration::from_secs(3), "stopping took {waited:?}");
+    }
+
+    #[test]
+    fn a_frontend_eval_within_its_limit_returns_its_output() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("echo out; echo err >&2; exit 3");
+        let out = output_within(cmd, Some(Duration::from_secs(30))).expect("spawn").expect("in time");
+        assert_eq!(out.stdout, b"out\n");
+        assert_eq!(out.stderr, b"err\n");
+        assert_eq!(out.status.code(), Some(3));
     }
 }

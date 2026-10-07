@@ -32,6 +32,8 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter
   , printCppVariantSerializers
   , printSerializer
   , printDeserializer
+  , WireField (..)
+  , printArmMarshallers
   , printTemplateHeader
   , printRecordTemplate
   ) where
@@ -532,6 +534,66 @@ printCppVariantSerializers name arms =
             ]
         , "}"
         ]
+
+-- | A field marshalled through its wire form, built from @obj.fN@ and
+-- rebuilt from @mlc_r@.
+data WireField = WireField
+  { wfToWire :: [MDoc]
+  , wfWire :: MDoc
+  , wfRawType :: MDoc
+  , wfFromWire :: [MDoc]
+  , wfNative :: MDoc
+  }
+
+-- | The three walk steps of an arm struct whose fields @f0..@ have the given
+-- types; a field with a 'WireField' crosses as its wire form.
+printArmMarshallers :: MDoc -> [(MDoc, Maybe WireField)] -> MDoc
+printArmMarshallers rtype fields =
+  vsep
+    [ step "write_step(MlcWriteWalk& w, const Schema* schema, void* dest, const" "& obj, size_t)" [] writeField
+    , step "read_step(MlcReadWalk& w, const Schema* schema, const void* data," "* out, size_t)" [] readField
+    , step "size_step(MlcSizeWalk& w, const Schema* schema, const" "& obj, size_t)" ["w.total += schema->width;"] sizeField
+    ]
+  where
+    step sig post prelude fieldDoc =
+      vsep
+        [ "void MlcNode<" <> rtype <> ">::" <> sig <+> rtype <> post
+        , "{"
+        , indent 4 (vsep (prelude <> zipWith fieldDoc [0 ..] fields))
+        , "}"
+        ]
+    key i = "f" <> pretty i
+    param i = "schema->parameters[" <> pretty i <> "]"
+    dst i = "(char*)dest + schema->offsets[" <> pretty i <> "]"
+    src i = "(const char*)data + schema->offsets[" <> pretty i <> "]"
+    kept wf =
+      wfToWire wf
+        <> [ "auto mlc_w = std::make_shared<std::decay_t<decltype(" <> wfWire wf <> ")>>(" <> wfWire wf <> ");"
+           , "w.keep.push_back(mlc_w);"
+           ]
+    writeField :: Int -> (MDoc, Maybe WireField) -> MDoc
+    writeField i (_, Nothing) = "w.child(" <> param i <> ", " <> dst i <> ", obj." <> key i <> ");"
+    writeField i (_, Just wf) =
+      braces' (kept wf <> ["w.child(" <> param i <> ", " <> dst i <> ", *mlc_w);"])
+    sizeField :: Int -> (MDoc, Maybe WireField) -> MDoc
+    sizeField i (_, Nothing) = "w.child(" <> param i <> ", obj." <> key i <> ", true);"
+    sizeField i (_, Just wf) =
+      braces' (kept wf <> ["w.child(" <> param i <> ", *mlc_w, true);"])
+    readField :: Int -> (MDoc, Maybe WireField) -> MDoc
+    readField i (_, Nothing) = "w.child(" <> param i <> ", " <> src i <> ", &out->" <> key i <> ");"
+    readField i (t, Just wf) =
+      braces'
+        [ "auto mlc_raw = std::make_shared<" <> wfRawType wf <> ">();"
+        , "w.keep.push_back(mlc_raw);"
+        , "w.after(+[](MlcReadWalk&, const Schema*, const void* mlc_d, void* mlc_o, size_t) {"
+        , indent 4 $ vsep $
+            ["const" <+> wfRawType wf <> "& mlc_r = *static_cast<const" <+> wfRawType wf <> "*>(mlc_d);"]
+              <> wfFromWire wf
+              <> ["*static_cast<" <> t <> "*>(mlc_o) = " <> wfNative wf <> ";"]
+        , "}, schema, mlc_raw.get(), &out->" <> key i <> ");"
+        , "w.child(" <> param i <> ", " <> src i <> ", mlc_raw.get());"
+        ]
+    braces' xs = vsep ["{", indent 4 (vsep xs), "}"]
 
 printStructTypedef ::
   [MDoc] -> -- template parameters (e.g., ["T"])

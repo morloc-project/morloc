@@ -29,7 +29,19 @@ use rustmorloc::{MorlocFn0, MorlocFn1, MorlocFn2, MorlocFn3, MorlocFn4, MorlocFn
 // has exactly two direct rlib dependencies (rustmorloc, morloc_runtime_types),
 // each pinned by path in the bare-rustc build -- avoiding `libc` crate-name
 // ambiguity across the many hashed rlibs staged in rust-deps.
+#[cfg(not(panic = "unwind"))]
+compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
+
+// PANIC-9: a frame of the pool file above the panic machinery, which the
+// classifier needs to trust a backtrace's paths; black_box keeps the call
+// from becoming a tail call, which would leave no frame here.
+#[inline(never)]
+extern "C" fn mlc_classify_panic(file: *const u8, len: usize) -> bool {
+    std::hint::black_box(rustmorloc::panic_is_runtime(file, len))
+}
+
 extern "C" {
+    fn morloc_set_panic_classifier(classify: Option<extern "C" fn(*const u8, usize) -> bool>);
     fn pool_main(argc: c_int, argv: *mut *mut c_char, config: *mut PoolConfig) -> c_int;
     fn morloc_lifeline_guard();
 }
@@ -50,7 +62,7 @@ struct PoolConfig {
     concurrency: PoolConcurrency,
     initial_workers: i32,
     dynamic_scaling: bool,
-    after_reply: Option<unsafe extern "C" fn()>,
+    release_dispatch: Option<unsafe extern "C" fn()>,
 }
 
 // <<<BREAK>>>
@@ -68,8 +80,11 @@ fn main() {
         return;
     }
 
-    rustmorloc::install_panic_hook();
     rustmorloc::install_crash_handler();
+    rustmorloc::install_panic_hook();
+    // PANIC-9
+    rustmorloc::register_pool_files(&[file!(), concat!(env!("CARGO_MANIFEST_DIR"), "/", file!())], MLC_USER_FILES, MLC_USER_CALLS);
+    unsafe { morloc_set_panic_classifier(Some(mlc_classify_panic)) };
     init_schemas();
     // argv is `<socket_path> <tmpdir> <shm_basename>`; record the tmpdir so
     // foreign calls can resolve peer-pool socket paths.
@@ -81,7 +96,7 @@ fn main() {
         .iter()
         .map(|a| CString::new(a.as_str()).unwrap().into_raw())
         .collect();
-    unsafe extern "C" fn after_reply() {
+    unsafe extern "C" fn release_dispatch() {
         rustmorloc::dispatch_flush();
     }
     let mut cfg = PoolConfig {
@@ -91,7 +106,7 @@ fn main() {
         concurrency: PoolConcurrency::Threads,
         initial_workers: 1,
         dynamic_scaling: true,
-        after_reply: Some(after_reply),
+        release_dispatch: Some(release_dispatch),
     };
     let rc = unsafe { pool_main(argv.len() as c_int, argv.as_mut_ptr(), &mut cfg) };
     std::process::exit(rc);

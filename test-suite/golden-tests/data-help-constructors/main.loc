@@ -10,7 +10,7 @@
 -- one can hold is covered: bare, under an optional, under a list, and
 -- behind a named option. A payload-bearing constructor is a shape rather
 -- than a word, so it is listed with the field count that tells the two
--- apart.
+-- apart. A field written through an alias is shown as the type it names.
 
 module main (paint, shade, blend, measure, mix)
 
@@ -18,7 +18,9 @@ import root-py
 
 data Color = Red | Green | Blue
 
-data Shape = Circle Real | Rect Real Real | Dot
+type Radius = Real
+
+data Shape = Circle Radius | Rect Real Real | Dot
 
 --' Name one color
 paint :: Color -> Str

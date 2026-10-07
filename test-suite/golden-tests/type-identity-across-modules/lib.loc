@@ -1,0 +1,53 @@
+module lib (mk, withSink, mkP, getx, red, circle, leafy, rank, area, isLeaf)
+
+import root-py
+
+type Batch = [Int]
+
+record P where
+  x :: Int
+  y :: Int
+record Py => P = "dict"
+record Cpp => P = "struct"
+
+data Color = Red | Green
+data Shape = Circle Real | Square Real
+data Tree = Leaf Int | Node [Tree]
+
+source Py from "lib.py" ("twice", "mkp")
+
+twice :: Int -> Batch
+mkp :: Int -> P
+
+mk :: Int -> Batch
+mk n = twice n
+
+withSink :: Int -> (Batch -> Int) -> Int
+withSink n f = f (twice n)
+
+mkP :: Int -> P
+mkP n = mkp n
+
+getx :: P -> Int
+getx p = .x p
+
+red :: Int -> Color
+red n = Red
+
+circle :: Real -> Shape
+circle r = Circle r
+
+leafy :: Int -> Tree
+leafy n = Node [Leaf n, Node [Leaf n]]
+
+rank :: Color -> Int
+rank | Red = 1
+     | _ = 2
+
+area :: Shape -> Real
+area | (Circle r) = r
+     | (Square s) = s
+
+isLeaf :: Tree -> Bool
+isLeaf | (Leaf _) = True
+       | _ = False

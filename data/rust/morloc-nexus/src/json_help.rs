@@ -811,9 +811,9 @@ fn schema_returns_object(p: &Schema) -> bool {
 }
 
 /// True when a wire schema tree contains a type the MCP tool surface cannot
-/// marshal or safely serve: Arrow `Table` (marshaling errors both directions) or
-/// a stream handle (`IFile`/`IStream`/`OStream`, which would need per-call
-/// stdout capture). Checked on every argument and the return type.
+/// safely serve: a stream handle (`IFile`/`IStream`/`OStream`, which would
+/// need per-call stdout capture). Checked on every argument and the return
+/// type.
 fn schema_tree_excluded(s: &Schema) -> bool {
     use SerialType::*;
     // A stream handle or an IFile cannot be served: the handle means nothing
@@ -825,11 +825,10 @@ fn schema_tree_excluded(s: &Schema) -> bool {
         || s.parameters.iter().any(schema_tree_excluded)
 }
 
+/// A schema that does not parse cannot be marshaled either, so its command
+/// is excluded.
 fn schema_str_excluded(schema: Option<&str>) -> bool {
-    schema
-        .and_then(|s| parse_schema(s).ok())
-        .map(|p| schema_tree_excluded(&p))
-        .unwrap_or(false)
+    schema.is_some_and(|s| parse_schema(s).map_or(true, |p| schema_tree_excluded(&p)))
 }
 
 /// Strip one layer of surrounding morloc string quotes from a CLI default
@@ -929,7 +928,7 @@ fn build_mcp_tools(m: &Manifest) -> Value {
 
 /// Non-internal commands servable over the JSON/packet wire, in manifest
 /// order. Applies the same exclusions as [`build_tool_shapes`] (`@stdin`,
-/// Arrow `Table` / stream-handle types, property-name collisions) but emits
+/// stream-handle types, unparseable schemas, property-name collisions) but emits
 /// no stderr note, so the daemon/mcp `-h` help renderer can list the servable
 /// surface without printing exclusion warnings.
 pub fn servable_commands(m: &Manifest) -> Vec<&Command> {
@@ -941,7 +940,7 @@ pub fn servable_commands(m: &Manifest) -> Vec<&Command> {
 }
 
 /// Build the MCP shape of every servable command. Commands the MCP tool surface
-/// cannot serve (Arrow `Table` / stream-handle types, `@stdin`, or a
+/// cannot serve (stream-handle types, unparseable schemas, `@stdin`, or a
 /// property-name collision) are dropped with a note on stderr.
 pub fn build_tool_shapes(m: &Manifest) -> Vec<McpToolShape> {
     m.commands
@@ -973,11 +972,11 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
             return Err("reads from @stdin".into());
         }
         if schema_str_excluded(arg.schema_str()) {
-            return Err("argument has an Arrow Table or stream-handle type".into());
+            return Err("argument has a stream-handle type or a schema that does not parse".into());
         }
     }
     if schema_str_excluded(non_empty(&cmd.ret.schema)) {
-        return Err("return has an Arrow Table or stream-handle type".into());
+        return Err("return has a stream-handle type or a schema that does not parse".into());
     }
 
     let mut props = Map::new();

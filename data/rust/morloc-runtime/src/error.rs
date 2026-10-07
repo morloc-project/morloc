@@ -4,30 +4,9 @@
 
 pub use morloc_runtime_types::error::*;
 
-/// Run the body of a C ABI entry point with `errmsg` cleared, converting
-/// a panic into an error return: `errmsg` receives the panic message and
-/// `on_panic` is the value returned. A panic that reaches the `extern "C"` boundary aborts
-/// the process, which skips every unwind-time release the arena relies
-/// on, so no decoder is trusted not to panic on the bytes it is handed.
-///
-/// # Safety
-/// `errmsg` must be a valid `char**` or null.
-pub unsafe fn guarded<R>(
-    errmsg: *mut *mut std::ffi::c_char,
-    on_panic: R,
-    body: impl FnOnce() -> R,
-) -> R {
-    clear_errmsg(errmsg);
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
-        Ok(r) => r,
-        Err(payload) => {
-            let msg = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "unknown panic".into());
-            set_errmsg(errmsg, &MorlocError::Other(format!("internal error: {}", msg)));
-            on_panic
-        }
-    }
+/// Run a third-party format library's call on bytes from outside the
+/// program, turning a panic the library raises on malformed input into an
+/// error (model/panic.md PANIC-2). Only the library call goes inside.
+pub fn decode<T>(what: &str, call: impl FnOnce() -> T) -> Result<T, MorlocError> {
+    morloc_runtime_types::panic::catch(call).map_err(|caught| MorlocError::Other(format!("{what}: {}", caught.message)))
 }

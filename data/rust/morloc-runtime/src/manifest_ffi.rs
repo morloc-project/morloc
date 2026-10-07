@@ -30,6 +30,7 @@
 //! consumer needs them; otherwise the new JSON keys are silently
 //! ignored here, which is the correct forward-compatible behavior.
 
+use crate::ffi::c_schema;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
 
@@ -721,19 +722,11 @@ unsafe fn build_app(
     je: &serde_json::Value,
     set_function: impl FnOnce(*mut MorlocAppExpression) -> Result<(), MorlocError>,
 ) -> Result<*mut MorlocExpression, MorlocError> {
-    use crate::ffi::parse_schema;
-    let mut err: *mut c_char = ptr::null_mut();
     let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
     let jargs = je.get("args").and_then(|v| v.as_array());
     let n = jargs.map(|a| a.len()).unwrap_or(0);
 
-    let c_schema_str = CString::new(schema_str).unwrap_or_default();
-    let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-    if !err.is_null() {
-        let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-        libc::free(err as *mut c_void);
-        return Err(MorlocError::Other(msg));
-    }
+    let schema = c_schema(schema_str)?;
 
     let args = libc::calloc(n, std::mem::size_of::<*mut MorlocExpression>()) as *mut *mut MorlocExpression;
     if let Some(jargs) = jargs {
@@ -757,7 +750,6 @@ unsafe fn build_app(
 unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, MorlocError> {
     let tag = je.get("tag").and_then(|v| v.as_str()).ok_or_else(|| MorlocError::Other("Expression missing 'tag' field".into()))?;
 
-    use crate::ffi::parse_schema;
     use crate::eval_ffi::make_morloc_literal;
     use crate::eval_ffi::make_morloc_bound_var;
     use crate::eval_ffi::make_morloc_pattern;
@@ -801,8 +793,8 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
                 _ => return Err(MorlocError::Other(format!("Unknown lit_type: {}", lt))),
             }
 
-            let c_schema = CString::new(schema).unwrap_or_default();
-            let result = make_morloc_literal(c_schema.as_ptr(), prim, &mut err);
+            let schema_c = CString::new(schema).unwrap_or_default();
+            let result = make_morloc_literal(schema_c.as_ptr(), prim, &mut err);
             if !err.is_null() {
                 let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
                 libc::free(err as *mut c_void);
@@ -823,8 +815,8 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
                     "Failed to allocate string literal".into(),
                 ));
             }
-            let c_schema = CString::new(schema).unwrap_or_default();
-            let result = make_morloc_literal(c_schema.as_ptr(), prim, &mut err);
+            let schema_c = CString::new(schema).unwrap_or_default();
+            let result = make_morloc_literal(schema_c.as_ptr(), prim, &mut err);
             if !err.is_null() {
                 let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
                 libc::free(err as *mut c_void);
@@ -838,13 +830,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             let elems = je.get("elements").and_then(|v| v.as_array());
             let n = elems.map(|a| a.len()).unwrap_or(0);
 
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
 
             let values = libc::calloc(n, std::mem::size_of::<*mut MorlocExpression>()) as *mut *mut MorlocExpression;
             if let Some(elems) = elems {
@@ -982,9 +968,9 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
         "bound" => {
             let schema = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
             let var = je.get("var").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema = CString::new(schema).unwrap_or_default();
+            let schema_c = CString::new(schema).unwrap_or_default();
             let c_var = c_strdup(var);
-            let result = make_morloc_bound_var(c_schema.as_ptr(), c_var, &mut err);
+            let result = make_morloc_bound_var(schema_c.as_ptr(), c_var, &mut err);
             if !err.is_null() {
                 let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
                 libc::free(err as *mut c_void);
@@ -995,13 +981,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
 
         "show" | "read" | "hash" | "load" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let child = build_expr(je.get("child").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
             (*expr).etype = match tag {
@@ -1022,13 +1002,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             // check matches the Unit dest the caller allocates. The
             // value's own schema travels on `value_expr.schema` and is
             // read by the Save handler from there.
-            let c_schema_str = CString::new("z").unwrap();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema("z")?;
             let fmt_str = je.get("format").and_then(|v| v.as_str()).unwrap_or("voidstar");
             let c_fmt = CString::new(fmt_str).unwrap_or_default();
             let level = build_expr(je.get("level").unwrap_or(&serde_json::Value::Null))?;
@@ -1048,13 +1022,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
 
         "map" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let func = build_expr(je.get("func").unwrap_or(&serde_json::Value::Null))?;
             let list = build_expr(je.get("list").unwrap_or(&serde_json::Value::Null))?;
             let me = libc::calloc(1, std::mem::size_of::<MorlocMapExpression>()) as *mut MorlocMapExpression;
@@ -1069,13 +1037,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
 
         "tagtest" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let subject = build_expr(je.get("subject").unwrap_or(&serde_json::Value::Null))?;
             let tag = je
                 .get("tag_ordinal")
@@ -1094,13 +1056,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
 
         "ctormake" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let tag = je.get("tag_ordinal").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
             let jfields = je.get("fields").and_then(|v| v.as_array());
             let n = jfields.map_or(0, |a| a.len());
@@ -1125,13 +1081,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
 
         "ctorfield" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let subject = build_expr(je.get("subject").unwrap_or(&serde_json::Value::Null))?;
             let tag = je.get("tag_ordinal").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
             let index = je.get("field_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
@@ -1152,13 +1102,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             let jstrs = je.get("strings").and_then(|v| v.as_array());
             let n = jstrs.map(|a| a.len()).unwrap_or(0);
 
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
 
             // Length-aware literal pieces: each entry preserves interior
             // NULs that c_strdup would have silently dropped.
@@ -1182,8 +1126,8 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
         "pattern" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
             let pat = build_pattern(je.get("pattern").unwrap_or(&serde_json::Value::Null))?;
-            let c_schema = CString::new(schema_str).unwrap_or_default();
-            let result = make_morloc_pattern(c_schema.as_ptr(), pat, &mut err);
+            let schema_c = CString::new(schema_str).unwrap_or_default();
+            let result = make_morloc_pattern(schema_c.as_ptr(), pat, &mut err);
             if !err.is_null() {
                 let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
                 libc::free(err as *mut c_void);
@@ -1198,13 +1142,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
         // mlc_* function.
         "open" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let kind = je.get("kind").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
             let path = build_expr(je.get("path").unwrap_or(&serde_json::Value::Null))?;
             let open = libc::calloc(1, std::mem::size_of::<MorlocOpenExpression>()) as *mut MorlocOpenExpression;
@@ -1220,13 +1158,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
         "close" => {
             // close has no return-typed schema (returns unit); parse a
             // sentinel "z" schema so the schema slot is non-null.
-            let c_schema_str = CString::new("z").unwrap();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema("z")?;
             let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
             (*expr).etype = MorlocExpressionType::Close;
@@ -1237,13 +1169,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
 
         "fschema" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let path = build_expr(je.get("path").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
             (*expr).etype = MorlocExpressionType::FSchema;
@@ -1254,13 +1180,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
 
         "flen" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
             (*expr).etype = MorlocExpressionType::FLength;
@@ -1271,13 +1191,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
 
         "ifile_walk" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
             let path_str = je.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let c_path = CString::new(path_str).unwrap_or_default();
@@ -1316,13 +1230,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
 
         "next" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
             (*expr).etype = MorlocExpressionType::Next;
@@ -1333,13 +1241,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
 
         "streamlayout" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
             (*expr).etype = MorlocExpressionType::StreamLayout;
@@ -1350,13 +1252,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
 
         "stream" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
             (*expr).etype = MorlocExpressionType::Stream;
@@ -1372,13 +1268,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             // to mlc_open_ostream, deriving the schema string from the
             // parsed schema via schema_to_string.
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let path = build_expr(je.get("path").unwrap_or(&serde_json::Value::Null))?;
             let oe = libc::calloc(1, std::mem::size_of::<MorlocOpenExpression>()) as *mut MorlocOpenExpression;
             (*oe).kind = 2; // MLC_KIND_OSTREAM
@@ -1399,13 +1289,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             //
             // The JSON's "schema" field carries the value's type for
             // tooling and is intentionally ignored here.
-            let c_schema_str = CString::new("z").unwrap();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema("z")?;
             let level = build_expr(je.get("level").unwrap_or(&serde_json::Value::Null))?;
             let value = build_expr(je.get("value").unwrap_or(&serde_json::Value::Null))?;
             let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
@@ -1428,13 +1312,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
         "append" => {
             // Mirror of open_ostream: schema in expr.schema, path in open_expr.
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let path = build_expr(je.get("path").unwrap_or(&serde_json::Value::Null))?;
             let oe = libc::calloc(1, std::mem::size_of::<MorlocOpenExpression>()) as *mut MorlocOpenExpression;
             (*oe).kind = 2; // MLC_KIND_OSTREAM (append always opens as OSTREAM)
@@ -1453,13 +1331,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             // must still be non-null because `morloc_eval_r`'s entry reads
             // `(*schema).width` to size the dest buffer. Sentinel "z" (Nil)
             // mirrors the Close handler.
-            let c_schema_str = CString::new("z").unwrap();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema("z")?;
             let paths = build_expr(je.get("paths").unwrap_or(&serde_json::Value::Null))?;
             let dest = build_expr(je.get("dest").unwrap_or(&serde_json::Value::Null))?;
             let args_vec: Vec<*mut MorlocExpression> = vec![dest];
@@ -1479,13 +1351,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
 
         "stdin" | "stdout" | "stderr" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
             (*expr).etype = match tag {
                 "stdin" => MorlocExpressionType::Stdin,
@@ -1499,13 +1365,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
         "flush" => {
             // Mirrors `close` but lowers to MorlocExpressionType::Flush.
             // Returns Unit; sentinel "z" schema slot.
-            let c_schema_str = CString::new("z").unwrap();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema("z")?;
             let handle = build_expr(je.get("handle").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
             (*expr).etype = MorlocExpressionType::Flush;
@@ -1515,13 +1375,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
         }
 
         "throw" => {
-            let c_schema_str = CString::new("z").unwrap();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema("z")?;
             let msg = build_expr(je.get("msg").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
             (*expr).etype = MorlocExpressionType::Throw;
@@ -1534,15 +1388,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             let schema_str = je.get("schema").and_then(|v| v.as_str()).ok_or_else(|| {
                 MorlocError::Other("try expression is missing its result schema".into())
             })?;
-            let c_schema_str = CString::new(schema_str).map_err(|_| {
-                MorlocError::Other("try schema contains an interior NUL".into())
-            })?;
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let schema = c_schema(schema_str)?;
             let body = build_expr(je.get("body").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
             (*expr).etype = MorlocExpressionType::Try;
@@ -1568,13 +1414,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             // evaluated against its own schema width by its caller, so the
             // value arm would then trip the eval width check.
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let c_schema = CString::new(schema_str).unwrap_or_default();
-            let sc = parse_schema(c_schema.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
+            let sc = c_schema(schema_str)?;
             (*expr).schema = sc;
             (*expr).expr.if_expr = ifx;
             Ok(expr)
@@ -1586,8 +1426,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
 
 // -- build_manifest_expr ------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn build_manifest_expr(
+pub(crate) unsafe fn build_manifest_expr(
     json_str: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> *mut MorlocExpression {
@@ -1950,8 +1789,7 @@ unsafe fn populate_service(dst: *mut ManifestService, src: &morloc_manifest::Ser
 // shape and validation rules live in one place (the morloc-manifest
 // crate).
 
-#[no_mangle]
-pub unsafe extern "C" fn parse_manifest(
+pub(crate) unsafe fn parse_manifest(
     text: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> *mut Manifest {
@@ -2028,8 +1866,7 @@ pub unsafe extern "C" fn parse_manifest(
 
 // -- read_manifest ------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn read_manifest(
+pub(crate) unsafe fn read_manifest(
     path: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> *mut Manifest {
@@ -2191,8 +2028,7 @@ unsafe fn free_terminal(t: &ManifestTerminal) {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn free_manifest(manifest: *mut Manifest) {
+pub(crate) unsafe fn free_manifest(manifest: *mut Manifest) {
     if manifest.is_null() {
         return;
     }
@@ -2303,8 +2139,7 @@ pub unsafe extern "C" fn free_manifest(manifest: *mut Manifest) {
 // daemon/router code for discovery RPC. The output mirrors the morloc
 // compiler's manifest format closely (no v1 legacy field names).
 
-#[no_mangle]
-pub unsafe extern "C" fn manifest_to_discovery_json(manifest: *const Manifest) -> *mut c_char {
+pub(crate) unsafe fn manifest_to_discovery_json(manifest: *const Manifest) -> *mut c_char {
     if manifest.is_null() {
         return ptr::null_mut();
     }
@@ -2539,5 +2374,34 @@ mod literal_tests {
         assert!(lit("i4", Some("twelve")).is_err());
         assert!(lit("f8", None).is_err(), "a missing value became a value");
         assert!(lit("u1", Some("200")).is_ok());
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn build_manifest_expr(json_str: *const c_char, errmsg: *mut *mut c_char) -> *mut MorlocExpression {
+        super::build_manifest_expr(json_str, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn parse_manifest(text: *const c_char, errmsg: *mut *mut c_char) -> *mut Manifest {
+        super::parse_manifest(text, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_manifest(path: *const c_char, errmsg: *mut *mut c_char) -> *mut Manifest {
+        super::read_manifest(path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn free_manifest(manifest: *mut Manifest) {
+        super::free_manifest(manifest)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn manifest_to_discovery_json(manifest: *const Manifest) -> *mut c_char {
+        super::manifest_to_discovery_json(manifest)
     }
 }

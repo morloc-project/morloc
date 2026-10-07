@@ -2,6 +2,8 @@
 #include <string>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
+#include <unistd.h>
 
 #include "morloc.h"
 
@@ -26,12 +28,20 @@ extern "C" const char* mlc_current_frame(size_t* len) {
     return f;
 }
 
+[[noreturn]] void mlc_runtime_defect(const std::string& msg) {
+    std::fprintf(stderr, "morloc internal error (C++ pool): %s\n", msg.c_str());
+    std::fflush(stderr);
+    // PANIC-5
+    _exit(70);
+}
+
+// PANIC-13: both resolve pointers into blocks this pool allocated.
 absptr_t rel2abs_cpp(relptr_t ptr){
     char* errmsg = NULL;
     absptr_t absptr = rel2abs(ptr, &errmsg);
     if(errmsg != NULL){
         std::string msg(errmsg); free(errmsg);
-        throw std::runtime_error(msg);
+        mlc_runtime_defect(msg);
     }
     return absptr;
 }
@@ -41,7 +51,7 @@ relptr_t abs2rel_cpp(absptr_t ptr){
     relptr_t relptr = abs2rel(ptr, &errmsg);
     if(errmsg != NULL){
         std::string msg(errmsg); free(errmsg);
-        throw std::runtime_error(msg);
+        mlc_runtime_defect(msg);
     }
     return relptr;
 }

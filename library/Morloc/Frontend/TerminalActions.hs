@@ -20,12 +20,13 @@ module Morloc.Frontend.TerminalActions
 
 import qualified Control.Monad.State.Strict as State
 import qualified Data.Set as Set
+import qualified Data.Text as T
 import qualified Morloc.Data.DAG as DAG
-import qualified Morloc.Data.GMap as GMap
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Frontend.Desugar as Desugar
+import Morloc.Frontend.Token (Pos (..))
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import Morloc.Typecheck.Internal (expandTransparentAliases)
@@ -33,8 +34,7 @@ import Morloc.Typecheck.Internal (expandTransparentAliases)
 -- | Synthesize every module's terminal-action commands and expand its
 -- @collect nodes. A single 'Desugar.DState' is threaded across modules so
 -- synthesized nodes get globally unique indices, seeded from and returned to
--- the compiler's counter. The indices each module's synthesis creates are
--- then linked to that module's type scopes.
+-- the compiler's counter.
 synthesizeTerminalActions ::
   DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
 synthesizeTerminalActions dag = do
@@ -51,52 +51,45 @@ synthesizeTerminalActions dag = do
           , Desugar.dsCompanions = Map.empty
           , Desugar.dsParseSlots = Map.empty
           })
-        start <- State.gets Desugar.dsExpIndex
         let sigs = Map.findWithDefault Map.empty m visible
         node' <- Desugar.injectTerminalActionsWithSigs sigs node
                    >>= Desugar.expandCollectE
-        end <- State.gets Desugar.dsExpIndex
         made <- State.gets (\st -> ModuleCommands
           { mcCompanions = Desugar.dsCompanions st
           , mcReplayPlans = Desugar.dsReplayPlans st
           , mcStreamElems = Desugar.dsStreamElems st
           , mcParseSlots = Desugar.dsParseSlots st
           })
-        return ((m, (node', edges)), (m, [start .. end - 1]), (m, made))
+        return ((m, (node', edges)), (m, made))
   case State.runStateT (mapM finalizeModule (Map.toList dag)) ds0 of
-    Left err ->
-      MM.throwSystemError . pretty $
-        Desugar.showParseError "<terminal-action synthesis>" err
+    Left err -> do
+      let file = posFile (Desugar.pePos err)
+      srcText <- MM.gets stateSourceText
+      let err' = case Map.lookup file srcText of
+            Just txt | null (Desugar.peSourceLines err) -> err {Desugar.peSourceLines = T.lines txt}
+            _ -> err
+          label = if null file then "<terminal-action synthesis>" else file
+      MM.throwSystemError . pretty $ Desugar.showParseError label err'
     Right (results, dsFinal) -> do
       MM.setCounter (Desugar.dsExpIndex dsFinal)
       MM.modify (\st -> st
         { stateSourceMap = Desugar.dsSourceMap dsFinal
-        , stateModuleCommands = Map.fromList [made | (_, _, made) <- results]
+        , stateModuleCommands = Map.fromList (map snd results)
         , stateErrorNotes = Map.map pretty (Desugar.dsErrorNotes dsFinal) <> stateErrorNotes st
         })
       case Desugar.dsWarnings dsFinal of
         [] -> return ()
         ws -> MM.tell ws
-      mapM_ (\(_, scope, _) -> uncurry linkScopes scope) results
-      return (Map.fromList [node | (node, _, _) <- results])
-
--- | Link indices to a module's general and concrete type scopes.
-linkScopes :: MVar -> [Int] -> MorlocMonad ()
-linkScopes m idxs = MM.modify $ \st -> st
-  { stateGeneralTypedefs = GMap.linkMany idxs m (stateGeneralTypedefs st)
-  , stateConcreteTypedefs = GMap.linkMany idxs m (stateConcreteTypedefs st)
-  }
+      return (Map.fromList (map fst results))
 
 -- | For each module, the term signatures visible to it: its own, shadowing
--- those its imports export, under the names it imports them by. Each type's
--- transparent aliases are expanded in the scope of the module that declared
--- it.
+-- those its imports export, under the names it imports them by, with each
+-- type's transparent aliases expanded.
 visibleSigs :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (Map.Map MVar (Map.Map EVar TypeU))
 visibleSigs dag = do
-  GMap _ scopes <- MM.gets stateGeneralTypedefs
-  let resolve m node children =
-        let scope = Map.findWithDefault Map.empty m scopes
-            local = Map.fromList
+  scope <- MM.getGeneralScope
+  let resolve _ node children =
+        let local = Map.fromList
               [ (v, expandTransparentAliases scope (etype et))
               | (v, _, et) <- AST.findSignatures node ]
             imported = Map.fromList

@@ -41,6 +41,7 @@ module Morloc.Namespace.Expr
   , ungroup
   , bracketArity
   , selectorHasBracket
+  , unappliedPatternArity
   , Pattern (..)
   , Intrinsic (..)
   , intrinsicName
@@ -381,6 +382,14 @@ data Pattern
   -- is preserved. The codegen translator emits the appropriate native
   -- slicing operation.
   deriving (Show, Ord, Eq)
+
+-- | The arguments a pattern takes when it appears unapplied. A setter only
+-- appears applied to its values, so an unapplied 'PatternStruct' is a getter.
+unappliedPatternArity :: Pattern -> Int
+unappliedPatternArity (PatternText _ ss) = length ss
+unappliedPatternArity (PatternStruct s) = bracketArity s + 1
+unappliedPatternArity PatternBracketIndex = 2
+unappliedPatternArity PatternBracketSlice = 4
 
 -- | Compiler intrinsics: functions the compiler generates specialized code for.
 data Intrinsic

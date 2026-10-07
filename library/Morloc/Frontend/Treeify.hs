@@ -34,9 +34,15 @@ import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import Morloc.Typecheck.Internal (collectEffLabels, unqualify)
 import qualified Morloc.DataFiles as DF
+import qualified Morloc.Config as MC
+import Control.Monad.IO.Class (liftIO)
+import qualified Data.ByteString as BS
+import qualified Data.Text.Encoding as TE
+import System.Directory (doesFileExist)
+import System.FilePath ((</>))
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.LanguageDescriptor
-  (loadLangDescriptorFromText, ldNamePattern, ldOperatorPattern, matchNamePattern)
+  (declaredNamePatterns, matchNamePattern)
 
 -- | Every term must either be sourced or declared.
 data TermOrigin = Declared ExprI | Sourced Source
@@ -295,8 +301,8 @@ rootCompanions d root exports = do
 -- foreign-language naming rule. Operator vs identifier is decided by the
 -- symbol itself (srcOperator), so "foo" and "+" are valid but "foo+"
 -- matches neither. The name is emitted verbatim into the pool, so a
--- non-name here is a code-injection vector. An empty pattern, or no
--- embedded descriptor, is not checked (fail open).
+-- non-name here is a code-injection vector: a language whose patterns
+-- cannot be read is an error, never a pass.
 checkSourceNames :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 checkSourceNames d = mapM_ (AST.checkExprI checkNode) (DAG.nodes d)
   where
@@ -306,36 +312,52 @@ checkSourceNames d = mapM_ (AST.checkExprI checkNode) (DAG.nodes d)
     -- verbatim as an infix operator" opt-out for keyword-shaped foreign
     -- operators (Python `and`, R `%in%`, etc.).
     checkNode (ExprI _ (SrcE src)) | srcBacktick src = return ()
-    checkNode (ExprI i (SrcE src)) =
+    checkNode (ExprI i (SrcE src)) = do
       let lang = ML.langName (srcLang src)
           nm = unSrcName (srcName src)
-       in case lookup
-            (MT.unpack lang)
-            [(n, DF.embededFileText ef) | (n, ef) <- DF.langRegistryFiles] of
-            Just yamlText ->
-              case loadLangDescriptorFromText yamlText of
-                Right desc ->
-                  let isOp = srcOperator src
-                      pat = if isOp then ldOperatorPattern desc else ldNamePattern desc
-                      kind = if isOp then "operator" else "name"
-                   in if MT.null pat || matchNamePattern pat nm
-                        then return ()
-                        else
-                          MM.throwSourcedError i $
-                            "Invalid"
-                              <+> pretty lang
-                              <+> "source"
-                              <+> kind
-                              <+> squotes (pretty nm) <> "."
-                              <+> "A sourced symbol is emitted verbatim, so it"
-                              <+> "must be a valid"
-                              <+> pretty lang
-                              <+> kind <> ", not code."
-                              <+> "Expected pattern"
-                              <+> squotes (pretty pat) <> "."
-                Left _ -> return ()
-            Nothing -> return ()
+          isOp = srcOperator src
+          kind = if isOp then "operator" else "name" :: MT.Text
+          refuse :: String -> MorlocMonad ()
+          refuse why =
+            MM.throwSourcedError i $
+              "Cannot check" <+> pretty lang <+> "source" <+> pretty kind
+                <+> squotes (pretty nm) <> ":" <+> pretty why
+      yamlText <- languageDescriptorText lang
+      case yamlText >>= declaredNamePatterns of
+        Left why -> refuse why
+        Right (namePat, opPat) -> do
+          let pat = if isOp then opPat else namePat
+          case matchNamePattern pat nm of
+            Left why -> refuse why
+            Right True -> return ()
+            Right False ->
+              MM.throwSourcedError i $
+                "Invalid"
+                  <+> pretty lang
+                  <+> "source"
+                  <+> pretty kind
+                  <+> squotes (pretty nm) <> "."
+                  <+> "A sourced symbol is emitted verbatim, so it"
+                  <+> "must be a valid"
+                  <+> pretty lang
+                  <+> pretty kind <> ", not code."
+                  <+> "Expected pattern"
+                  <+> squotes (pretty pat) <> "."
     checkNode _ = return ()
+
+-- | A language's lang.yaml: the embedded one, else a plugin's under the
+-- morloc home, as the code generator finds it.
+languageDescriptorText :: MT.Text -> MorlocMonad (Either String MT.Text)
+languageDescriptorText lang =
+  case lookup (MT.unpack lang) [(n, DF.embededFileText ef) | (n, ef) <- DF.langRegistryFiles] of
+    Just t -> return (Right t)
+    Nothing -> do
+      home <- MM.asks MC.configHome
+      let path = home </> "lang" </> MT.unpack lang </> "lang.yaml"
+      found <- liftIO (doesFileExist path)
+      if found
+        then Right . TE.decodeUtf8 <$> liftIO (BS.readFile path)
+        else return (Left ("no language descriptor at " <> path))
 
 checkDeclaredEffects :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 checkDeclaredEffects d = do

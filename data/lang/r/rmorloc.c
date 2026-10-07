@@ -11,6 +11,7 @@
 #include <limits.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <poll.h>
@@ -36,6 +37,17 @@
 #endif
 
 #define MAYFAIL char* child_errmsg_ = NULL;
+
+// Set when a stream write found its reader gone during the current dispatch.
+static int r_pipe_closed = 0;
+
+// Raise the closed-pipe condition (pool.R), which ends the call.
+static void raise_pipe_closed(void) {
+    r_pipe_closed = 1;
+    SEXP call = PROTECT(Rf_lang1(Rf_install("morloc_mlc_pipe_closed")));
+    Rf_eval(call, R_GlobalEnv);
+    UNPROTECT(1);
+}
 
 // User-attributable failures carry the message alone -- no source file, line,
 // or function. Those locate the runtime, not the user's program, and the user
@@ -87,15 +99,13 @@ static void morloc_error_take(const char* prefix, char* heap_msg) {
         } \
     }
 
-// Raise a MorlocInternalError-classed R error for genuine morloc-
-// invariant violations (compiler bugs, unreachable branches, libmorloc
-// contract violations). morloc_mlc_catch (in pool.R) inspects the
-// class and re-raises, so @catch cannot swallow it. The message goes
-// carries the runtime source location, unlike MORLOC_ERROR: a genuine
-// invariant violation is a bug report, and the location is the useful
-// part. Use ONLY for genuine bugs; user-attributable failures must go
-// through MORLOC_ERROR so @catch can intercept.
-static void __attribute__((noinline)) morloc_internal_abort_impl(
+// End the pool on a genuine morloc-invariant violation (compiler bug,
+// unreachable branch, libmorloc contract violation). The message carries
+// the runtime source location, unlike MORLOC_ERROR: a genuine invariant
+// violation is a bug report, and the location is the useful part. Use ONLY
+// for genuine bugs; user-attributable failures go through MORLOC_ERROR or
+// error() so @try can catch them.
+static void __attribute__((noinline, noreturn)) morloc_internal_abort_impl(
     const char* file, int line, const char* func, const char* fmt, ...
 ) {
     char _msg[3584];
@@ -103,23 +113,10 @@ static void __attribute__((noinline)) morloc_internal_abort_impl(
     va_start(ap, fmt);
     vsnprintf(_msg, sizeof(_msg), fmt, ap);
     va_end(ap);
-    char _buf[4096];
-    snprintf(_buf, sizeof(_buf), "morloc internal error (R pool, %s:%d in %s): %s",
-             file, line, func, _msg);
-    SEXP _cond = PROTECT(allocVector(VECSXP, 2));
-    SEXP _names = PROTECT(allocVector(STRSXP, 2));
-    SEXP _cls = PROTECT(allocVector(STRSXP, 3));
-    SET_STRING_ELT(_names, 0, mkChar("message"));
-    SET_STRING_ELT(_names, 1, mkChar("call"));
-    SET_VECTOR_ELT(_cond, 0, mkString(_buf));
-    SET_VECTOR_ELT(_cond, 1, R_NilValue);
-    setAttrib(_cond, R_NamesSymbol, _names);
-    SET_STRING_ELT(_cls, 0, mkChar("MorlocInternalError"));
-    SET_STRING_ELT(_cls, 1, mkChar("error"));
-    SET_STRING_ELT(_cls, 2, mkChar("condition"));
-    setAttrib(_cond, R_ClassSymbol, _cls);
-    UNPROTECT(3);
-    Rf_eval(Rf_lang2(install("stop"), _cond), R_GlobalEnv);
+    fprintf(stderr, "morloc internal error (R pool, %s:%d in %s): %s\n", file, line, func, _msg);
+    fflush(stderr);
+    // PANIC-5
+    _exit(70);
 }
 // The buffers live in the helper's frame, not the caller's, so a walker
 // that can abort does not carry them on every level.
@@ -129,8 +126,7 @@ static void __attribute__((noinline)) morloc_internal_abort_impl(
 // R_TRY for the machinery that carries values between pools: IPC, packet
 // construction and decode. These failures are not attributable to user data
 // or foreign-function behavior and leave the pool unable to continue, so
-// they raise the MorlocInternalError-classed condition that morloc_mlc_catch
-// re-raises, rather than the catchable error() that R_TRY raises.
+// they end the pool rather than raise the catchable error() R_TRY raises.
 #define R_TRY_INFRA(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
@@ -163,8 +159,24 @@ typedef struct {
 static shm_entry_t* shm_tracker = NULL;
 static size_t shm_tracker_count = 0;
 static size_t shm_tracker_cap = 0;
+static uint64_t shm_tracker_gen = 0;
+
+static void shm_tracker_forget_inherited(void) {
+    uint64_t g = morloc_fork_generation();
+    if (g == shm_tracker_gen) {
+        return;
+    }
+    for (size_t i = 0; i < shm_tracker_count; i++) {
+        if (shm_tracker[i].schema) {
+            free_schema(shm_tracker[i].schema);
+        }
+    }
+    shm_tracker_count = 0;
+    shm_tracker_gen = g;
+}
 
 static void shm_tracker_push(absptr_t ptr, Schema* schema) {
+    shm_tracker_forget_inherited();
     if (shm_tracker_count >= shm_tracker_cap) {
         size_t new_cap = shm_tracker_cap ? shm_tracker_cap * 2 : SHM_TRACKER_INIT_CAP;
         shm_entry_t* new_buf = (shm_entry_t*)realloc(shm_tracker, new_cap * sizeof(shm_entry_t));
@@ -182,6 +194,7 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
 }
 
 static void shm_tracker_flush(void) {
+    shm_tracker_forget_inherited();
     for (size_t i = 0; i < shm_tracker_count; i++) {
         char* err = NULL;
         // shfree decrements the refcount and zeros the block on final
@@ -201,6 +214,7 @@ static void shm_tracker_flush(void) {
 // codegen-determined scope ends, rather than waiting for the next
 // dispatch flush.
 static bool shm_tracker_release_one(absptr_t ptr) {
+    shm_tracker_forget_inherited();
     for (size_t i = 0; i < shm_tracker_count; i++) {
         if (shm_tracker[i].ptr == ptr) {
             Schema* schema = shm_tracker[i].schema;
@@ -2029,14 +2043,14 @@ static SEXP from_voidstar(const void* data, const Schema* schema, morloc_space_t
 
 // {{{ exported morloc API functions
 
-// PID of the process that created the daemon (set in morloc_start_daemon)
-static pid_t daemon_creator_pid = 0;
+// Fork generation of the process that created the daemon (FORK-14)
+static uint64_t daemon_creator_generation = UINT64_MAX;
 
 // Close the daemon when the R object dies
 static void daemon_finalizer(SEXP ptr) {
     if (!R_ExternalPtrAddr(ptr)) return;
     // Skip cleanup in forked children -- they must not unlink the socket file
-    if (daemon_creator_pid != 0 && getpid() != daemon_creator_pid) {
+    if (daemon_creator_generation != UINT64_MAX && morloc_fork_generation() != daemon_creator_generation) {
         R_ClearExternalPtr(ptr);
         return;
     }
@@ -2098,8 +2112,8 @@ SEXP morloc_start_daemon(
     // Wrap pointer in external pointer
     SEXP result = PROTECT(R_MakeExternalPtr(daemon, R_NilValue, R_NilValue));
 
-    // Record which process owns the daemon (for the PID guard in daemon_finalizer)
-    daemon_creator_pid = getpid();
+    // Record which process owns the daemon (for the guard in daemon_finalizer)
+    daemon_creator_generation = morloc_fork_generation();
 
     // Register finalizer with wrapper
     R_RegisterCFinalizerEx(result, daemon_finalizer, TRUE);
@@ -2147,8 +2161,8 @@ SEXP morloc_install_sigterm_handler(void) {
        terminates the R pool and the caller sees "Connection closed by peer". */
     signal(SIGPIPE, SIG_IGN);
 
-    /* End this pool's process group when the nexus ends, however it ends. */
-    morloc_lifeline_guard();
+    /* FORK-6: the lifeline is watched in morloc_wait_wakeup, not from a thread. */
+    morloc_lifeline_adopt();
 
     return R_NilValue;
 }
@@ -2220,7 +2234,13 @@ SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
     // Accept new connection if server_fd is ready
     if (server_ready) {
         int fd = accept(daemon->server_fd, NULL, NULL);
+        if (fd < 0 && (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM)) {
+            // Wait for a descriptor to free rather than spin on a full table.
+            struct timespec pause = {0, 50 * 1000 * 1000};
+            nanosleep(&pause, NULL);
+        }
         if (fd >= 0) {
+            fcntl(fd, F_SETFD, FD_CLOEXEC);
             fcntl(fd, F_SETFL, O_NONBLOCK);
             client_list_t* new_client = (client_list_t*)calloc(1, sizeof(client_list_t));
             if (new_client == NULL) {
@@ -2455,11 +2475,9 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
     const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
     bool tracked = false;
     if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
-        // SHM is referenced by the result packet; the pool retains the only
-        // reference until the next request. Hand voidstar AND schema to the
-        // tracker -- they are freed by shm_tracker_flush at the start of the
-        // next dispatch in run_job_c. Without this, every RPTR-shipped
-        // value would leak its SHM block for the lifetime of the pool.
+        // SHM is referenced by the result packet. Hand voidstar AND schema to
+        // the tracker: they are released once the reply holds the caller's
+        // reference (send_reply_to_foreign_server in dispatch_manifold_c).
         shm_tracker_push((absptr_t)voidstar, schema);
         tracked = true;
     } else {
@@ -2494,7 +2512,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
 // realistic morloc program.
 SEXP morloc_mlc_open(SEXP path_r, SEXP kind_r) { MAYFAIL
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_open: path must be a single string");
+        error("mlc_open: path must be a single string");
     }
     if ((TYPEOF(kind_r) != INTSXP && TYPEOF(kind_r) != REALSXP) || LENGTH(kind_r) != 1) {
         MORLOC_INTERNAL_ABORT("mlc_open: kind must be a single integer");
@@ -2511,16 +2529,17 @@ SEXP morloc_mlc_open(SEXP path_r, SEXP kind_r) { MAYFAIL
 
 SEXP morloc_mlc_close(SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_close: handle must be a single number");
+        error("mlc_close: handle must be a single number");
     }
     int64_t handle = i64_from_sexp(handle_r);
-    R_TRY(mlc_close, handle);
+    int rc = R_TRY(mlc_close, handle);
+    if (rc == MLC_RESULT_PIPE_CLOSED) raise_pipe_closed();
     return R_NilValue;
 }
 
 SEXP morloc_mlc_fschema(SEXP path_r) { MAYFAIL
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_fschema: path must be a single string");
+        error("mlc_fschema: path must be a single string");
     }
     const char* path = CHAR(STRING_ELT(path_r, 0));
     char* s = R_TRY(mlc_fschema, path);
@@ -2549,7 +2568,7 @@ SEXP morloc_mlc_tmpfile(void) { MAYFAIL
 // not created by mlc_tmpfile in this call.
 SEXP morloc_mlc_unlink_tmp(SEXP path_r) { MAYFAIL
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_unlink_tmp: path must be a single string");
+        error("mlc_unlink_tmp: path must be a single string");
     }
     const char* path = CHAR(STRING_ELT(path_r, 0));
     R_TRY(mlc_unlink_tmp, path);
@@ -2680,7 +2699,7 @@ SEXP morloc_mlc_load(SEXP schema_str_r, SEXP path_r) { MAYFAIL
         MORLOC_INTERNAL_ABORT("mlc_load: schema must be a single string");
     }
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_load: path must be a single string");
+        error("mlc_load: path must be a single string");
     }
     const char* path = CHAR(STRING_ELT(path_r, 0));
 
@@ -2690,10 +2709,7 @@ SEXP morloc_mlc_load(SEXP schema_str_r, SEXP path_r) { MAYFAIL
 
     void* voidstar = R_TRY_WITH(free_schema(schema), mlc_load, path, schema);
     if (voidstar == NULL) {
-        // Failure with no errmsg (e.g. file missing with clean NULL
-        // return) surfaces as a catchable R error.
-        free_schema(schema);
-        MORLOC_ERROR("@load: failed to load '%s'", path);
+        MORLOC_INTERNAL_ABORT("@load: the runtime failed without giving a reason");
     }
 
     // Tracked while it is read, so an R error on the way still releases
@@ -2712,7 +2728,7 @@ SEXP morloc_mlc_read(SEXP schema_str_r, SEXP json_str_r) { MAYFAIL
         MORLOC_INTERNAL_ABORT("mlc_read: schema must be a single string");
     }
     if (TYPEOF(json_str_r) != STRSXP || LENGTH(json_str_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_read: json must be a single string");
+        error("mlc_read: json must be a single string");
     }
     const char* json_str = CHAR(STRING_ELT(json_str_r, 0));
 
@@ -2784,13 +2800,13 @@ SEXP morloc_mlc_ifile_walk(SEXP schema_str_r, SEXP handle_r,
         MORLOC_INTERNAL_ABORT("mlc_ifile_walk: schema must be a single string");
     }
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_ifile_walk: handle must be a single number");
+        error("mlc_ifile_walk: handle must be a single number");
     }
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_ifile_walk: path must be a single string");
+        error("mlc_ifile_walk: path must be a single string");
     }
     if (TYPEOF(args_r) != VECSXP) {
-        MORLOC_INTERNAL_ABORT("mlc_ifile_walk: args must be a list");
+        error("mlc_ifile_walk: args must be a list");
     }
     int64_t handle = i64_from_sexp(handle_r);
     const char* path = CHAR(STRING_ELT(path_r, 0));
@@ -2830,7 +2846,7 @@ SEXP morloc_mlc_ifile_walk(SEXP schema_str_r, SEXP handle_r,
 
 SEXP morloc_mlc_ifile_length(SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_ifile_length: handle must be a single number");
+        error("mlc_ifile_length: handle must be a single number");
     }
     int64_t handle = i64_from_sexp(handle_r);
     int64_t n = R_TRY(mlc_ifile_length, handle);
@@ -2854,7 +2870,7 @@ SEXP morloc_mlc_next(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
         MORLOC_INTERNAL_ABORT("mlc_next: schema must be a single string");
     }
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_next: handle must be a single number");
+        error("mlc_next: handle must be a single number");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
@@ -2881,7 +2897,7 @@ SEXP morloc_mlc_next_frame(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
         MORLOC_INTERNAL_ABORT("mlc_next_frame: schema must be a single string");
     }
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_next_frame: handle must be a single number");
+        error("mlc_next_frame: handle must be a single number");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
@@ -2906,7 +2922,7 @@ SEXP morloc_mlc_stream_layout(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
         MORLOC_INTERNAL_ABORT("mlc_stream_layout: schema must be a single string");
     }
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_stream_layout: handle must be a single number");
+        error("mlc_stream_layout: handle must be a single number");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
@@ -2929,7 +2945,7 @@ SEXP morloc_mlc_stream_layout(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
 SEXP morloc_mlc_stream(SEXP ifile_handle_r) { MAYFAIL
     if ((TYPEOF(ifile_handle_r) != INTSXP && TYPEOF(ifile_handle_r) != REALSXP)
         || LENGTH(ifile_handle_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_stream: ifile handle must be a single number");
+        error("mlc_stream: ifile handle must be a single number");
     }
     int64_t ifh = i64_from_sexp(ifile_handle_r);
     int64_t new_h = R_TRY(mlc_stream, ifh);
@@ -2945,7 +2961,7 @@ SEXP morloc_mlc_open_ostream(SEXP schema_str_r, SEXP path_r) { MAYFAIL
         MORLOC_INTERNAL_ABORT("mlc_open_ostream: schema must be a single string");
     }
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_open_ostream: path must be a single string");
+        error("mlc_open_ostream: path must be a single string");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     const char* path = CHAR(STRING_ELT(path_r, 0));
@@ -2958,7 +2974,7 @@ SEXP morloc_mlc_open_istream(SEXP schema_str_r, SEXP path_r) { MAYFAIL
         MORLOC_INTERNAL_ABORT("mlc_open_istream: schema must be a single string");
     }
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_open_istream: path must be a single string");
+        error("mlc_open_istream: path must be a single string");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     const char* path = CHAR(STRING_ELT(path_r, 0));
@@ -3003,11 +3019,11 @@ SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle
     }
     if ((TYPEOF(level_r) != INTSXP && TYPEOF(level_r) != REALSXP)
         || LENGTH(level_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_write: level must be a single number");
+        error("mlc_write: level must be a single number");
     }
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP)
         || LENGTH(handle_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_write: handle must be a single number");
+        error("mlc_write: handle must be a single number");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
@@ -3017,13 +3033,14 @@ SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle
     void* voidstar = R_TRY(shmalloc, bytes);
     void* cursor = (uint8_t*)voidstar + schema->width;
     to_voidstar_inner(voidstar, &cursor, value_r, schema);
-    R_TRY(mlc_write, level, handle, voidstar);
+    int rc = R_TRY(mlc_write, level, handle, voidstar);
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
     }
     free_schema(schema);
+    if (rc == MLC_RESULT_PIPE_CLOSED) raise_pipe_closed();
     return R_NilValue;
 }
 
@@ -3125,7 +3142,7 @@ SEXP morloc_mlc_append(SEXP schema_str_r, SEXP path_r) { MAYFAIL
         MORLOC_INTERNAL_ABORT("mlc_append: schema must be a single string");
     }
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_append: path must be a single string");
+        error("mlc_append: path must be a single string");
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     const char* path = CHAR(STRING_ELT(path_r, 0));
@@ -3135,10 +3152,10 @@ SEXP morloc_mlc_append(SEXP schema_str_r, SEXP path_r) { MAYFAIL
 
 SEXP morloc_mlc_concat(SEXP paths_r, SEXP dest_r) { MAYFAIL
     if (TYPEOF(paths_r) != STRSXP) {
-        MORLOC_INTERNAL_ABORT("mlc_concat: paths must be a character vector");
+        error("mlc_concat: paths must be a character vector");
     }
     if (TYPEOF(dest_r) != STRSXP || LENGTH(dest_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_concat: dest must be a single string");
+        error("mlc_concat: dest must be a single string");
     }
     R_xlen_t n = XLENGTH(paths_r);
     const char** raw = NULL;
@@ -3154,10 +3171,11 @@ SEXP morloc_mlc_concat(SEXP paths_r, SEXP dest_r) { MAYFAIL
 
 SEXP morloc_mlc_flush(SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_flush: handle must be a single number");
+        error("mlc_flush: handle must be a single number");
     }
     int64_t handle = i64_from_sexp(handle_r);
-    R_TRY(mlc_flush, handle);
+    int rc = R_TRY(mlc_flush, handle);
+    if (rc == MLC_RESULT_PIPE_CLOSED) raise_pipe_closed();
     return R_NilValue;
 }
 
@@ -3184,7 +3202,7 @@ SEXP morloc_mlc_is_channel(SEXP handle_r) {
 // failure, unchanged, if a reader was handed it.
 SEXP morloc_mlc_settle(SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_settle: handle must be a single number");
+        error("mlc_settle: handle must be a single number");
     }
     mlc_settle(i64_from_sexp(handle_r), &child_errmsg_);
     if (child_errmsg_ != NULL) {
@@ -3210,7 +3228,7 @@ SEXP morloc_mlc_spawn(SEXP socket_path_r, SEXP mid_r, SEXP args_r, SEXP handle_r
         MORLOC_INTERNAL_ABORT("mlc_spawn: args must be a list of raw vectors");
     }
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_spawn: handle must be a single number");
+        error("mlc_spawn: handle must be a single number");
     }
     size_t nargs = (size_t)LENGTH(args_r);
     const uint8_t** arg_packets = (const uint8_t**)R_alloc(nargs > 0 ? nargs : 1, sizeof(uint8_t*));
@@ -3614,7 +3632,12 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
             char* msg_copy = strdup(fail_msg);
             free(fail_msg);
             free(packet);
+            bool pipe_closed = morloc_packet_is_pipe_closed((const uint8_t*)result);
             free(result);
+            if (pipe_closed) {
+                free(msg_copy);
+                raise_pipe_closed();
+            }
             if (msg_copy == NULL) {
                 error("morloc R foreign_call: OOM copying fail message");
             }
@@ -3895,9 +3918,14 @@ SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resou
 // {{{ fork and worker functions
 
 SEXP morloc_fork(void) {
-    pid_t pid = fork();
+    long threads = 0;
+    int err = 0;
+    pid_t pid = morloc_fork_worker(&threads, &err);
+    if (pid == -2) {
+        error("refusing to fork a worker from a process with %ld threads", threads);
+    }
     if (pid < 0) {
-        error("fork failed: %s", strerror(errno));
+        error("fork failed: %s", strerror(err));
     }
     return ScalarInteger((int)pid);
 }
@@ -4001,28 +4029,25 @@ SEXP morloc_waitpid(SEXP pid_r) {
 // pid list precisely, so shutdown never SIGKILLs a reaped-and-reused pid.
 // Returns: 0 = still alive; WTERMSIG (>0) = died by signal; -1 = reaped
 // (clean/nonzero exit) or already gone.
+// 0 while worker `pid` runs; 1 once it has ended (reaped here, with any
+// abnormal end reported, or already gone).
 SEXP morloc_reap_worker(SEXP pid_r) {
     pid_t pid = (pid_t)INTEGER(pid_r)[0];
     int status;
     pid_t r = waitpid(pid, &status, WNOHANG);
     if (r == 0) {
-        return ScalarInteger(0);   // still running
+        return ScalarInteger(0);
     }
-    if (r < 0) {
-        return ScalarInteger(-1);  // ECHILD / already reaped
-    }
-    if (WIFSIGNALED(status)) {
+    if (r > 0 && WIFSIGNALED(status)) {
         fprintf(stderr, "morloc R pool: worker %d crashed with signal %d\n",
                 (int)pid, WTERMSIG(status));
         fflush(stderr);
-        return ScalarInteger(WTERMSIG(status));
-    }
-    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+    } else if (r > 0 && WIFEXITED(status) && WEXITSTATUS(status) != 0) {
         fprintf(stderr, "morloc R pool: worker %d exited with status %d\n",
                 (int)pid, WEXITSTATUS(status));
         fflush(stderr);
     }
-    return ScalarInteger(-1);      // reaped
+    return ScalarInteger(1);
 }
 
 SEXP morloc_waitpid_blocking(SEXP pid_r) {
@@ -4084,6 +4109,8 @@ SEXP morloc_pipe(void) {
     if (pipe(fds) != 0) {
         error("pipe failed: %s", strerror(errno));
     }
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
     SEXP result = PROTECT(allocVector(INTSXP, 2));
     INTEGER(result)[0] = fds[0];  /* read end */
     INTEGER(result)[1] = fds[1];  /* write end */
@@ -4104,12 +4131,26 @@ SEXP morloc_set_nonblocking(SEXP fd_r) {
 
 // Wait up to `ms` for a byte on the wake-up pipe `fd` (non-blocking), then
 // drain it. Returns early on a signal, so shutdown stays prompt.
+/* Wait for a wake-up byte or the timeout; end the process group once the
+   nexus's lifeline reaches end of file. */
 SEXP morloc_wait_wakeup(SEXP fd_r, SEXP ms_r) {
+    static int lifeline_ended = 0;
     int fd = INTEGER(fd_r)[0];
-    struct pollfd p = {fd, POLLIN, 0};
-    if (poll(&p, 1, INTEGER(ms_r)[0]) > 0) {
-        char buf[256];
-        while (read(fd, buf, sizeof(buf)) > 0) {}
+    int life = lifeline_ended ? -1 : morloc_lifeline_adopt();
+    struct pollfd p[2] = {{fd, POLLIN, 0}, {life, POLLIN, 0}};
+    if (poll(p, life >= 0 ? 2 : 1, INTEGER(ms_r)[0]) > 0) {
+        if (p[0].revents) {
+            char buf[256];
+            while (read(fd, buf, sizeof(buf)) > 0) {}
+        }
+        if (life >= 0 && p[1].revents) {
+            char b;
+            ssize_t n = read(life, &b, 1);
+            if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) {
+                lifeline_ended = 1;
+                morloc_lifeline_teardown();
+            }
+        }
     }
     return R_NilValue;
 }
@@ -4222,7 +4263,7 @@ static void send_fail_to_client(int client_fd, const char* msg) {
         }
     }
     uint8_t* fail = make_fail_packet(full);
-    send_packet_to_foreign_server(client_fd, fail, &errmsg);
+    send_reply_to_foreign_server(client_fd, fail, shm_tracker_flush, &errmsg);
     free(fail);
     if (trace != NULL) {
         free(trace);
@@ -4278,11 +4319,20 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
 
     // Single crossing into R: evaluate the manifold
     int eval_err = 0;
+    r_pipe_closed = 0;
     SEXP result = R_tryEvalSilent(r_call, R_GlobalEnv, &eval_err);
+    // A process forked by user code during this call exits here (FORK-12).
+    morloc_exit_if_forked();
 
     if (eval_err || result == R_NilValue || TYPEOF(result) != RAWSXP) {
         UNPROTECT(nprotect);
-        if (eval_err) {
+        if (eval_err && r_pipe_closed) {
+            char* errmsg2 = NULL;
+            uint8_t* closed = make_pipe_closed_packet("@stdout: downstream pipe closed");
+            send_reply_to_foreign_server(client_fd, closed, shm_tracker_flush, &errmsg2);
+            free(closed);
+            free(errmsg2);
+        } else if (eval_err) {
             char* bare = r_error_message(R_curErrorBuf());
             send_fail_to_client(client_fd, bare != NULL ? bare : R_curErrorBuf());
             free(bare);
@@ -4295,7 +4345,9 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
     PROTECT(result);
     nprotect++;
 
-    send_packet_to_foreign_server(client_fd, RAW(result), &errmsg);
+    // What the dispatch holds, the reply's own block included, is released
+    // once the reply holds the caller's reference and before it is sent.
+    send_reply_to_foreign_server(client_fd, RAW(result), shm_tracker_flush, &errmsg);
     if (errmsg) {
         // A failed response send was previously dropped silently, leaving the
         // caller with an unexplained "Connection closed" -- log the cause.
@@ -4311,11 +4363,8 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
 static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
     char* errmsg = NULL;
 
-    // Release any SHM that the previous request's morloc_put_value handed
-    // off via PACKET_SOURCE_RPTR. The block stays alive until now so the
-    // calling daemon can dereference its relptr; once we're starting a new
-    // request, it is safe to reclaim. Without this every RPTR result would
-    // leak per call and grow /dev/shm/morloc-* monotonically.
+    // A reply releases what its dispatch held (send_reply_to_foreign_server);
+    // this covers a previous request that ended without sending one.
     shm_tracker_flush();
 
     // A table's block is held by the R object that reads it, and R's
@@ -4369,7 +4418,7 @@ static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
             if (!errmsg && is_ping_pkt) {
                 uint8_t* pong = return_ping(packet, &errmsg);
                 if (!errmsg) {
-                    send_packet_to_foreign_server(client_fd, pong, &errmsg);
+                    send_reply_to_foreign_server(client_fd, pong, shm_tracker_flush, &errmsg);
                     free(pong);
                 }
             } else if (!errmsg) {
@@ -4419,6 +4468,7 @@ SEXP morloc_worker_loop_c(SEXP listen_fd_r, SEXP life_fd_r, SEXP dispatch_r, SEX
         // Every idle worker wakes; one wins and the rest find nothing.
         int client_fd = accept(listen_fd, NULL, NULL);
         if (client_fd < 0) continue;
+        fcntl(client_fd, F_SETFD, FD_CLOEXEC);
         fcntl(client_fd, F_SETFL, O_NONBLOCK);
         mlc_trace("accept client=%d\n", client_fd);
         run_job_c(client_fd, dispatch_r, remote_dispatch_r);
@@ -4639,6 +4689,7 @@ void R_init_librmorloc(DllInfo *info) { _r_init_impl(info); }
 void R_init_rmorloc(DllInfo *info) { _r_init_impl(info); }
 
 static void _r_init_impl(DllInfo *info) {
+    morloc_install_panic_hook(NULL);
     R_CallMethodDef callMethods[] = {
         {"morloc_start_daemon", (DL_FUNC) &morloc_start_daemon, 4},
         {"morloc_wait_for_client", (DL_FUNC) &morloc_wait_for_client, 1},

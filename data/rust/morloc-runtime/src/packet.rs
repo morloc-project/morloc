@@ -55,25 +55,30 @@ pub fn shm_enabled() -> bool {
 }
 
 // Tmpdir for file-packet intermediates (written when SHM_ENABLED is
-// false and data exceeds the inline threshold). Mutex<Option<String>>
-// rather than an atomic because the value is a variable-length path.
-// Empty/None = "use std::env::temp_dir() at call time".
-static TMPDIR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+// false and data exceeds the inline threshold). None = "use
+// std::env::temp_dir() at call time".
+pub(crate) struct Config {
+    loaded: bool,
+    tmpdir: Option<String>,
+}
+
+pub(crate) static TMPDIR: crate::fork_policy::Held<Config> =
+    crate::fork_policy::Held::new(12, Config { loaded: false, tmpdir: None });
+
+static CONFIG_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Read the configured tmpdir for file packets. None = fall back to
 /// `std::env::temp_dir()` (or `/tmp`) at the call site. Read by
 /// `make_file_data_packet_voidstar`.
 pub fn file_packet_tmpdir() -> Option<String> {
     ensure_config_loaded();
-    TMPDIR.lock().ok().and_then(|g| g.clone())
+    TMPDIR.lock().tmpdir.clone()
 }
 
 /// Override the file-packet tmpdir. Empty string = unset (fall back
 /// to `std::env::temp_dir()`). Idempotent.
 pub fn set_file_packet_tmpdir(path: Option<String>) {
-    if let Ok(mut g) = TMPDIR.lock() {
-        *g = path.filter(|p| !p.is_empty());
-    }
+    TMPDIR.lock().tmpdir = path.filter(|p| !p.is_empty());
 }
 
 // One-shot loader for env-var fallbacks. Pool processes inherit the
@@ -82,32 +87,33 @@ pub fn set_file_packet_tmpdir(path: Option<String>) {
 // inline_threshold() / shm_enabled() / file_packet_tmpdir() is
 // called and pokes the globals. After that, FFI setters are the
 // only way to change the values.
-static CONFIG_INIT: std::sync::Once = std::sync::Once::new();
-
+// INIT-2: the environment is read before the TMPDIR lock is taken; a
+// thread forking through std holds the environment lock across prepare.
 fn ensure_config_loaded() {
-    CONFIG_INIT.call_once(|| {
-        if let Ok(s) = std::env::var("MORLOC_INLINE_SIZE") {
-            if let Ok(n) = s.parse::<i64>() {
-                if n >= 0 {
-                    INLINE_THRESHOLD.store(n as usize, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
-        if let Ok(s) = std::env::var("MORLOC_NO_SHM") {
-            let v = s.trim().to_ascii_lowercase();
-            let off = matches!(v.as_str(), "1" | "true" | "yes" | "on");
-            if off {
-                SHM_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-        if let Ok(s) = std::env::var("MORLOC_TMPDIR") {
-            if !s.is_empty() {
-                if let Ok(mut g) = TMPDIR.lock() {
-                    *g = Some(s);
-                }
-            }
-        }
-    });
+    use std::sync::atomic::Ordering;
+    if CONFIG_LOADED.load(Ordering::Acquire) {
+        return;
+    }
+    let inline = std::env::var("MORLOC_INLINE_SIZE").ok().and_then(|s| s.parse::<i64>().ok()).filter(|n| *n >= 0);
+    let no_shm = std::env::var("MORLOC_NO_SHM")
+        .map(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let tmpdir = std::env::var("MORLOC_TMPDIR").ok().filter(|s| !s.is_empty());
+    let mut config = TMPDIR.lock();
+    if config.loaded {
+        return;
+    }
+    if let Some(n) = inline {
+        INLINE_THRESHOLD.store(n as usize, Ordering::Relaxed);
+    }
+    if no_shm {
+        SHM_ENABLED.store(false, Ordering::Relaxed);
+    }
+    if tmpdir.is_some() {
+        config.tmpdir = tmpdir;
+    }
+    config.loaded = true;
+    CONFIG_LOADED.store(true, Ordering::Release);
 }
 
 // ── SHM-resolving payload extraction (stays in libmorloc.so) ───────────────
@@ -169,4 +175,32 @@ fn read_voidstar_binary(
     vol_idx_hint: u16,
 ) -> Result<crate::shm::AbsPtr, MorlocError> {
     crate::voidstar::read_binary_with_hint(blob, schema, vol_idx_hint)
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn a_child_forked_while_a_thread_holds_the_temp_dir_lock_can_read_it() {
+        let _ = file_packet_tmpdir();
+        let held = Arc::new(Barrier::new(2));
+        let holder = {
+            let held = Arc::clone(&held);
+            std::thread::spawn(move || {
+                let guard = TMPDIR.lock();
+                held.wait();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                drop(guard);
+            })
+        };
+        held.wait();
+        let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let _ = file_packet_tmpdir();
+            true
+        });
+        holder.join().unwrap();
+        assert!(ok, "a forked child blocked on a lock its parent's thread held at fork");
+    }
 }
