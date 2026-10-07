@@ -259,22 +259,37 @@ pub(crate) fn any_created() -> bool {
     CREATED.load(Ordering::Relaxed)
 }
 
-#[no_mangle]
-pub extern "C" fn morloc_reclaim_all() {
+pub(crate) fn morloc_reclaim_all() {
     reclaim();
 }
 
-#[no_mangle]
-pub extern "C" fn morloc_reclaim_leases() {
+pub(crate) fn morloc_reclaim_leases() {
     reclaim_if_due();
 }
 
 /// Remove the temp-directory leases of the current shared namespace; the
 /// run directory's go with it.
-#[no_mangle]
-pub extern "C" fn morloc_remove_leases() {
+pub(crate) fn morloc_remove_leases() {
     let basename = crate::shm::get_common_basename();
     if !basename.is_empty() {
         let _ = std::fs::remove_dir_all(temp_lease_dir(&basename));
+    }
+}
+
+mod c_abi {
+
+    #[no_mangle]
+    pub extern "C" fn morloc_reclaim_all() {
+        super::morloc_reclaim_all()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_reclaim_leases() {
+        super::morloc_reclaim_leases()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_remove_leases() {
+        super::morloc_remove_leases()
     }
 }

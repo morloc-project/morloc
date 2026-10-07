@@ -264,13 +264,25 @@ pub struct MorlocThrow(pub String);
 /// libmorloc's scope kind for a host's catch around user code (PANIC-6).
 const MORLOC_SCOPE_HOST: u8 = 2;
 
-static POOL_FILES: std::sync::OnceLock<(&'static [&'static str], &'static [&'static str])> = std::sync::OnceLock::new();
+struct Registered {
+    pool_files: &'static [&'static str],
+    user_files: &'static [&'static str],
+    /// The lines of the generated source that hold nothing but a call of a
+    /// sourced function (PANIC-15).
+    user_lines: &'static [u32],
+}
+
+static REGISTERED: std::sync::OnceLock<Registered> = std::sync::OnceLock::new();
 
 /// Record the pool's generated source file (each spelling: as panic
-/// locations and as backtraces name it) and the user sources it includes
-/// (PANIC-9).
-pub fn register_pool_files(pool_files: &'static [&'static str], user_files: &'static [&'static str]) {
-    let _ = POOL_FILES.set((pool_files, user_files));
+/// locations and as backtraces name it), the user sources it includes
+/// (PANIC-9), and its lines that only call a sourced function (PANIC-15).
+pub fn register_pool_files(
+    pool_files: &'static [&'static str],
+    user_files: &'static [&'static str],
+    user_lines: &'static [u32],
+) {
+    let _ = REGISTERED.set(Registered { pool_files, user_files, user_lines });
 }
 
 fn this_crate_dirs() -> [&'static str; 2] {
@@ -354,6 +366,23 @@ fn side_of(file: &str, pool_files: &[&str], user_files: &[&str]) -> Side {
 struct Frame<'a> {
     symbol: &'a str,
     file: Option<&'a str>,
+    line: Option<u32>,
+}
+
+/// A backtrace location's file and line: `file:line:col`, or `file:line`
+/// when the column is unknown; the file may itself contain `:`.
+fn all_digits(t: &str) -> bool {
+    !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn split_location(at: &str) -> (&str, Option<u32>) {
+    match at.rsplit_once(':') {
+        Some((rest, last)) if all_digits(last) => match rest.rsplit_once(':') {
+            Some((file, line)) if all_digits(line) => (file, line.parse().ok()),
+            _ => (rest, last.parse().ok()),
+        },
+        _ => (at, None),
+    }
 }
 
 /// Frames of `format!("{:#}", backtrace)`: "N: 0xADDR - symbol" lines, each
@@ -365,16 +394,17 @@ fn frames(trace: &str) -> Vec<Frame<'_>> {
     for line in trace.lines() {
         let t = line.trim_start();
         if let Some(at) = t.strip_prefix("at ") {
-            let file = at.rsplitn(3, ':').last().unwrap_or(at);
+            let (file, line) = split_location(at);
             if let Some(f) = out.last_mut() {
                 if f.file.is_none() {
                     f.file = Some(file);
+                    f.line = line;
                 }
             }
         } else if let Some((num, rest)) = t.split_once(':') {
-            if !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()) {
+            if all_digits(num) {
                 let symbol = rest.split_once(" - ").map(|(_, s)| s).unwrap_or(rest).trim();
-                out.push(Frame { symbol, file: None });
+                out.push(Frame { symbol, file: None, line: None });
             }
         }
     }
@@ -436,7 +466,7 @@ fn runtime_symbol(symbol: &str) -> bool {
     })
 }
 
-fn walk_is_runtime(trace: &str, pool_files: &[&str], user_files: &[&str]) -> bool {
+fn walk_is_runtime(trace: &str, pool_files: &[&str], user_files: &[&str], user_lines: &[u32]) -> bool {
     let frames = frames(trace);
     let Some(gate) = panic_gate(&frames) else { return true };
     let above = &frames[..gate];
@@ -448,6 +478,7 @@ fn walk_is_runtime(trace: &str, pool_files: &[&str], user_files: &[&str]) -> boo
     }
     for f in &frames[gate + 1..] {
         match f.file {
+            Some(p) if in_pool(p) && f.line.is_some_and(|l| user_lines.contains(&l)) => return false,
             Some(p) if runtime_symbol(f.symbol) && !is_user_file(p, user_files) => return true,
             None if runtime_symbol(f.symbol) => return true,
             Some(p) => match side_of(p, pool_files, user_files) {
@@ -468,14 +499,14 @@ fn walk_is_runtime(trace: &str, pool_files: &[&str], user_files: &[&str]) -> boo
 /// the generated code, std or a third-party crate needs the caller, found by
 /// walking a backtrace captured now, while the panic has not unwound.
 pub extern "C" fn panic_is_runtime(file: *const u8, len: usize) -> bool {
-    let Some((pool_files, user_files)) = POOL_FILES.get() else { return true };
+    let Some(&Registered { pool_files, user_files, user_lines }) = REGISTERED.get() else { return true };
     // SAFETY: PANIC-9: the hook passes the panic location's string.
     let file = unsafe { std::str::from_utf8(std::slice::from_raw_parts(file, len)) }.unwrap_or("");
     let in_pool_file = pool_files.iter().any(|p| trim_dot(p) == trim_dot(file));
     match side_of(file, pool_files, user_files) {
         Side::User if is_user_file(file, user_files) => false,
         Side::Runtime if !in_pool_file => true,
-        _ => walk_is_runtime(&format!("{:#}", std::backtrace::Backtrace::force_capture()), pool_files, user_files),
+        _ => walk_is_runtime(&format!("{:#}", std::backtrace::Backtrace::force_capture()), pool_files, user_files, user_lines),
     }
 }
 
@@ -3827,7 +3858,7 @@ mod panic_classifier_tests {
     }
 
     fn walk(t: &str) -> bool {
-        walk_is_runtime(t, &[POOL], &[USER])
+        walk_is_runtime(t, &[POOL], &[USER], &[])
     }
 
     #[test]
@@ -3871,7 +3902,22 @@ mod panic_classifier_tests {
         assert!(!runtime_symbol("morloc_runtimex::f"));
         assert!(!runtime_symbol("pool_ab12::m1"));
         let t = trace(&[], &[("morloc_runtime[h]::cell::cell_put", Some("/elsewhere/cell.rs")), ("u", Some(USER))], false);
-        assert!(walk_is_runtime(&t, &[POOL], &[USER, "/"]));
+        assert!(walk_is_runtime(&t, &[POOL], &[USER, "/"], &[]));
+    }
+
+    #[test]
+    fn a_location_names_its_line_with_or_without_a_column() {
+        assert_eq!(split_location("/x/src/main.rs:120:5"), ("/x/src/main.rs", Some(120)));
+        assert_eq!(split_location("/x/src/main.rs:120"), ("/x/src/main.rs", Some(120)));
+        assert_eq!(split_location("C:/a:b/main.rs:7:1"), ("C:/a:b/main.rs", Some(7)));
+        assert_eq!(split_location("/x/src/main.rs"), ("/x/src/main.rs", None));
+    }
+
+    #[test]
+    fn a_frame_at_a_registered_line_of_the_generated_source_is_the_users() {
+        let t = trace(&[], &[("dep::f", Some("/elsewhere/dep.rs")), ("pool::m1", Some(POOL))], false);
+        assert!(!walk_is_runtime(&t, &[POOL], &[USER], &[1]));
+        assert!(walk_is_runtime(&t, &[POOL], &[USER], &[2]));
     }
 
     #[test]
@@ -3940,7 +3986,7 @@ mod panic_classifier_tests {
         if std::env::var_os(CHILD_ENV).is_none() {
             return;
         }
-        register_pool_files(&[POOL_FILE, POOL_FILE_ABS], &[USER_FILE, USER_FILE_ABS]);
+        register_pool_files(&[POOL_FILE, POOL_FILE_ABS], &[USER_FILE, USER_FILE_ABS], &[]);
         std::panic::set_hook(Box::new(|info| {
             let file = info.location().map(|l| l.file()).unwrap_or("");
             let runtime = probe_classify_panic(file.as_ptr(), file.len());

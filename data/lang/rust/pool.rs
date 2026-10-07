@@ -82,7 +82,7 @@ fn main() {
 
     rustmorloc::install_crash_handler();
     // PANIC-9
-    rustmorloc::register_pool_files(&[file!(), concat!(env!("CARGO_MANIFEST_DIR"), "/", file!())], MLC_USER_FILES);
+    rustmorloc::register_pool_files(&[file!(), concat!(env!("CARGO_MANIFEST_DIR"), "/", file!())], MLC_USER_FILES, MLC_USER_LINES);
     unsafe { morloc_set_panic_classifier(Some(mlc_classify_panic)) };
     init_schemas();
     // argv is `<socket_path> <tmpdir> <shm_basename>`; record the tmpdir so

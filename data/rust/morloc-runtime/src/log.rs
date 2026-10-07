@@ -30,8 +30,7 @@ use morloc_runtime_types::publish_once::PublishOnce;
 
 static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-#[no_mangle]
-pub extern "C" fn morloc_log_next_id() -> u64 {
+pub(crate) fn morloc_log_next_id() -> u64 {
     CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -103,8 +102,7 @@ fn strip_csi(s: &str) -> String {
 /// Safety: `tmpl` must be a null-terminated UTF-8 byte sequence. A null
 /// pointer is treated as a no-op. `group` may be NULL or empty -- if so,
 /// the per-label tee is skipped; the stderr emission still happens.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_log_emit(
+pub(crate) unsafe fn morloc_log_emit(
     tmpl: *const c_char,
     group: *const c_char,
     runtime_seconds: f64,
@@ -195,8 +193,7 @@ pub fn bench_record_path() -> Option<std::path::PathBuf> {
 /// "group\tname\tlang" identity the compiler stamped on the manifold.
 ///
 /// Safety: `key` must be a NUL-terminated UTF-8 string.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_bench_record(key: *const c_char, seconds: f64) {
+pub(crate) unsafe fn morloc_bench_record(key: *const c_char, seconds: f64) {
     if key.is_null() || quiet() {
         return;
     }
@@ -223,8 +220,7 @@ pub unsafe extern "C" fn morloc_bench_record(key: *const c_char, seconds: f64) {
 /// mirror the per-label emitter for visual consistency.
 ///
 /// Safety: `text` must be a NUL-terminated UTF-8 string.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_run_emit_line(text: *const c_char) {
+pub(crate) unsafe fn morloc_run_emit_line(text: *const c_char) {
     if text.is_null() || quiet() {
         return;
     }
@@ -288,5 +284,29 @@ mod fork_tests {
         let _ = super::pool_pid();
         let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| super::pool_pid() == unsafe { libc::getpid() });
         assert!(ok, "a forked child logged its parent's pid");
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub extern "C" fn morloc_log_next_id() -> u64 {
+        super::morloc_log_next_id()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_log_emit(tmpl: *const c_char, group: *const c_char, runtime_seconds: f64, call_id: u64) {
+        super::morloc_log_emit(tmpl, group, runtime_seconds, call_id)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_bench_record(key: *const c_char, seconds: f64) {
+        super::morloc_bench_record(key, seconds)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_run_emit_line(text: *const c_char) {
+        super::morloc_run_emit_line(text)
     }
 }

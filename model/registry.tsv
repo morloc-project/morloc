@@ -220,7 +220,7 @@ rustmorloc/lib.rs::-::CURRENT_FRAME	thread
 rustmorloc/lib.rs::-::ACTIVE	thread		
 rustmorloc/lib.rs::-::QUEUE	thread		
 rustmorloc/lib.rs::-::TMPDIR	startup		
-rustmorloc/lib.rs::-::POOL_FILES	startup		
+rustmorloc/lib.rs::-::REGISTERED	startup		
 morloc-nexus/main.rs::-::FRONTEND_ROUTER	exec-only		
 morloc-nexus/mcp.rs::new_session_id::CTR	exec-only		
 morloc-nexus/mcp.rs::-::Frontend.locks	exec-only		

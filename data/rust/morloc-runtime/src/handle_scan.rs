@@ -440,8 +440,7 @@ pub fn rewrite_data_packet_for_persistence(
 /// `packet` / `out_ptr` / `out_len` / `errmsg` must be valid non-null
 /// pointers; `packet_len` must accurately size the readable region of
 /// `packet`.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_rewrite_packet_for_persistence(
+pub(crate) unsafe fn mlc_rewrite_packet_for_persistence(
     packet: *const u8,
     packet_len: usize,
     out_ptr: *mut *mut u8,
@@ -574,5 +573,13 @@ mod tests {
         let schema = parse_schema("F").unwrap();
         let payload = vec![0u8; 8]; // less than the 16-byte field
         assert!(collect_stream_fields(&payload, &schema).is_err());
+    }
+}
+
+mod c_abi {
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_rewrite_packet_for_persistence(packet: *const u8, packet_len: usize, out_ptr: *mut *mut u8, out_len: *mut usize, errmsg: *mut *mut std::os::raw::c_char) -> i32 {
+        super::mlc_rewrite_packet_for_persistence(packet, packet_len, out_ptr, out_len, errmsg)
     }
 }

@@ -388,8 +388,7 @@ pub fn cell_free(handle: i64) -> Result<(), MorlocError> {
 
 /// # Safety
 /// `init` must point at a value laid out as `schema` describes.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_cell_new(
+pub(crate) unsafe fn mlc_cell_new(
     schema: *const CSchema,
     init: *const c_void,
     errmsg: *mut *mut c_char,
@@ -402,8 +401,7 @@ pub unsafe extern "C" fn mlc_cell_new(
 
 /// # Safety
 /// `schema` must describe the type the cell was created with.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_cell_get(
+pub(crate) unsafe fn mlc_cell_get(
     handle: i64,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -416,8 +414,7 @@ pub unsafe extern "C" fn mlc_cell_get(
 
 /// # Safety
 /// `value` must point at a value laid out as `schema` describes.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_cell_put(
+pub(crate) unsafe fn mlc_cell_put(
     handle: i64,
     schema: *const CSchema,
     value: *const c_void,
@@ -429,15 +426,13 @@ pub unsafe extern "C" fn mlc_cell_put(
     })
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_cell_count(handle: i64, errmsg: *mut *mut c_char) -> i64 {
+pub(crate) unsafe fn mlc_cell_count(handle: i64, errmsg: *mut *mut c_char) -> i64 {
     wrap_c_call(errmsg, -1, || cell_count(handle))
 }
 
 /// # Safety
 /// `schema` must describe the type the cell was created with.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_cell_slot(
+pub(crate) unsafe fn mlc_cell_slot(
     handle: i64,
     index: i64,
     schema: *const CSchema,
@@ -449,8 +444,7 @@ pub unsafe extern "C" fn mlc_cell_slot(
     })
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_cell_free(handle: i64, errmsg: *mut *mut c_char) -> i32 {
+pub(crate) unsafe fn mlc_cell_free(handle: i64, errmsg: *mut *mut c_char) -> i32 {
     wrap_c_call(errmsg, 1, || cell_free(handle).map(|_| 0))
 }
 
@@ -730,5 +724,39 @@ mod tests {
             assert_eq!(live_cell_count(), before);
             assert!(cell_count(h).is_err());
         }
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_cell_new(schema: *const CSchema, init: *const c_void, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_cell_new(schema, init, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_cell_get(handle: i64, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_cell_get(handle, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_cell_put(handle: i64, schema: *const CSchema, value: *const c_void, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_cell_put(handle, schema, value, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_cell_count(handle: i64, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_cell_count(handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_cell_slot(handle: i64, index: i64, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_cell_slot(handle, index, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_cell_free(handle: i64, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_cell_free(handle, errmsg)
     }
 }

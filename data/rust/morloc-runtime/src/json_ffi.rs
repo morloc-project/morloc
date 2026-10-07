@@ -10,8 +10,7 @@ use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 
 // ── quoted ─────────────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn quoted(input: *const c_char) -> *mut c_char {
+pub(crate) unsafe fn quoted(input: *const c_char) -> *mut c_char {
     if input.is_null() {
         return ptr::null_mut();
     }
@@ -31,8 +30,7 @@ pub unsafe extern "C" fn quoted(input: *const c_char) -> *mut c_char {
 
 // ── read_json_with_schema ──────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn read_json_with_schema(
+pub(crate) unsafe fn read_json_with_schema(
     dest: *mut u8,
     json_str: *mut c_char,
     schema: *const CSchema,
@@ -59,8 +57,7 @@ pub unsafe extern "C" fn read_json_with_schema(
 
 // ── voidstar_to_json_string ────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn voidstar_to_json_string(
+pub(crate) unsafe fn voidstar_to_json_string(
     data: *const c_void,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -91,8 +88,7 @@ pub unsafe extern "C" fn voidstar_to_json_string(
 /// `libc::free` in `daemon_free_response`). `*out_len` receives the byte length.
 /// Returns null with `errmsg` set on error. Used for a media-typed daemon HTTP
 /// response body.
-#[no_mangle]
-pub unsafe extern "C" fn voidstar_to_raw_bytes(
+pub(crate) unsafe fn voidstar_to_raw_bytes(
     data: *const c_void,
     schema: *const CSchema,
     out_len: *mut usize,
@@ -130,8 +126,7 @@ pub unsafe extern "C" fn voidstar_to_raw_bytes(
 
 use morloc_runtime_types::{PRINT_RESULT_OK, PRINT_RESULT_ERR, PRINT_RESULT_PIPE_CLOSED};
 
-#[no_mangle]
-pub unsafe extern "C" fn print_voidstar(
+pub(crate) unsafe fn print_voidstar(
     data: *const c_void,
     schema: *const CSchema,
     keep_null: bool,
@@ -140,8 +135,7 @@ pub unsafe extern "C" fn print_voidstar(
     print_dispatch(data, schema, keep_null, errmsg, crate::json::print_voidstar)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn pretty_print_voidstar(
+pub(crate) unsafe fn pretty_print_voidstar(
     data: *const c_void,
     schema: *const CSchema,
     keep_null: bool,
@@ -153,8 +147,7 @@ pub unsafe extern "C" fn pretty_print_voidstar(
 /// Emit `data` as JSON-lines (one element per line for list schemas,
 /// one line total for scalars). Streams element-by-element -- peak
 /// memory is one element's JSON body, not the whole list.
-#[no_mangle]
-pub unsafe extern "C" fn print_voidstar_jsonl(
+pub(crate) unsafe fn print_voidstar_jsonl(
     data: *const c_void,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -169,8 +162,7 @@ pub unsafe extern "C" fn print_voidstar_jsonl(
 }
 
 /// Emit a `Str`/`[Str]` voidstar as verbatim bytes (the `-f raw` format).
-#[no_mangle]
-pub unsafe extern "C" fn print_voidstar_raw(
+pub(crate) unsafe fn print_voidstar_raw(
     data: *const c_void,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -209,23 +201,20 @@ pub struct JsonBuf {
     needs_comma: Vec<bool>,
 }
 
-#[no_mangle]
-pub extern "C" fn json_buf_new() -> *mut JsonBuf {
+pub(crate) fn json_buf_new() -> *mut JsonBuf {
     Box::into_raw(Box::new(JsonBuf {
         buf: String::with_capacity(256),
         needs_comma: Vec::new(),
     }))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn json_buf_free(jb: *mut JsonBuf) {
+pub(crate) unsafe fn json_buf_free(jb: *mut JsonBuf) {
     if !jb.is_null() {
         let _ = Box::from_raw(jb);
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn json_buf_finish(jb: *mut JsonBuf) -> *mut c_char {
+pub(crate) unsafe fn json_buf_finish(jb: *mut JsonBuf) -> *mut c_char {
     if jb.is_null() {
         return ptr::null_mut();
     }
@@ -245,8 +234,7 @@ unsafe fn jb_maybe_comma(jb: &mut JsonBuf) {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn json_write_obj_start(jb: *mut JsonBuf) {
+pub(crate) unsafe fn json_write_obj_start(jb: *mut JsonBuf) {
     if jb.is_null() { return; }
     let jb = &mut *jb;
     jb_maybe_comma(jb);
@@ -254,16 +242,14 @@ pub unsafe extern "C" fn json_write_obj_start(jb: *mut JsonBuf) {
     jb.needs_comma.push(false);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn json_write_obj_end(jb: *mut JsonBuf) {
+pub(crate) unsafe fn json_write_obj_end(jb: *mut JsonBuf) {
     if jb.is_null() { return; }
     let jb = &mut *jb;
     jb.needs_comma.pop();
     jb.buf.push('}');
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn json_write_arr_start(jb: *mut JsonBuf) {
+pub(crate) unsafe fn json_write_arr_start(jb: *mut JsonBuf) {
     if jb.is_null() { return; }
     let jb = &mut *jb;
     jb_maybe_comma(jb);
@@ -271,16 +257,14 @@ pub unsafe extern "C" fn json_write_arr_start(jb: *mut JsonBuf) {
     jb.needs_comma.push(false);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn json_write_arr_end(jb: *mut JsonBuf) {
+pub(crate) unsafe fn json_write_arr_end(jb: *mut JsonBuf) {
     if jb.is_null() { return; }
     let jb = &mut *jb;
     jb.needs_comma.pop();
     jb.buf.push(']');
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn json_write_key(jb: *mut JsonBuf, key: *const c_char) {
+pub(crate) unsafe fn json_write_key(jb: *mut JsonBuf, key: *const c_char) {
     if jb.is_null() || key.is_null() { return; }
     let jb = &mut *jb;
     jb_maybe_comma(jb);
@@ -294,8 +278,7 @@ pub unsafe extern "C" fn json_write_key(jb: *mut JsonBuf, key: *const c_char) {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn json_write_string(jb: *mut JsonBuf, val: *const c_char) {
+pub(crate) unsafe fn json_write_string(jb: *mut JsonBuf, val: *const c_char) {
     if jb.is_null() { return; }
     let jb = &mut *jb;
     jb_maybe_comma(jb);
@@ -322,40 +305,35 @@ pub unsafe extern "C" fn json_write_string(jb: *mut JsonBuf, val: *const c_char)
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn json_write_int(jb: *mut JsonBuf, val: i64) {
+pub(crate) unsafe fn json_write_int(jb: *mut JsonBuf, val: i64) {
     if jb.is_null() { return; }
     let jb = &mut *jb;
     jb_maybe_comma(jb);
     jb.buf.push_str(&val.to_string());
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn json_write_uint(jb: *mut JsonBuf, val: u64) {
+pub(crate) unsafe fn json_write_uint(jb: *mut JsonBuf, val: u64) {
     if jb.is_null() { return; }
     let jb = &mut *jb;
     jb_maybe_comma(jb);
     jb.buf.push_str(&val.to_string());
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn json_write_bool(jb: *mut JsonBuf, val: bool) {
+pub(crate) unsafe fn json_write_bool(jb: *mut JsonBuf, val: bool) {
     if jb.is_null() { return; }
     let jb = &mut *jb;
     jb_maybe_comma(jb);
     jb.buf.push_str(if val { "true" } else { "false" });
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn json_write_null(jb: *mut JsonBuf) {
+pub(crate) unsafe fn json_write_null(jb: *mut JsonBuf) {
     if jb.is_null() { return; }
     let jb = &mut *jb;
     jb_maybe_comma(jb);
     jb.buf.push_str("null");
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn json_write_raw(jb: *mut JsonBuf, raw: *const c_char) {
+pub(crate) unsafe fn json_write_raw(jb: *mut JsonBuf, raw: *const c_char) {
     if jb.is_null() || raw.is_null() { return; }
     let jb = &mut *jb;
     jb_maybe_comma(jb);
@@ -363,3 +341,116 @@ pub unsafe extern "C" fn json_write_raw(jb: *mut JsonBuf, raw: *const c_char) {
     jb.buf.push_str(&s);
 }
 
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn quoted(input: *const c_char) -> *mut c_char {
+        super::quoted(input)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_json_with_schema(dest: *mut u8, json_str: *mut c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::read_json_with_schema(dest, json_str, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn voidstar_to_json_string(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::voidstar_to_json_string(data, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn voidstar_to_raw_bytes(data: *const c_void, schema: *const CSchema, out_len: *mut usize, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::voidstar_to_raw_bytes(data, schema, out_len, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn print_voidstar(data: *const c_void, schema: *const CSchema, keep_null: bool, errmsg: *mut *mut c_char) -> i32 {
+        super::print_voidstar(data, schema, keep_null, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn pretty_print_voidstar(data: *const c_void, schema: *const CSchema, keep_null: bool, errmsg: *mut *mut c_char) -> i32 {
+        super::pretty_print_voidstar(data, schema, keep_null, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn print_voidstar_jsonl(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32 {
+        super::print_voidstar_jsonl(data, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn print_voidstar_raw(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32 {
+        super::print_voidstar_raw(data, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn json_buf_new() -> *mut JsonBuf {
+        super::json_buf_new()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn json_buf_free(jb: *mut JsonBuf) {
+        super::json_buf_free(jb)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn json_buf_finish(jb: *mut JsonBuf) -> *mut c_char {
+        super::json_buf_finish(jb)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn json_write_obj_start(jb: *mut JsonBuf) {
+        super::json_write_obj_start(jb)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn json_write_obj_end(jb: *mut JsonBuf) {
+        super::json_write_obj_end(jb)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn json_write_arr_start(jb: *mut JsonBuf) {
+        super::json_write_arr_start(jb)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn json_write_arr_end(jb: *mut JsonBuf) {
+        super::json_write_arr_end(jb)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn json_write_key(jb: *mut JsonBuf, key: *const c_char) {
+        super::json_write_key(jb, key)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn json_write_string(jb: *mut JsonBuf, val: *const c_char) {
+        super::json_write_string(jb, val)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn json_write_int(jb: *mut JsonBuf, val: i64) {
+        super::json_write_int(jb, val)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn json_write_uint(jb: *mut JsonBuf, val: u64) {
+        super::json_write_uint(jb, val)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn json_write_bool(jb: *mut JsonBuf, val: bool) {
+        super::json_write_bool(jb, val)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn json_write_null(jb: *mut JsonBuf) {
+        super::json_write_null(jb)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn json_write_raw(jb: *mut JsonBuf, raw: *const c_char) {
+        super::json_write_raw(jb, raw)
+    }
+}

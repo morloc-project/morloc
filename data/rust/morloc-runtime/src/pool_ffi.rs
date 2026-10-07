@@ -53,13 +53,11 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 // on it (see JobQueue); it is kept for inspection.
 static BUSY_COUNT: AtomicI32 = AtomicI32::new(0);
 
-#[no_mangle]
-pub extern "C" fn pool_mark_busy() {
+pub(crate) fn pool_mark_busy() {
     BUSY_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
-#[no_mangle]
-pub extern "C" fn pool_mark_idle() {
+pub(crate) fn pool_mark_idle() {
     BUSY_COUNT.fetch_sub(1, Ordering::Relaxed);
 }
 
@@ -69,8 +67,7 @@ extern "C" fn pool_sigterm_handler(_sig: i32) {
 
 // ── Packet dispatch ──────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn pool_dispatch_packet(
+pub(crate) unsafe fn pool_dispatch_packet(
     packet: *const u8,
     local_dispatch: PoolDispatchFn,
     remote_dispatch: PoolDispatchFn,
@@ -651,8 +648,7 @@ unsafe fn tune_allocator() {
 #[cfg(not(target_env = "gnu"))]
 unsafe fn tune_allocator() {}
 
-#[no_mangle]
-pub unsafe extern "C" fn pool_main(
+pub(crate) unsafe fn pool_main(
     argc: i32,
     argv: *mut *mut c_char,
     config: *mut PoolConfig,
@@ -797,5 +793,29 @@ mod tests {
         assert!(q.reserve_start());
         assert!(!q.reserve_start());
         assert!(covered(&q));
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub extern "C" fn pool_mark_busy() {
+        super::pool_mark_busy()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn pool_mark_idle() {
+        super::pool_mark_idle()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn pool_dispatch_packet(packet: *const u8, local_dispatch: PoolDispatchFn, remote_dispatch: PoolDispatchFn, ctx: *mut c_void) -> *mut u8 {
+        super::pool_dispatch_packet(packet, local_dispatch, remote_dispatch, ctx)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn pool_main(argc: i32, argv: *mut *mut c_char, config: *mut PoolConfig) -> i32 {
+        super::pool_main(argc, argv, config)
     }
 }

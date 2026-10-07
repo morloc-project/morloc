@@ -35,27 +35,23 @@ pub(crate) fn install(exit: Option<extern "C" fn() -> !>) {
     morloc_runtime_types::panic::install_hook_unless(panic_exit, may_unwind);
 }
 
-#[no_mangle]
-pub extern "C" fn morloc_install_panic_hook(exit: Option<extern "C" fn() -> !>) {
+pub(crate) fn morloc_install_panic_hook(exit: Option<extern "C" fn() -> !>) {
     install(exit)
 }
 
 // PANIC-9: the host says whether a panic at a location is its runtime's.
-#[no_mangle]
-pub extern "C" fn morloc_set_panic_classifier(classify: Option<extern "C" fn(*const u8, usize) -> bool>) {
+pub(crate) fn morloc_set_panic_classifier(classify: Option<extern "C" fn(*const u8, usize) -> bool>) {
     CLASSIFIER.store(classify.map_or(0, |f| f as usize), Ordering::Release);
 }
 
 // PANIC-6: `kind` 2 opens a host's scope around its user code, 0 closes it;
 // returns the scope to restore.
-#[no_mangle]
-pub extern "C" fn morloc_catch_scope(kind: u8) -> u8 {
+pub(crate) fn morloc_catch_scope(kind: u8) -> u8 {
     morloc_runtime_types::panic::set_scope(kind)
 }
 
 // PANIC-6
-#[no_mangle]
-pub extern "C" fn morloc_panic_caught() {
+pub(crate) fn morloc_panic_caught() {
     morloc_runtime_types::panic::caught()
 }
 
@@ -125,6 +121,27 @@ mod tests {
         in_child(|| {
             let schema = morloc_runtime_types::schema::parse_schema("i4").unwrap();
             let _ = morloc_runtime_types::panic::catch(|| unsafe { crate::cell::cell_put(0, &schema, std::ptr::null()) });
+            unsafe { libc::_exit(3) };
+        });
+    }
+
+    #[test]
+    fn a_panic_below_a_c_abi_function_called_from_rust_reaches_the_catch() {
+        assert_eq!(status_of_child("child_panics_below_a_c_abi_function"), CHILD_OK);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_panics_below_a_c_abi_function() {
+        in_child(|| {
+            let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+            let cs = unsafe { crate::ffi::parse_schema(c"i4".as_ptr(), &mut err) };
+            assert!(!cs.is_null());
+            unsafe { (*cs).serial_type = 9999 };
+            let caught = morloc_runtime_types::panic::catch(|| unsafe { crate::ffi::schema_to_string(cs) });
+            if caught.is_err() {
+                unsafe { libc::_exit(CHILD_OK) };
+            }
             unsafe { libc::_exit(3) };
         });
     }
@@ -239,5 +256,28 @@ mod tests {
                 unsafe { libc::_exit(3) };
             }
         });
+    }
+}
+
+mod c_abi {
+
+    #[no_mangle]
+    pub extern "C" fn morloc_install_panic_hook(exit: Option<extern "C" fn() -> !>) {
+        super::morloc_install_panic_hook(exit)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_set_panic_classifier(classify: Option<extern "C" fn(*const u8, usize) -> bool>) {
+        super::morloc_set_panic_classifier(classify)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_catch_scope(kind: u8) -> u8 {
+        super::morloc_catch_scope(kind)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_panic_caught() {
+        super::morloc_panic_caught()
     }
 }

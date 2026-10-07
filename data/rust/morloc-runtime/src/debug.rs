@@ -249,8 +249,7 @@ fn try_write(hash_val: u64, bytes: &[u8]) -> Option<PathBuf> {
 /// Safety: `packets` and `schemas` must each be an array of `n`
 /// pointers. Each `packets[i]` is a NUL-or-packet pointer; each
 /// `schemas[i]` is a NUL or NUL-terminated schema string.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_debug_record_frame(
+pub(crate) unsafe fn morloc_debug_record_frame(
     midx: u32,
     name: *const c_char,
     srcloc: *const c_char,
@@ -327,8 +326,7 @@ pub unsafe extern "C" fn morloc_debug_record_frame(
 /// `shm_tracker_flush`). Without this, recursion counters and the
 /// disk-write counter would carry across unrelated invocations of
 /// the same pool process.
-#[no_mangle]
-pub extern "C" fn morloc_debug_flush_dispatch() {
+pub(crate) fn morloc_debug_flush_dispatch() {
     FRAMES.with(|f| f.borrow_mut().clear());
     DUMPED_COUNT.with(|d| *d.borrow_mut() = 0);
     MIDX_COUNTERS.with(|m| m.borrow_mut().clear());
@@ -339,8 +337,7 @@ pub extern "C" fn morloc_debug_flush_dispatch() {
 /// Render the accumulated trace as a multi-line C string and clear
 /// the per-thread state. Caller takes ownership and must free with
 /// `libc::free`. Returns NULL when no frames were recorded.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_debug_drain_frames() -> *mut c_char {
+pub(crate) unsafe fn morloc_debug_drain_frames() -> *mut c_char {
     let frames: Vec<FrameEntry> = FRAMES.with(|f| std::mem::take(&mut *f.borrow_mut()));
     let overflow = OVERFLOW_REPORTED.swap(0, Ordering::Relaxed);
     if frames.is_empty() && overflow == 0 {
@@ -531,5 +528,24 @@ mod tests {
             // No per-frame [lang] tag anymore.
             assert!(!s.contains("[cpp]"));
         }
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_debug_record_frame(midx: u32, name: *const c_char, srcloc: *const c_char, lang: *const c_char, packets: *const *const u8, schemas: *const *const c_char, n: usize) {
+        super::morloc_debug_record_frame(midx, name, srcloc, lang, packets, schemas, n)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_debug_flush_dispatch() {
+        super::morloc_debug_flush_dispatch()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_debug_drain_frames() -> *mut c_char {
+        super::morloc_debug_drain_frames()
     }
 }

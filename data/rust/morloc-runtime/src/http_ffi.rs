@@ -101,8 +101,7 @@ unsafe fn http_recv(fd: i32, buf: *mut u8, len: usize) -> isize {
 
 // ── http_parse_request ───────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn http_parse_request(
+pub(crate) unsafe fn http_parse_request(
     fd: i32,
     errmsg: *mut *mut c_char,
 ) -> *mut HttpRequest {
@@ -232,8 +231,7 @@ pub unsafe extern "C" fn http_parse_request(
     req
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn http_free_request(req: *mut HttpRequest) {
+pub(crate) unsafe fn http_free_request(req: *mut HttpRequest) {
     if req.is_null() { return; }
     if !(*req).body.is_null() {
         libc::free((*req).body as *mut c_void);
@@ -257,8 +255,7 @@ fn http_status_text(status: i32) -> &'static str {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn http_write_response(
+pub(crate) unsafe fn http_write_response(
     fd: i32,
     status: i32,
     content_type: *const c_char,
@@ -278,8 +275,7 @@ pub(crate) unsafe fn write_response(
     write_response_ex(fd, status, content_type, body, body_len, ptr::null())
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn http_write_response_ex(fd: i32, status: i32, content_type: *const c_char, body: *const c_char, body_len: usize, extra_headers: *const c_char) -> bool {
+pub(crate) unsafe fn http_write_response_ex(fd: i32, status: i32, content_type: *const c_char, body: *const c_char, body_len: usize, extra_headers: *const c_char) -> bool {
     write_response_ex(fd, status, content_type, body, body_len, extra_headers)
 }
 
@@ -385,8 +381,7 @@ fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn http_to_daemon_request(
+pub(crate) unsafe fn http_to_daemon_request(
     req: *mut HttpRequest,
     errmsg: *mut *mut c_char,
     error_kind: *mut i32,
@@ -656,5 +651,34 @@ mod body_tests {
         let (d, e) = to_daemon(HttpMethod::Post, "/eval", "{\"expr\": ");
         assert!(d.is_null());
         assert!(e.unwrap().contains("Malformed JSON in /eval body"));
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn http_parse_request(fd: i32, errmsg: *mut *mut c_char) -> *mut HttpRequest {
+        super::http_parse_request(fd, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn http_free_request(req: *mut HttpRequest) {
+        super::http_free_request(req)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn http_write_response(fd: i32, status: i32, content_type: *const c_char, body: *const c_char, body_len: usize) -> bool {
+        super::http_write_response(fd, status, content_type, body, body_len)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn http_write_response_ex(fd: i32, status: i32, content_type: *const c_char, body: *const c_char, body_len: usize, extra_headers: *const c_char) -> bool {
+        super::http_write_response_ex(fd, status, content_type, body, body_len, extra_headers)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn http_to_daemon_request(req: *mut HttpRequest, errmsg: *mut *mut c_char, error_kind: *mut i32) -> *mut DaemonRequest {
+        super::http_to_daemon_request(req, errmsg, error_kind)
     }
 }

@@ -1035,8 +1035,7 @@ pub fn held_stream_locks() -> usize {
 }
 
 // SHM-8: what keeps a worker from retiring.
-#[no_mangle]
-pub extern "C" fn morloc_retire_blockers() -> i64 {
+pub(crate) fn morloc_retire_blockers() -> i64 {
     drop_ended_unlocked_slots();
     crate::shm::held_references() + held_stream_locks() as i64
 }
@@ -13852,5 +13851,13 @@ mod write_behind_tests {
         batches.insert(12, vec!["big".to_string(), "x".repeat(20_000), "after".to_string()]);
         write_strs(&path, &batches, 3, 4096, 8, &[]);
         assert_eq!(read_strs(&path), batches.concat());
+    }
+}
+
+mod c_abi {
+
+    #[no_mangle]
+    pub extern "C" fn morloc_retire_blockers() -> i64 {
+        super::morloc_retire_blockers()
     }
 }

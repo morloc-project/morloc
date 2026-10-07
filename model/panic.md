@@ -62,8 +62,13 @@ in libmorloc during a nexus request cannot reach the nexus's catch, since
 the two do not share a standard library, so it ends the process by
 PANIC-1 without a reply.
 
-Missing: code below the daemon's handlers still calls libmorloc's own
-`extern "C"` functions (DAEMON-8).
+Missing: the format-library catch wraps whole libmorloc entry points
+(`error::guarded` in arrow_ffi.rs and arrow_ipc_reader.rs), so morloc's
+own code around the library call -- shared-memory writers, schema
+conversion, a foreign producer's release callback -- is inside it, and a
+panic there not holding a lock becomes a decode error rather than ending
+the process. A signal handler runs in the interrupted thread's scope, so a
+panic in one unwinds into that scope.
 
 ### PANIC-3 A caught panic answers its request as failed, then ends the process
 Status: implemented
@@ -220,15 +225,28 @@ call with a null argument or a slot index out of range. A stale fold
 handle stays a catchable error: a user's thread can outlive its call.
 
 ### PANIC-15 Every sourced Rust function's panic is the user's
+Status: implemented
+Checked by: a_frame_at_a_registered_line_of_the_generated_source_is_the_users, golden:rust-user-panic-outside-sources, golden:rust-runtime-panic
+
+A panic in a function a sourced Rust file makes callable -- one it
+re-exports, a standard-library or dependency path, one in a file pulled
+in from outside the sourced file's directory -- is a user panic. The
+compiler records each line of the generated source that holds nothing but
+a call of a sourced function on plain arguments (names, borrows of names,
+literals); the walk counts a frame at such a line as the user's. A line
+with any other code on it is not recorded, so generated code is never
+claimed for the user.
+
+### PANIC-16 A sourced call beside generated code is the user's
 Status: deviation
 
-A panic in any function a sourced Rust file makes callable is a user panic.
+A panic in a sourced function is a user panic wherever the generated source
+calls it.
 
-Missing: three cases are attributed to the runtime and end the pool. A
-re-exported function (`pub use dep::f`) panics in the dependency and its
-caller is the generated source; a forwarding shim would need the
-function's arity and signature where the compiler names it, and could not
-forward an `unsafe fn`. A file pulled in from outside the sourced file's
-directory (`#[path = "/elsewhere"]`, `include!("../x.rs")`) is not a user
-file. A backtick-quoted foreign name would sit in the generated source,
-though Rust pools do not yet compile one.
+Missing: a sourced call that shares its line with generated code (an
+argument computed inline, such as a call of another manifold) and a later
+argument group of a curried sourced function, applied through the
+runtime's closure convention, are not recorded; a panic whose deciding
+frame is such a call is attributed to the runtime and ends the pool.
+Binding every argument and every curried application to a line of its own
+would record them.

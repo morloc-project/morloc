@@ -112,8 +112,7 @@ fn pool_hash() -> u64 {
 
 /// C-ABI accessor for the pool's source fingerprint. Pool wrap code
 /// calls this once at first cache lookup to mix into the cache key.
-#[no_mangle]
-pub extern "C" fn morloc_pool_hash() -> u64 {
+pub(crate) fn morloc_pool_hash() -> u64 {
     pool_hash()
 }
 
@@ -156,8 +155,7 @@ fn cache_base() -> PathBuf {
 /// failure. A NULL or empty `label` resolves to the synthetic
 /// `_unlabeled` subdirectory so legacy unlabeled callers (the SLURM
 /// remote-call cache today) stay segregated from user-labeled entries.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_cache_path(
+pub(crate) unsafe fn morloc_cache_path(
     label: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> *mut c_char {
@@ -201,22 +199,19 @@ static CACHE_STORES: AtomicU64 = AtomicU64::new(0);
 
 /// Increment the cache hit counter. Called by the labeled-call wrap on
 /// every successful lookup.
-#[no_mangle]
-pub extern "C" fn morloc_cache_record_hit() {
+pub(crate) fn morloc_cache_record_hit() {
     CACHE_HITS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment the cache miss counter. Called by the labeled-call wrap
 /// before it falls through to compute the value.
-#[no_mangle]
-pub extern "C" fn morloc_cache_record_miss() {
+pub(crate) fn morloc_cache_record_miss() {
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Increment the cache store counter. Called by the labeled-call wrap
 /// after it has written a freshly-computed value to disk.
-#[no_mangle]
-pub extern "C" fn morloc_cache_record_store() {
+pub(crate) fn morloc_cache_record_store() {
     CACHE_STORES.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -226,8 +221,7 @@ pub extern "C" fn morloc_cache_record_store() {
 /// # Safety
 ///
 /// Each out pointer must be null or writable for a `u64`.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_cache_stats(
+pub(crate) unsafe fn morloc_cache_stats(
     hits_out: *mut u64,
     misses_out: *mut u64,
     stores_out: *mut u64,
@@ -264,8 +258,7 @@ pub unsafe extern "C" fn morloc_cache_stats(
 /// function aborts (returns 0); silently falling back to byte hashing
 /// is unsafe -- it would let a SHM-backed cache miss masquerade as a
 /// "different input" forever.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_cache_key_compute(
+pub(crate) unsafe fn morloc_cache_key_compute(
     midx: u32,
     arg_packets: *const *const u8,
     arg_schemas: *const *const c_char,
@@ -372,8 +365,7 @@ unsafe fn read_and_validate_cache_file(
 /// any I/O error. Does not record hit/miss -- callers do that
 /// explicitly so the cross-pool dispatch loop and the intra-pool
 /// `call_cached` helper attribute their own results.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_cache_lookup(
+pub(crate) unsafe fn morloc_cache_lookup(
     key: u64,
     label: *const c_char,
     size_out: *mut usize,
@@ -502,8 +494,7 @@ unsafe fn cache_entry_is_valid(
 /// file that a later run silently overwrites via the same content
 /// hash. The reverse ordering would leave an indirection pointing at
 /// a missing content file, which the reader treats as a cache miss.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_cache_store(
+pub(crate) unsafe fn morloc_cache_store(
     key: u64,
     label: *const c_char,
     data: *const u8,
@@ -641,8 +632,7 @@ pub unsafe extern "C" fn morloc_cache_store(
 
 // ── hash_voidstar ──────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn hash_voidstar(
+pub(crate) unsafe fn hash_voidstar(
     data: *const c_void,
     schema: *const CSchema,
     seed: u64,
@@ -907,8 +897,7 @@ impl<'r> Walker<()> for HashWalk<'r> {
 
 // ── hash_morloc_packet ─────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn hash_morloc_packet(
+pub(crate) unsafe fn hash_morloc_packet(
     packet: *const u8,
     schema: *const CSchema,
     seed: u64,
@@ -976,8 +965,7 @@ pub unsafe extern "C" fn hash_morloc_packet(
 
 // ── Cache filename generation ──────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn make_cache_filename_ext(
+pub(crate) unsafe fn make_cache_filename_ext(
     key: u64,
     cache_path: *const c_char,
     ext: *const c_char,
@@ -996,8 +984,7 @@ pub unsafe extern "C" fn make_cache_filename_ext(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn make_cache_filename(
+pub(crate) unsafe fn make_cache_filename(
     key: u64,
     cache_path: *const c_char,
     errmsg: *mut *mut c_char,
@@ -1109,8 +1096,7 @@ pub(crate) unsafe fn build_persistence_data_packet(
 
 // ── Cache operations ───────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn put_cache_packet(
+pub(crate) unsafe fn put_cache_packet(
     voidstar: *const u8,
     schema: *const CSchema,
     key: u64,
@@ -1157,8 +1143,7 @@ pub unsafe extern "C" fn put_cache_packet(
     result
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn get_cache_packet(
+pub(crate) unsafe fn get_cache_packet(
     key: u64,
     cache_path: *const c_char,
     errmsg: *mut *mut c_char,
@@ -1174,8 +1159,7 @@ pub unsafe extern "C" fn get_cache_packet(
     read_and_validate_cache_file(filename, ptr::null_mut(), errmsg)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn del_cache_packet(
+pub(crate) unsafe fn del_cache_packet(
     key: u64,
     cache_path: *const c_char,
     errmsg: *mut *mut c_char,
@@ -1205,8 +1189,7 @@ pub unsafe extern "C" fn del_cache_packet(
     true
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn check_cache_packet(
+pub(crate) unsafe fn check_cache_packet(
     key: u64,
     cache_path: *const c_char,
     errmsg: *mut *mut c_char,
@@ -1350,5 +1333,94 @@ mod hash_pointer_tests {
         assert_eq!(hash_of(leaf, sch), hash_of(leaf, sch));
         assert_eq!(hash_of(node, sch), hash_of(node, sch));
         assert_ne!(hash_of(leaf, sch), hash_of(node, sch));
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub extern "C" fn morloc_pool_hash() -> u64 {
+        super::morloc_pool_hash()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_cache_path(label: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::morloc_cache_path(label, errmsg)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_cache_record_hit() {
+        super::morloc_cache_record_hit()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_cache_record_miss() {
+        super::morloc_cache_record_miss()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_cache_record_store() {
+        super::morloc_cache_record_store()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_cache_stats(hits_out: *mut u64, misses_out: *mut u64, stores_out: *mut u64) {
+        super::morloc_cache_stats(hits_out, misses_out, stores_out)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_cache_key_compute(midx: u32, arg_packets: *const *const u8, arg_schemas: *const *const c_char, n_args: usize, errmsg: *mut *mut c_char) -> u64 {
+        super::morloc_cache_key_compute(midx, arg_packets, arg_schemas, n_args, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_cache_lookup(key: u64, label: *const c_char, size_out: *mut usize, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::morloc_cache_lookup(key, label, size_out, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_cache_store(key: u64, label: *const c_char, data: *const u8, size: usize, schema_str: *const c_char, errmsg: *mut *mut c_char) -> bool {
+        super::morloc_cache_store(key, label, data, size, schema_str, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn hash_voidstar(data: *const c_void, schema: *const CSchema, seed: u64, errmsg: *mut *mut c_char) -> u64 {
+        super::hash_voidstar(data, schema, seed, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn hash_morloc_packet(packet: *const u8, schema: *const CSchema, seed: u64, hash_out: *mut u64, errmsg: *mut *mut c_char) -> bool {
+        super::hash_morloc_packet(packet, schema, seed, hash_out, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_cache_filename_ext(key: u64, cache_path: *const c_char, ext: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::make_cache_filename_ext(key, cache_path, ext, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_cache_filename(key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::make_cache_filename(key, cache_path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn put_cache_packet(voidstar: *const u8, schema: *const CSchema, key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::put_cache_packet(voidstar, schema, key, cache_path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn get_cache_packet(key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::get_cache_packet(key, cache_path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn del_cache_packet(key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> bool {
+        super::del_cache_packet(key, cache_path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn check_cache_packet(key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::check_cache_packet(key, cache_path, errmsg)
     }
 }

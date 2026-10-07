@@ -13,29 +13,25 @@ use crate::packet::{set_file_packet_tmpdir, INLINE_THRESHOLD, SHM_ENABLED};
 
 /// Override the inline threshold (in bytes). Values < 0 are treated as
 /// 0 (never inline). Idempotent.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_set_inline_threshold(bytes: i64) {
+pub(crate) unsafe fn morloc_set_inline_threshold(bytes: i64) {
     let v: usize = if bytes < 0 { 0 } else { bytes as usize };
     INLINE_THRESHOLD.store(v, Ordering::Relaxed);
 }
 
 /// Read the live inline threshold.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_get_inline_threshold() -> u64 {
+pub(crate) unsafe fn morloc_get_inline_threshold() -> u64 {
     crate::packet::inline_threshold() as u64
 }
 
 /// Enable or disable shared memory at runtime. When disabled, any data
 /// over the inline threshold is written to a temp file and passed by
 /// path (PACKET_SOURCE_FILE) instead of via SHM (PACKET_SOURCE_RPTR).
-#[no_mangle]
-pub unsafe extern "C" fn morloc_set_shm_enabled(enabled: bool) {
+pub(crate) unsafe fn morloc_set_shm_enabled(enabled: bool) {
     SHM_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
 /// Read the live SHM-enabled flag.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_get_shm_enabled() -> bool {
+pub(crate) unsafe fn morloc_get_shm_enabled() -> bool {
     crate::packet::shm_enabled()
 }
 
@@ -43,8 +39,7 @@ pub unsafe extern "C" fn morloc_get_shm_enabled() -> bool {
 /// null pointer or an empty string clears the override (libmorloc
 /// then falls back to `$TMPDIR` / `/tmp`). The directory is created
 /// lazily by the file-packet writer if it does not exist.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_set_tmpdir(path: *const c_char) {
+pub(crate) unsafe fn morloc_set_tmpdir(path: *const c_char) {
     if path.is_null() {
         set_file_packet_tmpdir(None);
         return;
@@ -115,5 +110,34 @@ mod tests {
         // null -> unset
         unsafe { morloc_set_tmpdir(std::ptr::null()) };
         assert!(file_packet_tmpdir().is_none());
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_set_inline_threshold(bytes: i64) {
+        super::morloc_set_inline_threshold(bytes)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_get_inline_threshold() -> u64 {
+        super::morloc_get_inline_threshold()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_set_shm_enabled(enabled: bool) {
+        super::morloc_set_shm_enabled(enabled)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_get_shm_enabled() -> bool {
+        super::morloc_get_shm_enabled()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_set_tmpdir(path: *const c_char) {
+        super::morloc_set_tmpdir(path)
     }
 }

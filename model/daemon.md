@@ -112,13 +112,21 @@ of it; DAEMON-8 covers that case. A shared-memory lock the panic unwound
 through is never handed on as sound (SHM-9).
 
 ### DAEMON-8 A panic below a C boundary in a request ends the daemon as failed
-Status: deviation
+Status: implemented
+Checked by: rust_code_calls_the_rust_function_behind_a_c_entry_point, a_panic_below_a_c_abi_function_called_from_rust_reaches_the_catch
 
-The handlers call the Rust functions behind the dispatch, request parsing
-and response writing wrappers, but code below them still calls about three
-hundred of libmorloc's own `extern "C"` functions directly (around nine
-hundred call sites). A panic below one of those aborts the process: the
-client gets no reply, shutdown is not graceful, and the exit status is 134
-rather than 70. A shared-memory allocation it interrupted is poisoned
-during the unwind (SHM-9). The fix is a rule that Rust code never calls a
-libmorloc `extern "C"` function, only the Rust function behind it.
+A panic below the daemon's handlers unwinds to the request's catch: no
+Rust code in libmorloc calls one of libmorloc's own C entry points (see
+DAEMON-9). A shared-memory allocation it interrupted is poisoned during the
+unwind (SHM-9). The C callbacks libmorloc hands to other code (an Arrow
+array's release, a dispatch's release) are still `extern "C"`; a panic
+below one that Rust code invokes ends the process (PANIC-1).
+
+### DAEMON-9 Rust code calls the Rust function behind a C entry point
+Status: implemented
+Checked by: rust_code_calls_the_rust_function_behind_a_c_entry_point
+
+Each libmorloc C entry point is a shell in its file's private `c_abi`
+module that calls the Rust function of the same name in the file; only
+the C entry points' own callers in other languages, and tests, reach the
+shells.

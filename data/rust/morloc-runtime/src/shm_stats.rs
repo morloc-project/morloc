@@ -95,8 +95,7 @@ pub fn snapshot() -> Option<(i64, i64)> {
 
 /// Bytes of shared memory the whole program holds now, or -1 when
 /// `MORLOC_SHM_STATS` is unset.
-#[no_mangle]
-pub extern "C" fn morloc_shm_live_bytes() -> i64 {
+pub(crate) fn morloc_shm_live_bytes() -> i64 {
     snapshot().map_or(-1, |(live, _)| live)
 }
 
@@ -116,5 +115,13 @@ fn teardown() {
     let name = SEGMENT.lock().as_mut().map(|seg| seg.forget_for_unlink());
     if let Some(name) = name {
         crate::shm_companion::remove_names(&name);
+    }
+}
+
+mod c_abi {
+
+    #[no_mangle]
+    pub extern "C" fn morloc_shm_live_bytes() -> i64 {
+        super::morloc_shm_live_bytes()
     }
 }

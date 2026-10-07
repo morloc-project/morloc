@@ -226,8 +226,7 @@ fn trace_close_enabled() -> bool {
     })
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn close_socket(socket_id: i32) {
+pub(crate) unsafe fn close_socket(socket_id: i32) {
     if socket_id >= 0 {
         if trace_close_enabled() {
             eprintln!(
@@ -246,8 +245,7 @@ pub unsafe extern "C" fn close_socket(socket_id: i32) {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn close_daemon(daemon_ptr: *mut *mut LanguageDaemon) {
+pub(crate) unsafe fn close_daemon(daemon_ptr: *mut *mut LanguageDaemon) {
     if daemon_ptr.is_null() || (*daemon_ptr).is_null() {
         return;
     }
@@ -335,8 +333,7 @@ unsafe fn new_server(socket_path: *const c_char, errmsg: *mut *mut c_char) -> i3
 
 // ── start_daemon ─────────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn start_daemon(
+pub(crate) unsafe fn start_daemon(
     socket_path: *const c_char,
     tmpdir: *const c_char,
     shm_basename: *const c_char,
@@ -419,8 +416,7 @@ pub unsafe extern "C" fn start_daemon(
 
 // ── stream_from_client_wait ──────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn stream_from_client_wait(
+pub(crate) unsafe fn stream_from_client_wait(
     client_fd: i32,
     poll_timeout_us: i32,
     recv_timeout_us: i32,
@@ -598,8 +594,7 @@ pub unsafe extern "C" fn stream_from_client_wait(
     result
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn stream_from_client(
+pub(crate) unsafe fn stream_from_client(
     client_fd: i32,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
@@ -631,8 +626,7 @@ fn refuse_a_reply_from_a_fork(client_fd: i32) {
 }
 
 // FORK-12: called as soon as user code returns, on the thread that read the request.
-#[no_mangle]
-pub extern "C" fn morloc_exit_if_forked() {
+pub(crate) fn morloc_exit_if_forked() {
     let (fd, generation) = REQUEST.with(|r| r.get());
     if fd >= 0 {
         exit_if_forked_since(generation);
@@ -664,8 +658,7 @@ fn forbid_self_call() -> bool {
 }
 
 /// Record the socket this pool serves. Called from pool startup.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_set_self_socket(socket_path: *const c_char) {
+pub(crate) unsafe fn mlc_set_self_socket(socket_path: *const c_char) {
     if socket_path.is_null() {
         return;
     }
@@ -726,8 +719,7 @@ unsafe fn self_call_error(socket_path: *const c_char, packet: *const u8) -> Morl
 
 // ── send_and_receive_over_socket ─────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn send_and_receive_over_socket_wait(
+pub(crate) unsafe fn send_and_receive_over_socket_wait(
     socket_path: *const c_char,
     packet: *const u8,
     poll_timeout_us: i32,
@@ -827,8 +819,7 @@ pub unsafe extern "C" fn send_and_receive_over_socket_wait(
     result
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn send_and_receive_over_socket(
+pub(crate) unsafe fn send_and_receive_over_socket(
     socket_path: *const c_char,
     packet: *const u8,
     errmsg: *mut *mut c_char,
@@ -842,8 +833,7 @@ pub unsafe extern "C" fn send_and_receive_over_socket(
 /// in the pool at `socket_path`, made and watched by the nexus. The watcher
 /// must outlive the producer, and any pool process -- this one included --
 /// may be the one that runs the producer, or be reaped once idle.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_spawn(
+pub(crate) unsafe fn mlc_spawn(
     socket_path: *const c_char,
     mid: u32,
     args: *const *const u8,
@@ -880,8 +870,7 @@ pub unsafe extern "C" fn mlc_spawn(
 /// on the channel, where every reader of it (in any pool) will see it after
 /// the batches already queued. The call is a dispatch of its own, so the
 /// producer runs alongside whatever its pool does next. Run by the nexus.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_spawn_watched(
+pub(crate) unsafe fn mlc_spawn_watched(
     socket_path: *const c_char,
     mid: u32,
     args: *const *const u8,
@@ -969,8 +958,7 @@ pub unsafe extern "C" fn mlc_spawn_watched(
 
 // ── send_packet_to_foreign_server ────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn send_packet_to_foreign_server(
+pub(crate) unsafe fn send_packet_to_foreign_server(
     client_fd: i32,
     packet: *mut u8,
     errmsg: *mut *mut c_char,
@@ -984,8 +972,7 @@ pub unsafe extern "C" fn send_packet_to_foreign_server(
 /// has its value can ask for the next one at once, and if that request is
 /// answered while this dispatch still holds the previous value, both are in
 /// memory together. `release` runs whether or not the send succeeds.
-#[no_mangle]
-pub unsafe extern "C" fn send_reply_to_foreign_server(
+pub(crate) unsafe fn send_reply_to_foreign_server(
     client_fd: i32,
     packet: *mut u8,
     release: Option<unsafe extern "C" fn()>,
@@ -1026,8 +1013,7 @@ pub unsafe extern "C" fn send_reply_to_foreign_server(
 
 // ── wait_for_client ──────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn wait_for_client_with_timeout(
+pub(crate) unsafe fn wait_for_client_with_timeout(
     daemon: *mut LanguageDaemon,
     timeout_us: i32,
     errmsg: *mut *mut c_char,
@@ -1130,8 +1116,7 @@ pub unsafe extern "C" fn wait_for_client_with_timeout(
     return_fd
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn wait_for_client(
+pub(crate) unsafe fn wait_for_client(
     daemon: *mut LanguageDaemon,
     errmsg: *mut *mut c_char,
 ) -> i32 {
@@ -1486,5 +1471,84 @@ mod reply_tests {
             libc::free(packet as *mut c_void);
             CSchema::free(cs);
         }
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn close_socket(socket_id: i32) {
+        super::close_socket(socket_id)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn close_daemon(daemon_ptr: *mut *mut LanguageDaemon) {
+        super::close_daemon(daemon_ptr)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn start_daemon(socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char, shm_default_size: usize, errmsg: *mut *mut c_char) -> *mut LanguageDaemon {
+        super::start_daemon(socket_path, tmpdir, shm_basename, shm_default_size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn stream_from_client_wait(client_fd: i32, poll_timeout_us: i32, recv_timeout_us: i32, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::stream_from_client_wait(client_fd, poll_timeout_us, recv_timeout_us, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn stream_from_client(client_fd: i32, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::stream_from_client(client_fd, errmsg)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_exit_if_forked() {
+        super::morloc_exit_if_forked()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_set_self_socket(socket_path: *const c_char) {
+        super::mlc_set_self_socket(socket_path)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn send_and_receive_over_socket_wait(socket_path: *const c_char, packet: *const u8, poll_timeout_us: i32, recv_timeout_us: i32, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::send_and_receive_over_socket_wait(socket_path, packet, poll_timeout_us, recv_timeout_us, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn send_and_receive_over_socket(socket_path: *const c_char, packet: *const u8, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::send_and_receive_over_socket(socket_path, packet, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_spawn(socket_path: *const c_char, mid: u32, args: *const *const u8, nargs: usize, handle: i64, errmsg: *mut *mut c_char) -> bool {
+        super::mlc_spawn(socket_path, mid, args, nargs, handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_spawn_watched(socket_path: *const c_char, mid: u32, args: *const *const u8, nargs: usize, handle: i64, errmsg: *mut *mut c_char) -> bool {
+        super::mlc_spawn_watched(socket_path, mid, args, nargs, handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn send_packet_to_foreign_server(client_fd: i32, packet: *mut u8, errmsg: *mut *mut c_char) -> usize {
+        super::send_packet_to_foreign_server(client_fd, packet, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn send_reply_to_foreign_server(client_fd: i32, packet: *mut u8, release: Option<unsafe extern "C" fn()>, errmsg: *mut *mut c_char) -> usize {
+        super::send_reply_to_foreign_server(client_fd, packet, release, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn wait_for_client_with_timeout(daemon: *mut LanguageDaemon, timeout_us: i32, errmsg: *mut *mut c_char) -> i32 {
+        super::wait_for_client_with_timeout(daemon, timeout_us, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn wait_for_client(daemon: *mut LanguageDaemon, errmsg: *mut *mut c_char) -> i32 {
+        super::wait_for_client(daemon, errmsg)
     }
 }

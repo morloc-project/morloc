@@ -1540,7 +1540,7 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP src) es0) = do
       handleFunctionArgs exprs =
         case provideClosure src (zipWith (\(i, t, own) e -> lcSourcedArg cfg (site i) own t e) (zip3 [0 ..] argTypes owns) exprs) of
           [] -> lcSrcName cfg src
-          (g0 : gs) -> foldl (lcApplySrcGroup cfg) (lcSrcName cfg src <> tupled g0) gs
+          (g0 : gs) -> foldl (lcApplySrcGroup cfg) (lcSrcName cfg src <> (if null g0 then tupled g0 else tupledNoFold g0)) gs
   return $ mergePoolDocs handleFunctionArgs (map snd es)
 lowerNativeExprRaw cfg _ (AppExeN_ t (PatCallP p) xs) = do
   let es = map snd xs

@@ -41,8 +41,7 @@ use std::os::raw::{c_char, c_void};
 ///
 /// Returns a heap-allocated description of the offending slot, which the
 /// caller must `free`, or NULL when the value carries no interior NUL.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_first_null_in_value(
+pub(crate) unsafe fn morloc_first_null_in_value(
     voidstar: *const c_void,
     schema: *const CSchema,
     space: MorlocSpace,
@@ -487,5 +486,14 @@ mod tests {
     #[test]
     fn json_scan_skips_non_string_leaves() {
         assert_eq!(first_null_in_json_text(r#"{"n":42,"f":3.14,"b":true}"#).unwrap(), None);
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_first_null_in_value(voidstar: *const c_void, schema: *const CSchema, space: MorlocSpace) -> *mut c_char {
+        super::morloc_first_null_in_value(voidstar, schema, space)
     }
 }

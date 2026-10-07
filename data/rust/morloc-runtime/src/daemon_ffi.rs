@@ -26,8 +26,7 @@ static POOLS_STOPPED: AtomicBool = AtomicBool::new(false);
 static EXIT_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 // DAEMON-6: one of the watchdog and the normal exit ends the process.
-#[no_mangle]
-pub extern "C" fn morloc_claim_exit() -> bool {
+pub(crate) fn morloc_claim_exit() -> bool {
     !EXIT_CLAIMED.swap(true, Ordering::SeqCst)
 }
 static G_EVAL_TIMEOUT: AtomicI32 = AtomicI32::new(30);
@@ -109,8 +108,7 @@ fn set_current_output_media_bytes(new: bool) -> bool {
 /// `@mime` return comes back as raw content bytes + media type instead of a
 /// JSON int array). Returns the previous value so the caller can restore it.
 /// The HTTP handler sets the same flag directly. Off by default.
-#[no_mangle]
-pub extern "C" fn daemon_set_output_media_bytes(on: bool) -> bool {
+pub(crate) fn daemon_set_output_media_bytes(on: bool) -> bool {
     set_current_output_media_bytes(on)
 }
 
@@ -283,23 +281,19 @@ pub fn is_shutting_down() -> bool {
 // loop. Going through the C ABI ensures both ends touch the same
 // atomics.
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_daemon_is_shutting_down() -> bool {
+pub(crate) unsafe fn morloc_daemon_is_shutting_down() -> bool {
     is_shutting_down()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_daemon_begin_recovery() -> bool {
+pub(crate) unsafe fn morloc_daemon_begin_recovery() -> bool {
     begin_recovery()
 }
 
-#[no_mangle]
-pub extern "C" fn morloc_daemon_wait_for_requests(timeout_ms: u64) -> bool {
+pub(crate) fn morloc_daemon_wait_for_requests(timeout_ms: u64) -> bool {
     wait_for_requests(std::time::Duration::from_millis(timeout_ms))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_daemon_end_recovery() {
+pub(crate) unsafe fn morloc_daemon_end_recovery() {
     end_recovery()
 }
 
@@ -572,8 +566,7 @@ exit \"$s\"";
 static EVAL_CHILDREN: morloc_runtime_types::child_group::ChildGroups =
     morloc_runtime_types::child_group::ChildGroups::new();
 
-#[no_mangle]
-pub extern "C" fn morloc_stop_child_groups() {
+pub(crate) fn morloc_stop_child_groups() {
     EVAL_CHILDREN.stop_all();
 }
 
@@ -765,14 +758,12 @@ fn compile_binding(base_dir: &str, hv: u64, expr: &str, eval_timeout: i32) -> Op
 
 // -- C-exported binding store functions ---------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn binding_store_init(base_dir: *const c_char) -> *mut BindingStore {
+pub(crate) unsafe fn binding_store_init(base_dir: *const c_char) -> *mut BindingStore {
     let dir = CStr::from_ptr(base_dir).to_string_lossy().into_owned();
     Box::into_raw(Box::new(BindingStore::new(&dir)))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn binding_store_free(store: *mut BindingStore) {
+pub(crate) unsafe fn binding_store_free(store: *mut BindingStore) {
     if !store.is_null() {
         drop(Box::from_raw(store));
     }
@@ -795,8 +786,7 @@ struct JsonRequest {
     media: Option<bool>,
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn daemon_parse_request(json: *const c_char, len: usize, errmsg: *mut *mut c_char) -> *mut DaemonRequest {
+pub(crate) unsafe fn daemon_parse_request(json: *const c_char, len: usize, errmsg: *mut *mut c_char) -> *mut DaemonRequest {
     parse_request(json, len, errmsg)
 }
 
@@ -920,8 +910,7 @@ struct WireResponse {
     error: Option<String>,
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn daemon_parse_response(
+pub(crate) unsafe fn daemon_parse_response(
     json: *const c_char,
     len: usize,
     errmsg: *mut *mut c_char,
@@ -1023,8 +1012,7 @@ pub unsafe extern "C" fn daemon_parse_response(
 
 // -- Free functions -----------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn daemon_free_request(req: *mut DaemonRequest) {
+pub(crate) unsafe fn daemon_free_request(req: *mut DaemonRequest) {
     if req.is_null() {
         return;
     }
@@ -1049,8 +1037,7 @@ pub unsafe extern "C" fn daemon_free_request(req: *mut DaemonRequest) {
     libc::free(req as *mut c_void);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn daemon_free_response(resp: *mut DaemonResponse) {
+pub(crate) unsafe fn daemon_free_response(resp: *mut DaemonResponse) {
     if resp.is_null() {
         return;
     }
@@ -1074,8 +1061,7 @@ pub unsafe extern "C" fn daemon_free_response(resp: *mut DaemonResponse) {
 
 // -- Response serialization (serde_json) --------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn daemon_serialize_response(response: *mut DaemonResponse, out_len: *mut usize) -> *mut c_char {
+pub(crate) unsafe fn daemon_serialize_response(response: *mut DaemonResponse, out_len: *mut usize) -> *mut c_char {
     serialize_response(response, out_len)
 }
 
@@ -1127,16 +1113,14 @@ pub(crate) unsafe fn serialize_response(
 
 // -- Discovery ----------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn daemon_build_discovery(manifest: *mut crate::manifest_ffi::Manifest) -> *mut c_char {
+pub(crate) unsafe fn daemon_build_discovery(manifest: *mut crate::manifest_ffi::Manifest) -> *mut c_char {
     use crate::manifest_ffi::manifest_to_discovery_json;
     manifest_to_discovery_json(manifest)
 }
 
 // -- Eval timeout -------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn daemon_set_eval_timeout(timeout_sec: i32) {
+pub(crate) fn daemon_set_eval_timeout(timeout_sec: i32) {
     let t = if timeout_sec > 0 { timeout_sec } else { 30 };
     G_EVAL_TIMEOUT.store(t, Ordering::Relaxed);
 }
@@ -1150,8 +1134,7 @@ pub extern "C" fn daemon_set_eval_timeout(timeout_sec: i32) {
 /// # Safety
 ///
 /// `allowed` must be null or a NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) {
+pub(crate) unsafe fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) {
     G_EVAL_SANDBOX.store(sandbox, Ordering::Relaxed);
     let list = if allowed.is_null() {
         None
@@ -1254,8 +1237,7 @@ static REAPED_NEXT: AtomicU64 = AtomicU64::new(1);
 /// async-signal-safe: atomics only, no allocation, no locks. The nexus warms
 /// the PLT entry for this symbol before installing the handler, so the
 /// in-handler call never triggers lazy symbol resolution.
-#[no_mangle]
-pub extern "C" fn morloc_note_child_exit(pid: i32, status: i32) {
+pub(crate) fn morloc_note_child_exit(pid: i32, status: i32) {
     if pid <= 0 {
         return; // PLT warm-up call, or nothing to record
     }
@@ -1266,13 +1248,11 @@ pub extern "C" fn morloc_note_child_exit(pid: i32, status: i32) {
     REAPED_PID[slot].store(pid, Ordering::SeqCst);
 }
 
-#[no_mangle]
-pub extern "C" fn morloc_reaped_sequence() -> u64 {
+pub(crate) fn morloc_reaped_sequence() -> u64 {
     REAPED_NEXT.load(Ordering::SeqCst)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_take_noted_child_exit(pid: i32, since: u64, status: *mut i32) -> i32 {
+pub(crate) unsafe fn morloc_take_noted_child_exit(pid: i32, since: u64, status: *mut i32) -> i32 {
     match take_noted_child_exit(pid, since) {
         Some(s) => {
             if !status.is_null() {
@@ -1734,8 +1714,7 @@ unsafe fn adopt_rptr_result(packet: *const u8) {
 
 // -- Dispatch -----------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn daemon_dispatch(manifest: *mut crate::manifest_ffi::Manifest, request: *mut DaemonRequest, sockets: *mut MorlocSocket, shm_basename: *const c_char) -> *mut DaemonResponse {
+pub(crate) unsafe fn daemon_dispatch(manifest: *mut crate::manifest_ffi::Manifest, request: *mut DaemonRequest, sockets: *mut MorlocSocket, shm_basename: *const c_char) -> *mut DaemonResponse {
     dispatch(manifest, request, sockets, shm_basename)
 }
 
@@ -1759,6 +1738,29 @@ pub(crate) unsafe fn dispatch(
         (*resp).error_kind = DAEMON_ERROR_RECOVERING;
     }
     resp
+}
+
+/// The result of a call that reports failure through an error out-pointer.
+unsafe fn checked<T>(call: impl FnOnce(*mut *mut c_char) -> T) -> Result<T, *mut c_char> {
+    let mut err: *mut c_char = ptr::null_mut();
+    let value = call(&mut err);
+    if err.is_null() { Ok(value) } else { Err(err) }
+}
+
+struct OwnedSchema(*mut CSchema);
+
+impl Drop for OwnedSchema {
+    fn drop(&mut self) {
+        unsafe { crate::ffi::free_schema(self.0) }
+    }
+}
+
+fn internal(e: *mut c_char) -> (i32, *mut c_char) {
+    (DAEMON_ERROR_INTERNAL, e)
+}
+
+fn bad_request(e: *mut c_char) -> (i32, *mut c_char) {
+    (DAEMON_ERROR_BAD_REQUEST, e)
 }
 
 unsafe fn dispatch_request(
@@ -1990,9 +1992,6 @@ unsafe fn dispatch_request(
         return resp;
     }
 
-    // Delegate to the C functions that handle manifest lookup, arg parsing,
-    // schema handling, and pool communication. These are all already ported
-    // to Rust in other _ffi modules, so we declare them as extern "C".
     use crate::ffi::parse_schema;
     use crate::ffi::free_schema;
     use crate::cli::initialize_positional;
@@ -2202,86 +2201,29 @@ unsafe fn dispatch_request(
         let prev_call_id = crate::stream::set_current_call_id(call_id);
 
         if !cleanup_and_fail {
-            for i in 0..nargs {
-                let schema_str = arg_schema_strs.get(i).copied().unwrap_or(ptr::null_mut());
-                *arg_schemas_arr.add(i) = parse_schema(schema_str, &mut err);
-                if !err.is_null() {
-                    (*resp).success = false;
-                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
-                    (*resp).error = err;
-                    cleanup_and_fail = true;
-                    break;
+            let evaluated = (|| -> Result<(), (i32, *mut c_char)> {
+                for i in 0..nargs {
+                    let schema_str = arg_schema_strs.get(i).copied().unwrap_or(ptr::null_mut());
+                    *arg_schemas_arr.add(i) = checked(|e| parse_schema(schema_str, e)).map_err(internal)?;
+                    *arg_packets.add(i) = checked(|e| parse_cli_data_argument(ptr::null_mut(), *args.add(i), *arg_schemas_arr.add(i), e))
+                        .map_err(bad_request)?;
+                    *arg_voidstars.add(i) = checked(|e| get_morloc_data_packet_value(*arg_packets.add(i), *arg_schemas_arr.add(i), e))
+                        .map_err(bad_request)?;
                 }
-
-                *arg_packets.add(i) = parse_cli_data_argument(
-                    ptr::null_mut(),
-                    *args.add(i),
-                    *arg_schemas_arr.add(i),
-                    &mut err,
-                );
-                if !err.is_null() {
-                    (*resp).success = false;
-                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-                    (*resp).error = err;
-                    cleanup_and_fail = true;
-                    break;
-                }
-
-                *arg_voidstars.add(i) = get_morloc_data_packet_value(
-                    *arg_packets.add(i),
-                    *arg_schemas_arr.add(i),
-                    &mut err,
-                );
-                if !err.is_null() {
-                    (*resp).success = false;
-                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-                    (*resp).error = err;
-                    cleanup_and_fail = true;
-                    break;
-                }
-            }
-        }
-
-        if !cleanup_and_fail {
-            let return_schema = parse_schema(cmd.ret.schema, &mut err);
-            if !err.is_null() {
-                (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
-                (*resp).error = err;
-            } else {
-                let result_abs = morloc_eval(
-                    cmd.expr,
-                    return_schema,
-                    arg_voidstars,
-                    arg_schemas_arr,
-                    nargs,
-                    &mut err,
-                );
-                if !err.is_null() {
-                    (*resp).success = false;
-                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
-                    (*resp).error = err;
-                } else if want_media_bytes {
+                let owned = OwnedSchema(checked(|e| parse_schema(cmd.ret.schema, e)).map_err(internal)?);
+                let return_schema = owned.0;
+                let result_abs = checked(|e| morloc_eval(cmd.expr, return_schema, arg_voidstars, arg_schemas_arr, nargs, e))
+                    .map_err(internal)?;
+                if want_media_bytes {
                     // Raw-media return: raw content bytes + media type, so the
                     // consumer (HTTP `Content-Type` body / MCP content block)
                     // skips the JSON int array.
-                    emit_raw_media(
-                        resp,
-                        result_abs as *mut c_void,
-                        return_schema as *const CSchema,
-                        cmd.ret.mime,
-                    );
+                    emit_raw_media(resp, result_abs as *mut c_void, return_schema as *const CSchema, cmd.ret.mime);
                 } else if want_packet {
                     // Packet mode: wrap the result voidstar in a data packet
                     // and flatten it to self-contained bytes (reading SHM,
                     // applying zstd) BEFORE the arena guard drops below.
-                    packetize_result_voidstar(
-                        resp,
-                        result_abs as *mut c_void,
-                        return_schema as *const CSchema,
-                        compression,
-                        &mut err,
-                    );
+                    packetize_result_voidstar(resp, result_abs as *mut c_void, return_schema as *const CSchema, compression, &mut err);
                 } else {
                     // A table is an Arrow block, which the generic voidstar
                     // serializer refuses. Render it as the array of row
@@ -2290,25 +2232,23 @@ unsafe fn dispatch_request(
                     // CSchema carries the discriminant as a raw u32.
                     let returns_table = (*(return_schema as *const CSchema)).serial_type
                         == morloc_runtime_types::schema::SerialType::Table as u32;
-                    let json = if returns_table {
-                        arrow_to_json_string(result_abs as *const c_void, &mut err)
-                    } else {
-                        voidstar_to_json_string(
-                            result_abs as *const c_void,
-                            return_schema as *const CSchema,
-                            &mut err,
-                        )
-                    };
-                    if !err.is_null() {
-                        (*resp).success = false;
-                        (*resp).error_kind = DAEMON_ERROR_INTERNAL;
-                        (*resp).error = err;
-                    } else {
-                        (*resp).success = true;
-                        (*resp).result_json = json;
-                    }
+                    let json = checked(|e| {
+                        if returns_table {
+                            arrow_to_json_string(result_abs as *const c_void, e)
+                        } else {
+                            voidstar_to_json_string(result_abs as *const c_void, return_schema as *const CSchema, e)
+                        }
+                    })
+                    .map_err(internal)?;
+                    (*resp).success = true;
+                    (*resp).result_json = json;
                 }
-                free_schema(return_schema);
+                Ok(())
+            })();
+            if let Err((kind, e)) = evaluated {
+                (*resp).success = false;
+                (*resp).error_kind = kind;
+                (*resp).error = e;
             }
         }
 
@@ -3004,8 +2944,7 @@ fn write_port_file_atomic(
     std::fs::rename(&tmp, path)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn daemon_run(
+pub(crate) unsafe fn daemon_run(
     config: *mut DaemonConfig,
     manifest: *mut crate::manifest_ffi::Manifest,
     sockets: *mut MorlocSocket,
@@ -3420,14 +3359,12 @@ fn begin_serving() {
 }
 
 // DAEMON-7: a panic the nexus caught while serving the daemon.
-#[no_mangle]
-pub extern "C" fn morloc_daemon_fail() {
+pub(crate) fn morloc_daemon_fail() {
     WORKER_PANICKED.store(true, Ordering::SeqCst);
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
 }
 
-#[no_mangle]
-pub extern "C" fn morloc_daemon_worker_panicked() -> bool {
+pub(crate) fn morloc_daemon_worker_panicked() -> bool {
     WORKER_PANICKED.load(Ordering::SeqCst)
 }
 
@@ -4011,5 +3948,129 @@ mod child_output_tests {
         assert!(!finished);
         assert!(gone, "process {grandchild} started by the eval outlived its limit");
         assert!(waited < std::time::Duration::from_millis(5500), "stopping took {waited:?}");
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub extern "C" fn morloc_claim_exit() -> bool {
+        super::morloc_claim_exit()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn daemon_set_output_media_bytes(on: bool) -> bool {
+        super::daemon_set_output_media_bytes(on)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_daemon_is_shutting_down() -> bool {
+        super::morloc_daemon_is_shutting_down()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_daemon_begin_recovery() -> bool {
+        super::morloc_daemon_begin_recovery()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_daemon_wait_for_requests(timeout_ms: u64) -> bool {
+        super::morloc_daemon_wait_for_requests(timeout_ms)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_daemon_end_recovery() {
+        super::morloc_daemon_end_recovery()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_stop_child_groups() {
+        super::morloc_stop_child_groups()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn binding_store_init(base_dir: *const c_char) -> *mut BindingStore {
+        super::binding_store_init(base_dir)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn binding_store_free(store: *mut BindingStore) {
+        super::binding_store_free(store)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn daemon_parse_request(json: *const c_char, len: usize, errmsg: *mut *mut c_char) -> *mut DaemonRequest {
+        super::daemon_parse_request(json, len, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn daemon_parse_response(json: *const c_char, len: usize, errmsg: *mut *mut c_char) -> *mut DaemonResponse {
+        super::daemon_parse_response(json, len, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn daemon_free_request(req: *mut DaemonRequest) {
+        super::daemon_free_request(req)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn daemon_free_response(resp: *mut DaemonResponse) {
+        super::daemon_free_response(resp)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn daemon_serialize_response(response: *mut DaemonResponse, out_len: *mut usize) -> *mut c_char {
+        super::daemon_serialize_response(response, out_len)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn daemon_build_discovery(manifest: *mut crate::manifest_ffi::Manifest) -> *mut c_char {
+        super::daemon_build_discovery(manifest)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn daemon_set_eval_timeout(timeout_sec: i32) {
+        super::daemon_set_eval_timeout(timeout_sec)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) {
+        super::daemon_set_eval_policy(sandbox, allowed)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_note_child_exit(pid: i32, status: i32) {
+        super::morloc_note_child_exit(pid, status)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_reaped_sequence() -> u64 {
+        super::morloc_reaped_sequence()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_take_noted_child_exit(pid: i32, since: u64, status: *mut i32) -> i32 {
+        super::morloc_take_noted_child_exit(pid, since, status)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn daemon_dispatch(manifest: *mut crate::manifest_ffi::Manifest, request: *mut DaemonRequest, sockets: *mut MorlocSocket, shm_basename: *const c_char) -> *mut DaemonResponse {
+        super::daemon_dispatch(manifest, request, sockets, shm_basename)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn daemon_run(config: *mut DaemonConfig, manifest: *mut crate::manifest_ffi::Manifest, sockets: *mut MorlocSocket, n_pools: usize, shm_basename: *const c_char) -> bool {
+        super::daemon_run(config, manifest, sockets, n_pools, shm_basename)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_daemon_fail() {
+        super::morloc_daemon_fail()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_daemon_worker_panicked() -> bool {
+        super::morloc_daemon_worker_panicked()
     }
 }

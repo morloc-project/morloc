@@ -22,8 +22,7 @@ pub struct MorlocCall {
 
 // ── Header reading ───────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn read_morloc_packet_header(
+pub(crate) unsafe fn read_morloc_packet_header(
     msg: *const u8,
     errmsg: *mut *mut c_char,
 ) -> *mut PacketHeader {
@@ -41,8 +40,7 @@ pub unsafe extern "C" fn read_morloc_packet_header(
     msg as *mut PacketHeader
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn packet_is_ping(
+pub(crate) unsafe fn packet_is_ping(
     packet: *const u8,
     errmsg: *mut *mut c_char,
 ) -> bool {
@@ -52,8 +50,7 @@ pub unsafe extern "C" fn packet_is_ping(
     (*header).is_ping()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn packet_is_local_call(
+pub(crate) unsafe fn packet_is_local_call(
     packet: *const u8,
     errmsg: *mut *mut c_char,
 ) -> bool {
@@ -63,8 +60,7 @@ pub unsafe extern "C" fn packet_is_local_call(
     (*header).is_local_call()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn packet_is_remote_call(
+pub(crate) unsafe fn packet_is_remote_call(
     packet: *const u8,
     errmsg: *mut *mut c_char,
 ) -> bool {
@@ -76,16 +72,14 @@ pub unsafe extern "C" fn packet_is_remote_call(
 
 // ── Packet size ──────────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_packet_size_from_header(
+pub(crate) unsafe fn morloc_packet_size_from_header(
     header: *const PacketHeader,
 ) -> usize {
     if header.is_null() { return 0; }
     32 + (*header).offset as usize + (*header).length as usize
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_packet_size(
+pub(crate) unsafe fn morloc_packet_size(
     packet: *const u8,
     errmsg: *mut *mut c_char,
 ) -> usize {
@@ -122,8 +116,7 @@ pub(crate) unsafe fn release_received_packet(packet: *mut u8) {
     libc::free(packet as *mut c_void);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_dup_packet(
+pub(crate) unsafe fn morloc_dup_packet(
     packet: *const u8,
     block_out: *mut *mut c_void,
     errmsg: *mut *mut c_char,
@@ -171,8 +164,7 @@ pub unsafe extern "C" fn morloc_dup_packet(
 
 // ── Ping ─────────────────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn return_ping(
+pub(crate) unsafe fn return_ping(
     packet: *const u8,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
@@ -194,8 +186,7 @@ pub unsafe extern "C" fn return_ping(
     buf
 }
 
-#[no_mangle]
-pub extern "C" fn make_ping_packet() -> *mut u8 {
+pub(crate) fn make_ping_packet() -> *mut u8 {
     // SAFETY: calloc returns null or a valid pointer to 32 zeroed bytes.
     let buf = unsafe { libc::calloc(32, 1) as *mut u8 };
     if buf.is_null() { return ptr::null_mut(); }
@@ -320,8 +311,7 @@ unsafe fn make_data_packet_with_schema(
 
 // ── Standard data packet (RPTR + VOIDSTAR) ──────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn make_standard_data_packet(
+pub(crate) unsafe fn make_standard_data_packet(
     relptr: RelPtr,
     schema: *const CSchema,
 ) -> *mut u8 {
@@ -345,8 +335,7 @@ pub unsafe extern "C" fn make_standard_data_packet(
     packet
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn make_arrow_data_packet(
+pub(crate) unsafe fn make_arrow_data_packet(
     relptr: RelPtr,
     schema: *const CSchema,
 ) -> *mut u8 {
@@ -371,8 +360,7 @@ pub unsafe extern "C" fn make_arrow_data_packet(
 
 // ── Msgpack packets ──────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn make_mpk_data_packet(
+pub(crate) unsafe fn make_mpk_data_packet(
     mpk_filename: *const c_char,
     schema: *const CSchema,
 ) -> *mut u8 {
@@ -397,8 +385,7 @@ pub unsafe extern "C" fn make_mpk_data_packet(
 /// file carries its own header + compression byte. Used by the cache
 /// and debug-dump writers to point at a content-addressed `.dat`
 /// sidecar without inlining its bytes.
-#[no_mangle]
-pub unsafe extern "C" fn make_data_indirection_packet(
+pub(crate) unsafe fn make_data_indirection_packet(
     dat_filename: *const c_char,
     schema: *const CSchema,
 ) -> *mut u8 {
@@ -420,8 +407,7 @@ pub unsafe extern "C" fn make_data_indirection_packet(
 /// A table argument that names its file. The receiving pool reads and
 /// decodes it, so the bytes are held once, by the process that will use
 /// the table, rather than being decoded in the nexus and shipped on.
-#[no_mangle]
-pub unsafe extern "C" fn make_table_file_packet(
+pub(crate) unsafe fn make_table_file_packet(
     path: *const c_char,
     schema: *const CSchema,
 ) -> *mut u8 {
@@ -439,8 +425,7 @@ pub unsafe extern "C" fn make_table_file_packet(
     )
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn make_data_packet_from_mpk(
+pub(crate) unsafe fn make_data_packet_from_mpk(
     mpk: *const c_char,
     mpk_size: usize,
     schema: *const CSchema,
@@ -459,8 +444,7 @@ pub unsafe extern "C" fn make_data_packet_from_mpk(
 
 // ── get_data_packet_as_mpk ───────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn get_data_packet_as_mpk(
+pub(crate) unsafe fn get_data_packet_as_mpk(
     packet: *const u8,
     schema: *const CSchema,
     mpk_out: *mut *mut c_char,
@@ -585,8 +569,7 @@ pub unsafe extern "C" fn get_data_packet_as_mpk(
 
 // ── Schema from metadata ─────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn read_schema_from_packet_meta(
+pub(crate) unsafe fn read_schema_from_packet_meta(
     packet: *const u8,
     errmsg: *mut *mut c_char,
 ) -> *mut c_char {
@@ -618,8 +601,7 @@ pub unsafe extern "C" fn read_schema_from_packet_meta(
 
 // ── Fail packet ──────────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn make_fail_packet(
+pub(crate) unsafe fn make_fail_packet(
     failure_message: *const c_char,
 ) -> *mut u8 {
     if failure_message.is_null() { return ptr::null_mut(); }
@@ -639,8 +621,7 @@ pub unsafe extern "C" fn make_fail_packet(
 
 /// A fail packet saying the call ended because its downstream reader
 /// closed the pipe; a caller re-raises it rather than handing it to `@try`.
-#[no_mangle]
-pub unsafe extern "C" fn make_pipe_closed_packet(
+pub(crate) unsafe fn make_pipe_closed_packet(
     failure_message: *const c_char,
 ) -> *mut u8 {
     if failure_message.is_null() { return ptr::null_mut(); }
@@ -658,8 +639,7 @@ pub unsafe extern "C" fn make_pipe_closed_packet(
     )
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_packet_is_pipe_closed(packet: *const u8) -> bool {
+pub(crate) unsafe fn morloc_packet_is_pipe_closed(packet: *const u8) -> bool {
     if packet.is_null() { return false; }
     let mut err: *mut c_char = ptr::null_mut();
     let header = read_morloc_packet_header(packet, &mut err);
@@ -669,8 +649,7 @@ pub unsafe extern "C" fn morloc_packet_is_pipe_closed(packet: *const u8) -> bool
 
 // ── Error message extraction ─────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn get_morloc_data_packet_error_message(
+pub(crate) unsafe fn get_morloc_data_packet_error_message(
     data: *const u8,
     errmsg: *mut *mut c_char,
 ) -> *mut c_char {
@@ -695,8 +674,7 @@ pub unsafe extern "C" fn get_morloc_data_packet_error_message(
 
 // ── get_morloc_data_packet_value ─────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn get_morloc_data_packet_value(
+pub(crate) unsafe fn get_morloc_data_packet_value(
     data: *const u8,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -818,12 +796,7 @@ pub unsafe extern "C" fn get_morloc_data_packet_value(
                 // sidecar or corrupt payload surfaces to the caller
                 // rather than being consumed as an @load-style miss.
                 use crate::utility::read_binary_file;
-                extern "C" {
-                    fn load_morloc_data_file(
-                        path: *const c_char, data: *mut u8, data_size: usize,
-                        schema: *const CSchema, errmsg: *mut *mut c_char,
-                    ) -> *mut c_void;
-                }
+                use crate::cli::load_morloc_data_file;
                 let filename_cstr = match std::ffi::CString::new(filename) {
                     Ok(c) => c,
                     Err(_) => {
@@ -935,8 +908,7 @@ pub(crate) unsafe fn inherit_reply(packet: *const u8) {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_inherit_reply(packet: *const u8) {
+pub(crate) unsafe fn morloc_inherit_reply(packet: *const u8) {
     inherit_reply(packet)
 }
 
@@ -1024,8 +996,7 @@ unsafe fn make_call_packet_gen(
     packet
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn make_morloc_local_call_packet(
+pub(crate) unsafe fn make_morloc_local_call_packet(
     midx: u32,
     arg_packets: *const *const u8,
     nargs: usize,
@@ -1034,8 +1005,7 @@ pub unsafe extern "C" fn make_morloc_local_call_packet(
     make_call_packet_gen(midx, PACKET_ENTRYPOINT_LOCAL, arg_packets, nargs, errmsg)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn make_morloc_remote_call_packet(
+pub(crate) unsafe fn make_morloc_remote_call_packet(
     midx: u32,
     arg_packets: *const *const u8,
     nargs: usize,
@@ -1046,8 +1016,7 @@ pub unsafe extern "C" fn make_morloc_remote_call_packet(
 
 // ── Call packet reading ──────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn read_morloc_call_packet(
+pub(crate) unsafe fn read_morloc_call_packet(
     packet: *const u8,
     errmsg: *mut *mut c_char,
 ) -> *mut MorlocCall {
@@ -1120,8 +1089,7 @@ pub unsafe extern "C" fn read_morloc_call_packet(
     call
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn free_morloc_call(call: *mut MorlocCall) {
+pub(crate) unsafe fn free_morloc_call(call: *mut MorlocCall) {
     if call.is_null() { return; }
     let c = &*call;
     if !c.args.is_null() {
@@ -1141,8 +1109,7 @@ pub unsafe extern "C" fn free_morloc_call(call: *mut MorlocCall) {
 
 // ── write_voidstar_binary (for intrinsics.c) ─────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn write_voidstar_binary(
+pub(crate) unsafe fn write_voidstar_binary(
     fd: i32,
     data: *const c_void,
     schema: *const CSchema,
@@ -1161,8 +1128,7 @@ pub unsafe extern "C" fn write_voidstar_binary(
 
 // ── flatten_voidstar_to_buffer ───────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn flatten_voidstar_to_buffer(
+pub(crate) unsafe fn flatten_voidstar_to_buffer(
     data: *const c_void,
     schema: *const CSchema,
     out_buf: *mut *mut u8,
@@ -1197,8 +1163,7 @@ pub unsafe extern "C" fn flatten_voidstar_to_buffer(
 
 // ── make_data_packet_auto ────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn make_data_packet_auto(
+pub(crate) unsafe fn make_data_packet_auto(
     voidstar: *mut c_void,
     relptr: RelPtr,
     schema: *const CSchema,
@@ -1248,8 +1213,7 @@ pub unsafe extern "C" fn make_data_packet_auto(
 /// value that must outlive the shared-memory block it was laid out in (a
 /// closure's captured value, applied back after the producing dispatch
 /// has released its blocks). A table's flat form is its block.
-#[no_mangle]
-pub unsafe extern "C" fn make_inline_data_packet(
+pub(crate) unsafe fn make_inline_data_packet(
     voidstar: *mut c_void,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -1325,8 +1289,7 @@ pub unsafe extern "C" fn make_inline_data_packet(
 // output buffer in a single pass.
 //
 // The output buffer is libc::malloc'd; the caller must libc::free.
-#[no_mangle]
-pub unsafe extern "C" fn normalize_data_packet_for_output(
+pub(crate) unsafe fn normalize_data_packet_for_output(
     packet: *const u8,
     packet_size: usize,
     compression_level: u8,
@@ -1582,8 +1545,7 @@ unsafe fn read_rptr_payload(
 // placeholder, streams the payload, then pwrites the corrected length.
 // Returns total bytes written, or -1 on error. RPTR+ARROW is currently
 // always buffered -- see TODO at stream_packet_to_fd.
-#[no_mangle]
-pub unsafe extern "C" fn normalize_data_packet_to_fd(
+pub(crate) unsafe fn normalize_data_packet_to_fd(
     packet: *const u8,
     packet_size: usize,
     compression_level: u8,
@@ -2294,8 +2256,7 @@ unsafe fn make_file_data_packet_voidstar(
 
 // ── print_morloc_data_packet ─────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn print_morloc_data_packet(
+pub(crate) unsafe fn print_morloc_data_packet(
     packet: *const u8,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -2769,5 +2730,179 @@ mod auto_routing_tests {
     fn well_over_threshold_uses_rptr() {
         // ~128 KB. Comfortably in the RPTR regime.
         assert_eq!(auto_route_source_for(128 * 1024), PACKET_SOURCE_RPTR);
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_morloc_packet_header(msg: *const u8, errmsg: *mut *mut c_char) -> *mut PacketHeader {
+        super::read_morloc_packet_header(msg, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn packet_is_ping(packet: *const u8, errmsg: *mut *mut c_char) -> bool {
+        super::packet_is_ping(packet, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn packet_is_local_call(packet: *const u8, errmsg: *mut *mut c_char) -> bool {
+        super::packet_is_local_call(packet, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn packet_is_remote_call(packet: *const u8, errmsg: *mut *mut c_char) -> bool {
+        super::packet_is_remote_call(packet, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_packet_size_from_header(header: *const PacketHeader) -> usize {
+        super::morloc_packet_size_from_header(header)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut c_char) -> usize {
+        super::morloc_packet_size(packet, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_dup_packet(packet: *const u8, block_out: *mut *mut c_void, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::morloc_dup_packet(packet, block_out, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn return_ping(packet: *const u8, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::return_ping(packet, errmsg)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn make_ping_packet() -> *mut u8 {
+        super::make_ping_packet()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_standard_data_packet(relptr: RelPtr, schema: *const CSchema) -> *mut u8 {
+        super::make_standard_data_packet(relptr, schema)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_arrow_data_packet(relptr: RelPtr, schema: *const CSchema) -> *mut u8 {
+        super::make_arrow_data_packet(relptr, schema)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_mpk_data_packet(mpk_filename: *const c_char, schema: *const CSchema) -> *mut u8 {
+        super::make_mpk_data_packet(mpk_filename, schema)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_data_indirection_packet(dat_filename: *const c_char, schema: *const CSchema) -> *mut u8 {
+        super::make_data_indirection_packet(dat_filename, schema)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_table_file_packet(path: *const c_char, schema: *const CSchema) -> *mut u8 {
+        super::make_table_file_packet(path, schema)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_data_packet_from_mpk(mpk: *const c_char, mpk_size: usize, schema: *const CSchema) -> *mut u8 {
+        super::make_data_packet_from_mpk(mpk, mpk_size, schema)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn get_data_packet_as_mpk(packet: *const u8, schema: *const CSchema, mpk_out: *mut *mut c_char, mpk_size_out: *mut usize, errmsg: *mut *mut c_char) -> i32 {
+        super::get_data_packet_as_mpk(packet, schema, mpk_out, mpk_size_out, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_schema_from_packet_meta(packet: *const u8, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::read_schema_from_packet_meta(packet, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_fail_packet(failure_message: *const c_char) -> *mut u8 {
+        super::make_fail_packet(failure_message)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_pipe_closed_packet(failure_message: *const c_char) -> *mut u8 {
+        super::make_pipe_closed_packet(failure_message)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_packet_is_pipe_closed(packet: *const u8) -> bool {
+        super::morloc_packet_is_pipe_closed(packet)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn get_morloc_data_packet_error_message(data: *const u8, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::get_morloc_data_packet_error_message(data, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn get_morloc_data_packet_value(data: *const u8, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::get_morloc_data_packet_value(data, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_inherit_reply(packet: *const u8) {
+        super::morloc_inherit_reply(packet)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_morloc_local_call_packet(midx: u32, arg_packets: *const *const u8, nargs: usize, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::make_morloc_local_call_packet(midx, arg_packets, nargs, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_morloc_remote_call_packet(midx: u32, arg_packets: *const *const u8, nargs: usize, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::make_morloc_remote_call_packet(midx, arg_packets, nargs, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_morloc_call_packet(packet: *const u8, errmsg: *mut *mut c_char) -> *mut MorlocCall {
+        super::read_morloc_call_packet(packet, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn free_morloc_call(call: *mut MorlocCall) {
+        super::free_morloc_call(call)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn write_voidstar_binary(fd: i32, data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> RelPtr {
+        super::write_voidstar_binary(fd, data, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn flatten_voidstar_to_buffer(data: *const c_void, schema: *const CSchema, out_buf: *mut *mut u8, out_size: *mut usize, errmsg: *mut *mut c_char) -> i32 {
+        super::flatten_voidstar_to_buffer(data, schema, out_buf, out_size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_data_packet_auto(voidstar: *mut c_void, relptr: RelPtr, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::make_data_packet_auto(voidstar, relptr, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn make_inline_data_packet(voidstar: *mut c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::make_inline_data_packet(voidstar, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn normalize_data_packet_for_output(packet: *const u8, packet_size: usize, compression_level: u8, out_buf: *mut *mut u8, out_size: *mut usize, errmsg: *mut *mut c_char) -> i32 {
+        super::normalize_data_packet_for_output(packet, packet_size, compression_level, out_buf, out_size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn normalize_data_packet_to_fd(packet: *const u8, packet_size: usize, compression_level: u8, fd: libc::c_int, errmsg: *mut *mut c_char) -> i64 {
+        super::normalize_data_packet_to_fd(packet, packet_size, compression_level, fd, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn print_morloc_data_packet(packet: *const u8, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32 {
+        super::print_morloc_data_packet(packet, schema, errmsg)
     }
 }

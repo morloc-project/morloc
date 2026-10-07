@@ -1391,16 +1391,14 @@ fn borrow_register(base: *const u8, rel: RelPtr, key: *const c_void, borrowable_
 ///
 /// # Safety
 /// `block` must be a live block the view holds a reference on.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_view_held(block: *const c_void, key: *const c_void) {
+pub(crate) unsafe fn morloc_view_held(block: *const c_void, key: *const c_void) {
     if let Ok(rel) = shm::abs2rel(block as *mut u8) {
         borrow_register(block as *const u8, rel, key, false);
     }
 }
 
 /// Forget the view recorded under `key`, before its reference is released.
-#[no_mangle]
-pub extern "C" fn morloc_view_released(key: *const c_void) {
+pub(crate) fn morloc_view_released(key: *const c_void) {
     borrow_forget(key);
 }
 
@@ -2375,5 +2373,19 @@ mod tests {
             assert_eq!(col.value(0), "7");
             assert_eq!(col.value(1), "8");
         });
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_view_held(block: *const c_void, key: *const c_void) {
+        super::morloc_view_held(block, key)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_view_released(key: *const c_void) {
+        super::morloc_view_released(key)
     }
 }

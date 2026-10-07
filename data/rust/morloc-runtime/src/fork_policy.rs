@@ -392,8 +392,7 @@ pub fn thread_count() -> Option<usize> {
 }
 
 // FORK-6: -1 when the count cannot be read.
-#[no_mangle]
-pub extern "C" fn morloc_thread_count() -> libc::c_long {
+pub(crate) fn morloc_thread_count() -> libc::c_long {
     thread_count().map_or(-1, |n| n as libc::c_long)
 }
 
@@ -404,8 +403,7 @@ pub const FORK_WORKER_REFUSED: libc::pid_t = -2;
 // only once the count is one. Returns the child's pid, 0 in the child, -1
 // with `error` set on a failed fork, or FORK_WORKER_REFUSED with
 // `threads_at_fork` set.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_fork_worker(threads_at_fork: *mut libc::c_long, error: *mut libc::c_int) -> libc::pid_t {
+pub(crate) unsafe fn morloc_fork_worker(threads_at_fork: *mut libc::c_long, error: *mut libc::c_int) -> libc::pid_t {
     let mut gate = [0i32; 2];
     if morloc_runtime_types::fd::pipe(gate.as_mut_ptr()) != 0 {
         if !error.is_null() {
@@ -811,5 +809,18 @@ mod tests {
             libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGABRT,
             "the fork neither aborted nor completed cleanly: status {status}"
         );
+    }
+}
+
+mod c_abi {
+
+    #[no_mangle]
+    pub extern "C" fn morloc_thread_count() -> libc::c_long {
+        super::morloc_thread_count()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_fork_worker(threads_at_fork: *mut libc::c_long, error: *mut libc::c_int) -> libc::pid_t {
+        super::morloc_fork_worker(threads_at_fork, error)
     }
 }

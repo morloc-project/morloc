@@ -37,8 +37,7 @@ const HANDLER_ALARM_SECS: u32 = 5;
 /// # Safety
 /// `lang` is a NUL-terminated string; `current_frame`, when given, is safe
 /// to call from a signal handler on any thread.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_install_crash_handler(lang: *const c_char, current_frame: FrameFn) {
+pub(crate) unsafe fn morloc_install_crash_handler(lang: *const c_char, current_frame: FrameFn) {
     let name = if lang.is_null() { "" } else { CStr::from_ptr(lang).to_str().unwrap_or("") };
     let owned = std::ffi::CString::new(name).unwrap_or_default();
     LANG.store(owned.into_raw(), Ordering::Release);
@@ -189,4 +188,13 @@ extern "C" fn fatal(sig: c_int, _info: *mut libc::siginfo_t, _ctx: *mut c_void) 
     // handler that returned from a sent signal would resume the pool as
     // if nothing had happened.
     unsafe { libc::raise(sig) };
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_install_crash_handler(lang: *const c_char, current_frame: FrameFn) {
+        super::morloc_install_crash_handler(lang, current_frame)
+    }
 }

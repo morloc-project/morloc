@@ -1203,8 +1203,7 @@ pub(crate) fn forget_held_references() {
     HELD_REFERENCES.store(0, Ordering::Relaxed);
 }
 
-#[no_mangle]
-pub extern "C" fn morloc_held_references() -> i64 {
+pub(crate) fn morloc_held_references() -> i64 {
     held_references()
 }
 
@@ -3030,5 +3029,13 @@ mod tests {
             crate::fork_policy::in_a_descendant_with_the_same_pid(|| !owns_program()) && owns_program()
         });
         assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid owned the program");
+    }
+}
+
+mod c_abi {
+
+    #[no_mangle]
+    pub extern "C" fn morloc_held_references() -> i64 {
+        super::morloc_held_references()
     }
 }

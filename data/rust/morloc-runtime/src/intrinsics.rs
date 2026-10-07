@@ -61,8 +61,7 @@ unsafe fn level_or_errmsg(
 // morloc packet and has no header in which to record a compression
 // algorithm. Compressing the file as a whole is the deferred "compressed
 // JSON/MPK input" workstream.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_save(
+pub(crate) unsafe fn mlc_save(
     data: *const c_void,
     schema: *const CSchema,
     level: i64,
@@ -99,8 +98,7 @@ pub unsafe extern "C" fn mlc_save(
 // ── mlc_save_json: serialize to JSON file ──────────────────────────────────
 
 // `level` is range-checked but otherwise unused; see mlc_save.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_save_json(
+pub(crate) unsafe fn mlc_save_json(
     data: *const c_void,
     schema: *const CSchema,
     level: i64,
@@ -400,8 +398,7 @@ pub fn run_temp_root(run_dir: &std::path::Path, user_tmpdir: Option<&str>) -> st
 ///
 /// # Safety
 /// `run_dir` must be a C string; `user_tmpdir` a C string or null.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_run_temp_root(run_dir: *const c_char, user_tmpdir: *const c_char) -> *mut c_char {
+pub(crate) unsafe fn morloc_run_temp_root(run_dir: *const c_char, user_tmpdir: *const c_char) -> *mut c_char {
     if run_dir.is_null() {
         return ptr::null_mut();
     }
@@ -455,8 +452,7 @@ pub(crate) fn pid_namespace_tag() -> String {
 }
 
 /// Remove this process's temp directory, as a worker does when it retires.
-#[no_mangle]
-pub extern "C" fn morloc_remove_own_temps() {
+pub(crate) fn morloc_remove_own_temps() {
     let _ = std::fs::remove_dir_all(process_temp_dir());
 }
 
@@ -480,8 +476,7 @@ pub fn begin_dispatch() -> (u64, u64) {
 
 /// @tmpfile :: <IO, Err> Str. Create a fresh empty file in the morloc tmpdir,
 /// register it for removal at end-of-call, and return its path.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
+pub(crate) unsafe fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
     clear_errmsg(errmsg);
     let dir = process_temp_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -512,8 +507,7 @@ pub unsafe extern "C" fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
 /// @close on a Str path: unlink a registered temp file and drop it from the
 /// call list. Errors if the path was not created by @tmpfile in this call --
 /// @close is not a general file-removal tool.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_unlink_tmp(
+pub(crate) unsafe fn mlc_unlink_tmp(
     path: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> i32 {
@@ -572,7 +566,7 @@ pub unsafe extern "C" fn mlc_unlink_tmp(
 pub fn end_dispatch(call_id: u64, prev: u64) {
     CURRENT_TEMP_OWNER.with(|c| c.set(prev));
     IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-    let mut oldest = None;
+    let oldest;
     let doomed: Vec<std::path::PathBuf> = {
         let mut reg = temp_registry();
         reg.inflight.remove(&call_id);
@@ -597,8 +591,7 @@ pub fn end_dispatch(call_id: u64, prev: u64) {
 }
 
 // ── mlc_save_voidstar: serialize to binary voidstar packet file ────────────
-#[no_mangle]
-pub unsafe extern "C" fn mlc_save_voidstar(
+pub(crate) unsafe fn mlc_save_voidstar(
     data: *const c_void,
     schema: *const CSchema,
     level: i64,
@@ -678,8 +671,7 @@ pub unsafe extern "C" fn mlc_save_voidstar(
 // with data-packet output, which has no source packet to hand
 // `normalize_data_packet_to_fd`). Returns total bytes written, or -1
 // on error.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_write_voidstar_data_packet_to_fd(
+pub(crate) unsafe fn mlc_write_voidstar_data_packet_to_fd(
     data: *const c_void,
     schema: *const CSchema,
     level: u8,
@@ -707,8 +699,7 @@ pub unsafe extern "C" fn mlc_write_voidstar_data_packet_to_fd(
 
 // ── mlc_load: load from file (auto-detect format) ─────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_load(
+pub(crate) unsafe fn mlc_load(
     path: *const c_char,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -716,12 +707,7 @@ pub unsafe extern "C" fn mlc_load(
     clear_errmsg(errmsg);
 
     use crate::utility::read_binary_file;
-    extern "C" {
-        fn load_morloc_data_file(
-            path: *const c_char, data: *mut u8, data_size: usize,
-            schema: *const CSchema, errmsg: *mut *mut c_char,
-        ) -> *mut c_void;
-    }
+    use crate::cli::load_morloc_data_file;
 
     if path.is_null() {
         set_errmsg(errmsg, &MorlocError::NullPointer);
@@ -805,8 +791,7 @@ pub unsafe extern "C" fn mlc_load(
 
 // ── mlc_hash: hash voidstar data ───────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_hash(
+pub(crate) unsafe fn mlc_hash(
     data: *const c_void,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -832,8 +817,7 @@ pub unsafe extern "C" fn mlc_hash(
 
 // ── mlc_show: serialize to JSON string ─────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_show(
+pub(crate) unsafe fn mlc_show(
     data: *const c_void,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -847,8 +831,7 @@ pub unsafe extern "C" fn mlc_show(
 
 // ── mlc_read: deserialize from JSON string ─────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_read(
+pub(crate) unsafe fn mlc_read(
     json_str: *const c_char,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -924,8 +907,7 @@ unsafe fn _write_voidstar_binary_rust(
 /// Returns non-zero (with errmsg set) on any failure: missing file,
 /// permission denied, short read, magic mismatch. Used by @open's
 /// IFile branch for eager packet-format validation.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_probe_packet(
+pub(crate) unsafe fn mlc_probe_packet(
     path: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> i32 {
@@ -971,8 +953,7 @@ pub unsafe extern "C" fn mlc_probe_packet(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_open(
+pub(crate) unsafe fn mlc_open(
     path: *const c_char,
     kind: u8,
     errmsg: *mut *mut c_char,
@@ -1007,8 +988,7 @@ pub unsafe extern "C" fn mlc_open(
 /// non-blocking exclusive flock is acquired to reject live concurrent
 /// writers, and the stream header is written with the schema metadata
 /// block.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_open_ostream(
+pub(crate) unsafe fn mlc_open_ostream(
     schema_str: *const c_char,
     path: *const c_char,
     errmsg: *mut *mut c_char,
@@ -1049,8 +1029,7 @@ pub unsafe extern "C" fn mlc_open_ostream(
 /// Open a channel for values of the list schema `schema_str`: one handle,
 /// written by its producer as an OStream and read by any pool as an
 /// IStream. Returns the handle, or -1 with `errmsg` set.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_open_channel(
+pub(crate) unsafe fn mlc_open_channel(
     schema_str: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> i64 {
@@ -1077,16 +1056,14 @@ pub unsafe extern "C" fn mlc_open_channel(
 
 /// Whether `handle` is an open channel. A pool that sizes its workers by
 /// how many are blocked counts a channel read or write as blocking.
-#[no_mangle]
-pub extern "C" fn mlc_is_channel(handle: i64) -> bool {
+pub(crate) fn mlc_is_channel(handle: i64) -> bool {
     crate::stream::shared_is_channel(handle)
 }
 
 /// Settle a channel whose readers are done with it; see
 /// `shared_settle_channel`. On a failure a reader was handed, returns false
 /// with the producer's message, unchanged, in `errmsg`.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_settle(handle: i64, errmsg: *mut *mut c_char) -> bool {
+pub(crate) unsafe fn mlc_settle(handle: i64, errmsg: *mut *mut c_char) -> bool {
     clear_errmsg(errmsg);
     match crate::stream::shared_settle_channel(handle) {
         Ok(()) => true,
@@ -1110,8 +1087,7 @@ pub unsafe extern "C" fn mlc_settle(handle: i64, errmsg: *mut *mut c_char) -> bo
 /// the schema is read off disk; for the `/dev/stdin` sentinel the schema
 /// declares the opener's type to the nexus (which guards the incoming
 /// stream) and routes reads through the pool-nexus RPC channel.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_open_istream(
+pub(crate) unsafe fn mlc_open_istream(
     schema_str: *const c_char,
     path: *const c_char,
     errmsg: *mut *mut c_char,
@@ -1155,8 +1131,7 @@ pub unsafe extern "C" fn mlc_open_istream(
 /// registers a slot that routes `mlc_next` through the pool-nexus
 /// RPC socket. At most one `@stdin` per nexus (enforced via CAS on
 /// the registry's stdin claim slot).
-#[no_mangle]
-pub unsafe extern "C" fn mlc_open_stdin(
+pub(crate) unsafe fn mlc_open_stdin(
     schema_str: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> i64 {
@@ -1172,8 +1147,7 @@ pub unsafe extern "C" fn mlc_open_stdin(
 /// `@stdout :: <IO> OStream a` -- typed intrinsic. Nexus owns fd 1;
 /// `mlc_write` routes through the pool-nexus RPC socket. At most one
 /// `@stdout` per nexus.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_open_stdout(
+pub(crate) unsafe fn mlc_open_stdout(
     schema_str: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> i64 {
@@ -1193,16 +1167,14 @@ pub unsafe extern "C" fn mlc_open_stdout(
 /// loop (pool_dispatch_packet) calls the underlying reclaim directly;
 /// Python and R call this C-ABI wrapper from their per-dispatch handlers.
 /// Cheap on the common no-stdio path (a single thread-local read).
-#[no_mangle]
-pub unsafe extern "C" fn mlc_reclaim_stdio_after_dispatch() {
+pub(crate) unsafe fn mlc_reclaim_stdio_after_dispatch() {
     crate::stream::pool_reclaim_stdio_after_dispatch();
 }
 
 /// `@stderr :: <IO> OStream a` -- typed intrinsic. Nexus owns fd 2;
 /// `mlc_write` routes through the pool-nexus RPC socket. At most one
 /// `@stderr` per nexus.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_open_stderr(
+pub(crate) unsafe fn mlc_open_stderr(
     schema_str: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> i64 {
@@ -1247,8 +1219,7 @@ unsafe fn open_stdio_ffi(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_close(
+pub(crate) unsafe fn mlc_close(
     handle: i64,
     errmsg: *mut *mut c_char,
 ) -> i32 {
@@ -1265,8 +1236,7 @@ pub unsafe extern "C" fn mlc_close(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_fschema(
+pub(crate) unsafe fn mlc_fschema(
     path: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> *mut c_char {
@@ -1341,8 +1311,7 @@ impl IFileWalkArg {
 /// materialized value (with sub-allocations also in SHM). The caller
 /// is responsible for freeing via `shfree` -- the active `eval_arena`
 /// does this automatically when its scope ends.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_ifile_walk(
+pub(crate) unsafe fn mlc_ifile_walk(
     handle: i64,
     path: *const c_char,
     args_ptr: *const IFileWalkArg,
@@ -1382,8 +1351,7 @@ pub unsafe extern "C" fn mlc_ifile_walk(
 /// Array<a> ready to be wrapped by the per-language `from_voidstar`.
 /// On EOF returns an Array with size 0 and `data == RELNULL`; the
 /// pool surfaces this as an empty list.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_next(
+pub(crate) unsafe fn mlc_next(
     handle: i64,
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
@@ -1400,8 +1368,7 @@ pub unsafe extern "C" fn mlc_next(
 /// Read the next frame (sub-packet) of a file-backed IStream as a fresh SHM
 /// Array<a>. At the end of the stream returns null and sets `*eof` to 1; an
 /// empty frame is an empty Array with `*eof` 0. Used by `@replay`.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_next_frame(
+pub(crate) unsafe fn mlc_next_frame(
     handle: i64,
     eof: *mut i32,
     errmsg: *mut *mut c_char,
@@ -1431,8 +1398,7 @@ pub unsafe extern "C" fn mlc_next_frame(
 /// sub-packet, ready for the per-language `from_voidstar`. A DATA packet
 /// yields a single triple; an empty stream yields an empty array. The only
 /// failure is a malformed packet.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_stream_layout(
+pub(crate) unsafe fn mlc_stream_layout(
     handle: i64,
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
@@ -1484,8 +1450,7 @@ pub unsafe extern "C" fn mlc_stream_layout(
 /// Element atomicity: a single element wider than the buffer is
 /// written as its own oversize sub-packet. Lists that partly fit
 /// flush, then resume buffering in the fresh buffer.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_write(
+pub(crate) unsafe fn mlc_write(
     level: i64,
     handle: i64,
     payload_voidstar: *const c_void,
@@ -1513,8 +1478,7 @@ pub unsafe extern "C" fn mlc_write(
 /// is empty. Useful for tests that need deterministic sub-packet
 /// boundaries and for user code wanting to make progress visible to
 /// concurrent readers.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_flush(
+pub(crate) unsafe fn mlc_flush(
     handle: i64,
     errmsg: *mut *mut c_char,
 ) -> i32 {
@@ -1532,8 +1496,7 @@ pub unsafe extern "C" fn mlc_flush(
 
 /// @tell: number of elements written to the process's @stdout OStream so far
 /// (0 if none open). Never fails.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_tell(errmsg: *mut *mut c_char) -> u64 {
+pub(crate) unsafe fn mlc_tell(errmsg: *mut *mut c_char) -> u64 {
     clear_errmsg(errmsg);
     crate::stream::stdout_element_count()
 }
@@ -1542,8 +1505,7 @@ pub unsafe extern "C" fn mlc_tell(errmsg: *mut *mut c_char) -> u64 {
 /// The schema must match the file's stored schema (mismatches error
 /// before any bytes are written). Returns a fresh OSTREAM handle whose
 /// cursor sits at the resume offset (end of the last complete sub-packet).
-#[no_mangle]
-pub unsafe extern "C" fn mlc_append(
+pub(crate) unsafe fn mlc_append(
     schema_str: *const c_char,
     path: *const c_char,
     errmsg: *mut *mut c_char,
@@ -1583,8 +1545,7 @@ pub unsafe extern "C" fn mlc_append(
 }
 
 /// `@concat paths dest`: byte-level concat of stream files into `dest`.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_concat(
+pub(crate) unsafe fn mlc_concat(
     paths: *const *const c_char,
     n_paths: usize,
     dest: *const c_char,
@@ -1642,8 +1603,7 @@ pub unsafe extern "C" fn mlc_concat(
 
 /// `@stream :: IFile [a] -> <IO> IStream a`: open a fresh IStream slot
 /// bound to the same path as the source IFile.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_stream(
+pub(crate) unsafe fn mlc_stream(
     ifile_handle: i64,
     errmsg: *mut *mut c_char,
 ) -> i64 {
@@ -1661,8 +1621,7 @@ pub unsafe extern "C" fn mlc_stream(
 /// cached value from the StreamDiag block populated at open time.
 /// Errors when the file's value type is not a list (the length of a
 /// tuple/record IFile is meaningless).
-#[no_mangle]
-pub unsafe extern "C" fn mlc_ifile_length(
+pub(crate) unsafe fn mlc_ifile_length(
     handle: i64,
     errmsg: *mut *mut c_char,
 ) -> i64 {
@@ -1692,8 +1651,7 @@ pub unsafe extern "C" fn mlc_ifile_length(
 // string owned by the caller. The caller frees with libc::free. Errors
 // return NULL and set errmsg.
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_handle_pack_path(
+pub(crate) unsafe fn mlc_handle_pack_path(
     handle: i64,
     out_kind: *mut u8,
     errmsg: *mut *mut c_char,
@@ -1735,8 +1693,7 @@ pub unsafe extern "C" fn mlc_handle_pack_path(
 // `handle_scan::rewrite_data_packet_for_persistence`, not through the bridge
 // codec. Returns -1 on error (kept for ABI parity with the earlier
 // variant).
-#[no_mangle]
-pub unsafe extern "C" fn mlc_handle_path_len(
+pub(crate) unsafe fn mlc_handle_path_len(
     _handle: i64,
     errmsg: *mut *mut c_char,
 ) -> i64 {
@@ -1744,8 +1701,7 @@ pub unsafe extern "C" fn mlc_handle_path_len(
     0
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_handle_unpack_path(
+pub(crate) unsafe fn mlc_handle_unpack_path(
     path: *const c_char,
     kind: u8,
     errmsg: *mut *mut c_char,
@@ -1797,8 +1753,7 @@ pub unsafe extern "C" fn mlc_handle_unpack_path(
 /// `dest` points at a 16-byte stream-handle field slot. `cursor` points
 /// at the bridge's voidstar suballoc cursor; only consulted when
 /// `tag == TAG_PATH`. Returns 0 on success, 1 on error.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_write_stream_field(
+pub(crate) unsafe fn mlc_write_stream_field(
     handle: i64,
     dest: *mut c_void,
     cursor: *mut *mut c_void,
@@ -1875,8 +1830,7 @@ pub unsafe extern "C" fn mlc_write_stream_field(
 ///
 /// Forwarded to `mlc_write_stream_field` until per-language bridges
 /// migrate to call that directly with an explicit tag.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_write_handle_voidstar(
+pub(crate) unsafe fn mlc_write_handle_voidstar(
     handle: i64,
     dest: *mut c_void,
     cursor: *mut *mut c_void,
@@ -1898,8 +1852,7 @@ pub unsafe extern "C" fn mlc_write_handle_voidstar(
 // to_voidstar; the singular path stays for cases where the handle is
 // embedded inside a wider record.
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_handles_path_lens(
+pub(crate) unsafe fn mlc_handles_path_lens(
     handles: *const i64,
     n: usize,
     out_lens: *mut i64,
@@ -1930,8 +1883,7 @@ pub unsafe extern "C" fn mlc_handles_path_lens(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn mlc_write_handles_voidstar(
+pub(crate) unsafe fn mlc_write_handles_voidstar(
     handles: *const i64,
     n: usize,
     dest: *mut c_void,
@@ -1978,8 +1930,7 @@ pub unsafe extern "C" fn mlc_write_handles_voidstar(
 /// generation-mismatch error.
 ///
 /// Returns -1 and sets errmsg on any failure.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_read_stream_field(
+pub(crate) unsafe fn mlc_read_stream_field(
     field_ptr: *const c_void,
     space: crate::voidstar::MorlocSpace,
     kind: u8,
@@ -2093,8 +2044,7 @@ pub unsafe extern "C" fn mlc_read_stream_field(
 /// form. Forwards to `mlc_read_stream_field`. The tag check in the new
 /// codec means a TAG_HANDLE field passed through this entry still works;
 /// the name "handle_voidstar" is historical.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_read_handle_voidstar(
+pub(crate) unsafe fn mlc_read_handle_voidstar(
     arr: *const c_void,
     space: crate::voidstar::MorlocSpace,
     kind: u8,
@@ -2111,8 +2061,7 @@ pub unsafe extern "C" fn mlc_read_handle_voidstar(
 /// Returns 0 on success (kind byte written to `*kind_out`), -1 if the
 /// handle is not stdio-bound (no errmsg), or a positive error code
 /// with `*errmsg` set for any other failure.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_stdio_slot_kind(
+pub(crate) unsafe fn mlc_stdio_slot_kind(
     handle: i64,
     kind_out: *mut u8,
     errmsg: *mut *mut c_char,
@@ -2133,8 +2082,7 @@ pub unsafe extern "C" fn mlc_stdio_slot_kind(
 /// On success returns 0 and sets `*buf_out` to a libc::malloc-owned
 /// buffer of `*len_out` bytes; caller frees via `libc::free`. Returns
 /// non-zero and sets `*errmsg` on failure.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_stdio_build_stream_header(
+pub(crate) unsafe fn mlc_stdio_build_stream_header(
     handle: i64,
     buf_out: *mut *mut u8,
     len_out: *mut usize,
@@ -2180,8 +2128,7 @@ pub unsafe extern "C" fn mlc_stdio_build_stream_header(
 ///
 /// Returns 0 on success; caller frees `*out_buf` via libc::free.
 /// Returns non-zero and sets errmsg on failure.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_stdio_slot_schema(
+pub(crate) unsafe fn mlc_stdio_slot_schema(
     handle: i64,
     out_buf: *mut *mut c_char,
     errmsg: *mut *mut c_char,
@@ -2217,8 +2164,7 @@ pub unsafe extern "C" fn mlc_stdio_slot_schema(
 ///
 /// Writes the sub-packet count to `*out_subpackets` on success.
 /// Returns 0 on success, non-zero on failure with `errmsg` set.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_view_stream_to_stream(
+pub(crate) unsafe fn mlc_view_stream_to_stream(
     in_path: *const c_char,
     out_path: *const c_char,
     compression_level: u8,
@@ -2253,8 +2199,7 @@ pub unsafe extern "C" fn mlc_view_stream_to_stream(
 ///
 /// Writes the sub-packet count to `*out_subpackets` on success.
 /// Returns 0 on success, non-zero on failure with `errmsg` set.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_view_data_to_stream(
+pub(crate) unsafe fn mlc_view_data_to_stream(
     in_path: *const c_char,
     out_path: *const c_char,
     compression_level: u8,
@@ -2285,8 +2230,7 @@ pub unsafe extern "C" fn mlc_view_data_to_stream(
 /// If the file has a clean final footer, this function delegates to
 /// `mlc_open_ifile` and ignores the caller's offsets -- the on-disk
 /// footer is authoritative.
-#[no_mangle]
-pub unsafe extern "C" fn mlc_open_ifile_recovered(
+pub(crate) unsafe fn mlc_open_ifile_recovered(
     path: *const c_char,
     subpacket_offsets: *const u64,
     subpacket_counts: *const u64,
@@ -2330,8 +2274,7 @@ pub unsafe extern "C" fn mlc_open_ifile_recovered(
 /// Handles the same compression byte cases as
 /// `materialize_subpacket_at_offset`'s mmap-based path
 /// (`PACKET_COMPRESSION_NONE` and `PACKET_COMPRESSION_ZSTD`).
-#[no_mangle]
-pub unsafe extern "C" fn mlc_materialize_subpacket_from_bytes(
+pub(crate) unsafe fn mlc_materialize_subpacket_from_bytes(
     bytes: *const u8,
     n: u64,
     elem_schema: *const CSchema,
@@ -2579,5 +2522,269 @@ mod tests {
         let why = unsafe { reason(err) }.unwrap();
         assert!(why.contains("JSON"), "{why}");
         unsafe { crate::ffi::free_schema(schema) };
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_save(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_save(data, schema, level, path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_save_json(data, schema, level, path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_run_temp_root(run_dir: *const c_char, user_tmpdir: *const c_char) -> *mut c_char {
+        super::morloc_run_temp_root(run_dir, user_tmpdir)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_remove_own_temps() {
+        super::morloc_remove_own_temps()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
+        super::mlc_tmpfile(errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_unlink_tmp(path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_unlink_tmp(path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_save_voidstar(data, schema, level, path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_voidstar_data_packet_to_fd(data: *const c_void, schema: *const CSchema, level: u8, fd: libc::c_int, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_write_voidstar_data_packet_to_fd(data, schema, level, fd, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_load(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_load(path, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_hash(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::mlc_hash(data, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_show(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::mlc_show(data, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_read(json_str: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_read(json_str, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_probe_packet(path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_probe_packet(path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_open(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_open(path, kind, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_open_ostream(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_open_ostream(schema_str, path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_open_channel(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_open_channel(schema_str, errmsg)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn mlc_is_channel(handle: i64) -> bool {
+        super::mlc_is_channel(handle)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_settle(handle: i64, errmsg: *mut *mut c_char) -> bool {
+        super::mlc_settle(handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_open_istream(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_open_istream(schema_str, path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_open_stdin(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_open_stdin(schema_str, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_open_stdout(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_open_stdout(schema_str, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_reclaim_stdio_after_dispatch() {
+        super::mlc_reclaim_stdio_after_dispatch()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_open_stderr(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_open_stderr(schema_str, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_close(handle: i64, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_close(handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_fschema(path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::mlc_fschema(path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_ifile_walk(handle: i64, path: *const c_char, args_ptr: *const IFileWalkArg, n_args: u64, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_ifile_walk(handle, path, args_ptr, n_args, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_next(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_next(handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_next_frame(handle: i64, eof: *mut i32, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_next_frame(handle, eof, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_stream_layout(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_stream_layout(handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write(level: i64, handle: i64, payload_voidstar: *const c_void, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write(level, handle, payload_voidstar, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_flush(handle: i64, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_flush(handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_tell(errmsg: *mut *mut c_char) -> u64 {
+        super::mlc_tell(errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_append(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_append(schema_str, path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_concat(paths: *const *const c_char, n_paths: usize, dest: *const c_char, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_concat(paths, n_paths, dest, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_stream(ifile_handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_ifile_length(handle: i64, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_ifile_length(handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_handle_pack_path(handle: i64, out_kind: *mut u8, errmsg: *mut *mut c_char) -> *mut c_char {
+        super::mlc_handle_pack_path(handle, out_kind, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_handle_path_len(_handle: i64, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_handle_path_len(_handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_handle_unpack_path(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_handle_unpack_path(path, kind, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_stream_field(handle: i64, dest: *mut c_void, cursor: *mut *mut c_void, tag: u8, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_stream_field(handle, dest, cursor, tag, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_handle_voidstar(handle: i64, dest: *mut c_void, cursor: *mut *mut c_void, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_handle_voidstar(handle, dest, cursor, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_handles_path_lens(handles: *const i64, n: usize, out_lens: *mut i64, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_handles_path_lens(handles, n, out_lens, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_write_handles_voidstar(handles: *const i64, n: usize, dest: *mut c_void, elem_stride: usize, cursor: *mut *mut c_void, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_write_handles_voidstar(handles, n, dest, elem_stride, cursor, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_read_stream_field(field_ptr: *const c_void, space: crate::voidstar::MorlocSpace, kind: u8, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_read_stream_field(field_ptr, space, kind, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_read_handle_voidstar(arr: *const c_void, space: crate::voidstar::MorlocSpace, kind: u8, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_read_handle_voidstar(arr, space, kind, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_stdio_slot_kind(handle: i64, kind_out: *mut u8, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_stdio_slot_kind(handle, kind_out, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_stdio_build_stream_header(handle: i64, buf_out: *mut *mut u8, len_out: *mut usize, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_stdio_build_stream_header(handle, buf_out, len_out, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_stdio_slot_schema(handle: i64, out_buf: *mut *mut c_char, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_stdio_slot_schema(handle, out_buf, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_view_stream_to_stream(in_path: *const c_char, out_path: *const c_char, compression_level: u8, schema_override: *const c_char, out_subpackets: *mut u64, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_view_stream_to_stream(in_path, out_path, compression_level, schema_override, out_subpackets, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_view_data_to_stream(in_path: *const c_char, out_path: *const c_char, compression_level: u8, out_subpackets: *mut u64, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_view_data_to_stream(in_path, out_path, compression_level, out_subpackets, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_open_ifile_recovered(path: *const c_char, subpacket_offsets: *const u64, subpacket_counts: *const u64, n_offsets: u64, element_count: u64, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_open_ifile_recovered(path, subpacket_offsets, subpacket_counts, n_offsets, element_count, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_materialize_subpacket_from_bytes(bytes: *const u8, n: u64, elem_schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_materialize_subpacket_from_bytes(bytes, n, elem_schema, errmsg)
     }
 }

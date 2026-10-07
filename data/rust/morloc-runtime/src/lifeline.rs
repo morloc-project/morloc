@@ -253,8 +253,7 @@ pub fn teardown(nexus_pgid: i32, grace: Duration) {
 ///
 /// # Safety
 /// `read_fd` must be writable.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const std::ffi::c_char {
+pub(crate) unsafe fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const std::ffi::c_char {
     static ENTRY: PublishOnce<CString> = PublishOnce::new();
     match Lifeline::get() {
         Ok(l) => {
@@ -269,20 +268,17 @@ pub unsafe extern "C" fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const 
 }
 
 /// C entry points for the pool scaffolds.
-#[no_mangle]
-pub extern "C" fn morloc_lifeline_adopt() -> i32 {
+pub(crate) fn morloc_lifeline_adopt() -> i32 {
     adopt()
 }
 
-#[no_mangle]
-pub extern "C" fn morloc_lifeline_guard() {
+pub(crate) fn morloc_lifeline_guard() {
     guard()
 }
 
 /// End this process group (see `teardown`) once a lifeline the caller
 /// watched itself has reached end of file. Does nothing if none was adopted.
-#[no_mangle]
-pub extern "C" fn morloc_lifeline_teardown() {
+pub(crate) fn morloc_lifeline_teardown() {
     if let Some(a) = ADOPTED.get().copied().flatten() {
         teardown(a.nexus_pgid, GRACE);
     }
@@ -476,5 +472,28 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!process::alive(worker as u32, 0), "a worker ignoring SIGTERM outlived its nexus");
+    }
+}
+
+mod c_abi {
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const std::ffi::c_char {
+        super::morloc_lifeline_child_env(read_fd)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_lifeline_adopt() -> i32 {
+        super::morloc_lifeline_adopt()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_lifeline_guard() {
+        super::morloc_lifeline_guard()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_lifeline_teardown() {
+        super::morloc_lifeline_teardown()
     }
 }

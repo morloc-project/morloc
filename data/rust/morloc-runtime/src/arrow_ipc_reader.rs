@@ -83,8 +83,7 @@ unsafe fn hand_out(buf: Vec<u8>, out_buf: *mut *mut u8, out_len: *mut usize, err
 ///
 /// # Safety
 /// `header` must be a live table block.
-#[no_mangle]
-pub unsafe extern "C" fn write_arrow_ipc_to_buffer(
+pub(crate) unsafe fn write_arrow_ipc_to_buffer(
     header: *const ArrowShmHeader,
     out_buf: *mut *mut u8,
     out_len: *mut usize,
@@ -135,8 +134,7 @@ unsafe fn write_arrow_ipc_to_buffer_impl(
 ///
 /// # Safety
 /// `header` must be a live table block.
-#[no_mangle]
-pub unsafe extern "C" fn write_parquet_to_buffer(
+pub(crate) unsafe fn write_parquet_to_buffer(
     header: *const ArrowShmHeader,
     out_buf: *mut *mut u8,
     out_len: *mut usize,
@@ -187,8 +185,7 @@ unsafe fn write_parquet_to_buffer_impl(
 ///
 /// # Safety
 /// `header` must be a live table block.
-#[no_mangle]
-pub unsafe extern "C" fn write_csv_to_buffer(
+pub(crate) unsafe fn write_csv_to_buffer(
     header: *const ArrowShmHeader,
     delimiter: u8,
     out_buf: *mut *mut u8,
@@ -232,8 +229,7 @@ unsafe fn write_csv_to_buffer_impl(
 /// # Safety
 /// `data` must point to `data_len` valid bytes; `schema` must be a valid
 /// CSchema pointer.
-#[no_mangle]
-pub unsafe extern "C" fn read_arrow_ipc_to_shm(
+pub(crate) unsafe fn read_arrow_ipc_to_shm(
     data: *const u8,
     data_len: usize,
     schema: *const CSchema,
@@ -329,8 +325,7 @@ pub fn sniff_table_format(head: &[u8], tail4: &[u8], path: &str) -> Option<Table
 /// # Safety
 /// `path` must be a valid null-terminated string and `schema` a valid
 /// CSchema pointer.
-#[no_mangle]
-pub unsafe extern "C" fn read_table_file_to_shm(
+pub(crate) unsafe fn read_table_file_to_shm(
     path: *const c_char,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
@@ -665,8 +660,7 @@ fn arrow_type_category(dt: &DataType) -> &'static str {
 /// # Safety
 /// `data` must point to `data_len` valid bytes; `out_info` and `errmsg`
 /// must be writable.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_csv_infer(
+pub(crate) unsafe fn morloc_csv_infer(
     data: *const u8,
     data_len: usize,
     delimiter: u8,
@@ -723,8 +717,7 @@ unsafe fn morloc_csv_infer_impl(
 /// # Safety
 /// `data` must point to `data_len` valid bytes; `schema` must be a valid
 /// CSchema pointer.
-#[no_mangle]
-pub unsafe extern "C" fn read_csv_to_shm(
+pub(crate) unsafe fn read_csv_to_shm(
     data: *const u8,
     data_len: usize,
     delimiter: u8,
@@ -797,8 +790,7 @@ unsafe fn read_csv_to_shm_impl(
 /// # Safety
 /// `data` must point to `data_len` valid bytes; `schema` must be a valid
 /// CSchema pointer.
-#[no_mangle]
-pub unsafe extern "C" fn read_parquet_to_shm(
+pub(crate) unsafe fn read_parquet_to_shm(
     data: *const u8,
     data_len: usize,
     schema: *const CSchema,
@@ -1021,5 +1013,49 @@ mod tests {
         survives_mutations("csv", csv, &|b, s, e| unsafe {
             read_csv_to_shm(b.as_ptr(), b.len(), b',', s, e)
         });
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn write_arrow_ipc_to_buffer(header: *const ArrowShmHeader, out_buf: *mut *mut u8, out_len: *mut usize, errmsg: *mut *mut c_char) -> i32 {
+        super::write_arrow_ipc_to_buffer(header, out_buf, out_len, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn write_parquet_to_buffer(header: *const ArrowShmHeader, out_buf: *mut *mut u8, out_len: *mut usize, errmsg: *mut *mut c_char) -> i32 {
+        super::write_parquet_to_buffer(header, out_buf, out_len, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn write_csv_to_buffer(header: *const ArrowShmHeader, delimiter: u8, out_buf: *mut *mut u8, out_len: *mut usize, errmsg: *mut *mut c_char) -> i32 {
+        super::write_csv_to_buffer(header, delimiter, out_buf, out_len, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_arrow_ipc_to_shm(data: *const u8, data_len: usize, schema: *const CSchema, errmsg: *mut *mut c_char) -> RelPtr {
+        super::read_arrow_ipc_to_shm(data, data_len, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_table_file_to_shm(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> RelPtr {
+        super::read_table_file_to_shm(path, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_csv_infer(data: *const u8, data_len: usize, delimiter: u8, out_info: *mut *mut c_char, errmsg: *mut *mut c_char) -> bool {
+        super::morloc_csv_infer(data, data_len, delimiter, out_info, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_csv_to_shm(data: *const u8, data_len: usize, delimiter: u8, schema: *const CSchema, errmsg: *mut *mut c_char) -> RelPtr {
+        super::read_csv_to_shm(data, data_len, delimiter, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_parquet_to_shm(data: *const u8, data_len: usize, schema: *const CSchema, errmsg: *mut *mut c_char) -> RelPtr {
+        super::read_parquet_to_shm(data, data_len, schema, errmsg)
     }
 }

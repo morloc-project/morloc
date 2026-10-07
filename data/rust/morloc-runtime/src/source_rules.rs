@@ -1060,3 +1060,73 @@ fn every_crate_refuses_to_build_without_unwinding() {
         );
     }
 }
+
+/// Finds `#[no_mangle]` functions outside a private `c_abi` module, and paths
+/// through `c_abi` outside it and outside test code.
+struct CAbiRule {
+    in_c_abi: bool,
+    in_test: bool,
+    found: Vec<String>,
+}
+
+fn exported(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        let t = a.to_token_stream().to_string().replace(' ', "");
+        t == "#[no_mangle]" || t == "#[unsafe(no_mangle)]" || t.starts_with("#[export_name") || t.starts_with("#[unsafe(export_name")
+    })
+}
+
+impl<'ast> Visit<'ast> for CAbiRule {
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        let (c, t) = (self.in_c_abi, self.in_test);
+        if m.ident == "c_abi" {
+            if !matches!(m.vis, syn::Visibility::Inherited) {
+                self.found.push("a c_abi module is not private".into());
+            }
+            self.in_c_abi = true;
+        }
+        self.in_test |= has_test_attr(&m.attrs);
+        syn::visit::visit_item_mod(self, m);
+        (self.in_c_abi, self.in_test) = (c, t);
+    }
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        if !self.in_c_abi && exported(&f.attrs) {
+            self.found.push(format!("{} is exported outside c_abi", f.sig.ident));
+        }
+        syn::visit::visit_item_fn(self, f);
+    }
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        if exported(&f.attrs) {
+            self.found.push(format!("{} is exported from an impl", f.sig.ident));
+        }
+        syn::visit::visit_impl_item_fn(self, f);
+    }
+    fn visit_foreign_item_fn(&mut self, f: &'ast syn::ForeignItemFn) {
+        if !self.in_test {
+            self.found.push(format!("{} is declared foreign, so a call to it crosses a C boundary", f.sig.ident));
+        }
+    }
+    fn visit_use_tree(&mut self, u: &'ast syn::UseTree) {
+        if !self.in_c_abi && !self.in_test && u.to_token_stream().to_string().split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == "c_abi") {
+            self.found.push(format!("use {} names a C entry point", u.to_token_stream()));
+        }
+    }
+    fn visit_path(&mut self, p: &'ast syn::Path) {
+        if !self.in_c_abi && !self.in_test && p.segments.iter().any(|s| s.ident == "c_abi") {
+            self.found.push(format!("{} names a C entry point", p.to_token_stream()));
+        }
+        syn::visit::visit_path(self, p);
+    }
+}
+
+#[test]
+fn rust_code_calls_the_rust_function_behind_a_c_entry_point() {
+    let mut found = Vec::new();
+    for path in walk(&rust_root().join("morloc-runtime").join("src"), &["rs"], &[]) {
+        let file = syn::parse_file(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut rule = CAbiRule { in_c_abi: false, in_test: false, found: Vec::new() };
+        rule.visit_file(&file);
+        found.extend(rule.found.into_iter().map(|f| format!("{}: {f}", path.display())));
+    }
+    assert!(found.is_empty(), "DAEMON-9: {}", found.join("\n"));
+}

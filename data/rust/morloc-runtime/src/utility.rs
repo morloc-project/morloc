@@ -95,8 +95,7 @@ pub unsafe fn set_nosigpipe(fd: i32) {
 
 // ── File operations ────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn file_exists(filename: *const c_char) -> bool {
+pub(crate) unsafe fn file_exists(filename: *const c_char) -> bool {
     if filename.is_null() {
         return false;
     }
@@ -104,8 +103,7 @@ pub unsafe extern "C" fn file_exists(filename: *const c_char) -> bool {
     std::path::Path::new(path.as_ref()).exists()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn mkdir_p(path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
+pub(crate) unsafe fn mkdir_p(path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
     clear_errmsg(errmsg);
     if path.is_null() {
         set_errmsg(errmsg, &MorlocError::Other("NULL path".into()));
@@ -124,8 +122,7 @@ pub unsafe extern "C" fn mkdir_p(path: *const c_char, errmsg: *mut *mut c_char) 
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn delete_directory(path: *const c_char) {
+pub(crate) unsafe fn delete_directory(path: *const c_char) {
     if path.is_null() {
         return;
     }
@@ -133,8 +130,7 @@ pub unsafe extern "C" fn delete_directory(path: *const c_char) {
     let _ = std::fs::remove_dir_all(p.as_ref());
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn has_suffix(x: *const c_char, suffix: *const c_char) -> bool {
+pub(crate) unsafe fn has_suffix(x: *const c_char, suffix: *const c_char) -> bool {
     if x.is_null() || suffix.is_null() {
         return false;
     }
@@ -355,8 +351,7 @@ pub fn write_atomic_path(path: &std::path::Path, bytes: &[u8]) -> std::io::Resul
     staged.commit()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn write_atomic(
+pub(crate) unsafe fn write_atomic(
     filename: *const c_char,
     data: *const u8,
     size: usize,
@@ -385,8 +380,7 @@ pub unsafe extern "C" fn write_atomic(
 
 // ── Binary I/O ─────────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn read_binary_file(
+pub(crate) unsafe fn read_binary_file(
     filename: *const c_char,
     file_size: *mut usize,
     errmsg: *mut *mut c_char,
@@ -415,8 +409,7 @@ pub unsafe extern "C" fn read_binary_file(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn read_binary_fd(
+pub(crate) unsafe fn read_binary_fd(
     file: *mut libc::FILE,
     file_size: *mut usize,
     errmsg: *mut *mut c_char,
@@ -498,8 +491,7 @@ pub fn write_all_to_fd(fd: i32, bytes: &[u8]) -> Result<(), MorlocError> {
 
 /// Returns 0, or `MLC_RESULT_PIPE_CLOSED` when the reader closed `fd`, or -1;
 /// `errmsg` holds the reason for either failure.
-#[no_mangle]
-pub unsafe extern "C" fn write_binary_fd(
+pub(crate) unsafe fn write_binary_fd(
     fd: i32,
     buf: *const c_char,
     count: usize,
@@ -516,8 +508,7 @@ pub unsafe extern "C" fn write_binary_fd(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn print_binary(
+pub(crate) unsafe fn print_binary(
     buf: *const c_char,
     count: usize,
     errmsg: *mut *mut c_char,
@@ -527,8 +518,7 @@ pub unsafe extern "C" fn print_binary(
 
 // ── Display ────────────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn hex(ptr: *const c_void, size: usize) {
+pub(crate) unsafe fn hex(ptr: *const c_void, size: usize) {
     if ptr.is_null() || size == 0 {
         return;
     }
@@ -544,8 +534,7 @@ pub unsafe extern "C" fn hex(ptr: *const c_void, size: usize) {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn print_hex_dump(
+pub(crate) unsafe fn print_hex_dump(
     data: *const u8,
     size: usize,
     errmsg: *mut *mut c_char,
@@ -579,8 +568,7 @@ pub unsafe extern "C" fn print_hex_dump(
 // ── xxHash wrapper and mix ─────────────────────────────────────────────────
 
 /// Mix two 64-bit hash values. Matches the C implementation in cache.c.
-#[no_mangle]
-pub extern "C" fn mix(a: u64, b: u64) -> u64 {
+pub(crate) fn mix(a: u64, b: u64) -> u64 {
     const PRIME64_1: u64 = 0x9E3779B185EBCA87;
     const PRIME64_2: u64 = 0xC2B2AE3D27D4EB4F;
     let mut a = a ^ b.wrapping_mul(PRIME64_1);
@@ -588,8 +576,7 @@ pub extern "C" fn mix(a: u64, b: u64) -> u64 {
     a.wrapping_mul(PRIME64_2)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn morloc_xxh64(
+pub(crate) unsafe fn morloc_xxh64(
     input: *const c_void,
     length: usize,
     seed: u64,
@@ -605,8 +592,7 @@ pub unsafe extern "C" fn morloc_xxh64(
 
 /// dirname - returns pointer into the input string (modifies it in-place)
 /// Matches the C behavior: returns "." for empty/NULL, strips trailing slashes
-#[no_mangle]
-pub unsafe extern "C" fn dirname(path: *mut c_char) -> *mut c_char {
+pub(crate) unsafe fn dirname(path: *mut c_char) -> *mut c_char {
     // Return a pointer to the static string "." for empty/null paths and paths with no slash.
     static DOT: [u8; 2] = [b'.', 0];
     let dot_ptr = DOT.as_ptr() as *mut c_char;
@@ -702,5 +688,79 @@ mod socket_addr_tests {
         write_all_to_fd(w, &data).unwrap();
         unsafe { libc::close(w) };
         assert_eq!(reader.join().unwrap(), data);
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn file_exists(filename: *const c_char) -> bool {
+        super::file_exists(filename)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mkdir_p(path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
+        super::mkdir_p(path, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn delete_directory(path: *const c_char) {
+        super::delete_directory(path)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn has_suffix(x: *const c_char, suffix: *const c_char) -> bool {
+        super::has_suffix(x, suffix)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn write_atomic(filename: *const c_char, data: *const u8, size: usize, errmsg: *mut *mut c_char) -> i32 {
+        super::write_atomic(filename, data, size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_binary_file(filename: *const c_char, file_size: *mut usize, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::read_binary_file(filename, file_size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn read_binary_fd(file: *mut libc::FILE, file_size: *mut usize, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::read_binary_fd(file, file_size, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn write_binary_fd(fd: i32, buf: *const c_char, count: usize, errmsg: *mut *mut c_char) -> i32 {
+        super::write_binary_fd(fd, buf, count, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn print_binary(buf: *const c_char, count: usize, errmsg: *mut *mut c_char) -> i32 {
+        super::print_binary(buf, count, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn hex(ptr: *const c_void, size: usize) {
+        super::hex(ptr, size)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn print_hex_dump(data: *const u8, size: usize, errmsg: *mut *mut c_char) -> bool {
+        super::print_hex_dump(data, size, errmsg)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn mix(a: u64, b: u64) -> u64 {
+        super::mix(a, b)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_xxh64(input: *const c_void, length: usize, seed: u64) -> u64 {
+        super::morloc_xxh64(input, length, seed)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn dirname(path: *mut c_char) -> *mut c_char {
+        super::dirname(path)
     }
 }

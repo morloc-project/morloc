@@ -179,8 +179,7 @@ unsafe fn router_build(
 // Serve exactly the named programs under `fdb_path`. A named program that is not
 // installed is an error. The only serve path: which modules are served is an
 // explicit decision, never "whatever happens to be installed".
-#[no_mangle]
-pub unsafe extern "C" fn router_init_explicit(
+pub(crate) unsafe fn router_init_explicit(
     fdb_path: *const c_char,
     names: *const *const c_char,
     n_names: usize,
@@ -202,8 +201,7 @@ pub unsafe extern "C" fn router_init_explicit(
 // Async-signal-safe (only `libc::kill`, no allocation/free/stdio), so it is safe
 // to call from a signal handler; the serving front-end has no other shutdown
 // path (it never returns), so this is how children are told to exit gracefully.
-#[no_mangle]
-pub unsafe extern "C" fn router_terminate_children(router: *mut Router) {
+pub(crate) unsafe fn router_terminate_children(router: *mut Router) {
     if router.is_null() {
         return;
     }
@@ -218,8 +216,7 @@ pub unsafe extern "C" fn router_terminate_children(router: *mut Router) {
 
 // -- router_free --------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn router_free(router: *mut Router) {
+pub(crate) unsafe fn router_free(router: *mut Router) {
     if router.is_null() {
         return;
     }
@@ -311,8 +308,7 @@ unsafe fn find_morloc_nexus() -> Result<String, Vec<String>> {
 
 // -- router_start_program -----------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn router_start_program(
+pub(crate) unsafe fn router_start_program(
     prog: *mut RouterProgram,
     errmsg: *mut *mut c_char,
 ) -> bool {
@@ -476,8 +472,7 @@ pub unsafe extern "C" fn router_start_program(
 
 // -- router_forward -----------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn router_forward(
+pub(crate) unsafe fn router_forward(
     router: *mut Router,
     program: *const c_char,
     request: *mut DaemonRequest,
@@ -780,8 +775,7 @@ unsafe fn serialize_request_to_json(request: *mut DaemonRequest) -> String {
 
 // -- router_build_discovery ---------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn router_build_discovery(router: *mut Router) -> *mut c_char {
+pub(crate) unsafe fn router_build_discovery(router: *mut Router) -> *mut c_char {
     // Walk the canonical Manifest C struct from manifest_ffi.rs. No
     // local mirror -- the in-memory layout is shared.
     use crate::manifest_ffi::Manifest as ManifestC;
@@ -870,5 +864,39 @@ mod forward_tests {
         req.args_json = a.as_ptr() as *mut c_char;
         let json = unsafe { serialize_request_to_json(&mut req) };
         assert_eq!(json, format!("{{\"method\":\"call\",\"command\":\"f\",\"args\":{args},\"media\":true}}"));
+    }
+}
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn router_init_explicit(fdb_path: *const c_char, names: *const *const c_char, n_names: usize, errmsg: *mut *mut c_char) -> *mut Router {
+        super::router_init_explicit(fdb_path, names, n_names, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn router_terminate_children(router: *mut Router) {
+        super::router_terminate_children(router)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn router_free(router: *mut Router) {
+        super::router_free(router)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn router_start_program(prog: *mut RouterProgram, errmsg: *mut *mut c_char) -> bool {
+        super::router_start_program(prog, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn router_forward(router: *mut Router, program: *const c_char, request: *mut DaemonRequest, errmsg: *mut *mut c_char) -> *mut DaemonResponse {
+        super::router_forward(router, program, request, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn router_build_discovery(router: *mut Router) -> *mut c_char {
+        super::router_build_discovery(router)
     }
 }

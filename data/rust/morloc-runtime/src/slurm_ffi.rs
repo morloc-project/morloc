@@ -21,8 +21,7 @@ pub struct Resources {
 
 // ── parse_slurm_time ─────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn parse_slurm_time(
+pub(crate) unsafe fn parse_slurm_time(
     time_str: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> usize {
@@ -80,8 +79,7 @@ pub unsafe extern "C" fn parse_slurm_time(
     (seconds + 60 * minutes + 60 * 60 * hours + 60 * 60 * 24 * days) as usize
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn write_slurm_time(seconds: i32) -> *mut c_char {
+pub(crate) unsafe fn write_slurm_time(seconds: i32) -> *mut c_char {
     let mut rem = seconds;
     let days = rem / (60 * 60 * 24);
     rem -= days * 60 * 60 * 24;
@@ -99,8 +97,7 @@ pub unsafe extern "C" fn write_slurm_time(seconds: i32) -> *mut c_char {
 
 // ── parse_morloc_call_arguments ──────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn parse_morloc_call_arguments(
+pub(crate) unsafe fn parse_morloc_call_arguments(
     packet: *mut u8,
     args: *mut *mut u8,
     nargs: *mut usize,
@@ -138,8 +135,7 @@ pub unsafe extern "C" fn parse_morloc_call_arguments(
 
 // ── slurm_job_is_complete ────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn slurm_job_is_complete(job_id: u32) -> bool {
+pub(crate) unsafe fn slurm_job_is_complete(job_id: u32) -> bool {
     // Containerized path: ask the host-side bridge instead of shelling
     // out to sacct (which isn't on the container's PATH). Any transport
     // error here returns false so the caller keeps polling -- the
@@ -187,8 +183,7 @@ fn shell_escape(input: &str) -> String {
 
 // ── submit_morloc_slurm_job ──────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn submit_morloc_slurm_job(
+pub(crate) unsafe fn submit_morloc_slurm_job(
     nexus_path: *const c_char,
     socket_basename: *const c_char,
     call_packet_filename: *const c_char,
@@ -353,8 +348,7 @@ pub unsafe extern "C" fn submit_morloc_slurm_job(
 
 // ── remote_call ──────────────────────────────────────────────────────────────
 
-#[no_mangle]
-pub unsafe extern "C" fn remote_call(
+pub(crate) unsafe fn remote_call(
     midx: i32,
     socket_basename: *const c_char,
     cache_path: *const c_char,
@@ -695,3 +689,37 @@ macro_rules! goto_cleanup {
     }};
 }
 use goto_cleanup;
+
+mod c_abi {
+    use super::*;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn parse_slurm_time(time_str: *const c_char, errmsg: *mut *mut c_char) -> usize {
+        super::parse_slurm_time(time_str, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn write_slurm_time(seconds: i32) -> *mut c_char {
+        super::write_slurm_time(seconds)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn parse_morloc_call_arguments(packet: *mut u8, args: *mut *mut u8, nargs: *mut usize, errmsg: *mut *mut c_char) -> bool {
+        super::parse_morloc_call_arguments(packet, args, nargs, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn slurm_job_is_complete(job_id: u32) -> bool {
+        super::slurm_job_is_complete(job_id)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn submit_morloc_slurm_job(nexus_path: *const c_char, socket_basename: *const c_char, call_packet_filename: *const c_char, result_cache_filename: *const c_char, output_filename: *const c_char, error_filename: *const c_char, resources: *const Resources, errmsg: *mut *mut c_char) -> u32 {
+        super::submit_morloc_slurm_job(nexus_path, socket_basename, call_packet_filename, result_cache_filename, output_filename, error_filename, resources, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn remote_call(midx: i32, socket_basename: *const c_char, cache_path: *const c_char, resources: *const Resources, arg_packets: *const *const u8, nargs: usize, errmsg: *mut *mut c_char) -> *mut u8 {
+        super::remote_call(midx, socket_basename, cache_path, resources, arg_packets, nargs, errmsg)
+    }
+}

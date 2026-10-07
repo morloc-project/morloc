@@ -350,8 +350,7 @@ fn write_summary_json(exit_code: i32) {
 /// processes never call it directly; they hit `get_run` lazily via the
 /// first log emission. Also seeds the [`RunContext`] used by the
 /// summary writer (started-at fields).
-#[no_mangle]
-pub extern "C" fn morloc_run_init() {
+pub(crate) fn morloc_run_init() {
     let _ = get_run();
     let _ = CONTEXT.get_or_init(|| RunContext {
         started_at: Instant::now(),
@@ -379,8 +378,7 @@ unsafe fn store_ctx_field(field: &Held<Option<String>>, cstr: *const libc::c_cha
 /// `summary.json` and `{name}` in prologue/epilogue templates.
 ///
 /// Safety: `name` must be a NUL-terminated UTF-8 string or NULL.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_run_record_command(name: *const libc::c_char) {
+pub(crate) unsafe fn morloc_run_record_command(name: *const libc::c_char) {
     store_ctx_field(&RUN_COMMAND, name);
 }
 
@@ -389,8 +387,7 @@ pub unsafe extern "C" fn morloc_run_record_command(name: *const libc::c_char) {
 /// epilogue.
 ///
 /// Safety: `msg` must be a NUL-terminated UTF-8 string or NULL.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_run_record_error(msg: *const libc::c_char) {
+pub(crate) unsafe fn morloc_run_record_error(msg: *const libc::c_char) {
     store_ctx_field(&RUN_ERROR, msg);
 }
 
@@ -400,8 +397,7 @@ pub unsafe extern "C" fn morloc_run_record_error(msg: *const libc::c_char) {
 /// templates without reparsing `MORLOC_RUN_DIR`.
 ///
 /// Safety: `buf` must be writable for at least `len` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_run_id(buf: *mut libc::c_char, len: usize) -> usize {
+pub(crate) unsafe fn morloc_run_id(buf: *mut libc::c_char, len: usize) -> usize {
     if buf.is_null() || len == 0 {
         return 0;
     }
@@ -421,8 +417,7 @@ pub unsafe extern "C" fn morloc_run_id(buf: *mut libc::c_char, len: usize) -> us
 /// can render `{hostname}` without an independent gethostname dance.
 ///
 /// Safety: `buf` must be writable for at least `len` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn morloc_hostname(buf: *mut libc::c_char, len: usize) -> usize {
+pub(crate) unsafe fn morloc_hostname(buf: *mut libc::c_char, len: usize) -> usize {
     if buf.is_null() || len == 0 {
         return 0;
     }
@@ -438,8 +433,7 @@ pub unsafe extern "C" fn morloc_hostname(buf: *mut libc::c_char, len: usize) -> 
 /// tee handles. Called from the nexus's `clean_exit` after pools have been
 /// torn down so any in-flight log lines they wrote also land in the
 /// per-label files.
-#[no_mangle]
-pub extern "C" fn morloc_run_finalize(exit_code: i32) {
+pub(crate) fn morloc_run_finalize(exit_code: i32) {
     write_summary_json(exit_code);
     crate::cli::remove_spooled_inputs();
     // FORK-10: the files are closed after the locks are released.
@@ -489,5 +483,38 @@ mod tests {
         // A pid that is not in our ancestry stands for the stale value a shell
         // exported from an earlier run.
         assert!(!descends_from(-1));
+    }
+}
+
+mod c_abi {
+
+    #[no_mangle]
+    pub extern "C" fn morloc_run_init() {
+        super::morloc_run_init()
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_run_record_command(name: *const libc::c_char) {
+        super::morloc_run_record_command(name)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_run_record_error(msg: *const libc::c_char) {
+        super::morloc_run_record_error(msg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_run_id(buf: *mut libc::c_char, len: usize) -> usize {
+        super::morloc_run_id(buf, len)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_hostname(buf: *mut libc::c_char, len: usize) -> usize {
+        super::morloc_hostname(buf, len)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_run_finalize(exit_code: i32) {
+        super::morloc_run_finalize(exit_code)
     }
 }
