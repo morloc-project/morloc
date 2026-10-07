@@ -66,12 +66,16 @@ module UnitTypeTests
   , variantTests
   , evalSandboxTests
   , typeRenderParenTests
+  , sourceNameTests
   , suspensionLawTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend, generatePools)
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc (pretty, render)
+import Morloc.CodeGenerator.LanguageDescriptor (declaredNamePatterns, matchNamePattern)
+import qualified Morloc.DataFiles as DF
+import Data.Either (isLeft)
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
@@ -11167,3 +11171,99 @@ typeIdentityTests =
             f :: Box -> Int
         |]
       ]
+
+-- A sourced name is emitted verbatim into the pool, so a name that is not a
+-- name in its language would be code.
+sourceNameTests :: TestTree
+sourceNameTests =
+  testGroup "a sourced name is a name, not code"
+    [ expectError "C++: an expression is not a source name"
+          [r|
+          module main (f)
+          source Cpp from "m" ("plain(1)+ns::inc" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Rust: an expression is not a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("plain(1)+inc" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "C: an expression is not a source name"
+          [r|
+          module main (f)
+          source C from "m" ("plain(1)+inc" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Futhark: an expression is not a source name"
+          [r|
+          module main (f)
+          source Futhark from "m" ("f (1)" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "C++: a single colon is not a scope operator"
+          [r|
+          module main (f)
+          source Cpp from "m" ("ns:inc" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "C++: a trailing scope operator names nothing"
+          [r|
+          module main (f)
+          source Cpp from "m" ("ns::" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Rust: a leading scope operator is not a path"
+          [r|
+          module main (f)
+          source Rust from "m" ("::inc" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectPass "C++: a qualified name is a source name"
+          [r|
+          module main (f)
+          source Cpp from "m" ("ns::inc" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "C++: a leading scope operator is not a name"
+          [r|
+          module main (f)
+          source Cpp from "m" ("::plain" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectPass "Rust: a path is a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("a::b" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , testCase "every built-in language declares patterns that compile" $
+        mapM_
+          (\(n, f) -> case declaredNamePatterns (DF.embededFileText f) of
+              Left e -> assertFailure (n <> ": " <> e)
+              Right _ -> return ())
+          DF.langRegistryFiles
+    , testCase "a descriptor without a name pattern is refused" $
+        assertBool "accepted" . isLeft $
+          declaredNamePatterns "name: x\nldOperatorPattern: \"[+]+\"\n"
+    , testCase "an empty pattern is refused" $
+        assertBool "accepted" . isLeft $
+          declaredNamePatterns "ldNamePattern: \"\"\nldOperatorPattern: \"[+]+\"\n"
+    , testCase "a pattern that does not parse is refused" $
+        assertBool "accepted" . isLeft $
+          declaredNamePatterns "ldNamePattern: \"[a-\"\nldOperatorPattern: \"[+]+\"\n"
+    , testCase "a group repeats" $
+        matchNamePattern "a(::a)*" "a::a::a" @?= Right True
+    , testCase "a group must match whole" $
+        matchNamePattern "a(::a)*" "a::" @?= Right False
+    ]

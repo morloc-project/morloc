@@ -11,5 +11,5 @@ cost: 0
 # String maps to Rust `String` (UTF-8, length-prefixed, interior NULs allowed).
 allow_string_null: true
 # A sourced symbol is a Rust path identifier (allowing ::).
-ldNamePattern: "[A-Za-z_][A-Za-z0-9_:]*"
-ldOperatorPattern: "[-!%&*+./<=>^|$~@:?]+"
+ldNamePattern: "[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*"
+ldOperatorPattern: "[-!%&*+./<=>^|~]+"

@@ -10,4 +10,4 @@ cost: 1
 allow_string_null: false
 # A sourced symbol is a C identifier or operator, emitted verbatim.
 ldNamePattern: "[A-Za-z_][A-Za-z0-9_]*"
-ldOperatorPattern: "[-!%&*+./<=>^|$~@:?]+"
+ldOperatorPattern: "[-!%&*+./<=>^|~]+"
