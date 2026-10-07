@@ -470,7 +470,11 @@ pub(crate) fn exits_cleanly_in_a_forked_child(work: impl FnOnce() -> bool) -> bo
     if pid == 0 {
         run_in_child(5, work);
     }
-    wait_status(pid) == 0
+    let status = wait_status(pid);
+    if status != 0 {
+        report_status("a forked test process", status);
+    }
+    status == 0
 }
 
 #[cfg(test)]

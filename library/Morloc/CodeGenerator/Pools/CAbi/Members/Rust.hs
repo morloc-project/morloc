@@ -2157,7 +2157,7 @@ makeTheMaker crateName offline locks = do
       copyCmd =
         SysRun . Code . render $
           if SI.os == "darwin"
-            then [idoc|cp '#{binPath}' '#{outRel}' && rm -rf '#{outRel}.dSYM' && cp -R '#{binPath}.dSYM' '#{outRel}.dSYM'|]
+            then [idoc|cp '#{binPath}' '#{outRel}' && rm -rf '#{outRel}.dSYM' && cp -RL '#{binPath}.dSYM' '#{outRel}.dSYM'|]
             else [idoc|cp '#{binPath}' '#{outRel}'|]
       -- Runs only after a successful build, so a failed resolution never
       -- writes anything into the environment lock.
