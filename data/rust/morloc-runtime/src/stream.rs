@@ -11937,10 +11937,8 @@ mod tests {
         // A slot of the same kind that does not hold the claim, as an open
         // that lost the race to claim it leaves behind.
         let (_, slot, guard) = allocate_slot_cas().unwrap();
-        unsafe {
-            slot.is_stdio.set(1);
-            slot.stdio_kind.set(STDIO_KIND_STDIN);
-        }
+        slot.is_stdio.set(1);
+        slot.stdio_kind.set(STDIO_KIND_STDIN);
         release_slot_locked(slot);
         drop(guard);
         assert_eq!(claim.load(Ordering::Acquire), h1, "another slot's release cleared the claim");
@@ -12787,11 +12785,9 @@ mod tests {
         // the next open must detect the dead owner, reclaim, and succeed.
         let (_g, idx) = unpack_handle(h1);
         let dead_pid = reap_dead_child_pid();
-        unsafe {
-            let slot = slot_ref(idx).unwrap();
-            slot.opener_pid.set(dead_pid);
-            slot.opener_pid_start_time.set(0);
-        }
+        let slot = slot_ref(idx).unwrap();
+        slot.opener_pid.set(dead_pid);
+        slot.opener_pid_start_time.set(0);
         let h2 = open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, "")
             .expect("dead-owner @stdin claim should be reclaimed");
         close_handle(h2).unwrap();
@@ -13674,10 +13670,8 @@ mod write_behind_tests {
                 libc::_exit(0);
             }
         }
-        unsafe {
-            slot.wb_owner_pid.set(owner as u32);
-            slot.wb_owner_start.set(morloc_runtime_types::process::start_time(owner as u32));
-        }
+        slot.wb_owner_pid.set(owner as u32);
+        slot.wb_owner_start.set(morloc_runtime_types::process::start_time(owner as u32));
         let stale = (gen_claim + 1) & GENERATION_MASK;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -13789,7 +13783,7 @@ mod write_behind_tests {
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
         let (_gen, idx) = unpack_handle(h);
         let slot = slot_ref(idx).unwrap();
-        unsafe { slot.staged.set(1); }
+        slot.staged.set(1);
         let small = odd_batches(4, 20, 'u');
         let big: Vec<String> = (0..1100).map(|i| format!("{i}:{}", "B".repeat(16 * 1024))).collect();
         let mut want = Vec::new();

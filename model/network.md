@@ -28,68 +28,74 @@ listener binds loopback only. The daemon test group `http-auth` runs it end
 to end.
 
 ### NET-2 A remote client's request arrives within a total deadline
-Status: deviation
+Status: implemented
+Checked by: a_request_trickling_in_ends_at_its_deadline, a_request_head_trickling_in_ends_at_its_deadline, a_large_body_gets_time_in_proportion
 
-A request's line and headers arrive within one total deadline from its
-first byte, and its body arrives at no less than a minimum rate. An idle
-keep-alive connection is closed after a limit. A per-read timeout alone
-does not meet this, because a client sending one byte just inside each
-timeout would hold a worker forever.
-
-Missing: the daemon sets a 30 s timeout on each read of an accepted
-connection, and the MCP and front-end connections do the same; neither has
-a total deadline or a minimum rate.
+A request's line and headers, or a length prefix, arrive within one total
+deadline (30 s) of the server starting to wait for them, and its body
+within 30 s plus a second for every 16 KiB. On a keep-alive connection the
+wait for the next request shares that deadline. Every read waits only for
+the time left, so a client sending one byte just inside each per-read
+timeout still runs out of time. This holds for the daemon's HTTP and TCP
+listeners, the MCP server and the serving front end.
 
 ### NET-3 A remote client's share of the server is bounded
-Status: deviation
+Status: implemented
+Checked by: connections_past_the_cap_get_no_slot, read_http_request_rejects_overlong_header_line, read_http_request_rejects_header_flood, read_http_request_body_bounded_to_content_length
 
-The number of connections served at once, the length of a header line, the
-number of headers and the size of a body are each capped. Past the
-connection cap, a new connection is answered 503, or closed, before
-anything is read from it.
-
-Missing: header line length, header count and body size are capped
-(`read_http_request_rejects_overlong_header_line`,
-`read_http_request_rejects_header_flood`,
-`read_http_request_body_bounded_to_content_length`). The MCP server and the
-front end start a thread per connection with no cap, and the daemon queues
-accepted connections without a cap.
+The length of a header line, the number of headers and the size of a body
+are each capped. The MCP server and the front end serve at most 128
+connections at once; the daemon lets at most four remote connections per
+worker wait in its queue. A connection past either cap is answered 503 (or,
+on the daemon's TCP listener, closed) before anything is read from it, and
+without blocking the accept loop. Local connections to the daemon are not
+capped.
 
 ### NET-4 A local endpoint lives in a directory only its user can enter
-Status: deviation
+Status: implemented
+Checked by: a_missing_directory_is_created_private, a_directory_others_may_enter_is_refused, a_symlink_is_refused_even_to_a_private_directory
 
-Every Unix socket, port file and state directory a morloc process creates
-lies under a directory owned by the running user with mode 0700: the run's
-temporary directory, or a per-user runtime directory
-(`$XDG_RUNTIME_DIR/morloc`, else `/tmp/morloc-<uid>`). A per-user directory
-is created when missing, and is used only after its owner and mode have
-been checked. Nothing is created at a fixed path in a directory other users
-can write.
-
-Missing: pool sockets live in the run's private directory. Router sockets
-are created at `/tmp/morloc-router-<name>.sock`, and the daemon's binding
-store at `/tmp/morloc-bindings`.
+Every Unix socket, log and state directory a morloc process creates at a
+name of its own choosing lies under a directory owned by the running user
+with mode 0700: the run's temporary directory, or the per-user runtime
+directory (`$XDG_RUNTIME_DIR/morloc`, else `/tmp/morloc-<uid>`). The
+per-user directory is created when missing and used only after it is found
+to be a real directory, owned by this user, that no one else may enter.
+Router sockets, the daemon's binding store, the router's daemon logs (when
+no state directory is set) and the cache (when no home directory is set)
+live there. A temporary file in a shared directory is made only with a
+unique name, created exclusively. Paths the user names (`--socket`,
+`--port-file`) are the user's choice.
 
 ### NET-5 A request on a local socket waits as long as its sender lives
-Status: deviation
+Status: implemented
+Checked by: a_stopped_sender_keeps_its_request, a_request_whose_sender_is_gone_ends_though_its_fd_lives_on
 
 A pool reading a request from a local socket waits until the request is
 complete, the sender closes its end, or the sending process (its pid taken
-from the socket's peer credentials when the connection is accepted) no
-longer exists. A stopped sender counts as alive. There is no time limit.
-
-Missing: a pool gives up on a request whose first byte, or whose next
-byte, takes more than 30 s, so a sender suspended mid-send loses its call.
+from the socket's peer credentials, with its start time) no longer exists,
+checking once a second. A stopped sender counts as alive; an exited one
+does not, even unreaped. There is no time limit, so a sender suspended mid-send keeps its
+call; a sender that died while a process it forked holds its descriptor
+open is noticed within a second. A sender whose process cannot be named
+(its pid is not visible here, as from another pid namespace) has each stall
+bounded at 30 s instead.
 
 ### NET-6 An endpoint path is taken only from no live listener
-Status: deviation
+Status: implemented
+Checked by: tla:EndpointClaim, tla:EndpointClaim_unlocked.bug, tla:EndpointClaim_unconditional.bug, tla:EndpointClaim_release_then_unlink.bug, tla:EndpointClaim_unverified.bug, a_live_listener_keeps_its_path_and_a_stale_file_is_replaced
 
 A daemon takes its socket path, and its port file, only while it holds an
-exclusive lock on a lock file beside the path; the lock lasts for the
-daemon's life and is never inherited by a child. Holding the lock, it
-replaces a socket file only when connecting to it is refused. If a live
-listener answers, or another daemon holds the lock, it refuses to start.
-
-Missing: a daemon unlinks its socket path before binding, so it takes the
-path from a daemon still serving there; two daemons writing one port file
-share one temporary name.
+exclusive lock on a lock file beside the path. It opens the lock file
+(never following a symlink, never inherited by a child) and takes the lock
+without waiting, refusing to start if another process holds it; if the
+file it locked is no longer the one at that path, it starts over. Holding
+the lock, it binds; when the path is in use it connects to it, refuses to
+start if something answers, and otherwise unlinks the stale file and binds
+again. A port file is written to a temporary name of its own and renamed.
+On exit the daemon removes each endpoint it created and then its lock file
+while it still holds the lock (DAEMON-10), so a daemon that opened the old
+lock file finds it gone and starts over. A daemon that refuses removes nothing: it lets the lock go and leaves
+the lock file in place. A held lock on the port file refuses the start
+like one on the socket; a port file that cannot be written at all is
+reported and the daemon serves without it.

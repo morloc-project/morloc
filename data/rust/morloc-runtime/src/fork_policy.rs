@@ -498,7 +498,7 @@ extern "C" fn exit_on_alarm(_: libc::c_int) {
 
 #[cfg(test)]
 fn run_in_child(seconds: u32, work: impl FnOnce() -> bool) -> ! {
-    unsafe { libc::signal(libc::SIGALRM, exit_on_alarm as libc::sighandler_t) };
+    unsafe { libc::signal(libc::SIGALRM, exit_on_alarm as *const () as libc::sighandler_t) };
     unsafe { libc::alarm(seconds) };
     let ok = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
         Ok(ok) => ok,
@@ -659,18 +659,27 @@ mod tests {
             assert_ne!(p, libc::MAP_FAILED);
             let word: &'static OwnerWord = unsafe { &*(p as *const OwnerWord) };
             word.acquire().unwrap();
+            let ancestor = morloc_runtime_types::process::token();
             let waited = in_a_descendant_with_the_same_pid(move || {
+                let owner = word.owner();
                 std::thread::spawn(|| {
                     std::thread::sleep(std::time::Duration::from_millis(300));
                     unsafe { libc::_exit(0) };
                 });
                 let _ = word.acquire();
+                let took = format!(
+                    "OW-1: the descendant acquired its ancestor's word: ancestor token {ancestor:#x}, descendant token {:#x}, owner {owner:#x}, ancestor start {}, descendant start {}\n",
+                    morloc_runtime_types::process::token(),
+                    morloc_runtime_types::process::start_time((ancestor >> 32) as u32),
+                    morloc_runtime_types::process::start_time(std::process::id()),
+                );
+                unsafe { libc::write(2, took.as_ptr() as *const libc::c_void, took.len()) };
                 false
             });
             unsafe { word.release() };
             waited
         });
-        assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid did not wait on its ancestor's lock");
+        assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid did not wait on its ancestor's lock (its tokens and exit status are on stderr above)");
     }
 
     #[test]

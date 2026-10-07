@@ -977,8 +977,11 @@ static FRONTEND_ROUTER: std::sync::atomic::AtomicPtr<std::ffi::c_void> =
 /// SIGTERM/SIGINT handler for the serving front-end: async-signal-safe. Tells
 /// each child daemon to shut down (SIGTERM, so it sweeps its own SHM) and exits.
 extern "C" fn frontend_shutdown_handler(_sig: libc::c_int) {
-    stop_frontend_children();
-    unsafe { libc::_exit(0) };
+    // PANIC-1
+    morloc_runtime_types::panic::signal_frame(|| {
+        stop_frontend_children();
+        unsafe { libc::_exit(0) };
+    })
 }
 
 /// Async-signal-safe; does nothing outside the serving front-end.

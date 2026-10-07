@@ -15,7 +15,7 @@ use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 
 use crate::arrow_shm::{self, ArrowShmHeader};
 use crate::cschema::CSchema;
-use crate::error::{set_errmsg, MorlocError};
+use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use morloc_runtime_types::{PRINT_RESULT_ERR, PRINT_RESULT_OK, PRINT_RESULT_PIPE_CLOSED};
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, RelPtr};
@@ -45,7 +45,8 @@ pub(crate) unsafe fn arrow_to_shm_typed(
     declared: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    crate::error::guarded(errmsg, shm::RELNULL, || arrow_to_shm_typed_impl(array, schema, declared, errmsg))
+    clear_errmsg(errmsg);
+    arrow_to_shm_typed_impl(array, schema, declared, errmsg)
 }
 
 unsafe fn arrow_to_shm_typed_impl(
@@ -61,16 +62,22 @@ unsafe fn arrow_to_shm_typed_impl(
     if let Some(rel) = arrow_shm::try_borrow(array, schema, declared_rs.as_ref()) {
         let raw = array as *mut arrow_shm::RawArray;
         if let Some(release) = (*raw).release {
-            release(array);
+            // PANIC-2: the producer's own code, never a catch scope's.
+            morloc_runtime_types::panic::outside_scope(|| release(array));
         }
         if stats_enabled() {
             eprintln!("arrow_to_shm: borrowed");
         }
         return rel;
     }
-    let batch = match arrow_shm::ffi_to_batch(array, schema) {
-        Ok(b) => b,
-        Err(e) => {
+    // PANIC-2
+    let batch = match crate::error::decode("importing an arrow table", || {
+        let batch = arrow_shm::ffi_to_batch(array, schema)?;
+        crate::arrow_ipc_reader::validate_batches(std::slice::from_ref(&batch), false)?;
+        Ok(batch)
+    }) {
+        Ok(Ok(b)) => b,
+        Ok(Err(e)) | Err(e) => {
             set_errmsg(errmsg, &e);
             return shm::RELNULL;
         }
@@ -105,7 +112,8 @@ pub(crate) unsafe fn arrow_stream_to_shm_typed(
     declared: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    crate::error::guarded(errmsg, shm::RELNULL, || arrow_stream_to_shm_typed_impl(stream, declared, errmsg))
+    clear_errmsg(errmsg);
+    arrow_stream_to_shm_typed_impl(stream, declared, errmsg)
 }
 
 unsafe fn arrow_stream_to_shm_typed_impl(
@@ -118,18 +126,35 @@ unsafe fn arrow_stream_to_shm_typed_impl(
         set_errmsg(errmsg, &MorlocError::Other("NULL arrow stream".into()));
         return shm::RELNULL;
     }
-    let reader = match ArrowArrayStreamReader::from_raw(stream) {
-        Ok(r) => r,
-        Err(e) => {
+    // PANIC-2
+    let mut reader = match crate::error::decode("importing an arrow stream", || ArrowArrayStreamReader::from_raw(stream)) {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             set_errmsg(errmsg, &MorlocError::Other(format!("importing arrow stream: {}", e)));
+            return shm::RELNULL;
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
             return shm::RELNULL;
         }
     };
     let schema = arrow_array::RecordBatchReader::schema(&reader);
-    let batches: Vec<RecordBatch> = match reader.collect::<Result<Vec<_>, _>>() {
-        Ok(v) => v,
-        Err(e) => {
+    // PANIC-2
+    let read = crate::error::decode("reading an arrow stream", || {
+        let batches = reader.by_ref().collect::<Result<Vec<RecordBatch>, _>>()?;
+        crate::arrow_ipc_reader::validate_batches(&batches, false).map_err(|e| arrow_schema::ArrowError::InvalidArgumentError(e.to_string()))?;
+        Ok::<_, arrow_schema::ArrowError>(batches)
+    });
+    // PANIC-2: dropping the reader runs the producer's release.
+    morloc_runtime_types::panic::outside_scope(|| drop(reader));
+    let batches = match read {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
             set_errmsg(errmsg, &MorlocError::Other(format!("reading arrow stream: {}", e)));
+            return shm::RELNULL;
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
             return shm::RELNULL;
         }
     };
@@ -138,10 +163,15 @@ unsafe fn arrow_stream_to_shm_typed_impl(
     } else if batches.is_empty() {
         RecordBatch::new_empty(schema)
     } else {
-        match arrow_select::concat::concat_batches(&schema, &batches) {
-            Ok(b) => b,
-            Err(e) => {
+        // PANIC-2
+        match crate::error::decode("concatenating an arrow stream", || arrow_select::concat::concat_batches(&schema, &batches)) {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => {
                 set_errmsg(errmsg, &MorlocError::Other(format!("concatenating arrow stream: {}", e)));
+                return shm::RELNULL;
+            }
+            Err(e) => {
+                set_errmsg(errmsg, &e);
                 return shm::RELNULL;
             }
         }
@@ -164,7 +194,8 @@ pub(crate) unsafe fn arrow_from_shm(
     out_array: *mut FFI_ArrowArray,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    crate::error::guarded(errmsg, 1, || arrow_from_shm_impl(header, out_schema, out_array, errmsg))
+    clear_errmsg(errmsg);
+    arrow_from_shm_impl(header, out_schema, out_array, errmsg)
 }
 
 unsafe fn arrow_from_shm_impl(
@@ -190,7 +221,8 @@ pub(crate) unsafe fn arrow_validate(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    crate::error::guarded(errmsg, 1, || arrow_validate_impl(header, schema, errmsg))
+    clear_errmsg(errmsg);
+    arrow_validate_impl(header, schema, errmsg)
 }
 
 unsafe fn arrow_validate_impl(
@@ -226,15 +258,14 @@ pub(crate) unsafe fn arrow_from_shm_owned(
     out_array: *mut FFI_ArrowArray,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    crate::error::guarded(errmsg, 1, || {
-        match arrow_shm::shm_to_ffi_owned(header, acquire != 0, out_schema, out_array) {
-            Ok(()) => 0,
-            Err(e) => {
-                set_errmsg(errmsg, &e);
-                1
-            }
+    clear_errmsg(errmsg);
+    match arrow_shm::shm_to_ffi_owned(header, acquire != 0, out_schema, out_array) {
+        Ok(()) => 0,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            1
         }
-    })
+    }
 }
 
 /// Bytes of shared memory held by this process's open table views. A
@@ -379,7 +410,8 @@ unsafe fn write_stdout(s: &str, errmsg: *mut *mut c_char) -> i32 {
 
 /// Print a block as a JSON array of row objects, one line.
 pub(crate) unsafe fn print_arrow_as_json(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
-    crate::error::guarded(errmsg, PRINT_RESULT_ERR, || print_arrow_as_json_impl(data, errmsg))
+    clear_errmsg(errmsg);
+    print_arrow_as_json_impl(data, errmsg)
 }
 
 unsafe fn print_arrow_as_json_impl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
@@ -464,7 +496,8 @@ pub(crate) unsafe fn arrow_to_json_string(
 /// written as it is built, so peak memory is one row's JSON body rather
 /// than the whole table -- the same reason `print_voidstar_jsonl` streams.
 pub(crate) unsafe fn print_arrow_as_jsonl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
-    crate::error::guarded(errmsg, PRINT_RESULT_ERR, || print_arrow_as_jsonl_impl(data, errmsg))
+    clear_errmsg(errmsg);
+    print_arrow_as_jsonl_impl(data, errmsg)
 }
 
 unsafe fn print_arrow_as_jsonl_impl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
@@ -500,7 +533,8 @@ unsafe fn print_arrow_as_jsonl_impl(data: *const c_void, errmsg: *mut *mut c_cha
 /// Print a block as a tab-separated table: a header line of column names,
 /// then one line per row with cells rendered as in the JSON form.
 pub(crate) unsafe fn print_arrow_as_table(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
-    crate::error::guarded(errmsg, PRINT_RESULT_ERR, || print_arrow_as_table_impl(data, errmsg))
+    clear_errmsg(errmsg);
+    print_arrow_as_table_impl(data, errmsg)
 }
 
 unsafe fn print_arrow_as_table_impl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
@@ -688,7 +722,8 @@ pub(crate) unsafe fn read_json_to_arrow_shm(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    crate::error::guarded(errmsg, shm::RELNULL, || read_json_to_arrow_shm_impl(json, schema, errmsg))
+    clear_errmsg(errmsg);
+    read_json_to_arrow_shm_impl(json, schema, errmsg)
 }
 
 unsafe fn read_json_to_arrow_shm_impl(

@@ -65,3 +65,6 @@ release.
 - `tla/DaemonRecovery.tla` -- pool-crash recovery against running requests
 - `tla/ForkLocks.tla` -- process-wide locks across fork
 - `tla/LazyInit.tla` -- initialising a process-wide value on first use
+- `tla/PoolGroup.tla` -- a process group id held while the nexus may signal it
+- `tla/RouterRestart.tla` -- the router restarting a program's daemon
+- `tla/EndpointClaim.tla` -- daemons claiming one socket path

@@ -15,7 +15,7 @@ use arrow_schema::{DataType, Field, Schema as ArrowSchema, SchemaRef};
 use crate::arrow_ffi::is_arrow_table_schema;
 use crate::arrow_shm::{self, ArrowShmHeader};
 use crate::cschema::CSchema;
-use crate::error::{set_errmsg, MorlocError};
+use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, RelPtr};
 
@@ -89,7 +89,8 @@ pub(crate) unsafe fn write_arrow_ipc_to_buffer(
     out_len: *mut usize,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    crate::error::guarded(errmsg, 1, || write_arrow_ipc_to_buffer_impl(header, out_buf, out_len, errmsg))
+    clear_errmsg(errmsg);
+    write_arrow_ipc_to_buffer_impl(header, out_buf, out_len, errmsg)
 }
 
 unsafe fn write_arrow_ipc_to_buffer_impl(
@@ -140,7 +141,8 @@ pub(crate) unsafe fn write_parquet_to_buffer(
     out_len: *mut usize,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    crate::error::guarded(errmsg, 1, || write_parquet_to_buffer_impl(header, out_buf, out_len, errmsg))
+    clear_errmsg(errmsg);
+    write_parquet_to_buffer_impl(header, out_buf, out_len, errmsg)
 }
 
 unsafe fn write_parquet_to_buffer_impl(
@@ -192,7 +194,8 @@ pub(crate) unsafe fn write_csv_to_buffer(
     out_len: *mut usize,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    crate::error::guarded(errmsg, 1, || write_csv_to_buffer_impl(header, delimiter, out_buf, out_len, errmsg))
+    clear_errmsg(errmsg);
+    write_csv_to_buffer_impl(header, delimiter, out_buf, out_len, errmsg)
 }
 
 unsafe fn write_csv_to_buffer_impl(
@@ -235,7 +238,8 @@ pub(crate) unsafe fn read_arrow_ipc_to_shm(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    crate::error::guarded(errmsg, shm::RELNULL, || read_arrow_ipc_to_shm_impl(data, data_len, schema, errmsg))
+    clear_errmsg(errmsg);
+    read_arrow_ipc_to_shm_impl(data, data_len, schema, errmsg)
 }
 
 unsafe fn read_arrow_ipc_to_shm_impl(
@@ -255,7 +259,14 @@ unsafe fn read_arrow_ipc_to_shm_impl(
         return shm::RELNULL;
     }
 
-    let decoded = if is_arrow_file_magic(bytes) { read_ipc_file(bytes) } else { read_ipc_stream(bytes) };
+    // PANIC-2: the decoder trusts the buffers it was handed until checked here.
+    let decoded = crate::error::decode("decoding Arrow IPC", || {
+        let (schema, batches) = if is_arrow_file_magic(bytes) { read_ipc_file(bytes) } else { read_ipc_stream(bytes) }?;
+        validate_schema(&schema)?;
+        validate_batches(&batches, true)?;
+        Ok((schema, batches))
+    })
+    .and_then(|r| r);
     match decoded {
         Ok((file_schema, batches)) => batches_to_shm(batches, file_schema, &rs, errmsg),
         Err(e) => {
@@ -263,6 +274,28 @@ unsafe fn read_arrow_ipc_to_shm_impl(
             shm::RELNULL
         }
     }
+}
+
+/// Check a decoded schema converts as the block writer will convert it (a
+/// field name with an interior NUL does not).
+pub(crate) fn validate_schema(schema: &ArrowSchema) -> Result<(), MorlocError> {
+    arrow_schema::ffi::FFI_ArrowSchema::try_from(schema)
+        .map(drop)
+        .map_err(|e| MorlocError::Other(format!("malformed table schema: {e}")))
+}
+
+/// Check decoded batches' buffers against their arrays: their sizes and
+/// offsets, and with `full` their contents (offsets in order, UTF-8 text,
+/// dictionary keys in range).
+pub(crate) fn validate_batches(batches: &[RecordBatch], full: bool) -> Result<(), MorlocError> {
+    for b in batches {
+        for c in b.columns() {
+            let data = c.to_data();
+            let checked = if full { data.validate_full() } else { data.validate() };
+            checked.map_err(|e| MorlocError::Other(format!("malformed table data: {e}")))?;
+        }
+    }
+    Ok(())
 }
 
 /// The table format a file holds, decided by what the bytes say and, only
@@ -308,7 +341,9 @@ pub fn sniff_table_format(head: &[u8], tail4: &[u8], path: &str) -> Option<Table
     }
     for delim in [b',', b'\t'] {
         let format = arrow_csv::reader::Format::default().with_header(true).with_delimiter(delim);
-        if let Ok((schema, rows)) = format.infer_schema(&mut Cursor::new(head), csv_sniff_rows()) {
+        // PANIC-2
+        let sniffed = crate::error::decode("sniffing a table", || format.infer_schema(&mut Cursor::new(head), csv_sniff_rows()));
+        if let Ok(Ok((schema, rows))) = sniffed {
             if rows > 0 && schema.fields().len() > 1 {
                 return Some(TableFormat::Delimited(delim));
             }
@@ -330,7 +365,8 @@ pub(crate) unsafe fn read_table_file_to_shm(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    crate::error::guarded(errmsg, shm::RELNULL, || read_table_file_to_shm_impl(path, schema, errmsg))
+    clear_errmsg(errmsg);
+    read_table_file_to_shm_impl(path, schema, errmsg)
 }
 
 unsafe fn read_table_file_to_shm_impl(
@@ -667,7 +703,8 @@ pub(crate) unsafe fn morloc_csv_infer(
     out_info: *mut *mut c_char,
     errmsg: *mut *mut c_char,
 ) -> bool {
-    crate::error::guarded(errmsg, false, || morloc_csv_infer_impl(data, data_len, delimiter, out_info, errmsg))
+    clear_errmsg(errmsg);
+    morloc_csv_infer_impl(data, data_len, delimiter, out_info, errmsg)
 }
 
 unsafe fn morloc_csv_infer_impl(
@@ -685,10 +722,15 @@ unsafe fn morloc_csv_infer_impl(
     let bytes = std::slice::from_raw_parts(data, data_len);
     let format = arrow_csv::reader::Format::default().with_header(true).with_delimiter(delimiter);
     let mut cursor = Cursor::new(bytes);
-    let schema = match format.infer_schema(&mut cursor, csv_sniff_rows()) {
-        Ok((s, _)) => s,
-        Err(e) => {
+    // PANIC-2
+    let schema = match crate::error::decode("inferring CSV columns", || format.infer_schema(&mut cursor, csv_sniff_rows())) {
+        Ok(Ok((s, _))) => s,
+        Ok(Err(e)) => {
             set_errmsg(errmsg, &MorlocError::Other(format!("{}", e)));
+            return false;
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
             return false;
         }
     };
@@ -724,7 +766,8 @@ pub(crate) unsafe fn read_csv_to_shm(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    crate::error::guarded(errmsg, shm::RELNULL, || read_csv_to_shm_impl(data, data_len, delimiter, schema, errmsg))
+    clear_errmsg(errmsg);
+    read_csv_to_shm_impl(data, data_len, delimiter, schema, errmsg)
 }
 
 unsafe fn read_csv_to_shm_impl(
@@ -749,10 +792,15 @@ unsafe fn read_csv_to_shm_impl(
 
     let format = arrow_csv::reader::Format::default().with_header(true).with_delimiter(delimiter);
     let mut sniff_cursor = Cursor::new(bytes);
-    let inferred = match format.infer_schema(&mut sniff_cursor, csv_sniff_rows()) {
-        Ok((s, _)) => s,
-        Err(e) => {
+    // PANIC-2
+    let inferred = match crate::error::decode("inferring CSV columns", || format.infer_schema(&mut sniff_cursor, csv_sniff_rows())) {
+        Ok(Ok((s, _))) => s,
+        Ok(Err(e)) => {
             set_errmsg(errmsg, &MorlocError::Other(format!("Failed to infer CSV schema: {}", e)));
+            return shm::RELNULL;
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
             return shm::RELNULL;
         }
     };
@@ -764,25 +812,28 @@ unsafe fn read_csv_to_shm_impl(
         }
     };
 
-    let reader = match ReaderBuilder::new(parse_schema.clone())
-        .with_header(true)
-        .with_delimiter(delimiter)
-        .build(Cursor::new(bytes))
-    {
-        Ok(r) => r,
+    // PANIC-2
+    let parsed = crate::error::decode("parsing CSV", || {
+        let reader = ReaderBuilder::new(parse_schema.clone())
+            .with_header(true)
+            .with_delimiter(delimiter)
+            .build(Cursor::new(bytes))
+            .map_err(|e| MorlocError::Other(format!("Failed to open CSV: {}", e)))?;
+        let batches = reader
+            .collect::<Result<Vec<RecordBatch>, _>>()
+            .map_err(|e| MorlocError::Other(format!("Failed to read CSV: {}", e)))?;
+        validate_schema(&parse_schema)?;
+        validate_batches(&batches, false)?;
+        Ok(batches)
+    })
+    .and_then(|r| r);
+    match parsed {
+        Ok(batches) => batches_to_shm(batches, parse_schema, &rs, errmsg),
         Err(e) => {
-            set_errmsg(errmsg, &MorlocError::Other(format!("Failed to open CSV: {}", e)));
-            return shm::RELNULL;
+            set_errmsg(errmsg, &e);
+            shm::RELNULL
         }
-    };
-    let batches: Vec<RecordBatch> = match reader.collect::<Result<Vec<_>, _>>() {
-        Ok(v) => v,
-        Err(e) => {
-            set_errmsg(errmsg, &MorlocError::Other(format!("Failed to read CSV: {}", e)));
-            return shm::RELNULL;
-        }
-    };
-    batches_to_shm(batches, parse_schema, &rs, errmsg)
+    }
 }
 
 /// Read a Parquet file into a table block under the declared schema.
@@ -796,7 +847,8 @@ pub(crate) unsafe fn read_parquet_to_shm(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    crate::error::guarded(errmsg, shm::RELNULL, || read_parquet_to_shm_impl(data, data_len, schema, errmsg))
+    clear_errmsg(errmsg);
+    read_parquet_to_shm_impl(data, data_len, schema, errmsg)
 }
 
 unsafe fn read_parquet_to_shm_impl(
@@ -838,29 +890,29 @@ pub unsafe fn read_parquet_bytes_to_shm(
         set_errmsg(errmsg, &MorlocError::Other("Parquet reader requires a Table schema".into()));
         return shm::RELNULL;
     }
-    let builder = match ParquetRecordBatchReaderBuilder::try_new(bytes) {
-        Ok(b) => b,
+    // PANIC-2
+    let parsed = crate::error::decode("decoding Parquet", || {
+        let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .map_err(|e| MorlocError::Other(format!("Failed to open Parquet file: {}", e)))?;
+        let file_schema = builder.schema().clone();
+        let reader = builder
+            .build()
+            .map_err(|e| MorlocError::Other(format!("Failed to build Parquet reader: {}", e)))?;
+        let batches = reader
+            .collect::<Result<Vec<RecordBatch>, _>>()
+            .map_err(|e| MorlocError::Other(format!("Failed to read Parquet record batches: {}", e)))?;
+        validate_schema(&file_schema)?;
+        validate_batches(&batches, true)?;
+        Ok((file_schema, batches))
+    })
+    .and_then(|r| r);
+    match parsed {
+        Ok((file_schema, batches)) => batches_to_shm(batches, file_schema, &rs, errmsg),
         Err(e) => {
-            set_errmsg(errmsg, &MorlocError::Other(format!("Failed to open Parquet file: {}", e)));
-            return shm::RELNULL;
+            set_errmsg(errmsg, &e);
+            shm::RELNULL
         }
-    };
-    let file_schema = builder.schema().clone();
-    let reader = match builder.build() {
-        Ok(r) => r,
-        Err(e) => {
-            set_errmsg(errmsg, &MorlocError::Other(format!("Failed to build Parquet reader: {}", e)));
-            return shm::RELNULL;
-        }
-    };
-    let batches: Vec<RecordBatch> = match reader.collect::<Result<Vec<_>, _>>() {
-        Ok(v) => v,
-        Err(e) => {
-            set_errmsg(errmsg, &MorlocError::Other(format!("Failed to read Parquet record batches: {}", e)));
-            return shm::RELNULL;
-        }
-    };
-    batches_to_shm(batches, file_schema, &rs, errmsg)
+    }
 }
 
 #[cfg(test)]

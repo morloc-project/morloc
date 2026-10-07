@@ -14,7 +14,7 @@ exits with it only when a panic ended it.
 
 ### PANIC-1 A panic ends its process unless a catch scope holds it
 Status: implemented
-Checked by: the_pools_own_hook_ends_the_process_on_a_panic_outside_a_catch, the_pools_own_hook_lets_a_panic_in_a_host_scope_unwind, a_panic_outside_a_catch_scope_exits_with_the_internal_error_status, a_panic_inside_a_catch_scope_reaches_the_catch, a_panic_while_unwinding_exits_with_the_internal_error_status, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_in_a_forked_child_leaves_the_parents_run_alone, every_host_installs_the_panic_hook, tla:PanicExit, tla:PanicExit_hook_exits_in_scope.bug
+Checked by: a_panic_in_a_signal_handler_ends_the_process_whatever_scope_it_interrupts, the_pools_own_hook_ends_the_process_on_a_panic_outside_a_catch, the_pools_own_hook_lets_a_panic_in_a_host_scope_unwind, a_panic_outside_a_catch_scope_exits_with_the_internal_error_status, a_panic_inside_a_catch_scope_reaches_the_catch, a_panic_while_unwinding_exits_with_the_internal_error_status, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_in_a_forked_child_leaves_the_parents_run_alone, every_host_installs_the_panic_hook, tla:PanicExit, tla:PanicExit_hook_exits_in_scope.bug
 
 Each copy of the Rust standard library installs one hook when it is first
 entered: the nexus at start, libmorloc when its host starts (the nexus,
@@ -44,32 +44,33 @@ the nexus before exec, where a spawn's pre-exec step and libmorloc's fork
 handlers run, owns none of its parent's pools, shared memory or paths: the
 panic exit there only calls _exit(70).
 
+A signal handler is never a catch scope, whatever scope the thread it
+interrupted was in. Every handler, and every libmorloc function a nexus
+handler calls, runs its body in a signal frame: a panic there writes one
+fixed line naming its location with write(2) and calls _exit(70), calling
+nothing that is not async-signal-safe.
+
 ### PANIC-2 Only request frames catch a panic
-Status: deviation
+Status: implemented
+Checked by: a_format_library_panic_is_a_decode_error_and_the_process_goes_on, a_poisoned_lock_inside_a_format_library_call_still_ends_the_process, a_panic_holding_a_runtime_lock_inside_a_format_library_call_ends_the_process, a_panicking_release_callback_ends_the_process_with_70
 
 The catch scopes are the daemon's request worker, the MCP HTTP and front
 end connection threads, the stdio server's workers and the MCP stdio
-loop. The one other catch scope is a call into a third-party format library
-(Arrow IPC, Parquet, CSV, JSON) on bytes the program was handed: such a
-library may panic on malformed input and cannot be made not to, so the
-call returns a decode error and the process goes on. A panic there while
-holding a runtime lock, or a fatal one, still ends the process; a
-shared-memory allocation it was in is poisoned (SHM-9), and the eval arena
-frees its blocks during the unwind. Nothing
-else catches a panic; an `extern "C"` function is never a catch scope,
-since a panic cannot unwind out of one. A request frame calls the Rust
-functions behind the `extern "C"` wrappers it would otherwise use. A panic
-in libmorloc during a nexus request cannot reach the nexus's catch, since
-the two do not share a standard library, so it ends the process by
-PANIC-1 without a reply.
-
-Missing: the format-library catch wraps whole libmorloc entry points
-(`error::guarded` in arrow_ffi.rs and arrow_ipc_reader.rs), so morloc's
-own code around the library call -- shared-memory writers, schema
-conversion, a foreign producer's release callback -- is inside it, and a
-panic there not holding a lock becomes a decode error rather than ending
-the process. A signal handler runs in the interrupted thread's scope, so a
-panic in one unwinds into that scope.
+loop. The one other catch scope is a third-party format library (Arrow,
+Arrow IPC, Parquet, CSV) decoding bytes the program was handed into the
+library's own values: such a library may panic on malformed input and
+cannot be made not to, so the decode returns an error and the process
+goes on. That catch covers the decode alone, which takes no lock and
+writes no shared memory; morloc's conversion of the decoded values into a
+block, a read of a block morloc built itself, and a foreign producer's
+release callback all run outside it. A panic in the decode while holding
+a runtime lock, or a fatal one, still ends the process. Nothing else
+catches a panic; an `extern "C"` function is never a catch scope, since a
+panic cannot unwind out of one. A request frame calls the Rust functions
+behind the `extern "C"` wrappers it would otherwise use. A panic in
+libmorloc during a nexus request cannot reach the nexus's catch, since the
+two do not share a standard library, so it ends the process by PANIC-1
+without a reply.
 
 ### PANIC-3 A caught panic answers its request as failed, then ends the process
 Status: implemented
@@ -227,27 +228,26 @@ handle stays a catchable error: a user's thread can outlive its call.
 
 ### PANIC-15 Every sourced Rust function's panic is the user's
 Status: implemented
-Checked by: a_frame_at_a_registered_line_of_the_generated_source_is_the_users, golden:rust-user-panic-outside-sources, golden:rust-runtime-panic
+Checked by: a_frame_at_a_registered_call_of_the_generated_source_is_the_users, golden:rust-user-panic-outside-sources, golden:rust-user-panic-call-positions, golden:rust-runtime-panic
 
 A panic in a function a sourced Rust file makes callable -- one it
 re-exports, a standard-library or dependency path, one in a file pulled
 in from outside the sourced file's directory -- is a user panic. The
-compiler records each line of the generated source that holds nothing but
-a call of a sourced function on plain arguments (names, borrows of names,
-literals); the walk counts a frame at such a line as the user's. A line
-with any other code on it is not recorded, so generated code is never
-claimed for the user.
+compiler records the position (line and column, as backtraces give them)
+of each call of a sourced function in the generated source: the start of
+the callee's name, and for a later argument group of a curried function,
+the method that applies it. The walk counts a frame at such a position as
+the user's. A frame elsewhere in the generated source is generated code
+and never the user's, whatever else shares its line.
 
 ### PANIC-16 A sourced call beside generated code is the user's
-Status: deviation
+Status: implemented
+Checked by: a_closure_convention_frame_forwards_to_its_caller, golden:rust-user-panic-call-positions
 
 A panic in a sourced function is a user panic wherever the generated source
-calls it.
-
-Missing: a sourced call that shares its line with generated code (an
-argument computed inline, such as a call of another manifold) and a later
-argument group of a curried sourced function, applied through the
-runtime's closure convention, are not recorded; a panic whose deciding
-frame is such a call is attributed to the runtime and ends the pool.
-Binding every argument and every curried application to a line of its own
-would record them.
+calls it: with an argument computed inline, beside other code on its line,
+or as a later argument group of a curried function. A frame of the
+runtime's closure convention (a `MorlocFnN::callN` of this runtime's own
+crate, inlined or not) only calls the function value it was given, so the
+walk passes over it to its caller; a generated closure it calls has its own
+frame deeper in the stack, which decides first.

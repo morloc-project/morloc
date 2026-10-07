@@ -422,6 +422,78 @@ pub(crate) unsafe fn stream_from_client_wait(
     recv_timeout_us: i32,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
+    read_packet(client_fd, poll_timeout_us, recv_timeout_us, None, errmsg)
+}
+
+/// The process at the other end of a local socket, as it connected.
+pub(crate) struct Peer {
+    pid: u32,
+    start: u64,
+}
+
+impl Peer {
+    pub(crate) fn of(fd: i32) -> Option<Peer> {
+        let pid = peer_pid(fd)?;
+        Some(Peer { pid, start: morloc_runtime_types::process::start_time(pid) })
+    }
+
+    fn alive(&self) -> bool {
+        morloc_runtime_types::process::alive(self.pid, self.start)
+    }
+
+    /// Read up to `len` bytes from `fd`, waiting as long as this peer lives.
+    /// `Ok(0)` is end of file.
+    // NET-5
+    pub(crate) unsafe fn recv(&self, fd: i32, buf: *mut u8, len: usize) -> std::io::Result<usize> {
+        loop {
+            let n = libc::recv(fd, buf as *mut c_void, len, libc::MSG_DONTWAIT);
+            if n >= 0 {
+                return Ok(n as usize);
+            }
+            let e = std::io::Error::last_os_error();
+            match e.kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => {}
+                _ => return Err(e),
+            }
+            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            if poll_wait(&mut pfd, 1, &PEER_CHECK) == 0 && !self.alive() {
+                return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the sending process is gone"));
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn peer_pid(fd: i32) -> Option<u32> {
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, &mut cred as *mut _ as *mut c_void, &mut len) };
+    (rc == 0 && cred.pid > 0).then_some(cred.pid as u32)
+}
+
+#[cfg(target_os = "macos")]
+fn peer_pid(fd: i32) -> Option<u32> {
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    let rc = unsafe { libc::getsockopt(fd, libc::SOL_LOCAL, libc::LOCAL_PEERPID, &mut pid as *mut _ as *mut c_void, &mut len) };
+    (rc == 0 && pid > 0).then_some(pid as u32)
+}
+
+/// How long a sender whose process cannot be named may stall, in us.
+const UNNAMED_SENDER_STALL_US: i32 = 30_000_000;
+
+/// How often a wait on a living sender checks that it still lives.
+const PEER_CHECK: libc::timespec = libc::timespec { tv_sec: 1, tv_nsec: 0 };
+
+// NET-5: with a peer, no time limit: a wait ends on end of file or when the peer is gone.
+unsafe fn read_packet(
+    client_fd: i32,
+    poll_timeout_us: i32,
+    recv_timeout_us: i32,
+    peer: Option<&Peer>,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
     clear_errmsg(errmsg);
 
     if libc::fcntl(client_fd, libc::F_GETFD) == -1 {
@@ -442,7 +514,9 @@ pub(crate) unsafe fn stream_from_client_wait(
 
     // Timeout setup
     let mut ts_loop: libc::timespec = std::mem::zeroed();
-    let timeout_ptr = if poll_timeout_us > 0 {
+    let timeout_ptr = if peer.is_some() {
+        &PEER_CHECK as *const libc::timespec
+    } else if poll_timeout_us > 0 {
         ts_loop.tv_sec = (poll_timeout_us / 1000000) as i64;
         ts_loop.tv_nsec = ((poll_timeout_us % 1000000) * 1000) as i64;
         &ts_loop as *const libc::timespec
@@ -473,8 +547,12 @@ pub(crate) unsafe fn stream_from_client_wait(
         }
 
         if ready == 0 {
+            if peer.is_some_and(Peer::alive) {
+                continue;
+            }
             libc::free(buffer as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Ipc("Timeout waiting for initial data".into()));
+            let why = if peer.is_some() { "The sending process is gone" } else { "Timeout waiting for initial data" };
+            set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
             return ptr::null_mut();
         }
         if ready < 0 {
@@ -539,9 +617,13 @@ pub(crate) unsafe fn stream_from_client_wait(
     let attempts = 10;
     while (data_ptr as usize - result as usize) < packet_length {
         let mut packet_received = false;
-        for attempt in 0..attempts {
-            let recv_timeout_ptr = if recv_timeout_us > 0 {
-                let total_us = recv_timeout_us as i64 * (attempt as i64 + 1);
+        let mut attempt = 0;
+        while attempt < attempts {
+            attempt += 1;
+            let recv_timeout_ptr = if peer.is_some() {
+                &PEER_CHECK as *const libc::timespec
+            } else if recv_timeout_us > 0 {
+                let total_us = recv_timeout_us as i64 * attempt as i64;
                 ts_loop.tv_sec = total_us / 1000000;
                 ts_loop.tv_nsec = (total_us % 1000000) * 1000;
                 &ts_loop as *const libc::timespec
@@ -552,8 +634,13 @@ pub(crate) unsafe fn stream_from_client_wait(
             let ready = poll_wait(&mut pfd, 1, recv_timeout_ptr);
 
             if ready == 0 {
+                if peer.is_some_and(Peer::alive) {
+                    attempt -= 1;
+                    continue;
+                }
                 libc::free(result as *mut c_void);
-                set_errmsg(errmsg, &MorlocError::Ipc("Timeout waiting for remaining data".into()));
+                let why = if peer.is_some() { "The sending process is gone" } else { "Timeout waiting for remaining data" };
+                set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
                 return ptr::null_mut();
             }
             if ready < 0 && crate::utility::errno_val() != libc::EINTR {
@@ -598,19 +685,15 @@ pub(crate) unsafe fn stream_from_client(
     client_fd: i32,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
-    let request = read_request_within(client_fd, REQUEST_STALL, errmsg);
+    // NET-5: a sender that cannot be named has its stalls bounded instead.
+    let request = match Peer::of(client_fd) {
+        Some(peer) => read_packet(client_fd, 0, 0, Some(&peer), errmsg),
+        None => read_packet(client_fd, UNNAMED_SENDER_STALL_US, UNNAMED_SENDER_STALL_US, None, errmsg),
+    };
     if !request.is_null() {
         REQUEST.with(|r| r.set((client_fd, crate::fork_policy::generation())));
     }
     request
-}
-
-// DAEMON-6: a request follows its connection at once; only its stalls are bounded.
-const REQUEST_STALL: std::time::Duration = std::time::Duration::from_secs(30);
-
-unsafe fn read_request_within(client_fd: i32, stall: std::time::Duration, errmsg: *mut *mut c_char) -> *mut u8 {
-    let us = stall.as_micros().min(i32::MAX as u128) as i32;
-    stream_from_client_wait(client_fd, us, us, errmsg)
 }
 
 thread_local! {
@@ -1304,23 +1387,112 @@ mod tests {
 mod dispatch_fork_tests {
     use super::*;
 
+    fn listening_socket() -> (i32, std::ffi::CString, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("mlc-peer-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("s");
+        let _ = std::fs::remove_file(&path);
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let fd = unsafe { morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (d, b) in addr.sun_path.iter_mut().zip(c.as_bytes()) {
+            *d = *b as c_char;
+        }
+        let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        assert_eq!(unsafe { libc::bind(fd, &addr as *const _ as *const libc::sockaddr, len) }, 0);
+        assert_eq!(unsafe { libc::listen(fd, 4) }, 0);
+        (fd, c, dir)
+    }
+
+    // A child that connects to `path`, then runs `then` with the connected fd;
+    // only async-signal-safe calls follow the fork.
+    unsafe fn connecting_child(path: &std::ffi::CStr, then: impl FnOnce(i32)) -> libc::pid_t {
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (d, b) in addr.sun_path.iter_mut().zip(path.to_bytes()) {
+            *d = *b as c_char;
+        }
+        let pid = libc::fork();
+        if pid == 0 {
+            let fd = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+            if fd < 0 || libc::connect(fd, &addr as *const _ as *const libc::sockaddr, len) != 0 {
+                libc::_exit(2);
+            }
+            then(fd);
+            libc::_exit(0);
+        }
+        pid
+    }
+
     #[test]
-    fn a_client_that_connects_and_never_sends_does_not_hold_the_reader() {
-        let mut sv = [0 as libc::c_int; 2];
-        assert_eq!(unsafe { morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr()) }, 0);
+    fn a_stopped_sender_keeps_its_request() {
+        let (listener, path, dir) = listening_socket();
+        let ping = crate::packet::PacketHeader::ping().to_bytes();
+        let child = unsafe {
+            connecting_child(&path, |fd| {
+                libc::raise(libc::SIGSTOP);
+                libc::write(fd, ping.as_ptr() as *const c_void, ping.len());
+            })
+        };
+        let conn = unsafe { morloc_runtime_types::fd::accept(listener, ptr::null_mut(), ptr::null_mut()) };
+        assert!(conn >= 0);
+        let resumer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+            unsafe { libc::kill(child, libc::SIGCONT) };
+        });
+        let mut err: *mut c_char = ptr::null_mut();
+        let request = unsafe { stream_from_client(conn, &mut err) };
+        resumer.join().unwrap();
+        let mut status = 0;
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        assert!(err.is_null(), "{}", unsafe { CStr::from_ptr(err) }.to_string_lossy());
+        assert!(!request.is_null());
+        unsafe {
+            libc::free(request as *mut c_void);
+            libc::close(conn);
+            libc::close(listener);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_request_whose_sender_is_gone_ends_though_its_fd_lives_on() {
+        let (listener, path, dir) = listening_socket();
+        let mut pipe = [0; 2];
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let child = unsafe {
+            connecting_child(&path, |_fd| {
+                if libc::fork() == 0 {
+                    let gc = libc::getpid();
+                    libc::write(pipe[1], &gc as *const _ as *const c_void, std::mem::size_of::<libc::pid_t>());
+                    libc::sleep(30);
+                    libc::_exit(0);
+                }
+            })
+        };
+        unsafe { libc::close(pipe[1]) };
+        let conn = unsafe { morloc_runtime_types::fd::accept(listener, ptr::null_mut(), ptr::null_mut()) };
+        assert!(conn >= 0);
+        let mut grandchild: libc::pid_t = 0;
+        unsafe { libc::read(pipe[0], &mut grandchild as *mut _ as *mut c_void, std::mem::size_of::<libc::pid_t>()) };
         let began = std::time::Instant::now();
         let mut err: *mut c_char = ptr::null_mut();
-        let request = unsafe { read_request_within(sv[0], std::time::Duration::from_millis(200), &mut err) };
+        let request = unsafe { stream_from_client(conn, &mut err) };
         let waited = began.elapsed();
         unsafe {
-            libc::close(sv[0]);
-            libc::close(sv[1]);
-            if !err.is_null() {
-                libc::free(err as *mut c_void);
-            }
+            libc::kill(grandchild, libc::SIGKILL);
+            libc::waitpid(child, ptr::null_mut(), 0);
+            libc::close(pipe[0]);
+            libc::close(conn);
+            libc::close(listener);
         }
-        assert!(request.is_null(), "a request appeared from a client that sent nothing");
-        assert!(waited < std::time::Duration::from_secs(5), "the reader waited {waited:?} for a silent client");
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(request.is_null());
+        assert!(!err.is_null());
+        unsafe { libc::free(err as *mut c_void) };
+        assert!(waited < std::time::Duration::from_secs(5), "waited {waited:?}");
     }
 
     fn drain(fd: i32) -> Vec<u8> {

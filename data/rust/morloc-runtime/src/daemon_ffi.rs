@@ -26,9 +26,11 @@ static POOLS_STOPPED: AtomicBool = AtomicBool::new(false);
 static EXIT_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 // DAEMON-10: the socket and port file this daemon made, by path and identity.
-static ENDPOINTS: [Endpoint; 2] = [const { Endpoint::new() }; 2];
+static ENDPOINTS: [Endpoint; 4] = [const { Endpoint::new() }; 4];
 const SOCKET_ENDPOINT: usize = 0;
 const PORT_FILE_ENDPOINT: usize = 1;
+// NET-6: a lock file goes after its endpoint, while its lock is still held.
+const LOCK_ENDPOINT: usize = 2;
 
 struct Endpoint {
     path: std::sync::atomic::AtomicPtr<c_char>,
@@ -44,6 +46,104 @@ impl Endpoint {
             ino: std::sync::atomic::AtomicU64::new(0),
         }
     }
+}
+
+#[cfg(test)]
+static ENDPOINT_TESTS: Mutex<()> = Mutex::new(());
+
+// NET-6: each endpoint's lock, held for the life of the process.
+static ENDPOINT_LOCKS: [std::sync::atomic::AtomicI32; 2] =
+    [std::sync::atomic::AtomicI32::new(-1), std::sync::atomic::AtomicI32::new(-1)];
+
+enum LockRefused {
+    /// Another process holds the lock.
+    Held(String),
+    /// The lock file cannot be opened or kept.
+    Unusable(String),
+}
+
+/// The lock beside an endpoint, released on drop unless kept.
+struct EndpointLock {
+    fd: i32,
+    path: Option<CString>,
+}
+
+impl EndpointLock {
+    // NET-6: kept for the life of the process; its file is removed after its endpoint.
+    unsafe fn keep(mut self, which: usize) {
+        ENDPOINT_LOCKS[which].store(self.fd, Ordering::SeqCst);
+        if let Some(path) = self.path.take() {
+            record_endpoint(LOCK_ENDPOINT + which, path.into_raw());
+        }
+        self.fd = -1;
+    }
+}
+
+impl Drop for EndpointLock {
+    fn drop(&mut self) {
+        if self.fd >= 0 {
+            unsafe { libc::close(self.fd) };
+        }
+    }
+}
+
+/// Take the exclusive lock on `<path>.lock`, refusing when another process
+/// holds it.
+fn lock_beside(path: &str) -> Result<EndpointLock, LockRefused> {
+    let lock_path = CString::new(format!("{path}.lock")).map_err(|e| LockRefused::Unusable(e.to_string()))?;
+    for _ in 0..8 {
+        // NET-6
+        let fd = unsafe {
+            libc::open(lock_path.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW, 0o600)
+        };
+        if fd < 0 {
+            return Err(LockRefused::Unusable(format!(
+                "cannot open {}: {}",
+                lock_path.to_string_lossy(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        let mut lock = EndpointLock { fd, path: None };
+        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(LockRefused::Held(format!("another daemon holds {path}")));
+        }
+        // NET-6: a lock on a file already removed from the path guards nothing; start over.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let locked = (unsafe { libc::fstat(fd, &mut st) } == 0).then(|| (st.st_dev as u64, st.st_ino as u64));
+        if locked.is_some() && locked == unsafe { identity(lock_path.as_ptr()) } {
+            lock.path = Some(lock_path);
+            return Ok(lock);
+        }
+    }
+    Err(LockRefused::Unusable(format!("the lock file beside {path} keeps changing")))
+}
+
+/// Bind `sock_fd` to `path` under its lock, replacing a socket file only
+/// when nothing answers there.
+unsafe fn claim_and_bind(sock_fd: i32, path: &CStr, addr: &libc::sockaddr_un) -> Result<(), String> {
+    let shown = path.to_string_lossy();
+    let lock = lock_beside(&shown).map_err(|(LockRefused::Held(e) | LockRefused::Unusable(e))| e)?;
+    let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    let bind = || libc::bind(sock_fd, addr as *const libc::sockaddr_un as *const libc::sockaddr, len) == 0;
+    if !bind() {
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EADDRINUSE) {
+            return Err(format!("failed to bind unix socket {shown}: {}", std::io::Error::last_os_error()));
+        }
+        let probe = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        let answered = probe >= 0 && libc::connect(probe, addr as *const libc::sockaddr_un as *const libc::sockaddr, len) == 0;
+        if probe >= 0 {
+            libc::close(probe);
+        }
+        if answered {
+            return Err(format!("a daemon is already serving {shown}"));
+        }
+        libc::unlink(path.as_ptr());
+        if !bind() {
+            return Err(format!("failed to bind unix socket {shown}: {}", std::io::Error::last_os_error()));
+        }
+    }
+    lock.keep(SOCKET_ENDPOINT);
+    Ok(())
 }
 
 unsafe fn identity(path: *const c_char) -> Option<(u64, u64)> {
@@ -2497,18 +2597,54 @@ unsafe fn dispatch_request(
     resp
 }
 
+/// Remote connections that may wait for a worker, per worker.
+const REMOTE_QUEUE_PER_WORKER: usize = 4;
+
+// NET-3: answered without reading and without blocking the accept loop.
+unsafe fn refuse_busy(job: DaemonJob) {
+    if job.conn_type == 2 {
+        let msg = b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 32\r\nConnection: close\r\n\r\n{\"error\":\"too many connections\"}";
+        libc::send(job.client_fd, msg.as_ptr() as *const c_void, msg.len(), libc::MSG_DONTWAIT);
+        // NET-3: unread request bytes at close would reset the connection and lose the reply.
+        libc::shutdown(job.client_fd, libc::SHUT_WR);
+        let mut buf = [0u8; 4096];
+        for _ in 0..16 {
+            if libc::recv(job.client_fd, buf.as_mut_ptr() as *mut c_void, buf.len(), libc::MSG_DONTWAIT) <= 0 {
+                break;
+            }
+        }
+    }
+    libc::close(job.client_fd);
+}
+
 // -- Length-prefixed message protocol -----------------------------------------
 
-unsafe fn recv_exact(fd: i32, buf: *mut u8, len: usize) -> Result<(), usize> {
+/// How long a client may take to send a message.
+enum ReadLimit<'a> {
+    // NET-2
+    Until(std::time::Instant),
+    // NET-5
+    WhileAlive(&'a crate::ipc_ffi::Peer),
+    Socket,
+}
+
+unsafe fn recv_exact(fd: i32, buf: *mut u8, len: usize, limit: &ReadLimit) -> Result<(), usize> {
     let mut total = 0;
     while total < len {
-        let n = libc::recv(fd, buf.add(total) as *mut c_void, len - total, 0);
-        if n > 0 {
-            total += n as usize;
-        } else if n < 0 && crate::utility::errno_val() == libc::EINTR {
-            continue;
-        } else {
-            return Err(total);
+        let got = match limit {
+            ReadLimit::Until(until) => morloc_runtime_types::net_limits::recv_by(fd, buf.add(total), len - total, *until),
+            ReadLimit::WhileAlive(peer) => peer.recv(fd, buf.add(total), len - total),
+            ReadLimit::Socket => {
+                let n = libc::recv(fd, buf.add(total) as *mut c_void, len - total, 0);
+                if n < 0 && crate::utility::errno_val() == libc::EINTR {
+                    continue;
+                }
+                if n < 0 { Err(std::io::Error::last_os_error()) } else { Ok(n as usize) }
+            }
+        };
+        match got {
+            Ok(n) if n > 0 => total += n,
+            _ => return Err(total),
         }
     }
     Ok(())
@@ -2516,13 +2652,21 @@ unsafe fn recv_exact(fd: i32, buf: *mut u8, len: usize) -> Result<(), usize> {
 
 unsafe fn read_lp_message(
     fd: i32,
+    remote: bool,
     out_len: *mut usize,
     errmsg: *mut *mut c_char,
 ) -> *mut c_char {
+    use morloc_runtime_types::net_limits::{body_limit, HEAD_LIMIT};
     clear_errmsg(errmsg);
 
     let mut len_buf = [0u8; 4];
-    if recv_exact(fd, len_buf.as_mut_ptr(), 4).is_err() {
+    let peer = if remote { None } else { crate::ipc_ffi::Peer::of(fd) };
+    let limit = |remote_limit: std::time::Duration| match (&peer, remote) {
+        (_, true) => ReadLimit::Until(std::time::Instant::now() + remote_limit),
+        (Some(p), false) => ReadLimit::WhileAlive(p),
+        (None, false) => ReadLimit::Socket,
+    };
+    if recv_exact(fd, len_buf.as_mut_ptr(), 4, &limit(HEAD_LIMIT)).is_err() {
         set_errmsg(
             errmsg,
             &MorlocError::Other("Failed to read message length prefix".into()),
@@ -2552,7 +2696,7 @@ unsafe fn read_lp_message(
         return ptr::null_mut();
     }
 
-    if let Err(total) = recv_exact(fd, msg as *mut u8, msg_len as usize) {
+    if let Err(total) = recv_exact(fd, msg as *mut u8, msg_len as usize, &limit(body_limit(msg_len as usize))) {
         libc::free(msg as *mut c_void);
         set_errmsg(
             errmsg,
@@ -2612,6 +2756,7 @@ unsafe fn write_lp_message(
 
 unsafe fn handle_lp_connection(
     client_fd: i32,
+    remote: bool,
     manifest: *mut c_void,
     sockets: *mut MorlocSocket,
     shm_basename: *const c_char,
@@ -2630,7 +2775,7 @@ unsafe fn handle_lp_connection(
         return;
     }
 
-    let msg = read_lp_message(client_fd, &mut msg_len, &mut errmsg);
+    let msg = read_lp_message(client_fd, remote, &mut msg_len, &mut errmsg);
     if !errmsg.is_null() {
         let err_str = CStr::from_ptr(errmsg).to_string_lossy();
         eprintln!("morloc-daemon: read error: {}", err_str);
@@ -2880,7 +3025,7 @@ unsafe fn handle_http_connection(
 #[derive(Clone, Copy)]
 struct DaemonJob {
     client_fd: i32,
-    conn_type: i32, // 0 = length-prefixed (unix/tcp), 2 = http
+    conn_type: i32, // 0 = unix, 1 = tcp, 2 = http
 }
 
 struct JobQueue {
@@ -2989,7 +3134,7 @@ fn write_port_file_atomic(
     body.push('}');
     body.push('\n');
 
-    let tmp = format!("{}.tmp", path);
+    let tmp = format!("{}.tmp.{}", path, std::process::id());
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(body.as_bytes())?;
@@ -3021,8 +3166,15 @@ pub(crate) unsafe fn daemon_run(
     G_DAEMON_OUTPUT_PACKET.store((*config).output_packet, Ordering::Relaxed);
     G_DAEMON_COMPRESSION.store((*config).compression_level, Ordering::Relaxed);
 
-    // Initialize binding store
-    binding_store().get_or_insert_with(|| BindingStore::new("/tmp/morloc-bindings"));
+    // NET-4
+    let bindings = match morloc_runtime_types::private_dir::runtime_dir() {
+        Ok(dir) => dir.join("bindings"),
+        Err(e) => {
+            eprintln!("morloc-daemon: no private directory for bindings: {e}");
+            return true;
+        }
+    };
+    binding_store().get_or_insert_with(|| BindingStore::new(&bindings.to_string_lossy()));
 
     // Install signal handlers
     begin_serving();
@@ -3061,14 +3213,9 @@ pub(crate) unsafe fn daemon_run(
                 return true;
             }
         };
-        libc::unlink((*config).unix_socket_path);
-        if libc::bind(
-            sock_fd,
-            &addr as *const libc::sockaddr_un as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
-        ) < 0
-        {
-            eprintln!("morloc-daemon: failed to bind unix socket");
+        // NET-6
+        if let Err(e) = claim_and_bind(sock_fd, CStr::from_ptr((*config).unix_socket_path), &addr) {
+            eprintln!("morloc-daemon: {e}");
             libc::close(sock_fd);
             return true;
         }
@@ -3175,9 +3322,20 @@ pub(crate) unsafe fn daemon_run(
         let path = CStr::from_ptr((*config).port_file_path)
             .to_string_lossy()
             .into_owned();
-        match write_port_file_atomic(&path, bound_http_port, bound_tcp_port, bound_unix_path.as_deref()) {
-            Ok(()) => record_endpoint(PORT_FILE_ENDPOINT, (*config).port_file_path),
-            Err(e) => eprintln!("morloc-daemon: failed to write port file {}: {}", path, e),
+        // NET-6
+        match lock_beside(&path) {
+            Err(LockRefused::Held(e)) => {
+                eprintln!("morloc-daemon: {e}");
+                return true;
+            }
+            Err(LockRefused::Unusable(e)) => eprintln!("morloc-daemon: failed to write port file {}: {}", path, e),
+            Ok(lock) => match write_port_file_atomic(&path, bound_http_port, bound_tcp_port, bound_unix_path.as_deref()) {
+                Ok(()) => {
+                    record_endpoint(PORT_FILE_ENDPOINT, (*config).port_file_path);
+                    lock.keep(PORT_FILE_ENDPOINT);
+                }
+                Err(e) => eprintln!("morloc-daemon: failed to write port file {}: {}", path, e),
+            },
         }
     }
 
@@ -3250,6 +3408,12 @@ pub(crate) unsafe fn daemon_run(
                 conn_type: fd_types[i],
             };
             let mut q = ctx.queue.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
+            // NET-3
+            if job.conn_type != 0 && q.jobs.iter().filter(|j| j.conn_type != 0).count() >= n_workers * REMOTE_QUEUE_PER_WORKER {
+                drop(q);
+                refuse_busy(job);
+                continue;
+            }
             q.jobs.push_back(job);
             ctx.cond.notify_one();
         }
@@ -3374,7 +3538,7 @@ fn daemon_worker_fn(ctx: Arc<WorkerContext>) {
             if job.conn_type == 2 {
                 handle_http_connection(fd, ctx.manifest, ctx.sockets, ctx.shm_basename);
             } else {
-                handle_lp_connection(fd, ctx.manifest, ctx.sockets, ctx.shm_basename);
+                handle_lp_connection(fd, job.conn_type == 1, ctx.manifest, ctx.sockets, ctx.shm_basename);
             }
         });
         if panicked {
@@ -3492,10 +3656,13 @@ unsafe fn answer_panicked_request(job: DaemonJob) {
 
 // Signal handler (must be async-signal-safe)
 extern "C" fn daemon_signal_handler_fn(_sig: i32) {
-    // DAEMON-6: a second signal ends the shutdown at once.
-    if SHUTDOWN_REQUESTED.swap(true, Ordering::SeqCst) {
-        SHUTDOWN_ESCALATED.store(true, Ordering::SeqCst);
-    }
+    // PANIC-1
+    morloc_runtime_types::panic::signal_frame(|| {
+        // DAEMON-6: a second signal ends the shutdown at once.
+        if SHUTDOWN_REQUESTED.swap(true, Ordering::SeqCst) {
+            SHUTDOWN_ESCALATED.store(true, Ordering::SeqCst);
+        }
+    })
 }
 
 #[cfg(test)]
@@ -3504,6 +3671,7 @@ mod endpoint_tests {
 
     #[test]
     fn a_daemon_removes_only_the_endpoint_files_it_made() {
+        let _endpoints = super::ENDPOINT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("morloc-endpoints-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let ours = dir.join("ours.sock");
@@ -3742,7 +3910,7 @@ mod lp_message_tests {
                 tid_tx.send(libc::pthread_self()).unwrap();
                 let mut len = 0usize;
                 let mut err: *mut c_char = ptr::null_mut();
-                let msg = read_lp_message(reader, &mut len, &mut err);
+                let msg = read_lp_message(reader, false, &mut len, &mut err);
                 let ok = !msg.is_null() && err.is_null() && len == 5
                     && std::slice::from_raw_parts(msg as *const u8, 5) == b"hello";
                 if !msg.is_null() {
@@ -4033,7 +4201,10 @@ mod c_abi {
 
     #[no_mangle]
     pub unsafe extern "C" fn morloc_daemon_remove_endpoints() {
-        super::morloc_daemon_remove_endpoints()
+        // PANIC-1
+        morloc_runtime_types::panic::signal_frame(|| {
+            super::morloc_daemon_remove_endpoints()
+        })
     }
 
     #[no_mangle]
@@ -4068,12 +4239,18 @@ mod c_abi {
 
     #[no_mangle]
     pub extern "C" fn morloc_stop_child_groups() {
-        super::morloc_stop_child_groups()
+        // PANIC-1
+        morloc_runtime_types::panic::signal_frame(|| {
+            super::morloc_stop_child_groups()
+        })
     }
 
     #[no_mangle]
     pub extern "C" fn morloc_child_group_leader_exited(pid: libc::c_int) {
-        super::morloc_child_group_leader_exited(pid)
+        // PANIC-1
+        morloc_runtime_types::panic::signal_frame(|| {
+            super::morloc_child_group_leader_exited(pid)
+        })
     }
 
     #[no_mangle]
@@ -4133,7 +4310,10 @@ mod c_abi {
 
     #[no_mangle]
     pub extern "C" fn morloc_note_child_exit(pid: i32, status: i32) {
-        super::morloc_note_child_exit(pid, status)
+        // PANIC-1
+        morloc_runtime_types::panic::signal_frame(|| {
+            super::morloc_note_child_exit(pid, status)
+        })
     }
 
     #[no_mangle]
@@ -4164,5 +4344,55 @@ mod c_abi {
     #[no_mangle]
     pub extern "C" fn morloc_daemon_worker_panicked() -> bool {
         super::morloc_daemon_worker_panicked()
+    }
+}
+
+#[cfg(test)]
+mod endpoint_claim_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    fn unbound(path: &std::path::Path) -> (i32, libc::sockaddr_un) {
+        let fd = unsafe { morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        let addr = crate::utility::unix_socket_addr(path.to_str().unwrap().as_bytes()).unwrap();
+        (fd, addr)
+    }
+
+    #[test]
+    fn a_live_listener_keeps_its_path_and_a_stale_file_is_replaced() {
+        let _endpoints = ENDPOINT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("mlc-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("d.sock");
+        let cpath = CString::new(path.to_str().unwrap()).unwrap();
+
+        let live = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let ino = std::fs::metadata(&path).unwrap().ino();
+        let (fd, addr) = unbound(&path);
+        let refused = unsafe { claim_and_bind(fd, &cpath, &addr) };
+        unsafe { libc::close(fd) };
+        assert!(refused.unwrap_err().contains("already serving"));
+        assert!(ENDPOINTS[LOCK_ENDPOINT + SOCKET_ENDPOINT].path.load(Ordering::SeqCst).is_null(), "a refused claim left its lock file to be removed");
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), ino);
+        assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
+
+        drop(live);
+        let (fd, addr) = unbound(&path);
+        unsafe { claim_and_bind(fd, &cpath, &addr) }.unwrap();
+        unsafe { libc::listen(fd, 1) };
+        assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
+
+        let (fd2, addr2) = unbound(&path);
+        let second = unsafe { claim_and_bind(fd2, &cpath, &addr2) };
+        let second = second.unwrap_err();
+        assert!(second.contains("another daemon holds"), "{second}");
+        unsafe {
+            libc::close(fd2);
+            libc::close(fd);
+            libc::close(ENDPOINT_LOCKS[SOCKET_ENDPOINT].swap(-1, Ordering::SeqCst));
+        }
+        ENDPOINTS[LOCK_ENDPOINT + SOCKET_ENDPOINT].path.store(ptr::null_mut(), Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

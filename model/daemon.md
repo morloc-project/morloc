@@ -41,15 +41,15 @@ reading it.
 
 ### DAEMON-6 Every wait on another process is bounded or ends when the peer dies
 Status: implemented
-Checked by: a_client_that_connects_and_never_sends_does_not_hold_the_reader, draining_a_writer_that_never_closes_stops_at_the_deadline, an_eval_past_its_wall_limit_is_stopped_with_everything_it_started, a_frontend_eval_past_its_wall_limit_is_stopped_with_everything_it_started, stopping_all_kills_registered_groups_and_every_group_added_later, a_killed_group_is_never_signalled_again, an_eval_leader_outlives_a_term_until_it_is_released, tla:DaemonShutdown, tla:DaemonShutdown_join_first.bug, tla:DaemonShutdown_no_kill.bug, tla:DaemonShutdown_unmap_on_give_up.bug, tla:DaemonShutdown_recovery_unmaps.bug, tla:DaemonShutdown_children_survive.bug
+Checked by: draining_a_writer_that_never_closes_stops_at_the_deadline, an_eval_past_its_wall_limit_is_stopped_with_everything_it_started, a_frontend_eval_past_its_wall_limit_is_stopped_with_everything_it_started, stopping_all_kills_registered_groups_and_every_group_added_later, a_killed_group_is_never_signalled_again, an_eval_leader_outlives_a_term_until_it_is_released, tla:DaemonShutdown, tla:DaemonShutdown_join_first.bug, tla:DaemonShutdown_no_kill.bug, tla:DaemonShutdown_unmap_on_give_up.bug, tla:DaemonShutdown_recovery_unmaps.bug, tla:DaemonShutdown_children_survive.bug
 
 A call into a pool has no deadline: a program may run for days, and nothing
 tells the caller how long a call should take. Such a wait ends when the
 peer dies (end of file, the lifeline, an owner-dead lock, a liveness check)
 and otherwise lasts as long as the work. A wait that is never legitimately
-long is bounded: a request is read within a stall limit after its
-connection is accepted; a readiness ping waits a few seconds per attempt,
-and its retries end when shutdown is requested.
+long is bounded: a readiness ping waits a few seconds per attempt, and its
+retries end when shutdown is requested. Reading a request is governed by
+NET-2 for a remote client and NET-5 on a local socket.
 
 A forked `morloc eval` runs in its own process group, limited in CPU time
 and in wall time; the wall limit stops the whole group. The group is
@@ -173,15 +173,17 @@ for the pool processes (not their groups, which the pins keep) to exit,
 kills every group, and reaps for up to 100 ms more.
 
 ### DAEMON-12 The router runs at most one daemon per program and reaps it
-Status: deviation
+Status: implemented
+Checked by: tla:RouterRestart, tla:RouterRestart_restart_without_stop.bug, tla:RouterRestart_raw_pid.bug, a_daemon_that_never_accepts_is_stopped_reaped_and_refused, an_exited_daemon_leaves_its_slot_before_it_is_reaped, signalling_all_reaches_every_live_group_and_no_killed_one
 
-The router starts a program's daemon, waits for it to accept connections,
-and forwards requests to it. A daemon that does not accept within the
-start limit is stopped and reaped, and the request fails. A restart stops
-and reaps the old daemon before starting the new one, so no daemon outlives
-the router's record of it.
-
-Missing: when a connection fails, the router clears the daemon's pid and
-starts another without stopping or reaping the old one; a daemon that never
-accepts is used anyway; the status query counts an unreaped dead daemon as
-running.
+The router starts a program's daemon in its own process group, registers
+the group in a table of groups, and waits for it to accept connections. A
+daemon that does not accept within the start limit (30 s) is stopped and
+reaped, and the request fails. A connection that fails stops and reaps the daemon it tried, unless
+another request has already replaced it, before another is started, so no daemon outlives the router's record of
+it. Stopping sends SIGTERM through the group's slot, waits up to 2 s, then
+sends SIGKILL and reaps. Every signal to a daemon, including the shutdown
+handler's, goes through the table; before the router reaps a daemon it
+marks the slot dead, so no signal reaches a pid the kernel has reissued.
+The status query counts an exited daemon as stopped even before it is
+reaped.

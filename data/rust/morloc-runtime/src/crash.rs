@@ -73,15 +73,18 @@ pub(crate) unsafe fn morloc_install_crash_handler(lang: *const c_char, current_f
 /// unblocked first; a raise alone would leave it pending behind the
 /// wedged handler.
 extern "C" fn wedged(_sig: c_int) {
-    let sig = PENDING.load(Ordering::Relaxed) as c_int;
-    unsafe {
-        libc::signal(sig, libc::SIG_DFL);
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, sig);
-        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
-        libc::raise(sig);
-    }
+    // PANIC-1
+    morloc_runtime_types::panic::signal_frame(|| {
+        let sig = PENDING.load(Ordering::Relaxed) as c_int;
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, sig);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+            libc::raise(sig);
+        }
+    })
 }
 
 fn signal_name(sig: c_int) -> &'static str {
@@ -133,61 +136,64 @@ impl Line {
 }
 
 extern "C" fn fatal(sig: c_int, _info: *mut libc::siginfo_t, _ctx: *mut c_void) {
-    PENDING.store(sig as usize, Ordering::Relaxed);
-    unsafe { libc::alarm(HANDLER_ALARM_SECS) };
+    // PANIC-1
+    morloc_runtime_types::panic::signal_frame(|| {
+        PENDING.store(sig as usize, Ordering::Relaxed);
+        unsafe { libc::alarm(HANDLER_ALARM_SECS) };
 
-    // The signal line first: everything after it may fault.
-    let mut line = Line::new();
-    line.str("\nmorloc ");
-    let lang = LANG.load(Ordering::Acquire);
-    if !lang.is_null() {
-        line.bytes(unsafe { CStr::from_ptr(lang) }.to_bytes());
-        line.str(" ");
-    }
-    line.str("pool (pid ");
-    line.num(unsafe { libc::getpid() } as u64);
-    line.str("): fatal signal ");
-    line.num(sig as u64);
-    let name = signal_name(sig);
-    if !name.is_empty() {
-        line.str(" (");
-        line.str(name);
-        line.str(")");
-    }
-    line.flush();
-
-    let frame_fn = FRAME_FN.load(Ordering::Acquire);
-    if frame_fn != 0 {
-        let f: unsafe extern "C" fn(*mut usize) -> *const c_char = unsafe { std::mem::transmute(frame_fn) };
-        let mut len = 0usize;
-        let p = unsafe { f(&mut len) };
-        if !p.is_null() && len > 0 {
-            line.str(" while executing ");
-            line.bytes(unsafe { std::slice::from_raw_parts(p as *const u8, len) });
-        } else {
-            line.str(" on a thread running no manifold");
+        // The signal line first: everything after it may fault.
+        let mut line = Line::new();
+        line.str("\nmorloc ");
+        let lang = LANG.load(Ordering::Acquire);
+        if !lang.is_null() {
+            line.bytes(unsafe { CStr::from_ptr(lang) }.to_bytes());
+            line.str(" ");
+        }
+        line.str("pool (pid ");
+        line.num(unsafe { libc::getpid() } as u64);
+        line.str("): fatal signal ");
+        line.num(sig as u64);
+        let name = signal_name(sig);
+        if !name.is_empty() {
+            line.str(" (");
+            line.str(name);
+            line.str(")");
         }
         line.flush();
-    }
-    line.str("\n");
-    if sig == libc::SIGBUS {
-        line.str("  (SIGBUS often means memory mapped from shared memory or a file could not be backed: a full /dev/shm or disk)\n");
-    }
-    line.flush();
 
-    let mut frames = [std::ptr::null_mut::<c_void>(); 64];
-    let n = unsafe { libc::backtrace(frames.as_mut_ptr(), frames.len() as c_int) };
-    unsafe { libc::backtrace_symbols_fd(frames.as_ptr(), n, 2) };
+        let frame_fn = FRAME_FN.load(Ordering::Acquire);
+        if frame_fn != 0 {
+            let f: unsafe extern "C" fn(*mut usize) -> *const c_char = unsafe { std::mem::transmute(frame_fn) };
+            let mut len = 0usize;
+            let p = unsafe { f(&mut len) };
+            if !p.is_null() && len > 0 {
+                line.str(" while executing ");
+                line.bytes(unsafe { std::slice::from_raw_parts(p as *const u8, len) });
+            } else {
+                line.str(" on a thread running no manifold");
+            }
+            line.flush();
+        }
+        line.str("\n");
+        if sig == libc::SIGBUS {
+            line.str("  (SIGBUS often means memory mapped from shared memory or a file could not be backed: a full /dev/shm or disk)\n");
+        }
+        line.flush();
 
-    // The signal is masked while this handler runs and its disposition is
-    // already the default, so the copy raised here is delivered on return
-    // and ends the process, whether the original was a fault the kernel
-    // raised or a signal a process sent (raise, kill). The two cannot be
-    // told apart portably: Linux marks a sent signal with si_code <= 0,
-    // while macOS stamps a SIGSEGV SEGV_ACCERR however it arrived, and a
-    // handler that returned from a sent signal would resume the pool as
-    // if nothing had happened.
-    unsafe { libc::raise(sig) };
+        let mut frames = [std::ptr::null_mut::<c_void>(); 64];
+        let n = unsafe { libc::backtrace(frames.as_mut_ptr(), frames.len() as c_int) };
+        unsafe { libc::backtrace_symbols_fd(frames.as_ptr(), n, 2) };
+
+        // The signal is masked while this handler runs and its disposition is
+        // already the default, so the copy raised here is delivered on return
+        // and ends the process, whether the original was a fault the kernel
+        // raised or a signal a process sent (raise, kill). The two cannot be
+        // told apart portably: Linux marks a sent signal with si_code <= 0,
+        // while macOS stamps a SIGSEGV SEGV_ACCERR however it arrived, and a
+        // handler that returned from a sent signal would resume the pool as
+        // if nothing had happened.
+        unsafe { libc::raise(sig) };
+    })
 }
 
 mod c_abi {

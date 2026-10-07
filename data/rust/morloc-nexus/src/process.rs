@@ -537,15 +537,18 @@ pub struct PoolSocket {
 
 /// SIGCHLD handler: reap terminated children.
 extern "C" fn sigchld_handler(_sig: libc::c_int) {
-    #[cfg(target_os = "linux")]
-    let saved_errno = unsafe { *libc::__errno_location() };
-    #[cfg(target_os = "macos")]
-    let saved_errno = unsafe { *libc::__error() };
-    reap_from_handler();
-    #[cfg(target_os = "linux")]
-    unsafe { *libc::__errno_location() = saved_errno };
-    #[cfg(target_os = "macos")]
-    unsafe { *libc::__error() = saved_errno };
+    // PANIC-1
+    morloc_runtime_types::panic::signal_frame(|| {
+        #[cfg(target_os = "linux")]
+        let saved_errno = unsafe { *libc::__errno_location() };
+        #[cfg(target_os = "macos")]
+        let saved_errno = unsafe { *libc::__error() };
+        reap_from_handler();
+        #[cfg(target_os = "linux")]
+        unsafe { *libc::__errno_location() = saved_errno };
+        #[cfg(target_os = "macos")]
+        unsafe { *libc::__error() = saved_errno };
+    })
 }
 
 /// SIGTERM/SIGINT handler: fast, async-signal-safe shutdown. Any Rust
@@ -554,10 +557,13 @@ extern "C" fn sigchld_handler(_sig: libc::c_int) {
 /// `summary.json` are the notable casualties; users who Ctrl-C don't
 /// expect them. A second signal skips even the pool-kill loop.
 extern "C" fn signal_exit_handler(sig: libc::c_int) {
-    if !CLEANING_UP.swap(true, Ordering::SeqCst) {
-        stop_everything();
-    }
-    unsafe { libc::_exit(128 + sig) };
+    // PANIC-1
+    morloc_runtime_types::panic::signal_frame(|| {
+        if !CLEANING_UP.swap(true, Ordering::SeqCst) {
+            stop_everything();
+        }
+        unsafe { libc::_exit(128 + sig) };
+    })
 }
 
 // PANIC-1
@@ -608,10 +614,13 @@ fn stop_everything() {
 /// pool-kill loop -- those are not async-signal-safe. Orphaned pools
 /// are reaped by the nexus poll's dead-pool sweep on the next run.
 extern "C" fn crash_cleanup_handler(sig: libc::c_int) {
-    unsafe {
-        sweep_shm_segments();
-        libc::raise(sig);
-    }
+    // PANIC-1
+    morloc_runtime_types::panic::signal_frame(|| {
+        unsafe {
+            sweep_shm_segments();
+            libc::raise(sig);
+        }
+    })
 }
 
 /// Sweep every `<basename>-<idx>` segment via `shm_unlink`. Called

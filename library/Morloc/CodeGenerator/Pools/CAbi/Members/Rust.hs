@@ -40,6 +40,8 @@ import Data.Ord (comparing)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.ByteString as BS
+import qualified Data.Text.Encoding as TE
 import qualified System.Info as SI
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
@@ -74,9 +76,6 @@ import qualified Morloc.Version as MV
 import Morloc.Quasi
 import System.Directory (findExecutable)
 import System.FilePath (takeDirectory)
-import Data.List (isSuffixOf)
-import Data.Char (isAlphaNum, isDigit)
-import Data.Foldable (asum)
 
 -- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
@@ -1317,8 +1316,8 @@ translate srcs es = do
   -- builds of the same program overwrite in place rather than accumulating a new
   -- crate per edit. Falls back to a source hash if the build dir is unset.
   let renderedSrc = subVersion (render code)
-      sourcedNames = [unSrcName (srcName s) | s <- srcs, srcLang s == rustLang, not (srcOperator s)]
-      poolSrc = renderedSrc <> "\n" <> rustUserLines sourcedNames renderedSrc <> "\n"
+      (unmarkedSrc, userCalls) = takeUserCallMarks renderedSrc
+      poolSrc = unmarkedSrc <> "\n" <> rustUserCalls userCalls <> "\n"
       crateName = "pool_" <> PH.hashText (maybe poolSrc T.pack installDir)
       (cargoToml, buildRs) = makeCargoDocs crateName deps localCrates home profile
   -- The pool starts from the environment's lock: the lock persisted with the
@@ -1441,46 +1440,32 @@ rustOperatorShims =
   , (">=", ("ge", "PartialOrd", True))
   ]
 
--- | The lines of the generated source that hold nothing but a call of a
--- sourced function on plain arguments (PANIC-15): a frame there is the
--- user's. A line with anything else on it is left out, so generated code
--- is never claimed for the user.
-rustUserLines :: [Text] -> Text -> Text
-rustUserLines names src =
-  "const MLC_USER_LINES: &[u32] = &["
-    <> T.intercalate ", " [T.pack (show n) | (n, l) <- zip [(1 :: Int) ..] (T.lines src), isSourcedCallLine names l]
-    <> "];"
+-- | Marks the callee of a call of a sourced function in the rendered pool
+-- source; 'takeUserCallMarks' removes every mark and records where it was.
+userCallMark :: Char
+userCallMark = '\x01'
 
-isSourcedCallLine :: [Text] -> Text -> Bool
-isSourcedCallLine names line = case T.stripPrefix "let " (T.strip line) of
-  Nothing -> False
-  Just rest ->
-    let (lhs, rhs0) = T.breakOn " = " rest
-     in not (T.null rhs0) && plainBinding lhs && callOk (T.drop 3 rhs0)
+-- | The source without its call marks, and the line and column of the text
+-- each mark stood before, as backtraces give them: both from 1, the column
+-- in bytes of UTF-8.
+takeUserCallMarks :: Text -> (Text, [(Int, Int)])
+takeUserCallMarks src =
+  let ls = T.splitOn "\n" src
+      perLine = zipWith unmark [1 ..] ls
+   in (T.intercalate "\n" (map fst perLine), concatMap snd perLine)
   where
-    plainBinding lhs = isIdent (T.strip (fst (T.breakOn ":" lhs)))
-    callOk rhs = case T.stripSuffix ");" rhs of
-      Nothing -> False
-      Just body -> any (\n -> maybe False argsOk (T.stripPrefix (n <> "(") body)) names
-    argsOk a = T.null a || all argOk (T.splitOn ", " a)
-    argOk a =
-      isIdent (unborrow a)
-        || isNumber a
-        || maybe False castOk (T.stripPrefix "(" a >>= T.stripSuffix ")")
-    unborrow a = fromMaybe a (asum [T.stripPrefix "&mut " a, T.stripPrefix "&(" a >>= T.stripSuffix ")", T.stripPrefix "&" a])
-    castOk c =
-      let (n, t) = T.breakOn " as " c
-       in isNumber n && not (T.null t) && T.all (\ch -> isAlphaNum ch || ch == '_') (T.drop 4 t)
-    isNumber t =
-      let digits d = not (T.null d) && T.all isDigit d
-          unsigned = fromMaybe t (T.stripPrefix "-" t)
-       in case T.splitOn "." unsigned of
-            [whole] -> digits whole
-            [whole, frac] -> digits whole && digits frac
-            _ -> False
-    isIdent t =
-      let t' = fromMaybe t (T.stripPrefix "r#" t)
-       in not (T.null t') && t' /= "_" && T.all (\ch -> isAlphaNum ch || ch == '_') t' && not (isDigit (T.head t'))
+    unmark n l =
+      let pieces = T.splitOn (T.singleton userCallMark) l
+          cols = scanl1 (+) [BS.length (TE.encodeUtf8 p) | p <- init pieces]
+       in (T.concat pieces, [(n, c + 1) | c <- cols])
+
+-- | Where the generated source calls a sourced function (PANIC-15): a frame
+-- at one of these positions is the user's.
+rustUserCalls :: [(Int, Int)] -> Text
+rustUserCalls calls =
+  "const MLC_USER_CALLS: &[(u32, u32)] = &["
+    <> T.intercalate ", " [T.pack ("(" <> show l <> ", " <> show c <> ")") | (l, c) <- calls]
+    <> "];"
 
 -- | A manifold returns its serialized result as the dispatch's reply
 -- (PANIC-10).
@@ -2198,12 +2183,12 @@ makeTheMaker crateName offline locks = do
 rustLowerConfig :: Map.Map SrcName [(Bool, Bool)] -> LowerConfig RustM
 rustLowerConfig mask =
   LowerConfig
-    { lcSrcName = \src -> pretty (srcName src)
+    { lcSrcName = \src -> pretty (T.cons userCallMark (unSrcName (srcName src)))
     , lcOperator = rustOperator
     -- A curried host returns a function value, and a function value is
     -- applied through its trait method -- Rust has no call syntax for one.
     , lcApplySrcGroup = \f as ->
-        parens f <> ".call" <> pretty (length as) <> tupled as
+        parens f <> "." <> pretty (T.singleton userCallMark) <> "call" <> pretty (length as) <> tupled as
     , lcSourcedArg = \site own tm x ->
         -- Pass each argument to match how the callee's parameter is written,
         -- adapting by the argument's ownership so no unnecessary copy is made.

@@ -13,6 +13,8 @@
 //! it through libmorloc.so's C ABI.
 
 pub mod bearer;
+pub mod net_limits;
+pub mod private_dir;
 pub mod error;
 pub mod hash;
 pub mod shm_types;

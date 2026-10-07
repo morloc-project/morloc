@@ -1149,7 +1149,7 @@ pub fn decompress_packet_if_needed(bytes: &[u8]) -> Result<Cow<'_, [u8]>, Morloc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::{make_mesg_data_packet, PACKET_FORMAT_MSGPACK};
+    use crate::packet::make_mesg_data_packet;
     use crate::schema::parse_schema;
 
     #[test]

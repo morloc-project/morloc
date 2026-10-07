@@ -12,6 +12,7 @@ thread_local! {
     static IN_SCOPE: Cell<u8> = const { Cell::new(0) };
     static UNWINDING: Cell<bool> = const { Cell::new(false) };
     static FATAL: Cell<bool> = const { Cell::new(false) };
+    static IN_HANDLER: Cell<u32> = const { Cell::new(0) };
 }
 
 pub struct Caught {
@@ -79,6 +80,33 @@ pub fn outside_scope<R>(body: impl FnOnce() -> R) -> R {
     body()
 }
 
+// PANIC-1: a signal handler's body. It is never a catch scope: a panic in
+// it ends the process at once.
+pub fn signal_frame<R>(body: impl FnOnce() -> R) -> R {
+    struct Leave;
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            let _ = IN_HANDLER.try_with(|d| d.set(d.get().saturating_sub(1)));
+        }
+    }
+    let _ = IN_HANDLER.try_with(|d| d.set(d.get() + 1));
+    let _leave = Leave;
+    outside_scope(body)
+}
+
+fn in_signal_frame() -> bool {
+    IN_HANDLER.try_with(|d| d.get() > 0).unwrap_or(false)
+}
+
+// PANIC-1: async-signal-safe: one fixed-size line, then _exit.
+fn exit_in_signal_frame(file: &str, line: u32) -> ! {
+    use std::fmt::Write;
+    let mut text = Report { buf: [0; 2048], len: 0 };
+    let _ = writeln!(text, "morloc: internal error: a panic in a signal handler at {file}:{line}");
+    write_stderr(text.as_bytes());
+    unsafe { libc::_exit(PANIC_EXIT_STATUS) }
+}
+
 // PANIC-1
 pub fn install_hook(panic_exit: fn() -> !) {
     install_hook_unless(panic_exit, |_, _| true)
@@ -97,6 +125,9 @@ pub fn source_dirs() -> [&'static str; 2] {
 pub fn install_hook_unless(panic_exit: fn() -> !, may_unwind: fn(bool, &str) -> bool) {
     std::panic::set_hook(Box::new(move |info| {
         let file = info.location().map(|l| l.file()).unwrap_or("");
+        if in_signal_frame() {
+            exit_in_signal_frame(file, info.location().map_or(0, |l| l.line()));
+        }
         match decide(file, false, may_unwind) {
             Outcome::Unwind => report(info),
             Outcome::UnwindQuietly => {}

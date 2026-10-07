@@ -1869,7 +1869,7 @@ if should_run "router"; then
 
         # Verify child daemons are also cleaned up
         sleep 1
-        remaining=$(pgrep -f "morloc-router-arithmetic" 2>/dev/null | wc -l) || remaining=0
+        remaining=$(pgrep -f "router-arithmetic.sock" 2>/dev/null | wc -l) || remaining=0
 
         TOTAL=$((TOTAL + 1))
         printf "  %-50s " "router cleans up child daemons"

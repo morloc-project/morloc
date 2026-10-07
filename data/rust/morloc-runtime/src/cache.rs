@@ -50,7 +50,13 @@ unsafe fn resolve_cache_filename(
 /// `<cache_base>/data/`, creating it on demand. Heap C-string the
 /// caller frees with `libc::free`, or null with `*errmsg` set.
 unsafe fn resolve_data_dir(errmsg: *mut *mut c_char) -> *mut c_char {
-    let dir = cache_base().join("data");
+    let dir = match cache_base() {
+        Ok(base) => base.join("data"),
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Other(e));
+            return ptr::null_mut();
+        }
+    };
     if std::fs::create_dir_all(&dir).is_err() {
         set_errmsg(
             errmsg,
@@ -125,27 +131,30 @@ pub(crate) fn morloc_pool_hash() -> u64 {
 ///      need the same path).
 ///   2. `$XDG_CACHE_HOME/morloc/cache` if `XDG_CACHE_HOME` is set.
 ///   3. `~/.cache/morloc/cache` default.
-///   4. `/tmp/morloc/cache` if `HOME` is also unset.
-fn cache_base() -> PathBuf {
-    static CACHED: PublishOnce<PathBuf> = PublishOnce::new();
+///   4. `cache` in the per-user runtime directory if `HOME` is also unset.
+fn cache_base() -> Result<PathBuf, String> {
+    static CACHED: PublishOnce<Result<PathBuf, String>> = PublishOnce::new();
     CACHED
         .get_or_init(|| {
             if let Ok(s) = std::env::var("MORLOC_CACHE_BASE") {
                 if !s.is_empty() {
-                    return PathBuf::from(s);
+                    return Ok(PathBuf::from(s));
                 }
             }
             if let Ok(s) = std::env::var("XDG_CACHE_HOME") {
                 if !s.is_empty() {
-                    return PathBuf::from(s).join("morloc/cache");
+                    return Ok(PathBuf::from(s).join("morloc/cache"));
                 }
             }
             if let Ok(home) = std::env::var("HOME") {
                 if !home.is_empty() {
-                    return PathBuf::from(home).join(".cache/morloc/cache");
+                    return Ok(PathBuf::from(home).join(".cache/morloc/cache"));
                 }
             }
-            PathBuf::from("/tmp/morloc/cache")
+            // NET-4
+            morloc_runtime_types::private_dir::runtime_dir()
+                .map(|d| d.join("cache"))
+                .map_err(|e| format!("no private directory for the cache: {e}"))
         })
         .clone()
 }
@@ -168,7 +177,13 @@ pub(crate) unsafe fn morloc_cache_path(
             _ => "_unlabeled".to_string(),
         }
     };
-    let dir = cache_base().join(label_part);
+    let dir = match cache_base() {
+        Ok(base) => base.join(label_part),
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Other(e));
+            return ptr::null_mut();
+        }
+    };
     if std::fs::create_dir_all(&dir).is_err() {
         set_errmsg(
             errmsg,

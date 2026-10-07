@@ -213,10 +213,8 @@ mod tests {
     #[ignore]
     fn child_decodes_malformed_bytes() {
         in_child(|| {
-            let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
-            let r = unsafe { crate::error::guarded(&mut err, 1, || -> i32 { panic!("malformed") }) };
-            let msg = unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned();
-            if r != 1 || !msg.contains("malformed") {
+            let r = crate::error::decode("decoding", || -> i32 { panic!("malformed") });
+            if !matches!(r, Err(e) if e.to_string().contains("malformed")) {
                 unsafe { libc::_exit(3) };
             }
         });
@@ -231,10 +229,7 @@ mod tests {
     #[ignore]
     fn child_finds_a_poisoned_lock_while_decoding() {
         in_child(|| {
-            let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
-            let _ = unsafe {
-                crate::error::guarded(&mut err, 1, || -> i32 { morloc_runtime_types::panic::poisoned_lock() })
-            };
+            let _ = crate::error::decode("decoding", || -> i32 { morloc_runtime_types::panic::poisoned_lock() });
             unsafe { libc::_exit(3) };
         });
     }
@@ -249,13 +244,83 @@ mod tests {
     fn child_panics_holding_a_lock_while_decoding() {
         in_child(|| {
             let lock = crate::fork_policy::Held::new(60, 0u32);
-            let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
-            let _ = unsafe {
-                crate::error::guarded(&mut err, 1, || -> i32 {
-                    let _g = lock.lock();
-                    panic!("inside the allocator")
-                })
+            let _ = crate::error::decode("decoding", || -> i32 {
+                let _g = lock.lock();
+                panic!("inside the allocator")
+            });
+            unsafe { libc::_exit(3) };
+        });
+    }
+
+    #[test]
+    fn a_panicking_release_callback_ends_the_process_with_70() {
+        assert_eq!(status_of_child("child_releases_a_stream_that_panics"), morloc_runtime_types::panic::PANIC_EXIT_STATUS);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_releases_a_stream_that_panics() {
+        use arrow_array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
+        use arrow_array::ffi_stream::FFI_ArrowArrayStream;
+        unsafe extern "C" fn get_schema(_: *mut FFI_ArrowArrayStream, out: *mut FFI_ArrowSchema) -> libc::c_int {
+            let s = arrow_schema::Schema::new(vec![arrow_schema::Field::new("x", arrow_schema::DataType::Int64, true)]);
+            std::ptr::write(out, FFI_ArrowSchema::try_from(&s).unwrap());
+            0
+        }
+        unsafe extern "C" fn get_next(_: *mut FFI_ArrowArrayStream, _: *mut FFI_ArrowArray) -> libc::c_int {
+            libc::EIO
+        }
+        unsafe extern "C" fn get_last_error(_: *mut FFI_ArrowArrayStream) -> *const std::ffi::c_char {
+            c"the producer failed".as_ptr()
+        }
+        unsafe extern "C" fn release(s: *mut FFI_ArrowArrayStream) {
+            (*s).release = None;
+            panic!("the producer's release");
+        }
+        in_child(|| {
+            let mut stream = FFI_ArrowArrayStream {
+                get_schema: Some(get_schema),
+                get_next: Some(get_next),
+                get_last_error: Some(get_last_error),
+                release: Some(release),
+                private_data: std::ptr::null_mut(),
             };
+            let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+            let _ = morloc_runtime_types::panic::catch(|| unsafe {
+                crate::arrow_ffi::arrow_stream_to_shm_typed(&mut stream, std::ptr::null(), &mut err)
+            });
+            unsafe { libc::_exit(3) };
+        });
+    }
+
+    extern "C" fn panicking_handler(_: libc::c_int) {
+        morloc_runtime_types::panic::signal_frame(|| panic!("in a signal handler"))
+    }
+
+    #[test]
+    fn a_panic_in_a_signal_handler_ends_the_process_whatever_scope_it_interrupts() {
+        assert_eq!(status_of_child("child_panics_in_a_handler_inside_a_catch"), morloc_runtime_types::panic::PANIC_EXIT_STATUS);
+        assert_eq!(status_of_child("child_panics_in_a_handler_inside_a_host_scope"), morloc_runtime_types::panic::PANIC_EXIT_STATUS);
+    }
+
+    #[test]
+    #[ignore]
+    fn child_panics_in_a_handler_inside_a_catch() {
+        in_child(|| {
+            unsafe { libc::signal(libc::SIGUSR1, panicking_handler as *const () as libc::sighandler_t) };
+            let _ = morloc_runtime_types::panic::catch(|| unsafe { libc::raise(libc::SIGUSR1) });
+            unsafe { libc::_exit(3) };
+        });
+    }
+
+    #[test]
+    #[ignore]
+    fn child_panics_in_a_handler_inside_a_host_scope() {
+        in_child(|| {
+            unsafe { libc::signal(libc::SIGUSR1, panicking_handler as *const () as libc::sighandler_t) };
+            let outer = morloc_runtime_types::panic::set_scope(morloc_runtime_types::panic::SCOPE_HOST);
+            unsafe { libc::raise(libc::SIGUSR1) };
+            morloc_runtime_types::panic::set_scope(outer);
             unsafe { libc::_exit(3) };
         });
     }

@@ -4,23 +4,9 @@
 
 pub use morloc_runtime_types::error::*;
 
-/// Run a call into a third-party format library with `errmsg` cleared,
-/// returning `on_panic` with the panic message in `errmsg` if the library
-/// panics on the bytes it is handed (model/panic.md PANIC-2).
-///
-/// # Safety
-/// `errmsg` must be a valid `char**` or null.
-pub unsafe fn guarded<R>(
-    errmsg: *mut *mut std::ffi::c_char,
-    on_panic: R,
-    body: impl FnOnce() -> R,
-) -> R {
-    clear_errmsg(errmsg);
-    match morloc_runtime_types::panic::catch(body) {
-        Ok(r) => r,
-        Err(caught) => {
-            set_errmsg(errmsg, &MorlocError::Other(format!("internal error: {}", caught.message)));
-            on_panic
-        }
-    }
+/// Run a third-party format library's call on bytes from outside the
+/// program, turning a panic the library raises on malformed input into an
+/// error (model/panic.md PANIC-2). Only the library call goes inside.
+pub fn decode<T>(what: &str, call: impl FnOnce() -> T) -> Result<T, MorlocError> {
+    morloc_runtime_types::panic::catch(call).map_err(|caught| MorlocError::Other(format!("{what}: {}", caught.message)))
 }

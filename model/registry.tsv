@@ -207,6 +207,7 @@ morloc-runtime-types/owner_word.rs::-::HELD	thread
 morloc-runtime-types/panic.rs::-::IN_SCOPE	thread		
 morloc-runtime-types/panic.rs::-::UNWINDING	thread		
 morloc-runtime-types/panic.rs::-::FATAL	thread		
+morloc-runtime-types/panic.rs::-::IN_HANDLER	thread		
 morloc-runtime-types/process.rs::token::CACHED	fork-scoped		
 morloc-runtime-types/process.rs::token::CACHED_GENERATION	fork-scoped		
 morloc-runtime-types/fork_generation.rs::-::GENERATION	counter		
@@ -228,6 +229,7 @@ morloc-nexus/mcp.rs::new_session_id::CTR	exec-only
 morloc-nexus/mcp.rs::-::Frontend.locks	exec-only		
 morloc-nexus/mcp.rs::-::Frontend.sessions	exec-only		
 morloc-nexus/mcp.rs::-::FRONTEND_EVALS	exec-only		
+morloc-nexus/mcp.rs::-::OPEN_CONNECTIONS	exec-only		
 morloc-nexus/parse_arg.rs::-::NEXUS_READS_STDIN	exec-only		
 morloc-nexus/parse_arg.rs::-::CONTEXTS	exec-only		
 morloc-nexus/parse_arg.rs::-::STAGE_DIR	exec-only		
@@ -285,3 +287,7 @@ morloc-runtime/stream.rs::-::GAP_SLOT	test-only
 morloc-runtime/stream.rs::-::AT_GAP	test-only		
 morloc-runtime/stream.rs::-::RESUME	test-only		
 morloc-runtime/stream.rs::-::RELEASES_SEEN	counter		
+morloc-runtime/router_ffi.rs::-::ROUTER_GROUPS	exec-only		
+morloc-runtime/router_ffi.rs::-::ROUTER_DAEMONS	exec-only		
+morloc-runtime/daemon_ffi.rs::-::ENDPOINT_LOCKS	exec-only		
+morloc-runtime/daemon_ffi.rs::-::ENDPOINT_TESTS	test-only		

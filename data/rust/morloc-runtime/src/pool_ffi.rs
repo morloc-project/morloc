@@ -62,7 +62,10 @@ pub(crate) fn pool_mark_idle() {
 }
 
 extern "C" fn pool_sigterm_handler(_sig: i32) {
-    SHUTTING_DOWN.store(true, Ordering::Relaxed);
+    // PANIC-1
+    morloc_runtime_types::panic::signal_frame(|| {
+        SHUTTING_DOWN.store(true, Ordering::Relaxed);
+    })
 }
 
 // ── Packet dispatch ──────────────────────────────────────────────────────────

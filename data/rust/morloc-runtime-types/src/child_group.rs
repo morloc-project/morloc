@@ -47,6 +47,16 @@ impl ChildGroups {
         });
     }
 
+    /// Send `sig` to every registered group that was not killed.
+    // DAEMON-12: callable from a signal handler.
+    pub fn signal_all(&self, sig: libc::c_int) {
+        masked(|_| {
+            for i in 0..SLOTS {
+                self.signal_slot(i, sig);
+            }
+        });
+    }
+
     /// The leader `pid` has exited and is about to be reaped: no signal
     /// reaches its group from now on.
     // DAEMON-11: callable from a signal handler; called before the reap, while the id is held.
@@ -250,6 +260,21 @@ mod tests {
         stopper.join().unwrap();
         assert!(killed(pid));
         assert!(r.while_held(|_| ()).is_none());
+    }
+
+    #[test]
+    fn signalling_all_reaches_every_live_group_and_no_killed_one() {
+        let groups = ChildGroups::new();
+        let (a, b) = (sleeper_group(), sleeper_group());
+        let (ra, rb) = (groups.add(a).unwrap(), groups.add(b).unwrap());
+        rb.signal(libc::SIGKILL);
+        assert!(killed(b));
+        groups.signal_all(libc::SIGTERM);
+        let mut status = 0;
+        unsafe { libc::waitpid(a, &mut status, 0) };
+        assert!(libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGTERM);
+        assert_eq!(groups.slots[rb.slot].load(Ordering::SeqCst), b | DEAD);
+        drop((ra, rb));
     }
 
     #[test]

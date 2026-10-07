@@ -922,14 +922,67 @@ fn read_lines_capped<R: BufRead>(mut reader: R) -> impl Iterator<Item = Result<S
 // (a pool-replication / worker model) is deliberately out of scope here.
 //
 // Because the endpoint is network-reachable, request reads are bounded (header
-// and body size caps + a per-read socket timeout) and the session table is
-// bounded (idle TTL + a hard cap), so a slow or abusive client cannot exhaust
-// memory or threads.
+// and body size caps, total read deadlines, a cap on open connections) and
+// the session table is bounded (idle TTL + a hard cap), so a slow or abusive
+// client cannot exhaust memory or threads (model/network.md NET-2, NET-3).
 
-/// Per-read socket timeout: a connection that sends nothing for this long is
-/// dropped, defusing idle/slowloris connections and freeing the thread. Also
-/// bounds keep-alive idle time between requests.
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Cap on connections served at once; past it a connection is answered 503.
+const MAX_CONNECTIONS: usize = 128;
+
+static OPEN_CONNECTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A place among the connections served at once, given back on drop.
+pub(crate) struct ConnectionSlot;
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        OPEN_CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+// NET-3
+pub(crate) fn connection_slot() -> Option<ConnectionSlot> {
+    use std::sync::atomic::Ordering;
+    OPEN_CONNECTIONS
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < MAX_CONNECTIONS).then_some(n + 1))
+        .ok()
+        .map(|_| ConnectionSlot)
+}
+
+/// Answer a connection past the cap without reading from it.
+pub(crate) fn refuse_busy(mut stream: TcpStream) {
+    let _ = stream.set_nonblocking(true);
+    let _ = stream.write_all(&http_json(503, br#"{"error":"too many connections"}"#, false));
+    // NET-3: unread request bytes at close would reset the connection and lose the reply.
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let mut buf = [0u8; 4096];
+    for _ in 0..16 {
+        if !matches!(stream.read(&mut buf), Ok(n) if n > 0) {
+            break;
+        }
+    }
+}
+
+/// A connection read under a deadline that holds however the bytes trickle
+/// in (NET-2): each read may wait only for the time left.
+struct DeadlineReader {
+    stream: TcpStream,
+    until: std::rc::Rc<std::cell::Cell<Instant>>,
+}
+
+impl Read for DeadlineReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.get().saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "the client took too long to send its request"));
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf).map_err(|e| match e.kind() {
+            std::io::ErrorKind::WouldBlock => std::io::Error::new(std::io::ErrorKind::TimedOut, e),
+            _ => e,
+        })
+    }
+}
 
 /// Cap on a single request-line / header line. Longer -> the request is
 /// rejected and the connection closed.
@@ -1046,9 +1099,14 @@ pub fn serve_http(
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
+                let Some(slot) = connection_slot() else {
+                    refuse_busy(stream);
+                    continue;
+                };
                 let st = Arc::clone(&state);
                 let tk = Arc::clone(&token);
                 std::thread::spawn(move || {
+                    let _slot = slot;
                     serve_conn(stream, |req, ka| build_response(req, &st, tk.as_ref().as_deref(), ka))
                 });
             }
@@ -1069,16 +1127,17 @@ pub(crate) fn serve_conn<F>(stream: TcpStream, mut respond: F)
 where
     F: FnMut(&HttpRequest, bool) -> Vec<u8>,
 {
-    // Drop a connection that stalls mid-request or sits idle past the timeout,
-    // so a slow/silent client cannot pin this thread indefinitely.
-    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+    use morloc_runtime_types::net_limits::{body_limit, HEAD_LIMIT};
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(_) => return,
     };
-    let mut reader = BufReader::new(stream);
+    let until = std::rc::Rc::new(std::cell::Cell::new(Instant::now() + HEAD_LIMIT));
+    let mut reader = BufReader::new(DeadlineReader { stream, until: until.clone() });
     loop {
-        let req = match read_http_request(&mut reader) {
+        // NET-2: the wait for a request, its line and headers share one deadline.
+        until.set(Instant::now() + HEAD_LIMIT);
+        let req = match read_http_request(&mut reader, |len| until.set(Instant::now() + body_limit(len))) {
             Ok(Some(r)) => r,
             _ => break, // EOF, malformed, or IO error -> close
         };
@@ -1125,7 +1184,7 @@ pub(crate) struct HttpRequest {
 /// the caller). Every line is size-capped and the body is read incrementally up
 /// to Content-Length, so a hostile Content-Length or header flood cannot force
 /// a large up-front allocation.
-fn read_http_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<HttpRequest>> {
+fn read_http_request<R: BufRead>(reader: &mut R, on_body: impl FnOnce(usize)) -> std::io::Result<Option<HttpRequest>> {
     let mut line = String::new();
     match read_capped_line(reader, &mut line)? {
         LineRead::Eof | LineRead::TooLong => return Ok(None),
@@ -1171,6 +1230,7 @@ fn read_http_request<R: BufRead>(reader: &mut R) -> std::io::Result<Option<HttpR
     }
     let mut body = Vec::new();
     if content_length > 0 {
+        on_body(content_length);
         reader.take(content_length as u64).read_to_end(&mut body)?;
     }
     Ok(Some(HttpRequest {
@@ -1903,9 +1963,14 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
+                let Some(slot) = connection_slot() else {
+                    refuse_busy(stream);
+                    continue;
+                };
                 let fe = Arc::clone(&fe);
                 let tk = Arc::clone(&token);
                 std::thread::spawn(move || {
+                    let _slot = slot;
                     serve_conn(stream, |req, ka| {
                         frontend_build_response(req, &fe, tk.as_ref().as_deref(), ka)
                     })
@@ -3070,6 +3135,38 @@ mod tests {
     }
 
     #[test]
+    fn connections_past_the_cap_get_no_slot() {
+        let held: Vec<_> = (0..MAX_CONNECTIONS).map(|_| connection_slot().expect("a slot below the cap")).collect();
+        assert!(connection_slot().is_none());
+        drop(held);
+        assert!(connection_slot().is_some());
+    }
+
+    #[test]
+    fn a_request_trickling_in_ends_at_its_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dripper = std::thread::spawn(move || {
+            let mut c = TcpStream::connect(addr).unwrap();
+            for b in b"POST /mcp HTTP/1.1\r\nHost: x\r\nX-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n" {
+                if c.write_all(&[*b]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let start = Instant::now();
+        let until = std::rc::Rc::new(std::cell::Cell::new(start + Duration::from_millis(300)));
+        let mut reader = BufReader::new(DeadlineReader { stream, until });
+        let got = read_http_request(&mut reader, |_| {});
+        assert!(matches!(&got, Err(e) if e.kind() == std::io::ErrorKind::TimedOut), "{:?}", got.map(|r| r.is_some()));
+        assert!(start.elapsed() < Duration::from_millis(800));
+        drop(reader);
+        dripper.join().unwrap();
+    }
+
+    #[test]
     fn an_open_bind_needs_a_token_or_an_explicit_waiver() {
         assert!(open_bind_refused("0.0.0.0", false, false));
         assert!(!open_bind_refused("0.0.0.0", true, false));
@@ -3129,7 +3226,7 @@ mod tests {
         });
         let (stream, _) = listener.accept().unwrap();
         let mut reader = BufReader::new(stream);
-        let parsed = read_http_request(&mut reader).unwrap().unwrap();
+        let parsed = read_http_request(&mut reader, |_| {}).unwrap().unwrap();
         assert_eq!(parsed.method, "POST");
         assert_eq!(parsed.path, "/mcp?x=1");
         assert_eq!(header_get(&parsed.headers, "mcp-session-id"), Some("sid"));
@@ -3145,7 +3242,7 @@ mod tests {
         let big = "a".repeat(MAX_HEADER_LINE_BYTES as usize + 1024);
         let raw = format!("GET /mcp HTTP/1.1\r\nX: {big}\r\n\r\n");
         let mut slice = raw.as_bytes();
-        assert!(read_http_request(&mut slice).unwrap().is_none());
+        assert!(read_http_request(&mut slice, |_| {}).unwrap().is_none());
     }
 
     #[test]
@@ -3157,7 +3254,7 @@ mod tests {
         }
         raw.push_str("\r\n");
         let mut slice = raw.as_bytes();
-        assert!(read_http_request(&mut slice).unwrap().is_none());
+        assert!(read_http_request(&mut slice, |_| {}).unwrap().is_none());
     }
 
     #[test]
@@ -3166,7 +3263,7 @@ mod tests {
         // next request) are left for the following read, not swallowed.
         let raw = b"POST /mcp HTTP/1.1\r\nContent-Length: 5\r\n\r\nHELLOEXTRA";
         let mut slice = &raw[..];
-        let parsed = read_http_request(&mut slice).unwrap().unwrap();
+        let parsed = read_http_request(&mut slice, |_| {}).unwrap().unwrap();
         assert_eq!(parsed.body, b"HELLO");
         assert_eq!(slice, b"EXTRA"); // remainder preserved
     }

@@ -41,6 +41,11 @@ impl OwnerWord {
         OwnerWord { owner: AtomicU64::new(0) }
     }
 
+    /// The token of the word's owner, 0 when free.
+    pub fn owner(&self) -> u64 {
+        self.owner.load(Ordering::Acquire)
+    }
+
     /// Take the word, waiting while its owner lives. Returns whether the
     /// previous owner died holding it.
     pub fn acquire(&self) -> Result<bool, MorlocError> {

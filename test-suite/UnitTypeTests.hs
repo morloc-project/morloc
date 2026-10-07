@@ -75,7 +75,6 @@ import Morloc.Frontend.Namespace
 import Morloc.Data.Doc (pretty, render)
 import Morloc.CodeGenerator.LanguageDescriptor (declaredNamePatterns, matchNamePattern)
 import qualified Morloc.DataFiles as DF
-import Data.Either (isLeft)
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
