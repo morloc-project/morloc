@@ -1617,6 +1617,41 @@ unsafe fn buffered_packet_to_fd(
     n
 }
 
+/// Write `bytes` to a new file `morloc-pkt-<pid>-<seq>.mpk` in `dir`,
+/// created exclusively and never through a symlink, so a name another user
+/// planted in a shared directory is skipped rather than written through.
+fn create_packet_file(
+    dir: &std::path::Path,
+    pid: u32,
+    mut next_seq: impl FnMut() -> u64,
+    bytes: &[u8],
+) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    for _ in 0..64 {
+        let path = dir.join(format!("morloc-pkt-{}-{}.mpk", pid, next_seq()));
+        let opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path);
+        match opened {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(bytes) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(e);
+                }
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name for a file packet"))
+}
+
+
 // Write `len` bytes from `buf` to `fd`, retrying on partial writes
 // and EINTR. Returns bytes written or -1 with errmsg set.
 pub(crate) unsafe fn write_all_fd(
@@ -2213,13 +2248,13 @@ unsafe fn make_file_data_packet_voidstar(
         return ptr::null_mut();
     }
     let pid = std::process::id();
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let path = dir.join(format!("morloc-pkt-{}-{}.mpk", pid, seq));
-
-    if let Err(e) = std::fs::write(&path, &mpk) {
-        set_errmsg(errmsg, &MorlocError::Io(e));
-        return ptr::null_mut();
-    }
+    let path = match create_packet_file(&dir, pid, || SEQ.fetch_add(1, Ordering::Relaxed), &mpk) {
+        Ok(p) => p,
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Io(e));
+            return ptr::null_mut();
+        }
+    };
 
     let path_str = match path.to_str() {
         Some(s) => s,
@@ -2373,6 +2408,7 @@ unsafe fn print_binary(
 
 #[cfg(test)]
 mod donation_tests {
+
     //! The reference a sender takes on behalf of a recipient must keep the
     //! block alive across the sender's own release. A concurrency soak can
     //! only show that the window narrowed; this shows the ordering property
@@ -2904,5 +2940,24 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn print_morloc_data_packet(packet: *const u8, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32 {
         super::print_morloc_data_packet(packet, schema, errmsg)
+    }
+}
+
+#[cfg(test)]
+mod packet_file_tests {
+    #[test]
+    fn a_file_packet_never_writes_through_a_planted_name() {
+        let dir = std::env::temp_dir().join(format!("mlc-pkt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("morloc-pkt-7-0.mpk")).unwrap();
+        let mut seq = 0;
+        let path = super::create_packet_file(&dir, 7, || { seq += 1; seq - 1 }, b"packet").unwrap();
+        assert_eq!(path, dir.join("morloc-pkt-7-1.mpk"));
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        assert_eq!(std::fs::read(&path).unwrap(), b"packet");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

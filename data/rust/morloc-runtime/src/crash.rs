@@ -7,8 +7,8 @@
 //! the manifold the faulting thread was executing, then a native
 //! backtrace; then it lets the process die of the signal so the parent
 //! still sees it. Inside the handler only calls that are safe there are
-//! used: `write`, `backtrace_symbols_fd` (warmed at install), `alarm`,
-//! `pthread_sigmask` and `raise`.
+//! used: `write`, `backtrace_symbols_fd` (warmed at install), `sigaction`,
+//! `alarm`, `pthread_sigmask` and `raise`.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
@@ -61,11 +61,6 @@ pub(crate) unsafe fn morloc_install_crash_handler(lang: *const c_char, current_f
     for sig in FATAL {
         libc::sigaction(sig, &sa, std::ptr::null_mut());
     }
-    let mut alarm: libc::sigaction = std::mem::zeroed();
-    alarm.sa_sigaction = wedged as *const () as usize;
-    alarm.sa_flags = libc::SA_ONSTACK;
-    libc::sigemptyset(&mut alarm.sa_mask);
-    libc::sigaction(libc::SIGALRM, &alarm, std::ptr::null_mut());
 }
 
 /// A handler that has taken too long: end the process with the signal it
@@ -139,7 +134,14 @@ extern "C" fn fatal(sig: c_int, _info: *mut libc::siginfo_t, _ctx: *mut c_void) 
     // PANIC-1
     morloc_runtime_types::panic::signal_frame(|| {
         PENDING.store(sig as usize, Ordering::Relaxed);
-        unsafe { libc::alarm(HANDLER_ALARM_SECS) };
+        unsafe {
+            let mut alarm: libc::sigaction = std::mem::zeroed();
+            alarm.sa_sigaction = wedged as *const () as usize;
+            alarm.sa_flags = libc::SA_ONSTACK;
+            libc::sigemptyset(&mut alarm.sa_mask);
+            libc::sigaction(libc::SIGALRM, &alarm, std::ptr::null_mut());
+            libc::alarm(HANDLER_ALARM_SECS);
+        }
 
         // The signal line first: everything after it may fault.
         let mut line = Line::new();

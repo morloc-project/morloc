@@ -286,6 +286,9 @@ fn die_with_pool_error(
         _ => format!("{}", comm_err),
     };
 
+    if matches!(comm_err.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe) {
+        process::wait_for_pool_exit(pool_index, std::time::Duration::from_millis(500));
+    }
     let mut full = format!("{}: {}", context, comm_msg);
     if let Some(info) = process::pool_death_info(pool_index) {
         full.push_str(&format!("\nPool '{}' {}", socket.lang, info));

@@ -148,15 +148,15 @@ pub(crate) unsafe fn slurm_job_is_complete(job_id: u32) -> bool {
         };
     }
 
-    let cmd = format!("sacct -j {} --format=State --noheader\0", job_id);
+    let cmd = format!("sacct -j {} --format=State%30 --noheader\0", job_id);
     let sacct = morloc_runtime_types::fd::popen(cmd.as_ptr() as *const c_char, b"r\0".as_ptr() as *const c_char);
     if sacct.is_null() { return false; }
 
     let mut state = [0u8; 64];
     let mut done = false;
     while !libc::fgets(state.as_mut_ptr() as *mut c_char, 64, sacct).is_null() {
-        let s = std::str::from_utf8(&state).unwrap_or("");
-        if s.contains("COMPLETED") || s.contains("FAILED") || s.contains("CANCELLED") {
+        let s = std::str::from_utf8(&state).unwrap_or("").trim_end_matches('\0');
+        if crate::slurm_bridge::state_is_terminal(s) {
             done = true;
             break;
         }

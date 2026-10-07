@@ -650,7 +650,11 @@ def _recv_fd(sock):
 
 WORKER_IDLE_TIMEOUT = 5.0  # seconds before an idle worker exits
 
-def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w, retire_w):
+def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w, retire_w, inherited_write_fd=-1):
+    # The job socket's write end belongs to the listener; a worker holding a
+    # copy would never see end of file when the listener dies.
+    if inherited_write_fd >= 0:
+        os.close(inherited_write_fd)
     # Reset signal handlers inherited from main. If user code inside run_job
     # calls multiprocessing.Pool (or anything else that forks and later
     # SIGTERMs its own children), those grandchildren would otherwise inherit
@@ -1137,7 +1141,8 @@ if __name__ == "__main__":
     for i in range(num_workers):
         worker = Process(target=worker_process,
                          args=(read_sock.fileno(), tmpdir, shm_basename, shutdown_flag,
-                               busy_count, total_workers, wakeup_w, retire_w))
+                               busy_count, total_workers, wakeup_w, retire_w,
+                               write_sock.fileno()))
         _fork_single_threaded(workers)
         worker.start()
         workers.append(worker)

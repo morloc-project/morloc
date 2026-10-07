@@ -144,6 +144,7 @@ extern "C" {
     fn morloc_take_noted_child_exit(pid: libc::c_int, since: u64, status: *mut libc::c_int) -> libc::c_int;
     fn morloc_stop_child_groups();
     fn morloc_child_group_leader_exited(pid: libc::c_int);
+    fn morloc_refuse_new_segments();
     fn morloc_claim_exit() -> bool;
     fn morloc_daemon_remove_endpoints();
     fn morloc_remove_leases();
@@ -584,6 +585,28 @@ pub fn record_nexus_process() {
     NEXUS_GENERATION.store(unsafe { morloc_fork_generation() }, Ordering::SeqCst);
 }
 
+// FORK-11: the environment is written only while the process has one thread;
+// a count that cannot be read allows it.
+fn alone() {
+    extern "C" {
+        fn morloc_thread_count() -> libc::c_long;
+    }
+    let n = unsafe { morloc_thread_count() };
+    if n > 1 {
+        morloc_runtime_types::panic::fatal(&format!("the environment was written with {n} threads running"));
+    }
+}
+
+pub(crate) fn set_startup_env(key: &str, value: impl AsRef<std::ffi::OsStr>) {
+    alone();
+    std::env::set_var(key, value);
+}
+
+pub(crate) fn remove_startup_env(key: &str) {
+    alone();
+    std::env::remove_var(key);
+}
+
 // DAEMON-6
 fn stop_everything() {
     // PANIC-1: a forked child before exec owns none of these.
@@ -777,7 +800,7 @@ pub fn init_shm() -> (String, String) {
     // free -- Python and R never enter libmorloc's pool_main, so a
     // C-ABI setter would have to be bound four times over. Unset means
     // "not benchmarking", and morloc_bench_record is then a no-op.
-    std::env::set_var(
+    crate::process::set_startup_env(
         "MORLOC_BENCH_RECORDS",
         std::path::Path::new(&tmpdir).join("benchmark.records"),
     );
@@ -995,18 +1018,20 @@ fn teardown(exit_code: i32, unmap: bool) -> ! {
     unsafe { morloc_remove_leases() };
     // Clean up shared memory segments
     extern "C" {
-        fn shclose(errmsg: *mut *mut std::ffi::c_char) -> bool;
+        fn morloc_shretire(errmsg: *mut *mut std::ffi::c_char) -> bool;
     }
-    // DAEMON-6
+    // DAEMON-5: names only; no thread can find the memory unmapped.
     if unmap {
         unsafe {
             let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
-            shclose(&mut err);
+            morloc_shretire(&mut err);
             if !err.is_null() {
                 libc::free(err as *mut libc::c_void);
             }
         }
     }
+    // DAEMON-5
+    unsafe { morloc_refuse_new_segments() };
     // Every segment the run recorded, including those of earlier recovery
     // generations and companions whose own teardown did not run.
     if let Some(dir) = RUN_TMPDIR.get() {
@@ -1620,11 +1645,32 @@ fn exited_child() -> Option<libc::pid_t> {
 /// leaves NO in-pool backtrace (no crash handler, no faulthandler, no log);
 /// only the parent's wait-status reveals it ("signal 9"). Called from the
 /// run-failed paths so that signal is surfaced instead of swallowed.
-pub fn report_dead_pools() {
+/// Wait up to `limit` for pool `pool_index`, which closed its connection on
+/// its way out, to exit and be reaped.
+pub fn wait_for_pool_exit(pool_index: usize, limit: Duration) {
+    let until = std::time::Instant::now() + limit;
+    loop {
+        reap_noting();
+        if pool_death_info(pool_index).is_some() || std::time::Instant::now() >= until {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// `dying` when a pool ended the call without a reply: it closed the
+/// connection on its way out, so its exit is waited for, briefly.
+pub fn report_dead_pools(dying: bool) {
     // Drain any child exits the SIGCHLD handler has not yet processed, so a
     // pool that died microseconds before the caller observed EOF is still
     // reported (avoids a report/reap race).
     reap_noting();
+    let n = POOL_LANGS.lock().unwrap().len().min(MAX_DAEMONS);
+    let until = std::time::Instant::now() + Duration::from_millis(500);
+    while dying && !(0..n).any(|i| pool_death_info(i).is_some()) && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+        reap_noting();
+    }
     let langs = POOL_LANGS.lock().unwrap();
     for i in 0..langs.len().min(MAX_DAEMONS) {
         if let Some(info) = pool_death_info(i) {

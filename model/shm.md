@@ -53,7 +53,9 @@ Status: deviation
 A result that aliases an argument has two holders and two references. The
 runtime has no release that drops a reference without also untracking the
 eval arena's own entry for the same address, so a non-arena release on a
-thread with an active arena leaks the arena's reference.
+thread with an active arena leaks the arena's reference. This belongs to
+the shared-memory references and pool runtime project, which records the
+holder of each reference.
 
 ### SHM-8 A dead holder's references are recoverable
 Status: implemented
@@ -79,7 +81,7 @@ the coordinator's shutdown flag is set before any worker can exit of it,
 and a coordinator that finds its flag set after reaping a worker ends
 normally rather than as failed; the namespace is discarded either way.
 R workers never retire. When a pool ends, a daemon or MCP nexus runs its
-coordinated recovery (DAEMON-5), which discards the whole namespace, and a
+coordinated recovery (DAEMON-1), which discards the whole namespace, and a
 CLI run fails. A worker crash therefore restarts every pool of a daemon,
 and a client that repeatedly crashes a worker reaches the recovery loop
 guard, which stops the daemon. References held by children forked from user

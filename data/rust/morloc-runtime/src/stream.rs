@@ -234,6 +234,18 @@ static REGISTRY_SLOT_COUNT: std::sync::atomic::AtomicUsize =
 pub(crate) static REGISTRY_SEGMENT: crate::fork_policy::Held<Option<crate::shm_companion::CompanionSegment>> =
     crate::fork_policy::Held::new(7, None);
 
+// DAEMON-5
+static REGISTRY_TORN_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+// DAEMON-5
+pub(crate) fn registry_reopen() {
+    REGISTRY_TORN_DOWN.store(false, std::sync::atomic::Ordering::Release);
+}
+
+fn registry_closed() -> MorlocError {
+    MorlocError::Other("the stream registry was torn down; no stream can be opened now".into())
+}
+
 /// Initialise the shared stream registry for this session. Wraps
 /// `registry_bootstrap`; kept as the public entry point for the FFI
 /// (`stream_registry_init` in ffi.rs).
@@ -253,6 +265,9 @@ pub fn registry_bootstrap() -> Result<usize, MorlocError> {
     let cached = REGISTRY_BASE.load(Ordering::Acquire);
     if !cached.is_null() {
         return Ok(REGISTRY_SLOT_COUNT.load(Ordering::Relaxed));
+    }
+    if REGISTRY_TORN_DOWN.load(Ordering::Acquire) {
+        return Err(registry_closed());
     }
     #[cfg(test)]
     {
@@ -279,6 +294,14 @@ pub fn registry_bootstrap() -> Result<usize, MorlocError> {
 
     let mut seg = seg;
     let mut segment = REGISTRY_SEGMENT.lock();
+    if REGISTRY_TORN_DOWN.load(Ordering::Acquire) {
+        drop(segment);
+        if shm::owns_program() {
+            seg.unlink();
+        }
+        seg.detach();
+        return Err(registry_closed());
+    }
     if !REGISTRY_BASE.load(Ordering::Acquire).is_null() {
         drop(segment);
         seg.detach();
@@ -374,6 +397,7 @@ pub fn registry_teardown() {
     let service_stopped = release_service_shutdown();
 
     let mut held = REGISTRY_SEGMENT.lock();
+    REGISTRY_TORN_DOWN.store(true, Ordering::Release);
     if REGISTRY_BASE.swap(std::ptr::null_mut(), Ordering::AcqRel).is_null() {
         return;
     }
@@ -382,7 +406,8 @@ pub fn registry_teardown() {
     drop(held);
     match segment {
         // A release service still blocked on a slot keeps the mapping.
-        Some(mut seg) if !service_stopped => {
+        // DAEMON-5: so does every exit.
+        Some(mut seg) if !service_stopped || shm::exiting() => {
             if shm::owns_program() {
                 seg.unlink();
             }
@@ -1215,7 +1240,7 @@ pub fn with_process_local_slot<R>(
     // the local cache) has its writes routed to a nexus RPC that
     // interleaves bytes on the same fd with the parent. Catch the
     // misuse at the pool-side entry point.
-    if slot.is_stdio.get() != 0 && slot.opener_pid.get() != std::process::id() {
+    if slot.is_stdio.get() != 0 && !is_this_process(slot.opener_pid.get(), slot.opener_pid_start_time.get()) {
         return Err(MorlocError::Other(format!(
             "stdio stream cannot cross a fork boundary: slot opened by \
              PID {}, current process is PID {}. Re-open the stream in \
@@ -1286,8 +1311,12 @@ pub fn with_process_local_slot<R>(
     // the stream meanwhile and left its file locked here, or this is a
     // forked child holding its parent's slot.
     if local.fork_epoch != fork_epoch() {
-        local.fd = -1;
-        local.holds_lock = false;
+        // FORK-4: a holder's descriptor was closed by the fork handler; the
+        // child closes its own copy of any other.
+        if local.holds_lock {
+            local.fd = -1;
+            local.holds_lock = false;
+        }
         drop(claim);
         drop(local);
     } else if has_ended(handle, &local) {
@@ -1870,7 +1899,7 @@ fn end_slot_locked(slot: &RegistrySlot) {
     use std::sync::atomic::Ordering;
     if slot.kind.get() == MLC_KIND_OSTREAM
         && slot.is_stdio.get() == 0
-        && slot.opener_pid.get() != std::process::id()
+        && !is_this_process(slot.opener_pid.get(), slot.opener_pid_start_time.get())
         && stdio_owner_is_alive(slot.opener_pid.get(), slot.opener_pid_start_time.get())
     {
         // ENDING is published before the generation moves: a holder that
@@ -2423,6 +2452,11 @@ fn read_pid_start_time() -> u64 {
     morloc_runtime_types::process::start_time(std::process::id())
 }
 
+// FORK-14: a pid alone names another process once reused, here or in another pid namespace.
+fn is_this_process(pid: u32, start: u64) -> bool {
+    pid == std::process::id() && (start == 0 || start as u32 == morloc_runtime_types::process::token() as u32)
+}
+
 /// Pull the current dispatch's `call_id` from thread-local storage.
 /// Returns `CALL_ID_NO_SWEEP` (= 0) if no call is active, which
 /// means the slot will never be swept by the per-call_id sweeper
@@ -2770,7 +2804,7 @@ fn try_reclaim_stale_stdio_claim(
             claim
                 .compare_exchange(existing, STDIO_UNCLAIMED, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
-        } else if slot.opener_pid.get() == std::process::id() {
+        } else if is_this_process(slot.opener_pid.get(), slot.opener_pid_start_time.get()) {
             false // our own live claim -- a real double-open
         } else if stdio_owner_is_alive(slot.opener_pid.get(), slot.opener_pid_start_time.get()) {
             false // another process legitimately holds it
@@ -3062,7 +3096,7 @@ pub fn verify_stdio_opener_pid(handle: i64) -> Result<(), MorlocError> {
     }
     let opener = slot.opener_pid.get();
     let me = std::process::id();
-    if opener != me {
+    if !is_this_process(opener, slot.opener_pid_start_time.get()) {
         return Err(MorlocError::Other(format!(
             "stdio stream cannot cross a fork boundary: slot opened by \
              PID {}, current process is PID {}. Re-open the stream in \
@@ -3115,7 +3149,11 @@ fn with_stdio_sock<R>(
             *opt = Some((generation, stdio_sock_connect()?));
         }
         let (_, s) = opt.as_mut().expect("populated above");
-        (f.take().expect("called once"))(s)
+        let result = (f.take().expect("called once"))(s);
+        if result.is_err() {
+            *opt = None;
+        }
+        result
     });
     match cached {
         Ok(r) => r,
@@ -3689,7 +3727,7 @@ pub fn shared_finalize_ostream_locked(
     };
     let is_stdio = slot.is_stdio.get() != 0;
     let owner = slot.wb_owner_pid.get();
-    if slot.write_failed.get() != 0 || (owner != 0 && owner != std::process::id()) {
+    if slot.write_failed.get() != 0 || (owner != 0 && !is_this_process(owner, slot.wb_owner_start.get())) {
         // Elements are missing from the file, or held by another process
         // this one cannot wait for under the lock: leave the temp footer,
         // the honest "writer didn't finish" signal.
@@ -4272,7 +4310,6 @@ fn lock_for_write<'a>(
     gen_claim: u64,
     stale: &str,
 ) -> Result<SlotGuard<'a>, MorlocError> {
-    let me = std::process::id();
     loop {
         let guard = SlotGuard::lock(slot)?;
         if !slot_generation_is(slot, gen_claim) {
@@ -4284,7 +4321,7 @@ fn lock_for_write<'a>(
             ));
         }
         let owner = slot.wb_owner_pid.get();
-        if owner == 0 || owner == me {
+        if owner == 0 || is_this_process(owner, slot.wb_owner_start.get()) {
             return Ok(guard);
         }
         slot.wb_sync_only.set(1);
@@ -10741,6 +10778,7 @@ mod tests {
         static RESUME: AtomicBool = AtomicBool::new(false);
         let _shm = crate::own_test_registry();
         registry_teardown();
+        registry_reopen();
         AT_GAP.store(false, Ordering::SeqCst);
         RESUME.store(false, Ordering::SeqCst);
         *BOOTSTRAP_GAP_HOOK.lock().unwrap() = Some(|| {
@@ -10775,7 +10813,7 @@ mod tests {
         let dir = concat_test_dir("fork_cache");
         let path = dir.join("z.idx");
         let p = path.to_str().unwrap().to_string();
-        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "0");
+        crate::write_behind::set_test_depth(Some(0));
         let w = shared_open_ostream_with_schema(&p, "ai8").unwrap();
         let list = parse_schema("ai8").unwrap();
         let level = crate::compression::CompressionLevel::from_u8(3).unwrap();
@@ -10786,7 +10824,7 @@ mod tests {
             shared_flush_buffer(w).unwrap();
         }
         shared_close_handle(w).unwrap();
-        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        crate::write_behind::set_test_depth(None);
 
         static HANDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
         let f = open_ifile(&p).unwrap();
@@ -11643,7 +11681,7 @@ mod tests {
         let dir = concat_test_dir("append_unclosed_z");
         let path = dir.join("log.idx");
         let p = path.to_str().unwrap().to_string();
-        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "0");
+        crate::write_behind::set_test_depth(Some(0));
         let w = shared_open_ostream_with_schema(&p, "ai8").unwrap();
         let list = parse_schema("ai8").unwrap();
         let level = crate::compression::CompressionLevel::from_u8(3).unwrap();
@@ -11654,7 +11692,7 @@ mod tests {
             shared_flush_buffer(w).unwrap();
         }
         shared_discard_handle(w).unwrap();
-        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        crate::write_behind::set_test_depth(None);
         let a = shared_append_to_path(&p, "ai8").unwrap();
         append_ints8(a, "[5, 6]");
         shared_close_handle(a).unwrap();
@@ -12587,7 +12625,7 @@ mod tests {
         let dir = concat_test_dir("cache_zero");
         let path = dir.join("z.idx");
         let p = path.to_str().unwrap().to_string();
-        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "0");
+        crate::write_behind::set_test_depth(Some(0));
         let w = shared_open_ostream_with_schema(&p, "ai8").unwrap();
         let list = parse_schema("ai8").unwrap();
         let level = crate::compression::CompressionLevel::from_u8(3).unwrap();
@@ -12598,7 +12636,7 @@ mod tests {
             shared_flush_buffer(w).unwrap();
         }
         shared_close_handle(w).unwrap();
-        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        crate::write_behind::set_test_depth(None);
 
         std::env::set_var("MORLOC_IFILE_CACHE_BYTES", "0");
         let f = open_ifile(&p).unwrap();
@@ -13501,7 +13539,7 @@ mod write_behind_tests {
         flush_after: &[usize],
     ) {
         std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", buf_bytes.to_string());
-        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", depth.to_string());
+        crate::write_behind::set_test_depth(Some(depth));
         let list = parse_schema("as").unwrap();
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
         for (i, b) in batches.iter().enumerate() {
@@ -13515,7 +13553,7 @@ mod write_behind_tests {
         }
         shared_close_handle(h).unwrap();
         std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
-        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        crate::write_behind::set_test_depth(None);
     }
 
     fn read_strs(path: &std::path::Path) -> Vec<String> {
@@ -13623,7 +13661,7 @@ mod write_behind_tests {
         let dir = test_dir("depth");
         let path = dir.join("depth.idx");
         std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
-        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "5");
+        crate::write_behind::set_test_depth(Some(5));
         let list = parse_schema("as").unwrap();
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
         let (_gen, idx) = unpack_handle(h);
@@ -13646,7 +13684,7 @@ mod write_behind_tests {
         assert_eq!(slot.wb_owner_pid.get(), 0);
         shared_close_handle(h).unwrap();
         std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
-        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        crate::write_behind::set_test_depth(None);
         assert_eq!(read_strs(&path), odd_batches(40, 37, 's').concat());
     }
 
@@ -13699,7 +13737,7 @@ mod write_behind_tests {
         let dir = test_dir("drain_gap");
         let path = dir.join("gap.idx");
         std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
-        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "5");
+        crate::write_behind::set_test_depth(Some(5));
         fn write_some(h: i64) {
             let list = parse_schema("as").unwrap();
             for b in odd_batches(12, 37, 's') {
@@ -13730,7 +13768,7 @@ mod write_behind_tests {
 
         shared_close_handle(h).unwrap();
         std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
-        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        crate::write_behind::set_test_depth(None);
         assert!(outstanding > 0, "the hook sealed nothing; the test does not exercise the gap");
         assert!(listed, "{outstanding} sealed batches are held by a stream no drain will visit");
     }
@@ -13743,7 +13781,7 @@ mod write_behind_tests {
         let dir = test_dir("drain");
         let path = dir.join("drain.idx");
         std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
-        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "8");
+        crate::write_behind::set_test_depth(Some(8));
         let list = parse_schema("as").unwrap();
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
         let (_gen, idx) = unpack_handle(h);
@@ -13760,7 +13798,7 @@ mod write_behind_tests {
         assert!(slot.subpacket_entries_len.get() > written);
         shared_close_handle(h).unwrap();
         std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
-        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        crate::write_behind::set_test_depth(None);
         assert_eq!(read_strs(&path), odd_batches(12, 37, 't').concat());
     }
 
@@ -13779,7 +13817,7 @@ mod write_behind_tests {
         let _shm = crate::own_test_registry();
         let dir = test_dir("staged");
         let path = dir.join("staged.idx");
-        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "8");
+        crate::write_behind::set_test_depth(Some(8));
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
         let (_gen, idx) = unpack_handle(h);
         let slot = slot_ref(idx).unwrap();
@@ -13796,7 +13834,7 @@ mod write_behind_tests {
         write_one(h, &small[3], 3);
         want.extend(small[3].iter().cloned());
         shared_close_handle(h).unwrap();
-        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        crate::write_behind::set_test_depth(None);
         assert_eq!(read_strs(&path), want);
     }
 
@@ -13808,7 +13846,7 @@ mod write_behind_tests {
         let dir = test_dir("threads");
         let path = dir.join("threads.idx");
         std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
-        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "8");
+        crate::write_behind::set_test_depth(Some(8));
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
         let (_gen, idx) = unpack_handle(h);
         let slot = slot_ref(idx).unwrap();
@@ -13827,7 +13865,7 @@ mod write_behind_tests {
         assert_eq!(slot.wb_owner_pid.get(), 0);
         shared_close_handle(h).unwrap();
         std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
-        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        crate::write_behind::set_test_depth(None);
         assert_eq!(read_strs(&path), batches.concat());
     }
 
@@ -13839,7 +13877,7 @@ mod write_behind_tests {
         let dir = test_dir("fork");
         let path = dir.join("fork.idx");
         std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
-        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "8");
+        crate::write_behind::set_test_depth(Some(8));
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
         let (_gen, idx) = unpack_handle(h);
         let slot = slot_ref(idx).unwrap();
@@ -13857,7 +13895,7 @@ mod write_behind_tests {
         assert_eq!(slot.wb_outstanding.get(), 0, "a fork left sealed batches queued");
         shared_close_handle(h).unwrap();
         std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
-        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        crate::write_behind::set_test_depth(None);
         assert_eq!(read_strs(&path), batches.concat());
     }
 
@@ -13880,5 +13918,33 @@ mod c_abi {
     #[no_mangle]
     pub extern "C" fn morloc_retire_blockers() -> i64 {
         super::morloc_retire_blockers()
+    }
+}
+
+#[cfg(test)]
+mod process_identity_tests {
+    #[test]
+    fn a_recorded_pid_is_this_process_only_with_its_start_stamp() {
+        let me = std::process::id();
+        let start = super::read_pid_start_time();
+        assert!(super::is_this_process(me, start));
+        assert!(super::is_this_process(me, 0));
+        assert!(!super::is_this_process(me, start + 1));
+        assert!(!super::is_this_process(me.wrapping_add(1), start));
+    }
+}
+
+#[cfg(test)]
+mod teardown_tests {
+    #[test]
+    fn a_registry_torn_down_is_not_created_again() {
+        let _shm = crate::own_test_registry();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            if super::registry_bootstrap().is_err() {
+                return false;
+            }
+            super::registry_teardown();
+            super::registry_bootstrap().is_err()
+        }));
     }
 }

@@ -26,13 +26,34 @@ use crate::shm::AbsPtr;
 /// oldest one. Each is at most one 16 MiB frame.
 const DEFAULT_DEPTH: usize = 8;
 
-/// `MORLOC_WRITE_BEHIND_DEPTH`, or the default. 0 compresses every
-/// sub-packet on the writing thread.
+/// `MORLOC_WRITE_BEHIND_DEPTH` as the process started, or the default. 0
+/// compresses every sub-packet on the writing thread.
+// FORK-9
 pub(crate) fn depth() -> usize {
-    std::env::var("MORLOC_WRITE_BEHIND_DEPTH")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_DEPTH)
+    #[cfg(test)]
+    {
+        let d = TEST_DEPTH.load(std::sync::atomic::Ordering::SeqCst);
+        if d != usize::MAX {
+            return d;
+        }
+    }
+    static DEPTH: morloc_runtime_types::publish_once::PublishOnce<usize> =
+        morloc_runtime_types::publish_once::PublishOnce::new();
+    *DEPTH.get_or_init(|| {
+        std::env::var("MORLOC_WRITE_BEHIND_DEPTH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_DEPTH)
+    })
+}
+
+#[cfg(test)]
+static TEST_DEPTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Override the depth for a test; `None` restores it.
+#[cfg(test)]
+pub(crate) fn set_test_depth(depth: Option<usize>) {
+    TEST_DEPTH.store(depth.unwrap_or(usize::MAX), std::sync::atomic::Ordering::SeqCst);
 }
 
 /// What a job compresses.

@@ -35,8 +35,7 @@ data/lang/r/rmorloc.c::morloc_wait_wakeup::lifeline_ended	fork-scoped
 data/lang/py/pool.py::-::stop	unreachable		
 data/lang/py/pool.py::-::job_q	unreachable		
 data/lang/py/pool.py::-::sched	unreachable		
-library/Morloc/CodeGenerator/Guest/Futhark.hs::-::m	reset		FORK-8
-library/Morloc/CodeGenerator/Guest/Futhark.hs::-::c	lazy		FORK-8
+library/Morloc/CodeGenerator/Guest/Futhark.hs::-::cur	fork-scoped		
 library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::SCHEMA_STRS	startup		
 library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::SCHEMA_TABLE	startup		
 morloc-runtime/arrow_ffi.rs::stats_enabled::FLAG	lazy		
@@ -291,3 +290,8 @@ morloc-runtime/router_ffi.rs::-::ROUTER_GROUPS	exec-only
 morloc-runtime/router_ffi.rs::-::ROUTER_DAEMONS	exec-only		
 morloc-runtime/daemon_ffi.rs::-::ENDPOINT_LOCKS	exec-only		
 morloc-runtime/daemon_ffi.rs::-::ENDPOINT_TESTS	test-only		
+morloc-runtime/write_behind.rs::depth::DEPTH	lazy		
+morloc-runtime/write_behind.rs::-::TEST_DEPTH	test-only		
+morloc-runtime/shm.rs::-::SEGMENTS_CLOSED	lazy		
+morloc-runtime/stream.rs::-::REGISTRY_TORN_DOWN	lazy		
+morloc-runtime/shm.rs::-::EXITING	lazy		

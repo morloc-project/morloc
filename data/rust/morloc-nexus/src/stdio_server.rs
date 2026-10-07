@@ -217,7 +217,7 @@ pub fn start(tmpdir: &str, output_format: OutputFormat, daemon: bool) {
             }
         };
         // Export to child pools via env.
-        std::env::set_var("MORLOC_NEXUS_STDIO_SOCK", &path);
+        crate::process::set_startup_env("MORLOC_NEXUS_STDIO_SOCK", &path);
         let socket_path = path.clone();
         std::thread::Builder::new()
             .name("morloc-stdio-server".into())
@@ -244,9 +244,7 @@ fn accept_loop(listener: UnixListener, _socket_path: String) {
                     })
                     .ok();
             }
-            Err(e) => {
-                eprintln!("stdio_server: accept error: {}", e);
-            }
+            Err(e) => crate::mcp::accept_failed("stdio_server", &e),
         }
     }
 }

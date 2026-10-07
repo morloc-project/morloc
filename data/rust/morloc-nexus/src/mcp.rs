@@ -18,8 +18,8 @@
 //! any command is evaluated: it saves the real stdout to a private high fd and
 //! aliases fd 1 onto fd 2, so every stray `print` / `std::cout` / `cat` lands on
 //! stderr. JSON-RPC is written only via raw `write(protocol_fd, ...)`, never
-//! `println!`. Commands whose types cannot be safely served (Arrow `Table`,
-//! stream handles, `@stdin`) are excluded from the tool surface upstream in
+//! `println!`. Commands whose types cannot be safely served (stream handles,
+//! `@stdin`) are excluded from the tool surface upstream in
 //! [`crate::json_help::build_tool_shapes`].
 
 use std::collections::HashMap;
@@ -219,7 +219,7 @@ pub fn rehome_stdout_for_protocol() -> RawFd {
     unsafe {
         libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO);
     }
-    std::env::set_var("MORLOC_QUIET", "1");
+    crate::process::set_startup_env("MORLOC_QUIET", "1");
     protocol_fd
 }
 
@@ -949,6 +949,16 @@ pub(crate) fn connection_slot() -> Option<ConnectionSlot> {
         .map(|_| ConnectionSlot)
 }
 
+/// A failed accept: with the descriptor table full, wait for one to free
+/// instead of retrying at once; otherwise report it.
+pub(crate) fn accept_failed(server: &str, e: &std::io::Error) {
+    if matches!(e.raw_os_error(), Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)) {
+        std::thread::sleep(Duration::from_millis(50));
+    } else {
+        eprintln!("{server}: accept error: {e}");
+    }
+}
+
 /// Answer a connection past the cap without reading from it.
 pub(crate) fn refuse_busy(mut stream: TcpStream) {
     let _ = stream.set_nonblocking(true);
@@ -1110,7 +1120,7 @@ pub fn serve_http(
                     serve_conn(stream, |req, ka| build_response(req, &st, tk.as_ref().as_deref(), ka))
                 });
             }
-            Err(e) => eprintln!("morloc mcp: accept error: {}", e),
+            Err(e) => accept_failed("morloc mcp", &e),
         }
     }
     process::clean_exit(0);
@@ -1976,7 +1986,7 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
                     })
                 });
             }
-            Err(e) => eprintln!("morloc serve: accept error: {}", e),
+            Err(e) => accept_failed("morloc serve", &e),
         }
     }
     process::clean_exit(0);

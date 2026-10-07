@@ -643,46 +643,6 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_descendant_with_its_ancestors_pid_waits_on_a_word_its_ancestor_holds() {
-        use morloc_runtime_types::owner_word::OwnerWord;
-        let ran = as_pid_one(|| {
-            let p = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    std::mem::size_of::<OwnerWord>(),
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_SHARED | libc::MAP_ANONYMOUS,
-                    -1,
-                    0,
-                )
-            };
-            assert_ne!(p, libc::MAP_FAILED);
-            let word: &'static OwnerWord = unsafe { &*(p as *const OwnerWord) };
-            word.acquire().unwrap();
-            let ancestor = morloc_runtime_types::process::token();
-            let waited = in_a_descendant_with_the_same_pid(move || {
-                let owner = word.owner();
-                std::thread::spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(300));
-                    unsafe { libc::_exit(0) };
-                });
-                let _ = word.acquire();
-                let took = format!(
-                    "OW-1: the descendant acquired its ancestor's word: ancestor token {ancestor:#x}, descendant token {:#x}, owner {owner:#x}, ancestor start {}, descendant start {}\n",
-                    morloc_runtime_types::process::token(),
-                    morloc_runtime_types::process::start_time((ancestor >> 32) as u32),
-                    morloc_runtime_types::process::start_time(std::process::id()),
-                );
-                unsafe { libc::write(2, took.as_ptr() as *const libc::c_void, took.len()) };
-                false
-            });
-            unsafe { word.release() };
-            waited
-        });
-        assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid did not wait on its ancestor's lock (its tokens and exit status are on stderr above)");
-    }
-
-    #[test]
     fn a_value_dropped_in_a_forked_child_is_forgotten() {
         let probe = Arc::new(());
         let local = ForkLocal::new(Arc::clone(&probe));

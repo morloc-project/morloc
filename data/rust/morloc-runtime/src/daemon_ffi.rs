@@ -3397,7 +3397,11 @@ pub(crate) unsafe fn daemon_run(
                 {
                     continue;
                 }
-                eprintln!("morloc-daemon: accept error");
+                if crate::ipc_ffi::out_of_descriptors() {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                } else {
+                    eprintln!("morloc-daemon: accept error");
+                }
                 continue;
             }
             crate::utility::set_nosigpipe(client_fd);

@@ -66,6 +66,11 @@ pub(crate) unsafe fn shclose(errmsg: *mut *mut c_char) -> bool {
     ffi_try!(errmsg, false, shm::shclose().map(|_| true))
 }
 
+// DAEMON-5
+pub(crate) unsafe fn morloc_shretire(errmsg: *mut *mut c_char) -> bool {
+    ffi_try!(errmsg, false, shm::shretire().map(|_| true))
+}
+
 /// Initialise the shared stream registry for the current nexus
 /// invocation. Allocates (or attaches to) the registry's SHM volume
 /// and publishes the magic gate. Safe to call multiple times --
@@ -749,6 +754,11 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn shclose(errmsg: *mut *mut c_char) -> bool {
         super::shclose(errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_shretire(errmsg: *mut *mut c_char) -> bool {
+        super::morloc_shretire(errmsg)
     }
 
     #[no_mangle]

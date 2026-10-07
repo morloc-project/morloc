@@ -49,6 +49,15 @@ fn morloc_state() -> String {
     std::env::var("MORLOC_STATE").unwrap_or_else(|_| morloc_home())
 }
 
+/// Watch the lifeline adopted at start from a thread of its own; called once
+/// the environment is written (FORK-11).
+fn watch_lifeline() {
+    extern "C" {
+        fn morloc_lifeline_guard();
+    }
+    unsafe { morloc_lifeline_guard() };
+}
+
 fn main() {
     // Ignore SIGPIPE process-wide so a reader that closes early (e.g.
     // `morloc view | head`, `... | less` quit before EOF) surfaces as an EPIPE
@@ -80,10 +89,10 @@ fn main() {
     // lifeline, never this one.
     {
         extern "C" {
-            fn morloc_lifeline_guard();
+            fn morloc_lifeline_adopt() -> i32;
         }
-        unsafe { morloc_lifeline_guard() };
-        std::env::remove_var("MORLOC_LIFELINE");
+        unsafe { morloc_lifeline_adopt() };
+        crate::process::remove_startup_env("MORLOC_LIFELINE");
     }
 
     // PANIC-1
@@ -125,10 +134,12 @@ fn main() {
             if fargs.validate {
                 process::init_shm();
             }
+            watch_lifeline();
             file::run(fargs)
         }
         cli::Mode::View(ref vargs) => {
             process::init_shm();
+            watch_lifeline();
             view::run(vargs);
         }
         _ => {}
@@ -194,6 +205,7 @@ fn main() {
             match invocation.nexus.cmd {
                 cli::Mode::Router(rargs) => {
                     let cfg = cli::router_args_to_config(&rargs);
+                    watch_lifeline();
                     run_router(&cfg);
                     std::process::exit(0);
                 }
@@ -213,6 +225,7 @@ fn main() {
     match invocation.nexus.cmd {
         cli::Mode::Router(rargs) => {
             let cfg = cli::router_args_to_config(&rargs);
+            watch_lifeline();
             run_router(&cfg);
             std::process::exit(0);
         }
@@ -295,13 +308,13 @@ fn main() {
     // them too (its first read of the atomics will trip the Once and
     // pull these values in).
     if let Some(n) = manifest.inline_size {
-        std::env::set_var("MORLOC_INLINE_SIZE", n.to_string());
+        crate::process::set_startup_env("MORLOC_INLINE_SIZE", n.to_string());
     }
     if manifest.no_shm {
-        std::env::set_var("MORLOC_NO_SHM", "1");
+        crate::process::set_startup_env("MORLOC_NO_SHM", "1");
     }
     if let Some(ref dir) = manifest.tmpdir {
-        std::env::set_var("MORLOC_TMPDIR", dir);
+        crate::process::set_startup_env("MORLOC_TMPDIR", dir);
     }
 
     // Propagate nexus + manifest absolute paths to pools. SLURM remote
@@ -313,7 +326,7 @@ fn main() {
     // started by, which for a PATH lookup is often a link such as
     // ~/.local/bin/morloc-nexus, whose directory is not this install's.
     if let Ok(exe) = std::env::current_exe().map(|e| std::fs::canonicalize(&e).unwrap_or(e)) {
-        std::env::set_var("MORLOC_NEXUS_PATH", &exe);
+        crate::process::set_startup_env("MORLOC_NEXUS_PATH", &exe);
         // Point pools at this nexus's sibling lib dir so they load the SAME
         // libmorloc.so the nexus resolved, wherever the build tree lives (pools
         // carry no absolute rpath). Append, never prepend, so a conda-provided
@@ -350,7 +363,7 @@ fn main() {
                 }
             }
             if let Ok(joined) = std::env::join_paths(&entries) {
-                std::env::set_var(var, joined);
+                crate::process::set_startup_env(var, joined);
             }
         }
         // On macOS, the Python pool forks workers after numpy (via pymorloc)
@@ -360,13 +373,13 @@ fn main() {
         // child's environment BEFORE exec -- setting it from inside the
         // already-running interpreter is too late to take effect.
         #[cfg(target_os = "macos")]
-        std::env::set_var("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES");
+        crate::process::set_startup_env("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES");
     }
     // Canonicalize once; reused below to resolve relative pool exec paths.
     let abs_manifest = std::fs::canonicalize(&manifest_path).ok();
     match &abs_manifest {
-        Some(p) => std::env::set_var("MORLOC_MANIFEST_PATH", p),
-        None => std::env::set_var("MORLOC_MANIFEST_PATH", &manifest_path),
+        Some(p) => crate::process::set_startup_env("MORLOC_MANIFEST_PATH", p),
+        None => crate::process::set_startup_env("MORLOC_MANIFEST_PATH", &manifest_path),
     }
 
     // Publish the run-scope activation env vars NOW (after both option
@@ -384,25 +397,25 @@ fn main() {
     // CLI flags win over env vars. Env vars that pre-existed without
     // a matching flag are left untouched so pools inherit them.
     if let Some(ref d) = config.log_dir {
-        std::env::set_var("MORLOC_LOG_DIR", d);
+        crate::process::set_startup_env("MORLOC_LOG_DIR", d);
     }
     if let Some(ref p) = config.summary_path {
-        std::env::set_var("MORLOC_SUMMARY", p);
+        crate::process::set_startup_env("MORLOC_SUMMARY", p);
     }
     if config.quiet {
-        std::env::set_var("MORLOC_QUIET", "1");
+        crate::process::set_startup_env("MORLOC_QUIET", "1");
     }
     if let Some(z) = config.stdout_compression {
-        std::env::set_var("MORLOC_STDOUT_COMPRESSION_LEVEL", z.to_string());
+        crate::process::set_startup_env("MORLOC_STDOUT_COMPRESSION_LEVEL", z.to_string());
     }
     if let Some(n) = config.debug_cache_depth {
-        std::env::set_var("MORLOC_DEBUG_CACHE_DEPTH", n.to_string());
+        crate::process::set_startup_env("MORLOC_DEBUG_CACHE_DEPTH", n.to_string());
     }
     if let Some(n) = config.debug_cache_max {
-        std::env::set_var("MORLOC_DEBUG_CACHE_MAX", n.to_string());
+        crate::process::set_startup_env("MORLOC_DEBUG_CACHE_MAX", n.to_string());
     }
     if let Some(n) = config.debug_recursion_cap {
-        std::env::set_var("MORLOC_DEBUG_RECURSION_CAP", n.to_string());
+        crate::process::set_startup_env("MORLOC_DEBUG_RECURSION_CAP", n.to_string());
     }
 
     // Resolve the per-run identity now so pools inherit a fully-published
@@ -462,7 +475,11 @@ fn main() {
     // @stderr through this dedicated socket; the fork-side child fd
     // hygiene installed in start_language_server takes fd 0/1 away
     // from the pool so the nexus keeps its bytes clean.
+    if matches!(config.child, dispatch::ChildMode::Stage { .. }) {
+        crate::process::set_startup_env("MORLOC_STDOUT_STAGE", "1");
+    }
     stdio_server::start(&tmpdir, config.output_format, config.daemon_flag);
+    watch_lifeline();
 
     // Become subreaper for orphaned grandchildren
     process::set_child_subreaper();
@@ -1117,7 +1134,7 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
             "unknown error".into()
         };
         eprintln!("Error: run failed: {}", msg);
-        process::report_dead_pools();
+        process::report_dead_pools(true);
         process::clean_exit(1);
     }
 
@@ -1127,7 +1144,7 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         let s = unsafe { std::ffi::CStr::from_ptr(run_err) }.to_string_lossy().into_owned();
         unsafe { libc::free(run_err as *mut c_void) };
         eprintln!("Error: run failed: {}", s);
-        process::report_dead_pools();
+        process::report_dead_pools(false);
         process::clean_exit(1);
     }
 

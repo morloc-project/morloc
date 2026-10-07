@@ -204,3 +204,14 @@ mod tests {
         }
     }
 }
+
+pub fn fill_standard_descriptors() {
+    for fd in 0..=2 {
+        if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+            let got = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR) };
+            if got >= 0 && got != fd {
+                unsafe { libc::close(got) };
+            }
+        }
+    }
+}

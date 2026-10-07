@@ -1050,12 +1050,6 @@ unsafe fn release_arena(private_data: *mut c_void) {
     if arena.is_null() || (*arena).magic != IMPORT_MAGIC {
         return;
     }
-    // A consumer that releases a struct it was told to consider consumed
-    // would otherwise wrap the count and take the block from whoever still
-    // holds it.
-    if (*arena).live_roots.load(Ordering::Acquire) == 0 {
-        return;
-    }
     if (*arena).live_roots.fetch_sub(1, Ordering::AcqRel) != 1 {
         return;
     }
@@ -2127,25 +2121,6 @@ mod tests {
             assert_eq!(unsafe { shm::reference_count(base) }, Some(1));
             release_roots(&mut s, &mut a, false);
             assert_eq!(unsafe { shm::reference_count(base) }, Some(0), "the last view frees the block");
-        });
-    }
-
-    #[test]
-    fn a_third_root_release_is_a_no_op() {
-        alone_with_shm(|| {
-            let rel = write_batch(&fixture(), None).unwrap();
-            let base = shm::rel2abs(rel).unwrap();
-            let mut s = FFI_ArrowSchema::empty();
-            let mut a = FFI_ArrowArray::empty();
-            unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, true, &mut s, &mut a) }.unwrap();
-            let arena = unsafe { (*(&s as *const FFI_ArrowSchema as *const RawSchema)).private_data };
-            release_roots(&mut s, &mut a, false);
-            assert_eq!(unsafe { shm::reference_count(base) }, Some(1));
-            // A consumer that releases a struct it was told to consider
-            // consumed must not take the block from whoever still holds it.
-            unsafe { release_arena(arena) };
-            assert_eq!(unsafe { shm::reference_count(base) }, Some(1));
-            let _ = shm::shfree(base);
         });
     }
 

@@ -273,8 +273,8 @@ pub(crate) unsafe fn close_daemon(daemon_ptr: *mut *mut LanguageDaemon) {
         libc::free((*daemon).shm_basename as *mut c_void);
     }
 
-    // Unmap the volumes; they are removed only if this process owns them.
-    let _ = crate::shm::shclose();
+    // DAEMON-5
+    let _ = crate::shm::shretire();
 
     libc::free(daemon as *mut c_void);
     *daemon_ptr = ptr::null_mut();
@@ -333,6 +333,14 @@ unsafe fn new_server(socket_path: *const c_char, errmsg: *mut *mut c_char) -> i3
 
 // ── start_daemon ─────────────────────────────────────────────────────────────
 
+/// Whether the last call failed for want of a descriptor or kernel memory.
+pub(crate) fn out_of_descriptors() -> bool {
+    matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+    )
+}
+
 pub(crate) unsafe fn start_daemon(
     socket_path: *const c_char,
     tmpdir: *const c_char,
@@ -340,6 +348,7 @@ pub(crate) unsafe fn start_daemon(
     shm_default_size: usize,
     errmsg: *mut *mut c_char,
 ) -> *mut LanguageDaemon {
+    morloc_runtime_types::fd::fill_standard_descriptors();
     clear_errmsg(errmsg);
 
     crate::utility::raise_nofile_limit();
@@ -1180,7 +1189,9 @@ pub(crate) unsafe fn wait_for_client_with_timeout(
                 }
             }
         }
-        // Ignore EAGAIN/EWOULDBLOCK on accept
+        else if out_of_descriptors() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     if (*daemon).client_fds.is_null() {

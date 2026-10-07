@@ -344,15 +344,16 @@ if should_run "exclude"; then
         cat "$EXCL_DIR"/build-*.err 2>/dev/null | head -20
     fi
 
-    # Table exclusion needs pyarrow; skip gracefully if the build fails.
+    # Tables are served (their row schema is known); needs pyarrow, so skip
+    # gracefully if the build fails.
     TBL_DIR=$(mktemp -d); WORK_DIRS+=("$TBL_DIR")
     cp "$SCRIPT_DIR/excluded_table.py" "$TBL_DIR/" 2>/dev/null || true
     if (cd "$TBL_DIR" && cp "$SCRIPT_DIR/excluded_table.loc" . && \
         morloc make -o nexus excluded_table.loc >/dev/null 2>build-table.err); then
         TOOLS="$(mcp_list "$TBL_DIR/nexus")"
         assert_contains "control 'plainAdd' present (table)" "plainAdd" "$TOOLS"
-        assert_not_contains "Table-return 'readTable' excluded" "readTable" "$TOOLS"
-        assert_not_contains "Table-arg 'sumTable' excluded"     "sumTable"  "$TOOLS"
+        assert_contains "Table-return 'readTable' served" "readTable" "$TOOLS"
+        assert_contains "Table-arg 'sumTable' served"     "sumTable"  "$TOOLS"
     else
         skip "excluded_table.loc failed to compile (needs pyarrow)"
     fi

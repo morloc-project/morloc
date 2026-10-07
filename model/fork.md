@@ -93,7 +93,8 @@ forking thread holds any. Model: `ForkLocks_misordered.bug` and
 `ForkLocks_fork_while_holding.bug` deadlock.
 
 ### FORK-8 A reset lock is never the parent's in the child
-Status: deviation
+Status: implemented
+Checked by: a_child_forked_while_a_thread_holds_a_reset_lock_gets_a_fresh_one, a_fork_from_a_thread_holding_a_reset_lock_aborts, a_forked_child_never_resolves_its_parents_cell, tla:ResetPublish, tla:ResetPublish_store.bug, tla:ResetPublish_no_generation.bug, tla:ResetPublish_free_observed.bug, golden:futhark-basic
 
 A reset lock and its state are replaced on first use in a new fork
 generation; the parent's copy is forgotten, never released or waited on.
@@ -113,7 +114,8 @@ a_forked_child_starts_its_own_sweeper_when_its_parent_had_one. A fresh
 value that depends on the parent's state is seeded from it: the temp
 registry starts with one dispatch that never ends when the parent had any
 running (FORK-16), and a child wants a sweeper when its parent did. The
-emitted Futhark context lock is not yet reset.
+emitted Futhark glue keeps its lock and context in such a slot, keyed on
+the fork generation the runtime reports.
 
 ### FORK-9 A lazily initialised value cannot be mid-initialisation at fork
 Status: implemented
@@ -134,18 +136,29 @@ and volume creation; the release pass across other processes' slot locks,
 compression jobs and nexus calls (also in prepare's own drain). Shared
 segments are opened outside their locks (INIT-2), and the benchmark and
 tee files are opened and written outside theirs. Model:
-`ForkLocks_held_across_wait.bug` deadlocks.
+`ForkLocks_held_across_wait.bug` deadlocks. The allocator half belongs to
+the shared-memory references and pool runtime project, and the release
+pass to the single-writer streams project (/work/plans briefs); until
+then a fork may be delayed by another process's work, with no cycle found
+by the lock-order audit.
 
 ### FORK-11 Code reachable in a forked child takes no standard-library lock
 Status: deviation
 
 Rust's standard streams and environment are guarded by locks of their own
-with no fork handling. The fork handler holds the standard output and error
-locks across fork, after every held lock, so a child inherits them
-unlocked. The environment's lock has no public handle and cannot be held:
-a child forked while another thread of the parent writes the environment
-blocks on its first read. CPython's buffered streams have the same hazard
-in the Python pool's forked workers.
+with no fork handling.
+
+The environment is written only while a process has one thread: the
+nexus at startup and a run published by a single-threaded process
+(`the_environment_is_written_only_by_its_checked_writers`), so no child can
+inherit its lock held.
+
+Missing: no fork handler holds the standard output or error locks, so a
+child forked while another thread prints inherits them locked. CPython's
+buffered streams have the same hazard in the Python pool's forked workers.
+Both reach only children of user forks in multithreaded pools; they belong
+to the shared-memory references and pool runtime project (one output path
+through a single write, and the Python pool on that runtime).
 
 ### FORK-15 A forked child's views keep their blocks until the child is gone
 Status: implemented
@@ -242,7 +255,7 @@ and fold cells draw a new tag in the child, never equal to the parent's.
 
 ### FORK-14 State inherited across fork is owned by fork generation, never by pid
 Status: implemented
-Checked by: a_descendant_with_its_ancestors_pid_leaves_the_ancestors_buffers, a_descendant_with_its_ancestors_pid_cannot_release_the_ancestors_reference, a_descendant_with_its_ancestors_pid_ignores_the_ancestors_in_use_marks, a_descendant_with_its_ancestors_pid_opens_its_own_nexus_connection, a_descendant_with_its_ancestors_pid_does_not_own_the_program, a_descendant_with_its_ancestors_pid_waits_on_a_word_its_ancestor_holds, every_process_id_read_is_reviewed
+Checked by: a_descendant_with_its_ancestors_pid_leaves_the_ancestors_buffers, a_descendant_with_its_ancestors_pid_cannot_release_the_ancestors_reference, a_descendant_with_its_ancestors_pid_ignores_the_ancestors_in_use_marks, a_descendant_with_its_ancestors_pid_opens_its_own_nexus_connection, a_descendant_with_its_ancestors_pid_does_not_own_the_program, every_process_id_read_is_reviewed
 
 Process-local state records the process that owns it, so a forked child
 can tell an inherited copy from its own. A pid does not identify a process
@@ -277,3 +290,10 @@ local-slot map, the descriptor list, the allocator, the sealed list and the
 compression service. A volume's lock ranks after VOLUMES: the allocator
 holds ALLOC_MUTEX and VOLUMES while it takes one. Test-only hooks
 (BEFORE_STREAM_LOCK, DRAIN_GAP_HOOK) are compiled only into tests.
+
+Shared memory, which other processes read, names a process by its pid and
+start stamp (`process::token`), as the stream slots' openers and writers
+do. Two processes with one pid in different pid namespaces that started in
+the same clock tick share that name; leases and temporary directories
+accept the same limit. The owner word, used only on macOS, meets no pid
+namespaces, and its same-pid descendant case has no test.

@@ -518,17 +518,16 @@ fn run_shclose_hooks_atexit() {
     }
 }
 
-/// atexit callback: unmap the volumes, and remove them if this process owns
-/// the program (see `OWNER_GENERATION`). Catches normal exit() calls that bypass
-/// an explicit shclose. Uses try_lock so a held mutex skips the cleanup
+/// atexit callback: remove the volumes' names if this process owns the
+/// program (see `OWNER_GENERATION`). Catches normal exit() calls that bypass
+/// an explicit shretire. Uses try_lock so a held mutex skips the cleanup
 /// instead of waiting inside atexit.
+// DAEMON-5: names only; the mappings go with the last thread.
 extern "C" fn shclose_atexit() {
-    // Run companion / subsystem hooks first so their teardown sees a
-    // still-live allocator (safe ordering, and required by any hook
-    // that itself performs allocator ops on the way out).
+    EXITING.store(true, Ordering::SeqCst);
     run_shclose_hooks_atexit();
-    if let Some(mut vols) = VOLUMES.try_lock() {
-        shclose_locked(&mut vols);
+    if let Some(_vols) = VOLUMES.try_lock() {
+        retire_names();
     }
 }
 
@@ -605,6 +604,7 @@ pub fn shinit(
     volume_index: usize,
     shm_size: usize,
 ) -> Result<*mut ShmHeader, MorlocError> {
+    crate::stream::registry_reopen();
     if volume_index == 0 || volume_index >= MAX_VOLUME_NUMBER {
         return Err(MorlocError::Shm(format!(
             "shinit: volume index {} is not usable (1..{})", volume_index, MAX_VOLUME_NUMBER
@@ -947,6 +947,38 @@ pub fn shclose() -> Result<(), MorlocError> {
     Ok(())
 }
 
+// DAEMON-5: set when the process starts to exit; teardown hooks then remove
+// names and keep their mappings.
+static EXITING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn exiting() -> bool {
+    EXITING.load(Ordering::SeqCst)
+}
+
+// DAEMON-5
+pub fn shretire() -> Result<(), MorlocError> {
+    EXITING.store(true, Ordering::SeqCst);
+    run_shclose_hooks();
+    let _lock = ALLOC_MUTEX.lock();
+    let vols = VOLUMES.lock();
+    retire_names();
+    drop(vols);
+    COMMON_BASENAME.lock().fill(0);
+    Ok(())
+}
+
+fn retire_names() {
+    if owns_program() {
+        if let Some(cb) = COMMON_BASENAME.try_lock() {
+            let basename = get_cstr_buf(&cb).to_string();
+            drop(cb);
+            let fallback = FALLBACK_DIR.try_lock().map(|fb| get_cstr_buf(&fb).to_string()).unwrap_or_default();
+            remove_program_volumes(&basename, &fallback);
+        }
+        OWNER_GENERATION.store(u64::MAX, Ordering::SeqCst);
+    }
+}
+
 /// Drop every SHM volume currently held by this process as `shclose` does,
 /// and clear bookkeeping (VOLUMES / CURRENT_VOLUME / COMMON_BASENAME).
 ///
@@ -1071,15 +1103,7 @@ fn shclose_locked(vols: &mut VolumeTable) {
         }
         vols.slots[i] = SendPtr::null();
     }
-    if owns_program() {
-        if let Some(cb) = COMMON_BASENAME.try_lock() {
-            let basename = get_cstr_buf(&cb).to_string();
-            drop(cb);
-            let fallback = FALLBACK_DIR.try_lock().map(|fb| get_cstr_buf(&fb).to_string()).unwrap_or_default();
-            remove_program_volumes(&basename, &fallback);
-        }
-        OWNER_GENERATION.store(u64::MAX, Ordering::SeqCst);
-    }
+    retire_names();
 }
 
 /// Remove every volume named for `basename`, whichever process created it:
@@ -1684,7 +1708,40 @@ impl Drop for Fd {
 /// creator contends for the one namespace and at most one wins. Without a
 /// usable tmpfs, the fallback file is the only namespace and is created
 /// exclusively.
+// DAEMON-5: set once teardown begins, before its sweep of recorded segments.
+static SEGMENTS_CLOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn morloc_refuse_new_segments() {
+    SEGMENTS_CLOSED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn segments_closed() -> MorlocError {
+    MorlocError::Shm("the process is shutting down; no shared memory can be made".into())
+}
+
+// DAEMON-5: a segment made as teardown began is removed here; one made
+// before is recorded by then, so the teardown's sweep removes it.
 pub(crate) fn create_segment(name: &str, full_size: usize) -> Result<Option<Segment>, MorlocError> {
+    use std::sync::atomic::Ordering;
+    if SEGMENTS_CLOSED.load(Ordering::SeqCst) {
+        return Err(segments_closed());
+    }
+    let made = make_segment(name, full_size)?;
+    if let (Some(seg), true) = (&made, SEGMENTS_CLOSED.load(Ordering::SeqCst)) {
+        // SAFETY: DAEMON-5: the mapping was made just now and handed to no one.
+        unsafe { libc::munmap(seg.ptr as *mut libc::c_void, seg.len) };
+        if let Ok(c) = std::ffi::CString::new(name) {
+            unlink_segment(&c);
+        }
+        if seg.label != name {
+            let _ = std::fs::remove_file(&seg.label);
+        }
+        return Err(segments_closed());
+    }
+    Ok(made)
+}
+
+fn make_segment(name: &str, full_size: usize) -> Result<Option<Segment>, MorlocError> {
     let name_cstr = std::ffi::CString::new(name)
         .map_err(|_| MorlocError::Shm(format!("volume name '{}' contains NUL", name)))?;
     // Record the object before making it, so no object exists unrecorded. A
@@ -2585,6 +2642,28 @@ mod tests {
     // Allocating with no shared memory initialised fails: growing would
     // otherwise make a volume named for no program, which nothing removes.
     #[test]
+    fn retiring_at_exit_leaves_memory_readable_to_threads_still_running() {
+        let _shm = crate::own_test_registry();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let Ok(p) = shmalloc(64) else { return false };
+            unsafe { *(p as *mut u64) = 0x5eed };
+            if shretire().is_err() {
+                return false;
+            }
+            unsafe { *(p as *const u64) == 0x5eed }
+        }));
+    }
+
+    #[test]
+    fn no_segment_is_made_once_teardown_begins() {
+        let _shm = crate::own_test_registry();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            morloc_refuse_new_segments();
+            create_segment("/mlc-refused-segment-test", 1 << 16).is_err()
+        }));
+    }
+
+    #[test]
     fn allocating_after_close_fails_without_making_a_volume() {
         let _arena = crate::own_test_shm();
         shclose().unwrap();
@@ -3037,5 +3116,10 @@ mod c_abi {
     #[no_mangle]
     pub extern "C" fn morloc_held_references() -> i64 {
         super::morloc_held_references()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_refuse_new_segments() {
+        super::morloc_refuse_new_segments()
     }
 }

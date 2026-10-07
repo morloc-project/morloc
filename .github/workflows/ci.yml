@@ -13,6 +13,31 @@ on:
     branches: [master, dev]
 
 jobs:
+  # The spec (model/) cites TLA+ runs as checks; check.sh runs every model,
+  # requires each <Module>.cfg to pass and each *.bug.cfg to fail, and checks
+  # each PlusCal translation is current.
+  model-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache TLA+ tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/morloc
+          key: tla2tools-1.7.4
+
+      - name: Model-check the spec
+        run: bash model/tla/check.sh
+
   build-and-test:
     strategy:
       fail-fast: false

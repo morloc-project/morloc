@@ -34,14 +34,24 @@ Checked by: `a_signal_during_a_read_does_not_drop_the_message`
 Reads and writes on client connections retry when interrupted.
 
 ### DAEMON-5 Shutdown does not unmap memory under running threads
-Status: deviation
+Status: implemented
+Checked by: retiring_at_exit_leaves_memory_readable_to_threads_still_running, no_segment_is_made_once_teardown_begins, tla:DaemonShutdown, tla:DaemonShutdown_unmap_at_exit.bug
 
-Process exit unmaps shared memory while detached threads may still be
-reading it.
+Threads that no request accounts for -- write-behind compressors, user
+threads, detached connection threads -- may still read shared memory while
+a process exits. So no exit path unmaps it: the nexus's teardown, a pool's
+exit and the exit handler remove the names of the shared memory this
+process owns, stop growth, and leave every mapping for the kernel to remove
+with the last thread. Teardown hooks (the stream registry, the statistics
+segment) likewise remove names and keep their mappings, and a stream
+registry torn down is not made again until shared memory is set up again. Once the nexus's
+teardown begins, no new segment is made, so its sweep of recorded segments
+sees every one; a segment made as it began is removed by its maker. Only
+recovery unmaps, under DAEMON-1.
 
 ### DAEMON-6 Every wait on another process is bounded or ends when the peer dies
 Status: implemented
-Checked by: draining_a_writer_that_never_closes_stops_at_the_deadline, an_eval_past_its_wall_limit_is_stopped_with_everything_it_started, a_frontend_eval_past_its_wall_limit_is_stopped_with_everything_it_started, stopping_all_kills_registered_groups_and_every_group_added_later, a_killed_group_is_never_signalled_again, an_eval_leader_outlives_a_term_until_it_is_released, tla:DaemonShutdown, tla:DaemonShutdown_join_first.bug, tla:DaemonShutdown_no_kill.bug, tla:DaemonShutdown_unmap_on_give_up.bug, tla:DaemonShutdown_recovery_unmaps.bug, tla:DaemonShutdown_children_survive.bug
+Checked by: draining_a_writer_that_never_closes_stops_at_the_deadline, an_eval_past_its_wall_limit_is_stopped_with_everything_it_started, a_frontend_eval_past_its_wall_limit_is_stopped_with_everything_it_started, stopping_all_kills_registered_groups_and_every_group_added_later, a_killed_group_is_never_signalled_again, an_eval_leader_outlives_a_term_until_it_is_released, tla:DaemonShutdown, tla:DaemonShutdown_join_first.bug, tla:DaemonShutdown_unmap_on_give_up.bug, tla:DaemonShutdown_recovery_unmaps.bug, tla:DaemonShutdown_children_survive.bug
 
 A call into a pool has no deadline: a program may run for days, and nothing
 tells the caller how long a call should take. Such a wait ends when the
@@ -69,11 +79,11 @@ lifeline.
 Shutdown closes the listeners, refuses queued requests and every request
 not yet admitted, waits a grace period for running ones, then stops the
 pools and child groups so a worker inside a call to a wedged pool returns,
-and waits again. If every worker returned, the daemon unmaps shared memory
-and exits. Otherwise a worker may still be inside a wait that stopping the
-pools does not end (a slow client, an evaluation in the daemon itself), so
-the daemon unlinks shared memory without unmapping it, frees nothing, and
-ends the process without running exit handlers. A pool crash recovery
+and waits again. If every worker returned, the daemon removes the names of
+shared memory without unmapping it (DAEMON-5) and exits. Otherwise a worker
+may still be inside a wait that stopping the pools does not end (a slow
+client, an evaluation in the daemon itself), so the daemon unlinks shared
+memory, frees nothing, and ends the process without running exit handlers. A pool crash recovery
 whose wait for running requests runs out exits the same way. A watchdog
 started with the shutdown ends the process with only async-signal-safe
 steps (kill pools and child groups, unlink shared memory and registered

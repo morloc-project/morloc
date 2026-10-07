@@ -11,15 +11,17 @@ Status: implemented
 Checked by: every_process_wide_value_is_registered, every_registry_row_names_a_value_in_code, registry_rows_obey_their_class, deviating_rows_only_decrease
 
 ### INIT-1 A process-wide value is initialised once, by a fork-safe primitive
-Status: deviation
+Status: implemented
+Checked by: tla:LazyInit, tla:LazyInit_unlocked.bug, tla:LazyInit_unheld.bug, golden:futhark-basic
 
 Lazy initialisation built by hand (a null check, then a set) lets two
 threads both initialise, and the second can destroy what the first built.
 The primitive is either a value set at startup, before the process has
 threads, or a `lazy` value whose initialiser runs under a lock and checks
 again once it holds it; that lock must be held across fork so a child never
-inherits it mid-initialisation (see FORK-5, FORK-9). The emitted Futhark
-context follows it. Model: `tla/LazyInit.tla` (`LazyInit` passes;
+inherits it mid-initialisation (see FORK-5, FORK-9), or be the lock of a
+reset value (FORK-8), which a child never sees. The emitted Futhark
+context is built under the lock of its reset state. Model: `tla/LazyInit.tla` (`LazyInit` passes;
 `LazyInit_unlocked.bug` uses a destroyed value; `LazyInit_unheld.bug` leaves
 the child blocked).
 
@@ -89,12 +91,15 @@ comma-separated list.
 
 ## Fork sites
 
-Every call to `fork` outside tests, and what its child does: `exec`, code
-that is `signal-safe`, or a pool `worker` that runs any code, forked only
-through the thread-count gate (FORK-6). Processes are started with
-`posix_spawn`, which runs no fork handler; a new `fork` call must be listed
-here.
+Every call to `fork` outside tests, including std's `Command::pre_exec`
+(whose closure runs in the child before exec), and what its child does:
+`exec`, code that is `signal-safe`, or a pool `worker` that runs any code,
+forked only through the thread-count gate (FORK-6). Processes are started
+with `posix_spawn`, which runs no fork handler; a new `fork` call must be
+listed here.
 
 | Site | Child |
 |---|---|
 | morloc-runtime/fork_policy.rs::morloc_fork_worker | worker |
+| morloc-nexus/mcp.rs::frontend_eval | exec |
+| morloc-nexus/orchestrate.rs::run_child | exec |

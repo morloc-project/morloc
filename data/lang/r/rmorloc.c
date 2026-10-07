@@ -11,6 +11,7 @@
 #include <limits.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <poll.h>
@@ -2233,6 +2234,11 @@ SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
     // Accept new connection if server_fd is ready
     if (server_ready) {
         int fd = accept(daemon->server_fd, NULL, NULL);
+        if (fd < 0 && (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM)) {
+            // Wait for a descriptor to free rather than spin on a full table.
+            struct timespec pause = {0, 50 * 1000 * 1000};
+            nanosleep(&pause, NULL);
+        }
         if (fd >= 0) {
             fcntl(fd, F_SETFD, FD_CLOEXEC);
             fcntl(fd, F_SETFL, O_NONBLOCK);

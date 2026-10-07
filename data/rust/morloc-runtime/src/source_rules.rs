@@ -5,7 +5,7 @@ use syn::visit::Visit;
 
 const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc", "morloc-nexus"];
 const PREPARE_HANDLERS: &[&str] = &["prepare_fork_body"];
-const MAX_DEVIATING_ROWS: usize = 5;
+const MAX_DEVIATING_ROWS: usize = 3;
 const MAX_ENV_READS: usize = 67;
 const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/cell.rs::proc_tag",
@@ -19,12 +19,8 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/run.rs::gen_id",
     "morloc-runtime/stream.rs::with_process_local_slot",
     "morloc-runtime/stream.rs::allocate_slot_cas",
-    "morloc-runtime/stream.rs::end_slot_locked",
     "morloc-runtime/stream.rs::read_pid_start_time",
-    "morloc-runtime/stream.rs::try_reclaim_stale_stdio_claim",
     "morloc-runtime/stream.rs::verify_stdio_opener_pid",
-    "morloc-runtime/stream.rs::shared_finalize_ostream_locked",
-    "morloc-runtime/stream.rs::lock_for_write",
     "morloc-runtime/stream.rs::note_sealed",
     "morloc-runtime-types/process.rs::token",
     "morloc-runtime-types/recoverable_lock.rs::ensure_ready",
@@ -37,6 +33,7 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-nexus/process.rs::init_shm",
     "morloc-nexus/mcp.rs::new_session_id",
     "morloc-runtime/ipc_ffi.rs::read_packet",
+    "morloc-runtime/stream.rs::is_this_process",
     "morloc-runtime/daemon_ffi.rs::write_port_file_atomic",
     "morloc-runtime/ipc_ffi.rs::wait_for_client_with_timeout",
     "morloc-runtime/ipc_ffi.rs::try_answer_ping",
@@ -682,6 +679,59 @@ fn fork_sites() -> Vec<(String, String)> {
     table_after("## Fork sites").into_iter().map(|c| (c[0].clone(), c[1].clone())).collect()
 }
 
+/// Functions outside tests that fork through std's `Command::pre_exec`, whose
+/// closure runs in the child before exec.
+fn pre_exec_sites() -> HashSet<String> {
+    let mut sites = HashSet::new();
+    for krate in ["morloc-nexus", "morloc-runtime"] {
+        for f in walk(&rust_root().join(krate).join("src"), &["rs"], &[]) {
+            let name = f.file_name().unwrap().to_string_lossy().into_owned();
+            if name.contains("test") || name == "source_rules.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&f).unwrap();
+            // Test modules anywhere in the file, as byte ranges.
+            let mut tests: Vec<(usize, usize)> = Vec::new();
+            for (start, _) in text.match_indices("#[cfg(test)]\nmod ") {
+                let Some(open) = text[start..].find('{').map(|i| start + i) else { continue };
+                let mut depth = 0usize;
+                let mut end = text.len();
+                for (i, c) in text[open..].char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = open + i;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                tests.push((start, end));
+            }
+            let text = text.as_str();
+            for (at, _) in text.match_indices(".pre_exec(").filter(|(at, _)| !tests.iter().any(|(s, e)| s <= at && at < e)) {
+                // The enclosing function: the nearest definition line above,
+                // not a declaration ending in `;`.
+                let definition = text[..at].lines().rev().find_map(|line| {
+                    let t = line.trim_start();
+                    let i = t.find("fn ")?;
+                    let lead = &t[..i];
+                    let is_def = !t.trim_end().ends_with(';')
+                        && lead.split_whitespace().all(|w| ["pub", "pub(crate)", "unsafe", "extern", "\"C\"", "async"].contains(&w));
+                    is_def.then(|| t[i + 3..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<String>())
+                });
+                if let Some(fname) = definition {
+                    sites.insert(format!("{krate}/{name}::{fname}"));
+                }
+            }
+        }
+    }
+    sites
+}
+
 fn production_calls<'a>(scan: &'a RustScan, path: &'a str) -> impl Iterator<Item = &'a Call> {
     scan.calls.iter().filter(move |c| !c.test_only && c.path == path)
 }
@@ -841,7 +891,11 @@ fn registry_rows_obey_their_class() {
     }
     let sites = fork_sites();
     let listed: HashSet<&str> = sites.iter().map(|(s, _)| s.as_str()).collect();
-    let forking: HashSet<&str> = production_calls(&scan, "libc::fork").map(|c| c.site.as_str()).collect();
+    let pre_exec = pre_exec_sites();
+    let forking: HashSet<&str> = production_calls(&scan, "libc::fork")
+        .map(|c| c.site.as_str())
+        .chain(pre_exec.iter().map(String::as_str))
+        .collect();
     for site in forking.difference(&listed) {
         problems.push(format!("{site}: forks but is not in the fork sites table"));
     }
@@ -960,6 +1014,28 @@ fn no_runtime_value_waits_for_another_thread_to_initialise_it() {
         "FORK-9: a fork while another thread initialises these leaves the child waiting forever; \
          use morloc_runtime_types::publish_once::PublishOnce (INIT-3):\n{}",
         waiting.join("\n")
+    );
+}
+
+#[test]
+fn the_environment_is_written_only_by_its_checked_writers() {
+    let writers = [
+        "morloc-nexus/process.rs::set_startup_env",
+        "morloc-nexus/process.rs::remove_startup_env",
+        "morloc-runtime/run.rs::publish_run",
+    ];
+    let writes: Vec<String> = scan_rust()
+        .calls
+        .iter()
+        .filter(|c| !c.test_only && (c.path.ends_with("env::set_var") || c.path.ends_with("env::remove_var")))
+        .filter(|c| !writers.contains(&c.site.as_str()))
+        .map(|c| format!("{}: {}", c.site, c.path))
+        .collect();
+    assert!(
+        writes.is_empty(),
+        "FORK-11: the environment is written only while the process has one thread, through \
+         the nexus's set_startup_env / remove_startup_env:\n{}",
+        writes.join("\n")
     );
 }
 

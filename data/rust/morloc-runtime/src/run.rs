@@ -161,7 +161,12 @@ fn init_run() -> Option<Run> {
 }
 
 // INIT-3: only the run that won publishes itself to the environment.
+// FORK-11: and only while this is the process's one thread; a child of a
+// process with others running starts a run of its own.
 fn publish_run(run: &Option<Run>) {
+    if crate::fork_policy::thread_count().is_some_and(|n| n > 1) {
+        return;
+    }
     if let Some(run) = run.as_ref().filter(|r| r.started_here) {
         std::env::set_var("MORLOC_RUN_DIR", &run.dir);
         std::env::set_var("MORLOC_RUN_BASE", &run.base);

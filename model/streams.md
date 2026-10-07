@@ -45,7 +45,8 @@ Status: deviation
 
 The slot lock is held across file writes, fsync, compression and calls to
 the nexus, and the release pass waits on other processes' slot locks with
-no deadline.
+no deadline. This belongs to the single-writer streams project, which
+removes the cause rather than bounding the wait.
 
 ### SLOT-8 A versioned read is a correct seqlock
 Status: implemented
