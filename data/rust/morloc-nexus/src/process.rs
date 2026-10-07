@@ -541,7 +541,7 @@ extern "C" fn sigchld_handler(_sig: libc::c_int) {
     let saved_errno = unsafe { *libc::__errno_location() };
     #[cfg(target_os = "macos")]
     let saved_errno = unsafe { *libc::__error() };
-    reap_noting();
+    reap_from_handler();
     #[cfg(target_os = "linux")]
     unsafe { *libc::__errno_location() = saved_errno };
     #[cfg(target_os = "macos")]
@@ -1544,12 +1544,23 @@ pub fn pool_death_info(pool_index: usize) -> Option<String> {
 static REAPING: AtomicBool = AtomicBool::new(false);
 
 // DAEMON-3: every reaped status is recorded for whoever waits on that child.
-// DAEMON-11: callable from a signal handler.
 fn reap_noting() {
+    reap(false)
+}
+
+// DAEMON-11: a handler may have interrupted the reaper's own thread, so it never waits for it.
+fn reap_from_handler() {
+    reap(true)
+}
+
+fn reap(in_handler: bool) {
     loop {
         // DAEMON-11: one reaper at a time, so a pid marked exited is never one reused since.
-        if REAPING.swap(true, Ordering::SeqCst) {
-            return;
+        while REAPING.swap(true, Ordering::SeqCst) {
+            if in_handler {
+                return;
+            }
+            std::thread::yield_now();
         }
         while let Some(pid) = exited_child() {
             // DAEMON-11: the group's slot is dead before its leader's id is freed.
@@ -1831,6 +1842,18 @@ mod tests {
         drop(pin);
         assert_eq!(unsafe { libc::waitpid(pgid, &mut status, 0) }, pgid);
         assert_eq!(unsafe { libc::kill(-pgid, 0) }, -1, "the group outlived its pin");
+    }
+
+    #[test]
+    fn a_thread_that_reaps_waits_for_a_reap_in_progress() {
+        while REAPING.swap(true, Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        let reaper = std::thread::spawn(reap_noting);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!reaper.is_finished(), "returned before the reap in progress ended");
+        REAPING.store(false, Ordering::SeqCst);
+        reaper.join().unwrap();
     }
 
     #[test]

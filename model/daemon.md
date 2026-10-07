@@ -144,7 +144,7 @@ over the path keeps its own.
 
 ### DAEMON-11 A process group id is held while the nexus may signal it
 Status: implemented
-Checked by: tla:PoolGroup, tla:PoolGroup_no_pin.bug, tla:PoolGroup_kill_then_clear.bug, tla:PoolGroup_reap_unmarked.bug, tla:PoolGroup_spawn_unheld.bug, a_pool_group_outlives_its_pool_until_released, a_pin_ignores_sigterm_from_birth, a_group_whose_leader_exited_is_never_signalled_again, stopping_all_waits_for_a_held_group_then_kills_it
+Checked by: tla:PoolGroup, tla:PoolGroup_no_pin.bug, tla:PoolGroup_kill_then_clear.bug, tla:PoolGroup_reap_unmarked.bug, tla:PoolGroup_spawn_unheld.bug, a_pool_group_outlives_its_pool_until_released, a_pin_ignores_sigterm_from_birth, a_group_whose_leader_exited_is_never_signalled_again, stopping_all_waits_for_a_held_group_then_kills_it, a_thread_that_reaps_waits_for_a_reap_in_progress
 
 Each pool runs in a process group led by a pin: a shell started with
 SIGTERM, SIGINT and SIGHUP blocked, which exits when the nexus closes its
@@ -157,8 +157,11 @@ either kills the pool with the group or finds the group dead and the pool
 is never started.
 
 The nexus has one reaper, run by the SIGCHLD handler and by threads that
-reap, and only one runs at a time; a reaper turned away leaves its children
-to the one running, which looks again before it stops. Before it reaps an
+reap, and only one runs at a time. A thread waits for the reaper running,
+so it never reports a child as alive while that child's reap is in
+progress. The handler never waits, since it may have interrupted the
+running reaper's own thread; it leaves its children to the one running,
+which looks again before it stops. Before it reaps an
 exited child it marks the slot of any group that child leads (a pool's pin,
 or the leader of a forked eval in DAEMON-6) dead, so a pin or eval leader
 killed from outside the nexus never leaves a slot naming a free id. Its
