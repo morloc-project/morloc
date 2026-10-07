@@ -1,0 +1,10 @@
+module main (summary)
+
+import root-py
+
+record Report where
+  symbols :: Int
+  ok :: Bool
+
+summary :: [Int] -> Report
+summary xs = {symbols = length xs, ok = True}

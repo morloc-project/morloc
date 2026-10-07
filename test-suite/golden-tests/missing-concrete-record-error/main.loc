@@ -1,15 +1,7 @@
--- A parameterized recursive record whose general definition exists
--- but has no concrete language instance. The realizer picks a language
--- for `foo`'s body based on the typeclass instances available for the
--- source-level operators (`>` and `-`), then needs a concrete
--- representation for `Container Int` in that language. None exists.
---
--- Pre-fix: morloc make hung indefinitely while inferConcreteVar
--- recursed on Container's general-scope NamU body whose extracted key
--- was Container itself.
--- Post-fix: morloc make emits a clean
---   "No concrete <lang> type for 'Container'"
--- error and exits non-zero.
+-- Records built in a pool need a declaration for that pool's language.
+-- Without one, morloc make fails, without looping on this parameterized
+-- recursive record, and names the `record` declaration to add.
+-- plain.loc is the unparameterized case.
 
 module main (foo)
 

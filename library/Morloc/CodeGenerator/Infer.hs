@@ -642,9 +642,12 @@ canHoldType' declaredRecords lang i t = do
       OptionalT x -> recordNames g x
       EffectT _ x -> recordNames g x
       _ -> []
-    namesRecord g v = case Map.lookup v g of
-      Just ((_, NamU o _ _ _, _, _, _) : _) -> o /= NamTable
-      _ -> False
+
+-- | Whether a general type name is a record.
+namesRecord :: Scope -> TVar -> Bool
+namesRecord g v = case Map.lookup v g of
+  Just ((_, NamU o _ _ _, _, _, _) : _) -> o /= NamTable
+  _ -> False
 
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
 inferConcreteVar lang t0@(Idx i v) = do
@@ -699,6 +702,9 @@ inferConcreteVar lang t0@(Idx i v) = do
             FV _ cv <- inferConcreteVar lang (Idx i bodyKey)
             return $ FV v cv
           Nothing | isData -> return $ FV v (CV (unTVar v))
+          Nothing | namesRecord gscope v -> MM.throwSourcedError i $
+            "No concrete" <+> pretty lang <+> "type for record"
+            <+> squotes (pretty v) <> "." <+> addDecl "record" <> "."
           Nothing -> do
             -- Last resort: transitive resolution via pairEval.
             case T.pairEval cscope gscope (VarU v) of
@@ -711,11 +717,12 @@ inferConcreteVar lang t0@(Idx i v) = do
                 <> ", but a single type variable is required here."
               Left _ -> MM.throwSourcedError i $
                 "No concrete" <+> pretty lang <+> "type for"
-                <+> squotes (pretty v) <> "."
-                <+> "Add a 'type" <+> pretty lang <+> "=>"
-                <+> pretty v <+> "= \"...\"' declaration,"
+                <+> squotes (pretty v) <> "." <+> addDecl "type" <> ","
                 <+> "or import a module that provides one"
                 <+> parens ("e.g. root-" <> pretty lang) <> "."
+  where
+    addDecl kw =
+      "Add a '" <> kw <+> pretty lang <+> "=>" <+> pretty v <+> "= \"...\"' declaration"
 
 -- | Outer name of a per-language typedef body, when it names one.
 bodyNameOf :: TypeU -> Maybe MT.Text
