@@ -1604,11 +1604,7 @@ expressPolyExpr _ parentLang _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manif
   -- It is the type a crossing inside the body carries: with the lambda's
   -- whole type the body would cross as a function value, and a suspension
   -- at its root would be run by the callee and reflected by the caller.
-  (inputTypes, bodyType) <- case val lambdaType of
-    (FunT ts ret)
-      | length ts > length vs -> return (take (length vs) ts, FunT (drop (length vs) ts) ret)
-      | otherwise -> return (ts, ret)
-    t -> return ([], t)
+  let (inputTypes, bodyType) = splitFunAt (length vs) (val lambdaType)
   body' <- expressPolyExprWrap lang (mkIdx body bodyType) body
 
   let contextArguments = map unvalue $ take (length manifoldArguments - length vs) manifoldArguments
@@ -1670,7 +1666,7 @@ expressPolyExpr
   ( AnnoS
       (Idx midx _)
       (_, outerArgs)
-      (AppS f@(AnnoS (Idx _ (FunT inputs out)) (Idx cidxCall callLang, _) (ExeS (PatCall pat))) xs)
+      (AppS f@(AnnoS (Idx _ ft@(FunT _ _)) (Idx cidxCall callLang, _) (ExeS (PatCall pat))) xs)
     )
     | isLocal = do
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
@@ -1721,6 +1717,7 @@ expressPolyExpr
                 [PolyBndVar (A parentLang) i | Arg i _ <- outerArgs]
         mkPolyManifold parentLang midx (ManifoldFull (map unvalue outerArgs)) remoteApp
     where
+      (inputs, out) = splitFunAt (length xs) ft
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
       stripPolyReturn (PolyReturn e) = return e
@@ -1769,7 +1766,7 @@ expressPolyExpr
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
             lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map Just callInputs)
-        retapp <- expressPolyApp parentLang e lambdaVals
+        retapp <- expressEtaApp parentLang e lambdaVals
         -- Implicit eta-abstraction of a function value. Any variables the
         -- wrapped value closes over (e.g. a let-bound closure `f <- ...;
         -- applyIt f 10`) are captured as CONTEXT args so the trampoline
@@ -1787,7 +1784,7 @@ expressPolyExpr
         let lambdaArgs = [Arg i None | i <- ids]
             lambdaTypedArgs = map (`Arg` Nothing) ids
             callVals = bindVarIds ids (map (C . Idx cidx) callInputs)
-        retapp <- expressPolyApp callLang e callVals
+        retapp <- expressEtaApp callLang e callVals
         innerWrap <- mkPolyManifold callLang midx (ManifoldFull lambdaArgs) retapp
         let remoteApp =
               PolyReturn $ PolyApp
@@ -2184,6 +2181,30 @@ dataHeadTVar (VarT v) = Just v
 dataHeadTVar (AppT (VarT v) _) = Just v
 dataHeadTVar _ = Nothing
 
+-- | Apply a function value to arguments made from its type, as eta
+-- abstraction does. A pattern whose result is a function takes fewer
+-- arguments than its flattened type lists: apply it to its own, bind the
+-- function it yields, and call that with the rest.
+expressEtaApp ::
+  Lang ->
+  AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
+  [PolyExpr] ->
+  MorlocMonad PolyExpr
+expressEtaApp lang e@(AnnoS (Idx i t) (Idx cidx _, _) (ExeS (PatCall pat))) xs
+  | k < length xs = do
+      patApp <- expressPolyApp lang e pre
+      return $ bindThenCall i (Idx cidx (snd (splitFunAt k t))) (unReturn patApp) post
+  where
+    k = unappliedPatternArity pat
+    (pre, post) = splitAt k xs
+    unReturn (PolyReturn x) = x
+    unReturn x = x
+expressEtaApp lang e xs = expressPolyApp lang e xs
+
+-- | Bind a computed function value under @i@, then call it.
+bindThenCall :: Int -> Indexed Type -> PolyExpr -> [PolyExpr] -> PolyExpr
+bindThenCall i fnT fe es = PolyLet i fe . PolyReturn $ PolyApp (PolyLetVar fnT i) es
+
 expressPolyApp ::
   Lang ->
   AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
@@ -2203,8 +2224,8 @@ expressPolyApp _ (AnnoS g _ (ExeS (SrcCall src))) xs =
 -- integers, not lists). Route the pattern through the same dispatch
 -- 'expressPolyExpr' uses so the IFile guard and user-declared
 -- @PatternAccessible@ instances see it.
-expressPolyApp callLang (AnnoS (Idx gi (FunT inputs out)) _ (ExeS (PatCall pat))) xs =
-  let g = Idx gi (FunT inputs out)
+expressPolyApp callLang (AnnoS g@(Idx gi ft@(FunT _ _)) _ (ExeS (PatCall pat))) xs =
+  let (inputs, out) = splitFunAt (length xs) ft
       fallback = return $ PolyApp (PolyExe g (PatCallP pat)) xs
   in PolyReturn <$> dispatchPatCall callLang gi gi pat inputs out xs fallback
 expressPolyApp _ (AnnoS g _ (ExeS (PatCall pat))) xs =

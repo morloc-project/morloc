@@ -66,6 +66,7 @@ module Morloc.Namespace.Type
   , collectExtends
   , isTupleName
   , type2typeu
+  , splitFunAt
   , EType (..)
   , unresolvedType2type
 
@@ -1733,6 +1734,16 @@ type2typeu NatVoidT = NatVoidU
 type2typeu (StrLitT s) = StrLitU s
 type2typeu (StrConcatT a b) = StrConcatU (type2typeu a) (type2typeu b)
 type2typeu StrVoidT = StrVoidU
+
+-- | The first @n@ inputs of a function type and the type left once they are
+-- consumed. Types are flattened (@a -> (b -> c)@ is @a -> b -> c@), so a
+-- function returning a function lists the returned function's inputs after
+-- its own.
+splitFunAt :: Int -> Type -> ([Type], Type)
+splitFunAt n (FunT ins out)
+  | length ins > n = (take n ins, FunT (drop n ins) out)
+  | otherwise = (ins, out)
+splitFunAt _ t = ([], t)
 
 unresolvedType2type :: TypeU -> Type
 unresolvedType2type (VarU v) = VarT v

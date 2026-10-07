@@ -1,0 +1,14 @@
+module mainpy
+  ( index
+  , viaHelper
+  , twoArg
+  , curried
+  , partialTwoArg
+  , mapIndex
+  , sliceThenIndex
+  , tupleGet
+  , mapTupleGet
+  )
+
+import .tests
+import root-py
