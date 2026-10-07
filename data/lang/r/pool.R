@@ -143,16 +143,11 @@ morloc_mlc_throw <- function(msg) {
     list(message = msg, call = NULL)
   ))
 }
-# Raise a genuine morloc-invariant violation (compiler bug, contract
-# violation, unreachable branch). Uses the MorlocInternalError class;
-# morloc_mlc_try inspects and re-raises so @try cannot swallow it.
-# The condition still derives from "error" so R's default handling
-# prints a stacktrace; the class marker is what routes it past @catch.
+# A genuine morloc-invariant violation (compiler bug, contract violation,
+# unreachable branch) ends the pool (PANIC-5).
 morloc_mlc_internal_abort <- function(msg) {
-  stop(structure(
-    class = c("MorlocInternalError", "error", "condition"),
-    list(message = paste0("morloc internal error (R pool): ", msg), call = NULL)
-  ))
+  cat(paste0("morloc internal error (R pool): ", msg, "\n"), file = stderr())
+  morloc_exit(70L)
 }
 # The downstream reader of a stream closed it: the call ends. Not an
 # "error" condition, so no error handler, @try's included, takes it.
@@ -162,24 +157,14 @@ morloc_mlc_pipe_closed <- function() {
     list(message = "@stdout: downstream pipe closed", call = NULL)
   ))
 }
-# @catch: evaluate fallible; on any error EXCEPT MorlocInternalError,
-# evaluate fallback. MorlocInternalError bypasses -- genuine compiler
-# bugs propagate past user @catch and terminate the pool.
 # @try body: run the thunk and convert the outcome to data. `ok` wraps the
 # value, `err` the message; codegen supplies both because only it knows how
-# this Try is represented in R.
-#
-# A MorlocInternalError is re-raised rather than becoming an Err arm: it
-# marks a compiler or infrastructure fault, which is not the user's to
-# recover from. An interrupt is not an "error" condition in R, so tryCatch
-# lets it past without help.
+# this Try is represented in R. An interrupt is not an "error" condition in
+# R, so tryCatch lets it past without help.
 morloc_mlc_try <- function(body, ok, err) {
   tryCatch(
     ok(body()),
-    error = function(e) {
-      if (inherits(e, "MorlocInternalError")) stop(e)
-      err(conditionMessage(e))
-    }
+    error = function(e) err(conditionMessage(e))
   )
 }
 morloc_fork                          <- function(...){ .Call("morloc_fork",                          ...) }

@@ -3715,13 +3715,14 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
 
     // @read :: Str -> <Err> a -- parse failure raises MorlocException
     // so _mlc_catch can intercept.
+    if (voidstar == NULL && read_err == NULL) {
+        PyINTERNAL_ABORT("@read: the runtime failed without giving a reason");
+    }
     if (voidstar == NULL) {
         if (PyMorlocException != NULL) {
-            PyErr_SetString(PyMorlocException,
-                            read_err != NULL ? read_err : "@read: parse failed");
+            PyErr_SetString(PyMorlocException, read_err);
         } else {
-            PyErr_SetString(PyExc_RuntimeError,
-                            read_err != NULL ? read_err : "@read: parse failed");
+            PyErr_SetString(PyExc_RuntimeError, read_err);
         }
         if (read_err != NULL) free(read_err);
         free_schema(schema);
@@ -3771,13 +3772,16 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
 
     // @load :: Str -> <IO, Err> a -- missing file / decode failure
     // raises MorlocException so _mlc_catch can intercept.
+    if (voidstar == NULL && load_err == NULL) {
+        PyINTERNAL_ABORT("@load: the runtime failed without giving a reason");
+    }
     if (voidstar == NULL) {
         if (PyMorlocException != NULL) {
             PyErr_SetString(PyMorlocException,
-                            load_err != NULL ? load_err : "@load: failed to load file");
+                            load_err);
         } else {
             PyErr_SetString(PyExc_RuntimeError,
-                            load_err != NULL ? load_err : "@load: failed to load file");
+                            load_err);
         }
         if (load_err != NULL) free(load_err);
         free_schema(schema);

@@ -296,6 +296,8 @@ auto to_vector(const Container& c) {
 
 absptr_t rel2abs_cpp(relptr_t ptr);
 relptr_t abs2rel_cpp(absptr_t ptr);
+// A defect in this runtime: report it and end the pool (PANIC-5).
+[[noreturn]] void mlc_runtime_defect(const std::string& msg);
 
 // Resolve `relptr` to `extent` readable bytes in `space`, throwing when the
 // region is not there (see resolve_region in morloc.h).
@@ -303,7 +305,8 @@ static inline void* resolve_region_cpp(relptr_t relptr, size_t extent, morloc_sp
     char* err = NULL;
     void* p = resolve_region(relptr, extent, space, &err);
     if (p == NULL) {
-        std::string msg = err ? err : "relptr did not resolve";
+        if (err == NULL) mlc_runtime_defect("relptr did not resolve, and the runtime gave no reason");
+        std::string msg(err);
         free(err);
         throw std::runtime_error(msg);
     }
@@ -315,7 +318,8 @@ static inline void* resolve_array_cpp(relptr_t relptr, size_t n, size_t width, m
     char* err = NULL;
     void* p = resolve_array(relptr, n, width, space, &err);
     if (p == NULL) {
-        std::string msg = err ? err : "relptr did not resolve";
+        if (err == NULL) mlc_runtime_defect("relptr did not resolve, and the runtime gave no reason");
+        std::string msg(err);
         free(err);
         throw std::runtime_error(msg);
     }
@@ -374,7 +378,7 @@ inline const Schema* resolve_recur(const Schema* schema) {
         std::ostringstream oss;
         oss << "Recur back-reference to undeclared schema name '"
             << (schema->name ? schema->name : "?") << "'";
-        throw std::runtime_error(oss.str());
+        mlc_runtime_defect(oss.str());
     }
     return target;
 }
@@ -463,7 +467,7 @@ inline void guard_scalar_schema(const Schema* schema, const char* fn) {
     if (schema->type == MORLOC_ARRAY
      || schema->type == MORLOC_TUPLE
      || schema->type == MORLOC_MAP) {
-        throw std::runtime_error(
+        mlc_runtime_defect(
             std::string(fn) + ": compound schema reached a scalar-sized type -- "
             "a Packable value was serialized without its pack wrapper");
     }
@@ -619,7 +623,8 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
                 char* err = NULL;
                 if (mlc_write_handle_voidstar(
                         static_cast<int64_t>(data), dest, cursor, &err) != 0) {
-                    std::string msg = err ? err : "mlc_write_handle_voidstar failed";
+                    if (err == NULL) mlc_runtime_defect("mlc_write_handle_voidstar failed without a reason");
+                    std::string msg(err);
                     free(err);
                     throw std::runtime_error(msg);
                 }
@@ -703,7 +708,8 @@ T mlc_leaf_read(const Schema* schema, const void* data, morloc_space_t space) {
                 int64_t handle = mlc_read_handle_voidstar(
                     data, space, kind, &err);
                 if (err || handle < 0) {
-                    std::string msg = err ? err : "mlc_read_handle_voidstar failed";
+                    if (err == NULL) mlc_runtime_defect("mlc_read_handle_voidstar failed without a reason");
+                    std::string msg(err);
                     free(err);
                     throw std::runtime_error(msg);
                 }
@@ -1129,7 +1135,7 @@ void* to_voidstar(const Schema* schema, const T& data){
 template<typename T>
 T from_voidstar(const Schema* schema, const void* data, T* = nullptr, morloc_space_t space = morloc_shm_space()) {
     if(data == NULL){
-        throw std::runtime_error("Void error in from_voidstar");
+        mlc_runtime_defect("from_voidstar was handed no value");
     }
     T out{};
     MlcReadWalk w(schema, space);
@@ -1233,7 +1239,8 @@ struct MlcNode {
                         int64_t paths_total = mlc_handles_path_lens(
                             data.data(), data.size(), nullptr, &err);
                         if (paths_total < 0) {
-                            std::string msg = err ? err : "mlc_handles_path_lens failed";
+                            if (err == NULL) mlc_runtime_defect("mlc_handles_path_lens failed without a reason");
+                            std::string msg(err);
                             free(err);
                             throw std::runtime_error(msg);
                         }
@@ -1307,7 +1314,8 @@ struct MlcNode {
                         char* err = NULL;
                         if (mlc_write_handles_voidstar(
                                 data.data(), data.size(), start, width, w.cursor, &err) != 0) {
-                            std::string msg = err ? err : "mlc_write_handles_voidstar failed";
+                            if (err == NULL) mlc_runtime_defect("mlc_write_handles_voidstar failed without a reason");
+                            std::string msg(err);
                             free(err);
                             throw std::runtime_error(msg);
                         }

@@ -231,7 +231,8 @@ fn release_entry(c: &mut CellEntry) {
 /// `init` must point at a value laid out as `rs` describes.
 pub unsafe fn cell_new(rs: &Schema, init: *const u8) -> Result<i64, MorlocError> {
     if init.is_null() {
-        return Err(MorlocError::Other("mlc_cell_new: null init".into()));
+        // PANIC-14
+        morloc_runtime_types::panic::fatal("mlc_cell_new: null init");
     }
     let seed = cell_owns(voidstar::deep_copy_to_block(init, rs)?)?;
     let mut reg = registry();
@@ -310,7 +311,8 @@ fn copy_out(
 /// `value` must point at a value laid out as `rs` describes.
 pub unsafe fn cell_put(handle: i64, rs: &Schema, value: *const u8) -> Result<(), MorlocError> {
     if value.is_null() {
-        return Err(MorlocError::Other("mlc_cell_put: null value".into()));
+        // PANIC-14
+        morloc_runtime_types::panic::fatal("mlc_cell_put: null value");
     }
     let me = std::thread::current().id();
     // Copied before the lock is taken: a deep copy of a large
@@ -367,10 +369,8 @@ pub unsafe fn cell_slot(handle: i64, index: i64, rs: &Schema) -> Result<AbsPtr, 
     let c = &reg.cells[i];
     let n = std::cmp::max(1, c.slots.len() as i64);
     if index < 0 || index >= n {
-        return Err(MorlocError::Other(format!(
-            "mlc_cell_slot: index {} out of range (cell holds {})",
-            index, n
-        )));
+        // PANIC-14
+        morloc_runtime_types::panic::fatal(&format!("mlc_cell_slot: index {index} out of range (cell holds {n})"));
     }
     let src = c.slots.get(index as usize).map(|(_, p)| *p).unwrap_or(c.init);
     copy_out(reg, src, rs)
@@ -456,7 +456,8 @@ pub unsafe extern "C" fn mlc_cell_free(handle: i64, errmsg: *mut *mut c_char) ->
 
 unsafe fn require_schema(schema: *const CSchema, fn_name: &str) -> Result<Schema, MorlocError> {
     if schema.is_null() {
-        return Err(MorlocError::Other(format!("{}: null schema", fn_name)));
+        // PANIC-14
+        morloc_runtime_types::panic::fatal(&format!("{fn_name}: null schema"));
     }
     Ok(CSchema::to_rust(schema))
 }

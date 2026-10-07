@@ -40,11 +40,13 @@ import Data.Ord (comparing)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified System.Info as SI
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( LoopResult (..)
+  , infixOperator
   , ArgSite (..)
   , IOwnership (..)
   , LowerConfig (..)
@@ -71,6 +73,8 @@ import qualified Morloc.System as MS
 import qualified Morloc.Version as MV
 import Morloc.Quasi
 import System.Directory (findExecutable)
+import System.FilePath (takeDirectory)
+import Data.List (isSuffixOf)
 
 -- | Duplicated here (as in Cpp.hs) to match data/lang/rust/lang.yaml. The
 -- second field is the source extension and must match lang.yaml's @extension@
@@ -1273,7 +1277,9 @@ translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es = do
   let rustSrcs = unique $ mapMaybe srcPath [s | s <- srcs, srcLang s == rustLang]
   absSrcs <- liftIO $ mapM MS.canonicalizePath rustSrcs
-  let includeDocs = map rustSourceInclude absSrcs ++ [rustUserFiles absSrcs]
+  localCrateDirs <- Map.elems <$> rustLocalDeps
+  let userDirs = unique (map takeDirectory absSrcs ++ localCrateDirs)
+      includeDocs = map rustSourceInclude absSrcs ++ ["mod mlc_user_ops;", rustUserFiles absSrcs userDirs]
 
   debugInfo <- makeManifoldDebugInfoLookup
 
@@ -1341,7 +1347,7 @@ translate srcs es = do
                 [ File "Cargo.toml" (Code (render cargoToml))
                 , File "Cargo.lock" (Code lockText)
                 , File "build.rs" (Code (render buildRs))
-                , Dir "src" [File "main.rs" (Code poolSrc)]
+                , Dir "src" [File "main.rs" (Code poolSrc), File "mlc_user_ops.rs" (Code rustUserOps)]
                 ]
             ]
       , scriptMake = maker
@@ -1393,11 +1399,66 @@ rustSourceInclude absPath = "include!(" <> rustPathLiteral absPath <> ");"
 rustPathLiteral :: Path -> MDoc
 rustPathLiteral = dquotes . pretty . RP.rustEscape . MT.pack
 
--- | The included user sources, spelled as panic locations name them, so the
--- pool can tell a user panic from a runtime one (model/panic.md PANIC-9).
-rustUserFiles :: [Path] -> MDoc
-rustUserFiles absPaths =
-  "const MLC_USER_FILES: &[&str] = &[" <> hsep (punctuate "," (map rustPathLiteral absPaths)) <> "];"
+-- | The user's code as panic locations name it, so the pool can tell a user
+-- panic from a runtime one (model/panic.md PANIC-9, PANIC-11): the included
+-- sources, the generated operator shims, and, as entries ending in @/@, the
+-- directories of the sources and of the local crates.
+rustUserFiles :: [Path] -> [Path] -> MDoc
+rustUserFiles absPaths dirs =
+  "const MLC_USER_FILES: &[&str] = &["
+    <> hsep (punctuate "," (map rustPathLiteral absPaths ++ opsFiles ++ map (rustPathLiteral . addSlash) dirs))
+    <> "];"
+  where
+    opsFiles = ["\"src/mlc_user_ops.rs\"", "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/mlc_user_ops.rs\")"]
+    addSlash d = if "/" `isSuffixOf` d then d else d <> "/"
+
+-- | Sourced Rust binary operators applied through shims in a generated user
+-- file, so a panic an operator raises (an integer divided by zero) is located
+-- in the user's code (PANIC-11). Each entry is the operator, its shim, the
+-- trait the shim requires, and whether it compares (by reference) rather
+-- than consumes its operands.
+rustOperatorShims :: [(Text, (Text, Text, Bool))]
+rustOperatorShims =
+  [ ("+", ("add", "std::ops::Add", False))
+  , ("-", ("sub", "std::ops::Sub", False))
+  , ("*", ("mul", "std::ops::Mul", False))
+  , ("/", ("div", "std::ops::Div", False))
+  , ("%", ("rem", "std::ops::Rem", False))
+  , ("&", ("bitand", "std::ops::BitAnd", False))
+  , ("|", ("bitor", "std::ops::BitOr", False))
+  , ("^", ("bitxor", "std::ops::BitXor", False))
+  , ("<<", ("shl", "std::ops::Shl", False))
+  , (">>", ("shr", "std::ops::Shr", False))
+  , ("==", ("eq", "PartialEq", True))
+  , ("!=", ("ne", "PartialEq", True))
+  , ("<", ("lt", "PartialOrd", True))
+  , (">", ("gt", "PartialOrd", True))
+  , ("<=", ("le", "PartialOrd", True))
+  , (">=", ("ge", "PartialOrd", True))
+  ]
+
+-- | A manifold returns its serialized result as the dispatch's reply
+-- (PANIC-10).
+rustReply :: MDoc -> MDoc
+rustReply e = case T.stripPrefix "rustmorloc::put_value(" (render e) of
+  Just rest -> "rustmorloc::put_reply(" <> pretty rest
+  Nothing -> e
+
+rustOperator :: Source -> MDoc -> MDoc -> MDoc
+rustOperator src l r = case lookup (unSrcName (srcName src)) rustOperatorShims of
+  Just (shim, _, True) -> "mlc_user_ops::" <> pretty shim <> tupled ["&(" <> l <> ")", "&(" <> r <> ")"]
+  Just (shim, _, False) -> "mlc_user_ops::" <> pretty shim <> tupled [l, r]
+  Nothing -> infixOperator src l r
+
+rustUserOps :: Text
+rustUserOps = render . vsep $ "#![allow(dead_code)]" : map shimDoc rustOperatorShims
+  where
+    shimDoc (op, (name, trait, True)) =
+      "#[inline(always)] pub fn " <> pretty name <> "<A: " <> pretty trait <> "<B> + ?Sized, B: ?Sized>(a: &A, b: &B) -> bool { a "
+        <> pretty op <> " b }"
+    shimDoc (op, (name, trait, False)) =
+      "#[inline(always)] pub fn " <> pretty name <> "<A: " <> pretty trait <> "<B>, B>(a: A, b: B) -> A::Output { a "
+        <> pretty op <> " b }"
 
 subVersion :: Text -> Text
 subVersion = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr)
@@ -1497,7 +1558,7 @@ makeClosureDispatch closureAsts closureTable es = do
               , indent 4 $
                   vsep
                     [ "let a = |k: usize| -> *const u8 { if k < nargs { unsafe { *args.add(k) } } else { std::ptr::null() } };"
-                    , "rustmorloc::put_value(&(" <> result <> "), " <> sch resSid <> ")"
+                    , "rustmorloc::put_reply(&(" <> result <> "), " <> sch resSid <> ")"
                     ]
               , "}"
               ]
@@ -1990,7 +2051,7 @@ makeCargoDocs crateName deps localCrates home profile =
         | (crate, path) <- Map.toList localCrates
         ]
       cargoToml =
-        vsep
+        vsep $
           [ "[package]"
           , "name = " <> nameLit
           , [idoc|version = "0.0.0"|]
@@ -2016,6 +2077,9 @@ makeCargoDocs crateName deps localCrates home profile =
           -- Line tables let the panic hook walk inlined frames (PANIC-9).
           , [idoc|debug = "line-tables-only"|]
           ]
+          -- PANIC-12: macOS otherwise leaves them in the build cache's object
+          -- files; packed, they go to a bundle copied beside the pool.
+          ++ [[idoc|split-debuginfo = "packed"|] | SI.os == "darwin"]
       -- No runtime rpath: the pool is relocatable and finds libmorloc via
       -- LD_LIBRARY_PATH exported by the nexus at launch. link-search is kept
       -- for the build-time link only.
@@ -2070,7 +2134,9 @@ makeTheMaker crateName offline locks = do
           [idoc|MORLOC_HOME='#{homeD}' cargo build --release#{offlineFlag} --manifest-path '#{manifestPath}' --target-dir '#{targetD}'|]
       copyCmd =
         SysRun . Code . render $
-          [idoc|cp '#{binPath}' '#{outRel}'|]
+          if SI.os == "darwin"
+            then [idoc|cp '#{binPath}' '#{outRel}' && rm -rf '#{outRel}.dSYM' && cp -R '#{binPath}.dSYM' '#{outRel}.dSYM'|]
+            else [idoc|cp '#{binPath}' '#{outRel}'|]
       -- Runs only after a successful build, so a failed resolution never
       -- writes anything into the environment lock.
       mergeCmd = SysMergeCargoLock (rlBase locks) (rlEnv locks) poolLock
@@ -2084,6 +2150,7 @@ rustLowerConfig :: Map.Map SrcName [(Bool, Bool)] -> LowerConfig RustM
 rustLowerConfig mask =
   LowerConfig
     { lcSrcName = \src -> pretty (srcName src)
+    , lcOperator = rustOperator
     -- A curried host returns a function value, and a function value is
     -- applied through its trait method -- Rust has no call syntax for one.
     , lcApplySrcGroup = \f as ->
@@ -2236,7 +2303,7 @@ rustLowerConfig mask =
     , lcMakeLet = rustMakeLet
     , lcReleaseStmt = \v -> "unsafe { rustmorloc::release_packet(" <> pretty v <> ", true) };"
     , lcReleaseBorrowedStmt = \v -> "unsafe { rustmorloc::release_packet(" <> pretty v <> ", false) };"
-    , lcReturn = \e -> "return" <+> e <> ";"
+    , lcReturn = \e -> "return" <+> rustReply e <> ";"
     , lcDupPacket = \e -> "rustmorloc::dup_packet(" <> e <> ")"
     , lcOwnedArg = \e -> "rustmorloc::Packet::new(" <> e <> ").as_ptr()"
     , lcLoopLetRhs = \_ _ d -> return d

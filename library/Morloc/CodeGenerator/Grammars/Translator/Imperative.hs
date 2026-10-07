@@ -50,6 +50,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 
     -- * Full lowering config
   , LowerConfig (..)
+  , infixOperator
   , LoopResult (..)
   , ArgSite (..)
   , IOwnership (..)
@@ -441,9 +442,15 @@ data IOwnership
   -- value): moving it out needs a clone, but it is not itself a reference
   deriving (Eq, Show)
 
+-- | A sourced binary operator written between its operands.
+infixOperator :: Source -> MDoc -> MDoc -> MDoc
+infixOperator src l r = parens (l <+> pretty (unSrcName (srcName src)) <+> r)
+
 -- | Per-language configuration for lowering
 data LowerConfig m = LowerConfig
   { lcSrcName :: Source -> MDoc
+  , lcOperator :: Source -> MDoc -> MDoc -> MDoc
+  -- ^ Apply a sourced binary operator to its two operands.
   , lcApplySrcGroup :: MDoc -> [MDoc] -> MDoc
   -- ^ Apply one CONTINUATION group of a curried source call (@f(a)(b)@, the
   -- groups a source statement's @\@rsize@ declares). The first group is the
@@ -1515,9 +1522,9 @@ lowerNativeExprRaw ::
   NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
   m PoolDocs
 -- Binary operator: emit (lhs op rhs) instead of function call
-lowerNativeExprRaw _ _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
+lowerNativeExprRaw cfg _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
   | srcOperator src =
-      return $ mergePoolDocs (\xs -> case xs of [l, r] -> parens (l <+> pretty (unSrcName (srcName src)) <+> r); _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
+      return $ mergePoolDocs (\xs -> case xs of [l, r] -> lcOperator cfg src l r; _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
 lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP src) es0) = do
   es <- bindCallArgs cfg origExpr es0
   owns <- argOwnerships cfg origExpr

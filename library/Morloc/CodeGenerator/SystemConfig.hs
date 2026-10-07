@@ -21,6 +21,7 @@ module Morloc.CodeGenerator.SystemConfig
   , compilerIncoherence
   ) where
 
+import qualified System.Info as SI
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Platform as P
 import qualified Morloc.Completion as Completion
@@ -451,12 +452,15 @@ provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
         sayInfo verbose "Persisting Rust workspace source to $MORLOC_HOME/rust"
         persistRustSource verbose srcAbs persistedRustDir destExists
     sayInfo verbose "Warming rustmorloc build cache (Rust pool marshaller)"
-    run verbose "cargo"
+    run verbose "cargo" $
       [ "build", "--release"
       , "--manifest-path", persistedRustDir </> "Cargo.toml"
       , "-p", "rustmorloc"
       , "--target-dir", poolTargetDir
       ]
+      -- The pool profile packs debug information on macOS (PANIC-12); the
+      -- warm-up must match it for pool builds to reuse these artifacts.
+      ++ (if SI.os == "darwin" then ["--config", "profile.release.split-debuginfo=\"packed\""] else [])
 
 -- | Search for a Rust workspace directory containing Cargo.toml
 findRustDir :: [FilePath] -> IO FilePath

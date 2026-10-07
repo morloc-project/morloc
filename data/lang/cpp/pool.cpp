@@ -99,14 +99,7 @@ public:
 [[noreturn]] static inline void _mlc_internal_abort(
     const char* file, int line, const char* func, const char* msg
 ) {
-    std::fprintf(
-        stderr,
-        "morloc internal error (C++ pool, %s:%d in %s):\n  %s\n",
-        file, line, func, msg
-    );
-    // PANIC-5
-    std::fflush(stderr);
-    _exit(70);
+    mlc_runtime_defect(std::string(file) + ":" + std::to_string(line) + " in " + func + ":\n  " + msg);
 }
 
 #define MLC_INTERNAL_ABORT(msg) _mlc_internal_abort(__FILE__, __LINE__, __func__, (msg))
@@ -403,7 +396,8 @@ T _get_value(const uint8_t* packet, Schema* schema){
         const arrow_shm_header_t* hdr = (const arrow_shm_header_t*)raw;
         char* verr = nullptr;
         if (arrow_validate(hdr, schema, &verr) != 0) {
-            std::string msg(verr ? verr : "arrow table failed validation");
+            if (verr == nullptr) MLC_INTERNAL_ABORT("arrow table validation failed without a reason");
+            std::string msg(verr);
             free(verr);
             throw MorlocException(msg);
         }
@@ -655,7 +649,7 @@ T _mlc_read(Schema* schema, const std::string& json_str) {
         throw MorlocException(std::string("@read: ") + msg);
     }
     if (voidstar == NULL) {
-        throw MorlocException("@read: parse failed on '" + json_str + "'");
+        MLC_INTERNAL_ABORT("@read: the runtime failed without giving a reason");
     }
     T* dummy = nullptr;
     T result = from_voidstar(schema, voidstar, dummy);
@@ -686,7 +680,7 @@ T _mlc_load(Schema* schema, const std::string& path) {
         throw MorlocException(std::string("@load: ") + msg);
     }
     if (voidstar == NULL) {
-        throw MorlocException("@load: failed to load '" + path + "'");
+        MLC_INTERNAL_ABORT("@load: the runtime failed without giving a reason");
     }
     T* dummy = nullptr;
     T result = from_voidstar(schema, voidstar, dummy);

@@ -211,6 +211,8 @@ morloc-runtime-types/fork_generation.rs::-::GENERATION	counter
 rustmorloc/lib.rs::-::CSCHEMA_CACHE	thread		
 rustmorloc/lib.rs::-::LIVE_CSCHEMAS	test-only		
 rustmorloc/lib.rs::-::TEST_BASE	thread		
+rustmorloc/lib.rs::-::READING_RUNTIME_VALUE	thread		
+rustmorloc/lib.rs::-::REPLY	thread		
 rustmorloc/lib.rs::-::RECUR_ENV	thread		
 rustmorloc/lib.rs::-::SHM_TRACKER	thread		
 rustmorloc/lib.rs::-::TRACEBACK	thread		

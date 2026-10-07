@@ -1,0 +1,21 @@
+-- A panic in user Rust code that is not in a sourced file itself is still the
+-- user's (model/panic.md PANIC-11): a sourced operator dividing by zero, and
+-- a helper file the sourced file pulls in. @try catches both and the pool
+-- keeps serving.
+module main (tryDiv, tryHelper)
+
+import root
+import root-rust
+
+type Rust => Int = "i64"
+
+source Rust from "h.rs" ("/" as div, "helper_panics" as helperPanics)
+
+div :: Int -> Int -> Int
+helperPanics :: Int -> Int
+
+tryDiv :: Int -> Int -> Int
+tryDiv x y = match (@try (div x y)) | (Ok v) = v | (Err _) = -1
+
+tryHelper :: Int -> Int
+tryHelper x = match (@try (helperPanics x)) | (Ok v) = v | (Err _) = -2

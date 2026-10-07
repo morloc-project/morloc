@@ -91,7 +91,7 @@ rule for locks shared between processes.
 
 ### PANIC-5 A pool never answers a panic
 Status: implemented
-Checked by: golden:py-systemexit-ends-pool, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_holding_a_runtime_lock_inside_a_format_library_call_ends_the_process, tla:PanicExit_continue_after_catch.bug
+Checked by: golden:py-systemexit-ends-pool, golden:r-internal-error-ends-pool, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_holding_a_runtime_lock_inside_a_format_library_call_ends_the_process, tla:PanicExit_continue_after_catch.bug
 
 A panic in a pool's runtime code -- a Rust panic outside user code, a C++
 infrastructure error -- ends the pool by PANIC-1. It is never turned into
@@ -99,7 +99,7 @@ a FAIL packet or an error return: user `@try` and `@catch`, Python
 `except Exception` and R `tryCatch` would catch it and the pool would go
 on serving with torn state. The Rust pool tells a panic in its runtime
 from one in user code as PANIC-9 says. A C++ pool's internal error exits
-70. A Python
+70; an R worker's exits 70 and its pool ends. A Python
 exception no handler catches (SystemExit, an interpreter error) ends the
 pool in either pool mode. The nexus recovers from the pool's end as SHM-8
 says, as it would from a crash.
@@ -165,41 +165,31 @@ directory. The walk costs time in proportion to the stack's depth, paid
 only by a panic whose location is ambiguous.
 
 ### PANIC-10 A result built before a failing destructor is freed
-Status: deviation
+Status: implemented
+Checked by: a_reply_built_before_the_manifold_unwinds_is_released_by_the_dispatch
 
 A panic in the destructor of a user value dropped after the Rust pool has
-built a call's result packet fails the call.
-
-Missing: the result packet's header, which no owner holds, leaks; its
-shared-memory block is tracked and freed with the dispatch.
+built a call's result packet fails the call, and the dispatch frees the
+packet; its shared-memory block is tracked and freed with the dispatch.
 
 ### PANIC-11 Every user panic is attributed to the user
-Status: deviation
+Status: implemented
+Checked by: a_file_below_a_user_directory_is_the_users_unless_claimed_or_hidden, golden:rust-user-panic-attribution
 
-A panic raised by any code the user supplies is a user panic.
-
-Missing: some user code is not a registered user source, so its panic is
-attributed to the runtime and ends the pool: text the compiler places in
-the generated source (a sourced operator such as `"/" as div`, a
-backtick-quoted foreign name, a sourced name that is a re-export such as
-`pub use dep::f`), files a sourced file pulls in itself (`mod`, `#[path]`,
-`include!`), and local crates the user's code calls. Emitting each sourced
-call as a shim in a generated user file would attribute all but the last
-two at no runtime cost.
+A panic raised by code the user supplies is a user panic: a sourced file,
+a file below a sourced file's directory or a local crate's (unless a
+runtime rule claims it or the path passes through a hidden directory), and
+a sourced binary operator, which the pool applies through a shim in a
+generated user file at no runtime cost.
 
 ### PANIC-12 A deployed Rust pool keeps its line tables
-Status: deviation
+Status: implemented
+Checked by: golden:rust-panic-sites, golden:rust-user-panic-attribution
 
 The walk of PANIC-9 needs the pool's line tables wherever the pool runs.
-
-Missing: on macOS, cargo keeps debug information beside the build objects
-(split debuginfo), not in the binary copied out of the build directory, so
-once the build cache is pruned or the pool moves, ambiguous user panics
-end the pool. Without line tables a frame with a standard-library symbol
-is still skipped, so runtime code inlined into a standard-library generic
-could go unseen; the trust check shows only that the classifier's own code
-resolves. Building with packed debuginfo and copying the debug bundle
-beside the pool would fix both.
+On macOS the pool is built with packed debug information and its bundle is
+copied beside it, since cargo otherwise keeps line tables in the build
+cache's object files.
 
 ### PANIC-13 A broken runtime invariant in the Rust pool ends the pool
 Status: implemented
@@ -213,20 +203,32 @@ and its failure ends the pool. The libmorloc calls the Rust pool makes
 give a reason for every failure input can cause; libmorloc's intrinsics
 treat a failure of their own callee without one as a defect. The Rust
 pool ends on such a call's failure that carries no reason, and on a write
-walk that leaves the block it allocated. A closed downstream pipe is
+walk that leaves the block it allocated. The C++ pool ends the same way,
+and Python and R end on a reason-less `@load` failure. A closed downstream pipe is
 neither: in every pool language it ends the call and no catch holds it; a
 callee answers it with a fail packet marked as a closed pipe, which its
 caller raises again; and the nexus decides the exit status.
 
 ### PANIC-14 A failed check on data the runtime built ends the pool
+Status: implemented
+Checked by: a_region_outside_a_runtime_built_value_ends_the_pool, a_region_outside_an_input_value_is_a_catchable_error, a_fold_call_with_a_null_value_ends_the_process
+
+A structural check that fails on a value libmorloc or the Rust pool built
+from its own schema -- a value `@read` produced, a fold accumulator, a
+stream layout -- is a runtime defect and ends the pool, as does a fold
+call with a null argument or a slot index out of range. A stale fold
+handle stays a catchable error: a user's thread can outlive its call.
+
+### PANIC-15 Every sourced Rust function's panic is the user's
 Status: deviation
 
-A structural check that fails on a value libmorloc or the pool built from
-its own schema -- a value `@read` or a JSON or msgpack `@load` produced, a
-fold accumulator, a stream layout -- is a runtime defect and ends the pool.
+A panic in any function a sourced Rust file makes callable is a user panic.
 
-Missing: the Rust read walk shares its checks between such values and
-input, and raises them all as catchable errors. Fold-accumulator failures
-on handles the compiler created (a stale handle, a slot out of range)
-carry a reason and are catchable too. Neither tears state: the guards free
-the value being read.
+Missing: three cases are attributed to the runtime and end the pool. A
+re-exported function (`pub use dep::f`) panics in the dependency and its
+caller is the generated source; a forwarding shim would need the
+function's arity and signature where the compiler names it, and could not
+forward an `unsafe fn`. A file pulled in from outside the sourced file's
+directory (`#[path = "/elsewhere"]`, `include!("../x.rs")`) is not a user
+file. A backtick-quoted foreign name would sit in the generated source,
+though Rust pools do not yet compile one.

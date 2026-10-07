@@ -30,6 +30,7 @@ import qualified Data.Text.Encoding as TE
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( LoopResult (..)
+  , infixOperator
   , containsClosure
   , IAccessor (..)
   , IExpr (..)
@@ -429,6 +430,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
     cfg =
       LowerConfig
         { lcSrcName = srcNamer
+        , lcOperator = infixOperator
         , lcApplySrcGroup = \f as -> f <+> tupled as
         , lcSourcedArg = \_ _ _ x -> x
         , lcOwnership = \_ -> return Owned

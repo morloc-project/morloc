@@ -35,6 +35,7 @@ import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( LoopResult (..)
+  , infixOperator
   , consumableProjectionLets
   , isBorrowableProjection
   , papplySteps
@@ -831,6 +832,7 @@ cppLowerConfig :: ClosureGen -> LowerConfig CppTranslatorM
 cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
   LowerConfig
     { lcSrcName = \src -> pretty (srcName src)
+    , lcOperator = infixOperator
     , lcApplySrcGroup = \f as -> f <+> tupled as
     , lcSourcedArg = \_ _ _ x -> x
     , lcOwnership = \_ -> return Owned
