@@ -67,7 +67,11 @@ generation before it changes any field or frees any block: releasing a slot
 bumps the generation first and fences, so its clearing stores cannot be
 seen ahead of the bump, and a reader that overlaps the release fails its
 second load instead of accepting cleared fields. Opening publishes fields
-then the new generation. Model: `tla/SlotSeqlock.tla`.
+then the new generation. Every field such a read copies is an atomic,
+loaded and stored with relaxed ordering, so a copy that races a write is a
+stale value rather than undefined behaviour; the fences above give the
+order. The slot's diagnostics record is not atomic and is touched only
+under the slot lock. Model: `tla/SlotSeqlock.tla`.
 
 ### SLOT-9 A process drops its slot for a stream that has ended
 Status: implemented
