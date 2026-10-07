@@ -971,6 +971,62 @@ if should_run "http-pure"; then
 fi
 
 # ======================================================================
+# A daemon HTTP listener off loopback requires a credential (NET-1)
+# ======================================================================
+
+if should_run "http-auth"; then
+    echo "${BOLD}[http-auth] Daemon HTTP credential${RESET}"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+    assert_contains "the HTTP listener binds loopback by default" \
+        "http://127.0.0.1:${HTTP_PORT}" "$(cat "$LAST_DAEMON_LOG")"
+    stop_daemon "$LAST_DAEMON_PID"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --http-host 0.0.0.0
+    open_pid=$LAST_DAEMON_PID
+    for _ in $(seq 1 100); do
+        kill -0 "$open_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$open_pid" 2>/dev/null; then
+        refused=no
+        stop_daemon "$open_pid"
+    else
+        refused=yes
+        wait "$open_pid" 2>/dev/null || true
+    fi
+    assert_test "an open bind with no token is refused" "yes" "$refused"
+    assert_contains "the refusal names the token option" "auth-token /" "$(cat "$LAST_DAEMON_LOG")"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --http-host 0.0.0.0 --auth-token s3cret
+    wait_for_http "$HTTP_PORT" 10
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -H "Content-Type: application/json" -d '[3, 4]')
+    assert_test "a request with no token is refused" "401" "$code"
+    code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -H "Authorization: Bearer nope" -H "Content-Type: application/json" -d '[3, 4]')
+    assert_test "a request with a wrong token is refused" "401" "$code"
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -H "Authorization: Bearer s3cret" -H "Content-Type: application/json" -d '[3, 4]')
+    assert_test "a request with the token is served" "7" "$(json_field "$result" "result")"
+    stop_daemon "$LAST_DAEMON_PID"
+
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --http-host 0.0.0.0 --allow-no-auth
+    wait_for_http "$HTTP_PORT" 10
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
+        -H "Content-Type: application/json" -d '[3, 4]')
+    assert_test "an open bind serves when explicitly allowed" "7" "$(json_field "$result" "result")"
+    assert_contains "an allowed open bind warns" "no auth token" "$(cat "$LAST_DAEMON_LOG")"
+    stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
 # Test Group 4: Unix socket (length-prefixed JSON)
 # ======================================================================
 
@@ -1136,11 +1192,11 @@ if should_run "port-ephemeral"; then
     http_line=$(grep "listening on http://" "$LAST_DAEMON_LOG" | head -1 || true)
     tcp_line=$(grep "listening on tcp://"  "$LAST_DAEMON_LOG" | head -1 || true)
 
-    assert_contains "http ready line is URL form"  "http://0.0.0.0:"   "$http_line"
+    assert_contains "http ready line is URL form"  "http://127.0.0.1:"   "$http_line"
     assert_contains "tcp  ready line is URL form"  "tcp://127.0.0.1:"  "$tcp_line"
 
     # Extract the assigned ports.
-    HTTP_PORT=$(echo "$http_line" | sed -n 's#.*http://0\.0\.0\.0:\([0-9][0-9]*\).*#\1#p')
+    HTTP_PORT=$(echo "$http_line" | sed -n 's#.*http://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p')
     TCP_PORT=$( echo "$tcp_line"  | sed -n 's#.*tcp://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p')
 
     # Both should be in the ephemeral range (>1024) and not be 0.
@@ -1248,7 +1304,7 @@ if should_run "port-file"; then
     done
 
     http_line=$(grep "listening on http://" "$LAST_DAEMON_LOG" | head -1 || true)
-    HTTP_PORT_C=$(echo "$http_line" | sed -n 's#.*http://0\.0\.0\.0:\([0-9][0-9]*\).*#\1#p')
+    HTTP_PORT_C=$(echo "$http_line" | sed -n 's#.*http://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p')
 
     assert_test "unwritable port-file: daemon still binds"   "1" \
         "$([ -n "$HTTP_PORT_C" ] && [ "$HTTP_PORT_C" -gt 0 ] && echo 1 || echo 0)"

@@ -171,3 +171,17 @@ lifeline when the nexus exits.
 Stopping the pools sends SIGTERM through every group, waits up to 200 ms
 for the pool processes (not their groups, which the pins keep) to exit,
 kills every group, and reaps for up to 100 ms more.
+
+### DAEMON-12 The router runs at most one daemon per program and reaps it
+Status: deviation
+
+The router starts a program's daemon, waits for it to accept connections,
+and forwards requests to it. A daemon that does not accept within the
+start limit is stopped and reaped, and the request fails. A restart stops
+and reaps the old daemon before starting the new one, so no daemon outlives
+the router's record of it.
+
+Missing: when a connection fails, the router clears the daemon's pid and
+starts another without stopping or reaping the old one; a daemon that never
+accepts is used anyway; the status query counts an unreaped dead daemon as
+running.

@@ -12,6 +12,7 @@
 //! crate -- it lives only in `morloc-runtime` so the nexus must reach
 //! it through libmorloc.so's C ABI.
 
+pub mod bearer;
 pub mod error;
 pub mod hash;
 pub mod shm_types;

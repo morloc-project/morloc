@@ -1028,8 +1028,7 @@ pub fn serve_http(
     // overridden (the manager passes --allow-no-auth for a loopback-only
     // publish, where the container nexus binds 0.0.0.0 but only loopback
     // reaches it).
-    let is_loopback = matches!(bind_host, "127.0.0.1" | "localhost" | "::1");
-    if auth_token.is_none() && !is_loopback && !allow_no_auth {
+    if open_bind_refused(bind_host, auth_token.is_some(), allow_no_auth) {
         eprintln!(
             "morloc mcp: refusing to serve on {} with no auth token (bind is not \
              loopback). Set --auth-token / MORLOC_MCP_TOKEN, or pass --allow-no-auth \
@@ -1360,31 +1359,18 @@ fn header_get<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str
 }
 
 /// True when the request carries `Authorization: Bearer <token>` matching.
-/// The token comparison is constant-time so a network attacker cannot recover
-/// the token byte-by-byte from response timing.
 fn authorized(headers: &[(String, String)], token: &str) -> bool {
-    match header_get(headers, "authorization") {
-        Some(v) => match v.trim().strip_prefix("Bearer ") {
-            Some(t) => ct_eq(t.trim().as_bytes(), token.as_bytes()),
-            None => false,
-        },
-        None => false,
-    }
+    morloc_runtime_types::bearer::authorizes(header_get(headers, "authorization"), token)
 }
 
-/// Constant-time byte-slice equality. Length is compared first (the token's
-/// length is not the secret); equal-length inputs are compared without an
-/// early exit, so timing does not depend on the position of the first
-/// mismatch.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+/// Whether a bind address keeps a listener on this machine.
+pub(crate) fn is_loopback(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+// NET-1
+pub(crate) fn open_bind_refused(host: &str, has_token: bool, allow_no_auth: bool) -> bool {
+    !is_loopback(host) && !has_token && !allow_no_auth
 }
 
 /// A fresh, unguessable session id: 16 random bytes hex-encoded (from
@@ -1863,9 +1849,8 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
         .unwrap_or_else(|_| addr.clone());
     // Fail closed: a non-loopback bind with no token would be an open,
     // unauthenticated endpoint (see the manager's loopback/expose logic).
-    let is_loopback = matches!(bind_host.as_str(), "127.0.0.1" | "localhost" | "::1");
     let auth_token = config.mcp_auth_token.clone();
-    if auth_token.is_none() && !is_loopback && !config.mcp_allow_no_auth {
+    if open_bind_refused(&bind_host, auth_token.is_some(), config.mcp_allow_no_auth) {
         eprintln!(
             "morloc serve: refusing to serve on {} with no auth token (bind is not loopback). \
              Set --auth-token / MORLOC_MCP_TOKEN, or pass --allow-no-auth to override.",
@@ -1877,7 +1862,7 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
     // the bind address says nothing about who can reach the process, and what
     // can is decided outside it by a published port or a network. Say so once,
     // because the caller who arrives is then whoever that decision let in.
-    if auth_token.is_none() && !is_loopback {
+    if auth_token.is_none() && !is_loopback(&bind_host) {
         eprintln!(
             "morloc serve: no auth token set. Every caller that can reach {} can call every \
              exposed function. Access control is the operator's: publish to loopback \
@@ -3082,6 +3067,16 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains("Connection: close\r\n"));
         assert!(text.contains("Content-Length: 0\r\n"));
+    }
+
+    #[test]
+    fn an_open_bind_needs_a_token_or_an_explicit_waiver() {
+        assert!(open_bind_refused("0.0.0.0", false, false));
+        assert!(!open_bind_refused("0.0.0.0", true, false));
+        assert!(!open_bind_refused("0.0.0.0", false, true));
+        for host in ["127.0.0.1", "localhost", "::1"] {
+            assert!(!open_bind_refused(host, false, false));
+        }
     }
 
     #[test]

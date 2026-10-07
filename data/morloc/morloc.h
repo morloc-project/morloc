@@ -1092,6 +1092,8 @@ typedef struct http_request_s {
     char path[256];
     char* body;
     size_t body_len;
+    char query[256];
+    bool authorized;
 } http_request_t;
 
 // -- Router types --

@@ -240,6 +240,24 @@ unsafe fn find_terminal<'a>(
 static G_EVAL_SANDBOX: AtomicBool = AtomicBool::new(false);
 static G_EVAL_ALLOWED: Mutex<Option<String>> = Mutex::new(None);
 
+// NET-1
+struct HttpAccess {
+    address: u32,
+    token: Option<String>,
+}
+
+static HTTP_ACCESS: Mutex<HttpAccess> = Mutex::new(HttpAccess { address: 0x7f00_0001, token: None });
+
+fn http_access() -> std::sync::MutexGuard<'static, HttpAccess> {
+    // PANIC-4
+    HTTP_ACCESS.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock())
+}
+
+/// The bearer token every HTTP request must carry, if one was set.
+pub(crate) fn http_token() -> Option<String> {
+    http_access().token.clone()
+}
+
 /// Set true while the daemon is performing pool-crash recovery: SIGTERM/KILL
 /// pools, drop SHM, respawn, etc. Workers must bail out of any incoming or
 /// in-flight request immediately when this is set, returning a "recovering"
@@ -1185,6 +1203,18 @@ pub(crate) fn daemon_set_eval_timeout(timeout_sec: i32) {
 /// # Safety
 ///
 /// `allowed` must be null or a NUL-terminated string.
+/// Set the HTTP listener's IPv4 address (host order) and the bearer token
+/// every HTTP request must carry; a null `token` requires none.
+///
+/// # Safety
+///
+/// `token` must be null or a NUL-terminated string.
+// NET-1
+pub(crate) unsafe fn daemon_set_http_access(address: u32, token: *const c_char) {
+    let token = (!token.is_null()).then(|| CStr::from_ptr(token).to_string_lossy().into_owned());
+    *http_access() = HttpAccess { address, token };
+}
+
 pub(crate) unsafe fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) {
     G_EVAL_SANDBOX.store(sandbox, Ordering::Relaxed);
     let list = if allowed.is_null() {
@@ -2718,6 +2748,22 @@ unsafe fn handle_http_connection(
     // should get 204 No Content with the standard CORS headers, never
     // reaching daemon_dispatch (which would otherwise process them
     // through the Health pipeline -- including the recovery gate).
+    // NET-1
+    if (*http_req).method != HttpMethod::Options && !(*http_req).authorized {
+        let body = b"{\"status\":\"error\",\"error\":\"unauthorized\"}";
+        crate::http_ffi::write_response_ex(
+            client_fd,
+            401,
+            c"application/json".as_ptr(),
+            body.as_ptr() as *const c_char,
+            body.len(),
+            c"WWW-Authenticate: Bearer\r\n".as_ptr(),
+        );
+        http_free_request(http_req);
+        libc::close(client_fd);
+        return;
+    }
+
     if (*http_req).method == HttpMethod::Options {
         let ct = b"application/json\0";
         crate::http_ffi::write_response(
@@ -3098,9 +3144,9 @@ pub(crate) unsafe fn daemon_run(
         );
         let mut addr: libc::sockaddr_in = std::mem::zeroed();
         addr.sin_family = libc::AF_INET as libc::sa_family_t;
-        // HTTP router is externally reachable; bind to all interfaces so that
-        // container port mappings (docker -p) can reach it.
-        addr.sin_addr.s_addr = libc::INADDR_ANY.to_be();
+        // NET-1
+        let address = http_access().address;
+        addr.sin_addr.s_addr = address.to_be();
         addr.sin_port = requested.to_be();
         if libc::bind(
             http_fd,
@@ -3118,7 +3164,7 @@ pub(crate) unsafe fn daemon_run(
         fds[nfds].events = libc::POLLIN as i16;
         fd_types[nfds] = 2;
         nfds += 1;
-        eprintln!("morloc-daemon: listening on http://0.0.0.0:{}", actual);
+        eprintln!("morloc-daemon: listening on http://{}:{}", std::net::Ipv4Addr::from(address), actual);
         bound_http_port = Some(actual);
     }
 
@@ -4078,6 +4124,11 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) {
         super::daemon_set_eval_policy(sandbox, allowed)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn daemon_set_http_access(address: u32, token: *const c_char) {
+        super::daemon_set_http_access(address, token)
     }
 
     #[no_mangle]

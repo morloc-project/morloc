@@ -58,6 +58,7 @@ release.
 - `streams.md` -- file-backed streams and their registry slots (SLOT)
 - `state.md` -- fork classes and rules for process-wide mutable values (STATE, INIT)
 - `panic.md` -- what a panic does in each process (PANIC)
+- `network.md` -- remote listeners and local endpoints (NET)
 - `registry.tsv` -- every process-wide mutable value with its fork class
 - `effects.md` -- the effect system
 - `tla/ShmHandoff.tla` -- a block crossing between pools, with death and fork

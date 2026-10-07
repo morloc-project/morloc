@@ -29,6 +29,8 @@ pub struct HttpRequest {
     /// Query string (the part after `?`), empty when absent. Kept separate from
     /// `path` so path matching stays exact.
     pub query: [c_char; 256],
+    /// Whether the request carries the daemon's bearer token, or none is set.
+    pub authorized: bool,
 }
 
 #[repr(C)]
@@ -100,6 +102,14 @@ unsafe fn http_recv(fd: i32, buf: *mut u8, len: usize) -> isize {
 }
 
 // ── http_parse_request ───────────────────────────────────────────────────────
+
+/// The value of the first header named `name` (case-insensitive).
+fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.split("\r\n").skip(1).find_map(|line| {
+        let (k, v) = line.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then_some(v)
+    })
+}
 
 pub(crate) unsafe fn http_parse_request(
     fd: i32,
@@ -176,6 +186,11 @@ pub(crate) unsafe fn http_parse_request(
     let query_len = query.len().min(255);
     ptr::copy_nonoverlapping(query.as_ptr(), (*req).query.as_mut_ptr() as *mut u8, query_len);
     (*req).query[query_len] = 0;
+
+    (*req).authorized = match crate::daemon_ffi::http_token() {
+        None => true,
+        Some(token) => morloc_runtime_types::bearer::authorizes(header_value(header_str, "authorization"), &token),
+    };
 
     // Find Content-Length
     let mut content_length: usize = 0;
@@ -309,7 +324,7 @@ pub(crate) unsafe fn write_response_ex(
          Connection: close\r\n\
          Access-Control-Allow-Origin: *\r\n\
          Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
-         Access-Control-Allow-Headers: Content-Type\r\n\
+         Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
          {}\r\n",
         status, http_status_text(status), ct, body_len, extra
     );
@@ -597,6 +612,14 @@ pub(crate) unsafe fn http_to_daemon_request(
 
 #[cfg(test)]
 mod body_tests {
+    #[test]
+    fn a_header_is_found_by_name_in_any_case() {
+        let head = "POST /call/f HTTP/1.1\r\nHost: x\r\nauthorization: Bearer t\r\n";
+        assert_eq!(super::header_value(head, "Authorization").map(str::trim), Some("Bearer t"));
+        assert_eq!(super::header_value(head, "content-length"), None);
+        assert_eq!(super::header_value("GET /authorization: x HTTP/1.1\r\n", "authorization"), None);
+    }
+
     use super::*;
     use std::ffi::CStr;
 

@@ -524,6 +524,31 @@ fn main() {
 
     // Daemon mode
     if config.daemon_flag {
+        if config.mcp_auth_token.as_ref().is_some_and(|t| t.contains('\0')) {
+            eprintln!("Error: the auth token contains a NUL byte");
+            process::clean_exit(1);
+        }
+        if config.http_port.is_some() {
+            let host = config.mcp_http_host.as_deref().unwrap_or("127.0.0.1");
+            if let Err(e) = daemon_http_address(host) {
+                eprintln!("Error: {e}");
+                process::clean_exit(1);
+            }
+            // NET-1
+            if mcp::open_bind_refused(host, config.mcp_auth_token.is_some(), config.mcp_allow_no_auth) {
+                eprintln!(
+                    "morloc-daemon: refusing to serve HTTP on {host} with no auth token (bind is not \
+                     loopback). Set --auth-token / MORLOC_MCP_TOKEN, or pass --allow-no-auth to override."
+                );
+                process::clean_exit(1);
+            }
+            if config.mcp_auth_token.is_none() && !mcp::is_loopback(host) {
+                eprintln!(
+                    "morloc-daemon: no auth token set. Every caller that can reach {host} can call every \
+                     exported function. Set MORLOC_MCP_TOKEN to require a bearer token."
+                );
+            }
+        }
         let all_indices: Vec<usize> = (0..manifest.pools.len()).collect();
         if let Err(e) = process::start_daemons(&mut sockets, &all_indices) {
             eprintln!("Error: {}", e);
@@ -736,6 +761,7 @@ fn run_daemon(
         ) -> bool;
         fn parse_manifest(text: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
         fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char);
+        fn daemon_set_http_access(address: u32, token: *const c_char);
     }
 
     // Build C MorlocSocket array (matches daemon_ffi::MorlocSocket layout)
@@ -829,6 +855,14 @@ fn run_daemon(
         daemon_set_eval_policy(
             config.eval_sandbox,
             eval_allowed_cstr.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+        );
+    }
+    let http_host = config.mcp_http_host.as_deref().unwrap_or("127.0.0.1");
+    let http_token = config.mcp_auth_token.as_ref().map(|t| CString::new(t.as_str()).unwrap());
+    unsafe {
+        daemon_set_http_access(
+            daemon_http_address(http_host).unwrap_or(u32::from(std::net::Ipv4Addr::LOCALHOST)),
+            http_token.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
         );
     }
 
@@ -1240,4 +1274,14 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
     }
 
     unsafe { libc::free(result_packet as *mut c_void) };
+}
+
+/// The daemon's HTTP listener is IPv4; its bind address in host order.
+fn daemon_http_address(host: &str) -> Result<u32, String> {
+    if host == "localhost" {
+        return Ok(u32::from(std::net::Ipv4Addr::LOCALHOST));
+    }
+    host.parse::<std::net::Ipv4Addr>()
+        .map(u32::from)
+        .map_err(|_| format!("--http-host {host}: the daemon listens on an IPv4 address"))
 }
