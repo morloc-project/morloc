@@ -99,6 +99,10 @@ jobs:
             .stack-work
           key: stack-deps-release-macos-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
           restore-keys: stack-deps-release-macos-
+      # The cache holds built snapshot packages but not ~/.stack/pantry, so
+      # the Hackage index must be fetched before any unbuilt package is.
+      - name: Update Hackage index
+        run: stack update
       - name: Build morloc compiler
         run: stack install --system-ghc --no-install-ghc --no-run-tests
       - name: Stage compiler binary
@@ -227,6 +231,9 @@ jobs:
           echo "$HOME/.local/bin" >> $GITHUB_PATH
           echo "$HOME/.local/share/morloc/bin" >> $GITHUB_PATH
           echo "R_LIBS_USER=$HOME/R/library" >> $GITHUB_ENV
+      # See compiler-macos: the cache omits ~/.stack/pantry.
+      - name: Update Hackage index
+        run: stack update
       - name: Build morloc
         run: stack install --system-ghc --no-install-ghc --no-run-tests
       - name: Initialize morloc (build runtime from source)
