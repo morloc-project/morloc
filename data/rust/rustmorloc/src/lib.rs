@@ -1325,11 +1325,17 @@ impl SizeWalk {
         }
     }
 
+    fn keep_ref<T: 'static>(&mut self, v: T) -> *const T {
+        let b = Box::new(v);
+        let r: *const T = &*b;
+        self.keep.push(b);
+        r
+    }
+
     /// A child the step itself produced (a reified closure origin): the walk
     /// keeps it alive until it is reached.
     pub fn child_owned<T: ToVoidstar + 'static>(&mut self, v: T, schema: &Schema, inline_slot: bool) {
-        self.keep.push(Box::new(v));
-        let r: *const T = self.keep.last().and_then(|b| b.downcast_ref::<T>()).unwrap();
+        let r = self.keep_ref(v);
         // SAFETY: the box lives in `keep` for the rest of the walk.
         self.child(unsafe { &*r }, schema, inline_slot);
     }
@@ -1348,6 +1354,12 @@ impl SizeWalk {
         let a = resolve_recur(arm);
         self.total += (schema.width + (a.alignment().max(1) - 1)) as isize;
         self.child(payload, a, false);
+    }
+
+    /// As `variant_payload`, for a payload the step itself produced.
+    pub fn variant_payload_owned<T: ToVoidstar + 'static>(&mut self, schema: &Schema, arm: &Schema, payload: T) {
+        let r = self.keep_ref(payload);
+        self.variant_payload(schema, arm, unsafe { &*r });
     }
 
     pub fn run(&mut self) -> usize {
@@ -1440,14 +1452,20 @@ impl<'a> WriteWalk<'a> {
         }
     }
 
+    fn keep_ref<T: 'static>(&mut self, v: T) -> *const T {
+        let b = Box::new(v);
+        let r: *const T = &*b;
+        self.keep.push(b);
+        r
+    }
+
     /// A child the step itself produced (a reified closure origin): the walk
     /// keeps it alive until it is reached.
     ///
     /// # Safety
     /// As for `child`.
     pub unsafe fn child_owned<T: ToVoidstar + 'static>(&mut self, v: T, dest: *mut u8, schema: &Schema) {
-        self.keep.push(Box::new(v));
-        let r: *const T = self.keep.last().and_then(|b| b.downcast_ref::<T>()).unwrap();
+        let r = self.keep_ref(v);
         self.child(&*r, dest, schema);
     }
 
@@ -1490,6 +1508,15 @@ impl<'a> WriteWalk<'a> {
         let slot = self.alloc(a);
         core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, to_rel(slot));
         self.child(payload, slot, a);
+    }
+
+    /// As `variant_payload`, for a payload the step itself produced.
+    ///
+    /// # Safety
+    /// As for `variant_payload`.
+    pub unsafe fn variant_payload_owned<T: ToVoidstar + 'static>(&mut self, dest: *mut u8, arm: &Schema, tag: u8, payload: T) {
+        let r = self.keep_ref(payload);
+        self.variant_payload(dest, arm, tag, &*r);
     }
 
     pub fn run(&mut self) {

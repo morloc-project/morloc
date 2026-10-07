@@ -1489,7 +1489,7 @@ makeRustCode :: [MDoc] -> Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> M
 makeRustCode includeDocs closureAsts closureTable0 es = do
   structDocs <- generateRustStructs closureAsts es
   enumDocs <- generateRustEnums es
-  variantDocs <- generateRustVariants es
+  variantDocs <- generateRustVariants closureAsts es
   stageTable <- CMS.gets rsStageTable
   heads <- papplyHeadSigs (\ins out -> render <$> rustStoredType (typeMof (FunF ins out))) es
   mask <- CMS.gets rsSrcTypeVarMask
@@ -1687,35 +1687,63 @@ collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
 -- @data@ type in the pool. Ownership follows the same rule as records and
 -- enums: a user-mapped @data Rust => X = "..."@ writes its own type in
 -- sourced Rust and gets only the impls.
-generateRustVariants :: [SerialManifold] -> RustM [MDoc]
-generateRustVariants es = do
+generateRustVariants :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> RustM [MDoc]
+generateRustVariants closureAsts es = do
   named <- mapM occurrence (collectRustVariants es)
+  wireArms <- variantWireArms rustTypeOf closureAsts es
   -- Merged by rendered name: one declaration per name.
-  concat <$> mapM (uncurry merged) (Map.toList (Map.fromListWith (flip (<>)) named))
+  concat <$> mapM (uncurry (merged wireArms)) (Map.toList (Map.fromListWith (flip (<>)) named))
   where
+
     -- One occurrence under its rendered name, with each arm's field types
     -- as written and as rendered, so the merge can compare spellings.
     occurrence (v, ps, as) = do
       n <- rustTypeOf (VariantF v ps as)
       as' <- mapM (\(c, ts) -> (\rs -> (c, (ts, map render rs))) <$> mapM rustFieldType ts) as
       return (render n, [(v, ps, as')])
-    merged name occs = case mergeVariantOccurrences name (map (\(_, _, as) -> as) occs) of
+    merged wireArms name occs = case mergeVariantOccurrences name (map (\(_, _, as) -> as) occs) of
       Right arms -> case occs of
-        ((v, ps, _) : _) -> makeOne (v, ps, arms)
+        ((v, ps, _) : _) -> makeOne (Map.lookup name wireArms) (v, ps, arms)
         [] -> return []
       Left msg -> CMS.modify (\s -> s {rsErrors = msg : rsErrors s}) >> return []
 
-    -- A function field has no marshalling (as for a generated record), so a
-    -- type holding one is declared without impls.
-    makeOne (FV gv (CV cvText), ps, arms) = do
+    -- A type holding a function gets impls only where it crosses: then each
+    -- arm holding a closure crosses as its wire tuple.
+    makeOne wireArms (FV gv (CV cvText), ps, arms) = do
       userMapped <- cscopeDeclaresVariant gv cvText
       arms' <- mapM (\(n, ts) -> (,) n <$> mapM rustFieldType ts) arms
       name <- rustTypeOf (VariantF (FV gv (CV cvText)) ps arms)
       let hasFun = any (any containsFunF . snd) arms
-          impls box = [RP.printVariantImpls box name arms' | not hasFun]
+      wires <- case wireArms of
+        Just was | hasFun -> mapM (\(c, ts) -> armWire ts (lookup c was)) arms'
+        _ -> return (map (const Nothing) arms')
+      let impls box = [RP.printVariantImpls box name [(c, ts, w) | ((c, ts), w) <- zip arms' wires] | not hasFun || isJust wireArms]
       return $ if userMapped
                  then impls RP.userBox
                  else RP.printRustVariant name arms' : impls RP.recBox
+
+    armWire :: [MDoc] -> Maybe [SerialAST] -> RustM (Maybe RP.ArmWire)
+    armWire ts (Just ss)
+      | length ss == length ts
+      , paths <- map wirePath ss
+      , any (maybe False pathHasClosure) paths = do
+          reifies <- mapM (traverse renderReify) paths
+          reflects <- mapM (traverse renderReflect) paths
+          wireTs <- zipWithM (\t (s, p) -> maybe (return t) (const (rustTypeOf (wireSerialAstToType rustClosureWireLeaf s))) p)
+                      ts (zip ss paths)
+          u <- getCounter
+          let slot v j = v <> "." <> pretty j
+              t = "__arm" <> pretty u
+              idx = zip [(0 :: Int) ..]
+          return . Just $
+            RP.ArmWire
+              { RP.awType = RP.tupled1 wireTs
+              , RP.awReify = \v -> RP.tupled1
+                  [maybe (parens (slot v j) <> ".clone()") ($ slot v j) f | (j, f) <- idx reifies]
+              , RP.awReflect = \v -> "{ let" <+> t <+> "=" <+> v <> ";" <+> RP.tupled1
+                  [maybe (slot t j) ($ slot t j) f | (j, f) <- idx reflects] <+> "}"
+              }
+    armWire _ _ = return Nothing
 
     cscopeDeclaresVariant :: TVar -> Text -> RustM Bool
     cscopeDeclaresVariant gv cvText = do

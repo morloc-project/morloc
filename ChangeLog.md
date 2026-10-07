@@ -11,6 +11,8 @@ Language and typing
  * Importing a type and also declaring one of that name is an error
 
 Fixes
+ * a `data` value whose constructor holds a function, or a custom-packed
+   type, crosses between languages (non-recursive types only)
  * a function-typed `@throw` bound by name (`f = @throw "..."`) builds and
    raises when applied
  * a parameterized `data` mapped to one unparameterized C++ or Rust name and

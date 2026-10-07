@@ -498,9 +498,8 @@ reduce ai
     -- The reduction's result is what the labeled application computes, so
     -- a label, cache or log setting on the application moves to its root.
     moveConfig i1n =<< wrapLets i1 tb1 hoisted =<< case () of
-      _ | isFunctionType tv, AnnoS (Idx ti _) tc (IntrinsicS IntrThrow msg) <- e1n -> do
-            ix <- newPlainIndex ti
-            return (AnnoS (Idx ix i1t) tc (IntrinsicS IntrThrow msg))
+      _ | isFunctionType tv, AnnoS (Idx ti _) tc (IntrinsicS IntrThrow msg) <- e1n ->
+            retypeThrow ti i1t tc msg
         | isValue e1n && (ai || nrefs <= 1) ->
             substituteAnnoS v e1n e2 >>= reduce ai . rebuild
         | isValue e1n -> share normalized v e1n e2
@@ -599,8 +598,7 @@ reduce ai (AnnoS g c (AppS headA es)) = do
     -- type of the application.
     AnnoS (Idx ti _) tc (IntrinsicS IntrThrow msg) -> do
       binds <- concat <$> mapM (fmap fst . bindArg ai) es
-      ix <- newPlainIndex ti
-      wrapLets g c binds (AnnoS (Idx ix (annT g)) tc (IntrinsicS IntrThrow msg))
+      wrapLets g c binds =<< retypeThrow ti (annT g) tc msg
     _ -> do
       es' <- mapM (reduce ai) es
       return $ case (headA', es') of
@@ -714,6 +712,12 @@ newPlainIndex parent = do
   i <- newIndex parent
   MM.modify (\s -> s {stateManifoldConfig = Map.delete i (stateManifoldConfig s)})
   return i
+
+-- | A throw at another type.
+retypeThrow :: Int -> Type -> c -> [AnnoS (Indexed Type) One c] -> MorlocMonad (AnnoS (Indexed Type) One c)
+retypeThrow from t c msg = do
+  ix <- newPlainIndex from
+  return (AnnoS (Idx ix t) c (IntrinsicS IntrThrow msg))
 
 -- | Split a suspension-building application into the arguments that are not
 -- values (to be bound by lets, returned in order) and the application of the

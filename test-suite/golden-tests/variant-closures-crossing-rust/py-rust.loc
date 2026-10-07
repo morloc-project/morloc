@@ -1,0 +1,70 @@
+-- `data` values whose arms hold closures cross pools in both directions:
+-- built in Py, relayed through a generic identity in Rust and back, then
+-- matched. Arms cover a closure beside data, two closures, a list of
+-- closures, a record of closures, a generic type, and no closure at all.
+module main (one, two, many, ops, boxed, plain, nada)
+
+import root-py
+import root-rust
+
+record Ops where
+  inc :: Int -> Int
+  scale :: Int -> Int
+record Py => Ops = "dict"
+record Rust => Ops = "Ops"
+
+data Holder
+  = Fn (Int -> Int) Int
+  | Two (Int -> Int) (Int -> Int)
+  | Many [Int -> Int]
+  | WithOps Ops
+  | Plain Int
+  | Nada
+
+data Box a = Has (a -> a) a | Empty
+
+source Py from "h.py" ("add" as addA, "mul" as mulA, "ident" as idA)
+source Rust from "h.rs" ("ident" as idB)
+
+addA :: Int -> Int -> Int
+mulA :: Int -> Int -> Int
+idA :: a -> a
+idB :: a -> a
+
+trip :: Holder -> Holder
+trip h = idA (idB (idA h))
+
+unbox :: Holder -> Int -> Int
+unbox h x = match h
+  | (Fn f n) = f x + n
+  | (Two f g) = f (g x)
+  | (Many fs) = (.[0] fs) x + (.[1] fs) x
+  | (WithOps o) = (.inc o) ((.scale o) x)
+  | (Plain n) = n
+  | Nada = x
+
+unboxG :: Box Int -> Int
+unboxG b = match b
+  | (Has f a) = f a
+  | Empty = 0
+
+one :: Int -> Int
+one x = unbox (trip (Fn (addA 1) 10)) x
+
+two :: Int -> Int
+two x = unbox (trip (Two (addA 1) (addA 2))) x
+
+many :: Int -> Int
+many x = unbox (trip (Many [addA 1, mulA 2])) x
+
+ops :: Int -> Int
+ops x = unbox (trip (WithOps {inc = addA 1, scale = mulA 2})) x
+
+boxed :: Int -> Int
+boxed x = unboxG (idA (idB (idA (Has (addA 1) x))))
+
+plain :: Int -> Int
+plain x = unbox (trip (Plain 7)) x
+
+nada :: Int -> Int
+nada x = unbox (trip Nada) x
