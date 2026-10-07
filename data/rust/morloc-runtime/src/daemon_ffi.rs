@@ -616,6 +616,11 @@ pub(crate) fn morloc_stop_child_groups() {
     EVAL_CHILDREN.stop_all();
 }
 
+// DAEMON-11
+pub(crate) fn morloc_child_group_leader_exited(pid: libc::c_int) {
+    EVAL_CHILDREN.leader_exited(pid);
+}
+
 struct EvalChild {
     pid: libc::pid_t,
     since: u64,
@@ -4018,6 +4023,11 @@ mod c_abi {
     #[no_mangle]
     pub extern "C" fn morloc_stop_child_groups() {
         super::morloc_stop_child_groups()
+    }
+
+    #[no_mangle]
+    pub extern "C" fn morloc_child_group_leader_exited(pid: libc::c_int) {
+        super::morloc_child_group_leader_exited(pid)
     }
 
     #[no_mangle]

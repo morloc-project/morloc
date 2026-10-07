@@ -40,9 +40,34 @@ impl ChildGroups {
     // DAEMON-6: callable from a signal handler.
     pub fn stop_all(&self) {
         self.stopped.store(true, Ordering::SeqCst);
-        for i in 0..SLOTS {
-            self.signal_slot(i, libc::SIGKILL);
-        }
+        masked(|_| {
+            for i in 0..SLOTS {
+                self.signal_slot(i, libc::SIGKILL);
+            }
+        });
+    }
+
+    /// The leader `pid` has exited and is about to be reaped: no signal
+    /// reaches its group from now on.
+    // DAEMON-11: callable from a signal handler; called before the reap, while the id is held.
+    pub fn leader_exited(&self, pid: libc::pid_t) {
+        masked(|_| {
+            for slot in &self.slots {
+                loop {
+                    let v = slot.load(Ordering::SeqCst);
+                    if v & PGID != pid || v & DEAD != 0 {
+                        break;
+                    }
+                    if v & BUSY != 0 {
+                        std::hint::spin_loop();
+                        continue;
+                    }
+                    if slot.compare_exchange(v, v | DEAD, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     pub fn is_stopped(&self) -> bool {
@@ -77,16 +102,45 @@ impl Default for ChildGroups {
 
 impl Registered<'_> {
     /// Signal the group unless it was already killed.
-    // DAEMON-6: signals blocked, so a handler in `stop_all` never spins on this thread.
     pub fn signal(&self, sig: libc::c_int) {
-        unsafe {
-            let mut all: libc::sigset_t = std::mem::zeroed();
-            let mut old: libc::sigset_t = std::mem::zeroed();
-            libc::sigfillset(&mut all);
-            libc::pthread_sigmask(libc::SIG_SETMASK, &all, &mut old);
-            self.groups.signal_slot(self.slot, sig);
-            libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
-        }
+        masked(|_| self.groups.signal_slot(self.slot, sig));
+    }
+
+    /// Run `f` holding the group's slot, so no signal reaches the group
+    /// meanwhile; `None`, without running it, once the group was killed.
+    /// `f` gets the signal mask to give a process it starts.
+    // DAEMON-11: a pool joins its group only while the slot is held.
+    pub fn while_held<T>(&self, f: impl FnOnce(&libc::sigset_t) -> T) -> Option<T> {
+        let slot = &self.groups.slots[self.slot];
+        masked(|old| loop {
+            let v = slot.load(Ordering::SeqCst);
+            if v & DEAD != 0 {
+                return None;
+            }
+            if v & BUSY != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            if slot.compare_exchange(v, v | BUSY, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                let r = f(old);
+                slot.store(v, Ordering::SeqCst);
+                return Some(r);
+            }
+        })
+    }
+}
+
+// DAEMON-6: a slot is held only with signals blocked, so a handler that
+// stops the table never spins on its own thread.
+fn masked<T>(f: impl FnOnce(&libc::sigset_t) -> T) -> T {
+    unsafe {
+        let mut all: libc::sigset_t = std::mem::zeroed();
+        let mut old: libc::sigset_t = std::mem::zeroed();
+        libc::sigfillset(&mut all);
+        libc::pthread_sigmask(libc::SIG_SETMASK, &all, &mut old);
+        let r = f(&old);
+        libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+        r
     }
 }
 
@@ -155,6 +209,47 @@ mod tests {
         assert!(killed(pid));
         drop(r);
         assert!(groups.slots.iter().all(|s| s.load(Ordering::SeqCst) == 0));
+    }
+
+    fn exited(pid: libc::pid_t) -> bool {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
+        };
+        rc == 0 && unsafe { info.si_pid() } == pid
+    }
+
+    #[test]
+    fn a_group_whose_leader_exited_is_never_signalled_again() {
+        let groups = ChildGroups::new();
+        let pid = sleeper_group();
+        let r = groups.add(pid).unwrap();
+        groups.leader_exited(pid);
+        assert_eq!(groups.slots[r.slot].load(Ordering::SeqCst), pid | DEAD);
+        r.signal(libc::SIGKILL);
+        groups.stop_all();
+        assert!(!exited(pid));
+        assert!(r.while_held(|_| ()).is_none());
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert!(killed(pid));
+    }
+
+    #[test]
+    fn stopping_all_waits_for_a_held_group_then_kills_it() {
+        let groups: &'static ChildGroups = Box::leak(Box::new(ChildGroups::new()));
+        let pid = sleeper_group();
+        let r = groups.add(pid).unwrap();
+        let stopper = r
+            .while_held(|_| {
+                let stopper = std::thread::spawn(|| groups.stop_all());
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                assert!(!exited(pid), "a signal reached a held group");
+                stopper
+            })
+            .unwrap();
+        stopper.join().unwrap();
+        assert!(killed(pid));
+        assert!(r.while_held(|_| ()).is_none());
     }
 
     #[test]

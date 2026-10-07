@@ -56,8 +56,10 @@ and in wall time; the wall limit stops the whole group. The group is
 registered in a table of child groups while it runs, and its leader (a
 shell that runs `morloc`, then ignores SIGTERM and waits on a pin the
 daemon closes after unregistering it) stays unreaped until it is
-unregistered, so the group id is never reused while anything may signal it; every signal goes through the table, none follows a
-SIGKILL, and a thread signalling a group blocks signals meanwhile so a
+unregistered, or, killed from outside, until the reaper has marked its
+slot dead (DAEMON-11), so the group id is never reused while anything may
+signal it; every signal goes through the table, none follows a SIGKILL,
+and a thread holding a group's slot blocks signals meanwhile so a
 signal handler that stops the table never waits on it. Stopping the pools
 also stops every registered group and every group registered later, so no
 eval outlives the daemon or the front-end. The pools of a program an eval
@@ -139,3 +141,30 @@ On any exit -- a clean one, the shutdown watchdog's, a signal's, a panic's
 -- a daemon removes its unix socket and its port file only if the file at
 each path is still the one it created, so a daemon that has since taken
 over the path keeps its own.
+
+### DAEMON-11 A process group id is held while the nexus may signal it
+Status: implemented
+Checked by: tla:PoolGroup, tla:PoolGroup_no_pin.bug, tla:PoolGroup_kill_then_clear.bug, tla:PoolGroup_reap_unmarked.bug, tla:PoolGroup_spawn_unheld.bug, a_pool_group_outlives_its_pool_until_released, a_pin_ignores_sigterm_from_birth, a_group_whose_leader_exited_is_never_signalled_again, stopping_all_waits_for_a_held_group_then_kills_it
+
+Each pool runs in a process group led by a pin: a shell started with
+SIGTERM, SIGINT and SIGHUP blocked, which exits when the nexus closes its
+pipe or when it is killed. The reaper takes the pool as soon as it exits,
+but the group id stays held by the pin, so no signal the nexus sends to the
+group reaches a process the id was handed to since. Every signal goes
+through the group's slot in a table of groups, and none follows a SIGKILL.
+The pool is started while its group's slot is held, so stopping every group
+either kills the pool with the group or finds the group dead and the pool
+is never started.
+
+The nexus has one reaper, run by the SIGCHLD handler and by threads that
+reap, and only one runs at a time; a reaper turned away leaves its children
+to the one running, which looks again before it stops. Before it reaps an
+exited child it marks the slot of any group that child leads (a pool's pin,
+or the leader of a forked eval in DAEMON-6) dead, so a pin or eval leader
+killed from outside the nexus never leaves a slot naming a free id. Its
+pool, still running, is then out of reach of signals and ends by its
+lifeline when the nexus exits.
+
+Stopping the pools sends SIGTERM through every group, waits up to 200 ms
+for the pool processes (not their groups, which the pins keep) to exit,
+kills every group, and reaps for up to 100 ms more.

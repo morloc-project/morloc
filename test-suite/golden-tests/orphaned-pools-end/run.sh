@@ -11,17 +11,25 @@ while [ ! -s started.txt ] && [ $i -lt 400 ]; do
   sleep 0.05
   i=$((i + 1))
 done
-pools=$(pgrep -P "$nx")
+pools=""
+for p in $(pgrep -P "$nx"); do
+  case "$(ps -o args= -p "$p")" in
+    morloc-pool-pin*) ;;
+    *) pools="$pools $p" ;;
+  esac
+done
 n=$(echo $pools | wc -w | tr -d ' ')
+groups=""
 for p in $pools; do
   ps -o args= -p "$p" | awk '{print $(NF-1)}' >> killed-dirs.txt
+  groups="$groups $(ps -o pgid= -p "$p" | tr -d ' ')"
 done
 kill -KILL "$nx"
 wait "$nx" 2> /dev/null
 i=0
 while [ $i -lt 300 ]; do
   left=""
-  for g in $pools; do
+  for g in $groups; do
     pgrep -g "$g" > /dev/null && left="$left $g"
   done
   [ -z "$left" ] && break

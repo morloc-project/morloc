@@ -45,6 +45,19 @@ impl Spawn {
         Ok(())
     }
 
+    pub fn join_process_group(&mut self, pgid: libc::pid_t) -> io::Result<()> {
+        check(unsafe { libc::posix_spawnattr_setpgroup(&mut self.attr, pgid) })?;
+        self.flags |= libc::POSIX_SPAWN_SETPGROUP as libc::c_short;
+        Ok(())
+    }
+
+    /// Start the child with signal mask `mask`.
+    pub fn signal_mask(&mut self, mask: &libc::sigset_t) -> io::Result<()> {
+        check(unsafe { libc::posix_spawnattr_setsigmask(&mut self.attr, mask) })?;
+        self.flags |= libc::POSIX_SPAWN_SETSIGMASK as libc::c_short;
+        Ok(())
+    }
+
     pub fn dup2(&mut self, from: c_int, to: c_int) -> io::Result<()> {
         check(unsafe { libc::posix_spawn_file_actions_adddup2(&mut self.actions, from, to) })
     }

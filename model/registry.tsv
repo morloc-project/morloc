@@ -234,7 +234,10 @@ morloc-nexus/process.rs::-::RECOVERY_GENERATION	exec-only
 morloc-nexus/process.rs::-::RECOVERY_CONTEXT	exec-only		
 morloc-nexus/process.rs::-::POOL_CHECK	exec-only		
 morloc-nexus/process.rs::-::PIDS	exec-only		
-morloc-nexus/process.rs::-::PGIDS	exec-only		
+morloc-nexus/process.rs::-::POOL_GROUPS	exec-only		
+morloc-nexus/process.rs::-::REAPING	exec-only		
+morloc-nexus/process.rs::-::POOL_PINS	exec-only		
+morloc-nexus/process.rs::-::SPAWNED_PIDS	exec-only		
 morloc-nexus/process.rs::-::EXIT_STATUSES	exec-only		
 morloc-nexus/process.rs::-::POOL_START_TIMES	exec-only		
 morloc-nexus/process.rs::-::POOL_SWEPT	exec-only		

@@ -41,7 +41,13 @@ for i in $(seq 1 "$ITERATIONS"); do
     sleep 0.1
 
     # Find and kill a pool child process
-    POOL_PID=$(pgrep -P "$NEXUS_PID" 2>/dev/null | head -1) || true
+    POOL_PID=""
+    for p in $(pgrep -P "$NEXUS_PID" 2>/dev/null); do
+        case "$(ps -o args= -p "$p")" in
+            morloc-pool-pin*) ;;
+            *) POOL_PID=$p; break ;;
+        esac
+    done
 
     KILLED=0
     if [ -n "$POOL_PID" ] && kill -9 "$POOL_PID" 2>/dev/null; then
