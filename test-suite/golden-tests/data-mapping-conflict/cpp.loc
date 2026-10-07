@@ -1,0 +1,18 @@
+-- A parameterized data type mapped to one unparameterized Cpp name cannot
+-- serve two instantiations; the build must fail with a compiler error.
+module main (foo, bar)
+
+import root-cpp
+
+data Box a = Has a | Empty
+data Cpp => (Box a) = "MyBox" a
+
+source Cpp from "m.hpp" ("one")
+
+one :: Int
+
+foo :: Int -> Box Int
+foo x = Has (x + one)
+
+bar :: Str -> Box Str
+bar s = Has (s <> "!")

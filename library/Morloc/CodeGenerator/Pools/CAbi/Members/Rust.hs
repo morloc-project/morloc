@@ -120,10 +120,11 @@ data RustState = RustState
   , rsStageTable :: Map.Map Int StageEntry
   , rsPapplyHeads :: Set.Set Text
   -- ^ The stored types of the function values this pool partially applies.
+  , rsErrors :: [Text]
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty []
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -978,16 +979,6 @@ capInit a@(Arg i t) = do
   -- raw packet pointer -- is taken as it is.
   return $ if rustArgIsRef t then deref <> ".clone()" else deref
 
--- | Reflect an incoming closure wire tuple into a native callable: a bare
--- @move@ closure that, on each application, appends the runtime-argument packets
--- to the deserialized captured packets and RPCs back to the producing pool via
--- 'foreign_call' (resolving its socket from the wire tuple's home-language
--- name). The result is a plain @Fn(&A..)->R@, so it satisfies BOTH a sourced
--- @impl Fn@ higher-order parameter (by value) and a morloc-defined
--- @&impl MorlocFnN@ parameter (via the @Fn@ blanket) -- mirroring the C++
--- member, whose reflected value is likewise a plain lambda. (Origin-preserving
--- re-cross of a reflected closure is deferred; it needs the same reify work the
--- C++ member also still lacks.)
 -- | How a proxy hands one of its arguments to the wire: a value is put as it
 -- is; a closure is reified first (its wire form is its origin tuple).
 closureArgPush :: Int -> SerialAST -> Int -> RustM MDoc
@@ -1302,7 +1293,8 @@ translate srcs es = do
   logTemplates <- collectRenderedTemplates rustLang
   stageTable <- stageTableEntries
   let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable}
-      code = CMS.evalState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
+      (code, stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
+  mapM_ (MM.throwSystemError . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
 
   home <- MM.asks configHome
   deps <- rustDepsUnion
@@ -1654,13 +1646,7 @@ bodyName (AppU (VarU (TV n)) _) = Just n
 bodyName (NamU _ (TV n) _ _) = Just n
 bodyName _ = Nothing
 
--- | Every occurrence of an argument-free @data@ type in these manifolds,
--- with its constructor names. Occurrences are merged in
--- 'generateRustEnums' by rendered name, keeping the LONGEST constructor
--- list rather than the first seen: a constructor LITERAL reports a type
--- whose table holds only its own arm, so a first-wins merge could define
--- the type from one arm and silently renumber every other constructor --
--- an arm's position is its wire tag.
+-- | Every argument-free @data@ type used in these manifolds, unmerged.
 collectRustEnums :: [SerialManifold] -> [(FVar, [TypeF], [Text])]
 collectRustEnums = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
@@ -1679,18 +1665,7 @@ collectRustEnums = concatMap (runIdentity . foldWithSerialManifoldM fm)
     seek (OptionalF t) = seek t
     seek _ = []
 
--- | Collect every payload-bearing @data@ type used in these manifolds with
--- its arms.
---
--- Occurrences are merged by keeping the WIDEST arm list rather than the
--- first one seen. A constructor literal's type reports only the arm being
--- built, so taking the first occurrence could declare a one-arm enum and
--- leave every other constructor undeclared.
--- Occurrences are not merged here: which ones name the same declaration is
--- a question of the RENDERED name -- a template instantiated twice is two
--- types, a generated type is one per instantiation whatever it was applied
--- to -- and rendering needs the translator, so the merge happens in
--- 'generateRustVariants'.
+-- | Every payload-bearing @data@ type used in these manifolds, unmerged.
 collectRustVariants :: [SerialManifold] -> [(FVar, [TypeF], [(Text, [TypeF])])]
 collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
@@ -1715,13 +1690,7 @@ collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
 generateRustVariants :: [SerialManifold] -> RustM [MDoc]
 generateRustVariants es = do
   named <- mapM occurrence (collectRustVariants es)
-  -- Merged by the RENDERED name, which is what the declaration is called: a
-  -- template instantiated twice is two declarations, a generated type is
-  -- one per instantiation, and keying by the general name would collapse
-  -- `Try Str ()` and `Try Str (IFile a)` into one and leave the second use
-  -- naming a type that was never emitted. Occurrences of one name that
-  -- disagree on an arm's field types fail the build here, since whichever
-  -- declaration came out could not serve both sites.
+  -- Merged by rendered name: one declaration per name.
   concat <$> mapM (uncurry merged) (Map.toList (Map.fromListWith (flip (<>)) named))
   where
     -- One occurrence under its rendered name, with each arm's field types
@@ -1734,7 +1703,7 @@ generateRustVariants es = do
       Right arms -> case occs of
         ((v, ps, _) : _) -> makeOne (v, ps, arms)
         [] -> return []
-      Left msg -> error $ "Rust pool: " ++ T.unpack msg
+      Left msg -> CMS.modify (\s -> s {rsErrors = msg : rsErrors s}) >> return []
 
     -- A function field has no marshalling (as for a generated record), so a
     -- type holding one is declared without impls.
@@ -1755,22 +1724,13 @@ generateRustVariants es = do
         Just entries -> any (\(_, body, _, _, _) -> bodyName body == Just cvText) entries
         Nothing -> False
 
--- | Emit the @ToVoidstar@/@FromVoidstar@ impls for every @data@ type used in
--- the pool, plus the enum definition itself when the pool owns it.
---
--- Ownership follows the record rule: a user-mapped @data Rust => X = "..."@
--- means the user writes the enum in sourced Rust and only the impls are
--- emitted. Otherwise the pool generates both. The @gv == cv@ shape alone
--- cannot decide this -- a user-written @data Rust => Foo = "Foo"@ produces
--- exactly the same FVar as an unmapped @Foo@ -- so the concrete scope is
--- consulted, as 'Cpp.cscopeMatches' does for the same ambiguity.
+-- | Impls for every nullary @data@ type in the pool, plus the enum itself
+-- unless the user maps it.
 generateRustEnums :: [SerialManifold] -> RustM [MDoc]
 generateRustEnums es = do
   named <- mapM (\(v, ps, ns) -> (\n -> (render n, (v, ps, ns))) <$> rustTypeOf (EnumF v ps ns))
                 (collectRustEnums es)
-  -- One entry per RENDERED name, as for variants: a user's template is one
-  -- type per instantiation, a generated enum one whatever it was applied
-  -- to. The longest constructor list is the complete one.
+  -- The longest constructor list is the complete one.
   concat <$> mapM makeOne (Map.elems (Map.fromListWith longest named))
   where
     longest a@(_, _, as) b@(_, _, bs) = if length as >= length bs then a else b

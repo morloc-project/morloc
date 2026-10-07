@@ -1060,8 +1060,9 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketIndex))) [iExp
           ft = FunU [apply g5 idxType, apply g5 expectedRcv] resultType
           f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall PatternBracketIndex))
       return (g5, resultType, AppS f1 [i', rcvSynExpr])
-synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall PatternBracketIndex))) args) =
-  error $ "PatternBracketIndex expects 2 args, got " <> show (length args)
+synthE i _ (AppS (AnnoS _ _ (ExeS (PatCall PatternBracketIndex))) args) =
+  MM.throwSourcedError i $
+    "A bracket index expects 2 args, got" <+> pretty (length args)
 
 -- Bracket-slice pattern (xs[i:j:k]). Args: [start, stop, step, receiver].
 -- Each bound is checked against a fresh bare existential so user
@@ -1102,8 +1103,9 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketSlice))) [star
               resultType
       f1 = AnnoS (Idx fgidx ft) fcidx (ExeS (PatCall PatternBracketSlice))
   return (g7, resultType, AppS f1 [s1, s2, s3, rcv'])
-synthE _ _ (AppS (AnnoS _ _ (ExeS (PatCall PatternBracketSlice))) args) =
-  error $ "PatternBracketSlice expects 4 args, got " <> show (length args)
+synthE i _ (AppS (AnnoS _ _ (ExeS (PatCall PatternBracketSlice))) args) =
+  MM.throwSourcedError i $
+    "A bracket slice expects 4 args, got" <+> pretty (length args)
 
 -- Bare bracket patterns (when used as values, not applied). The
 -- function types match the AppS arities above; index and bound types

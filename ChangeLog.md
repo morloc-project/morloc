@@ -10,6 +10,12 @@ Language and typing
    only per-language forms needs a general declaration (`newtype Map a b`)
  * Importing a type and also declaring one of that name is an error
 
+Fixes
+ * a function-typed `@throw` bound by name (`f = @throw "..."`) builds and
+   raises when applied
+ * a parameterized `data` mapped to one unparameterized C++ or Rust name and
+   used at two types is a compile error rather than a crash
+
 0.109.0 [2026-10-03]
 --------------------
 

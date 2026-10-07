@@ -1,0 +1,18 @@
+-- A parameterized data type mapped to one unparameterized Rust name cannot
+-- serve two instantiations; the build must fail with a compiler error.
+module main (foo, bar)
+
+import root-rust
+
+data Box a = Has a | Empty
+data Rust => (Box a) = "MyBox" a
+
+source Rust from "m.rs" ("one")
+
+one :: Int
+
+foo :: Int -> Box Int
+foo x = Has (x + one)
+
+bar :: Str -> Box Str
+bar s = Has (s <> "!")

@@ -498,7 +498,10 @@ reduce ai
     -- The reduction's result is what the labeled application computes, so
     -- a label, cache or log setting on the application moves to its root.
     moveConfig i1n =<< wrapLets i1 tb1 hoisted =<< case () of
-      _ | isValue e1n && (ai || nrefs <= 1) ->
+      _ | isFunctionType tv, AnnoS (Idx ti _) tc (IntrinsicS IntrThrow msg) <- e1n -> do
+            ix <- newPlainIndex ti
+            return (AnnoS (Idx ix i1t) tc (IntrinsicS IntrThrow msg))
+        | isValue e1n && (ai || nrefs <= 1) ->
             substituteAnnoS v e1n e2 >>= reduce ai . rebuild
         | isValue e1n -> share normalized v e1n e2
         -- A function built by a computation, on the nexus path. The pure

@@ -412,6 +412,7 @@ data CppTranslatorState = CppTranslatorState
   -- within a manifold and two manifolds may share one.
   , translatorCurrentRoot :: Int
   -- ^ The top-level manifold being lowered (see 'translatorConsumableLets').
+  , translatorErrors :: [Text]
   }
 
 instance Defaultable CppTranslatorState where
@@ -431,6 +432,7 @@ instance Defaultable CppTranslatorState where
       , translatorDebugMode = False
       , translatorConsumableLets = Set.empty
       , translatorCurrentRoot = 0
+      , translatorErrors = []
       }
 
 type CppTranslator a = CMS.StateT CppTranslatorState Identity a
@@ -505,7 +507,8 @@ translate srcs es = do
         , translatorDebugMode = debugMode
         , translatorConsumableLets = consumableProjectionLets es
         }
-      code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
+      (code, stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
+  mapM_ (MM.throwSystemError . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)
 
   maker <- makeTheMaker cxxFlags includeDirs
 
@@ -2004,7 +2007,7 @@ generateCppVariants es = do
       Right arms -> case occs of
         ((v, ps, _) : _) -> makeOne (v, ps, arms)
         [] -> return ([], [], [], [])
-      Left msg -> error $ "C++ pool: " ++ T.unpack msg
+      Left msg -> CMS.modify (\s -> s {translatorErrors = msg : translatorErrors s}) >> return ([], [], [], [])
 
     makeOne (FV gv (CV cvText), ps, arms) = do
       userMapped <- variantIsUserMapped gv cvText
