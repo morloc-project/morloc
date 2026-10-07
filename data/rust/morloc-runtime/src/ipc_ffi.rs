@@ -1416,9 +1416,10 @@ mod dispatch_fork_tests {
         (fd, c, dir)
     }
 
-    // A child that connects to `path`, then runs `then` with the connected fd;
-    // only async-signal-safe calls follow the fork.
-    unsafe fn connecting_child(path: &std::ffi::CStr, then: impl FnOnce(i32)) -> libc::pid_t {
+    // A child that connects `fd`, made by the caller, to `path`, then runs
+    // `then`; only async-signal-safe calls follow the fork.
+    unsafe fn connecting_child(path: &std::ffi::CStr, fd: i32, then: impl FnOnce(i32)) -> libc::pid_t {
+        assert!(fd >= 0);
         let mut addr: libc::sockaddr_un = std::mem::zeroed();
         addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
         for (d, b) in addr.sun_path.iter_mut().zip(path.to_bytes()) {
@@ -1426,14 +1427,14 @@ mod dispatch_fork_tests {
         }
         let pid = libc::fork();
         if pid == 0 {
-            let fd = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
             let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
-            if fd < 0 || libc::connect(fd, &addr as *const _ as *const libc::sockaddr, len) != 0 {
+            if libc::connect(fd, &addr as *const _ as *const libc::sockaddr, len) != 0 {
                 libc::_exit(2);
             }
             then(fd);
             libc::_exit(0);
         }
+        assert!(pid > 0, "fork failed");
         pid
     }
 
@@ -1441,12 +1442,14 @@ mod dispatch_fork_tests {
     fn a_stopped_sender_keeps_its_request() {
         let (listener, path, dir) = listening_socket();
         let ping = crate::packet::PacketHeader::ping().to_bytes();
+        let client = unsafe { morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
         let child = unsafe {
-            connecting_child(&path, |fd| {
+            connecting_child(&path, client, |fd| {
                 libc::raise(libc::SIGSTOP);
                 libc::write(fd, ping.as_ptr() as *const c_void, ping.len());
             })
         };
+        unsafe { libc::close(client) };
         let conn = unsafe { morloc_runtime_types::fd::accept(listener, ptr::null_mut(), ptr::null_mut()) };
         assert!(conn >= 0);
         let resumer = std::thread::spawn(move || {
@@ -1471,31 +1474,27 @@ mod dispatch_fork_tests {
     #[test]
     fn a_request_whose_sender_is_gone_ends_though_its_fd_lives_on() {
         let (listener, path, dir) = listening_socket();
-        let mut pipe = [0; 2];
-        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
-        let child = unsafe {
-            connecting_child(&path, |_fd| {
-                if libc::fork() == 0 {
-                    let gc = libc::getpid();
-                    libc::write(pipe[1], &gc as *const _ as *const c_void, std::mem::size_of::<libc::pid_t>());
-                    libc::sleep(30);
-                    libc::_exit(0);
-                }
-            })
-        };
-        unsafe { libc::close(pipe[1]) };
+        let client = unsafe { morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        let child = unsafe { connecting_child(&path, client, |_| {}) };
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "the child could not connect: {status}");
         let conn = unsafe { morloc_runtime_types::fd::accept(listener, ptr::null_mut(), ptr::null_mut()) };
         assert!(conn >= 0);
-        let mut grandchild: libc::pid_t = 0;
-        unsafe { libc::read(pipe[0], &mut grandchild as *mut _ as *mut c_void, std::mem::size_of::<libc::pid_t>()) };
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let watchdog = std::thread::spawn(move || {
+            if finished.recv_timeout(std::time::Duration::from_secs(10)).is_err() {
+                unsafe { libc::shutdown(client, libc::SHUT_WR) };
+            }
+        });
         let began = std::time::Instant::now();
         let mut err: *mut c_char = ptr::null_mut();
         let request = unsafe { stream_from_client(conn, &mut err) };
         let waited = began.elapsed();
+        let _ = done.send(());
+        watchdog.join().unwrap();
         unsafe {
-            libc::kill(grandchild, libc::SIGKILL);
-            libc::waitpid(child, ptr::null_mut(), 0);
-            libc::close(pipe[0]);
+            libc::close(client);
             libc::close(conn);
             libc::close(listener);
         }
