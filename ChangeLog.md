@@ -1,24 +1,4 @@
-Unreleased
-----------
-
-Language and typing
- * A type name means the declaration in scope where it is written: an imported
-   function's signature may name types the importer never imports, and two
-   modules may each declare a type of the same name (shown as `lib.P` where
-   they overlap)
- * A type name that is neither declared nor imported is an error; a type given
-   only per-language forms needs a general declaration (`newtype Map a b`)
- * Importing a type and also declaring one of that name is an error
-
-Fixes
- * a `data` value whose constructor holds a function, or a custom-packed
-   type, crosses between languages (non-recursive types only)
- * a function-typed `@throw` bound by name (`f = @throw "..."`) builds and
-   raises when applied
- * a parameterized `data` mapped to one unparameterized C++ or Rust name and
-   used at two types is a compile error rather than a crash
-
-0.109.0 [2026-10-03]
+0.109.0 [2026-10-07]
 --------------------
 
 New features
@@ -28,6 +8,8 @@ New features
  * Tables: `-f jsonl` and `-f tsv` output, CSV/TSV piped in on stdin, and table
    commands served over MCP
  * New table helpers: `addCol`, elementwise vector arithmetic, and a `|>` pipe operator
+ * `@parse` streams `IStream` arguments while the command runs, so a huge or
+   endless input can be consumed (or sampled) as it is parsed
 
 Language and typing
  * Instances can declare contexts
@@ -36,12 +18,40 @@ Language and typing
  * Function, effect and optional type aliases work anywhere, including inside row operators
  * Class methods are resolved from the argument's type, so `unpack v` no longer needs a signature
  * Each argument and each `where`/`let` value is evaluated once, not once per mention
+ * A type name means the declaration in scope where it is written: an imported
+   function's signature may name types the importer never imports, and two
+   modules may each declare a type of the same name (shown as `lib.P` where
+   they overlap)
+ * A type name that is neither declared nor imported is an error; a type given
+   only per-language forms needs a general declaration (`newtype Map a b`)
+ * Importing a type and also declaring one of that name is an error
+ * Effectful functions are adapted for host languages wherever they are built
+   (inside records, lists, callbacks, recursive helpers), not only when
+   written as a literal lambda in the host call
+ * Function values returned by patterns or computed by intrinsics can be applied
+
+Security and robustness
+ * The daemon's HTTP listener binds loopback by default; any other address
+   (`--http-host`) requires a bearer token unless `--allow-no-auth` is passed
+ * Remote MCP and daemon clients are bounded by request deadlines and
+   connection caps; sockets, logs and the binding store live in a private
+   per-user directory
+ * The daemon refuses internal commands at `/call`
+ * A panic in user Rust code fails only that call (catchable with `@try`), like
+   an exception in C++ or Python; an internal error in any morloc process ends
+   it with exit status 70
+ * C, C++ and Rust source names must be identifiers (`a::b` allowed); any other
+   string is refused instead of being pasted into the pool
+ * Pools end with their nexus however it dies (SIGKILL included), and shared
+   memory and temp files are reclaimed after crashed or forked processes
+ * macOS: pools, streams and shared-memory cleanup now work and are tested in CI
 
 Performance
  * Deeply nested definitions build and typecheck in linear time and memory instead of exponential
  * Shared memory is freed as soon as a value is read, so long loops and multi-table pipelines stay flat
  * Tail-recursive loops call functions from their own pool directly (100k iterations: 5 s -> 0.2 s)
  * Stream compression runs in parallel behind the writer, and streams copy each batch less often
+ * Generated C++ and Rust code no longer copies values it only reads or moves
  * C++ and Rust pools no longer grow with the number of cross-language calls
 
 Fixes
@@ -56,6 +66,20 @@ Fixes
  * `where` bindings are lexically scoped and no longer capture names at the call site
  * Sum-type naming fixed in C++ function types and records
  * Bug in R codegen caused by R laziness
+ * a `data` value whose constructor holds a function, or a custom-packed
+   type, crosses between languages (non-recursive types only)
+ * a function-typed `@throw` bound by name (`f = @throw "..."`) builds and
+   raises when applied
+ * a parameterized `data` mapped to one unparameterized C++ or Rust name and
+   used at two types is a compile error rather than a crash
+ * Rust sourced functions can run named morloc functions on threads
+ * `@stream` on an `IFile [a]` yields elements of type `a`
+ * A failed refutable bind on a `Try` throws the `Err` message
+ * Python can source a file whose path lies outside the program directory
+ * `morloc init -f` keeps the installed runtime if the new build fails
+ * Clearer errors for an unreadable `IFile` argument (names the argument and
+   path) and for a record declaration missing from a pool; the `-o` file is
+   not created when arguments fail to parse
 
 
 0.108.1 [2026-09-18]
