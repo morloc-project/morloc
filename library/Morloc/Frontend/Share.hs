@@ -169,9 +169,6 @@ ownedBy env d _ k = Map.lookup k (seOwner env) == Just d
 cafCandidate :: ShareEnv -> EVar -> Int -> Bool
 cafCandidate env (EV v) k = not (T.any (== '`') v) && not (seMethod env k)
 
-nodeIndex :: Node -> Int
-nodeIndex (AnnoS (Idx gi _) _ _) = gi
-
 -- | The group of a copy of an eligible term: the term and its type.
 termKey :: ShareEnv -> (EVar -> Int -> Bool) -> Node -> Maybe (Int, Type)
 termKey env eligible u@(AnnoS (Idx gi t) ci (VarS v (Many alts)))
@@ -204,27 +201,23 @@ originKey _ _ = Nothing
 -- after that right-hand side has been reduced to one copy. The groups may be
 -- of several kinds (named constants and the constants definitions compute),
 -- told apart by their keys.
+--
+-- A copy is a node its group key names. An index does not identify a copy:
+-- a term's implementation root carries the index of the use it was expanded
+-- at, and a coercion wraps a use under the use's index.
 placeGroups :: Ord k => ShareEnv -> (Node -> Maybe k) -> Node -> MorlocMonad Node
 placeGroups _ groupOf region
-  | not (null clashes) =
-      MM.throwCompilerBug "two sharing groups claim one expression index"
-  | Map.null uses = return region
+  | Map.null firstCopy = return region
   | otherwise = foldM placeGroup region order
   where
-    -- every copy in the region, by its index; an index is one expression, so
-    -- it belongs to at most one group
-    claims = Map.fromListWith (<>) [(nodeIndex u, [k]) | u <- allNodes region, Just k <- [groupOf u]]
-    clashes = [i | (i, ks) <- Map.toList claims, length (nubOrd ks) > 1]
-    uses = Map.mapMaybe listToMaybe claims
-    isUse k u = lookupUse u == Just k
+    isUse k u = groupOf u == Just k
     -- the groups used inside a group's right-hand side (every copy of a group
     -- is the same expression)
-    firstCopy = Map.fromListWith (\_ a -> a) [(k, u) | u <- allNodes region, Just k <- [lookupUse u]]
-    lookupUse u = Map.lookup (nodeIndex u) uses
+    firstCopy = Map.fromListWith (\_ a -> a) [(k, u) | u <- allNodes region, Just k <- [groupOf u]]
     inner k = case Map.lookup k firstCopy of
-      Just (AnnoS _ _ e) -> Set.fromList [k' | c <- childrenOf e, u <- allNodes c, Just k' <- [lookupUse u]]
+      Just (AnnoS _ _ e) -> Set.fromList [k' | c <- childrenOf e, u <- allNodes c, Just k' <- [groupOf u]]
       Nothing -> Set.empty
-    keys = Set.toList (Set.fromList (Map.elems uses))
+    keys = Map.keys firstCopy
     innerOf = Map.fromList [(k, inner k) | k <- keys]
     order = topo keys
     -- a group is placed once no unplaced group uses it; groups that use
@@ -239,12 +232,17 @@ placeGroups _ groupOf region
     bindCopies k node@(AnnoS (Idx gi tNode) ci _) =
       case copiesUnder k node of
         [] -> return node
-        cs@(rhs@(AnnoS (Idx _ tx) _ _) : _)
+        cs@(rhs0@(AnnoS (Idx gr tx) cr er) : _)
           -- a recursive call in a copy must stay under the term it calls
           | any (escapes node) cs -> return node
           | otherwise -> do
-              x <- freshName rhs
+              x <- freshName rhs0
               node' <- replaceNodesM (isUse k) (bndFor x) node
+              -- the binding keeps the placement node's index, which is the
+              -- copy's own when the group is placed at its copy, so the
+              -- right-hand side takes a fresh one
+              gr' <- plainIndex gr
+              let rhs = AnnoS (Idx gr' tx) cr er
               gBody <- plainIndex gi
               cBody <- plainIndex ci
               gLam <- plainIndex gi

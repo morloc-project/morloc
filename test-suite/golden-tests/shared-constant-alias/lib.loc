@@ -1,0 +1,14 @@
+-- The imported constant of imported.loc.
+
+module lib (flag)
+
+import root-py
+
+source Py from "helpers.py" ("note")
+note :: Str -> (Int, Int) -> (Int, Int)
+
+fin :: (Int, Int) -> Bool
+fin r = 0 == .0 r
+
+flag :: Bool
+flag = fin (note "g" (0, 0))

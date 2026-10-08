@@ -32,7 +32,7 @@ import qualified Data.Set as Set
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
 import Morloc.CodeGenerator.EffectBoundary (checkEffectBoundaries, insertEffectBoundaries)
-import Morloc.CodeGenerator.Emit (TranslateFn, emit, pool)
+import Morloc.CodeGenerator.Emit (TranslateFn, checkManifoldIds, emit, pool)
 import Morloc.CodeGenerator.StaticArgs (specializeStaticArgs)
 import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps, addLoopWraps, addNativeRecEntries, etaReduceForwarders)
 import Morloc.CodeGenerator.LambdaEval (applyLambdas)
@@ -141,7 +141,7 @@ lowerPools rASTs = do
     >>= mapM segment |>> concat
     >>= mapM serialize
     >>= mapM reduce
-      |>> pool reg
+    >>= (\ms -> checkManifoldIds reg ms >> return (pool reg ms))
 
 -- | Express a root. A root of function type is called with every input of
 -- its type (the nexus sends a command's arguments by its type), so its

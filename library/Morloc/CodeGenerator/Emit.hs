@@ -10,6 +10,7 @@ Maintainer  : z@morloc.io
 -}
 module Morloc.CodeGenerator.Emit
   ( pool
+  , checkManifoldIds
   , emit
   , TranslateFn
   ) where
@@ -18,6 +19,8 @@ import Morloc.CodeGenerator.Grammars.Common (invertSerialManifold)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.LangRegistry as LR
+import Morloc.Data.Doc (pretty, (<+>))
+import Morloc.Monad (runIdentity)
 import qualified Morloc.Monad as MM
 
 {- | Callback type for language-specific translation.
@@ -34,6 +37,25 @@ pool reg es =
   let (langs, indexedSegments) = unzip . groupSort . map (\x@(SerialManifold i lang _ _ _) -> (LR.poolOf reg lang, (i, x))) $ es
       uniqueSegments = map (Map.elems . Map.fromList) indexedSegments
    in zip langs uniqueSegments
+
+-- | A pool defines each manifold, nested ones included, under its id, and
+-- 'pool' keeps one segment per id, so two different manifolds with one id in
+-- one pool would leave a caller running the other.
+checkManifoldIds :: LR.LangRegistry -> [SerialManifold] -> MorlocMonad ()
+checkManifoldIds reg ms =
+  case [i | ((_, i), ds) <- Map.toList byId, length (nubOrd ds) > 1] of
+    [] -> return ()
+    (i : _) -> MM.throwCompilerBug $ "two different manifolds in one pool share the id" <+> pretty i
+  where
+    byId = Map.fromListWith (<>) [((LR.poolOf reg lang, i), [d]) | (i, lang, d) <- concatMap defs ms]
+    defs = runIdentity . foldWithSerialManifoldM ops
+    ops =
+      defaultValue
+        { opFoldWithSerialManifoldM = \m full@(SerialManifold_ i lang _ _ _) ->
+            return ((i, lang, show m) : foldlSM mappend mempty full)
+        , opFoldWithNativeManifoldM = \m full@(NativeManifold_ i lang _ _) ->
+            return ((i, lang, show m) : foldlNM mappend mempty full)
+        }
 
 -- | Translate a pool of serialized manifolds to target language source code
 emit ::
