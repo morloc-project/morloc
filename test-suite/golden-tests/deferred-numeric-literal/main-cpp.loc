@@ -1,0 +1,23 @@
+-- The program of main-py.loc in C++.
+
+module main (x, y, z)
+
+import root-cpp
+
+pair :: a -> a -> (a, a)
+pair a b = (a, b)
+
+wrap :: Int -> ?Int
+wrap q = q
+
+toR :: Int -> Real
+toR q = 1.5
+
+x :: Int -> (?Int, ?Int)
+x n = pair 7 (wrap n)
+
+y :: Int -> (Real, Real)
+y n = pair 7 (toR n)
+
+z :: Int -> (?Int, ?Int)
+z n = pair 7 Null

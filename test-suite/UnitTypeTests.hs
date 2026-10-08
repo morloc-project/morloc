@@ -1463,6 +1463,35 @@ pendingNumLitTests =
         |]
           (var "I8")
 
+      -- ----- A later argument that is itself an application pins the literal -----
+      , assertGeneralType
+          "int literal adopts Real from a later applied argument"
+          [r|
+        module main (x)
+        pair :: a -> a -> (a, a)
+        toR :: Int -> Real
+        x = pair 7 (toR 1)
+        |]
+          (tuple [real, real])
+      , assertGeneralType
+          "int literal adopts ?Int from a later applied argument"
+          [r|
+        module main (x)
+        pair :: a -> a -> (a, a)
+        wrap :: Int -> ?Int
+        x = pair 7 (wrap 1)
+        |]
+          (tuple [OptionalU int, OptionalU int])
+      , assertGeneralType
+          "int literal before an applied Int argument stays Int"
+          [r|
+        module main (x)
+        pair :: a -> a -> (a, a)
+        inc :: Int -> Int
+        x = pair 7 (inc 1)
+        |]
+          (tuple [int, int])
+
       -- ----- Negative: numeric literal in a non-numeric slot fails -----
       , exprTestBad
           "int literal in Bool slot rejected"

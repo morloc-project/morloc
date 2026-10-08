@@ -200,7 +200,7 @@ typecheckWith expected = run
       insetSay "g1:"
       seeGamma g1
       insetSay "========================================================"
-      let e2 = mapAnnoSG (fmap normalizeType) . applyGen g1 $ e1
+      e2 <- coerceLiteralsToOptional . mapAnnoSG (fmap normalizeType) . applyGen g1 $ e1
 
       (g2, e3) <- resolveInstances g1 e2
       let g3 = apply g2 g2
@@ -1975,6 +1975,20 @@ checkIntrinsicArgs i g intr argTypes = do
         (IntrLang, []) -> return g
         _ -> return g
 
+-- | A numeric literal whose type was deferred and later resolved to an
+-- optional is coerced to it, as a literal checked against that optional is.
+coerceLiteralsToOptional ::
+  AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) ManyPoly Int)
+coerceLiteralsToOptional (AnnoS (Idx i t) c e) = case (t, e) of
+  (OptionalU inner, IntS {}) -> wrap inner
+  (OptionalU inner, RealS {}) -> wrap inner
+  _ -> AnnoS (Idx i t) c <$> mapExprSM coerceLiteralsToOptional e
+  where
+    wrap inner = do
+      idx <- MM.getCounterWithPos i
+      lit <- coerceLiteralsToOptional (AnnoS (Idx idx inner) i e)
+      return (AnnoS (Idx i t) c (CoerceS CoerceToOptional lit))
+
 etaExpandSynthE ::
   Int ->
   Gamma ->
@@ -2010,8 +2024,12 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
   -- existentials. Resolving here pins the existential to a concrete
   -- numeric type (or to whatever a sibling arg already pinned it to)
   -- so the propagated return type is correct and instance resolution
-  -- can dispatch later.
-  g2 <- resolvePendingNumLits g2raw (gammaPendingNumLits g2raw)
+  -- can dispatch later. Only the literals this application registered are
+  -- resolved: an enclosing application's literal may still be pinned by a
+  -- later argument of that application.
+  let before = Set.fromList (gammaPendingNumLits g1)
+      own = filter (`Set.notMember` before) (gammaPendingNumLits g2raw)
+  g2 <- resolvePendingNumLits g2raw own
 
   MM.sayVVV $
     "  funType1:" <+> pretty funType1

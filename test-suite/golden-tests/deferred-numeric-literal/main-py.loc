@@ -1,0 +1,26 @@
+-- A numeric literal passed where a type variable is still unsolved takes the
+-- type a later argument gives that variable, even when the later argument is
+-- itself an application. At an optional type the literal is converted to
+-- the optional, as a literal written against that type is.
+
+module main (x, y, z)
+
+import root-py
+
+pair :: a -> a -> (a, a)
+pair a b = (a, b)
+
+wrap :: Int -> ?Int
+wrap q = q
+
+toR :: Int -> Real
+toR q = 1.5
+
+x :: Int -> (?Int, ?Int)
+x n = pair 7 (wrap n)
+
+y :: Int -> (Real, Real)
+y n = pair 7 (toR n)
+
+z :: Int -> (?Int, ?Int)
+z n = pair 7 Null
