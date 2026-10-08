@@ -12,11 +12,15 @@ nexus (one per program run, or one long-running daemon / MCP server)
 ```
 
 - The nexus creates the shared-memory namespace (volumes and the stream
-  registry) and is its only owner: only it unlinks the names.
+  registry) and is its only owner: only it unlinks the names while it
+  runs. Once a killed nexus's pools have ended, their reapers remove
+  them (DAEMON-13).
 - Every process maps the same volumes. A relative pointer names a block by
   volume index and offset, so it means the same block in every process.
 - A pool exits when its nexus does: it watches a lifeline pipe whose write
   end only the nexus holds.
+- A pool's workers end when its main process does: the nexus kills the
+  pool's group as it reaps the pool (DAEMON-14).
 
 ## Threads
 

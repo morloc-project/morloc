@@ -80,6 +80,16 @@ impl ChildGroups {
         });
     }
 
+    // DAEMON-14: callable from a signal handler.
+    pub fn kill_group(&self, pgid: libc::pid_t) {
+        masked(|_| {
+            for i in 0..SLOTS {
+                if self.slots[i].load(Ordering::SeqCst) & PGID == pgid {
+                    self.signal_slot(i, libc::SIGKILL);
+                }
+            }
+        });
+    }
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
     }
@@ -204,6 +214,27 @@ mod tests {
         let r = groups.add(later).unwrap();
         assert!(killed(later));
         drop(r);
+    }
+
+    #[test]
+    fn killing_a_group_by_its_id_goes_through_its_slot() {
+        let groups = ChildGroups::new();
+        let (a, b) = (sleeper_group(), sleeper_group());
+        let (ra, rb) = (groups.add(a).unwrap(), groups.add(b).unwrap());
+        groups.kill_group(a);
+        groups.kill_group(a);
+        groups.kill_group(i32::MAX & PGID);
+        let a_slot = groups.slots[ra.slot].load(Ordering::SeqCst);
+        let b_slot = groups.slots[rb.slot].load(Ordering::SeqCst);
+        rb.signal(libc::SIGKILL);
+        if a_slot != a | DEAD {
+            ra.signal(libc::SIGKILL);
+        }
+        assert!(killed(b));
+        assert_eq!(a_slot, a | DEAD, "the killed group's slot is not dead");
+        assert!(killed(a));
+        assert_eq!(b_slot, b, "another group's slot changed");
+        drop((ra, rb));
     }
 
     #[test]

@@ -405,6 +405,20 @@ static PIDS: [AtomicI32; MAX_DAEMONS] = {
     [INIT; MAX_DAEMONS]
 };
 
+// DAEMON-14: written before the pool's pid is published in PIDS.
+static POOL_PGIDS: [AtomicI32; MAX_DAEMONS] = {
+    const INIT: AtomicI32 = AtomicI32::new(0);
+    [INIT; MAX_DAEMONS]
+};
+
+// DAEMON-14
+fn kill_pool_group(i: usize) {
+    let pgid = POOL_PGIDS[i].load(Ordering::SeqCst);
+    if pgid > 0 {
+        POOL_GROUPS.kill_group(pgid);
+    }
+}
+
 /// The name a pool's pin runs under.
 pub const POOL_PIN_NAME: &str = "morloc-pool-pin";
 
@@ -1207,7 +1221,7 @@ pub fn setup_sockets(pools: &[Pool], tmpdir: &str, shm_basename: &str) -> Vec<Po
 /// nexus's RPC handler. The resulting stream on the wire may be
 /// corrupted -- the runtime cannot police fd sharing across pools
 /// and the nexus. Documented, not enforced.
-fn start_language_server(socket: &PoolSocket) -> Result<(i32, PoolPin), String> {
+fn start_language_server(socket: &PoolSocket) -> Result<(i32, libc::pid_t, PoolPin), String> {
     extern "C" {
         fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const libc::c_char;
     }
@@ -1250,6 +1264,11 @@ fn start_language_server(socket: &PoolSocket) -> Result<(i32, PoolPin), String> 
         .add(pin_pid)
         .ok_or_else(|| format!("cannot start pool '{}': too many process groups", socket.lang))?;
     let pinned = PoolPin { group, _pin: pin };
+    // DAEMON-13: recorded before anything in the group can make shared memory.
+    if let Some(dir) = RUN_TMPDIR.get() {
+        std::fs::write(std::path::Path::new(dir).join(format!("{GROUP_FILE_PREFIX}{pin_pid}")), "")
+            .map_err(|e| format!("cannot start pool '{}': cannot record its process group in {dir}: {e}", socket.lang))?;
+    }
     let started = pinned.group.while_held(|mask| {
         let mut spawn = morloc_runtime_types::spawn::Spawn::new()?;
         spawn.join_process_group(pin_pid)?;
@@ -1260,7 +1279,7 @@ fn start_language_server(socket: &PoolSocket) -> Result<(i32, PoolPin), String> 
         spawn.run(&program, &argv, &envp, false)
     });
     match started {
-        Some(Ok(pid)) => Ok((pid, pinned)),
+        Some(Ok(pid)) => Ok((pid, pin_pid, pinned)),
         Some(Err(e)) => Err(fail(e)),
         None => Err(format!("cannot start pool '{}': the pools are stopping", socket.lang)),
     }
@@ -1330,8 +1349,9 @@ pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<()
     }
     for &idx in indices {
         let since = unsafe { morloc_reaped_sequence() };
-        let (pid, pin) = start_language_server(&sockets[idx])?;
+        let (pid, pgid, pin) = start_language_server(&sockets[idx])?;
         pool_pins()[idx] = Some(pin);
+        POOL_PGIDS[idx].store(pgid, Ordering::SeqCst);
         #[cfg(test)]
         std::thread::sleep(Duration::from_millis(SPAWN_TO_RECORD_DELAY_MS.load(Ordering::Relaxed)));
         sockets[idx].pid = pid;
@@ -1348,6 +1368,7 @@ pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<()
         SPAWNED_PIDS[idx].store(pid, Ordering::Relaxed);
         let mut status = 0;
         if unsafe { morloc_take_noted_child_exit(pid, since, &mut status) } == 1 {
+            kill_pool_group(idx);
             EXIT_STATUSES[idx].store(status, Ordering::Relaxed);
             PIDS[idx].store(-1, Ordering::SeqCst);
         }
@@ -1601,6 +1622,9 @@ fn reap(in_handler: bool) {
             POOL_GROUPS.leader_exited(pid);
             crate::mcp::FRONTEND_EVALS.leader_exited(pid);
             unsafe { morloc_child_group_leader_exited(pid) };
+            if let Some(i) = (0..MAX_DAEMONS).find(|&i| PIDS[i].load(Ordering::SeqCst) == pid) {
+                kill_pool_group(i);
+            }
             let mut status: libc::c_int = 0;
             if unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } != pid {
                 continue;
@@ -1802,24 +1826,93 @@ pub fn cleanup_stale_shm() {
         if !meta.is_dir() || meta.uid() != euid || meta.mode() & 0o777 != 0o700 {
             continue;
         }
-        let Ok(record) = std::fs::read_to_string(dir.join(OWNER_FILE)) else { continue };
-        let f: Vec<&str> = record.split_whitespace().collect();
-        let [pid, start, owner_boot, owner_ns] = f.as_slice() else { continue };
-        let (Ok(pid), Ok(start)) = (pid.parse::<u32>(), start.parse::<u64>()) else { continue };
-        if ns.as_deref() != Some(*owner_ns) {
-            continue;
-        }
-        let other_boot = boot.as_deref().is_some_and(|b| b != *owner_boot);
-        if other_boot || !proc_info::alive(pid, start) {
-            unlink_marked_segments(&dir);
-            // FORK-16: a temp root kept outside the run directory goes with it.
-            if let Ok(temps) = std::fs::read_to_string(dir.join(TEMPS_FILE)) {
-                let _ = std::fs::remove_dir_all(temps.trim_end());
-            }
-            let _ = std::fs::remove_dir_all(&dir);
-        }
+        sweep_run_if_dead(&dir, boot.as_deref(), ns.as_deref());
     }
 }
+
+// DAEMON-13
+fn sweep_run_if_dead(dir: &std::path::Path, boot: Option<&str>, ns: Option<&str>) -> bool {
+    let Ok(record) = std::fs::read_to_string(dir.join(OWNER_FILE)) else { return false };
+    let f: Vec<&str> = record.split_whitespace().collect();
+    let [pid, start, owner_boot, owner_ns] = f.as_slice() else { return false };
+    let (Ok(pid), Ok(start)) = (pid.parse::<u32>(), start.parse::<u64>()) else { return false };
+    if ns != Some(*owner_ns) {
+        return false;
+    }
+    let other_boot = boot.is_some_and(|b| b != *owner_boot);
+    if !(other_boot || !proc_info::alive(pid, start)) {
+        return false;
+    }
+    // DAEMON-13: groups of another boot are gone.
+    if !other_boot && recorded_group_running(dir) {
+        return false;
+    }
+    unlink_marked_segments(dir);
+    // FORK-16: a temp root kept outside the run directory goes with it.
+    if let Ok(temps) = std::fs::read_to_string(dir.join(TEMPS_FILE)) {
+        let _ = std::fs::remove_dir_all(temps.trim_end());
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    true
+}
+
+// DAEMON-13
+fn recorded_group_running(dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return dir.exists() };
+    entries.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .and_then(|f| f.strip_prefix(GROUP_FILE_PREFIX))
+            .and_then(|g| g.parse::<libc::pid_t>().ok())
+            .is_some_and(proc_info::group_running)
+    })
+}
+
+// DAEMON-13
+pub fn sweep_dead_run(dir: &std::path::Path) -> bool {
+    sweep_run_if_dead(dir, proc_info::boot_id().as_deref(), proc_info::pid_namespace().as_deref())
+}
+
+// DAEMON-13
+pub fn run_dir_of(nexus_pid: u32, nexus_start: u64) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir("/tmp").ok()?;
+    entries.flatten().map(|e| e.path()).find(|dir| {
+        let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        name.starts_with("morloc.")
+            && std::fs::read_to_string(dir.join(OWNER_FILE)).is_ok_and(|record| {
+                let f: Vec<&str> = record.split_whitespace().collect();
+                f.first().and_then(|p| p.parse::<u32>().ok()) == Some(nexus_pid)
+                    && f.get(1).and_then(|t| t.parse::<u64>().ok()) == Some(nexus_start)
+            })
+    })
+}
+
+// DAEMON-13
+const GROUP_FILE_PREFIX: &str = ".group-";
+
+// DAEMON-13
+pub fn sweep_after(target: libc::pid_t, run_dir: Option<&std::path::Path>) {
+    let ended = || {
+        if target < 0 {
+            !proc_info::group_running(-target)
+        } else {
+            !proc_info::alive(target as u32, 0)
+        }
+    };
+    let until = std::time::Instant::now() + REAP_LIMIT;
+    while !ended() {
+        if std::time::Instant::now() >= until {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if let Some(dir) = run_dir {
+        sweep_dead_run(dir);
+    }
+}
+
+// DAEMON-13
+const REAP_LIMIT: Duration = Duration::from_secs(10);
 
 /// The run directory's record of its owner: pid, start stamp, boot and PID
 /// namespace.
@@ -1999,6 +2092,91 @@ mod tests {
         assert!(gone_ok, "a dead run's directory or object survived");
         assert!(reboot_ok, "a run from another boot survived");
         assert!(foreign_ok, "a run from another PID namespace was removed");
+    }
+
+    fn dead_pid() -> u32 {
+        unsafe {
+            let pid = libc::fork();
+            if pid == 0 {
+                libc::_exit(0);
+            }
+            libc::waitpid(pid, std::ptr::null_mut(), 0);
+            pid as u32
+        }
+    }
+
+    fn dead_run(tag: &str) -> (std::path::PathBuf, CString) {
+        let boot = proc_info::boot_id().unwrap();
+        let ns = proc_info::pid_namespace().unwrap();
+        fake_run(&format!("{} 0 {boot} {ns}", dead_pid()), tag)
+    }
+
+    fn start_group(script: &str) -> libc::pid_t {
+        let sh = CString::new("/bin/sh").unwrap();
+        let flag = CString::new("-c").unwrap();
+        let script = CString::new(script).unwrap();
+        let argv = [sh.as_ptr(), flag.as_ptr(), script.as_ptr(), std::ptr::null()];
+        let mut spawn = morloc_runtime_types::spawn::Spawn::new().unwrap();
+        spawn.new_process_group().unwrap();
+        spawn.run(&sh, &argv, &[std::ptr::null()], false).unwrap()
+    }
+
+    fn record_group(dir: &std::path::Path, pgid: libc::pid_t) {
+        std::fs::write(dir.join(format!("{GROUP_FILE_PREFIX}{pgid}")), "").unwrap();
+    }
+
+    #[test]
+    fn a_run_is_found_by_its_owners_pid_and_start() {
+        let (dir, name) = fake_run("4000001 777 boot ns", "aaaaaab3");
+        let found = run_dir_of(4000001, 777);
+        let other_start = run_dir_of(4000001, 778);
+        unsafe { libc::shm_unlink(name.as_ptr()) };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found, Some(dir));
+        assert_eq!(other_start, None, "a run of another process with the pid was found");
+    }
+
+    #[test]
+    fn a_dead_run_is_swept_only_once_its_recorded_groups_have_ended() {
+        let (dir, name) = dead_run("aaaaaab1");
+        let pgid = start_group("exec sleep 30");
+        record_group(&dir, pgid);
+        let swept_while_running = sweep_dead_run(&dir);
+        cleanup_stale_shm();
+        let kept = dir.exists() && object_exists(&name);
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+            libc::waitpid(pgid, std::ptr::null_mut(), 0);
+        }
+        let swept = sweep_dead_run(&dir);
+        let removed = !dir.exists() && !object_exists(&name);
+        unsafe { libc::shm_unlink(name.as_ptr()) };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!swept_while_running && kept, "a dead run was swept while a recorded group ran");
+        assert!(swept && removed, "a dead run whose groups ended was not swept");
+    }
+
+    #[test]
+    fn the_sweeper_waits_for_a_group_to_end_then_sweeps_its_dead_run() {
+        let (dir, name) = dead_run("aaaaaab2");
+        let pgid = start_group("sleep 30 & sleep 30 & wait");
+        record_group(&dir, pgid);
+        let sweeper = {
+            let dir = dir.clone();
+            std::thread::spawn(move || sweep_after(-pgid, Some(&dir)))
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        let kept_while_running = dir.exists() && object_exists(&name);
+        unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        sweeper.join().unwrap();
+        let removed = !dir.exists() && !object_exists(&name);
+        unsafe {
+            libc::waitpid(pgid, std::ptr::null_mut(), 0);
+            libc::shm_unlink(name.as_ptr());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(kept_while_running, "the sweeper swept while its group ran");
+        assert!(removed, "the sweeper left the dead run's shared memory");
     }
 
     #[test]

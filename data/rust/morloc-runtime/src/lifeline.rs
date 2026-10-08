@@ -74,6 +74,11 @@ impl Lifeline {
             // SAFETY: getpgrp cannot fail.
             unsafe { libc::getpgrp() },
         );
+        // DAEMON-13: last, as a path may hold ':'; only a nexus runs the sweeper.
+        let token = match std::env::current_exe() {
+            Ok(exe) if exe.file_name().is_some_and(|n| n == "morloc-nexus") => format!("{token}:{}", exe.display()),
+            _ => token,
+        };
         // The write end stays open for the life of the process.
         Ok(Lifeline { read_fd: fds[0], write_fd: fds[1], token })
     }
@@ -114,6 +119,10 @@ pub struct Adopted {
     pub fd: i32,
     /// The process group of the nexus that holds the write end.
     pub nexus_pgid: i32,
+    pub nexus_pid: u32,
+    pub nexus_start: u64,
+    // DAEMON-13
+    pub nexus_exe: Option<&'static str>,
 }
 
 /// Check `token` against this process. The descriptor must be the pipe the
@@ -128,8 +137,11 @@ fn validate(token: &str) -> Option<Adopted> {
 }
 
 fn validate_with(token: &str, snapshot: impl Fn(u32) -> Option<process::Snapshot>) -> Option<Adopted> {
-    let f: Vec<&str> = token.split(':').collect();
-    let [fd, dev, ino, pid, start, pgid] = f.as_slice() else { return None };
+    let f: Vec<&str> = token.splitn(7, ':').collect();
+    let (fd, dev, ino, pid, start, pgid) = match f.as_slice() {
+        [fd, dev, ino, pid, start, pgid] | [fd, dev, ino, pid, start, pgid, _] => (fd, dev, ino, pid, start, pgid),
+        _ => return None,
+    };
     let fd: i32 = fd.parse().ok()?;
     let identity = (dev.parse().ok()?, ino.parse().ok()?);
     let pid: i32 = pid.parse().ok()?;
@@ -144,7 +156,9 @@ fn validate_with(token: &str, snapshot: impl Fn(u32) -> Option<process::Snapshot
         Some(_) => at_end(fd),
         None => !process::alive(pid as u32, 0) && at_end(fd),
     };
-    ours.then_some(Adopted { fd, nexus_pgid })
+    // DAEMON-13: leaked once per adopted lifeline, to keep Adopted Copy.
+    let nexus_exe = f.get(6).filter(|e| !e.is_empty()).map(|e| &*Box::leak(e.to_string().into_boxed_str()));
+    ours.then_some(Adopted { fd, nexus_pgid, nexus_pid: pid as u32, nexus_start: start, nexus_exe })
 }
 
 static ADOPTED: PublishOnce<Option<Adopted>> = PublishOnce::new();
@@ -171,7 +185,7 @@ pub fn guard() {
     WATCHING.get_or_init_then(|| (), |_| {
         spawn_masked(move || {
             if wait_for_end(a.fd) {
-                teardown(a.nexus_pgid, GRACE);
+                teardown(&a, GRACE);
             }
         });
     });
@@ -219,10 +233,14 @@ fn spawn_masked(f: impl FnOnce() + Send + 'static) {
 /// arranges for pools), otherwise this process alone. A spawned reaper sends
 /// SIGTERM, waits `grace`, then sends SIGKILL; it ignores the SIGTERM it
 /// sends, so the escalation happens even after this process has exited.
-pub fn teardown(nexus_pgid: i32, grace: Duration) {
+pub fn teardown(nexus: &Adopted, grace: Duration) {
+    let nexus_pgid = nexus.nexus_pgid;
     // SAFETY: getpgrp and getpid cannot fail.
     let group = unsafe { libc::getpgrp() };
     let target = if group != nexus_pgid { -group } else { unsafe { libc::getpid() } };
+    if let Some(exe) = nexus.nexus_exe {
+        let _ = spawn_sweeper(exe, target, nexus.nexus_pid, nexus.nexus_start);
+    }
     let script = "trap '' TERM; kill -s TERM -- \"$1\"; sleep \"$2\"; kill -s KILL -- \"$1\"";
     let args: Vec<CString> = [
         "sh".to_string(),
@@ -244,6 +262,25 @@ pub fn teardown(nexus_pgid: i32, grace: Duration) {
         // SAFETY: kill takes plain integers.
         unsafe { libc::kill(target, libc::SIGTERM) };
     }
+}
+
+// DAEMON-13: in a group of its own, so the SIGKILL sent to `target` does not end it.
+fn spawn_sweeper(nexus_exe: &str, target: i32, nexus_pid: u32, nexus_start: u64) -> std::io::Result<libc::pid_t> {
+    let args = [
+        "morloc-nexus".to_string(),
+        "sweep-run".to_string(),
+        target.to_string(),
+        nexus_pid.to_string(),
+        nexus_start.to_string(),
+    ];
+    let args: Vec<CString> = args.into_iter().map(CString::new).collect::<Result<_, _>>()?;
+    let argv: Vec<*const libc::c_char> =
+        args.iter().map(|a| a.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
+    let exe = CString::new(nexus_exe)?;
+    let (_env, envp) = morloc_runtime_types::spawn::current_environment();
+    let mut spawn = morloc_runtime_types::spawn::Spawn::new()?;
+    spawn.new_process_group()?;
+    spawn.run(&exe, &argv, &envp, false)
 }
 
 /// The nexus side, for a child it starts: `MORLOC_LIFELINE=<token>` for the
@@ -280,7 +317,7 @@ pub(crate) fn morloc_lifeline_guard() {
 /// watched itself has reached end of file. Does nothing if none was adopted.
 pub(crate) fn morloc_lifeline_teardown() {
     if let Some(a) = ADOPTED.get().copied().flatten() {
-        teardown(a.nexus_pgid, GRACE);
+        teardown(&a, GRACE);
     }
 }
 
@@ -333,6 +370,34 @@ mod tests {
             out.extend_from_slice(&buf[..k as usize]);
         }
         out
+    }
+
+    #[test]
+    fn the_teardown_sweeper_runs_outside_the_group_it_waits_for() {
+        let dir = std::env::temp_dir().join(format!("morloc-sweeper-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("fake-nexus");
+        let out = dir.join("out");
+        std::fs::write(&exe, format!("#!/bin/sh\necho \"$* $(ps -o pgid= -p $$)\" > {}.tmp; mv {}.tmp {}\n", out.display(), out.display(), out.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pid = spawn_sweeper(exe.to_str().unwrap(), -12345, 678, 9012);
+        let mut seen = String::new();
+        for _ in 0..500 {
+            if let Ok(s) = std::fs::read_to_string(&out) {
+                seen = s;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Ok(pid) = pid {
+            exit_code(pid);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let fields: Vec<&str> = seen.split_whitespace().collect();
+        assert_eq!(fields.get(..4), Some(&["sweep-run", "-12345", "678", "9012"][..]), "sweeper ran as {seen:?}");
+        let pgid: i32 = fields[4].parse().unwrap();
+        assert_ne!(pgid, unsafe { libc::getpgrp() }, "the sweeper is in the group it waits for");
     }
 
     #[test]

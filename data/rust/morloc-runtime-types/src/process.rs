@@ -16,6 +16,7 @@ pub struct Snapshot {
     /// nothing and holds no descriptors or locks.
     pub exited: bool,
     pub parent: u32,
+    pub group: u32,
 }
 
 /// The process table's entry for `pid`, or `None` when there is none or it
@@ -34,12 +35,13 @@ fn parse_linux_stat(stat: &str) -> Option<Snapshot> {
     let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
     let state = *fields.first()?;
     let parent = fields.get(1)?.parse().ok()?;
+    let group = fields.get(2)?.parse().ok()?;
     let threads: u64 = fields.get(17)?.parse().ok()?;
     let start: u64 = fields.get(19)?.parse().ok()?;
     // A leader that exits while its other threads run also reads Z; the
     // process is gone only once no thread remains.
     let exited = state == "Z" && threads <= 1;
-    Some(Snapshot { start: start.max(1), exited, parent })
+    Some(Snapshot { start: start.max(1), exited, parent, group })
 }
 
 #[cfg(target_vendor = "apple")]
@@ -61,7 +63,12 @@ pub fn snapshot(pid: u32) -> Option<Snapshot> {
         return None;
     }
     let start = info.pbi_start_tvsec.wrapping_mul(1_000_000).wrapping_add(info.pbi_start_tvusec);
-    Some(Snapshot { start: start.max(1), exited: info.pbi_status == libc::SZOMB, parent: info.pbi_ppid })
+    Some(Snapshot {
+        start: start.max(1),
+        exited: info.pbi_status == libc::SZOMB,
+        parent: info.pbi_ppid,
+        group: info.pbi_pgid,
+    })
 }
 
 #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
@@ -186,6 +193,61 @@ pub fn token_alive(token: u64) -> bool {
     }
 }
 
+/// Whether any member of process group `pgid` may still be running. A
+/// member that has exited and awaits reaping runs nothing and does not count.
+/// Anything this cannot establish counts as running.
+pub fn group_running(pgid: libc::pid_t) -> bool {
+    let Ok(group) = u32::try_from(pgid) else { return true };
+    match group_members(pgid) {
+        Some(pids) => pids.into_iter().any(|pid| match snapshot(pid) {
+            Some(s) => s.group == group && !s.exited,
+            // Listed by group on macOS; on Linux every process is listed,
+            // and one without an entry has gone.
+            None => cfg!(target_vendor = "apple") && kill_finds(pid),
+        }),
+        None => true,
+    }
+}
+
+/// Whether `pid` names a process, whatever its state.
+fn kill_finds(pid: u32) -> bool {
+    // SAFETY: signal 0 performs only the existence and permission check.
+    let found = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+    found || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Every pid that may belong to group `pgid`, or `None` when the process
+/// table cannot be read.
+#[cfg(target_os = "linux")]
+fn group_members(_pgid: libc::pid_t) -> Option<Vec<u32>> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    Some(entries.flatten().filter_map(|e| e.file_name().to_str()?.parse().ok()).collect())
+}
+
+#[cfg(target_vendor = "apple")]
+fn group_members(pgid: libc::pid_t) -> Option<Vec<u32>> {
+    const PROC_PGRP_ONLY: u32 = 2;
+    let mut pids: Vec<libc::c_int> = vec![0; 1024];
+    loop {
+        let bytes = (pids.len() * std::mem::size_of::<libc::c_int>()) as libc::c_int;
+        // SAFETY: `pids` is a writable buffer of `bytes` bytes.
+        let n = unsafe { libc::proc_listpids(PROC_PGRP_ONLY, pgid as u32, pids.as_mut_ptr() as *mut libc::c_void, bytes) };
+        if n < 0 {
+            return None;
+        }
+        let count = n as usize / std::mem::size_of::<libc::c_int>();
+        if count < pids.len() {
+            return Some(pids[..count].iter().filter(|&&p| p > 0).map(|&p| p as u32).collect());
+        }
+        pids.resize(pids.len() * 2, 0);
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+fn group_members(_pgid: libc::pid_t) -> Option<Vec<u32>> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +270,38 @@ mod tests {
 
     fn reap(pid: libc::pid_t) {
         unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+    }
+
+    #[test]
+    fn a_group_runs_until_every_member_has_exited() {
+        let sh = std::ffi::CString::new("/bin/sh").unwrap();
+        let flag = std::ffi::CString::new("-c").unwrap();
+        let script = std::ffi::CString::new("sleep 30 & exec sleep 30").unwrap();
+        let argv = [sh.as_ptr(), flag.as_ptr(), script.as_ptr(), std::ptr::null()];
+        let mut spawn = crate::spawn::Spawn::new().unwrap();
+        spawn.new_process_group().unwrap();
+        let leader = spawn.run(&sh, &argv, &[std::ptr::null()], false).unwrap();
+        let wait_for = |want: bool| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while group_running(leader) != want && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            group_running(leader) == want
+        };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let running = group_running(leader);
+        unsafe {
+            libc::kill(leader, libc::SIGKILL);
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(libc::P_PID, leader as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT);
+        }
+        let member_keeps_it_running = group_running(leader);
+        unsafe { libc::kill(-leader, libc::SIGKILL) };
+        let ended = wait_for(false);
+        reap(leader);
+        assert!(running, "a running group reads as ended");
+        assert!(member_keeps_it_running, "a group whose leader exited reads as ended while a member runs");
+        assert!(ended, "a group whose members all exited reads as running");
     }
 
     #[test]
@@ -291,7 +385,7 @@ mod tests {
     fn stat_lines_are_read_from_the_last_parenthesis() {
         let line = "42 (a) b (c) Z 7 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 12345 0 0";
         let s = parse_linux_stat(line).unwrap();
-        assert_eq!(s, Snapshot { start: 12345, exited: true, parent: 7 });
+        assert_eq!(s, Snapshot { start: 12345, exited: true, parent: 7, group: 1 });
         let threaded = "42 (a) Z 7 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 3 0 12345 0 0";
         assert!(!parse_linux_stat(threaded).unwrap().exited);
     }

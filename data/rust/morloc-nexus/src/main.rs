@@ -108,6 +108,23 @@ fn main() {
         unsafe { morloc_install_panic_hook(Some(libmorloc_panic_exit)) };
     }
 
+    // `morloc-nexus sweep-run <target> <nexus pid> <nexus start>`: started
+    // by a pool's teardown (model/daemon.md DAEMON-13), never by a user.
+    if std::env::args().nth(1).as_deref() == Some("sweep-run") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        let (Some(target), Some(pid), Some(start)) = (
+            args.first().and_then(|a| a.parse::<libc::pid_t>().ok()),
+            args.get(1).and_then(|a| a.parse::<u32>().ok()),
+            args.get(2).and_then(|a| a.parse::<u64>().ok()),
+        ) else {
+            eprintln!("usage: morloc-nexus sweep-run <target> <nexus pid> <nexus start>");
+            std::process::exit(2);
+        };
+        unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) };
+        process::sweep_after(target, process::run_dir_of(pid, start).as_deref());
+        std::process::exit(0);
+    }
+
     // Top-level argv parse. [`cli::parse_invocation`] handles the
     // pre-scan for `@` separator (run mode), loads the manifest from
     // the wrapper target, and runs the augmented clap parse with

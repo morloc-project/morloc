@@ -6,7 +6,10 @@
 # hanging. Also checks for resource leaks.
 #
 # Usage: ./crash-recovery.sh <golden-test-dir> <call> [<call> ...] [-- iterations]
-#   e.g. ./crash-recovery.sh ../golden-tests/interop-3a-cp "foo '[1,2,3]'" -- 10
+#   e.g. ./crash-recovery.sh crash-workload "napCP 30" -- 10
+#
+# Each call must outlast the pool's startup by seconds: a call that returns
+# first leaves no pool to kill.
 
 source "$(dirname "$0")/common.sh"
 
@@ -21,6 +24,7 @@ done
 parse_args ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 
 MAX_WAIT_SECONDS=5
+POOL_WAIT_SECONDS=10
 
 echo "=== Crash Recovery Test ==="
 echo "Iterations: $ITERATIONS"
@@ -37,17 +41,22 @@ for i in $(seq 1 "$ITERATIONS"); do
     eval exec ./nexus $local_call 2>"$iter_err" > /dev/null &
     NEXUS_PID=$!
 
-    # Wait for pools to start
-    sleep 0.1
-
-    # Find and kill a pool child process
+    # Wait for a pool to start, then give it time to enter the call. The
+    # workload's calls sleep far longer than this, so the pool is killed
+    # mid-call.
     POOL_PID=""
-    for p in $(pgrep -P "$NEXUS_PID" 2>/dev/null); do
-        case "$(ps -o args= -p "$p")" in
-            morloc-pool-pin*) ;;
-            *) POOL_PID=$p; break ;;
-        esac
+    for _ in $(seq 1 "$((POOL_WAIT_SECONDS * 10))"); do
+        for p in $(pgrep -P "$NEXUS_PID" 2>/dev/null); do
+            case "$(ps -o args= -p "$p")" in
+                morloc-pool-pin*) ;;
+                *) POOL_PID=$p; break ;;
+            esac
+        done
+        [ -n "$POOL_PID" ] && break
+        kill -0 "$NEXUS_PID" 2>/dev/null || break
+        sleep 0.1
     done
+    sleep 0.5
 
     KILLED=0
     if [ -n "$POOL_PID" ] && kill -9 "$POOL_PID" 2>/dev/null; then

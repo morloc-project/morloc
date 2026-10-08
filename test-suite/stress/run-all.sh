@@ -47,6 +47,20 @@ workload_call() {
     esac
 }
 
+# crash-recovery kills a pool mid-call, so its calls must still be running
+# once every pool has started; these sleep in each pool of the combination.
+crash_call() {
+    case "$1" in
+        cpp)    echo "napC 30" ;;
+        py)     echo "napP 30" ;;
+        r)      echo "napR 30" ;;
+        cpp-py) echo "napCP 30" ;;
+        cpp-r)  echo "napCR 30" ;;
+        py-r)   echo "napPR 30" ;;
+        *)      echo "" ;;
+    esac
+}
+
 WORKLOAD_ORDER=(cpp py r cpp-py cpp-r py-r)
 
 # Restrict the language combinations swept, e.g.
@@ -80,9 +94,8 @@ run_test() {
     local test_script="$1"
     local test_name="$2"
     local workload="$3"
-    local dir call
-    dir=$(workload_dir "$workload")
-    call=$(workload_call "$workload")
+    local dir="${4:-$(workload_dir "$workload")}"
+    local call="${5:-$(workload_call "$workload")}"
 
     printf "%-20s %-8s ... " "$test_name" "[$workload]"
 
@@ -165,7 +178,8 @@ for workload in ${WORKLOAD_ORDER[@]+"${WORKLOAD_ORDER[@]}"}; do
         run_test "concurrent-stress.sh" "concurrent" "$workload"
     fi
     if should_run "crash"; then
-        run_test "crash-recovery.sh" "crash-recovery" "$workload"
+        run_test "crash-recovery.sh" "crash-recovery" "$workload" \
+            "$SCRIPT_DIR/crash-workload" "$(crash_call "$workload")"
     fi
     if should_run "valgrind"; then
         run_test "valgrind-check.sh" "valgrind" "$workload"

@@ -1,0 +1,31 @@
+module main (napC, napP, napR, napCP, napCR, napPR)
+
+type Py => Int = "int"
+type R => Int = "integer"
+type Cpp => Int = "int"
+
+source Cpp from "nap.hpp" ("cnap")
+source Py from "nap.py" ("pnap")
+source R from "nap.R" ("rnap")
+
+cnap :: Int -> Int
+pnap :: Int -> Int
+rnap :: Int -> Int
+
+napC :: Int -> Int
+napC n = cnap n
+
+napP :: Int -> Int
+napP n = pnap n
+
+napR :: Int -> Int
+napR n = rnap n
+
+napCP :: Int -> Int
+napCP n = cnap (pnap n)
+
+napCR :: Int -> Int
+napCR n = cnap (rnap n)
+
+napPR :: Int -> Int
+napPR n = pnap (rnap n)

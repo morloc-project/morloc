@@ -2915,6 +2915,14 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         0
     };
 
+    // Mint a call_id if the caller has not set one, before the slot is
+    // allocated and tagged with it, so the post-dispatch stdio reclaim
+    // (pool_reclaim_stdio_after_dispatch) can match this slot. The nexus
+    // dispatch always pre-sets a call_id, so this only fires in pool
+    // processes, and only when a stdio handle is opened.
+    if current_call_id() == CALL_ID_NO_SWEEP {
+        set_current_call_id(generate_call_id());
+    }
     let (slot_idx, slot, _guard) = allocate_slot_cas()?;
 
     // OStream stdio slots buffer writes through the same pipeline as
@@ -2976,15 +2984,6 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);
             slot.write_buffer_data_used.set(0);
-        }
-        // Lazily mint a call_id if the caller has not set one, so the
-        // post-dispatch stdio reclaim (pool_reclaim_stdio_after_dispatch)
-        // can match this slot. The nexus dispatch always pre-sets a
-        // call_id, so this only fires in pool processes -- and only when
-        // a stdio handle is actually opened, keeping the /dev/urandom
-        // read off the no-stdio dispatch hot path.
-        if current_call_id() == CALL_ID_NO_SWEEP {
-            set_current_call_id(generate_call_id());
         }
         let bump = registry_gen_salt() | 1;
         // wrapping_add: the generation is a wrapping counter masked to
@@ -12829,6 +12828,27 @@ mod tests {
         let h2 = open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, "")
             .expect("dead-owner @stdin claim should be reclaimed");
         close_handle(h2).unwrap();
+    }
+
+    /// A stdio claim opened in a pool dispatch with no call id set and left
+    /// open is released by the post-dispatch reclaim, so the next open
+    /// succeeds.
+    #[test]
+    fn stdio_claim_left_open_by_a_pool_dispatch_is_reclaimed() {
+        use std::sync::atomic::Ordering;
+        let _shm = crate::own_test_registry();
+        registry_init().unwrap();
+        let claim = stdio_claim_slot(STDIO_KIND_STDIN).expect("registry attached");
+        let prev = set_current_call_id(CALL_ID_NO_SWEEP);
+
+        let _leaked = open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, "").unwrap();
+        pool_reclaim_stdio_after_dispatch();
+        assert_eq!(claim.load(Ordering::Acquire), STDIO_UNCLAIMED, "the leaked claim was not reclaimed");
+
+        let h = open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, "")
+            .expect("@stdin should open after the reclaim");
+        close_handle(h).unwrap();
+        set_current_call_id(prev);
     }
 
     /// Trim a sub-packet's payload to its first `keep` bytes, as a writer

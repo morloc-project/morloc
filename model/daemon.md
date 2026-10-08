@@ -197,3 +197,55 @@ handler's, goes through the table; before the router reaps a daemon it
 marks the slot dead, so no signal reaches a pid the kernel has reissued.
 The status query counts an exited daemon as stopped even before it is
 reaped.
+
+### DAEMON-13 A run's shared memory is removed once the run has ended, however its nexus ended
+Status: implemented
+Checked by: tla:RunSweep, tla:RunSweep_no_wait.bug, tla:RunSweep_sweep_each.bug, tla:RunSweep_sweeper_in_group.bug, tla:RunSweep_startup_ignores_groups.bug, a_group_runs_until_every_member_has_exited, a_dead_run_is_swept_only_once_its_recorded_groups_have_ended, a_run_is_found_by_its_owners_pid_and_start, the_sweeper_waits_for_a_group_to_end_then_sweeps_its_dead_run, the_teardown_sweeper_runs_outside_the_group_it_waits_for
+
+The run directory holds a marker for every shared-memory object of the
+run, written before the object is made; a create whose marker cannot be
+written makes nothing. Before it starts a pool, the nexus records the
+pool's group in the run directory as `.group-<pgid>`, so once the nexus is
+gone every group of the run is recorded. A nexus that exits cleanly removes
+the names itself (DAEMON-5); one that is killed cannot, so its pools do.
+
+A pool that sees its lifeline end ends its group as before (SIGTERM, the
+grace period, SIGKILL) and also starts a sweeper, `morloc-nexus
+sweep-run`, in a process group of its own, so the SIGKILL does not reach
+it. The lifeline token names the nexus's executable, pid and start stamp;
+the sweeper finds the run as the directory whose owner record matches
+them. It waits until no member of the pool's group runs: a member killed
+in the middle of making an object finishes the system call before it dies.
+Then, if the run's owner is dead and no recorded group has a running
+member, it sweeps the run: every object a marker names, every marker, the
+run's temp root, and the directory. Groups only end, so the sweeper of the
+last group to end sees every group ended; two sweepers that both sweep do
+no harm. A process that is gone or awaits reaping runs nothing and counts
+as ended. A later nexus's startup sweep removes a dead run under the same
+condition. A sweeper whose group does not end within its limit (10 s),
+or that cannot be started, leaves the run to that startup sweep.
+
+Out of reach: a process that leaves its pool's group (setsid) escapes both
+the SIGKILL and the sweeper's wait, and an object it makes after the sweep is not
+removed; a group id reissued to a stranger's group that runs counts as
+running, so that run waits for a later startup sweep.
+
+### DAEMON-14 A pool's group ends when its pool process does
+Status: implemented
+Checked by: tla:PoolGroup, tla:PoolGroup_reap_only.bug, killing_a_group_by_its_id_goes_through_its_slot, golden:pool-main-death-ends-workers
+
+A pool is its main process together with every process in its group: the
+workers it forks (Python fork mode, R) and anything user code forks. A
+worker serves calls only for its pool, so none outlives it. When the
+reaper takes an exited pool process, whatever ended it and in every mode
+(a one-shot run, a daemon, an MCP server), it first sends SIGKILL to the
+pool's group through the group's slot (DAEMON-11). The kill is a slot
+signal like any other: callable from the SIGCHLD handler, refused once the
+group was killed, and it marks the slot dead. Every call the group was
+serving then fails, as its connection closes, and the nexus reports the
+pool's death. A one-shot run exits as failed; a daemon or MCP server
+answers the call as failed and recovers its pools (DAEMON-6).
+
+Out of reach: a group whose pin was killed from outside the nexus has a
+dead slot (DAEMON-11), so a worker of its pool runs until its call
+returns; workers do not watch the lifeline.

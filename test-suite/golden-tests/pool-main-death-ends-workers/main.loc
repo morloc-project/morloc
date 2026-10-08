@@ -1,0 +1,24 @@
+-- A pool is its main process together with every process in its group
+-- (model/daemon.md DAEMON-14). When the main process of a Python (fork
+-- mode) or R pool dies while a forked worker is running a call, the nexus
+-- kills the pool's group, so the call fails at once instead of the worker
+-- finishing it for a pool that no longer exists. Each function here kills
+-- its own pool's main process, then sleeps longer than the call should
+-- last. A Python pool in thread mode (the macOS default) has no worker, so
+-- there the function raises instead.
+module main (orphanPy, orphanR)
+
+import root-py
+import root-r
+
+source Py from "orphan.py" ("orphan" as orphanPyRaw)
+source R from "orphan.R" ("orphan" as orphanRRaw)
+
+orphanPyRaw :: Int -> Int
+orphanRRaw :: Int -> Int
+
+orphanPy :: Int -> Int
+orphanPy x = orphanPyRaw x
+
+orphanR :: Int -> Int
+orphanR x = orphanRRaw x
