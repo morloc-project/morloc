@@ -52,6 +52,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
+import qualified Morloc.TypeEval as TE
 
 -- Most of the transmogrification of docstrings occurs in the parser, but there
 -- are some limitations there since the types are not yet known. If a type in a
@@ -574,7 +575,7 @@ resolveAlt loc t r ctorDocs = do
         OptionalT (VarT v) -> (True, Just v)
         VarT v -> (False, Just v)
         _ -> (False, Nothing)
-  table <- case tv >>= scopeDataCtors scope of
+  table <- case tv >>= TE.dataCtors scope . TE.whnf scope . VarU of
     Just cs -> return cs
     Nothing ->
       MM.throwSystemError $
@@ -792,9 +793,10 @@ canonicalCtorDefault :: Type -> Text -> MorlocMonad Text
 canonicalCtorDefault t def = do
   scope <- MM.gets stateGeneralTypedefs
   let bare = MT.strip def
+      ctorsOf = TE.dataCtors scope . TE.whnf scope . VarU
       ctors = case t of
-        VarT v -> scopeDataCtors scope v
-        OptionalT (VarT v) -> scopeDataCtors scope v
+        VarT v -> ctorsOf v
+        OptionalT (VarT v) -> ctorsOf v
         _ -> Nothing
   return $ case ctors of
     Just table

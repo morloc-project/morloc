@@ -1879,7 +1879,7 @@ expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (StrS x)) 
 expressPolyExpr findRemote parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (ConS _ n i xs))
   | Just v <- dataHeadTVar t = do
       scope <- MM.getGeneralScope
-      if scopeDataIsEnum scope v
+      if TE.dataIsEnum scope (TE.whnf scope (VarU v))
         then return $ PolyEnum (Idx cidx t) n i
         else do
           xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs

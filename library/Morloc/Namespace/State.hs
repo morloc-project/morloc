@@ -909,6 +909,9 @@ data Gamma = Gamma
   -- distinguishes "outermost-not-seen-yet" from "outermost-seen-with-
   -- empty-econs", which a plain list cannot.
   , gammaAssumedConstraints :: Maybe [Constraint]
+  -- | Pairs assumed while their alias unfoldings are compared; see
+  -- 'Morloc.Typecheck.Internal.viaUnfold'.
+  , gammaUnfolded :: Set.Set (TypeU, TypeU)
   -- | Known constant values for let-bound variables (for nat label resolution).
   -- Tracks integers, tuples, and records so accessors like .0 can be evaluated.
   , gammaIntVals :: Map EVar ConstVal

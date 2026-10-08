@@ -1,0 +1,38 @@
+-- An alias of a recursive `data` type crosses the nexus wire under the
+-- `data` type's name, the name its constructors' fields refer back to:
+-- as a command argument and result, saved and loaded, inside a list, and
+-- as a recursive alias whose body applies the `data` type to itself.
+module main (idT, keep, keepAll, rose, rose2)
+
+import root-py
+
+data Tree a = Leaf a | Node (Tree a) (Tree a)
+type IntTree = Tree Int
+
+t :: Tree Int
+t = Node (Leaf 1) (Leaf 2)
+
+idT :: IntTree -> IntTree
+idT x = x
+
+keep :: Str -> <IO> IntTree
+keep path = do
+  @save 5 path t
+  Ok x <- @load path :: <IO> (Try Str IntTree)
+  x
+
+keepAll :: Str -> <IO> [IntTree]
+keepAll path = do
+  @save 5 path [t, t]
+  Ok x <- @load path :: <IO> (Try Str [IntTree])
+  x
+
+data Rose a = R a [Rose a]
+type X = Rose ?X
+type Y = Rose [Y]
+
+rose :: Int -> X
+rose n = R Null [R Null []]
+
+rose2 :: Int -> Y
+rose2 n = R [] [R [] []]

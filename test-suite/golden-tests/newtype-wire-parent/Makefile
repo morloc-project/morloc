@@ -21,6 +21,12 @@ all:
 	./nexus bufCross '[1,2,3]' >> obs.txt 2>> obs.err
 	echo "--- pairSwap ---" >> obs.txt
 	./nexus pairSwap '["a",7]' >> obs.txt 2>> obs.err
+	echo "--- twinSum ---" >> obs.txt
+	./nexus twinSum '[3,4]' >> obs.txt 2>> obs.err
+	echo "--- pointSum ---" >> obs.txt
+	./nexus pointSum '[3,4]' >> obs.txt 2>> obs.err
+	echo "--- pointLit ---" >> obs.txt
+	./nexus pointLit 3 >> obs.txt 2>> obs.err
 	echo "--- pathSuffix ---" >> obs.txt
 	./nexus pathSuffix notes/report.txt >> obs.txt 2>> obs.err
 	echo "--- bytesDecode ---" >> obs.txt

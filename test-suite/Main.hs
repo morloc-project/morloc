@@ -82,6 +82,7 @@ unitTests =
   , letBindingTests
   , irrefutablePatternTests
   , aliasConstructorTests
+  , aliasTransparencyTests
   , newtypeTests
   , literalDispatchTests
   , recursiveRecordTests

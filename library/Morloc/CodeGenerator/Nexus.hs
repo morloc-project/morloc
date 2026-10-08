@@ -55,6 +55,7 @@ import Morloc.Data.Json
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
+import qualified Morloc.TypeEval as TE
 import qualified Morloc.Version
 import Morloc.ProgramBuilder.Build (BuildDirs (..), resolveBuildDirs)
 import Morloc.ProgramBuilder.Paths (buildDirName, resolveDatafileAgainstRoot)
@@ -505,18 +506,21 @@ generalTypeToSerialAST' i anc (VarT v)
       -- try to serialize the table itself. This is the nexus's pure-morloc
       -- path, reached whenever a function over an enum has no sourced
       -- implementation and therefore runs in the nexus rather than a pool.
-      case (if scopeDataIsEnum scope v then scopeEnumCtors scope v else Nothing) of
-       Just ctors -> return $ SerialEnum (FV v (CV "")) [] ctors
+      case dataCtorsOfName scope v of
+       Just ctors
+         | all (null . snd) ctors -> return $ SerialEnum (FV v (CV "")) [] (map fst ctors)
        -- A `data` whose constructors take arguments. Each arm's field types
        -- are walked with this type pushed onto the ancestor set, so a
        -- constructor naming its own type becomes a back-reference rather
        -- than recursing forever -- the same cut the alias path below makes.
-       Nothing | Just arms <- scopeDataCtors scope v -> do
+       Just arms -> do
                    anc' <- descendT i (VarT v) anc
                    arms' <- mapM
                      (\(n, ts) -> (,) n <$> mapM (generalTypeToSerialAST' i anc' . typeOf) ts)
                      arms
                    return $ SerialVariant (FV v (CV "")) [] arms'
+       Nothing
+         | Just unfolded <- aliasOfData scope (VarT v) -> generalTypeToSerialAST' i anc unfolded
        Nothing -> case Map.lookup v scope of
         (Just [(_, _, _, True, _)]) -> error "Cannot handle terminal types"
         (Just [([], t', _, False, _)]) -> do
@@ -691,9 +695,10 @@ checkExportedHigherOrder i name t = case findOffender t of
 appliedTypeToSerialAST :: Int -> Set Type -> Type -> TVar -> [Type] -> MorlocMonad SerialAST
 appliedTypeToSerialAST i anc t0 v ts = do
   scope <- MM.gets stateGeneralTypedefs
-  case (if scopeDataIsEnum scope v then scopeEnumCtors scope v else Nothing) of
-    Just ctors -> return $ SerialEnum (FV v (CV "")) [] ctors
-    Nothing | Just arms <- scopeDataCtors scope v -> do
+  case dataCtorsOfName scope v of
+    Just ctors
+      | all (null . snd) ctors -> return $ SerialEnum (FV v (CV "")) [] (map fst ctors)
+    Just arms -> do
                 let params = case Map.lookup v scope of
                       Just ((ps, _, _, _, _) : _) -> [tv | Left (tv, _) <- ps]
                       _ -> []
@@ -715,6 +720,7 @@ resolveAliasApp :: Int -> Set Type -> Type -> TVar -> [Type] -> MorlocMonad Seri
 resolveAliasApp i anc t0 v ts = do
       scope <- MM.gets stateGeneralTypedefs
       case Map.lookup v scope of
+        _ | Just unfolded <- aliasOfData scope t0 -> generalTypeToSerialAST' i anc unfolded
         (Just [(params, body, _, False, _)]) -> do
           let tvars = [tv | Left (tv, _) <- params]
               resolved = foldl (\acc (tv, arg) -> substituteTVar tv arg acc) (typeOf body) (zip tvars ts)
@@ -752,11 +758,7 @@ nexusLiteralInt _ = Nothing
 nexusCtorTag :: AnnoS (Indexed Type) One () -> Text -> MorlocMonad Int
 nexusCtorTag (AnnoS (Idx i t) _ _) n = do
   scope <- MM.gets stateGeneralTypedefs
-  let tv = case t of
-        VarT v -> Just v
-        AppT (VarT v) _ -> Just v
-        _ -> Nothing
-  case tv >>= \v -> map fst <$> scopeDataCtors scope v of
+  case TE.enumCtors scope (TE.whnf scope (type2typeu t)) of
     Just names | (k : _) <- [k' | (k', m) <- zip [0 ..] names, m == n] -> return k
     _ -> MM.throwSourcedError i $
       "compiler bug: no tag for constructor" <+> squotes (pretty n)
@@ -968,7 +970,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- distinction for the pool path.
     toNexusExpr (AnnoS (Idx _ t) _ (ConS tv _ ordinal xs)) = do
       scope <- MM.gets stateGeneralTypedefs
-      if scopeDataIsEnum scope tv
+      if TE.dataIsEnum scope (TE.whnf scope (VarU tv))
         then return $ LitX U8X (MT.pack (show ordinal))
         else do
           sch <- type2schema t
@@ -3847,3 +3849,13 @@ uniqueFst = f []
 -- | Concatenate two socket lists, keeping the first socket per language.
 mergeSockets :: [Socket] -> [Socket] -> [Socket]
 mergeSockets a b = map snd (uniqueFst [(socketLang s, s) | s <- a ++ b])
+
+-- | The unfolding of an alias whose head-normal form is a `data` type. The
+-- type serializes as the `data` type under the `data` type's own name, the
+-- name its constructors' fields use to refer back to it.
+aliasOfData :: Scope -> Type -> Maybe Type
+aliasOfData scope t = case TE.dataHead scope u of
+  Just (n, _, _) | Just n /= typeHeadT t -> Just (typeOf (TE.unWhnf u))
+  _ -> Nothing
+  where
+    u = TE.whnf scope (type2typeu t)

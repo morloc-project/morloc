@@ -32,10 +32,11 @@ import qualified Morloc.Data.Map as Map
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
+import qualified Morloc.TypeEval as TE
 import Morloc.Frontend.Rename (renameLocals)
 import Morloc.Frontend.TerminalActions (synthesizeTerminalActions)
 import Morloc.Frontend.TypeNames (isReservedTypeName, resolveTypeNames)
-import Morloc.Typecheck.Internal (expandStructuralAliases, structuralAliasesIn, traverseTypeUChildren)
+import Morloc.Typecheck.Internal (expandStructuralAliases, structuralAliasesIn, traverseTypeUChildren, typeUChildren)
 
 -- | Resolve type aliases, term aliases and import/exports
 restructure ::
@@ -55,6 +56,7 @@ restructure s = do
     >>= resolveTypeNames -- every type name to the declaration it denotes
     >>= checkForSelfRecursion -- bare self-recursion is rejected; guarded forms pass
     >>= checkMutualRecursion -- typedef cycles no `data` cuts are rejected
+    >>= inferAliasParamKinds
     >>= refineKinds -- promote VarU to NatVarU based on typedef param kinds (before self-defs are removed)
       |>> handleTypeDeclarations
     >>= doM collectTypes
@@ -1140,22 +1142,27 @@ collectTypes fullDag = do
       concrete =
         Map.map (completeRecords general) $
           Map.unionsWith (Map.unionWith mergeEntries) (map snd found)
-  checkConflictingForms Nothing general
+  let modules = map fst (Map.elems fullDag)
+  checkConflictingForms modules Nothing general
   checkReservedDeclarations general
-  mapM_ (\(lang, sc) -> checkConflictingForms (Just lang) sc) (Map.toList concrete)
+  mapM_ (\(lang, sc) -> checkConflictingForms modules (Just lang) sc) (Map.toList concrete)
   MM.modify $ \s -> s {stateGeneralTypedefs = general, stateConcreteTypedefs = concrete}
 
 -- | Two declarations of one type, or two forms of it in one language, that
 -- apply to the same parameters but say different things.
-checkConflictingForms :: Maybe Lang -> Scope -> MorlocMonad ()
-checkConflictingForms lang scope =
+checkConflictingForms :: [ExprI] -> Maybe Lang -> Scope -> MorlocMonad ()
+checkConflictingForms modules lang scope =
   case [v | (v, entries) <- Map.toList scope, hasConflict entries] of
     [] -> return ()
-    vs ->
-      MM.throwSystemError $
-        "Conflicting" <+> what <+> "of"
-          <+> hsep (punctuate "," (map (squotes . pretty) vs))
-          <> "; a type is declared once, and has one form per language for each parameter pattern"
+    vs@(v0 : _) ->
+      let msg = "Conflicting" <+> what <+> "of"
+            <+> hsep (punctuate "," (map (squotes . pretty) vs))
+            <> "; a type is declared once, and has one form per language for each parameter pattern"
+          decls = [(i, paramPattern ps) | (i, ps) <- concatMap (typedefDecls lang v0) modules]
+          repeats = [i | (k, (i, pat)) <- zip [0 :: Int ..] decls, pat `elem` map snd (take k decls)]
+       in case repeats of
+            (i : _) -> MM.throwSourcedError i msg
+            [] -> MM.throwSystemError msg
   where
     what = maybe "declarations" (\l -> pretty l <+> "forms") lang
     hasConflict entries =
@@ -1214,6 +1221,9 @@ checkTypeInvariants dag = do
   -- root's instance.
   checkInstanceOnRoot dag gscope
 
+  -- Invariant 4: a transparent alias is applied to all of its parameters.
+  checkAliasApplications dag gscope
+
 -- | Enforce Invariant 1: a transparent @type Foo = Bar@ alias may not
 -- carry a per-language form. Primitives and newtypes are exempt -- both
 -- are nominally distinct base forms and own their per-language overrides.
@@ -1223,7 +1233,7 @@ checkAliasLanguageFormConflict dag gscope cscopes =
         [ (lang, v)
         | (lang, cscope) <- Map.toList cscopes
         , v <- Map.keys cscope
-        , isTransparentAlias v gscope
+        , TE.isTransparentAlias gscope v
         ]
   in case bad of
        [] -> return ()
@@ -1246,14 +1256,6 @@ checkAliasLanguageFormConflict dag gscope cscopes =
                       Nothing -> mempty
                 in MM.throwSystemError (header <> whereClause <> line <> advice)
   where
-    isTransparentAlias :: TVar -> Scope -> Bool
-    isTransparentAlias v scope = case Map.lookup v scope of
-      Nothing -> False
-      Just entries -> any isAliasKind entries
-      where
-        isAliasKind (_, _, _, _, TypedefAlias) = True
-        isAliasKind _ = False
-
     -- Walk the per-module AST to find the per-language typedef
     -- declaration for (lang, v). Returns the declaration's AST index
     -- (so the error caret lands on the offending line) and the
@@ -1349,18 +1351,10 @@ checkInstanceOnRoot dag gscope =
         | (_, (e, _)) <- Map.toList dag
         , (i, ts) <- findInstanceTypes e
         , Just v <- map extractHead ts
-        , isTransparentAlias v
+        , TE.isTransparentAlias gscope v
         ] of
       ((i, v) : _) -> Just (i, v)
       []           -> Nothing
-
-    isTransparentAlias :: TVar -> Bool
-    isTransparentAlias v = case Map.lookup v gscope of
-      Nothing -> False
-      Just entries -> any isAliasKind entries
-      where
-        isAliasKind (_, _, _, _, TypedefAlias) = True
-        isAliasKind _ = False
 
     -- Walk an expression tree to collect (instance-index, type-args) for
     -- every @IstE@ node. The index lets us locate the source caret on the
@@ -2108,3 +2102,187 @@ rename sourceName localAlias = f
     f (ProjectFieldU r fld) = ProjectFieldU (f r) (f fld)
     f (RecSingletonU k v) = RecSingletonU (f k) (f v)
     f (LabeledU n t) = LabeledU n (f t)
+
+-- | Every type declaration in a module, with its index.
+typedefsIn :: ExprI -> [(Int, ExprTypeE)]
+typedefsIn (ExprI i (TypE d)) = [(i, d)]
+typedefsIn (ExprI _ (ModE _ es)) = concatMap typedefsIn es
+typedefsIn (ExprI _ (AssE _ e es)) = concatMap typedefsIn (e : es)
+typedefsIn (ExprI _ (IstE _ _ _ es)) = concatMap typedefsIn es
+typedefsIn _ = []
+
+-- | The declarations of a type, general or in one language: each one's index
+-- and parameters.
+typedefDecls :: Maybe Lang -> TVar -> ExprI -> [(Int, [Either (TVar, Kind) TypeU])]
+typedefDecls lang v e =
+  [(i, ps) | (i, ExprTypeE form v' ps _ _ _) <- typedefsIn e, v' == v, fmap fst form == lang]
+
+-- | Each named head in a type with the arguments it is applied to, nested
+-- applications flattened.
+typeApplications :: TypeU -> [(TVar, [TypeU])]
+typeApplications t = case TE.flattenApp t of
+  AppU (VarU v) args -> (v, args) : concatMap typeApplications args
+  AppU h args -> typeApplications h ++ concatMap typeApplications args
+  VarU v -> [(v, [])]
+  t' -> concatMap typeApplications (typeUChildren t')
+
+aliasNamed :: TVar -> MDoc
+aliasNamed v = "The type alias" <+> squotes (pretty v)
+
+-- | Every type written in a module with the index it was written at:
+-- signatures and their constraints, annotations, class method signatures,
+-- instance heads and contexts, and general typedef bodies.
+writtenTypes :: ExprI -> [(Int, TypeU)]
+writtenTypes (ExprI i e) = here ++ concatMap writtenTypes children
+  where
+    here = case e of
+      SigE (Signature _ _ et) -> (i, etype et) : concatMap (constraintTypes i) (Set.toList (econs et))
+      AnnE _ t -> [(i, t)]
+      TypE (ExprTypeE Nothing _ ps t _ _) -> (i, t) : [(i, t') | Right t' <- ps]
+      IstE _ ctx ts _ -> map ((,) i) ts ++ concatMap (constraintTypes i) ctx
+      ClsE (Typeclass cs _ _ sigs) ->
+        concatMap (constraintTypes i) cs
+          ++ concat [(i, etype et) : concatMap (constraintTypes i) (Set.toList (econs et)) | Signature _ _ et <- sigs]
+      _ -> []
+    children = case e of
+      ModE _ es -> es
+      AssE _ x xs -> x : xs
+      IstE _ _ _ xs -> xs
+      _ -> AST.exprIChildren e
+    constraintTypes j (Constraint _ ts) = map ((,) j) ts
+    constraintTypes j (CMember a b) = [(j, a), (j, b)]
+    constraintTypes j (CSubset a b) = [(j, a), (j, b)]
+    constraintTypes j (CDisjoint a b) = [(j, a), (j, b)]
+
+-- | Enforce Invariant 4: a transparent alias is applied to exactly as many
+-- arguments as it has parameters, wherever it is written. Kind-only
+-- arguments left out have already been filled by 'refineKinds'. An alias
+-- applied to too few arguments has no expansion of its own (newtypes own
+-- partial applications), and one applied to too many names nothing.
+checkAliasApplications :: DAG MVar a ExprI -> Scope -> MorlocMonad ()
+checkAliasApplications dag scope =
+  case bad of
+    [] -> return ()
+    ((i, v, n, k) : _) ->
+      MM.throwSourcedError i $
+        aliasNamed v <+> "takes" <+> pretty n
+          <+> "type argument" <> (if n == 1 then "" else "s") <> ", but is applied to" <+> pretty k
+  where
+    arity v = case Map.lookup v scope of
+      Just entries@((ps, _, _, _, _) : _)
+        | all (\(_, _, _, _, k) -> k == TypedefAlias) entries
+        , all isLeft ps ->
+            Just (length ps)
+      _ -> Nothing
+    bad =
+      [ (i, v, n, length args)
+      | (_, (m, _)) <- Map.toList dag
+      , (i, t) <- writtenTypes m
+      , (v, args) <- typeApplications t
+      , Just n <- [arity v]
+      , n /= length args
+      ]
+
+-- | Give each parameter of a transparent alias the kind of the slots it
+-- fills in the alias's body: in @type Image h w = Tensor3 h w 3 U8@, @h@
+-- and @w@ fill Nat slots, so they are Nat parameters, exactly as if they
+-- were written @(h :: Nat)@. An alias is its expansion, so its parameters
+-- cannot have kinds the expansion does not give them. A parameter the body
+-- does not use is rejected: it would claim a distinction the alias cannot
+-- carry (a dimension that is never checked), which is what a newtype is for.
+inferAliasParamKinds ::
+  DAG MVar [AliasedSymbol] ExprI ->
+  MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
+inferAliasParamKinds dag = do
+  let allDecls = concatMap typedefsIn (DAG.nodes dag)
+      decls =
+        [ (i, d) | (i, d@(ExprTypeE Nothing _ ps _ _ TypedefAlias)) <- allDecls
+        , all isLeft ps ]
+      declared = Map.fromList
+        [ (v, map (either snd (const KindType)) ps)
+        | (_, ExprTypeE Nothing v ps _ _ _) <- allDecls ]
+  mapM_ checkRegularRecursion decls
+  refined <- solve (length decls + 1) declared decls
+  return $ DAG.mapNode (rewrite refined) dag
+  where
+    -- A recursive alias refers to itself with exactly its own parameters.
+    -- One whose arguments change on the way down (@type N a = (a, [N [a]])@)
+    -- has an expansion that never repeats, so no finite type stands for it.
+    checkRegularRecursion :: (Int, ExprTypeE) -> MorlocMonad ()
+    checkRegularRecursion (i, ExprTypeE _ v ps body _ _) =
+      let own = [VarU p | Left (p, _) <- ps]
+       in case [args | (v', args) <- typeApplications body, v' == v, args /= own] of
+            [] -> return ()
+            (args : _) -> MM.throwSourcedError i $
+              aliasNamed v <+> "refers to itself as"
+                <+> squotes (pretty (if null args then VarU v else AppU (VarU v) args))
+                <> ". A recursive alias must refer to itself with exactly its own parameters"
+                <+> parens (hsep (map pretty own)) <> "."
+
+    -- Kinds settle in at most one round per alias, since each round can
+    -- only pass a kind one alias further along a chain.
+    solve :: Int -> Map TVar [Kind] -> [(Int, ExprTypeE)] -> MorlocMonad (Map TVar [Kind])
+    solve 0 km _ = return km
+    solve n km ds = do
+      km' <- foldM refineOne km ds
+      if km' == km then return km else solve (n - 1) km' ds
+
+    refineOne :: Map TVar [Kind] -> (Int, ExprTypeE) -> MorlocMonad (Map TVar [Kind])
+    refineOne km (i, ExprTypeE _ v ps body _ _) = do
+      let uses = slotKinds km (Just KindType) body
+      ks <- mapM (paramKind i v uses) [pk | Left pk <- ps]
+      return (Map.insert v ks km)
+
+    -- A parameter takes the one kind other than Type that its slots give
+    -- it. Slots of unknown kind (inside a row operation, say) count as uses
+    -- and give none. A declared kind other than Type stands.
+    paramKind :: Int -> TVar -> [(TVar, Maybe Kind)] -> (TVar, Kind) -> MorlocMonad Kind
+    paramKind i v uses (p, declaredKind) =
+      let used = [k | (p', k) <- uses, p' == p]
+          kinded = Set.toList (Set.fromList [k | Just k <- used, k /= KindType])
+          typed = Just KindType `elem` used
+          param = "The parameter" <+> squotes (pretty p) <+> "of the type alias" <+> squotes (pretty v)
+          twoKinds :: [Kind] -> MorlocMonad Kind
+          twoKinds ks = MM.throwSourcedError i $
+            param <+> "is used at more than one kind:" <+> hsep (punctuate "," (map pretty ks))
+       in case (used, kinded) of
+            ([], _) -> MM.throwSourcedError i $
+              param <+> "is not used in its definition. An alias is its expansion and cannot"
+                <+> "carry a parameter the expansion does not; declare" <+> squotes (pretty v)
+                <+> "with 'newtype' to give it one."
+            (_, [])
+              -> return declaredKind
+            (_, [k])
+              | declaredKind == k -> return k
+              | declaredKind == KindType, not typed -> return k
+              | declaredKind == KindType -> twoKinds [KindType, k]
+            (_, ks) -> twoKinds (Set.toList (Set.fromList (declaredKind : ks)))
+
+    -- The kind of each slot a variable fills, given the kind the enclosing
+    -- position expects; Nothing where the slot's kind is not known here.
+    slotKinds :: Map TVar [Kind] -> Maybe Kind -> TypeU -> [(TVar, Maybe Kind)]
+    slotKinds km k t = case t of
+      VarU v -> [(v, k)]
+      KVarU (v, k') -> [(v, Just k')]
+      AppU (VarU h) args
+        | Just ks <- Map.lookup h km
+        , length ks == length args ->
+            concat (zipWith (slotKinds km . Just) ks args)
+      AppU h args -> slotKinds km (Just KindType) h ++ concatMap (slotKinds km (Just KindType)) args
+      OpU _ args -> case extractKey t of
+        TV "Nat" -> concatMap (slotKinds km (Just KindNat)) args
+        TV "Str" -> concatMap (slotKinds km (Just KindStr)) args
+        _ -> concatMap (slotKinds km Nothing) args
+      LitU _ -> concatMap (slotKinds km Nothing) (typeUChildren t)
+      _ -> concatMap (slotKinds km (Just KindType)) (typeUChildren t)
+
+    rewrite :: Map TVar [Kind] -> ExprI -> ExprI
+    rewrite km (ExprI i (ModE m es)) = ExprI i (ModE m (map (rewrite km) es))
+    rewrite km (ExprI i (AssE v e es)) = ExprI i (AssE v (rewrite km e) (map (rewrite km) es))
+    rewrite km (ExprI i (IstE c ctx ts es)) = ExprI i (IstE c ctx ts (map (rewrite km) es))
+    rewrite km (ExprI i (TypE (ExprTypeE Nothing v ps body doc TypedefAlias)))
+      | Just ks <- Map.lookup v km
+      , all isLeft ps
+      , length ks == length ps =
+          ExprI i (TypE (ExprTypeE Nothing v [Left (p, k) | (Left (p, _), k) <- zip ps ks] body doc TypedefAlias))
+    rewrite _ e = e

@@ -1,16 +1,18 @@
--- Phantom-Nat alias regression test.
+-- Phantom-Nat regression test.
 --
--- A phantom-Nat alias is a type alias whose declaration mentions
--- one or more Nat-kinded params that do not appear in the body:
---   type Vector (n :: Nat) a   = List a
---   type FixedPair (n :: Nat) a = (a, a)
+-- A phantom Nat is a Nat-kinded parameter that does not appear in the
+-- body of its declaration:
+--   newtype Vector (n :: Nat) a   = List a
+--   newtype FixedPair (n :: Nat) a = (a, a)
 --
--- These aliases serve a real purpose: they let the typechecker
--- enforce dimension constraints (`Vector n a` vs `Vector m a`) at
--- compile time, while erasing them at runtime. The wire form must
--- match the body: `Vector 6 Real` is byte-identical to `List Real`.
+-- Only a newtype can carry one: a `type` alias is its expansion, so a
+-- parameter the expansion lacks would be a dimension nothing checks.
+-- The newtype lets the typechecker enforce dimension constraints
+-- (`Vector n a` vs `Vector m a`) at compile time, while erasing them at
+-- runtime. The wire form must match the body: `Vector 6 Real` is
+-- byte-identical to `List Real`.
 --
--- Every operation valid on the body should be valid on the alias.
+-- Every operation valid on the body should be valid on the newtype.
 -- This test enumerates the surface area:
 --
 --   1. List-literal construction:   `[...] :: Vector N a`
@@ -20,10 +22,10 @@
 --   5. Round-trip through idcpp (forces wire+codegen path)
 --   6. Vector as function argument (foreign function takes Vector)
 --   7. Vector as function return value (foreign function returns Vector)
---   8. Alias-to-alias chain: `type MyVec (n :: Nat) a = Vector n a`
+--   8. Alias of the newtype: `type MyVec (n :: Nat) a = Vector n a`
 --      used both as annotation and as exported type
---   9. Tuple-shaped phantom-Nat alias: `type FixedPair (n :: Nat) a = (a, a)`
---      with tuple literal annotated as the alias
+--   9. Tuple-shaped phantom-Nat newtype: `newtype FixedPair (n :: Nat) a = (a, a)`
+--      with tuple literal annotated as the newtype
 --
 -- Each case below reflects a usage that should be supported
 -- regardless of which language(s) are imported. Failures here
@@ -72,14 +74,13 @@ source Cpp from "ops.hpp"
 sumVecCpp  :: Vector n Real -> Real
 makeVecCpp :: Vector 4 Real
 
--- A phantom-Nat alias chain: MyVec is itself an alias to Vector.
--- The body uses the same phantom Nat, so chasing the alias one
--- step yields `Vector n a`, then a second step yields `List a`.
+-- An alias of the phantom-Nat newtype Vector. The alias's n is not
+-- phantom: chasing the alias one step yields `Vector n a`.
 type MyVec (n :: Nat) a = Vector n a
 
--- Tuple-shaped phantom-Nat alias. The body is a 2-tuple over `a`
+-- Tuple-shaped phantom-Nat newtype. The body is a 2-tuple over `a`
 -- and the Nat is purely phantom. Wire form is identical to (a, a).
-type FixedPair (n :: Nat) a = (a, a)
+newtype FixedPair (n :: Nat) a = (a, a)
 
 -- 1) List literals annotated as Vector N a, exported directly. -----
 
@@ -98,12 +99,12 @@ vecBool2 = [True, False]
 vecStr3 :: Vector 3 Str
 vecStr3 = ["a", "b", "c"]
 
--- 2) Alias-to-alias chain over a phantom-Nat alias. ----------------
+-- 2) Alias of a phantom-Nat newtype. ----------------------------------
 
 chainVecReal3 :: MyVec 3 Real
 chainVecReal3 = [7.0, 8.0, 9.0]
 
--- 3) Tuple-shaped phantom-Nat alias. -------------------------------
+-- 3) Tuple-shaped phantom-Nat newtype. -----------------------------
 
 fixedPairInt :: FixedPair 2 Int
 fixedPairInt = (42, 99)
@@ -128,12 +129,12 @@ rtChainVec = idcpp ([7.0, 8.0, 9.0] :: MyVec 3 Real)
 rtFixedPair :: FixedPair 2 Int
 rtFixedPair = idcpp ((42, 99) :: FixedPair 2 Int)
 
--- Cross-language element inside a phantom-Nat tuple alias literal.
+-- Cross-language element inside a phantom-Nat tuple newtype literal.
 -- The first slot is a Python value (idpy 42) forced into a non-Py
 -- manifold via idcpp on the outside. The current expressCore /
 -- expressPolyExpr handlers for TupS zip the literal's elements
--- against the alias's *type args* [NatLit 2, Int] rather than the
--- alias body's *slot types* [Int, Int]. When the first slot needs a
+-- against the newtype's *type args* [NatLit 2, Int] rather than the
+-- newtype body's *slot types* [Int, Int]. When the first slot needs a
 -- cross-language wrap, expressContainer is called with the bogus
 -- parent type NatLit 2, which is illegal at the codegen layer.
 -- Same-language elements (the literals above) hide the bug because
@@ -201,7 +202,7 @@ rtMat2x3 = idcpp mat2x3
 rtMat0x3 :: Matrix 0 3 Real
 rtMat0x3 = idcpp mat0x3
 
--- 11) NatLit 0 through a phantom-Nat alias chain. Confirms the alias
+-- 11) NatLit 0 through an alias of a phantom-Nat newtype. Confirms the alias
 --     `MyVec n a = Vector n a` resolves correctly when n is a real 0.
 chainVecReal0 :: MyVec 0 Real
 chainVecReal0 = []

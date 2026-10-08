@@ -827,7 +827,7 @@ makeSerialAST m lang t0 = do
     -- whenever the scope has it, so the schema cannot be narrowed to
     -- whichever arm happened to be built here.
     makeSerialAST' gscope _ _ (EnumF v@(FV gv _) ps ns) =
-      return . SerialEnum v ps $ case scopeEnumCtors gscope gv of
+      return . SerialEnum v ps $ case TE.enumCtors gscope (TE.whnf gscope (VarU gv)) of
         Just declared | length declared >= length ns -> declared
         _ -> ns
     -- Cycle detection at the VariantF entry, as for NamF. A constructor
@@ -898,13 +898,17 @@ makeSerialAST m lang t0 = do
           | finalType == BT.u64U = return $ SerialUInt64 v
           -- A `data` type is nominal and closed; its constructor names
           -- come straight from the declaration.
-          | scopeDataIsEnum gscope gv
-          , Just ctorNames <- scopeEnumCtors gscope gv = return $ SerialEnum v [] ctorNames
+          --
+          -- By name: an alias of a `data` type is lowered by the alias
+          -- branch below, which keeps the `data` type's name on the binder
+          -- its fields refer back to.
+          | Just ctors <- dataCtorsOfName gscope gv
+          , all (null . snd) ctors = return $ SerialEnum v [] (map fst ctors)
           -- A payload-bearing `data` reached by name. Its arms are absent
           -- from the type because the walk that produced it is pure and
           -- cannot resolve a field's per-language form, so they are built
           -- from the declaration here, where the language is known.
-          | Just ctors <- scopeDataCtors gscope gv = withAncestorVar anc $ \anc' -> do
+          | Just ctors <- dataCtorsOfName gscope gv = withAncestorVar anc $ \anc' -> do
               as <- mapM
                 (\(n, fs) -> (,) n <$> mapM
                    (\fu -> inferConcreteType lang (Idx m (typeOf fu))
@@ -1086,7 +1090,7 @@ makeSerialAST m lang t0 = do
           -- type @Box Int@ reaches here as a plain application. Resolve it
           -- properly and lower the result; it comes back as the variant or
           -- enum form, which the branches above know how to cut and walk.
-          | Just _ <- scopeDataCtors gscope generalTypeName = do
+          | Just _ <- dataCtorsOfName gscope generalTypeName = do
               let (gt, _) = unweaveTypeF ft
               resolved <- inferConcreteType lang (Idx m (typeOf gt))
               case resolved of

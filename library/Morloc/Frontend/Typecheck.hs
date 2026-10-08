@@ -557,21 +557,31 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
 -- instance's chain too would erase the nominal boundary between
 -- sibling newtypes (Deque a / Array a / Vector n a) that all share
 -- @List a@ as their wire-parent body but each own their own instances.
+--
+-- A recursive alias changes with every step, so the walk is bounded: each
+-- step removes a level of the non-recursive alias chains, which are no
+-- longer than the scope, pushes a recursive alias's occurrences at least a
+-- level deeper, past where any candidate's head can look, or strips one of
+-- the call-site type's own wrappers.
 filterByAliasChain :: Scope -> TypeU -> [(EType, [a])] -> [(EType, [a])]
-filterByAliasChain scope gt0 candidates = go gt0
+filterByAliasChain scope gt0 candidates = go fuel gt0
   where
-    go currentGt =
+    fuel = Map.size scope + typeDepth gt0 + maximum (0 : [typeDepth t | (EType t _ _ _, _) <- candidates]) + 1
+    go n currentGt =
       case [x | x@(EType t _ _ _, _) <- candidates, compatibleTypeU currentGt t] of
+        [] | n <= 0 -> []
         [] -> case TE.reduceType scope currentGt of
-          Just gt' | gt' /= currentGt -> go gt'
+          Just gt' | gt' /= currentGt -> go (n - 1) gt'
           _ -> case TE.reduceTypeLeaves scope currentGt of
-            Just gt' | gt' /= currentGt -> go gt'
+            Just gt' | gt' /= currentGt -> go (n - 1) gt'
             _ -> case currentGt of
               -- Strip coercion wrappers: a -> ?a, a -> <E> a
-              OptionalU t -> go t
-              EffectU _ t -> go t
+              OptionalU t -> go (n - 1) t
+              EffectU _ t -> go (n - 1) t
               _ -> []  -- nothing reachable
         matches -> matches
+    typeDepth :: TypeU -> Int
+    typeDepth t = 1 + maximum (0 : map typeDepth (typeUChildren t))
 
 -- | Structural type compatibility for TypeU. ForallU-bound variables and
 -- ExistU act as wildcards (match anything). Other VarU nodes require exact
@@ -711,12 +721,8 @@ rejectListSelectorTarget i s t = do
 rejectSumSelectorTarget :: Int -> Selector -> TypeU -> MorlocMonad ()
 rejectSumSelectorTarget i s t = do
   scope <- MM.getGeneralScope
-  let name = case t of
-        VarU v -> Just v
-        AppU (VarU v) _ -> Just v
-        _ -> Nothing
-  case name of
-    Just v | Just _ <- scopeDataCtors scope v ->
+  case TE.dataHead scope (TE.whnf scope t) of
+    Just (v, _, _) ->
       MM.throwSourcedError i $
         "Getter" <+> pretty s <+> "cannot be applied to" <+> pretty v
           <> ", which is a `data` type. Which fields exist depends on the"
@@ -799,15 +805,13 @@ checkCtorBelongs :: Int -> Gamma -> TypeU -> Text -> MorlocMonad [TypeU]
 checkCtorBelongs i g subjectT n = do
   scope <- MM.getGeneralScope
   let resolved = apply g subjectT
-      tv = extractKey resolved
-      args = case resolved of
-        AppU _ ts -> ts
-        _ -> []
-      params = [p | (p, _) <- typeParamsOf scope tv]
-      inst t = foldr (\(p, a) acc -> substituteTVar p a acc) t (zip params args)
-  case lookup n =<< scopeDataCtors scope tv of
-    Just fs -> return (map inst fs)
-    Nothing ->
+  case TE.dataHead scope (TE.whnf scope resolved) of
+    Just (tv, args, ctors)
+      | Just fs <- lookup n ctors ->
+          let params = [p | (p, _) <- typeParamsOf scope tv]
+              inst t = foldr (\(p, a) acc -> substituteTVar p a acc) t (zip params args)
+           in return (map inst fs)
+    _ ->
       MM.throwSourcedError i $
         squotes (pretty n) <+> "is not a constructor of" <+> pretty resolved
 
@@ -849,7 +853,7 @@ synthE i g0 (ConS tv n ord xs) = do
       resultT = case freshArgs of
         [] -> VarU tv
         _ -> AppU (VarU tv) freshArgs
-  declaredArgs <- case lookup n =<< scopeDataCtors scope tv of
+  declaredArgs <- case lookup n =<< TE.dataCtors scope (TE.whnf scope (VarU tv)) of
     Just as -> return (map inst as)
     Nothing ->
       MM.throwSourcedError i $

@@ -71,6 +71,7 @@ module Morloc.Typecheck.Internal
   , expandStructuralAliases
   , expandTransparentAliases
   , structuralAliasesIn
+  , typeUChildren
   , traverseTypeUChildren
   , isSubtypeOf2
   , isSubtypeOfOpen
@@ -137,7 +138,7 @@ emptyGamma =
     , gammaSolved = Map.empty, gammaDeferred = [], gammaKindSubs = Map.empty
     , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
-    , gammaRigid = Nothing, gammaScoped = Map.empty
+    , gammaRigid = Nothing, gammaScoped = Map.empty, gammaUnfolded = Set.empty
     }
 
 unqualify :: TypeU -> ([TVar], TypeU)
@@ -1077,6 +1078,20 @@ subtype scope a@ExistU {} b@ExistU {} g
 -- types involved are all existentials, it will always pass, so I omit
 -- it.
 
+-- A transparent alias is its expansion. When the heads differ and one is an
+-- alias, unfold it a step before any rule below takes the types apart; a
+-- structural rule would otherwise bind part of an alias application, as
+-- @f := Model k@ in @Model k Int <: f a@. Heads that agree are compared by
+-- their arguments below, so a solved type keeps the alias it was written
+-- with. Existentials are left to the instantiation rules, which solve them
+-- to the type as written.
+subtype scope t1 t2 g
+  | not (isExist t1)
+  , not (isExist t2)
+  , typeHead t1 /= typeHead t2
+  , Just (t1', t2') <- unfoldDifferingAlias scope t1 t2 =
+      viaUnfold scope (t1, t2) t1' t2' g
+
 -- EffectU: row-unifying covariant subtyping. Closed rows use subsumption
 -- (<E1> T1 <: <E2> T2 when E1 is a subset of E2); an open row solves its
 -- single tail variable in gammaEffSubs to make the rows agree. See
@@ -1166,7 +1181,15 @@ subtype scope t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
   | AppU h2 inner2 <- v2, let t2' = AppU h2 (inner2 ++ vs2)
   , t2' /= t2
   = subtype scope t1 t2' g
-  | v1 == v2 && length vs1 == length vs2 = zipSubtype t1 t2 scope vs1 vs2 g
+  -- An alias's arguments can differ where its expansions agree (@Foo 1 3@ and
+  -- @Foo 2 2@ under @type Foo n m = Vector (n + m) Int@), so a failed
+  -- comparison of arguments falls back to the expansions.
+  | v1 == v2 && length vs1 == length vs2 = case zipSubtype t1 t2 scope vs1 vs2 g of
+      Left e
+        | Just t1' <- unfoldAlias scope t1
+        , Just t2' <- unfoldAlias scope t2 ->
+            either (const (Left e)) Right (viaUnfold scope (t1, t2) t1' t2' g)
+      r -> r
   -- Concrete-side type aliases for nat-parameterised types (e.g.
   -- `type Cpp => Vector (n :: Nat) a = "mlc::Tensor1<$1>" a`) drop Nat
   -- args from the C++ template -- the morloc-side has [n, a] but the
@@ -1421,16 +1444,46 @@ subtype scope t1 t2@(VarU _) g = subtypeEvaluated scope t1 t2 g
 -- fall through
 subtype _ a b _ = subtypeError a b "Type mismatch fall through"
 
--- | The name heading a type, bare or applied.
-aliasHeadName :: TypeU -> Maybe TVar
-aliasHeadName (VarU v) = Just v
-aliasHeadName (AppU (VarU v) _) = Just v
-aliasHeadName _ = Nothing
+-- | Compare a pair through the unfoldings @t1'@ and @t2'@ of its aliases.
+-- The pair is assumed while its unfoldings are compared, so meeting it again
+-- inside that comparison closes a cycle through recursive aliases, and the
+-- pair holds. The assumption ends with the comparison.
+viaUnfold :: Scope -> (TypeU, TypeU) -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
+viaUnfold scope pair t1' t2' g
+  | Set.member pair assumed = return g
+  | otherwise = do
+      g' <- subtype scope t1' t2' g {gammaUnfolded = Set.insert pair assumed}
+      return g' {gammaUnfolded = assumed}
+  where
+    assumed = gammaUnfolded g
+
+-- | The head of a type with nested applications flattened.
+typeHead :: TypeU -> Maybe TVar
+typeHead = TE.headName . TE.flattenApp
+
+isExist :: TypeU -> Bool
+isExist ExistU {} = True
+isExist _ = False
+
+-- | One step of the transparent alias heading either type, the left first.
+unfoldDifferingAlias :: Scope -> TypeU -> TypeU -> Maybe (TypeU, TypeU)
+unfoldDifferingAlias scope t1 t2 = case (unfoldAlias scope t1, unfoldAlias scope t2) of
+  (Just t1', _) -> Just (t1', t2)
+  (_, Just t2') -> Just (t1, t2')
+  _ -> Nothing
+
+-- | One step of the transparent alias heading a type.
+unfoldAlias :: Scope -> TypeU -> Maybe TypeU
+unfoldAlias scope t = case TE.headName t' of
+  Just v | TE.isTransparentAlias scope v -> TE.expandHeadOnly scope t'
+  _ -> Nothing
+  where
+    t' = TE.flattenApp t
 
 -- | One reduction step of a type whose head is an alias in scope. Nothing for
 -- anything else, including a rigid variable head.
 reduceAliasHead :: Scope -> TypeU -> Maybe TypeU
-reduceAliasHead scope t = case aliasHeadName t of
+reduceAliasHead scope t = case TE.headName t of
   Just v | Map.member v scope -> TE.reduceType scope t
   _ -> Nothing
 
@@ -1466,7 +1519,7 @@ expandStructuralAliases = expandAliasesWith . structuralAliasHead
 -- meaning even where that module's aliases are not in scope.
 expandTransparentAliases :: Scope -> TypeU -> TypeU
 expandTransparentAliases scope =
-  expandAliasesWith (\t -> (,) <$> aliasHeadName t <*> TE.expandHeadOnly scope t)
+  expandAliasesWith (\t -> (,) <$> TE.headName t <*> TE.expandHeadOnly scope t)
 
 -- | The aliases in a type that 'expandStructuralAliases' would expand.
 structuralAliasesIn :: Scope -> TypeU -> [TVar]
@@ -1478,7 +1531,7 @@ structuralAliasesIn scope t = case structuralAliasHead scope t of
 -- names.
 structuralAliasHead :: Scope -> TypeU -> Maybe (TVar, TypeU)
 structuralAliasHead scope t = do
-  v <- aliasHeadName t
+  v <- TE.headName t
   case expandAliasHead scope t of
     t'@(FunU _ _) -> Just (v, t')
     t'@(EffectU _ _) -> Just (v, t')
@@ -1500,6 +1553,7 @@ traverseTypeUChildren f t = case t of
   OpU op ts -> OpU op <$> traverse f ts
   LitU (LRec fs) -> LitU . LRec <$> traverse (traverse f) fs
   LitU (LList es) -> LitU . LList <$> traverse f es
+  LitU (LSet es) -> LitU . LSet <$> traverse f es
   LabeledU v x -> LabeledU v <$> f x
   _ -> pure t
 
