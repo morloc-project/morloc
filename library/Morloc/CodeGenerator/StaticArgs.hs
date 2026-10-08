@@ -39,7 +39,7 @@ module Morloc.CodeGenerator.StaticArgs
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.LambdaEval (applyLambdas, reindexTree)
+import Morloc.CodeGenerator.LambdaEval (applyPoolLambdas, reindexTree)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
@@ -292,7 +292,7 @@ specialize h hp fixedArgs = do
   let body' = renameBackEdges h name dropped body
   -- A substituted lambda the body applies is a new redex; reduce the copy as
   -- every tree was reduced before this pass.
-  tree <- applyLambdas False (AnnoS (Idx gi (dropInputs dropped t)) c (LamS (dropAt dropped params) body'))
+  tree <- applyPoolLambdas (AnnoS (Idx gi (dropInputs dropped t)) c (LamS (dropAt dropped params) body'))
   MM.modify $ \s ->
     s { stateName = Map.insert gi name (stateName s)
       , stateRecursionTargets = Map.insert name gi (stateRecursionTargets s)

@@ -85,7 +85,7 @@ prettyFoldManifold =
 
     makeNativeExpr ::
       (Monad m) => NativeExpr -> NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> m PoolDocs
-    makeNativeExpr _ (AppExeN_ _ (SrcCallP src) xs) =
+    makeNativeExpr _ (AppExeN_ _ (SrcCallP _ src) xs) =
       return $ mergePoolDocs ((<>) (pretty $ srcName src) . tupled) xs
     makeNativeExpr _ (AppExeN_ _ (PatCallP pat) xs) =
       return $ mergePoolDocs ((<>) (pretty pat) . tupled) xs
@@ -103,7 +103,7 @@ prettyFoldManifold =
     makeNativeExpr _ (LetVarN_ _ i) = return $ defaultValue {poolExpr = letNamerN i}
     makeNativeExpr _ (BndVarN_ _ i) = return $ defaultValue {poolExpr = bndNamerN i}
     makeNativeExpr _ (DeserializeN_ _ _ e) = return $ e {poolExpr = "DeserializeN" <> parens (poolExpr e)}
-    makeNativeExpr _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr = pretty (srcName src)}
+    makeNativeExpr _ (ExeN_ _ (SrcCallP _ src)) = return $ defaultValue {poolExpr = pretty (srcName src)}
     makeNativeExpr _ (ExeN_ _ (PatCallP pat)) = return $ defaultValue {poolExpr = pretty pat}
     makeNativeExpr _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = letNamerN idx}
     makeNativeExpr _ (ExeN_ _ (PapplyP idx)) = return $ defaultValue {poolExpr = letNamerN idx}

@@ -1574,10 +1574,10 @@ lowerNativeExprRaw ::
   NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
   m PoolDocs
 -- Binary operator: emit (lhs op rhs) instead of function call
-lowerNativeExprRaw cfg _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
+lowerNativeExprRaw cfg _ (AppExeN_ _ (SrcCallP _ src) (map snd -> [lhs, rhs]))
   | srcOperator src =
       return $ mergePoolDocs (\xs -> case xs of [l, r] -> lcOperator cfg src l r; _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
-lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP src) es0) = do
+lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es0) = do
   es <- bindCallArgs cfg origExpr es0
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst es
@@ -1695,7 +1695,7 @@ lowerNativeExprRaw cfg _ (DeserializeN_ t s x) = do
       { poolExpr = deserialized
       , poolPriorLines = poolPriorLines x <> assignments
       }
-lowerNativeExprRaw cfg _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr = lcSrcName cfg src}
+lowerNativeExprRaw cfg _ (ExeN_ _ (SrcCallP _ src)) = return $ defaultValue {poolExpr = lcSrcName cfg src}
 lowerNativeExprRaw _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
 lowerNativeExprRaw _ _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
 lowerNativeExprRaw _ _ (ExeN_ _ (PapplyP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}

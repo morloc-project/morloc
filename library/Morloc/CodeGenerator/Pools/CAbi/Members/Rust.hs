@@ -652,7 +652,7 @@ thinSinkNames mask es = Set.filter occursOnlyHere sites
         , opFoldWithNativeArgM = \_ node -> return (foldlNA Set.union Set.empty node)
         }
 
-    atSite (AppExeN _ (SrcCallP src) args) =
+    atSite (AppExeN _ (SrcCallP _ src) args) =
       Set.fromList
         [ render (manNamer i)
         | (k, NativeArgManifold (NativeManifold i _ form _)) <- zip [(0 :: Int) ..] args

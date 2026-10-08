@@ -665,7 +665,7 @@ expressCore :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMona
 expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do
   ids <- MM.takeFromCounter (length inputs)
   exe' <- case exe of
-    (SrcCall src) -> checkRsizeArity midx src (length inputs) >> return (SrcCallP src)
+    (SrcCall src) -> checkRsizeArity midx src (length inputs) >> return (SrcCallP (Just cidx) src)
     (PatCall pat) -> return $ PatCallP pat
   let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
   return
@@ -967,7 +967,7 @@ expressBracketSlice callLang midx inputs out xsExpr =
               eW <- wrapBoundInToIndex callLang midx eT eE
               pW <- wrapBoundInToIndex callLang midx pT pE
               let fT = FunT [optI64T, optI64T, optI64T, rcvT] out
-              return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP getSliceSrc)) [sW, eW, pW, rcvE]
+              return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP Nothing getSliceSrc)) [sW, eW, pW, rcvE]
     _ -> MM.throwSourcedError midx "PatternBracketSlice expects 4 arguments"
 
 -- | Run a list of @Maybe@-returning monadic lookups in order, returning
@@ -1017,7 +1017,7 @@ expressBracketIndex callLang midx inputs out xsExpr =
                 callLang "Indexable.__access_index__" rcvT
               iW <- wrapBoundInToIndex callLang midx iT iE
               let fT = FunT [optI64T, rcvT] out
-              return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP accessSrc)) [iW, rcvE]
+              return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP Nothing accessSrc)) [iW, rcvE]
     _ -> MM.throwSourcedError midx "PatternBracketIndex expects 2 arguments"
 
 -- | Walk the alias chain and check whether the receiver type's head
@@ -1096,7 +1096,7 @@ emitPatternAccessibleCall callLang midx out src steps rcvT bounds rcvE = do
       -- the wire level, matching the PolyStr argument.
       patternChainT = AppT (VarT BT.patternChainVar) [rcvT, out]
       fT           = FunT [patternChainT, argsListT, rcvT] out
-  return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP src))
+  return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP Nothing src))
                    [pathPoly, argsListPoly, rcvE]
 
 -- | Try to dispatch a pattern-accessor call through a user-declared
@@ -1261,7 +1261,7 @@ wrapBoundInToIndex lang midx boundType expr = do
   case mSrc of
     Just src ->
       let wrapFT = FunT [boundType] optI64T
-      in return $ PolyApp (PolyExe (Idx midx wrapFT) (SrcCallP src)) [expr]
+      in return $ PolyApp (PolyExe (Idx midx wrapFT) (SrcCallP Nothing src)) [expr]
     Nothing -> MM.throwSourcedError midx $
       "No IndexLike.__to_index__ instance found for" <+> pretty boundType
       <+> "in language" <+> pretty lang
@@ -1400,7 +1400,7 @@ dispatchListLit midx cidx lang userT userTV userArgs xs' = do
         Just src ->
           let inner = PolyList (Idx cidx wireTV) (map (Idx cidx) wireArgs) xs'
               funT = FunT [AppT (VarT wireTV) wireArgs] userT
-          in return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP src)) [inner]
+          in return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP Nothing src)) [inner]
     _ -> MM.throwSourcedError midx "Expected a list type"
 
 -- | Emit a primitive literal at user-facing type @userT@ (whose outer
@@ -1466,7 +1466,7 @@ dispatchPrimLit midx lang userT userTV mkLit = do
     Nothing -> return (mkLit userTV)
     Just src ->
       let funT = FunT [typeOf wireTU] userT
-      in return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP src)) [mkLit wireTV]
+      in return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP Nothing src)) [mkLit wireTV]
 
 expressPolyExpr ::
   (Lang -> Lang -> Maybe RemoteForm) ->
@@ -1971,7 +1971,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT v) _)) (Idx c
               let inner = PolyList (Idx cidx wireV) (map (Idx cidx) wireArgs) xs'
                   funT = FunT [AppT (VarT wireV) wireArgs] userT
               in expressContainer pc (Idx midx parentLang) (Idx cidx lang) args
-                   (PolyApp (PolyExe (Idx midx funT) (SrcCallP src)) [inner])
+                   (PolyApp (PolyExe (Idx midx funT) (SrcCallP Nothing src)) [inner])
             Nothing -> MM.throwSourcedError midx $
               "Packable wire form for"
               <+> squotes (pretty v)
@@ -2036,7 +2036,7 @@ expressPolyExpr _ pl pc (AnnoS (Idx midx t) c@(Idx cidx lang, _) e@(TupS _)) = d
         Just src -> do
           inner <- expressPolyExprWrap lang (Idx cidx bodyT) (AnnoS (Idx midx bodyT) c e)
           let funT = FunT [bodyT] t
-          return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP src)) [inner]
+          return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP Nothing src)) [inner]
         Nothing -> expressPolyExprWrap pl pc (AnnoS (Idx midx bodyT) c e)
     Nothing -> MM.throwSourcedError midx "Expected a tuple type"
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
@@ -2124,7 +2124,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (Intri
       funcExpr <- expressPolyExprWrap lang (mkIdx funcE funcT) funcE
       listExpr <- expressPolyExprWrap lang (mkIdx listE listT) listE
       let mapFunT = FunT [funcT, listT] t
-          e = PolyApp (PolyExe (Idx midx mapFunT) (SrcCallP mapSrc)) [funcExpr, listExpr]
+          e = PolyApp (PolyExe (Idx midx mapFunT) (SrcCallP Nothing mapSrc)) [funcExpr, listExpr]
       expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (IntrinsicS intr xs)) = do
   xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs
@@ -2207,11 +2207,11 @@ expressPolyApp ::
   AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
   [PolyExpr] ->
   MorlocMonad PolyExpr
-expressPolyApp _ (AnnoS g@(Idx gi (FunT inputs _)) _ (ExeS (SrcCall src))) xs = do
+expressPolyApp _ (AnnoS g@(Idx gi (FunT inputs _)) (Idx ci _, _) (ExeS (SrcCall src))) xs = do
   checkRsizeArity gi src (length inputs)
-  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP src)) xs
-expressPolyApp _ (AnnoS g _ (ExeS (SrcCall src))) xs =
-  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP src)) xs
+  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP (Just ci) src)) xs
+expressPolyApp _ (AnnoS g (Idx ci _, _) (ExeS (SrcCall src))) xs =
+  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP (Just ci) src)) xs
 -- Eta-expanded pattern call: fires when a pattern-typed expression
 -- (e.g. @firstOf f = .[0] f@) is used higher-order (e.g. @map firstOf
 -- fs@). The eta-expansion path in 'expressPolyExpr' delegates to

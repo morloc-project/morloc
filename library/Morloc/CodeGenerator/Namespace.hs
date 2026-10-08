@@ -424,7 +424,10 @@ instance Pretty SerialAST where
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
 data ExecutableExpressionPool
-  = SrcCallP Source -- source code
+  = SrcCallP (Maybe Int) Source
+  -- ^ A call of a sourced function, with the index of the source expression
+  -- it was linked from when a user term makes it; a call the compiler builds
+  -- itself has none.
   | PatCallP Pattern -- pattern function
   | LocalCallP Int -- a locally defined function
   | PapplyP Int
@@ -436,7 +439,7 @@ data ExecutableExpressionPool
   deriving (Show, Ord, Eq)
 
 instance Pretty ExecutableExpressionPool where
-  pretty (SrcCallP src) = pretty src
+  pretty (SrcCallP _ src) = pretty src
   pretty (PatCallP pat) = pretty pat
   pretty (LocalCallP i) = "x" <> pretty i
   pretty (PapplyP i) = "papply_x" <> pretty i
@@ -1840,7 +1843,7 @@ instance Pretty PolyExpr where
     "PolyDebugWrap<" <> pretty m <> ">" <+> parens (pretty e)
   pretty (PolyBndVar _ _) = "PolyBndVar"
   pretty (PolyLetVar _ _) = "PolyLetVar"
-  pretty (PolyExe _ (SrcCallP src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
+  pretty (PolyExe _ (SrcCallP _ src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
   pretty (PolyExe _ (PatCallP _)) = "PolyExe<pattern>"
   pretty (PolyExe _ (LocalCallP _)) = "PolyExe<local>"
   pretty (PolyExe _ (PapplyP _)) = "PolyExe<papply>"

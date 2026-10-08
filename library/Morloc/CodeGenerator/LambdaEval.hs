@@ -14,6 +14,7 @@ unapplied lambdas, never @(\\x -> body) arg@.
 -}
 module Morloc.CodeGenerator.LambdaEval
   ( applyLambdas
+  , applyPoolLambdas
   , reindexTree
   ) where
 
@@ -22,10 +23,10 @@ import Morloc.CodeGenerator.Grammars.Common (propagateManifoldLabel)
 import Morloc.Frontend.Namespace (newIndex)
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
-import qualified Morloc.Data.GMap as GMap
 import Morloc.Data.Doc (pretty, squotes, (<+>))
 import Morloc.CodeGenerator.Serial (containsFunT)
 import Morloc.CodeGenerator.Value (etaParts, isValue)
+import Morloc.CodeGenerator.EffectBoundary (sourceSignature)
 import qualified Morloc.Data.Text as MT
 import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 
@@ -123,9 +124,12 @@ import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 -- | Beta-reduce a tree, then give every function value the arity of its
 -- type (see 'saturate').
 applyLambdas :: Bool -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
-applyLambdas ai e = do
-  e' <- reduceRoot ai e >>= saturateAt True ai
-  if ai then return e' else groupCallbacks e'
+applyLambdas ai e = reduceRoot ai e >>= saturateAt True ai
+
+-- | 'applyLambdas' for a tree that becomes a pool: each function passed to a
+-- source is also given the grouping the source calls it with.
+applyPoolLambdas :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
+applyPoolLambdas e = applyLambdas False e >>= groupCallbacks
 
 -- | Reduce the root of a tree. A root of function type -- a command, a shared
 -- specialization, a recursive helper -- is called with every input of its
@@ -297,21 +301,8 @@ recordStage flat k stage =
 -- with two arguments, @(a -> (b -> c))@ with one. A function taking more than
 -- that is passed as @\a1..an -> g a1..an@: a partial application of it, which
 -- runs any stage it reaches ('mlc_papply').
-groupCallbacks :: AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
-groupCallbacks e0 = do
-  sigs <- MM.gets stateSignatures
-  let grouping =
-        Map.fromList
-          [ (srcKey src, (map groups (params (etype et)), et))
-          | sig <- GMap.elems sigs
-          , (et, tts) <- case sig of
-              Monomorphic tt -> [(et, [tt]) | Just et <- [termGeneral tt]]
-              -- a method is called as its class declares it
-              Polymorphic _ _ et tts -> [(et, tts)]
-          , tt <- tts
-          , (_, Idx _ src) <- termConcrete tt
-          ]
-  go grouping e0
+groupCallbacks :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
+groupCallbacks = go
   where
     params (ForallU _ t) = params t
     params (FunU ts _) = ts
@@ -327,11 +318,13 @@ groupCallbacks e0 = do
     passesGrouped (FunU ts _) = any ((> 1) . length . groups) ts
     passesGrouped _ = False
 
-    go grouping (AnnoS g@(Idx gi _) c (AppS f xs)) = do
-      f' <- go grouping f
-      xs' <- mapM (go grouping) xs
-      xs'' <- case sourceOf f of
-        Just src | Just (gss, et) <- Map.lookup (srcKey src) grouping -> do
+    go (AnnoS g@(Idx gi _) c (AppS f xs)) = do
+      f' <- go f
+      xs' <- mapM go xs
+      sig <- maybe (return Nothing) (uncurry sourceSignature) (sourceOf f)
+      xs'' <- case (sourceOf f, sig) of
+        (Just (_, src), Just et) -> do
+          let gss = map groups (params (etype et))
           when (any passesGrouped (params (etype et))) $
             MM.throwSourcedError gi $
               "The source" <+> squotes (pretty (unEVar (srcAlias src)))
@@ -341,11 +334,9 @@ groupCallbacks e0 = do
           sequence [regroup x gs | (x, gs) <- zip xs' (gss ++ repeat [])]
         _ -> return xs'
       return (AnnoS g c (AppS f' xs''))
-    go grouping (AnnoS g c e) = AnnoS g c <$> mapExprSM (go grouping) e
+    go (AnnoS g c e) = AnnoS g c <$> mapExprSM go e
 
-    srcKey src = (srcName src, srcLang src, srcPath src)
-
-    sourceOf (AnnoS _ _ (ExeS (SrcCall src))) = Just src
+    sourceOf (AnnoS _ (Idx ci _) (ExeS (SrcCall src))) = Just (Just ci, src)
     sourceOf (AnnoS _ _ (VarS _ (One x))) = sourceOf x
     sourceOf _ = Nothing
 

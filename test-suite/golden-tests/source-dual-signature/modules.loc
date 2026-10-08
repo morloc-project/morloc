@@ -1,0 +1,13 @@
+-- One host function, one name, two signatures in two modules.
+
+module modules (viaB, viaA)
+
+import root-py
+import .a as a
+import .b as b
+
+viaB :: [Int] -> <IO> [Int]
+viaB xs = b.doubleAll xs
+
+viaA :: [Int] -> [Int]
+viaA xs = a.doubleAll xs

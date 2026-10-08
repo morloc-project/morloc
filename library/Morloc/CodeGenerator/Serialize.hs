@@ -562,7 +562,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
               raw = IntrinsicN rawInnerTf intr msch es''
           packed <- case mPacker of
             Just (packerSrc, _) ->
-              return $ AppExeN payloadTf (SrcCallP packerSrc) [NativeArgExpr raw]
+              return $ AppExeN payloadTf (SrcCallP Nothing packerSrc) [NativeArgExpr raw]
             Nothing -> return raw
           -- Reuse @try rather than a bespoke wrap: converting a raised
           -- failure into an Ok/Err value is exactly what it does, and
@@ -586,7 +586,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           raw = IntrinsicN rawTf intr msch es''
       case mPacker of
         Just (packerSrc, _) ->
-          return $ AppExeN tf (SrcCallP packerSrc) [NativeArgExpr raw]
+          return $ AppExeN tf (SrcCallP Nothing packerSrc) [NativeArgExpr raw]
         Nothing -> return raw
 
     -- For data-bearing runtime intrinsics (@save/@savej/@savem/@show/@hash),
@@ -642,7 +642,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         SerialPack _ (packer, _) -> do
           let unpackerSrc = typePackerReverse packer
               unpackedType = typePackerUnpacked packer
-          return [AppExeN unpackedType (SrcCallP unpackerSrc) [NativeArgExpr dataArg]]
+          return [AppExeN unpackedType (SrcCallP Nothing unpackerSrc) [NativeArgExpr dataArg]]
         _ -> return [dataArg]
 
     -- Symmetric to unpackDataArgIfNeeded: @load and @read return the wire

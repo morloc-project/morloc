@@ -35,7 +35,7 @@ import Morloc.CodeGenerator.EffectBoundary (checkEffectBoundaries, insertEffectB
 import Morloc.CodeGenerator.Emit (TranslateFn, checkManifoldIds, emit, pool)
 import Morloc.CodeGenerator.StaticArgs (specializeStaticArgs)
 import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps, addLoopWraps, addNativeRecEntries, etaReduceForwarders)
-import Morloc.CodeGenerator.LambdaEval (applyLambdas)
+import Morloc.CodeGenerator.LambdaEval (applyLambdas, applyPoolLambdas)
 import Morloc.CodeGenerator.Namespace (Arg, PolyHead (..), SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Morloc.CodeGenerator.Parameterize (parameterize)
@@ -101,13 +101,13 @@ typecheck path code =
 
 -- | Do everything except language specific code generation.
 --
--- Runs 'applyLambdas' first, matching the pool path in 'writeProgram': the
--- 'express' pipeline assumes lambdas have been reduced/lifted, so skipping it
--- lets a lambda reach 'expressPolyApp' as an un-handled head ("unexpected
--- LamS"). 'False' keeps a multiply-used lambda as a shared native closure
--- (rASTs become pools, not the pure nexus evaluator).
+-- Runs 'applyPoolLambdas' first, matching the pool path in 'writeProgram':
+-- the 'express' pipeline assumes lambdas have been reduced/lifted, so skipping
+-- it lets a lambda reach 'expressPolyApp' as an un-handled head ("unexpected
+-- LamS"). A multiply-used lambda is kept as a shared native closure (rASTs
+-- become pools, not the pure nexus evaluator).
 generatePools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
-generatePools rASTs = mapM (applyLambdas False) rASTs >>= specializeStaticArgs >>= lowerPools
+generatePools rASTs = mapM applyPoolLambdas rASTs >>= specializeStaticArgs >>= lowerPools
 
 -- | Lower realized pool trees to per-language serial manifolds. This is the
 -- whole path from parameterization to pool assembly, shared by 'writeProgram'
@@ -182,7 +182,7 @@ writeProgram translateFn path code =
     -- cannot hold a native closure, so let-bound lambdas are always inlined
     -- there (True); rASTs become pools, where a multiply-used lambda is kept
     -- as a shared native closure to avoid exponential inlining (False).
-    >>= bimapM (mapM (applyLambdas True)) (mapM (applyLambdas False))
+    >>= bimapM (mapM (applyLambdas True)) (mapM applyPoolLambdas)
     -- Give a recursive helper its own copy for each closed function it is
     -- passed at a position every recursion passes through unchanged, so the
     -- function is referenced directly rather than carried as a closure value.

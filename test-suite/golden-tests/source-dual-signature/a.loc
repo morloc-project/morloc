@@ -1,0 +1,8 @@
+-- The host function of b.loc under a pure signature and the same name.
+
+module a (doubleAll)
+
+import root-py
+
+source Py from "lib.py" ("double_all" as doubleAll)
+doubleAll :: [Int] -> [Int]

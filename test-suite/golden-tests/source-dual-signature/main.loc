@@ -1,0 +1,39 @@
+-- One host function sourced under several signatures.
+--
+-- Each signature declares a different term, and a call is made as the
+-- signature of the term it names says, whatever other signatures the same
+-- host function has and in whatever order they are declared. A pure and an
+-- effectful signature differ in whether the call is suspended; a callback
+-- parameter's type decides how the callback is passed.
+
+module main (pureFirstIO, pureFirstPure, separateIO, callbackIO, callbackPure)
+
+import root-py
+
+source Py from "lib.py" ("double_all" as doubleAll, "double_all" as doubleAllIO)
+doubleAll :: [Int] -> [Int]
+doubleAllIO :: [Int] -> <IO> [Int]
+
+source Py from "lib.py" ("triple_all" as tripleAll)
+source Py from "lib.py" ("triple_all" as tripleAllIO)
+tripleAll :: [Int] -> [Int]
+tripleAllIO :: [Int] -> <IO> [Int]
+
+source Py from "lib.py" ("apply" as applyP, "apply" as applyIO)
+applyP :: (Int -> Int) -> Int -> Int
+applyIO :: (Int -> <IO> Int) -> Int -> <IO> Int
+
+pureFirstIO :: [Int] -> <IO> [Int]
+pureFirstIO xs = doubleAllIO xs
+
+pureFirstPure :: [Int] -> [Int]
+pureFirstPure xs = doubleAll xs
+
+separateIO :: [Int] -> <IO> [Int]
+separateIO xs = tripleAllIO xs
+
+callbackIO :: Int -> <IO> Int
+callbackIO x = applyIO (\y -> do { y + 1 }) x
+
+callbackPure :: Int -> Int
+callbackPure x = applyP (\y -> y * 10) x
