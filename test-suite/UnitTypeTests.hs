@@ -1483,6 +1483,55 @@ pendingNumLitTests =
         |]
           (tuple [OptionalU int, OptionalU int])
       , assertGeneralType
+          "int literal in a list adopts Real from a later list argument"
+          [r|
+        module main (x)
+        pair :: a -> a -> (a, a)
+        toR :: Int -> Real
+        x = pair [7] [toR 1]
+        |]
+          (tuple [lst real, lst real])
+      , assertGeneralType
+          "int literal in a nested list adopts Real from a later argument"
+          [r|
+        module main (x)
+        pair :: a -> a -> (a, a)
+        toR :: Int -> Real
+        x = pair [[7]] [[toR 1]]
+        |]
+          (tuple [lst (lst real), lst (lst real)])
+      , assertGeneralType
+          "int literal in a tuple adopts Real from a later tuple argument"
+          [r|
+        module main (x)
+        pair :: a -> a -> (a, a)
+        toR :: Int -> Real
+        x = pair (7, 1) (toR 1, 2)
+        |]
+          (tuple [tuple [real, int], tuple [real, int]])
+      , assertGeneralType
+          "int literal at the head of a list adopts Real from a later element"
+          [r|
+        module main (x)
+        toR :: Int -> Real
+        x = [7, toR 1]
+        |]
+          (lst real)
+      , assertGeneralType
+          "list of int literals defaults to Int"
+          [r|
+        module main (x)
+        x = [7, 8, 9]
+        |]
+          (lst int)
+      , assertGeneralType
+          "tuple of an int and a real literal keeps both"
+          [r|
+        module main (x)
+        x = (7, 2.5)
+        |]
+          (tuple [int, real])
+      , assertGeneralType
           "int literal before an applied Int argument stays Int"
           [r|
         module main (x)

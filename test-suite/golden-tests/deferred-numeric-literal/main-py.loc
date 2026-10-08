@@ -1,9 +1,10 @@
 -- A numeric literal passed where a type variable is still unsolved takes the
 -- type a later argument gives that variable, even when the later argument is
 -- itself an application. At an optional type the literal is converted to
--- the optional, as a literal written against that type is.
+-- the optional, as a literal written against that type is. The same holds
+-- for a literal inside a list or tuple literal.
 
-module main (x, y, z)
+module main (x, y, z, inList, inTuple)
 
 import root-py
 
@@ -24,3 +25,9 @@ y n = pair 7 (toR n)
 
 z :: Int -> (?Int, ?Int)
 z n = pair 7 Null
+
+inList :: Int -> [?Int]
+inList n = [7, wrap n]
+
+inTuple :: Int -> ((Real, Int), (Real, Int))
+inTuple n = pair (7, 1) (toR n, 2)

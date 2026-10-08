@@ -1165,7 +1165,7 @@ synthE _ g (LstS []) =
       listType = BT.listU itemType
    in return (g1, listType, LstS [])
 synthE i g (LstS (e : es)) = do
-  (g1, itemType, itemExpr) <- synthG g e
+  (g1, itemType, itemExpr) <- synthElem g e
   (g2, listType, listExpr) <- checkE' i g1 (LstS es) (BT.listU itemType)
   case listExpr of
     (LstS es') -> return (g2, listType, LstS (itemExpr : es'))
@@ -1177,7 +1177,7 @@ synthE _ g (TupS []) =
    in return (g, t, TupS [])
 synthE i g (TupS (e : es)) = do
   -- synthesize head
-  (g1, itemType, itemExpr) <- synthG g e
+  (g1, itemType, itemExpr) <- synthElem g e
 
   -- synthesize tail
   (g2, tupleType, tupleExpr) <- synthE' i g1 (TupS es)
@@ -1975,6 +1975,28 @@ checkIntrinsicArgs i g intr argTypes = do
         (IntrLang, []) -> return g
         _ -> return g
 
+-- | Synthesize an element of a list or tuple literal. A numeric literal is
+-- checked against a fresh variable instead, so a later element or argument
+-- can still give it its type, as it can a literal passed on its own.
+synthElem ::
+  Gamma ->
+  AnnoS Int ManyPoly Int ->
+  MorlocMonad (Gamma, TypeU, AnnoS (Indexed TypeU) ManyPoly Int)
+synthElem g x@(AnnoS _ _ e)
+  | numLit e = let (g1, v) = newvar "lit_" g in checkG g1 x v
+  | otherwise = synthG g x
+  where
+    numLit (IntS _ _) = True
+    numLit (RealS _ _) = True
+    numLit _ = False
+
+-- | Defer a literal of kind @k@ at existential @v@. One entry per variable
+-- and kind decides them all, so the literals of a long list add one.
+deferNumLit :: (Int, TVar, NumLitKind) -> Gamma -> Gamma
+deferNumLit lit@(_, v, k) g
+  | any (\(_, v', k') -> v' == v && k' == k) (gammaPendingNumLits g) = g
+  | otherwise = g {gammaPendingNumLits = lit : gammaPendingNumLits g}
+
 -- | A numeric literal whose type was deferred and later resolved to an
 -- optional is coerced to it, as a literal checked against that optional is.
 coerceLiteralsToOptional ::
@@ -2195,12 +2217,21 @@ checkE i g e t | Just e' <- reduceSetterRedex e = checkE i g e' t
 -- are nominal.
 checkE i g1 (LstS (e : es)) (AppU (VarU v) [t])
   | v == BT.list
-  , not (isNatExpr t || isStrExpr t || isRecExpr t
-         || isListExpr t || isSetExpr t) = do
+  , plainElem t = do
       (g2, t2, e') <- checkG g1 e t
-      -- LstS [] will go to the normal Sub case
-      (g3, t3, LstS es') <- checkE' i g2 (LstS es) (AppU (VarU v) [t2])
-      return (g3, t3, LstS (map (applyGen g3) (e' : es')))
+      (g3, t3, rest) <- checkRest g2 t2 [] es
+      -- the final context is applied once, not once per element
+      return (g3, t3, LstS (map (applyGen g3) (e' : rest)))
+  where
+    plainElem x = not (isNatExpr x || isStrExpr x || isRecExpr x || isListExpr x || isSetExpr x)
+    checkRest g tc acc (x : xs)
+      | plainElem tc = do
+          (g', tc', x') <- checkG g x tc
+          checkRest g' tc' (x' : acc) xs
+    -- LstS [] goes to the normal Sub case
+    checkRest g tc acc xs = do
+      (g', t', LstS xs') <- checkE' i g (LstS xs) (AppU (VarU v) [tc])
+      return (g', t', reverse acc ++ xs')
 checkE i g0 (LamS vs body) t@(FunU as b)
   | length vs == length as = do
       let g1 = g0 ++> zipWith AnnG vs as
@@ -2581,7 +2612,7 @@ checkE i g (IntS si x) t = do
       -- type via the deferred-numeric-literal resolution at the end of
       -- typechecking. If nothing pins it, apply the @Int@ default.
       ExistU v _ _ ->
-        let g' = g { gammaPendingNumLits = (i, v, IntDefault) : gammaPendingNumLits g }
+        let g' = deferNumLit (i, v, IntDefault) g
         in return (g', tApplied, IntS si x)
       _ -> checkEFallback i g (IntS si x) t
 checkE i g (RealS si x) t = do
@@ -2593,7 +2624,7 @@ checkE i g (RealS si x) t = do
     then return (g, tApplied, RealS si x)
     else case tApplied of
       ExistU v _ _ ->
-        let g' = g { gammaPendingNumLits = (i, v, RealDefault) : gammaPendingNumLits g }
+        let g' = deferNumLit (i, v, RealDefault) g
         in return (g', tApplied, RealS si x)
       _ -> checkEFallback i g (RealS si x) t
 -- String, boolean, and unit literal acceptance. Same wire-parent walk

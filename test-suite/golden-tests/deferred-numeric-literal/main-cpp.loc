@@ -1,6 +1,6 @@
 -- The program of main-py.loc in C++.
 
-module main (x, y, z)
+module main (x, y, z, inList, inTuple)
 
 import root-cpp
 
@@ -21,3 +21,9 @@ y n = pair 7 (toR n)
 
 z :: Int -> (?Int, ?Int)
 z n = pair 7 Null
+
+inList :: Int -> [?Int]
+inList n = [7, wrap n]
+
+inTuple :: Int -> ((Real, Int), (Real, Int))
+inTuple n = pair (7, 1) (toR n, 2)
