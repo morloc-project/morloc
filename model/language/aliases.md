@@ -135,8 +135,8 @@ type docstrings.
 
 ### ALIAS-11 An alias names a type of any kind, over its own parameters
 Intent: ruled 2026-10-08
-Tests: spec-alias-11-1, spec-alias-11-2
-Code: deviates (unfiled: a free variable in an alias body is accepted, as in `type Twice = (a, a)`)
+Tests: spec-alias-11-1, spec-alias-11-2, spec-alias-11-3, spec-alias-11-4, spec-alias-11-5
+Code: conforms 2026-10-09
 
 An alias may name a row, a table or any other kind of type
 (`type Cols = {x = Int, y = Bool}`, `type MyTable n = Table n Cols`). Every

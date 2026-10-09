@@ -2206,6 +2206,7 @@ inferAliasParamKinds dag = do
         [ (v, map (either snd (const KindType)) ps)
         | (_, ExprTypeE Nothing v ps _ _ _) <- allDecls ]
   mapM_ checkRegularRecursion decls
+  mapM_ checkClosed decls
   refined <- solve (length decls + 1) declared decls
   return $ DAG.mapNode (rewrite refined) dag
   where
@@ -2222,6 +2223,25 @@ inferAliasParamKinds dag = do
                 <+> squotes (pretty (if null args then VarU v else AppU (VarU v) args))
                 <> ". A recursive alias must refer to itself with exactly its own parameters"
                 <+> parens (hsep (map pretty own)) <> "."
+
+    -- Every type variable in an alias body is one of its parameters
+    -- (ALIAS-11): a free variable would make the alias a different type at
+    -- each use, with no way to say how two uses relate.
+    checkClosed :: (Int, ExprTypeE) -> MorlocMonad ()
+    checkClosed (i, ExprTypeE _ v ps body _ _) =
+      case Set.toList (typeVariables body `Set.difference` Set.fromList [p | Left (p, _) <- ps]) of
+        [] -> return ()
+        free -> MM.throwSourcedError i $
+          aliasNamed v <+> "uses" <+> hsep (punctuate "," (map (squotes . pretty) free))
+            <+> "without declaring" <+> (if length free == 1 then "it" else "them")
+            <+> "as a parameter."
+
+    typeVariables :: TypeU -> Set TVar
+    typeVariables t = case t of
+      VarU v@(TV n) | isTypeVariableName n -> Set.singleton v
+      KVarU (v@(TV n), _) | isTypeVariableName n -> Set.singleton v
+      ForallU v body -> Set.delete v (typeVariables body)
+      _ -> Set.unions (map typeVariables (typeUChildren t))
 
     -- Kinds settle in at most one round per alias, since each round can
     -- only pass a kind one alias further along a chain.

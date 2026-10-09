@@ -6955,8 +6955,10 @@ typedefKindVarTests =
                           t
              Left e -> assertFailure $ "Expected expansion, got: " ++ show e
     , testCase "evaluateType: Nat typedef param leaves unrelated NatVarU intact" $
-        -- type Foo (n :: Nat) = Vector (k + n) Int
-        -- Foo 3 should give Vector (k + 3) Int (k stays NatVarU)
+        -- Substitution replaces only the parameter: in the body
+        -- Vector (k + n) Int, Foo 3 gives Vector (k + 3) Int. A declaration
+        -- with the free k is rejected before expansion (ALIAS-11); the
+        -- expander is tested on it directly.
         let bodyT = AppU (VarU (TV "Vector"))
                       [NatAddU (NatVarU (TV "k")) (NatVarU (TV "n")), VarU (TV "Int")]
             params = [Left (TV "n", KindNat)]

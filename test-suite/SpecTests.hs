@@ -455,6 +455,29 @@ aliasTests =
         type MyTable n = Tbl n Cols
         f :: MyTable n -> Int
         |]
+    , reject
+        "spec-alias-11-3"
+        [r|
+        module main (f)
+        type Twice = (a, a)
+        f :: Twice -> Int
+        |]
+    , accept
+        "spec-alias-11-4"
+        [r|
+        module main (f)
+        type Twice a = (a, a)
+        f :: Twice Int -> Int
+        |]
+    , reject
+        "spec-alias-11-5"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type Cols = {x = Int, y = Bool}
+        type MyTable = Tbl n Cols
+        f :: MyTable -> Int
+        |]
     , accept
         "spec-alias-12-1"
         [r|
