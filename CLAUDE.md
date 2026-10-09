@@ -65,6 +65,31 @@ test is named for its item (`spec-alias-3-1`): a case in
 Before changing behavior a spec item governs, read the item; a `ruled`
 item outranks the code.
 
+## Issues
+
+`model/runtime/issues/` is where every known issue in morloc is recorded,
+so that none is lost between sessions. Record an issue there the moment you
+find it, before working on it and whether or not you fix it. It replaces
+loose findings files under `/work/plans`; GitHub issues remain for what the
+user chooses to publish.
+
+- Frame every issue against the model: either the code violates a named
+  spec item, or the spec is incomplete (it says nothing, or something the
+  user has not ruled on). Name the item, or the file whose gap it is.
+- Keep entries minimal: what is wrong, the evidence level (reproduced,
+  read, speculative), a reproduction or file:line, and any open design
+  question. Cached state that helps the next session (a reproduction
+  program, a narrowed cause, a partial ruling) belongs in the entry.
+- Related issues share a file in `issues/`; `issues/LIST.md` lists every
+  file with a one-line description. Add a line when you add a file.
+- When an issue is solved, delete its entry completely, and delete a file
+  (and its LIST.md line) once it is empty. The fix's commit and the spec
+  item it now satisfies are the record; no solved or archived issues are
+  kept here.
+- Issue files are read by the model checks: keep them ASCII, and never
+  start a heading with an item ID (`### SHM-6 ...`), which would define a
+  duplicate item. Cite IDs in the text.
+
 ## Thread and memory model
 
 `model/runtime/` holds the spec of threads, processes, locks and shared-memory
