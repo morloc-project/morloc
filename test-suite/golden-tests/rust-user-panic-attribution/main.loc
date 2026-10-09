@@ -1,5 +1,5 @@
 -- A panic in user Rust code that is not in a sourced file itself is still the
--- user's (model/panic.md PANIC-11): a sourced operator dividing by zero, and
+-- user's (model/runtime/panic.md PANIC-11): a sourced operator dividing by zero, and
 -- a helper file the sourced file pulls in. @try catches both and the pool
 -- keeps serving.
 module main (tryDiv, tryHelper)

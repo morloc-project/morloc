@@ -4864,7 +4864,7 @@ effVar :: MT.Text -> TypeU -> TypeU
 effVar v = EffectU (EffectVar (TV v))
 
 -- | Effect subtyping covers four cases the spec lays out
--- ('model/effects.md' under "Subtyping" and "Effect Checking"):
+-- (EFF-8 and EFF-10):
 --
 --   1. Widening accepted: fewer effects can be used where more are
 --      expected.  This is the one direction the rule permits.
@@ -4989,7 +4989,7 @@ effectSubtypeTests =
 
 -- | Effect synthesis tests verify that the inferred effect set on a
 -- top-level export matches the spec's structural propagation rule
--- ('model/effects.md' under "Effect Inference"):
+-- (EFF-6):
 effectSynthesisTests :: TestTree
 effectSynthesisTests =
   localOption (mkTimeout 100000) $ -- 0.1 second timeout

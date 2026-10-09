@@ -30,7 +30,7 @@ use rustmorloc::{MorlocFn0, MorlocFn1, MorlocFn2, MorlocFn3, MorlocFn4, MorlocFn
 // each pinned by path in the bare-rustc build -- avoiding `libc` crate-name
 // ambiguity across the many hashed rlibs staged in rust-deps.
 #[cfg(not(panic = "unwind"))]
-compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
+compile_error!("morloc needs panic = \"unwind\" (model/runtime/panic.md PANIC-8)");
 
 // PANIC-9: a frame of the pool file above the panic machinery, which the
 // classifier needs to trust a backtrace's paths; black_box keeps the call

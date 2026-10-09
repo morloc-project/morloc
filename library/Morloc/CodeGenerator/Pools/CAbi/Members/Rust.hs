@@ -1395,7 +1395,7 @@ rustPathLiteral :: Path -> MDoc
 rustPathLiteral = dquotes . pretty . RP.rustEscape . MT.pack
 
 -- | The user's code as panic locations name it, so the pool can tell a user
--- panic from a runtime one (model/panic.md PANIC-9, PANIC-11): the included
+-- panic from a runtime one (model/runtime/panic.md PANIC-9, PANIC-11): the included
 -- sources, the generated operator shims, and, as entries ending in @/@, the
 -- directories of the sources and of the local crates.
 rustUserFiles :: [Path] -> [Path] -> MDoc

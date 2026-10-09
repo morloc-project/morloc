@@ -1,5 +1,5 @@
 -- Panics in sourced Rust are the call's failure wherever they are raised
--- (model/panic.md PANIC-6): one reported at the user's own line, one raised
+-- (model/runtime/panic.md PANIC-6): one reported at the user's own line, one raised
 -- inside the standard library on the user's behalf (found by walking the
 -- stack), and one in a user function the runtime applies through `map`.
 -- Built with thin LTO, so inlining across user and generated code is real.

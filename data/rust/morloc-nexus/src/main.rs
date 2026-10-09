@@ -5,7 +5,7 @@
 //! routes function calls to them over Unix sockets.
 
 #[cfg(not(panic = "unwind"))]
-compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
+compile_error!("morloc needs panic = \"unwind\" (model/runtime/panic.md PANIC-8)");
 mod cli;
 mod convert;
 mod dispatch;
@@ -109,7 +109,7 @@ fn main() {
     }
 
     // `morloc-nexus sweep-run <target> <nexus pid> <nexus start>`: started
-    // by a pool's teardown (model/daemon.md DAEMON-13), never by a user.
+    // by a pool's teardown (model/runtime/daemon.md DAEMON-13), never by a user.
     if std::env::args().nth(1).as_deref() == Some("sweep-run") {
         let args: Vec<String> = std::env::args().skip(2).collect();
         let (Some(target), Some(pid), Some(start)) = (

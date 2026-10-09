@@ -1,4 +1,4 @@
-//! How long a remote client may take over a request (model/network.md NET-2).
+//! How long a remote client may take over a request (model/runtime/network.md NET-2).
 
 use std::io;
 use std::time::{Duration, Instant};

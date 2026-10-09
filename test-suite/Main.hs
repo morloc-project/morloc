@@ -26,6 +26,7 @@ import LockFileTests (lockFileTests)
 import RustPoolBuildTests (rustPoolBuildTests)
 import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
+import SpecTests (specTests)
 import VariantMergeTests (variantMergeTests)
 import SystemConfigTests (systemConfigTests)
 import UnitTypeTests
@@ -33,7 +34,8 @@ import VersionConstraintTests (versionConstraintTests)
 
 unitTests :: [TestTree]
 unitTests =
-  [ unitTypeTests
+  [ specTests
+  , unitTypeTests
   , recSolverTests
   , abiTests
   , buildParamsTests

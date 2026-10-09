@@ -54,12 +54,23 @@ If the required morloc libraries may have changed, you may run:
 
 $ morloc install --force <remote-model-name>
 
+## Specification
+
+`model/` holds the spec the code is held to, in three parts that share the
+format in `model/README.md`: `model/language/` (what programs mean),
+`model/compiler/` (internal contracts) and `model/runtime/` (below).
+`bash model/check.sh` checks the items and their test citations. A spec
+test is named for its item (`spec-alias-3-1`): a case in
+`test-suite/SpecTests.hs`, or a golden `test-suite/golden-tests/spec-*/`.
+Before changing behavior a spec item governs, read the item; a `ruled`
+item outranks the code.
+
 ## Thread and memory model
 
-`model/` holds the spec of threads, processes, locks and shared-memory
+`model/runtime/` holds the spec of threads, processes, locks and shared-memory
 ownership. Every process-wide mutable value (lock, atomic, once-cell,
 thread-local, lock field, binder or emitted static) needs a row in
-`model/registry.tsv` with its fork class; a test fails until it has one, and
+`model/runtime/registry.tsv` with its fork class; a test fails until it has one, and
 prints the row to fill in. It describes the system as it is; where code breaks it, the
 break is listed in its deviations section. Read the relevant section before
 changing that code, and change the spec in the same commit as any protocol

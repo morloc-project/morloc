@@ -27,7 +27,7 @@
 //!  * I8  All scalar pokes through the byte cursor use unaligned access.
 
 #[cfg(not(panic = "unwind"))]
-compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
+compile_error!("morloc needs panic = \"unwind\" (model/runtime/panic.md PANIC-8)");
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_char, c_void, CString};

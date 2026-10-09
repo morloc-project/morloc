@@ -1,5 +1,5 @@
 -- A panic in a function a sourced Rust file pulls in from outside its own
--- directory is still the user's (model/panic.md PANIC-15): the generated
+-- directory is still the user's (model/runtime/panic.md PANIC-15): the generated
 -- source calls it on a line of its own, and that line is the user's. @try
 -- catches it and the pool keeps serving.
 module main (tryHelper, helperOk)

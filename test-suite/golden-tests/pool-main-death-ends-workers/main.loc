@@ -1,5 +1,5 @@
 -- A pool is its main process together with every process in its group
--- (model/daemon.md DAEMON-14). When the main process of a Python (fork
+-- (model/runtime/daemon.md DAEMON-14). When the main process of a Python (fork
 -- mode) or R pool dies while a forked worker is running a call, the nexus
 -- kills the pool's group, so the call fails at once instead of the worker
 -- finishing it for a pool that no longer exists. Each function here kills

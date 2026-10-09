@@ -1,6 +1,6 @@
 -- A panic in a sourced Rust function whose body lies outside the user's own
 -- source directory is the user's wherever the generated code calls it
--- (model/panic.md PANIC-15): with another call as its argument, with a string
+-- (model/runtime/panic.md PANIC-15): with another call as its argument, with a string
 -- argument, after non-ASCII text on the same line, and as the later
 -- argument group of a curried function. @try catches each and the pool
 -- keeps serving.

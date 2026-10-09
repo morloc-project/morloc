@@ -1,5 +1,5 @@
 #[cfg(not(panic = "unwind"))]
-compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
+compile_error!("morloc needs panic = \"unwind\" (model/runtime/panic.md PANIC-8)");
 // Modules that come entirely (error, hash, schema, cschema) or
 // partially (packet, null_check) from morloc-runtime-types live as
 // thin re-export shims in this crate so existing `crate::error::*`,

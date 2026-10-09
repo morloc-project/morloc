@@ -15,7 +15,7 @@ import root-py
 
 -- An argument is evaluated once, at the application, however many times the
 -- parameter is referenced and wherever the references sit
--- (model/effects.md, law 5).
+-- (EVAL-1).
 --
 -- `tick` records each of its evaluations in `tick.log` and `ticks` reads the
 -- count after its argument is computed, so each count export prints how many

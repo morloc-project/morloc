@@ -924,7 +924,7 @@ fn read_lines_capped<R: BufRead>(mut reader: R) -> impl Iterator<Item = Result<S
 // Because the endpoint is network-reachable, request reads are bounded (header
 // and body size caps, total read deadlines, a cap on open connections) and
 // the session table is bounded (idle TTL + a hard cap), so a slow or abusive
-// client cannot exhaust memory or threads (model/network.md NET-2, NET-3).
+// client cannot exhaust memory or threads (model/runtime/network.md NET-2, NET-3).
 
 /// Cap on connections served at once; past it a connection is answered 503.
 const MAX_CONNECTIONS: usize = 128;
@@ -2214,7 +2214,7 @@ fn eval_failure_response(out: &std::process::Output, cpu_secs: i32) -> (u16, Str
 }
 
 /// A blocked eval spends no CPU, so its CPU limit is backed by a wall limit
-/// of this many times as long (model/daemon.md DAEMON-6).
+/// of this many times as long (model/runtime/daemon.md DAEMON-6).
 const EVAL_WALL_PER_CPU: u64 = 4;
 
 /// Process groups of running evals, killed when the front-end exits.

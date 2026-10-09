@@ -36,7 +36,7 @@ jobs:
           key: tla2tools-1.7.4
 
       - name: Model-check the spec
-        run: bash model/tla/check.sh
+        run: bash model/runtime/tla/check.sh
 
   build-and-test:
     strategy:

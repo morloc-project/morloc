@@ -1,5 +1,5 @@
 -- A panic in sourced Rust is the call's failure, not the pool's end
--- (model/panic.md PANIC-6): the caller gets an error naming the panic, a
+-- (model/runtime/panic.md PANIC-6): the caller gets an error naming the panic, a
 -- @try catches it, and the call goes on.
 module main (nth, safeNth, afterPanic)
 

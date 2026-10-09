@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// A process-wide value set on first use, safe to fork at any moment
-/// (INIT-3, model/tla/OncePublish.tla). Each first user builds a value
+/// (INIT-3, model/runtime/tla/OncePublish.tla). Each first user builds a value
 /// outside any lock and publishes it by compare-and-swap; a loser drops its
 /// own and takes the published one. Nothing ever waits on another thread, so
 /// a forked child is never left waiting on a builder it does not have.

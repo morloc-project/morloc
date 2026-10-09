@@ -57,7 +57,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn model_dir() -> PathBuf {
-    repo_root().join("model")
+    repo_root().join("model").join("runtime")
 }
 
 fn walk(dir: &Path, exts: &[&str], skip: &[&str]) -> Vec<PathBuf> {
@@ -644,7 +644,7 @@ fn parse_registry(text: &str) -> Result<Vec<Row>, String> {
 
 fn rows() -> Vec<Row> {
     let text = std::fs::read_to_string(model_dir().join("registry.tsv")).unwrap();
-    parse_registry(&text).unwrap_or_else(|e| panic!("model/registry.tsv: {e}"))
+    parse_registry(&text).unwrap_or_else(|e| panic!("model/runtime/registry.tsv: {e}"))
 }
 
 #[test]
@@ -823,14 +823,14 @@ fn every_process_wide_value_is_registered() {
         .filter(|f| !ids.contains(f.id.as_str()))
         .map(|f| format!("{}\t?\t\t   ({:?}{})", f.id, f.kind, if f.test_only { ", test-only" } else { "" }))
         .collect();
-    assert!(missing.is_empty(), "process-wide values missing from model/registry.tsv:\n{}", missing.join("\n"));
+    assert!(missing.is_empty(), "process-wide values missing from model/runtime/registry.tsv:\n{}", missing.join("\n"));
 }
 
 #[test]
 fn every_registry_row_names_a_value_in_code() {
     let found: HashSet<String> = all_found(&scan_rust()).into_iter().map(|f| f.id).collect();
     let stale: Vec<String> = rows().into_iter().filter(|r| !found.contains(&r.id)).map(|r| r.id).collect();
-    assert!(stale.is_empty(), "model/registry.tsv rows with no value in code:\n{}", stale.join("\n"));
+    assert!(stale.is_empty(), "model/runtime/registry.tsv rows with no value in code:\n{}", stale.join("\n"));
 }
 
 #[test]
@@ -910,7 +910,7 @@ fn registry_rows_obey_their_class() {
             problems.push(format!("{site}: listed as a fork site but does not fork"));
         }
     }
-    assert!(problems.is_empty(), "model/registry.tsv disagrees with the code:\n{}", problems.join("\n"));
+    assert!(problems.is_empty(), "model/runtime/registry.tsv disagrees with the code:\n{}", problems.join("\n"));
 }
 
 #[test]
