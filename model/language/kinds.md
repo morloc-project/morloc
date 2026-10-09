@@ -48,8 +48,8 @@ one is a type error at the signature.
 
 ### KIND-6 Gradual filling through a `type` alias
 Intent: ruled 2026-10-08
-Tests: spec-kind-6-1
-Code: deviates (unfiled: only a declared kind is filled; `type MyTable n = Table n {x = Int}` used bare is rejected)
+Tests: spec-kind-6-1, spec-kind-6-2, spec-kind-6-3
+Code: conforms 2026-10-09
 
 Omitted non-`Type` arguments of an alias are filled as in KIND-5, whether
 the parameter's kind is declared or inferred (ALIAS-8). ALIAS-3 counts only

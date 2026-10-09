@@ -1589,7 +1589,12 @@ refineKinds dag = do
                     buckets = bucketByKind args'
                     typeParamCount = length [() | KindType <- paramKinds]
                     typeArgsProvided = length (Map.findWithDefault [] KindType buckets)
-                in if typeArgsProvided < typeParamCount
+                    -- Every given argument needs a parameter of its kind;
+                    -- one that has none is left for the arity and kind
+                    -- checks to report rather than dropped.
+                    fits = and [ length as <= length [() | pk <- paramKinds, pk == k]
+                               | (k, as) <- Map.toList buckets ]
+                in if typeArgsProvided < typeParamCount || not fits
                    then AppU h args'  -- arity error surfaces downstream
                    else AppU h (fillByBucket paramKinds buckets)
           _ -> AppU h (map go args)
@@ -1687,72 +1692,6 @@ refineKinds dag = do
     -- applications so user-defined types named e.g. \"Foo\" still work.
     --
     -- Recurses into all subterms so nested uses get rewritten too.
-    rewriteCrossKindBuiltins :: TypeU -> TypeU
-    rewriteCrossKindBuiltins = goRW
-      where
-        goRW (AppU (VarU (TV "Keys")) [r]) = KeysU (asRec (goRW r))
-        goRW (AppU (VarU (TV "ListToSet")) [l]) = ListToSetU (asList (goRW l))
-        goRW (AppU (VarU (TV "Size")) [c]) = SizeU (goRW c)
-          -- Size is kind-dispatched (List / Set / Rec). Don't force a
-          -- kind here; let downstream kindMap classify.
-        goRW (AppU (VarU (TV "ProjectField")) [r, f]) =
-          ProjectFieldU (asRec (goRW r)) (asStr (goRW f))
-        -- @Singleton k v@: a one-field Rec with a Str-kinded key (literal
-        -- or variable) and a Type-kinded value. Reduces to RecExtendU
-        -- when the key is solved at the call site.
-        goRW (AppU (VarU (TV "Singleton")) [k, v]) =
-          RecSingletonU (asStr (goRW k)) (goRW v)
-        -- @Restrict r l@: restrict the Rec @r@ to fields whose names
-        -- appear in the List @l@. Surface alternative to the `#`
-        -- operator (which would clash with morloc's `#{...}` string
-        -- interpolation if used as an inline binary operator).
-        goRW (AppU (VarU (TV "Restrict")) [r, l]) =
-          RecRestrictU (asRec (goRW r)) (asList (goRW l))
-        goRW (AppU h ts) = AppU (goRW h) (map goRW ts)
-        goRW (FunU ts t) = FunU (map goRW ts) (goRW t)
-        goRW (ForallU v t) = ForallU v (goRW t)
-        goRW (NamU r v ps rs) = NamU r v (map goRW ps) [(k, goRW t) | (k, t) <- rs]
-        goRW (ExistU v (ts, tc) (rs, rc)) =
-          ExistU v (map goRW ts, tc) ([(k, goRW t) | (k, t) <- rs], rc)
-        goRW (EffectU effs t) = EffectU effs (goRW t)
-        goRW (OptionalU t) = OptionalU (goRW t)
-        -- Unified carriers: uniform recursion across all operators and literal payloads.
-        goRW (OpU op args) = OpU op (map goRW args)
-        goRW (LitU (LRec fs)) = LitU (LRec [(k, goRW v) | (k, v) <- fs])
-        goRW (LitU (LList es)) = LitU (LList (map goRW es))
-        goRW (LitU (LSet es)) = LitU (LSet (map goRW es))
-        goRW (LabeledU n t) = LabeledU n (goRW t)
-        goRW t = t
-
-        -- Force a TypeU into the Rec / List / Str kind by promoting
-        -- bare 'VarU's to their kinded counterparts. Used at the
-        -- argument positions of cross-kind builtins so explicit
-        -- constraint expressions like @Keys r@ commit @r@ to the Rec
-        -- kind even when the surrounding context didn't already
-        -- classify it.
-        --
-        -- Only a type *variable* may be promoted. A capitalised name is a
-        -- concrete type or an alias, and turning it into a kind variable
-        -- would strip the name an alias needs to be expanded by later --
-        -- @Restrict Cols ['b]@ would become a row variable and generalize
-        -- away. Same lowercase convention that 'collectKindedVarsFromScope'
-        -- uses.
-        isKindVarName (TV n) = isTypeVariableName n
-
-        asRec (VarU v) | isKindVarName v = RecVarU v
-        asRec t = t
-
-        asList (VarU v) | isKindVarName v = ListVarU v
-        asList t = t
-
-        asStr (VarU v) | isKindVarName v = StrVarU v
-        asStr t = t
-
-    -- Collect variables that appear in kinded positions according to typedef
-    -- param kinds. Returns a map from var name to its required kind. In
-    -- conflicts (same var used in multiple kinded positions), the first
-    -- encountered kind wins; this is consistent with how the typechecker
-    -- discovers kinds.
     collectKindedVarsFromScope :: Map TVar [Kind] -> TypeU -> Map TVar Kind
     collectKindedVarsFromScope km = go
       where
@@ -2133,6 +2072,157 @@ typeApplications t = case TE.flattenApp t of
 aliasNamed :: TVar -> MDoc
 aliasNamed v = "The type alias" <+> squotes (pretty v)
 
+-- | Turn the kind-level builtins written by name (`Keys r`, `Singleton k v`,
+-- `Restrict r l`, ...) into their operators.
+rewriteCrossKindBuiltins :: TypeU -> TypeU
+rewriteCrossKindBuiltins = goRW
+  where
+    goRW (AppU (VarU (TV "Keys")) [r]) = KeysU (asRec (goRW r))
+    goRW (AppU (VarU (TV "ListToSet")) [l]) = ListToSetU (asList (goRW l))
+    goRW (AppU (VarU (TV "Size")) [c]) = SizeU (goRW c)
+      -- Size is kind-dispatched (List / Set / Rec). Don't force a
+      -- kind here; let downstream kindMap classify.
+    goRW (AppU (VarU (TV "ProjectField")) [r, f]) =
+      ProjectFieldU (asRec (goRW r)) (asStr (goRW f))
+    -- @Singleton k v@: a one-field Rec with a Str-kinded key (literal
+    -- or variable) and a Type-kinded value. Reduces to RecExtendU
+    -- when the key is solved at the call site.
+    goRW (AppU (VarU (TV "Singleton")) [k, v]) =
+      RecSingletonU (asStr (goRW k)) (goRW v)
+    -- @Restrict r l@: restrict the Rec @r@ to fields whose names
+    -- appear in the List @l@. Surface alternative to the `#`
+    -- operator (which would clash with morloc's `#{...}` string
+    -- interpolation if used as an inline binary operator).
+    goRW (AppU (VarU (TV "Restrict")) [r, l]) =
+      RecRestrictU (asRec (goRW r)) (asList (goRW l))
+    goRW (AppU h ts) = AppU (goRW h) (map goRW ts)
+    goRW (FunU ts t) = FunU (map goRW ts) (goRW t)
+    goRW (ForallU v t) = ForallU v (goRW t)
+    goRW (NamU r v ps rs) = NamU r v (map goRW ps) [(k, goRW t) | (k, t) <- rs]
+    goRW (ExistU v (ts, tc) (rs, rc)) =
+      ExistU v (map goRW ts, tc) ([(k, goRW t) | (k, t) <- rs], rc)
+    goRW (EffectU effs t) = EffectU effs (goRW t)
+    goRW (OptionalU t) = OptionalU (goRW t)
+    -- Unified carriers: uniform recursion across all operators and literal payloads.
+    goRW (OpU op args) = OpU op (map goRW args)
+    goRW (LitU (LRec fs)) = LitU (LRec [(k, goRW v) | (k, v) <- fs])
+    goRW (LitU (LList es)) = LitU (LList (map goRW es))
+    goRW (LitU (LSet es)) = LitU (LSet (map goRW es))
+    goRW (LabeledU n t) = LabeledU n (goRW t)
+    goRW t = t
+
+    -- Force a TypeU into the Rec / List / Str kind by promoting
+    -- bare 'VarU's to their kinded counterparts. Used at the
+    -- argument positions of cross-kind builtins so explicit
+    -- constraint expressions like @Keys r@ commit @r@ to the Rec
+    -- kind even when the surrounding context didn't already
+    -- classify it.
+    --
+    -- Only a type *variable* may be promoted. A capitalised name is a
+    -- concrete type or an alias, and turning it into a kind variable
+    -- would strip the name an alias needs to be expanded by later --
+    -- @Restrict Cols ['b]@ would become a row variable and generalize
+    -- away. Same lowercase convention that 'collectKindedVarsFromScope'
+    -- uses.
+    isKindVarName (TV n) = isTypeVariableName n
+
+    asRec (VarU v) | isKindVarName v = RecVarU v
+    asRec t = t
+
+    asList (VarU v) | isKindVarName v = ListVarU v
+    asList t = t
+
+    asStr (VarU v) | isKindVarName v = StrVarU v
+    asStr t = t
+
+-- Collect variables that appear in kinded positions according to typedef
+-- param kinds. Returns a map from var name to its required kind. In
+-- conflicts (same var used in multiple kinded positions), the first
+-- encountered kind wins; this is consistent with how the typechecker
+-- discovers kinds.
+
+-- | The kind of each operand of a type-level operator, where it is fixed.
+opOperandKinds :: OpTag -> Int -> [Maybe Kind]
+opOperandKinds op n = case op of
+  OpNatAdd -> nat
+  OpNatSub -> nat
+  OpNatMul -> nat
+  OpNatDiv -> nat
+  OpStrConcat -> replicate n (Just KindStr)
+  OpRecExtend -> [Just KindStr, Just KindType, Just KindRec]
+  OpRecUnion -> replicate n (Just KindRec)
+  OpRecIntersect -> replicate n (Just KindRec)
+  OpRecRestrict -> [Just KindRec, Just (KindList KindStr)]
+  OpRecDiffList -> [Just KindRec, Just (KindList KindStr)]
+  OpRecSingleton -> [Just KindStr, Just KindType]
+  OpKeys -> [Just KindRec]
+  OpListToSet -> [Just (KindList KindStr)]
+  OpProjectField -> [Just KindRec, Just KindStr]
+  _ -> replicate n Nothing
+  where
+    nat = replicate n (Just KindNat)
+
+-- | The kind of a type where its form fixes it; Nothing for a type variable
+-- or anything else whose kind is not known here. A name is followed into the
+-- body @aliasBody@ gives for it, if any.
+evidentKindWith :: (TVar -> Maybe TypeU) -> TypeU -> Maybe Kind
+evidentKindWith aliasBody = go Set.empty
+  where
+    go seen t = case t of
+      KVarU (_, k) -> Just k
+      VoidU k -> Just k
+      LitU (LNat _) -> Just KindNat
+      LitU (LStr _) -> Just KindStr
+      LitU (LRec _) -> Just KindRec
+      LitU (LList _) -> Just (KindList KindStr)
+      LitU (LSet _) -> Just (KindSet KindStr)
+      OpU op args -> opKind seen op args
+      FunU _ _ -> Just KindType
+      OptionalU _ -> Just KindType
+      EffectU _ _ -> Just KindType
+      NamU _ _ _ _ -> Just KindType
+      _ -> case typeApplications t of
+        ((v@(TV n), _) : _)
+          | isTypeVariableName n -> Nothing
+          | Set.member v seen -> Nothing
+          | Just body <- aliasBody v -> go (Set.insert v seen) body
+          | otherwise -> Just KindType
+        [] -> Nothing
+    opKind seen op args
+      | op `elem` [OpNatAdd, OpNatSub, OpNatMul, OpNatDiv] = arithmeticKindWith (go seen) op args
+      | op == OpStrConcat = Just KindStr
+      | op `elem` rowOps = Just KindRec
+      | op == OpKeys || op == OpListToSet = Just (KindSet KindStr)
+      | op == OpSize = Just KindNat
+      | otherwise = Nothing
+
+rowOps :: [OpTag]
+rowOps = [OpRecExtend, OpRecUnion, OpRecIntersect, OpRecRestrict, OpRecDiffList, OpRecSingleton]
+
+-- | `+` and `-` are written alike for numbers, rows, lists and sets; the
+-- operands decide which, as when the operators are classified once kinds
+-- are known: a row operand makes `+` a union, a name or a list of names on
+-- the right makes `-` a row difference. Nothing when no operand decides.
+arithmeticKindWith :: (TypeU -> Maybe Kind) -> OpTag -> [TypeU] -> Maybe Kind
+arithmeticKindWith kindOf op args
+  | KindRec `elem` kinds = Just KindRec
+  | op == OpNatSub, [_, LitU (LStr _)] <- args = Just KindRec
+  | op == OpNatSub, [_, LitU (LList _)] <- args = Just KindRec
+  | (k : _) <- [k | k@(KindList _) <- kinds] = Just k
+  | (k : _) <- [k | k@(KindSet _) <- kinds] = Just k
+  | KindNat `elem` kinds = Just KindNat
+  | otherwise = Nothing
+  where
+    kinds = [k | Just k <- map kindOf args]
+
+-- | The evident kind of a type, following the aliases of a scope.
+evidentKind :: Scope -> TypeU -> Maybe Kind
+evidentKind scope = evidentKindWith body
+  where
+    body v = case Map.lookup v scope of
+      Just ((ps, b, _, _, TypedefAlias) : _) | all isLeft ps -> Just b
+      _ -> Nothing
+
 -- | Every type written in a module with the index it was written at:
 -- signatures and their constraints, annotations, class method signatures,
 -- instance heads and contexts, and general typedef bodies.
@@ -2164,14 +2254,44 @@ writtenTypes (ExprI i e) = here ++ concatMap writtenTypes children
 -- applied to too few arguments has no expansion of its own (newtypes own
 -- partial applications), and one applied to too many names nothing.
 checkAliasApplications :: DAG MVar a ExprI -> Scope -> MorlocMonad ()
-checkAliasApplications dag scope =
+checkAliasApplications dag scope = do
   case bad of
     [] -> return ()
     ((i, v, n, k) : _) ->
       MM.throwSourcedError i $
         aliasNamed v <+> "takes" <+> pretty n
-          <+> "type argument" <> (if n == 1 then "" else "s") <> ", but is applied to" <+> pretty k
+          <+> "argument" <> (if n == 1 then "" else "s") <> ", but is applied to" <+> pretty k
+  -- An argument whose kind is evident must have its parameter's kind
+  -- (ALIAS-8). A record row given to a `Type` parameter is a record type.
+  -- A variable's kind is settled by promotion, not by its form, so a
+  -- variable is not checked here.
+  case wrongKind of
+    [] -> return ()
+    ((i, v, p, pk, a, ak) : _) ->
+      MM.throwSourcedError i $
+        aliasNamed v <+> "takes a parameter" <+> squotes (pretty p) <+> "of kind" <+> pretty pk
+          <> ", but is given" <+> squotes (pretty a) <> ", of kind" <+> pretty ak
   where
+    applied =
+      [ (i, v, args)
+      | (_, (m, _)) <- Map.toList dag
+      , (i, t) <- writtenTypes m
+      , (v, args) <- typeApplications t
+      ]
+    wrongKind =
+      [ (i, v, p, pk, a, ak)
+      | (i, v, args) <- applied
+      , Just ((ps, _, _, _, TypedefAlias) : _) <- [Map.lookup v scope]
+      , (Left (p, pk), a) <- zip ps args
+      , not (isVariable a)
+      , Just ak <- [evidentKind scope a]
+      , ak /= pk
+      , not (pk == KindType && ak == KindRec)
+      ]
+    isVariable t = case t of
+      VarU (TV n) -> isTypeVariableName n
+      KVarU _ -> True
+      _ -> False
     arity v = case Map.lookup v scope of
       Just entries@((ps, _, _, _, _) : _)
         | all (\(_, _, _, _, k) -> k == TypedefAlias) entries
@@ -2207,7 +2327,9 @@ inferAliasParamKinds dag = do
         | (_, ExprTypeE Nothing v ps _ _ _) <- allDecls ]
   mapM_ checkRegularRecursion decls
   mapM_ checkClosed decls
-  refined <- solve (length decls + 1) declared decls
+  let bodies = Map.fromList [(v, rewriteCrossKindBuiltins b) | (_, ExprTypeE _ v _ b _ _) <- decls]
+      aliasKind = evidentKindWith (`Map.lookup` bodies)
+  refined <- solve aliasKind (length decls + 1) declared [(i, d {exprTypeType = bodies Map.! exprTypeName d}) | (i, d) <- decls]
   return $ DAG.mapNode (rewrite refined) dag
   where
     -- A recursive alias refers to itself with exactly its own parameters.
@@ -2245,15 +2367,15 @@ inferAliasParamKinds dag = do
 
     -- Kinds settle in at most one round per alias, since each round can
     -- only pass a kind one alias further along a chain.
-    solve :: Int -> Map TVar [Kind] -> [(Int, ExprTypeE)] -> MorlocMonad (Map TVar [Kind])
-    solve 0 km _ = return km
-    solve n km ds = do
-      km' <- foldM refineOne km ds
-      if km' == km then return km else solve (n - 1) km' ds
+    solve :: (TypeU -> Maybe Kind) -> Int -> Map TVar [Kind] -> [(Int, ExprTypeE)] -> MorlocMonad (Map TVar [Kind])
+    solve _ 0 km _ = return km
+    solve kindOf n km ds = do
+      km' <- foldM (refineOne kindOf) km ds
+      if km' == km then return km else solve kindOf (n - 1) km' ds
 
-    refineOne :: Map TVar [Kind] -> (Int, ExprTypeE) -> MorlocMonad (Map TVar [Kind])
-    refineOne km (i, ExprTypeE _ v ps body _ _) = do
-      let uses = slotKinds km (Just KindType) body
+    refineOne :: (TypeU -> Maybe Kind) -> Map TVar [Kind] -> (Int, ExprTypeE) -> MorlocMonad (Map TVar [Kind])
+    refineOne kindOf km (i, ExprTypeE _ v ps body _ _) = do
+      let uses = slotKinds kindOf km (Just KindType) body
       ks <- mapM (paramKind i v uses) [pk | Left pk <- ps]
       return (Map.insert v ks km)
 
@@ -2284,21 +2406,30 @@ inferAliasParamKinds dag = do
 
     -- The kind of each slot a variable fills, given the kind the enclosing
     -- position expects; Nothing where the slot's kind is not known here.
-    slotKinds :: Map TVar [Kind] -> Maybe Kind -> TypeU -> [(TVar, Maybe Kind)]
-    slotKinds km k t = case t of
+    slotKinds :: (TypeU -> Maybe Kind) -> Map TVar [Kind] -> Maybe Kind -> TypeU -> [(TVar, Maybe Kind)]
+    slotKinds kindOf km k t = case t of
       VarU v -> [(v, k)]
       KVarU (v, k') -> [(v, Just k')]
       AppU (VarU h) args
         | Just ks <- Map.lookup h km
         , length ks == length args ->
-            concat (zipWith (slotKinds km . Just) ks args)
-      AppU h args -> slotKinds km (Just KindType) h ++ concatMap (slotKinds km (Just KindType)) args
-      OpU _ args -> case extractKey t of
-        TV "Nat" -> concatMap (slotKinds km (Just KindNat)) args
-        TV "Str" -> concatMap (slotKinds km (Just KindStr)) args
-        _ -> concatMap (slotKinds km Nothing) args
-      LitU _ -> concatMap (slotKinds km Nothing) (typeUChildren t)
-      _ -> concatMap (slotKinds km (Just KindType)) (typeUChildren t)
+            concat (zipWith (go . Just) ks args)
+      AppU h args -> go (Just KindType) h ++ concatMap (go (Just KindType)) args
+      OpU op args
+        | op `elem` [OpNatAdd, OpNatSub, OpNatMul, OpNatDiv] ->
+            let kind = case arithmeticKindWith kindOf op args of
+                  Just ak -> Just ak
+                  Nothing | k /= Just KindType -> k
+                  Nothing -> Nothing
+             in case (kind, op, args) of
+                  (Just KindRec, OpNatSub, [a, b]) -> go kind a ++ go Nothing b
+                  _ -> concatMap (go kind) args
+        | otherwise -> concat (zipWith go (opOperandKinds op (length args)) args)
+      LitU (LRec fs) -> concatMap (go (Just KindType) . snd) fs
+      LitU _ -> concatMap (go Nothing) (typeUChildren t)
+      _ -> concatMap (go (Just KindType)) (typeUChildren t)
+      where
+        go = slotKinds kindOf km
 
     rewrite :: Map TVar [Kind] -> ExprI -> ExprI
     rewrite km (ExprI i (ModE m es)) = ExprI i (ModE m (map (rewrite km) es))

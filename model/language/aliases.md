@@ -22,8 +22,8 @@ be in kind expressions.
 
 ### ALIAS-3 An alias is applied to all its `Type` parameters
 Intent: ruled 2026-10-08
-Tests: spec-alias-3-1, spec-alias-3-2, spec-alias-3-3, spec-alias-3-4, spec-alias-3-5, spec-alias-3-6, spec-alias-3-7, spec-alias-3-8, spec-alias-3-9
-Code: deviates (unfiled: an omitted argument whose kind ALIAS-8 inferred is not filled)
+Tests: spec-alias-3-1, spec-alias-3-2, spec-alias-3-3, spec-alias-3-4, spec-alias-3-5, spec-alias-3-6, spec-alias-3-7, spec-alias-3-8, spec-alias-3-9, spec-alias-3-10, spec-alias-3-11
+Code: conforms 2026-10-09
 
 An alias applied to fewer `Type` arguments, or more arguments, than it
 declares is rejected, wherever it is written: signatures, constraints,
@@ -65,8 +65,8 @@ equal unfoldings are the same type (TEQ-1).
 
 ### ALIAS-8 An alias parameter takes the kind of the slots it fills
 Intent: ruled 2026-10-08
-Tests: spec-alias-8-1, spec-alias-8-3, spec-alias-8-4
-Code: deviates (unfiled: a parameter used only in a row expression keeps kind `Type`, and an argument of the wrong kind, as in `V Str` for a Nat parameter, is accepted)
+Tests: spec-alias-8-1, spec-alias-8-2, spec-alias-8-3, spec-alias-8-4, spec-alias-8-5, spec-alias-8-6, spec-alias-8-7, spec-alias-8-8, spec-alias-8-9, spec-alias-8-10, spec-alias-8-11, spec-alias-8-12, spec-alias-8-13, spec-alias-8-14, spec-alias-8-15, spec-alias-8-16
+Code: conforms 2026-10-09
 
 An unannotated alias parameter that fills only slots of one kind `K` other
 than `Type` has kind `K`, as if written `(x :: K)`. One that fills slots of

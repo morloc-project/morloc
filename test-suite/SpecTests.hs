@@ -274,6 +274,22 @@ aliasTests =
         f :: Q -> Int
         |]
     , reject
+        "spec-alias-3-10"
+        [r|
+        module main (f)
+        newtype G (r :: Nat) a = List a
+        type M a n b = (G n a, b)
+        f :: M Int -> Int
+        |]
+    , accept
+        "spec-alias-3-11"
+        [r|
+        module main (f)
+        newtype G (r :: Nat) a = List a
+        type M a n b = (G n a, b)
+        f :: M Int Str -> Int
+        |]
+    , reject
         "spec-alias-4-1"
         [r|
         module main (f)
@@ -363,6 +379,14 @@ aliasTests =
         f :: V 3 -> Int
         |]
     , reject
+        "spec-alias-8-2"
+        [r|
+        module main (f)
+        newtype G (r :: Nat) a = List a
+        type V n = G n Int
+        f :: V Str -> Int
+        |]
+    , reject
         "spec-alias-8-3"
         [r|
         module main (f)
@@ -377,6 +401,101 @@ aliasTests =
         newtype G (r :: Nat) a = List a
         type Ok h = (G h Int, [Int])
         f :: Ok 2 -> Int
+        |]
+    , reject
+        "spec-alias-8-5"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type Bed3 r = {chrom = Str, start = Int} + r
+        f :: Tbl 3 (Bed3 Int) -> Int
+        |]
+    , accept
+        "spec-alias-8-6"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type Bed3 r = {chrom = Str, start = Int} + r
+        f :: Tbl 3 (Bed3 {name = Str}) -> Int
+        |]
+    , accept
+        "spec-alias-8-7"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type B r s = {c = Str} + r + s
+        f :: Tbl 3 (B {a = Int} {b = Int}) -> Int
+        |]
+    , accept
+        "spec-alias-8-8"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type WithCol r k a = r + Singleton k a
+        f :: Tbl 3 (WithCol {x = Int} "y" Int) -> Int
+        |]
+    , accept
+        "spec-alias-8-9"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type Cols = {x = Int}
+        type Ext r = Cols + r
+        f :: Tbl 3 (Ext {y = Int}) -> Int
+        |]
+    , accept
+        "spec-alias-8-10"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type Bed3 r = {c = Str} + r
+        f :: Tbl 3 (Bed3 r) -> Tbl 3 ({x = Int} + r)
+        |]
+    , accept
+        "spec-alias-8-11"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type Bed3 r = {c = Str} + r
+        f :: Tbl 3 ({x = Int} + r) -> Tbl 3 (Bed3 r)
+        |]
+    , accept
+        "spec-alias-8-12"
+        [r|
+        module main (f)
+        newtype G (r :: Nat) a = List a
+        type V n = G n Int
+        f :: V (n + 1) -> Int
+        |]
+    , reject
+        "spec-alias-8-13"
+        [r|
+        module main (f)
+        type B a = [a]
+        f :: B 3 -> Int
+        |]
+    , accept
+        "spec-alias-8-14"
+        [r|
+        module main (f)
+        type B a = [a]
+        f :: B Int -> Int
+        |]
+    , reject
+        "spec-alias-8-15"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type M n r = Tbl n r
+        f :: M Int -> Int
+        |]
+    , accept
+        "spec-alias-8-16"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type M n r = Tbl n r
+        f :: M 3 -> Int
         |]
     , reject
         "spec-alias-9-1"
@@ -495,6 +614,22 @@ kindTests =
   testGroup
     "KIND"
     [ accept
+        "spec-kind-6-2"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type MyTable n = Tbl n {x = Int}
+        f :: MyTable -> Int
+        |]
+    , accept
+        "spec-kind-6-3"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type MyTable n = Tbl n {x = Int}
+        f :: MyTable 3 -> Int
+        |]
+    , accept
         "spec-kind-6-1"
         [r|
         module main (f)
