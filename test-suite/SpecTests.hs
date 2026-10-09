@@ -646,6 +646,10 @@ aliasTests =
         f :: Scorers (<IO> Int) -> <IO> Int
         f x = g x
         |]
+    , acceptTypecheck
+        "spec-alias-12-4"
+        ( "module main (f)\ntype D a = (a, a)\ng :: " <> ladder "a" <> " -> Int\nf :: "
+            <> ladder "Int" <> " -> Int\nf x = g x\n" )
     , rejectNaming
         "spec-alias-5-1"
         ["WindSpeed"]
@@ -842,6 +846,21 @@ newtTests =
         f :: Buffer 3 Int -> Int
         |]
     ]
+
+-- | An alias applied to itself 28 times, whose expansion has 2^28 leaves.
+ladder :: MT.Text -> MT.Text
+ladder leaf = iterate (\t -> "(D " <> t <> ")") leaf !! 28
+
+-- | Acceptance by the typechecker alone, without expanding the resulting
+-- types, for a program whose types are exponential once expanded.
+acceptTypecheck :: String -> MT.Text -> TestTree
+acceptTypecheck name code =
+  testCase name $ do
+    config <- emptyConfig
+    ((x, _), _) <- MM.runMorlocMonad Nothing 0 config defaultValue (typecheckFrontend Nothing (Code code))
+    case x of
+      Right _ -> return ()
+      Left e -> assertFailure $ "expected acceptance, got: " <> show e
 
 accept :: String -> MT.Text -> TestTree
 accept name code =

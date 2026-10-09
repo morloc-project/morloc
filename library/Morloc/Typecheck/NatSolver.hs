@@ -30,7 +30,7 @@ module Morloc.Typecheck.NatSolver
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.List (foldl', sortBy, groupBy)
+import Data.List (sortBy, groupBy)
 import Data.Ord (comparing)
 import Data.Function (on)
 import Morloc.Namespace.Prim (TVar(..))
@@ -262,7 +262,7 @@ naturalSolution eqs
       , all (\p -> Map.size (npVars p) <= 1 && all (== 1) (Map.elems (npVars p))) ps =
           let k = negate (sum [npCoeff p | p <- ps, Map.null (npVars p)])
               cs = [npCoeff p | p <- ps, not (Map.null (npVars p))]
-          in Just (linearNatural cs k)
+          in linearNatural cs k
       | otherwise = Nothing
 
 -- | Whether @sum (zipWith (*) cs xs) == k@ has a solution with every
@@ -270,23 +270,32 @@ naturalSolution eqs
 -- their gcd divides @k@: the vector @|c_q| e_p + c_p e_q@ for @c_p > 0 > c_q@
 -- leaves the sum unchanged, so any integer solution can be shifted until it
 -- is natural. With one sign it is the coin problem: past the Frobenius bound
--- every multiple of the gcd is reachable, and below it a table decides.
-linearNatural :: [Integer] -> Integer -> Bool
+-- every multiple of the gcd is reachable, and below it the least reachable
+-- sum in each residue class decides; @Nothing@ when that table is too large.
+linearNatural :: [Integer] -> Integer -> Maybe Bool
 linearNatural cs0 k0
-  | null cs0 = k0 == 0
-  | k0 `mod` g /= 0 = False
-  | any (> 0) cs0 && any (< 0) cs0 = True
-  | otherwise =
-      let cs = map (abs . (`div` g)) cs0
-          k = (if all (> 0) cs0 then k0 else negate k0) `div` g
-          frobenius = (minimum cs - 1) * (maximum cs - 1)
-      in k >= 0 && (k >= frobenius || reachable cs k)
+  | null cs0 = Just (k0 == 0)
+  | k0 `mod` g /= 0 = Just False
+  | any (> 0) cs0 && any (< 0) cs0 = Just True
+  | k < 0 = Just False
+  | k >= (a - 1) * (maximum cs - 1) = Just True
+  | a > 100000 = Nothing
+  | otherwise = Just (maybe False (<= k) (Map.lookup (k `mod` a) smallest))
   where
     g = foldr1 gcd cs0
-    reachable cs k = Set.member k (foldl' (step cs) Set.empty [0 .. k])
-    step cs seen i
-      | i == 0 || any (\c -> c <= i && Set.member (i - c) seen) cs = Set.insert i seen
-      | otherwise = seen
+    cs = map (abs . (`div` g)) cs0
+    k = (if all (> 0) cs0 then k0 else negate k0) `div` g
+    a = minimum cs
+    -- the least reachable sum in each residue class modulo the smallest
+    -- coefficient; a sum is reachable when it is at least that least one
+    smallest = dijkstra (Set.singleton (0, 0)) Map.empty
+    dijkstra frontier done = case Set.minView frontier of
+      Nothing -> done
+      Just ((d, r), rest)
+        | Map.member r done -> dijkstra rest done
+        | otherwise ->
+            let next = Set.fromList [(d + c, (r + c) `mod` a) | c <- cs]
+            in dijkstra (Set.union rest next) (Map.insert r d done)
 
 -- | Whether a normal form holds a quotient that could not be reduced.
 hasOpaqueDivision :: NatSOP -> Bool

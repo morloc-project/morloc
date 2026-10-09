@@ -6828,6 +6828,9 @@ natArithTests =
     , testCase "the coin problem below its bound: 3n + 5m ~ 7 has no solution" $
         assertEqual "" (Just False)
           (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 3) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 5) (NS.NatVar (TV "m"))), NS.NatLit 7)])
+    , testCase "the coin problem with large coefficients is decided quickly: 1000n + 999m ~ 998001" $
+        assertEqual "" (Just True)
+          (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 1000) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 999) (NS.NatVar (TV "m"))), NS.NatLit 998001)])
     , testCase "a witness never passes through a negative difference: (3 - n) * (3 - n) ~ 16" $
         let d = NS.NatSub (NS.NatLit 3) (NS.NatVar (TV "n"))
         in assertBool "" (NS.naturalSolution [(NS.NatMul d d, NS.NatLit 16)] /= Just True)

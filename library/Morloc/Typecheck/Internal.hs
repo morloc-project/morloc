@@ -1187,7 +1187,8 @@ subtype scope t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
   -- and matching arguments would solve a variable the unfoldings leave
   -- open. Arguments that are one type are the cheap common case.
   | v1 == v2, isAliasHead v1 =
-      if map (canonical . apply g) vs1 == map (canonical . apply g) vs2
+      if map (apply g) vs1 == map (apply g) vs2
+          || map (canonical . apply g) vs1 == map (canonical . apply g) vs2
         then return g
         else case (unfoldAlias scope t1, unfoldAlias scope t2) of
           (Just t1', Just t2') -> viaUnfold scope (t1, t2) t1' t2' g

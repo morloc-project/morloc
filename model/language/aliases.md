@@ -147,7 +147,7 @@ declaration error. A `Type` is required only where a type classifies a term
 
 ### ALIAS-12 Two applications of one alias are compared through the expansion
 Intent: ruled 2026-10-09
-Tests: spec-alias-12-1, spec-alias-12-2, spec-alias-12-3
+Tests: spec-alias-12-1, spec-alias-12-2, spec-alias-12-3, spec-alias-12-4
 Code: conforms 2026-10-09
 
 `A U1 ... Un <: A V1 ... Vn` holds exactly when the unfoldings are related
