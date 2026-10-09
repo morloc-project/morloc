@@ -12,7 +12,7 @@ unannotated parameter has kind `Type`, except an alias parameter (ALIAS-8). Any 
 
 ### KIND-2 Only a `Type`-kinded type classifies values
 Intent: proposed
-Code: deviates (unfiled: types-kinds.asc says it fails only at code generation)
+Code: deviates (issues/typecheck.md)
 
 `Nat`, `Str`, `Rec`, `List` and `Set` expressions exist only in the type
 system and are erased before anything runs. A type that classifies a term
@@ -39,7 +39,7 @@ below zero is a type error where it is reduced; (b) subtraction clamps at 0;
 
 ### KIND-5 Missing non-`Type` arguments are filled gradually
 Intent: proposed
-Code: deviates (unfiled: types-kinds.asc says bare `Vector` passes typecheck)
+Code: deviates (issues/typecheck.md)
 
 A type constructor given fewer arguments than it declares has its missing
 non-`Type` positions filled, left to right within each kind, with

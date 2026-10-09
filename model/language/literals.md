@@ -13,12 +13,12 @@ insensitive. A prefixed literal containing a digit invalid for its base is a
 lexical error, never a literal followed by a name.
 
 ### LIT-2 A real literal has a decimal point or an exponent
-Intent: proposed
-Code: unaudited
+Intent: ruled 2026-10-09
+Code: deviates (issues/typecheck.md)
 
 `1.0`, `1e0` and `6.022E23` are real literals; `1` is an integer literal.
-Numeric literals are not polymorphic between the integer and real families.
-`Inf` and `NaN` are real literals.
+An integer literal takes a real type from a context that expects one; a
+real literal never takes an integer type. `Inf` and `NaN` are real literals.
 
 ### LIT-3 A `-` against a digit is part of the literal
 Intent: proposed

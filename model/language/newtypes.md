@@ -29,7 +29,7 @@ that adds a kind or a dimension to its representation is declared (ALIAS-2).
 
 ### NEWT-4 A native form needs a way to be built
 Intent: proposed
-Code: deviates (unfiled: types-newtype.asc says the form is dropped silently)
+Code: deviates (issues/values.md)
 
 A newtype with a native form in `L` that the language's binding cannot build
 from the representation needs a `Packable` instance in `L`. Without one the
