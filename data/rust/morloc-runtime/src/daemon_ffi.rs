@@ -4365,38 +4365,35 @@ mod endpoint_claim_tests {
     #[test]
     fn a_live_listener_keeps_its_path_and_a_stale_file_is_replaced() {
         let _endpoints = ENDPOINT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("mlc-claim-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("d.sock");
-        let cpath = CString::new(path.to_str().unwrap()).unwrap();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let dir = std::env::temp_dir().join(format!("mlc-claim-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("d.sock");
+            let cpath = CString::new(path.to_str().unwrap()).unwrap();
 
-        let live = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        let ino = std::fs::metadata(&path).unwrap().ino();
-        let (fd, addr) = unbound(&path);
-        let refused = unsafe { claim_and_bind(fd, &cpath, &addr) };
-        unsafe { libc::close(fd) };
-        assert!(refused.unwrap_err().contains("already serving"));
-        assert!(ENDPOINTS[LOCK_ENDPOINT + SOCKET_ENDPOINT].path.load(Ordering::SeqCst).is_null(), "a refused claim left its lock file to be removed");
-        assert_eq!(std::fs::metadata(&path).unwrap().ino(), ino);
-        assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
+            let live = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            let ino = std::fs::metadata(&path).unwrap().ino();
+            let (fd, addr) = unbound(&path);
+            let refused = unsafe { claim_and_bind(fd, &cpath, &addr) };
+            unsafe { libc::close(fd) };
+            assert!(refused.unwrap_err().contains("already serving"));
+            assert!(ENDPOINTS[LOCK_ENDPOINT + SOCKET_ENDPOINT].path.load(Ordering::SeqCst).is_null(), "a refused claim left its lock file to be removed");
+            assert_eq!(std::fs::metadata(&path).unwrap().ino(), ino);
+            assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
 
-        drop(live);
-        let (fd, addr) = unbound(&path);
-        unsafe { claim_and_bind(fd, &cpath, &addr) }.unwrap();
-        unsafe { libc::listen(fd, 1) };
-        assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
+            drop(live);
+            let (fd, addr) = unbound(&path);
+            unsafe { claim_and_bind(fd, &cpath, &addr) }.unwrap();
+            unsafe { libc::listen(fd, 1) };
+            assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
 
-        let (fd2, addr2) = unbound(&path);
-        let second = unsafe { claim_and_bind(fd2, &cpath, &addr2) };
-        let second = second.unwrap_err();
-        assert!(second.contains("another daemon holds"), "{second}");
-        unsafe {
-            libc::close(fd2);
-            libc::close(fd);
-            libc::close(ENDPOINT_LOCKS[SOCKET_ENDPOINT].swap(-1, Ordering::SeqCst));
-        }
-        ENDPOINTS[LOCK_ENDPOINT + SOCKET_ENDPOINT].path.store(ptr::null_mut(), Ordering::SeqCst);
-        let _ = std::fs::remove_dir_all(dir);
+            let (fd2, addr2) = unbound(&path);
+            let second = unsafe { claim_and_bind(fd2, &cpath, &addr2) };
+            let second = second.unwrap_err();
+            assert!(second.contains("another daemon holds"), "{second}");
+            let _ = std::fs::remove_dir_all(dir);
+            true
+        }));
     }
 }

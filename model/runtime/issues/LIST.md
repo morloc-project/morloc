@@ -13,4 +13,3 @@ it is solved, and a file when it is empty.
 - [cli-directives.md](cli-directives.md): cross-language @fold, @render type check and -f, multi-output gaps
 - [tables-tensors.md](tables-tensors.md): column type inference, NaN in JSON, tensor dims unchecked, table spec mismatches
 - [build-and-text.md](build-and-text.md): non-atomic build swap, stale help text and comments, dead code
-- [test-harness-forks.md](test-harness-forks.md): forked test children keep other tests' descriptors alive (listener reclaim flake)
