@@ -1160,14 +1160,18 @@ checkConflictingForms modules lang scope =
             <> "; a type is declared once, and has one form per language for each parameter pattern"
           decls = [(i, paramPattern ps) | (i, ps) <- concatMap (typedefDecls lang v0) modules]
           repeats = [i | (k, (i, pat)) <- zip [0 :: Int ..] decls, pat `elem` map snd (take k decls)]
-       in case repeats of
+       in case repeats ++ map fst (drop 1 decls) of
             (i : _) -> MM.throwSourcedError i msg
             [] -> MM.throwSystemError msg
   where
     what = maybe "declarations" (\l -> pretty l <+> "forms") lang
+    -- A general alias is declared once (ALIAS-9): it has no parameter
+    -- patterns of its own to tell two declarations apart.
     hasConflict entries =
       let patterns = [paramPattern ps | (ps, _, _, _, _) <- entries]
+          isAlias (_, _, _, _, k) = k == TypedefAlias
        in length patterns /= Set.size (Set.fromList patterns)
+            || (lang == Nothing && length entries > 1 && any isAlias entries)
 
 -- | The parameters a form applies to, with type variables numbered by first
 -- appearance so that @Foo (List a)@ and @Foo (List b)@ are one pattern.

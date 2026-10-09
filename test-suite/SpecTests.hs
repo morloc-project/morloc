@@ -394,6 +394,50 @@ aliasTests =
         type B = Str
         f :: A -> Int
         |]
+    , reject
+        "spec-alias-9-3"
+        [r|
+        module main (f)
+        type A = Int
+        type A a = [a]
+        f :: A -> Int
+        |]
+    , accept
+        "spec-alias-9-4"
+        [r|
+        module main (f)
+        type A = Int
+        type B a = [a]
+        f :: A -> Int
+        |]
+    , reject
+        "spec-alias-9-5"
+        [r|
+        module main (f)
+        type A = Int
+        newtype A = Str
+        f :: A -> Int
+        |]
+    , accept
+        "spec-alias-9-6"
+        [r|
+        module main (f)
+        type A = Int
+        newtype B = Str
+        f :: A -> Int
+        |]
+    , accept
+        "spec-alias-9-7"
+        [r|
+        module lib (g)
+          type A = Int
+          g :: A -> Int
+        module main (f)
+          import lib (g)
+          type A = Str
+          f :: Int -> Int
+          f x = g x
+        |]
     , accept
         "spec-alias-11-1"
         [r|

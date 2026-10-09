@@ -74,8 +74,8 @@ two kinds is a declaration error. A declared kind stands.
 
 ### ALIAS-9 An alias is declared once
 Intent: ruled 2026-10-08
-Tests: spec-alias-9-1, spec-alias-9-2
-Code: deviates (unfiled: `type A = Int` beside `type A a = [a]` is accepted; only equal parameter lists are rejected)
+Tests: spec-alias-9-1, spec-alias-9-2, spec-alias-9-3, spec-alias-9-4, spec-alias-9-5, spec-alias-9-6, spec-alias-9-7
+Code: conforms 2026-10-09
 
 A second general declaration of an alias's name is a declaration error,
 located at the second.
