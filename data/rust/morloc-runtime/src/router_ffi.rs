@@ -398,8 +398,8 @@ pub(crate) unsafe fn router_start_program(
 ) -> bool {
     clear_errmsg(errmsg);
 
-    let nexus_path = match find_morloc_nexus() {
-        Ok(p) => p,
+    match find_morloc_nexus() {
+        Ok(nexus_path) => start_program_with(prog, errmsg, &nexus_path),
         Err(tried) => {
             set_errmsg(
                 errmsg,
@@ -408,10 +408,17 @@ pub(crate) unsafe fn router_start_program(
                     tried.join(", ")
                 )),
             );
-            return false;
+            false
         }
-    };
-    let c_nexus = CString::new(nexus_path.as_str()).unwrap_or_default();
+    }
+}
+
+unsafe fn start_program_with(
+    prog: *mut RouterProgram,
+    errmsg: *mut *mut c_char,
+    nexus_path: &str,
+) -> bool {
+    let c_nexus = CString::new(nexus_path).unwrap_or_default();
 
     // Capture the daemon's startup stderr to a host-visible file so a crash
     // surfaces the real cause (missing shared library, unreadable config, bad
@@ -946,13 +953,10 @@ mod forward_tests {
 
     #[test]
     fn a_daemon_that_never_accepts_is_stopped_reaped_and_refused() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("mlc-router-never-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("fake-nexus");
-        std::fs::write(&script, "#!/bin/sh\nexec sleep 60\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::env::set_var("MORLOC_NEXUS", &script);
+        crate::write_test_executable(&script, "#!/bin/sh\nexec sleep 60\n");
         let mut prog: RouterProgram = unsafe { std::mem::zeroed() };
         prog.name = unsafe { libc::strdup(c"never".as_ptr()) };
         prog.manifest_path = unsafe { libc::strdup(c"/nonexistent/manifest.json".as_ptr()) };
@@ -961,8 +965,7 @@ mod forward_tests {
             *d = *b as c_char;
         }
         let mut err: *mut c_char = ptr::null_mut();
-        let started = unsafe { router_start_program(&mut prog, &mut err) };
-        std::env::remove_var("MORLOC_NEXUS");
+        let started = unsafe { start_program_with(&mut prog, &mut err, script.to_str().unwrap()) };
         assert!(!started, "a daemon that never accepted was used");
         assert_eq!(prog.daemon_pid.load(std::sync::atomic::Ordering::SeqCst), 0);
         let msg = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();

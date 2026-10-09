@@ -149,7 +149,8 @@ Rust's standard streams and environment are guarded by locks of their own
 with no fork handling.
 
 The environment is written only while a process has one thread: the
-nexus at startup and a run published by a single-threaded process
+nexus at startup, a run published by a single-threaded process, and a
+test's forked child through `set_test_env`, which bypasses the lock
 (`the_environment_is_written_only_by_its_checked_writers`), so no child can
 inherit its lock held.
 

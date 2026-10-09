@@ -1023,18 +1023,20 @@ fn the_environment_is_written_only_by_its_checked_writers() {
         "morloc-nexus/process.rs::set_startup_env",
         "morloc-nexus/process.rs::remove_startup_env",
         "morloc-runtime/run.rs::publish_run",
+        "morloc-runtime/fork_policy.rs::set_test_env",
     ];
+    let writing = ["env::set_var", "env::remove_var", "libc::setenv", "libc::unsetenv", "libc::putenv", "libc::clearenv"];
     let writes: Vec<String> = scan_rust()
         .calls
         .iter()
-        .filter(|c| !c.test_only && (c.path.ends_with("env::set_var") || c.path.ends_with("env::remove_var")))
+        .filter(|c| writing.iter().any(|w| c.path.ends_with(w)))
         .filter(|c| !writers.contains(&c.site.as_str()))
         .map(|c| format!("{}: {}", c.site, c.path))
         .collect();
     assert!(
         writes.is_empty(),
         "FORK-11: the environment is written only while the process has one thread, through \
-         the nexus's set_startup_env / remove_startup_env:\n{}",
+         the nexus's set_startup_env / remove_startup_env, or in tests set_test_env:\n{}",
         writes.join("\n")
     );
 }

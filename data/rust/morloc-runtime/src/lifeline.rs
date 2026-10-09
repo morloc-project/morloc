@@ -378,9 +378,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("fake-nexus");
         let out = dir.join("out");
-        std::fs::write(&exe, format!("#!/bin/sh\necho \"$* $(ps -o pgid= -p $$)\" > {}.tmp; mv {}.tmp {}\n", out.display(), out.display(), out.display())).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::write_test_executable(&exe, &format!("#!/bin/sh\necho \"$* $(ps -o pgid= -p $$)\" > {}.tmp; mv {}.tmp {}\n", out.display(), out.display(), out.display()));
         let pid = spawn_sweeper(exe.to_str().unwrap(), -12345, 678, 9012);
         let mut seen = String::new();
         for _ in 0..500 {
@@ -513,10 +511,7 @@ mod tests {
                     }
                 }
                 libc::signal(libc::SIGTERM, on_term_report as *const () as libc::sighandler_t);
-                // Not std::env::set_var: its lock may have been held by
-                // another test thread when this process was forked.
-                let kv = std::ffi::CString::new(token.as_str()).unwrap();
-                libc::setenv(b"MORLOC_LIFELINE\0".as_ptr() as *const libc::c_char, kv.as_ptr(), 1);
+                crate::fork_policy::set_test_env("MORLOC_LIFELINE", Some(std::ffi::OsStr::new(&token)));
                 guard();
                 send(ready[1], b"r");
                 loop {

@@ -431,9 +431,10 @@ mod tests {
 
     #[test]
     fn env_skip_default_off() {
-        // Don't set anything; expect false.
-        std::env::remove_var("MORLOC_SKIP_NULL_CHECK");
-        assert!(!env_skip_null_check());
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            crate::fork_policy::set_test_env("MORLOC_SKIP_NULL_CHECK", None);
+            !env_skip_null_check()
+        }));
     }
 
     #[test]

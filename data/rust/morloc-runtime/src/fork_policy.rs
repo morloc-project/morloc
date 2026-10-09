@@ -588,6 +588,24 @@ pub(crate) fn in_a_descendant_with_the_same_pid(work: impl FnOnce() -> bool) -> 
     status == 0
 }
 
+// FORK-11: std::env::set_var would take the environment lock, which a child
+// of the test harness may have inherited held.
+#[cfg(test)]
+pub(crate) fn set_test_env(key: &str, value: Option<&std::ffi::OsStr>) {
+    use std::os::unix::ffi::OsStrExt;
+    let threads = thread_count();
+    assert!(!threads.is_some_and(|n| n > 1), "the environment was written with {threads:?} threads running");
+    let k = std::ffi::CString::new(key).unwrap();
+    let rc = match value {
+        Some(v) => {
+            let v = std::ffi::CString::new(v.as_bytes()).unwrap();
+            unsafe { libc::setenv(k.as_ptr(), v.as_ptr(), 1) }
+        }
+        None => unsafe { libc::unsetenv(k.as_ptr()) },
+    };
+    assert_eq!(rc, 0, "writing {key} failed");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

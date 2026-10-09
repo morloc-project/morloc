@@ -6554,6 +6554,13 @@ pub fn stdio_compression_override() -> Option<u8> {
 
 pub fn read_write_buffer_bytes_env() -> usize {
     const MIN: usize = 4096;
+    #[cfg(test)]
+    {
+        let n = TEST_WRITE_BUFFER_BYTES.load(std::sync::atomic::Ordering::SeqCst);
+        if n != usize::MAX {
+            return n.max(MIN);
+        }
+    }
     if let Ok(s) = std::env::var("MORLOC_WRITE_BUFFER_BYTES") {
         if let Ok(n) = s.parse::<usize>() {
             return n.max(MIN);
@@ -6722,7 +6729,30 @@ impl voidstar::Space for SrcSpace {
     }
 }
 
+#[cfg(test)]
+static TEST_WRITE_BUFFER_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+#[cfg(test)]
+pub(crate) fn set_test_write_buffer_bytes(n: Option<usize>) {
+    TEST_WRITE_BUFFER_BYTES.store(n.unwrap_or(usize::MAX), std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+static TEST_IFILE_CACHE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+#[cfg(test)]
+pub(crate) fn set_test_ifile_cache_bytes(n: Option<u64>) {
+    TEST_IFILE_CACHE_BYTES.store(n.unwrap_or(u64::MAX), std::sync::atomic::Ordering::SeqCst);
+}
+
 fn read_cache_cap_env() -> u64 {
+    #[cfg(test)]
+    {
+        let n = TEST_IFILE_CACHE_BYTES.load(std::sync::atomic::Ordering::SeqCst);
+        if n != u64::MAX {
+            return n;
+        }
+    }
     if let Ok(s) = std::env::var("MORLOC_IFILE_CACHE_BYTES") {
         if let Ok(n) = s.parse::<u64>() {
             return n;
@@ -11460,7 +11490,7 @@ mod tests {
         let sock = dir.join("nexus.sock");
         let ran = crate::fork_policy::as_pid_one(move || {
             let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
-            std::env::set_var("MORLOC_NEXUS_STDIO_SOCK", &sock);
+            crate::fork_policy::set_test_env("MORLOC_NEXUS_STDIO_SOCK", Some(sock.as_os_str()));
             with_stdio_sock(|_| Ok(())).unwrap();
             let (_ancestor_conn, _) = listener.accept().unwrap();
             let wrote = crate::fork_policy::in_a_descendant_with_the_same_pid(|| {
@@ -11496,7 +11526,7 @@ mod tests {
             thread_local! {
                 static LATE: UsesTheNexus = const { UsesTheNexus };
             }
-            std::env::set_var("MORLOC_NEXUS_STDIO_SOCK", &sock);
+            crate::fork_policy::set_test_env("MORLOC_NEXUS_STDIO_SOCK", Some(sock.as_os_str()));
             std::thread::spawn(|| {
                 LATE.with(|_| {});
                 with_stdio_sock(|_| Ok(())).unwrap();
@@ -11514,57 +11544,54 @@ mod tests {
         let _shm = crate::own_test_registry();
         let dir = concat_test_dir("stdio_sock");
         let sock = dir.join("nexus.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
-        let saved = std::env::var("MORLOC_NEXUS_STDIO_SOCK").ok();
-        std::env::set_var("MORLOC_NEXUS_STDIO_SOCK", &sock);
-        with_stdio_sock(|_| Ok(())).unwrap();
-        let (_parent_conn, _) = listener.accept().unwrap();
+        let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(move || {
+            let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+            crate::fork_policy::set_test_env("MORLOC_NEXUS_STDIO_SOCK", Some(sock.as_os_str()));
+            with_stdio_sock(|_| Ok(())).unwrap();
+            let (_parent_conn, _) = listener.accept().unwrap();
 
-        // Requests and replies on one socket from two processes interleave:
-        // a child must open its own connection. The child names itself on
-        // whatever connection it uses, so its pid arrives on a new one only
-        // if it opened one.
-        let pid = unsafe { libc::fork() };
-        if pid == 0 {
-            let me = unsafe { libc::getpid() };
-            let ok = with_stdio_sock(|s| {
-                s.write_all(&me.to_le_bytes()).map_err(MorlocError::Io)
-            }).is_ok();
-            unsafe { libc::_exit(if ok { 0 } else { 2 }) };
-        }
-        listener.set_nonblocking(true).unwrap();
-        let began = std::time::Instant::now();
-        let peer = loop {
-            match listener.accept() {
-                Ok((mut conn, _)) => {
-                    let mut buf = [0u8; std::mem::size_of::<libc::pid_t>()];
-                    let mut got = 0;
-                    while got < buf.len() && began.elapsed() < std::time::Duration::from_secs(5) {
-                        match conn.read(&mut buf[got..]) {
-                            Ok(0) => break,
-                            Ok(n) => got += n,
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                std::thread::sleep(std::time::Duration::from_millis(5));
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    break (got == buf.len()).then(|| libc::pid_t::from_le_bytes(buf));
-                }
-                Err(_) if began.elapsed() < std::time::Duration::from_secs(5) => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                Err(_) => break None,
+            // Requests and replies on one socket from two processes interleave:
+            // a child must open its own connection. The child names itself on
+            // whatever connection it uses, so its pid arrives on a new one only
+            // if it opened one.
+            let pid = unsafe { libc::fork() };
+            if pid == 0 {
+                let me = unsafe { libc::getpid() };
+                let ok = with_stdio_sock(|s| {
+                    s.write_all(&me.to_le_bytes()).map_err(MorlocError::Io)
+                }).is_ok();
+                unsafe { libc::_exit(if ok { 0 } else { 2 }) };
             }
-        };
-        let mut status = 0;
-        unsafe { libc::waitpid(pid, &mut status, 0) };
-        match saved {
-            Some(v) => std::env::set_var("MORLOC_NEXUS_STDIO_SOCK", v),
-            None => std::env::remove_var("MORLOC_NEXUS_STDIO_SOCK"),
-        }
-        STDIO_SOCK.with(|c| *c.borrow_mut() = None);
-        assert_eq!(peer, Some(pid), "the child reused its parent's connection");
+            listener.set_nonblocking(true).unwrap();
+            let began = std::time::Instant::now();
+            let peer = loop {
+                match listener.accept() {
+                    Ok((mut conn, _)) => {
+                        let mut buf = [0u8; std::mem::size_of::<libc::pid_t>()];
+                        let mut got = 0;
+                        while got < buf.len() && began.elapsed() < std::time::Duration::from_secs(3) {
+                            match conn.read(&mut buf[got..]) {
+                                Ok(0) => break,
+                                Ok(n) => got += n,
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    std::thread::sleep(std::time::Duration::from_millis(5));
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        break (got == buf.len()).then(|| libc::pid_t::from_le_bytes(buf));
+                    }
+                    Err(_) if began.elapsed() < std::time::Duration::from_secs(3) => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break None,
+                }
+            };
+            let mut status = 0;
+            unsafe { libc::waitpid(pid, &mut status, 0) };
+            peer == Some(pid)
+        });
+        assert!(ok, "the child reused its parent's connection");
     }
 
     /// Run `act` in a forked child and return its exit code, or the signal
@@ -12576,13 +12603,8 @@ mod tests {
     /// clock-hand eviction is exercised.
     #[test]
     fn ifile_cache_eviction_correct() {
-        // Override the cache cap for this test by writing to the env
-        // BEFORE the registry is lazy-initialised. (The registry uses
-        // a once-init pattern keyed on the static REGISTRY; we run
-        // each test in its own process, so this is safe-ish but
-        // best-effort -- the lazy init may have already run.)
-        std::env::set_var("MORLOC_IFILE_CACHE_BYTES", "256");
         let _shm = crate::own_test_registry();
+        crate::stream::set_test_ifile_cache_bytes(Some(256));
         let dir = std::env::temp_dir().join(format!(
             "morloc_stream_test_{}_cache", std::process::id()
         ));
@@ -12615,7 +12637,7 @@ mod tests {
         }
         close_handle(handle).unwrap();
         let _ = std::fs::remove_file(&path);
-        std::env::remove_var("MORLOC_IFILE_CACHE_BYTES");
+        crate::stream::set_test_ifile_cache_bytes(None);
     }
 
     #[test]
@@ -12637,9 +12659,9 @@ mod tests {
         shared_close_handle(w).unwrap();
         crate::write_behind::set_test_depth(None);
 
-        std::env::set_var("MORLOC_IFILE_CACHE_BYTES", "0");
+        crate::stream::set_test_ifile_cache_bytes(Some(0));
         let f = open_ifile(&p).unwrap();
-        std::env::remove_var("MORLOC_IFILE_CACHE_BYTES");
+        crate::stream::set_test_ifile_cache_bytes(None);
         for i in 0..6 {
             let ptr = ifile_bracket_index(f, i).unwrap();
             assert_eq!(unsafe { *(ptr as *const i64) }, i + 1);
@@ -13558,7 +13580,7 @@ mod write_behind_tests {
         depth: usize,
         flush_after: &[usize],
     ) {
-        std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", buf_bytes.to_string());
+        crate::stream::set_test_write_buffer_bytes(Some(buf_bytes));
         crate::write_behind::set_test_depth(Some(depth));
         let list = parse_schema("as").unwrap();
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
@@ -13572,7 +13594,7 @@ mod write_behind_tests {
             }
         }
         shared_close_handle(h).unwrap();
-        std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
+        crate::stream::set_test_write_buffer_bytes(None);
         crate::write_behind::set_test_depth(None);
     }
 
@@ -13680,7 +13702,7 @@ mod write_behind_tests {
         let _shm = crate::own_test_registry();
         let dir = test_dir("depth");
         let path = dir.join("depth.idx");
-        std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
+        crate::stream::set_test_write_buffer_bytes(Some(4096));
         crate::write_behind::set_test_depth(Some(5));
         let list = parse_schema("as").unwrap();
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
@@ -13703,7 +13725,7 @@ mod write_behind_tests {
         assert_eq!(slot.wb_outstanding.get(), 0);
         assert_eq!(slot.wb_owner_pid.get(), 0);
         shared_close_handle(h).unwrap();
-        std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
+        crate::stream::set_test_write_buffer_bytes(None);
         crate::write_behind::set_test_depth(None);
         assert_eq!(read_strs(&path), odd_batches(40, 37, 's').concat());
     }
@@ -13756,7 +13778,7 @@ mod write_behind_tests {
         let _shm = crate::own_test_registry();
         let dir = test_dir("drain_gap");
         let path = dir.join("gap.idx");
-        std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
+        crate::stream::set_test_write_buffer_bytes(Some(4096));
         crate::write_behind::set_test_depth(Some(5));
         fn write_some(h: i64) {
             let list = parse_schema("as").unwrap();
@@ -13787,7 +13809,7 @@ mod write_behind_tests {
         let listed = crate::write_behind::sealed_handles().contains(&h);
 
         shared_close_handle(h).unwrap();
-        std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
+        crate::stream::set_test_write_buffer_bytes(None);
         crate::write_behind::set_test_depth(None);
         assert!(outstanding > 0, "the hook sealed nothing; the test does not exercise the gap");
         assert!(listed, "{outstanding} sealed batches are held by a stream no drain will visit");
@@ -13800,7 +13822,7 @@ mod write_behind_tests {
         let _shm = crate::own_test_registry();
         let dir = test_dir("drain");
         let path = dir.join("drain.idx");
-        std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
+        crate::stream::set_test_write_buffer_bytes(Some(4096));
         crate::write_behind::set_test_depth(Some(8));
         let list = parse_schema("as").unwrap();
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
@@ -13817,7 +13839,7 @@ mod write_behind_tests {
         assert_eq!(slot.wb_outstanding.get(), 0);
         assert!(slot.subpacket_entries_len.get() > written);
         shared_close_handle(h).unwrap();
-        std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
+        crate::stream::set_test_write_buffer_bytes(None);
         crate::write_behind::set_test_depth(None);
         assert_eq!(read_strs(&path), odd_batches(12, 37, 't').concat());
     }
@@ -13865,7 +13887,7 @@ mod write_behind_tests {
         let _shm = crate::own_test_registry();
         let dir = test_dir("threads");
         let path = dir.join("threads.idx");
-        std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
+        crate::stream::set_test_write_buffer_bytes(Some(4096));
         crate::write_behind::set_test_depth(Some(8));
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
         let (_gen, idx) = unpack_handle(h);
@@ -13884,7 +13906,7 @@ mod write_behind_tests {
         assert_eq!(slot.wb_outstanding.get(), 0, "batches sealed on a worker thread were left queued");
         assert_eq!(slot.wb_owner_pid.get(), 0);
         shared_close_handle(h).unwrap();
-        std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
+        crate::stream::set_test_write_buffer_bytes(None);
         crate::write_behind::set_test_depth(None);
         assert_eq!(read_strs(&path), batches.concat());
     }
@@ -13896,7 +13918,7 @@ mod write_behind_tests {
         let _shm = crate::own_test_registry();
         let dir = test_dir("fork");
         let path = dir.join("fork.idx");
-        std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
+        crate::stream::set_test_write_buffer_bytes(Some(4096));
         crate::write_behind::set_test_depth(Some(8));
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
         let (_gen, idx) = unpack_handle(h);
@@ -13914,7 +13936,7 @@ mod write_behind_tests {
         unsafe { libc::waitpid(pid, &mut status, 0) };
         assert_eq!(slot.wb_outstanding.get(), 0, "a fork left sealed batches queued");
         shared_close_handle(h).unwrap();
-        std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
+        crate::stream::set_test_write_buffer_bytes(None);
         crate::write_behind::set_test_depth(None);
         assert_eq!(read_strs(&path), batches.concat());
     }

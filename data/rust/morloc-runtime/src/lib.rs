@@ -196,6 +196,19 @@ pub(crate) fn own_test_shm() -> ArenaOwned {
     ArenaOwned(())
 }
 
+/// Write an executable script from another process. A file this process
+/// opened for writing can be inherited by a test's forked child, and exec'ing
+/// it fails with ETXTBSY until that child exits.
+#[cfg(test)]
+pub(crate) fn write_test_executable(path: &std::path::Path, script: &str) {
+    let status = std::process::Command::new("sh")
+        .args(["-c", "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"", "sh", script])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "writing {} failed", path.display());
+}
+
 /// Exclusive access with the shared arena guaranteed live. For tests that
 /// drive process-global companion state -- the stream and stdio registries --
 /// which, like the arena, exist once per process and cannot be shared.
