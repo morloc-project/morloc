@@ -303,6 +303,22 @@ aliasTests =
         type N a = (a, [N a])
         f :: N Int -> Int
         |]
+    , accept
+        "spec-alias-4-3"
+        [r|
+        module main (f)
+        type Id a = a
+        type T a = (a, ?(T (Id a)))
+        f :: T Int -> Int
+        |]
+    , reject
+        "spec-alias-4-4"
+        [r|
+        module main (f)
+        type Id a = a
+        type T a = (a, ?(T (Id [a])))
+        f :: T Int -> Int
+        |]
     , reject
         "spec-alias-6-1"
         [r|

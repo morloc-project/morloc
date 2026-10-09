@@ -72,6 +72,7 @@ module Morloc.Typecheck.Internal
   , expandTransparentAliases
   , structuralAliasesIn
   , typeUChildren
+  , mapTypeUChildren
   , traverseTypeUChildren
   , isSubtypeOf2
   , isSubtypeOfOpen

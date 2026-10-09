@@ -36,7 +36,7 @@ import qualified Morloc.TypeEval as TE
 import Morloc.Frontend.Rename (renameLocals)
 import Morloc.Frontend.TerminalActions (synthesizeTerminalActions)
 import Morloc.Frontend.TypeNames (isReservedTypeName, resolveTypeNames)
-import Morloc.Typecheck.Internal (expandStructuralAliases, structuralAliasesIn, traverseTypeUChildren, typeUChildren)
+import Morloc.Typecheck.Internal (expandStructuralAliases, mapTypeUChildren, structuralAliasesIn, traverseTypeUChildren, typeUChildren)
 
 -- | Resolve type aliases, term aliases and import/exports
 restructure ::
@@ -2332,19 +2332,41 @@ inferAliasParamKinds dag = do
   refined <- solve aliasKind (length decls + 1) declared [(i, d {exprTypeType = bodies Map.! exprTypeName d}) | (i, d) <- decls]
   return $ DAG.mapNode (rewrite refined) dag
   where
-    -- A recursive alias refers to itself with exactly its own parameters.
-    -- One whose arguments change on the way down (@type N a = (a, [N [a]])@)
+    -- A recursive alias refers to itself with exactly its own parameters,
+    -- once the other aliases in the arguments are unfolded (ALIAS-1). One
+    -- whose arguments change on the way down (@type N a = (a, [N [a]])@)
     -- has an expansion that never repeats, so no finite type stands for it.
     checkRegularRecursion :: (Int, ExprTypeE) -> MorlocMonad ()
     checkRegularRecursion (i, ExprTypeE _ v ps body _ _) =
       let own = [VarU p | Left (p, _) <- ps]
-       in case [args | (v', args) <- typeApplications body, v' == v, args /= own] of
+          others = Map.fromList
+            [ (n, ([p | Left (p, _) <- ps'], b))
+            | (_, ExprTypeE Nothing n ps' b _ TypedefAlias) <- concatMap typedefsIn (DAG.nodes dag)
+            , n /= v, all isLeft ps' ]
+       in case [ args | (v', args) <- typeApplications body, v' == v
+                      , map (unfoldOthers others Set.empty) args /= own ] of
             [] -> return ()
             (args : _) -> MM.throwSourcedError i $
               aliasNamed v <+> "refers to itself as"
                 <+> squotes (pretty (if null args then VarU v else AppU (VarU v) args))
                 <> ". A recursive alias must refer to itself with exactly its own parameters"
                 <+> parens (hsep (map pretty own)) <> "."
+
+    -- Unfold the aliases of @others@ throughout a type, each at most once
+    -- along any path, so a recursive one is left as it is.
+    unfoldOthers :: Map TVar ([TVar], TypeU) -> Set TVar -> TypeU -> TypeU
+    unfoldOthers others seen t = case TE.flattenApp t of
+      AppU (VarU h) args
+        | Just (params, b) <- Map.lookup h others
+        , Set.notMember h seen
+        , length params == length args ->
+            unfoldOthers others (Set.insert h seen) (substituteAll (zip params args) b)
+      VarU h
+        | Just ([], b) <- Map.lookup h others
+        , Set.notMember h seen ->
+            unfoldOthers others (Set.insert h seen) b
+      t' -> mapTypeUChildren (unfoldOthers others seen) t'
+    substituteAll sub b = foldr (\(p, a) acc -> substituteTVar p a acc) b sub
 
     -- Every type variable in an alias body is one of its parameters
     -- (ALIAS-11): a free variable would make the alias a different type at

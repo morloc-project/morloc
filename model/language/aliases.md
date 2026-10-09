@@ -32,8 +32,8 @@ are filled (KIND-6).
 
 ### ALIAS-4 A non-regular recursive alias is rejected at its declaration
 Intent: ruled 2026-10-08
-Tests: spec-alias-4-1, spec-alias-4-2
-Code: deviates (unfiled: the arguments are compared as written, so `T (Id a)` with `type Id a = a` is rejected)
+Tests: spec-alias-4-1, spec-alias-4-2, spec-alias-4-3, spec-alias-4-4
+Code: conforms 2026-10-09
 
 An alias whose body mentions the alias at arguments other than its own
 parameters, as in `type N a = (a, [N [a]])`, is a declaration error. The
