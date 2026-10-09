@@ -12,16 +12,19 @@ format in `../README.md`:
 
 - `Status: implemented` becomes `Intent: ruled` with `Code: conforms`.
 - `Status: deviation` becomes `Intent: ruled` with `Code: deviates`.
+- `Status: draft` becomes `Intent: proposed`.
 - `Checked by:` becomes `Tests:` (Rust test names, `tla:<config>`, spec
   tests).
 
 Until then:
 
-- `Status` is `implemented`, `deviation` or `retired`.
+- `Status` is `implemented`, `deviation`, `draft` or `retired`. A draft
+  states behavior that has not yet been checked against the code or ruled
+  on.
 - `Checked by` lists the tests that fail if the rule is broken: Rust test
   function names, `golden:<dir>` for a golden test, or `tla:<config>` for a
   model-checking run in `tla/`. An implemented item must name at least one.
-  A deviation names none.
+  A deviation or a draft names none.
 
 ## Citing an item from code
 

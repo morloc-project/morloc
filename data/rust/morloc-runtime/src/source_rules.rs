@@ -790,7 +790,7 @@ fn model_items_are_checked() {
                     }
                 }
             }
-            Some("deviation") | Some("retired") => {
+            Some("deviation") | Some("draft") | Some("retired") => {
                 if !item.checks.is_empty() {
                     problems.push(format!("{} ({at}) is not implemented but names tests", item.id));
                 }

@@ -32,10 +32,28 @@ nexus (one per program run, or one long-running daemon / MCP server)
   Julia).
 - write-behind compression jobs for output streams.
 
+## Worker scaling
+
+- Every pool starts with one worker.
+- Thread pools (C++, Rust, Python thread mode) start a worker whenever a
+  call arrives and no worker is free; no upper bound.
+- Forked pools (Python fork mode, R) count a worker busy only while it waits
+  on another pool (foreign call, channel read/write/flush/close) and fork a
+  worker when every worker is busy; a computing worker makes calls queue.
+- Surplus idle workers retire after 5 s (`MORLOC_POOL_IDLE_TIMEOUT_MS` for
+  thread pools in libmorloc); R workers never retire (SHM-8).
+- Daemon request workers: number of pools + 4, clamped to [4, 32].
+
 ## Communication
 
 - One unix-socket connection per call, carrying one request packet and one
-  reply packet. Small values travel inline; large ones as a relative
-  pointer into shared memory.
+  reply packet. Small values (at most the inline threshold, 64 KiB by
+  default) travel inline; large ones as a relative pointer into shared
+  memory, or, when shared memory is disabled, as the path of a temporary
+  file.
+- A command that calls no foreign function is pure: the nexus evaluates it
+  itself and starts no pool.
+- A one-shot CLI run starts only the pools its command can reach; the
+  daemon, MCP server and call-packet mode start every pool at startup.
 - Streams: a registry slot in shared memory names the file, its schema and
   its cursor; each process keeps its own descriptor and mapping.
