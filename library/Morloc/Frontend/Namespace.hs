@@ -151,6 +151,7 @@ copyState oldIdx newIdx = do
       , stateModuleDoc = stateModuleDoc s
       , stateModuleEpilogues = stateModuleEpilogues s
       , stateVariantAncestors = stateVariantAncestors s
+      , stateVariantArgsResolving = stateVariantArgsResolving s
       }
   where
     updateGMap g = case GMap.yIsX oldIdx newIdx g of

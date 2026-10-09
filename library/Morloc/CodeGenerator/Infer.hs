@@ -157,7 +157,14 @@ inferVariantArms lang i gscope vG vC targs = do
   -- rendered, and a literal like `A :: Tag a` with no use of `a` is
   -- ordinary code. It is only a template that would try to spell it, and
   -- the native compiler reports that where it happens.
-  ps <- mapM (argType lang i) targs
+  --
+  -- The type is an ancestor while its arguments are resolved, so an
+  -- argument that contains the type itself (@type X = Rose ?X@, whose
+  -- argument is @?X@) ends at a back-edge rather than expanding forever.
+  anc0 <- CMS.gets stateVariantAncestors
+  CMS.modify (\st -> st { stateVariantAncestors = Set.insert (vG, targs) anc0 })
+  ps <- resolveArgs lang i (vG, targs)
+  CMS.modify (\st -> st { stateVariantAncestors = anc0 })
   if all (null . snd) arms
     then return $ EnumF (FV vG (CV vC)) ps (map fst arms)
     else do
@@ -235,8 +242,36 @@ argType lang i t = case typeOf t of
 
 backEdge :: Lang -> Int -> Scope -> TVar -> [TypeU] -> MorlocMonad TypeF
 backEdge lang i cscope v args = do
+  resolving <- CMS.gets stateVariantArgsResolving
+  if Set.member (v, args) resolving
+    -- Reached while resolving this instantiation's own arguments: an
+    -- argument contains the type itself, so its native spelling would be
+    -- infinite. A generated type is named by its arguments as written and
+    -- never spells them, so it needs none here; a user template would have
+    -- to spell them, and cannot.
+    then
+      if MT.any (== '$') name
+        then MM.throwSourcedError i $
+          "The native form of" <+> squotes (pretty v) <+> "is a template,"
+            <+> "but its argument" <+> hsep (map pretty args)
+            <+> "contains the type itself, so the template has no finite"
+            <+> "instance."
+        else return $ VariantF (FV v (CV name)) [] []
+    else do
+      ps <- resolveArgs lang i (v, args)
+      return $ VariantF (FV v (CV name)) ps []
+  where
+    name = instanceName cscope v args
+
+-- | Resolve the applied arguments of a `data` instantiation, marking it as
+-- resolving its arguments for the duration (see 'backEdge').
+resolveArgs :: Lang -> Int -> (TVar, [TypeU]) -> MorlocMonad [TypeF]
+resolveArgs lang i key@(_, args) = do
+  resolving <- CMS.gets stateVariantArgsResolving
+  CMS.modify (\st -> st { stateVariantArgsResolving = Set.insert key resolving })
   ps <- mapM (argType lang i) args
-  return $ VariantF (FV v (CV (instanceName cscope v args))) ps []
+  CMS.modify (\st -> st { stateVariantArgsResolving = resolving })
+  return ps
 
 -- | A short, deterministic suffix distinguishing one instantiation of a
 -- parameterized `data` from another in a language that declares types by

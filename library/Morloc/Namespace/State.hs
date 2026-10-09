@@ -370,6 +370,10 @@ data MorlocState = MorlocState
   -- identify a type: the inner @Box Int@ of a @Box (Box Int)@ is not the
   -- outer one, and leaving it opaque would say the value contains
   -- itself.
+  , stateVariantArgsResolving :: Set.Set (TVar, [TypeU])
+  -- ^ `data` type instantiations whose applied arguments are being resolved.
+  -- An argument that contains the instantiation itself, as in
+  -- @type X = Rose ?X@, meets it here.
   }
   deriving (Show)
 
@@ -1073,6 +1077,7 @@ instance Defaultable MorlocState where
       , stateModuleDoc = []
       , stateModuleEpilogues = []
       , stateVariantAncestors = Set.empty
+      , stateVariantArgsResolving = Set.empty
       }
 
 instance Defaultable PackageMeta where

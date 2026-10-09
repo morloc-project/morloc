@@ -1,0 +1,30 @@
+-- Spec ALIAS-7: a recursive alias guarded by an optional or a list is legal.
+-- `X` unfolds to a `data` type applied to an optional of itself; values of
+-- it are built, matched and passed through a Python and a C++ pool.
+module main (topPy, topCpp, roundPy, roundCpp)
+
+import root-py
+import root-cpp
+
+data Rose a = R a [Rose a]
+type X = Rose ?X
+
+source Py from "ops.py" ("ident" as idPy)
+source Cpp from "ops.hpp" ("ident" as idCpp)
+idPy :: X -> X
+idCpp :: X -> X
+
+top :: X -> Int
+top | (R _ cs) = length cs
+
+topPy :: Int -> Int
+topPy n = top (idPy (R Null [R Null [], R Null []]))
+
+topCpp :: Int -> Int
+topCpp n = top (idCpp (R Null [R Null [], R Null []]))
+
+roundPy :: X -> X
+roundPy x = idPy x
+
+roundCpp :: X -> X
+roundCpp x = idCpp x

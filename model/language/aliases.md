@@ -56,8 +56,8 @@ alias. Every alias shares the instances and native forms of its expansion
 
 ### ALIAS-7 Recursive aliases are legal if guarded by an optional or a list
 Intent: ruled 2026-10-08
-Tests: spec-alias-7-1, spec-alias-7-2
-Code: deviates (unfiled: `type X = Rose ?X` used in a pool exhausts memory in code generation)
+Tests: spec-alias-7-1, spec-alias-7-2, spec-alias-7-3
+Code: conforms 2026-10-09
 
 A regular recursive alias whose every recursive occurrence sits under `?`
 or `[ ]`, as in `type T a = (a, ?(T a))`, is legal. Two such aliases with
