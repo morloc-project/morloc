@@ -13,14 +13,16 @@ its native forms.
 
 ### NEWT-2 A newtype with no native form takes its representation's
 Intent: ruled 2026-10-08
-Code: unaudited
+Tests: spec-newt-2-1
+Code: conforms 2026-10-09
 
 If `N` has no `type L => N = ...` form, `[[N]]_L` is `[[T]]_L`, following
 the representation chain through further newtypes.
 
 ### NEWT-3 A newtype parameter need not appear in its representation
 Intent: proposed
-Code: unaudited
+Tests: spec-newt-3-1
+Code: conforms 2026-10-09
 
 `newtype Buffer (n :: Nat) a = List a` is legal. This is where a type
 that adds a kind or a dimension to its representation is declared (ALIAS-2).

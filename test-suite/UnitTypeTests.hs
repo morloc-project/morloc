@@ -1263,8 +1263,8 @@ numericLiteralAliasTests =
         x :: Char
         x = 1.5
         |]
-        -- Nat-parameterized list aliases: `Vector 4 I32` reduces via
-        -- `type Vector (n :: Nat) a = List a` to `List I32`. The list
+        -- Nat-parameterized list newtypes: `Vector 4 I32` has the wire
+        -- form of `List I32` (`newtype Vector (n :: Nat) a = List a`). The list
         -- literal's elements must take on the reduced element type,
         -- not synthesize as `Int` and fail the subsequent subtype check.
         -- This is the user's original reproducer from the bug report.

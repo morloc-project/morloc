@@ -12,8 +12,8 @@ class Encode a where
 instance Encode Str where
   source Py from "test.py" ("encode_str" as encode)
 
--- This should fail: encode returns Bytes, but the Encode Str instance
--- operates on "str" in Python, while Bytes is "bytes" in Python.
--- The concrete types are incompatible.
+-- Rejected at the declaration `type Py => Bytes = "bytes"`: a transparent
+-- alias has no per-language form of its own (ALIAS-6); a type with its own
+-- native form is a newtype.
 shouldFail :: Str -> Bytes
 shouldFail x = encode x

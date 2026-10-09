@@ -1,11 +1,11 @@
--- Parameterized Cpp cycle: each alias takes a type parameter and
+-- Parameterized Cpp cycle: each newtype takes a type parameter and
 -- threads it through the cycle. Verifies that the SCC walk treats
--- parameterized aliases the same as non-parameterized ones.
+-- parameterized newtypes the same as non-parameterized ones.
 module main (ida)
 import root
 
-type P a = a
-type Q a = a
+newtype P a = a
+newtype Q a = a
 
 type Cpp => P a = "wrap_p" (Q a)
 type Cpp => Q a = "wrap_q" (P a)

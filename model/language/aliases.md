@@ -4,7 +4,8 @@
 
 ### ALIAS-1 An alias is the same type as its expansion
 Intent: ruled 2026-10-08
-Code: conforms 2026-10-08
+Tests: spec-alias-1-1, spec-alias-1-2, spec-alias-1-3, spec-alias-1-4, spec-alias-1-5, spec-alias-1-6
+Code: conforms 2026-10-09
 
 Given `type A x1 ... xn = T`, `A U1 ... Un == T[x1 := U1, ..., xn := Un]` in
 every position a type can appear. Two aliases with one expansion are the same
@@ -13,13 +14,15 @@ to its expansion but its docstrings (DOC-3).
 
 ### ALIAS-2 Every alias parameter appears in the body
 Intent: ruled 2026-10-08
-Code: conforms 2026-10-08
+Tests: spec-alias-2-1, spec-alias-2-2, spec-alias-2-3, spec-alias-2-4
+Code: conforms 2026-10-09
 
 A `type` parameter that the body does not use is a declaration error. Uses may
 be in kind expressions.
 
 ### ALIAS-3 An alias is applied to all its `Type` parameters
 Intent: ruled 2026-10-08
+Tests: spec-alias-3-1, spec-alias-3-2, spec-alias-3-3, spec-alias-3-4, spec-alias-3-5, spec-alias-3-6, spec-alias-3-7, spec-alias-3-8, spec-alias-3-9
 Code: deviates (unfiled: an omitted argument whose kind ALIAS-8 inferred is not filled)
 
 An alias applied to fewer `Type` arguments, or more arguments, than it
@@ -29,6 +32,7 @@ are filled (KIND-6).
 
 ### ALIAS-4 A non-regular recursive alias is rejected at its declaration
 Intent: ruled 2026-10-08
+Tests: spec-alias-4-1, spec-alias-4-2
 Code: deviates (unfiled: the arguments are compared as written, so `T (Id a)` with `type Id a = a` is rejected)
 
 An alias whose body mentions the alias at arguments other than its own
@@ -43,7 +47,8 @@ Where a type was written with an alias, a diagnostic prints the alias name.
 
 ### ALIAS-6 An alias owns no instances and no native forms
 Intent: proposed
-Code: conforms 2026-10-08
+Tests: spec-alias-6-1, spec-alias-6-2, spec-alias-6-3, spec-alias-6-4, spec-alias-6-5
+Code: conforms 2026-10-09
 
 `instance C A` and `type L => A = ...` are rejected when `A` is a `type`
 alias. Every alias shares the instances and native forms of its expansion
@@ -51,7 +56,8 @@ alias. Every alias shares the instances and native forms of its expansion
 
 ### ALIAS-7 Recursive aliases are legal if guarded by an optional or a list
 Intent: ruled 2026-10-08
-Code: conforms 2026-10-08
+Tests: spec-alias-7-1, spec-alias-7-2
+Code: deviates (unfiled: `type X = Rose ?X` used in a pool exhausts memory in code generation)
 
 A regular recursive alias whose every recursive occurrence sits under `?`
 or `[ ]`, as in `type T a = (a, ?(T a))`, is legal. Two such aliases with
@@ -59,7 +65,8 @@ equal unfoldings are the same type (TEQ-1).
 
 ### ALIAS-8 An alias parameter takes the kind of the slots it fills
 Intent: ruled 2026-10-08
-Code: deviates (unfiled: a parameter used only in a row expression keeps kind `Type`, so `Bed3 Int` is accepted)
+Tests: spec-alias-8-1, spec-alias-8-3, spec-alias-8-4
+Code: deviates (unfiled: a parameter used only in a row expression keeps kind `Type`, and an argument of the wrong kind, as in `V Str` for a Nat parameter, is accepted)
 
 An unannotated alias parameter that fills only slots of one kind `K` other
 than `Type` has kind `K`, as if written `(x :: K)`. One that fills slots of
@@ -67,6 +74,7 @@ two kinds is a declaration error. A declared kind stands.
 
 ### ALIAS-9 An alias is declared once
 Intent: ruled 2026-10-08
+Tests: spec-alias-9-1, spec-alias-9-2
 Code: deviates (unfiled: `type A = Int` beside `type A a = [a]` is accepted; only equal parameter lists are rejected)
 
 A second general declaration of an alias's name is a declaration error,
@@ -127,6 +135,7 @@ type docstrings.
 
 ### ALIAS-11 An alias names a type of any kind, over its own parameters
 Intent: ruled 2026-10-08
+Tests: spec-alias-11-1, spec-alias-11-2
 Code: deviates (unfiled: a free variable in an alias body is accepted, as in `type Twice = (a, a)`)
 
 An alias may name a row, a table or any other kind of type
@@ -137,6 +146,7 @@ declaration error. A `Type` is required only where a type classifies a term
 
 ### ALIAS-12 Two applications of one alias are compared through the expansion
 Intent: proposed
+Tests: spec-alias-12-1
 Code: deviates (unfiled: equal alias heads are compared argument by argument, which is sound only while SUB-5 lifts nothing)
 
 `A U1 ... Un <: A V1 ... Vn` holds exactly when the unfoldings are related

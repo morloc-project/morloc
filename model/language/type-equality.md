@@ -4,7 +4,8 @@ When two types are the same type. Prefix: TEQ.
 
 ### TEQ-1 Equality is structural after alias expansion
 Intent: proposed
-Code: unaudited
+Tests: spec-teq-1-1, spec-teq-1-2
+Code: conforms 2026-10-09
 
 `T == U` when, with every alias unfolded (ALIAS-1), they are the same
 constructors applied to equal arguments, up to renaming of bound type
