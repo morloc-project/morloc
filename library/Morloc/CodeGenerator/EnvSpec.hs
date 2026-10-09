@@ -162,7 +162,6 @@ buildEnvSpec morlocVersion langs metas = do
       [ ("py",    packagePyDeps)
       , ("r",     packageRDeps)
       , ("cpp",   packageCppDeps)
-      , ("julia", packageJuliaDeps)
       , ("rust",  packageRustDeps)
       ]
 

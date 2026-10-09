@@ -4,7 +4,7 @@
 
 ```
 nexus (one per program run, or one long-running daemon / MCP server)
-  |-- pool per language (C++, Python, R, Rust, Julia), fork+exec
+  |-- pool per language (C++, Python, R, Rust), fork+exec
   |     |-- Python/R fork-mode workers, fork without exec
   |     |-- user code may fork further (multiprocessing, mclapply, fork())
   |-- `morloc eval` / `typecheck` children (daemon only), fork+exec
@@ -28,8 +28,7 @@ nexus (one per program run, or one long-running daemon / MCP server)
   request workers, a SIGCHLD handler that reaps every child.
 - pool: dispatch workers (C++, Rust: a job queue in libmorloc; Python
   thread mode: Python threads; Python fork mode and R: forked worker
-  processes), the stream sweeper thread, the lifeline thread (C++, R, Rust,
-  Julia).
+  processes), the stream sweeper thread, the lifeline thread (C++, R, Rust).
 - write-behind compression jobs for output streams.
 
 ## Worker scaling

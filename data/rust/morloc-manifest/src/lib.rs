@@ -207,7 +207,7 @@ pub struct RunLog {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct Pool {
-    /// Language tag (e.g. `"py"`, `"cpp"`, `"r"`, `"julia"`).
+    /// Language tag (e.g. `"py"`, `"cpp"`, `"r"`, `"rust"`).
     pub lang: String,
     /// argv used to spawn the pool process (e.g. `["python3", "pool.py"]`).
     pub exec: Vec<String>,

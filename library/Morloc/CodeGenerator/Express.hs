@@ -1430,7 +1430,7 @@ checkStringNul idx lang s
         "This string literal contains a NUL byte, which the"
         <+> pretty (ML.langName lang)
         <+> "pool cannot represent in its native string type."
-        <+> "Move the literal to a language that can (Python, C++, Julia, or the"
+        <+> "Move the literal to a language that can (Python, C++, or the"
         <+> "nexus itself), or remove the NUL byte."
         <+> "See the allow_string_null field in the language's lang.yaml."
 

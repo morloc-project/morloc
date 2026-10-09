@@ -41,7 +41,6 @@ ldRealNaN: "NaN"
 ldListStyle: type_dependent
 ldTupleConstructor: "list"
 ldRecordConstructor: "list"
-ldRecordSeparator: "="
 
 # Access styles
 ldIndexStyle: one_double_bracket
@@ -67,14 +66,12 @@ ldRemoteCallFn: "morloc_remote_call"
 # Record handling
 ldDictStyleRecords: false
 ldEnumLitByName: true
-ldQuoteRecordKeys: false
 
 # Arguments are promises, forced when the callee first reads them
 ldLazyArgs: true
 
 # Import syntax
 ldQualifiedImports: false
-ldIncludeRelToFile: false
 
 # Template fields
 # A sourced symbol is an R identifier or operator, emitted verbatim.
@@ -92,7 +89,6 @@ ldResourcePackTemplate: "list(memory={{mem}}L, time={{time}}L, cpus={{cpus}}L, g
 ldReturnTemplate: "return({{expr}})"
 ldFuncDefHeader: "{{name}} <- function({{args}})"
 ldBlockStyle: braces
-ldBlockEnd: "}"
 ldErrorWrapOpen: "tryCatch({"
 ldErrorWrapClose:
   - "}, error = function(e) {"

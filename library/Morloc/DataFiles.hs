@@ -74,7 +74,7 @@ poolTemplateGeneric name = poolTemplate name
 the data files that should be written to the build dir before running it.
 -}
 langSetups :: [LangSetup]
-langSetups = [cppSetup, pythonSetup, rSetup, juliaSetup]
+langSetups = [cppSetup, pythonSetup, rSetup]
 
 cppSetup :: LangSetup
 cppSetup =
@@ -111,20 +111,6 @@ rSetup =
     [ EmbededFile "rmorloc.c" (decodeUtf8 $ $(embedFileRelative "data/lang/r/rmorloc.c"))
     ]
 
-juliaSetup :: LangSetup
-juliaSetup =
-  LangSetup
-    "Julia"
-    ["julia"]
-    (EmbededFile "init.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/init.sh")))
-    [ EmbededFile "juliabridge.c" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/juliabridge.c"))
-    , EmbededFile
-        "MorlocRuntime.jl"
-        (decodeUtf8 $ $(embedFileRelative "data/lang/julia/MorlocRuntime.jl"))
-    , EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/lang.yaml"))
-    , EmbededFile "pool.jl" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/pool.jl"))
-    ]
-
 -- | Per-language lang.yaml files keyed by canonical name
 langRegistryFiles :: [(String, EmbededFile)]
 langRegistryFiles =
@@ -132,7 +118,6 @@ langRegistryFiles =
   , ("cpp", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/lang.yaml")))
   , ("py", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/py/lang.yaml")))
   , ("r", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/r/lang.yaml")))
-  , ("jl", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/julia/lang.yaml")))
   , ("futhark", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/futhark/lang.yaml")))
   , ("rust", EmbededFile "lang.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/rust/lang.yaml")))
   ]

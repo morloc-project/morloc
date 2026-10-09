@@ -500,7 +500,7 @@ fn other_found(file: &Path, scope: &str, name: String, kind: Kind) -> Found {
 
 fn scan_c(out: &mut Vec<Found>) {
     let locks = ["std::mutex", "std::once_flag", "pthread_mutex_t", "pthread_once_t", "std::condition_variable"];
-    for f in walk(&repo_root().join("data/lang"), &["c", "cpp", "hpp", "h"], &["nanoarrow", "/julia"]) {
+    for f in walk(&repo_root().join("data/lang"), &["c", "cpp", "hpp", "h"], &["nanoarrow"]) {
         let text = std::fs::read_to_string(&f).unwrap();
         let mut scope = "-".to_string();
         for line in text.lines() {
@@ -538,7 +538,7 @@ fn scan_py(out: &mut Vec<Found>) {
         "threading.Lock(", "threading.RLock(", "threading.Condition(", "threading.Event(",
         "threading.Semaphore(", "threading.BoundedSemaphore(", "queue.Queue(", "queue.SimpleQueue(",
     ];
-    for f in walk(&repo_root().join("data/lang"), &["py"], &["/julia"]) {
+    for f in walk(&repo_root().join("data/lang"), &["py"], &[]) {
         for line in std::fs::read_to_string(&f).unwrap().lines() {
             if let Some((lhs, rhs)) = line.split_once('=') {
                 if ctors.iter().any(|k| rhs.trim_start().starts_with(k)) {
@@ -1063,7 +1063,7 @@ fn every_process_id_read_is_reviewed() {
     let scan = scan_rust();
     let reads: HashSet<&str> = scan.pid_reads.iter().map(|s| s.as_str()).collect();
     let mut binder_counts: HashMap<String, usize> = HashMap::new();
-    for f in walk(&repo_root().join("data/lang"), &["c", "cpp", "hpp", "h", "py", "R", "rs"], &["/julia", "nanoarrow"]) {
+    for f in walk(&repo_root().join("data/lang"), &["c", "cpp", "hpp", "h", "py", "R", "rs"], &["nanoarrow"]) {
         let text = std::fs::read_to_string(&f).unwrap();
         let n = text.lines().filter(|l| l.contains("getpid(") || l.contains("os.getpid") || l.contains("Sys.getpid")).count();
         if n > 0 {

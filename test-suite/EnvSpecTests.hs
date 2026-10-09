@@ -121,6 +121,8 @@ envSpecTests =
             assertBool "crates+channel must be rejected" (isLeft (decodeDep "{\"source\":\"crates\",\"channel\":\"x\"}"))
         , testCase "an unknown source is a parse error" $
             assertBool "unknown source must be rejected" (isLeft (decodeDep "{\"source\":\"npm\"}"))
+        , testCase "pkg is not a dependency source" $
+            assertBool "pkg source must be rejected" (isLeft (decodeDep "{\"source\":\"pkg\"}"))
         ]
     , testGroup
         "FromJSON PackageMeta agrees with the no-package.yaml defaults"
@@ -192,8 +194,8 @@ envSpecTests =
             assertLeftWith "cxx-flags" (checkPackageDeps (pm {packageLocalDeps = localGroup "cpp" [("mylib", LocalDep "./vendor/mylib" False)]}))
         , testCase "r local dep is rejected" $
             assertLeft (checkPackageDeps (pm {packageLocalDeps = localGroup "r" [("mylib", LocalDep "./vendor/mylib" False)]}))
-        , testCase "julia local dep is rejected (not yet supported)" $
-            assertLeft (checkPackageDeps (pm {packageLocalDeps = localGroup "julia" [("mylib", LocalDep "./vendor/mylib" False)]}))
+        , testCase "a local dep for an unknown language is rejected" $
+            assertLeft (checkPackageDeps (pm {packageLocalDeps = localGroup "go" [("mylib", LocalDep "./vendor/mylib" False)]}))
         , testCase "an absolute local path is rejected" $
             assertLeft (checkPackageDeps (pm {packageLocalDeps = localGroup "py" [("mylib", LocalDep "/opt/mylib" False)]}))
         , testCase "a local path with .. is rejected" $
@@ -299,11 +301,11 @@ envSpecTests =
         ]
     , testGroup
         "renderDepCapabilities (derived from depPolicy, single source of truth)"
-        [ testCase "python and rust support local deps; cpp/r/julia do not" $ do
+        [ testCase "python and rust support local deps; cpp/r do not" $ do
             assertBool "py local yes" (T.isInfixOf "py | conda, pypi | yes" caps)
             assertBool "rust local yes" (T.isInfixOf "rust | crates | yes" caps)
             assertBool "cpp local no" (T.isInfixOf "cpp | conda | no" caps)
-            assertBool "julia local no" (T.isInfixOf "julia | pkg | no" caps)
+            assertBool "r local no" (T.isInfixOf "r | conda | no" caps)
         ]
     ]
   where

@@ -267,7 +267,6 @@ syncEnvDeps projectRoot = do
         || not (Map.null (packageRDeps pm))
         || not (Map.null (packageCppDeps pm))
         || not (Map.null (packageRustDeps pm))
-        || not (Map.null (packageJuliaDeps pm))
         || not (Map.null (packageLocalDeps pm))
 
     -- @requireHook@ is @declaresDeps@: a program that DECLARES package

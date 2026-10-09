@@ -66,7 +66,7 @@ langSupportTests =
         ]
     , testGroup
         "drift guard vs DataFiles.langSetups"
-        [ testCase "every shim language has a requirements entry or is deferred" $ withParsed $ \t ->
+        [ testCase "every shim language has a requirements entry" $ withParsed $ \t ->
             mapM_ (checkCovered t) DF.langSetups
         ]
     , testGroup
@@ -93,16 +93,12 @@ langSupportTests =
       "C++" -> "cpp"
       "python" -> "py"
       "R" -> "r"
-      "Julia" -> "julia"
       other -> T.pack other
-    -- shim languages morloc can build but that are not yet natively supported
-    deferred :: [Text]
-    deferred = ["julia"]
     checkCovered t ls =
       let key = canonicalKey (DF.lsName ls)
        in assertBool
-            (DF.lsName ls <> " (" <> T.unpack key <> ") must have a requirements.yaml or be deferred")
-            (Map.member key (lsLanguages t) || key `elem` deferred)
+            (DF.lsName ls <> " (" <> T.unpack key <> ") must have a requirements.yaml")
+            (Map.member key (lsLanguages t))
 
     minimal =
       LangSupport

@@ -328,10 +328,6 @@ translateSource desc p = do
   unless exists . MM.throwSystemError $
     "Source file not found:" <+> pretty p
   let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
-      -- For languages whose import is resolved relative to the pool FILE
-      -- (Julia's `include`), reach the source root: the pool sits at
-      -- <root>/<key>-build/pools/<lang>/, so sources are three levels up.
-      p'' = if ldIncludeRelToFile desc then "../../../" <> p' else p'
   if ldQualifiedImports desc
     then do
       lib <- MT.pack <$> asks MC.configLibrary
@@ -350,7 +346,7 @@ translateSource desc p = do
           ]
     else do
       let tmpl = ldImportTemplate desc
-      return . pretty $ substituteT tmpl [("path", p'')]
+      return . pretty $ substituteT tmpl [("path", p')]
 
 -- | Prefix for the pool-side name a sourced file is bound to.
 --
@@ -530,7 +526,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
               defaultValue
                 { poolExpr =
                     pretty (ldRecordConstructor desc)
-                      <> tupled [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> v | (k, v) <- rs]
+                      <> tupled [pretty k <+> "=" <+> v | (k, v) <- rs]
                 }
         , lcStoreField = \_ v -> return v
         , lcApplyClosure = \callee args -> callee <> tupled args
@@ -637,9 +633,6 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                     nest 4 (vsep [header, vsep (wrapError (priorLines <> [body]))])
                   BraceBlock ->
                     block 4 header (vsep $ wrapError (priorLines <> [body]))
-                  EndKeywordBlock ->
-                    let endKw = ldBlockEnd desc
-                     in vsep [header, indent 4 (vsep $ wrapError (priorLines <> [body])), pretty endKw]
         , lcClosureSig = \_ -> return ""
         , lcMakePass = \_sig _ mname _ ->
             return . pretty $
@@ -778,13 +771,6 @@ genericCacheBody desc cfg resSa lbl midx args bodyPool = do
           , indent 4 (vsep missLines)
           , "}"
           ]
-        EndKeywordBlock -> vsep
-          [ "if" <+> condE
-          , indent 4 (vsep hitLines)
-          , "else"
-          , indent 4 (vsep missLines)
-          , "end"
-          ]
       priorLines = serializeStmts ++ [keyCompute, cacheLookup, ifBlock]
   return $ defaultValue
     { poolExpr = resultVar
@@ -868,20 +854,6 @@ genericDebugWrap desc cfg debugInfo midx args bodyPool = do
           , indent 4 "stop(" <> excVar <> ")"
           , "})"
           ]
-        EndKeywordBlock -> vsep
-          -- No supported lang uses EndKeyword for try/catch today;
-          -- placeholder mirroring Ruby/Lua idioms.
-          [ "begin"
-          , indent 4 (vsep (poolPriorLines bodyPool
-              ++ [resultVar <+> assign <+> poolExpr bodyPool]))
-          , "rescue" <+> excVar
-          , indent 4 "begin"
-          , indent 8 (vsep catchStmts)
-          , indent 4 "rescue"
-          , indent 4 "end"
-          , indent 4 "raise"
-          , "end"
-          ]
   return $ defaultValue
     { poolExpr = resultVar
     , poolPriorLines = [catchBlock]
@@ -934,12 +906,6 @@ genericRemoteCall desc socketFile mid res args = do
           <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resPacked, list args]
   return $ defaultValue {poolExpr = call}
 
--- | Format a record key: bare identifier or quoted string
-makeRecordKey :: LangDescriptor -> Key -> MDoc
-makeRecordKey desc k
-  | ldQuoteRecordKeys desc = dquotes (pretty k)
-  | otherwise = pretty k
-
 makeGenericSocketPath :: LangDescriptor -> MDoc -> MDoc
 makeGenericSocketPath desc socketFileBasename =
   let tmpl = ldSocketPathTemplate desc
@@ -972,15 +938,6 @@ genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
             , indent 4 (vsep elseBlock)
             , "}"
             ]
-        EndKeywordBlock ->
-          let endKw = ldBlockEnd desc
-           in vsep
-                [ v <+> "<-" <+> "if" <+> parens condE <+> "{"
-                , indent 4 (vsep (poolPriorLines thenDocs <> [thenE]))
-                , "} else {"
-                , indent 4 (vsep (poolPriorLines elseDocs <> [elseE]))
-                , "}" <+> pretty endKw
-                ]
   return $
     PoolDocs
       { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds thenDocs <> poolCompleteManifolds elseDocs
@@ -1051,20 +1008,15 @@ genericMakeLoop desc cfg _ carried body = do
           eLines <- go e
           return $ poolPriorLines guardDocs <> [renderIf (poolExpr guardDocs) tLines eLines]
         sameLocal i d = null (poolPriorLines d) && render (poolExpr d) == render (nvarNamer i)
-    -- Block-style rendering (IndentBlock=py, BraceBlock=r, EndKeywordBlock=julia
-    -- kept for consistency with sibling emitters though gated out today).
+    -- Block-style rendering (IndentBlock=py, BraceBlock=r).
     renderIf g tLines eLines = case ldBlockStyle desc of
       IndentBlock ->
         vsep [nest 4 (vsep (("if" <+> g <> ":") : tLines)), nest 4 (vsep ("else:" : eLines))]
       BraceBlock ->
         vsep ["if" <+> parens g <+> "{", indent 4 (vsep tLines), "} else {", indent 4 (vsep eLines), "}"]
-      EndKeywordBlock ->
-        vsep ["if" <+> g, indent 4 (vsep tLines), "else", indent 4 (vsep eLines), pretty (ldBlockEnd desc)]
     renderWhile bodyLines = case ldBlockStyle desc of
       IndentBlock -> nest 4 (vsep (("while" <+> trueLit <> ":") : bodyLines))
       BraceBlock -> vsep ["while" <+> parens trueLit <+> "{", indent 4 (vsep bodyLines), "}"]
-      EndKeywordBlock -> vsep ["while" <+> trueLit, indent 4 (vsep bodyLines), pretty (ldBlockEnd desc)]
-
 -- Build a suspended do-block thunk. When the thunk form can hold
 -- statements (non-empty ldDoBlockBlock, e.g. an R closure body) the
 -- prior statements are absorbed into that block. When it cannot (empty
@@ -1091,8 +1043,6 @@ genericMakeDoBlock desc cfg _ stmts expr
           retLine = pretty $ substituteT (ldReturnTemplate desc) [("expr", render expr)]
           def = case ldBlockStyle desc of
             BraceBlock -> block 4 header (vsep (stmts <> [retLine]))
-            EndKeywordBlock ->
-              vsep [header, indent 4 (vsep (stmts <> [retLine])), pretty (ldBlockEnd desc)]
             IndentBlock -> nest 4 (vsep [header, vsep (stmts <> [retLine])])
       return ([def], nm)
   where
@@ -1155,7 +1105,7 @@ genericPrintExpr desc = go
       name -> pretty name <> tupled (map go es)
     go (IRecordLit _ _ entries) =
       pretty (ldRecordConstructor desc)
-        <> tupled [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> go e | (k, e) <- entries]
+        <> tupled [pretty k <+> "=" <+> go e | (k, e) <- entries]
     go (IAccess e (IIdx i)) = case ldIndexStyle desc of
       ZeroBracket -> go e <> "[" <> pretty i <> "]"
       OneBracket -> go e <> "[" <> pretty (i + 1) <> "]"
@@ -1430,14 +1380,6 @@ genericPrintStmt desc = go
             , indent 4 (vsep (map go elseStmts ++ [pretty resultVar <+> pretty (ldAssignOp desc) <+> printE elseExpr <> ";"]))
             , "}"
             ]
-        EndKeywordBlock ->
-          vsep
-                [ pretty resultVar <+> "<-" <+> "if" <+> parens (printE condExpr) <+> "{"
-                , indent 4 (vsep (map go thenStmts ++ [printE thenExpr]))
-                , "} else {"
-                , indent 4 (vsep (map go elseStmts ++ [printE elseExpr]))
-                , "}"
-                ]
     go (IIfNotNull resultVar _ source unwrapVar _ bodyStmts bodyExpr) =
       let srcVar = unwrapVar <> "_src"
           srcDoc = pretty srcVar
@@ -1464,15 +1406,6 @@ genericPrintStmt desc = go
                 , pretty resultVar <+> pretty (ldAssignOp desc) <+> pretty (ldNullLiteral desc) <> ";"
                 , "if" <+> parens condDoc <+> "{"
                 , indent 4 (vsep (bindUnwrap <> ";" : map go bodyStmts ++ [pretty resultVar <+> pretty (ldAssignOp desc) <+> printE bodyExpr <> ";"]))
-                , "}"
-                ]
-            EndKeywordBlock ->
-              vsep
-                [ srcBind
-                , pretty resultVar <+> "<-" <+> "if" <+> parens condDoc <+> "{"
-                , indent 4 (vsep (bindUnwrap : map go bodyStmts ++ [printE bodyExpr]))
-                , "} else {"
-                , indent 4 (pretty (ldNullLiteral desc))
                 , "}"
                 ]
     go (IFunDef _ _ _ _) = error "IFunDef not yet implemented for generic printer"
@@ -1698,7 +1631,7 @@ genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
     makeRecord (NamF _ _ _ rs) xs =
       pretty (ldRecordConstructor desc)
         <> tupled
-          [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> x | (k, x) <- zip (map fst rs) xs]
+          [pretty k <+> "=" <+> x | (k, x) <- zip (map fst rs) xs]
     makeRecord _ _ = error "Incorrectly typed record setter"
 
     accessTuple _ m i = case ldIndexStyle desc of

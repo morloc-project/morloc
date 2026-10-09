@@ -41,14 +41,14 @@ import qualified Text.Parsec as P
 
 -- | How to access tuple/list elements by index
 data IndexStyle
-  = ZeroBracket -- e[i]     (Python, JS, Julia, Lua)
+  = ZeroBracket -- e[i]     (Python, JS, Lua)
   | OneBracket -- e[i+1]   (R-like with [], 1-indexed)
   | OneDoubleBracket -- e[[i+1]] (R with [[]], 1-indexed)
   deriving (Eq, Show, Generic)
 
 -- | How to access record fields
 data FieldAccessStyle
-  = DotAccess -- e.field  (Python, JS, Julia)
+  = DotAccess -- e.field  (Python, JS)
   | DollarAccess -- e$field  (R)
   deriving (Eq, Show, Generic)
 
@@ -56,7 +56,6 @@ data FieldAccessStyle
 data BlockStyle
   = IndentBlock -- Python-style: header + indented body
   | BraceBlock -- R/JS-style: header { body }
-  | EndKeywordBlock -- Julia/Ruby-style: header body end
   deriving (Eq, Show, Generic)
 
 -- | List iteration / map style
@@ -111,7 +110,6 @@ data LangDescriptor = LangDescriptor
     ldListStyle :: !ListStyle
   , ldTupleConstructor :: !Text -- "tuple" or "list" or ""
   , ldRecordConstructor :: !Text -- "dict" or "OrderedDict" or "list"
-  , ldRecordSeparator :: !Text -- "=" for Python/R, "=>" for Julia
   , -- Access styles
     ldIndexStyle :: !IndexStyle
   , ldKeyAccess :: !Text -- "bracket" -> e["k"], "double_bracket" -> e[["k"]]
@@ -141,10 +139,8 @@ data LangDescriptor = LangDescriptor
     -- R does, where an enum is a factor and a factor compares equal to its
     -- level label. False: by TAG, as Python does, where the runtime hands
     -- the pool a plain int and the ordinal is the value.
-  , ldQuoteRecordKeys :: !Bool -- True: "k" => v (Julia), False: k=v (Python, R)
   , -- Import syntax
     ldQualifiedImports :: !Bool -- True: qualify source names with module path (Python)
-  , ldIncludeRelToFile :: !Bool -- True if include() resolves relative to file (Julia), False for CWD (R)
   , -- Pool template
     ldPoolTemplate :: !Text -- pool template content
   , ldBreakMarker :: !Text -- "# <<<BREAK>>>"
@@ -155,7 +151,7 @@ data LangDescriptor = LangDescriptor
   , -- NUL-in-Str policy. False means the morloc runtime rejects any
     -- attempt to send a Str containing an interior NUL byte across the
     -- boundary into a pool of this language. Languages whose native
-    -- string type is length-prefixed (Python, C++, Julia) set this to
+    -- string type is length-prefixed (Python, C++) set this to
     -- True; languages where strings are NUL-terminated by convention
     -- (C) or whose stdlib refuses NUL strings (R) set it to False.
     ldAllowStringNull :: !Bool
@@ -194,7 +190,6 @@ data LangDescriptor = LangDescriptor
   , -- Function definition
     ldFuncDefHeader :: !Text -- e.g. "def {{name}}({{args}}):"
   , ldBlockStyle :: !BlockStyle
-  , ldBlockEnd :: !Text -- "" or "end"
   , -- Error wrapping
     ldErrorWrapOpen :: !Text -- "try:" for Python, "" for others
   , ldErrorWrapClose :: ![Text] -- Except block lines with {{name}} template var
@@ -266,7 +261,6 @@ instance Y.FromJSON BlockStyle where
   parseJSON = Y.withText "BlockStyle" $ \t -> case t of
     "indent" -> pure IndentBlock
     "braces" -> pure BraceBlock
-    "end_keyword" -> pure EndKeywordBlock
     _ -> fail $ "Unknown BlockStyle: " <> T.unpack t
 
 instance Y.FromJSON MapStyle where
@@ -327,7 +321,6 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldOwnedArgFn" (Y.String "")
             . ins "ldDictStyleRecords" (Y.Bool False)
             . ins "ldEnumLitByName" (Y.Bool False)
-            . ins "ldQuoteRecordKeys" (Y.Bool True)
             . ins "ldQualifiedImports" (Y.Bool False)
             . ins "ldRunCommand" (Y.Array mempty)
             . ins "ldIsCompiled" (Y.Bool False)
@@ -346,7 +339,6 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldReturnTemplate" (Y.String "return({{expr}})")
             . ins "ldFuncDefHeader" (Y.String "")
             . ins "ldBlockStyle" (Y.String "indent")
-            . ins "ldBlockEnd" (Y.String "")
             . ins "ldErrorWrapOpen" (Y.String "")
             . ins "ldErrorWrapClose" (Y.Array mempty)
             . ins "ldPatternStyle" (Y.String "fstring")
@@ -404,7 +396,6 @@ defaultLangDescriptor name ext =
     , ldListStyle = BracketList
     , ldTupleConstructor = ""
     , ldRecordConstructor = "dict"
-    , ldRecordSeparator = "="
     , ldIndexStyle = ZeroBracket
     , ldKeyAccess = "bracket"
     , ldFieldAccess = DotAccess
@@ -420,9 +411,7 @@ defaultLangDescriptor name ext =
     , ldRemoteCallFn = ""
     , ldDictStyleRecords = False
     , ldEnumLitByName = False
-    , ldQuoteRecordKeys = True
     , ldQualifiedImports = False
-    , ldIncludeRelToFile = False
     , ldPoolTemplate = ""
     , ldBreakMarker = "# <<<BREAK>>>"
     , ldCommentMarker = "#"
@@ -445,7 +434,6 @@ defaultLangDescriptor name ext =
     , ldReturnTemplate = "return({{expr}})"
     , ldFuncDefHeader = ""
     , ldBlockStyle = IndentBlock
-    , ldBlockEnd = ""
     , ldErrorWrapOpen = ""
     , ldErrorWrapClose = []
     , ldPatternStyle = FStringPattern

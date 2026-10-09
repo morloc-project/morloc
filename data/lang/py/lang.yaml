@@ -39,7 +39,6 @@ ldRealNaN: "float('nan')"
 ldListStyle: bracket
 ldTupleConstructor: ""
 ldRecordConstructor: "OrderedDict"
-ldRecordSeparator: "="
 
 # Access styles
 ldIndexStyle: zero_bracket
@@ -65,11 +64,9 @@ ldRemoteCallFn: "morloc.remote_call"
 # Record handling
 ldDictStyleRecords: true
 ldEnumLitByName: false
-ldQuoteRecordKeys: false
 
 # Import syntax
 ldQualifiedImports: true
-ldIncludeRelToFile: false
 
 # Template fields
 # A sourced symbol is a Python identifier or operator, emitted verbatim.
@@ -86,7 +83,6 @@ ldResourcePackTemplate: "struct.pack('iiii', {{mem}}, {{time}}, {{cpus}}, {{gpus
 ldReturnTemplate: "return({{expr}})"
 ldFuncDefHeader: "def {{name}}({{args}}):"
 ldBlockStyle: indent
-ldBlockEnd: ""
 ldErrorWrapOpen: "try:"
 ldErrorWrapClose:
   - "except Exception as e:"

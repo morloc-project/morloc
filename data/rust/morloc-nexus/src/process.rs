@@ -527,7 +527,7 @@ extern "C" {
 /// the nexus: a core morloc guarantee is that anything a sourced function
 /// prints to stderr/stdout is passed through unchanged. Raised exceptions
 /// are caught inside each pool's dispatch wrapper (see pool.py/pool.cpp/
-/// pool.R/pool.jl) and returned as morloc error packets, which the nexus
+/// pool.R) and returned as morloc error packets, which the nexus
 /// then annotates with call-site context when bubbling them up.
 #[derive(Clone)]
 pub struct PoolSocket {

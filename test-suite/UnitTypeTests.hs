@@ -2376,7 +2376,7 @@ unitTypeTests =
         assertGeneralType "primitive boolean" "True" bool
       , assertGeneralType "primitive string" "\"this is a string literal\"" str
       , -- The `\0` escape is intentionally legal at the source-level so
-        --   that NUL-tolerant pools (Python, C++, Julia) and the pure
+        --   that NUL-tolerant pools (Python, C++) and the pure
         --   morloc nexus can carry interior NULs. The dispatch-layer
         --   guard rejects NUL-bearing values only at boundaries into
         --   NUL-intolerant languages (R, C). See features-strings.asc.

@@ -465,7 +465,7 @@ data Config
 -- | The ecosystem (package database / index) a dependency is drawn from. This
 -- names WHERE a package comes from, never the tool that fetches it: 'SrcConda'
 -- (the conda package database), 'SrcPypi' (PyPI), 'SrcCran'/'SrcBioconductor'
--- (R registries), 'SrcCrates' (crates.io), 'SrcPkg' (Julia's General registry).
+-- (R registries), 'SrcCrates' (crates.io).
 -- A module declaring its sources is self-describing: the meaning of a name does
 -- not depend on which channels the builder happens to provide.
 data DepSource
@@ -474,7 +474,6 @@ data DepSource
   | SrcCran
   | SrcBioconductor
   | SrcCrates
-  | SrcPkg
   deriving (Show, Eq, Ord)
 
 -- | Which registry a dependency is drawn from, carrying only the fields that are
@@ -487,7 +486,6 @@ data RegDep
   = RegConda !(Maybe Text)   -- optional channel; Nothing means conda-forge
   | RegPypi
   | RegCrates
-  | RegPkg
   | RegCran
   | RegBioconductor
   | RegDefault
@@ -517,7 +515,6 @@ dsSource ds = case dsReg ds of
   RegConda _ -> Just SrcConda
   RegPypi -> Just SrcPypi
   RegCrates -> Just SrcCrates
-  RegPkg -> Just SrcPkg
   RegCran -> Just SrcCran
   RegBioconductor -> Just SrcBioconductor
   RegDefault -> Nothing
@@ -540,7 +537,6 @@ parseDepSource "pypi" = Just SrcPypi
 parseDepSource "cran" = Just SrcCran
 parseDepSource "bioconductor" = Just SrcBioconductor
 parseDepSource "crates" = Just SrcCrates
-parseDepSource "pkg" = Just SrcPkg
 parseDepSource _ = Nothing
 
 -- | Canonical name for a source (the inverse of 'parseDepSource'): the string
@@ -551,7 +547,6 @@ depSourceText SrcPypi = "pypi"
 depSourceText SrcCran = "cran"
 depSourceText SrcBioconductor = "bioconductor"
 depSourceText SrcCrates = "crates"
-depSourceText SrcPkg = "pkg"
 
 -- | A language's dependency-source policy: the sources honored today, sources
 -- recognized but not yet wired up, and the source assumed when the author omits
@@ -573,7 +568,6 @@ depPolicy "py" = LangDepPolicy [SrcConda, SrcPypi] [] Nothing True
 depPolicy "r" = LangDepPolicy [SrcConda] [SrcCran, SrcBioconductor] (Just SrcConda) False
 depPolicy "cpp" = LangDepPolicy [SrcConda] [] (Just SrcConda) False
 depPolicy "rust" = LangDepPolicy [SrcCrates] [] (Just SrcCrates) True
-depPolicy "julia" = LangDepPolicy [SrcPkg] [] (Just SrcPkg) False
 depPolicy _ = LangDepPolicy [SrcConda] [] (Just SrcConda) False
 
 -- | The source assumed for a language's dependency when none is declared.
@@ -583,7 +577,7 @@ defaultDepSource = ldpDefault . depPolicy
 -- | The languages with an explicit dependency policy, in display order. The
 -- capability table ('renderDepCapabilities') iterates these.
 knownDepLangs :: [Text]
-knownDepLangs = ["py", "r", "cpp", "rust", "julia"]
+knownDepLangs = ["py", "r", "cpp", "rust"]
 
 -- | Render the per-language dependency-capability table as plain lines, DERIVED
 -- entirely from 'depPolicy' (the single source of truth) so an advertised table
@@ -654,7 +648,6 @@ regOfSource :: DepSource -> RegDep
 regOfSource SrcConda = RegConda Nothing
 regOfSource SrcPypi = RegPypi
 regOfSource SrcCrates = RegCrates
-regOfSource SrcPkg = RegPkg
 regOfSource SrcCran = RegCran
 regOfSource SrcBioconductor = RegBioconductor
 
@@ -673,7 +666,7 @@ instance FromJSON LocalDep where
 --   * R: defaults to conda (the @r-@ feedstock); @cran@/@bioconductor@ are not
 --     yet supported (the R pool installs only through conda).
 --   * C++: conda only.
---   * Rust: crates.io only.  * Julia: the General registry only.
+--   * Rust: crates.io only.
 --   * @channel@ is conda-only: it may not accompany a non-conda source, and a
 --     conda-forge R name must be a bare CRAN name (no @r-@ prefix).
 checkPackageDeps :: PackageMeta -> Either Text ()
@@ -685,7 +678,6 @@ checkPackageDeps pm =
       , ("r", packageRDeps pm)
       , ("cpp", packageCppDeps pm)
       , ("rust", packageRustDeps pm)
-      , ("julia", packageJuliaDeps pm)
       ]
 
     checkGroup (lang, m) = mapM_ (checkDep lang) (Map.toList m)
@@ -804,9 +796,6 @@ data PackageMeta
   -- | External C++ libraries (name -> 'DepSpec') needed by the C++ pool; the
   -- structured, version-managed successor to 'packageDependencies'.
   , packageCppDeps :: Map Text DepSpec
-  -- | External Julia packages (name -> 'DepSpec') needed by the Julia pool
-  -- (resolved by Pkg.jl).
-  , packageJuliaDeps :: Map Text DepSpec
   -- | Local (filesystem-path) dependencies, grouped by language
   -- (lang -> name -> 'LocalDep'). Non-portable until frozen; honored only from
   -- the root/entry module. Supported languages: py, rust (see 'ldpLocalInstall').
@@ -1107,7 +1096,6 @@ instance Defaultable PackageMeta where
       , packagePyDeps = Map.empty
       , packageRDeps = Map.empty
       , packageCppDeps = Map.empty
-      , packageJuliaDeps = Map.empty
       , packageLocalDeps = Map.empty
       , packageLangVersions = Map.empty
       , packageInclude = Nothing
@@ -1167,7 +1155,6 @@ instance FromJSON PackageMeta where
       <*> o .:? "py-deps" .!= Map.empty
       <*> o .:? "r-deps" .!= Map.empty
       <*> o .:? "cpp-deps" .!= Map.empty
-      <*> o .:? "julia-deps" .!= Map.empty
       <*> o .:? "local-deps" .!= Map.empty
       <*> o .:? "lang-versions" .!= Map.empty
       <*> o .:? "include"
