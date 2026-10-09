@@ -12,6 +12,8 @@ module SpecTests (specTests) where
 
 import Morloc (typecheckFrontend)
 import Morloc.Frontend.Namespace
+import Morloc.Data.Doc (render)
+import qualified Data.Char as DC
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
 import qualified Data.Text as MT
@@ -30,6 +32,7 @@ specTests =
     , localOption (mkTimeout 2000000) kindTests
     , localOption (mkTimeout 2000000) teqTests
     , localOption (mkTimeout 2000000) newtTests
+    , localOption (mkTimeout 5000000) dimTests
     , modelCheck
     ]
 
@@ -623,6 +626,90 @@ aliasTests =
         f :: Foo 1 3 -> Int
         f x = g x
         |]
+    , reject
+        "spec-alias-12-2"
+        [r|
+        module main (f)
+        effect IO
+        type Scorers a = [a -> Int]
+        g :: Scorers (<IO> Int) -> <IO> Int
+        f :: Scorers (<> Int) -> <IO> Int
+        f x = g x
+        |]
+    , accept
+        "spec-alias-12-3"
+        [r|
+        module main (f)
+        effect IO
+        type Scorers a = [a -> Int]
+        g :: Scorers (<> Int) -> <IO> Int
+        f :: Scorers (<IO> Int) -> <IO> Int
+        f x = g x
+        |]
+    , rejectNaming
+        "spec-alias-5-1"
+        ["WindSpeed"]
+        ["Real"]
+        [r|
+        module main (f)
+        type WindSpeed = Real
+        g :: Str -> Int
+        f :: WindSpeed -> Int
+        f x = g x
+        |]
+    , accept
+        "spec-alias-5-2"
+        [r|
+        module main (f)
+        type WindSpeed = Real
+        g :: WindSpeed -> Int
+        f :: WindSpeed -> Int
+        f x = g x
+        |]
+    , rejectNaming
+        "spec-alias-5-3"
+        ["WindSpeed"]
+        ["Real"]
+        [r|
+        module main (f)
+        type WindSpeed = Real
+        g :: [(Str, Int)] -> Int
+        ident :: a -> a
+        f :: [(WindSpeed, Int)] -> Int
+        f x = g (ident x)
+        |]
+    , rejectNaming
+        "spec-alias-5-5"
+        ["WindSpeed", "Label"]
+        ["Real", "Str"]
+        [r|
+        module main (f)
+        type WindSpeed = Real
+        type Label = Str
+        g :: Label -> Int
+        f :: WindSpeed -> Int
+        f x = g x
+        |]
+    , accept
+        "spec-alias-5-6"
+        [r|
+        module main (f)
+        type WindSpeed = Real
+        type Label = Real
+        g :: Label -> Int
+        f :: WindSpeed -> Int
+        f x = g x
+        |]
+    , accept
+        "spec-alias-5-4"
+        [r|
+        module main (f)
+        type WindSpeed = Real
+        g :: [(WindSpeed, Int)] -> Int
+        ident :: a -> a
+        f :: [(WindSpeed, Int)] -> Int
+        f x = g (ident x)
+        |]
     ]
 
 kindTests :: TestTree
@@ -652,6 +739,70 @@ kindTests =
         newtype Vector (n :: Nat) a = List a
         type V (n :: Nat) a = Vector n a
         f :: V Int -> Int
+        |]
+    ]
+
+dimTests :: TestTree
+dimTests =
+  testGroup
+    "DIM"
+    [ accept
+        "spec-dim-6-1"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
+        h :: Foo n m -> Int
+        f :: Foo 1 3 -> Int
+        f x = h x
+        |]
+    , rejectUser
+        "spec-dim-6-2"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
+        h :: Foo n n -> Int
+        f :: Foo 1 2 -> Int
+        f x = h x
+        |]
+    , rejectUser
+        "spec-dim-6-3"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
+        h :: Foo (n + 5) m -> Int
+        f :: Foo 1 3 -> Int
+        f x = h x
+        |]
+    , accept
+        "spec-dim-6-4"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
+        h :: Foo (n + 3) m -> Int
+        f :: Foo 1 3 -> Int
+        f x = h x
+        |]
+    , rejectUser
+        "spec-dim-6-5"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector (m + 1) Int -> Int
+        f :: Vector 0 Int -> Int
+        f x = h x
+        |]
+    , accept
+        "spec-dim-6-6"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector (m + 1) Int -> Int
+        f :: Vector 1 Int -> Int
+        f x = h x
         |]
     ]
 
@@ -707,6 +858,32 @@ reject name code =
     runFront code >>= \case
       Right _ -> assertFailure "expected rejection"
       Left _ -> return ()
+
+-- | A rejection reported as the user's error, not as a compiler fault.
+rejectUser :: String -> MT.Text -> TestTree
+rejectUser name code =
+  testCase name $
+    runFront code >>= \case
+      Right _ -> assertFailure "expected rejection"
+      Left (SystemError e) -> assertFailure $ "expected a user error, got a compiler error: " <> show e
+      Left _ -> return ()
+
+-- | A rejection whose diagnostic names each type in @named@ and none in
+-- @unnamed@, as whole words. Nothing else about its text is checked.
+rejectNaming :: String -> [MT.Text] -> [MT.Text] -> MT.Text -> TestTree
+rejectNaming name named unnamed code =
+  testCase name $
+    runFront code >>= \case
+      Right _ -> assertFailure "expected rejection"
+      Left (SystemError e) -> assertFailure $ "expected a user error, got a compiler error: " <> show e
+      Left err -> do
+        let ws = MT.split (\c -> not (DC.isAlphaNum c || c == '_')) (diagnosticText err)
+        mapM_ (\n -> assertBool ("diagnostic does not name " <> MT.unpack n) (n `elem` ws)) named
+        mapM_ (\n -> assertBool ("diagnostic names " <> MT.unpack n) (n `notElem` ws)) unnamed
+  where
+    diagnosticText (SourcedError _ d) = render d
+    diagnosticText (UnificationError _ _ _ d) = render d
+    diagnosticText (SystemError d) = render d
 
 runFront :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
 runFront code = do

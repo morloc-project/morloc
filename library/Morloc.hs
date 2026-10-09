@@ -41,6 +41,7 @@ import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Morloc.CodeGenerator.Parameterize (parameterize)
 import Morloc.CodeGenerator.Guest.Pass (lowerGuests)
 import Morloc.CodeGenerator.Realize (realityCheck)
+import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.Segment (segment)
 import Morloc.CodeGenerator.Serial (checkPackerCoherence)
 import Morloc.CodeGenerator.Reduce (reduce)
@@ -90,6 +91,7 @@ typecheck path code =
     >>= lowerGuests
     -- resolve all TypeU types to Type
     |>> map F.resolveTypes
+    >>= (\es -> Infer.recordUndeterminedSites es >> return es)
     -- fail fast on a discarded Try (types are concrete here, instances
     -- still Many, so one insertion covers every realization)
     >>= mapM autoRequire

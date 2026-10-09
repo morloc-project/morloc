@@ -1191,7 +1191,17 @@ foldExprS f (DoBlockS x)      = f x
 foldExprS f (EvalS x)         = f x
 foldExprS f (CoerceS _ x)     = f x
 foldExprS f (IntrinsicS _ xs) = foldMap f xs
-foldExprS _ _                 = mempty
+foldExprS f (ConS _ _ _ xs)   = foldMap f xs
+foldExprS _ UniS              = mempty
+foldExprS _ NullS             = mempty
+foldExprS _ (BndS _)          = mempty
+foldExprS _ (RealS _ _)       = mempty
+foldExprS _ (IntS _ _)        = mempty
+foldExprS _ (LogS _)          = mempty
+foldExprS _ (StrS _)          = mempty
+foldExprS _ (ExeS _)          = mempty
+foldExprS _ (LetBndS _)       = mempty
+foldExprS _ (CallS _)         = mempty
 
 -- | Fold a monoid over every 'AnnoS' node in a tree (including the root).
 foldAnnoS :: (Foldable f, Monoid m) => (AnnoS g f c -> m) -> AnnoS g f c -> m

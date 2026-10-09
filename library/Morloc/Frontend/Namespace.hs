@@ -127,6 +127,7 @@ copyState oldIdx newIdx = do
       , stateWhereOwner = stateWhereOwner s
       , stateConstantOrigin = updateMap (stateConstantOrigin s)
       , stateHoldCache = stateHoldCache s
+      , stateUndeterminedSites = stateUndeterminedSites s
       , stateStageEntries = stateStageEntries s
       , stateStageContext = stateStageContext s
       , stateRecStages = stateRecStages s

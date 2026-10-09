@@ -1,0 +1,13 @@
+-- Spec POLY-6: the twin of main.loc, with the element type determined.
+module main (f)
+
+import root-py
+
+data P a = P [a]
+
+g :: P a -> Int
+g p = match p
+  | (P xs) = length xs
+
+f :: Int -> Int
+f x = g (P [x])

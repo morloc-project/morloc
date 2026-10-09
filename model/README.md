@@ -68,7 +68,8 @@ Every rule is one item with a stable ID:
   rule needs a build, a run, or more than one language.
 - A rejection test has an accept twin that differs only in the rule's
   subject, since a rejection test passes on any error.
-- No test checks the wording of an error message.
+- No test checks the wording of an error message. A test may check that a
+  diagnostic names, or does not name, a type.
 - A test for a `deviates` item fails until the code is fixed, and its
   header names the issue.
 - Runtime items also cite Rust test names and `tla:<config>` runs.

@@ -134,6 +134,7 @@ module Morloc.Namespace.Type
   , isInternalTerminalName
   , ArgDoc (..)
   , ArgDocVars (..)
+  , inheritArgDocVars
   , ExprTypeE (..)
 
     -- * Scope
@@ -853,6 +854,35 @@ data ArgDocVars = ArgDocVars
     -- command's help, after its argument and return blocks
   }
   deriving (Show, Ord, Eq)
+
+-- | Docstring variables with each one unset in the first taken from the
+-- second (DOC-5: the nearest docstring wins).
+inheritArgDocVars :: ArgDocVars -> ArgDocVars -> ArgDocVars
+inheritArgDocVars r1 r2 =
+  ArgDocVars
+    { docLines = if (length (docLines r1) > 0) then docLines r1 else docLines r2
+    , docName = docName r1 <|> docName r2
+    , docLiteral = docLiteral r1 <|> docLiteral r2
+    , docMany = docMany r1 <|> docMany r2
+    , docStdin = docStdin r1 <|> docStdin r2
+    , docUnroll = docUnroll r1 <|> docUnroll r2
+    , docDefault = docDefault r1 <|> docDefault r2
+    , docMetavar = docMetavar r1 <|> docMetavar r2
+    , docArg = docArg r1 <|> docArg r2
+    , docTrue = docTrue r1 <|> docTrue r2
+    , docFalse = docFalse r1 <|> docFalse r2
+    , docReturn = docReturn r1 <|> docReturn r2
+    , docSource = docSource r1 <|> docSource r2
+    , docForm = docForm r1 <|> docForm r2
+    , docChecks = if null (docChecks r1) then docChecks r2 else docChecks r1
+    , docListSource = docListSource r1 <|> docListSource r2
+    , docListForm = docListForm r1 <|> docListForm r2
+    , docListChecks = if null (docListChecks r1) then docListChecks r2 else docListChecks r1
+    , docWith = if null (docWith r1) then docWith r2 else docWith r1
+    , docParse = docParse r1
+    , docMime = docMime r1 <|> docMime r2
+    , docEpilogues = if null (docEpilogues r1) then docEpilogues r2 else docEpilogues r1
+    }
 
 data ArgDoc
   = ArgDocRec ArgDocVars [(Key, ArgDocVars)]
@@ -1735,6 +1765,9 @@ unresolvedType2type :: TypeU -> Type
 unresolvedType2type (VarU v) = VarT v
 unresolvedType2type (NatVarU _) = NatVoidT
 unresolvedType2type ExistU {} = error "Cannot cast existential type to Type"
+-- An undetermined variable is carried as 'UnkT', whose 'TypeU' form is a
+-- variable quantified over itself ('type2typeu').
+unresolvedType2type (ForallU v (VarU v')) | v == v' = UnkT v
 unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
 unresolvedType2type (FunU ts t) = FunT (map unresolvedType2type ts) (unresolvedType2type t)
 unresolvedType2type (AppU v ts) = AppT (unresolvedType2type v) (map unresolvedType2type ts)

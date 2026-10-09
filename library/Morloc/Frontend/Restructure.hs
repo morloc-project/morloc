@@ -36,7 +36,7 @@ import qualified Morloc.TypeEval as TE
 import Morloc.Frontend.Rename (renameLocals)
 import Morloc.Frontend.TerminalActions (synthesizeTerminalActions)
 import Morloc.Frontend.TypeNames (isReservedTypeName, resolveTypeNames)
-import Morloc.Typecheck.Internal (expandStructuralAliases, mapTypeUChildren, structuralAliasesIn, traverseTypeUChildren, typeUChildren)
+import Morloc.Typecheck.Internal (expandStructuralAliases, mapTypeUChildren, structuralAliasHead, structuralAliasesIn, traverseTypeUChildren, typeUChildren)
 
 -- | Resolve type aliases, term aliases and import/exports
 restructure ::
@@ -193,9 +193,46 @@ expandStructuralTypes d = do
   where
     expandModule :: Scope -> ExprI -> MorlocMonad ExprI
     expandModule sc e = do
-      e' <- AST.mapTypeInExprI (expandStructuralAliases sc) e
+      e' <- AST.mapTypeInExprI (expandStructuralAliases sc) (writtenAliasDocs sc e)
       checkExpandable sc e'
       return (expandClassSigs sc e')
+
+    -- DOC-3: a function, effect or optional alias carries its docstring
+    -- where a signature names it, and the expansion drops the name.
+    writtenAliasDocs :: Scope -> ExprI -> ExprI
+    writtenAliasDocs sc (ExprI i (ModE m es)) = ExprI i (ModE m (map (writtenAliasDocs sc) es))
+    writtenAliasDocs sc (ExprI i (SigE (Signature v l et))) = ExprI i (SigE (Signature v l (sigAliasDocs sc et)))
+    writtenAliasDocs sc (ExprI i (ClsE (Typeclass cs cls vs sigs))) =
+      ExprI i (ClsE (Typeclass cs cls vs [Signature v l (sigAliasDocs sc et) | Signature v l et <- sigs]))
+    writtenAliasDocs _ e = e
+
+    sigAliasDocs :: Scope -> EType -> EType
+    sigAliasDocs sc et = case (edocs et, unforall (etype et)) of
+      (ArgDocSig cmd args ret, FunU ts r)
+        | length ts == length args ->
+            et { edocs = ArgDocSig cmd (zipWith (position sc) ts args) (position sc r ret) }
+      (ArgDocSig cmd args ret, t) ->
+        let inherited = position sc t cmd
+        in et { edocs = ArgDocSig cmd { docLines = docLines inherited, docReturn = docReturn inherited } args ret }
+      _ -> et
+
+    unforall (ForallU _ t) = unforall t
+    unforall t = t
+
+    -- the docstrings of the alias chain at a position, nearest first
+    position :: Scope -> TypeU -> ArgDocVars -> ArgDocVars
+    -- A media type is checked where it is declared and read from the type
+    -- later; one carried into a signature's docs would read as written there.
+    position sc t dv = case structuralAliasHead sc t of
+      Just _ -> (foldl inheritArgDocVars dv (chainDocs sc (Map.size sc) t)) { docMime = docMime dv }
+      Nothing -> dv
+
+    chainDocs sc n t = case TE.headName t of
+      Just v
+        | n > 0
+        , Just ((_, _, ArgDocAlias r, _, TypedefAlias) : _) <- Map.lookup v sc ->
+            r : maybe [] (chainDocs sc (n - 1)) (TE.expandHeadOnly sc t)
+      _ -> []
 
     expandClassSigs :: Scope -> ExprI -> ExprI
     expandClassSigs sc (ExprI i (ModE m es)) = ExprI i (ModE m (map (expandClassSigs sc) es))

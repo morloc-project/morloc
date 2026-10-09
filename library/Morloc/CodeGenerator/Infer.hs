@@ -18,6 +18,8 @@ module Morloc.CodeGenerator.Infer
   , inferConcreteTypeUniversal
   , inferConcreteTypeU
   , inferConcreteVar
+  , undeterminedError
+  , recordUndeterminedSites
   , canHoldType
   , evalGeneralStep
   ) where
@@ -34,6 +36,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
 import qualified Morloc.TypeEval as T
+import Morloc.Typecheck.Internal (typeUChildren)
 import Numeric (showHex)
 
 evalGeneralStep :: TypeU -> MorlocMonad (Maybe TypeU)
@@ -58,10 +61,16 @@ inferConcreteTypeU' :: TypeU -> (Scope, Scope) -> Either MorlocError TypeU
 inferConcreteTypeU' generalType (cscope, gscope) = T.pairEval cscope gscope generalType
 
 inferConcreteType :: Lang -> Indexed Type -> MorlocMonad TypeF
-inferConcreteType _ (Idx i (UnkT _)) =
-  MM.throwSourcedError i "Cannot infer concrete type for UnkT. This may be an unsolved generic term"
-inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
+inferConcreteType lang (Idx i t0) = do
+  let generalType = type2typeu t0
   (cscope0, gscope0) <- getScope lang
+  -- POLY-6: a variable nothing determined has no native form. The arguments
+  -- of a `data` type are exempt here: one its fields use is checked when
+  -- the fields are resolved, and one they do not use is never spelled.
+  when (containsUnk t0) $
+    case undetermined gscope0 generalType of
+      [] -> return ()
+      vs -> undeterminedError i vs
   anc <- CMS.gets stateVariantAncestors
   -- A `data` type already being expanded resolves to its NAME and stops.
   -- The check belongs here, at the single entry point, rather than deeper:
@@ -75,6 +84,87 @@ inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
       concreteType <- inferConcreteTypeU lang (Idx i generalType)
       (_, gscope) <- getScope lang
       inferConcreteTypeStructural lang i gscope generalType concreteType
+
+-- | The variables of a type that nothing determined ('UnkT', a variable
+-- quantified over itself in 'TypeU'), outside the arguments of a `data` type.
+undetermined :: Scope -> TypeU -> [TVar]
+undetermined gscope t = case t of
+  ForallU v (VarU v') | v == v' -> [v]
+  _ | Just _ <- dataHeadOf gscope t -> []
+  _ -> concatMap (undetermined gscope) (typeChildren gscope t)
+
+-- | The children of a type that classify values. A dimension or other
+-- non-`Type` argument is erased (KIND-2) and needs no value (DIM-6).
+typeChildren :: Scope -> TypeU -> [TypeU]
+typeChildren gscope t = case T.flattenApp t of
+  OpU {} -> []
+  AppU h@(VarU name) args
+    | Just ((ps, _, _, _, _) : _) <- Map.lookup name gscope ->
+        h : [a | (a, k) <- zip args (map paramKind ps <> repeat KindType), k == KindType]
+  t' -> typeUChildren t'
+  where
+    paramKind (Left (_, k)) = k
+    paramKind (Right _) = KindType
+
+-- | Record, for each undetermined variable, the outermost term whose type
+-- holds it. Code generation finds a variable deep inside a type, where the
+-- index at hand may be a declaration's rather than the term's.
+recordUndeterminedSites :: [AnnoS (Indexed Type) Many Int] -> MorlocMonad ()
+recordUndeterminedSites es = do
+  gscope <- MM.getGeneralScope
+  -- Names are unique within one tree only, so a name met in two trees
+  -- locates nothing.
+  let perTree = [sites gscope e | e <- es]
+      counts = Map.unionsWith (+) [Map.map (const (1 :: Int)) m | m <- perTree]
+      located = Map.filterWithKey (\v _ -> Map.lookup v counts == Just 1) (Map.unions perTree)
+  located `seq` CMS.modify (\st -> st { stateUndeterminedSites = located })
+  where
+    sites gscope e = Map.fromListWith (\_ old -> old)
+      [(v, ci) | (t, ci) <- ordered [e], containsUnk t, v <- needed gscope (type2typeu t)]
+    -- Terms outside any function come first, so a variable is reported at
+    -- the argument a caller wrote rather than inside the callee's body.
+    ordered [] = []
+    ordered roots =
+      let (values, functions, inner) = mconcat (map byNesting roots)
+      in values <> functions <> ordered inner
+    byNesting (AnnoS (Idx _ t) ci e) = case t of
+      FunT {} -> ([], [(t, ci)], foldExprS (: []) e)
+      _ -> ([(t, ci)], [], []) <> mconcat (map byNesting (foldExprS (: []) e))
+
+-- | The undetermined variables of a type that a native form needs: those
+-- outside any `data` type, and those a `data` type's fields use.
+needed :: Scope -> TypeU -> [TVar]
+needed gscope = go Set.empty
+  where
+    go seen t = case t of
+      ForallU v (VarU v') | v == v' -> [v]
+      _ | Just key@(name, args) <- dataHeadOf gscope t ->
+            if Set.member key seen || Set.size seen >= 64
+              then []
+              else concatMap (go (Set.insert key seen)) (fields name args)
+      _ -> concatMap (go seen) (typeChildren gscope t)
+    fields name args =
+      let params = case Map.lookup name gscope of
+            Just ((ps, _, _, _, _) : _) -> [tv | Left (tv, _) <- ps]
+            _ -> []
+          inst f = foldl (\acc (tv, a) -> substituteTVar tv a acc) f (zip params args)
+      in [inst f | Just cs <- [dataCtorsOfName gscope name], (_, fs) <- cs, f <- fs]
+
+-- | A type variable nothing in the program determines, where a native form
+-- needs it (POLY-6).
+undeterminedError :: Int -> [TVar] -> MorlocMonad a
+undeterminedError i0 vs = do
+  sites <- CMS.gets stateUndeterminedSites
+  let i = case mapMaybe (`Map.lookup` sites) vs of
+        (site : _) -> site
+        [] -> i0
+  MM.throwSourcedError i $
+    "The type of this term is not determined: nothing in the program fixes"
+      <+> hsep (punctuate "," (map (squotes . pretty . written) vs))
+      <> ". Add a signature or an annotation that does."
+  where
+    -- the name as written, without the suffix that makes it unique
+    written (TV n) = MT.takeWhile (/= '@') n
 
 -- | Parallel structural walk over (general, concrete) that handles the
 -- AppU/VarU mismatch case at any depth. Parameterised newtypes whose

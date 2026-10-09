@@ -411,6 +411,7 @@ listToGamma gs =
     , gammaExist = existMap
     , gammaSolved = Map.empty
     , gammaDeferred = []
+    , gammaDeferredAt = Map.empty
     , gammaKindSubs = Map.empty
     , gammaEffSubs = Map.empty
     , gammaIntVals = Map.empty
@@ -6808,6 +6809,36 @@ natArithTests =
         in case NS.solveNat e1 e2 of
              Left NS.Contradiction -> return ()
              other -> assertFailure $ "Expected Contradiction, got: " ++ show other
+    , testCase "a quotient the solver cannot reduce is not zero: n / 2 + 3 ~ 3" $
+        let e1 = NS.NatAdd (NS.NatDiv (NS.NatVar (TV "n")) (NS.NatLit 2)) (NS.NatLit 3)
+            e2 = NS.NatLit 3
+        in case NS.solveNat e1 e2 of
+             Left (NS.Deferred _) -> return ()
+             other -> assertFailure $ "Expected Deferred, got: " ++ show other
+    , testCase "a ground quotient truncates: 7 / 2 ~ 3" $
+        case NS.solveNat (NS.NatDiv (NS.NatLit 7) (NS.NatLit 2)) (NS.NatLit 3) of
+          Right subs -> assertEqual "" Map.empty subs
+          other -> assertFailure $ "Expected success, got: " ++ show other
+    , testCase "an open linear equation with large constants is decided: n + m ~ 400" $
+        assertEqual "" (Just True)
+          (NS.naturalSolution [(NS.NatAdd (NS.NatVar (TV "n")) (NS.NatVar (TV "m")), NS.NatLit 400)])
+    , testCase "a linear equation off the coefficients' lattice has no solution: 2n + 4m ~ 7" $
+        assertEqual "" (Just False)
+          (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 2) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 4) (NS.NatVar (TV "m"))), NS.NatLit 7)])
+    , testCase "the coin problem below its bound: 3n + 5m ~ 7 has no solution" $
+        assertEqual "" (Just False)
+          (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 3) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 5) (NS.NatVar (TV "m"))), NS.NatLit 7)])
+    , testCase "a witness never passes through a negative difference: (3 - n) * (3 - n) ~ 16" $
+        let d = NS.NatSub (NS.NatLit 3) (NS.NatVar (TV "n"))
+        in assertBool "" (NS.naturalSolution [(NS.NatMul d d, NS.NatLit 16)] /= Just True)
+    , testCase "a solved Nat is never negative: m + 1 ~ 0" $
+        case NS.solveNat (NS.NatAdd (NS.NatVar (TV "m")) (NS.NatLit 1)) (NS.NatLit 0) of
+          Left NS.Contradiction -> return ()
+          other -> assertFailure $ "Expected Contradiction, got: " ++ show other
+    , testCase "an open equation keeps no solution that may be negative: n + m ~ 4" $
+        case NS.solveNat (NS.NatAdd (NS.NatVar (TV "n")) (NS.NatVar (TV "m"))) (NS.NatLit 4) of
+          Left (NS.Deferred _) -> return ()
+          other -> assertFailure $ "Expected Deferred, got: " ++ show other
     , testCase "subtraction with variable: n - 3 ~ 5 => n = 8" $
         let e1 = NS.NatSub (NS.NatVar (TV "n")) (NS.NatLit 3)
             e2 = NS.NatLit 5

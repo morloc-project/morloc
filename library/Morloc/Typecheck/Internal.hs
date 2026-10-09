@@ -71,12 +71,14 @@ module Morloc.Typecheck.Internal
   , expandStructuralAliases
   , expandTransparentAliases
   , structuralAliasesIn
+  , structuralAliasHead
   , typeUChildren
   , mapTypeUChildren
   , traverseTypeUChildren
   , isSubtypeOf2
   , isSubtypeOfOpen
   , recheckDeferred
+  , typeUToNatExpr
 
     -- * primitive constraint discharge (Stage 9 of the tables refactor)
   , reduceConstraint
@@ -136,7 +138,7 @@ emptyGamma :: Gamma
 emptyGamma =
   Gamma
     { gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty
-    , gammaSolved = Map.empty, gammaDeferred = [], gammaKindSubs = Map.empty
+    , gammaSolved = Map.empty, gammaDeferred = [], gammaDeferredAt = Map.empty, gammaKindSubs = Map.empty
     , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
     , gammaRigid = Nothing, gammaScoped = Map.empty, gammaUnfolded = Set.empty
@@ -1059,6 +1061,17 @@ subtype scope t1 t2 g | isNamOrExist t1, Just fs <- asClosedRec t2 = subtype sco
 -- NatVarU: identical nat variables are equal; different ones fall to isNatExpr path
 subtype _ (NatVarU v1) (NatVarU v2) g
   | v1 == v2 = return g
+-- A transparent alias is its expansion (ALIAS-1). When the heads differ and
+-- one is an alias, unfold it a step before any rule below takes the types
+-- apart; a structural rule would otherwise bind part of an alias
+-- application, as @f := Model k@ in @Model k Int <: f a@. Existentials are
+-- left to the instantiation rules, which solve them to the type as written.
+subtype scope t1 t2 g
+  | not (isExist t1)
+  , not (isExist t2)
+  , typeHead t1 /= typeHead t2
+  , Just (t1', t2') <- unfoldDifferingAlias scope t1 t2 =
+      viaUnfold scope (t1, t2) t1' t2' g
 -- VarU vs VarT
 subtype scope t1@(VarU a1) t2@(VarU a2) g
   -- If everything is the same, do nothing
@@ -1078,20 +1091,6 @@ subtype scope a@ExistU {} b@ExistU {} g
 -- formally, an `Ea notin FV(G)` check should be done here, but since the
 -- types involved are all existentials, it will always pass, so I omit
 -- it.
-
--- A transparent alias is its expansion. When the heads differ and one is an
--- alias, unfold it a step before any rule below takes the types apart; a
--- structural rule would otherwise bind part of an alias application, as
--- @f := Model k@ in @Model k Int <: f a@. Heads that agree are compared by
--- their arguments below, so a solved type keeps the alias it was written
--- with. Existentials are left to the instantiation rules, which solve them
--- to the type as written.
-subtype scope t1 t2 g
-  | not (isExist t1)
-  , not (isExist t2)
-  , typeHead t1 /= typeHead t2
-  , Just (t1', t2') <- unfoldDifferingAlias scope t1 t2 =
-      viaUnfold scope (t1, t2) t1' t2' g
 
 -- EffectU: row-unifying covariant subtyping. Closed rows use subsumption
 -- (<E1> T1 <: <E2> T2 when E1 is a subset of E2); an open row solves its
@@ -1182,15 +1181,19 @@ subtype scope t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
   | AppU h2 inner2 <- v2, let t2' = AppU h2 (inner2 ++ vs2)
   , t2' /= t2
   = subtype scope t1 t2' g
-  -- An alias's arguments can differ where its expansions agree (@Foo 1 3@ and
-  -- @Foo 2 2@ under @type Foo n m = Vector (n + m) Int@), so a failed
-  -- comparison of arguments falls back to the expansions.
-  | v1 == v2 && length vs1 == length vs2 = case zipSubtype t1 t2 scope vs1 vs2 g of
-      Left e
-        | Just t1' <- unfoldAlias scope t1
-        , Just t2' <- unfoldAlias scope t2 ->
-            either (const (Left e)) Right (viaUnfold scope (t1, t2) t1' t2' g)
-      r -> r
+  -- Two applications of one alias are related exactly when their unfoldings
+  -- are (ALIAS-12). Their arguments are not compared pairwise: an alias may
+  -- use a parameter contravariantly, under arithmetic, or not injectively,
+  -- and matching arguments would solve a variable the unfoldings leave
+  -- open. Arguments that are one type are the cheap common case.
+  | v1 == v2, isAliasHead v1 =
+      if map (canonical . apply g) vs1 == map (canonical . apply g) vs2
+        then return g
+        else case (unfoldAlias scope t1, unfoldAlias scope t2) of
+          (Just t1', Just t2') -> viaUnfold scope (t1, t2) t1' t2' g
+          _ | length vs1 == length vs2 -> zipSubtype t1 t2 scope vs1 vs2 g
+          _ -> subtypeError t1 t2 "Cannot unfold the alias"
+  | v1 == v2 && length vs1 == length vs2 = zipSubtype t1 t2 scope vs1 vs2 g
   -- Concrete-side type aliases for nat-parameterised types (e.g.
   -- `type Cpp => Vector (n :: Nat) a = "mlc::Tensor1<$1>" a`) drop Nat
   -- args from the C++ template -- the morloc-side has [n, a] but the
@@ -1202,6 +1205,10 @@ subtype scope t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
   , length vs1' == length vs2' && length vs1' /= length vs1
   = zipSubtype t1 t2 scope vs1' vs2' g
   | otherwise = subtypeEvaluated scope t1 t2 g
+  where
+    isAliasHead (VarU v) = TE.isTransparentAlias scope v
+    isAliasHead _ = False
+    canonical = expandTransparentAliases scope . TE.flattenApp
 -- Records are nominal: a named record is its name and its parameters, so
 -- same-fielded records are distinct and a phantom parameter is compared. The
 -- anonymous forms (the generic Record and a closed row bridged to Rec) match
@@ -1449,14 +1456,39 @@ subtype _ a b _ = subtypeError a b "Type mismatch fall through"
 -- The pair is assumed while its unfoldings are compared, so meeting it again
 -- inside that comparison closes a cycle through recursive aliases, and the
 -- pair holds. The assumption ends with the comparison.
+--
+-- A failure is reported on the pair as written (ALIAS-5): a reason that
+-- names only the unfolded parts is replaced by it, a more specific reason is
+-- kept beneath it, and a failure already reported on an alias pair further
+-- in stands as it is.
 viaUnfold :: Scope -> (TypeU, TypeU) -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
-viaUnfold scope pair t1' t2' g
+viaUnfold scope (w1, w2) t1' t2' g
   | Set.member pair assumed = return g
-  | otherwise = do
-      g' <- subtype scope t1' t2' g {gammaUnfolded = Set.insert pair assumed}
-      return g' {gammaUnfolded = assumed}
+  | otherwise =
+      case subtype scope t1' t2' g {gammaUnfolded = Set.insert pair assumed} of
+        Right g' -> Right g' {gammaUnfolded = assumed}
+        Left e
+          | not (sameShape (expanded t1') (expanded t2')) -> Left written
+          | aliasMismatchPrefix `MT.isPrefixOf` render e -> Left e
+          | otherwise -> Left (written <> line <> e)
   where
+    -- ALIAS-5: a mismatch at this position is reported as written; one
+    -- inside it, as the inner position was written.
+    expanded = expandAliasHead scope . TE.flattenApp . apply g
+    sameShape a b = case (a, b) of
+      (AppU (VarU x) xs, AppU (VarU y) ys) -> x == y && length xs == length ys
+      (FunU xs _, FunU ys _) -> length xs == length ys
+      (NamU _ x _ _, NamU _ y _ _) -> x == y
+      (EffectU _ _, EffectU _ _) -> True
+      (OptionalU _, OptionalU _) -> True
+      _ -> False
     assumed = gammaUnfolded g
+    pair = (apply g w1, apply g w2)
+    written = pretty aliasMismatchPrefix <+> prettyTypeU w1 <+> "and" <+> prettyTypeU w2
+
+aliasMismatchPrefix :: MT.Text
+aliasMismatchPrefix = "Cannot compare the types"
+
 
 -- | The head of a type with nested applications flattened.
 typeHead :: TypeU -> Maybe TVar
@@ -2607,7 +2639,9 @@ simplifyNats = go
     go t = t
 
     trySimplify nat = case typeUToNatExpr nat of
-      Just ne -> natExprToTypeU (NS.sopToNatExpr (NS.normalize ne))
+      Just ne
+        | NS.hasOpaqueDivision (NS.normalize ne) -> nat
+        | otherwise -> natExprToTypeU (NS.sopToNatExpr (NS.normalize ne))
       Nothing -> nat
 
 letterPool :: [TVar]

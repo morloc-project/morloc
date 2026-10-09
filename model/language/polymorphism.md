@@ -40,3 +40,13 @@ Code: unaudited
 Is a local definition without a signature (a) generalized, so that each use
 may instantiate it differently, or (b) monomorphic, with one type fixed by
 its uses?
+
+### POLY-6 An undetermined type variable is a located error
+Intent: ruled 2026-10-09
+Tests: spec-poly-6-1, spec-poly-6-2, spec-poly-6-3
+Code: conforms 2026-10-09
+
+A type variable that nothing in the program determines, and that a native
+representation needs (POLY-2), is rejected at the term where it occurs, and
+the error names the variable. One that no representation needs, such as a
+phantom parameter of an argument-free `data` type, is not an error.

@@ -21,11 +21,13 @@ types or of the return type.
 
 ### DOC-3 A type's docstring is inherited wherever the type is used
 Intent: ruled 2026-10-08
-Tests: spec-doc-3-1
-Code: deviates (unfiled: the docstring of a function, effect or optional alias is lost)
+Tests: spec-doc-3-1, spec-doc-3-2, spec-doc-3-3
+Code: conforms 2026-10-09
 
 A docstring on a `type` declaration belongs to the type. Every argument or
-return position whose type is that type carries the docstring.
+return position whose type is that type carries the docstring. A function,
+effect or optional alias carries it where it is written in a signature; a
+position whose type is inferred does not inherit it.
 
 ### DOC-4 Term docstrings are never inherited on assignment
 Intent: ruled 2026-10-08
@@ -37,7 +39,7 @@ docstrings of the types in `bar`'s signature still apply (DOC-3).
 
 ### DOC-5 The nearest docstring wins
 Intent: proposed
-Code: deviates (unfiled: an alias of a function, effect or optional type loses its docstring)
+Code: conforms 2026-10-09
 
 For one argument position: a docstring written inline on the type in the
 signature, else the docstring of the alias named there, else that of the next

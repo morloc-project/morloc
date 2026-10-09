@@ -584,6 +584,7 @@ generalTypeToSerialAST' i anc t0@(NamT o v ps rs)
 generalTypeToSerialAST' i _ t@(FunT _ _) = MM.throwSourcedError i $
   "A command evaluated without a language pool cannot hold a function value (here of type"
     <+> pretty t <> "); import a language so the command runs in a pool"
+generalTypeToSerialAST' i _ (UnkT v) = Infer.undeterminedError i [v]
 generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
   "cannot serialize type:" <+> pretty t
 

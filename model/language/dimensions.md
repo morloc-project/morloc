@@ -42,3 +42,15 @@ Code: unaudited
 DIM-4 lets `Vector 3 a` flow into `Vector a`. May `Vector a` flow into
 `Vector 3 a`? Candidates: (a) no, a type error; (b) yes, with the DIM-3
 runtime check at that point.
+
+### DIM-6 An open Nat equation is accepted when it has a solution
+Intent: ruled 2026-10-09
+Tests: spec-dim-6-1, spec-dim-6-2, spec-dim-6-3, spec-dim-6-4, spec-dim-6-5, spec-dim-6-6
+Code: conforms 2026-10-09
+
+A Nat equation still open when inference ends, such as `n + m = 4` with
+`n` and `m` otherwise free, is accepted when it has a solution in the
+naturals: dimensions are erased before anything runs (KIND-2), so the free
+variables need no value (POLY-6). An equation with no solution, or one the
+compiler cannot decide, is a type error at the term that produced it.
+

@@ -268,6 +268,9 @@ data MorlocState = MorlocState
   -- | Answers of 'Infer.canHoldType', by (records must be declared, language,
   -- index, type).
   , stateHoldCache :: Map (Bool, Text, Int, Type) Bool
+  -- | The outermost term at which each undetermined type variable occurs,
+  -- where POLY-6 reports it.
+  , stateUndeterminedSites :: Map TVar Int
   -- | Each staged closure value (by the index of its flat entry): its first
   -- stage point and the index of its stage entry.
   , stateStageEntries :: Map Int (Int, Int)
@@ -880,6 +883,8 @@ data Gamma = Gamma
   , gammaSolved :: Map TVar TypeU
   -- | Nat constraints that could not be solved (deferred)
   , gammaDeferred :: [(TypeU, TypeU)]
+  -- | The term at which each deferred constraint arose, for its report.
+  , gammaDeferredAt :: Map (TypeU, TypeU) Int
   -- | Solutions for kind-tagged variables (KVarU / NatVarU / StrVarU /
   -- RecVarU / ListVarU / SetVarU) from the per-kind constraint solvers.
   -- Keyed on (TVar, Kind) so all five previously-parallel gammaXSubs
@@ -1053,6 +1058,7 @@ instance Defaultable MorlocState where
       , stateWhereOwner = Map.empty
       , stateConstantOrigin = Map.empty
       , stateHoldCache = Map.empty
+      , stateUndeterminedSites = Map.empty
       , stateStageEntries = Map.empty
       , stateStageContext = Map.empty
       , stateRecStages = Map.empty

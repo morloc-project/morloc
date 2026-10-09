@@ -41,7 +41,8 @@ arguments are compared after unfolding (ALIAS-1).
 
 ### ALIAS-5 Error messages name the alias, not its expansion
 Intent: ruled 2026-10-08
-Code: deviates (unfiled: the expected/inferred lines name the alias; the line naming the mismatched parts names the expansion)
+Tests: spec-alias-5-1, spec-alias-5-2, spec-alias-5-3, spec-alias-5-4, spec-alias-5-5, spec-alias-5-6
+Code: conforms 2026-10-09
 
 Where a type was written with an alias, a diagnostic prints the alias name.
 
@@ -145,9 +146,9 @@ declaration error. A `Type` is required only where a type classifies a term
 (KIND-2).
 
 ### ALIAS-12 Two applications of one alias are compared through the expansion
-Intent: proposed
-Tests: spec-alias-12-1
-Code: deviates (unfiled: equal alias heads are compared argument by argument, which is sound only while SUB-5 lifts nothing)
+Intent: ruled 2026-10-09
+Tests: spec-alias-12-1, spec-alias-12-2, spec-alias-12-3
+Code: conforms 2026-10-09
 
 `A U1 ... Un <: A V1 ... Vn` holds exactly when the unfoldings are related
 (ALIAS-1). Comparing the arguments pairwise, `Ui <: Vi`, decides it only

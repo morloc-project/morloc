@@ -423,32 +423,6 @@ reduceArgDocFrom seen i t@(VarT v) arg
               <> "': '" <> pretty a <> "' and '" <> pretty b <> "'"
       _ -> return ()
 
-    inheritArgDocVars :: ArgDocVars -> ArgDocVars -> ArgDocVars
-    inheritArgDocVars r1 r2 =
-      ArgDocVars
-        { docLines = if (length (docLines r1) > 0) then docLines r1 else docLines r2
-        , docName = docName r1 <|> docName r2
-        , docLiteral = docLiteral r1 <|> docLiteral r2
-        , docMany = docMany r1 <|> docMany r2
-        , docStdin = docStdin r1 <|> docStdin r2
-        , docUnroll = docUnroll r1 <|> docUnroll r2
-        , docDefault = docDefault r1 <|> docDefault r2
-        , docMetavar = docMetavar r1 <|> docMetavar r2
-        , docArg = docArg r1 <|> docArg r2
-        , docTrue = docTrue r1 <|> docTrue r2
-        , docFalse = docFalse r1 <|> docFalse r2
-        , docReturn = docReturn r1 <|> docReturn r2
-        , docSource = docSource r1 <|> docSource r2
-        , docForm = docForm r1 <|> docForm r2
-        , docChecks = if null (docChecks r1) then docChecks r2 else docChecks r1
-        , docListSource = docListSource r1 <|> docListSource r2
-        , docListForm = docListForm r1 <|> docListForm r2
-        , docListChecks = if null (docListChecks r1) then docListChecks r2 else docListChecks r1
-        , docWith = if null (docWith r1) then docWith r2 else docWith r1
-        , docParse = docParse r1
-        , docMime = docMime r1 <|> docMime r2
-        , docEpilogues = if null (docEpilogues r1) then docEpilogues r2 else docEpilogues r1
-        }
 reduceArgDocFrom seen i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
   let args = map (ArgDocAlias . snd) rs
       keys = map fst rs

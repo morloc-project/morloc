@@ -26,6 +26,7 @@ import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal
+import qualified Morloc.Typecheck.NatSolver as NS
 
 {- | Each SAnno object in the input list represents one exported function.
 Modules, scopes, imports and everything else are abstracted away.
@@ -205,19 +206,42 @@ typecheckWith expected = run
       (g2, e3) <- resolveInstances g1 e2
       let g3 = apply g2 g2
 
-      -- Re-check deferred kind constraints now that existentials are solved.
-      case recheckDeferred g3 of
-        Left err -> MM.throwSystemError err
-        Right [] -> return ()
-        Right remaining ->
-          MM.throwSystemError $ vsep
-            [ "unsolvable deferred kind constraints (solver could not decide):"
+      -- Re-check deferred kind constraints now that existentials are solved,
+      -- each one reported at the term where it arose (DIM-6).
+      let rootIndex = case e0 of AnnoS gi _ _ -> gi
+          site p = Map.findWithDefault rootIndex p (gammaDeferredAt g3)
+          natEquation p@(t1, t2) = case (typeUToNatExpr (apply g3 t1), typeUToNatExpr (apply g3 t2)) of
+            (Just a, Just b) -> Just (site p, p, (a, b))
+            _ -> Nothing
+          natEquations = mapMaybe natEquation (gammaDeferred g3)
+          trivial (a, b) = NS.normalize (NS.NatSub a b) == NS.NatSOP []
+      forM_ (natComponents [eq | eq@(_, _, ab) <- reverse natEquations, not (trivial ab)]) $ \eqs ->
+        case (NS.naturalSolution [ab | (_, _, ab) <- eqs], eqs) of
+          (Just True, _) -> return ()
+          (_, []) -> return ()
+          (answer, (i, _, _) : _) ->
+            MM.throwSourcedError i $ vsep
+              [ case answer of
+                  Just False -> "These kind-level equations have no solution in the natural numbers:"
+                  _ -> "The compiler cannot decide whether these kind-level equations have a solution in the natural numbers:"
+              , vsep [ let (d1, d2) = prettyTypeUPair (apply g3 t1) (apply g3 t2)
+                       in "  " <> d1 <+> "~" <+> d2
+                     | (_, (t1, t2), _) <- eqs ]
+              ]
+      let natPairs = [p | (_, p, _) <- natEquations]
+      remaining <- fmap concat . flip mapM (filter (`notElem` natPairs) (gammaDeferred g3)) $ \p ->
+        case recheckDeferred g3 { gammaDeferred = [p] } of
+          Left err -> MM.throwSourcedError (site p) err
+          Right rs -> return [(site p, r) | r <- rs]
+      case remaining of
+        [] -> return ()
+        ((i0, _) : _) ->
+          MM.throwSourcedError i0 $ vsep
+            [ "The compiler cannot decide whether these kind-level equations hold:"
             , vsep [ let (d1, d2) = prettyTypeUPair t1 t2
                      in "  " <> d1 <+> "~" <+> d2
-                   | (t1, t2) <- remaining ]
-            , "  Annotate the site with a concrete kind value, or extend the"
-            , "  relevant solver (NatSolver / StrSolver / RecSolver / ListSolver"
-            , "  / SetSolver) to handle this equation shape."
+                   | (_, (t1, t2)) <- remaining ]
+            , "  Annotate the term with concrete values."
             ]
 
       -- discharge primitive set-theoretic constraints (Member / Subset /
@@ -341,7 +365,13 @@ typecheckWith expected = run
         go (LitU (LList es)) = concatMap go es
         go (LitU (LSet es)) = concatMap go es
         go (LitU _) = []
-        go (OpU _ ts) = concatMap go ts
+        -- An expression with a free variable may be non-negative for some
+        -- value of it (DIM-6); only a ground one has a value to check.
+        go t@(OpU _ ts) = case typeUToNatExpr t of
+          Just ne
+            | NS.isGround ne -> [c | NS.NatSOP [NS.NatProduct c _] <- [NS.normalize ne], c < 0]
+            | otherwise -> []
+          Nothing -> concatMap go ts
         go (FunU ts t) = concatMap go (t : ts)
         go (AppU t ts) = concatMap go (t : ts)
         go (NamU _ _ ps rs) = concatMap go (ps <> map snd rs)
@@ -2998,11 +3028,29 @@ subtype' i a b g = do
   case subtype scope a b g of
     (Left err') -> MM.throwSourcedError i err'
     (Right g') -> do
-      let newDeferred = drop (length (gammaDeferred g)) (gammaDeferred g')
       mapM_ (\(t1, t2) ->
         MM.sayV $ "Warning: deferred Nat constraint:" <+> prettyTypeU t1 <+> "~" <+> prettyTypeU t2
-        ) newDeferred
-      return g'
+        ) (newlyDeferred g g')
+      return (locateDeferred i g g')
+
+-- | Group Nat equations that share a variable. Each group starts with its
+-- equation that comes first in the input.
+natComponents :: [(Int, (TypeU, TypeU), (NS.NatExpr, NS.NatExpr))] -> [[(Int, (TypeU, TypeU), (NS.NatExpr, NS.NatExpr))]]
+natComponents = foldr insert []
+  where
+    vars (_, _, (a, b)) = NS.freeNatVars a <> NS.freeNatVars b
+    insert x groups =
+      let (linked, apart) = List.partition (any (not . Set.null . Set.intersection (vars x) . vars)) groups
+      in (x : concat linked) : apart
+
+-- | Attribute the kind equations deferred between two contexts to term
+-- @i@, unless an inner term already claimed them.
+locateDeferred :: Int -> Gamma -> Gamma -> Gamma
+locateDeferred i g g' = g' { gammaDeferredAt = foldr (\p -> Map.insertWith (\_ old -> old) p i) (gammaDeferredAt g') (newlyDeferred g g') }
+
+-- | The kind equations deferred between two contexts.
+newlyDeferred :: Gamma -> Gamma -> [(TypeU, TypeU)]
+newlyDeferred g g' = take (length (gammaDeferred g') - length (gammaDeferred g)) (gammaDeferred g')
 
 -- | Extract nat-kinded argument values from a type, given the Scope.
 -- For Matrix 2 4 Int with alias params [(m, KindNat), (n, KindNat), (a, KindType)]
@@ -3383,11 +3431,11 @@ synthE' ::
 synthE' i g x = do
   enter "synthE"
   insetSay $ "synthesize type for: " <> peakSExpr x
-  r@(g', t, _) <- synthE i g x
+  (g', t, e) <- synthE i g x
   leave "synthE"
   seeGamma g'
   insetSay $ "synthesized type = " <> pretty t
-  return r
+  return (locateDeferred i g g', t, e)
 
 checkE' ::
   Int ->
@@ -3403,11 +3451,11 @@ checkE' i g x t = do
   enter "checkE"
   insetSay $ "check if expr: " <> peakSExpr x
   insetSay $ "matches type: " <> pretty t
-  r@(g', t', _) <- checkE i g x t
+  (g', t', e) <- checkE i g x t
   leave "checkE"
   seeGamma g'
   seeType t'
-  return r
+  return (locateDeferred i g g', t', e)
 
 application' ::
   Int ->

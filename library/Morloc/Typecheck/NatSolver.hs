@@ -23,15 +23,19 @@ module Morloc.Typecheck.NatSolver
   , isGround
   , freeNatVars
   , sopToNatExpr
+  , naturalSolution
+  , hasOpaqueDivision
   ) where
 
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.List (partition, sortBy, groupBy)
+import Data.List (foldl', sortBy, groupBy)
 import Data.Ord (comparing)
 import Data.Function (on)
 import Morloc.Namespace.Prim (TVar(..))
+import qualified Data.Text as T
+import Data.Maybe (isJust)
 
 -- | A type-level natural number expression
 data NatExpr
@@ -145,14 +149,24 @@ divSOP (NatSOP ps1) (NatSOP ps2)
   , let n = sum (map npCoeff ps1)
   , let d = sum (map npCoeff ps2)
   , d /= 0
-  , n `mod` d == 0
-  = NatSOP [NatProduct (n `div` d) Map.empty]
-  -- Cannot simplify: return a sentinel that won't match anything useful.
-  -- The solver will see non-matching SOPs and return Deferred.
-  | otherwise = NatSOP [NatProduct 0 (Map.singleton (TV "__div__") 1)]
+  = NatSOP (mergeLikeTerms [NatProduct (n `quot` d) Map.empty])
+  -- Cannot simplify: an opaque variable named for the operands, so that
+  -- equal quotients are equal and the solver never solves one.
+  | otherwise = NatSOP [NatProduct 1 (Map.singleton (divVar ps1 ps2) 1)]
+
+divVar :: [NatProduct] -> [NatProduct] -> TVar
+divVar ps1 ps2 = TV (T.pack (divPrefix <> show (ps1, ps2)))
+
+divPrefix :: String
+divPrefix = "__div__"
+
+isDivVar :: TVar -> Bool
+isDivVar (TV v) = T.pack divPrefix `T.isPrefixOf` v
 
 -- | Solve sop = 0
 solveSOP :: NatSOP -> Either NatError (Map TVar NatExpr)
+solveSOP sop@(NatSOP ps)
+  | any (any isDivVar . Map.keys . npVars) ps = Left (Deferred sop)
 solveSOP (NatSOP []) = Right Map.empty  -- 0 = 0
 solveSOP (NatSOP [NatProduct c vs])
   | Map.null vs && c /= 0 = Left Contradiction  -- c = 0 where c /= 0
@@ -165,7 +179,7 @@ solveSOP (NatSOP [NatProduct c vs])
   | otherwise = Left (Deferred (NatSOP [NatProduct c vs]))
 solveSOP (NatSOP prods)
   | Just (v, a, b) <- extractLinearVar prods =
-      if b `mod` a == 0
+      if b `mod` a == 0 && negate b `div` a >= 0
         then Right (Map.singleton v (NatLit (negate b `div` a)))
         else Left Contradiction
   | Just (v, e) <- extractLinearVarPoly prods =
@@ -173,33 +187,110 @@ solveSOP (NatSOP prods)
   | otherwise = Left (Deferred (NatSOP prods))
 
 -- | Solve @c*v + P(others) = 0@ as @v := -P/c@ when @c@ divides every
--- coefficient in @P@. Distinct from 'extractLinearVar', which requires
--- @P@ to be a constant. Prefers candidates whose scaled substitution
--- has all non-negative coefficients (Nat-hygienic; avoids introducing
--- subtractions that the receiver cannot statically verify).
+-- coefficient in @P@ and the result has no negative coefficient, so that
+-- it is a natural number for every value of the other variables. Distinct
+-- from 'extractLinearVar', which requires @P@ to be a constant.
 extractLinearVarPoly :: [NatProduct] -> Maybe (TVar, NatExpr)
 extractLinearVarPoly prods =
-  let linearSingles = [ (v, npCoeff p)
-                      | p <- prods
-                      , Map.size (npVars p) == 1
-                      , [(v, 1)] <- [Map.toList (npVars p)]
-                      ]
-      candidates = [ (v, c, others, allNonNeg)
-                   | (v, c) <- linearSingles
-                   , c /= 0
-                   , length [() | p <- prods, Map.member v (npVars p)] == 1
-                   , let others = [p | p <- prods, not (Map.member v (npVars p))]
-                   , all (\p -> npCoeff p `mod` c == 0) others
-                   , let allNonNeg = all (\p -> negate (npCoeff p) `div` c >= 0) others
-                   ]
-      (preferred, rest) = partition (\(_,_,_,ok) -> ok) candidates
-      picked = case preferred ++ rest of
-                 ((v, c, others, _) : _) -> Just (v, c, others)
-                 _                       -> Nothing
-      buildSolution (v, c, others) =
-        let scaled = NatSOP [NatProduct (negate (npCoeff p) `div` c) (npVars p) | p <- others]
-        in (v, sopToNatExpr scaled)
-  in fmap buildSolution picked
+  case candidates of
+    ((v, c, others) : _) ->
+      Just (v, sopToNatExpr (NatSOP [NatProduct (negate (npCoeff p) `div` c) (npVars p) | p <- others]))
+    [] -> Nothing
+  where
+    candidates =
+      [ (v, c, others)
+      | p0 <- prods
+      , [(v, 1)] <- [Map.toList (npVars p0)]
+      , let c = npCoeff p0
+      , c /= 0
+      , length [() | p <- prods, Map.member v (npVars p)] == 1
+      , let others = [p | p <- prods, not (Map.member v (npVars p))]
+      , all (\p -> npCoeff p `mod` c == 0 && negate (npCoeff p) `div` c >= 0) others
+      ]
+
+-- | Whether the equations @a = b@ have a common solution in the naturals:
+-- @Just True@ when one is found, @Just False@ when there is none, @Nothing@
+-- when neither is shown. A single linear equation is decided exactly; other
+-- systems are searched for a small witness. A difference that goes below
+-- zero is not a natural (KIND-4), so a witness never passes through one.
+naturalSolution :: [(NatExpr, NatExpr)] -> Maybe Bool
+naturalSolution eqs
+  | any signed sops = Just False
+  | [NatSOP ps] <- sops, Just answer <- linear ps = Just answer
+  | any holds candidates = Just True
+  | otherwise = Nothing
+  where
+    sops = [normalize (NatSub a b) | (a, b) <- eqs]
+    vs = Set.toList (Set.unions [freeNatVars a <> freeNatVars b | (a, b) <- eqs])
+    bound = 1 + maximum (0 : [abs (npCoeff p) | NatSOP ps <- sops, p <- ps])
+    width = last (0 : takeWhile (\w -> (w + 1) ^ length vs <= (40000 :: Integer)) [1 .. bound])
+    candidates = [Map.fromList (zip vs xs) | xs <- mapM (const [0 .. width]) vs]
+    holds env = all (\(a, b) -> isJust (eval env a) && eval env a == eval env b) eqs
+    eval env e = case e of
+      NatLit n -> Just n
+      NatVar v -> Map.lookup v env
+      NatAdd a b -> (+) <$> eval env a <*> eval env b
+      NatMul a b -> (*) <$> eval env a <*> eval env b
+      NatSub a b -> case (-) <$> eval env a <*> eval env b of
+        Just x | x >= 0 -> Just x
+        _ -> Nothing
+      NatDiv a b -> case (eval env a, eval env b) of
+        (Just x, Just y) | y /= 0 -> Just (x `quot` y)
+        _ -> Nothing
+    -- every product of naturals is non-negative, so a sum of terms whose
+    -- coefficients share one sign and include a nonzero constant is never 0;
+    -- a quotient of an expression with subtraction may be negative, so an
+    -- equation holding one says nothing
+    signed (NatSOP ps)
+      | hasOpaqueDivision (NatSOP ps) = False
+      | otherwise =
+          let constant = sum [npCoeff p | p <- ps, Map.null (npVars p)]
+              varCoeffs = [npCoeff p | p <- ps, not (Map.null (npVars p))]
+          in (constant > 0 && all (> 0) varCoeffs) || (constant < 0 && all (< 0) varCoeffs)
+    -- the equation came from expressions without subtraction, so its
+    -- normal form is the whole constraint
+    noSubtraction = not (any (\(a, b) -> hasSub a || hasSub b) eqs)
+    hasSub e = case e of
+      NatSub _ _ -> True
+      NatAdd a b -> hasSub a || hasSub b
+      NatMul a b -> hasSub a || hasSub b
+      NatDiv a b -> hasSub a || hasSub b
+      _ -> False
+    linear ps
+      | noSubtraction
+      , not (hasOpaqueDivision (NatSOP ps))
+      , all (\p -> Map.size (npVars p) <= 1 && all (== 1) (Map.elems (npVars p))) ps =
+          let k = negate (sum [npCoeff p | p <- ps, Map.null (npVars p)])
+              cs = [npCoeff p | p <- ps, not (Map.null (npVars p))]
+          in Just (linearNatural cs k)
+      | otherwise = Nothing
+
+-- | Whether @sum (zipWith (*) cs xs) == k@ has a solution with every
+-- @xs@ a natural. With coefficients of both signs it has one exactly when
+-- their gcd divides @k@: the vector @|c_q| e_p + c_p e_q@ for @c_p > 0 > c_q@
+-- leaves the sum unchanged, so any integer solution can be shifted until it
+-- is natural. With one sign it is the coin problem: past the Frobenius bound
+-- every multiple of the gcd is reachable, and below it a table decides.
+linearNatural :: [Integer] -> Integer -> Bool
+linearNatural cs0 k0
+  | null cs0 = k0 == 0
+  | k0 `mod` g /= 0 = False
+  | any (> 0) cs0 && any (< 0) cs0 = True
+  | otherwise =
+      let cs = map (abs . (`div` g)) cs0
+          k = (if all (> 0) cs0 then k0 else negate k0) `div` g
+          frobenius = (minimum cs - 1) * (maximum cs - 1)
+      in k >= 0 && (k >= frobenius || reachable cs k)
+  where
+    g = foldr1 gcd cs0
+    reachable cs k = Set.member k (foldl' (step cs) Set.empty [0 .. k])
+    step cs seen i
+      | i == 0 || any (\c -> c <= i && Set.member (i - c) seen) cs = Set.insert i seen
+      | otherwise = seen
+
+-- | Whether a normal form holds a quotient that could not be reduced.
+hasOpaqueDivision :: NatSOP -> Bool
+hasOpaqueDivision (NatSOP ps) = any (any isDivVar . Map.keys . npVars) ps
 
 -- | Find a variable that appears linearly (exponent 1, alone in its product)
 -- Returns (variable, coefficient, sum of constant terms)
