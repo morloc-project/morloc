@@ -117,14 +117,17 @@ processes interleave only between writes.
 
 ### SLOT-12 A slot-lock holder waits only on the custodian
 Status: implemented
-Checked by: outstanding_batches_never_exceed_the_queue_depth, a_full_queue_makes_the_producer_wait_until_the_custodian_takes_one, tla:StreamQueue, tla:StreamQueue_pop_locks.bug, tla:StreamQueue_enqueue_unlocked.bug
+Checked by: outstanding_batches_never_exceed_the_queue_depth, a_full_queue_makes_the_producer_wait_until_the_custodian_takes_one, a_writer_fills_the_buffer_its_publisher_made_whatever_its_own_setting, tla:StreamQueue, tla:StreamQueue_pop_locks.bug, tla:StreamQueue_enqueue_unlocked.bug
 
 Under a slot lock a pool copies elements, moves SHM pointers and, when the
 queue is full, waits for the custodian to make room. The queue holds at most
 its depth of unfinished batches (`MORLOC_WRITE_BEHIND_DEPTH`, at most 7; 1
 for an uncompressed stream), and a writer waits for room before reusing a
-buffer, so a stream's shared memory does not grow with its length. The custodian takes no slot lock and waits on
-no pool, so no wait cycle passes through a slot.
+buffer, so a stream's shared memory does not grow with its length. Every
+buffer of a stream has the size its publisher gave the first, and a writer
+fills it up to that block's size, whatever its own process's setting. The
+custodian takes no slot lock and waits on no pool, so no wait cycle passes
+through a slot.
 
 ### SLOT-13 A returned write is written when its stream is flushed or closed
 Status: implemented

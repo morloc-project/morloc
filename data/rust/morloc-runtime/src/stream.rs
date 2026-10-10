@@ -3354,10 +3354,10 @@ pub(crate) fn host_adopt(handle: i64) -> Result<(), MorlocError> {
 }
 
 
-/// Explicit `@close`: writes final footer (status = CLOSED) + fdatasync
-/// for OStream, then releases the slot. Caller-visible failures (pwrite,
-/// fsync) propagate to the user; the slot stays OPEN on error so a retry
-/// can succeed.
+/// Explicit `@close`. For an OStream it returns once the custodian has
+/// written the final footer (status CLOSED) and synced the file (SLOT-15);
+/// a failure there is returned, and the slot is released either way, since
+/// the custodian has finished with the file.
 pub fn shared_close_handle(handle: i64) -> Result<(), MorlocError> {
     shared_close_handle_with_status(
         handle,
@@ -3366,10 +3366,9 @@ pub fn shared_close_handle(handle: i64) -> Result<(), MorlocError> {
 }
 
 /// Same as `shared_close_handle` but records `status` in the final
-/// footer's `METADATA_TYPE_FOOTER_STATUS` block. Used by the per-call_id
-/// sweeper to mark OStream slots auto-closed at remote-child dispatch
-/// exit with `FOOTER_STATUS_PAUSED` so the parent can distinguish a
-/// hand-off from a `@close` that ran to completion.
+/// footer's `METADATA_TYPE_FOOTER_STATUS` block, so a stream a sweep ends
+/// (`FOOTER_STATUS_PAUSED`) can be told from a `@close` that ran to
+/// completion.
 pub fn shared_close_handle_with_status(
     handle: i64,
     status: u8,
@@ -3700,6 +3699,14 @@ fn flush_full_buffer(
     flush_write_buffer(slot, local)
 }
 
+/// The size of the slot's write buffer block. Every buffer a stream holds
+/// has the size its publisher gave the first one.
+fn write_buffer_capacity(slot: &RegistrySlot) -> Result<usize, MorlocError> {
+    let block = crate::shm::rel2abs(slot.write_buffer.get())?;
+    unsafe { crate::shm::shm_block_size(block) }
+        .ok_or_else(|| MorlocError::Other("stream write buffer is not an SHM block".into()))
+}
+
 /// The index capacity a write buffer starts at: the default, clamped to what
 /// a buffer of `buf_size` can hold at `w` bytes an element. Capacity then
 /// doubles while the buffer has room.
@@ -4003,11 +4010,9 @@ pub fn shared_write_subpacket(
 
         // Walk the elements and append each. element_count updates
         // here (not at flush) so @flen reflects buffered elements too.
-        // `buf_size` and `scratch` are hoisted out of the loop: the write-
-        // buffer size is read from the environment once, and one scratch
-        // buffer is reused for every element's flatten (no per-element
-        // env lookup, no per-element heap allocation).
-        let buf_size = read_write_buffer_bytes_env();
+        // The capacity is the buffer block's own size: its publisher sized
+        // it, refills copy that size, and this process's setting may differ.
+        // One scratch buffer is reused for every element's flatten.
         let mut scratch: Vec<u8> = Vec::new();
         if slot.staged.get() != 0 {
             // One batch, one sub-packet: the whole `[a]` is flattened and
@@ -4022,6 +4027,7 @@ pub fn shared_write_subpacket(
             slot.element_count.set(slot.element_count.get() + n_elements);
             return Ok(());
         }
+        let buf_size = write_buffer_capacity(slot)?;
         if local.elem_schema.is_fixed_width() && w > 0 && 16 + w <= buf_size {
             append_flat_run(slot, local, elem_data_base, n_elements as usize, buf_size)?;
             slot.element_count.set(slot.element_count.get() + n_elements);
@@ -10705,6 +10711,39 @@ mod write_behind_tests {
         shared_close_handle(h).unwrap();
         crate::stream::set_test_write_buffer_bytes(None);
         crate::write_behind::set_test_depth(None);
+    }
+
+    /// The bytes the slot's write buffer claims, and the size of the block.
+    fn claimed_and_capacity(h: i64) -> (usize, usize) {
+        with_process_local_slot(h, |local, slot| {
+            let w = local.elem_schema.width;
+            let claimed = 16 + slot.write_buffer_index_cap.get() as usize * w + slot.write_buffer_data_used.get() as usize;
+            let block = crate::shm::rel2abs(slot.write_buffer.get())?;
+            Ok((claimed, unsafe { crate::shm::shm_block_size(block) }.unwrap()))
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_writer_fills_the_buffer_its_publisher_made_whatever_its_own_setting() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("foreign_buffer_size");
+        let path = dir.join("s.idx");
+        let list = parse_schema("as").unwrap();
+        crate::stream::set_test_write_buffer_bytes(Some(4096));
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        crate::stream::set_test_write_buffer_bytes(Some(1 << 20));
+        let words: Vec<String> = (0..2000).map(|i| format!("word-number-{i:08}")).collect();
+        let json = serde_json::to_string(&words).unwrap();
+        let v = crate::json::read_json_with_schema(&json, &list).unwrap();
+        shared_write_subpacket(h, CompressionLevel::from_u8(0).unwrap(), v).unwrap();
+        shm::shfree(v).unwrap();
+        let (claimed, capacity) = claimed_and_capacity(h);
+        shared_close_handle(h).unwrap();
+        crate::stream::set_test_write_buffer_bytes(None);
+        assert!(claimed <= capacity, "the writer claims {claimed} bytes of a {capacity}-byte buffer");
+        assert_eq!(read_strs(&path), words);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn read_strs(path: &std::path::Path) -> Vec<String> {
