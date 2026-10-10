@@ -1,3 +1,6 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include <R.h>
 #include <Rinternals.h>
 #include <Rdefines.h>
@@ -19,6 +22,28 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <unistd.h>
+
+// FORK-2: atomic close-on-exec where the platform has it.
+static int mlc_accept_cloexec(int fd) {
+#ifdef __linux__
+    return accept4(fd, NULL, NULL, SOCK_CLOEXEC);
+#else
+    int c = accept(fd, NULL, NULL);
+    if (c >= 0) fcntl(c, F_SETFD, FD_CLOEXEC);
+    return c;
+#endif
+}
+
+static int mlc_pipe_cloexec(int fds[2]) {
+#ifdef __linux__
+    return pipe2(fds, O_CLOEXEC);
+#else
+    if (pipe(fds) != 0) return -1;
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    return 0;
+#endif
+}
 
 #include "morloc.h"
 
@@ -2233,14 +2258,13 @@ SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
 
     // Accept new connection if server_fd is ready
     if (server_ready) {
-        int fd = accept(daemon->server_fd, NULL, NULL);
+        int fd = mlc_accept_cloexec(daemon->server_fd);
         if (fd < 0 && (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM)) {
             // Wait for a descriptor to free rather than spin on a full table.
             struct timespec pause = {0, 50 * 1000 * 1000};
             nanosleep(&pause, NULL);
         }
         if (fd >= 0) {
-            fcntl(fd, F_SETFD, FD_CLOEXEC);
             fcntl(fd, F_SETFL, O_NONBLOCK);
             client_list_t* new_client = (client_list_t*)calloc(1, sizeof(client_list_t));
             if (new_client == NULL) {
@@ -4106,11 +4130,9 @@ SEXP morloc_shared_counter_read(SEXP ptr_r) {
 
 SEXP morloc_pipe(void) {
     int fds[2];
-    if (pipe(fds) != 0) {
+    if (mlc_pipe_cloexec(fds) != 0) {
         error("pipe failed: %s", strerror(errno));
     }
-    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
-    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
     SEXP result = PROTECT(allocVector(INTSXP, 2));
     INTEGER(result)[0] = fds[0];  /* read end */
     INTEGER(result)[1] = fds[1];  /* write end */
@@ -4468,9 +4490,8 @@ SEXP morloc_worker_loop_c(SEXP listen_fd_r, SEXP life_fd_r, SEXP dispatch_r, SEX
         if (pfds[1].revents) break;
         if (!(pfds[0].revents & POLLIN)) continue;
         // Every idle worker wakes; one wins and the rest find nothing.
-        int client_fd = accept(listen_fd, NULL, NULL);
+        int client_fd = mlc_accept_cloexec(listen_fd);
         if (client_fd < 0) continue;
-        fcntl(client_fd, F_SETFD, FD_CLOEXEC);
         fcntl(client_fd, F_SETFL, O_NONBLOCK);
         mlc_trace("accept client=%d\n", client_fd);
         run_job_c(client_fd, dispatch_r, remote_dispatch_r);
