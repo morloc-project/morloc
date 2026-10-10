@@ -93,6 +93,8 @@ pub enum MorlocExpressionType {
                        // has established.
     CtorMake = 33,     // fields + a tag -> a `data` value. Builds the
                        // tagged-pointer form from the arm's field values.
+    ListLenTest = 34,  // (list) + a length -> Bool. Answered in the nexus,
+                       // like TagTest, from the Array header it already holds.
 }
 
 #[repr(C)]
@@ -252,6 +254,14 @@ pub struct MorlocCtorFieldExpression {
     pub index: u32,
 }
 
+// A list-pattern length test: a list and the length it must have.
+// See MorlocExpressionType::ListLenTest.
+#[repr(C)]
+pub struct MorlocListLenTestExpression {
+    pub subject: *mut MorlocExpression,
+    pub length: usize,
+}
+
 // Constructing a payload-bearing `data` value: the arm's tag and one
 // expression per field. The arm's schema describes the fields as a tuple,
 // which is what the payload is written as.
@@ -308,6 +318,7 @@ pub union ExprUnion {
     pub tag_test_expr: *mut MorlocTagTestExpression,
     pub ctor_field_expr: *mut MorlocCtorFieldExpression,
     pub ctor_make_expr: *mut MorlocCtorMakeExpression,
+    pub list_len_test_expr: *mut MorlocListLenTestExpression,
     pub if_expr: *mut MorlocIfExpression,
     // IFile-family expressions.
     pub open_expr: *mut MorlocOpenExpression,
@@ -1094,6 +1105,26 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             (*expr).etype = MorlocExpressionType::CtorField;
             (*expr).schema = schema;
             (*expr).expr.ctor_field_expr = fe;
+            Ok(expr)
+        }
+
+        "listlentest" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let schema = c_schema(schema_str)?;
+            let subject = build_expr(je.get("subject").unwrap_or(&serde_json::Value::Null))?;
+            let length = je
+                .get("length")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| MorlocError::Other("listlentest: missing length".into()))?
+                as usize;
+            let le = libc::calloc(1, std::mem::size_of::<MorlocListLenTestExpression>())
+                as *mut MorlocListLenTestExpression;
+            (*le).subject = subject;
+            (*le).length = length;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::ListLenTest;
+            (*expr).schema = schema;
+            (*expr).expr.list_len_test_expr = le;
             Ok(expr)
         }
 

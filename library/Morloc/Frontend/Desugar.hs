@@ -2150,9 +2150,10 @@ exprToRefutPat (Loc sp (CTupE es))
 exprToRefutPat (Loc sp (CNamE entries)) = do
   ps <- mapM (\(k, e) -> do p <- exprToRefutPat e; return (k, p)) entries
   return (Loc sp (CRPatRec ps))
+exprToRefutPat (Loc sp (CLstE es)) = Loc sp . CRPatList <$> mapM exprToRefutPat es
 exprToRefutPat (Loc sp _) =
   dfail (startPos sp)
-    "expected a pattern (variable, '_', literal, tuple, record, or label@pattern) in a `|` clause"
+    "expected a pattern (variable, '_', literal, tuple, record, list, or label@pattern) in a `|` clause"
 
 -- | Split a possibly namespace-qualified name into its qualifier and its
 -- last component. The grammar produces at most one level (`p.Red`), and a
@@ -2189,10 +2190,15 @@ qualifiedCtor sp n = case splitQualifier n of
 -- on its constructor, so there is no projection to write and none is
 -- accepted from surface syntax. It is sound here only because the tag test
 -- guarding it has already fixed the constructor.
+--
+-- A list-element step is not a 'Selector' step either: a bracket selector
+-- dispatches through the receiver's Indexable instance, and matching must
+-- not depend on one. The length test guarding it puts the index in range.
 data RefutStep
   = StepIdx Int
   | StepKey Text
   | StepField EVar Int
+  | StepElem Int
 
 -- | A leaf of a refutable-pattern walk: a variable bound at a path from the
 -- receiver, or a value to test at one.
@@ -2203,6 +2209,8 @@ data RefutLeaf
   -- distinct from 'RTest' because that lowers to Eq's '==', and an enum has
   -- no Eq instance: a tag test goes through 'IntrTagTest' instead.
   | RTagTest EVar [RefutStep]
+  -- | The list at this path must have exactly this many elements.
+  | RLenTest Int [RefutStep]
 
 -- | Walk a refutable pattern to its leaves, accumulating the path taken.
 -- Mirrors 'walkIrrefPat' but also collects tests.
@@ -2222,13 +2230,17 @@ walkRefutPat (Loc _ (CRPatTup ps))   path = concat
   [ walkRefutPat p (path <> [StepIdx i]) | (i, p) <- zip [0 ..] ps ]
 walkRefutPat (Loc _ (CRPatRec kps))  path = concat
   [ walkRefutPat p (path <> [StepKey k]) | (Key k, p) <- kps ]
+walkRefutPat (Loc _ (CRPatList ps))  path =
+  RLenTest (length ps) path
+    : concat [ walkRefutPat p (path <> [StepElem i]) | (i, p) <- zip [0 ..] ps ]
 
 -- | Build the expression naming the value at a path from the receiver.
 --
 -- Consecutive projection steps are folded into a single 'Selector' so an
 -- ordinary tuple or record pattern emits exactly one getter, as it did
 -- before constructor fields existed. A constructor-field step breaks the
--- run, since it is an intrinsic rather than a projection.
+-- run, as does a list-element step: each is an intrinsic rather than a
+-- projection.
 subjectAt :: Span -> EVar -> [RefutStep] -> D ExprI
 subjectAt sp recv path = do
   root <- freshExprSpan sp (VarE defaultValue recv)
@@ -2241,16 +2253,22 @@ subjectAt sp recv path = do
         idxE <- freshExprSpan sp (IntE (fromIntegral i))
         acc' <- freshExprSpan sp (IntrinsicE IntrCtorField [acc, nameE, idxE])
         go acc' rest
+      ([], StepElem i : rest) -> do
+        idxE <- freshExprSpan sp (IntE (fromIntegral i))
+        acc' <- freshExprSpan sp (IntrinsicE IntrListElem [acc, idxE])
+        go acc' rest
       (projs, rest) -> do
         acc' <- applySelector acc (foldl addStep SelectorEnd projs)
         go acc' rest
 
     isProjection (StepField _ _) = False
+    isProjection (StepElem _) = False
     isProjection _ = True
 
     addStep sel (StepIdx i) = extendSelIdx i sel
     addStep sel (StepKey k) = extendSelKey k sel
     addStep sel (StepField _ _) = sel
+    addStep sel (StepElem _) = sel
 
     applySelector acc SelectorEnd = return acc
     applySelector acc sel = do
@@ -2266,6 +2284,7 @@ refutPatBoundNames (Loc _  (CRPatCon _ ps))    = concatMap refutPatBoundNames ps
 refutPatBoundNames (Loc sp (CRPatAs (EV n) p)) = (n, startPos sp) : refutPatBoundNames p
 refutPatBoundNames (Loc _  (CRPatTup ps))      = concatMap refutPatBoundNames ps
 refutPatBoundNames (Loc _  (CRPatRec kps))     = concatMap (refutPatBoundNames . snd) kps
+refutPatBoundNames (Loc _  (CRPatList ps))     = concatMap refutPatBoundNames ps
 
 -- | The boolean value of a single bare-literal Bool pattern, if it is one.
 refutPatBoolLit :: Loc CstRefutPat -> Maybe Bool
@@ -2281,6 +2300,8 @@ refutPatHasLit (Loc _ (CRPatLit _))   = True
 -- and 'assembleCascade' then DROPS that clause's test -- so an unmatched
 -- input would silently take the final arm.
 refutPatHasLit (Loc _ (CRPatCon _ _)) = True
+-- A list pattern is refutable through its length, for the same reason.
+refutPatHasLit (Loc _ (CRPatList _))  = True
 refutPatHasLit (Loc _ (CRPatVar _))   = False
 refutPatHasLit (Loc _ CRPatWild)      = False
 refutPatHasLit (Loc _ (CRPatAs _ p))  = refutPatHasLit p
@@ -2325,6 +2346,7 @@ refutClauseArg usedNames formal p = do
   where
     buildLeafTest f _  (RTest e path)    = Just <$> buildRefutTest f (e, path)
     buildLeafTest f sp (RTagTest v path) = Just <$> buildRefutTagTest sp f (v, path)
+    buildLeafTest f sp (RLenTest n path) = Just <$> buildRefutLenTest sp f (n, path)
     buildLeafTest _ _  (RBind _ _)       = return Nothing
 
 -- | Lower one constructor pattern to a tag test on the projected value.
@@ -2344,6 +2366,14 @@ buildRefutTagTest sp formal (ctor, path) = do
   -- rejects a borrowed constructor for either tier.
   nameE <- freshExprSpan sp (StrE (unEVar ctor))
   freshExprSpan sp (IntrinsicE IntrTagTest [subject, nameE])
+
+-- | Lower one list pattern's length test on the projected value. It must
+-- precede every element read below it; see 'IntrListLenTest'.
+buildRefutLenTest :: Span -> EVar -> (Int, [RefutStep]) -> D ExprI
+buildRefutLenTest sp formal (n, path) = do
+  subject <- subjectAt sp formal path
+  lenE <- freshExprSpan sp (IntE (fromIntegral n))
+  freshExprSpan sp (IntrinsicE IntrListLenTest [subject, lenE])
 
 -- | Conjoin per-argument tests into one Bool without duplicating the
 -- clause body: @t1 && ... && tn@ as nested IfE returning True/False.
@@ -2415,9 +2445,9 @@ checkRefutCoverage sp name clausePatLists = do
           Nothing
             | any (any refutPatIsLit) clausePatLists -> dfail (startPos sp)
                 ("`|` patterns for '" ++ T.unpack (unEVar name)
-                 ++ "' are not exhaustive; a literal pattern cannot cover"
-                 ++ " its type, so add a final catch-all clause (a variable"
-                 ++ " or '_')")
+                 ++ "' are not exhaustive; a literal or list pattern cannot"
+                 ++ " cover its type, so add a final catch-all clause (a"
+                 ++ " variable or '_')")
           _ -> return ()
   where
     lastIrrefutable = case clausePatLists of
@@ -2465,13 +2495,15 @@ checkRefutCoverage sp name clausePatLists = do
 --
 -- Distinct from 'refutPatHasLit', which also counts a constructor pattern:
 -- here the question is specifically whether the clause set ranges over an
--- unbounded domain, which a constructor never does.
+-- unbounded domain, which a constructor never does. A list pattern does:
+-- no set of lengths covers every list.
 refutPatIsLit :: Loc CstRefutPat -> Bool
 refutPatIsLit (Loc _ (CRPatLit _))   = True
 refutPatIsLit (Loc _ (CRPatCon _ ps)) = any refutPatIsLit ps
 refutPatIsLit (Loc _ (CRPatAs _ p))  = refutPatIsLit p
 refutPatIsLit (Loc _ (CRPatTup ps))  = any refutPatIsLit ps
 refutPatIsLit (Loc _ (CRPatRec kps)) = any (refutPatIsLit . snd) kps
+refutPatIsLit (Loc _ (CRPatList _))  = True
 refutPatIsLit _                      = False
 
 -- | Reject a constructor pattern whose field count differs from the
@@ -2520,6 +2552,7 @@ refutPatIrrefutable (Loc _ (CRPatTup ps))   = all refutPatIrrefutable ps
 refutPatIrrefutable (Loc _ (CRPatRec kps))  = all (refutPatIrrefutable . snd) kps
 refutPatIrrefutable (Loc _ (CRPatLit _))    = False
 refutPatIrrefutable (Loc _ (CRPatCon _ _))  = False
+refutPatIrrefutable (Loc _ (CRPatList _))   = False
 
 -- | True when every clause is a single Bool-literal argument and the
 -- clauses cover both True and False.

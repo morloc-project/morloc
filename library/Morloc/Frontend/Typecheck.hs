@@ -1561,6 +1561,25 @@ synthE i g (IntrinsicS IntrCtorField [subjectE, nameE, idxE])
               <+> pretty (show idx)
 synthE _ _ (IntrinsicS IntrCtorField args) =
   error $ "IntrCtorField expects (subject, constructor name, index), got " <> show (length args)
+-- IntrListLenTest and IntrListElem: the list-pattern length test and element
+-- read. The subject is checked against @List a@ itself, not a fresh
+-- container, so a list pattern rejects every other container.
+synthE _ g (IntrinsicS IntrListLenTest [subjectE, lenE])
+  | IntS _ _ <- unAnnoSE lenE = do
+      let (g1, a) = newvar "listpat_elem_" g
+      (g2, _, subjectE') <- checkG g1 subjectE (BT.listU a)
+      (g3, _, lenE') <- synthG g2 lenE
+      return (g3, BT.boolU, IntrinsicS IntrListLenTest [subjectE', lenE'])
+synthE _ _ (IntrinsicS IntrListLenTest args) =
+  error $ "IntrListLenTest expects (subject, literal length), got " <> show (length args)
+synthE _ g (IntrinsicS IntrListElem [subjectE, idxE])
+  | IntS _ _ <- unAnnoSE idxE = do
+      let (g1, a) = newvar "listpat_elem_" g
+      (g2, _, subjectE') <- checkG g1 subjectE (BT.listU a)
+      (g3, _, idxE') <- synthG g2 idxE
+      return (g3, apply g3 a, IntrinsicS IntrListElem [subjectE', idxE'])
+synthE _ _ (IntrinsicS IntrListElem args) =
+  error $ "IntrListElem expects (subject, literal index), got " <> show (length args)
 -- IntrWrite: @Int -> OStream a -> [a] -> <IO> ()@. Handle-before-list
 -- is the natural partial-application shape: @write 3 o@ is a
 -- reusable [a] -> <IO> () sink for callbacks. The handle is
@@ -1886,6 +1905,10 @@ intrinsicType IntrTagTest =
   error "intrinsicType: IntrTagTest must be typed via synthE's dedicated clause"
 intrinsicType IntrCtorField =
   error "intrinsicType: IntrCtorField must be typed via synthE's dedicated clause"
+intrinsicType IntrListLenTest =
+  error "intrinsicType: IntrListLenTest must be typed via synthE's dedicated clause"
+intrinsicType IntrListElem =
+  error "intrinsicType: IntrListElem must be typed via synthE's dedicated clause"
 -- IntrStdin/Stdout/Stderr flow through intrinsicTypeG (fresh existential
 -- element type resolved by the user's inline ascription).
 intrinsicType IntrStdin =

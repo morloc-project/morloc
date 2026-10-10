@@ -241,6 +241,9 @@ data NexusExpr
                           -- the slot has the right width inside arrays/records.
   | TagTestX Text NexusExpr Int
   | CtorFieldX Text NexusExpr Int Int
+  | ListLenTestX Text NexusExpr Int
+      -- ^ schema (Bool), list, length: does the list have exactly this many
+      -- elements. Emitted only by the desugar's list-pattern lowering.
   | CtorMakeX Text Int [NexusExpr]
       -- ^ schema (Bool), subject, constructor. Compares the one-byte tags of
       -- two `data` values. The nexus answers this itself: the tag is a byte
@@ -1045,6 +1048,19 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           subj <- toNexusExpr subjE
           tag <- nexusCtorTag subjE n
           return (CtorFieldX sch subj tag idx)
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrListLenTest [subjE, lenE]))
+      | Just n <- nexusLiteralInt lenE = do
+          sch <- type2schema t
+          subj <- toNexusExpr subjE
+          return (ListLenTestX sch subj n)
+    -- A list-pattern element read is a bracket index the guarding length
+    -- test has put in range, so it reuses the nexus's native bracket index.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrListElem [subjE, idxE]))
+      | Just _ <- nexusLiteralInt idxE = do
+          sch <- type2schema t
+          idx <- toNexusExpr idxE
+          subj <- toNexusExpr subjE
+          return (AppX sch (PatX sch PatternBracketIndex) [idx, subj])
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
       ShowX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrRead [arg])) =
@@ -2873,6 +2889,13 @@ exprToJson (CtorFieldX schema subjExpr tag idx) =
     , ("subject", exprToJson subjExpr)
     , ("tag_ordinal", jsonInt (fromIntegral tag))
     , ("field_index", jsonInt (fromIntegral idx))
+    ]
+exprToJson (ListLenTestX schema subjExpr n) =
+  jsonObj
+    [ ("tag", jsonStr "listlentest")
+    , ("schema", jsonStr schema)
+    , ("subject", exprToJson subjExpr)
+    , ("length", jsonInt (fromIntegral n))
     ]
 exprToJson (MapX schema funcExpr listExpr) =
   jsonObj

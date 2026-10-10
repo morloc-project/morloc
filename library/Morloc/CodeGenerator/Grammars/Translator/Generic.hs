@@ -490,6 +490,17 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
             if ldEnumLitByName desc
               then parens (subj <+> "==" <+> dquotes (pretty n))
               else parens (subj <+> "==" <+> pretty i)
+        , lcListLenTest = \subj n ->
+            if MT.null (ldListLengthTemplate desc)
+              then error $ "language " <> MT.unpack (ldName desc)
+                     <> " declares no ldListLengthTemplate, so it cannot match a list pattern"
+              else parens
+                (pretty (substituteT (ldListLengthTemplate desc) [("expr", render subj)])
+                  <+> "==" <+> pretty n)
+        , lcListElem = \subj i -> case ldIndexStyle desc of
+            ZeroBracket -> parens subj <> "[" <> pretty i <> "]"
+            OneBracket -> parens subj <> "[" <> pretty (i + 1) <> "]"
+            OneDoubleBracket -> parens subj <> "[[" <> pretty (i + 1) <> "]]"
         , lcCoerceOptional = id
         , lcTypeOf = \_ -> return Nothing
         , lcSerialAstType = \_ -> return Nothing

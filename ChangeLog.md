@@ -1,3 +1,10 @@
+Unreleased
+----------
+
+Language and typing
+ * `|` clauses, `match` and refutable `<-` binds can match fixed-length lists:
+   `[]`, `[x]`, `[0, y]`
+
 0.109.0 [2026-10-07]
 --------------------
 

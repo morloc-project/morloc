@@ -2043,6 +2043,14 @@ unsafe fn morloc_eval_r(
                 std::ptr::copy_nonoverlapping(field_ptr, dest, w);
             }
         }
+        MorlocExpressionType::ListLenTest => {
+            let le = (*expr).expr.list_len_test_expr;
+            let subject_ptr = morloc_eval_r((*le).subject, ptr::null_mut(), 0, bndvars)?;
+            let arr = &*(subject_ptr as *const shm::Array);
+            if !dest.is_null() {
+                *dest = u8::from(arr.size == (*le).length);
+            }
+        }
         MorlocExpressionType::If => {
             // Evaluate the condition (a Bool) into a fresh buffer and read
             // its byte (0 = false), then materialize the taken branch into

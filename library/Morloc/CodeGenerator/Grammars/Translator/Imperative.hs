@@ -550,6 +550,13 @@ data LowerConfig m = LowerConfig
   -- deliberately compares against the bare constructor name rather than
   -- against the factor 'lcEnumLit' builds, which would allocate a whole
   -- level set per test.
+  , lcListLenTest :: MDoc -> Int -> MDoc
+  -- ^ Test whether a list has exactly this many elements ('IntrListLenTest'):
+  -- the subject and the length.
+  , lcListElem :: MDoc -> Int -> MDoc
+  -- ^ Read the element at a 0-based index of a list ('IntrListElem'): the
+  -- subject and the index. Only ever emitted under a passing
+  -- 'lcListLenTest', so the index is in range.
   , lcCoerceOptional :: MDoc -> MDoc
   -- ^ Widen a value to an optional (@CoerceToOptional@). Default is identity: in
   -- C++/Python/R a @T@ is a valid @?T@ (their serializers are schema-driven). In
@@ -1949,6 +1956,16 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n, IntN _ i]) (Intrin
         (const (lcCtorField cfg ty n (armIndex n (map fst arms)) (fromIntegral i) (poolExpr subjectDocs)))
         [subjectDocs]
     t -> error $ "constructor field projection on a non-variant: " <> show (pretty t)
+-- A list pattern's length test and element read. Like the tag test, each is
+-- written in the target language with no runtime call.
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, IntN _ n]) (IntrinsicN_ _ IntrListLenTest _ [subjectDocs, _]) =
+  return $ mergePoolDocs
+    (const (lcListLenTest cfg (poolExpr subjectDocs) (fromIntegral n)))
+    [subjectDocs]
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, IntN _ i]) (IntrinsicN_ _ IntrListElem _ [subjectDocs, _]) =
+  return $ mergePoolDocs
+    (const (lcListElem cfg (poolExpr subjectDocs) (fromIntegral i)))
+    [subjectDocs]
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFSchema _ [pathDocs]) =
   return $ pathDocs
     { poolExpr = lcPrintExpr cfg

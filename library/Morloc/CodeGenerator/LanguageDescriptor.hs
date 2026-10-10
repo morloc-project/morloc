@@ -100,6 +100,10 @@ data LangDescriptor = LangDescriptor
     -- through an Optional. Examples: "{{expr}} is not None" (Python),
     -- "!is.null({{expr}})" (R). C++ handles its own form in CppPrinter.
     ldNullCheckTemplate :: !Text
+  , -- The length of a list, with {{expr}} placeholder: "len({{expr}})"
+    -- (Python), "length({{expr}})" (R). Used by list patterns. Empty means
+    -- the language cannot match a list pattern.
+    ldListLengthTemplate :: !Text
   , -- Non-finite Real literals: idiomatic source-level expressions for
     -- +Inf, -Inf, and NaN in the target language. Used by IRealLit
     -- printing when the literal payload is non-finite.
@@ -311,6 +315,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldCodegenCommand" Y.Null
             . ins "ldTableImportFn" Y.Null
             . ins "ldRealPosInf" (Y.String "")
+            . ins "ldListLengthTemplate" (Y.String "")
             . ins "ldRealNegInf" (Y.String "")
             . ins "ldRealNaN" (Y.String "")
             . ins "ldIntLiteralSuffix" (Y.String "")
@@ -390,6 +395,7 @@ defaultLangDescriptor name ext =
     , ldBoolFalse = "False"
     , ldNullLiteral = "None"
     , ldNullCheckTemplate = "{{expr}} is not None"
+    , ldListLengthTemplate = "len({{expr}})"
     , ldRealPosInf = "float('inf')"
     , ldRealNegInf = "float('-inf')"
     , ldRealNaN = "float('nan')"

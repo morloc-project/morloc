@@ -205,9 +205,10 @@ data CstIrrefPat
 -- expression in a `|`-clause, then lowered into a nested 'IfE' cascade of
 -- equality tests (Eq's '==') and 'Selector' projections.
 --
--- A constructor pattern is the one arm that does NOT lower to '=='. It
--- becomes an 'IntrTagTest', which asks only whether the value carries that
--- constructor's tag; see the note on 'IntrTagTest'.
+-- Constructor and list patterns do NOT lower to '=='. A constructor becomes
+-- an 'IntrTagTest', which asks only whether the value carries that
+-- constructor's tag (see the note on 'IntrTagTest'); a list becomes an
+-- 'IntrListLenTest' on its length.
 data CstRefutPat
   = CRPatVar EVar                            -- ^ x
   | CRPatWild                                -- ^ _
@@ -216,6 +217,7 @@ data CstRefutPat
   | CRPatTup [Loc CstRefutPat]               -- ^ (p1, ..., pn), n >= 2
   | CRPatRec [(Key, Loc CstRefutPat)]        -- ^ {a=p1, b=p2}
   | CRPatAs EVar (Loc CstRefutPat)           -- ^ label@pat
+  | CRPatList [Loc CstRefutPat]              -- ^ [p1, ..., pn], n >= 0
   deriving (Show, Eq)
 
 data CstAccessorBody

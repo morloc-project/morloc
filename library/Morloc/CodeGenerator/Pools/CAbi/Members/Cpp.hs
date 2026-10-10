@@ -874,6 +874,8 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
         "std::get<" <> pretty tag <> ">" <> parens (parens subj <> ".v") <> "->f" <> pretty i
     , lcEnumTagTest = \ty _ n _ subj ->
         parens (subj <+> "==" <+> ty <> "::" <> pretty n)
+    , lcListLenTest = \subj n -> parens (parens subj <> ".size() ==" <+> pretty n)
+    , lcListElem = \subj i -> parens subj <> "[" <> pretty i <> "]"
     , lcCoerceOptional = \x -> "std::make_optional(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
     , lcSerialAstType = serializeTypeOf

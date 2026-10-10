@@ -40,6 +40,18 @@ PAT-2 makes a `Real` literal pattern an `Eq` test, so `NaN` never matches and
 `0.0` matches `-0.0`. Candidates: (a) allowed with those semantics; (b) a
 `Real` literal pattern is rejected.
 
+### PAT-7 A list pattern matches a list of exactly its length
+Intent: ruled 2026-10-10
+Tests: spec-pat-7-1, spec-pat-7-2, spec-pat-7-3, spec-pat-7-4, spec-pat-7-5, spec-pat-7-6
+Code: conforms 2026-10-10
+
+A refutable pattern may be a list `[p1, ..., pn]`, n >= 0. It matches a
+`List a` of length n whose i-th element matches pi. Its receiver is `List a`
+and no other container, `Vector n a` included. No clause set over list
+patterns covers `List a`, so PAT-3 requires a catch-all. Matching reads only
+the length and the elements the pattern tests or binds, and needs no
+instance.
+
 ## Pattern chains
 
 ### PAT-5 A chain step must fit the shape of its receiver

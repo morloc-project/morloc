@@ -1,0 +1,201 @@
+-- PAT-7: a list pattern `[p1, ..., pn]` matches a `List a` of exactly n
+-- elements whose i-th element matches pi.
+--
+-- Every function is written once per pool language, with a sourced call in
+-- each arm so the match itself is generated in that language. `pickPure`
+-- has no sourced call, so the nexus evaluates it.
+--
+-- The clause sets cover the shapes that each lower differently:
+--
+--   * the empty pattern `[]`, which tests the length alone
+--   * binding elements, at more than one length
+--   * a literal inside a list (`[0, y]`), which must not shadow the general
+--     two-element clause after it
+--   * a list nested in a tuple nested in a list, with wildcards
+--   * an as-pattern around a list pattern
+--   * a list pattern in a `match`, and in a refutable `do` bind, where a
+--     list of the wrong length must fail the run rather than bind
+--   * a list that has crossed into the pool and back before it is matched
+
+module main
+  ( pickPure
+  , sumPy
+  , namePy
+  , wholePy
+  , firstPy
+  , roundPy
+  , bindPy
+  , sumCpp
+  , nameCpp
+  , wholeCpp
+  , firstCpp
+  , roundCpp
+  , bindCpp
+  , sumR
+  , nameR
+  , wholeR
+  , firstR
+  , roundR
+  , bindR
+  , sumRust
+  , nameRust
+  , wholeRust
+  , firstRust
+  , roundRust
+  , bindRust
+  )
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+pickPure :: [Int] -> Int
+pickPure | [] = 0
+         | [x] = x
+         | [_, y] = y
+         | _ = 99
+
+source Py from "lists.py" ("inc" as incPy, "add" as addPy, "join2" as catPy, "count2" as sizePy, "ident" as idPy, "mknames" as namesPy)
+
+incPy :: Int -> Int
+addPy :: Int -> Int -> Int
+catPy :: Str -> Str -> Str
+sizePy :: [Int] -> Int
+idPy :: [Int] -> [Int]
+namesPy :: Int -> <IO> [Str]
+
+sumPy :: [Int] -> Int
+sumPy | [] = incPy 0
+     | [x] = incPy x
+     | [0, y] = incPy y
+     | [x, y] = addPy x y
+     | xs = sizePy xs
+
+namePy :: [(Str, [Int])] -> Str
+namePy | [(s, [])] = catPy s "!"
+      | [(s, [_]), (t, _)] = catPy s t
+      | _ = catPy "other" ""
+
+wholePy :: [Int] -> Int
+wholePy | all@[_, _, _] = sizePy all
+       | _ = incPy (-1)
+
+firstPy :: [Str] -> Str
+firstPy xs = match xs | [a, _] = catPy a "" | _ = catPy "?" ""
+
+roundPy :: [Int] -> Int
+roundPy xs = sumPy (idPy xs)
+
+bindPy :: Int -> <IO> Str
+bindPy n = do
+  [a, b] <- namesPy n
+  catPy b a
+
+source Cpp from "lists.hpp" ("inc" as incCpp, "add" as addCpp, "join2" as catCpp, "count2" as sizeCpp, "ident" as idCpp, "mknames" as namesCpp)
+
+incCpp :: Int -> Int
+addCpp :: Int -> Int -> Int
+catCpp :: Str -> Str -> Str
+sizeCpp :: [Int] -> Int
+idCpp :: [Int] -> [Int]
+namesCpp :: Int -> <IO> [Str]
+
+sumCpp :: [Int] -> Int
+sumCpp | [] = incCpp 0
+     | [x] = incCpp x
+     | [0, y] = incCpp y
+     | [x, y] = addCpp x y
+     | xs = sizeCpp xs
+
+nameCpp :: [(Str, [Int])] -> Str
+nameCpp | [(s, [])] = catCpp s "!"
+      | [(s, [_]), (t, _)] = catCpp s t
+      | _ = catCpp "other" ""
+
+wholeCpp :: [Int] -> Int
+wholeCpp | all@[_, _, _] = sizeCpp all
+       | _ = incCpp (-1)
+
+firstCpp :: [Str] -> Str
+firstCpp xs = match xs | [a, _] = catCpp a "" | _ = catCpp "?" ""
+
+roundCpp :: [Int] -> Int
+roundCpp xs = sumCpp (idCpp xs)
+
+bindCpp :: Int -> <IO> Str
+bindCpp n = do
+  [a, b] <- namesCpp n
+  catCpp b a
+
+source R from "lists.R" ("inc" as incR, "add" as addR, "join2" as catR, "count2" as sizeR, "ident" as idR, "mknames" as namesR)
+
+incR :: Int -> Int
+addR :: Int -> Int -> Int
+catR :: Str -> Str -> Str
+sizeR :: [Int] -> Int
+idR :: [Int] -> [Int]
+namesR :: Int -> <IO> [Str]
+
+sumR :: [Int] -> Int
+sumR | [] = incR 0
+     | [x] = incR x
+     | [0, y] = incR y
+     | [x, y] = addR x y
+     | xs = sizeR xs
+
+nameR :: [(Str, [Int])] -> Str
+nameR | [(s, [])] = catR s "!"
+      | [(s, [_]), (t, _)] = catR s t
+      | _ = catR "other" ""
+
+wholeR :: [Int] -> Int
+wholeR | all@[_, _, _] = sizeR all
+       | _ = incR (-1)
+
+firstR :: [Str] -> Str
+firstR xs = match xs | [a, _] = catR a "" | _ = catR "?" ""
+
+roundR :: [Int] -> Int
+roundR xs = sumR (idR xs)
+
+bindR :: Int -> <IO> Str
+bindR n = do
+  [a, b] <- namesR n
+  catR b a
+
+source Rust from "lists.rs" ("inc" as incRust, "add" as addRust, "join2" as catRust, "count2" as sizeRust, "ident" as idRust, "mknames" as namesRust)
+
+incRust :: Int -> Int
+addRust :: Int -> Int -> Int
+catRust :: Str -> Str -> Str
+sizeRust :: [Int] -> Int
+idRust :: [Int] -> [Int]
+namesRust :: Int -> <IO> [Str]
+
+sumRust :: [Int] -> Int
+sumRust | [] = incRust 0
+     | [x] = incRust x
+     | [0, y] = incRust y
+     | [x, y] = addRust x y
+     | xs = sizeRust xs
+
+nameRust :: [(Str, [Int])] -> Str
+nameRust | [(s, [])] = catRust s "!"
+      | [(s, [_]), (t, _)] = catRust s t
+      | _ = catRust "other" ""
+
+wholeRust :: [Int] -> Int
+wholeRust | all@[_, _, _] = sizeRust all
+       | _ = incRust (-1)
+
+firstRust :: [Str] -> Str
+firstRust xs = match xs | [a, _] = catRust a "" | _ = catRust "?" ""
+
+roundRust :: [Int] -> Int
+roundRust xs = sumRust (idRust xs)
+
+bindRust :: Int -> <IO> Str
+bindRust n = do
+  [a, b] <- namesRust n
+  catRust b a

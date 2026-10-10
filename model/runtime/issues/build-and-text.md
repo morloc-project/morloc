@@ -12,3 +12,10 @@
   lacks metadata kind 0x08; kind 0x02 is defined and unused.
 - [read] morloc-runtime/src/ipc.rs `send_and_receive`: public, uncalled,
   underflows `offset - 32`. Delete.
+- **morloc.h expression structs drift from Rust.** [read] The header's
+  `morloc_tag_test_expression_s` holds `subject, constructor` (two
+  expression pointers); `MorlocTagTestExpression` in manifest_ffi.rs holds
+  `subject, tag: u8`. The header has no ctor-field or ctor-make struct and
+  its expression union lacks those members. `c_abi_layout.rs` checks neither
+  struct, so nothing caught it. Fix: mirror both and add them to
+  `expression_structs_match_the_header`.

@@ -625,11 +625,13 @@ typedef enum {
                             // The tag selects the arm whose schema describes
                             // the out-of-line payload; the index selects the
                             // field within it.
-    MORLOC_X_CTOR_MAKE      // fields + a tag -> a `data` value. Builds the
+    MORLOC_X_CTOR_MAKE,     // fields + a tag -> a `data` value. Builds the
                             // tagged-pointer form: the tag, then the arm's
                             // fields written out of line as a tuple. A
                             // constructor with no arguments is its tag byte
                             // and needs no node.
+    MORLOC_X_LIST_LEN_TEST  // (list) + a length -> Bool. A list pattern's
+                            // length test, answered in the nexus.
 } morloc_expression_type;
 
 typedef enum { APPLY_PATTERN, APPLY_LAMBDA, APPLY_FORMAT } morloc_app_expression_type;
@@ -745,6 +747,13 @@ typedef struct morloc_tag_test_expression_s {
     morloc_expression_t* constructor;
 } morloc_tag_test_expression_t;
 
+// A list pattern's length test: does `subject` have exactly `length`
+// elements.
+typedef struct morloc_list_len_test_expression_s {
+    morloc_expression_t* subject;
+    size_t length;
+} morloc_list_len_test_expression_t;
+
 // Pure-nexus conditional. Both branches share the If node's schema.
 typedef struct morloc_if_expression_s {
     morloc_expression_t* cond;
@@ -786,6 +795,7 @@ typedef struct morloc_expression_s {
         morloc_if_expression_t* if_expr;
         morloc_open_expression_t* open_expr;
         morloc_ifile_walk_expression_t* ifile_walk_expr;
+        morloc_list_len_test_expression_t* list_len_test_expr;
     } expr;
 } morloc_expression_t;
 

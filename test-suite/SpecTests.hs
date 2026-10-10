@@ -33,6 +33,7 @@ specTests =
     , localOption (mkTimeout 2000000) teqTests
     , localOption (mkTimeout 2000000) newtTests
     , localOption (mkTimeout 5000000) dimTests
+    , localOption (mkTimeout 2000000) patTests
     , modelCheck
     ]
 
@@ -844,6 +845,61 @@ newtTests =
         module main (f)
         newtype Buffer (n :: Nat) a = List a
         f :: Buffer 3 Int -> Int
+        |]
+    ]
+
+patTests :: TestTree
+patTests =
+  testGroup
+    "PAT"
+    [ accept
+        "spec-pat-7-1"
+        [r|
+        module main (f, g, h)
+        f :: [Int] -> Int
+        f | [] = 0
+          | [x] = x
+          | [x, y] = y
+          | xs = 3
+        g :: (Int, [[Str]]) -> [Str]
+        g | (n, [[s], _]) = [s]
+          | (n, [ys]) = ys
+          | _ = []
+        h :: [Bool] -> Bool
+        h xs = match xs | all@[a, _] = a | _ = True
+        |]
+    , reject
+        "spec-pat-7-2"
+        [r|
+        module main (f)
+        f :: [Int] -> Int
+        f | [] = 0
+          | [x] = x
+        |]
+    , reject
+        "spec-pat-7-3"
+        [r|
+        module main (f)
+        newtype Deque a = List a
+        f :: Deque Int -> Int
+        f | [x] = x
+          | _ = 0
+        |]
+    , reject
+        "spec-pat-7-4"
+        [r|
+        module main (f)
+        f :: [Int] -> Str
+        f | [x] = x
+          | _ = "none"
+        |]
+    , reject
+        "spec-pat-7-6"
+        [r|
+        module main (f)
+        f :: Vector 2 Int -> Int
+        f | [x, y] = y
+          | _ = 0
         |]
     ]
 

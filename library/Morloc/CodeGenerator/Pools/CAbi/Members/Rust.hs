@@ -2258,6 +2258,10 @@ rustLowerConfig mask =
           <+> "}"
     , lcEnumTagTest = \ty _ n _ subj ->
         parens (subj <+> "==" <+> "<" <> ty <> ">::" <> pretty n)
+    , lcListLenTest = \subj n -> parens (parens subj <> ".len() ==" <+> pretty n)
+    -- Indexing yields a place, not a value, so the element is cloned out of
+    -- it, as a constructor field is.
+    , lcListElem = \subj i -> parens subj <> "[" <> pretty i <> "].clone()"
     , lcCoerceOptional = \x -> "Some(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> rustTypeOf t
     -- The serialize / raw-deserialize types use the WIRE form: a closure nested

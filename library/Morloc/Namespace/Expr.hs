@@ -452,6 +452,16 @@ data Intrinsic
                   -- this projection has already established the arm, and
                   -- short-circuiting in the emitted condition keeps the
                   -- projection from running against any other one.
+  | IntrListLenTest -- ^ implicit @List a -> Int -> Bool@: does the list have
+                  -- exactly this many elements. Emitted only by the
+                  -- desugar's list-pattern lowering, with a literal length,
+                  -- and NOT reachable from surface syntax. A primitive
+                  -- rather than a call to a size function so that matching
+                  -- needs no instance in scope.
+  | IntrListElem  -- ^ implicit @List a -> Int -> a@: the element at a
+                  -- literal index. Emitted only by the desugar's
+                  -- list-pattern lowering, under a passing 'IntrListLenTest'
+                  -- that puts the index in range.
   | IntrFLength     -- ^ @flen :: IFile a -> <IO> (Try Str Int)@ -- file element count.
                     -- Free from the footer's StreamDiag.element_count. Users
                     -- typically alias as @length@ via stdlib shims.
@@ -595,6 +605,8 @@ intrinsicName IntrMap = "map"
 intrinsicName IntrMapOptional = "mapoptional"
 intrinsicName IntrTagTest = "tagtest"
 intrinsicName IntrCtorField = "ctorfield"
+intrinsicName IntrListLenTest = "listlentest"
+intrinsicName IntrListElem = "listelem"
 intrinsicName IntrFLength = "flen"
 intrinsicName IntrStreamLayout = "streamlayout"
 intrinsicName IntrNext = "next"
@@ -677,6 +689,8 @@ intrinsicIsIO IntrMap = False
 intrinsicIsIO IntrMapOptional = False
 intrinsicIsIO IntrTagTest = False
 intrinsicIsIO IntrCtorField = False
+intrinsicIsIO IntrListLenTest = False
+intrinsicIsIO IntrListElem = False
 intrinsicIsIO IntrThrow = False
 intrinsicIsIO IntrTry = False
 
@@ -723,6 +737,8 @@ intrinsicArity :: Intrinsic -> Int
 intrinsicArity IntrSave = 3
 intrinsicArity IntrTagTest = 2
 intrinsicArity IntrCtorField = 3
+intrinsicArity IntrListLenTest = 2
+intrinsicArity IntrListElem = 2
 intrinsicArity IntrSaveM = 2
 intrinsicArity IntrSaveJ = 2
 intrinsicArity IntrLoad = 1
