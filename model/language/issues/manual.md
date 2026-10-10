@@ -13,8 +13,6 @@ says whether it reproduces.
   in every example. NATIVE-5 is open on whether these lines are legal.
 - Stale: features-optionals.asc:290-292 says sum types are "planned but not
   yet supported".
-- features-patterns.asc:249 says "Pass `Null` through as `Nothing`"; morloc
-  has no `Nothing`.
 - features-sum-types.asc:490 and :827 both say Python and R "declare
   nothing" in one foldout.
 - Contradicts DOC-6 and SRC-2: features-source.asc:37, :52, :102 use the
