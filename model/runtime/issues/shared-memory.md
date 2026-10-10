@@ -2,19 +2,6 @@
 
 Changes here touch locks and ownership: model first.
 
-- **New blocks are not zero.** [read] Violates SHM-6 ("a new one [reads] as
-  zero"). Default-mode `shmalloc` does not zero (only poison mode,
-  morloc-runtime/src/shm.rs:1946), and `scan_volume` (shm.rs:2215-2255)
-  leaves each merged neighbor's 16-byte header (0x0CB1DEAD, size) inside the
-  survivor. The SHM-6 test checks only poison mode (shm.rs:2342). Voidstar
-  padding is therefore not guaranteed zero, which breaks byte hashing (see
-  cache.md). Open: zero on allocation, zero merged headers, or drop the
-  guarantee and make hashing skip padding.
-- **Registry slot count not read back.** [read] stream.rs:345 writes it,
-  :316 each process uses its own `MORLOC_REGISTRY_SLOT_COUNT`; a mismatch
-  rejects handles or fails attach after 5 s.
-- [speculative] stream.rs:1840-1872 `clear_slot_fields` keeps `diag`; an
-  IFile over a plain data packet shows the previous stream's diagnostics.
 - [speculative race] shm.rs:970-983 `retire_names` clears ownership even
   when `COMMON_BASENAME.try_lock()` fails: leaks every volume.
 - [speculative race] shm.rs:1442-1453 `rel2abs` fast path holds nothing on
@@ -46,10 +33,3 @@ Changes here touch locks and ownership: model first.
 - [speculative] Python thread mode: a NumPy view's `__del__` running on
   another thread can release through that thread's tracker, dropping
   another holder's reference early when two threads hold the same block.
-- **Namespace-wide settings are read from each process's own
-  environment.** [read] `MORLOC_WRITE_BUFFER_BYTES` (the stream buffer
-  overrun in streams.md), `MORLOC_REGISTRY_SLOT_COUNT` (above) and
-  `MORLOC_SHM_POISON` (shm.rs ~1931: mixed settings hand out poisoned
-  bytes, breaking SHM-6) must agree across the processes of a program but
-  are read per process. Fix: publish them in the shared header at shinit,
-  as the custody queue depth already is per queue.

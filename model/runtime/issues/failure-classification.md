@@ -21,9 +21,13 @@ failure (a fail packet). Several sites are misclassified.
   declared Int column) kills the pool instead of failing the call. Probably
   also a wrong-length tensor (unconfirmed). Open: should the C ABI report an
   error class with every message?
-- **No liveness check on a reply wait.** [read] Gap next to NET-5 (covers
-  only reading a request): the caller waits for end of file only, so a dead
-  callee whose socket is held open by a grandchild hangs it.
+- **A reply wait checks the listener, not the worker.** [read] NET-5
+  applies to a reply wait through the connected socket's peer, which is
+  the process that listened. In a Python or R fork pool that is the
+  coordinator or listener, not the worker serving the call, so a worker
+  that dies while a process it forked holds the connection open still
+  hangs its caller. The kernel offers no way to name the accepting
+  process; the callee would have to say who it is.
 - **Malformed argument exits 1, unknown command 2.** Gap in LIFE-3: is a
   malformed value a usage error? (`./prog cmd notanint` -> 1.)
 - **Top-level `Err` keyed by arm name.** Gap: morloc-nexus/src/dispatch.rs
