@@ -1223,7 +1223,12 @@ pub(crate) unsafe fn send_and_receive_over_socket_wait(
             CStr::from_ptr(socket_path).to_string_lossy());
     }
 
-    let result = stream_from_client_wait(client_fd, poll_timeout_us, recv_timeout_us, &mut err);
+    // NET-5: the reply waits as long as the callee's process lives; a callee
+    // that cannot be named is waited on until its end closes.
+    let result = match Peer::of(client_fd) {
+        Some(peer) => read_packet(client_fd, 0, 0, Some(&peer), &mut err),
+        None => stream_from_client_wait(client_fd, poll_timeout_us, recv_timeout_us, &mut err),
+    };
     if !err.is_null() {
         drop_conn(client_fd);
         *errmsg = err;
@@ -1893,6 +1898,47 @@ mod dispatch_fork_tests {
         let bytes = unsafe { std::slice::from_raw_parts(got, size) }.to_vec();
         unsafe { libc::free(got as *mut c_void) };
         assert_eq!(bytes, packet);
+    }
+
+    #[test]
+    fn a_caller_whose_callee_died_stops_waiting_though_the_fd_lives_on() {
+        let dir = std::env::temp_dir().join(format!("mlc-reply-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pipe");
+        let cpath = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let mut ready = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0);
+        let callee = unsafe { libc::fork() };
+        if callee == 0 {
+            let l = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            unsafe { libc::write(ready[1], b"r".as_ptr() as *const c_void, 1) };
+            let (conn, _) = l.accept().unwrap();
+            let mut header = [0u8; morloc_runtime_types::packet::PKT_HEADER_SIZE];
+            let _ = std::io::Read::read_exact(&mut &conn, &mut header);
+            if unsafe { libc::fork() } == 0 {
+                unsafe { libc::sleep(30) };
+                unsafe { libc::_exit(0) };
+            }
+            unsafe { libc::_exit(0) };
+        }
+        let mut b = 0u8;
+        assert_eq!(unsafe { libc::read(ready[0], &mut b as *mut u8 as *mut c_void, 1) }, 1);
+        let reaper = std::thread::spawn(move || unsafe { libc::waitpid(callee, ptr::null_mut(), 0) });
+        let req = crate::packet::PacketHeader::ping().to_bytes();
+        let started = std::time::Instant::now();
+        let mut err: *mut c_char = ptr::null_mut();
+        let reply = unsafe { send_and_receive_over_socket(cpath.as_ptr(), req.as_ptr(), &mut err) };
+        let took = started.elapsed();
+        reaper.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe {
+            libc::close(ready[0]);
+            libc::close(ready[1]);
+        }
+        assert!(reply.is_null(), "no reply came");
+        unsafe { libc::free(err as *mut c_void) };
+        assert!(took < std::time::Duration::from_secs(5), "the dead callee was noticed: {took:?}");
     }
 
     #[test]
