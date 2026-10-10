@@ -14,11 +14,10 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   so each request pays a TCP connect, accept and close. The soak client in
   test-suite/daemon-tests says its requests ride persistent connections and
   exercise the keep-alive path; there is none.
-- [measured] Each crossing costs 76-86 us here, ~23 us of it bookkeeping:
-  the callee reads `/proc/<caller>/stat` for the caller's start time on
-  every accepted connection (~11 us), and caller and callee make ~8
-  `clock_gettime` calls between them (real syscalls on this HPET host,
-  ~1.5 us each): /work/tests/runtime/crossing.
+- [measured] A crossing costs 33 us (Python -> C++, reused connection)
+  and 51 us (C++ -> Python, connection per call) here, against a 13.6 us
+  socket round trip: /work/tests/runtime/crossing. Calls into Python and R
+  still connect per call, and Python's own per-call work is ~19 us.
 - Spec text behind the code: topology.md lists a stream sweeper thread in
   pools and a lifeline thread in R; neither exists.
 - [read] FORK-3 gap on non-Linux: accept and pipe set close-on-exec in a
