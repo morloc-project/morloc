@@ -1,8 +1,9 @@
 # Streams (SLOT)
 
-A stream's identity lives in a shared registry slot; each process keeps its
-own descriptor, mapping and cache for it. A handle carries the slot index
-and the slot's generation when the handle was made.
+A stream's identity lives in a shared registry slot. A process reading a
+stream keeps its own descriptor, mapping and cache for it; a written
+stream's file is held by its writer in the nexus (SLOT-10). A handle
+carries the slot index and the slot's generation when the handle was made.
 
 ### SLOT-1 A stale handle never touches the slot it used to name
 Status: implemented
@@ -55,7 +56,7 @@ opened or followed before that. A pointer and its length are copied
 together through a bounds check, so a torn pair is an error rather than a
 read past the mapping. An open OStream's entry array and compression level
 change under the slot lock and are never read this way. A reader with no
-handle (a scan for an ending or orphaned slot) checks again under the
+handle (a sweep's scan for slots to end) checks again under the
 lock. An acquire load does not keep earlier reads
 before it, so the second load follows an acquire fence; on a weakly ordered
 processor the reads could otherwise complete after it. A writer moves the

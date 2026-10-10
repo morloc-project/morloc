@@ -38,7 +38,8 @@ Reads and writes on client connections retry when interrupted.
 Status: implemented
 Checked by: retiring_at_exit_leaves_memory_readable_to_threads_still_running, no_segment_is_made_once_teardown_begins, tla:DaemonShutdown, tla:DaemonShutdown_unmap_at_exit.bug
 
-Threads that no request accounts for -- write-behind compressors, user
+Threads that no request accounts for -- stream writers and their
+compressors, user
 threads, detached connection threads -- may still read shared memory while
 a process exits. So no exit path unmaps it: the nexus's teardown, a pool's
 exit and the exit handler remove the names of the shared memory this

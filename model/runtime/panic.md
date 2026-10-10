@@ -131,7 +131,7 @@ Status: implemented
 Checked by: a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_outside_a_catch_scope_exits_with_the_internal_error_status
 
 A thread that serves no request -- the stream sweeper, the lifeline, the
-shutdown watchdog, the release service, write-behind compression, a
+shutdown watchdog, a stream writer, stream compression, a
 child's output reader -- catches nothing, so its panic ends the process by
 PANIC-1. It never dies alone, which would leak, orphan children, lose the
 shutdown bound or hang its consumer.

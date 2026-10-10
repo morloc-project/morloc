@@ -31,8 +31,8 @@ Status: implemented
 Checked by: a_forked_child_does_not_keep_a_finished_stream_locked
 
 A file lock belongs to the open file description, which a forked child
-shares. The opener unlocks explicitly when the stream ends rather than
-relying on close.
+shares. The stream's writer (SLOT-10) unlocks explicitly when the stream
+ends rather than relying on close.
 
 ### FORK-5 Every process-wide lock has a fork class
 Status: implemented

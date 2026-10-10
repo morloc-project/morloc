@@ -25,11 +25,12 @@ nexus (one per program run, or one long-running daemon / MCP server)
 ## Threads
 
 - nexus/daemon: an accept thread (also runs pool-crash recovery), 4-32
-  request workers, a SIGCHLD handler that reaps every child.
+  request workers, a SIGCHLD handler that reaps every child, and one writer
+  thread per open written stream (the custodian, SLOT-10) with its
+  compression jobs.
 - pool: dispatch workers (C++, Rust: a job queue in libmorloc; Python
   thread mode: Python threads; Python fork mode and R: forked worker
   processes), the stream sweeper thread, the lifeline thread (C++, R, Rust).
-- write-behind compression jobs for output streams.
 
 ## Worker scaling
 
@@ -55,4 +56,8 @@ nexus (one per program run, or one long-running daemon / MCP server)
 - A one-shot CLI run starts only the pools its command can reach; the
   daemon, MCP server and call-packet mode start every pool at startup.
 - Streams: a registry slot in shared memory names the file, its schema and
-  its cursor; each process keeps its own descriptor and mapping.
+  its cursor. A reading process keeps its own descriptor and mapping. A
+  written stream's elements go into the slot's shared buffer, and full
+  buffers onto a queue in shared memory that the nexus's writer for that
+  stream drains: only the nexus touches a written stream's file, stdout
+  and stderr included (SLOT-10, SLOT-16).
