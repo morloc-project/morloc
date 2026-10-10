@@ -24,6 +24,11 @@ pub struct LanguageDaemon {
     pub shm_default_size: usize,
     pub server_fd: i32,
     pub client_fds: *mut ClientList,
+    /// The socket file this pool bound, as (device, inode); (0, 0) if unknown.
+    pub socket_dev: u64,
+    pub socket_ino: u64,
+    /// Holds that file so its inode number cannot be reused (-1 if none).
+    pub socket_hold: i32,
 }
 
 const BUFFER_SIZE: usize = 65536;
@@ -310,8 +315,12 @@ pub(crate) unsafe fn close_daemon(daemon_ptr: *mut *mut LanguageDaemon) {
     }
 
     if !(*daemon).socket_path.is_null() {
-        libc::unlink((*daemon).socket_path);
+        // DAEMON-10
+        unlink_if_ours((*daemon).socket_path, ((*daemon).socket_dev, (*daemon).socket_ino));
         libc::free((*daemon).socket_path as *mut c_void);
+    }
+    if (*daemon).socket_hold >= 0 {
+        libc::close((*daemon).socket_hold);
     }
     if !(*daemon).tmpdir.is_null() {
         libc::free((*daemon).tmpdir as *mut c_void);
@@ -328,6 +337,36 @@ pub(crate) unsafe fn close_daemon(daemon_ptr: *mut *mut LanguageDaemon) {
 }
 
 // ── Socket helpers ───────────────────────────────────────────────────────────
+
+/// The (device, inode) of the file at `path`, not following a symlink.
+fn socket_file_id(path: *const c_char) -> Option<(u64, u64)> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    (unsafe { libc::lstat(path, &mut st) } == 0).then(|| (st.st_dev as u64, st.st_ino as u64))
+}
+
+/// Hold the socket file at `path` open where the platform allows it, so its
+/// inode number is not reused while this pool lives, and return its identity.
+fn hold_socket_file(path: *const c_char) -> (i32, Option<(u64, u64)>) {
+    #[cfg(target_os = "linux")]
+    {
+        let fd = unsafe { libc::open(path, libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd >= 0 {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(fd, &mut st) } == 0 {
+                return (fd, Some((st.st_dev as u64, st.st_ino as u64)));
+            }
+            unsafe { libc::close(fd) };
+        }
+    }
+    (-1, socket_file_id(path))
+}
+
+/// Remove `path` only while it is still the file with identity `id`.
+unsafe fn unlink_if_ours(path: *const c_char, id: (u64, u64)) {
+    if id != (0, 0) && socket_file_id(path) == Some(id) {
+        libc::unlink(path);
+    }
+}
 
 unsafe fn new_socket(errmsg: *mut *mut c_char) -> i32 {
     clear_errmsg(errmsg);
@@ -407,6 +446,7 @@ pub(crate) unsafe fn start_daemon(
     }
 
     (*daemon).server_fd = -1;
+    (*daemon).socket_hold = -1;
     (*daemon).socket_path = libc::strdup(socket_path);
     (*daemon).tmpdir = libc::strdup(tmpdir);
     (*daemon).shm_basename = libc::strdup(shm_basename);
@@ -455,6 +495,13 @@ pub(crate) unsafe fn start_daemon(
         close_daemon(&mut (daemon as *mut LanguageDaemon));
         *errmsg = err;
         return ptr::null_mut();
+    }
+    // DAEMON-10
+    let (hold, id) = hold_socket_file(socket_path);
+    (*daemon).socket_hold = hold;
+    if let Some((dev, ino)) = id {
+        (*daemon).socket_dev = dev;
+        (*daemon).socket_ino = ino;
     }
 
     // Set non-blocking mode
@@ -2363,5 +2410,40 @@ mod reuse_tests {
         assert!(unsafe { take_keep_bit(p.as_mut_ptr()) });
         assert_eq!(mode_of(&p), 0);
         assert!(!unsafe { take_keep_bit(p.as_mut_ptr()) });
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn a_pool_removes_only_the_socket_file_it_bound() {
+        let dir = std::env::temp_dir().join(format!("mlc-endpoint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pipe");
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+
+        let ours = UnixListener::bind(&path).unwrap();
+        let (hold, id) = hold_socket_file(c.as_ptr());
+        drop(ours);
+        std::fs::remove_file(&path).unwrap();
+        let theirs = UnixListener::bind(&path).unwrap();
+        unsafe { unlink_if_ours(c.as_ptr(), id.unwrap()) };
+        assert!(path.exists(), "a file another pool bound at the path stays");
+        if hold >= 0 {
+            unsafe { libc::close(hold) };
+        }
+
+        let (hold, id) = hold_socket_file(c.as_ptr());
+        unsafe { unlink_if_ours(c.as_ptr(), id.unwrap()) };
+        assert!(!path.exists(), "the file this pool bound is removed");
+        if hold >= 0 {
+            unsafe { libc::close(hold) };
+        }
+        drop(theirs);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

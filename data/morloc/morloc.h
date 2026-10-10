@@ -969,6 +969,9 @@ typedef struct language_daemon_s {
     size_t shm_default_size;
     int server_fd;
     client_list_t* client_fds;
+    uint64_t socket_dev;
+    uint64_t socket_ino;
+    int socket_hold;
 } language_daemon_t;
 
 typedef struct morloc_socket_s {

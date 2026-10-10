@@ -147,12 +147,14 @@ shells.
 
 ### DAEMON-10 A daemon removes only the endpoint files it made
 Status: implemented
-Checked by: a_daemon_removes_only_the_endpoint_files_it_made
+Checked by: a_daemon_removes_only_the_endpoint_files_it_made, a_pool_removes_only_the_socket_file_it_bound
 
 On any exit -- a clean one, the shutdown watchdog's, a signal's, a panic's
 -- a daemon removes its unix socket and its port file only if the file at
 each path is still the one it created, so a daemon that has since taken
-over the path keeps its own.
+over the path keeps its own. A pool does the same with its socket, and
+keeps the file it bound open while it lives where the system allows it, so
+the file system cannot give a replacement file the same identity.
 
 ### DAEMON-11 A process group id is held while the nexus may signal it
 Status: implemented
