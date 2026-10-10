@@ -547,6 +547,10 @@ def _with_debug_trace(msg: str) -> str:
 
 
 def run_job(client_fd: int) -> None:
+    # Once a reply has started to go out, a failure must not be followed by
+    # a second packet on the same connection: a reader would take its bytes
+    # as the rest of the first.
+    replying = False
     try:
         # Anything left on this thread outside a dispatch; a dispatch's own
         # entries are released as its reply is sent (send_reply).
@@ -559,6 +563,7 @@ def run_job(client_fd: int) -> None:
         # fail packet rather than a cryptic dispatch error.
         if _mlc_source_error is not None and not morloc.is_ping(client_data):
             sys.stdout.flush()
+            replying = True
             morloc.send_reply(client_fd, morloc.make_fail_packet(_mlc_source_error))
             return
 
@@ -602,17 +607,19 @@ def run_job(client_fd: int) -> None:
         # SLOT-16: output the call left on @stdout is written before its reply.
         morloc.reclaim_stdio_after_dispatch()
 
+        replying = True
         morloc.send_reply(client_fd, result)
 
     except Exception as e:
-        # Try to send a fail packet back to the caller before giving up.
-        # This may fail (e.g., broken pipe from a timed-out ping), which is OK.
-        try:
-            morloc.reclaim_stdio_after_dispatch()
-            result = morloc.make_fail_packet(str(e))
-            morloc.send_reply(client_fd, result)
-        except Exception:
-            pass
+        # Try to send a fail packet back to the caller before giving up,
+        # unless a reply already started to go out.
+        if not replying:
+            try:
+                morloc.reclaim_stdio_after_dispatch()
+                result = morloc.make_fail_packet(str(e))
+                morloc.send_reply(client_fd, result)
+            except Exception:
+                pass
         print(f"job failed: {e!s}", file=sys.stderr)
     finally:
         morloc.exit_if_forked()
@@ -1216,7 +1223,7 @@ if __name__ == "__main__":
             break
 
         # Spawn a new worker if all are busy (or all have exited)
-        if len(workers) == 0 or busy_count.value >= total_workers.value:
+        if not shutdown_flag.value and (len(workers) == 0 or busy_count.value >= total_workers.value):
             w = Process(target=worker_process,
                         args=(spare_read_fd, tmpdir, shm_basename, shutdown_flag,
                               busy_count, total_workers, wakeup_w, retire_w))
