@@ -14,7 +14,7 @@ use morloc_runtime_types::shm_lock::{ShmGuard, ShmLock};
 pub use morloc_runtime_types::shm_types::{
     align_up, encode_relptr, relptr_is_sentinel, relptr_offset, relptr_volume_index,
     AbsPtr, Array, BlockHeader, MorlocVolEntry, RelPtr, ShmHeader, VolPtr,
-    BLK_ABSORBED, BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER, PRIMARY_VOLUME,
+    BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER, PRIMARY_VOLUME,
     OFFSET_MASK, RELNULL, SHM_MAGIC, VOLNULL,
 };
 
@@ -708,9 +708,7 @@ unsafe fn init_volume(
     set_cstr(&mut name_buf, label);
     (*shm).volume_name = name_buf;
     (*shm).volume_index = volume_index as i32;
-    // `relative_offset` is unused under the indexed-relptr encoding; each
-    // relptr carries its own volume index in the high bits.
-    (*shm).relative_offset = 0;
+    (*shm).poison = poison_on_free() as usize;
     (*shm).volume_size = data_size;
     ShmLock::init(std::ptr::addr_of_mut!((*shm).lock))?;
     (*shm).cursor = 0;
@@ -722,7 +720,19 @@ unsafe fn init_volume(
     Ok(())
 }
 
+/// Take the program-wide settings a volume's header records: the primary
+/// volume's poison setting holds for every process (SHM-6).
+///
+/// # Safety
+/// `shm` must point to a published volume header.
+unsafe fn adopt_volume_settings(volume_index: usize, shm: *const ShmHeader) {
+    if volume_index == PRIMARY_VOLUME {
+        POISON.store(if (*shm).poison != 0 { 2 } else { 1 }, Ordering::Relaxed);
+    }
+}
+
 fn register_volume(volume_index: usize, shm: *mut ShmHeader, data_size: usize) {
+    unsafe { adopt_volume_settings(volume_index, shm) };
     {
         let mut vols = VOLUMES.lock();
         vols.slots[volume_index].set(shm, data_size);
@@ -1314,12 +1324,6 @@ pub unsafe fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
     // SAFETY: ptr was returned by shmalloc, which places a BlockHeader immediately before
     // the returned data pointer. Magic check below validates the header.
     let blk = unsafe { &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader) };
-    if blk.magic == BLK_ABSORBED {
-        return Err(MorlocError::Shm(
-            "Cannot incref a block that was merged into its predecessor \
-             (the caller is holding a stale pointer)".into(),
-        ));
-    }
     if blk.magic != BLK_MAGIC {
         return Err(MorlocError::Shm("Corrupted memory - invalid magic".into()));
     }
@@ -1962,12 +1966,6 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
     let blk = unsafe {
         &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)
     };
-    if blk.magic == BLK_ABSORBED {
-        return Err(MorlocError::Shm(
-            "Cannot free a block that was merged into its predecessor \
-             (the caller is holding a stale pointer)".into(),
-        ));
-    }
     if blk.magic != BLK_MAGIC {
         return Err(MorlocError::Shm("Corrupted memory".into()));
     }
@@ -2235,13 +2233,11 @@ unsafe fn scan_volume(
             {
                 break;
             }
-            // The absorbed header becomes interior bytes of the survivor.
-            // Stamp it so a pointer to the absorbed block stops reading as
-            // a block: leaving a valid header inside a live allocation is
-            // the allocator lying about its own structure, and every
-            // validating entry point believes it.
+            // SHM-6: the absorbed header becomes interior bytes of the
+            // survivor, zero like the rest of a free block. A zero magic also
+            // stops a stale pointer to the absorbed block reading as a block.
             let next_size = (*next).size;
-            (*next).magic = BLK_ABSORBED;
+            std::ptr::write_bytes(next as *mut u8, 0, hdr_size);
             (*blk).size += hdr_size + next_size;
         }
 
@@ -2292,12 +2288,9 @@ unsafe fn split_block(
         let data_start = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
         (*shm).cursor = (new_free as *const u8).offset_from(data_start) as VolPtr;
     } else {
-        // Too small to head, so it becomes interior bytes of the block.
-        // Stamp whatever header may be sitting there, for the same reason
-        // the merge does.
-        if remaining >= std::mem::size_of::<u32>() {
-            (*new_free).magic = BLK_ABSORBED;
-        }
+        // SHM-6: too small to head, so it becomes interior bytes of the
+        // block, zeroed as the merge zeroes an absorbed header.
+        std::ptr::write_bytes(new_free as *mut u8, 0, remaining);
         (*blk).size += remaining;
         (*shm).cursor = VOLNULL;
     }
@@ -2337,6 +2330,21 @@ pub unsafe fn vol2abs(ptr: VolPtr, shm: *const ShmHeader) -> AbsPtr {
 #[cfg(test)]
 mod poison_tests {
     use super::*;
+
+    #[test]
+    fn every_process_poisons_as_the_program_does() {
+        let _shm = crate::own_test_registry();
+        let size = std::mem::size_of::<ShmHeader>() + 4096;
+        let mut backing = vec![0u64; size / 8 + 1];
+        let shm = backing.as_mut_ptr() as *mut ShmHeader;
+        set_poison_on_free(true);
+        unsafe { init_volume(shm, PRIMARY_VOLUME, "poison-test", 4096).unwrap() };
+        set_poison_on_free(false);
+        unsafe { adopt_volume_settings(PRIMARY_VOLUME, shm) };
+        let adopted = poison_on_free();
+        set_poison_on_free(false);
+        assert!(adopted, "a process whose own setting is off poisons like the program");
+    }
 
     #[test]
     fn a_released_block_reads_as_poison_and_a_new_one_as_zero() {
@@ -2807,11 +2815,14 @@ mod tests {
             "merged block did not absorb its neighbour",
         );
 
-        assert_eq!(
-            unsafe { (*second).magic }, BLK_ABSORBED,
+        assert_ne!(
+            unsafe { (*second).magic }, BLK_MAGIC,
             "absorbed block still reads as a block, so a stale pointer to it \
              passes the header check and is acted on as live payload",
         );
+        // SHM-6: a free block's bytes are zero, absorbed headers included.
+        let data = unsafe { std::slice::from_raw_parts(base.add(hdr), (*first).size) };
+        assert!(data.iter().all(|b| *b == 0), "the merged block holds the absorbed header's bytes");
 
     }
 

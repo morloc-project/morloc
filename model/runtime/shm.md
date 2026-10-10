@@ -41,11 +41,17 @@ allocator moves to another volume or grows a new one.
 
 ### SHM-6 A released block is scrubbed before it can be reused
 Status: implemented
-Checked by: a_released_block_reads_as_poison_and_a_new_one_as_zero
+Checked by: a_released_block_reads_as_poison_and_a_new_one_as_zero, coalescing_invalidates_the_absorbed_block_header, every_process_poisons_as_the_program_does
 
 The last release fills the block (zeros, or a marker byte under
 `MORLOC_SHM_POISON=1`) and only then publishes it as free, with release
-ordering; the allocator reads that state with acquire ordering.
+ordering; the allocator reads that state with acquire ordering. When free
+blocks merge, the absorbed block's header is zeroed too, as is a remainder
+too small to carry a header, so a free block reads as zero throughout and
+a stale pointer to an absorbed block fails every header check. Whether
+to poison is the program's choice, not each process's: the primary
+volume's creator records its setting in the volume header and every
+process that maps the volume follows it.
 
 ### SHM-7 Arguments and results are owned separately, even when one block
 Status: deviation

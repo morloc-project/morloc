@@ -15,13 +15,6 @@ use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize};
 
 pub const SHM_MAGIC: u32 = 0xFECA_0DF0;
 pub const BLK_MAGIC: u32 = 0x0CB1_0DF0;
-
-/// Written over a block header that has been merged into its predecessor.
-/// The header is then interior bytes of the surviving block, so it must
-/// stop reading as a block; a distinct value rather than zero lets the
-/// allocator tell "you are holding a pointer to a block that was coalesced
-/// away" apart from uninitialised or scrubbed memory, which are both zero.
-pub const BLK_ABSORBED: u32 = 0x0CB1_DEAD;
 pub const MAX_VOLUME_NUMBER: usize = 32768;
 
 /// The volume every process of a program shares, created by the first to
@@ -165,7 +158,9 @@ pub struct ShmHeader {
     pub volume_name: [u8; MAX_FILENAME_SIZE],
     pub volume_index: i32,
     pub volume_size: usize,
-    pub relative_offset: usize,
+    /// Nonzero when the program fills released blocks with the poison byte;
+    /// the primary volume's value holds for every process (SHM-6).
+    pub poison: usize,
     pub lock: crate::shm_lock::ShmLock,
     pub cursor: VolPtr,
 }
