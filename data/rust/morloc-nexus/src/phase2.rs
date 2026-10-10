@@ -629,41 +629,42 @@ fn render_return_block(mcmd: &ManifestCommand, manifest: &Manifest) -> String {
         return block;
     }
 
-    // (flag-label, return-type) rows: the bare command first, then one
-    // per terminal flag. A terminal whose entry can't be resolved (a
-    // malformed manifest) contributes an empty type rather than being
-    // dropped, so the row still documents the flag.
-    let mut rows: Vec<(String, String)> = Vec::with_capacity(mcmd.terminals.len() + 1);
-    rows.push(("default".to_string(), stdout_display(mcmd)));
-    for t in &mcmd.terminals {
-        let label = match t.short {
-            Some(c) => format!("-{}/--{}", c, t.long),
-            None => format!("--{}", t.long),
-        };
-        // A `render` action writes its bytes verbatim, so `-f` does not
-        // apply to it; say so rather than leave the reader to find out.
-        let ret = t
-            .output_command(manifest)
-            .map(|c| {
-                let base = stdout_display(c);
-                if t.render && !base.is_empty() {
-                    format!("{}    (raw bytes)", base)
-                } else {
-                    base
-                }
-            })
-            .unwrap_or_default();
-        rows.push((label, ret));
+    let mut block = format!("Return:\n  type: {}", stdout_display(mcmd));
+    for (i, line) in mcmd.ret.desc.iter().enumerate() {
+        let lead = if i == 0 { "desc: " } else { "      " };
+        block.push_str(&format!("\n  {}{}", lead, line));
     }
+    block.push_str("\n  actions:");
 
-    // Align the type column one space past the widest `label:`.
-    let width = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0) + 1;
-    let mut block = String::from("Return:");
-    for (label, ret) in &rows {
-        block.push_str(&format!("\n  {:<width$} {}", format!("{}:", label), ret, width = width));
-    }
-    for line in &mcmd.ret.desc {
-        block.push_str(&format!("\n  {}", line));
+    // One row per action: flag, return type, `(raw bytes)` for a `render`
+    // action (`-f` does not apply to it), `default` for the `@default` one.
+    // A terminal whose entry can't be resolved (a malformed manifest) keeps
+    // its row with an empty type, so the row still documents the flag.
+    let rows: Vec<[String; 4]> = mcmd
+        .terminals
+        .iter()
+        .map(|t| {
+            let label = match t.short {
+                Some(c) => format!("-{}/--{}:", c, t.long),
+                None => format!("--{}:", t.long),
+            };
+            let ret = t.output_command(manifest).map(stdout_display).unwrap_or_default();
+            let raw = if t.render { "(raw bytes)" } else { "" };
+            let mark = if t.default { "default" } else { "" };
+            [label, ret, raw.to_string(), mark.to_string()]
+        })
+        .collect();
+
+    let widths: Vec<usize> = (0..4)
+        .map(|c| rows.iter().map(|r| r[c].len()).max().unwrap_or(0))
+        .collect();
+    for row in &rows {
+        let line = format!(
+            "{:<w0$} {:<w1$}  {:<w2$}  {}",
+            row[0], row[1], row[2], row[3],
+            w0 = widths[0], w1 = widths[1], w2 = widths[2],
+        );
+        block.push_str(&format!("\n    {}", line.trim_end()));
     }
     block
 }
@@ -2507,6 +2508,79 @@ mod help_level_tests {
         assert_eq!(
             help_via_clap(3, &["add", "-hhh"]),
             help_via_clap(3, &["add", "-h"]),
+        );
+    }
+
+    /// `structure` returns a `Molecule` and has two output actions: a
+    /// `@render` `--mol` and a `@with` `-c/--count`. `mol_default` sets
+    /// `@default` on `--mol`.
+    fn fixture_actions(mol_default: bool) -> Manifest {
+        let v = env!("CARGO_PKG_VERSION");
+        let ret = |ty: &str, mime: &str, desc: &str| {
+            format!(
+                r#"{{"schema": "z", "type": "{}", "mime": {}, "desc": [{}], "constraints": [], "metadata": {{}}}}"#,
+                ty, mime, desc
+            )
+        };
+        let cmd = |name: &str, internal: bool, terminals: &str, ret: String| {
+            format!(
+                r#"{{"name": "{}", "type": "remote", "mid": 1, "pool": 0, "needed_pools": [0], "desc": [], "args": [], "return": {}, "constraints": [], "metadata": {{}}, "group": null, "internal": {}, "terminals": [{}]}}"#,
+                name, ret, internal, terminals
+            )
+        };
+        let terminals = format!(
+            r#"{{"long": "mol", "entry": "mlcp_structure_mol", "render": true, "default": {}}},
+               {{"short": "c", "long": "count", "entry": "mlcp_structure_count"}}"#,
+            mol_default
+        );
+        let json = format!(
+            r#"{{
+                "name": "main",
+                "build": {{"path": "/tmp/test", "time": 0, "morloc_version": "{}"}},
+                "pools": [
+                    {{"lang": "py", "exec": ["python3", "pool.py"], "socket": "pipe-py", "metadata": {{}}}}
+                ],
+                "commands": [{}, {}, {}],
+                "groups": [],
+                "metadata": {{}}
+            }}"#,
+            v,
+            cmd("structure", false, &terminals, ret("Molecule", "null", r#""Atoms and bonds", "with hydrogens""#)),
+            cmd("mlcp_structure_mol", true, "", ret("[U8]", r#""chemical/x-mdl-molfile""#, "")),
+            cmd("mlcp_structure_count", true, "", ret("Int", "null", "")),
+        );
+        parse_manifest(&json).unwrap()
+    }
+
+    fn return_block(m: &Manifest) -> String {
+        render_return_block(m.command_by_name("structure").unwrap(), m)
+    }
+
+    #[test]
+    fn return_block_marks_the_default_action() {
+        assert_eq!(
+            return_block(&fixture_actions(true)),
+            "Return:\n\
+             \x20 type: Molecule\n\
+             \x20 desc: Atoms and bonds\n\
+             \x20       with hydrogens\n\
+             \x20 actions:\n\
+             \x20   --mol:      chemical/x-mdl-molfile  (raw bytes)  default\n\
+             \x20   -c/--count: Int"
+        );
+    }
+
+    #[test]
+    fn return_block_without_default_marks_nothing() {
+        assert_eq!(
+            return_block(&fixture_actions(false)),
+            "Return:\n\
+             \x20 type: Molecule\n\
+             \x20 desc: Atoms and bonds\n\
+             \x20       with hydrogens\n\
+             \x20 actions:\n\
+             \x20   --mol:      chemical/x-mdl-molfile  (raw bytes)\n\
+             \x20   -c/--count: Int"
         );
     }
 }

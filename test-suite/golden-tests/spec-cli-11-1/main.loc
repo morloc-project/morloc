@@ -1,0 +1,28 @@
+-- Spec CLI-11: the Return block of a command with output actions names the
+-- type, the return description and one row per action, marking the
+-- `@default` one.
+module main (once, plain)
+
+import root
+
+--' Size
+count :: [Int] -> Int
+count _ = 3
+
+--' Text
+shout :: [Int] -> Str
+shout _ = "shout"
+
+--' Numbers
+--' return: Three small integers
+--' @render -a/--shout=shout @default
+--' @with -c/--count=count
+once :: [Int]
+once = [1,2,3]
+
+--' Numbers
+--' return: Three small integers
+--' @render -a/--shout=shout
+--' @with -c/--count=count
+plain :: [Int]
+plain = [1,2,3]

@@ -1,0 +1,2 @@
+  -a, --shout[=<PATH>]  Text
+  -b, --quiet[=<PATH>]

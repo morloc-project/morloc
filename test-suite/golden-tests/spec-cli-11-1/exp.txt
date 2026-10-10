@@ -1,0 +1,12 @@
+Return:
+  type: [Int]
+  desc: Three small integers
+  actions:
+    -a/--shout: Str  (raw bytes)  default
+    -c/--count: Int
+Return:
+  type: [Int]
+  desc: Three small integers
+  actions:
+    -a/--shout: Str  (raw bytes)
+    -c/--count: Int

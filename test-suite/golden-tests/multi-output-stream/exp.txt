@@ -152,10 +152,11 @@ mark
 1: 7
 --- serving ---
 Return:
-  default:      [Int]
-  -a/--all:     Str    (raw bytes)
-  -b/--batches: Str    (raw bytes)
-  -k/--marks:   Str    (raw bytes)
+  type: [Int]
+  actions:
+    -a/--all:     Str  (raw bytes)
+    -b/--batches: Str  (raw bytes)
+    -k/--marks:   Str  (raw bytes)
 stream ['raw', 'all', 'count', 'batches', 'folded', 'marks']
 twoSites ['raw']
 ok 20005: 1,2,3,4,5,0,1,2
