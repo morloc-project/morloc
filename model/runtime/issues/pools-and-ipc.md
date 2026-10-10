@@ -36,3 +36,6 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   ~1.5 us each): /work/tests/runtime/crossing.
 - Spec text behind the code: topology.md lists a stream sweeper thread in
   pools and a lifeline thread in R; neither exists.
+- [speculative] `read_packet` takes the packet size from the first `recv`
+  even when it returned fewer than the 32 header bytes (ipc_ffi.rs
+  ~648-682); the rest of the header is calloc zeros, so the size is wrong.

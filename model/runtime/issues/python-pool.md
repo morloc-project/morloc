@@ -23,3 +23,14 @@
 - [read] Thread mode starts and stops a thread per call when calls are more
   than ~100 ms apart (idle retirement after ~100 ms, not the 5 s
   topology.md states).
+- **A failed reply is followed by a second packet on the same connection.**
+  [read] If `send_reply` fails part-way, `run_job`'s handler sends a fail
+  packet on that connection (pool.py ~605-615). A caller that resumes reads
+  the partial reply's header, whose length then covers bytes of the fail
+  packet, and decodes them as data: unsound. The C++/Rust pools
+  (pool_ffi.rs ~429-448) and R (rmorloc.c ~4352-4359) close instead.
+- [read] FORK-3: fds received in `_recv_fd` (pool.py ~642) lack
+  close-on-exec (no `MSG_CMSG_CLOEXEC`).
+- [read] An EMFILE in `_recv_fd` raises RuntimeError, which escapes the
+  `except (EOFError, OSError)` at pool.py ~712; the worker exits without
+  its retire token and SHM-8 ends the whole pool, dropping the call.
