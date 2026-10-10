@@ -143,3 +143,18 @@ without waiting for either. A pool with a fixed number of workers keeps no
 connection. Model:
 tla:CrossingConn with its `.bug` variants `finishing_counts_pinned` and
 `join_pinned_without_shutdown_wake`.
+
+### NET-9 In a fork pool only an idle worker takes a connection
+Status: implemented
+Checked by: tla:PyForkAccept, tla:PyForkAccept_exclusive, tla:PyForkAccept_emfile_exits.bug, tla:PyForkAccept_retire_before_accept.bug, tla:PyForkAccept_no_refork_after_retire.bug, tla:PyForkAccept_accept_while_busy.bug, golden:pool-nested-callbacks-churn
+
+In a Python fork pool the coordinator binds the pool's socket before any
+worker exists, and every idle worker polls it and accepts; a worker that
+loses the race to accept polls again. A worker waiting on another pool
+does not poll, so a call never lands on a worker that cannot serve it, and
+the coordinator forks a worker whenever every live worker is waiting (or
+none is left). A worker accepts before it considers retiring, so it never
+retires with a connection queued, and an accept that fails for want of a
+descriptor leaves the connection queued and the worker polling. A process
+forked from a worker never accepts. The readiness probe is answered like
+any call, by a worker whose sources have loaded.

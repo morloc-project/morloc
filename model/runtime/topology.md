@@ -42,6 +42,7 @@ nexus (one per program run, or one long-running daemon / MCP server)
 - Forked pools (Python fork mode, R) count a worker busy only while it waits
   on another pool (foreign call, channel read/write/flush/close) and fork a
   worker when every worker is busy; a computing worker makes calls queue.
+  Idle workers accept on the pool's socket themselves (NET-9).
 - Surplus idle workers retire after 60 s (`MORLOC_POOL_IDLE_TIMEOUT_MS`;
   Python thread mode retires after ~100 ms); R workers never retire (SHM-8).
 - Daemon request workers: number of pools + 4, clamped to [4, 32].

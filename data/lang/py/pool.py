@@ -2,6 +2,7 @@ import signal
 import faulthandler
 import sys
 import select
+import errno
 import os # required for setting path to morloc dependencies
 import time
 import gc
@@ -638,26 +639,6 @@ def run_job(client_fd: int) -> None:
         morloc.close_socket(client_fd)
 
 
-def _send_fd(sock, fd):
-    """Send a file descriptor over a Unix domain socket."""
-    sock.sendmsg([b'\x00'],
-                 [(_socket.SOL_SOCKET, _socket.SCM_RIGHTS,
-                   array.array('i', [fd]))])
-
-def _recv_fd(sock):
-    """Receive a file descriptor from a Unix domain socket."""
-    msg, ancdata, flags, addr = sock.recvmsg(1, _socket.CMSG_SPACE(4))
-    if not msg and not ancdata:
-        raise EOFError("Connection closed")
-    for cmsg_level, cmsg_type, cmsg_data in ancdata:
-        if (cmsg_level == _socket.SOL_SOCKET and
-                cmsg_type == _socket.SCM_RIGHTS):
-            a = array.array('i')
-            a.frombytes(cmsg_data[:4])
-            return a[0]
-    raise RuntimeError("No fd received in ancillary data")
-
-
 def _worker_idle_timeout():
     """Seconds a surplus fork worker stays idle before it retires."""
     try:
@@ -667,11 +648,10 @@ def _worker_idle_timeout():
 
 WORKER_IDLE_TIMEOUT = _worker_idle_timeout()
 
-def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w, retire_w, inherited_write_fd=-1):
-    # The job socket's write end belongs to the listener; a worker holding a
-    # copy would never see end of file when the listener dies.
-    if inherited_write_fd >= 0:
-        os.close(inherited_write_fd)
+def worker_process(listen_fd, tmpdir, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w, retire_w):
+    # FORK-12: a process forked from this one (by user code while its sources
+    # load) has another generation and never accepts calls.
+    born = morloc.fork_generation()
     # Reset signal handlers inherited from main. If user code inside run_job
     # calls multiprocessing.Pool (or anything else that forks and later
     # SIGTERMs its own children), those grandchildren would otherwise inherit
@@ -689,8 +669,8 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
     # it into a fail packet so the caller gets the real import error.
     _mlc_load_user_sources()
     _init_worker_tracking(busy_count, total_workers, wakeup_w)
-    sock = _socket.fromfd(job_fd, _socket.AF_UNIX, _socket.SOCK_STREAM)
-    os.close(job_fd)  # sock owns a dup'd copy
+    listener = _socket.socket(fileno=listen_fd)
+    listener.setblocking(False)
     me = os.getpid()
     last_activity = time.monotonic()
     warned_blocked = False
@@ -711,20 +691,31 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
         # job-queue fd >= 1024 makes select.select raise ValueError and kill the
         # worker. The Rust/C/R pools already use poll(2) for this reason.
         poller = select.poll()
-        poller.register(sock.fileno(), select.POLLIN)
+        poller.register(listener.fileno(), select.POLLIN)
         while not shutdown_flag.value:
             events = poller.poll(10)  # milliseconds (was 0.01s)
             if shutdown_flag.value:
                 break
             if events:
+                if morloc.fork_generation() != born:
+                    os._exit(0)
+                # Every idle worker polls the one listening socket; those that
+                # lose the race to accept find nothing and poll again.
                 try:
-                    client_fd = _recv_fd(sock)
-                    run_job(client_fd)
-                    last_activity = time.monotonic()
-                    if trace_retire:
-                        trace("job done")
-                except (EOFError, OSError):
-                    break
+                    conn, _ = listener.accept()
+                except (BlockingIOError, InterruptedError):
+                    continue
+                except OSError as e:
+                    if e.errno in (errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM):
+                        time.sleep(0.05)
+                        continue
+                    raise
+                client_fd = conn.detach()
+                os.set_blocking(client_fd, False)
+                run_job(client_fd)
+                last_activity = time.monotonic()
+                if trace_retire:
+                    trace("job done")
             else:
                 # FORK-15: leases of user-forked children that are gone.
                 morloc.reclaim_leases()
@@ -776,7 +767,7 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
             morloc.shm_tracker_flush()
         except Exception:
             pass
-        sock.close()
+        listener.close()
 
 
 def _hold_daemon(d):
@@ -845,30 +836,6 @@ def _report_worker_death(w, shutting_down=False):
     elif code != 0:
         print(f"morloc py pool: worker {w.pid} exited with status {code}", file=sys.stderr)
     sys.stderr.flush()
-
-
-def client_listener(job_fd, socket_path, tmpdir, shm_basename, shutdown_flag):
-    global daemon
-    daemon = _hold_daemon(morloc.start_daemon(socket_path, tmpdir, shm_basename, 0xffff))
-    sock = _socket.fromfd(job_fd, _socket.AF_UNIX, _socket.SOCK_STREAM)
-    os.close(job_fd)  # sock owns a dup'd copy
-
-    while not shutdown_flag.value:
-        try:
-            client_fd = morloc.wait_for_client(daemon)
-        except Exception as e:
-            print(f"In python daemon, failed to connect to client: {e!s}", file=sys.stderr)
-            continue
-
-        if client_fd > 0:
-            try:
-                _send_fd(sock, client_fd)
-            except Exception as e:
-                print(f"In python daemon, failed to start worker: {e!s}", file=sys.stderr)
-            finally:
-                morloc.close_socket(client_fd)
-    sock.close()
-
 
 
 def _select_pool_mode():
@@ -1129,10 +1096,11 @@ if __name__ == "__main__":
     # deadlock at teardown. A single byte needs no lock.
     shutdown_flag = RawValue('b', shutdown_flag.value)
 
-    # Shared job queue: listener writes fds to write_sock, workers read from read_sock.
-    # Only idle workers (blocked in recvmsg) pick up jobs, preventing the round-robin
-    # deadlock where a callback gets dispatched to a busy worker.
-    read_sock, write_sock = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    # The pool's listening socket, bound before any worker exists. Idle
+    # workers accept on it themselves; a busy worker does not poll it, so a
+    # call never lands on a worker waiting on another pool.
+    daemon = _hold_daemon(morloc.start_daemon(socket_path, tmpdir, shm_basename, 0xffff))
+    listen_fd = morloc.daemon_listen_fd(daemon)
 
     num_workers = 1
     workers = []
@@ -1146,9 +1114,6 @@ if __name__ == "__main__":
     os.set_blocking(wakeup_r, False)
     _shutdown_wakeup_fd = wakeup_w
 
-    # Keep a dup of the read end so we can spawn new workers later
-    spare_read_fd = os.dup(read_sock.fileno())
-
     # A worker that retires writes its pid here first (SHM-8).
     retire_r, retire_w = os.pipe()
     os.set_blocking(retire_r, False)
@@ -1157,22 +1122,11 @@ if __name__ == "__main__":
 
     for i in range(num_workers):
         worker = Process(target=worker_process,
-                         args=(read_sock.fileno(), tmpdir, shm_basename, shutdown_flag,
-                               busy_count, total_workers, wakeup_w, retire_w,
-                               write_sock.fileno()))
+                         args=(listen_fd, tmpdir, shm_basename, shutdown_flag,
+                               busy_count, total_workers, wakeup_w, retire_w))
         _fork_single_threaded(workers)
         worker.start()
         workers.append(worker)
-    read_sock.close()  # main/listener don't need the read end (spare_read_fd kept)
-
-    # Start client listener process
-    listener_process = Process(
-        target=client_listener,
-        args=(write_sock.fileno(), socket_path, tmpdir, shm_basename, shutdown_flag)
-    )
-    _fork_single_threaded(workers)
-    listener_process.start()
-    write_sock.close()  # main doesn't need the write end
 
     # Main loop: monitor wake-up pipe, spawn new workers when all are busy,
     # and reap idle workers that have exited. poll() (not select.select) avoids
@@ -1212,8 +1166,6 @@ if __name__ == "__main__":
             w.close()
         workers = alive
         total_workers.value = max(1, len(workers))
-        if pool_failure is None and not shutdown_flag.value and not listener_process.is_alive():
-            pool_failure = "the listener ended"
         if pool_failure is not None:
             # SHM-8: what the process held is recovered only by ending the
             # pool, so the nexus recovers its shared memory.
@@ -1225,9 +1177,9 @@ if __name__ == "__main__":
         # Spawn a new worker if all are busy (or all have exited)
         if not shutdown_flag.value and (len(workers) == 0 or busy_count.value >= total_workers.value):
             w = Process(target=worker_process,
-                        args=(spare_read_fd, tmpdir, shm_basename, shutdown_flag,
+                        args=(listen_fd, tmpdir, shm_basename, shutdown_flag,
                               busy_count, total_workers, wakeup_w, retire_w))
-            _fork_single_threaded(workers + [listener_process])
+            _fork_single_threaded(workers)
             w.start()
             workers.append(w)
             total_workers.value = len(workers)
@@ -1235,16 +1187,14 @@ if __name__ == "__main__":
     # Shutdown sequence
     os.close(wakeup_r)
     os.close(wakeup_w)
-    os.close(spare_read_fd)
     os.close(retire_r)
     os.close(retire_w)
 
-    # 1. Stop listener first
-    listener_process.terminate()
-    listener_process.join(timeout=0.001)
-    listener_process.kill()
-    listener_process.join()  # Final blocking reap
-    listener_process.close()
+    # 1. Stop taking calls: close the listening socket and remove its path,
+    # since idle workers would accept until they are killed.
+    d = _take_daemon()
+    if d is not None:
+        morloc.close_daemon(d)
 
     # 2. Terminate workers with escalating force. A worker that already died
     # by a signal is reported here too, since the reap loop above may not

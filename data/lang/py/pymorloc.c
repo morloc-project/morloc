@@ -2405,6 +2405,26 @@ static PyObject* pybinding__lifeline_teardown(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+static PyObject* pybinding__daemon_listen_fd(PyObject* self, PyObject* args) {
+    PyObject* daemon_capsule;
+
+    PARSE_ARGS_OR_ABORT(args, "O", &daemon_capsule);
+
+    language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
+    if (daemon == NULL) {
+        return NULL;
+    }
+    return PyLong_FromLong(daemon->server_fd);
+
+error:
+    return NULL;
+}
+
+static PyObject* pybinding__fork_generation(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    return PyLong_FromUnsignedLongLong((unsigned long long)morloc_fork_generation());
+}
+
 static PyObject* pybinding__close_daemon(PyObject* self, PyObject* args) {
     PyObject* daemon_capsule;
 
@@ -4558,6 +4578,8 @@ static PyMethodDef Methods[] = {
     {"reclaim_leases", pybinding__reclaim_leases, METH_NOARGS, "Release leases of forked children that are gone"},
     {"remove_own_temps", pybinding__remove_own_temps, METH_NOARGS, "Remove this process's temp directory"},
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
+    {"daemon_listen_fd", pybinding__daemon_listen_fd, METH_VARARGS, "The daemon's listening socket descriptor"},
+    {"fork_generation", pybinding__fork_generation, METH_NOARGS, "This process's fork generation"},
     {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},
     {"send_reply", pybinding__send_reply, METH_VARARGS, "Send a dispatch's reply, releasing what the dispatch holds first"},
