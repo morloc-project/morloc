@@ -13,7 +13,9 @@ failure (a fail packet). Several sites are misclassified.
   Python `die(x): os._exit(9)`, C++ `cdbl`, `safedie x = @try (cdbl (die
   x))`; and C++ `ccrash` calling `std::abort()`, `g x = @try (pinc (ccrash
   (pinc x)))`. CLI exits 1. Open: FAIL-6 (catchable or not). Code already
-  answers "not catchable"; the status and message are wrong either way.
+  answers "not catchable"; the status and message are wrong either way. A
+  fix needs the error class asked about in the next entry: a binding sees
+  a bare message and cannot tell a dead callee from an internal error.
 - **User data decode is classified infrastructure.** [reproduced for tables]
   Violates PANIC-6 / FAIL-4: decoding an argument
   (`get_morloc_data_packet_value`) is wrapped INFRA in pymorloc.c:2769,
@@ -32,4 +34,4 @@ failure (a fail packet). Several sites are misclassified.
   malformed value a usage error? (`./prog cmd notanint` -> 1.)
 - **Top-level `Err` keyed by arm name.** Gap: morloc-nexus/src/dispatch.rs
   `die_on_top_level_err` fails the run for any variant arm named `Err`, not
-  only `Try`.
+  only `Try`. Open: should only `Try`'s `Err` fail the run?
