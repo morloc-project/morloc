@@ -1,13 +1,5 @@
-//! Compression of sealed OStream sub-packets on background threads.
-//!
-//! When a compressed stream's write buffer fills, the writer seals it: the
-//! buffer is detached from the slot, a fresh one takes its place, and the
-//! sealed buffer is queued here. A service thread compacts the buffer and
-//! compresses it into one zstd frame. The writer commits a batch -- writes it
-//! and does the slot's bookkeeping -- only on its own thread, in seal order,
-//! at fixed points: when a seal leaves more than `depth` batches queued, and
-//! at every flush, close and dispatch end. Which call commits a batch, and so
-//! which call reports its I/O error, depends only on the data written.
+//! Compression of written-stream batches on background threads, for the
+//! stream custodian (`custody`), which writes them in queue order.
 //!
 //! Service threads touch nothing but the job they run: never the registry
 //! slot, the process-local slot map, or the SHM allocator.
@@ -22,12 +14,11 @@ use morloc_runtime_types::schema::Schema;
 use crate::error::MorlocError;
 use crate::shm::AbsPtr;
 
-/// Sealed batches a stream may have queued before a seal waits for the
-/// oldest one. Each is at most one 16 MiB frame.
-const DEFAULT_DEPTH: usize = 8;
+/// Batches a compressed stream may have outstanding before a writer waits
+/// for the oldest; each is at most one 16 MiB frame.
+const DEFAULT_DEPTH: usize = 7;
 
-/// `MORLOC_WRITE_BEHIND_DEPTH` as the process started, or the default. 0
-/// compresses every sub-packet on the writing thread.
+/// `MORLOC_WRITE_BEHIND_DEPTH` as the process started, or the default.
 // FORK-9
 pub(crate) fn depth() -> usize {
     #[cfg(test)]
@@ -67,8 +58,9 @@ pub(crate) enum Input {
         data_used: u64,
         elem: Schema,
     },
-    /// A complete payload.
-    Owned(Vec<u8>),
+    /// A complete payload in a block nothing else touches until the job is
+    /// done.
+    Slice { base: usize, len: usize },
 }
 
 /// A compressed payload: one zstd frame and its index entry.
@@ -189,7 +181,6 @@ fn run(
         }
     };
     let payload: &[u8];
-    let owned;
     match input {
         Input::Buffer { base, n, cap, data_used, elem } => {
             let len = compact_sealed_buffer(base as AbsPtr, n, cap, data_used, &elem)?;
@@ -197,9 +188,9 @@ fn run(
             // completes and holds `len` bytes after compaction.
             payload = unsafe { std::slice::from_raw_parts(base as *const u8, len) };
         }
-        Input::Owned(v) => {
-            owned = v;
-            payload = &owned;
+        Input::Slice { base, len } => {
+            // SAFETY: the block is the job's until it completes.
+            payload = unsafe { std::slice::from_raw_parts(base as *const u8, len) };
         }
     }
     let (bytes, frames) = compressors[c].1.compress(payload)?;
@@ -245,202 +236,32 @@ pub(crate) fn compact_sealed_buffer(
     Ok(16 + n * w + data_used)
 }
 
-/// One sealed batch awaiting commit.
-pub(crate) struct Pending {
-    job: Arc<Job>,
-    pub elem_count: u64,
-    /// The sealed write buffer, returned to the stream once the job is done.
-    pub buffer: Option<AbsPtr>,
-}
+/// A compression job in flight.
+pub(crate) struct Ticket(Arc<Job>);
 
-// SAFETY: `buffer` is an SHM block owned by this entry; no other thread
-// dereferences it once the job has completed.
-unsafe impl Send for Pending {}
-
-impl Pending {
+impl Ticket {
     pub(crate) fn wait(&self) -> Result<Compressed, MorlocError> {
-        self.job.wait()
+        self.0.wait()
+    }
+
+    pub(crate) fn settle(&self) {
+        self.0.settle()
     }
 }
 
-/// A stream's queue of sealed batches and the spare write buffers it may
-/// reuse. Lives in the stream's process-local slot, which a forked child
-/// inherits: the queue and buffers stay the parent's, so in any other
-/// process they are forgotten, never waited on or freed.
-#[derive(Default)]
-pub(crate) struct WriteBehind {
-    pending: VecDeque<Pending>,
-    pub spare: Vec<AbsPtr>,
-    owner: Option<u64>,
+/// Compact and compress a write buffer of `n` elements.
+pub(crate) fn compress_buffer(
+    base: AbsPtr,
+    n: u64,
+    cap: u64,
+    data_used: u64,
+    elem: &Schema,
+    level: CompressionLevel,
+) -> Ticket {
+    Ticket(submit(Input::Buffer { base: base as usize, n, cap, data_used, elem: elem.clone() }, level))
 }
 
-// SAFETY: see `Pending`; spare buffers are unreferenced SHM blocks.
-unsafe impl Send for WriteBehind {}
-
-impl WriteBehind {
-    /// Take ownership for this process, forgetting anything inherited
-    /// from a parent across a fork.
-    pub(crate) fn claim(&mut self) {
-        // FORK-14
-        let me = crate::fork_policy::generation();
-        if self.owner != Some(me) {
-            if self.owner.is_some() {
-                std::mem::forget(std::mem::take(&mut self.pending));
-                self.spare.clear();
-            }
-            self.owner = Some(me);
-        }
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.pending.len()
-    }
-
-    pub(crate) fn pop_front(&mut self) -> Option<Pending> {
-        self.pending.pop_front()
-    }
-
-    pub(crate) fn seal_buffer(
-        &mut self,
-        base: AbsPtr,
-        n: u64,
-        cap: u64,
-        data_used: u64,
-        elem: &Schema,
-        level: CompressionLevel,
-    ) {
-        self.claim();
-        let job = submit(
-            Input::Buffer { base: base as usize, n, cap, data_used, elem: elem.clone() },
-            level,
-        );
-        self.pending.push_back(Pending { job, elem_count: n, buffer: Some(base) });
-    }
-
-    pub(crate) fn seal_owned(&mut self, payload: Vec<u8>, elem_count: u64, level: CompressionLevel) {
-        self.claim();
-        let job = submit(Input::Owned(payload), level);
-        self.pending.push_back(Pending { job, elem_count, buffer: None });
-    }
-
-    /// A spare write buffer, if one is free.
-    pub(crate) fn take_spare(&mut self) -> Option<AbsPtr> {
-        self.claim();
-        self.spare.pop()
-    }
-
-    /// Return a committed batch's buffer for reuse, keeping at most `keep`.
-    pub(crate) fn recycle(&mut self, buffer: Option<AbsPtr>, keep: usize) {
-        if let Some(b) = buffer {
-            if self.spare.len() < keep {
-                self.spare.push(b);
-            } else {
-                let _ = crate::shm::shfree(b);
-            }
-        }
-    }
-
-    /// Drop every queued batch unwritten, once its job has finished with its
-    /// buffer.
-    pub(crate) fn abandon(&mut self) {
-        self.claim();
-        for p in self.pending.drain(..) {
-            p.job.settle();
-            if let Some(b) = p.buffer {
-                let _ = crate::shm::shfree(b);
-            }
-        }
-    }
-}
-
-impl Drop for WriteBehind {
-    fn drop(&mut self) {
-        self.claim();
-        self.abandon();
-        for b in self.spare.drain(..) {
-            let _ = crate::shm::shfree(b);
-        }
-    }
-}
-
-/// Streams this process holds sealed batches of, whichever thread sealed
-/// them: every point where another process may take over a stream drains
-/// them all.
-static SEALED: crate::fork_policy::Reset<Vec<i64>> = crate::fork_policy::Reset::new(Vec::new);
-
-thread_local! {
-    /// The subset this thread sealed: a failure to write one of these is the
-    /// error of the call running on this thread.
-    static THREAD_SEALED: std::cell::RefCell<Vec<i64>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-pub(crate) fn note_sealed(handle: i64) {
-    let mut all = SEALED.lock().unwrap();
-    if !all.contains(&handle) {
-        all.push(handle);
-    }
-    drop(all);
-    THREAD_SEALED.with(|h| {
-        let mut h = h.borrow_mut();
-        if !h.contains(&handle) {
-            h.push(handle);
-        }
-    });
-}
-
-pub(crate) fn sealed_handles() -> Vec<i64> {
-    SEALED.lock().unwrap().clone()
-}
-
-pub(crate) fn forget_sealed(handle: i64) {
-    SEALED.lock().unwrap().retain(|h| *h != handle);
-}
-
-pub(crate) fn take_thread_sealed() -> Vec<i64> {
-    THREAD_SEALED.with(|h| std::mem::take(&mut *h.borrow_mut()))
-}
-
-pub(crate) fn thread_sealed() -> Vec<i64> {
-    THREAD_SEALED.with(|h| h.borrow().clone())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // What a forked child inherits belongs to its parent: dropping it in the
-    // child must neither wait on the parent's jobs nor free its buffers.
-    #[test]
-    fn a_copy_in_another_process_leaves_the_parents_buffers() {
-        let _shm = crate::own_test_registry();
-        let buf = crate::shm::shcalloc(1, 4096).unwrap();
-        let mut wb = WriteBehind::default();
-        wb.spare.push(buf);
-        wb.claim();
-        wb.owner = wb.owner.map(|g| g.wrapping_add(1));
-        drop(wb);
-        let rc = unsafe { crate::shm::reference_count(buf) };
-        assert_eq!(rc, Some(1), "a copy in another process freed the parent's buffer");
-        crate::shm::shfree(buf).unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_descendant_with_its_ancestors_pid_leaves_the_ancestors_buffers() {
-        let _shm = crate::own_test_registry();
-        let ran = crate::fork_policy::as_pid_one(|| {
-            let buf = crate::shm::shcalloc(1, 4096).unwrap();
-            let mut wb = WriteBehind::default();
-            wb.spare.push(buf);
-            wb.claim();
-            let wb = std::mem::ManuallyDrop::new(wb);
-            let dropped = crate::fork_policy::in_a_descendant_with_the_same_pid(move || {
-                drop(std::mem::ManuallyDrop::into_inner(wb));
-                true
-            });
-            let kept = unsafe { crate::shm::reference_count(buf) } == Some(1);
-            dropped && kept
-        });
-        assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid freed the ancestor's buffer");
-    }
+/// Compress the compact payload of `len` bytes at `base`.
+pub(crate) fn compress_slice(base: AbsPtr, len: usize, level: CompressionLevel) -> Ticket {
+    Ticket(submit(Input::Slice { base: base as usize, len }, level))
 }

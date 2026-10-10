@@ -180,18 +180,15 @@ morloc-runtime/stream.rs::-::PROCESS_LOCAL_SLOTS	held	2
 morloc-runtime/stream.rs::-::PROCESS_LOCAL_RETURNED	paired		
 morloc-runtime/stream.rs::-::LOCKED_FDS	held	3	
 morloc-runtime/stream.rs::slot_probe_seed::SEED	counter		
-morloc-runtime/stream.rs::-::RELEASE_PASS	held	1	FORK-10
-morloc-runtime/stream.rs::-::RELEASE_SERVICE	reset		
+morloc-runtime/stream.rs::-::RELEASE_PASS	held	1	
 morloc-runtime/stream.rs::-::BEFORE_STREAM_LOCK	test-only		
 morloc-runtime/stream.rs::-::CURRENT_CALL_ID	thread		
 morloc-runtime/stream.rs::-::STDIO_SOCK	thread		
-morloc-runtime/stream.rs::-::DRAIN_GAP_HOOK	test-only		
 morloc-runtime/stream.rs::-::SWEEPER	reset		
 morloc-runtime/stream.rs::-::SWEEPER_WANTED	counter		
 morloc-runtime/stream.rs::generate_call_id::FALLBACK_COUNTER	counter		
 morloc-runtime/stream.rs::a_forked_child_leaves_its_parents_cached_reads_alone::HANDLE	test-only		
 morloc-runtime/stream.rs::channel_depth::DEPTH	lazy		
-morloc-runtime/stream.rs::a_batch_sealed_while_a_drain_finishes_is_still_drained::TARGET	test-only		
 morloc-runtime/utility.rs::create_beside::SEQ	counter		
 morloc-runtime/write_behind.rs::-::Job.input	instance		
 morloc-runtime/write_behind.rs::-::Job.result	instance		
@@ -199,8 +196,12 @@ morloc-runtime/write_behind.rs::-::Job.done	instance
 morloc-runtime/write_behind.rs::-::Service.queue	instance		
 morloc-runtime/write_behind.rs::-::Service.ready	instance		
 morloc-runtime/write_behind.rs::-::SERVICE	reset		
-morloc-runtime/write_behind.rs::-::SEALED	reset		
-morloc-runtime/write_behind.rs::-::THREAD_SEALED	thread		
+morloc-runtime/custody.rs::-::STDIO_SINK	lazy		
+morloc-runtime/custody.rs::-::HOSTED	reset		
+morloc-runtime/custody.rs::-::HOST_GENERATION	fork-scoped		
+morloc-runtime/custody.rs::-::TEST_SOCK	test-only		
+morloc-runtime/stream.rs::-::SINK	test-only		
+morloc-runtime-types/wait_word.rs::a_waiter_wakes_when_the_word_changes_on_another_thread::WORD	test-only		
 morloc-runtime-types/compression.rs::frame_workers::CACHED	lazy		
 morloc-runtime-types/owner_word.rs::-::HELD	thread		
 morloc-runtime-types/panic.rs::-::IN_SCOPE	thread		
@@ -269,6 +270,7 @@ morloc-nexus/stdio_server.rs::-::NEXUS_PID	exec-only
 morloc-nexus/stdio_server.rs::-::DAEMON_MODE	exec-only		
 morloc-nexus/stdio_server.rs::-::RENDER_CFG	exec-only		
 morloc-nexus/stdio_server.rs::start::INIT	exec-only		
+morloc-nexus/stdio_server.rs::pipe_closed_resp::EXITING	exec-only		
 morloc-nexus/view.rs::-::STDIN_TEMP_FILES	exec-only		
 morloc-nexus/view.rs::-::STDIN_ATEXIT_REGISTERED	exec-only		
 morloc-runtime/fork_policy.rs::a_fork_from_a_thread_local_destructor_completes::LATE	test-only		

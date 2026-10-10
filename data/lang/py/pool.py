@@ -599,6 +599,8 @@ def run_job(client_fd: int) -> None:
         # Both processes share the same stdout fd, so if we flush after sending,
         # the nexus can print first, causing out-of-order output.
         sys.stdout.flush()
+        # SLOT-16: output the call left on @stdout is written before its reply.
+        morloc.reclaim_stdio_after_dispatch()
 
         morloc.send_reply(client_fd, result)
 
@@ -606,6 +608,7 @@ def run_job(client_fd: int) -> None:
         # Try to send a fail packet back to the caller before giving up.
         # This may fail (e.g., broken pipe from a timed-out ping), which is OK.
         try:
+            morloc.reclaim_stdio_after_dispatch()
             result = morloc.make_fail_packet(str(e))
             morloc.send_reply(client_fd, result)
         except Exception:

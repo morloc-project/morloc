@@ -319,6 +319,9 @@ pub fn registry_bootstrap() -> Result<usize, MorlocError> {
 
     // Register normal-exit teardown once per process. `register_shclose_hook`
     // runs on both nexus (via `clean_exit -> shclose`) and pool (via
+    // DAEMON-1, SLOT-13: stream writers stop before the registry and the
+    // volumes they read are unmapped.
+    shm::register_shclose_hook(crate::custody::stop_before_unmap);
     shm::register_shclose_hook(registry_teardown);
 
     sweeper_want();
@@ -394,7 +397,8 @@ pub fn registry_teardown() {
     use std::sync::atomic::Ordering;
 
     sweeper_shutdown();
-    let service_stopped = release_service_shutdown();
+    // DAEMON-1: after the sweeps, which finish streams through their writers.
+    crate::custody::stop_before_unmap();
 
     let mut held = REGISTRY_SEGMENT.lock();
     REGISTRY_TORN_DOWN.store(true, Ordering::Release);
@@ -405,9 +409,8 @@ pub fn registry_teardown() {
     let segment = held.take();
     drop(held);
     match segment {
-        // A release service still blocked on a slot keeps the mapping.
-        // DAEMON-5: so does every exit.
-        Some(mut seg) if !service_stopped || shm::exiting() => {
+        // DAEMON-5: every exit keeps the mapping.
+        Some(mut seg) if shm::exiting() => {
             if shm::owns_program() {
                 seg.unlink();
             }
@@ -721,32 +724,19 @@ pub struct RegistrySlot {
     pub staged:               std::sync::atomic::AtomicU8,                              // off 330
     _stdio_pad:               [u8; 5],                         // off 331..336
 
-    /// The process holding sealed, uncommitted batches of this OStream
-    /// (see `write_behind`), or 0. Guarded by the lock.
-    pub wb_owner_pid:         std::sync::atomic::AtomicU32,                             // off 336
-    /// How many sealed batches `wb_owner_pid` has not yet committed.
-    pub wb_outstanding:       std::sync::atomic::AtomicU32,                             // off 340
-    /// Non-zero once a second process has written this OStream: from then
-    /// on every writer commits synchronously, so no process holds batches
-    /// another cannot see.
-    pub wb_sync_only:         std::sync::atomic::AtomicU8,                              // off 344
-    /// Non-zero once a sealed batch failed to compress or to be written.
-    /// The stream is incomplete; every later write, flush or close fails.
-    pub write_failed:         std::sync::atomic::AtomicU8,                              // off 345
+    _retired_wb:              [u8; 10],                        // off 336..346
     /// Non-zero once a process died holding `lock`: what it protects may
     /// be half-updated, so every operation but releasing the slot fails.
     pub poisoned:             std::sync::atomic::AtomicU8,                              // off 346
     _wb_pad:                  [u8; 5],                         // off 347..352
-    /// Start time of `wb_owner_pid`, so a reused PID is not taken for it.
-    pub wb_owner_start:       std::sync::atomic::AtomicU64,                             // off 352
+    /// A written stream's queue to its custodian (`custody::CustodyQueue`).
+    pub custody:              std::sync::atomic::AtomicIsize,                          // off 352
 
     /// Device and inode of an OStream's file, from its locked descriptor,
     /// so a reopen blocked by the lock can find the stream holding it.
     pub file_dev:             std::sync::atomic::AtomicU64,                             // off 360
     pub file_ino:             std::sync::atomic::AtomicU64,                             // off 368
-    /// The generation an ENDING stream's handles carry; the opener's
-    /// entries for it are matched by it.
-    pub ended_gen:            std::sync::atomic::AtomicU64,    // off 376
+    _retired_end:             [u8; 8],                         // off 376
 
     /// Per-slot mutation lock. Held for cursor / element_count / diag
     /// updates. NOT held for lockfree reads of immutable-after-open
@@ -944,10 +934,6 @@ pub struct ProcessLocalSlot {
     /// this flag to skip the stream-header / footer parsing paths.
     pub is_data_packet: bool,
 
-    /// OStream only: sealed batches compressing behind the writer, in
-    /// seal order, and spare write buffers.
-    pub(crate) write_behind: crate::write_behind::WriteBehind,
-
     /// `fd` holds the stream file's lock: this process opened the stream.
     pub(crate) holds_lock: bool,
 
@@ -984,17 +970,6 @@ impl Drop for ProcessLocalSlot {
     }
 }
 
-impl ProcessLocalSlot {
-    /// Release the stream's file lock, if this descriptor holds it, for
-    /// every process sharing the descriptor. Call only once the stream has
-    /// ended: a forked child holds the same lock through its copy, so
-    /// closing this one would leave the path locked while the child lives.
-    fn unlock_ended_stream(&self) {
-        if self.fd >= 0 {
-            unsafe { libc::flock(self.fd, libc::LOCK_UN); }
-        }
-    }
-}
 
 fn file_identity_of(f: &std::fs::File) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
@@ -1485,28 +1460,8 @@ fn attach_process_local_slot(
             let keep = if x == MLC_KIND_ISTREAM { Some(f) } else { None };
             (-1i32, keep, mp, sz)
         }
-        x if x == MLC_KIND_OSTREAM => {
-            // Non-opener pools open RDWR but DO NOT acquire flock
-            // (the opener holds it for the slot's lifetime). The fd
-            // exists only for `pwrite` of sub-packets.
-            use std::ffi::CString;
-            let c_path = CString::new(path_str.as_bytes()).map_err(|e| {
-                MorlocError::Other(format!(
-                    "OStream attach: path contains NUL: {}", e,
-                ))
-            })?;
-            let fd = unsafe {
-                libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC, 0)
-            };
-            if fd < 0 {
-                return Err(MorlocError::Io(std::io::Error::last_os_error()));
-            }
-            if let Err(e) = check_identity(handle, view.identity, &path_str, file_identity(fd)) {
-                unsafe { libc::close(fd); }
-                return Err(e);
-            }
-            (fd, None, std::ptr::null_mut(), 0)
-        }
+        // SLOT-10: a writer needs no descriptor; the custodian has the file.
+        x if x == MLC_KIND_OSTREAM => (-1i32, None, std::ptr::null_mut(), 0),
         other => {
             return Err(MorlocError::Other(format!(
                 "stream handle {:#x}: unknown kind byte {}", handle, other,
@@ -1564,7 +1519,6 @@ fn attach_process_local_slot(
         subpacket_entries_local,
         subpacket_elem_cum: None,
         is_data_packet,
-        write_behind: Default::default(),
         holds_lock: false,
         fork_epoch: fork_epoch(),
     })
@@ -1604,14 +1558,17 @@ fn slot_probe_seed() -> usize {
     prev
 }
 
-/// Allocate a free slot via random-probe CAS. On success returns the
-/// (slot_idx, slot_ref) pair with `state` set to `OPEN_SHARED` but
-/// `generation` NOT YET bumped, and the slot's lock held. The caller must
-/// fill in the other fields and Release-store the new generation last to
-/// complete publication.
-///
-/// Returns `Err` if all slots are occupied.
 pub(crate) fn allocate_slot_cas(
+) -> Result<(usize, &'static RegistrySlot, SlotGuard<'static>), MorlocError> {
+    allocate_slot_cas_for(std::process::id(), read_pid_start_time(), current_call_id())
+}
+
+/// Allocate a slot for a stream opened by process `(pid, start)` in call
+/// `call_id`.
+pub(crate) fn allocate_slot_cas_for(
+    pid: u32,
+    start: u64,
+    call_id: u64,
 ) -> Result<(usize, &'static RegistrySlot, SlotGuard<'static>), MorlocError> {
     use std::sync::atomic::Ordering;
     // Lazily attach to the shared registry. Pool processes (py/r/cpp)
@@ -1626,46 +1583,38 @@ pub(crate) fn allocate_slot_cas(
             "stream registry: not initialised (call registry_init first)".into(),
         ));
     }
-    let start = slot_probe_seed() % slot_count;
-    // Slots left ENDING for openers that have died are reclaimed only when
-    // the registry is otherwise full.
-    for round in 0..2 {
-        if round == 1 && reclaim_dead_ending() == 0 {
-            break;
-        }
-        for off in 0..slot_count {
-            let idx = (start + off) % slot_count;
-            // SAFETY: idx < slot_count and slots_base points to a valid
-            // region of slot_count * STREAM_ENTRY_SIZE bytes.
-            let slot = unsafe {
-                &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot)
+    let start_idx = slot_probe_seed() % slot_count;
+    for off in 0..slot_count {
+        let idx = (start_idx + off) % slot_count;
+        // SAFETY: idx < slot_count and slots_base points to a valid
+        // region of slot_count * STREAM_ENTRY_SIZE bytes.
+        let slot = unsafe {
+            &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot)
+        };
+        if slot.state
+            .compare_exchange(
+                SLOT_STATE_FREE, SLOT_STATE_OPEN_SHARED,
+                Ordering::AcqRel, Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            let guard = match SlotGuard::lock_any(slot) {
+                Ok(g) => g,
+                Err(e) => {
+                    slot.state.store(SLOT_STATE_FREE, Ordering::Release);
+                    return Err(e);
+                }
             };
-            if slot.state
-                .compare_exchange(
-                    SLOT_STATE_FREE, SLOT_STATE_OPEN_SHARED,
-                    Ordering::AcqRel, Ordering::Relaxed,
-                )
-                .is_ok()
-            {
-                let guard = match SlotGuard::lock_any(slot) {
-                    Ok(g) => g,
-                    Err(e) => {
-                        slot.state.store(SLOT_STATE_FREE, Ordering::Release);
-                        return Err(e);
-                    }
-                };
-                // A process that died inside the slot before it was freed
-                // left the mark; the stream about to be published owns every
-                // field afresh. The opener is recorded first, so the crash
-                // sweeps can reclaim the slot if this process dies before
-                // publishing it.
-                slot.poisoned.set(0);
-                slot.opener_pid.set(std::process::id());
-                slot.opener_pid_start_time.set(read_pid_start_time());
+            // A process that died inside the slot before it was freed
+            // left the mark; the stream about to be published owns every
+            // field afresh. The opener is recorded first, so the crash
+            // sweeps can reclaim the slot if it dies before publishing it.
+            slot.poisoned.set(0);
+            slot.opener_pid.set(pid);
+            slot.opener_pid_start_time.set(start);
 
-                slot.call_id.store(current_call_id(), Ordering::Release);
-                return Ok((idx, slot, guard));
-            }
+            slot.call_id.store(call_id, Ordering::Release);
+            return Ok((idx, slot, guard));
         }
     }
     Err(MorlocError::Other(format!(
@@ -1673,6 +1622,25 @@ pub(crate) fn allocate_slot_cas(
          MORLOC_REGISTRY_SLOT_COUNT (current cap {}) or close more handles",
         slot_count, STREAM_REGISTRY_MAX_SLOT_COUNT,
     )))
+}
+
+/// The slot's custody queue, ready for a new stream: the one its index
+/// already has, or a new one the slot keeps from now on.
+// SLOT-10
+fn ready_slot_queue(slot: &RegistrySlot) -> Result<&'static crate::custody::CustodyQueue, MorlocError> {
+    let depth = crate::write_behind::depth().max(1);
+    if let Ok(q) = slot_queue(slot) {
+        if !q.has_consumer() {
+            q.reset_for_open(depth);
+            return Ok(q);
+        }
+        // A writer that has not yet seen its slot released may still pop
+        // the old queue; the new stream gets its own, and the old block is
+        // left to it.
+    }
+    let rel = crate::custody::new_queue()?;
+    slot.custody.set(slot_owns(rel));
+    slot_queue(slot)
 }
 
 /// Transfer a freshly allocated block to the registry. The slot owns it
@@ -1852,6 +1820,86 @@ fn free_slot_blocks(slot: &RegistrySlot) {
             free_uncounted(abs);
         }
     }
+    // SLOT-10: the queue itself stays with the slot index, for its next stream.
+    if let Ok(q) = slot_queue(slot) {
+        for spare in q.drain_spares() {
+            if let Ok(abs) = crate::shm::rel2abs(spare) {
+                free_uncounted(abs);
+            }
+        }
+    }
+}
+
+/// End the stream `(slot_idx, gen_claim)` names with a final footer of
+/// `status` (or none, for `custody::STATUS_DISCARD`), and release its slot.
+/// Waits, unlocked, for its custodian to write everything queued. A stream
+/// another process is already ending is refused.
+// SLOT-12, SLOT-14, SLOT-15
+pub(crate) fn finish_stream(slot_idx: usize, gen_claim: u64, status: u32) -> Result<(), MorlocError> {
+    use std::sync::atomic::Ordering;
+    let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
+        "stream slot index {} out of range", slot_idx,
+    )))?;
+    let waiting = {
+        let _guard = SlotGuard::lock_any(slot)?;
+        if !slot_generation_is(slot, gen_claim) || slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
+            return Err(MorlocError::Other("the stream was closed".into()));
+        }
+        let q = if slot.kind.get() == MLC_KIND_OSTREAM {
+            slot_queue(slot).ok().filter(|q| q.hosted() && !q.is_stopped())
+        } else {
+            None
+        };
+        if let Some(q) = q {
+            let poisoned = slot.poisoned.get() != 0;
+            let tail = if poisoned || status == crate::custody::STATUS_DISCARD {
+                Ok(())
+            } else {
+                queue_buffer(slot)
+            };
+            let status = if poisoned || tail.is_err() {
+                morloc_runtime_types::packet::FOOTER_STATUS_FAILED as u32
+            } else {
+                status
+            };
+            match q.push_close(status) {
+                Ok(seq) => Some((q, seq, q.epoch(), tail, poisoned)),
+                // SLOT-10: a writer that is gone reads the slot no more.
+                Err(_) if q.is_stopped() => {
+                    release_slot_locked(slot);
+                    None
+                }
+                Err(e) => return Err(e),
+            }
+        } else {
+            // No writer took the stream, or it has stopped: nothing reads it.
+            release_slot_locked(slot);
+            None
+        }
+    };
+    invalidate_process_local_slot(pack_handle(gen_claim, slot_idx));
+    let Some((q, seq, epoch, tail, poisoned)) = waiting else { return Ok(()) };
+    let done = q.wait_done(seq, epoch);
+    release_closed_slot(slot_idx, gen_claim);
+    if poisoned {
+        return Err(died_inside());
+    }
+    tail?;
+    done
+}
+
+/// Release the slot of a stream whose close has been written.
+pub(crate) fn release_closed_slot(slot_idx: usize, gen_claim: u64) {
+    use std::sync::atomic::Ordering;
+    let Some(slot) = slot_ref(slot_idx) else { return };
+    let Ok(_guard) = SlotGuard::lock_any(slot) else { return };
+    if slot_generation_is(slot, gen_claim) && slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED {
+        release_slot_locked(slot);
+    }
+}
+
+pub(crate) fn slot_generation_is_pub(slot: &RegistrySlot, gen_claim: u64) -> bool {
+    slot_generation_is(slot, gen_claim)
 }
 
 fn clear_slot_fields(slot: &RegistrySlot) {
@@ -1877,42 +1925,11 @@ fn clear_slot_fields(slot: &RegistrySlot) {
     slot.write_buffer_index_cap.set(0);
     slot.write_buffer_index_count.set(0);
     slot.write_buffer_data_used.set(0);
-    slot.wb_owner_pid.set(0);
-    slot.wb_outstanding.set(0);
-    slot.wb_sync_only.set(0);
-    slot.write_failed.set(0);
     slot.poisoned.set(0);
     slot.data_end.set(0);
-    slot.wb_owner_start.set(0);
     slot.file_dev.set(0);
     slot.file_ino.set(0);
 
-    slot.ended_gen.store(0, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// End a stream whose slot lock the caller holds. The slot is released,
-/// unless the stream's file is still locked by its opener: a lock lives on
-/// the opener's descriptor, which only a process holding it can unlock. A
-/// live opener elsewhere is handed the slot, left ENDING with its handles
-/// already dead, and its release service frees both.
-fn end_slot_locked(slot: &RegistrySlot) {
-    use std::sync::atomic::Ordering;
-    if slot.kind.get() == MLC_KIND_OSTREAM
-        && slot.is_stdio.get() == 0
-        && !is_this_process(slot.opener_pid.get(), slot.opener_pid_start_time.get())
-        && stdio_owner_is_alive(slot.opener_pid.get(), slot.opener_pid_start_time.get())
-    {
-        // ENDING is published before the generation moves: a holder that
-        // sees its handle dead must also see who is to release the slot.
-        let gen = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-        slot.ended_gen.store(gen, Ordering::Release);
-        slot.state.store(SLOT_STATE_ENDING, Ordering::Release);
-        let bump = registry_gen_salt() | 1;
-        slot.generation.fetch_add(bump, Ordering::AcqRel);
-        ring_release_doorbell();
-    } else {
-        release_slot_locked(slot);
-    }
 }
 
 /// Whether `local` holds the file lock of a stream that has since ended.
@@ -1929,29 +1946,9 @@ fn has_ended(handle: i64, local: &ProcessLocalSlot) -> bool {
     }
 }
 
-/// Dispose of this process's slot for a stream that has ended: unlock and
-/// close its descriptor, and release the slot if it was left ENDING for
-/// the holder of that lock.
-fn finish_ended(handle: i64, local: ProcessLocalSlot) {
-    use std::sync::atomic::Ordering;
-    local.unlock_ended_stream();
-    let (holds, gen) = (local.holds_lock, local.cached_generation);
+/// Dispose of this process's slot for a stream that has ended.
+fn finish_ended(_handle: i64, local: ProcessLocalSlot) {
     drop(local);
-    if !holds {
-        return;
-    }
-    let (_, idx) = unpack_handle(handle);
-    let Some(slot) = slot_ref(idx) else { return };
-    if slot.state.load(Ordering::Acquire) != SLOT_STATE_ENDING {
-        return;
-    }
-    let Ok(guard) = SlotGuard::lock_any(slot) else { return };
-    if slot.state.load(Ordering::Acquire) == SLOT_STATE_ENDING
-        && slot.ended_gen.load(Ordering::Acquire) == gen
-    {
-        release_slot_locked(slot);
-    }
-    drop(guard);
 }
 
 /// Held across a release pass, which frees SHM blocks, so a fork never
@@ -2004,35 +2001,6 @@ pub(crate) fn drop_ended_unlocked_slots() -> bool {
     true
 }
 
-fn release_ended_streams() {
-    let _pass = RELEASE_PASS.lock();
-    let ended: Vec<(i64, ProcessLocalSlot)> = {
-        let mut guard = PROCESS_LOCAL_SLOTS.lock();
-        let Some(map) = guard.as_mut() else { return };
-        let handles: Vec<i64> = map
-            .iter()
-            .filter_map(|(h, e)| match e {
-                LocalEntry::Idle(l) if has_ended(*h, l) => Some(*h),
-                _ => None,
-            })
-            .collect();
-        handles
-            .into_iter()
-            .filter_map(|h| match map.remove(&h) {
-                Some(LocalEntry::Idle(l)) => Some((h, l)),
-                Some(mark) => {
-                    map.insert(h, mark);
-                    None
-                }
-                None => None,
-            })
-            .collect()
-    };
-    for (h, l) in ended {
-        finish_ended(h, l);
-    }
-}
-
 fn release_doorbell() -> Option<&'static std::sync::atomic::AtomicU32> {
     use std::sync::atomic::Ordering;
     let base = REGISTRY_BASE.load(Ordering::Acquire);
@@ -2042,113 +2010,6 @@ fn release_doorbell() -> Option<&'static std::sync::atomic::AtomicU32> {
     // SAFETY: the registry stays mapped until `registry_teardown`, which
     // stops the release service first.
     Some(unsafe { &(*base).release_doorbell })
-}
-
-fn ring_release_doorbell() {
-    use std::sync::atomic::Ordering;
-    let Some(bell) = release_doorbell() else { return };
-    bell.fetch_add(1, Ordering::Release);
-    #[cfg(target_os = "linux")]
-    unsafe {
-        libc::syscall(
-            libc::SYS_futex,
-            bell.as_ptr(),
-            libc::FUTEX_WAKE,
-            i32::MAX,
-            std::ptr::null::<libc::timespec>(),
-            std::ptr::null::<u32>(),
-            0,
-        );
-    }
-}
-
-/// Wait until the doorbell moves past `seen`, or a while passes.
-fn wait_release_doorbell(bell: &std::sync::atomic::AtomicU32, seen: u32) {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let timeout = libc::timespec { tv_sec: 1, tv_nsec: 0 };
-        libc::syscall(
-            libc::SYS_futex,
-            bell.as_ptr(),
-            libc::FUTEX_WAIT,
-            seen,
-            &timeout as *const libc::timespec,
-            std::ptr::null::<u32>(),
-            0,
-        );
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (bell, seen);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
-struct ReleaseService {
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-static RELEASE_SERVICE: crate::fork_policy::Reset<Option<ReleaseService>> =
-    crate::fork_policy::Reset::new(|| None);
-
-/// Start this process's release service, once, before it first holds a
-/// stream file's lock. A forked child starts its own.
-fn ensure_release_service() -> Result<(), MorlocError> {
-    // The service waits on the registry's doorbell, so the registry must be
-    // attached first; a pool's first stream operation may be this one.
-    registry_init()?;
-    let mut service = RELEASE_SERVICE.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
-    let running = |s: &ReleaseService| s.thread.as_ref().is_some_and(|t| !t.is_finished());
-    if service.as_ref().is_some_and(running) {
-        return Ok(());
-    }
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stopped = stop.clone();
-    let thread = std::thread::Builder::new()
-        .name("morloc-release".into())
-        .stack_size(64 * 1024)
-        .spawn(move || release_service_main(&stopped))
-        .map_err(|e| MorlocError::Other(format!(
-            "cannot start the thread that releases ended streams' files: {e}"
-        )))?;
-    *service = Some(ReleaseService { stop, thread: Some(thread) });
-    Ok(())
-}
-
-fn release_service_main(stop: &std::sync::atomic::AtomicBool) {
-    use std::sync::atomic::Ordering;
-    loop {
-        if stop.load(Ordering::Acquire) {
-            return;
-        }
-        let Some(bell) = release_doorbell() else { return };
-        let seen = bell.load(Ordering::Acquire);
-        release_ended_streams();
-        wait_release_doorbell(bell, seen);
-    }
-}
-
-/// Stop the release service. Returns false if it was left running.
-fn release_service_shutdown() -> bool {
-    use std::sync::atomic::Ordering;
-    let taken = RELEASE_SERVICE.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock()).take();
-    let Some(mut service) = taken else { return true };
-    service.stop.store(true, Ordering::Release);
-    ring_release_doorbell();
-    // A pass may be blocked on a slot a stopped process holds; exit must
-    // not wait on it.
-    if let Some(t) = service.thread.take() {
-        let began = std::time::Instant::now();
-        while !t.is_finished() && began.elapsed() < std::time::Duration::from_secs(1) {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        if !t.is_finished() {
-            return false;
-        }
-        let _ = t.join();
-    }
-    true
 }
 
 /// The sub-packet index and element count of a stream with no final
@@ -2310,140 +2171,14 @@ fn file_is_being_read(identity: (u64, u64)) -> bool {
 #[cfg(test)]
 pub(crate) static BEFORE_STREAM_LOCK: Mutex<Option<(String, Box<dyn Fn() + Send>)>> = Mutex::new(None);
 
-/// How long a reopen waits for a live opener to release a stream another
-/// process ended. The release takes microseconds; only a stopped or starved
-/// opener reaches this.
-const REOPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Take the exclusive lock on a stream file opened for writing. A stream
-/// another process ended may hold it until its opener releases it; that
-/// release is waited for, within `REOPEN_WAIT`, rather than reported as a
-/// conflict. Returns the reason the lock was refused.
+/// Take the exclusive lock on a stream file opened for writing. Returns
+/// the reason the lock was refused.
 pub(crate) fn lock_stream_file(fd: libc::c_int) -> Result<(), String> {
-    release_ended_streams();
-    let try_lock = || {
-        let locked = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0;
-        if locked {
-            note_locked_fd(fd);
-        }
-        locked
-    };
-    if try_lock() {
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        note_locked_fd(fd);
         return Ok(());
     }
-    let refused = std::io::Error::last_os_error();
-    if refused.raw_os_error() != Some(libc::EWOULDBLOCK) {
-        return Err(refused.to_string());
-    }
-    let (dev, ino) = file_identity(fd);
-    let deadline = std::time::Instant::now() + REOPEN_WAIT;
-    loop {
-        let pending = if ino == 0 { None } else { ending_stream_of(dev, ino) };
-        let Some((idx, ended, opener, start)) = pending else {
-            // A release may have finished since the first attempt.
-            return if try_lock() {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error().to_string())
-            };
-        };
-        while still_ending(idx, ended) {
-            if !stdio_owner_is_alive(opener, start) {
-                reclaim_ending(idx, ended);
-            }
-            if try_lock() {
-                return Ok(());
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(format!(
-                    "the stream last writing it has ended, but process {opener}, which \
-                     opened it, has not released the file within {} s; is it stopped?",
-                    REOPEN_WAIT.as_secs(),
-                ));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        if try_lock() {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-    }
-}
-
-fn still_ending(idx: usize, ended: u64) -> bool {
-    use std::sync::atomic::Ordering;
-    slot_ref(idx).is_some_and(|slot| {
-        slot.state.load(Ordering::Acquire) == SLOT_STATE_ENDING
-            && slot.ended_gen.load(Ordering::Acquire) == ended
-    })
-}
-
-/// An ENDING stream on the file `(dev, ino)`: its slot index, ended
-/// generation, and opener.
-fn ending_stream_of(dev: u64, ino: u64) -> Option<(usize, u64, u32, u64)> {
-    use std::sync::atomic::Ordering;
-    let (slots_base, slot_count) = registry_slot_array();
-    if slots_base.is_null() {
-        return None;
-    }
-    for idx in 0..slot_count {
-        let slot = unsafe { &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot) };
-        if slot.state.load(Ordering::Acquire) != SLOT_STATE_ENDING {
-            continue;
-        }
-        // Versioned read: an ENDING slot's fields change only when it is
-        // released, which bumps the generation.
-        let gen_before = slot.generation.load(Ordering::Acquire);
-        let seen = (slot.file_dev.get(), slot.file_ino.get(), slot.ended_gen.load(Ordering::Acquire),
-                    slot.opener_pid.get(), slot.opener_pid_start_time.get());
-        if generation_after_read(slot) != gen_before
-            || slot.state.load(Ordering::Acquire) != SLOT_STATE_ENDING
-        {
-            continue;
-        }
-        if seen.0 == dev && seen.1 == ino {
-            return Some((idx, seen.2, seen.3, seen.4));
-        }
-    }
-    None
-}
-
-/// Release an ENDING slot whose opener died: the kernel dropped its lock.
-fn reclaim_ending(idx: usize, ended: u64) {
-    use std::sync::atomic::Ordering;
-    let Some(slot) = slot_ref(idx) else { return };
-    let Ok(guard) = SlotGuard::lock_any(slot) else { return };
-    if slot.state.load(Ordering::Acquire) == SLOT_STATE_ENDING
-        && slot.ended_gen.load(Ordering::Acquire) == ended
-        && !stdio_owner_is_alive(slot.opener_pid.get(), slot.opener_pid_start_time.get())
-    {
-        release_slot_locked(slot);
-    }
-    drop(guard);
-}
-
-/// Release every ENDING slot whose opener has died. Returns how many it
-/// found, freed by this call or another.
-fn reclaim_dead_ending() -> usize {
-    use std::sync::atomic::Ordering;
-    let (slots_base, slot_count) = registry_slot_array();
-    if slots_base.is_null() {
-        return 0;
-    }
-    let mut freed = 0;
-    for idx in 0..slot_count {
-        let slot = unsafe { &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot) };
-        if slot.state.load(Ordering::Acquire) != SLOT_STATE_ENDING {
-            continue;
-        }
-        if !stdio_owner_is_alive(slot.opener_pid.get(), slot.opener_pid_start_time.get()) {
-            reclaim_ending(idx, slot.ended_gen.load(Ordering::Acquire));
-            freed += 1;
-        }
-    }
-    freed
+    Err(std::io::Error::last_os_error().to_string())
 }
 
 /// This process's start stamp: with the pid, it names this process even
@@ -2462,6 +2197,10 @@ fn is_this_process(pid: u32, start: u64) -> bool {
 /// means the slot will never be swept by the per-call_id sweeper
 /// (a deliberate no-op for handles opened outside a dispatch, e.g.
 /// from unit tests).
+pub(crate) fn current_call_id_for_open() -> u64 {
+    current_call_id()
+}
+
 fn current_call_id() -> u64 {
     CURRENT_CALL_ID.with(|c| c.get())
 }
@@ -2637,7 +2376,6 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         subpacket_entries_local: parsed.subpacket_entries.clone(),
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
-        write_behind: Default::default(),
         holds_lock: false,
         fork_epoch: fork_epoch(),
     };
@@ -2748,7 +2486,6 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         subpacket_entries_local: parsed.subpacket_entries.clone(),
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
-        write_behind: Default::default(),
         holds_lock: false,
         fork_epoch: fork_epoch(),
     };
@@ -2790,33 +2527,28 @@ fn try_reclaim_stale_stdio_claim(
                 .is_ok();
         }
     };
-    let Ok(guard) = SlotGuard::lock_any(slot) else { return false };
-    let cleared = if claim.load(Ordering::Acquire) != existing {
-        // Someone else changed the claim under us; the caller re-loads.
-        false
-    } else {
+    let dead_owner = {
+        let Ok(_guard) = SlotGuard::lock_any(slot) else { return false };
+        if claim.load(Ordering::Acquire) != existing {
+            // Someone else changed the claim under us; the caller re-loads.
+            return false;
+        }
         let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
         let slot_ok = slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED
             && slot.is_stdio.get() != 0
             && gen_now == gen_claim;
         if !slot_ok {
             // Claim points at a freed / reused / non-stdio slot: garbage.
-            claim
+            return claim
                 .compare_exchange(existing, STDIO_UNCLAIMED, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        } else if is_this_process(slot.opener_pid.get(), slot.opener_pid_start_time.get()) {
-            false // our own live claim -- a real double-open
-        } else if stdio_owner_is_alive(slot.opener_pid.get(), slot.opener_pid_start_time.get()) {
-            false // another process legitimately holds it
-        } else {
-            // Dead owner: finalize its OStream and discard, which stores
-            // STDIO_UNCLAIMED into the claim.
-            finalize_and_discard_slot_locked(slot, slot_idx);
-            true
+                .is_ok();
         }
+        !is_this_process(slot.opener_pid.get(), slot.opener_pid_start_time.get())
+            && !stdio_owner_is_alive(slot.opener_pid.get(), slot.opener_pid_start_time.get())
     };
-    drop(guard);
-    cleared
+    // A dead owner's stream is finished, which clears the claim.
+    dead_owner
+        && finish_stream(slot_idx, gen_claim, morloc_runtime_types::packet::FOOTER_STATUS_PAUSED as u32).is_ok()
 }
 
 /// Open one of stdin/stdout/stderr as a stream handle. The nexus is
@@ -2953,15 +2685,10 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         // position; they're accurate whenever the consumer starts
         // reading from the beginning of the emitted output (the
         // `> file` case).
-        let (idx_rel, idx_cap) = if kind == MLC_KIND_OSTREAM {
-            let cap = OSTREAM_SUBPACKET_INDEX_INITIAL_CAP;
-            let bytes = (cap as usize)
-                * std::mem::size_of::<morloc_runtime_types::packet::SubpacketEntry>();
-            let abs = crate::shm::shcalloc(1, bytes)?;
-            (pending.hold(crate::shm::abs2rel(abs)?), cap)
-        } else {
-            (shm_types_crate::RELNULL, 0)
-        };
+        if kind == MLC_KIND_OSTREAM {
+            ready_slot_queue(slot)?;
+        }
+        let (idx_rel, idx_cap) = (shm_types_crate::RELNULL, 0);
         unsafe {
             slot.kind.set(kind);
             slot.is_stdio.set(1);
@@ -3011,6 +2738,18 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
              stdio kind is allowed", stdio_kind_name(stdio_kind),
         )));
     }
+    drop(_guard);
+    // SLOT-16
+    if kind == MLC_KIND_OSTREAM {
+        if let Err(e) = crate::custody::adopt(handle) {
+            if let Ok(_g) = SlotGuard::lock_any(slot) {
+                if slot_generation_is(slot, new_gen) {
+                    release_slot_locked(slot);
+                }
+            }
+            return Err(e);
+        }
+    }
 
     // Install a process-local slot so the buffered write path
     // (`with_process_local_slot` -> `append_one_element`) can flow
@@ -3040,7 +2779,6 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         subpacket_entries_local: Vec::new(),
         subpacket_elem_cum: None,
         is_data_packet: false,
-        write_behind: Default::default(),
         holds_lock: false,
         fork_epoch: fork_epoch(),
     };
@@ -3116,7 +2854,7 @@ pub fn verify_stdio_opener_pid(handle: i64) -> Result<(), MorlocError> {
 // connect cost per call.
 
 use morloc_runtime_types::stdio_proto::{
-    OP_NEXT_STDIO, OP_WRITE_STDIO, STATUS_OK, STATUS_ERR, STATUS_EOF, STATUS_PIPE_CLOSED,
+    OP_NEXT_STDIO, STATUS_OK, STATUS_ERR, STATUS_EOF,
 };
 
 thread_local! {
@@ -3126,7 +2864,10 @@ thread_local! {
 }
 
 fn stdio_sock_connect() -> Result<std::os::unix::net::UnixStream, MorlocError> {
-    let path = std::env::var("MORLOC_NEXUS_STDIO_SOCK").map_err(|_| MorlocError::Other(
+    let set = std::env::var("MORLOC_NEXUS_STDIO_SOCK").ok();
+    #[cfg(test)]
+    let set = set.or_else(|| crate::custody::TEST_SOCK.get().cloned());
+    let path = set.ok_or_else(|| MorlocError::Other(
         "@stdin/@stdout/@stderr: MORLOC_NEXUS_STDIO_SOCK is not set. The \
          pool was not started by a morloc nexus, or the nexus failed to \
          bind its stdio server.".into(),
@@ -3136,7 +2877,7 @@ fn stdio_sock_connect() -> Result<std::os::unix::net::UnixStream, MorlocError> {
     ))
 }
 
-fn with_stdio_sock<R>(
+pub(crate) fn with_stdio_sock<R>(
     f: impl FnOnce(&mut std::os::unix::net::UnixStream) -> Result<R, MorlocError>,
 ) -> Result<R, MorlocError> {
     // FORK-14
@@ -3161,7 +2902,7 @@ fn with_stdio_sock<R>(
     }
 }
 
-fn read_error_message(stream: &mut std::os::unix::net::UnixStream) -> String {
+pub(crate) fn read_error_message(stream: &mut std::os::unix::net::UnixStream) -> String {
     use std::io::Read;
     let mut len_buf = [0u8; 4];
     if stream.read_exact(&mut len_buf).is_err() {
@@ -3334,104 +3075,194 @@ fn reject_dev_stdio_path(path: &str) -> Result<(), MorlocError> {
     }
 }
 
-/// Open a file as `OStream` with the element schema known up front.
 pub fn shared_open_ostream_with_schema(
     path: &str,
     schema_str: &str,
 ) -> Result<i64, MorlocError> {
-    use morloc_runtime_types::schema::SerialType;
-    use morloc_runtime_types::packet::make_stream_header_block;
-
     reject_dev_stdio_path(path)?;
+    // Parse schema first so a malformed spec never destroys prior content.
+    ostream_schema(schema_str, "OStream open", path)?;
+    crate::custody::open(
+        morloc_runtime_types::stdio_proto::OPEN_CREATE,
+        &absolute_path(path)?,
+        schema_str,
+    )
+}
 
-    // Parse schema first so a malformed spec never destroys prior
-    // content. Empty is a placeholder for the bridge.
-    // The schema string is the value schema `[a]` -- streams are
-    // list-shaped and the on-disk metadata block must match the wire
-    // data type.
-    let parsed_schema = if schema_str.is_empty() {
-        morloc_runtime_types::schema::Schema::primitive(SerialType::Nil)
+/// `path` resolved against this process's working directory, which the
+/// custodian does not share.
+fn absolute_path(path: &str) -> Result<String, MorlocError> {
+    let abs = std::path::absolute(path).map_err(MorlocError::Io)?;
+    abs.into_os_string().into_string().map_err(|_| MorlocError::Other(format!(
+        "stream path '{}' is not valid UTF-8", path,
+    )))
+}
+
+/// The value schema `[a]` of a written stream; empty is the bridge's
+/// placeholder.
+fn ostream_schema(schema_str: &str, what: &str, path: &str) -> Result<Schema, MorlocError> {
+    let parsed = if schema_str.is_empty() {
+        Schema::primitive(SerialType::Nil)
     } else {
         parse_schema(schema_str).map_err(|e| MorlocError::Schema(format!(
-            "OStream open: unparseable schema '{}': {}", schema_str, e,
+            "{}: unparseable schema '{}': {}", what, schema_str, e,
         )))?
     };
-    reject_non_list_stream_schema(&parsed_schema, "OStream open", path)?;
-    let header_bytes = make_stream_header_block(&parsed_schema);
+    reject_non_list_stream_schema(&parsed, what, path)?;
+    Ok(parsed)
+}
 
-    ensure_release_service()?;
-    let fd = match open_locked_for_writing(path) {
-        Ok(fd) => fd,
-        Err(WriteOpenError::Open(e)) => return Err(MorlocError::Io(e)),
-        Err(WriteOpenError::Lock(why)) => {
-            return Err(MorlocError::Other(format!(
-                "@open OStream '{}': could not acquire exclusive flock: {}",
-                path, why,
-            )));
+/// Where a custodian starts writing a file it has locked.
+struct Resume {
+    cursor: u64,
+    body_start: u64,
+    entries: Vec<morloc_runtime_types::packet::SubpacketEntry>,
+    element_count: u64,
+}
+
+/// Open a file `OStream` in the custodian, for the process `(pid, start)`
+/// in call `call_id`. `mode` is `stdio_proto::OPEN_CREATE` or `OPEN_APPEND`.
+// SLOT-10
+pub(crate) fn host_open(
+    mode: u8,
+    path: &str,
+    schema_str: &str,
+    pid: u32,
+    start: u64,
+    call_id: u64,
+) -> Result<i64, MorlocError> {
+    use morloc_runtime_types::stdio_proto::{OPEN_APPEND, OPEN_CREATE};
+    reject_dev_stdio_path(path)?;
+    let opener = (pid, start, call_id);
+    let mut retried = false;
+    loop {
+        let res = match mode {
+            OPEN_CREATE => host_create(path, schema_str, opener),
+            OPEN_APPEND => host_append(path, schema_str, opener),
+            other => return Err(MorlocError::Other(format!("unknown stream open mode {other}"))),
+        };
+        match res {
+            Err(HostOpenError::Locked(e)) if !retried && finish_dead_openers_of(path) => {
+                retried = true;
+                let _ = e;
+            }
+            Err(HostOpenError::Locked(e)) | Err(HostOpenError::Other(e)) => return Err(e),
+            Ok(h) => return Ok(h),
         }
+    }
+}
+
+enum HostOpenError {
+    Locked(MorlocError),
+    Other(MorlocError),
+}
+
+impl From<MorlocError> for HostOpenError {
+    fn from(e: MorlocError) -> Self {
+        HostOpenError::Other(e)
+    }
+}
+
+fn open_for_custody(path: &str, what: &str) -> Result<libc::c_int, HostOpenError> {
+    match open_locked_for_writing(path) {
+        Ok(fd) => Ok(fd),
+        Err(WriteOpenError::Open(e)) => Err(HostOpenError::Other(MorlocError::Io(e))),
+        Err(WriteOpenError::Lock(why)) => Err(HostOpenError::Locked(MorlocError::Other(format!(
+            "{} '{}': could not acquire exclusive flock: {}", what, path, why,
+        )))),
+    }
+}
+
+/// Finish the streams this custodian writes on `path`'s file whose opener
+/// has died, as the kernel would have dropped a dead opener's lock. Returns
+/// whether it finished any.
+fn finish_dead_openers_of(path: &str) -> bool {
+    use std::sync::atomic::Ordering;
+    let Ok(meta) = std::fs::metadata(path) else { return false };
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
     };
+    let mut any = false;
+    for (idx, gen) in crate::custody::hosted_slots() {
+        let Some(slot) = slot_ref(idx) else { continue };
+        if slot.generation.load(Ordering::Acquire) & GENERATION_MASK != gen {
+            continue;
+        }
+        let seen = (slot.file_dev.get(), slot.file_ino.get(), slot.opener_pid.get(), slot.opener_pid_start_time.get());
+        if generation_after_read(slot) & GENERATION_MASK != gen || (seen.0, seen.1) != identity {
+            continue;
+        }
+        if !morloc_runtime_types::process::alive(seen.2, seen.3)
+            && finish_stream(idx, gen, morloc_runtime_types::packet::FOOTER_STATUS_PAUSED as u32).is_ok()
+        {
+            any = true;
+        }
+    }
+    any
+}
+
+fn host_create(path: &str, schema_str: &str, opener: (u32, u64, u64)) -> Result<i64, HostOpenError> {
+    let parsed_schema = ostream_schema(schema_str, "OStream open", path)?;
+    let header_bytes = morloc_runtime_types::packet::make_stream_header_block(&parsed_schema);
+    let fd = open_for_custody(path, "@open OStream")?;
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     let fd = if unsafe { libc::fstat(fd, &mut st) } == 0 && st.st_size == 0 {
         fd
     } else {
         replace_with_fresh_file(fd, path)?
     };
-    init_ostream_on_locked_fd(fd, path, schema_str, parsed_schema, header_bytes)
+    Ok(start_fresh(fd, path, schema_str, parsed_schema, header_bytes, opener)?)
 }
 
-/// Initialise an already-open, already-locked descriptor as an empty
-/// `OStream` and publish a handle for it. The caller owns `fd` and must hold
-/// the exclusive lock across the call, so the decision to start the file and
-/// the truncation acting on it cannot straddle a window in which another
-/// writer finishes. `fd` is closed on error.
-fn init_ostream_on_locked_fd(
+fn start_fresh(
     fd: libc::c_int,
     path: &str,
     schema_str: &str,
-    parsed_schema: morloc_runtime_types::schema::Schema,
+    parsed_schema: Schema,
     header_bytes: Vec<u8>,
+    opener: (u32, u64, u64),
 ) -> Result<i64, MorlocError> {
-    use std::sync::atomic::Ordering;
     if unsafe { libc::ftruncate(fd, 0) } != 0 {
         let e = std::io::Error::last_os_error();
         unlock_and_close(fd);
         return Err(MorlocError::Io(e));
     }
-
     if let Err(e) = write_all_fd(fd, &header_bytes) {
         unlock_and_close(fd);
         return Err(e);
     }
     let body_start = header_bytes.len() as u64;
+    let resume = Resume { cursor: body_start, body_start, entries: Vec::new(), element_count: 0 };
+    start_custody(fd, path, schema_str, parsed_schema, resume, opener)
+}
 
-    let (slot_idx, slot, _guard) = match allocate_slot_cas() {
+/// Publish a slot for the locked file `fd` and start its custodian. `fd` is
+/// closed on error.
+fn start_custody(
+    fd: libc::c_int,
+    path: &str,
+    schema_str: &str,
+    parsed_schema: Schema,
+    resume: Resume,
+    opener: (u32, u64, u64),
+) -> Result<i64, MorlocError> {
+    use std::sync::atomic::Ordering;
+    let (slot_idx, slot, guard) = match allocate_slot_cas_for(opener.0, opener.1, opener.2) {
         Ok(s) => s,
         Err(e) => {
             unlock_and_close(fd);
             return Err(e);
         }
     };
-
     let publish_result = (|| -> Result<u64, MorlocError> {
         let mut pending = Unpublished::default();
         let path_rel = pending.hold(shm_copy_bytes(path.as_bytes())?);
         let schema_rel = pending.hold(shm_copy_bytes(schema_str.as_bytes())?);
-        // Allocate the write buffer in SHM. shcalloc zero-fills, which
-        // matches `_tail_pad`'s implicit zero start (no leaked bytes
-        // from a previous slot use). Sized from MORLOC_WRITE_BUFFER_BYTES.
         let buf_bytes = read_write_buffer_bytes_env();
         let buf_abs = crate::shm::shcalloc(1, buf_bytes)?;
         let buf_rel = pending.hold(crate::shm::abs2rel(buf_abs)?);
-        // SHM-resident sub-packet entry array, shared across all writer
-        // pools so the final footer at @close reflects every flush
-        // regardless of which pool emitted it. Initial cap is small and
-        // grows exponentially under the slot lock in
-        // emit_subpacket_to_disk.
-        let idx_cap_initial: u64 = OSTREAM_SUBPACKET_INDEX_INITIAL_CAP;
-        let idx_buf_bytes = (idx_cap_initial as usize)
-            * std::mem::size_of::<morloc_runtime_types::packet::SubpacketEntry>();
-        let idx_buf_abs = crate::shm::shcalloc(1, idx_buf_bytes)?;
-        let idx_buf_rel = pending.hold(crate::shm::abs2rel(idx_buf_abs)?);
+        crate::custody::take_custody(ready_slot_queue(slot)?);
         unsafe {
             slot.kind.set(MLC_KIND_OSTREAM);
             let (dev, ino) = file_identity(fd);
@@ -3441,18 +3272,15 @@ fn init_ostream_on_locked_fd(
             slot.file_path_len.set(path.len() as u32);
             slot.schema_str.set(pending.own(schema_rel));
             slot.schema_str_len.set(schema_str.len() as u32);
-            slot.subpacket_entries.set(pending.own(idx_buf_rel));
+            slot.subpacket_entries.set(shm_types_crate::RELNULL);
             slot.subpacket_entries_len.set(0);
-            slot.subpacket_entries_cap.set(idx_cap_initial);
-            slot.body_start.set(body_start);
+            slot.subpacket_entries_cap.set(0);
+            slot.body_start.set(resume.body_start);
             slot.final_footer.set(0);
-            slot.cursor.set(body_start);
-            slot.element_count.set(0);
+            slot.cursor.set(resume.cursor);
+            slot.element_count.set(resume.element_count);
             slot.compression_level.set(0);
             *slot.diag.get() = StreamDiag::new();
-            // Write buffer fields. index_cap is set lazily on first
-            // @write -- elem_width isn't known until then since the
-            // schema-string parse happens below.
             slot.write_buffer.set(pending.own(buf_rel));
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);
@@ -3461,8 +3289,7 @@ fn init_ostream_on_locked_fd(
         let bump = registry_gen_salt() | 1;
         // wrapping_add: generation is a wrapping counter masked to
         // GENERATION_MASK; a large random salt overflows u64 (debug panic).
-        let new_gen = slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK;
-        Ok(new_gen)
+        Ok(slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK)
     })();
     let new_gen = match publish_result {
         Ok(g) => g,
@@ -3472,38 +3299,83 @@ fn init_ostream_on_locked_fd(
             return Err(e);
         }
     };
+    let (value_schema, elem_schema) = derive_stream_schemas(&parsed_schema);
+    let mut diag = StreamDiag::new();
+    diag.subpacket_count = resume.entries.len() as u64;
+    diag.element_count = resume.element_count;
+    let writer = crate::custody::Writer::new(crate::custody::WriterInit {
+        q: slot_queue(slot)?,
+        slot,
+        slot_idx,
+        gen: new_gen,
+        out: crate::custody::Out::File(fd),
+        value_schema,
+        elem_schema,
+        cursor: resume.cursor,
+        entries: resume.entries,
+        diag,
+    });
+    if let Err(e) = crate::custody::host_spawn(writer) {
+        release_slot_locked(slot);
+        drop(guard);
+        unlock_and_close(fd);
+        return Err(e);
+    }
+    drop(guard);
+    Ok(pack_handle(new_gen, slot_idx))
+}
 
-    // Value schema is `[a]`, element is parameters[0]. Empty schema is
-    // a placeholder for the bridge and produces Nil for both fields.
-    let (value_schema_cached, elem_schema_cached) = if schema_str.is_empty() {
-        let nil = morloc_runtime_types::schema::Schema::primitive(
-            morloc_runtime_types::schema::SerialType::Nil,
-        );
-        (nil.clone(), nil)
+/// Start the custodian of a stdout or stderr stream this process or a pool
+/// published.
+// SLOT-16
+pub(crate) fn host_adopt(handle: i64) -> Result<(), MorlocError> {
+    use std::sync::atomic::Ordering;
+    let (gen, slot_idx) = unpack_handle(handle);
+    let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
+        "stream handle {:#x}: slot index out of range", handle,
+    )))?;
+    let (schema, body_start) = versioned_read(slot, gen, |s| {
+        if s.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED
+            || s.kind.get() != MLC_KIND_OSTREAM
+            || s.is_stdio.get() == 0
+        {
+            return Err(MorlocError::Other(format!("stream handle {:#x} is not an open stdout or stderr stream", handle)));
+        }
+        Ok((copy_slot_bytes(s.schema_str.get(), s.schema_str_len.get() as usize)?, s.body_start.get()))
+    })?
+    .ok_or_else(|| MorlocError::Other(format!("stream handle {:#x} was closed", handle)))?;
+    let schema_str = String::from_utf8(schema).map_err(|_| MorlocError::Other("stream schema is not UTF-8".into()))?;
+    let parsed = if schema_str.is_empty() {
+        Schema::primitive(SerialType::Nil)
     } else {
-        let elem = parsed_schema.parameters[0].clone();
-        (parsed_schema, elem)
+        parse_schema(&schema_str).map_err(|e| MorlocError::Schema(e.to_string()))?
     };
-    let local = ProcessLocalSlot {
-        cached_generation: new_gen,
-        mmap_ptr: std::ptr::null_mut(),
-        mmap_size: 0,
-        pages_dropped: 0,
-        map_file: None,
-        fd,                       // opener holds flock for slot lifetime
-        cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(0))),
-        value_schema: value_schema_cached,
-        elem_schema: elem_schema_cached,
-        subpacket_entries_local: Vec::new(),
-        subpacket_elem_cum: None,
-        is_data_packet: false,
-        write_behind: Default::default(),
-        holds_lock: true,
-        fork_epoch: fork_epoch(),
+    let (value_schema, elem_schema) = derive_stream_schemas(&parsed);
+    let q = {
+        let _guard = SlotGuard::lock(slot)?;
+        let q = slot_queue(slot)?;
+        if !slot_generation_is(slot, gen) || slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
+            return Err(MorlocError::Other(format!("stream handle {:#x} was closed", handle)));
+        }
+        if q.hosted() {
+            return Err(MorlocError::Other(format!("stream handle {:#x} already has a writer", handle)));
+        }
+        crate::custody::take_custody(q);
+        q
     };
-    let handle = pack_handle(new_gen, slot_idx);
-    install_process_local_slot(handle, local);
-    Ok(handle)
+    let writer = crate::custody::Writer::new(crate::custody::WriterInit {
+        q,
+        slot,
+        slot_idx,
+        gen,
+        out: crate::custody::Out::Stdio,
+        value_schema,
+        elem_schema,
+        cursor: body_start,
+        entries: Vec::new(),
+        diag: StreamDiag::new(),
+    });
+    crate::custody::host_spawn(writer)
 }
 
 
@@ -3553,21 +3425,18 @@ pub fn shared_close_handle_with_status(
     }
 }
 
-/// End a stream a process died inside: release its slot, leaking what the
-/// slot held, and the path's lock if this process holds it. Returns the
-/// error to report, or `None` if the stream was not poisoned.
+/// End a stream a process died inside, recording the failure in its footer.
+/// Returns the error to report, or `None` if the stream was not poisoned.
 fn release_poisoned(handle: i64, slot: &RegistrySlot, gen_claim: u64) -> Option<MorlocError> {
     use std::sync::atomic::Ordering;
-    let guard = SlotGuard::lock_any(slot).ok()?;
     if slot.poisoned.get() == 0
         || !slot_generation_is(slot, gen_claim)
         || slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED
     {
         return None;
     }
-    end_slot_locked(slot);
-    drop(guard);
-    invalidate_process_local_slot(handle);
+    let (_, idx) = unpack_handle(handle);
+    let _ = finish_stream(idx, gen_claim, morloc_runtime_types::packet::FOOTER_STATUS_FAILED as u32);
     Some(died_inside())
 }
 
@@ -3596,168 +3465,34 @@ fn close_open_stream(
     }
 
     if kind == MLC_KIND_OSTREAM {
-        // OStream close uses with_process_local_slot so the buffer
-        // flush (which appends to local.subpacket_entries_local) and
-        // the subsequent final-footer write share one locked
-        // critical section. The flush + footer write together can
-        // be sizable (one buffered sub-packet + a final footer)
-        // but cross-pool contention during close is rare; the
-        // shared-buffer story trumps minimising hold time here.
-        //
-        // Stdio-bound OStream slots build the same final-footer
-        // packet locally and hand it to the nexus over the stdio
-        // RPC, so `program > out.packet` produces a complete
-        // stream-packet file.
-        with_process_local_slot(handle, |local, slot| {
-            let _guard = lock_for_write(slot, gen_claim, "shared_close_handle: slot generation changed under us")?;
-            flush_write_buffer(slot, local)?;
-            let diag = unsafe { *slot.diag.get() };
-            let shared_entries = read_shared_subpacket_entries(slot)?;
-            let footer = morloc_runtime_types::packet::make_final_footer_packet(
-                &diag, &shared_entries, status,
-            );
-            if slot.is_stdio.get() == 0 {
-                let cursor = slot.cursor.get();
-                pwrite_all_fd(local.fd, &footer, cursor)?;
-                let rc = unsafe { crate::utility::sync_file_data(local.fd) };
-                if rc != 0 {
-                    return Err(MorlocError::Io(std::io::Error::last_os_error()));
-                }
-            } else {
-                emit_footer_via_rpc(slot, &footer)?;
-            }
-            local.unlock_ended_stream();
-            end_slot_locked(slot);
-            drop(_guard);
-            Ok(())
-        })?;
-    } else {
-        // IFile / IStream: no finalisation; just release.
-        let _guard = SlotGuard::lock(slot)?;
-        let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-        if gen_now != gen_claim {
-            return Err(MorlocError::Other(
-                "shared_close_handle: slot generation changed under us".into(),
-            ));
+        if slot.poisoned.get() != 0 {
+            return Err(died_inside());
         }
-        release_slot_locked(slot);
-        drop(_guard);
+        let (_, idx) = unpack_handle(handle);
+        return finish_stream(idx, gen_claim, status as u32);
     }
 
-    invalidate_process_local_slot(handle);
-    Ok(())
-}
-
-/// Sweep-path close: releases the slot WITHOUT writing a final footer.
-/// Used by the per-call_id sweeper and the PID-based pool-crash sweep.
-/// Leaves the on-disk OStream in temp-footer state (the honest "writer
-/// didn't finish" signal — a downstream reader sees a temp footer iff the
-/// writer never reached an explicit close).
-pub fn shared_discard_handle(handle: i64) -> Result<(), MorlocError> {
-    use std::sync::atomic::Ordering;
-
-    let (gen_claim, slot_idx) = unpack_handle(handle);
-    let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
-        "shared_discard_handle: slot index {} out of range", slot_idx,
-    )))?;
-    let _guard = SlotGuard::lock_any(slot)?;
+    // IFile / IStream: no finalisation; just release.
+    let _guard = SlotGuard::lock(slot)?;
     let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
     if gen_now != gen_claim {
-        return Err(MorlocError::Other(format!(
-            "shared_discard_handle: generation mismatch (handle {}, slot {})",
-            gen_claim, gen_now,
-        )));
+        return Err(MorlocError::Other(
+            "shared_close_handle: slot generation changed under us".into(),
+        ));
     }
-    end_slot_locked(slot);
+    release_slot_locked(slot);
     drop(_guard);
     invalidate_process_local_slot(handle);
     Ok(())
 }
 
-/// Same as `shared_discard_handle` but assumes the caller already
-/// holds the slot's lock. Used by the per-call_id sweeper, which
-/// takes the lock to re-check `state` + `call_id` and then
-/// proceeds to the discard while still holding it.
-pub fn shared_discard_handle_locked(
-    slot: &RegistrySlot,
-    slot_idx: usize,
-) -> Result<(), MorlocError> {
-    use std::sync::atomic::Ordering;
-    let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-    let handle = pack_handle(gen_now, slot_idx);
-    end_slot_locked(slot);
-    invalidate_process_local_slot(handle);
-    Ok(())
-}
-
-/// Finalise an OPEN OStream slot in place: flush its write buffer, write
-/// the final footer with `status`, and fdatasync. Caller MUST hold the
-/// slot's lock and have confirmed `slot.kind.get() == MLC_KIND_OSTREAM` and
-/// `slot.state == OPEN_SHARED`. The slot is left OPEN; the caller must
-/// follow up with `shared_discard_handle_locked` (or equivalent) to
-/// release it.
-///
-/// Used by the per-call_id sweeper at dispatch exit so an OStream that a
-/// remote-child returned without an explicit `@close` lands on disk as a
-/// well-formed file (status = PAUSED) the parent can `@append` to.
-///
-/// Errors propagate but do NOT release the slot. The sweeper logs and
-/// continues to the discard step so a single I/O failure on one slot
-/// doesn't strand others.
-pub fn shared_finalize_ostream_locked(
-    slot: &RegistrySlot,
-    slot_idx: usize,
-    status: u8,
-) -> Result<(), MorlocError> {
-    use std::sync::atomic::Ordering;
-    let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-    let handle = pack_handle(gen_now, slot_idx);
-    let (_claim, mut local) = match claim_process_local_slot(handle, ClaimMode::NoWait) {
-        Ok(Some((claim, Some(l)))) => (claim, l),
-        _ => {
-            // No process-local entry. This can happen if the slot was
-            // opened in a different process (cross-pool sharing where the
-            // opener is not the current sweep-runner). Without the fd we
-            // can't flush or fdatasync, so leave the file in temp-footer
-            // state -- a clean "writer didn't finish" signal that a reader
-            // can recover from via forward-scan.
-            return Ok(());
-        }
-    };
-    let is_stdio = slot.is_stdio.get() != 0;
-    let owner = slot.wb_owner_pid.get();
-    if slot.write_failed.get() != 0 || (owner != 0 && !is_this_process(owner, slot.wb_owner_start.get())) {
-        // Elements are missing from the file, or held by another process
-        // this one cannot wait for under the lock: leave the temp footer,
-        // the honest "writer didn't finish" signal.
-        local.unlock_ended_stream();
-        return Ok(());
-    }
-    let result = (|| -> Result<(), MorlocError> {
-        flush_write_buffer(slot, &mut local)?;
-        let diag = unsafe { *slot.diag.get() };
-        let shared_entries = read_shared_subpacket_entries(slot)?;
-        let footer = morloc_runtime_types::packet::make_final_footer_packet(
-            &diag, &shared_entries, status,
-        );
-        if is_stdio {
-            emit_footer_via_rpc(slot, &footer)?;
-            return Ok(());
-        }
-        let cursor = slot.cursor.get();
-        pwrite_all_fd(local.fd, &footer, cursor)?;
-        let rc = unsafe { crate::utility::sync_file_data(local.fd) };
-        if rc != 0 {
-            return Err(MorlocError::Io(std::io::Error::last_os_error()));
-        }
-        Ok(())
-    })();
-    // Drop `local` here so its fd closes before the slot is released by
-    // the caller's discard step. Re-installing it in the map would just
-    // get torn down on the next access via the generation check.
-    local.unlock_ended_stream();
-    drop(local);
-    result
+/// End a stream without completing it: what was queued is written, the
+/// unflushed buffer is dropped, and an `OStream`'s file keeps its temporary
+/// footer (the "writer did not finish" signal). Used by the sweeps of
+/// abandoned handles and by cleanup after errors.
+pub fn shared_discard_handle(handle: i64) -> Result<(), MorlocError> {
+    let (gen_claim, slot_idx) = unpack_handle(handle);
+    finish_stream(slot_idx, gen_claim, crate::custody::STATUS_DISCARD)
 }
 
 // Shared op functions run against the SHM slot + process-local mmap cache.
@@ -3772,53 +3507,35 @@ pub fn shared_finalize_ostream_locked(
 /// level 0 it is the caller's buffer unchanged, so it is carried by
 /// reference. Assembling one contiguous `Vec` instead would copy it -- and
 /// the old shape copied it twice, once to own it and once to append it.
-struct SubpacketBytes<'a> {
-    head: Vec<u8>,
-    payload: std::borrow::Cow<'a, [u8]>,
+pub(crate) struct SubpacketBytes<'a> {
+    pub(crate) head: Vec<u8>,
+    pub(crate) payload: std::borrow::Cow<'a, [u8]>,
     /// Zero bytes written after an uncompressed payload, counted in the
     /// header's length, so the next sub-packet -- and so its payload,
     /// whose metadata block is padded too -- starts 8-byte aligned and
     /// a reader can use the mapped bytes in place.
-    pad: usize,
+    pub(crate) pad: usize,
     /// On-disk payload region size (post-compression if applicable).
     /// Tracked separately so diag counters see the true bytes written
     /// rather than the assembled packet length (which also carries
     /// the header + metadata block).
-    compressed_payload_len: usize,
+    pub(crate) compressed_payload_len: usize,
     /// The payload's size before compression.
-    uncompressed_len: usize,
+    pub(crate) uncompressed_len: usize,
 }
 
 impl SubpacketBytes<'_> {
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.head.len() + self.payload.len() + self.pad
     }
 }
 
 /// A sub-packet payload ready to frame: the bytes to write and, when they
 /// are zstd frames, their index.
-struct PreparedPayload<'a> {
-    bytes: std::borrow::Cow<'a, [u8]>,
-    frames: Option<Vec<morloc_runtime_types::packet::FrameEntry>>,
-    uncompressed_len: usize,
-}
-
-/// Compress a raw voidstar payload at `level` (none at level 0).
-fn prepare_payload(payload_bytes: &[u8], level: u8) -> Result<PreparedPayload<'_>, MorlocError> {
-    let clvl = crate::compression::CompressionLevel::from_u8(level)?;
-    if clvl.is_none() {
-        return Ok(PreparedPayload {
-            bytes: std::borrow::Cow::Borrowed(payload_bytes),
-            frames: None,
-            uncompressed_len: payload_bytes.len(),
-        });
-    }
-    let (bytes, frames) = crate::compression::compress_payload_zstd(payload_bytes, clvl)?;
-    Ok(PreparedPayload {
-        bytes: std::borrow::Cow::Owned(bytes),
-        frames: Some(frames),
-        uncompressed_len: payload_bytes.len(),
-    })
+pub(crate) struct PreparedPayload<'a> {
+    pub(crate) bytes: std::borrow::Cow<'a, [u8]>,
+    pub(crate) frames: Option<Vec<morloc_runtime_types::packet::FrameEntry>>,
+    pub(crate) uncompressed_len: usize,
 }
 
 /// Assemble a `MORLOC_DATA_PACKET` around a prepared payload: build the
@@ -3826,7 +3543,7 @@ fn prepare_payload(payload_bytes: &[u8], level: u8) -> Result<PreparedPayload<'_
 /// prepend the 32-byte header. Returns the wire bytes ready to write to
 /// any transport (disk pwrite, RPC send-into-SHM). Format-only work -- no
 /// cursor, no diag, no I/O.
-fn build_subpacket_bytes<'a>(
+pub(crate) fn build_subpacket_bytes<'a>(
     value_schema: &morloc_runtime_types::schema::Schema,
     prepared: PreparedPayload<'a>,
 ) -> Result<SubpacketBytes<'a>, MorlocError> {
@@ -3895,7 +3612,7 @@ fn build_subpacket_bytes<'a>(
 /// change. Pass `tail_offset` when the sub-packet has a stable on-disk
 /// position to record in the tail window (disk writers); pass `None`
 /// for transports without one (RPC).
-unsafe fn record_subpacket_flush(
+pub(crate) unsafe fn record_subpacket_flush(
     diag_ptr: *mut StreamDiag,
     uncompressed: u64,
     compressed: u64,
@@ -3942,169 +3659,6 @@ impl<'a> PortablePayload<'a> {
     }
 }
 
-/// Emit one sub-packet of the OStream from its uncompressed `[a]` voidstar
-/// payload (Array header + inline + variable), compressed at `level`, at the
-/// slot's current cursor, and update slot bookkeeping (cursor, diag, temp
-/// footer, shared sub-packet index). Caller MUST hold the slot lock, and
-/// must have committed every batch sealed before this payload.
-fn emit_subpacket(
-    slot: &RegistrySlot,
-    local: &mut ProcessLocalSlot,
-    payload: PortablePayload<'_>,
-    level: u8,
-    elem_count: u64,
-) -> Result<(), MorlocError> {
-    debug_assert_payload_elem_count(elem_count, payload.0, "emit_subpacket");
-    let prepared = prepare_payload(payload.0, level)?;
-    emit_prepared(slot, local, prepared, elem_count)
-}
-
-fn emit_prepared(
-    slot: &RegistrySlot,
-    local: &mut ProcessLocalSlot,
-    prepared: PreparedPayload<'_>,
-    elem_count: u64,
-) -> Result<(), MorlocError> {
-    let sub = build_subpacket_bytes(&local.value_schema, prepared)?;
-    if slot.is_stdio.get() != 0 {
-        emit_subpacket_via_rpc(slot, sub, elem_count)
-    } else {
-        emit_subpacket_to_disk(slot, local, sub, elem_count)
-    }
-}
-
-fn emit_subpacket_to_disk(
-    slot: &RegistrySlot,
-    local: &mut ProcessLocalSlot,
-    sub: SubpacketBytes<'_>,
-    elem_count: u64,
-) -> Result<(), MorlocError> {
-    use morloc_runtime_types::packet::make_temp_footer_packet;
-
-    let compressed_payload_len = sub.compressed_payload_len;
-
-    let cursor = slot.cursor.get();
-    // Payload first, then the head over what was the temp footer: a reader
-    // opening meanwhile finds no sub-packet there and stops, instead of
-    // reading a head whose payload is half written. The payload
-    // is still the buffer the caller filled; copying the two together first
-    // would move the whole payload for the sake of one `pwrite`.
-    // The footer's header goes first, so no reader takes the payload landing
-    // over the footer's body for footer metadata.
-    pwrite_all_fd(local.fd, &[0u8; 32], cursor)?;
-    pwrite_all_fd(local.fd, &sub.payload, cursor + sub.head.len() as u64)?;
-    pwrite_all_fd(local.fd, &[0u8; 8][..sub.pad], cursor + (sub.head.len() + sub.payload.len()) as u64)?;
-    pwrite_all_fd(local.fd, &sub.head, cursor)?;
-    let subpacket_end = cursor + sub.len() as u64;
-
-    unsafe {
-        slot.cursor.set(subpacket_end);
-        record_subpacket_flush(
-            slot.diag.get(),
-            sub.uncompressed_len as u64,
-            compressed_payload_len as u64,
-            Some(cursor),
-        );
-    }
-    // Every pool's flushes append here under the slot lock; the
-    // opener's @close reads this shared array to build the final footer.
-    append_shared_subpacket_index(slot, morloc_runtime_types::packet::SubpacketEntry {
-        offset: cursor, elem_count,
-    })?;
-
-    let footer = make_temp_footer_packet(unsafe { &*slot.diag.get() });
-    pwrite_all_fd(local.fd, &footer, subpacket_end)?;
-    Ok(())
-}
-
-/// Emit one sub-packet by sending it to the nexus stdio RPC server,
-/// which writes the bytes to fd 1 (stdout) or fd 2 (stderr). Caller
-/// MUST hold the slot lock.
-///
-/// The payload is portable ([`PortablePayload`]): a receiver reading this
-/// stream through a different nexus has no view of the sender's SHM
-/// registry, so a handle field must already name its file by path.
-fn emit_subpacket_via_rpc(
-    slot: &RegistrySlot,
-    sub: SubpacketBytes<'_>,
-    elem_count: u64,
-) -> Result<(), MorlocError> {
-    let compressed_payload_len = sub.compressed_payload_len;
-
-    let total = sub.len() as u64;
-    let dst_abs = crate::shm::shmalloc(sub.len())?;
-    // SAFETY: the block was sized as head + payload + pad.
-    unsafe {
-        std::ptr::copy_nonoverlapping(sub.head.as_ptr(), dst_abs as *mut u8, sub.head.len());
-        std::ptr::copy_nonoverlapping(
-            sub.payload.as_ptr(),
-            (dst_abs as *mut u8).add(sub.head.len()),
-            sub.payload.len(),
-        );
-        std::ptr::write_bytes((dst_abs as *mut u8).add(sub.head.len() + sub.payload.len()), 0, sub.pad);
-    }
-    let relptr = crate::shm::abs2rel(dst_abs)? as i64;
-
-    let handle = slot_handle(slot);
-    let rc = stdio_rpc_send_write(handle, relptr, total);
-
-    // The nexus copies bytes out during the RPC handler; free the block
-    // regardless of the response so we don't leak on error.
-    if let Ok(abs) = crate::shm::rel2abs(relptr as crate::shm::RelPtr) {
-        let _ = crate::shm::shfree(abs);
-    }
-    rc?;
-
-    // Cursor tracks stream position, not fd offset -- the pool doesn't
-    // own the nexus's fd 1/2, but header_len + sum(sub-packet lengths)
-    // is deterministic and matches the on-disk layout whenever the
-    // consumer reads from the start of the emitted output (which is
-    // the case for a `> file` redirect). `body_start` at open was
-    // seeded to the stream-header length so this cursor value is the
-    // sub-packet's start offset in the emitted stream.
-    let cursor = slot.cursor.get();
-    let subpacket_end = cursor + total;
-    unsafe {
-        slot.cursor.set(subpacket_end);
-        record_subpacket_flush(
-            slot.diag.get(),
-            sub.uncompressed_len as u64,
-            compressed_payload_len as u64,
-            Some(cursor),
-        );
-    }
-    append_shared_subpacket_index(slot, morloc_runtime_types::packet::SubpacketEntry {
-        offset: cursor, elem_count,
-    })?;
-    Ok(())
-}
-
-/// Emit a pre-built final-footer packet to the nexus stdio RPC server
-/// so it is appended to fd 1 / fd 2 after the last sub-packet. Caller
-/// MUST hold the slot lock. Unlike sub-packet emission, the footer
-/// carries no user-visible fields and needs no handle-to-path rewrite.
-fn emit_footer_via_rpc(
-    slot: &RegistrySlot,
-    footer_bytes: &[u8],
-) -> Result<(), MorlocError> {
-    let total = footer_bytes.len() as u64;
-    let dst_abs = crate::shm::shmalloc(footer_bytes.len())?;
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            footer_bytes.as_ptr(),
-            dst_abs as *mut u8,
-            footer_bytes.len(),
-        );
-    }
-    let relptr = crate::shm::abs2rel(dst_abs)? as i64;
-    let handle = slot_handle(slot);
-    let rc = stdio_rpc_send_write(handle, relptr, total);
-    if let Ok(abs) = crate::shm::rel2abs(relptr as crate::shm::RelPtr) {
-        let _ = crate::shm::shfree(abs);
-    }
-    rc
-}
-
 /// Read the current handle for a slot under its lock. Both fields are
 /// derived from immutable-after-@open state, so this is a plain load.
 fn slot_handle(slot: &RegistrySlot) -> i64 {
@@ -4120,49 +3674,13 @@ fn slot_handle(slot: &RegistrySlot) -> i64 {
     pack_handle(gen_now, slot_idx)
 }
 
-/// Send an `OP_WRITE_STDIO` request over the cached nexus socket. The
-/// SHM block referenced by `relptr` remains owned by the caller
-/// (freed after the RPC returns) -- the nexus reads through it during
-/// the write and returns before the shfree.
-fn stdio_rpc_send_write(
-    handle: i64,
-    relptr: i64,
-    size: u64,
-) -> Result<(), MorlocError> {
-    use std::io::{Read, Write};
-    with_stdio_sock(|s| {
-        let mut req = [0u8; 25];
-        req[0] = OP_WRITE_STDIO;
-        req[1..9].copy_from_slice(&handle.to_le_bytes());
-        req[9..17].copy_from_slice(&relptr.to_le_bytes());
-        req[17..25].copy_from_slice(&size.to_le_bytes());
-        s.write_all(&req).map_err(|e| MorlocError::Other(
-            format!("@write: send: {}", e),
-        ))?;
-        let mut status = [0u8; 1];
-        s.read_exact(&mut status).map_err(|e| MorlocError::Other(
-            format!("@write: recv status: {}", e),
-        ))?;
-        match status[0] {
-            STATUS_OK  => Ok(()),
-            STATUS_PIPE_CLOSED => Err(MorlocError::PipeClosed),
-            STATUS_ERR => Err(MorlocError::Other(format!(
-                "@write: {}", read_error_message(s),
-            ))),
-            other => Err(MorlocError::Other(format!(
-                "@write: unknown status byte {}", other,
-            ))),
-        }
-    })
-}
-
 /// Debug-only guard: the writer's declared element count must equal
 /// the count already stamped into the payload's Array header
 /// (first 8 bytes = `Array.size`). Divergence would desync the
 /// footer's per-sub-packet counts from the on-disk sub-packet payloads.
 /// No-op in release builds.
 #[inline]
-fn debug_assert_payload_elem_count(elem_count: u64, payload: &[u8], site: &str) {
+pub(crate) fn debug_assert_payload_elem_count(elem_count: u64, payload: &[u8], site: &str) {
     if cfg!(debug_assertions) {
         let payload_count = if payload.len() < 8 {
             0
@@ -4175,84 +3693,6 @@ fn debug_assert_payload_elem_count(elem_count: u64, payload: &[u8], site: &str) 
             site, elem_count, payload_count,
         );
     }
-}
-
-/// Snapshot the SHM-resident shared sub-packet entry array into a heap
-/// `Vec<SubpacketEntry>` suitable for `make_final_footer_packet`.
-/// Caller MUST hold the slot lock so the array can't grow underneath
-/// us. Returns an empty vec when the slot has no entries allocated
-/// (IFile/IStream slots, or an OStream with no flushes yet).
-fn read_shared_subpacket_entries(
-    slot: &RegistrySlot,
-) -> Result<Vec<morloc_runtime_types::packet::SubpacketEntry>, MorlocError> {
-    let len = slot.subpacket_entries_len.get() as usize;
-    if len == 0 {
-        return Ok(Vec::new());
-    }
-    let idx_rel = slot.subpacket_entries.get();
-    if idx_rel == shm_types_crate::RELNULL {
-        return Ok(Vec::new());
-    }
-    let idx_abs = crate::shm::rel2abs(idx_rel)?
-        as *const morloc_runtime_types::packet::SubpacketEntry;
-    // SAFETY: the caller holds the slot lock, and the entry array holds
-    // `len` initialized entries.
-    Ok(unsafe { std::slice::from_raw_parts(idx_abs, len) }.to_vec())
-}
-
-/// Append a sub-packet's `(offset, elem_count)` entry to the
-/// SHM-resident shared sub-packet entry array. Caller MUST hold the
-/// slot lock. Doubles the capacity (and reallocates the SHM block)
-/// when full. The relptr in `slot.subpacket_entries.get()` is updated to the
-/// new block before the old one is freed -- readers under the same
-/// lock see a single publication step.
-fn append_shared_subpacket_index(
-    slot: &RegistrySlot,
-    entry: morloc_runtime_types::packet::SubpacketEntry,
-) -> Result<(), MorlocError> {
-    let cap = slot.subpacket_entries_cap.get();
-    if cap == 0 {
-        // OStream slots seed this to >= OSTREAM_SUBPACKET_INDEX_INITIAL_CAP
-        // at open. A zero cap here means this slot isn't OStream-shaped
-        // (IFile/IStream readers don't emit sub-packets); the emit path
-        // shouldn't be called against them.
-        return Err(MorlocError::Other(
-            "append_shared_subpacket_index: slot has no growable index \
-             (kind is not OStream or open path forgot to allocate)".into(),
-        ));
-    }
-    let len = slot.subpacket_entries_len.get();
-    let idx_rel = slot.subpacket_entries.get();
-    let idx_abs = crate::shm::rel2abs(idx_rel)?
-        as *mut morloc_runtime_types::packet::SubpacketEntry;
-    if len < cap {
-        unsafe { *idx_abs.add(len as usize) = entry; }
-        slot.subpacket_entries_len.set(len + 1);
-
-        return Ok(());
-    }
-    // Grow by doubling.
-    let new_cap = cap.checked_mul(2).ok_or_else(|| MorlocError::Other(
-        "append_shared_subpacket_index: capacity overflow".into(),
-    ))?;
-    let new_bytes = (new_cap as usize)
-        * std::mem::size_of::<morloc_runtime_types::packet::SubpacketEntry>();
-    let new_abs = crate::shm::shcalloc(1, new_bytes)?
-        as *mut morloc_runtime_types::packet::SubpacketEntry;
-    unsafe {
-        std::ptr::copy_nonoverlapping(idx_abs, new_abs, len as usize);
-        *new_abs.add(len as usize) = entry;
-    }
-    let new_rel = crate::shm::abs2rel(new_abs as *mut u8)?;
-    slot.subpacket_entries.set(slot_owns(new_rel));
-    slot.subpacket_entries_len.set(len + 1);
-    slot.subpacket_entries_cap.set(new_cap);
-
-    // Free the old block AFTER the publication. Readers under the
-    // lock see the new relptr; no one is holding a pointer to the
-    // old block.
-    free_uncounted(idx_abs as *mut u8);
-    Ok(())
 }
 
 /// Double the write buffer's index-section capacity. Caller MUST hold
@@ -4299,174 +3739,109 @@ fn grow_index_capacity(
     Ok(())
 }
 
-/// Take the lock of an OStream about to be written, flushed or closed.
-/// Batches another process has sealed must reach the file before anything
-/// this call writes: while it holds some, mark the stream synchronous and
-/// wait, unlocked, for that process to commit them. A stream with a batch
-/// that failed to be written is refused.
+/// Take the lock of a stream about to be written, flushed or closed.
 fn lock_for_write<'a>(
     slot: &'a RegistrySlot,
     gen_claim: u64,
     stale: &str,
 ) -> Result<SlotGuard<'a>, MorlocError> {
-    loop {
-        let guard = SlotGuard::lock(slot)?;
-        if !slot_generation_is(slot, gen_claim) {
+    let guard = SlotGuard::lock(slot)?;
+    if !slot_generation_is(slot, gen_claim) {
+        return Err(MorlocError::Other(stale.into()));
+    }
+    if slot.kind.get() == MLC_KIND_OSTREAM {
+        let q = slot_queue(slot)?;
+        if let Some(e) = q.failure() {
+            return Err(e);
+        }
+        if q.is_closed() {
             return Err(MorlocError::Other(stale.into()));
         }
-        if slot.write_failed.get() != 0 {
-            return Err(MorlocError::Other(
-                "an earlier write to this stream failed; the stream is incomplete".into(),
-            ));
-        }
-        let owner = slot.wb_owner_pid.get();
-        if owner == 0 || is_this_process(owner, slot.wb_owner_start.get()) {
-            return Ok(guard);
-        }
-        slot.wb_sync_only.set(1);
-        if !stdio_owner_is_alive(owner, slot.wb_owner_start.get()) {
-            let lost = slot.wb_outstanding.get();
-            slot.write_failed.set(1);
-            slot.wb_owner_pid.set(0);
-            slot.wb_owner_start.set(0);
-            slot.wb_outstanding.set(0);
-
-            return Err(MorlocError::Other(format!(
-                "process {owner} exited before writing {lost} batches of this stream; \
-                 the stream is incomplete"
-            )));
-        }
-        drop(guard);
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
+    Ok(guard)
 }
 
-/// What `with_idle_local_slot` found.
-enum IdleSlot<R> {
-    /// Another thread of this process is using the stream.
-    Busy,
-    /// The stream was closed or discarded.
-    Closed,
-    Ran(R),
+fn slot_queue(slot: &RegistrySlot) -> Result<&'static crate::custody::CustodyQueue, MorlocError> {
+    crate::custody::queue_at(slot.custody.get())
 }
 
-/// Run `f` on this process's slot of `handle` unless a thread is using it
-/// now. Unlike `with_process_local_slot`, never attaches afresh.
-fn with_idle_local_slot<R>(
-    handle: i64,
-    f: impl FnOnce(&mut ProcessLocalSlot, &'static RegistrySlot) -> R,
-) -> IdleSlot<R> {
-    use std::sync::atomic::Ordering;
-    let (gen_claim, slot_idx) = unpack_handle(handle);
-    let slot = match slot_ref(slot_idx) {
-        Some(s) => s,
-        None => return IdleSlot::Closed,
+// SLOT-12: the full buffer moves to the queue and a spare takes its place.
+fn queue_buffer(slot: &RegistrySlot) -> Result<(), MorlocError> {
+    use crate::custody::{Item, ENTRY_BUFFER};
+    let n = slot.write_buffer_index_count.get();
+    if n == 0 {
+        return Ok(());
+    }
+    let q = slot_queue(slot)?;
+    let full = slot.write_buffer.get();
+    let fresh = match q.take_spare() {
+        Some(r) => r,
+        None => {
+            let size = unsafe { crate::shm::shm_block_size(crate::shm::rel2abs(full)?) }.ok_or_else(|| {
+                MorlocError::Other("stream write buffer is not an SHM block".into())
+            })?;
+            let abs = crate::shm::shcalloc(1, size)?;
+            slot_owns(crate::shm::abs2rel(abs)?)
+        }
     };
-    if slot.generation.load(Ordering::Acquire) & GENERATION_MASK != gen_claim
-        || slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED
-    {
-        return IdleSlot::Closed;
-    }
-    let (claim, mut local) = match claim_process_local_slot(handle, ClaimMode::NoWait) {
-        Ok(Some((claim, Some(l)))) => (claim, l),
-        _ => return IdleSlot::Busy,
+    let item = Item {
+        kind: ENTRY_BUFFER,
+        status: 0,
+        block: full,
+        elems: n,
+        index_cap: slot.write_buffer_index_cap.get(),
+        data_used: slot.write_buffer_data_used.get(),
+        len: 0,
+        oversize: false,
+        level: slot.compression_level.get(),
     };
-    if local.cached_generation != gen_claim {
-        drop(claim);
-        finish_ended(handle, local);
-        return IdleSlot::Closed;
-    }
-    let r = f(&mut local, slot);
-    if has_ended(handle, &local) {
-        drop(claim);
-        finish_ended(handle, local);
-    } else {
-        claim.give_back(local);
-    }
-    IdleSlot::Ran(r)
-}
-
-/// Commit the sealed batches of every stream this process holds batches
-/// of and no thread is using. A failure on a stream `mine` lists is
-/// returned; any other is reported, and the stream is marked failed so
-/// its next use reports it too.
-#[cfg(test)]
-static DRAIN_GAP_HOOK: Mutex<Option<fn(i64)>> = Mutex::new(None);
-
-fn drain_idle_streams(mine: &[i64]) -> Result<(), MorlocError> {
-    let mut first_err = None;
-    for handle in crate::write_behind::sealed_handles() {
-        let (gen_claim, _) = unpack_handle(handle);
-        let r = with_idle_local_slot(handle, |local, slot| {
-            let committed = (|| {
-                let _guard = SlotGuard::lock(slot)?;
-                if !slot_generation_is(slot, gen_claim) {
-                    return Ok(());
-                }
-                commit_sealed(slot, local, 0)
-            })();
-            crate::write_behind::forget_sealed(handle);
-            committed
-        });
-        #[cfg(test)]
-        {
-            let hook = *DRAIN_GAP_HOOK.lock().unwrap();
-            if let Some(hook) = hook {
-                hook(handle);
-            }
+    if let Err(e) = q.push(item) {
+        if let Ok(abs) = crate::shm::rel2abs(fresh) {
+            free_uncounted(abs);
         }
-        match r {
-            IdleSlot::Busy => {}
-            IdleSlot::Closed => {
-                crate::write_behind::forget_sealed(handle);
-                // Its batches were committed at close, or are dropped with
-                // this process's entry for it.
-                invalidate_process_local_slot(handle);
-            }
-            IdleSlot::Ran(res) => {
-                if let Err(e) = res {
-                    if mine.contains(&handle) {
-                        first_err.get_or_insert(e);
-                    } else {
-                        eprintln!("morloc: a stream write failed: {e}");
-                    }
-                }
-            }
-        }
+        return Err(e);
     }
-    first_err.map_or(Ok(()), Err)
+    slot.write_buffer.set(fresh);
+    slot.write_buffer_index_count.set(0);
+    slot.write_buffer_data_used.set(0);
+    Ok(())
 }
 
-/// Commit the batches this process holds, when a dispatch ends: no batch
-/// outlives the call that wrote it, so the caller, or another process it
-/// hands a stream to, sees every element written.
-pub(crate) fn drain_sealed_batches() -> Result<(), MorlocError> {
-    let mine = crate::write_behind::take_thread_sealed();
-    drain_idle_streams(&mine)
+// SLOT-12
+fn queue_block(slot: &RegistrySlot, payload: &[u8], elems: u64, oversize: bool) -> Result<(), MorlocError> {
+    use crate::custody::{Item, ENTRY_BLOCK};
+    let q = slot_queue(slot)?;
+    let abs = crate::shm::shmalloc(payload.len().max(1))?;
+    // SAFETY: the block holds at least `payload.len()` bytes.
+    unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), abs as *mut u8, payload.len()) };
+    let rel = slot_owns(crate::shm::abs2rel(abs)?);
+    let item = Item {
+        kind: ENTRY_BLOCK,
+        status: 0,
+        block: rel,
+        elems,
+        index_cap: 0,
+        data_used: 0,
+        len: payload.len() as u64,
+        oversize,
+        level: slot.compression_level.get(),
+    };
+    if let Err(e) = q.push(item) {
+        free_uncounted(abs);
+        return Err(e);
+    }
+    Ok(())
 }
 
-/// Commit the batches this process holds before it hands control to
-/// another process that may write the same streams: a call to another
-/// pool, or a fork.
-pub(crate) fn drain_before_handoff() -> Result<(), MorlocError> {
-    let mine = crate::write_behind::thread_sealed();
-    drain_idle_streams(&mine)
-}
-
-// FORK-5: prepare reads no thread-local; it also runs from thread-local destructors.
-pub(crate) fn drain_before_fork() {
-    let _ = drain_idle_streams(&[]);
-}
-
-/// Compact the write buffer (remove wasted index space) and emit its
-/// contents as one sub-packet at the slot's cursor, after every batch
-/// sealed before it. Caller MUST hold the slot lock. Resets buffer
-/// counters after a successful flush.
+/// Hand the buffered elements on: an `OStream`'s to its custodian, a
+/// channel's compacted onto its queue. Caller MUST hold the slot lock.
 fn flush_write_buffer(
     slot: &RegistrySlot,
     local: &mut ProcessLocalSlot,
 ) -> Result<(), MorlocError> {
-    commit_sealed(slot, local, 0)?;
+    if slot.kind.get() != MLC_KIND_CHANNEL {
+        return queue_buffer(slot);
+    }
     let n = slot.write_buffer_index_count.get();
     if n == 0 {
         return Ok(());
@@ -4480,161 +3855,18 @@ fn flush_write_buffer(
         &local.elem_schema,
     )?;
     let payload_slice = unsafe { std::slice::from_raw_parts(buf_abs, payload_len) };
-
-    let level = slot.compression_level.get();
     let payload = PortablePayload::new(payload_slice, &local.value_schema)?;
-    if slot.kind.get() == MLC_KIND_CHANNEL {
-        channel_enqueue(slot, local, payload)?;
-    } else {
-        emit_subpacket(slot, local, payload, level, n)?;
-    }
-
-    // Reset buffer counters. The buffer bytes don't need to be cleared;
-    // the next @write overwrites them.
+    channel_enqueue(slot, local, payload)?;
     slot.write_buffer_index_count.set(0);
     slot.write_buffer_data_used.set(0);
-
     Ok(())
 }
 
-/// How many batches this OStream may keep compressing behind its writer,
-/// or `None` when its sub-packets are compressed synchronously: at level 0,
-/// on a channel, once a second process has written it, or when
-/// `MORLOC_WRITE_BEHIND_DEPTH` is 0.
-fn write_behind_depth(slot: &RegistrySlot) -> Option<usize> {
-    if slot.kind.get() != MLC_KIND_OSTREAM || slot.compression_level.get() == 0 || slot.wb_sync_only.get() != 0 {
-        return None;
-    }
-    match crate::write_behind::depth() {
-        0 => None,
-        d => Some(d),
-    }
-}
-
-/// Emit the full write buffer: sealed for background compression when the
-/// stream allows it (see `write_behind_depth`), flushed otherwise. Caller
-/// MUST hold the slot lock.
 fn flush_full_buffer(
     slot: &RegistrySlot,
     local: &mut ProcessLocalSlot,
 ) -> Result<(), MorlocError> {
-    let depth = match write_behind_depth(slot) {
-        Some(d) => d,
-        None => return flush_write_buffer(slot, local),
-    };
-    let n = slot.write_buffer_index_count.get();
-    if n == 0 {
-        return Ok(());
-    }
-    let w = local.elem_schema.width;
-    let payload_len = 16 + n as usize * w + slot.write_buffer_data_used.get() as usize;
-    if payload_len > morloc_runtime_types::compression::FRAME_CHUNK_SIZE {
-        // More than one frame: compressed in parallel frames by the flush.
-        return flush_write_buffer(slot, local);
-    }
-    let sealed = crate::shm::rel2abs(slot.write_buffer.get())?;
-    let buf_bytes = unsafe { crate::shm::shm_block_size(sealed) }.ok_or_else(|| {
-        MorlocError::Other("stream write buffer is not an SHM block".into())
-    })?;
-    let fresh = match local.write_behind.take_spare() {
-        Some(b) => b,
-        None => crate::shm::shcalloc(1, buf_bytes)?,
-    };
-    let level = crate::compression::CompressionLevel::from_u8(slot.compression_level.get())?;
-    let fresh_rel = crate::shm::abs2rel(fresh)?;
-    local.write_behind.seal_buffer(
-        sealed,
-        n,
-        slot.write_buffer_index_cap.get(),
-        slot.write_buffer_data_used.get(),
-        &local.elem_schema,
-        level,
-    );
-    // SHM-8: the sealed buffer is this process's from here.
-    crate::shm::take_on_reference();
-    slot.write_buffer.set(slot_owns(fresh_rel));
-    slot.write_buffer_index_count.set(0);
-    slot.write_buffer_data_used.set(0);
-
-    note_sealed(slot);
-    commit_sealed(slot, local, depth)
-}
-
-/// Queue a staged batch's payload for background compression, as its own
-/// sub-packet. Caller MUST hold the slot lock and have checked
-/// `write_behind_depth`.
-fn seal_staged_batch(
-    slot: &RegistrySlot,
-    local: &mut ProcessLocalSlot,
-    payload: Vec<u8>,
-    elem_count: u64,
-    depth: usize,
-) -> Result<(), MorlocError> {
-    let level = crate::compression::CompressionLevel::from_u8(slot.compression_level.get())?;
-    local.write_behind.seal_owned(payload, elem_count, level);
-    note_sealed(slot);
-    commit_sealed(slot, local, depth)
-}
-
-/// Record a new sealed batch in the slot and remember the handle, so this
-/// thread's dispatch end commits it.
-fn note_sealed(slot: &RegistrySlot) {
-    if slot.wb_owner_pid.get() == 0 {
-        slot.wb_owner_pid.set(std::process::id());
-        slot.wb_owner_start.set(read_pid_start_time());
-    }
-    slot.wb_outstanding.set(slot.wb_outstanding.get() + 1);
-
-    crate::write_behind::note_sealed(slot_handle(slot));
-}
-
-/// Write the oldest sealed batches, in seal order, until at most `keep`
-/// remain, waiting for each to finish compressing. Caller MUST hold the
-/// slot lock. On the first failure every remaining batch is dropped and
-/// the stream is marked failed.
-fn commit_sealed(
-    slot: &RegistrySlot,
-    local: &mut ProcessLocalSlot,
-    keep: usize,
-) -> Result<(), MorlocError> {
-    local.write_behind.claim();
-    while local.write_behind.len() > keep {
-        let p = local.write_behind.pop_front().expect("pending is non-empty");
-        let res = p.wait().and_then(|c| {
-            if let Some(buf) = p.buffer {
-                // SAFETY: the job compacted the buffer to `uncompressed_len`
-                // bytes and is done with it.
-                let bytes = unsafe { std::slice::from_raw_parts(buf, c.uncompressed_len) };
-                debug_assert_payload_elem_count(p.elem_count, bytes, "commit_sealed");
-                PortablePayload::new(bytes, &local.value_schema)?;
-            }
-            let prepared = PreparedPayload {
-                bytes: std::borrow::Cow::Owned(c.bytes),
-                frames: Some(c.frames),
-                uncompressed_len: c.uncompressed_len,
-            };
-            emit_prepared(slot, local, prepared, p.elem_count)
-        });
-        let keep_spare = crate::write_behind::depth() + 1;
-        local.write_behind.recycle(p.buffer, keep_spare);
-        slot.wb_outstanding.set(slot.wb_outstanding.get() - 1);
-        if slot.wb_outstanding.get() == 0 {
-            slot.wb_owner_pid.set(0);
-            slot.wb_owner_start.set(0);
-        }
-
-        if let Err(e) = res {
-            let dropped = local.write_behind.len() as u32;
-            local.write_behind.abandon();
-            slot.wb_outstanding.set(slot.wb_outstanding.get() - dropped);
-            slot.wb_owner_pid.set(0);
-            slot.wb_owner_start.set(0);
-            slot.write_failed.set(1);
-
-            return Err(e);
-        }
-    }
-    Ok(())
+    flush_write_buffer(slot, local)
 }
 
 /// The index capacity a write buffer starts at: the default, clamped to what
@@ -4770,12 +4002,11 @@ fn append_one_element(
                 payload_base, oversize_len, 16, &local.elem_schema, 16isize,
             )?;
         }
-        let level = slot.compression_level.get();
         let payload = PortablePayload::new(&oversize_payload, &local.value_schema)?;
         if slot.kind.get() == MLC_KIND_CHANNEL {
             channel_enqueue(slot, local, payload)?;
         } else {
-            emit_subpacket(slot, local, payload, level, 1)?;
+            queue_block(slot, payload.0, 1, true)?;
         }
         return Ok(());
     }
@@ -4889,7 +4120,7 @@ pub fn shared_write_subpacket(
         channel_wait_room(handle)?;
     }
     let (gen_claim, _) = unpack_handle(handle);
-    with_process_local_slot(handle, |local, slot| {
+    let queued = with_process_local_slot(handle, |local, slot| {
         if slot.kind.get() != MLC_KIND_OSTREAM && slot.kind.get() != MLC_KIND_CHANNEL {
             return Err(MorlocError::Other(format!(
                 "@write on non-OStream handle (kind = {})",
@@ -4907,10 +4138,6 @@ pub fn shared_write_subpacket(
         };
 
         let _guard = lock_for_write(slot, gen_claim, "the stream was closed, or its reader stopped")?;
-        // Another process is waiting to write: hand it the stream.
-        if slot.wb_sync_only.get() != 0 {
-            commit_sealed(slot, local, 0)?;
-        }
 
         // The `@write` level is the default; on a stdio-bound stream the
         // nexus's explicit `-z` overrides it. The pool compresses the
@@ -4925,15 +4152,37 @@ pub fn shared_write_subpacket(
 
         // Pin compression level on first @write into this slot
         // (across all pools); subsequent writes must match.
-        if slot.element_count.get() == 0 && slot.write_buffer_index_count.get() == 0 {
+        let pinned = if slot.kind.get() == MLC_KIND_OSTREAM {
+            slot_queue(slot)?.pin_level(&slot.compression_level, level)
+        } else if slot.element_count.get() == 0 && slot.write_buffer_index_count.get() == 0 {
             slot.compression_level.set(level);
+            Ok(())
         } else if slot.compression_level.get() != level {
+            Err(slot.compression_level.get())
+        } else {
+            Ok(())
+        };
+        if let Err(was) = pinned {
             return Err(MorlocError::Other(format!(
                 "@write level mismatch: stream was opened/written at level {} \
                  but this call passed {}. All sub-packets must share a level.",
-                slot.compression_level.get(), level,
+                was, level,
             )));
         }
+        // SLOT-16: a stdio write returns once its batches are out, so a raw
+        // print by this process never lands inside one.
+        let stdio_queue = if slot.is_stdio.get() != 0 {
+            let q = slot_queue(slot)?;
+            Some((q, q.pushed()))
+        } else {
+            None
+        };
+        let queued = |stdio_queue: Option<(&'static crate::custody::CustodyQueue, u32)>| {
+            stdio_queue.and_then(|(q, before)| {
+                let after = q.pushed();
+                (after != before).then_some((q, after, q.epoch()))
+            })
+        };
 
         // Walk the elements and append each. element_count updates
         // here (not at flush) so @flen reflects buffered elements too.
@@ -4951,32 +4200,15 @@ pub fn shared_write_subpacket(
                 flush_write_buffer(slot, local)?;
             }
             crate::voidstar::flatten_into_portable(&mut scratch, payload_voidstar, &local.value_schema)?;
-            let level = slot.compression_level.get();
             let payload = PortablePayload::new(&scratch, &local.value_schema)?;
-            match write_behind_depth(slot) {
-                Some(depth) if scratch.len() <= morloc_runtime_types::compression::FRAME_CHUNK_SIZE => {
-                    seal_staged_batch(slot, local, scratch, n_elements, depth)?;
-                }
-                _ => {
-                    commit_sealed(slot, local, 0)?;
-                    emit_subpacket(slot, local, payload, level, n_elements)?
-                }
-            }
-            unsafe {
-                slot.element_count.set(slot.element_count.get() + n_elements);
-                let d = &mut *slot.diag.get();
-                d.element_count += n_elements;
-            }
-            return Ok(());
+            queue_block(slot, payload.0, n_elements, false)?;
+            slot.element_count.set(slot.element_count.get() + n_elements);
+            return Ok(queued(stdio_queue));
         }
         if local.elem_schema.is_fixed_width() && w > 0 && 16 + w <= buf_size {
             append_flat_run(slot, local, elem_data_base, n_elements as usize, buf_size)?;
-            unsafe {
-                slot.element_count.set(slot.element_count.get() + n_elements);
-                let d = &mut *slot.diag.get();
-                d.element_count += n_elements;
-            }
-            return Ok(());
+            slot.element_count.set(slot.element_count.get() + n_elements);
+            return Ok(queued(stdio_queue));
         }
         // One copy of the element schema for the batch: its resolver
         // borrows it while the slot itself is updated per element.
@@ -4985,23 +4217,21 @@ pub fn shared_write_subpacket(
         for i in 0..n_elements {
             let elem_src = unsafe { elem_data_base.add((i as usize) * w) };
             append_one_element(slot, local, elem_src, buf_size, &mut scratch, &elem, &res)?;
-            unsafe {
-                slot.element_count.set(slot.element_count.get() + 1);
-                let d = &mut *slot.diag.get();
-                d.element_count += 1;
-            }
+            slot.element_count.set(slot.element_count.get() + 1);
         }
-        Ok(())
-    })
+        Ok(queued(stdio_queue))
+    })?;
+    match queued {
+        Some((q, seq, epoch)) => q.wait_done(seq, epoch),
+        None => Ok(()),
+    }
 }
 
-/// `@flush handle`: force any buffered elements to be written as a
-/// sub-packet immediately, without closing the stream. Useful for
-/// tests that need predictable packet boundaries and for user code
-/// that wants to commit progress visibly to readers.
+/// `@flush handle`: hand the buffered elements on now, without closing the
+/// stream. On an `OStream` it returns once they are in the file (SLOT-15).
 pub fn shared_flush_buffer(handle: i64) -> Result<(), MorlocError> {
     let (gen_claim, _) = unpack_handle(handle);
-    with_process_local_slot(handle, |local, slot| {
+    let waiting = with_process_local_slot(handle, |local, slot| {
         if slot.kind.get() != MLC_KIND_OSTREAM && slot.kind.get() != MLC_KIND_CHANNEL {
             return Err(MorlocError::Other(format!(
                 "@flush on non-OStream handle (kind = {})",
@@ -5009,8 +4239,18 @@ pub fn shared_flush_buffer(handle: i64) -> Result<(), MorlocError> {
             )));
         }
         let _guard = lock_for_write(slot, gen_claim, "the stream was closed, or its reader stopped")?;
-        flush_write_buffer(slot, local)
-    })
+        flush_write_buffer(slot, local)?;
+        if slot.kind.get() != MLC_KIND_OSTREAM {
+            return Ok(None);
+        }
+        let q = slot_queue(slot)?;
+        let seq = q.push(crate::custody::Item::marker(crate::custody::ENTRY_FLUSH, 0))?;
+        Ok(Some((q, seq, q.epoch())))
+    })?;
+    match waiting {
+        Some((q, seq, epoch)) => q.wait_done(seq, epoch),
+        None => Ok(()),
+    }
 }
 
 /// `@next handle` on an IStream slot. Reads the next sub-packet's
@@ -6005,20 +5245,21 @@ fn shared_ifile_bracket_slice_with_tail(
     })
 }
 
-/// `@append schema_str path`: open an existing stream file for append
-/// and allocate a fresh OSTREAM slot in the shared registry. The
-/// schema must match the file's stored schema; mismatches error
-/// before any bytes are written. Trailing partial bytes (orphaned
-/// temp footer from the prior writer, partial flush) are truncated
-/// at the last complete sub-packet boundary.
+/// `@append` to a stream file: resume it after its last complete
+/// sub-packet, or start it if empty or absent.
 pub fn shared_append_to_path(
     path: &str,
     expected_schema_str: &str,
 ) -> Result<i64, MorlocError> {
-    use std::sync::atomic::Ordering;
-
     reject_dev_stdio_path(path)?;
+    crate::custody::open(
+        morloc_runtime_types::stdio_proto::OPEN_APPEND,
+        &absolute_path(path)?,
+        expected_schema_str,
+    )
+}
 
+fn host_append(path: &str, expected_schema_str: &str, opener: (u32, u64, u64)) -> Result<i64, HostOpenError> {
     // The caller's string may carry `<hint>` prefixes (a pool passes the
     // schema the compiler baked into its dispatch table); the header
     // never does. Canonicalize before comparing, and compare
@@ -6031,22 +5272,13 @@ pub fn shared_append_to_path(
     // all happen under one lock, so a writer that finishes in between
     // cannot have its records cut away by an offset computed before they
     // existed.
-    ensure_release_service()?;
-    let fd = match open_locked_for_writing(path) {
-        Ok(fd) => fd,
-        Err(WriteOpenError::Open(e)) => return Err(MorlocError::Io(e)),
-        Err(WriteOpenError::Lock(why)) => {
-            return Err(MorlocError::Other(format!(
-                "@append: failed to flock '{}': {}", path, why
-            )));
-        }
-    };
+    let fd = open_for_custody(path, "@append")?;
 
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(fd, &mut st) } != 0 {
         let e = std::io::Error::last_os_error();
         unlock_and_close(fd);
-        return Err(MorlocError::Io(e));
+        return Err(MorlocError::Io(e).into());
     }
     let file_size = st.st_size as u64;
 
@@ -6054,33 +5286,16 @@ pub fn shared_append_to_path(
     // the open above, or a previous writer died before writing a header.
     // Either way this is where the log starts.
     if file_size == 0 {
-        let parsed_schema = if requested_schema_str.is_empty() {
-            morloc_runtime_types::schema::Schema::primitive(
-                morloc_runtime_types::schema::SerialType::Nil,
-            )
-        } else {
-            match parse_schema(&requested_schema_str) {
-                Ok(s) => s,
-                Err(e) => {
-                    unlock_and_close(fd);
-                    return Err(MorlocError::Schema(format!(
-                        "@append: unparseable schema '{}': {}",
-                        requested_schema_str, e,
-                    )));
-                }
+        let parsed_schema = match ostream_schema(&requested_schema_str, "@append", path) {
+            Ok(s) => s,
+            Err(e) => {
+                unlock_and_close(fd);
+                return Err(e.into());
             }
         };
-        if let Err(e) =
-            reject_non_list_stream_schema(&parsed_schema, "@append", path)
-        {
-            unlock_and_close(fd);
-            return Err(e);
-        }
         let header_bytes =
             morloc_runtime_types::packet::make_stream_header_block(&parsed_schema);
-        return init_ostream_on_locked_fd(
-            fd, path, &requested_schema_str, parsed_schema, header_bytes,
-        );
+        return Ok(start_fresh(fd, path, &requested_schema_str, parsed_schema, header_bytes, opener)?);
     }
 
     // Resume. The mapping is built on the locked descriptor rather than a
@@ -6090,15 +5305,15 @@ pub fn shared_append_to_path(
         Ok(t) => t,
         Err(e) => {
             unlock_and_close(fd);
-            return Err(e);
+            return Err(e.into());
         }
     };
-    let unmap_and = |e: MorlocError| -> MorlocError {
+    let unmap_and = |e: MorlocError| -> HostOpenError {
         unsafe {
             libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
             unlock_and_close(fd);
         }
-        e
+        e.into()
     };
     let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
         Ok(p) => p,
@@ -6121,7 +5336,7 @@ pub fn shared_append_to_path(
     // final footer indexes the sub-packets; otherwise the index is rebuilt
     // from the file, or the resumed stream's index would lose them.
     let resume_off = parsed.data_end;
-    let (subpacket_entries_clone, element_count_at_resume) = if parsed.final_footer {
+    let (entries, element_count) = if parsed.final_footer {
         (parsed.subpacket_entries.clone(), parsed.element_count)
     } else {
         match index_unclosed_stream(mmap_ptr, mmap_size, parsed.body_start, resume_off) {
@@ -6130,121 +5345,16 @@ pub fn shared_append_to_path(
         }
     };
     let body_start = parsed.body_start;
-    let value_schema_clone = parsed.value_schema.clone();
-    let elem_schema_clone = parsed.elem_schema.clone();
-    let schema_str_clone = parsed.schema_str.clone();
+    let schema_str = parsed.schema_str.clone();
+    let value_schema = parsed.value_schema.clone();
     unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
-    let trunc_rc = unsafe { libc::ftruncate(fd, resume_off as libc::off_t) };
-    if trunc_rc != 0 {
+    if unsafe { libc::ftruncate(fd, resume_off as libc::off_t) } != 0 {
         let e = std::io::Error::last_os_error();
         unlock_and_close(fd);
-        return Err(MorlocError::Io(e));
+        return Err(MorlocError::Io(e).into());
     }
-
-    // Step 3: allocate a fresh OSTREAM slot in the shared registry,
-    // pre-seeded with the resume cursor + element_count.
-    let (slot_idx, slot, _guard) = match allocate_slot_cas() {
-        Ok(s) => s,
-        Err(e) => {
-            unlock_and_close(fd);
-            return Err(e);
-        }
-    };
-    let publish_result = (|| -> Result<u64, MorlocError> {
-        let mut pending = Unpublished::default();
-        let path_rel = pending.hold(shm_copy_bytes(path.as_bytes())?);
-        let schema_rel = pending.hold(shm_copy_bytes(schema_str_clone.as_bytes())?);
-        let buf_bytes = read_write_buffer_bytes_env();
-        let buf_abs = crate::shm::shcalloc(1, buf_bytes)?;
-        let buf_rel = pending.hold(crate::shm::abs2rel(buf_abs)?);
-        let mut diag = StreamDiag::new();
-        diag.subpacket_count = subpacket_entries_clone.len() as u64;
-        diag.element_count = element_count_at_resume;
-        // SHM-resident sub-packet entry array pre-seeded with the
-        // on-disk (offset, elem_count) pairs discovered during
-        // forward-scan recovery. Subsequent flushes from any pool append
-        // under the slot lock. Initial capacity is at least the current
-        // length so we don't grow during the first append.
-        let preseed_len = subpacket_entries_clone.len();
-        let idx_cap_initial: u64 = std::cmp::max(
-            OSTREAM_SUBPACKET_INDEX_INITIAL_CAP,
-            (preseed_len as u64).next_power_of_two().max(1),
-        );
-        let idx_buf_bytes = (idx_cap_initial as usize)
-            * std::mem::size_of::<morloc_runtime_types::packet::SubpacketEntry>();
-        let idx_buf_abs = crate::shm::shcalloc(1, idx_buf_bytes)?;
-        let idx_buf_rel = pending.hold(crate::shm::abs2rel(idx_buf_abs)?);
-        if preseed_len > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    subpacket_entries_clone.as_ptr(),
-                    idx_buf_abs as *mut morloc_runtime_types::packet::SubpacketEntry,
-                    preseed_len,
-                );
-            }
-        }
-        unsafe {
-            slot.kind.set(MLC_KIND_OSTREAM);
-            let (dev, ino) = file_identity(fd);
-            slot.file_dev.set(dev);
-            slot.file_ino.set(ino);
-            slot.file_path.set(pending.own(path_rel));
-            slot.file_path_len.set(path.len() as u32);
-            slot.schema_str.set(pending.own(schema_rel));
-            slot.schema_str_len.set(schema_str_clone.len() as u32);
-            slot.subpacket_entries.set(pending.own(idx_buf_rel));
-            slot.subpacket_entries_len.set(preseed_len as u64);
-            slot.subpacket_entries_cap.set(idx_cap_initial);
-            slot.body_start.set(body_start);
-            slot.final_footer.set(0);
-            slot.cursor.set(resume_off);
-            slot.element_count.set(element_count_at_resume);
-            slot.compression_level.set(0);
-            *slot.diag.get() = diag;
-            slot.write_buffer.set(pending.own(buf_rel));
-            slot.write_buffer_index_cap.set(0);
-            slot.write_buffer_index_count.set(0);
-            slot.write_buffer_data_used.set(0);
-        }
-        let bump = registry_gen_salt() | 1;
-        // wrapping_add: generation is a wrapping counter masked to
-        // GENERATION_MASK; a large random salt overflows u64 (debug panic).
-        let new_gen = slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK;
-        Ok(new_gen)
-    })();
-    let new_gen = match publish_result {
-        Ok(g) => g,
-        Err(e) => {
-            release_slot_locked(slot);
-            unlock_and_close(fd);
-            return Err(e);
-        }
-    };
-
-    // Install the process-local cache. The OPENER's sub-packet index is
-    // handed to this fresh slot so subsequent @close can rebuild the final
-    // footer correctly. In the multi-pool case, the `@append`er is the
-    // canonical "opener" of the new slot and owns the final-footer write.
-    let local = ProcessLocalSlot {
-        cached_generation: new_gen,
-        mmap_ptr: std::ptr::null_mut(),
-        mmap_size: 0,
-        pages_dropped: 0,
-        map_file: None,
-        fd,
-        cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(0))),
-        value_schema: value_schema_clone,
-        elem_schema: elem_schema_clone,
-        subpacket_entries_local: subpacket_entries_clone,
-        subpacket_elem_cum: None,
-        is_data_packet: false,
-        write_behind: Default::default(),
-        holds_lock: true,
-        fork_epoch: fork_epoch(),
-    };
-    let handle = pack_handle(new_gen, slot_idx);
-    install_process_local_slot(handle, local);
-    Ok(handle)
+    let resume = Resume { cursor: resume_off, body_start, entries, element_count };
+    Ok(start_custody(fd, path, &schema_str, value_schema, resume, opener)?)
 }
 
 // ── Off-worker-thread sweeper ────────────────────────────────────────────
@@ -6387,34 +5497,14 @@ fn sweeper_main(rx: std::sync::mpsc::Receiver<SweepRequest>) {
     }
 }
 
-/// Finalise an OStream slot's on-disk footer as PAUSED, then discard the
-/// handle. Caller MUST hold the slot lock. Shared by the per-call and
-/// per-pid sweeps and the pool-side stdio reclaim.
-///
-/// The paused-status footer lets a downstream reader see a clean file
-/// rather than a temp footer (distinguishing "producer exited with
-/// buffered data" from "crashed mid-flush"). Finalise errors are ignored
-/// so a single bad slot cannot strand a sweep across the registry.
-fn finalize_and_discard_slot_locked(slot: &RegistrySlot, idx: usize) {
-    if slot.kind.get() == MLC_KIND_OSTREAM && slot.poisoned.get() == 0 {
-        let _ = shared_finalize_ostream_locked(
-            slot,
-            idx,
-            morloc_runtime_types::packet::FOOTER_STATUS_PAUSED,
-        );
-    }
-    let _ = shared_discard_handle_locked(slot, idx);
+/// End every open stream opened in call `call_id`, an `OStream` with a
+/// PAUSED footer. Each slot is matched under a versioned read and ended by
+/// `finish_stream`, which confirms its generation under the lock.
+fn sweep_per_call(call_id: u64) {
+    sweep_matching(|slot| slot.call_id.load(std::sync::atomic::Ordering::Acquire) == call_id);
 }
 
-/// Walk the registry and discard any OPEN slot whose `call_id`
-/// matches. Two-phase: lockfree pre-filter (`state` + `call_id`
-/// Acquire-loads), then take the slot lock and re-confirm before
-/// calling `shared_discard_handle_locked`.
-///
-/// The re-confirm protects against the race where another dispatch
-/// (on a different worker) reallocates the slot in the window
-/// between the pre-filter and the discard.
-fn sweep_per_call(call_id: u64) {
+fn sweep_matching(matches: impl Fn(&RegistrySlot) -> bool) {
     use std::sync::atomic::Ordering;
     let (slots_base, slot_count) = registry_slot_array();
     if slots_base.is_null() || slot_count == 0 {
@@ -6428,116 +5518,57 @@ fn sweep_per_call(call_id: u64) {
         if slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
             continue;
         }
-        if slot.call_id.load(Ordering::Acquire) != call_id {
+        let gen = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+        let hit = matches(slot);
+        if generation_after_read(slot) & GENERATION_MASK != gen || !hit {
             continue;
         }
-        // Confirm under the slot lock.
-        let Ok(guard) = SlotGuard::lock_any(slot) else { continue };
-        let still_open = slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED;
-        let still_matches = slot.call_id.load(Ordering::Acquire) == call_id;
-        if still_open && still_matches {
-            finalize_and_discard_slot_locked(slot, idx);
-        }
-        drop(guard);
+        let _ = finish_stream(idx, gen, morloc_runtime_types::packet::FOOTER_STATUS_PAUSED as u32);
     }
 }
 
-/// Walk the registry and discard any OPEN slot whose
-/// (`opener_pid`, `opener_pid_start_time`) matches. The start-time
-/// disambiguates PID reuse: a new process given the same PID after
-/// the original exits has a different start time.
+/// End every open stream the process `(pid, start_time)` opened; the start
+/// time tells a reused pid apart.
 fn sweep_per_pid(pid: u32, start_time: u64) {
-    use std::sync::atomic::Ordering;
-    let (slots_base, slot_count) = registry_slot_array();
-    if slots_base.is_null() || slot_count == 0 {
-        return;
-    }
-    for idx in 0..slot_count {
-        let slot = unsafe {
-            &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot)
-        };
-        let state = slot.state.load(Ordering::Acquire);
-        if state != SLOT_STATE_OPEN_SHARED && state != SLOT_STATE_ENDING {
-            continue;
-        }
-        // `opener_pid` and `opener_pid_start_time` are immutable
-        // after @open publication, so a lockfree read (under the
-        // versioned-pointer pattern) is safe. Read generation
-        // before and after, retry on mismatch.
-        let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-        let read_pid = slot.opener_pid.get();
-        let read_start = slot.opener_pid_start_time.get();
-        let gen_after = generation_after_read(slot) & GENERATION_MASK;
-        if gen_before != gen_after {
-            continue;  // raced; next sweep iteration may catch it
-        }
-        if read_pid != pid || read_start != start_time {
-            continue;
-        }
-        let Ok(guard) = SlotGuard::lock_any(slot) else { continue };
-        // Re-confirm under the lock (state could have changed).
-        let opener_matches = slot.opener_pid.get() == pid && slot.opener_pid_start_time.get() == start_time;
-        match slot.state.load(Ordering::Acquire) {
-            SLOT_STATE_OPEN_SHARED if opener_matches => finalize_and_discard_slot_locked(slot, idx),
-            // Left for an opener that died: the kernel dropped its lock.
-            SLOT_STATE_ENDING if opener_matches => release_slot_locked(slot),
-            _ => {}
-        }
-        drop(guard);
-    }
+    sweep_matching(|slot| slot.opener_pid.get() == pid && slot.opener_pid_start_time.get() == start_time);
 }
 
 /// Reclaim a stdio singleton claim (@stdout/@stderr/@stdin) left open by
-/// the pool dispatch that just returned. Mirrors the nexus local path's
-/// per-call sweep, but scoped to the three stdio singletons only: a
-/// leaked stdio claim is never legitimate, whereas a file-backed OStream
-/// handle may legitimately outlive its opening dispatch, so this
-/// deliberately does NOT touch non-stdio slots.
+/// the pool dispatch that just returned. Only the three stdio singletons:
+/// a leaked stdio claim is never legitimate, whereas a file-backed OStream
+/// handle may outlive its opening dispatch. Its buffered output reaches the
+/// nexus before this returns, so a caller that replies after it is not
+/// overtaken by its own output.
 ///
 /// Gate: the per-thread `call_id` is `CALL_ID_NO_SWEEP` unless THIS
 /// dispatch opened a stdio handle (`open_stdio` lazily mints one), so the
 /// common no-stdio dispatch pays only a thread-local read and returns.
-/// When a claim IS held, matching on the dispatch's own `call_id` keeps a
-/// concurrent same-pid worker's live claim (Threads mode) safe from
-/// reclaim. Resets the per-thread `call_id` before returning so the next
-/// dispatch on this worker starts clean.
+/// Matching on the dispatch's own `call_id` keeps a concurrent same-pid
+/// worker's live claim (Threads mode) safe. Resets the per-thread `call_id`
+/// before returning.
 pub(crate) fn pool_reclaim_stdio_after_dispatch() {
     use std::sync::atomic::Ordering;
-    if let Err(e) = drain_sealed_batches() {
-        // The stream is marked failed, so its next use reports it too.
-        eprintln!("morloc: a stream write failed after its call returned: {e}");
-    }
     let call_id = current_call_id();
     if call_id == CALL_ID_NO_SWEEP {
         return;
     }
     for stdio_kind in [STDIO_KIND_STDIN, STDIO_KIND_STDOUT, STDIO_KIND_STDERR] {
-        let claim = match stdio_claim_slot(stdio_kind) {
-            Some(c) => c,
-            None => continue,
-        };
+        let Some(claim) = stdio_claim_slot(stdio_kind) else { continue };
         let existing = claim.load(Ordering::Acquire);
         if existing == STDIO_UNCLAIMED {
             continue;
         }
-        let (_gen, slot_idx) = unpack_handle(existing);
-        let slot = match slot_ref(slot_idx) {
-            Some(s) => s,
-            None => continue,
-        };
-        let Ok(guard) = SlotGuard::lock_any(slot) else { continue };
-        // Re-confirm under the lock: same claim, still open, still a
-        // stdio slot, and tagged with THIS dispatch's call_id.
-        let owned = claim.load(Ordering::Acquire) == existing
-            && slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED
-            && slot.is_stdio.get() != 0
-            && slot.call_id.load(Ordering::Acquire) == call_id;
-        if owned {
-            // Discard the slot (which stores STDIO_UNCLAIMED into the
-            // claim), landing any buffered OStream data as a paused footer.
-            finalize_and_discard_slot_locked(slot, slot_idx);
+        let (gen, slot_idx) = unpack_handle(existing);
+        let Some(slot) = slot_ref(slot_idx) else { continue };
+        let owned = slot.is_stdio.get() != 0 && slot.call_id.load(Ordering::Acquire) == call_id;
+        if !owned || generation_after_read(slot) & GENERATION_MASK != gen {
+            continue;
         }
-        drop(guard);
+        if let Err(e) = finish_stream(slot_idx, gen, morloc_runtime_types::packet::FOOTER_STATUS_PAUSED as u32) {
+            if !matches!(e, MorlocError::PipeClosed) {
+                eprintln!("morloc: a stream write failed after its call returned: {e}");
+            }
+        }
     }
     set_current_call_id(CALL_ID_NO_SWEEP);
 }
@@ -9725,7 +8756,7 @@ fn write_all_fd(fd: i32, mut buf: &[u8]) -> Result<(), MorlocError> {
 }
 
 /// `pwrite_all`: positional write that loops past EINTR / partials.
-fn pwrite_all_fd(fd: i32, mut buf: &[u8], mut offset: u64) -> Result<(), MorlocError> {
+pub(crate) fn pwrite_all_fd(fd: i32, mut buf: &[u8], mut offset: u64) -> Result<(), MorlocError> {
     while !buf.is_empty() {
         let n = unsafe {
             libc::pwrite(
@@ -10316,7 +9347,6 @@ pub fn shared_open_ifile_recovered(
         subpacket_entries_local: subpacket_entries,
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
-        write_behind: Default::default(),
         holds_lock: false,
         fork_epoch: fork_epoch(),
     };
@@ -10584,19 +9614,24 @@ mod tests {
     }
 
     #[test]
-    fn an_open_output_stream_keeps_its_opener_from_retiring() {
+    // SLOT-10, SHM-8: an opener holds neither the file's lock nor a counted
+    // reference, so an open stream does not keep it from retiring.
+    fn an_open_output_stream_does_not_keep_its_opener_from_retiring() {
         let _shm = crate::own_test_registry();
         let dir = concat_test_dir("retire_lock");
         let p = dir.join("out.idx").to_str().unwrap().to_string();
+        let q = p.clone();
         assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(move || {
-            let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
-            let open = held_stream_locks() == 1 && morloc_retire_blockers() > 0;
-            shared_close_handle(h).unwrap();
-            let closed = morloc_retire_blockers() == 0;
-            if !(open && closed) {
-                eprintln!("open: locks {} blockers; closed: {} blockers", held_stream_locks(), morloc_retire_blockers());
+            let h = shared_open_ostream_with_schema(&q, "ai4").unwrap();
+            let schema = parse_schema("ai4").unwrap();
+            let v = crate::json::read_json_with_schema("[1,2,3]", &schema).unwrap();
+            shared_write_subpacket(h, crate::compression::CompressionLevel::NONE, v).unwrap();
+            crate::shm::shfree(v).unwrap();
+            let open = held_stream_locks() == 0 && morloc_retire_blockers() == 0;
+            if !open {
+                eprintln!("open: {} locks, {} blockers", held_stream_locks(), morloc_retire_blockers());
             }
-            open && closed
+            open
         }));
     }
 
@@ -10705,10 +9740,6 @@ mod tests {
         }
     }
 
-    fn release_service_running() -> bool {
-        RELEASE_SERVICE.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock()).as_ref().is_some_and(|s| s.thread.as_ref().is_some_and(|t| !t.is_finished()))
-    }
-
     fn has_local_slot(handle: i64) -> bool {
         PROCESS_LOCAL_SLOTS.lock().as_ref().is_some_and(|m| m.contains_key(&handle))
     }
@@ -10739,7 +9770,7 @@ mod tests {
             if let Some(frame) = shared_next_frame(r).unwrap() {
                 crate::shm::shfree(frame).unwrap();
             }
-            let had = has_local_slot(r) && !release_service_running();
+            let had = has_local_slot(r);
             let closer = unsafe { libc::fork() };
             if closer == 0 {
                 let ok = shared_close_handle(r).is_ok();
@@ -11193,37 +10224,6 @@ mod tests {
     }
 
     #[test]
-    fn a_reopen_waits_a_bounded_time_for_a_stopped_opener() {
-        let _shm = crate::own_test_registry();
-        let dir = concat_test_dir("stopped_opener");
-        let path = dir.join("log.idx");
-        let p = path.to_str().unwrap().to_string();
-        let (pid, h, release) = stopped_opener(&p);
-        shared_close_handle(h).unwrap();
-
-        // The opener cannot release the file while stopped: the reopen must
-        // say so after a bounded wait instead of hanging or failing at once.
-        let began = std::time::Instant::now();
-        let q = p.clone();
-        let stuck = within_seconds("a reopen blocked by a stopped opener", move || {
-            shared_append_to_path(&q, "ai4")
-        });
-        let e = stuck.expect_err("a reopen succeeded while the opener held the file");
-        assert!(format!("{e:?}").contains("stopped"), "unexpected error: {e:?}");
-        assert!(began.elapsed() >= REOPEN_WAIT);
-
-        // Once it runs again it releases the file.
-        unsafe { libc::kill(pid, libc::SIGCONT); }
-        let q = p.clone();
-        let h2 = within_seconds("a reopen after the opener continued", move || {
-            shared_append_to_path(&q, "ai4")
-        })
-        .expect("append after the opener continued");
-        shared_close_handle(h2).unwrap();
-        release_forked_holder((pid, release));
-    }
-
-    #[test]
     fn a_stream_left_for_an_opener_that_died_is_reclaimed() {
         use std::sync::atomic::Ordering;
         let _shm = crate::own_test_registry();
@@ -11413,8 +10413,8 @@ mod tests {
             shared_open_ostream_with_schema(&q, "ai4").unwrap()
         });
 
-        // A pool writing a stream another opened must write the opener's
-        // file, not whatever now has its name.
+        // SLOT-10: the stream is written to the file it opened, not to
+        // whatever now has its name.
         let other = dir.join("other.bin");
         std::fs::write(&other, b"not a stream").unwrap();
         std::fs::rename(&other, &path).unwrap();
@@ -11425,9 +10425,10 @@ mod tests {
         shm::shfree(v).unwrap();
         let after = std::fs::read(&path).unwrap();
         release_forked_holder((pid, release));
+        wrote.unwrap();
+        shared_close_handle(h).unwrap();
         assert_eq!(after, b"not a stream", "the replacing file was written");
-        let e = wrote.expect_err("a write to a replaced file succeeded");
-        assert!(format!("{e:?}").contains("replaced"), "unexpected error: {e:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"not a stream", "closing wrote the replacing file");
     }
 
     fn staging_files(dir: &std::path::Path) -> Vec<String> {
@@ -13187,7 +12188,6 @@ fn channel_local(generation: u64, value_schema: &Schema) -> ProcessLocalSlot {
         subpacket_entries_local: Vec::new(),
         subpacket_elem_cum: None,
         is_data_packet: false,
-        write_behind: Default::default(),
         holds_lock: false,
         fork_epoch: fork_epoch(),
     }
@@ -13675,61 +12675,53 @@ mod write_behind_tests {
         assert_eq!(d[1], c[0], "the second sub-packet carries bytes of the first");
     }
 
-    // Compressing behind the writer changes when a sub-packet is written,
-    // never what or where: the file is the one a synchronous writer makes.
+    // The queue's depth changes when a sub-packet is written, never what or
+    // where: the file is the one a synchronous writer makes.
     #[test]
-    fn write_behind_writes_the_synchronous_sub_packets() {
+    fn the_queue_depth_changes_when_sub_packets_are_written_never_what() {
         let _shm = crate::own_test_registry();
         let dir = test_dir("same");
         let sync = dir.join("sync.idx");
         let behind = dir.join("behind.idx");
         let batches = odd_batches(60, 37, 'q');
-        for depth in [1, 3, 8] {
-            write_strs(&sync, &batches, 3, 4096, 0, &[17, 41]);
+        for depth in [1, 3, 7] {
+            write_strs(&sync, &batches, 3, 4096, 1, &[17, 41]);
             write_strs(&behind, &batches, 3, 4096, depth, &[17, 41]);
             let s = subpackets(&sync);
-            assert!(s.len() > 20, "the test must seal many buffers, got {}", s.len());
+            assert!(s.len() > 20, "the test must fill many buffers, got {}", s.len());
             assert_eq!(s, subpackets(&behind), "depth {depth}");
             let want: Vec<String> = batches.concat();
             assert_eq!(read_strs(&behind), want, "depth {depth}");
         }
     }
 
-    // Full buffers are held back, at most `depth` of them, and the
-    // writer's process is recorded as their holder until they are written.
+    // SLOT-12: no more batches are outstanding than the queue's depth.
     #[test]
-    fn sealed_batches_are_held_back_up_to_the_depth() {
+    fn outstanding_batches_never_exceed_the_queue_depth() {
         let _shm = crate::own_test_registry();
         let dir = test_dir("depth");
         let path = dir.join("depth.idx");
         crate::stream::set_test_write_buffer_bytes(Some(4096));
-        crate::write_behind::set_test_depth(Some(5));
-        let list = parse_schema("as").unwrap();
+        crate::write_behind::set_test_depth(Some(3));
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
         let (_gen, idx) = unpack_handle(h);
-        let slot = slot_ref(idx).unwrap();
-        let mut max_held = 0;
+        let q = slot_queue(slot_ref(idx).unwrap()).unwrap();
+        let before = q.pushed();
+        let mut most = 0;
         for b in odd_batches(40, 37, 's') {
-            let v = crate::json::read_json_with_schema(&serde_json::to_string(&b).unwrap(), &list).unwrap();
-            shared_write_subpacket(h, CompressionLevel::from_u8(3).unwrap(), v).unwrap();
-            shm::shfree(v).unwrap();
-            let held = slot.wb_outstanding.get();
-            assert!(held <= 5, "{held} batches held, depth is 5");
-            if held > 0 {
-                assert_eq!(slot.wb_owner_pid.get(), std::process::id());
-            }
-            max_held = max_held.max(held);
+            write_one(h, &b, 3);
+            most = most.max(q.outstanding());
+            assert!(q.outstanding() <= 3, "{} batches outstanding, depth is 3", q.outstanding());
         }
-        assert_eq!(max_held, 5, "the writer must keep full buffers compressing behind it");
-        shared_flush_buffer(h).unwrap();
-        assert_eq!(slot.wb_outstanding.get(), 0);
-        assert_eq!(slot.wb_owner_pid.get(), 0);
+        assert!(q.pushed().wrapping_sub(before) > 10, "the test must queue many buffers");
         shared_close_handle(h).unwrap();
         crate::stream::set_test_write_buffer_bytes(None);
         crate::write_behind::set_test_depth(None);
+        assert!(most >= 1);
         assert_eq!(read_strs(&path), odd_batches(40, 37, 's').concat());
     }
 
+    // SLOT-1
     #[test]
     fn a_stale_handle_never_touches_the_slot_it_used_to_name() {
         let _shm = crate::own_test_registry();
@@ -13738,110 +12730,263 @@ mod write_behind_tests {
         let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
         let (gen_claim, idx) = unpack_handle(h);
         let slot = slot_ref(idx).unwrap();
-        let mut fds = [0 as libc::c_int; 2];
-        assert_eq!(unsafe { morloc_runtime_types::fd::pipe(fds.as_mut_ptr()) }, 0);
-        let owner = unsafe { libc::fork() };
-        assert!(owner >= 0);
-        if owner == 0 {
-            let mut b = 0u8;
-            unsafe {
-                libc::close(fds[1]);
-                libc::read(fds[0], &mut b as *mut u8 as *mut libc::c_void, 1);
-                libc::_exit(0);
-            }
-        }
-        slot.wb_owner_pid.set(owner as u32);
-        slot.wb_owner_start.set(morloc_runtime_types::process::start_time(owner as u32));
-        let stale = (gen_claim + 1) & GENERATION_MASK;
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let slot = slot_ref(idx).unwrap();
-            let r = lock_for_write(slot, stale, "stale").map(|_| ());
-            let _ = tx.send(r.is_err());
-        });
-        let refused = rx.recv_timeout(std::time::Duration::from_secs(5));
-        let sync_only = slot.wb_sync_only.get();
-        unsafe {
-            slot.wb_owner_pid.set(0);
-            slot.wb_owner_start.set(0);
-            libc::close(fds[1]);
-            libc::close(fds[0]);
-            libc::waitpid(owner, std::ptr::null_mut(), 0);
-        }
-        shared_close_handle(h).unwrap();
-        assert_eq!(refused, Ok(true), "a stale generation was not refused promptly");
-        assert_eq!(sync_only, 0, "a stale handle changed the slot's write mode");
-    }
-
-    #[test]
-    fn a_batch_sealed_while_a_drain_finishes_is_still_drained() {
-        let _shm = crate::own_test_registry();
-        let dir = test_dir("drain_gap");
-        let path = dir.join("gap.idx");
-        crate::stream::set_test_write_buffer_bytes(Some(4096));
-        crate::write_behind::set_test_depth(Some(5));
-        fn write_some(h: i64) {
-            let list = parse_schema("as").unwrap();
-            for b in odd_batches(12, 37, 's') {
-                let v = crate::json::read_json_with_schema(&serde_json::to_string(&b).unwrap(), &list).unwrap();
-                shared_write_subpacket(h, CompressionLevel::from_u8(3).unwrap(), v).unwrap();
-                shm::shfree(v).unwrap();
-            }
-        }
-        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
-        let (_gen, idx) = unpack_handle(h);
-        let slot = slot_ref(idx).unwrap();
-        write_some(h);
-        assert!(crate::write_behind::sealed_handles().contains(&h));
-
-        static TARGET: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
-        TARGET.store(h, std::sync::atomic::Ordering::SeqCst);
-        *DRAIN_GAP_HOOK.lock().unwrap() = Some(|h| {
-            if h == TARGET.load(std::sync::atomic::Ordering::SeqCst) {
-                *DRAIN_GAP_HOOK.lock().unwrap() = None;
-                write_some(h);
-            }
-        });
-        let drained = drain_before_handoff();
-        *DRAIN_GAP_HOOK.lock().unwrap() = None;
-        drained.unwrap();
-        let outstanding = slot.wb_outstanding.get();
-        let listed = crate::write_behind::sealed_handles().contains(&h);
-
-        shared_close_handle(h).unwrap();
-        crate::stream::set_test_write_buffer_bytes(None);
-        crate::write_behind::set_test_depth(None);
-        assert!(outstanding > 0, "the hook sealed nothing; the test does not exercise the gap");
-        assert!(listed, "{outstanding} sealed batches are held by a stream no drain will visit");
-    }
-
-    // A dispatch leaves nothing compressing: its end writes every batch
-    // the thread sealed, on a stream the call left open.
-    #[test]
-    fn dispatch_end_writes_the_threads_sealed_batches() {
-        let _shm = crate::own_test_registry();
-        let dir = test_dir("drain");
-        let path = dir.join("drain.idx");
-        crate::stream::set_test_write_buffer_bytes(Some(4096));
-        crate::write_behind::set_test_depth(Some(8));
+        let q = slot_queue(slot).unwrap();
+        let stale = pack_handle((gen_claim + 1) & GENERATION_MASK, idx);
+        let pushed = q.pushed();
+        let count = slot.element_count.get();
         let list = parse_schema("as").unwrap();
-        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
-        let (_gen, idx) = unpack_handle(h);
-        let slot = slot_ref(idx).unwrap();
-        for b in odd_batches(12, 37, 't') {
-            let v = crate::json::read_json_with_schema(&serde_json::to_string(&b).unwrap(), &list).unwrap();
-            shared_write_subpacket(h, CompressionLevel::from_u8(2).unwrap(), v).unwrap();
-            shm::shfree(v).unwrap();
+        let v = crate::json::read_json_with_schema("[\"a\"]", &list).unwrap();
+        assert!(shared_write_subpacket(stale, CompressionLevel::from_u8(0).unwrap(), v).is_err());
+        assert!(shared_flush_buffer(stale).is_err());
+        assert!(shared_close_handle(stale).is_err());
+        shm::shfree(v).unwrap();
+        assert_eq!(q.pushed(), pushed, "a stale handle queued something");
+        assert_eq!(slot.element_count.get(), count, "a stale handle wrote an element");
+        assert!(lock_for_write(slot, (gen_claim + 1) & GENERATION_MASK, "stale").is_err());
+        shared_close_handle(h).unwrap();
+    }
+
+    fn fork_writer(h: i64, batches: Vec<Vec<String>>) -> libc::pid_t {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe { libc::alarm(20) };
+            let ok = std::panic::catch_unwind(|| {
+                for b in &batches {
+                    write_one(h, b, 0);
+                }
+            })
+            .is_ok();
+            unsafe { libc::_exit(if ok { 0 } else { 3 }) };
         }
-        assert!(slot.wb_outstanding.get() > 0);
-        let written = slot.subpacket_entries_len.get();
-        drain_sealed_batches().unwrap();
-        assert_eq!(slot.wb_outstanding.get(), 0);
-        assert!(slot.subpacket_entries_len.get() > written);
+        pid
+    }
+
+    fn reap(pid: libc::pid_t) -> i32 {
+        let mut st = 0;
+        unsafe { libc::waitpid(pid, &mut st, 0) };
+        st
+    }
+
+    // SLOT-13: a writer that leaves through _exit, with elements still
+    // buffered, loses none of them.
+    #[test]
+    fn a_forked_writer_that_exits_without_flushing_loses_nothing() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("child_exit");
+        let path = dir.join("child.idx");
+        crate::stream::set_test_write_buffer_bytes(Some(4096));
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let batches = odd_batches(9, 23, 'c');
+        let st = reap(fork_writer(h, batches.clone()));
+        assert!(libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0, "writer status {st}");
         shared_close_handle(h).unwrap();
         crate::stream::set_test_write_buffer_bytes(None);
-        crate::write_behind::set_test_depth(None);
-        assert_eq!(read_strs(&path), odd_batches(12, 37, 't').concat());
+        assert_eq!(read_strs(&path), batches.concat());
+    }
+
+    // SLOT-11: writes from two processes interleave only between writes.
+    #[test]
+    fn writes_from_two_processes_keep_each_write_whole() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("two_writers");
+        let path = dir.join("two.idx");
+        crate::stream::set_test_write_buffer_bytes(Some(4096));
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let tagged = |tag: char| -> Vec<Vec<String>> {
+            (0..30).map(|w| (0..17).map(|i| format!("{tag}{w}:{i}")).collect()).collect()
+        };
+        let a = fork_writer(h, tagged('a'));
+        let b = fork_writer(h, tagged('b'));
+        let (sa, sb) = (reap(a), reap(b));
+        assert!(libc::WIFEXITED(sa) && libc::WEXITSTATUS(sa) == 0);
+        assert!(libc::WIFEXITED(sb) && libc::WEXITSTATUS(sb) == 0);
+        shared_close_handle(h).unwrap();
+        crate::stream::set_test_write_buffer_bytes(None);
+        let got = read_strs(&path);
+        assert_eq!(got.len(), 2 * 30 * 17);
+        for chunk in got.chunks(17) {
+            let write = chunk[0].split(':').next().unwrap();
+            for (i, e) in chunk.iter().enumerate() {
+                assert_eq!(e, &format!("{write}:{i}"), "a write was split: {chunk:?}");
+            }
+        }
+        for tag in ['a', 'b'] {
+            let order: Vec<&str> = got.iter().step_by(17).map(|e| e.split(':').next().unwrap()).filter(|w| w.starts_with(tag)).collect();
+            let want: Vec<String> = (0..30).map(|w| format!("{tag}{w}")).collect();
+            assert_eq!(order, want, "one process's writes out of order");
+        }
+    }
+
+    // SLOT-14: a writer killed inside the slot lock fails the stream; what
+    // was queued before it is still written, and the footer says FAILED.
+    #[test]
+    fn a_writer_killed_inside_the_slot_lock_fails_the_stream() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("killed_inside");
+        let path = dir.join("killed.idx");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let first = vec!["kept".to_string()];
+        write_one(h, &first, 0);
+        shared_flush_buffer(h).unwrap();
+        let (_gen, idx) = unpack_handle(h);
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            let slot = slot_ref(idx).unwrap();
+            std::mem::forget(SlotGuard::lock(slot));
+            unsafe { libc::_exit(0) };
+        }
+        reap(pid);
+        let closed = shared_close_handle(h);
+        assert!(closed.is_err(), "closing a stream a writer died inside succeeded");
+        let (mp, sz) = mmap_file_readonly(path.to_str().unwrap()).unwrap();
+        let footer = try_read_footer(mp, sz);
+        unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize) };
+        let footer = footer.unwrap().expect("a final footer");
+        assert_eq!(footer.footer_status, morloc_runtime_types::packet::FOOTER_STATUS_FAILED);
+        assert_eq!(read_strs(&path), first);
+    }
+
+    // SLOT-15: once close returns the file is finished, so its path reopens
+    // at once; writes through the closed handle fail.
+    #[test]
+    fn a_closed_stream_refuses_writes_and_its_path_reopens_at_once() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("reopen");
+        let path = dir.join("reopen.idx");
+        let p = path.to_str().unwrap();
+        let h = shared_open_ostream_with_schema(p, "as").unwrap();
+        write_one(h, &["x".to_string()], 0);
+        shared_close_handle(h).unwrap();
+        let list = parse_schema("as").unwrap();
+        let v = crate::json::read_json_with_schema("[\"late\"]", &list).unwrap();
+        assert!(shared_write_subpacket(h, CompressionLevel::from_u8(0).unwrap(), v).is_err());
+        shm::shfree(v).unwrap();
+        let began = std::time::Instant::now();
+        let again = shared_append_to_path(p, "as").unwrap();
+        assert!(began.elapsed() < std::time::Duration::from_millis(500));
+        write_one(again, &["y".to_string()], 0);
+        shared_close_handle(again).unwrap();
+        assert_eq!(read_strs(&path), vec!["x".to_string(), "y".to_string()]);
+    }
+
+    // SLOT-15: a flush returns once its elements are in the file.
+    #[test]
+    fn a_flush_makes_its_elements_readable_from_the_open_file() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("flush_visible");
+        let path = dir.join("flush.idx");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let batch: Vec<String> = (0..5).map(|i| format!("f{i}")).collect();
+        write_one(h, &batch, 3);
+        shared_flush_buffer(h).unwrap();
+        assert_eq!(read_strs(&path), batch);
+        shared_close_handle(h).unwrap();
+    }
+
+    static SINK: Mutex<Vec<(i64, Vec<u8>)>> = Mutex::new(Vec::new());
+
+    unsafe extern "C" fn recording_sink(handle: i64, rel: i64, len: u64, _err: *mut *mut libc::c_char) -> i32 {
+        let abs = crate::shm::rel2abs(rel as RelPtr).unwrap();
+        let bytes = std::slice::from_raw_parts(abs as *const u8, len as usize).to_vec();
+        SINK.lock().unwrap().push((handle, bytes));
+        crate::custody::SINK_WRITTEN
+    }
+
+    // SLOT-16: a stdout write that queued a batch returns once the batch has
+    // reached the nexus, and the close's footer follows it there.
+    #[test]
+    fn a_stdout_write_returns_once_its_batches_reach_the_nexus() {
+        let _shm = crate::own_test_registry();
+        crate::custody::set_stdio_sink(recording_sink);
+        crate::stream::set_test_write_buffer_bytes(Some(4096));
+        let h = open_stdio(MLC_KIND_OSTREAM, STDIO_KIND_STDOUT, "as").unwrap();
+        let mine = || SINK.lock().unwrap().iter().filter(|(x, _)| *x == h).count();
+        let batch: Vec<String> = (0..400).map(|i| format!("{i}:{}", "s".repeat(20))).collect();
+        write_one(h, &batch, 0);
+        let after_write = mine();
+        shared_close_handle(h).unwrap();
+        let after_close = mine();
+        crate::stream::set_test_write_buffer_bytes(None);
+        assert!(after_write >= 1, "a write that filled buffers returned before any reached the nexus");
+        assert_eq!(after_close, after_write + 2, "the close sent other than its tail and footer");
+        assert!(open_stdio(MLC_KIND_OSTREAM, STDIO_KIND_STDOUT, "as").map(shared_close_handle).is_ok(), "the stdout claim was not released");
+    }
+
+    // SLOT-13, DAEMON-1: stopping a writer finishes its file with the given
+    // status from what reached the queue.
+    #[test]
+    fn a_stopped_writer_finishes_its_file_with_the_given_status() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("stopped");
+        let path = dir.join("stopped.idx");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let first = vec!["queued".to_string()];
+        write_one(h, &first, 0);
+        shared_flush_buffer(h).unwrap();
+        write_one(h, &["buffered".to_string()], 0);
+        let (gen, idx) = unpack_handle(h);
+        crate::custody::host_stop(idx, morloc_runtime_types::packet::FOOTER_STATUS_FAILED);
+        release_closed_slot(idx, gen);
+        let (mp, sz) = mmap_file_readonly(path.to_str().unwrap()).unwrap();
+        let footer = try_read_footer(mp, sz);
+        unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize) };
+        assert_eq!(footer.unwrap().expect("a final footer").footer_status, morloc_runtime_types::packet::FOOTER_STATUS_FAILED);
+        assert_eq!(read_strs(&path), first);
+    }
+
+    // A close after the writer stopped returns at once and frees the slot.
+    #[test]
+    fn a_close_after_its_writer_stopped_does_not_wait() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("after_stop");
+        let path = dir.join("after_stop.idx");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let (gen, idx) = unpack_handle(h);
+        crate::custody::host_stop(idx, crate::custody::STATUS_DISCARD as u8);
+        let began = std::time::Instant::now();
+        let _ = shared_close_handle(h);
+        assert!(began.elapsed() < std::time::Duration::from_secs(2), "a close waited on a stopped writer");
+        assert!(!slot_generation_is(slot_ref(idx).unwrap(), gen), "the slot was not released");
+    }
+
+    // A slot released without a close ends its writer, which then leaves
+    // the queue alone.
+    #[test]
+    fn a_writer_whose_slot_was_released_stops_reading_its_queue() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("released_under");
+        let path = dir.join("released.idx");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let (gen, idx) = unpack_handle(h);
+        let slot = slot_ref(idx).unwrap();
+        let q = slot_queue(slot).unwrap();
+        release_closed_slot(idx, gen);
+        let began = std::time::Instant::now();
+        while q.has_consumer() && began.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!q.has_consumer(), "the writer kept reading a released slot's queue");
+    }
+
+    // A discarded stream writes what was queued, drops what was buffered,
+    // and keeps the temporary footer: the "writer did not finish" signal.
+    #[test]
+    fn a_discarded_stream_keeps_what_was_queued_and_no_final_footer() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("discard");
+        let path = dir.join("discard.idx");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let first = vec!["queued".to_string()];
+        write_one(h, &first, 0);
+        shared_flush_buffer(h).unwrap();
+        write_one(h, &["buffered".to_string()], 0);
+        shared_discard_handle(h).unwrap();
+        let (mp, sz) = mmap_file_readonly(path.to_str().unwrap()).unwrap();
+        let footer = try_read_footer(mp, sz);
+        unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize) };
+        assert!(footer.unwrap().is_none_or(|f| !f.final_footer), "a discarded stream has a final footer");
+        assert_eq!(read_strs(&path), first);
     }
 
     fn write_one(h: i64, batch: &[String], level: u8) {
@@ -13878,67 +13023,6 @@ mod write_behind_tests {
         shared_close_handle(h).unwrap();
         crate::write_behind::set_test_depth(None);
         assert_eq!(read_strs(&path), want);
-    }
-
-    // A dispatch's end writes batches sealed by any thread of the pool, not
-    // only the dispatch thread: a producer may write from its own workers.
-    #[test]
-    fn dispatch_end_writes_batches_sealed_on_other_threads() {
-        let _shm = crate::own_test_registry();
-        let dir = test_dir("threads");
-        let path = dir.join("threads.idx");
-        crate::stream::set_test_write_buffer_bytes(Some(4096));
-        crate::write_behind::set_test_depth(Some(8));
-        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
-        let (_gen, idx) = unpack_handle(h);
-        let slot = slot_ref(idx).unwrap();
-        let batches = odd_batches(12, 37, 'v');
-        let b2 = batches.clone();
-        std::thread::spawn(move || {
-            for b in &b2 {
-                write_one(h, b, 3);
-            }
-        })
-        .join()
-        .unwrap();
-        assert!(slot.wb_outstanding.get() > 0);
-        drain_sealed_batches().unwrap();
-        assert_eq!(slot.wb_outstanding.get(), 0, "batches sealed on a worker thread were left queued");
-        assert_eq!(slot.wb_owner_pid.get(), 0);
-        shared_close_handle(h).unwrap();
-        crate::stream::set_test_write_buffer_bytes(None);
-        crate::write_behind::set_test_depth(None);
-        assert_eq!(read_strs(&path), batches.concat());
-    }
-
-    // A forked child may write the stream too, so a fork first writes the
-    // batches this process holds; otherwise the child would wait for them.
-    #[test]
-    fn fork_writes_the_batches_this_process_holds() {
-        let _shm = crate::own_test_registry();
-        let dir = test_dir("fork");
-        let path = dir.join("fork.idx");
-        crate::stream::set_test_write_buffer_bytes(Some(4096));
-        crate::write_behind::set_test_depth(Some(8));
-        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
-        let (_gen, idx) = unpack_handle(h);
-        let slot = slot_ref(idx).unwrap();
-        let batches = odd_batches(12, 37, 'w');
-        for b in &batches {
-            write_one(h, b, 3);
-        }
-        assert!(slot.wb_outstanding.get() > 0);
-        let pid = unsafe { libc::fork() };
-        if pid == 0 {
-            unsafe { libc::_exit(0) };
-        }
-        let mut status = 0;
-        unsafe { libc::waitpid(pid, &mut status, 0) };
-        assert_eq!(slot.wb_outstanding.get(), 0, "a fork left sealed batches queued");
-        shared_close_handle(h).unwrap();
-        crate::stream::set_test_write_buffer_bytes(None);
-        crate::write_behind::set_test_depth(None);
-        assert_eq!(read_strs(&path), batches.concat());
     }
 
     // An element too large for the buffer is written on its own, between

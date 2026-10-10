@@ -106,9 +106,10 @@ In these files the only comments allowed are spec references:
 - morloc-runtime/src: stream.rs, write_behind.rs, handle_scan.rs, pins.rs,
   cache.rs, shm.rs, shm_companion.rs, eval_arena.rs, cell.rs, crash.rs,
   daemon_ffi.rs, pool_ffi.rs, ipc_ffi.rs, router_ffi.rs, arrow_shm.rs,
-  lifeline.rs, fork_policy.rs, panic_ffi.rs
+  lifeline.rs, fork_policy.rs, panic_ffi.rs, custody.rs
 - morloc-runtime-types/src: recoverable_lock.rs, shm_lock.rs,
-  owner_word.rs, stream_handle.rs, dispatch_guard.rs, fd.rs, panic.rs
+  owner_word.rs, stream_handle.rs, dispatch_guard.rs, fd.rs, panic.rs,
+  wait_word.rs
 - morloc-nexus/src: process.rs
 
 The form is `// <ID>: <how this line applies it>`, with `// SAFETY: <ID>: ...`

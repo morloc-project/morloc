@@ -820,12 +820,6 @@ pub(crate) unsafe fn send_and_receive_over_socket_wait(
 ) -> *mut u8 {
     clear_errmsg(errmsg);
 
-    // The callee may write a stream this pool has batches of in flight.
-    if let Err(e) = crate::stream::drain_before_handoff() {
-        set_errmsg(errmsg, &e);
-        return ptr::null_mut();
-    }
-
     if forbid_self_call() && is_self_socket(socket_path) {
         set_errmsg(errmsg, &self_call_error(socket_path, packet));
         return ptr::null_mut();

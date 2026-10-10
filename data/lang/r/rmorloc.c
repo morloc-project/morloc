@@ -4323,6 +4323,8 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
     SEXP result = R_tryEvalSilent(r_call, R_GlobalEnv, &eval_err);
     // A process forked by user code during this call exits here (FORK-12).
     morloc_exit_if_forked();
+    // SLOT-16: output the call left on stdout is written before its reply.
+    mlc_reclaim_stdio_after_dispatch();
 
     if (eval_err || result == R_NilValue || TYPEOF(result) != RAWSXP) {
         UNPROTECT(nprotect);

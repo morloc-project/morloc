@@ -37,6 +37,7 @@ pub mod compression;
 pub mod daemon_socket;
 pub mod stream_handle;
 pub mod stdio_proto;
+pub mod wait_word;
 pub mod width;
 pub mod slice;
 pub mod eval_status;

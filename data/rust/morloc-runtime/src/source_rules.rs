@@ -5,7 +5,7 @@ use syn::visit::Visit;
 
 const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc", "morloc-nexus"];
 const PREPARE_HANDLERS: &[&str] = &["prepare_fork_body"];
-const MAX_DEVIATING_ROWS: usize = 3;
+const MAX_DEVIATING_ROWS: usize = 2;
 const MAX_ENV_READS: usize = 67;
 const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/cell.rs::proc_tag",
@@ -21,7 +21,9 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/stream.rs::allocate_slot_cas",
     "morloc-runtime/stream.rs::read_pid_start_time",
     "morloc-runtime/stream.rs::verify_stdio_opener_pid",
-    "morloc-runtime/stream.rs::note_sealed",
+    "morloc-runtime/custody.rs::push_with",
+    "morloc-runtime/custody.rs::take_custody",
+    "morloc-runtime/custody.rs::open",
     "morloc-runtime-types/process.rs::token",
     "morloc-runtime-types/recoverable_lock.rs::ensure_ready",
     "morloc-nexus/process.rs::make_tmpdir",

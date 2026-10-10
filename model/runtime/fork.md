@@ -132,15 +132,14 @@ Status: deviation
 Prepare waits for every held lock, so a thread that holds one while
 waiting on another process makes the fork wait as long as that process.
 Today the allocator's locks are held across other processes' volume locks
-and volume creation; the release pass across other processes' slot locks,
-compression jobs and nexus calls (also in prepare's own drain). Shared
-segments are opened outside their locks (INIT-2), and the benchmark and
-tee files are opened and written outside theirs. Model:
-`ForkLocks_held_across_wait.bug` deadlocks. The allocator half belongs to
-the shared-memory references and pool runtime project, and the release
-pass to the single-writer streams project (/work/plans briefs); until
-then a fork may be delayed by another process's work, with no cycle found
-by the lock-order audit.
+and volume creation. The stream release pass waits on nothing: written
+streams are finished by their custodian (SLOT-10), and prepare no longer
+drains anything. Shared segments are opened outside their locks (INIT-2),
+and the benchmark and tee files are opened and written outside theirs.
+Model: `ForkLocks_held_across_wait.bug` deadlocks. The allocator half
+belongs to the shared-memory references and pool runtime project
+(/work/plans brief); until then a fork may be delayed by another process's
+allocation, with no cycle found by the lock-order audit.
 
 ### FORK-11 Code reachable in a forked child takes no standard-library lock
 Status: deviation
@@ -256,7 +255,7 @@ and fold cells draw a new tag in the child, never equal to the parent's.
 
 ### FORK-14 State inherited across fork is owned by fork generation, never by pid
 Status: implemented
-Checked by: a_descendant_with_its_ancestors_pid_leaves_the_ancestors_buffers, a_descendant_with_its_ancestors_pid_cannot_release_the_ancestors_reference, a_descendant_with_its_ancestors_pid_ignores_the_ancestors_in_use_marks, a_descendant_with_its_ancestors_pid_opens_its_own_nexus_connection, a_descendant_with_its_ancestors_pid_does_not_own_the_program, every_process_id_read_is_reviewed
+Checked by: a_descendant_with_its_ancestors_pid_cannot_release_the_ancestors_reference, a_descendant_with_its_ancestors_pid_ignores_the_ancestors_in_use_marks, a_descendant_with_its_ancestors_pid_opens_its_own_nexus_connection, a_descendant_with_its_ancestors_pid_does_not_own_the_program, every_process_id_read_is_reviewed
 
 Process-local state records the process that owns it, so a forked child
 can tell an inherited copy from its own. A pid does not identify a process

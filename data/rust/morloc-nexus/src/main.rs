@@ -58,6 +58,35 @@ fn watch_lifeline() {
     unsafe { morloc_lifeline_guard() };
 }
 
+extern "C" {
+    fn morloc_custody_host_start();
+    fn morloc_custody_finish_all(status: u8);
+    fn morloc_custody_finish_stdio(status: u8);
+    fn morloc_custody_stop_all(status: u8);
+}
+
+/// Make the nexus the writer of every written stream (SLOT-10).
+pub(crate) fn custody_host_start() {
+    unsafe { morloc_custody_host_start() };
+}
+
+/// End the written streams still open: stdout and stderr only, or all.
+pub(crate) fn custody_finish(stdio_only: bool) {
+    let paused = morloc_runtime_types::packet::FOOTER_STATUS_PAUSED;
+    unsafe {
+        if stdio_only {
+            morloc_custody_finish_stdio(paused)
+        } else {
+            morloc_custody_finish_all(paused)
+        }
+    }
+}
+
+/// Stop every stream writer, finishing each file with `status`.
+pub(crate) fn custody_stop(status: u8) {
+    unsafe { morloc_custody_stop_all(status) };
+}
+
 fn main() {
     // Ignore SIGPIPE process-wide so a reader that closes early (e.g.
     // `morloc view | head`, `... | less` quit before EOF) surfaces as an EPIPE
@@ -156,6 +185,7 @@ fn main() {
         }
         cli::Mode::View(ref vargs) => {
             process::init_shm();
+            custody_host_start();
             watch_lifeline();
             view::run(vargs);
         }

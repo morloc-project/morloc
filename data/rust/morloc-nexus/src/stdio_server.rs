@@ -29,7 +29,7 @@ use std::sync::Mutex;
 
 use morloc_runtime_types::packet::{PacketHeader, StreamDiag, SubpacketEntry};
 use morloc_runtime_types::stdio_proto::{
-    OP_NEXT_STDIO, OP_WRITE_STDIO, OP_SPAWN,
+    OP_NEXT_STDIO, OP_SPAWN, OP_OPEN_STREAM, OP_ADOPT_STREAM,
     STATUS_OK, STATUS_ERR, STATUS_EOF, STATUS_PIPE_CLOSED,
     STDIO_KIND_STDOUT, STDIO_KIND_STDERR,
 };
@@ -199,6 +199,8 @@ pub fn start(tmpdir: &str, output_format: OutputFormat, daemon: bool) {
         }
         NEXUS_PID.store(std::process::id() as i32, std::sync::atomic::Ordering::Release);
         set_daemon_mode(daemon);
+        crate::custody_host_start();
+        unsafe { morloc_custody_set_stdio_sink(stdio_sink as *const std::ffi::c_void) };
 
         // SIGPIPE ignore. One-liner but easy to miss; without it a
         // `write(1)` to a closed downstream pipe kills the nexus.
@@ -263,13 +265,14 @@ fn handle_connection(mut stream: UnixStream) -> std::io::Result<()> {
                 let slot_id = i64::from_le_bytes(req);
                 serve_op(&mut stream, |_| Ok(do_next(slot_id)))?;
             }
-            OP_WRITE_STDIO => {
-                let mut req = [0u8; 24];
+            OP_OPEN_STREAM => {
+                serve_op(&mut stream, do_open_stream)?;
+            }
+            OP_ADOPT_STREAM => {
+                let mut req = [0u8; 8];
                 stream.read_exact(&mut req)?;
-                let slot_id = i64::from_le_bytes(req[0..8].try_into().unwrap());
-                let relptr = i64::from_le_bytes(req[8..16].try_into().unwrap());
-                let size = u64::from_le_bytes(req[16..24].try_into().unwrap());
-                serve_op(&mut stream, |_| Ok(do_write(slot_id, relptr, size)))?;
+                let handle = i64::from_le_bytes(req);
+                serve_op(&mut stream, |_| Ok(do_adopt_stream(handle)))?;
             }
             OP_SPAWN => {
                 serve_op(&mut stream, do_spawn)?;
@@ -333,10 +336,102 @@ fn write_resp(r: Result<(), crate::stdio_bridge::WriteError>) -> Resp {
 /// this never returns. In daemon mode the nexus serves other clients, so
 /// it returns `PipeClosed` to fail just the current call instead.
 fn pipe_closed_resp() -> Resp {
-    if DAEMON_MODE.load(std::sync::atomic::Ordering::Acquire) {
-        Resp::PipeClosed
+    if !DAEMON_MODE.load(std::sync::atomic::Ordering::Acquire) {
+        crate::process::mark_broken_pipe();
+        // The stream writer calling this must not run the teardown that
+        // stops it.
+        static EXITING: std::sync::Once = std::sync::Once::new();
+        EXITING.call_once(|| {
+            let _ = std::thread::Builder::new()
+                .name("morloc-broken-pipe".into())
+                .spawn(|| crate::process::exit_broken_pipe());
+        });
+    }
+    Resp::PipeClosed
+}
+
+extern "C" {
+    fn morloc_custody_open(
+        mode: u8,
+        path: *const u8,
+        path_len: usize,
+        schema: *const u8,
+        schema_len: usize,
+        pid: u32,
+        start: u64,
+        call_id: u64,
+        errmsg: *mut *mut std::ffi::c_char,
+    ) -> i64;
+    fn morloc_custody_adopt(handle: i64, errmsg: *mut *mut std::ffi::c_char) -> i32;
+    fn morloc_custody_set_stdio_sink(sink: *const std::ffi::c_void);
+}
+
+fn take_errmsg(err: *mut std::ffi::c_char) -> String {
+    if err.is_null() {
+        return "unknown error".into();
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned();
+    unsafe { libc::free(err as *mut libc::c_void) };
+    s
+}
+
+/// `OP_OPEN_STREAM`: open a file `OStream` for a pool (SLOT-10).
+fn do_open_stream(stream: &mut UnixStream) -> std::io::Result<Resp> {
+    let mut head = [0u8; 1 + 4 + 8 + 8];
+    stream.read_exact(&mut head)?;
+    let mode = head[0];
+    let pid = u32::from_le_bytes(head[1..5].try_into().unwrap());
+    let start = u64::from_le_bytes(head[5..13].try_into().unwrap());
+    let call_id = u64::from_le_bytes(head[13..21].try_into().unwrap());
+    let path = read_sized(stream)?;
+    let schema = read_sized(stream)?;
+    let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+    let handle = unsafe {
+        morloc_custody_open(mode, path.as_ptr(), path.len(), schema.as_ptr(), schema.len(), pid, start, call_id, &mut err)
+    };
+    Ok(if handle < 0 { Resp::Err(take_errmsg(err)) } else { Resp::Ok(handle, 0) })
+}
+
+fn read_sized(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len)?;
+    let n = u32::from_le_bytes(len) as usize;
+    const MAX_FIELD: usize = 1 << 20;
+    if n > MAX_FIELD {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "request field too long"));
+    }
+    let mut v = vec![0u8; n];
+    stream.read_exact(&mut v)?;
+    Ok(v)
+}
+
+/// `OP_ADOPT_STREAM`: start writing a pool's stdout or stderr stream (SLOT-16).
+fn do_adopt_stream(handle: i64) -> Resp {
+    let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+    if unsafe { morloc_custody_adopt(handle, &mut err) } != 0 {
+        Resp::Err(take_errmsg(err))
     } else {
-        crate::process::exit_broken_pipe()
+        Resp::Ok(0, 0)
+    }
+}
+
+/// The custodian's sink for stdout and stderr streams (SLOT-16).
+pub(crate) unsafe extern "C" fn stdio_sink(
+    handle: i64,
+    rel: i64,
+    len: u64,
+    errmsg: *mut *mut std::ffi::c_char,
+) -> i32 {
+    match do_write(handle, rel, len) {
+        Resp::Ack | Resp::Ok(..) | Resp::Eof => 0,
+        Resp::PipeClosed => 2,
+        Resp::Err(m) => {
+            if !errmsg.is_null() {
+                let c = std::ffi::CString::new(m.replace('\0', " ")).unwrap_or_default();
+                *errmsg = libc::strdup(c.as_ptr());
+            }
+            1
+        }
     }
 }
 

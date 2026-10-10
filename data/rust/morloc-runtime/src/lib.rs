@@ -60,6 +60,7 @@ pub mod eval_arena;
 pub mod eval_ffi;
 pub mod stream;
 mod write_behind;
+pub mod custody;
 pub mod handle_scan;
 pub mod arrow_shm;
 pub mod lease;
@@ -240,6 +241,7 @@ fn ensure_test_arena() {
             libc::atexit(remove_test_arena);
         });
     }
+    crate::custody::test_host();
 }
 
 /// Remove this process's test arena at exit: statics are never dropped, so

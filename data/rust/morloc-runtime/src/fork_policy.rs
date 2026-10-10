@@ -264,7 +264,6 @@ fn prepare_fork_body() {
         None
     };
     let pass = crate::stream::RELEASE_PASS.lock();
-    crate::stream::drain_before_fork();
     let held = ForkHeld {
         _pass: pass,
         map: crate::stream::PROCESS_LOCAL_SLOTS.lock(),

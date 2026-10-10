@@ -275,6 +275,8 @@ fn check_and_recover(n_pools: usize) {
     // the namespace being discarded.
     unsafe { morloc_reclaim_all() };
     unsafe { morloc_remove_leases() };
+    // DAEMON-1, SLOT-13: no stream writer reads the namespace being discarded.
+    crate::custody_stop(morloc_runtime_types::packet::FOOTER_STATUS_FAILED);
     unsafe {
         let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
         shclose(&mut err);
@@ -977,6 +979,7 @@ fn teardown(exit_code: i32, unmap: bool) -> ! {
     if CLEANING_UP.swap(true, Ordering::SeqCst) {
         park_until_exit();
     }
+    let exit_code = if BROKEN_PIPE.load(Ordering::SeqCst) { 141 } else { exit_code };
     EXIT_CODE.store(exit_code, Ordering::SeqCst);
     // DAEMON-10
     unsafe { morloc_daemon_remove_endpoints() };
@@ -986,6 +989,7 @@ fn teardown(exit_code: i32, unmap: bool) -> ! {
     // a reader cannot mistake a partial stream for a whole one.
     let mut exit_code = exit_code;
     if exit_code == 0 && !BROKEN_PIPE.load(Ordering::Relaxed) {
+        crate::custody_finish(false);
         crate::stdio_server::finish_stdout();
     }
     // A stage completes the stream it saved even when stdout broke; the
@@ -1028,6 +1032,8 @@ fn teardown(exit_code: i32, unmap: bool) -> ! {
     stop_pools();
     crate::stop_frontend_children();
 
+    // SLOT-13: a stream nobody finished keeps its temporary footer.
+    crate::custody_stop(255);
     // FORK-15: leases kept outside the run directory.
     unsafe { morloc_remove_leases() };
     // Clean up shared memory segments
@@ -1152,8 +1158,14 @@ pub fn end_after_panic() -> ! {
 }
 
 pub fn exit_broken_pipe() -> ! {
-    BROKEN_PIPE.store(true, Ordering::SeqCst);
+    mark_broken_pipe();
     clean_exit(141);
+}
+
+/// Record that stdout's reader is gone; the run then ends with 141 whichever
+/// thread ends it.
+pub fn mark_broken_pipe() {
+    BROKEN_PIPE.store(true, Ordering::SeqCst);
 }
 
 /// True once some thread has committed to tearing the nexus down.
