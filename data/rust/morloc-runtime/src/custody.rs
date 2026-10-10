@@ -603,7 +603,7 @@ impl Writer {
         } else {
             match ticket.wait() {
                 Ok(c) => {
-                    let prepared = crate::stream::PreparedPayload {
+                    let prepared = crate::stream_format::PreparedPayload {
                         bytes: std::borrow::Cow::Owned(c.bytes),
                         frames: Some(c.frames),
                         uncompressed_len: c.uncompressed_len,
@@ -630,7 +630,7 @@ impl Writer {
         let res = self.compact(&item).and_then(|bytes| {
             let level = crate::compression::CompressionLevel::from_u8(item.level)?;
             let (out, frames) = crate::compression::compress_payload_zstd(bytes, level)?;
-            Ok(crate::stream::PreparedPayload {
+            Ok(crate::stream_format::PreparedPayload {
                 bytes: std::borrow::Cow::Owned(out),
                 frames: Some(frames),
                 uncompressed_len: bytes.len(),
@@ -661,8 +661,8 @@ impl Writer {
     fn commit_now(&mut self, item: Item) {
         match self.compact(&item) {
             Ok(bytes) => {
-                crate::stream::debug_assert_payload_elem_count(item.elems, bytes, "custody");
-                let prepared = crate::stream::PreparedPayload {
+                crate::stream_format::debug_assert_payload_elem_count(item.elems, bytes, "custody");
+                let prepared = crate::stream_format::PreparedPayload {
                     bytes: std::borrow::Cow::Borrowed(bytes),
                     frames: None,
                     uncompressed_len: bytes.len(),
@@ -675,8 +675,8 @@ impl Writer {
         self.q.finish(1);
     }
 
-    fn emit(&mut self, prepared: crate::stream::PreparedPayload<'_>, item: &Item) {
-        let sub = match crate::stream::build_subpacket_bytes(&self.value_schema, prepared) {
+    fn emit(&mut self, prepared: crate::stream_format::PreparedPayload<'_>, item: &Item) {
+        let sub = match crate::stream_format::build_subpacket_bytes(&self.value_schema, prepared) {
             Ok(s) => s,
             Err(e) => return self.fail(FAILED_IO, &e.to_string()),
         };
@@ -695,7 +695,7 @@ impl Writer {
         }
         // SAFETY: SLOT-10: `diag` is the writer's own.
         unsafe {
-            crate::stream::record_subpacket_flush(
+            crate::stream_format::record_subpacket_flush(
                 &mut self.diag,
                 sub.uncompressed_len as u64,
                 sub.compressed_payload_len as u64,
@@ -705,7 +705,7 @@ impl Writer {
         self.entries.push(morloc_runtime_types::packet::SubpacketEntry { offset: cursor, elem_count: item.elems });
         if let Out::File(fd) = self.out {
             let footer = morloc_runtime_types::packet::make_temp_footer_packet(&self.diag);
-            if let Err(e) = crate::stream::pwrite_all_fd(fd, &footer, self.cursor) {
+            if let Err(e) = crate::stream_format::pwrite_all_fd(fd, &footer, self.cursor) {
                 self.fail(FAILED_IO, &e.to_string());
             }
         }
@@ -749,7 +749,7 @@ impl Writer {
         if !self.failed && status != STATUS_DISCARD {
             let footer = morloc_runtime_types::packet::make_final_footer_packet(&self.diag, &self.entries, status as u8);
             let res = match self.out {
-                Out::File(fd) => crate::stream::pwrite_all_fd(fd, &footer, self.cursor)
+                Out::File(fd) => crate::stream_format::pwrite_all_fd(fd, &footer, self.cursor)
                     .map_err(|e| (FAILED_IO, e.to_string()))
                     .and_then(|_| {
                         // SAFETY: SLOT-10: fd is the writer's open descriptor.
@@ -798,8 +798,8 @@ impl Writer {
 
 // SLOT-15: payload first, head last, so a reader never takes a half-written
 // sub-packet for one.
-fn write_subpacket_to_file(fd: i32, sub: &crate::stream::SubpacketBytes<'_>, cursor: u64) -> Result<(), (u32, String)> {
-    let w = |bytes: &[u8], at: u64| crate::stream::pwrite_all_fd(fd, bytes, at).map_err(|e| (FAILED_IO, e.to_string()));
+fn write_subpacket_to_file(fd: i32, sub: &crate::stream_format::SubpacketBytes<'_>, cursor: u64) -> Result<(), (u32, String)> {
+    let w = |bytes: &[u8], at: u64| crate::stream_format::pwrite_all_fd(fd, bytes, at).map_err(|e| (FAILED_IO, e.to_string()));
     w(&[0u8; 32], cursor)?;
     w(&sub.payload, cursor + sub.head.len() as u64)?;
     w(&[0u8; 8][..sub.pad], cursor + (sub.head.len() + sub.payload.len()) as u64)?;

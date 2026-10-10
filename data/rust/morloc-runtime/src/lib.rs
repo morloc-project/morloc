@@ -59,6 +59,8 @@ mod c_abi_prototypes;
 pub mod eval_arena;
 pub mod eval_ffi;
 pub mod stream;
+mod stream_walk;
+mod stream_format;
 mod write_behind;
 pub mod custody;
 pub mod handle_scan;
