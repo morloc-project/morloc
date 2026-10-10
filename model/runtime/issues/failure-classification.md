@@ -21,14 +21,6 @@ failure (a fail packet). Several sites are misclassified.
   declared Int column) kills the pool instead of failing the call. Probably
   also a wrong-length tensor (unconfirmed). Open: should the C ABI report an
   error class with every message?
-- **Readiness wait ~11 min.** [read] Gap in DAEMON-6 / LIFE-2 (no total
-  bound). `wait_for_daemon` (morloc-nexus/src/process.rs:1447) sleeps between
-  17 pings with an uncapped doubling from 10 ms: 655 s for a pool that lives
-  but never binds its socket.
-- **120 s send deadline.** [read] Contradicts the "no deadline on pool
-  calls" rule in DAEMON-6: `send_all` gives up after 120 s without progress
-  (morloc-runtime/src/ipc_ffi.rs:78, 90-139), e.g. a SIGSTOPped receiver
-  and a packet larger than the socket buffer.
 - **No liveness check on a reply wait.** [read] Gap next to NET-5 (covers
   only reading a request): the caller waits for end of file only, so a dead
   callee whose socket is held open by a grandchild hangs it.

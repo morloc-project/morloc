@@ -7,16 +7,6 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   stops every stream writer with a FAILED status (~279), so a crashed
   pool's streams end PAUSED or FAILED depending on timing (SLOT-13 says
   FAILED). Recovery and shutdown already finish every stream.
-- **Pool readiness is seen late.** [read] The nexus pings a starting pool
-  with a doubling sleep from 10 ms (process.rs ~1511-1518): a pool ready at
-  160 ms is seen at ~310 ms, one ready at 700 ms at ~1270 ms; an R ping
-  whose read times out abandons its connection. Every CLI run starting
-  Python or R pays it.
-- [read] R accepts connections and makes pipes without setting
-  close-on-exec atomically (rmorloc.c), so a fork in another thread could
-  inherit them (FORK-2).
-- [read] The C++ pool builds peer socket paths in a 128-byte buffer and
-  truncates longer ones silently (pool.cpp ~1101).
 - [speculative] A connect to a pool that died while idle may retry for up
   to 30 s before failing.
 - [measured] Python and R pools queue concurrent daemon requests behind a
@@ -36,19 +26,11 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   ~1.5 us each): /work/tests/runtime/crossing.
 - Spec text behind the code: topology.md lists a stream sweeper thread in
   pools and a lifeline thread in R; neither exists.
-- [speculative] `read_packet` takes the packet size from the first `recv`
-  even when it returned fewer than the 32 header bytes (ipc_ffi.rs
-  ~648-682); the rest of the header is calloc zeros, so the size is wrong.
-- [read] DAEMON-10 gap for pools: `close_daemon` unlinks the pool socket
-  path unconditionally (ipc_ffi.rs ~294), without checking it is still the
-  file this pool bound; pool sockets take no claim (`new_server` unlinks and
-  binds, ~343-357), unlike the daemon's (daemon_ffi.rs ~123).
-- [read] FORK-3 gap on non-Linux: accept sets close-on-exec in a second
-  step (runtime-types fd.rs ~80-83), so a fork in another thread can
-  inherit the accepted fd. Live on macOS today.
-- [read] The nexus readiness probe notices a pool's death only between its
-  sleeps, which grow without bound (process.rs ~1511); attempt k starts at
-  ~20*(2^k-1) ms, so a pool ready at 3 s is first seen at ~5 s.
+- [read] FORK-3 gap on non-Linux: accept and pipe set close-on-exec in a
+  second step (runtime-types fd.rs ~80-83, rmorloc.c mlc_accept_cloexec and
+  mlc_pipe_cloexec), so a fork-and-exec in another thread can inherit the
+  descriptor. Live on macOS today. Open: macOS has no atomic form; a fork
+  gate held across the two steps would block forks behind a blocking accept.
 - [speculative] On macOS a connect to a full listen backlog (128) fails
   with ECONNREFUSED instead of blocking; `connect_to` then retries for at
   most 30 s (ipc_ffi.rs), a deadline on a pool call (DAEMON-6). Matters
