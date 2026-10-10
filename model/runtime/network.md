@@ -69,7 +69,7 @@ unique name, created exclusively. Paths the user names (`--socket`,
 
 ### NET-5 A request on a local socket waits as long as its sender lives
 Status: implemented
-Checked by: a_stopped_sender_keeps_its_request, a_request_whose_sender_is_gone_ends_though_its_fd_lives_on, a_sender_counts_as_alive_until_it_exits_in_either_identity
+Checked by: a_stopped_sender_keeps_its_request, a_request_whose_sender_is_gone_ends_though_its_fd_lives_on, a_sender_counts_as_alive_until_it_exits_in_either_identity, a_reply_to_a_stopped_reader_waits_until_it_resumes, a_reply_to_a_reader_that_died_ends_though_its_fd_lives_on
 
 A pool reading a request from a local socket waits until the request is
 complete, the sender closes its end, or the sending process no longer
@@ -82,7 +82,10 @@ does not, even unreaped. There is no time limit, so a sender suspended mid-send 
 call; a sender that died while a process it forked holds its descriptor
 open is noticed within a second. A sender whose process cannot be named
 (its pid is not visible here, as from another pid namespace) has each stall
-bounded at 30 s instead.
+bounded at 30 s instead. Sending on a local socket is held to the same
+rule: a send that stalls because its reader is not reading waits as long
+as the reader lives, checking once a second; one to a reader that cannot be
+named fails after 120 s without progress.
 
 ### NET-6 An endpoint path is taken only from no live listener
 Status: implemented
