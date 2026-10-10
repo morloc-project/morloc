@@ -1098,14 +1098,13 @@ mlc::Unit _mlc_replay(Schema* schema, int64_t handle, F fn) {
 uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t** args_array, size_t nargs) {
     char* errmsg = NULL;
 
-    char socket_path[128];
-    snprintf(socket_path, sizeof(socket_path), "%s/%s", g_tmpdir, socket_filename);
+    std::string socket_path = std::string(g_tmpdir) + "/" + socket_filename;
 
     uint8_t* packet = make_morloc_local_call_packet((uint32_t)mid, args_array, nargs, &errmsg);
     PROPAGATE_INFRA_ERROR(errmsg)
 
     pool_mark_busy();
-    uint8_t* result = send_and_receive_over_socket(socket_path, packet, &errmsg);
+    uint8_t* result = send_and_receive_over_socket(socket_path.c_str(), packet, &errmsg);
     pool_mark_idle();
 
     free(packet);
