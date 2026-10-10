@@ -1150,6 +1150,9 @@ fn run_remote_command(
     }
     unsafe { morloc_inherit_reply(full_packet.as_ptr()) };
 
+    if reply_is_pipe_closed(&full_packet) {
+        process::exit_broken_pipe();
+    }
     // Check for error
     match packet::get_error_message(&full_packet) {
         Ok(Some(err_msg)) => {
@@ -2298,9 +2301,28 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     }
 }
 
+/// Whether a pool's reply says the run's stdout reader closed the pipe, which
+/// ends the run as a broken pipe rather than as a failure.
+pub(crate) fn reply_is_pipe_closed(packet: &[u8]) -> bool {
+    let Some(header) = packet.get(..32) else { return false };
+    let header: &[u8; 32] = header.try_into().expect("32 bytes");
+    morloc_runtime_types::packet::PacketHeader::from_bytes(header).map_or(false, |h| h.is_pipe_closed())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reply_that_reports_a_closed_pipe_is_told_from_a_failure() {
+        use morloc_runtime_types::packet::{CommandData, PacketHeader, PACKET_STATUS_PIPE_CLOSED, PKT_CMD_OFF};
+        let fail = PacketHeader::fail(0).to_bytes();
+        assert!(!reply_is_pipe_closed(&fail));
+        let mut closed = fail;
+        closed[PKT_CMD_OFF + std::mem::offset_of!(CommandData, status)] = PACKET_STATUS_PIPE_CLOSED;
+        assert!(reply_is_pipe_closed(&closed));
+        assert!(!reply_is_pipe_closed(&closed[..10]));
+    }
 
     fn positional(schema: &str) -> crate::manifest::Arg {
         serde_json::from_str(&format!(

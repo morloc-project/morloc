@@ -1186,6 +1186,9 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
     }
 
     // Check for error in response
+    if crate::dispatch::reply_is_pipe_closed(unsafe { std::slice::from_raw_parts(result_packet, 32) }) {
+        process::exit_broken_pipe();
+    }
     let run_err = unsafe { get_morloc_data_packet_error_message(result_packet, &mut errmsg) };
     if !run_err.is_null() {
         let s = unsafe { std::ffi::CStr::from_ptr(run_err) }.to_string_lossy().into_owned();

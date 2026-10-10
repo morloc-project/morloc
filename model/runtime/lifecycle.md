@@ -26,7 +26,9 @@ Status: draft
 
 0 success; 1 call failure (user error, pool death, unreadable argument,
 runtime error); 2 usage error (unknown command or option); 70 panic only
-(PANIC); 128+N signal N; 141 broken stdout pipe.
+(PANIC); 128+N signal N; 141 broken stdout pipe. A pool reply that reports
+the closed pipe ends the run with 141 and nothing on stderr, the same as
+the nexus finding the pipe closed itself, whichever comes first.
 
 ### LIFE-4 The run directory is under /tmp with an owner record
 Status: draft
