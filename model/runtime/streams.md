@@ -120,8 +120,9 @@ Checked by: outstanding_batches_never_exceed_the_queue_depth, a_full_queue_makes
 
 Under a slot lock a pool copies elements, moves SHM pointers and, when the
 queue is full, waits for the custodian to make room. The queue holds at most
-its depth of unfinished batches (`MORLOC_WRITE_BEHIND_DEPTH`, at most 7; 2
-for an uncompressed stream). The custodian takes no slot lock and waits on
+its depth of unfinished batches (`MORLOC_WRITE_BEHIND_DEPTH`, at most 7; 1
+for an uncompressed stream), and a writer waits for room before reusing a
+buffer, so a stream's shared memory does not grow with its length. The custodian takes no slot lock and waits on
 no pool, so no wait cycle passes through a slot.
 
 ### SLOT-13 A returned write is written when its stream is flushed or closed
@@ -159,9 +160,10 @@ benchmark (issues/streams.md).
 
 ### SLOT-16 Stdout and stderr streams go through the queue
 Status: implemented
-Checked by: a_stdout_write_returns_once_its_batches_reach_the_nexus
+Checked by: a_stdout_stream_reaches_the_nexus_before_its_close_returns
 
-The nexus's stdout and stderr writer is the custodian's consumer. A write
-that queued a batch returns once the batch has reached it, so a pool's raw
-prints never land inside a batch, and a pool finishes the stdio streams a
-call left open before replying.
+The nexus's stdout and stderr writer is the custodian's consumer. A pool
+finishes the stdio streams a call left open before replying, so a call's
+output precedes its result. A write returns once its batches are queued,
+not written; text a pool prints to the shared stdout meanwhile may land
+inside a batch (issues/streams.md).

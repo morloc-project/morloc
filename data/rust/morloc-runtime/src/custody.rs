@@ -10,7 +10,7 @@ use crate::error::MorlocError;
 
 pub(crate) const QUEUE_SLOTS: usize = 8;
 const MAX_DEPTH: usize = QUEUE_SLOTS - 1;
-const LEVEL0_DEPTH: usize = 2;
+const LEVEL0_DEPTH: usize = 1;
 
 pub(crate) const ENTRY_BUFFER: u32 = 1;
 pub(crate) const ENTRY_BLOCK: u32 = 2;
@@ -24,6 +24,7 @@ pub(crate) const FAILED_PIPE_CLOSED: u32 = 2;
 
 const ERR_BYTES: usize = 240;
 const WAIT_SLICE: Duration = Duration::from_millis(100);
+const SPIN: Duration = Duration::from_micros(50);
 
 #[repr(C)]
 pub(crate) struct Entry {
@@ -196,6 +197,27 @@ impl CustodyQueue {
         self.push_with(Item::marker(ENTRY_CLOSE, status), false)
     }
 
+    /// Wait until the queue has room; a buffer the custodian finished is
+    /// then among the spares.
+    pub(crate) fn wait_room(&self) -> Result<(), MorlocError> {
+        loop {
+            if let Some(e) = self.failure() {
+                return Err(e);
+            }
+            if self.is_closed() {
+                return Err(Self::closed_error());
+            }
+            let d = self.done.load(Ordering::Acquire);
+            if self.tail.load(Ordering::Relaxed).wrapping_sub(d) < self.depth() {
+                return Ok(());
+            }
+            if !self.host_alive() {
+                return Err(Self::gone());
+            }
+            wait_word::wait(&self.done, d, WAIT_SLICE);
+        }
+    }
+
     fn push_with(&self, item: Item, refuse_failed: bool) -> Result<u32, MorlocError> {
         loop {
             if refuse_failed {
@@ -248,10 +270,15 @@ impl CustodyQueue {
     /// Wait until entry `seq`, pushed while the queue served opening
     /// `epoch`, is finished, and report the stream's failure if any.
     pub(crate) fn wait_done(&self, seq: u32, epoch: u32) -> Result<(), MorlocError> {
+        let spin_until = std::time::Instant::now() + SPIN;
         loop {
             let d = self.done.load(Ordering::Acquire);
             if (d.wrapping_sub(seq) as i32) >= 0 {
                 break;
+            }
+            if std::time::Instant::now() < spin_until {
+                std::hint::spin_loop();
+                continue;
             }
             if !self.host_alive() {
                 return Err(Self::gone());
@@ -311,6 +338,13 @@ impl CustodyQueue {
 
     pub(crate) fn wait_pushed(&self, timeout: Duration) {
         let h = self.head.load(Ordering::Relaxed);
+        let spin_until = std::time::Instant::now() + SPIN;
+        while std::time::Instant::now() < spin_until {
+            if self.tail.load(Ordering::Acquire) != h {
+                return;
+            }
+            std::hint::spin_loop();
+        }
         wait_word::wait(&self.tail, h, timeout);
     }
 

@@ -1855,7 +1855,7 @@ pub(crate) fn finish_stream(slot_idx: usize, gen_claim: u64, status: u32) -> Res
             let tail = if poisoned || status == crate::custody::STATUS_DISCARD {
                 Ok(())
             } else {
-                queue_buffer(slot)
+                queue_buffer_then(slot, false)
             };
             let status = if poisoned || tail.is_err() {
                 morloc_runtime_types::packet::FOOTER_STATUS_FAILED as u32
@@ -3767,6 +3767,12 @@ fn slot_queue(slot: &RegistrySlot) -> Result<&'static crate::custody::CustodyQue
 
 // SLOT-12: the full buffer moves to the queue and a spare takes its place.
 fn queue_buffer(slot: &RegistrySlot) -> Result<(), MorlocError> {
+    queue_buffer_then(slot, true)
+}
+
+/// Queue the buffered elements; `refill` installs a fresh buffer for later
+/// writes, which a closing stream does not need.
+fn queue_buffer_then(slot: &RegistrySlot, refill: bool) -> Result<(), MorlocError> {
     use crate::custody::{Item, ENTRY_BUFFER};
     let n = slot.write_buffer_index_count.get();
     if n == 0 {
@@ -3774,15 +3780,19 @@ fn queue_buffer(slot: &RegistrySlot) -> Result<(), MorlocError> {
     }
     let q = slot_queue(slot)?;
     let full = slot.write_buffer.get();
-    let fresh = match q.take_spare() {
-        Some(r) => r,
-        None => {
-            let size = unsafe { crate::shm::shm_block_size(crate::shm::rel2abs(full)?) }.ok_or_else(|| {
-                MorlocError::Other("stream write buffer is not an SHM block".into())
-            })?;
-            let abs = crate::shm::shcalloc(1, size)?;
-            slot_owns(crate::shm::abs2rel(abs)?)
-        }
+    if refill {
+        q.wait_room()?;
+    }
+    let fresh = if !refill {
+        shm_types_crate::RELNULL
+    } else if let Some(r) = q.take_spare() {
+        r
+    } else {
+        let size = unsafe { crate::shm::shm_block_size(crate::shm::rel2abs(full)?) }.ok_or_else(|| {
+            MorlocError::Other("stream write buffer is not an SHM block".into())
+        })?;
+        let abs = crate::shm::shcalloc(1, size)?;
+        slot_owns(crate::shm::abs2rel(abs)?)
     };
     let item = Item {
         kind: ENTRY_BUFFER,
@@ -3796,8 +3806,10 @@ fn queue_buffer(slot: &RegistrySlot) -> Result<(), MorlocError> {
         level: slot.compression_level.get(),
     };
     if let Err(e) = q.push(item) {
-        if let Ok(abs) = crate::shm::rel2abs(fresh) {
-            free_uncounted(abs);
+        if fresh != shm_types_crate::RELNULL {
+            if let Ok(abs) = crate::shm::rel2abs(fresh) {
+                free_uncounted(abs);
+            }
         }
         return Err(e);
     }
@@ -4120,7 +4132,7 @@ pub fn shared_write_subpacket(
         channel_wait_room(handle)?;
     }
     let (gen_claim, _) = unpack_handle(handle);
-    let queued = with_process_local_slot(handle, |local, slot| {
+    with_process_local_slot(handle, |local, slot| {
         if slot.kind.get() != MLC_KIND_OSTREAM && slot.kind.get() != MLC_KIND_CHANNEL {
             return Err(MorlocError::Other(format!(
                 "@write on non-OStream handle (kind = {})",
@@ -4169,20 +4181,6 @@ pub fn shared_write_subpacket(
                 was, level,
             )));
         }
-        // SLOT-16: a stdio write returns once its batches are out, so a raw
-        // print by this process never lands inside one.
-        let stdio_queue = if slot.is_stdio.get() != 0 {
-            let q = slot_queue(slot)?;
-            Some((q, q.pushed()))
-        } else {
-            None
-        };
-        let queued = |stdio_queue: Option<(&'static crate::custody::CustodyQueue, u32)>| {
-            stdio_queue.and_then(|(q, before)| {
-                let after = q.pushed();
-                (after != before).then_some((q, after, q.epoch()))
-            })
-        };
 
         // Walk the elements and append each. element_count updates
         // here (not at flush) so @flen reflects buffered elements too.
@@ -4203,12 +4201,12 @@ pub fn shared_write_subpacket(
             let payload = PortablePayload::new(&scratch, &local.value_schema)?;
             queue_block(slot, payload.0, n_elements, false)?;
             slot.element_count.set(slot.element_count.get() + n_elements);
-            return Ok(queued(stdio_queue));
+            return Ok(());
         }
         if local.elem_schema.is_fixed_width() && w > 0 && 16 + w <= buf_size {
             append_flat_run(slot, local, elem_data_base, n_elements as usize, buf_size)?;
             slot.element_count.set(slot.element_count.get() + n_elements);
-            return Ok(queued(stdio_queue));
+            return Ok(());
         }
         // One copy of the element schema for the batch: its resolver
         // borrows it while the slot itself is updated per element.
@@ -4219,12 +4217,8 @@ pub fn shared_write_subpacket(
             append_one_element(slot, local, elem_src, buf_size, &mut scratch, &elem, &res)?;
             slot.element_count.set(slot.element_count.get() + 1);
         }
-        Ok(queued(stdio_queue))
-    })?;
-    match queued {
-        Some((q, seq, epoch)) => q.wait_done(seq, epoch),
-        None => Ok(()),
-    }
+        Ok(())
+    })
 }
 
 /// `@flush handle`: hand the buffered elements on now, without closing the
@@ -12893,10 +12887,10 @@ mod write_behind_tests {
         crate::custody::SINK_WRITTEN
     }
 
-    // SLOT-16: a stdout write that queued a batch returns once the batch has
-    // reached the nexus, and the close's footer follows it there.
+    // SLOT-16: a stdout stream's batches and footer have reached the nexus
+    // when its close returns.
     #[test]
-    fn a_stdout_write_returns_once_its_batches_reach_the_nexus() {
+    fn a_stdout_stream_reaches_the_nexus_before_its_close_returns() {
         let _shm = crate::own_test_registry();
         crate::custody::set_stdio_sink(recording_sink);
         crate::stream::set_test_write_buffer_bytes(Some(4096));
@@ -12908,8 +12902,8 @@ mod write_behind_tests {
         shared_close_handle(h).unwrap();
         let after_close = mine();
         crate::stream::set_test_write_buffer_bytes(None);
-        assert!(after_write >= 1, "a write that filled buffers returned before any reached the nexus");
-        assert_eq!(after_close, after_write + 2, "the close sent other than its tail and footer");
+        assert!(after_close >= after_write + 1, "the close returned before its footer reached the nexus");
+        assert!(after_close >= 3, "the batches that filled buffers did not reach the nexus");
         assert!(open_stdio(MLC_KIND_OSTREAM, STDIO_KIND_STDOUT, "as").map(shared_close_handle).is_ok(), "the stdout claim was not released");
     }
 
