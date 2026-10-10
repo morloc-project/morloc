@@ -16,6 +16,8 @@ pub mod deep_tests;
 #[cfg(test)]
 mod alloc_bench;
 #[cfg(test)]
+mod stream_bench;
+#[cfg(test)]
 mod layout_bench;
 #[cfg(test)]
 mod layout_props;

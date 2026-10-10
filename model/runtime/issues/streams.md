@@ -40,3 +40,30 @@ here touch locks and ownership: model first.
   without, 4.3 s before the custodian (2026-10-10). Chosen for now (not
   ruled): no wait.
   Should pools' raw stdout go to stderr while a command streams to stdout?
+- **A closed reader on a `@collect` stream prints "run failed".**
+  [reproduced, dev 2026-10-10] `./reads -f jsonl score reads.dat | head -3`
+  prints the three values, then `Error: run failed` and `@stdout: downstream
+  pipe closed` on stderr, every time; the `@render` path (`score reads.dat
+  -t | head -1`) does the same. The golden `stdio-pipe-closed` holds that an
+  early-closing reader leaves stderr clean, so this path (an `IStream` read
+  in C++, scored by `psmap`, written under `@collect`) escapes that
+  classification. Repro: web/morloc-studio/public/assets/home-examples/streams
+  (`simulate 1000000` is enough); `test/check-examples.py streams` there
+  fails on it.
+- **A writer can write past its stream's buffer.** [read] Violates SHM
+  memory safety. The buffer is allocated by its publisher with the
+  publisher's `MORLOC_WRITE_BUFFER_BYTES` (the custodian, stream.rs ~3237;
+  `open_stdio` ~2650; the channel opener ~10238), but every `@write` sizes
+  its appends from its own process's value (stream.rs ~4010,
+  `read_write_buffer_bytes_env`). A pool whose value is larger (user code
+  setting the variable, or a different environment) writes beyond the
+  block. Fix: record the buffer size in the slot at publication and read it
+  from there.
+- [read] `ready_slot_queue` gives a slot a new queue block when the old
+  queue's writer has not exited yet, and the old block is never freed
+  (about 1 KiB of shared memory per occurrence).
+- [read] `stdout_element_count` (`@tell`) maps every error to 0, so a call
+  from a pool that did not open stdout reports offset 0 silently.
+- [read] `shared_close_handle`'s doc says a failed close leaves the slot
+  open for a retry; `finish_stream` releases it regardless. Doc or
+  behaviour must change.
