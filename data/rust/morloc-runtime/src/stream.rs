@@ -544,7 +544,7 @@ pub(crate) fn registry_gen_salt() -> u64 {
 // IStream) are read through versioned_read. An OStream's
 // subpacket_entries and compression_level change under the lock.
 //
-// Mutable-under-lock fields (cursor, element_count, diag) require
+// Mutable-under-lock fields (cursor, element_count) require
 // taking `lock` before read or write. Lockfree snapshot reads of
 // these are explicitly NOT supported by this protocol.
 
@@ -586,7 +586,7 @@ pub use morloc_runtime_types::stdio_proto::{
 ///     `compression_level`, `subpacket_entries`, `subpacket_entries_len`,
 ///     `body_start`. Readers use the versioned-pointer pattern
 ///     described above.
-///   - **Mutated under `lock`**: `cursor`, `element_count`, `diag`.
+///   - **Mutated under `lock`**: `cursor`, `element_count`.
 ///   - **Independently atomic**: `generation`, `call_id`, `state`,
 ///     `lock`. These are accessed without holding any other lock.
 /// SLOT-8: a slot field, written under the slot's lock and read under it
@@ -691,10 +691,8 @@ pub struct RegistrySlot {
     /// after @open publication.
     pub body_start:           std::sync::atomic::AtomicU64,                             // off 120..128
 
-    /// Per-write diagnostic / running counters. Updated by OStream
-    /// writers under `lock`; readers either hold the lock or accept
-    /// momentarily-stale values. ~160 bytes embedded inline.
-    pub diag:                 std::cell::UnsafeCell<StreamDiag>,                      // off 128..288
+    /// Unused bytes, kept so the fields after them stay where they are.
+    _pad_128:                 [u8; std::mem::size_of::<StreamDiag>()],                // off 128..288
 
     // ── OStream write buffer (Part A of the buffering work) ────────
     /// SHM RelPtr to a per-slot write buffer. Allocated at @open
@@ -753,7 +751,7 @@ pub struct RegistrySlot {
     pub file_ino:             std::sync::atomic::AtomicU64,                             // off 368
     _retired_end:             [u8; 8],                         // off 376
 
-    /// Per-slot mutation lock. Held for cursor / element_count / diag
+    /// Per-slot mutation lock. Held for cursor / element_count
     /// updates. NOT held for lockfree reads of immutable-after-open
     /// fields (those use the versioned-pointer pattern against
     /// `generation`). Survives a holder's death; see `SlotGuard`.
@@ -763,9 +761,6 @@ pub struct RegistrySlot {
     /// slot starts on a fresh cache-line-aligned boundary.
     _tail_pad:                [u8; 128 - std::mem::size_of::<RecoverableLock>()],
 }
-
-// SLOT-8: `diag` is read and written only under the slot's lock.
-unsafe impl Sync for RegistrySlot {}
 
 const _: () = {
     assert!(std::mem::size_of::<RegistrySlot>() == STREAM_ENTRY_SIZE);
@@ -825,7 +820,7 @@ pub(crate) const GENERATION_MASK: u64 = 0x0000_7FFF_FFFF_FFFF;
 // -- Slot lock --
 //
 // Each `RegistrySlot` has its own `lock`, which serialises mutations to
-// `cursor`, `element_count`, `diag` and the write buffer. It is held across
+// `cursor`, `element_count` and the write buffer. It is held across
 // sub-packet writes, fdatasync, synchronous compression and stdio RPCs, so
 // waiters block rather than spin. A process killed while holding it (a
 // signal, the OOM killer) poisons the slot: its state may be half-updated,
@@ -2298,11 +2293,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         } else {
             shm_types_crate::RELNULL
         };
-        // SAFETY: we hold the slot's lock; state is OPEN_SHARED but
-        // generation has NOT been bumped to the new value yet, so no
-        // cross-pool reader can observe these field writes (the
-        // versioned-pointer pattern gates on the new generation).
-        unsafe {
+        {
             slot.kind.set(MLC_KIND_IFILE);
             slot.file_dev.set(file_dev);
             slot.file_ino.set(file_ino);
@@ -2330,9 +2321,6 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);
             slot.write_buffer_data_used.set(0);
-            if let Some(d) = parsed.diag.as_ref() {
-                *slot.diag.get() = *d;
-            }
         }
         // Bump generation by the salted random increment. This is
         // the publication store: cross-pool readers Acquire-load
@@ -2425,7 +2413,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         let mut pending = Unpublished::default();
         let path_rel = pending.hold(shm_copy_bytes(path.as_bytes())?);
         let schema_rel = pending.hold(shm_copy_bytes(parsed.schema_str.as_bytes())?);
-        unsafe {
+        {
             slot.kind.set(MLC_KIND_ISTREAM);
             slot.file_dev.set(file_dev);
             slot.file_ino.set(file_ino);
@@ -2447,9 +2435,6 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);
             slot.write_buffer_data_used.set(0);
-            if let Some(d) = parsed.diag.as_ref() {
-                *slot.diag.get() = *d;
-            }
         }
         let bump = registry_gen_salt() | 1;
         // wrapping_add: generation is a wrapping counter masked to
@@ -2683,7 +2668,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             ready_slot_queue(slot)?;
         }
         let (idx_rel, idx_cap) = (shm_types_crate::RELNULL, 0);
-        unsafe {
+        {
             slot.kind.set(kind);
             slot.is_stdio.set(1);
             slot.stdio_kind.set(stdio_kind);
@@ -2700,7 +2685,6 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             slot.cursor.set(stdio_body_start);
             slot.element_count.set(0);
             slot.compression_level.set(0);
-            *slot.diag.get() = StreamDiag::new();
             slot.write_buffer.set(pending.own(buf_rel));
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);
@@ -3257,7 +3241,7 @@ fn start_custody(
         let buf_abs = crate::shm::shcalloc(1, buf_bytes)?;
         let buf_rel = pending.hold(crate::shm::abs2rel(buf_abs)?);
         crate::custody::take_custody(ready_slot_queue(slot)?);
-        unsafe {
+        {
             slot.kind.set(MLC_KIND_OSTREAM);
             let (dev, ino) = file_identity(fd);
             slot.file_dev.set(dev);
@@ -3274,7 +3258,6 @@ fn start_custody(
             slot.cursor.set(resume.cursor);
             slot.element_count.set(resume.element_count);
             slot.compression_level.set(0);
-            *slot.diag.get() = StreamDiag::new();
             slot.write_buffer.set(pending.own(buf_rel));
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);
@@ -7419,7 +7402,7 @@ pub fn shared_open_ifile_recovered(
         } else {
             shm_types_crate::RELNULL
         };
-        unsafe {
+        {
             slot.kind.set(MLC_KIND_IFILE);
             slot.file_dev.set(file_dev);
             slot.file_ino.set(file_ino);
@@ -7443,9 +7426,6 @@ pub fn shared_open_ifile_recovered(
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);
             slot.write_buffer_data_used.set(0);
-            if let Some(d) = parsed.diag.as_ref() {
-                *slot.diag.get() = *d;
-            }
         }
         let bump = registry_gen_salt() | 1;
         // wrapping_add: the generation is a wrapping counter masked to
@@ -10271,7 +10251,7 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
             (*b).fail_msg = shm_types_crate::RELNULL;
         }
         let block_rel = pending.hold(crate::shm::abs2rel(block_abs)?);
-        unsafe {
+        {
             slot.kind.set(MLC_KIND_CHANNEL);
             slot.file_path.set(shm_types_crate::RELNULL);
             slot.file_path_len.set(0);
@@ -10285,7 +10265,6 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
             slot.cursor.set(0);
             slot.element_count.set(0);
             slot.compression_level.set(0);
-            *slot.diag.get() = StreamDiag::new();
             slot.write_buffer.set(pending.own(buf_rel));
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);

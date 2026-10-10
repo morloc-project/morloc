@@ -29,7 +29,6 @@ pub(crate) struct ParsedStreamFile {
     pub(crate) elem_schema: Schema,
     pub(crate) subpacket_entries: Vec<morloc_runtime_types::packet::SubpacketEntry>,
     pub(crate) element_count: u64,
-    pub(crate) diag: Option<StreamDiag>,
     /// True iff the file is a STREAM_PACKET that carries a
     /// `METADATA_TYPE_FOOTER_FINAL` block. False for STREAM_PACKET files
     /// that only have a temp footer (or none at all), and false for
@@ -71,16 +70,16 @@ pub(crate) fn parse_stream_file(
     let is_data_packet = outer_header.is_data();
     let mut footer_start: Option<u64> = None;
     let mut scanned_end: Option<u64> = None;
-    let (schema_str, subpacket_entries, element_count, diag, final_footer, body_start):
-        (String, Vec<morloc_runtime_types::packet::SubpacketEntry>, u64, Option<StreamDiag>, bool, u64) = if is_data_packet {
+    let (schema_str, subpacket_entries, element_count, final_footer, body_start):
+        (String, Vec<morloc_runtime_types::packet::SubpacketEntry>, u64, bool, u64) = if is_data_packet {
         let (schema, entries, count) = open_data_packet(path, mmap_ptr, mmap_size)?;
         // DATA-packet files have no stream header; the whole file is a
         // single sub-packet that starts at offset 0. IStream's forward
         // walker reads this as one sub-packet, then sees EOF. There is
-        // no StreamDiag and no footer of either kind, so diag = None
-        // and final_footer = false; the IFile gate uses is_data_packet
-        // separately to know this branch is still random-access safe.
-        (schema, entries, count, None, false, 0u64)
+        // no footer of either kind, so final_footer = false; the IFile gate
+        // uses is_data_packet separately to know this branch is still
+        // random-access safe.
+        (schema, entries, count, false, 0u64)
     } else if outer_header.is_stream() {
         let StreamHeader { schema: schema_str, body_start } =
             parse_stream_header(mmap_ptr, mmap_size)?;
@@ -100,14 +99,13 @@ pub(crate) fn parse_stream_file(
         // IStream walks forward from body_start without needing an
         // index, so an empty subpacket_entries on temp-footer files is
         // fine here; IFile's open path enforces final_footer separately.
-        let (subpacket_entries, element_count, diag, final_footer) =
+        let (subpacket_entries, element_count, final_footer) =
             match try_read_footer(mmap_ptr, mmap_size) {
                 Ok(Some(parsed)) => {
                     footer_start = Some(parsed.footer_start);
                     (
                     parsed.subpacket_entries,
                     parsed.element_count,
-                    parsed.diag,
                     parsed.final_footer,
                     )
                 }
@@ -121,10 +119,10 @@ pub(crate) fn parse_stream_file(
                     let entries = scanned.subpacket_offsets.into_iter().map(|offset|
                         morloc_runtime_types::packet::SubpacketEntry { offset, elem_count: 0 }
                     ).collect();
-                    (entries, scanned.element_count, None, false)
+                    (entries, scanned.element_count, false)
                 }
             };
-        (schema_str, subpacket_entries, element_count, diag, final_footer, body_start)
+        (schema_str, subpacket_entries, element_count, final_footer, body_start)
     } else {
         return Err(MorlocError::Packet(format!(
             "file '{}' is neither a STREAM_PACKET nor a DATA_PACKET (cmd_type = {})",
@@ -164,7 +162,6 @@ pub(crate) fn parse_stream_file(
         elem_schema,
         subpacket_entries,
         element_count,
-        diag,
         final_footer,
         is_data_packet,
         body_start,
@@ -472,7 +469,6 @@ pub(crate) struct ParsedFooter {
     pub(crate) footer_start: u64,
     pub(crate) subpacket_entries: Vec<morloc_runtime_types::packet::SubpacketEntry>,
     pub(crate) element_count: u64,
-    pub(crate) diag: Option<StreamDiag>,
     pub(crate) final_footer: bool,
     /// Status byte from `METADATA_TYPE_FOOTER_STATUS` if present, or
     /// `FOOTER_STATUS_CLOSED` when the block is absent (legacy footer).
@@ -568,7 +564,6 @@ pub(crate) fn try_read_footer(
         footer_start,
         subpacket_entries,
         element_count,
-        diag,
         final_footer,
         footer_status,
     }))
