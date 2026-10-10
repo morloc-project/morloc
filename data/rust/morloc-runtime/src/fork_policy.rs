@@ -327,6 +327,7 @@ extern "C" fn after_fork_in_child() {
 
 fn after_fork_in_child_body() {
     morloc_runtime_types::fork_generation::bump_in_child();
+    crate::ipc_ffi::after_fork_in_child();
     // FORK-16: the dispatches running anywhere in the parent, none of which
     // the child has.
     INHERITED_DISPATCHES.store(crate::intrinsics::dispatches_in_flight(), Ordering::Relaxed);

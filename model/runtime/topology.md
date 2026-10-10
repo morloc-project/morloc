@@ -36,7 +36,9 @@ nexus (one per program run, or one long-running daemon / MCP server)
 
 - Every pool starts with one worker.
 - Thread pools (C++, Rust, Python thread mode) start a worker whenever a
-  call arrives and no worker is free; no upper bound.
+  call arrives and no worker is free; no upper bound. A C++ or Rust worker
+  stays with a kept connection, waiting for its next call, until the caller
+  closes it (NET-8).
 - Forked pools (Python fork mode, R) count a worker busy only while it waits
   on another pool (foreign call, channel read/write/flush/close) and fork a
   worker when every worker is busy; a computing worker makes calls queue.
@@ -46,9 +48,11 @@ nexus (one per program run, or one long-running daemon / MCP server)
 
 ## Communication
 
-- One unix-socket connection per call, carrying one request packet and one
-  reply packet. Small values (at most the inline threshold, 64 KiB by
-  default) travel inline; large ones as a relative pointer into shared
+- A unix-socket connection carries one request packet and then one reply
+  packet at a time. A caller thread keeps one per C++ or Rust pool for its
+  next call (NET-7); a call into Python or R takes a connection of its own.
+  Small values (at most the inline threshold, 64 KiB by default) travel
+  inline; large ones as a relative pointer into shared
   memory, or, when shared memory is disabled, as the path of a temporary
   file.
 - A command that calls no foreign function is pure: the nexus evaluates it

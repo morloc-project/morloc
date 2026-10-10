@@ -19,6 +19,11 @@ pub const THIS_VERSION: u16 = 0;
 pub const DEFAULT_FLAVOR: u16 = 0;
 pub const DEFAULT_MODE: u16 = 0;
 
+/// Mode bit on a request on a local connection: the caller can reuse the
+/// connection for its next call. On the reply: the callee keeps it (NET-7).
+/// The caller clears it from every reply it hands on.
+pub const MODE_KEEP: u16 = 1;
+
 // ── Command type discriminants ─────────────────────────────────────────────
 
 pub const PACKET_TYPE_DATA: u8 = 0;
@@ -504,6 +509,7 @@ pub const PKT_FORMAT_OFF: usize = PKT_CMD_OFF + std::mem::offset_of!(CommandData
 pub const PKT_COMPRESSION_OFF: usize = PKT_CMD_OFF + std::mem::offset_of!(CommandData, compression);
 pub const PKT_ENCRYPTION_OFF: usize = PKT_CMD_OFF + std::mem::offset_of!(CommandData, encryption);
 pub const PKT_OFFSET_OFF: usize = std::mem::offset_of!(PacketHeader, offset);
+pub const PKT_MODE_OFF: usize = std::mem::offset_of!(PacketHeader, mode);
 pub const PKT_LENGTH_OFF: usize = std::mem::offset_of!(PacketHeader, length);
 
 // Pin the wire layout: the C header and every binding assume these.

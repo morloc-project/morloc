@@ -6,9 +6,11 @@ chapter describes them in full; these items are the rules a test can check.
 
 ### FMT-1 A packet is a 32-byte header, `offset` bytes of metadata, `length` bytes of payload
 Status: draft
-Magic 0x0707f86d at offset 0; plain/version/flavor/mode reserved 0; command
-at 12 (type byte first); offset u32 at 20; length u64 at 24. Integers are
-little-endian.
+Magic 0x0707f86d at offset 0; plain/version/flavor reserved 0; mode u16 at
+10, whose bit 0 asks on a request, and answers on a reply, that the
+connection be kept for the next call (NET-7), the other bits reserved 0;
+command at 12 (type byte first); offset u32 at 20; length u64 at 24.
+Integers are little-endian.
 
 ### FMT-2 Packet types: 0 data, 1 call, 2 ping, 3 stream, 4 footer
 Status: draft

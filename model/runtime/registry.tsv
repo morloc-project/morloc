@@ -118,6 +118,9 @@ morloc-runtime/ipc_ffi.rs::-::SELF_SOCKET	held	13
 morloc-runtime/ipc_ffi.rs::-::REQUEST	thread		
 morloc-runtime/ipc_ffi.rs::forbid_self_call::FORBID	lazy		
 morloc-runtime/ipc_ffi.rs::deferred::SUPPORTED	lazy		
+morloc-runtime/ipc_ffi.rs::-::CONN_FDS	fork-scoped		
+morloc-runtime/ipc_ffi.rs::-::CONN_CACHE	thread		
+morloc-runtime/ipc_ffi.rs::-::TestCallee.conns	test-only		
 morloc-runtime/ipc_ffi.rs::-::HELD	test-only		
 morloc-runtime/ipc_ffi.rs::-::PEER	test-only		
 morloc-runtime/ipc_ffi.rs::-::SEEN_COUNT	test-only		

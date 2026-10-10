@@ -379,8 +379,6 @@ unsafe fn spawn_worker(
 // `retire_after` is how long a worker beyond the initial ones may stay idle
 // before it exits; None keeps every worker.
 unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig, retire_after: Option<std::time::Duration>) {
-    use crate::ipc_ffi::stream_from_client;
-    use crate::ipc_ffi::send_reply_to_foreign_server;
     use crate::ipc_ffi::close_socket;
 
     let min_workers = config.initial_workers.max(1) as usize;
@@ -393,59 +391,135 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig, retire_after: Optio
             PopResult::Shutdown => break,
             PopResult::Retire => return,
         };
+        // NET-8: a worker waiting on a kept connection is not free, so it
+        // comes back to the queue counted as neither finishing nor starting.
         arriving = Arriving::Other;
-
-        let mut errmsg: *mut c_char = ptr::null_mut();
-        let data = stream_from_client(client_fd, &mut errmsg);
-        if data.is_null() || !errmsg.is_null() {
-            // Log why the request read failed before closing: otherwise the
-            // caller only sees a bare "Connection closed by peer" with no cause.
-            // eprintln! writes to Rust's unbuffered stderr (a raw fdopen(2)
-            // FILE* would be block-buffered and lost if the pool never flushes).
-            if !errmsg.is_null() {
-                let m = std::ffi::CStr::from_ptr(errmsg).to_string_lossy();
-                eprintln!("morloc pool: request read failed: {}", m);
-                try_send_fail(client_fd, errmsg);
-                libc::free(errmsg as *mut c_void);
-            } else {
-                eprintln!("morloc pool: request read returned no data");
+        let peer = crate::ipc_ffi::Peer::of(client_fd);
+        loop {
+            match serve_one(client_fd, queue, config) {
+                Served::Closed => break,
+                Served::Finishing => {
+                    arriving = Arriving::Finishing;
+                    break;
+                }
+                Served::Kept => {
+                    if !wait_next_request(client_fd, peer.as_ref()) {
+                        break;
+                    }
+                }
             }
-            libc::free(data as *mut c_void);
-            close_socket(client_fd);
-            continue;
         }
-
-        let result = pool_dispatch_packet(data, config.local_dispatch, config.remote_dispatch, config.dispatch_ctx);
-        libc::free(data as *mut c_void);
-        libc::fflush(ptr::null_mut()); // flush stdout
-
-        // From here the worker counts as free, so nothing below may wait on
-        // another thread of the program: only the send (which waits on the
-        // caller, already reading), the dispatch's release and the close.
-        queue.finishing();
-        arriving = Arriving::Finishing;
-
-        if !result.is_null() {
-            send_reply_to_foreign_server(client_fd, result, config.release_dispatch, &mut errmsg);
-            libc::free(result as *mut c_void);
-            // A failed response send was previously freed silently, leaving the
-            // caller with an unexplained "Connection closed" -- log the cause.
-            if !errmsg.is_null() {
-                let m = std::ffi::CStr::from_ptr(errmsg).to_string_lossy();
-                eprintln!("morloc pool: response send failed: {}", m);
-                libc::free(errmsg as *mut c_void);
-            }
-        } else {
-            // pool_dispatch_packet returned null: no response is sent and the
-            // socket is closed below, so the caller sees a bare "Connection
-            // closed by peer". This should not happen (dispatch always returns
-            // at least a fail packet); log it to catch the case if it does.
-            eprintln!("morloc pool: dispatch returned null result (no response sent)");
-            if let Some(f) = config.release_dispatch { f(); }
-        }
-
         close_socket(client_fd);
         idle_since = std::time::Instant::now();
+    }
+}
+
+enum Served {
+    /// The connection failed; close it.
+    Closed,
+    /// Replied and counted free; close it.
+    Finishing,
+    /// Replied; the caller keeps the connection for its next call.
+    Kept,
+}
+
+// Read one request from `client_fd`, run it and reply.
+unsafe fn serve_one(client_fd: i32, queue: &JobQueue, config: &PoolConfig) -> Served {
+    use crate::ipc_ffi::send_reply_to_foreign_server;
+    use crate::ipc_ffi::stream_from_client;
+
+    let mut errmsg: *mut c_char = ptr::null_mut();
+    let data = stream_from_client(client_fd, &mut errmsg);
+    if data.is_null() || !errmsg.is_null() {
+        // Log why the request read failed before closing: otherwise the
+        // caller only sees a bare "Connection closed by peer" with no cause.
+        // eprintln! writes to Rust's unbuffered stderr (a raw fdopen(2)
+        // FILE* would be block-buffered and lost if the pool never flushes).
+        if !errmsg.is_null() {
+            let m = std::ffi::CStr::from_ptr(errmsg).to_string_lossy();
+            eprintln!("morloc pool: request read failed: {}", m);
+            try_send_fail(client_fd, errmsg);
+            libc::free(errmsg as *mut c_void);
+        } else {
+            eprintln!("morloc pool: request read returned no data");
+        }
+        libc::free(data as *mut c_void);
+        return Served::Closed;
+    }
+
+    // NET-8: only a pool whose workers grow on demand pins a worker.
+    let keep = crate::ipc_ffi::take_keep_bit(data) && config.dynamic_scaling;
+    let result = pool_dispatch_packet(data, config.local_dispatch, config.remote_dispatch, config.dispatch_ctx);
+    libc::free(data as *mut c_void);
+    libc::fflush(ptr::null_mut()); // flush stdout
+
+    // From here a worker that will not keep the connection counts as free,
+    // so nothing below may wait on another thread of the program: only the
+    // send (which waits on the caller, already reading), the dispatch's
+    // release and the close.
+    if !keep {
+        queue.finishing();
+    }
+
+    if result.is_null() {
+        // pool_dispatch_packet returned null: no response is sent and the
+        // socket is closed, so the caller sees a bare "Connection closed by
+        // peer". This should not happen (dispatch always returns at least a
+        // fail packet); log it to catch the case if it does.
+        eprintln!("morloc pool: dispatch returned null result (no response sent)");
+        if let Some(f) = config.release_dispatch { f(); }
+        return if keep { Served::Closed } else { Served::Finishing };
+    }
+    if keep {
+        crate::ipc_ffi::set_keep_bit(result);
+    }
+    send_reply_to_foreign_server(client_fd, result, config.release_dispatch, &mut errmsg);
+    libc::free(result as *mut c_void);
+    if !errmsg.is_null() {
+        // A failed response send was previously freed silently, leaving the
+        // caller with an unexplained "Connection closed" -- log the cause.
+        let m = std::ffi::CStr::from_ptr(errmsg).to_string_lossy();
+        eprintln!("morloc pool: response send failed: {}", m);
+        libc::free(errmsg as *mut c_void);
+        return if keep { Served::Closed } else { Served::Finishing };
+    }
+    if keep { Served::Kept } else { Served::Finishing }
+}
+
+// NET-8: wait for the next request on a kept connection. False when the
+// caller closed it, its process is gone (NET-5), or the pool is shutting down.
+unsafe fn wait_next_request(fd: i32, peer: Option<&crate::ipc_ffi::Peer>) -> bool {
+    const SLICE_MS: i32 = 100;
+    const SLICES_PER_PEER_CHECK: u32 = 10;
+    let mut slices = 0u32;
+    loop {
+        if SHUTTING_DOWN.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        let ready = libc::poll(&mut pfd, 1, SLICE_MS);
+        if ready > 0 {
+            let mut byte = 0u8;
+            let n = libc::recv(fd, &mut byte as *mut u8 as *mut c_void, 1, libc::MSG_PEEK | libc::MSG_DONTWAIT);
+            if n > 0 {
+                return true;
+            }
+            if n == 0 {
+                return false;
+            }
+            let e = crate::utility::errno_val();
+            if e != libc::EAGAIN && e != libc::EWOULDBLOCK && e != libc::EINTR {
+                return false;
+            }
+            continue;
+        }
+        if ready < 0 && crate::utility::errno_val() != libc::EINTR {
+            return false;
+        }
+        slices += 1;
+        if slices % SLICES_PER_PEER_CHECK == 0 && peer.is_some_and(|p| !p.alive()) {
+            return false;
+        }
     }
 }
 
