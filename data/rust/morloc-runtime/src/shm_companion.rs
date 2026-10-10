@@ -78,6 +78,18 @@ impl CompanionSegment {
         size:   usize,
         policy: SweepPolicy,
     ) -> Result<Self, MorlocError> {
+        Self::open_min(suffix, size, size, policy)
+    }
+
+    /// As `open`, but an existing segment is mapped whole once it holds at
+    /// least `attach_min` bytes, for a caller that learns the real size from
+    /// the segment's own header.
+    pub fn open_min(
+        suffix:     &str,
+        size:       usize,
+        attach_min: usize,
+        policy:     SweepPolicy,
+    ) -> Result<Self, MorlocError> {
         let basename = shm::get_common_basename();
         if basename.is_empty() {
             return Err(MorlocError::Shm(format!(
@@ -88,7 +100,7 @@ impl CompanionSegment {
         let name_str = format!("{}.{}", basename, suffix);
         let (base, actual_size) = match shm::create_segment(&name_str, size)? {
             Some(seg) => (seg.ptr, seg.len),
-            None => attach(&name_str, size)?,
+            None => attach(&name_str, attach_min)?,
         };
 
         let name = CString::new(name_str.as_str()).map_err(|e| {

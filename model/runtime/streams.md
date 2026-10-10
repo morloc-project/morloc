@@ -171,3 +171,14 @@ finishes the stdio streams a call left open before replying, so a call's
 output precedes its result. A write returns once its batches are queued,
 not written; text a pool prints to the shared stdout meanwhile may land
 inside a batch (issues/streams.md).
+
+### SLOT-17 Every process uses the slot count the registry was published with
+Status: implemented
+Checked by: every_process_takes_the_slot_count_the_registry_was_published_with
+
+The process that creates the registry sizes it from its own setting
+(`MORLOC_REGISTRY_SLOT_COUNT`) and publishes the count in the registry's
+header. Every process that attaches maps the registry as it was made and
+uses the published count, whatever its own setting, so a handle names the
+same slot in every process; one whose mapping does not cover the count
+refuses to attach.

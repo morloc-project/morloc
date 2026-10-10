@@ -277,16 +277,23 @@ pub fn registry_bootstrap() -> Result<usize, MorlocError> {
     let volume_bytes = registry_volume_size(slot_count);
 
     // INIT-2: opened and published without the lock.
-    let seg = crate::shm_companion::CompanionSegment::open(
+    // An attaching process maps what the creator made and takes its count.
+    let seg = crate::shm_companion::CompanionSegment::open_min(
         "reg",
         volume_bytes,
+        std::mem::size_of::<RegistryHeader>(),
         crate::shm_companion::SweepPolicy::SweepOnCrash,
     )?;
     let base = seg.base as *mut RegistryHeader;
-    if let Err(e) = publish_registry_header(base, slot_count) {
-        seg.detach();
-        return Err(e);
-    }
+    let slot_count = match publish_registry_header(base, slot_count)
+        .and_then(|()| published_slot_count(base, seg.size))
+    {
+        Ok(n) => n,
+        Err(e) => {
+            seg.detach();
+            return Err(e);
+        }
+    };
 
     let mut seg = seg;
     let mut segment = REGISTRY_SEGMENT.lock();
@@ -323,6 +330,18 @@ pub fn registry_bootstrap() -> Result<usize, MorlocError> {
     sweeper_want();
 
     Ok(slot_count)
+}
+
+/// The slot count the registry was published with, which every attached
+/// process uses whatever its own setting; `mapped` must cover it.
+fn published_slot_count(base: *const RegistryHeader, mapped: usize) -> Result<usize, MorlocError> {
+    let n = unsafe { (*base).slot_count } as usize;
+    if n == 0 || n > STREAM_REGISTRY_MAX_SLOT_COUNT || mapped < registry_volume_size(n) {
+        return Err(MorlocError::Other(format!(
+            "stream registry: published with {n} slots, which {mapped} mapped bytes do not cover"
+        )));
+    }
+    Ok(n)
 }
 
 fn publish_registry_header(base: *mut RegistryHeader, slot_count: usize) -> Result<(), MorlocError> {
@@ -11220,5 +11239,24 @@ mod teardown_tests {
             super::registry_teardown();
             super::registry_bootstrap().is_err()
         }));
+    }
+}
+
+#[cfg(test)]
+mod registry_count_tests {
+    use super::*;
+
+    #[test]
+    fn every_process_takes_the_slot_count_the_registry_was_published_with() {
+        let n = 64usize;
+        let size = registry_volume_size(n);
+        let layout = std::alloc::Layout::from_size_align(size, 64).unwrap();
+        let base = unsafe { std::alloc::alloc_zeroed(layout) } as *mut RegistryHeader;
+        publish_registry_header(base, n).unwrap();
+        // A process whose own setting differs attaches to the same header.
+        publish_registry_header(base, 16).unwrap();
+        assert_eq!(published_slot_count(base, size).unwrap(), n);
+        assert!(published_slot_count(base, registry_volume_size(16)).is_err(), "a mapping too small for the published count is refused");
+        unsafe { std::alloc::dealloc(base as *mut u8, layout) };
     }
 }
