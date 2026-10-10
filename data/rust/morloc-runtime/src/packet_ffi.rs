@@ -1173,7 +1173,7 @@ pub(crate) unsafe fn make_data_packet_auto(
     let rs = CSchema::to_rust(schema);
 
     let threshold = crate::packet::inline_threshold();
-    let t_sz = std::time::Instant::now();
+    let t_sz = crate::log::trace_enabled().then(std::time::Instant::now);
     // Bounded size walk: we only need to know whether the serialized
     // form fits inline (i.e. is `<= threshold`), so cap the walk at
     // `threshold + 1`. For payloads that clearly overflow inline the
@@ -1194,7 +1194,7 @@ pub(crate) unsafe fn make_data_packet_auto(
         "[make_data_packet_auto] calc_voidstar_size_bounded ({} KiB cap) = {} bytes in {:.2?}",
         threshold / 1024,
         flat_size,
-        t_sz.elapsed()
+        t_sz.map(|t| t.elapsed()).unwrap_or_default()
     );
 
     if flat_size <= threshold {

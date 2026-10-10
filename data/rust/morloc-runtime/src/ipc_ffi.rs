@@ -96,12 +96,13 @@ pub(crate) unsafe fn send_all(fd: i32, buf: *const u8, len: usize) -> bool {
         tv_nsec: (SEND_STALL_TIMEOUT_MS % 1000) * 1_000_000,
     };
     let stall_dur = std::time::Duration::from_millis(SEND_STALL_TIMEOUT_MS as u64);
-    // Wall-clock deadline for a zero-progress stall, reset on every byte sent.
+    // Wall-clock deadline for a zero-progress stall, started when a send
+    // first stalls and cleared on every byte sent.
     // Bounding on elapsed time (not just per-poll timeout) prevents a signal
     // storm -- e.g. SIGCHLD from exiting pool workers -- from turning
     // send->EAGAIN->poll->EINTR->send into an unbounded busy-loop that never
     // trips the per-poll ceiling.
-    let mut last_progress = std::time::Instant::now();
+    let mut stalled_since: Option<std::time::Instant> = None;
     let mut total: usize = 0;
     while total < len {
         let n = libc::send(
@@ -112,7 +113,7 @@ pub(crate) unsafe fn send_all(fd: i32, buf: *const u8, len: usize) -> bool {
         );
         if n > 0 {
             total += n as usize;
-            last_progress = std::time::Instant::now();
+            stalled_since = None;
             continue;
         }
         if n == 0 {
@@ -129,7 +130,7 @@ pub(crate) unsafe fn send_all(fd: i32, buf: *const u8, len: usize) -> bool {
             // (bounded) for writability and retry the same offset. A dead peer
             // surfaces as POLLHUP/POLLERR -> the next send returns EPIPE and we
             // bail on the hard-error path below.
-            if last_progress.elapsed() >= stall_dur {
+            if stalled_since.get_or_insert_with(std::time::Instant::now).elapsed() >= stall_dur {
                 return false;
             }
             let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
@@ -435,19 +436,60 @@ pub(crate) unsafe fn stream_from_client_wait(
 }
 
 /// The process at the other end of a local socket, as it connected.
-pub(crate) struct Peer {
-    pid: u32,
-    start: u64,
+pub(crate) enum Peer {
+    /// Its pid and start stamp, read when the connection was taken.
+    Stamped { pid: u32, start: u64 },
+    /// Asked of the socket only when a wait stalls: the kernel keeps the
+    /// connecting process's identity with the socket, safe against pid reuse.
+    Deferred { fd: i32 },
 }
 
 impl Peer {
     pub(crate) fn of(fd: i32) -> Option<Peer> {
+        Self::deferred(fd).or_else(|| Self::stamped(fd))
+    }
+
+    fn stamped(fd: i32) -> Option<Peer> {
         let pid = peer_pid(fd)?;
-        Some(Peer { pid, start: morloc_runtime_types::process::start_time(pid) })
+        Some(Peer::Stamped { pid, start: morloc_runtime_types::process::start_time(pid) })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn deferred(fd: i32) -> Option<Peer> {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        const UNKNOWN: u8 = 0;
+        const YES: u8 = 1;
+        const NO: u8 = 2;
+        static SUPPORTED: AtomicU8 = AtomicU8::new(UNKNOWN);
+        peer_pid(fd)?;
+        match SUPPORTED.load(Ordering::Relaxed) {
+            YES => Some(Peer::Deferred { fd }),
+            NO => None,
+            _ => match peer_pidfd(fd) {
+                Err(e) if e.raw_os_error() == Some(libc::ENOPROTOOPT) => {
+                    SUPPORTED.store(NO, Ordering::Relaxed);
+                    None
+                }
+                Ok(pidfd) => {
+                    unsafe { libc::close(pidfd) };
+                    SUPPORTED.store(YES, Ordering::Relaxed);
+                    Some(Peer::Deferred { fd })
+                }
+                Err(_) => None,
+            },
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn deferred(_fd: i32) -> Option<Peer> {
+        None
     }
 
     fn alive(&self) -> bool {
-        morloc_runtime_types::process::alive(self.pid, self.start)
+        match *self {
+            Peer::Stamped { pid, start } => morloc_runtime_types::process::alive(pid, start),
+            Peer::Deferred { fd } => deferred_alive(fd),
+        }
     }
 
     /// Read up to `len` bytes from `fd`, waiting as long as this peer lives.
@@ -481,6 +523,39 @@ fn peer_pid(fd: i32) -> Option<u32> {
     (rc == 0 && cred.pid > 0).then_some(cred.pid as u32)
 }
 
+#[cfg(target_os = "linux")]
+const SO_PEERPIDFD: libc::c_int = 77;
+
+/// A pidfd for the process that connected to `fd`. Fails with ENOPROTOOPT
+/// on kernels before 6.5, and EINVAL or ESRCH once that process is reaped.
+#[cfg(target_os = "linux")]
+fn peer_pidfd(fd: i32) -> std::io::Result<i32> {
+    let mut pidfd: libc::c_int = -1;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let rc = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, SO_PEERPIDFD, &mut pidfd as *mut _ as *mut c_void, &mut len) };
+    if rc == 0 { Ok(pidfd) } else { Err(std::io::Error::last_os_error()) }
+}
+
+/// A pidfd polls readable once its process has exited, reaped or not; a
+/// stopped process has not.
+#[cfg(target_os = "linux")]
+fn deferred_alive(fd: i32) -> bool {
+    match peer_pidfd(fd) {
+        Ok(pidfd) => {
+            let mut pfd = libc::pollfd { fd: pidfd, events: libc::POLLIN, revents: 0 };
+            let exited = unsafe { libc::poll(&mut pfd, 1, 0) } == 1;
+            unsafe { libc::close(pidfd) };
+            !exited
+        }
+        Err(e) => !matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ESRCH)),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn deferred_alive(_fd: i32) -> bool {
+    true
+}
+
 #[cfg(target_os = "macos")]
 fn peer_pid(fd: i32) -> Option<u32> {
     let mut pid: libc::pid_t = 0;
@@ -504,11 +579,6 @@ unsafe fn read_packet(
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
     clear_errmsg(errmsg);
-
-    if libc::fcntl(client_fd, libc::F_GETFD) == -1 {
-        set_errmsg(errmsg, &MorlocError::Ipc("Invalid file descriptor".into()));
-        return ptr::null_mut();
-    }
 
     let buffer = libc::calloc(BUFFER_SIZE, 1) as *mut u8;
     if buffer.is_null() {
@@ -1459,6 +1529,46 @@ mod dispatch_fork_tests {
         assert!(!request.is_null());
         unsafe {
             libc::free(request as *mut c_void);
+            libc::close(conn);
+            libc::close(listener);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_sender_counts_as_alive_until_it_exits_in_either_identity() {
+        let (listener, path, dir) = listening_socket();
+        let client = unsafe { morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        let child = unsafe {
+            connecting_child(&path, client, |_| {
+                libc::raise(libc::SIGSTOP);
+            })
+        };
+        let conn = unsafe { morloc_runtime_types::fd::accept(listener, ptr::null_mut(), ptr::null_mut()) };
+        assert!(conn >= 0);
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, libc::WUNTRACED) }, child);
+        assert!(libc::WIFSTOPPED(status));
+        let stamped = Peer::stamped(conn).unwrap();
+        let deferred = Peer::deferred(conn);
+        assert!(stamped.alive(), "a stopped sender is alive");
+        if let Some(d) = &deferred {
+            assert!(d.alive(), "a stopped sender is alive");
+        }
+        unsafe { libc::kill(child, libc::SIGKILL) };
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::waitid(libc::P_PID, child as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT) }, 0);
+        assert!(!stamped.alive(), "an unreaped sender is gone");
+        if let Some(d) = &deferred {
+            assert!(!d.alive(), "an unreaped sender is gone");
+        }
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(!stamped.alive(), "a reaped sender is gone");
+        if let Some(d) = &deferred {
+            assert!(!d.alive(), "a reaped sender is gone");
+        }
+        unsafe {
+            libc::close(client);
             libc::close(conn);
             libc::close(listener);
         }

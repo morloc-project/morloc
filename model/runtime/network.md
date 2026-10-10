@@ -69,12 +69,15 @@ unique name, created exclusively. Paths the user names (`--socket`,
 
 ### NET-5 A request on a local socket waits as long as its sender lives
 Status: implemented
-Checked by: a_stopped_sender_keeps_its_request, a_request_whose_sender_is_gone_ends_though_its_fd_lives_on
+Checked by: a_stopped_sender_keeps_its_request, a_request_whose_sender_is_gone_ends_though_its_fd_lives_on, a_sender_counts_as_alive_until_it_exits_in_either_identity
 
 A pool reading a request from a local socket waits until the request is
-complete, the sender closes its end, or the sending process (its pid taken
-from the socket's peer credentials, with its start time) no longer exists,
-checking once a second. A stopped sender counts as alive; an exited one
+complete, the sender closes its end, or the sending process no longer
+exists, checking once a second. The sending process is the one the socket's
+peer credentials name. Where the kernel keeps that process's identity with
+the socket (Linux 6.5 and later), it is asked only when a wait stalls and
+cannot be confused with a later process given the same pid; elsewhere the
+pid and its start time are read when the connection is taken. A stopped sender counts as alive; an exited one
 does not, even unreaped. There is no time limit, so a sender suspended mid-send keeps its
 call; a sender that died while a process it forked holds its descriptor
 open is noticed within a second. A sender whose process cannot be named
