@@ -246,10 +246,7 @@ morloc-nexus/process.rs::-::POOL_PGIDS	exec-only
 morloc-nexus/process.rs::-::POOL_GROUPS	exec-only		
 morloc-nexus/process.rs::-::REAPING	exec-only		
 morloc-nexus/process.rs::-::POOL_PINS	exec-only		
-morloc-nexus/process.rs::-::SPAWNED_PIDS	exec-only		
 morloc-nexus/process.rs::-::EXIT_STATUSES	exec-only		
-morloc-nexus/process.rs::-::POOL_START_TIMES	exec-only		
-morloc-nexus/process.rs::-::POOL_SWEPT	exec-only		
 morloc-nexus/process.rs::-::POOL_LANGS	exec-only		
 morloc-nexus/process.rs::-::CLEANING_UP	exec-only		
 morloc-nexus/process.rs::-::EXIT_CODE	exec-only		

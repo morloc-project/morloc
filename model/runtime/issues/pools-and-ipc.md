@@ -2,11 +2,6 @@
 
 Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
 
-- **The per-pid stream sweep races daemon recovery.** [read] A dead pool's
-  per-pid sweep is queued (nexus process.rs ~190) just before recovery
-  stops every stream writer with a FAILED status (~279), so a crashed
-  pool's streams end PAUSED or FAILED depending on timing (SLOT-13 says
-  FAILED). Recovery and shutdown already finish every stream.
 - [speculative] A connect to a pool that died while idle may retry for up
   to 30 s before failing.
 - [measured] Python and R pools queue concurrent daemon requests behind a

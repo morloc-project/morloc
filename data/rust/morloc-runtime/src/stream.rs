@@ -2488,8 +2488,7 @@ fn stdio_owner_is_alive(pid: u32, opener_start_time: u64) -> bool {
 /// double-open still errors.
 ///
 /// Without this a leaked or corrupt claim would wedge every @stdout open
-/// until the owning process dies (so the nexus poll's `sweep_per_pid`
-/// fires) or the daemon restarts.
+/// until the daemon restarts.
 fn try_reclaim_stale_stdio_claim(
     claim: &std::sync::atomic::AtomicI64,
     existing: i64,
@@ -5192,18 +5191,11 @@ fn host_append(path: &str, expected_schema_str: &str, opener: (u32, u64, u64)) -
 // landed in the same slot index between pre-filter and discard isn't
 // accidentally swept).
 //
-// Per-PID sweeps (for crashed pools) flow through the same thread and
-// queue.
-
 /// A request enqueued to the sweeper thread.
 #[derive(Debug, Clone, Copy)]
 pub enum SweepRequest {
     /// Discard all slots whose `call_id` field matches.
     PerCall(u64),
-    /// Discard all slots whose (`opener_pid`, `opener_pid_start_time`)
-    /// matches a (PID, start_time) pair. Used when a pool is detected
-    /// to have crashed.
-    PerPid(u32, u64),
 }
 
 struct Sweeper {
@@ -5242,9 +5234,6 @@ fn start_sweeper() -> Option<Sweeper> {
 fn sweep_now(req: SweepRequest) {
     match req {
         SweepRequest::PerCall(call_id) => sweep_per_call(call_id),
-        SweepRequest::PerPid(pid, start_time) => {
-            sweep_per_pid(pid, start_time);
-        }
     }
 }
 
@@ -5303,12 +5292,6 @@ pub fn sweeper_enqueue_call(call_id: u64) {
     sweeper_send(SweepRequest::PerCall(call_id));
 }
 
-/// Enqueue a per-PID sweep request. Called when a pool crash is detected
-/// (the pool's PID + start_time uniquely identify the dead pool's slots).
-pub fn sweeper_enqueue_pid(pid: u32, start_time: u64) {
-    sweeper_send(SweepRequest::PerPid(pid, start_time));
-}
-
 /// Sweeper thread main loop. Drains the queue forever; exits when
 /// the `Sender` half is dropped (only happens at clean shutdown if
 /// somebody calls `sweeper_shutdown`).
@@ -5346,12 +5329,6 @@ fn sweep_matching(matches: impl Fn(&RegistrySlot) -> bool) {
         }
         let _ = finish_stream(idx, gen, morloc_runtime_types::packet::FOOTER_STATUS_PAUSED as u32);
     }
-}
-
-/// End every open stream the process `(pid, start_time)` opened; the start
-/// time tells a reused pid apart.
-fn sweep_per_pid(pid: u32, start_time: u64) {
-    sweep_matching(|slot| slot.opener_pid.get() == pid && slot.opener_pid_start_time.get() == start_time);
 }
 
 /// Reclaim a stdio singleton claim (@stdout/@stderr/@stdin) left open by
@@ -8035,7 +8012,7 @@ mod tests {
             sweeper_want();
             let idle = !sweeper_running() && crate::fork_policy::thread_count() == Some(1);
             idle && crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
-                sweeper_enqueue_pid(1, u64::MAX);
+                sweeper_enqueue_call(u64::MAX);
                 sweeper_running()
             })
         });
@@ -8047,7 +8024,7 @@ mod tests {
         let _shm = crate::own_test_registry();
         sweeper_init();
         let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
-            sweeper_enqueue_pid(1, u64::MAX);
+            sweeper_enqueue_call(u64::MAX);
             sweeper_running()
         });
         assert!(ok, "a forked child dropped its sweep requests");
@@ -8059,7 +8036,6 @@ mod tests {
         sweeper_init();
         let status = run_in_forked_child(|| {
             sweeper_enqueue_call(u64::MAX);
-            sweeper_enqueue_pid(1, u64::MAX);
             sweeper_shutdown();
         });
         assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
@@ -8337,27 +8313,6 @@ mod tests {
         release_forked_holder((pid, release));
     }
 
-    #[test]
-    fn a_stream_left_for_an_opener_that_died_is_reclaimed() {
-        use std::sync::atomic::Ordering;
-        let _shm = crate::own_test_registry();
-        let dir = concat_test_dir("ended_dead_opener");
-        let path = dir.join("log.idx");
-        let p = path.to_str().unwrap().to_string();
-        let (pid, h, release) = stopped_opener(&p);
-        let start = morloc_runtime_types::process::start_time(pid as u32);
-        shared_close_handle(h).unwrap();
-        unsafe { libc::kill(pid, libc::SIGKILL); }
-        release_forked_holder((pid, release));
-
-        // The kernel dropped the dead opener's lock, so the path is free; its
-        // slot, left for it to release, is reclaimed by the crash sweep.
-        let h2 = shared_append_to_path(&p, "ai4").expect("append after the opener died");
-        shared_close_handle(h2).unwrap();
-        within_seconds("the crash sweep", move || sweep_per_pid(pid as u32, start));
-        let (_, idx) = unpack_handle(h);
-        assert_eq!(slot_ref(idx).unwrap().state.load(Ordering::Acquire), SLOT_STATE_FREE);
-    }
 
     #[test]
     fn an_opener_reopens_a_stream_another_process_ended() {
@@ -9035,53 +8990,7 @@ mod tests {
         shared_close_handle(h2).unwrap();
     }
 
-    #[test]
-    fn the_crash_sweep_reclaims_a_stream_its_opener_died_inside() {
-        let _shm = crate::own_test_registry();
-        let dir = concat_test_dir("dead_opener");
-        let path = dir.join("log.idx");
-        let p = path.to_str().unwrap().to_string();
 
-        let q = p.clone();
-        let (pid, h, release) = child_reporting(move || {
-            let h = shared_open_ostream_with_schema(&q, "ai4").unwrap();
-            let (_, idx) = unpack_handle(h);
-            std::mem::forget(SlotGuard::lock_any(slot_ref(idx).unwrap()).unwrap());
-            h
-        });
-        let start = morloc_runtime_types::process::start_time(pid as u32);
-        unsafe { libc::kill(pid, libc::SIGKILL); }
-        release_forked_holder((pid, release));
-
-        within_seconds("the crash sweep", move || sweep_per_pid(pid as u32, start));
-        let (gen, idx) = unpack_handle(h);
-        assert!(!slot_generation_is(slot_ref(idx).unwrap(), gen), "the sweep left the slot open");
-        assert!(shared_close_handle(h).is_err(), "the swept stream is still open");
-        let h2 = shared_append_to_path(&p, "ai4").expect("append after the sweep");
-        shared_close_handle(h2).unwrap();
-    }
-
-    #[test]
-    fn the_crash_sweep_reclaims_a_slot_its_opener_died_in_before_publishing() {
-        use std::sync::atomic::Ordering;
-        let _shm = crate::own_test_registry();
-        registry_init().unwrap();
-
-        // An open that dies between taking a slot and publishing its stream
-        // must not leave the slot taken for the rest of the run.
-        let (pid, idx, release) = child_reporting(|| {
-            let (idx, _, guard) = allocate_slot_cas().unwrap();
-            std::mem::forget(guard);
-            idx as i64
-        });
-        let start = morloc_runtime_types::process::start_time(pid as u32);
-        unsafe { libc::kill(pid, libc::SIGKILL); }
-        release_forked_holder((pid, release));
-
-        within_seconds("the crash sweep", move || sweep_per_pid(pid as u32, start));
-        let slot = slot_ref(idx as usize).unwrap();
-        assert_eq!(slot.state.load(Ordering::Acquire), SLOT_STATE_FREE);
-    }
 
     #[test]
     fn a_panic_inside_a_stream_poisons_it() {

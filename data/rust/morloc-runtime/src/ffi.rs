@@ -88,35 +88,6 @@ pub(crate) unsafe fn stream_registry_init(
     ffi_try!(errmsg, usize::MAX, crate::stream::registry_init())
 }
 
-/// Enqueue a PID-sweep request to the dedicated sweeper thread.
-/// Used by the nexus when it detects a pool has died (clean exit or
-/// crash) so any slots that pool left open in the shared registry
-/// are released without waiting for the per-call sweep (which only
-/// fires when a dispatch ends normally).
-///
-/// `pid` and `start_time` together identify a unique process across
-/// PID reuse. The sweeper walks the registry and discards slots whose
-/// `(opener_pid, opener_pid_start_time)` matches both. Pass
-/// `start_time = 0` to skip the start-time check (accepts the rare
-/// PID-reuse false positive).
-///
-/// Non-blocking; the actual sweep runs on the sweeper thread.
-pub(crate) unsafe fn stream_sweep_pid(
-    pid: u32,
-    start_time: u64,
-) {
-    crate::stream::sweeper_enqueue_pid(pid, start_time);
-}
-
-/// The start stamp of `pid` (`process::start_time`), which the nexus pairs
-/// with a pool's pid when it enqueues a PID sweep. 0 when unreadable; the
-/// sweep then accepts a PID-only match.
-pub(crate) unsafe fn stream_pid_start_time(
-    pid: u32,
-) -> u64 {
-    morloc_runtime_types::process::start_time(pid)
-}
-
 pub(crate) unsafe fn shm_set_fallback_dir(dir: *const c_char) {
     if !dir.is_null() {
         let d = CStr::from_ptr(dir).to_string_lossy();
@@ -764,16 +735,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn stream_registry_init(errmsg: *mut *mut c_char) -> usize {
         super::stream_registry_init(errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn stream_sweep_pid(pid: u32, start_time: u64) {
-        super::stream_sweep_pid(pid, start_time)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn stream_pid_start_time(pid: u32) -> u64 {
-        super::stream_pid_start_time(pid)
     }
 
     #[no_mangle]

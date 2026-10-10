@@ -183,12 +183,6 @@ fn check_and_recover(n_pools: usize) {
         Err(std::sync::TryLockError::Poisoned(_)) => panic!("the pool recovery lock is poisoned"),
         Err(std::sync::TryLockError::WouldBlock) => return,
     };
-    // First, enqueue PID-sweep requests for any pool that has died
-    // since our last visit. The sweeper thread releases the dead
-    // pool's slots in the shared SHM registry off this latency path.
-    // Cheap on the no-death fast path (one Relaxed load per pool).
-    sweep_dead_pools(n_pools);
-
     // Fast path: if no pool has died, we're done. This runs every
     // poll cycle so it must be cheap.
     let mut any_dead = false;
@@ -433,12 +427,6 @@ struct PoolPin {
 static POOL_PINS: std::sync::Mutex<[Option<PoolPin>; MAX_DAEMONS]> =
     std::sync::Mutex::new([const { None }; MAX_DAEMONS]);
 
-/// The pid each pool started with, kept after its exit for the crash sweep.
-static SPAWNED_PIDS: [AtomicI32; MAX_DAEMONS] = {
-    const INIT: AtomicI32 = AtomicI32::new(0);
-    [INIT; MAX_DAEMONS]
-};
-
 fn pool_pins() -> std::sync::MutexGuard<'static, [Option<PoolPin>; MAX_DAEMONS]> {
     // PANIC-4
     POOL_PINS.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock())
@@ -460,22 +448,6 @@ fn release_pool_group(i: usize) {
 /// Exit statuses saved by SIGCHLD handler.
 static EXIT_STATUSES: [AtomicI32; MAX_DAEMONS] = {
     const INIT: AtomicI32 = AtomicI32::new(0);
-    [INIT; MAX_DAEMONS]
-};
-
-/// Start stamps of pool processes, captured at spawn. Paired with PIDs
-/// for the §1.7 PID sweep. Zero entries (unset or unreadable) cause the
-/// sweeper to fall back to PID-only matching.
-static POOL_START_TIMES: [std::sync::atomic::AtomicU64; MAX_DAEMONS] = {
-    const INIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    [INIT; MAX_DAEMONS]
-};
-
-/// Per-pool flag: has this pool's PID sweep already been enqueued?
-/// Prevents duplicate sweeps after the same death is observed across
-/// multiple dispatch cycles. Reset when a pool is respawned.
-static POOL_SWEPT: [AtomicBool; MAX_DAEMONS] = {
-    const INIT: AtomicBool = AtomicBool::new(false);
     [INIT; MAX_DAEMONS]
 };
 
@@ -534,11 +506,6 @@ pub struct PoolSocket {
     pub socket_path: String,
     pub syscmd: Vec<CString>,
     pub pid: i32,
-    /// Process start stamp of `pid`, read right after the daemon was
-    /// spawned. Paired with `pid` when the nexus enqueues a PID sweep on
-    /// pool death, so the sweeper rejects PID-reuse false positives. 0 if
-    /// it couldn't be read (the sweep then falls back to PID-only).
-    pub pid_start_time: u64,
     /// XXH64 fingerprint (16-char hex) of this pool's emitted source +
     /// any declared @hash-include@ files. Exported to the spawned pool
     /// process as @MORLOC_POOL_HASH@ so the runtime cache key changes
@@ -1210,8 +1177,7 @@ pub fn setup_sockets(pools: &[Pool], tmpdir: &str, shm_basename: &str) -> Vec<Po
                 socket_path,
                 syscmd,
                 pid: 0,
-                pid_start_time: 0,
-                pool_hash: CString::new(pool.pool_hash.as_str())
+                    pool_hash: CString::new(pool.pool_hash.as_str())
                     .unwrap_or_else(|_| CString::new("").unwrap()),
             }
         })
@@ -1353,9 +1319,6 @@ static SPAWN_TO_RECORD_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomi
 
 /// Start pool daemons for the given socket indices and wait for them to respond to pings.
 pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<(), String> {
-    extern "C" {
-        fn stream_pid_start_time(pid: u32) -> u64;
-    }
     for &idx in indices {
         let since = unsafe { morloc_reaped_sequence() };
         let (pid, pgid, pin) = start_language_server(&sockets[idx])?;
@@ -1364,17 +1327,7 @@ pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<()
         #[cfg(test)]
         std::thread::sleep(Duration::from_millis(SPAWN_TO_RECORD_DELAY_MS.load(Ordering::Relaxed)));
         sockets[idx].pid = pid;
-        // Capture the pool's start stamp at spawn so the PID-based crash
-        // sweep can detect PID reuse. Zero if the read races a fast exit;
-        // the sweep falls back to a PID-only match in that case.
-        let start_time = unsafe { stream_pid_start_time(pid as u32) };
-        sockets[idx].pid_start_time = start_time;
-        POOL_START_TIMES[idx].store(start_time, Ordering::Release);
-        // Fresh incarnation: clear the sweep-done flag so the next
-        // death of this pool is detected.
-        POOL_SWEPT[idx].store(false, Ordering::Relaxed);
         PIDS[idx].store(pid, Ordering::SeqCst);
-        SPAWNED_PIDS[idx].store(pid, Ordering::Relaxed);
         let mut status = 0;
         if unsafe { morloc_take_noted_child_exit(pid, since, &mut status) } == 1 {
             kill_pool_group(idx);
@@ -1399,41 +1352,6 @@ pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<()
     Ok(())
 }
 
-/// Walk the per-index PIDs/start-times arrays and enqueue a
-/// PID sweep for any pool that has died (`PIDS[i] == -1`) but hasn't
-/// been swept yet. Idempotent per pool index until the pool is
-/// respawned (which clears `POOL_SWEPT[i]`).
-///
-/// Called by the daemon poll-cycle hook (alongside
-/// `pool_check_and_recover`) so pool clean-exits between dispatches
-/// release their slots promptly. The crash-recovery path tears down
-/// the SHM registry so any racy sweep enqueue against the new
-/// registry is harmless (no slots will match).
-///
-/// Walks the global `PIDS` / `POOL_START_TIMES` / `POOL_SWEPT`
-/// statics rather than a `&[PoolSocket]` so it can be called from
-/// any context (including the C-ABI callback from libmorloc.so).
-pub fn sweep_dead_pools(n_pools: usize) {
-    extern "C" {
-        fn stream_sweep_pid(pid: u32, start_time: u64);
-    }
-    let limit = n_pools.min(MAX_DAEMONS);
-    for i in 0..limit {
-        if POOL_SWEPT[i].load(Ordering::Relaxed) { continue; }
-        let pid = PIDS[i].load(Ordering::Relaxed);
-        if pid != -1 { continue; }
-        let dead_pid = SPAWNED_PIDS[i].load(Ordering::Relaxed);
-        if dead_pid <= 0 { continue; }
-        let start_time = POOL_START_TIMES[i].load(Ordering::Acquire);
-        if POOL_SWEPT[i]
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_err()
-        {
-            continue;
-        }
-        unsafe { stream_sweep_pid(dead_pid as u32, start_time) };
-    }
-}
 
 
 fn wait_for_daemon(socket: &PoolSocket, pool_index: usize) -> Result<(), String> {
@@ -1972,7 +1890,6 @@ mod tests {
             socket_path: dir.join("pipe").to_str().unwrap().into(),
             syscmd: Vec::new(),
             pid: 0,
-            pid_start_time: 0,
             pool_hash: CString::new("").unwrap(),
         }
     }
@@ -2269,7 +2186,6 @@ mod tests {
             socket_path: "/nonexistent/morloc-test.sock".into(),
             syscmd: vec![CString::new("true").unwrap()],
             pid: 0,
-            pid_start_time: 0,
             pool_hash: CString::new("").unwrap(),
         }];
         let died = matches!(start_daemons(&mut sockets, &[0]), Err(e) if e.contains("died"));
