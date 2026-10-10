@@ -651,7 +651,14 @@ def _recv_fd(sock):
     raise RuntimeError("No fd received in ancillary data")
 
 
-WORKER_IDLE_TIMEOUT = 5.0  # seconds before an idle worker exits
+def _worker_idle_timeout():
+    """Seconds a surplus fork worker stays idle before it retires."""
+    try:
+        return int(os.environ["MORLOC_POOL_IDLE_TIMEOUT_MS"].strip()) / 1000.0
+    except (KeyError, ValueError):
+        return 60.0
+
+WORKER_IDLE_TIMEOUT = _worker_idle_timeout()
 
 def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, total_workers, wakeup_w, retire_w, inherited_write_fd=-1):
     # The job socket's write end belongs to the listener; a worker holding a

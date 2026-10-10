@@ -306,20 +306,19 @@ impl JobQueue {
     }
 }
 
-// How long a surplus worker stays idle before it exits, unless
-// MORLOC_POOL_IDLE_TIMEOUT_MS says otherwise. Mirrors the Python pool's
-// WORKER_IDLE_TIMEOUT so a burst of concurrency does not leave threads (and
-// the fds/stacks they hold) alive for the rest of the run.
 // Consecutive passes of the accept loop (about 10 ms apart) on which a worker
 // fails to start before the jobs waiting for one are failed.
 const START_ATTEMPTS: u32 = 50;
 
+// How long a surplus worker stays idle before it exits, unless
+// MORLOC_POOL_IDLE_TIMEOUT_MS says otherwise; the Python pool reads the same
+// variable with the same default.
 fn worker_idle_timeout() -> std::time::Duration {
     std::env::var("MORLOC_POOL_IDLE_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map(std::time::Duration::from_millis)
-        .unwrap_or(std::time::Duration::from_secs(5))
+        .unwrap_or(std::time::Duration::from_secs(60))
 }
 
 // ── Worker thread ────────────────────────────────────────────────────────────

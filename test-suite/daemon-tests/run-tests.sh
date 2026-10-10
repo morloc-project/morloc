@@ -1526,6 +1526,8 @@ if should_run "worker-crash"; then
     echo "${BOLD}[worker-crash] a worker killed inside a call is recovered${RESET}"
 
     CRASH_DIR=$(mktemp -d)
+    # The retirement checks below wait seconds, not the default minute.
+    MORLOC_POOL_IDLE_TIMEOUT_MS=3000; export MORLOC_POOL_IDLE_TIMEOUT_MS
     WORK_DIRS+=("$CRASH_DIR")
     compile_program "crash.loc" "$CRASH_DIR"
     HTTP_PORT=$(pick_port)
@@ -1640,6 +1642,7 @@ if should_run "worker-crash"; then
         stop_daemon "$local_pid"
         pkill -9 -f "$CRASH_DIR" 2>/dev/null || true
     fi
+    unset MORLOC_POOL_IDLE_TIMEOUT_MS
     echo ""
 fi
 
