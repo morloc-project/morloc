@@ -34,3 +34,10 @@
 - [read] An EMFILE in `_recv_fd` raises RuntimeError, which escapes the
   `except (EOFError, OSError)` at pool.py ~712; the worker exits without
   its retire token and SHM-8 ends the whole pool, dropping the call.
+- [read] Fork-mode workers never get the raised descriptor limit: only the
+  listener process calls `raise_nofile_limit` (ipc_ffi.rs ~382).
+- [read] FORK-12 gap: a user module that forks while it is imported (after
+  the worker forks, before its loop) leaves a child that polls the job
+  socket and serves calls, uncounted by the coordinator.
+- [read] The coordinator's spawn branch (pool.py ~1219) does not check the
+  shutdown flag, so a worker can be forked during shutdown.
