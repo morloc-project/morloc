@@ -270,6 +270,7 @@ pub fn build_json_help(m: &Manifest) -> Value {
         "program": {
             "name": m.name,
             "description": m.desc,
+            "epilogues": epilogues_json(&m.epilogues),
         },
         "groups": groups,
         "commands": commands,
@@ -399,7 +400,13 @@ fn command_to_json(cmd: &Command, manifest: &Manifest) -> Value {
             },
         },
         "terminals": terminals,
+        "epilogues": epilogues_json(&cmd.epilogues),
     })
+}
+
+/// One verbatim string per `@epilogue` block, its lines joined by newlines.
+fn epilogues_json(epilogues: &[Vec<String>]) -> Vec<String> {
+    epilogues.iter().map(|block| block.join("\n")).collect()
 }
 
 /// Render one manifest [`Arg`] to its lossless JSON object. `pos_index` is the

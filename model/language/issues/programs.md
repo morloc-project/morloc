@@ -34,3 +34,7 @@ Reproduced on 0.109.0 unless marked.
 - **Benchmark and log `{lang}` name the caller.** [reproduced] ANN-6 open.
   `compare2 x = (slow@incr x, fast@triple x)`, Python `incr`, C++ `triple`:
   the log line and the benchmark row both report `incr` as `cpp`.
+- **Blank line before `@epilogue` stays in the description.** [reproduced]
+  Spec gap: no item says whether trailing blank docstring lines belong to
+  the description. `--' Search notes` / `--'` / `--' @epilogue` on a module
+  gives `--json-help` `program.description` `["Search notes", ""]`.

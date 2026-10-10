@@ -1,0 +1,3 @@
+["Examples:\n  main once", "See also: the manual"]
+once ["Examples:\n\n# three numbers\n  once"]
+plain []

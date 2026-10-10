@@ -6,7 +6,8 @@
     "description": [
       "Demo program exercising every CLI argument shape, used to verify the",
       "--json-help and --mcp-tools machine-readable help outputs."
-    ]
+    ],
+    "epilogues": []
   },
   "groups": [],
   "commands": [
@@ -62,7 +63,8 @@
           }
         }
       },
-      "terminals": []
+      "terminals": [],
+      "epilogues": []
     },
     {
       "name": "configure",
@@ -206,7 +208,8 @@
           }
         }
       },
-      "terminals": []
+      "terminals": [],
+      "epilogues": []
     },
     {
       "name": "countWords",
@@ -260,7 +263,8 @@
           }
         }
       },
-      "terminals": []
+      "terminals": [],
+      "epilogues": []
     },
     {
       "name": "mapSize",
@@ -324,7 +328,8 @@
           }
         }
       },
-      "terminals": []
+      "terminals": [],
+      "epilogues": []
     },
     {
       "name": "fileHead",
@@ -412,7 +417,8 @@
             }
           }
         }
-      ]
+      ],
+      "epilogues": []
     },
     {
       "name": "pairFiles",
@@ -496,7 +502,8 @@
           }
         }
       },
-      "terminals": []
+      "terminals": [],
+      "epilogues": []
     },
     {
       "name": "addOne",
@@ -547,7 +554,8 @@
           }
         }
       },
-      "terminals": []
+      "terminals": [],
+      "epilogues": []
     },
     {
       "name": "maybeDouble",
@@ -604,7 +612,8 @@
           }
         }
       },
-      "terminals": []
+      "terminals": [],
+      "epilogues": []
     }
   ],
   "types": [

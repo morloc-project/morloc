@@ -118,3 +118,12 @@ description lines. A command with actions prints `Return:` and then:
 - `actions:` one row per action in declaration order: the flag, the type of
   its output (its media type when it has one), `(raw bytes)` for a
   `@render` action, and `default` for the `@default` action.
+
+### CLI-12 `--json-help` carries every epilogue verbatim
+Intent: ruled 2026-10-10
+Tests: spec-cli-12-1
+Code: conforms 2026-10-10
+
+`program.epilogues` and each command's `epilogues` list that docstring's
+`@epilogue` blocks in order, one string per block, its lines joined by
+newlines and nothing trimmed. No blocks is `[]`.
