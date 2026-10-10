@@ -40,13 +40,6 @@ here touch locks and ownership: model first.
   without, 4.3 s before the custodian (2026-10-10). Chosen for now (not
   ruled): no wait.
   Should pools' raw stdout go to stderr while a command streams to stdout?
-- [read] `ready_slot_queue` gives a slot a new queue block when the old
-  queue's writer has not exited yet, and the old block is never freed
-  (about 1 KiB of shared memory per occurrence). The fix needs the opener
-  and the departing writer to agree on exactly one of them freeing it; a
-  consumer flag plus a custody pointer read leaks in one interleaving, so
-  extend tla/StreamQueue.tla first (the writer must not free a queue the
-  slot still uses: StreamQueue_writer_frees.bug).
 - Open question (`@tell`): intrinsics.md gives `@tell` no failure value and
   it returns 0 when this process has no `@stdout` open, so a pool other
   than the one that opened the run's stdout reports 0 while elements have

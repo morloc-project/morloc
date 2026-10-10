@@ -181,3 +181,17 @@ header. Every process that attaches maps the registry as it was made and
 uses the published count, whatever its own setting, so a handle names the
 same slot in every process; one whose mapping does not cover the count
 refuses to attach.
+
+### SLOT-18 A queue block is freed by exactly one of its slot and its last writer
+Status: implemented
+Checked by: an_opener_reuses_a_queue_whose_writer_has_left, the_writer_leaving_frees_a_queue_its_slot_gave_up, the_writer_leaving_keeps_a_queue_its_slot_still_uses, tla:QueueHandoff, tla:QueueHandoff_flag_and_pointer.bug, tla:QueueHandoff_no_recheck.bug
+
+A slot keeps its queue block from one stream to the next. When a stream is
+opened while the custodian's writer for the slot's previous stream has not
+yet left, the slot takes a new queue and the old block goes to that
+writer: one word on the queue holds a consumer flag, cleared by the writer
+as it leaves, and an abandoned flag, set by the opener under the slot lock.
+The writer frees the queue, with its spare buffers, if it finds the
+abandoned flag set; an opener that sets the flag and finds the consumer
+already gone clears it again and keeps the queue. So the block is freed
+once, never while the slot uses it, and never leaked.

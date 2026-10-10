@@ -1640,13 +1640,11 @@ pub(crate) fn allocate_slot_cas_for(
 fn ready_slot_queue(slot: &RegistrySlot) -> Result<&'static crate::custody::CustodyQueue, MorlocError> {
     let depth = crate::write_behind::depth().max(1);
     if let Ok(q) = slot_queue(slot) {
-        if !q.has_consumer() {
+        // SLOT-18: a writer still leaving keeps the old queue and frees it.
+        if !q.abandon() {
             q.reset_for_open(depth);
             return Ok(q);
         }
-        // A writer that has not yet seen its slot released may still pop
-        // the old queue; the new stream gets its own, and the old block is
-        // left to it.
     }
     let rel = crate::custody::new_queue()?;
     slot.custody.set(slot_owns(rel));
@@ -1689,7 +1687,7 @@ impl Drop for Unpublished {
     }
 }
 
-fn slot_owns(rel: RelPtr) -> RelPtr {
+pub(crate) fn slot_owns(rel: RelPtr) -> RelPtr {
     if rel != shm_types_crate::RELNULL {
         if let Ok(abs) = crate::shm::rel2abs(rel) {
             crate::eval_arena::forget_if_active(abs);

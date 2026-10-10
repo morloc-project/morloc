@@ -19,6 +19,10 @@ pub(crate) const ENTRY_CLOSE: u32 = 4;
 
 pub(crate) const STATUS_DISCARD: u32 = 255;
 
+// SLOT-18: the queue's consumer word.
+const CONSUMER: u32 = 1;
+const ABANDONED: u32 = 2;
+
 pub(crate) const FAILED_IO: u32 = 1;
 pub(crate) const FAILED_PIPE_CLOSED: u32 = 2;
 
@@ -108,7 +112,38 @@ impl CustodyQueue {
 
     /// Whether a writer may still pop this queue.
     pub(crate) fn has_consumer(&self) -> bool {
-        self.consumer.load(Ordering::Acquire) != 0
+        self.consumer.load(Ordering::Acquire) & CONSUMER != 0
+    }
+
+    /// An opener giving its slot this queue for a new stream: false when no
+    /// writer holds it any more, so the slot keeps it; true when a writer
+    /// still does, so the slot needs a new queue and that writer frees this
+    /// one as it leaves.
+    // SLOT-18
+    pub(crate) fn abandon(&self) -> bool {
+        let prev = self.consumer.fetch_or(ABANDONED, Ordering::AcqRel);
+        if prev & CONSUMER == 0 {
+            self.consumer.fetch_and(!ABANDONED, Ordering::AcqRel);
+            return false;
+        }
+        true
+    }
+
+    /// The writer stops consuming this queue; it frees the queue, with its
+    /// spare buffers, when the slot has given it up. True when it did.
+    // SLOT-18
+    pub(crate) fn leave(&self) -> bool {
+        let prev = self.consumer.fetch_and(!CONSUMER, Ordering::AcqRel);
+        if prev & ABANDONED == 0 {
+            return false;
+        }
+        for spare in self.drain_spares() {
+            if let Ok(abs) = crate::shm::rel2abs(spare) {
+                crate::shm::free_uncounted(abs);
+            }
+        }
+        crate::shm::free_uncounted(self as *const CustodyQueue as crate::shm::AbsPtr);
+        true
     }
 
     fn gone() -> MorlocError {
@@ -400,7 +435,7 @@ pub(crate) fn queue_at(rel: RelPtr) -> Result<&'static CustodyQueue, MorlocError
         return Err(MorlocError::Other("the stream has no custody queue".into()));
     }
     let abs = crate::shm::rel2abs(rel)?;
-    // SAFETY: SLOT-10: a slot index keeps its queue block for the registry's life.
+    // SAFETY: SLOT-18: the queue a slot points at lives while the slot uses it.
     Ok(unsafe { &*(abs as *const CustodyQueue) })
 }
 
@@ -481,7 +516,7 @@ impl Writer {
         let q = self.q;
         self.serve_queue(stop);
         // SLOT-10: from here this writer touches the queue no more.
-        q.consumer.store(0, Ordering::Release);
+        q.leave();
     }
 
     fn serve_queue(&mut self, stop: &AtomicU32) {
@@ -834,7 +869,7 @@ pub(crate) fn host_spawn(writer: Writer) -> Result<(), MorlocError> {
     let queue = writer.q;
     let slot_idx = writer.slot_idx;
     let gen = writer.gen;
-    queue.consumer.store(1, Ordering::Release);
+    queue.consumer.store(CONSUMER, Ordering::Release);
     let stop = std::sync::Arc::new(AtomicU32::new(STOP_NONE));
     let thread_stop = stop.clone();
     let thread = std::thread::Builder::new()
@@ -1166,6 +1201,36 @@ mod tests {
         let arena = crate::own_test_registry();
         let q = queue_at(new_queue().unwrap()).unwrap();
         (arena, q)
+    }
+
+    #[test]
+    fn an_opener_reuses_a_queue_whose_writer_has_left() {
+        let (_a, q) = fresh();
+        assert!(!q.abandon(), "no writer holds it, so the slot keeps it");
+        assert!(!q.has_consumer());
+        assert_eq!(q.consumer.load(Ordering::Acquire), 0, "a reused queue carries no abandon mark");
+    }
+
+    #[test]
+    fn the_writer_leaving_frees_a_queue_its_slot_gave_up() {
+        let (_a, q) = fresh();
+        q.consumer.store(CONSUMER, Ordering::Release);
+        let spare_abs = crate::shm::shcalloc(1, 64).unwrap();
+        let spare = crate::stream::slot_owns(crate::shm::abs2rel(spare_abs).unwrap());
+        assert!(q.give_spare(spare));
+        let q_abs = q as *const CustodyQueue as crate::shm::AbsPtr;
+        assert!(q.abandon(), "a writer still holds it, so the slot takes a new one");
+        assert!(q.leave(), "the writer frees the queue it was the last to hold");
+        assert_eq!(unsafe { crate::shm::reference_count(q_abs) }, Some(0));
+        assert_eq!(unsafe { crate::shm::reference_count(spare_abs) }, Some(0));
+    }
+
+    #[test]
+    fn the_writer_leaving_keeps_a_queue_its_slot_still_uses() {
+        let (_a, q) = fresh();
+        q.consumer.store(CONSUMER, Ordering::Release);
+        assert!(!q.leave());
+        assert!(!q.has_consumer());
     }
 
     #[test]
