@@ -89,45 +89,61 @@ unsafe fn parse_request_within(
 ) -> *mut HttpRequest {
     clear_errmsg(errmsg);
 
-    use morloc_runtime_types::net_limits::{body_limit, recv_by};
+    use morloc_runtime_types::net_limits::{body_limit, peek_by, recv_by};
     // NET-2
     let head_until = std::time::Instant::now() + head_limit;
 
-    // Read headers byte by byte until \r\n\r\n
+    // Peek, then consume only through the blank line, so the socket is left
+    // at the body.
     let mut header_buf = vec![0u8; HTTP_MAX_HEADERS];
     let mut header_len: usize = 0;
-    let mut header_end_pos: Option<usize> = None;
+    let mut head_done = false;
 
     while header_len < HTTP_MAX_HEADERS - 1 {
-        match recv_by(fd, header_buf.as_mut_ptr().add(header_len), 1, head_until) {
-            Ok(1) => {}
-            Ok(_) => {
+        let room = HTTP_MAX_HEADERS - 1 - header_len;
+        let n = match peek_by(fd, header_buf.as_mut_ptr().add(header_len), room, head_until) {
+            Ok(0) => {
                 set_errmsg(errmsg, &MorlocError::Other("Connection closed while reading HTTP headers".into()));
                 return ptr::null_mut();
             }
+            Ok(n) => n,
             Err(e) => {
                 set_errmsg(errmsg, &MorlocError::Other(format!("Reading HTTP headers: {e}")));
                 return ptr::null_mut();
             }
-        }
-        header_len += 1;
-
-        if header_len >= 4 {
-            let tail = &header_buf[header_len - 4..header_len];
-            if tail == b"\r\n\r\n" {
-                header_end_pos = Some(header_len - 4);
-                break;
+        };
+        let from = header_len.saturating_sub(3);
+        let take = match header_buf[from..header_len + n].windows(4).position(|w| w == b"\r\n\r\n") {
+            Some(p) => {
+                head_done = true;
+                from + p + 4 - header_len
             }
+            None => n,
+        };
+        let mut got = 0;
+        while got < take {
+            match recv_by(fd, header_buf.as_mut_ptr().add(header_len + got), take - got, head_until) {
+                Ok(k) if k > 0 => got += k,
+                failed => {
+                    let why = match failed {
+                        Err(e) => format!("Reading HTTP headers: {e}"),
+                        Ok(_) => "Connection closed while reading HTTP headers".to_string(),
+                    };
+                    set_errmsg(errmsg, &MorlocError::Other(why));
+                    return ptr::null_mut();
+                }
+            }
+        }
+        header_len += take;
+        if head_done {
+            break;
         }
     }
 
-    let header_end = match header_end_pos {
-        Some(p) => p,
-        None => {
-            set_errmsg(errmsg, &MorlocError::Other("HTTP headers too large or malformed".into()));
-            return ptr::null_mut();
-        }
-    };
+    if !head_done {
+        set_errmsg(errmsg, &MorlocError::Other("HTTP headers too large or malformed".into()));
+        return ptr::null_mut();
+    }
 
     let header_str = std::str::from_utf8(&header_buf[..header_len]).unwrap_or("");
 
@@ -202,16 +218,9 @@ unsafe fn parse_request_within(
             return ptr::null_mut();
         }
 
-        // Some body bytes may be in header_buf after \r\n\r\n
-        let after_headers = header_end + 4;
-        let already_read = (header_len - after_headers).min(content_length);
-        if already_read > 0 {
-            ptr::copy_nonoverlapping(header_buf.as_ptr().add(after_headers), body, already_read);
-        }
-
         // NET-2
         let body_until = std::time::Instant::now() + body_limit(content_length);
-        let mut total = already_read;
+        let mut total = 0;
         while total < content_length {
             match recv_by(fd, body.add(total), content_length - total, body_until) {
                 Ok(n) if n > 0 => total += n,
@@ -628,6 +637,69 @@ mod body_tests {
             libc::close(reader);
         }
         dripper.join().unwrap();
+    }
+
+    fn parse(fd: i32) -> (String, String) {
+        let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+        let req = unsafe { super::parse_request_within(fd, std::time::Duration::from_secs(5), &mut err) };
+        assert!(!req.is_null(), "{}", unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy());
+        let r = unsafe { &*req };
+        let path = unsafe { std::ffi::CStr::from_ptr(r.path.as_ptr()) }.to_string_lossy().into_owned();
+        let body = if r.body.is_null() {
+            String::new()
+        } else {
+            String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(r.body as *const u8, r.body_len) }).into_owned()
+        };
+        unsafe { super::http_free_request(req) };
+        (path, body)
+    }
+
+    fn pair() -> (i32, i32) {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) }, 0);
+        (fds[0], fds[1])
+    }
+
+    fn send_all(fd: i32, bytes: &[u8]) {
+        let n = unsafe { libc::send(fd, bytes.as_ptr() as *const libc::c_void, bytes.len(), libc::MSG_NOSIGNAL) };
+        assert_eq!(n, bytes.len() as isize);
+    }
+
+    #[test]
+    fn pipelined_requests_on_one_connection_parse_in_turn() {
+        let (reader, writer) = pair();
+        send_all(
+            writer,
+            b"POST /call/f HTTP/1.1\r\nContent-Length: 3\r\n\r\n[1]\
+              POST /call/g HTTP/1.1\r\ncontent-length: 4\r\n\r\n[22]\
+              GET /health HTTP/1.1\r\nHost: x\r\n\r\n",
+        );
+        assert_eq!(parse(reader), ("/call/f".to_string(), "[1]".to_string()));
+        assert_eq!(parse(reader), ("/call/g".to_string(), "[22]".to_string()));
+        assert_eq!(parse(reader), ("/health".to_string(), String::new()));
+        unsafe {
+            libc::close(reader);
+            libc::close(writer);
+        }
+    }
+
+    #[test]
+    fn a_head_whose_end_is_split_across_sends_is_found() {
+        let (reader, writer) = pair();
+        let sender = std::thread::spawn(move || {
+            for part in [&b"POST /call/f HTTP/1.1\r\nContent-Length: 2\r"[..], b"\n\r", b"\n[", b"]GET /x HTTP/1.1\r\n\r\n"] {
+                send_all(writer, part);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            writer
+        });
+        assert_eq!(parse(reader), ("/call/f".to_string(), "[]".to_string()));
+        assert_eq!(parse(reader), ("/x".to_string(), String::new()));
+        let writer = sender.join().unwrap();
+        unsafe {
+            libc::close(reader);
+            libc::close(writer);
+        }
     }
 
     #[test]

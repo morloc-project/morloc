@@ -22,11 +22,24 @@ pub fn body_limit(len: usize) -> Duration {
 ///
 /// `buf` must be valid for `len` bytes of writes.
 pub unsafe fn recv_by(fd: libc::c_int, buf: *mut u8, len: usize, until: Instant) -> io::Result<usize> {
+    recv_flags_by(fd, buf, len, until, 0)
+}
+
+/// As `recv_by`, but the bytes stay queued on the socket.
+///
+/// # Safety
+///
+/// `buf` must be valid for `len` bytes of writes.
+pub unsafe fn peek_by(fd: libc::c_int, buf: *mut u8, len: usize, until: Instant) -> io::Result<usize> {
+    recv_flags_by(fd, buf, len, until, libc::MSG_PEEK)
+}
+
+unsafe fn recv_flags_by(fd: libc::c_int, buf: *mut u8, len: usize, until: Instant, flags: libc::c_int) -> io::Result<usize> {
     loop {
         if Instant::now() >= until {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "the client took too long to send its request"));
         }
-        let n = libc::recv(fd, buf as *mut libc::c_void, len, libc::MSG_DONTWAIT);
+        let n = libc::recv(fd, buf as *mut libc::c_void, len, libc::MSG_DONTWAIT | flags);
         if n >= 0 {
             return Ok(n as usize);
         }
