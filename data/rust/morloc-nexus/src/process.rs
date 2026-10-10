@@ -392,12 +392,9 @@ pub fn mcp_recover_pools_after_failure(n_pools: usize) {
 
 const POOL_END_WAIT: Duration = Duration::from_millis(200);
 
-const INITIAL_PING_TIMEOUT: Duration = Duration::from_millis(10);
-const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(1);
-const RETRY_MULTIPLIER: f64 = 1.25;
-const MAX_RETRIES: usize = 16;
-// DAEMON-6
-const PING_REPLY_LIMIT: Duration = Duration::from_secs(5);
+// LIFE-2: how often a readiness wait looks at the pool's process and at
+// shutdown, and the longest pause between connects while the socket is absent.
+const READY_CHECK: Duration = Duration::from_millis(20);
 
 // ── Global state for signal handlers ───────────────────────────────────────
 
@@ -1438,87 +1435,71 @@ pub fn sweep_dead_pools(n_pools: usize) {
     }
 }
 
-/// Ping a daemon with exponential backoff until it responds.
-/// Matches the C nexus behavior: initial delay 1ms, multiplier 1.25,
-/// plus socket timeout that doubles from 10ms to ~10s.
-// DAEMON-6: false once a daemon shutdown is requested.
-fn sleep_unless_shutting_down(d: Duration) -> bool {
-    let until = std::time::Instant::now() + d;
-    loop {
-        if unsafe { morloc_daemon_is_shutting_down() } {
-            return false;
-        }
-        let left = until.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            return true;
-        }
-        std::thread::sleep(left.min(Duration::from_millis(50)));
-    }
-}
 
 fn wait_for_daemon(socket: &PoolSocket, pool_index: usize) -> Result<(), String> {
     use morloc_runtime_types::packet::PacketHeader;
-    use std::os::unix::net::UnixStream;
     use std::io::{Read, Write};
+    use std::os::unix::io::AsRawFd;
+    use std::os::unix::net::UnixStream;
 
-    let ping = PacketHeader::ping();
-    let ping_bytes = ping.to_bytes();
-    let mut retry_delay = INITIAL_RETRY_DELAY.as_secs_f64();
-    let mut ping_timeout = INITIAL_PING_TIMEOUT;
-
-    for attempt in 0..=MAX_RETRIES {
-        // Check if child already died. The pool's stderr was inherited
-        // directly, so any traceback it printed is already on the user's
-        // terminal; the nexus just reports the exit status here.
+    // LIFE-2: one ping on one connection, answered or ended by the pool's death.
+    let ping = PacketHeader::ping().to_bytes();
+    let gone = |what: &str| -> Option<String> {
         if PIDS[pool_index].load(Ordering::Relaxed) == -1 {
             let status = EXIT_STATUSES[pool_index].load(Ordering::Relaxed);
-            return Err(format!(
-                "Pool process for '{}' died unexpectedly (status: {})",
-                socket.lang, status
-            ));
+            return Some(format!("Pool process for '{}' died unexpectedly (status: {})", socket.lang, status));
         }
-
-        // Try to connect and ping
-        match UnixStream::connect(&socket.socket_path) {
-            Ok(mut stream) => {
-                let _ = stream.set_read_timeout(Some(ping_timeout.min(PING_REPLY_LIMIT)));
-                let _ = stream.set_write_timeout(Some(ping_timeout.min(PING_REPLY_LIMIT)));
-
-                if stream.write_all(&ping_bytes).is_ok() {
-                    let mut resp = [0u8; 32];
-                    if stream.read_exact(&mut resp).is_ok() {
-                        if let Ok(hdr) = PacketHeader::from_bytes(&resp) {
-                            if hdr.is_ping() {
-                                return Ok(());
-                            }
-                        }
-                    }
+        if unsafe { morloc_daemon_is_shutting_down() } {
+            return Some(format!("the daemon is shutting down; pool '{}' was not {}", socket.lang, what));
+        }
+        None
+    };
+    let mut pause = Duration::from_millis(1);
+    loop {
+        let mut stream = loop {
+            if let Some(e) = gone("started") {
+                return Err(e);
+            }
+            match UnixStream::connect(&socket.socket_path) {
+                Ok(s) => break s,
+                Err(_) => {
+                    std::thread::sleep(pause);
+                    pause = (pause * 2).min(READY_CHECK);
                 }
             }
-            Err(_) => {}
+        };
+        if stream.write_all(&ping).is_err() {
+            continue;
         }
-
-        if attempt == MAX_RETRIES {
-            return Err(format!(
-                "Failed to ping pool '{}' at {} after {} retries",
-                socket.lang, socket.socket_path, MAX_RETRIES
-            ));
+        let mut resp = [0u8; 32];
+        let mut got = 0;
+        let answered = loop {
+            if let Some(e) = gone("started") {
+                return Err(e);
+            }
+            let mut pfd = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            let ready = unsafe { libc::poll(&mut pfd, 1, READY_CHECK.as_millis() as libc::c_int) };
+            if ready <= 0 {
+                continue;
+            }
+            match stream.read(&mut resp[got..]) {
+                Ok(0) => break false,
+                Ok(n) => {
+                    got += n;
+                    if got == resp.len() {
+                        break true;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break false,
+            }
+        };
+        if answered && PacketHeader::from_bytes(&resp).map_or(false, |h| h.is_ping()) {
+            return Ok(());
         }
-
-        // Sleep with exponential backoff
-        // Use the larger of retry_delay or ping_timeout to ensure we wait
-        // long enough for slow-starting pools (R, Python)
-        let wait = retry_delay.max(ping_timeout.as_secs_f64());
-        let secs = wait as u64;
-        let nanos = ((wait - secs as f64) * 1e9) as u32;
-        if !sleep_unless_shutting_down(Duration::new(secs, nanos)) {
-            return Err(format!("the daemon is shutting down; pool '{}' was not started", socket.lang));
-        }
-        retry_delay *= RETRY_MULTIPLIER;
-        ping_timeout = ping_timeout * 2;
+        // The pool closed the probe without a pong; ask again.
+        std::thread::sleep(READY_CHECK);
     }
-
-    unreachable!()
 }
 
 /// Stop every pool process group: SIGTERM, up to 200 ms for the pools to
@@ -1985,6 +1966,74 @@ pub fn set_child_subreaper() {
 
 #[cfg(test)]
 mod tests {
+    fn fake_socket(dir: &std::path::Path) -> PoolSocket {
+        PoolSocket {
+            lang: "test".into(),
+            socket_path: dir.join("pipe").to_str().unwrap().into(),
+            syscmd: Vec::new(),
+            pid: 0,
+            pid_start_time: 0,
+            pool_hash: CString::new("").unwrap(),
+        }
+    }
+
+    fn fresh_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mlc-ready-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_pool_is_seen_ready_as_soon_as_it_answers() {
+        use std::io::{Read, Write};
+        let idx = MAX_DAEMONS - 1;
+        PIDS[idx].store(std::process::id() as i32, Ordering::SeqCst);
+        let dir = fresh_dir("answers");
+        let socket = fake_socket(&dir);
+        let path = socket.socket_path.clone();
+        let pool = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            let (mut c, _) = listener.accept().unwrap();
+            let mut ping = [0u8; 32];
+            c.read_exact(&mut ping).unwrap();
+            std::thread::sleep(Duration::from_millis(600));
+            c.write_all(&ping).unwrap();
+        });
+        let started = std::time::Instant::now();
+        let ready = super::wait_for_daemon(&socket, idx);
+        let took = started.elapsed();
+        pool.join().unwrap();
+        PIDS[idx].store(-1, Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ready.is_ok(), "{ready:?}");
+        assert!(took < Duration::from_millis(1000), "ready at ~700 ms, seen at {took:?}");
+    }
+
+    #[test]
+    fn a_pool_that_dies_while_starting_is_reported_at_once() {
+        let idx = MAX_DAEMONS - 2;
+        PIDS[idx].store(std::process::id() as i32, Ordering::SeqCst);
+        let dir = fresh_dir("dies");
+        let socket = fake_socket(&dir);
+        let path = socket.socket_path.clone();
+        let pool = std::thread::spawn(move || {
+            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            let (_c, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            PIDS[idx].store(-1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(3000));
+        });
+        let started = std::time::Instant::now();
+        let ready = super::wait_for_daemon(&socket, idx);
+        let took = started.elapsed();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(ready.is_err());
+        assert!(took < Duration::from_millis(1000), "died at ~300 ms, reported at {took:?}");
+        pool.join().unwrap();
+    }
+
     #[test]
     fn a_pool_group_outlives_its_pool_until_released() {
         let (pgid, pin) = super::start_pin().unwrap();

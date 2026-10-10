@@ -59,8 +59,8 @@ A call into a pool has no deadline: a program may run for days, and nothing
 tells the caller how long a call should take. Such a wait ends when the
 peer dies (end of file, the lifeline, an owner-dead lock, a liveness check)
 and otherwise lasts as long as the work. A wait that is never legitimately
-long is bounded: a readiness ping waits a few seconds per attempt, and its
-retries end when shutdown is requested. Reading a request is governed by
+long is bounded. A readiness ping waits until the pool answers, exits, or
+shutdown is requested (LIFE-2). Reading a request is governed by
 NET-2 for a remote client and NET-5 on a local socket.
 
 A forked `morloc eval` runs in its own process group, limited in CPU time

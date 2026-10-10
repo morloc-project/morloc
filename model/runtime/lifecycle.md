@@ -11,10 +11,15 @@ the shared-memory base name. Environment adds `MORLOC_POOL_HASH` and
 `MORLOC_LIFELINE`. Standard streams are inherited unchanged.
 
 ### LIFE-2 A pool is ready when it answers a ping
-Status: draft
+Status: implemented
+Checked by: a_pool_is_seen_ready_as_soon_as_it_answers, a_pool_that_dies_while_starting_is_reported_at_once
 
-The nexus pings with exponential backoff and fails at once if the pool
-process has exited.
+The nexus connects to the pool's socket, retrying every few milliseconds
+while it does not yet exist, sends one ping and waits on that connection
+for the answer. The pool is ready the moment it answers. The wait ends
+early, with an error, when the pool's process exits or shutdown is
+requested; it has no other limit (DAEMON-6), since a pool may spend long
+loading its libraries. A probe the pool closes unanswered is sent again.
 
 ### LIFE-3 Exit status of a one-shot run
 Status: draft
