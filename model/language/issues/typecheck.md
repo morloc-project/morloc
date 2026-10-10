@@ -81,3 +81,13 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   now rejected ("both sides have: state"); the Packable mismatch error no
   longer prints compiler internals (types-custom-types.asc quotes the old
   message).
+- **`@collect (psmap f (@next s))` leaves the element type unsolved.**
+  [reproduced, 0.109.0] With `f :: Str -> Real`, `s :: IStream Str` and
+  `import parallel-cpp`, `morloc make` fails "cannot serialize unknown type
+  variable: b" at the export. `psmap :: (a -> b) -> ... -> ([b] -> <IO> ())
+  -> <IO> ()` fixes `b = Real`, so the sink type is determined. Works when
+  the producer goes through a signature (`scores :: IStream Str -> ([Real]
+  -> <IO> ()) -> <IO> (); scores s = psmap f (@next s)`) or the sink is
+  ascribed in a lambda. The `parallel` module docstring advertises the
+  failing form. Repro: web/morloc-studio/public/assets/home-examples/streams
+  with `@collect (psmap complexity (@next s))` inlined.
