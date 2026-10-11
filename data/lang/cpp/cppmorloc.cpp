@@ -86,16 +86,6 @@ void* shmalloc_cpp(size_t size){
     return new_ptr;
 }
 
-shm_t* shinit_cpp(const char* shm_basename, size_t volume_index, size_t shm_size) {
-    char* errmsg = NULL;
-    shm_t* new_ptr = shinit(shm_basename, volume_index, shm_size, &errmsg);
-    if(errmsg != NULL){
-        std::string msg(errmsg); free(errmsg);
-        throw std::runtime_error(msg);
-    }
-    return new_ptr;
-}
-
 int pack_with_schema_cpp(const void* mlc, const Schema* schema, char** mpk, size_t* mpk_size){
     char* errmsg = NULL;
     int exitcode = pack_with_schema(mlc, schema, mpk, mpk_size, &errmsg);

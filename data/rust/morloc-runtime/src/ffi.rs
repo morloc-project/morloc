@@ -43,12 +43,11 @@ macro_rules! ffi_try {
 
 pub(crate) unsafe fn shinit(
     shm_basename: *const c_char,
-    volume_index: usize,
     shm_size: usize,
     errmsg: *mut *mut c_char,
 ) -> *mut ShmHeader {
     let basename = CStr::from_ptr(shm_basename).to_string_lossy();
-    ffi_try!(errmsg, ptr::null_mut(), shm::shinit(&basename, volume_index, shm_size))
+    ffi_try!(errmsg, ptr::null_mut(), shm::shinit(&basename, shm_size))
 }
 
 pub(crate) unsafe fn shclose(errmsg: *mut *mut c_char) -> bool {
@@ -690,8 +689,8 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn shinit(shm_basename: *const c_char, volume_index: usize, shm_size: usize, errmsg: *mut *mut c_char) -> *mut ShmHeader {
-        super::shinit(shm_basename, volume_index, shm_size, errmsg)
+    pub unsafe extern "C" fn shinit(shm_basename: *const c_char, shm_size: usize, errmsg: *mut *mut c_char) -> *mut ShmHeader {
+        super::shinit(shm_basename, shm_size, errmsg)
     }
 
     #[no_mangle]

@@ -239,7 +239,7 @@ fn ensure_test_arena() {
         let _ = std::fs::create_dir_all(&test_dir);
         shm::shm_set_fallback_dir(test_dir.to_str().unwrap());
         let basename = format!("/morloc-{}-test-arena", std::process::id());
-        shm::shinit(&basename, shm::PRIMARY_VOLUME, 0x100000).unwrap(); // 1MB
+        shm::shinit(&basename, 0x100000).unwrap(); // 1MB
         static AT_EXIT: std::sync::Once = std::sync::Once::new();
         AT_EXIT.call_once(|| unsafe {
             libc::atexit(remove_test_arena);

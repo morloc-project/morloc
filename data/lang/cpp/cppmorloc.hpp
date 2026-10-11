@@ -328,7 +328,6 @@ static inline void* resolve_array_cpp(relptr_t relptr, size_t n, size_t width, m
 bool shfree_cpp(absptr_t ptr);
 Schema* parse_schema_cpp(const char* schema_ptr);
 void* shmalloc_cpp(size_t size);
-shm_t* shinit_cpp(const char* shm_basename, size_t volume_index, size_t shm_size);
 int pack_with_schema_cpp(const void* mlc, const Schema* schema, char** mpk, size_t* mpk_size);
 int unpack_with_schema_cpp(const char* mgk, size_t mgk_size, const Schema* schema, void** mlcptr);
 

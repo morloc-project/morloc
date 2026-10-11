@@ -452,7 +452,7 @@ pub(crate) unsafe fn start_daemon(
 
     // Init shared memory
     let mut err: *mut c_char = ptr::null_mut();
-    let shm = crate::ffi::shinit(shm_basename, morloc_runtime_types::shm_types::PRIMARY_VOLUME, shm_default_size, &mut err);
+    let shm = crate::ffi::shinit(shm_basename, shm_default_size, &mut err);
     if !err.is_null() {
         close_daemon(&mut (daemon as *mut LanguageDaemon));
         *errmsg = err;

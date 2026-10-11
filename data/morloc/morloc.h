@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 8
+#define MORLOC_ABI_VERSION 9
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -1271,7 +1271,7 @@ typedef struct resources_s {
 // Section 11: Function declarations -- Memory / SHM
 // ========================================================================
 
-shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ERRMSG);
+shm_t* shinit(const char* shm_basename, size_t shm_size, ERRMSG);
 bool shclose(ERRMSG);
 void shm_set_fallback_dir(const char* dir);
 void* shmalloc(size_t size, ERRMSG);

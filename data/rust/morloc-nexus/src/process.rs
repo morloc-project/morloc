@@ -120,7 +120,6 @@ extern "C" {
     fn shclose(errmsg: *mut *mut std::ffi::c_char) -> bool;
     fn shinit(
         basename: *const std::ffi::c_char,
-        volume_index: usize,
         shm_size: usize,
         errmsg: *mut *mut std::ffi::c_char,
     ) -> *mut std::ffi::c_void;
@@ -298,7 +297,7 @@ fn check_and_recover(n_pools: usize) {
         // both sets COMMON_BASENAME and creates the primary volume.
         let basename_c = CString::new(new_basename.as_str()).unwrap();
         let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
-        let shm = unsafe { shinit(basename_c.as_ptr(), morloc_runtime_types::shm_types::PRIMARY_VOLUME, 0xffff, &mut err) };
+        let shm = unsafe { shinit(basename_c.as_ptr(), 0xffff, &mut err) };
         if shm.is_null() {
             let msg = if !err.is_null() {
                 let s = unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned();
@@ -812,7 +811,6 @@ pub fn init_shm() -> (String, String) {
         fn shm_set_fallback_dir(dir: *const std::ffi::c_char);
         fn shinit(
             shm_basename: *const std::ffi::c_char,
-            volume_index: usize,
             shm_size: usize,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut std::ffi::c_void;
@@ -824,7 +822,7 @@ pub fn init_shm() -> (String, String) {
     let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
     unsafe {
         shm_set_fallback_dir(tmpdir_c.as_ptr());
-        let shm = shinit(basename_c.as_ptr(), morloc_runtime_types::shm_types::PRIMARY_VOLUME, 0xffff, &mut errmsg);
+        let shm = shinit(basename_c.as_ptr(), 0xffff, &mut errmsg);
         if shm.is_null() {
             let msg = if !errmsg.is_null() {
                 let s = std::ffi::CStr::from_ptr(errmsg).to_string_lossy().into_owned();

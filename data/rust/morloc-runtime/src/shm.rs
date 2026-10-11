@@ -551,27 +551,18 @@ pub(crate) fn unlink_segment(name: &std::ffi::CStr) {
     }
 }
 
-/// Map volume `volume_index` of the program named `shm_basename`, creating
-/// it with `shm_size` data bytes when it does not exist yet. The process
-/// that creates the primary volume owns the program's volumes.
-pub fn shinit(
-    shm_basename: &str,
-    volume_index: usize,
-    shm_size: usize,
-) -> Result<*mut ShmHeader, MorlocError> {
+/// Map the primary volume of the program named `shm_basename`, creating it
+/// with `shm_size` data bytes when it does not exist yet. The process that
+/// creates it owns the program's volumes; the others are made by growth.
+pub fn shinit(shm_basename: &str, shm_size: usize) -> Result<*mut ShmHeader, MorlocError> {
     crate::stream::registry_reopen();
-    if volume_index == 0 || volume_index >= MAX_VOLUME_NUMBER {
-        return Err(MorlocError::Shm(format!(
-            "shinit: volume index {} is not usable (1..{})", volume_index, MAX_VOLUME_NUMBER
-        )));
-    }
     // Unmap (and, for the owner, remove) the volumes on any normal exit,
     // even one that bypasses an explicit shclose.
     if !ATEXIT_REGISTERED.swap(true, Ordering::SeqCst) {
         unsafe { libc::atexit(shclose_atexit) };
     }
     if get_common_basename() == shm_basename {
-        let mapped = VOLUMES.lock().slots[volume_index].ptr();
+        let mapped = VOLUMES.lock().slots[PRIMARY_VOLUME].ptr();
         if !mapped.is_null() {
             return Ok(mapped);
         }
@@ -588,15 +579,13 @@ pub fn shinit(
         let mut cb = COMMON_BASENAME.lock();
         set_cstr(&mut *cb, shm_basename);
     }
-    let shm_name = volume_name(shm_basename, volume_index);
-    if let Some(shm) = create_and_register(&shm_name, volume_index, shm_size)? {
-        if volume_index == PRIMARY_VOLUME {
-            claim_program();
-        }
+    let shm_name = volume_name(shm_basename, PRIMARY_VOLUME);
+    if let Some(shm) = create_and_register(&shm_name, PRIMARY_VOLUME, shm_size)? {
+        claim_program();
         crate::shm_stats::init()?;
         return Ok(shm);
     }
-    match open_and_register(&shm_name, volume_index)? {
+    match open_and_register(&shm_name, PRIMARY_VOLUME)? {
         Ok(shm) => {
             crate::shm_stats::init()?;
             Ok(shm)
@@ -2578,7 +2567,7 @@ mod tests {
         let test_dir = fallback.path().to_path_buf();
         let base = format!("/morloc-{}-test-own", std::process::id());
         let _ = shclose();
-        shinit(&base, PRIMARY_VOLUME, 4096).unwrap();
+        shinit(&base, 4096).unwrap();
         unsafe {
             let slot = libc::mmap(
                 std::ptr::null_mut(),
@@ -2620,7 +2609,7 @@ mod tests {
         let fallback = crate::ScopedFallback::new("busybase");
         let test_dir = fallback.path().to_path_buf();
         let base = format!("/morloc-{}-test-busybase", std::process::id());
-        shinit(&base, PRIMARY_VOLUME, 4096).unwrap();
+        shinit(&base, 4096).unwrap();
         assert_eq!(live_segments(&test_dir, &base[1..]).len(), 1);
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {
@@ -2648,7 +2637,7 @@ mod tests {
             let pid = libc::fork();
             assert!(pid >= 0);
             if pid == 0 {
-                if shinit(&base, PRIMARY_VOLUME, 4096).is_err() {
+                if shinit(&base, 4096).is_err() {
                     libc::_exit(2);
                 }
                 let (held_tx, held_rx) = std::sync::mpsc::channel();
@@ -2731,7 +2720,7 @@ mod tests {
         shclose().unwrap();
         let basename = format!("/morloc-{}-test-poison", std::process::id());
         let _ = shclose();
-        let shm = shinit(&basename, PRIMARY_VOLUME, 0x10000).unwrap();
+        let shm = shinit(&basename, 0x10000).unwrap();
         unsafe {
             let holder = libc::fork();
             assert!(holder >= 0);
@@ -2986,7 +2975,7 @@ mod tests {
 
         let basename = format!("morloc-{}-test-vt", std::process::id());
         let _ = shclose();
-        let shm = shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
+        let shm = shinit(&basename, 4096).unwrap();
 
         // shinit should have populated the primary volume's slot.
         let entry = &MORLOC_VOL_TABLE[PRIMARY_VOLUME];
@@ -3034,7 +3023,7 @@ mod tests {
 
         let basename = format!("morloc-{}-test-idx", std::process::id());
         let _ = shclose();
-        shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
+        shinit(&basename, 4096).unwrap();
 
         // Force grow into several randomly-allocated volumes by
         // allocating much more than the initial 4 KiB volume can hold.
@@ -3087,7 +3076,7 @@ mod tests {
 
         let basename = format!("morloc-{}-test-shm", std::process::id());
         let _ = shclose();
-        let shm = shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
+        let shm = shinit(&basename, 4096).unwrap();
         assert!(!shm.is_null());
         assert_eq!(unsafe { (*shm).magic.load(Ordering::Acquire) }, SHM_MAGIC);
 
@@ -3134,7 +3123,7 @@ mod tests {
         // `parallel_madvise_populate_write`.
         let alloc_size = 128 * 1024 * 1024;
         let _ = shclose();
-        shinit(&basename, PRIMARY_VOLUME, alloc_size).unwrap();
+        shinit(&basename, alloc_size).unwrap();
         let p = shmalloc(alloc_size).unwrap();
         let ps = page_size();
         let n_pages = alloc_size / ps;

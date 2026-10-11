@@ -3421,15 +3421,13 @@ static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
     shm_t* shm = NULL;
     
     const char* shm_basename;
-    size_t volume_index;
     size_t shm_default_size;
 
-    PARSE_ARGS_OR_ABORT(args, "skk", &shm_basename, &volume_index, &shm_default_size);
+    PARSE_ARGS_OR_ABORT(args, "sk", &shm_basename, &shm_default_size);
 
     shm = PyTRY(
         shinit,
         shm_basename,
-        volume_index,
         shm_default_size
     );
 
