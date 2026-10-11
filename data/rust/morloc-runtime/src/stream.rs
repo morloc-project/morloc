@@ -3925,10 +3925,29 @@ pub fn shared_write_subpacket(
         // borrows it while the slot itself is updated per element.
         let elem = local.elem_schema.clone();
         let res = crate::recur::Resolver::new(&elem);
-        for i in 0..n_elements {
+        // An Int of at most one limb is its own 16 bytes, holding no pointer,
+        // so a run of them is copied as a fixed-width array while the buffer
+        // holds no variable bytes.
+        // SAFETY: element `i` of the batch starts with its limb count.
+        let inline_int = |i: u64| elem.serial_type == SerialType::Int
+            && unsafe { *(elem_data_base.add(i as usize * w) as *const usize) } <= 1;
+        let mut i = 0u64;
+        while i < n_elements {
+            if inline_int(i) && slot.write_buffer_data_used.get() == 0 && 16 + w <= buf_size {
+                let mut j = i + 1;
+                while j < n_elements && inline_int(j) {
+                    j += 1;
+                }
+                // SAFETY: elements i..j lie within the batch.
+                let run = unsafe { elem_data_base.add(i as usize * w) };
+                append_flat_run(slot, local, run, (j - i) as usize, buf_size)?;
+                i = j;
+                continue;
+            }
             let elem_src = unsafe { elem_data_base.add((i as usize) * w) };
             append_one_element(slot, local, elem_src, buf_size, &mut scratch, &elem, &res)?;
             slot.element_count.set(slot.element_count.get() + 1);
+            i += 1;
         }
         Ok(())
     })
