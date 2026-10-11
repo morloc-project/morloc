@@ -30,8 +30,8 @@ nexus (one per program run, or one long-running daemon / MCP server)
   compression jobs.
 - pool: dispatch workers (C++, Rust: a job queue in libmorloc; Python
   thread mode: Python threads; Python fork mode and R: forked worker
-  processes) and the lifeline thread (C++, Rust; R watches its lifeline in
-  its wait for work).
+  processes). C++ and Rust pools watch the nexus's lifeline in their accept
+  loop, beside the listening socket; R watches it in its wait for work.
 
 ## Worker scaling
 

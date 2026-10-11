@@ -37,7 +37,7 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/ipc_ffi.rs::read_packet",
     "morloc-runtime/stream.rs::is_this_process",
     "morloc-runtime/daemon_ffi.rs::write_port_file_atomic",
-    "morloc-runtime/ipc_ffi.rs::wait_for_client_with_timeout",
+    "morloc-runtime/ipc_ffi.rs::accept_or_watch",
     "morloc-runtime/ipc_ffi.rs::try_answer_ping",
     "morloc-runtime/ipc_ffi.rs::close_socket",
     "morloc-runtime/ipc_ffi.rs::send_and_receive_over_socket",

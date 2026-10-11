@@ -10,7 +10,8 @@
 //
 // The fixed scaffold below owns the C ABI declarations and main(), which
 // fills a PoolConfig and hands control to pool_main in libmorloc.so. main()
-// mirrors pool_host.cpp: --health probe, lifeline, panic hook, schema init.
+// mirrors pool_host.cpp: --health probe, panic hook, schema init; pool_main
+// watches the nexus's lifeline.
 // NOTE: the marker string must not appear anywhere above the first real
 // marker (the splicer splits on every occurrence).
 #![allow(dead_code, unused_variables, unused_unsafe, unused_mut, non_snake_case, non_camel_case_types, unused_imports, unused_parens)]
@@ -43,7 +44,6 @@ extern "C" fn mlc_classify_panic(file: *const u8, len: usize) -> bool {
 extern "C" {
     fn morloc_set_panic_classifier(classify: Option<extern "C" fn(*const u8, usize) -> bool>);
     fn pool_main(argc: c_int, argv: *mut *mut c_char, config: *mut PoolConfig) -> c_int;
-    fn morloc_lifeline_guard();
 }
 
 
@@ -65,8 +65,6 @@ struct PoolConfig {
 // <<<BREAK>>>
 
 fn main() {
-    unsafe { morloc_lifeline_guard(); }
-
     let raw: Vec<String> = std::env::args().collect();
     if raw.len() == 2 && raw[1] == "--health" {
         println!("{{\"status\":\"ok\",\"version\":\"__MORLOC_VERSION__\"}}");

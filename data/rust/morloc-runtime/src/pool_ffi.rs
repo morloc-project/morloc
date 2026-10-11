@@ -36,11 +36,20 @@ unsafe impl Sync for PoolConfig {}
 // ── Global state ─────────────────────────────────────────────────────────────
 
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+// The write end of a pipe the accept loop watches, written by the SIGTERM
+// handler so the loop wakes at once; -1 before the loop makes it.
+static WAKE_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 extern "C" fn pool_sigterm_handler(_sig: i32) {
     // PANIC-1
     morloc_runtime_types::panic::signal_frame(|| {
         SHUTTING_DOWN.store(true, Ordering::Relaxed);
+        let fd = WAKE_FD.load(Ordering::Relaxed);
+        if fd >= 0 {
+            let b = 1u8;
+            // SAFETY: write is async-signal-safe; the pipe outlives the loop.
+            unsafe { libc::write(fd, &b as *const u8 as *const c_void, 1) };
+        }
     })
 }
 
@@ -273,7 +282,10 @@ impl JobQueue {
                 return PopResult::Retire;
             }
             st.idle += 1;
-            st = self.cond.wait_timeout(st, std::time::Duration::from_millis(100)).unwrap().0;
+            // Until this worker could retire, and at least once a retirement
+            // period, since another worker starting makes this one surplus.
+            let wait = retire_after.saturating_sub(idle_since.elapsed()).max(std::time::Duration::from_millis(1));
+            st = self.cond.wait_timeout(st, wait).unwrap().0;
             st.idle -= 1;
         }
     }
@@ -495,9 +507,7 @@ unsafe fn wait_next_request(fd: i32, peer: Option<&crate::ipc_ffi::Peer>) -> boo
 // ── Accept loop ──────────────────────────────────────────────────────────────
 
 unsafe fn serve(config: &PoolConfig, socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char) -> i32 {
-    use crate::ipc_ffi::start_daemon;
-    use crate::ipc_ffi::close_daemon;
-    use crate::ipc_ffi::wait_for_client_with_timeout;
+    use crate::ipc_ffi::{accept_or_watch, close_daemon, start_daemon, Accepted};
 
     let mut errmsg: *mut c_char = ptr::null_mut();
     let mut daemon = start_daemon(socket_path, tmpdir, shm_basename, 0xffff, &mut errmsg);
@@ -513,18 +523,43 @@ unsafe fn serve(config: &PoolConfig, socket_path: *const c_char, tmpdir: *const 
     let mut handles = vec![spawn_worker(&queue, config, retire_after).expect("failed to spawn pool worker thread")];
     let mut start_failures = 0u32;
 
+    // The nexus's lifeline and the SIGTERM handler's wake pipe are watched
+    // beside the socket, so the loop sleeps until there is work.
+    let mut wake = [-1 as libc::c_int; 2];
+    if morloc_runtime_types::fd::pipe(wake.as_mut_ptr()) == 0 {
+        for fd in wake {
+            libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK);
+        }
+        WAKE_FD.store(wake[1], Ordering::Relaxed);
+    }
+    let mut lifeline = crate::lifeline::adopt();
+
     while !SHUTTING_DOWN.load(Ordering::Relaxed) {
-        let client_fd = wait_for_client_with_timeout(daemon, 10000, &mut errmsg);
-        if !errmsg.is_null() {
+        let watch = [wake[0], lifeline];
+        let watched = if lifeline >= 0 { &watch[..] } else { &watch[..1] };
+        // A worker that failed to start is retried soon; otherwise nothing
+        // needs the loop until a connection, the lifeline or SIGTERM.
+        let timeout_us = if start_failures > 0 { 10_000 } else { 1_000_000 };
+        match accept_or_watch((*daemon).server_fd, timeout_us, watched) {
+            Ok(Accepted::Client(fd)) => queue.push(fd),
+            Ok(Accepted::Watched(0)) => {
+                let mut b = [0u8; 64];
+                libc::read(wake[0], b.as_mut_ptr() as *mut c_void, b.len());
+            }
+            Ok(Accepted::Watched(_)) => {
+                let mut b = 0u8;
+                let n = libc::read(lifeline, &mut b as *mut u8 as *mut c_void, 1);
+                if n == 0 || (n < 0 && crate::utility::errno_val() != libc::EINTR && crate::utility::errno_val() != libc::EAGAIN) {
+                    // The nexus is gone: end this pool's group as the
+                    // lifeline guard would, and watch it no more.
+                    lifeline = -1;
+                    crate::lifeline::morloc_lifeline_teardown();
+                }
+            }
+            Ok(Accepted::Nothing) => {}
             // A dropped accept-loop error can leave an accepted client
             // unserved (the caller then sees a bare "Connection closed"); log it.
-            let m = std::ffi::CStr::from_ptr(errmsg).to_string_lossy();
-            eprintln!("morloc pool: accept loop error: {}", m);
-            libc::free(errmsg as *mut c_void);
-            errmsg = ptr::null_mut();
-        }
-        if client_fd > 0 {
-            queue.push(client_fd);
+            Err(e) => eprintln!("morloc pool: accept loop error: {}", e),
         }
 
         // Start a worker for each queued job that no worker can take. A start

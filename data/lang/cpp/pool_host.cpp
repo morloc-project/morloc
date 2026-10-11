@@ -35,9 +35,6 @@ int main(int argc, char* argv[]) {
     // backtrace, then die of the signal (see morloc_install_crash_handler).
     morloc_install_crash_handler("cpp", mlc_current_frame);
 
-    // End this pool's process group when the nexus ends, however it ends.
-    morloc_lifeline_guard();
-
     // Health check: confirm binary links and print version
     if (argc == 2 && std::string(argv[1]) == "--health") {
         std::cout << "{\"status\":\"ok\",\"version\":\"__MORLOC_VERSION__\"}" << std::endl;

@@ -1389,18 +1389,44 @@ pub(crate) unsafe fn send_reply_to_foreign_server(
 
 // ── wait_for_client ──────────────────────────────────────────────────────────
 
+/// What a wait on a listening socket, and on descriptors watched beside
+/// it, saw.
+pub(crate) enum Accepted {
+    /// A connection to serve.
+    Client(i32),
+    /// The watched descriptor at this index is readable or has hung up.
+    Watched(usize),
+    /// Nothing to act on: the wait timed out or was interrupted, or a
+    /// readiness ping was answered here.
+    Nothing,
+}
+
 pub(crate) unsafe fn wait_for_client_with_timeout(
     daemon: *mut LanguageDaemon,
     timeout_us: i32,
     errmsg: *mut *mut c_char,
 ) -> i32 {
     clear_errmsg(errmsg);
+    match accept_or_watch((*daemon).server_fd, timeout_us, &[]) {
+        Ok(Accepted::Client(fd)) => fd,
+        Ok(_) => 0,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
 
+/// Wait up to `timeout_us` (none if 0) for a connection on `server_fd` or
+/// for one of `watch` to become readable, and accept the connection.
+pub(crate) unsafe fn accept_or_watch(server_fd: i32, timeout_us: i32, watch: &[i32]) -> Result<Accepted, MorlocError> {
     // poll() instead of pselect/FD_SET so any fd value is accepted (an fd_set
     // caps at FD_SETSIZE=1024).
-    let mut pfd = libc::pollfd { fd: (*daemon).server_fd, events: libc::POLLIN, revents: 0 };
+    let mut pfds: Vec<libc::pollfd> = std::iter::once(server_fd)
+        .chain(watch.iter().copied())
+        .map(|fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 })
+        .collect();
 
-    // Timeout
     let mut ts: libc::timespec = std::mem::zeroed();
     let timeout_ptr = if timeout_us > 0 {
         ts.tv_sec = (timeout_us / 1000000) as i64;
@@ -1410,27 +1436,28 @@ pub(crate) unsafe fn wait_for_client_with_timeout(
         ptr::null()
     };
 
-    let ready = poll_wait(&mut pfd, 1, timeout_ptr);
+    let ready = poll_wait(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout_ptr);
     if ready < 0 {
         if crate::utility::errno_val() == libc::EINTR {
-            return 0;
+            return Ok(Accepted::Nothing);
         }
-        set_errmsg(errmsg, &MorlocError::Ipc("poll error".into()));
-        return -1;
+        return Err(MorlocError::Ipc("poll error".into()));
     }
     if ready == 0 {
-        return 0;
+        return Ok(Accepted::Nothing);
     }
-
-    if pfd.revents & libc::POLLIN == 0 {
-        return 0;
+    if let Some(i) = pfds[1..].iter().position(|p| pfd_ready(p)) {
+        return Ok(Accepted::Watched(i));
     }
-    let selected_fd = morloc_runtime_types::fd::accept((*daemon).server_fd, ptr::null_mut(), ptr::null_mut());
+    if pfds[0].revents & libc::POLLIN == 0 {
+        return Ok(Accepted::Nothing);
+    }
+    let selected_fd = morloc_runtime_types::fd::accept(server_fd, ptr::null_mut(), ptr::null_mut());
     if selected_fd < 0 {
         if out_of_descriptors() {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        return 0;
+        return Ok(Accepted::Nothing);
     }
     if trace_close_enabled() {
         eprintln!("[MLC_IPC] pid={} accept fd={}", libc::getpid(), selected_fd);
@@ -1447,14 +1474,14 @@ pub(crate) unsafe fn wait_for_client_with_timeout(
     // with the pool-side silent-pong-drop as backstop).
     if PING_PEEK_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
         match try_answer_ping(selected_fd) {
-            PingPeek::Answered => return 0,
+            PingPeek::Answered => return Ok(Accepted::Nothing),
             PingPeek::NotPing => {
                 PING_PEEK_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
             }
             PingPeek::Unknown => {}
         }
     }
-    selected_fd
+    Ok(Accepted::Client(selected_fd))
 }
 
 #[cfg(test)]
@@ -1637,6 +1664,25 @@ mod tests {
 #[cfg(test)]
 mod dispatch_fork_tests {
     use super::*;
+
+    // A pool's accept loop learns of a watched descriptor's end, such as
+    // the nexus's lifeline, without a thread of its own blocked on it.
+    #[test]
+    fn an_accept_wait_reports_a_watched_descriptor_that_ended() {
+        let (server, _path, dir) = listening_socket();
+        let mut p = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
+        let quiet = unsafe { accept_or_watch(server, 20_000, &[p[0]]) }.unwrap();
+        unsafe { libc::close(p[1]) };
+        let ended = unsafe { accept_or_watch(server, 1_000_000, &[p[0]]) }.unwrap();
+        unsafe {
+            libc::close(p[0]);
+            libc::close(server);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(quiet, Accepted::Nothing), "a live descriptor was reported");
+        assert!(matches!(ended, Accepted::Watched(0)), "the ended descriptor was not reported");
+    }
 
     fn listening_socket() -> (i32, std::ffi::CString, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("mlc-peer-{}-{:?}", std::process::id(), std::thread::current().id()));
