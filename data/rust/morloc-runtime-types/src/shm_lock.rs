@@ -8,56 +8,68 @@
 //! lock is poisoned and every later attempt fails with an error instead of
 //! allocating from a corrupt list.
 //!
-//! Linux uses a process-shared robust pthread mutex, whose death detection
-//! the kernel performs. macOS has no robust mutexes; there the lock word
-//! holds the owner's `process::token` and a waiter poisons it once that
-//! process is gone.
+//! It is a `RecoverableLock` with a poison word: the holder's death, which
+//! that lock reports, poisons it.
 
 use crate::error::MorlocError;
+use crate::recoverable_lock::{RecoverableGuard, RecoverableLock};
 
-#[cfg(target_os = "linux")]
-use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 #[repr(C)]
 pub struct ShmLock {
-    #[cfg(target_os = "linux")]
-    mutex: UnsafeCell<libc::pthread_mutex_t>,
-    #[cfg(not(target_os = "linux"))]
-    holder: crate::owner_word::OwnerWord,
+    lock: RecoverableLock,
     poisoned: AtomicU32,
 }
-
-// SAFETY: the lock exists to be shared; every access goes through
-// pthread_mutex_* (Linux) or atomics (elsewhere).
-unsafe impl Sync for ShmLock {}
 
 // SHM-9
 pub struct ShmGuard<'a> {
     lock: &'a ShmLock,
+    held: Option<RecoverableGuard<'a>>,
 }
 
 impl ShmGuard<'_> {
     // SHM-9
-    pub fn release(self) {
-        // SAFETY: a guard exists only while this thread holds the lock.
-        unsafe { self.lock.unlock() };
-        std::mem::forget(self);
+    pub fn release(mut self) {
+        self.held.take();
     }
 }
 
 impl Drop for ShmGuard<'_> {
     fn drop(&mut self) {
-        // SHM-9: the section may be half-edited.
-        self.lock.poisoned.store(1, Ordering::Release);
-        // SAFETY: a guard exists only while this thread holds the lock.
-        unsafe { self.lock.unlock() }
+        if let Some(held) = self.held.take() {
+            // SHM-9: the section may be half-edited.
+            self.lock.poisoned.store(1, Ordering::Release);
+            drop(held);
+        }
     }
 }
 
 impl ShmLock {
+    /// Initialise the lock in place: zeroed, which is an unpoisoned
+    /// `RecoverableLock` that sets itself up on first use.
+    ///
+    /// # Safety
+    /// `this` must be valid for writes and not yet shared.
+    pub unsafe fn init(this: *mut ShmLock) -> Result<(), MorlocError> {
+        std::ptr::write_bytes(this as *mut u8, 0, std::mem::size_of::<ShmLock>());
+        Ok(())
+    }
+
     pub fn lock(&self) -> Result<ShmGuard<'_>, MorlocError> {
         self.lock_live()?.ok_or_else(poisoned)
+    }
+
+    /// Take the lock, or `None` when it is poisoned.
+    pub fn lock_live(&self) -> Result<Option<ShmGuard<'_>>, MorlocError> {
+        let taken = self.lock.lock_without_spinning()?;
+        if taken.holder_died {
+            self.poisoned.store(1, Ordering::Release);
+        }
+        if self.poisoned.load(Ordering::Acquire) != 0 {
+            return Ok(None);
+        }
+        Ok(Some(ShmGuard { lock: self, held: Some(taken.guard) }))
     }
 }
 
@@ -68,107 +80,6 @@ fn poisoned() -> MorlocError {
          volume can no longer allocate"
             .into(),
     )
-}
-
-#[cfg(target_os = "linux")]
-impl ShmLock {
-    /// Initialise the lock in place.
-    ///
-    /// # Safety
-    /// `this` must point to writable memory shared by every process that
-    /// will take the lock, and no process may use the lock until this
-    /// returns. Initialising a lock that is in use is undefined behaviour.
-    pub unsafe fn init(this: *mut ShmLock) -> Result<(), MorlocError> {
-        let mut attr: libc::pthread_mutexattr_t = std::mem::zeroed();
-        let fail = |what: &str, rc: i32| {
-            MorlocError::Shm(format!("cannot initialise the volume lock: {what} returned {rc}"))
-        };
-        let rc = libc::pthread_mutexattr_init(&mut attr);
-        if rc != 0 {
-            return Err(fail("pthread_mutexattr_init", rc));
-        }
-        let result = (|| {
-            let rc = libc::pthread_mutexattr_setpshared(&mut attr, libc::PTHREAD_PROCESS_SHARED);
-            if rc != 0 {
-                return Err(fail("pthread_mutexattr_setpshared", rc));
-            }
-            let rc = libc::pthread_mutexattr_setrobust(&mut attr, libc::PTHREAD_MUTEX_ROBUST);
-            if rc != 0 {
-                return Err(fail("pthread_mutexattr_setrobust", rc));
-            }
-            // A thread relocking its own lock gets EDEADLK instead of hanging.
-            let rc = libc::pthread_mutexattr_settype(&mut attr, libc::PTHREAD_MUTEX_ERRORCHECK);
-            if rc != 0 {
-                return Err(fail("pthread_mutexattr_settype", rc));
-            }
-            let rc = libc::pthread_mutex_init((*this).mutex.get(), &attr);
-            if rc != 0 {
-                return Err(fail("pthread_mutex_init", rc));
-            }
-            std::ptr::addr_of_mut!((*this).poisoned).write(AtomicU32::new(0));
-            Ok(())
-        })();
-        libc::pthread_mutexattr_destroy(&mut attr);
-        result
-    }
-
-    /// The lock, or `None` if a holder died inside it.
-    pub fn lock_live(&self) -> Result<Option<ShmGuard<'_>>, MorlocError> {
-        // SAFETY: the mutex was initialised by `init` before the volume
-        // became visible.
-        match unsafe { libc::pthread_mutex_lock(self.mutex.get()) } {
-            0 if self.poisoned.load(Ordering::Acquire) != 0 => {
-                unsafe { self.unlock() };
-                Ok(None)
-            }
-            0 => Ok(Some(ShmGuard { lock: self })),
-            libc::EOWNERDEAD => {
-                // Unlocking without marking the mutex consistent makes it
-                // permanently unrecoverable: every later lock fails.
-                unsafe { libc::pthread_mutex_unlock(self.mutex.get()) };
-                Ok(None)
-            }
-            libc::ENOTRECOVERABLE => Ok(None),
-            rc => Err(MorlocError::Shm(format!(
-                "cannot take the volume lock: pthread_mutex_lock returned {rc}"
-            ))),
-        }
-    }
-
-    unsafe fn unlock(&self) {
-        libc::pthread_mutex_unlock(self.mutex.get());
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-impl ShmLock {
-    /// Initialise the lock in place.
-    ///
-    /// # Safety
-    /// As on Linux: shared writable memory, and no user until this returns.
-    pub unsafe fn init(this: *mut ShmLock) -> Result<(), MorlocError> {
-        std::ptr::addr_of_mut!((*this).holder).write(crate::owner_word::OwnerWord::new());
-        std::ptr::addr_of_mut!((*this).poisoned).write(AtomicU32::new(0));
-        Ok(())
-    }
-
-    /// The lock, or `None` if a holder died inside it.
-    pub fn lock_live(&self) -> Result<Option<ShmGuard<'_>>, MorlocError> {
-        let holder_died = self.holder.acquire()?;
-        if holder_died {
-            self.poisoned.store(1, Ordering::Release);
-        }
-        if self.poisoned.load(Ordering::Acquire) != 0 {
-            // SAFETY: this thread took the word above.
-            unsafe { self.holder.release() };
-            return Ok(None);
-        }
-        Ok(Some(ShmGuard { lock: self }))
-    }
-
-    unsafe fn unlock(&self) {
-        self.holder.release()
-    }
 }
 
 #[cfg(test)]

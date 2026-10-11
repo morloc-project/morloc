@@ -13,8 +13,8 @@ Changes here touch locks and ownership: model first.
   thread that is not a dispatch worker (OpenMP, TBB, a user pool) never
   flushes, so a long-lived daemon leaks the blocks it allocates there.
   Spec gap against SHM-8 (who releases a helper thread's references).
-- [speculative] The robust error-checking mutexes in `ShmLock` and
-  `RecoverableLock` compare the owner's thread id with the caller's; two
+- [speculative] The robust error-checking mutex in `RecoverableLock`
+  (which the volume lock is built on) compares the owner's thread id with the caller's; two
   processes in different pid namespaces sharing a volume could match and
   get EDEADLK instead of waiting.
 - [read] When FORK-15 lease staging fails, a forked child's view

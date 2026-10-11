@@ -68,9 +68,19 @@ const READY: u32 = u32::MAX;
 #[cfg(target_os = "linux")]
 impl RecoverableLock {
     pub fn lock(&self) -> Result<Acquired<'_>, MorlocError> {
+        self.lock_after(SPINS)
+    }
+
+    /// `lock` without trying first: for locks taken by many threads back to
+    /// back, where the trying contends for the lock's cache line.
+    pub fn lock_without_spinning(&self) -> Result<Acquired<'_>, MorlocError> {
+        self.lock_after(0)
+    }
+
+    fn lock_after(&self, spins: u32) -> Result<Acquired<'_>, MorlocError> {
         self.ensure_ready()?;
         let m = self.mutex.get();
-        for _ in 0..SPINS {
+        for _ in 0..spins {
             // SAFETY: `ensure_ready` initialised the mutex.
             match unsafe { libc::pthread_mutex_trylock(m) } {
                 libc::EBUSY => std::hint::spin_loop(),
@@ -191,6 +201,10 @@ unsafe fn init_mutex(m: *mut libc::pthread_mutex_t) -> Result<(), MorlocError> {
 
 #[cfg(not(target_os = "linux"))]
 impl RecoverableLock {
+    pub fn lock_without_spinning(&self) -> Result<Acquired<'_>, MorlocError> {
+        self.lock()
+    }
+
     pub fn lock(&self) -> Result<Acquired<'_>, MorlocError> {
         let holder_died = self.owner.acquire()?;
         Ok(Acquired {
