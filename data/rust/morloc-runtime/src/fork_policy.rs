@@ -215,7 +215,6 @@ struct ForkHeld {
     views: HeldGuard<'static, Vec<crate::arrow_shm::BorrowEntry>>,
     lease: Option<crate::lease::Staged>,
     lease_rels: Vec<crate::shm::RelPtr>,
-    _alloc: HeldGuard<'static, ()>,
     _volumes: HeldGuard<'static, crate::shm::VolumeTable>,
     _basename: HeldGuard<'static, [u8; crate::shm::MAX_FILENAME_SIZE]>,
     _registry: HeldGuard<'static, Option<crate::shm_companion::CompanionSegment>>,
@@ -271,7 +270,6 @@ fn prepare_fork_body() {
         views: crate::arrow_shm::BORROWABLE.lock(),
         lease: None,
         lease_rels: Vec::new(),
-        _alloc: crate::shm::ALLOC_MUTEX.lock(),
         _volumes: crate::shm::VOLUMES.lock(),
         _registry: crate::stream::REGISTRY_SEGMENT.lock(),
         _stats: crate::shm_stats::SEGMENT.lock(),
@@ -790,7 +788,7 @@ mod tests {
         assert!(pid >= 0);
         if pid == 0 {
             unsafe { libc::alarm(5) };
-            let _alloc = crate::shm::ALLOC_MUTEX.lock();
+            let _volumes = crate::shm::VOLUMES.lock();
             let grandchild = unsafe { libc::fork() };
             unsafe { libc::_exit(if grandchild == 0 { 0 } else { 1 }) };
         }

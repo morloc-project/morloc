@@ -161,11 +161,11 @@ morloc-runtime/run.rs::-::RUN_ERROR	held	18
 morloc-runtime/run.rs::-::CONTEXT	lazy		
 morloc-runtime/shm.rs::page_size::CACHED	lazy		
 morloc-runtime/shm.rs::-::CURRENT_VOLUME	counter		
-morloc-runtime/shm.rs::-::VOLUMES	held	6	FORK-10
+morloc-runtime/shm.rs::-::VOLUMES	held	6	
 morloc-runtime/shm.rs::-::MORLOC_VOL_TABLE	counter		
 morloc-runtime/shm.rs::-::PUBLISHED	counter		
 morloc-runtime/shm.rs::-::PUBLISHED_LEN	counter		
-morloc-runtime/shm.rs::-::ALLOC_MUTEX	held	5	FORK-10
+morloc-runtime/shm.rs::-::GROW	reset		
 morloc-runtime/shm.rs::-::RNG_STATE	thread		
 morloc-runtime/shm.rs::-::COMMON_BASENAME	held	9	
 morloc-runtime/shm.rs::-::FALLBACK_DIR	held	10	

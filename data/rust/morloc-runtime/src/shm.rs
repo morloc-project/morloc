@@ -416,7 +416,9 @@ pub(crate) static VOLUMES: Held<VolumeTable> = Held::new(6, VolumeTable {
     used: Vec::new(),
 });
 
-pub(crate) static ALLOC_MUTEX: Held<()> = Held::new(5, ());
+// SHM-11: one thread of a process grows the volumes at a time; fresh in a
+// forked child, so a fork never waits for a growth.
+static GROW: crate::fork_policy::Reset<()> = crate::fork_policy::Reset::new(|| ());
 
 /// Reference-count value marking a block whose last reference has been
 /// dropped and whose bytes are being scrubbed. It reads as in-use, so no
@@ -963,7 +965,6 @@ fn split_volume_name(name: &str) -> (String, usize) {
 /// rather than growing a volume that no owner would ever remove.
 pub fn shclose() -> Result<(), MorlocError> {
     run_shclose_hooks();
-    let _lock = ALLOC_MUTEX.lock();
     let mut vols = VOLUMES.lock();
     shclose_locked(&mut vols);
     CURRENT_VOLUME.store(0, Ordering::Release);
@@ -983,7 +984,6 @@ pub(crate) fn exiting() -> bool {
 pub fn shretire() -> Result<(), MorlocError> {
     EXITING.store(true, Ordering::SeqCst);
     run_shclose_hooks();
-    let _lock = ALLOC_MUTEX.lock();
     let vols = VOLUMES.lock();
     retire_names();
     drop(vols);
@@ -1232,15 +1232,10 @@ pub(crate) fn morloc_held_references() -> i64 {
 /// see no behavioral difference.
 pub fn shmalloc(size: usize) -> Result<AbsPtr, MorlocError> {
     let size = if size == 0 { BLOCK_ALIGN } else { align_up(size, BLOCK_ALIGN) };
-    let first = {
-        let _lock = ALLOC_MUTEX.lock();
-        shmalloc_unlocked(size)
-    };
-    let ptr = match first {
+    let ptr = match shmalloc_unlocked(size) {
         Ok(p) => p,
         // FORK-15: blocks only gone children still lease may be released.
         Err(e) if crate::lease::any_created() && crate::lease::reclaim() > 0 => {
-            let _lock = ALLOC_MUTEX.lock();
             shmalloc_unlocked(size).map_err(|_| e)?
         }
         Err(e) => return Err(e),
@@ -1949,32 +1944,49 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
     }
 }
 
-fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
-    let cv = CURRENT_VOLUME.load(Ordering::Relaxed);
-    let vols = VOLUMES.lock();
+// SHM-10: the header of published volume `idx`.
+fn published_header(idx: usize) -> Option<*mut ShmHeader> {
+    let base = MORLOC_VOL_TABLE.get(idx)?.data_base.load(Ordering::Acquire);
+    if base.is_null() {
+        return None;
+    }
+    // SAFETY: SHM-10: a published base is the data region just past its
+    // volume's header, mapped until a quiesced recovery.
+    Some(unsafe { base.sub(std::mem::size_of::<ShmHeader>()) } as *mut ShmHeader)
+}
 
-    // Try current volume first (allocation hint).
-    let shm = vols.slots[cv].ptr();
-    if !shm.is_null() {
+// SHM-11: try the published volumes, the hinted one first, holding no
+// process lock while each volume's own lock is awaited.
+fn find_in_published(size: usize) -> Result<Option<*mut BlockHeader>, MorlocError> {
+    let cv = CURRENT_VOLUME.load(Ordering::Relaxed);
+    if let Some(shm) = published_header(cv) {
         if let Some(blk) = find_free_block_in_volume(shm, size)? {
-            return Ok(blk);
+            return Ok(Some(blk));
         }
     }
-
-    // Fall back to scanning all currently-occupied volumes.
-    for &slot_idx in &vols.used {
-        let i = slot_idx as usize;
+    let n = PUBLISHED_LEN.load(Ordering::Acquire);
+    for slot in &PUBLISHED[..n] {
+        let i = slot.load(Ordering::Relaxed) as usize;
         if i == cv {
             continue;
         }
-        let shm = vols.slots[i].ptr();
-        if shm.is_null() {
-            continue;
-        }
+        let Some(shm) = published_header(i) else { continue };
         if let Some(blk) = find_free_block_in_volume(shm, size)? {
             CURRENT_VOLUME.store(i, Ordering::Relaxed);
-            return Ok(blk);
+            return Ok(Some(blk));
         }
+    }
+    Ok(None)
+}
+
+fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
+    if let Some(blk) = find_in_published(size)? {
+        return Ok(blk);
+    }
+    // SHM-11: a thread that grew meanwhile may have made room.
+    let _grow = GROW.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(blk) = find_in_published(size)? {
+        return Ok(blk);
     }
 
     // No existing volume has space; grow into a randomly-chosen free
@@ -1982,20 +1994,16 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
     // expanding exponentially so MAX_VOLUME_NUMBER is unreachable in
     // practice.
     const VOLUME_GROWTH_FACTOR: usize = 2;
-    let prev_volume_size = {
-        let last = vols.slots[cv];
-        if !last.is_null() {
-            last.data_size()
-        } else {
-            0xffff
-        }
+    let cv = CURRENT_VOLUME.load(Ordering::Relaxed);
+    let prev_volume_size = match MORLOC_VOL_TABLE.get(cv) {
+        Some(e) if !e.data_base.load(Ordering::Acquire).is_null() => e.data_size.load(Ordering::Relaxed),
+        _ => 0xffff,
     };
     let new_size = std::cmp::max(
         size.saturating_add(std::mem::size_of::<BlockHeader>()),
         prev_volume_size.saturating_mul(VOLUME_GROWTH_FACTOR),
     );
 
-    drop(vols);
     let basename = {
         let cb = COMMON_BASENAME.lock();
         get_cstr_buf(&cb).to_string()
@@ -2048,10 +2056,8 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
 /// count lives in shared memory where every process can see it. Handing a
 /// block back to a caller while it still reads zero publishes it as
 /// available to every other process for as long as it takes the caller to
-/// claim it -- and `ALLOC_MUTEX`, the only thing serialising the steps
-/// between, is an ordinary in-process mutex. It keeps this process's own
-/// threads apart and says nothing about the pools, which are separate
-/// processes allocating from these same volumes. Two of them would be given
+/// claim it, and the pools are separate processes allocating from these
+/// same volumes. Two of them would be given
 /// the same block, then write over each other's data, split the same block
 /// in two different ways, and each free it once.
 ///
@@ -2292,6 +2298,24 @@ mod calloc_tests {
 
 #[cfg(test)]
 mod tests {
+    // SHM-11: an allocation from a volume that has room waits on no process
+    // lock another thread holds.
+    #[test]
+    fn an_allocation_waits_on_no_process_lock() {
+        let _shm = crate::own_test_registry();
+        super::shfree(super::shmalloc(64).unwrap()).unwrap();
+        let held = super::VOLUMES.lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let ok = super::shmalloc(64).map(|p| super::shfree(p).is_ok()).unwrap_or(false);
+            tx.send(ok).unwrap();
+        });
+        let done = rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        worker.join().unwrap();
+        assert_eq!(done, Ok(true), "an allocation waited on the volume list");
+    }
+
     // SHM-10: none of them waits while another thread holds the volume list.
     #[test]
     fn a_release_a_new_reference_and_a_conversion_take_no_process_lock() {

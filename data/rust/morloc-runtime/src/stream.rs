@@ -6318,8 +6318,8 @@ fn ifile_bracket_slice_against_slot(
     // Fast path: when the projected element is a String, do ONE
     // shmalloc for the whole output (n element headers + concatenated
     // string bytes) and cursor-pack each element. Replaces N
-    // per-element shmemcpy calls with one shmalloc + N memcpys --
-    // eliminates the ALLOC_MUTEX bottleneck for slice patterns like
+    // per-element shmemcpy calls with one shmalloc + N memcpys, for
+    // slice patterns like
     // `.[i:j].field-of-Str` that the chain-fusion path produces. For
     // anything else we keep the per-element deep_copy_with route
     // below, which already handles the full schema zoo.
@@ -6612,8 +6612,7 @@ fn copy_runs(plans: &[RunPlan<'_>], elem_schema: &Schema) -> Result<AbsPtr, Morl
 /// same buffer. One shmalloc for the whole slice, regardless of N --
 /// the value's own `Array` header included, so the caller's single
 /// `shfree` gives all of it back. Replaces the per-element shmemcpy in
-/// `deep_copy_with`'s String arm under the ALLOC_MUTEX -- the dominant
-/// cost for record slices that the chain-fusion path projects down to a
+/// `deep_copy_with`'s String arm -- the dominant cost for record slices that the chain-fusion path projects down to a
 /// String field.
 ///
 /// Caller is responsible for releasing `work.materialised`.

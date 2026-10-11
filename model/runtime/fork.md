@@ -123,19 +123,17 @@ The runtime's lazily set values are published by compare-and-swap instead
 (INIT-3), and its crates hold no standard once cell outside tests.
 
 ### FORK-10 No held lock is held across an unbounded wait
-Status: deviation
+Status: implemented
+Checked by: an_allocation_waits_on_no_process_lock, tla:AllocWait, tla:AllocWait_alloc_mutex.bug, tla:AllocWait_grow_under_volumes.bug, tla:ForkLocks_held_across_wait.bug
 
 Prepare waits for every held lock, so a thread that holds one while
 waiting on another process makes the fork wait as long as that process.
-Today the allocator's locks are held across other processes' volume locks
-and volume creation. The stream release pass waits on nothing: written
+The allocator holds none while it waits on a volume's lock or builds a
+volume (SHM-11). The stream release pass waits on nothing: written
 streams are finished by their custodian (SLOT-10), and prepare no longer
 drains anything. Shared segments are opened outside their locks (INIT-2),
 and the benchmark and tee files are opened and written outside theirs.
-Model: `ForkLocks_held_across_wait.bug` deadlocks. The allocator half
-belongs to the shared-memory references and pool runtime project
-(/work/plans brief); until then a fork may be delayed by another process's
-allocation, with no cycle found by the lock-order audit.
+Model: `ForkLocks_held_across_wait.bug` deadlocks.
 
 ### FORK-11 Code reachable in a forked child takes no standard-library lock
 Status: deviation
@@ -282,9 +280,8 @@ Cross-process locks are not fork-handled: they live in shared segments and
 the dead-holder rules apply (SLOT-4, SHM-5). They still have a place in the
 order. A slot's lock ranks between RELEASE_PASS and PROCESS_LOCAL_SLOTS:
 the release pass takes slot locks, and code holding a slot lock takes the
-local-slot map, the descriptor list and the allocator. A volume's lock
-ranks after VOLUMES: the allocator holds ALLOC_MUTEX and VOLUMES while it
-takes one. The test-only hook BEFORE_STREAM_LOCK is compiled only into
+local-slot map, the descriptor list and the allocator. A volume's lock is
+taken with no held lock (SHM-11). The test-only hook BEFORE_STREAM_LOCK is compiled only into
 tests.
 
 Shared memory, which other processes read, names a process by its pid and

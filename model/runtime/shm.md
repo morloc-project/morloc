@@ -119,3 +119,15 @@ They find a pointer's volume in a list of published volumes that grows
 while the process runs and is emptied only by a recovery that has stopped
 every thread that could read it (DAEMON-1), so no volume is unmapped under
 them. A release's scrub then runs outside every lock.
+
+### SHM-11 An allocation waits on another process only while holding no process lock
+Status: implemented
+Checked by: an_allocation_waits_on_no_process_lock, tla:AllocWait, tla:AllocWait_alloc_mutex.bug, tla:AllocWait_grow_under_volumes.bug, tla:AllocWait_uncounted_reader.bug, tla:AllocWait_loser_unlinks.bug
+
+An allocation reads the published volumes (SHM-10) and waits for each
+volume's own lock holding nothing else. When none has room, one thread of
+the process grows at a time, under a lock that is fresh in a forked child:
+it looks again, builds the new volume outside every other lock, and
+publishes it under VOLUMES. A process that picks an index another process
+took opens that volume instead and never removes its name.
+

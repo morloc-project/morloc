@@ -77,7 +77,7 @@ fn with_arena<R>(f: impl FnOnce(&mut Option<ArenaState>) -> R) -> Option<R> {
 /// Initial capacity of the tracking vector. Sized to avoid libc-malloc
 /// reallocation for typical eval calls (a few dozen blocks). Growing
 /// beyond this is fine -- `Vec::push` reallocates via the system
-/// allocator, not via SHM, so there's no reentrancy on `ALLOC_MUTEX`.
+/// allocator, not via SHM.
 const INITIAL_CAPACITY: usize = 64;
 
 /// RAII guard returned by [`enter`]. Drop releases every recorded block.
@@ -188,8 +188,7 @@ pub fn enter() -> Result<ArenaGuard, MorlocError> {
 /// Record `ptr` in the active arena. No-op if no arena is active.
 ///
 /// Called from `shm::shmalloc` after a successful allocation. Must not
-/// allocate SHM itself (would deadlock on `ALLOC_MUTEX`); `Vec::push`
-/// uses the system allocator, which is safe.
+/// allocate SHM itself; `Vec::push` uses the system allocator.
 #[inline]
 pub fn record_if_active(ptr: AbsPtr) {
     if ptr.is_null() {
