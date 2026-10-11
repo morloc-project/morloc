@@ -44,14 +44,21 @@ impl<X: Copy> Frame<X> {
     }
 }
 
-/// The pending visits, innermost last.
+/// Frames held without a heap allocation; most values never need more,
+/// and a walk runs once per element of a written stream.
+const INLINE: usize = 8;
+
+/// The pending visits, innermost last: the first `INLINE` in place, the
+/// rest on the heap.
 pub struct Stack<X: Copy> {
-    v: Vec<Frame<X>>,
+    inline: [std::mem::MaybeUninit<Frame<X>>; INLINE],
+    n: usize,
+    spill: Vec<Frame<X>>,
 }
 
 impl<X: Copy> Default for Stack<X> {
     fn default() -> Self {
-        Stack { v: Vec::new() }
+        Stack { inline: [std::mem::MaybeUninit::uninit(); INLINE], n: 0, spill: Vec::new() }
     }
 }
 
@@ -60,29 +67,47 @@ impl<X: Copy> Stack<X> {
         Stack::default()
     }
 
+    fn push(&mut self, f: Frame<X>) {
+        if self.spill.is_empty() && self.n < INLINE {
+            self.inline[self.n].write(f);
+            self.n += 1;
+        } else {
+            self.spill.push(f);
+        }
+    }
+
     /// Push a child to be stepped next.
     pub fn enter(&mut self, schema: &Schema, data: *const u8, x: X) {
-        self.v.push(Frame::new(schema, data, x));
+        self.push(Frame::new(schema, data, x));
     }
 
     /// Push the continuation of `f` at child `idx`, to run once whatever
     /// is pushed above it has been stepped.
     pub fn resume(&mut self, f: &Frame<X>, idx: usize) {
-        self.v.push(Frame { idx, finish: false, finish_pushed: true, ..*f });
+        self.push(Frame { idx, finish: false, finish_pushed: true, ..*f });
     }
 
     /// Push `f`'s post action, to run once everything above it is done.
     pub fn finish(&mut self, f: &Frame<X>) {
-        self.v.push(Frame { finish: true, ..*f });
+        self.push(Frame { finish: true, ..*f });
     }
 
     pub fn pop(&mut self) -> Option<Frame<X>> {
-        self.v.pop()
+        if let Some(f) = self.spill.pop() {
+            return Some(f);
+        }
+        if self.n == 0 {
+            return None;
+        }
+        self.n -= 1;
+        // SAFETY: slots below `n` were written by `push` and not yet popped.
+        Some(unsafe { self.inline[self.n].assume_init() })
     }
 
     /// Drop every pending visit, ending the walk after the current step.
     pub fn clear(&mut self) {
-        self.v.clear();
+        self.n = 0;
+        self.spill.clear();
     }
 }
 
@@ -236,5 +261,26 @@ mod tests {
         w.step(&mut st, Frame::new(&flat, std::ptr::null(), ())).unwrap();
         assert!(st.pop().is_none());
         assert_eq!(w.out, ["open Map", "open Sint32", "open String", "open Uint8", "close String", "close Map"]);
+    }
+
+    // Frames past the inline ones come back in the order they went in.
+    #[test]
+    fn a_deep_stack_pops_in_reverse_order_across_its_inline_frames() {
+        let schema = crate::schema::parse_schema("i4").unwrap();
+        let mut st: Stack<usize> = Stack::new();
+        for i in 0..3 * INLINE {
+            st.enter(&schema, std::ptr::null(), i);
+        }
+        let mut seen = Vec::new();
+        while let Some(f) = st.pop() {
+            seen.push(f.x);
+            if f.x == 2 * INLINE {
+                st.enter(&schema, std::ptr::null(), 1000);
+            }
+        }
+        let mut want: Vec<usize> = (0..3 * INLINE).rev().collect();
+        let at = want.iter().position(|&x| x == 2 * INLINE).unwrap();
+        want.insert(at + 1, 1000);
+        assert_eq!(seen, want);
     }
 }

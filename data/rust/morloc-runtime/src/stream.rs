@@ -3549,6 +3549,7 @@ fn queue_buffer_then(slot: &RegistrySlot, refill: bool) -> Result<(), MorlocErro
         return Err(e);
     }
     slot.write_buffer.set(fresh);
+    forget_write_room();
     slot.write_buffer_index_count.set(0);
     slot.write_buffer_data_used.set(0);
     Ok(())
@@ -3631,12 +3632,30 @@ fn first_write_buffer(limit: usize) -> usize {
     limit.min(FIRST)
 }
 
+thread_local! {
+    // SLOT-20: the write buffer and its block size as this thread last saw
+    // them under the slot lock; cleared when a batch starts and whenever the
+    // buffer is replaced, since a freed block's pointer can name a smaller
+    // block later.
+    static WRITE_ROOM: std::cell::Cell<(RelPtr, usize)> = const { std::cell::Cell::new((shm_types_crate::RELNULL, 0)) };
+}
+
+fn forget_write_room() {
+    WRITE_ROOM.with(|r| r.set((shm_types_crate::RELNULL, 0)));
+}
+
 // SLOT-20: grow the write buffer's block to hold `need` bytes, at least
 // doubling and never past the limit, carrying over what it holds; offsets
 // inside the buffer are relative to it. Caller holds the slot lock.
 fn ensure_write_room(slot: &RegistrySlot, need: usize) -> Result<(), MorlocError> {
+    let rel = slot.write_buffer.get();
+    let (seen, size) = WRITE_ROOM.with(|r| r.get());
+    if rel == seen && rel != shm_types_crate::RELNULL && need <= size {
+        return Ok(());
+    }
     let have = write_buffer_block_size(slot)?;
     if need <= have {
+        WRITE_ROOM.with(|r| r.set((rel, have)));
         return Ok(());
     }
     let limit = write_buffer_capacity(slot)?.max(need);
@@ -3646,7 +3665,9 @@ fn ensure_write_room(slot: &RegistrySlot, need: usize) -> Result<(), MorlocError
     // SAFETY: SLOT-20: the old block's bytes up to `have` are the buffer's,
     // and the fresh block holds `size > have` bytes.
     unsafe { std::ptr::copy_nonoverlapping(old, fresh, have) };
-    slot.write_buffer.set(slot_owns(crate::shm::abs2rel(fresh)?));
+    let fresh_rel = slot_owns(crate::shm::abs2rel(fresh)?);
+    slot.write_buffer.set(fresh_rel);
+    WRITE_ROOM.with(|r| r.set((fresh_rel, size)));
     free_uncounted(old);
     Ok(())
 }
@@ -3963,6 +3984,7 @@ pub fn shared_write_subpacket(
         // SLOT-20: the capacity is the stream's, fixed at open.
         // One scratch buffer is reused for every element's flatten.
         let mut scratch: Vec<u8> = Vec::new();
+        forget_write_room();
         if slot.staged.get() != 0 {
             // One batch, one sub-packet: the whole `[a]` is flattened and
             // emitted as it is, so a batch is never split across frames or
