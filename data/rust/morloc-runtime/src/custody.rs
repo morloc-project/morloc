@@ -89,9 +89,30 @@ pub(crate) struct CustodyQueue {
     epoch: AtomicU32,
     closer_pid: AtomicU32,
     closer_start: AtomicU64,
+    // SLOT-22: sleepers on `tail` and on `done`.
+    tail_waiters: AtomicU32,
+    done_waiters: AtomicU32,
     entries: [Entry; QUEUE_SLOTS],
     spares: [AtomicIsize; QUEUE_SLOTS],
     err: [AtomicU8; ERR_BYTES],
+}
+
+// SLOT-22: register, then sleep while `word` holds `seen`; the fence orders
+// the registration before the wait's comparison.
+fn sleep_on(word: &AtomicU32, waiters: &AtomicU32, seen: u32, timeout: Duration) {
+    waiters.fetch_add(1, Ordering::SeqCst);
+    std::sync::atomic::fence(Ordering::SeqCst);
+    wait_word::wait(word, seen, timeout);
+    waiters.fetch_sub(1, Ordering::SeqCst);
+}
+
+// SLOT-22: the caller has just moved `word`; the fence orders that before
+// the look at its sleepers.
+fn wake_sleepers(word: &AtomicU32, waiters: &AtomicU32) {
+    std::sync::atomic::fence(Ordering::SeqCst);
+    if waiters.load(Ordering::SeqCst) > 0 {
+        wait_word::wake_all(word);
+    }
 }
 
 impl CustodyQueue {
@@ -264,7 +285,7 @@ impl CustodyQueue {
             if !self.host_alive() {
                 return Err(Self::gone());
             }
-            wait_word::wait(&self.done, d, WAIT_SLICE);
+            sleep_on(&self.done, &self.done_waiters, d, WAIT_SLICE);
         }
     }
 
@@ -305,13 +326,13 @@ impl CustodyQueue {
                     self.closed.store(1, Ordering::Release);
                 }
                 self.tail.store(t.wrapping_add(1), Ordering::Release);
-                wait_word::wake_all(&self.tail);
+                wake_sleepers(&self.tail, &self.tail_waiters);
                 return Ok(t.wrapping_add(1));
             }
             if !self.host_alive() {
                 return Err(Self::gone());
             }
-            wait_word::wait(&self.done, d, WAIT_SLICE);
+            sleep_on(&self.done, &self.done_waiters, d, WAIT_SLICE);
         }
     }
 
@@ -341,7 +362,7 @@ impl CustodyQueue {
             if !self.host_alive() {
                 return Err(Self::gone());
             }
-            wait_word::wait(&self.done, d, WAIT_SLICE);
+            sleep_on(&self.done, &self.done_waiters, d, WAIT_SLICE);
         }
         let failure = self.failure();
         if self.epoch() != epoch {
@@ -390,7 +411,6 @@ impl CustodyQueue {
             level: e.level.load(Ordering::Relaxed) as u8,
         };
         self.head.store(h.wrapping_add(1), Ordering::Release);
-        wait_word::wake_all(&self.head);
         Some(item)
     }
 
@@ -403,12 +423,12 @@ impl CustodyQueue {
             }
             std::hint::spin_loop();
         }
-        wait_word::wait(&self.tail, h, timeout);
+        sleep_on(&self.tail, &self.tail_waiters, h, timeout);
     }
 
     pub(crate) fn finish(&self, n: u32) {
         self.done.fetch_add(n, Ordering::AcqRel);
-        wait_word::wake_all(&self.done);
+        wake_sleepers(&self.done, &self.done_waiters);
     }
 
     pub(crate) fn give_spare(&self, block: RelPtr) -> bool {
@@ -433,7 +453,6 @@ impl CustodyQueue {
         }
         self.err_len.store(n as u32, Ordering::Release);
         self.failed.store(kind, Ordering::Release);
-        wait_word::wake_all(&self.head);
         wait_word::wake_all(&self.done);
     }
 

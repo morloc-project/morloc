@@ -232,3 +232,16 @@ holds what it read, so a change made after the release ends the sleep at
 once. It deregisters under the lock at its next look, which comes at
 least every 100 ms, as a released slot's word may be reused.
 
+### SLOT-22 A stream's writer and custodian wake each other only when one sleeps
+Status: implemented
+Checked by: a_full_queue_makes_the_producer_wait_until_the_custodian_takes_one, a_waiter_sees_its_entry_done_and_any_failure, tla:QueueWake, tla:QueueWake_check_before_bump.bug, tla:QueueWake_register_after_compare.bug
+
+The custody queue takes no lock. A side about to sleep on a queue word
+(the push count, for the custodian; the done count, for a writer or a
+closer) reads the word, registers on its waiter count, and sleeps only
+while the word still holds what it read. A side that moves a word moves it
+first and then wakes its sleepers only when the count is non-zero; both
+orders are sequentially consistent, so either the mover sees the
+registration or the sleeper sees the moved word. Stopping and failing a
+stream wake unconditionally.
+
