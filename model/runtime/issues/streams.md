@@ -51,3 +51,13 @@ here touch locks and ownership: model first.
   has finished it fails: the custodian takes the file lock non-blocking
   (stream.rs `lock_stream_file`). Open: should an open of a path whose
   previous stream is still closing wait for that close?
+- [speculative] A written element's variable data keeps its alignment
+  only modulo 8. stream.rs `append_one_element` flattens the element with
+  its inline part at offset 0 and copies the variable part to the
+  buffer's data offset, shifting pointers by `data_offset - w`; flush
+  compaction shifts again by `(cap - n) * w`. Both are multiples of 8, not
+  16, so a block needing 16-byte alignment (an Arrow buffer of a table
+  element, voidstar.rs `array_data_alignment`) can land misaligned in a
+  sub-packet. Untested: write a stream of tables with decimal columns and
+  check each buffer's alignment on read.
+
