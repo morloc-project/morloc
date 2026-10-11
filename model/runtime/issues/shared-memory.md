@@ -16,7 +16,20 @@ Changes here touch locks and ownership: model first.
   flushes, so a long-lived daemon leaks the blocks it allocates there.
   Spec gap against SHM-8 (who releases a helper thread's references).
 - [read] Each process grows its own volumes from its own size hint, so N
-  pools under pressure can create N times the memory needed.
+  pools under pressure can create N times the memory needed. Design
+  (DA-reviewed, /work/plans/runtime-audit-2026-10-10/m5/DA-namespace-growth.md):
+  number volumes in order from a `next_index` in the primary header, grow
+  under a namespace `RecoverableLock` there, mapping every index below
+  `next_index` before creating; model NamespaceGrow in the scratch plan.
+- [read] Growth sizes a new volume from `CURRENT_VOLUME`, the last volume
+  used, not the largest (shm.rs `find_free_block`), so a process whose hint
+  points at a small volume grows in small steps.
+- [read] `shinit` accepts any volume index through the C ABI and the
+  Python binding although every caller passes the primary.
+- [speculative] The robust error-checking mutexes in `ShmLock` and
+  `RecoverableLock` compare the owner's thread id with the caller's; two
+  processes in different pid namespaces sharing a volume could match and
+  get EDEADLK instead of waiting.
 - [read] When FORK-15 lease staging fails, a forked child's view
   references stay counted for the rest of the run (logged, not leaked
   beyond the run). A fix would have the child release them as it exits,

@@ -1263,10 +1263,8 @@ pub fn shcalloc(nmemb: usize, size: usize) -> Result<AbsPtr, MorlocError> {
     let total = nmemb.checked_mul(size).ok_or_else(|| {
         MorlocError::Shm(format!("shcalloc: {nmemb} elements of {size} bytes overflows"))
     })?;
-    let ptr = shmalloc(total)?;
-    // SAFETY: ptr is a freshly allocated SHM block of `total` bytes.
-    unsafe { std::ptr::write_bytes(ptr, 0, total) };
-    Ok(ptr)
+    // SHM-6: a new block already reads as zero.
+    shmalloc(total)
 }
 
 /// Free a shared memory block (decrement reference count).
@@ -2298,6 +2296,28 @@ mod calloc_tests {
 
 #[cfg(test)]
 mod tests {
+    // SHM-6: without poisoning, a block made from freed and merged dirty
+    // blocks reads as zero, so shcalloc need not clear it.
+    #[test]
+    fn a_new_block_reads_as_zero_without_poisoning() {
+        let _shm = crate::own_test_registry();
+        if super::poison_on_free() {
+            return;
+        }
+        let blocks: Vec<_> = (0..8).map(|_| super::shmalloc(200).unwrap()).collect();
+        for &p in &blocks {
+            unsafe { std::ptr::write_bytes(p, 0xAB, 200) };
+        }
+        for &p in &blocks {
+            super::shfree(p).unwrap();
+        }
+        let big = super::shcalloc(1, 1500).unwrap();
+        let bytes = unsafe { std::slice::from_raw_parts(big, 1500) };
+        let dirty = bytes.iter().position(|&b| b != 0);
+        super::shfree(big).unwrap();
+        assert_eq!(dirty, None, "a new block held a released block's bytes");
+    }
+
     // SHM-11: an allocation from a volume that has room waits on no process
     // lock another thread holds.
     #[test]
