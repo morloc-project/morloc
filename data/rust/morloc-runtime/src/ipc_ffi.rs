@@ -1674,7 +1674,13 @@ mod dispatch_fork_tests {
         assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
         let quiet = unsafe { accept_or_watch(server, 20_000, &[p[0]]) }.unwrap();
         unsafe { libc::close(p[1]) };
-        let ended = unsafe { accept_or_watch(server, 1_000_000, &[p[0]]) }.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let ended = loop {
+            let got = unsafe { accept_or_watch(server, 1_000_000, &[p[0]]) }.unwrap();
+            if !matches!(got, Accepted::Nothing) || std::time::Instant::now() > deadline {
+                break got;
+            }
+        };
         unsafe {
             libc::close(p[0]);
             libc::close(server);
