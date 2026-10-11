@@ -78,6 +78,9 @@ morloc-runtime/daemon_ffi.rs::-::HTTP_ACCESS	exec-only
 morloc-runtime/daemon_ffi.rs::-::RECOVERY_IN_PROGRESS	counter		
 morloc-runtime/daemon_ffi.rs::-::REQUESTS_IN_FLIGHT	exec-only		
 morloc-runtime/daemon_ffi.rs::-::REQUESTS_DRAINED	exec-only		
+morloc-runtime/daemon_ffi.rs::-::SHM_USERS	exec-only		
+morloc-runtime/daemon_ffi.rs::-::SHM_USERS_DONE	exec-only		
+morloc-runtime/daemon_ffi.rs::-::RECOVERY_FLAG	test-only		
 morloc-runtime/daemon_ffi.rs::-::POOL_STATUS	exec-only		
 morloc-runtime/daemon_ffi.rs::-::BINDING_STORE	exec-only		
 morloc-runtime/daemon_ffi.rs::-::BINDING_FINISHED	exec-only		

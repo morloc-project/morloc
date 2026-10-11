@@ -1295,7 +1295,14 @@ pub(crate) unsafe fn mlc_spawn_watched(
         }
         return false;
     }
+    // DAEMON-1
+    let Some(user) = crate::daemon_ffi::enter_shm_user() else {
+        close_socket(fd);
+        set_errmsg(errmsg, &MorlocError::Ipc("the daemon is recovering from a pool crash".into()));
+        return false;
+    };
     std::thread::spawn(move || {
+        let _user = user;
         let mut err: *mut c_char = ptr::null_mut();
         let result = read_packet(fd, Wait::Forever, &mut err);
         close_socket(fd);

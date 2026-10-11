@@ -2,12 +2,14 @@
 
 ### DAEMON-1 Shared memory is unmapped only when no request is running
 Status: implemented
-Checked by: `recovery_waits_for_requests_already_running_and_admits_none`, `a_stopped_writer_finishes_its_file_with_the_given_status`, `tla:DaemonRecovery`, `tla:DaemonRecovery_fixed_delay.bug`, `tla:DaemonRecovery_unlocked_admission.bug`, `tla:DaemonRecovery_wait_before_kill.bug`
+Checked by: `recovery_waits_for_requests_already_running_and_admits_none`, `recovery_waits_for_a_thread_reading_shared_memory_and_admits_none`, `a_stopped_writer_finishes_its_file_with_the_given_status`, `tla:DaemonRecovery`, `tla:DaemonRecovery_fixed_delay.bug`, `tla:DaemonRecovery_unlocked_admission.bug`, `tla:DaemonRecovery_wait_before_kill.bug`
 
 Admission and the recovery flag share one lock. Recovery closes admission,
-kills the pools, and waits for every admitted request to finish, then stops
-the stream writers (SLOT-13) before it unmaps; if requests do not finish
-within a minute the daemon exits instead.
+kills the pools, and waits for every admitted request to finish, and for
+every nexus thread outside a request that reads shared memory (a stdio
+connection's operation, a spawn watcher), which recovery alone refuses; it
+then stops the stream writers (SLOT-13) before it unmaps. If they do not
+finish within a minute the daemon exits instead.
 No request spans a recovery, so no pointer from an old generation reaches
 the new one.
 

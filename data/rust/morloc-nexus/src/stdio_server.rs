@@ -277,10 +277,31 @@ pub(crate) fn set_daemon_mode(daemon: bool) {
     DAEMON_MODE.store(daemon, std::sync::atomic::Ordering::Release);
 }
 
+extern "C" {
+    fn morloc_shm_user_enter() -> *mut std::ffi::c_void;
+    fn morloc_shm_user_leave(user: *mut std::ffi::c_void);
+}
+
+struct ShmUser(*mut std::ffi::c_void);
+
+impl Drop for ShmUser {
+    fn drop(&mut self) {
+        unsafe { morloc_shm_user_leave(self.0) };
+    }
+}
+
 pub(crate) fn serve_op(
     stream: &mut UnixStream,
     compute: impl FnOnce(&mut UnixStream) -> std::io::Result<Resp>,
 ) -> std::io::Result<()> {
+    // DAEMON-1
+    let user = unsafe { morloc_shm_user_enter() };
+    if user.is_null() {
+        let why = "the daemon is recovering from a pool crash";
+        write_response(stream, Resp::Err(why.into()))?;
+        return Err(std::io::Error::other(why));
+    }
+    let _user = ShmUser(user);
     match morloc_runtime_types::panic::catch(|| compute(stream)) {
         Ok(resp) => write_response(stream, resp?),
         Err(_) => {

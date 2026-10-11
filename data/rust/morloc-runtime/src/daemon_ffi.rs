@@ -378,6 +378,7 @@ pub fn is_recovering() -> bool {
 /// skip the recovery sequence).
 pub fn begin_recovery() -> bool {
     let _requests = requests_in_flight();
+    let _users = shm_users();
     RECOVERY_IN_PROGRESS
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
@@ -412,12 +413,53 @@ pub(crate) fn enter_request() -> Option<InFlight> {
     Some(InFlight(()))
 }
 
+static SHM_USERS: Mutex<usize> = Mutex::new(0);
+static SHM_USERS_DONE: Condvar = Condvar::new();
+
+fn shm_users() -> std::sync::MutexGuard<'static, usize> {
+    SHM_USERS.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock())
+}
+
+pub(crate) struct ShmUser(());
+
+impl Drop for ShmUser {
+    fn drop(&mut self) {
+        let mut n = shm_users();
+        *n -= 1;
+        if *n == 0 {
+            SHM_USERS_DONE.notify_all();
+        }
+    }
+}
+
+// DAEMON-1: a nexus thread outside any request that reads shared memory.
+// Only recovery refuses it: a request draining at shutdown may still need it.
+pub(crate) fn enter_shm_user() -> Option<ShmUser> {
+    let mut n = shm_users();
+    if RECOVERY_IN_PROGRESS.load(Ordering::SeqCst) {
+        return None;
+    }
+    *n += 1;
+    Some(ShmUser(()))
+}
+
+// DAEMON-1: every admitted request and shared-memory user has left.
 pub fn wait_for_requests(timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
     let n = requests_in_flight();
     let (n, _) = REQUESTS_DRAINED
         .wait_timeout_while(n, timeout, |n| *n > 0)
         .unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
-    *n == 0
+    if *n != 0 {
+        return false;
+    }
+    drop(n);
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    let u = shm_users();
+    let (u, _) = SHM_USERS_DONE
+        .wait_timeout_while(u, left, |u| *u > 0)
+        .unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
+    *u == 0
 }
 
 /// Mark recovery as complete. Workers will start accepting requests again.
@@ -3790,8 +3832,39 @@ mod recovery_gate_tests {
     use super::*;
     use std::time::Duration;
 
+    static RECOVERY_FLAG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // DAEMON-1: a nexus thread outside any request that reads shared memory
+    // (a stdio connection, a spawn watcher) holds off the unmap too.
+    #[test]
+    fn recovery_waits_for_a_thread_reading_shared_memory_and_admits_none() {
+        let _flag = RECOVERY_FLAG.lock().unwrap_or_else(|e| e.into_inner());
+        let (inside_tx, inside_rx) = std::sync::mpsc::channel();
+        let (leave_tx, leave_rx) = std::sync::mpsc::channel::<()>();
+        let reader = std::thread::spawn(move || {
+            let guard = enter_shm_user().expect("admitted before recovery");
+            inside_tx.send(()).unwrap();
+            leave_rx.recv().unwrap();
+            drop(guard);
+        });
+        inside_rx.recv().unwrap();
+        assert!(begin_recovery());
+        let admitted_during = enter_shm_user().is_some();
+        let drained_while_reading = wait_for_requests(Duration::from_millis(200));
+        leave_tx.send(()).unwrap();
+        let drained_after = wait_for_requests(Duration::from_secs(5));
+        reader.join().unwrap();
+        end_recovery();
+        let admitted_after = enter_shm_user().is_some();
+        assert!(!admitted_during, "a reader was admitted during recovery");
+        assert!(!drained_while_reading, "recovery saw no readers while one was reading");
+        assert!(drained_after, "recovery never saw the reader finish");
+        assert!(admitted_after, "readers were refused after recovery ended");
+    }
+
     #[test]
     fn recovery_waits_for_requests_already_running_and_admits_none() {
+        let _flag = RECOVERY_FLAG.lock().unwrap_or_else(|e| e.into_inner());
         let (inside_tx, inside_rx) = std::sync::mpsc::channel();
         let (leave_tx, leave_rx) = std::sync::mpsc::channel::<()>();
         let request = std::thread::spawn(move || {
@@ -4209,6 +4282,25 @@ mod c_abi {
     #[no_mangle]
     pub extern "C" fn morloc_daemon_wait_for_requests(timeout_ms: u64) -> bool {
         super::morloc_daemon_wait_for_requests(timeout_ms)
+    }
+
+    /// DAEMON-1: null while recovery runs; give it back with `morloc_shm_user_leave`.
+    #[no_mangle]
+    pub extern "C" fn morloc_shm_user_enter() -> *mut c_void {
+        match super::enter_shm_user() {
+            Some(u) => Box::into_raw(Box::new(u)) as *mut c_void,
+            None => std::ptr::null_mut(),
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `user` is null or came from `morloc_shm_user_enter` and is given back once.
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_shm_user_leave(user: *mut c_void) {
+        if !user.is_null() {
+            drop(Box::from_raw(user as *mut super::ShmUser));
+        }
     }
 
     #[no_mangle]
