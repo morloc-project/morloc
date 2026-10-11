@@ -2312,8 +2312,7 @@ unsafe fn dispatch_request(
         // Tag this dispatch with a unique `call_id` so every @open
         // it issues records the id in its slot. After the response
         // is sent below (`drop(arena_guard)` and the libc cleanup
-        // loop), we enqueue a per-call sweep to the dedicated
-        // sweeper thread, which discards any slot left open at the
+        // loop), a call sweep closes any stream left open at the
         // call's tail. Stored in TLS for the duration of morloc_eval.
         let call_id = crate::stream::generate_call_id();
         let prev_call_id = crate::stream::set_current_call_id(call_id);
@@ -2393,13 +2392,9 @@ unsafe fn dispatch_request(
         libc::free(arg_packets as *mut c_void);
         libc::free(arg_voidstars as *mut c_void);
 
-        // Clear the per-thread call_id BEFORE enqueueing the sweep
-        // so the sweeper sees the slot as belonging to a finished
-        // call (TLS restore happens-before the queue push by
-        // sequential program order on this thread). The sweep runs
-        // on a separate thread and is off the user latency path.
+        // SLOT-19: the reply is sent; the sweep does not wait for writers.
         crate::stream::set_current_call_id(prev_call_id);
-        crate::stream::sweeper_enqueue_call(call_id);
+        crate::stream::sweep_call(call_id);
     } else {
         // Remote command: send call packet to pool. v2 stores schemas
         // per-arg, but make_call_packet_from_cli wants a NULL-terminated

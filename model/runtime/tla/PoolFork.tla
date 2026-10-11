@@ -1,26 +1,23 @@
 ------------------------------- MODULE PoolFork -------------------------------
 (* A pool forking a worker (model/runtime/fork.md FORK-6). The coordinator takes up *)
 (* the nexus's lifeline and attaches the stream registry, starting no      *)
-(* thread of its own: it watches the lifeline in its own loop, and         *)
-(* attaching marks the sweeper as wanted. A library thread exists from the *)
-(* start and is ended by the library's own fork handler. The coordinator   *)
-(* forks through a gate: the child waits while the parent counts its       *)
-(* threads after the fork, and runs only if the count is one; otherwise    *)
-(* the parent kills the child, which may be stuck before its gate when     *)
-(* another thread existed at the fork, and the pool ends. The worker sends *)
-(* a sweep request, and the sweeper starts on the first request.           *)
+(* thread of its own: it watches the lifeline in its own loop. A library   *)
+(* thread exists from the start and is ended by the library's own fork     *)
+(* handler. The coordinator forks through a gate: the child waits while    *)
+(* the parent counts its threads after the fork, and runs only if the      *)
+(* count is one; otherwise the parent kills the child, which may be stuck  *)
+(* before its gate when another thread existed at the fork, and the pool   *)
+(* ends. A worker that runs serves.                                        *)
 EXTENDS Naturals
 
 CONSTANT Variant
 \* "design": the design.
 \* "guard_thread": the coordinator watches the lifeline from a thread.
-\* "eager_sweeper": attaching the registry starts the sweeper.
-\* "wanted_by_thread": a process wants a sweeper only if its parent ran one.
 \* "unpolled": the coordinator never watches the lifeline.
 \* "count_before_fork": threads are counted before the fork handlers run.
-\* "no_kill": with a sweeper thread at the fork, a refused child is waited
-\* for but not killed.
-\* "ungated": with a sweeper thread at the fork, the child runs at once.
+\* "no_kill": with a thread left at the fork, a refused child is waited for
+\* but not killed.
+\* "ungated": with a thread left at the fork, the child runs at once.
 
 (* --algorithm PoolFork
 variables
@@ -29,13 +26,9 @@ variables
     groupEnded = FALSE,
     libThread = TRUE,
     coordThreads = {},
-    coordWants = FALSE,
     atFork = {},
     child = "none",
     refused = FALSE,
-    workerWants = FALSE,
-    workerSweeper = FALSE,
-    requested = FALSE,
     served = FALSE;
 
 define
@@ -65,20 +58,14 @@ begin
       coordThreads := coordThreads \union {"lifeline"};
     end if;
   Attach:
-    coordWants := TRUE;
-    if Variant \in {"eager_sweeper", "ungated", "no_kill"} then
-      coordThreads := coordThreads \union {"sweeper"};
+    if Variant \in {"ungated", "no_kill"} then
+      coordThreads := coordThreads \union {"stray"};
     end if;
   Prepare:
     counted := coordThreads \union (IF libThread THEN {"lib"} ELSE {});
     libThread := FALSE;
   Fork:
     atFork := coordThreads;
-    if Variant = "wanted_by_thread" then
-      workerWants := "sweeper" \in coordThreads;
-    else
-      workerWants := coordWants;
-    end if;
     if Variant = "ungated" then
       child := "running";
       goto Watch;
@@ -138,23 +125,14 @@ begin
     if child /= "running" then
       goto Done;
     end if;
-  Send:
-    requested := TRUE;
-    if workerWants then
-      workerSweeper := TRUE;
-    end if;
   Serve:
-    await workerSweeper \/ groupEnded;
-    if workerSweeper then
-      served := TRUE;
-    end if;
+    served := TRUE;
 end process;
 
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "8169f56f" /\ chksum(tla) = "47a59c5")
+\* BEGIN TRANSLATION
 VARIABLES nexusAlive, nexusSettled, groupEnded, libThread, coordThreads, 
-          coordWants, atFork, child, refused, workerWants, workerSweeper, 
-          requested, served, pc
+          atFork, child, refused, served, pc
 
 (* define statement *)
 ChildRunsOnlyIfForkedAlone == child = "running" => atFork = {}
@@ -165,8 +143,7 @@ ThePoolServes == <>(served \/ ~nexusAlive)
 VARIABLE counted
 
 vars == << nexusAlive, nexusSettled, groupEnded, libThread, coordThreads, 
-           coordWants, atFork, child, refused, workerWants, workerSweeper, 
-           requested, served, pc, counted >>
+           atFork, child, refused, served, pc, counted >>
 
 ProcSet == {"nexus"} \cup {"coord"} \cup {"guard"} \cup {"worker"}
 
@@ -176,13 +153,9 @@ Init == (* Global variables *)
         /\ groupEnded = FALSE
         /\ libThread = TRUE
         /\ coordThreads = {}
-        /\ coordWants = FALSE
         /\ atFork = {}
         /\ child = "none"
         /\ refused = FALSE
-        /\ workerWants = FALSE
-        /\ workerSweeper = FALSE
-        /\ requested = FALSE
         /\ served = FALSE
         (* Process Coordinator *)
         /\ counted = {}
@@ -197,15 +170,13 @@ Live == /\ pc["nexus"] = "Live"
               /\ UNCHANGED nexusAlive
         /\ pc' = [pc EXCEPT !["nexus"] = "Settle"]
         /\ UNCHANGED << nexusSettled, groupEnded, libThread, coordThreads, 
-                        coordWants, atFork, child, refused, workerWants, 
-                        workerSweeper, requested, served, counted >>
+                        atFork, child, refused, served, counted >>
 
 Settle == /\ pc["nexus"] = "Settle"
           /\ nexusSettled' = TRUE
           /\ pc' = [pc EXCEPT !["nexus"] = "Done"]
           /\ UNCHANGED << nexusAlive, groupEnded, libThread, coordThreads, 
-                          coordWants, atFork, child, refused, workerWants, 
-                          workerSweeper, requested, served, counted >>
+                          atFork, child, refused, served, counted >>
 
 Nexus == Live \/ Settle
 
@@ -216,41 +187,33 @@ Adopt == /\ pc["coord"] = "Adopt"
                     /\ UNCHANGED coordThreads
          /\ pc' = [pc EXCEPT !["coord"] = "Attach"]
          /\ UNCHANGED << nexusAlive, nexusSettled, groupEnded, libThread, 
-                         coordWants, atFork, child, refused, workerWants, 
-                         workerSweeper, requested, served, counted >>
+                         atFork, child, refused, served, counted >>
 
 Attach == /\ pc["coord"] = "Attach"
-          /\ coordWants' = TRUE
-          /\ IF Variant \in {"eager_sweeper", "ungated", "no_kill"}
-                THEN /\ coordThreads' = (coordThreads \union {"sweeper"})
+          /\ IF Variant \in {"ungated", "no_kill"}
+                THEN /\ coordThreads' = (coordThreads \union {"stray"})
                 ELSE /\ TRUE
                      /\ UNCHANGED coordThreads
           /\ pc' = [pc EXCEPT !["coord"] = "Prepare"]
           /\ UNCHANGED << nexusAlive, nexusSettled, groupEnded, libThread, 
-                          atFork, child, refused, workerWants, workerSweeper, 
-                          requested, served, counted >>
+                          atFork, child, refused, served, counted >>
 
 Prepare == /\ pc["coord"] = "Prepare"
            /\ counted' = (coordThreads \union (IF libThread THEN {"lib"} ELSE {}))
            /\ libThread' = FALSE
            /\ pc' = [pc EXCEPT !["coord"] = "Fork"]
            /\ UNCHANGED << nexusAlive, nexusSettled, groupEnded, coordThreads, 
-                           coordWants, atFork, child, refused, workerWants, 
-                           workerSweeper, requested, served >>
+                           atFork, child, refused, served >>
 
 Fork == /\ pc["coord"] = "Fork"
         /\ atFork' = coordThreads
-        /\ IF Variant = "wanted_by_thread"
-              THEN /\ workerWants' = ("sweeper" \in coordThreads)
-              ELSE /\ workerWants' = coordWants
         /\ IF Variant = "ungated"
               THEN /\ child' = "running"
                    /\ pc' = [pc EXCEPT !["coord"] = "Watch"]
               ELSE /\ child' = "gated"
                    /\ pc' = [pc EXCEPT !["coord"] = "Count"]
         /\ UNCHANGED << nexusAlive, nexusSettled, groupEnded, libThread, 
-                        coordThreads, coordWants, refused, workerSweeper, 
-                        requested, served, counted >>
+                        coordThreads, refused, served, counted >>
 
 Count == /\ pc["coord"] = "Count"
          /\ IF Variant /= "count_before_fork"
@@ -267,8 +230,7 @@ Count == /\ pc["coord"] = "Count"
                                /\ child' = child
          /\ pc' = [pc EXCEPT !["coord"] = "Reap"]
          /\ UNCHANGED << nexusAlive, nexusSettled, groupEnded, libThread, 
-                         coordThreads, coordWants, atFork, workerWants, 
-                         workerSweeper, requested, served >>
+                         coordThreads, atFork, served >>
 
 Reap == /\ pc["coord"] = "Reap"
         /\ IF refused
@@ -278,8 +240,7 @@ Reap == /\ pc["coord"] = "Reap"
               ELSE /\ pc' = [pc EXCEPT !["coord"] = "Watch"]
                    /\ UNCHANGED groupEnded
         /\ UNCHANGED << nexusAlive, nexusSettled, libThread, coordThreads, 
-                        coordWants, atFork, child, refused, workerWants, 
-                        workerSweeper, requested, served, counted >>
+                        atFork, child, refused, served, counted >>
 
 Watch == /\ pc["coord"] = "Watch"
          /\ IF Variant = "unpolled" \/ Variant = "guard_thread"
@@ -292,8 +253,7 @@ Watch == /\ pc["coord"] = "Watch"
                                /\ UNCHANGED groupEnded
          /\ pc' = [pc EXCEPT !["coord"] = "Done"]
          /\ UNCHANGED << nexusAlive, nexusSettled, libThread, coordThreads, 
-                         coordWants, atFork, child, refused, workerWants, 
-                         workerSweeper, requested, served, counted >>
+                         atFork, child, refused, served, counted >>
 
 Coordinator == Adopt \/ Attach \/ Prepare \/ Fork \/ Count \/ Reap \/ Watch
 
@@ -308,8 +268,7 @@ GuardWatch == /\ pc["guard"] = "GuardWatch"
                          /\ UNCHANGED groupEnded
               /\ pc' = [pc EXCEPT !["guard"] = "Done"]
               /\ UNCHANGED << nexusAlive, nexusSettled, libThread, 
-                              coordThreads, coordWants, atFork, child, refused, 
-                              workerWants, workerSweeper, requested, served, 
+                              coordThreads, atFork, child, refused, served, 
                               counted >>
 
 Guard == GuardWatch
@@ -321,34 +280,17 @@ Gate == /\ pc["worker"] = "Gate"
               ELSE /\ child /= "gated"
         /\ IF child /= "running"
               THEN /\ pc' = [pc EXCEPT !["worker"] = "Done"]
-              ELSE /\ pc' = [pc EXCEPT !["worker"] = "Send"]
+              ELSE /\ pc' = [pc EXCEPT !["worker"] = "Serve"]
         /\ UNCHANGED << nexusAlive, nexusSettled, groupEnded, libThread, 
-                        coordThreads, coordWants, atFork, child, refused, 
-                        workerWants, workerSweeper, requested, served, counted >>
-
-Send == /\ pc["worker"] = "Send"
-        /\ requested' = TRUE
-        /\ IF workerWants
-              THEN /\ workerSweeper' = TRUE
-              ELSE /\ TRUE
-                   /\ UNCHANGED workerSweeper
-        /\ pc' = [pc EXCEPT !["worker"] = "Serve"]
-        /\ UNCHANGED << nexusAlive, nexusSettled, groupEnded, libThread, 
-                        coordThreads, coordWants, atFork, child, refused, 
-                        workerWants, served, counted >>
+                        coordThreads, atFork, child, refused, served, counted >>
 
 Serve == /\ pc["worker"] = "Serve"
-         /\ workerSweeper \/ groupEnded
-         /\ IF workerSweeper
-               THEN /\ served' = TRUE
-               ELSE /\ TRUE
-                    /\ UNCHANGED served
+         /\ served' = TRUE
          /\ pc' = [pc EXCEPT !["worker"] = "Done"]
          /\ UNCHANGED << nexusAlive, nexusSettled, groupEnded, libThread, 
-                         coordThreads, coordWants, atFork, child, refused, 
-                         workerWants, workerSweeper, requested, counted >>
+                         coordThreads, atFork, child, refused, counted >>
 
-Worker == Gate \/ Send \/ Serve
+Worker == Gate \/ Serve
 
 (* Allow infinite stuttering to prevent deadlock on termination. *)
 Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
@@ -365,5 +307,5 @@ Spec == /\ Init /\ [][Next]_vars
 
 Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
-\* END TRANSLATION 
+\* END TRANSLATION
 =============================================================================

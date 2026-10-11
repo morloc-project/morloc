@@ -27,8 +27,7 @@ nexus (one per program run, or one long-running daemon / MCP server)
 - nexus/daemon: an accept thread (also runs pool-crash recovery), 4-32
   request workers, a SIGCHLD handler that reaps every child, one writer
   thread per open written stream (the custodian, SLOT-10) with its
-  compression jobs, and the stream sweeper, started by the first per-call
-  sweep.
+  compression jobs.
 - pool: dispatch workers (C++, Rust: a job queue in libmorloc; Python
   thread mode: Python threads; Python fork mode and R: forked worker
   processes) and the lifeline thread (C++, Rust; R watches its lifeline in

@@ -327,8 +327,6 @@ pub fn registry_bootstrap() -> Result<usize, MorlocError> {
     shm::register_shclose_hook(crate::custody::stop_before_unmap);
     shm::register_shclose_hook(registry_teardown);
 
-    sweeper_want();
-
     Ok(slot_count)
 }
 
@@ -404,15 +402,13 @@ fn publish_registry_header(base: *mut RegistryHeader, slot_count: usize) -> Resu
     Ok(())
 }
 
-/// Reverse of `registry_bootstrap`. Ordering: stop sweeper (its reads
-/// depend on `REGISTRY_BASE`), invalidate the base, then drop the
-/// segment (its `Drop` runs `munmap` + `shm_unlink` + sweep-list
-/// deregister). Idempotent.
+/// Reverse of `registry_bootstrap`: stop the writers, invalidate the base,
+/// then drop the segment (its `Drop` runs `munmap` + `shm_unlink` +
+/// sweep-list deregister). Idempotent.
 pub fn registry_teardown() {
     use std::sync::atomic::Ordering;
 
-    sweeper_shutdown();
-    // DAEMON-1: after the sweeps, which finish streams through their writers.
+    // DAEMON-1
     crate::custody::stop_before_unmap();
 
     let mut held = REGISTRY_SEGMENT.lock();
@@ -557,8 +553,8 @@ pub const SLOT_STATE_OPEN_SHARED: u8 = 1;
 /// Sentinel `call_id` value: "this slot should NOT be swept at end of
 /// any call". Used by the cross-nexus return-serialization path to
 /// transfer slot ownership from the remote's call to the caller's
-/// scope. The sweeper compares against non-zero `call_id`s only, so
-/// slots with this value are always skipped.
+/// scope. A call sweep matches non-zero `call_id`s only, so slots with
+/// this value are always skipped.
 pub const CALL_ID_NO_SWEEP: u64 = 0;
 
 /// Sentinel value stored in `stdio_slot_{stdin,stdout,stderr}` when no
@@ -1481,7 +1477,7 @@ fn attach_process_local_slot(
 //
 // `release_slot_locked`: caller already holds the slot lock; we
 // just zero `state` and bump `generation`. Used by both
-// `shared_close_handle` (after finalisation) and the sweeper.
+// `shared_close_handle` (after finalisation) and the call sweep.
 
 /// Pull 4 bytes of entropy as a slot-probe seed. We don't need
 /// cryptographic randomness; the goal is just to spread allocations
@@ -1724,7 +1720,7 @@ fn release_slot_locked(slot: &RegistrySlot) {
     }
 
     // Reset call_id to the no-sweep sentinel (which is also the
-    // logical "free slot" value -- the sweeper skips it anyway).
+    // logical "free slot" value -- a call sweep skips it anyway).
     slot.call_id.store(CALL_ID_NO_SWEEP, Ordering::Release);
 
     // Finally: release the slot. State = FREE is the publication
@@ -1781,6 +1777,11 @@ fn free_slot_blocks(slot: &RegistrySlot) {
 /// another process is already ending is refused.
 // SLOT-12, SLOT-14, SLOT-15
 pub(crate) fn finish_stream(slot_idx: usize, gen_claim: u64, status: u32) -> Result<(), MorlocError> {
+    close_stream(slot_idx, gen_claim, status, crate::custody::Closing::Wait)
+}
+
+// SLOT-19: a detached close leaves the slot to the writer.
+fn close_stream(slot_idx: usize, gen_claim: u64, status: u32, closing: crate::custody::Closing) -> Result<(), MorlocError> {
     use std::sync::atomic::Ordering;
     let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
         "stream slot index {} out of range", slot_idx,
@@ -1807,7 +1808,7 @@ pub(crate) fn finish_stream(slot_idx: usize, gen_claim: u64, status: u32) -> Res
             } else {
                 status
             };
-            match q.push_close(status) {
+            match q.push_close(status, closing) {
                 Ok(seq) => Some((q, seq, q.epoch(), tail, poisoned)),
                 // SLOT-10: a writer that is gone reads the slot no more.
                 Err(_) if q.is_stopped() => {
@@ -1824,6 +1825,9 @@ pub(crate) fn finish_stream(slot_idx: usize, gen_claim: u64, status: u32) -> Res
     };
     invalidate_process_local_slot(pack_handle(gen_claim, slot_idx));
     let Some((q, seq, epoch, tail, poisoned)) = waiting else { return Ok(()) };
+    if closing == crate::custody::Closing::Detach {
+        return tail;
+    }
     let done = q.wait_done(seq, epoch);
     release_closed_slot(slot_idx, gen_claim);
     if poisoned {
@@ -2108,7 +2112,7 @@ fn is_this_process(pid: u32, start: u64) -> bool {
 
 /// Pull the current dispatch's `call_id` from thread-local storage.
 /// Returns `CALL_ID_NO_SWEEP` (= 0) if no call is active, which
-/// means the slot will never be swept by the per-call_id sweeper
+/// means the slot will never be swept at the end of a call
 /// (a deliberate no-op for handles opened outside a dispatch, e.g.
 /// from unit tests).
 pub(crate) fn current_call_id_for_open() -> u64 {
@@ -2122,7 +2126,7 @@ fn current_call_id() -> u64 {
 thread_local! {
     /// Per-thread current `call_id`. Set by the daemon dispatch loop
     /// at the start of a request; read by `@open` to tag freshly-allocated
-    /// slots for the sweeper.
+    /// slots for the call sweep.
     static CURRENT_CALL_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(CALL_ID_NO_SWEEP) };
 }
 
@@ -5082,134 +5086,12 @@ fn host_append(path: &str, expected_schema_str: &str, opener: (u32, u64, u64)) -
     Ok(start_custody(fd, path, &schema_str, value_schema, resume, opener)?)
 }
 
-// ── Off-worker-thread sweeper ────────────────────────────────────────────
-//
-// Daemon workers tag every `@open` with the current dispatch's `call_id`
-// (held in TLS, set at start of the dispatch). After the daemon sends its
-// response back to the nexus, it enqueues a per-call sweep request and
-// clears its TLS. A single dedicated sweeper thread drains the queue and
-// walks the registry, discarding any slots whose `call_id` matches.
-//
-// The sweep is OFF the worker thread (so a slow sweep doesn't block the
-// next dispatch on the same worker) and confirms `state` + `call_id`
-// UNDER the slot lock before discarding (so a fresh allocation that
-// landed in the same slot index between pre-filter and discard isn't
-// accidentally swept).
-//
-/// A request enqueued to the sweeper thread.
-#[derive(Debug, Clone, Copy)]
-pub enum SweepRequest {
-    /// Discard all slots whose `call_id` field matches.
-    PerCall(u64),
-}
-
-struct Sweeper {
-    tx: std::sync::mpsc::Sender<SweepRequest>,
-    thread: std::thread::JoinHandle<()>,
-}
-
-static SWEEPER: crate::fork_policy::Reset<Option<Sweeper>> = crate::fork_policy::Reset::new(|| None);
-
-static SWEEPER_WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-// FORK-6: the thread starts on the first request, so attaching starts none.
-pub fn sweeper_want() {
-    let _guard = SWEEPER.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
-    SWEEPER_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[cfg(test)]
-pub fn sweeper_init() {
-    let mut guard = SWEEPER.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
-    SWEEPER_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
-    if guard.is_none() {
-        *guard = start_sweeper();
-    }
-}
-
-fn start_sweeper() -> Option<Sweeper> {
-    let (tx, rx) = std::sync::mpsc::channel::<SweepRequest>();
-    let thread = std::thread::Builder::new()
-        .name("morloc-stream-sweeper".into())
-        .spawn(move || sweeper_main(rx))
-        .ok()?;
-    Some(Sweeper { tx, thread })
-}
-
-fn sweep_now(req: SweepRequest) {
-    match req {
-        SweepRequest::PerCall(call_id) => sweep_per_call(call_id),
-    }
-}
-
-// FORK-6: a process that wants a sweeper starts its own, a forked child included.
-fn sweeper_send(req: SweepRequest) {
-    let mut guard = SWEEPER.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
-    if !SWEEPER_WANTED.load(std::sync::atomic::Ordering::Relaxed) {
-        return;
-    }
-    if guard.is_none() {
-        *guard = start_sweeper();
-    }
-    if let Some(sweeper) = guard.as_ref() {
-        let _ = sweeper.tx.send(req);
-        return;
-    }
-    drop(guard);
-    // FORK-6: no thread could be started; the request is served here.
-    sweep_now(req);
-}
-
-#[cfg(test)]
-fn sweeper_running() -> bool {
-    SWEEPER.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock()).as_ref().is_some_and(|s| !s.thread.is_finished())
-}
-
-/// Stop the sweeper thread. Called before `registry_teardown` unmaps
-/// the registry SHM so the sweeper can't race a null / freed base.
-///
-/// Drops the sender first: the sweeper's `rx.recv()` then returns
-/// `Err` at the NEXT call (after any in-flight work item finishes), so
-/// the loop exits cleanly. Then join. Idempotent: no-op if the sweeper
-/// was never started or was already shut down.
-pub fn sweeper_shutdown() {
-    let taken = {
-        let mut guard = SWEEPER.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
-        SWEEPER_WANTED.store(false, std::sync::atomic::Ordering::Relaxed);
-        guard.take()
-    };
-    if let Some(Sweeper { tx, thread }) = taken {
-        drop(tx);
-        let _ = thread.join();
-    }
-}
-
-/// Enqueue a per-call sweep request. Non-blocking. Dropped in a process
-/// that never attached the registry.
-///
-/// `CALL_ID_NO_SWEEP` (0) is filtered here: enqueueing a sweep for
-/// the sentinel value would needlessly walk the registry without
-/// matching anything.
-pub fn sweeper_enqueue_call(call_id: u64) {
+/// End every open stream opened in call `call_id`, an `OStream` with a
+/// PAUSED footer, without waiting for its writer (SLOT-19).
+pub fn sweep_call(call_id: u64) {
     if call_id == CALL_ID_NO_SWEEP {
         return;
     }
-    sweeper_send(SweepRequest::PerCall(call_id));
-}
-
-/// Sweeper thread main loop. Drains the queue forever; exits when
-/// the `Sender` half is dropped (only happens at clean shutdown if
-/// somebody calls `sweeper_shutdown`).
-fn sweeper_main(rx: std::sync::mpsc::Receiver<SweepRequest>) {
-    while let Ok(req) = rx.recv() {
-        sweep_now(req);
-    }
-}
-
-/// End every open stream opened in call `call_id`, an `OStream` with a
-/// PAUSED footer. Each slot is matched under a versioned read and ended by
-/// `finish_stream`, which confirms its generation under the lock.
-fn sweep_per_call(call_id: u64) {
     sweep_matching(|slot| slot.call_id.load(std::sync::atomic::Ordering::Acquire) == call_id);
 }
 
@@ -5232,7 +5114,7 @@ fn sweep_matching(matches: impl Fn(&RegistrySlot) -> bool) {
         if generation_after_read(slot) & GENERATION_MASK != gen || !hit {
             continue;
         }
-        let _ = finish_stream(idx, gen, morloc_runtime_types::packet::FOOTER_STATUS_PAUSED as u32);
+        let _ = close_stream(idx, gen, morloc_runtime_types::packet::FOOTER_STATUS_PAUSED as u32, crate::custody::Closing::Detach);
     }
 }
 
@@ -7902,44 +7784,6 @@ mod tests {
         shm::shfree(ptr).unwrap();
         assert_eq!(v, 2);
         shared_close_handle(f).unwrap();
-    }
-
-    #[test]
-    fn wanting_a_sweeper_starts_no_thread_and_a_childs_first_request_starts_one() {
-        let _shm = crate::own_test_registry();
-        let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
-            sweeper_shutdown();
-            sweeper_want();
-            let idle = !sweeper_running() && crate::fork_policy::thread_count() == Some(1);
-            idle && crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
-                sweeper_enqueue_call(u64::MAX);
-                sweeper_running()
-            })
-        });
-        assert!(ok, "wanting a sweeper started a thread, or a child dropped its request");
-    }
-
-    #[test]
-    fn a_forked_child_starts_its_own_sweeper_when_its_parent_had_one() {
-        let _shm = crate::own_test_registry();
-        sweeper_init();
-        let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
-            sweeper_enqueue_call(u64::MAX);
-            sweeper_running()
-        });
-        assert!(ok, "a forked child dropped its sweep requests");
-    }
-
-    #[test]
-    fn a_forked_child_can_shut_down_without_its_parents_sweeper() {
-        let _shm = crate::own_test_registry();
-        sweeper_init();
-        let status = run_in_forked_child(|| {
-            sweeper_enqueue_call(u64::MAX);
-            sweeper_shutdown();
-        });
-        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
-                "child shutting down the sweeper did not exit cleanly: status {status}");
     }
 
     #[cfg(target_os = "linux")]
@@ -10883,6 +10727,48 @@ mod write_behind_tests {
         let footer = try_read_footer(mp, sz);
         unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize) };
         assert_eq!(footer.unwrap().expect("a final footer").footer_status, morloc_runtime_types::packet::FOOTER_STATUS_FAILED);
+        assert_eq!(read_strs(&path), first);
+    }
+
+    // FORK-2: a child's shutdown leaves the writer threads its parent runs.
+    #[test]
+    fn a_forked_child_can_shut_down_without_its_parents_writers() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("fork_teardown");
+        let path = dir.join("hosted.idx");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            registry_teardown();
+            true
+        });
+        assert!(ok, "a child shutting down with its parent's writer did not exit cleanly");
+        shared_close_handle(h).unwrap();
+    }
+
+    // SLOT-19: the end-of-call sweep closes the call's open streams without
+    // waiting, and their writer frees each slot once its footer is written.
+    #[test]
+    fn a_call_sweep_pauses_the_calls_streams_and_their_writer_frees_the_slots() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("call_sweep");
+        let path = dir.join("swept.idx");
+        let prev = set_current_call_id(4242);
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as");
+        set_current_call_id(prev);
+        let h = h.unwrap();
+        let first = vec!["kept".to_string()];
+        write_one(h, &first, 0);
+        let (gen, idx) = unpack_handle(h);
+        sweep_call(4242);
+        let began = std::time::Instant::now();
+        while slot_generation_is(slot_ref(idx).unwrap(), gen) && began.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!slot_generation_is(slot_ref(idx).unwrap(), gen), "the swept stream's slot was never freed");
+        let (mp, sz) = mmap_file_readonly(path.to_str().unwrap()).unwrap();
+        let footer = try_read_footer(mp, sz);
+        unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize) };
+        assert_eq!(footer.unwrap().expect("a final footer").footer_status, morloc_runtime_types::packet::FOOTER_STATUS_PAUSED);
         assert_eq!(read_strs(&path), first);
     }
 

@@ -352,12 +352,12 @@ fn forget_dispatches_for_test() {
 /// Source of dispatch identities for the temp registry.
 ///
 /// Deliberately NOT the stream registry's `call_id`. That one is random and
-/// unique across processes because it tags SHM slots a cross-process sweeper
+/// unique across processes because it tags SHM slots a call sweep
 /// reads; this registry lives in one process, so a plain counter suffices --
 /// and it costs an atomic increment rather than a read from /dev/urandom on
 /// every manifold dispatch. Borrowing the stream id would also start tagging
 /// every `@open` in a pool as belonging to a call, changing which slots the
-/// stream sweeper considers its own.
+/// call sweep considers its own.
 static TEMP_OWNER_COUNTER: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
@@ -1724,8 +1724,7 @@ pub(crate) unsafe fn mlc_handle_unpack_path(
     };
     // Route through the shared-registry `open_dispatch`. The fresh
     // slot's `call_id` is tagged from the thread-local set by the
-    // daemon dispatch loop, so the per-call sweeper cleans it up at
-    // scope exit. (Replaces the prior `eval_arena::record_slot_if_active`
+    // daemon dispatch loop, so the call sweep closes it at scope exit. (Replaces the prior `eval_arena::record_slot_if_active`
     // bookkeeping under the process-local registry.)
     match crate::stream::open_dispatch(path_str, kind) {
         Ok(handle) => handle,

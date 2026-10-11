@@ -14,7 +14,7 @@ language pools' trackers forget inherited entries the same way.
 
 ### FORK-2 A forked child can shut down without its parent's threads
 Status: implemented
-Checked by: a_forked_child_can_shut_down_without_its_parents_sweeper
+Checked by: a_forked_child_can_shut_down_without_its_parents_writers
 
 Shutdown joins only threads the current process started.
 
@@ -54,16 +54,13 @@ Model: `tla/ForkLocks.tla` (`ForkLocks` passes;
 
 ### FORK-6 Workers fork from a process that has no other threads
 Status: implemented
-Checked by: a_worker_forked_from_a_process_with_another_thread_never_runs, a_worker_forked_from_a_lone_thread_runs, a_forked_child_counts_only_its_own_threads, wanting_a_sweeper_starts_no_thread_and_a_childs_first_request_starts_one, tla:PoolFork, tla:PoolFork_guard_thread.bug, tla:PoolFork_eager_sweeper.bug, tla:PoolFork_wanted_by_thread.bug, tla:PoolFork_unpolled.bug, tla:PoolFork_count_before_fork.bug, tla:PoolFork_no_kill.bug, tla:PoolFork_ungated.bug
+Checked by: a_worker_forked_from_a_process_with_another_thread_never_runs, a_worker_forked_from_a_lone_thread_runs, a_forked_child_counts_only_its_own_threads, tla:PoolFork, tla:PoolFork_guard_thread.bug, tla:PoolFork_unpolled.bug, tla:PoolFork_count_before_fork.bug, tla:PoolFork_no_kill.bug, tla:PoolFork_ungated.bug
 
 A forked child has only the thread that forked, so a pool that runs user
 code in forked workers (Python fork mode, R) forks them from a coordinator
 that starts no thread of its own. The coordinator loads no user code; it
 watches the nexus's lifeline in its own wait loop rather than from a
-thread; and attaching the stream registry marks the sweeper as wanted
-without starting it, so the sweeper starts on the first sweep request.
-Only the nexus sends one, so no pool process starts a sweeper. If no thread
-can be started, the request is served by the thread that sent it.
+thread; and attaching the stream registry starts no thread.
 
 A library may run threads of its own that it ends in its fork handler and
 starts again later (OpenBLAS does), so the R coordinator forks through a
@@ -109,11 +106,10 @@ variants fail). Tests: a_child_forked_while_a_thread_holds_a_reset_lock_gets_a_f
 a_fork_from_a_thread_holding_a_reset_lock_aborts,
 a_forked_child_never_resolves_its_parents_cell,
 a_forked_child_leaves_its_parents_spooled_inputs,
-a_forked_child_leaves_its_parents_temp_files,
-a_forked_child_starts_its_own_sweeper_when_its_parent_had_one. A fresh
+a_forked_child_leaves_its_parents_temp_files. A fresh
 value that depends on the parent's state is seeded from it: the temp
 registry starts with one dispatch that never ends when the parent had any
-running (FORK-16), and a child wants a sweeper when its parent did. The
+running (FORK-16). The
 emitted Futhark glue keeps its lock and context in such a slot, keyed on
 the fork generation the runtime reports.
 

@@ -42,3 +42,12 @@ here touch locks and ownership: model first.
   it returns 0 when this process has no `@stdout` open, so a pool other
   than the one that opened the run's stdout reports 0 while elements have
   been written. Should `@tell` count the run's stdout from any pool?
+- **A path left open by a daemon call may refuse to reopen in the next
+  call.** [read] Gap in SLOT-15 ("its path reopens at once" covers only a
+  user close). A nexus-evaluated daemon request that leaves an OStream open
+  has it closed by the per-call sweep after the reply is sent
+  (daemon_ffi.rs `sweeper_enqueue_call`), off the request thread. A next
+  request that opens the same path before the custodian has finished it
+  fails: the custodian takes the file lock non-blocking
+  (stream.rs `lock_stream_file`). Open: should an open of a path whose
+  previous stream is still closing wait for that close?

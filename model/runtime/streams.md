@@ -195,3 +195,15 @@ The writer frees the queue, with its spare buffers, if it finds the
 abandoned flag set; an opener that sets the flag and finds the consumer
 already gone clears it again and keeps the queue. So the block is freed
 once, never while the slot uses it, and never leaked.
+
+### SLOT-19 A queued close frees its slot once, after the footer
+Status: implemented
+Checked by: only_a_detached_or_dead_closer_leaves_the_slot_to_the_custodian, a_call_sweep_pauses_the_calls_streams_and_their_writer_frees_the_slots, tla:SlotRelease, tla:SlotRelease_detached_releases.bug, tla:SlotRelease_detached_waits.bug
+
+A close names its closer on the queue. A waiting closer (`@close`, a
+flush-and-close at the end of a run) frees the slot once the custodian has
+written the footer (SLOT-15). The sweep that ends a nexus-evaluated
+daemon call closes each stream the call left open detached: it queues the
+close and returns, and the custodian frees the slot after writing the
+footer, as it does for a waiting closer that died. Every free checks under
+the slot lock that the slot still holds the stream being closed.

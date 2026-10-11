@@ -19,6 +19,14 @@ pub(crate) const ENTRY_CLOSE: u32 = 4;
 
 pub(crate) const STATUS_DISCARD: u32 = 255;
 
+// SLOT-19
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Closing {
+    Wait,
+    Detach,
+}
+const DETACHED_CLOSER: u32 = u32::MAX;
+
 // SLOT-18: the queue's consumer word.
 const CONSUMER: u32 = 1;
 const ABANDONED: u32 = 2;
@@ -225,12 +233,18 @@ impl CustodyQueue {
 
     // SLOT-12: a producer holds the slot lock; it waits only on the custodian.
     pub(crate) fn push(&self, item: Item) -> Result<u32, MorlocError> {
-        self.push_with(item, true)
+        self.push_with(item, true, Closing::Wait)
     }
 
     /// Queue the close: once queued, nothing more is.
-    pub(crate) fn push_close(&self, status: u32) -> Result<u32, MorlocError> {
-        self.push_with(Item::marker(ENTRY_CLOSE, status), false)
+    pub(crate) fn push_close(&self, status: u32, closing: Closing) -> Result<u32, MorlocError> {
+        self.push_with(Item::marker(ENTRY_CLOSE, status), false, closing)
+    }
+
+    // SLOT-19: a detached closer, or one that died, leaves the slot to the writer.
+    pub(crate) fn closer_gone(&self) -> bool {
+        let (pid, start) = self.closer();
+        pid == DETACHED_CLOSER || (pid != 0 && !morloc_runtime_types::process::alive(pid, start))
     }
 
     /// Wait until the queue has room; a buffer the custodian finished is
@@ -254,7 +268,7 @@ impl CustodyQueue {
         }
     }
 
-    fn push_with(&self, item: Item, refuse_failed: bool) -> Result<u32, MorlocError> {
+    fn push_with(&self, item: Item, refuse_failed: bool, closing: Closing) -> Result<u32, MorlocError> {
         loop {
             if refuse_failed {
                 if let Some(e) = self.failure() {
@@ -278,9 +292,15 @@ impl CustodyQueue {
                 e.oversize.store(item.oversize as u32, Ordering::Relaxed);
                 e.level.store(item.level as u32, Ordering::Relaxed);
                 if item.kind == ENTRY_CLOSE {
-                    // SLOT-13: the closer is the process that queued the close.
-                    let pid = std::process::id();
-                    self.closer_start.store(morloc_runtime_types::process::start_time(pid), Ordering::Relaxed);
+                    // SLOT-13, SLOT-19: the closer is the process that queued the close.
+                    let (pid, start) = match closing {
+                        Closing::Wait => {
+                            let pid = std::process::id();
+                            (pid, morloc_runtime_types::process::start_time(pid))
+                        }
+                        Closing::Detach => (DETACHED_CLOSER, 0),
+                    };
+                    self.closer_start.store(start, Ordering::Relaxed);
                     self.closer_pid.store(pid, Ordering::Relaxed);
                     self.closed.store(1, Ordering::Release);
                 }
@@ -609,14 +629,13 @@ impl Writer {
         }
     }
 
-    // SLOT-13: a closer that dies before releasing the slot leaves it here.
+    // SLOT-13, SLOT-19
     fn await_release(&self, stop: &AtomicU32) {
         loop {
             if !crate::stream::slot_generation_is_pub(self.slot, self.gen) || stop.load(Ordering::Acquire) != STOP_NONE {
                 return;
             }
-            let (pid, start) = self.q.closer();
-            if pid != 0 && !morloc_runtime_types::process::alive(pid, start) {
+            if self.q.closer_gone() {
                 crate::stream::release_closed_slot(self.slot_idx, self.gen);
                 return;
             }
@@ -1296,6 +1315,18 @@ mod tests {
         q.finish(1);
         q.reset_for_open(3);
         assert!(q.wait_done(seq, epoch).is_err());
+    }
+
+    // SLOT-19: a detached closer leaves the slot for the custodian to free;
+    // a waiting closer that lives frees it itself.
+    #[test]
+    fn only_a_detached_or_dead_closer_leaves_the_slot_to_the_custodian() {
+        let (_a, q) = fresh();
+        q.push_close(0, Closing::Wait).unwrap();
+        assert!(!q.closer_gone(), "a living waiting closer was taken for gone");
+        q.reset_for_open(3);
+        q.push_close(0, Closing::Detach).unwrap();
+        assert!(q.closer_gone(), "a detached closer was waited on");
     }
 
     #[test]
