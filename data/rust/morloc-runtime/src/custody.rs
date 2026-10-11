@@ -111,6 +111,7 @@ impl CustodyQueue {
     }
 
     /// Whether a writer may still pop this queue.
+    #[cfg(test)]
     pub(crate) fn has_consumer(&self) -> bool {
         self.consumer.load(Ordering::Acquire) & CONSUMER != 0
     }
@@ -294,10 +295,12 @@ impl CustodyQueue {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn pushed(&self) -> u32 {
         self.tail.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
     pub(crate) fn outstanding(&self) -> u32 {
         self.tail.load(Ordering::Acquire).wrapping_sub(self.done.load(Ordering::Acquire))
     }
@@ -921,6 +924,7 @@ pub fn host_stop_all(status: u8) {
 }
 
 /// Stop the writer of the stream in `slot_idx`, as `host_stop_all` does.
+#[cfg(test)]
 pub(crate) fn host_stop(slot_idx: usize, status: u8) {
     let taken: Vec<Hosted> = {
         let mut hosted = HOSTED.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());

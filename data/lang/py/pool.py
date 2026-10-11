@@ -680,8 +680,7 @@ def worker_process(listen_fd, tmpdir, shm_basename, shutdown_flag, busy_count, t
     def trace(what):
         refs = morloc.held_references()
         sys.stderr.write(f"morloc py worker {me}: {what} idle={time.monotonic() - last_activity:.1f}s "
-                         f"workers={total_workers.value} busy={busy_count.value} refs={refs} "
-                         f"stream_locks={morloc.retire_blockers() - refs}\n")
+                         f"workers={total_workers.value} busy={busy_count.value} refs={refs}\n")
         sys.stderr.flush()
 
     if trace_retire:
@@ -737,7 +736,7 @@ def worker_process(listen_fd, tmpdir, shm_basename, shutdown_flag, busy_count, t
                 if not warned_blocked:
                     warned_blocked = True
                     sys.stderr.write(f"morloc py worker {me}: idle but holding {blockers} "
-                                     "shared-memory references or stream locks; it cannot retire\n")
+                                     "shared-memory references; it cannot retire\n")
                     sys.stderr.flush()
                 last_activity = time.monotonic()
     except BaseException as e:

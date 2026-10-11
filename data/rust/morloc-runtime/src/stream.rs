@@ -164,8 +164,8 @@ struct RegistryHeader {
     stdio_slot_stdout:  std::sync::atomic::AtomicI64,
     stdio_slot_stderr:  std::sync::atomic::AtomicI64,
 
-    /// Bumped, with a wake, whenever a stream is left ENDING for its
-    /// opener to release; every process's release service waits on it.
+    /// Bumped whenever a slot is released, so each process can tell when to
+    /// drop its own slots for ended streams (SLOT-9).
     release_doorbell:   std::sync::atomic::AtomicU32,
 
     /// Reserved for future use.
@@ -550,15 +550,9 @@ pub(crate) fn registry_gen_salt() -> u64 {
 
 /// Per-slot state byte. Stored in the `state` AtomicU8. `FREE` is
 /// re-allocatable (implicit zero on init); `OPEN_SHARED` marks a slot
-/// in active use; `REMOTE_PAUSED` is reserved for cross-nexus IStream
-/// pause-on-egress.
+/// in active use.
 pub const SLOT_STATE_FREE: u8 = 0;
 pub const SLOT_STATE_OPEN_SHARED: u8 = 1;
-pub const SLOT_STATE_REMOTE_PAUSED: u8 = 2;
-/// An OStream ended by a process other than its opener: its footer is
-/// written and its handle is dead, but the file is still locked by the
-/// opener's descriptor, so the opener releases the slot.
-pub const SLOT_STATE_ENDING: u8 = 3;
 
 /// Sentinel `call_id` value: "this slot should NOT be swept at end of
 /// any call". Used by the cross-nexus return-serialization path to
@@ -631,7 +625,7 @@ pub struct RegistrySlot {
     /// transfer ownership.
     pub call_id:              std::sync::atomic::AtomicU64,    // off 8..16
 
-    /// SLOT_STATE_FREE / SLOT_STATE_OPEN_SHARED / SLOT_STATE_REMOTE_PAUSED.
+    /// SLOT_STATE_FREE / SLOT_STATE_OPEN_SHARED.
     /// Allocation is a CAS on this field (FREE -> OPEN_SHARED).
     pub state:                std::sync::atomic::AtomicU8,     // off 16
     /// MLC_KIND_IFILE / MLC_KIND_ISTREAM / MLC_KIND_OSTREAM.
@@ -676,7 +670,7 @@ pub struct RegistrySlot {
 
     /// IFile only; set at @open from the file's footer. Plain u8 0/1
     /// for cross-process clarity. Immutable after @open publication.
-    pub final_footer:         std::sync::atomic::AtomicU8,                              // off 96
+    _retired_96:              u8,                                                       // off 96
     pub compression_level:    std::sync::atomic::AtomicU8,                              // off 97
     _pad5:                    [u8; 6],                         // off 98..104
 
@@ -722,7 +716,7 @@ pub struct RegistrySlot {
     /// doubling under the slot lock when `subpacket_entries_len` reaches
     /// it. For IFile this field is 0 (the array is set once from the
     /// parsed final footer and never grows).
-    pub subpacket_entries_cap:std::sync::atomic::AtomicU64,                             // off 320..328
+    _retired_320:             [u8; 8],                                                  // off 320..328
 
     /// Non-zero when this slot is bound to stdin/stdout/stderr rather
     /// than a real file. Immutable after publication.
@@ -820,9 +814,9 @@ pub(crate) const GENERATION_MASK: u64 = 0x0000_7FFF_FFFF_FFFF;
 // -- Slot lock --
 //
 // Each `RegistrySlot` has its own `lock`, which serialises mutations to
-// `cursor`, `element_count` and the write buffer. It is held across
-// sub-packet writes, fdatasync, synchronous compression and stdio RPCs, so
-// waiters block rather than spin. A process killed while holding it (a
+// `cursor`, `element_count` and the write buffer. It is held while elements
+// are copied in and, when the queue is full, while the writer waits for the
+// custodian (SLOT-12), so waiters block rather than spin. A process killed while holding it (a
 // signal, the OOM killer) poisons the slot: its state may be half-updated,
 // so operations on the stream fail from then on, and releasing the slot
 // leaks its SHM blocks rather than free pointers that may be mid-swap.
@@ -905,11 +899,6 @@ pub struct ProcessLocalSlot {
     /// 'drop_read_pages' can map read pages afresh.
     pub map_file: Option<std::fs::File>,
 
-    /// Underlying file descriptor. For OStream this is the fd that
-    /// holds the flock (only the OPENER pool acquires the flock;
-    /// non-opener writers use their own non-flock'd fd). For
-    /// IFile/IStream this is -1 (we close after mmap).
-    pub fd: i32,
 
     /// Per-handle decompressed-sub-packet LRU. Lives on the heap so
     /// dropping the entry from the HashMap shfree's the SHM blocks
@@ -944,8 +933,6 @@ pub struct ProcessLocalSlot {
     /// this flag to skip the stream-header / footer parsing paths.
     pub is_data_packet: bool,
 
-    /// `fd` holds the stream file's lock: this process opened the stream.
-    pub(crate) holds_lock: bool,
 
     /// `FORK_EPOCH` when this slot was made. A slot from before a fork that
     /// the child reaches is its parent's: its descriptor was closed.
@@ -959,8 +946,7 @@ fn fork_epoch() -> u64 {
 impl Drop for ProcessLocalSlot {
     fn drop(&mut self) {
         // Drop the decompression cache first; this shfree's any
-        // SHM blocks the cache references. Then unmap the file
-        // region. Then close the fd (which releases flock if held).
+        // SHM blocks the cache references. Then unmap the file region.
         if !self.cache.is_inherited() {
             for entry in self.cache.entries.drain(..) {
                 let _ = crate::shm::shfree(entry.shm_packet);
@@ -970,12 +956,6 @@ impl Drop for ProcessLocalSlot {
             unsafe {
                 libc::munmap(self.mmap_ptr as *mut libc::c_void, self.mmap_size as usize);
             }
-        }
-        if self.fd >= 0 {
-            if self.holds_lock {
-                LOCKED_FDS.lock().retain(|&f| f != self.fd);
-            }
-            unsafe { libc::close(self.fd); }
         }
     }
 }
@@ -1045,10 +1025,8 @@ pub(crate) enum LocalEntry {
 /// initialised on first access; cleared on `shclose_atexit`-style
 /// teardown.
 ///
-/// A process has at most one slot per written handle. A second would hold
-/// its own descriptor and sealed batches: whichever was dropped would take
-/// the opener's file lock or unwritten elements with it. So an operation
-/// on a written handle takes the slot out of the map and leaves an `InUse`
+/// A process has at most one slot per written handle. An operation on a
+/// written handle takes the slot out of the map and leaves an `InUse`
 /// mark, and other threads wait for it rather than attaching another. A
 /// read handle's slot holds only a mapping and a cache, so threads reading
 /// at once each use their own. The map lock is never held across an
@@ -1056,23 +1034,10 @@ pub(crate) enum LocalEntry {
 pub(crate) static PROCESS_LOCAL_SLOTS: Held<Option<std::collections::HashMap<i64, LocalEntry>>> =
     Held::new(2, None);
 
-// SHM-8: slots that hold a stream's file lock, which only this process releases.
-pub fn held_stream_locks() -> usize {
-    let guard = PROCESS_LOCAL_SLOTS.lock();
-    guard.as_ref().map_or(0, |map| {
-        map.values()
-            .filter(|e| match e {
-                LocalEntry::Idle(local) => local.holds_lock,
-                LocalEntry::InUse { .. } => true,
-            })
-            .count()
-    })
-}
-
 // SHM-8: what keeps a worker from retiring.
 pub(crate) fn morloc_retire_blockers() -> i64 {
-    drop_ended_unlocked_slots();
-    crate::shm::held_references() + held_stream_locks() as i64
+    drop_ended_slots();
+    crate::shm::held_references()
 }
 
 /// Signalled whenever an `InUse` mark is replaced or removed.
@@ -1134,8 +1099,6 @@ enum ClaimMode {
     Shared,
     /// Exclusive, waiting while another thread of this process uses it.
     Wait,
-    /// Exclusive, or `None` while another thread uses it.
-    NoWait,
 }
 
 /// Claim `handle`'s slot for one operation, taking its idle slot if there
@@ -1169,9 +1132,6 @@ fn claim_process_local_slot(
                         "stream handle {:#x} used again by an operation already using it",
                         handle,
                     )));
-                }
-                if mode == ClaimMode::NoWait {
-                    return Ok(None);
                 }
                 guard = guard.wait(&PROCESS_LOCAL_RETURNED);
                 continue;
@@ -1245,7 +1205,7 @@ pub fn with_process_local_slot<R>(
     // Validate cached_generation; dispose on mismatch. The stream it
     // belonged to has ended.
     if taken.as_ref().is_some_and(|l| l.cached_generation != gen_now) {
-        finish_ended(handle, taken.take().expect("checked above"));
+        drop(taken.take().expect("checked above"));
     }
     let mut local = match taken {
         Some(s) => s,
@@ -1261,7 +1221,7 @@ pub fn with_process_local_slot<R>(
     if gen_after != gen_now {
         // The local slot is now stale; dispose of it.
         drop(claim);
-        finish_ended(handle, local);
+        drop(local);
         return Err(MorlocError::Other(format!(
             "stream handle {:#x}: slot was closed mid-attach (generation \
              went from {} to {}); retry",
@@ -1273,8 +1233,7 @@ pub fn with_process_local_slot<R>(
         local.cache = crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(read_cache_cap_env())));
     }
 
-    // Run f with the validated local slot. A panic must not lose the slot:
-    // it may hold the file lock that only this process can release.
+    // Run f with the validated local slot, keeping it if f panics.
     let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         f(&mut local, slot)
     })) {
@@ -1282,7 +1241,7 @@ pub fn with_process_local_slot<R>(
         Err(panic) => {
             if has_ended(handle, &local) {
                 drop(claim);
-                finish_ended(handle, local);
+                drop(local);
             } else {
                 claim.give_back(local);
             }
@@ -1293,20 +1252,14 @@ pub fn with_process_local_slot<R>(
     // Re-install the local slot in the map for future calls. We
     // always re-install, even on Err, so the cache isn't dropped
     // just because the operation failed -- unless another process ended
-    // the stream meanwhile and left its file locked here, or this is a
-    // forked child holding its parent's slot.
+    // the stream meanwhile, or this is a forked child holding its parent's
+    // slot.
     if local.fork_epoch != fork_epoch() {
-        // FORK-4: a holder's descriptor was closed by the fork handler; the
-        // child closes its own copy of any other.
-        if local.holds_lock {
-            local.fd = -1;
-            local.holds_lock = false;
-        }
         drop(claim);
         drop(local);
     } else if has_ended(handle, &local) {
         drop(claim);
-        finish_ended(handle, local);
+        drop(local);
     } else {
         claim.give_back(local);
     }
@@ -1323,7 +1276,7 @@ fn install_process_local_slot(handle: i64, slot: ProcessLocalSlot) {
     drop(guard);
     PROCESS_LOCAL_RETURNED.notify_all();
     if let Some(LocalEntry::Idle(old)) = replaced {
-        finish_ended(handle, old);
+        drop(old);
     }
 }
 
@@ -1337,23 +1290,9 @@ fn note_locked_fd(fd: libc::c_int) {
 }
 
 // FORK-4: the child closes its copies; its slots reattach on next use.
-pub(crate) fn after_fork_in_child(
-    map: &mut Option<std::collections::HashMap<i64, LocalEntry>>,
-    locked_fds: &mut Vec<libc::c_int>,
-) {
+pub(crate) fn after_fork_in_child(locked_fds: &mut Vec<libc::c_int>) {
     for fd in locked_fds.drain(..) {
         unsafe { libc::close(fd); }
-    }
-    if let Some(map) = map.as_mut() {
-        for entry in map.values_mut() {
-            if let LocalEntry::Idle(local) = entry {
-                if local.holds_lock {
-                    local.fd = -1;
-                    local.holds_lock = false;
-                    local.cached_generation = u64::MAX;
-                }
-            }
-        }
     }
 }
 
@@ -1366,7 +1305,7 @@ pub fn invalidate_process_local_slot(handle: i64) {
     let removed = guard.as_mut().and_then(|map| map.remove(&handle));
     drop(guard);
     match removed {
-        Some(LocalEntry::Idle(local)) => finish_ended(handle, local),
+        Some(LocalEntry::Idle(local)) => drop(local),
         Some(LocalEntry::InUse { .. }) => PROCESS_LOCAL_RETURNED.notify_all(),
         None => {}
     }
@@ -1460,7 +1399,7 @@ fn attach_process_local_slot(
     })?;
 
     // Open + mmap depending on kind.
-    let (fd, map_file, mmap_ptr, mmap_size) = match kind {
+    let (map_file, mmap_ptr, mmap_size) = match kind {
         x if x == MLC_KIND_IFILE || x == MLC_KIND_ISTREAM => {
             let (f, mp, sz) = mmap_file_readonly_keep(&path_str)?;
             if let Err(e) = check_identity(handle, view.identity, &path_str, file_identity_of(&f)) {
@@ -1468,10 +1407,10 @@ fn attach_process_local_slot(
                 return Err(e);
             }
             let keep = if x == MLC_KIND_ISTREAM { Some(f) } else { None };
-            (-1i32, keep, mp, sz)
+            (keep, mp, sz)
         }
         // SLOT-10: a writer needs no descriptor; the custodian has the file.
-        x if x == MLC_KIND_OSTREAM => (-1i32, None, std::ptr::null_mut(), 0),
+        x if x == MLC_KIND_OSTREAM => (None, std::ptr::null_mut(), 0),
         other => {
             return Err(MorlocError::Other(format!(
                 "stream handle {:#x}: unknown kind byte {}", handle, other,
@@ -1522,14 +1461,12 @@ fn attach_process_local_slot(
         mmap_size,
         pages_dropped: 0,
         map_file,
-        fd,
         cache,
         value_schema,
         elem_schema,
         subpacket_entries_local,
         subpacket_elem_cum: None,
         is_data_packet,
-        holds_lock: false,
         fork_epoch: fork_epoch(),
     })
 }
@@ -1794,7 +1731,7 @@ fn release_slot_locked(slot: &RegistrySlot) {
     // gate that allows other allocators' CAS to succeed.
     slot.state.store(SLOT_STATE_FREE, Ordering::Release);
     // SLOT-9: counted, not woken: each process drops its slot for the stream
-    // at its next dispatch end or release service tick.
+    // at its next dispatch end.
     if let Some(bell) = release_doorbell() {
         bell.fetch_add(1, Ordering::Release);
     }
@@ -1917,10 +1854,8 @@ fn clear_slot_fields(slot: &RegistrySlot) {
     slot.schema_str_len.set(0);
     slot.subpacket_entries.set(shm_types_crate::RELNULL);
     slot.subpacket_entries_len.set(0);
-    slot.subpacket_entries_cap.set(0);
     slot.cursor.set(0);
     slot.element_count.set(0);
-    slot.final_footer.set(0);
     slot.compression_level.set(0);
     slot.body_start.set(0);
     slot.opener_pid.set(0);
@@ -1940,9 +1875,8 @@ fn clear_slot_fields(slot: &RegistrySlot) {
 
 }
 
-/// Whether `local` holds the file lock of a stream that has since ended.
-// SLOT-9: a slot for a stream that has ended, whether or not it holds the
-// file lock, is disposed of rather than kept.
+/// Whether `local` belongs to a stream that has since ended.
+// SLOT-9: such a slot is disposed of rather than kept.
 fn has_ended(handle: i64, local: &ProcessLocalSlot) -> bool {
     use std::sync::atomic::Ordering;
     let (_, idx) = unpack_handle(handle);
@@ -1952,11 +1886,6 @@ fn has_ended(handle: i64, local: &ProcessLocalSlot) -> bool {
         }
         None => true,
     }
-}
-
-/// Dispose of this process's slot for a stream that has ended.
-fn finish_ended(_handle: i64, local: ProcessLocalSlot) {
-    drop(local);
 }
 
 /// Held across a release pass, which frees SHM blocks, so a fork never
@@ -1972,16 +1901,15 @@ pub(crate) fn release_ended_if_rung() {
     let Some(bell) = release_doorbell() else { return };
     let now = bell.load(Ordering::Acquire);
     let seen = RELEASES_SEEN.swap(now, Ordering::AcqRel);
-    if seen != now && !drop_ended_unlocked_slots() {
+    if seen != now && !drop_ended_slots() {
         // A pass already runs; a later dispatch end tries again.
         let _ = RELEASES_SEEN.compare_exchange(now, seen, Ordering::AcqRel, Ordering::Relaxed);
     }
 }
 
-// SLOT-9: never waits: a slot holding a file lock is left to the release
-// service, which every holder runs, and a running pass is left alone.
-// Returns false if a pass was running.
-pub(crate) fn drop_ended_unlocked_slots() -> bool {
+// SLOT-9: never waits: a running pass is left alone. Returns false if a pass
+// was running.
+pub(crate) fn drop_ended_slots() -> bool {
     let Some(_pass) = RELEASE_PASS.try_lock() else { return false };
     let ended: Vec<ProcessLocalSlot> = {
         let mut guard = PROCESS_LOCAL_SLOTS.lock();
@@ -1989,7 +1917,7 @@ pub(crate) fn drop_ended_unlocked_slots() -> bool {
         let handles: Vec<i64> = map
             .iter()
             .filter_map(|(h, e)| match e {
-                LocalEntry::Idle(l) if !l.holds_lock && has_ended(*h, l) => Some(*h),
+                LocalEntry::Idle(l) if has_ended(*h, l) => Some(*h),
                 _ => None,
             })
             .collect();
@@ -2015,8 +1943,7 @@ fn release_doorbell() -> Option<&'static std::sync::atomic::AtomicU32> {
     if base.is_null() {
         return None;
     }
-    // SAFETY: the registry stays mapped until `registry_teardown`, which
-    // stops the release service first.
+    // SAFETY: SLOT-9: the registry stays mapped until `registry_teardown`.
     Some(unsafe { &(*base).release_doorbell })
 }
 
@@ -2305,9 +2232,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
             // from the parsed final footer and never grown. cap = 0
             // marks "not OStream-growable" so release_slot_locked treats
             // subpacket_entries_len, not _cap, as the freed extent.
-            slot.subpacket_entries_cap.set(0);
             slot.body_start.set(parsed.body_start);
-            slot.final_footer.set(if parsed.final_footer { 1 } else { 0 });
             slot.cursor.set(0);
             slot.element_count.set(parsed.element_count);
             slot.compression_level.set(0);
@@ -2349,14 +2274,12 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         mmap_size,
         pages_dropped: 0,
         map_file: None,
-        fd: -1,
         cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(cap_bytes))),
         value_schema: parsed.value_schema.clone(),
         elem_schema: parsed.elem_schema.clone(),
         subpacket_entries_local: parsed.subpacket_entries.clone(),
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
-        holds_lock: false,
         fork_epoch: fork_epoch(),
     };
     let handle = pack_handle(new_gen, slot_idx);
@@ -2421,9 +2344,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
             slot.schema_str_len.set(parsed.schema_str.len() as u32);
             slot.subpacket_entries.set(shm_types_crate::RELNULL);
             slot.subpacket_entries_len.set(0);
-            slot.subpacket_entries_cap.set(0);
             slot.body_start.set(parsed.body_start);
-            slot.final_footer.set(if parsed.final_footer { 1 } else { 0 });
             // IStream walks by cursor starting at body_start.
             slot.cursor.set(parsed.body_start);
             slot.data_end.set(parsed.data_end);
@@ -2456,14 +2377,12 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         mmap_size,
         pages_dropped: 0,
         map_file: Some(map_file),
-        fd: -1,
         cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(cap_bytes))),
         value_schema: parsed.value_schema.clone(),
         elem_schema: parsed.elem_schema.clone(),
         subpacket_entries_local: parsed.subpacket_entries.clone(),
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
-        holds_lock: false,
         fork_epoch: fork_epoch(),
     };
     let handle = pack_handle(new_gen, slot_idx);
@@ -2664,7 +2583,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         if kind == MLC_KIND_OSTREAM {
             ready_slot_queue(slot)?;
         }
-        let (idx_rel, idx_cap) = (shm_types_crate::RELNULL, 0);
+        let idx_rel = shm_types_crate::RELNULL;
         {
             slot.kind.set(kind);
             slot.is_stdio.set(1);
@@ -2676,9 +2595,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             slot.schema_str_len.set(schema_str.len() as u32);
             slot.subpacket_entries.set(pending.own(idx_rel));
             slot.subpacket_entries_len.set(0);
-            slot.subpacket_entries_cap.set(idx_cap);
             slot.body_start.set(stdio_body_start);
-            slot.final_footer.set(0);
             slot.cursor.set(stdio_body_start);
             slot.element_count.set(0);
             slot.compression_level.set(0);
@@ -2747,14 +2664,12 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         mmap_size: 0,
         pages_dropped: 0,
         map_file: None,
-        fd: -1,                    // stdio writes go through RPC, not fd
         cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(0))),
         value_schema: value_schema_cached,
         elem_schema: elem_schema_cached,
         subpacket_entries_local: Vec::new(),
         subpacket_elem_cum: None,
         is_data_packet: false,
-        holds_lock: false,
         fork_epoch: fork_epoch(),
     };
     install_process_local_slot(handle, local);
@@ -3249,9 +3164,7 @@ fn start_custody(
             slot.schema_str_len.set(schema_str.len() as u32);
             slot.subpacket_entries.set(shm_types_crate::RELNULL);
             slot.subpacket_entries_len.set(0);
-            slot.subpacket_entries_cap.set(0);
             slot.body_start.set(resume.body_start);
-            slot.final_footer.set(0);
             slot.cursor.set(resume.cursor);
             slot.element_count.set(resume.element_count);
             slot.compression_level.set(0);
@@ -3691,12 +3604,6 @@ fn flush_write_buffer(
     Ok(())
 }
 
-fn flush_full_buffer(
-    slot: &RegistrySlot,
-    local: &mut ProcessLocalSlot,
-) -> Result<(), MorlocError> {
-    flush_write_buffer(slot, local)
-}
 
 /// The size of the slot's write buffer block. Every buffer a stream holds
 /// has the size its publisher gave the first one.
@@ -3742,7 +3649,7 @@ fn append_flat_run(
         }
         let space = (slot.write_buffer_index_cap.get() - slot.write_buffer_index_count.get()) as usize;
         if space == 0 {
-            flush_full_buffer(slot, local)?;
+            flush_write_buffer(slot, local)?;
             continue;
         }
         let k = space.min(n - done);
@@ -3881,7 +3788,7 @@ fn append_one_element(
 
             continue;
         }
-        flush_full_buffer(slot, local)?;
+        flush_write_buffer(slot, local)?;
         // Loop: buffer is empty now, try again.
     }
 
@@ -5622,9 +5529,9 @@ pub fn open_ostream_with_schema(
 /// Close any open handle. Bumps the slot's generation; subsequent
 /// operations on the same Int return a clean generation-mismatch error.
 ///
-/// For OStream, this is the **explicit-close** path: it runs
-/// `finalise_ostream` which pwrites the final footer and fdatasyncs
-/// before releasing the slot. A file closed this way is "cleanly
+/// For OStream, this is the **explicit-close** path: it returns once the
+/// custodian has written the final footer and synced the file (SLOT-15). A
+/// file closed this way is "cleanly
 /// closed" -- the final footer carries the full sub-packet index, and
 /// IFile can open it for random access.
 ///
@@ -5640,9 +5547,8 @@ pub fn close_handle(handle: i64) -> Result<(), MorlocError> {
 /// eval_arena Drop path: when an OStream goes out of scope without an
 /// explicit `@close`, we deliberately leave the temp footer in place
 /// so downstream tooling can distinguish "writer crashed / never
-/// finished" from "writer completed cleanly". The fd is closed (which
-/// also releases the flock) and the slot is freed; subsequent ops on
-/// the handle return generation-mismatch errors.
+/// finished" from "writer completed cleanly". The slot is freed;
+/// subsequent ops on the handle return generation-mismatch errors.
 ///
 /// IFile / IStream entries take the same release path as `close_handle`
 /// (they have nothing to finalise either way).
@@ -7387,13 +7293,11 @@ pub fn shared_open_ifile_recovered(
             slot.schema_str_len.set(parsed.schema_str.len() as u32);
             slot.subpacket_entries.set(pending.own(idx_rel));
             slot.subpacket_entries_len.set(subpacket_entries.len() as u64);
-            slot.subpacket_entries_cap.set(0);
             slot.body_start.set(parsed.body_start);
             // Mark as clean so downstream bracket walkers don't refuse
             // the handle. The trust boundary is at this function: if
             // the caller's forward-scan lied, the walker's mmap
             // bounds check catches it at access time.
-            slot.final_footer.set(1);
             slot.cursor.set(0);
             slot.element_count.set(element_count);
             slot.compression_level.set(0);
@@ -7429,14 +7333,12 @@ pub fn shared_open_ifile_recovered(
         mmap_size,
         pages_dropped: 0,
         map_file: None,
-        fd: -1,
         cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(cap_bytes))),
         value_schema: parsed.value_schema.clone(),
         elem_schema: parsed.elem_schema.clone(),
         subpacket_entries_local: subpacket_entries,
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
-        holds_lock: false,
         fork_epoch: fork_epoch(),
     };
     let handle = pack_handle(new_gen, _slot_idx);
@@ -7716,9 +7618,9 @@ mod tests {
             let v = crate::json::read_json_with_schema("[1,2,3]", &schema).unwrap();
             shared_write_subpacket(h, crate::compression::CompressionLevel::NONE, v).unwrap();
             crate::shm::shfree(v).unwrap();
-            let open = held_stream_locks() == 0 && morloc_retire_blockers() == 0;
+            let open = morloc_retire_blockers() == 0;
             if !open {
-                eprintln!("open: {} locks, {} blockers", held_stream_locks(), morloc_retire_blockers());
+                eprintln!("open: {} blockers", morloc_retire_blockers());
             }
             open
         }));
@@ -7839,8 +7741,8 @@ mod tests {
         let dir = concat_test_dir("stale_reader");
         let p = dir.join("in.idx").to_str().unwrap().to_string();
         assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(move || {
-            // The stream is written elsewhere, so this process only reads
-            // and runs no release service: only a dispatch end can drop it.
+            // The stream is written elsewhere, so this process only reads:
+            // only a dispatch end can drop its slot.
             let writer = unsafe { libc::fork() };
             if writer == 0 {
                 let schema = parse_schema("ai4").unwrap();
@@ -10166,9 +10068,7 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
             slot.schema_str_len.set(schema_str.len() as u32);
             slot.subpacket_entries.set(pending.own(block_rel));
             slot.subpacket_entries_len.set(0);
-            slot.subpacket_entries_cap.set(0);
             slot.body_start.set(0);
-            slot.final_footer.set(0);
             slot.cursor.set(0);
             slot.element_count.set(0);
             slot.compression_level.set(0);
@@ -10201,14 +10101,12 @@ fn channel_local(generation: u64, value_schema: &Schema) -> ProcessLocalSlot {
         mmap_size: 0,
         pages_dropped: 0,
         map_file: None,
-        fd: -1,
         cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(0))),
         value_schema: value_schema.clone(),
         elem_schema: value_schema.parameters[0].clone(),
         subpacket_entries_local: Vec::new(),
         subpacket_elem_cum: None,
         is_data_packet: false,
-        holds_lock: false,
         fork_epoch: fork_epoch(),
     }
 }

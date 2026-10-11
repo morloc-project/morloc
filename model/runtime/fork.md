@@ -286,10 +286,10 @@ Cross-process locks are not fork-handled: they live in shared segments and
 the dead-holder rules apply (SLOT-4, SHM-5). They still have a place in the
 order. A slot's lock ranks between RELEASE_PASS and PROCESS_LOCAL_SLOTS:
 the release pass takes slot locks, and code holding a slot lock takes the
-local-slot map, the descriptor list, the allocator, the sealed list and the
-compression service. A volume's lock ranks after VOLUMES: the allocator
-holds ALLOC_MUTEX and VOLUMES while it takes one. Test-only hooks
-(BEFORE_STREAM_LOCK, DRAIN_GAP_HOOK) are compiled only into tests.
+local-slot map, the descriptor list and the allocator. A volume's lock
+ranks after VOLUMES: the allocator holds ALLOC_MUTEX and VOLUMES while it
+takes one. The test-only hook BEFORE_STREAM_LOCK is compiled only into
+tests.
 
 Shared memory, which other processes read, names a process by its pid and
 start stamp (`process::token`), as the stream slots' openers and writers

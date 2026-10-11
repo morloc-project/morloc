@@ -78,9 +78,8 @@ stdin batch from the nexus) is counted when it is released, and a forked
 child starts at zero. A pool worker
 that forks from a coordinator (Python fork mode, R) ends in one of two
 ways. It retires, which a Python worker does only when idle, after a
-garbage collection and its tracker flush, with its count at zero and no
-stream file lock held (a lock only its holder releases), after writing its
-pid to the coordinator; or it ends any other way, by a signal, an error, or an exit
+garbage collection and its tracker flush, with its count at zero, after
+writing its pid to the coordinator; or it ends any other way, by a signal, an error, or an exit
 of any status without that token, and the coordinator then ends the pool.
 The exception is shutdown: it signals the pool's whole process group, so
 the coordinator's shutdown flag is set before any worker can exit of it,

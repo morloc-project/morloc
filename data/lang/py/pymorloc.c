@@ -2375,7 +2375,7 @@ static PyObject* pybinding__reclaim_leases(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-// Held references plus stream file locks (SHM-8).
+// The shared-memory references this process holds (SHM-8).
 static PyObject* pybinding__retire_blockers(PyObject* self, PyObject* args) {
     return PyLong_FromLongLong((long long)morloc_retire_blockers());
 }
@@ -4555,7 +4555,7 @@ static PyMethodDef Methods[] = {
     {"lifeline_teardown", pybinding__lifeline_teardown, METH_NOARGS, "End this pool's process group after the nexus ended"},
     {"thread_count", pybinding__thread_count, METH_NOARGS, "The number of threads in this process, or -1"},
     {"held_references", pybinding__held_references, METH_NOARGS, "Shared-memory references this process holds"},
-    {"retire_blockers", pybinding__retire_blockers, METH_NOARGS, "Held references plus stream file locks"},
+    {"retire_blockers", pybinding__retire_blockers, METH_NOARGS, "The shared-memory references this process holds"},
     {"reclaim_leases", pybinding__reclaim_leases, METH_NOARGS, "Release leases of forked children that are gone"},
     {"remove_own_temps", pybinding__remove_own_temps, METH_NOARGS, "Remove this process's temp directory"},
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},

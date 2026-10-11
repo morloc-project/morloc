@@ -210,7 +210,7 @@ pub(crate) fn inherited_dispatches() -> usize {
 
 struct ForkHeld {
     _pass: HeldGuard<'static, ()>,
-    map: HeldGuard<'static, Option<std::collections::HashMap<i64, crate::stream::LocalEntry>>>,
+    _map: HeldGuard<'static, Option<std::collections::HashMap<i64, crate::stream::LocalEntry>>>,
     locked_fds: HeldGuard<'static, Vec<libc::c_int>>,
     views: HeldGuard<'static, Vec<crate::arrow_shm::BorrowEntry>>,
     lease: Option<crate::lease::Staged>,
@@ -266,7 +266,7 @@ fn prepare_fork_body() {
     let pass = crate::stream::RELEASE_PASS.lock();
     let held = ForkHeld {
         _pass: pass,
-        map: crate::stream::PROCESS_LOCAL_SLOTS.lock(),
+        _map: crate::stream::PROCESS_LOCAL_SLOTS.lock(),
         locked_fds: crate::stream::LOCKED_FDS.lock(),
         views: crate::arrow_shm::BORROWABLE.lock(),
         lease: None,
@@ -334,7 +334,7 @@ fn after_fork_in_child_body() {
     crate::cell::after_fork_in_child();
     crate::shm::forget_held_references();
     if let Some(mut held) = take_fork_held() {
-        crate::stream::after_fork_in_child(&mut held.map, &mut held.locked_fds);
+        crate::stream::after_fork_in_child(&mut held.locked_fds);
         // FORK-15: the child keeps its lease locked for as long as it lives.
         let lease = held.lease.take();
         if let Some(l) = &lease {
