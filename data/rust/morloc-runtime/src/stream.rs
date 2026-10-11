@@ -685,9 +685,9 @@ pub struct RegistrySlot {
     _pad_128:                 [u8; std::mem::size_of::<StreamDiag>()],                // off 128..288
 
     // ── OStream write buffer (Part A of the buffering work) ────────
-    /// SHM RelPtr to a per-slot write buffer. Allocated at @open
-    /// OStream (`WRITE_BUFFER_BYTES_DEFAULT` bytes, env-overridable),
-    /// freed at slot release. The buffer's first 16 bytes are
+    /// SHM RelPtr to a per-slot write buffer, grown up to
+    /// `write_buffer_limit` (SLOT-20) and freed at slot release. The
+    /// buffer's first 16 bytes are
     /// reserved for the Array header (filled at flush); bytes 16..
     /// 16+`index_cap`*elem_width are the inline element index; the
     /// remainder is the variable-data section. Cross-pool writers
@@ -707,12 +707,9 @@ pub struct RegistrySlot {
     /// portion). Reset to 0 after each flush.
     pub write_buffer_data_used: std::sync::atomic::AtomicU64,                           // off 312..320
 
-    /// OStream-only: capacity in entries of the SHM-resident sub-packet
-    /// entry array whose RelPtr lives in `subpacket_entries`. Grown by
-    /// doubling under the slot lock when `subpacket_entries_len` reaches
-    /// it. For IFile this field is 0 (the array is set once from the
-    /// parsed final footer and never grows).
-    _retired_320:             [u8; 8],                                                  // off 320..328
+    /// The size sub-packets are cut at, fixed at open (SLOT-20); 0 for a
+    /// stream with no write buffer.
+    pub write_buffer_limit:   std::sync::atomic::AtomicU64,                             // off 320..328
 
     /// Non-zero when this slot is bound to stdin/stdout/stderr rather
     /// than a real file. Immutable after publication.
@@ -1869,6 +1866,7 @@ fn clear_slot_fields(slot: &RegistrySlot) {
     slot.stdio_kind.set(0);
     slot.staged.set(0);
     slot.write_buffer.set(shm_types_crate::RELNULL);
+    slot.write_buffer_limit.set(0);
     slot.write_buffer_index_cap.set(0);
     slot.write_buffer_index_count.set(0);
     slot.write_buffer_data_used.set(0);
@@ -2102,7 +2100,7 @@ pub(crate) fn lock_stream_file(fd: libc::c_int) -> Result<(), String> {
 /// This process's start stamp: with the pid, it names this process even
 /// after the pid is reused. 0 when unknown.
 fn read_pid_start_time() -> u64 {
-    morloc_runtime_types::process::start_time(std::process::id())
+    morloc_runtime_types::process::own_start_time()
 }
 
 // FORK-14: a pid alone names another process once reused, here or in another pid namespace.
@@ -2245,6 +2243,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
             // on a freshly-allocated never-released slot whose
             // zero-init bytes look like a real volume-0 relptr.
             slot.write_buffer.set(shm_types_crate::RELNULL);
+            slot.write_buffer_limit.set(0);
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);
             slot.write_buffer_data_used.set(0);
@@ -2355,6 +2354,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
             slot.element_count.set(parsed.element_count);
             slot.compression_level.set(0);
             slot.write_buffer.set(shm_types_crate::RELNULL);
+            slot.write_buffer_limit.set(0);
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);
             slot.write_buffer_data_used.set(0);
@@ -2572,12 +2572,11 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         let schema_rel = pending.hold(shm_copy_bytes(schema_str.as_bytes())?);
         let (buf_rel, buf_size) = if want_write_buffer {
             let buf_bytes = read_write_buffer_bytes_env();
-            let buf_abs = crate::shm::shcalloc(1, buf_bytes)?;
+            let buf_abs = crate::shm::shmalloc(first_write_buffer(buf_bytes))?;
             (pending.hold(crate::shm::abs2rel(buf_abs)?), buf_bytes)
         } else {
             (shm_types_crate::RELNULL, 0)
         };
-        let _ = buf_size;
         // OStream stdio slots grow a shared subpacket_entries array
         // just like file-backed OStreams, so `@close`'s final footer
         // can carry a real index. Offsets are stream-position, not fd
@@ -2607,6 +2606,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);
             slot.write_buffer_data_used.set(0);
+            slot.write_buffer_limit.set(buf_size as u64);
         }
         let bump = registry_gen_salt() | 1;
         // wrapping_add: the generation is a wrapping counter masked to
@@ -3154,7 +3154,7 @@ fn start_custody(
         let path_rel = pending.hold(shm_copy_bytes(path.as_bytes())?);
         let schema_rel = pending.hold(shm_copy_bytes(schema_str.as_bytes())?);
         let buf_bytes = read_write_buffer_bytes_env();
-        let buf_abs = crate::shm::shcalloc(1, buf_bytes)?;
+        let buf_abs = crate::shm::shmalloc(first_write_buffer(buf_bytes))?;
         let buf_rel = pending.hold(crate::shm::abs2rel(buf_abs)?);
         crate::custody::take_custody(ready_slot_queue(slot)?);
         {
@@ -3176,6 +3176,7 @@ fn start_custody(
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);
             slot.write_buffer_data_used.set(0);
+            slot.write_buffer_limit.set(buf_bytes as u64);
         }
         let bump = registry_gen_salt() | 1;
         // wrapping_add: generation is a wrapping counter masked to
@@ -3429,9 +3430,9 @@ fn slot_handle(slot: &RegistrySlot) -> i64 {
     pack_handle(gen_now, slot_idx)
 }
 
-/// Double the write buffer's index-section capacity. Caller MUST hold
-/// the slot lock and have already verified that the new capacity
-/// (plus current data_used) still fits in the buffer. Memmoves the
+/// Raise the write buffer's index-section capacity. Caller MUST hold
+/// the slot lock and have already made the block hold the new capacity
+/// plus current data_used (SLOT-20). Memmoves the
 /// data region right by `(new_cap - old_cap) * elem_width` and
 /// shifts every inline element's relptrs by the same amount.
 fn grow_index_capacity(
@@ -3609,12 +3610,45 @@ fn flush_write_buffer(
 }
 
 
-/// The size of the slot's write buffer block. Every buffer a stream holds
-/// has the size its publisher gave the first one.
+// SLOT-20: the size a sub-packet is cut at, fixed when the stream opened.
 fn write_buffer_capacity(slot: &RegistrySlot) -> Result<usize, MorlocError> {
+    match slot.write_buffer_limit.get() as usize {
+        0 => Err(MorlocError::Other("stream has no write buffer size".into())),
+        limit => Ok(limit),
+    }
+}
+
+fn write_buffer_block_size(slot: &RegistrySlot) -> Result<usize, MorlocError> {
     let block = crate::shm::rel2abs(slot.write_buffer.get())?;
     unsafe { crate::shm::shm_block_size(block) }
         .ok_or_else(|| MorlocError::Other("stream write buffer is not an SHM block".into()))
+}
+
+/// The block a stream's first write buffer takes: small, since most
+/// streams write little and a block's whole extent is scrubbed when freed.
+fn first_write_buffer(limit: usize) -> usize {
+    const FIRST: usize = 64 << 10;
+    limit.min(FIRST)
+}
+
+// SLOT-20: grow the write buffer's block to hold `need` bytes, at least
+// doubling and never past the limit, carrying over what it holds; offsets
+// inside the buffer are relative to it. Caller holds the slot lock.
+fn ensure_write_room(slot: &RegistrySlot, need: usize) -> Result<(), MorlocError> {
+    let have = write_buffer_block_size(slot)?;
+    if need <= have {
+        return Ok(());
+    }
+    let limit = write_buffer_capacity(slot)?.max(need);
+    let size = need.max(have.saturating_mul(2)).min(limit);
+    let old = crate::shm::rel2abs(slot.write_buffer.get())?;
+    let fresh = crate::shm::shmalloc(size)?;
+    // SAFETY: SLOT-20: the old block's bytes up to `have` are the buffer's,
+    // and the fresh block holds `size > have` bytes.
+    unsafe { std::ptr::copy_nonoverlapping(old, fresh, have) };
+    slot.write_buffer.set(slot_owns(crate::shm::abs2rel(fresh)?));
+    free_uncounted(old);
+    Ok(())
 }
 
 /// The index capacity a write buffer starts at: the default, clamped to what
@@ -3647,25 +3681,30 @@ fn append_flat_run(
         cap *= 2;
     }
     let mut done = 0usize;
+    debug_assert_eq!(slot.write_buffer_data_used.get(), 0, "fixed-width elements have no variable bytes");
     while done < n {
-        if slot.write_buffer_index_cap.get() < cap {
-            grow_index_capacity(slot, local, cap)?;
-        }
-        let space = (slot.write_buffer_index_cap.get() - slot.write_buffer_index_count.get()) as usize;
-        if space == 0 {
+        let count = slot.write_buffer_index_count.get();
+        if count >= cap {
             flush_write_buffer(slot, local)?;
             continue;
         }
-        let k = space.min(n - done);
+        let k = (cap - count).min((n - done) as u64) as usize;
+        let at = 16 + count as usize * w;
+        // SLOT-20: the block grows to hold these records, and the index
+        // grows only as far as the block holds; sub-packets are still cut
+        // at `cap`.
+        ensure_write_room(slot, at + k * w)?;
+        let fits = ((write_buffer_block_size(slot)? - 16) / w) as u64;
+        // With no variable bytes behind the index, resizing it moves nothing.
+        slot.write_buffer_index_cap.set(fits.min(cap));
         let buf_abs = crate::shm::rel2abs(slot.write_buffer.get())?;
-        let at = 16 + (slot.write_buffer_index_count.get() as usize) * w;
-        // SAFETY: the record region holds `write_buffer_index_cap` slots of
-        // `w` bytes after the 16-byte header, all within the buffer, and
-        // `src` holds `n` elements.
+        // SAFETY: SLOT-20: the block holds `at + k * w` bytes and `src`
+        // holds `n` elements.
         unsafe {
             std::ptr::copy_nonoverlapping(src.add(done * w), buf_abs.add(at), k * w);
-            slot.write_buffer_index_count.set(slot.write_buffer_index_count.get() + k as u64);
         }
+        slot.write_buffer_index_count.set(count + k as u64);
+        slot.element_count.set(slot.element_count.get() + k as u64);
         done += k;
     }
     Ok(())
@@ -3775,6 +3814,7 @@ fn append_one_element(
             + (slot.write_buffer_data_used.get() as usize)
             + variable_size;
         if required <= buf_size {
+            ensure_write_room(slot, required)?;
             if need_index_grow {
                 grow_index_capacity(slot, local, candidate_cap)?;
             }
@@ -3920,8 +3960,7 @@ pub fn shared_write_subpacket(
 
         // Walk the elements and append each. element_count updates
         // here (not at flush) so @flen reflects buffered elements too.
-        // The capacity is the buffer block's own size: its publisher sized
-        // it, refills copy that size, and this process's setting may differ.
+        // SLOT-20: the capacity is the stream's, fixed at open.
         // One scratch buffer is reused for every element's flatten.
         let mut scratch: Vec<u8> = Vec::new();
         if slot.staged.get() != 0 {
@@ -3940,7 +3979,6 @@ pub fn shared_write_subpacket(
         let buf_size = write_buffer_capacity(slot)?;
         if local.elem_schema.is_fixed_width() && w > 0 && 16 + w <= buf_size {
             append_flat_run(slot, local, elem_data_base, n_elements as usize, buf_size)?;
-            slot.element_count.set(slot.element_count.get() + n_elements);
             return Ok(());
         }
         // One copy of the element schema for the batch: its resolver
@@ -7183,6 +7221,7 @@ pub fn shared_open_ifile_recovered(
             slot.element_count.set(element_count);
             slot.compression_level.set(0);
             slot.write_buffer.set(shm_types_crate::RELNULL);
+            slot.write_buffer_limit.set(0);
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);
             slot.write_buffer_data_used.set(0);
@@ -9892,7 +9931,8 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
     let publish = (|| -> Result<u64, MorlocError> {
         let mut pending = Unpublished::default();
         let schema_rel = pending.hold(shm_copy_bytes(schema_str.as_bytes())?);
-        let buf_abs = crate::shm::shcalloc(1, read_write_buffer_bytes_env())?;
+        let buf_bytes = read_write_buffer_bytes_env();
+        let buf_abs = crate::shm::shmalloc(first_write_buffer(buf_bytes))?;
         let buf_rel = pending.hold(crate::shm::abs2rel(buf_abs)?);
         let block_abs = crate::shm::shcalloc(1, std::mem::size_of::<ChannelBlock>())?;
         unsafe {
@@ -9919,6 +9959,7 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
             slot.write_buffer_index_cap.set(0);
             slot.write_buffer_index_count.set(0);
             slot.write_buffer_data_used.set(0);
+            slot.write_buffer_limit.set(buf_bytes as u64);
         }
         let bump = registry_gen_salt() | 1;
         Ok(slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK)
@@ -10727,6 +10768,45 @@ mod write_behind_tests {
         unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize) };
         assert_eq!(footer.unwrap().expect("a final footer").footer_status, morloc_runtime_types::packet::FOOTER_STATUS_FAILED);
         assert_eq!(read_strs(&path), first);
+    }
+
+    // SLOT-20: a write buffer starts small and grows as elements arrive,
+    // while sub-packets are still cut at the stream's configured size.
+    #[test]
+    fn a_write_buffer_starts_small_and_sub_packets_keep_their_size() {
+        let _shm = crate::own_test_registry();
+        const LIMIT: usize = 1 << 20;
+        crate::stream::set_test_write_buffer_bytes(Some(LIMIT));
+        let dir = test_dir("growing");
+        let path = dir.join("grow.idx");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "ai4").unwrap();
+        let (_, idx) = unpack_handle(h);
+        let slot = slot_ref(idx).unwrap();
+        let first = unsafe { crate::shm::shm_block_size(crate::shm::rel2abs(slot.write_buffer.get()).unwrap()) }.unwrap();
+        let n = 300_000i64;
+        let json = format!("[{}]", (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+        let v = crate::json::read_json_with_schema(&json, &parse_schema("ai4").unwrap()).unwrap();
+        shared_write_subpacket(h, CompressionLevel::from_u8(0).unwrap(), v).unwrap();
+        shm::shfree(v).unwrap();
+        let block = unsafe { crate::shm::shm_block_size(crate::shm::rel2abs(slot.write_buffer.get()).unwrap()) }.unwrap();
+        let index_end = 16 + slot.write_buffer_index_cap.get() as usize * 4;
+        shared_close_handle(h).unwrap();
+        crate::stream::set_test_write_buffer_bytes(None);
+        assert!(index_end <= block, "the index ({index_end} bytes) runs past its {block}-byte block");
+        let r = shared_open_istream(path.to_str().unwrap()).unwrap();
+        let mut sizes = Vec::new();
+        while let Some(frame) = shared_next_frame(r).unwrap() {
+            sizes.push(unsafe { (*(frame as *const shm_types_crate::Array)).size });
+            shm::shfree(frame).unwrap();
+        }
+        let _ = shared_close_handle(r);
+        assert!(first < LIMIT, "the first buffer took the whole {LIMIT} bytes");
+        assert_eq!(sizes.iter().sum::<usize>(), n as usize);
+        let mut cut = initial_index_cap(LIMIT, 4) as usize;
+        while cut * 2 <= (LIMIT - 16) / 4 {
+            cut *= 2;
+        }
+        assert_eq!(sizes[0], cut, "the first sub-packet was not cut at the configured size");
     }
 
     // FORK-2: a child's shutdown leaves the writer threads its parent runs.

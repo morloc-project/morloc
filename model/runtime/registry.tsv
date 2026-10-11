@@ -214,8 +214,9 @@ morloc-runtime-types/panic.rs::-::IN_SCOPE	thread
 morloc-runtime-types/panic.rs::-::UNWINDING	thread		
 morloc-runtime-types/panic.rs::-::FATAL	thread		
 morloc-runtime-types/panic.rs::-::IN_HANDLER	thread		
-morloc-runtime-types/process.rs::token::CACHED	fork-scoped		
-morloc-runtime-types/process.rs::token::CACHED_GENERATION	fork-scoped		
+morloc-runtime-types/process.rs::own_start_time::CACHED	fork-scoped		
+morloc-runtime-types/process.rs::own_start_time::CACHED_GENERATION	fork-scoped		
+morloc-runtime-types/process.rs::own_start_time::CACHED_PID	fork-scoped		
 morloc-runtime-types/fork_generation.rs::-::GENERATION	counter		
 rustmorloc/lib.rs::-::CSCHEMA_CACHE	thread		
 rustmorloc/lib.rs::-::LIVE_CSCHEMAS	test-only		

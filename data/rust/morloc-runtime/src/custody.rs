@@ -296,7 +296,7 @@ impl CustodyQueue {
                     let (pid, start) = match closing {
                         Closing::Wait => {
                             let pid = std::process::id();
-                            (pid, morloc_runtime_types::process::start_time(pid))
+                            (pid, morloc_runtime_types::process::own_start_time())
                         }
                         Closing::Detach => (DETACHED_CLOSER, 0),
                     };
@@ -929,7 +929,7 @@ pub(crate) fn hosted_slots() -> Vec<(usize, u64)> {
 /// Record this process as the custodian of `q`.
 pub(crate) fn take_custody(q: &CustodyQueue) {
     let pid = std::process::id();
-    q.set_host(pid, morloc_runtime_types::process::start_time(pid));
+    q.set_host(pid, morloc_runtime_types::process::own_start_time());
 }
 
 /// Stop every writer this process hosts, finishing each file with
@@ -997,7 +997,7 @@ pub fn host_finish_stdio(status: u8) {
 /// process if it is the custodian, otherwise through the nexus.
 pub(crate) fn open(mode: u8, path: &str, schema_str: &str) -> Result<i64, MorlocError> {
     let pid = std::process::id();
-    let start = morloc_runtime_types::process::start_time(pid);
+    let start = morloc_runtime_types::process::own_start_time();
     let call_id = crate::stream::current_call_id_for_open();
     if is_host() {
         return crate::stream::host_open(mode, path, schema_str, pid, start, call_id);

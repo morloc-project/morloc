@@ -19,7 +19,7 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/run.rs::gen_id",
     "morloc-runtime/stream.rs::with_process_local_slot",
     "morloc-runtime/stream.rs::allocate_slot_cas",
-    "morloc-runtime/stream.rs::read_pid_start_time",
+    "morloc-runtime-types/process.rs::own_start_time",
     "morloc-runtime/stream.rs::verify_stdio_opener_pid",
     "morloc-runtime/custody.rs::push_with",
     "morloc-runtime/custody.rs::take_custody",

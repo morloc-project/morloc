@@ -122,9 +122,9 @@ Under a slot lock a pool copies elements, moves SHM pointers and, when the
 queue is full, waits for the custodian to make room. The queue holds at most
 its depth of unfinished batches (`MORLOC_WRITE_BEHIND_DEPTH`, at most 7; 1
 for an uncompressed stream), and a writer waits for room before reusing a
-buffer, so a stream's shared memory does not grow with its length. Every
-buffer of a stream has the size its publisher gave the first, and a writer
-fills it up to that block's size, whatever its own process's setting. The
+buffer, so a stream's shared memory does not grow with its length. A
+writer fills a buffer up to the sub-packet size its publisher fixed
+(SLOT-20), whatever its own process's setting. The
 custodian takes no slot lock and waits on no pool, so no wait cycle passes
 through a slot.
 
@@ -207,3 +207,15 @@ daemon call closes each stream the call left open detached: it queues the
 close and returns, and the custodian frees the slot after writing the
 footer, as it does for a waiting closer that died. Every free checks under
 the slot lock that the slot still holds the stream being closed.
+
+### SLOT-20 A write buffer grows to its stream's sub-packet size
+Status: implemented
+Checked by: a_write_buffer_starts_small_and_sub_packets_keep_their_size
+
+The size a stream's sub-packets are cut at is fixed when the stream opens
+and kept in its slot, so every writer cuts at the same points. The write
+buffer's block starts small and, under the slot lock, is replaced by one at
+least twice as large, up to that size, when an append needs more room; its
+bytes move with it, since offsets inside a buffer are relative to it. A
+refill takes a block of the size the previous buffer reached.
+
