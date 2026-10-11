@@ -2,8 +2,6 @@
 
 Changes here touch locks and ownership: model first.
 
-- [speculative race] shm.rs:970-983 `retire_names` clears ownership even
-  when `COMMON_BASENAME.try_lock()` fails: leaks every volume.
 - Spec text behind the code: SLOT-8 says the generation changes on close (it changes at open and
   release, stream.rs:2604, 1793); topology.md says only the nexus unlinks
   (code: the fork generation that made the primary volume, shm.rs:659-670);

@@ -471,29 +471,19 @@ fn run_shclose_hooks() {
     }
 }
 
-/// Variant for the atexit path: `try_lock` so a contended mutex doesn't
-/// wedge process shutdown.
-fn run_shclose_hooks_atexit() {
-    let hooks: Vec<ShcloseHook> = match SHCLOSE_HOOKS.try_lock() {
-        Some(hs) => hs.clone(),
-        None => return,
-    };
-    for h in hooks {
-        h();
-    }
-}
-
 /// atexit callback: remove the volumes' names if this process owns the
 /// program (see `OWNER_GENERATION`). Catches normal exit() calls that bypass
-/// an explicit shretire. Uses try_lock so a held mutex skips the cleanup
-/// instead of waiting inside atexit.
+/// an explicit shretire. Other threads hold these locks only briefly, so it
+/// waits for them; an exit from inside a runtime lock skips the cleanup.
 // DAEMON-5: names only; the mappings go with the last thread.
 extern "C" fn shclose_atexit() {
     EXITING.store(true, Ordering::SeqCst);
-    run_shclose_hooks_atexit();
-    if let Some(_vols) = VOLUMES.try_lock() {
-        retire_names();
+    if !crate::fork_policy::holds_no_runtime_lock() {
+        return;
     }
+    run_shclose_hooks();
+    let _vols = VOLUMES.lock();
+    retire_names();
 }
 
 fn set_cstr(buf: &mut [u8], s: &str) {
@@ -952,12 +942,9 @@ pub fn shretire() -> Result<(), MorlocError> {
 
 fn retire_names() {
     if owns_program() {
-        if let Some(cb) = COMMON_BASENAME.try_lock() {
-            let basename = get_cstr_buf(&cb).to_string();
-            drop(cb);
-            let fallback = FALLBACK_DIR.try_lock().map(|fb| get_cstr_buf(&fb).to_string()).unwrap_or_default();
-            remove_program_volumes(&basename, &fallback);
-        }
+        let basename = get_cstr_buf(&COMMON_BASENAME.lock()).to_string();
+        let fallback = get_cstr_buf(&FALLBACK_DIR.lock()).to_string();
+        remove_program_volumes(&basename, &fallback);
         OWNER_GENERATION.store(u64::MAX, Ordering::SeqCst);
     }
 }
@@ -2621,6 +2608,63 @@ mod tests {
             rel2abs(r).expect("the child's volume outlives the child");
         }
         shclose().unwrap();
+        assert_eq!(live_segments(&test_dir, &base[1..]), Vec::<String>::new(), "the owner left volumes behind");
+    }
+
+    // DAEMON-5: the owner removes the names even when another thread is
+    // reading the program's basename as it closes.
+    #[test]
+    fn closing_while_the_basename_is_read_still_removes_the_volumes() {
+        let _arena = crate::own_test_shm();
+        shclose().unwrap();
+        let fallback = crate::ScopedFallback::new("busybase");
+        let test_dir = fallback.path().to_path_buf();
+        let base = format!("/morloc-{}-test-busybase", std::process::id());
+        shinit(&base, PRIMARY_VOLUME, 4096).unwrap();
+        assert_eq!(live_segments(&test_dir, &base[1..]).len(), 1);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let cb = COMMON_BASENAME.lock();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(cb);
+        });
+        held_rx.recv().unwrap();
+        shclose().unwrap();
+        reader.join().unwrap();
+        assert_eq!(live_segments(&test_dir, &base[1..]), Vec::<String>::new(), "the owner left volumes behind");
+    }
+
+    // DAEMON-5: exiting removes the owner's names even when another thread
+    // is inside the volume table at that moment.
+    #[test]
+    fn exiting_while_the_volume_table_is_busy_still_removes_the_volumes() {
+        let _arena = crate::own_test_shm();
+        shclose().unwrap();
+        let fallback = crate::ScopedFallback::new("busyexit");
+        let test_dir = fallback.path().to_path_buf();
+        let base = format!("/morloc-{}-test-busyexit", std::process::id());
+        unsafe {
+            let pid = libc::fork();
+            assert!(pid >= 0);
+            if pid == 0 {
+                if shinit(&base, PRIMARY_VOLUME, 4096).is_err() {
+                    libc::_exit(2);
+                }
+                let (held_tx, held_rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let vols = VOLUMES.lock();
+                    let _ = held_tx.send(());
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    drop(vols);
+                });
+                let _ = held_rx.recv();
+                libc::exit(0);
+            }
+            let mut status = 0;
+            libc::waitpid(pid, &mut status, 0);
+            assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "child failed: {status}");
+        }
         assert_eq!(live_segments(&test_dir, &base[1..]), Vec::<String>::new(), "the owner left volumes behind");
     }
 

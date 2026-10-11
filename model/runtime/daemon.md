@@ -38,7 +38,7 @@ Reads and writes on client connections retry when interrupted.
 
 ### DAEMON-5 Shutdown does not unmap memory under running threads
 Status: implemented
-Checked by: retiring_at_exit_leaves_memory_readable_to_threads_still_running, no_segment_is_made_once_teardown_begins, tla:DaemonShutdown, tla:DaemonShutdown_unmap_at_exit.bug
+Checked by: retiring_at_exit_leaves_memory_readable_to_threads_still_running, no_segment_is_made_once_teardown_begins, closing_while_the_basename_is_read_still_removes_the_volumes, exiting_while_the_volume_table_is_busy_still_removes_the_volumes, tla:DaemonShutdown, tla:DaemonShutdown_unmap_at_exit.bug
 
 Threads that no request accounts for -- stream writers and their
 compressors, user
@@ -46,7 +46,9 @@ threads, detached connection threads -- may still read shared memory while
 a process exits. So no exit path unmaps it: the nexus's teardown, a pool's
 exit and the exit handler remove the names of the shared memory this
 process owns, stop growth, and leave every mapping for the kernel to remove
-with the last thread. Teardown hooks (the stream registry, the statistics
+with the last thread. Removing the names waits for the locks other threads
+hold to read the volume table or the program's name; only an exit made
+while the exiting thread itself holds a runtime lock skips it. Teardown hooks (the stream registry, the statistics
 segment) likewise remove names and keep their mappings, and a stream
 registry torn down is not made again until shared memory is set up again. Once the nexus's
 teardown begins, no new segment is made, so its sweep of recorded segments
