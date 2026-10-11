@@ -1848,6 +1848,74 @@ pub(crate) fn slot_generation_is_pub(slot: &RegistrySlot, gen_claim: u64) -> boo
     slot_generation_is(slot, gen_claim)
 }
 
+/// What a newly opened stream's slot holds; fields left at their default
+/// read as zero or null. `publish_slot` writes every one of them, so no
+/// opener leaves a field from the slot's previous stream.
+struct SlotInit {
+    kind: u8,
+    stdio_kind: Option<u8>,
+    staged: bool,
+    file: (u64, u64),
+    path: (RelPtr, u32),
+    schema: (RelPtr, u32),
+    entries: (RelPtr, u64),
+    body_start: u64,
+    cursor: u64,
+    data_end: u64,
+    element_count: u64,
+    buffer: (RelPtr, u64),
+}
+
+impl Default for SlotInit {
+    fn default() -> Self {
+        let null = shm_types_crate::RELNULL;
+        SlotInit {
+            kind: 0,
+            stdio_kind: None,
+            staged: false,
+            file: (0, 0),
+            path: (null, 0),
+            schema: (null, 0),
+            entries: (null, 0),
+            body_start: 0,
+            cursor: 0,
+            data_end: 0,
+            element_count: 0,
+            buffer: (null, 0),
+        }
+    }
+}
+
+// SLOT-8: the fields are written, then the generation bump publishes them.
+fn publish_slot(slot: &RegistrySlot, i: &SlotInit) -> u64 {
+    use std::sync::atomic::Ordering;
+    slot.kind.set(i.kind);
+    slot.is_stdio.set(i.stdio_kind.is_some() as u8);
+    slot.stdio_kind.set(i.stdio_kind.unwrap_or(0));
+    slot.staged.set(i.staged as u8);
+    slot.file_dev.set(i.file.0);
+    slot.file_ino.set(i.file.1);
+    slot.file_path.set(i.path.0);
+    slot.file_path_len.set(i.path.1);
+    slot.schema_str.set(i.schema.0);
+    slot.schema_str_len.set(i.schema.1);
+    slot.subpacket_entries.set(i.entries.0);
+    slot.subpacket_entries_len.set(i.entries.1);
+    slot.body_start.set(i.body_start);
+    slot.cursor.set(i.cursor);
+    slot.data_end.set(i.data_end);
+    slot.element_count.set(i.element_count);
+    slot.compression_level.set(0);
+    slot.write_buffer.set(i.buffer.0);
+    slot.write_buffer_limit.set(i.buffer.1);
+    slot.write_buffer_index_cap.set(0);
+    slot.write_buffer_index_count.set(0);
+    slot.write_buffer_data_used.set(0);
+    let bump = registry_gen_salt() | 1;
+    // The generation wraps, masked to GENERATION_MASK.
+    slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK
+}
+
 fn clear_slot_fields(slot: &RegistrySlot) {
     slot.file_path.set(shm_types_crate::RELNULL);
     slot.file_path_len.set(0);
@@ -2172,7 +2240,6 @@ fn shm_copy_entries_slice(
 /// design contract: random access requires the full index, which
 /// only a clean close writes).
 pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
-    use std::sync::atomic::Ordering;
 
     reject_dev_stdio_path(path)?;
 
@@ -2220,41 +2287,16 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         } else {
             shm_types_crate::RELNULL
         };
-        {
-            slot.kind.set(MLC_KIND_IFILE);
-            slot.file_dev.set(file_dev);
-            slot.file_ino.set(file_ino);
-            slot.file_path.set(pending.own(path_rel));
-            slot.file_path_len.set(path.len() as u32);
-            slot.schema_str.set(pending.own(schema_rel));
-            slot.schema_str_len.set(parsed.schema_str.len() as u32);
-            slot.subpacket_entries.set(pending.own(idx_rel));
-            slot.subpacket_entries_len.set(parsed.subpacket_entries.len() as u64);
-            // IFile's sub-packet entry array is immutable -- set once
-            // from the parsed final footer and never grown. cap = 0
-            // marks "not OStream-growable" so release_slot_locked treats
-            // subpacket_entries_len, not _cap, as the freed extent.
-            slot.body_start.set(parsed.body_start);
-            slot.cursor.set(0);
-            slot.element_count.set(parsed.element_count);
-            slot.compression_level.set(0);
-            // IFile/IStream don't write; clear buffer fields so
-            // release_slot_locked doesn't attempt an spurious shfree
-            // on a freshly-allocated never-released slot whose
-            // zero-init bytes look like a real volume-0 relptr.
-            slot.write_buffer.set(shm_types_crate::RELNULL);
-            slot.write_buffer_limit.set(0);
-            slot.write_buffer_index_cap.set(0);
-            slot.write_buffer_index_count.set(0);
-            slot.write_buffer_data_used.set(0);
-        }
-        // Bump generation by the salted random increment. This is
-        // the publication store: cross-pool readers Acquire-load
-        // this and observe all prior writes happens-before.
-        let bump = registry_gen_salt() | 1;
-        // wrapping_add: generation is a wrapping counter masked to
-        // GENERATION_MASK; a large random salt overflows u64 (debug panic).
-        let new_gen = slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK;
+        let new_gen = publish_slot(slot, &SlotInit {
+            kind: MLC_KIND_IFILE,
+            file: (file_dev, file_ino),
+            path: (pending.own(path_rel), path.len() as u32),
+            schema: (pending.own(schema_rel), parsed.schema_str.len() as u32),
+            entries: (pending.own(idx_rel), parsed.subpacket_entries.len() as u64),
+            body_start: parsed.body_start,
+            element_count: parsed.element_count,
+            ..Default::default()
+        });
         Ok(new_gen)
     })();
     let new_gen = match publish_result {
@@ -2294,7 +2336,6 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
 /// IFile, IStream walks forward by byte cursor and works on
 /// temp-footer files (writer in progress).
 pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
-    use std::sync::atomic::Ordering;
 
     reject_dev_stdio_path(path)?;
 
@@ -2337,32 +2378,18 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         let mut pending = Unpublished::default();
         let path_rel = pending.hold(shm_copy_bytes(path.as_bytes())?);
         let schema_rel = pending.hold(shm_copy_bytes(parsed.schema_str.as_bytes())?);
-        {
-            slot.kind.set(MLC_KIND_ISTREAM);
-            slot.file_dev.set(file_dev);
-            slot.file_ino.set(file_ino);
-            slot.file_path.set(pending.own(path_rel));
-            slot.file_path_len.set(path.len() as u32);
-            slot.schema_str.set(pending.own(schema_rel));
-            slot.schema_str_len.set(parsed.schema_str.len() as u32);
-            slot.subpacket_entries.set(shm_types_crate::RELNULL);
-            slot.subpacket_entries_len.set(0);
-            slot.body_start.set(parsed.body_start);
+        let new_gen = publish_slot(slot, &SlotInit {
+            kind: MLC_KIND_ISTREAM,
+            file: (file_dev, file_ino),
+            path: (pending.own(path_rel), path.len() as u32),
+            schema: (pending.own(schema_rel), parsed.schema_str.len() as u32),
+            body_start: parsed.body_start,
             // IStream walks by cursor starting at body_start.
-            slot.cursor.set(parsed.body_start);
-            slot.data_end.set(parsed.data_end);
-            slot.element_count.set(parsed.element_count);
-            slot.compression_level.set(0);
-            slot.write_buffer.set(shm_types_crate::RELNULL);
-            slot.write_buffer_limit.set(0);
-            slot.write_buffer_index_cap.set(0);
-            slot.write_buffer_index_count.set(0);
-            slot.write_buffer_data_used.set(0);
-        }
-        let bump = registry_gen_salt() | 1;
-        // wrapping_add: generation is a wrapping counter masked to
-        // GENERATION_MASK; a large random salt overflows u64 (debug panic).
-        let new_gen = slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK;
+            cursor: parsed.body_start,
+            data_end: parsed.data_end,
+            element_count: parsed.element_count,
+            ..Default::default()
+        });
         Ok(new_gen)
     })();
     let new_gen = match publish_result {
@@ -2587,34 +2614,18 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             ready_slot_queue(slot)?;
         }
         let idx_rel = shm_types_crate::RELNULL;
-        {
-            slot.kind.set(kind);
-            slot.is_stdio.set(1);
-            slot.stdio_kind.set(stdio_kind);
-            slot.staged.set(staged as u8);
-            slot.file_path.set(pending.own(path_rel));
-            slot.file_path_len.set(sentinel.len() as u32);
-            slot.schema_str.set(pending.own(schema_rel));
-            slot.schema_str_len.set(schema_str.len() as u32);
-            slot.subpacket_entries.set(pending.own(idx_rel));
-            slot.subpacket_entries_len.set(0);
-            slot.body_start.set(stdio_body_start);
-            slot.cursor.set(stdio_body_start);
-            slot.element_count.set(0);
-            slot.compression_level.set(0);
-            slot.write_buffer.set(pending.own(buf_rel));
-            slot.write_buffer_index_cap.set(0);
-            slot.write_buffer_index_count.set(0);
-            slot.write_buffer_data_used.set(0);
-            slot.write_buffer_limit.set(buf_size as u64);
-        }
-        let bump = registry_gen_salt() | 1;
-        // wrapping_add: the generation is a wrapping counter masked to
-        // GENERATION_MASK; a large random salt can overflow u64, which
-        // panics in debug builds without the wrapping form.
-        let new_gen = slot.generation.fetch_add(bump, Ordering::AcqRel)
-            .wrapping_add(bump)
-            & GENERATION_MASK;
+        let new_gen = publish_slot(slot, &SlotInit {
+            kind,
+            stdio_kind: Some(stdio_kind),
+            staged,
+            path: (pending.own(path_rel), sentinel.len() as u32),
+            schema: (pending.own(schema_rel), schema_str.len() as u32),
+            entries: (pending.own(idx_rel), 0),
+            body_start: stdio_body_start,
+            cursor: stdio_body_start,
+            buffer: (pending.own(buf_rel), buf_size as u64),
+            ..Default::default()
+        });
         Ok(new_gen)
     })();
 
@@ -3141,7 +3152,6 @@ fn start_custody(
     resume: Resume,
     opener: (u32, u64, u64),
 ) -> Result<i64, MorlocError> {
-    use std::sync::atomic::Ordering;
     let (slot_idx, slot, guard) = match allocate_slot_cas_for(opener.0, opener.1, opener.2) {
         Ok(s) => s,
         Err(e) => {
@@ -3157,31 +3167,18 @@ fn start_custody(
         let buf_abs = crate::shm::shmalloc(first_write_buffer(buf_bytes))?;
         let buf_rel = pending.hold(crate::shm::abs2rel(buf_abs)?);
         crate::custody::take_custody(ready_slot_queue(slot)?);
-        {
-            slot.kind.set(MLC_KIND_OSTREAM);
-            let (dev, ino) = file_identity(fd);
-            slot.file_dev.set(dev);
-            slot.file_ino.set(ino);
-            slot.file_path.set(pending.own(path_rel));
-            slot.file_path_len.set(path.len() as u32);
-            slot.schema_str.set(pending.own(schema_rel));
-            slot.schema_str_len.set(schema_str.len() as u32);
-            slot.subpacket_entries.set(shm_types_crate::RELNULL);
-            slot.subpacket_entries_len.set(0);
-            slot.body_start.set(resume.body_start);
-            slot.cursor.set(resume.cursor);
-            slot.element_count.set(resume.element_count);
-            slot.compression_level.set(0);
-            slot.write_buffer.set(pending.own(buf_rel));
-            slot.write_buffer_index_cap.set(0);
-            slot.write_buffer_index_count.set(0);
-            slot.write_buffer_data_used.set(0);
-            slot.write_buffer_limit.set(buf_bytes as u64);
-        }
-        let bump = registry_gen_salt() | 1;
-        // wrapping_add: generation is a wrapping counter masked to
-        // GENERATION_MASK; a large random salt overflows u64 (debug panic).
-        Ok(slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK)
+        let new_gen = publish_slot(slot, &SlotInit {
+            kind: MLC_KIND_OSTREAM,
+            file: file_identity(fd),
+            path: (pending.own(path_rel), path.len() as u32),
+            schema: (pending.own(schema_rel), schema_str.len() as u32),
+            body_start: resume.body_start,
+            cursor: resume.cursor,
+            element_count: resume.element_count,
+            buffer: (pending.own(buf_rel), buf_bytes as u64),
+            ..Default::default()
+        });
+        Ok(new_gen)
     })();
     let new_gen = match publish_result {
         Ok(g) => g,
@@ -7159,7 +7156,6 @@ pub fn shared_open_ifile_recovered(
     caller_counts: &[u64],
     caller_element_count: u64,
 ) -> Result<i64, MorlocError> {
-    use std::sync::atomic::Ordering;
 
     reject_dev_stdio_path(path)?;
 
@@ -7224,37 +7220,16 @@ pub fn shared_open_ifile_recovered(
         } else {
             shm_types_crate::RELNULL
         };
-        {
-            slot.kind.set(MLC_KIND_IFILE);
-            slot.file_dev.set(file_dev);
-            slot.file_ino.set(file_ino);
-            slot.file_path.set(pending.own(path_rel));
-            slot.file_path_len.set(path.len() as u32);
-            slot.schema_str.set(pending.own(schema_rel));
-            slot.schema_str_len.set(parsed.schema_str.len() as u32);
-            slot.subpacket_entries.set(pending.own(idx_rel));
-            slot.subpacket_entries_len.set(subpacket_entries.len() as u64);
-            slot.body_start.set(parsed.body_start);
-            // Mark as clean so downstream bracket walkers don't refuse
-            // the handle. The trust boundary is at this function: if
-            // the caller's forward-scan lied, the walker's mmap
-            // bounds check catches it at access time.
-            slot.cursor.set(0);
-            slot.element_count.set(element_count);
-            slot.compression_level.set(0);
-            slot.write_buffer.set(shm_types_crate::RELNULL);
-            slot.write_buffer_limit.set(0);
-            slot.write_buffer_index_cap.set(0);
-            slot.write_buffer_index_count.set(0);
-            slot.write_buffer_data_used.set(0);
-        }
-        let bump = registry_gen_salt() | 1;
-        // wrapping_add: the generation is a wrapping counter masked to
-        // GENERATION_MASK; a large random salt can overflow u64, which
-        // panics in debug builds without the wrapping form.
-        let new_gen = slot.generation.fetch_add(bump, Ordering::AcqRel)
-            .wrapping_add(bump)
-            & GENERATION_MASK;
+        let new_gen = publish_slot(slot, &SlotInit {
+            kind: MLC_KIND_IFILE,
+            file: (file_dev, file_ino),
+            path: (pending.own(path_rel), path.len() as u32),
+            schema: (pending.own(schema_rel), parsed.schema_str.len() as u32),
+            entries: (pending.own(idx_rel), subpacket_entries.len() as u64),
+            body_start: parsed.body_start,
+            element_count,
+            ..Default::default()
+        });
         Ok(new_gen)
     })();
     let new_gen = match publish_result {
@@ -9943,7 +9918,6 @@ fn slot_generation_is(slot: &RegistrySlot, gen_claim: u64) -> bool {
 /// The one handle serves as both the producer's OStream and the readers'
 /// IStream.
 pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
-    use std::sync::atomic::Ordering;
     let parsed_schema = parse_schema(schema_str).map_err(|e| MorlocError::Schema(format!(
         "channel open: unparseable schema '{}': {}", schema_str, e,
     )))?;
@@ -9965,26 +9939,14 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
             (*b).fail_msg = shm_types_crate::RELNULL;
         }
         let block_rel = pending.hold(crate::shm::abs2rel(block_abs)?);
-        {
-            slot.kind.set(MLC_KIND_CHANNEL);
-            slot.file_path.set(shm_types_crate::RELNULL);
-            slot.file_path_len.set(0);
-            slot.schema_str.set(pending.own(schema_rel));
-            slot.schema_str_len.set(schema_str.len() as u32);
-            slot.subpacket_entries.set(pending.own(block_rel));
-            slot.subpacket_entries_len.set(0);
-            slot.body_start.set(0);
-            slot.cursor.set(0);
-            slot.element_count.set(0);
-            slot.compression_level.set(0);
-            slot.write_buffer.set(pending.own(buf_rel));
-            slot.write_buffer_index_cap.set(0);
-            slot.write_buffer_index_count.set(0);
-            slot.write_buffer_data_used.set(0);
-            slot.write_buffer_limit.set(buf_bytes as u64);
-        }
-        let bump = registry_gen_salt() | 1;
-        Ok(slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK)
+        let new_gen = publish_slot(slot, &SlotInit {
+            kind: MLC_KIND_CHANNEL,
+            schema: (pending.own(schema_rel), schema_str.len() as u32),
+            entries: (pending.own(block_rel), 0),
+            buffer: (pending.own(buf_rel), buf_bytes as u64),
+            ..Default::default()
+        });
+        Ok(new_gen)
     })();
     let new_gen = match publish {
         Ok(g) => g,
