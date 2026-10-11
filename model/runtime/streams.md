@@ -219,3 +219,16 @@ least twice as large, up to that size, when an append needs more room; its
 bytes move with it, since offsets inside a buffer are relative to it. A
 refill takes a block of the size the previous buffer reached.
 
+### SLOT-21 A channel's reader and writer sleep until the channel changes
+Status: implemented
+Checked by: a_waiting_reader_wakes_when_a_batch_arrives, a_full_channel_holds_its_producer_until_a_reader_takes_a_batch, tla:ChannelWait, tla:ChannelWait_read_after_unlock.bug, tla:ChannelWait_no_bump.bug, tla:ChannelWait_no_register.bug
+
+Every change to a channel (a batch queued or taken, its end or failure,
+its release) is made under the slot lock and bumps the channel's sequence
+word, and wakes the sleepers when any are registered. A reader with
+nothing to take, or a writer with no room, registers and reads the word
+under the lock, releases the lock and sleeps only while the word still
+holds what it read, so a change made after the release ends the sleep at
+once. It deregisters under the lock at its next look, which comes at
+least every 100 ms, as a released slot's word may be reused.
+

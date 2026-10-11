@@ -130,3 +130,77 @@ fn stream_bench_bulk_z0() {
 fn stream_bench_bulk_z3() {
     mlcbench("stream", "bulk-z3-s-per-mib", &in_child(|d| bulk(d, 3)));
 }
+
+/// Seconds per batch through a channel: a producer thread queues one-element
+/// batches as fast as the reader takes them.
+#[test]
+#[ignore]
+fn stream_bench_channel() {
+    let s = in_child(|_dir| {
+        use crate::stream::{shared_next_frame, shared_open_channel, shared_settle_channel};
+        const N: usize = 2000;
+        (0..REPS)
+            .map(|_| {
+                let h = shared_open_channel("ai4").unwrap();
+                let t = Instant::now();
+                let producer = std::thread::spawn(move || {
+                    let v = ints("[1]");
+                    for _ in 0..N {
+                        shared_write_subpacket(h, CompressionLevel::NONE, v).unwrap();
+                        shared_flush_buffer(h).unwrap();
+                    }
+                    crate::shm::shfree(v).unwrap();
+                    shared_close_handle(h).unwrap();
+                });
+                let mut n = 0;
+                while let Some(p) = shared_next_frame(h).unwrap() {
+                    crate::shm::shfree(p).unwrap();
+                    n += 1;
+                }
+                producer.join().unwrap();
+                assert_eq!(n, N);
+                shared_settle_channel(h).unwrap();
+                t.elapsed().as_secs_f64() / N as f64
+            })
+            .collect()
+    });
+    mlcbench("stream", "channel-batch", &s);
+}
+
+/// Seconds a reader takes, beyond the producer's own pace, to see each batch
+/// of a channel whose producer pauses 200 us between batches.
+#[test]
+#[ignore]
+fn stream_bench_channel_paced() {
+    let s = in_child(|_dir| {
+        use crate::stream::{shared_next_frame, shared_open_channel, shared_settle_channel};
+        const N: usize = 200;
+        const PACE: std::time::Duration = std::time::Duration::from_micros(200);
+        (0..REPS)
+            .map(|_| {
+                let h = shared_open_channel("ai4").unwrap();
+                let t = Instant::now();
+                let producer = std::thread::spawn(move || {
+                    let v = ints("[1]");
+                    for _ in 0..N {
+                        std::thread::sleep(PACE);
+                        shared_write_subpacket(h, CompressionLevel::NONE, v).unwrap();
+                        shared_flush_buffer(h).unwrap();
+                    }
+                    crate::shm::shfree(v).unwrap();
+                    shared_close_handle(h).unwrap();
+                });
+                let mut n = 0;
+                while let Some(p) = shared_next_frame(h).unwrap() {
+                    crate::shm::shfree(p).unwrap();
+                    n += 1;
+                }
+                producer.join().unwrap();
+                assert_eq!(n, N);
+                shared_settle_channel(h).unwrap();
+                (t.elapsed().as_secs_f64() - N as f64 * PACE.as_secs_f64()) / N as f64
+            })
+            .collect()
+    });
+    mlcbench("stream", "channel-paced-lag", &s);
+}

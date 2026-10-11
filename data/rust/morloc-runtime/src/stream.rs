@@ -9826,6 +9826,10 @@ struct ChannelBlock {
     tail: RelPtr,
     fail_msg: RelPtr,
     fail_len: u64,
+    /// SLOT-21: bumped by every change made under the lock.
+    seq: std::sync::atomic::AtomicU32,
+    /// SLOT-21: sides sleeping on `seq`, counted under the lock.
+    waiters: u32,
 }
 
 #[repr(C)]
@@ -9845,15 +9849,42 @@ fn channel_depth() -> u64 {
     })
 }
 
-/// Back off between polls of a channel: a short spin, then sleeps growing
-/// to a millisecond.
-fn channel_backoff(round: &mut u32) {
-    *round += 1;
-    if *round < 64 {
-        std::thread::yield_now();
-    } else {
-        let us = (50u64 << ((*round - 64).min(5))).min(1000);
-        std::thread::sleep(std::time::Duration::from_micros(us));
+/// How long a channel wait sleeps before it looks at the slot again.
+const CHANNEL_WAIT_SLICE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Looks, yielding between them, before a channel wait sleeps: a busy
+/// channel changes within a few, and a sleep costs a wake.
+const CHANNEL_YIELDS: u32 = 64;
+
+// SLOT-21: the caller holds the slot lock and has just changed the channel.
+fn channel_changed(b: *mut ChannelBlock) {
+    // SAFETY: SLOT-21: the block is the slot's, held under its lock.
+    let (seq, waiters) = unsafe { (&(*b).seq, (*b).waiters) };
+    seq.fetch_add(1, std::sync::atomic::Ordering::Release);
+    if waiters > 0 {
+        morloc_runtime_types::wait_word::wake_all(seq);
+    }
+}
+
+// SLOT-21: under the slot lock, register as a waiter and read the word; the
+// caller waits after releasing the lock and deregisters at its next look.
+fn channel_seen(b: *mut ChannelBlock) -> (&'static std::sync::atomic::AtomicU32, u32) {
+    // SAFETY: SLOT-21: shared memory stays mapped (DAEMON-1), so the word
+    // stays readable after the block is freed; a wait on it then ends at
+    // the slice and the slot's generation answers.
+    let seq: &'static std::sync::atomic::AtomicU32 = unsafe {
+        (*b).waiters += 1;
+        &(*b).seq
+    };
+    let seen = seq.load(std::sync::atomic::Ordering::Acquire);
+    (seq, seen)
+}
+
+// SLOT-21: under the slot lock, end a registration made under it earlier.
+fn channel_unwait(b: *mut ChannelBlock, registered: &mut bool) {
+    if std::mem::take(registered) {
+        // SAFETY: SLOT-21: the slot still holds the channel this side registered on.
+        unsafe { (*b).waiters = (*b).waiters.saturating_sub(1) };
     }
 }
 
@@ -9960,17 +9991,19 @@ fn channel_local(generation: u64, value_schema: &Schema) -> ProcessLocalSlot {
 /// readers are gone (the slot was released) or it was already finished --
 /// which is what stops a producer nobody reads any more.
 fn channel_wait_room(handle: i64) -> Result<(), MorlocError> {
-    let mut round = 0u32;
+    let mut registered = false;
+    let mut yields = 0u32;
     loop {
         let Some((slot, gen_claim)) = channel_slot(handle)? else {
             return Err(MorlocError::Other("the reader of this stream has stopped".into()));
         };
-        {
+        let word = {
             let _g = SlotGuard::lock(slot)?;
             if !slot_generation_is(slot, gen_claim) {
                 return Err(MorlocError::Other("the reader of this stream has stopped".into()));
             }
             let b = channel_block(slot)?;
+            channel_unwait(b, &mut registered);
             let (status, count) = unsafe { ((*b).status, (*b).count) };
             if status != CHANNEL_RUNNING {
                 return Err(MorlocError::Other("this stream was already finished".into()));
@@ -9978,8 +10011,20 @@ fn channel_wait_room(handle: i64) -> Result<(), MorlocError> {
             if count < channel_depth() {
                 return Ok(());
             }
+            if yields < CHANNEL_YIELDS {
+                None
+            } else {
+                registered = true;
+                Some(channel_seen(b))
+            }
+        };
+        match word {
+            Some((seq, seen)) => morloc_runtime_types::wait_word::wait(seq, seen, CHANNEL_WAIT_SLICE),
+            None => {
+                yields += 1;
+                std::thread::yield_now();
+            }
         }
-        channel_backoff(&mut round);
     }
 }
 
@@ -10011,6 +10056,7 @@ fn channel_enqueue(
         }
         (*b).tail = slot_owns(node_rel);
         (*b).count += 1;
+        channel_changed(b);
     }
     Ok(())
 }
@@ -10019,19 +10065,22 @@ fn channel_enqueue(
 /// `None` at the end, or the producer's failure (which is then marked
 /// delivered).
 fn channel_pop(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
-    let mut round = 0u32;
+    let mut registered = false;
+    let mut yields = 0u32;
     loop {
         let Some((slot, gen_claim)) = channel_slot(handle)? else {
             return Err(MorlocError::Other(format!(
                 "stream handle {:#x}: the stream was closed", handle,
             )));
         };
-        {
+        let word = {
             let _g = SlotGuard::lock(slot)?;
             if !slot_generation_is(slot, gen_claim) {
+                registered = false;
                 continue;
             }
             let b = channel_block(slot)?;
+            channel_unwait(b, &mut registered);
             unsafe {
                 if (*b).count > 0 {
                     let node_abs = crate::shm::rel2abs((*b).head)?;
@@ -10042,6 +10091,7 @@ fn channel_pop(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
                         (*b).tail = shm_types_crate::RELNULL;
                     }
                     (*b).count -= 1;
+                    channel_changed(b);
                     free_uncounted(node_abs);
                     // SHM-8: the batch is this process's from here.
                     crate::shm::take_on_reference();
@@ -10056,8 +10106,20 @@ fn channel_pop(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
                     _ => {}
                 }
             }
+            if yields < CHANNEL_YIELDS {
+                None
+            } else {
+                registered = true;
+                Some(channel_seen(b))
+            }
+        };
+        match word {
+            Some((seq, seen)) => morloc_runtime_types::wait_word::wait(seq, seen, CHANNEL_WAIT_SLICE),
+            None => {
+                yields += 1;
+                std::thread::yield_now();
+            }
         }
-        channel_backoff(&mut round);
     }
 }
 
@@ -10080,6 +10142,7 @@ fn channel_finish(slot: &RegistrySlot) -> Result<(), MorlocError> {
     unsafe {
         if (*b).status == CHANNEL_RUNNING {
             (*b).status = CHANNEL_DONE;
+            channel_changed(b);
         }
     }
     Ok(())
@@ -10105,6 +10168,7 @@ pub fn shared_channel_fail(handle: i64, msg: &str) -> Result<(), MorlocError> {
         (*b).fail_msg = slot_owns(rel);
         (*b).fail_len = msg.len() as u64;
         (*b).status = CHANNEL_FAILED;
+        channel_changed(b);
     }
     Ok(())
 }
@@ -10165,6 +10229,8 @@ pub fn shared_settle_channel(handle: i64) -> Result<(), MorlocError> {
 /// the slot lock; the block itself is freed with the slot's other blocks.
 fn channel_free_queue(slot: &RegistrySlot) {
     let Ok(b) = channel_block(slot) else { return };
+    // SLOT-21: waiters look again and find the slot released.
+    channel_changed(b);
     unsafe {
         let mut node_rel = (*b).head;
         while node_rel != shm_types_crate::RELNULL {
@@ -10280,6 +10346,28 @@ mod channel_tests {
         // Settling again, or the producer's call ending, is harmless.
         shared_settle_channel(h).unwrap();
         shared_channel_ended(h).unwrap();
+    }
+
+    // SLOT-21: a waiting reader wakes when a batch is queued, not at its
+    // next look.
+    #[test]
+    fn a_waiting_reader_wakes_when_a_batch_arrives() {
+        let _shm = crate::own_test_registry();
+        let h = shared_open_channel("as").unwrap();
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+        let s2 = sent.clone();
+        let producer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            *s2.lock().unwrap() = Some(std::time::Instant::now());
+            write(h, r#"["x"]"#).unwrap();
+            shared_close_handle(h).unwrap();
+        });
+        assert_eq!(read(h).unwrap().as_deref(), Some(r#"["x"]"#));
+        let lag = sent.lock().unwrap().unwrap().elapsed();
+        producer.join().unwrap();
+        assert_eq!(read(h).unwrap(), None);
+        shared_settle_channel(h).unwrap();
+        assert!(lag < std::time::Duration::from_millis(50), "the reader saw the batch {lag:?} late");
     }
 
     #[test]
