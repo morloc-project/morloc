@@ -110,3 +110,12 @@ releases normally; a panic inside it poisons, whatever the thread was doing
 before. The stream slot lock is a recoverable lock whose only user, the
 slot guard, marks its slot poisoned whenever it is dropped during an unwind
 and then releases it.
+
+### SHM-10 A release, a new reference and a pointer conversion take no process lock
+Status: implemented
+Checked by: a_release_a_new_reference_and_a_conversion_take_no_process_lock
+
+They find a pointer's volume in a list of published volumes that grows
+while the process runs and is emptied only by a recovery that has stopped
+every thread that could read it (DAEMON-1), so no volume is unmapped under
+them. A release's scrub then runs outside every lock.

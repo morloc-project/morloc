@@ -354,6 +354,31 @@ fn unpublish_vol(idx: usize) {
         .store(std::ptr::null_mut(), Ordering::Release);
 }
 
+// SHM-10: the indices of published volumes, appended under VOLUMES and read
+// without a lock; only a quiesced recovery empties it (DAEMON-1).
+static PUBLISHED: [std::sync::atomic::AtomicU16; MAX_VOLUME_NUMBER] =
+    [const { std::sync::atomic::AtomicU16::new(0) }; MAX_VOLUME_NUMBER];
+static PUBLISHED_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// SHM-10: the published volume holding `ptr`: its index and data region.
+fn published_volume_of(ptr: AbsPtr) -> Option<(usize, *mut u8, usize)> {
+    let p = ptr as usize;
+    let n = PUBLISHED_LEN.load(Ordering::Acquire);
+    for slot in &PUBLISHED[..n] {
+        let idx = slot.load(Ordering::Relaxed) as usize;
+        let entry = &MORLOC_VOL_TABLE[idx];
+        let base = entry.data_base.load(Ordering::Acquire);
+        if base.is_null() {
+            continue;
+        }
+        let size = entry.data_size.load(Ordering::Relaxed);
+        if p >= base as usize && p < base as usize + size {
+            return Some((idx, base, size));
+        }
+    }
+    None
+}
+
 // ── Global state ───────────────────────────────────────────────────────────
 
 /// Hint for `find_free_block`: the slot index where the last allocation
@@ -733,12 +758,17 @@ unsafe fn adopt_volume_settings(volume_index: usize, shm: *const ShmHeader) {
 
 fn register_volume(volume_index: usize, shm: *mut ShmHeader, data_size: usize) {
     unsafe { adopt_volume_settings(volume_index, shm) };
-    {
-        let mut vols = VOLUMES.lock();
-        vols.slots[volume_index].set(shm, data_size);
-        vols.mark_used(volume_index);
-    }
+    let mut vols = VOLUMES.lock();
+    let listed = vols.used.iter().any(|&i| i as usize == volume_index);
+    vols.slots[volume_index].set(shm, data_size);
+    vols.mark_used(volume_index);
     publish_vol(volume_index, shm, data_size);
+    // SHM-10
+    if !listed && volume_index < MAX_VOLUME_NUMBER {
+        let n = PUBLISHED_LEN.load(Ordering::Relaxed);
+        PUBLISHED[n].store(volume_index as u16, Ordering::Relaxed);
+        PUBLISHED_LEN.store(n + 1, Ordering::Release);
+    }
 }
 
 /// Map an existing, initialised volume at `volume_index`.
@@ -1027,7 +1057,7 @@ pub fn live_block_stats(hist: &mut [usize]) -> (usize, usize) {
 /// stale pointer after `shclose` (e.g. a worker that was holding an
 /// SHM ptr when its request was failed by the recovery quiesce).
 fn ptr_is_in_any_volume(ptr: AbsPtr) -> bool {
-    ptr_in_volumes(&VOLUMES.lock(), ptr)
+    published_volume_of(ptr).is_some()
 }
 
 fn ptr_in_volumes(vols: &VolumeTable, ptr: AbsPtr) -> bool {
@@ -1052,6 +1082,8 @@ fn shclose_locked(vols: &mut VolumeTable) {
     // Drain `used` once into a local list; `mark_free` would O(N) on
     // each removal otherwise.
     let used: Vec<u16> = std::mem::take(&mut vols.used);
+    // SHM-10, DAEMON-1
+    PUBLISHED_LEN.store(0, Ordering::Release);
     for slot_idx in used {
         let i = slot_idx as usize;
         let shm = vols.slots[i].ptr();
@@ -1165,7 +1197,6 @@ pub(crate) unsafe fn incref_held(vols: &VolumeTable, ptr: AbsPtr) -> bool {
 // none is consulted.
 pub(crate) fn free_uncounted(abs: AbsPtr) {
     take_on_reference();
-    let _lock = ALLOC_MUTEX.lock();
     if ptr_is_in_any_volume(abs) {
         let _ = shfree_unlocked(abs);
     }
@@ -1249,13 +1280,8 @@ pub fn shfree(ptr: AbsPtr) -> Result<(), MorlocError> {
     // guard-drop won't attempt a second free. No-op if no arena is active
     // or if `ptr` was never tracked.
     crate::eval_arena::forget_if_active(ptr);
-    let _lock = ALLOC_MUTEX.lock();
-    // Pool-crash recovery: if `shclose` has unmapped every volume since
-    // this caller obtained `ptr`, dereferencing the (now-unmapped) header
-    // would segfault. The recovery sequence is responsible for getting all
-    // workers to drop their references; this guard is just defense in
-    // depth for the in-flight case where a worker's arena drop race-loses
-    // to shclose's munmap.
+    // SHM-10: a pointer into no published volume is from a namespace a
+    // recovery discarded.
     if !ptr.is_null() && !ptr_is_in_any_volume(ptr) {
         return Ok(());
     }
@@ -1544,31 +1570,11 @@ fn rel2abs_miss_error(
     }
 }
 
-/// Convert absolute pointer to relative pointer. Walks `USED_VOLUMES`
-/// (the packed list of K active slot indices) rather than scanning the
-/// 32 768-slot sparse `slots` array. Cost is O(K_active).
+/// Convert absolute pointer to relative pointer.
 pub fn abs2rel(ptr: AbsPtr) -> Result<RelPtr, MorlocError> {
-    let vols = VOLUMES.lock();
-    for &slot_idx in &vols.used {
-        let i = slot_idx as usize;
-        let slot = vols.slots[i];
-        if slot.is_null() {
-            continue;
-        }
-        // SAFETY: data_base = header + sizeof::<ShmHeader>(); the slot's
-        // cached data_size bounds the search range. ptr is matched
-        // against the half-open interval [data_start, data_start +
-        // data_size) before any pointer arithmetic returns.
-        unsafe {
-            let data_start = (slot.ptr() as *const u8)
-                .add(std::mem::size_of::<ShmHeader>());
-            let data_end = data_start.add(slot.data_size());
-            let p = ptr as *const u8;
-            if p >= data_start && p < data_end {
-                let offset = p.offset_from(data_start) as usize;
-                return Ok(encode_relptr(i, offset));
-            }
-        }
+    // SHM-10
+    if let Some((idx, base, _)) = published_volume_of(ptr) {
+        return Ok(encode_relptr(idx, ptr as usize - base as usize));
     }
     Err(MorlocError::Shm(format!(
         "Failed to find absptr {:?} in shared memory",
@@ -2286,6 +2292,26 @@ mod calloc_tests {
 
 #[cfg(test)]
 mod tests {
+    // SHM-10: none of them waits while another thread holds the volume list.
+    #[test]
+    fn a_release_a_new_reference_and_a_conversion_take_no_process_lock() {
+        let _shm = crate::own_test_registry();
+        let p = super::shmalloc(64).unwrap() as usize;
+        let held = super::VOLUMES.lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let p = p as super::AbsPtr;
+            let rel = super::abs2rel(p).is_ok();
+            let incref = unsafe { super::shincref(p) }.is_ok();
+            let freed = super::shfree(p).is_ok() && super::shfree(p).is_ok();
+            tx.send(rel && incref && freed).unwrap();
+        });
+        let done = rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        worker.join().unwrap();
+        assert_eq!(done, Ok(true), "a release, incref or abs2rel waited on the volume list");
+    }
+
     #[test]
     fn a_process_counts_the_references_it_holds() {
         let _shm = crate::own_test_registry();
