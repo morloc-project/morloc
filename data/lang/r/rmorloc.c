@@ -222,8 +222,6 @@ static void shm_tracker_flush(void) {
     shm_tracker_forget_inherited();
     for (size_t i = 0; i < shm_tracker_count; i++) {
         char* err = NULL;
-        // shfree decrements the refcount and zeros the block on final
-        // ref-drop, so a separate metadata-zeroing pass is unnecessary.
         shfree(shm_tracker[i].ptr, &err);
         if (err) { free(err); }
         if (shm_tracker[i].schema) {

@@ -159,7 +159,7 @@ extern "C" {
 /// 1. Close the request gate: no new request is admitted.
 /// 2. SIGTERM -> SIGKILL all remaining live pools; reap each.
 /// 3. Wait for every admitted request to finish; exit if they do not.
-/// 4. Drop the entire SHM namespace (shclose / reset_all).
+/// 4. Drop the entire SHM namespace (shclose).
 /// 5. Bump RECOVERY_GENERATION, compute new basename.
 /// 6. Re-shinit and respawn every pool with the new basename.
 /// 7. Wait for ping responses.

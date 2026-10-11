@@ -32,13 +32,10 @@ use crate::error::MorlocError;
 use crate::shm;
 
 /// Whether the companion should be `shm_unlink`ed on abnormal exit
-/// (SIGTERM / SIGINT / panic). Most companions are `SweepOnCrash`;
-/// `Persist` is for authoritative state that a next-nexus recovery is
-/// expected to pick up (e.g. an `@save` index).
+/// (SIGTERM / SIGINT / panic).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SweepPolicy {
     SweepOnCrash,
-    Persist,
 }
 
 /// A shared memory segment held outside the general allocator's

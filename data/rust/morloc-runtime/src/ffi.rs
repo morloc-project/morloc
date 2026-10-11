@@ -9,7 +9,7 @@ use std::ptr;
 
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::schema::{self};
-use crate::shm::{self, AbsPtr, BlockHeader, RelPtr, ShmHeader, VolPtr};
+use crate::shm::{self, AbsPtr, BlockHeader, RelPtr, ShmHeader};
 pub use crate::cschema::CSchema;
 
 /// The ABI/wire-format version compiled into this libmorloc.so (see morloc.h's
@@ -49,17 +49,6 @@ pub(crate) unsafe fn shinit(
 ) -> *mut ShmHeader {
     let basename = CStr::from_ptr(shm_basename).to_string_lossy();
     ffi_try!(errmsg, ptr::null_mut(), shm::shinit(&basename, volume_index, shm_size))
-}
-
-pub(crate) unsafe fn shopen(
-    volume_index: usize,
-    errmsg: *mut *mut c_char,
-) -> *mut ShmHeader {
-    ffi_try!(
-        errmsg,
-        ptr::null_mut(),
-        shm::shopen(volume_index).and_then(|opt| opt.ok_or(MorlocError::Shm("volume not found".into())))
-    )
 }
 
 pub(crate) unsafe fn shclose(errmsg: *mut *mut c_char) -> bool {
@@ -181,10 +170,6 @@ pub(crate) unsafe fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> RelP
     ffi_try!(errmsg, shm::RELNULL, shm::abs2rel(ptr as AbsPtr))
 }
 
-pub(crate) unsafe fn abs2shm(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut ShmHeader {
-    ffi_try!(errmsg, ptr::null_mut(), shm::abs2shm(ptr as AbsPtr))
-}
-
 pub(crate) unsafe fn abs2blk(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut BlockHeader {
     clear_errmsg(errmsg);
     if ptr.is_null() {
@@ -197,14 +182,6 @@ pub(crate) unsafe fn abs2blk(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut
         return ptr::null_mut();
     }
     blk
-}
-
-pub(crate) unsafe fn vol2rel(ptr: VolPtr, shm_ptr: *const ShmHeader) -> RelPtr {
-    shm::vol2rel(ptr, &*shm_ptr)
-}
-
-pub(crate) unsafe fn vol2abs(ptr: VolPtr, shm_ptr: *const ShmHeader) -> *mut c_void {
-    shm::vol2abs(ptr, shm_ptr) as *mut c_void
 }
 
 // ── Schema functions ───────────────────────────────────────────────────────
@@ -718,11 +695,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn shopen(volume_index: usize, errmsg: *mut *mut c_char) -> *mut ShmHeader {
-        super::shopen(volume_index, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn shclose(errmsg: *mut *mut c_char) -> bool {
         super::shclose(errmsg)
     }
@@ -803,23 +775,8 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn abs2shm(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut ShmHeader {
-        super::abs2shm(ptr, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn abs2blk(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut BlockHeader {
         super::abs2blk(ptr, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn vol2rel(ptr: VolPtr, shm_ptr: *const ShmHeader) -> RelPtr {
-        super::vol2rel(ptr, shm_ptr)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn vol2abs(ptr: VolPtr, shm_ptr: *const ShmHeader) -> *mut c_void {
-        super::vol2abs(ptr, shm_ptr)
     }
 
     #[no_mangle]

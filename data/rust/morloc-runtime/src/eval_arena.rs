@@ -240,21 +240,6 @@ pub fn forget_if_active(ptr: AbsPtr) {
     });
 }
 
-/// Remove `path` from the active arena's file list. Use when a caller
-/// has taken responsibility for unlinking the file itself (or after the
-/// receiver has consumed it). No-op if no arena is active or the path
-/// is not tracked.
-#[inline]
-pub fn forget_file_if_active(path: &std::path::Path) {
-    with_arena(|slot| {
-        if let Some(s) = slot.as_mut() {
-            if let Some(idx) = s.files.iter().rposition(|p| p == path) {
-                s.files.swap_remove(idx);
-            }
-        }
-    });
-}
-
 /// Record a stream handle in the active arena. Called from
 /// `stream::open_*` after a successful slot allocation. No-op if no
 /// arena is active (the caller is then responsible for cleanup).
@@ -266,24 +251,6 @@ pub fn record_slot_if_active(handle: i64) {
     with_arena(|slot| {
         if let Some(s) = slot.as_mut() {
             s.slots.push(handle);
-        }
-    });
-}
-
-/// Remove `handle` from the active arena's slot list. Called from
-/// `stream::close_handle` before the actual close, so an explicit
-/// `@close` during the arena window correctly removes the handle from
-/// the tracking list and won't be double-closed at guard drop.
-#[inline]
-pub fn forget_slot_if_active(handle: i64) {
-    if handle < 0 {
-        return;
-    }
-    with_arena(|slot| {
-        if let Some(s) = slot.as_mut() {
-            if let Some(idx) = s.slots.iter().rposition(|&h| h == handle) {
-                s.slots.swap_remove(idx);
-            }
         }
     });
 }
@@ -354,6 +321,7 @@ pub fn rollback_to(cp: ArenaCheckpoint) {
 }
 
 /// Returns true if an arena is currently active on this thread.
+#[cfg(test)]
 pub fn is_active() -> bool {
     with_arena(|slot| slot.is_some()).unwrap_or(false)
 }

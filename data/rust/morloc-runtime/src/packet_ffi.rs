@@ -91,6 +91,18 @@ pub(crate) unsafe fn morloc_packet_size(
 
 // ── Duplicate ────────────────────────────────────────────────────────────────
 
+/// Finish with a reply received over a socket: give back the shared-memory
+/// reference its sender donated, if it names a block, and free the packet.
+pub(crate) unsafe fn release_received_packet(packet: *mut u8) {
+    if packet.is_null() {
+        return;
+    }
+    if let Ok(Some(block)) = packet_rptr_block(packet) {
+        let _ = shm::shfree(block);
+    }
+    libc::free(packet as *mut c_void);
+}
+
 /// A copy of `packet` a pool can return as its own result when the result
 /// is one of its arguments, unchanged.
 ///
@@ -104,18 +116,6 @@ pub(crate) unsafe fn morloc_packet_size(
 /// removed when that evaluation ends, not when a packet naming it is freed;
 /// the caller waiting on this call is inside that evaluation, so a copy of
 /// the packet is as valid as the argument itself.
-/// Finish with a reply received over a socket: give back the shared-memory
-/// reference its sender donated, if it names a block, and free the packet.
-pub(crate) unsafe fn release_received_packet(packet: *mut u8) {
-    if packet.is_null() {
-        return;
-    }
-    if let Ok(Some(block)) = packet_rptr_block(packet) {
-        let _ = shm::shfree(block);
-    }
-    libc::free(packet as *mut c_void);
-}
-
 pub(crate) unsafe fn morloc_dup_packet(
     packet: *const u8,
     block_out: *mut *mut c_void,

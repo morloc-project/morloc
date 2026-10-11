@@ -307,7 +307,7 @@ fn get_cstr_buf(buf: &[u8; MAX_FILENAME_SIZE]) -> &str {
 ///   (Relaxed -- readers ignore it until the gate flips), then store
 ///   `data_base` with Release. The Release pairs with the reader's
 ///   Acquire of `data_base` and makes `data_size` visible.
-/// * **Invalidate** (`shclose`/`reset_all`): store `data_base = null`
+/// * **Invalidate** (`shclose`): store `data_base = null`
 ///   with Release. Subsequent readers see null and fall through to the
 ///   FFI slow path, which will either find the segment unmapped or
 ///   trigger a fresh shopen.
@@ -765,16 +765,12 @@ fn open_and_register(
     Ok(Ok(shm))
 }
 
-/// Reason `shopen` could not return a mapped volume. Each variant is
-/// distinguishable so callers (notably `rel2abs`) can render a precise
-/// diagnostic instead of the historical generic "volume not found".
+/// Reason `shopen_diag` could not return a mapped volume, so callers
+/// (notably `rel2abs`) can render a precise diagnostic.
 #[derive(Debug)]
 pub enum ShopenMiss {
-    /// COMMON_BASENAME is empty: this process never called `shinit`.
-    /// Post-refactor (rlib removal) this should not be reachable from
-    /// normal call paths -- there is one libmorloc.so per process and
-    /// the nexus/pool wire shinit before any allocation. Surfacing it
-    /// explicitly catches "someone touched a relptr before init" bugs.
+    /// COMMON_BASENAME is empty: this process never called `shinit`, so a
+    /// relptr was used before initialisation.
     NotInitialized,
     /// Basename is set but neither `/dev/shm/<basename>-<i>` nor the
     /// file-backed fallback at `<fallback_dir>/<basename>-<i>` could be
@@ -790,20 +786,8 @@ pub enum ShopenMiss {
     },
 }
 
-/// Open an existing SHM volume (or return cached pointer).
-/// Wrapper around `shopen_diag` that collapses miss reasons into
-/// `Ok(None)` for legacy callers; use `shopen_diag` directly when you
-/// need to render a specific diagnostic.
-pub fn shopen(volume_index: usize) -> Result<Option<*mut ShmHeader>, MorlocError> {
-    match shopen_diag(volume_index)? {
-        Ok(shm) => Ok(Some(shm)),
-        Err(_) => Ok(None),
-    }
-}
-
-/// Diagnostic version of `shopen`: distinguishes "not initialized"
-/// from "file missing" so `rel2abs` can give the user something
-/// actionable instead of the generic "volume not found".
+/// Map an existing volume (or return the cached mapping), or say why it
+/// could not be mapped.
 pub fn shopen_diag(
     volume_index: usize,
 ) -> Result<Result<*mut ShmHeader, ShopenMiss>, MorlocError> {
@@ -989,32 +973,6 @@ fn retire_names() {
     }
 }
 
-/// Drop every SHM volume currently held by this process as `shclose` does,
-/// and clear bookkeeping (VOLUMES / CURRENT_VOLUME / COMMON_BASENAME).
-///
-/// Intended for in-process recovery (pool-crash teardown) by the owner.
-/// After this returns, no SHM is mapped or named on disk for this basename, and the
-/// allocator is reset to its pre-`shinit` state. Caller is responsible
-/// for calling `shinit` again with a fresh basename and respawning any
-/// pools so they shopen the new files.
-///
-/// Holds `ALLOC_MUTEX` across the entire teardown, so any concurrent
-/// `shmalloc` or `shfree` blocks until reset completes. Callers that
-/// `shfree` after reset against a stale pointer will hit the
-/// "address not inside any mapped volume" guard added to `shfree` and
-/// no-op rather than segfault.
-pub fn reset_all() -> Result<(), MorlocError> {
-    let _lock = ALLOC_MUTEX.lock();
-    let mut vols = VOLUMES.lock();
-    shclose_locked(&mut vols);
-    CURRENT_VOLUME.store(0, std::sync::atomic::Ordering::Release);
-    let mut cb = COMMON_BASENAME.lock();
-    for b in cb.iter_mut() {
-        *b = 0;
-    }
-    Ok(())
-}
-
 /// Blocks currently held across every mapped volume, and the bytes they
 /// cover. Walks each volume's block chain; a block is held when its
 /// reference count is non-zero.
@@ -1066,7 +1024,7 @@ pub fn live_block_stats(hist: &mut [usize]) -> (usize, usize) {
 
 /// Returns true if `ptr` falls inside any currently-mapped SHM volume.
 /// Used by `shfree` as a safety guard against being called with a
-/// stale pointer after `reset_all` (e.g. a worker that was holding an
+/// stale pointer after `shclose` (e.g. a worker that was holding an
 /// SHM ptr when its request was failed by the recovery quiesce).
 fn ptr_is_in_any_volume(ptr: AbsPtr) -> bool {
     ptr_in_volumes(&VOLUMES.lock(), ptr)
@@ -1156,25 +1114,6 @@ fn remove_program_volumes(basename: &str, fallback: &str) {
     }
 }
 
-/// Allocate at least `size` bytes from shared memory and return a pointer
-/// to the start of the data region.
-///
-/// **Size contract.** The returned block always has at least `BLOCK_ALIGN`
-/// usable bytes; requests for any size in `0..=BLOCK_ALIGN` all yield a
-/// `BLOCK_ALIGN`-byte block. Larger requests are rounded up to a multiple
-/// of `BLOCK_ALIGN`. Callers that ship "zero bytes of payload" (e.g. nil
-/// values, empty arrays whose width comes from `schema.width == 0`) get a
-/// real, freeable block back -- there is no zero-byte sentinel. This is
-/// load-bearing: the eval pipeline (`morloc_eval_r` shcalloc'ing the
-/// top-level wrapper at width 0 for nil), `unpack_with_schema`, and
-/// `read_binary` all rely on receiving a non-null pointer for nil-shaped
-/// allocations.
-///
-/// **Lifetime contract.** Every successful return must be paired with
-/// either an `shfree` or, when active on the current thread, registration
-/// in the per-eval arena (which auto-shfrees at scope drop). The arena
-/// hook fires here unconditionally on success; callers outside the arena
-/// see no behavioral difference.
 // SHM-8: the references this process holds, net of those it has handed on.
 static HELD_REFERENCES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
@@ -1241,6 +1180,25 @@ pub(crate) fn morloc_held_references() -> i64 {
     held_references()
 }
 
+/// Allocate at least `size` bytes from shared memory and return a pointer
+/// to the start of the data region.
+///
+/// **Size contract.** The returned block always has at least `BLOCK_ALIGN`
+/// usable bytes; requests for any size in `0..=BLOCK_ALIGN` all yield a
+/// `BLOCK_ALIGN`-byte block. Larger requests are rounded up to a multiple
+/// of `BLOCK_ALIGN`. Callers that ship "zero bytes of payload" (e.g. nil
+/// values, empty arrays whose width comes from `schema.width == 0`) get a
+/// real, freeable block back -- there is no zero-byte sentinel. This is
+/// load-bearing: the eval pipeline (`morloc_eval_r` shcalloc'ing the
+/// top-level wrapper at width 0 for nil), `unpack_with_schema`, and
+/// `read_binary` all rely on receiving a non-null pointer for nil-shaped
+/// allocations.
+///
+/// **Lifetime contract.** Every successful return must be paired with
+/// either an `shfree` or, when active on the current thread, registration
+/// in the per-eval arena (which auto-shfrees at scope drop). The arena
+/// hook fires here unconditionally on success; callers outside the arena
+/// see no behavioral difference.
 pub fn shmalloc(size: usize) -> Result<AbsPtr, MorlocError> {
     let size = if size == 0 { BLOCK_ALIGN } else { align_up(size, BLOCK_ALIGN) };
     let first = {
@@ -1292,12 +1250,12 @@ pub fn shfree(ptr: AbsPtr) -> Result<(), MorlocError> {
     // or if `ptr` was never tracked.
     crate::eval_arena::forget_if_active(ptr);
     let _lock = ALLOC_MUTEX.lock();
-    // Pool-crash recovery: if `reset_all` has unmapped every volume since
+    // Pool-crash recovery: if `shclose` has unmapped every volume since
     // this caller obtained `ptr`, dereferencing the (now-unmapped) header
     // would segfault. The recovery sequence is responsible for getting all
     // workers to drop their references; this guard is just defense in
     // depth for the in-flight case where a worker's arena drop race-loses
-    // to reset_all's munmap.
+    // to shclose's munmap.
     if !ptr.is_null() && !ptr_is_in_any_volume(ptr) {
         return Ok(());
     }
@@ -1314,7 +1272,7 @@ pub unsafe fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
         return Err(MorlocError::Shm("Cannot incref NULL pointer".into()));
     }
     // A pointer into a volume that has since been unmapped (pool-crash
-    // recovery calls `reset_all`) must not be dereferenced. `shfree` takes
+    // recovery calls `shclose`) must not be dereferenced. `shfree` takes
     // the same guard.
     if !ptr_is_in_any_volume(ptr) {
         return Err(MorlocError::Shm(
@@ -1618,39 +1576,6 @@ pub fn abs2rel(ptr: AbsPtr) -> Result<RelPtr, MorlocError> {
     )))
 }
 
-/// Find the ShmHeader for a given absolute pointer.
-pub fn abs2shm(ptr: AbsPtr) -> Result<*mut ShmHeader, MorlocError> {
-    let vols = VOLUMES.lock();
-    for &slot_idx in &vols.used {
-        let slot = vols.slots[slot_idx as usize];
-        if slot.is_null() {
-            continue;
-        }
-        // SAFETY: see abs2rel.
-        unsafe {
-            let data_start = (slot.ptr() as *const u8)
-                .add(std::mem::size_of::<ShmHeader>());
-            let data_end = data_start.add(slot.data_size());
-            let p = ptr as *const u8;
-            if p >= data_start && p < data_end {
-                return Ok(slot.ptr());
-            }
-        }
-    }
-    Err(MorlocError::Shm("Failed to find absptr in SHM".into()))
-}
-
-/// Register a pre-mapped ShmHeader-backed region as a volume.
-///
-/// `slot_hint = Some(i)` requests that index; if `i` is occupied, falls
-/// back to a randomly chosen free slot. `slot_hint = None` always picks
-/// random.
-///
-/// The caller owns the mmap'd region for as long as the volume is
-/// registered. Layer 2 (packet-as-volume) uses this to map an input
-/// file's data section directly into VOLUMES without a memcpy.
-///
-/// Returns the chosen slot index, or an error if every slot is taken.
 /// Bytes across every allocator volume plus every attached companion.
 pub fn total_shm_size() -> usize {
     let mut total = 0;
@@ -2309,21 +2234,6 @@ unsafe fn vol2abs_raw(ptr: VolPtr, shm: *const ShmHeader) -> *mut u8 {
 }
 
 // ── Pointer conversion helpers ─────────────────────────────────────────────
-
-#[inline]
-pub fn vol2rel(ptr: VolPtr, shm: &ShmHeader) -> RelPtr {
-    // Under the indexed-relptr encoding, the volume index lives in the
-    // high bits of the relptr and the volume-local offset (ptr) lives
-    // in the low 48 bits.
-    encode_relptr(shm.volume_index as usize, ptr as usize)
-}
-
-/// # Safety
-/// `shm` must be a valid mmap'd ShmHeader. `ptr` must be within the volume's data region.
-#[inline]
-pub unsafe fn vol2abs(ptr: VolPtr, shm: *const ShmHeader) -> AbsPtr {
-    vol2abs_raw(ptr, shm)
-}
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 

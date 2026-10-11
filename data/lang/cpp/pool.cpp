@@ -157,8 +157,6 @@ struct ShmEntry { absptr_t ptr; };
 static void _shm_release_entries(std::vector<ShmEntry>& entries) {
     for (auto& e : entries) {
         char* err = NULL;
-        // shfree decrements the refcount and zeros the block on final
-        // ref-drop, so a separate metadata-zeroing pass is unnecessary.
         shfree(e.ptr, &err);
         if (err) { free(err); }
     }
@@ -358,8 +356,7 @@ uint8_t* _put_value(const T& value, Schema* schema, bool self_contained = false)
                 // SHM referenced by packet -- track for deferred cleanup
                 _shm_tracker_live().push_back({(absptr_t)voidstar});
             } else {
-                // Data inlined in packet -- free SHM immediately. shfree
-                // zeros the block on final ref-drop.
+                // Data inlined in packet -- free SHM immediately.
                 char* free_err = NULL;
                 shfree((absptr_t)voidstar, &free_err);
                 if (free_err) { free(free_err); }

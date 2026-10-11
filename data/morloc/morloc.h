@@ -1286,7 +1286,6 @@ typedef struct resources_s {
 // ========================================================================
 
 shm_t* shinit(const char* shm_basename, size_t volume_index, size_t shm_size, ERRMSG);
-shm_t* shopen(size_t volume_index, ERRMSG);
 bool shclose(ERRMSG);
 void shm_set_fallback_dir(const char* dir);
 void* shmalloc(size_t size, ERRMSG);
@@ -1383,10 +1382,7 @@ static inline void* resolve_array(relptr_t relptr, size_t n, size_t width, morlo
     return resolve_region(relptr, extent, space, errmsg_);
 }
 
-relptr_t vol2rel(volptr_t ptr, const shm_t* shm);
-absptr_t vol2abs(volptr_t ptr, const shm_t* shm);
 relptr_t abs2rel(absptr_t ptr, ERRMSG);
-shm_t* abs2shm(absptr_t ptr, ERRMSG);
 block_header_t* abs2blk(void* ptr, ERRMSG);
 
 // ========================================================================

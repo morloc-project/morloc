@@ -96,7 +96,6 @@ static PyObject* shm_view_owner(void) {
 #define SHM_TRACKER_INIT_CAP 16
 typedef struct {
     absptr_t ptr;
-    Schema* schema;
 } shm_entry_t;
 // Thread-local: each worker gets its own SHM tracking list so a per-dispatch
 // flush frees only that thread's in-flight SHM, never a sibling's. Required for
@@ -112,16 +111,11 @@ static void shm_tracker_forget_inherited(void) {
     if (g == shm_tracker_gen) {
         return;
     }
-    for (size_t i = 0; i < shm_tracker_count; i++) {
-        if (shm_tracker[i].schema) {
-            free_schema(shm_tracker[i].schema);
-        }
-    }
     shm_tracker_count = 0;
     shm_tracker_gen = g;
 }
 
-static void shm_tracker_push(absptr_t ptr, Schema* schema) {
+static void shm_tracker_push(absptr_t ptr) {
     shm_tracker_forget_inherited();
     if (shm_tracker_count >= shm_tracker_cap) {
         size_t new_cap = shm_tracker_cap ? shm_tracker_cap * 2 : SHM_TRACKER_INIT_CAP;
@@ -136,7 +130,6 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
         shm_tracker_cap = new_cap;
     }
     shm_tracker[shm_tracker_count].ptr = ptr;
-    shm_tracker[shm_tracker_count].schema = schema;
     shm_tracker_count++;
 }
 
@@ -144,32 +137,25 @@ static void shm_tracker_flush(void) {
     shm_tracker_forget_inherited();
     for (size_t i = 0; i < shm_tracker_count; i++) {
         char* err = NULL;
-        // shm::shfree decrements the refcount and zeros the block on final
-        // ref-drop, so no separate metadata-zeroing pass is needed here.
         shfree(shm_tracker[i].ptr, &err);
         if (err) { free(err); }
-        if (shm_tracker[i].schema) {
-            free_schema(shm_tracker[i].schema);
-        }
     }
     shm_tracker_count = 0;
 }
 
-// Drop one tracker entry matching ptr (swap-with-last), shfree the
-// block, and free its schema. Used by release_packet_shm to free
+// Drop one tracker entry matching ptr (swap-with-last) and shfree the
+// block. Used by release_packet_shm to free
 // a put_value-tracked packet's SHM as soon as its codegen-determined
 // scope ends, rather than waiting for the next dispatch flush.
 static bool shm_tracker_release_one(absptr_t ptr) {
     shm_tracker_forget_inherited();
     for (size_t i = 0; i < shm_tracker_count; i++) {
         if (shm_tracker[i].ptr == ptr) {
-            Schema* schema = shm_tracker[i].schema;
             shm_tracker[i] = shm_tracker[shm_tracker_count - 1];
             shm_tracker_count--;
             char* err = NULL;
             shfree(ptr, &err);
             if (err) { free(err); }
-            if (schema) { free_schema(schema); }
             return true;
         }
     }
@@ -2679,7 +2665,7 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
         void* shm_ptr = rel2abs(relptr, &resolve_err);
         if (resolve_err) { free(resolve_err); }
         if (shm_ptr) {
-            shm_tracker_push((absptr_t)shm_ptr, NULL);
+            shm_tracker_push((absptr_t)shm_ptr);
         }
 
         if (self_contained) {
@@ -2719,11 +2705,10 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
         const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
         if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
             // SHM referenced by packet -- track for deferred cleanup
-            shm_tracker_push((absptr_t)voidstar, schema);
+            shm_tracker_push((absptr_t)voidstar);
             tracked = true;
         } else {
-            // Data inlined in packet -- free SHM immediately. shfree zeros
-            // the block on final ref-drop, so no metadata-walk needed.
+            // Data inlined in packet -- free SHM immediately.
             char* free_err = NULL;
             shfree((absptr_t)voidstar, &free_err);
             if (free_err) { free(free_err); }
@@ -2736,22 +2721,18 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     {
         PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
         free(packet);
-        if (!tracked) {
-            free_schema(schema);
-        }
+        free_schema(schema);
         return retval;
     }
 
 error:
     FREE(packet)
-    if (!tracked) {
-        if (voidstar && schema) {
-            char* free_err = NULL;
-            shfree((absptr_t)voidstar, &free_err);
-            if (free_err) { free(free_err); }
-        }
-        free_schema(schema);
+    if (!tracked && voidstar && schema) {
+        char* free_err = NULL;
+        shfree((absptr_t)voidstar, &free_err);
+        if (free_err) { free(free_err); }
     }
+    free_schema(schema);
     return NULL;
 }
 
@@ -3249,8 +3230,8 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
         }
     }
 
-    // Incref the result's SHM so the callee's tracker flush won't destroy
-    // data we may still need (e.g. forwarded result packets).
+    // Track the result's shared memory: the reference the callee donated
+    // with it is this pool's now.
     {
         const morloc_packet_header_t* res_header = (const morloc_packet_header_t*)result;
         if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
@@ -3261,7 +3242,7 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
             if (res_voidstar) {
                 // The callee took a reference before sending; it is ours
                 // now. Inherit it rather than adding another.
-                shm_tracker_push((absptr_t)res_voidstar, NULL);
+                shm_tracker_push((absptr_t)res_voidstar);
             }
         }
     }
