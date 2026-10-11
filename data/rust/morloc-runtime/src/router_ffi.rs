@@ -284,14 +284,6 @@ unsafe fn take_if_exited(slot: &std::sync::atomic::AtomicI32, pid: i32) -> Optio
     Some(Ok(status))
 }
 
-/// Whether child `pid` has exited (or is not this process's child), leaving
-/// it unreaped.
-fn has_exited(pid: i32) -> bool {
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
-    rc != 0 || info.si_signo == libc::SIGCHLD
-}
-
 pub(crate) unsafe fn router_terminate_children(router: *mut Router) {
     if router.is_null() {
         return;
@@ -875,77 +867,6 @@ unsafe fn serialize_request_to_json(request: *mut DaemonRequest) -> String {
 
 // -- router_build_discovery ---------------------------------------------------
 
-pub(crate) unsafe fn router_build_discovery(router: *mut Router) -> *mut c_char {
-    // Walk the canonical Manifest C struct from manifest_ffi.rs. No
-    // local mirror -- the in-memory layout is shared.
-    use crate::manifest_ffi::Manifest as ManifestC;
-
-    #[derive(serde::Serialize)]
-    struct CommandInfo {
-        name: String,
-        r#type: String,
-        return_type: String,
-    }
-
-    #[derive(serde::Serialize)]
-    struct ProgramInfo {
-        name: String,
-        running: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        commands: Option<Vec<CommandInfo>>,
-    }
-
-    #[derive(serde::Serialize)]
-    struct Discovery {
-        programs: Vec<ProgramInfo>,
-    }
-
-    let mut programs = Vec::with_capacity((*router).n_programs);
-
-    for i in 0..(*router).n_programs {
-        let prog = &*(*router).programs.add(i);
-        let name = CStr::from_ptr(prog.name).to_string_lossy().into_owned();
-        let pid = prog.daemon_pid.load(std::sync::atomic::Ordering::SeqCst);
-        let running = pid > 0 && !has_exited(pid);
-
-        let commands = if !prog.manifest.is_null() {
-            let mv = prog.manifest as *const ManifestC;
-            let mut cmds = Vec::with_capacity((*mv).n_commands);
-            for c in 0..(*mv).n_commands {
-                let cmd = &*(*mv).commands.add(c);
-                let cmd_name = CStr::from_ptr(cmd.name).to_string_lossy().into_owned();
-                let cmd_type = if cmd.is_pure { "pure" } else { "remote" };
-                let ret_type = if !cmd.ret.type_desc.is_null() {
-                    CStr::from_ptr(cmd.ret.type_desc)
-                        .to_string_lossy()
-                        .into_owned()
-                } else {
-                    String::new()
-                };
-                cmds.push(CommandInfo {
-                    name: cmd_name,
-                    r#type: cmd_type.into(),
-                    return_type: ret_type,
-                });
-            }
-            Some(cmds)
-        } else {
-            None
-        };
-
-        programs.push(ProgramInfo {
-            name,
-            running,
-            commands,
-        });
-    }
-
-    let disco = Discovery { programs };
-    let json = serde_json::to_string(&disco).unwrap_or_else(|_| "{}".into());
-    let c = CString::new(json).unwrap_or_default();
-    libc::strdup(c.as_ptr())
-}
-
 
 #[cfg(test)]
 mod forward_tests {
@@ -1048,10 +969,5 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn router_forward(router: *mut Router, program: *const c_char, request: *mut DaemonRequest, errmsg: *mut *mut c_char) -> *mut DaemonResponse {
         super::router_forward(router, program, request, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn router_build_discovery(router: *mut Router) -> *mut c_char {
-        super::router_build_discovery(router)
     }
 }

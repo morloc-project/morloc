@@ -7,9 +7,7 @@ here touch locks and ownership: model first.
   morloc-nexus/src/stdio_server.rs `do_write` keeps `STDOUT_SLOT` across
   transcoding and `write(1)`. The pool no longer waits under a slot lock
   for it (the custodian's thread does), but a slow stdout reader stalls the
-  stderr-free paths sharing the lock, and the file's header comment (21-23)
-  says the mutex is held only across the syscall and omits status 3
-  (PIPE_CLOSED).
+  stderr-free paths sharing the lock.
 - Open question (SLOT-15): should close and flush return as soon as their
   marker is queued, with the wait moved to where a finished file is needed
   (opening it to read, `@save`/`@concat`, reopening the path, the end of

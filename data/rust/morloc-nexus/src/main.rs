@@ -242,40 +242,25 @@ fn main() {
         }
     }
 
+    if let cli::Mode::Router(rargs) = &invocation.nexus.cmd {
+        let cfg = cli::router_args_to_config(rargs);
+        watch_lifeline();
+        run_router(&cfg);
+        std::process::exit(0);
+    }
+
     let mut manifest = match invocation.manifest {
         Some(m) => m,
         None => {
-            // Router mode or top-level help: still need to dispatch
-            // via the static `Nexus`. The legacy router branch below
-            // handles the only non-help case; help paths exited
-            // inside parse_invocation.
-            match invocation.nexus.cmd {
-                cli::Mode::Router(rargs) => {
-                    let cfg = cli::router_args_to_config(&rargs);
-                    watch_lifeline();
-                    run_router(&cfg);
-                    std::process::exit(0);
-                }
-                _ => {
-                    // clap rendered help and the process exited
-                    // inside parse_invocation; if we got here, the
-                    // user invoked a mode that needs a manifest
-                    // without supplying one and we should hand
-                    // control back to clap for a proper error.
-                    eprintln!("Error: missing required target argument");
-                    std::process::exit(2);
-                }
-            }
+            // Help paths exited inside parse_invocation, so this mode needs
+            // a manifest and none was given.
+            eprintln!("Error: missing required target argument");
+            std::process::exit(2);
         }
     };
 
     match invocation.nexus.cmd {
-        cli::Mode::Router(rargs) => {
-            let cfg = cli::router_args_to_config(&rargs);
-            watch_lifeline();
-            run_router(&cfg);
-            std::process::exit(0);
-        }
+        cli::Mode::Router(_) => unreachable!("router mode exits above"),
         cli::Mode::Run(rargs) => {
             format_explicit = rargs.common.output_form.is_some();
             let (mut cfg, _target) = cli::run_args_to_config(&rargs);

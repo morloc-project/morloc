@@ -4,7 +4,7 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Condvar};
 
 // ── C-compatible types matching pool.h ───────────────────────────────────────
@@ -14,23 +14,10 @@ pub type PoolDispatchFn = unsafe extern "C" fn(
 ) -> *mut u8;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PoolConcurrency {
-    Threads = 0,
-    Single = 1,
-}
-
-#[repr(C)]
 pub struct PoolConfig {
     pub local_dispatch: PoolDispatchFn,
     pub remote_dispatch: PoolDispatchFn,
     pub dispatch_ctx: *mut c_void,
-    pub concurrency: PoolConcurrency,
-    pub initial_workers: i32,
-    /// Start workers as calls need them. Without it the pool keeps
-    /// `initial_workers`, which must exceed the depth of calls back into the
-    /// pool that can be waiting at once.
-    pub dynamic_scaling: bool,
     /// Release what a dispatch still holds. Runs on the worker thread once
     /// the reply holds the caller's own reference to its value and before
     /// the reply is sent (see `send_reply_to_foreign_server`), or after the
@@ -49,17 +36,6 @@ unsafe impl Sync for PoolConfig {}
 // ── Global state ─────────────────────────────────────────────────────────────
 
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
-// Threads blocked in a call to another pool. Starting workers does not depend
-// on it (see JobQueue); it is kept for inspection.
-static BUSY_COUNT: AtomicI32 = AtomicI32::new(0);
-
-pub(crate) fn pool_mark_busy() {
-    BUSY_COUNT.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn pool_mark_idle() {
-    BUSY_COUNT.fetch_sub(1, Ordering::Relaxed);
-}
 
 extern "C" fn pool_sigterm_handler(_sig: i32) {
     // PANIC-1
@@ -215,13 +191,13 @@ enum PopResult {
 }
 
 impl JobQueue {
-    fn new(workers: usize) -> Self {
+    fn new() -> Self {
         JobQueue {
             state: Mutex::new(QueueState {
                 jobs: Vec::new(),
-                total: workers,
+                total: 1,
                 idle: 0,
-                starting: workers,
+                starting: 1,
                 finishing: 0,
             }),
             cond: Condvar::new(),
@@ -270,15 +246,14 @@ impl JobQueue {
         self.state.lock().unwrap().finishing += 1;
     }
 
-    // Wait for a job. A surplus worker idle past `retire_after` retires; the
-    // decision is taken under the lock, so no job can arrive unseen between
-    // it and the worker leaving.
+    // Wait for a job. A worker other than the last, idle past `retire_after`,
+    // retires; the decision is taken under the lock, so no job can arrive
+    // unseen between it and the worker leaving.
     fn pop(
         &self,
         arriving: Arriving,
         idle_since: std::time::Instant,
-        retire_after: Option<std::time::Duration>,
-        min_workers: usize,
+        retire_after: std::time::Duration,
     ) -> PopResult {
         let mut st = self.state.lock().unwrap();
         match arriving {
@@ -293,11 +268,9 @@ impl JobQueue {
             if let Some(fd) = st.jobs.pop() {
                 return PopResult::Job(fd);
             }
-            if let Some(t) = retire_after {
-                if st.total > min_workers && idle_since.elapsed() >= t {
-                    st.total -= 1;
-                    return PopResult::Retire;
-                }
+            if st.total > 1 && idle_since.elapsed() >= retire_after {
+                st.total -= 1;
+                return PopResult::Retire;
             }
             st.idle += 1;
             st = self.cond.wait_timeout(st, std::time::Duration::from_millis(100)).unwrap().0;
@@ -366,7 +339,7 @@ impl Drop for AltStack {
 unsafe fn spawn_worker(
     queue: &Arc<JobQueue>,
     config: &PoolConfig,
-    retire_after: Option<std::time::Duration>,
+    retire_after: std::time::Duration,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let q = Arc::clone(queue);
     let cfg = ptr::read(config); // Copy config for thread
@@ -376,17 +349,14 @@ unsafe fn spawn_worker(
     })
 }
 
-// `retire_after` is how long a worker beyond the initial ones may stay idle
-// before it exits; None keeps every worker.
-unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig, retire_after: Option<std::time::Duration>) {
+unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig, retire_after: std::time::Duration) {
     use crate::ipc_ffi::close_socket;
 
-    let min_workers = config.initial_workers.max(1) as usize;
     let mut idle_since = std::time::Instant::now();
     let mut arriving = Arriving::Starting;
 
     while !SHUTTING_DOWN.load(Ordering::Relaxed) {
-        let client_fd = match queue.pop(arriving, idle_since, retire_after, min_workers) {
+        let client_fd = match queue.pop(arriving, idle_since, retire_after) {
             PopResult::Job(fd) => fd,
             PopResult::Shutdown => break,
             PopResult::Retire => return,
@@ -447,8 +417,7 @@ unsafe fn serve_one(client_fd: i32, queue: &JobQueue, config: &PoolConfig) -> Se
         return Served::Closed;
     }
 
-    // NET-8: only a pool whose workers grow on demand pins a worker.
-    let keep = crate::ipc_ffi::take_keep_bit(data) && config.dynamic_scaling;
+    let keep = crate::ipc_ffi::take_keep_bit(data);
     let result = pool_dispatch_packet(data, config.local_dispatch, config.remote_dispatch, config.dispatch_ctx);
     libc::free(data as *mut c_void);
     libc::fflush(ptr::null_mut()); // flush stdout
@@ -523,9 +492,9 @@ unsafe fn wait_next_request(fd: i32, peer: Option<&crate::ipc_ffi::Peer>) -> boo
     }
 }
 
-// ── Pool main: threads mode ──────────────────────────────────────────────────
+// ── Accept loop ──────────────────────────────────────────────────────────────
 
-unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char) -> i32 {
+unsafe fn serve(config: &PoolConfig, socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char) -> i32 {
     use crate::ipc_ffi::start_daemon;
     use crate::ipc_ffi::close_daemon;
     use crate::ipc_ffi::wait_for_client_with_timeout;
@@ -538,14 +507,10 @@ unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmp
         return 1;
     }
 
-    let nthreads = config.initial_workers.max(1) as usize;
-    let queue = Arc::new(JobQueue::new(nthreads));
-    let retire_after = if config.dynamic_scaling { Some(worker_idle_timeout()) } else { None };
+    let queue = Arc::new(JobQueue::new());
+    let retire_after = worker_idle_timeout();
 
-    let mut handles = Vec::with_capacity(nthreads);
-    for _ in 0..nthreads {
-        handles.push(spawn_worker(&queue, config, retire_after).expect("failed to spawn pool worker thread"));
-    }
+    let mut handles = vec![spawn_worker(&queue, config, retire_after).expect("failed to spawn pool worker thread")];
     let mut start_failures = 0u32;
 
     while !SHUTTING_DOWN.load(Ordering::Relaxed) {
@@ -567,7 +532,7 @@ unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmp
         // START_ATTEMPTS passes in a row, the jobs no worker can take are
         // failed, since left queued they could wait on workers that are
         // themselves waiting on them.
-        while config.dynamic_scaling && queue.reserve_start() {
+        while queue.reserve_start() {
             match spawn_worker(&queue, config, retire_after) {
                 Ok(h) => {
                     handles.push(h);
@@ -607,56 +572,6 @@ unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmp
     }
 
     for h in handles { let _ = h.join(); }
-
-    close_daemon(&mut daemon);
-    0
-}
-
-// ── Pool main: single mode ───────────────────────────────────────────────────
-
-unsafe fn pool_main_single(config: &PoolConfig, socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char) -> i32 {
-    use crate::ipc_ffi::start_daemon;
-    use crate::ipc_ffi::close_daemon;
-    use crate::ipc_ffi::wait_for_client_with_timeout;
-    use crate::ipc_ffi::stream_from_client;
-    use crate::ipc_ffi::send_reply_to_foreign_server;
-    use crate::ipc_ffi::close_socket;
-
-    let mut errmsg: *mut c_char = ptr::null_mut();
-    let mut daemon = start_daemon(socket_path, tmpdir, shm_basename, 0xffff, &mut errmsg);
-    if !errmsg.is_null() {
-        eprintln!("Failed to start language server:\n{}", CStr::from_ptr(errmsg).to_string_lossy());
-        libc::free(errmsg as *mut c_void);
-        return 1;
-    }
-
-    while !SHUTTING_DOWN.load(Ordering::Relaxed) {
-        let client_fd = wait_for_client_with_timeout(daemon, 10000, &mut errmsg);
-        if !errmsg.is_null() { libc::free(errmsg as *mut c_void); errmsg = ptr::null_mut(); }
-        if client_fd <= 0 { continue; }
-
-        let data = stream_from_client(client_fd, &mut errmsg);
-        if data.is_null() || !errmsg.is_null() {
-            if !errmsg.is_null() { try_send_fail(client_fd, errmsg); libc::free(errmsg as *mut c_void); errmsg = ptr::null_mut(); }
-            libc::free(data as *mut c_void);
-            close_socket(client_fd);
-            continue;
-        }
-
-        let result = pool_dispatch_packet(data, config.local_dispatch, config.remote_dispatch, config.dispatch_ctx);
-        libc::free(data as *mut c_void);
-
-        if !result.is_null() {
-            send_reply_to_foreign_server(client_fd, result, config.release_dispatch, &mut errmsg);
-            libc::free(result as *mut c_void);
-            if !errmsg.is_null() { libc::free(errmsg as *mut c_void); errmsg = ptr::null_mut(); }
-        } else if let Some(f) = config.release_dispatch {
-            f();
-        }
-
-        libc::fflush(ptr::null_mut());
-        close_socket(client_fd);
-    }
 
     close_daemon(&mut daemon);
     0
@@ -725,11 +640,7 @@ pub(crate) unsafe fn pool_main(
         return 1;
     }
 
-    let cfg = &mut *config;
-    if cfg.initial_workers <= 0 { cfg.initial_workers = 1; }
-
     SHUTTING_DOWN.store(false, Ordering::Relaxed);
-    BUSY_COUNT.store(0, Ordering::Relaxed);
 
     // SIGTERM handler
     let mut sa: libc::sigaction = std::mem::zeroed();
@@ -749,10 +660,7 @@ pub(crate) unsafe fn pool_main(
     let shm_basename = *argv.add(3);
     crate::ipc_ffi::mlc_set_self_socket(socket_path);
 
-    match cfg.concurrency {
-        PoolConcurrency::Threads => pool_main_threads(cfg, socket_path, tmpdir, shm_basename),
-        PoolConcurrency::Single => pool_main_single(cfg, socket_path, tmpdir, shm_basename),
-    }
+    serve(&*config, socket_path, tmpdir, shm_basename)
 }
 
 #[cfg(test)]
@@ -800,7 +708,7 @@ mod tests {
     }
 
     fn take(q: &JobQueue, arriving: Arriving) -> i32 {
-        match q.pop(arriving, std::time::Instant::now(), None, 1) {
+        match q.pop(arriving, std::time::Instant::now(), std::time::Duration::MAX) {
             PopResult::Job(fd) => fd,
             _ => panic!("expected a job"),
         }
@@ -811,7 +719,7 @@ mod tests {
     // be handed back to fail.
     #[test]
     fn failed_start_never_strands_an_older_job() {
-        let q = JobQueue::new(1);
+        let q = JobQueue::new();
         q.push(10);
         assert!(!q.reserve_start());
         assert_eq!(take(&q, Arriving::Starting), 10);
@@ -834,7 +742,7 @@ mod tests {
     // need a second worker.
     #[test]
     fn sequential_calls_keep_one_worker() {
-        let q = JobQueue::new(1);
+        let q = JobQueue::new();
         let mut arriving = Arriving::Starting;
         for fd in 0..100 {
             q.push(fd);
@@ -850,7 +758,7 @@ mod tests {
     // it, so the callback starts a worker.
     #[test]
     fn callback_to_a_waiting_pool_starts_a_worker() {
-        let q = JobQueue::new(1);
+        let q = JobQueue::new();
         q.push(1);
         assert_eq!(take(&q, Arriving::Starting), 1);
         q.push(2);
@@ -862,16 +770,6 @@ mod tests {
 
 mod c_abi {
     use super::*;
-
-    #[no_mangle]
-    pub extern "C" fn pool_mark_busy() {
-        super::pool_mark_busy()
-    }
-
-    #[no_mangle]
-    pub extern "C" fn pool_mark_idle() {
-        super::pool_mark_idle()
-    }
 
     #[no_mangle]
     pub unsafe extern "C" fn pool_dispatch_packet(packet: *const u8, local_dispatch: PoolDispatchFn, remote_dispatch: PoolDispatchFn, ctx: *mut c_void) -> *mut u8 {

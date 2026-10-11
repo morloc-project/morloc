@@ -61,9 +61,9 @@ code in forked workers (Python fork mode, R) forks them from a coordinator
 that starts no thread of its own. The coordinator loads no user code; it
 watches the nexus's lifeline in its own wait loop rather than from a
 thread; and attaching the stream registry marks the sweeper as wanted
-without starting it, so the sweeper starts on the first sweep request in
-whichever process sends one, a forked worker included. If no thread can be
-started, the request is served by the thread that sent it.
+without starting it, so the sweeper starts on the first sweep request.
+Only the nexus sends one, so no pool process starts a sweeper. If no thread
+can be started, the request is served by the thread that sent it.
 
 A library may run threads of its own that it ends in its fork handler and
 starts again later (OpenBLAS does), so the R coordinator forks through a

@@ -148,7 +148,6 @@ morloc-runtime/packet.rs::-::TMPDIR	held	12
 morloc-runtime/packet.rs::-::CONFIG_LOADED	counter		
 morloc-runtime/packet_ffi.rs::make_file_data_packet_voidstar::SEQ	counter		
 morloc-runtime/pool_ffi.rs::-::SHUTTING_DOWN	counter		
-morloc-runtime/pool_ffi.rs::-::BUSY_COUNT	counter		
 morloc-runtime/pool_ffi.rs::-::JobQueue.state	unreachable		
 morloc-runtime/pool_ffi.rs::-::JobQueue.cond	unreachable		
 morloc-runtime/run.rs::-::RUN	lazy		

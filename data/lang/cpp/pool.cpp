@@ -1100,9 +1100,7 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
     uint8_t* packet = make_morloc_local_call_packet((uint32_t)mid, args_array, nargs, &errmsg);
     PROPAGATE_INFRA_ERROR(errmsg)
 
-    pool_mark_busy();
     uint8_t* result = send_and_receive_over_socket(socket_path.c_str(), packet, &errmsg);
-    pool_mark_idle();
 
     free(packet);
     PROPAGATE_INFRA_ERROR(errmsg)
@@ -1534,17 +1532,13 @@ uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
 
 // Registration entry called by the member-agnostic host translation unit.
 // The host owns main() and the pool_main loop; this hook wires the C++
-// member's dispatchers, concurrency policy, tmpdir, and schema table into the
-// pool config. cpp_local_dispatch/cpp_remote_dispatch, g_tmpdir, POOL_THREADS,
-// and _init_schemas all live in this (member) translation unit.
+// member's dispatchers, tmpdir, and schema table into the pool config.
+// cpp_local_dispatch/cpp_remote_dispatch, g_tmpdir and _init_schemas all live in this (member) translation unit.
 void cpp_register(pool_config_t* config, const char* tmpdir) {
     g_tmpdir = strdup(tmpdir);
     config->local_dispatch = cpp_local_dispatch;
     config->remote_dispatch = cpp_remote_dispatch;
     config->dispatch_ctx = NULL;
-    config->concurrency = POOL_THREADS;
-    config->initial_workers = 1;
-    config->dynamic_scaling = true;
     config->release_dispatch = _shm_tracker_flush;
     _init_schemas();
 }

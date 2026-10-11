@@ -288,10 +288,6 @@ pub(crate) unsafe fn write_response(
     write_response_ex(fd, status, content_type, body, body_len, ptr::null())
 }
 
-pub(crate) unsafe fn http_write_response_ex(fd: i32, status: i32, content_type: *const c_char, body: *const c_char, body_len: usize, extra_headers: *const c_char) -> bool {
-    write_response_ex(fd, status, content_type, body, body_len, extra_headers)
-}
-
 /// Same as `http_write_response`, plus an optional `extra_headers` block
 /// (one or more `Name: value\r\n` lines, NUL-terminated, may be NULL).
 /// Used for adding `Retry-After: 1` on 503 responses.
@@ -783,11 +779,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn http_write_response(fd: i32, status: i32, content_type: *const c_char, body: *const c_char, body_len: usize) -> bool {
         super::http_write_response(fd, status, content_type, body, body_len)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn http_write_response_ex(fd: i32, status: i32, content_type: *const c_char, body: *const c_char, body_len: usize, extra_headers: *const c_char) -> bool {
-        super::http_write_response_ex(fd, status, content_type, body, body_len, extra_headers)
     }
 
     #[no_mangle]

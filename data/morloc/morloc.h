@@ -953,11 +953,6 @@ typedef struct morloc_call_s {
     int owns_args;
 } morloc_call_t;
 
-typedef struct client_list_s {
-    int fd;
-    struct client_list_s* next;
-} client_list_t;
-
 typedef struct language_daemon_s {
     char* socket_path;
     char* tmpdir;
@@ -965,7 +960,6 @@ typedef struct language_daemon_s {
     shm_t* shm;
     size_t shm_default_size;
     int server_fd;
-    client_list_t* client_fds;
     uint64_t socket_dev;
     uint64_t socket_ino;
     int socket_hold;
@@ -1133,18 +1127,10 @@ typedef uint8_t* (*pool_dispatch_fn_t)(
     void* ctx
 );
 
-typedef enum {
-    POOL_THREADS,
-    POOL_SINGLE
-} pool_concurrency_t;
-
 typedef struct {
     pool_dispatch_fn_t local_dispatch;
     pool_dispatch_fn_t remote_dispatch;
     void* dispatch_ctx;
-    pool_concurrency_t concurrency;
-    int initial_workers;
-    bool dynamic_scaling;
     // Release what a dispatch still holds: run on the worker thread once the
     // reply holds the caller's reference and before it is sent; NULL for none.
     void (*release_dispatch)(void);
@@ -1545,17 +1531,12 @@ void close_daemon(language_daemon_t** daemon_ptr);
 language_daemon_t* start_daemon(
     const char* socket_path, const char* tmpdir,
     const char* shm_basename, size_t shm_default_size, ERRMSG);
-uint8_t* stream_from_client_wait(int client_fd, int poll_timeout_us, int recv_timeout_us, ERRMSG);
 uint8_t* stream_from_client(int client_fd, ERRMSG);
-uint8_t* send_and_receive_over_socket_wait(
-    const char* socket_path, const uint8_t* packet,
-    int poll_timeout_us, int recv_timeout_us, ERRMSG);
 uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG);
 void mlc_set_self_socket(const char* socket_path);
 size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG);
 size_t send_reply_to_foreign_server(int client_fd, uint8_t* packet, void (*release)(void), ERRMSG);
 int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRMSG);
-int wait_for_client(language_daemon_t* daemon, ERRMSG);
 
 // Daemon event loop and dispatch.
 // False when a request was still running at exit: the caller must then
@@ -1569,15 +1550,11 @@ daemon_response_t* daemon_dispatch(manifest_t* manifest,
                                    const char* shm_basename);
 daemon_request_t* daemon_parse_request(const char* json, size_t len, ERRMSG);
 daemon_response_t* daemon_parse_response(const char* json, size_t len, ERRMSG);
-char* daemon_serialize_response(daemon_response_t* response, size_t* out_len);
 char* daemon_build_discovery(manifest_t* manifest);
-void daemon_set_eval_timeout(int timeout_sec);
 void daemon_free_request(daemon_request_t* req);
 void daemon_free_response(daemon_response_t* resp);
 
 // Binding store (public types only; internal hash table functions are Rust-side).
-binding_store_t* binding_store_init(const char* base_dir);
-void binding_store_free(binding_store_t* store);
 
 // ========================================================================
 // Section 17: Function declarations -- HTTP
@@ -1589,9 +1566,6 @@ bool http_write_response(int fd, int status, const char* content_type,
 // Like http_write_response, but appends `extra_headers` (one or more
 // `Name: value\r\n` lines, NUL-terminated, may be NULL) to the response
 // header block. Used for `Retry-After: 1` on 503 responses.
-bool http_write_response_ex(int fd, int status, const char* content_type,
-                            const char* body, size_t body_len,
-                            const char* extra_headers);
 // `error_kind_out` (nullable) receives DAEMON_ERROR_BAD_REQUEST for
 // malformed body / missing fields and DAEMON_ERROR_NOT_FOUND for an
 // unknown route.
@@ -1607,7 +1581,6 @@ router_t* router_init_explicit(const char* fdb_path, const char* const* names,
 bool router_start_program(router_program_t* prog, ERRMSG);
 daemon_response_t* router_forward(router_t* router, const char* program,
                                   daemon_request_t* request, ERRMSG);
-char* router_build_discovery(router_t* router);
 void router_terminate_children(router_t* router);
 void router_free(router_t* router);
 
@@ -1621,8 +1594,6 @@ uint8_t* pool_dispatch_packet(
     pool_dispatch_fn_t local_dispatch,
     pool_dispatch_fn_t remote_dispatch,
     void* ctx);
-void pool_mark_busy(void);
-void pool_mark_idle(void);
 // Report a fatal signal with the manifold the faulting thread was executing
 // (`current_frame` returns it as a pointer and byte length, or NULL), then
 // die of the signal. Installed once per pool process.

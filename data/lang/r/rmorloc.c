@@ -2095,13 +2095,6 @@ SEXP morloc_worker_listener(SEXP daemon_r) {
     language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(daemon_r);
     if (daemon == NULL) error("morloc_worker_listener: no daemon");
     int fd = daemon->server_fd;
-    client_list_t *current = daemon->client_fds;
-    while (current) {
-        client_list_t *next = current->next;
-        close(current->fd);
-        free(current);
-        current = next;
-    }
     free(daemon->socket_path);
     free(daemon->tmpdir);
     free(daemon->shm_basename);
@@ -2151,16 +2144,6 @@ SEXP morloc_start_daemon(
 
 
 
-SEXP morloc_shinit(SEXP shm_basename_r, SEXP volume_index_r, SEXP shm_size_r) { MAYFAIL
-    const char* shm_basename = CHAR(STRING_ELT(shm_basename_r, 0));
-    size_t volume_index = (size_t)asInteger(volume_index_r);
-    size_t shm_size = (size_t)asInteger(shm_size_r);
-
-    R_TRY(shinit, shm_basename, volume_index, shm_size);
-
-    return R_NilValue;
-}
-
 
 // {{{ signal handling for graceful shutdown
 
@@ -2203,192 +2186,9 @@ SEXP morloc_set_line_buffered(void) {
 
 // }}} signal handling
 
-SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
-    if (!R_ExternalPtrAddr(daemon_r)) {
-        MORLOC_ERROR("Expected a daemon pointer");
-    }
-
-    // Return immediately if shutdown was requested
-    if (r_shutting_down) {
-        return ScalarInteger(-1);
-    }
-
-    language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(daemon_r);
-
-    // poll() instead of pselect/FD_SET (used directly, not
-    // wait_for_client_with_timeout, so we can return immediately on EINTR from
-    // SIGTERM). An fd_set caps at FD_SETSIZE (1024) and FD_SET on a higher fd is
-    // out of bounds; poll accepts any fd value. The old empty pselect mask meant
-    // no signals were blocked during the wait, so SIGTERM still interrupts poll
-    // (EINTR) -- same responsive-shutdown behavior. Index 0 is the listening
-    // socket; client fds follow so activity on them also wakes the wait.
-    int nclients = 0;
-    for (client_list_t* cl = daemon->client_fds; cl != NULL; cl = cl->next) nclients++;
-
-    int nfds = nclients + 1;
-    struct pollfd* pfds = (struct pollfd*)calloc(nfds, sizeof(struct pollfd));
-    if (pfds == NULL) {
-        MORLOC_INTERNAL_ABORT("calloc failed (OOM)");
-    }
-    pfds[0].fd = daemon->server_fd;
-    pfds[0].events = POLLIN;
-    int pidx = 1;
-    for (client_list_t* cl = daemon->client_fds; cl != NULL; cl = cl->next) {
-        pfds[pidx].fd = cl->fd;
-        pfds[pidx].events = POLLIN;
-        pidx++;
-    }
-
-    // 100ms timeout -- short enough for responsive SIGTERM handling
-    int ready = poll(pfds, nfds, 100);
-    int server_ready = (pfds[0].revents & POLLIN) != 0;
-    free(pfds);
-
-    // Check shutdown after poll (signal may have arrived during the call)
-    if (r_shutting_down) {
-        return ScalarInteger(-1);
-    }
-
-    // Timeout or interrupted -- return 0 (no client)
-    if (ready <= 0) {
-        return ScalarInteger(0);
-    }
-
-    // Accept new connection if server_fd is ready
-    if (server_ready) {
-        int fd = mlc_accept_cloexec(daemon->server_fd);
-        if (fd < 0 && (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM)) {
-            // Wait for a descriptor to free rather than spin on a full table.
-            struct timespec pause = {0, 50 * 1000 * 1000};
-            nanosleep(&pause, NULL);
-        }
-        if (fd >= 0) {
-            fcntl(fd, F_SETFL, O_NONBLOCK);
-            client_list_t* new_client = (client_list_t*)calloc(1, sizeof(client_list_t));
-            if (new_client == NULL) {
-                close(fd);
-                MORLOC_INTERNAL_ABORT("calloc failed (OOM)");
-            }
-            new_client->fd = fd;
-            new_client->next = NULL;
-            if (daemon->client_fds == NULL) {
-                daemon->client_fds = new_client;
-            } else {
-                client_list_t* last = daemon->client_fds;
-                while (last->next) last = last->next;
-                last->next = new_client;
-            }
-        }
-    }
-
-    // Return first ready client fd
-    if (daemon->client_fds != NULL) {
-        client_list_t* first = daemon->client_fds;
-        int client_fd = first->fd;
-        daemon->client_fds = first->next;
-        free(first);
-        return ScalarInteger(client_fd);
-    }
-
-    return ScalarInteger(0);
-}
 
 
-SEXP morloc_read_morloc_call_packet(SEXP packet_r) { MAYFAIL
-    uint8_t* packet = RAW(packet_r);
-    morloc_call_t* call_packet = R_TRY(read_morloc_call_packet, packet);
 
-    // Create two element R list
-    //  1: manifold id
-    //  2: argument list of raw packets
-    SEXP r_list = PROTECT(allocVector(VECSXP, 2));
-
-    // Convert midx to R integer
-    SEXP r_mid = PROTECT(ScalarInteger(call_packet->midx));
-
-    // Create arguments list
-    SEXP r_args = PROTECT(allocVector(VECSXP, call_packet->nargs));
-
-    for(size_t i = 0; i < call_packet->nargs; i++) {
-        size_t arg_packet_size = R_TRY_WITH(UNPROTECT(3), morloc_packet_size, call_packet->args[i]);
-        SEXP r_arg = PROTECT(allocVector(RAWSXP, arg_packet_size));
-        memcpy(RAW(r_arg), call_packet->args[i], arg_packet_size);
-        SET_VECTOR_ELT(r_args, i, r_arg);
-        UNPROTECT(1);  // r_arg
-    }
-
-    // Assemble final list
-    SET_VECTOR_ELT(r_list, 0, r_mid);
-    SET_VECTOR_ELT(r_list, 1, r_args);
-
-    free_morloc_call(call_packet);
-
-    UNPROTECT(3);  // r_list, r_mid, r_args
-    return r_list;
-}
-
-
-SEXP morloc_send_packet_to_foreign_server(SEXP client_fd_r, SEXP packet_r) { MAYFAIL
-    if (TYPEOF(client_fd_r) != INTSXP || LENGTH(client_fd_r) != 1) {
-        MORLOC_INTERNAL_ABORT("client_fd must be a single integer");
-    }
-    if (TYPEOF(packet_r) != RAWSXP) {
-        MORLOC_ERROR("packet must be a raw vector");
-    }
-
-    // Extract arguments
-    int client_fd = INTEGER(client_fd_r)[0];
-    uint8_t* packet = RAW(packet_r);
-    size_t packet_size = (size_t)LENGTH(packet_r);
-    if (!morloc_packet_fits(packet, packet_size)) {
-        MORLOC_ERROR("a %zu-byte packet is shorter than its header claims", packet_size);
-    }
-
-    // Call underlying implementation
-    size_t bytes_sent = R_TRY(send_packet_to_foreign_server, client_fd, packet);
-
-    // This could in theory be problematic, since int is smaller than size_t
-    // In practice it should not be, since packets are typically small
-    // However, if I refactor to send large packets in the future, this could be
-    // problematic. Then I would need to convert to a double return.
-    return ScalarInteger((int)bytes_sent);
-}
-
-
-// Read from socket returning raw vector of received data
-SEXP morloc_stream_from_client(SEXP client_fd_r) { MAYFAIL
-    if (TYPEOF(client_fd_r) != INTSXP || LENGTH(client_fd_r) != 1) {
-        MORLOC_INTERNAL_ABORT("client_fd must be a single integer");
-    }
-
-    int client_fd = INTEGER(client_fd_r)[0];
-
-    // Read packet from socket
-    uint8_t* packet = R_TRY(stream_from_client, client_fd);
-
-    // Read the packet size from the header (free packet before longjmp on error)
-    size_t packet_size = R_TRY_WITH(free(packet), morloc_packet_size, packet);
-
-    // Create raw vector for result
-    SEXP result = PROTECT(allocVector(RAWSXP, packet_size));
-    memcpy(RAW(result), packet, packet_size);
-    free(packet);
-
-    UNPROTECT(1);
-    return result;
-}
-
-
-// close_socket
-SEXP morloc_close_socket(SEXP socket_id_r) {
-    if (TYPEOF(socket_id_r) != INTSXP || LENGTH(socket_id_r) != 1) {
-        MORLOC_INTERNAL_ABORT("socket_id must be a single integer");
-    }
-    int socket_id = INTEGER(socket_id_r)[0];
-    close_socket(socket_id);
-    // Return invisible NULL
-    return R_NilValue;
-}
 
 
 // put_value
@@ -3750,71 +3550,9 @@ SEXP morloc_bench_record_r(SEXP key_r, SEXP seconds_r) {
     return R_NilValue;
 }
 
-SEXP morloc_is_ping(SEXP packet_r) { MAYFAIL
-    if (TYPEOF(packet_r) != RAWSXP) {
-        MORLOC_ERROR("packet must be a raw vector");
-    }
-
-    bool is_ping = R_TRY(packet_is_ping, RAW(packet_r));
-
-    return ScalarLogical(is_ping);
-}
 
 
-SEXP morloc_is_local_call(SEXP packet_r) { MAYFAIL
-    if (TYPEOF(packet_r) != RAWSXP) {
-        MORLOC_ERROR("packet must be a raw vector");
-    }
 
-    bool is_local_call = R_TRY(packet_is_local_call, RAW(packet_r));
-
-    return ScalarLogical(is_local_call);
-}
-
-
-SEXP morloc_is_remote_call(SEXP packet_r) { MAYFAIL
-    if (TYPEOF(packet_r) != RAWSXP) {
-        MORLOC_ERROR("packet must be a raw vector");
-    }
-
-    bool is_remote_call = R_TRY(packet_is_remote_call, RAW(packet_r));
-
-    return ScalarLogical(is_remote_call);
-}
-
-
-SEXP morloc_pong(SEXP packet_r) { MAYFAIL
-    if (TYPEOF(packet_r) != RAWSXP) {
-        MORLOC_ERROR("packet must be a raw vector");
-    }
-
-    // Generate a response to ping
-    uint8_t* pong = R_TRY(return_ping, RAW(packet_r));
-
-    size_t pong_size = R_TRY_WITH(free(pong), morloc_packet_size, pong);
-
-    SEXP result_r = PROTECT(allocVector(RAWSXP, pong_size));
-    memcpy(RAW(result_r), pong, pong_size);
-    free(pong);
-
-    UNPROTECT(1);
-    return result_r;
-}
-
-
-SEXP morloc_make_fail_packet(SEXP failure_message_r) { MAYFAIL
-    const char* failure_message = CHAR(STRING_ELT(failure_message_r, 0));
-    uint8_t* fail_packet = make_fail_packet(failure_message);
-
-    size_t packet_size = R_TRY(morloc_packet_size, fail_packet);
-
-    SEXP packet_r = PROTECT(allocVector(RAWSXP, packet_size));
-    memcpy(RAW(packet_r), fail_packet, packet_size);
-    free(fail_packet);
-
-    UNPROTECT(1);
-    return packet_r;
-}
 
 
 // Release the SHM ref owned by a morloc_put_value-produced packet. The
@@ -3992,55 +3730,11 @@ static void mlc_trace(const char* fmt, ...) {
 }
 
 
-SEXP morloc_recv_fd(SEXP pipe_fd_r) {
-    int pipe_fd = INTEGER(pipe_fd_r)[0];
-
-    struct msghdr msg = {0};
-    struct iovec iov;
-    char buf[1];
-    char cmsgbuf[CMSG_SPACE(sizeof(int))];
-
-    iov.iov_base = buf;
-    iov.iov_len = 1;
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-
-    // Retry EINTR (a signal must not spuriously report the pipe as closed);
-    // only a genuine pipe close returns 0.
-    ssize_t n;
-    for (;;) {
-        msg.msg_control = cmsgbuf;
-        msg.msg_controllen = sizeof(cmsgbuf);
-        msg.msg_flags = 0;
-        n = recvmsg(pipe_fd, &msg, 0);
-        if (n >= 0 || errno != EINTR) break;
-    }
-    if (n <= 0) {
-        return ScalarInteger(-1);
-    }
-
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    if (cmsg == NULL || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
-        return ScalarInteger(-1);
-    }
-
-    int fd;
-    memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
-    return ScalarInteger(fd);
-}
-
 SEXP morloc_kill(SEXP pid_r, SEXP sig_r) {
     pid_t pid = (pid_t)INTEGER(pid_r)[0];
     int sig = INTEGER(sig_r)[0];
     int ret = kill(pid, sig);
     return ScalarInteger(ret);
-}
-
-SEXP morloc_waitpid(SEXP pid_r) {
-    pid_t pid = (pid_t)INTEGER(pid_r)[0];
-    int status;
-    pid_t result = waitpid(pid, &status, WNOHANG);
-    return ScalarInteger((int)result);
 }
 
 // Non-blocking reap of ONE worker pid, reporting HOW it died. A crashed R
@@ -4713,11 +4407,6 @@ static void _r_init_impl(DllInfo *info) {
     morloc_install_panic_hook(NULL);
     R_CallMethodDef callMethods[] = {
         {"morloc_start_daemon", (DL_FUNC) &morloc_start_daemon, 4},
-        {"morloc_wait_for_client", (DL_FUNC) &morloc_wait_for_client, 1},
-        {"morloc_read_morloc_call_packet", (DL_FUNC) &morloc_read_morloc_call_packet, 1},
-        {"morloc_send_packet_to_foreign_server", (DL_FUNC) &morloc_send_packet_to_foreign_server, 2},
-        {"morloc_stream_from_client", (DL_FUNC) &morloc_stream_from_client, 1},
-        {"morloc_close_socket", (DL_FUNC) &morloc_close_socket, 1},
         {"morloc_foreign_call", (DL_FUNC) &morloc_foreign_call, 3},
         {"morloc_get_value", (DL_FUNC) &morloc_get_value, 3},
         {"morloc_put_value", (DL_FUNC) &morloc_put_value, 3},
@@ -4731,19 +4420,11 @@ static void _r_init_impl(DllInfo *info) {
         {"r_morloc_log_next_id", (DL_FUNC) &morloc_log_next_id_r, 0},
         {"r_morloc_log_emit", (DL_FUNC) &morloc_log_emit_r, 4},
         {"r_morloc_bench_record", (DL_FUNC) &morloc_bench_record_r, 2},
-        {"morloc_is_ping", (DL_FUNC) &morloc_is_ping, 1},
-        {"morloc_is_local_call", (DL_FUNC) &morloc_is_local_call, 1},
-        {"morloc_is_remote_call", (DL_FUNC) &morloc_is_remote_call, 1},
         {"morloc_remote_call", (DL_FUNC) &morloc_remote_call, 5},
-        {"morloc_pong", (DL_FUNC) &morloc_pong, 1},
-        {"morloc_make_fail_packet", (DL_FUNC) &morloc_make_fail_packet, 1},
         {"morloc_release_packet_shm", (DL_FUNC) &morloc_release_packet_shm, 1},
-        {"morloc_shinit", (DL_FUNC) &morloc_shinit, 3},
         {"morloc_fork", (DL_FUNC) &morloc_fork, 0},
         {"morloc_exit", (DL_FUNC) &morloc_exit, 1},
-        {"morloc_recv_fd", (DL_FUNC) &morloc_recv_fd, 1},
         {"morloc_kill", (DL_FUNC) &morloc_kill, 2},
-        {"morloc_waitpid", (DL_FUNC) &morloc_waitpid, 1},
         {"morloc_waitpid_blocking", (DL_FUNC) &morloc_waitpid_blocking, 1},
         {"morloc_reap_worker", (DL_FUNC) &morloc_reap_worker, 1},
         {"morloc_install_sigterm_handler", (DL_FUNC) &morloc_install_sigterm_handler, 0},

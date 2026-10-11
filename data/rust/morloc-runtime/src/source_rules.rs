@@ -40,7 +40,7 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/ipc_ffi.rs::wait_for_client_with_timeout",
     "morloc-runtime/ipc_ffi.rs::try_answer_ping",
     "morloc-runtime/ipc_ffi.rs::close_socket",
-    "morloc-runtime/ipc_ffi.rs::send_and_receive_over_socket_wait",
+    "morloc-runtime/ipc_ffi.rs::send_and_receive_over_socket",
     "morloc-runtime/utility.rs::create_beside",
 ];
 // SHM-8: pool.py's retiring worker names itself to its coordinator.

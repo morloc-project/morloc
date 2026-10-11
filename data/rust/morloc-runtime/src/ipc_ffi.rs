@@ -8,12 +8,6 @@ use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 
 // ── C types from call.h ──────────────────────────────────────────────────────
 
-#[repr(C)]
-pub struct ClientList {
-    pub fd: i32,
-    pub next: *mut ClientList,
-}
-
 // Mirrors C `language_daemon_t` in morloc.h; layout must stay in sync.
 #[repr(C)]
 pub struct LanguageDaemon {
@@ -23,7 +17,6 @@ pub struct LanguageDaemon {
     pub shm: *mut crate::shm::ShmHeader,
     pub shm_default_size: usize,
     pub server_fd: i32,
-    pub client_fds: *mut ClientList,
     /// The socket file this pool bound, as (device, inode); (0, 0) if unknown.
     pub socket_dev: u64,
     pub socket_ino: u64,
@@ -305,15 +298,6 @@ pub(crate) unsafe fn close_daemon(daemon_ptr: *mut *mut LanguageDaemon) {
 
     close_socket((*daemon).server_fd);
 
-    // Free client list
-    let mut current = (*daemon).client_fds;
-    while !current.is_null() {
-        let next = (*current).next;
-        libc::close((*current).fd);
-        libc::free(current as *mut c_void);
-        current = next;
-    }
-
     if !(*daemon).socket_path.is_null() {
         // DAEMON-10
         unlink_if_ours((*daemon).socket_path, ((*daemon).socket_dev, (*daemon).socket_ino));
@@ -462,7 +446,6 @@ pub(crate) unsafe fn start_daemon(
     }
 
     (*daemon).shm_default_size = shm_default_size;
-    (*daemon).client_fds = ptr::null_mut();
 
     // Set fallback dir for file-backed SHM
     crate::shm::shm_set_fallback_dir(&CStr::from_ptr(tmpdir).to_string_lossy());
@@ -515,17 +498,6 @@ pub(crate) unsafe fn start_daemon(
     }
 
     daemon
-}
-
-// ── stream_from_client_wait ──────────────────────────────────────────────────
-
-pub(crate) unsafe fn stream_from_client_wait(
-    client_fd: i32,
-    poll_timeout_us: i32,
-    recv_timeout_us: i32,
-    errmsg: *mut *mut c_char,
-) -> *mut u8 {
-    read_packet(client_fd, poll_timeout_us, recv_timeout_us, None, errmsg)
 }
 
 /// The process at the other end of a local socket, as it connected.
@@ -657,20 +629,24 @@ fn peer_pid(fd: i32) -> Option<u32> {
     (rc == 0 && pid > 0).then_some(pid as u32)
 }
 
-/// How long a sender whose process cannot be named may stall, in us.
-const UNNAMED_SENDER_STALL_US: i32 = 30_000_000;
+/// How long a sender whose process cannot be named may stall.
+const UNNAMED_SENDER_STALL: libc::timespec = libc::timespec { tv_sec: 30, tv_nsec: 0 };
 
 /// How often a wait on a living sender checks that it still lives.
 const PEER_CHECK: libc::timespec = libc::timespec { tv_sec: 1, tv_nsec: 0 };
 
+/// How long a read waits for the sender's next bytes.
+enum Wait<'a> {
+    /// While this process lives (NET-5).
+    Peer(&'a Peer),
+    /// Until no byte has arrived for a sender that cannot be named.
+    Stall,
+    /// Until the sender's end closes.
+    Forever,
+}
+
 // NET-5: with a peer, no time limit: a wait ends on end of file or when the peer is gone.
-unsafe fn read_packet(
-    client_fd: i32,
-    poll_timeout_us: i32,
-    recv_timeout_us: i32,
-    peer: Option<&Peer>,
-    errmsg: *mut *mut c_char,
-) -> *mut u8 {
+unsafe fn read_packet(client_fd: i32, wait: Wait, errmsg: *mut *mut c_char) -> *mut u8 {
     clear_errmsg(errmsg);
 
     let buffer = libc::calloc(BUFFER_SIZE, 1) as *mut u8;
@@ -684,16 +660,10 @@ unsafe fn read_packet(
     // pollfd imposes no ceiling on the fd value.
     let mut pfd = libc::pollfd { fd: client_fd, events: libc::POLLIN, revents: 0 };
 
-    // Timeout setup
-    let mut ts_loop: libc::timespec = std::mem::zeroed();
-    let timeout_ptr = if peer.is_some() {
-        &PEER_CHECK as *const libc::timespec
-    } else if poll_timeout_us > 0 {
-        ts_loop.tv_sec = (poll_timeout_us / 1000000) as i64;
-        ts_loop.tv_nsec = ((poll_timeout_us % 1000000) * 1000) as i64;
-        &ts_loop as *const libc::timespec
-    } else {
-        ptr::null()
+    let (timeout_ptr, peer) = match wait {
+        Wait::Peer(p) => (&PEER_CHECK as *const libc::timespec, Some(p)),
+        Wait::Stall => (&UNNAMED_SENDER_STALL as *const libc::timespec, None),
+        Wait::Forever => (ptr::null(), None),
     };
 
     // Initial receive: poll, then recv, retrying on EINTR (poll) and on a
@@ -794,68 +764,52 @@ unsafe fn read_packet(
     let mut data_ptr = result.add(copy_length);
     libc::free(buffer as *mut c_void);
 
-    let attempts = 10;
     while (data_ptr as usize - result as usize) < packet_length {
-        let mut packet_received = false;
-        let mut attempt = 0;
-        while attempt < attempts {
-            attempt += 1;
-            let recv_timeout_ptr = if peer.is_some() {
-                &PEER_CHECK as *const libc::timespec
-            } else if recv_timeout_us > 0 {
-                let total_us = recv_timeout_us as i64 * attempt as i64;
-                ts_loop.tv_sec = total_us / 1000000;
-                ts_loop.tv_nsec = (total_us % 1000000) * 1000;
-                &ts_loop as *const libc::timespec
-            } else {
-                ptr::null()
-            };
-
-            let ready = poll_wait(&mut pfd, 1, recv_timeout_ptr);
-
-            if ready == 0 {
-                if peer.is_some_and(Peer::alive) {
-                    attempt -= 1;
-                    continue;
-                }
-                libc::free(result as *mut c_void);
-                let why = if peer.is_some() { "The sending process is gone" } else { "Timeout waiting for remaining data" };
-                set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
-                return ptr::null_mut();
+        let ready = poll_wait(&mut pfd, 1, timeout_ptr);
+        if ready == 0 {
+            if peer.is_some_and(Peer::alive) {
+                continue;
             }
-            if ready < 0 && crate::utility::errno_val() != libc::EINTR {
-                libc::free(result as *mut c_void);
-                set_errmsg(errmsg, &MorlocError::Ipc("poll error".into()));
-                return ptr::null_mut();
-            }
-            if ready <= 0 { continue; }
-
-            if pfd_ready(&pfd) {
-                let remaining = packet_length - (data_ptr as usize - result as usize);
-                let recv_size = remaining.min(BUFFER_SIZE);
-                let n = libc::recv(client_fd, data_ptr as *mut c_void, recv_size, 0);
-                if n > 0 {
-                    data_ptr = data_ptr.add(n as usize);
-                    packet_received = true;
-                    break;
-                }
-                if n == 0 {
-                    libc::free(result as *mut c_void);
-                    set_errmsg(errmsg, &MorlocError::Ipc("Connection closed early".into()));
-                    return ptr::null_mut();
-                }
-                if n < 0 && crate::utility::errno_val() != libc::EWOULDBLOCK && crate::utility::errno_val() != libc::EAGAIN {
-                    libc::free(result as *mut c_void);
-                    set_errmsg(errmsg, &MorlocError::Ipc("Recv error".into()));
-                    return ptr::null_mut();
-                }
-            }
-        }
-        if !packet_received {
             libc::free(result as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Ipc("Failed to retrieve packet".into()));
+            let why = if peer.is_some() { "The sending process is gone" } else { "Timeout waiting for remaining data" };
+            set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
             return ptr::null_mut();
         }
+        if ready < 0 {
+            if crate::utility::errno_val() == libc::EINTR {
+                continue;
+            }
+            libc::free(result as *mut c_void);
+            set_errmsg(errmsg, &MorlocError::Ipc("poll error".into()));
+            return ptr::null_mut();
+        }
+        if !pfd_ready(&pfd) {
+            continue;
+        }
+        let remaining = packet_length - (data_ptr as usize - result as usize);
+        let n = libc::recv(client_fd, data_ptr as *mut c_void, remaining.min(BUFFER_SIZE), 0);
+        if n > 0 {
+            data_ptr = data_ptr.add(n as usize);
+            continue;
+        }
+        if n == 0 {
+            libc::free(result as *mut c_void);
+            set_errmsg(errmsg, &MorlocError::Ipc("Connection closed early".into()));
+            return ptr::null_mut();
+        }
+        let e = crate::utility::errno_val();
+        if e == libc::EWOULDBLOCK || e == libc::EAGAIN {
+            spurious += 1;
+            if spurious <= MAX_SPURIOUS_WAKEUPS {
+                continue;
+            }
+            libc::free(result as *mut c_void);
+            set_errmsg(errmsg, &MorlocError::Ipc("Timeout waiting for remaining data".into()));
+            return ptr::null_mut();
+        }
+        libc::free(result as *mut c_void);
+        set_errmsg(errmsg, &MorlocError::Ipc("Recv error".into()));
+        return ptr::null_mut();
     }
 
     result
@@ -867,8 +821,8 @@ pub(crate) unsafe fn stream_from_client(
 ) -> *mut u8 {
     // NET-5: a sender that cannot be named has its stalls bounded instead.
     let request = match Peer::of(client_fd) {
-        Some(peer) => read_packet(client_fd, 0, 0, Some(&peer), errmsg),
-        None => read_packet(client_fd, UNNAMED_SENDER_STALL_US, UNNAMED_SENDER_STALL_US, None, errmsg),
+        Some(peer) => read_packet(client_fd, Wait::Peer(&peer), errmsg),
+        None => read_packet(client_fd, Wait::Stall, errmsg),
     };
     if !request.is_null() {
         REQUEST.with(|r| r.set((client_fd, crate::fork_policy::generation())));
@@ -1166,11 +1120,9 @@ pub(crate) unsafe fn set_keep_bit(packet: *mut u8) {
     *at.add(1) = mode[1];
 }
 
-pub(crate) unsafe fn send_and_receive_over_socket_wait(
+pub(crate) unsafe fn send_and_receive_over_socket(
     socket_path: *const c_char,
     packet: *const u8,
-    poll_timeout_us: i32,
-    recv_timeout_us: i32,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
     clear_errmsg(errmsg);
@@ -1226,8 +1178,8 @@ pub(crate) unsafe fn send_and_receive_over_socket_wait(
     // NET-5: the reply waits as long as the callee's process lives; a callee
     // that cannot be named is waited on until its end closes.
     let result = match Peer::of(client_fd) {
-        Some(peer) => read_packet(client_fd, 0, 0, Some(&peer), &mut err),
-        None => stream_from_client_wait(client_fd, poll_timeout_us, recv_timeout_us, &mut err),
+        Some(peer) => read_packet(client_fd, Wait::Peer(&peer), &mut err),
+        None => read_packet(client_fd, Wait::Forever, &mut err),
     };
     if !err.is_null() {
         drop_conn(client_fd);
@@ -1242,14 +1194,6 @@ pub(crate) unsafe fn send_and_receive_over_socket_wait(
     // SHM-8
     crate::packet_ffi::inherit_reply(result);
     result
-}
-
-pub(crate) unsafe fn send_and_receive_over_socket(
-    socket_path: *const c_char,
-    packet: *const u8,
-    errmsg: *mut *mut c_char,
-) -> *mut u8 {
-    send_and_receive_over_socket_wait(socket_path, packet, 0, 0, errmsg)
 }
 
 // -- mlc_spawn ----------------------------------------------------------------
@@ -1353,7 +1297,7 @@ pub(crate) unsafe fn mlc_spawn_watched(
     }
     std::thread::spawn(move || {
         let mut err: *mut c_char = ptr::null_mut();
-        let result = stream_from_client_wait(fd, 0, 0, &mut err);
+        let result = read_packet(fd, Wait::Forever, &mut err);
         close_socket(fd);
         // SHM-8
         crate::packet_ffi::inherit_reply(result);
@@ -1446,16 +1390,8 @@ pub(crate) unsafe fn wait_for_client_with_timeout(
     clear_errmsg(errmsg);
 
     // poll() instead of pselect/FD_SET so any fd value is accepted (an fd_set
-    // caps at FD_SETSIZE=1024). Index 0 is the listening socket; the client fds
-    // follow. Only the server slot is acted on (accept), matching the original;
-    // clients are included so activity on them still wakes the wait.
-    let mut pfds: Vec<libc::pollfd> = Vec::new();
-    pfds.push(libc::pollfd { fd: (*daemon).server_fd, events: libc::POLLIN, revents: 0 });
-    let mut client = (*daemon).client_fds;
-    while !client.is_null() {
-        pfds.push(libc::pollfd { fd: (*client).fd, events: libc::POLLIN, revents: 0 });
-        client = (*client).next;
-    }
+    // caps at FD_SETSIZE=1024).
+    let mut pfd = libc::pollfd { fd: (*daemon).server_fd, events: libc::POLLIN, revents: 0 };
 
     // Timeout
     let mut ts: libc::timespec = std::mem::zeroed();
@@ -1467,7 +1403,7 @@ pub(crate) unsafe fn wait_for_client_with_timeout(
         ptr::null()
     };
 
-    let ready = poll_wait(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout_ptr);
+    let ready = poll_wait(&mut pfd, 1, timeout_ptr);
     if ready < 0 {
         if crate::utility::errno_val() == libc::EINTR {
             return 0;
@@ -1479,75 +1415,39 @@ pub(crate) unsafe fn wait_for_client_with_timeout(
         return 0;
     }
 
-    // Check for new connection
-    if pfds[0].revents & libc::POLLIN != 0 {
-        let selected_fd = morloc_runtime_types::fd::accept((*daemon).server_fd, ptr::null_mut(), ptr::null_mut());
-        if selected_fd >= 0 {
-            if trace_close_enabled() {
-                eprintln!("[MLC_IPC] pid={} accept fd={}", libc::getpid(), selected_fd);
-            }
-            crate::utility::set_nosigpipe(selected_fd);
-            libc::fcntl(selected_fd, libc::F_SETFL, libc::O_NONBLOCK);
-
-            // Short-circuit readiness pings here (see try_answer_ping) so they
-            // never wait on a possibly-initializing worker. Peeking costs one
-            // extra recv per accept, so only do it during startup: readiness
-            // pings always precede the first real call, so once a non-ping
-            // request is seen the peek is disabled and steady-state calls pay
-            // nothing (a later recovery ping falls through to a now-warm worker,
-            // with the pool-side silent-pong-drop as backstop).
-            let mut handled = false;
-            if PING_PEEK_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
-                match try_answer_ping(selected_fd) {
-                    PingPeek::Answered => handled = true,
-                    PingPeek::NotPing => {
-                        PING_PEEK_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    PingPeek::Unknown => {}
-                }
-            }
-            if !handled {
-                let new_client = libc::calloc(1, std::mem::size_of::<ClientList>()) as *mut ClientList;
-                (*new_client).fd = selected_fd;
-                (*new_client).next = ptr::null_mut();
-
-                if (*daemon).client_fds.is_null() {
-                    (*daemon).client_fds = new_client;
-                } else {
-                    let mut last = (*daemon).client_fds;
-                    while !(*last).next.is_null() {
-                        last = (*last).next;
-                    }
-                    (*last).next = new_client;
-                }
-            }
-        }
-        else if out_of_descriptors() {
+    if pfd.revents & libc::POLLIN == 0 {
+        return 0;
+    }
+    let selected_fd = morloc_runtime_types::fd::accept((*daemon).server_fd, ptr::null_mut(), ptr::null_mut());
+    if selected_fd < 0 {
+        if out_of_descriptors() {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        return 0;
     }
-
-    if (*daemon).client_fds.is_null() {
-        return 0; // spurious wakeup
-    }
-
-    // Dequeue first client
-    let client_node = (*daemon).client_fds;
-    let return_fd = (*client_node).fd;
-    (*daemon).client_fds = (*client_node).next;
-    libc::free(client_node as *mut c_void);
-
     if trace_close_enabled() {
-        eprintln!("[MLC_IPC] pid={} wait_for_client return fd={}", libc::getpid(), return_fd);
+        eprintln!("[MLC_IPC] pid={} accept fd={}", libc::getpid(), selected_fd);
     }
-    return_fd
-}
+    crate::utility::set_nosigpipe(selected_fd);
+    libc::fcntl(selected_fd, libc::F_SETFL, libc::O_NONBLOCK);
 
-pub(crate) unsafe fn wait_for_client(
-    daemon: *mut LanguageDaemon,
-    errmsg: *mut *mut c_char,
-) -> i32 {
-    wait_for_client_with_timeout(daemon, 0, errmsg)
+    // Short-circuit readiness pings here (see try_answer_ping) so they
+    // never wait on a possibly-initializing worker. Peeking costs one
+    // extra recv per accept, so only do it during startup: readiness
+    // pings always precede the first real call, so once a non-ping
+    // request is seen the peek is disabled and steady-state calls pay
+    // nothing (a later recovery ping falls through to a now-warm worker,
+    // with the pool-side silent-pong-drop as backstop).
+    if PING_PEEK_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        match try_answer_ping(selected_fd) {
+            PingPeek::Answered => return 0,
+            PingPeek::NotPing => {
+                PING_PEEK_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            PingPeek::Unknown => {}
+        }
+    }
+    selected_fd
 }
 
 #[cfg(test)]
@@ -2218,11 +2118,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn stream_from_client_wait(client_fd: i32, poll_timeout_us: i32, recv_timeout_us: i32, errmsg: *mut *mut c_char) -> *mut u8 {
-        super::stream_from_client_wait(client_fd, poll_timeout_us, recv_timeout_us, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn stream_from_client(client_fd: i32, errmsg: *mut *mut c_char) -> *mut u8 {
         super::stream_from_client(client_fd, errmsg)
     }
@@ -2235,11 +2130,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_set_self_socket(socket_path: *const c_char) {
         super::mlc_set_self_socket(socket_path)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn send_and_receive_over_socket_wait(socket_path: *const c_char, packet: *const u8, poll_timeout_us: i32, recv_timeout_us: i32, errmsg: *mut *mut c_char) -> *mut u8 {
-        super::send_and_receive_over_socket_wait(socket_path, packet, poll_timeout_us, recv_timeout_us, errmsg)
     }
 
     #[no_mangle]
@@ -2270,11 +2160,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn wait_for_client_with_timeout(daemon: *mut LanguageDaemon, timeout_us: i32, errmsg: *mut *mut c_char) -> i32 {
         super::wait_for_client_with_timeout(daemon, timeout_us, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn wait_for_client(daemon: *mut LanguageDaemon, errmsg: *mut *mut c_char) -> i32 {
-        super::wait_for_client(daemon, errmsg)
     }
 }
 

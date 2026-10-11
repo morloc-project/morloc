@@ -102,8 +102,6 @@ extern "C" {
     fn send_and_receive_over_socket(socket_path: *const c_char, packet: *const u8,
                                     errmsg: *mut *mut c_char) -> *mut u8;
     fn get_morloc_data_packet_error_message(data: *const u8, errmsg: *mut *mut c_char) -> *mut c_char;
-    fn pool_mark_busy();
-    fn pool_mark_idle();
     // @show / @read : voidstar <-> JSON text.
     fn mlc_show(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char;
     fn mlc_read(json_str: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
@@ -3099,9 +3097,7 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
         morloc_infra_abort(cstr_take(err));
     }
 
-    pool_mark_busy();
     let result = send_and_receive_over_socket(socket_path.as_ptr(), packet, &mut err);
-    pool_mark_idle();
     libc::free(packet as *mut c_void);
     if !err.is_null() {
         morloc_infra_abort(cstr_take(err));
@@ -3172,7 +3168,6 @@ pub unsafe fn remote_call(
     };
     let resources = Resources { memory: mem, time, cpus, gpus };
     let mut err: *mut c_char = std::ptr::null_mut();
-    pool_mark_busy();
     let result = remote_call_ffi(
         mid as i32,
         socket_c.as_ptr(),
@@ -3182,7 +3177,6 @@ pub unsafe fn remote_call(
         args.len(),
         &mut err,
     );
-    pool_mark_idle();
     if !err.is_null() {
         morloc_throw(cstr_take(err));
     }

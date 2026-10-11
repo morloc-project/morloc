@@ -1,27 +1,13 @@
 //! Nexus-side stdio RPC server.
 //!
-//! The nexus is the sole owner of fd 0/1/2. Pools reach stdin/stdout/
-//! stderr through synchronous RPCs over a dedicated Unix socket exported
-//! via `MORLOC_NEXUS_STDIO_SOCK`.
+//! The nexus is the sole owner of fd 0/1/2. Pools reach it over a Unix
+//! socket exported via `MORLOC_NEXUS_STDIO_SOCK`; the opcodes and status
+//! bytes are in `morloc_runtime_types::stdio_proto`. Bytes never travel over
+//! the socket in bulk: sub-packets ride in shared memory and only a `RelPtr`
+//! moves.
 //!
-//! Wire protocol (all little-endian):
-//!
-//!   Request:  [opcode: u8]
-//!             [slot_id: i64]                       (both directions)
-//!             [payload_relptr: i64][size: u64]     (WRITE_STDIO only)
-//!
-//!   Response: [status: u8]
-//!             where status = 0 (ok), 1 (err), 2 (eof)
-//!     if ok and NEXT_STDIO: [relptr: i64][size: u64]
-//!     if err:                [err_len: u32][err_bytes...]
-//!
-//! Bytes never travel over the socket in bulk: sub-packets ride in the
-//! shared SHM arena and only a `RelPtr` moves.
-//!
-//! Concurrency: three separate mutexes for stdin / stdout / stderr so a
-//! slow downstream consumer of stdout doesn't stall reads on stdin. The
-//! mutex is held only across the underlying `read(2)` / `write(2)`
-//! syscall (plus the fixed-cost header parse for stdin).
+//! Written stdout and stderr streams do not use the socket: the custodian
+//! hands each sub-packet to `stdio_sink` (SLOT-16).
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -240,8 +226,7 @@ fn accept_loop(listener: UnixListener, _socket_path: String) {
                     .spawn(move || {
                         // Per-connection: drain requests until the client
                         // closes or errors. A single pool may send many
-                        // `NEXT_STDIO` / `WRITE_STDIO` requests over the
-                        // same connection to amortise the connect cost.
+                        // requests over the same connection to amortise the connect cost.
                         let _ = handle_connection(stream);
                     })
                     .ok();
@@ -312,7 +297,7 @@ pub(crate) fn serve_op(
 
 pub(crate) enum Resp {
     Ok(i64, u64), // relptr, size (NEXT_STDIO success)
-    Ack,           // WRITE_STDIO success
+    Ack,           // write success
     Eof,
     Err(String),
     PipeClosed,    // downstream consumer closed the pipe (EPIPE)
@@ -326,7 +311,7 @@ fn write_resp(r: Result<(), crate::stdio_bridge::WriteError>) -> Resp {
     match r {
         Ok(()) => Resp::Ack,
         Err(WriteError::BrokenPipe) => pipe_closed_resp(),
-        Err(WriteError::Other(e)) => Resp::Err(format!("WRITE_STDIO body: {}", e)),
+        Err(WriteError::Other(e)) => Resp::Err(format!("stdio write: {}", e)),
     }
 }
 
@@ -649,7 +634,7 @@ fn check_incoming_schema(meta: &[u8], expected_schema: &str, what: &str) -> Resu
     Ok(())
 }
 
-/// Handle a `WRITE_STDIO` request.
+/// Write one sub-packet of a stdout or stderr stream.
 ///
 /// **stderr** stays the raw diagnostic channel: the first call emits the
 /// stream-packet header, subsequent calls append sub-packet/footer bytes
@@ -668,17 +653,16 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
     let stdio_kind = match unsafe { br::stdio_kind_of(slot_id) } {
         Ok(Some(k)) => k,
         Ok(None) => return Resp::Err(format!(
-            "WRITE_STDIO: slot {:#x} is not stdio-bound", slot_id,
+            "stdio write: slot {:#x} is not stdio-bound", slot_id,
         )),
-        Err(e) => return Resp::Err(format!("WRITE_STDIO: {}", e)),
+        Err(e) => return Resp::Err(format!("stdio write: {}", e)),
     };
-    // `WRITE_STDIO` on a stdin-bound slot is a caller bug (writer on
-    // a reader).
+    // A write to a stdin-bound slot is a caller bug.
     let slot_mtx = match stdio_kind {
         STDIO_KIND_STDOUT => &STDOUT_SLOT,
         STDIO_KIND_STDERR => &STDERR_SLOT,
         _ => return Resp::Err(format!(
-            "WRITE_STDIO: unsupported stdio_kind {} for write path", stdio_kind,
+            "stdio write: unsupported stdio_kind {} for write path", stdio_kind,
         )),
     };
     let route = if stdio_kind == STDIO_KIND_STDOUT { stdout_route() } else { StdoutRoute::Direct };
@@ -704,7 +688,7 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
             match unsafe { br::write_stream_header_for_slot(slot.fd, slot_id) } {
                 Ok(_) => { slot.header_done = true; }
                 Err(br::WriteError::BrokenPipe) => return pipe_closed_resp(),
-                Err(br::WriteError::Other(e)) => return Resp::Err(format!("WRITE_STDIO header: {}", e)),
+                Err(br::WriteError::Other(e)) => return Resp::Err(format!("stdio write header: {}", e)),
             }
         }
         return write_resp(unsafe { br::write_shm_bytes_to_fd(slot.fd, relptr, size) });
@@ -716,18 +700,18 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
     let cfg = render_cfg();
     let hdr_vec = match unsafe { br::read_shm_bytes(relptr, 32) } {
         Ok(h) => h,
-        Err(e) => return Resp::Err(format!("WRITE_STDIO read: {}", e)),
+        Err(e) => return Resp::Err(format!("stdio write read: {}", e)),
     };
     if hdr_vec.len() < 32 {
         return Resp::Err(format!(
-            "WRITE_STDIO: blob is {} bytes, smaller than a packet header", hdr_vec.len(),
+            "stdio write: blob is {} bytes, smaller than a packet header", hdr_vec.len(),
         ));
     }
     let mut hdr = [0u8; 32];
     hdr.copy_from_slice(&hdr_vec[..32]);
     let header = match PacketHeader::from_bytes(&hdr) {
         Ok(h) => h,
-        Err(e) => return Resp::Err(format!("WRITE_STDIO header parse: {}", e)),
+        Err(e) => return Resp::Err(format!("stdio write header parse: {}", e)),
     };
     let is_footer = header.is_footer();
     let is_data = header.is_data();

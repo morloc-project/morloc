@@ -146,7 +146,7 @@ pub unsafe fn stdio_slot_schema(handle: i64) -> Result<String, String> {
 }
 
 /// Emit the `MORLOC_STREAM_PACKET` prefix for the given stdio slot to
-/// `fd`. Used lazily on the first `WRITE_STDIO` per slot.
+/// `fd`. Used lazily on the first write per slot.
 pub unsafe fn write_stream_header_for_slot(fd: i32, handle: i64) -> Result<u64, WriteError> {
     let mut buf: *mut u8 = std::ptr::null_mut();
     let mut len: usize = 0;
@@ -162,7 +162,7 @@ pub unsafe fn write_stream_header_for_slot(fd: i32, handle: i64) -> Result<u64, 
 }
 
 /// Read `size` bytes from the SHM block at `relptr` and write them to
-/// `fd`. Used by `WRITE_STDIO`. The bytes are the raw sub-packet
+/// `fd`. The bytes are the raw sub-packet
 /// (header + metadata + payload) the pool assembled in SHM.
 pub unsafe fn write_shm_bytes_to_fd(fd: i32, relptr: i64, size: u64) -> Result<(), WriteError> {
     let mut err: *mut c_char = std::ptr::null_mut();

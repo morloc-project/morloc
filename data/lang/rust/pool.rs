@@ -47,10 +47,6 @@ extern "C" {
 }
 
 
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq)]
-enum PoolConcurrency { Threads = 0, Single = 1 }
-
 type PoolDispatchFn =
     unsafe extern "C" fn(u32, *const *const u8, usize, *mut c_void) -> *mut u8;
 
@@ -59,9 +55,6 @@ struct PoolConfig {
     local_dispatch: PoolDispatchFn,
     remote_dispatch: PoolDispatchFn,
     dispatch_ctx: *mut c_void,
-    concurrency: PoolConcurrency,
-    initial_workers: i32,
-    dynamic_scaling: bool,
     release_dispatch: Option<unsafe extern "C" fn()>,
 }
 
@@ -103,9 +96,6 @@ fn main() {
         local_dispatch,
         remote_dispatch,
         dispatch_ctx: std::ptr::null_mut(),
-        concurrency: PoolConcurrency::Threads,
-        initial_workers: 1,
-        dynamic_scaling: true,
         release_dispatch: Some(release_dispatch),
     };
     let rc = unsafe { pool_main(argv.len() as c_int, argv.as_mut_ptr(), &mut cfg) };

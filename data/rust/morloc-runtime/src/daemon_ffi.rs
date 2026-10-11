@@ -927,17 +927,6 @@ fn compile_binding(base_dir: &str, hv: u64, expr: &str, eval_timeout: i32) -> Op
 
 // -- C-exported binding store functions ---------------------------------------
 
-pub(crate) unsafe fn binding_store_init(base_dir: *const c_char) -> *mut BindingStore {
-    let dir = CStr::from_ptr(base_dir).to_string_lossy().into_owned();
-    Box::into_raw(Box::new(BindingStore::new(&dir)))
-}
-
-pub(crate) unsafe fn binding_store_free(store: *mut BindingStore) {
-    if !store.is_null() {
-        drop(Box::from_raw(store));
-    }
-}
-
 // -- Request parsing (serde_json) ---------------------------------------------
 
 #[derive(serde::Deserialize)]
@@ -1230,10 +1219,6 @@ pub(crate) unsafe fn daemon_free_response(resp: *mut DaemonResponse) {
 
 // -- Response serialization (serde_json) --------------------------------------
 
-pub(crate) unsafe fn daemon_serialize_response(response: *mut DaemonResponse, out_len: *mut usize) -> *mut c_char {
-    serialize_response(response, out_len)
-}
-
 pub(crate) unsafe fn serialize_response(
     response: *mut DaemonResponse,
     out_len: *mut usize,
@@ -1288,11 +1273,6 @@ pub(crate) unsafe fn daemon_build_discovery(manifest: *mut crate::manifest_ffi::
 }
 
 // -- Eval timeout -------------------------------------------------------------
-
-pub(crate) fn daemon_set_eval_timeout(timeout_sec: i32) {
-    let t = if timeout_sec > 0 { timeout_sec } else { 30 };
-    G_EVAL_TIMEOUT.store(t, Ordering::Relaxed);
-}
 
 /// Set the eval sandbox policy applied to forked `morloc eval`/`--save`.
 /// `sandbox` enables the sandbox; `allowed` is a NUL-terminated, comma-
@@ -4258,16 +4238,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn binding_store_init(base_dir: *const c_char) -> *mut BindingStore {
-        super::binding_store_init(base_dir)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn binding_store_free(store: *mut BindingStore) {
-        super::binding_store_free(store)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn daemon_parse_request(json: *const c_char, len: usize, errmsg: *mut *mut c_char) -> *mut DaemonRequest {
         super::daemon_parse_request(json, len, errmsg)
     }
@@ -4288,18 +4258,8 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn daemon_serialize_response(response: *mut DaemonResponse, out_len: *mut usize) -> *mut c_char {
-        super::daemon_serialize_response(response, out_len)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn daemon_build_discovery(manifest: *mut crate::manifest_ffi::Manifest) -> *mut c_char {
         super::daemon_build_discovery(manifest)
-    }
-
-    #[no_mangle]
-    pub extern "C" fn daemon_set_eval_timeout(timeout_sec: i32) {
-        super::daemon_set_eval_timeout(timeout_sec)
     }
 
     #[no_mangle]

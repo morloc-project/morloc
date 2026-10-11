@@ -2056,7 +2056,7 @@ pub(crate) unsafe fn mlc_read_handle_voidstar(
 // ── stdio-server bridge FFI ────────────────────────────────────────────────
 
 /// Return the `STDIO_KIND_*` byte for a stdio-bound slot. Used by the
-/// nexus stdio server to route a `WRITE_STDIO` request to fd 1 or fd 2.
+/// nexus stdio server to route a write to fd 1 or fd 2.
 ///
 /// Returns 0 on success (kind byte written to `*kind_out`), -1 if the
 /// handle is not stdio-bound (no errmsg), or a positive error code
@@ -2076,7 +2076,7 @@ pub(crate) unsafe fn mlc_stdio_slot_kind(
 
 /// Build a MORLOC_STREAM_PACKET prefix (32-byte header + SCHEMA_STRING
 /// metadata block) from a stdio OStream slot's cached element schema.
-/// Used by the nexus stdio server on the first `WRITE_STDIO` per slot
+/// Used by the nexus stdio server on the first write per slot
 /// to emit the stream header before any sub-packet bytes flow.
 ///
 /// On success returns 0 and sets `*buf_out` to a libc::malloc-owned

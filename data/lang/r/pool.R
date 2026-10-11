@@ -48,18 +48,7 @@ mlc_load_user_sources <- function() {
   invisible()
 }
 
-morloc_is_ping                       <- function(...){ .Call("morloc_is_ping",                       ...) }
-morloc_pong                          <- function(...){ .Call("morloc_pong",                          ...) }
-morloc_is_local_call                 <- function(...){ .Call("morloc_is_local_call",                 ...) }
-morloc_is_remote_call                <- function(...){ .Call("morloc_is_remote_call",                ...) }
-morloc_make_fail_packet              <- function(...){ .Call("morloc_make_fail_packet",              ...) }
-morloc_wait_for_client               <- function(...){ .Call("morloc_wait_for_client",               ...) }
-morloc_stream_from_client            <- function(...){ .Call("morloc_stream_from_client",            ...) }
-morloc_read_morloc_call_packet       <- function(...){ .Call("morloc_read_morloc_call_packet",       ...) }
-morloc_send_packet_to_foreign_server <- function(...){ .Call("morloc_send_packet_to_foreign_server", ...) }
-morloc_close_socket                  <- function(...){ .Call("morloc_close_socket",                  ...) }
 morloc_start_daemon                  <- function(...){ .Call("morloc_start_daemon",                  ...) }
-morloc_shinit                        <- function(...){ .Call("morloc_shinit",                        ...) }
 morloc_foreign_call                  <- function(...){ .Call("morloc_foreign_call",                  ...) }
 # The third argument is codegen's per-call answer to "can this value carry an
 # interior NUL", which R cannot represent. It defaults to TRUE for the call
@@ -168,9 +157,7 @@ morloc_mlc_try <- function(body, ok, err) {
   )
 }
 morloc_fork                          <- function(...){ .Call("morloc_fork",                          ...) }
-morloc_recv_fd                       <- function(...){ .Call("morloc_recv_fd",                       ...) }
 morloc_kill                          <- function(...){ .Call("morloc_kill",                          ...) }
-morloc_waitpid                       <- function(...){ .Call("morloc_waitpid",                       ...) }
 morloc_install_sigterm_handler       <- function(...){ .Call("morloc_install_sigterm_handler",       ...) }
 morloc_is_shutting_down              <- function(...){ .Call("morloc_is_shutting_down",              ...) }
 morloc_waitpid_blocking              <- function(...){ .Call("morloc_waitpid_blocking",              ...) }
