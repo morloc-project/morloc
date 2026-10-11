@@ -506,6 +506,7 @@ pub(crate) enum Peer {
     Stamped { pid: u32, start: u64 },
     /// Asked of the socket only when a wait stalls: the kernel keeps the
     /// connecting process's identity with the socket, safe against pid reuse.
+    #[cfg(target_os = "linux")]
     Deferred { fd: i32 },
 }
 
@@ -553,6 +554,7 @@ impl Peer {
     pub(crate) fn alive(&self) -> bool {
         match *self {
             Peer::Stamped { pid, start } => morloc_runtime_types::process::alive(pid, start),
+            #[cfg(target_os = "linux")]
             Peer::Deferred { fd } => deferred_alive(fd),
         }
     }
@@ -614,11 +616,6 @@ fn deferred_alive(fd: i32) -> bool {
         }
         Err(e) => !matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ESRCH)),
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn deferred_alive(_fd: i32) -> bool {
-    true
 }
 
 #[cfg(target_os = "macos")]
