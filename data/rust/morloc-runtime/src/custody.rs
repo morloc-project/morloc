@@ -462,11 +462,11 @@ pub(crate) fn queue_at(rel: RelPtr) -> Result<&'static CustodyQueue, MorlocError
     Ok(unsafe { &*(abs as *const CustodyQueue) })
 }
 
-/// The nexus's stdout and stderr writer: given the stream's handle and a
-/// block of `len` bytes (a sub-packet or a footer) at `rel`, it returns
-/// `SINK_WRITTEN`, `SINK_PIPE_CLOSED`, or `SINK_FAILED` with a malloc'd
-/// message in `*errmsg`.
-pub type StdioSink = unsafe extern "C" fn(handle: i64, rel: i64, len: u64, errmsg: *mut *mut libc::c_char) -> i32;
+/// The nexus's stdout and stderr writer: given the stream's handle and the
+/// `len` bytes at `bytes` (a sub-packet or a footer), read before it
+/// returns, it returns `SINK_WRITTEN`, `SINK_PIPE_CLOSED`, or `SINK_FAILED`
+/// with a malloc'd message in `*errmsg`.
+pub type StdioSink = unsafe extern "C" fn(handle: i64, bytes: *const u8, len: u64, errmsg: *mut *mut libc::c_char) -> i32;
 
 pub const SINK_WRITTEN: i32 = 0;
 pub const SINK_FAILED: i32 = 1;
@@ -499,6 +499,7 @@ pub(crate) struct Writer {
     diag: morloc_runtime_types::packet::StreamDiag,
     inflight: std::collections::VecDeque<(crate::write_behind::Ticket, Item)>,
     failed: bool,
+    stdio_out: Vec<u8>,
 }
 
 // SAFETY: SLOT-10: the writer alone uses the blocks it references while it runs.
@@ -525,6 +526,7 @@ impl Writer {
             cursor: i.cursor, entries: i.entries, diag: i.diag,
             inflight: Default::default(),
             failed: false,
+            stdio_out: Vec::new(),
         }
     }
 
@@ -768,24 +770,19 @@ impl Writer {
         }
     }
 
-    fn send_stdio(&self, parts: &[&[u8]]) -> Result<(), (u32, String)> {
+    fn send_stdio(&mut self, parts: &[&[u8]]) -> Result<(), (u32, String)> {
         let Some(sink) = STDIO_SINK.get() else {
             return Err((FAILED_IO, "no stdout writer in this process".into()));
         };
-        let len: usize = parts.iter().map(|p| p.len()).sum();
-        let abs = crate::shm::shmalloc(len.max(1)).map_err(|e| (FAILED_IO, e.to_string()))?;
-        let mut at = 0;
+        self.stdio_out.clear();
         for p in parts {
-            // SAFETY: SLOT-16: the block holds `len` bytes.
-            unsafe { std::ptr::copy_nonoverlapping(p.as_ptr(), (abs as *mut u8).add(at), p.len()) };
-            at += p.len();
+            self.stdio_out.extend_from_slice(p);
         }
         let mut err: *mut libc::c_char = std::ptr::null_mut();
-        let res = crate::shm::abs2rel(abs)
-            .map_err(|e| (FAILED_IO, e.to_string()))
-            // SAFETY: SLOT-16: the sink reads `len` bytes at `rel` before returning.
-            .map(|rel| unsafe { sink(self.handle(), rel as i64, len as u64, &mut err) });
-        let _ = crate::shm::shfree(abs);
+        // SAFETY: SLOT-16: the sink reads `len` bytes at `bytes` before returning.
+        let res: Result<i32, (u32, String)> = Ok(unsafe {
+            sink(self.handle(), self.stdio_out.as_ptr(), self.stdio_out.len() as u64, &mut err)
+        });
         let msg = if err.is_null() {
             String::from("the stdout writer failed")
         } else {
@@ -856,11 +853,10 @@ impl Writer {
 // SLOT-15: payload first, head last, so a reader never takes a half-written
 // sub-packet for one.
 fn write_subpacket_to_file(fd: i32, sub: &crate::stream_format::SubpacketBytes<'_>, cursor: u64) -> Result<(), (u32, String)> {
-    let w = |bytes: &[u8], at: u64| crate::stream_format::pwrite_all_fd(fd, bytes, at).map_err(|e| (FAILED_IO, e.to_string()));
-    w(&[0u8; 32], cursor)?;
-    w(&sub.payload, cursor + sub.head.len() as u64)?;
-    w(&[0u8; 8][..sub.pad], cursor + (sub.head.len() + sub.payload.len()) as u64)?;
-    w(&sub.head, cursor)
+    let io = |e: MorlocError| (FAILED_IO, e.to_string());
+    let blank = vec![0u8; sub.head.len()];
+    crate::stream_format::pwritev_all_fd(fd, &[&blank, &sub.payload, &[0u8; 8][..sub.pad]], cursor).map_err(io)?;
+    crate::stream_format::pwrite_all_fd(fd, &sub.head, cursor).map_err(io)
 }
 
 struct Hosted {

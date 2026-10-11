@@ -906,6 +906,54 @@ pub(crate) fn pwrite_all_fd(fd: i32, mut buf: &[u8], mut offset: u64) -> Result<
     Ok(())
 }
 
+/// Write `parts` back to back at `offset`, as one system call where the
+/// platform has one.
+pub(crate) fn pwritev_all_fd(fd: i32, parts: &[&[u8]], offset: u64) -> Result<(), MorlocError> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut iov: Vec<libc::iovec> = parts
+            .iter()
+            .filter(|p| !p.is_empty())
+            .map(|p| libc::iovec { iov_base: p.as_ptr() as *mut libc::c_void, iov_len: p.len() })
+            .collect();
+        let mut first = 0usize;
+        let mut offset = offset;
+        while first < iov.len() {
+            // SAFETY: every iovec names a live slice of `parts`.
+            let n = unsafe { libc::pwritev(fd, iov[first..].as_ptr(), (iov.len() - first) as libc::c_int, offset as libc::off_t) };
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted { continue; }
+                return Err(MorlocError::Io(e));
+            }
+            if n == 0 {
+                return Err(MorlocError::Other("pwritev_all_fd: zero-byte write".into()));
+            }
+            let mut n = n as usize;
+            offset += n as u64;
+            while first < iov.len() && n >= iov[first].iov_len {
+                n -= iov[first].iov_len;
+                first += 1;
+            }
+            if first < iov.len() {
+                // SAFETY: n < iov_len, so the advanced base stays in its slice.
+                iov[first].iov_base = unsafe { (iov[first].iov_base as *mut u8).add(n) } as *mut libc::c_void;
+                iov[first].iov_len -= n;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut offset = offset;
+        for p in parts {
+            pwrite_all_fd(fd, p, offset)?;
+            offset += p.len() as u64;
+        }
+        Ok(())
+    }
+}
+
 /// Copy `count` bytes from `src_fd[src_off..src_off+count]` to
 /// `dest_fd[dest_off..]` using `sendfile()` for zero-copy via the
 /// kernel pagecache. Loops past EINTR + partial transfers; advances

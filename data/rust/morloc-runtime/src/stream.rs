@@ -10721,9 +10721,8 @@ mod write_behind_tests {
 
     static SINK: Mutex<Vec<(i64, Vec<u8>)>> = Mutex::new(Vec::new());
 
-    unsafe extern "C" fn recording_sink(handle: i64, rel: i64, len: u64, _err: *mut *mut libc::c_char) -> i32 {
-        let abs = crate::shm::rel2abs(rel as RelPtr).unwrap();
-        let bytes = std::slice::from_raw_parts(abs as *const u8, len as usize).to_vec();
+    unsafe extern "C" fn recording_sink(handle: i64, bytes: *const u8, len: u64, _err: *mut *mut libc::c_char) -> i32 {
+        let bytes = std::slice::from_raw_parts(bytes, len as usize).to_vec();
         SINK.lock().unwrap().push((handle, bytes));
         crate::custody::SINK_WRITTEN
     }
