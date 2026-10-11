@@ -944,6 +944,7 @@ impl Drop for ProcessLocalSlot {
             for entry in self.cache.entries.drain(..) {
                 let _ = crate::shm::shfree(entry.shm_packet);
             }
+            self.cache.handle_bytes.fetch_sub(self.cache.current_bytes, std::sync::atomic::Ordering::Relaxed);
         }
         if !self.mmap_ptr.is_null() && self.mmap_size > 0 {
             unsafe {
@@ -1011,12 +1012,18 @@ unsafe impl Send for ProcessLocalSlot {}
 /// initialised on first access; cleared on `shclose_atexit`-style
 /// teardown.
 ///
-/// An operation takes a handle's idle slot out of the map, or attaches
-/// another when a thread of this process already has it out, and puts one
-/// back when it ends. Threads writing one handle at once take turns on its
+/// An operation takes one of a handle's idle slots out of the map, or
+/// attaches another when every one is out, and puts it back when it ends. Threads writing one handle at once take turns on its
 /// stream's slot lock; a written handle's slot holds only its schemas. The
 /// map lock is never held across an operation's I/O.
-pub(crate) static PROCESS_LOCAL_SLOTS: Held<Option<std::collections::HashMap<i64, ProcessLocalSlot>>> =
+/// A handle's idle slots in this process, and the bytes their caches hold.
+#[derive(Default)]
+pub(crate) struct HandleSlots {
+    idle: Vec<ProcessLocalSlot>,
+    cache_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+pub(crate) static PROCESS_LOCAL_SLOTS: Held<Option<std::collections::HashMap<i64, HandleSlots>>> =
     Held::new(2, None);
 
 // SHM-8: what keeps a worker from retiring.
@@ -1033,14 +1040,12 @@ struct LocalClaim {
 impl LocalClaim {
     fn give_back(self, local: ProcessLocalSlot) {
         let mut guard = PROCESS_LOCAL_SLOTS.lock();
-        let map = guard.get_or_insert_with(std::collections::HashMap::new);
-        let spare = match map.entry(self.handle) {
-            std::collections::hash_map::Entry::Vacant(v) => {
-                v.insert(local);
-                None
-            }
-            // Another thread put one back first; keep one.
-            std::collections::hash_map::Entry::Occupied(_) => Some(local),
+        let idle = &mut guard.get_or_insert_with(std::collections::HashMap::new).entry(self.handle).or_default().idle;
+        let spare = if idle.len() < idle_slots_kept() {
+            idle.push(local);
+            None
+        } else {
+            Some(local)
         };
         drop(guard);
         drop(spare);
@@ -1049,10 +1054,20 @@ impl LocalClaim {
 
 /// Claim `handle`'s slot for one operation, taking its idle slot if there
 /// is one.
-fn claim_process_local_slot(handle: i64) -> (LocalClaim, Option<ProcessLocalSlot>) {
+fn claim_process_local_slot(
+    handle: i64,
+) -> (LocalClaim, Option<ProcessLocalSlot>, std::sync::Arc<std::sync::atomic::AtomicU64>) {
     let mut guard = PROCESS_LOCAL_SLOTS.lock();
-    let local = guard.as_mut().and_then(|map| map.remove(&handle));
-    (LocalClaim { handle }, local)
+    let slots = guard.get_or_insert_with(std::collections::HashMap::new).entry(handle).or_default();
+    (LocalClaim { handle }, slots.idle.pop(), slots.cache_bytes.clone())
+}
+
+/// Idle slots kept per handle: threads using one handle at once each find
+/// a warm one (a read slot's mapping and decompressed cache) when they come
+/// back, rather than building one that is then discarded.
+fn idle_slots_kept() -> usize {
+    static KEPT: morloc_runtime_types::publish_once::PublishOnce<usize> = morloc_runtime_types::publish_once::PublishOnce::new();
+    *KEPT.get_or_init(|| std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16))
 }
 
 /// Run `f` against the process-local slot for `handle`. On entry the
@@ -1104,7 +1119,7 @@ pub fn with_process_local_slot<R>(
         )));
     }
 
-    let (claim, mut taken) = claim_process_local_slot(handle);
+    let (claim, mut taken, cache_bytes) = claim_process_local_slot(handle);
 
     // Validate cached_generation; dispose on mismatch. The stream it
     // belonged to has ended.
@@ -1135,6 +1150,13 @@ pub fn with_process_local_slot<R>(
 
     if local.cache.is_inherited() {
         local.cache = crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(read_cache_cap_env())));
+    }
+    // SLOT-23
+    if !std::sync::Arc::ptr_eq(&local.cache.handle_bytes, &cache_bytes) {
+        let held = local.cache.current_bytes;
+        let own = std::mem::replace(&mut local.cache.handle_bytes, cache_bytes);
+        own.fetch_sub(held, std::sync::atomic::Ordering::Relaxed);
+        local.cache.handle_bytes.fetch_add(held, std::sync::atomic::Ordering::Relaxed);
     }
 
     // Run f with the validated local slot, keeping it if f panics.
@@ -1176,7 +1198,8 @@ pub fn with_process_local_slot<R>(
 fn install_process_local_slot(handle: i64, slot: ProcessLocalSlot) {
     let mut guard = PROCESS_LOCAL_SLOTS.lock();
     let map = guard.get_or_insert_with(std::collections::HashMap::new);
-    let replaced = map.insert(handle, slot);
+    let cache_bytes = slot.cache.handle_bytes.clone();
+    let replaced = map.insert(handle, HandleSlots { idle: vec![slot], cache_bytes });
     drop(guard);
     drop(replaced);
 }
@@ -1890,9 +1913,9 @@ pub(crate) fn drop_ended_slots() -> bool {
         let Some(map) = guard.as_mut() else { return true };
         let handles: Vec<i64> = map
             .iter()
-            .filter_map(|(h, l)| has_ended(*h, l).then_some(*h))
+            .filter_map(|(h, slots)| slots.idle.iter().any(|l| has_ended(*h, l)).then_some(*h))
             .collect();
-        handles.into_iter().filter_map(|h| map.remove(&h)).collect()
+        handles.into_iter().filter_map(|h| map.remove(&h)).flat_map(|s| s.idle).collect()
     };
     drop(ended);
     true
@@ -5161,6 +5184,9 @@ pub fn generate_call_id() -> u64 {
 pub struct StreamCache {
     pub capacity_bytes: u64,
     pub current_bytes: u64,
+    /// Bytes cached for this handle by every slot of this process, which
+    /// `capacity_bytes` bounds.
+    pub handle_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub entries: Vec<CacheEntry>,
     /// Index of the next entry the clock hand will scan on eviction.
     pub clock_hand: usize,
@@ -5181,6 +5207,7 @@ impl StreamCache {
         Self {
             capacity_bytes,
             current_bytes: 0,
+            handle_bytes: Default::default(),
             entries: Vec::new(),
             clock_hand: 0,
         }
@@ -6034,17 +6061,22 @@ fn cache_get_or_materialize(
         let arr_base = *arr_base;
         let size_bytes = unsafe { shm::shm_block_size(arr_base).unwrap_or(0) } as u64;
         cache_make_room_for(&mut local.cache, size_bytes);
-        // Install: shincref so the cache owns one ref and the caller
-        // owns the other. Both decrement independently on shfree.
-        // SAFETY: arr_base is the live SHM block of the materialised array.
-        unsafe { shm::shincref(arr_base) }?;
-        local.cache.entries.push(CacheEntry {
-            subpacket_idx: sub_k as u64,
-            shm_packet: arr_base,
-            size_bytes,
-            clock_bit: 1,
-        });
-        local.cache.current_bytes = local.cache.current_bytes.saturating_add(size_bytes);
+        // SLOT-23: past the handle's bound, a sub-packet is served uncached.
+        let held = local.cache.handle_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        if held == 0 || held.saturating_add(size_bytes) <= local.cache.capacity_bytes {
+            // Install: shincref so the cache owns one ref and the caller
+            // owns the other. Both decrement independently on shfree.
+            // SAFETY: arr_base is the live SHM block of the materialised array.
+            unsafe { shm::shincref(arr_base) }?;
+            local.cache.entries.push(CacheEntry {
+                subpacket_idx: sub_k as u64,
+                shm_packet: arr_base,
+                size_bytes,
+                clock_bit: 1,
+            });
+            local.cache.current_bytes = local.cache.current_bytes.saturating_add(size_bytes);
+            local.cache.handle_bytes.fetch_add(size_bytes, std::sync::atomic::Ordering::Relaxed);
+        }
     }
     Ok(src)
 }
@@ -6059,7 +6091,7 @@ fn cache_make_room_for(cache: &mut StreamCache, needed: u64) {
     // Bound the eviction loop to two full passes so the clock-hand
     // sweep is guaranteed to terminate.
     let mut passes_remaining = 2 * cache.entries.len().max(1);
-    while cache.current_bytes.saturating_add(needed) > cache.capacity_bytes
+    while cache.handle_bytes.load(std::sync::atomic::Ordering::Relaxed).saturating_add(needed) > cache.capacity_bytes
         && !cache.entries.is_empty()
         && passes_remaining > 0
     {
@@ -6072,6 +6104,7 @@ fn cache_make_room_for(cache: &mut StreamCache, needed: u64) {
             // Evict.
             let entry = cache.entries.swap_remove(i);
             cache.current_bytes = cache.current_bytes.saturating_sub(entry.size_bytes);
+            cache.handle_bytes.fetch_sub(entry.size_bytes, std::sync::atomic::Ordering::Relaxed);
             let _ = shm::shfree(entry.shm_packet);
             // `swap_remove` filled slot `i` with the last entry; keep
             // the hand pointing at `i` so the next pass starts there.
@@ -7516,7 +7549,7 @@ mod tests {
     }
 
     fn has_local_slot(handle: i64) -> bool {
-        PROCESS_LOCAL_SLOTS.lock().as_ref().is_some_and(|m| m.contains_key(&handle))
+        PROCESS_LOCAL_SLOTS.lock().as_ref().is_some_and(|m| m.get(&handle).is_some_and(|s| !s.idle.is_empty()))
     }
 
     #[test]
@@ -7824,6 +7857,50 @@ mod tests {
         unsafe { libc::close(fd); }
         assert_ne!(rc, 0, "an open stream's path could be locked by another writer");
         shared_close_handle(h).unwrap();
+    }
+
+    // The cache bound is the handle's, however many of its slots read at once.
+    #[test]
+    fn threads_reading_one_file_share_its_cache_bound() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("cache_bound");
+        let path = dir.join("in.idx");
+        let p = path.to_str().unwrap().to_string();
+        let schema = parse_schema("ai4").unwrap();
+        let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
+        let batch = format!("[{}]", (0..4096).map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+        for _ in 0..16 {
+            let v = crate::json::read_json_with_schema(&batch, &schema).unwrap();
+            shared_write_subpacket(h, crate::compression::CompressionLevel::from_u8(3).unwrap(), v).unwrap();
+            shm::shfree(v).unwrap();
+            shared_flush_buffer(h).unwrap();
+        }
+        shared_close_handle(h).unwrap();
+        const CAP: u64 = 3 * (16 + 4096 * 4);
+        set_test_ifile_cache_bytes(Some(CAP));
+        let f = open_ifile(&p).unwrap();
+        let workers: Vec<_> = (0..4u64)
+            .map(|k| {
+                std::thread::spawn(move || {
+                    for r in 0..200u64 {
+                        let i = ((r * 7919 + k * 104729) % (16 * 4096)) as i64;
+                        let arg = [crate::intrinsics::IFileWalkArg::opt(Some(i))];
+                        let x = shared_ifile_walk(f, ".[]", &arg).unwrap();
+                        let got = unsafe { *(x as *const i32) } as i64;
+                        shm::shfree(x).unwrap();
+                        assert_eq!(got, i % 4096);
+                    }
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().unwrap();
+        }
+        let held = PROCESS_LOCAL_SLOTS.lock().as_ref().and_then(|m| m.get(&f).map(|s| s.cache_bytes.load(std::sync::atomic::Ordering::Relaxed)));
+        set_test_ifile_cache_bytes(None);
+        shared_close_handle(f).unwrap();
+        let held = held.expect("the handle has slots");
+        assert!(held <= CAP, "the handle's caches hold {held} bytes, over its {CAP}");
     }
 
     #[test]

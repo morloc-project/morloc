@@ -196,6 +196,7 @@ morloc-runtime/stream.rs::-::STDIO_SOCK	thread
 morloc-runtime/stream.rs::generate_call_id::FALLBACK_COUNTER	counter		
 morloc-runtime/stream.rs::a_forked_child_leaves_its_parents_cached_reads_alone::HANDLE	test-only		
 morloc-runtime/stream.rs::channel_depth::DEPTH	lazy		
+morloc-runtime/stream.rs::idle_slots_kept::KEPT	lazy		
 morloc-runtime/utility.rs::create_beside::SEQ	counter		
 morloc-runtime/write_behind.rs::-::Job.input	instance		
 morloc-runtime/write_behind.rs::-::Job.result	instance		

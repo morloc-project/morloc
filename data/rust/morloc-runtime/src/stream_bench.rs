@@ -204,3 +204,59 @@ fn stream_bench_channel_paced() {
     });
     mlcbench("stream", "channel-paced-lag", &s);
 }
+
+/// Seconds per random `.[i]` read of one compressed IFile, by one thread
+/// and by four threads sharing the handle.
+fn ifile_reads(threads: usize) -> Vec<f64> {
+    let _shm = crate::own_test_registry();
+    let dir: PathBuf = std::env::temp_dir().join(format!("stream-bench-ifile-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("reads.idx");
+    let p = path.to_str().unwrap().to_string();
+    let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
+    let batch = format!("[{}]", (0..65536).map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+    let v = ints(&batch);
+    for _ in 0..32 {
+        shared_write_subpacket(h, CompressionLevel::from_u8(3).unwrap(), v).unwrap();
+        shared_flush_buffer(h).unwrap();
+    }
+    crate::shm::shfree(v).unwrap();
+    shared_close_handle(h).unwrap();
+    let f = crate::stream::shared_open_ifile(&p).unwrap();
+    const READS: usize = 4000;
+    let out = (0..REPS)
+        .map(|_| {
+            let t = Instant::now();
+            let workers: Vec<_> = (0..threads)
+                .map(|k| {
+                    std::thread::spawn(move || {
+                        let mut x: u64 = 0x9E37_79B9_7F4A_7C15 ^ (k as u64 + 1);
+                        for _ in 0..READS {
+                            x ^= x << 13;
+                            x ^= x >> 7;
+                            x ^= x << 17;
+                            let i = (x % (32 * 65536)) as i64;
+                            let arg = [crate::intrinsics::IFileWalkArg::opt(Some(i))];
+                            let r = crate::stream::shared_ifile_walk(f, ".[]", &arg).unwrap();
+                            crate::shm::shfree(r).unwrap();
+                        }
+                    })
+                })
+                .collect();
+            for w in workers {
+                w.join().unwrap();
+            }
+            t.elapsed().as_secs_f64() / (READS * threads) as f64
+        })
+        .collect();
+    let _ = shared_close_handle(f);
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+#[ignore]
+fn stream_bench_ifile_reads() {
+    mlcbench("stream", "ifile-read-1t", &ifile_reads(1));
+    mlcbench("stream", "ifile-read-4t", &ifile_reads(4));
+}

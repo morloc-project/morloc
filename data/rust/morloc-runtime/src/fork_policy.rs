@@ -201,7 +201,7 @@ pub(crate) fn inherited_dispatches() -> usize {
 
 struct ForkHeld {
     _pass: HeldGuard<'static, ()>,
-    _map: HeldGuard<'static, Option<std::collections::HashMap<i64, crate::stream::ProcessLocalSlot>>>,
+    _map: HeldGuard<'static, Option<std::collections::HashMap<i64, crate::stream::HandleSlots>>>,
     locked_fds: HeldGuard<'static, Vec<libc::c_int>>,
     views: HeldGuard<'static, Vec<crate::arrow_shm::BorrowEntry>>,
     lease: Option<crate::lease::Staged>,

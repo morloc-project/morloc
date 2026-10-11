@@ -245,3 +245,15 @@ orders are sequentially consistent, so either the mover sees the
 registration or the sleeper sees the moved word. Stopping and failing a
 stream wake unconditionally.
 
+### SLOT-23 Threads reading one file share its slots and its cache bound
+Status: implemented
+Checked by: threads_reading_one_file_share_its_cache_bound, threads_read_one_input_file_at_once
+
+A process keeps up to as many idle slots per handle as it has processors;
+an operation takes one, or attaches another when all are out, and puts it
+back, so threads reading one file each find a warm mapping and cache, and
+never wait for each other. The decompressed sub-packets cached by all of
+a handle's slots in the process stay within `MORLOC_IFILE_CACHE_BYTES`:
+a slot evicts its own entries to make room, and serves a sub-packet
+uncached when the handle has no room for it.
+
