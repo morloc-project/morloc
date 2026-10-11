@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{Condvar, LockResult, Mutex, MutexGuard, PoisonError};
+use std::sync::{LockResult, Mutex, MutexGuard, PoisonError};
 
 pub(crate) use morloc_runtime_types::fork_generation::generation;
 
@@ -95,15 +95,6 @@ impl<T> Held<T> {
         let bit = 1u64 << self.rank;
         HELD_RANKS.with(|r| r.set(r.get() | bit));
         Some(HeldGuard { guard: Some(guard), bit })
-    }
-}
-
-impl<T> HeldGuard<'_, T> {
-    pub(crate) fn wait(mut self, condvar: &Condvar) -> Self {
-        let guard = self.guard.take().unwrap();
-        let guard = condvar.wait(guard).unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
-        self.guard = Some(guard);
-        self
     }
 }
 
@@ -210,7 +201,7 @@ pub(crate) fn inherited_dispatches() -> usize {
 
 struct ForkHeld {
     _pass: HeldGuard<'static, ()>,
-    _map: HeldGuard<'static, Option<std::collections::HashMap<i64, crate::stream::LocalEntry>>>,
+    _map: HeldGuard<'static, Option<std::collections::HashMap<i64, crate::stream::ProcessLocalSlot>>>,
     locked_fds: HeldGuard<'static, Vec<libc::c_int>>,
     views: HeldGuard<'static, Vec<crate::arrow_shm::BorrowEntry>>,
     lease: Option<crate::lease::Staged>,

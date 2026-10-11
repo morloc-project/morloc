@@ -185,7 +185,6 @@ morloc-runtime/stream.rs::first_uses_on_two_threads_build_one_registry::AT_GAP	t
 morloc-runtime/stream.rs::first_uses_on_two_threads_build_one_registry::RESUME	test-only		
 morloc-runtime/stream.rs::stdout_staged::STAGED	lazy		
 morloc-runtime/stream.rs::-::PROCESS_LOCAL_SLOTS	held	2	
-morloc-runtime/stream.rs::-::PROCESS_LOCAL_RETURNED	paired		
 morloc-runtime/stream.rs::-::LOCKED_FDS	held	3	
 morloc-runtime/stream.rs::slot_probe_seed::SEED	counter		
 morloc-runtime/stream.rs::-::RELEASE_PASS	held	1	

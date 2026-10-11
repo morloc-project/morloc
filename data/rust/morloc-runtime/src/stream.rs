@@ -1006,25 +1006,17 @@ pub(crate) fn unlock_and_close(fd: libc::c_int) {
 unsafe impl Send for ProcessLocalSlot {}
 
 /// A process's entry for one handle.
-pub(crate) enum LocalEntry {
-    Idle(ProcessLocalSlot),
-    /// A thread has the slot out for an operation; others wait for it.
-    /// A forked child inherits the mark without the thread, so a mark
-    /// from another pid is disregarded.
-    InUse { generation: u64, thread: std::thread::ThreadId },
-}
 
 /// Per-process map from handle int to physical OS state. Lazily
 /// initialised on first access; cleared on `shclose_atexit`-style
 /// teardown.
 ///
-/// A process has at most one slot per written handle. An operation on a
-/// written handle takes the slot out of the map and leaves an `InUse`
-/// mark, and other threads wait for it rather than attaching another. A
-/// read handle's slot holds only a mapping and a cache, so threads reading
-/// at once each use their own. The map lock is never held across an
-/// operation's I/O.
-pub(crate) static PROCESS_LOCAL_SLOTS: Held<Option<std::collections::HashMap<i64, LocalEntry>>> =
+/// An operation takes a handle's idle slot out of the map, or attaches
+/// another when a thread of this process already has it out, and puts one
+/// back when it ends. Threads writing one handle at once take turns on its
+/// stream's slot lock; a written handle's slot holds only its schemas. The
+/// map lock is never held across an operation's I/O.
+pub(crate) static PROCESS_LOCAL_SLOTS: Held<Option<std::collections::HashMap<i64, ProcessLocalSlot>>> =
     Held::new(2, None);
 
 // SHM-8: what keeps a worker from retiring.
@@ -1033,33 +1025,21 @@ pub(crate) fn morloc_retire_blockers() -> i64 {
     crate::shm::held_references()
 }
 
-/// Signalled whenever an `InUse` mark is replaced or removed.
-static PROCESS_LOCAL_RETURNED: std::sync::Condvar = std::sync::Condvar::new();
-
-/// This thread's use of a handle's slot. Dropping an exclusive claim
-/// without `give_back` removes the `InUse` mark, so waiting threads attach
-/// anew.
+/// This thread's use of a handle's slot, put back with `give_back`.
 struct LocalClaim {
     handle: i64,
-    exclusive: bool,
-    returned: bool,
 }
 
 impl LocalClaim {
-    fn give_back(mut self, local: ProcessLocalSlot) {
-        self.returned = true;
-        if self.exclusive {
-            install_process_local_slot(self.handle, local);
-            return;
-        }
+    fn give_back(self, local: ProcessLocalSlot) {
         let mut guard = PROCESS_LOCAL_SLOTS.lock();
         let map = guard.get_or_insert_with(std::collections::HashMap::new);
         let spare = match map.entry(self.handle) {
             std::collections::hash_map::Entry::Vacant(v) => {
-                v.insert(LocalEntry::Idle(local));
+                v.insert(local);
                 None
             }
-            // Another reader returned first; keep one.
+            // Another thread put one back first; keep one.
             std::collections::hash_map::Entry::Occupied(_) => Some(local),
         };
         drop(guard);
@@ -1067,75 +1047,12 @@ impl LocalClaim {
     }
 }
 
-impl Drop for LocalClaim {
-    fn drop(&mut self) {
-        if self.returned || !self.exclusive {
-            return;
-        }
-        let mut guard = PROCESS_LOCAL_SLOTS.lock();
-        if let Some(map) = guard.as_mut() {
-            if let Some(LocalEntry::InUse { generation, thread }) = map.get(&self.handle) {
-                if *generation == crate::fork_policy::generation() && *thread == std::thread::current().id() {
-                    map.remove(&self.handle);
-                }
-            }
-        }
-        drop(guard);
-        PROCESS_LOCAL_RETURNED.notify_all();
-    }
-}
-
-/// How an operation uses a handle's slot.
-#[derive(Clone, Copy, PartialEq)]
-enum ClaimMode {
-    /// Reads only: take the idle slot if there is one, else attach another.
-    Shared,
-    /// Exclusive, waiting while another thread of this process uses it.
-    Wait,
-}
-
 /// Claim `handle`'s slot for one operation, taking its idle slot if there
-/// is one. An exclusive claim marks the handle in use by this thread.
-fn claim_process_local_slot(
-    handle: i64,
-    mode: ClaimMode,
-) -> Result<Option<(LocalClaim, Option<ProcessLocalSlot>)>, MorlocError> {
-    // FORK-14
-    let generation = crate::fork_policy::generation();
-    let thread = std::thread::current().id();
+/// is one.
+fn claim_process_local_slot(handle: i64) -> (LocalClaim, Option<ProcessLocalSlot>) {
     let mut guard = PROCESS_LOCAL_SLOTS.lock();
-    if mode == ClaimMode::Shared {
-        let map = guard.get_or_insert_with(std::collections::HashMap::new);
-        let local = match map.remove(&handle) {
-            Some(LocalEntry::Idle(l)) => Some(l),
-            Some(mark) => {
-                map.insert(handle, mark);
-                None
-            }
-            None => None,
-        };
-        return Ok(Some((LocalClaim { handle, exclusive: false, returned: false }, local)));
-    }
-    loop {
-        let map = guard.get_or_insert_with(std::collections::HashMap::new);
-        if let Some(LocalEntry::InUse { generation: g, thread: t }) = map.get(&handle) {
-            if *g == generation {
-                if *t == thread {
-                    return Err(MorlocError::Other(format!(
-                        "stream handle {:#x} used again by an operation already using it",
-                        handle,
-                    )));
-                }
-                guard = guard.wait(&PROCESS_LOCAL_RETURNED);
-                continue;
-            }
-        }
-        let local = match map.insert(handle, LocalEntry::InUse { generation, thread }) {
-            Some(LocalEntry::Idle(l)) => Some(l),
-            _ => None,
-        };
-        return Ok(Some((LocalClaim { handle, exclusive: true, returned: false }, local)));
-    }
+    let local = guard.as_mut().and_then(|map| map.remove(&handle));
+    (LocalClaim { handle }, local)
 }
 
 /// Run `f` against the process-local slot for `handle`. On entry the
@@ -1187,13 +1104,7 @@ pub fn with_process_local_slot<R>(
         )));
     }
 
-    let mode = if slot.kind.get() == MLC_KIND_IFILE || slot.kind.get() == MLC_KIND_ISTREAM {
-        ClaimMode::Shared
-    } else {
-        ClaimMode::Wait
-    };
-    let (claim, mut taken) = claim_process_local_slot(handle, mode)?
-        .expect("a waiting claim always succeeds");
+    let (claim, mut taken) = claim_process_local_slot(handle);
 
     // Validate cached_generation; dispose on mismatch. The stream it
     // belonged to has ended.
@@ -1265,12 +1176,9 @@ pub fn with_process_local_slot<R>(
 fn install_process_local_slot(handle: i64, slot: ProcessLocalSlot) {
     let mut guard = PROCESS_LOCAL_SLOTS.lock();
     let map = guard.get_or_insert_with(std::collections::HashMap::new);
-    let replaced = map.insert(handle, LocalEntry::Idle(slot));
+    let replaced = map.insert(handle, slot);
     drop(guard);
-    PROCESS_LOCAL_RETURNED.notify_all();
-    if let Some(LocalEntry::Idle(old)) = replaced {
-        drop(old);
-    }
+    drop(replaced);
 }
 
 /// Descriptors of this process that hold a stream file's lock. A forked
@@ -1297,11 +1205,7 @@ pub fn invalidate_process_local_slot(handle: i64) {
     let mut guard = PROCESS_LOCAL_SLOTS.lock();
     let removed = guard.as_mut().and_then(|map| map.remove(&handle));
     drop(guard);
-    match removed {
-        Some(LocalEntry::Idle(local)) => drop(local),
-        Some(LocalEntry::InUse { .. }) => PROCESS_LOCAL_RETURNED.notify_all(),
-        None => {}
-    }
+    drop(removed);
 }
 
 /// Open the underlying file and mmap it (for read kinds), producing
@@ -1986,22 +1890,9 @@ pub(crate) fn drop_ended_slots() -> bool {
         let Some(map) = guard.as_mut() else { return true };
         let handles: Vec<i64> = map
             .iter()
-            .filter_map(|(h, e)| match e {
-                LocalEntry::Idle(l) if has_ended(*h, l) => Some(*h),
-                _ => None,
-            })
+            .filter_map(|(h, l)| has_ended(*h, l).then_some(*h))
             .collect();
-        handles
-            .into_iter()
-            .filter_map(|h| match map.remove(&h) {
-                Some(LocalEntry::Idle(l)) => Some(l),
-                Some(mark) => {
-                    map.insert(h, mark);
-                    None
-                }
-                None => None,
-            })
-            .collect()
+        handles.into_iter().filter_map(|h| map.remove(&h)).collect()
     };
     drop(ended);
     true
