@@ -3661,7 +3661,18 @@ fn append_one_element(
     // `scratch` reuses its allocation across the whole @write batch, so this
     // hot loop pays no per-element heap allocation. `buf_size` is read once by
     // the caller rather than re-querying the environment per element.
-    crate::voidstar::flatten_into_portable_with(scratch, elem_src, elem, res)?;
+    // An Int of at most one limb holds its value inline: its flat form is
+    // its own bytes, with no variable part and no pointer.
+    let inline_int = elem.serial_type == SerialType::Int
+        // SAFETY: an Int's slot starts with its limb count.
+        && unsafe { *(elem_src as *const usize) } <= 1;
+    if inline_int {
+        scratch.clear();
+        // SAFETY: the element's slot holds `w` bytes.
+        scratch.extend_from_slice(unsafe { std::slice::from_raw_parts(elem_src as *const u8, w) });
+    } else {
+        crate::voidstar::flatten_into_portable_with(scratch, elem_src, elem, res)?;
+    }
     let elem_blob: &[u8] = scratch.as_slice();
     // Round the variable region up to 8-byte alignment. Successive
     // elements' variable regions concatenate in the write buffer at
@@ -3797,7 +3808,7 @@ fn append_one_element(
     // SHM volume rather than in the write buffer (the relptrs are
     // pure offsets with `vol_idx == 0`), corrupting arbitrary bytes.
     let shift: isize = (data_offset as isize) - (w as isize);
-    if shift != 0 {
+    if shift != 0 && !inline_int {
         unsafe {
             crate::voidstar::shift_buffer_relptrs_with(
                 buf_abs, data_offset + raw_variable_size, index_offset,
@@ -7857,6 +7868,34 @@ mod tests {
         unsafe { libc::close(fd); }
         assert_ne!(rc, 0, "an open stream's path could be locked by another writer");
         shared_close_handle(h).unwrap();
+    }
+
+    // An Int stream mixing inline values and multi-limb ones reads back as
+    // written, whichever way each element was buffered.
+    #[test]
+    fn int_elements_of_every_size_round_trip_through_a_stream() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("int_round_trip");
+        let path = dir.join("ints.idx");
+        let p = path.to_str().unwrap().to_string();
+        let json = "[0,1,-1,9223372036854775807,-9223372036854775808,123456789012345678901234567890,-98765432109876543210987654321,42]";
+        let schema = parse_schema("aj").unwrap();
+        let h = shared_open_ostream_with_schema(&p, "aj").unwrap();
+        for level in [3u8, 3] {
+            let v = crate::json::read_json_with_schema(json, &schema).unwrap();
+            shared_write_subpacket(h, crate::compression::CompressionLevel::from_u8(level).unwrap(), v).unwrap();
+            shm::shfree(v).unwrap();
+            shared_flush_buffer(h).unwrap();
+        }
+        shared_close_handle(h).unwrap();
+        let r = shared_open_istream(&p).unwrap();
+        let mut frames = Vec::new();
+        while let Some(f) = shared_next_frame(r).unwrap() {
+            frames.push(crate::json::voidstar_to_json_string(f, &schema).unwrap());
+            shm::shfree(f).unwrap();
+        }
+        let _ = shared_close_handle(r);
+        assert_eq!(frames, vec![json.to_string(), json.to_string()]);
     }
 
     // The cache bound is the handle's, however many of its slots read at once.
