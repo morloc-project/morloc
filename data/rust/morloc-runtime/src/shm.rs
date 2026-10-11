@@ -426,68 +426,6 @@ static GROW: crate::fork_policy::Reset<()> = crate::fork_policy::Reset::new(|| (
 /// zero.
 const TEARING_DOWN: u32 = u32::MAX;
 
-// ── Thread-local PRNG (for random slot allocation) ─────────────────────────
-
-thread_local! {
-    static RNG_STATE: std::cell::Cell<u64> = std::cell::Cell::new(rng_seed());
-}
-
-fn rng_seed() -> u64 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    // SAFETY: pthread_self always succeeds; the value is opaque but unique
-    // per live thread, which is all we need to differentiate seeds.
-    let tid = unsafe { libc::pthread_self() as u64 };
-    let mut s = nanos
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add(tid.wrapping_mul(0xBF58_476D_1CE4_E5B9));
-    if s == 0 {
-        s = 0xA5A5_A5A5_A5A5_A5A5;
-    }
-    s
-}
-
-/// xorshift64 -- unbiased enough for random slot picking; not
-/// cryptographic. Local to this module; called only inside the
-/// allocator path.
-fn next_random_u64() -> u64 {
-    RNG_STATE.with(|cell| {
-        let mut x = cell.get();
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        cell.set(x);
-        x
-    })
-}
-
-/// Pick a random unoccupied slot in `slots`. Tries random uniform
-/// picks first (the common case at low occupancy), falls back to a
-/// linear probe from a random start (covers the dense case where
-/// random picks keep colliding).
-fn pick_free_slot(table: &VolumeTable) -> Option<usize> {
-    if table.used.len() >= MAX_VOLUME_NUMBER {
-        return None;
-    }
-    // Volume 0 is never mapped; see PRIMARY_VOLUME.
-    for _ in 0..8 {
-        let idx = (next_random_u64() as usize) & (MAX_VOLUME_NUMBER - 1);
-        if idx != 0 && table.slots[idx].is_null() {
-            return Some(idx);
-        }
-    }
-    let start = (next_random_u64() as usize) & (MAX_VOLUME_NUMBER - 1);
-    for off in 0..MAX_VOLUME_NUMBER {
-        let idx = (start + off) & (MAX_VOLUME_NUMBER - 1);
-        if idx != 0 && table.slots[idx].is_null() {
-            return Some(idx);
-        }
-    }
-    None
-}
-
 pub(crate) static COMMON_BASENAME: Held<[u8; MAX_FILENAME_SIZE]> = Held::new(9, [0u8; MAX_FILENAME_SIZE]);
 
 pub(crate) static FALLBACK_DIR: Held<[u8; MAX_FILENAME_SIZE]> = Held::new(10, [0u8; MAX_FILENAME_SIZE]);
@@ -648,6 +586,14 @@ pub fn shinit(
             return Ok(mapped);
         }
     }
+    // SHM-12: one program's volumes at a time; a new one follows shclose.
+    let current = get_common_basename();
+    if !current.is_empty() && current != shm_basename {
+        return Err(MorlocError::Shm(format!(
+            "shinit: shared memory is open for '{}'; close it before opening '{}'",
+            current, shm_basename
+        )));
+    }
     {
         let mut cb = COMMON_BASENAME.lock();
         set_cstr(&mut *cb, shm_basename);
@@ -712,8 +658,7 @@ fn create_and_register(
     // SAFETY: this process created the volume and nothing can use it before
     // its magic is stored, which `init_volume` does last.
     unsafe { init_volume(shm, volume_index, &seg.label, data_size)? };
-    register_volume(volume_index, shm, data_size);
-    Ok(Some(shm))
+    Ok(Some(register_volume(volume_index, shm, data_size)))
 }
 
 /// Write a new volume's header and its single free block, then publish it
@@ -739,6 +684,11 @@ unsafe fn init_volume(
     (*shm).volume_size = data_size;
     ShmLock::init(std::ptr::addr_of_mut!((*shm).lock))?;
     (*shm).cursor = 0;
+    // SHM-12
+    (*shm).next_index.store(
+        if volume_index == PRIMARY_VOLUME { PRIMARY_VOLUME as u32 + 1 } else { 0 },
+        Ordering::Relaxed,
+    );
     let first_block = (shm as *mut u8).add(std::mem::size_of::<ShmHeader>()) as *mut BlockHeader;
     (*first_block).magic = BLK_MAGIC;
     (*first_block).reference_count = AtomicU32::new(0);
@@ -758,9 +708,18 @@ unsafe fn adopt_volume_settings(volume_index: usize, shm: *const ShmHeader) {
     }
 }
 
-fn register_volume(volume_index: usize, shm: *mut ShmHeader, data_size: usize) {
-    unsafe { adopt_volume_settings(volume_index, shm) };
+// SHM-10: a volume this process already maps keeps that mapping; the new
+// one is dropped and the existing header returned.
+fn register_volume(volume_index: usize, shm: *mut ShmHeader, data_size: usize) -> *mut ShmHeader {
     let mut vols = VOLUMES.lock();
+    let existing = vols.slots[volume_index].ptr();
+    if !existing.is_null() {
+        drop(vols);
+        // SAFETY: mapped by the caller with this length and not yet shared.
+        unsafe { libc::munmap(shm as *mut libc::c_void, data_size + std::mem::size_of::<ShmHeader>()) };
+        return existing;
+    }
+    unsafe { adopt_volume_settings(volume_index, shm) };
     let listed = vols.used.iter().any(|&i| i as usize == volume_index);
     vols.slots[volume_index].set(shm, data_size);
     vols.mark_used(volume_index);
@@ -771,6 +730,7 @@ fn register_volume(volume_index: usize, shm: *mut ShmHeader, data_size: usize) {
         PUBLISHED[n].store(volume_index as u16, Ordering::Relaxed);
         PUBLISHED_LEN.store(n + 1, Ordering::Release);
     }
+    shm
 }
 
 /// Map an existing, initialised volume at `volume_index`.
@@ -793,8 +753,7 @@ fn open_and_register(
             name, stored, volume_index
         )));
     }
-    register_volume(volume_index, shm, data_size);
-    Ok(Ok(shm))
+    Ok(Ok(register_volume(volume_index, shm, data_size)))
 }
 
 /// Reason `shopen_diag` could not return a mapped volume, so callers
@@ -1120,8 +1079,14 @@ fn remove_program_volumes(basename: &str, fallback: &str) {
             .map_or(false, |hex| hex.len() == 4 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
     };
     if fallback.is_empty() {
-        // Nothing records this program's objects: try every index.
-        for i in 1..MAX_VOLUME_NUMBER {
+        // Nothing records this program's objects: try every numbered index,
+        // and the one being created if its creator died before counting it
+        // (SHM-12).
+        let last = published_header(PRIMARY_VOLUME)
+            .map(|p| unsafe { (*p).next_index.load(Ordering::Acquire) } as usize)
+            .filter(|&n| n > PRIMARY_VOLUME)
+            .map_or(MAX_VOLUME_NUMBER - 1, |n| n.min(MAX_VOLUME_NUMBER - 1));
+        for i in 1..=last {
             if let Ok(c) = std::ffi::CString::new(volume_name(basename, i)) {
                 unsafe { libc::shm_unlink(c.as_ptr()) };
             }
@@ -1987,64 +1952,74 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
         return Ok(blk);
     }
 
-    // No existing volume has space; grow into a randomly-chosen free
-    // slot. Geometric growth (K x previous size) keeps total capacity
-    // expanding exponentially so MAX_VOLUME_NUMBER is unreachable in
-    // practice.
-    const VOLUME_GROWTH_FACTOR: usize = 2;
-    let cv = CURRENT_VOLUME.load(Ordering::Relaxed);
-    let prev_volume_size = match MORLOC_VOL_TABLE.get(cv) {
-        Some(e) if !e.data_base.load(Ordering::Acquire).is_null() => e.data_size.load(Ordering::Relaxed),
-        _ => 0xffff,
-    };
-    let new_size = std::cmp::max(
-        size.saturating_add(std::mem::size_of::<BlockHeader>()),
-        prev_volume_size.saturating_mul(VOLUME_GROWTH_FACTOR),
-    );
-
-    let basename = {
-        let cb = COMMON_BASENAME.lock();
-        get_cstr_buf(&cb).to_string()
-    };
+    let basename = get_common_basename();
     // No program to grow: shared memory is not initialised, or was closed.
     // A volume made now would be named for nothing and outlive the process.
-    if basename.is_empty() {
+    let Some(primary) = published_header(PRIMARY_VOLUME).filter(|_| !basename.is_empty()) else {
         return Err(MorlocError::Shm(format!(
             "cannot allocate {} bytes: shared memory is not initialised",
             size
         )));
+    };
+    // SHM-12: the volumes other processes made may have room.
+    map_numbered(&basename, primary);
+    if let Some(blk) = find_in_published(size)? {
+        return Ok(blk);
     }
-    // Another process may have created the index this process picks, since
-    // the choice is made from this process's own table. Such an index is
-    // mapped (a volume of the program like any other) and tried, and the
-    // search moves on.
-    const ATTEMPTS: usize = 16;
-    for _ in 0..ATTEMPTS {
-        let picked = pick_free_slot(&VOLUMES.lock());
-        let Some(idx) = picked else {
+    // SAFETY: SHM-10: the primary volume stays mapped.
+    let header = unsafe { &*primary };
+    // SHM-12: nothing under the lock is left torn by a holder's death.
+    let _ns = header.grow_lock.lock()?;
+    map_numbered(&basename, primary);
+    if let Some(blk) = find_in_published(size)? {
+        return Ok(blk);
+    }
+    let largest = {
+        let n = PUBLISHED_LEN.load(Ordering::Acquire);
+        PUBLISHED[..n]
+            .iter()
+            .map(|i| MORLOC_VOL_TABLE[i.load(Ordering::Relaxed) as usize].data_size.load(Ordering::Relaxed))
+            .max()
+            .unwrap_or(0xffff)
+    };
+    let new_size = std::cmp::max(
+        size.saturating_add(std::mem::size_of::<BlockHeader>()),
+        largest.saturating_mul(2),
+    );
+    loop {
+        let idx = header.next_index.load(Ordering::Acquire) as usize;
+        if idx >= MAX_VOLUME_NUMBER {
             return Err(MorlocError::Shm(format!(
-                "Could not find suitable block for {} bytes: all {} \
-                 volume slots are occupied",
+                "Could not find suitable block for {} bytes: all {} volume numbers are used",
                 size, MAX_VOLUME_NUMBER
             )));
-        };
+        }
         let name = volume_name(&basename, idx);
+        // SHM-12: a name that exists was made by a creator that died before
+        // counting it: used if initialised, skipped otherwise, never removed.
         let shm = match create_and_register(&name, idx, new_size)? {
-            Some(shm) => shm,
-            None => match open_and_register(&name, idx) {
-                Ok(Ok(shm)) => shm,
-                _ => continue,
-            },
+            Some(shm) => Some(shm),
+            None => open_and_register(&name, idx).ok().and_then(|r| r.ok()),
         };
-        if let Some(blk) = find_free_block_in_volume(shm, size)? {
-            CURRENT_VOLUME.store(idx, Ordering::Relaxed);
-            return Ok(blk);
+        header.next_index.store(idx as u32 + 1, Ordering::Release);
+        if let Some(shm) = shm {
+            if let Some(blk) = find_free_block_in_volume(shm, size)? {
+                CURRENT_VOLUME.store(idx, Ordering::Relaxed);
+                return Ok(blk);
+            }
         }
     }
-    Err(MorlocError::Shm(format!(
-        "Could not create a volume for {} bytes: {} volume indices in a row were taken",
-        size, ATTEMPTS
-    )))
+}
+
+// SHM-12: map every initialised volume numbered below the primary's count.
+fn map_numbered(basename: &str, primary: *mut ShmHeader) {
+    // SAFETY: SHM-10: the primary volume stays mapped.
+    let next = unsafe { (*primary).next_index.load(Ordering::Acquire) } as usize;
+    for idx in PRIMARY_VOLUME + 1..next.min(MAX_VOLUME_NUMBER) {
+        if published_header(idx).is_none() {
+            let _ = open_and_register(&volume_name(basename, idx), idx);
+        }
+    }
 }
 
 /// Take ownership of a free block, found and sized under the volume lock
@@ -2296,6 +2271,42 @@ mod calloc_tests {
 
 #[cfg(test)]
 mod tests {
+    // SHM-12: a process that runs out of room uses a volume another process
+    // made rather than making its own.
+    #[test]
+    fn a_process_out_of_room_uses_a_volume_another_made() {
+        let _shm = crate::own_test_registry();
+        const BIG: usize = 48 << 20;
+        let primary = super::published_header(super::PRIMARY_VOLUME).unwrap();
+        let count = || unsafe { (*primary).next_index.load(std::sync::atomic::Ordering::Acquire) };
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let p = super::shmalloc(BIG).unwrap();
+            super::shfree(p).is_ok()
+        }));
+        let after_child = count();
+        let p = super::shmalloc(BIG).unwrap();
+        let after_parent = count();
+        super::shfree(p).unwrap();
+        assert!(after_child > super::PRIMARY_VOLUME as u32 + 1, "the child made no volume");
+        assert_eq!(after_parent, after_child, "the parent made a volume of its own");
+    }
+
+    // SHM-10: mapping a volume this process already maps keeps the first
+    // mapping, so pointers made from it still convert.
+    #[test]
+    fn a_volume_mapped_twice_keeps_its_first_mapping() {
+        let _shm = crate::own_test_registry();
+        let p = super::shmalloc(64).unwrap();
+        let (idx, base, _) = super::published_volume_of(p).unwrap();
+        let name = super::volume_name(&super::get_common_basename(), idx);
+        let again = super::open_and_register(&name, idx).unwrap().unwrap();
+        let first = unsafe { base.sub(std::mem::size_of::<super::ShmHeader>()) } as *mut super::ShmHeader;
+        let still = super::abs2rel(p).is_ok();
+        super::shfree(p).unwrap();
+        assert_eq!(again, first, "a second mapping replaced the first");
+        assert!(still, "a pointer from the first mapping no longer converts");
+    }
+
     // SHM-6: without poisoning, a block made from freed and merged dirty
     // blocks reads as zero, so shcalloc need not clear it.
     #[test]
@@ -2579,6 +2590,7 @@ mod tests {
         let fallback = crate::ScopedFallback::new("own");
         let test_dir = fallback.path().to_path_buf();
         let base = format!("/morloc-{}-test-own", std::process::id());
+        let _ = shclose();
         shinit(&base, PRIMARY_VOLUME, 4096).unwrap();
         unsafe {
             let slot = libc::mmap(
@@ -2674,6 +2686,7 @@ mod tests {
         let _arena = crate::own_test_shm();
         shclose().unwrap();
         let basename = format!("/morloc-{}-test-poison", std::process::id());
+        let _ = shclose();
         let shm = shinit(&basename, PRIMARY_VOLUME, 0x10000).unwrap();
         unsafe {
             let holder = libc::fork();
@@ -2928,6 +2941,7 @@ mod tests {
         let _fallback = crate::ScopedFallback::new("vt");
 
         let basename = format!("morloc-{}-test-vt", std::process::id());
+        let _ = shclose();
         let shm = shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
 
         // shinit should have populated the primary volume's slot.
@@ -2975,6 +2989,7 @@ mod tests {
         let _fallback = crate::ScopedFallback::new("idx");
 
         let basename = format!("morloc-{}-test-idx", std::process::id());
+        let _ = shclose();
         shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
 
         // Force grow into several randomly-allocated volumes by
@@ -3027,6 +3042,7 @@ mod tests {
         let _fallback = crate::ScopedFallback::new("plain");
 
         let basename = format!("morloc-{}-test-shm", std::process::id());
+        let _ = shclose();
         let shm = shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
         assert!(!shm.is_null());
         assert_eq!(unsafe { (*shm).magic.load(Ordering::Acquire) }, SHM_MAGIC);
@@ -3073,6 +3089,7 @@ mod tests {
         // returns >= 1 worker, and on Linux 5.14+ this exercises
         // `parallel_madvise_populate_write`.
         let alloc_size = 128 * 1024 * 1024;
+        let _ = shclose();
         shinit(&basename, PRIMARY_VOLUME, alloc_size).unwrap();
         let p = shmalloc(alloc_size).unwrap();
         let ps = page_size();

@@ -163,6 +163,10 @@ pub struct ShmHeader {
     pub poison: usize,
     pub lock: crate::shm_lock::ShmLock,
     pub cursor: VolPtr,
+    /// SHM-12: in the primary volume, the program's volumes are numbered
+    /// below this; growth takes `grow_lock` to create the next one.
+    pub next_index: std::sync::atomic::AtomicU32,
+    pub grow_lock: crate::recoverable_lock::RecoverableLock,
 }
 
 const _: () = assert!(std::mem::size_of::<ShmHeader>() % std::mem::align_of::<BlockHeader>() == 0);

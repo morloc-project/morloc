@@ -131,3 +131,19 @@ it looks again, builds the new volume outside every other lock, and
 publishes it under VOLUMES. A process that picks an index another process
 took opens that volume instead and never removes its name.
 
+### SHM-12 A process grows the program's memory only when no volume has room
+Status: implemented
+Checked by: a_process_out_of_room_uses_a_volume_another_made, a_volume_mapped_twice_keeps_its_first_mapping, tla:NamespaceGrow, tla:NamespaceGrow_no_lock.bug, tla:NamespaceGrow_no_remap.bug, tla:NamespaceGrow_map_uninit.bug, tla:NamespaceGrow_bump_after_init.bug
+
+Volumes are numbered in order; the primary volume's header holds the next
+number and a growth lock that reports a holder's death rather than
+disabling itself. A process out of room maps every initialised volume
+numbered below the next number and looks again; then it takes the growth
+lock, maps and looks once more, and only then creates the next volume,
+exclusively, at twice the size of the largest, counting it once the
+create succeeds. A name that already exists was made by a creator that
+died before counting it: it is used if initialised and skipped otherwise,
+and never removed. The growth lock is taken after the process's own growth
+lock (SHM-11) and before any volume's lock. Mapping a volume this process
+already maps keeps the first mapping.
+
