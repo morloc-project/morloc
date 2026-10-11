@@ -2246,19 +2246,18 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
     // mmap + parse the file BEFORE we touch the registry, so a bad
     // file doesn't leave a half-initialised slot.
     let (map_file, mmap_ptr, mmap_size) = mmap_file_readonly_keep(path)?;
+    let mapping = crate::stream_format::Mapping::new(mmap_ptr, mmap_size);
     let (file_dev, file_ino) = file_identity_of(&map_file);
     drop(map_file);
     let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
         Ok(p) => p,
         Err(e) => {
-            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
             return Err(e);
         }
     };
     // Enforce the IFile-on-clean-footer contract (matches the
     // process-local `open_file_as` check for IFile).
     if !parsed.is_data_packet && !parsed.final_footer {
-        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
         return Err(MorlocError::Other(format!(
             "@open IFile '{}': file is not cleanly closed (no final footer). \
              Open it as IStream to drain forward, or repair it with morloc-nexus.",
@@ -2270,7 +2269,6 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
     let (slot_idx, slot, _guard) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
-            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
             return Err(e);
         }
     };
@@ -2306,11 +2304,11 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
             // RelPtrs we've published; the lock guard releases on
             // drop.
             release_slot_locked(slot);
-            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
             return Err(e);
         }
     };
 
+    let (mmap_ptr, mmap_size) = mapping.into_raw();
     // Install the process-local slot with the mmap we already have.
     let cap_bytes = read_cache_cap_env();
     let local = ProcessLocalSlot {
@@ -2340,11 +2338,11 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
     reject_dev_stdio_path(path)?;
 
     let (map_file, mmap_ptr, mmap_size) = mmap_file_readonly_keep(path)?;
+    let mapping = crate::stream_format::Mapping::new(mmap_ptr, mmap_size);
     let (file_dev, file_ino) = file_identity_of(&map_file);
     let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
         Ok(p) => p,
         Err(e) => {
-            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
             return Err(e);
         }
     };
@@ -2354,7 +2352,6 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
     if let Err(e) = reject_non_list_stream_schema(
         &parsed.value_schema, "IStream open", path,
     ) {
-        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
         return Err(e);
     }
     // Forward-only access: kernel readahead is the right hint.
@@ -2369,7 +2366,6 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
     let (slot_idx, slot, _guard) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
-            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
             return Err(e);
         }
     };
@@ -2396,12 +2392,12 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         Ok(g) => g,
         Err(e) => {
             release_slot_locked(slot);
-            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
             return Err(e);
         }
     };
 
     let cap_bytes = read_cache_cap_env();
+    let (mmap_ptr, mmap_size) = mapping.into_raw();
     let local = ProcessLocalSlot {
         cached_generation: new_gen,
         mmap_ptr,
@@ -5094,11 +5090,9 @@ fn host_append(path: &str, expected_schema_str: &str, opener: (u32, u64, u64)) -
             return Err(e.into());
         }
     };
+    let mapping = crate::stream_format::Mapping::new(mmap_ptr, mmap_size);
     let unmap_and = |e: MorlocError| -> HostOpenError {
-        unsafe {
-            libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
-            unlock_and_close(fd);
-        }
+        unlock_and_close(fd);
         e.into()
     };
     let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
@@ -5133,7 +5127,7 @@ fn host_append(path: &str, expected_schema_str: &str, opener: (u32, u64, u64)) -
     let body_start = parsed.body_start;
     let schema_str = parsed.schema_str.clone();
     let value_schema = parsed.value_schema.clone();
-    unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+    drop(mapping);
     if unsafe { libc::ftruncate(fd, resume_off as libc::off_t) } != 0 {
         let e = std::io::Error::last_os_error();
         unlock_and_close(fd);
@@ -5968,18 +5962,11 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         // sub-packet index). The bulk byte copy below uses sendfile()
         // against a separate fd so the kernel moves the data without
         // crossing into userspace.
-        let (mmap_ptr, mmap_size) = match mmap_file_readonly(p) {
-            Ok(t) => t,
-            Err(e) => {
-                return Err(e);
-            }
-        };
+        let (mmap_ptr, mmap_size) = mmap_file_readonly(p)?;
+        let mapping = crate::stream_format::Mapping::new(mmap_ptr, mmap_size);
         let parsed = match parse_stream_file(p, mmap_ptr, mmap_size) {
             Ok(p2) => p2,
             Err(e) => {
-                unsafe {
-                    libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
-                }
                 return Err(e);
             }
         };
@@ -5992,9 +5979,6 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
                     ref_str, &parsed.schema_str,
                 ) =>
             {
-                unsafe {
-                    libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
-                }
                 return Err(MorlocError::Other(format!(
                     "@concat: schema mismatch -- '{}' has '{}', earlier had '{}'",
                     p, parsed.schema_str, ref_str
@@ -6005,9 +5989,6 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         let hdr = match parse_stream_header(mmap_ptr, mmap_size) {
             Ok(h) => h,
             Err(e) => {
-                unsafe {
-                    libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
-                }
                 return Err(e);
             }
         };
@@ -6022,9 +6003,6 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
             match read_subpacket_size(mmap_ptr, mmap_size, last_off) {
                 Ok(sz) => last_off + sz,
                 Err(e) => {
-                    unsafe {
-                        libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
-                    }
                     return Err(e);
                 }
             }
@@ -6033,7 +6011,7 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         };
 
         // Done with mmap (parsing complete); release it before sendfile.
-        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+        drop(mapping);
 
         // Reopen the source RDONLY for sendfile. The previous fd that
         // mmap was built on was dropped in mmap_file_readonly; sendfile
@@ -7160,12 +7138,12 @@ pub fn shared_open_ifile_recovered(
     reject_dev_stdio_path(path)?;
 
     let (map_file, mmap_ptr, mmap_size) = mmap_file_readonly_keep(path)?;
+    let mapping = crate::stream_format::Mapping::new(mmap_ptr, mmap_size);
     let (file_dev, file_ino) = file_identity_of(&map_file);
     drop(map_file);
     let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
         Ok(p) => p,
         Err(e) => {
-            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
             return Err(e);
         }
     };
@@ -7174,7 +7152,7 @@ pub fn shared_open_ifile_recovered(
     // the caller-supplied offsets. This keeps the "cleanly closed
     // file is authoritative" invariant.
     if parsed.is_data_packet || parsed.final_footer {
-        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+        drop(mapping);
         return shared_open_ifile(path);
     }
 
@@ -7183,7 +7161,6 @@ pub fn shared_open_ifile_recovered(
     // Caller must pass a counts slice of matching length (or empty for
     // the delegated path).
     if !caller_offsets.is_empty() && caller_offsets.len() != caller_counts.len() {
-        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
         return Err(MorlocError::Other(format!(
             "shared_open_ifile_recovered: caller_offsets has {} entries but \
              caller_counts has {} entries; they must match",
@@ -7206,7 +7183,6 @@ pub fn shared_open_ifile_recovered(
     let (_slot_idx, slot, _guard) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
-            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
             return Err(e);
         }
     };
@@ -7236,7 +7212,6 @@ pub fn shared_open_ifile_recovered(
         Ok(g) => g,
         Err(e) => {
             release_slot_locked(slot);
-            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
             return Err(e);
         }
     };
@@ -7244,6 +7219,7 @@ pub fn shared_open_ifile_recovered(
     // Install the process-local slot mirroring shared_open_ifile's
     // final block so future access reuses the mmap without re-parsing.
     let cap_bytes = read_cache_cap_env();
+    let (mmap_ptr, mmap_size) = mapping.into_raw();
     let local = ProcessLocalSlot {
         cached_generation: new_gen,
         mmap_ptr,

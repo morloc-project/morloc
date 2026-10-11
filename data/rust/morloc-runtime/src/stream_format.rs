@@ -200,6 +200,32 @@ pub(crate) fn mmap_fd_readonly(
     Ok((ptr as AbsPtr, size))
 }
 
+/// A read-only mapping of a file, unmapped when dropped unless its owner
+/// takes it with `into_raw`.
+pub(crate) struct Mapping {
+    ptr: AbsPtr,
+    len: u64,
+}
+
+impl Mapping {
+    pub(crate) fn new(ptr: AbsPtr, len: u64) -> Mapping {
+        Mapping { ptr, len }
+    }
+
+    pub(crate) fn into_raw(self) -> (AbsPtr, u64) {
+        let raw = (self.ptr, self.len);
+        std::mem::forget(self);
+        raw
+    }
+}
+
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        // SAFETY: the mapping was made with this length and is still owned here.
+        unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len as usize) };
+    }
+}
+
 pub(crate) fn mmap_file_readonly(path: &str) -> Result<(AbsPtr, u64), MorlocError> {
     mmap_file_readonly_keep(path).map(|(_, ptr, size)| (ptr, size))
 }
