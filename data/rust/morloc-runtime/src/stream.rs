@@ -9546,6 +9546,54 @@ mod tests {
         assert!(inside, "the element's bytes are in a block of their own");
     }
 
+    // A numeric list inside a written element keeps its natural alignment.
+    #[test]
+    fn numeric_lists_read_from_a_stream_keep_their_natural_alignment() {
+        let _shm = crate::own_test_registry();
+        for level in [3u8, 0] {
+            let dir = concat_test_dir(&format!("align_{level}"));
+            let path = dir.join("a.idx");
+            let p = path.to_str().unwrap().to_string();
+            crate::write_behind::set_test_depth(Some(0));
+            let w = shared_open_ostream_with_schema(&p, "aaf8").unwrap();
+            let list = parse_schema("aaf8").unwrap();
+            let lvl = crate::compression::CompressionLevel::from_u8(level).unwrap();
+            let v = crate::json::read_json_with_schema("[[1.5], [1.5, 2.5, 3.5], [4.5], [5.5, 6.5]]", &list).unwrap();
+            shared_write_subpacket(w, lvl, v).unwrap();
+            shm::shfree(v).unwrap();
+            shared_close_handle(w).unwrap();
+            crate::write_behind::set_test_depth(None);
+
+            let want = parse_schema("f8").unwrap().alignment();
+            let r = shared_open_istream(&p).unwrap();
+            let got = shared_next_subpacket(r).unwrap();
+            let outer = unsafe { &*(got as *const shm_types_crate::Array) };
+            let elems = shm::rel2abs(outer.data).unwrap() as *const shm_types_crate::Array;
+            let mut misaligned = Vec::new();
+            for i in 0..outer.size {
+                let inner = unsafe { &*elems.add(i) };
+                let data = shm::rel2abs(inner.data).unwrap() as usize;
+                if data % want != 0 {
+                    misaligned.push((i, data % want));
+                }
+            }
+            shm::shfree(got).unwrap();
+            shared_close_handle(r).unwrap();
+            let f = open_ifile(&p).unwrap();
+            for i in 0..4 {
+                let e = ifile_bracket_index(f, i).unwrap();
+                let inner = unsafe { &*(e as *const shm_types_crate::Array) };
+                let data = shm::rel2abs(inner.data).unwrap() as usize;
+                if data % want != 0 {
+                    misaligned.push((100 + i as usize, data % want));
+                }
+                shm::shfree(e).unwrap();
+            }
+            shared_close_handle(f).unwrap();
+            assert!(misaligned.is_empty(), "level {level}: (element, offset mod {want}) {misaligned:?}");
+        }
+    }
+
     #[test]
     fn a_cache_of_capacity_zero_holds_nothing() {
         let _shm = crate::own_test_registry();
