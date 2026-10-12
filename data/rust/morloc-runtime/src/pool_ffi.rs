@@ -377,8 +377,9 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig, retire_after: std::
         // comes back to the queue counted as neither finishing nor starting.
         arriving = Arriving::Other;
         let peer = crate::ipc_ffi::Peer::of(client_fd);
+        let mut kept = false;
         loop {
-            match serve_one(client_fd, queue, config) {
+            match serve_one(client_fd, queue, config, kept) {
                 Served::Closed => break,
                 Served::Finishing => {
                     arriving = Arriving::Finishing;
@@ -388,6 +389,7 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig, retire_after: std::
                     if !wait_next_request(client_fd, peer.as_ref()) {
                         break;
                     }
+                    kept = true;
                 }
             }
         }
@@ -405,13 +407,24 @@ enum Served {
     Kept,
 }
 
-// Read one request from `client_fd`, run it and reply.
-unsafe fn serve_one(client_fd: i32, queue: &JobQueue, config: &PoolConfig) -> Served {
-    use crate::ipc_ffi::send_reply_to_foreign_server;
-    use crate::ipc_ffi::stream_from_client;
+// Read one request from `client_fd`, run it and reply. On a kept
+// connection, the caller closing it instead of sending is its end.
+unsafe fn serve_one(client_fd: i32, queue: &JobQueue, config: &PoolConfig, kept: bool) -> Served {
+    use crate::ipc_ffi::{read_request, send_reply_to_foreign_server, ReadFailure, CLOSED_BY_PEER};
 
     let mut errmsg: *mut c_char = ptr::null_mut();
-    let data = stream_from_client(client_fd, &mut errmsg);
+    let data = match read_request(client_fd) {
+        Ok(p) => p,
+        Err(ReadFailure::Io(why)) if kept && why == CLOSED_BY_PEER => return Served::Closed,
+        Err(ReadFailure::Io(why)) => {
+            crate::error::set_errmsg(&mut errmsg, &crate::error::MorlocError::Ipc(why.into()));
+            ptr::null_mut()
+        }
+        Err(ReadFailure::Packet(e)) => {
+            errmsg = e;
+            ptr::null_mut()
+        }
+    };
     if data.is_null() || !errmsg.is_null() {
         // Log why the request read failed before closing: otherwise the
         // caller only sees a bare "Connection closed by peer" with no cause.
@@ -467,8 +480,8 @@ unsafe fn serve_one(client_fd: i32, queue: &JobQueue, config: &PoolConfig) -> Se
     if keep { Served::Kept } else { Served::Finishing }
 }
 
-// NET-8: wait for the next request on a kept connection. False when the
-// caller closed it, its process is gone (NET-5), or the pool is shutting down.
+// NET-8: wait for the next request on a kept connection, or its close. False
+// when the caller's process is gone (NET-5) or the pool is shutting down.
 unsafe fn wait_next_request(fd: i32, peer: Option<&crate::ipc_ffi::Peer>) -> bool {
     const SLICE_MS: i32 = 100;
     const SLICES_PER_PEER_CHECK: u32 = 10;
@@ -480,19 +493,7 @@ unsafe fn wait_next_request(fd: i32, peer: Option<&crate::ipc_ffi::Peer>) -> boo
         let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
         let ready = libc::poll(&mut pfd, 1, SLICE_MS);
         if ready > 0 {
-            let mut byte = 0u8;
-            let n = libc::recv(fd, &mut byte as *mut u8 as *mut c_void, 1, libc::MSG_PEEK | libc::MSG_DONTWAIT);
-            if n > 0 {
-                return true;
-            }
-            if n == 0 {
-                return false;
-            }
-            let e = crate::utility::errno_val();
-            if e != libc::EAGAIN && e != libc::EWOULDBLOCK && e != libc::EINTR {
-                return false;
-            }
-            continue;
+            return true;
         }
         if ready < 0 && crate::utility::errno_val() != libc::EINTR {
             return false;

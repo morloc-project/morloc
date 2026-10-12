@@ -643,6 +643,26 @@ enum Wait<'a> {
 // NET-5: with a peer, no time limit: a wait ends on end of file or when the peer is gone.
 unsafe fn read_packet(client_fd: i32, wait: Wait, reply: bool, errmsg: *mut *mut c_char) -> *mut u8 {
     clear_errmsg(errmsg);
+    match read_packet_raw(client_fd, wait, reply) {
+        Ok(p) => p,
+        Err(ReadFailure::Packet(e)) => {
+            *errmsg = e;
+            ptr::null_mut()
+        }
+        Err(ReadFailure::Io(why)) => {
+            set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
+            ptr::null_mut()
+        }
+    }
+}
+
+pub(crate) enum ReadFailure {
+    Io(&'static str),
+    /// A malformed header; the C string is the caller's to free.
+    Packet(*mut c_char),
+}
+
+unsafe fn read_packet_raw(client_fd: i32, wait: Wait, reply: bool) -> Result<*mut u8, ReadFailure> {
     let mut reader = PacketReader {
         fd: client_fd,
         pfd: libc::pollfd { fd: client_fd, events: libc::POLLIN, revents: 0 },
@@ -655,23 +675,18 @@ unsafe fn read_packet(client_fd: i32, wait: Wait, reply: bool, errmsg: *mut *mut
     while have < morloc_runtime_types::packet::PKT_HEADER_SIZE {
         match reader.recv(head.as_mut_ptr().add(have), HEAD_READ - have, have == 0) {
             Ok(n) => have += n,
-            Err(why) => {
-                set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
-                return ptr::null_mut();
-            }
+            Err(why) => return Err(ReadFailure::Io(why)),
         }
     }
 
     let mut packet_err: *mut c_char = ptr::null_mut();
     let packet_length = crate::packet_ffi::morloc_packet_size(head.as_ptr(), &mut packet_err);
     if !packet_err.is_null() {
-        *errmsg = packet_err;
-        return ptr::null_mut();
+        return Err(ReadFailure::Packet(packet_err));
     }
     let result = libc::malloc(packet_length.max(1)) as *mut u8;
     if result.is_null() {
-        set_errmsg(errmsg, &MorlocError::Ipc("malloc failure".into()));
-        return ptr::null_mut();
+        return Err(ReadFailure::Io("malloc failure"));
     }
     let copied = have.min(packet_length);
     ptr::copy_nonoverlapping(head.as_ptr(), result, copied);
@@ -681,19 +696,20 @@ unsafe fn read_packet(client_fd: i32, wait: Wait, reply: bool, errmsg: *mut *mut
             Ok(n) => got += n,
             Err(why) => {
                 libc::free(result as *mut c_void);
-                let why = if why == TIMEOUT_INITIAL { "Timeout waiting for remaining data" } else { why };
-                set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
-                return ptr::null_mut();
+                return Err(ReadFailure::Io(if why == TIMEOUT_INITIAL { "Timeout waiting for remaining data" } else { why }));
             }
         }
     }
-    result
+    Ok(result)
 }
 
 /// Bytes read before the header is parsed: a whole small packet.
 const HEAD_READ: usize = 4096;
 
 const TIMEOUT_INITIAL: &str = "Timeout waiting for initial data";
+
+/// The sender closed before the first byte of a packet.
+pub(crate) const CLOSED_BY_PEER: &str = "Connection closed by peer";
 
 struct PacketReader<'a> {
     fd: i32,
@@ -727,7 +743,7 @@ impl PacketReader<'_> {
                 if trace_close_enabled() {
                     eprintln!("[MLC_IPC] pid={} recv EOF (0 bytes) fd={}", libc::getpid(), self.fd);
                 }
-                return Err(if first { "Connection closed by peer" } else { "Connection closed early" });
+                return Err(if first { CLOSED_BY_PEER } else { "Connection closed early" });
             }
             let e = crate::utility::errno_val();
             if e == libc::EINTR {
@@ -779,15 +795,28 @@ pub(crate) unsafe fn stream_from_client(
     client_fd: i32,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
+    clear_errmsg(errmsg);
+    match read_request(client_fd) {
+        Ok(p) => p,
+        Err(ReadFailure::Packet(e)) => {
+            *errmsg = e;
+            ptr::null_mut()
+        }
+        Err(ReadFailure::Io(why)) => {
+            set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
+            ptr::null_mut()
+        }
+    }
+}
+
+pub(crate) unsafe fn read_request(client_fd: i32) -> Result<*mut u8, ReadFailure> {
     // NET-5: a sender that cannot be named has its stalls bounded instead.
     let request = match Peer::of(client_fd) {
-        Some(peer) => read_packet(client_fd, Wait::Peer(&peer), false, errmsg),
-        None => read_packet(client_fd, Wait::Stall, false, errmsg),
-    };
-    if !request.is_null() {
-        REQUEST.with(|r| r.set((client_fd, crate::fork_policy::generation())));
-    }
-    request
+        Some(peer) => read_packet_raw(client_fd, Wait::Peer(&peer), false),
+        None => read_packet_raw(client_fd, Wait::Stall, false),
+    }?;
+    REQUEST.with(|r| r.set((client_fd, crate::fork_policy::generation())));
+    Ok(request)
 }
 
 thread_local! {
