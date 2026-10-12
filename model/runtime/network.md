@@ -146,15 +146,22 @@ tla:CrossingConn with its `.bug` variants `finishing_counts_pinned` and
 
 ### NET-9 In a fork pool only an idle worker takes a connection
 Status: implemented
-Checked by: tla:PyForkAccept, tla:PyForkAccept_exclusive, tla:PyForkAccept_emfile_exits.bug, tla:PyForkAccept_retire_before_accept.bug, tla:PyForkAccept_no_refork_after_retire.bug, tla:PyForkAccept_accept_while_busy.bug, golden:pool-nested-callbacks-churn
+Checked by: a_fork_pool_serves_calls_and_stops_on_sigterm, a_busy_worker_gets_a_second_worker, the_busy_count_stays_balanced_across_processes, tla:ForkPool, tla:ForkPool_exclusive, tla:ForkPool_noretire, tla:ForkPool_death, tla:ForkPool_emfile_exits.bug, tla:ForkPool_retire_before_accept.bug, tla:ForkPool_no_refork_after_retire.bug, tla:ForkPool_accept_while_busy.bug, tla:ForkPool_descendant_uncounted.bug, tla:ForkPool_no_life_pipe.bug, golden:pool-nested-callbacks-churn
 
-In a Python fork pool the coordinator binds the pool's socket before any
-worker exists, and every idle worker polls it and accepts; a worker that
-loses the race to accept polls again. A worker waiting on another pool
-does not poll, so a call never lands on a worker that cannot serve it, and
-the coordinator forks a worker whenever every live worker is waiting (or
+A fork pool (Python, R) runs one scheduler in libmorloc; the language gives
+only how to fork, how a worker loads its sources, how it serves one
+connection, and whether its workers retire. The coordinator binds the
+pool's socket before any worker exists, and every idle worker polls it and
+accepts; a worker that loses the race to accept polls again. A worker
+waiting on another pool does not poll. The pool counts the waits on
+another pool in progress -- a foreign call's round trip, a channel read or
+write that sleeps -- made by a worker or by a process the user's code
+forked from one, counting nested waits on one thread once; the coordinator
+forks a worker whenever that count reaches the number of live workers (or
 none is left). A worker accepts before it considers retiring, so it never
 retires with a connection queued, and an accept that fails for want of a
 descriptor leaves the connection queued and the worker polling. A process
 forked from a worker never accepts. The readiness probe is answered like
-any call, by a worker whose sources have loaded.
+any call, by a worker whose sources have loaded. A worker leaves when the
+read end of a pipe only the coordinator holds reaches end of file, so no
+worker outlives its coordinator.

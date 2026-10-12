@@ -23,32 +23,6 @@
 #include <signal.h>
 #include <unistd.h>
 
-// FORK-2: atomic close-on-exec where the platform has it; the new
-// descriptor is non-blocking.
-static int mlc_accept_nonblocking(int fd) {
-#ifdef __linux__
-    return accept4(fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
-#else
-    int c = accept(fd, NULL, NULL);
-    if (c >= 0) {
-        fcntl(c, F_SETFD, FD_CLOEXEC);
-        fcntl(c, F_SETFL, fcntl(c, F_GETFL) | O_NONBLOCK);
-    }
-    return c;
-#endif
-}
-
-static int mlc_pipe_cloexec(int fds[2]) {
-#ifdef __linux__
-    return pipe2(fds, O_CLOEXEC);
-#else
-    if (pipe(fds) != 0) return -1;
-    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
-    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
-    return 0;
-#endif
-}
-
 #include "morloc.h"
 
 // {{{ macros
@@ -2088,98 +2062,7 @@ static void daemon_finalizer(SEXP ptr) {
     R_ClearExternalPtr(ptr);
 }
 
-// Release daemon resources in a forked child WITHOUT unlinking the socket file.
-// Workers call this after fork so they don't hold the server_fd or accidentally
-// destroy the socket when they exit.
-// In a forked worker: take the listening socket out of the inherited daemon
-// handle and drop the rest. The socket stays open for the worker to accept
-// on; the path is the main process's to remove, so the handle is released
-// without closing or unlinking anything.
-SEXP morloc_worker_listener(SEXP daemon_r) {
-    language_daemon_t* daemon = (language_daemon_t*)R_ExternalPtrAddr(daemon_r);
-    if (daemon == NULL) error("morloc_worker_listener: no daemon");
-    int fd = daemon->server_fd;
-    free(daemon->socket_path);
-    free(daemon->tmpdir);
-    free(daemon->shm_basename);
-    free(daemon);
-    R_ClearExternalPtr(daemon_r);
-    return ScalarInteger(fd);
-}
-
-SEXP morloc_start_daemon(
-    SEXP socket_path_r,
-    SEXP tmpdir_r,
-    SEXP shm_basename_r,
-    SEXP shm_default_size_r
-){ MAYFAIL
-    const char* socket_path = CHAR(STRING_ELT(socket_path_r, 0));
-    const char* tmpdir = CHAR(STRING_ELT(tmpdir_r, 0));
-    const char* shm_basename = CHAR(STRING_ELT(shm_basename_r, 0));
-    size_t shm_default_size = (size_t)asInteger(shm_default_size_r);
-
-    // Workers are forked from this process afterwards and inherit it.
-    mlc_set_self_socket(socket_path);
-
-    language_daemon_t* daemon = R_TRY(
-        start_daemon,
-        socket_path,
-        tmpdir,
-        shm_basename,
-        shm_default_size
-    );
-
-    // Wrap pointer in external pointer
-    SEXP result = PROTECT(R_MakeExternalPtr(daemon, R_NilValue, R_NilValue));
-
-    // Record which process owns the daemon (for the guard in daemon_finalizer)
-    daemon_creator_generation = morloc_fork_generation();
-
-    // Register finalizer with wrapper
-    R_RegisterCFinalizerEx(result, daemon_finalizer, TRUE);
-
-    // Set class attribute
-    SEXP class_name = PROTECT(mkString("language_daemon"));
-    SET_CLASS(result, class_name);
-
-    UNPROTECT(2);
-    return result;
-}
-
-
-
-
-// {{{ signal handling for graceful shutdown
-
-static volatile sig_atomic_t r_shutting_down = 0;
-
-static void r_sigterm_handler(int sig) {
-    (void)sig;
-    r_shutting_down = 1;
-}
-
-SEXP morloc_install_sigterm_handler(void) {
-    struct sigaction sa;
-    sa.sa_handler = r_sigterm_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGTERM, &sa, NULL);
-
-    /* Ignore SIGPIPE: a peer closing the socket mid-write must surface as an
-       EPIPE return, not kill the pool. Linux masks this via MSG_NOSIGNAL on
-       each send; macOS has no per-call flag, so without this a broken pipe
-       terminates the R pool and the caller sees "Connection closed by peer". */
-    signal(SIGPIPE, SIG_IGN);
-
-    /* FORK-6: the lifeline is watched in morloc_wait_wakeup, not from a thread. */
-    morloc_lifeline_adopt();
-
-    return R_NilValue;
-}
-
-SEXP morloc_is_shutting_down(void) {
-    return ScalarLogical(r_shutting_down != 0);
-}
+// {{{ stdio
 
 SEXP morloc_set_line_buffered(void) {
     // Only stderr - stdout is left fully buffered for performance
@@ -2188,11 +2071,7 @@ SEXP morloc_set_line_buffered(void) {
     return R_NilValue;
 }
 
-// }}} signal handling
-
-
-
-
+// }}} stdio
 
 
 // put_value
@@ -3016,14 +2895,6 @@ SEXP morloc_mlc_open_channel(SEXP schema_str_r) { MAYFAIL
     return make_integer64_scalar(h);
 }
 
-// mlc_is_channel(handle) -> logical. A channel read or write may wait.
-SEXP morloc_mlc_is_channel(SEXP handle_r) {
-    if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
-        return ScalarLogical(0);
-    }
-    return ScalarLogical(mlc_is_channel(i64_from_sexp(handle_r)) ? 1 : 0);
-}
-
 // mlc_settle(handle) -> NULL. Release the channel; raises the producer's
 // failure, unchanged, if a reader was handed it.
 SEXP morloc_mlc_settle(SEXP handle_r) { MAYFAIL
@@ -3555,10 +3426,6 @@ SEXP morloc_bench_record_r(SEXP key_r, SEXP seconds_r) {
 }
 
 
-
-
-
-
 // Release the SHM ref owned by a morloc_put_value-produced packet. The
 // codegen inserts this call at the end of a serialize let's scope so
 // the tracker entry is dropped as soon as the packet is no longer
@@ -3679,20 +3546,7 @@ SEXP morloc_remote_call(SEXP midx, SEXP socket_path, SEXP cache_path, SEXP resou
 }
 
 
-// {{{ fork and worker functions
-
-SEXP morloc_fork(void) {
-    long threads = 0;
-    int err = 0;
-    pid_t pid = morloc_fork_worker(&threads, &err);
-    if (pid == -2) {
-        error("refusing to fork a worker from a process with %ld threads", threads);
-    }
-    if (pid < 0) {
-        error("fork failed: %s", strerror(err));
-    }
-    return ScalarInteger((int)pid);
-}
+// {{{ exit and tracing
 
 // Immediately terminate the process without running any cleanup.
 // Must be used by forked worker children instead of R's quit().
@@ -3733,169 +3587,9 @@ static void mlc_trace(const char* fmt, ...) {
     fflush(stderr);
 }
 
+// }}} exit and tracing
 
-SEXP morloc_kill(SEXP pid_r, SEXP sig_r) {
-    pid_t pid = (pid_t)INTEGER(pid_r)[0];
-    int sig = INTEGER(sig_r)[0];
-    int ret = kill(pid, sig);
-    return ScalarInteger(ret);
-}
-
-// Non-blocking reap of ONE worker pid, reporting HOW it died. A crashed R
-// worker (forked process) closes its client fd -> the caller sees a bare
-// "Connection closed by peer", and the nexus cannot see it (it tracks the R
-// dispatcher pid, not worker grandchildren), so log the disposition here.
-// Reaping by specific pid (not waitpid(-1)) lets the dispatcher prune its own
-// pid list precisely, so shutdown never SIGKILLs a reaped-and-reused pid.
-// Returns: 0 = still alive; WTERMSIG (>0) = died by signal; -1 = reaped
-// (clean/nonzero exit) or already gone.
-// 0 while worker `pid` runs; 1 once it has ended (reaped here, with any
-// abnormal end reported, or already gone).
-SEXP morloc_reap_worker(SEXP pid_r) {
-    pid_t pid = (pid_t)INTEGER(pid_r)[0];
-    int status;
-    pid_t r = waitpid(pid, &status, WNOHANG);
-    if (r == 0) {
-        return ScalarInteger(0);
-    }
-    if (r > 0 && WIFSIGNALED(status)) {
-        fprintf(stderr, "morloc R pool: worker %d crashed with signal %d\n",
-                (int)pid, WTERMSIG(status));
-        fflush(stderr);
-    } else if (r > 0 && WIFEXITED(status) && WEXITSTATUS(status) != 0) {
-        fprintf(stderr, "morloc R pool: worker %d exited with status %d\n",
-                (int)pid, WEXITSTATUS(status));
-        fflush(stderr);
-    }
-    return ScalarInteger(1);
-}
-
-SEXP morloc_waitpid_blocking(SEXP pid_r) {
-    pid_t pid = (pid_t)INTEGER(pid_r)[0];
-    int status;
-    pid_t result = waitpid(pid, &status, 0);
-    return ScalarInteger((int)result);
-}
-
-// }}} fork and worker functions
-
-// {{{ shared counter functions (for dynamic worker spawning)
-
-static void shared_counter_finalizer(SEXP ptr) {
-    int* p = (int*)R_ExternalPtrAddr(ptr);
-    if (p != NULL) {
-        munmap(p, sizeof(int));
-        R_ClearExternalPtr(ptr);
-    }
-}
-
-SEXP morloc_shared_counter_create(void) {
-    int* p = (int*)mmap(NULL, sizeof(int),
-                        PROT_READ | PROT_WRITE,
-                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) {
-        error("mmap failed for shared counter: %s", strerror(errno));
-    }
-    *p = 0;
-    SEXP ptr = PROTECT(R_MakeExternalPtr(p, R_NilValue, R_NilValue));
-    R_RegisterCFinalizerEx(ptr, shared_counter_finalizer, TRUE);
-    UNPROTECT(1);
-    return ptr;
-}
-
-SEXP morloc_shared_counter_inc(SEXP ptr_r) {
-    int* p = (int*)R_ExternalPtrAddr(ptr_r);
-    if (p == NULL) error("shared counter is NULL");
-    int val = __atomic_add_fetch(p, 1, __ATOMIC_RELAXED);
-    return ScalarInteger(val);
-}
-
-SEXP morloc_shared_counter_dec(SEXP ptr_r) {
-    int* p = (int*)R_ExternalPtrAddr(ptr_r);
-    if (p == NULL) error("shared counter is NULL");
-    int val = __atomic_sub_fetch(p, 1, __ATOMIC_RELAXED);
-    return ScalarInteger(val);
-}
-
-SEXP morloc_shared_counter_read(SEXP ptr_r) {
-    int* p = (int*)R_ExternalPtrAddr(ptr_r);
-    if (p == NULL) error("shared counter is NULL");
-    int val = __atomic_load_n(p, __ATOMIC_RELAXED);
-    return ScalarInteger(val);
-}
-
-SEXP morloc_pipe(void) {
-    int fds[2];
-    if (mlc_pipe_cloexec(fds) != 0) {
-        error("pipe failed: %s", strerror(errno));
-    }
-    SEXP result = PROTECT(allocVector(INTSXP, 2));
-    INTEGER(result)[0] = fds[0];  /* read end */
-    INTEGER(result)[1] = fds[1];  /* write end */
-    UNPROTECT(1);
-    return result;
-}
-
-// Make `fd` non-blocking: a worker's wake-up byte must never wait on a full
-// pipe, since the reader may be the very process it is waiting for.
-SEXP morloc_set_nonblocking(SEXP fd_r) {
-    int fd = INTEGER(fd_r)[0];
-    int fl = fcntl(fd, F_GETFL, 0);
-    if (fl == -1 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) == -1) {
-        error("cannot make fd %d non-blocking: %s", fd, strerror(errno));
-    }
-    return R_NilValue;
-}
-
-// Wait up to `ms` for a byte on the wake-up pipe `fd` (non-blocking), then
-// drain it. Returns early on a signal, so shutdown stays prompt.
-/* Wait for a wake-up byte or the timeout; end the process group once the
-   nexus's lifeline reaches end of file. */
-SEXP morloc_wait_wakeup(SEXP fd_r, SEXP ms_r) {
-    static int lifeline_ended = 0;
-    int fd = INTEGER(fd_r)[0];
-    int life = lifeline_ended ? -1 : morloc_lifeline_adopt();
-    struct pollfd p[2] = {{fd, POLLIN, 0}, {life, POLLIN, 0}};
-    if (poll(p, life >= 0 ? 2 : 1, INTEGER(ms_r)[0]) > 0) {
-        if (p[0].revents) {
-            char buf[256];
-            while (read(fd, buf, sizeof(buf)) > 0) {}
-        }
-        if (life >= 0 && p[1].revents) {
-            char b;
-            ssize_t n = read(life, &b, 1);
-            if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) {
-                lifeline_ended = 1;
-                morloc_lifeline_teardown();
-            }
-        }
-    }
-    return R_NilValue;
-}
-
-SEXP morloc_shared_counter_set(SEXP ptr_r, SEXP val_r) {
-    int* p = (int*)R_ExternalPtrAddr(ptr_r);
-    if (p == NULL) error("shared counter is NULL");
-    __atomic_store_n(p, INTEGER(val_r)[0], __ATOMIC_RELAXED);
-    return R_NilValue;
-}
-
-SEXP morloc_write_byte(SEXP fd_r, SEXP byte_r) {
-    int fd = INTEGER(fd_r)[0];
-    unsigned char b = (unsigned char)RAW(byte_r)[0];
-    ssize_t n = write(fd, &b, 1);
-    return ScalarInteger((int)n);
-}
-
-SEXP morloc_close_fd(SEXP fd_r) {
-    int fd = INTEGER(fd_r)[0];
-    close(fd);
-    return R_NilValue;
-}
-
-// }}} shared counter functions
-
-// {{{ C-level worker loop
+// {{{ serving a call
 
 
 // Drain the morloc debug-trace (if --debug was compiled in and any
@@ -4164,40 +3858,85 @@ static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
     close_socket(client_fd);
 }
 
-// Tight C worker loop. Each idle worker waits on the pool's listening socket
-// and serves the connection it accepts itself, crossing into R only for
-// manifold evaluation. No other process holds a copy of a client socket, so a
-// worker that dies mid-request ends that connection and its caller sees the
-// failure. The worker also watches `life_fd`, a pipe whose write end only the
-// pool's main process holds: end of file there means the pool is gone.
-SEXP morloc_worker_loop_c(SEXP listen_fd_r, SEXP life_fd_r, SEXP dispatch_r, SEXP remote_dispatch_r) {
-    int listen_fd = INTEGER(listen_fd_r)[0];
-    int life_fd = INTEGER(life_fd_r)[0];
-    PROTECT(dispatch_r);
-    PROTECT(remote_dispatch_r);
+// }}} serving a call
 
-    while (!r_shutting_down) {
-        struct pollfd pfds[2] = {{listen_fd, POLLIN, 0}, {life_fd, POLLIN, 0}};
-        int rc = poll(pfds, 2, 100);
-        if (rc < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (pfds[1].revents) break;
-        if (!(pfds[0].revents & POLLIN)) continue;
-        // Every idle worker wakes; one wins and the rest find nothing.
-        int client_fd = mlc_accept_nonblocking(listen_fd);
-        if (client_fd < 0) continue;
-        mlc_trace("accept client=%d\n", client_fd);
-        run_job_c(client_fd, dispatch_r, remote_dispatch_r);
-        fflush(stdout);
-    }
+// {{{ fork pool
 
+// The worker's dispatch tables, set by its init function.
+typedef struct {
+    SEXP init;
+    SEXP dispatch;
+    SEXP remote_dispatch;
+} r_fork_pool_ctx;
+
+// A worker whose R code failed past its handler ends with this status.
+#define R_WORKER_FATAL 70
+
+// Every R evaluation below runs under R_ToplevelExec, so an R error ends at
+// this boundary instead of unwinding through the runtime's frames.
+static void r_fork_pool_init_body(void* data) {
+    r_fork_pool_ctx* c = (r_fork_pool_ctx*)data;
+    SEXP call = PROTECT(Rf_lang1(c->init));
+    SEXP tables = PROTECT(Rf_eval(call, R_GlobalEnv));
+    c->dispatch = VECTOR_ELT(tables, 0);
+    c->remote_dispatch = VECTOR_ELT(tables, 1);
+    R_PreserveObject(c->dispatch);
+    R_PreserveObject(c->remote_dispatch);
     UNPROTECT(2);
-    return R_NilValue;
 }
 
-// }}} C-level worker loop
+static int r_fork_pool_init(void* ctx) {
+    return R_ToplevelExec(r_fork_pool_init_body, ctx) ? 0 : R_WORKER_FATAL;
+}
+
+typedef struct {
+    int fd;
+    r_fork_pool_ctx* c;
+} r_fork_pool_job;
+
+static void r_fork_pool_serve_body(void* data) {
+    r_fork_pool_job* job = (r_fork_pool_job*)data;
+    run_job_c(job->fd, job->c->dispatch, job->c->remote_dispatch);
+    fflush(stdout);
+}
+
+static int r_fork_pool_serve(int client_fd, void* ctx) {
+    r_fork_pool_job job = { client_fd, (r_fork_pool_ctx*)ctx };
+    return R_ToplevelExec(r_fork_pool_serve_body, &job) ? 0 : R_WORKER_FATAL;
+}
+
+static void r_fork_pool_worker_exit(void* ctx, int status) {
+    (void)ctx;
+    (void)status;
+    fflush(NULL);
+}
+
+// Run this pool's coordinator and forked workers until the pool ends; its
+// exit status. `init_r` is the R function a new worker calls to load its
+// sources; it returns list(dispatch, remote_dispatch). R workers never retire.
+SEXP morloc_fork_pool_run_r(SEXP socket_path_r, SEXP tmpdir_r, SEXP shm_basename_r, SEXP init_r) {
+    static r_fork_pool_ctx ctx;
+    ctx.init = init_r;
+    R_PreserveObject(init_r);
+    morloc_fork_pool_t cfg = {
+        .lang = "R",
+        .ctx = &ctx,
+        .fork = NULL,
+        .worker_init = r_fork_pool_init,
+        .serve = r_fork_pool_serve,
+        .before_retire = NULL,
+        .worker_exit = r_fork_pool_worker_exit,
+    };
+    int status = morloc_fork_pool_run(
+        CHAR(STRING_ELT(socket_path_r, 0)),
+        CHAR(STRING_ELT(tmpdir_r, 0)),
+        CHAR(STRING_ELT(shm_basename_r, 0)),
+        &cfg);
+    return ScalarInteger(status);
+}
+
+// }}} fork pool
+
 
 // -- Cache bridge to libmorloc.so -------------------------------------------
 
@@ -4409,7 +4148,6 @@ void R_init_rmorloc(DllInfo *info) { _r_init_impl(info); }
 static void _r_init_impl(DllInfo *info) {
     morloc_install_panic_hook(NULL);
     R_CallMethodDef callMethods[] = {
-        {"morloc_start_daemon", (DL_FUNC) &morloc_start_daemon, 4},
         {"morloc_foreign_call", (DL_FUNC) &morloc_foreign_call, 3},
         {"morloc_get_value", (DL_FUNC) &morloc_get_value, 3},
         {"morloc_put_value", (DL_FUNC) &morloc_put_value, 3},
@@ -4425,26 +4163,9 @@ static void _r_init_impl(DllInfo *info) {
         {"r_morloc_bench_record", (DL_FUNC) &morloc_bench_record_r, 2},
         {"morloc_remote_call", (DL_FUNC) &morloc_remote_call, 5},
         {"morloc_release_packet_shm", (DL_FUNC) &morloc_release_packet_shm, 1},
-        {"morloc_fork", (DL_FUNC) &morloc_fork, 0},
         {"morloc_exit", (DL_FUNC) &morloc_exit, 1},
-        {"morloc_kill", (DL_FUNC) &morloc_kill, 2},
-        {"morloc_waitpid_blocking", (DL_FUNC) &morloc_waitpid_blocking, 1},
-        {"morloc_reap_worker", (DL_FUNC) &morloc_reap_worker, 1},
-        {"morloc_install_sigterm_handler", (DL_FUNC) &morloc_install_sigterm_handler, 0},
         {"morloc_set_line_buffered", (DL_FUNC) &morloc_set_line_buffered, 0},
-        {"morloc_is_shutting_down", (DL_FUNC) &morloc_is_shutting_down, 0},
-        {"morloc_worker_listener", (DL_FUNC) &morloc_worker_listener, 1},
-        {"morloc_shared_counter_create", (DL_FUNC) &morloc_shared_counter_create, 0},
-        {"morloc_shared_counter_inc", (DL_FUNC) &morloc_shared_counter_inc, 1},
-        {"morloc_shared_counter_dec", (DL_FUNC) &morloc_shared_counter_dec, 1},
-        {"morloc_shared_counter_read", (DL_FUNC) &morloc_shared_counter_read, 1},
-        {"morloc_pipe", (DL_FUNC) &morloc_pipe, 0},
-        {"morloc_write_byte", (DL_FUNC) &morloc_write_byte, 2},
-        {"morloc_set_nonblocking", (DL_FUNC) &morloc_set_nonblocking, 1},
-        {"morloc_wait_wakeup", (DL_FUNC) &morloc_wait_wakeup, 2},
-        {"morloc_shared_counter_set", (DL_FUNC) &morloc_shared_counter_set, 2},
-        {"morloc_close_fd", (DL_FUNC) &morloc_close_fd, 1},
-        {"morloc_worker_loop_c", (DL_FUNC) &morloc_worker_loop_c, 4},
+        {"morloc_fork_pool_run_r", (DL_FUNC) &morloc_fork_pool_run_r, 4},
         {"r_morloc_cache_key_compute", (DL_FUNC) &morloc_cache_key_compute_r, 3},
         {"r_morloc_debug_record_frame", (DL_FUNC) &morloc_debug_record_frame_r, 6},
         {"r_morloc_debug_flush_dispatch", (DL_FUNC) &morloc_debug_flush_dispatch_r, 0},
@@ -4468,7 +4189,6 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_open_ostream", (DL_FUNC) &morloc_mlc_open_ostream, 2},
         {"morloc_mlc_open_istream", (DL_FUNC) &morloc_mlc_open_istream, 2},
         {"morloc_mlc_open_channel", (DL_FUNC) &morloc_mlc_open_channel, 1},
-        {"morloc_mlc_is_channel", (DL_FUNC) &morloc_mlc_is_channel, 1},
         {"morloc_mlc_settle", (DL_FUNC) &morloc_mlc_settle, 1},
         {"morloc_mlc_spawn", (DL_FUNC) &morloc_mlc_spawn, 4},
         {"morloc_mlc_open_stdin",   (DL_FUNC) &morloc_mlc_open_stdin,   1},

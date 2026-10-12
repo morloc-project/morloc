@@ -71,6 +71,7 @@ pub mod lease;
 pub mod arrow_ffi;
 pub mod arrow_ipc_reader;
 pub mod pool_ffi;
+pub mod fork_pool;
 pub mod crash;
 pub mod daemon_ffi;
 pub mod panic_ffi;

@@ -31,6 +31,7 @@ mod tests {
         ("FFI_ArrowArrayStream", "struct ArrowArrayStream"),
         ("ShmHeader", "shm_t"),
         ("PacketHeader", "morloc_packet_header_t"),
+        ("ForkPoolConfig", "morloc_fork_pool_t"),
     ];
 
     /// `FooBar` -> `foo_bar_t`.

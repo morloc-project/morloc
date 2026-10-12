@@ -1148,10 +1148,6 @@ pub(crate) fn forget_held_references() {
     HELD_REFERENCES.store(0, Ordering::Relaxed);
 }
 
-pub(crate) fn morloc_held_references() -> i64 {
-    held_references()
-}
-
 /// Allocate at least `size` bytes from shared memory and return a pointer
 /// to the start of the data region.
 ///
@@ -3227,11 +3223,6 @@ pub(crate) mod tests {
 }
 
 mod c_abi {
-
-    #[no_mangle]
-    pub extern "C" fn morloc_held_references() -> i64 {
-        super::morloc_held_references()
-    }
 
     #[no_mangle]
     pub extern "C" fn morloc_refuse_new_segments() {

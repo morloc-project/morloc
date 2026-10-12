@@ -48,7 +48,6 @@ mlc_load_user_sources <- function() {
   invisible()
 }
 
-morloc_start_daemon                  <- function(...){ .Call("morloc_start_daemon",                  ...) }
 morloc_foreign_call                  <- function(...){ .Call("morloc_foreign_call",                  ...) }
 # The third argument is codegen's per-call answer to "can this value carry an
 # interior NUL", which R cannot represent. It defaults to TRUE for the call
@@ -95,7 +94,6 @@ morloc_mlc_append                    <- function(...){ .Call("morloc_mlc_append"
 morloc_mlc_concat                    <- function(...){ .Call("morloc_mlc_concat",                    ...) }
 morloc_mlc_flush                     <- function(...){ .Call("morloc_mlc_flush",                     ...) }
 morloc_mlc_open_channel              <- function(...){ .Call("morloc_mlc_open_channel",              ...) }
-morloc_mlc_is_channel                <- function(...){ .Call("morloc_mlc_is_channel",                ...) }
 morloc_mlc_settle                    <- function(...){ .Call("morloc_mlc_settle",                    ...) }
 morloc_mlc_spawn                     <- function(...){ .Call("morloc_mlc_spawn",                     ...) }
 # Merge every fold accumulator with the handler's `combine`, then release
@@ -156,24 +154,7 @@ morloc_mlc_try <- function(body, ok, err) {
     error = function(e) err(conditionMessage(e))
   )
 }
-morloc_fork                          <- function(...){ .Call("morloc_fork",                          ...) }
-morloc_kill                          <- function(...){ .Call("morloc_kill",                          ...) }
-morloc_install_sigterm_handler       <- function(...){ .Call("morloc_install_sigterm_handler",       ...) }
-morloc_is_shutting_down              <- function(...){ .Call("morloc_is_shutting_down",              ...) }
-morloc_waitpid_blocking              <- function(...){ .Call("morloc_waitpid_blocking",              ...) }
-morloc_reap_worker                   <- function(...){ .Call("morloc_reap_worker",                   ...) }
-morloc_worker_listener               <- function(...){ .Call("morloc_worker_listener",               ...) }
-morloc_shared_counter_create         <- function(...){ .Call("morloc_shared_counter_create",         ...) }
-morloc_shared_counter_inc            <- function(...){ .Call("morloc_shared_counter_inc",            ...) }
-morloc_shared_counter_dec            <- function(...){ .Call("morloc_shared_counter_dec",            ...) }
-morloc_shared_counter_read           <- function(...){ .Call("morloc_shared_counter_read",           ...) }
-morloc_pipe                          <- function(...){ .Call("morloc_pipe",                          ...) }
-morloc_write_byte                    <- function(...){ .Call("morloc_write_byte",                    ...) }
-morloc_set_nonblocking               <- function(...){ .Call("morloc_set_nonblocking",               ...) }
-morloc_wait_wakeup                   <- function(...){ .Call("morloc_wait_wakeup",                   ...) }
-morloc_shared_counter_set            <- function(...){ .Call("morloc_shared_counter_set",            ...) }
-morloc_close_fd                      <- function(...){ .Call("morloc_close_fd",                      ...) }
-morloc_worker_loop_c                 <- function(...){ .Call("morloc_worker_loop_c",                 ...) }
+morloc_fork_pool_run_r               <- function(...){ .Call("morloc_fork_pool_run_r",               ...) }
 morloc_set_line_buffered             <- function(...){ .Call("morloc_set_line_buffered",             ...) }
 morloc_exit                          <- function(...){ .Call("morloc_exit",                          ...) }
 morloc_cache_key_compute             <- function(...){ .Call("r_morloc_cache_key_compute",           ...) }
@@ -186,49 +167,6 @@ morloc_cache_record_miss             <- function( ){ .Call("r_morloc_cache_recor
 morloc_cache_record_store            <- function( ){ .Call("r_morloc_cache_record_store"           ) }
 
 global_state <- list()
-
-# Dynamic worker spawning: monkey-patch morloc_foreign_call to track busy workers.
-# Workers atomically increment a shared counter before a foreign_call and
-# decrement after. When all workers are busy, a byte is written to a wake-up
-# pipe to tell the main process to spawn a new worker. The pipe never blocks a
-# writer, and the main process drains it.
-.orig_foreign_call <- morloc_foreign_call
-.busy_counter <- NULL
-.total_counter <- NULL
-.wakeup_fd <- NULL
-
-.all_workers_busy <- function(busy) {
-  !is.null(.total_counter) && busy >= morloc_shared_counter_read(.total_counter)
-}
-
-morloc_foreign_call <- function(...) {
-  val <- morloc_shared_counter_inc(.busy_counter)
-  if (.all_workers_busy(val) && !is.null(.wakeup_fd)) {
-    tryCatch(morloc_write_byte(.wakeup_fd, as.raw(0x21)), error = function(e) NULL)
-  }
-  on.exit(morloc_shared_counter_dec(.busy_counter))
-  .orig_foreign_call(...)
-}
-
-# A channel read or write waits on another worker, which may need a free
-# worker of this pool to make progress, so it counts as busy.
-.mlc_tracked_on_channel <- function(f, handle_pos) {
-  force(f)
-  function(...) {
-    if (morloc_mlc_is_channel(list(...)[[handle_pos]])) {
-      val <- morloc_shared_counter_inc(.busy_counter)
-      if (.all_workers_busy(val) && !is.null(.wakeup_fd)) {
-        tryCatch(morloc_write_byte(.wakeup_fd, as.raw(0x21)), error = function(e) NULL)
-      }
-      on.exit(morloc_shared_counter_dec(.busy_counter))
-    }
-    f(...)
-  }
-}
-morloc_mlc_next  <- .mlc_tracked_on_channel(morloc_mlc_next, 2)
-morloc_mlc_write <- .mlc_tracked_on_channel(morloc_mlc_write, 4)
-morloc_mlc_flush <- .mlc_tracked_on_channel(morloc_mlc_flush, 1)
-morloc_mlc_close <- .mlc_tracked_on_channel(morloc_mlc_close, 1)
 
 .mlc_wrap_log <- function(group, start_tmpl, pass_tmpl, fail_tmpl, bench_key, fn) {
   # Eagerly resolve `fn` so the closure captures the ORIGINAL function. The
@@ -469,129 +407,27 @@ mlc_make_closure_dispatch <- function(mid, arg_codecs, res_codec) {
 # <<<BREAK>>>
 # AUTO include dispatch end
 
-worker_loop <- function(listen_fd, life_fd) {
-  # If deferred source loading failed in this worker, make every dispatch entry
-  # report the real cause as a clean fail packet. The C loop evaluates the
-  # manifold via R_tryEvalSilent and returns the error text, so a stop() here
-  # surfaces "there is no package called X" instead of a downstream
-  # "could not find function ..." from a manifold referencing an unloaded symbol.
-  # (Mirrors the Python pool's run_job _mlc_source_error guard.)
+# A new worker, after it is forked: load the user's sources and return the
+# dispatch tables it serves calls from.
+worker_init <- function() {
+  mlc_load_user_sources()
+  # If loading failed, every call reports the real cause as a clean fail
+  # packet rather than a downstream "could not find function ...".
   if (!is.null(.mlc_source_error)) {
     fail_fn <- function(...) stop(.mlc_source_error)
     .dispatch <<- lapply(.dispatch, function(f) fail_fn)
     .remote_dispatch <<- lapply(.remote_dispatch, function(f) fail_fn)
   }
-  morloc_worker_loop_c(listen_fd, life_fd, .dispatch, .remote_dispatch)
+  list(.dispatch, .remote_dispatch)
 }
 
 main <- function(socket_path, tmpdir, shm_basename) {
-  # Force line-buffered stdout/stderr so output from user functions is not lost
+  # Force line-buffered stderr so output from user functions is not lost
   # when the nexus kills the pool process group.
   morloc_set_line_buffered()
-  morloc_install_sigterm_handler()
-
-  # The main process listens but never accepts: each idle worker accepts on
-  # the shared socket and serves the connection itself, so only idle workers
-  # take calls, and a re-entrant callback is never queued behind a busy one.
-  daemon <- morloc_start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
-
-  # Shared counters for dynamic worker spawning: workers busy in a foreign
-  # call, and live workers.
-  busy_counter <- morloc_shared_counter_create()
-  total_counter <- morloc_shared_counter_create()
-  wakeup <- morloc_pipe()  # c(read_fd, write_fd)
-  morloc_set_nonblocking(wakeup[1L])
-  morloc_set_nonblocking(wakeup[2L])
-  # Only this process holds the write end; a worker sees end of file on the
-  # read end once this process is gone, and exits.
-  life <- morloc_pipe()
-
-  # Set globals so the monkey-patched morloc_foreign_call can use them.
-  # Forked children inherit these values.
-  .busy_counter <<- busy_counter
-  .total_counter <<- total_counter
-  .wakeup_fd <<- wakeup[2L]
-
-  min_workers <- 1L  # floor the pool never drops below
-
-  # Fork one worker: clean state -> load user sources -> serve. Returns its pid.
-  spawn_worker <- function() {
-    pid <- morloc_fork()
-    if (pid == 0L) {
-      # A worker never unwinds into main's frames, whose exit handler would
-      # kill its siblings: an error that reaches here ends the worker alone.
-      tryCatch({
-        listen_fd <- morloc_worker_listener(daemon)
-        morloc_close_fd(wakeup[1L])  # child doesn't read the wake-up pipe
-        morloc_close_fd(life[2L])    # nor hold the main process's lifeline
-        mlc_load_user_sources()      # load user sources post-fork
-        worker_loop(listen_fd, life[1L])
-      }, error = function(e) {
-        cat(paste0("morloc R pool worker: ", conditionMessage(e), "\n"), file = stderr())
-        morloc_exit(70L)
-      }, interrupt = function(e) morloc_exit(70L))
-      morloc_exit(0L)
-    }
-    pid
-  }
-
-  # SHM-8: a worker never retires, so one that ended may have held shared
-  # memory no other process can release. The pool ends, and the nexus
-  # recovers the namespace. The ended pid leaves `pids` first, so the exit
-  # handler never signals a reused pid.
-  reap_or_end <- function(pids) {
-    for (pid in pids) {
-      if (morloc_reap_worker(pid) != 0L) {
-        kept <- setdiff(pids, pid)
-        pids <<- kept
-        # SHM-8: shutdown sets this flag before any worker can exit of it.
-        if (morloc_is_shutting_down()) return(kept)
-        stop(sprintf("worker %d ended; ending the pool so its shared memory is recovered", pid))
-      }
-    }
-    pids
-  }
-
-  pids <- integer(0)
-  for (i in seq_len(min_workers)) {
-    pids <- c(pids, spawn_worker())
-  }
-  morloc_shared_counter_set(total_counter, length(pids))
-
-  on.exit({
-    tryCatch(morloc_close_fd(wakeup[1L]), error = function(e) NULL)
-    tryCatch(morloc_close_fd(wakeup[2L]), error = function(e) NULL)
-    tryCatch(morloc_close_fd(life[2L]), error = function(e) NULL)
-    # Reap-and-log any final crash, then kill+reap the (pruned) live workers.
-    for (pid in pids) {
-      tryCatch(morloc_reap_worker(pid), error = function(e) NULL)
-    }
-    for (pid in pids) {
-      if (pid > 0L) {
-        tryCatch(morloc_kill(pid, 9L), error = function(e) NULL)
-        tryCatch(morloc_waitpid_blocking(pid), error = function(e) NULL)
-      }
-    }
-  })
-
-  while (!morloc_is_shutting_down()) {
-    # Reap dead workers, respawn to the floor, and keep the shared worker count
-    # honest (a stale count would make the saturation gate below stop tripping).
-    pids <- reap_or_end(pids)
-    morloc_shared_counter_set(total_counter, length(pids))
-
-    morloc_wait_wakeup(wakeup[1L], 100L)
-
-    # Dynamic worker spawning: if all workers are blocked in foreign_call,
-    # spawn a new one so incoming callbacks can still be served. (A worker that
-    # crashed mid-foreign-call leaves its busy increment un-decremented, so this
-    # may over-count busy and over-spawn -- bounded and self-limiting, and far
-    # safer than an under-spawn deadlock.)
-    if (morloc_shared_counter_read(busy_counter) >= length(pids)) {
-      pids <- c(pids, spawn_worker())
-      morloc_shared_counter_set(total_counter, length(pids))
-    }
-  }
+  # The scheduler (libmorloc) binds the socket, forks the workers and
+  # returns the pool's exit status; workers never return from it.
+  morloc_fork_pool_run_r(socket_path, tmpdir, shm_basename, worker_init)
 }
 
 args <- commandArgs(trailingOnly = TRUE)
@@ -620,13 +456,8 @@ shm_basename <- args[3]
 
 global_state$tmpdir <- tmpdir
 
-tryCatch(
-  {
-    main(socket_path, tmpdir, shm_basename)
-  },  error = function(e) {
-      stop(paste("Pool failed:", e$message))
-  })
+status <- main(socket_path, tmpdir, shm_basename)
 
 # Use _exit to avoid R cleanup which triggers heap corruption on glibc >= 2.39
 # (R's finalizers attempt to free objects in SHM-related C extensions)
-morloc_exit(0L)
+morloc_exit(status)

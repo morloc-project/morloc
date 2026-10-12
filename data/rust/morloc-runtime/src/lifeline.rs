@@ -551,9 +551,4 @@ mod c_abi {
     pub extern "C" fn morloc_lifeline_guard() {
         super::morloc_lifeline_guard()
     }
-
-    #[no_mangle]
-    pub extern "C" fn morloc_lifeline_teardown() {
-        super::morloc_lifeline_teardown()
-    }
 }

@@ -35,6 +35,7 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-nexus/process.rs::init_shm",
     "morloc-nexus/mcp.rs::new_session_id",
     "morloc-runtime/ipc_ffi.rs::recv",
+    "morloc-runtime/fork_pool.rs::worker",
     "morloc-runtime/stream.rs::is_this_process",
     "morloc-runtime/daemon_ffi.rs::write_port_file_atomic",
     "morloc-runtime/ipc_ffi.rs::accept_or_watch",
@@ -43,8 +44,7 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/ipc_ffi.rs::send_and_receive_over_socket",
     "morloc-runtime/utility.rs::create_beside",
 ];
-// SHM-8: pool.py's retiring worker names itself to its coordinator.
-const BINDER_PID_READS: &[(&str, usize)] = &[("data/lang/r/rmorloc.c", 1), ("data/lang/py/pool.py", 1)];
+const BINDER_PID_READS: &[(&str, usize)] = &[("data/lang/r/rmorloc.c", 1)];
 const CLASSES: &[&str] = &[
     "held", "reset", "unreachable", "exec-only", "startup", "lazy", "fork-scoped", "counter", "thread",
     "instance", "paired", "test-only",

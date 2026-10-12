@@ -1115,6 +1115,8 @@ pub(crate) unsafe fn send_and_receive_over_socket(
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
     clear_errmsg(errmsg);
+    // NET-9: a worker waiting on another pool counts busy.
+    let _busy = crate::fork_pool::busy();
 
     if forbid_self_call() && is_self_socket(socket_path) {
         set_errmsg(errmsg, &self_call_error(socket_path, packet));
@@ -2191,11 +2193,6 @@ mod c_abi {
     #[no_mangle]
     pub extern "C" fn morloc_exit_if_forked() {
         super::morloc_exit_if_forked()
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn mlc_set_self_socket(socket_path: *const c_char) {
-        super::mlc_set_self_socket(socket_path)
     }
 
     #[no_mangle]

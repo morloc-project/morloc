@@ -209,6 +209,12 @@ mod tests {
             return (format!("__anon:{size}:{align}"), name);
         }
         let decl = decl.trim();
+        // A function pointer, `ret (*name)(args)`, is pointer-sized.
+        if let Some(star) = decl.find("(*") {
+            let rest = &decl[star + 2..];
+            let name = &rest[..rest.find(')').expect("a function pointer names its field")];
+            return ("void*".to_string(), name.trim().to_string());
+        }
         let split = decl
             .rfind(|c: char| c.is_whitespace() || c == '*')
             .expect("field declaration must have a type and a name");
@@ -348,6 +354,20 @@ mod tests {
             alignment => "alignment",
             data_alignment => "data_alignment",
             fixed_width => "fixed_width",
+        ]);
+    }
+
+    #[test]
+    fn fork_pool_config_matches_the_header() {
+        use crate::fork_pool::ForkPoolConfig;
+        assert_same_layout!(ForkPoolConfig, "morloc_fork_pool_s", [
+            lang => "lang",
+            ctx => "ctx",
+            fork => "fork",
+            worker_init => "worker_init",
+            serve => "serve",
+            before_retire => "before_retire",
+            worker_exit => "worker_exit",
         ]);
     }
 

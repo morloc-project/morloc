@@ -243,7 +243,7 @@ Status: implemented
 Checked by: tla:PoolGroup, tla:PoolGroup_reap_only.bug, killing_a_group_by_its_id_goes_through_its_slot, golden:pool-main-death-ends-workers
 
 A pool is its main process together with every process in its group: the
-workers it forks (Python fork mode, R) and anything user code forks. A
+workers it forks (a fork pool: Python, R) and anything user code forks. A
 worker serves calls only for its pool, so none outlives it. When the
 reaper takes an exited pool process, whatever ended it and in every mode
 (a one-shot run, a daemon, an MCP server), it first sends SIGKILL to the

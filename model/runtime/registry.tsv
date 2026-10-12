@@ -27,11 +27,9 @@ data/lang/r/rmorloc.c::-::r_pipe_closed	thread
 data/lang/r/rmorloc.c::-::r_frames	thread		
 data/lang/r/rmorloc.c::-::r_frames_cap	thread		
 data/lang/r/rmorloc.c::-::daemon_creator_generation	fork-scoped		
-data/lang/r/rmorloc.c::-::r_shutting_down	thread		
 data/lang/r/rmorloc.c::mlc_trace_ipc::cached	thread		
 data/lang/r/rmorloc.c::run_job_c::budget	thread		
 data/lang/r/rmorloc.c::run_job_c::budget_read	thread		
-data/lang/r/rmorloc.c::morloc_wait_wakeup::lifeline_ended	fork-scoped		
 library/Morloc/CodeGenerator/Guest/Futhark.hs::-::cur	fork-scoped		
 library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::SCHEMA_STRS	startup		
 library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::SCHEMA_TABLE	startup		
@@ -303,3 +301,8 @@ morloc-runtime/stream.rs::-::TEST_IFILE_CACHE_BYTES	test-only
 morloc-runtime/shm.rs::-::SEGMENTS_CLOSED	lazy		
 morloc-runtime/stream.rs::-::REGISTRY_TORN_DOWN	lazy		
 morloc-runtime/shm.rs::-::EXITING	lazy		
+morloc-runtime/fork_pool.rs::-::WORKER	fork-scoped		
+morloc-runtime/fork_pool.rs::-::COORDINATOR	fork-scoped		
+morloc-runtime/fork_pool.rs::-::COORDINATOR_WAKE	fork-scoped		
+morloc-runtime/fork_pool.rs::-::DEPTH	thread		
+data/lang/r/rmorloc.c::morloc_fork_pool_run_r::ctx	startup		

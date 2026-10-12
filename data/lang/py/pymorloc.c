@@ -1,6 +1,3 @@
-#if defined(__linux__) && !defined(_GNU_SOURCE)
-#define _GNU_SOURCE
-#endif
 #define PY_SSIZE_T_CLEAN
 #include "morloc.h"
 #include "Python.h"
@@ -8,9 +5,6 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 
 // boilerplate for numpy support
@@ -2261,118 +2255,11 @@ static PyObject* pybinding__cache_record_store(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-static PyObject* pybinding__start_daemon(PyObject* self, PyObject* args) { MAYFAIL
-    const char* socket_path;
-    const char* tmpdir;
-    const char* shm_basename;
-    size_t shm_default_size;
-    language_daemon_t* daemon = NULL;
-
-    if (!PyArg_ParseTuple(args, "sssk", &socket_path, &tmpdir, &shm_basename, &shm_default_size)) {
-      goto error;
-    }
-
-    daemon = PyTRY(
-        start_daemon,
-        socket_path,
-        tmpdir,
-        shm_basename,
-        shm_default_size
-    );
-
-    return PyCapsule_New(daemon, "language_daemon_t", NULL);
-
-error:
-    FREE(daemon)
-    return NULL;
-}
-
-
-// Record the socket this pool serves; see mlc_set_self_socket.
-static PyObject* pybinding__set_self_socket(PyObject* self, PyObject* args) {
-    const char* socket_path;
-    if (!PyArg_ParseTuple(args, "s", &socket_path)) {
-        return NULL;
-    }
-    mlc_set_self_socket(socket_path);
-    Py_RETURN_NONE;
-}
-
-// The lifeline descriptor this pool watches for its nexus's end, or -1.
-static PyObject* pybinding__lifeline_adopt(PyObject* self, PyObject* args) {
-    return PyLong_FromLong(morloc_lifeline_adopt());
-}
-
-// Shared-memory references this process holds (SHM-8).
-static PyObject* pybinding__held_references(PyObject* self, PyObject* args) {
-    return PyLong_FromLongLong((long long)morloc_held_references());
-}
-
-// Remove this process's temp directory (FORK-16).
-static PyObject* pybinding__remove_own_temps(PyObject* self, PyObject* args) {
-    morloc_remove_own_temps();
-    Py_RETURN_NONE;
-}
-
-// Release leases of forked children that are gone (FORK-15).
-static PyObject* pybinding__reclaim_leases(PyObject* self, PyObject* args) {
-    morloc_reclaim_leases();
-    Py_RETURN_NONE;
-}
-
-// The shared-memory references this process holds (SHM-8).
-static PyObject* pybinding__retire_blockers(PyObject* self, PyObject* args) {
-    return PyLong_FromLongLong((long long)morloc_retire_blockers());
-}
-
-// The number of threads in this process, or -1 if it cannot be read.
-static PyObject* pybinding__thread_count(PyObject* self, PyObject* args) {
-    return PyLong_FromLong(morloc_thread_count());
-}
-
-// End this pool's process group once the watched lifeline reaches end of file.
-static PyObject* pybinding__lifeline_teardown(PyObject* self, PyObject* args) {
-    morloc_lifeline_teardown();
-    Py_RETURN_NONE;
-}
-
-static PyObject* pybinding__daemon_listen_fd(PyObject* self, PyObject* args) {
-    PyObject* daemon_capsule;
-
-    PARSE_ARGS_OR_ABORT(args, "O", &daemon_capsule);
-
-    language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
-    if (daemon == NULL) {
-        return NULL;
-    }
-    return PyLong_FromLong(daemon->server_fd);
-
-error:
-    return NULL;
-}
 
 static PyObject* pybinding__fork_generation(PyObject* self, PyObject* args) {
     (void)self; (void)args;
     return PyLong_FromUnsignedLongLong((unsigned long long)morloc_fork_generation());
 }
-
-static PyObject* pybinding__close_daemon(PyObject* self, PyObject* args) {
-    PyObject* daemon_capsule;
-
-    PARSE_ARGS_OR_ABORT(args, "O", &daemon_capsule);
-
-    language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
-
-    if(daemon != NULL){
-        close_daemon(&daemon);
-    }
-
-    Py_RETURN_NONE;
-
-error:
-    return NULL;
-}
-
 
 static PyObject*  pybinding__read_morloc_call_packet(PyObject* self, PyObject* args){ MAYFAIL
     char* packet;
@@ -2486,55 +2373,126 @@ error:
 
 
 
-// Accept one connection on a non-blocking listening socket: the new
-// descriptor, non-blocking and close-on-exec, or -1 when there was none to
-// take (another worker took it, or a signal interrupted the call).
-static PyObject* pybinding__accept_client(PyObject* self, PyObject* args) {
-    int listen_fd = -1;
-    if (!PyArg_ParseTuple(args, "i", &listen_fd)) {
-        return NULL;
+
+// {{{ fork pool
+
+typedef struct {
+    PyObject* worker_init;
+    PyObject* serve;
+    PyObject* before_retire;
+    PyObject* worker_exit;
+} py_fork_pool_ctx;
+
+// A worker whose Python code raised past its handler ends with this status.
+#define PY_WORKER_FATAL 70
+
+// Print the pending exception and say whether the worker must end. Never
+// lets SystemExit reach PyErr_Print, which would finalize the interpreter.
+static int py_fork_pool_failed(const char* where) {
+    if (!PyErr_Occurred()) return 0;
+    if (PyErr_ExceptionMatches(PyExc_SystemExit) || PyErr_ExceptionMatches(PyExc_KeyboardInterrupt)) {
+        PyErr_Clear();
+        fprintf(stderr, "morloc py pool worker: %s raised SystemExit or KeyboardInterrupt\n", where);
+    } else {
+        fprintf(stderr, "morloc py pool worker: %s raised:\n", where);
+        PyErr_Print();
     }
-#ifdef __linux__
-    int fd = accept4(listen_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
-#else
-    int fd = accept(listen_fd, NULL, NULL);
-    if (fd >= 0) {
-        if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0
-            || fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) < 0) {
-            int saved = errno;
-            close(fd);
-            errno = saved;
-            fd = -1;
-        }
-    }
-#endif
-    if (fd < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ECONNABORTED) {
-            return PyLong_FromLong(-1);
-        }
-        return PyErr_SetFromErrno(PyExc_OSError);
-    }
-    return PyLong_FromLong((long)fd);
+    fflush(stderr);
+    return PY_WORKER_FATAL;
 }
 
-// Wait up to timeout_ms for fd to be readable; whether it is. Unlike
-// select.poll, reads no clock.
-static PyObject* pybinding__wait_readable(PyObject* self, PyObject* args) {
-    int fd = -1;
-    int timeout_ms = 0;
-    if (!PyArg_ParseTuple(args, "ii", &fd, &timeout_ms)) {
+static int py_fork_pool_call(PyObject* f, PyObject* args, const char* where) {
+    if (f == NULL || f == Py_None) return 0;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallObject(f, args);
+    Py_XDECREF(r);
+    int status = r == NULL ? py_fork_pool_failed(where) : 0;
+    PyGILState_Release(g);
+    return status;
+}
+
+// The gated fork (FORK-6) between CPython's own fork handlers.
+static pid_t py_fork_pool_fork(void* ctx) {
+    (void)ctx;
+    PyGILState_STATE g = PyGILState_Ensure();
+    long threads = 0;
+    int err = 0;
+    PyOS_BeforeFork();
+    pid_t pid = morloc_fork_worker(&threads, &err);
+    if (pid == 0) {
+        PyOS_AfterFork_Child();
+    } else {
+        PyOS_AfterFork_Parent();
+    }
+    PyGILState_Release(g);
+    errno = err;
+    return pid;
+}
+
+static int py_fork_pool_worker_init(void* ctx) {
+    return py_fork_pool_call(((py_fork_pool_ctx*)ctx)->worker_init, NULL, "loading the worker");
+}
+
+static int py_fork_pool_serve(int client_fd, void* ctx) {
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* args = Py_BuildValue("(i)", client_fd);
+    int status = 0;
+    if (args == NULL) {
+        status = py_fork_pool_failed("a call");
+    } else {
+        PyObject* r = PyObject_CallObject(((py_fork_pool_ctx*)ctx)->serve, args);
+        Py_DECREF(args);
+        Py_XDECREF(r);
+        if (r == NULL) status = py_fork_pool_failed("a call");
+    }
+    PyGILState_Release(g);
+    return status;
+}
+
+static void py_fork_pool_before_retire(void* ctx) {
+    (void)py_fork_pool_call(((py_fork_pool_ctx*)ctx)->before_retire, NULL, "preparing to retire");
+}
+
+static void py_fork_pool_worker_exit(void* ctx, int status) {
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* args = Py_BuildValue("(i)", status);
+    if (args != NULL) {
+        PyObject* r = PyObject_CallObject(((py_fork_pool_ctx*)ctx)->worker_exit, args);
+        Py_DECREF(args);
+        Py_XDECREF(r);
+    }
+    if (PyErr_Occurred()) PyErr_Clear();
+    PyGILState_Release(g);
+}
+
+// fork_pool_run(socket_path, tmpdir, shm_basename, worker_init, serve,
+//               before_retire, worker_exit) -> exit status
+static PyObject* pybinding__fork_pool_run(PyObject* self, PyObject* args) {
+    const char* socket_path;
+    const char* tmpdir;
+    const char* shm_basename;
+    py_fork_pool_ctx ctx;
+    if (!PyArg_ParseTuple(args, "sssOOOO", &socket_path, &tmpdir, &shm_basename,
+                          &ctx.worker_init, &ctx.serve, &ctx.before_retire, &ctx.worker_exit)) {
         return NULL;
     }
-    struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
-    int ready;
+    morloc_fork_pool_t cfg = {
+        .lang = "py",
+        .ctx = &ctx,
+        .fork = py_fork_pool_fork,
+        .worker_init = py_fork_pool_worker_init,
+        .serve = py_fork_pool_serve,
+        .before_retire = ctx.before_retire == Py_None ? NULL : py_fork_pool_before_retire,
+        .worker_exit = py_fork_pool_worker_exit,
+    };
+    int status;
     Py_BEGIN_ALLOW_THREADS
-    ready = poll(&pfd, 1, timeout_ms);
+    status = morloc_fork_pool_run(socket_path, tmpdir, shm_basename, &cfg);
     Py_END_ALLOW_THREADS
-    if (ready < 0 && errno != EINTR) {
-        return PyErr_SetFromErrno(PyExc_OSError);
-    }
-    return PyBool_FromLong(ready > 0);
+    return PyLong_FromLong(status);
 }
+
+// }}} fork pool
 
 static PyObject*  pybinding__close_socket(PyObject* self, PyObject* args){
     int socket_id = 0;
@@ -3057,19 +3015,6 @@ static PyObject* pybinding__debug_drain_frames(PyObject* self, PyObject* args) {
     return result;
 }
 
-// Atomically add `delta` to the C int at `address` and return the new value.
-// The pool's worker processes share their counters in memory inherited
-// across fork; a Python read-then-write on it loses updates.
-static PyObject* pybinding__atomic_add_int(PyObject* self, PyObject* args) {
-    (void)self;
-    unsigned long long address;
-    int delta;
-    if (!PyArg_ParseTuple(args, "Ki", &address, &delta)) {
-        return NULL;
-    }
-    int value = __atomic_add_fetch((int*)(uintptr_t)address, delta, __ATOMIC_SEQ_CST);
-    return PyLong_FromLong(value);
-}
 
 // Reset per-dispatch debug state (recursion counters, write counter,
 // frame stack). Called by the pool's run_job at the start of each
@@ -4223,12 +4168,6 @@ error:
     return NULL;
 }
 
-// mlc_is_channel(handle) -> bool. A channel read or write may wait.
-static PyObject* pybinding__mlc_is_channel(PyObject* self, PyObject* args) {
-    long long handle_ll;
-    if (!PyArg_ParseTuple(args, "L", &handle_ll)) return NULL;
-    return PyBool_FromLong(mlc_is_channel((int64_t)handle_ll));
-}
 
 // mlc_settle(handle) -> None. Release the channel; raises the producer's
 // failure, unchanged, if a reader was handed it.
@@ -4533,24 +4472,12 @@ static PyMethodDef Methods[] = {
     {"cache_record_store", pybinding__cache_record_store, METH_NOARGS, "Increment the cache store counter"},
     {"set_fallback_dir", pybinding__set_fallback_dir, METH_VARARGS, "Set fallback directory for file-backed shared memory"},
     {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
-    {"start_daemon", pybinding__start_daemon, METH_VARARGS, "Initialize the shared memory and socket for the python daemon"},
-    {"set_self_socket", pybinding__set_self_socket, METH_VARARGS, "Record the socket this pool serves"},
-    {"lifeline_adopt", pybinding__lifeline_adopt, METH_NOARGS, "The lifeline descriptor to watch for the nexus's end, or -1"},
-    {"lifeline_teardown", pybinding__lifeline_teardown, METH_NOARGS, "End this pool's process group after the nexus ended"},
-    {"thread_count", pybinding__thread_count, METH_NOARGS, "The number of threads in this process, or -1"},
-    {"held_references", pybinding__held_references, METH_NOARGS, "Shared-memory references this process holds"},
-    {"retire_blockers", pybinding__retire_blockers, METH_NOARGS, "The shared-memory references this process holds"},
-    {"reclaim_leases", pybinding__reclaim_leases, METH_NOARGS, "Release leases of forked children that are gone"},
-    {"remove_own_temps", pybinding__remove_own_temps, METH_NOARGS, "Remove this process's temp directory"},
-    {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
-    {"daemon_listen_fd", pybinding__daemon_listen_fd, METH_VARARGS, "The daemon's listening socket descriptor"},
     {"fork_generation", pybinding__fork_generation, METH_NOARGS, "This process's fork generation"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},
     {"send_reply", pybinding__send_reply, METH_VARARGS, "Send a dispatch's reply, releasing what the dispatch holds first"},
     // The name pools built by earlier compilers call.
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
-    {"wait_readable", pybinding__wait_readable, METH_VARARGS, "Wait up to a timeout in milliseconds for a descriptor to be readable"},
-    {"accept_client", pybinding__accept_client, METH_VARARGS, "Accept a connection on a non-blocking listening socket, or -1 if none"},
+    {"fork_pool_run", pybinding__fork_pool_run, METH_VARARGS, "Run this pool's coordinator and forked workers until the pool ends"},
     {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
     {"shm_live_bytes", pybinding__shm_live_bytes, METH_NOARGS, "Bytes of shared memory the program holds now (-1 unless MORLOC_SHM_STATS is set)"},
     {"shm_tracker_flush", pybinding__shm_tracker_flush, METH_NOARGS, "Free tracked SHM allocations from put_value calls"},
@@ -4560,7 +4487,6 @@ static PyMethodDef Methods[] = {
     {"debug_flush_dispatch", pybinding__debug_flush_dispatch, METH_NOARGS, "Reset per-dispatch debug state (recursion counters etc.)"},
     {"reclaim_stdio_after_dispatch", pybinding__reclaim_stdio_after_dispatch, METH_NOARGS, "Reclaim any stdio claim this dispatch left open"},
     {"foreign_call", pybinding__foreign_call, METH_VARARGS, "Send a call packet to a foreign pool"},
-    {"atomic_add_int", pybinding__atomic_add_int, METH_VARARGS, "Atomically add to a shared C int at an address"},
     {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},
     {"is_ping", pybinding__is_ping, METH_VARARGS, "Packet is a ping"},
@@ -4597,7 +4523,6 @@ static PyMethodDef Methods[] = {
     {"mlc_concat", pybinding__mlc_concat, METH_VARARGS, "Concatenate stream files"},
     {"mlc_flush", pybinding__mlc_flush, METH_VARARGS, "Force OStream buffer to flush as a sub-packet"},
     {"mlc_open_channel", pybinding__mlc_open_channel, METH_VARARGS, "Open a channel for a streamed @parse argument"},
-    {"mlc_is_channel", pybinding__mlc_is_channel, METH_VARARGS, "Whether a handle is an open channel"},
     {"mlc_settle", pybinding__mlc_settle, METH_VARARGS, "Release a channel, raising the failure its reader saw"},
     {"mlc_spawn", pybinding__mlc_spawn, METH_VARARGS, "Start a producer on a channel without waiting for it"},
     {"mlc_tell", pybinding__mlc_tell, METH_NOARGS, "Elements written to @stdout so far"},

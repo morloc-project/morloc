@@ -1531,9 +1531,7 @@ if should_run "worker-crash"; then
     WORK_DIRS+=("$CRASH_DIR")
     compile_program "crash.loc" "$CRASH_DIR"
     HTTP_PORT=$(pick_port)
-    MORLOC_PY_TRACE_RETIRE=1; export MORLOC_PY_TRACE_RETIRE
     start_daemon "$CRASH_DIR" --http-port "$HTTP_PORT"
-    unset MORLOC_PY_TRACE_RETIRE
     wait_for_http "$HTTP_PORT" 15
     local_pid=$LAST_DAEMON_PID
 
@@ -1587,7 +1585,7 @@ if should_run "worker-crash"; then
             late=""
             for _ in $(seq 1 30); do sleep 1; late="$late $($rc_count)"; done
             echo "      30 more seconds, every 1 s:$late"
-            grep "py worker .*\(retiring\|cannot retire\)" "$LAST_DAEMON_LOG" | tail -n 5 | cut -c1-200 | sed 's/^/      late log: /' || true
+            grep "py worker .*cannot retire" "$LAST_DAEMON_LOG" | tail -n 5 | cut -c1-200 | sed 's/^/      late log: /' || true
         fi
         assert_test "worker-crash${rc_label}: a retirement starts no recovery" "$recoveries" \
             "$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)"

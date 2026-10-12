@@ -1054,11 +1054,6 @@ pub(crate) unsafe fn mlc_open_channel(
     }
 }
 
-/// Whether `handle` is an open channel. A pool that sizes its workers by
-/// how many are blocked counts a channel read or write as blocking.
-pub(crate) fn mlc_is_channel(handle: i64) -> bool {
-    crate::stream::shared_is_channel(handle)
-}
 
 /// Settle a channel whose readers are done with it; see
 /// `shared_settle_channel`. On a failure a reader was handed, returns false
@@ -2543,11 +2538,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub extern "C" fn morloc_remove_own_temps() {
-        super::morloc_remove_own_temps()
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
         super::mlc_tmpfile(errmsg)
     }
@@ -2605,11 +2595,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_open_channel(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64 {
         super::mlc_open_channel(schema_str, errmsg)
-    }
-
-    #[no_mangle]
-    pub extern "C" fn mlc_is_channel(handle: i64) -> bool {
-        super::mlc_is_channel(handle)
     }
 
     #[no_mangle]

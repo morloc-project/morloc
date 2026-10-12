@@ -70,7 +70,7 @@ those and keeps the earlier ones, whichever were freed in between.
 
 ### SHM-8 A dead holder's references are recoverable
 Status: implemented
-Checked by: a_process_counts_the_references_it_holds, a_donated_reference_leaves_the_senders_count_and_joins_the_receivers, a_revoked_donation_returns_to_the_senders_count, a_closed_output_stream_leaves_no_reference_counted_to_its_process, a_settled_channel_leaves_no_reference_counted_to_its_process, an_open_output_stream_does_not_keep_its_opener_from_retiring, tla:WorkerExit, tla:WorkerExit_status_inferred.bug, tla:WorkerExit_retire_holding.bug, tla:WorkerExit_no_recovery.bug, tla:WorkerExit_flag_before_reap.bug
+Checked by: a_worker_that_ends_unretired_ends_the_pool, a_retiring_worker_leaves_the_pool_running, a_process_counts_the_references_it_holds, a_donated_reference_leaves_the_senders_count_and_joins_the_receivers, a_revoked_donation_returns_to_the_senders_count, a_closed_output_stream_leaves_no_reference_counted_to_its_process, a_settled_channel_leaves_no_reference_counted_to_its_process, an_open_output_stream_does_not_keep_its_opener_from_retiring, tla:WorkerExit, tla:WorkerExit_status_inferred.bug, tla:WorkerExit_retire_holding.bug, tla:WorkerExit_no_recovery.bug, tla:WorkerExit_flag_before_reap.bug
 
 A block's count is shared by all its holders and names none of them, so a
 dead holder's references are recovered by discarding the namespace, never
@@ -80,12 +80,13 @@ leaves the sender's count when donated and joins the receiver's when its
 reply arrives, a reference a stream registry slot or channel queue holds
 belongs to no process, a block another process allocated for this one (a
 stdin batch from the nexus) is counted when it is released, and a forked
-child starts at zero. A pool worker
-that forks from a coordinator (Python fork mode, R) ends in one of two
-ways. It retires, which a Python worker does only when idle, after a
-garbage collection and its tracker flush, with its count at zero, after
-writing its pid to the coordinator; or it ends any other way, by a signal, an error, or an exit
-of any status without that token, and the coordinator then ends the pool.
+child starts at zero. A worker of a
+fork pool (Python, R; NET-9) ends in one of two ways. It retires, which it
+does only when idle and only if its language lets workers retire (Python:
+after a garbage collection and its tracker flush), with its count at zero,
+after writing its pid to the coordinator; or it ends any other way, by a
+signal, an error, or an exit of any status without that token, and the
+coordinator then ends the pool.
 The exception is shutdown: it signals the pool's whole process group, so
 the coordinator's shutdown flag is set before any worker can exit of it,
 and a coordinator that finds its flag set after reaping a worker ends

@@ -57,19 +57,19 @@ Status: implemented
 Checked by: a_worker_forked_from_a_process_with_another_thread_never_runs, a_worker_forked_from_a_lone_thread_runs, a_forked_child_counts_only_its_own_threads, tla:PoolFork, tla:PoolFork_guard_thread.bug, tla:PoolFork_unpolled.bug, tla:PoolFork_count_before_fork.bug, tla:PoolFork_no_kill.bug, tla:PoolFork_ungated.bug
 
 A forked child has only the thread that forked, so a pool that runs user
-code in forked workers (Python fork mode, R) forks them from a coordinator
-that starts no thread of its own. The coordinator loads no user code; it
+code in forked workers (a fork pool: Python, R) forks them from a
+coordinator that starts no thread of its own. The coordinator loads no user code; it
 watches the nexus's lifeline in its own wait loop rather than from a
 thread; and attaching the stream registry starts no thread.
 
 A library may run threads of its own that it ends in its fork handler and
-starts again later (OpenBLAS does), so the R coordinator forks through a
+starts again later (OpenBLAS does), so the coordinator forks through a
 gate: the child waits while the parent, past every fork handler, counts its
 live threads (on Linux, a thread already exiting is not counted), and runs
 only if there is one. Otherwise the parent kills the child, which may be
-stuck in a fork handler before its gate, and the fork fails loudly. The
-Python coordinator, which loads no such library, counts before each fork
-and on a refusal ends with every process it started.
+stuck in a fork handler before its gate, and the fork fails loudly: the pool
+ends with every process it started. Python wraps the gated fork in
+CPython's own fork handlers.
 
 The count sees threads that exist at the fork and still exist when it is
 taken; a thread that ends in between is not seen. The guarantee is that the

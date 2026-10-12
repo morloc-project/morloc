@@ -296,9 +296,8 @@ impl JobQueue {
 const START_ATTEMPTS: u32 = 50;
 
 // How long a surplus worker stays idle before it exits, unless
-// MORLOC_POOL_IDLE_TIMEOUT_MS says otherwise; the Python pool reads the same
-// variable with the same default.
-fn worker_idle_timeout() -> std::time::Duration {
+// MORLOC_POOL_IDLE_TIMEOUT_MS says otherwise; fork pools use the same.
+pub(crate) fn worker_idle_timeout() -> std::time::Duration {
     std::env::var("MORLOC_POOL_IDLE_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())

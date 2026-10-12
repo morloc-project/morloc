@@ -10168,6 +10168,8 @@ fn channel_local(generation: u64, value_schema: &Schema) -> ProcessLocalSlot {
 fn channel_wait_room(handle: i64) -> Result<(), MorlocError> {
     let mut registered = false;
     let mut yields = 0u32;
+    // NET-9: a worker waiting on another counts busy.
+    let mut busy = None;
     loop {
         let Some((slot, gen_claim)) = channel_slot(handle)? else {
             return Err(MorlocError::Other("the reader of this stream has stopped".into()));
@@ -10194,7 +10196,10 @@ fn channel_wait_room(handle: i64) -> Result<(), MorlocError> {
             }
         };
         match word {
-            Some((seq, seen)) => morloc_runtime_types::wait_word::wait(seq, seen, CHANNEL_WAIT_SLICE),
+            Some((seq, seen)) => {
+                busy.get_or_insert_with(crate::fork_pool::busy);
+                morloc_runtime_types::wait_word::wait(seq, seen, CHANNEL_WAIT_SLICE)
+            }
             None => {
                 yields += 1;
                 std::thread::yield_now();
@@ -10242,6 +10247,8 @@ fn channel_enqueue(
 fn channel_pop(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
     let mut registered = false;
     let mut yields = 0u32;
+    // NET-9: a worker waiting on another counts busy.
+    let mut busy = None;
     loop {
         let Some((slot, gen_claim)) = channel_slot(handle)? else {
             return Err(MorlocError::Other(format!(
@@ -10289,7 +10296,10 @@ fn channel_pop(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
             }
         };
         match word {
-            Some((seq, seen)) => morloc_runtime_types::wait_word::wait(seq, seen, CHANNEL_WAIT_SLICE),
+            Some((seq, seen)) => {
+                busy.get_or_insert_with(crate::fork_pool::busy);
+                morloc_runtime_types::wait_word::wait(seq, seen, CHANNEL_WAIT_SLICE)
+            }
             None => {
                 yields += 1;
                 std::thread::yield_now();
@@ -11178,11 +11188,6 @@ mod write_behind_tests {
 }
 
 mod c_abi {
-
-    #[no_mangle]
-    pub extern "C" fn morloc_retire_blockers() -> i64 {
-        super::morloc_retire_blockers()
-    }
 }
 
 #[cfg(test)]

@@ -1488,29 +1488,24 @@ char* voidstar_to_json_string(const void* voidstar, const Schema* schema, ERRMSG
 // `teardown` at end of file.
 int morloc_lifeline_adopt(void);
 void morloc_lifeline_guard(void);
-void morloc_lifeline_teardown(void);
 // The number of threads in this process, or -1 if it cannot be read.
 long morloc_thread_count(void);
 // Fork a worker, refusing (-2, child never runs) unless this process had one
 // thread at the fork; -1 with *error set if the fork failed.
 pid_t morloc_fork_worker(long* threads_at_fork, int* error);
 // Shared-memory references this process holds, net of those it handed on.
-int64_t morloc_held_references(void);
 // Held references plus stream file locks: a worker retires only at zero.
-int64_t morloc_retire_blockers(void);
 // Record a language's view of a block it holds a reference on, under a key,
 // so a forked child keeps the block while it lives; forget it on release.
 void morloc_view_held(const void* block, const void* key);
 void morloc_view_released(const void* key);
 // Release the references of leases whose forked holder is gone (rate-limited).
-void morloc_reclaim_leases(void);
 // Remove the current namespace's leases kept outside the run directory.
 void morloc_remove_leases(void);
 // Release every free lease and remove the temp directories of processes
 // that are gone, now.
 void morloc_reclaim_all(void);
 // Remove this process's temp directory (a retiring worker's).
-void morloc_remove_own_temps(void);
 // The temp root of the run whose directory is run_dir (user_tmpdir: the
 // user's --tmpdir, or NULL), as a malloc'd string the caller frees.
 char* morloc_run_temp_root(const char* run_dir, const char* user_tmpdir);
@@ -1533,7 +1528,6 @@ language_daemon_t* start_daemon(
     const char* shm_basename, size_t shm_default_size, ERRMSG);
 uint8_t* stream_from_client(int client_fd, ERRMSG);
 uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG);
-void mlc_set_self_socket(const char* socket_path);
 size_t send_reply_to_foreign_server(int client_fd, uint8_t* packet, void (*release)(void), ERRMSG);
 
 // Daemon event loop and dispatch.
@@ -1587,6 +1581,27 @@ void router_free(router_t* router);
 // ========================================================================
 
 int pool_main(int argc, char** argv, pool_config_t* config);
+
+// A pool whose workers are forked processes (Python, R). The language gives
+// how to fork (NULL: morloc_fork_worker), how a worker loads its sources, how
+// it serves one accepted connection (and closes it), if its workers retire
+// when idle what it releases first (NULL: they never retire), and what it
+// flushes before a worker exits. A non-zero status from worker_init or serve
+// ends the worker with that status.
+typedef struct morloc_fork_pool_s {
+    const char* lang;
+    void* ctx;
+    pid_t (*fork)(void* ctx);
+    int (*worker_init)(void* ctx);
+    int (*serve)(int client_fd, void* ctx);
+    void (*before_retire)(void* ctx);
+    void (*worker_exit)(void* ctx, int status);
+} morloc_fork_pool_t;
+
+// Run the pool until it is stopped or a worker ends without retiring; the
+// process's exit status. Workers never return from it.
+int morloc_fork_pool_run(const char* socket_path, const char* tmpdir,
+                         const char* shm_basename, const morloc_fork_pool_t* cfg);
 uint8_t* pool_dispatch_packet(
     const uint8_t* packet,
     pool_dispatch_fn_t local_dispatch,
@@ -1921,7 +1936,6 @@ int64_t mlc_open_ostream(const char* schema_str, const char* path, ERRMSG);
 int64_t mlc_open_istream(const char* schema_str, const char* path, ERRMSG);
 int64_t mlc_open_channel(const char* schema_str, ERRMSG);
 bool mlc_settle(int64_t handle, ERRMSG);
-bool mlc_is_channel(int64_t handle);
 bool mlc_spawn(const char* socket_path, uint32_t mid, const uint8_t* const* args, size_t nargs, int64_t handle, ERRMSG);
 // @stdin / @stdout / @stderr intrinsics -- open implied. The nexus is the
 // sole owner of fd 0/1/2; these register slots that route mlc_next /
