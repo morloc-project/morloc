@@ -875,6 +875,7 @@ if should_run "http-json-args"; then
     assert_test "strlen of 'say \"hi\"' (object form) -> 8" "8" "$val"
 
     stop_daemon "$LAST_DAEMON_PID"
+
     echo ""
 fi
 
@@ -1100,6 +1101,26 @@ if should_run "http-pure"; then
     result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/nosuch" \
         -H "Content-Type: application/json" -d '[]')
     assert_test "an unknown command is class not-found" "not-found" "$(json_field "$result" "class")"
+    # A zero-argument command does not run on a body that holds no args.
+    for body in '{"args":5}' '{"x":1}' '5'; do
+        assert_http_status "POST /call/checkInt $body -> 400" "400" \
+            "http://127.0.0.1:${HTTP_PORT}/call/checkInt" \
+            -X POST -H "Content-Type: application/json" -d "$body"
+    done
+    assert_http_status "POST /call/checkInt non-UTF-8 body -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/call/checkInt" \
+        -X POST -H "Content-Type: application/json" --data-binary $'\xff'
+    assert_http_status "POST /call/checkInt empty body -> 200" "200" \
+        "http://127.0.0.1:${HTTP_PORT}/call/checkInt" -X POST
+    stop_daemon "$LAST_DAEMON_PID"
+    PURE_SOCK="/tmp/morloc-test-pureargs-$$.sock"
+    SOCKET_FILES+=("$PURE_SOCK")
+    start_daemon "$PURE_DIR" --socket "$PURE_SOCK"
+    wait_for_daemon "$LAST_DAEMON_LOG" 10
+    lp=$(lp_request "$PURE_SOCK" '{"method":"call","command":"checkInt","args":null}')
+    assert_test "LP args null is refused, not run without args" "bad-request" "$(json_field "$lp" "class")"
+    lp=$(lp_request "$PURE_SOCK" '{"method":"call","command":"checkInt","args":{"x":1}}')
+    assert_test "LP named args are refused until supported" "bad-request" "$(json_field "$lp" "class")"
 
     stop_daemon "$LAST_DAEMON_PID"
     echo ""

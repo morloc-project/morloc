@@ -599,6 +599,13 @@ pub(crate) unsafe fn router_forward(
         return ptr::null_mut();
     }
 
+    let req_json = match serialize_request_to_json(request) {
+        Ok(j) => j,
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Other(e));
+            return ptr::null_mut();
+        }
+    };
     // Check if a previously-started daemon has exited (crash recovery)
     let pid = (*prog).daemon_pid.load(std::sync::atomic::Ordering::SeqCst);
     if pid > 0 {
@@ -634,7 +641,6 @@ pub(crate) unsafe fn router_forward(
     }
 
     // Serialize request to JSON
-    let req_json = serialize_request_to_json(request);
     let req_len = req_json.len();
 
     // Try to connect, retry once on failure
@@ -771,14 +777,18 @@ struct ForwardRequest<'a> {
     render_default: bool,
 }
 
-/// Serialize a DaemonRequest to JSON.
-unsafe fn serialize_request_to_json(request: *mut DaemonRequest) -> String {
+/// Serialize a DaemonRequest to JSON; args that are not JSON are an error,
+/// never a request without args.
+unsafe fn serialize_request_to_json(request: *mut DaemonRequest) -> Result<String, String> {
     let owned = |p: *const c_char| (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned());
     let args_str = owned((*request).args_json);
-    // Args text that is not JSON is dropped, as a request without args.
-    let args = args_str
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<&serde_json::value::RawValue>(s).ok());
+    let args = match args_str.as_deref() {
+        None => None,
+        Some(s) => Some(
+            serde_json::from_str::<&serde_json::value::RawValue>(s)
+                .map_err(|e| format!("the request's args are not JSON: {}", e))?,
+        ),
+    };
     let req = ForwardRequest {
         id: owned((*request).id),
         method: match (*request).method {
@@ -803,7 +813,7 @@ unsafe fn serialize_request_to_json(request: *mut DaemonRequest) -> String {
         render: owned((*request).render),
         render_default: (*request).render_default,
     };
-    serde_json::to_string(&req).unwrap_or_else(|_| "{}".into())
+    serde_json::to_string(&req).map_err(|e| e.to_string())
 }
 
 // -- router_build_discovery ---------------------------------------------------
@@ -878,7 +888,7 @@ mod forward_tests {
         let a = CString::new(args.as_str()).unwrap();
         req.command = cmd.as_ptr() as *mut c_char;
         req.args_json = a.as_ptr() as *mut c_char;
-        let json = unsafe { serialize_request_to_json(&mut req) };
+        let json = unsafe { serialize_request_to_json(&mut req) }.unwrap();
         assert_eq!(json, format!("{{\"method\":\"call\",\"command\":\"f\",\"args\":{args},\"media\":true}}"));
     }
 }

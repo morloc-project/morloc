@@ -936,6 +936,7 @@ struct JsonRequest {
     /// Kept as the text the client sent: it goes to the pool verbatim,
     /// so an integer wider than a double keeps its digits and a value of
     /// any depth passes, neither of which a tree-shaped parse allows.
+    #[serde(default, deserialize_with = "present")]
     args: Option<Box<serde_json::value::RawValue>>,
     expr: Option<String>,
     name: Option<String>,
@@ -1023,7 +1024,15 @@ pub(crate) unsafe fn parse_request(
     }
 
     if let Some(args) = &parsed.args {
-        let c = CString::new(args.get()).unwrap_or_default();
+        let text = match morloc_runtime_types::call_body::args_value(args.get()) {
+            Ok(t) => t,
+            Err(e) => {
+                daemon_free_request(req);
+                set_errmsg(errmsg, &MorlocError::Other(e));
+                return ptr::null_mut();
+            }
+        };
+        let c = CString::new(text).unwrap_or_default();
         (*req).args_json = libc::strdup(c.as_ptr());
     }
 

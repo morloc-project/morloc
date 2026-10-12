@@ -5,6 +5,19 @@ MCP-specific entries are in model/runtime/issues/mcp.md. Entries marked
 [read, survey] come from one read-only pass over the code and have not been
 re-checked.
 
+## Rulings needed
+
+- **IFACE-5 says an omitted flag is false; the CLI gives its default.**
+  A flag may default to true (library/Morloc/CodeGenerator/Docstrings.hs
+  ~l.1066; morloc-nexus/src/phase2.rs ~l.1271-1280 reads `"true"`/`"1"`).
+  IFACE-1 (ruled) asks for the CLI's value, IFACE-5 (ruled) for false.
+  Proposed amendment: "A boolean flag left out takes its declared default,
+  false unless declared." The resolver follows IFACE-1 until ruled.
+- **IFACE-17 (`check.path` on every interface) is proposed.** The resolver
+  does not apply argument checks off the CLI until it is ruled. Open with
+  it: a failed check is bad-request; a supplied `IFile` that does not exist
+  is bad-request; a default file that does not exist is a call failure.
+
 ## Commands (IFACE-3, IFACE-16)
 
 - **MCP leaves out file-path and `stdin:` commands.** [read] Violates
@@ -48,16 +61,15 @@ re-checked.
   json_help.rs:843-896: `strip_cli_quotes` drops quotes without decoding
   escapes, so a default `"a\tb"` reaches MCP as backslash-t. Depends on
   CLI-4.
-- **Request bodies are read differently by the daemon and the front end.**
-  [read, survey] `{"args":5}`: daemon treats as no args
-  (morloc-runtime/src/http_ffi.rs:551-556), front end forwards the 5
-  (mcp.rs:2577). A bare JSON scalar: daemon runs with no args
-  (http_ffi.rs:561), front end answers 400 (mcp.rs:2580). A non-UTF-8 body
-  is silently empty on the daemon (http_ffi.rs:417).
-- **The router drops arguments that are not JSON.** [read]
-  `serialize_request_to_json` (morloc-runtime/src/router_ffi.rs:839-842)
-  forwards a request with no args instead of rejecting it: a third
-  body behavior beside the daemon's and the front end's.
+- **An `IFile` given as `"-"` skips the existence check.** [read]
+  morloc-nexus/src/dispatch.rs `check_ifile_arg` runs only for
+  `ArgValue::Value`; a test asserts a JSON `"-"` passes (~l.2352).
+- **A daemon ignores a failure to enter the eval arena.** [read]
+  morloc-runtime/src/daemon_ffi.rs (remote branch, ~l.2611): the call
+  proceeds without one and its argument SHM is not reclaimed.
+- **Internal argument errors are classed bad-request.** [read]
+  daemon_ffi.rs ~l.2476 and ~l.2626: SHM exhaustion and other internal
+  failures while building arguments answer 400 (IFACE-10).
 - **`--json-help` marks every argument group required.** [read, survey]
   json_help.rs:550; MCP marks a whole-object group optional, and an
   unrolled field with a default optional (json_help.rs:1073, 1109).
@@ -148,6 +160,11 @@ re-checked.
   (morloc-nexus/src/mcp.rs, no bind check) and the daemon's
   `eval_refusal`: eval with no token set is refused unless waived, whatever
   the bind. One side is wrong; the code follows the front end.
+- **Eval request bodies are read differently.** [read] The front end's
+  `/eval` (morloc-nexus/src/mcp.rs `frontend_eval_api`) reads the body with
+  `from_utf8_lossy` and accepts `expr`, `expression` or a bare string; the
+  daemon's (morloc-runtime/src/http_ffi.rs) accepts only `expr` and refuses
+  a body that is not UTF-8.
 - **Eval results have two shapes.** [read, survey] Daemon `/eval` returns
   parsed JSON (`"result":2`, daemon_ffi.rs:1606-1614); front-end `/eval`
   a string (`"result":"2"`, mcp.rs:2325). The front end's MCP `eval`

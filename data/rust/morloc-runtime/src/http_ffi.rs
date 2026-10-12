@@ -419,8 +419,14 @@ pub(crate) unsafe fn http_to_daemon_request(
     let method = (*req).method;
 
     let body_str = if !(*req).body.is_null() && (*req).body_len > 0 {
-        std::str::from_utf8(std::slice::from_raw_parts((*req).body as *const u8, (*req).body_len))
-            .unwrap_or("")
+        match std::str::from_utf8(std::slice::from_raw_parts((*req).body as *const u8, (*req).body_len)) {
+            Ok(text) => text,
+            Err(_) => {
+                crate::daemon_ffi::daemon_free_request(dreq);
+                set_errmsg(errmsg, &MorlocError::Other("the request body is not UTF-8".into()));
+                return ptr::null_mut();
+            }
+        }
     } else {
         ""
     };
@@ -547,53 +553,21 @@ pub(crate) unsafe fn http_to_daemon_request(
             }
         }
 
-        // Parse body. Accepts either a bare JSON array (`[arg1, arg2]`)
-        // or an object with an `args` array (`{"args": [...]}`).
-        // serde_json correctly handles string escapes and nested
-        // brackets, replacing the previous bracket-counting parser that
-        // misclassified `]` characters inside string fields as array
-        // terminators.
-        // The args stay the text they arrived as, so an integer wider
-        // than a double and a value of any depth reach the pool intact.
-        let trimmed = body_str.trim();
-        if !trimmed.is_empty() {
-            use serde_json::value::RawValue;
-            let args_text: Result<Option<String>, serde_json::Error> = if trimmed.starts_with('[') {
-                // The whole body is the args array.
-                serde_json::from_str::<&RawValue>(trimmed).map(|_| Some(trimmed.to_string()))
-            } else if trimmed.starts_with('{') {
-                serde_json::from_str::<std::collections::HashMap<String, &RawValue>>(trimmed).map(|map| {
-                    map.get("args")
-                        .map(|a| a.get().trim())
-                        .filter(|a| a.starts_with('['))
-                        .map(str::to_string)
-                })
-            } else {
-                // JSON that is neither an array nor an object carries no
-                // args; downstream reports them missing. Anything else is
-                // malformed.
-                serde_json::from_str::<&RawValue>(trimmed).map(|_| None)
-            };
-            match args_text {
-                Ok(Some(s)) => {
-                    let c = std::ffi::CString::new(s).unwrap_or_default();
-                    (*dreq).args_json = libc::strdup(c.as_ptr());
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    // Malformed JSON. Fail fast with a clear message
-                    // rather than letting it fall through as "missing
-                    // args".
-                    crate::daemon_ffi::daemon_free_request(dreq);
-                    set_errmsg(
-                        errmsg,
-                        &MorlocError::Other(format!(
-                            "Malformed JSON in /call body: {}",
-                            e
-                        )),
-                    );
-                    return ptr::null_mut();
-                }
+        let body = if (*req).body.is_null() {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts((*req).body as *const u8, (*req).body_len)
+        };
+        match morloc_runtime_types::call_body::args_of(body) {
+            Ok(Some(args)) => {
+                let c = std::ffi::CString::new(args).unwrap_or_default();
+                (*dreq).args_json = libc::strdup(c.as_ptr());
+            }
+            Ok(None) => {}
+            Err(e) => {
+                crate::daemon_ffi::daemon_free_request(dreq);
+                set_errmsg(errmsg, &MorlocError::Other(e));
+                return ptr::null_mut();
             }
         }
         return dreq;
@@ -784,12 +758,13 @@ mod body_tests {
         let (d, e) = to_daemon(HttpMethod::Post, "/call/f", &bare);
         assert_eq!(e, None);
         assert_eq!(args_of(d), bare);
-        let (d, e) = to_daemon(HttpMethod::Post, "/call/f", &format!(" {{\"args\": {bare} , \"x\": null}} "));
+        let (d, e) = to_daemon(HttpMethod::Post, "/call/f", &format!(" {{\"args\": {bare} }} "));
         assert_eq!(e, None);
         assert_eq!(args_of(d), bare);
+        let (d, e) = to_daemon(HttpMethod::Post, "/call/f", &format!(" {{\"args\": {bare} , \"x\": null}} "));
+        assert!(d.is_null() && e.is_some());
         let (d, e) = to_daemon(HttpMethod::Post, "/call/f", "[1,");
-        assert!(d.is_null());
-        assert!(e.unwrap().contains("Malformed JSON in /call body"));
+        assert!(d.is_null() && e.is_some());
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub mod private_dir;
 pub mod error;
 pub mod hash;
 pub mod http_query;
+pub mod call_body;
 pub mod daemon_error;
 pub mod shm_types;
 pub mod shm_lock;

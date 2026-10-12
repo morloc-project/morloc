@@ -156,12 +156,13 @@ fn tool_selection(shape: &McpToolShape, args: &Args) -> Result<Selection, String
     }
 }
 
-/// A daemon call request, with the args array as the text it arrived in.
-fn call_request(command: &str, args: &str, selection: &Selection) -> String {
+/// A daemon call request, with its args (absent, or the text they arrived
+/// in).
+fn call_request(command: &str, args: Option<&str>, selection: &Selection) -> String {
     format!(
-        "{{\"method\":\"call\",\"command\":{},\"args\":{}{}}}",
+        "{{\"method\":\"call\",\"command\":{}{}{}}}",
         Value::String(command.to_string()),
-        args,
+        args.map(|a| format!(",\"args\":{}", a)).unwrap_or_default(),
         selection.request_fields()
     )
 }
@@ -516,7 +517,7 @@ fn handle_tools_call(
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
     let args = serde_json::to_string(&positional).expect("raw JSON members serialize");
-    match ctx.dispatch(&call_request(&shape.name, &args, &selection), &shape.name) {
+    match ctx.dispatch(&call_request(&shape.name, Some(&args), &selection), &shape.name) {
         Ok(result) => result_response(id, result),
         Err(DispatchError::Request(e)) => error_response(id, JSONRPC_INVALID_PARAMS, &e),
         // Execution failure (pool error, @throw, recovering, internal):
@@ -2591,7 +2592,7 @@ fn frontend_tools_call(id: Value, msg: &RpcMessage, fe: &Frontend) -> Value {
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
     let args = serde_json::to_string(&positional).expect("raw JSON members serialize");
-    let request = call_request(&shape.name, &args, &selection);
+    let request = call_request(&shape.name, Some(&args), &selection);
     let result = match fe.forward(module, &request, &selection) {
         Ok(ForwardOk::Json(result_json)) => tool_result_object(&result_json),
         Ok(ForwardOk::Media(bytes, mime, text, action)) => {
@@ -2620,45 +2621,31 @@ fn frontend_call_api(
     let module = it.next().unwrap_or("");
     let command = it.next().unwrap_or("");
     if module.is_empty() || command.is_empty() {
-        return http_json(400, br#"{"error":"expected /call/<module>/<command>"}"#, keep_alive);
+        use morloc_runtime_types::daemon_error::{error_body, BAD_REQUEST};
+        return http_json(400, error_body(BAD_REQUEST, "expected /call/<module>/<command>").as_bytes(), keep_alive);
     }
     if !fe.api_modules.contains(module) {
-        return http_json(404, br#"{"error":"module not exposed on the API"}"#, keep_alive);
+        use morloc_runtime_types::daemon_error::{error_body, NOT_FOUND};
+        return http_json(404, error_body(NOT_FOUND, "module not exposed on the API").as_bytes(), keep_alive);
     }
     // The args stay the text they arrived in.
-    let body = String::from_utf8_lossy(&req.body);
-    let trimmed = body.trim();
-    let args: Raw = if trimmed.is_empty() {
-        raw_of(&Value::Array(Vec::new()))
-    } else if trimmed.starts_with('[') {
-        match serde_json::from_str::<Raw>(trimmed) {
-            Ok(a) => a,
-            Err(_) => return http_json(400, br#"{"error":"invalid JSON body"}"#, keep_alive),
+    let args = match morloc_runtime_types::call_body::args_of(&req.body) {
+        Ok(a) => a,
+        Err(e) => {
+            use morloc_runtime_types::daemon_error::{error_body, BAD_REQUEST};
+            return http_json(400, error_body(BAD_REQUEST, &e).as_bytes(), keep_alive);
         }
-    } else if trimmed.starts_with('{') {
-        match serde_json::from_str::<HashMap<String, Raw>>(trimmed) {
-            Ok(o) => o.get("args").cloned().unwrap_or_else(|| raw_of(&Value::Array(Vec::new()))),
-            Err(_) => return http_json(400, br#"{"error":"invalid JSON body"}"#, keep_alive),
-        }
-    } else if serde_json::from_str::<&RawValue>(trimmed).is_ok() {
-        return http_json(
-            400,
-            br#"{"error":"body must be a JSON array or {\"args\":[...]}"}"#,
-            keep_alive,
-        );
-    } else {
-        return http_json(400, br#"{"error":"invalid JSON body"}"#, keep_alive);
     };
     let query = req.path.split_once('?').map(|(_, q)| q).unwrap_or("");
     let selection = match morloc_runtime_types::http_query::render_selection(query) {
         Ok(Some(r)) => Selection::Named(r.to_string()),
         Ok(None) => Selection::Default,
         Err(e) => {
-            let body = json!({ "error": e }).to_string();
-            return http_json(400, body.as_bytes(), keep_alive);
+            use morloc_runtime_types::daemon_error::{error_body, BAD_REQUEST};
+            return http_json(400, error_body(BAD_REQUEST, e).as_bytes(), keep_alive);
         }
     };
-    let request_str = call_request(command, args.get(), &selection);
+    let request_str = call_request(command, args, &selection);
     match fe.forward(module, &request_str, &selection) {
         Ok(ForwardOk::Json(result_json)) => {
             let body = format!("{{\"status\":\"ok\",\"result\":{}}}", result_json);
@@ -2668,8 +2655,8 @@ fn frontend_call_api(
         // declared Content-Type (a real image/PDF/...), not a JSON envelope.
         Ok(ForwardOk::Media(bytes, mime, _, _)) => http_binary_response(200, &mime, &bytes, keep_alive),
         Err((kind, message)) => {
-            use morloc_runtime_types::daemon_error::{class_name, http_status, RECOVERING};
-            let body = json!({ "status": "error", "class": class_name(kind), "error": message }).to_string();
+            use morloc_runtime_types::daemon_error::{error_body, http_status, RECOVERING};
+            let body = error_body(kind, &message);
             let extra: Vec<(String, String)> = if kind == RECOVERING {
                 vec![("Retry-After".to_string(), "1".to_string())]
             } else {
@@ -2895,11 +2882,11 @@ mod tests {
             &["big", "deep"]);
         let positional = resolve_arguments(&s, &arguments).unwrap();
         assert_eq!(
-            call_request("t", &serde_json::to_string(&positional).unwrap(), &Selection::None),
+            call_request("t", Some(&serde_json::to_string(&positional).unwrap()), &Selection::None),
             format!("{{\"method\":\"call\",\"command\":\"t\",\"args\":[18446744073709551617,{deep}]}}")
         );
-        assert!(call_request("t", "[]", &Selection::Default).ends_with(",\"render_default\":true}"));
-        assert!(call_request("t", "[]", &Selection::Named("png".into())).ends_with(",\"render\":\"png\"}"));
+        assert!(call_request("t", Some("[]"), &Selection::Default).ends_with(",\"render_default\":true}"));
+        assert!(call_request("t", Some("[]"), &Selection::Named("png".into())).ends_with(",\"render\":\"png\"}"));
         // Arguments that are not an object are rejected, as is a message
         // without params.
         let bad = RpcMessage::parse(b"{\"method\":\"tools/call\",\"params\":{\"name\":\"t\",\"arguments\":[1]}}").unwrap();
