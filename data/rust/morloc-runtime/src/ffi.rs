@@ -176,7 +176,7 @@ pub(crate) unsafe fn abs2blk(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut
         return ptr::null_mut();
     }
     let blk = (ptr as *mut u8).sub(std::mem::size_of::<BlockHeader>()) as *mut BlockHeader;
-    if (*blk).magic != shm::BLK_MAGIC {
+    if (*blk).magic() != shm::BLK_MAGIC {
         set_errmsg(errmsg, &MorlocError::Shm("Bad block magic".into()));
         return ptr::null_mut();
     }

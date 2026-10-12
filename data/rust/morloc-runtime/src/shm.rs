@@ -669,9 +669,9 @@ unsafe fn init_volume(
         Ordering::Relaxed,
     );
     let first_block = (shm as *mut u8).add(std::mem::size_of::<ShmHeader>()) as *mut BlockHeader;
-    (*first_block).magic = BLK_MAGIC;
-    (*first_block).reference_count = AtomicU32::new(0);
-    (*first_block).size = first_size;
+    (*first_block).set_magic(BLK_MAGIC);
+    (*first_block).reference_count.store(0, Ordering::Relaxed);
+    (*first_block).set_size(first_size);
     (*shm).magic.store(SHM_MAGIC, Ordering::Release);
     Ok(())
 }
@@ -965,10 +965,10 @@ pub fn live_block_stats(hist: &mut [usize]) -> (usize, usize) {
             while (blk as *const u8) < end
                 && (end as usize) - (blk as usize) >= hdr_size
             {
-                if (*blk).magic != BLK_MAGIC {
+                if (*blk).magic() != BLK_MAGIC {
                     break;
                 }
-                let size = (*blk).size;
+                let size = (*blk).size();
                 if size == 0 || size > slot.data_size() {
                     break;
                 }
@@ -1115,7 +1115,7 @@ pub(crate) unsafe fn incref_held(vols: &VolumeTable, ptr: AbsPtr) -> bool {
         return false;
     }
     let blk = &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader);
-    if blk.magic != BLK_MAGIC {
+    if blk.magic() != BLK_MAGIC {
         return false;
     }
     loop {
@@ -1248,7 +1248,7 @@ pub unsafe fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
     // SAFETY: ptr was returned by shmalloc, which places a BlockHeader immediately before
     // the returned data pointer. Magic check below validates the header.
     let blk = unsafe { &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader) };
-    if blk.magic != BLK_MAGIC {
+    if blk.magic() != BLK_MAGIC {
         return Err(MorlocError::Shm("Corrupted memory - invalid magic".into()));
     }
     // Refuse the same two states `shfree` refuses. Zero means the block is
@@ -1296,7 +1296,7 @@ pub unsafe fn reference_count(ptr: AbsPtr) -> Option<u32> {
     let blk = unsafe {
         &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)
     };
-    if blk.magic != BLK_MAGIC {
+    if blk.magic() != BLK_MAGIC {
         return None;
     }
     Some(blk.reference_count.load(Ordering::Acquire))
@@ -1328,10 +1328,10 @@ pub unsafe fn shm_block_size(ptr: AbsPtr) -> Option<usize> {
         return None;
     }
     let header = &*(header_ptr as *const BlockHeader);
-    if header.magic != BLK_MAGIC {
+    if header.magic() != BLK_MAGIC {
         return None;
     }
-    Some(header.size)
+    Some(header.size())
 }
 
 /// Convert relative pointer to absolute pointer. O(1) under the
@@ -1822,7 +1822,7 @@ fn shmalloc_unlocked(size: usize) -> Result<AbsPtr, MorlocError> {
     unsafe {
         let data = (blk as *mut u8).add(std::mem::size_of::<BlockHeader>());
         if poison_on_free() {
-            std::ptr::write_bytes(data, 0, (*blk).size);
+            std::ptr::write_bytes(data, 0, (*blk).size());
         }
         Ok(data)
     }
@@ -1837,7 +1837,7 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
     let blk = unsafe {
         &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)
     };
-    if blk.magic != BLK_MAGIC {
+    if blk.magic() != BLK_MAGIC {
         return Err(MorlocError::Shm("Corrupted memory".into()));
     }
     // Scrub before publishing, not after. A count of zero is precisely what
@@ -1880,9 +1880,9 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
             // the store below.
             let scrub = if poison_on_free() { POISON_BYTE } else { 0 };
             unsafe {
-                std::ptr::write_bytes(ptr, scrub, blk.size);
+                std::ptr::write_bytes(ptr, scrub, blk.size());
             }
-            crate::shm_stats::on_release(blk.size);
+            crate::shm_stats::on_release(blk.size());
             blk.reference_count.store(0, Ordering::Release);
         }
         return Ok(());
@@ -2028,7 +2028,7 @@ unsafe fn claim(_held: &ShmGuard<'_>, blk: *mut BlockHeader) -> Result<*mut Bloc
         .reference_count
         .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
         .map(|_| {
-            crate::shm_stats::on_claim((*blk).size);
+            crate::shm_stats::on_claim((*blk).size());
             blk
         })
         .map_err(|n| {
@@ -2056,9 +2056,9 @@ fn find_free_block_in_volume(
             // Try cursor position first
             if cursor != VOLNULL {
                 let blk = vol2abs_raw(cursor, shm) as *mut BlockHeader;
-                if (*blk).magic == BLK_MAGIC
+                if (*blk).magic() == BLK_MAGIC
                     && (*blk).reference_count.load(Ordering::Acquire) == 0
-                    && (*blk).size >= size
+                    && (*blk).size() >= size
                 {
                     break 'found Some(blk);
                 }
@@ -2109,18 +2109,18 @@ unsafe fn scan_volume(
 ) -> Option<*mut BlockHeader> {
     let hdr_size = std::mem::size_of::<BlockHeader>();
     while (blk as *const u8).add(hdr_size + size) <= end {
-        if blk.is_null() || (*blk).magic != BLK_MAGIC {
+        if blk.is_null() || (*blk).magic() != BLK_MAGIC {
             return None;
         }
 
         // Merge adjacent free blocks
         while (*blk).reference_count.load(Ordering::Acquire) == 0 {
-            let next = (blk as *mut u8).add(hdr_size + (*blk).size) as *mut BlockHeader;
+            let next = (blk as *mut u8).add(hdr_size + (*blk).size()) as *mut BlockHeader;
             // The whole header must lie inside the region: starting inside it
             // is not enough, since the next thing done is a 16-byte read.
             if (next as *const u8) >= end
                 || (end as usize) - (next as usize) < hdr_size
-                || (*next).magic != BLK_MAGIC
+                || (*next).magic() != BLK_MAGIC
                 || (*next).reference_count.load(Ordering::Acquire) != 0
             {
                 break;
@@ -2128,16 +2128,18 @@ unsafe fn scan_volume(
             // SHM-6: the absorbed header becomes interior bytes of the
             // survivor, zero like the rest of a free block. A zero magic also
             // stops a stale pointer to the absorbed block reading as a block.
-            let next_size = (*next).size;
-            std::ptr::write_bytes(next as *mut u8, 0, hdr_size);
-            (*blk).size += hdr_size + next_size;
+            let next_size = (*next).size();
+            (*next).set_magic(0);
+            (*next).reference_count.store(0, Ordering::Relaxed);
+            (*next).set_size(0);
+            (*blk).set_size((*blk).size() + hdr_size + next_size);
         }
 
-        if (*blk).reference_count.load(Ordering::Acquire) == 0 && (*blk).size >= size {
+        if (*blk).reference_count.load(Ordering::Acquire) == 0 && (*blk).size() >= size {
             return Some(blk);
         }
 
-        blk = (blk as *mut u8).add(hdr_size + (*blk).size) as *mut BlockHeader;
+        blk = (blk as *mut u8).add(hdr_size + (*blk).size()) as *mut BlockHeader;
     }
     None
 }
@@ -2153,28 +2155,28 @@ unsafe fn split_block(
     blk: *mut BlockHeader,
     size: usize,
 ) -> Result<(), MorlocError> {
-    if (*blk).size == size {
+    if (*blk).size() == size {
         return Ok(());
     }
     // A block smaller than the request would underflow the remainder and
     // send the split below to write a header outside the mapping. The
     // search is supposed to return only blocks large enough; refuse rather
     // than trust it.
-    if (*blk).size < size {
+    if (*blk).size() < size {
         return Err(MorlocError::Shm(
             "Block smaller than the request reached the split".into(),
         ));
     }
-    let remaining = (*blk).size - size;
-    (*blk).size = size;
+    let remaining = (*blk).size() - size;
+    (*blk).set_size(size);
 
     let hdr_size = std::mem::size_of::<BlockHeader>();
     let new_free = (blk as *mut u8).add(hdr_size + size) as *mut BlockHeader;
 
     if remaining > hdr_size {
-        (*new_free).magic = BLK_MAGIC;
-        (*new_free).reference_count = AtomicU32::new(0);
-        (*new_free).size = remaining - hdr_size;
+        (*new_free).set_magic(BLK_MAGIC);
+        (*new_free).reference_count.store(0, Ordering::Relaxed);
+        (*new_free).set_size(remaining - hdr_size);
 
         // Update cursor
         let data_start = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
@@ -2183,7 +2185,7 @@ unsafe fn split_block(
         // SHM-6: too small to head, so it becomes interior bytes of the
         // block, zeroed as the merge zeroes an absorbed header.
         std::ptr::write_bytes(new_free as *mut u8, 0, remaining);
-        (*blk).size += remaining;
+        (*blk).set_size((*blk).size() + remaining);
         (*shm).cursor = VOLNULL;
     }
     Ok(())
@@ -2831,11 +2833,11 @@ mod tests {
         let first = base as *mut BlockHeader;
         let second = unsafe { base.add(hdr + body) as *mut BlockHeader };
         unsafe {
-            (*first).magic = BLK_MAGIC;
-            (*first).size = body;
+            (*first).set_magic(BLK_MAGIC);
+            (*first).set_size(body);
             (*first).reference_count = AtomicU32::new(0);
-            (*second).magic = BLK_MAGIC;
-            (*second).size = body;
+            (*second).set_magic(BLK_MAGIC);
+            (*second).set_size(body);
             (*second).reference_count = AtomicU32::new(0);
         }
 
@@ -2843,17 +2845,17 @@ mod tests {
         let found = unsafe { scan_volume(first, body + 8, end) };
         assert_eq!(found, Some(first), "expected the pair to merge");
         assert!(
-            unsafe { (*first).size } >= 2 * body,
+            unsafe { (*first).size() } >= 2 * body,
             "merged block did not absorb its neighbour",
         );
 
         assert_ne!(
-            unsafe { (*second).magic }, BLK_MAGIC,
+            unsafe { (*second).magic() }, BLK_MAGIC,
             "absorbed block still reads as a block, so a stale pointer to it \
              passes the header check and is acted on as live payload",
         );
         // SHM-6: a free block's bytes are zero, absorbed headers included.
-        let data = unsafe { std::slice::from_raw_parts(base.add(hdr), (*first).size) };
+        let data = unsafe { std::slice::from_raw_parts(base.add(hdr), (*first).size()) };
         assert!(data.iter().all(|b| *b == 0), "the merged block holds the absorbed header's bytes");
 
     }
