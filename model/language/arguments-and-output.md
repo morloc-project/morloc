@@ -73,7 +73,8 @@ In order, the first that applies:
    error.
 3. The `@default` action, unless `-f` was given or that action was given a
    path.
-4. The command's own value, in the `-f` form.
+4. The command's own value, in the `-f` form; without `-f`, a value whose
+   type carries `@mime` is its bytes (IFACE-19).
 
 At most one action per command is `@default`; a second is a build error.
 

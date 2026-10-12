@@ -117,9 +117,7 @@ A typed value delivered as JSON is the JSON the CLI prints with `-f json`,
 on every interface. A `@render` action's output is its handler's bytes
 (CLI-8) on every interface, with its `@mime` type or, without one,
 `text/plain; charset=utf-8` for `Str` and `application/octet-stream` for
-bytes. A value whose type carries `@mime` is its bytes with that type on
-every interface, the CLI included: a `@mime` `Str` is its text, unquoted,
-and a `@mime` byte vector its bytes. Whether JSON floats must round trip, and how a non-finite
+bytes. A value whose type carries `@mime` is its bytes (IFACE-19). Whether JSON floats must round trip, and how a non-finite
 float is written, is open (WIRE).
 
 ### IFACE-10 One failure, one class
@@ -241,3 +239,15 @@ credential NET-1 requires.
 
 Why: orchestrators and load balancers probe health without the
 application's token; a probe that reveals nothing costs nothing to open.
+
+### IFACE-19 A `@mime` value is its bytes on every interface
+Intent: ruled 2026-10-12
+Tests: spec-iface-19-1
+Code: conforms 2026-10-12
+
+A value whose type carries `@mime` is delivered as its bytes with that
+media type on every interface, the CLI included: a `@mime` `Str` is its
+text, unquoted, and a `@mime` byte vector its bytes. This holds for a
+command's own value and for an action's output, on stdout or in a file.
+On the CLI, `-f` or `-p` names another form instead.
+

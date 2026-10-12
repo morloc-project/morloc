@@ -25,17 +25,6 @@
 - Gap: model/language/arguments-and-output.md has no rules for @parse.
 - [read] morloc-nexus/src/orchestrate.rs:198 error text omits voidstar and
   raw.
-- **Help names a media type the stdout does not carry.** [reproduced,
-  0.109.0] Against CLI-11. For `structure :: Smiles -> MolFile` with
-  `MolFile = Str` tagged `@mime chemical/x-mdl-molfile`, `-h` prints
-  `Return: type: chemical/x-mdl-molfile`, but a bare run writes the JSON
-  form of a `Str` (CLI-7 case 4), a quoted string with `\n` escapes; `-f`
-  offers no raw form. The daemon's HTTP `/call/structure` returns the raw
-  molfile with `Content-Type: chemical/x-mdl-molfile`, so the CLI and HTTP
-  disagree on what a `@mime`-typed return is. Violates IFACE-9 (ruled
-  2026-10-12: a `@mime` return is written raw on the CLI too, text or
-  bytes).
-  Repro: web/morloc-studio/public/assets/home-examples/smiles.
 - **`--json-help` drops render media types.** [reproduced, 0.109.0] For a
   command with `@render --png=png` where `png :: Molecule -> PNG` and
   `PNG` carries `@mime image/png`, `--json-help` gives each terminal

@@ -640,6 +640,8 @@ fn main() {
                 .find(|t| t.replay.as_deref() == Some(cmd.as_str()));
             if let Some(t) = term.filter(|t| t.render) {
                 set_render_output(&mut config, t.kind);
+            } else {
+                apply_value_form(&mut config, &manifest.commands[idx], format_explicit);
             }
             // Each input is a file the stage wrote, read as the manifest
             // says its argument is read (see `stageReplayArgs` in the
@@ -710,6 +712,7 @@ fn main() {
             }
             let (idx, values) =
                 parse_arg::redirect(&manifest, parsed.parent_index, parsed.values);
+            apply_value_form(&mut config, &manifest.commands[idx], format_explicit);
             dispatch::dispatch_command_parsed(
                 values,
                 &config,
@@ -732,6 +735,9 @@ fn main() {
         }
         let (cmd_index, values) = parse_arg::redirect(&manifest, parsed.cmd_index, parsed.values);
         let cmd = &manifest.commands[cmd_index];
+        if !parsed.render {
+            apply_value_form(&mut config, cmd, format_explicit);
+        }
         dispatch::dispatch_command_parsed(
             values,
             &config,
@@ -771,6 +777,14 @@ fn set_render_output(config: &mut dispatch::NexusConfig, kind: manifest::ActionK
     config.output_format = dispatch::OutputFormat::Raw;
     if kind == manifest::ActionKind::Stream {
         stdio_server::set_output_format(dispatch::OutputFormat::Raw);
+    }
+}
+
+/// A value whose type carries `@mime` is written as its bytes, as on every
+/// other interface, unless `-f` or `-p` asks for another form.
+fn apply_value_form(config: &mut dispatch::NexusConfig, cmd: &manifest::Command, format_explicit: bool) {
+    if !format_explicit && !config.print_flag && cmd.ret.mime.is_some() {
+        set_render_output(config, manifest::ActionKind::Value);
     }
 }
 

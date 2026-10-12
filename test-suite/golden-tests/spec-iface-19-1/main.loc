@@ -1,0 +1,27 @@
+-- Spec IFACE-19: a value whose type carries `@mime` is its bytes on the
+-- command line, as over HTTP and MCP, unless `-f` names another form. This
+-- holds for a command's own value and for an `@with` action's output, on
+-- stdout and in a file, and for the command's value while another action
+-- writes a file.
+module main (note, tagged)
+
+import root
+
+--' @mime text/plain
+type Note = Str
+
+asNote :: Str -> Note
+asNote x = x
+
+up :: Str -> Str
+up x = x
+
+--' A note
+--' @with -u/--up=up
+note :: Str -> Note
+note x = x
+
+--' Text with a note action
+--' @with -n/--note=asNote
+tagged :: Str -> Str
+tagged x = x

@@ -64,12 +64,6 @@ re-checked.
 
 ## Output (IFACE-9)
 
-- **A `@mime` value is JSON on the CLI.** [reproduced, 0.109.0] Violates
-  IFACE-9 (ruled 2026-10-12: raw on every interface, the CLI included).
-  smiles `structure` with `MolFile = Str` tagged `@mime
-  chemical/x-mdl-molfile` prints a quoted JSON string from `./smiles
-  structure CCO --mol`; HTTP, the front end and MCP send the bytes. See also
-  cli-directives.md.
 - **Non-finite floats.** [read, survey] Lists and records write the
   strings `"nan"`/`"inf"` (morloc-runtime/src/json.rs:1818-1822) where the
   advertised schema says `number`; a Table writes bare `nan`
