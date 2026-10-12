@@ -225,7 +225,8 @@ process serving it. Off the CLI no call has a standard input of its own,
 so the read takes whatever the server's stdin holds, or waits for input
 that never comes. This is a request the server cannot meet, not a fault
 of the call. Open: whether such a command is refused off the CLI, or its
-`@stdin` is at end of input there.
+`@stdin` is at end of input there; today a served process's fd 0 is
+`/dev/null` (DAEMON-15), so it reads end of input.
 
 ### IFACE-17 An argument's checks apply on every interface
 Intent: proposed

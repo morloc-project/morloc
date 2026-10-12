@@ -700,6 +700,9 @@ fn write_leaf(
             use morloc_runtime_types::stream_handle as sh;
             let s: String = serde_json::from_str(text)
                 .map_err(|e| err(&format!("expected string: {}", e)))?;
+            if crate::stream::served_stdio_path(&s) {
+                return Err(crate::stream::served_stdio_error(&s));
+            }
             let bytes = s.as_bytes();
 
             let (w, payload) = if dest.is_some() {

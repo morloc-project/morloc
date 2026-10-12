@@ -543,6 +543,12 @@ if should_run "render"; then
     result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/guarded" \
         -H "Content-Type: application/json" -d '["toolong"]')
     assert_test "a pool Err is class failure" "failure" "$(json_field "$result" "class")"
+    for p in '-' '/dev/stdin' '/dev/fd/0'; do
+        result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/readFrom" \
+            -H "Content-Type: application/json" -d "[\"$p\"]")
+        assert_contains "readFrom $p is refused, not read from the server's stdin" \
+            "standard input" "$(json_field "$result" "error")"
+    done
     assert_http_status "POST /call/echo?render=a&render=b -> 400" "400" \
         "http://127.0.0.1:${HTTP_PORT}/call/echo?render=shout&render=plain" \
         -X POST -H "Content-Type: application/json" -d '["hi"]'
@@ -581,6 +587,8 @@ if should_run "render"; then
         '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"Hi","_render":"raw"}}}' \
         '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"Hi","_render":"nope"}}}' \
         '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"guarded","arguments":{"_1":"toolong"}}}' \
+        '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"readFrom","arguments":{"_1":"-"}}}' \
+        '{"jsonrpc":"2.0","id":9,"method":"ping"}' \
         | (cd "$RENDER_DIR" && timeout 60 morloc-nexus mcp ./nexus 2>/dev/null))
     mcp_get() {
         echo "$mcp_out" | python3 -c '
@@ -602,6 +610,8 @@ for line in sys.stdin:
     assert_test "MCP _render=raw is the own value" '"Hi"' "$(mcp_get 5 result.content.0.text)"
     assert_test "MCP unknown action is invalid params" "-32602" "$(mcp_get 6 error.code)"
     assert_test "MCP pool Err is isError" "True" "$(mcp_get 7 result.isError)"
+    assert_test "MCP readFrom - is refused" "True" "$(mcp_get 8 result.isError)"
+    assert_test "the MCP session survives it" "{}" "$(mcp_get 9 result)"
 fi
 
 # ======================================================================

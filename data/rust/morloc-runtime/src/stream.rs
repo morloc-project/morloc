@@ -516,6 +516,11 @@ pub(crate) enum StdoutMode {
     Refused,
 }
 
+// DAEMON-15
+pub(crate) fn serving() -> bool {
+    stdout_mode() == StdoutMode::Refused
+}
+
 fn stdout_mode() -> StdoutMode {
     static MODE: morloc_runtime_types::publish_once::PublishOnce<StdoutMode> =
         morloc_runtime_types::publish_once::PublishOnce::new();
@@ -2897,11 +2902,35 @@ fn is_stdin_device(path: &str) -> bool {
     matches!(path, "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0")
 }
 
+// DAEMON-15
+pub(crate) fn served_stdio_path(path: &str) -> bool {
+    serving() && names_server_stdio(path)
+}
+
+pub(crate) fn names_server_stdio(path: &str) -> bool {
+    path == STDIO_SENTINEL_STD
+        || path == STDIO_SENTINEL_ERR
+        || matches!(path, "/dev/stdin" | "/dev/stdout" | "/dev/stderr")
+        || path.starts_with("/dev/fd/")
+        || path.starts_with("/proc/self/fd/")
+        || path.starts_with("/proc/thread-self/fd/")
+}
+
+pub(crate) fn served_stdio_error(path: &str) -> MorlocError {
+    MorlocError::Other(format!(
+        "'{}' names the server's own standard input or output, which a served call cannot use",
+        path
+    ))
+}
+
 /// Refuse `@open` on the `/dev/std{in,out,err}` paths. Opening them
 /// as a regular file would race the nexus's own reads/writes on
 /// fd 0/1/2. The user must route through `@stdin` / `@stdout` /
 /// `@stderr` intrinsics instead.
 fn reject_dev_stdio_path(path: &str) -> Result<(), MorlocError> {
+    if served_stdio_path(path) {
+        return Err(served_stdio_error(path));
+    }
     match path {
         "/dev/stdin" | "/dev/stdout" | "/dev/stderr" => Err(MorlocError::Other(
             format!(
@@ -6758,6 +6787,9 @@ fn slice_bulk_pack_str(
 /// through `mlc_open(path, kind)` would create a Nil-schema header on
 /// disk, breaking the receiving IStream/IFile reader's schema parse.
 pub fn open_dispatch(path: &str, kind: u8) -> Result<i64, MorlocError> {
+    if served_stdio_path(path) {
+        return Err(served_stdio_error(path));
+    }
     if is_stdin_device(path) {
         // stdin is forward-only and lives on the nexus's fd 0. IFile
         // (random access) is impossible; the error is catchable, so the
@@ -6808,6 +6840,9 @@ pub fn open_dispatch(path: &str, kind: u8) -> Result<i64, MorlocError> {
 /// declaring the ascribed `[a]` schema so the nexus can guard the
 /// incoming stream against the opener's type.
 pub fn open_dispatch_istream(path: &str, schema_str: &str) -> Result<i64, MorlocError> {
+    if served_stdio_path(path) {
+        return Err(served_stdio_error(path));
+    }
     if is_stdin_device(path) {
         return open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, schema_str);
     }
@@ -11006,6 +11041,17 @@ mod write_behind_tests {
         assert!(after_close >= after_write + 1, "the close returned before its footer reached the nexus");
         assert!(after_close >= 3, "the batches that filled buffers did not reach the nexus");
         assert!(open_stdio(MLC_KIND_OSTREAM, STDIO_KIND_STDOUT, "as").map(shared_close_handle).is_ok(), "the stdout claim was not released");
+    }
+
+    // DAEMON-15
+    #[test]
+    fn a_served_path_may_not_name_the_servers_stdio() {
+        for p in ["-", "-2", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/fd/0", "/proc/self/fd/1"] {
+            assert!(names_server_stdio(p), "{p}");
+        }
+        for p in ["/dev/null", "/tmp/x", "-x", "data/-"] {
+            assert!(!names_server_stdio(p), "{p}");
+        }
     }
 
     // DAEMON-15

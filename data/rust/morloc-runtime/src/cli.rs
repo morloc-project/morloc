@@ -75,6 +75,17 @@ pub fn reset_stdin_claim() {
 /// first claim, `Err(...)` if another argument has already consumed
 /// stdin in this dispatch.
 fn claim_stdin() -> Result<(), MorlocError> {
+    claim_stdin_when(crate::stream::serving())
+}
+
+fn claim_stdin_when(serving: bool) -> Result<(), MorlocError> {
+    if serving {
+        return Err(MorlocError::Other(
+            "a call served by a daemon or an MCP server has no standard input; \
+             give the argument its value"
+                .into(),
+        ));
+    }
     if STDIN_CLAIMED.swap(true, Ordering::Relaxed) {
         Err(MorlocError::Other(
             "stdin can only be read by a single argument per command".into()
@@ -3951,6 +3962,11 @@ pub(crate) unsafe fn make_call_packet_from_cli(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_served_call_cannot_claim_stdin() {
+        assert!(claim_stdin_when(true).is_err());
+    }
 
     #[test]
     fn a_forked_child_leaves_its_parents_spooled_inputs() {

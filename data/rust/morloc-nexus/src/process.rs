@@ -576,6 +576,22 @@ fn alone() {
     }
 }
 
+// DAEMON-15
+pub(crate) fn detach_stdin() -> i32 {
+    alone();
+    let saved = unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
+    let null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if saved < 0 || null < 0 {
+        eprintln!("morloc: failed to detach standard input");
+        clean_exit(1);
+    }
+    unsafe {
+        libc::dup2(null, libc::STDIN_FILENO);
+        libc::close(null);
+    }
+    saved
+}
+
 pub(crate) fn set_startup_env(key: &str, value: impl AsRef<std::ffi::OsStr>) {
     alone();
     std::env::set_var(key, value);

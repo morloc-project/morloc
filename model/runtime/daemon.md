@@ -258,9 +258,9 @@ Out of reach: a group whose pin was killed from outside the nexus has a
 dead slot (DAEMON-11), so a worker of its pool runs until its call
 returns; workers do not watch the lifeline.
 
-### DAEMON-15 A served call opens no standard output
+### DAEMON-15 A served call opens no standard output, and takes no argument from standard input
 Status: implemented
-Checked by: a_served_call_cannot_open_stdout_and_leaves_no_claim
+Checked by: a_served_call_cannot_open_stdout_and_leaves_no_claim, a_served_call_cannot_claim_stdin, a_served_path_may_not_name_the_servers_stdio
 
 In a daemon or an MCP server, `@stdout` fails to open, and the call that
 opened it fails: the server serves many calls and none of them owns its
@@ -269,3 +269,9 @@ The failed open releases its claim, so the next open fails the same way,
 not as already open. `@stderr` opens as usual and reaches the server's
 log.
 
+A served process's fd 0 is `/dev/null`; an MCP server over stdio reads its
+requests from a private copy of the stdin it was given. An argument read
+from stdin is refused, and so is a path, given as an argument or opened by
+the call, that names the server's standard input, output or error (`-`,
+`-2`, the `/dev/std*` and descriptor paths). The `@stdin` intrinsic reads
+end of input.

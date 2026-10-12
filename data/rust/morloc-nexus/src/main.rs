@@ -302,6 +302,19 @@ fn main() {
     } else {
         None
     };
+    // DAEMON-15: a served call cannot reach the server's own stdin; MCP over
+    // stdio keeps it, privately, as its request stream.
+    let mcp_protocol_in: Option<i32> = if config.mcp_flag || config.daemon_flag {
+        let saved = process::detach_stdin();
+        if config.mcp_flag && config.http_port.is_none() {
+            Some(saved)
+        } else {
+            unsafe { libc::close(saved) };
+            None
+        }
+    } else {
+        None
+    };
 
     // The name to show in Usage lines: the launcher's own `$0` (via
     // MORLOC_PROG_NAME) when invoked through the generated wrapper, else the
@@ -572,6 +585,7 @@ fn main() {
             &payload,
             &manifest,
             protocol_fd,
+            mcp_protocol_in.expect("stdio mcp keeps its request stream"),
         );
         // mcp::serve never returns.
     }

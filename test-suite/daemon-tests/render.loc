@@ -18,7 +18,7 @@
 -- `PlainText = Str` carries `@mime text/plain`, so a value of that type is served
 -- as raw bytes with the media type rather than the JSON envelope. Str keeps this
 -- test free of numpy/Pillow.
-module main (echo, guarded)
+module main (echo, guarded, readFrom)
 
 import root-py
 
@@ -45,4 +45,11 @@ echo :: Str -> Str
 -- A top-level `Err` from a pool is a failed call on every interface.
 guarded :: Str -> Try Str Int
 guarded s = ? size s > 3 = Err "too long" : Ok (size s)
+
+-- A path a served call is given names a file, never the server's stdio.
+readFrom :: Str -> <IO> [Int]
+readFrom f = do
+  Ok fi <- (@open f :: <IO> (Try Str (IStream Int)))
+  Ok xs <- @next fi
+  xs
 

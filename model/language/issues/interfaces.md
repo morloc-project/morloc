@@ -31,12 +31,11 @@ re-checked.
   for a router-started daemon.** [speculative] IFACE-3 resolves against
   the server's working directory; what that is for a daemon the router
   starts (DAEMON-12) is not specified.
-- **`@stdin` off the CLI reads the server's stdin.** [reproduced, 0.109.0]
-  Gap at IFACE-16; not blocking (user, 2026-10-12). rust-stdio golden
-  built as `rs`: MCP lists `doubler`, `checkSum`, `producer`; `tools/call
-  checkSum` returns `0`, `isError:false`, as `./rs checkSum < /dev/null`
-  does, because the MCP stdio server saw end of input. A daemon whose
-  stdin is a terminal or an open pipe would wait instead.
+- **`@stdin` off the CLI reads end of input.** [reproduced, 0.109.0;
+  read since] Gap at IFACE-16; not blocking (user, 2026-10-12). A served
+  process's fd 0 is now `/dev/null` (DAEMON-15), so a call that opens
+  `@stdin` reads nothing rather than the server's own stdin or a hang;
+  whether such a call should be refused instead is IFACE-16's question.
 - **`daemon -h` and `mcp -h` list only the MCP-servable commands.**
   [read, survey] morloc-nexus/src/serve_help.rs:17,34; the daemon serves
   more.
@@ -82,11 +81,6 @@ re-checked.
 - **MCP lists a whole-object group as optional when a field is required.**
   [read] json_help.rs ~l.1028-1029: `tools/list` says the group may be
   omitted, and the call then fails "Required field ... missing".
-- **A daemon never resets its stdin claim.** [read] morloc-runtime/src/
-  cli.rs `STDIN_CLAIMED` (~l.66) is set by the first argument read from
-  `-`/`/dev/stdin` and never cleared, and such a read takes the daemon's
-  own stdin (~l.172-176).
-
 ## Output (IFACE-9)
 
 - **Non-finite floats.** [read, survey] Lists and records write the

@@ -278,6 +278,7 @@ pub fn serve(
     manifest_payload: &str,
     manifest: &Manifest,
     protocol_fd: RawFd,
+    protocol_in: RawFd,
 ) -> ! {
     // Parse the manifest into the C-layout struct daemon_dispatch expects.
     let manifest_c = parse_c_manifest(manifest_payload);
@@ -303,9 +304,11 @@ pub fn serve(
     let server_version = manifest.build.morloc_version.clone();
 
     let mut session = Session::new();
-    // `StdinLock` is itself a `BufRead`; the lock is process-local, so pools
-    // (separate processes sharing fd 0) can't contend on it.
-    let reader = std::io::stdin().lock();
+    // The requests arrive on the client's stdin, held at a private
+    // descriptor; fd 0 itself is /dev/null (DAEMON-15).
+    let reader = BufReader::new(unsafe {
+        <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(protocol_in)
+    });
 
     for line in read_lines_capped(reader) {
         let line = match line {
