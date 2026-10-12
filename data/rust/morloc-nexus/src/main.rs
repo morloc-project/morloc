@@ -507,8 +507,13 @@ fn main() {
     // @stderr through this dedicated socket; the fork-side child fd
     // hygiene installed in start_language_server takes fd 0/1 away
     // from the pool so the nexus keeps its bytes clean.
+    crate::process::remove_startup_env("MORLOC_STDOUT");
     if matches!(config.child, dispatch::ChildMode::Stage { .. }) {
-        crate::process::set_startup_env("MORLOC_STDOUT_STAGE", "1");
+        crate::process::set_startup_env("MORLOC_STDOUT", "stage");
+    }
+    // DAEMON-15
+    if config.daemon_flag || config.mcp_flag {
+        crate::process::set_startup_env("MORLOC_STDOUT", "refused");
     }
     stdio_server::start(&tmpdir, config.output_format, config.daemon_flag);
     watch_lifeline();

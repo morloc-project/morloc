@@ -2906,6 +2906,28 @@ unsafe fn handle_http_connection(
         return;
     }
 
+    let head = (*http_req).method == HttpMethod::Head;
+    REPLY_WITHOUT_BODY.with(|r| r.set(head));
+    if head {
+        (*http_req).method = HttpMethod::Get;
+    }
+    // NET-1: the liveness probe needs no token.
+    let is_probe = (*http_req).method == HttpMethod::Get
+        && CStr::from_ptr((*http_req).path.as_ptr()).to_bytes()
+            == morloc_runtime_types::bearer::LIVENESS_PATH.as_bytes();
+    if is_probe && !(*http_req).authorized {
+        let body = morloc_runtime_types::bearer::LIVENESS_BODY;
+        crate::http_ffi::write_response(
+            client_fd,
+            200,
+            c"application/json".as_ptr(),
+            body.as_ptr() as *const c_char,
+            body.len(),
+        );
+        http_free_request(http_req);
+        libc::close(client_fd);
+        return;
+    }
     // CORS preflight short-circuit. Browser-issued OPTIONS requests
     // should get 204 No Content with the standard CORS headers, never
     // reaching daemon_dispatch (which would otherwise process them
@@ -3577,6 +3599,13 @@ thread_local! {
     // whether any of a reply has been written.
     static REPLY_IS_PACKET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static REPLY_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REPLY_WITHOUT_BODY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the HTTP reply being written answers a `HEAD`, and so carries
+/// headers only.
+pub(crate) fn reply_without_body() -> bool {
+    REPLY_WITHOUT_BODY.with(|r| r.get())
 }
 
 pub(crate) fn note_reply_started() {
@@ -4032,6 +4061,38 @@ mod panic_tests {
                 && SHUTDOWN_REQUESTED.load(Ordering::SeqCst);
             if !ok {
                 eprintln!("panicked {panicked}, reply {reply:?}");
+            }
+            ok
+        }));
+    }
+
+    #[test]
+    fn a_liveness_probe_needs_no_token_and_says_only_that_the_daemon_answers() {
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            http_access().token = Some("s3cret".into());
+            let ask = |request: &[u8]| -> String {
+                let sv = pair();
+                unsafe {
+                    libc::write(sv[1], request.as_ptr() as *const c_void, request.len());
+                    libc::shutdown(sv[1], libc::SHUT_WR);
+                    handle_http_connection(sv[0], ptr::null_mut(), ptr::null_mut(), ptr::null());
+                }
+                String::from_utf8_lossy(&read_all(sv[1])).into_owned()
+            };
+            let get = ask(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n");
+            let head = ask(b"HEAD /health HTTP/1.1\r\nHost: x\r\n\r\n");
+            let head_other = ask(b"HEAD /discover HTTP/1.1\r\nHost: x\r\n\r\n");
+            let call = ask(b"POST /call/f HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n[]");
+            let ok = get.starts_with("HTTP/1.1 200")
+                && get.ends_with("{\"status\":\"ok\"}")
+                && head.starts_with("HTTP/1.1 200")
+                && head.contains("Content-Length: 15\r\n")
+                && head.ends_with("\r\n\r\n")
+                && head_other.starts_with("HTTP/1.1 401")
+                && head_other.ends_with("\r\n\r\n")
+                && call.starts_with("HTTP/1.1 401");
+            if !ok {
+                eprintln!("get {get:?}\nhead {head:?}\nhead_other {head_other:?}\ncall {call:?}");
             }
             ok
         }));

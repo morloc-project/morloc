@@ -23,3 +23,8 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   with ECONNREFUSED instead of blocking; `connect_to` then retries for at
   most 30 s (ipc_ffi.rs), a deadline on a pool call (DAEMON-6). Matters
   for fork-mode pools, whose backlog only idle workers drain.
+- **The front end's forward to a daemon times out at 60 s.** [read]
+  Violates DAEMON-6 and IFACE-12. data/rust/morloc-runtime/src/
+  router_ffi.rs:772-789 sets `SO_RCVTIMEO`/`SO_SNDTIMEO` of 60 s on the
+  forward socket; a call longer than that fails "Failed to read response
+  length" while the child keeps computing.

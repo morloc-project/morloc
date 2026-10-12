@@ -15,13 +15,14 @@ one is not bounded by time.
 
 ### NET-1 A listener reachable from another machine requires a credential
 Status: implemented
-Checked by: an_open_bind_needs_a_token_or_an_explicit_waiver, only_the_exact_bearer_token_authorizes, a_header_is_found_by_name_in_any_case
+Checked by: an_open_bind_needs_a_token_or_an_explicit_waiver, only_the_exact_bearer_token_authorizes, a_header_is_found_by_name_in_any_case, a_liveness_probe_needs_no_token_and_says_only_that_the_daemon_answers, a_liveness_probe_needs_no_token_and_a_head_answer_has_no_body
 
 A remote listener binds loopback unless told otherwise. Bound to any other
 address, it refuses to start without an authentication token, unless the
 caller explicitly opts out (as a container does when it decides
 reachability with a published port), and then it warns once. With a token
-set, every request without `Authorization: Bearer <token>` is answered 401;
+set, every request but the liveness probe (IFACE-18) that lacks
+`Authorization: Bearer <token>` is answered 401;
 the token is compared in constant time. This holds for the daemon's HTTP
 listener, the MCP server and the serving front end; the daemon's TCP
 listener binds loopback only. The daemon test group `http-auth` runs it end

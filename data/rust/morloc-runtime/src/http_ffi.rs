@@ -18,6 +18,7 @@ pub enum HttpMethod {
     Post = 1,
     Delete = 2,
     Options = 3,
+    Head = 4,
 }
 
 #[repr(C)]
@@ -162,6 +163,8 @@ unsafe fn parse_request_within(
         (*req).method = HttpMethod::Delete;
     } else if header_str.starts_with("OPTIONS ") {
         (*req).method = HttpMethod::Options;
+    } else if header_str.starts_with("HEAD ") {
+        (*req).method = HttpMethod::Head;
     } else {
         libc::free(req as *mut c_void);
         set_errmsg(errmsg, &MorlocError::Other("Unsupported HTTP method".into()));
@@ -306,7 +309,7 @@ pub(crate) unsafe fn write_response_ex(
          Content-Length: {}\r\n\
          Connection: close\r\n\
          Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+         Access-Control-Allow-Methods: GET, HEAD, POST, DELETE, OPTIONS\r\n\
          Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
          {}\r\n",
         status, http_status_text(status), ct, body_len, extra
@@ -318,7 +321,7 @@ pub(crate) unsafe fn write_response_ex(
         return false;
     }
 
-    if !body.is_null() && body_len > 0 {
+    if !body.is_null() && body_len > 0 && !crate::daemon_ffi::reply_without_body() {
         if !crate::ipc_ffi::send_all(fd, body as *const u8, body_len) {
             return false;
         }
@@ -585,6 +588,7 @@ pub(crate) unsafe fn http_to_daemon_request(
         HttpMethod::Post => "POST",
         HttpMethod::Delete => "DELETE",
         HttpMethod::Options => "OPTIONS",
+        HttpMethod::Head => "HEAD",
     };
     if !error_kind.is_null() {
         *error_kind = crate::daemon_ffi::DAEMON_ERROR_NOT_FOUND;

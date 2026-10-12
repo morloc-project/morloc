@@ -6,7 +6,7 @@
 //! - `value.pkt`: the parent's result, for a command that returns a value;
 //! - `stream.pkt`: everything the parent streams to stdout, for a
 //!   `@collect` command, one frame per batch (the pools write batch by
-//!   batch under `MORLOC_STDOUT_STAGE`, see the runtime's `open_stdio`);
+//!   batch under `MORLOC_STDOUT=stage`, see the runtime's `open_stdio`);
 //! - `arg<N>.pkt`: each parent argument an action refers to as `$N`.
 //!
 //! With `tee`, the output also goes to stdout exactly as an ordinary run
@@ -23,7 +23,7 @@ struct Stage {
 
 static STAGE: OnceLock<Stage> = OnceLock::new();
 
-/// Enter stage mode. The pools read `MORLOC_STDOUT_STAGE`, which main sets
+/// Enter stage mode. The pools read `MORLOC_STDOUT=stage`, which main sets
 /// at startup for a stage child.
 pub fn init(dir: &str, args: &[usize], tee: bool, parent: &str) {
     let _ = STAGE.set(Stage { dir: dir.to_string(), args: args.to_vec(), tee, parent: parent.to_string() });

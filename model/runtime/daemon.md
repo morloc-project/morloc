@@ -257,3 +257,15 @@ answers the call as failed and recovers its pools (DAEMON-6).
 Out of reach: a group whose pin was killed from outside the nexus has a
 dead slot (DAEMON-11), so a worker of its pool runs until its call
 returns; workers do not watch the lifeline.
+
+### DAEMON-15 A served call opens no standard output
+Status: implemented
+Checked by: a_served_call_cannot_open_stdout_and_leaves_no_claim
+
+In a daemon or an MCP server, `@stdout` fails to open, and the call that
+opened it fails: the server serves many calls and none of them owns its
+standard output, so a batch written there would reach no caller (IFACE-8).
+The failed open releases its claim, so the next open fails the same way,
+not as already open. `@stderr` opens as usual and reaches the server's
+log.
+

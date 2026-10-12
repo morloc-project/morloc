@@ -1054,7 +1054,8 @@ typedef enum {
     HTTP_GET,
     HTTP_POST,
     HTTP_DELETE,
-    HTTP_OPTIONS
+    HTTP_OPTIONS,
+    HTTP_HEAD
 } http_method_t;
 
 typedef struct http_request_s {

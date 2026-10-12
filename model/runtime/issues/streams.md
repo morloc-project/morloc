@@ -71,3 +71,11 @@ here touch locks and ownership: model first.
   dropped reader: model first. Small sub-packets pay the request instead:
   20000 sub-packets of 100 Ints take 0.50 s from stdin and 0.13 s from a
   file, ~18 us more per `@next`, which reading ahead does not remove.
+- **`@next` errors carry their prefix twice.** [reproduced, 0.109.0]
+  `./rs producer | ./rs checkSum` (rust-stdio golden) prints "@next:
+  @next: stdin ended after 23 byte(s) ...".
+- **The daemon's remote path sets no call id and runs no sweep.** [read]
+  Against SLOT-19. data/rust/morloc-runtime/src/daemon_ffi.rs:2359-2360 and
+  2438-2439 set and sweep a call id on the pure path only; the remote
+  branch (2441 on) does neither, and stream.rs:2485-2489 claims "the nexus
+  dispatch always pre-sets a call_id", which holds only there.

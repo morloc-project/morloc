@@ -34,6 +34,7 @@ specTests =
     , localOption (mkTimeout 2000000) newtTests
     , localOption (mkTimeout 5000000) dimTests
     , localOption (mkTimeout 2000000) patTests
+    , localOption (mkTimeout 2000000) ifaceTests
     , modelCheck
     ]
 
@@ -845,6 +846,48 @@ newtTests =
         module main (f)
         newtype Buffer (n :: Nat) a = List a
         f :: Buffer 3 Int -> Int
+        |]
+    ]
+
+ifaceTests :: TestTree
+ifaceTests =
+  testGroup
+    "IFACE"
+    [ reject
+        "spec-iface-6-1"
+        [r|
+        module main (foo)
+        fmt :: Int -> Str
+        --' @render --raw=fmt
+        foo :: Int -> Int
+        foo x = x
+        |]
+    , accept
+        "spec-iface-6-2"
+        [r|
+        module main (foo)
+        fmt :: Int -> Str
+        --' @render --rawest=fmt
+        foo :: Int -> Int
+        foo x = x
+        |]
+    , reject
+        "spec-iface-6-3"
+        [r|
+        module main (foo)
+        fmt :: Int -> Str
+        --' @with -r/--raw=fmt
+        foo :: Int -> Int
+        foo x = x
+        |]
+    , accept
+        "spec-iface-6-4"
+        [r|
+        module main (foo)
+        fmt :: Int -> Str
+        --' @with -r/--rawest=fmt
+        foo :: Int -> Int
+        foo x = x
         |]
     ]
 

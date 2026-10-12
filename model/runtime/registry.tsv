@@ -89,6 +89,7 @@ morloc-runtime/daemon_ffi.rs::-::EVAL_CHILDREN	exec-only
 morloc-runtime/daemon_ffi.rs::-::WORKER_PANICKED	counter		
 morloc-runtime/daemon_ffi.rs::-::REPLY_IS_PACKET	thread		
 morloc-runtime/daemon_ffi.rs::-::REPLY_STARTED	thread		
+morloc-runtime/daemon_ffi.rs::-::REPLY_WITHOUT_BODY	thread		
 morloc-runtime/debug.rs::-::FRAMES	thread		
 morloc-runtime/debug.rs::-::DUMPED_COUNT	thread		
 morloc-runtime/debug.rs::-::MIDX_COUNTERS	thread		
@@ -174,12 +175,12 @@ morloc-runtime/shm_companion.rs::-::COMPANION_TOTAL_BYTES	counter
 morloc-runtime/shm_stats.rs::-::COUNTERS	startup		
 morloc-runtime/shm_stats.rs::-::SEGMENT	held	8	
 morloc-runtime/stream.rs::-::REGISTRY_BASE	lazy		
+morloc-runtime/stream.rs::stdout_mode::MODE	lazy		
 morloc-runtime/stream.rs::-::REGISTRY_SLOT_COUNT	lazy		
 morloc-runtime/stream.rs::-::REGISTRY_SEGMENT	held	7	
 morloc-runtime/stream.rs::-::BOOTSTRAP_GAP_HOOK	test-only		
 morloc-runtime/stream.rs::first_uses_on_two_threads_build_one_registry::AT_GAP	test-only		
 morloc-runtime/stream.rs::first_uses_on_two_threads_build_one_registry::RESUME	test-only		
-morloc-runtime/stream.rs::stdout_staged::STAGED	lazy		
 morloc-runtime/stream.rs::-::PROCESS_LOCAL_SLOTS	held	2	
 morloc-runtime/stream.rs::-::LOCKED_FDS	held	3	
 morloc-runtime/stream.rs::slot_probe_seed::SEED	counter		

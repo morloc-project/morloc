@@ -101,6 +101,7 @@ split later.
 |---|---|---|
 | [commands.md](commands.md) | CMD | which exports become commands, and their names |
 | [arguments-and-output.md](arguments-and-output.md) | CLI | argument shapes, parsing, stdin, `@parse`, `@render`, output rendering |
+| [interfaces.md](interfaces.md) | IFACE | one call, the same meaning on the CLI, the daemon's HTTP and socket APIs, MCP and the serving front end |
 | [diagnostics.md](diagnostics.md) | DIAG | the compiler's error contract: never crash, every rejection located, warnings |
 
 Runtime processes, threads, locks and shared memory are `../runtime/`'s.

@@ -14,3 +14,4 @@ it is solved, and a file when it is empty.
 - [manual.md](manual.md): manual text that contradicts a spec item or itself
 - [typeclasses.md](typeclasses.md): compiler crashes in instance bodies, catch-all fallthrough depends on instance body (CLS-12), unchecked class obligations and superclasses (CLS-5)
 - [records.md](records.md): design decision pending: are inline (anonymous) record types legal?
+- [interfaces.md](interfaces.md): CLI, daemon HTTP/LP, MCP and front end disagree on commands served, argument decoding and defaults, `@default`, render bytes, failure classes, discovery, limits and eval gating (IFACE)

@@ -1007,6 +1007,8 @@ if should_run "http-auth"; then
     code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
         -H "Content-Type: application/json" -d '[3, 4]')
     assert_test "a request with no token is refused" "401" "$code"
+    probe=$(curl -s "http://127.0.0.1:${HTTP_PORT}/health")
+    assert_test "the liveness probe needs no token and says only ok" '{"status":"ok"}' "$probe"
     code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
         -H "Authorization: Bearer nope" -H "Content-Type: application/json" -d '[3, 4]')
     assert_test "a request with a wrong token is refused" "401" "$code"

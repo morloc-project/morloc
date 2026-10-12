@@ -925,6 +925,14 @@ processArgDocLinesD pos ls = do
     [] -> return v
     (e : _) -> dfail pos (T.unpack e)
 
+-- | Long names an output action may not take, with the reason.
+reservedActionLongs :: [(Text, Text)]
+reservedActionLongs =
+  [ ("help", "`--help` is always available")
+  , ("no-stdout", "`--no-stdout` is available on every command with terminal actions")
+  , ("raw", "`raw` names the command's own value when an action is selected by name (HTTP `?render=`, MCP `_render`)")
+  ]
+
 -- | Validate signature-preamble `with:` specs: reject duplicate short/
 -- long names within one export, reject collisions with reserved
 -- command-scope flags (`-h`, `--help`), and reject collisions with the
@@ -944,16 +952,10 @@ validateSigWith pos specs argDocs = do
   reportIfJust pos (firstDuplicate shorts) $ \c ->
     "duplicate `@with` short name `-" <> T.singleton c
     <> "` in this signature. Each terminal action needs a unique short form."
-  reportIfAny pos [l | l <- longs, l == "help"] $ \l ->
-    "`@with` long name `--" <> l
-    <> "` collides with a reserved command-scope flag. `--help` is "
-    <> "always available; pick a different long name."
-  -- A command with terminal actions also takes `--no-stdout`.
-  reportIfAny pos [l | l <- longs, l == "no-stdout"] $ \l ->
-    "`@with` long name `--" <> l
-    <> "` collides with a reserved command-scope flag. `--no-stdout` is "
-    <> "available on every command with terminal actions; pick a different "
-    <> "long name."
+  reportIfAny pos [(s, why) | s <- specs, Just why <- [lookup (wsLong s) reservedActionLongs]] $
+    \(s, why) ->
+      "`" <> (if wsRender s then "@render" else "@with") <> "` long name `--" <> wsLong s
+        <> "` is reserved: " <> why <> "; pick a different long name."
   unless (null specs) $
     reportIfAny pos [l | l <- argLongs, l == "no-stdout"] $ \l ->
       "argument long name `--" <> l

@@ -104,9 +104,20 @@ fn tool_call_params(msg: &RpcMessage) -> Result<(String, Args), &'static str> {
     Ok((name, arguments))
 }
 
-/// The string argument `key`, when present and a string.
-fn arg_str(args: &Args, key: &str) -> Option<String> {
-    serde_json::from_str::<String>(args.get(key)?.get()).ok()
+/// The string argument `key`: `Ok(None)` when absent, an error naming the
+/// argument when present but not a string (`null` included).
+fn arg_str(args: &Args, key: &str) -> Result<Option<String>, String> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(r) => serde_json::from_str::<String>(r.get())
+            .map(Some)
+            .map_err(|_| format!("argument '{}' must be a string", key)),
+    }
+}
+
+/// The output selection of a `tools/call`: `_render`, or `raw` when absent.
+fn render_selection(args: &Args) -> Result<String, String> {
+    Ok(arg_str(args, "_render")?.unwrap_or_else(|| "raw".to_string()))
 }
 
 /// A daemon call request, with the args as the text they arrived in.
@@ -470,7 +481,10 @@ fn handle_tools_call(
     // dispatches that projection's entry command and packages its result by the
     // entry's media type. `_render` is not a pool argument, so `positional` is
     // identical for the command and any of its projections.
-    let render_sel = arg_str(&arguments, "_render").unwrap_or_else(|| "raw".to_string());
+    let render_sel = match render_selection(&arguments) {
+        Ok(r) => r,
+        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
+    };
     let (dispatch_command, ret_mime, returns_object) = match shape.dispatch_for(&render_sel) {
         Ok(target) => target,
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
@@ -1169,6 +1183,7 @@ where
                 process::end_after_panic();
             }
         };
+        let resp = if req.method == "HEAD" { without_body(resp) } else { resp };
         if writer.write_all(&resp).is_err() {
             break;
         }
@@ -1280,6 +1295,9 @@ fn build_response(
     token: Option<&str>,
     keep_alive: bool,
 ) -> Vec<u8> {
+    if let Some(resp) = health_probe(req, keep_alive) {
+        return resp;
+    }
     if let Some(tok) = token {
         if !authorized(&req.headers, tok) {
             let extra = vec![("WWW-Authenticate".to_string(), "Bearer".to_string())];
@@ -1562,6 +1580,24 @@ fn poisoned_reply() -> Vec<u8> {
 /// A JSON response with no extra headers -- the common case.
 pub(crate) fn http_json(status: u16, body: &[u8], keep_alive: bool) -> Vec<u8> {
     http_response(status, body, keep_alive, &[])
+}
+
+/// A response with its body removed and its headers, `Content-Length`
+/// included, kept: the answer to a `HEAD` (RFC 9110 9.3.2).
+fn without_body(mut resp: Vec<u8>) -> Vec<u8> {
+    if let Some(end) = resp.windows(4).position(|w| w == b"\r\n\r\n") {
+        resp.truncate(end + 4);
+    }
+    resp
+}
+
+/// The liveness probe (IFACE-18): `GET`/`HEAD /health` answers that the
+/// server is up, before any credential is checked, and says nothing else.
+fn health_probe(req: &HttpRequest, keep_alive: bool) -> Option<Vec<u8>> {
+    use morloc_runtime_types::bearer::{LIVENESS_BODY, LIVENESS_PATH};
+    let path = req.path.split('?').next().unwrap_or("");
+    (path == LIVENESS_PATH && (req.method == "GET" || req.method == "HEAD"))
+        .then(|| http_json(200, LIVENESS_BODY, keep_alive))
 }
 
 /// A 405 with the `Allow` header naming the accepted method(s).
@@ -2006,7 +2042,7 @@ fn frontend_build_response(
     // request only if this 204 grants the method/headers.
     if req.method == "OPTIONS" {
         let extra = vec![
-            ("Access-Control-Allow-Methods".to_string(), "GET, POST, DELETE, OPTIONS".to_string()),
+            ("Access-Control-Allow-Methods".to_string(), "GET, HEAD, POST, DELETE, OPTIONS".to_string()),
             (
                 "Access-Control-Allow-Headers".to_string(),
                 "Authorization, Content-Type, Mcp-Session-Id".to_string(),
@@ -2016,12 +2052,9 @@ fn frontend_build_response(
         return http_response(204, b"", keep_alive, &extra);
     }
     let path = req.path.split('?').next().unwrap_or("");
-    // Liveness probe for container orchestrators (the deploy image's
-    // HEALTHCHECK). Answered BEFORE the auth gate: it reveals nothing and a
-    // token-protected serve must not 401 its own healthcheck (which curls with
-    // no token). The front-end is up if it can answer; child health is per-call.
-    if path == "/health" && (req.method == "GET" || req.method == "HEAD") {
-        return http_json(200, br#"{"status":"ok"}"#, keep_alive);
+    // The front end is up if it can answer; a child's health is per call.
+    if let Some(resp) = health_probe(req, keep_alive) {
+        return resp;
     }
     if let Some(tok) = token {
         if !authorized(&req.headers, tok) {
@@ -2502,8 +2535,9 @@ fn frontend_tools_call(id: Value, msg: &RpcMessage, fe: &Frontend) -> Value {
             return error_response(id, JSONRPC_INVALID_PARAMS, EVAL_NEEDS_TOKEN);
         }
         let expr = match arg_str(&arguments, "expression") {
-            Some(e) => e,
-            None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing 'expression'"),
+            Ok(Some(e)) => e,
+            Ok(None) => return error_response(id, JSONRPC_INVALID_PARAMS, "missing 'expression'"),
+            Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
         };
         return match frontend_eval(&expr, fe) {
             Ok(out) => result_response(id, json!({ "content": [ { "type": "text", "text": out } ] })),
@@ -2523,7 +2557,10 @@ fn frontend_tools_call(id: Value, msg: &RpcMessage, fe: &Frontend) -> Value {
         Ok(p) => p,
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
-    let render_sel = arg_str(&arguments, "_render").unwrap_or_else(|| "raw".to_string());
+    let render_sel = match render_selection(&arguments) {
+        Ok(r) => r,
+        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
+    };
     // A media (`@mime`) projection comes back from the child as raw bytes+mime
     // (base64 over the wire) and is rendered as an MCP media block below; the
     // JSON projection becomes a text/structured result.
@@ -2657,6 +2694,47 @@ mod tests {
             Value::Object(m) => m.iter().map(|(k, v)| (k.clone(), raw_of(v))).collect(),
             _ => panic!("test args must be an object"),
         }
+    }
+
+    #[test]
+    fn a_liveness_probe_needs_no_token_and_a_head_answer_has_no_body() {
+        let req = |method: &str, path: &str| HttpRequest {
+            method: method.into(),
+            path: path.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let state = Arc::new(Mutex::new(HttpState {
+            manifest_c: std::ptr::null_mut(),
+            sockets_ptr: std::ptr::null_mut(),
+            n_pools: 0,
+            shm: CString::new("x").unwrap(),
+            shapes: Vec::new(),
+            tools_list: Vec::new(),
+            server_name: String::new(),
+            server_version: String::new(),
+            sessions: HashMap::new(),
+        }));
+        let get = build_response(&req("GET", "/health"), &state, Some("s3cret"), true);
+        let get = String::from_utf8(get).unwrap();
+        assert!(get.starts_with("HTTP/1.1 200"), "{get}");
+        assert!(get.ends_with("{\"status\":\"ok\"}\n"), "{get}");
+        let refused = build_response(&req("POST", "/mcp"), &state, Some("s3cret"), true);
+        assert!(String::from_utf8(refused).unwrap().starts_with("HTTP/1.1 401"));
+        let head = String::from_utf8(without_body(get.clone().into_bytes())).unwrap();
+        assert!(head.ends_with("\r\n\r\n"), "{head}");
+        assert_eq!(head, get[..get.find("\r\n\r\n").unwrap() + 4]);
+    }
+
+    #[test]
+    fn an_output_selection_that_is_not_a_string_is_refused() {
+        assert_eq!(render_selection(&args(json!({}))).unwrap(), "raw");
+        assert_eq!(render_selection(&args(json!({ "_render": "png" }))).unwrap(), "png");
+        assert!(render_selection(&args(json!({ "_render": 5 }))).is_err());
+        assert!(render_selection(&args(json!({ "_render": null }))).is_err());
+        assert!(render_selection(&args(json!({ "_render": ["png"] }))).is_err());
+        assert!(arg_str(&args(json!({ "expression": 1 })), "expression").is_err());
+        assert_eq!(arg_str(&args(json!({})), "expression").unwrap(), None);
     }
 
     /// The resolved positional arguments as the JSON they would be sent as.

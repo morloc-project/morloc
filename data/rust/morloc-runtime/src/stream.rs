@@ -506,11 +506,24 @@ pub fn stdout_element_count() -> u64 {
     with_process_local_slot(handle, |_local, slot| Ok(slot.element_count.get())).unwrap_or(0)
 }
 
-/// True when this process runs under a staging nexus, which captures the
-/// run's stdout stream batch by batch for replay (`MORLOC_STDOUT_STAGE`).
-fn stdout_staged() -> bool {
-    static STAGED: morloc_runtime_types::publish_once::PublishOnce<bool> = morloc_runtime_types::publish_once::PublishOnce::new();
-    *STAGED.get_or_init(|| std::env::var_os("MORLOC_STDOUT_STAGE").is_some())
+/// How this process's nexus takes the run's stdout stream, from
+/// `MORLOC_STDOUT`: `stage` captures it batch by batch for replay; `refused`
+/// takes none (DAEMON-15).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum StdoutMode {
+    Direct,
+    Stage,
+    Refused,
+}
+
+fn stdout_mode() -> StdoutMode {
+    static MODE: morloc_runtime_types::publish_once::PublishOnce<StdoutMode> =
+        morloc_runtime_types::publish_once::PublishOnce::new();
+    *MODE.get_or_init(|| match std::env::var_os("MORLOC_STDOUT").as_deref().and_then(|v| v.to_str()) {
+        Some("stage") => StdoutMode::Stage,
+        Some("refused") => StdoutMode::Refused,
+        _ => StdoutMode::Direct,
+    })
 }
 
 /// Return the registry's per-nexus generation-increment salt. The salt
@@ -2402,17 +2415,30 @@ fn try_reclaim_stale_stdio_claim(
 pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
     -> Result<i64, MorlocError>
 {
+    open_stdio_in(kind, stdio_kind, schema_str, stdout_mode())
+}
+
+pub(crate) fn open_stdio_in(kind: u8, stdio_kind: u8, schema_str: &str, mode: StdoutMode)
+    -> Result<i64, MorlocError>
+{
     use std::sync::atomic::Ordering;
 
     // The declared schema is published to the nexus, which compares it
     // against the schema on each incoming packet. A pool passes the
     // compiler's hint-bearing string and the wire never carries hints,
     // so store the canonical form.
+    let stdout = kind == MLC_KIND_OSTREAM && stdio_kind == STDIO_KIND_STDOUT;
+    // DAEMON-15
+    if stdout && mode == StdoutMode::Refused {
+        return Err(MorlocError::Other(
+            "@stdout is not available to a call served by a daemon or an MCP server: \
+             its output would not reach the caller. Run this command from the command line."
+                .into(),
+        ));
+    }
     let schema_owned =
         morloc_runtime_types::schema::canonicalize_schema_str(schema_str);
-    let staged = kind == MLC_KIND_OSTREAM
-        && stdio_kind == STDIO_KIND_STDOUT
-        && stdout_staged();
+    let staged = stdout && mode == StdoutMode::Stage;
     let schema_str: &str = &schema_owned;
 
     // Pool processes attach lazily; without this, the first stdio open
@@ -10980,6 +11006,27 @@ mod write_behind_tests {
         assert!(after_close >= after_write + 1, "the close returned before its footer reached the nexus");
         assert!(after_close >= 3, "the batches that filled buffers did not reach the nexus");
         assert!(open_stdio(MLC_KIND_OSTREAM, STDIO_KIND_STDOUT, "as").map(shared_close_handle).is_ok(), "the stdout claim was not released");
+    }
+
+    // DAEMON-15
+    #[test]
+    fn a_served_call_cannot_open_stdout_and_leaves_no_claim() {
+        let _shm = crate::own_test_registry();
+        crate::custody::set_stdio_sink(recording_sink);
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let open = |kind| open_stdio_in(MLC_KIND_OSTREAM, kind, "as", StdoutMode::Refused);
+            let first = open(STDIO_KIND_STDOUT).err();
+            let second = open(STDIO_KIND_STDOUT).err();
+            let stderr = open(STDIO_KIND_STDERR).map(shared_close_handle);
+            let refused = |e: &Option<MorlocError>| e.as_ref().is_some_and(|e| e.to_string().contains("not available"));
+            let ok = refused(&first)
+                && refused(&second)
+                && matches!(stderr, Ok(Ok(())));
+            if !ok {
+                eprintln!("first {first:?}, second {second:?}, stderr {stderr:?}");
+            }
+            ok
+        }));
     }
 
     // SLOT-13, DAEMON-1: stopping a writer finishes its file with the given
