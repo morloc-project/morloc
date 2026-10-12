@@ -28,9 +28,15 @@ here touch locks and ownership: model first.
   path finishes it (as the kernel dropping the flock allowed before).
   Should the custodian also finish it on its own when the opener is gone,
   at the cost of other live writers of the handle?
-- Open question (SLOT-10): the custodian runs one thread per open written
-  stream. A program holding thousands of streams open at once holds as many
-  threads in the nexus; a pool of writer threads would bound it.
+- [measured] Possible speedup (SLOT-11): appending an element with
+  nested pointers (`[[Str]]`, optionals of arrays) walks the flattened
+  element to move its relative pointers to its place in the buffer
+  (stream.rs `append_one_element`). A `[[Str]]` element costs 305 ns, of
+  which flattening is 100 ns (stream_bench_string_elements with
+  BENCH_DEEP=1, 2026-10-12); a `Str` element, which skips the walk
+  (`shallow_array_slots`), 135 ns with 41 ns flattening. Flattening at the
+  buffer offset would drop the walk, about 80 ns per nested element, but
+  the flattener re-reads pointers it wrote, so every pointer write changes.
 - Open question (SLOT-16): a stdout write returns once its batches are
   queued, so raw text a pool prints to its inherited stdout while it streams
   to `@stdout` can land inside a frame; before, a single-threaded pool's

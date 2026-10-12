@@ -27,7 +27,10 @@ nexus (one per program run, or one long-running daemon / MCP server)
 - nexus/daemon: an accept thread (also runs pool-crash recovery), 4-32
   request workers, a SIGCHLD handler that reaps every child, one writer
   thread per open written stream (the custodian, SLOT-10) with its
-  compression jobs.
+  compression jobs. The registry's 4096 slots bound how many there are;
+  an open stream costs about 75-130 KiB and an open plus first write
+  150-325 us (stream_bench_many_open, 1000 streams, 2026-10-12), so a
+  pool of writer threads is not worth its scheduling.
 - pool: dispatch workers (C++, Rust: a job queue in libmorloc; Python and
   R: forked worker processes run by libmorloc's fork-pool scheduler,
   NET-9). C++ and Rust pools watch the nexus's lifeline in their accept

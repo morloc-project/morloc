@@ -219,11 +219,13 @@ pub(crate) fn compact_sealed_buffer(
             std::ptr::copy(buf.add(old_data_offset), buf.add(new_data_offset), data_used);
         }
         let res = crate::recur::Resolver::new(elem);
+        let shallow = crate::voidstar::shallow_array_slots(elem);
         for i in 0..n {
             let inline_off = 16 + i * w;
             unsafe {
-                crate::voidstar::shift_buffer_relptrs_with(
+                crate::voidstar::shift_element_relptrs(
                     buf, new_data_offset + data_used, inline_off, elem, -(wasted as isize), &res,
+                    shallow.as_deref(),
                 )?;
             }
         }

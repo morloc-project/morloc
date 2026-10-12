@@ -247,6 +247,86 @@ fn window_of(lo: RelPtr, len: usize) -> Result<RelWindow, MorlocError> {
 /// primary SHM volume rather than in the buffer, so any descent must
 /// use buffer-local pointer arithmetic (`buf_base + offset`).
 ///
+/// Where the pointers of a value of `schema` are, when every one of them is
+/// an array header whose elements hold no pointer: (offset of the header in
+/// the value's inline slot, element width). `None` when some pointer leads
+/// further, so a shift has to walk the value.
+pub fn shallow_array_slots(schema: &Schema) -> Option<Vec<(usize, usize)>> {
+    fn collect(s: &Schema, base: usize, out: &mut Vec<(usize, usize)>) -> bool {
+        if s.is_fixed_width() {
+            return true;
+        }
+        match s.serial_type {
+            SerialType::String => {
+                out.push((base, 1));
+                true
+            }
+            SerialType::Array => match s.parameters.first() {
+                Some(e) if e.is_fixed_width() => {
+                    out.push((base, e.width));
+                    true
+                }
+                _ => false,
+            },
+            SerialType::Tuple | SerialType::Map => s
+                .parameters
+                .iter()
+                .zip(&s.offsets)
+                .all(|(p, &off)| collect(p, base + off, out)),
+            _ => false,
+        }
+    }
+    let mut out = Vec::new();
+    collect(schema, 0, &mut out).then_some(out)
+}
+
+/// [`shift_buffer_relptrs`] for a value whose pointers `slots` lists
+/// ([`shallow_array_slots`]): the same rule without the walk.
+///
+/// # Safety
+/// As [`shift_buffer_relptrs`].
+pub unsafe fn shift_shallow_relptrs(
+    buf_base: *mut u8,
+    buf_len: usize,
+    field_offset: usize,
+    slots: &[(usize, usize)],
+    delta: isize,
+) -> Result<(), MorlocError> {
+    for &(off, w) in slots {
+        let arr = &mut *(buf_base.add(field_offset + off) as *mut Array);
+        // A buffer-local shift leaves an empty or null data pointer alone.
+        if arr.size == 0 || arr.data <= 0 {
+            continue;
+        }
+        arr.data += delta;
+        let end = (arr.data as usize).checked_add(arr.size.checked_mul(w).unwrap_or(usize::MAX));
+        if arr.data < 0 || end.map_or(true, |e| e > buf_len) {
+            return Err(payload_region_error(arr.data, arr.size.saturating_mul(w), buf_len));
+        }
+    }
+    Ok(())
+}
+
+/// [`shift_buffer_relptrs_with`], or [`shift_shallow_relptrs`] when
+/// `shallow` lists the value's pointers.
+///
+/// # Safety
+/// As [`shift_buffer_relptrs`].
+pub unsafe fn shift_element_relptrs(
+    buf_base: *mut u8,
+    buf_len: usize,
+    field_offset: usize,
+    schema: &Schema,
+    delta: isize,
+    res: &Resolver<'_>,
+    shallow: Option<&[(usize, usize)]>,
+) -> Result<(), MorlocError> {
+    match shallow {
+        Some(slots) => shift_shallow_relptrs(buf_base, buf_len, field_offset, slots, delta),
+        None => shift_buffer_relptrs_with(buf_base, buf_len, field_offset, schema, delta, res),
+    }
+}
+
 /// Use this instead of `adjust_relptrs_within` when the target of the shift
 /// is not a fresh SHM allocation but an in-place move within a Vec /
 /// per-slot write buffer -- e.g. the write-buffer compaction step and
@@ -2412,5 +2492,55 @@ mod flatten_size_tests {
                 crate::json::voidstar_to_json_string(v, &schema).unwrap(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod shallow_shift_tests {
+    use super::*;
+    use morloc_runtime_types::schema::parse_schema;
+
+    // A shallow shift moves the same pointers the walk does, by the same
+    // amount, and leaves the same ones alone.
+    #[test]
+    fn a_shallow_shift_matches_the_walk() {
+        let _shm = crate::init_test_shm();
+        for (schema, json) in [
+            ("s", r#""hello""#),
+            ("s", r#""""#),
+            ("ai4", "[1, 2, 3]"),
+            ("ai4", "[]"),
+            ("t3sai8f8", r#"["ab", [7, 8], 1.5]"#),
+            ("m24names3agei4", r#"{"name": "x", "age": 3}"#),
+        ] {
+            let s = parse_schema(schema).unwrap();
+            let slots = shallow_array_slots(&s).unwrap_or_else(|| panic!("{schema} is shallow"));
+            let v = crate::json::read_json_with_schema(json, &s).unwrap();
+            let mut blob = Vec::new();
+            let res = Resolver::new(&s);
+            flatten_into_portable_with(&mut blob, v, &s, &res).unwrap();
+            let shift = 1000isize;
+            let len = blob.len() + shift as usize;
+            let mut a = vec![0u8; len];
+            let mut b = vec![0u8; len];
+            a[..s.width].copy_from_slice(&blob[..s.width]);
+            b[..s.width].copy_from_slice(&blob[..s.width]);
+            a[s.width + shift as usize..].copy_from_slice(&blob[s.width..]);
+            b[s.width + shift as usize..].copy_from_slice(&blob[s.width..]);
+            unsafe {
+                shift_buffer_relptrs(a.as_mut_ptr(), len, 0, &s, shift).unwrap();
+                shift_shallow_relptrs(b.as_mut_ptr(), len, 0, &slots, shift).unwrap();
+            }
+            assert_eq!(a, b, "{schema} {json}");
+            shm::shfree(v).unwrap();
+        }
+    }
+
+    #[test]
+    fn nested_pointers_are_not_shallow() {
+        for schema in ["aas", "a?i4", "?s", "j", "t2jai4"] {
+            assert!(shallow_array_slots(&parse_schema(schema).unwrap()).is_none(), "{schema}");
+        }
+        assert_eq!(shallow_array_slots(&parse_schema("t2i4f8").unwrap()), Some(vec![]));
     }
 }

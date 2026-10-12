@@ -260,3 +260,89 @@ fn stream_bench_ifile_reads() {
     mlcbench("stream", "ifile-read-1t", &ifile_reads(1));
     mlcbench("stream", "ifile-read-4t", &ifile_reads(4));
 }
+
+fn proc_status(field: &str) -> u64 {
+    std::fs::read_to_string("/proc/self/status").ok().and_then(|s| {
+        s.lines().find(|l| l.starts_with(field)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse().ok())
+    }).unwrap_or(0)
+}
+
+/// Many written streams open at once: the custodian's thread per stream.
+#[test]
+#[ignore]
+fn stream_bench_many_open() {
+    let _shm = crate::own_test_registry();
+    let dir: PathBuf = std::env::temp_dir().join(format!("stream-bench-many-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lvl = CompressionLevel::from_u8(0).unwrap();
+    let v = ints("[1]");
+    for n in [100usize, 500, 1000] {
+        let (rss0, threads0) = (proc_status("VmRSS:"), proc_status("Threads:"));
+        let t = Instant::now();
+        let hs: Vec<i64> = (0..n)
+            .map(|i| {
+                let p = dir.join(format!("m{n}-{i}.idx"));
+                let h = shared_open_ostream_with_schema(p.to_str().unwrap(), "ai4").unwrap();
+                shared_write_subpacket(h, lvl, v).unwrap();
+                h
+            })
+            .collect();
+        let opened = t.elapsed().as_secs_f64();
+        let (rss1, threads1) = (proc_status("VmRSS:"), proc_status("Threads:"));
+        let t = Instant::now();
+        for h in hs {
+            shared_close_handle(h).unwrap();
+        }
+        let closed = t.elapsed().as_secs_f64();
+        println!(
+            "BENCH many-open n={n}: open+write {:.1} us/stream, close {:.1} us/stream, +{} threads, +{} KiB RSS ({:.1} KiB/stream)",
+            opened / n as f64 * 1e6, closed / n as f64 * 1e6, threads1.saturating_sub(threads0),
+            rss1.saturating_sub(rss0), rss1.saturating_sub(rss0) as f64 / n as f64
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Writing string elements: the whole append, and the flatten into scratch
+/// alone, whose difference is the copy into the buffer and its bookkeeping.
+#[test]
+#[ignore]
+fn stream_bench_string_elements() {
+    let _shm = crate::own_test_registry();
+    let dir: PathBuf = std::env::temp_dir().join(format!("stream-bench-str-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lvl = CompressionLevel::from_u8(0).unwrap();
+    let n = 200_000usize;
+    let deep = std::env::var_os("BENCH_DEEP").is_some();
+    let (list_s, elem_s) = if deep { ("aas", "as") } else { ("as", "s") };
+    let json = if deep {
+        format!("[{}]", (0..n).map(|i| format!("[\"a{i}\", \"b\"]")).collect::<Vec<_>>().join(","))
+    } else {
+        format!("[{}]", (0..n).map(|i| format!("\"element number {i:08}\"")).collect::<Vec<_>>().join(","))
+    };
+    let list = parse_schema(list_s).unwrap();
+    let v = crate::json::read_json_with_schema(&json, &list).unwrap();
+    for rep in 0..3 {
+        let p = dir.join(format!("s{rep}.idx"));
+        let h = shared_open_ostream_with_schema(p.to_str().unwrap(), list_s).unwrap();
+        let t = Instant::now();
+        shared_write_subpacket(h, lvl, v).unwrap();
+        shared_flush_buffer(h).unwrap();
+        let write = t.elapsed().as_secs_f64();
+        shared_close_handle(h).unwrap();
+        let elem = parse_schema(elem_s).unwrap();
+        let res = crate::recur::Resolver::new(&elem);
+        let arr = unsafe { &*(v as *const crate::shm_types::Array) };
+        let base = crate::shm::rel2abs(arr.data).unwrap();
+        let mut scratch = Vec::new();
+        let t = Instant::now();
+        for i in 0..n {
+            let e = unsafe { base.add(i * elem.width) };
+            crate::voidstar::flatten_into_portable_with(&mut scratch, e, &elem, &res).unwrap();
+        }
+        let flatten = t.elapsed().as_secs_f64();
+        println!("BENCH strings: write {:.1} ns/elem, flatten alone {:.1} ns/elem", write / n as f64 * 1e9, flatten / n as f64 * 1e9);
+    }
+    crate::shm::shfree(v).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -3651,6 +3651,7 @@ fn append_one_element(
     scratch: &mut Vec<u8>,
     elem: &Schema,
     res: &crate::recur::Resolver<'_>,
+    shallow: Option<&[(usize, usize)]>,
 ) -> Result<(), MorlocError> {
     let w = elem.width;
 
@@ -3809,9 +3810,9 @@ fn append_one_element(
     let shift: isize = (data_offset as isize) - (w as isize);
     if shift != 0 && !inline_int {
         unsafe {
-            crate::voidstar::shift_buffer_relptrs_with(
+            crate::voidstar::shift_element_relptrs(
                 buf_abs, data_offset + raw_variable_size, index_offset,
-                elem, shift, res,
+                elem, shift, res, shallow,
             )?;
         }
     }
@@ -3924,6 +3925,7 @@ pub fn shared_write_subpacket(
         // borrows it while the slot itself is updated per element.
         let elem = local.elem_schema.clone();
         let res = crate::recur::Resolver::new(&elem);
+        let shallow = crate::voidstar::shallow_array_slots(&elem);
         // An Int of at most one limb is its own 16 bytes, holding no pointer,
         // so a run of them is copied as a fixed-width array while the buffer
         // holds no variable bytes.
@@ -3944,7 +3946,7 @@ pub fn shared_write_subpacket(
                 continue;
             }
             let elem_src = unsafe { elem_data_base.add((i as usize) * w) };
-            append_one_element(slot, local, elem_src, buf_size, &mut scratch, &elem, &res)?;
+            append_one_element(slot, local, elem_src, buf_size, &mut scratch, &elem, &res, shallow.as_deref())?;
             slot.element_count.set(slot.element_count.get() + 1);
             i += 1;
         }
