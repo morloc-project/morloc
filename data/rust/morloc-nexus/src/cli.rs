@@ -261,6 +261,16 @@ pub struct DaemonArgs {
     #[arg(long = "port-file", value_name = "PATH")]
     pub port_file: Option<String>,
 
+    /// Expose eval, typecheck and bind (`/eval`, `/typecheck`, `/bind`, and
+    /// their socket methods). Off by default.
+    #[arg(long = "eval")]
+    pub eval: bool,
+
+    /// Serve eval over HTTP without a bearer token. Falls back to
+    /// MORLOC_EVAL_ALLOW_NO_AUTH.
+    #[arg(long = "eval-allow-no-auth")]
+    pub eval_allow_no_auth: bool,
+
     /// CPU budget for /eval and /typecheck in seconds.
     #[arg(long = "eval-timeout", value_name = "SECS", default_value_t = 30)]
     pub eval_timeout: u32,
@@ -853,6 +863,12 @@ pub fn run_args_to_config(args: &RunArgs) -> (NexusConfig, String) {
     (cfg, args.target.clone())
 }
 
+/// The eval waiver's environment form, usable where a container cannot pass
+/// a flag without restating its whole command.
+fn eval_waived_by_environment() -> bool {
+    std::env::var("MORLOC_EVAL_ALLOW_NO_AUTH").map(|v| !v.is_empty()).unwrap_or(false)
+}
+
 /// The bearer token from MORLOC_MCP_TOKEN, which keeps it off the process
 /// argv (invisible to `ps`).
 fn token_from_environment() -> Option<String> {
@@ -882,6 +898,8 @@ pub fn daemon_args_to_config(args: &DaemonArgs) -> (NexusConfig, String) {
     cfg.mcp_allow_no_auth = args.allow_no_auth;
     cfg.port_file_path = args.port_file.clone();
     cfg.eval_timeout = args.eval_timeout as i32;
+    cfg.eval_enabled = args.eval;
+    cfg.eval_allow_no_auth = args.eval_allow_no_auth || eval_waived_by_environment();
     apply_eval_policy(&mut cfg, &args.eval_allowed_modules);
     (cfg, args.target.clone())
 }
@@ -936,10 +954,7 @@ pub fn router_args_to_config(args: &RouterArgs) -> NexusConfig {
     // An image cannot take a command-line flag from `docker run` without the
     // operator restating the whole command, so the waiver has an env form too,
     // exactly as the token does.
-    cfg.eval_allow_no_auth = args.eval_allow_no_auth
-        || std::env::var("MORLOC_EVAL_ALLOW_NO_AUTH")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
+    cfg.eval_allow_no_auth = args.eval_allow_no_auth || eval_waived_by_environment();
     cfg
 }
 

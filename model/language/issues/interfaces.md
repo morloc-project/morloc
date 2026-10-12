@@ -126,10 +126,12 @@ re-checked.
   wrong slots. ART-5 compares only the morloc version string.
 ## Eval (IFACE-13)
 
-- **The daemon exposes eval, typecheck and bind unconditionally.**
-  [read, survey] http_ffi.rs:435-513, sandboxed but with no opt-in and no
-  credential rule; the front end requires `--eval` plus a token or waiver
-  (mcp.rs:1626-1642).
+- **The manual says loopback eval needs no token; the code locks it.**
+  [read] docs src/content/deploy-eval.asc ("On the default loopback bind,
+  eval needs no token") against the front end's `eval_needs_token`
+  (morloc-nexus/src/mcp.rs, no bind check) and the daemon's
+  `eval_refusal`: eval with no token set is refused unless waived, whatever
+  the bind. One side is wrong; the code follows the front end.
 - **Eval results have two shapes.** [read, survey] Daemon `/eval` returns
   parsed JSON (`"result":2`, daemon_ffi.rs:1606-1614); front-end `/eval`
   a string (`"result":"2"`, mcp.rs:2325). The front end's MCP `eval`

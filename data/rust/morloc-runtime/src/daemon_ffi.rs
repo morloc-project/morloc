@@ -1339,6 +1339,45 @@ pub(crate) unsafe fn daemon_set_http_access(address: u32, token: *const c_char) 
     *http_access() = HttpAccess { address, token };
 }
 
+static G_EVAL_EXPOSED: AtomicBool = AtomicBool::new(false);
+static G_EVAL_ALLOW_NO_AUTH: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn daemon_set_eval_exposure(exposed: bool, allow_no_auth: bool) {
+    G_EVAL_EXPOSED.store(exposed, Ordering::Relaxed);
+    G_EVAL_ALLOW_NO_AUTH.store(allow_no_auth, Ordering::Relaxed);
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Transport {
+    Unix,
+    Tcp,
+    Http,
+}
+
+fn is_eval_family(method: DaemonMethod) -> bool {
+    matches!(
+        method,
+        DaemonMethod::Eval | DaemonMethod::Typecheck | DaemonMethod::Bind | DaemonMethod::Bindings | DaemonMethod::Unbind
+    )
+}
+
+// NET-1, NET-4
+fn eval_refusal(method: DaemonMethod, transport: Transport) -> Option<(i32, &'static str)> {
+    use morloc_runtime_types::daemon_error::{EVAL_NEEDS_TOKEN, EVAL_NOT_EXPOSED, FORBIDDEN, NOT_FOUND};
+    if !is_eval_family(method) {
+        return None;
+    }
+    if !G_EVAL_EXPOSED.load(Ordering::Relaxed) {
+        return Some((NOT_FOUND, EVAL_NOT_EXPOSED));
+    }
+    let uncredentialed = match transport {
+        Transport::Unix => false,
+        Transport::Tcp => true,
+        Transport::Http => http_token().is_none(),
+    };
+    (uncredentialed && !G_EVAL_ALLOW_NO_AUTH.load(Ordering::Relaxed)).then_some((FORBIDDEN, EVAL_NEEDS_TOKEN))
+}
+
 pub(crate) unsafe fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) {
     G_EVAL_SANDBOX.store(sandbox, Ordering::Relaxed);
     let list = if allowed.is_null() {
@@ -2029,6 +2068,13 @@ unsafe fn dispatch_request(
         DaemonMethod::Discover => {
             (*resp).success = true;
             (*resp).result_json = daemon_build_discovery(manifest);
+            return resp;
+        }
+        method if eval_refusal(method, Transport::Unix).is_some() => {
+            let (kind, msg) = eval_refusal(method, Transport::Unix).unwrap_or_default();
+            (*resp).success = false;
+            (*resp).error_kind = kind;
+            (*resp).error = libc::strdup(CString::new(msg).unwrap_or_default().as_ptr());
             return resp;
         }
         DaemonMethod::Eval => {
@@ -2897,6 +2943,25 @@ unsafe fn handle_lp_connection(
         return;
     }
 
+    let transport = if remote { Transport::Tcp } else { Transport::Unix };
+    if let Some((kind, msg)) = eval_refusal((*req).method, transport) {
+        let mut err_resp: DaemonResponse = std::mem::zeroed();
+        err_resp.error_kind = kind;
+        err_resp.error = libc::strdup(CString::new(msg).unwrap_or_default().as_ptr());
+        let mut resp_len: usize = 0;
+        let resp_json = serialize_response(&mut err_resp, &mut resp_len);
+        let mut write_err: *mut c_char = ptr::null_mut();
+        write_lp_message(client_fd, resp_json, resp_len, &mut write_err);
+        libc::free(resp_json as *mut c_void);
+        if !write_err.is_null() {
+            libc::free(write_err as *mut c_void);
+        }
+        libc::free(err_resp.error as *mut c_void);
+        daemon_free_request(req);
+        libc::close(client_fd);
+        return;
+    }
+
     // Packet output applies only to `call` results on this raw-packet (Unix
     // socket / TCP) wire. Scoped per-thread around the dispatch so the shared
     // `daemon_dispatch` stays JSON for HTTP and control methods.
@@ -3038,6 +3103,21 @@ unsafe fn handle_http_connection(
         return;
     }
 
+    if let Some(method) = crate::http_ffi::eval_route(http_req) {
+        if let Some((kind, msg)) = eval_refusal(method, Transport::Http) {
+            let body = morloc_runtime_types::daemon_error::error_body(kind, msg);
+            crate::http_ffi::write_response(
+                client_fd,
+                daemon_error_kind_to_http_status(kind, false),
+                c"application/json".as_ptr(),
+                body.as_ptr() as *const c_char,
+                body.len(),
+            );
+            http_free_request(http_req);
+            libc::close(client_fd);
+            return;
+        }
+    }
     let mut route_kind: i32 = DAEMON_ERROR_BAD_REQUEST;
     let req = http_to_daemon_request(http_req, &mut errmsg, &mut route_kind);
     if !errmsg.is_null() {
@@ -4486,6 +4566,11 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn daemon_free_response(resp: *mut DaemonResponse) {
         super::daemon_free_response(resp)
+    }
+
+    #[no_mangle]
+    pub extern "C" fn daemon_set_eval_exposure(exposed: bool, allow_no_auth: bool) {
+        super::daemon_set_eval_exposure(exposed, allow_no_auth)
     }
 
     #[no_mangle]

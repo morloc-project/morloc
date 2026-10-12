@@ -617,7 +617,7 @@ if should_run "http-status"; then
     echo "${BOLD}[http-status] HTTP status code classification${RESET}"
 
     HTTP_PORT=$(pick_port)
-    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval --eval-allow-no-auth
     wait_for_http "$HTTP_PORT" 10
 
     # 200 happy path (regression guard).
@@ -688,7 +688,7 @@ if should_run "http-eval-timeout"; then
     echo "${BOLD}[http-eval-timeout] /eval CPU budget -> 408${RESET}"
 
     HTTP_PORT=$(pick_port)
-    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval-timeout 1 \
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval --eval-allow-no-auth --eval-timeout 1 \
         --eval-allowed-modules root-py
     wait_for_http "$HTTP_PORT" 10
 
@@ -729,7 +729,7 @@ if should_run "http-typecheck-eval"; then
     echo "${BOLD}[http-typecheck-eval] /typecheck and /eval expressions${RESET}"
 
     HTTP_PORT=$(pick_port)
-    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" \
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval --eval-allow-no-auth \
         --eval-allowed-modules root-py
     wait_for_http "$HTTP_PORT" 10
 
@@ -764,6 +764,47 @@ if should_run "http-typecheck-eval"; then
     bad_status=$(json_field "$bad_resp" "status")
     assert_test "POST /typecheck ill-typed status=error" "error" "$bad_status"
 
+    stop_daemon "$LAST_DAEMON_PID"
+
+    # Eval is off unless asked for, and over HTTP it needs a token or the
+    # waiver (IFACE-13).
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -H "Content-Type: application/json" -d '{"expr":"2 + 2"}')
+    assert_test "POST /eval without --eval is not found" "not-found" "$(json_field "$result" "class")"
+    assert_http_status "POST /eval {} without --eval -> 404" "404" \
+        "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -X POST -H "Content-Type: application/json" -d '{}'
+    stop_daemon "$LAST_DAEMON_PID"
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval
+    wait_for_http "$HTTP_PORT" 10
+    assert_http_status "POST /eval with --eval and no token -> 403" "403" \
+        "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -X POST -H "Content-Type: application/json" -d '{}'
+    stop_daemon "$LAST_DAEMON_PID"
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval --auth-token s3cret --eval-allowed-modules root-py
+    wait_for_http "$HTTP_PORT" 10
+    result=$(curl -s --max-time 60 -X POST "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -H "Authorization: Bearer s3cret" -H "Content-Type: application/json" -d '{"expr":"import root-py\n2 + 2"}')
+    assert_test "POST /eval with --eval and the token runs" "4" "$(json_field "$result" "result")"
+    stop_daemon "$LAST_DAEMON_PID"
+    EVAL_SOCK="/tmp/morloc-test-eval-$$.sock"
+    SOCKET_FILES+=("$EVAL_SOCK")
+    TCP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --socket "$EVAL_SOCK"
+    wait_for_daemon "$LAST_DAEMON_LOG" 10
+    lp=$(lp_request "$EVAL_SOCK" '{"method":"eval","expr":"2 + 2"}')
+    assert_test "LP eval without --eval is not found" "not-found" "$(json_field "$lp" "class")"
+    stop_daemon "$LAST_DAEMON_PID"
+    start_daemon "$ARITH_DIR" --port "$TCP_PORT" --eval
+    wait_for_daemon "$LAST_DAEMON_LOG" 10
+    lp=$(lp_request "127.0.0.1:$TCP_PORT" '{"method":"eval","expr":"2 + 2"}')
+    assert_test "TCP eval with --eval and no waiver is forbidden" "forbidden" "$(json_field "$lp" "class")"
+    assert_contains "a locked eval is logged at startup" "LOCKED on TCP" "$(cat "$LAST_DAEMON_LOG")"
     stop_daemon "$LAST_DAEMON_PID"
     echo ""
 fi
@@ -1799,7 +1840,7 @@ if should_run "shutdown-wedged"; then
     # An /eval still compiling at shutdown is stopped with the daemon, not
     # left to run out its own limits.
     HTTP_PORT=$(pick_port)
-    start_daemon "$WEDGE_DIR" --http-port "$HTTP_PORT" --eval-timeout 120 \
+    start_daemon "$WEDGE_DIR" --http-port "$HTTP_PORT" --eval --eval-allow-no-auth --eval-timeout 120 \
         --eval-allowed-modules root-py
     wait_for_http "$HTTP_PORT" 10
     local_pid=$LAST_DAEMON_PID

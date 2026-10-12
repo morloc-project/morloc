@@ -177,9 +177,13 @@ Intent: ruled 2026-10-12
 Code: deviates model/language/issues/interfaces.md
 
 Eval, typecheck and bind are off unless the server is started with
-`--eval`, on the daemon as on the front end, and then follow the front
-end's credential rule. Every server that offers them returns the same
-result shape.
+`--eval`, on the daemon as on the front end (not-found otherwise). Then the
+front end's credential rule applies: over HTTP they need the bearer token
+when one is set, and are refused (forbidden) when none is set unless
+`--eval-allow-no-auth` or `MORLOC_EVAL_ALLOW_NO_AUTH` waives it; raw TCP,
+which carries no credential, is refused unless waived; a local socket,
+which only its owner can reach (NET-4), needs only `--eval`. Every server
+that offers them returns the same result shape.
 
 ## MCP
 

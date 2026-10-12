@@ -829,6 +829,7 @@ fn run_daemon(
         ) -> bool;
         fn parse_manifest(text: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
         fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char);
+        fn daemon_set_eval_exposure(exposed: bool, allow_no_auth: bool);
         fn daemon_set_http_access(address: u32, token: *const c_char);
     }
 
@@ -924,6 +925,21 @@ fn run_daemon(
             config.eval_sandbox,
             eval_allowed_cstr.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
         );
+        daemon_set_eval_exposure(config.eval_enabled, config.eval_allow_no_auth);
+    }
+    if config.eval_enabled && !config.eval_allow_no_auth {
+        let http_locked = config.http_port.is_some() && config.mcp_auth_token.is_none();
+        if http_locked || config.tcp_port.is_some() {
+            eprintln!(
+                "morloc-daemon: eval is exposed but LOCKED on {}. {}",
+                match (http_locked, config.tcp_port.is_some()) {
+                    (true, true) => "HTTP and TCP",
+                    (true, false) => "HTTP",
+                    _ => "TCP",
+                },
+                morloc_runtime_types::daemon_error::EVAL_NEEDS_TOKEN
+            );
+        }
     }
     let http_host = config.mcp_http_host.as_deref().unwrap_or("127.0.0.1");
     let http_token = config.mcp_auth_token.as_ref().map(|t| CString::new(t.as_str()).unwrap());

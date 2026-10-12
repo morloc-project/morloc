@@ -67,6 +67,8 @@ morloc-runtime/daemon_ffi.rs::-::G_DAEMON_COMPRESSION	startup
 morloc-runtime/daemon_ffi.rs::-::CURRENT_OUTPUT_PACKET	thread		
 morloc-runtime/daemon_ffi.rs::-::CURRENT_OUTPUT_MEDIA_BYTES	thread		
 morloc-runtime/daemon_ffi.rs::-::G_EVAL_SANDBOX	startup		
+morloc-runtime/daemon_ffi.rs::-::G_EVAL_EXPOSED	startup		
+morloc-runtime/daemon_ffi.rs::-::G_EVAL_ALLOW_NO_AUTH	startup		
 morloc-runtime/daemon_ffi.rs::-::G_EVAL_ALLOWED	exec-only		
 morloc-runtime/daemon_ffi.rs::-::HTTP_ACCESS	exec-only		
 morloc-runtime/daemon_ffi.rs::-::RECOVERY_IN_PROGRESS	counter		

@@ -377,6 +377,20 @@ unsafe fn body_string(
     }
 }
 
+/// The eval-family method a request routes to, if any, read from its method
+/// and path alone, before its body.
+pub(crate) unsafe fn eval_route(req: *const HttpRequest) -> Option<DaemonMethod> {
+    let path = std::ffi::CStr::from_ptr((*req).path.as_ptr()).to_str().unwrap_or("");
+    match ((*req).method, path) {
+        (HttpMethod::Post, "/eval") => Some(DaemonMethod::Eval),
+        (HttpMethod::Post, "/typecheck") => Some(DaemonMethod::Typecheck),
+        (HttpMethod::Post, "/bind") => Some(DaemonMethod::Bind),
+        (HttpMethod::Get, "/bindings") => Some(DaemonMethod::Bindings),
+        (HttpMethod::Delete, p) if p.starts_with("/bindings/") => Some(DaemonMethod::Unbind),
+        _ => None,
+    }
+}
+
 /// Translate a parsed HTTP request into a daemon request. On failure,
 /// `errmsg` carries the human-readable cause and `error_kind` carries the
 /// classification (DAEMON_ERROR_BAD_REQUEST for malformed body / missing

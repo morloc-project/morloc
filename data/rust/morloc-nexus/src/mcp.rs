@@ -1789,11 +1789,7 @@ impl Frontend {
     }
 }
 
-/// Why an exposed eval is refused, said the same way at both entry points.
-const EVAL_NEEDS_TOKEN: &str = "the eval capability is exposed but requires a bearer token: \
-     it compiles and runs expressions the caller writes, which costs seconds to tens of \
-     seconds of this container's CPU each time. Set MORLOC_MCP_TOKEN (or --auth-token), or \
-     waive the requirement with MORLOC_EVAL_ALLOW_NO_AUTH=1 (or --eval-allow-no-auth).";
+use morloc_runtime_types::daemon_error::EVAL_NEEDS_TOKEN;
 
 /// Check that a served module's pools can actually be spawned: every pool file
 /// present, every interpreter on PATH.
@@ -2111,13 +2107,8 @@ fn frontend_build_response(
         }
     } else if path == "/eval" {
         if fe.eval_needs_token {
-            return http_json(
-                403,
-                serde_json::json!({ "status": "error", "class": "forbidden", "error": EVAL_NEEDS_TOKEN })
-                    .to_string()
-                    .as_bytes(),
-                keep_alive,
-            );
+            use morloc_runtime_types::daemon_error::{error_body, FORBIDDEN};
+            return http_json(403, error_body(FORBIDDEN, EVAL_NEEDS_TOKEN).as_bytes(), keep_alive);
         }
         match req.method.as_str() {
             "POST" => frontend_eval_api(req, fe, keep_alive),
@@ -2374,7 +2365,8 @@ fn output_within(
 /// `{"expression":"..."}`, or a bare JSON string). 404 when eval is not exposed.
 fn frontend_eval_api(req: &HttpRequest, fe: &Frontend, keep_alive: bool) -> Vec<u8> {
     if !fe.eval_enabled {
-        return http_json(404, br#"{"error":"eval is not exposed"}"#, keep_alive);
+        use morloc_runtime_types::daemon_error::{error_body, EVAL_NOT_EXPOSED, NOT_FOUND};
+        return http_json(404, error_body(NOT_FOUND, EVAL_NOT_EXPOSED).as_bytes(), keep_alive);
     }
     let body = String::from_utf8_lossy(&req.body);
     let expr: Option<String> = if body.trim_start().starts_with('{') {

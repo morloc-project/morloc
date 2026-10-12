@@ -12,6 +12,18 @@ pub const INTERNAL: i32 = 5;
 /// The call failed on its own terms: it raised, returned `Err`, or its
 /// result could not be written. Nothing needs recovering.
 pub const FAILED: i32 = 6;
+/// The request needs a credential this transport did not present.
+pub const FORBIDDEN: i32 = 7;
+
+/// Why an exposed eval is refused over HTTP without a credential, said the
+/// same way by every server that offers it.
+pub const EVAL_NEEDS_TOKEN: &str = "the eval capability is exposed but requires a bearer token: \
+     it compiles and runs expressions the caller writes, which costs seconds to tens of \
+     seconds of this container's CPU each time. Set MORLOC_MCP_TOKEN (or --auth-token), or \
+     waive the requirement with MORLOC_EVAL_ALLOW_NO_AUTH=1 (or --eval-allow-no-auth).";
+
+/// Why eval is refused by a server not started with `--eval`.
+pub const EVAL_NOT_EXPOSED: &str = "eval is not exposed; start the server with --eval";
 
 /// The HTTP status of a reply.
 pub fn http_status(kind: i32, success: bool) -> i32 {
@@ -23,6 +35,7 @@ pub fn http_status(kind: i32, success: bool) -> i32 {
         NOT_FOUND => 404,
         TIMEOUT => 408,
         RECOVERING => 503,
+        FORBIDDEN => 403,
         _ => 500,
     }
 }
@@ -34,8 +47,14 @@ pub fn class_name(kind: i32) -> &'static str {
         NOT_FOUND => "not-found",
         TIMEOUT => "timeout",
         RECOVERING => "recovering",
+        FORBIDDEN => "forbidden",
         _ => "failure",
     }
+}
+
+/// The JSON body of an error reply of `kind`.
+pub fn error_body(kind: i32, message: &str) -> String {
+    serde_json::json!({ "status": "error", "class": class_name(kind), "error": message }).to_string()
 }
 
 /// The class of an error reply that has a status but no kind.
@@ -60,6 +79,7 @@ pub fn kind_of_class(class: &str) -> i32 {
         "not-found" => NOT_FOUND,
         "timeout" => TIMEOUT,
         "recovering" => RECOVERING,
+        "forbidden" => FORBIDDEN,
         _ => FAILED,
     }
 }
@@ -70,7 +90,7 @@ mod tests {
 
     #[test]
     fn every_kind_survives_its_class_name() {
-        for k in [BAD_REQUEST, NOT_FOUND, TIMEOUT, RECOVERING, FAILED] {
+        for k in [BAD_REQUEST, NOT_FOUND, TIMEOUT, RECOVERING, FAILED, FORBIDDEN] {
             assert_eq!(kind_of_class(class_name(k)), k);
         }
         assert_eq!(class_name(INTERNAL), "failure");
