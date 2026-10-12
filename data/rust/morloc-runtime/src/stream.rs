@@ -938,11 +938,11 @@ fn fork_epoch() -> u64 {
 
 impl Drop for ProcessLocalSlot {
     fn drop(&mut self) {
-        // Drop the decompression cache first; this shfree's any
-        // SHM blocks the cache references. Then unmap the file region.
+        // Drop the decompression cache first, releasing the cache's own
+        // references (SHM-7). Then unmap the file region.
         if !self.cache.is_inherited() {
             for entry in self.cache.entries.drain(..) {
-                let _ = crate::shm::shfree(entry.shm_packet);
+                let _ = crate::shm::release(entry.shm_packet);
             }
             self.cache.handle_bytes.fetch_sub(self.cache.current_bytes, std::sync::atomic::Ordering::Relaxed);
         }
@@ -1537,7 +1537,6 @@ impl Drop for Unpublished {
     fn drop(&mut self) {
         for rel in self.0.drain(..) {
             if let Ok(abs) = crate::shm::rel2abs(rel) {
-                crate::eval_arena::forget_if_active(abs);
                 let _ = crate::shm::shfree(abs);
             }
         }
@@ -4135,8 +4134,8 @@ fn materialize_and_finalise_subpacket(
     let arr = unsafe { &*(arr_base as *const shm_types_crate::Array) };
     let arr_size = arr.size as u64;
 
-    match src {
-        SubpacketSrc::File { payload_base, payload_len, vol_idx_hint, .. } => {
+    match &src {
+        &SubpacketSrc::File { payload_base, payload_len, vol_idx_hint, .. } => {
             if arr_size == 0 {
                 return empty_shm_array();
             }
@@ -4146,7 +4145,7 @@ fn materialize_and_finalise_subpacket(
             };
             payload_into_shm(bytes, &local.elem_schema, vol_idx_hint)
         }
-        SubpacketSrc::Shm { arr_base } => Ok(arr_base),
+        SubpacketSrc::Shm { .. } => Ok(src.into_block()),
     }
 }
 
@@ -5275,6 +5274,15 @@ pub(crate) enum SubpacketSrc {
     },
 }
 
+// The `File` variant's mapping is owned by its slot.
+impl Drop for SubpacketSrc {
+    fn drop(&mut self) {
+        if let SubpacketSrc::Shm { arr_base } = *self {
+            let _ = shm::shfree(arr_base);
+        }
+    }
+}
+
 impl SubpacketSrc {
     pub(crate) fn arr_base(&self) -> AbsPtr {
         match *self {
@@ -5282,14 +5290,15 @@ impl SubpacketSrc {
             SubpacketSrc::Shm { arr_base } => arr_base,
         }
     }
-    /// Drop the caller's reference to the source. For `File`, this is
-    /// a no-op (the mmap is owned by the ProcessLocalSlot). For `Shm`, we
-    /// `shfree` the SHM block, decrementing the refcount; the cache's
-    /// own reference keeps the block alive for future hits.
-    pub(crate) fn release(self) {
-        if let SubpacketSrc::Shm { arr_base } = self {
-            let _ = shm::shfree(arr_base);
-        }
+    /// Drop the caller's reference to the source; the cache's own
+    /// reference keeps the block for later hits.
+    pub(crate) fn release(self) {}
+
+    /// Hand the caller's reference on with the block.
+    pub(crate) fn into_block(self) -> AbsPtr {
+        let p = self.arr_base();
+        std::mem::forget(self);
+        p
     }
 
     /// The space the sub-packet's relptrs resolve in.
@@ -6077,6 +6086,8 @@ fn cache_get_or_materialize(
             ce.clock_bit = 1;
             // SAFETY: a cached entry holds a live SHM packet.
             unsafe { shm::shincref(ce.shm_packet) }?;
+            // SHM-7: the caller's reference is the arena's, as on a miss.
+            crate::eval_arena::record_if_active(ce.shm_packet);
             return Ok(SubpacketSrc::Shm { arr_base: ce.shm_packet });
         }
     }
@@ -6135,7 +6146,8 @@ fn cache_make_room_for(cache: &mut StreamCache, needed: u64) {
             let entry = cache.entries.swap_remove(i);
             cache.current_bytes = cache.current_bytes.saturating_sub(entry.size_bytes);
             cache.handle_bytes.fetch_sub(entry.size_bytes, std::sync::atomic::Ordering::Relaxed);
-            let _ = shm::shfree(entry.shm_packet);
+            // SHM-7: the cache's own reference.
+            let _ = shm::release(entry.shm_packet);
             // `swap_remove` filled slot `i` with the last entry; keep
             // the hand pointing at `i` so the next pass starts there.
         } else {
@@ -6169,7 +6181,10 @@ fn ifile_extract_element(
     // dst is a fresh block of one element's width.
     unsafe {
         let elem_src = (records as *const u8).add(idx * elem_width);
-        voidstar::deep_copy_with(elem_src, dst, elem_schema, &src.space())?;
+        if let Err(e) = voidstar::deep_copy_with(elem_src, dst, elem_schema, &src.space()) {
+            let _ = shm::shfree(dst);
+            return Err(e);
+        }
     }
     Ok(dst)
 }
@@ -6327,47 +6342,37 @@ fn ifile_bracket_slice_against_slot(
     // result's size until it has, so it builds with a recorded block per
     // variable-length part and consolidates into one block at the end --
     // the shape a pool can release.
+    // Every block the walk takes until `consolidate` owns them; an error
+    // before then gives all of them back.
     let mut parts: Vec<AbsPtr> = Vec::new();
-    let buf_ptr: AbsPtr = shm::shcalloc(n_out, out_elem_width)?;
-
-    // For each output slot, ensure the source sub-packet is located, then
-    // deep_copy the projected sub-field into the output buffer slot.
-    // Sub-packets are cached by sub_k for the duration of the walk so a
-    // slice spanning many elements within one sub-packet pays only one
-    // location cost.
-    for (out_i, &(sub_k, local_idx)) in work.plan.iter().enumerate() {
-        if !work.materialised.contains_key(&sub_k) {
-            let src = cache_get_or_materialize(local, sub_k)?;
-            work.materialised.insert(sub_k, src);
-        }
-        let src = work.materialised.get(&sub_k).unwrap();
-        let arr_base = src.arr_base();
-        let arr = unsafe { &*(arr_base as *const shm_types_crate::Array) };
-        if local_idx >= arr.size as u64 {
-            // Defensive -- should be unreachable given the
-            // cum-element-count plan.
-            for p in parts {
-                let _ = shm::shfree(p);
+    let walked = (|| -> Result<(), MorlocError> {
+        let buf_ptr: AbsPtr = shm::shcalloc(n_out, out_elem_width)?;
+        parts.push(buf_ptr);
+        // For each output slot, ensure the source sub-packet is located,
+        // then deep_copy the projected sub-field into the output buffer
+        // slot. Sub-packets are kept by sub_k for the duration of the walk
+        // so a slice spanning many elements within one sub-packet pays
+        // only one location cost.
+        for (out_i, &(sub_k, local_idx)) in work.plan.iter().enumerate() {
+            if !work.materialised.contains_key(&sub_k) {
+                let src = cache_get_or_materialize(local, sub_k)?;
+                work.materialised.insert(sub_k, src);
             }
-            for (_, s) in std::mem::take(&mut work.materialised) {
-                s.release();
+            let src = work.materialised.get(&sub_k).unwrap();
+            let arr = unsafe { &*(src.arr_base() as *const shm_types_crate::Array) };
+            if local_idx >= arr.size as u64 {
+                return Err(MorlocError::Other(format!(
+                    "slice plan: local index {} out of bounds for sub-packet {} (size {})",
+                    local_idx, sub_k, arr.size,
+                )));
             }
-            let _ = shm::shfree(buf_ptr);
-            let _ = shm::shfree(arr_ptr);
-            return Err(MorlocError::Other(format!(
-                "slice plan: local index {} out of bounds for sub-packet {} (size {})",
-                local_idx, sub_k, arr.size,
-            )));
-        }
-        let dst = unsafe {
-            (buf_ptr as *mut u8).add(out_i * out_elem_width)
-        };
-        // The source's space resolves every relptr the copy follows: the
-        // mapped payload for an uncompressed sub-packet, SHM for a
-        // decompressed one. `proj_offset` hops over any record fields the
-        // chain fusion is skipping.
-        let space = src.space();
-        let copied = src.records(work.elem_width).and_then(|(_, records)| {
+            let dst = unsafe { (buf_ptr as *mut u8).add(out_i * out_elem_width) };
+            // The source's space resolves every relptr the copy follows:
+            // the mapped payload for an uncompressed sub-packet, SHM for a
+            // decompressed one. `proj_offset` hops over any record fields
+            // the chain fusion is skipping.
+            let space = src.space();
+            let (_, records) = src.records(work.elem_width)?;
             // SAFETY: local_idx is inside the records region just resolved.
             unsafe {
                 let elem_src = (records as *const u8)
@@ -6376,35 +6381,22 @@ fn ifile_bracket_slice_against_slot(
                 voidstar::deep_copy_alloc(
                     elem_src, dst, &work.proj_schema, &space,
                     voidstar::CopyAlloc::Recording(&mut parts),
-                )
+                )?;
             }
-        });
-        if let Err(e) = copied {
-            // Only `consolidate` gives the recorded blocks back, and it
-            // never runs now.
-            for p in parts {
-                let _ = shm::shfree(p);
-            }
-            for (_, s) in std::mem::take(&mut work.materialised) {
-                s.release();
-            }
-            let _ = shm::shfree(buf_ptr);
-            let _ = shm::shfree(arr_ptr);
-            return Err(e);
         }
+        let arr = unsafe { &mut *(arr_ptr as *mut shm_types_crate::Array) };
+        arr.size = n_out;
+        arr.data = shm::abs2rel(buf_ptr)?;
+        Ok(())
+    })();
+    work.materialised.clear();
+    if let Err(e) = walked {
+        for p in parts {
+            let _ = shm::shfree(p);
+        }
+        let _ = shm::shfree(arr_ptr);
+        return Err(e);
     }
-
-    // Release source descriptors and fill in the output Array struct.
-    // The cache (for Shm variants) keeps its own refs; File variants are
-    // no-op releases.
-    for (_, s) in std::mem::take(&mut work.materialised) {
-        s.release();
-    }
-    let buf_relptr = shm::abs2rel(buf_ptr)?;
-    let arr = unsafe { &mut *(arr_ptr as *mut shm_types_crate::Array) };
-    arr.size = n_out;
-    arr.data = buf_relptr;
-    parts.push(buf_ptr);
     let out_schema = array_schema(&work.proj_schema);
     // SAFETY: `parts` lists every block the copies above took and the
     // element bank they were written into; nothing else points into them.
@@ -9443,6 +9435,85 @@ mod tests {
         close_handle(handle).unwrap();
         let _ = std::fs::remove_file(&path);
         crate::stream::set_test_ifile_cache_bytes(None);
+    }
+
+    // SHM-7: a cached sub-packet's reference handed to an eval is the
+    // arena's, on a hit as on a miss, so the arena releases one the eval
+    // leaves behind.
+    #[test]
+    fn an_arena_releases_cached_sub_packets_its_eval_left() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("cache_arena");
+        let path = dir.join("a.idx");
+        let p = path.to_str().unwrap().to_string();
+        crate::write_behind::set_test_depth(Some(0));
+        let w = shared_open_ostream_with_schema(&p, "ai8").unwrap();
+        let list = parse_schema("ai8").unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(3).unwrap();
+        let v = crate::json::read_json_with_schema("[1, 2, 3]", &list).unwrap();
+        shared_write_subpacket(w, level, v).unwrap();
+        shm::shfree(v).unwrap();
+        shared_close_handle(w).unwrap();
+        crate::write_behind::set_test_depth(None);
+
+        let f = open_ifile(&p).unwrap();
+        let g = crate::eval_arena::enter().unwrap();
+        let block = with_process_local_slot(f, |local, _| {
+            let miss = cache_get_or_materialize(local, 0)?;
+            let hit = cache_get_or_materialize(local, 0)?;
+            assert_eq!(miss.arr_base(), hit.arr_base());
+            Ok(hit.arr_base())
+        })
+        .unwrap();
+        unsafe { shm::shincref(block) }.unwrap();
+        shared_close_handle(f).unwrap();
+        drop(g);
+        let left = unsafe { shm::reference_count(block) }.unwrap();
+        shm::release(block).unwrap();
+        assert_eq!(left, 1, "the eval's cached sub-packet references outlived the arena");
+    }
+
+    // A slice that fails part way gives back the sub-packets it read.
+    #[test]
+    fn a_failed_slice_releases_the_sub_packets_it_read() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("slice_fail");
+        let path = dir.join("s.idx");
+        let p = path.to_str().unwrap().to_string();
+        crate::write_behind::set_test_depth(Some(0));
+        let w = shared_open_ostream_with_schema(&p, "ai8").unwrap();
+        let list = parse_schema("ai8").unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(3).unwrap();
+        for json in ["[1, 2, 3]", "[4, 5, 6]"] {
+            let v = crate::json::read_json_with_schema(json, &list).unwrap();
+            shared_write_subpacket(w, level, v).unwrap();
+            shm::shfree(v).unwrap();
+            shared_flush_buffer(w).unwrap();
+        }
+        shared_close_handle(w).unwrap();
+        crate::write_behind::set_test_depth(None);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let frames: Vec<usize> = bytes.windows(4).enumerate()
+            .filter(|(_, w)| *w == [0x28, 0xb5, 0x2f, 0xfd]).map(|(i, _)| i).collect();
+        assert!(frames.len() >= 2, "expected two compressed sub-packets, found {}", frames.len());
+        for b in &mut bytes[frames[1] + 4..frames[1] + 12] {
+            *b ^= 0xff;
+        }
+        std::fs::write(&path, &bytes).unwrap();
+
+        let f = open_ifile(&p).unwrap();
+        let r = ifile_bracket_slice(f, Some(0), Some(6), Some(2));
+        assert!(r.is_err(), "a corrupt sub-packet was read");
+        let first = with_process_local_slot(f, |local, _| {
+            Ok(local.cache.entries.iter().find(|e| e.subpacket_idx == 0).map(|e| e.shm_packet))
+        })
+        .unwrap()
+        .expect("the first sub-packet was cached");
+        unsafe { shm::shincref(first) }.unwrap();
+        shared_close_handle(f).unwrap();
+        let left = unsafe { shm::reference_count(first) }.unwrap();
+        shm::release(first).unwrap();
+        assert_eq!(left, 1, "the failed slice kept its reference to the first sub-packet");
     }
 
     #[test]

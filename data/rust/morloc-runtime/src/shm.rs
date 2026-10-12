@@ -1214,6 +1214,12 @@ pub fn shfree(ptr: AbsPtr) -> Result<(), MorlocError> {
     // guard-drop won't attempt a second free. No-op if no arena is active
     // or if `ptr` was never tracked.
     crate::eval_arena::forget_if_active(ptr);
+    release(ptr)
+}
+
+/// Release one reference the caller took for itself, never one an eval
+/// arena records (SHM-7).
+pub fn release(ptr: AbsPtr) -> Result<(), MorlocError> {
     // SHM-10: a pointer into no published volume is from a namespace a
     // recovery discarded.
     if !ptr.is_null() && !ptr_is_in_any_volume(ptr) {

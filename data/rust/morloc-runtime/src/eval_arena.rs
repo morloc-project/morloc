@@ -41,7 +41,10 @@ use crate::error::MorlocError;
 use crate::shm::{self, AbsPtr};
 
 struct ArenaState {
-    blocks: Vec<AbsPtr>,
+    // Each block with the number of blocks recorded before it, which is
+    // what a checkpoint compares against.
+    blocks: Vec<(AbsPtr, u64)>,
+    recorded: u64,
     files: Vec<PathBuf>,
     // Stream registry slot IDs (handle integers) opened during this
     // arena scope. Auto-closed at guard drop. Prevents slot leaks under
@@ -98,7 +101,7 @@ impl Drop for ArenaGuard {
         // reason.
         let state = with_arena(|slot| slot.take()).flatten();
         if let Some(state) = state {
-            for ptr in state.blocks {
+            for (ptr, _) in state.blocks {
                 // Panic-safe: log and continue rather than propagate.
                 // A panic inside Drop while already unwinding aborts
                 // the process, which is strictly worse than leaving
@@ -168,6 +171,7 @@ pub fn enter() -> Result<ArenaGuard, MorlocError> {
         }
         *slot = Some(ArenaState {
             blocks: Vec::with_capacity(INITIAL_CAPACITY),
+            recorded: 0,
             files: Vec::new(),
             slots: Vec::new(),
         });
@@ -196,7 +200,8 @@ pub fn record_if_active(ptr: AbsPtr) {
     }
     with_arena(|slot| {
         if let Some(s) = slot.as_mut() {
-            s.blocks.push(ptr);
+            s.blocks.push((ptr, s.recorded));
+            s.recorded += 1;
         }
     });
 }
@@ -232,7 +237,7 @@ pub fn forget_if_active(ptr: AbsPtr) {
     }
     with_arena(|slot| {
         if let Some(s) = slot.as_mut() {
-            if let Some(idx) = s.blocks.iter().rposition(|&p| p == ptr) {
+            if let Some(idx) = s.blocks.iter().rposition(|&(p, _)| p == ptr) {
                 s.blocks.swap_remove(idx);
             }
         }
@@ -261,7 +266,7 @@ pub fn record_slot_if_active(handle: i64) {
 /// until the top-level arena scope exits.
 #[derive(Debug, Clone, Copy)]
 pub struct ArenaCheckpoint {
-    blocks: usize,
+    blocks: u64,
     files: usize,
     slots: usize,
 }
@@ -271,7 +276,7 @@ pub struct ArenaCheckpoint {
 pub fn checkpoint() -> ArenaCheckpoint {
     with_arena(|slot| match slot.as_ref() {
         Some(s) => ArenaCheckpoint {
-            blocks: s.blocks.len(),
+            blocks: s.recorded,
             files: s.files.len(),
             slots: s.slots.len(),
         },
@@ -293,7 +298,11 @@ pub fn rollback_to(cp: ArenaCheckpoint) {
     let (blocks, files, slots): (Vec<AbsPtr>, Vec<PathBuf>, Vec<i64>) =
         with_arena(|slot| match slot.as_mut() {
             Some(s) => (
-                if s.blocks.len() > cp.blocks { s.blocks.split_off(cp.blocks) } else { Vec::new() },
+                {
+                    let (later, kept): (Vec<_>, Vec<_>) = s.blocks.drain(..).partition(|&(_, n)| n >= cp.blocks);
+                    s.blocks = kept;
+                    later.into_iter().map(|(p, _)| p).collect()
+                },
                 if s.files.len() > cp.files { s.files.split_off(cp.files) } else { Vec::new() },
                 if s.slots.len() > cp.slots { s.slots.split_off(cp.slots) } else { Vec::new() },
             ),
@@ -410,7 +419,7 @@ mod tests {
     }
 
     fn arena_contains(p: AbsPtr) -> bool {
-        with_arena(|slot| slot.as_ref().map(|s| s.blocks.contains(&p)).unwrap_or(false))
+        with_arena(|slot| slot.as_ref().map(|s| s.blocks.iter().any(|&(q, _)| q == p)).unwrap_or(false))
             .unwrap_or(false)
     }
 
@@ -460,6 +469,43 @@ mod tests {
 
         assert_eq!(arena_len(), 0);
         // Guard drops -> nothing left to free, no error.
+    }
+
+    fn count(p: AbsPtr) -> u32 {
+        unsafe { shm::reference_count(p) }.unwrap()
+    }
+
+    // SHM-7: a holder's own reference is released without touching the
+    // arena's, so the arena still releases the allocation's at its end.
+    #[test]
+    fn a_holders_release_leaves_the_arenas_reference() {
+        let _shm = ensure_shm();
+        let g = enter().unwrap();
+        let p = shm::shmalloc(48).unwrap();
+        unsafe { shm::shincref(p) }.unwrap();
+        unsafe { shm::shincref(p) }.unwrap();
+        shm::release(p).unwrap();
+        drop(g);
+        let left = count(p);
+        shm::release(p).unwrap();
+        assert_eq!(left, 1, "only the observing reference should remain");
+    }
+
+    // SHM-7: freeing an entry recorded before a checkpoint leaves the ones
+    // recorded after it in the range a rollback releases.
+    #[test]
+    fn a_free_before_the_checkpoint_keeps_later_entries_in_the_rollback() {
+        let _shm = ensure_shm();
+        let _g = enter().unwrap();
+        let before = shm::shmalloc(48).unwrap();
+        let cp = checkpoint();
+        let after = shm::shmalloc(48).unwrap();
+        unsafe { shm::shincref(after) }.unwrap();
+        shm::shfree(before).unwrap();
+        rollback_to(cp);
+        let left = count(after);
+        shm::release(after).unwrap();
+        assert_eq!(left, 1, "the rollback did not release the entry made after the checkpoint");
     }
 
     #[test]

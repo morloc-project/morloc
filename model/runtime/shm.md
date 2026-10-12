@@ -54,14 +54,19 @@ volume's creator records its setting in the volume header and every
 process that maps the volume follows it.
 
 ### SHM-7 Arguments and results are owned separately, even when one block
-Status: deviation
+Status: implemented
+Checked by: a_holders_release_leaves_the_arenas_reference, a_free_before_the_checkpoint_keeps_later_entries_in_the_rollback, an_arena_releases_cached_sub_packets_its_eval_left, tla:ArenaRelease, tla:ArenaRelease_evict_forgets.bug, tla:ArenaRelease_hit_unrecorded.bug, tla:ArenaRelease_handoff_keeps_entry.bug, tla:ArenaCheckpoint, tla:ArenaCheckpoint_length_checkpoint.bug
 
-A result that aliases an argument has two holders and two references. The
-runtime has no release that drops a reference without also untracking the
-eval arena's own entry for the same address, so a non-arena release on a
-thread with an active arena leaks the arena's reference. This belongs to
-the shared-memory references and pool runtime project, which records the
-holder of each reference.
+A result that aliases an argument has two holders and two references. On
+a thread with an eval arena, the arena holds exactly the references
+recorded in it: each allocation's, a reply reference the daemon adopts,
+and each reference a stream read hands to the eval, from its cache or not.
+Freeing one of those drops one entry for the block and releases one
+reference. A reference held by a runtime structure (a stream's cache, a
+cell, an Arrow view) is released without touching the arena, and a
+hand-off of a recorded reference to such a holder drops one entry. A
+checkpoint names the entries recorded after it, so a rollback releases
+those and keeps the earlier ones, whichever were freed in between.
 
 ### SHM-8 A dead holder's references are recoverable
 Status: implemented

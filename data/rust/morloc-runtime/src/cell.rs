@@ -177,14 +177,14 @@ fn cell_owns(p: AbsPtr) -> Result<RelPtr, MorlocError> {
     crate::eval_arena::forget_if_active(p);
     let rel = shm::abs2rel(p);
     if rel.is_err() {
-        let _ = shm::shfree(p);
+        let _ = shm::release(p);
     }
     rel
 }
 
 fn free_block(rel: RelPtr) {
     if let Ok(p) = shm::rel2abs(rel) {
-        let _ = shm::shfree(p);
+        let _ = shm::release(p);
     }
 }
 
@@ -301,7 +301,7 @@ fn copy_out(
     unsafe { shm::shincref(abs) }?;
     drop(reg);
     let out = unsafe { voidstar::deep_copy_to_block(abs, rs) };
-    let _ = shm::shfree(abs);
+    let _ = shm::release(abs);
     out
 }
 

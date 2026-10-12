@@ -150,7 +150,7 @@ pub(crate) unsafe fn morloc_dup_packet(
     let copy = libc::malloc(size) as *mut u8;
     if copy.is_null() {
         if !block.is_null() {
-            let _ = shm::shfree(block);
+            let _ = shm::release(block);
         }
         set_errmsg(errmsg, &MorlocError::Other("morloc_dup_packet: out of memory".into()));
         return ptr::null_mut();
@@ -917,7 +917,7 @@ pub(crate) unsafe fn morloc_inherit_reply(packet: *const u8) {
 pub(crate) unsafe fn revoke_packet_reference(packet: *const u8) {
     if let Ok(Some(abs)) = packet_rptr_block(packet) {
         crate::shm::take_on_reference();
-        let _ = crate::shm::shfree(abs);
+        let _ = crate::shm::release(abs);
     }
 }
 
