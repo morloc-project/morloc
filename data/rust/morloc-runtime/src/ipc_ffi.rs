@@ -1441,7 +1441,7 @@ pub(crate) unsafe fn accept_or_watch(server_fd: i32, timeout_us: i32, watch: &[i
     if pfds[0].revents & libc::POLLIN == 0 {
         return Ok(Accepted::Nothing);
     }
-    let selected_fd = morloc_runtime_types::fd::accept(server_fd, ptr::null_mut(), ptr::null_mut());
+    let selected_fd = morloc_runtime_types::fd::accept_nonblocking(server_fd);
     if selected_fd < 0 {
         if out_of_descriptors() {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1452,7 +1452,6 @@ pub(crate) unsafe fn accept_or_watch(server_fd: i32, timeout_us: i32, watch: &[i
         eprintln!("[MLC_IPC] pid={} accept fd={}", libc::getpid(), selected_fd);
     }
     crate::utility::set_nosigpipe(selected_fd);
-    libc::fcntl(selected_fd, libc::F_SETFL, libc::O_NONBLOCK);
 
     // Short-circuit readiness pings here (see try_answer_ping) so they
     // never wait on a possibly-initializing worker. Peeking costs one

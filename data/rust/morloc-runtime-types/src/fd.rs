@@ -83,6 +83,25 @@ pub unsafe fn accept(fd: c_int, addr: *mut libc::sockaddr, len: *mut libc::sockl
     }
 }
 
+/// `accept` with the new descriptor non-blocking.
+///
+/// # Safety
+/// As `accept(2)`.
+pub unsafe fn accept_nonblocking(fd: c_int) -> c_int {
+    #[cfg(target_os = "linux")]
+    {
+        libc::accept4(fd, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let c = accept(fd, std::ptr::null_mut(), std::ptr::null_mut());
+        if c >= 0 {
+            libc::fcntl(c, libc::F_SETFL, libc::fcntl(c, libc::F_GETFL) | libc::O_NONBLOCK);
+        }
+        c
+    }
+}
+
 /// # Safety
 /// As `dup(2)`.
 pub unsafe fn dup(fd: c_int) -> c_int {

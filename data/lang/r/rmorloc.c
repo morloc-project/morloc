@@ -23,13 +23,17 @@
 #include <signal.h>
 #include <unistd.h>
 
-// FORK-2: atomic close-on-exec where the platform has it.
-static int mlc_accept_cloexec(int fd) {
+// FORK-2: atomic close-on-exec where the platform has it; the new
+// descriptor is non-blocking.
+static int mlc_accept_nonblocking(int fd) {
 #ifdef __linux__
-    return accept4(fd, NULL, NULL, SOCK_CLOEXEC);
+    return accept4(fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
 #else
     int c = accept(fd, NULL, NULL);
-    if (c >= 0) fcntl(c, F_SETFD, FD_CLOEXEC);
+    if (c >= 0) {
+        fcntl(c, F_SETFD, FD_CLOEXEC);
+        fcntl(c, F_SETFL, fcntl(c, F_GETFL) | O_NONBLOCK);
+    }
     return c;
 #endif
 }
@@ -4182,9 +4186,8 @@ SEXP morloc_worker_loop_c(SEXP listen_fd_r, SEXP life_fd_r, SEXP dispatch_r, SEX
         if (pfds[1].revents) break;
         if (!(pfds[0].revents & POLLIN)) continue;
         // Every idle worker wakes; one wins and the rest find nothing.
-        int client_fd = mlc_accept_cloexec(listen_fd);
+        int client_fd = mlc_accept_nonblocking(listen_fd);
         if (client_fd < 0) continue;
-        fcntl(client_fd, F_SETFL, O_NONBLOCK);
         mlc_trace("accept client=%d\n", client_fd);
         run_job_c(client_fd, dispatch_r, remote_dispatch_r);
         fflush(stdout);

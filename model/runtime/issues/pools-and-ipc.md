@@ -14,12 +14,12 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   so each request pays a TCP connect, accept and close. The soak client in
   test-suite/daemon-tests says its requests ride persistent connections and
   exercise the keep-alive path; there is none.
-- [measured] A crossing costs 33 us (Python -> C++, reused connection)
-  and 51 us (C++ -> Python, connection per call) here, against a 13.6 us
+- [measured] A crossing costs 25 us (Python -> C++, reused connection)
+  and 36.5 us (C++ -> Python, connection per call) here, against a 13.6 us
   socket round trip: /work/tests/runtime/crossing. Calls into Python and R
-  still connect per call, and Python's own per-call work is ~19 us.
+  (~49 us) still connect per call.
 - [read] FORK-3 gap on non-Linux: accept and pipe set close-on-exec in a
-  second step (runtime-types fd.rs ~80-83, rmorloc.c mlc_accept_cloexec and
+  second step (runtime-types fd.rs ~80-83, rmorloc.c mlc_accept_nonblocking and
   mlc_pipe_cloexec), so a fork-and-exec in another thread can inherit the
   descriptor. Live on macOS today. Open: macOS has no atomic form; a fork
   gate held across the two steps would block forks behind a blocking accept.
