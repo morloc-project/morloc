@@ -2014,6 +2014,13 @@ fn internal(e: *mut c_char) -> (i32, *mut c_char) {
     (DAEMON_ERROR_INTERNAL, e)
 }
 
+unsafe fn arena_error(resp: *mut DaemonResponse, why: &str) {
+    (*resp).success = false;
+    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+    let msg = CString::new(format!("eval arena error: {}", why)).unwrap_or_default();
+    (*resp).error = libc::strdup(msg.as_ptr());
+}
+
 fn failed(e: *mut c_char) -> (i32, *mut c_char) {
     (DAEMON_ERROR_FAILED, e)
 }
@@ -2458,11 +2465,7 @@ unsafe fn dispatch_request(
         let arena_guard = match crate::eval_arena::enter() {
             Ok(g) => Some(g),
             Err(e) => {
-                (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
-                let msg = CString::new(format!("eval arena error: {}", e))
-                    .unwrap_or_default();
-                (*resp).error = libc::strdup(msg.as_ptr());
+                arena_error(resp, &e.to_string());
                 cleanup_and_fail = true;
                 None
             }
@@ -2617,117 +2620,122 @@ unsafe fn dispatch_request(
         // in the call packet shipped to the pool); the pool's arg ingress
         // shincref's any RPTR args it consumes, so we can safely shfree
         // our originals when the arena drops here.
-        let _arena = match crate::eval_arena::enter() {
-            Ok(g) => Some(g),
-            Err(_) => None,  // already active is unexpected here; proceed without
-        };
-        let arg_schemas_flat = cmd.build_arg_schemas_array();
-        let call_packet = make_call_packet_from_cli(
-            ptr::null_mut(),
-            cmd.mid,
-            args,
-            arg_schemas_flat,
-            &mut err,
-        );
-        libc::free(arg_schemas_flat as *mut c_void);
-        if !err.is_null() {
-            (*resp).success = false;
-            (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-            (*resp).error = err;
-        } else {
-            let socket_path = (*sockets.add(cmd.pool_index)).socket_filename;
-            let result_packet =
-                send_and_receive_over_socket(socket_path, call_packet, &mut err);
-            libc::free(call_packet as *mut c_void);
-
+        'remote: {
+            let _arena_guard = match crate::eval_arena::enter() {
+                Ok(g) => g,
+                Err(e) => {
+                    arena_error(resp, &e.to_string());
+                    break 'remote;
+                }
+            };
+            let arg_schemas_flat = cmd.build_arg_schemas_array();
+            let call_packet = make_call_packet_from_cli(
+                ptr::null_mut(),
+                cmd.mid,
+                args,
+                arg_schemas_flat,
+                &mut err,
+            );
+            libc::free(arg_schemas_flat as *mut c_void);
             if !err.is_null() {
                 (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                 (*resp).error = err;
             } else {
-                adopt_rptr_result(result_packet);
+                let socket_path = (*sockets.add(cmd.pool_index)).socket_filename;
+                let result_packet =
+                    send_and_receive_over_socket(socket_path, call_packet, &mut err);
+                libc::free(call_packet as *mut c_void);
 
-                let packet_error =
-                    get_morloc_data_packet_error_message(result_packet, &mut err);
-                if !packet_error.is_null() {
-                    (*resp).success = false;
-                    (*resp).error_kind = DAEMON_ERROR_FAILED;
-                    (*resp).error = libc::strdup(packet_error);
-                    libc::free(result_packet as *mut c_void);
-                } else if !err.is_null() {
+                if !err.is_null() {
                     (*resp).success = false;
                     (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = err;
-                    libc::free(result_packet as *mut c_void);
-                } else if want_packet {
-                    // Packet mode: forward the pool's result packet as
-                    // self-contained bytes -- no JSON round-trip, no schema
-                    // parse. A pool FAIL packet was already turned into
-                    // `resp.error` by the `packet_error` check above.
-                    packetize_data_packet(resp, result_packet, compression, &mut err);
-                    libc::free(result_packet as *mut c_void);
                 } else {
-                    let return_schema = parse_schema(cmd.ret.schema, &mut err);
-                    if !err.is_null() {
+                    adopt_rptr_result(result_packet);
+
+                    let packet_error =
+                        get_morloc_data_packet_error_message(result_packet, &mut err);
+                    if !packet_error.is_null() {
+                        (*resp).success = false;
+                        (*resp).error_kind = DAEMON_ERROR_FAILED;
+                        (*resp).error = libc::strdup(packet_error);
+                        libc::free(result_packet as *mut c_void);
+                    } else if !err.is_null() {
                         (*resp).success = false;
                         (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                         (*resp).error = err;
                         libc::free(result_packet as *mut c_void);
+                    } else if want_packet {
+                        // Packet mode: forward the pool's result packet as
+                        // self-contained bytes -- no JSON round-trip, no schema
+                        // parse. A pool FAIL packet was already turned into
+                        // `resp.error` by the `packet_error` check above.
+                        packetize_data_packet(resp, result_packet, compression, &mut err);
+                        libc::free(result_packet as *mut c_void);
                     } else {
-                        let packet_value = get_morloc_data_packet_value(
-                            result_packet,
-                            return_schema as *const CSchema,
-                            &mut err,
-                        );
-                        let failed = if err.is_null() {
-                            top_level_err(want_packet, packet_value as *const c_void, return_schema as *const CSchema)
-                        } else {
-                            None
-                        };
+                        let return_schema = parse_schema(cmd.ret.schema, &mut err);
                         if !err.is_null() {
                             (*resp).success = false;
                             (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                             (*resp).error = err;
-                        } else if let Some(msg) = failed {
-                            (*resp).success = false;
-                            (*resp).error_kind = DAEMON_ERROR_FAILED;
-                            let c = CString::new(msg).unwrap_or_default();
-                            (*resp).error = libc::strdup(c.as_ptr());
-                        } else if want_media_bytes {
-                            // Raw-media return: raw content bytes + media type
-                            // from the pool's result value.
-                            emit_raw_media(
-                                resp,
-                                packet_value as *mut c_void,
-                                return_schema as *const CSchema,
-                                cmd.ret.mime,
-                            );
+                            libc::free(result_packet as *mut c_void);
                         } else {
-                            // Same reason as the eval path above: a table is
-                            // an Arrow block, not a generic voidstar.
-                            let returns_table =
-                                (*(return_schema as *const CSchema)).serial_type
-                                    == morloc_runtime_types::schema::SerialType::Table as u32;
-                            let json = if returns_table {
-                                arrow_to_json_string(packet_value as *const c_void, &mut err)
+                            let packet_value = get_morloc_data_packet_value(
+                                result_packet,
+                                return_schema as *const CSchema,
+                                &mut err,
+                            );
+                            let failed = if err.is_null() {
+                                top_level_err(want_packet, packet_value as *const c_void, return_schema as *const CSchema)
                             } else {
-                                voidstar_to_json_string(
-                                    packet_value as *const c_void,
-                                    return_schema as *const CSchema,
-                                    &mut err,
-                                )
+                                None
                             };
                             if !err.is_null() {
                                 (*resp).success = false;
                                 (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                                 (*resp).error = err;
+                            } else if let Some(msg) = failed {
+                                (*resp).success = false;
+                                (*resp).error_kind = DAEMON_ERROR_FAILED;
+                                let c = CString::new(msg).unwrap_or_default();
+                                (*resp).error = libc::strdup(c.as_ptr());
+                            } else if want_media_bytes {
+                                // Raw-media return: raw content bytes + media type
+                                // from the pool's result value.
+                                emit_raw_media(
+                                    resp,
+                                    packet_value as *mut c_void,
+                                    return_schema as *const CSchema,
+                                    cmd.ret.mime,
+                                );
                             } else {
-                                (*resp).success = true;
-                                (*resp).result_json = json;
+                                // Same reason as the eval path above: a table is
+                                // an Arrow block, not a generic voidstar.
+                                let returns_table =
+                                    (*(return_schema as *const CSchema)).serial_type
+                                        == morloc_runtime_types::schema::SerialType::Table as u32;
+                                let json = if returns_table {
+                                    arrow_to_json_string(packet_value as *const c_void, &mut err)
+                                } else {
+                                    voidstar_to_json_string(
+                                        packet_value as *const c_void,
+                                        return_schema as *const CSchema,
+                                        &mut err,
+                                    )
+                                };
+                                if !err.is_null() {
+                                    (*resp).success = false;
+                                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+                                    (*resp).error = err;
+                                } else {
+                                    (*resp).success = true;
+                                    (*resp).result_json = json;
+                                }
                             }
+                            free_schema(return_schema);
+                            libc::free(result_packet as *mut c_void);
                         }
-                        free_schema(return_schema);
-                        libc::free(result_packet as *mut c_void);
                     }
                 }
             }

@@ -64,9 +64,6 @@ re-checked.
 - **An `IFile` given as `"-"` skips the existence check.** [read]
   morloc-nexus/src/dispatch.rs `check_ifile_arg` runs only for
   `ArgValue::Value`; a test asserts a JSON `"-"` passes (~l.2352).
-- **A daemon ignores a failure to enter the eval arena.** [read]
-  morloc-runtime/src/daemon_ffi.rs (remote branch, ~l.2611): the call
-  proceeds without one and its argument SHM is not reclaimed.
 - **Internal argument errors are classed bad-request.** [read]
   daemon_ffi.rs ~l.2476 and ~l.2626: SHM exhaustion and other internal
   failures while building arguments answer 400 (IFACE-10).
