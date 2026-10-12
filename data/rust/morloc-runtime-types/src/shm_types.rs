@@ -200,15 +200,50 @@ impl BlockHeader {
     pub fn set_magic(&self, m: u32) {
         self.magic.store(m, std::sync::atomic::Ordering::Relaxed)
     }
+    /// The data bytes the block covers.
     #[inline]
     pub fn size(&self) -> usize {
-        self.size.load(std::sync::atomic::Ordering::Relaxed)
+        self.size.load(std::sync::atomic::Ordering::Relaxed) & BLOCK_SIZE_MASK
     }
+    /// Set the size, keeping the generation.
     #[inline]
     pub fn set_size(&self, n: usize) {
-        self.size.store(n, std::sync::atomic::Ordering::Relaxed)
+        debug_assert!(n <= BLOCK_SIZE_MASK);
+        let g = self.size.load(std::sync::atomic::Ordering::Relaxed) & !BLOCK_SIZE_MASK;
+        self.size.store(g | n, std::sync::atomic::Ordering::Relaxed)
+    }
+    /// Every byte of the header zero, as an absorbed header becomes.
+    #[inline]
+    pub fn zero(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.magic.store(0, Relaxed);
+        self.reference_count.store(0, Relaxed);
+        self.size.store(0, Relaxed);
+    }
+    /// SHM-13: which allocation of this address the block holds.
+    #[inline]
+    pub fn generation(&self) -> u16 {
+        (self.size.load(std::sync::atomic::Ordering::Relaxed) >> BLOCK_SIZE_BITS) as u16
+    }
+    /// Advance the generation, skipping 0; the caller holds the volume lock.
+    #[inline]
+    pub fn bump_generation(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let w = self.size.load(Relaxed);
+        let g = ((w >> BLOCK_SIZE_BITS) as u16).wrapping_add(1).max(1);
+        self.size.store(((g as usize) << BLOCK_SIZE_BITS) | (w & BLOCK_SIZE_MASK), Relaxed);
+    }
+    #[inline]
+    pub fn set_generation(&self, g: u16) {
+        let n = self.size();
+        self.size.store(((g as usize) << BLOCK_SIZE_BITS) | n, std::sync::atomic::Ordering::Relaxed)
     }
 }
+
+/// The low bits of a block header's size word hold the size; the top 16 the
+/// generation (SHM-13).
+pub const BLOCK_SIZE_BITS: u32 = 48;
+pub const BLOCK_SIZE_MASK: usize = (1usize << BLOCK_SIZE_BITS) - 1;
 
 const _: () = assert!(
     std::mem::size_of::<BlockHeader>()

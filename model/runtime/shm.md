@@ -152,3 +152,21 @@ and never removed. The growth lock is taken after the process's own growth
 lock (SHM-11) and before any volume's lock. Mapping a volume this process
 already maps keeps the first mapping.
 
+
+### SHM-13 A reference names the allocation it was made for
+Status: implemented
+Checked by: a_packet_naming_a_reused_block_is_refused_and_disarmed, a_packet_for_a_live_block_is_read, a_reclaimed_address_gets_a_new_generation
+
+Every block carries a 16-bit generation beside its size. Claiming a block
+for an allocation advances it (skipping 0), a block split off another
+starts at the parent's, and a merge keeps the larger of the two, so a
+header made again at an address starts past every allocation it held
+before. A reference packet records the generation of the block it names
+when it is built; 0 means unrecorded. The runtime reads a received
+reference only through the check that the block still has that
+generation; on a mismatch the read fails and the packet's relptr is
+cleared, so that no later release through the packet reaches the block's
+new owner. The check detects a reference used after its allocation ended
+(a protocol slip); it does not prevent one, and a generation repeats
+after 65535 claims of one address. Interior relptrs and releases by
+address are not checked.

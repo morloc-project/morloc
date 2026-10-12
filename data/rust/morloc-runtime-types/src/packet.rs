@@ -444,7 +444,9 @@ pub struct CommandData {
     pub compression: u8,
     pub encryption: u8,
     pub status: u8,
-    pub padding: [u8; 2],
+    /// SHM-13: for a reference packet, the generation of the block it names
+    /// (little endian); 0 means unchecked.
+    pub generation: [u8; 2],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -510,6 +512,7 @@ pub const PKT_COMPRESSION_OFF: usize = PKT_CMD_OFF + std::mem::offset_of!(Comman
 pub const PKT_ENCRYPTION_OFF: usize = PKT_CMD_OFF + std::mem::offset_of!(CommandData, encryption);
 pub const PKT_OFFSET_OFF: usize = std::mem::offset_of!(PacketHeader, offset);
 pub const PKT_MODE_OFF: usize = std::mem::offset_of!(PacketHeader, mode);
+pub const PKT_GENERATION_OFF: usize = PKT_CMD_OFF + std::mem::offset_of!(CommandData, generation);
 pub const PKT_LENGTH_OFF: usize = std::mem::offset_of!(PacketHeader, length);
 
 // Pin the wire layout: the C header and every binding assume these.
@@ -610,7 +613,7 @@ impl PacketHeader {
                     compression: PACKET_COMPRESSION_NONE,
                     encryption: PACKET_ENCRYPTION_NONE,
                     status: PACKET_STATUS_PASS,
-                    padding: [0; 2],
+                    generation: [0; 2],
                 },
             },
             0, // metadata size set separately when building full packet
@@ -629,7 +632,7 @@ impl PacketHeader {
                     compression: PACKET_COMPRESSION_NONE,
                     encryption: PACKET_ENCRYPTION_NONE,
                     status: PACKET_STATUS_PASS,
-                    padding: [0; 2],
+                    generation: [0; 2],
                 },
             },
             0, // metadata size set separately when building full packet
@@ -683,7 +686,7 @@ impl PacketHeader {
                     compression: PACKET_COMPRESSION_NONE,
                     encryption: PACKET_ENCRYPTION_NONE,
                     status: PACKET_STATUS_FAIL,
-                    padding: [0; 2],
+                    generation: [0; 2],
                 },
             },
             0,

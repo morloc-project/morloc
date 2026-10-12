@@ -350,7 +350,7 @@ typedef struct __attribute__((packed)) packet_command_data_s {
     uint8_t compression;
     uint8_t encryption;
     uint8_t status;
-    uint8_t padding[2];
+    uint8_t generation[2]; // SHM-13: a reference packet's block generation, little endian; 0 = unchecked
 } packet_command_data_t;
 
 typedef struct __attribute__((packed)) packet_command_ping_s {

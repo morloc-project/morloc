@@ -263,7 +263,7 @@ unsafe fn make_data_packet_raw(
         compression: cmpr,
         encryption: encr,
         status,
-        padding: [0; 2],
+        generation: [0; 2],
     };
     let header = PacketHeader {
         magic: PACKET_MAGIC,
@@ -331,6 +331,7 @@ pub(crate) unsafe fn make_standard_data_packet(
     let header = &*(packet as *const PacketHeader);
     let payload_offset = 32 + header.offset as usize;
     *(packet.add(payload_offset) as *mut RelPtr) = relptr;
+    stamp_generation(packet, relptr);
 
     packet
 }
@@ -354,8 +355,34 @@ pub(crate) unsafe fn make_arrow_data_packet(
     let header = &*(packet as *const PacketHeader);
     let payload_offset = 32 + header.offset as usize;
     *(packet.add(payload_offset) as *mut RelPtr) = relptr;
+    stamp_generation(packet, relptr);
 
     packet
+}
+
+// SHM-13: the packet names the allocation its block holds now.
+unsafe fn stamp_generation(packet: *mut u8, relptr: RelPtr) {
+    if let Some(g) = shm::rel2abs(relptr).ok().and_then(|abs| shm::block_generation(abs)) {
+        ptr::copy_nonoverlapping(g.to_le_bytes().as_ptr(), packet.add(PKT_GENERATION_OFF), 2);
+    }
+}
+
+// SHM-13: the block a reference packet names, provided it is still the
+// allocation the packet was made for. Otherwise the packet is disarmed, so
+// that no release through it reaches the block's new owner.
+unsafe fn checked_rptr_block(packet: *const u8, payload: *const u8) -> Result<AbsPtr, MorlocError> {
+    let relptr = *(payload as *const RelPtr);
+    let abs = shm::rel2abs(relptr)?;
+    let stamp = u16::from_le_bytes([*packet.add(PKT_GENERATION_OFF), *packet.add(PKT_GENERATION_OFF + 1)]);
+    let found = shm::block_generation(abs);
+    if stamp == 0 || found == Some(stamp) {
+        return Ok(abs);
+    }
+    *(payload as *mut RelPtr) = shm::RELNULL;
+    Err(MorlocError::Shm(format!(
+        "a reference packet names a shared-memory block that was released and reused \
+         (generation {stamp} expected, {found:?} found)"
+    )))
 }
 
 // ── Msgpack packets ──────────────────────────────────────────────────────────
@@ -852,8 +879,7 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
         }
         PACKET_SOURCE_RPTR => {
             if format == PACKET_FORMAT_VOIDSTAR || format == PACKET_FORMAT_ARROW {
-                let relptr = *(data.add(payload_start) as *const RelPtr);
-                match shm::rel2abs(relptr) {
+                match checked_rptr_block(data, data.add(payload_start)) {
                     Ok(abs) => abs,
                     Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                 }
@@ -934,8 +960,7 @@ unsafe fn packet_rptr_block(packet: *const u8) -> Result<Option<AbsPtr>, MorlocE
     {
         return Ok(None);
     }
-    let relptr = *(packet.add(32 + (*header).offset as usize) as *const RelPtr);
-    crate::shm::rel2abs(relptr).map(Some)
+    checked_rptr_block(packet, packet.add(32 + (*header).offset as usize)).map(Some)
 }
 
 unsafe fn make_call_packet_gen(
@@ -2959,5 +2984,61 @@ mod packet_file_tests {
         assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
         assert_eq!(std::fs::read(&path).unwrap(), b"packet");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    // SHM-13: a reference packet names the allocation it was made for; one
+    // whose block was released and reused is refused, and disarmed so that
+    // no later release through it touches the new owner's block.
+    #[test]
+    fn a_packet_naming_a_reused_block_is_refused_and_disarmed() {
+        let _arena = crate::own_test_shm();
+        let _fallback = crate::shm::tests::small_volume("genpkt");
+        let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
+        let cs = CSchema::from_rust(&schema);
+        let abs = crate::shm::shmalloc(64).expect("allocate");
+        let packet = unsafe { make_standard_data_packet(crate::shm::abs2rel(abs).unwrap(), cs) };
+        crate::shm::shfree(abs).unwrap();
+        let (again, held) = crate::shm::tests::reallocate_at(abs, 64);
+        let mut err: *mut c_char = ptr::null_mut();
+        let got = unsafe { get_morloc_data_packet_value(packet, cs, &mut err) };
+        let disarmed = unsafe { packet_rptr_block(packet) }.ok().flatten().is_none();
+        let count = unsafe { crate::shm::reference_count(again) };
+        for p in held.into_iter().chain([again]) {
+            crate::shm::shfree(p).unwrap();
+        }
+        crate::shm::shclose().unwrap();
+        unsafe {
+            if !err.is_null() {
+                libc::free(err as *mut c_void);
+            }
+            libc::free(packet as *mut c_void);
+            CSchema::free(cs);
+        }
+        assert!(got.is_null() && !err.is_null(), "a packet for a released block was read");
+        assert!(disarmed, "the refused packet still names the block");
+        assert_eq!(count, Some(1), "the new owner's count changed");
+    }
+
+    #[test]
+    fn a_packet_for_a_live_block_is_read() {
+        let _shm = crate::own_test_registry();
+        let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
+        let cs = CSchema::from_rust(&schema);
+        let abs = crate::shm::shmalloc(64).expect("allocate");
+        let packet = unsafe { make_standard_data_packet(crate::shm::abs2rel(abs).unwrap(), cs) };
+        let mut err: *mut c_char = ptr::null_mut();
+        let got = unsafe { get_morloc_data_packet_value(packet, cs, &mut err) };
+        crate::shm::shfree(abs).unwrap();
+        unsafe {
+            libc::free(packet as *mut c_void);
+            CSchema::free(cs);
+        }
+        assert!(err.is_null());
+        assert_eq!(got, abs as *mut u8);
     }
 }

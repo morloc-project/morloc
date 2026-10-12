@@ -1334,6 +1334,23 @@ pub unsafe fn shm_block_size(ptr: AbsPtr) -> Option<usize> {
     Some(header.size())
 }
 
+/// SHM-13: the generation of the block `ptr` heads, or `None` when no block
+/// heads it.
+///
+/// # Safety
+/// `ptr` must be null or point into a mapped volume's data.
+pub unsafe fn block_generation(ptr: AbsPtr) -> Option<u16> {
+    if ptr.is_null() {
+        return None;
+    }
+    let header_ptr = ptr.sub(std::mem::size_of::<BlockHeader>());
+    if !ptr_is_in_any_volume(header_ptr) {
+        return None;
+    }
+    let header = &*(header_ptr as *const BlockHeader);
+    (header.magic() == BLK_MAGIC).then(|| header.generation())
+}
+
 /// Convert relative pointer to absolute pointer. O(1) under the
 /// indexed-relptr encoding: a relptr packs `(volume_index, offset)`
 /// into a 64-bit word, so we read the index, look up VOLUMES[idx],
@@ -2024,6 +2041,8 @@ fn map_numbered(basename: &str, primary: *mut ShmHeader) {
 /// `blk` must be a valid BlockHeader in the volume `_held` locks.
 #[inline]
 unsafe fn claim(_held: &ShmGuard<'_>, blk: *mut BlockHeader) -> Result<*mut BlockHeader, MorlocError> {
+    // SHM-13: published by the CAS below; 0 is left to packets to mean unchecked.
+    (*blk).bump_generation();
     (*blk)
         .reference_count
         .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
@@ -2129,9 +2148,10 @@ unsafe fn scan_volume(
             // survivor, zero like the rest of a free block. A zero magic also
             // stops a stale pointer to the absorbed block reading as a block.
             let next_size = (*next).size();
-            (*next).set_magic(0);
-            (*next).reference_count.store(0, Ordering::Relaxed);
-            (*next).set_size(0);
+            // SHM-13: a header made here later starts past both generations.
+            let g = (*blk).generation().max((*next).generation());
+            (*blk).set_generation(g);
+            (*next).zero();
             (*blk).set_size((*blk).size() + hdr_size + next_size);
         }
 
@@ -2177,6 +2197,8 @@ unsafe fn split_block(
         (*new_free).set_magic(BLK_MAGIC);
         (*new_free).reference_count.store(0, Ordering::Relaxed);
         (*new_free).set_size(remaining - hdr_size);
+        // SHM-13
+        (*new_free).set_generation((*blk).generation());
 
         // Update cursor
         let data_start = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
@@ -2254,7 +2276,7 @@ mod calloc_tests {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     // SHM-12: a process that runs out of room uses a volume another process
     // made rather than making its own.
     #[test]
@@ -2702,6 +2724,47 @@ mod tests {
             morloc_refuse_new_segments();
             create_segment("/mlc-refused-segment-test", 1 << 16).is_err()
         }));
+    }
+
+    /// A program of one small volume, so that a freed block is soon the
+    /// only room left. The caller holds the exclusive test arena.
+    pub(crate) fn small_volume(tag: &str) -> crate::ScopedFallback {
+        let _ = shclose();
+        let fallback = crate::ScopedFallback::new(tag);
+        shinit(&format!("/morloc-{}-test-{tag}", std::process::id()), 4096).unwrap();
+        fallback
+    }
+
+    /// Allocate until `addr` is handed back; the other blocks taken on the way.
+    pub(crate) fn reallocate_at(addr: AbsPtr, size: usize) -> (AbsPtr, Vec<AbsPtr>) {
+        let mut held = Vec::new();
+        loop {
+            let q = shmalloc(size).unwrap();
+            if q == addr {
+                return (q, held);
+            }
+            held.push(q);
+            assert!(held.len() < 1000, "the allocator never reused {addr:p}");
+        }
+    }
+
+    // SHM-13
+    #[test]
+    fn a_reclaimed_address_gets_a_new_generation() {
+        let _arena = crate::own_test_shm();
+        let _fallback = small_volume("gen");
+        let p = shmalloc(64).unwrap();
+        let first = unsafe { block_generation(p) }.unwrap();
+        shfree(p).unwrap();
+        let (again, held) = reallocate_at(p, 64);
+        let second = unsafe { block_generation(again) }.unwrap();
+        for q in held.into_iter().chain([again]) {
+            shfree(q).unwrap();
+        }
+        shclose().unwrap();
+        assert_ne!(first, 0);
+        assert_ne!(second, 0);
+        assert_ne!(first, second, "the same generation names two allocations");
     }
 
     #[test]
