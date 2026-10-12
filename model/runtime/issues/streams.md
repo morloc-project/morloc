@@ -60,17 +60,6 @@ here touch locks and ownership: model first.
   has finished it fails: the custodian takes the file lock non-blocking
   (stream.rs `lock_stream_file`). Open: should an open of a path whose
   previous stream is still closing wait for that close?
-- [measured] Nested numeric arrays get natural alignment, not the 64 bytes
-  `Schema::array_data_alignment` (morloc-runtime-types schema.rs) states as
-  the wire format's: lists built from JSON land at 0/8/32/40 mod 64, and
-  lists read back from a written stream (IStream and IFile paths) at
-  multiples of 8 only (test
-  numeric_lists_read_from_a_stream_keep_their_natural_alignment checks
-  the natural alignment). Spec gap: is 64 a guarantee or a preference?
-  Still untested: a 16-byte requirement (an Arrow decimal buffer inside a
-  table element written to a stream), where the writer's 8-byte steps
-  (stream.rs `append_one_element`, write_behind.rs compaction) could
-  misalign.
 - [measured] Possible speedup (stdin): the nexus reads a stdin sub-packet
   only when a pool's `@next` asks for it (stdio_server.rs `do_next`), so a
   piped producer and the reader take turns. Counting 20M Ints in 200
