@@ -273,7 +273,12 @@ pub fn shallow_array_slots(schema: &Schema) -> Option<Vec<(usize, usize)>> {
                 .iter()
                 .zip(&s.offsets)
                 .all(|(p, &off)| collect(p, base + off, out)),
-            _ => false,
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16
+            | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16
+            | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64
+            | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur
+            | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Enum
+            | SerialType::Variant => false,
         }
     }
     let mut out = Vec::new();
