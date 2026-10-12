@@ -2267,10 +2267,8 @@ unsafe fn dispatch_request(
 
     use crate::ffi::parse_schema;
     use crate::ffi::free_schema;
-    use crate::cli::initialize_positional;
-    use crate::cli::free_argument_t;
-    use crate::cli::parse_cli_data_argument;
-    use crate::cli::make_call_packet_from_cli;
+    use crate::cli::call_arg_packet;
+    use crate::cli::make_call_packet;
     use crate::ipc_ffi::send_and_receive_over_socket;
     use crate::packet_ffi::get_morloc_data_packet_error_message;
     use crate::packet_ffi::get_morloc_data_packet_value;
@@ -2326,7 +2324,6 @@ unsafe fn dispatch_request(
         };
     }
     let cmd = target;
-    let expected_nargs = cmd.n_args;
 
     // Result-form policy for this dispatch. `want_packet` is a per-thread flag
     // set only by the raw-packet (Unix socket / TCP) wire; the HTTP handler and
@@ -2343,91 +2340,39 @@ unsafe fn dispatch_request(
         && (!cmd.ret.mime.is_null() || renders);
     let compression = G_DAEMON_COMPRESSION.load(Ordering::Relaxed);
 
-    // Parse JSON args into argument_t** array
     let mut err: *mut c_char = ptr::null_mut();
-    let args: *mut *mut crate::cli::ArgumentT;
-
-    if !(*request).args_json.is_null() {
-        // Parse the JSON array
-        let args_str = CStr::from_ptr((*request).args_json).to_string_lossy();
-        let parsed_args: Vec<&serde_json::value::RawValue> = match serde_json::from_str(&args_str) {
-            Ok(v) => v,
-            Err(e) => {
-                (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-                let c = CString::new(format!("Failed to parse args: {}", e)).unwrap_or_default();
-                (*resp).error = libc::strdup(c.as_ptr());
-                return resp;
-            }
-        };
-
-        if parsed_args.len() != expected_nargs {
+    let call_cmd = match (*mv).parsed().and_then(|m| m.command_by_name(&CStr::from_ptr(cmd.name).to_string_lossy())) {
+        Some(c) => c,
+        None => {
             (*resp).success = false;
-            (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-            let c = CString::new(format!(
-                "Expected {} arguments, got {}",
-                expected_nargs,
-                parsed_args.len()
-            ))
-            .unwrap_or_default();
-            (*resp).error = libc::strdup(c.as_ptr());
+            (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+            (*resp).error = libc::strdup(c"the command's arguments are not in the manifest".as_ptr());
             return resp;
         }
-
-        // Each argument goes to the pool as the JSON text it arrived in. A
-        // NUL inside a JSON string is the escape `\u0000`, and a raw NUL
-        // anywhere is a syntax error the parse above rejects, so the
-        // CString cannot fail. Done before the allocation below so a
-        // failure returns without leaking the argument array.
-        let mut arg_texts: Vec<CString> = Vec::with_capacity(expected_nargs);
-        for val in parsed_args.iter() {
-            let encoded = CString::new(val.get()).map_err(|e| e.to_string());
-            match encoded {
-                Ok(c) => arg_texts.push(c),
-                Err(e) => {
-                    (*resp).success = false;
-                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-                    let c = CString::new(format!(
-                        "Failed to encode argument {}: {}",
-                        arg_texts.len() + 1,
-                        e
-                    ))
-                    .unwrap_or_default();
-                    (*resp).error = libc::strdup(c.as_ptr());
-                    return resp;
-                }
-            }
-        }
-
-        args = libc::calloc(expected_nargs + 1, std::mem::size_of::<*mut c_void>())
-            as *mut *mut crate::cli::ArgumentT;
-        for (i, c) in arg_texts.iter().enumerate() {
-            let dup = libc::strdup(c.as_ptr());
-            *args.add(i) = initialize_positional(dup);
-            libc::free(dup as *mut c_void);
-        }
-        *args.add(expected_nargs) = ptr::null_mut();
-    } else {
-        if expected_nargs > 0 {
-            // Check if any are positional (required)
-            // For simplicity, match the C behavior: require args if n_args > 0
+    };
+    let args_text = (!(*request).args_json.is_null())
+        .then(|| CStr::from_ptr((*request).args_json).to_string_lossy());
+    let args = match morloc_manifest::call_args::resolve(call_cmd, args_text.as_deref()) {
+        Ok(a) => a,
+        Err(morloc_manifest::call_args::ResolveError::Request(msg)) => return refuse(resp, msg),
+        Err(morloc_manifest::call_args::ResolveError::Default(msg)) => {
             (*resp).success = false;
-            (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-            let c = CString::new("Missing 'args' field in call request").unwrap();
-            (*resp).error = libc::strdup(c.as_ptr());
+            (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+            (*resp).error = libc::strdup(CString::new(msg).unwrap_or_default().as_ptr());
             return resp;
         }
-        args =
-            libc::calloc(1, std::mem::size_of::<*mut c_void>()) as *mut *mut crate::cli::ArgumentT;
-        *args = ptr::null_mut();
+    };
+
+    if args.len() != cmd.n_args {
+        (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+        (*resp).error = libc::strdup(c"the manifest's two views of the command disagree".as_ptr());
+        return resp;
     }
 
     if cmd.is_pure {
         // Pure command: evaluate expression tree
-        let mut nargs: usize = 0;
-        while !(*args.add(nargs)).is_null() {
-            nargs += 1;
-        }
+        let nargs = args.len();
 
         // v2: schemas live on each ManifestArg. Walk cmd.args in
         // declaration order, INCLUDING flags (they consume an arg
@@ -2484,8 +2429,8 @@ unsafe fn dispatch_request(
                 for i in 0..nargs {
                     let schema_str = arg_schema_strs.get(i).copied().unwrap_or(ptr::null_mut());
                     *arg_schemas_arr.add(i) = checked(|e| parse_schema(schema_str, e)).map_err(internal)?;
-                    *arg_packets.add(i) = checked(|e| parse_cli_data_argument(ptr::null_mut(), *args.add(i), *arg_schemas_arr.add(i), e))
-                        .map_err(bad_request)?;
+                    *arg_packets.add(i) = call_arg_packet(&args[i], *arg_schemas_arr.add(i))
+                        .map_err(|m| bad_request(libc::strdup(CString::new(m).unwrap_or_default().as_ptr())))?;
                     *arg_voidstars.add(i) = checked(|e| get_morloc_data_packet_value(*arg_packets.add(i), *arg_schemas_arr.add(i), e))
                         .map_err(bad_request)?;
                 }
@@ -2580,37 +2525,17 @@ unsafe fn dispatch_request(
         let skip = (*mv).unsafe_skip_null_check
             || crate::null_check::env_skip_null_check();
         if !skip && !target_pool.allow_string_null {
-            if !(*request).args_json.is_null() {
-                let args_str = CStr::from_ptr((*request).args_json).to_string_lossy();
-                let lang = CStr::from_ptr(target_pool.lang).to_string_lossy();
-                let rejection = match crate::null_check::first_null_in_json_text(&args_str) {
-                    Ok(None) => None,
-                    Ok(Some(p)) => Some(format!(
-                        "{} does not support embedded NUL bytes in strings (at {})",
-                        lang, p
-                    )),
-                    Err(e) => Some(format!("Failed to scan args for NUL bytes: {}", e)),
-                };
-                if let Some(msg) = rejection {
-                    (*resp).success = false;
-                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-                    let c = CString::new(msg).unwrap_or_default();
-                    (*resp).error = libc::strdup(c.as_ptr());
-                    // Cleanup the args array allocated above.
-                    if !args.is_null() {
-                        let mut i = 0;
-                        loop {
-                            let p = *args.add(i);
-                            if p.is_null() {
-                                break;
-                            }
-                            free_argument_t(p);
-                            i += 1;
-                        }
-                        libc::free(args as *mut c_void);
-                    }
-                    return resp;
-                }
+            let lang = CStr::from_ptr(target_pool.lang).to_string_lossy();
+            let rejection = match morloc_manifest::call_args::first_null(&args) {
+                Ok(None) => None,
+                Ok(Some(p)) => Some(format!(
+                    "{} does not support embedded NUL bytes in strings (at {})",
+                    lang, p
+                )),
+                Err(e) => Some(format!("Failed to scan args for NUL bytes: {}", e)),
+            };
+            if let Some(msg) = rejection {
+                return refuse(resp, msg);
             }
         }
 
@@ -2629,19 +2554,13 @@ unsafe fn dispatch_request(
                 }
             };
             let arg_schemas_flat = cmd.build_arg_schemas_array();
-            let call_packet = make_call_packet_from_cli(
-                ptr::null_mut(),
-                cmd.mid,
-                args,
-                arg_schemas_flat,
-                &mut err,
-            );
+            let call_packet = make_call_packet(cmd.mid, &args, arg_schemas_flat);
             libc::free(arg_schemas_flat as *mut c_void);
-            if !err.is_null() {
+            if let Err(msg) = &call_packet {
                 (*resp).success = false;
                 (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-                (*resp).error = err;
-            } else {
+                (*resp).error = libc::strdup(CString::new(msg.as_str()).unwrap_or_default().as_ptr());
+            } else if let Ok(call_packet) = call_packet {
                 let socket_path = (*sockets.add(cmd.pool_index)).socket_filename;
                 let result_packet =
                     send_and_receive_over_socket(socket_path, call_packet, &mut err);
@@ -2741,14 +2660,6 @@ unsafe fn dispatch_request(
             }
         }
     }
-
-    // Free args
-    let mut i = 0;
-    while !(*args.add(i)).is_null() {
-        free_argument_t(*args.add(i));
-        i += 1;
-    }
-    libc::free(args as *mut c_void);
 
     resp
 }

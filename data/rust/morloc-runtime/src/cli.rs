@@ -5,7 +5,7 @@
 // goes through a checked conversion or a named helper, never `as`.
 #![deny(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -3896,67 +3896,108 @@ pub(crate) unsafe fn parse_cli_data_argument_group_shaped(
     wrap_voidstar_as_packet(result as *mut c_void, schema, errmsg)
 }
 
-// ── make_call_packet_from_cli ────────────────────────────────────────────────
+// -- make_call_packet --
 
-pub(crate) unsafe fn make_call_packet_from_cli(
-    dest: *mut u8,
-    mid: u32,
-    args: *mut *mut ArgumentT,   // NULL-terminated
-    arg_schema_strs: *mut *mut c_char, // NULL-terminated
-    errmsg: *mut *mut c_char,
-) -> *mut u8 {
-    clear_errmsg(errmsg);
+/// The packet of one argument of a call made off the command line: its text
+/// read by the classifier, or by the shape its default carries; a record
+/// assembled from its whole value, its given fields and its defaults.
+pub(crate) unsafe fn call_arg_packet(
+    arg: &morloc_manifest::call_args::CallArg,
+    schema: *const CSchema,
+) -> Result<*mut u8, String> {
+    use morloc_manifest::call_args::CallArg;
+    let c = |s: &str| CString::new(s).map_err(|_| "an argument holds a NUL byte".to_string());
+    let opt = |s: &Option<String>| s.as_deref().map(c).transpose();
     let mut err: *mut c_char = ptr::null_mut();
-
-    // Count and parse schemas
-    let mut nschemas: usize = 0;
-    while !(*arg_schema_strs.add(nschemas)).is_null() {
-        nschemas += 1;
-    }
-
-    let mut schemas: Vec<*mut CSchema> = Vec::with_capacity(nschemas);
-    for i in 0..nschemas {
-        let schema = crate::ffi::parse_schema(*arg_schema_strs.add(i), &mut err);
-        if !err.is_null() {
-            for s in &schemas { CSchema::free(*s); }
-            *errmsg = err;
-            return ptr::null_mut();
+    let packet = match arg {
+        CallArg::Value { text, shape, .. } => {
+            let text = c(text)?;
+            let a = initialize_positional(text.as_ptr() as *mut c_char);
+            let packet = match shape {
+                Some(sh) => {
+                    let list_config = opt(&sh.list_config)?;
+                    parse_cli_data_argument_shaped(
+                        ptr::null_mut(), a, schema, sh.source, sh.form,
+                        list_config.as_ref().map_or(ptr::null(), |l| l.as_ptr()), &mut err,
+                    )
+                }
+                None => parse_cli_data_argument(ptr::null_mut(), a, schema, &mut err),
+            };
+            free_argument_t(a);
+            packet
         }
-        schemas.push(schema);
-    }
-
-    // Count args
-    let mut nargs: usize = 0;
-    while !(*args.add(nargs)).is_null() {
-        nargs += 1;
-    }
-
-    // Parse each argument into a data packet
-    let mut packet_args: Vec<*const u8> = Vec::with_capacity(nargs);
-    for i in 0..nargs {
-        let packet = parse_cli_data_argument(dest, *args.add(i), schemas[i], &mut err);
-        if !err.is_null() {
-            for p in &packet_args { libc::free(*p as *mut c_void); }
-            for s in &schemas { CSchema::free(*s); }
-            *errmsg = err;
-            return ptr::null_mut();
+        CallArg::Group { bundle, fields, defaults } => {
+            let bundle = opt(bundle)?;
+            let fields = fields.iter().map(opt).collect::<Result<Vec<_>, _>>()?;
+            let defaults = defaults.iter().map(opt).collect::<Result<Vec<_>, _>>()?;
+            let ptrs = |v: &[Option<CString>]| -> Vec<*mut c_char> {
+                v.iter().map(|s| s.as_ref().map_or(ptr::null_mut(), |s| s.as_ptr() as *mut c_char)).collect()
+            };
+            let (mut f, mut d) = (ptrs(&fields), ptrs(&defaults));
+            let a = initialize_unrolled(
+                f.len(),
+                bundle.as_ref().map_or(ptr::null_mut(), |b| b.as_ptr() as *mut c_char),
+                f.as_mut_ptr(),
+                d.as_mut_ptr(),
+            );
+            let packet = parse_cli_data_argument(ptr::null_mut(), a, schema, &mut err);
+            free_argument_t(a);
+            packet
         }
-        packet_args.push(packet as *const u8);
-    }
-
-    // Build call packet
-    let call_packet = crate::packet_ffi::make_morloc_local_call_packet(
-        mid, packet_args.as_ptr(), nargs, &mut err,
-    );
-
-    for p in &packet_args { libc::free(*p as *mut c_void); }
-    for s in &schemas { CSchema::free(*s); }
-
+    };
     if !err.is_null() {
-        *errmsg = err;
-        return ptr::null_mut();
+        let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+        libc::free(err as *mut c_void);
+        if !packet.is_null() {
+            libc::free(packet as *mut c_void);
+        }
+        return Err(msg);
     }
-    call_packet
+    if packet.is_null() {
+        return Err("the argument could not be read".into());
+    }
+    Ok(packet)
+}
+
+/// The call packet for command `mid` with the given arguments, one wire
+/// schema per argument.
+pub(crate) unsafe fn make_call_packet(
+    mid: u32,
+    args: &[morloc_manifest::call_args::CallArg],
+    arg_schema_strs: *mut *mut c_char, // NULL-terminated
+) -> Result<*mut u8, String> {
+    let mut err: *mut c_char = ptr::null_mut();
+    let take = |err: &mut *mut c_char| {
+        let msg = CStr::from_ptr(*err).to_string_lossy().into_owned();
+        libc::free(*err as *mut c_void);
+        *err = ptr::null_mut();
+        msg
+    };
+    let mut schemas: Vec<*mut CSchema> = Vec::with_capacity(args.len());
+    let mut packets: Vec<*const u8> = Vec::with_capacity(args.len());
+    let result = (|| {
+        for (i, arg) in args.iter().enumerate() {
+            let s = *arg_schema_strs.add(i);
+            if s.is_null() {
+                return Err(format!("argument {} has no schema", i + 1));
+            }
+            let schema = crate::ffi::parse_schema(s, &mut err);
+            if !err.is_null() {
+                return Err(take(&mut err));
+            }
+            schemas.push(schema);
+            let packet = call_arg_packet(arg, schema).map_err(|e| format!("argument {}: {}", i + 1, e))?;
+            packets.push(packet as *const u8);
+        }
+        let call = crate::packet_ffi::make_morloc_local_call_packet(mid, packets.as_ptr(), packets.len(), &mut err);
+        if !err.is_null() {
+            return Err(take(&mut err));
+        }
+        Ok(call)
+    })();
+    for p in &packets { libc::free(*p as *mut c_void); }
+    for s in &schemas { CSchema::free(*s); }
+    result
 }
 
 #[cfg(test)]

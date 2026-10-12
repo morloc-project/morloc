@@ -18,9 +18,8 @@
 //! any command is evaluated: it saves the real stdout to a private high fd and
 //! aliases fd 1 onto fd 2, so every stray `print` / `std::cout` / `cat` lands on
 //! stderr. JSON-RPC is written only via raw `write(protocol_fd, ...)`, never
-//! `println!`. Commands whose types cannot be safely served (stream handles,
-//! `@stdin`) are excluded from the tool surface upstream in
-//! [`crate::json_help::build_tool_shapes`].
+//! `println!`. A command returning a file handle is left out of the tool
+//! surface ([`crate::json_help::build_tool_shapes`]).
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -42,10 +41,6 @@ type Raw = Box<RawValue>;
 
 /// A tool call's named arguments, in the order the client wrote them.
 type Args = indexmap::IndexMap<String, Raw>;
-
-fn raw_of(v: &Value) -> Raw {
-    RawValue::from_string(v.to_string()).expect("a serialized value is JSON")
-}
 
 /// A JSON-RPC message. The envelope is protocol-shaped and small; `params`
 /// stays text until the method that reads it decides how.
@@ -97,7 +92,14 @@ fn tool_call_params(msg: &RpcMessage) -> Result<(String, Args), &'static str> {
     let arguments = match p.arguments {
         None => Args::new(),
         Some(r) if r.get().trim_start().starts_with('{') => {
-            serde_json::from_str::<Args>(r.get()).map_err(|_| "invalid params")?
+            let members = morloc_runtime_types::call_body::members(r.get()).map_err(|_| "invalid params")?;
+            let mut args = Args::with_capacity(members.len());
+            for (k, v) in members {
+                if args.insert(k, v.to_owned()).is_some() {
+                    return Err("an argument is given twice");
+                }
+            }
+            args
         }
         Some(_) => return Err("'arguments' must be an object"),
     };
@@ -156,6 +158,22 @@ fn tool_selection(shape: &McpToolShape, args: &Args) -> Result<Selection, String
     }
 }
 
+/// A tool call's arguments as the call's named-argument object: every
+/// argument but the `_render` selector.
+fn named_args(arguments: &Args) -> String {
+    let mut out = String::from("{");
+    for (k, v) in arguments.iter().filter(|(k, _)| k.as_str() != "_render") {
+        if out.len() > 1 {
+            out.push(',');
+        }
+        out.push_str(&Value::String(k.clone()).to_string());
+        out.push(':');
+        out.push_str(v.get());
+    }
+    out.push('}');
+    out
+}
+
 /// A daemon call request, with its args (absent, or the text they arrived
 /// in).
 fn call_request(command: &str, args: Option<&str>, selection: &Selection) -> String {
@@ -170,7 +188,7 @@ fn call_request(command: &str, args: Option<&str>, selection: &Selection) -> Str
 use morloc_manifest::Manifest;
 use morloc_runtime_types::daemon_socket::MorlocSocket;
 
-use crate::json_help::{build_tool_shapes, ArgSlot, McpToolShape};
+use crate::json_help::{build_tool_shapes, McpToolShape};
 use crate::process::{self, PoolSocket};
 
 /// The MCP protocol revision this server implements. Pinned so we never have to
@@ -293,8 +311,8 @@ pub fn serve(
         shm: CString::new(shm_basename).unwrap(),
     };
 
-    // Precompute every servable tool's shape (forward inputSchema + inverse
-    // argument mapping). Excluded commands are dropped with a stderr note.
+    // Every servable tool's shape; excluded commands are dropped with a
+    // stderr note.
     let shapes: Vec<McpToolShape> = build_tool_shapes(manifest);
     let tools_list: Vec<Value> = shapes.iter().map(|s| s.tool.clone()).collect();
     let by_name: HashMap<&str, &McpToolShape> =
@@ -484,9 +502,9 @@ fn handle_message(
     }
 }
 
-/// Service one `tools/call`: validate arguments against the tool's inputSchema,
-/// invert the named `arguments` into the positional array `daemon_dispatch`
-/// wants, dispatch, and shape the result. Argument problems become JSON-RPC
+/// Service one `tools/call`: forward the named `arguments` to
+/// `daemon_dispatch`, which reads them as every interface does, and shape the
+/// result. Argument problems become JSON-RPC
 /// errors; execution problems become a normal result with `isError: true`.
 fn handle_tools_call(
     id: Value,
@@ -509,17 +527,11 @@ fn handle_tools_call(
         }
     };
 
-    // Validate + invert named arguments into the exact-arity positional array.
-    let positional = match resolve_arguments(shape, &arguments) {
-        Ok(p) => p,
-        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
-    };
-
     let selection = match tool_selection(shape, &arguments) {
         Ok(sel) => sel,
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
-    let args = serde_json::to_string(&positional).expect("raw JSON members serialize");
+    let args = named_args(&arguments);
     match ctx.dispatch(&call_request(&shape.name, Some(&args), &selection), &shape.name) {
         Ok(result) => result_response(id, result),
         Err(DispatchError::Request(e)) => error_response(id, JSONRPC_INVALID_PARAMS, &e),
@@ -532,75 +544,6 @@ fn handle_tools_call(
 
 fn tool_error(message: &str) -> Value {
     json!({ "content": [ { "type": "text", "text": message } ], "isError": true })
-}
-
-/// Validate the client's named `arguments` against a tool's inputSchema and
-/// invert them into the exact-arity positional array `daemon_dispatch` expects.
-/// Pure (no FFI): rejects unknown/missing arguments and resolves each slot.
-fn resolve_arguments(shape: &McpToolShape, arguments: &Args) -> Result<Vec<Raw>, String> {
-    // Reject unknown argument names (inputSchema is additionalProperties:false).
-    for key in arguments.keys() {
-        if !shape.prop_names.contains(key) {
-            return Err(format!("unknown argument '{}'", key));
-        }
-    }
-    // Reject missing required arguments.
-    for req in &shape.required {
-        if !arguments.contains_key(req) {
-            return Err(format!("missing required argument '{}'", req));
-        }
-    }
-    // One resolved value per declared arg slot, in order.
-    let mut positional: Vec<Raw> = Vec::with_capacity(shape.slots.len());
-    for slot in &shape.slots {
-        positional.push(resolve_slot(slot, arguments)?);
-    }
-    Ok(positional)
-}
-
-/// Resolve one argument slot against the client's named `arguments`.
-fn resolve_slot(slot: &ArgSlot, args: &Args) -> Result<Raw, String> {
-    match slot {
-        // Required-ness was already enforced in `resolve_arguments`, so an
-        // absent key here is genuinely optional and falls back to `missing`.
-        ArgSlot::Value { key, missing } => {
-            Ok(args.get(key).cloned().unwrap_or_else(|| raw_of(missing)))
-        }
-        ArgSlot::Flag { key, default } => match args.get(key) {
-            Some(r) => match serde_json::from_str::<bool>(r.get()) {
-                Ok(_) => Ok(r.clone()),
-                Err(_) => Err(format!("argument '{}' must be a boolean", key)),
-            },
-            None => Ok(raw_of(&Value::Bool(*default))),
-        },
-        ArgSlot::Record { group_key, fields } => {
-            // Whole-object (group_opt) form: start from the object the client
-            // passed under the group key, if any. A non-object value is
-            // forwarded as-is for the pool to reject.
-            let mut obj: Args = match group_key.as_ref().and_then(|gk| args.get(gk)) {
-                Some(r) if r.get().trim_start().starts_with('{') => {
-                    serde_json::from_str(r.get()).map_err(|e| e.to_string())?
-                }
-                Some(other) => return Ok(other.clone()),
-                None => Args::new(),
-            };
-            // Fill every field still absent -- from its own flat argument key
-            // (the unrolled form) or its default. So BOTH record forms supply
-            // defaults for omitted fields rather than deferring a partial record
-            // to a pool error.
-            for f in fields {
-                if !obj.contains_key(&f.field) {
-                    let v = args
-                        .get(&f.field)
-                        .cloned()
-                        .unwrap_or_else(|| raw_of(&f.default));
-                    obj.insert(f.field.clone(), v);
-                }
-            }
-            let text = serde_json::to_string(&obj).map_err(|e| e.to_string())?;
-            RawValue::from_string(text).map_err(|e| e.to_string())
-        }
-    }
 }
 
 /// Session-constant execution backend: the C manifest, socket array, pool count,
@@ -1677,12 +1620,12 @@ struct Frontend {
     /// MCP tools/list (union across MCP modules; names `<module>__<command>`).
     mcp_tools: Vec<Value>,
     /// Namespaced tool name -> (module, shape). The shape keeps its bare command
-    /// name for dispatch/argument resolution.
+    /// name for dispatch.
     mcp_by_name: HashMap<String, (String, McpToolShape)>,
     /// Modules answering the `/call` JSON API.
     api_modules: std::collections::HashSet<String>,
     /// Per-API-module machine-readable help (`GET /discover/<module>`), keyed by
-    /// module. Describes positional-argument commands for the `/call` contract.
+    /// module: each command's arguments, by position and by name.
     api_help: HashMap<String, Value>,
     /// Whether the sandboxed eval capability is exposed (an `eval` MCP tool +
     /// `/eval` route). Off unless the operator exposed it.
@@ -1954,9 +1897,8 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
         config.api_programs.iter().cloned().collect();
 
     // API discovery: per-module machine-readable help (the lossless `--json-help`
-    // view). It describes each command's POSITIONAL arguments, matching the
-    // `/call/<module>/<command>` positional-array contract. MCP clients discover
-    // via the protocol-native `tools/list` (named-argument inputSchema) instead.
+    // view): each command's arguments in order, with the names `/call` takes.
+    // MCP clients discover through `tools/list` instead.
     let mut api_help: HashMap<String, Value> = HashMap::new();
     for m in &config.api_programs {
         if let Some(manifest) = manifests.get(m) {
@@ -2134,10 +2076,8 @@ fn frontend_build_response(
 }
 
 /// `GET /discover`: the API index. Lists the JSON-API-exposed modules (with the
-/// `/call` URL shape and a link to each module's positional-argument help) and
-/// points MCP clients at the protocol-native `tools/list`. This is the API-side
-/// counterpart to MCP discovery -- the two adapters branch here because `/call`
-/// takes positional args while MCP tools take a named-argument object.
+/// `/call` URL shape and a link to each module's argument help) and points MCP
+/// clients at the protocol-native `tools/list`.
 fn frontend_discover(fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
     let mut modules: Vec<&String> = fe.api_help.keys().collect();
     modules.sort();
@@ -2155,8 +2095,10 @@ fn frontend_discover(fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
         "api": {
             "modules": api_modules,
             "call": "/call/<module>/<command>",
-            "note": "POST positional args as a JSON array (or {\"args\":[...]}). \
-                     GET /discover/<module> for each command's ordered arguments.",
+            "note": "POST {\"args\": ...}: an array with one value per argument, or an \
+                     object keyed by argument name, which may leave out an argument \
+                     that has a default. GET /discover/<module> for each command's \
+                     arguments.",
         },
         "mcp": {
             "endpoint": "/mcp",
@@ -2177,7 +2119,7 @@ fn frontend_discover(fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
 }
 
 /// `GET /discover/<module>`: the machine-readable help for one API module (its
-/// commands and their positional arguments). 404 unless the module is exposed on
+/// commands and their arguments). 404 unless the module is exposed on
 /// the JSON API.
 fn frontend_discover_module(module: &str, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
     match fe.api_help.get(module) {
@@ -2586,15 +2528,11 @@ fn frontend_tools_call(id: Value, msg: &RpcMessage, fe: &Frontend) -> Value {
             return error_response(id, JSONRPC_INVALID_PARAMS, &format!("unknown tool '{}'", name))
         }
     };
-    let positional = match resolve_arguments(shape, &arguments) {
-        Ok(p) => p,
-        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
-    };
     let selection = match tool_selection(shape, &arguments) {
         Ok(sel) => sel,
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
-    let args = serde_json::to_string(&positional).expect("raw JSON members serialize");
+    let args = named_args(&arguments);
     let request = call_request(&shape.name, Some(&args), &selection);
     let result = match fe.forward(module, &request, &selection) {
         Ok(ForwardOk::Json(result_json)) => tool_result_object(&result_json),
@@ -2612,8 +2550,9 @@ fn frontend_tools_call(id: Value, msg: &RpcMessage, fe: &Frontend) -> Value {
     }
 }
 
-/// `POST /call/<module>/<command>`: JSON API adapter. Body is a positional-args
-/// JSON array or `{"args":[...]}`. Stateless (no session).
+/// `POST /call/<module>/<command>`: JSON API adapter. Body is the arguments
+/// array, or `{"args": ...}` holding the array or a named-argument object.
+/// Stateless (no session).
 fn frontend_call_api(
     rest: &str,
     req: &HttpRequest,
@@ -2699,19 +2638,13 @@ mod tests {
     }
 
     use super::*;
-    use crate::json_help::RecordField;
-    use std::collections::HashSet;
 
-    fn shape(slots: Vec<ArgSlot>, props: &[&str], required: &[&str]) -> McpToolShape {
-        let prop_names: HashSet<String> = props.iter().map(|s| s.to_string()).collect();
-        McpToolShape {
-            name: "t".into(),
-            tool: json!({ "name": "t" }),
-            slots,
-            prop_names,
-            required: required.iter().map(|s| s.to_string()).collect(),
-            actions: Vec::new(),
-        }
+    fn raw_of(v: &Value) -> Raw {
+        RawValue::from_string(v.to_string()).expect("a serialized value is JSON")
+    }
+
+    fn shape() -> McpToolShape {
+        McpToolShape { name: "t".into(), tool: json!({ "name": "t" }), actions: Vec::new() }
     }
 
     fn args(v: Value) -> Args {
@@ -2753,9 +2686,9 @@ mod tests {
 
     #[test]
     fn an_output_selection_is_raw_an_action_or_the_default() {
-        let mut with_actions = shape(Vec::new(), &["_render"], &[]);
+        let mut with_actions = shape();
         with_actions.actions = vec!["png".into()];
-        let plain = shape(Vec::new(), &[], &[]);
+        let plain = shape();
         let sel = |s: &McpToolShape, a: Value| tool_selection(s, &args(a));
         assert!(matches!(sel(&with_actions, json!({})).unwrap(), Selection::Default));
         assert!(matches!(sel(&plain, json!({})).unwrap(), Selection::None));
@@ -2767,11 +2700,6 @@ mod tests {
         assert!(sel(&with_actions, json!({ "_render": ["png"] })).is_err());
         assert!(arg_str(&args(json!({ "expression": 1 })), "expression").is_err());
         assert_eq!(arg_str(&args(json!({})), "expression").unwrap(), None);
-    }
-
-    /// The resolved positional arguments as the JSON they would be sent as.
-    fn resolved(s: &McpToolShape, a: Value) -> Result<Vec<String>, String> {
-        resolve_arguments(s, &args(a)).map(|v| v.iter().map(|r| r.get().to_string()).collect())
     }
 
     /// A one-pool manifest written into a fresh directory, returned with the
@@ -2849,19 +2777,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn optional_omitted_uses_typed_default() {
-        let s = shape(
-            vec![ArgSlot::Value { key: "count".into(), missing: json!(5) }],
-            &["count"],
-            &[]);
-        assert_eq!(resolved(&s, json!({})).unwrap(), vec![json!(5).to_string()]);
-        assert_eq!(
-            resolved(&s, json!({ "count": 10 })).unwrap(),
-            vec![json!(10).to_string()]
-        );
-    }
-
     // A tool call's arguments reach the pool as the text the client sent:
     // a value nested past any tree parser's limit and an integer wider than
     // a double both pass through unchanged.
@@ -2876,18 +2791,14 @@ mod tests {
         assert_eq!(msg.method.as_deref(), Some("tools/call"));
         let (name, arguments) = tool_call_params(&msg).unwrap();
         assert_eq!(name, "t");
-        let s = shape(
-            vec![
-                ArgSlot::Value { key: "big".into(), missing: Value::Null },
-                ArgSlot::Value { key: "deep".into(), missing: Value::Null },
-            ],
-            &["big", "deep"],
-            &["big", "deep"]);
-        let positional = resolve_arguments(&s, &arguments).unwrap();
         assert_eq!(
-            call_request("t", Some(&serde_json::to_string(&positional).unwrap()), &Selection::None),
-            format!("{{\"method\":\"call\",\"command\":\"t\",\"args\":[18446744073709551617,{deep}]}}")
+            call_request("t", Some(&named_args(&arguments)), &Selection::None),
+            format!("{{\"method\":\"call\",\"command\":\"t\",\"args\":{{\"big\":18446744073709551617,\"deep\":{deep}}}}}")
         );
+        let with_render = RpcMessage::parse(br#"{"method":"tools/call","params":{"name":"t","arguments":{"_render":"png","a":1}}}"#).unwrap();
+        assert_eq!(named_args(&tool_call_params(&with_render).unwrap().1), r#"{"a":1}"#);
+        let twice = RpcMessage::parse(br#"{"method":"tools/call","params":{"name":"t","arguments":{"a":1,"a":2}}}"#).unwrap();
+        assert_eq!(tool_call_params(&twice).unwrap_err(), "an argument is given twice");
         assert!(call_request("t", Some("[]"), &Selection::Default).ends_with(",\"render_default\":true}"));
         assert!(call_request("t", Some("[]"), &Selection::Named("png".into())).ends_with(",\"render\":\"png\"}"));
         // Arguments that are not an object are rejected, as is a message
@@ -2899,77 +2810,6 @@ mod tests {
         // A null id still marks a request.
         let nul = RpcMessage::parse(b"{\"id\":null,\"method\":\"ping\"}").unwrap();
         assert_eq!(nul.id, Some(Value::Null));
-    }
-
-    #[test]
-    fn missing_required_is_error() {
-        let s = shape(
-            vec![ArgSlot::Value { key: "n".into(), missing: Value::Null }],
-            &["n"],
-            &["n"]);
-        assert!(resolved(&s, json!({})).is_err());
-        assert_eq!(resolved(&s, json!({ "n": 7 })).unwrap(), vec![json!(7).to_string()]);
-    }
-
-    #[test]
-    fn unknown_argument_is_error() {
-        let s = shape(
-            vec![ArgSlot::Value { key: "n".into(), missing: Value::Null }],
-            &["n"],
-            &[]);
-        assert!(resolved(&s, json!({ "bogus": 1 })).is_err());
-    }
-
-    #[test]
-    fn flag_default_and_type_check() {
-        let s = shape(
-            vec![ArgSlot::Flag { key: "v".into(), default: false }],
-            &["v"],
-            &[]);
-        assert_eq!(resolved(&s, json!({})).unwrap(), vec![json!(false).to_string()]);
-        assert_eq!(resolved(&s, json!({ "v": true })).unwrap(), vec![json!(true).to_string()]);
-        // Non-boolean flag value is rejected.
-        assert!(resolved(&s, json!({ "v": "yes" })).is_err());
-    }
-
-    #[test]
-    fn record_unrolled_assembles_object_from_fields() {
-        let s = shape(
-            vec![ArgSlot::Record {
-                group_key: None,
-                fields: vec![
-                    RecordField { field: "a".into(), default: json!(3) },
-                    RecordField { field: "b".into(), default: json!("hi") },
-                ],
-            }],
-            &["a", "b"],
-            &[]);
-        // Provided field overrides its default; omitted field uses it.
-        assert_eq!(
-            resolved(&s, json!({ "a": 10 })).unwrap(),
-            vec![json!({ "a": 10, "b": "hi" }).to_string()]
-        );
-    }
-
-    #[test]
-    fn record_group_opt_accepts_whole_object() {
-        let s = shape(
-            vec![ArgSlot::Record {
-                group_key: Some("cfg".into()),
-                fields: vec![RecordField { field: "a".into(), default: json!(3) }],
-            }],
-            &["cfg"],
-            &[]);
-        // Whole object passed under the group key is used verbatim.
-        assert_eq!(
-            resolved(&s, json!({ "cfg": { "a": 9 } })).unwrap(),
-            vec![json!({ "a": 9 }).to_string()]
-        );
-        // Omitted: assembled from field defaults.
-        assert_eq!(
-            resolved(&s, json!({})).unwrap(),
-            vec![json!({ "a": 3 }).to_string()]
-        );
     }
 
     // A result keeps every digit of a wide integer in both the text and

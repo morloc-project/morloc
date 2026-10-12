@@ -890,6 +890,62 @@ if should_run "http-json-args"; then
 fi
 
 # ======================================================================
+# Test Group 1b2: arguments by name
+#
+# An omitted option, flag or record field takes the value the command line
+# gives it (IFACE-5); names the command line would not take are refused.
+# ======================================================================
+
+if should_run "http-named-args"; then
+    echo "${BOLD}[http-named-args] Arguments by name${RESET}"
+
+    NAMED_DIR=$(mktemp -d)
+    WORK_DIRS+=("$NAMED_DIR")
+    compile_program "named.loc" "$NAMED_DIR"
+    HTTP_PORT=$(pick_port)
+    NAMED_SOCK="$NAMED_DIR/named.sock"
+    start_daemon "$NAMED_DIR" --http-port "$HTTP_PORT" --socket "$NAMED_SOCK"
+    wait_for_http "$HTTP_PORT" 10
+
+    named_call() {
+        curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/$1" \
+            -H "Content-Type: application/json" -d "$2"
+    }
+    named_result() {
+        json_field "$(named_call "$1" "$2")" "result"
+    }
+
+    assert_test "omitted option and flag take their defaults" \
+        "6" "$(named_result shift '{"args":{"_1":1}}')"
+    assert_test "named option and flag" \
+        "-3" "$(named_result shift '{"args":{"_1":1,"gap":2,"neg":true}}')"
+    assert_test "positional form fills every slot" \
+        "3" "$(named_result shift '[1,2,false]')"
+    assert_test "record fields default one by one" \
+        "none:3" "$(named_result configure '{"args":{"count":3}}')"
+    assert_test "no arguments at all takes every default" \
+        "none:1" "$(named_result configure '')"
+    assert_test "a field overrides the whole record" \
+        "y:4" "$(named_result configure '{"args":{"opts":{"count":4},"label":"y"}}')"
+    assert_test "a partial record is completed from defaults" \
+        "none:7" "$(named_result configure '[{"count":7}]')"
+    for body in '{"args":{"gap":2}}' '{"args":{"_1":1,"bogus":1}}' \
+                '{"args":{"_1":1,"neg":"yes"}}' '{"args":{"_1":1,"_1":2}}'; do
+        assert_http_status "refused: $body" "400" \
+            "http://127.0.0.1:${HTTP_PORT}/call/shift" \
+            -X POST -H "Content-Type: application/json" -d "$body"
+    done
+    assert_contains "a missing required argument is named" \
+        "missing required argument '_1'" "$(named_call shift '{"args":{"gap":2}}')"
+    result=$(lp_request "$NAMED_SOCK" '{"method":"call","command":"shift","args":{"_1":10,"neg":true}}')
+    assert_test "the socket takes arguments by name" "-15" "$(json_field "$result" "result")"
+
+    stop_daemon "$LAST_DAEMON_PID"
+
+    echo ""
+fi
+
+# ======================================================================
 # Test Group 1c: OPTIONS preflight short-circuit
 #
 # CORS preflight requests must get 204 No Content with the standard
@@ -1977,6 +2033,9 @@ if should_run "router"; then
         val=$(json_field "$result" "result" 2>/dev/null) || val=""
         assert_test "router call add status=ok" "ok" "$status"
         assert_test "router call add [5,10] result=15" "15" "$val"
+        result=$(curl -s -X POST "http://127.0.0.1:${ROUTER_PORT}/call/arithmetic/add" \
+            -H "Content-Type: application/json" -d '{"args":{"_2":10,"_1":5}}' 2>/dev/null) || result=""
+        assert_test "router call add by name result=15" "15" "$(json_field "$result" "result" 2>/dev/null)"
 
         # Call through router: square(4) -> 16
         result=$(curl -s -X POST "http://127.0.0.1:${ROUTER_PORT}/call/arithmetic/square" \

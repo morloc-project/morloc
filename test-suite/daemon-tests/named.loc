@@ -1,0 +1,39 @@
+--' Calls by argument name: an omitted option, flag or record field takes the
+--' value the command line gives it, on every interface (IFACE-5).
+module named (shift, configure)
+
+import root-py
+
+source Py from "named.py" ("shift_by" as shiftBy, "opts_summary" as optsSummary)
+
+--' Shift a number by a gap, negated on request
+shift ::
+  Int ->
+  --' arg: --gap
+  --' default: 5
+  Int ->
+  --' true: --neg
+  Bool ->
+  Int
+shift x g n = shiftBy x g n
+
+--' Options taken whole or field by field
+--' unroll: true
+--' arg: --opts
+record Opts where
+  --' arg: --label
+  --' default: "none"
+  label :: Str
+
+  --' arg: --count
+  --' default: 1
+  count :: Int
+
+record Py => Opts = "dict"
+
+shiftBy :: Int -> Int -> Bool -> Int
+optsSummary :: Opts -> Str
+
+--' Summarize the options
+configure :: Opts -> Str
+configure o = optsSummary o

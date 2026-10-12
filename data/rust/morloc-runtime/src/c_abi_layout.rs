@@ -504,6 +504,7 @@ mod tests {
             service => "service",
             metadata_json => "metadata_json",
             unsafe_skip_null_check => "unsafe_skip_null_check",
+            rust => "rust",
         ]);
     }
 

@@ -526,9 +526,17 @@ pub struct Manifest {
     /// When true, skip the runtime NUL-in-Str scan at cross-pool
     /// boundaries. Set by `morloc make --unsafe-skip-null-check`.
     pub unsafe_skip_null_check: bool,
+    /// The parsed manifest this one was built from.
+    pub rust: *mut morloc_manifest::Manifest,
 }
 
 impl Manifest {
+    /// The parsed manifest, for what the C view leaves out (argument keys,
+    /// shapes, defaults). None for a manifest not built by `parse_manifest`.
+    pub unsafe fn parsed(&self) -> Option<&morloc_manifest::Manifest> {
+        self.rust.as_ref()
+    }
+
     /// Find a command by name (linear scan; manifests are small). Skips
     /// null-named entries defensively. Single source for the by-name lookups
     /// the daemon dispatch, render resolution, and discovery all need.
@@ -1878,6 +1886,7 @@ pub(crate) unsafe fn parse_manifest(
         for (i, c) in parsed.commands.iter().enumerate() {
             if let Err(e) = populate_command((*m).commands.add(i), c) {
                 set_errmsg(errmsg, &e);
+                free_manifest(m);
                 return ptr::null_mut();
             }
         }
@@ -1896,14 +1905,15 @@ pub(crate) unsafe fn parse_manifest(
     }
 
     // service
-    if let Some(svc) = parsed.service {
+    if let Some(svc) = &parsed.service {
         (*m).service =
             libc::calloc(1, std::mem::size_of::<ManifestService>()) as *mut ManifestService;
-        populate_service((*m).service, &svc);
+        populate_service((*m).service, svc);
     }
 
     (*m).metadata_json = populate_metadata(&parsed.metadata);
     (*m).unsafe_skip_null_check = parsed.unsafe_skip_null_check;
+    (*m).rust = Box::into_raw(Box::new(parsed));
 
     m
 }
@@ -2077,6 +2087,9 @@ pub(crate) unsafe fn free_manifest(manifest: *mut Manifest) {
         return;
     }
     let m = &*manifest;
+    if !m.rust.is_null() {
+        drop(Box::from_raw(m.rust));
+    }
     if !m.name.is_null() {
         libc::free(m.name as *mut c_void);
     }

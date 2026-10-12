@@ -25,3 +25,9 @@
   later runs passed. Something allocated or freed a block outside that
   guard during the test: a test without a guard, or a thread a previous
   test left running (a custodian, a write-behind worker). Not found.
+- **Fork-pool unretired-worker test fails under load.** [reproduced once]
+  Against SHM-8. `cargo test --workspace` on 2026-10-12 failed
+  `fork_pool::tests::a_worker_that_ends_unretired_ends_the_pool`
+  (morloc-runtime/src/fork_pool.rs ~l.626); five isolated reruns and two
+  full runtime runs passed. Which assertion failed (both pings, or the
+  coordinator's exit status within 10 s) was not captured.

@@ -25,17 +25,25 @@ pub fn args_of(body: &[u8]) -> Result<Option<&str>, String> {
                 Some(a) => args_value(a.get()).map(Some),
             }
         }
-        _ => Err("the request body must be a JSON array of arguments or {\"args\": [...]}".into()),
+        _ => Err("the request body must be a JSON array of arguments or {\"args\": ...}".into()),
     }
 }
 
-/// `args` itself: an array of arguments, one per slot.
+/// `args` itself: an array of arguments, one per slot, or an object keyed
+/// by argument names.
 pub fn args_value(text: &str) -> Result<&str, String> {
     match text.trim_start().as_bytes().first() {
-        Some(b'[') => Ok(text),
-        Some(b'{') => Err("named arguments are not supported yet; pass 'args' as an array".into()),
-        _ => Err("'args' must be an array".into()),
+        Some(b'[' | b'{') => Ok(text),
+        _ => Err("'args' must be an array or an object".into()),
     }
+}
+
+/// The members of a JSON object in order, duplicates kept; an error for
+/// text that is not an object.
+pub fn members(text: &str) -> Result<Vec<(String, &serde_json::value::RawValue)>, String> {
+    serde_json::from_str::<Envelope>(text)
+        .map(|m| m.0)
+        .map_err(|e| format!("malformed JSON object: {}", e))
 }
 
 /// An object's members in order, duplicates kept.
@@ -71,7 +79,7 @@ mod tests {
         assert_eq!(args_of(b"  "), Ok(None));
         assert_eq!(args_of(b"[1, 2]"), Ok(Some("[1, 2]")));
         assert_eq!(args_of(br#"{"args":[1]}"#), Ok(Some("[1]")));
-        assert!(args_of(br#"{"args":{"_1":1}}"#).is_err());
+        assert_eq!(args_of(br#"{"args":{"_1":1}}"#), Ok(Some(r#"{"_1":1}"#)));
         assert_eq!(args_of(b"{}"), Ok(None));
         assert!(args_of(br#"{"args":5}"#).is_err());
         assert!(args_of(br#"{"args":null}"#).is_err());

@@ -779,6 +779,7 @@ dependencies = [
 name = "morloc-manifest"
 version = "0.109.0"
 dependencies = [
+ "morloc-runtime-types",
  "serde",
  "serde_json",
 ]

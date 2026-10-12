@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 10
+#define MORLOC_ABI_VERSION 11
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -907,6 +907,8 @@ typedef struct {
     // When true, skip the runtime NUL-in-Str scan at cross-pool
     // boundaries; set via `morloc make --unsafe-skip-null-check`.
     bool unsafe_skip_null_check;
+    // The runtime's parsed manifest; opaque to C.
+    void* rust;
 } manifest_t;
 
 // ========================================================================

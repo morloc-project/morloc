@@ -51,7 +51,7 @@ arguments mean something narrower off the CLI:
 
 ### IFACE-4 Off the CLI an argument is its JSON value
 Intent: ruled 2026-10-12
-Code: deviates model/language/issues/interfaces.md
+Code: conforms 2026-10-12
 
 The CLI carries an argument as an argv token, read by CLI-1 and the
 argument's text-form directives (`source:`, `form:`, `@parse`). Every
@@ -67,9 +67,13 @@ value the CLI gives it: its default, read by the same rules (CLI-1, its
 text-form directives, CLI-4), on the server. A default naming a file names
 the server's file (IFACE-3). A boolean flag left out is false. No
 interface requires a caller to fill a slot the CLI lets them omit.
-HTTP and LP take the arguments either as the positional array, one slot
-per argument, or as an object keyed by the argument names `--json-help`
-gives; only the object form can leave an argument out.
+Every interface but the CLI takes the arguments as an object keyed by
+argument name (MCP's `arguments`; `args` on HTTP and LP), and HTTP and LP
+also as the positional array, one slot per argument; only the object form
+can leave an argument out. The names are the keys `--json-help` gives:
+a record argument's fields by their own keys, and the whole record by
+its key only where the CLI takes it whole. A name given twice, a name no
+argument has, or a flag that is not a boolean is a bad request.
 
 ## Output selection
 

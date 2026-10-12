@@ -78,7 +78,7 @@
           "name": "sysconfig",
           "role": "group",
           "metavar": "SYS_CONFIG",
-          "required": true,
+          "required": false,
           "description": [
             "System configuration passed as a flattened flag group"
           ],
@@ -695,6 +695,18 @@
             ],
             "additionalProperties": false,
             "description": "System configuration passed as a flattened flag group"
+          },
+          "tmpDir": {
+            "type": "string",
+            "description": "Directory for scratch files (default: \"/tmp\")"
+          },
+          "numThreads": {
+            "type": "integer",
+            "description": "Worker thread count (default: 1)"
+          },
+          "removeCaches": {
+            "type": "boolean",
+            "description": "Whether to purge caches on exit (default: false)"
           }
         },
         "required": [],
@@ -751,7 +763,7 @@
     },
     {
       "name": "fileHead",
-      "description": "Read the lines of a file",
+      "description": "Read the lines of a file\n\nOutput actions (`_render`):\n  raw: [Str]\n  lines: Unit -- Print each string on its own line\n  sum: Str -- Join all strings into one semicolon-separated summary",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -766,7 +778,7 @@
               "sum"
             ],
             "default": "raw",
-            "description": "Output projection: 'raw' returns the underlying typed value; a renderer name returns that projection (e.g. an image)."
+            "description": "Output action: 'raw' returns the command's own value; any other value runs that output action, as its command-line flag does."
           }
         },
         "required": [

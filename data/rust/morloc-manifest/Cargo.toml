@@ -10,5 +10,6 @@ description = "Morloc manifest schema (v2): shared Rust types for the .manifest 
 # requires bumping this version in lockstep.
 
 [dependencies]
+morloc-runtime-types = { path = "../morloc-runtime-types" }
 serde = { workspace = true }
 serde_json = { workspace = true }

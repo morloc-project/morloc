@@ -1273,10 +1273,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                 } else if neg_set {
                     false
                 } else {
-                    default_val
-                        .as_deref()
-                        .map(|s| matches!(s, "true" | "1"))
-                        .unwrap_or(false)
+                    morloc_manifest::call_args::flag_default(default_val.as_deref())
                 };
                 out.push(ArgValue::Value(
                     if bool_val { "true" } else { "false" }.to_string(),
