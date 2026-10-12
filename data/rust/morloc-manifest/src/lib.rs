@@ -49,6 +49,7 @@
 //! compiler will still parse with an older nexus (modulo the version
 //! mismatch error in [`parse_manifest`]).
 
+pub mod cli_value;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 

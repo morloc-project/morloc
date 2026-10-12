@@ -668,21 +668,11 @@ fn input_object(
 }
 
 fn source_str(s: &SourceAtom) -> &'static str {
-    match s {
-        SourceAtom::Auto => "auto",
-        SourceAtom::Inline => "inline",
-        SourceAtom::File => "file",
-    }
+    morloc_manifest::cli_value::source_atom_name(*s)
 }
 
 fn form_str(f: &FormAtom) -> &'static str {
-    match f {
-        FormAtom::Auto => "auto",
-        FormAtom::Packet => "packet",
-        FormAtom::Bytes => "bytes",
-        FormAtom::BytesOnly => "bytes-only",
-        FormAtom::List => "list",
-    }
+    morloc_manifest::cli_value::form_atom_name(*f)
 }
 
 fn checks_json(checks: &[Check]) -> Value {
