@@ -1,3 +1,6 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #define PY_SSIZE_T_CLEAN
 #include "morloc.h"
 #include "Python.h"
@@ -5,6 +8,9 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 
 // boilerplate for numpy support
@@ -2546,6 +2552,56 @@ error:
 
 
 
+// Accept one connection on a non-blocking listening socket: the new
+// descriptor, non-blocking and close-on-exec, or -1 when there was none to
+// take (another worker took it, or a signal interrupted the call).
+static PyObject* pybinding__accept_client(PyObject* self, PyObject* args) {
+    int listen_fd = -1;
+    if (!PyArg_ParseTuple(args, "i", &listen_fd)) {
+        return NULL;
+    }
+#ifdef __linux__
+    int fd = accept4(listen_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+#else
+    int fd = accept(listen_fd, NULL, NULL);
+    if (fd >= 0) {
+        if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0
+            || fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) < 0) {
+            int saved = errno;
+            close(fd);
+            errno = saved;
+            fd = -1;
+        }
+    }
+#endif
+    if (fd < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ECONNABORTED) {
+            return PyLong_FromLong(-1);
+        }
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    return PyLong_FromLong((long)fd);
+}
+
+// Wait up to timeout_ms for fd to be readable; whether it is. Unlike
+// select.poll, reads no clock.
+static PyObject* pybinding__wait_readable(PyObject* self, PyObject* args) {
+    int fd = -1;
+    int timeout_ms = 0;
+    if (!PyArg_ParseTuple(args, "ii", &fd, &timeout_ms)) {
+        return NULL;
+    }
+    struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+    int ready;
+    Py_BEGIN_ALLOW_THREADS
+    ready = poll(&pfd, 1, timeout_ms);
+    Py_END_ALLOW_THREADS
+    if (ready < 0 && errno != EINTR) {
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    return PyBool_FromLong(ready > 0);
+}
+
 static PyObject*  pybinding__close_socket(PyObject* self, PyObject* args){
     int socket_id = 0;
 
@@ -4565,6 +4621,8 @@ static PyMethodDef Methods[] = {
     // The name pools built by earlier compilers call.
     {"send_packet_to_foreign_server", pybinding__send_reply, METH_VARARGS, "Same as send_reply"},
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
+    {"wait_readable", pybinding__wait_readable, METH_VARARGS, "Wait up to a timeout in milliseconds for a descriptor to be readable"},
+    {"accept_client", pybinding__accept_client, METH_VARARGS, "Accept a connection on a non-blocking listening socket, or -1 if none"},
     {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
     {"shm_live_bytes", pybinding__shm_live_bytes, METH_NOARGS, "Bytes of shared memory the program holds now (-1 unless MORLOC_SHM_STATS is set)"},
     {"shm_tracker_flush", pybinding__shm_tracker_flush, METH_NOARGS, "Free tracked SHM allocations from put_value calls"},

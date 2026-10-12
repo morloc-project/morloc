@@ -34,7 +34,7 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-nexus/main.rs::run_call_packet",
     "morloc-nexus/process.rs::init_shm",
     "morloc-nexus/mcp.rs::new_session_id",
-    "morloc-runtime/ipc_ffi.rs::read_packet",
+    "morloc-runtime/ipc_ffi.rs::recv",
     "morloc-runtime/stream.rs::is_this_process",
     "morloc-runtime/daemon_ffi.rs::write_port_file_atomic",
     "morloc-runtime/ipc_ffi.rs::accept_or_watch",

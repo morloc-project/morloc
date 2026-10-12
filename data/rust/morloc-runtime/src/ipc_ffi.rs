@@ -24,7 +24,6 @@ pub struct LanguageDaemon {
     pub socket_hold: i32,
 }
 
-const BUFFER_SIZE: usize = 65536;
 
 // Whether the accept loop still peeks each new connection for a readiness ping.
 // True until the first non-ping request is seen (readiness pings precede all
@@ -527,11 +526,10 @@ impl Peer {
         const YES: u8 = 1;
         const NO: u8 = 2;
         static SUPPORTED: AtomicU8 = AtomicU8::new(UNKNOWN);
-        peer_pid(fd)?;
         match SUPPORTED.load(Ordering::Relaxed) {
             YES => Some(Peer::Deferred { fd }),
             NO => None,
-            _ => match peer_pidfd(fd) {
+            _ => match peer_pid(fd).map(|_| peer_pidfd(fd))? {
                 Err(e) if e.raw_os_error() == Some(libc::ENOPROTOOPT) => {
                     SUPPORTED.store(NO, Ordering::Relaxed);
                     None
@@ -643,173 +641,138 @@ enum Wait<'a> {
 }
 
 // NET-5: with a peer, no time limit: a wait ends on end of file or when the peer is gone.
-unsafe fn read_packet(client_fd: i32, wait: Wait, errmsg: *mut *mut c_char) -> *mut u8 {
+unsafe fn read_packet(client_fd: i32, wait: Wait, reply: bool, errmsg: *mut *mut c_char) -> *mut u8 {
     clear_errmsg(errmsg);
-
-    let buffer = libc::calloc(BUFFER_SIZE, 1) as *mut u8;
-    if buffer.is_null() {
-        set_errmsg(errmsg, &MorlocError::Ipc("calloc failed for buffer".into()));
-        return ptr::null_mut();
-    }
-
-    // poll() instead of pselect/FD_SET: an fd_set can only hold descriptors
-    // below FD_SETSIZE (1024), and FD_SET on a higher fd is out-of-bounds. A
-    // pollfd imposes no ceiling on the fd value.
-    let mut pfd = libc::pollfd { fd: client_fd, events: libc::POLLIN, revents: 0 };
-
-    let (timeout_ptr, peer) = match wait {
-        Wait::Peer(p) => (&PEER_CHECK as *const libc::timespec, Some(p)),
-        Wait::Stall => (&UNNAMED_SENDER_STALL as *const libc::timespec, None),
-        Wait::Forever => (ptr::null(), None),
+    let mut reader = PacketReader {
+        fd: client_fd,
+        pfd: libc::pollfd { fd: client_fd, events: libc::POLLIN, revents: 0 },
+        wait,
+        spurious: 0,
+        wait_first: reply,
     };
-
-    // Initial receive: poll, then recv, retrying on EINTR (poll) and on a
-    // spurious EAGAIN/EWOULDBLOCK. A non-blocking socket can report readable via
-    // poll yet return EAGAIN on recv; on macOS an accepted fd inherits the listen
-    // socket's non-blocking flag, so this is reachable. Looping (rather than
-    // falling through with a negative length, which then copied uninitialized
-    // buffer bytes) keeps a garbage packet from being returned as success.
-    // Bound consecutive poll-readable-but-recv-EAGAIN spins so a peer that keeps
-    // the fd poll-readable without ever delivering data cannot defeat the
-    // per-iteration timeout and hang the reader indefinitely. The normal path
-    // sees zero or one spurious wakeup; this ceiling is orders of magnitude
-    // above that.
-    const MAX_SPURIOUS_WAKEUPS: u32 = 1024;
-    let mut spurious: u32 = 0;
-    // The size is read from the header, so the first read lasts until the
-    // whole header is in.
+    let mut head = [0u8; HEAD_READ];
     let mut have = 0usize;
-    let recv_length = loop {
-        let mut ready;
-        loop {
-            ready = poll_wait(&mut pfd, 1, timeout_ptr);
-            if !(ready < 0 && crate::utility::errno_val() == libc::EINTR) {
-                break;
-            }
-        }
-
-        if ready == 0 {
-            if peer.is_some_and(Peer::alive) {
-                continue;
-            }
-            libc::free(buffer as *mut c_void);
-            let why = if peer.is_some() { "The sending process is gone" } else { "Timeout waiting for initial data" };
-            set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
-            return ptr::null_mut();
-        }
-        if ready < 0 {
-            libc::free(buffer as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Ipc("poll error".into()));
-            return ptr::null_mut();
-        }
-        if !pfd_ready(&pfd) {
-            libc::free(buffer as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Ipc("Bad client file descriptor".into()));
-            return ptr::null_mut();
-        }
-
-        let n = libc::recv(client_fd, buffer.add(have) as *mut c_void, BUFFER_SIZE - have, 0);
-        if n == 0 {
-            if trace_close_enabled() {
-                eprintln!("[MLC_IPC] pid={} recv EOF (0 bytes) fd={}", libc::getpid(), client_fd);
-            }
-            libc::free(buffer as *mut c_void);
-            let why = if have == 0 { "Connection closed by peer" } else { "Connection closed early" };
-            set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
-            return ptr::null_mut();
-        }
-        if n > 0 {
-            have += n as usize;
-            if have >= morloc_runtime_types::packet::PKT_HEADER_SIZE {
-                break have as isize;
-            }
-            continue;
-        }
-        let e = crate::utility::errno_val();
-        if e == libc::EWOULDBLOCK || e == libc::EAGAIN {
-            spurious += 1;
-            if spurious > MAX_SPURIOUS_WAKEUPS {
-                libc::free(buffer as *mut c_void);
-                set_errmsg(errmsg, &MorlocError::Ipc("Timeout waiting for initial data".into()));
+    while have < morloc_runtime_types::packet::PKT_HEADER_SIZE {
+        match reader.recv(head.as_mut_ptr().add(have), HEAD_READ - have, have == 0) {
+            Ok(n) => have += n,
+            Err(why) => {
+                set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
                 return ptr::null_mut();
             }
-            continue; // no data yet despite poll; re-poll and retry
         }
-        libc::free(buffer as *mut c_void);
-        set_errmsg(errmsg, &MorlocError::Ipc("Recv error".into()));
-        return ptr::null_mut();
-    };
+    }
 
-    // Get packet size from header
     let mut packet_err: *mut c_char = ptr::null_mut();
-    let packet_length = crate::packet_ffi::morloc_packet_size(buffer, &mut packet_err);
+    let packet_length = crate::packet_ffi::morloc_packet_size(head.as_ptr(), &mut packet_err);
     if !packet_err.is_null() {
-        libc::free(buffer as *mut c_void);
         *errmsg = packet_err;
         return ptr::null_mut();
     }
-
-    let result = libc::calloc(packet_length, 1) as *mut u8;
+    let result = libc::malloc(packet_length.max(1)) as *mut u8;
     if result.is_null() {
-        libc::free(buffer as *mut c_void);
-        set_errmsg(errmsg, &MorlocError::Ipc("calloc failure".into()));
+        set_errmsg(errmsg, &MorlocError::Ipc("malloc failure".into()));
         return ptr::null_mut();
     }
-
-    let copy_length = (recv_length as usize).min(packet_length);
-    ptr::copy_nonoverlapping(buffer, result, copy_length);
-    let mut data_ptr = result.add(copy_length);
-    libc::free(buffer as *mut c_void);
-
-    while (data_ptr as usize - result as usize) < packet_length {
-        let ready = poll_wait(&mut pfd, 1, timeout_ptr);
-        if ready == 0 {
-            if peer.is_some_and(Peer::alive) {
-                continue;
+    let copied = have.min(packet_length);
+    ptr::copy_nonoverlapping(head.as_ptr(), result, copied);
+    let mut got = copied;
+    while got < packet_length {
+        match reader.recv(result.add(got), packet_length - got, false) {
+            Ok(n) => got += n,
+            Err(why) => {
+                libc::free(result as *mut c_void);
+                let why = if why == TIMEOUT_INITIAL { "Timeout waiting for remaining data" } else { why };
+                set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
+                return ptr::null_mut();
             }
-            libc::free(result as *mut c_void);
-            let why = if peer.is_some() { "The sending process is gone" } else { "Timeout waiting for remaining data" };
-            set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
-            return ptr::null_mut();
         }
-        if ready < 0 {
-            if crate::utility::errno_val() == libc::EINTR {
-                continue;
-            }
-            libc::free(result as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Ipc("poll error".into()));
-            return ptr::null_mut();
-        }
-        if !pfd_ready(&pfd) {
-            continue;
-        }
-        let remaining = packet_length - (data_ptr as usize - result as usize);
-        let n = libc::recv(client_fd, data_ptr as *mut c_void, remaining.min(BUFFER_SIZE), 0);
-        if n > 0 {
-            data_ptr = data_ptr.add(n as usize);
-            continue;
-        }
-        if n == 0 {
-            libc::free(result as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Ipc("Connection closed early".into()));
-            return ptr::null_mut();
-        }
-        let e = crate::utility::errno_val();
-        if e == libc::EWOULDBLOCK || e == libc::EAGAIN {
-            spurious += 1;
-            if spurious <= MAX_SPURIOUS_WAKEUPS {
-                continue;
-            }
-            libc::free(result as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Ipc("Timeout waiting for remaining data".into()));
-            return ptr::null_mut();
-        }
-        libc::free(result as *mut c_void);
-        set_errmsg(errmsg, &MorlocError::Ipc("Recv error".into()));
-        return ptr::null_mut();
     }
-
     result
+}
+
+/// Bytes read before the header is parsed: a whole small packet.
+const HEAD_READ: usize = 4096;
+
+const TIMEOUT_INITIAL: &str = "Timeout waiting for initial data";
+
+struct PacketReader<'a> {
+    fd: i32,
+    pfd: libc::pollfd,
+    wait: Wait<'a>,
+    spurious: u32,
+    /// A reply is not there yet when its read begins.
+    wait_first: bool,
+}
+
+impl PacketReader<'_> {
+    /// Receive at least one byte into `dst`, waiting as `wait` allows.
+    /// `first` says no byte of the packet has arrived yet.
+    unsafe fn recv(&mut self, dst: *mut u8, len: usize, first: bool) -> Result<usize, &'static str> {
+        // A non-blocking socket can report readable yet return EAGAIN (an
+        // accepted fd inherits the listener's flag on macOS); a sender that
+        // keeps the fd readable without delivering data is bounded here.
+        const MAX_SPURIOUS_WAKEUPS: u32 = 1024;
+        let mut polled = false;
+        if self.wait_first {
+            self.wait_first = false;
+            self.wait_readable()?;
+            polled = true;
+        }
+        loop {
+            let n = libc::recv(self.fd, dst as *mut c_void, len, libc::MSG_DONTWAIT);
+            if n > 0 {
+                return Ok(n as usize);
+            }
+            if n == 0 {
+                if trace_close_enabled() {
+                    eprintln!("[MLC_IPC] pid={} recv EOF (0 bytes) fd={}", libc::getpid(), self.fd);
+                }
+                return Err(if first { "Connection closed by peer" } else { "Connection closed early" });
+            }
+            let e = crate::utility::errno_val();
+            if e == libc::EINTR {
+                continue;
+            }
+            if e != libc::EWOULDBLOCK && e != libc::EAGAIN {
+                return Err("Recv error");
+            }
+            if polled {
+                self.spurious += 1;
+                if self.spurious > MAX_SPURIOUS_WAKEUPS {
+                    return Err(TIMEOUT_INITIAL);
+                }
+            }
+            self.wait_readable()?;
+            polled = true;
+        }
+    }
+
+    unsafe fn wait_readable(&mut self) -> Result<(), &'static str> {
+        let (timeout_ptr, peer) = match self.wait {
+            Wait::Peer(p) => (&PEER_CHECK as *const libc::timespec, Some(p)),
+            Wait::Stall => (&UNNAMED_SENDER_STALL as *const libc::timespec, None),
+            Wait::Forever => (ptr::null(), None),
+        };
+        loop {
+            let ready = poll_wait(&mut self.pfd, 1, timeout_ptr);
+            if ready < 0 {
+                if crate::utility::errno_val() == libc::EINTR {
+                    continue;
+                }
+                return Err("poll error");
+            }
+            if ready == 0 {
+                if peer.is_some_and(Peer::alive) {
+                    continue;
+                }
+                return Err(if peer.is_some() { "The sending process is gone" } else { TIMEOUT_INITIAL });
+            }
+            if !pfd_ready(&self.pfd) {
+                return Err("Bad client file descriptor");
+            }
+            return Ok(());
+        }
+    }
 }
 
 pub(crate) unsafe fn stream_from_client(
@@ -818,8 +781,8 @@ pub(crate) unsafe fn stream_from_client(
 ) -> *mut u8 {
     // NET-5: a sender that cannot be named has its stalls bounded instead.
     let request = match Peer::of(client_fd) {
-        Some(peer) => read_packet(client_fd, Wait::Peer(&peer), errmsg),
-        None => read_packet(client_fd, Wait::Stall, errmsg),
+        Some(peer) => read_packet(client_fd, Wait::Peer(&peer), false, errmsg),
+        None => read_packet(client_fd, Wait::Stall, false, errmsg),
     };
     if !request.is_null() {
         REQUEST.with(|r| r.set((client_fd, crate::fork_policy::generation())));
@@ -1175,8 +1138,8 @@ pub(crate) unsafe fn send_and_receive_over_socket(
     // NET-5: the reply waits as long as the callee's process lives; a callee
     // that cannot be named is waited on until its end closes.
     let result = match Peer::of(client_fd) {
-        Some(peer) => read_packet(client_fd, Wait::Peer(&peer), &mut err),
-        None => read_packet(client_fd, Wait::Forever, &mut err),
+        Some(peer) => read_packet(client_fd, Wait::Peer(&peer), true, &mut err),
+        None => read_packet(client_fd, Wait::Forever, true, &mut err),
     };
     if !err.is_null() {
         drop_conn(client_fd);
@@ -1301,7 +1264,7 @@ pub(crate) unsafe fn mlc_spawn_watched(
     std::thread::spawn(move || {
         let _user = user;
         let mut err: *mut c_char = ptr::null_mut();
-        let result = read_packet(fd, Wait::Forever, &mut err);
+        let result = read_packet(fd, Wait::Forever, true, &mut err);
         close_socket(fd);
         // SHM-8
         crate::packet_ffi::inherit_reply(result);

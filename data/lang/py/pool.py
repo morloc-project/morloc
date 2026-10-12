@@ -673,6 +673,7 @@ def worker_process(listen_fd, tmpdir, shm_basename, shutdown_flag, busy_count, t
     listener.setblocking(False)
     me = os.getpid()
     last_activity = time.monotonic()
+    busy_since_idle_check = False
     warned_blocked = False
     trace_retire = os.environ.get("MORLOC_PY_TRACE_RETIRE") == "1"
     last_trace = 0.0
@@ -689,10 +690,8 @@ def worker_process(listen_fd, tmpdir, shm_basename, shutdown_flag, busy_count, t
         # poll() (not select.select) avoids the FD_SETSIZE=1024 ceiling: a
         # job-queue fd >= 1024 makes select.select raise ValueError and kill the
         # worker. The Rust/C/R pools already use poll(2) for this reason.
-        poller = select.poll()
-        poller.register(listener.fileno(), select.POLLIN)
         while not shutdown_flag.value:
-            events = poller.poll(10)  # milliseconds (was 0.01s)
+            events = morloc.wait_readable(listen_fd, 10)
             if shutdown_flag.value:
                 break
             if events:
@@ -701,23 +700,26 @@ def worker_process(listen_fd, tmpdir, shm_basename, shutdown_flag, busy_count, t
                 # Every idle worker polls the one listening socket; those that
                 # lose the race to accept find nothing and poll again.
                 try:
-                    conn, _ = listener.accept()
-                except (BlockingIOError, InterruptedError):
-                    continue
+                    client_fd = morloc.accept_client(listen_fd)
                 except OSError as e:
                     if e.errno in (errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM):
                         time.sleep(0.05)
                         continue
                     raise
-                client_fd = conn.detach()
-                os.set_blocking(client_fd, False)
+                if client_fd < 0:
+                    continue
                 run_job(client_fd)
-                last_activity = time.monotonic()
+                busy_since_idle_check = True
                 if trace_retire:
                     trace("job done")
             else:
                 # FORK-15: leases of user-forked children that are gone.
                 morloc.reclaim_leases()
+                # A clock read is a system call on some hosts, so the idle
+                # time is measured only from polls that found nothing.
+                if busy_since_idle_check:
+                    busy_since_idle_check = False
+                    last_activity = time.monotonic()
             if trace_retire and not events and time.monotonic() - last_trace >= 1.0:
                 last_trace = time.monotonic()
                 trace("idle check")
