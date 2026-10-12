@@ -710,6 +710,39 @@ const TIMEOUT_INITIAL: &str = "Timeout waiting for initial data";
 /// The sender closed before the first byte of a packet.
 pub(crate) const CLOSED_BY_PEER: &str = "Connection closed by peer";
 
+// NET-5: a reply waits as long as the callee's process lives; a callee that
+// cannot be named is waited on until its end closes.
+fn reply_wait(peer: &Option<Peer>) -> Wait<'_> {
+    match peer {
+        Some(p) => Wait::Peer(p),
+        None => Wait::Forever,
+    }
+}
+
+// NET-5
+pub(crate) unsafe fn recv_frame(fd: i32) -> Result<Vec<u8>, &'static str> {
+    let peer = Peer::of(fd);
+    let mut reader = PacketReader {
+        fd,
+        pfd: libc::pollfd { fd, events: libc::POLLIN, revents: 0 },
+        wait: reply_wait(&peer),
+        spurious: 0,
+        wait_first: true,
+    };
+    let mut fill = |buf: &mut [u8], first: bool| -> Result<(), &'static str> {
+        let mut got = 0usize;
+        while got < buf.len() {
+            got += reader.recv(buf.as_mut_ptr().add(got), buf.len() - got, first && got == 0)?;
+        }
+        Ok(())
+    };
+    let mut len = [0u8; 4];
+    fill(&mut len, true)?;
+    let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+    fill(&mut body, false)?;
+    Ok(body)
+}
+
 struct PacketReader<'a> {
     fd: i32,
     pfd: libc::pollfd,
@@ -1165,12 +1198,8 @@ pub(crate) unsafe fn send_and_receive_over_socket(
             CStr::from_ptr(socket_path).to_string_lossy());
     }
 
-    // NET-5: the reply waits as long as the callee's process lives; a callee
-    // that cannot be named is waited on until its end closes.
-    let result = match Peer::of(client_fd) {
-        Some(peer) => read_packet(client_fd, Wait::Peer(&peer), true, &mut err),
-        None => read_packet(client_fd, Wait::Forever, true, &mut err),
-    };
+    let peer = Peer::of(client_fd);
+    let result = read_packet(client_fd, reply_wait(&peer), true, &mut err);
     if !err.is_null() {
         drop_conn(client_fd);
         *errmsg = err;
@@ -2419,3 +2448,29 @@ mod endpoint_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+mod forward_reply_tests {
+    use super::*;
+
+    // DAEMON-6, NET-5
+    #[test]
+    fn a_reply_that_takes_its_time_is_read_and_a_closed_peer_ends_the_wait() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            let mut theirs = theirs;
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            theirs.write_all(&[0, 0, 0, 4]).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            theirs.write_all(b"abcd").unwrap();
+            theirs
+        });
+        let got = unsafe { recv_frame(ours.as_raw_fd()) };
+        assert_eq!(got.as_deref(), Ok(&b"abcd"[..]));
+        drop(writer.join().unwrap());
+        assert!(unsafe { recv_frame(ours.as_raw_fd()) }.is_err());
+    }
+}
+

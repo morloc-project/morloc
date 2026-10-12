@@ -62,6 +62,22 @@ re-checked.
   json_help.rs:550; MCP marks a whole-object group optional, and an
   unrolled field with a default optional (json_help.rs:1073, 1109).
 
+- **The C manifest drops an unrolled `data` argument's default.** [read]
+  morloc-runtime/src/manifest_ffi.rs `populate_arg` (Arg::Alt branch,
+  ~l.1671-1687) copies neither `default_val` nor `required`, so the daemon
+  cannot default an unrolled `data` argument (IFACE-5).
+- **MCP's keyed-group fallback to field keys cannot run.** [read]
+  morloc-nexus/src/mcp.rs `resolve_slot` reads flattened field keys for a
+  keyed group (~l.589), but `resolve_arguments` rejects those keys as
+  unknown first (~l.538-541).
+- **MCP lists a whole-object group as optional when a field is required.**
+  [read] json_help.rs ~l.1028-1029: `tools/list` says the group may be
+  omitted, and the call then fails "Required field ... missing".
+- **A daemon never resets its stdin claim.** [read] morloc-runtime/src/
+  cli.rs `STDIN_CLAIMED` (~l.66) is set by the first argument read from
+  `-`/`/dev/stdin` and never cleared, and such a read takes the daemon's
+  own stdin (~l.172-176).
+
 ## Output (IFACE-9)
 
 - **Non-finite floats.** [read, survey] Lists and records write the

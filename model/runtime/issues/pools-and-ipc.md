@@ -23,8 +23,11 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   with ECONNREFUSED instead of blocking; `connect_to` then retries for at
   most 30 s (ipc_ffi.rs), a deadline on a pool call (DAEMON-6). Matters
   for fork-mode pools, whose backlog only idle workers drain.
-- **The front end's forward to a daemon times out at 60 s.** [read]
-  Violates DAEMON-6 and IFACE-12. data/rust/morloc-runtime/src/
-  router_ffi.rs:772-789 sets `SO_RCVTIMEO`/`SO_SNDTIMEO` of 60 s on the
-  forward socket; a call longer than that fails "Failed to read response
-  length" while the child keeps computing.
+- **A caller's connect and send block without a liveness check.** [read]
+  Against NET-5. The sockets a pool caller (ipc_ffi.rs `connect_to`,
+  `send_request`) and the front end's forward (router_ffi.rs
+  `connect_to_daemon`) use are blocking, so `sendmsg` to a reader that died
+  while a copy of its descriptor lives on, or `connect` to a full backlog,
+  blocks in the kernel and never reaches `send_parts`' once-a-second
+  `Peer::alive` check. Only the reply read is liveness-checked.
+

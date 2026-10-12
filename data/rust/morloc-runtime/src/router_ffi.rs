@@ -635,7 +635,6 @@ pub(crate) unsafe fn router_forward(
 
     // Serialize request to JSON
     let req_json = serialize_request_to_json(request);
-    let c_req = CString::new(req_json.as_str()).unwrap_or_default();
     let req_len = req_json.len();
 
     // Try to connect, retry once on failure
@@ -674,9 +673,7 @@ pub(crate) unsafe fn router_forward(
         (req_len & 0xFF) as u8,
     ];
 
-    // send_all retries on EAGAIN (a full send buffer surfaces as EWOULDBLOCK on
-    // this SO_SNDTIMEO socket) instead of misreading it as a fatal error and
-    // truncating the request mid-message.
+    // NET-5
     if !crate::ipc_ffi::send_all(sock, len_buf.as_ptr(), 4) {
         libc::close(sock);
         set_errmsg(
@@ -686,7 +683,7 @@ pub(crate) unsafe fn router_forward(
         return ptr::null_mut();
     }
 
-    if !crate::ipc_ffi::send_all(sock, c_req.as_ptr() as *const u8, req_len) {
+    if !crate::ipc_ffi::send_all(sock, req_json.as_ptr(), req_len) {
         libc::close(sock);
         set_errmsg(
             errmsg,
@@ -695,66 +692,23 @@ pub(crate) unsafe fn router_forward(
         return ptr::null_mut();
     }
 
-    // Read response length
-    let mut resp_len_buf = [0u8; 4];
-    let n = libc::recv(
-        sock,
-        resp_len_buf.as_mut_ptr() as *mut c_void,
-        4,
-        libc::MSG_WAITALL,
-    );
-    if n != 4 {
-        libc::close(sock);
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other("Failed to read response length from daemon".into()),
-        );
-        return ptr::null_mut();
-    }
-
-    let resp_len = ((resp_len_buf[0] as u32) << 24)
-        | ((resp_len_buf[1] as u32) << 16)
-        | ((resp_len_buf[2] as u32) << 8)
-        | (resp_len_buf[3] as u32);
-
-    let resp_json = libc::malloc(resp_len as usize + 1) as *mut c_char;
-    if resp_json.is_null() {
-        libc::close(sock);
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other("Failed to allocate response buffer".into()),
-        );
-        return ptr::null_mut();
-    }
-
-    let mut total_recv: usize = 0;
-    while total_recv < resp_len as usize {
-        let n = libc::recv(
-            sock,
-            resp_json.add(total_recv) as *mut c_void,
-            resp_len as usize - total_recv,
-            0,
-        );
-        if n <= 0 {
-            libc::free(resp_json as *mut c_void);
-            libc::close(sock);
+    // DAEMON-6
+    let frame = crate::ipc_ffi::recv_frame(sock);
+    libc::close(sock);
+    let body = match frame {
+        Ok(body) => body,
+        Err(why) => {
             set_errmsg(
                 errmsg,
-                &MorlocError::Other("Failed to read response body from daemon".into()),
+                &MorlocError::Other(format!("Failed to read the reply from the program's daemon: {}", why)),
             );
             return ptr::null_mut();
         }
-        total_recv += n as usize;
-    }
-    *resp_json.add(resp_len as usize) = 0;
-    libc::close(sock);
-
-    let resp = daemon_parse_response(resp_json, resp_len as usize, errmsg);
-    libc::free(resp_json as *mut c_void);
-    resp
+    };
+    daemon_parse_response(body.as_ptr() as *const c_char, body.len(), errmsg)
 }
 
-/// Helper: connect to a program daemon's unix socket with 60s timeouts.
+/// Connect to a program daemon's unix socket.
 unsafe fn connect_to_daemon(
     prog: *mut RouterProgram,
     errmsg: *mut *mut c_char,
@@ -768,25 +722,6 @@ unsafe fn connect_to_daemon(
         return -1;
     }
     crate::utility::set_nosigpipe(sock);
-
-    let tv = libc::timeval {
-        tv_sec: 60,
-        tv_usec: 0,
-    };
-    libc::setsockopt(
-        sock,
-        libc::SOL_SOCKET,
-        libc::SO_RCVTIMEO,
-        &tv as *const libc::timeval as *const c_void,
-        std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-    );
-    libc::setsockopt(
-        sock,
-        libc::SOL_SOCKET,
-        libc::SO_SNDTIMEO,
-        &tv as *const libc::timeval as *const c_void,
-        std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-    );
 
     // The path was checked to fit when the program was registered.
     let addr = crate::utility::unix_socket_addr(CStr::from_ptr((*prog).daemon_socket.as_ptr()).to_bytes())

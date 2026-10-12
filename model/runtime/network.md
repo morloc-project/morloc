@@ -70,7 +70,7 @@ unique name, created exclusively. Paths the user names (`--socket`,
 
 ### NET-5 A request on a local socket waits as long as its sender lives
 Status: implemented
-Checked by: a_stopped_sender_keeps_its_request, a_request_whose_sender_is_gone_ends_though_its_fd_lives_on, a_sender_counts_as_alive_until_it_exits_in_either_identity, a_reply_to_a_stopped_reader_waits_until_it_resumes, a_reply_to_a_reader_that_died_ends_though_its_fd_lives_on, a_caller_whose_callee_died_stops_waiting_though_the_fd_lives_on
+Checked by: a_stopped_sender_keeps_its_request, a_request_whose_sender_is_gone_ends_though_its_fd_lives_on, a_sender_counts_as_alive_until_it_exits_in_either_identity, a_reply_to_a_stopped_reader_waits_until_it_resumes, a_reply_to_a_reader_that_died_ends_though_its_fd_lives_on, a_caller_whose_callee_died_stops_waiting_though_the_fd_lives_on, a_reply_that_takes_its_time_is_read_and_a_closed_peer_ends_the_wait
 
 A pool reading a request from a local socket waits until the request is
 complete, the sender closes its end, or the sending process no longer
