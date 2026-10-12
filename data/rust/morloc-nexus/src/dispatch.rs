@@ -1190,7 +1190,7 @@ fn run_remote_command(
         process::clean_exit(1);
     }
 
-    die_on_top_level_err(result_ptr, &return_schema, c_schema);
+    die_on_top_level_err(result_ptr, c_schema);
 
     // A table-typed result is a block whatever packet form carried it
     // (a reference, or a file a cached result was read back from).
@@ -1566,33 +1566,22 @@ unsafe fn json_arg_packet(
 /// already shows.
 fn die_on_top_level_err(
     result_ptr: *mut u8,
-    return_schema: &morloc_runtime_types::schema::Schema,
     c_schema: *const morloc_runtime_types::cschema::CSchema,
 ) {
     extern "C" {
-        fn mlc_show(
+        fn morloc_top_level_err(
             voidstar: *const std::ffi::c_void,
             schema: *const morloc_runtime_types::cschema::CSchema,
-            errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut std::ffi::c_char;
     }
-    if morloc_runtime_types::schema::SerialType::Variant != return_schema.serial_type {
+    let out = unsafe { morloc_top_level_err(result_ptr as *const std::ffi::c_void, c_schema) };
+    if out.is_null() {
         return;
     }
-    let tag = unsafe { *result_ptr } as usize;
-    if !return_schema.keys.get(tag).map(|k| k == "Err").unwrap_or(false) {
-        return;
-    }
-    let mut show_err: *mut std::ffi::c_char = std::ptr::null_mut();
     let rendered = unsafe {
-        let out = mlc_show(result_ptr as *const std::ffi::c_void, c_schema, &mut show_err);
-        if out.is_null() {
-            process::take_c_errmsg(show_err).unwrap_or_else(|| "unknown error".into())
-        } else {
-            let text = std::ffi::CStr::from_ptr(out).to_string_lossy().into_owned();
-            libc::free(out as *mut std::ffi::c_void);
-            text
-        }
+        let text = std::ffi::CStr::from_ptr(out).to_string_lossy().into_owned();
+        libc::free(out as *mut std::ffi::c_void);
+        text
     };
     crate::runlog::record_error(&rendered);
     eprintln!("Error: run failed\n{}", rendered);
@@ -2288,7 +2277,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
         process::clean_exit(1);
     }
 
-    die_on_top_level_err(result_ptr, &return_schema, c_return_schema);
+    die_on_top_level_err(result_ptr, c_return_schema);
     print_result_c(result_ptr, c_return_schema, &pkt_bytes, false, config);
 
     // Cleanup

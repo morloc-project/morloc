@@ -553,33 +553,16 @@ pub struct DaemonConfig {
     pub emergency_exit_fn: Option<unsafe extern "C" fn(i32)>,
 }
 
-/// Error classification for a daemon dispatch failure.
-///
-/// `success = true` -> `error_kind = OK`. On failure, the kind drives
-/// HTTP status mapping in `handle_http_connection` (and in the router's
-/// equivalent). Unix/TCP clients keep reading the `success` boolean and
-/// the `{"status":"error","error":"..."}` JSON envelope; they don't see
-/// the kind on the wire today.
-pub const DAEMON_ERROR_OK:          i32 = 0;
-pub const DAEMON_ERROR_BAD_REQUEST: i32 = 1;
-pub const DAEMON_ERROR_NOT_FOUND:   i32 = 2;
-pub const DAEMON_ERROR_TIMEOUT:     i32 = 3;
-pub const DAEMON_ERROR_RECOVERING:  i32 = 4;
-pub const DAEMON_ERROR_INTERNAL:    i32 = 5;
+pub const DAEMON_ERROR_OK: i32 = morloc_runtime_types::daemon_error::OK;
+pub const DAEMON_ERROR_BAD_REQUEST: i32 = morloc_runtime_types::daemon_error::BAD_REQUEST;
+pub const DAEMON_ERROR_NOT_FOUND: i32 = morloc_runtime_types::daemon_error::NOT_FOUND;
+pub const DAEMON_ERROR_TIMEOUT: i32 = morloc_runtime_types::daemon_error::TIMEOUT;
+pub const DAEMON_ERROR_RECOVERING: i32 = morloc_runtime_types::daemon_error::RECOVERING;
+pub const DAEMON_ERROR_INTERNAL: i32 = morloc_runtime_types::daemon_error::INTERNAL;
+pub const DAEMON_ERROR_FAILED: i32 = morloc_runtime_types::daemon_error::FAILED;
 
-/// Translate a `DAEMON_ERROR_*` kind to its HTTP status code.
 pub fn daemon_error_kind_to_http_status(kind: i32, success: bool) -> i32 {
-    if success {
-        return 200;
-    }
-    match kind {
-        DAEMON_ERROR_BAD_REQUEST => 400,
-        DAEMON_ERROR_NOT_FOUND   => 404,
-        DAEMON_ERROR_TIMEOUT     => 408,
-        DAEMON_ERROR_RECOVERING  => 503,
-        // OK with success=false shouldn't happen, but treat as internal.
-        _ => 500,
-    }
+    morloc_runtime_types::daemon_error::http_status(kind, success)
 }
 
 /// Matches daemon_response_t from daemon.h. `error_kind` is one of the
@@ -1094,6 +1077,7 @@ struct JsonResponse {
     mime: Option<String>,
     action: Option<String>,
     text: Option<bool>,
+    class: Option<String>,
 }
 
 /// The response as written to the socket. The member order is the wire
@@ -1103,6 +1087,8 @@ struct WireResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<String>,
     status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    class: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1163,14 +1149,10 @@ pub(crate) unsafe fn daemon_parse_response(
         .as_deref()
         .map(|s| s == "ok")
         .unwrap_or(false);
-    // The wire JSON envelope does not carry error_kind, so a parsed
-    // error response defaults to INTERNAL. Callers that received a real
-    // dispatch response (not a re-parse) will already have the correct
-    // kind set directly on DaemonResponse.
     (*resp).error_kind = if (*resp).success {
         DAEMON_ERROR_OK
     } else {
-        DAEMON_ERROR_INTERNAL
+        morloc_runtime_types::daemon_error::kind_of_class(parsed.class.as_deref().unwrap_or("failure"))
     };
 
     // Media (`@mime`) return: decode base64 back to raw bytes + mime, mirroring
@@ -1285,6 +1267,8 @@ pub(crate) unsafe fn serialize_response(
     let mut wire = WireResponse {
         id: owned((*response).id),
         status: if (*response).success { "ok" } else { "error" },
+        class: (!(*response).success)
+            .then(|| morloc_runtime_types::daemon_error::class_name((*response).error_kind)),
         action: owned((*response).action),
         result_b64: None,
         mime: None,
@@ -1779,7 +1763,7 @@ unsafe fn set_packet_error(
     default_msg: &str,
 ) {
     (*resp).success = false;
-    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+    (*resp).error_kind = DAEMON_ERROR_FAILED;
     if (*err).is_null() {
         let c = CString::new(default_msg).unwrap_or_default();
         (*resp).error = libc::strdup(c.as_ptr());
@@ -1882,6 +1866,33 @@ unsafe fn emit_raw_media(
     };
 }
 
+pub(crate) unsafe fn top_level_err(want_packet: bool, voidstar: *const c_void, schema: *const CSchema) -> Option<String> {
+    use morloc_runtime_types::schema::SerialType;
+    if want_packet || voidstar.is_null() || (*schema).serial_type != SerialType::Variant as u32 {
+        return None;
+    }
+    let rs = CSchema::to_rust(schema);
+    let tag = *(voidstar as *const u8) as usize;
+    if rs.keys.get(tag).map(String::as_str) != Some("Err") {
+        return None;
+    }
+    let mut err: *mut c_char = ptr::null_mut();
+    let out = crate::intrinsics::mlc_show(voidstar, schema, &mut err);
+    if out.is_null() {
+        let msg = if err.is_null() {
+            "the call returned Err".to_string()
+        } else {
+            let m = CStr::from_ptr(err).to_string_lossy().into_owned();
+            libc::free(err as *mut c_void);
+            m
+        };
+        return Some(msg);
+    }
+    let text = CStr::from_ptr(out).to_string_lossy().into_owned();
+    libc::free(out as *mut c_void);
+    Some(text)
+}
+
 /// # Safety
 /// `packet` must be a well-formed morloc packet.
 unsafe fn adopt_rptr_result(packet: *const u8) {
@@ -1953,6 +1964,10 @@ impl Drop for OwnedSchema {
 
 fn internal(e: *mut c_char) -> (i32, *mut c_char) {
     (DAEMON_ERROR_INTERNAL, e)
+}
+
+fn failed(e: *mut c_char) -> (i32, *mut c_char) {
+    (DAEMON_ERROR_FAILED, e)
 }
 
 fn bad_request(e: *mut c_char) -> (i32, *mut c_char) {
@@ -2419,7 +2434,11 @@ unsafe fn dispatch_request(
                 let owned = OwnedSchema(checked(|e| parse_schema(cmd.ret.schema, e)).map_err(internal)?);
                 let return_schema = owned.0;
                 let result_abs = checked(|e| morloc_eval(cmd.expr, return_schema, arg_voidstars, arg_schemas_arr, nargs, e))
-                    .map_err(internal)?;
+                    .map_err(failed)?;
+                if let Some(msg) = top_level_err(want_packet, result_abs as *const c_void, return_schema as *const CSchema) {
+                    let c = CString::new(msg).unwrap_or_default();
+                    return Err(failed(libc::strdup(c.as_ptr())));
+                }
                 if want_media_bytes {
                     // Raw-media return: raw content bytes + media type, so the
                     // consumer (HTTP `Content-Type` body / MCP content block)
@@ -2577,7 +2596,7 @@ unsafe fn dispatch_request(
                     get_morloc_data_packet_error_message(result_packet, &mut err);
                 if !packet_error.is_null() {
                     (*resp).success = false;
-                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+                    (*resp).error_kind = DAEMON_ERROR_FAILED;
                     (*resp).error = libc::strdup(packet_error);
                     libc::free(result_packet as *mut c_void);
                 } else if !err.is_null() {
@@ -2605,10 +2624,20 @@ unsafe fn dispatch_request(
                             return_schema as *const CSchema,
                             &mut err,
                         );
+                        let failed = if err.is_null() {
+                            top_level_err(want_packet, packet_value as *const c_void, return_schema as *const CSchema)
+                        } else {
+                            None
+                        };
                         if !err.is_null() {
                             (*resp).success = false;
                             (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                             (*resp).error = err;
+                        } else if let Some(msg) = failed {
+                            (*resp).success = false;
+                            (*resp).error_kind = DAEMON_ERROR_FAILED;
+                            let c = CString::new(msg).unwrap_or_default();
+                            (*resp).error = libc::strdup(c.as_ptr());
                         } else if want_media_bytes {
                             // Raw-media return: raw content bytes + media type
                             // from the pool's result value.
@@ -2939,7 +2968,7 @@ unsafe fn handle_http_connection(
     let mut errmsg: *mut c_char = ptr::null_mut();
     let http_req = http_parse_request(client_fd, &mut errmsg);
     if !errmsg.is_null() {
-        let body = b"{\"status\":\"error\",\"error\":\"Bad request\"}\0";
+        let body = b"{\"status\":\"error\",\"class\":\"bad-request\",\"error\":\"Bad request\"}\0";
         let ct = b"application/json\0";
         crate::http_ffi::write_response(
             client_fd,
@@ -2981,7 +3010,7 @@ unsafe fn handle_http_connection(
     // through the Health pipeline -- including the recovery gate).
     // NET-1
     if (*http_req).method != HttpMethod::Options && !(*http_req).authorized {
-        let body = b"{\"status\":\"error\",\"error\":\"unauthorized\"}";
+        let body = b"{\"status\":\"error\",\"class\":\"unauthorized\",\"error\":\"unauthorized\"}";
         crate::http_ffi::write_response_ex(
             client_fd,
             401,
@@ -3018,7 +3047,8 @@ unsafe fn handle_http_connection(
         // routes correctly.
         let err_str = CStr::from_ptr(errmsg).to_string_lossy();
         let body = format!(
-            "{{\"status\":\"error\",\"error\":{}}}\n",
+            "{{\"status\":\"error\",\"class\":\"{}\",\"error\":{}}}\n",
+            morloc_runtime_types::daemon_error::class_name(route_kind),
             serde_json::Value::String(err_str.into_owned())
         );
         let body_c = CString::new(body.as_str()).unwrap_or_default();
@@ -3722,7 +3752,7 @@ unsafe fn answer_panicked_request(job: DaemonJob) {
             libc::free(err as *mut c_void);
         }
     } else if job.conn_type == 2 {
-        let body = format!("{{\"status\":\"error\",\"error\":\"{}\"}}", message);
+        let body = format!("{{\"status\":\"error\",\"class\":\"panic\",\"error\":\"{}\"}}", message);
         let ct = b"application/json\0";
         crate::http_ffi::write_response(
             job.client_fd,
@@ -4438,6 +4468,19 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn daemon_free_request(req: *mut DaemonRequest) {
         super::daemon_free_request(req)
+    }
+
+    /// # Safety
+    /// `voidstar` is null or a value of `schema`.
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_top_level_err(voidstar: *const c_void, schema: *const CSchema) -> *mut c_char {
+        match super::top_level_err(false, voidstar, schema) {
+            Some(msg) => {
+                let c = CString::new(msg).unwrap_or_default();
+                libc::strdup(c.as_ptr())
+            }
+            None => ptr::null_mut(),
+        }
     }
 
     #[no_mangle]

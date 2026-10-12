@@ -73,25 +73,10 @@ re-checked.
 
 ## Failure (IFACE-10)
 
-- **A user failure is classified INTERNAL.** [read, survey] Violates
-  IFACE-10. A pool FAIL
-  (`@throw`) and an eval error get DAEMON_ERROR_INTERNAL
-  (daemon_ffi.rs:2375, 2533): HTTP 500, the panic status. MCP stdio runs
-  pool recovery after every `@throw` (mcp.rs:654). The CLI exits 1.
-- **LP drops the failure class.** [read, survey] `WireResponse` has no
-  kind; `daemon_parse_response` defaults to INTERNAL
-  (daemon_ffi.rs:1159-1167). Front-end `/call` answers 500 for unknown
-  commands, bad arguments and recovery alike (mcp.rs:2602-2604); the
-  daemon gives 404/400/503.
-- **A top-level `Err` fails only on the CLI.** [read, survey]
-  morloc-nexus/src/dispatch.rs:1567-1601; HTTP and LP return it as `ok`,
-  MCP as `isError: false`. Violates IFACE-10.
-- **Daemon HTTP edge cases.** [read, survey] No 401 reason text
-  (http_ffi.rs:257-268, sent as `401 Unknown`); a wrong method is 404, not
-  405 (http_ffi.rs:593-603); CORS `Allow-Methods`
-  omits DELETE although `DELETE /bindings` exists (http_ffi.rs:320);
-  `Content-Length` is found by substring search over all headers
-  (http_ffi.rs:195-197).
+- **A wrong method on a daemon path is 404, not 405.** [read, survey]
+  morloc-runtime/src/http_ffi.rs `http_to_daemon_request` answers any
+  unmatched method and path "Unknown HTTP endpoint"; the MCP server and the
+  front end answer 405 with `Allow`.
 
 ## Discovery (IFACE-11)
 
@@ -139,21 +124,6 @@ re-checked.
   cached at startup (`mcp_by_name`); a child started later reads the
   current manifest. Reordered arguments of one type bind silently to the
   wrong slots. ART-5 compares only the morloc version string.
-- **The daemon request and response C mirrors have no layout test.** [read]
-  `DaemonRequest`/`DaemonResponse` (daemon_ffi.rs), `daemon_request_t`/
-  `daemon_response_t` (data/morloc/morloc.h) and `CDaemonResponse`
-  (morloc-nexus/src/mcp.rs:182) are kept in step by hand; c_abi_layout.rs
-  does not cover them.
-
-## Output bytes (IFACE-9)
-
-- **A null or `()` render result differs by interface.** [read] The CLI's
-  raw writer prints nothing for a top-level null (morloc-nexus/src/
-  dispatch.rs:1924-1928); the daemon's `voidstar_raw_to_bytes` errors.
-- **A failed media serialization is classed INTERNAL.** [read]
-  daemon_ffi.rs `emit_raw_media` -> `set_packet_error`; MCP stdio then runs
-  pool recovery (mcp.rs:668) for a call that failed on its own.
-
 ## Eval (IFACE-13)
 
 - **The daemon exposes eval, typecheck and bind unconditionally.**

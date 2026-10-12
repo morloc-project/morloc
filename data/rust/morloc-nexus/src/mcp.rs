@@ -181,12 +181,10 @@ const SERVER_PROTOCOL_VERSION: &str = "2025-06-18";
 /// 64 MiB cap would otherwise provide.
 const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
-/// Mirror of the daemon dispatch error kinds we care about
-/// (`daemon_ffi::DAEMON_ERROR_INTERNAL`). A dispatch that fails with this kind
-/// may mean a pool process died, so we probe + recover afterward.
-const DAEMON_ERROR_INTERNAL: i32 = 5;
-const DAEMON_ERROR_BAD_REQUEST: i32 = 1;
-const DAEMON_ERROR_NOT_FOUND: i32 = 2;
+use morloc_runtime_types::daemon_error::{
+    BAD_REQUEST as DAEMON_ERROR_BAD_REQUEST, INTERNAL as DAEMON_ERROR_INTERNAL,
+    NOT_FOUND as DAEMON_ERROR_NOT_FOUND,
+};
 
 /// Heap ceiling for a forked `morloc eval`, written as a GHC RTS argument.
 ///
@@ -1562,18 +1560,7 @@ fn http_head(
     keep_alive: bool,
     extra_headers: &[(String, String)],
 ) -> String {
-    let reason = match status {
-        200 => "OK",
-        202 => "Accepted",
-        204 => "No Content",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        500 => "Internal Server Error",
-        503 => "Service Unavailable",
-        _ => "OK",
-    };
+    let reason = morloc_runtime_types::http_query::reason_phrase(status as i32);
     let mut head = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\n{}",
         status,
@@ -1739,44 +1726,45 @@ impl Frontend {
     /// Forward `request_json` to `module`'s child daemon. Holds the per-module
     /// lock across `router_forward` (whose crash-detect mutates the child's
     /// RouterProgram).
-    fn forward(&self, module: &str, request_str: &str, selection: &Selection) -> Result<ForwardOk, String> {
+    fn forward(&self, module: &str, request_str: &str, selection: &Selection) -> Result<ForwardOk, (i32, String)> {
+        use morloc_runtime_types::daemon_error::{BAD_REQUEST, INTERNAL};
         // Fail closed: every served module must have a per-module lock, since
         // router_forward mutates the child's RouterProgram (waitpid + restart).
         // Forwarding without the lock would be a silent unserialized race, so a
         // missing entry is a bug -- error rather than skip the guard.
         let lock = self.locks.get(module).ok_or_else(|| {
-            format!("internal error: no forward lock for module '{}'", module)
+            (INTERNAL, format!("internal error: no forward lock for module '{}'", module))
         })?;
         let req_c = CString::new(request_str)
-            .map_err(|_| "request contains a NUL byte".to_string())?;
+            .map_err(|_| (BAD_REQUEST, "request contains a NUL byte".to_string()))?;
         let mut errmsg: *mut c_char = ptr::null_mut();
         let req =
             unsafe { daemon_parse_request(req_c.as_ptr(), request_str.len(), &mut errmsg) };
         if req.is_null() {
             let msg = process::take_c_errmsg(errmsg).unwrap_or_else(|| "bad request".into());
-            return Err(format!("failed to build request: {}", msg));
+            return Err((BAD_REQUEST, format!("failed to build request: {}", msg)));
         }
         let module_c = CString::new(module).unwrap_or_default();
         // Keep the guard alive across the forward (named binding, not `_`).
         // PANIC-4
         let Ok(_guard) = lock.lock() else {
             unsafe { daemon_free_request(req) };
-            return Err("the server is shutting down after an internal error".into());
+            return Err((morloc_runtime_types::daemon_error::RECOVERING, "the server is shutting down after an internal error".into()));
         };
         let mut ferr: *mut c_char = ptr::null_mut();
         let resp = unsafe { router_forward(self.router.0, module_c.as_ptr(), req, &mut ferr) };
         unsafe { daemon_free_request(req) };
         if resp.is_null() {
             let msg = process::take_c_errmsg(ferr).unwrap_or_else(|| "forward failed".into());
-            return Err(msg);
+            return Err((INTERNAL, msg));
         }
         let out = unsafe {
             if (*resp).success && !selection.applied_by(cstr_to_string((*resp).action).as_deref()) {
-                Err(format!(
+                Err((INTERNAL, format!(
                     "the daemon serving '{}' did not apply the requested output selection; \
                      it may be running another build of morloc",
                     module
-                ))
+                )))
             } else if (*resp).success {
                 // Raw output arrives as bytes + mime (base64 over the socket
                 // wire); otherwise a JSON value.
@@ -1792,8 +1780,8 @@ impl Frontend {
                     ))
                 }
             } else {
-                Err(cstr_to_string((*resp).error)
-                    .unwrap_or_else(|| "dispatch failed".to_string()))
+                Err(((*resp).error_kind, cstr_to_string((*resp).error)
+                    .unwrap_or_else(|| "dispatch failed".to_string())))
             }
         };
         unsafe { daemon_free_response(resp as *mut c_void) };
@@ -2125,7 +2113,7 @@ fn frontend_build_response(
         if fe.eval_needs_token {
             return http_json(
                 403,
-                serde_json::json!({ "status": "error", "error": EVAL_NEEDS_TOKEN })
+                serde_json::json!({ "status": "error", "class": "forbidden", "error": EVAL_NEEDS_TOKEN })
                     .to_string()
                     .as_bytes(),
                 keep_alive,
@@ -2407,7 +2395,8 @@ fn frontend_eval_api(req: &HttpRequest, fe: &Frontend, keep_alive: bool) -> Vec<
             http_json(200, body.as_bytes(), keep_alive)
         }
         Err((status, message)) => {
-            let body = json!({ "status": "error", "error": message }).to_string();
+            let class = morloc_runtime_types::daemon_error::class_of_status(status as i32);
+            let body = json!({ "status": "error", "class": class, "error": message }).to_string();
             http_json(status, body.as_bytes(), keep_alive)
         }
     }
@@ -2616,7 +2605,10 @@ fn frontend_tools_call(id: Value, msg: &RpcMessage, fe: &Frontend) -> Value {
         Ok(ForwardOk::Media(bytes, mime, text, action)) => {
             media_result(&bytes, &mime, text, &shape.name, &action)
         }
-        Err(message) => Err(message),
+        Err((kind, message)) if kind == DAEMON_ERROR_BAD_REQUEST || kind == DAEMON_ERROR_NOT_FOUND => {
+            return error_response(id, JSONRPC_INVALID_PARAMS, &message)
+        }
+        Err((_, message)) => Err(message),
     };
     match result {
         Ok(r) => result_response(id, r),
@@ -2683,9 +2675,15 @@ fn frontend_call_api(
         // A media (`@mime`) return goes out as the raw content bytes with the
         // declared Content-Type (a real image/PDF/...), not a JSON envelope.
         Ok(ForwardOk::Media(bytes, mime, _, _)) => http_binary_response(200, &mime, &bytes, keep_alive),
-        Err(message) => {
-            let body = json!({ "status": "error", "error": message }).to_string();
-            http_json(500, body.as_bytes(), keep_alive)
+        Err((kind, message)) => {
+            use morloc_runtime_types::daemon_error::{class_name, http_status, RECOVERING};
+            let body = json!({ "status": "error", "class": class_name(kind), "error": message }).to_string();
+            let extra: Vec<(String, String)> = if kind == RECOVERING {
+                vec![("Retry-After".to_string(), "1".to_string())]
+            } else {
+                Vec::new()
+            };
+            http_response(http_status(kind, false) as u16, body.as_bytes(), keep_alive, &extra)
         }
     }
 }

@@ -11,6 +11,26 @@ pub fn render_selection(query: &str) -> Result<Option<&str>, &'static str> {
     }
 }
 
+/// The reason phrase of an HTTP status; empty for one not listed, which
+/// HTTP allows.
+pub fn reason_phrase(status: i32) -> &'static str {
+    match status {
+        200 => "OK",
+        202 => "Accepted",
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        413 => "Content Too Large",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
+        _ => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::render_selection;

@@ -70,6 +70,27 @@ pub struct DaemonRequest {
 
 // ── http_parse_request ───────────────────────────────────────────────────────
 
+/// The body length a request head declares: digits only, and every
+/// `Content-Length` header must agree (RFC 9110 8.6); none means 0.
+fn content_length_of(head: &str) -> Result<usize, String> {
+    let mut found: Option<&str> = None;
+    for line in head.split("\r\n").skip(1) {
+        let Some((name, value)) = line.split_once(':') else { continue };
+        if !name.trim().eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        let value = value.trim();
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("invalid Content-Length: {}", value));
+        }
+        match found {
+            Some(prev) if prev != value => return Err("conflicting Content-Length headers".into()),
+            _ => found = Some(value),
+        }
+    }
+    found.map_or(Ok(0), |v| v.parse().map_err(|_| format!("invalid Content-Length: {}", v)))
+}
+
 /// The value of the first header named `name` (case-insensitive).
 fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
     head.split("\r\n").skip(1).find_map(|line| {
@@ -195,18 +216,14 @@ unsafe fn parse_request_within(
         Some(token) => morloc_runtime_types::bearer::authorizes(header_value(header_str, "authorization"), &token),
     };
 
-    // Find Content-Length
-    let mut content_length: usize = 0;
-    let header_lower = header_str.to_ascii_lowercase();
-    if let Some(pos) = header_lower.find("content-length:") {
-        let after = &header_str[pos + 15..];
-        let trimmed = after.trim_start();
-        if let Some(end) = trimmed.find(|c: char| !c.is_ascii_digit()) {
-            content_length = trimmed[..end].parse().unwrap_or(0);
-        } else {
-            content_length = trimmed.parse().unwrap_or(0);
+    let content_length: usize = match content_length_of(header_str) {
+        Ok(n) => n,
+        Err(msg) => {
+            libc::free(req as *mut c_void);
+            set_errmsg(errmsg, &MorlocError::Other(msg));
+            return ptr::null_mut();
         }
-    }
+    };
 
     // Read body
     if content_length > 0 {
@@ -260,17 +277,7 @@ pub(crate) unsafe fn http_free_request(req: *mut HttpRequest) {
 // ── http_write_response ──────────────────────────────────────────────────────
 
 fn http_status_text(status: i32) -> &'static str {
-    match status {
-        200 => "OK",
-        204 => "No Content",
-        400 => "Bad Request",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        408 => "Request Timeout",
-        500 => "Internal Server Error",
-        503 => "Service Unavailable",
-        _ => "Unknown",
-    }
+    morloc_runtime_types::http_query::reason_phrase(status)
 }
 
 pub(crate) unsafe fn write_response(
@@ -666,6 +673,32 @@ mod body_tests {
         );
         assert_eq!(parse(reader), ("/call/f".to_string(), "[1]".to_string()));
         assert_eq!(parse(reader), ("/call/g".to_string(), "[22]".to_string()));
+        assert_eq!(parse(reader), ("/health".to_string(), String::new()));
+        unsafe {
+            libc::close(reader);
+            libc::close(writer);
+        }
+    }
+
+    #[test]
+    fn a_content_length_is_digits_and_its_copies_agree() {
+        let head = |h: &str| format!("POST /call/f HTTP/1.1\r\n{}\r\n", h);
+        assert_eq!(super::content_length_of(&head("Content-Length: 5")), Ok(5));
+        assert_eq!(super::content_length_of(&head("Host: x")), Ok(0));
+        assert!(super::content_length_of(&head("Content-Length: +5")).is_err());
+        assert!(super::content_length_of(&head("Content-Length: 2\r\nContent-Length: 40")).is_err());
+        assert_eq!(super::content_length_of(&head("Content-Length: 2\r\ncontent-length: 2")), Ok(2));
+    }
+
+    #[test]
+    fn the_body_length_comes_from_the_content_length_header_alone() {
+        let (reader, writer) = pair();
+        send_all(
+            writer,
+            b"POST /call/f HTTP/1.1\r\nX-Note: content-length: 99\r\nContent-Length: 2\r\n\r\n[]\
+              GET /health HTTP/1.1\r\n\r\n",
+        );
+        assert_eq!(parse(reader), ("/call/f".to_string(), "[]".to_string()));
         assert_eq!(parse(reader), ("/health".to_string(), String::new()));
         unsafe {
             libc::close(reader);

@@ -537,6 +537,12 @@ if should_run "render"; then
         -H "Content-Type: application/json" -d '["four"]')
     assert_test "?render=size returns typed value" "4" "$(json_field "$result" "result")"
 
+    assert_http_status "POST /call/guarded (pool Err) -> 500" "500" \
+        "http://127.0.0.1:${HTTP_PORT}/call/guarded" \
+        -X POST -H "Content-Type: application/json" -d '["toolong"]'
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/guarded" \
+        -H "Content-Type: application/json" -d '["toolong"]')
+    assert_test "a pool Err is class failure" "failure" "$(json_field "$result" "class")"
     assert_http_status "POST /call/echo?render=a&render=b -> 400" "400" \
         "http://127.0.0.1:${HTTP_PORT}/call/echo?render=shout&render=plain" \
         -X POST -H "Content-Type: application/json" -d '["hi"]'
@@ -559,6 +565,10 @@ if should_run "render"; then
     assert_test "LP null render is refused" "error" "$(json_field "$lp" "status")"
     lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"echo","args":["hi"],"render":"shout","render_default":true}')
     assert_test "LP render with render_default is refused" "error" "$(json_field "$lp" "status")"
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"guarded","args":["toolong"]}')
+    assert_test "LP pool Err is class failure" "failure" "$(json_field "$lp" "class")"
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"echo","args":[]}')
+    assert_test "LP wrong arity is class bad-request" "bad-request" "$(json_field "$lp" "class")"
     stop_daemon "$LAST_DAEMON_PID"
 
     # MCP: every action is a `_render` value; a bare call runs @default.
@@ -570,6 +580,7 @@ if should_run "render"; then
         '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"four","_render":"size"}}}' \
         '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"Hi","_render":"raw"}}}' \
         '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"Hi","_render":"nope"}}}' \
+        '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"guarded","arguments":{"_1":"toolong"}}}' \
         | (cd "$RENDER_DIR" && timeout 60 morloc-nexus mcp ./nexus 2>/dev/null))
     mcp_get() {
         echo "$mcp_out" | python3 -c '
@@ -590,6 +601,7 @@ for line in sys.stdin:
     assert_test "MCP _render=size is JSON" "4" "$(mcp_get 4 result.content.0.text)"
     assert_test "MCP _render=raw is the own value" '"Hi"' "$(mcp_get 5 result.content.0.text)"
     assert_test "MCP unknown action is invalid params" "-32602" "$(mcp_get 6 error.code)"
+    assert_test "MCP pool Err is isError" "True" "$(mcp_get 7 result.isError)"
 fi
 
 # ======================================================================
@@ -1032,6 +1044,21 @@ if should_run "http-pure"; then
     result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/swapLadder" \
         -H "Content-Type: application/json" -d '[1, 2]')
     assert_contains "POST /call/swapLadder [1,2] calls named functions" '[2,1]' "$result"
+
+    # A top-level Err is a failed call, and the reply names its class.
+    assert_http_status "POST /call/checkErr -> 500" "500" \
+        "http://127.0.0.1:${HTTP_PORT}/call/checkErr" \
+        -X POST -H "Content-Type: application/json" -d '[]'
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/checkErr" \
+        -H "Content-Type: application/json" -d '[]')
+    assert_test "a top-level Err is class failure" "failure" "$(json_field "$result" "class")"
+    assert_contains "a top-level Err names its value" "nope" "$(json_field "$result" "error")"
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/checkOk" \
+        -H "Content-Type: application/json" -d '[]')
+    assert_test "a top-level Ok is a success" "ok" "$(json_field "$result" "status")"
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/nosuch" \
+        -H "Content-Type: application/json" -d '[]')
+    assert_test "an unknown command is class not-found" "not-found" "$(json_field "$result" "class")"
 
     stop_daemon "$LAST_DAEMON_PID"
     echo ""
@@ -1905,6 +1932,13 @@ if should_run "router"; then
             -X OPTIONS
         assert_http_status "router POST /call/arithmetic/add 200 happy" "200" \
             "http://127.0.0.1:${ROUTER_PORT}/call/arithmetic/add" \
+            -X POST -d '[1,2]'
+        # A child's failure keeps its class through the front end (IFACE-2).
+        assert_http_status "router POST /call/arithmetic/nosuch -> 404 (child's class)" "404" \
+            "http://127.0.0.1:${ROUTER_PORT}/call/arithmetic/nosuch" \
+            -X POST -d '[1,2]'
+        assert_http_status "router POST /call/arithmetic/add?render=nope -> 400" "400" \
+            "http://127.0.0.1:${ROUTER_PORT}/call/arithmetic/add?render=nope" \
             -X POST -d '[1,2]'
 
         # Shutdown router

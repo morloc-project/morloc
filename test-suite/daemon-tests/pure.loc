@@ -1,4 +1,6 @@
-module pure (checkInt, checkReal, checkBool, checkStr, checkTuple, swapLadder)
+module pure (checkInt, checkReal, checkBool, checkStr, checkTuple, swapLadder, checkErr, checkOk)
+
+import root
 
 checkInt = 42 :: Int
 checkReal = 3.14 :: Real
@@ -35,3 +37,11 @@ s11 p = s0 (s10 p)
 
 swapLadder :: Int -> Int -> (Int, Int)
 swapLadder a b = s11 (a, b)
+
+-- a top-level `Err` is a failed call on every interface (IFACE-10)
+checkErr :: Try Str Int
+checkErr = Err "nope"
+
+checkOk :: Try Str Int
+checkOk = Ok 1
+

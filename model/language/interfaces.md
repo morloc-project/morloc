@@ -125,21 +125,24 @@ Intent: ruled 2026-10-12
 Code: deviates model/language/issues/interfaces.md
 
 Every failure falls in one class, and each interface reports it. An HTTP
-error body and an MCP error result name the class, so classes that share
-a status stay apart.
+or socket error body names the class (`bad-request`, `not-found`,
+`timeout`, `recovering`, `failure`, `panic`, and `unauthorized` or
+`forbidden` for NET-1), so classes that share a status stay apart.
 
 | Class | CLI exit | HTTP | MCP |
 |---|---|---|---|
 | unknown command | 2 | 404 | invalid params |
 | unknown action, bad argument | 2, 1 | 400 | invalid params |
+| an action this interface cannot run (IFACE-1) | - | 400 | invalid params |
 | a limit (IFACE-12) | - | 413 request, 500 reply | invalid request, `isError` |
 | the call fails | 1 | 500 | `isError` |
 | recovering from a pool's death | - | 503, `Retry-After` | `isError` |
 | a panic (PANIC, DAEMON-7) | 70 | 500, then the daemon ends | internal error |
 
 The call fails when it raises (`@throw`, FAIL), when a pool dies under it,
-or when its top-level value is `Err` (on every interface, as on the CLI).
-The class survives forwarding.
+when it meets a runtime error, or when its top-level value is `Err`: on
+every interface, as on the CLI, except to an LP packet client, which
+decodes the value itself. The class survives forwarding.
 
 Why: 4xx says the request is at fault. A failing call may be the server's
 fault (a missing file, a bug in sourced code), so it is 500, not 422.

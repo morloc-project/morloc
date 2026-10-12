@@ -27,10 +27,3 @@ under data/rust/.
   (`Frontend::forward`, `.to_vec()`), and only `media_result` compares it
   with the cap. A request field telling the daemon the caller's cap would
   refuse it first.
-- **A refusal the interface cannot carry is reported as invalid params.**
-  [read] An unknown action is a bad request (IFACE-10), but a replay-only
-  or stream-kind action is refused with the same daemon kind
-  (BAD_REQUEST), so MCP answers -32602 for both; IFACE-10 has no class yet
-  for "this interface cannot run it". Behind the front end every child
-  error is an `isError` result instead, since LP carries no error kind
-  (model/language/issues/interfaces.md, "LP drops the failure class").
