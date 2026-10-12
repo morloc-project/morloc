@@ -1042,14 +1042,14 @@ fn read_one_subpacket_into_shm(slot: &mut StdioSlot) -> Result<Option<(i64, u64)
         let header = PacketHeader::from_bytes(prefix[..32].try_into().unwrap())
             .map_err(|e| format!("stdin data-packet header parse: {}", e))?;
         reject_unreadable_subpacket(&header)?;
-        let payload_len = header.length as usize;
-        let base = prefix.len();
-        let mut buf = prefix;
-        buf.resize(base + payload_len, 0);
-        if payload_len > 0 && !read_exact_fd(slot.fd, &mut buf[base..])? {
-            return Err("stdin: EOF inside data-packet payload".into());
+        let fd = slot.fd;
+        return unsafe {
+            crate::stdio_bridge::read_into_shm(
+                &prefix, header.length as usize, |b| read_exact_fd(fd, b),
+                "stdin: EOF inside data-packet payload",
+            )
         }
-        return unsafe { crate::stdio_bridge::copy_into_shm(&buf) }.map(Some);
+        .map(Some);
     }
     // A lone data packet's single batch was already emitted -> end of stream.
     if slot.single_data {
@@ -1069,20 +1069,16 @@ fn read_one_subpacket_into_shm(slot: &mut StdioSlot) -> Result<Option<(i64, u64)
         return Ok(None);
     }
     reject_unreadable_subpacket(&header)?;
-    let meta_len = header.offset as u64;
-    let payload_len = header.length;
-    let total = 32u64
-        .checked_add(meta_len)
-        .and_then(|n| n.checked_add(payload_len))
+    let rest = (header.offset as u64)
+        .checked_add(header.length)
+        .and_then(|n| usize::try_from(n).ok())
         .ok_or_else(|| "subpacket size overflow".to_string())?;
-    let usize_total = total as usize;
-    let mut buf = vec![0u8; usize_total];
-    buf[..32].copy_from_slice(&hdr);
-    if usize_total > 32 && !read_exact_fd(fd, &mut buf[32..])? {
-        return Err("stdin: EOF inside sub-packet body".into());
+    unsafe {
+        crate::stdio_bridge::read_into_shm(
+            &hdr, rest, |b| read_exact_fd(fd, b), "stdin: EOF inside sub-packet body",
+        )
     }
-    unsafe { crate::stdio_bridge::copy_into_shm(&buf) }
-        .map(Some)
+    .map(Some)
 }
 
 /// Reject a stdin sub-packet the pool decoder can't consume: a non-MESG

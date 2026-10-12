@@ -71,3 +71,14 @@ here touch locks and ownership: model first.
   table element written to a stream), where the writer's 8-byte steps
   (stream.rs `append_one_element`, write_behind.rs compaction) could
   misalign.
+- [measured] Possible speedup (stdin): the nexus reads a stdin sub-packet
+  only when a pool's `@next` asks for it (stdio_server.rs `do_next`), so a
+  piped producer and the reader take turns. Counting 20M Ints in 200
+  sub-packets (2026-10-12): from a file 0.36 s, stdin redirected from that
+  file 0.39 s, the same file through `cat |` 1.20 s, where `cat | wc -c`
+  alone takes 0.69 s. Reading the next sub-packet ahead would overlap the
+  pipe with the reader (at best ~0.7 s), but makes the nexus hold a block
+  no pool has asked for, to free at close, at the end of the run and on a
+  dropped reader: model first. Small sub-packets pay the request instead:
+  20000 sub-packets of 100 Ints take 0.50 s from stdin and 0.13 s from a
+  file, ~18 us more per `@next`, which reading ahead does not remove.

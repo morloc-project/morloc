@@ -158,20 +158,42 @@ pub unsafe fn write_stream_header_for_slot(fd: i32, handle: i64) -> Result<u64, 
     r.map(|()| len as u64)
 }
 
-/// Copy `bytes` into a fresh SHM block; return `(relptr, size)` for
-/// hand-off to the pool via the socket response.
-pub unsafe fn copy_into_shm(bytes: &[u8]) -> Result<(i64, u64), String> {
+/// Read a packet into a fresh SHM block: `prefix`, then `rest` more bytes
+/// that `fill` reads in place (`Ok(false)`: input ended first). Returns
+/// `(relptr, size)` for hand-off to the pool via the socket response; on
+/// any error the block is freed.
+pub unsafe fn read_into_shm(
+    prefix: &[u8],
+    rest: usize,
+    fill: impl FnOnce(&mut [u8]) -> Result<bool, String>,
+    short: &str,
+) -> Result<(i64, u64), String> {
+    let total = prefix
+        .len()
+        .checked_add(rest)
+        .ok_or_else(|| "stdin packet size overflow".to_string())?;
     let mut err: *mut c_char = std::ptr::null_mut();
-    let abs = shmalloc(bytes.len(), &mut err);
+    let abs = shmalloc(total, &mut err);
     if abs.is_null() {
         return Err(take_err(err));
     }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), abs as *mut u8, bytes.len());
-    let rel = abs2rel(abs, &mut err);
-    if rel < 0 {
-        return Err(take_err(err));
+    let block = std::slice::from_raw_parts_mut(abs as *mut u8, total);
+    block[..prefix.len()].copy_from_slice(prefix);
+    let r = match fill(&mut block[prefix.len()..]) {
+        Ok(true) => {
+            let rel = abs2rel(abs, &mut err);
+            if rel < 0 { Err(take_err(err)) } else { Ok((rel as i64, total as u64)) }
+        }
+        Ok(false) => Err(short.to_string()),
+        Err(e) => Err(e),
+    };
+    if r.is_err() {
+        let mut ferr: *mut c_char = std::ptr::null_mut();
+        if !shfree(abs, &mut ferr) {
+            drop(take_err(ferr));
+        }
     }
-    Ok((rel as i64, bytes.len() as u64))
+    r
 }
 
 /// Error from a stdout/stderr write. `BrokenPipe` is the `<IO>` condition

@@ -14,6 +14,8 @@ OK: schema mismatch rejected
 OK: foreign input rejected
 --- truncated stdin (8 bytes) ---
 OK: truncated input rejected
+--- truncated stdin payload ---
+OK: truncated payload rejected
 --- empty stdin ---
 []
 --- compile rejection: two stdin args ---
