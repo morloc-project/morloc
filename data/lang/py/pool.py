@@ -9,11 +9,10 @@ import gc
 import copy
 import array
 import struct
+import mmap
 import socket as _socket
-import threading
-import queue
 from collections import OrderedDict
-from multiprocessing import Process, Value, RawValue
+from multiprocessing import Process
 import ctypes
 import functools
 import importlib
@@ -35,11 +34,6 @@ global_state = dict()
 _shutdown_wakeup_fd = -1
 # Read end of the nexus's lifeline pipe (see morloc_lifeline_adopt), or -1.
 _lifeline_fd = -1
-
-
-class _LocalFlag:
-    """The shutdown flag of a process that shares it with no other."""
-    value = False
 
 
 def _fork_single_threaded(started):
@@ -839,188 +833,6 @@ def _report_worker_death(w, shutting_down=False):
     sys.stderr.flush()
 
 
-def _select_pool_mode():
-    # Concurrency model for the Python pool:
-    #   MORLOC_PY_POOL=fork    -> process workers (the fork model; works on Linux
-    #                             and lets user code fork freely)
-    #   MORLOC_PY_POOL=thread  -> thread workers (no live-interpreter fork; safe
-    #                             on macOS, where forking a live CPython aborts)
-    # Default: thread on macOS, fork elsewhere. The env var overrides the default
-    # so BOTH models are exercisable on BOTH platforms (test the thread model on
-    # Linux CI; force fork on macOS to reconfirm the crash).
-    mode = os.environ.get("MORLOC_PY_POOL", "").strip().lower()
-    if mode in ("fork", "thread"):
-        return mode
-    return "thread" if sys.platform == "darwin" else "fork"
-
-
-def run_thread_pool(socket_path, tmpdir, shm_basename):
-    # Thread-based pool: workers are threads, so a live CPython interpreter is
-    # never forked (that abort is the macOS pool-death bug). Re-entrant callbacks
-    # are served because foreign_call releases the GIL (pymorloc), letting a
-    # sibling worker run while one is blocked on a downstream pool. Per-dispatch
-    # state (shm_tracker, recur_env) is __thread in pymorloc, so workers do not
-    # corrupt one another; libmorloc's own dispatch state is already thread-safe
-    # (the C++ pool runs this same threaded model). User multi-threading/parallel
-    # map still works: multiprocessing uses the 'fork' start method (forced in
-    # __main__) so a user Pool worker inherits the manifolds exec'd into this
-    # process's globals; spawn would re-import and fail to find them. Forking
-    # this threaded pool is safe on macOS (OBJC_DISABLE_INITIALIZE_FORK_SAFETY;
-    # the pool's threads hold no Apple-framework locks at fork time).
-    #
-    # Concurrency note: worker manifolds run on multiple threads sharing one
-    # interpreter, so user Python source is expected to be thread-safe under
-    # concurrent/re-entrant dispatch (morloc manifolds are pure functions, and
-    # numpy/most C extensions release the GIL and are safe). Source that mutates
-    # module-level globals from a manifold is the exception. This is inherent to
-    # the thread model -- the process-isolated fork model is not available on
-    # macOS (forking a live interpreter aborts), and serializing dispatch would
-    # forfeit the required in-pool parallelism.
-    faulthandler.enable()
-    morloc.set_fallback_dir(tmpdir)
-    morloc.shinit(shm_basename, 0xffff)  # attach SHM once for the process
-    _mlc_load_user_sources()  # no fork on this path -> safe to import in-thread
-
-    daemon = _hold_daemon(morloc.start_daemon(socket_path, tmpdir, shm_basename, 0xffff))
-
-    stop = threading.Event()
-    def _on_signal(_sig, _frame):
-        stop.set()
-    signal.signal(signal.SIGTERM, _on_signal)
-    signal.signal(signal.SIGINT, _on_signal)
-
-    job_q = queue.Queue()
-    sched = threading.Lock()
-    counts = {"busy": 0, "total": 0}
-
-    trace_retire = os.environ.get("MORLOC_PY_TRACE_RETIRE") == "1"
-
-    def trace(what):
-        sys.stderr.write(f"morloc py worker thread {threading.get_ident()}: {what} "
-                         f"workers={counts['total']} busy={counts['busy']}\n")
-        sys.stderr.flush()
-
-    def _spawn_worker():
-        threading.Thread(target=_worker_loop, daemon=True).start()
-
-    def _worker_loop():
-        with sched:
-            counts["total"] += 1
-            if trace_retire:
-                trace("started")
-        released = False  # ensure this worker's slot is freed exactly once
-        try:
-            while not stop.is_set():
-                try:
-                    client_fd = job_q.get(timeout=0.1)
-                except queue.Empty:
-                    # Reap a surplus idle worker so a re-entrancy burst does not
-                    # leave threads around forever, but always keep one idle:
-                    # a busy worker may be blocked in a foreign call whose
-                    # callee calls back into this pool, and that callback can
-                    # arrive long after the pre-spawn above. With no idle
-                    # worker it would sit in the queue forever (deadlock).
-                    with sched:
-                        if counts["total"] - counts["busy"] > 1:
-                            counts["total"] -= 1
-                            released = True
-                            if trace_retire:
-                                trace("retiring")
-                            # shm_tracker is __thread; release anything this
-                            # thread holds before it goes.
-                            morloc.shm_tracker_flush()
-                            return
-                    continue
-                # Reserve a slot; if that saturates the pool, pre-spawn one so a
-                # re-entrant callback always finds a free worker (no deadlock).
-                with sched:
-                    counts["busy"] += 1
-                    saturated = counts["busy"] >= counts["total"]
-                if saturated:
-                    _spawn_worker()
-                try:
-                    run_job(client_fd)
-                finally:
-                    with sched:
-                        counts["busy"] -= 1
-        except BaseException as e:
-            import traceback
-            print(f"morloc pool worker thread fatal: {e!s}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            sys.stderr.flush()
-            # PANIC-5 / SHM-8: what the thread held is recovered only by
-            # ending the pool, as a fork-mode worker's death does.
-            try:
-                sys.stdout.flush()
-            except Exception:
-                pass
-            os._exit(1)
-        finally:
-            # A thread leaving by any route takes its deferred releases with
-            # it, so perform them here as the surplus reap above does.
-            try:
-                morloc.shm_tracker_flush()
-            except Exception:
-                pass
-            # Release the slot on a FATAL exit too (the surplus reap above already
-            # released it and set the flag). Leaking `total` would make the
-            # saturation gate `busy >= total` stop tripping, so a re-entrant
-            # callback could find no free worker and deadlock.
-            if not released:
-                with sched:
-                    if counts["total"] > 0:
-                        counts["total"] -= 1
-
-    def _listener_loop():
-        # Single acceptor: pull each client off the daemon and hand it to a
-        # worker via the in-process queue (no fd-passing needed among threads).
-        # A 200ms accept timeout lets this thread observe `stop` and exit so it
-        # can be joined BEFORE close_daemon frees the daemon struct (otherwise it
-        # would dereference freed memory on shutdown).
-        while not stop.is_set():
-            try:
-                client_fd = morloc.wait_for_client(daemon, 200000)
-            except Exception as e:
-                print(f"In python daemon, failed to connect to client: {e!s}", file=sys.stderr)
-                continue
-            if client_fd and client_fd > 0:
-                job_q.put(client_fd)
-
-    _spawn_worker()
-    listener = threading.Thread(target=_listener_loop, daemon=True)
-    listener.start()
-
-    lifeline = select.poll()
-    if _lifeline_fd >= 0:
-        lifeline.register(_lifeline_fd, select.POLLIN)
-    try:
-        while not stop.is_set():
-            # Signals reach Python handlers on this thread only, so a user's
-            # handler that raises (a SIGALRM timeout, say) raises here; that
-            # is the user's error, not a reason to stop serving.
-            try:
-                if _lifeline_fd < 0:
-                    time.sleep(0.05)
-                elif lifeline.poll(50) and _lifeline_ended():
-                    lifeline.unregister(_lifeline_fd)
-                    morloc.lifeline_teardown()
-            except Exception as e:
-                print(f"morloc pool: a signal handler raised: {e!r}", file=sys.stderr)
-    finally:
-        stop.set()
-        # Join the listener so it is no longer inside wait_for_client(daemon)
-        # before we free the daemon struct. It polls `stop` every 200ms, so this
-        # returns promptly; the bound keeps a wedged listener from hanging exit.
-        listener.join(timeout=2.0)
-        sys.stdout.flush()
-        d = _take_daemon()
-        if d is not None:
-            try:
-                morloc.close_daemon(d)
-            except Exception:
-                pass
-
-
 if __name__ == "__main__":
     # Line-buffer stderr so diagnostic output is not lost when pool is killed.
     # stdout is left fully buffered for performance (genome-scale piping) and
@@ -1037,10 +849,7 @@ if __name__ == "__main__":
     #      Under spawn the mp worker re-imports and cannot find them
     #      ("name 'foo' is not defined"); under fork it inherits them. This is
     #      the user-parallel-map capability, which must work on macOS too.
-    # Forking this (thread-model) pool process is safe on macOS in practice: the
-    # nexus exports OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES and the pool's own
-    # threads are plain socket-I/O pthreads holding no Apple-framework locks at
-    # fork time. On Linux fork is already the default (no-op).
+    # On Linux fork is already the default (no-op).
     import multiprocessing as _mp
     try:
         _mp.set_start_method("fork", force=True)
@@ -1051,11 +860,19 @@ if __name__ == "__main__":
     # process group when the nexus ends, however it ends.
     _lifeline_fd = morloc.lifeline_adopt()
 
-    # The SIGTERM/SIGINT handler sets this. A plain flag until the fork model
-    # needs one its workers share: a
-    # multiprocessing value is backed, off Linux, by a file in a pymp-*
-    # temporary directory that only an orderly exit removes.
-    shutdown_flag = _LocalFlag()
+    # Python pools fork their workers; there is no other model.
+    if os.environ.get("MORLOC_PY_POOL", "").strip().lower() not in ("", "fork"):
+        print(f"morloc py pool: MORLOC_PY_POOL={os.environ['MORLOC_PY_POOL']} is not supported; "
+              "Python pools fork their workers", file=sys.stderr)
+        sys.exit(1)
+
+    # Shared with the workers, which inherit the mapping. Unlike a
+    # multiprocessing value it needs no lock, which the signal handler could
+    # not take safely, and leaves no pymp-* temporary file behind.
+    _shared_words = mmap.mmap(-1, 16)
+    shutdown_flag = ctypes.c_byte.from_buffer(_shared_words, 0)
+    busy_count = ctypes.c_int.from_buffer(_shared_words, 4)
+    total_workers = ctypes.c_int.from_buffer(_shared_words, 8)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -1084,19 +901,6 @@ if __name__ == "__main__":
     global_state["tmpdir"] = tmpdir
     morloc.set_self_socket(socket_path)
 
-    # Thread-based pool (macOS default; forced anywhere via MORLOC_PY_POOL=thread).
-    # Avoids forking a live CPython interpreter. Everything below this branch is
-    # the fork-based process pool (Linux default / MORLOC_PY_POOL=fork).
-    if _select_pool_mode() == "thread":
-        run_thread_pool(socket_path, tmpdir, shm_basename)
-        sys.exit(0)
-
-    # Shared with the workers. RawValue (no lock), not Value: the signal
-    # handler writes it, and a Value's semaphore lock is not async-signal-safe
-    # -- acquiring it in the handler while the interrupted code holds it can
-    # deadlock at teardown. A single byte needs no lock.
-    shutdown_flag = RawValue('b', shutdown_flag.value)
-
     # The pool's listening socket, bound before any worker exists. Idle
     # workers accept on it themselves; a busy worker does not poll it, so a
     # call never lands on a worker waiting on another pool.
@@ -1106,11 +910,9 @@ if __name__ == "__main__":
     num_workers = 1
     workers = []
 
-    # Shared counters for dynamic worker spawning.
-    # Workers increment busy_count before foreign_call and decrement after.
-    # When all workers are busy, main process spawns a new one.
-    busy_count = RawValue(ctypes.c_int, 0)
-    total_workers = RawValue(ctypes.c_int, num_workers)
+    # Workers count themselves busy across a foreign call; when every worker
+    # is busy, this process starts another.
+    total_workers.value = num_workers
     wakeup_r, wakeup_w = os.pipe()
     os.set_blocking(wakeup_r, False)
     _shutdown_wakeup_fd = wakeup_w

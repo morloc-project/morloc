@@ -32,9 +32,6 @@ data/lang/r/rmorloc.c::mlc_trace_ipc::cached	thread
 data/lang/r/rmorloc.c::run_job_c::budget	thread		
 data/lang/r/rmorloc.c::run_job_c::budget_read	thread		
 data/lang/r/rmorloc.c::morloc_wait_wakeup::lifeline_ended	fork-scoped		
-data/lang/py/pool.py::-::stop	unreachable		
-data/lang/py/pool.py::-::job_q	unreachable		
-data/lang/py/pool.py::-::sched	unreachable		
 library/Morloc/CodeGenerator/Guest/Futhark.hs::-::cur	fork-scoped		
 library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::SCHEMA_STRS	startup		
 library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::SCHEMA_TABLE	startup		

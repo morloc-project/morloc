@@ -1376,7 +1376,7 @@ pub(crate) unsafe fn send_reply_to_foreign_server(
     size
 }
 
-// ── wait_for_client ──────────────────────────────────────────────────────────
+// ── Accept ──────────────────────────────────────────────────────────────────
 
 /// What a wait on a listening socket, and on descriptors watched beside
 /// it, saw.
@@ -1388,22 +1388,6 @@ pub(crate) enum Accepted {
     /// Nothing to act on: the wait timed out or was interrupted, or a
     /// readiness ping was answered here.
     Nothing,
-}
-
-pub(crate) unsafe fn wait_for_client_with_timeout(
-    daemon: *mut LanguageDaemon,
-    timeout_us: i32,
-    errmsg: *mut *mut c_char,
-) -> i32 {
-    clear_errmsg(errmsg);
-    match accept_or_watch((*daemon).server_fd, timeout_us, &[]) {
-        Ok(Accepted::Client(fd)) => fd,
-        Ok(_) => 0,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            -1
-        }
-    }
 }
 
 /// Wait up to `timeout_us` (none if 0) for a connection on `server_fd` or
@@ -2237,11 +2221,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn send_reply_to_foreign_server(client_fd: i32, packet: *mut u8, release: Option<unsafe extern "C" fn()>, errmsg: *mut *mut c_char) -> usize {
         super::send_reply_to_foreign_server(client_fd, packet, release, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn wait_for_client_with_timeout(daemon: *mut LanguageDaemon, timeout_us: i32, errmsg: *mut *mut c_char) -> i32 {
-        super::wait_for_client_with_timeout(daemon, timeout_us, errmsg)
     }
 }
 

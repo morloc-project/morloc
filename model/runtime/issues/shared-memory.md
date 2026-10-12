@@ -30,6 +30,3 @@ Changes here touch locks and ownership: model first.
   arena, which closes it at a failed `@catch` body's rollback and at the
   arena's end; other opens rely on the call sweep alone. Should every open
   be recorded, or none?
-- [speculative] Python thread mode: a NumPy view's `__del__` running on
-  another thread can release through that thread's tracker, dropping
-  another holder's reference early when two threads hold the same block.

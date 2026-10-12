@@ -2,12 +2,10 @@
 -- which signal, and which manifold was executing. The pools differ in how
 -- a signal reaches the user. A C++ or Rust pool is one process, so its
 -- own handler names the innermost manifold and the nexus reports the
--- signal from the exit status. A Python worker is either a forked
--- process whose parent survives (the Linux default), so the parent
--- reports the worker's signal, or a thread (the macOS default, forced
--- here with MORLOC_PY_POOL=thread), so the whole pool dies and the
--- nexus reports the signal; either way the fault handler prints the
--- Python frames and the nexus names the command it was running. An R
+-- signal from the exit status. A Python worker is a forked process
+-- whose parent survives, so the parent reports the worker's signal; the
+-- fault handler prints the Python frames and the nexus names the command
+-- it was running. An R
 -- worker's own segfault handler prints an R traceback naming the
 -- manifold.
 module main (crashPy, crashCpp, crashRust, crashR, viaCpp)

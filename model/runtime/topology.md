@@ -28,24 +28,23 @@ nexus (one per program run, or one long-running daemon / MCP server)
   request workers, a SIGCHLD handler that reaps every child, one writer
   thread per open written stream (the custodian, SLOT-10) with its
   compression jobs.
-- pool: dispatch workers (C++, Rust: a job queue in libmorloc; Python
-  thread mode: Python threads; Python fork mode and R: forked worker
-  processes). C++ and Rust pools watch the nexus's lifeline in their accept
+- pool: dispatch workers (C++, Rust: a job queue in libmorloc; Python and
+  R: forked worker processes). C++ and Rust pools watch the nexus's lifeline in their accept
   loop, beside the listening socket; R watches it in its wait for work.
 
 ## Worker scaling
 
 - Every pool starts with one worker.
-- Thread pools (C++, Rust, Python thread mode) start a worker whenever a
+- Thread pools (C++, Rust) start a worker whenever a
   call arrives and no worker is free; no upper bound. A C++ or Rust worker
   stays with a kept connection, waiting for its next call, until the caller
   closes it (NET-8).
-- Forked pools (Python fork mode, R) count a worker busy only while it waits
+- Forked pools (Python, R) count a worker busy only while it waits
   on another pool (foreign call, channel read/write/flush/close) and fork a
   worker when every worker is busy; a computing worker makes calls queue.
   Idle workers accept on the pool's socket themselves (NET-9).
-- Surplus idle workers retire after 60 s (`MORLOC_POOL_IDLE_TIMEOUT_MS`;
-  Python thread mode retires after ~100 ms); R workers never retire (SHM-8).
+- Surplus idle workers retire after 60 s (`MORLOC_POOL_IDLE_TIMEOUT_MS`);
+  R workers never retire (SHM-8).
 - Daemon request workers: number of pools + 4, clamped to [4, 32].
 
 ## Communication

@@ -15,5 +15,4 @@ it is solved, and a file when it is empty.
 - [build-and-text.md](build-and-text.md): non-atomic build swap, stale help text and comments, dead code, morloc.h expression structs drifted from Rust
 - [streams.md](streams.md): written streams: nexus stdout lock, closed reader under @collect prints an error; open questions on deferred completion, dead openers, a thread per stream
 - [flaky-tests.md](flaky-tests.md): intermittent test failures with no known cause
-- [python-pool.md](python-pool.md): thread-mode signal handlers never reach a manifold; fork-mode counter temp dirs leak
 - [pools-and-ipc.md](pools-and-ipc.md): pool readiness latency, per-pid sweep race, R close-on-exec, C++ path truncation

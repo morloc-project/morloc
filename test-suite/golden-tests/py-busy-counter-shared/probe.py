@@ -3,10 +3,6 @@ import __main__
 
 
 def drift(procs, reps):
-    # The thread model (the macOS default) keeps no count across processes,
-    # and forking its live interpreter aborts there.
-    if __main__._busy_ref is None:
-        return 0
     # The pool's main loop starts workers while the count is high; this
     # probe's own children account for it, so none are wanted.
     before = __main__._busy_ref.value

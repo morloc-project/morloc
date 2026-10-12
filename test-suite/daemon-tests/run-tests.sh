@@ -1558,21 +1558,11 @@ if should_run "worker-crash"; then
 
 
     # A worker started for a call blocked in another language retires once
-    # idle; a retirement ends nothing. Fork-mode workers are processes,
-    # thread-mode workers (the macOS default) are threads of one process.
+    # idle; a retirement ends nothing. Workers are processes.
     workers_of() { (pgrep -f "$CRASH_DIR/.*pools/py" 2>/dev/null || true) | wc -l | tr -d ' '; }
-    threads_of() {
-        tpid=$( (pgrep -f "$CRASH_DIR/.*pools/py" 2>/dev/null || true) | head -n 1)
-        [ -z "$tpid" ] && { echo 0; return; }
-        tn=$(ps -o nlwp= -p "$tpid" 2>/dev/null | tr -d ' \n')
-        case "$tn" in
-            ''|*[!0-9]*) ps -M -p "$tpid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ' ;;
-            *) echo "$tn" ;;
-        esac
-    }
     retire_check() {
         rc_label=$1
-        if [ "$2" = thread ]; then rc_count=threads_of; else rc_count=workers_of; fi
+        rc_count=workers_of
         recoveries=$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)
         base=$($rc_count)
         log_mark=$(wc -l < "$LAST_DAEMON_LOG" | tr -d ' ')
@@ -1590,7 +1580,7 @@ if should_run "worker-crash"; then
         after=$($rc_count)
         assert_test "worker-crash${rc_label}: an idle extra worker retires" "yes" "$([ "$after" -lt "$peak" ] && echo yes || echo no)"
         if [ "$after" -ge "$peak" ]; then
-            echo "      $2 pool, counting $rc_count: base $base, peak $peak, after $after; calls took ${calls_took}s"
+            echo "      counting $rc_count: base $base, peak $peak, after $after; calls took ${calls_took}s"
             echo "      every 0.5 s:$timeline"
             ps -axo pid,ppid,stat,etime,command 2>/dev/null | grep "$CRASH_DIR" | grep -v grep | cut -c1-200 | sed 's/^/      ps: /' || true
             tail -n "+$((log_mark + 1))" "$LAST_DAEMON_LOG" | cut -c1-200 | sed 's/^/      log: /'
@@ -1604,12 +1594,8 @@ if should_run "worker-crash"; then
         result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/pyOk" -d '[9]')
         assert_test "worker-crash${rc_label}: works after a retirement" "9" "$(json_field "$result" "result")"
     }
-    case "${MORLOC_PY_POOL:-}" in
-        fork|thread) default_mode=$MORLOC_PY_POOL ;;
-        *) if [ "$(uname)" = Darwin ]; then default_mode=thread; else default_mode=fork; fi ;;
-    esac
     # A worker leaving by an exception no handler catches (SystemExit) ends
-    # the pool in either mode, so the daemon recovers what it held.
+    # the pool, so the daemon recovers what it held.
     exit_check() {
         ec_label=$1
         recoveries=$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)
@@ -1624,24 +1610,11 @@ if should_run "worker-crash"; then
         result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/pyOk" -d '[5]')
         assert_test "worker-crash${ec_label}: works after a SystemExit" "5" "$(json_field "$result" "result")"
     }
-    retire_check "" "$default_mode"
+    retire_check ""
     exit_check ""
 
     stop_daemon "$local_pid"
     pkill -9 -f "$CRASH_DIR" 2>/dev/null || true
-
-    if [ "$default_mode" = fork ]; then
-        HTTP_PORT=$(pick_port)
-        MORLOC_PY_POOL=thread; MORLOC_PY_TRACE_RETIRE=1; export MORLOC_PY_POOL MORLOC_PY_TRACE_RETIRE
-        start_daemon "$CRASH_DIR" --http-port "$HTTP_PORT"
-        unset MORLOC_PY_POOL MORLOC_PY_TRACE_RETIRE
-        wait_for_http "$HTTP_PORT" 15
-        local_pid=$LAST_DAEMON_PID
-        retire_check " thread pool" thread
-        exit_check " thread pool"
-        stop_daemon "$local_pid"
-        pkill -9 -f "$CRASH_DIR" 2>/dev/null || true
-    fi
     unset MORLOC_POOL_IDLE_TIMEOUT_MS
     echo ""
 fi
@@ -2051,7 +2024,6 @@ if should_run "soak"; then
         SOAK_CHURN="--workers $SOAK_W --requests 25 --rounds 60"
         SOAK_PIN_CHURN="--workers $SOAK_W --requests 20 --rounds 60"
         SOAK_PIN_CONC="--workers $SOAK_WB --requests 100 --rounds 40"
-        SOAK_THREAD_CHURN="--workers $SOAK_W --requests 20 --rounds 30"
     else
         SOAK_CHURN="--workers $SOAK_W --requests 12 --rounds 2"
         SOAK_PIN_CHURN="--workers $SOAK_W --requests 10 --rounds 2"
@@ -2258,65 +2230,8 @@ if should_run "soak"; then
             stop_daemon "$PIN_PID"
         fi
 
-        # The Python pool picks its concurrency model by platform: worker
-        # processes on Linux, worker threads on macOS, because forking a live
-        # interpreter aborts there. The two share almost no code path, so a
-        # run on Linux says nothing about the model macOS actually ships --
-        # and the threaded one, where workers share an address space, is
-        # where a concurrency fault has room to do damage. A long run on any
-        # other platform therefore takes a pass with it forced on, so whoever
-        # is hunting covers the model they are not otherwise testing. On
-        # macOS this is already what ran, three phases ago.
-        if [ "$MORLOC_TEST_LEVEL" = "long" ] && [ "$(uname -s)" != "Darwin" ]; then
-            THR_PORT=$(pick_port)
-            THR_LOG="$SOAK_DIR/threaded.log"
-            (cd "$SOAK_DIR" && export MORLOC_PY_POOL=thread && \
-                exec morloc-nexus daemon ./nexus \
-                --http-port "$THR_PORT" 2>"$THR_LOG") &
-            THR_PID=$!
-            DAEMON_PIDS+=("$THR_PID")
-            wait_for_http "$THR_PORT" 20 || true
-            curl -s -o /dev/null --max-time 30 -X POST \
-                "http://127.0.0.1:${THR_PORT}/call/pyEcho" \
-                -H "Content-Type: application/json" -d '[[1,2,3]]'
-
-            # Confirm the setting reached the pool rather than assuming it.
-            # A test that quietly exercises the default model while claiming
-            # otherwise is worse than not running: it reports coverage of the
-            # one platform nobody else is testing.
-            thr_pools=0
-            for cp in $(pgrep -P "$THR_PID" 2>/dev/null); do
-                if tr '\0' '\n' < "/proc/$cp/environ" 2>/dev/null |  # portable: this phase runs off macOS only
-                        grep -q '^MORLOC_PY_POOL=thread$'; then
-                    thr_pools=$((thr_pools + 1))
-                fi
-            done
-            assert_test "threaded pool model actually in force" "yes" \
-                "$([ "$thr_pools" -gt 0 ] && echo yes || echo no)"
-
-            thr_out=$(python3 "$SCRIPT_DIR/soak-client.py" "$THR_PORT" churn \
-                $SOAK_THREAD_CHURN 2>&1) && thr_rc=0 || thr_rc=$?
-            assert_test "correct under the threaded pool model" "0" "$thr_rc"
-            if [ "$thr_rc" != "0" ]; then
-                echo "      $thr_out"
-            fi
-
-            thr_noise=$(grep -vE \
-                -e '^morloc-daemon: listening ' \
-                -e '^morloc daemon: pool crash detected' \
-                -e '^ *pool [0-9]+: Pool process crashed with signal ' \
-                -e '^morloc daemon: recovery complete ' \
-                "$THR_LOG" 2>/dev/null | grep -c .) || thr_noise=0
-            assert_test "threaded pool logged nothing unexpected" "0" "$thr_noise"
-            if [ "$thr_noise" != "0" ]; then
-                sed 's/^/      /' "$THR_LOG"
-            fi
-
-            stop_daemon "$THR_PID"
-        fi
-
         if [ "$FAILED" -gt "$SOAK_FAILED_BEFORE" ]; then
-            for lg in "$SOAK_LOG" "$SOAK_DIR/pinned.log" "$SOAK_DIR/threaded.log"; do
+            for lg in "$SOAK_LOG" "$SOAK_DIR/pinned.log"; do
                 [ -s "$lg" ] || continue
                 echo "      --- $(basename "$lg") ---"
                 sed 's/^/      /' "$lg"

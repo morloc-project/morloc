@@ -1536,7 +1536,6 @@ uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* pa
 void mlc_set_self_socket(const char* socket_path);
 size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG);
 size_t send_reply_to_foreign_server(int client_fd, uint8_t* packet, void (*release)(void), ERRMSG);
-int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRMSG);
 
 // Daemon event loop and dispatch.
 // False when a request was still running at exit: the caller must then

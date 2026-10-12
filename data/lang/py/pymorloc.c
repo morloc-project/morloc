@@ -2287,41 +2287,6 @@ static PyObject* pybinding__cache_record_store(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-static PyObject* pybinding__wait_for_client(PyObject* self, PyObject* args) { MAYFAIL
-    PyObject* daemon_capsule;
-    int timeout_us = 0;  // optional; 0 = block indefinitely
-
-    PARSE_ARGS_OR_ABORT(args, "O|i", &daemon_capsule, &timeout_us);
-
-    language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
-
-    // Release the GIL for the blocking accept: in the thread-based pool the
-    // listener thread sits here, and holding the GIL while blocked would starve
-    // every worker thread (deadlock). Harmless in the fork pool's listener
-    // process. Only the blocking wait is GIL-free. A positive timeout_us lets
-    // the listener wake periodically to observe shutdown (so it can be joined
-    // before the daemon struct is freed).
-    int client_fd;
-    Py_BEGIN_ALLOW_THREADS
-    client_fd = wait_for_client_with_timeout(daemon, timeout_us, &child_errmsg_);
-    Py_END_ALLOW_THREADS
-    if (child_errmsg_ != NULL) {
-        char* prior_err = get_prior_err();
-        if (prior_err == NULL) {
-            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
-        } else {
-            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
-            free(prior_err);
-        }
-        goto error;
-    }
-
-    return PyLong_FromLong((long)client_fd);
-
-error:
-    return NULL;
-}
-
 static PyObject* pybinding__start_daemon(PyObject* self, PyObject* args) { MAYFAIL
     const char* socket_path;
     const char* tmpdir;
@@ -4615,7 +4580,6 @@ static PyMethodDef Methods[] = {
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
     {"daemon_listen_fd", pybinding__daemon_listen_fd, METH_VARARGS, "The daemon's listening socket descriptor"},
     {"fork_generation", pybinding__fork_generation, METH_NOARGS, "This process's fork generation"},
-    {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},
     {"send_reply", pybinding__send_reply, METH_VARARGS, "Send a dispatch's reply, releasing what the dispatch holds first"},
     // The name pools built by earlier compilers call.
