@@ -2636,9 +2636,9 @@ pub(crate) mod tests {
     fn closing_while_the_basename_is_read_still_removes_the_volumes() {
         let _arena = crate::own_test_shm();
         shclose().unwrap();
-        let fallback = crate::ScopedFallback::new("busybase");
+        let fallback = crate::ScopedFallback::new("bb");
         let test_dir = fallback.path().to_path_buf();
-        let base = format!("/morloc-{}-test-busybase", std::process::id());
+        let base = format!("/morloc-{}-test-bb", std::process::id());
         shinit(&base, 4096).unwrap();
         assert_eq!(live_segments(&test_dir, &base[1..]).len(), 1);
         let (held_tx, held_rx) = std::sync::mpsc::channel();
@@ -2660,15 +2660,18 @@ pub(crate) mod tests {
     fn exiting_while_the_volume_table_is_busy_still_removes_the_volumes() {
         let _arena = crate::own_test_shm();
         shclose().unwrap();
-        let fallback = crate::ScopedFallback::new("busyexit");
+        let fallback = crate::ScopedFallback::new("be");
         let test_dir = fallback.path().to_path_buf();
-        let base = format!("/morloc-{}-test-busyexit", std::process::id());
+        let base = format!("/morloc-{}-test-be", std::process::id());
         unsafe {
             let pid = libc::fork();
             assert!(pid >= 0);
             if pid == 0 {
                 if shinit(&base, 4096).is_err() {
                     libc::_exit(2);
+                }
+                if live_segments(&test_dir, &base[1..]).len() != 1 {
+                    libc::_exit(3);
                 }
                 let (held_tx, held_rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {

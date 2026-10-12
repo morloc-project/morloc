@@ -2997,7 +2997,7 @@ mod generation_tests {
     #[test]
     fn a_packet_naming_a_reused_block_is_refused_and_disarmed() {
         let _arena = crate::own_test_shm();
-        let _fallback = crate::shm::tests::small_volume("genpkt");
+        let _fallback = crate::shm::tests::small_volume("gp");
         let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
         let cs = CSchema::from_rust(&schema);
         let abs = crate::shm::shmalloc(64).expect("allocate");
