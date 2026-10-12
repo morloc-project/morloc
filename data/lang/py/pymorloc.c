@@ -103,10 +103,7 @@ static PyObject* shm_view_owner(void) {
 typedef struct {
     absptr_t ptr;
 } shm_entry_t;
-// Thread-local: each worker gets its own SHM tracking list so a per-dispatch
-// flush frees only that thread's in-flight SHM, never a sibling's. Required for
-// the thread-based pool (macOS); a no-op distinction under the single-threaded
-// fork worker (Linux). Mirrors the __thread recur_env_stack below.
+// Per thread: a dispatch's flush frees only what its own thread tracked.
 static __thread shm_entry_t* shm_tracker = NULL;
 static __thread size_t shm_tracker_count = 0;
 static __thread size_t shm_tracker_cap = 0;
@@ -319,9 +316,7 @@ error:
 // (name, schema) entries: push on entering a declaration, pop on exit.
 // A Recur node looks up its target by scanning the stack top-down.
 //
-// __thread keeps the stack per-thread so concurrent walks (e.g. the
-// daemon dispatcher and a foreign-call serializer running on another
-// thread) do not stomp on each other's environments.
+// The stack is per thread, so walks on different threads stay apart.
 typedef struct {
     const char* name;
     const Schema* schema;
@@ -2117,27 +2112,6 @@ static PyObject* pybinding__pool_hash(PyObject* self, PyObject* args) {
     return PyLong_FromUnsignedLongLong((unsigned long long)morloc_pool_hash());
 }
 
-static PyObject* pybinding__cache_path(PyObject* self, PyObject* args) {
-    const char* label;
-    if (!PyArg_ParseTuple(args, "z", &label)) {
-        return NULL;
-    }
-    char* errmsg = NULL;
-    char* path = morloc_cache_path(label, &errmsg);
-    if (!path) {
-        if (errmsg) {
-            PyErr_SetString(PyExc_RuntimeError, errmsg);
-            free(errmsg);
-        } else {
-            PyErr_SetString(PyExc_RuntimeError, "morloc_cache_path failed");
-        }
-        return NULL;
-    }
-    PyObject* result = PyUnicode_FromString(path);
-    free(path);
-    return result;
-}
-
 static PyObject* pybinding__cache_lookup(PyObject* self, PyObject* args) {
     unsigned long long key;
     const char* label;
@@ -2452,12 +2426,8 @@ static PyObject*  pybinding__send_reply(PyObject* self, PyObject* args){ MAYFAIL
 
     PARSE_ARGS_OR_ABORT(args, "iy#", &client_fd, &packet, &packet_size);
 
-    // Release the GIL around the blocking send: send_all can now wait (bounded)
-    // for socket writability when the send buffer is full, and holding the GIL
-    // across that wait would starve every sibling worker thread and the listener
-    // in the thread-based pool. Only the syscall is GIL-free; the Python C-API
-    // error handling below re-holds it. (Expanded PyTRY so Py_BEGIN/END wraps
-    // just the syscall, mirroring the stream_from_client binding.)
+    // The GIL is released only around the blocking send, so threads the
+    // user's code started keep running; error handling below re-holds it.
     size_t bytes_sent = 0;
     Py_BEGIN_ALLOW_THREADS
     bytes_sent = send_reply_to_foreign_server(client_fd, packet, shm_tracker_flush, &child_errmsg_);
@@ -2486,8 +2456,7 @@ static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){
 
     PARSE_ARGS_OR_ABORT(args, "i", &client_fd);
 
-    // Release the GIL for the blocking request read so sibling worker threads run
-    // in the thread-based pool; harmless in the single-threaded fork worker.
+    // The GIL is released only around the blocking read.
     Py_BEGIN_ALLOW_THREADS
     packet = stream_from_client(client_fd, &child_errmsg_);
     Py_END_ALLOW_THREADS
@@ -3211,11 +3180,8 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     free(arg_packets);
     arg_packets = NULL;
 
-    // Release the GIL for the blocking round-trip to the foreign pool: this is
-    // what lets a sibling worker thread run and service a re-entrant callback in
-    // the thread-based pool (macOS). Harmless in the single-threaded fork worker
-    // (Linux). Only the blocking call is GIL-free; the error handling re-holds
-    // it. (Expanded PyTRY so the Py_BEGIN/END wraps just the syscall.)
+    // The GIL is released only around the blocking round trip to the
+    // foreign pool; the error handling re-holds it.
     Py_BEGIN_ALLOW_THREADS
     result = send_and_receive_over_socket(socket_path, packet, &child_errmsg_);
     Py_END_ALLOW_THREADS
@@ -4559,7 +4525,6 @@ static PyMethodDef Methods[] = {
     {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
     {"bench_record", pybinding__bench_record, METH_VARARGS, "Record one benchmark timing via libmorloc"},
     {"pool_hash", pybinding__pool_hash, METH_NOARGS, "Return the pool's source fingerprint"},
-    {"cache_path", pybinding__cache_path, METH_VARARGS, "Resolve per-label cache directory"},
     {"cache_lookup", pybinding__cache_lookup, METH_VARARGS, "Cache lookup; returns bytes or None"},
     {"cache_store", pybinding__cache_store, METH_VARARGS, "Atomically store packet bytes in cache"},
     {"cache_key_compute", pybinding__cache_key_compute, METH_VARARGS, "Compute cache key from midx + per-arg bytes"},
@@ -4583,7 +4548,6 @@ static PyMethodDef Methods[] = {
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},
     {"send_reply", pybinding__send_reply, METH_VARARGS, "Send a dispatch's reply, releasing what the dispatch holds first"},
     // The name pools built by earlier compilers call.
-    {"send_packet_to_foreign_server", pybinding__send_reply, METH_VARARGS, "Same as send_reply"},
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
     {"wait_readable", pybinding__wait_readable, METH_VARARGS, "Wait up to a timeout in milliseconds for a descriptor to be readable"},
     {"accept_client", pybinding__accept_client, METH_VARARGS, "Accept a connection on a non-blocking listening socket, or -1 if none"},

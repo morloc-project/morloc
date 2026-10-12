@@ -1360,11 +1360,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn morloc_cache_path(label: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char {
-        super::morloc_cache_path(label, errmsg)
-    }
-
-    #[no_mangle]
     pub extern "C" fn morloc_cache_record_hit() {
         super::morloc_cache_record_hit()
     }

@@ -1534,7 +1534,6 @@ language_daemon_t* start_daemon(
 uint8_t* stream_from_client(int client_fd, ERRMSG);
 uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG);
 void mlc_set_self_socket(const char* socket_path);
-size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG);
 size_t send_reply_to_foreign_server(int client_fd, uint8_t* packet, void (*release)(void), ERRMSG);
 
 // Daemon event loop and dispatch.
@@ -1654,7 +1653,6 @@ uint64_t morloc_pool_hash(void);
 // ~/.cache/morloc/cache by default). A NULL or empty `label` resolves
 // to a synthetic `_unlabeled` subdirectory. Returns a heap-allocated
 // path string the caller frees via libc::free, NULL on failure.
-char* morloc_cache_path(const char* label, ERRMSG);
 
 // Counters consumed by the run summary (Stage 4). Each event is
 // independent: a `record_miss` followed by a successful compute and

@@ -2214,11 +2214,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn send_packet_to_foreign_server(client_fd: i32, packet: *mut u8, errmsg: *mut *mut c_char) -> usize {
-        super::send_packet_to_foreign_server(client_fd, packet, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn send_reply_to_foreign_server(client_fd: i32, packet: *mut u8, release: Option<unsafe extern "C" fn()>, errmsg: *mut *mut c_char) -> usize {
         super::send_reply_to_foreign_server(client_fd, packet, release, errmsg)
     }
