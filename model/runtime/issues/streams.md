@@ -3,11 +3,14 @@
 Written streams go through the custodian (streams.md SLOT-10..16). Changes
 here touch locks and ownership: model first.
 
-- **The nexus's stdout lock is held across a blocking write.** [read]
-  morloc-nexus/src/stdio_server.rs `do_write` keeps `STDOUT_SLOT` across
-  transcoding and `write(1)`. The pool no longer waits under a slot lock
-  for it (the custodian's thread does), but a slow stdout reader stalls the
-  stderr-free paths sharing the lock.
+- Open question (performance): the nexus's stdout lock
+  (morloc-nexus/src/stdio_server.rs `do_write`, `STDOUT_SLOT`) is held
+  across transcoding and `write(1)`. Only stdout writes and the final
+  footer take it, and their frames must reach the descriptor in order, so
+  holding it across the write is required; what it costs is that two
+  pools streaming to stdout cannot transcode in parallel. Worth moving the
+  transcoding out only if a benchmark of concurrent stdout writers shows
+  it.
 - Open question (SLOT-15): should close and flush return as soon as their
   marker is queued, with the wait moved to where a finished file is needed
   (opening it to read, `@save`/`@concat`, reopening the path, the end of
