@@ -3,7 +3,7 @@
 //! Every volume carries a cross-process lock (`ShmLock`) over its block list.
 
 use crate::error::MorlocError;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use crate::fork_policy::Held;
 use morloc_runtime_types::shm_lock::{ShmGuard, ShmLock};
 
@@ -2493,7 +2493,7 @@ mod tests {
                 libc::MAP_SHARED | libc::MAP_ANONYMOUS,
                 -1,
                 0,
-            ) as *const AtomicU32;
+            ) as *const std::sync::atomic::AtomicU32;
             assert_ne!(wins as *mut libc::c_void, libc::MAP_FAILED);
             let mut kids = Vec::new();
             for _ in 0..KIDS {
@@ -2835,10 +2835,10 @@ mod tests {
         unsafe {
             (*first).set_magic(BLK_MAGIC);
             (*first).set_size(body);
-            (*first).reference_count = AtomicU32::new(0);
+            (*first).reference_count = std::sync::atomic::AtomicU32::new(0);
             (*second).set_magic(BLK_MAGIC);
             (*second).set_size(body);
-            (*second).reference_count = AtomicU32::new(0);
+            (*second).reference_count = std::sync::atomic::AtomicU32::new(0);
         }
 
         // Ask for more than either block alone can serve, forcing the merge.
