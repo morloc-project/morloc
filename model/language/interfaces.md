@@ -86,7 +86,7 @@ value; an action cannot be named `raw`.
 
 ### IFACE-7 A call that selects nothing gets the CLI's output, except on LP
 Intent: ruled 2026-10-12
-Code: deviates model/language/issues/interfaces.md
+Code: conforms 2026-10-12
 
 With no selection, CLI-7 cases 3 and 4 apply on every interface but LP:
 the `@default` action if there is one, else the command's own value. A
@@ -184,7 +184,7 @@ result shape.
 
 ### IFACE-14 One MCP tool per command
 Intent: ruled 2026-10-12
-Code: deviates model/runtime/issues/mcp.md
+Code: conforms 2026-10-12
 
 A command is one tool. Its output selection is an optional string
 argument `_render` whose values are `raw` and every action (IFACE-6), with
@@ -200,13 +200,14 @@ argument name can begin with `_`.
 
 ### IFACE-15 MCP content follows the output's type
 Intent: ruled 2026-10-12
-Code: deviates model/runtime/issues/mcp.md
+Code: conforms 2026-10-12
 
 `image/png`, `image/jpeg`, `image/gif` and `image/webp` are an image
 block, `audio/*` an audio block (media type compared without parameters,
 lower case). Any other output is an embedded resource with its media
 type: `text` for a `Str` result that is valid UTF-8, `blob` otherwise.
-Each resource has a URI unique to the call.
+Each resource has a URI unique to the call. The server declares no
+`resources` capability: a result's resource is never listed or read back.
 
 ## Proposed additions
 

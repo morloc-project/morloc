@@ -465,6 +465,9 @@ pub struct ManifestTerminal {
     pub description: *mut c_char,
     pub render: bool,
     pub default: bool,
+    /// How the handler consumes the output: 0 value, 1 gather, 2 stream,
+    /// 3 fold (`morloc_manifest::ActionKind`).
+    pub kind: u8,
 }
 
 #[repr(C)]
@@ -494,6 +497,9 @@ pub struct ManifestCommand {
     /// True for synthesized internal commands (e.g. `@render` entries): hidden
     /// from `/discover` but still callable by name.
     pub internal: bool,
+    /// True when the command streams its output: a known stream type, or an
+    /// action that consumes a stream.
+    pub streams: bool,
 }
 
 #[repr(C)]
@@ -1712,12 +1718,20 @@ unsafe fn populate_terminal(dst: *mut ManifestTerminal, src: &morloc_manifest::T
     (*dst).description = c_strdup(&src.description);
     (*dst).render = src.render;
     (*dst).default = src.default;
+    (*dst).kind = match src.kind {
+        morloc_manifest::ActionKind::Value => 0,
+        morloc_manifest::ActionKind::Gather => 1,
+        morloc_manifest::ActionKind::Stream => 2,
+        morloc_manifest::ActionKind::Fold => 3,
+    };
 }
 
 unsafe fn populate_command(dst: *mut ManifestCommand, src: &morloc_manifest::Command) -> Result<(), MorlocError> {
     (*dst).name = c_strdup(&src.name);
     (*dst).is_pure = src.is_pure();
     (*dst).internal = src.internal;
+    (*dst).streams = src.stream.is_some()
+        || src.terminals.iter().any(|t| t.kind.of_streaming_command());
     (*dst).mid = src.mid;
     (*dst).pool_index = src.pool_index;
     if !src.needed_pools.is_empty() {

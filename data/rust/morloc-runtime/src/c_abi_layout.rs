@@ -157,7 +157,8 @@ mod tests {
             | "morloc_serial_type"
             | "morloc_expression_type"
             | "morloc_app_expression_type"
-            | "morloc_pattern_type" => (4, 4),
+            | "morloc_pattern_type"
+            | "daemon_method_t" => (4, 4),
             // A composite embedded by value: measure it from the header too.
             _ => match aggregate_of(ty) {
                 (Kind::Union, body) => union_layout(&body),
@@ -437,6 +438,7 @@ mod tests {
             description => "description",
             render => "render",
             default => "is_default",
+            kind => "kind",
         ]);
         assert_same_layout!(ManifestCommand, "manifest_command_t", [
             name => "name",
@@ -458,6 +460,30 @@ mod tests {
             terminals => "terminals",
             n_terminals => "n_terminals",
             internal => "internal",
+            streams => "streams",
+        ]);
+        assert_same_layout!(crate::http_ffi::DaemonRequest, "daemon_request_t", [
+            id => "id",
+            method => "method",
+            command => "command",
+            args_json => "args_json",
+            expr => "expr",
+            name => "name",
+            render => "render",
+            media => "media",
+            render_default => "render_default",
+        ]);
+        assert_same_layout!(crate::daemon_ffi::DaemonResponse, "daemon_response_t", [
+            id => "id",
+            success => "success",
+            error_kind => "error_kind",
+            result_json => "result_json",
+            error => "error",
+            result_bytes => "result_bytes",
+            result_len => "result_len",
+            mime => "mime",
+            action => "action",
+            result_text => "result_text",
         ]);
         assert_same_layout!(ManifestService, "manifest_service_t", [
             stype => "stype",

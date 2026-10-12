@@ -370,21 +370,21 @@ stdioWedgeTests env = testCase "Daemon @stdout claim reclaim (wedge)" $ do
             sockPath
             ("{\"method\":\"call\",\"command\":\"" ++ cmd ++ "\",\"args\":[]}")
 
-    -- A served call cannot open @stdout (DAEMON-15): the open fails and
-    -- the call reports an error.
+    -- A served call cannot stream to stdout (DAEMON-15): the call is refused.
     r0 <- call "useStdout"
     assertJsonEq "useStdout is refused" r0 "status" "error"
-    assertBool ("the refusal names @stdout: " ++ r0) ("@stdout" `isInfixOf` r0)
+    assertBool ("the refusal says the output streams: " ++ r0) ("streams" `isInfixOf` r0)
 
-    -- A refused open must leave no claim behind: every later open is
-    -- refused the same way, never as already open.
+    -- A refused open in the pool must leave no claim behind: every later
+    -- open is refused the same way, never as already open.
     mapM_
       ( \i -> do
-          rr <- call "useStdout"
+          rr <- call "rawStdout"
+          assertBool ("the pool refuses @stdout: " ++ rr) ("@stdout" `isInfixOf` rr)
           assertBool
             ("refusal " ++ show i ++ " must not report 'already open': " ++ rr)
             (not ("already open" `isInfixOf` rr))
-          assertJsonEq ("useStdout still refused " ++ show i) rr "status" "error"
+          assertJsonEq ("rawStdout still refused " ++ show i) rr "status" "error"
       )
       [1 .. 3 :: Int]
 

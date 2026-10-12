@@ -11,7 +11,7 @@ it is solved, and a file when it is empty.
 - [value-encoding.md](value-encoding.md): non-ASCII schema names, missing record keys, MessagePack decoder bugs, record alignment, canonical bytes
 - [cache.md](cache.md): stale results after a source edit, unverified keys, log and summary leaks into nested runs
 - [cli-directives.md](cli-directives.md): cross-language @fold, @render type check and -f, multi-output gaps
-- [mcp.md](mcp.md): MCP `_render` refused by the daemon, streaming calls refused off the CLI, rendered results vs outputSchema, media-to-content mapping, router drops ?render=
+- [mcp.md](mcp.md): streaming calls refused off the CLI, MCP stdio server in one-shot mode, front-end line cap checked after copying, refusal class
 - [tables-tensors.md](tables-tensors.md): column type inference, NaN in JSON, tensor dims unchecked, table spec mismatches
 - [build-and-text.md](build-and-text.md): non-atomic build swap, stale help text and comments, dead code, morloc.h expression structs drifted from Rust
 - [streams.md](streams.md): written streams: nexus stdout lock, open questions on deferred completion, dead openers, stdout placement, @tell, reopen after a daemon call; measured speedups (nested element append, stdin read-ahead)

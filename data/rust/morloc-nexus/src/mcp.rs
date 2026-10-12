@@ -115,22 +115,55 @@ fn arg_str(args: &Args, key: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// The output selection of a `tools/call`: `_render`, or `raw` when absent.
-fn render_selection(args: &Args) -> Result<String, String> {
-    Ok(arg_str(args, "_render")?.unwrap_or_else(|| "raw".to_string()))
+/// The output selection a request carries, so its reply can be checked.
+enum Selection {
+    None,
+    Default,
+    Named(String),
 }
 
-/// A daemon call request, with the args as the text they arrived in.
-#[derive(serde::Serialize)]
-struct CallRequest<'a> {
-    method: &'static str,
-    command: &'a str,
-    args: Vec<Raw>,
+impl Selection {
+    /// The request fields that carry it.
+    fn request_fields(&self) -> String {
+        match self {
+            Selection::None => String::new(),
+            Selection::Default => ",\"render_default\":true".into(),
+            Selection::Named(r) => format!(",\"render\":{}", Value::String(r.clone())),
+        }
+    }
+
+    /// Whether a reply that names `action` applied this selection: a daemon
+    /// that ignored the selection names no action.
+    fn applied_by(&self, action: Option<&str>) -> bool {
+        match (self, action) {
+            (Selection::None, _) => true,
+            (Selection::Default, Some(_)) => true,
+            (Selection::Named(r), Some(a)) => r == a,
+            _ => false,
+        }
+    }
 }
 
-fn call_request(command: &str, args: Vec<Raw>) -> String {
-    serde_json::to_string(&CallRequest { method: "call", command, args })
-        .expect("a request of raw JSON members serializes")
+/// The output selection of a `tools/call` on `shape`: `_render`
+/// when given, which must be `raw` or one of the tool's actions; otherwise
+/// the `@default` action of a tool that has actions.
+fn tool_selection(shape: &McpToolShape, args: &Args) -> Result<Selection, String> {
+    match arg_str(args, "_render")? {
+        Some(r) if r == "raw" || shape.actions.contains(&r) => Ok(Selection::Named(r)),
+        Some(r) => Err(format!("unknown output action '{}'", r)),
+        None if shape.actions.is_empty() => Ok(Selection::None),
+        None => Ok(Selection::Default),
+    }
+}
+
+/// A daemon call request, with the args array as the text it arrived in.
+fn call_request(command: &str, args: &str, selection: &Selection) -> String {
+    format!(
+        "{{\"method\":\"call\",\"command\":{},\"args\":{}{}}}",
+        Value::String(command.to_string()),
+        args,
+        selection.request_fields()
+    )
 }
 
 use morloc_manifest::Manifest;
@@ -152,6 +185,8 @@ const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 /// (`daemon_ffi::DAEMON_ERROR_INTERNAL`). A dispatch that fails with this kind
 /// may mean a pool process died, so we probe + recover afterward.
 const DAEMON_ERROR_INTERNAL: i32 = 5;
+const DAEMON_ERROR_BAD_REQUEST: i32 = 1;
+const DAEMON_ERROR_NOT_FOUND: i32 = 2;
 
 /// Heap ceiling for a forked `morloc eval`, written as a GHC RTS argument.
 ///
@@ -188,6 +223,8 @@ struct CDaemonResponse {
     result_bytes: *mut u8,
     result_len: usize,
     mime: *mut c_char,
+    action: *mut c_char,
+    result_text: bool,
 }
 
 extern "C" {
@@ -476,43 +513,23 @@ fn handle_tools_call(
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
 
-    // Select the output projection. Commands with terminals expose a `_render`
-    // enum: "raw" (default) dispatches the command itself; a renderer name
-    // dispatches that projection's entry command and packages its result by the
-    // entry's media type. `_render` is not a pool argument, so `positional` is
-    // identical for the command and any of its projections.
-    let render_sel = match render_selection(&arguments) {
-        Ok(r) => r,
+    let selection = match tool_selection(shape, &arguments) {
+        Ok(sel) => sel,
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
-    let (dispatch_command, ret_mime, returns_object) = match shape.dispatch_for(&render_sel) {
-        Ok(target) => target,
-        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
-    };
-
-    // Dispatch through the shared execution backend. A media-typed projection is
-    // fetched as raw bytes (no JSON int-array), then base64'd into an MCP block.
-    let want_media = ret_mime.is_some();
-    match ctx.dispatch(&call_request(&dispatch_command, positional), want_media) {
-        Ok(DispatchOutcome::Media(content)) => {
-            result_response(id, media_result_object(content))
-        }
-        Ok(DispatchOutcome::Json(result_json)) => {
-            result_response(id, tool_result_object(&result_json, returns_object))
-        }
-        Err(message) => {
-            // Execution failure (pool error, @throw, recovering, internal):
-            // report as a tool result with isError, not a protocol error, so
-            // the model can read and react to the failure.
-            result_response(
-                id,
-                json!({
-                    "content": [ { "type": "text", "text": message } ],
-                    "isError": true,
-                }),
-            )
-        }
+    let args = serde_json::to_string(&positional).expect("raw JSON members serialize");
+    match ctx.dispatch(&call_request(&shape.name, &args, &selection), &shape.name) {
+        Ok(result) => result_response(id, result),
+        Err(DispatchError::Request(e)) => error_response(id, JSONRPC_INVALID_PARAMS, &e),
+        // Execution failure (pool error, @throw, recovering, internal):
+        // report as a tool result with isError, not a protocol error, so
+        // the model can read and react to the failure.
+        Err(DispatchError::Call(message)) => result_response(id, tool_error(&message)),
     }
+}
+
+fn tool_error(message: &str) -> Value {
+    json!({ "content": [ { "type": "text", "text": message } ], "isError": true })
 }
 
 /// Validate the client's named `arguments` against a tool's inputSchema and
@@ -595,25 +612,22 @@ struct DispatchCtx {
     shm: CString,
 }
 
-/// A successful dispatch's payload: either the JSON-serialized return value, or
-/// -- when `want_media` was requested for a media-typed (`@mime`) return -- the
-/// finished MCP content block built from the raw bytes (skips both the JSON
-/// int-array round-trip and an owning copy of the payload).
-enum DispatchOutcome {
-    Json(String),
-    Media(Value),
+/// Why a dispatch failed: the request itself (an unknown command or action,
+/// a bad argument), answered as invalid params; or the call.
+enum DispatchError {
+    Request(String),
+    Call(String),
 }
 
 impl DispatchCtx {
     /// Marshal a call-request JSON through `daemon_parse_request` +
-    /// `daemon_dispatch` and read the response: `Ok(outcome)` on success,
-    /// `Err(message)` on failure. `want_media` asks the backend for the raw
-    /// content bytes of a media-typed return (set only when the selected
-    /// projection has a `@mime`); otherwise the JSON form is returned. On an
-    /// INTERNAL failure a pool may have died, so probe liveness and run crash
-    /// recovery (a fast no-op when all pools are alive) before returning, so a
+    /// `daemon_dispatch` and build the MCP tool result from the response.
+    /// Raw output (a `@mime` value, a `@render` action) comes back as bytes
+    /// and becomes a content block without an owning copy. On an INTERNAL
+    /// failure a pool may have died, so probe liveness and run crash recovery
+    /// (a fast no-op when all pools are alive) before returning, so a
     /// subsequent call can succeed.
-    fn dispatch(&self, request_str: &str, want_media: bool) -> Result<DispatchOutcome, String> {
+    fn dispatch(&self, request_str: &str, command: &str) -> Result<Value, DispatchError> {
         // SHM-8: a pool that ended since the last call is recovered first.
         process::mcp_recover_pools(self.n_pools);
         let req_c = CString::new(request_str).unwrap();
@@ -624,42 +638,33 @@ impl DispatchCtx {
         };
         if req.is_null() {
             let msg = process::take_c_errmsg(errmsg).unwrap_or_else(|| "unknown error".into());
-            return Err(format!("failed to build call request: {}", msg));
+            return Err(DispatchError::Request(format!("failed to build call request: {}", msg)));
         }
 
         // Request the raw-media response form for this one dispatch (same thread,
         // so the backend's thread-local sees it), then restore.
-        let prev = if want_media {
-            unsafe { daemon_set_output_media_bytes(true) }
-        } else {
-            false
-        };
+        let prev = unsafe { daemon_set_output_media_bytes(true) };
         let resp =
             unsafe { daemon_dispatch(self.manifest_c, req, self.sockets_ptr, self.shm.as_ptr()) };
-        if want_media {
-            unsafe { daemon_set_output_media_bytes(prev) };
-        }
+        unsafe { daemon_set_output_media_bytes(prev) };
         unsafe { daemon_free_request(req) };
 
         if resp.is_null() {
-            return Err("dispatch returned no response".into());
+            return Err(DispatchError::Call("dispatch returned no response".into()));
         }
 
         let outcome = unsafe {
             if (*resp).success {
-                // Prefer the raw-media bytes when the backend produced them;
-                // fall back to JSON otherwise (untyped return, or want_media off).
-                // Build the content block from the borrowed bytes here, before
-                // the response is freed below -- no owning copy of the payload.
-                if want_media && !(*resp).result_bytes.is_null() {
+                if !(*resp).result_bytes.is_null() {
                     let bytes =
                         std::slice::from_raw_parts((*resp).result_bytes, (*resp).result_len);
                     let mime = cstr_to_string((*resp).mime).unwrap_or_default();
-                    Ok(DispatchOutcome::Media(media_content_block(bytes, &mime)))
+                    let action = cstr_to_string((*resp).action).unwrap_or_else(|| "raw".into());
+                    media_result(bytes, &mime, (*resp).result_text, command, &action)
+                        .map_err(DispatchError::Call)
                 } else {
-                    Ok(DispatchOutcome::Json(
-                        cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string()),
-                    ))
+                    let json = cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string());
+                    tool_result_object(&json).map_err(DispatchError::Call)
                 }
             } else {
                 let kind = (*resp).error_kind;
@@ -668,7 +673,11 @@ impl DispatchCtx {
                 if kind == DAEMON_ERROR_INTERNAL {
                     process::mcp_recover_pools_after_failure(self.n_pools);
                 }
-                Err(msg)
+                if kind == DAEMON_ERROR_BAD_REQUEST || kind == DAEMON_ERROR_NOT_FOUND {
+                    Err(DispatchError::Request(msg))
+                } else {
+                    Err(DispatchError::Call(msg))
+                }
             }
         };
         unsafe { daemon_free_response(resp as *mut c_void) };
@@ -676,65 +685,96 @@ impl DispatchCtx {
     }
 }
 
-/// Build the MCP `result` object for a successful non-media call. `result_json`
-/// is the serialized return value; `structured` is true only for object returns.
-fn tool_result_object(result_json: &str, structured: bool) -> Value {
-    // Parse so we can (a) emit compact single-line text and (b) mirror an object
-    // return into structuredContent. Fall back to the raw string.
-    let parsed: Option<Value> = serde_json::from_str(result_json).ok();
+/// Bytes one JSON-RPC line may hold, outbound as inbound.
+const MAX_RESULT_LINE: usize = MAX_LINE_BYTES;
 
+/// The bytes `s` takes as the body of a JSON string.
+fn json_escaped_len(s: &[u8]) -> usize {
+    s.iter()
+        .map(|&b| match b {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
+            0..=0x1f => 6,
+            _ => 1,
+        })
+        .sum()
+}
+
+fn too_large(size: usize) -> String {
+    format!(
+        "the result needs {} bytes on the MCP line, past its cap of {}; \
+         run the command over HTTP or from the command line",
+        size, MAX_RESULT_LINE
+    )
+}
+
+/// Overhead the JSON-RPC envelope adds to a result's content.
+const ENVELOPE: usize = 4096;
+
+/// The MCP `result` object for a JSON value: compact text, mirrored into
+/// `structuredContent` when it is an object.
+fn tool_result_object(result_json: &str) -> Result<Value, String> {
+    let object = result_json.trim_start().starts_with('{');
+    let size = json_escaped_len(result_json.as_bytes())
+        + if object { result_json.len() } else { 0 }
+        + ENVELOPE;
+    if size > MAX_RESULT_LINE {
+        return Err(too_large(size));
+    }
+    let parsed: Option<Value> = serde_json::from_str(result_json).ok();
     let text = parsed
         .as_ref()
         .map(|v| v.to_string())
         .unwrap_or_else(|| result_json.to_string());
-
     let mut result = Map::new();
-    result.insert(
-        "content".into(),
-        json!([ { "type": "text", "text": text } ]),
-    );
-    if structured {
-        if let Some(Value::Object(_)) = parsed {
-            result.insert("structuredContent".into(), parsed.unwrap());
-        }
+    result.insert("content".into(), json!([ { "type": "text", "text": text } ]));
+    if let Some(Value::Object(_)) = parsed {
+        result.insert("structuredContent".into(), parsed.unwrap());
     }
     result.insert("isError".into(), Value::Bool(false));
-    Value::Object(result)
+    Ok(Value::Object(result))
 }
 
-/// Build the MCP `result` object wrapping a media content block (from
-/// `DispatchOutcome::Media`, built by `media_content_block`).
-fn media_result_object(content: Value) -> Value {
-    let mut result = Map::new();
-    result.insert("content".into(), json!([content]));
-    result.insert("isError".into(), Value::Bool(false));
-    Value::Object(result)
-}
-
-/// The MCP content block for `bytes` labeled `mime`. MCP carries binary only as
-/// base64: `image/*` and `audio/*` become their content block, `text/*` a text
-/// block (UTF-8), and any other binary an embedded resource `blob`.
-fn media_content_block(bytes: &[u8], mime: &str) -> Value {
-    let family = mime.split('/').next().unwrap_or("");
-    match family {
-        "image" | "audio" => json!({
-            "type": family,
+/// The MCP `result` object for raw output: raster images and
+/// audio as their content blocks; anything else as an embedded resource with
+/// its media type, its text when it is text, else its bytes in base64. The
+/// server declares no `resources` capability: a result's resource is never
+/// listed or read back.
+fn media_result(bytes: &[u8], mime: &str, text: bool, command: &str, action: &str) -> Result<Value, String> {
+    let essence = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let as_text = if text { std::str::from_utf8(bytes).ok() } else { None };
+    let size = match as_text {
+        Some(t) => json_escaped_len(t.as_bytes()),
+        None => bytes.len().div_ceil(3) * 4,
+    } + ENVELOPE;
+    if size > MAX_RESULT_LINE {
+        return Err(too_large(size));
+    }
+    let block = match essence.as_str() {
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" => json!({
+            "type": "image",
             "data": base64_encode(bytes),
-            "mimeType": mime,
+            "mimeType": essence,
         }),
-        "text" => json!({
-            "type": "text",
-            "text": String::from_utf8_lossy(bytes).into_owned(),
+        e if e.starts_with("audio/") => json!({
+            "type": "audio",
+            "data": base64_encode(bytes),
+            "mimeType": essence,
         }),
-        _ => json!({
-            "type": "resource",
-            "resource": {
-                "uri": "morloc://return",
-                "mimeType": mime,
-                "blob": base64_encode(bytes),
-            },
-        }),
-    }
+        _ => {
+            let uri = format!("morloc://result/{}/{}/{}", command, action, new_session_id());
+            match as_text {
+                Some(t) => json!({
+                    "type": "resource",
+                    "resource": { "uri": uri, "mimeType": mime, "text": t },
+                }),
+                None => json!({
+                    "type": "resource",
+                    "resource": { "uri": uri, "mimeType": mime, "blob": base64_encode(bytes) },
+                }),
+            }
+        }
+    };
+    Ok(json!({ "content": [block], "isError": false }))
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -1591,7 +1631,7 @@ fn without_body(mut resp: Vec<u8>) -> Vec<u8> {
     resp
 }
 
-/// The liveness probe (IFACE-18): `GET`/`HEAD /health` answers that the
+/// The liveness probe: `GET`/`HEAD /health` answers that the
 /// server is up, before any credential is checked, and says nothing else.
 fn health_probe(req: &HttpRequest, keep_alive: bool) -> Option<Vec<u8>> {
     use morloc_runtime_types::bearer::{LIVENESS_BODY, LIVENESS_PATH};
@@ -1690,15 +1730,16 @@ unsafe impl Sync for Frontend {}
 /// A successful forward's payload (owned so the C response is freed at once).
 enum ForwardOk {
     Json(String),
-    /// A media-typed (`@mime`) return: raw content bytes + media type.
-    Media(Vec<u8>, String),
+    /// Raw output: content bytes, media type, whether the bytes are text, and
+    /// the action that produced them.
+    Media(Vec<u8>, String, bool, String),
 }
 
 impl Frontend {
     /// Forward `request_json` to `module`'s child daemon. Holds the per-module
     /// lock across `router_forward` (whose crash-detect mutates the child's
     /// RouterProgram).
-    fn forward(&self, module: &str, request_str: &str) -> Result<ForwardOk, String> {
+    fn forward(&self, module: &str, request_str: &str, selection: &Selection) -> Result<ForwardOk, String> {
         // Fail closed: every served module must have a per-module lock, since
         // router_forward mutates the child's RouterProgram (waitpid + restart).
         // Forwarding without the lock would be a silent unserialized race, so a
@@ -1730,14 +1771,21 @@ impl Frontend {
             return Err(msg);
         }
         let out = unsafe {
-            if (*resp).success {
-                // A media (`@mime`) return arrives as raw bytes + mime (conveyed
-                // as base64 over the socket wire); otherwise a JSON value.
+            if (*resp).success && !selection.applied_by(cstr_to_string((*resp).action).as_deref()) {
+                Err(format!(
+                    "the daemon serving '{}' did not apply the requested output selection; \
+                     it may be running another build of morloc",
+                    module
+                ))
+            } else if (*resp).success {
+                // Raw output arrives as bytes + mime (base64 over the socket
+                // wire); otherwise a JSON value.
                 if !(*resp).mime.is_null() && !(*resp).result_bytes.is_null() {
                     let bytes =
                         std::slice::from_raw_parts((*resp).result_bytes, (*resp).result_len).to_vec();
                     let mime = cstr_to_string((*resp).mime).unwrap_or_default();
-                    Ok(ForwardOk::Media(bytes, mime))
+                    let action = cstr_to_string((*resp).action).unwrap_or_else(|| "raw".into());
+                    Ok(ForwardOk::Media(bytes, mime, (*resp).result_text, action))
                 } else {
                     Ok(ForwardOk::Json(
                         cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string()),
@@ -2557,28 +2605,22 @@ fn frontend_tools_call(id: Value, msg: &RpcMessage, fe: &Frontend) -> Value {
         Ok(p) => p,
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
-    let render_sel = match render_selection(&arguments) {
-        Ok(r) => r,
+    let selection = match tool_selection(shape, &arguments) {
+        Ok(sel) => sel,
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
-    // A media (`@mime`) projection comes back from the child as raw bytes+mime
-    // (base64 over the wire) and is rendered as an MCP media block below; the
-    // JSON projection becomes a text/structured result.
-    let (dispatch_command, _ret_mime, returns_object) = match shape.dispatch_for(&render_sel) {
-        Ok(t) => t,
-        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
+    let args = serde_json::to_string(&positional).expect("raw JSON members serialize");
+    let request = call_request(&shape.name, &args, &selection);
+    let result = match fe.forward(module, &request, &selection) {
+        Ok(ForwardOk::Json(result_json)) => tool_result_object(&result_json),
+        Ok(ForwardOk::Media(bytes, mime, text, action)) => {
+            media_result(&bytes, &mime, text, &shape.name, &action)
+        }
+        Err(message) => Err(message),
     };
-    match fe.forward(module, &call_request(&dispatch_command, positional)) {
-        Ok(ForwardOk::Json(result_json)) => {
-            result_response(id, tool_result_object(&result_json, returns_object))
-        }
-        Ok(ForwardOk::Media(bytes, mime)) => {
-            result_response(id, media_result_object(media_content_block(&bytes, &mime)))
-        }
-        Err(message) => result_response(
-            id,
-            json!({ "content": [ { "type": "text", "text": message } ], "isError": true }),
-        ),
+    match result {
+        Ok(r) => result_response(id, r),
+        Err(message) => result_response(id, tool_error(&message)),
     }
 }
 
@@ -2623,19 +2665,24 @@ fn frontend_call_api(
     } else {
         return http_json(400, br#"{"error":"invalid JSON body"}"#, keep_alive);
     };
-    let request_str = format!(
-        "{{\"method\":\"call\",\"command\":{},\"args\":{}}}",
-        Value::String(command.to_string()),
-        args.get()
-    );
-    match fe.forward(module, &request_str) {
+    let query = req.path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let selection = match morloc_runtime_types::http_query::render_selection(query) {
+        Ok(Some(r)) => Selection::Named(r.to_string()),
+        Ok(None) => Selection::Default,
+        Err(e) => {
+            let body = json!({ "error": e }).to_string();
+            return http_json(400, body.as_bytes(), keep_alive);
+        }
+    };
+    let request_str = call_request(command, args.get(), &selection);
+    match fe.forward(module, &request_str, &selection) {
         Ok(ForwardOk::Json(result_json)) => {
             let body = format!("{{\"status\":\"ok\",\"result\":{}}}", result_json);
             http_json(200, body.as_bytes(), keep_alive)
         }
         // A media (`@mime`) return goes out as the raw content bytes with the
         // declared Content-Type (a real image/PDF/...), not a JSON envelope.
-        Ok(ForwardOk::Media(bytes, mime)) => http_binary_response(200, &mime, &bytes, keep_alive),
+        Ok(ForwardOk::Media(bytes, mime, _, _)) => http_binary_response(200, &mime, &bytes, keep_alive),
         Err(message) => {
             let body = json!({ "status": "error", "error": message }).to_string();
             http_json(500, body.as_bytes(), keep_alive)
@@ -2675,7 +2722,7 @@ mod tests {
     use crate::json_help::RecordField;
     use std::collections::HashSet;
 
-    fn shape(slots: Vec<ArgSlot>, props: &[&str], required: &[&str], returns_object: bool) -> McpToolShape {
+    fn shape(slots: Vec<ArgSlot>, props: &[&str], required: &[&str]) -> McpToolShape {
         let prop_names: HashSet<String> = props.iter().map(|s| s.to_string()).collect();
         McpToolShape {
             name: "t".into(),
@@ -2683,9 +2730,7 @@ mod tests {
             slots,
             prop_names,
             required: required.iter().map(|s| s.to_string()).collect(),
-            returns_object,
-            return_mime: None,
-            renders: Vec::new(),
+            actions: Vec::new(),
         }
     }
 
@@ -2727,12 +2772,19 @@ mod tests {
     }
 
     #[test]
-    fn an_output_selection_that_is_not_a_string_is_refused() {
-        assert_eq!(render_selection(&args(json!({}))).unwrap(), "raw");
-        assert_eq!(render_selection(&args(json!({ "_render": "png" }))).unwrap(), "png");
-        assert!(render_selection(&args(json!({ "_render": 5 }))).is_err());
-        assert!(render_selection(&args(json!({ "_render": null }))).is_err());
-        assert!(render_selection(&args(json!({ "_render": ["png"] }))).is_err());
+    fn an_output_selection_is_raw_an_action_or_the_default() {
+        let mut with_actions = shape(Vec::new(), &["_render"], &[]);
+        with_actions.actions = vec!["png".into()];
+        let plain = shape(Vec::new(), &[], &[]);
+        let sel = |s: &McpToolShape, a: Value| tool_selection(s, &args(a));
+        assert!(matches!(sel(&with_actions, json!({})).unwrap(), Selection::Default));
+        assert!(matches!(sel(&plain, json!({})).unwrap(), Selection::None));
+        assert!(matches!(sel(&with_actions, json!({ "_render": "png" })).unwrap(), Selection::Named(r) if r == "png"));
+        assert!(matches!(sel(&with_actions, json!({ "_render": "raw" })).unwrap(), Selection::Named(r) if r == "raw"));
+        assert!(sel(&with_actions, json!({ "_render": "gif" })).is_err());
+        assert!(sel(&with_actions, json!({ "_render": 5 })).is_err());
+        assert!(sel(&with_actions, json!({ "_render": null })).is_err());
+        assert!(sel(&with_actions, json!({ "_render": ["png"] })).is_err());
         assert!(arg_str(&args(json!({ "expression": 1 })), "expression").is_err());
         assert_eq!(arg_str(&args(json!({})), "expression").unwrap(), None);
     }
@@ -2822,9 +2874,7 @@ mod tests {
         let s = shape(
             vec![ArgSlot::Value { key: "count".into(), missing: json!(5) }],
             &["count"],
-            &[],
-            false,
-        );
+            &[]);
         assert_eq!(resolved(&s, json!({})).unwrap(), vec![json!(5).to_string()]);
         assert_eq!(
             resolved(&s, json!({ "count": 10 })).unwrap(),
@@ -2852,14 +2902,14 @@ mod tests {
                 ArgSlot::Value { key: "deep".into(), missing: Value::Null },
             ],
             &["big", "deep"],
-            &["big", "deep"],
-            false,
-        );
+            &["big", "deep"]);
         let positional = resolve_arguments(&s, &arguments).unwrap();
         assert_eq!(
-            call_request("t", positional),
+            call_request("t", &serde_json::to_string(&positional).unwrap(), &Selection::None),
             format!("{{\"method\":\"call\",\"command\":\"t\",\"args\":[18446744073709551617,{deep}]}}")
         );
+        assert!(call_request("t", "[]", &Selection::Default).ends_with(",\"render_default\":true}"));
+        assert!(call_request("t", "[]", &Selection::Named("png".into())).ends_with(",\"render\":\"png\"}"));
         // Arguments that are not an object are rejected, as is a message
         // without params.
         let bad = RpcMessage::parse(b"{\"method\":\"tools/call\",\"params\":{\"name\":\"t\",\"arguments\":[1]}}").unwrap();
@@ -2876,9 +2926,7 @@ mod tests {
         let s = shape(
             vec![ArgSlot::Value { key: "n".into(), missing: Value::Null }],
             &["n"],
-            &["n"],
-            false,
-        );
+            &["n"]);
         assert!(resolved(&s, json!({})).is_err());
         assert_eq!(resolved(&s, json!({ "n": 7 })).unwrap(), vec![json!(7).to_string()]);
     }
@@ -2888,9 +2936,7 @@ mod tests {
         let s = shape(
             vec![ArgSlot::Value { key: "n".into(), missing: Value::Null }],
             &["n"],
-            &[],
-            false,
-        );
+            &[]);
         assert!(resolved(&s, json!({ "bogus": 1 })).is_err());
     }
 
@@ -2899,9 +2945,7 @@ mod tests {
         let s = shape(
             vec![ArgSlot::Flag { key: "v".into(), default: false }],
             &["v"],
-            &[],
-            false,
-        );
+            &[]);
         assert_eq!(resolved(&s, json!({})).unwrap(), vec![json!(false).to_string()]);
         assert_eq!(resolved(&s, json!({ "v": true })).unwrap(), vec![json!(true).to_string()]);
         // Non-boolean flag value is rejected.
@@ -2919,9 +2963,7 @@ mod tests {
                 ],
             }],
             &["a", "b"],
-            &[],
-            false,
-        );
+            &[]);
         // Provided field overrides its default; omitted field uses it.
         assert_eq!(
             resolved(&s, json!({ "a": 10 })).unwrap(),
@@ -2937,9 +2979,7 @@ mod tests {
                 fields: vec![RecordField { field: "a".into(), default: json!(3) }],
             }],
             &["cfg"],
-            &[],
-            false,
-        );
+            &[]);
         // Whole object passed under the group key is used verbatim.
         assert_eq!(
             resolved(&s, json!({ "cfg": { "a": 9 } })).unwrap(),
@@ -2957,17 +2997,17 @@ mod tests {
     // limit is still delivered as text.
     #[test]
     fn result_text_is_exact() {
-        let r = tool_result_object("{\"n\":18446744073709551617}", true);
+        let r = tool_result_object("{\"n\":18446744073709551617}").unwrap();
         assert_eq!(r["content"][0]["text"], "{\"n\":18446744073709551617}");
         assert_eq!(r["structuredContent"].to_string(), "{\"n\":18446744073709551617}");
         let deep = format!("{}1{}", "[".repeat(400), "]".repeat(400));
-        let r = tool_result_object(&deep, false);
+        let r = tool_result_object(&deep).unwrap();
         assert_eq!(r["content"][0]["text"], deep);
     }
 
     #[test]
     fn scalar_result_has_text_only() {
-        let r = tool_result_object("42", false);
+        let r = tool_result_object("42").unwrap();
         assert_eq!(r["isError"], json!(false));
         assert_eq!(r["content"][0]["type"], "text");
         assert_eq!(r["content"][0]["text"], "42");
@@ -2975,27 +3015,18 @@ mod tests {
     }
 
     #[test]
-    fn object_result_has_structured_content() {
-        let r = tool_result_object("{\"a\":1}", true);
+    fn an_object_result_has_structured_content_and_an_array_does_not() {
+        let r = tool_result_object("{\"a\":1}").unwrap();
         assert_eq!(r["structuredContent"], json!({ "a": 1 }));
         assert_eq!(r["content"][0]["text"], "{\"a\":1}");
-    }
-
-    #[test]
-    fn structured_flag_ignored_for_non_object_result() {
-        // Even when the return type is declared object, an array/scalar body
-        // must not be placed in structuredContent (it must be a JSON object).
-        let r = tool_result_object("[1,2]", true);
+        let r = tool_result_object("[1,2]").unwrap();
         assert!(r.get("structuredContent").is_none());
         assert_eq!(r["content"][0]["text"], "[1,2]");
     }
 
     #[test]
-    fn image_mime_produces_base64_image_block() {
-        // A media-typed return arrives as raw bytes (from the backend's raw-media
-        // path); an image/* media type turns them into an MCP image block with
-        // base64 data -- not a giant JSON number array.
-        let r = media_result_object(media_content_block(&[137, 80, 78, 71], "image/png"));
+    fn a_raster_image_is_an_image_block_named_by_its_media_type() {
+        let r = media_result(&[137, 80, 78, 71], "IMAGE/PNG; x=1", false, "draw", "png").unwrap();
         assert_eq!(r["isError"], json!(false));
         assert_eq!(r["content"][0]["type"], "image");
         assert_eq!(r["content"][0]["mimeType"], "image/png");
@@ -3004,25 +3035,36 @@ mod tests {
     }
 
     #[test]
-    fn text_mime_produces_unquoted_text_block() {
-        // A text/* renderer returns `Str`; the raw bytes are surfaced as text.
-        let r = media_result_object(media_content_block(b"hi there", "text/plain"));
-        assert_eq!(r["content"][0]["type"], "text");
-        assert_eq!(r["content"][0]["text"], "hi there");
+    fn text_output_is_a_text_resource_keeping_its_media_type() {
+        let svg = b"<svg/>";
+        let r = media_result(svg, "image/svg+xml", true, "draw", "svg").unwrap();
+        assert_eq!(r["content"][0]["type"], "resource");
+        assert_eq!(r["content"][0]["resource"]["mimeType"], "image/svg+xml");
+        assert_eq!(r["content"][0]["resource"]["text"], "<svg/>");
+        let pdb = media_result(b"ATOM", "chemical/x-pdb", true, "s", "pdb").unwrap();
+        assert_eq!(pdb["content"][0]["resource"]["text"], "ATOM");
     }
 
     #[test]
-    fn other_binary_mime_produces_resource_blob() {
-        let r = media_result_object(media_content_block(&[1, 2, 3], "application/octet-stream"));
-        assert_eq!(r["content"][0]["type"], "resource");
-        assert_eq!(
-            r["content"][0]["resource"]["mimeType"],
-            "application/octet-stream"
-        );
-        assert_eq!(
-            r["content"][0]["resource"]["blob"],
-            base64_encode(&[1, 2, 3])
-        );
+    fn binary_output_is_a_blob_resource_with_a_uri_of_its_own() {
+        let a = media_result(&[1, 2, 3], "application/octet-stream", false, "f", "raw").unwrap();
+        let b = media_result(&[1, 2, 3], "application/octet-stream", false, "f", "raw").unwrap();
+        assert_eq!(a["content"][0]["type"], "resource");
+        assert_eq!(a["content"][0]["resource"]["blob"], base64_encode(&[1, 2, 3]));
+        let uri = a["content"][0]["resource"]["uri"].as_str().unwrap();
+        assert!(uri.starts_with("morloc://result/f/raw/"), "{uri}");
+        assert_ne!(a["content"][0]["resource"]["uri"], b["content"][0]["resource"]["uri"]);
+        // Bytes the daemon did not mark as text stay bytes.
+        let c = media_result(b"hi", "text/plain", false, "f", "raw").unwrap();
+        assert!(c["content"][0]["resource"].get("blob").is_some());
+    }
+
+    #[test]
+    fn the_escaped_length_counts_what_json_writes() {
+        assert_eq!(json_escaped_len(b"ab"), 2);
+        assert_eq!(json_escaped_len(b"\"\\\n"), 6);
+        assert_eq!(json_escaped_len(&[0x01]), 6);
+        assert_eq!(json_escaped_len(&[0x01]), serde_json::to_string("\u{1}").unwrap().len() - 2);
     }
 
     // -- handshake / dispatch of non-FFI methods -----------------------------

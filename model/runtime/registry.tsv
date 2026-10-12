@@ -65,7 +65,6 @@ morloc-runtime/daemon_ffi.rs::-::G_EVAL_TIMEOUT	startup
 morloc-runtime/daemon_ffi.rs::-::G_DAEMON_OUTPUT_PACKET	startup		
 morloc-runtime/daemon_ffi.rs::-::G_DAEMON_COMPRESSION	startup		
 morloc-runtime/daemon_ffi.rs::-::CURRENT_OUTPUT_PACKET	thread		
-morloc-runtime/daemon_ffi.rs::-::CURRENT_OUTPUT_HTTP	thread		
 morloc-runtime/daemon_ffi.rs::-::CURRENT_OUTPUT_MEDIA_BYTES	thread		
 morloc-runtime/daemon_ffi.rs::-::G_EVAL_SANDBOX	startup		
 morloc-runtime/daemon_ffi.rs::-::G_EVAL_ALLOWED	exec-only		

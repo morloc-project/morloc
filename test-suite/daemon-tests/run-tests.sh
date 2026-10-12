@@ -523,6 +523,73 @@ if should_run "render"; then
     assert_http_status "POST /call/mlcp_echo_shout (internal) -> 404" "404" \
         "http://127.0.0.1:${HTTP_PORT}/call/mlcp_echo_shout" \
         -X POST -H "Content-Type: application/json" -d '["hi"]'
+
+    # A @render with no @mime is its bytes, typed by what they are.
+    curl -s -D "$RENDER_DIR/p.hdr" -o "$RENDER_DIR/p.body" -X POST \
+        "http://127.0.0.1:${HTTP_PORT}/call/echo?render=plain" \
+        -H "Content-Type: application/json" -d '["Hi"]'
+    pct=$(grep -i '^content-type:' "$RENDER_DIR/p.hdr" | tr -d '\r' | cut -d' ' -f2-)
+    assert_test "?render=plain Content-Type" "text/plain; charset=utf-8" "$pct"
+    assert_test "?render=plain raw body" "hi" "$(cat "$RENDER_DIR/p.body")"
+
+    # A typed @with action is JSON.
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/echo?render=size" \
+        -H "Content-Type: application/json" -d '["four"]')
+    assert_test "?render=size returns typed value" "4" "$(json_field "$result" "result")"
+
+    assert_http_status "POST /call/echo?render=a&render=b -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/call/echo?render=shout&render=plain" \
+        -X POST -H "Content-Type: application/json" -d '["hi"]'
+    stop_daemon "$LAST_DAEMON_PID"
+
+    # The socket protocol: a bare call is the own value; a selection is
+    # echoed and a @render's output comes back as bytes.
+    RENDER_SOCK="/tmp/morloc-test-render-$$.sock"
+    SOCKET_FILES+=("$RENDER_SOCK")
+    start_daemon "$RENDER_DIR" --socket "$RENDER_SOCK"
+    wait_for_daemon "$LAST_DAEMON_LOG" 10
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"echo","args":["hi"]}')
+    assert_test "LP bare call is the own value" "hi" "$(json_field "$lp" "result")"
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"echo","args":["hi"],"render":"shout"}')
+    assert_test "LP render echoes the action" "shout" "$(json_field "$lp" "action")"
+    assert_test "LP render is bytes" "SEk=" "$(json_field "$lp" "result_b64")"
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"echo","args":["hi"],"render_default":true}')
+    assert_test "LP render_default runs @default" "shout" "$(json_field "$lp" "action")"
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"echo","args":["hi"],"render":null}')
+    assert_test "LP null render is refused" "error" "$(json_field "$lp" "status")"
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"echo","args":["hi"],"render":"shout","render_default":true}')
+    assert_test "LP render with render_default is refused" "error" "$(json_field "$lp" "status")"
+    stop_daemon "$LAST_DAEMON_PID"
+
+    # MCP: every action is a `_render` value; a bare call runs @default.
+    mcp_out=$(printf '%s\n' \
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' \
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"Hi"}}}' \
+        '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"Hi","_render":"plain"}}}' \
+        '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"four","_render":"size"}}}' \
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"Hi","_render":"raw"}}}' \
+        '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"Hi","_render":"nope"}}}' \
+        | (cd "$RENDER_DIR" && timeout 60 morloc-nexus mcp ./nexus 2>/dev/null))
+    mcp_get() {
+        echo "$mcp_out" | python3 -c '
+import json, sys
+want, path = int(sys.argv[1]), sys.argv[2].split(".")
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get("id") == want:
+        v = m
+        for k in path:
+            v = v[int(k)] if k.isdigit() else v.get(k, "")
+        print(v)
+' "$1" "$2"
+    }
+    assert_test "MCP bare call runs @default" "HI" "$(mcp_get 2 result.content.0.resource.text)"
+    assert_test "MCP @default keeps its media type" "text/plain" "$(mcp_get 2 result.content.0.resource.mimeType)"
+    assert_test "MCP _render=plain is text" "hi" "$(mcp_get 3 result.content.0.resource.text)"
+    assert_test "MCP _render=size is JSON" "4" "$(mcp_get 4 result.content.0.text)"
+    assert_test "MCP _render=raw is the own value" '"Hi"' "$(mcp_get 5 result.content.0.text)"
+    assert_test "MCP unknown action is invalid params" "-32602" "$(mcp_get 6 error.code)"
 fi
 
 # ======================================================================

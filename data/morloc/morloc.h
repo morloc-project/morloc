@@ -856,6 +856,7 @@ typedef struct {
     char* description;
     bool render;
     bool is_default;
+    uint8_t kind;            // 0 value, 1 gather, 2 stream, 3 fold
 } manifest_terminal_t;
 
 typedef struct {
@@ -880,6 +881,8 @@ typedef struct {
     // True for synthesized internal commands (e.g. `@render` entries):
     // hidden from /discover but still callable by name.
     bool internal;
+    // True when the command streams its output.
+    bool streams;
 } manifest_command_t;
 
 typedef struct {
@@ -1020,6 +1023,8 @@ typedef struct daemon_request_s {
     // `@mime` return (bytes+mime, base64 on the wire). Direct length-prefixed
     // clients leave it false and receive the JSON `result` field.
     bool media;
+    // Select the command's @default action (never together with `render`).
+    bool render_default;
 } daemon_request_t;
 
 // Error classification for daemon failures. On success, error_kind is
@@ -1046,6 +1051,13 @@ typedef struct daemon_response_s {
     // handler writes these bytes verbatim instead of the JSON envelope.
     unsigned char* result_bytes;
     size_t result_len;
+    // Media type of a raw-media result in `result_bytes`, or NULL.
+    char* mime;
+    // The output action that ran ("raw" for the command's own value) when the
+    // request selected one, or NULL.
+    char* action;
+    // True when `result_bytes` hold text: a Str, or a list of Str, in UTF-8.
+    bool result_text;
 } daemon_response_t;
 
 // -- HTTP types --

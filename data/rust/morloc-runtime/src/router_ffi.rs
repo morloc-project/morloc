@@ -830,6 +830,10 @@ struct ForwardRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     media: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    render_default: bool,
 }
 
 /// Serialize a DaemonRequest to JSON.
@@ -861,6 +865,8 @@ unsafe fn serialize_request_to_json(request: *mut DaemonRequest) -> String {
         // Direct length-prefixed clients (which don't go through
         // router_forward) omit this and keep JSON `result`.
         media: true,
+        render: owned((*request).render),
+        render_default: (*request).render_default,
     };
     serde_json::to_string(&req).unwrap_or_else(|_| "{}".into())
 }

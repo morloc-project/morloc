@@ -158,10 +158,10 @@ Return:
     -b/--batches: Str  (raw bytes)
     -k/--marks:   Str  (raw bytes)
 stream ['raw', 'all', 'count', 'batches', 'folded', 'marks']
-twoSites ['raw']
-ok 20005: 1,2,3,4,5,0,1,2
-error render 'all' of command 'twoSites' runs only from the command line; request render=raw for the command's own output
-unknown render 'all'
+twoSites ['raw', 'all', 'batches', 'marks']
+200 text/plain; charset=utf-8 20005: 1,2,3,4,5,0,1,2
+error render 'all' of command 'twoSites' runs only from the command line; select raw for the command's own output
+render 'all' of command 'twoSites' runs only from the command line; select raw for the command's own output
 --- formats ---
 OK
 OK

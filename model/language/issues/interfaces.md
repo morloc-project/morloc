@@ -62,24 +62,14 @@ re-checked.
   json_help.rs:550; MCP marks a whole-object group optional, and an
   unrolled field with a default optional (json_help.rs:1073, 1109).
 
-## Output selection (IFACE-7)
-
-- **A bare call fires `@default` on daemon HTTP only.** [read] LP
-  (daemon_ffi.rs:2186-2191) and MCP (json_help.rs:1175) return the own
-  value by design; front-end `/call` drops `?render=` (see mcp.md). The
-  same bare call gives different output from the daemon and from the front
-  end.
-
 ## Output (IFACE-9)
 
-- **A `@render` result is a JSON string over HTTP.** [read] The
-  multi-output-stream golden records `ok 20005: ...` in a JSON envelope
-  for `?render=all`; CLI-8 says the handler's bytes. A `[Str]` or
-  `[Vector U8]` handler comes back as a JSON array.
-- **A `@mime` value is encoded four ways.** [read, survey] CLI: JSON;
-  HTTP and front-end `/call`: raw bytes with `Content-Type`; LP: JSON
-  unless `media:true` (only the router sends it, router_ffi.rs:863); MCP:
-  a content block (mcp.md). See also cli-directives.md.
+- **A `@mime` value is JSON on the CLI.** [reproduced, 0.109.0] Violates
+  IFACE-9 (ruled 2026-10-12: raw on every interface, the CLI included).
+  smiles `structure` with `MolFile = Str` tagged `@mime
+  chemical/x-mdl-molfile` prints a quoted JSON string from `./smiles
+  structure CCO --mol`; HTTP, the front end and MCP send the bytes. See also
+  cli-directives.md.
 - **Non-finite floats.** [read, survey] Lists and records write the
   strings `"nan"`/`"inf"` (morloc-runtime/src/json.rs:1818-1822) where the
   advertised schema says `number`; a Table writes bare `nan`

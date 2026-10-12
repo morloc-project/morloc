@@ -1,8 +1,8 @@
 -- Daemon-mode regression for the @stdout claim wedge.
 --
 -- @collect wires a @stdout OStream into `produce*` inside the language
--- pool, so the @stdout claim is taken POOL-SIDE. A daemon refuses the open
--- (DAEMON-15).
+-- pool. A daemon refuses such a call before it runs; `rawStdout` opens
+-- @stdout itself, which only the pool-side open refuses (DAEMON-15).
 --
 -- A daemon reuses one pool and one registry across every call, so a claim
 -- left behind by a refused open would make every later open fail "@stdout
@@ -11,7 +11,7 @@
 -- must release it for `useStderr`. A one-shot golden cannot show either:
 -- each run gets a fresh registry.
 
-module main (useStdout, useStderr, leakStderr)
+module main (useStdout, rawStdout, useStderr, leakStderr)
 
 import root-py
 
@@ -26,6 +26,12 @@ produceOk sink = do
 
 useStdout :: <IO> ()
 useStdout = @collect produceOk
+
+rawStdout :: <IO> ()
+rawStdout = do
+  o <- @stdout :: <IO> OStream Int
+  @write 0 o (mk 1)
+  @close o
 
 useStderr :: <IO> Int
 useStderr = do

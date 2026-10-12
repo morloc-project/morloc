@@ -17,6 +17,7 @@ pub mod net_limits;
 pub mod private_dir;
 pub mod error;
 pub mod hash;
+pub mod http_query;
 pub mod shm_types;
 pub mod shm_lock;
 pub mod recoverable_lock;

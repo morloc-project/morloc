@@ -748,23 +748,6 @@ pub struct RecordField {
     pub default: Value,
 }
 
-/// One selectable output projection of a command, exposed via the synthetic
-/// `render` enum. `"raw"` (the command's own typed value) is implicit and not
-/// listed here; each entry is a `@render`/`@with` terminal.
-pub struct RenderTarget {
-    /// The `render` enum value (the terminal's long flag name, e.g. `"png"`).
-    pub value: String,
-    /// The internal command dispatched when this projection is selected (the
-    /// terminal's mangled `entry`).
-    pub command: String,
-    /// Media type of that command's return, from its `@mime` type. Drives the
-    /// MCP content block (`image/*` -> image block, etc.). Filled by
-    /// [`build_tool_shapes`] from the manifest; `None` when untyped.
-    pub mime: Option<String>,
-    /// True when the projection's return is a Map/record.
-    pub returns_object: bool,
-}
-
 /// The complete MCP shape of one command: the `tools/list` entry plus the
 /// inverse mapping and validation metadata needed to service a `tools/call`.
 pub struct McpToolShape {
@@ -778,36 +761,9 @@ pub struct McpToolShape {
     pub prop_names: std::collections::HashSet<String>,
     /// Property names that must be present (for missing-argument rejection).
     pub required: Vec<String>,
-    /// True when the return type is a Map/record: only then do we emit
-    /// `structuredContent` + an object `outputSchema`.
-    pub returns_object: bool,
-    /// Media type of the command's own (`"raw"`) return, from its `@mime` type;
-    /// `None` when untyped. Used when no renderer is selected.
-    pub return_mime: Option<String>,
-    /// Output projections selectable via the `render` enum (empty when the
-    /// command has no terminals).
-    pub renders: Vec<RenderTarget>,
-}
-
-impl McpToolShape {
-    /// Resolve a `render` selection to the command to dispatch and how to
-    /// package its result: `"raw"` (the default) -> this command itself; a
-    /// renderer name -> that terminal's entry command (dispatched with the same
-    /// positional args). `Err` for an unknown renderer.
-    pub fn dispatch_for(&self, render: &str) -> Result<(&str, Option<&str>, bool), String> {
-        if render == "raw" {
-            return Ok((
-                self.name.as_str(),
-                self.return_mime.as_deref(),
-                self.returns_object,
-            ));
-        }
-        self.renders
-            .iter()
-            .find(|r| r.value == render)
-            .map(|t| (t.command.as_str(), t.mime.as_deref(), t.returns_object))
-            .ok_or_else(|| format!("unknown render '{}'", render))
-    }
+    /// The values `_render` may take besides `raw`: every output action's long
+    /// name (empty when the command has none).
+    pub actions: Vec<String>,
 }
 
 /// True when a return's parsed wire schema is a Map/record -- the single
@@ -955,7 +911,7 @@ pub fn build_tool_shapes(m: &Manifest) -> Vec<McpToolShape> {
         .filter(|c| !c.internal)
         .filter_map(|c| match command_to_tool_shape(c) {
             Ok(mut shape) => {
-                fill_render_targets(&mut shape, m);
+                describe_actions(&mut shape, c, m);
                 Some(shape)
             }
             Err(reason) => {
@@ -1157,32 +1113,26 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
     // `ArgSlot` and is never part of the inverted positional array. The leading
     // `_` uses the same reserved namespace as positional keys (`_1`, ...), which
     // an argument flag can never produce -- so it cannot collide with a real arg.
-    let mut renders: Vec<RenderTarget> = Vec::new();
-    if !cmd.terminals.is_empty() {
-        let mut enum_vals: Vec<Value> = vec![Value::String("raw".into())];
-        // A tool call runs one action on a fresh run of its command; an
-        // action with no such entry runs only on saved output, from the CLI.
-        for t in &cmd.terminals {
-            let Some(entry) = &t.entry else { continue };
-            enum_vals.push(Value::String(t.long.clone()));
-            renders.push(RenderTarget {
-                value: t.long.clone(),
-                command: entry.clone(),
-                mime: None,
-                returns_object: false,
-            });
-        }
-        // MCP intentionally defaults to "raw" (the structured value), NOT the
-        // CLI's `@default` renderer: an agent generally wants the typed data and
-        // opts into a renderer via this enum, so `Terminal::default` is
-        // deliberately not consulted here.
+    let actions: Vec<String> = cmd.terminals.iter().map(|t| t.long.clone()).collect();
+    if !actions.is_empty() {
+        let enum_vals: Vec<Value> = std::iter::once("raw".to_string())
+            .chain(actions.iter().cloned())
+            .map(Value::String)
+            .collect();
+        // A call that selects nothing gets the CLI's output.
+        let default = cmd
+            .terminals
+            .iter()
+            .find(|t| t.default)
+            .map(|t| t.long.clone())
+            .unwrap_or_else(|| "raw".to_string());
         let prop = json!({
             "type": "string",
             "enum": enum_vals,
-            "default": "raw",
+            "default": default,
             "description":
-                "Output projection: 'raw' returns the underlying typed value; a \
-                 renderer name returns that projection (e.g. an image)."
+                "Output action: 'raw' returns the command's own value; any other \
+                 value runs that output action, as its command-line flag does."
         });
         insert_prop(&mut props, "_render", prop)?;
     }
@@ -1210,8 +1160,10 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
     );
     // Output schema: emit ONLY for object (Map/record) returns. MCP
     // `structuredContent` must be a JSON object, so a scalar/array
-    // `outputSchema` would be invalid; those results ride in a text block.
-    if returns_object {
+    // `outputSchema` would be invalid; those results ride in a text block. A
+    // command with output actions declares none: an action's result need not
+    // match it.
+    if returns_object && actions.is_empty() {
         if let Some(ref parsed) = ret_parsed {
             tool.insert("outputSchema".into(), schema_to_json_schema(parsed));
         }
@@ -1223,25 +1175,52 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
         slots,
         prop_names,
         required: required_names,
-        returns_object,
-        return_mime: cmd.ret.mime.clone(),
-        renders,
+        actions,
     })
 }
 
-/// Fill each render target's media type + object-ness by looking up its entry
-/// command in the manifest. Split from `command_to_tool_shape` (which sees only
-/// one command) so the shape builder stays manifest-free and unit-testable.
-fn fill_render_targets(shape: &mut McpToolShape, m: &Manifest) {
-    for rt in &mut shape.renders {
-        if let Some(entry) = m.command_by_name(&rt.command) {
-            rt.mime = entry.ret.mime.clone();
-            rt.returns_object = parse_schema(&entry.ret.schema)
-                .ok()
-                .as_ref()
-                .map(schema_returns_object)
-                .unwrap_or(false);
+/// Append the command's output actions to its tool description, one row per
+/// action as `-h` prints them (CLI-11): the action, its output's media type or
+/// type, `(raw bytes)` for a `@render` action, and `default`. Split from
+/// `command_to_tool_shape`, which sees one command, because an action's output
+/// type is its entry command's return.
+fn describe_actions(shape: &mut McpToolShape, cmd: &Command, m: &Manifest) {
+    if cmd.terminals.is_empty() {
+        return;
+    }
+    let streams = cmd.stream.is_some() || cmd.terminals.iter().any(|t| t.kind.of_streaming_command());
+    let raw = if streams {
+        "streams its output; runs only from the command line".to_string()
+    } else {
+        cmd.ret.type_desc.clone()
+    };
+    let mut rows = vec!["Output actions (`_render`):".to_string(), format!("  raw: {}", raw)];
+    for t in &cmd.terminals {
+        let entry = t.entry.as_deref().and_then(|e| m.command_by_name(e));
+        let out = match entry {
+            _ if t.kind == morloc_manifest::ActionKind::Stream => {
+                "streams its output; runs only from the command line".to_string()
+            }
+            Some(e) => e.ret.mime.clone().unwrap_or_else(|| e.ret.type_desc.clone()),
+            None => "runs only from the command line".to_string(),
+        };
+        let mut row = format!("  {}: {}", t.long, out);
+        if t.render {
+            row.push_str(" (raw bytes)");
         }
+        if t.default {
+            row.push_str(", default");
+        }
+        if !t.description.is_empty() {
+            row.push_str(&format!(" -- {}", t.description));
+        }
+        rows.push(row);
+    }
+    if let Some(Value::String(d)) = shape.tool.get_mut("description") {
+        if !d.is_empty() {
+            d.push_str("\n\n");
+        }
+        d.push_str(&rows.join("\n"));
     }
 }
 
@@ -1464,7 +1443,6 @@ mod tests {
             other => panic!("expected a Value slot, got {:?}", other),
         }
         // Scalar return -> no outputSchema.
-        assert!(!shape.returns_object);
         assert!(shape.tool.get("outputSchema").is_none());
     }
 
@@ -1573,7 +1551,7 @@ mod tests {
             "args": [],
         }));
         let shape = command_to_tool_shape(&cmd).expect("servable");
-        assert!(shape.returns_object);
+        assert!(shape.tool.get("outputSchema").is_some());
         let out = shape.tool.get("outputSchema").expect("record return has outputSchema");
         assert_eq!(out["type"], "object");
     }

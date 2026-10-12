@@ -63,6 +63,9 @@ pub struct DaemonRequest {
     /// `@mime` return comes back as result_bytes+mime (base64 over the wire).
     /// Direct length-prefixed clients leave it false and keep the JSON `result`.
     pub media: bool,
+    /// Select the command's `@default` action (its own value when it has
+    /// none). Exclusive with `render`; both absent selects the own value.
+    pub render_default: bool,
 }
 
 // ── http_parse_request ───────────────────────────────────────────────────────
@@ -360,7 +363,7 @@ unsafe fn body_string(
     match extract_json_string(body, key) {
         Ok(v) => Ok(v),
         Err(e) => {
-            libc::free(dreq as *mut c_void);
+            crate::daemon_ffi::daemon_free_request(dreq);
             set_errmsg(errmsg, &MorlocError::Other(format!("Malformed JSON in {} body: {}", route, e)));
             Err(())
         }
@@ -372,16 +375,6 @@ unsafe fn body_string(
 /// classification (DAEMON_ERROR_BAD_REQUEST for malformed body / missing
 /// fields, DAEMON_ERROR_NOT_FOUND for an unrecognized route). `error_kind`
 /// may be NULL if the caller doesn't care.
-/// Extract a query-string parameter value (`key=value`) from a raw query, or
-/// None. First occurrence wins; values are used verbatim (render flags are
-/// simple identifiers, so no percent-decoding is needed).
-fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
-    query.split('&').find_map(|pair| match pair.split_once('=') {
-        Some((k, v)) if k == key => Some(v),
-        _ => None,
-    })
-}
-
 pub(crate) unsafe fn http_to_daemon_request(
     req: *mut HttpRequest,
     errmsg: *mut *mut c_char,
@@ -434,7 +427,7 @@ pub(crate) unsafe fn http_to_daemon_request(
             (*dreq).expr = libc::strdup(c.as_ptr());
         }
         if (*dreq).expr.is_null() {
-            libc::free(dreq as *mut c_void);
+            crate::daemon_ffi::daemon_free_request(dreq);
             set_errmsg(errmsg, &MorlocError::Other("Missing 'expr' field in /eval request body".into()));
             return ptr::null_mut();
         }
@@ -452,7 +445,7 @@ pub(crate) unsafe fn http_to_daemon_request(
             (*dreq).expr = libc::strdup(c.as_ptr());
         }
         if (*dreq).expr.is_null() {
-            libc::free(dreq as *mut c_void);
+            crate::daemon_ffi::daemon_free_request(dreq);
             set_errmsg(errmsg, &MorlocError::Other("Missing 'expr' field in /typecheck request body".into()));
             return ptr::null_mut();
         }
@@ -477,7 +470,7 @@ pub(crate) unsafe fn http_to_daemon_request(
             (*dreq).name = libc::strdup(c.as_ptr());
         }
         if (*dreq).expr.is_null() {
-            libc::free(dreq as *mut c_void);
+            crate::daemon_ffi::daemon_free_request(dreq);
             set_errmsg(errmsg, &MorlocError::Other("Missing 'expr' field in /bind request body".into()));
             return ptr::null_mut();
         }
@@ -494,7 +487,7 @@ pub(crate) unsafe fn http_to_daemon_request(
     if method == HttpMethod::Delete && path.starts_with("/bindings/") {
         let name = &path[10..];
         if name.is_empty() {
-            libc::free(dreq as *mut c_void);
+            crate::daemon_ffi::daemon_free_request(dreq);
             set_errmsg(errmsg, &MorlocError::Other("Missing binding name in /bindings/ path".into()));
             return ptr::null_mut();
         }
@@ -508,7 +501,7 @@ pub(crate) unsafe fn http_to_daemon_request(
     if method == HttpMethod::Post && path.starts_with("/call/") {
         let cmd_name = &path[6..];
         if cmd_name.is_empty() {
-            libc::free(dreq as *mut c_void);
+            crate::daemon_ffi::daemon_free_request(dreq);
             set_errmsg(errmsg, &MorlocError::Other("Missing command name in /call/ path".into()));
             return ptr::null_mut();
         }
@@ -520,9 +513,17 @@ pub(crate) unsafe fn http_to_daemon_request(
         let query = std::ffi::CStr::from_ptr((*req).query.as_ptr())
             .to_str()
             .unwrap_or("");
-        if let Some(render) = query_param(query, "render") {
-            let rc = std::ffi::CString::new(render).unwrap_or_default();
-            (*dreq).render = libc::strdup(rc.as_ptr());
+        match morloc_runtime_types::http_query::render_selection(query) {
+            Ok(Some(render)) => {
+                let rc = std::ffi::CString::new(render).unwrap_or_default();
+                (*dreq).render = libc::strdup(rc.as_ptr());
+            }
+            Ok(None) => (*dreq).render_default = true,
+            Err(msg) => {
+                crate::daemon_ffi::daemon_free_request(dreq);
+                set_errmsg(errmsg, &MorlocError::Other(msg.into()));
+                return ptr::null_mut();
+            }
         }
 
         // Parse body. Accepts either a bare JSON array (`[arg1, arg2]`)
@@ -562,7 +563,7 @@ pub(crate) unsafe fn http_to_daemon_request(
                     // Malformed JSON. Fail fast with a clear message
                     // rather than letting it fall through as "missing
                     // args".
-                    libc::free(dreq as *mut c_void);
+                    crate::daemon_ffi::daemon_free_request(dreq);
                     set_errmsg(
                         errmsg,
                         &MorlocError::Other(format!(
@@ -582,7 +583,7 @@ pub(crate) unsafe fn http_to_daemon_request(
     // OPTIONS request somehow falls through here, treat it as an
     // unknown endpoint (NOT_FOUND below).
 
-    libc::free(dreq as *mut c_void);
+    crate::daemon_ffi::daemon_free_request(dreq);
     let method_str = match method {
         HttpMethod::Get => "GET",
         HttpMethod::Post => "POST",

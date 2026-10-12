@@ -211,14 +211,6 @@ fn set_current_output_packet(new: bool) -> bool {
 }
 
 thread_local! {
-    /// Per-thread flag: when set, `daemon_dispatch` does `?render=` output-
-    /// projection resolution against the command's terminals (the `@default`
-    /// terminal when no render is given). HTTP-only -- LP/MCP callers select
-    /// their projection before dispatch, so this stays false for them. See also
-    /// `CURRENT_OUTPUT_MEDIA_BYTES`, which governs the raw-bytes response form
-    /// and is shared with the in-process MCP server.
-    static CURRENT_OUTPUT_HTTP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-
     /// Per-thread flag: when set, `daemon_dispatch`'s `call` path returns the
     /// raw content bytes of a media-typed (`@mime`) return on
     /// `resp.result_bytes` plus the media type on `resp.mime`, instead of a JSON
@@ -228,11 +220,6 @@ thread_local! {
     /// content block, via `daemon_set_output_media_bytes`). Off for everyone
     /// else, so their dispatches stay JSON.
     static CURRENT_OUTPUT_MEDIA_BYTES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Read the current thread's HTTP-output flag.
-fn current_output_http() -> bool {
-    CURRENT_OUTPUT_HTTP.with(|c| c.get())
 }
 
 /// Read the current thread's raw-media-output flag.
@@ -258,71 +245,56 @@ pub(crate) fn daemon_set_output_media_bytes(on: bool) -> bool {
     set_current_output_media_bytes(on)
 }
 
-/// Set the current thread's HTTP-output flag, returning the previous value.
-fn set_current_output_http(new: bool) -> bool {
-    CURRENT_OUTPUT_HTTP.with(|c| {
-        let old = c.get();
-        c.set(new);
-        old
-    })
-}
-
-/// Resolve the HTTP output projection for a `/call`: the command to actually
-/// dispatch given `?render=<flag>`. Null render = fire the `@default` terminal
-/// (matching the CLI's no-flag behavior); `"raw"` = the command's own typed
-/// value (the `-f json` analog); a flag = that terminal's entry command. `Err`
-/// for an unknown render flag.
 unsafe fn resolve_render_target<'a>(
     mv: *const crate::manifest_ffi::Manifest,
     cmd: &'a crate::manifest_ffi::ManifestCommand,
     render: *const c_char,
-) -> Result<&'a crate::manifest_ffi::ManifestCommand, String> {
-    // The terminal the request names, or the `@default` one when it names
-    // none; no terminal at all means the command's own typed value.
-    let (terminal, named) = if render.is_null() {
-        (find_terminal(cmd, None), None)
-    } else {
+    use_default: bool,
+) -> Result<(&'a crate::manifest_ffi::ManifestCommand, Option<&'a crate::manifest_ffi::ManifestTerminal>), String> {
+    let cmd_name = || CStr::from_ptr(cmd.name).to_string_lossy();
+    let (terminal, named) = if !render.is_null() {
         let r = CStr::from_ptr(render).to_str().unwrap_or("");
         if r == "raw" {
-            return Ok(cmd);
+            return Ok((cmd, None));
         }
         match find_terminal(cmd, Some(r)) {
             Some(t) => (Some(t), Some(r)),
-            None => {
-                return Err(format!(
-                    "unknown render '{}' for command '{}'",
-                    r,
-                    CStr::from_ptr(cmd.name).to_string_lossy()
-                ))
-            }
+            None => return Err(format!("unknown render '{}' for command '{}'", r, cmd_name())),
         }
+    } else if use_default {
+        (find_terminal(cmd, None), None)
+    } else {
+        (None, None)
     };
-    let Some(t) = terminal else { return Ok(cmd) };
-    // An action with no entry applies to the command's whole streamed output,
-    // which only the command line saves and replays.
+    let Some(t) = terminal else { return Ok((cmd, None)) };
+    let which = || match named {
+        Some(r) => format!("render '{}'", r),
+        None => "the default render".to_string(),
+    };
     if t.entry.is_null() {
-        let which = match named {
-            Some(r) => format!("render '{}'", r),
-            None => "the default render".to_string(),
-        };
         return Err(format!(
-            "{} of command '{}' runs only from the command line; request render=raw \
-             for the command's own output",
-            which,
-            CStr::from_ptr(cmd.name).to_string_lossy()
+            "{} of command '{}' runs only from the command line; select raw for \
+             the command's own output",
+            which(),
+            cmd_name()
+        ));
+    }
+    // DAEMON-15
+    if t.kind == 2 {
+        return Err(format!(
+            "{} of command '{}' streams its output, which reaches a caller only \
+             from the command line; select raw or another action",
+            which(),
+            cmd_name()
         ));
     }
     let m: &'a crate::manifest_ffi::Manifest = &*mv;
-    m.command_by_name(CStr::from_ptr(t.entry)).ok_or_else(|| {
-        format!(
-            "render entry '{}' not found",
-            CStr::from_ptr(t.entry).to_string_lossy()
-        )
-    })
+    let entry = m.command_by_name(CStr::from_ptr(t.entry)).ok_or_else(|| {
+        format!("render entry '{}' not found", CStr::from_ptr(t.entry).to_string_lossy())
+    })?;
+    Ok((entry, Some(t)))
 }
 
-/// The first terminal whose long flag is `match_long`, or with `None` the
-/// `@default` terminal.
 unsafe fn find_terminal<'a>(
     cmd: &'a crate::manifest_ffi::ManifestCommand,
     match_long: Option<&str>,
@@ -632,6 +604,8 @@ pub struct DaemonResponse {
     /// the `Content-Type`. Null in JSON/packet modes. `libc::strdup`'d; freed in
     /// `daemon_free_response`. Appended last so earlier C-ABI offsets are stable.
     pub mime: *mut c_char,
+    pub action: *mut c_char,
+    pub result_text: bool,
 }
 
 // -- Binding store (replaces linear-probe hash table with HashMap) ------------
@@ -984,6 +958,14 @@ struct JsonRequest {
     name: Option<String>,
     #[serde(default)]
     media: Option<bool>,
+    #[serde(default, deserialize_with = "present")]
+    render: Option<Box<serde_json::value::RawValue>>,
+    #[serde(default)]
+    render_default: Option<bool>,
+}
+
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Box<serde_json::value::RawValue>>, D::Error> {
+    serde::Deserialize::deserialize(d).map(Some)
 }
 
 pub(crate) unsafe fn daemon_parse_request(json: *const c_char, len: usize, errmsg: *mut *mut c_char) -> *mut DaemonRequest {
@@ -1073,6 +1055,25 @@ pub(crate) unsafe fn parse_request(
     }
 
     (*req).media = parsed.media.unwrap_or(false);
+    (*req).render_default = parsed.render_default.unwrap_or(false);
+    if let Some(r) = &parsed.render {
+        match serde_json::from_str::<String>(r.get()) {
+            Ok(name) if !(*req).render_default => {
+                let c = CString::new(name).unwrap_or_default();
+                (*req).render = libc::strdup(c.as_ptr());
+            }
+            Ok(_) => {
+                daemon_free_request(req);
+                set_errmsg(errmsg, &MorlocError::Other("'render' and 'render_default' are exclusive".into()));
+                return ptr::null_mut();
+            }
+            Err(_) => {
+                daemon_free_request(req);
+                set_errmsg(errmsg, &MorlocError::Other("'render' must be a string".into()));
+                return ptr::null_mut();
+            }
+        }
+    }
 
     req
 }
@@ -1091,6 +1092,8 @@ struct JsonResponse {
     /// daemon_serialize_response). Reconstructed onto result_bytes/mime.
     result_b64: Option<String>,
     mime: Option<String>,
+    action: Option<String>,
+    text: Option<bool>,
 }
 
 /// The response as written to the socket. The member order is the wire
@@ -1101,9 +1104,13 @@ struct WireResponse {
     id: Option<String>,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     result_b64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<Box<serde_json::value::RawValue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1186,6 +1193,7 @@ pub(crate) unsafe fn daemon_parse_response(
                         (*resp).result_len = len;
                         let c = CString::new(mime.as_str()).unwrap_or_default();
                         (*resp).mime = libc::strdup(c.as_ptr());
+                        (*resp).result_text = parsed.text.unwrap_or(false);
                         None
                     }
                 }
@@ -1205,6 +1213,10 @@ pub(crate) unsafe fn daemon_parse_response(
     if let Some(error) = &parsed.error {
         let c = CString::new(error.as_str()).unwrap_or_default();
         (*resp).error = libc::strdup(c.as_ptr());
+    }
+    if let Some(action) = &parsed.action {
+        let c = CString::new(action.as_str()).unwrap_or_default();
+        (*resp).action = libc::strdup(c.as_ptr());
     }
 
     resp
@@ -1256,6 +1268,9 @@ pub(crate) unsafe fn daemon_free_response(resp: *mut DaemonResponse) {
     if !(*resp).mime.is_null() {
         libc::free((*resp).mime as *mut c_void);
     }
+    if !(*resp).action.is_null() {
+        libc::free((*resp).action as *mut c_void);
+    }
     libc::free(resp as *mut c_void);
 }
 
@@ -1270,8 +1285,10 @@ pub(crate) unsafe fn serialize_response(
     let mut wire = WireResponse {
         id: owned((*response).id),
         status: if (*response).success { "ok" } else { "error" },
+        action: owned((*response).action),
         result_b64: None,
         mime: None,
+        text: None,
         result: None,
         error: None,
     };
@@ -1285,6 +1302,7 @@ pub(crate) unsafe fn serialize_response(
         let bytes = std::slice::from_raw_parts((*response).result_bytes, (*response).result_len);
         wire.result_b64 = Some(base64::engine::general_purpose::STANDARD.encode(bytes));
         wire.mime = owned((*response).mime);
+        wire.text = (*response).result_text.then_some(true);
     } else if (*response).success && !(*response).result_json.is_null() {
         // The value goes out as the text it is; text that is not JSON is
         // carried as a JSON string.
@@ -1833,17 +1851,35 @@ unsafe fn emit_raw_media(
     schema: *const CSchema,
     mime: *const c_char,
 ) {
-    let mut err: *mut c_char = ptr::null_mut();
-    let mut raw_len: usize = 0;
-    let raw = crate::json_ffi::voidstar_to_raw_bytes(voidstar, schema, &mut raw_len, &mut err);
-    if raw.is_null() || !err.is_null() {
-        set_packet_error(resp, &mut err, "failed to serialize media return");
-        return;
-    }
+    use morloc_runtime_types::schema::SerialType;
+    let rs = CSchema::to_rust(schema);
+    let textual = rs.serial_type == SerialType::String
+        || (rs.serial_type == SerialType::Array
+            && rs.parameters.first().is_some_and(|p| p.serial_type == SerialType::String));
+    let (raw, raw_len) = if morloc_runtime_types::is_top_null(schema, voidstar as *const u8) {
+        (libc::malloc(1) as *mut u8, 0)
+    } else {
+        let mut err: *mut c_char = ptr::null_mut();
+        let mut raw_len: usize = 0;
+        let raw = crate::json_ffi::voidstar_to_raw_bytes(voidstar, schema, &mut raw_len, &mut err);
+        if raw.is_null() || !err.is_null() {
+            set_packet_error(resp, &mut err, "failed to serialize media return");
+            return;
+        }
+        (raw, raw_len)
+    };
+    let utf8 = textual && std::str::from_utf8(std::slice::from_raw_parts(raw, raw_len)).is_ok();
     (*resp).success = true;
     (*resp).result_bytes = raw;
     (*resp).result_len = raw_len;
-    (*resp).mime = libc::strdup(mime);
+    (*resp).result_text = utf8;
+    (*resp).mime = if !mime.is_null() {
+        libc::strdup(mime)
+    } else if utf8 {
+        libc::strdup(c"text/plain; charset=utf-8".as_ptr())
+    } else {
+        libc::strdup(c"application/octet-stream".as_ptr())
+    };
 }
 
 /// # Safety
@@ -2182,27 +2218,37 @@ unsafe fn dispatch_request(
             return resp;
         }
     };
-    // HTTP output selection: `?render=<flag>` (or the command's `@default`
-    // terminal when absent) re-points dispatch to that projection's entry
-    // command -- same argument shape by construction, so parsing below is
-    // unchanged. Gated on the HTTP transport so LP / MCP callers are unaffected:
-    // a bare LP `/call` runs the command's own typed value, never the @default
-    // projection (LP framing carries no render selector and its clients decode
-    // the typed value directly). The @default asymmetry is intentional.
-    let cmd = if current_output_http() {
-        match resolve_render_target(mv, cmd, (*request).render) {
-            Ok(c) => c,
-            Err(msg) => {
-                (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-                let ce = CString::new(msg).unwrap_or_default();
-                (*resp).error = libc::strdup(ce.as_ptr());
-                return resp;
-            }
+    let selected = !(*request).render.is_null() || (*request).render_default;
+    let refuse = |resp: *mut DaemonResponse, msg: String| {
+        (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
+        let ce = CString::new(msg).unwrap_or_default();
+        (*resp).error = libc::strdup(ce.as_ptr());
+        resp
+    };
+    let (target, terminal) = if selected {
+        match resolve_render_target(mv, cmd, (*request).render, (*request).render_default) {
+            Ok(r) => r,
+            Err(msg) => return refuse(resp, msg),
         }
     } else {
-        cmd
+        (cmd, None)
     };
+    // DAEMON-15
+    if terminal.is_none() && cmd.streams {
+        return refuse(resp, format!(
+            "command '{}' streams its output, which reaches a caller only from \
+             the command line",
+            CStr::from_ptr(cmd.name).to_string_lossy()
+        ));
+    }
+    if selected {
+        (*resp).action = match terminal {
+            Some(t) => libc::strdup(t.long),
+            None => libc::strdup(c"raw".as_ptr()),
+        };
+    }
+    let cmd = target;
     let expected_nargs = cmd.n_args;
 
     // Result-form policy for this dispatch. `want_packet` is a per-thread flag
@@ -2211,12 +2257,13 @@ unsafe fn dispatch_request(
     // below. When set, both the pure-eval and remote sub-cases emit a morloc
     // data packet (compressed per `compression`) on `resp.result_bytes`.
     let want_packet = current_output_packet();
-    // Raw-media output: when a raw-media consumer (the HTTP handler or the
-    // in-process MCP server) is active AND the command's return type carries a
-    // `@mime`, emit the raw content bytes + media type instead of JSON. The HTTP
-    // handler turns this into a `Content-Type` body; MCP base64s it into a
-    // content block. Both skip the wasteful JSON int-array round-trip.
-    let want_media_bytes = current_output_media_bytes() && !cmd.ret.mime.is_null();
+    if want_packet && terminal.is_some() {
+        return refuse(resp, "a packet client cannot select an output action; select raw".into());
+    }
+    let renders = terminal.is_some_and(|t| t.render);
+    let want_media_bytes = !want_packet
+        && (current_output_media_bytes() || terminal.is_some())
+        && (!cmd.ret.mime.is_null() || renders);
     let compression = G_DAEMON_COMPRESSION.load(Ordering::Relaxed);
 
     // Parse JSON args into argument_t** array
@@ -2995,11 +3042,9 @@ unsafe fn handle_http_connection(
     // the raw-media response form: a return whose type carries a `@mime` comes
     // back as raw bytes + media type rather than JSON, so we can set
     // `Content-Type` below.
-    let prev_http = set_current_output_http(true);
     let prev_media = set_current_output_media_bytes(true);
     let resp = dispatch(manifest as *mut crate::manifest_ffi::Manifest, req, sockets, shm_basename);
     set_current_output_media_bytes(prev_media);
-    set_current_output_http(prev_http);
 
     let status = daemon_error_kind_to_http_status(
         (*resp).error_kind, (*resp).success,
