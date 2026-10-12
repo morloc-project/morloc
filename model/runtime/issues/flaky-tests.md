@@ -16,3 +16,12 @@
   references held ...") is not kept by the gate's filter, so which of the
   three conditions failed is unknown; a rerun should keep the full test
   output.
+- **Block census test sees a block change under it.** [reproduced once,
+  1 in 6 runs] Spec gap: no item says which tests may touch shared
+  memory without the exclusive test guard. `cargo test -p morloc-runtime
+  --lib` on 2026-10-12 failed
+  `shm::tests::live_block_stats_counts_what_is_held` at its first
+  assert (held != baseline + 2) while holding `own_test_registry`; five
+  later runs passed. Something allocated or freed a block outside that
+  guard during the test: a test without a guard, or a thread a previous
+  test left running (a custodian, a write-behind worker). Not found.

@@ -389,19 +389,39 @@ pub(crate) fn walk_into_fresh(
     let result_schema = infer_chain_schema(value_schema, steps)?;
     let dst = shm::shcalloc(1, result_schema.width)?;
     let mut cursor = ArgsCursor::new(args);
-    if let Err(e) = walk_into(src, src.arr_base(), value_schema,
-                              steps, &mut cursor, dst, &result_schema) {
-        let _ = shm::shfree(dst);
-        return Err(e);
+    let mut parts: Vec<AbsPtr> = Vec::new();
+    let walked = walk_into(src, src.arr_base(), value_schema,
+                           steps, &mut cursor, dst, &result_schema, &mut parts)
+        .and_then(|()| match cursor.remaining() {
+            0 => Ok(()),
+            n => Err(MorlocError::Other(format!(
+                "walk: {} unconsumed runtime arg(s) -- pattern/args arity mismatch", n
+            ))),
+        });
+    one_block(dst, &result_schema, parts, walked)
+}
+
+/// The value built at `root` from `parts` as one block, which is how a pool
+/// releases it; on `built`'s error, every block given back.
+pub(crate) fn one_block(
+    root: AbsPtr,
+    schema: &Schema,
+    parts: Vec<AbsPtr>,
+    built: Result<(), MorlocError>,
+) -> Result<AbsPtr, MorlocError> {
+    match built {
+        Ok(()) if parts.is_empty() => Ok(root),
+        // SAFETY: `parts` lists every block below `root`, and nothing else
+        // points into them.
+        Ok(()) => unsafe { voidstar::consolidate(root, schema, &parts) },
+        Err(e) => {
+            for p in parts {
+                let _ = shm::shfree(p);
+            }
+            let _ = shm::shfree(root);
+            Err(e)
+        }
     }
-    if cursor.remaining() != 0 {
-        let _ = shm::shfree(dst);
-        return Err(MorlocError::Other(format!(
-            "walk: {} unconsumed runtime arg(s) -- pattern/args arity mismatch",
-            cursor.remaining()
-        )));
-    }
-    Ok(dst)
 }
 
 /// Walk `steps` from the current source position into a pre-allocated
@@ -416,6 +436,7 @@ pub(crate) fn walk_into(
     args: &mut ArgsCursor<'_>,
     out: AbsPtr,
     out_schema: &Schema,
+    parts: &mut Vec<AbsPtr>,
 ) -> Result<(), MorlocError> {
     // Pre-walk through any leading Field steps -- they are pure
     // pointer arithmetic and never consume args.
@@ -428,7 +449,7 @@ pub(crate) fn walk_into(
                 // Reached the end of the chain. Deep-copy current
                 // value into out.
                 debug_assert_eq!(out_schema.width, cur_schema_ref.width);
-                return deep_copy_one(src, cur_ptr, cur_schema_ref, out);
+                return deep_copy_one(src, cur_ptr, cur_schema_ref, out, parts);
             }
             Some(WalkStep::Field(_)) => unreachable!("navigate_field_prefix consumed all fields"),
             Some(WalkStep::BracketIndex) => {
@@ -472,12 +493,12 @@ pub(crate) fn walk_into(
                 let remaining = &tail[1..];
                 if remaining.is_empty() {
                     return inline_bracket_slice(
-                        src, cur_ptr, cur_schema_ref, s, e, p, out,
+                        src, cur_ptr, cur_schema_ref, s, e, p, out, parts,
                     );
                 }
                 return broadcast_slice_tail(
                     src, cur_ptr, cur_schema_ref, s, e, p,
-                    remaining, args, out, out_schema,
+                    remaining, args, out, out_schema, parts,
                 );
             }
             Some(WalkStep::Group(chains)) => {
@@ -485,7 +506,7 @@ pub(crate) fn walk_into(
                 // directly into `out`.
                 debug_assert_eq!(tail.len(), 1, "Group should be terminal");
                 return materialize_group(src, cur_ptr, cur_schema_ref,
-                                          chains, args, out, out_schema);
+                                          chains, args, out, out_schema, parts);
             }
         }
     }
@@ -588,6 +609,7 @@ pub(crate) fn inline_bracket_slice(
     stop: Option<i64>,
     step: Option<i64>,
     out: AbsPtr,
+    parts: &mut Vec<AbsPtr>,
 ) -> Result<(), MorlocError> {
     debug_assert_eq!(arr_schema.serial_type, SerialType::Array);
     if arr_schema.parameters.is_empty() {
@@ -603,16 +625,15 @@ pub(crate) fn inline_bracket_slice(
     let buf_ptr = if n_out == 0 {
         std::ptr::null::<u8>() as AbsPtr
     } else {
-        shm::shcalloc(n_out, elem_w)?
+        let b = shm::shcalloc(n_out, elem_w)?;
+        parts.push(b);
+        b
     };
     let data_abs = src.array_data(arr, elem_w)?;
     for (k, i) in slice.positions().enumerate() {
         let elem_src = unsafe { (data_abs as *const u8).add(i * elem_w) as AbsPtr };
         let elem_dst = unsafe { (buf_ptr as *mut u8).add(k * elem_w) as AbsPtr };
-        if let Err(e) = deep_copy_one(src, elem_src, elem_schema, elem_dst) {
-            if !buf_ptr.is_null() { let _ = shm::shfree(buf_ptr); }
-            return Err(e);
-        }
+        deep_copy_one(src, elem_src, elem_schema, elem_dst, parts)?;
     }
     // Write the Array { size, RelPtr data } header into out.
     let data_rel = if buf_ptr.is_null() {
@@ -659,6 +680,7 @@ pub(crate) fn broadcast_slice_tail(
     args: &mut ArgsCursor<'_>,
     out: AbsPtr,
     out_schema: &Schema,
+    parts: &mut Vec<AbsPtr>,
 ) -> Result<(), MorlocError> {
     debug_assert_eq!(arr_schema.serial_type, SerialType::Array);
     debug_assert_eq!(out_schema.serial_type, SerialType::Array);
@@ -682,7 +704,9 @@ pub(crate) fn broadcast_slice_tail(
     let buf_ptr = if n_out == 0 {
         std::ptr::null::<u8>() as AbsPtr
     } else {
-        shm::shcalloc(n_out, out_elem_w)?
+        let b = shm::shcalloc(n_out, out_elem_w)?;
+        parts.push(b);
+        b
     };
     let data_abs = src.array_data(arr, elem_w)?;
     // The tail's runtime args (any BracketIndex/BracketSlice in the
@@ -700,18 +724,14 @@ pub(crate) fn broadcast_slice_tail(
             (buf_ptr as *mut u8).add(k * out_elem_w) as AbsPtr
         };
         args.pos = snapshot_pos;
-        if let Err(e) = walk_into(
+        walk_into(
             src, elem_src_ptr, elem_schema,
-            tail, args, elem_dst_ptr, out_elem_schema,
-        ) {
-            if !buf_ptr.is_null() { let _ = shm::shfree(buf_ptr); }
-            return Err(e);
-        }
+            tail, args, elem_dst_ptr, out_elem_schema, parts,
+        )?;
         let consumed = args.pos - snapshot_pos;
         match per_iter_consumed {
             None => per_iter_consumed = Some(consumed),
             Some(prev) if prev != consumed => {
-                if !buf_ptr.is_null() { let _ = shm::shfree(buf_ptr); }
                 return Err(MorlocError::Other(format!(
                     "walk: broadcast tail consumed different arg counts \
                      across iterations ({} vs {}); pattern is malformed",
@@ -777,6 +797,7 @@ pub(crate) fn materialize_group(
     args: &mut ArgsCursor<'_>,
     out: AbsPtr,
     out_schema: &Schema,
+    parts: &mut Vec<AbsPtr>,
 ) -> Result<(), MorlocError> {
     // Empty group: nothing to do. The output slot is `out_schema`'s
     // width (zero for Nil/empty-tuple); the caller's shcalloc has
@@ -791,7 +812,7 @@ pub(crate) fn materialize_group(
         let slot_off = out_schema.offsets[i];
         let slot_schema = &out_schema.parameters[i];
         let slot_dst = unsafe { (out as *mut u8).add(slot_off) as AbsPtr };
-        walk_into(src, cur_ptr, cur_schema, chain, args, slot_dst, slot_schema)?;
+        walk_into(src, cur_ptr, cur_schema, chain, args, slot_dst, slot_schema, parts)?;
     }
     Ok(())
 }
@@ -912,7 +933,12 @@ pub(crate) fn deep_copy_one(
     cur_ptr: AbsPtr,
     cur_schema: &Schema,
     dst: AbsPtr,
+    parts: &mut Vec<AbsPtr>,
 ) -> Result<(), MorlocError> {
-    unsafe { voidstar::deep_copy_with(cur_ptr, dst, cur_schema, &src.space()) }
+    unsafe {
+        voidstar::deep_copy_alloc(
+            cur_ptr, dst, cur_schema, &src.space(), voidstar::CopyAlloc::Recording(parts),
+        )
+    }
 }
 

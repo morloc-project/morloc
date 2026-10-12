@@ -6177,16 +6177,14 @@ fn ifile_extract_element(
         )));
     }
     let dst = shm::shcalloc(1, elem_width)?;
+    let mut parts = Vec::new();
     // SAFETY: the records were resolved as one region of `n` elements, and
     // dst is a fresh block of one element's width.
-    unsafe {
+    let copied = unsafe {
         let elem_src = (records as *const u8).add(idx * elem_width);
-        if let Err(e) = voidstar::deep_copy_with(elem_src, dst, elem_schema, &src.space()) {
-            let _ = shm::shfree(dst);
-            return Err(e);
-        }
-    }
-    Ok(dst)
+        crate::stream_walk::deep_copy_one(src, elem_src as AbsPtr, elem_schema, dst, &mut parts)
+    };
+    crate::stream_walk::one_block(dst, elem_schema, parts, copied)
 }
 
 /// Implementation of `.[s:e:p] f` on an IFile handle. Each bound is
@@ -9514,6 +9512,35 @@ mod tests {
         let left = unsafe { shm::reference_count(first) }.unwrap();
         shm::release(first).unwrap();
         assert_eq!(left, 1, "the failed slice kept its reference to the first sub-packet");
+    }
+
+    // A value read out of a file is one block, which is how a pool
+    // releases it.
+    #[test]
+    fn an_element_read_from_a_file_is_one_block() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("elem_one_block");
+        let path = dir.join("e.idx");
+        let p = path.to_str().unwrap().to_string();
+        crate::write_behind::set_test_depth(Some(0));
+        let w = shared_open_ostream_with_schema(&p, "as").unwrap();
+        let list = parse_schema("as").unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(3).unwrap();
+        let v = crate::json::read_json_with_schema(r#"["a string long enough to need its own bytes"]"#, &list).unwrap();
+        shared_write_subpacket(w, level, v).unwrap();
+        shm::shfree(v).unwrap();
+        shared_close_handle(w).unwrap();
+        crate::write_behind::set_test_depth(None);
+
+        let f = open_ifile(&p).unwrap();
+        let got = ifile_bracket_index(f, 0).unwrap();
+        let arr = unsafe { &*(got as *const shm_types_crate::Array) };
+        let bytes = shm::rel2abs(arr.data).unwrap();
+        let block = unsafe { shm::shm_block_size(got) }.unwrap();
+        let inside = (bytes as usize) >= (got as usize) && (bytes as usize) < (got as usize) + block;
+        shm::shfree(got).unwrap();
+        shared_close_handle(f).unwrap();
+        assert!(inside, "the element's bytes are in a block of their own");
     }
 
     #[test]
