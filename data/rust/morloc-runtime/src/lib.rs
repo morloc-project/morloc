@@ -193,6 +193,14 @@ pub(crate) fn init_test_shm() -> ArenaShared {
     guard
 }
 
+#[cfg(test)]
+pub(crate) fn signal_test_child(pid: libc::pid_t, sig: libc::c_int) {
+    // A pid of 0 or -1 names a process group or every process, which on a CI
+    // runner includes the runner itself.
+    assert!(pid > 0 && pid != unsafe { libc::getpid() }, "refusing to signal pid {pid}");
+    unsafe { libc::kill(pid, sig) };
+}
+
 /// Exclusive access for tests that build and tear down their own arena.
 #[cfg(test)]
 #[must_use]

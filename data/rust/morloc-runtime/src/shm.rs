@@ -2783,7 +2783,7 @@ mod tests {
                 let mut waited = 0;
                 while libc::waitpid(pid, &mut status, libc::WNOHANG) == 0 {
                     if waited > 2000 {
-                        libc::kill(pid, libc::SIGKILL);
+                        crate::signal_test_child(pid, libc::SIGKILL);
                         libc::waitpid(pid, &mut status, 0);
                         hung += 1;
                         break;

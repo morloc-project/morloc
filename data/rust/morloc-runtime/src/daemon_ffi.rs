@@ -4240,7 +4240,7 @@ mod child_output_tests {
             false
         });
         if !gone {
-            unsafe { libc::kill(grandchild, libc::SIGKILL) };
+            crate::signal_test_child(grandchild, libc::SIGKILL);
         }
         assert!(!finished);
         assert!(gone, "process {grandchild} started by the eval outlived its limit");

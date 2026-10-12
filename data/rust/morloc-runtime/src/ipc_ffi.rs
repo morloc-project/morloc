@@ -1658,10 +1658,12 @@ mod dispatch_fork_tests {
     #[test]
     fn an_accept_wait_reports_a_watched_descriptor_that_ended() {
         let (server, _path, dir) = listening_socket();
+        // A shutdown reaches the other end even when concurrent tests' forked
+        // children hold copies of this descriptor; a close would not.
         let mut p = [0 as libc::c_int; 2];
-        assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, p.as_mut_ptr()) }, 0);
         let quiet = unsafe { accept_or_watch(server, 20_000, &[p[0]]) }.unwrap();
-        unsafe { libc::close(p[1]) };
+        unsafe { libc::shutdown(p[1], libc::SHUT_WR) };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let ended = loop {
             let got = unsafe { accept_or_watch(server, 1_000_000, &[p[0]]) }.unwrap();
@@ -1671,6 +1673,7 @@ mod dispatch_fork_tests {
         };
         unsafe {
             libc::close(p[0]);
+            libc::close(p[1]);
             libc::close(server);
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -1750,7 +1753,7 @@ mod dispatch_fork_tests {
         assert_eq!(unsafe { libc::waitpid(child, &mut status, libc::WUNTRACED) }, child);
         let resumer = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(2500));
-            unsafe { libc::kill(child, libc::SIGCONT) };
+            crate::signal_test_child(child, libc::SIGCONT);
         });
         SEND_STALL_LIMIT.with(|l| l.set(Some(std::time::Duration::from_millis(1000))));
         let buf = big_buffer();
@@ -1765,31 +1768,43 @@ mod dispatch_fork_tests {
         assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "the reader got every byte: {status}");
     }
 
+    /// A pipe whose read end a child waits on until the test closes the
+    /// write end (or 30 s pass, since concurrent tests' children may hold
+    /// copies of it).
+    fn hold_pipe() -> [libc::c_int; 2] {
+        let mut p = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { morloc_runtime_types::fd::pipe(p.as_mut_ptr()) }, 0);
+        p
+    }
+
+    /// In a forked child: fork a grandchild that keeps this process's
+    /// descriptors open until `hold` is released, then return.
+    unsafe fn leave_a_holder(hold: &[libc::c_int; 2]) {
+        let grandchild = libc::fork();
+        if grandchild == 0 {
+            libc::close(hold[1]);
+            let mut pfd = libc::pollfd { fd: hold[0], events: libc::POLLIN, revents: 0 };
+            libc::poll(&mut pfd, 1, 30_000);
+            libc::_exit(0);
+        }
+        if grandchild < 0 {
+            libc::_exit(5);
+        }
+    }
+
     #[test]
     fn a_reply_to_a_reader_that_died_ends_though_its_fd_lives_on() {
         let (listener, path, dir) = listening_socket();
         let client = unsafe { morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-        let mut pids = [0 as libc::c_int; 2];
-        assert_eq!(unsafe { libc::pipe(pids.as_mut_ptr()) }, 0);
-        let pid_w = pids[1];
-        let child = unsafe {
-            connecting_child(&path, client, move |_| {
-                let grandchild = libc::fork();
-                if grandchild == 0 {
-                    libc::sleep(30);
-                    libc::_exit(0);
-                }
-                libc::write(pid_w, &grandchild as *const libc::pid_t as *const c_void, std::mem::size_of::<libc::pid_t>());
-            })
-        };
-        unsafe { libc::close(client) };
-        let mut grandchild: libc::pid_t = 0;
-        assert_eq!(
-            unsafe { libc::read(pids[0], &mut grandchild as *mut libc::pid_t as *mut c_void, std::mem::size_of::<libc::pid_t>()) },
-            std::mem::size_of::<libc::pid_t>() as isize
-        );
+        let hold = hold_pipe();
+        let child = unsafe { connecting_child(&path, client, move |_| leave_a_holder(&hold)) };
+        unsafe {
+            libc::close(client);
+            libc::close(hold[0]);
+        }
         let mut status = 0;
         assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "the child failed: {status}");
         let conn = unsafe { morloc_runtime_types::fd::accept(listener, ptr::null_mut(), ptr::null_mut()) };
         assert!(conn >= 0);
         unsafe { libc::fcntl(conn, libc::F_SETFL, libc::O_NONBLOCK) };
@@ -1798,12 +1813,9 @@ mod dispatch_fork_tests {
         let sent = unsafe { send_all(conn, buf.as_ptr(), buf.len()) };
         let took = started.elapsed();
         unsafe {
-            libc::kill(grandchild, libc::SIGKILL);
-            libc::waitpid(grandchild, ptr::null_mut(), 0);
+            libc::close(hold[1]);
             libc::close(conn);
             libc::close(listener);
-            libc::close(pids[0]);
-            libc::close(pids[1]);
         }
         let _ = std::fs::remove_dir_all(dir);
         assert!(!sent, "the reader is gone");
@@ -1834,7 +1846,7 @@ mod dispatch_fork_tests {
         let mut err: *mut c_char = ptr::null_mut();
         let got = unsafe { stream_from_client(conn, &mut err) };
         unsafe {
-            libc::kill(child, libc::SIGKILL);
+            crate::signal_test_child(child, libc::SIGKILL);
             libc::waitpid(child, ptr::null_mut(), 0);
             libc::close(conn);
             libc::close(listener);
@@ -1854,23 +1866,49 @@ mod dispatch_fork_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("pipe");
         let cpath = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
-        let mut ready = [0 as libc::c_int; 2];
-        assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0);
+        // The callee makes its own listener: a caller names its callee by the
+        // process that listened. Prepared here, as the child must not allocate.
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (d, b) in addr.sun_path.iter_mut().zip(cpath.as_bytes()) {
+            *d = *b as c_char;
+        }
+        let ready = hold_pipe();
+        let hold = hold_pipe();
         let callee = unsafe { libc::fork() };
+        assert!(callee >= 0, "fork failed");
         if callee == 0 {
-            let l = std::os::unix::net::UnixListener::bind(&path).unwrap();
-            unsafe { libc::write(ready[1], b"r".as_ptr() as *const c_void, 1) };
-            let (conn, _) = l.accept().unwrap();
-            let mut header = [0u8; morloc_runtime_types::packet::PKT_HEADER_SIZE];
-            let _ = std::io::Read::read_exact(&mut &conn, &mut header);
-            if unsafe { libc::fork() } == 0 {
-                unsafe { libc::sleep(30) };
-                unsafe { libc::_exit(0) };
+            unsafe {
+                let lfd = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+                let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+                if lfd < 0 || libc::bind(lfd, &addr as *const _ as *const libc::sockaddr, len) != 0 || libc::listen(lfd, 1) != 0 {
+                    libc::_exit(2);
+                }
+                libc::write(ready[1], b"r".as_ptr() as *const c_void, 1);
+                let conn = morloc_runtime_types::fd::accept(lfd, ptr::null_mut(), ptr::null_mut());
+                if conn < 0 {
+                    libc::_exit(2);
+                }
+                let mut header = [0u8; morloc_runtime_types::packet::PKT_HEADER_SIZE];
+                let mut got = 0usize;
+                while got < header.len() {
+                    let n = libc::read(conn, header.as_mut_ptr().add(got) as *mut c_void, header.len() - got);
+                    if n <= 0 {
+                        break;
+                    }
+                    got += n as usize;
+                }
+                leave_a_holder(&hold);
+                libc::_exit(0);
             }
-            unsafe { libc::_exit(0) };
+        }
+        unsafe {
+            libc::close(hold[0]);
+            libc::close(ready[1]);
         }
         let mut b = 0u8;
-        assert_eq!(unsafe { libc::read(ready[0], &mut b as *mut u8 as *mut c_void, 1) }, 1);
+        assert_eq!(unsafe { libc::read(ready[0], &mut b as *mut u8 as *mut c_void, 1) }, 1, "the callee did not start");
+        unsafe { libc::close(ready[0]) };
         let reaper = std::thread::spawn(move || unsafe { libc::waitpid(callee, ptr::null_mut(), 0) });
         let req = crate::packet::PacketHeader::ping().to_bytes();
         let started = std::time::Instant::now();
@@ -1878,11 +1916,8 @@ mod dispatch_fork_tests {
         let reply = unsafe { send_and_receive_over_socket(cpath.as_ptr(), req.as_ptr(), &mut err) };
         let took = started.elapsed();
         reaper.join().unwrap();
+        unsafe { libc::close(hold[1]) };
         let _ = std::fs::remove_dir_all(&dir);
-        unsafe {
-            libc::close(ready[0]);
-            libc::close(ready[1]);
-        }
         assert!(reply.is_null(), "no reply came");
         unsafe { libc::free(err as *mut c_void) };
         assert!(took < std::time::Duration::from_secs(5), "the dead callee was noticed: {took:?}");
@@ -1904,7 +1939,7 @@ mod dispatch_fork_tests {
         assert!(conn >= 0);
         let resumer = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(2500));
-            unsafe { libc::kill(child, libc::SIGCONT) };
+            crate::signal_test_child(child, libc::SIGCONT);
         });
         let mut err: *mut c_char = ptr::null_mut();
         let request = unsafe { stream_from_client(conn, &mut err) };
@@ -1941,7 +1976,7 @@ mod dispatch_fork_tests {
         if let Some(d) = &deferred {
             assert!(d.alive(), "a stopped sender is alive");
         }
-        unsafe { libc::kill(child, libc::SIGKILL) };
+        crate::signal_test_child(child, libc::SIGKILL);
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         assert_eq!(unsafe { libc::waitid(libc::P_PID, child as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT) }, 0);
         assert!(!stamped.alive(), "an unreaped sender is gone");
@@ -2374,7 +2409,7 @@ mod reuse_tests {
         drop_cached_connections();
         let freed = eventually(|| t.eofs.load(Ordering::SeqCst) == 1);
         unsafe {
-            libc::kill(child, libc::SIGKILL);
+            crate::signal_test_child(child, libc::SIGKILL);
             libc::waitpid(child, ptr::null_mut(), 0);
         }
         assert!(freed, "the callee saw the connection end while the child lived");

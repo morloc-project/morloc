@@ -8052,7 +8052,7 @@ mod tests {
         let (pid, h, release) = child_reporting(move || {
             shared_open_ostream_with_schema(&q, "ai4").unwrap()
         });
-        unsafe { libc::kill(pid, libc::SIGSTOP); }
+        crate::signal_test_child(pid, libc::SIGSTOP);
         let mut status = 0;
         unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED); }
         (pid, h, release)
@@ -8080,7 +8080,7 @@ mod tests {
         unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize); }
         assert_eq!(parsed.unwrap().element_count, 0);
 
-        unsafe { libc::kill(pid, libc::SIGCONT); }
+        crate::signal_test_child(pid, libc::SIGCONT);
         release_forked_holder((pid, release));
     }
 
@@ -8127,6 +8127,9 @@ mod tests {
                     libc::_exit(0);
                 }
             }
+            if worker < 0 {
+                unsafe { libc::_exit(5) };
+            }
             let mut msg = [0u8; 16];
             msg[..8].copy_from_slice(&h.to_le_bytes());
             msg[8..].copy_from_slice(&(worker as i64).to_le_bytes());
@@ -8145,13 +8148,13 @@ mod tests {
         let h = i64::from_le_bytes(msg[..8].try_into().unwrap());
         let worker = i64::from_le_bytes(msg[8..].try_into().unwrap()) as libc::pid_t;
         unsafe {
-            libc::kill(opener, libc::SIGKILL);
+            crate::signal_test_child(opener, libc::SIGKILL);
             let mut status = 0;
             libc::waitpid(opener, &mut status, 0);
         }
         let closed = shared_close_handle(h);
         let again = shared_append_to_path(&p, "ai4");
-        unsafe { libc::kill(worker, libc::SIGKILL); }
+        crate::signal_test_child(worker, libc::SIGKILL);
         closed.unwrap();
         let h2 = again.expect("append while the dead opener's child lives");
         shared_close_handle(h2).unwrap();
@@ -8171,7 +8174,7 @@ mod tests {
 
         // Dead but not yet reaped: nothing can release a slot left for it.
         unsafe {
-            libc::kill(pid, libc::SIGKILL);
+            crate::signal_test_child(pid, libc::SIGKILL);
             let mut info: libc::siginfo_t = std::mem::zeroed();
             libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT);
         }
@@ -8702,7 +8705,7 @@ mod tests {
             std::mem::forget(SlotGuard::lock_any(slot_ref(idx).unwrap()).unwrap());
             0
         });
-        unsafe { libc::kill(pid, libc::SIGKILL); }
+        crate::signal_test_child(pid, libc::SIGKILL);
         release_forked_holder((pid, release));
     }
 
