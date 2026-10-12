@@ -186,17 +186,6 @@ pub(crate) unsafe fn return_ping(
     buf
 }
 
-pub(crate) fn make_ping_packet() -> *mut u8 {
-    // SAFETY: calloc returns null or a valid pointer to 32 zeroed bytes.
-    let buf = unsafe { libc::calloc(32, 1) as *mut u8 };
-    if buf.is_null() { return ptr::null_mut(); }
-    let header = PacketHeader::ping();
-    let bytes = header.to_bytes();
-    // SAFETY: buf points to 32 bytes; bytes is exactly 32 bytes from to_bytes().
-    unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), buf, 32) };
-    buf
-}
-
 // ── Data packet construction helpers ─────────────────────────────────────────
 
 /// Build metadata section: metadata header + schema string, padded to 32-byte boundary.
@@ -470,129 +459,6 @@ pub(crate) unsafe fn make_data_packet_from_mpk(
 }
 
 // ── get_data_packet_as_mpk ───────────────────────────────────────────────────
-
-pub(crate) unsafe fn get_data_packet_as_mpk(
-    packet: *const u8,
-    schema: *const CSchema,
-    mpk_out: *mut *mut c_char,
-    mpk_size_out: *mut usize,
-    errmsg: *mut *mut c_char,
-) -> i32 {
-    clear_errmsg(errmsg);
-    *mpk_out = ptr::null_mut();
-    *mpk_size_out = 0;
-
-    let header = read_morloc_packet_header(packet, errmsg);
-    if header.is_null() { return 0; }
-
-    if (*header).command_type() != PACKET_TYPE_DATA {
-        set_errmsg(errmsg, &MorlocError::Packet("Expected a data packet".into()));
-        return 0;
-    }
-
-    // Check for error
-    if (*header).is_fail() {
-        let payload_start = 32 + (*header).offset as usize;
-        let payload_len = (*header).length as usize;
-        let msg = std::str::from_utf8_unchecked(
-            std::slice::from_raw_parts(packet.add(payload_start), payload_len)
-        );
-        set_errmsg(errmsg, &MorlocError::Packet(format!("\n{}", msg)));
-        return 0;
-    }
-
-    let rs = CSchema::to_rust(schema);
-    let source = (*header).command.data.source;
-    let format = (*header).command.data.format;
-    let payload_start = 32 + (*header).offset as usize;
-    let payload_len = (*header).length as usize;
-    let payload = std::slice::from_raw_parts(packet.add(payload_start), payload_len);
-
-    if source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_MSGPACK {
-        // Inline msgpack: copy directly
-        let buf = libc::malloc(payload_len) as *mut c_char;
-        if buf.is_null() {
-            set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
-            return 0;
-        }
-        ptr::copy_nonoverlapping(payload.as_ptr(), buf as *mut u8, payload_len);
-        *mpk_out = buf;
-        *mpk_size_out = payload_len;
-    } else if source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR {
-        // Inline voidstar: load into SHM then convert to msgpack
-        match crate::voidstar::read_binary(payload, &rs) {
-            Ok(abs) => {
-                match crate::mpack::pack_with_schema(abs, &rs) {
-                    Ok(data) => {
-                        let buf = libc::malloc(data.len()) as *mut u8;
-                        if buf.is_null() {
-                            set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
-                            return 0;
-                        }
-                        ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
-                        *mpk_out = buf as *mut c_char;
-                        *mpk_size_out = data.len();
-                    }
-                    Err(e) => { set_errmsg(errmsg, &e); return 0; }
-                }
-                // Free SHM. shm::shfree zeros the whole block on final ref-drop;
-                // since `abs` came from read_binary's single-block layout, one
-                // shfree releases the wrapper and all packed sub-data.
-                let _ = shm::shfree(abs);
-            }
-            Err(e) => { set_errmsg(errmsg, &e); return 0; }
-        }
-    } else if source == PACKET_SOURCE_FILE && format == PACKET_FORMAT_MSGPACK {
-        // File-based msgpack: read the file
-        let filename_bytes = &payload[..payload_len.min(4096)];
-        let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
-        let filename = filename.trim_end_matches('\0');
-        match std::fs::read(filename) {
-            Ok(data) => {
-                let buf = libc::malloc(data.len()) as *mut u8;
-                if buf.is_null() {
-                    set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
-                    return 0;
-                }
-                ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
-                *mpk_out = buf as *mut c_char;
-                *mpk_size_out = data.len();
-            }
-            Err(e) => {
-                set_errmsg(errmsg, &MorlocError::Io(e));
-                return 0;
-            }
-        }
-    } else if source == PACKET_SOURCE_RPTR && format == PACKET_FORMAT_VOIDSTAR {
-        // Voidstar via relptr: convert to msgpack
-        let relptr = *(payload.as_ptr() as *const RelPtr);
-        match shm::rel2abs(relptr) {
-            Ok(abs) => {
-                match crate::mpack::pack_with_schema(abs, &rs) {
-                    Ok(data) => {
-                        let buf = libc::malloc(data.len()) as *mut u8;
-                        if buf.is_null() {
-                            set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
-                            return 0;
-                        }
-                        ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
-                        *mpk_out = buf as *mut c_char;
-                        *mpk_size_out = data.len();
-                    }
-                    Err(e) => { set_errmsg(errmsg, &e); return 0; }
-                }
-            }
-            Err(e) => { set_errmsg(errmsg, &e); return 0; }
-        }
-    } else {
-        set_errmsg(errmsg, &MorlocError::Packet(
-            format!("Unsupported packet source/format: 0x{:02x}/0x{:02x}", source, format)
-        ));
-        return 0;
-    }
-
-    1 // true
-}
 
 // ── Schema from metadata ─────────────────────────────────────────────────────
 
@@ -1131,25 +997,7 @@ pub(crate) unsafe fn free_morloc_call(call: *mut MorlocCall) {
     libc::free(call as *mut c_void);
 }
 
-
 // ── write_voidstar_binary (for intrinsics.c) ─────────────────────────────────
-
-pub(crate) unsafe fn write_voidstar_binary(
-    fd: i32,
-    data: *const c_void,
-    schema: *const CSchema,
-    errmsg: *mut *mut c_char,
-) -> RelPtr {
-    clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
-    match crate::voidstar::write_binary_to_fd(fd, data as AbsPtr, &rs) {
-        Ok(n) => n as RelPtr,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            -1isize as RelPtr
-        }
-    }
-}
 
 // ── flatten_voidstar_to_buffer ───────────────────────────────────────────────
 
@@ -1184,7 +1032,6 @@ pub(crate) unsafe fn flatten_voidstar_to_buffer(
         }
     }
 }
-
 
 // ── make_data_packet_auto ────────────────────────────────────────────────────
 
@@ -1618,7 +1465,6 @@ pub(crate) unsafe fn normalize_data_packet_to_fd(
 // be single-threaded anyway.
 const STREAMING_THRESHOLD: u64 = 1 << 20;
 
-
 // Run the existing in-memory normalizer, then write the resulting
 // buffer to the fd in one syscall. Used for every non-streamed path.
 unsafe fn buffered_packet_to_fd(
@@ -1675,7 +1521,6 @@ fn create_packet_file(
     }
     Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name for a file packet"))
 }
-
 
 // Write `len` bytes from `buf` to `fd`, retrying on partial writes
 // and EINTR. Returns bytes written or -1 with errmsg set.
@@ -2649,8 +2494,8 @@ mod auto_routing_tests {
     ///
     /// Acquires [`TEST_CONFIG_LOCK`] for the duration of the call so
     /// the read of [`crate::packet::inline_threshold`] inside
-    /// `make_data_packet_auto` can't race with a write from a
-    /// concurrent `config_ffi::tests` test.
+    /// `make_data_packet_auto` can't race with a concurrent test's
+    /// write.
     fn auto_route_source_for(n: usize) -> u8 {
         let _guard = TEST_CONFIG_LOCK.lock().unwrap();
         let _shm = ensure_shm();
@@ -2798,11 +2643,6 @@ mod c_abi {
     use super::*;
 
     #[no_mangle]
-    pub unsafe extern "C" fn read_morloc_packet_header(msg: *const u8, errmsg: *mut *mut c_char) -> *mut PacketHeader {
-        super::read_morloc_packet_header(msg, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn packet_is_ping(packet: *const u8, errmsg: *mut *mut c_char) -> bool {
         super::packet_is_ping(packet, errmsg)
     }
@@ -2815,11 +2655,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn packet_is_remote_call(packet: *const u8, errmsg: *mut *mut c_char) -> bool {
         super::packet_is_remote_call(packet, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn morloc_packet_size_from_header(header: *const PacketHeader) -> usize {
-        super::morloc_packet_size_from_header(header)
     }
 
     #[no_mangle]
@@ -2838,11 +2673,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub extern "C" fn make_ping_packet() -> *mut u8 {
-        super::make_ping_packet()
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn make_standard_data_packet(relptr: RelPtr, schema: *const CSchema) -> *mut u8 {
         super::make_standard_data_packet(relptr, schema)
     }
@@ -2853,16 +2683,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn make_mpk_data_packet(mpk_filename: *const c_char, schema: *const CSchema) -> *mut u8 {
-        super::make_mpk_data_packet(mpk_filename, schema)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn make_data_indirection_packet(dat_filename: *const c_char, schema: *const CSchema) -> *mut u8 {
-        super::make_data_indirection_packet(dat_filename, schema)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn make_table_file_packet(path: *const c_char, schema: *const CSchema) -> *mut u8 {
         super::make_table_file_packet(path, schema)
     }
@@ -2870,16 +2690,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn make_data_packet_from_mpk(mpk: *const c_char, mpk_size: usize, schema: *const CSchema) -> *mut u8 {
         super::make_data_packet_from_mpk(mpk, mpk_size, schema)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn get_data_packet_as_mpk(packet: *const u8, schema: *const CSchema, mpk_out: *mut *mut c_char, mpk_size_out: *mut usize, errmsg: *mut *mut c_char) -> i32 {
-        super::get_data_packet_as_mpk(packet, schema, mpk_out, mpk_size_out, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn read_schema_from_packet_meta(packet: *const u8, errmsg: *mut *mut c_char) -> *mut c_char {
-        super::read_schema_from_packet_meta(packet, errmsg)
     }
 
     #[no_mangle]
@@ -2918,11 +2728,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn make_morloc_remote_call_packet(midx: u32, arg_packets: *const *const u8, nargs: usize, errmsg: *mut *mut c_char) -> *mut u8 {
-        super::make_morloc_remote_call_packet(midx, arg_packets, nargs, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn read_morloc_call_packet(packet: *const u8, errmsg: *mut *mut c_char) -> *mut MorlocCall {
         super::read_morloc_call_packet(packet, errmsg)
     }
@@ -2930,16 +2735,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn free_morloc_call(call: *mut MorlocCall) {
         super::free_morloc_call(call)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn write_voidstar_binary(fd: i32, data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> RelPtr {
-        super::write_voidstar_binary(fd, data, schema, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn flatten_voidstar_to_buffer(data: *const c_void, schema: *const CSchema, out_buf: *mut *mut u8, out_size: *mut usize, errmsg: *mut *mut c_char) -> i32 {
-        super::flatten_voidstar_to_buffer(data, schema, out_buf, out_size, errmsg)
     }
 
     #[no_mangle]

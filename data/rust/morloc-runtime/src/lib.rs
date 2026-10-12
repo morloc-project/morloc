@@ -78,7 +78,6 @@ pub mod panic_ffi;
 pub mod router_ffi;
 pub mod null_check;
 pub mod cli;
-pub mod config_ffi;
 pub mod log;
 pub mod run;
 pub mod lifeline;

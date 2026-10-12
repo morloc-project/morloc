@@ -184,7 +184,6 @@ unsafe fn build_voidstar_data_packet_parts(
 ) -> Option<VoidstarDataPacketParts> {
     use crate::packet_ffi::flatten_voidstar_to_buffer;
 
-
     let mut blob: *mut u8 = ptr::null_mut();
     let mut blob_size: usize = 0;
     let mut err: *mut c_char = ptr::null_mut();
@@ -1054,7 +1053,6 @@ pub(crate) unsafe fn mlc_open_channel(
     }
 }
 
-
 /// Settle a channel whose readers are done with it; see
 /// `shared_settle_channel`. On a failure a reader was handed, returns false
 /// with the producer's message, unchanged, in `errmsg`.
@@ -1075,7 +1073,6 @@ pub(crate) unsafe fn mlc_settle(handle: i64, errmsg: *mut *mut c_char) -> bool {
         }
     }
 }
-
 
 /// `@open path :: <IO> (IStream T)` -- typed open. Like `mlc_open_ostream`
 /// the codegen threads the element schema string for `T`. For a real file
@@ -1646,40 +1643,6 @@ pub(crate) unsafe fn mlc_ifile_length(
 // string owned by the caller. The caller frees with libc::free. Errors
 // return NULL and set errmsg.
 
-pub(crate) unsafe fn mlc_handle_pack_path(
-    handle: i64,
-    out_kind: *mut u8,
-    errmsg: *mut *mut c_char,
-) -> *mut c_char {
-    clear_errmsg(errmsg);
-    let kind = match crate::stream::shared_handle_kind(handle) {
-        Ok(k) => k,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            return ptr::null_mut();
-        }
-    };
-    let path = match crate::stream::shared_handle_path(handle) {
-        Ok(p) => p,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            return ptr::null_mut();
-        }
-    };
-    if !out_kind.is_null() {
-        *out_kind = kind;
-    }
-    match CString::new(path) {
-        Ok(cs) => libc::strdup(cs.as_ptr()),
-        Err(_) => {
-            set_errmsg(errmsg, &MorlocError::Other(
-                "mlc_handle_pack_path: path contains NUL byte".into(),
-            ));
-            ptr::null_mut()
-        }
-    }
-}
-
 // Suballoc-cost lookup for the per-language `get_shm_size` sizing pass on
 // embedded stream-handle fields. Since bridge codecs now uniformly emit
 // TAG_HANDLE (the intra-nexus fast path -- bare slot id in the inline
@@ -1694,40 +1657,6 @@ pub(crate) unsafe fn mlc_handle_path_len(
 ) -> i64 {
     clear_errmsg(errmsg);
     0
-}
-
-pub(crate) unsafe fn mlc_handle_unpack_path(
-    path: *const c_char,
-    kind: u8,
-    errmsg: *mut *mut c_char,
-) -> i64 {
-    clear_errmsg(errmsg);
-    if path.is_null() {
-        set_errmsg(errmsg, &MorlocError::Other(
-            "mlc_handle_unpack_path: null path".into(),
-        ));
-        return -1;
-    }
-    let path_str = match CStr::from_ptr(path).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_errmsg(errmsg, &MorlocError::Other(
-                "mlc_handle_unpack_path: path is not valid UTF-8".into(),
-            ));
-            return -1;
-        }
-    };
-    // Route through the shared-registry `open_dispatch`. The fresh
-    // slot's `call_id` is tagged from the thread-local set by the
-    // daemon dispatch loop, so the call sweep closes it at scope exit. (Replaces the prior `eval_arena::record_slot_if_active`
-    // bookkeeping under the process-local registry.)
-    match crate::stream::open_dispatch(path_str, kind) {
-        Ok(handle) => handle,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            -1
-        }
-    }
 }
 
 // ── Voidstar wire-layout helpers for stream handles ───────────────────────
@@ -2578,11 +2507,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn mlc_probe_packet(path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
-        super::mlc_probe_packet(path, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn mlc_open(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64 {
         super::mlc_open(path, kind, errmsg)
     }
@@ -2693,18 +2617,8 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn mlc_handle_pack_path(handle: i64, out_kind: *mut u8, errmsg: *mut *mut c_char) -> *mut c_char {
-        super::mlc_handle_pack_path(handle, out_kind, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn mlc_handle_path_len(_handle: i64, errmsg: *mut *mut c_char) -> i64 {
         super::mlc_handle_path_len(_handle, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn mlc_handle_unpack_path(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64 {
-        super::mlc_handle_unpack_path(path, kind, errmsg)
     }
 
     #[no_mangle]

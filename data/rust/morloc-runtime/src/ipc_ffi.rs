@@ -24,7 +24,6 @@ pub struct LanguageDaemon {
     pub socket_hold: i32,
 }
 
-
 // Whether the accept loop still peeks each new connection for a readiness ping.
 // True until the first non-ping request is seen (readiness pings precede all
 // real calls), after which steady-state accepts skip the extra peek syscall.
@@ -1548,9 +1547,8 @@ mod tests {
                 0
             );
             let (peer, server) = (fds[0], fds[1]);
-            let ping = crate::packet_ffi::make_ping_packet();
-            assert!(!ping.is_null());
-            assert_eq!(send_all(peer, ping, 32), true);
+            let ping = morloc_runtime_types::packet::PacketHeader::ping().to_bytes();
+            assert_eq!(send_all(peer, ping.as_ptr(), 32), true);
 
             assert!(
                 matches!(try_answer_ping(server), PingPeek::Answered),
@@ -1563,7 +1561,6 @@ mod tests {
             let mut e: *mut c_char = ptr::null_mut();
             assert!(crate::packet_ffi::packet_is_ping(pong.as_ptr(), &mut e));
             if !e.is_null() { libc::free(e as *mut c_void); }
-            libc::free(ping as *mut c_void);
             libc::close(peer);
 
             // -- non-ping: not consumed, left for the worker --
@@ -1606,11 +1603,7 @@ mod tests {
             let (peer, server) = (fds[0], fds[1]);
             // Start from a genuine ping header, then forge a nonzero length so
             // morloc_packet_size(hdr) != 32.
-            let ping = crate::packet_ffi::make_ping_packet();
-            assert!(!ping.is_null());
-            let mut hdr = [0u8; 32];
-            std::ptr::copy_nonoverlapping(ping, hdr.as_mut_ptr(), 32);
-            libc::free(ping as *mut c_void);
+            let mut hdr = morloc_runtime_types::packet::PacketHeader::ping().to_bytes();
             // PacketHeader length is the last 4 bytes (see morloc_packet_size =
             // 32 + offset + length); set a large length to force the over-read.
             hdr[28] = 0x00; hdr[29] = 0x10; hdr[30] = 0x00; hdr[31] = 0x00;
@@ -2178,11 +2171,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn close_daemon(daemon_ptr: *mut *mut LanguageDaemon) {
         super::close_daemon(daemon_ptr)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn start_daemon(socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char, shm_default_size: usize, errmsg: *mut *mut c_char) -> *mut LanguageDaemon {
-        super::start_daemon(socket_path, tmpdir, shm_basename, shm_default_size, errmsg)
     }
 
     #[no_mangle]

@@ -4330,11 +4330,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn daemon_parse_response(json: *const c_char, len: usize, errmsg: *mut *mut c_char) -> *mut DaemonResponse {
-        super::daemon_parse_response(json, len, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn daemon_free_request(req: *mut DaemonRequest) {
         super::daemon_free_request(req)
     }
@@ -4342,11 +4337,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn daemon_free_response(resp: *mut DaemonResponse) {
         super::daemon_free_response(resp)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn daemon_build_discovery(manifest: *mut crate::manifest_ffi::Manifest) -> *mut c_char {
-        super::daemon_build_discovery(manifest)
     }
 
     #[no_mangle]

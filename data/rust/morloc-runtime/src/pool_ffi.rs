@@ -807,11 +807,6 @@ mod c_abi {
     use super::*;
 
     #[no_mangle]
-    pub unsafe extern "C" fn pool_dispatch_packet(packet: *const u8, local_dispatch: PoolDispatchFn, remote_dispatch: PoolDispatchFn, ctx: *mut c_void) -> *mut u8 {
-        super::pool_dispatch_packet(packet, local_dispatch, remote_dispatch, ctx)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn pool_main(argc: i32, argv: *mut *mut c_char, config: *mut PoolConfig) -> i32 {
         super::pool_main(argc, argv, config)
     }

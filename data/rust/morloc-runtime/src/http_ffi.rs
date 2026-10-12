@@ -64,7 +64,6 @@ pub struct DaemonRequest {
     pub media: bool,
 }
 
-
 // ── http_parse_request ───────────────────────────────────────────────────────
 
 /// The value of the first header named `name` (case-insensitive).
@@ -266,16 +265,6 @@ fn http_status_text(status: i32) -> &'static str {
         503 => "Service Unavailable",
         _ => "Unknown",
     }
-}
-
-pub(crate) unsafe fn http_write_response(
-    fd: i32,
-    status: i32,
-    content_type: *const c_char,
-    body: *const c_char,
-    body_len: usize,
-) -> bool {
-    write_response(fd, status, content_type, body, body_len)
 }
 
 pub(crate) unsafe fn write_response(
@@ -760,29 +749,5 @@ mod body_tests {
         let (d, e) = to_daemon(HttpMethod::Post, "/eval", "{\"expr\": ");
         assert!(d.is_null());
         assert!(e.unwrap().contains("Malformed JSON in /eval body"));
-    }
-}
-
-mod c_abi {
-    use super::*;
-
-    #[no_mangle]
-    pub unsafe extern "C" fn http_parse_request(fd: i32, errmsg: *mut *mut c_char) -> *mut HttpRequest {
-        super::http_parse_request(fd, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn http_free_request(req: *mut HttpRequest) {
-        super::http_free_request(req)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn http_write_response(fd: i32, status: i32, content_type: *const c_char, body: *const c_char, body_len: usize) -> bool {
-        super::http_write_response(fd, status, content_type, body, body_len)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn http_to_daemon_request(req: *mut HttpRequest, errmsg: *mut *mut c_char, error_kind: *mut i32) -> *mut DaemonRequest {
-        super::http_to_daemon_request(req, errmsg, error_kind)
     }
 }

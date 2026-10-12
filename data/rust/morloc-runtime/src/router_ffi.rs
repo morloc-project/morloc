@@ -867,7 +867,6 @@ unsafe fn serialize_request_to_json(request: *mut DaemonRequest) -> String {
 
 // -- router_build_discovery ---------------------------------------------------
 
-
 #[cfg(test)]
 mod forward_tests {
     use super::*;
@@ -954,16 +953,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn router_terminate_children(router: *mut Router) {
         super::router_terminate_children(router)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn router_free(router: *mut Router) {
-        super::router_free(router)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn router_start_program(prog: *mut RouterProgram, errmsg: *mut *mut c_char) -> bool {
-        super::router_start_program(prog, errmsg)
     }
 
     #[no_mangle]

@@ -21,64 +21,6 @@ pub struct Resources {
 
 // ── parse_slurm_time ─────────────────────────────────────────────────────────
 
-pub(crate) unsafe fn parse_slurm_time(
-    time_str: *const c_char,
-    errmsg: *mut *mut c_char,
-) -> usize {
-    clear_errmsg(errmsg);
-    let s = CStr::from_ptr(time_str).to_string_lossy();
-
-    let mut days: i32 = 0;
-    let hours: i32;
-    let minutes: i32;
-    let seconds: i32;
-
-    // Try D-HH:MM:SS format
-    if let Some(dash_pos) = s.find('-') {
-        days = match s[..dash_pos].parse() {
-            Ok(d) => d,
-            Err(_) => {
-                set_errmsg(errmsg, &MorlocError::Other(format!("Failed to scan slurm walltime string '{}'", s)));
-                return 0;
-            }
-        };
-        let rest = &s[dash_pos + 1..];
-        let parts: Vec<&str> = rest.split(':').collect();
-        if parts.len() != 3 {
-            set_errmsg(errmsg, &MorlocError::Other(format!("Failed to scan slurm walltime string '{}'", s)));
-            return 0;
-        }
-        hours = parts[0].parse().unwrap_or(-1);
-        minutes = parts[1].parse().unwrap_or(-1);
-        seconds = parts[2].parse().unwrap_or(-1);
-    } else {
-        // Try HH:MM:SS format
-        let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() != 3 {
-            set_errmsg(errmsg, &MorlocError::Other(format!("Failed to scan slurm walltime string '{}'", s)));
-            return 0;
-        }
-        hours = parts[0].parse().unwrap_or(-1);
-        minutes = parts[1].parse().unwrap_or(-1);
-        seconds = parts[2].parse().unwrap_or(-1);
-    }
-
-    if days < 0 || hours < 0 || minutes < 0 || seconds < 0 {
-        set_errmsg(errmsg, &MorlocError::Other(format!("Negative time component in '{}'", s)));
-        return 0;
-    }
-    if hours > 23 || minutes > 59 || seconds > 59 {
-        set_errmsg(errmsg, &MorlocError::Other(format!("Invalid time component in '{}' (HH<=23 MM<=59 SS<=59)", s)));
-        return 0;
-    }
-    if days > 3650 {
-        set_errmsg(errmsg, &MorlocError::Other("Do you really want to run this job for more than 10 years?".into()));
-        return 0;
-    }
-
-    (seconds + 60 * minutes + 60 * 60 * hours + 60 * 60 * 24 * days) as usize
-}
-
 pub(crate) unsafe fn write_slurm_time(seconds: i32) -> *mut c_char {
     let mut rem = seconds;
     let days = rem / (60 * 60 * 24);
@@ -96,42 +38,6 @@ pub(crate) unsafe fn write_slurm_time(seconds: i32) -> *mut c_char {
 }
 
 // ── parse_morloc_call_arguments ──────────────────────────────────────────────
-
-pub(crate) unsafe fn parse_morloc_call_arguments(
-    packet: *mut u8,
-    args: *mut *mut u8,
-    nargs: *mut usize,
-    errmsg: *mut *mut c_char,
-) -> bool {
-    clear_errmsg(errmsg);
-    *nargs = 0;
-
-    let header = &*(packet as *const crate::packet::PacketHeader);
-    let packet_size = 32 + header.offset as usize + header.length as usize;
-
-    if header.command_type() != crate::packet::PACKET_TYPE_CALL {
-        set_errmsg(errmsg, &MorlocError::Packet("Unexpected packet type (BUG)".into()));
-        return false;
-    }
-
-    // First pass: count args
-    let mut pos = 32 + header.offset as usize;
-    while pos < packet_size {
-        let arg_header = &*(packet.add(pos) as *const crate::packet::PacketHeader);
-        pos += 32 + arg_header.offset as usize + arg_header.length as usize;
-        *nargs += 1;
-    }
-
-    // Second pass: set pointers
-    pos = 32 + header.offset as usize;
-    for i in 0..*nargs {
-        *args.add(i) = packet.add(pos);
-        let arg_header = &*(packet.add(pos) as *const crate::packet::PacketHeader);
-        pos += 32 + arg_header.offset as usize + arg_header.length as usize;
-    }
-
-    true
-}
 
 // ── slurm_job_is_complete ────────────────────────────────────────────────────
 
@@ -686,31 +592,6 @@ use goto_cleanup;
 
 mod c_abi {
     use super::*;
-
-    #[no_mangle]
-    pub unsafe extern "C" fn parse_slurm_time(time_str: *const c_char, errmsg: *mut *mut c_char) -> usize {
-        super::parse_slurm_time(time_str, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn write_slurm_time(seconds: i32) -> *mut c_char {
-        super::write_slurm_time(seconds)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn parse_morloc_call_arguments(packet: *mut u8, args: *mut *mut u8, nargs: *mut usize, errmsg: *mut *mut c_char) -> bool {
-        super::parse_morloc_call_arguments(packet, args, nargs, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn slurm_job_is_complete(job_id: u32) -> bool {
-        super::slurm_job_is_complete(job_id)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn submit_morloc_slurm_job(nexus_path: *const c_char, socket_basename: *const c_char, call_packet_filename: *const c_char, result_cache_filename: *const c_char, output_filename: *const c_char, error_filename: *const c_char, resources: *const Resources, errmsg: *mut *mut c_char) -> u32 {
-        super::submit_morloc_slurm_job(nexus_path, socket_basename, call_packet_filename, result_cache_filename, output_filename, error_filename, resources, errmsg)
-    }
 
     #[no_mangle]
     pub unsafe extern "C" fn remote_call(midx: i32, socket_basename: *const c_char, cache_path: *const c_char, resources: *const Resources, arg_packets: *const *const u8, nargs: usize, errmsg: *mut *mut c_char) -> *mut u8 {

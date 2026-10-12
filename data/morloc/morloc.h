@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 9
+#define MORLOC_ABI_VERSION 10
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -46,7 +46,7 @@ extern "C" {
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>      // FILE* for read_binary_fd
+#include <stdio.h>
 #include <sys/socket.h>
 #include <sys/types.h>  // pid_t, ssize_t
 #include <sys/un.h>     // struct sockaddr_un
@@ -340,7 +340,7 @@ typedef struct __attribute__((packed)) packet_command_call_s {
 #define PACKET_STATUS_PIPE_CLOSED 0x02
 
 // The reader closed the pipe: mlc_write / mlc_flush / mlc_close return it
-// with no errmsg; write_binary_fd and print_binary with one.
+// with no errmsg.
 #define MLC_RESULT_PIPE_CLOSED 2
 
 typedef struct __attribute__((packed)) packet_command_data_s {
@@ -383,16 +383,8 @@ typedef struct __attribute__((packed)) morloc_packet_header_s {
 // temp file (PACKET_SOURCE_FILE). This is only the compile-time
 // default; the effective value at runtime is tunable per-program via
 // `morloc make --inline-size`, propagated through the manifest and
-// the MORLOC_INLINE_SIZE env var, and finally settable directly via
-// the morloc_set_inline_threshold() FFI below.
+// the MORLOC_INLINE_SIZE env var.
 #define MORLOC_INLINE_THRESHOLD (64 * 1024)
-
-// Override the inline threshold at runtime. Values < 0 are clamped to
-// 0 (never inline). Returns no status; idempotent.
-void morloc_set_inline_threshold(int64_t bytes);
-
-// Read the live inline threshold (in bytes).
-uint64_t morloc_get_inline_threshold(void);
 
 // Bytes of shared memory the whole program holds now, or -1 when
 // MORLOC_SHM_STATS is unset.
@@ -403,32 +395,6 @@ int64_t morloc_shm_live_bytes(void);
 // compiler's expected version at provisioning time so a mismatched prebuilt
 // binary is refused rather than run.
 uint32_t morloc_abi_version(void);
-
-// Toggle shared memory at runtime. When disabled, payloads above the
-// inline threshold are written to a temp file (PACKET_SOURCE_FILE)
-// instead of shared memory (PACKET_SOURCE_RPTR). Set automatically by
-// the nexus on startup when the manifest carries `no_shm: true`
-// (from `morloc make --no-shm`); pool processes inherit the
-// MORLOC_NO_SHM env var on spawn.
-void morloc_set_shm_enabled(bool enabled);
-
-// Read the live SHM-enabled flag.
-bool morloc_get_shm_enabled(void);
-
-// Override the directory where file-packet intermediates land when
-// SHM is disabled. NULL or "" clears the override (libmorloc falls
-// back to $TMPDIR or /tmp). The directory is created lazily on
-// first write if it does not exist. Set automatically by the nexus
-// on startup when the manifest carries a `tmpdir` (from
-// `morloc make --tmpdir`); pool processes inherit MORLOC_TMPDIR on
-// spawn.
-//
-// Persistence: when a tmpdir is set (non-NULL, non-empty), file
-// packets are NOT auto-deleted at end-of-eval. The caller has
-// explicitly named the directory and is responsible for cleanup.
-// With no override (default), files are unlinked when the
-// surrounding eval scope ends via eval_arena.
-void morloc_set_tmpdir(const char* path);
 
 // ========================================================================
 // Log emission for `log: true` labeled manifolds
@@ -1275,14 +1241,11 @@ shm_t* shinit(const char* shm_basename, size_t shm_size, ERRMSG);
 bool shclose(ERRMSG);
 void shm_set_fallback_dir(const char* dir);
 void* shmalloc(size_t size, ERRMSG);
-void* shmemcpy(void* src, size_t size, ERRMSG);
 bool shfree(absptr_t ptr, ERRMSG);
 bool shincref(absptr_t ptr, ERRMSG);
 uint64_t morloc_fork_generation(void);
 void morloc_exit_if_forked(void);
-void* shcalloc(size_t nmemb, size_t size, ERRMSG);
 size_t total_shm_size(void);
-volptr_t rel2vol(relptr_t ptr, ERRMSG);
 absptr_t rel2abs(relptr_t ptr, ERRMSG);
 
 // -- Lock-free per-process volume base table ---------------------------------
@@ -1369,7 +1332,6 @@ static inline void* resolve_array(relptr_t relptr, size_t n, size_t width, morlo
 }
 
 relptr_t abs2rel(absptr_t ptr, ERRMSG);
-block_header_t* abs2blk(void* ptr, ERRMSG);
 
 // ========================================================================
 // Section 12: Function declarations -- Schema
@@ -1377,9 +1339,7 @@ block_header_t* abs2blk(void* ptr, ERRMSG);
 
 Schema* parse_schema(const char* schema, ERRMSG);
 char* schema_to_string(const Schema* schema);
-void* get_ptr(const Schema* schema, ERRMSG);
 void free_schema(Schema* schema);
-size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG);
 // Narrow a double to the nearest float: 0 on success, -1 when a finite value
 // lies beyond the float range (a plain C conversion is then undefined).
 int morloc_f32_from_f64(double v, float* out);
@@ -1399,7 +1359,6 @@ int unpack_with_schema(const char* mpk, size_t mpk_size, const Schema* schema, v
 // Section 14: Function declarations -- Packets
 // ========================================================================
 
-morloc_packet_header_t* read_morloc_packet_header(const uint8_t* msg, ERRMSG);
 // True iff `n` bytes hold a packet header and the payload that header claims.
 static inline bool morloc_packet_fits(const uint8_t* packet, size_t n) {
     if (n < sizeof(morloc_packet_header_t)) return false;
@@ -1410,16 +1369,12 @@ static inline bool morloc_packet_fits(const uint8_t* packet, size_t n) {
 bool packet_is_ping(const uint8_t* packet, ERRMSG);
 bool packet_is_local_call(const uint8_t* packet, ERRMSG);
 bool packet_is_remote_call(const uint8_t* packet, ERRMSG);
-size_t morloc_packet_size_from_header(const morloc_packet_header_t* header);
 size_t morloc_packet_size(const uint8_t* packet, ERRMSG);
 uint8_t* morloc_dup_packet(const uint8_t* packet, absptr_t* block_out, ERRMSG);
 uint8_t* return_ping(const uint8_t* packet, ERRMSG);
-uint8_t* make_ping_packet(void);
 uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema);
 uint8_t* make_arrow_data_packet(relptr_t ptr, const Schema* schema);
-uint8_t* make_mpk_data_packet(const char* mpk_filename, const Schema* schema);
 uint8_t* make_data_packet_from_mpk(const char* mpk, size_t mpk_size, const Schema* schema);
-uint8_t* make_data_indirection_packet(const char* dat_filename, const Schema* schema);
 // Returns 1 iff `path` names a file whose first 32 bytes parse as a
 // morloc packet header with `cmd_type = STREAM`. 0 otherwise. Used by
 // per-language pool `_get_value` implementations to detect stream
@@ -1427,8 +1382,6 @@ uint8_t* make_data_indirection_packet(const char* dat_filename, const Schema* sc
 // the language runtime discriminates here whether to slurp via
 // get_morloc_data_packet_value or iterate via mlc_open/mlc_next).
 int32_t file_is_stream_packet(const char* path);
-int get_data_packet_as_mpk(const uint8_t* packet, const Schema* schema, char** mpk_out, size_t* mpk_size_out, ERRMSG);
-char* read_schema_from_packet_meta(const uint8_t* packet, ERRMSG);
 uint8_t* make_fail_packet(const char* failure_message);
 uint8_t* make_pipe_closed_packet(const char* failure_message);
 bool morloc_packet_is_pipe_closed(const uint8_t* packet);
@@ -1452,16 +1405,12 @@ char* morloc_first_null_in_value(
     morloc_space_t space);
 
 uint8_t* make_morloc_local_call_packet(uint32_t midx, const uint8_t* const* arg_packets, size_t nargs, ERRMSG);
-uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t* const* arg_packets, size_t nargs, ERRMSG);
 morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG);
 void free_morloc_call(morloc_call_t* call);
 int print_morloc_data_packet(const uint8_t* packet, const Schema* schema, ERRMSG);
-int flatten_voidstar_to_buffer(const void* data, const Schema* schema, uint8_t** out_buf, size_t* out_size, ERRMSG);
 uint8_t* make_data_packet_auto(void* voidstar, relptr_t relptr, const Schema* schema, ERRMSG);
 uint8_t* make_inline_data_packet(void* voidstar, const Schema* schema, ERRMSG);
 void* read_voidstar_binary(const uint8_t* blob, size_t blob_size, const Schema* schema, ERRMSG);
-bool parse_morloc_call_arguments(uint8_t* packet, uint8_t** args, size_t* nargs, ERRMSG);
-bool hash_morloc_packet(const uint8_t* packet, const Schema* schema, uint64_t seed, uint64_t* hash, ERRMSG);
 
 // ========================================================================
 // Section 15: Function declarations -- Printing / output
@@ -1475,7 +1424,6 @@ int32_t print_voidstar(const void* voidstar, const Schema* schema, bool keep_nul
 int32_t pretty_print_voidstar(const void* voidstar, const Schema* schema, bool keep_null, ERRMSG);
 int32_t print_arrow_as_json(const void* data, ERRMSG);
 int32_t print_arrow_as_table(const void* data, ERRMSG);
-bool print_hex_dump(const uint8_t* data, size_t size, ERRMSG);
 char* voidstar_to_json_string(const void* voidstar, const Schema* schema, ERRMSG);
 
 // ========================================================================
@@ -1523,9 +1471,6 @@ const char* morloc_lifeline_child_env(int* read_fd);
 
 void close_socket(int socket_id);
 void close_daemon(language_daemon_t** daemon_ptr);
-language_daemon_t* start_daemon(
-    const char* socket_path, const char* tmpdir,
-    const char* shm_basename, size_t shm_default_size, ERRMSG);
 uint8_t* stream_from_client(int client_fd, ERRMSG);
 uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG);
 size_t send_reply_to_foreign_server(int client_fd, uint8_t* packet, void (*release)(void), ERRMSG);
@@ -1541,43 +1486,23 @@ daemon_response_t* daemon_dispatch(manifest_t* manifest,
                                    morloc_socket_t* sockets,
                                    const char* shm_basename);
 daemon_request_t* daemon_parse_request(const char* json, size_t len, ERRMSG);
-daemon_response_t* daemon_parse_response(const char* json, size_t len, ERRMSG);
-char* daemon_build_discovery(manifest_t* manifest);
 void daemon_free_request(daemon_request_t* req);
 void daemon_free_response(daemon_response_t* resp);
 
 // Binding store (public types only; internal hash table functions are Rust-side).
 
 // ========================================================================
-// Section 17: Function declarations -- HTTP
-// ========================================================================
-
-http_request_t* http_parse_request(int fd, ERRMSG);
-bool http_write_response(int fd, int status, const char* content_type,
-                         const char* body, size_t body_len);
-// Like http_write_response, but appends `extra_headers` (one or more
-// `Name: value\r\n` lines, NUL-terminated, may be NULL) to the response
-// header block. Used for `Retry-After: 1` on 503 responses.
-// `error_kind_out` (nullable) receives DAEMON_ERROR_BAD_REQUEST for
-// malformed body / missing fields and DAEMON_ERROR_NOT_FOUND for an
-// unknown route.
-daemon_request_t* http_to_daemon_request(http_request_t* req, ERRMSG, int* error_kind_out);
-void http_free_request(http_request_t* req);
-
-// ========================================================================
-// Section 18: Function declarations -- Router
+// Section 17: Function declarations -- Router
 // ========================================================================
 
 router_t* router_init_explicit(const char* fdb_path, const char* const* names,
                                size_t n_names, ERRMSG);
-bool router_start_program(router_program_t* prog, ERRMSG);
 daemon_response_t* router_forward(router_t* router, const char* program,
                                   daemon_request_t* request, ERRMSG);
 void router_terminate_children(router_t* router);
-void router_free(router_t* router);
 
 // ========================================================================
-// Section 19: Function declarations -- Pool
+// Section 18: Function declarations -- Pool
 // ========================================================================
 
 int pool_main(int argc, char** argv, pool_config_t* config);
@@ -1602,11 +1527,6 @@ typedef struct morloc_fork_pool_s {
 // process's exit status. Workers never return from it.
 int morloc_fork_pool_run(const char* socket_path, const char* tmpdir,
                          const char* shm_basename, const morloc_fork_pool_t* cfg);
-uint8_t* pool_dispatch_packet(
-    const uint8_t* packet,
-    pool_dispatch_fn_t local_dispatch,
-    pool_dispatch_fn_t remote_dispatch,
-    void* ctx);
 // Report a fatal signal with the manifold the faulting thread was executing
 // (`current_frame` returns it as a pointer and byte length, or NULL), then
 // die of the signal. Installed once per pool process.
@@ -1614,7 +1534,7 @@ void morloc_install_crash_handler(const char* lang,
                                   const char* (*current_frame)(size_t* len));
 
 // ========================================================================
-// Section 20: Function declarations -- Arrow
+// Section 19: Function declarations -- Arrow
 // ========================================================================
 
 // Move a C Data Interface struct array into a fresh SHM block. Takes
@@ -1641,20 +1561,13 @@ int arrow_from_shm_owned(const arrow_shm_header_t* header, int acquire,
                          struct ArrowSchema* out_schema,
                          struct ArrowArray* out_array, ERRMSG);
 size_t arrow_live_view_bytes(void);
-// Bytes memcpy'd into SHM by table writes in this process so far.
-uint64_t arrow_copied_bytes(void);
 int arrow_from_shm(const arrow_shm_header_t* header,
                    struct ArrowSchema* out_schema,
                    struct ArrowArray* out_array, ERRMSG);
 
 // ========================================================================
-// Section 21: Function declarations -- Cache
+// Section 20: Function declarations -- Cache
 // ========================================================================
-
-char* put_cache_packet(const uint8_t* voidstar, const Schema* schema, uint64_t key, const char* cache_path, ERRMSG);
-uint8_t* get_cache_packet(uint64_t key, const char* cache_path, ERRMSG);
-bool del_cache_packet(uint64_t key, const char* cache_path, ERRMSG);
-char* check_cache_packet(uint64_t key, const char* cache_path, ERRMSG);
 
 // Per-pool source fingerprint, parsed once from MORLOC_POOL_HASH at
 // first call and cached. Returns 0 when the env var is absent. The
@@ -1663,20 +1576,12 @@ char* check_cache_packet(uint64_t key, const char* cache_path, ERRMSG);
 // stale entry from this pool.
 uint64_t morloc_pool_hash(void);
 
-// Resolve and create the per-label cache directory beneath the unified
-// base ($MORLOC_CACHE_BASE, $XDG_CACHE_HOME/morloc/cache, or
-// ~/.cache/morloc/cache by default). A NULL or empty `label` resolves
-// to a synthetic `_unlabeled` subdirectory. Returns a heap-allocated
-// path string the caller frees via libc::free, NULL on failure.
-
 // Counters consumed by the run summary (Stage 4). Each event is
 // independent: a `record_miss` followed by a successful compute and
-// store fires `record_store` as well. NULL out-pointers in
-// `morloc_cache_stats` are ignored.
+// store fires `record_store` as well.
 void morloc_cache_record_hit(void);
 void morloc_cache_record_miss(void);
 void morloc_cache_record_store(void);
-void morloc_cache_stats(uint64_t* hits_out, uint64_t* misses_out, uint64_t* stores_out);
 
 // Compute the cache key from a manifold id and N byte slices, one per
 // argument's content (resolved through the schema so SHM-backed packets
@@ -1719,7 +1624,7 @@ bool morloc_cache_store(
 );
 
 // ========================================================================
-// Section 22: Function declarations -- CLI / argument parsing
+// Section 21: Function declarations -- CLI / argument parsing
 // ========================================================================
 
 argument_t* initialize_positional(char* value);
@@ -1736,35 +1641,25 @@ uint8_t* parse_cli_data_argument(uint8_t* dest, const argument_t* arg, const Sch
 uint8_t* parse_cli_data_argument_list(
     uint8_t* dest, const argument_t* const* args, size_t n,
     const Schema* list_schema, ERRMSG);
-uint8_t* make_call_packet_from_cli(
-    uint8_t* dest, uint32_t mid,
-    argument_t** args, char** arg_schema_strs, ERRMSG);
 void* load_morloc_data_file(const char* path, uint8_t* data, size_t data_size, const Schema* schema, ERRMSG);
 
 // ========================================================================
-// Section 23: Function declarations -- Expression evaluation
+// Section 22: Function declarations -- Expression evaluation
 // ========================================================================
 
-morloc_expression_t* make_morloc_bound_var(const char* schema_str, char* varname, ERRMSG);
-morloc_expression_t* make_morloc_literal(const char* schema_str, primitive_t lit, ERRMSG);
-morloc_expression_t* make_morloc_pattern(const char* schema_str, morloc_pattern_t* pattern, ERRMSG);
-morloc_pattern_t* make_morloc_pattern_end(void);
 absptr_t morloc_eval(
     morloc_expression_t* expr, Schema* return_schema,
     uint8_t** arg_voidstar, Schema** arg_schemas, size_t nargs, ERRMSG);
 
 // ========================================================================
-// Section 24: Function declarations -- Manifest
+// Section 23: Function declarations -- Manifest
 // ========================================================================
 
 manifest_t* parse_manifest(const char* text, ERRMSG);
-manifest_t* read_manifest(const char* path, ERRMSG);
-void free_manifest(manifest_t* manifest);
 morloc_expression_t* build_manifest_expr(const char* json_str, ERRMSG);
-char* manifest_to_discovery_json(const manifest_t* manifest);
 
 // ========================================================================
-// Section 25: Function declarations -- Intrinsics
+// Section 24: Function declarations -- Intrinsics
 // ========================================================================
 
 int mlc_save(const void* data, const Schema* schema, int64_t level, const char* path, ERRMSG);
@@ -1777,19 +1672,8 @@ void* mlc_load(const char* path, const Schema* schema, ERRMSG);
 char* mlc_hash(const void* data, const Schema* schema, ERRMSG);
 char* mlc_show(const void* data, const Schema* schema, ERRMSG);
 void* mlc_read(const char* json_str, const Schema* schema, ERRMSG);
-relptr_t write_voidstar_binary(int fd, const void* data, const Schema* schema, ERRMSG);
 
 // -- Stream-handle intrinsics ---------------------------------------------
-// Probe a file for a valid morloc packet without opening it as a typed
-// handle or allocating SHM. Opens the file, reads the packet-header
-// prefix, validates magic + structural sanity, and closes. Returns 0 if
-// the file exists, is readable, and starts with a well-formed morloc
-// packet header. Returns non-zero (with errmsg set) on any failure:
-// missing file, permission denied, short read, header parse failure.
-// Used by @open for IFile validation, where we need eager
-// packet-format verification but don't want to pay the cost of a full
-// mlc_open / mlc_close cycle.
-int mlc_probe_packet(const char* path, ERRMSG);
 // Open a STREAM_PACKET file as the given handle kind (MLC_KIND_*) and
 // return a 64-bit handle ID. Returns -1 on failure, with errmsg set.
 int64_t mlc_open(const char* path, uint8_t kind, ERRMSG);
@@ -1834,11 +1718,6 @@ int64_t mlc_ifile_length(int64_t handle, ERRMSG);
 // registry and binds a fresh local handle. Each pool owns its own fd +
 // mmap and is responsible for closing its own slot (typically via the
 // arena that recorded it).
-//
-// Owned strings: the path returned by mlc_handle_pack_path is a malloc'd
-// NUL-terminated C string. Caller frees with libc::free.
-char* mlc_handle_pack_path(int64_t handle, uint8_t* out_kind, ERRMSG);
-int64_t mlc_handle_unpack_path(const char* path, uint8_t kind, ERRMSG);
 
 // Length of the path string a handle would pack to, without allocating
 // the string itself. Used by per-language get_shm_size's IFile-array
@@ -2017,21 +1896,9 @@ void* mlc_cell_slot(int64_t handle, int64_t index, const Schema* schema,
 int32_t mlc_cell_free(int64_t handle, ERRMSG);
 
 // ========================================================================
-// Section 26: Function declarations -- Slurm
+// Section 25: Function declarations -- Slurm
 // ========================================================================
 
-size_t parse_slurm_time(const char* time_str, ERRMSG);
-char* write_slurm_time(int seconds);
-bool slurm_job_is_complete(uint32_t job_id);
-uint32_t submit_morloc_slurm_job(
-    const char* nexus_path,
-    const char* socket_basename,
-    const char* call_packet_filename,
-    const char* result_cache_filename,
-    const char* output_filename,
-    const char* error_filename,
-    const resources_t* resources,
-    ERRMSG);
 uint8_t* remote_call(
     int midx,
     const char* socket_basename,
@@ -2042,28 +1909,14 @@ uint8_t* remote_call(
     ERRMSG);
 
 // ========================================================================
-// Section 27: Function declarations -- Utility
+// Section 26: Function declarations -- Utility
 // ========================================================================
 
 void hex(const void* ptr, size_t size);
-bool file_exists(const char* filename);
-int mkdir_p(const char* path, ERRMSG);
-void delete_directory(const char* path);
-bool has_suffix(const char* x, const char* suffix);
-int write_atomic(const char* filename, const uint8_t* data, size_t size, ERRMSG);
-int write_binary_fd(int fd, const char* buf, size_t count, ERRMSG);
-int print_binary(const char* buf, size_t count, ERRMSG);
-uint8_t* read_binary_fd(FILE* file, size_t* file_size, ERRMSG);
 uint8_t* read_binary_file(const char* filename, size_t* file_size, ERRMSG);
 
 // ========================================================================
-// Section 28: Function declarations -- Hashing
-// ========================================================================
-
-uint64_t morloc_xxh64(const void* input, size_t length, uint64_t seed);
-
-// ========================================================================
-// Section 29: Function declarations -- JSON reader
+// Section 27: Function declarations -- JSON reader
 // ========================================================================
 
 uint8_t* read_json_with_schema(uint8_t* voidstar, char* json_data, const Schema* schema, ERRMSG);

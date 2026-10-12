@@ -4151,12 +4151,4 @@ mod c_abi {
         super::parse_cli_data_argument_group_shaped(dest, arg, schema, source_codes, form_codes, list_config_jsons, n_fields, errmsg)
     }
 
-    #[no_mangle]
-    pub unsafe extern "C" fn make_call_packet_from_cli(dest: *mut u8, mid: u32, args: *mut *mut ArgumentT, // NULL-terminated
-    arg_schema_strs: *mut *mut c_char, // NULL-terminated
-    errmsg: *mut *mut c_char) -> *mut u8 {
-        super::make_call_packet_from_cli(dest, mid, args, // NULL-terminated
-    arg_schema_strs, // NULL-terminated
-    errmsg)
-    }
 }

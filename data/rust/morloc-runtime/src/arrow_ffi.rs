@@ -1045,11 +1045,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub extern "C" fn arrow_copied_bytes() -> u64 {
-        super::arrow_copied_bytes()
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn print_arrow_as_json(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
         super::print_arrow_as_json(data, errmsg)
     }

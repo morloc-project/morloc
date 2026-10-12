@@ -302,7 +302,6 @@ pub struct MorlocIFileWalkExpression {
     pub n_args: u64,
 }
 
-
 #[repr(C)]
 pub union ExprUnion {
     pub app_expr: *mut MorlocAppExpression,
@@ -2421,18 +2420,4 @@ mod c_abi {
         super::parse_manifest(text, errmsg)
     }
 
-    #[no_mangle]
-    pub unsafe extern "C" fn read_manifest(path: *const c_char, errmsg: *mut *mut c_char) -> *mut Manifest {
-        super::read_manifest(path, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn free_manifest(manifest: *mut Manifest) {
-        super::free_manifest(manifest)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn manifest_to_discovery_json(manifest: *const Manifest) -> *mut c_char {
-        super::manifest_to_discovery_json(manifest)
-    }
 }

@@ -230,28 +230,6 @@ pub(crate) fn morloc_cache_record_store() {
     CACHE_STORES.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Read the (hits, misses, stores) counter triple. Consumed by the
-/// nexus at exit to print the run summary.
-///
-/// # Safety
-///
-/// Each out pointer must be null or writable for a `u64`.
-pub(crate) unsafe fn morloc_cache_stats(
-    hits_out: *mut u64,
-    misses_out: *mut u64,
-    stores_out: *mut u64,
-) {
-    if !hits_out.is_null() {
-        unsafe { *hits_out = CACHE_HITS.load(Ordering::Relaxed) };
-    }
-    if !misses_out.is_null() {
-        unsafe { *misses_out = CACHE_MISSES.load(Ordering::Relaxed) };
-    }
-    if !stores_out.is_null() {
-        unsafe { *stores_out = CACHE_STORES.load(Ordering::Relaxed) };
-    }
-}
-
 // ── Cache key computation ──────────────────────────────────────────────────
 
 /// Compute a cache key from the manifold id and the schema-resolved
@@ -1174,36 +1152,6 @@ pub(crate) unsafe fn get_cache_packet(
     read_and_validate_cache_file(filename, ptr::null_mut(), errmsg)
 }
 
-pub(crate) unsafe fn del_cache_packet(
-    key: u64,
-    cache_path: *const c_char,
-    errmsg: *mut *mut c_char,
-) -> bool {
-    clear_errmsg(errmsg);
-    let mut err: *mut c_char = ptr::null_mut();
-
-    let filename = make_cache_filename(key, cache_path, &mut err);
-    if filename.is_null() {
-        *errmsg = err;
-        return false;
-    }
-
-    let rc = libc::unlink(filename);
-    if rc != 0 {
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other(format!(
-                "Failed to delete cache file '{}'",
-                CStr::from_ptr(filename).to_string_lossy()
-            )),
-        );
-        libc::free(filename as *mut c_void);
-        return false;
-    }
-    libc::free(filename as *mut c_void);
-    true
-}
-
 pub(crate) unsafe fn check_cache_packet(
     key: u64,
     cache_path: *const c_char,
@@ -1375,11 +1323,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn morloc_cache_stats(hits_out: *mut u64, misses_out: *mut u64, stores_out: *mut u64) {
-        super::morloc_cache_stats(hits_out, misses_out, stores_out)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn morloc_cache_key_compute(midx: u32, arg_packets: *const *const u8, arg_schemas: *const *const c_char, n_args: usize, errmsg: *mut *mut c_char) -> u64 {
         super::morloc_cache_key_compute(midx, arg_packets, arg_schemas, n_args, errmsg)
     }
@@ -1400,11 +1343,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn hash_morloc_packet(packet: *const u8, schema: *const CSchema, seed: u64, hash_out: *mut u64, errmsg: *mut *mut c_char) -> bool {
-        super::hash_morloc_packet(packet, schema, seed, hash_out, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn make_cache_filename_ext(key: u64, cache_path: *const c_char, ext: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char {
         super::make_cache_filename_ext(key, cache_path, ext, errmsg)
     }
@@ -1414,23 +1352,4 @@ mod c_abi {
         super::make_cache_filename(key, cache_path, errmsg)
     }
 
-    #[no_mangle]
-    pub unsafe extern "C" fn put_cache_packet(voidstar: *const u8, schema: *const CSchema, key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char {
-        super::put_cache_packet(voidstar, schema, key, cache_path, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn get_cache_packet(key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> *mut u8 {
-        super::get_cache_packet(key, cache_path, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn del_cache_packet(key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> bool {
-        super::del_cache_packet(key, cache_path, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn check_cache_packet(key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char {
-        super::check_cache_packet(key, cache_path, errmsg)
-    }
 }

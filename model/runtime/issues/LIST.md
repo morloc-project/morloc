@@ -14,6 +14,5 @@ it is solved, and a file when it is empty.
 - [tables-tensors.md](tables-tensors.md): column type inference, NaN in JSON, tensor dims unchecked, table spec mismatches
 - [build-and-text.md](build-and-text.md): non-atomic build swap, stale help text and comments, dead code, morloc.h expression structs drifted from Rust
 - [streams.md](streams.md): written streams: nexus stdout lock, open questions on deferred completion, dead openers, stdout placement, @tell, reopen after a daemon call, alignment; measured speedups (nested element append, stdin read-ahead)
-- [c-exports.md](c-exports.md): 65 morloc.h functions no binding or pool calls; what the C header should hold
 - [flaky-tests.md](flaky-tests.md): intermittent test failures with no known cause
 - [pools-and-ipc.md](pools-and-ipc.md): pool readiness latency, per-pid sweep race, R close-on-exec, C++ path truncation

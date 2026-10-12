@@ -2231,26 +2231,6 @@ mod c_abi {
     use super::*;
 
     #[no_mangle]
-    pub unsafe extern "C" fn make_morloc_bound_var(schema_str: *const c_char, varname: *mut c_char, errmsg: *mut *mut c_char) -> *mut MorlocExpression {
-        super::make_morloc_bound_var(schema_str, varname, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn make_morloc_literal(schema_str: *const c_char, lit: Primitive, errmsg: *mut *mut c_char) -> *mut MorlocExpression {
-        super::make_morloc_literal(schema_str, lit, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn make_morloc_pattern(schema_str: *const c_char, pattern: *mut MorlocPattern, errmsg: *mut *mut c_char) -> *mut MorlocExpression {
-        super::make_morloc_pattern(schema_str, pattern, errmsg)
-    }
-
-    #[no_mangle]
-    pub extern "C" fn make_morloc_pattern_end() -> *mut MorlocPattern {
-        super::make_morloc_pattern_end()
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn morloc_eval(expr: *mut MorlocExpression, return_schema: *mut CSchema, arg_voidstar: *mut *mut u8, arg_schemas: *mut *mut CSchema, nargs: usize, errmsg: *mut *mut c_char) -> *mut c_void {
         super::morloc_eval(expr, return_schema, arg_voidstar, arg_schemas, nargs, errmsg)
     }

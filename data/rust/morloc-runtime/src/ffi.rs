@@ -9,7 +9,7 @@ use std::ptr;
 
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::schema::{self};
-use crate::shm::{self, AbsPtr, BlockHeader, RelPtr, ShmHeader};
+use crate::shm::{self, AbsPtr, RelPtr, ShmHeader};
 pub use crate::cschema::CSchema;
 
 /// The ABI/wire-format version compiled into this libmorloc.so (see morloc.h's
@@ -87,26 +87,6 @@ pub(crate) unsafe fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_v
     ffi_try!(errmsg, ptr::null_mut(), shm::shmalloc(size).map(|p| p as *mut c_void))
 }
 
-pub(crate) unsafe fn shmemcpy(
-    src: *mut c_void,
-    size: usize,
-    errmsg: *mut *mut c_char,
-) -> *mut c_void {
-    ffi_try!(
-        errmsg,
-        ptr::null_mut(),
-        shm::shmemcpy(src as *const u8, size).map(|p| p as *mut c_void)
-    )
-}
-
-pub(crate) unsafe fn shcalloc(
-    nmemb: usize,
-    size: usize,
-    errmsg: *mut *mut c_char,
-) -> *mut c_void {
-    ffi_try!(errmsg, ptr::null_mut(), shm::shcalloc(nmemb, size).map(|p| p as *mut c_void))
-}
-
 /// Report blocks currently held across every mapped volume. Writes the
 /// block count and byte total through the out pointers, and prints a
 /// size-class breakdown to stderr.
@@ -167,20 +147,6 @@ pub(crate) unsafe fn morloc_payload_region_error(
 
 pub(crate) unsafe fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> RelPtr {
     ffi_try!(errmsg, shm::RELNULL, shm::abs2rel(ptr as AbsPtr))
-}
-
-pub(crate) unsafe fn abs2blk(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut BlockHeader {
-    clear_errmsg(errmsg);
-    if ptr.is_null() {
-        set_errmsg(errmsg, &MorlocError::NullPointer);
-        return ptr::null_mut();
-    }
-    let blk = (ptr as *mut u8).sub(std::mem::size_of::<BlockHeader>()) as *mut BlockHeader;
-    if (*blk).magic() != shm::BLK_MAGIC {
-        set_errmsg(errmsg, &MorlocError::Shm("Bad block magic".into()));
-        return ptr::null_mut();
-    }
-    blk
 }
 
 // ── Schema functions ───────────────────────────────────────────────────────
@@ -321,25 +287,6 @@ pub(crate) unsafe fn unpack_with_schema(
 // are provided by json.c
 
 // ── Schema utility functions needed by C code ──────────────────────────────
-
-pub(crate) unsafe fn calculate_voidstar_size(
-    data: *const c_void,
-    schema: *const CSchema,
-    errmsg: *mut *mut c_char,
-) -> usize {
-    clear_errmsg(errmsg);
-    if data.is_null() || schema.is_null() {
-        return 0;
-    }
-    let rs = CSchema::to_rust(schema);
-    match calc_voidstar_size_inner(data as *const u8, &rs) {
-        Ok(size) => size,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            0
-        }
-    }
-}
 
 /// The size of the value at `data`, and an upper bound on the number of
 /// sub-allocations a deep copy of it takes.
@@ -668,18 +615,6 @@ impl<'a, 'r> crate::walk::Walker<bool> for SizeWalk<'a, 'r> {
     }
 }
 
-pub(crate) unsafe fn get_ptr(
-    schema: *const CSchema,
-    errmsg: *mut *mut c_char,
-) -> *mut c_void {
-    clear_errmsg(errmsg);
-    if schema.is_null() {
-        return ptr::null_mut();
-    }
-    let rs = CSchema::to_rust(schema);
-    ffi_try!(errmsg, ptr::null_mut(), shm::shmalloc(rs.width).map(|p| p as *mut c_void))
-}
-
 mod c_abi {
     use super::*;
 
@@ -716,16 +651,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_void {
         super::shmalloc(size, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn shmemcpy(src: *mut c_void, size: usize, errmsg: *mut *mut c_char) -> *mut c_void {
-        super::shmemcpy(src, size, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn shcalloc(nmemb: usize, size: usize, errmsg: *mut *mut c_char) -> *mut c_void {
-        super::shcalloc(nmemb, size, errmsg)
     }
 
     #[no_mangle]
@@ -774,11 +699,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn abs2blk(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut BlockHeader {
-        super::abs2blk(ptr, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn parse_schema(schema_str: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema {
         super::parse_schema(schema_str, errmsg)
     }
@@ -813,13 +733,4 @@ mod c_abi {
         super::unpack_with_schema(mpk, mpk_size, schema, mlcptr, errmsg)
     }
 
-    #[no_mangle]
-    pub unsafe extern "C" fn calculate_voidstar_size(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> usize {
-        super::calculate_voidstar_size(data, schema, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn get_ptr(schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
-        super::get_ptr(schema, errmsg)
-    }
 }
