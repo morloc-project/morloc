@@ -91,3 +91,37 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   ascribed in a lambda. The `parallel` module docstring advertises the
   failing form. Repro: web/morloc-studio/public/assets/home-examples/streams
   with `@collect (psmap complexity (@next s))` inlined.
+- **A local signature replaces an imported term's.** [reproduced,
+  0.109.0] Spec gap. `sub.loc`: `record Bar where x :: Int`, `foo :: Int
+  -> Bar`; `main.loc`: `import .sub (foo, Bar)`, `foo :: Int -> Int`, `baz
+  :: Int -> Bar`, `baz = foo`. The only error is at `baz = foo` (expected
+  `Int -> Bar`, inferred `Int -> Int`): the local signature silently wins.
+  Two IMPORTED signatures for one name are rejected ("Illegal masking of
+  type signatures"), so the paths disagree. Open: error, or require equal
+  types?
+- **Effect rows with two tails, or left labels the right row lacks, are
+  solved rather than included.** [read] Violates EFF-8. Two guard branches
+  whose rows carry different tails (a rigid `e` in one, an existential from
+  an unannotated lambda parameter in the other) are not joined by
+  `joinSuspensions` (Frontend/Typecheck.hs) and fall back to subtyping one
+  into the other, which solves the left tail; when that tail is a
+  signature's rigid variable, `validate` rejects the definition. Separately,
+  `subtypeEffRows` open <: open with distinct tails (Typecheck/Internal.hs)
+  requires the left labels to be a subset of the right labels, where the
+  surplus could be taken by the right tail. Not reproduced.
+- **A tree skipped as generic for a variable no representation needs.**
+  [speculative] Morloc.hs skips any tree whose type `containsUnk`; a call
+  into one reports POLY-6 only when `Infer.needed` finds a variable. A
+  helper whose only undetermined variable is one POLY-6 exempts (a phantom
+  `data` argument, an erased dimension) would still be skipped, and its
+  caller would get the unlocated "Cannot resolve recursive call". Such a
+  tree should be generated, not skipped.
+- **A pure branch fixes the row of an unsigned function's callback.**
+  [reproduced] Violates EFF-8. `pick3 b f ? b = do () : f 1` with no
+  signature, used as `pick3 True pyLog` (`pyLog :: Int -> <IO> ()`), fails
+  "body performs effect(s) <IO> ... <IO> Unit <: <> Unit". The callback's
+  result is still an existential when the branches are joined, so
+  `joinSuspensions` (Frontend/Typecheck.hs) does not apply and the old
+  subtype path solves it to `<> Unit`. With the signature `pick2 :: Bool ->
+  (Int -> <e> ()) -> <e> ()` it typechecks. Open: instantiate an
+  existential branch to a suspension with a fresh row before joining.

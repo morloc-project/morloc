@@ -1,0 +1,54 @@
+-- Spec CLS-2: a method used at a record type selects that record's
+-- instance wherever the use sits, including a field of a record literal,
+-- where the field's type is known only from the enclosing record.
+module main (combine, empty, viaHelper, boxed, nested)
+
+import root-py
+
+record P where
+  n :: Int
+
+record Py => P = "dict"
+
+instance Semigroup P where
+  (<>) a b = {n = .n a + .n b}
+
+instance Monoid P where
+  mempty = {n = 0}
+
+record Box a where
+  v :: a
+
+record Py => Box a = "dict"
+
+instance Semigroup (Box a) where
+  (<>) a b = b
+
+record Scan where
+  q :: P
+  r :: Box Int
+
+record Py => Scan = "dict"
+
+record Outer where
+  inner :: Scan
+
+record Py => Outer = "dict"
+
+cat :: Semigroup a => a -> a -> a
+cat x y = x <> y
+
+combine :: P -> P -> Scan
+combine x y = {q = x <> y, r = {v = 1}}
+
+empty :: Int -> Scan
+empty k = {q = mempty, r = {v = k}}
+
+viaHelper :: P -> P -> Scan
+viaHelper x y = {q = cat x y, r = {v = 2}}
+
+boxed :: Box Int -> Box Int -> Scan
+boxed a b = {q = {n = 0}, r = a <> b}
+
+nested :: P -> P -> Outer
+nested x y = {inner = {q = x <> y, r = {v = 3}}}

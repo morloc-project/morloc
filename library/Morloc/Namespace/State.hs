@@ -271,6 +271,10 @@ data MorlocState = MorlocState
   -- | The outermost term at which each undetermined type variable occurs,
   -- where POLY-6 reports it.
   , stateUndeterminedSites :: Map TVar Int
+  -- | Each tree left out of code generation because its type is not
+  -- concrete, by name: its index and type. A call that needs one reports
+  -- its undetermined variables (POLY-6).
+  , stateSkippedGeneric :: Map EVar (Int, Type)
   -- | Each staged closure value (by the index of its flat entry): its first
   -- stage point and the index of its stage entry.
   , stateStageEntries :: Map Int (Int, Int)
@@ -1048,6 +1052,7 @@ instance Defaultable MorlocState where
       , stateConstantOrigin = Map.empty
       , stateHoldCache = Map.empty
       , stateUndeterminedSites = Map.empty
+      , stateSkippedGeneric = Map.empty
       , stateStageEntries = Map.empty
       , stateStageContext = Map.empty
       , stateRecStages = Map.empty

@@ -35,3 +35,10 @@
   Frontend/Typecheck.hs:3643) covers only instances in the root module
   (Treeify.hs:512), so an imported module's `instance D T` without `C T` is
   likely accepted. Not reproduced across modules.
+- **An instance on a legacy-form record is not found where its type was
+  evaluated.** [read] Violates CLS-2. Instance filtering
+  (Frontend/Typecheck.hs `compatibleTypeU`) compares an evaluated record
+  (`NamU`) by its name, but a record declared `record Foo = Bar {...}`
+  evaluates to a `NamU` named by its constructor `Bar` (Desugar.hs ~3563),
+  so `instance Semigroup Foo` used where the type was evaluated (a field of
+  a record literal) is still "No instance found". Not reproduced.

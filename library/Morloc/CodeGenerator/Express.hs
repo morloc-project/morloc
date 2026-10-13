@@ -2428,7 +2428,12 @@ lookupRecursiveTarget parentLang v = do
             Just tl | not (LR.coLocated reg parentLang tl) -> Just tl
             _ -> Nothing
       return (mid, crossLang)
-    Nothing -> MM.throwSystemError $ "Cannot resolve recursive call to" <+> pretty v
+    Nothing -> do
+      skipped <- MM.gets stateSkippedGeneric
+      case Map.lookup v skipped of
+        Just (i, t) -> rejectUndetermined i t
+        Nothing -> return ()
+      MM.throwSystemError $ "Cannot resolve recursive call to" <+> pretty v
 
 bindVarIds :: [Int] -> [Three Lang Type (Indexed Type)] -> [PolyExpr]
 bindVarIds [] [] = []

@@ -74,6 +74,7 @@ place. A `!` with no enclosing do-block is a type error.
 
 ### EFF-8 Rows compare by inclusion
 Intent: proposed
+Tests: spec-eff-8-1
 Code: unaudited
 
     E1 subset of E2      T1 <: T2

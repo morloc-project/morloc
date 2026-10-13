@@ -288,7 +288,14 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       -- plans/in-morloc-recursive-fields-* for context.
       let bnd' = Set.insert n' (Set.insert n bnd)
       ts' <- mapM (recurse bnd' . snd) rs
-      ps' <- mapM (recurse bnd') ps
+      -- A structural record form holds in its fields every parameter its
+      -- representation uses, so a parameter with no form here is phantom and
+      -- is kept as written (POLY-6). A template form ("Map<$1,$2>") spells
+      -- its parameters and needs each one.
+      ps' <-
+        if MT.isInfixOf "$" (unTVar n')
+          then mapM (recurse bnd') ps
+          else return [either (const p) id (recurse bnd' p) | p <- ps]
       return $ NamU o' n' ps' (zip (map fst rs) ts')
     -- Flatten nested AppU heads first. Substituting a partial-applied
     -- class head into a method's @f a@ signature produces @AppU (AppU H

@@ -1,0 +1,15 @@
+-- Spec POLY-6: a type variable that nothing determines and that a native
+-- representation needs is a located error, also when the term that holds
+-- it is a recursive function: `count` is instantiated at the element type
+-- of `[]`, which nothing fixes.
+module main (f)
+
+import root-py
+
+count :: [a] -> Int
+count xs
+  ? length xs == 0 = 0
+  : 1 + count (.[1:] xs)
+
+f :: Int -> Int
+f x = count []

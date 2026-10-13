@@ -153,7 +153,7 @@ toExistential g0 (unqualify -> (vs0, t0)) = f g0 vs0 t0
   where
     f g [] t = (g, t)
     f g (v : vs) t =
-      let (g', newVar) = newvar ("cls_" <> unTVar v) g
+      let (g', newVar) = newvar ("cls_" <> unTVar v <> "_") g
        in f g' vs (substituteTVar v newVar t)
 
 class Applicable a where
@@ -739,19 +739,16 @@ subtypeEffRows scope e1 e2 i1 i2 g =
             then solveEff t1 (EffectSet (Set.difference l2 l1)) g >>= recurse
             else
               subtypeError lhs rhs (missingMsg (Set.difference l1 l2))
-        -- closed <: right open : l2 must fit, solve the tail to the remainder.
-        -- The remainder is a lower bound on the tail; when it is empty (the
-        -- left row is <> or already covered) there is nothing to record, and
-        -- the tail stays open for a later constraint to solve.
+        -- closed <: right open : the labels the right row does not name
+        -- must come from its tail, so solve the tail to that remainder. The
+        -- remainder is a lower bound on the tail; when it is empty (the left
+        -- row is <> or already covered) there is nothing to record, and the
+        -- tail stays open for a later constraint to solve.
         ([], [t2]) ->
-          if Set.isSubsetOf l2 l1
-            then
-              let remainder = Set.difference l1 l2
-               in if Set.null remainder
-                    then recurse g
-                    else solveEff t2 (EffectSet remainder) g >>= recurse
-            else
-              subtypeError lhs rhs (missingMsg (Set.difference l2 l1))
+          let remainder = Set.difference l1 l2
+           in if Set.null remainder
+                then recurse g
+                else solveEff t2 (EffectSet remainder) g >>= recurse
         -- open <: open
         ([t1], [t2])
           -- shared tail variable: the tails cancel, subsumption on labels

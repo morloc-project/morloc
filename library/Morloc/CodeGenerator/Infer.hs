@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Infer
   , inferConcreteTypeU
   , inferConcreteVar
   , undeterminedError
+  , rejectUndetermined
   , recordUndeterminedSites
   , canHoldType
   , evalGeneralStep
@@ -38,6 +39,7 @@ import qualified Morloc.Language as ML
 import qualified Morloc.TypeEval as T
 import Morloc.Typecheck.Internal (typeUChildren)
 import Numeric (showHex)
+import Data.Char (isDigit)
 
 evalGeneralStep :: TypeU -> MorlocMonad (Maybe TypeU)
 evalGeneralStep t = T.evaluateStep <$> MM.getGeneralScope <*> pure t
@@ -150,6 +152,16 @@ needed gscope = go Set.empty
           inst f = foldl (\acc (tv, a) -> substituteTVar tv a acc) f (zip params args)
       in [inst f | Just cs <- [dataCtorsOfName gscope name], (_, fs) <- cs, f <- fs]
 
+-- | Reject a type holding a variable nothing determines that a native form
+-- needs and that occurs in a term of the program (POLY-6).
+rejectUndetermined :: Int -> Type -> MorlocMonad ()
+rejectUndetermined i t = do
+  gscope <- MM.getGeneralScope
+  sites <- CMS.gets stateUndeterminedSites
+  case filter (`Map.member` sites) (needed gscope (type2typeu t)) of
+    [] -> return ()
+    vs -> undeterminedError i vs
+
 -- | A type variable nothing in the program determines, where a native form
 -- needs it (POLY-6).
 undeterminedError :: Int -> [TVar] -> MorlocMonad a
@@ -163,8 +175,12 @@ undeterminedError i0 vs = do
       <+> hsep (punctuate "," (map (squotes . pretty . written) vs))
       <> ". Add a signature or an annotation that does."
   where
-    -- the name as written, without the suffix that makes it unique
-    written (TV n) = MT.takeWhile (/= '@') n
+    -- the name as written: without the suffix that makes it unique, or
+    -- without the prefix and counter 'toExistential' gives a class method's
+    -- variable
+    written (TV n) =
+      let base = MT.takeWhile (/= '@') n
+       in fromMaybe base (MT.stripPrefix "cls_" base >>= MT.stripSuffix "_" . MT.dropWhileEnd isDigit)
 
 -- | Parallel structural walk over (general, concrete) that handles the
 -- AppU/VarU mismatch case at any depth. Parameterised newtypes whose

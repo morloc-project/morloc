@@ -12,6 +12,7 @@ one type (see `APP`).
 
 ### HOST-2 A sourced function calls a callback by the callback's type as written
 Intent: ruled 2026-09-24
+Tests: spec-host-2-1
 Code: unaudited
 
 A callback parameter written `(a -> b -> c)` in the source signature is

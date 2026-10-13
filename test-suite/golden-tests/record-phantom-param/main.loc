@@ -1,0 +1,34 @@
+-- A record whose parameters no field uses (phantom kinds) crosses from a
+-- pool that gives the parameters a form (C++) into pools that give them
+-- none (Python, R). The parameters need no representation there, so no
+-- form is required for them.
+module main (viaPy, viaR)
+
+import root-py
+import root-cpp
+import root-r
+
+type Genome
+type Transcript
+type Cpp => Genome = "int"
+type Cpp => Transcript = "int"
+
+record Mapping a b where
+  src :: Int
+  dst :: Int
+
+record Cpp => (Mapping a b) = "Mapping<$1,$2>" a b
+
+source Cpp from "f.hpp" ("mk")
+source Py from "f.py" ("total" as pyTotal)
+source R from "f.R" ("total" as rTotal)
+
+mk :: Int -> Mapping Transcript Genome
+pyTotal :: [Mapping Transcript Genome] -> Int
+rTotal :: [Mapping Transcript Genome] -> Int
+
+viaPy :: Int -> Int
+viaPy x = pyTotal [mk x, mk (x + 1)]
+
+viaR :: Int -> Int
+viaR x = rTotal [mk x, mk (x + 1)]

@@ -1,0 +1,84 @@
+-- Spec EFF-8: rows compare by inclusion, so a pure branch (<> T) of a
+-- guard joins an <e> T branch at <e> T without fixing e. This lets an
+-- effect-polymorphic recursion with a pure base case be written once and
+-- used at any row: here at <IO> in each language and at <> with a lambda.
+module main (sayPy, sayCpp, sayR, sayRust, sumPy, sumCpp, sumPure, logPy, unitPy, sumNone)
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+source Py from "f.py" ("say" as pySay, "tick" as pyTick, "log" as pyLog)
+source Cpp from "f.hpp" ("say" as cppSay, "tick" as cppTick)
+source R from "f.R" ("say" as rSay)
+source Rust from "f.rs" ("say" as rustSay)
+
+pySay :: Int -> <IO> ()
+cppSay :: Int -> <IO> ()
+rSay :: Int -> <IO> ()
+rustSay :: Int -> <IO> ()
+pyTick :: Int -> <IO> Int
+cppTick :: Int -> <IO> Int
+
+mapE_ :: (a -> <e> ()) -> [a] -> <e> ()
+mapE_ f xs = do
+  ? length xs == 0 = do ()
+  : do
+      f (.[0] xs)
+      mapE_ f (.[1:] xs)
+
+sumE :: (a -> <e> Int) -> [a] -> <e> Int
+sumE f xs = do
+  ? length xs == 0 = do 0
+  : do
+      y <- f (.[0] xs)
+      rest <- sumE f (.[1:] xs)
+      y + rest
+
+sayPy :: [Int] -> <IO> ()
+sayPy xs = mapE_ pySay xs
+
+sayCpp :: [Int] -> <IO> ()
+sayCpp xs = mapE_ cppSay xs
+
+sayR :: [Int] -> <IO> ()
+sayR xs = mapE_ rSay xs
+
+sayRust :: [Int] -> <IO> ()
+sayRust xs = mapE_ rustSay xs
+
+sumPy :: [Int] -> <IO> Int
+sumPy xs = sumE pyTick xs
+
+sumCpp :: [Int] -> <IO> Int
+sumCpp xs = sumE cppTick xs
+
+sumPure :: [Int] -> <IO> Int
+sumPure xs = sumE (\x -> do (x * 2)) xs
+
+-- A row with a label beside the variable: the pure base case <> fits
+-- <IO, e>, and the body's own IO is part of the declared row.
+logEach :: (a -> <e> ()) -> [a] -> <IO, e> ()
+logEach f xs = do
+  ? length xs == 0 = do ()
+  : do
+      pyLog (length xs)
+      f (.[0] xs)
+      logEach f (.[1:] xs)
+
+pyLog :: Int -> <IO> ()
+
+logPy :: [Int] -> <IO> ()
+logPy xs = logEach pySay xs
+
+-- A pure block checked against a row with a label and a variable.
+unitE :: <IO, e> ()
+unitE = do ()
+
+unitPy :: Int -> <IO> ()
+unitPy x = unitE
+
+-- The row instantiated at <>: the lambda's do-block performs nothing.
+sumNone :: [Int] -> <> Int
+sumNone xs = sumE (\x -> do (x + 100)) xs

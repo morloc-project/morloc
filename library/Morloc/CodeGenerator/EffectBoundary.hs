@@ -576,6 +576,14 @@ splitAtArity n (FunT ins ret)
 splitAtArity 0 t = Just ([], t)
 splitAtArity _ _ = Nothing
 
+-- | A function type with the parameters of a function-typed result moved
+-- into its own: @a -> (b -> c)@ is @a -> b -> c@.
+flattenFunT :: Type -> Type
+flattenFunT (FunT ins ret) = case flattenFunT ret of
+  FunT ins' r -> FunT (ins <> ins') r
+  r -> FunT ins r
+flattenFunT t = t
+
 -- | The signature a source function is declared with, and the type
 -- variables it quantifies. The signature is found by the source it
 -- implements, since the call's own index may belong to the definition
@@ -703,6 +711,19 @@ opaqueAt :: HostView -> Maybe Type -> Bool
 opaqueAt (HostView _ vs _ _ _) (Just (VarT v)) = Set.member v vs
 opaqueAt _ _ = False
 
+-- | The parameters and result of a function as the host calls it: split at
+-- the arity of its declaration, so a declared @a -> c@ instantiated at
+-- @c = B -> D@ is called with one argument and returns a function, although
+-- its type reads @a -> B -> D@. Without a declared function type, split at
+-- the type's own outer parameters.
+calledAs :: HostView -> Maybe Type -> Type -> Maybe ([Type], Type)
+calledAs (HostView scope _ _ _ _) d t = case (expandT scope <$> d, flattenFunT t) of
+  (Just (FunT ds _), FunT as r)
+    | length ds < length as -> Just (take (length ds) as, FunT (drop (length ds) as) r)
+  _ -> case t of
+    FunT as r -> Just (as, r)
+    _ -> Nothing
+
 -- | The declared type of each part of a declared type, where its shape
 -- matches the value's; 'Nothing' where there is no declaration to consult,
 -- and the value's own type decides.
@@ -771,7 +792,7 @@ hostTypeOn hv@(HostView scope _ hostRecs _ _) seen0 d t
   | opaqueAt hv d = Nothing
   | any (`Set.member` seen0) here = Nothing
   | otherwise = case expandT scope t of
-      FunT as r ->
+      t'@(FunT _ _) | Just (as, r) <- calledAs hv d t' ->
         let (das, dr) = declFun hv (length as) d
             as' = zipWith (hostTypeOn hv seen) das as
             r' = case r of
@@ -819,7 +840,7 @@ adapt dir lang g hv@(HostView scope _ _ _ _) d t0 e
         hv' <- inPool l m hv t0
         PolyManifold l m f k <$> adapt dir l m hv' d t0 x
       PolyManifold l m f@(ManifoldPart _ _) k body
-        | Outbound <- dir, FunT as r <- t -> do
+        | Outbound <- dir, Just (as, r) <- calledAs hv d t -> do
             hv' <- inPool l m hv t0
             let (das, dr) = declFun hv' (length as) d
             body' <- case r of
@@ -902,7 +923,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
         Inbound -> hostType hv d t
       var = PolyLetVar (Idx g here) v
   body <- case t of
-    FunT as r -> wrapFunction v here as r
+    FunT _ _ | Just (as, r) <- calledAs hv d t -> wrapFunction v here as r
     EffectT effs c -> do
       let dc = declEffect hv d
           forced = PolyEval (Idx g (case dir of Outbound -> c; Inbound -> hostType hv dc c)) var

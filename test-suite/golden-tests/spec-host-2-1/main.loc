@@ -1,0 +1,44 @@
+-- Spec HOST-2: a sourced function calls a callback by the callback's type
+-- as written. `zipWith :: (a -> b -> c) -> ...` calls its callback with two
+-- arguments even where `c` is itself a function, here an effectful one: the
+-- callback returns that function, and the effect runs only when the result
+-- is applied and run.
+module main (runPy, runCpp, runR, runRust)
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+source Py from "f.py" ("emit" as pyEmit, "say" as pySay)
+source Cpp from "f.hpp" ("emit" as cppEmit, "say" as cppSay)
+source R from "f.R" ("emit" as rEmit, "say" as rSay)
+source Rust from "f.rs" ("emit" as rustEmit, "say" as rustSay)
+
+pyEmit :: Int -> Int -> ([Int] -> <IO> ()) -> <IO> ()
+cppEmit :: Int -> Int -> ([Int] -> <IO> ()) -> <IO> ()
+rEmit :: Int -> Int -> ([Int] -> <IO> ()) -> <IO> ()
+rustEmit :: Int -> Int -> ([Int] -> <IO> ()) -> <IO> ()
+pySay :: [Int] -> <IO> ()
+cppSay :: [Int] -> <IO> ()
+rSay :: [Int] -> <IO> ()
+rustSay :: [Int] -> <IO> ()
+
+sinkAll :: [([Int] -> <IO> ()) -> <IO> ()] -> ([Int] -> <IO> ()) -> <IO> ()
+sinkAll fs sink = do
+  ? length fs == 0 = do ()
+  : do
+      (.[0] fs) sink
+      sinkAll (.[1:] fs) sink
+
+runPy :: [Int] -> [Int] -> <IO> ()
+runPy xs ys = sinkAll (zipWith pyEmit xs ys) pySay
+
+runCpp :: [Int] -> [Int] -> <IO> ()
+runCpp xs ys = sinkAll (zipWith cppEmit xs ys) cppSay
+
+runR :: [Int] -> [Int] -> <IO> ()
+runR xs ys = sinkAll (zipWith rEmit xs ys) rSay
+
+runRust :: [Int] -> [Int] -> <IO> ()
+runRust xs ys = sinkAll (zipWith rustEmit xs ys) rustSay

@@ -1,0 +1,5 @@
+build_rejected
+0
+main.loc:15:13-14:
+fixes 'a'
+3

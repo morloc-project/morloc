@@ -199,16 +199,22 @@ writeProgram translateFn path code =
     >>= \(gASTs, rASTs) ->
       do
         -- Filter out generic (polymorphic) exports -- they can't become CLI subcommands
+        exportIds <- Set.fromList <$> MM.gets stateExports
         let isConcreteExport (AnnoS (Idx _ t) _ _, _) = not (containsUnk t)
             (concreteGASTs, genericGASTs) = partition isConcreteExport gASTs
             (concreteRASTs, genericRASTs) = partition isConcreteExport rASTs
-            warnSkip (AnnoS (Idx i _) _ _) = do
-              name <- MM.metaName i
-              case name of
-                Just (EV n) -> MM.say $ "Warning: skipping generic export '" <> pretty n <> "'"
-                Nothing -> return ()
+            warnSkip (AnnoS (Idx i _) _ _)
+              | Set.member i exportIds = do
+                  name <- MM.metaName i
+                  case name of
+                    Just (EV n) -> MM.say $ "Warning: skipping generic export '" <> pretty n <> "'"
+                    Nothing -> return ()
+              | otherwise = return ()
         mapM_ (warnSkip . fst) genericGASTs
         mapM_ (warnSkip . fst) genericRASTs
+        let skippedEntry (AnnoS (Idx i t) _ _) = fmap (\v -> (v, (i, t))) <$> MM.metaName i
+        skipped <- (<>) <$> mapM (skippedEntry . fst) genericGASTs <*> mapM (skippedEntry . fst) genericRASTs
+        MM.modify (\st -> st {stateSkippedGeneric = Map.fromListWith (\_ old -> old) (catMaybes skipped)})
         -- Only exports become commands, but helper rASTs also flow to
         -- 'Nexus.generate' so it can see their languages for pool
         -- enumeration -- the export tree ends at a bare 'CallS' back-edge

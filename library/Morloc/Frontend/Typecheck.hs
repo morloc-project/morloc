@@ -495,6 +495,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
             "No instance found for" <+> pretty clsName
               <> "::"
               <> pretty v
+              <+> "at type" <+> prettyTypeU gtEval
               <> "\n  Are you missing a top-level type signature?"
         -- There may be many suitable instances from the general type level,
         -- however, they may differ at the concrete level, so keep all for know
@@ -639,6 +640,12 @@ compatibleTypeU = go Set.empty Set.empty
     go b1 b2 (VarU v1) (VarU v2)
       | Set.member v1 b1 || Set.member v2 b2 = True
       | otherwise = v1 == v2
+    -- A record evaluated to its body still carries its name and parameters,
+    -- and an instance head names it nominally.
+    go b1 b2 t1@NamU{} t2@(VarU _) = go b1 b2 (nominal t1) t2
+    go b1 b2 t1@NamU{} t2@(AppU _ _) = go b1 b2 (nominal t1) t2
+    go b1 b2 t1@(VarU _) t2@NamU{} = go b1 b2 t1 (nominal t2)
+    go b1 b2 t1@(AppU _ _) t2@NamU{} = go b1 b2 t1 (nominal t2)
     go b1 _  (VarU v1) _ = Set.member v1 b1
     go _  b2 _ (VarU v2) = Set.member v2 b2
     go b1 b2 (FunU as1 r1) (FunU as2 r2) =
@@ -679,6 +686,10 @@ compatibleTypeU = go Set.empty Set.empty
     -- isSubtypeOf2 / subtype pipeline does proper Nat solving downstream.
     go _  _  t1 t2 | isNatExprT t1 && isNatExprT t2 = True
     go _  _  _ _ = False
+
+    nominal (NamU _ n [] _) = VarU n
+    nominal (NamU _ n ps _) = AppU (VarU n) ps
+    nominal t = t
 
     isNatExprT :: TypeU -> Bool
     isNatExprT (NatLitU _) = True
@@ -1441,27 +1452,30 @@ synthE i g (IfS cond thenE elseE) = do
   scope <- MM.getGeneralScope
   let t2' = apply g4 t2
       t3' = apply g4 t3
-  -- Try strict subtype both directions first (zero-coercion path), then
-  -- fall back to tryCoerce (which handles a -> ?a and chains). Two
-  -- suspension branches join by row inclusion (<> T <: <E> T); a value
-  -- branch against a suspension branch is a type error, since a value is
-  -- never silently a suspension.
-  case subtype scope t3' t2' g4 of
-    Right g5 -> return (g5, apply g5 t2, IfS cond' thenE' elseE')
-    Left _ -> case subtype scope t2' t3' g4 of
-      Right g5 -> return (g5, apply g5 t3, IfS cond' thenE' elseE')
-      Left _ -> case tryCoerce scope t3' t2' g4 of
-        Just (coercions, g5) -> do
-          elseE'' <- wrapAnnoCoercions i (apply g5 t3') coercions elseE'
-          return (g5, apply g5 t2, IfS cond' thenE' elseE'')
-        Nothing -> case tryCoerce scope t2' t3' g4 of
+  -- Two suspensions join at the union of their rows, so neither row is
+  -- solved to the other: a pure branch (<> T) beside an <e> T branch joins
+  -- at <e> T and leaves e free (EFF-8). Otherwise try strict subtype both
+  -- directions (zero-coercion path), then tryCoerce (which handles a -> ?a
+  -- and chains). A value branch against a suspension branch is a type
+  -- error, since a value is never silently a suspension.
+  case joinSuspensions scope g4 t2' t3' of
+    Just (g5, tj) -> return (g5, tj, IfS cond' thenE' elseE')
+    Nothing -> case subtype scope t3' t2' g4 of
+      Right g5 -> return (g5, apply g5 t2, IfS cond' thenE' elseE')
+      Left _ -> case subtype scope t2' t3' g4 of
+        Right g5 -> return (g5, apply g5 t3, IfS cond' thenE' elseE')
+        Left _ -> case tryCoerce scope t3' t2' g4 of
           Just (coercions, g5) -> do
-            thenE'' <- wrapAnnoCoercions i (apply g5 t2') coercions thenE'
-            return (g5, apply g5 t3, IfS cond' thenE'' elseE')
-          Nothing -> MM.throwSourcedError i $
-            "Branches of guard/if have incompatible types:"
-            <> line <> "  then-branch: " <> prettyTypeU t2'
-            <> line <> "  else-branch: " <> prettyTypeU t3'
+            elseE'' <- wrapAnnoCoercions i (apply g5 t3') coercions elseE'
+            return (g5, apply g5 t2, IfS cond' thenE' elseE'')
+          Nothing -> case tryCoerce scope t2' t3' g4 of
+            Just (coercions, g5) -> do
+              thenE'' <- wrapAnnoCoercions i (apply g5 t2') coercions thenE'
+              return (g5, apply g5 t3, IfS cond' thenE'' elseE')
+            Nothing -> MM.throwSourcedError i $
+              "Branches of guard/if have incompatible types:"
+              <> line <> "  then-branch: " <> prettyTypeU t2'
+              <> line <> "  else-branch: " <> prettyTypeU t3'
 synthE i g (DoBlockS e) = do
   (g1, t1, e1) <- synthG g e
   -- Strip forall wrappers before matching EffectU: a polymorphic final
@@ -3011,6 +3025,26 @@ reduceSetterRedex
     )
     | v == v' = Just (AppS pat (receiver : values))
 reduceSetterRedex _ = Nothing
+
+-- | The join of two suspension types whose rows have at most one tail
+-- variable between them: the union of the rows, with each branch a subtype
+-- of the result. Nothing when either is not a suspension, the rows have
+-- two distinct tails, or the payloads do not meet in either direction.
+joinSuspensions :: Scope -> Gamma -> TypeU -> TypeU -> Maybe (Gamma, TypeU)
+joinSuspensions scope g (EffectU e1 i1) (EffectU e2 i2)
+  | (_, vs1) <- effectSetParts (applyEff g e1)
+  , (_, vs2) <- effectSetParts (applyEff g e2)
+  , Set.size (Set.union vs1 vs2) <= 1 =
+      let row = unionEffectSet (applyEff g e1) (applyEff g e2)
+          into inner = do
+            g1 <- subtype scope (EffectU e1 i1) (EffectU row inner) g
+            g2 <- subtype scope (apply g1 (EffectU e2 i2)) (apply g1 (EffectU row inner)) g1
+            return (g2, apply g2 (EffectU row inner))
+       in either (const Nothing) Just (into i1 `orElse` into i2)
+  where
+    orElse (Left _) b = b
+    orElse a _ = a
+joinSuspensions _ _ _ _ = Nothing
 
 -- | Choose the record-shaped type with the most keys. Non-record cases
 -- fall back to the second argument (the standard "return the expected

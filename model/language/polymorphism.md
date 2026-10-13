@@ -43,7 +43,7 @@ its uses?
 
 ### POLY-6 An undetermined type variable is a located error
 Intent: ruled 2026-10-09
-Tests: spec-poly-6-1, spec-poly-6-2, spec-poly-6-3
+Tests: spec-poly-6-1, spec-poly-6-2, spec-poly-6-3, spec-poly-6-4
 Code: conforms 2026-10-09
 
 A type variable that nothing in the program determines, and that a native
