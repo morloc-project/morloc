@@ -101,6 +101,12 @@ re-checked.
 
 ## Front end and its children (IFACE-1, IFACE-2)
 
+- **The front end drops the `action` field of a successful call.** [read,
+  reproduced 2026-10-13] A daemon's HTTP reply is
+  `{"status":"ok","action":"raw","result":...}`; the front end's `/call`
+  rebuilds the envelope as `{"status":"ok","result":...}`
+  (morloc-nexus/src/mcp.rs `frontend_call_api`), so a caller cannot see
+  which output action ran. Violates IFACE-2.
 - **The router starts a child daemon from whatever `morloc-nexus` it
   finds.** [read] `find_morloc_nexus` (morloc-runtime/src/router_ffi.rs:
   331-383) searches `$MORLOC_NEXUS`, `$MORLOC_HOME/bin`, `$PATH`,
