@@ -1,7 +1,7 @@
 #[derive(Clone)]
 pub struct Ops {
-    pub inc: std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>>,
-    pub total: std::rc::Rc<dyn rustmorloc::MorlocFn0<i64>>,
+    pub inc: rustmorloc::FnValue1<i64, i64>,
+    pub total: rustmorloc::FnValue0<i64>,
 }
 
 pub fn rs_double(x: i64) -> i64 {

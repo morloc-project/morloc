@@ -2,7 +2,7 @@
 -- crossing a pool boundary. Producer: Python (reify). Consumer: Rust (reflect).
 -- Exercises the Rust member's closure REFLECTION for every aggregate shape: Rust
 -- reads each closure's wire tuple off the aggregate slot and rebuilds an
--- origin-preserving `Rc<dyn MorlocFnN>` FatClosure proxy that RPCs back to the
+-- origin-preserving `FnValueN` FatClosure proxy that RPCs back to the
 -- Python home pool on application (`call1`).
 --
 -- `crossListOfRecords` is the composition test (DA): the OUTER list is diverted

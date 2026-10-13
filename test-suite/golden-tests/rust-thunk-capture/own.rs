@@ -14,8 +14,8 @@ pub fn rt_nonempty(xs: &Vec<i64>) -> Vec<i64> {
 // closure. Without this the reuse-after-a-thunk shapes above do not reproduce
 // the whole-frame capture defect.
 pub struct Cmds {
-    pub step: std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>>,
-    pub view: std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>>,
+    pub step: rustmorloc::FnValue1<i64, i64>,
+    pub view: rustmorloc::FnValue1<i64, i64>,
 }
 pub fn rt_bump(x: i64) -> i64 { x + 1 }
 pub fn rt_peek(x: i64) -> i64 { x }

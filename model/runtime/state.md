@@ -10,6 +10,30 @@ across fork.
 Status: implemented
 Checked by: every_process_wide_value_is_registered, every_registry_row_names_a_value_in_code, registry_rows_obey_their_class, deviating_rows_only_decrease
 
+### STATE-2 Per-thread state a manifold builds does not outlive its thread
+Status: implemented
+Checked by: golden:threaded-sourced-callbacks, golden:spec-host-7-1, cschema_cache_is_freed_when_its_thread_ends, a_drain_leaves_nothing_behind_on_its_thread, deep_recursive_value_dropped_concurrently
+
+A manifold may run on a thread a sourced function starts (HOST-7). A
+`thread` row such a call can reach either frees its value when the thread
+ends, or holds nothing once the frame that filled it returns. The schema
+conversion cache is freed by its destructor. The recursive-value drain
+keeps its worklist in the frame of the drop that started it, and a shared
+recursive value is drained by the owner that finds itself unique when it
+drops, on whichever thread that is. A thread that outlives the call (a
+persistent host pool) keeps what a failed call left in its tracker; see
+issues/rust-closures-threads.md.
+
+### STATE-3 A packet a closure captures is only read by the closure's calls
+Status: implemented
+Checked by: golden:placement-representability
+
+A Rust closure may hold a packet among its captures (a value the pool does
+not decode). Its calls pass the packet on to the manifold the closure
+calls, which reads it and never releases it, so threads calling the closure
+at once (HOST-7) share it. Its lifetime is the enclosing call's; see
+issues/rust-closures-threads.md.
+
 ### INIT-1 A process-wide value is initialised once, by a fork-safe primitive
 Status: implemented
 Checked by: tla:LazyInit, tla:LazyInit_unlocked.bug, tla:LazyInit_unheld.bug, golden:futhark-basic

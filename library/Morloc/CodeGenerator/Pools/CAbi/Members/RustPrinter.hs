@@ -676,11 +676,11 @@ printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
         ]
 
 -- | Per-field marshalling strategy for a record function field. A closure field
--- is stored natively as @Rc<dyn MorlocFnN>@ (no @ToVoidstar@), so it is reified
+-- is stored natively as @FnValueN@ (no @ToVoidstar@), so it is reified
 -- to its @ClosureOrigin@ wire tuple on write/shm_size and reflected back on read.
 data ClosureMarshal = ClosureMarshal
   { cmReify :: MDoc              -- ^ arity-indexed reify method, e.g. @reify1@
-  , cmReflect :: MDoc -> MDoc    -- ^ a @ClosureOrigin@ slot-read expression -> the reflected @Rc<dyn MorlocFnN>@
+  , cmReflect :: MDoc -> MDoc    -- ^ a @ClosureOrigin@ slot-read expression -> the reflected @FnValueN@
   }
 
 -- | Whose field types a record's reader names: a generated struct's are the

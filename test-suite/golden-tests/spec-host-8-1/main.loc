@@ -1,0 +1,35 @@
+-- HOST-8: a Rust function value is `rustmorloc::FnValueN`, which host code names to
+-- build one, to hold one in a record field, and to move one to another
+-- thread. A function value must be thread-safe, so host code that builds one
+-- holding a value that is not (an `Rc`, in unshareable.loc) fails to build,
+-- with a note naming the rule before rustc's report.
+
+module main (adder, viaOps)
+
+import root-rust
+
+record Ops = Ops { run :: Int -> Int, later :: <IO> Int }
+record Rust => Ops = "Ops"
+
+source Rust from "host.rs" ("use_ops" as useOps)
+useOps :: Ops -> Int -> Int
+
+source Rust from "host.rs" where
+  --' name: make_adder
+  --' @rsize 1
+  makeAdder
+
+makeAdder :: Int -> (Int -> Int)
+
+tenTimes :: Int -> <IO> Int
+tenTimes k = do
+  k * 10
+
+mkOps :: Int -> Ops
+mkOps k = {run = makeAdder k, later = tenTimes k}
+
+adder :: Int -> Int -> Int
+adder k x = makeAdder k x
+
+viaOps :: Int -> Int -> Int
+viaOps k x = useOps (mkOps k) x

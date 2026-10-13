@@ -385,7 +385,8 @@ compilerBugMsg cs msg =
 systemCallError :: Text -> Text -> String -> MorlocMonad a
 systemCallError cmd loc msg =
   throwSystemError $
-    "System call failed at ("
+    maybe mempty (<> "\n\n") (buildFailureNote cmd msg)
+      <> "System call failed at ("
       <> pretty loc
       <> "):\n"
       <> " cmd> "
@@ -393,6 +394,24 @@ systemCallError cmd loc msg =
       <> "\n"
       <> " msg>\n"
       <> pretty msg
+
+-- | What a failed build means in morloc's terms, when its output shows a
+-- cause morloc introduced. rustc's own report follows it unchanged.
+buildFailureNote :: Text -> String -> Maybe MDoc
+buildFailureNote cmd msg
+  | "cargo build" `MT.isInfixOf` cmd
+  , any (`MT.isInfixOf` MT.pack msg)
+      [ "cannot be shared between threads safely"
+      , "cannot be sent between threads safely"
+      ] =
+      Just . vsep $
+        [ "A Rust function value (rustmorloc::FnValueN) may be called from any thread, so it"
+        , "must be Send + Sync: every value a closure captures, and every value stored in a"
+        , "function value or in a recursive type, must be Send + Sync too. If rustc's report"
+        , "below traces the type it names to a FnValueN, a closure or a recursive type, make"
+        , "that type thread-safe (Arc and Mutex in place of Rc and RefCell)."
+        ]
+  | otherwise = Nothing
 
 -- | Execute a system call
 runCommand ::

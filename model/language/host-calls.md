@@ -52,3 +52,33 @@ Code: unaudited
 An exception escaping a sourced function, in any language and across any
 number of pools, reaches morloc as a failure that `@try` can catch (see
 `FAIL`). A pool that is killed outright is not such a failure.
+
+### HOST-7 A function value may be called on threads its sourced callee starts
+Intent: proposed
+Tests: spec-host-7-1
+Code: unaudited
+
+A sourced function may call a function value it was given from threads it
+starts and joins before it returns, concurrently, as a parallel map does.
+This holds for every function value: a named function, a lambda and what it
+captures, a partial application, one taken from a list or a record field,
+one built by host code, and one from another language. Each call computes
+what it would on the calling thread. A failure that morloc or another pool
+raises in such a call (`@throw`, a foreign exception) unwinds to the sourced
+function, and reaches `@try` around its call if the sourced function
+propagates it; a panic in host code on such a thread is PANIC-6's.
+
+### HOST-8 A Rust function value is `rustmorloc::FnValueN`
+Intent: proposed
+Tests: spec-host-8-1
+Code: unaudited
+
+[[a1 -> .. -> an -> b]]_Rust is `rustmorloc::FnValueN<A1, .., An, B>`, and
+[[<E> T]]_Rust held as a value is `rustmorloc::FnValue0<T>`: a shared,
+thread-safe (`Send + Sync`) handle. Host code names the type by that alias.
+Everything a function value holds, and so every value a morloc closure
+captures and every value a recursive type holds, must be `Send + Sync` in
+Rust; otherwise the build fails, with a note naming this rule before
+rustc's report. A value a closure captures in its serialized form (a
+packet the pool does not decode) is only read by the closure's calls, so
+the threads that call it share it.

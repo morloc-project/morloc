@@ -609,7 +609,7 @@ data LowerConfig m = LowerConfig
   -- ^ Adapt a value to its stored representation inside an aggregate (given the
   -- element/field type). Applied to record fields AND list/tuple elements.
   -- Default is identity; the Rust member wraps a function value in
-  -- @Rc::new(..) as Rc<dyn MorlocFnN<..>>@ so it fits the boxed fat-trait-object
+  -- @Arc::new(..) as FnValueN<..>@ so it fits the boxed fat-trait-object
   -- element type (a bare @impl Fn@ is illegal in a Vec/tuple/struct field, and
   -- the explicit cast is needed because a @vec![..]@ has no per-element declared
   -- type to drive the unsizing coercion). Monadic so the cast type can render.
@@ -1446,7 +1446,7 @@ adaptLoopBodyOwned cfg adaptBase origBody body = go origBody body
     isIdentChar c = isAlphaNum c || c == '_'
 
 -- | Adapt each aggregate element/field to its stored representation via
--- 'lcStoreField' (e.g. Rust boxes a function value into its @Rc<dyn MorlocFnN>@
+-- 'lcStoreField' (e.g. Rust boxes a function value into its @FnValueN@
 -- element type). Passes through unchanged when the original expression list is
 -- unavailable (length mismatch), mirroring 'adaptOwnedElems'.
 storeElems :: (Monad m) => LowerConfig m -> [NativeExpr] -> [PoolDocs] -> m [PoolDocs]
@@ -1797,8 +1797,8 @@ lowerNativeExprRaw cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcApplyClosure cf
 lowerNativeExprRaw cfg (CoerceN _ _ innerE) (CoerceN_ CoerceToOptional _ x) = do
   x' <- adaptOwnedElem cfg innerE x
   -- Adapt the inner to its stored representation before wrapping (Rust boxes a
-  -- closure into `Rc<dyn MorlocFnN>` so the payload matches the boxed
-  -- `Option<Rc<dyn MorlocFnN>>` element type), mirroring list/tuple/record.
+  -- closure into `FnValueN` so the payload matches the boxed
+  -- `Option<FnValueN>` element type), mirroring list/tuple/record.
   boxed <- lcStoreField cfg (typeFof innerE) (poolExpr x')
   return $ x' {poolExpr = lcCoerceOptional cfg boxed}
 lowerNativeExprRaw cfg _ (CoerceN_ CoerceToOptional _ x) =

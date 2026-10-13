@@ -612,7 +612,7 @@ where
     ERR: FnOnce(String) -> R,
 {
     // The body is a SUSPENSION, so it is taken as one: that accepts an inline
-    // thunk (through the `Fn` blanket) and an `Rc<dyn MorlocFn0>` held in a
+    // thunk (through the `Fn` blanket) and an `FnValue0` held in a
     // variable alike, rather than only the former.
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.call0())) {
         Ok(v) => ok(v),
@@ -907,6 +907,16 @@ impl Drop for Packet {
         unsafe { release_packet(self.0, true) }
     }
 }
+
+/// A packet a closure holds among its captures, passed on to the manifold
+/// the closure calls.
+#[derive(Clone, Copy)]
+pub struct PacketRef(pub *const u8);
+
+// SAFETY: STATE-3
+unsafe impl Send for PacketRef {}
+// SAFETY: STATE-3
+unsafe impl Sync for PacketRef {}
 
 /// Drop one tracker entry for this block and give its reference back.
 /// Anything not tracked here belongs to someone else and is left alone.
@@ -2299,20 +2309,16 @@ impl<T: FromVoidstar> FromVoidstar for Box<T> {
 //
 // The box is reference counted: cloning shares the pointee, which keeps a
 // projection out of a value (which clones the projected field) at a constant
-// cost instead of a copy of the whole subtree. Values never cross threads,
-// so a non-atomic count is enough.
+// cost instead of a copy of the whole subtree.
 pub mod rec_drain {
     use std::cell::Cell;
 
-    /// A block waiting to be freed: the raw `Rc` pointer and the function
+    /// A block waiting to be freed: the raw `Arc` pointer and the function
     /// that reconstitutes and drops it with its real type.
     pub type Entry = (*mut u8, unsafe fn(*mut u8));
 
     thread_local! {
-        static ACTIVE: Cell<bool> = const { Cell::new(false) };
-        // Allocated on first use and never freed, so no destructor runs at
-        // thread exit and the queue is usable while other thread-locals are
-        // being torn down.
+        // STATE-2: the running drain's worklist; null when none runs.
         static QUEUE: Cell<*mut Vec<Entry>> = const { Cell::new(std::ptr::null_mut()) };
     }
 
@@ -2326,9 +2332,9 @@ pub mod rec_drain {
     }
 
     pub fn state() -> State {
-        match ACTIVE.try_with(|a| a.get()) {
-            Ok(true) => State::Active,
-            Ok(false) => State::Inactive,
+        match QUEUE.try_with(|q| q.get().is_null()) {
+            Ok(false) => State::Active,
+            Ok(true) => State::Inactive,
             Err(_) => State::Unavailable,
         }
     }
@@ -2338,57 +2344,65 @@ pub mod rec_drain {
     pub fn push(e: Entry) -> Result<(), ()> {
         QUEUE
             .try_with(|q| {
-                let mut p = q.get();
+                let p = q.get();
                 if p.is_null() {
-                    p = Box::into_raw(Box::new(Vec::new()));
-                    q.set(p);
+                    return Err(());
                 }
-                // SAFETY: the queue is only ever touched from this thread and
-                // no reference to it is held across a drop call.
+                // SAFETY: STATE-2: non-null only inside 'run', which owns it.
                 unsafe { (*p).try_reserve(1).map_err(|_| ())?; (*p).push(e); }
                 Ok(())
             })
             .unwrap_or(Err(()))
     }
 
-    /// Marks a drain as running for its lifetime and drains the queue when
-    /// it ends, including while unwinding from a panic inside a drop.
-    pub struct Guard;
-
-    impl Guard {
-        pub fn begin() -> Guard {
-            let _ = ACTIVE.try_with(|a| a.set(true));
-            Guard
+    /// Run `release` as the outermost drop of a drain: every further
+    /// last-owner drop on this thread is queued while it runs, and the queue
+    /// is drained before this returns, including while unwinding from a
+    /// panic inside a drop.
+    pub fn run(release: impl FnOnce()) {
+        let mut queue: Vec<Entry> = Vec::new();
+        let guard = Guard(&mut queue);
+        if QUEUE.try_with(|q| q.set(guard.0)).is_err() {
+            drop(guard);
+            release();
+            return;
         }
+        release();
+        drop(guard);
     }
+
+    struct Guard(*mut Vec<Entry>);
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            let _ = QUEUE.try_with(|q| {
-                let p = q.get();
-                if p.is_null() {
-                    return;
+            // SAFETY: STATE-2: the worklist is declared before the guard in
+            // 'run'; an entry is popped before its drop, which may push more.
+            while let Some((ptr, f)) = unsafe { (*self.0).pop() } {
+                // A panic in one block's drop must not escape a drop that
+                // may itself be running during unwinding.
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { f(ptr) })).is_err() {
+                    unsafe { crate::morloc_panic_caught() };
                 }
-                // SAFETY: as in `push`; the entry is popped before its drop
-                // runs, and that drop may push more entries.
-                while let Some((ptr, f)) = unsafe { (*p).pop() } {
-                    // A panic in one block's drop must not escape a drop that
-                    // may itself be running during unwinding.
-                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { f(ptr) })).is_err() {
-                        unsafe { crate::morloc_panic_caught() };
-                    }
+            }
+            let _ = QUEUE.try_with(|q| {
+                if q.get() == self.0 {
+                    q.set(std::ptr::null_mut());
                 }
             });
-            let _ = ACTIVE.try_with(|a| a.set(false));
         }
+    }
+
+    #[cfg(test)]
+    pub fn idle() -> bool {
+        QUEUE.with(|q| q.get().is_null())
     }
 }
 
-pub struct RecBox<T>(std::mem::ManuallyDrop<std::rc::Rc<T>>);
+pub struct RecBox<T>(std::mem::ManuallyDrop<std::sync::Arc<T>>);
 
 impl<T> RecBox<T> {
     pub fn new(v: T) -> Self {
-        RecBox(std::mem::ManuallyDrop::new(std::rc::Rc::new(v)))
+        RecBox(std::mem::ManuallyDrop::new(std::sync::Arc::new(v)))
     }
 
     /// The value, moved out when this is the only owner and copied
@@ -2398,9 +2412,9 @@ impl<T> RecBox<T> {
         T: Clone,
     {
         let mut me = std::mem::ManuallyDrop::new(self);
-        // SAFETY: `me` is never dropped, so the Rc is taken exactly once.
+        // SAFETY: `me` is never dropped, so the Arc is taken exactly once.
         let rc = unsafe { std::mem::ManuallyDrop::take(&mut me.0) };
-        std::rc::Rc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone())
+        std::sync::Arc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone())
     }
 }
 
@@ -2419,7 +2433,7 @@ impl<T> std::ops::Deref for RecBox<T> {
 
 impl<T> Clone for RecBox<T> {
     fn clone(&self) -> Self {
-        RecBox(std::mem::ManuallyDrop::new(std::rc::Rc::clone(&self.0)))
+        RecBox(std::mem::ManuallyDrop::new(std::sync::Arc::clone(&self.0)))
     }
 }
 
@@ -2436,31 +2450,27 @@ impl<T: PartialEq> PartialEq for RecBox<T> {
 }
 
 unsafe fn rec_drop_thunk<T>(p: *mut u8) {
-    drop(std::rc::Rc::from_raw(p as *const T));
+    drop(std::sync::Arc::from_raw(p as *const T));
 }
 
 impl<T> Drop for RecBox<T> {
     fn drop(&mut self) {
         // SAFETY: the field is taken exactly once, here.
-        let rc = unsafe { std::mem::ManuallyDrop::take(&mut self.0) };
-        // A shared block only loses this owner's count; the last owner
-        // frees it, and only that drop can recurse.
-        if std::rc::Rc::strong_count(&rc) != 1 {
+        let mut rc = unsafe { std::mem::ManuallyDrop::take(&mut self.0) };
+        // STATE-2: uniqueness, not a count, picks the owner that drains.
+        if std::sync::Arc::get_mut(&mut rc).is_none() {
             drop(rc);
             return;
         }
         match rec_drain::state() {
             rec_drain::State::Active => {
-                let raw = std::rc::Rc::into_raw(rc) as *mut u8;
+                let raw = std::sync::Arc::into_raw(rc) as *mut u8;
                 if rec_drain::push((raw, rec_drop_thunk::<T>)).is_err() {
                     // SAFETY: `raw` came from `into_raw` just above.
                     unsafe { rec_drop_thunk::<T>(raw) };
                 }
             }
-            rec_drain::State::Inactive => {
-                let _g = rec_drain::Guard::begin();
-                drop(rc); // the pointee's RecBoxes queue rather than recurse
-            }
+            rec_drain::State::Inactive => rec_drain::run(|| drop(rc)),
             rec_drain::State::Unavailable => drop(rc),
         }
     }
@@ -2543,7 +2553,7 @@ tuple_impl!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7);
 // ---------------------------------------------------------------------------
 // Function values (defunctionalization). A morloc function stored in data (a
 // record/list field) or crossing a pool boundary is represented as a fat trait
-// object `Rc<dyn MorlocFnN<..>>`: callable via `callN`, and reifiable to its
+// object `FnValueN<..>`: callable via `callN`, and reifiable to its
 // origin via `reifyN`. A plain native closure is a THIN function value -- the
 // blanket impl makes any `Fn(&A..)->R` a `MorlocFnN`, so `callN` monomorphizes
 // (zero-cost, inlined) while a boxed one dispatches through the vtable. A
@@ -2574,16 +2584,18 @@ pub fn require_origin(origin: Option<&ClosureOrigin>) -> ClosureOrigin {
 }
 
 macro_rules! morloc_fn {
-    ($trait:ident, $closure:ident, $fnptr:ident, $call:ident, $reify:ident,
-     $apply:ident, $prev:ident, $pcall:ident, $preify:ident, $pap:ident, $staged:ident, $apply1:ident,
+    ($trait:ident, $value:ident, $closure:ident, $fnptr:ident, $call:ident, $reify:ident,
+     $apply:ident, $prev:ident, $pvalue:ident, $pcall:ident, $preify:ident, $pap:ident, $staged:ident, $apply1:ident,
      ($H:ident, $h:ident) $(, ($T:ident, $t:ident))* ) => {
         pub trait $trait<$H, $($T,)* R> {
             fn $call(&self, $h: &$H, $($t: &$T,)*) -> R;
             fn $reify(&self) -> Option<&ClosureOrigin>;
             /// Apply to the first argument the way morloc does, when this
             /// value knows how (see '$apply1'); `None` otherwise.
-            fn $apply(&self, _x: &$H) -> Option<std::rc::Rc<dyn $prev<$($T,)* R>>> { None }
+            fn $apply(&self, _x: &$H) -> Option<$pvalue<$($T,)* R>> { None }
         }
+        /// A function value: the one form morloc holds a function in.
+        pub type $value<$H, $($T,)* R> = std::sync::Arc<dyn $trait<$H, $($T,)* R> + Send + Sync>;
         // A plain native closure. Host code declares a higher-order parameter
         // as either `F: Fn(&A..) -> R` or `impl MorlocFnN<A.., R>`; this impl
         // is what lets one generated form satisfy both. It has no origin, so a
@@ -2593,13 +2605,13 @@ macro_rules! morloc_fn {
             fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { self($h, $($t,)*) }
             fn $reify(&self) -> Option<&ClosureOrigin> { None }
         }
-        // A function value is held as `Rc<dyn $trait>`, and that is itself a
+        // A function value is held behind an `Arc`, and that is itself a
         // function value, so it can be passed wherever one is taken.
-        impl<$H, $($T,)* R, T: $trait<$H, $($T,)* R> + ?Sized> $trait<$H, $($T,)* R> for std::rc::Rc<T> {
+        impl<$H, $($T,)* R, T: $trait<$H, $($T,)* R> + ?Sized> $trait<$H, $($T,)* R> for std::sync::Arc<T> {
             #[inline]
             fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { (**self).$call($h, $($t,)*) }
             fn $reify(&self) -> Option<&ClosureOrigin> { (**self).$reify() }
-            fn $apply(&self, x: &$H) -> Option<std::rc::Rc<dyn $prev<$($T,)* R>>> { (**self).$apply(x) }
+            fn $apply(&self, x: &$H) -> Option<$pvalue<$($T,)* R>> { (**self).$apply(x) }
         }
         /// A morloc-built function value: the environment it captured, the
         /// manifold call, and how to reify that environment. `call` and `mk`
@@ -2610,24 +2622,24 @@ macro_rules! morloc_fn {
             caps: C,
             call: fn(&C, &$H, $(&$T,)*) -> R,
             mk: Option<fn(&C) -> ClosureOrigin>,
-            origin: std::cell::OnceCell<ClosureOrigin>,
+            origin: std::sync::OnceLock<ClosureOrigin>,
         }
         impl<C, $H, $($T,)* R> $closure<C, $H, $($T,)* R> {
             /// A closure that can be reified: the origin is built on first
             /// use and cached, so one that never crosses pays nothing.
             pub fn new(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R, mk: fn(&C) -> ClosureOrigin) -> Self {
-                Self { caps, call, mk: Some(mk), origin: std::cell::OnceCell::new() }
+                Self { caps, call, mk: Some(mk), origin: std::sync::OnceLock::new() }
             }
             /// A closure with no dispatch entry, so nothing can call back
             /// into it and it has no origin to offer.
             pub fn local(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R) -> Self {
-                Self { caps, call, mk: None, origin: std::cell::OnceCell::new() }
+                Self { caps, call, mk: None, origin: std::sync::OnceLock::new() }
             }
             /// A closure reflected from another pool. It answers with the
             /// origin it ARRIVED with, so a value crossing A -> B -> C calls
             /// back to A rather than to B.
             pub fn proxy(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R, origin: ClosureOrigin) -> Self {
-                let cell = std::cell::OnceCell::new();
+                let cell = std::sync::OnceLock::new();
                 let _ = cell.set(origin);
                 Self { caps, call, mk: None, origin: cell }
             }
@@ -2636,11 +2648,11 @@ macro_rules! morloc_fn {
             #[inline]
             fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { (self.call)(&self.caps, $h, $($t,)*) }
             fn $reify(&self) -> Option<&ClosureOrigin> {
-                if self.origin.get().is_none() {
-                    let mk = self.mk?;
-                    let _ = self.origin.set(mk(&self.caps));
+                if let Some(o) = self.origin.get() {
+                    return Some(o);
                 }
-                self.origin.get()
+                let mk = self.mk?;
+                Some(self.origin.get_or_init(|| mk(&self.caps)))
             }
         }
         /// A capture-free closure as a plain function pointer. Coercion happens
@@ -2669,8 +2681,8 @@ macro_rules! morloc_fn {
         /// applied manifold's type counts its captured context arguments
         /// too. The adapter has no origin, so a value that reaches morloc
         /// back through a host parameter cannot be sent onward.
-        impl<$H: 'static, $($T: 'static,)* R: 'static> ThinFn for std::rc::Rc<dyn $trait<$H, $($T,)* R>> {
-            type Out = Box<dyn Fn(&$H, $(&$T,)*) -> R>;
+        impl<$H: 'static, $($T: 'static,)* R: 'static> ThinFn for $value<$H, $($T,)* R> {
+            type Out = Box<dyn Fn(&$H, $(&$T,)*) -> R + Send + Sync>;
             fn thin(&self) -> Self::Out {
                 let v = self.clone();
                 Box::new(move |$h, $($t,)*| v.$call($h, $($t,)*))
@@ -2681,14 +2693,14 @@ macro_rules! morloc_fn {
         /// has an origin, so does this, with the argument appended to its
         /// captured values (`wire` serializes it).
         pub struct $pap<$H, $($T,)* R> {
-            f: std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
+            f: $value<$H, $($T,)* R>,
             x: $H,
             wire: Option<fn(&$H) -> Vec<u8>>,
-            origin: std::cell::OnceCell<Option<ClosureOrigin>>,
+            origin: std::sync::OnceLock<Option<ClosureOrigin>>,
         }
         impl<$H, $($T,)* R> $pap<$H, $($T,)* R> {
-            pub fn new(f: std::rc::Rc<dyn $trait<$H, $($T,)* R>>, x: $H, wire: Option<fn(&$H) -> Vec<u8>>) -> Self {
-                Self { f, x, wire, origin: std::cell::OnceCell::new() }
+            pub fn new(f: $value<$H, $($T,)* R>, x: $H, wire: Option<fn(&$H) -> Vec<u8>>) -> Self {
+                Self { f, x, wire, origin: std::sync::OnceLock::new() }
             }
         }
         impl<$H, $($T,)* R> $prev<$($T,)* R> for $pap<$H, $($T,)* R> {
@@ -2711,13 +2723,13 @@ macro_rules! morloc_fn {
         /// it has the arguments before the stage point). Called with every
         /// argument, it is `flat`.
         pub struct $staged<$H, $($T,)* R> {
-            flat: std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
-            step: std::rc::Rc<dyn Fn(&$H) -> std::rc::Rc<dyn $prev<$($T,)* R>>>,
+            flat: $value<$H, $($T,)* R>,
+            step: std::sync::Arc<dyn Fn(&$H) -> $pvalue<$($T,)* R> + Send + Sync>,
         }
         impl<$H, $($T,)* R> $staged<$H, $($T,)* R> {
             pub fn new(
-                flat: std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
-                step: std::rc::Rc<dyn Fn(&$H) -> std::rc::Rc<dyn $prev<$($T,)* R>>>,
+                flat: $value<$H, $($T,)* R>,
+                step: std::sync::Arc<dyn Fn(&$H) -> $pvalue<$($T,)* R> + Send + Sync>,
             ) -> Self {
                 Self { flat, step }
             }
@@ -2726,18 +2738,18 @@ macro_rules! morloc_fn {
             #[inline]
             fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { self.flat.$call($h, $($t,)*) }
             fn $reify(&self) -> Option<&ClosureOrigin> { self.flat.$reify() }
-            fn $apply(&self, x: &$H) -> Option<std::rc::Rc<dyn $prev<$($T,)* R>>> { Some((self.step)(x)) }
+            fn $apply(&self, x: &$H) -> Option<$pvalue<$($T,)* R>> { Some((self.step)(x)) }
         }
 
         /// Apply a function value to its first argument: a value morloc made
         /// knows how; any other keeps the argument.
-        pub fn $apply1<$H: Clone + 'static, $($T: 'static,)* R: 'static>(
-            f: &std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
+        pub fn $apply1<$H: Clone + Send + Sync + 'static, $($T: 'static,)* R: 'static>(
+            f: &$value<$H, $($T,)* R>,
             x: &$H,
-        ) -> std::rc::Rc<dyn $prev<$($T,)* R>> {
+        ) -> $pvalue<$($T,)* R> {
             match f.$apply(x) {
                 Some(g) => g,
-                None => std::rc::Rc::new($pap::new(f.clone(), x.clone(), None)),
+                None => std::sync::Arc::new($pap::new(f.clone(), x.clone(), None)),
             }
         }
     };
@@ -2754,7 +2766,9 @@ impl<R, F: Fn() -> R> MorlocFn0<R> for F {
     fn call0(&self) -> R { self() }
     fn reify0(&self) -> Option<&ClosureOrigin> { None }
 }
-impl<R, T: MorlocFn0<R> + ?Sized> MorlocFn0<R> for std::rc::Rc<T> {
+/// A suspension held as a value.
+pub type FnValue0<R> = std::sync::Arc<dyn MorlocFn0<R> + Send + Sync>;
+impl<R, T: MorlocFn0<R> + ?Sized> MorlocFn0<R> for std::sync::Arc<T> {
     #[inline]
     fn call0(&self) -> R { (**self).call0() }
     fn reify0(&self) -> Option<&ClosureOrigin> { (**self).reify0() }
@@ -2763,17 +2777,17 @@ pub struct Closure0<C, R> {
     caps: C,
     call: fn(&C) -> R,
     mk: Option<fn(&C) -> ClosureOrigin>,
-    origin: std::cell::OnceCell<ClosureOrigin>,
+    origin: std::sync::OnceLock<ClosureOrigin>,
 }
 impl<C, R> Closure0<C, R> {
     pub fn new(caps: C, call: fn(&C) -> R, mk: fn(&C) -> ClosureOrigin) -> Self {
-        Self { caps, call, mk: Some(mk), origin: std::cell::OnceCell::new() }
+        Self { caps, call, mk: Some(mk), origin: std::sync::OnceLock::new() }
     }
     pub fn local(caps: C, call: fn(&C) -> R) -> Self {
-        Self { caps, call, mk: None, origin: std::cell::OnceCell::new() }
+        Self { caps, call, mk: None, origin: std::sync::OnceLock::new() }
     }
     pub fn proxy(caps: C, call: fn(&C) -> R, origin: ClosureOrigin) -> Self {
-        let cell = std::cell::OnceCell::new();
+        let cell = std::sync::OnceLock::new();
         let _ = cell.set(origin);
         Self { caps, call, mk: None, origin: cell }
     }
@@ -2782,11 +2796,11 @@ impl<C, R> MorlocFn0<R> for Closure0<C, R> {
     #[inline]
     fn call0(&self) -> R { (self.call)(&self.caps) }
     fn reify0(&self) -> Option<&ClosureOrigin> {
-        if self.origin.get().is_none() {
-            let mk = self.mk?;
-            let _ = self.origin.set(mk(&self.caps));
+        if let Some(o) = self.origin.get() {
+            return Some(o);
         }
-        self.origin.get()
+        let mk = self.mk?;
+        Some(self.origin.get_or_init(|| mk(&self.caps)))
     }
 }
 /// A function value rendered as a plain `Fn`, for host code that declares a
@@ -2801,22 +2815,22 @@ impl<R> ThinFn for fn() -> R {
     type Out = Self;
     fn thin(&self) -> Self { *self }
 }
-impl<R: 'static> ThinFn for std::rc::Rc<dyn MorlocFn0<R>> {
-    type Out = Box<dyn Fn() -> R>;
+impl<R: 'static> ThinFn for FnValue0<R> {
+    type Out = Box<dyn Fn() -> R + Send + Sync>;
     fn thin(&self) -> Self::Out {
         let v = self.clone();
         Box::new(move || v.call0())
     }
 }
 
-morloc_fn!(MorlocFn1, Closure1, fn_ptr1, call1, reify1, apply1, MorlocFn0, call0, reify0, Pap1, Staged1, apply1_1, (A1, a1));
-morloc_fn!(MorlocFn2, Closure2, fn_ptr2, call2, reify2, apply2, MorlocFn1, call1, reify1, Pap2, Staged2, apply1_2, (A1, a1), (A2, a2));
-morloc_fn!(MorlocFn3, Closure3, fn_ptr3, call3, reify3, apply3, MorlocFn2, call2, reify2, Pap3, Staged3, apply1_3, (A1, a1), (A2, a2), (A3, a3));
-morloc_fn!(MorlocFn4, Closure4, fn_ptr4, call4, reify4, apply4, MorlocFn3, call3, reify3, Pap4, Staged4, apply1_4, (A1, a1), (A2, a2), (A3, a3), (A4, a4));
-morloc_fn!(MorlocFn5, Closure5, fn_ptr5, call5, reify5, apply5, MorlocFn4, call4, reify4, Pap5, Staged5, apply1_5, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5));
-morloc_fn!(MorlocFn6, Closure6, fn_ptr6, call6, reify6, apply6, MorlocFn5, call5, reify5, Pap6, Staged6, apply1_6, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6));
-morloc_fn!(MorlocFn7, Closure7, fn_ptr7, call7, reify7, apply7, MorlocFn6, call6, reify6, Pap7, Staged7, apply1_7, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7));
-morloc_fn!(MorlocFn8, Closure8, fn_ptr8, call8, reify8, apply8, MorlocFn7, call7, reify7, Pap8, Staged8, apply1_8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7), (A8, a8));
+morloc_fn!(MorlocFn1, FnValue1, Closure1, fn_ptr1, call1, reify1, apply1, MorlocFn0, FnValue0, call0, reify0, Pap1, Staged1, apply1_1, (A1, a1));
+morloc_fn!(MorlocFn2, FnValue2, Closure2, fn_ptr2, call2, reify2, apply2, MorlocFn1, FnValue1, call1, reify1, Pap2, Staged2, apply1_2, (A1, a1), (A2, a2));
+morloc_fn!(MorlocFn3, FnValue3, Closure3, fn_ptr3, call3, reify3, apply3, MorlocFn2, FnValue2, call2, reify2, Pap3, Staged3, apply1_3, (A1, a1), (A2, a2), (A3, a3));
+morloc_fn!(MorlocFn4, FnValue4, Closure4, fn_ptr4, call4, reify4, apply4, MorlocFn3, FnValue3, call3, reify3, Pap4, Staged4, apply1_4, (A1, a1), (A2, a2), (A3, a3), (A4, a4));
+morloc_fn!(MorlocFn5, FnValue5, Closure5, fn_ptr5, call5, reify5, apply5, MorlocFn4, FnValue4, call4, reify4, Pap5, Staged5, apply1_5, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5));
+morloc_fn!(MorlocFn6, FnValue6, Closure6, fn_ptr6, call6, reify6, apply6, MorlocFn5, FnValue5, call5, reify5, Pap6, Staged6, apply1_6, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6));
+morloc_fn!(MorlocFn7, FnValue7, Closure7, fn_ptr7, call7, reify7, apply7, MorlocFn6, FnValue6, call6, reify6, Pap7, Staged7, apply1_7, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7));
+morloc_fn!(MorlocFn8, FnValue8, Closure8, fn_ptr8, call8, reify8, apply8, MorlocFn7, FnValue7, call7, reify7, Pap8, Staged8, apply1_8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7), (A8, a8));
 
 // ---------------------------------------------------------------------------
 // Packet bridge (production). `put_value` serializes a native value into a
@@ -4598,6 +4612,54 @@ mod tests {
         }
     }
 
+    // Every owner of a deep shared chain drops it on its own small-stack
+    // thread at once. Whichever drop releases the last reference frees the
+    // chain, and it must do so through the drain, not one frame per level.
+    #[test]
+    fn deep_recursive_value_dropped_concurrently() {
+        const DEPTH: i64 = 300_000;
+        for _ in 0..4 {
+            let mut chain = LL { head: 0, tail: None };
+            for i in 1..=DEPTH {
+                chain = LL { head: i, tail: Some(RecBox::new(chain)) };
+            }
+            let tail = chain.tail.clone().unwrap();
+            drop(chain);
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let mine = tail.clone();
+                    let b = barrier.clone();
+                    std::thread::Builder::new()
+                        .stack_size(256 * 1024)
+                        .spawn(move || {
+                            b.wait();
+                            drop(mine);
+                        })
+                        .unwrap()
+                })
+                .collect();
+            drop(tail);
+            for h in handles {
+                h.join().expect("a concurrent drop overflowed its stack");
+            }
+        }
+    }
+
+    #[test]
+    fn a_drain_leaves_nothing_behind_on_its_thread() {
+        std::thread::spawn(|| {
+            let mut chain = LL { head: 0, tail: None };
+            for i in 1..=100 {
+                chain = LL { head: i, tail: Some(RecBox::new(chain)) };
+            }
+            drop(chain);
+            assert!(rec_drain::idle());
+        })
+        .join()
+        .expect("thread");
+    }
+
     // A chain far deeper than a 2 MiB test thread's stack could walk one
     // frame per level: the size, write and read passes must stay flat.
     #[test]
@@ -4780,13 +4842,13 @@ mod tests {
 
     #[test]
     fn closure_calls_through_a_trait_object() {
-        let f: std::rc::Rc<dyn MorlocFn1<i64, i64>> = std::rc::Rc::new(Closure1::local(
+        let f: FnValue1<i64, i64> = std::sync::Arc::new(Closure1::local(
             (7i64,),
             |c: &(i64,), a: &i64| c.0 + a,
         ));
         assert_eq!(f.call1(&5), 12);
-        // an Rc of a function value is a function value
-        let g: std::rc::Rc<dyn MorlocFn1<i64, i64>> = std::rc::Rc::new(f.clone());
+        // a function value held by a function value is a function value
+        let g: FnValue1<i64, i64> = std::sync::Arc::new(f.clone());
         assert_eq!(g.call1(&5), 12);
     }
 
@@ -4811,6 +4873,62 @@ mod tests {
         assert_eq!(f.reify0(), Some(&origin_of(42)));
         assert_eq!(f.reify0(), Some(&origin_of(42)));
         assert_eq!(f.caps.0.get(), 1, "the origin must be built exactly once");
+    }
+
+    fn assert_thread_safe<T: Send + Sync>(_: &T) {}
+
+    #[test]
+    fn function_values_are_called_from_other_threads() {
+        let caps = (String::from("p-"), vec![1i64, 2, 3]);
+        let f: FnValue1<String, String> = std::sync::Arc::new(Closure1::local(
+            caps,
+            |c: &(String, Vec<i64>), a: &String| format!("{}{}{}", c.0, a, c.1.len()),
+        ));
+        let g: FnValue1<i64, i64> = std::sync::Arc::new(Pap2::new(
+            std::sync::Arc::new(|a: &i64, b: &i64| a * b) as FnValue2<i64, i64, i64>,
+            3,
+            None,
+        ));
+        let t: FnValue0<i64> = std::sync::Arc::new(Closure0::local((5i64,), |c: &(i64,)| c.0));
+        let thin = ThinFn::thin(&f);
+        assert_thread_safe(&f);
+        assert_thread_safe(&g);
+        assert_thread_safe(&t);
+        assert_thread_safe(&thin);
+        assert_thread_safe(&RecBox::new(LL { head: 1, tail: None }));
+        let out: Vec<(String, i64, i64)> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..4i64)
+                .map(|i| {
+                    let (f, g, t, thin) = (&f, &g, &t, &thin);
+                    s.spawn(move || {
+                        let a = f.call1(&i.to_string());
+                        assert_eq!(a, thin(&i.to_string()));
+                        (a, g.call1(&i), t.call0())
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(out[2], ("p-23".to_string(), 6, 5));
+    }
+
+    #[test]
+    fn the_origin_is_built_once_under_concurrent_reify() {
+        let f = Closure0::new(
+            (std::sync::atomic::AtomicU32::new(0),),
+            |_: &(std::sync::atomic::AtomicU32,)| 1i64,
+            |c: &(std::sync::atomic::AtomicU32,)| {
+                c.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                origin_of(9)
+            },
+        );
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| assert_eq!(f.reify0(), Some(&origin_of(9))));
+            }
+        });
+        assert_eq!(f.caps.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

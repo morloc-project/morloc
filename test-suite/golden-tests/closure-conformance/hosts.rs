@@ -1,19 +1,17 @@
-use std::rc::Rc;
-
 #[derive(Clone)]
 pub struct Holder {
-    pub run: std::rc::Rc<dyn rustmorloc::MorlocFn0<i64>>,
+    pub run: rustmorloc::FnValue0<i64>,
     pub tag: i64,
 }
 
 #[derive(Clone)]
 pub struct Caller {
-    pub inc: std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>>,
+    pub inc: rustmorloc::FnValue1<i64, i64>,
 }
 
 #[derive(Clone)]
 pub struct Purer {
-    pub apply: std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>>,
+    pub apply: rustmorloc::FnValue1<i64, i64>,
 }
 
 
@@ -48,8 +46,8 @@ pub fn home_fail(path: &String) -> i64 {
     rustmorloc::morloc_throw(format!("failHome ran: {}", path))
 }
 
-pub fn home_mk(k: i64) -> std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>> {
-    std::rc::Rc::new(move |x: &i64| x + k)
+pub fn home_mk(k: i64) -> rustmorloc::FnValue1<i64, i64> {
+    std::sync::Arc::new(move |x: &i64| x + k)
 }
 
 pub fn home_big(n: i64) -> Vec<i64> {
@@ -90,19 +88,19 @@ pub fn away_use_record(h: &Holder) -> i64 {
     h.run.call0() + h.tag
 }
 
-pub fn away_use_list(xs: &Vec<Rc<dyn rustmorloc::MorlocFn0<i64>>>) -> i64 {
+pub fn away_use_list(xs: &Vec<rustmorloc::FnValue0<i64>>) -> i64 {
     xs[0].call0();
     xs[0].call0();
     xs[0].call0()
 }
 
-pub fn away_use_tuple(t: &(Rc<dyn rustmorloc::MorlocFn0<i64>>, i64)) -> i64 {
+pub fn away_use_tuple(t: &(rustmorloc::FnValue0<i64>, i64)) -> i64 {
     t.0.call0();
     t.0.call0();
     t.0.call0() + t.1
 }
 
-pub fn away_use_opt(t: &Option<Rc<dyn rustmorloc::MorlocFn0<i64>>>) -> i64 {
+pub fn away_use_opt(t: &Option<rustmorloc::FnValue0<i64>>) -> i64 {
     match t {
         Some(f) => {
             f.call0();
@@ -140,46 +138,46 @@ pub fn away_use_pinned(c: &Caller, x: i64) -> i64 {
 }
 
 pub fn away_use_hof(
-    f: impl rustmorloc::MorlocFn1<Rc<dyn rustmorloc::MorlocFn1<i64, i64>>, i64>,
-    g: impl rustmorloc::MorlocFn1<i64, i64> + 'static,
+    f: impl rustmorloc::MorlocFn1<rustmorloc::FnValue1<i64, i64>, i64>,
+    g: impl rustmorloc::MorlocFn1<i64, i64> + Send + Sync + 'static,
 ) -> i64 {
-    let boxed: Rc<dyn rustmorloc::MorlocFn1<i64, i64>> = Rc::new(g);
+    let boxed: rustmorloc::FnValue1<i64, i64> = std::sync::Arc::new(g);
     f.call1(&boxed)
 }
 
-pub fn away_use_list_pure(fs: &Vec<Rc<dyn rustmorloc::MorlocFn1<i64, i64>>>, x: i64) -> i64 {
+pub fn away_use_list_pure(fs: &Vec<rustmorloc::FnValue1<i64, i64>>, x: i64) -> i64 {
     fs.iter().map(|f| f.call1(&x)).sum()
 }
 
 pub fn away_use_mk(
-    f: impl rustmorloc::MorlocFn1<i64, Rc<dyn rustmorloc::MorlocFn1<i64, i64>>>,
+    f: impl rustmorloc::MorlocFn1<i64, rustmorloc::FnValue1<i64, i64>>,
     a: i64,
     b: i64,
 ) -> i64 {
     f.call1(&a).call1(&b)
 }
 
-pub fn away_use_thunk2(t: impl rustmorloc::MorlocFn0<Rc<dyn rustmorloc::MorlocFn0<i64>>>) -> i64 {
+pub fn away_use_thunk2(t: impl rustmorloc::MorlocFn0<rustmorloc::FnValue0<i64>>) -> i64 {
     let inner = t.call0();
     inner.call0();
     inner.call0();
     inner.call0()
 }
 
-pub fn away_use_thunk_fn(t: impl rustmorloc::MorlocFn0<Rc<dyn rustmorloc::MorlocFn1<i64, i64>>>, x: i64) -> i64 {
+pub fn away_use_thunk_fn(t: impl rustmorloc::MorlocFn0<rustmorloc::FnValue1<i64, i64>>, x: i64) -> i64 {
     t.call0().call1(&x)
 }
 
 pub fn away_use_fn_thunk(
-    f: impl rustmorloc::MorlocFn1<Rc<dyn rustmorloc::MorlocFn0<i64>>, i64>,
-    t: impl rustmorloc::MorlocFn0<i64> + 'static,
+    f: impl rustmorloc::MorlocFn1<rustmorloc::FnValue0<i64>, i64>,
+    t: impl rustmorloc::MorlocFn0<i64> + Send + Sync + 'static,
 ) -> i64 {
-    let boxed: Rc<dyn rustmorloc::MorlocFn0<i64>> = Rc::new(t);
+    let boxed: rustmorloc::FnValue0<i64> = std::sync::Arc::new(t);
     f.call1(&boxed)
 }
 
-pub fn away_pass_through(f: impl rustmorloc::MorlocFn1<i64, i64> + 'static) -> Rc<dyn rustmorloc::MorlocFn1<i64, i64>> {
-    Rc::new(f)
+pub fn away_pass_through(f: impl rustmorloc::MorlocFn1<i64, i64> + Send + Sync + 'static) -> rustmorloc::FnValue1<i64, i64> {
+    std::sync::Arc::new(f)
 }
 
 pub fn away_map_away<F: Fn(&i64) -> i64>(f: F, xs: &Vec<i64>) -> Vec<i64> {
@@ -187,18 +185,18 @@ pub fn away_map_away<F: Fn(&i64) -> i64>(f: F, xs: &Vec<i64>) -> Vec<i64> {
 }
 
 pub fn away_use_hof_eff(
-    f: impl rustmorloc::MorlocFn1<Rc<dyn rustmorloc::MorlocFn1<i64, i64>>, i64>,
-    g: impl rustmorloc::MorlocFn1<i64, i64> + 'static,
+    f: impl rustmorloc::MorlocFn1<rustmorloc::FnValue1<i64, i64>, i64>,
+    g: impl rustmorloc::MorlocFn1<i64, i64> + Send + Sync + 'static,
 ) -> i64 {
-    let boxed: Rc<dyn rustmorloc::MorlocFn1<i64, i64>> = Rc::new(g);
+    let boxed: rustmorloc::FnValue1<i64, i64> = std::sync::Arc::new(g);
     f.call1(&boxed)
 }
 
 pub fn away_use_hof2(
-    f: impl rustmorloc::MorlocFn1<Rc<dyn rustmorloc::MorlocFn1<Rc<dyn rustmorloc::MorlocFn1<i64, i64>>, i64>>, i64>,
+    f: impl rustmorloc::MorlocFn1<rustmorloc::FnValue1<rustmorloc::FnValue1<i64, i64>, i64>, i64>,
 ) -> i64 {
-    let h: Rc<dyn rustmorloc::MorlocFn1<Rc<dyn rustmorloc::MorlocFn1<i64, i64>>, i64>> =
-        Rc::new(move |g: &Rc<dyn rustmorloc::MorlocFn1<i64, i64>>| g.call1(&3));
+    let h: rustmorloc::FnValue1<rustmorloc::FnValue1<i64, i64>, i64> =
+        std::sync::Arc::new(move |g: &rustmorloc::FnValue1<i64, i64>| g.call1(&3));
     f.call1(&h)
 }
 

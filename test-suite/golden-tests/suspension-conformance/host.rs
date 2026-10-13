@@ -1,11 +1,11 @@
 #[derive(Clone)]
 pub struct Holder {
-    pub run: std::rc::Rc<dyn rustmorloc::MorlocFn0<i64>>,
+    pub run: rustmorloc::FnValue0<i64>,
 }
 
 #[derive(Clone)]
 pub struct Caller {
-    pub inc: std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>>,
+    pub inc: rustmorloc::FnValue1<i64, i64>,
 }
 
 pub fn tick(path: &String) -> i64 {
@@ -39,7 +39,7 @@ pub fn use_record(h: &Holder) -> i64 {
     h.run.call0()
 }
 
-pub fn use_list(xs: &Vec<std::rc::Rc<dyn rustmorloc::MorlocFn0<i64>>>) -> i64 {
+pub fn use_list(xs: &Vec<rustmorloc::FnValue0<i64>>) -> i64 {
     xs[0].call0();
     xs[0].call0();
     xs[0].call0()

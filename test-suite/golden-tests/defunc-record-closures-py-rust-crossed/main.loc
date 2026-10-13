@@ -4,7 +4,7 @@
 -- in the Python home pool, which reifies the whole aggregate into a
 -- `Vec`/tuple/`Option` of wire tuples; Rust then deserializes it
 -- (`get_value::<Vec<ClosureOrigin>>` ...) and reflects each element in place into
--- an `Rc<dyn MorlocFnN>` FatClosure proxy applied with `.call1`.
+-- an `FnValueN` FatClosure proxy applied with `.call1`.
 --
 -- This exercises the structural reflect path (the deserialize-side `construct`
 -- over SerialList/Tuple/Optional) that the plain `defunc-record-closures-py-rust`

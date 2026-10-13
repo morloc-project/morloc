@@ -227,7 +227,6 @@ rustmorloc/lib.rs::-::RECUR_ENV	thread
 rustmorloc/lib.rs::-::SHM_TRACKER	thread		
 rustmorloc/lib.rs::-::TRACEBACK	thread		
 rustmorloc/lib.rs::-::CURRENT_FRAME	thread		
-rustmorloc/lib.rs::-::ACTIVE	thread		
 rustmorloc/lib.rs::-::QUEUE	thread		
 rustmorloc/lib.rs::-::TMPDIR	startup		
 rustmorloc/lib.rs::-::REGISTERED	startup		

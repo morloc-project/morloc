@@ -1,0 +1,17 @@
+-- A function value must be thread-safe, so host code that builds one holding
+-- a value that is not (here an `Rc`) fails to build, with a note naming the
+-- rule before rustc's report.
+
+module unshareable (addAll)
+
+import root-rust
+
+source Rust from "unshareable.rs" where
+  --' name: make_counter
+  --' @rsize 1
+  makeCounter
+
+makeCounter :: Int -> (Int -> Int)
+
+addAll :: Int -> Int -> Int
+addAll k x = makeCounter k x

@@ -15,7 +15,7 @@
 -- no such closure manifold -- and fail. A `13` result is conclusive.
 --
 -- `forward` (Rust) genuinely reflects the incoming list into
--- `Vec<Rc<dyn MorlocFnN>>` and returns it, so the closure round-trips THROUGH the
+-- `Vec<FnValueN>` and returns it, so the closure round-trips THROUGH the
 -- Rust pool. Capture `a` is a runtime CLI arg (not constant folded).
 
 module main (recrossPRC, recrossCRP)
