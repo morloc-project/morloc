@@ -19,3 +19,18 @@
   its expression union lacks those members. `c_abi_layout.rs` checks neither
   struct, so nothing caught it. Fix: mirror both and add them to
   `expression_structs_match_the_header`.
+- **ABI version never gated.** [read] Spec gap: no item covers the ABI
+  version. library/Morloc/Abi.hs:18-22 says provisioning compares
+  `morloc_abi_version()` and `morloc-nexus --abi-version` against
+  `abiVersion` and refuses a mismatch; nothing does. `abiVersion` is only
+  printed (executable/Subcommands.hs:734) and unit-tested
+  (test-suite/AbiTests.hs). tooling/morloc-manager mim/src/provision.rs:8
+  calls the gate deferred and relies on one release tag. A runtime built
+  from another release's source loads silently.
+- **Crate versions claim a lockstep they lack.** [read]
+  morloc-runtime-types (0.87.0) and rustmorloc (0.95.0) say "Version
+  locked with morloc-runtime" (0.109.0); scripts/bump-version.sh:36 bumps
+  only nexus, manifest and runtime.
+- **`mlcKind*` agreement with morloc.h untested on the Haskell side.**
+  [read] library/Morloc/BaseTypes.hs:196 requires `mlcKind*` to equal
+  morloc.h `MLC_KIND_*`; no test in test-suite/ compares them.
