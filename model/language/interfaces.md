@@ -59,13 +59,14 @@ other interface carries it as JSON, and that JSON is the argument's value
 in its wire form. The text-form directives apply only on the CLI.
 
 ### IFACE-5 An omitted optional argument takes its default everywhere
-Intent: ruled 2026-10-12
-Code: deviates model/language/issues/interfaces.md
+Intent: ruled 2026-10-13
+Code: conforms 2026-10-13
 
 An argument with a default may be left out on every interface and gets the
 value the CLI gives it: its default, read by the same rules (CLI-1, its
 text-form directives, CLI-4), on the server. A default naming a file names
-the server's file (IFACE-3). A boolean flag left out is false. No
+the server's file (IFACE-3). A boolean flag left out takes its declared
+default, false unless declared. No
 interface requires a caller to fill a slot the CLI lets them omit.
 Every interface but the CLI takes the arguments as an object keyed by
 argument name (MCP's `arguments`; `args` on HTTP and LP), and HTTP and LP

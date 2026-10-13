@@ -7,12 +7,6 @@ re-checked.
 
 ## Rulings needed
 
-- **IFACE-5 says an omitted flag is false; the CLI gives its default.**
-  A flag may default to true (library/Morloc/CodeGenerator/Docstrings.hs
-  ~l.1066; morloc-nexus/src/phase2.rs ~l.1271-1280 reads `"true"`/`"1"`).
-  IFACE-1 (ruled) asks for the CLI's value, IFACE-5 (ruled) for false.
-  Proposed amendment: "A boolean flag left out takes its declared default,
-  false unless declared." The resolver follows IFACE-1 until ruled.
 - **IFACE-17 (`check.path` on every interface) is proposed.** The resolver
   does not apply argument checks off the CLI until it is ruled. Open with
   it: a failed check is bad-request; a supplied `IFile` that does not exist
@@ -41,7 +35,7 @@ re-checked.
   which leaves out a command returning a file handle; the daemon serves
   it.
 
-## Arguments (IFACE-4, IFACE-5, IFACE-17)
+## Arguments (IFACE-4, IFACE-17)
 
 - **The daemon skips `check.path`.** [read] Violates IFACE-17. A daemon
   argument is read by `call_arg_packet` (morloc-runtime/src/cli.rs) with no
