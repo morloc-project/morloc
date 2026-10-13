@@ -1,8 +1,8 @@
 // A user-mapped record `record Rust => Ops = "Ops"` whose fields are runtime
 // closures, stored in the fat trait object morloc uses for a function value.
 pub struct Ops {
-    pub inc: rustmorloc::FnValue1<i64, i64>,
-    pub scale: rustmorloc::FnValue1<i64, i64>,
+    pub inc: std::sync::Arc<dyn Fn(&i64) -> i64 + Send + Sync>,
+    pub scale: std::sync::Arc<dyn Fn(&i64) -> i64 + Send + Sync>,
 }
 
 pub fn tick() -> i64 {

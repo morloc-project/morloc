@@ -13,6 +13,6 @@ pub fn count(path: &String) -> i64 {
     std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0)
 }
 
-pub fn h_pass<A, B>(f: impl rustmorloc::MorlocFn1<A, B>, x: &A) -> B {
-    f.call1(x)
+pub fn h_pass<A, B>(f: impl Fn(&A) -> B, x: &A) -> B {
+    f(x)
 }

@@ -310,3 +310,5 @@ morloc-runtime/fork_pool.rs::-::COORDINATOR	fork-scoped
 morloc-runtime/fork_pool.rs::-::COORDINATOR_WAKE	fork-scoped		
 morloc-runtime/fork_pool.rs::-::DEPTH	thread		
 data/lang/r/rmorloc.c::morloc_fork_pool_run_r::ctx	startup		
+rustmorloc/fv.rs::-::REGISTRY	exec-only		
+rustmorloc/fv.rs::-::STAGED_LIVE	exec-only		

@@ -459,8 +459,7 @@ data LowerConfig m = LowerConfig
   -- groups a source statement's @\@rsize@ declares). The first group is the
   -- call itself; each later group applies the function value the previous
   -- group returned. Default is juxtaposition, which is how a host language
-  -- with first-class callables spells it; Rust applies a function value
-  -- through its trait method instead.
+  -- with first-class callables spells it.
   , lcSourcedArg :: ArgSite -> IOwnership -> TypeM -> MDoc -> MDoc
   -- ^ How to pass one argument at a call, given the call kind ('ArgSite'), the
   -- argument's ownership ('IOwnership'), its 'TypeM', and its rendered
@@ -609,7 +608,7 @@ data LowerConfig m = LowerConfig
   -- ^ Adapt a value to its stored representation inside an aggregate (given the
   -- element/field type). Applied to record fields AND list/tuple elements.
   -- Default is identity; the Rust member wraps a function value in
-  -- @Arc::new(..) as FnValueN<..>@ so it fits the boxed fat-trait-object
+  -- @Arc<dyn Fn>@ so it fits the boxed trait-object
   -- element type (a bare @impl Fn@ is illegal in a Vec/tuple/struct field, and
   -- the explicit cast is needed because a @vec![..]@ has no per-element declared
   -- type to drive the unsizing coercion). Monadic so the cast type can render.
@@ -620,9 +619,8 @@ data LowerConfig m = LowerConfig
   -- stage entry when it has one ('mlc_papply').
   , lcApplyClosure :: MDoc -> [MDoc] -> MDoc
   -- ^ Apply a local function value (a 'LocalCallP') to its arguments. Default is
-  -- a direct call @f(args)@; the Rust member emits @f.callN(args)@ (the fat/thin
-  -- trait method -- monomorphized and inlined for a thin closure, dispatched for
-  -- a boxed one) where N is the argument count.
+  -- a direct call @f(args)@; the Rust member parenthesizes the callee,
+  -- @(f)(args)@, since a field or call expression cannot be called bare.
   , lcForeignCall :: MDoc -> Int -> [MDoc] -> MDoc
   , lcRemoteCall :: MDoc -> Int -> RemoteResources -> [MDoc] -> m PoolDocs
   , lcCacheBody :: SerialAST -> Text -> Int -> [(Arg TypeM, SerialAST)] -> PoolDocs -> m PoolDocs
@@ -1446,7 +1444,7 @@ adaptLoopBodyOwned cfg adaptBase origBody body = go origBody body
     isIdentChar c = isAlphaNum c || c == '_'
 
 -- | Adapt each aggregate element/field to its stored representation via
--- 'lcStoreField' (e.g. Rust boxes a function value into its @FnValueN@
+-- 'lcStoreField' (e.g. Rust boxes a function value into its @Arc<dyn Fn>@
 -- element type). Passes through unchanged when the original expression list is
 -- unavailable (length mismatch), mirroring 'adaptOwnedElems'.
 storeElems :: (Monad m) => LowerConfig m -> [NativeExpr] -> [PoolDocs] -> m [PoolDocs]
@@ -1797,8 +1795,8 @@ lowerNativeExprRaw cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcApplyClosure cf
 lowerNativeExprRaw cfg (CoerceN _ _ innerE) (CoerceN_ CoerceToOptional _ x) = do
   x' <- adaptOwnedElem cfg innerE x
   -- Adapt the inner to its stored representation before wrapping (Rust boxes a
-  -- closure into `FnValueN` so the payload matches the boxed
-  -- `Option<FnValueN>` element type), mirroring list/tuple/record.
+  -- closure into `Arc<dyn Fn>` so the payload matches the boxed
+  -- `Option<Arc<dyn Fn>>` element type), mirroring list/tuple/record.
   boxed <- lcStoreField cfg (typeFof innerE) (poolExpr x')
   return $ x' {poolExpr = lcCoerceOptional cfg boxed}
 lowerNativeExprRaw cfg _ (CoerceN_ CoerceToOptional _ x) =

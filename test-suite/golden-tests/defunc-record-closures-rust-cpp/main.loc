@@ -1,6 +1,6 @@
 -- Runtime closures nested in a record / list / tuple / optional crossing a pool
 -- boundary between two STATICALLY typed pools. Producer: Rust (reify). Consumer:
--- C++ (reflect). Rust boxes each closure into `FnValueN`, reifies it in
+-- C++ (reflect). Rust boxes each closure into `Arc<dyn Fn>`, reifies it in
 -- place into the wire tuple; C++ reflects each into a std::function proxy that
 -- RPCs back to the Rust home pool. Exercises Rust<->C++ (static peer) interop for
 -- every aggregate shape -- the wire form is language-agnostic (t3sjaau1).

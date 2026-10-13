@@ -676,11 +676,10 @@ printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
         ]
 
 -- | Per-field marshalling strategy for a record function field. A closure field
--- is stored natively as @FnValueN@ (no @ToVoidstar@), so it is reified
+-- is stored natively as a function value (no @ToVoidstar@), so it is reified
 -- to its @ClosureOrigin@ wire tuple on write/shm_size and reflected back on read.
-data ClosureMarshal = ClosureMarshal
-  { cmReify :: MDoc              -- ^ arity-indexed reify method, e.g. @reify1@
-  , cmReflect :: MDoc -> MDoc    -- ^ a @ClosureOrigin@ slot-read expression -> the reflected @FnValueN@
+newtype ClosureMarshal = ClosureMarshal
+  { cmReflect :: MDoc -> MDoc    -- ^ a @ClosureOrigin@ slot-read expression -> the reflected function value
   }
 
 -- | Whose field types a record's reader names: a generated struct's are the
@@ -716,18 +715,15 @@ printRecordImpls fieldTypes name params fields = vsep [toImpl, "", fromImpl]
     -- Hand a field to the walk: a plain field by reference; a closure field
     -- reifies to its ClosureOrigin wire tuple (which IS ToVoidstar), owned by
     -- the walk since the step's own frame does not outlive the call.
-    -- `reifyN` BORROWS the origin (`Option<&ClosureOrigin>`), so the two
-    -- callers (size, write) share it without cloning the captured packets
-    -- twice.
     sizeField (i, (f, _, _, Nothing)) =
       "w.child(&self." <> f <> ", " <> fieldSchema i <> ", true);"
-    sizeField (i, (f, _, _, Just cm)) =
-      "w.child_owned(rustmorloc::require_origin(self." <> f <> "." <> cmReify cm <> "()), "
+    sizeField (i, (f, _, _, Just _)) =
+      "w.child_owned(rustmorloc::require_origin(rustmorloc::reify(&self." <> f <> ")), "
         <> fieldSchema i <> ", true);"
     writeField (i, (f, _, _, Nothing)) =
       "w.child(&self." <> f <> ", " <> fieldSlot i <> ", " <> fieldSchema i <> ");"
-    writeField (i, (f, _, _, Just cm)) =
-      "w.child_owned(rustmorloc::require_origin(self." <> f <> "." <> cmReify cm <> "()), "
+    writeField (i, (f, _, _, Just _)) =
+      "w.child_owned(rustmorloc::require_origin(rustmorloc::reify(&self." <> f <> ")), "
         <> fieldSlot i <> ", " <> fieldSchema i <> ");"
 
     toImpl =

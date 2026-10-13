@@ -34,6 +34,25 @@ calls, which reads it and never releases it, so threads calling the closure
 at once (HOST-7) share it. Its lifetime is the enclosing call's; see
 issues/rust-closures-threads.md.
 
+### STATE-4 A Rust function value that can cross is found by its allocation
+Status: implemented
+Checked by: tla:FnRegistry, tla:FnRegistry_remove_after_free.bug, tla:FnRegistry_register_after_escape.bug, golden:defunc-record-closures-recross, golden:host-closure-cannot-cross
+
+A Rust function value is a plain `Arc<dyn Fn>` (HOST-8), which carries
+nothing morloc can read. A value that can cross pools (its signature
+reaches a serialization site) keeps its origin, staged step and partial
+application in an environment its closure owns, and a process-wide
+registry maps the address of the value's allocation to that environment.
+The entry is inserted before the constructor returns the value, so no
+handle exists without it, and removed by the environment when the last
+owner drops the value, before the allocation is freed, so an address in
+the registry always names the live value made there. A clone keeps the
+address; a value host code builds has no entry and fails to cross by name.
+A lookup that would reinterpret an environment checks the value's type
+first. The registry is `exec-only`: no process that links the Rust runtime
+forks a worker (FORK-6). Model: `tla/FnRegistry.tla` (`FnRegistry` passes;
+`remove_after_free` and `register_after_escape` lose an entry).
+
 ### INIT-1 A process-wide value is initialised once, by a fork-safe primitive
 Status: implemented
 Checked by: tla:LazyInit, tla:LazyInit_unlocked.bug, tla:LazyInit_unheld.bug, golden:futhark-basic

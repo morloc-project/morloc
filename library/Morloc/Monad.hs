@@ -405,11 +405,11 @@ buildFailureNote cmd msg
       , "cannot be sent between threads safely"
       ] =
       Just . vsep $
-        [ "A Rust function value (rustmorloc::FnValueN) may be called from any thread, so it"
-        , "must be Send + Sync: every value a closure captures, and every value stored in a"
-        , "function value or in a recursive type, must be Send + Sync too. If rustc's report"
-        , "below traces the type it names to a FnValueN, a closure or a recursive type, make"
-        , "that type thread-safe (Arc and Mutex in place of Rc and RefCell)."
+        [ "A Rust function value (Arc<dyn Fn(..) + Send + Sync>) may be called from any"
+        , "thread, so every value a closure captures, and every value stored in a function"
+        , "value or in a recursive type, must be Send + Sync. If rustc's report below traces"
+        , "the type it names to a function value, a closure or a recursive type, make that"
+        , "type thread-safe (Arc and Mutex in place of Rc and RefCell)."
         ]
   | otherwise = Nothing
 

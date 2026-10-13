@@ -242,12 +242,11 @@ and never the user's, whatever else shares its line.
 
 ### PANIC-16 A sourced call beside generated code is the user's
 Status: implemented
-Checked by: a_closure_convention_frame_forwards_to_its_caller, golden:rust-user-panic-call-positions
+Checked by: a_function_value_frame_forwards_to_its_caller, golden:rust-user-panic-call-positions, golden:spec-host-8-1
 
 A panic in a sourced function is a user panic wherever the generated source
 calls it: with an argument computed inline, beside other code on its line,
 or as a later argument group of a curried function. A frame of the
-runtime's closure convention (a `MorlocFnN::callN` of this runtime's own
-crate, inlined or not) only calls the function value it was given, so the
-walk passes over it to its caller; a generated closure it calls has its own
+runtime's function values (its fv.rs, inlined or not; HOST-8) only calls the
+function value it was given, so the walk passes over it to its caller; a generated closure it calls has its own
 frame deeper in the stack, which decides first.

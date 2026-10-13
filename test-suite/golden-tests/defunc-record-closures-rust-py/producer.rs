@@ -1,10 +1,10 @@
 // A user-mapped record `record Rust => Ops = "Ops"` whose fields are runtime
 // closures. Each field is the fat trait object morloc stores a function value in
-// (`FnValueN`); morloc builds the struct literal and reifies each field
+// (`Arc<dyn Fn>`); morloc builds the struct literal and reifies each field
 // on serialization.
 pub struct Ops {
-    pub inc: rustmorloc::FnValue1<i64, i64>,
-    pub scale: rustmorloc::FnValue1<i64, i64>,
+    pub inc: std::sync::Arc<dyn Fn(&i64) -> i64 + Send + Sync>,
+    pub scale: std::sync::Arc<dyn Fn(&i64) -> i64 + Send + Sync>,
 }
 
 // The effectful tick plus the arithmetic whose partial applications

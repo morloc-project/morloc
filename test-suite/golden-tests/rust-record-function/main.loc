@@ -6,9 +6,9 @@ source Rust from "own.rs" ("inc" as inc)
 inc :: Int -> Int
 
 -- A record with a FUNCTION field, used entirely within one Rust pool. The field
--- is stored as a fat trait object `rustmorloc::FnValue1<i64,i64>` (a bare `impl Fn`
--- is illegal in a struct field); construction boxes the closure with `Arc::new`;
--- the extracted field is applied via `act.call1(..)`. The record never crosses a
+-- is stored as `Arc<dyn Fn(&i64) -> i64 + Send + Sync>` (a bare `impl Fn` is
+-- illegal in a struct field); construction boxes the closure in an `Arc`;
+-- the extracted field is called as `act(..)`. The record never crosses a
 -- boundary, so its auto-marshaller is skipped (a function value only crosses via
 -- reify/reflect, which is Stage 3).
 record Handler where

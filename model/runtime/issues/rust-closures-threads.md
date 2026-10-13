@@ -1,7 +1,7 @@
 # Function values on threads a sourced function starts
 
 What remains after Rust function values became thread-safe
-(`rustmorloc::FnValueN`, HOST-7, HOST-8, STATE-2). Tests:
+(`Arc<dyn Fn>`, HOST-7, HOST-8, STATE-2, STATE-4). Tests:
 golden spec-host-7-1, spec-host-8-1, rust-function-arg-threads.
 
 ## A host panic on a callback thread ends the pool [read, open ruling]
@@ -15,7 +15,7 @@ hook; spec-host-7-1 `tryThrow`, `tryForeign`).
 
 - morloc-runtime-types/src/panic.rs:152 `decide`: scope 0 means Exit; only
   `dispatch_guard` (rustmorloc lib.rs) opens a host scope, on the pool thread.
-- Candidate: the `ThinFn` adapter (or the manifold entry) opens
+- Candidate: the `IntoCallbackN` adapter (or the manifold entry) opens
   `SCOPE_HOST` when the thread has no scope, so the panic unwinds to the
   sourced function, whose join carries it to the pool thread's scope. Open:
   what a detached thread's panic then does (PANIC-7 says a thread never dies
@@ -26,7 +26,7 @@ hook; spec-host-7-1 `tryThrow`, `tryForeign`).
 ## A function value called after its sourced callee returned [read, spec gap]
 
 HOST-7 covers calls made before the callee returns. Host code can now move
-a `FnValueN` into a thread it never joins, or keep it in a static, and call
+a function value into a thread it never joins, or keep it in a static, and call
 it later. Nothing says what such a call does: the dispatch that received it
 has ended, SHM blocks tracked on that thread are freed only at its exit,
 and after the peer pools exit a foreign call fails. Captures are owned by
@@ -44,15 +44,17 @@ on one thread and 620 ms on two (separate trees: 148 ms and 214 ms). So
 Candidate: match projections borrow instead of clone. Benchmark source:
 a Rust replica of the generated walk (Rc vs Arc RecBox).
 
-## A capturing closure at a direct sourced argument is boxed [measured]
+## Registry costs where nothing crosses [read]
 
-A closure passed straight to a sourced function is built as an `Arc`
-trait object and handed over through `ThinFn` as a boxed `Fn`: two
-allocations per call and two indirect calls per element, no inlining.
-`seqSum (\x -> x + k) n` costs about 2 ns per element more than
-`seqSum addSeven n` (1e8 calls: 0.44 s vs 0.24 s). Candidate: emit a
-concrete `move` closure over the capture tuple at that site, and let
-StaticArgs pass a copied helper's captures through.
+STATE-4's registry is paid by every closure whose signature can cross, as
+the crossing analysis matches signatures: a closure built and applied in
+place still pays a second allocation and two shard write locks (about +40
+ns, measured in /work/plans/rust-idiomatic-fn-values). And `apply1_N` skips
+its registry lookup only while no staged value is alive; every reflected
+proxy is staged, so once one is alive each partial application of any
+function value takes a shard read lock, which threads applying values at
+once contend on. Candidates: register lazily (on first reify), a per-value
+staged marker visible without a lookup, or a narrower crossing analysis.
 
 ## A closure capturing a packet holds a pointer into its call [read]
 

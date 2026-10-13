@@ -68,17 +68,23 @@ raises in such a call (`@throw`, a foreign exception) unwinds to the sourced
 function, and reaches `@try` around its call if the sourced function
 propagates it; a panic in host code on such a thread is PANIC-6's.
 
-### HOST-8 A Rust function value is `rustmorloc::FnValueN`
+### HOST-8 A Rust function value is a plain `Arc<dyn Fn>` taking every argument by reference
 Intent: proposed
 Tests: spec-host-8-1
 Code: unaudited
 
-[[a1 -> .. -> an -> b]]_Rust is `rustmorloc::FnValueN<A1, .., An, B>`, and
-[[<E> T]]_Rust held as a value is `rustmorloc::FnValue0<T>`: a shared,
-thread-safe (`Send + Sync`) handle. Host code names the type by that alias.
-Everything a function value holds, and so every value a morloc closure
-captures and every value a recursive type holds, must be `Send + Sync` in
-Rust; otherwise the build fails, with a note naming this rule before
-rustc's report. A value a closure captures in its serialized form (a
-packet the pool does not decode) is only read by the closure's calls, so
-the threads that call it share it.
+[[a1 -> .. -> an -> b]]_Rust, held as a value, is
+`std::sync::Arc<dyn Fn(&A1, .., &An) -> B + Send + Sync>`, called `f(&x1, ..)`;
+[[<E> T]]_Rust held as a value is `std::sync::Arc<dyn Fn() -> T + Send + Sync>`.
+Every argument of a function type is a reference, whatever its type, so a
+morloc type has one Rust spelling in concrete and generic host code alike.
+A sourced function's parameter that is itself a function is generic, any
+`F: Fn(&A1, ..) -> B`; a function inside a parameter (a field, an element)
+has the stored spelling. A sourced function may return a function as any
+`impl Fn(&A1, ..) -> B + Send + Sync + 'static`, or return a stored value it
+was given, which keeps its identity. Host code names no morloc type. Everything a
+function value holds, and so every value a morloc closure captures and every
+value a recursive type holds, must be `Send + Sync`; otherwise the build
+fails, with a note naming this rule before rustc's report. A value a closure
+captures in its serialized form (a packet the pool does not decode) is only
+read by the closure's calls (STATE-3).

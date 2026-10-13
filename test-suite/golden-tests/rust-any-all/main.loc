@@ -2,7 +2,7 @@
 --
 -- `any`/`all` are morloc-defined in root as `fold (\b a -> b || f a) ...`,
 -- where the inner lambda CAPTURES the function parameter `f`. In Rust this
--- needs the captured function forwarded by reference (`&impl MorlocFnN`) so it
+-- needs the captured function forwarded by reference (`&Arc<dyn Fn>`) so it
 -- stays re-callable across the per-element fold; a by-value `impl Fn` would
 -- move out on the first call. This golden exercises that path (any/all over a
 -- sourced predicate and over a lambda).

@@ -21,10 +21,6 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::sync::OnceLock;
 use rustmorloc::{parse_schema, Schema, ToVoidstar, FromVoidstar, RecurScope, resolve_recur};
 use rustmorloc::{SizeWalk, WriteWalk, ReadWalk, write_variant_nullary, read_variant_tag};
-// Function-value traits: a closure is applied as `f.callN(..)` (the trait method
-// must be in scope). The blanket impl covers native closures; boxed function
-// values (record fields) dispatch through the trait object.
-use rustmorloc::{MorlocFn0, MorlocFn1, MorlocFn2, MorlocFn3, MorlocFn4, MorlocFn5, MorlocFn6, MorlocFn7, MorlocFn8};
 
 // Declared directly (rather than via the `libc` crate) so the generated pool
 // has exactly two direct rlib dependencies (rustmorloc, morloc_runtime_types),

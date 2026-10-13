@@ -24,5 +24,5 @@ pub fn tick_rust() -> i64 { 0 }
 // argument is the packed type, so Rust holds it as `MyWrap` while the wire
 // carries `Int`.
 pub struct Ops {
-    pub f: rustmorloc::FnValue1<MyWrap, i64>,
+    pub f: std::sync::Arc<dyn Fn(&MyWrap) -> i64 + Send + Sync>,
 }

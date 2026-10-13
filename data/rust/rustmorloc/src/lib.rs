@@ -467,24 +467,39 @@ fn runtime_symbol(symbol: &str) -> bool {
     })
 }
 
-/// A frame of this crate's closure convention (a `MorlocFnN::callN`), which
-/// only calls the function value it was given. Its symbol is a full path
-/// (`<F as rustmorloc::MorlocFn1<..>>::call1`) or, inlined, the bare method
-/// with its generics (`call1<..>`).
+/// A frame of a closure this crate builds for a function value (fv.rs), which
+/// only calls the function it was given; the registry code beside it is the
+/// runtime's.
 fn applies_a_function_value(f: &Frame<'_>) -> bool {
-    let in_this_crate = f.file.is_some_and(|p| {
-        let p = normalize(trim_dot(p));
-        this_crate_dirs().iter().any(|d| p.starts_with(normalize(trim_dot(d)).as_str()))
-    });
-    let method = match f.symbol.rfind(">::") {
-        Some(i) if f.symbol.starts_with('<') => &f.symbol[i + 3..],
-        _ => {
-            let base = f.symbol.split('<').next().unwrap_or("");
-            base.rsplit("::").next().unwrap_or(base)
+    // The path without generic arguments: its last segment is the closure,
+    // and the one before it, when the frame is not inlined, the function
+    // that built it.
+    let mut path = String::new();
+    let mut depth = 0;
+    let mut prev = ' ';
+    for c in f.symbol.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' if depth > 0 && prev != '-' => depth -= 1,
+            _ if depth == 0 => path.push(c),
+            _ => {}
         }
-    };
-    let method = method.split("::").next().unwrap_or(method);
-    in_this_crate && method.strip_prefix("call").is_some_and(all_digits)
+        prev = c;
+    }
+    let is_closure = |s: &str| s == "{{closure}}" || s.starts_with("{closure#");
+    let mut segs = path.rsplit("::");
+    let closure = segs.next().is_some_and(is_closure);
+    let builder = segs.find(|s| !s.is_empty() && !is_closure(s)).map_or(true, |p| {
+        let stem = p.trim_end_matches(|c: char| c.is_ascii_digit());
+        ["local", "crossing", "proxy", "pap", "staged", "into_callback"].contains(&stem)
+    });
+    closure && builder && f.file.is_some_and(|p| {
+        let p = normalize(trim_dot(p));
+        this_crate_dirs().iter().any(|d| {
+            let d = normalize(trim_dot(d));
+            p.strip_prefix(d.as_str()).is_some_and(|rest| rest == "fv.rs")
+        })
+    })
 }
 
 fn walk_is_runtime(trace: &str, pool_files: &[&str], user_files: &[&str], user_calls: &[(u32, u32)]) -> bool {
@@ -607,14 +622,13 @@ const PIPE_CLOSED_MESSAGE: &str = "@stdout: downstream pipe closed";
 /// it unwinds here (PANIC-5).
 pub fn mlc_try<T, R, F, OK, ERR>(body: F, ok: OK, err: ERR) -> R
 where
-    F: MorlocFn0<T>,
+    F: Invoke0<T>,
     OK: FnOnce(T) -> R,
     ERR: FnOnce(String) -> R,
 {
     // The body is a SUSPENSION, so it is taken as one: that accepts an inline
-    // thunk (through the `Fn` blanket) and an `FnValue0` held in a
-    // variable alike, rather than only the former.
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.call0())) {
+    // thunk and a suspension held in a variable alike.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.invoke())) {
         Ok(v) => ok(v),
         Err(payload) if payload.is::<MorlocPipeClosed>() => std::panic::resume_unwind(payload),
         Err(payload) => {
@@ -909,9 +923,20 @@ impl Drop for Packet {
 }
 
 /// A packet a closure holds among its captures, passed on to the manifold
-/// the closure calls.
+/// the closure calls. Read through `get`, so a closure captures the whole
+/// wrapper rather than the pointer inside it.
 #[derive(Clone, Copy)]
-pub struct PacketRef(pub *const u8);
+pub struct PacketRef(*const u8);
+
+impl PacketRef {
+    pub fn new(p: *const u8) -> PacketRef {
+        PacketRef(p)
+    }
+    #[inline]
+    pub fn get(self) -> *const u8 {
+        self.0
+    }
+}
 
 // SAFETY: STATE-3
 unsafe impl Send for PacketRef {}
@@ -2550,287 +2575,8 @@ tuple_impl!(A 0, B 1, C 2, D 3, E 4, F 5);
 tuple_impl!(A 0, B 1, C 2, D 3, E 4, F 5, G 6);
 tuple_impl!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7);
 
-// ---------------------------------------------------------------------------
-// Function values (defunctionalization). A morloc function stored in data (a
-// record/list field) or crossing a pool boundary is represented as a fat trait
-// object `FnValueN<..>`: callable via `callN`, and reifiable to its
-// origin via `reifyN`. A plain native closure is a THIN function value -- the
-// blanket impl makes any `Fn(&A..)->R` a `MorlocFnN`, so `callN` monomorphizes
-// (zero-cost, inlined) while a boxed one dispatches through the vtable. A
-// closure that can CROSS is built as a `FatClosure` carrying its
-// `(sockid, mid, captured)` origin, so `reifyN` returns `Some`; a thin one
-// returns `None`. Function ARGUMENTS to higher-order functions stay monomorphic
-// `impl Fn` (never boxed), so a local map/fold pays no dispatch cost.
-
-/// The reified origin of a crossing closure: (home socket name, home manifold
-/// id, serialized captured environment).
-pub type ClosureOrigin = (String, i64, Vec<Vec<u8>>);
-
-/// Raise on a function value that has no origin to send. A closure morloc
-/// built carries the manifold to call back into; a callable host code made
-/// has no such identity, and neither does a closure whose context is not
-/// wholly native (those cross by the serial path instead). Every site that
-/// needs an origin goes through here, so the failure names its cause once.
-pub fn require_origin(origin: Option<&ClosureOrigin>) -> ClosureOrigin {
-    match origin {
-        Some(o) => o.clone(),
-        None => morloc_throw(
-            "cannot send a function value that morloc did not create: it has no \
-             manifold to call back into. Apply it in the pool that received it, \
-             or have the host return the data it would compute."
-                .to_string(),
-        ),
-    }
-}
-
-macro_rules! morloc_fn {
-    ($trait:ident, $value:ident, $closure:ident, $fnptr:ident, $call:ident, $reify:ident,
-     $apply:ident, $prev:ident, $pvalue:ident, $pcall:ident, $preify:ident, $pap:ident, $staged:ident, $apply1:ident,
-     ($H:ident, $h:ident) $(, ($T:ident, $t:ident))* ) => {
-        pub trait $trait<$H, $($T,)* R> {
-            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R;
-            fn $reify(&self) -> Option<&ClosureOrigin>;
-            /// Apply to the first argument the way morloc does, when this
-            /// value knows how (see '$apply1'); `None` otherwise.
-            fn $apply(&self, _x: &$H) -> Option<$pvalue<$($T,)* R>> { None }
-        }
-        /// A function value: the one form morloc holds a function in.
-        pub type $value<$H, $($T,)* R> = std::sync::Arc<dyn $trait<$H, $($T,)* R> + Send + Sync>;
-        // A plain native closure. Host code declares a higher-order parameter
-        // as either `F: Fn(&A..) -> R` or `impl MorlocFnN<A.., R>`; this impl
-        // is what lets one generated form satisfy both. It has no origin, so a
-        // value reaching morloc this way cannot be sent onward.
-        impl<$H, $($T,)* R, F: Fn(&$H, $(&$T,)*) -> R> $trait<$H, $($T,)* R> for F {
-            #[inline]
-            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { self($h, $($t,)*) }
-            fn $reify(&self) -> Option<&ClosureOrigin> { None }
-        }
-        // A function value is held behind an `Arc`, and that is itself a
-        // function value, so it can be passed wherever one is taken.
-        impl<$H, $($T,)* R, T: $trait<$H, $($T,)* R> + ?Sized> $trait<$H, $($T,)* R> for std::sync::Arc<T> {
-            #[inline]
-            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { (**self).$call($h, $($t,)*) }
-            fn $reify(&self) -> Option<&ClosureOrigin> { (**self).$reify() }
-            fn $apply(&self, x: &$H) -> Option<$pvalue<$($T,)* R>> { (**self).$apply(x) }
-        }
-        /// A morloc-built function value: the environment it captured, the
-        /// manifold call, and how to reify that environment. `call` and `mk`
-        /// are non-capturing, so they are plain function pointers reading the
-        /// one copy of the captures -- the whole value is a single allocation
-        /// and the captures are copied once.
-        pub struct $closure<C, $H, $($T,)* R> {
-            caps: C,
-            call: fn(&C, &$H, $(&$T,)*) -> R,
-            mk: Option<fn(&C) -> ClosureOrigin>,
-            origin: std::sync::OnceLock<ClosureOrigin>,
-        }
-        impl<C, $H, $($T,)* R> $closure<C, $H, $($T,)* R> {
-            /// A closure that can be reified: the origin is built on first
-            /// use and cached, so one that never crosses pays nothing.
-            pub fn new(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R, mk: fn(&C) -> ClosureOrigin) -> Self {
-                Self { caps, call, mk: Some(mk), origin: std::sync::OnceLock::new() }
-            }
-            /// A closure with no dispatch entry, so nothing can call back
-            /// into it and it has no origin to offer.
-            pub fn local(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R) -> Self {
-                Self { caps, call, mk: None, origin: std::sync::OnceLock::new() }
-            }
-            /// A closure reflected from another pool. It answers with the
-            /// origin it ARRIVED with, so a value crossing A -> B -> C calls
-            /// back to A rather than to B.
-            pub fn proxy(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R, origin: ClosureOrigin) -> Self {
-                let cell = std::sync::OnceLock::new();
-                let _ = cell.set(origin);
-                Self { caps, call, mk: None, origin: cell }
-            }
-        }
-        impl<C, $H, $($T,)* R> $trait<$H, $($T,)* R> for $closure<C, $H, $($T,)* R> {
-            #[inline]
-            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { (self.call)(&self.caps, $h, $($t,)*) }
-            fn $reify(&self) -> Option<&ClosureOrigin> {
-                if let Some(o) = self.origin.get() {
-                    return Some(o);
-                }
-                let mk = self.mk?;
-                Some(self.origin.get_or_init(|| mk(&self.caps)))
-            }
-        }
-        /// A capture-free closure as a plain function pointer. Coercion happens
-        /// at this call, so a caller never has to name the result type -- which
-        /// it could not do anyway, since the arity of a partially applied
-        /// manifold's morloc type counts its captured context arguments.
-        pub fn $fnptr<$H, $($T,)* R>(f: fn(&$H, $(&$T,)*) -> R) -> fn(&$H, $(&$T,)*) -> R { f }
-
-        /// A function pointer is already the thinnest form there is, so the
-        /// adapter is the identity. Anchoring this on a CONCRETE self type is
-        /// what lets it coexist with the trait-object impl: the two self types
-        /// are disjoint, so there is no overlap to reason about, and both
-        /// parameters appear in the self type, so neither is unconstrained.
-        impl<$H, $($T,)* R> ThinFn for fn(&$H, $(&$T,)*) -> R {
-            type Out = Self;
-            fn thin(&self) -> Self { *self }
-        }
-
-        /// The ONE thin `Fn` adapter. Host code may declare a higher-order
-        /// parameter as `F: Fn(&A..) -> R`, which a trait object cannot
-        /// satisfy, so a function value is handed over as one of these.
-        ///
-        /// It is a trait rather than a family of named functions so the
-        /// ARITY comes from the value's own type: a caller cannot read the
-        /// arity off the morloc type at the call, because a partially
-        /// applied manifold's type counts its captured context arguments
-        /// too. The adapter has no origin, so a value that reaches morloc
-        /// back through a host parameter cannot be sent onward.
-        impl<$H: 'static, $($T: 'static,)* R: 'static> ThinFn for $value<$H, $($T,)* R> {
-            type Out = Box<dyn Fn(&$H, $(&$T,)*) -> R + Send + Sync>;
-            fn thin(&self) -> Self::Out {
-                let v = self.clone();
-                Box::new(move |$h, $($t,)*| v.$call($h, $($t,)*))
-            }
-        }
-        /// A function value applied to its first argument, keeping the
-        /// argument: it calls the function with the rest. If the function
-        /// has an origin, so does this, with the argument appended to its
-        /// captured values (`wire` serializes it).
-        pub struct $pap<$H, $($T,)* R> {
-            f: $value<$H, $($T,)* R>,
-            x: $H,
-            wire: Option<fn(&$H) -> Vec<u8>>,
-            origin: std::sync::OnceLock<Option<ClosureOrigin>>,
-        }
-        impl<$H, $($T,)* R> $pap<$H, $($T,)* R> {
-            pub fn new(f: $value<$H, $($T,)* R>, x: $H, wire: Option<fn(&$H) -> Vec<u8>>) -> Self {
-                Self { f, x, wire, origin: std::sync::OnceLock::new() }
-            }
-        }
-        impl<$H, $($T,)* R> $prev<$($T,)* R> for $pap<$H, $($T,)* R> {
-            #[inline]
-            fn $pcall(&self, $($t: &$T,)*) -> R { self.f.$call(&self.x, $($t,)*) }
-            fn $preify(&self) -> Option<&ClosureOrigin> {
-                self.origin
-                    .get_or_init(|| {
-                        let (home, mid, mut caps) = self.f.$reify()?.clone();
-                        let wire = self.wire?;
-                        caps.push(wire(&self.x));
-                        Some((home, mid, caps))
-                    })
-                    .as_ref()
-            }
-        }
-
-        /// A function value that knows how morloc applies it to its first
-        /// argument: `step` does it (a staged function runs its stage when
-        /// it has the arguments before the stage point). Called with every
-        /// argument, it is `flat`.
-        pub struct $staged<$H, $($T,)* R> {
-            flat: $value<$H, $($T,)* R>,
-            step: std::sync::Arc<dyn Fn(&$H) -> $pvalue<$($T,)* R> + Send + Sync>,
-        }
-        impl<$H, $($T,)* R> $staged<$H, $($T,)* R> {
-            pub fn new(
-                flat: $value<$H, $($T,)* R>,
-                step: std::sync::Arc<dyn Fn(&$H) -> $pvalue<$($T,)* R> + Send + Sync>,
-            ) -> Self {
-                Self { flat, step }
-            }
-        }
-        impl<$H, $($T,)* R> $trait<$H, $($T,)* R> for $staged<$H, $($T,)* R> {
-            #[inline]
-            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { self.flat.$call($h, $($t,)*) }
-            fn $reify(&self) -> Option<&ClosureOrigin> { self.flat.$reify() }
-            fn $apply(&self, x: &$H) -> Option<$pvalue<$($T,)* R>> { Some((self.step)(x)) }
-        }
-
-        /// Apply a function value to its first argument: a value morloc made
-        /// knows how; any other keeps the argument.
-        pub fn $apply1<$H: Clone + Send + Sync + 'static, $($T: 'static,)* R: 'static>(
-            f: &$value<$H, $($T,)* R>,
-            x: &$H,
-        ) -> $pvalue<$($T,)* R> {
-            match f.$apply(x) {
-                Some(g) => g,
-                None => std::sync::Arc::new($pap::new(f.clone(), x.clone(), None)),
-            }
-        }
-    };
-}
-
-// A function value of no arguments: a suspension. Written out because the
-// macro's argument list is non-empty.
-pub trait MorlocFn0<R> {
-    fn call0(&self) -> R;
-    fn reify0(&self) -> Option<&ClosureOrigin>;
-}
-impl<R, F: Fn() -> R> MorlocFn0<R> for F {
-    #[inline]
-    fn call0(&self) -> R { self() }
-    fn reify0(&self) -> Option<&ClosureOrigin> { None }
-}
-/// A suspension held as a value.
-pub type FnValue0<R> = std::sync::Arc<dyn MorlocFn0<R> + Send + Sync>;
-impl<R, T: MorlocFn0<R> + ?Sized> MorlocFn0<R> for std::sync::Arc<T> {
-    #[inline]
-    fn call0(&self) -> R { (**self).call0() }
-    fn reify0(&self) -> Option<&ClosureOrigin> { (**self).reify0() }
-}
-pub struct Closure0<C, R> {
-    caps: C,
-    call: fn(&C) -> R,
-    mk: Option<fn(&C) -> ClosureOrigin>,
-    origin: std::sync::OnceLock<ClosureOrigin>,
-}
-impl<C, R> Closure0<C, R> {
-    pub fn new(caps: C, call: fn(&C) -> R, mk: fn(&C) -> ClosureOrigin) -> Self {
-        Self { caps, call, mk: Some(mk), origin: std::sync::OnceLock::new() }
-    }
-    pub fn local(caps: C, call: fn(&C) -> R) -> Self {
-        Self { caps, call, mk: None, origin: std::sync::OnceLock::new() }
-    }
-    pub fn proxy(caps: C, call: fn(&C) -> R, origin: ClosureOrigin) -> Self {
-        let cell = std::sync::OnceLock::new();
-        let _ = cell.set(origin);
-        Self { caps, call, mk: None, origin: cell }
-    }
-}
-impl<C, R> MorlocFn0<R> for Closure0<C, R> {
-    #[inline]
-    fn call0(&self) -> R { (self.call)(&self.caps) }
-    fn reify0(&self) -> Option<&ClosureOrigin> {
-        if let Some(o) = self.origin.get() {
-            return Some(o);
-        }
-        let mk = self.mk?;
-        Some(self.origin.get_or_init(|| mk(&self.caps)))
-    }
-}
-/// A function value rendered as a plain `Fn`, for host code that declares a
-/// higher-order parameter that way. See the impls generated beside each
-/// `MorlocFnN`.
-pub trait ThinFn {
-    type Out;
-    fn thin(&self) -> Self::Out;
-}
-pub fn fn_ptr0<R>(f: fn() -> R) -> fn() -> R { f }
-impl<R> ThinFn for fn() -> R {
-    type Out = Self;
-    fn thin(&self) -> Self { *self }
-}
-impl<R: 'static> ThinFn for FnValue0<R> {
-    type Out = Box<dyn Fn() -> R + Send + Sync>;
-    fn thin(&self) -> Self::Out {
-        let v = self.clone();
-        Box::new(move || v.call0())
-    }
-}
-
-morloc_fn!(MorlocFn1, FnValue1, Closure1, fn_ptr1, call1, reify1, apply1, MorlocFn0, FnValue0, call0, reify0, Pap1, Staged1, apply1_1, (A1, a1));
-morloc_fn!(MorlocFn2, FnValue2, Closure2, fn_ptr2, call2, reify2, apply2, MorlocFn1, FnValue1, call1, reify1, Pap2, Staged2, apply1_2, (A1, a1), (A2, a2));
-morloc_fn!(MorlocFn3, FnValue3, Closure3, fn_ptr3, call3, reify3, apply3, MorlocFn2, FnValue2, call2, reify2, Pap3, Staged3, apply1_3, (A1, a1), (A2, a2), (A3, a3));
-morloc_fn!(MorlocFn4, FnValue4, Closure4, fn_ptr4, call4, reify4, apply4, MorlocFn3, FnValue3, call3, reify3, Pap4, Staged4, apply1_4, (A1, a1), (A2, a2), (A3, a3), (A4, a4));
-morloc_fn!(MorlocFn5, FnValue5, Closure5, fn_ptr5, call5, reify5, apply5, MorlocFn4, FnValue4, call4, reify4, Pap5, Staged5, apply1_5, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5));
-morloc_fn!(MorlocFn6, FnValue6, Closure6, fn_ptr6, call6, reify6, apply6, MorlocFn5, FnValue5, call5, reify5, Pap6, Staged6, apply1_6, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6));
-morloc_fn!(MorlocFn7, FnValue7, Closure7, fn_ptr7, call7, reify7, apply7, MorlocFn6, FnValue6, call6, reify6, Pap7, Staged7, apply1_7, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7));
-morloc_fn!(MorlocFn8, FnValue8, Closure8, fn_ptr8, call8, reify8, apply8, MorlocFn7, FnValue7, call7, reify7, Pap8, Staged8, apply1_8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7), (A8, a8));
+mod fv;
+pub use fv::*;
 
 // ---------------------------------------------------------------------------
 // Packet bridge (production). `put_value` serializes a native value into a
@@ -3514,7 +3260,7 @@ pub unsafe fn next<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
 /// @replay: call `f` on every frame (sub-packet) of the stream, in order,
 /// each as the list it holds. An empty frame is an empty list; only the end
 /// of the stream stops the loop.
-pub unsafe fn replay<E, F: MorlocFn1<Vec<E>, ()>>(schema: &Schema, handle: u64, f: F)
+pub unsafe fn replay<E, F: Invoke1<Vec<E>, ()>>(schema: &Schema, handle: u64, f: F)
 where
     Vec<E>: FromVoidstar,
 {
@@ -3526,7 +3272,7 @@ where
             break;
         }
         let frame: Vec<E> = read_voidstar(voidstar, err, schema, "@replay");
-        f.call1(&frame);
+        f.invoke(&frame);
     }
 }
 
@@ -3644,10 +3390,8 @@ pub unsafe fn cell_put<T: ToVoidstar>(schema: &Schema, handle: u64, value: &T) {
 ///
 /// The count is never zero -- an untouched cell answers with its seed -- so
 /// this always has a value to return.
-/// The combine is bounded on `MorlocFn2` rather than `Fn`: a morloc function
-/// value in a Rust pool is a defunctionalized closure, and the blanket impl
-/// beside the trait covers a plain `Fn` as well.
-pub unsafe fn cell_reduce<T: FromVoidstar, F: MorlocFn2<T, T, T>>(
+/// The combine may be an inline closure or a function value.
+pub unsafe fn cell_reduce<T: FromVoidstar, F: Invoke2<T, T, T>>(
     schema: &Schema,
     combine: F,
     handle: u64,
@@ -3676,7 +3420,7 @@ pub unsafe fn cell_reduce<T: FromVoidstar, F: MorlocFn2<T, T, T>>(
     let guard = FreeOnUnwind(handle as i64);
     let mut acc = slot(0);
     for i in 1..n {
-        acc = combine.call2(&acc, &slot(i));
+        acc = combine.invoke(&acc, &slot(i));
     }
     std::mem::forget(guard);
     let mut ferr: *mut c_char = std::ptr::null_mut();
@@ -3712,8 +3456,8 @@ pub unsafe fn open_channel(schema: &Schema) -> u64 {
 /// Start the producer `f` on the channel as a separate dispatch in its home
 /// pool, without waiting for it. The channel travels as the producer's
 /// OStream argument, after its captured values.
-pub unsafe fn spawn<R, F: MorlocFn1<u64, R>>(f: &F, handle: u64, schema: &Schema) {
-    let (home, mid, mut captured) = require_origin(f.reify1());
+pub unsafe fn spawn<R>(f: &FnValue1<u64, R>, handle: u64, schema: &Schema) {
+    let (home, mid, mut captured) = require_origin(reify(f));
     captured.push(reify_capture(&handle, schema));
     let ptrs: Vec<*const u8> = captured.iter().map(|c| c.as_ptr()).collect();
     let tmpdir = TMPDIR
@@ -3997,22 +3741,33 @@ mod panic_classifier_tests {
     }
 
     #[test]
-    fn a_closure_convention_frame_forwards_to_its_caller() {
-        let rt = format!("{}lib.rs", this_crate_dirs()[1]);
+    fn a_function_value_frame_forwards_to_its_caller() {
+        let fv = format!("{}fv.rs", this_crate_dirs()[1]);
         let call = format!("{POOL}:7:20");
-        let apply = ("<F as rustmorloc::MorlocFn1<i64, i64>>::call1", Some(rt.as_str()));
-        let inlined = ("call1<i64, i64, pool::curried::{closure_env#0}>", Some(rt.as_str()));
-        for frame in [apply, inlined] {
+        let closure = ("rustmorloc::fv::crossing1::{{closure}}", Some(fv.as_str()));
+        let inlined = ("{{closure}}<i64, i64>", Some(fv.as_str()));
+        let nested = ("rustmorloc::fv::staged2::<i64, i64, i64>::{{closure}}::{{closure}}", Some(fv.as_str()));
+        let callback = ("<alloc::sync::Arc<dyn Fn(&i64) -> i64> as rustmorloc::fv::IntoCallback1<i64, i64>>::into_callback::{{closure}}", Some(fv.as_str()));
+        for frame in [closure, inlined, nested, callback] {
             let t = trace(&[], &[("dep::f", Some("/elsewhere/dep.rs")), frame, ("pool::m1", Some(&call))], false);
-            assert!(!walk_is_runtime(&t, &[POOL], &[USER], &[(7, 20)]));
+            assert!(!walk_is_runtime(&t, &[POOL], &[USER], &[(7, 20)]), "{}", frame.0);
             assert!(walk_is_runtime(&t, &[POOL], &[USER], &[]));
         }
-        let elsewhere = ("call1<i64>", Some("/elsewhere/dep.rs"));
-        let t = trace(&[], &[("dep::f", Some("/elsewhere/dep.rs")), elsewhere, ("rustmorloc::x", Some(rt.as_str())), ("pool::m1", Some(&call))], false);
+        let rt = format!("{}lib.rs", this_crate_dirs()[1]);
+        let t = trace(&[], &[("dep::f", Some("/elsewhere/dep.rs")), ("rustmorloc::x", Some(rt.as_str())), ("pool::m1", Some(&call))], false);
         assert!(walk_is_runtime(&t, &[POOL], &[USER], &[(7, 20)]));
         let generated = format!("{POOL}:3:5");
-        let t = trace(&[], &[("pool::m1::{{closure}}", Some(&generated)), apply, ("pool::m1", Some(&call))], false);
+        let t = trace(&[], &[("pool::m1::{{closure}}", Some(&generated)), closure, ("pool::m1", Some(&call))], false);
         assert!(walk_is_runtime(&t, &[POOL], &[USER], &[(7, 20)]));
+        for registry in [
+            "rustmorloc::fv::apply1_2",
+            "rustmorloc::fv::reify_env::{{closure}}",
+            "<pool::m5::{{closure}} as rustmorloc::fv::Invoke0<i64>>::invoke",
+            "rustmorloc::fv::registered::<(i64,), rustmorloc::fv::crossing1::{closure#0}>",
+        ] {
+            let t = trace(&[], &[("dep::f", Some("/elsewhere/dep.rs")), (registry, Some(fv.as_str())), ("pool::m1", Some(&call))], false);
+            assert!(walk_is_runtime(&t, &[POOL], &[USER], &[(7, 20)]), "{registry}");
+        }
     }
 
     #[test]
@@ -4836,107 +4591,155 @@ mod tests {
 
     // --- function values -------------------------------------------------
 
+    use std::sync::atomic::{AtomicU32, Ordering as AtOrd};
+    use std::sync::Arc;
+
     fn origin_of(n: i64) -> ClosureOrigin {
         ("rust".to_string(), n, vec![vec![1u8]])
-    }
-
-    #[test]
-    fn closure_calls_through_a_trait_object() {
-        let f: FnValue1<i64, i64> = std::sync::Arc::new(Closure1::local(
-            (7i64,),
-            |c: &(i64,), a: &i64| c.0 + a,
-        ));
-        assert_eq!(f.call1(&5), 12);
-        // a function value held by a function value is a function value
-        let g: FnValue1<i64, i64> = std::sync::Arc::new(f.clone());
-        assert_eq!(g.call1(&5), 12);
-    }
-
-    #[test]
-    fn a_local_closure_has_no_origin() {
-        let f = Closure0::local((), |_: &()| 1i64);
-        assert!(f.reify0().is_none());
-    }
-
-    #[test]
-    fn the_origin_is_built_once_and_cached() {
-        // `mk` is a plain fn pointer, so the count lives beside the captures
-        let f = Closure0::new(
-            (std::cell::Cell::new(0u32),),
-            |_: &(std::cell::Cell<u32>,)| 1i64,
-            |c: &(std::cell::Cell<u32>,)| {
-                c.0.set(c.0.get() + 1);
-                origin_of(42)
-            },
-        );
-        assert_eq!(f.reify0(), Some(&origin_of(42)));
-        assert_eq!(f.reify0(), Some(&origin_of(42)));
-        assert_eq!(f.reify0(), Some(&origin_of(42)));
-        assert_eq!(f.caps.0.get(), 1, "the origin must be built exactly once");
     }
 
     fn assert_thread_safe<T: Send + Sync>(_: &T) {}
 
     #[test]
-    fn function_values_are_called_from_other_threads() {
-        let caps = (String::from("p-"), vec![1i64, 2, 3]);
-        let f: FnValue1<String, String> = std::sync::Arc::new(Closure1::local(
-            caps,
-            |c: &(String, Vec<i64>), a: &String| format!("{}{}{}", c.0, a, c.1.len()),
-        ));
-        let g: FnValue1<i64, i64> = std::sync::Arc::new(Pap2::new(
-            std::sync::Arc::new(|a: &i64, b: &i64| a * b) as FnValue2<i64, i64, i64>,
-            3,
-            None,
-        ));
-        let t: FnValue0<i64> = std::sync::Arc::new(Closure0::local((5i64,), |c: &(i64,)| c.0));
-        let thin = ThinFn::thin(&f);
-        assert_thread_safe(&f);
-        assert_thread_safe(&g);
-        assert_thread_safe(&t);
-        assert_thread_safe(&thin);
-        assert_thread_safe(&RecBox::new(LL { head: 1, tail: None }));
-        let out: Vec<(String, i64, i64)> = std::thread::scope(|s| {
-            let hs: Vec<_> = (0..4i64)
-                .map(|i| {
-                    let (f, g, t, thin) = (&f, &g, &t, &thin);
-                    s.spawn(move || {
-                        let a = f.call1(&i.to_string());
-                        assert_eq!(a, thin(&i.to_string()));
-                        (a, g.call1(&i), t.call0())
-                    })
-                })
-                .collect();
-            hs.into_iter().map(|h| h.join().unwrap()).collect()
-        });
-        assert_eq!(out[2], ("p-23".to_string(), 6, 5));
+    fn a_local_function_value_is_a_plain_closure_with_no_origin() {
+        let f = local1((7i64,), |c: &(i64,), a: &i64| c.0 + a);
+        let g: Arc<dyn Fn(&i64) -> i64 + Send + Sync> = f.clone();
+        assert_eq!(f(&5), 12);
+        assert_eq!(g(&5), 12);
+        assert!(reify(&f).is_none());
     }
 
     #[test]
-    fn the_origin_is_built_once_under_concurrent_reify() {
-        let f = Closure0::new(
-            (std::sync::atomic::AtomicU32::new(0),),
-            |_: &(std::sync::atomic::AtomicU32,)| 1i64,
-            |c: &(std::sync::atomic::AtomicU32,)| {
-                c.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    fn a_crossing_value_builds_its_origin_once() {
+        let count = Arc::new(AtomicU32::new(0));
+        let f = crossing0(
+            (count.clone(),),
+            |_: &(Arc<AtomicU32>,)| 1i64,
+            |c: &(Arc<AtomicU32>,)| {
+                c.0.fetch_add(1, AtOrd::SeqCst);
                 std::thread::sleep(std::time::Duration::from_millis(5));
                 origin_of(9)
             },
         );
         std::thread::scope(|s| {
             for _ in 0..8 {
-                s.spawn(|| assert_eq!(f.reify0(), Some(&origin_of(9))));
+                s.spawn(|| assert_eq!(reify(&f), Some(origin_of(9))));
             }
         });
-        assert_eq!(f.caps.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(count.load(AtOrd::SeqCst), 1, "the origin must be built exactly once");
+        assert_eq!(f(), 1);
+    }
+
+    #[test]
+    fn a_clone_keeps_the_origin_and_a_host_wrapper_has_none() {
+        let f = crossing1((2i64,), |c: &(i64,), a: &i64| c.0 * a, |_| origin_of(4));
+        let g = f.clone();
+        assert_eq!(reify(&g), Some(origin_of(4)));
+        let h: Arc<dyn Fn(&i64) -> i64 + Send + Sync> = Arc::new(move |x| f(x));
+        assert_eq!(h(&3), 6);
+        assert!(reify(&h).is_none());
     }
 
     #[test]
     fn a_proxy_answers_with_the_origin_it_arrived_with() {
         // a value crossing A -> B -> C must call back to A, not to B
-        let f = Closure1::proxy((), |_: &(), a: &i64| *a, origin_of(3));
-        assert_eq!(f.reify1(), Some(&origin_of(3)));
-        assert_eq!(f.reify1(), Some(&origin_of(3)));
+        let f = proxy1((), |_: &(), a: &i64| *a, origin_of(3));
+        assert_eq!(reify(&f), Some(origin_of(3)));
+        assert_eq!(reify(&f), Some(origin_of(3)));
+    }
+
+    #[test]
+    fn a_partial_application_appends_its_argument_to_the_origin() {
+        let f = crossing2((), |_: &(), a: &i64, b: &i64| a * 10 + b, |_| origin_of(5));
+        let wired = pap2(&f, &7, Some(|x: &i64| x.to_le_bytes().to_vec()));
+        assert_eq!(wired(&3), 73);
+        let mut want = origin_of(5);
+        want.2.push(7i64.to_le_bytes().to_vec());
+        assert_eq!(reify(&wired), Some(want));
+        let plain = apply1_2(&f, &8);
+        assert_eq!(plain(&1), 81);
+        assert!(reify(&plain).is_none());
+    }
+
+    #[test]
+    fn a_staged_value_runs_its_step_and_crosses_as_its_flat_form() {
+        let flat = crossing2((), |_: &(), a: &i64, b: &i64| a + b, |_| origin_of(6));
+        let steps = Arc::new(AtomicU32::new(0));
+        let counted = steps.clone();
+        let step: Step2<i64, i64, i64> = Arc::new(move |a: &i64| {
+            counted.fetch_add(1, AtOrd::SeqCst);
+            let a = *a * 100;
+            Arc::new(move |b: &i64| a + b) as FnValue1<i64, i64>
+        });
+        let f = staged2(flat, step);
+        assert_eq!(f(&1, &2), 3);
+        assert_eq!(apply1_2(&f, &1)(&2), 102);
+        assert_eq!(steps.load(AtOrd::SeqCst), 1);
+        assert_eq!(reify(&f), Some(origin_of(6)));
+    }
+
+    #[test]
+    fn an_entry_goes_with_its_value() {
+        let before = fv::registered_count();
+        let fs: Vec<_> = (0..1000).map(|i| crossing1((i as i64,), |c: &(i64,), a: &i64| c.0 + a, |_| origin_of(1))).collect();
+        let during = fv::registered_count();
+        drop(fs);
+        let after = fv::registered_count();
+        assert!(during >= before + 1000 - 50, "{before} -> {during}");
+        assert!(during - after >= 1000 - 50, "{during} -> {after}");
+    }
+
+    #[test]
+    fn a_value_made_where_a_registered_one_was_has_no_entry() {
+        let f = crossing1((1u64,), |c: &(u64,), a: &i64| *a + c.0 as i64, |_| origin_of(2));
+        let key = Arc::as_ptr(&f) as *const () as usize;
+        drop(f);
+        // A local closure over one u64 is the size of a crossing one (a guard
+        // pointer), so the allocator hands back the freed block.
+        let mut reused = 0;
+        let mut held = Vec::new();
+        for _ in 0..1000 {
+            let g = local1((1u64,), |c: &(u64,), a: &i64| *a + c.0 as i64);
+            if Arc::as_ptr(&g) as *const () as usize == key {
+                reused += 1;
+                assert!(reify(&g).is_none(), "a stale entry answered for a new value");
+            }
+            held.push(g);
+        }
+        // glibc hands a thread its own freed block back; other allocators may not.
+        if cfg!(target_os = "linux") {
+            assert!(reused > 0, "the freed address was never reused, so nothing was checked");
+        }
+    }
+
+    #[test]
+    fn function_values_and_callbacks_are_called_from_other_threads() {
+        let caps = (String::from("p-"), vec![1i64, 2, 3]);
+        let f: FnValue1<String, String> =
+            local1(caps, |c: &(String, Vec<i64>), a: &String| format!("{}{}{}", c.0, a, c.1.len()));
+        let g = apply1_2(&local2((), |_: &(), a: &i64, b: &i64| a * b), &3);
+        let t = local0((5i64,), |c: &(i64,)| c.0);
+        let cb = IntoCallback1::into_callback(f.clone());
+        let direct = IntoCallback1::into_callback(|x: &String| x.len());
+        assert_thread_safe(&f);
+        assert_thread_safe(&g);
+        assert_thread_safe(&t);
+        assert_thread_safe(&cb);
+        assert_thread_safe(&RecBox::new(LL { head: 1, tail: None }));
+        let out: Vec<(String, i64, i64, usize)> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..4i64)
+                .map(|i| {
+                    let (f, g, t, cb, direct) = (&f, &g, &t, &cb, &direct);
+                    s.spawn(move || {
+                        let a = f(&i.to_string());
+                        assert_eq!(a, cb(&i.to_string()));
+                        (a, g(&i), t(), direct(&i.to_string()))
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(out[2], ("p-23".to_string(), 6, 5, 1));
     }
 
 }

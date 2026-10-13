@@ -6,7 +6,7 @@ pub struct Opts {
 
 #[derive(Clone)]
 pub struct Fns {
-    pub run: rustmorloc::FnValue1<i64, i64>,
+    pub run: std::sync::Arc<dyn Fn(&i64) -> i64 + Send + Sync>,
     pub tag: i64,
 }
 
@@ -33,6 +33,6 @@ where
     })
 }
 
-pub fn make_adder(k: i64) -> rustmorloc::FnValue1<i64, i64> {
+pub fn make_adder(k: i64) -> std::sync::Arc<dyn Fn(&i64) -> i64 + Send + Sync> {
     std::sync::Arc::new(move |x: &i64| x + k)
 }
