@@ -27,7 +27,7 @@ import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM, forM_, replicateM_)
 import qualified Data.Text.IO as TIO
-import Morloc.Build.CargoLock (lockCoversCrates, mergeCargoLocks, mergeLockFiles)
+import Morloc.Build.CargoLock (mergeCargoLocks, mergeLockFiles)
 import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
 import Morloc.Build.Params (LangParams, parseLangParamList)
@@ -55,8 +55,7 @@ rustPoolBuildTests :: TestTree
 rustPoolBuildTests =
   testGroup
     "Rust pool build"
-    [ lockCoverageTests
-    , lockMergeTests
+    [ lockMergeTests
     , profileTests
     , envParamListTests
     ]
@@ -134,25 +133,6 @@ lockMergeTests =
           @?= lock [("libc", "0.2.1"), ("ndarray", "0.16.1")]
     ]
 
-lockCoverageTests :: TestTree
-lockCoverageTests =
-  testGroup
-    "cargo lock coverage"
-    [ testCase "no external crates is always covered" $
-        assertBool "" (lockCoversCrates (lock [("libc", "0.2.1")]) [])
-    , testCase "every crate present" $
-        assertBool "" (lockCoversCrates (lock [("libc", "0.2.1"), ("ndarray", "0.16.1")]) ["ndarray", "libc"])
-    , testCase "one crate missing" $
-        assertBool "" (not (lockCoversCrates (lock [("libc", "0.2.1")]) ["ndarray"]))
-    , testCase "a dependency-list mention is not a package entry" $
-        -- `dependencies = [ "ndarray" ]` names the crate but does not pin it.
-        assertBool "" (not (lockCoversCrates (lock [("libc", "0.2.1")] <> "dependencies = [\n \"ndarray\",\n]\n") ["ndarray"]))
-    , testCase "prefix of a name does not match" $
-        assertBool "" (not (lockCoversCrates (lock [("ndarray-rand", "0.15.0")]) ["ndarray"]))
-    , testCase "empty lock covers nothing" $
-        assertBool "" (not (lockCoversCrates "" ["libc"]))
-    ]
-
 -- Builds of one environment merge their pool's pins into the same lock at
 -- once; each must replace it whole, not through a staging file another
 -- build is also writing.
@@ -179,5 +159,5 @@ concurrentMerges = do
     Left e -> assertFailure ("a concurrent merge failed: " <> show e)
     Right () -> return ()
   merged <- TIO.readFile env
-  assertBool "the merged lock lost the base's crates" (lockCoversCrates merged ["libc"])
+  assertBool "the merged lock lost the base's crates" ("name = \"libc\"" `T.isInfixOf` merged)
   removeDirectoryRecursive dir

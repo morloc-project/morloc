@@ -12,8 +12,8 @@ every time in one environment, so every pool starts from one lock: the
 workspace lock persisted with the runtime (the authority for rustmorloc and
 everything it pulls in) extended by the crates earlier pools in this
 environment resolved from @rust-deps@. Cargo prunes the entries a pool does not
-use and pins the rest, so a pool whose crates are all in the lock builds
-offline; a pool that adds a crate resolves it once and its pins are merged
+use and pins the rest, so a pool whose crates are all in the lock needs no
+network; a pool that adds a crate resolves it once and its pins are merged
 back, after which every later pool finds it pinned.
 
 Cargo's lock format is a header, one @[[package]]@ table per crate, and
@@ -25,8 +25,7 @@ does not already carry. A pool table that refers to a version the merged lock
 lacks is not a hazard: cargo treats it as stale and re-resolves that crate.
 -}
 module Morloc.Build.CargoLock
-  ( lockCoversCrates
-  , mergeCargoLocks
+  ( mergeCargoLocks
   , mergeLockFiles
   ) where
 
@@ -47,14 +46,6 @@ data Lock = Lock
   , lockPackages :: [(Text, [Text])]
   , lockTrailer :: [[Text]]
   }
-
--- | Does the lock pin every one of the given crates? A pinned crate is a
--- @[[package]]@ table; a crate that appears only inside another package's
--- @dependencies@ list is not pinned.
-lockCoversCrates :: Text -> [Text] -> Bool
-lockCoversCrates lockText crates = all (`Set.member` pinned) crates
-  where
-    pinned = Set.fromList (map fst (lockPackages (parseLock lockText)))
 
 -- | Extend @base@ with every package table of @extra@ whose crate name @base@
 -- lacks. The header and trailing tables are @base@'s; packages come out sorted

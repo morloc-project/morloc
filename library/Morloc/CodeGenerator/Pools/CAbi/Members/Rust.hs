@@ -60,7 +60,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , toIType
   )
 import Morloc.CodeGenerator.Namespace
-import Morloc.Build.CargoLock (lockCoversCrates, mergeCargoLocks)
+import Morloc.Build.CargoLock (mergeCargoLocks)
 import qualified Morloc.Build.Params as BP
 import qualified Morloc.Data.PoolHash as PH
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter as RP
@@ -1353,10 +1353,7 @@ translate srcs es = do
   -- needed before; the pins cargo adds are merged back after the build.
   locks <- rustLockPaths
   lockText <- mergeCargoLocks <$> readRustLock (rlBase locks) <*> readLockIfPresent (rlEnv locks)
-  let registryCrates = Map.keys (Map.filterWithKey (\c _ -> not (Map.member c localCrates)) deps)
-      -- A local crate carries its own dependencies, which the lock cannot pin.
-      offline = Map.null localCrates && lockCoversCrates lockText registryCrates
-  maker <- makeTheMaker crateName offline locks
+  maker <- makeTheMaker crateName locks
   let poolSubdir = ML.poolDirKey rustLang
 
   -- The Rust pool is a real Cargo project: `src/main.rs` is the rendered pool
@@ -2141,16 +2138,16 @@ makeCargoDocs crateName deps localCrates home profile =
   in (cargoToml, buildRs)
 
 -- | Build the Rust pool with @cargo build@ (one unified dependency resolution
--- over rustmorloc + any external crates, pinned by the shipped Cargo.lock;
--- @offline@ when that lock already covers every crate), merge the pins cargo
+-- over rustmorloc + any external crates, pinned by the shipped Cargo.lock),
+-- merge the pins cargo
 -- added into the environment lock, then copy the binary to the
 -- @pool-rust.out@ path the manifest/nexus expect. @MORLOC_HOME@ is set on the
 -- command so rustmorloc's build.rs locates libmorloc.so. The @--target-dir@ is
 -- shared across programs so rustmorloc + deps compile once and cache (cargo's
 -- own lock serialises concurrent builds; the per-program @crateName@ keeps each
 -- program's output binary distinct within that shared dir).
-makeTheMaker :: Text -> Bool -> RustLocks -> MorlocMonad [SysCommand]
-makeTheMaker crateName offline locks = do
+makeTheMaker :: Text -> RustLocks -> MorlocMonad [SysCommand]
+makeTheMaker crateName locks = do
   -- cargo is required at make time (a Rust pool is a Cargo project). Fail fast
   -- with a clear message rather than a raw shell "command not found".
   cargoAvail <- liftIO (findExecutable "cargo")
@@ -2173,13 +2170,15 @@ makeTheMaker crateName offline locks = do
       homeD = pretty home
       -- Paths are single-quoted: they are interpolated into a shell string and
       -- $MORLOC_HOME (hence targetDir/binPath) may contain spaces.
-      -- With every crate pinned by the shipped Cargo.lock, cargo needs nothing
-      -- from the network; --offline makes an unexpected fetch a hard error
-      -- rather than a silent re-resolution against a newer registry index.
-      offlineFlag = if offline then " --offline" else "" :: MDoc
+      -- Cargo keeps every pin of a consistent lock and fetches only what the
+      -- lock lacks or the cache does not hold, so a pool whose crates are all
+      -- pinned and cached needs no network. The build is never forced
+      -- offline: a crate's features can need a dependency the lock has no
+      -- table for, which only an online resolution can add. A user without
+      -- a network sets CARGO_NET_OFFLINE.
       buildCmd =
         SysRun . Code . render $
-          [idoc|MORLOC_HOME='#{homeD}' cargo build --release#{offlineFlag} --manifest-path '#{manifestPath}' --target-dir '#{targetD}'|]
+          [idoc|MORLOC_HOME='#{homeD}' cargo build --release --manifest-path '#{manifestPath}' --target-dir '#{targetD}'|]
       copyCmd =
         SysRun . Code . render $
           if SI.os == "darwin"
