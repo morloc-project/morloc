@@ -99,19 +99,24 @@ fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
+/// Null with `errmsg` set on a refused request; `too_large` says the body was
+/// past the cap (NET-10).
 pub(crate) unsafe fn http_parse_request(
     fd: i32,
     errmsg: *mut *mut c_char,
+    too_large: &mut bool,
 ) -> *mut HttpRequest {
-    parse_request_within(fd, morloc_runtime_types::net_limits::HEAD_LIMIT, errmsg)
+    parse_request_within(fd, morloc_runtime_types::net_limits::HEAD_LIMIT, errmsg, too_large)
 }
 
 unsafe fn parse_request_within(
     fd: i32,
     head_limit: std::time::Duration,
     errmsg: *mut *mut c_char,
+    too_large: &mut bool,
 ) -> *mut HttpRequest {
     clear_errmsg(errmsg);
+    *too_large = false;
 
     use morloc_runtime_types::net_limits::{body_limit, peek_by, recv_by};
     // NET-2
@@ -165,7 +170,8 @@ unsafe fn parse_request_within(
     }
 
     if !head_done {
-        set_errmsg(errmsg, &MorlocError::Other("HTTP headers too large or malformed".into()));
+        *too_large = true;
+        set_errmsg(errmsg, &MorlocError::Other("the request headers are larger than this server takes".into()));
         return ptr::null_mut();
     }
 
@@ -228,8 +234,9 @@ unsafe fn parse_request_within(
     // Read body
     if content_length > 0 {
         if content_length > HTTP_MAX_REQUEST {
+            *too_large = true;
             libc::free(req as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Other(format!("HTTP body too large: {} bytes", content_length)));
+            set_errmsg(errmsg, &MorlocError::Other(format!("the request body is {} bytes; this server takes at most {}", content_length, HTTP_MAX_REQUEST)));
             return ptr::null_mut();
         }
 
@@ -611,7 +618,7 @@ mod body_tests {
         });
         let start = std::time::Instant::now();
         let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
-        let req = unsafe { super::parse_request_within(reader, std::time::Duration::from_millis(300), &mut err) };
+        let req = unsafe { super::parse_request_within(reader, std::time::Duration::from_millis(300), &mut err, &mut false) };
         assert!(req.is_null());
         assert!(!err.is_null());
         let msg = unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned();
@@ -626,7 +633,7 @@ mod body_tests {
 
     fn parse(fd: i32) -> (String, String) {
         let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
-        let req = unsafe { super::parse_request_within(fd, std::time::Duration::from_secs(5), &mut err) };
+        let req = unsafe { super::parse_request_within(fd, std::time::Duration::from_secs(5), &mut err, &mut false) };
         assert!(!req.is_null(), "{}", unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy());
         let r = unsafe { &*req };
         let path = unsafe { std::ffi::CStr::from_ptr(r.path.as_ptr()) }.to_string_lossy().into_owned();

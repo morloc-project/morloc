@@ -95,20 +95,9 @@ re-checked.
 
 ## Limits (IFACE-12)
 
-- **Body caps disagree.** [read, survey] Daemon HTTP 4 MiB
-  (http_ffi.rs:10), LP 64 MiB (daemon_ffi.rs:19), MCP and front end 64 MiB.
-  A front-end body near 64 MiB plus the envelope exceeds the child's LP
-  cap and the child closes without replying: a generic 500. The LP
-  writer's 32-bit length wraps at 4 GiB (daemon_ffi.rs:2744-2749); the
-  router allocates whatever length the child declares (router_ffi.rs:720).
 - **Concurrent calls to one streaming command may clash.** [speculative]
   "@stdout already open in this nexus" (morloc-runtime/src/stream.rs:
   2437-2446).
-
-- **An LP reply of 4 GiB or more gets a wrong length.** [read]
-  `write_lp_message` (morloc-runtime/src/daemon_ffi.rs:2744-2749) writes
-  `len & 0xFFFFFFFF` unchecked, and the router reads whatever length a
-  child declares (router_ffi.rs:715-720). Violates IFACE-12 (refuse loudly).
 
 ## Front end and its children (IFACE-1, IFACE-2)
 

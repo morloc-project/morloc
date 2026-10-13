@@ -15,6 +15,28 @@ pub fn body_limit(len: usize) -> Duration {
     BODY_BASE + Duration::from_secs(len as u64 / BODY_MIN_RATE)
 }
 
+/// How long a server reads and discards what a client still sends after a
+/// refusal, so the client can read it (NET-10).
+pub const LINGER: Duration = Duration::from_secs(2);
+
+/// Stop writing to `fd`, discard what the client still sends for up to
+/// `LINGER`, then close it (NET-10).
+///
+/// # Safety
+///
+/// `fd` must be an open socket the caller owns; it is closed.
+pub unsafe fn linger_close(fd: libc::c_int) {
+    libc::shutdown(fd, libc::SHUT_WR);
+    let until = Instant::now() + LINGER;
+    let mut buf = [0u8; 65536];
+    while let Ok(n) = recv_by(fd, buf.as_mut_ptr(), buf.len(), until) {
+        if n == 0 {
+            break;
+        }
+    }
+    libc::close(fd);
+}
+
 /// Read up to `len` bytes into `buf` from `fd`, giving up at `until`
 /// however the bytes trickle in. `Ok(0)` is end of file.
 ///

@@ -42,7 +42,7 @@ listeners, the MCP server and the serving front end.
 
 ### NET-3 A remote client's share of the server is bounded
 Status: implemented
-Checked by: connections_past_the_cap_get_no_slot, read_http_request_rejects_overlong_header_line, read_http_request_rejects_header_flood, read_http_request_body_bounded_to_content_length
+Checked by: connections_past_the_cap_get_no_slot, read_http_request_rejects_overlong_header_line, read_http_request_rejects_header_flood, the_header_names_every_kind_as_the_runtime_does, a_reply_is_refused_before_it_is_built_only_when_its_payload_is_past_the_frame, read_http_request_body_bounded_to_content_length
 
 The length of a header line, the number of headers and the size of a body
 are each capped. The MCP server and the front end serve at most 128
@@ -166,3 +166,22 @@ forked from a worker never accepts. The readiness probe is answered like
 any call, by a worker whose sources have loaded. A worker leaves when the
 read end of a pipe only the coordinator holds reaches end of file, so no
 worker outlives its coordinator.
+
+### NET-10 A message past a limit is answered, and no declared length is trusted
+Status: implemented
+Checked by: a_message_past_the_frame_is_refused_unsent, a_request_past_the_daemons_cap_is_refused_as_a_limit, every_kind_survives_its_class_name, read_http_request_rejects_overlong_header_line, read_http_request_rejects_header_flood, the_header_names_every_kind_as_the_runtime_does, a_reply_is_refused_before_it_is_built_only_when_its_payload_is_past_the_frame
+
+A length-prefixed message carries at most 4 GiB. A daemon takes a request
+of at most 64 MiB on its socket and 4 MiB over HTTP; an MCP server over
+HTTP and the front end take 64 MiB, and a router refuses, without sending
+it, a request its daemon would not take. A request past a limit, in its
+body, its headers or its frame, is answered with the `limit` class (HTTP
+413) before the connection closes, and the server reads and discards what
+the client still sends for up to 2 s, so the client can read the answer.
+A reply too long for its frame is a `reply-limit` failure (HTTP 500),
+refused before it is built when its payload alone is past the frame, and
+never sent with a wrapped length. A reader of a length-prefixed message
+allocates as its bytes arrive, so a declared length costs memory only as
+it is sent; an HTTP body within its cap is allocated when its length is
+read. A request refused before it is parsed is answered in JSON, as an
+unparsable one is, also to a packet-mode client.

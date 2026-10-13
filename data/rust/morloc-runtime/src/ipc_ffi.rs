@@ -738,8 +738,19 @@ pub(crate) unsafe fn recv_frame(fd: i32) -> Result<Vec<u8>, &'static str> {
     };
     let mut len = [0u8; 4];
     fill(&mut len, true)?;
-    let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
-    fill(&mut body, false)?;
+    let len = u32::from_be_bytes(len) as usize;
+    // NET-10: memory follows the bytes that arrive, not the length declared.
+    const CHUNK: usize = 1 << 20;
+    let mut body: Vec<u8> = Vec::new();
+    while body.len() < len {
+        let at = body.len();
+        let n = (len - at).min(CHUNK);
+        if at + n > body.capacity() {
+            body.reserve_exact((body.capacity() * 2).max(at + n).min(len) - at);
+        }
+        body.resize(at + n, 0);
+        fill(&mut body[at..], false)?;
+    }
     Ok(body)
 }
 

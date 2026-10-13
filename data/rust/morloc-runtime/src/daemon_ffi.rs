@@ -16,7 +16,7 @@ use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpMethod};
 // -- Constants ----------------------------------------------------------------
 
 const DEFAULT_XXHASH_SEED: u64 = 0;
-const MAX_LP_MESSAGE: u32 = 64 * 1024 * 1024;
+pub(crate) const MAX_LP_MESSAGE: u32 = 64 * 1024 * 1024;
 
 // -- Global state -------------------------------------------------------------
 
@@ -560,6 +560,8 @@ pub const DAEMON_ERROR_TIMEOUT: i32 = morloc_runtime_types::daemon_error::TIMEOU
 pub const DAEMON_ERROR_RECOVERING: i32 = morloc_runtime_types::daemon_error::RECOVERING;
 pub const DAEMON_ERROR_INTERNAL: i32 = morloc_runtime_types::daemon_error::INTERNAL;
 pub const DAEMON_ERROR_FAILED: i32 = morloc_runtime_types::daemon_error::FAILED;
+pub const DAEMON_ERROR_LIMIT: i32 = morloc_runtime_types::daemon_error::LIMIT;
+pub const DAEMON_ERROR_REPLY_LIMIT: i32 = morloc_runtime_types::daemon_error::REPLY_LIMIT;
 
 pub fn daemon_error_kind_to_http_status(kind: i32, success: bool) -> i32 {
     morloc_runtime_types::daemon_error::http_status(kind, success)
@@ -2722,7 +2724,9 @@ unsafe fn read_lp_message(
     remote: bool,
     out_len: *mut usize,
     errmsg: *mut *mut c_char,
+    too_large: &mut bool,
 ) -> *mut c_char {
+    *too_large = false;
     use morloc_runtime_types::net_limits::{body_limit, HEAD_LIMIT};
     clear_errmsg(errmsg);
 
@@ -2747,6 +2751,10 @@ unsafe fn read_lp_message(
         | (len_buf[3] as u32);
 
     if msg_len > MAX_LP_MESSAGE {
+        *too_large = true;
+        if !out_len.is_null() {
+            *out_len = msg_len as usize;
+        }
         set_errmsg(
             errmsg,
             &MorlocError::Other(format!("Message too large: {} bytes", msg_len)),
@@ -2754,27 +2762,42 @@ unsafe fn read_lp_message(
         return ptr::null_mut();
     }
 
-    let msg = libc::malloc(msg_len as usize + 1) as *mut c_char;
-    if msg.is_null() {
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other("Failed to allocate message buffer".into()),
-        );
-        return ptr::null_mut();
+    // NET-10: the buffer grows as the body arrives.
+    const CHUNK: usize = 1 << 20;
+    let want = msg_len as usize;
+    let lim = limit(body_limit(want));
+    let mut msg: *mut c_char = ptr::null_mut();
+    let mut cap = 0usize;
+    let mut got = 0usize;
+    loop {
+        let n = (want - got).min(CHUNK);
+        if got + n + 1 > cap {
+            cap = (cap * 2).max(got + n + 1).min(want + 1);
+            let grown = libc::realloc(msg as *mut c_void, cap) as *mut c_char;
+            if grown.is_null() {
+                libc::free(msg as *mut c_void);
+                set_errmsg(errmsg, &MorlocError::Other("Failed to allocate message buffer".into()));
+                return ptr::null_mut();
+            }
+            msg = grown;
+        }
+        if let Err(total) = recv_exact(fd, msg.add(got) as *mut u8, n, &lim) {
+            libc::free(msg as *mut c_void);
+            set_errmsg(
+                errmsg,
+                &MorlocError::Other(format!(
+                    "Failed to read message body (got {} of {} bytes)",
+                    got + total, msg_len
+                )),
+            );
+            return ptr::null_mut();
+        }
+        got += n;
+        if got == want {
+            break;
+        }
     }
-
-    if let Err(total) = recv_exact(fd, msg as *mut u8, msg_len as usize, &limit(body_limit(msg_len as usize))) {
-        libc::free(msg as *mut c_void);
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other(format!(
-                "Failed to read message body (got {} of {} bytes)",
-                total, msg_len
-            )),
-        );
-        return ptr::null_mut();
-    }
-    *msg.add(msg_len as usize) = 0;
+    *msg.add(want) = 0;
 
     if !out_len.is_null() {
         *out_len = msg_len as usize;
@@ -2789,6 +2812,11 @@ unsafe fn write_lp_message(
     errmsg: *mut *mut c_char,
 ) -> bool {
     clear_errmsg(errmsg);
+    // NET-10
+    if len > u32::MAX as usize {
+        set_errmsg(errmsg, &MorlocError::Other(format!("a {len}-byte message exceeds the socket protocol's 4 GiB frame")));
+        return false;
+    }
     note_reply_started();
 
     let len_buf: [u8; 4] = [
@@ -2819,6 +2847,41 @@ unsafe fn write_lp_message(
     true
 }
 
+// NET-10: the payload alone is past the frame, so the envelope is never built.
+unsafe fn reply_past_frame(resp: *mut DaemonResponse) -> Option<usize> {
+    let payload = if !(*resp).success {
+        0
+    } else if !(*resp).mime.is_null() && !(*resp).result_bytes.is_null() {
+        (*resp).result_len.div_ceil(3).saturating_mul(4)
+    } else if !(*resp).result_json.is_null() {
+        libc::strlen((*resp).result_json)
+    } else {
+        0
+    };
+    (payload > u32::MAX as usize).then_some(payload)
+}
+
+fn too_large_reply(len: usize) -> String {
+    format!("the reply is {len} bytes, more than the socket protocol's 4 GiB frame carries")
+}
+
+unsafe fn write_lp_error(fd: i32, kind: i32, message: &str) {
+    let mut resp: DaemonResponse = std::mem::zeroed();
+    resp.error_kind = kind;
+    resp.error = libc::strdup(CString::new(message).unwrap_or_default().as_ptr());
+    let mut len: usize = 0;
+    let json = serialize_response(&mut resp, &mut len);
+    let mut err: *mut c_char = ptr::null_mut();
+    write_lp_message(fd, json, len, &mut err);
+    libc::free(json as *mut c_void);
+    libc::free(resp.error as *mut c_void);
+    if !err.is_null() {
+        libc::free(err as *mut c_void);
+    }
+}
+
+use morloc_runtime_types::net_limits::linger_close;
+
 // -- Connection handlers ------------------------------------------------------
 
 unsafe fn handle_lp_connection(
@@ -2842,11 +2905,20 @@ unsafe fn handle_lp_connection(
         return;
     }
 
-    let msg = read_lp_message(client_fd, remote, &mut msg_len, &mut errmsg);
+    let mut too_large = false;
+    let msg = read_lp_message(client_fd, remote, &mut msg_len, &mut errmsg, &mut too_large);
     if !errmsg.is_null() {
-        let err_str = CStr::from_ptr(errmsg).to_string_lossy();
-        eprintln!("morloc-daemon: read error: {}", err_str);
+        let err_str = CStr::from_ptr(errmsg).to_string_lossy().into_owned();
         libc::free(errmsg as *mut c_void);
+        if too_large {
+            // NET-10
+            write_lp_error(client_fd, DAEMON_ERROR_LIMIT, &format!(
+                "the request is {msg_len} bytes; this daemon's socket takes at most {MAX_LP_MESSAGE}"
+            ));
+            linger_close(client_fd);
+            return;
+        }
+        eprintln!("morloc-daemon: read error: {}", err_str);
         libc::close(client_fd);
         return;
     }
@@ -2873,18 +2945,7 @@ unsafe fn handle_lp_connection(
 
     let transport = if remote { Transport::Tcp } else { Transport::Unix };
     if let Some((kind, msg)) = eval_refusal((*req).method, transport) {
-        let mut err_resp: DaemonResponse = std::mem::zeroed();
-        err_resp.error_kind = kind;
-        err_resp.error = libc::strdup(CString::new(msg).unwrap_or_default().as_ptr());
-        let mut resp_len: usize = 0;
-        let resp_json = serialize_response(&mut err_resp, &mut resp_len);
-        let mut write_err: *mut c_char = ptr::null_mut();
-        write_lp_message(client_fd, resp_json, resp_len, &mut write_err);
-        libc::free(resp_json as *mut c_void);
-        if !write_err.is_null() {
-            libc::free(write_err as *mut c_void);
-        }
-        libc::free(err_resp.error as *mut c_void);
+        write_lp_error(client_fd, kind, &msg);
         daemon_free_request(req);
         libc::close(client_fd);
         return;
@@ -2908,7 +2969,11 @@ unsafe fn handle_lp_connection(
     set_current_output_packet(prev);
 
     let mut write_err: *mut c_char = ptr::null_mut();
-    if want_packet && !(*resp).result_bytes.is_null() {
+    if want_packet && !(*resp).result_bytes.is_null() && (*resp).result_len > u32::MAX as usize {
+        // NET-10
+        let fail = morloc_runtime_types::packet::make_fail_packet_bytes(&too_large_reply((*resp).result_len));
+        write_lp_message(client_fd, fail.as_ptr() as *const c_char, fail.len(), &mut write_err);
+    } else if want_packet && !(*resp).result_bytes.is_null() {
         // Success (or a forwarded FAIL packet): raw bytes, no JSON envelope.
         write_lp_message(
             client_fd,
@@ -2931,10 +2996,18 @@ unsafe fn handle_lp_connection(
             fail.len(),
             &mut write_err,
         );
+    } else if let Some(len) = reply_past_frame(resp) {
+        // NET-10
+        write_lp_error(client_fd, DAEMON_ERROR_REPLY_LIMIT, &too_large_reply(len));
     } else {
         let mut resp_len: usize = 0;
         let resp_json = serialize_response(resp, &mut resp_len);
-        write_lp_message(client_fd, resp_json, resp_len, &mut write_err);
+        if resp_len > u32::MAX as usize {
+            // NET-10
+            write_lp_error(client_fd, DAEMON_ERROR_REPLY_LIMIT, &too_large_reply(resp_len));
+        } else {
+            write_lp_message(client_fd, resp_json, resp_len, &mut write_err);
+        }
         libc::free(resp_json as *mut c_void);
     }
     if !write_err.is_null() {
@@ -2959,19 +3032,32 @@ unsafe fn handle_http_connection(
     use crate::http_ffi::http_to_daemon_request;
 
     let mut errmsg: *mut c_char = ptr::null_mut();
-    let http_req = http_parse_request(client_fd, &mut errmsg);
+    let mut too_large = false;
+    let http_req = http_parse_request(client_fd, &mut errmsg, &mut too_large);
     if !errmsg.is_null() {
-        let body = b"{\"status\":\"error\",\"class\":\"bad-request\",\"error\":\"Bad request\"}\0";
-        let ct = b"application/json\0";
+        let (status, body) = if too_large {
+            // NET-10
+            let why = CStr::from_ptr(errmsg).to_string_lossy();
+            (
+                morloc_runtime_types::daemon_error::http_status(DAEMON_ERROR_LIMIT, false),
+                morloc_runtime_types::daemon_error::error_body(DAEMON_ERROR_LIMIT, &why),
+            )
+        } else {
+            (400, "{\"status\":\"error\",\"class\":\"bad-request\",\"error\":\"Bad request\"}".to_string())
+        };
         crate::http_ffi::write_response(
             client_fd,
-            400,
-            ct.as_ptr() as *const c_char,
+            status,
+            c"application/json".as_ptr(),
             body.as_ptr() as *const c_char,
-            body.len() - 1,
+            body.len(),
         );
         libc::free(errmsg as *mut c_void);
-        libc::close(client_fd);
+        if too_large {
+            linger_close(client_fd);
+        } else {
+            libc::close(client_fd);
+        }
         return;
     }
 
@@ -3800,6 +3886,43 @@ extern "C" fn daemon_signal_handler_fn(_sig: i32) {
 }
 
 #[cfg(test)]
+mod frame_limit_tests {
+    use super::*;
+
+    #[test]
+    fn a_reply_is_refused_before_it_is_built_only_when_its_payload_is_past_the_frame() {
+        let mut resp: DaemonResponse = unsafe { std::mem::zeroed() };
+        resp.success = true;
+        resp.result_bytes = ptr::NonNull::dangling().as_ptr();
+        resp.result_len = 3_300_000_000;
+        assert_eq!(unsafe { reply_past_frame(&mut resp) }, None, "bytes without a media type are not sent");
+        resp.mime = c"image/png".as_ptr() as *mut c_char;
+        assert_eq!(unsafe { reply_past_frame(&mut resp) }, Some(4_400_000_000));
+        resp.success = false;
+        assert_eq!(unsafe { reply_past_frame(&mut resp) }, None, "a failure carries no payload");
+    }
+
+    #[test]
+    fn a_message_past_the_frame_is_refused_unsent() {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) }, 0);
+        let mut err: *mut c_char = ptr::null_mut();
+        let sent = unsafe { write_lp_message(fds[0], ptr::NonNull::dangling().as_ptr(), u32::MAX as usize + 1, &mut err) };
+        assert!(!sent);
+        let msg = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
+        assert!(msg.contains("4 GiB"), "{msg}");
+        let mut b = [0u8; 1];
+        let n = unsafe { libc::recv(fds[1], b.as_mut_ptr() as *mut c_void, 1, libc::MSG_DONTWAIT) };
+        assert_eq!(n, -1, "bytes of a refused message were sent");
+        unsafe {
+            libc::free(err as *mut c_void);
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+}
+
+#[cfg(test)]
 mod endpoint_tests {
     use super::*;
 
@@ -4075,7 +4198,7 @@ mod lp_message_tests {
                 tid_tx.send(libc::pthread_self()).unwrap();
                 let mut len = 0usize;
                 let mut err: *mut c_char = ptr::null_mut();
-                let msg = read_lp_message(reader, false, &mut len, &mut err);
+                let msg = read_lp_message(reader, false, &mut len, &mut err, &mut false);
                 let ok = !msg.is_null() && err.is_null() && len == 5
                     && std::slice::from_raw_parts(msg as *const u8, 5) == b"hello";
                 if !msg.is_null() {

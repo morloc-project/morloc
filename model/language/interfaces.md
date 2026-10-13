@@ -131,8 +131,9 @@ Code: deviates model/language/issues/interfaces.md
 
 Every failure falls in one class, and each interface reports it. An HTTP
 or socket error body names the class (`bad-request`, `not-found`,
-`timeout`, `recovering`, `failure`, `panic`, and `unauthorized` or
-`forbidden` for NET-1), so classes that share a status stay apart.
+`timeout`, `recovering`, `failure`, `panic`, `limit` for a request and
+`reply-limit` for a reply (NET-10), and `unauthorized` or `forbidden` for
+NET-1), so classes that share a status stay apart.
 
 | Class | CLI exit | HTTP | MCP |
 |---|---|---|---|

@@ -664,6 +664,25 @@ pub(crate) unsafe fn router_forward(
             return ptr::null_mut();
         }
     };
+    if req_json.len() > crate::daemon_ffi::MAX_LP_MESSAGE as usize {
+        // NET-10
+        let resp = libc::calloc(1, std::mem::size_of::<DaemonResponse>()) as *mut DaemonResponse;
+        if resp.is_null() {
+            set_errmsg(errmsg, &MorlocError::Other("Failed to allocate daemon_response_t".into()));
+            return ptr::null_mut();
+        }
+        if !(*request).id.is_null() {
+            (*resp).id = libc::strdup((*request).id);
+        }
+        (*resp).error_kind = morloc_runtime_types::daemon_error::LIMIT;
+        let msg = format!(
+            "the request is {} bytes; a program's daemon takes at most {}",
+            req_json.len(),
+            crate::daemon_ffi::MAX_LP_MESSAGE
+        );
+        (*resp).error = libc::strdup(CString::new(msg).unwrap_or_default().as_ptr());
+        return resp;
+    }
     let state = &*(*prog).state;
     let mut attempt = 0;
     let sock = loop {
@@ -972,6 +991,27 @@ mod forward_tests {
         } else {
             Ok(resp)
         }
+    }
+
+    #[test]
+    fn a_request_past_the_daemons_cap_is_refused_as_a_limit() {
+        let sock = format!("{}/mlc-router-limit-{}.sock", std::env::temp_dir().display(), std::process::id());
+        let mut t = test_router(&sock, 0);
+        let mut req: DaemonRequest = unsafe { std::mem::zeroed() };
+        req.method = DaemonMethod::Call;
+        let cmd = CString::new("f").unwrap();
+        let big = CString::new(format!("[\"{}\"]", "x".repeat(crate::daemon_ffi::MAX_LP_MESSAGE as usize))).unwrap();
+        req.command = cmd.as_ptr() as *mut c_char;
+        req.args_json = big.as_ptr() as *mut c_char;
+        let mut err: *mut c_char = ptr::null_mut();
+        let resp = unsafe { router_forward(&mut *t.router, c"p".as_ptr(), &mut req, &mut err) };
+        assert!(!resp.is_null());
+        unsafe {
+            assert!(!(*resp).success);
+            assert_eq!((*resp).error_kind, morloc_runtime_types::daemon_error::LIMIT);
+            crate::daemon_ffi::daemon_free_response(resp);
+        }
+        assert_eq!(t.prog.daemon_pid.load(std::sync::atomic::Ordering::SeqCst), 0, "a daemon was started for a refused request");
     }
 
     #[test]

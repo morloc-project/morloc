@@ -1231,7 +1231,16 @@ where
         // NET-2: the wait for a request, its line and headers share one deadline.
         until.set(Instant::now() + HEAD_LIMIT);
         let req = match read_http_request(&mut reader, |len| until.set(Instant::now() + body_limit(len))) {
-            Ok(Some(r)) => r,
+            Ok(ReadOutcome::Request(r)) => r,
+            Ok(ReadOutcome::TooLarge(why)) => {
+                // NET-10
+                use morloc_runtime_types::daemon_error::{error_body, http_status, LIMIT};
+                let body = error_body(LIMIT, why);
+                let _ = writer.write_all(&http_json(http_status(LIMIT, false) as u16, body.as_bytes(), false));
+                let fd = std::os::unix::io::IntoRawFd::into_raw_fd(writer);
+                unsafe { morloc_runtime_types::net_limits::linger_close(fd) };
+                return;
+            }
             _ => break, // EOF, malformed, or IO error -> close
         };
         let keep_alive = header_get(&req.headers, "connection")
@@ -1273,33 +1282,43 @@ pub(crate) struct HttpRequest {
     body: Vec<u8>,
 }
 
-/// Read one request from the buffered connection. `Ok(None)` on a clean EOF, an
-/// over-long line/body, or too many headers (the connection is then closed by
-/// the caller). Every line is size-capped and the body is read incrementally up
+/// What one read of a connection gave.
+enum ReadOutcome {
+    Request(HttpRequest),
+    /// End of file, or a malformed request line.
+    Closed,
+    /// Refused for its size (NET-10): an over-long line or body, or too many
+    /// headers.
+    TooLarge(&'static str),
+}
+
+/// Read one request from the buffered connection. Every line is size-capped and the body is read incrementally up
 /// to Content-Length, so a hostile Content-Length or header flood cannot force
 /// a large up-front allocation.
-fn read_http_request<R: BufRead>(reader: &mut R, on_body: impl FnOnce(usize)) -> std::io::Result<Option<HttpRequest>> {
+fn read_http_request<R: BufRead>(reader: &mut R, on_body: impl FnOnce(usize)) -> std::io::Result<ReadOutcome> {
     let mut line = String::new();
     match read_capped_line(reader, &mut line)? {
-        LineRead::Eof | LineRead::TooLong => return Ok(None),
+        LineRead::Eof => return Ok(ReadOutcome::Closed),
+        LineRead::TooLong => return Ok(ReadOutcome::TooLarge("the request line is too long")),
         LineRead::Ok => {}
     }
     let mut it = line.trim_end().split_whitespace();
     let method = it.next().unwrap_or("").to_string();
     let path = it.next().unwrap_or("").to_string();
     if method.is_empty() {
-        return Ok(None);
+        return Ok(ReadOutcome::Closed);
     }
 
     let mut headers: Vec<(String, String)> = Vec::new();
     let mut content_length: usize = 0;
     loop {
         if headers.len() >= MAX_HEADERS {
-            return Ok(None); // header flood
+            return Ok(ReadOutcome::TooLarge("the request has too many headers"));
         }
         let mut h = String::new();
         match read_capped_line(reader, &mut h)? {
-            LineRead::Eof | LineRead::TooLong => return Ok(None),
+            LineRead::Eof => return Ok(ReadOutcome::Closed),
+            LineRead::TooLong => return Ok(ReadOutcome::TooLarge("a request header is too long")),
             LineRead::Ok => {}
         }
         let t = h.trim_end_matches(['\r', '\n']);
@@ -1320,14 +1339,14 @@ fn read_http_request<R: BufRead>(reader: &mut R, on_body: impl FnOnce(usize)) ->
     // stdio line cap provides). Read the body incrementally so the buffer grows
     // with the bytes actually received, not the client-declared length.
     if content_length > MAX_LINE_BYTES {
-        return Ok(None);
+        return Ok(ReadOutcome::TooLarge("the request body is larger than this server takes"));
     }
     let mut body = Vec::new();
     if content_length > 0 {
         on_body(content_length);
         reader.take(content_length as u64).read_to_end(&mut body)?;
     }
-    Ok(Some(HttpRequest {
+    Ok(ReadOutcome::Request(HttpRequest {
         method,
         path,
         headers,
@@ -2508,6 +2527,10 @@ fn frontend_tools_call(id: Value, msg: &RpcMessage, fe: &Frontend) -> Value {
         Err((kind, message)) if kind == DAEMON_ERROR_BAD_REQUEST || kind == DAEMON_ERROR_NOT_FOUND => {
             return error_response(id, JSONRPC_INVALID_PARAMS, &message)
         }
+        // A request past a limit is the caller's, not a failed call.
+        Err((morloc_runtime_types::daemon_error::LIMIT, message)) => {
+            return error_response(id, JSONRPC_INVALID_REQUEST, &message)
+        }
         Err((_, message)) => Err(message),
     };
     match result {
@@ -3130,7 +3153,7 @@ mod tests {
         let until = std::rc::Rc::new(std::cell::Cell::new(start + Duration::from_millis(300)));
         let mut reader = BufReader::new(DeadlineReader { stream, until });
         let got = read_http_request(&mut reader, |_| {});
-        assert!(matches!(&got, Err(e) if e.kind() == std::io::ErrorKind::TimedOut), "{:?}", got.map(|r| r.is_some()));
+        assert!(matches!(&got, Err(e) if e.kind() == std::io::ErrorKind::TimedOut), "{:?}", got.map(|r| matches!(r, ReadOutcome::Request(_))));
         assert!(start.elapsed() < Duration::from_millis(800));
         drop(reader);
         dripper.join().unwrap();
@@ -3196,7 +3219,7 @@ mod tests {
         });
         let (stream, _) = listener.accept().unwrap();
         let mut reader = BufReader::new(stream);
-        let parsed = read_http_request(&mut reader, |_| {}).unwrap().unwrap();
+        let parsed = match read_http_request(&mut reader, |_| {}).unwrap() { ReadOutcome::Request(r) => r, _ => panic!("no request") };
         assert_eq!(parsed.method, "POST");
         assert_eq!(parsed.path, "/mcp?x=1");
         assert_eq!(header_get(&parsed.headers, "mcp-session-id"), Some("sid"));
@@ -3208,11 +3231,11 @@ mod tests {
 
     #[test]
     fn read_http_request_rejects_overlong_header_line() {
-        // One header line past MAX_HEADER_LINE_BYTES -> connection closed (None).
+        // One header line past MAX_HEADER_LINE_BYTES is refused for its size.
         let big = "a".repeat(MAX_HEADER_LINE_BYTES as usize + 1024);
         let raw = format!("GET /mcp HTTP/1.1\r\nX: {big}\r\n\r\n");
         let mut slice = raw.as_bytes();
-        assert!(read_http_request(&mut slice, |_| {}).unwrap().is_none());
+        assert!(matches!(read_http_request(&mut slice, |_| {}).unwrap(), ReadOutcome::TooLarge(_)));
     }
 
     #[test]
@@ -3224,7 +3247,7 @@ mod tests {
         }
         raw.push_str("\r\n");
         let mut slice = raw.as_bytes();
-        assert!(read_http_request(&mut slice, |_| {}).unwrap().is_none());
+        assert!(matches!(read_http_request(&mut slice, |_| {}).unwrap(), ReadOutcome::TooLarge(_)));
     }
 
     #[test]
@@ -3233,7 +3256,7 @@ mod tests {
         // next request) are left for the following read, not swallowed.
         let raw = b"POST /mcp HTTP/1.1\r\nContent-Length: 5\r\n\r\nHELLOEXTRA";
         let mut slice = &raw[..];
-        let parsed = read_http_request(&mut slice, |_| {}).unwrap().unwrap();
+        let parsed = match read_http_request(&mut slice, |_| {}).unwrap() { ReadOutcome::Request(r) => r, _ => panic!("no request") };
         assert_eq!(parsed.body, b"HELLO");
         assert_eq!(slice, b"EXTRA"); // remainder preserved
     }

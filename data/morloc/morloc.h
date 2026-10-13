@@ -1032,7 +1032,8 @@ typedef struct daemon_request_s {
 // Error classification for daemon failures. On success, error_kind is
 // DAEMON_ERROR_OK (0). On failure, it drives HTTP status mapping in
 // handle_http_connection (BAD_REQUEST -> 400, NOT_FOUND -> 404,
-// TIMEOUT -> 408, RECOVERING -> 503, INTERNAL -> 500). The socket
+// TIMEOUT -> 408, RECOVERING -> 503, INTERNAL -> 500, FAILED -> 500,
+// FORBIDDEN -> 403, LIMIT -> 413, REPLY_LIMIT -> 500). The socket
 // protocol names it in the error envelope's "class" field.
 #define DAEMON_ERROR_OK          0
 #define DAEMON_ERROR_BAD_REQUEST 1
@@ -1040,6 +1041,10 @@ typedef struct daemon_request_s {
 #define DAEMON_ERROR_TIMEOUT     3
 #define DAEMON_ERROR_RECOVERING  4
 #define DAEMON_ERROR_INTERNAL    5
+#define DAEMON_ERROR_FAILED      6
+#define DAEMON_ERROR_FORBIDDEN   7
+#define DAEMON_ERROR_LIMIT       8
+#define DAEMON_ERROR_REPLY_LIMIT 9
 
 typedef struct daemon_response_s {
     char* id;

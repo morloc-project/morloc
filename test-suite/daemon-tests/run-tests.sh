@@ -462,6 +462,12 @@ if should_run "http"; then
     assert_http_status "OPTIONS returns 204" "204" "http://127.0.0.1:${HTTP_PORT}/call/add" \
         -X OPTIONS
 
+    # A body past the cap is answered as a limit (NET-10).
+    BIG_BODY=$(mktemp)
+    WORK_DIRS+=("$BIG_BODY")
+    head -c $((5 * 1024 * 1024)) /dev/zero | tr '\0' '1' > "$BIG_BODY"
+    assert_http_status "POST a 5 MiB body -> 413" "413" \
+        "http://127.0.0.1:${HTTP_PORT}/call/add" -X POST -H 'Expect:' --data-binary "@$BIG_BODY"
     stop_daemon "$LAST_DAEMON_PID"
     echo ""
 fi
@@ -1291,6 +1297,18 @@ if should_run "socket"; then
     status=$(json_field "$result" "status")
     assert_test "socket unknown command returns error" "error" "$status"
 
+    # A request past the socket's cap is answered as a limit, not dropped (IFACE-12).
+    over=$(python3 -c "
+import json, socket, struct, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sys.argv[1])
+s.settimeout(10)
+body = b'x' * (70 * 1024 * 1024)
+s.sendall(struct.pack('>I', len(body)) + body)
+n = struct.unpack('>I', s.recv(4, socket.MSG_WAITALL))[0]
+print(json.loads(s.recv(n, socket.MSG_WAITALL)).get('class'))
+" "$SOCK_PATH" 2>/dev/null) || over=""
+    assert_test "socket: an oversized request sent whole is a limit" "limit" "$over"
     stop_daemon "$LAST_DAEMON_PID"
     echo ""
 fi
@@ -2209,6 +2227,19 @@ PY
         printf "%sFAIL%s (%ss)\n" "$RED" "$RESET" "$probe"; FAILED=$((FAILED + 1))
         FAILURES+=("MCP over HTTP: ping held by calls (${probe}s)")
     fi
+    # A body past the cap is answered as a limit (NET-10).
+    big=$(python3 -c "
+import sys, urllib.request, urllib.error
+body = b'x' * (64 * 1024 * 1024 + 1)
+try:
+    urllib.request.urlopen(urllib.request.Request(sys.argv[1], data=body, headers={'Content-Type': 'application/json'}), timeout=30)
+    print('accepted')
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception as e:
+    print(type(e).__name__)
+" "$MCP_URL")
+    assert_test "MCP over HTTP: an oversized body is 413" "413" "$big"
     stop_daemon "$NAP_MCP_PID"
 
     echo ""

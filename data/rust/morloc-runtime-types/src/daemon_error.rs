@@ -14,6 +14,10 @@ pub const INTERNAL: i32 = 5;
 pub const FAILED: i32 = 6;
 /// The request needs a credential this transport did not present.
 pub const FORBIDDEN: i32 = 7;
+/// The request is larger than this interface takes (NET-10).
+pub const LIMIT: i32 = 8;
+/// The reply is larger than this interface carries (NET-10).
+pub const REPLY_LIMIT: i32 = 9;
 
 /// Why an exposed eval is refused over HTTP without a credential, said the
 /// same way by every server that offers it.
@@ -36,6 +40,7 @@ pub fn http_status(kind: i32, success: bool) -> i32 {
         TIMEOUT => 408,
         RECOVERING => 503,
         FORBIDDEN => 403,
+        LIMIT => 413,
         _ => 500,
     }
 }
@@ -48,6 +53,8 @@ pub fn class_name(kind: i32) -> &'static str {
         TIMEOUT => "timeout",
         RECOVERING => "recovering",
         FORBIDDEN => "forbidden",
+        LIMIT => "limit",
+        REPLY_LIMIT => "reply-limit",
         _ => "failure",
     }
 }
@@ -80,6 +87,8 @@ pub fn kind_of_class(class: &str) -> i32 {
         "timeout" => TIMEOUT,
         "recovering" => RECOVERING,
         "forbidden" => FORBIDDEN,
+        "limit" => LIMIT,
+        "reply-limit" => REPLY_LIMIT,
         _ => FAILED,
     }
 }
@@ -89,8 +98,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_header_names_every_kind_as_the_runtime_does() {
+        let header = include_str!("../../../morloc/morloc.h");
+        let named = |name: &str| {
+            header
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(&format!("#define DAEMON_ERROR_{name} ")))
+                .and_then(|v| v.trim().parse::<i32>().ok())
+        };
+        for (name, kind) in [
+            ("OK", OK),
+            ("BAD_REQUEST", BAD_REQUEST),
+            ("NOT_FOUND", NOT_FOUND),
+            ("TIMEOUT", TIMEOUT),
+            ("RECOVERING", RECOVERING),
+            ("INTERNAL", INTERNAL),
+            ("FAILED", FAILED),
+            ("FORBIDDEN", FORBIDDEN),
+            ("LIMIT", LIMIT),
+            ("REPLY_LIMIT", REPLY_LIMIT),
+        ] {
+            assert_eq!(named(name), Some(kind), "morloc.h DAEMON_ERROR_{name}");
+        }
+    }
+
+    #[test]
     fn every_kind_survives_its_class_name() {
-        for k in [BAD_REQUEST, NOT_FOUND, TIMEOUT, RECOVERING, FAILED, FORBIDDEN] {
+        for k in [BAD_REQUEST, NOT_FOUND, TIMEOUT, RECOVERING, FAILED, FORBIDDEN, LIMIT, REPLY_LIMIT] {
             assert_eq!(kind_of_class(class_name(k)), k);
         }
         assert_eq!(class_name(INTERNAL), "failure");
