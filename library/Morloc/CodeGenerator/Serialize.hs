@@ -840,16 +840,19 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
                         sa <- case tm of
                           Native tf -> Serial.makeSerialAST m lang tf
                           Serial tf -> Serial.makeSerialAST m lang tf
-                          Passthrough -> MM.throwCompilerBug
-                            $ "lowerCacheBody: cannot hash a Passthrough arg (arg "
-                            <> pretty i <> "); the cache wrap needs a schema for"
-                            <+> "each arg, so passthrough args must be resolved upstream"
-                          Function _ _ -> MM.throwCompilerBug
-                            $ "lowerCacheBody: cannot hash a Function arg (arg "
-                            <> pretty i <> "); function values have no wire form"
+                          Passthrough -> MM.throwSourcedError midx
+                            $ "The cached call under label" <+> squotes (pretty lbl)
+                            <+> "depends on a value this language cannot read, so it has no cache key"
+                          Function _ _ -> MM.throwSourcedError midx
+                            $ "The cached call under label" <+> squotes (pretty lbl)
+                            <+> "depends on a function value, which has no cache key;"
+                            <+> "label a call whose inputs are data"
                         return (arg, sa)
                     ) args
       t' <- serialResultType "CacheBody" body'
+      case t' of
+        FunF _ _ -> MM.throwCompilerBug $ "a cache wrap around a function value, label" <+> squotes (pretty lbl)
+        _ -> return ()
       resSa <- Serial.makeSerialAST m lang t'
       return $ CacheBodyS t' resSa lbl midx args' body'
 

@@ -20,3 +20,4 @@ it is solved, and a file when it is empty.
 - [kept-connections.md](kept-connections.md): kept caller connections into Python and R fork pools; affinity deadlock, options (deferred)
 - [flaky-tests.md](flaky-tests.md): intermittent test failures with no known cause
 - [pools-and-ipc.md](pools-and-ipc.md): pool readiness latency, per-pid sweep race, R close-on-exec, C++ path truncation
+- [remote-dispatch.md](remote-dispatch.md): SLURM jobs: inherited parent environment, endless poll on empty sacct, job directories left by a killed parent

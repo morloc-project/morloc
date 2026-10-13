@@ -41,7 +41,6 @@ check's guard are never moved.
 -}
 module Morloc.Frontend.Share
   ( shareBindings
-  , configured
   ) where
 
 import qualified Data.Map as Map
@@ -92,8 +91,6 @@ data ShareEnv = ShareEnv
   , seMethod :: Int -> Bool
   , seOwners :: Set.Set Int
   -- ^ the terms that own at least one where-binding
-  , seLabeled :: Int -> Bool
-  -- ^ an index carrying manifold configuration
   , seOrigin :: Map.Map Int Int
   -- ^ the constant an expression is a copy of, by index
   }
@@ -102,7 +99,6 @@ shareEnv :: MorlocMonad ShareEnv
 shareEnv = do
   GMap idmap sigmap <- MM.gets stateSignatures
   owners <- MM.gets stateWhereOwner
-  config <- MM.gets stateManifoldConfig
   origins <- MM.gets stateConstantOrigin
   let isMethod k = case Map.lookup k sigmap of
         Just (Polymorphic {}) -> True
@@ -112,17 +108,8 @@ shareEnv = do
     , seOwner = owners
     , seMethod = isMethod
     , seOwners = Set.fromList (Map.elems owners)
-    , seLabeled = \i -> maybe False configured (Map.lookup i config)
     , seOrigin = origins
     }
-
--- | A configuration that sets anything: a label, caching, logging, remote
--- resources.
-configured :: ManifoldConfig -> Bool
-configured cfg =
-  isJust (manifoldConfigLabel cfg)
-    || isJust (manifoldConfigRemote cfg)
-    || any (== Just True) [manifoldConfigCache cfg, manifoldConfigBenchmark cfg, manifoldConfigLog cfg]
 
 -- | Process innermost scopes first: a definition's own where-bindings at each
 -- of its expansions, and each pure let.
@@ -171,13 +158,12 @@ cafCandidate env (EV v) k = not (T.any (== '`') v) && not (seMethod env k)
 
 -- | The group of a copy of an eligible term: the term and its type.
 termKey :: ShareEnv -> (EVar -> Int -> Bool) -> Node -> Maybe (Int, Type)
-termKey env eligible u@(AnnoS (Idx gi t) ci (VarS v (Many alts)))
+termKey env eligible u@(AnnoS (Idx _ t) _ (VarS v (Many alts)))
   | Just k <- termOfNode env u
   , eligible v k
   , isData t || (isFunctionValued t && any (not . isValue) alts)
   , not (null alts)
-  , all (not . isLambda) alts
-  , not (seLabeled env gi || seLabeled env ci) =
+  , all (not . isLambda) alts =
       Just (k, t)
 termKey _ _ _ = Nothing
 
@@ -188,8 +174,7 @@ originKey env u@(AnnoS (Idx gi t) ci e)
   | Just o <- Map.lookup ci (seOrigin env) <|> Map.lookup gi (seOrigin env)
   , notTerm e
   , isData t || (isFunctionValued t && not (isValue u))
-  , not (isLambda u)
-  , not (seLabeled env gi || seLabeled env ci) =
+  , not (isLambda u) =
       Just (o, t)
   where
     notTerm (VarS _ _) = False
@@ -432,14 +417,12 @@ freshName _ = do
   k <- MM.getCounter
   return (EV ("shared`s" <> T.pack (show k)))
 
--- | A fresh index carrying @parent@'s state except its manifold
--- configuration and export membership: a node introduced here computes
--- nothing the user labeled and is not a command.
+-- | A fresh index carrying @parent@'s state except its export membership: a
+-- node introduced here is not a command.
 plainIndex :: Int -> MorlocMonad Int
 plainIndex parent = do
   i <- newIndex parent
-  MM.modify (\s -> s { stateManifoldConfig = Map.delete i (stateManifoldConfig s)
-                     , stateExports = filter (/= i) (stateExports s) })
+  MM.modify (\s -> s {stateExports = filter (/= i) (stateExports s)})
   return i
 
 -- | A copy of a subtree with fresh indices, for a right-hand side served in

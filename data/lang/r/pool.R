@@ -49,6 +49,7 @@ mlc_load_user_sources <- function() {
 }
 
 morloc_foreign_call                  <- function(...){ .Call("morloc_foreign_call",                  ...) }
+morloc_remote_call                   <- function(...){ .Call("morloc_remote_call",                   ...) }
 # The third argument is codegen's per-call answer to "can this value carry an
 # interior NUL", which R cannot represent. It defaults to TRUE for the call
 # sites in this template, whose schemas are only known at run time (closure

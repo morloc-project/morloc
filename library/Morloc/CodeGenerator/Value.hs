@@ -79,6 +79,7 @@ isValueWith stage a@(AnnoS (Idx _ t) _ e) = case e of
   NamS rs -> all (isValueWith stage . snd) rs
   ConS _ _ _ xs -> all (isValueWith stage) xs
   CoerceS _ x -> isValueWith stage x
+  LabelS _ x -> isValueWith stage x
   -- applying a function whose result is a suspension builds the suspension
   -- and runs nothing (EFF-6)
   AppS f xs -> isValueWith stage f && all (isValueWith stage) xs && (length xs < arity stage f || isSuspensionType t)
@@ -131,4 +132,5 @@ arity stage (AnnoS (Idx _ t) _ e) = case e of
     ns -> minimum ns
   ExeS _ -> typeArity t
   CallS v -> fromMaybe (typeArity t) (stage v)
+  LabelS _ x -> arity stage x
   _ -> 0

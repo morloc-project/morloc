@@ -49,6 +49,7 @@ import Morloc.CodeGenerator.Serialize (serialize)
 import Morloc.CodeGenerator.Suspension (lowerSuspensions)
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Frontend.API as F
+import Morloc.Frontend.Labels (checkLabels)
 import Morloc.Frontend.AutoRequire (autoRequire)
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Restructure (restructure)
@@ -91,6 +92,7 @@ typecheck path code =
     >>= lowerGuests
     -- resolve all TypeU types to Type
     |>> map F.resolveTypes
+    >>= mapM checkLabels
     >>= (\es -> Infer.recordUndeterminedSites es >> return es)
     -- fail fast on a discarded Try (types are concrete here, instances
     -- still Many, so one insertion covers every realization)

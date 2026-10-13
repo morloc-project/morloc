@@ -389,7 +389,10 @@ makeAndInstall path outfile code extraIncludes verbosity config buildConfig forc
 
 -- | build a Morloc program, generating the nexus and pool files
 cmdMake :: MakeCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
-cmdMake args verbosity config buildConfig = do
+cmdMake args verbosity config buildConfig0 = do
+  let buildConfig
+        | makeSlurm args = buildConfig0 {buildConfigSlurmSupport = Just True}
+        | otherwise = buildConfig0
   (path, code) <- readScript (makeExpression args) (makeScript args)
   -- Program identity for the build directory. Precedence: --name, then the
   -- explicit -o/--cli-out name (so the same source built twice with

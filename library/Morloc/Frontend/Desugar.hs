@@ -2958,8 +2958,13 @@ desugarExpr (Loc sp (CAsE (EV label) (Loc _ (CVarE v)))) = do
     Nothing -> dfail (startPos sp)
       ("Undefined label '" ++ T.unpack label
        ++ "': no matching entry in module config labeled-groups")
-desugarExpr (Loc sp (CAsE _ _)) =
-  dfail (startPos sp) "as-pattern '@' is only valid in a binding position"
+desugarExpr (Loc sp (CAsE (EV label) _)) = do
+  moduleConfig <- State.gets dsModuleConfig
+  dfail (startPos sp) $
+    if Map.member label (moduleConfigLabeledGroups moduleConfig)
+      then "A label goes on the name of a function or a suspension, never on a larger expression; give the expression a name and label that ('"
+        ++ T.unpack label ++ "@f x', where 'f' computes it)"
+      else "as-pattern '@' is only valid in a binding position"
 
 -- | Wrap an intrinsic in a lambda if it has fewer args than its arity.
 -- Fully applied intrinsics pass through as IntrinsicE nodes. @collect passes

@@ -41,6 +41,7 @@ morloc-runtime/arrow_shm.rs::borrowing_disabled::FLAG	lazy
 morloc-runtime/arrow_shm.rs::-::VIEW_COUNT	counter		
 morloc-runtime/lease.rs::-::CREATED	counter		
 morloc-runtime/lease.rs::-::SEQ	counter		
+morloc-runtime/slurm_ffi.rs::make_job_dir::NEXT	counter		
 morloc-runtime/lease.rs::-::LAST_RECLAIM_MS	counter		
 morloc-runtime/lease.rs::-::FORKED	counter		
 morloc-runtime/cache.rs::pool_hash::CACHED	lazy		

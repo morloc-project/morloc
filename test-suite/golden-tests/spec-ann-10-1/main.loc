@@ -1,0 +1,75 @@
+-- A label on a suspension wraps each run of the suspension (ANN-10): a
+-- held suspension run twice logs twice, and a cached one does its work
+-- on the first run only. A cached run is keyed on what the suspension
+-- captured, so `cachedCall 4` and `cachedCall 5` are distinct entries. A
+-- suspension returned from either branch of a guard, one whose run crosses
+-- into another pool, and one from Rust are wrapped the same way, and so is
+-- every case in a `--debug` build.
+module main (named, whereBound, argBound, cachedNamed, cachedCall, cachedCpp, namedCpp, picked, mixed, cachedRs)
+
+import root-py
+import root-cpp
+import root-rust
+
+source Py from "lib.py" ("load", "run_twice")
+source Cpp from "lib.hpp" ("load_cpp")
+source Rust from "lib.rs" ("load_rs")
+
+load :: Int -> <IO> Int
+run_twice :: <IO> Int -> <IO> Int
+load_cpp :: Int -> <IO> Int
+load_rs :: I64 -> <IO> I64
+
+act :: <IO> Int
+act = load 3
+
+actCpp :: <IO> Int
+actCpp = load_cpp 9
+
+runIt :: <IO> Int -> <IO> Int
+runIt s = run_twice (t@s)
+
+named :: Int -> <IO> Int
+named x = run_twice (t@act)
+
+whereBound :: Int -> <IO> Int
+whereBound x = run_twice (t@s) where
+  s = load x
+
+argBound :: Int -> <IO> Int
+argBound x = runIt (load x)
+
+cachedNamed :: Int -> <IO> Int
+cachedNamed x = run_twice (c@act)
+
+cachedCall :: Int -> <IO> Int
+cachedCall x = run_twice (c@load x)
+
+cachedCpp :: Int -> <IO> Int
+cachedCpp x = run_twice (c@load_cpp x)
+
+namedCpp :: Int -> <IO> Int
+namedCpp x = run_twice (t@actCpp)
+
+pick :: Int -> <IO> Int
+pick x = ? x > 0 = load x : load 0
+
+picked :: Int -> <IO> Int
+picked x = run_twice (c@pick x)
+
+both :: Int -> <IO> Int
+both x = do
+  y <- load_cpp x
+  load y
+
+mixed :: Int -> <IO> Int
+mixed x = run_twice (c@both x)
+
+twiceRs :: <IO> I64 -> <IO> I64
+twiceRs s = do
+  a <- s
+  b <- s
+  a + b
+
+cachedRs :: I64 -> <IO> I64
+cachedRs x = twiceRs (c@load_rs x)

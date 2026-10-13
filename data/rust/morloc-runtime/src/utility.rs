@@ -103,25 +103,6 @@ pub(crate) unsafe fn file_exists(filename: *const c_char) -> bool {
     std::path::Path::new(path.as_ref()).exists()
 }
 
-pub(crate) unsafe fn mkdir_p(path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
-    clear_errmsg(errmsg);
-    if path.is_null() {
-        set_errmsg(errmsg, &MorlocError::Other("NULL path".into()));
-        return -1;
-    }
-    let p = CStr::from_ptr(path).to_string_lossy();
-    match std::fs::create_dir_all(p.as_ref()) {
-        Ok(_) => 0,
-        Err(e) => {
-            set_errmsg(
-                errmsg,
-                &MorlocError::Io(e),
-            );
-            -1
-        }
-    }
-}
-
 /// Best-effort raise of the soft open-file limit (RLIMIT_NOFILE) toward the
 /// hard limit, so a process holding many concurrent connections/fds is bounded
 /// by the (large) hard limit rather than the common 1024 (Linux) or 256

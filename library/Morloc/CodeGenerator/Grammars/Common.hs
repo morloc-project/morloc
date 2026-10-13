@@ -60,7 +60,6 @@ module Morloc.CodeGenerator.Grammars.Common
   , orNativeType
   , collectLogLabels
   , collectManifoldIds
-  , propagateManifoldLabel
   , hasManifoldLabel
   , isForeignCalleeForm
 
@@ -406,8 +405,8 @@ renameSE old new = go where
   go (AppPoolS t p args) = AppPoolS t (renamePoolCall old new p) (map goA args)
   go (AppRecS t m es) = AppRecS t m (map go es)
   go (AppForeignRecS t m s es) = AppForeignRecS t m s (map go es)
-  go (CacheBodyS t resSa lbl m args body) = CacheBodyS t resSa lbl m args (go body)
-  go (DebugWrapS t m args body) = DebugWrapS t m args (go body)
+  go (CacheBodyS t resSa lbl m args body) = CacheBodyS t resSa lbl m (map raPair args) (go body)
+  go (DebugWrapS t m args body) = DebugWrapS t m (map raPair args) (go body)
   go (ReturnS se) = ReturnS (go se)
   go (SerialLetS i se1 se2) = SerialLetS (ri i) (go se1) (go se2)
   go (NativeLetS i ne se) = NativeLetS (ri i) (renameNE old new ne) (go se)
@@ -417,6 +416,7 @@ renameSE old new = go where
   go (LoopS t ids body) = LoopS t (map ri ids) (trimap (renameNE old new) go go body)
   goA (SerialArgManifold sm) = SerialArgManifold (renameSM old new sm)
   goA (SerialArgExpr se) = SerialArgExpr (go se)
+  raPair (Arg i t, sa) = (Arg (ri i) t, sa)
 
 renameNM :: Int -> Int -> NativeManifold -> NativeManifold
 renameNM old new (NativeManifold m lang form body) =
@@ -768,14 +768,8 @@ collectManifoldIds = Set.unions . map (runIdentity . foldSerialManifoldM ops)
             return (Set.insert i (foldlNM mappend mempty full))
         }
 
--- | Derive a (manifold-id -> log-label) map from 'stateManifoldConfig'.
--- A manifold ID is included only when its config has 'manifoldConfigLog'
--- set to @Just True@. The label string comes from 'manifoldConfigLabel'
--- (set by 'Desugar' when the source binding used the @label:var@ form
--- and propagated through 'Realize.extractRecursiveHelpers' as the
--- synthetic helper manifold's config). The invariant: a labeled call
--- site is always extracted to its own manifold whose midx carries the
--- label config, so a pure index-based lookup is sufficient.
+-- | Derive a (manifold-id -> log-label) map from 'stateManifoldConfig':
+-- the manifolds whose label asks for @log: true@.
 collectLogLabels ::
   Map.Map Int ManifoldConfig ->
   Map.Map Int Text
@@ -785,22 +779,6 @@ collectLogLabels =
         Just True -> manifoldConfigLabel cfg
         _ -> Nothing
     )
-
--- | If @srcIdx@ has a user-labeled 'ManifoldConfig' in 'stateManifoldConfig',
--- copy it to @dstIdx@ and return True. Otherwise return False. Plain @VarE@
--- configs without a label are skipped so this acts as a true label
--- propagator. Two call sites use this: 'Express.setManifoldConfig' walks
--- the head spine to attach a label to a manifold midx, and 'LambdaEval'
--- carries labels across beta-reduction sites that discard the labeled
--- head AnnoS.
-propagateManifoldLabel :: Int -> Int -> MorlocMonad Bool
-propagateManifoldLabel dstIdx srcIdx = do
-  mconfig <- MM.gets (Map.lookup srcIdx . stateManifoldConfig)
-  case mconfig of
-    Just cfg | isJust (manifoldConfigLabel cfg) -> do
-      MM.modify (\s -> s {stateManifoldConfig = Map.insert dstIdx cfg (stateManifoldConfig s)})
-      return True
-    _ -> return False
 
 -- | True iff @idx@ has a user-labeled 'ManifoldConfig'. Used to decide
 -- whether a call site needs to become a manifold for the label to attach.
@@ -838,29 +816,19 @@ populated from 'stateManifoldConfig' for manifolds whose 'ManifoldConfig'
 has @log: true@.
 -}
 extractLocalDispatch :: Map.Map Int Text -> [SerialManifold] -> [DispatchEntry]
-extractLocalDispatch labels = catMaybes . map localEntry
-  where
-    localEntry (SerialManifold _ _ _ HeadManifoldFormRemoteWorker _) = Nothing
-    localEntry (SerialManifold i _ form _ _) =
-      Just $ DispatchEntry i (getSize form) (Map.lookup i labels)
+extractLocalDispatch labels ms =
+  [dispatchEntry labels m | m@(SerialManifold _ _ _ hf _) <- ms, hf /= HeadManifoldFormRemoteWorker]
 
-    getSize :: ManifoldForm (Or TypeS TypeF) TypeS -> Int
-    getSize = sum . abilist (\_ _ -> 1) (\_ _ -> 1)
-
--- | Extract remote dispatch entries by walking the AST. The label map carries
--- the same role as in 'extractLocalDispatch'.
+-- | The remote dispatch entries of a pool: the job-side entries of the
+-- remote calls whose callee lives in this pool. The label map carries the
+-- same role as in 'extractLocalDispatch'.
 extractRemoteDispatch :: Map.Map Int Text -> [SerialManifold] -> [DispatchEntry]
-extractRemoteDispatch labels =
-  map (\(i, n) -> DispatchEntry i n (Map.lookup i labels)) . unique . concatMap getRemotes
-  where
-    getRemotes :: SerialManifold -> [(Int, Int)]
-    getRemotes = runIdentity . foldSerialManifoldM (defaultValue {opSerialExprM = getRemoteSE})
+extractRemoteDispatch labels ms =
+  [dispatchEntry labels m | m@(SerialManifold _ _ _ HeadManifoldFormRemoteWorker _) <- ms]
 
-    getRemoteSE ::
-      SerialExpr_ [(Int, Int)] [(Int, Int)] [(Int, Int)] [(Int, Int)] [(Int, Int)] ->
-      Identity [(Int, Int)]
-    getRemoteSE (AppPoolS_ _ (PoolCall i _ (RemoteCall _) _) xss) = return $ (i, length xss) : concat xss
-    getRemoteSE x = return $ foldlSE mappend mempty x
+dispatchEntry :: Map.Map Int Text -> SerialManifold -> DispatchEntry
+dispatchEntry labels (SerialManifold i _ form _ _) =
+  DispatchEntry i (sum (abilist (\_ _ -> 1) (\_ _ -> 1) form)) (Map.lookup i labels)
 
 -- | Collect every NESTED closure manifold (a 'ManifoldPart'/'ManifoldPass'
 -- with non-empty bound args) from a manifold tree. Such closures are

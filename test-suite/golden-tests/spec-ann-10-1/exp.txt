@@ -1,0 +1,125 @@
+--- named ---
+6
+LOG t act start
+RUN load 3
+LOG t act done
+LOG t act start
+RUN load 3
+LOG t act done
+--- whereBound ---
+8
+LOG t s start
+RUN load 4
+LOG t s done
+LOG t s start
+RUN load 4
+LOG t s done
+--- argBound ---
+10
+LOG t s start
+RUN load 5
+LOG t s done
+LOG t s start
+RUN load 5
+LOG t s done
+--- cachedNamed ---
+6
+RUN load 3
+6
+--- cachedCall ---
+8
+RUN load 4
+10
+RUN load 5
+8
+--- cachedCpp ---
+12
+RUN load_cpp 6
+12
+--- namedCpp ---
+18
+LOG t actCpp start
+RUN load_cpp 9
+LOG t actCpp done
+LOG t actCpp start
+RUN load_cpp 9
+LOG t actCpp done
+--- picked ---
+8
+RUN load 4
+8
+0
+RUN load 0
+0
+--- mixed ---
+10
+RUN load_cpp 5
+RUN load 5
+10
+--- cachedRs ---
+12
+RUN load_rs 6
+12
+=== --debug ===
+--- named ---
+6
+LOG t act start
+RUN load 3
+LOG t act done
+LOG t act start
+RUN load 3
+LOG t act done
+--- whereBound ---
+8
+LOG t s start
+RUN load 4
+LOG t s done
+LOG t s start
+RUN load 4
+LOG t s done
+--- argBound ---
+10
+LOG t s start
+RUN load 5
+LOG t s done
+LOG t s start
+RUN load 5
+LOG t s done
+--- cachedNamed ---
+6
+RUN load 3
+6
+--- cachedCall ---
+8
+RUN load 4
+10
+RUN load 5
+8
+--- cachedCpp ---
+12
+RUN load_cpp 6
+12
+--- namedCpp ---
+18
+LOG t actCpp start
+RUN load_cpp 9
+LOG t actCpp done
+LOG t actCpp start
+RUN load_cpp 9
+LOG t actCpp done
+--- picked ---
+8
+RUN load 4
+8
+0
+RUN load 0
+0
+--- mixed ---
+10
+RUN load_cpp 5
+RUN load 5
+10
+--- cachedRs ---
+12
+RUN load_rs 6
+12

@@ -10,7 +10,7 @@
 -- by the `Tests:` line of that rule.
 module SpecTests (specTests) where
 
-import Morloc (typecheckFrontend)
+import Morloc (typecheck, typecheckFrontend)
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc (render)
 import qualified Data.Char as DC
@@ -35,8 +35,60 @@ specTests =
     , localOption (mkTimeout 5000000) dimTests
     , localOption (mkTimeout 2000000) patTests
     , localOption (mkTimeout 2000000) ifaceTests
+    , localOption (mkTimeout 20000000) annTests
     , modelCheck
     ]
+
+-- | Typecheck a program written to a directory beside its YAML config, as a
+-- labeled program must be: labels are declared in the config.
+runLabeled :: String -> MT.Text -> MT.Text -> IO (Either MorlocError ())
+runLabeled name code yaml = do
+  tmp <- SD.getTemporaryDirectory
+  let dir = tmp <> "/morloc-label-test-" <> map (\c -> if c == ' ' then '-' else c) name
+  SD.createDirectoryIfMissing True dir
+  let path = dir <> "/main.loc"
+  writeFile path (MT.unpack code)
+  writeFile (dir <> "/main.yaml") (MT.unpack yaml)
+  writeFile (dir <> "/lib.py") "def f(x): return x\ndef app(g, x): return g(x)\ndef io(x): return x\n"
+  config <- emptyConfig
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 config defaultValue (typecheck (Just path) (Code code))
+  SD.removeDirectoryRecursive dir
+  return (() <$ x)
+
+labelProgram :: MT.Text -> MT.Text
+labelProgram body =
+  "module main (g)\neffect IO\nsource Py from \"lib.py\" (\"f\", \"app\", \"io\")\nf :: Int -> Int\napp :: (Int -> Int) -> Int -> Int\nio :: Int -> <IO> Int\nk :: Int\nk = 5\n" <> body
+
+labelAccepts :: String -> MT.Text -> MT.Text -> TestTree
+labelAccepts msg yaml body = testCase msg $ do
+  result <- runLabeled msg (labelProgram body) yaml
+  case result of
+    Right _ -> return ()
+    Left e -> assertFailure ("expected acceptance, got: " <> show e)
+
+labelRejects :: String -> MT.Text -> MT.Text -> TestTree
+labelRejects msg yaml body = testCase msg $ do
+  result <- runLabeled msg (labelProgram body) yaml
+  case result of
+    Left _ -> return ()
+    Right _ -> assertFailure "expected an error"
+
+annTests :: TestTree
+annTests =
+  testGroup
+    "ANN"
+    [ labelAccepts "spec-ann-8-1" logYaml "g :: Int -> Int\ng x = l@f x\n"
+    , labelRejects "spec-ann-8-2" logYaml "g :: Int -> Int\ng x = l@k\n"
+    , labelRejects "spec-ann-8-3" logYaml "g :: Int -> Int\ng x = l@(f x)\n"
+    , labelAccepts "spec-ann-11-1" logYaml "h :: (Int -> Int) -> Int -> Int\nh q x = l@q x\ng :: Int -> Int\ng x = h f x\n"
+    , labelRejects "spec-ann-11-2" cacheYaml "h :: (Int -> Int) -> Int -> Int\nh q x = l@q x\ng :: Int -> Int\ng x = h f x\n"
+    , labelAccepts "spec-ann-10-2" logYaml "s :: <IO> Int\ns = io 1\ng :: Int -> <IO> Int\ng x = l@s\n"
+    , labelAccepts "spec-ann-10-3" cacheYaml "s :: <IO> Int\ns = io 1\ng :: Int -> <IO> Int\ng x = l@s\n"
+    , labelAccepts "spec-ann-11-3" cacheYaml "g :: Int -> <IO> Int\ng x = l@s where\n  s = io x\n"
+    ]
+  where
+    logYaml = "labeled-groups:\n  l: { log: true }\n"
+    cacheYaml = "labeled-groups:\n  l: { cache: true }\n"
 
 -- | The items in model/ agree with each other and with these tests.
 modelCheck :: TestTree

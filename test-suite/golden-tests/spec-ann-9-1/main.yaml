@@ -1,9 +1,7 @@
 labeled-groups:
-  big:
-    cache: false
-    benchmark: false
+  r:
     remote:
       threads: 1
       memory: 1
-      time: 60
+      time: "00:05:00"
       gpus: 0

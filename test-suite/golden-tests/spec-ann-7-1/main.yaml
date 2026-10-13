@@ -1,0 +1,4 @@
+labeled-groups:
+  l: { benchmark: true }
+benchmark-template:
+  summary: "ROW {group} {name} {lang} n={count}"

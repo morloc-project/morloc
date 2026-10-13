@@ -36,7 +36,7 @@ import qualified Data.Text as T
 import Morloc.Frontend.Namespace
 import Morloc.CodeGenerator.Value (isValue)
 import Morloc.Frontend.Rename (displayName, fresh)
-import qualified Morloc.Frontend.Share as Share
+
 import Morloc.Frontend.Treeify (Validation (..), collectRoot, recName)
 import Morloc.Frontend.Typecheck (typecheckRoot, typecheckRootAt)
 import Morloc.Data.Doc
@@ -336,10 +336,9 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
             <+> "is at a different type than the use it recurses from"
     | otherwise -> do
         elab <- elaborate spec target (ci, refName e) (k, key)
-        labeledUse <- configured [gi, ci]
         shared <- Map.lookup (k, key) <$> liftIO (readIORef (specShared spec))
         case shared of
-          Just tok | not labeledUse -> sharedUse tok elab
+          Just tok -> sharedUse tok elab
           _ -> do
             copy <- instantiate elab
             case copy of
@@ -352,7 +351,7 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
                 -- a body with no back-edge is closed: it means the same
                 -- wherever it is used, so whether it is shared is decided once
                 inlined <- Set.member (k, key) <$> liftIO (readIORef (specInlined spec))
-                let closed = target == Definition && Set.null innerBacks && not labeledUse
+                let closed = target == Definition && Set.null innerBacks
                 share <-
                   if closed && not inlined
                     then shareable key t alts'
@@ -368,7 +367,7 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
                   else do
                     when closed $
                       liftIO (modifyIORef' (specInlined spec) (Set.insert (k, key)))
-                    alts'' <- mapM (atUse ci) alts'
+                    let alts'' = map (atUse ci) alts'
                     return (AnnoS (Idx gi t) ci (VarS name' (Many alts'')))
               _ -> MM.throwCompilerBug "specialize: an elaboration is not a term"
   Nothing -> AnnoS (Idx gi t) ci <$> mapExprSM (splice spec backs stack) e
@@ -384,21 +383,13 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
       callAt tok name sourced
     sharedUse _ _ = MM.throwCompilerBug "specialize: an elaboration is not a term"
     callAt tok name sourced = do
-      sourced' <- mapM (atUse ci) sourced
+      let sourced' = map (atUse ci) sourced
       call <- AnnoS <$> (Idx <$> plainIndex gi <*> pure t) <*> plainIndex ci <*> pure (CallS tok)
       return (AnnoS (Idx gi t) ci (VarS name (Many (sourced' <> [call]))))
 
 isSourced :: Typed -> Bool
 isSourced (AnnoS _ _ (ExeS (SrcCall _))) = True
 isSourced _ = False
-
--- | Whether any of these indices carries manifold configuration (a label, a
--- cache, a remote setting): such a use stays in place, so its configuration
--- stays with it.
-configured :: [Int] -> MorlocMonad Bool
-configured is = do
-  cfg <- MM.gets stateManifoldConfig
-  return (any (maybe False Share.configured . (`Map.lookup` cfg)) is)
 
 -- | A name for a shared specialization, never a term's or a recursion
 -- token's.
@@ -430,7 +421,6 @@ shareable key t alts = do
       defined = filter (not . isSourced) alts
       ns = concatMap annoNodes defined
       inner = Set.fromList [v | AnnoS _ _ (VarS v _) <- ns]
-  labeled <- configured (concat [[gi, ci] | AnnoS (Idx gi _) ci _ <- defined])
   return $
     not (null (drop shareSize ns))
       && not (null params)
@@ -441,7 +431,6 @@ shareable key t alts = do
       && all isValue defined
       && not (any (readsConstant idmap sigmap) ns)
       && not (any (\(AnnoS _ _ x) -> recurses names inner x) ns)
-      && not labeled
   where
     arrow (FunU ts r) = let (ts', r') = arrow r in (ts <> ts', r')
     arrow x = ([], x)
@@ -476,17 +465,9 @@ shareSize :: Int
 shareSize = 32
 
 -- | An implementation spliced at a reference takes the reference's own index
--- as its outer index, as a term expanded in place does, and a label on the
--- implementation applies at the reference.
-atUse :: Int -> Typed -> MorlocMonad Typed
-atUse gi (AnnoS (Idx _ t) ci e) = do
-  st <- MM.get
-  case Map.lookup ci (stateManifoldConfig st) of
-    Just cfg
-      | Just _ <- manifoldConfigLabel cfg ->
-          MM.modify (\s -> s {stateManifoldConfig = Map.insert gi cfg (stateManifoldConfig s)})
-    _ -> return ()
-  return (AnnoS (Idx gi t) ci e)
+-- as its outer index, as a term expanded in place does.
+atUse :: Int -> Typed -> Typed
+atUse gi (AnnoS (Idx _ t) ci e) = AnnoS (Idx gi t) ci e
 
 -- | A copy of a tree with fresh indices (carrying the state of the indices
 -- they copy) and fresh names for the variables it binds. A source call keeps

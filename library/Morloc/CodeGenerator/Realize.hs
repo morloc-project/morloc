@@ -24,7 +24,6 @@ import Morloc.CodeGenerator.Value (etaParts, isValueWith)
 import Morloc.Frontend.Namespace (newIndex)
 import Morloc.Frontend.Rename (displayName)
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Grammars.Common (propagateManifoldLabel)
 import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
@@ -226,13 +225,11 @@ normalizePop1 ::
   (EVar -> Maybe Int) ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (AnnoS (Indexed Type) Many Int)
--- empty lambda, no args left: unwrap, moving the discarded head's label up
-normalizePop1 sp (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx lamIdx _) _ (LamS [] (AnnoS _ c2 e))) [])) = do
-  _ <- propagateManifoldLabel g1Idx lamIdx
+-- empty lambda, no args left: unwrap
+normalizePop1 sp (AnnoS g1 _ (AppS (AnnoS _ _ (LamS [] (AnnoS _ c2 e))) [])) =
   normalizePop1 sp (AnnoS g1 c2 e)
 -- empty lambda with remaining args (over-application): unwrap the spent layer
-normalizePop1 sp (AnnoS g1@(Idx g1Idx _) c1 (AppS (AnnoS (Idx lamIdx _) _ (LamS [] body)) es@(_ : _))) = do
-  _ <- propagateManifoldLabel g1Idx lamIdx
+normalizePop1 sp (AnnoS g1 c1 (AppS (AnnoS _ _ (LamS [] body)) es@(_ : _))) =
   normalizePop1 sp (AnnoS g1 c1 (AppS body es))
 -- beta-reduce one parameter. A value used at most once is substituted (a pure
 -- move). An argument that is not a value is evaluated once at the application,
@@ -251,10 +248,7 @@ normalizePop1 sp
         normalizePop1 sp $ residual (substFreeBnd v e1 e2)
     | not valueArg && not (isFunT tv) && not (isEffT tv) = do
         e1' <- normalizePop1 sp e1
-        -- the let is the root of what the labeled application computes, so
-        -- a label, cache or log setting on the application moves to it
         letIx <- newIndex i1n
-        MM.modify (\st -> st {stateManifoldConfig = Map.delete i1n (stateManifoldConfig st)})
         body <- normalizePop1 sp (residual (rebindFreeBnd v e2))
         return (AnnoS (Idx letIx i1t) tb1 (LetS v e1' body))
   where
@@ -267,9 +261,8 @@ normalizePop1 sp
     -- suspension is shared ('hoistThunkArgs')
     isEffT (EffectT _ _) = True
     isEffT _ = False
--- application to no args: unwrap, moving the discarded head's label up
-normalizePop1 sp (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx headIdx _) c2 e) [])) = do
-  _ <- propagateManifoldLabel g1Idx headIdx
+-- application to no args: unwrap
+normalizePop1 sp (AnnoS g1 _ (AppS (AnnoS _ c2 e) [])) =
   normalizePop1 sp (AnnoS g1 c2 e)
 -- every other node (incl. multiply-used or Many-headed applications): recurse
 normalizePop1 sp (AnnoS g c e) = AnnoS g c <$> mapExprSM (normalizePop1 sp) e
@@ -591,6 +584,9 @@ realizeWithRegistry registry tables seedLangs s0 = do
     scoreExpr rstat (CoerceS c x, i) = do
       x' <- scoreAnnoS rstat x
       return (CoerceS c x', Idx i (scoresOf x'))
+    scoreExpr rstat (LabelS k x, i) = do
+      x' <- scoreAnnoS rstat x
+      return (LabelS k x', Idx i (scoresOf x'))
     scoreExpr rstat (IntrinsicS intr xs, i) = do
       xs' <- mapM (scoreAnnoS rstat) xs
       let Idx _ langScores = zipLang i rstat
@@ -980,6 +976,10 @@ realizeWithRegistry registry tables seedLangs s0 = do
       lang <- pickLanguage heads l1 [x] ss
       x' <- collapseAnnoS heads lang x
       return (CoerceS c x', Idx i lang)
+    collapseExpr heads _ l1 (LabelS k x, Idx i ss) = do
+      lang <- pickLanguage heads l1 [x] ss
+      x' <- collapseAnnoS heads lang x
+      return (LabelS k x', Idx i lang)
     collapseExpr heads _ l1 (IntrinsicS intr xs, Idx i ss) = do
       lang <- pickLanguage heads l1 xs ss
       xs' <- mapM (collapseAnnoS heads lang) xs
@@ -1126,6 +1126,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
             (DoBlockS x) -> DoBlockS <$> f lang x
             (EvalS x) -> EvalS <$> f lang x
             (CoerceS c x) -> CoerceS c <$> f lang x
+            (LabelS k x) -> LabelS k <$> f lang x
             (IntrinsicS intr xs) -> IntrinsicS intr <$> mapM (f lang) xs
           return (AnnoS g (Idx i lang) e'')
 
@@ -1166,6 +1167,7 @@ removeVarS (AnnoS g c (IfS cond thenE elseE)) = AnnoS g c (IfS (removeVarS cond)
 removeVarS (AnnoS g c (DoBlockS e)) = AnnoS g c (DoBlockS (removeVarS e))
 removeVarS (AnnoS g c (EvalS e)) = AnnoS g c (EvalS (removeVarS e))
 removeVarS (AnnoS g c (CoerceS co e)) = AnnoS g c (CoerceS co (removeVarS e))
+removeVarS (AnnoS g c (LabelS k e)) = AnnoS g c (LabelS k (removeVarS e))
 removeVarS (AnnoS g c (IntrinsicS intr es)) = AnnoS g c (IntrinsicS intr (map removeVarS es))
 removeVarS x = x
 
@@ -1309,12 +1311,9 @@ extractFromTree exports (AnnoS g@(Idx gi t) c e) = do
   case (e, e') of
     -- A reference that now names an extracted helper: Treeify gave the
     -- reference the index of the definition it copied, which is the helper's
-    -- manifold, so the reference takes an index of its own. Its state is
-    -- copied, but not the helper's manifold configuration: the helper
-    -- itself carries it.
+    -- manifold, so the reference takes an index of its own.
     (VarS _ _, CallS _) -> do
       gi' <- newIndex gi
-      MM.modify (\st -> st {stateManifoldConfig = Map.delete gi' (stateManifoldConfig st)})
       return (AnnoS (Idx gi' t) c e', helpers)
     _ -> return (AnnoS g c e', helpers)
 
@@ -1392,6 +1391,9 @@ extractExpr exports (EvalS e) = do
 extractExpr exports (CoerceS c e) = do
   (e', helpers) <- extractFromTree exports e
   return (CoerceS c e', helpers)
+extractExpr exports (LabelS k e) = do
+  (e', helpers) <- extractFromTree exports e
+  return (LabelS k e', helpers)
 extractExpr exports (IntrinsicS intr es) = do
   results <- mapM (extractFromTree exports) es
   let (es', helperLists) = unzip results

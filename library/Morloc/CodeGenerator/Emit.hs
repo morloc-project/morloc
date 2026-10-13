@@ -34,16 +34,23 @@ type TranslateFn = Lang -> [Source] -> [SerialManifold] -> MorlocMonad Script
 -- For non-member languages 'poolOf' is identity, so this is unchanged.
 pool :: LR.LangRegistry -> [SerialManifold] -> [(Lang, [SerialManifold])]
 pool reg es =
-  let (langs, indexedSegments) = unzip . groupSort . map (\x@(SerialManifold i lang _ _ _) -> (LR.poolOf reg lang, (i, x))) $ es
+  let (langs, indexedSegments) = unzip . groupSort . map (\x@(SerialManifold i lang _ hf _) -> (LR.poolOf reg lang, (emittedId i hf, x))) $ es
       uniqueSegments = map (Map.elems . Map.fromList) indexedSegments
    in zip langs uniqueSegments
 
--- | A pool defines each manifold, nested ones included, under its id, and
--- 'pool' keeps one segment per id, so two different manifolds with one id in
--- one pool would leave a caller running the other.
+-- | A manifold's name in its pool: its id, and whether it is the job-side
+-- entry of a remote call, which is emitted with a suffix beside the local
+-- manifold of the same id.
+emittedId :: Int -> HeadManifoldForm -> (Int, Bool)
+emittedId i HeadManifoldFormRemoteWorker = (i, True)
+emittedId i _ = (i, False)
+
+-- | A pool defines each manifold, nested ones included, under its emitted
+-- name, and 'pool' keeps one segment per name, so two different manifolds
+-- with one name in one pool would leave a caller running the other.
 checkManifoldIds :: LR.LangRegistry -> [SerialManifold] -> MorlocMonad ()
 checkManifoldIds reg ms =
-  case [i | ((_, i), ds) <- Map.toList byId, length (nubOrd ds) > 1] of
+  case [i | ((_, (i, _)), ds) <- Map.toList byId, length (nubOrd ds) > 1] of
     [] -> return ()
     (i : _) -> MM.throwCompilerBug $ "two different manifolds in one pool share the id" <+> pretty i
   where
@@ -51,10 +58,10 @@ checkManifoldIds reg ms =
     defs = runIdentity . foldWithSerialManifoldM ops
     ops =
       defaultValue
-        { opFoldWithSerialManifoldM = \m full@(SerialManifold_ i lang _ _ _) ->
-            return ((i, lang, show m) : foldlSM mappend mempty full)
+        { opFoldWithSerialManifoldM = \m full@(SerialManifold_ i lang _ hf _) ->
+            return ((emittedId i hf, lang, show m) : foldlSM mappend mempty full)
         , opFoldWithNativeManifoldM = \m full@(NativeManifold_ i lang _ _) ->
-            return ((i, lang, show m) : foldlNM mappend mempty full)
+            return (((i, False), lang, show m) : foldlNM mappend mempty full)
         }
 
 -- | Translate a pool of serialized manifolds to target language source code

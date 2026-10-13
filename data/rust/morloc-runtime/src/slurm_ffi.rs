@@ -1,13 +1,9 @@
 //! C ABI wrappers for SLURM job submission.
-//! Replaces slurm.c.
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
 
-use crate::error::{clear_errmsg, set_errmsg, MorlocError};
-
-const MAX_SLURM_COMMAND_LENGTH: usize = 1024;
-const DEFAULT_XXHASH_SEED: u64 = 0;
+use crate::error::{clear_errmsg, set_errmsg, take_reason, MorlocError};
 
 // ── C-compatible types ───────────────────────────────────────────────────────
 
@@ -19,56 +15,59 @@ pub struct Resources {
     pub gpus: i32,
 }
 
-// ── parse_slurm_time ─────────────────────────────────────────────────────────
+// ── sbatch_resource_args ─────────────────────────────────────────────────────
 
-pub(crate) unsafe fn write_slurm_time(seconds: i32) -> *mut c_char {
-    let mut rem = seconds;
-    let days = rem / (60 * 60 * 24);
-    rem -= days * 60 * 60 * 24;
-    let hours = rem / (60 * 60);
-    rem -= hours * 60 * 60;
-    let minutes = rem / 60;
-    rem -= minutes * 60;
-
-    let s = format!("{}-{:02}:{:02}:{:02}", days, hours, minutes, rem);
-    match CString::new(s) {
-        Ok(cs) => cs.into_raw(),
-        Err(_) => ptr::null_mut(),
-    }
+/// SLURM's `D-HH:MM:SS` for a walltime in seconds.
+fn slurm_time(seconds: i32) -> String {
+    let (d, rem) = (seconds / 86400, seconds % 86400);
+    format!("{}-{:02}:{:02}:{:02}", d, rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
-// ── parse_morloc_call_arguments ──────────────────────────────────────────────
+/// The sbatch options for a label's resources. A resource the label leaves
+/// unset (-1) is not requested, so the cluster's default applies. Memory and
+/// time of 0 are passed on, since SLURM reads them as all of a node's memory
+/// and no limit; CPUs and GPUs of 0 are not requested. mim's bridge builds
+/// the same options in `resource_args`.
+pub(crate) fn sbatch_resource_args(res: &Resources) -> Vec<String> {
+    let mut args = Vec::new();
+    if res.memory >= 0 { args.push(format!("--mem={}G", res.memory)); }
+    if res.time >= 0 { args.push(format!("--time={}", slurm_time(res.time))); }
+    if res.cpus > 0 { args.push(format!("--cpus-per-task={}", res.cpus)); }
+    if res.gpus > 0 { args.push(format!("--gres=gpu:{}", res.gpus)); }
+    args
+}
 
-// ── slurm_job_is_complete ────────────────────────────────────────────────────
+// ── slurm_job_end_state ──────────────────────────────────────────────────────
 
-pub(crate) unsafe fn slurm_job_is_complete(job_id: u32) -> bool {
+/// The state a job ended in, or `None` while it may still make progress.
+pub(crate) unsafe fn slurm_job_end_state(job_id: u32) -> Option<String> {
     // Containerized path: ask the host-side bridge instead of shelling
     // out to sacct (which isn't on the container's PATH). Any transport
-    // error here returns false so the caller keeps polling -- the
+    // error here returns None so the caller keeps polling -- the
     // submit-time error path is the one that surfaces bridge problems
     // to the user.
     if let Some(sock) = crate::slurm_bridge::socket_from_env() {
         return match crate::slurm_bridge::status(&sock, job_id) {
-            Ok(state) => state.is_terminal(),
-            Err(_) => false,
+            Ok(state) if state.is_terminal() => Some(state.name().to_string()),
+            _ => None,
         };
     }
 
     let cmd = format!("sacct -j {} --format=State%30 --noheader\0", job_id);
     let sacct = morloc_runtime_types::fd::popen(cmd.as_ptr() as *const c_char, b"r\0".as_ptr() as *const c_char);
-    if sacct.is_null() { return false; }
+    if sacct.is_null() { return None; }
 
     let mut state = [0u8; 64];
-    let mut done = false;
+    let mut end = None;
     while !libc::fgets(state.as_mut_ptr() as *mut c_char, 64, sacct).is_null() {
-        let s = std::str::from_utf8(&state).unwrap_or("").trim_end_matches('\0');
-        if crate::slurm_bridge::state_is_terminal(s) {
-            done = true;
+        let line = CStr::from_ptr(state.as_ptr() as *const c_char).to_string_lossy();
+        if crate::slurm_bridge::state_is_terminal(&line) {
+            end = line.split_whitespace().next().map(str::to_string);
             break;
         }
     }
     libc::pclose(sacct);
-    done
+    end
 }
 
 // ── shell_escape ─────────────────────────────────────────────────────────────
@@ -91,6 +90,7 @@ fn shell_escape(input: &str) -> String {
 
 pub(crate) unsafe fn submit_morloc_slurm_job(
     nexus_path: *const c_char,
+    manifest_path: &str,
     socket_basename: *const c_char,
     call_packet_filename: *const c_char,
     result_cache_filename: *const c_char,
@@ -124,21 +124,13 @@ pub(crate) unsafe fn submit_morloc_slurm_job(
     let output = CStr::from_ptr(output_filename).to_string_lossy();
     let error = CStr::from_ptr(error_filename).to_string_lossy();
 
-    let time_str_raw = write_slurm_time(res.time);
-    let time_str = CStr::from_ptr(time_str_raw).to_string_lossy().into_owned();
-    libc::free(time_str_raw as *mut c_void);
-
-    let mem_arg = format!("--mem={}G", res.memory);
-    let time_arg = format!("--time={}", time_str);
-    let cpus_arg = format!("--cpus-per-task={}", res.cpus);
-    let gpus_arg = format!("--gres=gpu:{}", res.gpus);
-
     // Build the inner command as an argv vector. The bridge takes this
     // as-is over JSON (no shell quoting on the wire); the direct-shell
     // path below shell-escapes it once for sbatch --wrap. Same source
     // of truth for both transports.
     let inner_argv: Vec<String> = vec![
         nexus.to_string(),
+        "run".to_string(),
         "--call-packet".to_string(),
         call.to_string(),
         "--socket-base".to_string(),
@@ -147,6 +139,7 @@ pub(crate) unsafe fn submit_morloc_slurm_job(
         result_cache.to_string(),
         "--output-form".to_string(),
         "packet".to_string(),
+        manifest_path.to_string(),
     ];
 
     // Containerized path: send the structured argv to mim
@@ -181,19 +174,15 @@ pub(crate) unsafe fn submit_morloc_slurm_job(
         .map(|a| shell_escape(a))
         .collect::<Vec<_>>()
         .join(" ");
-    if wrap_cmd.len() >= MAX_SLURM_COMMAND_LENGTH {
-        set_errmsg(errmsg, &MorlocError::Other("Wrap command too long".into()));
-        return 0;
-    }
     let wrap_arg = format!("--wrap={}", wrap_cmd);
 
-    let args: Option<Vec<CString>> = [
-        "sbatch", "--parsable", "-o", output.as_ref(), "-e", error.as_ref(),
-        mem_arg.as_str(), time_arg.as_str(), cpus_arg.as_str(), gpus_arg.as_str(), wrap_arg.as_str(),
-    ]
-    .iter()
-    .map(|a| CString::new(*a).ok())
-    .collect();
+    let resource_args = sbatch_resource_args(res);
+    let args: Option<Vec<CString>> = ["sbatch", "--parsable", "-o", output.as_ref(), "-e", error.as_ref()]
+        .into_iter()
+        .chain(resource_args.iter().map(String::as_str))
+        .chain(std::iter::once(wrap_arg.as_str()))
+        .map(|a| CString::new(a).ok())
+        .collect();
     let Some(args) = args else {
         set_errmsg(errmsg, &MorlocError::Other("sbatch argument contains a NUL byte".into()));
         return 0;
@@ -252,343 +241,239 @@ pub(crate) unsafe fn submit_morloc_slurm_job(
     }
 }
 
+/// A variable the nexus exports to every pool it spawns.
+fn nexus_env(name: &str) -> Result<String, String> {
+    match std::env::var(name) {
+        Ok(p) if !p.is_empty() => Ok(p),
+        _ => Err(format!(
+            "{name} is unset; remote dispatch requires the pool to be spawned by a morloc nexus"
+        )),
+    }
+}
+
+/// The start of a job's stderr file, to show with the job's failure.
+fn job_stderr_head(path: &str) -> String {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    match std::fs::File::open(path) {
+        Ok(f) => { let _ = f.take(4096).read_to_end(&mut buf); }
+        Err(_) => return String::new(),
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let text = text.trim_end();
+    if text.is_empty() { String::new() } else { format!(":\n{}", text) }
+}
+
 // ── remote_call ──────────────────────────────────────────────────────────────
 
 pub(crate) unsafe fn remote_call(
     midx: i32,
     socket_basename: *const c_char,
-    cache_path: *const c_char,
+    _cache_path: *const c_char,
     resources: *const Resources,
     arg_packets: *const *const u8,
     nargs: usize,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
     clear_errmsg(errmsg);
+    let args: Vec<*const u8> = (0..nargs).map(|i| *arg_packets.add(i)).collect();
+    match run_remote_job(midx, socket_basename, resources, &args) {
+        Ok(packet) => {
+            let out = libc::malloc(packet.len().max(1)) as *mut u8;
+            if out.is_null() {
+                set_errmsg(errmsg, &MorlocError::Other("remote_call: malloc failed".into()));
+                return ptr::null_mut();
+            }
+            ptr::copy_nonoverlapping(packet.as_ptr(), out, packet.len());
+            out
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            ptr::null_mut()
+        }
+    }
+}
 
-    // Use extern C declarations for functions from other modules
-    use crate::packet_ffi::read_schema_from_packet_meta;
-    use crate::ffi::parse_schema;
-    use crate::ffi::free_schema;
-    use crate::packet_ffi::get_morloc_data_packet_value;
-    use crate::cache::hash_voidstar;
-    use crate::utility::mix;
-    use crate::utility::mkdir_p;
-    use crate::cache::check_cache_packet;
-    use crate::cache::get_cache_packet;
-    use crate::cache::put_cache_packet;
-    use crate::cache::make_cache_filename;
-    use crate::cache::make_cache_filename_ext;
-    use crate::packet_ffi::make_morloc_remote_call_packet;
-    use crate::packet_ffi::morloc_packet_size;
-    use crate::utility::read_binary_file;
-    use crate::utility::write_atomic;
-    use crate::packet_ffi::get_morloc_data_packet_error_message;
-
-    let seed = midx as u64;
+/// A data packet holding an argument's value inline, readable by a nexus
+/// on another node.
+unsafe fn self_contained_arg(i: usize, packet: *const u8) -> Result<Vec<u8>, MorlocError> {
+    use crate::packet_ffi::{get_morloc_data_packet_value, read_schema_from_packet_meta};
     let mut err: *mut c_char = ptr::null_mut();
-    let _ = cache_path; // legacy arg ignored; cache now lives under the unified base.
-
-    // Resolve the remote-dispatch cache directory once. Replaces the
-    // legacy per-cwd `.morloc-cache` (which broke on compute nodes
-    // brought up by sbatch with a different cwd) with the unified
-    // `~/.cache/morloc/cache/_remote/` (overridable via
-    // `MORLOC_CACHE_BASE`). The compute-node nexus, brought up by
-    // sbatch on a different host, sees the same path because the env
-    // var is set in the nexus environment and shared FS hosts the cache.
-    let _cache_owned: CString = {
-        let label = CString::new("_remote").unwrap();
-        let path = crate::cache::morloc_cache_path(label.as_ptr(), &mut err);
-        if path.is_null() {
-            if !err.is_null() { *errmsg = err; }
-            return ptr::null_mut();
-        }
-        let cs = CStr::from_ptr(path).to_owned();
-        libc::free(path as *mut c_void);
-        cs
-    };
-    let cache_path: *const c_char = _cache_owned.as_ptr();
-
-    // Pool source fingerprint, parsed once from MORLOC_POOL_HASH and
-    // cached. Mixed into the cache key so that editing the morloc
-    // source (or any declared @hash-include@ file) invalidates every
-    // entry from this pool.
-    let pool_hash = crate::cache::morloc_pool_hash();
-
-    // Cleanup tracking
-    let mut return_packet: *mut u8 = ptr::null_mut();
-    let mut arg_hashes: Vec<u64> = vec![0; nargs];
-    let mut arg_voidstars: Vec<*mut u8> = vec![ptr::null_mut(); nargs];
-    let mut arg_schemas: Vec<*mut crate::cschema::CSchema> = vec![ptr::null_mut(); nargs];
-    let mut cached_arg_filenames: Vec<*mut c_char> = vec![ptr::null_mut(); nargs];
-    let mut cached_arg_packets: Vec<*mut u8> = vec![ptr::null_mut(); nargs];
-
-    let mut function_hash = mix(mix(pool_hash, seed), DEFAULT_XXHASH_SEED);
-
-    // Hash each argument
-    for i in 0..nargs {
-        let schema_str = read_schema_from_packet_meta(*arg_packets.add(i), &mut err);
-        if schema_str.is_null() || !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
-
-        arg_schemas[i] = parse_schema(schema_str, &mut err);
-        if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
-
-        // Cross-nexus argument restrictions. IStream and OStream carry
-        // per-nexus state (cursor / write buffer / open fd) that has no
-        // meaning in a fresh child nexus's registry, so we reject them
-        // at the boundary rather than shipping a handle the child can't
-        // interpret. IFile is allowed because both sides share the
-        // filesystem and the child can open the same path locally.
-        {
-            let rs = crate::cschema::CSchema::to_rust(arg_schemas[i]);
-            for (bad_kind, label) in [
-                (crate::handle_scan::StreamFieldKind::IStream, "IStream"),
-                (crate::handle_scan::StreamFieldKind::OStream, "OStream"),
-            ] {
-                if crate::handle_scan::schema_contains_kind(&rs, bad_kind) {
-                    set_errmsg(
-                        &mut err as *mut *mut c_char,
-                        &MorlocError::Other(format!(
-                            "remote_call: argument {} contains {}, which cannot cross \
-                             a nexus boundary; only IFile is supported in argument \
-                             position for cross-nexus calls",
-                            i, label,
-                        )),
-                    );
-                    goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
-                }
+    let schema_str = read_schema_from_packet_meta(packet, &mut err);
+    if schema_str.is_null() || !err.is_null() { return Err(take_reason(err)); }
+    let schema = crate::ffi::parse_schema(schema_str, &mut err);
+    if !err.is_null() { return Err(take_reason(err)); }
+    let result = (|| {
+        let rs = crate::cschema::CSchema::to_rust(schema);
+        for (kind, name) in [
+            (crate::handle_scan::StreamFieldKind::IStream, "IStream"),
+            (crate::handle_scan::StreamFieldKind::OStream, "OStream"),
+        ] {
+            if crate::handle_scan::schema_contains_kind(&rs, kind) {
+                return Err(MorlocError::Other(format!(
+                    "remote_call: argument {} contains {}, which cannot cross a nexus \
+                     boundary; only IFile is supported in argument position for \
+                     cross-nexus calls", i, name)));
             }
         }
+        let mut err: *mut c_char = ptr::null_mut();
+        let value = get_morloc_data_packet_value(packet, schema, &mut err);
+        if !err.is_null() { return Err(take_reason(err)); }
+        crate::cache::build_persistence_data_packet(value, schema, &mut err)
+            .ok_or_else(|| take_reason(err))
+    })();
+    crate::ffi::free_schema(schema);
+    result
+}
 
-        arg_voidstars[i] = get_morloc_data_packet_value(*arg_packets.add(i), arg_schemas[i], &mut err);
-        if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
-
-        let h = hash_voidstar(arg_voidstars[i] as *const c_void, arg_schemas[i], DEFAULT_XXHASH_SEED, &mut err);
-        if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
-        arg_hashes[i] = h;
-
-        function_hash = mix(function_hash, h);
-    }
-
-    mkdir_p(cache_path, &mut err);
-    if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
-
-    // Check if result is cached
-    let mut result_cache_filename = check_cache_packet(function_hash, cache_path, &mut err);
-    if !err.is_null() { libc::free(err as *mut c_void); err = ptr::null_mut(); }
-
-    if !result_cache_filename.is_null() {
-        return_packet = get_cache_packet(function_hash, cache_path, &mut err);
-        if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
+/// A fresh directory under the shared cache base for one job's files.
+unsafe fn make_job_dir() -> Result<std::path::PathBuf, MorlocError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let label = CString::new("_remote").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let base = crate::cache::morloc_cache_path(label.as_ptr(), &mut err);
+    if base.is_null() { return Err(take_reason(err)); }
+    let base_path = std::path::PathBuf::from(CStr::from_ptr(base).to_string_lossy().into_owned());
+    libc::free(base as *mut c_void);
+    let mut buf = [0u8; 256];
+    let host = if libc::gethostname(buf.as_mut_ptr() as *mut c_char, buf.len() - 1) == 0 {
+        CStr::from_ptr(buf.as_ptr() as *const c_char).to_string_lossy().into_owned()
     } else {
-        result_cache_filename = make_cache_filename(function_hash, cache_path, &mut err);
-        if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
-
-        // Cache arguments
-        for i in 0..nargs {
-            cached_arg_filenames[i] = check_cache_packet(arg_hashes[i], cache_path, &mut err);
-            if cached_arg_filenames[i].is_null() {
-                if !err.is_null() { libc::free(err as *mut c_void); err = ptr::null_mut(); }
-                cached_arg_filenames[i] = put_cache_packet(arg_voidstars[i], arg_schemas[i], arg_hashes[i], cache_path, &mut err);
-                if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
-            }
-        }
-
-        // Read cached arg packets
-        for i in 0..nargs {
-            let mut file_size: usize = 0;
-            cached_arg_packets[i] = read_binary_file(cached_arg_filenames[i], &mut file_size, &mut err);
-            if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
-
-            // Cross-nexus rewrite: intra-nexus bridges emit stream-
-            // handle fields in TAG_HANDLE form (bare slot id, valid
-            // only in the local SHM registry). Convert those to
-            // TAG_PATH so the child nexus can `mlc_open` locally.
-            // No-op for non-VOIDSTAR payloads.
-            let src_slice = std::slice::from_raw_parts(cached_arg_packets[i], file_size);
-            match crate::handle_scan::rewrite_data_packet_for_persistence(src_slice) {
-                Ok(rewritten) => {
-                    if rewritten.len() != file_size
-                        || rewritten.as_slice() != src_slice
-                    {
-                        let new_buf = libc::malloc(rewritten.len()) as *mut u8;
-                        if new_buf.is_null() {
-                            set_errmsg(
-                                &mut err as *mut *mut c_char,
-                                &MorlocError::Other(
-                                    "remote_call: malloc failed while rewriting arg packet"
-                                        .into(),
-                                ),
-                            );
-                            goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
-                        }
-                        std::ptr::copy_nonoverlapping(
-                            rewritten.as_ptr(), new_buf, rewritten.len(),
-                        );
-                        libc::free(cached_arg_packets[i] as *mut c_void);
-                        cached_arg_packets[i] = new_buf;
-                    }
-                }
-                Err(e) => {
-                    set_errmsg(&mut err as *mut *mut c_char, &e);
-                    goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
-                }
-            }
-        }
-
-        // Build call packet
-        let cached_ptrs: Vec<*const u8> = cached_arg_packets.iter().map(|p| *p as *const u8).collect();
-        let call_packet = make_morloc_remote_call_packet(midx as u32, cached_ptrs.as_ptr(), nargs, &mut err);
-        if !err.is_null() {
-            libc::free(call_packet as *mut c_void);
-            goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
-        }
-
-        let call_packet_size = morloc_packet_size(call_packet, &mut err);
-
-        // Hash call packet with xxhash
-        let call_packet_hash = crate::hash::xxh64_with_seed(std::slice::from_raw_parts(call_packet, call_packet_size), DEFAULT_XXHASH_SEED);
-
-        let call_ext = CString::new("-call.dat").unwrap();
-        let call_packet_filename = make_cache_filename_ext(call_packet_hash, cache_path, call_ext.as_ptr(), &mut err);
-
-        // Write call packet to disk
-        write_atomic(call_packet_filename, call_packet, call_packet_size, &mut err);
-        libc::free(call_packet as *mut c_void);
-
-        let out_ext = CString::new(".out").unwrap();
-        let err_ext = CString::new(".err").unwrap();
-        let output_filename = make_cache_filename_ext(function_hash, cache_path, out_ext.as_ptr(), &mut err);
-        let error_filename = make_cache_filename_ext(function_hash, cache_path, err_ext.as_ptr(), &mut err);
-
-        // Resolve the nexus path. MORLOC_NEXUS_PATH is exported by the
-        // nexus itself (main.rs) to every pool it spawns, so the
-        // wrap command we hand to sbatch is the same absolute binary
-        // path that ran us. No relative-path assumptions about the
-        // sbatch working directory.
-        let nexus_path = match std::env::var("MORLOC_NEXUS_PATH") {
-            Ok(p) if !p.is_empty() => p,
-            _ => {
-                set_errmsg(
-                    &mut err as *mut *mut c_char,
-                    &MorlocError::Other(
-                        "MORLOC_NEXUS_PATH is unset; remote dispatch requires \
-                         the pool to be spawned by a morloc nexus".into()));
-                goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
-            }
-        };
-        let nexus_c = CString::new(nexus_path).unwrap();
-        let pid = submit_morloc_slurm_job(
-            nexus_c.as_ptr(), socket_basename, call_packet_filename,
-            result_cache_filename, output_filename, error_filename,
-            resources, &mut err,
-        );
-
-        libc::free(call_packet_filename as *mut c_void);
-        libc::free(output_filename as *mut c_void);
-        libc::free(error_filename as *mut c_void);
-
-        if !err.is_null() { goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet); }
-
-        // Wait for job completion
-        while !slurm_job_is_complete(pid) {
-            libc::sleep(1);
-        }
-
-        let mut return_packet_size: usize = 0;
-        return_packet = read_binary_file(result_cache_filename, &mut return_packet_size, &mut err);
-        if return_packet.is_null() || !err.is_null() {
-            goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
-        }
-
-        // Structural check: the result file may be torn if the compute-node
-        // nexus crashed mid-write. Without this, downstream parsers would
-        // read past the end of the buffer or interpret garbage as headers.
-        let result_slice = std::slice::from_raw_parts(return_packet, return_packet_size);
-        if let Err(ve) = crate::packet::validate_packet(result_slice) {
-            set_errmsg(
-                &mut err as *mut *mut c_char,
-                &MorlocError::Packet(format!(
-                    "result packet for slurm job {} is malformed ({}); inspect the job's stderr",
-                    pid, ve
-                )),
-            );
-            // Drop the bogus result so a re-run actually re-runs.
-            libc::unlink(result_cache_filename);
-            goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
-        }
-
-        let failure = get_morloc_data_packet_error_message(return_packet, &mut err);
-        if !failure.is_null() {
-            eprintln!("Failed, deleting result {}", CStr::from_ptr(result_cache_filename).to_string_lossy());
-            libc::unlink(result_cache_filename);
-            libc::free(failure as *mut c_void);
-        }
-
-        // Cross-nexus return restriction: IStream cannot come back from
-        // a remote call (the child's cursor state is discarded when its
-        // nexus exits). IFile and OStream are allowed -- the child's
-        // filesystem path stays reachable via shared FS.
-        {
-            let ret_schema_str = read_schema_from_packet_meta(return_packet, &mut err);
-            if !ret_schema_str.is_null() && err.is_null() {
-                let ret_schema_c = parse_schema(ret_schema_str, &mut err);
-                libc::free(ret_schema_str as *mut c_void);
-                if err.is_null() && !ret_schema_c.is_null() {
-                    let rs = crate::cschema::CSchema::to_rust(ret_schema_c);
-                    let has_istream = crate::handle_scan::schema_contains_kind(
-                        &rs,
-                        crate::handle_scan::StreamFieldKind::IStream,
-                    );
-                    free_schema(ret_schema_c);
-                    if has_istream {
-                        set_errmsg(
-                            &mut err as *mut *mut c_char,
-                            &MorlocError::Other(
-                                "remote_call: result contains IStream, which cannot \
-                                 be returned from a cross-nexus call".into(),
-                            ),
-                        );
-                        libc::unlink(result_cache_filename);
-                        goto_cleanup!(errmsg, err, arg_schemas, cached_arg_filenames, cached_arg_packets, return_packet);
-                    }
-                }
-            }
-            // Any parse failure on the return schema is deferred to the
-            // downstream reader -- validation is a policy check, not a
-            // structural correctness check. The `err` local exits scope
-            // right after this block, so we only need to release the
-            // owning pointer, not reset the local.
-            if !err.is_null() { libc::free(err as *mut c_void); }
+        String::from("host")
+    };
+    loop {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let name = format!("{}-{}-{}-{}", host, std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed), nanos);
+        let dir = base_path.join(name);
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(MorlocError::Other(format!("cannot create {}: {}", dir.display(), e))),
         }
     }
+}
 
-    // Cleanup
-    for i in 0..nargs {
-        if !arg_schemas[i].is_null() { free_schema(arg_schemas[i]); }
-        if !cached_arg_filenames[i].is_null() { libc::free(cached_arg_filenames[i] as *mut c_void); }
-        if !cached_arg_packets[i].is_null() { libc::free(cached_arg_packets[i] as *mut c_void); }
+/// Why a remote call failed. A job that ran and failed keeps its directory,
+/// so its stderr can be read.
+enum JobError {
+    Call(MorlocError),
+    Job(MorlocError),
+}
+
+impl From<MorlocError> for JobError {
+    fn from(e: MorlocError) -> Self { JobError::Call(e) }
+}
+
+/// Run one labeled call as a SLURM job and return its result packet. The
+/// job's files live in a directory of their own, removed once the result
+/// is read.
+unsafe fn run_remote_job(
+    midx: i32,
+    socket_basename: *const c_char,
+    resources: *const Resources,
+    args: &[*const u8],
+) -> Result<Vec<u8>, MorlocError> {
+    let arg_bytes: Vec<Vec<u8>> = args
+        .iter()
+        .enumerate()
+        .map(|(i, p)| self_contained_arg(i, *p))
+        .collect::<Result<_, _>>()?;
+    let arg_ptrs: Vec<*const u8> = arg_bytes.iter().map(|b| b.as_ptr()).collect();
+    let mut err: *mut c_char = ptr::null_mut();
+    let call = crate::packet_ffi::make_morloc_remote_call_packet(midx as u32, arg_ptrs.as_ptr(), args.len(), &mut err);
+    if call.is_null() || !err.is_null() {
+        if !call.is_null() { libc::free(call as *mut c_void); }
+        return Err(take_reason(err));
     }
-    if !result_cache_filename.is_null() { libc::free(result_cache_filename as *mut c_void); }
+    let size = crate::packet_ffi::morloc_packet_size(call, &mut err);
+    let call_bytes = std::slice::from_raw_parts(call, size).to_vec();
+    libc::free(call as *mut c_void);
+    if !err.is_null() { return Err(take_reason(err)); }
 
-    return_packet
-}
+    let nexus = CString::new(nexus_env("MORLOC_NEXUS_PATH").map_err(MorlocError::Other)?)
+        .map_err(|_| MorlocError::Other("MORLOC_NEXUS_PATH contains a NUL byte".into()))?;
+    let manifest = nexus_env("MORLOC_MANIFEST_PATH").map_err(MorlocError::Other)?;
 
-// Cleanup macro for goto-like pattern
-macro_rules! goto_cleanup {
-    ($errmsg:expr, $err:expr, $schemas:expr, $filenames:expr, $packets:expr, $return_packet:expr) => {{
-        *$errmsg = $err;
-        for i in 0..$schemas.len() {
-            if !$schemas[i].is_null() {
-                use crate::ffi::free_schema;
-                free_schema($schemas[i]);
-            }
-            if !$filenames[i].is_null() { libc::free($filenames[i] as *mut c_void); }
-            if !$packets[i].is_null() { libc::free($packets[i] as *mut c_void); }
+    let dir = make_job_dir()?;
+    let result = submit_and_wait(&dir, &nexus, &manifest, socket_basename, resources, &call_bytes);
+    match result {
+        Ok(packet) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            Ok(packet)
         }
-        return $return_packet;
-    }};
+        Err(JobError::Call(e)) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            Err(e)
+        }
+        Err(JobError::Job(e)) => Err(e),
+    }
 }
-use goto_cleanup;
+
+unsafe fn submit_and_wait(
+    dir: &std::path::Path,
+    nexus: &CStr,
+    manifest: &str,
+    socket_basename: *const c_char,
+    resources: *const Resources,
+    call_bytes: &[u8],
+) -> Result<Vec<u8>, JobError> {
+    let c_path = |name: &str| {
+        CString::new(dir.join(name).to_string_lossy().as_bytes())
+            .map_err(|_| MorlocError::Other(format!("{} contains a NUL byte", dir.display())))
+    };
+    std::fs::write(dir.join("call.dat"), call_bytes)
+        .map_err(|e| MorlocError::Other(format!("cannot write the call packet in {}: {}", dir.display(), e)))?;
+    let (call_c, result_c, out_c, stderr_c) = (c_path("call.dat")?, c_path("result.dat")?, c_path("job.out")?, c_path("job.err")?);
+    let mut err: *mut c_char = ptr::null_mut();
+    let job = submit_morloc_slurm_job(
+        nexus.as_ptr(), manifest, socket_basename, call_c.as_ptr(),
+        result_c.as_ptr(), out_c.as_ptr(), stderr_c.as_ptr(), resources, &mut err,
+    );
+    if !err.is_null() { return Err(take_reason(err).into()); }
+
+    let stderr = dir.join("job.err").to_string_lossy().into_owned();
+    let end_state = loop {
+        match slurm_job_end_state(job) {
+            Some(state) => break state,
+            None => { libc::sleep(1); }
+        }
+    };
+    if end_state != "COMPLETED" {
+        return Err(JobError::Job(MorlocError::Other(format!(
+            "SLURM job {} ended {}; its stderr is {}{}",
+            job, end_state, stderr, job_stderr_head(&stderr)))));
+    }
+    let packet = std::fs::read(dir.join("result.dat")).map_err(|_| JobError::Job(MorlocError::Other(format!(
+        "SLURM job {} completed without writing its result; its stderr is {}", job, stderr))))?;
+    if let Err(e) = crate::packet::validate_packet(&packet) {
+        return Err(JobError::Job(MorlocError::Packet(format!(
+            "result packet for SLURM job {} is malformed ({}); its stderr is {}", job, e, stderr))));
+    }
+
+    // A job's IStream result would name a cursor in the job's own nexus,
+    // which is gone once the job ends. A packet without a readable schema
+    // (a failure) is passed on for its reader to report.
+    let mut err: *mut c_char = ptr::null_mut();
+    let schema_str = crate::packet_ffi::read_schema_from_packet_meta(packet.as_ptr(), &mut err);
+    if !schema_str.is_null() && err.is_null() {
+        let schema = crate::ffi::parse_schema(schema_str, &mut err);
+        if err.is_null() && !schema.is_null() {
+            let rs = crate::cschema::CSchema::to_rust(schema);
+            crate::ffi::free_schema(schema);
+            if crate::handle_scan::schema_contains_kind(&rs, crate::handle_scan::StreamFieldKind::IStream) {
+                return Err(MorlocError::Other(
+                    "remote_call: result contains IStream, which cannot be returned from a \
+                     cross-nexus call".into()).into());
+            }
+        }
+    }
+    if !err.is_null() { libc::free(err as *mut c_void); }
+    Ok(packet)
+}
 
 mod c_abi {
     use super::*;
@@ -596,5 +481,23 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn remote_call(midx: i32, socket_basename: *const c_char, cache_path: *const c_char, resources: *const Resources, arg_packets: *const *const u8, nargs: usize, errmsg: *mut *mut c_char) -> *mut u8 {
         super::remote_call(midx, socket_basename, cache_path, resources, arg_packets, nargs, errmsg)
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+
+    #[test]
+    fn an_unset_resource_is_left_to_the_cluster_default() {
+        let none = Resources { memory: -1, time: -1, cpus: -1, gpus: 0 };
+        assert!(sbatch_resource_args(&none).is_empty());
+        let zero = Resources { memory: 0, time: 0, cpus: 0, gpus: 0 };
+        assert_eq!(sbatch_resource_args(&zero), ["--mem=0G", "--time=0-00:00:00"]);
+        let all = Resources { memory: 32, time: 90061, cpus: 8, gpus: 2 };
+        assert_eq!(
+            sbatch_resource_args(&all),
+            ["--mem=32G", "--time=1-01:01:01", "--cpus-per-task=8", "--gres=gpu:2"]
+        );
     }
 }

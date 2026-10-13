@@ -122,28 +122,15 @@ helperTable :: [Tree] -> MorlocMonad (Map.Map EVar Helper)
 helperTable trees = do
   names <- MM.gets stateName
   stages <- MM.gets stateRecStages
-  config <- MM.gets stateManifoldConfig
   return $ Map.fromList
     [ (v, Helper t vs static)
     | t@(AnnoS (Idx gi ht) _ (LamS vs body)) <- trees
     , Just v <- [Map.lookup gi names]
     , not (Map.member v stages)
-    , not (maybe False observed (Map.lookup gi config))
     , maybe False (>= length vs) (inputCount ht)
     , Just static <- [staticPositions v vs body]
     , not (Set.null static)
     ]
-
--- | A manifold configuration that attaches something to the manifold's own
--- identity (a cache, a benchmark, a log line, a label, a remote placement),
--- which a copy would duplicate or detach.
-observed :: ManifoldConfig -> Bool
-observed c =
-  manifoldConfigCache c == Just True
-    || manifoldConfigBenchmark c == Just True
-    || manifoldConfigLog c == Just True
-    || isJust (manifoldConfigLabel c)
-    || isJust (manifoldConfigRemote c)
 
 -- | The number of inputs a function type shows, through any effect around it.
 -- Nothing for anything else (an alias is not looked through: a type whose

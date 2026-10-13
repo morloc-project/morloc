@@ -912,9 +912,18 @@ genericRemoteCall desc socketFile mid res args = do
             , ("cpus", resCPU)
             , ("gpus", resGPU)
             ]
+      argsDoc = case ldListStyle desc of
+        BracketList -> list args
+        _ -> pretty (ldGenericListFn desc) <> tupled args
       call =
         remoteFn
-          <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resPacked, list args]
+          <> tupled
+            [ pretty mid <> pretty (ldForeignCallIntSuffix desc)
+            , dquotes socketFile
+            , dquotes ".morloc-cache"
+            , resPacked
+            , argsDoc
+            ]
   return $ defaultValue {poolExpr = call}
 
 makeGenericSocketPath :: LangDescriptor -> MDoc -> MDoc

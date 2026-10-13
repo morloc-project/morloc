@@ -6,9 +6,9 @@
 nexus (one per program run, or one long-running daemon / MCP server)
   |-- pool per language (C++, Python, R, Rust), fork+exec
   |     |-- Python/R fork-mode workers, fork without exec
+  |     |-- sbatch and sacct for a remote label (SLURM), spawned and waited for
   |     |-- user code may fork further (multiprocessing, mclapply, fork())
-  |-- `morloc eval` / `typecheck` children (daemon only), fork+exec
-  `-- sbatch children (SLURM), fork+exec
+  `-- `morloc eval` / `typecheck` children (daemon only), fork+exec
 ```
 
 - The nexus creates the shared-memory namespace (volumes and the stream

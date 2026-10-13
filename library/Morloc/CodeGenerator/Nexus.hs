@@ -1011,6 +1011,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- times or more than once, is refused above.
     toNexusExpr (AnnoS _ _ (DoBlockS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (EvalS e)) = toNexusExpr e
+    toNexusExpr (AnnoS (Idx i _) _ (LabelS _ _)) =
+      MM.throwSourcedError i
+        "A label needs a language pool to run its hooks, and this command runs without one; label a sourced function, or a function that calls one."
     -- CoerceToOptional changes the value's runtime layout: the voidstar
     -- slot becomes a relptr (RELNULL = absent, otherwise points to T's
     -- body). The eval path allocates T at the cursor and stores the

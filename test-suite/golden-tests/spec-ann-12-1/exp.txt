@@ -1,0 +1,10 @@
+"worker:1"
+jobs 1 kept 0
+"worker:1"
+jobs 2 kept 0
+"worker:2"
+jobs 3 kept 0
+"worker:2"
+jobs 3 kept 0
+exit 1
+jobs 4 kept 1

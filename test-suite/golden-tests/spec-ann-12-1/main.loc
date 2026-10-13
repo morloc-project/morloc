@@ -1,0 +1,18 @@
+-- A remote job's files last only as long as the call (ANN-12): every run
+-- of `plain` submits a job, and a job that succeeds leaves nothing in the
+-- cache base. A label that also asks for `cache` keeps the result as any
+-- cached call does, so the second run of `cached` submits no job. A job
+-- that fails keeps its files for its stderr.
+module main (plain, cached)
+
+import root-py
+
+source Py from "lib.py" ("here")
+
+here :: Int -> Str
+
+plain :: Int -> Str
+plain x = r@here x
+
+cached :: Int -> Str
+cached x = rc@here x

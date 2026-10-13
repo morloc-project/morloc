@@ -161,9 +161,7 @@ fn cache_base() -> Result<PathBuf, String> {
 
 /// Resolve the per-label cache directory, creating it on demand. Returns
 /// an absolute path string the caller frees via `libc::free`. NULL on
-/// failure. A NULL or empty `label` resolves to the synthetic
-/// `_unlabeled` subdirectory so legacy unlabeled callers (the SLURM
-/// remote-call cache today) stay segregated from user-labeled entries.
+/// failure. A NULL or empty `label` resolves to `_unlabeled`.
 pub(crate) unsafe fn morloc_cache_path(
     label: *const c_char,
     errmsg: *mut *mut c_char,
@@ -538,9 +536,7 @@ pub(crate) unsafe fn morloc_cache_store(
     }
 
     let rs = CSchema::to_rust(schema);
-    // Structural hash matches the caller-side lookup key semantics
-    // (see slurm_ffi::remote_call using `hash_voidstar`) so store and
-    // lookup agree. Seed 0 is the shared default across the runtime.
+    // Seed 0 is the shared default across the runtime.
     let data_hash = match hash_voidstar_value(voidstar as *const u8, &rs, 0) {
         Ok(h) => h,
         Err(e) => {
@@ -1085,112 +1081,6 @@ pub(crate) unsafe fn build_persistence_data_packet(
     out.extend_from_slice(&metadata);
     out.extend_from_slice(&payload);
     Some(out)
-}
-
-// ── Cache operations ───────────────────────────────────────────────────────
-
-pub(crate) unsafe fn put_cache_packet(
-    voidstar: *const u8,
-    schema: *const CSchema,
-    key: u64,
-    cache_path: *const c_char,
-    errmsg: *mut *mut c_char,
-) -> *mut c_char {
-    clear_errmsg(errmsg);
-
-    let mut err: *mut c_char = ptr::null_mut();
-
-    let pkt_filename = make_cache_filename(key, cache_path, &mut err);
-    if pkt_filename.is_null() {
-        *errmsg = err;
-        return ptr::null_mut();
-    }
-
-    // One file per cache entry: the caller-supplied `key` here is
-    // already `hash_voidstar(arg_voidstars[i])`, so key == content
-    // hash and the "indirection" packet degenerates to the data
-    // packet itself.
-    let packet_bytes = match build_persistence_data_packet(voidstar, schema, &mut err) {
-        Some(b) => b,
-        None => {
-            libc::free(pkt_filename as *mut c_void);
-            if !err.is_null() { *errmsg = err; }
-            return ptr::null_mut();
-        }
-    };
-
-    let rc = write_atomic(
-        pkt_filename,
-        packet_bytes.as_ptr(),
-        packet_bytes.len(),
-        &mut err,
-    );
-    if rc != 0 {
-        libc::free(pkt_filename as *mut c_void);
-        if !err.is_null() { *errmsg = err; }
-        return ptr::null_mut();
-    }
-
-    let result = libc::strdup(pkt_filename);
-    libc::free(pkt_filename as *mut c_void);
-    result
-}
-
-pub(crate) unsafe fn get_cache_packet(
-    key: u64,
-    cache_path: *const c_char,
-    errmsg: *mut *mut c_char,
-) -> *mut u8 {
-    clear_errmsg(errmsg);
-    let mut err: *mut c_char = ptr::null_mut();
-
-    let filename = make_cache_filename(key, cache_path, &mut err);
-    if filename.is_null() {
-        *errmsg = err;
-        return ptr::null_mut();
-    }
-    read_and_validate_cache_file(filename, ptr::null_mut(), errmsg)
-}
-
-pub(crate) unsafe fn check_cache_packet(
-    key: u64,
-    cache_path: *const c_char,
-    errmsg: *mut *mut c_char,
-) -> *mut c_char {
-    clear_errmsg(errmsg);
-    let mut err: *mut c_char = ptr::null_mut();
-
-    let filename = make_cache_filename(key, cache_path, &mut err);
-    if filename.is_null() {
-        *errmsg = err;
-        return ptr::null_mut();
-    }
-
-    // Cache existence + format check on the hot SLURM dispatch path.
-    // Bounded peek: PacketHeader is 32 B, the filename payload rarely
-    // exceeds a few hundred bytes, so 4 KiB is a safe upper bound
-    // that covers the whole indirection while avoiding the full-file
-    // read a stale/oversized entry would trigger.
-    let fd = libc::open(filename, libc::O_RDONLY | libc::O_CLOEXEC);
-    if fd < 0 {
-        libc::free(filename as *mut c_void);
-        return ptr::null_mut(); // miss / unreadable
-    }
-    let mut buf: [u8; 4096] = [0; 4096];
-    let n = libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len());
-    libc::close(fd);
-    if n < 32 {
-        libc::unlink(filename);
-        libc::free(filename as *mut c_void);
-        return ptr::null_mut();
-    }
-    if !cache_entry_is_valid(filename, buf.as_ptr(), n as usize) {
-        libc::free(filename as *mut c_void);
-        return ptr::null_mut();
-    }
-    let result = libc::strdup(filename);
-    libc::free(filename as *mut c_void);
-    result
 }
 
 #[cfg(test)]

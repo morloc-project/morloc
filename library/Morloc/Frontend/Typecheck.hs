@@ -430,6 +430,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (DoBlockS e') = DoBlockS (resolveTypes e')
     f (EvalS e') = EvalS (resolveTypes e')
     f (CoerceS c e') = CoerceS c (resolveTypes e')
+    f (LabelS k e') = LabelS k (resolveTypes e')
     f (IfS c t' e') = IfS (resolveTypes c) (resolveTypes t') (resolveTypes e')
     f (IntrinsicS intr es) = IntrinsicS intr (map resolveTypes es)
 
@@ -556,6 +557,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f _ g0 (DoBlockS e) = resolveInstances g0 e |>> second DoBlockS
     f _ g0 (EvalS e) = resolveInstances g0 e |>> second EvalS
     f _ g0 (CoerceS c e) = resolveInstances g0 e |>> second (CoerceS c)
+    f _ g0 (LabelS k e) = resolveInstances g0 e |>> second (LabelS k)
     f _ g0 (IfS c t e) = do
       (g1, c') <- resolveInstances g0 c
       (g2, t') <- resolveInstances g1 t
@@ -1485,6 +1487,9 @@ synthE i g (DoBlockS e) = do
 synthE _ g (CoerceS coercion e) = do
   (g1, t1, e1) <- synthG g e
   return (g1, applyCoercion coercion t1, CoerceS coercion e1)
+synthE _ g (LabelS k e) = do
+  (g1, t1, e1) <- synthG g e
+  return (g1, t1, LabelS k e1)
 synthE i g (EvalS e) = do
   (g1, t1, e1) <- synthG g e
   (g1', t1') <- forcedView g1 t1
@@ -3233,6 +3238,7 @@ collectDoEffects = go
       IfS c t e -> go c `effUnion` go t `effUnion` go e
       DoBlockS e -> go e
       CoerceS _ e -> go e
+      LabelS _ e -> go e
       IntrinsicS _ es -> unions (map go es)
       _ -> emptyEffectSet
 
@@ -3277,6 +3283,7 @@ inferExprEffects = go
       NamS rs -> unions (map (go . snd) rs)
       IfS c t e -> go c `effUnion` go t `effUnion` go e
       CoerceS _ e -> go e
+      LabelS _ e -> go e
       IntrinsicS _ es -> unions (map go es)
       -- Thunk boundaries: their effects live in the type, not in the
       -- evaluation of the surrounding expression.
@@ -3404,6 +3411,7 @@ uncoveredEvalIdxs uncovered = go
       NamS rs -> concatMap (go . snd) rs
       IfS c t e -> go c ++ go t ++ go e
       CoerceS _ e -> go e
+      LabelS _ e -> go e
       IntrinsicS _ es -> concatMap go es
       _ -> []
 
@@ -3648,6 +3656,7 @@ peakSExpr (CallS v) = "CallS" <+> pretty v
 peakSExpr (DoBlockS _) = "DoBlockS"
 peakSExpr (EvalS _) = "EvalS"
 peakSExpr (CoerceS _ _) = "CoerceS"
+peakSExpr (LabelS _ _) = "LabelS"
 peakSExpr (IfS _ _ _) = "IfS"
 peakSExpr (IntrinsicS intr _) = "@" <> pretty (intrinsicName intr)
 

@@ -204,11 +204,10 @@ data ManifoldConfig = ManifoldConfig
   , manifoldConfigLabel :: Maybe Text
   , manifoldConfigLogTemplate :: Maybe LogTemplate
   , manifoldConfigLabelIdx :: Maybe Int
-  -- ^ The ExprI index where the label was attached. Set by 'collectTags'
-  -- when a labeled VarE is registered and preserved by
-  -- 'propagateManifoldLabel'. Used at codegen to look up the source
-  -- position (for @{module}@/@{line}@/@{column}@) and the term name
-  -- (for @{name}@). Not user-facing; absent from YAML.
+  -- ^ The index of the labeled reference, set when the label is placed
+  -- (Treeify). Codegen looks up the source position (for
+  -- @{module}@/@{line}@/@{column}@) and the name (for @{name}@) there. Not
+  -- user-facing; absent from YAML.
   }
   deriving (Show, Ord, Eq, Generic)
 
@@ -974,6 +973,10 @@ data ExprS g f c
   | EvalS (AnnoS g f c)
   | CoerceS Coercion (AnnoS g f c)
   | IntrinsicS Intrinsic [AnnoS g f c]
+  -- | A labeled function (@lab\@h@), or a labeled call once applied. The
+  -- index keys the label's configuration in 'stateManifoldConfig'; it names
+  -- no node, so no pass renumbers it.
+  | LabelS Int (AnnoS g f c)
 
 data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName EVar EType [(EType, [a])]
   deriving (Show, Eq, Ord)
@@ -1152,6 +1155,7 @@ mapExprSM f (DoBlockS e) = DoBlockS <$> f e
 mapExprSM f (EvalS e) = EvalS <$> f e
 mapExprSM f (CoerceS c e) = CoerceS c <$> f e
 mapExprSM f (IntrinsicS intr es) = IntrinsicS intr <$> mapM f es
+mapExprSM f (LabelS k e) = LabelS k <$> f e
 
 mapAnnoSM ::
   (Traversable f, Monad m) =>
@@ -1206,6 +1210,7 @@ foldExprS f (IfS c t e)       = f c <> f t <> f e
 foldExprS f (DoBlockS x)      = f x
 foldExprS f (EvalS x)         = f x
 foldExprS f (CoerceS _ x)     = f x
+foldExprS f (LabelS _ x)      = f x
 foldExprS f (IntrinsicS _ xs) = foldMap f xs
 foldExprS f (ConS _ _ _ xs)   = foldMap f xs
 foldExprS _ UniS              = mempty
@@ -1420,6 +1425,7 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (EvalS e) = "(EvalS" <+> pretty e <> ")"
   pretty (CoerceS c e) = "(CoerceS" <+> viaShow c <+> pretty e <> ")"
   pretty (IntrinsicS intr es) = "(IntrinsicS" <+> viaShow intr <+> list (map pretty es) <> ")"
+  pretty (LabelS k e) = "(LabelS" <+> pretty k <+> pretty e <> ")"
 
 instance Pretty ExecutableExpr where
   pretty (SrcCall src) = pretty src
