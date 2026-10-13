@@ -28,7 +28,7 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::io::RawFd;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::value::RawValue;
@@ -309,6 +309,7 @@ pub fn serve(
         sockets_ptr: c_sockets.as_mut_ptr() as *mut c_void,
         n_pools: c_sockets.len(),
         shm: CString::new(shm_basename).unwrap(),
+        calls: CallSlots::new(1),
     };
 
     // Every servable tool's shape; excluded commands are dropped with a
@@ -555,6 +556,42 @@ struct DispatchCtx {
     sockets_ptr: *mut c_void,
     n_pools: usize,
     shm: CString,
+    calls: CallSlots,
+}
+
+// DAEMON-16
+unsafe impl Send for DispatchCtx {}
+unsafe impl Sync for DispatchCtx {}
+
+/// The calls a server runs at once (DAEMON-16); a call past them waits.
+struct CallSlots {
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+struct CallSlot<'a>(&'a CallSlots);
+
+impl Drop for CallSlot<'_> {
+    fn drop(&mut self) {
+        // PANIC-4
+        let mut free = self.0.free.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
+        *free += 1;
+        self.0.freed.notify_one();
+    }
+}
+
+impl CallSlots {
+    fn new(n: usize) -> Self {
+        CallSlots { free: Mutex::new(n), freed: Condvar::new() }
+    }
+
+    fn take(&self) -> CallSlot<'_> {
+        // PANIC-4
+        let free = self.free.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
+        let mut free = self.freed.wait_while(free, |n| *n == 0).unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
+        *free -= 1;
+        CallSlot(self)
+    }
 }
 
 /// Why a dispatch failed: the request itself (an unknown command or action,
@@ -573,6 +610,7 @@ impl DispatchCtx {
     /// (a fast no-op when all pools are alive) before returning, so a
     /// subsequent call can succeed.
     fn dispatch(&self, request_str: &str, command: &str) -> Result<Value, DispatchError> {
+        let _slot = self.calls.take();
         // SHM-8: a pool that ended since the last call is recovered first.
         process::mcp_recover_pools(self.n_pools);
         let req_c = CString::new(request_str).unwrap();
@@ -1007,33 +1045,79 @@ const SESSION_TTL: Duration = Duration::from_secs(3600);
 /// Hard cap on live sessions (backstop against initialize floods).
 const MAX_SESSIONS: usize = 10_000;
 
-/// One session's state: the handshake flag plus a last-seen stamp for TTL
-/// eviction.
+/// One session's state: the handshake flag, a last-seen stamp for TTL
+/// eviction, and the requests it has in progress.
 struct SessionInfo {
     initialized: bool,
     last_seen: Instant,
+    in_flight: usize,
 }
 
-/// Shared server state guarded by one mutex. The raw C pointers address the
-/// leaked (process-lifetime) manifest and socket array; they are only ever
-/// dereferenced while the mutex is held, so no dispatch interleaves with
-/// another (see `unsafe impl Send`).
-struct HttpState {
-    manifest_c: *mut c_void,
-    sockets_ptr: *mut c_void,
-    n_pools: usize,
-    shm: CString,
-    shapes: Vec<McpToolShape>,
+/// The MCP sessions of an HTTP server, bounded by TTL + MAX_SESSIONS
+/// (DAEMON-16).
+struct Sessions(Mutex<HashMap<String, SessionInfo>>);
+
+impl Sessions {
+    fn new() -> Self {
+        Sessions(Mutex::new(HashMap::new()))
+    }
+
+    /// Admit one request: the session it names, or a new one on `initialize`,
+    /// with its handshake flag; otherwise the reply refusing it.
+    fn begin(&self, method: &str, sid: Option<&str>, keep_alive: bool) -> Result<(String, bool), Vec<u8>> {
+        let now = Instant::now();
+        // PANIC-4
+        let Ok(mut sessions) = self.0.lock() else { return Err(poisoned_reply()) };
+        if method == "initialize" {
+            if !prune_sessions(&mut sessions, now) {
+                return Err(http_json(503, br#"{"error":"too many sessions"}"#, keep_alive));
+            }
+            let id = new_session_id();
+            sessions.insert(id.clone(), SessionInfo { initialized: false, last_seen: now, in_flight: 1 });
+            return Ok((id, false));
+        }
+        let Some(id) = sid else {
+            return Err(http_json(400, br#"{"error":"missing Mcp-Session-Id header"}"#, keep_alive));
+        };
+        match sessions.get_mut(id) {
+            Some(s) => {
+                s.in_flight += 1;
+                s.last_seen = now;
+                Ok((id.to_string(), s.initialized))
+            }
+            None => Err(http_json(404, br#"{"error":"unknown or expired session; re-initialize"}"#, keep_alive)),
+        }
+    }
+
+    /// End a request `begin` admitted; false if the table is poisoned.
+    fn end(&self, id: &str, initialized: bool) -> bool {
+        // PANIC-4
+        let Ok(mut sessions) = self.0.lock() else { return false };
+        if let Some(s) = sessions.get_mut(id) {
+            s.in_flight -= 1;
+            s.initialized |= initialized;
+            s.last_seen = Instant::now();
+        }
+        true
+    }
+
+    fn remove(&self, id: &str) -> bool {
+        // PANIC-4
+        let Ok(mut sessions) = self.0.lock() else { return false };
+        sessions.remove(id);
+        true
+    }
+}
+
+/// An MCP server over HTTP.
+struct HttpServer {
+    ctx: DispatchCtx,
+    by_name: HashMap<&'static str, &'static McpToolShape>,
     tools_list: Vec<Value>,
     server_name: String,
     server_version: String,
-    /// Session id -> handshake + last-seen state. Bounded by TTL + MAX_SESSIONS.
-    sessions: HashMap<String, SessionInfo>,
+    sessions: Sessions,
 }
-
-// Safe because every access to the raw pointers happens under the mutex, and
-// the pointed-to allocations live for the whole process (leaked in serve_http).
-unsafe impl Send for HttpState {}
 
 /// Serve the program's MCP tool surface over HTTP. Never returns.
 pub fn serve_http(
@@ -1058,20 +1142,23 @@ pub fn serve_http(
     std::mem::forget(boxed);
     std::mem::forget(keepalive);
 
-    let shapes: Vec<McpToolShape> = build_tool_shapes(manifest);
+    let shapes: &'static [McpToolShape] = Box::leak(build_tool_shapes(manifest).into_boxed_slice());
     let tools_list: Vec<Value> = shapes.iter().map(|s| s.tool.clone()).collect();
 
-    let state = Arc::new(Mutex::new(HttpState {
-        manifest_c,
-        sockets_ptr,
-        n_pools,
-        shm: CString::new(shm_basename).unwrap(),
-        shapes,
+    let state = Arc::new(HttpServer {
+        ctx: DispatchCtx {
+            manifest_c,
+            sockets_ptr,
+            n_pools,
+            shm: CString::new(shm_basename).unwrap(),
+            calls: CallSlots::new(morloc_runtime_types::daemon_socket::daemon_workers(n_pools)),
+        },
+        by_name: shapes.iter().map(|s| (s.name.as_str(), s)).collect(),
         tools_list,
         server_name: manifest.name.clone(),
         server_version: manifest.build.morloc_version.clone(),
-        sessions: HashMap::new(),
-    }));
+        sessions: Sessions::new(),
+    });
 
     let addr = format!("{}:{}", bind_host, port);
     let listener = match TcpListener::bind(&addr) {
@@ -1125,9 +1212,6 @@ pub fn serve_http(
     process::clean_exit(0);
 }
 
-/// One HTTP connection: read requests (keep-alive) and reply. Socket reads run
-/// off the mutex; only `build_response`'s dispatch section locks it, so a slow
-/// client never blocks others from executing.
 /// One keep-alive HTTP connection: read requests until EOF/timeout/`close` and
 /// reply, delegating each request to `respond`. Shared by the single-program
 /// MCP server and the multi-module front-end, which differ only in how they
@@ -1276,7 +1360,7 @@ fn read_capped_line<R: BufRead>(reader: &mut R, buf: &mut String) -> std::io::Re
 /// Auth-check, route on method+path, and produce the full HTTP response bytes.
 fn build_response(
     req: &HttpRequest,
-    state: &Arc<Mutex<HttpState>>,
+    state: &HttpServer,
     token: Option<&str>,
     keep_alive: bool,
 ) -> Vec<u8> {
@@ -1307,7 +1391,7 @@ fn build_response(
 /// notification). Session created on `initialize`, required on everything else.
 fn handle_http_post(
     req: &HttpRequest,
-    state: &Arc<Mutex<HttpState>>,
+    state: &HttpServer,
     keep_alive: bool,
 ) -> Vec<u8> {
     let msg = match RpcMessage::parse(&req.body) {
@@ -1320,77 +1404,24 @@ fn handle_http_post(
         }
     };
     let method = msg.method.as_deref().unwrap_or("");
-    let sid_hdr = header_get(&req.headers, "mcp-session-id").map(|s| s.to_string());
-
-    // PANIC-4
-    let Ok(mut guard) = state.lock() else { return poisoned_reply() };
-
-    // Resolve (or, on initialize, create) the session.
-    let now = Instant::now();
-    let (session_id, prior_init) = if method == "initialize" {
-        // Evict idle/overflow sessions before minting a new one so the table
-        // stays bounded even when clients never send DELETE.
-        prune_sessions(&mut guard.sessions, now);
-        let id = new_session_id();
-        guard.sessions.insert(
-            id.clone(),
-            SessionInfo { initialized: false, last_seen: now },
-        );
-        (id, false)
-    } else {
-        match sid_hdr {
-            None => {
-                return http_json(
-                    400,
-                    br#"{"error":"missing Mcp-Session-Id header"}"#,
-                    keep_alive,
-                );
-            }
-            Some(id) => match guard.sessions.get(&id) {
-                Some(s) => (id, s.initialized),
-                None => {
-                    return http_json(
-                        404,
-                        br#"{"error":"unknown or expired session; re-initialize"}"#,
-                        keep_alive,
-                    );
-                }
-            },
-        }
+    let sid_hdr = header_get(&req.headers, "mcp-session-id");
+    let (session_id, prior_init) = match state.sessions.begin(method, sid_hdr, keep_alive) {
+        Ok(admitted) => admitted,
+        Err(reply) => return reply,
     };
-
-    // Run the shared message core under the lock (serializes dispatch). The
-    // per-request name->shape map borrows the shared shapes (no name copies) and
-    // keeps the shapes owned by the state.
-    let (resp_opt, new_init) = {
-        let ctx = DispatchCtx {
-            manifest_c: guard.manifest_c,
-            sockets_ptr: guard.sockets_ptr,
-            n_pools: guard.n_pools,
-            shm: guard.shm.clone(),
-        };
-        let by_name: HashMap<&str, &McpToolShape> =
-            guard.shapes.iter().map(|s| (s.name.as_str(), s)).collect();
-        let mut sess = Session {
-            initialized: prior_init,
-        };
-        let r = handle_message(
-            &msg,
-            &mut sess,
-            &guard.tools_list,
-            &by_name,
-            &ctx,
-            &guard.server_name,
-            &guard.server_version,
-        );
-        (r, sess.initialized)
-    };
-    // Touch the session (refresh last_seen and persist the handshake flag).
-    guard.sessions.insert(
-        session_id.clone(),
-        SessionInfo { initialized: new_init, last_seen: now },
+    let mut sess = Session { initialized: prior_init };
+    let resp_opt = handle_message(
+        &msg,
+        &mut sess,
+        &state.tools_list,
+        &state.by_name,
+        &state.ctx,
+        &state.server_name,
+        &state.server_version,
     );
-    drop(guard);
+    if !state.sessions.end(&session_id, sess.initialized) {
+        return poisoned_reply();
+    }
 
     // A newly created session (only `initialize` mints one) is announced via the
     // Mcp-Session-Id header so the client echoes it on subsequent requests.
@@ -1409,16 +1440,12 @@ fn handle_http_post(
 /// A `DELETE /mcp`: end the named session.
 fn handle_http_delete(
     req: &HttpRequest,
-    state: &Arc<Mutex<HttpState>>,
+    state: &HttpServer,
     keep_alive: bool,
 ) -> Vec<u8> {
     match header_get(&req.headers, "mcp-session-id") {
-        Some(id) => {
-            // PANIC-4
-            let Ok(mut g) = state.lock() else { return poisoned_reply() };
-            g.sessions.remove(id);
-            http_json(200, br#"{"ok":true}"#, keep_alive)
-        }
+        Some(id) if state.sessions.remove(id) => http_json(200, br#"{"ok":true}"#, keep_alive),
+        Some(_) => poisoned_reply(),
         None => http_json(400, br#"{"error":"missing Mcp-Session-Id header"}"#, keep_alive),
     }
 }
@@ -1474,20 +1501,24 @@ fn new_session_id() -> String {
 /// the oldest until there is room for one more below `MAX_SESSIONS`. Called on
 /// `initialize` (before minting a new id), so a client that never sends
 /// `DELETE /mcp` cannot grow the table without limit.
-fn prune_sessions(sessions: &mut HashMap<String, SessionInfo>, now: Instant) {
-    sessions.retain(|_, s| now.duration_since(s.last_seen) < SESSION_TTL);
+/// False when no session can go because every one has a request in progress.
+fn prune_sessions(sessions: &mut HashMap<String, SessionInfo>, now: Instant) -> bool {
+    // DAEMON-16
+    sessions.retain(|_, s| s.in_flight > 0 || now.duration_since(s.last_seen) < SESSION_TTL);
     while sessions.len() >= MAX_SESSIONS {
         let oldest = sessions
             .iter()
+            .filter(|(_, s)| s.in_flight == 0)
             .min_by_key(|(_, s)| s.last_seen)
             .map(|(k, _)| k.clone());
         match oldest {
             Some(k) => {
                 sessions.remove(&k);
             }
-            None => break,
+            None => return false,
         }
     }
+    true
 }
 
 /// Assemble a complete HTTP/1.1 response. The body is always JSON (the only
@@ -1603,9 +1634,7 @@ extern "C" {
     ) -> *mut CDaemonResponse;
 }
 
-/// Raw supervisor handle shared across connection threads. Mutations to a given
-/// program's child are serialized by `Frontend.locks[program]`; distinct
-/// programs are distinct memory; the program array is fixed after init.
+/// The router, as the front end's threads share it (DAEMON-16).
 struct RouterHandle(*mut c_void);
 unsafe impl Send for RouterHandle {}
 unsafe impl Sync for RouterHandle {}
@@ -1613,10 +1642,6 @@ unsafe impl Sync for RouterHandle {}
 /// Shared front-end state. Runs no morloc compute; every call is forwarded.
 struct Frontend {
     router: RouterHandle,
-    /// Per-module forward lock: `router_forward` mutates the child's
-    /// RouterProgram on crash-restart, so same-module forwards serialize while
-    /// different modules run in parallel. Keys fixed at construction.
-    locks: HashMap<String, Mutex<()>>,
     /// MCP tools/list (union across MCP modules; names `<module>__<command>`).
     mcp_tools: Vec<Value>,
     /// Namespaced tool name -> (module, shape). The shape keeps its bare command
@@ -1656,7 +1681,7 @@ struct Frontend {
     eval_timeout: i32,
     server_name: String,
     server_version: String,
-    sessions: Mutex<HashMap<String, SessionInfo>>,
+    sessions: Sessions,
 }
 unsafe impl Send for Frontend {}
 unsafe impl Sync for Frontend {}
@@ -1670,18 +1695,9 @@ enum ForwardOk {
 }
 
 impl Frontend {
-    /// Forward `request_json` to `module`'s child daemon. Holds the per-module
-    /// lock across `router_forward` (whose crash-detect mutates the child's
-    /// RouterProgram).
+    /// Forward `request_json` to `module`'s child daemon.
     fn forward(&self, module: &str, request_str: &str, selection: &Selection) -> Result<ForwardOk, (i32, String)> {
         use morloc_runtime_types::daemon_error::{BAD_REQUEST, INTERNAL};
-        // Fail closed: every served module must have a per-module lock, since
-        // router_forward mutates the child's RouterProgram (waitpid + restart).
-        // Forwarding without the lock would be a silent unserialized race, so a
-        // missing entry is a bug -- error rather than skip the guard.
-        let lock = self.locks.get(module).ok_or_else(|| {
-            (INTERNAL, format!("internal error: no forward lock for module '{}'", module))
-        })?;
         let req_c = CString::new(request_str)
             .map_err(|_| (BAD_REQUEST, "request contains a NUL byte".to_string()))?;
         let mut errmsg: *mut c_char = ptr::null_mut();
@@ -1692,12 +1708,6 @@ impl Frontend {
             return Err((BAD_REQUEST, format!("failed to build request: {}", msg)));
         }
         let module_c = CString::new(module).unwrap_or_default();
-        // Keep the guard alive across the forward (named binding, not `_`).
-        // PANIC-4
-        let Ok(_guard) = lock.lock() else {
-            unsafe { daemon_free_request(req) };
-            return Err((morloc_runtime_types::daemon_error::RECOVERING, "the server is shutting down after an internal error".into()));
-        };
         let mut ferr: *mut c_char = ptr::null_mut();
         let resp = unsafe { router_forward(self.router.0, module_c.as_ptr(), req, &mut ferr) };
         unsafe { daemon_free_request(req) };
@@ -1889,10 +1899,6 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
         }));
     }
 
-    let mut locks: HashMap<String, Mutex<()>> = HashMap::new();
-    for m in &config.programs {
-        locks.insert(m.clone(), Mutex::new(()));
-    }
     let api_modules: std::collections::HashSet<String> =
         config.api_programs.iter().cloned().collect();
 
@@ -1966,7 +1972,6 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
 
     let fe = Arc::new(Frontend {
         router: RouterHandle(router),
-        locks,
         mcp_tools,
         mcp_by_name,
         api_modules,
@@ -1981,7 +1986,7 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
         } else {
             server_version
         },
-        sessions: Mutex::new(HashMap::new()),
+        sessions: Sessions::new(),
     });
     let token = Arc::new(auth_token);
     for incoming in listener.incoming() {
@@ -2340,8 +2345,7 @@ fn frontend_eval_api(req: &HttpRequest, fe: &Frontend, keep_alive: bool) -> Vec<
     }
 }
 
-/// `POST /mcp`: one JSON-RPC message. Session resolution locks briefly; the
-/// forward (dispatch) runs lock-free so modules execute in parallel.
+/// `POST /mcp`: one JSON-RPC message (DAEMON-16).
 fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
     let msg = match RpcMessage::parse(&req.body) {
         Some(m) => m,
@@ -2353,49 +2357,15 @@ fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) ->
         }
     };
     let method = msg.method.as_deref().unwrap_or("");
-    let sid_hdr = header_get(&req.headers, "mcp-session-id").map(|s| s.to_string());
-    let now = Instant::now();
-
-    let (session_id, prior_init) = {
-        // PANIC-4
-        let Ok(mut sessions) = fe.sessions.lock() else { return poisoned_reply() };
-        if method == "initialize" {
-            prune_sessions(&mut sessions, now);
-            let id = new_session_id();
-            sessions.insert(id.clone(), SessionInfo { initialized: false, last_seen: now });
-            (id, false)
-        } else {
-            match sid_hdr {
-                None => {
-                    return http_json(400, br#"{"error":"missing Mcp-Session-Id header"}"#, keep_alive)
-                }
-                Some(id) => match sessions.get(&id) {
-                    Some(s) => (id, s.initialized),
-                    None => {
-                        return http_json(
-                            404,
-                            br#"{"error":"unknown or expired session; re-initialize"}"#,
-                            keep_alive,
-                        )
-                    }
-                },
-            }
-        }
+    let sid_hdr = header_get(&req.headers, "mcp-session-id");
+    let (session_id, prior_init) = match fe.sessions.begin(method, sid_hdr, keep_alive) {
+        Ok(admitted) => admitted,
+        Err(reply) => return reply,
     };
-
     let mut session = Session { initialized: prior_init };
     let resp_opt = frontend_handle_message(&msg, &mut session, fe);
-    {
-        // Update in place only if the session still exists. A DELETE or prune
-        // that ran while the forward was in flight (lock-free) must not be
-        // undone by resurrecting the entry, and re-inserting would bypass the
-        // MAX_SESSIONS cap enforced at initialize.
-        // PANIC-4
-        let Ok(mut sessions) = fe.sessions.lock() else { return poisoned_reply() };
-        if let Some(s) = sessions.get_mut(&session_id) {
-            s.initialized = session.initialized;
-            s.last_seen = now;
-        }
+    if !fe.sessions.end(&session_id, session.initialized) {
+        return poisoned_reply();
     }
     let extra: Vec<(String, String)> = if method == "initialize" {
         vec![("Mcp-Session-Id".to_string(), session_id)]
@@ -2413,12 +2383,8 @@ fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) ->
 /// `DELETE /mcp`: end the named session.
 fn frontend_mcp_delete(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
     match header_get(&req.headers, "mcp-session-id") {
-        Some(id) => {
-            // PANIC-4
-            let Ok(mut sessions) = fe.sessions.lock() else { return poisoned_reply() };
-            sessions.remove(id);
-            http_json(200, br#"{"ok":true}"#, keep_alive)
-        }
+        Some(id) if fe.sessions.remove(id) => http_json(200, br#"{"ok":true}"#, keep_alive),
+        Some(_) => poisoned_reply(),
         None => http_json(400, br#"{"error":"missing Mcp-Session-Id header"}"#, keep_alive),
     }
 }
@@ -2662,17 +2628,7 @@ mod tests {
             headers: Vec::new(),
             body: Vec::new(),
         };
-        let state = Arc::new(Mutex::new(HttpState {
-            manifest_c: std::ptr::null_mut(),
-            sockets_ptr: std::ptr::null_mut(),
-            n_pools: 0,
-            shm: CString::new("x").unwrap(),
-            shapes: Vec::new(),
-            tools_list: Vec::new(),
-            server_name: String::new(),
-            server_version: String::new(),
-            sessions: HashMap::new(),
-        }));
+        let state = test_server();
         let get = build_response(&req("GET", "/health"), &state, Some("s3cret"), true);
         let get = String::from_utf8(get).unwrap();
         assert!(get.starts_with("HTTP/1.1 200"), "{get}");
@@ -2897,12 +2853,13 @@ mod tests {
         let msg = RpcMessage::parse(msg.to_string().as_bytes()).expect("test messages are objects");
         // These tests exercise only non-FFI methods (initialize / tools/list /
         // ping / unknown), which never call `ctx.dispatch`, so a null-pointer
-        // context is never dereferenced.
+        // context is never dereferenced, and none waits for a call slot.
         let ctx = DispatchCtx {
             manifest_c: ptr::null_mut(),
             sockets_ptr: ptr::null_mut(),
             n_pools: 0,
             shm: CString::new("").unwrap(),
+            calls: CallSlots::new(0),
         };
         handle_message(&msg, session, tools, &empty_by_name(), &ctx, "prog", "1.2.3")
     }
@@ -3027,26 +2984,89 @@ mod tests {
             .collect()
     }
 
-    fn poisoned_state() -> Arc<Mutex<HttpState>> {
-        let state = Arc::new(Mutex::new(HttpState {
-            manifest_c: std::ptr::null_mut(),
-            sockets_ptr: std::ptr::null_mut(),
-            n_pools: 0,
-            shm: CString::new("x").unwrap(),
-            shapes: Vec::new(),
+    fn test_server() -> HttpServer {
+        HttpServer {
+            ctx: DispatchCtx {
+                manifest_c: std::ptr::null_mut(),
+                sockets_ptr: std::ptr::null_mut(),
+                n_pools: 0,
+                shm: CString::new("x").unwrap(),
+                calls: CallSlots::new(1),
+            },
+            by_name: HashMap::new(),
             tools_list: Vec::new(),
             server_name: String::new(),
             server_version: String::new(),
-            sessions: HashMap::new(),
-        }));
+            sessions: Sessions::new(),
+        }
+    }
+
+    fn poisoned_state() -> Arc<HttpServer> {
+        let state = Arc::new(test_server());
         let s = Arc::clone(&state);
         let _ = std::thread::spawn(move || {
-            let _g = s.lock().unwrap();
+            let _g = s.sessions.0.lock().unwrap();
             panic!("torn");
         })
         .join();
-        assert!(state.is_poisoned());
+        assert!(state.sessions.0.is_poisoned());
         state
+    }
+
+    #[test]
+    fn a_session_with_a_call_in_flight_survives_pruning_and_a_deleted_one_stays_deleted() {
+        let sessions = Sessions::new();
+        let (busy, _) = sessions.begin("initialize", None, false).unwrap();
+        let (idle, _) = sessions.begin("initialize", None, false).unwrap();
+        assert!(sessions.end(&idle, true));
+        let late = Instant::now() + SESSION_TTL + Duration::from_secs(1);
+        prune_sessions(&mut sessions.0.lock().unwrap(), late);
+        let held = sessions.0.lock().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(held, vec![busy.clone()], "pruning took a session with a call in flight");
+
+        let (again, init) = sessions.begin("tools/call", Some(&busy), false).unwrap();
+        assert!(!init);
+        assert!(sessions.end(&busy, true), "first request");
+        assert!(sessions.remove(&again));
+        assert!(sessions.end(&again, true));
+        assert!(sessions.0.lock().unwrap().is_empty(), "a call ending revived a deleted session");
+        let refused = sessions.begin("ping", Some(&again), false).unwrap_err();
+        assert!(String::from_utf8_lossy(&refused).starts_with("HTTP/1.1 404"));
+    }
+
+    #[test]
+    fn a_late_call_does_not_undo_a_finished_handshake() {
+        let sessions = Sessions::new();
+        let (id, _) = sessions.begin("initialize", None, false).unwrap();
+        assert!(sessions.end(&id, false));
+        let (_, before) = sessions.begin("tools/list", Some(&id), false).unwrap();
+        assert!(!before);
+        sessions.begin("notifications/initialized", Some(&id), false).unwrap();
+        assert!(sessions.end(&id, true));
+        assert!(sessions.end(&id, before));
+        assert!(sessions.0.lock().unwrap()[&id].initialized);
+    }
+
+    #[test]
+    fn call_slots_admit_at_most_their_count_at_once() {
+        let slots = Arc::new(CallSlots::new(2));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let now = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let threads: Vec<_> = (0..6)
+            .map(|_| {
+                let (slots, peak, now) = (Arc::clone(&slots), Arc::clone(&peak), Arc::clone(&now));
+                std::thread::spawn(move || {
+                    let _slot = slots.take();
+                    let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(n, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(50));
+                    now.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        threads.into_iter().for_each(|t| t.join().unwrap());
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert_eq!(*slots.free.lock().unwrap(), 2);
     }
 
     #[test]
@@ -3225,8 +3245,8 @@ mod tests {
         let base = Instant::now();
         let future = base + SESSION_TTL + Duration::from_secs(1);
         let mut m: HashMap<String, SessionInfo> = HashMap::new();
-        m.insert("old".into(), SessionInfo { initialized: true, last_seen: base });
-        m.insert("fresh".into(), SessionInfo { initialized: false, last_seen: future });
+        m.insert("old".into(), SessionInfo { initialized: true, last_seen: base, in_flight: 0 });
+        m.insert("fresh".into(), SessionInfo { initialized: false, last_seen: future, in_flight: 0 });
         prune_sessions(&mut m, future);
         assert!(!m.contains_key("old"), "idle session should be evicted");
         assert!(m.contains_key("fresh"), "current session should survive");
@@ -3234,10 +3254,19 @@ mod tests {
         // Hard cap: fill to MAX_SESSIONS (all current), prune makes room for one.
         let mut full: HashMap<String, SessionInfo> = HashMap::new();
         for i in 0..MAX_SESSIONS {
-            full.insert(format!("s{i}"), SessionInfo { initialized: false, last_seen: base });
+            full.insert(format!("s{i}"), SessionInfo { initialized: false, last_seen: base, in_flight: 0 });
         }
         prune_sessions(&mut full, base);
         assert!(full.len() < MAX_SESSIONS, "cap backstop should evict the oldest");
+
+        for s in full.values_mut() {
+            s.in_flight = 1;
+        }
+        while full.len() < MAX_SESSIONS {
+            full.insert(format!("t{}", full.len()), SessionInfo { initialized: false, last_seen: base, in_flight: 1 });
+        }
+        assert!(!prune_sessions(&mut full, base), "a full table of busy sessions made room");
+        assert_eq!(full.len(), MAX_SESSIONS);
     }
 
     #[test]

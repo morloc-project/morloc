@@ -9,7 +9,9 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   question whether they should start a worker per concurrent job. Eight
   concurrent daemon requests making 20 Python calls each take 1.0 ms per
   request against 2.4 ms for one client (C++-only requests scale 5.2x):
-  /work/tests/runtime/daemon.
+  /work/tests/runtime/daemon. Two concurrent 2 s `time.sleep` calls to one
+  Python pool take 4.0 s over the daemon, MCP over HTTP or the front end,
+  where the same in C++ takes 2.0 s (NET-9; 2026-10-13).
 - [measured] The daemon answers every HTTP request with `Connection: close`,
   so each request pays a TCP connect, accept and close. The soak client in
   test-suite/daemon-tests says its requests ride persistent connections and

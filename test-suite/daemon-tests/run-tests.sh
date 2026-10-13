@@ -263,6 +263,7 @@ compile_program() {
     cp "$SCRIPT_DIR/$loc_file" "$work_dir/"
     cp "$SCRIPT_DIR"/*.py "$work_dir/" 2>/dev/null || true
     cp "$SCRIPT_DIR"/*.R "$work_dir/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/*.hpp "$work_dir/" 2>/dev/null || true
 
     if ! (cd "$work_dir" && morloc make -o nexus "$loc_file" > /dev/null 2>"$work_dir/build-${name}.err"); then
         echo "COMPILE FAIL: $loc_file" >&2
@@ -2090,6 +2091,125 @@ if should_run "router"; then
             FAILURES+=("router cleans up child daemons")
         fi
     fi
+
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 10b: Served calls overlap (DAEMON-16)
+#
+# Two slow calls to one module through the front end, and two over MCP on
+# HTTP, finish in about the time of one; a ping during them is not held.
+# ======================================================================
+
+if should_run "concurrent-calls"; then
+    echo "${BOLD}[concurrent-calls] Served calls overlap${RESET}"
+
+    NAP_FDB=$(mktemp -d)
+    WORK_DIRS+=("$NAP_FDB")
+    mkdir -p "$NAP_FDB/nap"
+    compile_program "nap.loc" "$NAP_FDB/nap"
+    ln -s "$NAP_FDB/nap/nexus-build" "$NAP_FDB/nap/nap-build"
+    NEXUS_PATH="$(which morloc-nexus 2>/dev/null || echo "$HOME/.local/bin/morloc-nexus")"
+
+    # Prints the seconds two concurrent POSTs took, then the seconds a third
+    # request sent while they run took to answer.
+    overlap() {
+        python3 - "$@" <<'PY'
+import json, sys, threading, time, urllib.request
+url, body, probe_url, probe_body = sys.argv[1:5]
+headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+if len(sys.argv) > 5:
+    headers["Mcp-Session-Id"] = sys.argv[5]
+def post(u, b):
+    data = b.encode() if b else None
+    return urllib.request.urlopen(urllib.request.Request(u, data=data, headers=headers), timeout=60).read()
+results = []
+def call():
+    try:
+        reply = json.loads(post(url, body))
+        results.append(reply.get("status") == "ok" or ("result" in reply and not reply["result"].get("isError")))
+    except Exception:
+        results.append(False)
+began = time.time()
+calls = [threading.Thread(target=call) for _ in range(2)]
+for c in calls:
+    c.start()
+time.sleep(0.5)
+t = time.time()
+post(probe_url, probe_body)
+probe = time.time() - t
+for c in calls:
+    c.join()
+took = time.time() - began
+print("%.2f %.2f" % (took, probe) if results == [True, True] else "failed %.2f" % probe)
+PY
+    }
+    # True when $1 < $2 (seconds).
+    less_than() { python3 -c "import sys; sys.exit(0 if '$1' != 'failed' and float('$1') < float('$2') else 1)"; }
+
+    ROUTER_PORT=$(pick_port)
+    (exec "$NEXUS_PATH" router --http-port "$ROUTER_PORT" --fdb "$NAP_FDB" \
+        --program nap 2>"$NAP_FDB/router.log") &
+    NAP_ROUTER_PID=$!
+    DAEMON_PIDS+=("$NAP_ROUTER_PID")
+    wait_for_http "$ROUTER_PORT" 15 || true
+    # The first call starts the child daemon.
+    curl -s -X POST "http://127.0.0.1:${ROUTER_PORT}/call/nap/nap" -d '[0]' >/dev/null
+    read -r took probe <<<"$(overlap "http://127.0.0.1:${ROUTER_PORT}/call/nap/nap" '[2]' \
+        "http://127.0.0.1:${ROUTER_PORT}/health" '')"
+    TOTAL=$((TOTAL + 1))
+    printf "  %-50s " "front end: two 2 s calls to one module overlap"
+    if less_than "$took" 3.5; then
+        printf "%sPASS%s (%ss)\n" "$GREEN" "$RESET" "$took"; PASSED=$((PASSED + 1))
+    else
+        printf "%sFAIL%s (%ss)\n" "$RED" "$RESET" "$took"; FAILED=$((FAILED + 1))
+        FAILURES+=("front end: two calls to one module overlap (${took}s)")
+    fi
+    TOTAL=$((TOTAL + 1))
+    printf "  %-50s " "front end: a health probe during them is not held"
+    if less_than "$probe" 0.5; then
+        printf "%sPASS%s (%ss)\n" "$GREEN" "$RESET" "$probe"; PASSED=$((PASSED + 1))
+    else
+        printf "%sFAIL%s (%ss)\n" "$RED" "$RESET" "$probe"; FAILED=$((FAILED + 1))
+        FAILURES+=("front end: health probe held by calls (${probe}s)")
+    fi
+    stop_daemon "$NAP_ROUTER_PID"
+
+    MCP_PORT=$(pick_port)
+    (cd "$NAP_FDB/nap" && exec morloc-nexus mcp ./nexus --http-port "$MCP_PORT" 2>"$NAP_FDB/mcp.log") &
+    NAP_MCP_PID=$!
+    DAEMON_PIDS+=("$NAP_MCP_PID")
+    for _ in $(seq 1 50); do
+        curl -s "http://127.0.0.1:${MCP_PORT}/health" >/dev/null 2>&1 && break
+        sleep 0.2
+    done
+    MCP_URL="http://127.0.0.1:${MCP_PORT}/mcp"
+    sid=$(curl -s -D - -o /dev/null -X POST "$MCP_URL" -H "Content-Type: application/json" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}' \
+        | tr -d '\r' | awk -F': ' 'tolower($1)=="mcp-session-id"{print $2}')
+    curl -s -X POST "$MCP_URL" -H "Content-Type: application/json" -H "Mcp-Session-Id: $sid" \
+        -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
+    read -r took probe <<<"$(overlap "$MCP_URL" \
+        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nap","arguments":{"_1":2}}}' \
+        "$MCP_URL" '{"jsonrpc":"2.0","id":3,"method":"ping"}' "$sid")"
+    TOTAL=$((TOTAL + 1))
+    printf "  %-50s " "MCP over HTTP: two 2 s calls overlap"
+    if less_than "$took" 3.5; then
+        printf "%sPASS%s (%ss)\n" "$GREEN" "$RESET" "$took"; PASSED=$((PASSED + 1))
+    else
+        printf "%sFAIL%s (%ss)\n" "$RED" "$RESET" "$took"; FAILED=$((FAILED + 1))
+        FAILURES+=("MCP over HTTP: two calls overlap (${took}s)")
+    fi
+    TOTAL=$((TOTAL + 1))
+    printf "  %-50s " "MCP over HTTP: a ping during them is not held"
+    if less_than "$probe" 0.5; then
+        printf "%sPASS%s (%ss)\n" "$GREEN" "$RESET" "$probe"; PASSED=$((PASSED + 1))
+    else
+        printf "%sFAIL%s (%ss)\n" "$RED" "$RESET" "$probe"; FAILED=$((FAILED + 1))
+        FAILURES+=("MCP over HTTP: ping held by calls (${probe}s)")
+    fi
+    stop_daemon "$NAP_MCP_PID"
 
     echo ""
 fi

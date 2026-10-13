@@ -197,9 +197,9 @@ Checked by: tla:RouterRestart, tla:RouterRestart_restart_without_stop.bug, tla:R
 The router starts a program's daemon in its own process group, registers
 the group in a table of groups, and waits for it to accept connections. A
 daemon that does not accept within the start limit (30 s) is stopped and
-reaped, and the request fails. A connection that fails stops and reaps the daemon it tried, unless
-another request has already replaced it, before another is started, so no daemon outlives the router's record of
-it. Stopping sends SIGTERM through the group's slot, waits up to 2 s, then
+reaped, and the request fails. A daemon that has exited is reaped before
+another is started, and a live daemon is stopped only when its socket is
+gone (DAEMON-16), so no daemon outlives the router's record of it. Stopping sends SIGTERM through the group's slot, waits up to 2 s, then
 sends SIGKILL and reaps. Every signal to a daemon, including the shutdown
 handler's, goes through the table; before the router reaps a daemon it
 marks the slot dead, so no signal reaches a pid the kernel has reissued.
@@ -275,3 +275,25 @@ from stdin is refused, and so is a path, given as an argument or opened by
 the call, that names the server's standard input, output or error (`-`,
 `-2`, the `/dev/std*` and descriptor paths). The `@stdin` intrinsic reads
 end of input.
+
+### DAEMON-16 Served calls run concurrently, up to the daemon's worker count
+Status: implemented
+Checked by: tla:RouterForward, tla:RouterForward_unlocked_check.bug, tla:RouterForward_stop_on_refused.bug, tla:RouterForward_never_replace.bug, calls_to_one_program_through_the_router_overlap, a_refused_connection_to_a_live_daemon_leaves_it_running, a_daemon_whose_socket_is_gone_is_stopped, call_slots_admit_at_most_their_count_at_once, a_session_with_a_call_in_flight_survives_pruning_and_a_deleted_one_stays_deleted, a_late_call_does_not_undo_a_finished_handshake
+
+No served call holds a lock across its dispatch or its exchange with a
+daemon. A daemon runs at most W = clamp(pools + 4, 4, 32) calls at once and
+queues the rest; an MCP server over HTTP runs at most W `tools/call`
+requests at once, and its other methods wait for none of them. The router
+holds a program's lock only to reap an exited daemon and start a missing
+one (DAEMON-12), and connects and exchanges outside it, so calls to one
+program overlap. A failed connection is retried once, deciding under the
+lock: an exited daemon is reaped, and a live one whose socket is gone is
+stopped and replaced. A connection refused by a live daemon, or failing on
+the router's side, stops nothing. A request that
+waited for the lock while a start failed gets that failure rather than
+starting another. An MCP session with a call in flight is never evicted,
+and a session deleted during a call stays deleted.
+
+Why: a live daemon refuses a connection when its backlog is full (macOS)
+or when it has closed its listener to shut down, which ends within
+DAEMON-6's bound; stopping it would end the calls it is still serving.

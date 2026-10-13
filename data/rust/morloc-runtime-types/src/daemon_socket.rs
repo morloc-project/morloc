@@ -14,3 +14,8 @@ pub struct MorlocSocket {
     pub socket_filename: *mut c_char,
     pub pid: i32,
 }
+
+/// How many calls a server of `n_pools` pools runs at once (DAEMON-16).
+pub fn daemon_workers(n_pools: usize) -> usize {
+    n_pools.saturating_add(4).clamp(4, 32)
+}

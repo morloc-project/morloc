@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 11
+#define MORLOC_ABI_VERSION 12
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -1088,6 +1088,7 @@ typedef struct router_program_s {
     manifest_t* manifest;
     pid_t daemon_pid;
     char daemon_socket[sizeof(((struct sockaddr_un*)0)->sun_path)];
+    void* state;
 } router_program_t;
 
 typedef struct router_s {

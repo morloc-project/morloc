@@ -3477,7 +3477,8 @@ pub(crate) unsafe fn daemon_run(
         shm_basename,
     });
 
-    let n_workers = n_pools.saturating_add(4).clamp(4, 32);
+    // DAEMON-16
+    let n_workers = morloc_runtime_types::daemon_socket::daemon_workers(n_pools);
     let mut workers = Vec::with_capacity(n_workers);
     for _ in 0..n_workers {
         let ctx = Arc::clone(&ctx);

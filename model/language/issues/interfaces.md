@@ -67,6 +67,14 @@ re-checked.
   morloc-runtime/src/http_ffi.rs `http_to_daemon_request` answers any
   unmatched method and path "Unknown HTTP endpoint"; the MCP server and the
   front end answer 405 with `Allow`.
+- **A call ended by another call's pool recovery is classed internal.**
+  [read] When a pool crash starts recovery, the pools are killed under the
+  calls still running on them, which fail as internal errors ("pool
+  died"); only a shutdown remaps them to recovering
+  (morloc-runtime/src/daemon_ffi.rs `dispatch`, `POOLS_STOPPED`). The
+  caller cannot tell its call is retryable. Daemon and MCP alike. A call
+  admitted while another call is checking for a dead pool, before that
+  check closes the request gate, fails the same way.
 
 ## Discovery (IFACE-11)
 
@@ -93,11 +101,6 @@ re-checked.
   cap and the child closes without replying: a generic 500. The LP
   writer's 32-bit length wraps at 4 GiB (daemon_ffi.rs:2744-2749); the
   router allocates whatever length the child declares (router_ffi.rs:720).
-- **MCP over HTTP serializes every method behind one lock.**
-  [read, survey] mcp.rs:1323-1390: a long `tools/call` blocks every
-  session's `ping`, `tools/list` and `initialize`. The front end holds the
-  per-module lock across the whole forward (mcp.rs:1685-1690), so calls to
-  one module run one at a time although the daemon has 4-32 workers.
 - **Concurrent calls to one streaming command may clash.** [speculative]
   "@stdout already open in this nexus" (morloc-runtime/src/stream.rs:
   2437-2446).

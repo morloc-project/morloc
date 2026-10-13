@@ -67,5 +67,6 @@ release.
 - `tla/LazyInit.tla`: initialising a process-wide value on first use
 - `tla/PoolGroup.tla`: a process group id held while the nexus may signal it
 - `tla/RouterRestart.tla`: the router restarting a program's daemon
+- `tla/RouterForward.tla`: concurrent requests forwarded to one program's daemon
 - `tla/EndpointClaim.tla`: daemons claiming one socket path
 - `tla/StreamQueue.tla`: writers, the queue and the custodian of a written stream

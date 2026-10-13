@@ -25,6 +25,9 @@
   later runs passed. Something allocated or freed a block outside that
   guard during the test: a test without a guard, or a thread a previous
   test left running (a custodian, a write-behind worker). Not found.
+  Seen again 2026-10-13 in a full workspace run with held = 6105935:
+  not a block or two off, so the census walked a volume that changed
+  under it (torn down or reinitialised), not one stray allocation.
 - **Fork-pool unretired-worker test fails under load.** [reproduced once]
   Against SHM-8. `cargo test --workspace` on 2026-10-12 failed
   `fork_pool::tests::a_worker_that_ends_unretired_ends_the_pool`

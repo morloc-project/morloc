@@ -232,8 +232,9 @@ rustmorloc/lib.rs::-::TMPDIR	startup
 rustmorloc/lib.rs::-::REGISTERED	startup		
 morloc-nexus/main.rs::-::FRONTEND_ROUTER	exec-only		
 morloc-nexus/mcp.rs::new_session_id::CTR	exec-only		
-morloc-nexus/mcp.rs::-::Frontend.locks	exec-only		
-morloc-nexus/mcp.rs::-::Frontend.sessions	exec-only		
+morloc-nexus/mcp.rs::-::CallSlots.free	exec-only		
+morloc-nexus/mcp.rs::-::CallSlots.freed	exec-only		
+morloc-nexus/mcp.rs::-::Sessions.0	exec-only		
 morloc-nexus/mcp.rs::-::FRONTEND_EVALS	exec-only		
 morloc-nexus/mcp.rs::-::OPEN_CONNECTIONS	exec-only		
 morloc-nexus/parse_arg.rs::-::NEXUS_READS_STDIN	exec-only		
@@ -292,6 +293,7 @@ morloc-runtime/stream.rs::-::GAP_SLOT	test-only
 morloc-runtime/stream.rs::-::AT_GAP	test-only		
 morloc-runtime/stream.rs::-::RESUME	test-only		
 morloc-runtime/stream.rs::-::RELEASES_SEEN	counter		
+morloc-runtime/router_ffi.rs::-::ProgramState.start	exec-only		
 morloc-runtime/router_ffi.rs::-::ROUTER_GROUPS	exec-only		
 morloc-runtime/router_ffi.rs::-::ROUTER_DAEMONS	exec-only		
 morloc-runtime/daemon_ffi.rs::-::ENDPOINT_LOCKS	exec-only		

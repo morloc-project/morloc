@@ -1,8 +1,8 @@
 ----------------------------- MODULE RouterRestart ----------------------------
 (* The router's daemon for one program (model/runtime/daemon.md DAEMON-12). The *)
 (* forwarder starts a daemon and records it in the program's slot. A daemon *)
-(* may exit at any time, or never become ready. When it is not ready or a   *)
-(* connection fails, the forwarder stops the daemon (SIGTERM, then SIGKILL) *)
+(* may exit at any time, or never become ready. When it is not ready or its *)
+(* socket is gone, the forwarder stops the daemon (SIGTERM, then SIGKILL)   *)
 (* and reaps it, clearing the slot first, before starting another. A signal *)
 (* handler on another thread may send SIGTERM to the program's daemon at    *)
 (* any time. Once a daemon is reaped the kernel may hand its pid to a       *)

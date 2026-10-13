@@ -1,0 +1,9 @@
+--' Calls that take a while, to show served calls overlap (DAEMON-16).
+module nap (nap)
+
+import root-cpp
+
+source Cpp from "nap.hpp" ("nap")
+
+--' Sleep for some seconds and return them
+nap :: Real -> Real
