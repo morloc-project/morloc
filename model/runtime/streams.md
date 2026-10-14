@@ -339,3 +339,60 @@ blocks it allocated where the slot releases them. Before the stream
 registry is unmapped, the passes of every idle slot are joined and their
 blocks released. Joining waits for one pass at most: dropping or resetting
 a slot, which joins, waits that long. Model: `tla/AheadJob.tla`.
+
+## Reading a stream file's end
+
+A stream file ends with a footer that indexes its sub-packets (FMT-8). The
+custodian writes a temporary footer after each sub-packet it writes and
+replaces it with a final footer, carrying a status, when the stream is
+closed or stopped (custody.rs `emit`, `close`).
+How a file ends records why its writer stopped; this section says how each
+reader treats each ending. An issue (issues/streams.md) records what is
+wrong with it.
+
+### SLOT-28 A stream file ends in one of five states
+Status: implemented
+Checked by: a_stopped_writer_finishes_its_file_with_the_given_status, a_discarded_stream_keeps_what_was_queued_and_no_final_footer, a_writer_killed_inside_the_slot_lock_fails_the_stream
+
+| End state | How a file gets it |
+|---|---|
+| final footer, CLOSED | `@close` (SLOT-15) |
+| final footer, PAUSED | a remote child returns the stream without `@close`; the file is complete and may be appended to |
+| final footer, FAILED | the stream's writer died inside the slot lock (SLOT-14), or daemon recovery stopped the custodian (SLOT-13) |
+| temporary footer | the stream is still being written; or it was discarded, its handle dropped or its run ended without `@close`, with its unflushed elements dropped (SLOT-13); or its custodian failed to write (an I/O error such as a full disk), after which it writes nothing more; or its custodian was killed after writing a batch |
+| no footer | the custodian was killed before writing any footer; the machine stopped (power loss, kernel panic); or the file was cut short outside morloc (an interrupted copy, a full disk) |
+
+Every footer follows the last complete sub-packet, so in the first four
+states the data ends at the footer. A file whose bytes were cut after a
+complete sub-packet is indistinguishable from the last state.
+
+### SLOT-29 An input stream reads every complete batch and ends, whatever the end state
+Status: draft
+
+`@next` on an IStream walks the sub-packets in order and, past the last
+one, returns an empty batch, in every end state. With a final or
+temporary footer the walk stops at the footer; with no footer it scans
+forward and stops at the last complete sub-packet, or fails if a
+sub-packet's header extends past the end of the file. The footer's status
+is parsed and not consulted: a FAILED file reads as a CLOSED one. A
+reader of a file still being written sees the batches its writer had
+flushed when the reader opened it (SLOT-15).
+
+### SLOT-30 An indexed file opens only with a final footer
+Status: implemented
+Checked by: ifile_rejects_footerless_stream
+
+`@open` as an IFile needs the per-sub-packet element counts that only a
+final footer records, so it refuses a file in the temporary-footer or
+no-footer state. It does not consult the status: a FAILED file opens.
+
+### SLOT-31 What a reader reports at an ending that is not a clean close
+Status: draft
+
+Open; needs a ruling and a model (issues/streams.md). The endings in
+SLOT-28 tell a reader why its writer stopped, except in one case: a
+temporary footer is written both by a stream still being written, which a
+reader may legitimately read while it grows, and by a stream discarded or
+killed, whose file will never change again. The registry of the process
+tree that writes a stream can tell the two apart while that tree runs; a
+reader on another machine, or after the tree has ended, cannot.

@@ -51,4 +51,4 @@ BYTES.
 ### FMT-8 A stream file is head, data batches, footer, 8-byte tail
 Status: draft
 Tail = footer length u32 LE + bytes 07 07 f8 6d. Footer holds subpacket
-index, final marker, status (0 closed, 1 paused).
+index, final marker, status (0 closed, 1 paused, 2 failed; 3 repaired is reserved).

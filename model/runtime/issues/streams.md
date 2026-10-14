@@ -79,19 +79,49 @@ here touch locks and ownership: model first.
   2438-2439 set and sweep a call id on the pure path only; the remote
   branch (2441 on) does neither, and stream.rs:2485-2489 claims "the nexus
   dispatch always pre-sets a call_id", which holds only there.
-- **A truncated stream file reads as a shorter stream.** [reproduced,
-  0.109.0] Spec gap: nothing says whether a stream file without its final
-  footer is an error. `saveSource 0 p` of batches [1,2,3], [4,5], [6]
-  writes 689 bytes; cut 300 bytes off the end and `@next` returns `Ok
-  [[1,2,3]]`, `Ok [[4,5]]`, `Ok []`: the batch [6] is silently gone. Cut 500
-  and every `@next` is `Ok []`. Only a cut inside a sub-packet header errors
-  ("sub-packet header extends past file end"). Cause, read:
-  data/rust/morloc-runtime/src/stream_format.rs:112, the `Ok(None) |
-  Err(_)` arm treats a missing footer as a crashed writer and
-  forward-scans the complete sub-packets. Any statistic or copy over such a
-  file is silently partial. Open: should a footer-less file be an `Err` at
-  the point the walk reaches the end (with crash recovery an explicit
-  opt-in), or is recovery the intended default?
+- **A reader cannot tell a finished stream file from an unfinished one.**
+  [reproduced 0.109.0, and read] Spec: SLOT-28 to SLOT-31 (streams.md,
+  "Reading a stream file's end"); SLOT-31 is open. An IStream reads every
+  complete batch and then reports the end of the stream in every end state
+  (SLOT-29), so a program cannot tell a clean close from a file its writer
+  never finished, and any count, statistic or copy over such a file is
+  silently partial. lib/biolib rnaseq R23 hit it, and keeps the check in a
+  separate `knownIssues` export.
+  - No footer: `saveSource 0 p` of batches [1,2,3], [4,5], [6] writes 689
+    bytes; with 300 bytes cut off, `@next` returns `Ok [[1,2,3]]`, `Ok
+    [[4,5]]`, `Ok []`; with 500 cut, `Ok []` at once. Only a cut inside a
+    sub-packet header errors. Cause: stream_format.rs:112 forward-scans
+    when no footer parses.
+  - Final footer, FAILED: the status is parsed (stream_format.rs ~563) and
+    never consulted, so a file whose writer died inside the slot lock reads
+    as a clean one. IFile opens it too (SLOT-30).
+  - Temporary footer: written both while a stream is being written, when a
+    reader may legitimately read it as it grows, and by a stream that will
+    never change again (discarded without `@close` with its unflushed
+    elements dropped, or a custodian that failed or was killed). The file
+    does not say which. The writing tree's registry knows while the tree
+    runs (the sweeps find open writers there); a reader on another machine
+    (a SLURM job on a shared filesystem) or after the tree has ended
+    cannot know.
+  - Standard input carries no footer at all: an empty sub-packet or EOF
+    ends the stream, so a writer that died mid-stream is not seen either.
+  Needs a TLA+ model before any fix (tla/, beside StreamQueue.tla): a
+  writer (writing, flushed, closed, paused, discarded, failed, killed at
+  any step), the custodian's file states (SLOT-28's five, plus a
+  sub-packet half-written), the registry's view of the writer (live, gone,
+  unknown for another machine), and readers that open at any step and read
+  to the end. Properties: a reader that reports a clean end has read every
+  element its writer flushed before closing; a reader of a stream still
+  being written is never told it failed; a reader is told of a failure in
+  every state where the file will not change again and its writer did not
+  close it. Candidate rule (to model, then rule): deliver every complete
+  batch, then end with `Ok` for CLOSED or PAUSED, with an `Err` for FAILED,
+  for no footer, and for a temporary footer whose writer the registry shows
+  gone. Open: a temporary footer whose writer cannot be checked (another
+  machine, or no registry) -- error, or read on; and whether a discard
+  (SLOT-13) should instead finish its file with a final footer and a
+  status of its own, which would make a temporary footer mean only "still
+  being written, or killed".
 - **A forked child starts with its parent's cache byte count.** [read]
   Gap in SLOT-23. `HandleSlots.cache_bytes` is shared memory of the
   process, so a child forked while its parent caches sub-packets inherits
