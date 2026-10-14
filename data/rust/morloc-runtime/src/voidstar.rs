@@ -1186,21 +1186,63 @@ fn flatten_into_mode(
         return Ok(());
     }
 
-    // SAFETY: data points to at least schema.width bytes in SHM; buf has total >= schema.width bytes.
-    unsafe { std::ptr::copy_nonoverlapping(data, buf.as_mut_ptr(), schema.width) };
+    // SAFETY: `buf` holds `total >= schema.width` bytes.
+    unsafe { flatten_at(buf.as_mut_ptr(), 0, schema.width, total, data, schema, portable, res) }
+}
 
-    // Phase 2: fix up relptrs and copy variable-length data
-    let mut w = FlattenWalk {
-        res,
-        buf: buf.as_mut_ptr(),
-        len: buf.len(),
-        cursor: schema.width,
-        portable,
+/// [`flatten_into_portable_with`] written in place: the value's slot at
+/// `buf + slot_at` and its variable bytes from `data_at` on, laid out as in
+/// a flat form of its own whose offset `schema.width` is at `data_at`.
+/// `total` is that flat form's size as the size walk gave it, or more; the
+/// region `[data_at, data_at + total - width)` is filled entirely, with
+/// zeros where the value leaves bytes. Offsets are relative to `buf`. Not
+/// for a table, whose flat form has no separate slot.
+///
+/// # Safety
+/// `buf` must be writable over `[slot_at, slot_at + width)` and over that
+/// region.
+pub(crate) unsafe fn flatten_portable_in_place(
+    buf: *mut u8,
+    slot_at: usize,
+    data_at: usize,
+    total: usize,
+    data: AbsPtr,
+    schema: &Schema,
+    res: &Resolver<'_>,
+) -> Result<(), MorlocError> {
+    if schema.serial_type == SerialType::Table {
+        return Err(MorlocError::Other("flatten in place: a table has no separate slot".into()));
+    }
+    flatten_at(buf, slot_at, data_at, total, data, schema, true, res)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn flatten_at(
+    buf: *mut u8,
+    slot_at: usize,
+    data_at: usize,
+    total: usize,
+    data: AbsPtr,
+    schema: &Schema,
+    portable: bool,
+    res: &Resolver<'_>,
+) -> Result<(), MorlocError> {
+    let w = schema.width;
+    let len = match (data_at.checked_sub(w), total.checked_sub(w)) {
+        (Some(_), Some(var)) => data_at
+            .checked_add(var)
+            .ok_or_else(|| MorlocError::Other("flatten: value size overflows".into()))?,
+        _ => return Err(MorlocError::Other("flatten: no room for the value's slot".into())),
     };
+    std::ptr::copy_nonoverlapping(data, buf.add(slot_at), w);
+    let mut walk = FlattenWalk { res, buf, len, cursor: data_at, portable, origin: data_at - w };
     let mut st = Stack::new();
-    st.enter(schema, data, 0);
-    walk::run(&mut w, &mut st)?;
-
+    st.enter(schema, data, slot_at);
+    walk::run(&mut walk, &mut st)?;
+    let end = walk.cursor;
+    if end < len {
+        walk.region(end, len - end)?.fill(0);
+    }
     Ok(())
 }
 
@@ -1215,9 +1257,25 @@ struct FlattenWalk<'a, 'r> {
     cursor: usize,
     /// Write handle-form stream fields as their paths.
     portable: bool,
+    /// Where offset 0 of the value's own flat form lies in `buf`: blocks
+    /// are aligned relative to it, so the layout, and the size walk's
+    /// total, are the same wherever the value is placed.
+    origin: usize,
 }
 
 impl<'a, 'r> FlattenWalk<'a, 'r> {
+    /// Move the cursor to the next multiple of `align` past `origin`,
+    /// zeroing the bytes it skips.
+    fn align(&mut self, align: usize) -> Result<(), MorlocError> {
+        let next = self.origin + shm::align_up(self.cursor - self.origin, align);
+        if next > self.cursor {
+            let at = self.cursor;
+            self.region(at, next - at)?.fill(0);
+        }
+        self.cursor = next;
+        Ok(())
+    }
+
     /// The buffer region `[at, at + n)`, checked against the buffer's size,
     /// which the size walk chose to hold the whole value.
     fn region(&mut self, at: usize, n: usize) -> Result<&mut [u8], MorlocError> {
@@ -1265,7 +1323,7 @@ impl<'a, 'r> Walker<usize> for FlattenWalk<'a, 'r> {
                     if size > 1 {
                         let relptr = *(data.add(std::mem::size_of::<usize>()) as *const RelPtr);
                         let limbs = shm::rel2abs(relptr)?;
-                        self.cursor = shm::align_up(self.cursor, std::mem::align_of::<u64>());
+                        self.align(std::mem::align_of::<u64>())?;
                         let total = size * std::mem::size_of::<u64>();
                         let here = self.cursor;
                         self.region(here, total)?.copy_from_slice(std::slice::from_raw_parts(limbs, total));
@@ -1295,7 +1353,7 @@ impl<'a, 'r> Walker<usize> for FlattenWalk<'a, 'r> {
                         } else {
                             elem_schema.array_data_alignment()
                         };
-                        self.cursor = shm::align_up(self.cursor, align);
+                        self.align(align)?;
                         // Checked: a corrupt or hostile size must not wrap the
                         // product into a short copy.
                         let total = elem_w
@@ -1339,7 +1397,7 @@ impl<'a, 'r> Walker<usize> for FlattenWalk<'a, 'r> {
                     match tag {
                         t if t == sh::TAG_PATH => {
                             if let Some(block) = path_suballoc(&Arena, src_payload)? {
-                                self.cursor = shm::align_up(self.cursor, 8);
+                                self.align(8)?;
                                 let here = self.cursor;
                                 self.region(here, block.len())?.copy_from_slice(block);
                                 self.cursor += block.len();
@@ -1354,7 +1412,7 @@ impl<'a, 'r> Walker<usize> for FlattenWalk<'a, 'r> {
                                 sh::write_field(dst_field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
                             } else {
                                 let total = sh::path_suballoc_size(path.len());
-                                self.cursor = shm::align_up(self.cursor, 8);
+                                self.align(8)?;
                                 let here = self.cursor;
                                 sh::write_path_suballoc(self.region(here, total)?.as_mut_ptr(), path.as_bytes());
                                 self.cursor += total;
@@ -1396,7 +1454,7 @@ impl<'a, 'r> Walker<usize> for FlattenWalk<'a, 'r> {
                     if orig_relptr == shm::RELNULL {
                         self.region(slot, std::mem::size_of::<RelPtr>())?.copy_from_slice(&shm::RELNULL.to_ne_bytes());
                     } else {
-                        self.cursor = shm::align_up(self.cursor, arm.alignment().max(1));
+                        self.align(arm.alignment().max(1))?;
                         let here = self.cursor;
                         let inner = shm::rel2abs(orig_relptr)?;
                         self.region(here, arm.width)?.copy_from_slice(std::slice::from_raw_parts(inner, arm.width));
@@ -1418,7 +1476,7 @@ impl<'a, 'r> Walker<usize> for FlattenWalk<'a, 'r> {
                         self.region(at, std::mem::size_of::<RelPtr>())?.copy_from_slice(&shm::RELNULL.to_ne_bytes());
                     } else {
                         let inner_schema = &s.parameters[0];
-                        self.cursor = shm::align_up(self.cursor, inner_schema.alignment().max(1));
+                        self.align(inner_schema.alignment().max(1))?;
                         let here = self.cursor;
                         let inner = shm::rel2abs(orig_relptr)?;
                         self.region(here, inner_schema.width)?
@@ -2187,6 +2245,44 @@ mod one_block_copy_tests {
             // One block: the pool releases a value with a single shfree, so
             // everything below the root has to live inside it.
             shm::shfree(copy).unwrap();
+            shm::shfree(src).unwrap();
+        }
+    }
+
+    /// SLOT-20: an element flattened in place, at any offset and over any
+    /// bytes, is its flat form moved there: the bytes a copy of the flat
+    /// form with its offsets shifted would hold, every gap zeroed.
+    #[test]
+    fn flattening_in_place_writes_the_flat_form_moved() {
+        let _shm = crate::own_test_registry();
+        for (schema_str, json) in SHAPES {
+            let schema = parse_schema(schema_str).unwrap();
+            if schema.serial_type == SerialType::Table {
+                continue;
+            }
+            let src = read_json_with_schema(json, &schema).unwrap();
+            let res = Resolver::new(&schema);
+            let mut flat = Vec::new();
+            flatten_into_portable_with(&mut flat, src, &schema, &res).unwrap();
+            let w = schema.width;
+            let var = flat.len() - w;
+            let after = |at: usize, gap: usize| (at + w).next_multiple_of(8) + gap;
+            for (slot_at, data_at) in [(8usize, after(8, 8)), (40, after(40, 72)), (0, after(0, 0))] {
+                let size = data_at + var + 8;
+                let mut want = vec![0xffu8; size];
+                want[slot_at..slot_at + w].copy_from_slice(&flat[..w]);
+                want[data_at..data_at + var].copy_from_slice(&flat[w..]);
+                unsafe {
+                    shift_element_relptrs(
+                        want.as_mut_ptr(), data_at + var, slot_at, &schema, (data_at - w) as isize, &res, None,
+                    )
+                    .unwrap();
+                }
+                let mut got = vec![0xffu8; size];
+                unsafe { flatten_portable_in_place(got.as_mut_ptr(), slot_at, data_at, flat.len(), src, &schema, &res) }
+                    .unwrap_or_else(|e| panic!("{schema_str} {json}: {e:?}"));
+                assert!(got == want, "{schema_str} {json} at ({slot_at}, {data_at})");
+            }
             shm::shfree(src).unwrap();
         }
     }

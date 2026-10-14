@@ -1,6 +1,10 @@
 # Stream reads and writes copy each batch several times
 
-Status: analysed 2026-10-13, reviewed by the devil's advocate, not fixed.
+Status: analysed 2026-10-13, reviewed by the devil's advocate. W1 fixed
+2026-10-14: an element is flattened straight into the write buffer, laid
+out as before (files byte-identical), with every byte it does not fill
+zeroed; C++ level-0 write of 600 MiB of `[Vector U8]` 1.75 -> 1.64 s,
+pairs unchanged within noise. The size walk remains. Others open.
 Parent: runtime/issues/encode-throughput.md sections 1b and 2. Source:
 lib/biolib/runtime-bench README sections 2 and 6.
 

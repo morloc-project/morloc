@@ -3706,29 +3706,23 @@ fn append_one_element(
     scratch: &mut Vec<u8>,
     elem: &Schema,
     res: &crate::recur::Resolver<'_>,
-    shallow: Option<&[(usize, usize)]>,
 ) -> Result<(), MorlocError> {
     let w = elem.width;
 
-    // Flatten the single element to a self-contained blob:
-    //   blob[0..w]: inline (with buffer-relative relptrs into blob[w..])
-    //   blob[w..]:  variable bytes (sub-allocations)
-    // `scratch` reuses its allocation across the whole @write batch, so this
-    // hot loop pays no per-element heap allocation. `buf_size` is read once by
-    // the caller rather than re-querying the environment per element.
     // An Int of at most one limb holds its value inline: its flat form is
     // its own bytes, with no variable part and no pointer.
     let inline_int = elem.serial_type == SerialType::Int
         // SAFETY: an Int's slot starts with its limb count.
         && unsafe { *(elem_src as *const usize) } <= 1;
-    if inline_int {
-        scratch.clear();
-        // SAFETY: the element's slot holds `w` bytes.
-        scratch.extend_from_slice(unsafe { std::slice::from_raw_parts(elem_src as *const u8, w) });
-    } else {
+    let via_scratch = elem.serial_type == SerialType::Table;
+    let flat_len = if inline_int {
+        w
+    } else if via_scratch {
         crate::voidstar::flatten_into_portable_with(scratch, elem_src, elem, res)?;
-    }
-    let elem_blob: &[u8] = scratch.as_slice();
+        scratch.len()
+    } else {
+        crate::ffi::calc_voidstar_size_portable_with(elem_src, elem, res)?
+    };
     // Round the variable region up to 8-byte alignment. Successive
     // elements' variable regions concatenate in the write buffer at
     // `data_region_start + write_buffer_data_used`; if any element's
@@ -3738,8 +3732,9 @@ fn append_one_element(
     // requirements (fatal in a debug-checked runtime; silent UB in
     // release). The trailing pad bytes are zeroed where the element is
     // copied in; no relptr ever targets the padding.
-    let raw_variable_size = elem_blob.len().saturating_sub(w);
-    let variable_size = (raw_variable_size + 7) & !7;
+    let too_big = || MorlocError::Other("@write: an element's size overflows".into());
+    let raw_variable_size = flat_len.saturating_sub(w);
+    let variable_size = raw_variable_size.checked_add(7).ok_or_else(too_big)? & !7;
 
     // Initialise the index cap on first write into this slot. Clamp
     // to what the buffer can actually hold: with a small env-overridden
@@ -3755,33 +3750,32 @@ fn append_one_element(
     // with the smallest possible index (one slot). The buffer's layout
     // is header (16) + index (>= 1 element) + variable data. If even
     // that minimum exceeds buf_size, the element is truly oversize.
-    let min_required = 16 + w + variable_size;
+    let min_required = (16 + w).checked_add(variable_size).ok_or_else(too_big)?;
     if min_required > buf_size {
-        // Even on an empty buffer, this element wouldn't fit. Flush
-        // and emit oversize. The oversize packet is a one-element
-        // Array<a> built from elem_blob.
+        // A one-element `[a]`: its 16-byte header, then the element's flat
+        // form with offsets relative to the header.
         flush_write_buffer(slot, local)?;
-        // Build oversize payload: Array{size=1, data=16} + elem_blob,
-        // with elem_blob's inline relptrs shifted by +16 to account
-        // for the Array header.
-        let oversize_len = 16 + elem_blob.len();
-        let mut oversize_payload = Vec::with_capacity(oversize_len);
-        // Array header
+        let oversize_len = 16usize.checked_add(flat_len).ok_or_else(too_big)?;
+        let mut oversize_payload = vec![0u8; oversize_len];
         let arr_hdr = shm_types_crate::Array { size: 1, data: 16 as RelPtr };
-        oversize_payload.extend_from_slice(unsafe {
-            std::slice::from_raw_parts(
-                &arr_hdr as *const _ as *const u8,
-                16,
-            )
-        });
-        // Element blob
-        oversize_payload.extend_from_slice(elem_blob);
-        // Shift relptrs in the appended element by +16.
+        // SAFETY: the payload holds the 16-byte header.
+        unsafe { std::ptr::write_unaligned(oversize_payload.as_mut_ptr() as *mut shm_types_crate::Array, arr_hdr) };
         let payload_base = oversize_payload.as_mut_ptr();
-        unsafe {
-            crate::voidstar::shift_buffer_relptrs(
-                payload_base, oversize_len, 16, &local.elem_schema, 16isize,
-            )?;
+        if via_scratch {
+            oversize_payload[16..].copy_from_slice(scratch);
+            unsafe {
+                crate::voidstar::shift_buffer_relptrs(
+                    payload_base, oversize_len, 16, &local.elem_schema, 16isize,
+                )?;
+            }
+        } else if inline_int {
+            // SAFETY: the element's slot holds `w` bytes.
+            unsafe { std::ptr::copy_nonoverlapping(elem_src as *const u8, payload_base.add(16), w) };
+        } else {
+            // SAFETY: the payload holds the slot and `flat_len - w` bytes after it.
+            unsafe {
+                crate::voidstar::flatten_portable_in_place(payload_base, 16, 16 + w, flat_len, elem_src, elem, res)?;
+            }
         }
         let payload = PortablePayload::new(&oversize_payload, &local.value_schema)?;
         if slot.kind.get() == MLC_KIND_CHANNEL {
@@ -3804,9 +3798,10 @@ fn append_one_element(
             slot.write_buffer_index_cap.get()
         };
         let candidate_index_bytes = (candidate_cap as usize) * w;
-        let required = 16 + candidate_index_bytes
-            + (slot.write_buffer_data_used.get() as usize)
-            + variable_size;
+        let required = (16 + candidate_index_bytes)
+            .checked_add(slot.write_buffer_data_used.get() as usize)
+            .and_then(|r| r.checked_add(variable_size))
+            .ok_or_else(too_big)?;
         if required <= buf_size {
             ensure_write_room(slot, required)?;
             if need_index_grow {
@@ -3836,38 +3831,31 @@ fn append_one_element(
     let data_region_start = 16 + (slot.write_buffer_index_cap.get() as usize) * w;
     let data_offset = data_region_start + (slot.write_buffer_data_used.get() as usize);
 
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            elem_blob.as_ptr(), buf_abs.add(index_offset), w,
-        );
-        // The buffer is reused across flushes, so the pad bytes up to
-        // the 8-byte alignment are zeroed here; no relptr references them.
-        if raw_variable_size > 0 {
-            std::ptr::copy_nonoverlapping(
-                elem_blob.as_ptr().add(w),
-                buf_abs.add(data_offset),
-                raw_variable_size,
-            );
-        }
-        std::ptr::write_bytes(
-            buf_abs.add(data_offset + raw_variable_size),
-            0,
-            variable_size - raw_variable_size,
-        );
-    }
-    // Shift the copied element's relptrs from "blob-relative" (where
-    // sub-allocations start at offset w) to "buffer-relative" (where
-    // they now start at `data_offset`). We shift in place using pure
-    // buffer arithmetic -- an SHM rebase would take a `rel2abs`
-    // step on each Optional/Array descent that lands in the primary
-    // SHM volume rather than in the write buffer (the relptrs are
-    // pure offsets with `vol_idx == 0`), corrupting arbitrary bytes.
-    let shift: isize = (data_offset as isize) - (w as isize);
-    if shift != 0 && !inline_int {
+    if via_scratch || inline_int {
+        // SAFETY: SLOT-20: room for the slot and `variable_size` bytes.
         unsafe {
-            crate::voidstar::shift_element_relptrs(
-                buf_abs, data_offset + raw_variable_size, index_offset,
-                elem, shift, res, shallow,
+            if inline_int {
+                std::ptr::copy_nonoverlapping(elem_src as *const u8, buf_abs.add(index_offset), w);
+            } else {
+                std::ptr::copy_nonoverlapping(scratch.as_ptr(), buf_abs.add(index_offset), w);
+                std::ptr::copy_nonoverlapping(scratch.as_ptr().add(w), buf_abs.add(data_offset), raw_variable_size);
+            }
+            std::ptr::write_bytes(buf_abs.add(data_offset + raw_variable_size), 0, variable_size - raw_variable_size);
+        }
+        let shift: isize = (data_offset as isize) - (w as isize);
+        if via_scratch && shift != 0 {
+            unsafe {
+                crate::voidstar::shift_element_relptrs(
+                    buf_abs, data_offset + raw_variable_size, index_offset,
+                    elem, shift, res, None,
+                )?;
+            }
+        }
+    } else {
+        // SAFETY: SLOT-20: room for the slot and `variable_size` bytes.
+        unsafe {
+            crate::voidstar::flatten_portable_in_place(
+                buf_abs, index_offset, data_offset, w + variable_size, elem_src, elem, res,
             )?;
         }
     }
@@ -3980,7 +3968,6 @@ pub fn shared_write_subpacket(
         // borrows it while the slot itself is updated per element.
         let elem = local.elem_schema.clone();
         let res = crate::recur::Resolver::new(&elem);
-        let shallow = crate::voidstar::shallow_array_slots(&elem);
         // An Int of at most one limb is its own 16 bytes, holding no pointer,
         // so a run of them is copied as a fixed-width array while the buffer
         // holds no variable bytes.
@@ -4001,7 +3988,7 @@ pub fn shared_write_subpacket(
                 continue;
             }
             let elem_src = unsafe { elem_data_base.add((i as usize) * w) };
-            append_one_element(slot, local, elem_src, buf_size, &mut scratch, &elem, &res, shallow.as_deref())?;
+            append_one_element(slot, local, elem_src, buf_size, &mut scratch, &elem, &res)?;
             slot.element_count.set(slot.element_count.get() + 1);
             i += 1;
         }
@@ -8679,6 +8666,111 @@ mod tests {
         assert_eq!(found.len(), 1, "expected one compressed sub-packet");
         let (sub, frames) = found.remove(0);
         (sub, frames.iter().map(|f| f.uncompressed_size).collect())
+    }
+
+    /// The data packets (FMT-2 type 0) inside a stream file, in order.
+    fn data_subpackets(bytes: &[u8]) -> Vec<Vec<u8>> {
+        let mut at = 0usize;
+        let mut out = Vec::new();
+        while at + 32 <= bytes.len() && bytes[at..at + 4] == [0x6d, 0xf8, 0x07, 0x07] {
+            let offset = u32::from_le_bytes(bytes[at + 20..at + 24].try_into().unwrap()) as usize;
+            let length = u64::from_le_bytes(bytes[at + 24..at + 32].try_into().unwrap()) as usize;
+            match bytes[at + 12] {
+                0 => out.push(bytes[at..at + 32 + offset + length].to_vec()),
+                3 => {
+                    at += 32 + offset;
+                    continue;
+                }
+                _ => {}
+            }
+            at += 32 + offset + length;
+        }
+        out
+    }
+
+    /// Write each of `batches` as one `@write` of `list`, flushing after
+    /// each, to a new stream at `p`; return the last batch as the runtime
+    /// prints it.
+    fn write_json_stream(p: &str, list: &str, batches: &[&str]) -> String {
+        let schema = parse_schema(list).unwrap();
+        let w = shared_open_ostream_with_schema(p, list).unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(0).unwrap();
+        let mut shown = String::new();
+        for json in batches {
+            let v = crate::json::read_json_with_schema(json, &schema).unwrap();
+            shown = crate::json::voidstar_to_json_string(v, &schema).unwrap();
+            shared_write_subpacket(w, level, v).unwrap();
+            shm::shfree(v).unwrap();
+            shared_flush_buffer(w).unwrap();
+        }
+        shared_close_handle(w).unwrap();
+        shown
+    }
+
+    struct TestWriteBuffer;
+    impl Drop for TestWriteBuffer {
+        fn drop(&mut self) {
+            set_test_write_buffer_bytes(None);
+        }
+    }
+
+    /// SLOT-20: an element written into a write buffer reused from an
+    /// earlier sub-packet is laid out exactly as over any other contents:
+    /// no byte of what the buffer held survives in an alignment gap, and
+    /// the elements read back unchanged. Two streams write first batches
+    /// of one layout and different bytes, then the same batch.
+    #[test]
+    fn written_elements_do_not_depend_on_a_reused_buffer() {
+        let _shm = crate::own_test_registry();
+        set_test_write_buffer_bytes(Some(64 * 1024));
+        let _buf = TestWriteBuffer;
+        let dir = concat_test_dir("reused_buffer");
+        let list = "at3sai4?f8";
+        let row = |i: usize, fill: char, big: bool| {
+            let s: String = std::iter::repeat(fill).take((i * 37) % 301).collect();
+            let xs: Vec<String> = (0..(i * 11) % 23)
+                .map(|k| if big { (-1 - k as i64).to_string() } else { 0.to_string() })
+                .collect();
+            let opt = if i % 3 == 0 { "null".to_string() } else if big { "-1e300".to_string() } else { "0.0".to_string() };
+            format!("[\"{s}\", [{}], {opt}]", xs.join(","))
+        };
+        let first = |fill: char, big: bool| format!("[{}]", (0..1500).map(|i| row(i, fill, big)).collect::<Vec<_>>().join(","));
+        let then = format!("[{}]", (0..1500).map(|i| row(i * 5 + 3, 'a', false)).collect::<Vec<_>>().join(","));
+        let (dirty, plain) = (first('z', true), first('a', false));
+
+        let a = dir.join("a.idx").to_str().unwrap().to_string();
+        let b = dir.join("b.idx").to_str().unwrap().to_string();
+        let shown = write_json_stream(&a, list, &[&dirty, &then]);
+        write_json_stream(&b, list, &[&plain, &then]);
+
+        // The first batch starts on a fresh buffer in both streams, so it
+        // fills as many sub-packets as it does in a stream of its own.
+        let c = dir.join("c.idx").to_str().unwrap().to_string();
+        write_json_stream(&c, list, &[&plain]);
+        let k = data_subpackets(&std::fs::read(&c).unwrap()).len();
+
+        let after_dirty = data_subpackets(&std::fs::read(&a).unwrap());
+        let after_plain = data_subpackets(&std::fs::read(&b).unwrap());
+        assert_eq!(after_dirty.len(), after_plain.len());
+        let n = after_dirty.len();
+        assert!(k > 4 && n > k + 4, "{n} sub-packets, {k} in the first batch: too few buffers reused");
+        assert!(after_dirty[..k] != after_plain[..k], "the first batches wrote the same bytes");
+        assert!(
+            after_dirty[k..] == after_plain[k..],
+            "bytes a reused buffer held before changed the sub-packets written into it"
+        );
+
+        let schema = parse_schema(list).unwrap();
+        let r = open_istream(&a).unwrap();
+        let mut back = Vec::new();
+        while let Some(f) = shared_next_frame(r).unwrap() {
+            let s = crate::json::voidstar_to_json_string(f, &schema).unwrap();
+            back.push(s[1..s.len() - 1].to_string());
+            shm::shfree(f).unwrap();
+        }
+        shared_close_handle(r).unwrap();
+        let all = format!("[{}]", back.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(","));
+        assert!(all.ends_with(&shown[1..]), "the elements read back differ from those written");
     }
 
     struct TestDepth;
