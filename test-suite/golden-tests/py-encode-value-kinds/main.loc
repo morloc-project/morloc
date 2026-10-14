@@ -1,0 +1,64 @@
+-- What the Python encoder accepts as a list: a list, bytes, a bytearray, or
+-- a numpy ndarray (subclasses included). Anything else is a type error, in
+-- particular an object that merely has `__array_interface__` (a numpy
+-- scalar, a hand-made object). A masked array is refused rather than
+-- silently losing its mask.
+--
+-- Writing strings and records never imports numpy, and a record missing a
+-- field is an error rather than a zero or a null slot. A value that grows
+-- between the encoder's sizing and writing passes (a dict key whose
+-- comparison runs Python code) is an error, never a write past the block,
+-- and so is one that shrinks, never a read of an element that is gone.
+module main
+  ( numpyScalar, fakeArray, maskedArray, numpyArray, numpySubclass
+  , missingKey, growing, shrinking
+  , numpyAfterStrs, numpyAfterRecords
+  )
+
+import root-py
+
+effect IO
+
+record R where
+  name :: Str
+  items :: [U8]
+
+applyPy :: (Int -> <IO> Int) -> Int -> <IO> Int
+numpyScalar :: Int -> [U8]
+fakeArray :: Int -> [U8]
+maskedArray :: Int -> [U8]
+numpyArray :: Int -> [U8]
+numpySubclass :: Int -> [U8]
+strsPy :: Int -> [Str]
+recordsPy :: Int -> [R]
+missingKey :: Int -> [R]
+growing :: Int -> [R]
+shrinking :: Int -> [R]
+numpyLoaded :: Int -> Int
+source Py from "src.py"
+  ( "apply_once" as applyPy
+  , "numpy_scalar" as numpyScalar, "fake_array" as fakeArray
+  , "masked_array" as maskedArray, "numpy_array" as numpyArray
+  , "numpy_subclass" as numpySubclass
+  , "strs" as strsPy, "records" as recordsPy, "missing_key" as missingKey
+  , "growing" as growing, "shrinking" as shrinking
+  , "numpy_loaded" as numpyLoaded
+  )
+
+numpyAfterStrs :: Str -> <IO> Int
+numpyAfterStrs p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream Str))
+  r <- applyPy (\x -> do
+    @write 0 o (strsPy x)
+    numpyLoaded x) 3
+  @close o
+  r
+
+numpyAfterRecords :: Str -> <IO> Int
+numpyAfterRecords p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream R))
+  r <- applyPy (\x -> do
+    @write 0 o (recordsPy x)
+    numpyLoaded x) 3
+  @close o
+  r

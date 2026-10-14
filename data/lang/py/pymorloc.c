@@ -285,19 +285,64 @@ PyObject* numpy_module = NULL;
 // is used. This avoids the agonizingly long numpy import time. Idempotent:
 // PyImport_ImportModule + import_array() reinitialize the C-API pointer table
 // on every call, so guard with numpy_module and short-circuit after first init.
-void* import_numpy() {
+// Returns 0, or -1 with a Python error set.
+int import_numpy(void) {
     if (numpy_module != NULL) {
-        return NULL;
+        return 0;
     }
     numpy_module = PyImport_ImportModule("numpy");
-    if(numpy_module == NULL){
-        PyRAISE("NumPy is not available");
+    if (numpy_module == NULL) {
+        return -1;
     }
+    if (_import_array() < 0) {
+        Py_CLEAR(numpy_module);
+        return -1;
+    }
+    return 0;
+}
 
-    import_array();
+// 1 if `obj` is a numpy ndarray the encoder can read, 0 if it is not an
+// ndarray, -1 with a Python error set. Never imports numpy: an ndarray
+// cannot exist unless numpy is already loaded. A masked array is refused,
+// since its mask has no place on the wire.
+static int py_is_ndarray(PyObject* obj) {
+    if (numpy_module == NULL) {
+        PyObject* np = PyDict_GetItemString(PyImport_GetModuleDict(), "numpy");
+        if (np == NULL || !PyModule_Check(np)) {
+            return 0;
+        }
+        if (import_numpy() != 0) return -1;
+    }
+    if (!PyArray_Check(obj)) return 0;
+    if (Py_TYPE(obj) == &PyArray_Type) return 1;
+    PyObject* ma = PyDict_GetItemString(PyImport_GetModuleDict(), "numpy.ma");
+    if (ma == NULL || !PyModule_Check(ma)) return 1;
+    PyObject* masked_type = PyObject_GetAttrString(ma, "MaskedArray");
+    if (masked_type == NULL) return -1;
+    int masked = PyObject_IsInstance(obj, masked_type);
+    Py_DECREF(masked_type);
+    if (masked < 0) return -1;
+    if (masked) {
+        PyErr_SetString(PyExc_TypeError,
+            "a numpy masked array cannot be written as a list: its mask would be lost");
+        return -1;
+    }
+    return 1;
+}
 
-error:
-    return NULL;
+// For a list-typed value, check that `obj` is a list, bytes, bytearray or
+// ndarray. Returns 0, or -1 with a Python error set.
+static int py_check_list_value(PyObject* obj) {
+    if (PyList_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj)) return 0;
+    int nd = py_is_ndarray(obj);
+    if (nd < 0) return -1;
+    if (nd == 0) {
+        PyErr_Format(PyExc_TypeError,
+            "Expected list, bytes, bytearray, or numpy array for a list, but got %s",
+            Py_TYPE(obj)->tp_name);
+        return -1;
+    }
+    return 0;
 }
 
 
@@ -528,6 +573,11 @@ typedef struct {
     unsigned char pop_env;     // sentinel: pop the recur env and nothing else
 } py_frame_t;
 
+typedef struct py_keyset {
+    const Schema* schema;
+    PyObject** keys;
+} py_keyset_t;
+
 typedef struct {
     py_frame_t* frames;
     size_t len;
@@ -541,6 +591,9 @@ typedef struct {
     size_t env_base;        // recur env depth at entry, restored on exit
     ssize_t total;          // size pass
     void** cursor;          // write pass
+    void* end;              // write pass: the end of the block the size pass measured
+    struct py_keyset* keysets; // record key objects made by this walk
+    size_t n_keysets;
     morloc_space_t space;   // read pass: where relptrs lead
     PyObject* result;       // read pass: the root, owned until returned
     PyObject* keep;         // references the walk holds until it ends
@@ -581,7 +634,76 @@ static void py_walk_free(py_walk_t* w) {
     free(w->frames);
     w->frames = NULL;
     Py_CLEAR(w->keep);
+    for (size_t i = 0; i < w->n_keysets; i++) {
+        for (size_t k = 0; k < w->keysets[i].schema->size; k++) {
+            Py_XDECREF(w->keysets[i].keys[k]);
+        }
+        free(w->keysets[i].keys);
+    }
+    free(w->keysets);
+    w->keysets = NULL;
+    w->n_keysets = 0;
     recur_env_depth = w->env_base;
+}
+
+// The key objects of a record schema, made once per walk rather than once
+// per record. NULL with a Python error set.
+static PyObject** py_record_keys(py_walk_t* w, const Schema* schema) {
+    for (size_t i = 0; i < w->n_keysets; i++) {
+        if (w->keysets[i].schema == schema) return w->keysets[i].keys;
+    }
+    py_keyset_t* grown = (py_keyset_t*)realloc(w->keysets, (w->n_keysets + 1) * sizeof(py_keyset_t));
+    if (grown == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    w->keysets = grown;
+    PyObject** keys = (PyObject**)calloc(schema->size ? schema->size : 1, sizeof(PyObject*));
+    if (keys == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    w->keysets[w->n_keysets].schema = schema;
+    w->keysets[w->n_keysets].keys = keys;
+    w->n_keysets++;
+    for (size_t k = 0; k < schema->size; k++) {
+        keys[k] = PyUnicode_InternFromString(schema->keys[k]);
+        if (keys[k] == NULL) return NULL;
+    }
+    return keys;
+}
+
+// A record field's value, or NULL with a Python error set when the dict
+// lacks the field.
+static PyObject* py_record_field(const Schema* schema, PyObject** keys, PyObject* dict, size_t i) {
+    PyObject* value = PyDict_GetItemWithError(dict, keys[i]);
+    if (value == NULL && !PyErr_Occurred()) {
+        PyErr_Format(PyExc_KeyError, "record field '%s' is missing", schema->keys[i]);
+    }
+    return value;
+}
+
+// An element the walk was about to visit is gone: Python code run during
+// the walk (a dict key's __eq__) changed the value. Returns -1.
+static int py_vanished(void) {
+    if (!PyErr_Occurred()) {
+        PyErr_SetString(PyExc_RuntimeError, "the value changed while it was being written");
+    }
+    return -1;
+}
+
+// Align the cursor to `align`, take `n` bytes there and return their
+// start; NULL with a Python error set, writing nothing, when they no longer
+// fit the space the size pass measured (the value changed between passes).
+static char* py_take(py_walk_t* w, size_t align, size_t n) {
+    char* at = (char*)ALIGN_UP((uintptr_t)*w->cursor, align);
+    if (at > (char*)w->end || n > (size_t)((char*)w->end - at)) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "the value changed while it was being written: it no longer fits the space measured for it");
+        return NULL;
+    }
+    *w->cursor = at + n;
+    return at;
 }
 
 static int py_push(py_walk_t* w, const py_frame_t* f) {
@@ -688,12 +810,18 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
 // Account for a child. `inline_slot` says the child's fixed width lies
 // inside the parent's (tuple and record fields), so only its tail is added.
 static int py_size_child(py_walk_t* w, const Schema* schema, PyObject* obj, int inline_slot) {
+    if (obj == NULL) return py_vanished();
     const Schema* s = py_resolve(schema);
     if (s == NULL) return -1;
     if (py_flat(w, s)) {
         if (inline_slot) w->total -= (ssize_t)s->width;
-        return py_size_step(w, s, obj, 0);
+        Py_INCREF(obj);
+        int r = py_size_step(w, s, obj, 0);
+        Py_DECREF(obj);
+        return r;
     }
+    Py_INCREF(obj);
+    if (py_keep(w, obj) != 0) return -1;
     py_frame_t f;
     memset(&f, 0, sizeof(f));
     f.schema = s;
@@ -763,9 +891,7 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
             if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) )) {
                 PyRAISE("Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
             }
-            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) {
-                PyRAISE("Expected list, bytes, bytearray, or numpy array for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
-            }
+            if (schema->type == MORLOC_ARRAY && idx == 0 && py_check_list_value(obj) != 0) return -1;
 
             const Schema* element_schema = py_resolve(schema->parameters[0]);
             if (element_schema == NULL) return -1;
@@ -836,8 +962,7 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                             }
                             break;  // one compound element per visit, below
                     }
-                } else if (PyObject_HasAttrString(obj, "__array_interface__")) {
-                    import_numpy();
+                } else if (schema->type == MORLOC_ARRAY && !PyBytes_Check(obj) && !PyByteArray_Check(obj)) {
                     PyArrayObject *arr = (PyArrayObject *)obj;
                     // A bulk or widening route copies `width` bytes per
                     // element; any other array is sized element by element.
@@ -921,13 +1046,12 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                 PyRAISE("Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
             }
             w->total += (ssize_t)schema->width;
+            PyObject** keys = py_record_keys(w, schema);
+            if (keys == NULL) return -1;
             for (size_t i = 0; i < schema->size; ++i) {
-                PyObject* key = PyUnicode_FromString(schema->keys[i]);
-                PyObject* value = PyDict_GetItem(obj, key);
-                Py_DECREF(key);
-                if (value) {
-                    if (py_size_child(w, schema->parameters[i], value, 1) != 0) return -1;
-                }
+                PyObject* value = py_record_field(schema, keys, obj, i);
+                if (value == NULL) return -1;
+                if (py_size_child(w, schema->parameters[i], value, 1) != 0) return -1;
             }
             return 0;
         }
@@ -1035,11 +1159,17 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
 // Write a child into its slot: a leaf now, a compound node by call or by
 // frame.
 static int py_write_child(py_walk_t* w, const Schema* schema, void* dest, PyObject* obj) {
+    if (obj == NULL) return py_vanished();
     const Schema* s = py_resolve(schema);
     if (s == NULL) return -1;
     if (py_flat(w, s)) {
-        return py_write_step(w, s, dest, obj, 0);
+        Py_INCREF(obj);
+        int r = py_write_step(w, s, dest, obj, 0);
+        Py_DECREF(obj);
+        return r;
     }
+    Py_INCREF(obj);
+    if (py_keep(w, obj) != 0) return -1;
     py_frame_t f;
     memset(&f, 0, sizeof(f));
     f.schema = s;
@@ -1163,13 +1293,14 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             } else {
                 // Overflow: allocate limb array, store relptr
                 fields[0] = (int64_t)nlimbs;
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, _Alignof(uint64_t));
+                char* limbs = py_take(w, _Alignof(uint64_t), nlimbs * sizeof(uint64_t));
+                if (limbs == NULL) goto error;
                 {
                     char* rel_err = NULL;
-                    *(relptr_t*)&fields[1] = abs2rel(*cursor, &rel_err);
+                    *(relptr_t*)&fields[1] = abs2rel(limbs, &rel_err);
                     if (rel_err) { free(rel_err); goto error; }
                 }
-                memset(*cursor, 0, nlimbs * sizeof(uint64_t));
+                memset(limbs, 0, nlimbs * sizeof(uint64_t));
                 // Python 3.13 added a trailing `with_exceptions` argument to
                 // _PyLong_AsByteArray; pass 1 to keep the exception-raising
                 // behavior that older Pythons had implicitly.
@@ -1179,13 +1310,12 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
 #  define MORLOC_ASBYTEARRAY_TAIL
 #endif
                 if (_PyLong_AsByteArray((PyLongObject*)obj,
-                                        (unsigned char*)*cursor,
+                                        (unsigned char*)limbs,
                                         nlimbs * sizeof(uint64_t),
                                         1, 1 MORLOC_ASBYTEARRAY_TAIL) < 0) {
                     goto error;
                 }
 #undef MORLOC_ASBYTEARRAY_TAIL
-                *cursor = (char*)*cursor + nlimbs * sizeof(uint64_t);
             }
             break;
         }
@@ -1209,9 +1339,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 PyRAISE("Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
             }
 
-            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) {
-                PyRAISE("Expected list, bytes, bytearray, or numpy array for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
-            }
+            if (schema->type == MORLOC_ARRAY && idx == 0 && py_check_list_value(obj) != 0) goto error;
 
             const Schema* element_schema = py_resolve(schema->parameters[0]);
             if (element_schema == NULL) goto error;
@@ -1274,8 +1402,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                             goto error;
                         }
                     }
-                } else if (schema->type == MORLOC_ARRAY && PyObject_HasAttrString(obj, "__array_interface__")) { // check if it is a numpy array
-                    import_numpy();
+                } else if (schema->type == MORLOC_ARRAY) {
                     PyArrayObject* arr = (PyArrayObject*)obj;
                     size = PyArray_SIZE(arr);
                     if (numpy_route(arr, element_schema, &np_route) != 0) goto error;
@@ -1303,17 +1430,17 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                     break;
                 }
 
-                // align cursor for element data placement.
-                // String stays at natural element alignment (1 byte for chars);
-                // Array bumps to 64 for primitive numeric elements (SIMD/BLAS).
-                {
-                    size_t buf_align = (schema->type == MORLOC_STRING)
-                        ? schema->parameters[0]->alignment
-                        : element_schema->data_alignment;
-                    *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, buf_align);
-                }
+                // Element data: strings stay at natural element alignment
+                // (1 byte for chars); arrays bump to 64 for primitive
+                // numeric elements (SIMD/BLAS). Bytes and strings have
+                // one-byte elements, so every branch fills size * width.
+                size_t buf_align = (schema->type == MORLOC_STRING)
+                    ? schema->parameters[0]->alignment
+                    : element_schema->data_alignment;
+                char* start = py_take(w, buf_align, (size_t)size * width);
+                if (start == NULL) goto error;
 
-                result->data = PyTRY(abs2rel, *cursor);
+                result->data = PyTRY(abs2rel, start);
 
                 if (PyList_Check(obj) || numpy_per_element) {
                     // Per-element walk: works for Python lists and numpy
@@ -1323,11 +1450,6 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                     // Element access differs (PyList_GetItem vs
                     // PyArray_GETITEM), but the wire layout is identical.
 
-                    // Move the cursor to the location immediately after the
-                    // fixed sized elements
-                    *cursor = (void*)(*(char**)cursor + size * width);
-
-                    char* start = (char*) PyTRY(rel2abs, result->data);
                     PyArrayObject* arr = numpy_per_element ? (PyArrayObject*)obj : NULL;
                     // Batched stream-handle-array write: one registry lock for all N handles.
                     if ((element_schema->type == MORLOC_IFILE
@@ -1391,29 +1513,19 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                     }
 
                 } else if (PyBytes_Check(obj) || PyByteArray_Check(obj)){
-                    absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
-                    memcpy(tmp_ptr, mutable_data, size);
-                    // move cursor to the location after the copied data
-                    *cursor = (void*)(*(char**)cursor + size);
+                    memcpy(start, mutable_data, size);
                 }
                 else if (np_route == NPY_ROUTE_CAST) {
-                    absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
                     PyArrayObject* cast = (PyArrayObject*)PyArray_FromArray(
                         (PyArrayObject*)obj,
                         PyArray_DescrFromType(schema_to_npy_type(element_schema->type)),
                         NPY_ARRAY_CARRAY);
                     if (!cast) goto error;
-                    memcpy(tmp_ptr, PyArray_DATA(cast), size * width);
+                    memcpy(start, PyArray_DATA(cast), size * width);
                     Py_DECREF(cast);
-                    *cursor = (void*)(*(char**)cursor + size * width);
                 }
                 else{
-                    absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
-                    memcpy(tmp_ptr, immutable_data, size * width);
-
-                    // Move the cursor to the location immediately after the
-                    // fixed sized elements
-                    *cursor = (void*)(*(char**)cursor + size * width);
+                    memcpy(start, immutable_data, size * width);
                 }
             }
             break;
@@ -1444,14 +1556,13 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             }
 
             {
+                PyObject** keys = py_record_keys(w, schema);
+                if (keys == NULL) goto error;
                 for (size_t i = 0; i < schema->size; ++i) {
-                    PyObject* key = PyUnicode_FromString(schema->keys[i]);
-                    PyObject* value = PyDict_GetItem(obj, key);
-                    Py_DECREF(key);
-                    if (value) {
-                        if (py_write_child(w, schema->parameters[i], (char*)dest + schema->offsets[i], value) != 0) {
-                            goto error;
-                        }
+                    PyObject* value = py_record_field(schema, keys, obj, i);
+                    if (value == NULL) goto error;
+                    if (py_write_child(w, schema->parameters[i], (char*)dest + schema->offsets[i], value) != 0) {
+                        goto error;
                     }
                 }
             }
@@ -1476,14 +1587,13 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 *(relptr_t*)((char*)dest + 8) = RELNULL;
             } else {
                 size_t warm_align = warm->alignment;
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, warm_align);
+                void* arm_dest = py_take(w, warm_align, warm->width);
+                if (arm_dest == NULL) goto error;
                 {
                     char* rel_err = NULL;
-                    *(relptr_t*)((char*)dest + 8) = abs2rel(*cursor, &rel_err);
+                    *(relptr_t*)((char*)dest + 8) = abs2rel(arm_dest, &rel_err);
                     if (rel_err) { free(rel_err); goto error; }
                 }
-                void* arm_dest = *cursor;
-                *cursor = (void*)((char*)*cursor + warm->width);
                 if (py_write_child(w, warm, arm_dest, wfields) != 0) {
                     goto error;
                 }
@@ -1503,14 +1613,13 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 const Schema* inner_schema = py_resolve(schema->parameters[0]);
                 if (inner_schema == NULL) goto error;
                 size_t inner_align = inner_schema->alignment;
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, inner_align);
+                void* inner_dest = py_take(w, inner_align, inner_schema->width);
+                if (inner_dest == NULL) goto error;
                 {
                     char* rel_err = NULL;
-                    *(relptr_t*)dest = abs2rel(*cursor, &rel_err);
+                    *(relptr_t*)dest = abs2rel(inner_dest, &rel_err);
                     if (rel_err) { free(rel_err); goto error; }
                 }
-                void* inner_dest = *cursor;
-                *cursor = (void*)((char*)*cursor + inner_schema->width);
                 if (py_write_child(w, inner_schema, inner_dest, obj) != 0) {
                     goto error;
                 }
@@ -1528,11 +1637,12 @@ error:
 }
 
 // Write `obj` into the slot at `dest`, appending variable-length parts at
-// the cursor. Returns 0, or -1 with a Python error set.
-int to_voidstar_inner(void* dest, void** cursor, const Schema* schema, PyObject* obj) {
+// the cursor, never past `end`. Returns 0, or -1 with a Python error set.
+int to_voidstar_inner(void* dest, void** cursor, void* end, const Schema* schema, PyObject* obj) {
     py_walk_t w;
     py_walk_init(&w, schema);
     w.cursor = cursor;
+    w.end = end;
     int result = -1;
     if (py_write_child(&w, schema, dest, obj) != 0) goto done;
     for (;;) {
@@ -1553,6 +1663,7 @@ void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
   // calculate the required size of the shared memory object
   ssize_t shm_size = get_shm_size(schema, obj);
   if(shm_size == -1){
+      if (PyErr_Occurred()) goto error;
       PyRAISE("Schema does not match object");
   }
 
@@ -1563,7 +1674,7 @@ void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
   void* cursor = (void*)((char*)dest + schema->width);
 
   // write the data to the block
-  int result = to_voidstar_inner(dest, &cursor, schema, obj);
+  int result = to_voidstar_inner(dest, &cursor, (char*)dest + shm_size, schema, obj);
   if (result != 0) {
       goto error;
   }
@@ -1815,7 +1926,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 // Boxed path: build dtype=object array and fill it element
                 // by element. Each slot stores a PyObject* pointer; SETITEM
                 // handles INCREF/DECREF correctly.
-                import_numpy();
+                if (import_numpy() != 0) goto error;
                 npy_intp dims[] = {array->size};
                 obj = PyArray_SimpleNew(1, dims, NPY_OBJECT);
                 if (obj == NULL) {
@@ -1823,7 +1934,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 }
                 elem_slot_kind = PY_SLOT_NPY;
             } else if (numpy_type_num >= 0) {
-                import_numpy();
+                if (import_numpy() != 0) goto error;
                 npy_intp dims[] = {array->size};
                 // Own the buffer when the source is inline (packet buffer is
                 // freed shortly after get_value returns; a view would see
@@ -4076,7 +4187,7 @@ static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
     if (bytes < 0) { goto error; }
     voidstar = PyTRY(shmalloc, (size_t)bytes);
     void* cursor = (uint8_t*)voidstar + schema->width;
-    if (to_voidstar_inner(voidstar, &cursor, schema, value_obj) != 0) {
+    if (to_voidstar_inner(voidstar, &cursor, (uint8_t*)voidstar + bytes, schema, value_obj) != 0) {
         goto error;
     }
     {

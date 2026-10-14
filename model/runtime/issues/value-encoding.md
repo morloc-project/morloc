@@ -5,10 +5,10 @@
   writes a character count; morloc-runtime-types/src/schema.rs:575-586 reads
   bytes. A record field whose name has one non-ASCII letter (U+00FC) gives
   `m24...j1bj` and fails at run time: "unknown schema character 'r'".
-- **Missing record keys accepted.** [read] Violates REC-2. Python
-  (pymorloc.c:946-950, 1466-1474) and R (rmorloc.c:743-746, 1407-1410)
-  skip a missing key: a number becomes 0, an optional becomes pointer 0
-  (volume 0) instead of null.
+- **Missing record keys accepted.** [read] Violates REC-2. R
+  (rmorloc.c:743-746, 1407-1410) skips a missing key: a number becomes 0,
+  an optional becomes pointer 0 (volume 0) instead of null. (Python raises
+  a KeyError.)
 - [read] morloc-runtime/src/mpack.rs:401-403: Int limbs copied unaligned;
   json.rs:1537 reads them as `*const u64`.
 - [read] mpack.rs:388-400: a 0- or 8-byte `bin` Int stores a pointer that is
