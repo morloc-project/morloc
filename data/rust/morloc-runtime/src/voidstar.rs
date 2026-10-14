@@ -624,6 +624,13 @@ impl Landing {
         Ok(Landing { block: shm::shmalloc(len)?, len })
     }
 
+    /// Give up the landing's block without freeing it: the caller owns it.
+    pub fn into_block(self) -> AbsPtr {
+        let block = self.block;
+        std::mem::forget(self);
+        block
+    }
+
     /// Where to write the landed bytes: `len` writable bytes.
     pub fn as_mut_ptr(&self) -> *mut u8 {
         self.block
@@ -643,24 +650,144 @@ impl Landing {
     /// written now). Every rebased pointer and the bytes it addresses must lie
     /// inside the block.
     pub fn relocate(self, schema: &Schema, vol_idx_hint: u16) -> Result<AbsPtr, MorlocError> {
-        // The root slot is read before any pointer is: a value shorter than
-        // it would be read past the block.
-        if self.len < schema.width {
-            return Err(MorlocError::Serialization(format!(
-                "a voidstar value of {} bytes is shorter than its {}-byte root", self.len, schema.width
-            )));
-        }
-        let block_rel = shm::abs2rel(self.block)?;
-        let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
-        let delta = (block_rel as i64).wrapping_sub(producer_base as i64) as RelPtr;
-        let window = RelWindow::of_block(self.block, self.len)?;
-        // SAFETY: the block holds `len` landed bytes, at least one root
-        // wide; every pointer the rebase follows is checked against it.
-        unsafe { adjust_relptrs_within(self.block, schema, delta, window) }?;
+        // SAFETY: the landing's block holds `len` landed bytes.
+        unsafe { relocate_landed(self.block, self.len, schema, vol_idx_hint) }?;
         let block = self.block;
         std::mem::forget(self);
         Ok(block)
     }
+}
+
+/// `Landing::relocate` for a block its caller keeps: rebase the value of
+/// `schema` landed in the `len` bytes at `block`.
+///
+/// # Safety
+/// `block` must be a live SHM block holding `len` landed bytes that nothing
+/// else reads or writes during the call.
+pub unsafe fn relocate_landed(block: AbsPtr, len: usize, schema: &Schema, vol_idx_hint: u16) -> Result<(), MorlocError> {
+    if len < schema.width {
+        return Err(MorlocError::Serialization(format!(
+            "a voidstar value of {} bytes is shorter than its {}-byte root", len, schema.width
+        )));
+    }
+    let block_rel = shm::abs2rel(block)?;
+    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
+    let delta = (block_rel as i64).wrapping_sub(producer_base as i64) as RelPtr;
+    let window = RelWindow::of_block(block, len)?;
+    // SAFETY: the caller's block holds `len` bytes, at least one root wide;
+    // every pointer the rebase follows is checked against it.
+    if let Some(r) = unsafe { walk_root_array_parallel(RebaseMode::Shm(delta), window, block, schema) } {
+        return r;
+    }
+    unsafe { adjust_relptrs_within(block, schema, delta, window) }
+}
+
+/// The mode of a parallel walk, rebuilt on each worker.
+#[derive(Clone, Copy)]
+enum RebaseMode {
+    Shm(RelPtr),
+    Check { base: usize, shift: RelPtr },
+}
+
+impl RebaseMode {
+    fn rebase(self) -> Rebase {
+        match self {
+            RebaseMode::Shm(b) => Rebase::Shm(b),
+            RebaseMode::Check { base, shift } => Rebase::Check { base: base as *const u8, shift },
+        }
+    }
+}
+
+/// Bytes below which a value is walked on the calling thread.
+const PARALLEL_WALK_MIN_BYTES: isize = 8 << 20;
+
+/// Walk a large root array whose elements hold pointers on the frame
+/// workers: its header on the calling thread, as the walk steps it, then
+/// ranges of its elements (single elements when there are few), each
+/// element walked as a record of its own (as `adjust_records_within` walks
+/// records). `None` when the value is not such an array, for the caller to
+/// walk whole.
+///
+/// # Safety
+/// As for the serial walk in `mode`: `data` holds a value of `schema` whose
+/// pointers are checked against `window`.
+unsafe fn walk_root_array_parallel(
+    mode: RebaseMode,
+    window: RelWindow,
+    data: *mut u8,
+    schema: &Schema,
+) -> Option<Result<(), MorlocError>> {
+    let workers = crate::compression::frame_workers();
+    if workers < 2 {
+        return None;
+    }
+    let res = Resolver::new(schema);
+    let s = res.resolve(schema).ok()?;
+    if s.serial_type != SerialType::Array || s.parameters.is_empty() || s.parameters[0].is_fixed_width() {
+        return None;
+    }
+    // A rebase writes each pointer it follows; it runs on several threads
+    // only when every pointer of an element lies in the element itself, so
+    // no two threads write one place, however the input aliases.
+    if matches!(mode, RebaseMode::Shm(_)) && shallow_array_slots(&s.parameters[0]).is_none() {
+        return None;
+    }
+    // SAFETY: the root is an Array header (the caller checked its width).
+    let arr = unsafe { &mut *(data as *mut Array) };
+    if arr.size < 2 || window.hi - window.lo < PARALLEL_WALK_MIN_BYTES {
+        return None;
+    }
+    let elem_schema = &s.parameters[0];
+    let width = elem_schema.width;
+    let w = RebaseWalk { res: &res, mode: mode.rebase(), window: Some(window) };
+    // The header, as the walk's first step on an array does.
+    let rel = unsafe { w.moved(std::ptr::addr_of_mut!(arr.data)) };
+    if let Err(e) = w.check(rel, arr.size.checked_mul(width)) {
+        return Some(Err(e));
+    }
+    let data_rel = if matches!(mode, RebaseMode::Check { .. }) { arr.data + w.shift() } else { arr.data };
+    let elems = match w.target(data_rel) {
+        Ok(p) => p as usize,
+        Err(e) => return Some(Err(e)),
+    };
+    let n = arr.size;
+    let chunk = n.div_ceil(4 * workers).max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failed: std::sync::Mutex<Option<MorlocError>> = std::sync::Mutex::new(None);
+    let work = || {
+        let res = Resolver::new(schema);
+        let mut w = RebaseWalk { res: &res, mode: mode.rebase(), window: Some(window) };
+        let mut st = Stack::new();
+        loop {
+            let start = next.fetch_add(chunk, std::sync::atomic::Ordering::Relaxed);
+            if start >= n {
+                return;
+            }
+            for i in start..(start + chunk).min(n) {
+                // SAFETY: element i lies inside the region the header check
+                // admitted.
+                st.enter(elem_schema, unsafe { (elems as *const u8).add(i * width) }, ());
+                if let Err(e) = walk::run(&mut w, &mut st) {
+                    failed.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(e);
+                    next.store(n, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+    };
+    std::thread::scope(|sc| {
+        // The calling thread works too, so a refused spawn only narrows it.
+        for _ in 1..workers {
+            if std::thread::Builder::new().spawn_scoped(sc, &work).is_err() {
+                break;
+            }
+        }
+        work();
+    });
+    Some(match failed.into_inner().unwrap_or_else(|p| p.into_inner()) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    })
 }
 
 /// Check a value of `schema` that lies in `bytes` (a sub-packet payload in
@@ -675,11 +802,18 @@ pub fn check_in_place(bytes: &[u8], schema: &Schema, vol_idx_hint: u16) -> Resul
     }
     let hi = isize::try_from(bytes.len())
         .map_err(|_| MorlocError::Serialization("a voidstar value too large to address".into()))?;
+    let shift = -shm::encode_relptr(vol_idx_hint as usize, 0);
+    let window = RelWindow { lo: 0, hi };
+    // SAFETY: checking writes nothing; `bytes` holds at least one root.
+    let mode = RebaseMode::Check { base: bytes.as_ptr() as usize, shift };
+    if let Some(r) = unsafe { walk_root_array_parallel(mode, window, bytes.as_ptr() as *mut u8, schema) } {
+        return r;
+    }
     let res = Resolver::new(schema);
     let mut w = RebaseWalk {
         res: &res,
-        mode: Rebase::Check { base: bytes.as_ptr(), shift: -shm::encode_relptr(vol_idx_hint as usize, 0) },
-        window: Some(RelWindow { lo: 0, hi }),
+        mode: Rebase::Check { base: bytes.as_ptr(), shift },
+        window: Some(window),
     };
     let mut st = Stack::new();
     st.enter(schema, bytes.as_ptr(), ());

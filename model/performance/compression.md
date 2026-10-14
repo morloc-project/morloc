@@ -164,3 +164,23 @@ levels 7-9 keep 16 MiB frames, whose long-range window is their point.
 
 Why: reverses the 2026-09-29 ruling of one 16 MiB frame per sub-packet,
 which left a flushed write at the speed of one zstd thread.
+
+### ZIP-10 Reading a compressed stream decodes beside the reader, on every frame worker
+Intent: proposed
+Bench: compression
+Model: r_z(m) - r_0(m) = max(0, d_z * m / min(w, k) - c(m)) for a stream read with `@next`, c the reader's own work in the same time, k the frames a pass holds (2w); passes decode on a thread beside the reader (SLOT-26, SLOT-27), so small batches decode as widely as large ones and the reader waits only when decoding is the slower
+Measured: pending
+Limit: fastq.z3.read.batch64k <= 1.2 x
+
+Before SLOT-26 each `@next` decoded its own sub-packet on the calling
+thread; only the frames of one sub-packet ran in parallel, so a stream
+written in batches below the frame size (2 MiB at levels 1-6) decoded on
+one thread whatever the worker count, and no decoding overlapped the
+reader. Relocating a decoded batch, and checking an uncompressed one read
+in place (SLOT-25), walk the elements of a root array of 8 MiB or more on
+the frame workers too: a check always (it writes nothing), a relocation
+only when every pointer of an element lies in the element itself, so no
+two threads write one place whatever the input; the calling thread works
+beside them, so a thread the system refuses only narrows the walk. Measured on lib/biolib/bioprojects/overlap (10M intervals,
+314 MB raw, 79 MB at zstd 3, load average 7-9): zstd-3 over raw went from
++133 to +57 ms on one consumer thread and from +143 to +92 ms on twelve.

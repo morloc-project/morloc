@@ -410,6 +410,8 @@ pub fn registry_teardown() {
 
     // DAEMON-1
     crate::custody::stop_before_unmap();
+    // SLOT-27
+    ahead_join_idle();
 
     let mut held = REGISTRY_SEGMENT.lock();
     REGISTRY_TORN_DOWN.store(true, Ordering::Release);
@@ -962,6 +964,13 @@ impl Drop for ProcessLocalSlot {
             for entry in self.cache.entries.drain(..) {
                 let _ = crate::shm::release(entry.shm_packet);
             }
+            ahead_join(&mut self.cache);
+            for entry in self.cache.ahead.drain(..) {
+                let _ = crate::shm::release(entry.block);
+            }
+            for (block, _) in self.cache.spare.drain(..) {
+                let _ = crate::shm::release(block);
+            }
             self.cache.handle_bytes.fetch_sub(self.cache.current_bytes, std::sync::atomic::Ordering::Relaxed);
         }
         if !self.mmap_ptr.is_null() && self.mmap_size > 0 {
@@ -1171,6 +1180,8 @@ pub fn with_process_local_slot<R>(
     }
     // SLOT-23
     if !std::sync::Arc::ptr_eq(&local.cache.handle_bytes, &cache_bytes) {
+        // SLOT-27: a running pass settles against the counter it reserved in.
+        ahead_join(&mut local.cache);
         let held = local.cache.current_bytes;
         let own = std::mem::replace(&mut local.cache.handle_bytes, cache_bytes);
         own.fetch_sub(held, std::sync::atomic::Ordering::Relaxed);
@@ -4092,13 +4103,13 @@ pub fn shared_next_with(
         return shm::shfree(p).map(|_| ());
     }
     with_process_local_slot(handle, |local, slot| {
-        let Some((claim_cursor, on_disk_size)) = claim_next_subpacket(handle, local, slot)? else {
+        let Some((claim_cursor, on_disk_size, end)) = claim_next_subpacket(handle, local, slot)? else {
             let empty = shm_types_crate::Array { size: 0, data: shm::RELNULL };
             let base = &empty as *const shm_types_crate::Array as *const u8;
             decode(base, voidstar::MorlocSpace { base, len: std::mem::size_of::<shm_types_crate::Array>() });
             return Ok(());
         };
-        let (src, _) = materialize_subpacket_at_offset(local, claim_cursor)?;
+        let src = claimed_subpacket(local, claim_cursor, on_disk_size, end)?;
         match &src {
             &SubpacketSrc::File { payload_base, payload_len, vol_idx_hint, .. } => {
                 // SLOT-25: checked as the copy into shared memory checks it.
@@ -4111,7 +4122,11 @@ pub fn shared_next_with(
             }
             SubpacketSrc::Shm { arr_base } => decode(*arr_base as *const u8, voidstar::MorlocSpace::SHM),
         }
-        drop(src);
+        match src {
+            // SLOT-25: the decoder has returned and kept nothing of the block.
+            SubpacketSrc::Shm { .. } => ahead_recycle(local, src.into_block()),
+            SubpacketSrc::File { .. } => drop(src),
+        }
         drop_read_pages(local, claim_cursor + on_disk_size);
         Ok(())
     })
@@ -4122,7 +4137,7 @@ fn claim_next_subpacket(
     handle: i64,
     local: &mut ProcessLocalSlot,
     slot: &RegistrySlot,
-) -> Result<Option<(u64, u64)>, MorlocError> {
+) -> Result<Option<(u64, u64, u64)>, MorlocError> {
     if slot.kind.get() != MLC_KIND_ISTREAM {
         return Err(MorlocError::Other(format!(
             "@next on non-IStream handle (kind = {})",
@@ -4156,18 +4171,366 @@ fn claim_next_subpacket(
     // SLOT-23: the cursor moves under the lock, so another reader claims
     // the next sub-packet.
     slot.cursor.set(cursor + size);
-    Ok(Some((cursor, size)))
+    Ok(Some((cursor, size, end)))
 }
 
 fn next_file_subpacket(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
     with_process_local_slot(handle, |local, slot| {
-        let Some((claim_cursor, on_disk_size)) = claim_next_subpacket(handle, local, slot)? else {
+        let Some((claim_cursor, on_disk_size, end)) = claim_next_subpacket(handle, local, slot)? else {
             return Ok(None);
         };
-        let arr = materialize_and_finalise_subpacket(local, slot, claim_cursor)?;
+        let arr = materialize_and_finalise_subpacket(local, claim_cursor, on_disk_size, end)?;
         drop_read_pages(local, claim_cursor + on_disk_size);
         Ok(Some(arr))
     })
+}
+
+/// Sub-packets one decode-ahead pass takes at most, and the frames past
+/// which it stops adding more (ZIP-10).
+const AHEAD_MAX_SUBPACKETS: usize = 64;
+const AHEAD_FRAMES_PER_WORKER: usize = 2;
+const AHEAD_PASS_BYTES: u64 = 8 << 20;
+const AHEAD_MAX_SPARES: usize = 4;
+
+/// The source of the sub-packet this slot has claimed at `off`. A
+/// compressed one comes from the sub-packets decoded ahead, or is decoded
+/// with the compressed sub-packets that follow it in the file, all at once
+/// on the frame workers; those are kept for this slot's later claims
+/// (ZIP-10). The claim is not extended: a sub-packet decoded ahead and
+/// claimed by another reader is released unused.
+fn claimed_subpacket(
+    local: &mut ProcessLocalSlot,
+    off: u64,
+    size: u64,
+    end: u64,
+) -> Result<SubpacketSrc, MorlocError> {
+    // A slot whose claims follow one another reads the stream alone; one
+    // whose claims interleave with other readers' would decode for them.
+    let alone = local.cache.last_claim_end == 0 || local.cache.last_claim_end == off;
+    local.cache.last_claim_end = off + size;
+    if !alone {
+        spare_release(&mut local.cache);
+    }
+    ahead_join(&mut local.cache);
+    if let Some(block) = ahead_take(&mut local.cache, off) {
+        // SHM-7: the cache's reference becomes the caller's, which the
+        // arena records as it records a fresh block.
+        crate::eval_arena::record_if_active(block);
+        if alone {
+            ahead_schedule(local, off + size, end);
+        }
+        return Ok(SubpacketSrc::Shm { arr_base: block });
+    }
+    let (header, _, _) = read_subpacket_header(local, off)?;
+    let compressed = unsafe { header.command.data }.compression == PACKET_COMPRESSION_ZSTD;
+    if !alone || !compressed || local.cache.capacity_bytes == 0 || crate::compression::frame_workers() < 2 {
+        return Ok(materialize_subpacket_at_offset(local, off)?.0);
+    }
+    let src = materialize_subpacket_at_offset(local, off)?.0;
+    ahead_schedule(local, off + size, end);
+    Ok(src)
+}
+
+/// One compressed sub-packet of a decode-ahead pass.
+struct AheadPick {
+    offset: u64,
+    frames: Vec<morloc_runtime_types::packet::FrameEntry>,
+    payload_off: u64,
+    payload_len: u64,
+    vol_idx_hint: u16,
+    uncompressed: usize,
+}
+
+/// Parse the compressed sub-packet at `off` for a decode-ahead pass; `None`
+/// for anything else (the end of the data, a footer, an uncompressed or
+/// malformed sub-packet).
+fn ahead_pick(local: &ProcessLocalSlot, off: u64, end: u64) -> Option<AheadPick> {
+    if off + 32 > end {
+        return None;
+    }
+    let (header, payload_off, payload_len) = read_subpacket_header(local, off).ok()?;
+    if !header.is_data() || unsafe { header.command.data }.compression != PACKET_COMPRESSION_ZSTD {
+        return None;
+    }
+    if payload_off + payload_len > end {
+        return None;
+    }
+    // SAFETY: read_subpacket_header checked the header, metadata and
+    // payload lie inside the mapping.
+    let packet = unsafe {
+        std::slice::from_raw_parts((local.mmap_ptr as *const u8).add(off as usize), (payload_off + payload_len - off) as usize)
+    };
+    let frames = morloc_runtime_types::packet::read_frame_index_from_meta(packet).ok()??;
+    let (uncompressed, compressed) = morloc_runtime_types::packet::frame_totals(&frames).ok()?;
+    if compressed as u64 != payload_len {
+        return None;
+    }
+    let meta = &packet[..(payload_off - off) as usize];
+    let vol_idx_hint = morloc_runtime_types::packet::read_vol_index_from_meta(meta).ok().flatten().unwrap_or(0);
+    Some(AheadPick { offset: off, frames, payload_off, payload_len, vol_idx_hint, uncompressed })
+}
+
+/// Reserve `size` bytes of the handle's cache bound (SLOT-23); with `first`,
+/// the first entry is admitted whatever its size.
+fn cache_reserve(cache: &StreamCache, size: u64, first: bool) -> bool {
+    use std::sync::atomic::Ordering;
+    let mut held = cache.handle_bytes.load(Ordering::Relaxed);
+    loop {
+        if !(first && held == 0) && held.saturating_add(size) > cache.capacity_bytes {
+            return false;
+        }
+        match cache.handle_bytes.compare_exchange_weak(held, held + size, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(now) => held = now,
+        }
+    }
+}
+
+/// Join the slot's background pass, if any (SLOT-27): the sub-packets it
+/// decoded join the ones kept ahead, the rest are released.
+fn ahead_join(cache: &mut StreamCache) {
+    let Some(job) = cache.job.take() else { return };
+    let finished = job.handle.join().is_ok();
+    let done = std::mem::take(&mut *job.blocks.lock().unwrap_or_else(|p| p.into_inner()));
+    for (i, (offset, frames, reserved)) in job.picks.into_iter().enumerate() {
+        let got = done.get(i).copied().flatten().map(|(b, ok)| (b, ok && finished));
+        let block = got.map(|(b, _)| b as AbsPtr);
+        let size_bytes = block.and_then(|b| unsafe { shm::shm_block_size(b) }).unwrap_or(0) as u64;
+        // SLOT-23: settle the reservation at the block's size.
+        if size_bytes > reserved {
+            cache.handle_bytes.fetch_add(size_bytes - reserved, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            cache.handle_bytes.fetch_sub(reserved - size_bytes, std::sync::atomic::Ordering::Relaxed);
+        }
+        match (block, got.map(|(_, ok)| ok)) {
+            (Some(b), Some(true)) => {
+                cache.current_bytes = cache.current_bytes.saturating_add(size_bytes);
+                cache.ahead.push(AheadEntry { offset, block: b, size_bytes, frames });
+            }
+            (Some(b), _) => {
+                cache.handle_bytes.fetch_sub(size_bytes, std::sync::atomic::Ordering::Relaxed);
+                // SHM-7: the job's block, not recorded in any arena.
+                let _ = shm::release(b);
+            }
+            (None, _) => {}
+        }
+    }
+}
+
+/// Start decoding the next pass on a thread of its own when the slot holds
+/// less than a pass of sub-packets decoded ahead (SLOT-27). The pass starts
+/// after the last sub-packet taken ahead, or at `from`. The job allocates
+/// its blocks and reads the compressed bytes where they are mapped, past the
+/// claim that started it.
+fn ahead_schedule(local: &mut ProcessLocalSlot, from: u64, end: u64) {
+    if local.cache.job.is_some() || local.cache.capacity_bytes == 0 {
+        return;
+    }
+    let enough_frames = AHEAD_FRAMES_PER_WORKER * crate::compression::frame_workers();
+    let held_frames: usize = local.cache.ahead.iter().map(|e| e.frames).sum();
+    let held_bytes: u64 = local.cache.ahead.iter().map(|e| e.size_bytes).sum();
+    if held_frames >= enough_frames || held_bytes >= AHEAD_PASS_BYTES {
+        return;
+    }
+    let mut next = match local.cache.ahead.last() {
+        Some(e) => {
+            let Ok((_, po, pl)) = read_subpacket_header(local, e.offset) else { return };
+            po + pl
+        }
+        None => from,
+    };
+    let mut picks: Vec<(u64, usize, u64)> = Vec::new();
+    let mut inputs: Vec<(Vec<morloc_runtime_types::packet::FrameEntry>, usize, usize, usize, u16, Option<(usize, usize)>)> = Vec::new();
+    let (mut frames, mut bytes) = (0, 0u64);
+    while picks.len() < AHEAD_MAX_SUBPACKETS && frames < enough_frames && bytes < AHEAD_PASS_BYTES {
+        let Some(p) = ahead_pick(local, next, end) else { break };
+        // A spare block large enough lands the pick; its bytes are already
+        // in the bound and now count as its reservation.
+        let want = p.uncompressed as u64;
+        let slack = (want / 8).max(64 << 10);
+        let spare = local
+            .cache
+            .spare
+            .iter()
+            .enumerate()
+            .filter(|(_, &(_, sz))| sz >= want && sz - want <= slack)
+            .min_by_key(|(_, &(_, sz))| sz)
+            .map(|(i, _)| i);
+        let (landing, reserved) = match spare {
+            Some(i) => {
+                let (b, sz) = local.cache.spare.swap_remove(i);
+                local.cache.current_bytes = local.cache.current_bytes.saturating_sub(sz);
+                (Some((b as usize, sz as usize)), sz)
+            }
+            None => {
+                // SLOT-23: a block is at most its bytes and a page.
+                let reserved = p.uncompressed as u64 + 4096;
+                if !cache_reserve(&local.cache, reserved, false) {
+                    break;
+                }
+                (None, reserved)
+            }
+        };
+        frames += p.frames.len();
+        bytes += p.uncompressed as u64;
+        next = p.payload_off + p.payload_len;
+        let compressed = local.mmap_ptr as usize + p.payload_off as usize;
+        picks.push((p.offset, p.frames.len(), reserved));
+        inputs.push((p.frames, compressed, p.payload_len as usize, p.uncompressed, p.vol_idx_hint, landing));
+    }
+    if picks.is_empty() {
+        return;
+    }
+    let schema = array_schema(&local.elem_schema);
+    let lent: Vec<(usize, u64)> = inputs.iter().zip(&picks).filter_map(|(i, p)| i.5.map(|(b, _)| (b, p.2))).collect();
+    let shared: std::sync::Arc<std::sync::Mutex<Vec<Option<(usize, bool)>>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(inputs.iter().map(|i| i.5.map(|(b, _)| (b, false))).collect()));
+    let job_blocks = shared.clone();
+    let spawned = std::thread::Builder::new().name("morloc-decode-ahead".into()).spawn(move || {
+        let mut blocks: Vec<Option<(usize, bool)>> = Vec::with_capacity(inputs.len());
+        for (k, (_, _, _, len, _, landing)) in inputs.iter().enumerate() {
+            let b = match landing {
+                Some((b, size)) => {
+                    // A reused block's bytes past this batch are an earlier
+                    // batch's; they are cleared (SHM-6).
+                    // SAFETY: the block is `size` bytes, at least `len`.
+                    unsafe { std::ptr::write_bytes((*b as *mut u8).add(*len), 0, size - len) };
+                    Some((*b, false))
+                }
+                None => {
+                    let b = voidstar::Landing::new(*len).ok().map(|l| (l.into_block() as usize, false));
+                    job_blocks.lock().unwrap_or_else(|p| p.into_inner())[k] = b;
+                    b
+                }
+            };
+            blocks.push(b);
+        }
+        let decoded = {
+            let mut sets: Vec<crate::compression::FrameSet<'_>> = inputs
+                .iter()
+                .zip(&blocks)
+                .filter_map(|((frames, compressed, clen, len, _, _), b)| {
+                    let (block, _) = (*b)?;
+                    Some(crate::compression::FrameSet {
+                        frames,
+                        // SAFETY: SLOT-27: the payload lies in the slot's
+                        // mapping past the claim that started this job.
+                        compressed: unsafe { std::slice::from_raw_parts(*compressed as *const u8, *clen) },
+                        // SAFETY: a block of at least `len` bytes only this
+                        // job holds.
+                        dest: unsafe { std::slice::from_raw_parts_mut(block as *mut u8, *len) },
+                    })
+                })
+                .collect();
+            crate::compression::parallel_decompress_frame_sets(&mut sets)
+        };
+        if decoded.is_ok() {
+            for (k, (_, _, _, len, hint, _)) in inputs.iter().enumerate() {
+                if let Some((block, _)) = blocks[k] {
+                    // SAFETY: as above; the block now holds its landed bytes.
+                    let ok = unsafe { voidstar::relocate_landed(block as AbsPtr, *len, &schema, *hint) }.is_ok();
+                    blocks[k] = Some((block, ok));
+                }
+            }
+        }
+        *job_blocks.lock().unwrap_or_else(|p| p.into_inner()) = blocks;
+    });
+    match spawned {
+        Ok(handle) => {
+            local.cache.job = Some(AheadJob { handle, blocks: shared, picks })
+        }
+        Err(_) => {
+            let lent_bytes: u64 = lent.iter().map(|(_, sz)| sz).sum();
+            let reserved: u64 = picks.iter().map(|p| p.2).sum();
+            local.cache.handle_bytes.fetch_sub(reserved - lent_bytes, std::sync::atomic::Ordering::Relaxed);
+            for (b, sz) in lent {
+                local.cache.current_bytes = local.cache.current_bytes.saturating_add(sz);
+                local.cache.spare.push((b as AbsPtr, sz));
+            }
+        }
+    }
+}
+
+/// Keep the block of a batch the pool has decoded as a landing for a later
+/// pass, when the slot decodes ahead and the block is the caller's alone;
+/// release it otherwise (SLOT-27).
+fn ahead_recycle(local: &mut ProcessLocalSlot, block: AbsPtr) {
+    let only = unsafe { shm::reference_count(block) } == Some(1);
+    let size = unsafe { shm::shm_block_size(block) }.unwrap_or(0) as u64;
+    let decoding_ahead = local.cache.job.is_some() || !local.cache.ahead.is_empty();
+    if only
+        && decoding_ahead
+        && local.cache.spare.len() < AHEAD_MAX_SPARES
+        && cache_reserve(&local.cache, size, false)
+    {
+        // SHM-7: the block becomes the cache's.
+        crate::eval_arena::forget_if_active(block);
+        local.cache.current_bytes = local.cache.current_bytes.saturating_add(size);
+        local.cache.spare.push((block, size));
+        return;
+    }
+    let _ = shm::shfree(block);
+}
+
+/// Release the blocks kept as landings (SLOT-27).
+fn spare_release(cache: &mut StreamCache) {
+    for (block, size) in cache.spare.drain(..) {
+        cache.current_bytes = cache.current_bytes.saturating_sub(size);
+        cache.handle_bytes.fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
+        // SHM-7: the cache's own reference.
+        let _ = shm::release(block);
+    }
+}
+
+/// Join the passes of every idle reader slot of the process before the
+/// shared memory they write into is unmapped (SLOT-27), releasing their
+/// blocks. The jobs are taken out under the table's lock and joined after.
+fn ahead_join_idle() {
+    let jobs: Vec<AheadJob> = {
+        let mut guard = PROCESS_LOCAL_SLOTS.lock();
+        let Some(map) = guard.as_mut() else { return };
+        map.values_mut()
+            .flat_map(|slots| slots.idle.iter_mut())
+            .filter(|l| !l.cache.is_inherited())
+            .filter_map(|l| l.cache.job.take())
+            .collect()
+    };
+    for job in jobs {
+        let _ = job.handle.join();
+        for (b, _) in job.blocks.lock().unwrap_or_else(|p| p.into_inner()).drain(..).flatten() {
+            let _ = shm::release(b as AbsPtr);
+        }
+    }
+}
+
+/// Take the block decoded ahead for the sub-packet at `off`, releasing the
+/// ones before it, which another reader claimed.
+fn ahead_take(cache: &mut StreamCache, off: u64) -> Option<AbsPtr> {
+    if cache.ahead.is_empty() {
+        return None;
+    }
+    ahead_release(cache, |o| o < off);
+    let i = cache.ahead.iter().position(|e| e.offset == off)?;
+    let e = cache.ahead.remove(i);
+    cache.current_bytes = cache.current_bytes.saturating_sub(e.size_bytes);
+    cache.handle_bytes.fetch_sub(e.size_bytes, std::sync::atomic::Ordering::Relaxed);
+    Some(e.block)
+}
+
+/// Release the blocks decoded ahead whose offsets `gone` selects.
+fn ahead_release(cache: &mut StreamCache, gone: impl Fn(u64) -> bool) {
+    let mut kept = Vec::with_capacity(cache.ahead.len());
+    for e in cache.ahead.drain(..) {
+        if !gone(e.offset) {
+            kept.push(e);
+            continue;
+        }
+        cache.current_bytes = cache.current_bytes.saturating_sub(e.size_bytes);
+        cache.handle_bytes.fetch_sub(e.size_bytes, std::sync::atomic::Ordering::Relaxed);
+        // SHM-7: the cache's own reference.
+        let _ = shm::release(e.block);
+    }
+    cache.ahead = kept;
 }
 
 /// Hand back to the kernel the pages of an IStream's mapping that lie wholly
@@ -4205,12 +4568,12 @@ fn drop_read_pages(local: &mut ProcessLocalSlot, read_end: u64) {
 /// and produce a fresh SHM `Array<a>` to return to the caller.
 /// Decompresses if needed, walks relptrs, deep-copies.
 fn materialize_and_finalise_subpacket(
-    local: &ProcessLocalSlot,
-    _slot: &RegistrySlot,
+    local: &mut ProcessLocalSlot,
     subpacket_off: u64,
+    on_disk_size: u64,
+    end: u64,
 ) -> Result<AbsPtr, MorlocError> {
-    let (src, _on_disk_size) =
-        materialize_subpacket_at_offset(local, subpacket_off)?;
+    let src = claimed_subpacket(local, subpacket_off, on_disk_size, end)?;
     let arr_base = src.arr_base();
     let arr = unsafe { &*(arr_base as *const shm_types_crate::Array) };
     let arr_size = arr.size as u64;
@@ -4328,6 +4691,7 @@ impl From<MorlocError> for CollectSized {
 /// Put an IStream back at its first sub-packet.
 fn reset_istream_cursor(handle: i64) -> Result<(), MorlocError> {
     with_process_local_slot(handle, |local, slot| {
+        ahead_join(&mut local.cache);
         let _guard = SlotGuard::lock(slot)?;
         if !slot_generation_is(slot, local.cached_generation) {
             return Err(MorlocError::Other(format!(
@@ -4335,7 +4699,9 @@ fn reset_istream_cursor(handle: i64) -> Result<(), MorlocError> {
             )));
         }
         slot.cursor.set(slot.body_start.get());
-
+        ahead_release(&mut local.cache, |_| true);
+        spare_release(&mut local.cache);
+        local.cache.last_claim_end = 0;
         Ok(())
     })
 }
@@ -5300,6 +5666,38 @@ pub struct StreamCache {
     pub entries: Vec<CacheEntry>,
     /// Index of the next entry the clock hand will scan on eviction.
     pub clock_hand: usize,
+    /// IStream only: sub-packets decoded ahead of the cursor, by file
+    /// offset, served when this slot claims that offset (ZIP-10).
+    pub ahead: Vec<AheadEntry>,
+    /// IStream only: where this slot's last claim ended.
+    pub last_claim_end: u64,
+    /// IStream only: the pass decoding in the background (SLOT-27).
+    pub job: Option<AheadJob>,
+    /// IStream only: blocks of batches already decoded by the pool and
+    /// handed back, reused as the landings of later passes (SLOT-27).
+    pub spare: Vec<(AbsPtr, u64)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AheadEntry {
+    pub offset: u64,
+    pub block: AbsPtr,
+    pub size_bytes: u64,
+    pub frames: usize,
+}
+
+/// A pass of sub-packets decoding on a thread of its own (SLOT-27): its
+/// blocks are the cache's, reserved in the handle's bound, and nothing
+/// reads, serves or releases them until the job is joined.
+#[derive(Debug)]
+pub struct AheadJob {
+    handle: std::thread::JoinHandle<()>,
+    /// Per pick, the block the job landed it in and whether it decoded;
+    /// filled as the job allocates, so a job that panics leaves its blocks
+    /// here to be released.
+    blocks: std::sync::Arc<std::sync::Mutex<Vec<Option<(usize, bool)>>>>,
+    /// Per pick: its offset, frames, and the bytes reserved for its block.
+    picks: Vec<(u64, usize, u64)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5320,6 +5718,10 @@ impl StreamCache {
             handle_bytes: Default::default(),
             entries: Vec::new(),
             clock_hand: 0,
+            ahead: Vec::new(),
+            last_claim_end: 0,
+            job: None,
+            spare: Vec::new(),
         }
     }
 }
@@ -6184,8 +6586,7 @@ fn cache_get_or_materialize(
         let size_bytes = unsafe { shm::shm_block_size(arr_base).unwrap_or(0) } as u64;
         cache_make_room_for(&mut local.cache, size_bytes);
         // SLOT-23: past the handle's bound, a sub-packet is served uncached.
-        let held = local.cache.handle_bytes.load(std::sync::atomic::Ordering::Relaxed);
-        if held == 0 || held.saturating_add(size_bytes) <= local.cache.capacity_bytes {
+        if cache_reserve(&local.cache, size_bytes, true) {
             // Install: shincref so the cache owns one ref and the caller
             // owns the other. Both decrement independently on shfree.
             // SAFETY: arr_base is the live SHM block of the materialised array.
@@ -6197,7 +6598,6 @@ fn cache_get_or_materialize(
                 clock_bit: 1,
             });
             local.cache.current_bytes = local.cache.current_bytes.saturating_add(size_bytes);
-            local.cache.handle_bytes.fetch_add(size_bytes, std::sync::atomic::Ordering::Relaxed);
         }
     }
     Ok(src)
@@ -10017,6 +10417,264 @@ mod tests {
         assert_eq!(held, 0, "a cache of capacity 0 kept {held} sub-packets");
     }
 
+    /// `n` compressed sub-packets of `k` consecutive i64s each, from 0.
+    fn write_compressed_runs(path: &std::path::Path, n: i64, k: i64) {
+        let p = path.to_str().unwrap();
+        crate::write_behind::set_test_depth(Some(0));
+        let w = shared_open_ostream_with_schema(p, "ai8").unwrap();
+        let list = parse_schema("ai8").unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(3).unwrap();
+        for b in 0..n {
+            let json = format!("[{}]", (b * k..(b + 1) * k).map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+            let v = crate::json::read_json_with_schema(&json, &list).unwrap();
+            shared_write_subpacket(w, level, v).unwrap();
+            shm::shfree(v).unwrap();
+            shared_flush_buffer(w).unwrap();
+        }
+        shared_close_handle(w).unwrap();
+        crate::write_behind::set_test_depth(None);
+    }
+
+    /// The i64s of one `@next` batch, freeing it; empty at the end.
+    fn next_ints(h: i64) -> Vec<i64> {
+        let arr = shared_next_subpacket(h).unwrap();
+        let a = unsafe { &*(arr as *const shm_types_crate::Array) };
+        let out = if a.size == 0 {
+            Vec::new()
+        } else {
+            let data = shm::rel2abs(a.data).unwrap() as *const i64;
+            (0..a.size).map(|i| unsafe { *data.add(i) }).collect()
+        };
+        shm::shfree(arr).unwrap();
+        out
+    }
+
+    /// ZIP-10: compressed sub-packets read with `@next` (both the copying
+    /// and the in-place path) are decoded ahead and come back in order.
+    #[test]
+    fn compressed_sub_packets_decoded_ahead_are_read_in_order() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("ahead_order");
+        let path = dir.join("a.idx");
+        write_compressed_runs(&path, 40, 100);
+        let p = path.to_str().unwrap();
+        let h = open_istream(p).unwrap();
+        let mut got = next_ints(h);
+        let held = with_process_local_slot(h, |local, _| Ok(local.cache.ahead.len() + local.cache.job.as_ref().map_or(0, |j| j.picks.len()))).unwrap();
+        loop {
+            let mut batch = Vec::new();
+            shared_next_with(h, &mut |data, _| {
+                let a = unsafe { &*(data as *const shm_types_crate::Array) };
+                if a.size > 0 {
+                    let d = shm::rel2abs(a.data).unwrap() as *const i64;
+                    batch = (0..a.size).map(|i| unsafe { *d.add(i) }).collect();
+                }
+            })
+            .unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            got.extend(batch);
+            got.extend(next_ints(h));
+        }
+        shared_close_handle(h).unwrap();
+        assert!(held > 0, "the first compressed read decoded nothing ahead");
+        assert_eq!(got, (0..4000).collect::<Vec<i64>>());
+    }
+
+    /// SLOT-27: a block handed back after the pool decoded it is the cache's
+    /// alone: memory the reader allocates between batches never shares it,
+    /// so every batch reads back as written.
+    #[test]
+    fn batches_read_in_place_beside_other_allocations_read_back_as_written() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("ahead_recycle");
+        let path = dir.join("r.idx");
+        write_compressed_runs(&path, 60, 3000);
+        let h = open_istream(path.to_str().unwrap()).unwrap();
+        let mut got: Vec<i64> = Vec::new();
+        let mut other = Vec::new();
+        loop {
+            let mut batch = Vec::new();
+            shared_next_with(h, &mut |data, _| {
+                let a = unsafe { &*(data as *const shm_types_crate::Array) };
+                if a.size > 0 {
+                    let d = shm::rel2abs(a.data).unwrap() as *const i64;
+                    batch = (0..a.size).map(|i| unsafe { *d.add(i) }).collect();
+                }
+            })
+            .unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            got.extend(batch);
+            let b = shm::shmalloc(3000 * 8 + 64).unwrap();
+            unsafe { std::ptr::write_bytes(b, 0xab, 3000 * 8 + 64) };
+            other.push(b);
+        }
+        shared_close_handle(h).unwrap();
+        for b in other {
+            shm::shfree(b).unwrap();
+        }
+        assert_eq!(got, (0..180000).collect::<Vec<i64>>());
+    }
+
+    /// ZIP-10: threads sharing one cursor each read distinct sub-packets,
+    /// so every element is read exactly once, whatever each decoded ahead;
+    /// what they decoded ahead stays within the handle's cache bound.
+    #[test]
+    fn readers_sharing_a_cursor_read_each_sub_packet_once() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("ahead_shared");
+        let path = dir.join("s.idx");
+        write_compressed_runs(&path, 200, 50);
+        let h = open_istream(path.to_str().unwrap()).unwrap();
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let mut mine = Vec::new();
+                    loop {
+                        let b = next_ints(h);
+                        if b.is_empty() {
+                            return mine;
+                        }
+                        mine.extend(b);
+                    }
+                })
+            })
+            .collect();
+        let mut all: Vec<i64> = readers.into_iter().flat_map(|r| r.join().unwrap()).collect();
+        let held = PROCESS_LOCAL_SLOTS.lock().as_ref().and_then(|m| m.get(&h).map(|s| s.cache_bytes.load(std::sync::atomic::Ordering::Relaxed)));
+        shared_close_handle(h).unwrap();
+        all.sort();
+        assert_eq!(all, (0..10000).collect::<Vec<i64>>());
+        assert!(held.unwrap_or(0) <= DEFAULT_IFILE_CACHE_BYTES);
+    }
+
+    /// ZIP-10, SHM-7: sub-packets decoded ahead inside an eval are the
+    /// cache's, not the eval's: the arena ending leaves them, and they are
+    /// read after it.
+    #[test]
+    fn an_arena_ending_leaves_the_sub_packets_decoded_ahead() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("ahead_arena");
+        let path = dir.join("r.idx");
+        write_compressed_runs(&path, 8, 10);
+        let h = open_istream(path.to_str().unwrap()).unwrap();
+        let g = crate::eval_arena::enter().unwrap();
+        let first = next_ints(h);
+        let held = with_process_local_slot(h, |local, _| Ok(local.cache.ahead.len() + local.cache.job.as_ref().map_or(0, |j| j.picks.len()))).unwrap();
+        drop(g);
+        let mut got = first;
+        loop {
+            let b = next_ints(h);
+            if b.is_empty() {
+                break;
+            }
+            got.extend(b);
+        }
+        shared_close_handle(h).unwrap();
+        assert!(held > 0, "nothing was decoded ahead");
+        assert_eq!(got, (0..80).collect::<Vec<i64>>());
+    }
+
+    /// ZIP-10, SLOT-6: with the cache disabled nothing is decoded ahead.
+    #[test]
+    fn a_disabled_cache_decodes_nothing_ahead() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("ahead_zero");
+        let path = dir.join("z.idx");
+        write_compressed_runs(&path, 6, 10);
+        crate::stream::set_test_ifile_cache_bytes(Some(0));
+        let h = open_istream(path.to_str().unwrap()).unwrap();
+        crate::stream::set_test_ifile_cache_bytes(None);
+        let got = next_ints(h);
+        let held = with_process_local_slot(h, |local, _| Ok(local.cache.ahead.len() + local.cache.job.as_ref().map_or(0, |j| j.picks.len()))).unwrap();
+        shared_close_handle(h).unwrap();
+        assert_eq!(got, (0..10).collect::<Vec<i64>>());
+        assert_eq!(held, 0, "a disabled cache decoded {held} sub-packets ahead");
+    }
+
+    /// ZIP-10: putting the cursor back drops what was decoded ahead, and the
+    /// stream reads the same again.
+    #[test]
+    fn a_reset_cursor_reads_the_stream_again() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("ahead_reset");
+        let path = dir.join("t.idx");
+        write_compressed_runs(&path, 10, 10);
+        let h = open_istream(path.to_str().unwrap()).unwrap();
+        let first = next_ints(h);
+        reset_istream_cursor(h).unwrap();
+        let held = with_process_local_slot(h, |local, _| Ok(local.cache.ahead.len() + local.cache.job.as_ref().map_or(0, |j| j.picks.len()))).unwrap();
+        let mut got = Vec::new();
+        loop {
+            let b = next_ints(h);
+            if b.is_empty() {
+                break;
+            }
+            got.extend(b);
+        }
+        shared_close_handle(h).unwrap();
+        assert_eq!(first, (0..10).collect::<Vec<i64>>());
+        assert_eq!(held, 0, "a reset kept what was decoded ahead");
+        assert_eq!(got, (0..100).collect::<Vec<i64>>());
+    }
+
+    /// A batch of strings large enough that relocation and the in-place
+    /// check walk it on several threads reads back as written, from a
+    /// compressed and an uncompressed file, by both `@next` paths.
+    #[test]
+    fn a_large_batch_walked_in_parallel_reads_back_as_written() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("par_walk");
+        let list = "as";
+        let schema = parse_schema(list).unwrap();
+        let n = 400_000 + 7;
+        let rows = format!("[{}]", (0..n).map(|i| format!("\"{}\"", "x".repeat(i % 13))).collect::<Vec<_>>().join(","));
+        for level in [0u8, 3] {
+            let p = dir.join(format!("l{level}.idx")).to_str().unwrap().to_string();
+            let w = shared_open_ostream_with_schema(&p, list).unwrap();
+            let v = crate::json::read_json_with_schema(&rows, &schema).unwrap();
+            shared_write_subpacket(w, crate::compression::CompressionLevel::from_u8(level).unwrap(), v).unwrap();
+            shm::shfree(v).unwrap();
+            shared_close_handle(w).unwrap();
+            let a = open_istream(&p).unwrap();
+            let c = shared_next_subpacket(a).unwrap();
+            let copied = crate::json::voidstar_to_json_string(c, &schema).unwrap();
+            shm::shfree(c).unwrap();
+            shared_close_handle(a).unwrap();
+            let b = open_istream(&p).unwrap();
+            let mut in_place = String::new();
+            shared_next_with(b, &mut |data, space| in_place = batch_json(data, space, &schema)).unwrap();
+            shared_close_handle(b).unwrap();
+            let want = crate::json::voidstar_to_json_string(crate::json::read_json_with_schema(&rows, &schema).unwrap(), &schema).unwrap();
+            assert_eq!(copied, want, "level {level}: copied");
+            assert_eq!(in_place, want, "level {level}: in place");
+        }
+    }
+
+    /// The in-place check of a large batch, walked on several threads, still
+    /// rejects one pointer that leaves the payload near its end.
+    #[test]
+    fn a_parallel_check_rejects_a_pointer_out_of_its_payload() {
+        let _shm = crate::own_test_registry();
+        let list = "as";
+        let schema = parse_schema(list).unwrap();
+        let n = 400_000;
+        let rows = format!("[{}]", (0..n).map(|i| format!("\"{}\"", "y".repeat(1 + i % 5))).collect::<Vec<_>>().join(","));
+        let v = crate::json::read_json_with_schema(&rows, &schema).unwrap();
+        let bytes = crate::voidstar::flatten_to_buffer(v, &schema).unwrap();
+        shm::shfree(v).unwrap();
+        crate::voidstar::check_in_place(&bytes, &schema, 0).unwrap();
+        let mut bad = bytes.clone();
+        // the data pointer of element n - 3, a String header after the root
+        let elem = std::mem::size_of::<shm_types_crate::Array>() + (n - 3) * std::mem::size_of::<shm_types_crate::Array>();
+        let at = elem + std::mem::size_of::<usize>();
+        bad[at..at + 8].copy_from_slice(&(bytes.len() as i64 + 64).to_le_bytes());
+        assert!(crate::voidstar::check_in_place(&bad, &schema, 0).is_err(), "a pointer past the payload passed the check");
+    }
+
     /// DATA_PACKET file: a single voidstar packet (no STREAM header,
     /// no footer). The IFile dispatch treats the whole file as one
     /// sub-packet and exercises bracket index + slice + length over
@@ -11659,3 +12317,4 @@ mod registry_count_tests {
         unsafe { std::alloc::dealloc(base as *mut u8, layout) };
     }
 }
+

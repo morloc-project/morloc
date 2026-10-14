@@ -209,6 +209,11 @@ def e4_batches(c):
     whole = os.path.getsize(paths[0])
     for s, o in zip([s for s, _ in flushed], out):
         b.record("ZIP-7", f"fastq.z3.batch{s >> 10}k", o / whole, "x", "file / one @write")
+    rs = b.sweep("E4:read", sizes, lambda s: c.read_cmd(corpus, n, paths[s]), reps=3)
+    read_whole = rs[sizes.index(0)]
+    for s, t in zip(sizes, rs):
+        if s:
+            b.record("ZIP-10", f"fastq.z3.read.batch{s >> 10}k", t / read_whole, "x", "read / read of one @write")
     for p in paths.values():
         os.remove(p)
 

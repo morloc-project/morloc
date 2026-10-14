@@ -1,4 +1,4 @@
-# Compressed streams: memory bounded per stream, oversize elements copied, no decode-ahead
+# Compressed streams: memory bounded per stream, oversize elements copied
 
 Status: open. Parent: runtime/issues/encode-throughput.md section 3.
 Source: lib/biolib/runtime-bench.
@@ -35,9 +35,6 @@ data/rust/morloc-runtime-types/src.
   oversize path: source voidstar, `scratch`, `oversize_payload`, the queued
   block, ~8 GiB for a 2 GiB chromosome. See stream-copies.md W1, which
   removes the `scratch` copy for every write.
-- **Reads decode on the calling thread, one sub-packet at a time.** Frames
-  of one sub-packet now decode in parallel; the next sub-packet is not
-  decoded until `@next` asks for it.
 - **Unmeasured: which process grows.** lib/biolib/runtime-bench's
   measure.py reports the largest process's VmHWM, which counts shared
   pages it touched; per-process RssShmem and RssAnon would locate the
@@ -54,23 +51,3 @@ data/rust/morloc-runtime-types/src.
   "no wait cycle passes through a slot" must be re-derived (a stdio sink
   blocked on an external reader is a way in): model first, in
   tla/StreamQueue.
-- **S5. Decode-ahead without claiming.** Decode the next sub-packets
-  speculatively into the per-handle cache (SLOT-23, bounded by
-  `MORLOC_IFILE_CACHE_BYTES`), keyed by offset, and serve from it when
-  the reader claims them. It must not claim ahead: claiming moves the
-  shared cursor, and sub-packets claimed by a reader that stops are lost
-  to the others. Model first.
-
-Rejected:
-
-- zstd's own workers on one frame (`ZSTD_c_nbWorkers`): nbWorkers 0 and
-  >= 1 write different bytes, so choosing it when the stream is serial
-  (a race) would make file bytes depend on timing; reads would stay
-  single-threaded. Fixed frames per level dominate it.
-- `@flush` as a boundary only: after it returns, flushed data survives a
-  crash (SLOT-13) and a reader of the open file sees it (SLOT-15).
-  Pipelining the flush with the next batch removes that guarantee. A
-  separate opt-in form would fit the 2026-10-06 ruling on opt-in fast
-  modes; never a change to `@flush`.
-- Exact-size compression output (no zero-fill of `compress_bound`): with
-  2 MiB frames the fill is ~0.1 ms against ~30 ms of compression.

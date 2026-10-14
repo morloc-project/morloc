@@ -249,7 +249,7 @@ stream wake unconditionally.
 
 ### SLOT-23 Threads reading one file share its slots and its cache bound
 Status: implemented
-Checked by: threads_reading_one_file_share_its_cache_bound, threads_read_one_input_file_at_once
+Checked by: threads_reading_one_file_share_its_cache_bound, threads_read_one_input_file_at_once, readers_sharing_a_cursor_read_each_sub_packet_once
 
 A process keeps up to as many idle slots per handle as it has processors;
 an operation takes one, or attaches another when all are out, and puts it
@@ -287,3 +287,55 @@ outlives the call, since the slot's mapping may be replaced once it is
 released (pages behind the cursor are dropped, idle mappings unmapped). A
 decoder reports failure by return value, never by unwinding through the
 runtime, and the claim is released either way.
+
+### SLOT-26 A reader decodes ahead of its claim without claiming
+Status: implemented
+Checked by: compressed_sub_packets_decoded_ahead_are_read_in_order, readers_sharing_a_cursor_read_each_sub_packet_once, an_arena_ending_leaves_the_sub_packets_decoded_ahead, a_disabled_cache_decodes_nothing_ahead, a_reset_cursor_reads_the_stream_again
+
+A reader whose previous claim ended where its new one starts (no other
+reader claimed in between, so the sub-packets after are likely its own)
+decodes the compressed sub-packets that follow its claim in the file, up
+to the end of the data its claim saw under the slot lock, and keeps them in
+its slot's cache by file offset (SLOT-27 says how). It claims nothing more:
+the cursor moves only by claims. A later claim of a kept offset is served
+from the cache; a kept sub-packet at an offset before a claim was claimed
+by another reader and is released unused; resetting the cursor releases
+them all. File bytes at an offset do not change while the stream is open
+(the custodian writes only past the published end, SLOT-10, SLOT-15), so a
+kept sub-packet is the one a claim would decode. Each block is reserved in
+the handle's bound (SLOT-23) before it is decoded, and a cache of capacity
+0 keeps nothing (SLOT-6). Kept blocks are the cache's references (SHM-7):
+none is recorded in an arena while kept, and a served one is recorded as a
+fresh block is. Speculation never fails a claim: a block that cannot be
+reserved or allocated ends the pass, and a sub-packet that does not decode
+is simply not kept.
+
+### SLOT-27 Decoding ahead runs beside the reader and is joined before use
+Status: implemented
+Checked by: compressed_sub_packets_decoded_ahead_are_read_in_order, batches_read_in_place_beside_other_allocations_read_back_as_written, a_reset_cursor_reads_the_stream_again, tla:AheadJob, tla:AheadJob_drop_without_join.bug, tla:AheadJob_serve_before_join.bug
+
+After a claim, a slot that holds less than a pass of sub-packets decoded
+ahead starts one job on a thread of its own for the next pass. A pass
+takes sub-packets until it holds twice as many frames as frame workers or
+8 MiB, so small sub-packets decode many at once and large ones, whose
+frames already decode in parallel, one at a time beside the reader. The job allocates the pass's blocks (or takes
+blocks the slot handed it), decodes their frames on the frame workers,
+relocates them, and frees nothing; it reads the compressed bytes where the
+slot maps them, past the claim that started it. The slot joins the job
+before it serves, keeps, releases or drops any of its blocks: at its next
+claim, at a cursor reset, and before it unmaps its file. Pages a reader
+drops lie before the end of its claim, so never under a running job. A
+block whose batch the pool decoded in place (SLOT-25) is the caller's
+alone once the decoder returns; while the slot decodes ahead it keeps up
+to four such blocks, counted in the bound, as landings for later passes
+instead of releasing them, and releases them when its claims stop
+following one another, at a cursor reset and when it is dropped. A kept
+block lands only a batch within an eighth (at least 64 KiB) of its size,
+and the bytes past the batch are cleared before it is used, so no earlier
+batch shows through it (SHM-6). The slot's byte counter is swapped to its
+handle's (SLOT-23) only after the slot's pass is joined, so a pass's
+reservations settle where they were made. A job that panics leaves the
+blocks it allocated where the slot releases them. Before the stream
+registry is unmapped, the passes of every idle slot are joined and their
+blocks released. Joining waits for one pass at most: dropping or resetting
+a slot, which joins, waits that long. Model: `tla/AheadJob.tla`.

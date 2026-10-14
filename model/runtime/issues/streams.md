@@ -92,3 +92,15 @@ here touch locks and ownership: model first.
   file is silently partial. Open: should a footer-less file be an `Err` at
   the point the walk reaches the end (with crash recovery an explicit
   opt-in), or is recovery the intended default?
+- **A forked child starts with its parent's cache byte count.** [read]
+  Gap in SLOT-23. `HandleSlots.cache_bytes` is shared memory of the
+  process, so a child forked while its parent caches sub-packets inherits
+  the parent's count; the child replaces the inherited caches without
+  subtracting it, so its room under `MORLOC_IFILE_CACHE_BYTES` stays low and
+  it caches (and decodes ahead, SLOT-26) less, possibly nothing. Speed only.
+- **Several slots in one process may decode the same offsets ahead after a
+  reset.** [read] `reset_istream_cursor` releases only the resetting slot's
+  sub-packets decoded ahead (SLOT-26); another slot of the process keeps
+  its own, and a later pass may decode the same offsets again. Both copies
+  are correct and counted against the bound; they hold room until the
+  cursor passes them.

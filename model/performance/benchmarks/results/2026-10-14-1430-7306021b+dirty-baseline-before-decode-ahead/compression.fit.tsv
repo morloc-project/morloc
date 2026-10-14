@@ -1,0 +1,412 @@
+# compression 2026-10-14 14:30 load=0.46 morloc=0.109.0 commit=7306021b+dirty cpu=AMD Ryzen 5 7535U with Radeon Graphics cores=12
+item	param	value	unit	note
+ZIP-1	u64-uniform.z0	4.86351	ms/MB	level 0 write: generation, encoding and file write
+ZIP-1	u64-uniform.z1	1.43502	ms/MB	over level 0, one worker; 697 MB/s
+ZIP-2	u64-uniform.z1	2.3378	ms/MB	over level 0, one worker
+ZIP-3	u64-uniform.z1	1.00004	x	file / level-0 file
+ZIP-4	u64-uniform.z1.time	1.29935	x	morloc / zstd -T1 -1 per MB
+ZIP-4	u64-uniform.z1.ratio	1.00002	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-uniform.z2	1.48209	ms/MB	over level 0, one worker; 675 MB/s
+ZIP-2	u64-uniform.z2	2.29235	ms/MB	over level 0, one worker
+ZIP-3	u64-uniform.z2	1.00004	x	file / level-0 file
+ZIP-4	u64-uniform.z2.time	1.05865	x	morloc / zstd -T1 -3 per MB
+ZIP-4	u64-uniform.z2.ratio	1.00002	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-uniform.z3	1.60313	ms/MB	over level 0, one worker; 624 MB/s
+ZIP-2	u64-uniform.z3	2.31461	ms/MB	over level 0, one worker
+ZIP-3	u64-uniform.z3	1.00004	x	file / level-0 file
+ZIP-4	u64-uniform.z3.time	0.859653	x	morloc / zstd -T1 -6 per MB
+ZIP-4	u64-uniform.z3.ratio	1.00002	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-uniform.z4	2.0904	ms/MB	over level 0, one worker; 478 MB/s
+ZIP-2	u64-uniform.z4	2.36916	ms/MB	over level 0, one worker
+ZIP-3	u64-uniform.z4	1.00004	x	file / level-0 file
+ZIP-4	u64-uniform.z4.time	0.794992	x	morloc / zstd -T1 -9 per MB
+ZIP-4	u64-uniform.z4.ratio	1.00002	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-uniform.z5	2.80856	ms/MB	over level 0, one worker; 356 MB/s
+ZIP-2	u64-uniform.z5	2.45648	ms/MB	over level 0, one worker
+ZIP-3	u64-uniform.z5	1.00004	x	file / level-0 file
+ZIP-4	u64-uniform.z5.time	0.648721	x	morloc / zstd -T1 -12 per MB
+ZIP-4	u64-uniform.z5.ratio	1.00002	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-uniform.z6	14.4259	ms/MB	over level 0, one worker; 69 MB/s
+ZIP-2	u64-uniform.z6	2.17765	ms/MB	over level 0, one worker
+ZIP-3	u64-uniform.z6	1.00004	x	file / level-0 file
+ZIP-4	u64-uniform.z6.time	0.763011	x	morloc / zstd -T1 -15 per MB
+ZIP-4	u64-uniform.z6.ratio	1.00002	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-uniform.z7	161.056	ms/MB	over level 0, one worker; 6 MB/s
+ZIP-2	u64-uniform.z7	2.17955	ms/MB	over level 0, one worker
+ZIP-3	u64-uniform.z7	1.00003	x	file / level-0 file
+ZIP-4	u64-uniform.z7.time	0.710427	x	morloc / zstd -T1 -19 per MB
+ZIP-4	u64-uniform.z7.ratio	1	x	morloc ratio / zstd single-frame ratio
+ZIP-4	u64-uniform.z7.long	1	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	u64-uniform.z8	132.388	ms/MB	over level 0, one worker; 8 MB/s
+ZIP-2	u64-uniform.z8	2.17883	ms/MB	over level 0, one worker
+ZIP-3	u64-uniform.z8	1.00003	x	file / level-0 file
+ZIP-4	u64-uniform.z8.time	0.684133	x	morloc / zstd -T1 -21 per MB
+ZIP-4	u64-uniform.z8.ratio	1	x	morloc ratio / zstd single-frame ratio
+ZIP-4	u64-uniform.z8.long	1	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	u64-uniform.z9	133.139	ms/MB	over level 0, one worker; 8 MB/s
+ZIP-2	u64-uniform.z9	2.16625	ms/MB	over level 0, one worker
+ZIP-3	u64-uniform.z9	1.00003	x	file / level-0 file
+ZIP-4	u64-uniform.z9.time	0.806989	x	morloc / zstd -T1 -22 per MB
+ZIP-4	u64-uniform.z9.ratio	1	x	morloc ratio / zstd single-frame ratio
+ZIP-4	u64-uniform.z9.long	1	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	u64-small.z0	5.19749	ms/MB	level 0 write: generation, encoding and file write
+ZIP-1	u64-small.z1	3.4868	ms/MB	over level 0, one worker; 287 MB/s
+ZIP-2	u64-small.z1	3.60676	ms/MB	over level 0, one worker
+ZIP-3	u64-small.z1	0.435519	x	file / level-0 file
+ZIP-4	u64-small.z1.time	0.958445	x	morloc / zstd -T1 -1 per MB
+ZIP-4	u64-small.z1.ratio	0.999725	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-small.z2	5.21107	ms/MB	over level 0, one worker; 192 MB/s
+ZIP-2	u64-small.z2	3.31766	ms/MB	over level 0, one worker
+ZIP-3	u64-small.z2	0.416435	x	file / level-0 file
+ZIP-4	u64-small.z2.time	0.861463	x	morloc / zstd -T1 -3 per MB
+ZIP-4	u64-small.z2.ratio	0.998415	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-small.z3	13.7981	ms/MB	over level 0, one worker; 72 MB/s
+ZIP-2	u64-small.z3	3.42377	ms/MB	over level 0, one worker
+ZIP-3	u64-small.z3	0.430378	x	file / level-0 file
+ZIP-4	u64-small.z3.time	0.924244	x	morloc / zstd -T1 -6 per MB
+ZIP-4	u64-small.z3.ratio	0.99629	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-small.z4	24.2032	ms/MB	over level 0, one worker; 41 MB/s
+ZIP-2	u64-small.z4	3.60279	ms/MB	over level 0, one worker
+ZIP-3	u64-small.z4	0.39495	x	file / level-0 file
+ZIP-4	u64-small.z4.time	0.868443	x	morloc / zstd -T1 -9 per MB
+ZIP-4	u64-small.z4.ratio	0.967986	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-small.z5	67.5874	ms/MB	over level 0, one worker; 15 MB/s
+ZIP-2	u64-small.z5	3.54691	ms/MB	over level 0, one worker
+ZIP-3	u64-small.z5	0.393763	x	file / level-0 file
+ZIP-4	u64-small.z5.time	0.815554	x	morloc / zstd -T1 -12 per MB
+ZIP-4	u64-small.z5.ratio	0.963533	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-small.z6	187.66	ms/MB	over level 0, one worker; 5 MB/s
+ZIP-2	u64-small.z6	3.60176	ms/MB	over level 0, one worker
+ZIP-3	u64-small.z6	0.388746	x	file / level-0 file
+ZIP-4	u64-small.z6.time	0.495008	x	morloc / zstd -T1 -15 per MB
+ZIP-4	u64-small.z6.ratio	0.981753	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-small.z7	445.378	ms/MB	over level 0, one worker; 2 MB/s
+ZIP-2	u64-small.z7	3.28445	ms/MB	over level 0, one worker
+ZIP-3	u64-small.z7	0.37721	x	file / level-0 file
+ZIP-4	u64-small.z7.time	0.810194	x	morloc / zstd -T1 -19 per MB
+ZIP-4	u64-small.z7.ratio	0.999477	x	morloc ratio / zstd single-frame ratio
+ZIP-4	u64-small.z7.long	1.00011	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	u64-small.z8	450.538	ms/MB	over level 0, one worker; 2 MB/s
+ZIP-2	u64-small.z8	3.23043	ms/MB	over level 0, one worker
+ZIP-3	u64-small.z8	0.37721	x	file / level-0 file
+ZIP-4	u64-small.z8.time	0.682718	x	morloc / zstd -T1 -21 per MB
+ZIP-4	u64-small.z8.ratio	0.999589	x	morloc ratio / zstd single-frame ratio
+ZIP-4	u64-small.z8.long	1	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	u64-small.z9	459.444	ms/MB	over level 0, one worker; 2 MB/s
+ZIP-2	u64-small.z9	3.04029	ms/MB	over level 0, one worker
+ZIP-3	u64-small.z9	0.37721	x	file / level-0 file
+ZIP-4	u64-small.z9.time	0.68912	x	morloc / zstd -T1 -22 per MB
+ZIP-4	u64-small.z9.ratio	0.999589	x	morloc ratio / zstd single-frame ratio
+ZIP-4	u64-small.z9.long	1	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	u64-sorted.z0	5.64967	ms/MB	level 0 write: generation, encoding and file write
+ZIP-1	u64-sorted.z1	1.71838	ms/MB	over level 0, one worker; 582 MB/s
+ZIP-2	u64-sorted.z1	3.25622	ms/MB	over level 0, one worker
+ZIP-3	u64-sorted.z1	0.134757	x	file / level-0 file
+ZIP-4	u64-sorted.z1.time	0.693687	x	morloc / zstd -T1 -1 per MB
+ZIP-4	u64-sorted.z1.ratio	1.00038	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-sorted.z2	2.33511	ms/MB	over level 0, one worker; 428 MB/s
+ZIP-2	u64-sorted.z2	3.0672	ms/MB	over level 0, one worker
+ZIP-3	u64-sorted.z2	0.134751	x	file / level-0 file
+ZIP-4	u64-sorted.z2.time	0.720179	x	morloc / zstd -T1 -3 per MB
+ZIP-4	u64-sorted.z2.ratio	1.00023	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-sorted.z3	8.68292	ms/MB	over level 0, one worker; 115 MB/s
+ZIP-2	u64-sorted.z3	3.29792	ms/MB	over level 0, one worker
+ZIP-3	u64-sorted.z3	0.134794	x	file / level-0 file
+ZIP-4	u64-sorted.z3.time	0.923543	x	morloc / zstd -T1 -6 per MB
+ZIP-4	u64-sorted.z3.ratio	1.0002	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-sorted.z4	15.7526	ms/MB	over level 0, one worker; 63 MB/s
+ZIP-2	u64-sorted.z4	3.22502	ms/MB	over level 0, one worker
+ZIP-3	u64-sorted.z4	0.134782	x	file / level-0 file
+ZIP-4	u64-sorted.z4.time	0.91673	x	morloc / zstd -T1 -9 per MB
+ZIP-4	u64-sorted.z4.ratio	1.00019	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-sorted.z5	35.6201	ms/MB	over level 0, one worker; 28 MB/s
+ZIP-2	u64-sorted.z5	3.21422	ms/MB	over level 0, one worker
+ZIP-3	u64-sorted.z5	0.134783	x	file / level-0 file
+ZIP-4	u64-sorted.z5.time	0.916166	x	morloc / zstd -T1 -12 per MB
+ZIP-4	u64-sorted.z5.ratio	1.00017	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-sorted.z6	93.5281	ms/MB	over level 0, one worker; 11 MB/s
+ZIP-2	u64-sorted.z6	3.15415	ms/MB	over level 0, one worker
+ZIP-3	u64-sorted.z6	0.134748	x	file / level-0 file
+ZIP-4	u64-sorted.z6.time	0.860289	x	morloc / zstd -T1 -15 per MB
+ZIP-4	u64-sorted.z6.ratio	1.00011	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-sorted.z7	384.197	ms/MB	over level 0, one worker; 3 MB/s
+ZIP-2	u64-sorted.z7	3.26633	ms/MB	over level 0, one worker
+ZIP-3	u64-sorted.z7	0.135472	x	file / level-0 file
+ZIP-4	u64-sorted.z7.time	0.769481	x	morloc / zstd -T1 -19 per MB
+ZIP-4	u64-sorted.z7.ratio	1.00002	x	morloc ratio / zstd single-frame ratio
+ZIP-4	u64-sorted.z7.long	1.00015	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	u64-sorted.z8	381.038	ms/MB	over level 0, one worker; 3 MB/s
+ZIP-2	u64-sorted.z8	3.14632	ms/MB	over level 0, one worker
+ZIP-3	u64-sorted.z8	0.135472	x	file / level-0 file
+ZIP-4	u64-sorted.z8.time	0.553317	x	morloc / zstd -T1 -21 per MB
+ZIP-4	u64-sorted.z8.ratio	0.999729	x	morloc ratio / zstd single-frame ratio
+ZIP-4	u64-sorted.z8.long	1	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	u64-sorted.z9	385.414	ms/MB	over level 0, one worker; 3 MB/s
+ZIP-2	u64-sorted.z9	3.11865	ms/MB	over level 0, one worker
+ZIP-3	u64-sorted.z9	0.135472	x	file / level-0 file
+ZIP-4	u64-sorted.z9.time	0.558428	x	morloc / zstd -T1 -22 per MB
+ZIP-4	u64-sorted.z9.ratio	0.999729	x	morloc ratio / zstd single-frame ratio
+ZIP-4	u64-sorted.z9.long	1	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	u64-zero.z0	5.30365	ms/MB	level 0 write: generation, encoding and file write
+ZIP-1	u64-zero.z1	-0.336983	ms/MB	over level 0, one worker; 33553513000 MB/s
+ZIP-2	u64-zero.z1	2.12532	ms/MB	over level 0, one worker
+ZIP-3	u64-zero.z1	7.09911e-05	x	file / level-0 file
+ZIP-4	u64-zero.z1.time	-0.60435	x	morloc / zstd -T1 -1 per MB
+ZIP-4	u64-zero.z1.ratio	1.57958	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-zero.z2	-0.384805	ms/MB	over level 0, one worker; 33553513000 MB/s
+ZIP-2	u64-zero.z2	2.18514	ms/MB	over level 0, one worker
+ZIP-3	u64-zero.z2	7.04248e-05	x	file / level-0 file
+ZIP-4	u64-zero.z2.time	-0.476642	x	morloc / zstd -T1 -3 per MB
+ZIP-4	u64-zero.z2.ratio	1.67115	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-zero.z3	-0.0784674	ms/MB	over level 0, one worker; 33553513000 MB/s
+ZIP-2	u64-zero.z3	2.24573	ms/MB	over level 0, one worker
+ZIP-3	u64-zero.z3	6.99778e-05	x	file / level-0 file
+ZIP-4	u64-zero.z3.time	-0.0758181	x	morloc / zstd -T1 -6 per MB
+ZIP-4	u64-zero.z3.ratio	1.71012	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-zero.z4	0.230976	ms/MB	over level 0, one worker; 4329 MB/s
+ZIP-2	u64-zero.z4	2.31423	ms/MB	over level 0, one worker
+ZIP-3	u64-zero.z4	6.99778e-05	x	file / level-0 file
+ZIP-4	u64-zero.z4.time	0.159698	x	morloc / zstd -T1 -9 per MB
+ZIP-4	u64-zero.z4.ratio	1.71262	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-zero.z5	0.632875	ms/MB	over level 0, one worker; 1580 MB/s
+ZIP-2	u64-zero.z5	2.3063	ms/MB	over level 0, one worker
+ZIP-3	u64-zero.z5	6.99778e-05	x	file / level-0 file
+ZIP-4	u64-zero.z5.time	0.317747	x	morloc / zstd -T1 -12 per MB
+ZIP-4	u64-zero.z5.ratio	1.71889	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-zero.z6	1.31361	ms/MB	over level 0, one worker; 761 MB/s
+ZIP-2	u64-zero.z6	2.3747	ms/MB	over level 0, one worker
+ZIP-3	u64-zero.z6	7.03354e-05	x	file / level-0 file
+ZIP-4	u64-zero.z6.time	0.461533	x	morloc / zstd -T1 -15 per MB
+ZIP-4	u64-zero.z6.ratio	1.72515	x	morloc ratio / zstd single-frame ratio
+ZIP-1	u64-zero.z7	1.37969	ms/MB	over level 0, one worker; 725 MB/s
+ZIP-2	u64-zero.z7	2.16797	ms/MB	over level 0, one worker
+ZIP-3	u64-zero.z7	5.64173e-05	x	file / level-0 file
+ZIP-4	u64-zero.z7.time	0.454774	x	morloc / zstd -T1 -19 per MB
+ZIP-4	u64-zero.z7.ratio	1.4148	x	morloc ratio / zstd single-frame ratio
+ZIP-4	u64-zero.z7.long	0.938714	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	u64-zero.z8	3.19258	ms/MB	over level 0, one worker; 313 MB/s
+ZIP-2	u64-zero.z8	2.05701	ms/MB	over level 0, one worker
+ZIP-3	u64-zero.z8	5.64173e-05	x	file / level-0 file
+ZIP-4	u64-zero.z8.time	0.435317	x	morloc / zstd -T1 -21 per MB
+ZIP-4	u64-zero.z8.ratio	1.50717	x	morloc ratio / zstd single-frame ratio
+ZIP-4	u64-zero.z8.long	1	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	u64-zero.z9	4.37798	ms/MB	over level 0, one worker; 228 MB/s
+ZIP-2	u64-zero.z9	1.92754	ms/MB	over level 0, one worker
+ZIP-3	u64-zero.z9	5.64173e-05	x	file / level-0 file
+ZIP-4	u64-zero.z9.time	0.525136	x	morloc / zstd -T1 -22 per MB
+ZIP-4	u64-zero.z9.ratio	1.50717	x	morloc ratio / zstd single-frame ratio
+ZIP-4	u64-zero.z9.long	1	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	real-walk.z0	5.35888	ms/MB	level 0 write: generation, encoding and file write
+ZIP-1	real-walk.z1	1.6286	ms/MB	over level 0, one worker; 614 MB/s
+ZIP-2	real-walk.z1	2.94653	ms/MB	over level 0, one worker
+ZIP-3	real-walk.z1	0.877178	x	file / level-0 file
+ZIP-4	real-walk.z1.time	1.12449	x	morloc / zstd -T1 -1 per MB
+ZIP-4	real-walk.z1.ratio	1.00009	x	morloc ratio / zstd single-frame ratio
+ZIP-1	real-walk.z2	2.00237	ms/MB	over level 0, one worker; 499 MB/s
+ZIP-2	real-walk.z2	2.93937	ms/MB	over level 0, one worker
+ZIP-3	real-walk.z2	0.861972	x	file / level-0 file
+ZIP-4	real-walk.z2.time	0.771131	x	morloc / zstd -T1 -3 per MB
+ZIP-4	real-walk.z2.ratio	0.996962	x	morloc ratio / zstd single-frame ratio
+ZIP-1	real-walk.z3	1.70078	ms/MB	over level 0, one worker; 588 MB/s
+ZIP-2	real-walk.z3	2.93069	ms/MB	over level 0, one worker
+ZIP-3	real-walk.z3	0.876101	x	file / level-0 file
+ZIP-4	real-walk.z3.time	0.642045	x	morloc / zstd -T1 -6 per MB
+ZIP-4	real-walk.z3.ratio	1.00025	x	morloc ratio / zstd single-frame ratio
+ZIP-1	real-walk.z4	2.37096	ms/MB	over level 0, one worker; 422 MB/s
+ZIP-2	real-walk.z4	2.9302	ms/MB	over level 0, one worker
+ZIP-3	real-walk.z4	0.876466	x	file / level-0 file
+ZIP-4	real-walk.z4.time	0.667227	x	morloc / zstd -T1 -9 per MB
+ZIP-4	real-walk.z4.ratio	1.00023	x	morloc ratio / zstd single-frame ratio
+ZIP-1	real-walk.z5	3.25604	ms/MB	over level 0, one worker; 307 MB/s
+ZIP-2	real-walk.z5	2.96963	ms/MB	over level 0, one worker
+ZIP-3	real-walk.z5	0.876466	x	file / level-0 file
+ZIP-4	real-walk.z5.time	0.577036	x	morloc / zstd -T1 -12 per MB
+ZIP-4	real-walk.z5.ratio	1.00023	x	morloc ratio / zstd single-frame ratio
+ZIP-1	real-walk.z6	19.2755	ms/MB	over level 0, one worker; 52 MB/s
+ZIP-2	real-walk.z6	2.94286	ms/MB	over level 0, one worker
+ZIP-3	real-walk.z6	0.876471	x	file / level-0 file
+ZIP-4	real-walk.z6.time	0.723148	x	morloc / zstd -T1 -15 per MB
+ZIP-4	real-walk.z6.ratio	1.00024	x	morloc ratio / zstd single-frame ratio
+ZIP-1	real-walk.z7	194.248	ms/MB	over level 0, one worker; 5 MB/s
+ZIP-2	real-walk.z7	3.10311	ms/MB	over level 0, one worker
+ZIP-3	real-walk.z7	0.705246	x	file / level-0 file
+ZIP-4	real-walk.z7.time	0.773119	x	morloc / zstd -T1 -19 per MB
+ZIP-4	real-walk.z7.ratio	1.00005	x	morloc ratio / zstd single-frame ratio
+ZIP-4	real-walk.z7.long	0.999994	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	real-walk.z8	163.813	ms/MB	over level 0, one worker; 6 MB/s
+ZIP-2	real-walk.z8	3.20869	ms/MB	over level 0, one worker
+ZIP-3	real-walk.z8	0.705246	x	file / level-0 file
+ZIP-4	real-walk.z8.time	0.701145	x	morloc / zstd -T1 -21 per MB
+ZIP-4	real-walk.z8.ratio	1.00006	x	morloc ratio / zstd single-frame ratio
+ZIP-4	real-walk.z8.long	1	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	real-walk.z9	159.426	ms/MB	over level 0, one worker; 6 MB/s
+ZIP-2	real-walk.z9	3.35529	ms/MB	over level 0, one worker
+ZIP-3	real-walk.z9	0.705246	x	file / level-0 file
+ZIP-4	real-walk.z9.time	0.786102	x	morloc / zstd -T1 -22 per MB
+ZIP-4	real-walk.z9.ratio	1.00006	x	morloc ratio / zstd single-frame ratio
+ZIP-4	real-walk.z9.long	1	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	str-dna.z0	7.02747	ms/MB	level 0 write: generation, encoding and file write
+ZIP-1	str-dna.z1	2.69052	ms/MB	over level 0, one worker; 372 MB/s
+ZIP-2	str-dna.z1	2.31699	ms/MB	over level 0, one worker
+ZIP-3	str-dna.z1	0.0932939	x	file / level-0 file
+ZIP-4	str-dna.z1.time	1.9264	x	morloc / zstd -T1 -1 per MB
+ZIP-4	str-dna.z1.ratio	0.997603	x	morloc ratio / zstd single-frame ratio
+ZIP-1	str-dna.z2	2.92154	ms/MB	over level 0, one worker; 342 MB/s
+ZIP-2	str-dna.z2	2.40914	ms/MB	over level 0, one worker
+ZIP-3	str-dna.z2	0.0958627	x	file / level-0 file
+ZIP-4	str-dna.z2.time	1.36651	x	morloc / zstd -T1 -3 per MB
+ZIP-4	str-dna.z2.ratio	0.983728	x	morloc ratio / zstd single-frame ratio
+ZIP-1	str-dna.z3	5.33752	ms/MB	over level 0, one worker; 187 MB/s
+ZIP-2	str-dna.z3	2.27007	ms/MB	over level 0, one worker
+ZIP-3	str-dna.z3	0.0918245	x	file / level-0 file
+ZIP-4	str-dna.z3.time	0.882534	x	morloc / zstd -T1 -6 per MB
+ZIP-4	str-dna.z3.ratio	1.00052	x	morloc ratio / zstd single-frame ratio
+ZIP-1	str-dna.z4	9.1538	ms/MB	over level 0, one worker; 109 MB/s
+ZIP-2	str-dna.z4	2.24761	ms/MB	over level 0, one worker
+ZIP-3	str-dna.z4	0.0901603	x	file / level-0 file
+ZIP-4	str-dna.z4.time	0.933144	x	morloc / zstd -T1 -9 per MB
+ZIP-4	str-dna.z4.ratio	1.00029	x	morloc ratio / zstd single-frame ratio
+ZIP-1	str-dna.z5	19.4049	ms/MB	over level 0, one worker; 52 MB/s
+ZIP-2	str-dna.z5	2.20516	ms/MB	over level 0, one worker
+ZIP-3	str-dna.z5	0.0882052	x	file / level-0 file
+ZIP-4	str-dna.z5.time	0.903057	x	morloc / zstd -T1 -12 per MB
+ZIP-4	str-dna.z5.ratio	1.0007	x	morloc ratio / zstd single-frame ratio
+ZIP-1	str-dna.z6	83.4857	ms/MB	over level 0, one worker; 12 MB/s
+ZIP-2	str-dna.z6	2.20809	ms/MB	over level 0, one worker
+ZIP-3	str-dna.z6	0.0868406	x	file / level-0 file
+ZIP-4	str-dna.z6.time	0.473006	x	morloc / zstd -T1 -15 per MB
+ZIP-4	str-dna.z6.ratio	1.01919	x	morloc ratio / zstd single-frame ratio
+ZIP-1	str-dna.z7	258.596	ms/MB	over level 0, one worker; 4 MB/s
+ZIP-2	str-dna.z7	2.16297	ms/MB	over level 0, one worker
+ZIP-3	str-dna.z7	0.0672892	x	file / level-0 file
+ZIP-4	str-dna.z7.time	0.77973	x	morloc / zstd -T1 -19 per MB
+ZIP-4	str-dna.z7.ratio	0.874162	x	morloc ratio / zstd single-frame ratio
+ZIP-4	str-dna.z7.long	0.959186	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	str-dna.z8	446.121	ms/MB	over level 0, one worker; 2 MB/s
+ZIP-2	str-dna.z8	2.21878	ms/MB	over level 0, one worker
+ZIP-3	str-dna.z8	0.0693365	x	file / level-0 file
+ZIP-4	str-dna.z8.time	1.02713	x	morloc / zstd -T1 -21 per MB
+ZIP-4	str-dna.z8.ratio	0.945446	x	morloc ratio / zstd single-frame ratio
+ZIP-4	str-dna.z8.long	1.00018	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	str-dna.z9	436.366	ms/MB	over level 0, one worker; 2 MB/s
+ZIP-2	str-dna.z9	2.05998	ms/MB	over level 0, one worker
+ZIP-3	str-dna.z9	0.0693365	x	file / level-0 file
+ZIP-4	str-dna.z9.time	0.974299	x	morloc / zstd -T1 -22 per MB
+ZIP-4	str-dna.z9.ratio	0.945446	x	morloc ratio / zstd single-frame ratio
+ZIP-4	str-dna.z9.long	1.00018	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	str-fastq.z0	7.59918	ms/MB	level 0 write: generation, encoding and file write
+ZIP-1	str-fastq.z1	3.89012	ms/MB	over level 0, one worker; 257 MB/s
+ZIP-2	str-fastq.z1	2.7466	ms/MB	over level 0, one worker
+ZIP-3	str-fastq.z1	0.345692	x	file / level-0 file
+ZIP-4	str-fastq.z1.time	1.28264	x	morloc / zstd -T1 -1 per MB
+ZIP-4	str-fastq.z1.ratio	0.99471	x	morloc ratio / zstd single-frame ratio
+ZIP-1	str-fastq.z2	6.24432	ms/MB	over level 0, one worker; 160 MB/s
+ZIP-2	str-fastq.z2	2.98155	ms/MB	over level 0, one worker
+ZIP-3	str-fastq.z2	0.34871	x	file / level-0 file
+ZIP-4	str-fastq.z2.time	0.987865	x	morloc / zstd -T1 -3 per MB
+ZIP-4	str-fastq.z2.ratio	0.99171	x	morloc ratio / zstd single-frame ratio
+ZIP-1	str-fastq.z3	14.534	ms/MB	over level 0, one worker; 69 MB/s
+ZIP-2	str-fastq.z3	2.89706	ms/MB	over level 0, one worker
+ZIP-3	str-fastq.z3	0.33513	x	file / level-0 file
+ZIP-4	str-fastq.z3.time	0.984969	x	morloc / zstd -T1 -6 per MB
+ZIP-4	str-fastq.z3.ratio	1.00166	x	morloc ratio / zstd single-frame ratio
+ZIP-1	str-fastq.z4	23.2407	ms/MB	over level 0, one worker; 43 MB/s
+ZIP-2	str-fastq.z4	2.95986	ms/MB	over level 0, one worker
+ZIP-3	str-fastq.z4	0.33223	x	file / level-0 file
+ZIP-4	str-fastq.z4.time	0.860733	x	morloc / zstd -T1 -9 per MB
+ZIP-4	str-fastq.z4.ratio	1.00542	x	morloc ratio / zstd single-frame ratio
+ZIP-1	str-fastq.z5	49.9458	ms/MB	over level 0, one worker; 20 MB/s
+ZIP-2	str-fastq.z5	2.90096	ms/MB	over level 0, one worker
+ZIP-3	str-fastq.z5	0.326985	x	file / level-0 file
+ZIP-4	str-fastq.z5.time	0.786346	x	morloc / zstd -T1 -12 per MB
+ZIP-4	str-fastq.z5.ratio	1.00445	x	morloc ratio / zstd single-frame ratio
+ZIP-1	str-fastq.z6	164.391	ms/MB	over level 0, one worker; 6 MB/s
+ZIP-2	str-fastq.z6	2.75572	ms/MB	over level 0, one worker
+ZIP-3	str-fastq.z6	0.320807	x	file / level-0 file
+ZIP-4	str-fastq.z6.time	0.480274	x	morloc / zstd -T1 -15 per MB
+ZIP-4	str-fastq.z6.ratio	1.01724	x	morloc ratio / zstd single-frame ratio
+ZIP-1	str-fastq.z7	626.671	ms/MB	over level 0, one worker; 2 MB/s
+ZIP-2	str-fastq.z7	2.92938	ms/MB	over level 0, one worker
+ZIP-3	str-fastq.z7	0.314397	x	file / level-0 file
+ZIP-4	str-fastq.z7.time	0.924929	x	morloc / zstd -T1 -19 per MB
+ZIP-4	str-fastq.z7.ratio	1.05591	x	morloc ratio / zstd single-frame ratio
+ZIP-4	str-fastq.z7.long	0.991155	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	str-fastq.z8	628.191	ms/MB	over level 0, one worker; 2 MB/s
+ZIP-2	str-fastq.z8	2.8483	ms/MB	over level 0, one worker
+ZIP-3	str-fastq.z8	0.314442	x	file / level-0 file
+ZIP-4	str-fastq.z8.time	0.730305	x	morloc / zstd -T1 -21 per MB
+ZIP-4	str-fastq.z8.ratio	1.06888	x	morloc ratio / zstd single-frame ratio
+ZIP-4	str-fastq.z8.long	1	x	zstd ratio with --long=27 / without, single frame
+ZIP-1	str-fastq.z9	702.766	ms/MB	over level 0, one worker; 1 MB/s
+ZIP-2	str-fastq.z9	2.69804	ms/MB	over level 0, one worker
+ZIP-3	str-fastq.z9	0.314422	x	file / level-0 file
+ZIP-4	str-fastq.z9.time	0.72614	x	morloc / zstd -T1 -22 per MB
+ZIP-4	str-fastq.z9.ratio	1.06129	x	morloc ratio / zstd single-frame ratio
+ZIP-4	str-fastq.z9.long	1	x	zstd ratio with --long=27 / without, single frame
+ZIP-5	str-fastq.z1.write.a	552.312	ms	r2=0.9961
+ZIP-5	str-fastq.z1.write.B	555.808	ms	r2=0.9961
+ZIP-5	str-fastq.z1.write.speedup6	1.68644	x	
+ZIP-5	str-fastq.z1.write.speedup12	1.6936	x	
+ZIP-5	str-fastq.z1.read.a	429.75	ms	r2=0.9987
+ZIP-5	str-fastq.z1.read.B	284.444	ms	r2=0.9987
+ZIP-5	str-fastq.z1.read.speedup6	1.49352	x	
+ZIP-5	str-fastq.z1.read.speedup12	1.52179	x	
+ZIP-5	str-fastq.z3.write.a	807.548	ms	r2=0.9960
+ZIP-5	str-fastq.z3.write.B	1793.91	ms	r2=0.9960
+ZIP-5	str-fastq.z3.write.speedup6	2.2537	x	
+ZIP-5	str-fastq.z3.write.speedup12	2.30479	x	
+ZIP-5	str-fastq.z3.read.a	437.186	ms	r2=0.9998
+ZIP-5	str-fastq.z3.read.B	304.475	ms	r2=0.9998
+ZIP-5	str-fastq.z3.read.speedup6	1.52115	x	
+ZIP-5	str-fastq.z3.read.speedup12	1.52501	x	
+ZIP-5	str-fastq.z6.write.a	6800.6	ms	r2=0.9994
+ZIP-5	str-fastq.z6.write.B	16827.7	ms	r2=0.9994
+ZIP-5	str-fastq.z6.write.speedup6	2.43912	x	
+ZIP-5	str-fastq.z6.write.speedup12	2.8345	x	
+ZIP-5	str-fastq.z6.read.a	369.224	ms	r2=0.9278
+ZIP-5	str-fastq.z6.read.B	379.347	ms	r2=0.9278
+ZIP-5	str-fastq.z6.read.speedup6	1.7935	x	
+ZIP-5	str-fastq.z6.read.speedup12	1.4831	x	
+ZIP-5	str-fastq.taskset1	1.07654	x	taskset -c 0-0 / MORLOC_FRAME_WORKERS=1
+ZIP-5	str-fastq.taskset2	1.3753	x	taskset -c 0-1 / MORLOC_FRAME_WORKERS=2
+ZIP-5	str-fastq.taskset4	1.22127	x	taskset -c 0-3 / MORLOC_FRAME_WORKERS=4
+ZIP-5	str-fastq.taskset6	1.13499	x	taskset -c 0-5 / MORLOC_FRAME_WORKERS=6
+ZIP-5	u64-small.z1.write.a	298.894	ms	r2=0.9963
+ZIP-5	u64-small.z1.write.B	677.687	ms	r2=0.9963
+ZIP-5	u64-small.z1.write.speedup6	2.30692	x	
+ZIP-5	u64-small.z1.write.speedup12	2.39391	x	
+ZIP-5	u64-small.z1.read.a	309.783	ms	r2=0.9916
+ZIP-5	u64-small.z1.read.B	390.088	ms	r2=0.9916
+ZIP-5	u64-small.z1.read.speedup6	1.84776	x	
+ZIP-5	u64-small.z1.read.speedup12	1.92494	x	
+ZIP-5	u64-small.z3.write.a	545.782	ms	r2=0.9938
+ZIP-5	u64-small.z3.write.B	1877.59	ms	r2=0.9938
+ZIP-5	u64-small.z3.write.speedup6	2.62146	x	
+ZIP-5	u64-small.z3.write.speedup12	2.45421	x	
+ZIP-5	u64-small.z3.read.a	311.69	ms	r2=0.9955
+ZIP-5	u64-small.z3.read.B	367.352	ms	r2=0.9955
+ZIP-5	u64-small.z3.read.speedup6	1.83811	x	
+ZIP-5	u64-small.z3.read.speedup12	1.84559	x	
+ZIP-5	u64-small.z6.write.a	7288.98	ms	r2=0.9999
+ZIP-5	u64-small.z6.write.B	18053.9	ms	r2=0.9999
+ZIP-5	u64-small.z6.write.speedup6	2.47802	x	
+ZIP-5	u64-small.z6.write.speedup12	2.99297	x	
+ZIP-5	u64-small.z6.read.a	291.648	ms	r2=0.9591
+ZIP-5	u64-small.z6.read.B	405.493	ms	r2=0.9591
+ZIP-5	u64-small.z6.read.speedup6	1.82933	x	
+ZIP-5	u64-small.z6.read.speedup12	1.88164	x	
+ZIP-5	u64-small.taskset1	1.05541	x	taskset -c 0-0 / MORLOC_FRAME_WORKERS=1
+ZIP-5	u64-small.taskset2	1.51876	x	taskset -c 0-1 / MORLOC_FRAME_WORKERS=2
+ZIP-5	u64-small.taskset4	1.32603	x	taskset -c 0-3 / MORLOC_FRAME_WORKERS=4
+ZIP-5	u64-small.taskset6	1.20311	x	taskset -c 0-5 / MORLOC_FRAME_WORKERS=6
+ZIP-6	fastq.z3.r	0.33143	x	r2=1.00000, bytes out per raw byte
+ZIP-6	fastq.z3.h	-1.23656	KiB	r2=1.00000, extra bytes per frame
+ZIP-6	fastq.z3.w1.b	18.4368	ms/MB	r2=0.9989
+ZIP-6	fastq.z3.wall.b	32.8557	ms/MB	r2=0.4184, against min(m, 16 MiB)
+ZIP-7	fastq.z3.h	2.81605	KiB	r2=0.9453, extra bytes per flushed batch
+ZIP-7	fastq.z3.d	0.47923	ms	r2=0.4537, time per flushed batch
+ZIP-7	fastq.z3.batch64k	1.1316	x	file / one @write
+ZIP-7	fastq.z3.batch256k	1.06135	x	file / one @write
+ZIP-7	fastq.z3.batch1024k	1.00417	x	file / one @write
+ZIP-7	fastq.z3.batch4096k	1.00052	x	file / one @write
+ZIP-7	fastq.z3.batch16384k	1.00003	x	file / one @write

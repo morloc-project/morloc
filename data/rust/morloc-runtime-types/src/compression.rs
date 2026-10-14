@@ -839,6 +839,108 @@ pub fn parallel_decompress_frames(
     })
 }
 
+/// One payload for [`parallel_decompress_frame_sets`]: its frame index, its
+/// compressed bytes and where its decompressed bytes go.
+pub struct FrameSet<'a> {
+    pub frames: &'a [FrameEntry],
+    pub compressed: &'a [u8],
+    pub dest: &'a mut [u8],
+}
+
+/// Decompress the frames of several payloads on one set of `frame_workers()`
+/// threads, so payloads of a frame or two each still decode in parallel.
+/// Each set is checked as [`parallel_decompress_frames`] checks its one
+/// payload before anything is decoded; the result is the first error, or
+/// `Ok` when every frame of every set decoded to its indexed size.
+pub fn parallel_decompress_frame_sets(sets: &mut [FrameSet<'_>]) -> Result<(), MorlocError> {
+    // (set, comp_off, comp_len, unc_off, unc_len)
+    let mut work: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
+    for (k, set) in sets.iter().enumerate() {
+        let (unc, comp) = crate::packet::frame_totals(set.frames)?;
+        if comp != set.compressed.len() {
+            return Err(MorlocError::Packet(format!(
+                "compressed buffer is {} bytes; frame index sums to {}",
+                set.compressed.len(),
+                comp
+            )));
+        }
+        if unc != set.dest.len() {
+            return Err(MorlocError::Packet(format!(
+                "dest buffer is {} bytes; frame index sums to {}",
+                set.dest.len(),
+                unc
+            )));
+        }
+        let (mut comp_off, mut unc_off) = (0usize, 0usize);
+        for f in set.frames {
+            let cs = crate::width::usize_from_u64(f.compressed_size);
+            let us = crate::width::usize_from_u64(f.uncompressed_size);
+            work.push((k, comp_off, cs, unc_off, us));
+            comp_off += cs;
+            unc_off += us;
+        }
+    }
+    if work.is_empty() {
+        return Ok(());
+    }
+    let dests: Vec<(usize, usize)> = sets.iter_mut().map(|s| (s.dest.as_mut_ptr() as usize, s.dest.len())).collect();
+    let comps: Vec<&[u8]> = sets.iter().map(|s| s.compressed).collect();
+    let decode_one = |decoder: &mut zstd::bulk::Decompressor<'_>, i: usize| -> Result<(), MorlocError> {
+        let (k, comp_off, cs, unc_off, us) = work[i];
+        let comp_slice = &comps[k][comp_off..comp_off + cs];
+        // SAFETY: frame `i`'s destination range lies inside set k's dest
+        // (checked against the index above) and no other frame's overlaps it.
+        let dest_slice = unsafe { std::slice::from_raw_parts_mut((dests[k].0 as *mut u8).add(unc_off), us) };
+        let written = decoder.decompress_to_buffer(comp_slice, dest_slice).map_err(MorlocError::Io)?;
+        if written != us {
+            return Err(MorlocError::Packet(format!(
+                "frame {} decompressed {} bytes, expected {}",
+                i, written, us
+            )));
+        }
+        Ok(())
+    };
+    let n_workers = frame_workers().min(work.len());
+    if n_workers <= 1 {
+        let mut decoder = make_bulk_decompressor().map_err(MorlocError::Io)?;
+        for i in 0..work.len() {
+            decode_one(&mut decoder, i)?;
+        }
+        return Ok(());
+    }
+    let next_idx = std::sync::atomic::AtomicUsize::new(0);
+    let first_err: std::sync::Mutex<Option<MorlocError>> = std::sync::Mutex::new(None);
+    let work = || {
+        let fail = |e: MorlocError| {
+            first_err.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(e);
+            next_idx.store(usize::MAX / 2, std::sync::atomic::Ordering::Relaxed);
+        };
+        let mut decoder = match make_bulk_decompressor() {
+            Ok(d) => d,
+            Err(e) => return fail(MorlocError::Io(e)),
+        };
+        loop {
+            let i = next_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if i >= work.len() {
+                return;
+            }
+            if let Err(e) = decode_one(&mut decoder, i) {
+                return fail(e);
+            }
+        }
+    };
+    std::thread::scope(|s| {
+        // The calling thread works too, so a refused spawn only narrows it.
+        for _ in 1..n_workers {
+            if std::thread::Builder::new().spawn_scoped(s, &work).is_err() {
+                break;
+            }
+        }
+        work();
+    });
+    first_err.into_inner().unwrap_or_else(|p| p.into_inner()).map_or(Ok(()), Err)
+}
+
 // ── Streaming encoders (no intermediate Vec for the compressed bytes) ────
 
 /// Stream-compress everything pulled from `reader` into `writer` as a
