@@ -79,3 +79,16 @@ here touch locks and ownership: model first.
   2438-2439 set and sweep a call id on the pure path only; the remote
   branch (2441 on) does neither, and stream.rs:2485-2489 claims "the nexus
   dispatch always pre-sets a call_id", which holds only there.
+- **A truncated stream file reads as a shorter stream.** [reproduced,
+  0.109.0] Spec gap: nothing says whether a stream file without its final
+  footer is an error. `saveSource 0 p` of batches [1,2,3], [4,5], [6]
+  writes 689 bytes; cut 300 bytes off the end and `@next` returns `Ok
+  [[1,2,3]]`, `Ok [[4,5]]`, `Ok []`: the batch [6] is silently gone. Cut 500
+  and every `@next` is `Ok []`. Only a cut inside a sub-packet header errors
+  ("sub-packet header extends past file end"). Cause, read:
+  data/rust/morloc-runtime/src/stream_format.rs:112, the `Ok(None) |
+  Err(_)` arm treats a missing footer as a crashed writer and
+  forward-scans the complete sub-packets. Any statistic or copy over such a
+  file is silently partial. Open: should a footer-less file be an `Err` at
+  the point the walk reaches the end (with crash recovery an explicit
+  opt-in), or is recovery the intended default?

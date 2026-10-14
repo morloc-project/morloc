@@ -15,3 +15,8 @@
   `/work/plans/issues/164/repro/a2-crypt/`.
 - [reproduced] Unused imports warned at library/Morloc/Frontend/Treeify.hs:38
   (Control.Monad.IO.Class).
+- [reproduced] A `match` whose branches differ in type (a value beside a
+  `do` suspension) is reported as "Branches of guard/if have incompatible
+  types" with "then-branch" and "else-branch", constructs the program does
+  not contain: `match` reaches Typecheck.hs:1476 through IfS. Repro: in a
+  `do` block, `match r | (Err e) = Err e | (Ok xs) = do { f xs; Ok xs }`.

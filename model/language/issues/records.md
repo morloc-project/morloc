@@ -35,3 +35,13 @@
   `R Int` and `R Str` with both crossing, reflects both instantiations'
   closure fields with whichever schema was harvested last. Key the harvest
   by instantiation. Not reproduced.
+- **A phantom parameter still needs a Python form when a Python function
+  takes the record.** [reproduced] 82a8d98b lets a record with a phantom
+  parameter pass through a pool without a language form for the parameter,
+  but a record literal `{pos = 7} :: Loc Tag` that a Python-sourced function
+  takes, where `Tag` has only a Rust form, fails at the literal: "Could not
+  resolve type for variable 'Tag'". The Python form `record Py => (Loc k) =
+  "dict" k` never uses `k`. Repro: lib/biolib/rnaseq/notes/repros/
+  phantom-py-arg/ (`morloc make -o phantom main.loc`; drop `pyPos` from `f`
+  and it builds). Seen in the bio suite, whose checks run in Python on
+  `Mapping Transcript Genome` values.
