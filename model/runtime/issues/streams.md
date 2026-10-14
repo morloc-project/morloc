@@ -134,3 +134,14 @@ here touch locks and ownership: model first.
   its own, and a later pass may decode the same offsets again. Both copies
   are correct and counted against the bound; they hold room until the
   cursor passes them.
+- **Where a stream is cut can depend on spare-buffer timing.** [read, not
+  reproduced] Against SLOT-20 ("every writer cuts at the same points").
+  `append_flat_run` sets the index cap to `fits.min(cap)`, `fits` taken
+  from the current block's size, which depends on whether `take_spare`
+  returned a smaller earlier block or a fresh full-size one, that is on
+  when the custodian released it; later doubling in `append_one_element`
+  then starts from that cap. Payload bytes do not depend on the cap
+  (compaction removes it), but sub-packet boundaries can. Reachable by an
+  `Int` stream mixing inline and big ints. Candidate fix: with nothing
+  buffered, set the cap without clamping to the block. Test: write one
+  stream with and without a spare available and compare file hashes.

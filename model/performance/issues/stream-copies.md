@@ -165,6 +165,14 @@ No type or API change, each measurable alone:
 - **R2.** Decompress into a reused, bounded private buffer and decode in
   payload space (with R1's callback), skipping the shared-memory block
   and its scrub. A thread-local buffer needs a STATE-1 registry row.
+  Tried 2026-10-14 and rejected by measurement: decode-ahead (SLOT-26/27)
+  already serves compressed batches from reused shared-memory landings
+  without a scrub, and on the synchronous path a fresh private buffer
+  costs page faults and kernel zeroing where a shared-memory block comes
+  from a pre-faulted volume. Interleaved A/B over 5 rounds, C++ level-3
+  reads of 600 MiB: default 0.27 -> 0.29 s (bytes), 0.555 -> 0.574 s
+  (pairs); cache off 0.36 -> 0.374 s, 0.70 -> 0.72 s. Deeper decode-ahead
+  passes (32 MiB, 4 spares) were no better (0.38 s) and used more memory.
 
 Rejected: scrubbing large blocks with `MADV_REMOVE`/hole punching instead
 of a memset. Re-allocating freed tmpfs pages on a full `/dev/shm` raises
