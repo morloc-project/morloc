@@ -67,7 +67,7 @@ realityCheck es = do
 
   -- Now dissolve remaining (non-recursive) VarS wrappers
   let gASTs = map removeVarS gASTs1
-      rASTs = map removeVarS rASTs1
+      rASTs = map (headInBody . removeVarS) rASTs1
 
   -- check and configure the system
   -- in the future, the results of this step may be used to winnow the build
@@ -1290,6 +1290,16 @@ reindexWith f (AnnoS (Idx gi t) c e) = do
   gi' <- newIndex gi
   c' <- f c
   AnnoS (Idx gi' t) c' <$> mapExprSM (reindexWith f) e
+
+-- | A root lambda's manifold is built in its body's language (the body is
+-- the manifold's code; the lambda is only its parameters), so the root is
+-- annotated with that language. A shared specialization realized for a
+-- caller in one language can place its body in another.
+headInBody :: AnnoS g One (Indexed Lang) -> AnnoS g One (Indexed Lang)
+headInBody (AnnoS g (Idx ci _) (LamS vs body)) =
+  let body'@(AnnoS _ (Idx _ lang) _) = headInBody body
+   in AnnoS g (Idx ci lang) (LamS vs body')
+headInBody t = t
 
 -- | A tree whose root term is renamed.
 renameRoot :: EVar -> AnnoS g One c -> AnnoS g One c

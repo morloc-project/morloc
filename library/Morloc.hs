@@ -123,7 +123,7 @@ lowerPools rASTs = do
         [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]
   MM.modify (\s -> s { stateManifoldLang = langMap })
   reg <- MM.gets stateLangRegistry
-  mapM expressRoot paramRASTs
+  mapM (\r -> expressRoot r >>= checkHeadLang langMap) paramRASTs
     -- Wrap each cache:true manifold's body in a 'PolyCacheBody'.
     >>= mapM addCacheWraps
     -- When 'stateDebugTrace' (--debug), wrap every foreign-call
@@ -146,6 +146,16 @@ lowerPools rASTs = do
     >>= mapM serialize
     >>= mapM reduce
     >>= (\ms -> checkManifoldIds reg ms >> return (pool reg ms))
+
+-- | Callers of a root read its language from 'stateManifoldLang', so its head
+-- must be built there.
+checkHeadLang :: Map.Map Int Lang -> PolyHead -> MorlocMonad PolyHead
+checkHeadLang langMap h@(PolyHead lang midx _ _)
+  | Map.lookup midx langMap == Just lang = return h
+  | otherwise =
+      MM.throwCompilerBug $
+        "the manifold of root" <+> pretty midx <+> "is built in" <+> pretty lang
+          <+> "but its tree is realized in" <+> pretty (Map.lookup midx langMap)
 
 -- | Express a root. A root of function type is called with every input of
 -- its type (the nexus sends a command's arguments by its type), so its

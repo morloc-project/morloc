@@ -32,4 +32,3 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   while a copy of its descriptor lives on, or `connect` to a full backlog,
   blocks in the kernel and never reaches `send_parts`' once-a-second
   `Peer::alive` check. Only the reply read is liveness-checked.
-
