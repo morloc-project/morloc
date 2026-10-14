@@ -4,8 +4,18 @@
 -- projected once (taken), a subject matched twice (copied), a two-field arm
 -- (copied), and a projection inside a tail loop, where the subject is built
 -- again on every iteration. Each must compile and give the same values.
+--
+-- Rust's generated match consumes the subject variable where C++ takes one
+-- field, so Rust takes the field only when nothing names the subject after
+-- the projection: not a second
+-- `match` (secondMatchRust), not `@show` in a throw arm (showAfterRust), and
+-- not from inside a `@try` body the subject was bound outside of
+-- (tryBodyRust); a `data` type the user maps to their own Rust enum keeps a
+-- plain Box and is copied (userRust). The last line counts the moves in the
+-- generated Rust, so a projection that could move but clones shows.
 module main
   ( onceRust, twiceRust, pairRust, loopRust
+  , userRust, secondMatchRust, showAfterRust, tryBodyRust
   , onceCpp, twiceCpp, pairCpp, loopCpp
   )
 
@@ -13,6 +23,9 @@ import root-rust
 import root-cpp
 
 data Two = Two [U8] [U8]
+
+data Holder a = Hollow | Hold a
+data Rust => (Holder a) = "MyHolder<$1>" a
 
 mkRust :: U64 -> [U8]
 lenRust :: [U8] -> U64
@@ -40,6 +53,29 @@ loopRust :: U64 -> U64 -> U64
 loopRust k acc
   ? k == 0 = acc
   : loopRust (k - 1) (addRust acc (match (@try (mkRust k)) | (Ok v) = lenRust v | (Err _) = 0))
+
+userRust :: U64 -> U64
+userRust n = match (Hold (mkRust n)) | (Hold v) = lenRust v | Hollow = 0
+
+secondMatchRust :: U64 -> U64
+secondMatchRust n =
+  let t = @try (mkRust n)
+  in addRust (match t | (Ok v) = lenRust v | (Err _) = 0)
+             (match t | (Err _) = 1 | (Ok _) = 0)
+
+showAfterRust :: U64 -> U64
+showAfterRust n =
+  let t = @try (mkRust n)
+  in match t
+     | (Ok v) = (? lenRust v > 3 = lenRust v : @throw (@show t))
+     | (Err _) = 0
+
+tryBodyRust :: U64 -> U64
+tryBodyRust n =
+  let t = @try (mkRust n)
+  in match (@try (lenRust (match t | (Ok v) = v | (Err _) = mkRust 0)))
+     | (Ok m) = m
+     | (Err _) = 0
 
 onceCpp :: U64 -> U64
 onceCpp n = match (@try (mkCpp n)) | (Ok v) = lenCpp v | (Err _) = 0

@@ -53,6 +53,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , IOwnership (..)
   , LowerConfig (..)
   , buildProgramM
+  , consumableProjectionLets
   , papplySteps
   , defaultDeserialize
   , defaultFoldRules
@@ -120,11 +121,17 @@ data RustState = RustState
   , rsStageTable :: Map.Map Int StageEntry
   , rsPapplyHeads :: Set.Set Text
   -- ^ The stored types of the function values this pool partially applies.
+  , rsConsumable :: Set.Set (Int, Int)
+  -- ^ The projections whose let may take the payload out of its subject
+  -- instead of cloning it, keyed by top-level manifold and let index
+  -- ('rustMovableProjections').
+  , rsCurrentRoot :: Int
+  -- ^ The top-level manifold being lowered (see 'rsConsumable').
   , rsErrors :: [Text]
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty []
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty Set.empty 0 []
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -1323,7 +1330,7 @@ translate srcs es = do
   let closureTable = Map.map closureSchemaTexts closureAsts
   logTemplates <- collectRenderedTemplates rustLang
   stageTable <- stageTableEntries
-  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable}
+  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsConsumable = rustMovableProjections es}
       (code, stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwSystemError . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
 
@@ -1739,7 +1746,7 @@ generateRustVariants closureAsts es = do
     -- A type holding a function gets impls only where it crosses: then each
     -- arm holding a closure crosses as its wire tuple.
     makeOne wireArms (FV gv (CV cvText), ps, arms) = do
-      userMapped <- cscopeDeclaresVariant gv cvText
+      userMapped <- rustUserMapsVariant gv cvText
       arms' <- mapM (\(n, ts) -> (,) n <$> mapM rustFieldType ts) arms
       name <- rustTypeOf (VariantF (FV gv (CV cvText)) ps arms)
       let hasFun = any (any containsFunF . snd) arms
@@ -1774,12 +1781,14 @@ generateRustVariants closureAsts es = do
               }
     armWire _ _ = return Nothing
 
-    cscopeDeclaresVariant :: TVar -> Text -> RustM Bool
-    cscopeDeclaresVariant gv cvText = do
-      cscope <- CMS.gets rsCScope
-      return $ case Map.lookup gv cscope of
-        Just entries -> any (\(_, body, _, _, _) -> bodyName body == Just cvText) entries
-        Nothing -> False
+-- | Whether the user maps this @data@ type to a Rust type of their own, whose
+-- arms box their payloads in a plain 'Box'.
+rustUserMapsVariant :: TVar -> Text -> RustM Bool
+rustUserMapsVariant gv cvText = do
+  cscope <- CMS.gets rsCScope
+  return $ case Map.lookup gv cscope of
+    Just entries -> any (\(_, body, _, _, _) -> bodyName body == Just cvText) entries
+    Nothing -> False
 
 -- | Impls for every nullary @data@ type in the pool, plus the enum itself
 -- unless the user maps it.
@@ -2017,8 +2026,9 @@ rustSurround =
     }
 
 translateSegment :: SerialManifold -> RustM MDoc
-translateSegment m0 = do
+translateSegment m0@(SerialManifold root _ _ _ _) = do
   resetCounter
+  CMS.modify (\st -> st {rsCurrentRoot = root})
   mask <- CMS.gets rsSrcTypeVarMask
   e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask)) m0
   return $ renderPoolDocs e
@@ -2380,7 +2390,8 @@ rustLowerConfig mask =
     , lcReturn = \e -> "return" <+> rustReply e <> ";"
     , lcDupPacket = \e -> "rustmorloc::dup_packet(" <> e <> ")"
     , lcOwnedArg = \e -> "rustmorloc::Packet::new(" <> e <> ").as_ptr()"
-    , lcLoopLetRhs = \_ _ d -> return d
+    , lcLoopLetRhs = rustConsumeLetRhs
+    , lcLetRhs = rustConsumeLetRhs
     , lcOwnPacketDecl = \v e -> Just ("let" <+> v <+> "= rustmorloc::Packet::new(" <> e <> ");", v <> ".as_ptr()")
     , lcMakeIf = rustMakeIf
     , lcMakeLoop = rustMakeLoop
@@ -2464,6 +2475,178 @@ isFunctionTypeF :: TypeF -> Bool
 -- the annotation like any closure's.
 isFunctionTypeF (FunF _ _) = True
 isFunctionTypeF _ = False
+
+-- | A projection in 'rustMovableProjections' matches the subject by value and
+-- takes the field through @RecBox::try_into_inner@, falling back to a clone
+-- of the field, so the field's type needs only what the borrowing form needs.
+-- Every other projection borrows the subject and clones the field.
+rustConsumeLetRhs :: Int -> NativeExpr -> PoolDocs -> RustM PoolDocs
+rustConsumeLetRhs i (IntrinsicN _ IntrCtorField _ [LetVarN t@(VariantF (FV gv (CV cv)) _ _) subj, StrN _ n, IntN _ k]) d = do
+  consumable <- CMS.gets rsConsumable
+  root <- CMS.gets rsCurrentRoot
+  userMapped <- rustUserMapsVariant gv cv
+  if Set.member (root, i) consumable && not userMapped
+    then do
+      ty <- rustTypeOf t
+      return d
+        { poolExpr =
+            "match" <+> nvarNamer subj <+> "{"
+              <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
+              <+> "=> match mlc_b.try_into_inner() {"
+              <+> "::std::result::Result::Ok(mlc_v) => mlc_v." <> pretty k <> ","
+              <+> "::std::result::Result::Err(mlc_b) => mlc_b." <> pretty k <> ".clone(),"
+              <+> "},"
+              <+> "_ => unreachable!()"
+              <+> "}"
+        }
+    else return d
+rustConsumeLetRhs _ _ d = return d
+
+-- | The projections of 'consumableProjectionLets' that Rust can render by
+-- value: the generated match consumes the whole subject variable, so the
+-- subject may not be named after the projection on the path that runs it,
+-- and the projection may not sit in a closure that names a subject bound
+-- outside it, since rustc rejects both.
+rustMovableProjections :: [SerialManifold] -> Set.Set (Int, Int)
+rustMovableProjections sms =
+  Set.filter movable (consumableProjectionLets sms)
+  where
+    roots = Map.fromList [(r, sm) | sm@(SerialManifold r _ _ _ _) <- sms]
+    movable (r, k) = case Map.lookup r roots of
+      Just sm@(SerialManifold _ _ _ _ body) -> case projectionSubject k (RSM sm) of
+        Just subj -> isJust (moveWalk subj k False (RS body))
+        Nothing -> False
+      Nothing -> False
+
+-- | A node of the IR, for walks that cross between its kinds.
+data RNode
+  = RS SerialExpr
+  | RN NativeExpr
+  | RSM SerialManifold
+  | RNM NativeManifold
+  | RLS (LoopBody NativeExpr SerialExpr SerialExpr)
+  | RLN (LoopBody NativeExpr SerialExpr NativeExpr)
+
+-- | A node's children, in the order the generated code evaluates them.
+rnodeChildren :: RNode -> [RNode]
+rnodeChildren (RSM (SerialManifold _ _ _ _ e)) = [RS e]
+rnodeChildren (RNM (NativeManifold _ _ _ e)) = [RN e]
+rnodeChildren (RS e) = case e of
+  ManS sm -> [RSM sm]
+  AppPoolS _ _ args -> map serialArg args
+  AppRecS _ _ es -> map RS es
+  AppForeignRecS _ _ _ es -> map RS es
+  CacheBodyS _ _ _ _ _ x -> [RS x]
+  DebugWrapS _ _ _ x -> [RS x]
+  ReturnS x -> [RS x]
+  SerialLetS _ a b -> [RS a, RS b]
+  NativeLetS _ a b -> [RN a, RS b]
+  LetVarS _ _ -> []
+  BndVarS _ _ -> []
+  SerializeS _ x -> [RN x]
+  LoopS _ _ body -> [RLS body]
+  where
+    serialArg (SerialArgManifold sm) = RSM sm
+    serialArg (SerialArgExpr x) = RS x
+rnodeChildren (RN e) = case e of
+  ManN nm -> [RNM nm]
+  AppExeN _ _ args -> map nativeArg args
+  ReturnN x -> [RN x]
+  SerialLetN _ a b -> [RS a, RN b]
+  NativeLetN _ a b -> [RN a, RN b]
+  LetVarN _ _ -> []
+  BndVarN _ _ -> []
+  DeserializeN _ _ x -> [RS x]
+  ExeN _ _ -> []
+  ListN _ _ xs -> map RN xs
+  TupleN _ xs -> map RN xs
+  RecordN _ _ _ kvs -> map (RN . snd) kvs
+  LogN _ _ -> []
+  RealN _ _ -> []
+  IntN _ _ -> []
+  StrN _ _ -> []
+  EnumN _ _ _ -> []
+  VariantN _ _ _ xs -> map RN xs
+  NullN _ -> []
+  DoBlockN _ x -> [RN x]
+  EvalN _ x -> [RN x]
+  CoerceN _ _ x -> [RN x]
+  IfN _ c t f -> [RN c, RN t, RN f]
+  IntrinsicN _ _ _ xs -> map RN xs
+  MapOptionalN _ _ _ x -> [RN x]
+  LoopN _ starts body -> map (RN . snd) starts <> [RLN body]
+  where
+    nativeArg (NativeArgManifold nm) = RNM nm
+    nativeArg (NativeArgExpr x) = RN x
+rnodeChildren (RLS b) = loopChildren RS RLS b
+rnodeChildren (RLN b) = loopChildren RN RLN b
+
+loopChildren :: (b -> RNode) -> (LoopBody NativeExpr SerialExpr b -> RNode) -> LoopBody NativeExpr SerialExpr b -> [RNode]
+loopChildren _ wrap (LoopIf c t f) = [RN c, wrap t, wrap f]
+loopChildren _ wrap (LoopNLet _ a b) = [RN a, wrap b]
+loopChildren _ wrap (LoopSLet _ a b) = [RS a, wrap b]
+loopChildren base _ (LoopBase x) = [base x]
+loopChildren _ _ (LoopContinue xs) = map RN xs
+
+-- | The native variable a let binds, its right-hand side and its body.
+rnodeLet :: RNode -> Maybe (Int, RNode, RNode)
+rnodeLet (RN (NativeLetN i a b)) = Just (i, RN a, RN b)
+rnodeLet (RS (NativeLetS i a b)) = Just (i, RN a, RS b)
+rnodeLet (RLS (LoopNLet i a b)) = Just (i, RN a, RLS b)
+rnodeLet (RLN (LoopNLet i a b)) = Just (i, RN a, RLN b)
+rnodeLet _ = Nothing
+
+-- | Whether a node names native variable @i@: a reference, or a manifold that
+-- captures it.
+rnodeNames :: Int -> RNode -> Bool
+rnodeNames i n = here n || any (rnodeNames i) (rnodeChildren n)
+  where
+    here (RN (LetVarN _ j)) = i == j
+    here (RN (BndVarN _ j)) = i == j
+    here (RSM (SerialManifold _ _ form _ _)) = any (\(Arg j _) -> j == i) (manifoldContext form)
+    here (RNM (NativeManifold _ _ form _)) = any (\(Arg j _) -> j == i) (manifoldContext form)
+    here _ = False
+
+-- | Whether a let binding native variable @i@ lies under a node.
+rnodeBinds :: Int -> RNode -> Bool
+rnodeBinds i n = maybe False (\(j, _, _) -> i == j) (rnodeLet n) || any (rnodeBinds i) (rnodeChildren n)
+
+-- | The subject of the projection let @k@ binds, under a node.
+projectionSubject :: Int -> RNode -> Maybe Int
+projectionSubject k n = case rnodeLet n of
+  Just (i, RN (IntrinsicN _ IntrCtorField _ (LetVarN _ subj : _)), _) | i == k -> Just subj
+  _ -> foldr (\c acc -> maybe acc Just (projectionSubject k c)) Nothing (rnodeChildren n)
+
+-- | Walk a node in evaluation order, knowing whether subject @subj@ has been
+-- moved by projection let @k@: the state after it, or Nothing when the
+-- subject is named after the move, or moved from inside a closure that did
+-- not bind it.
+moveWalk :: Int -> Int -> Bool -> RNode -> Maybe Bool
+moveWalk subj k moved n = case n of
+  RN (LetVarN _ j) | j == subj -> if moved then Nothing else Just moved
+  RN (BndVarN _ j) | j == subj -> if moved then Nothing else Just moved
+  RN (IfN _ c t f) -> branch (RN c) (RN t) (RN f)
+  RLS (LoopIf c t f) -> branch (RN c) (RLS t) (RLS f)
+  RLN (LoopIf c t f) -> branch (RN c) (RLN t) (RLN f)
+  RN (DoBlockN _ _) -> closure
+  RNM _ -> closure
+  RSM _ -> closure
+  _ -> case rnodeLet n of
+    Just (i, rhs, body)
+      | i == k -> moveWalk subj k moved rhs >> moveWalk subj k True body
+      | i == subj -> moveWalk subj k moved rhs >> moveWalk subj k False body
+      | otherwise -> moveWalk subj k moved rhs >>= \m -> moveWalk subj k m body
+    Nothing -> foldM (moveWalk subj k) moved (rnodeChildren n)
+  where
+    branch c t f = do
+      m <- moveWalk subj k moved c
+      mt <- moveWalk subj k m t
+      mf <- moveWalk subj k m f
+      return (mt || mf)
+    closure
+      | rnodeBinds k n = if rnodeBinds subj n then foldM (moveWalk subj k) moved (rnodeChildren n) else Nothing
+      | rnodeNames subj n = Nothing
+      | otherwise = Just moved
 
 -- The borrow-safe flag ('isBorrowableProjection') is unused: Rust binds owned
 -- locals and adapts a borrowed/place RHS via 'adaptOwnedElem' upstream.

@@ -1,6 +1,6 @@
 -- Primitive vectors crossing between Rust and C++ pools, in both
--- directions, long enough that each side's bulk copy is the path taken
--- (model/performance/issues/rust-vector-encode.md). Each check sums or
+-- directions, long enough that each side's bulk copy is the path taken.
+-- Each check sums or
 -- counts on the receiving side with position weights, so a byte lost,
 -- reordered or misread in either encoder or decoder changes the value.
 -- Floats cross bit for bit, signalling NaNs included, alone and in

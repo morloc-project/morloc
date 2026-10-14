@@ -33,3 +33,6 @@
   align to the largest field. Open: unify (a wire change).
 - **Canonical bytes.** Gap: must equal values have equal bytes, padding
   included? Depends on shared-memory.md (SHM-6) and drives cache.md.
+- **Voidstar byte order is unspecified.** Gap in FMT-6: FMT-1 fixes only
+  the packet header as little-endian; a stream file of voidstar values
+  moved between hosts of different byte order reads wrongly.

@@ -1001,6 +1001,7 @@ PROPAGATE_ERROR(errmsg)|]
           if Set.member (root, i) consumable && isBorrowableProjection orhs && not (isScalarCppType typestr)
             then d {poolExpr = "std::move(" <> poolExpr d <> ")"}
             else d
+    , lcLetRhs = \_ _ d -> return d
     , lcOwnPacketDecl = \v e -> Just ("mlc::Packet" <+> v <> "(" <> e <> ");", v <> ".get()")
     , lcMakeLoop = \res carried body -> do
         -- Tail-loop. Walk the 'LoopBody' tree into C++ control flow. The

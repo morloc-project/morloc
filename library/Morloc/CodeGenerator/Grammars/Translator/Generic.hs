@@ -569,6 +569,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcDupPacket = id
         , lcOwnedArg = \e -> if T.null (ldOwnedArgFn desc) then e else pretty (ldOwnedArgFn desc) <> "(" <> e <> ")"
         , lcLoopLetRhs = \_ _ d -> return d
+        , lcLetRhs = \_ _ d -> return d
         , lcOwnPacketDecl = \v e ->
             if T.null (ldOwnedArgFn desc)
               then Nothing

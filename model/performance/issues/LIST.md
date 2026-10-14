@@ -8,6 +8,5 @@ its issue is fixed.
 
 From lib/biolib/runtime-bench (runtime/issues/encode-throughput.md):
 
-- [rust-vector-encode.md](rust-vector-encode.md): Rust clones every batch bound out of a `Try` (C++ moves); needs a Rust use-after-move check; borrowed slices later
 - [stream-copies.md](stream-copies.md): stream copies: compressed batches land in shared memory, move the index not the data, then views (flatten into the buffer and decode in place fixed)
 - [stream-compression-pipeline.md](stream-compression-pipeline.md): compressed streams: memory bounded per stream, not per process; oversize elements copied four times; no decode-ahead (frames per level fixed)

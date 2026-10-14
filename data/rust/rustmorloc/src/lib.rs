@@ -2549,6 +2549,14 @@ impl<T> RecBox<T> {
         let rc = unsafe { std::mem::ManuallyDrop::take(&mut me.0) };
         std::sync::Arc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone())
     }
+
+    /// The value if `Arc::try_unwrap` gives it, else the box back.
+    pub fn try_into_inner(self) -> Result<T, RecBox<T>> {
+        let mut me = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `me` is not dropped and its Arc is not used after this take.
+        let rc = unsafe { std::mem::ManuallyDrop::take(&mut me.0) };
+        std::sync::Arc::try_unwrap(rc).map_err(|rc| RecBox(std::mem::ManuallyDrop::new(rc)))
+    }
 }
 
 impl<T> From<T> for RecBox<T> {
@@ -4456,6 +4464,19 @@ mod tests {
                 }
             }
         };
+    }
+
+    /// `try_into_inner` gives the value of a box with one handle and returns
+    /// a box that has another.
+    #[test]
+    fn a_rec_box_gives_up_its_value_only_when_unshared() {
+        let b = RecBox::new((vec![1u8, 2], 7i64));
+        assert_eq!(b.try_into_inner().map(|t| t.0).ok(), Some(vec![1, 2]));
+        let b = RecBox::new((vec![3u8], 8i64));
+        let other = b.clone();
+        let back = b.try_into_inner().err().expect("a shared box gave up its value");
+        assert_eq!((*back).1, 8);
+        assert_eq!((*other).0, vec![3]);
     }
 
     /// Primitive vectors under their own schema: 64-byte aligned element

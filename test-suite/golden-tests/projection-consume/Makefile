@@ -5,10 +5,15 @@ all:
 	./nexus twiceRust 5 >> obs.txt 2>> obs.err
 	./nexus pairRust 5 >> obs.txt 2>> obs.err
 	./nexus loopRust 10 0 >> obs.txt 2>> obs.err
+	./nexus userRust 5 >> obs.txt 2>> obs.err
+	./nexus secondMatchRust 5 >> obs.txt 2>> obs.err
+	./nexus showAfterRust 5 >> obs.txt 2>> obs.err
+	./nexus tryBodyRust 5 >> obs.txt 2>> obs.err
 	./nexus onceCpp 5 >> obs.txt 2>> obs.err
 	./nexus twiceCpp 5 >> obs.txt 2>> obs.err
 	./nexus pairCpp 5 >> obs.txt 2>> obs.err
 	./nexus loopCpp 10 0 >> obs.txt 2>> obs.err
+	grep -c 'try_into_inner()' nexus-build/pools/rust/src/main.rs >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__ *.err

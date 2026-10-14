@@ -671,6 +671,10 @@ data LowerConfig m = LowerConfig
   -- index and original expression. A loop let is emitted by the member's
   -- loop walker rather than 'lcMakeLet', so a member that binds some lets by
   -- taking their value (see 'consumableProjectionLets') applies it here.
+  , lcLetRhs :: Int -> NativeExpr -> PoolDocs -> m PoolDocs
+  -- ^ As 'lcLoopLetRhs', for a native let outside a loop: a member whose
+  -- 'lcMakeLet' cannot see the original right-hand side takes consumable
+  -- projections here.
   , lcOwnPacketDecl :: MDoc -> MDoc -> Maybe (MDoc, MDoc)
   -- ^ Given an owner variable and a fresh packet expression, a statement
   -- declaring the owner (which releases the packet when its scope ends) and
@@ -1070,7 +1074,7 @@ lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) =
 -- As for a native let ('NativeLetN_'): the bound local is owned, so its RHS
 -- is an owned sink.
 lowerSerialExpr cfg (NativeLetS _ rhsE _) (NativeLetS_ i e1 e2) = do
-  e1' <- adaptOwnedElem cfg rhsE e1
+  e1' <- adaptOwnedElem cfg rhsE e1 >>= lcLetRhs cfg i rhsE
   lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) e1' e2
 lowerSerialExpr cfg _ (NativeLetS_ i e1 e2) =
   lcMakeLet cfg nvarNamer i Nothing False e1 e2
@@ -1176,13 +1180,19 @@ borrowableRoot e = isBorrowableProjection e
 -- scan merges the uses of any index two of its nested manifolds share, which
 -- can only make a candidate look more used than it is -- costing a copy,
 -- never permitting a take.
+--
+-- A let index that two projections in one scan share is never a candidate:
+-- the decision is keyed by the index, so it would also reach the projection
+-- the conditions were not checked for.
 consumableProjectionLets :: [SerialManifold] -> Set.Set (Int, Int)
 consumableProjectionLets sms =
   Set.fromList
     [ (root, letIdx)
     | sm@(SerialManifold root _ _ _ _) <- sms
     , let scan = scanSM sm
+          projected = Map.fromListWith (+) [(l, 1 :: Int) | (l, _) <- csProjections scan]
     , (letIdx, subjIdx) <- csProjections scan
+    , Map.lookup letIdx projected == Just 1
     , maybe False buildsFreshValue (Map.lookup subjIdx (csDefs scan))
     , Map.findWithDefault 0 subjIdx (csUses scan) == 1
     ]
@@ -1688,7 +1698,7 @@ lowerNativeExprRaw cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothi
 -- bound value (Rust clones a borrowed/place RHS -- e.g. a getter through a
 -- borrowed receiver -- to match the owned binding type; other members unchanged).
 lowerNativeExprRaw cfg (NativeLetN _ rhsE _) (NativeLetN_ i x1 x2) = do
-  x1' <- adaptOwnedElem cfg rhsE x1
+  x1' <- adaptOwnedElem cfg rhsE x1 >>= lcLetRhs cfg i rhsE
   lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) x1' x2
 lowerNativeExprRaw cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing False x1 x2
 lowerNativeExprRaw _ _ (LetVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}

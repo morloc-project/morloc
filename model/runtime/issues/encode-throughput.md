@@ -19,8 +19,7 @@ Each section below has a reviewed analysis with causes, solutions and
 tests in model/performance/issues/ (LIST.md there): stream-copies.md
 (sections 1 and 2), stream-compression-pipeline.md (section 3; also a
 per-stream memory bound that lets N open compressed streams exhaust
-memory), rust-vector-encode.md (what remains of Rust's encode cost: a
-clone on every `Try` bind).
+memory).
 
 ## 1. Where decode and encode time goes, by value shape
 
