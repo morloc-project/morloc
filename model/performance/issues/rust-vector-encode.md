@@ -14,8 +14,19 @@ b.0.clone() }`: the compiler's Rust constructor-field projection
 borrows the subject and clones the field. C++ moves it
 (`std::move(std::get<1>(n64.v)->f0)`), because it consumes the set of
 projections the shared analysis `consumableProjectionLets`
-(Grammars/Translator/Imperative.hs) marks as taking their payload. One
-extra allocation and memcpy per batch, ~0.1-0.2 s per 600 MiB [inferred].
+(Grammars/Translator/Imperative.hs) marks as taking their payload.
+
+Measured 2026-10-14 by hand-patching the generated bench pool to
+`match n64 { Ok(b) => b.into_inner().0 }` (interleaved runs, same files):
+this clone is the whole remaining gap between Rust and C++ reads.
+
+| read, level 0 | Rust (clone) | Rust (move) | C++ |
+|---|---|---|---|
+| 600 MiB `[Vector U8]` | 0.57-0.65 s | 0.44-0.53 s | 0.45-0.51 s |
+| 1M `(Read, Read)` pairs | 1.95-2.04 s | 1.39-1.54 s | 1.40-1.49 s |
+
+For pairs the clone is a deep copy of every record (six allocations per
+pair), ~0.5 s per 1M pairs; for bytes one 10 MiB copy per batch.
 
 ## Why the shared analysis cannot be reused as it is
 
