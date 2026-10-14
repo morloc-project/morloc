@@ -120,7 +120,12 @@ extern "C" {
     fn mlc_unlink_tmp(path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_fschema(path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
     fn mlc_ifile_length(handle: i64, errmsg: *mut *mut c_char) -> i64;
-    fn mlc_next(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_next_with(
+        handle: i64,
+        decode: unsafe extern "C" fn(*mut c_void, *const c_void, MorlocSpace) -> i32,
+        ctx: *mut c_void,
+        errmsg: *mut *mut c_char,
+    ) -> i32;
     fn mlc_next_frame(handle: i64, eof: *mut i32, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_stream_layout(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;
@@ -3352,12 +3357,46 @@ pub unsafe fn ifile_length(handle: u64) -> i64 {
     n
 }
 
-/// @next: materialise an IStream's current sub-packet as `[a]` and advance the
-/// cursor. An empty list at EOF is a valid (non-null) voidstar.
+/// @next: decode an IStream's current sub-packet as `[a]` where it lies and
+/// advance the cursor (SLOT-25); an empty list at the end.
 pub unsafe fn next<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
+    struct Decoded<'a, T> {
+        schema: &'a Schema,
+        value: Option<T>,
+        unwinding: Option<Box<dyn std::any::Any + Send>>,
+    }
+    // SLOT-25: a throw while decoding must not unwind through the runtime,
+    // so it is held here and resumed once the runtime has returned.
+    unsafe extern "C" fn next_decode<T: FromVoidstar>(c: *mut c_void, data: *const c_void, space: MorlocSpace) -> i32 {
+        let d = &mut *(c as *mut Decoded<T>);
+        let schema = d.schema;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _recur = RecurScope::enter(schema);
+            <T as FromVoidstar>::read(schema, data as *const u8, space)
+        })) {
+            Ok(v) => {
+                d.value = Some(v);
+                0
+            }
+            Err(p) => {
+                d.unwinding = Some(p);
+                1
+            }
+        }
+    }
+    let mut d = Decoded::<T> { schema, value: None, unwinding: None };
     let mut err: *mut c_char = std::ptr::null_mut();
-    let voidstar = mlc_next(handle as i64, &mut err);
-    read_voidstar(voidstar, err, schema, "@next")
+    let rc = mlc_next_with(handle as i64, next_decode::<T>, &mut d as *mut Decoded<T> as *mut c_void, &mut err);
+    if rc < 0 {
+        morloc_throw(format!("@next: {}", reason_or_abort(err, "@next")));
+    }
+    if let Some(p) = d.unwinding {
+        std::panic::resume_unwind(p);
+    }
+    match d.value {
+        Some(v) => v,
+        None => failed_without_reason("@next"),
+    }
 }
 
 /// @replay: call `f` on every frame (sub-packet) of the stream, in order,

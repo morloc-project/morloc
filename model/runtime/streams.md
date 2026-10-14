@@ -272,3 +272,18 @@ whatever any of them returned (a job that panics ends the process,
 PANIC-1). No compression job waits on another, so the pool cannot deadlock however
 few threads it has, and with none at all a job runs on the thread that
 submits it.
+
+### SLOT-25 A reader decodes its batch inside its claim
+Status: implemented
+Checked by: a_batch_decoded_in_place_is_the_batch_next_returns, a_decoder_that_fails_still_releases_its_claim, golden:next-decode-failure
+
+`@next` from a C++ or Rust pool claims the next sub-packet as SLOT-23's
+readers do and hands it to the pool's decoder while the process keeps the
+claimed slot, with no slot lock held: an uncompressed sub-packet aligned
+in the file is read where it is mapped, with its offsets relative to its
+payload; any other is decompressed or copied into one shared-memory block
+first, freed when the decoder returns. Nothing the decoder is given
+outlives the call, since the slot's mapping may be replaced once it is
+released (pages behind the cursor are dropped, idle mappings unmapped). A
+decoder reports failure by return value, never by unwinding through the
+runtime, and the claim is released either way.

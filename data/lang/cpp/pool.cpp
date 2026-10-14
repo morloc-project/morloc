@@ -8,6 +8,8 @@
 #include <iterator>
 #include <climits>
 #include <stdexcept>
+#include <exception>
+#include <optional>
 #include <fstream>
 #include <system_error>
 #include <unordered_map>
@@ -800,17 +802,31 @@ T _mlc_ifile_walk(
     return result;
 }
 
-// @next: materialise the IStream's current sub-packet as `[a]` and
-// advance the cursor. Empty list at EOF.
+// @next: decode the IStream's current sub-packet as `[a]` where it lies
+// and advance the cursor (SLOT-25). Empty list at EOF.
 template <typename T>
 T _mlc_next(Schema* schema, int64_t handle) {
+    struct Decoded {
+        Schema* schema;
+        std::optional<T> value;
+        std::exception_ptr error;
+    } ctx{schema, std::nullopt, nullptr};
+    mlc_next_decode_fn decode = [](void* c, const void* data, morloc_space_t space) -> int32_t {
+        Decoded* d = static_cast<Decoded*>(c);
+        try {
+            T* dummy = nullptr;
+            d->value.emplace(from_voidstar(d->schema, data, dummy, space));
+            return 0;
+        } catch (...) {
+            d->error = std::current_exception();
+            return 1;
+        }
+    };
     char* errmsg = NULL;
-    void* voidstar = mlc_next(handle, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    T* dummy = nullptr;
-    T result = from_voidstar(schema, voidstar, dummy);
-    shfree_cpp(voidstar);
-    return result;
+    int32_t rc = mlc_next_with(handle, decode, &ctx, &errmsg);
+    if (rc < 0) { PROPAGATE_ERROR(errmsg) }
+    if (ctx.error) { std::rethrow_exception(ctx.error); }
+    return std::move(*ctx.value);
 }
 
 // @streamLayout: per-sub-packet layout of an IFile as `[(U64,U64,U64)]`.

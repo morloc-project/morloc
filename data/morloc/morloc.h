@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 12
+#define MORLOC_ABI_VERSION 13
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -1787,6 +1787,16 @@ int32_t mlc_write_handles_voidstar(const int64_t* handles, size_t n,
 // new handle is auto-registered with the current `eval_arena`.
 void* mlc_next(int64_t handle, ERRMSG);
 int64_t mlc_stream(int64_t ifile_handle, ERRMSG);
+
+// `mlc_next_with(handle, decode, ctx)` is `mlc_next` handing the batch to
+// `decode` (never NULL) where it lies instead of copying it into a block: `data` is the
+// `[a]` and `space` where its offsets lead. Neither outlives the call. A
+// decoder returns 0, or nonzero having kept its own error; it must not
+// unwind out of the call. Returns 0 when `decode` read the batch, 1 when it
+// failed, -1 with errmsg set when the runtime failed, before the decoder ran
+// or after it succeeded; the batch is consumed either way (SLOT-25).
+typedef int32_t (*mlc_next_decode_fn)(void* ctx, const void* data, morloc_space_t space);
+int32_t mlc_next_with(int64_t handle, mlc_next_decode_fn decode, void* ctx, ERRMSG);
 
 // `mlc_next_frame(handle, eof)` reads the next sub-packet of a file-backed
 // IStream like `mlc_next`, but tells the end of the stream apart from an

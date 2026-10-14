@@ -1357,6 +1357,38 @@ pub(crate) unsafe fn mlc_next(
     }
 }
 
+/// A pool's decoder for `mlc_next_with`: 0 when it decoded the batch,
+/// nonzero when it failed and kept its own error.
+pub type NextDecode = unsafe extern "C" fn(ctx: *mut c_void, data: *const c_void, space: crate::voidstar::MorlocSpace) -> i32;
+
+/// `@next` decoding the batch in place (SLOT-25): 0 when `decode` read it,
+/// 1 when `decode` failed (whatever the runtime did after), -1 with
+/// `errmsg` set when the runtime failed.
+pub(crate) unsafe fn mlc_next_with(
+    handle: i64,
+    decode: Option<NextDecode>,
+    ctx: *mut c_void,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    let Some(decode) = decode else {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_next_with: no decoder".into()));
+        return -1;
+    };
+    let mut rc = 0;
+    let res = crate::stream::shared_next_with(handle, &mut |data, space| {
+        rc = decode(ctx, data as *const c_void, space);
+    });
+    match res {
+        _ if rc != 0 => 1,
+        Ok(()) => 0,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
 /// Read the next frame (sub-packet) of a file-backed IStream as a fresh SHM
 /// Array<a>. At the end of the stream returns null and sets `*eof` to 1; an
 /// empty frame is an empty Array with `*eof` 0. Used by `@replay`.
@@ -2569,6 +2601,11 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_next(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void {
         super::mlc_next(handle, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_next_with(handle: i64, decode: super::NextDecode, ctx: *mut c_void, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_next_with(handle, Some(decode), ctx, errmsg)
     }
 
     #[no_mangle]

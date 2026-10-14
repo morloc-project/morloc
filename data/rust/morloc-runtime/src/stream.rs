@@ -4071,62 +4071,99 @@ pub fn shared_next_frame(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
     next_file_subpacket(handle)
 }
 
+// SLOT-25
+pub fn shared_next_with(
+    handle: i64,
+    decode: &mut dyn FnMut(*const u8, voidstar::MorlocSpace),
+) -> Result<(), MorlocError> {
+    let block = if channel_slot(handle)?.is_some() {
+        Some(match channel_pop(handle)? {
+            Some(p) => p,
+            None => empty_shm_array()?,
+        })
+    } else if let Some(stdio_kind) = shared_handle_stdio_kind(handle)? {
+        verify_stdio_opener_pid(handle)?;
+        Some(stdio_next_via_rpc(handle, stdio_kind)?)
+    } else {
+        None
+    };
+    if let Some(p) = block {
+        decode(p as *const u8, voidstar::MorlocSpace::SHM);
+        return shm::shfree(p).map(|_| ());
+    }
+    with_process_local_slot(handle, |local, slot| {
+        let Some((claim_cursor, on_disk_size)) = claim_next_subpacket(handle, local, slot)? else {
+            let empty = shm_types_crate::Array { size: 0, data: shm::RELNULL };
+            let base = &empty as *const shm_types_crate::Array as *const u8;
+            decode(base, voidstar::MorlocSpace { base, len: std::mem::size_of::<shm_types_crate::Array>() });
+            return Ok(());
+        };
+        let (src, _) = materialize_subpacket_at_offset(local, claim_cursor)?;
+        match &src {
+            &SubpacketSrc::File { payload_base, payload_len, vol_idx_hint, .. } => {
+                // SLOT-25: checked as the copy into shared memory checks it.
+                let bytes = unsafe { std::slice::from_raw_parts(payload_base as *const u8, payload_len as usize) };
+                voidstar::check_in_place(bytes, &array_schema(&local.elem_schema), vol_idx_hint)?;
+                decode(
+                    payload_base as *const u8,
+                    voidstar::MorlocSpace { base: payload_base as *const u8, len: payload_len as usize },
+                );
+            }
+            SubpacketSrc::Shm { arr_base } => decode(*arr_base as *const u8, voidstar::MorlocSpace::SHM),
+        }
+        drop(src);
+        drop_read_pages(local, claim_cursor + on_disk_size);
+        Ok(())
+    })
+}
+
+// SLOT-23
+fn claim_next_subpacket(
+    handle: i64,
+    local: &mut ProcessLocalSlot,
+    slot: &RegistrySlot,
+) -> Result<Option<(u64, u64)>, MorlocError> {
+    if slot.kind.get() != MLC_KIND_ISTREAM {
+        return Err(MorlocError::Other(format!(
+            "@next on non-IStream handle (kind = {})",
+            handle_kind_name(slot.kind.get()),
+        )));
+    }
+    let _guard = SlotGuard::lock(slot)?;
+    if !slot_generation_is(slot, local.cached_generation) {
+        return Err(MorlocError::Other(format!(
+            "stream handle {:#x}: the stream was closed", handle,
+        )));
+    }
+    let cursor = slot.cursor.get();
+    let end = if slot.data_end.get() != 0 { slot.data_end.get().min(local.mmap_size) } else { local.mmap_size };
+    if cursor >= end || cursor + 32 > end {
+        return Ok(None);
+    }
+    let hdr_bytes = unsafe {
+        std::slice::from_raw_parts((local.mmap_ptr as *const u8).add(cursor as usize), 32)
+    };
+    let header = morloc_runtime_types::packet::PacketHeader::from_bytes(hdr_bytes.try_into().unwrap())?;
+    if !header.is_data() {
+        return Ok(None);
+    }
+    let size = 32 + header.offset as u64 + header.length;
+    if cursor + size > end {
+        return Err(MorlocError::Packet(format!(
+            "stream handle {:#x}: a sub-packet runs past the end of the stream", handle,
+        )));
+    }
+    // SLOT-23: the cursor moves under the lock, so another reader claims
+    // the next sub-packet.
+    slot.cursor.set(cursor + size);
+    Ok(Some((cursor, size)))
+}
+
 fn next_file_subpacket(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
     with_process_local_slot(handle, |local, slot| {
-        if slot.kind.get() != MLC_KIND_ISTREAM {
-            return Err(MorlocError::Other(format!(
-                "@next on non-IStream handle (kind = {})",
-                handle_kind_name(slot.kind.get()),
-            )));
-        }
-
-        // Claim the next sub-packet under the lock. The lock window
-        // is just header-read + cursor-advance; the actual
-        // decompression / deep-copy happens with the lock dropped.
-        let (claim_cursor, on_disk_size, header_is_data) = {
-            let _guard = SlotGuard::lock(slot)?;
-            if !slot_generation_is(slot, local.cached_generation) {
-                return Err(MorlocError::Other(format!(
-                    "stream handle {:#x}: the stream was closed", handle,
-                )));
-            }
-            let cursor = slot.cursor.get();
-            let end = if slot.data_end.get() != 0 { slot.data_end.get().min(local.mmap_size) } else { local.mmap_size };
-            if cursor >= end || cursor + 32 > end {
-                // EOF: leave cursor where it is.
-                return Ok(None);
-            }
-            let hdr_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    (local.mmap_ptr as *const u8).add(cursor as usize),
-                    32,
-                )
-            };
-            let header = morloc_runtime_types::packet::PacketHeader::from_bytes(
-                hdr_bytes.try_into().unwrap(),
-            )?;
-            if !header.is_data() {
-                // Footer encountered: end-of-stream.
-                return Ok(None);
-            }
-            let size = 32 + header.offset as u64 + header.length;
-            if cursor + size > end {
-                return Err(MorlocError::Packet(format!(
-                    "stream handle {:#x}: a sub-packet runs past the end of the stream", handle,
-                )));
-            }
-            // Advance the cursor BEFORE we drop the lock so concurrent
-            // @next on this slot from another pool reads from
-            // cursor+size and claims a DIFFERENT sub-packet.
-            slot.cursor.set(cursor + size);
-
-            (cursor, size, true)
+        let Some((claim_cursor, on_disk_size)) = claim_next_subpacket(handle, local, slot)? else {
+            return Ok(None);
         };
-        let _ = header_is_data;
-
-        // Materialise the claimed sub-packet without holding the
-        // lock. Other pools can advance through subsequent
-        // sub-packets in parallel.
         let arr = materialize_and_finalise_subpacket(local, slot, claim_cursor)?;
         drop_read_pages(local, claim_cursor + on_disk_size);
         Ok(Some(arr))
@@ -8705,6 +8742,110 @@ mod tests {
         }
         shared_close_handle(w).unwrap();
         shown
+    }
+
+    /// The JSON of a batch as `shared_next_with` hands it over, read
+    /// wherever it lies.
+    fn batch_json(data: *const u8, space: voidstar::MorlocSpace, list: &Schema) -> String {
+        let block = if space.base.is_null() {
+            None
+        } else {
+            let bytes = unsafe { std::slice::from_raw_parts(space.base, space.len) };
+            Some(voidstar::read_binary(bytes, list).unwrap())
+        };
+        let at = block.unwrap_or(data as AbsPtr);
+        let s = crate::json::voidstar_to_json_string(at, list).unwrap();
+        if let Some(b) = block {
+            shm::shfree(b).unwrap();
+        }
+        s
+    }
+
+    /// SLOT-25: each batch decoded where it lies is the batch `@next`
+    /// copies out, compressed or not, to the empty batch at the end.
+    #[test]
+    fn a_batch_decoded_in_place_is_the_batch_next_returns() {
+        let _shm = crate::own_test_registry();
+        set_test_write_buffer_bytes(Some(64 * 1024));
+        let _buf = TestWriteBuffer;
+        let dir = concat_test_dir("next_with");
+        let list = "at3sai4?f8";
+        let schema = parse_schema(list).unwrap();
+        let rows = format!(
+            "[{}]",
+            (0..2000).map(|i| format!("[\"{}\", [{}], {}]", "q".repeat(i % 97), i % 5, if i % 2 == 0 { "null" } else { "2.5" }))
+                .collect::<Vec<_>>().join(",")
+        );
+        for level in [0u8, 3] {
+            let p = dir.join(format!("l{level}.idx")).to_str().unwrap().to_string();
+            let w = shared_open_ostream_with_schema(&p, list).unwrap();
+            let v = crate::json::read_json_with_schema(&rows, &schema).unwrap();
+            shared_write_subpacket(w, crate::compression::CompressionLevel::from_u8(level).unwrap(), v).unwrap();
+            shm::shfree(v).unwrap();
+            shared_close_handle(w).unwrap();
+
+            let copied = open_istream(&p).unwrap();
+            let in_place = open_istream(&p).unwrap();
+            let mut batches = 0;
+            let mut mapped = 0;
+            loop {
+                let c = shared_next_subpacket(copied).unwrap();
+                let want = crate::json::voidstar_to_json_string(c, &schema).unwrap();
+                shm::shfree(c).unwrap();
+                let mut got = String::new();
+                shared_next_with(in_place, &mut |data, space| {
+                    if !space.base.is_null() && want != "[]" {
+                        mapped += 1;
+                    }
+                    got = batch_json(data, space, &schema)
+                })
+                .unwrap();
+                assert_eq!(got, want, "level {level}, batch {batches}");
+                if want == "[]" {
+                    break;
+                }
+                batches += 1;
+            }
+            assert!(batches > 2, "level {level}: {batches} batches");
+            if level == 0 {
+                assert_eq!(mapped, batches, "an uncompressed batch was not read where it is mapped");
+            } else {
+                assert_eq!(mapped, 0, "a compressed batch was read from the file");
+            }
+            shared_close_handle(copied).unwrap();
+            shared_close_handle(in_place).unwrap();
+        }
+    }
+
+    /// SLOT-25: a decoder that reports failure leaves the claim released:
+    /// the next `@next` reads the next batch and the handle closes.
+    #[test]
+    fn a_decoder_that_fails_still_releases_its_claim() {
+        unsafe extern "C" fn refuse(_: *mut std::ffi::c_void, _: *const std::ffi::c_void, _: voidstar::MorlocSpace) -> i32 {
+            1
+        }
+        unsafe extern "C" fn count(c: *mut std::ffi::c_void, data: *const std::ffi::c_void, space: voidstar::MorlocSpace) -> i32 {
+            let schema = parse_schema("ai8").unwrap();
+            *(c as *mut String) = batch_json(data as *const u8, space, &schema);
+            0
+        }
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("next_with_fail");
+        let path = dir.join("ints.idx");
+        write_int_stream(&path, &[&[1, 2], &[3]]);
+        let r = open_istream(path.to_str().unwrap()).unwrap();
+        let mut err = std::ptr::null_mut();
+        let idle = || PROCESS_LOCAL_SLOTS.lock().as_ref().and_then(|m| m.get(&r).map(|s| s.idle.len())).unwrap_or(0);
+        let rc = unsafe { crate::intrinsics::mlc_next_with(r, Some(refuse), std::ptr::null_mut(), &mut err) };
+        assert_eq!(rc, 1);
+        assert!(err.is_null());
+        assert_eq!(idle(), 1, "the failed decode did not give its slot back");
+        let mut got = String::new();
+        let rc = unsafe { crate::intrinsics::mlc_next_with(r, Some(count), &mut got as *mut String as *mut std::ffi::c_void, &mut err) };
+        assert_eq!(idle(), 1, "a second slot was attached");
+        assert_eq!(rc, 0);
+        assert_eq!(got, "[3]");
+        shared_close_handle(r).unwrap();
     }
 
     struct TestWriteBuffer;

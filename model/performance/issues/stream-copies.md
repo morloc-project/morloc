@@ -4,7 +4,12 @@ Status: analysed 2026-10-13, reviewed by the devil's advocate. W1 fixed
 2026-10-14: an element is flattened straight into the write buffer, laid
 out as before (files byte-identical), with every byte it does not fill
 zeroed; C++ level-0 write of 600 MiB of `[Vector U8]` 1.75 -> 1.64 s,
-pairs unchanged within noise. The size walk remains. Others open.
+pairs unchanged within noise. The size walk remains. R1 fixed 2026-10-14
+(SLOT-25): C++ and Rust pools decode an uncompressed, aligned batch where
+it is mapped; level-0 reads of 600 MiB of `[Vector U8]`, C++ 0.27 -> 0.18
+s, Rust 0.40 -> 0.26 s; 1M pairs, C++ 0.80 -> 0.49 s, Rust 1.14 -> 0.76 s
+(`cat` 0.07 s). Compressed batches still land in shared memory (R2).
+Others open.
 Parent: runtime/issues/encode-throughput.md sections 1b and 2. Source:
 lib/biolib/runtime-bench README sections 2 and 6.
 

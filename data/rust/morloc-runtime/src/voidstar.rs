@@ -375,6 +375,9 @@ pub unsafe fn shift_buffer_relptrs_with(
 enum Rebase {
     Shm(RelPtr),
     Buffer { buf_base: *mut u8, delta: isize },
+    /// Check a value where it lies, writing nothing: each relptr, shifted,
+    /// is an offset from `base`.
+    Check { base: *const u8, shift: RelPtr },
 }
 
 /// Adds a constant to every relptr under a value, in place, descending
@@ -393,7 +396,18 @@ impl<'a, 'r> RebaseWalk<'a, 'r> {
         match self.mode {
             Rebase::Shm(b) => b,
             Rebase::Buffer { delta, .. } => delta,
+            Rebase::Check { shift, .. } => shift,
         }
+    }
+
+    /// The relptr in `slot`, shifted; written back unless only checking.
+    #[inline]
+    unsafe fn moved(&self, slot: *mut RelPtr) -> RelPtr {
+        let v = *slot + self.shift();
+        if !matches!(self.mode, Rebase::Check { .. }) {
+            *slot = v;
+        }
+        v
     }
 
     /// The block a rebased relptr names.
@@ -403,6 +417,8 @@ impl<'a, 'r> RebaseWalk<'a, 'r> {
             Rebase::Shm(_) => shm::rel2abs(rel),
             // SAFETY: a buffer-local relptr is an offset into the buffer.
             Rebase::Buffer { buf_base, .. } => Ok(unsafe { buf_base.add(rel as usize) }),
+            // SAFETY: a checked relptr is an offset into the value's bytes.
+            Rebase::Check { base, .. } => Ok(unsafe { base.add(rel as usize) as *mut u8 }),
         }
     }
 
@@ -453,9 +469,8 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                     // pointer needs rebasing; the limbs themselves hold none.
                     let size = *(data as *const usize);
                     if size > 1 {
-                        let relptr = &mut *(data.add(std::mem::size_of::<usize>()) as *mut RelPtr);
-                        *relptr += shift;
-                        self.check(*relptr, size.checked_mul(std::mem::size_of::<u64>()))?;
+                        let rel = self.moved(data.add(std::mem::size_of::<usize>()) as *mut RelPtr);
+                        self.check(rel, size.checked_mul(std::mem::size_of::<u64>()))?;
                     }
                 }
                 SerialType::String | SerialType::Array => {
@@ -466,6 +481,9 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                         if matches!(self.mode, Rebase::Buffer { .. }) && (arr.size == 0 || arr.data <= 0) {
                             return Ok(());
                         }
+                        if matches!(self.mode, Rebase::Check { .. }) && arr.size == 0 {
+                            return Ok(());
+                        }
                         // An empty array's pointer is never followed, but a
                         // rebased one could name an address before the
                         // block, even outside its volume; inside a window it
@@ -474,10 +492,10 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                             arr.data = lo;
                             return Ok(());
                         }
-                        arr.data += shift;
+                        let rel = self.moved(std::ptr::addr_of_mut!(arr.data));
                         if arr.size > 0 {
                             let w = s.parameters.first().map_or(1, |e| e.width);
-                            self.check(arr.data, arr.size.checked_mul(w))?;
+                            self.check(rel, arr.size.checked_mul(w))?;
                         }
                     }
                     // An empty array points nowhere (its rebased sentinel is
@@ -487,7 +505,8 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                     }
                     let elem_schema = &s.parameters[0];
                     let w = elem_schema.width;
-                    let elems = self.target(arr.data)?;
+                    let data_rel = if matches!(self.mode, Rebase::Check { .. }) { arr.data + shift } else { arr.data };
+                    let elems = self.target(data_rel)?;
                     let flat_elem = self.res.flat(elem_schema);
                     for i in f.idx..arr.size {
                         let p = elems.add(i * w);
@@ -508,7 +527,9 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                         let payload = sh::read_payload(data);
                         if payload != sh::RELNULL_PAYLOAD {
                             let moved = payload.wrapping_add(width::i64_from_isize(shift).cast_unsigned());
-                            sh::write_field(data, sh::TAG_PATH, moved);
+                            if !matches!(self.mode, Rebase::Check { .. }) {
+                                sh::write_field(data, sh::TAG_PATH, moved);
+                            }
                             if self.window.is_some() {
                                 // A path is an 8-byte length, then its bytes.
                                 let rel = sh::payload_relptr(moved);
@@ -535,11 +556,11 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                         return Ok(());
                     }
                     let arm = variant_arm_schema(*data, s)?;
-                    let relptr_slot = &mut *(data.add(VARIANT_PAYLOAD_OFFSET) as *mut RelPtr);
+                    let relptr_slot = data.add(VARIANT_PAYLOAD_OFFSET) as *mut RelPtr;
                     if *relptr_slot != shm::RELNULL {
-                        *relptr_slot += shift;
-                        self.check(*relptr_slot, Some(arm.width))?;
-                        let inner = self.target(*relptr_slot)?;
+                        let rel = self.moved(relptr_slot);
+                        self.check(rel, Some(arm.width))?;
+                        let inner = self.target(rel)?;
                         self.child(st, &f, 0, arm, inner)?;
                     }
                 }
@@ -550,11 +571,11 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                     if f.idx > 0 || s.parameters.is_empty() {
                         return Ok(());
                     }
-                    let relptr_slot = &mut *(data as *mut RelPtr);
+                    let relptr_slot = data as *mut RelPtr;
                     if *relptr_slot != shm::RELNULL {
-                        *relptr_slot += shift;
-                        self.check(*relptr_slot, Some(s.parameters[0].width))?;
-                        let inner = self.target(*relptr_slot)?;
+                        let rel = self.moved(relptr_slot);
+                        self.check(rel, Some(s.parameters[0].width))?;
+                        let inner = self.target(rel)?;
                         self.child(st, &f, 0, &s.parameters[0], inner)?;
                     }
                 }
@@ -640,6 +661,29 @@ impl Landing {
         std::mem::forget(self);
         Ok(block)
     }
+}
+
+/// Check a value of `schema` that lies in `bytes` (a sub-packet payload in
+/// the producer's frame, relptrs carrying `vol_idx_hint`) as `relocate`
+/// would, writing nothing: every pointer and the bytes it addresses lie
+/// inside `bytes`, every variant tag names an arm.
+pub fn check_in_place(bytes: &[u8], schema: &Schema, vol_idx_hint: u16) -> Result<(), MorlocError> {
+    if bytes.len() < schema.width {
+        return Err(MorlocError::Serialization(format!(
+            "a voidstar value of {} bytes is shorter than its {}-byte root", bytes.len(), schema.width
+        )));
+    }
+    let hi = isize::try_from(bytes.len())
+        .map_err(|_| MorlocError::Serialization("a voidstar value too large to address".into()))?;
+    let res = Resolver::new(schema);
+    let mut w = RebaseWalk {
+        res: &res,
+        mode: Rebase::Check { base: bytes.as_ptr(), shift: -shm::encode_relptr(vol_idx_hint as usize, 0) },
+        window: Some(RelWindow { lo: 0, hi }),
+    };
+    let mut st = Stack::new();
+    st.enter(schema, bytes.as_ptr(), ());
+    walk::run(&mut w, &mut st)
 }
 
 /// Decompress the zstd `frames` of `compressed` into one fresh SHM block

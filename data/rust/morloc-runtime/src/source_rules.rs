@@ -1112,6 +1112,8 @@ fn only_catch_scopes_catch_a_panic() {
         "morloc-runtime/stream.rs::with_process_local_slot",
         "rustmorloc/lib.rs::dispatch_guard",
         "rustmorloc/lib.rs::mlc_try",
+        // SLOT-25: holds a decoder's throw across the runtime call, then resumes it.
+        "rustmorloc/lib.rs::next_decode",
         "rustmorloc/lib.rs::drop",
     ];
     let ours = ["morloc-runtime/", "morloc-runtime-types/", "morloc-nexus/", "rustmorloc/"];
