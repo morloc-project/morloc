@@ -34,25 +34,27 @@
 - **`mlcKind*` agreement with morloc.h untested on the Haskell side.**
   [read] library/Morloc/BaseTypes.hs:196 requires `mlcKind*` to equal
   morloc.h `MLC_KIND_*`; no test in test-suite/ compares them.
-- **A pool's own newer crate pins never reach the environment lock.**
-  [read] Gap: none stated. Build/CargoLock.hs `mergeLockFiles` re-bases the
-  environment lock on the runtime's Cargo.lock and `mergeCargoLocks` keeps
-  the base's table for every crate name the base has, so a version cargo had
-  to bump for one pool (lib/biolib salmon-rust: cf1-rs needs anyhow
-  ^1.0.104, the runtime pins 1.0.102) is dropped. Since pool builds are no
-  longer forced offline this no longer fails; each rebuild of that program
-  re-resolves the bumped crate online instead, and may pick a newer version
-  than the last build did. Options (DA review 2026-10-13): start each pool
-  from its own previous pools/rust/Cargo.lock and merge only new names from
-  the environment lock (keeps the runtime's authority); or keep the newer
-  pin per semver-compatible line environment-wide, which needs dependency
-  references rewritten on replacement, numeric semver comparison and a
-  same-`source` check, and ratchets versions for every program.
-- **The environment lock keeps a table for every pool ever built.** [read]
-  `mergeCargoLocks` adds any crate name the base lacks, including each
-  program's `pool_<hash>` crate and its local path crates, so
-  $MORLOC_STATE/cache/rust-env.lock grows by one table per program built
-  and never shrinks.
+- **Rust crates are resolved per pool, outside the environment's solve.**
+  [read] Rust pools resolve rust-deps one pool at a time against an
+  environment lock the compiler maintains (Build/CargoLock.hs), while
+  Python, R and C++ packages are solved by mim into one solved set per
+  environment (mim model/dependencies.md DEP-3, DEP-7; DEP-8 leaves crates to
+  cargo). Consequences: a version cargo had to bump for one pool (lib/biolib
+  salmon-rust: anyhow ^1.0.104 against the runtime's 1.0.102) is dropped
+  when the merge re-bases on the runtime's lock, so each rebuild re-resolves
+  it online (violates the intent of DEP-7: versions move only when forced,
+  and stay); and the environment lock keeps a table for every program ever
+  built (each `pool_<hash>` crate and its local path crates). Ruled
+  2026-10-14: crates join the single solved environment. One lock per
+  environment, resolved by cargo over a workspace of the runtime crates and
+  every program's rust-deps; every pool builds against it, with no
+  per-pool merge. For crates, "one package, one version" means one version
+  per crate per semver-compatible line: cargo links several major lines of
+  one crate into one binary, and the ecosystem relies on that during major
+  migrations, so one version per crate name would make ordinary crate
+  combinations unsatisfiable. Conflicting exact pins fail the build. Needs
+  its own session: DEP-3/DEP-8 wording in mim's model, the solve in mim or
+  the build hook, removal of the compiler's lock merge.
 - **A native type form does not bring in the file that defines the type.**
   [reproduced, 0.109.0; C++ in lib/biolib FINDINGS F7, Rust in rnaseq R26]
   Gap in NATIVE-3: it says the user defines the struct and links it with
