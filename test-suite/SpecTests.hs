@@ -34,6 +34,7 @@ specTests =
     , localOption (mkTimeout 2000000) newtTests
     , localOption (mkTimeout 5000000) dimTests
     , localOption (mkTimeout 2000000) patTests
+    , localOption (mkTimeout 2000000) lexTests
     , localOption (mkTimeout 2000000) ifaceTests
     , localOption (mkTimeout 20000000) annTests
     , modelCheck
@@ -995,6 +996,44 @@ patTests =
         f :: Vector 2 Int -> Int
         f | [x, y] = y
           | _ = 0
+        |]
+    ]
+
+lexTests :: TestTree
+lexTests =
+  testGroup
+    "LEX"
+    [ accept
+        "spec-lex-4-1"
+        [r|
+        module main (a, b, c, d, e)
+        effect IO
+        record R where
+          on :: Bool
+          n :: Int
+        a :: Int -> <IO> R
+        a x = do
+          {on = True, n = x}
+        b :: Int -> <IO> R
+        b x = do {on = False, n = x}
+        c :: Bool -> <IO> R
+        c t = do
+          ? t = do
+              {on = False, n = 0}
+          : do
+              {on = True, n = 1}
+        d :: Int -> <IO> Int
+        d x = do { let y = x; y }
+        e :: Int -> <IO> R
+        e x = do { let y = x; {on = True, n = y} }
+        |]
+    , reject
+        "spec-lex-4-2"
+        [r|
+        module main (d)
+        effect IO
+        d :: Int -> <IO> Int
+        d x = do { y = x; y }
         |]
     ]
 

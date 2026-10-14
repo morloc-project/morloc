@@ -1,14 +1,18 @@
 # Syntax
 
-- **A `do` block whose first statement is a record literal does not
-  parse.** [reproduced, 0.109.0] Spec gap in LEX-4: `{` directly after
-  `do` always opens an explicit-brace block, so `f s = do` followed on the
-  next line by `{on = False, n = 0}` (or `do {on = False}` on one line)
-  fails "unexpected '='", while the grammar's `do_stmt` admits any
-  expression. Cause: Frontend/Lexer.hs `startLayoutCtx` takes any
-  `TokLBrace` after a layout keyword as explicit. Proposed rule, needs a
-  ruling: after `do` (not `where` or `let`), `{` followed by a lowercase
-  name and `=` (not `==`) begins a record literal in a layout block; no
-  statement can begin with `name =`, so no legal program changes meaning.
-  Workaround: move the literal into a function, or put a statement first.
-  Repro: /work/plans/rnaseq-bugs/rparse/b.loc.
+- **A block opened mid-line is closed only by `)`, `]` or `}`.** [reproduced]
+  Violates LEX-4 (a block is delimited by indentation). Frontend/Lexer.hs
+  `indentCheck` has no counterpart of Haskell's parse-error(t) rule, so a
+  `do` block opened in the middle of a line is not closed by a `,`, `;`,
+  `:` or `where` later on that line, which belongs to an enclosing
+  construct. Rejected: `(do bump x, 1)` at ','; `? x == 0 = do bump 0 : do
+  bump x` at ':'; `do { k <- bump x; r <- do bump k; r }` at the second ';';
+  `t x = do bump x where ...` at 'where'; and the same with a record literal
+  (`(do {on = True, n = x}, 1)`). Writing each block on its own lines works.
+  Open: close blocks opened on the current line when one of these
+  separators arrives and an enclosing context can take it.
+- **A binding without `let` in an explicit `do` block is reported as a
+  record.** [reproduced] `do { y = 1; y }` now fails "expected one of: '}',
+  ','" at the ';', since after `do` a `{` followed by `name =` opens a
+  record literal (LEX-4); the message no longer points at the missing
+  `let`.

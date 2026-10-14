@@ -29,12 +29,15 @@ class instance effect escapable infixl infixr infix match let in do` and the
 literal words `True False Null Inf NaN` cannot be used as names.
 
 ### LEX-4 Blocks are delimited by indentation or by explicit braces
-Intent: proposed
+Intent: ruled 2026-10-14
+Tests: spec-lex-4-1, spec-lex-4-2
 Code: unaudited
 
 The bindings after `where`, `let` and `do` form a block delimited by
 indentation, or by `{` and `}` with `;` separators when `{` directly follows
-the keyword.
+the keyword. After `do`, a `{` followed by a lowercase name and `=` begins a
+record literal, the first statement of an indented block, since no
+statement begins with `name =`.
 
 ### LEX-5 Whitespace around `@` and `-` changes the token
 Intent: proposed
