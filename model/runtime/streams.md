@@ -326,9 +326,9 @@ before it serves, keeps, releases or drops any of its blocks: at its next
 claim, at a cursor reset, and before it unmaps its file. Pages a reader
 drops lie before the end of its claim, so never under a running job. A
 block whose batch the pool decoded in place (SLOT-25) is the caller's
-alone once the decoder returns; while the slot decodes ahead it keeps up
-to four such blocks, counted in the bound, as landings for later passes
-instead of releasing them, and releases them when its claims stop
+alone once the decoder returns; while the slot decodes ahead it keeps one
+such block, counted in the bound, as the landing of a later pass instead
+of releasing it, and releases it when its claims stop
 following one another, at a cursor reset and when it is dropped. A kept
 block lands only a batch within an eighth (at least 64 KiB) of its size,
 and the bytes past the batch are cleared before it is used, so no earlier

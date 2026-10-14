@@ -4190,7 +4190,7 @@ fn next_file_subpacket(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
 const AHEAD_MAX_SUBPACKETS: usize = 64;
 const AHEAD_FRAMES_PER_WORKER: usize = 2;
 const AHEAD_PASS_BYTES: u64 = 8 << 20;
-const AHEAD_MAX_SPARES: usize = 4;
+const AHEAD_MAX_SPARES: usize = 1;
 
 /// The source of the sub-packet this slot has claimed at `off`. A
 /// compressed one comes from the sub-packets decoded ahead, or is decoded
