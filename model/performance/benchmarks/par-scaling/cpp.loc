@@ -1,0 +1,6 @@
+module main (seqMap, parMap)
+
+import parallel.bench
+import parallel-cpp
+
+source Cpp from "benchcosts.hpp" ("spin", "spinKeep", "spinList", "makeStr", "strCost")

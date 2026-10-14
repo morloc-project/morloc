@@ -14,8 +14,9 @@ correctness, test-first, comments, ASCII-only). Repo-specific rules follow.
 
 - Performance is critical
   - Morloc programs may run for days or nanoseconds
-  - All between process communication must be as fast as possible (no more than
-    a few microseconds), and yet the processes must accommodate very large
+  - All between process communication must be as fast as possible (a
+    cross-language round trip targets about 20 us; the floor is about 13 us,
+    see model/performance/cross-language.md XL-1), and yet the processes must accommodate very large
     packets and programs that run for a very long time. 
 
 ## Checking code

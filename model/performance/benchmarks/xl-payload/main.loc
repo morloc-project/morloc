@@ -1,0 +1,86 @@
+module main (realsPyPy, realsPyCpp, realsPyR, realsPyRs, realsCppPy, realsCppCpp, realsCppR, realsCppRs, realsRPy, realsRCpp, realsRR, realsRRs, realsRsPy, realsRsCpp, realsRsR, realsRsRs, strPyPy, strPyCpp, strPyR, strPyRs, strCppPy, strCppCpp, strCppR, strCppRs, strRPy, strRCpp, strRR, strRRs, strRsPy, strRsCpp, strRsR, strRsRs, strsPyPy, strsPyCpp, strsPyR, strsPyRs, strsCppPy, strsCppCpp, strsCppR, strsCppRs, strsRPy, strsRCpp, strsRR, strsRRs, strsRsPy, strsRsCpp, strsRsR, strsRsRs)
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+source Py from "f.py" ("mk_reals" as mkRealsPy, "len_reals" as lenRealsPy, "mk_str" as mkStrPy, "len_str" as lenStrPy, "mk_strs" as mkStrsPy, "len_strs" as lenStrsPy)
+source Cpp from "f.hpp" ("mk_reals" as mkRealsCpp, "len_reals" as lenRealsCpp, "mk_str" as mkStrCpp, "len_str" as lenStrCpp, "mk_strs" as mkStrsCpp, "len_strs" as lenStrsCpp)
+source R from "f.R" ("mk_reals" as mkRealsR, "len_reals" as lenRealsR, "mk_str" as mkStrR, "len_str" as lenStrR, "mk_strs" as mkStrsR, "len_strs" as lenStrsR)
+source Rust from "f.rs" ("mk_reals" as mkRealsRs, "len_reals" as lenRealsRs, "mk_str" as mkStrRs, "len_str" as lenStrRs, "mk_strs" as mkStrsRs, "len_strs" as lenStrsRs)
+
+mkRealsPy :: I64 -> [Real]
+lenRealsPy :: [Real] -> I64
+mkStrPy :: I64 -> Str
+lenStrPy :: Str -> I64
+mkStrsPy :: I64 -> [Str]
+lenStrsPy :: [Str] -> I64
+mkRealsCpp :: I64 -> [Real]
+lenRealsCpp :: [Real] -> I64
+mkStrCpp :: I64 -> Str
+lenStrCpp :: Str -> I64
+mkStrsCpp :: I64 -> [Str]
+lenStrsCpp :: [Str] -> I64
+mkRealsR :: I64 -> [Real]
+lenRealsR :: [Real] -> I64
+mkStrR :: I64 -> Str
+lenStrR :: Str -> I64
+mkStrsR :: I64 -> [Str]
+lenStrsR :: [Str] -> I64
+mkRealsRs :: I64 -> [Real]
+lenRealsRs :: [Real] -> I64
+mkStrRs :: I64 -> Str
+lenStrRs :: Str -> I64
+mkStrsRs :: I64 -> [Str]
+lenStrsRs :: [Str] -> I64
+
+-- <kind><From><To> n: build a value of size n in <From>, measure it in <To>.
+realsPyPy n = lenRealsPy (mkRealsPy n)
+realsPyCpp n = lenRealsCpp (mkRealsPy n)
+realsPyR n = lenRealsR (mkRealsPy n)
+realsPyRs n = lenRealsRs (mkRealsPy n)
+realsCppPy n = lenRealsPy (mkRealsCpp n)
+realsCppCpp n = lenRealsCpp (mkRealsCpp n)
+realsCppR n = lenRealsR (mkRealsCpp n)
+realsCppRs n = lenRealsRs (mkRealsCpp n)
+realsRPy n = lenRealsPy (mkRealsR n)
+realsRCpp n = lenRealsCpp (mkRealsR n)
+realsRR n = lenRealsR (mkRealsR n)
+realsRRs n = lenRealsRs (mkRealsR n)
+realsRsPy n = lenRealsPy (mkRealsRs n)
+realsRsCpp n = lenRealsCpp (mkRealsRs n)
+realsRsR n = lenRealsR (mkRealsRs n)
+realsRsRs n = lenRealsRs (mkRealsRs n)
+strPyPy n = lenStrPy (mkStrPy n)
+strPyCpp n = lenStrCpp (mkStrPy n)
+strPyR n = lenStrR (mkStrPy n)
+strPyRs n = lenStrRs (mkStrPy n)
+strCppPy n = lenStrPy (mkStrCpp n)
+strCppCpp n = lenStrCpp (mkStrCpp n)
+strCppR n = lenStrR (mkStrCpp n)
+strCppRs n = lenStrRs (mkStrCpp n)
+strRPy n = lenStrPy (mkStrR n)
+strRCpp n = lenStrCpp (mkStrR n)
+strRR n = lenStrR (mkStrR n)
+strRRs n = lenStrRs (mkStrR n)
+strRsPy n = lenStrPy (mkStrRs n)
+strRsCpp n = lenStrCpp (mkStrRs n)
+strRsR n = lenStrR (mkStrRs n)
+strRsRs n = lenStrRs (mkStrRs n)
+strsPyPy n = lenStrsPy (mkStrsPy n)
+strsPyCpp n = lenStrsCpp (mkStrsPy n)
+strsPyR n = lenStrsR (mkStrsPy n)
+strsPyRs n = lenStrsRs (mkStrsPy n)
+strsCppPy n = lenStrsPy (mkStrsCpp n)
+strsCppCpp n = lenStrsCpp (mkStrsCpp n)
+strsCppR n = lenStrsR (mkStrsCpp n)
+strsCppRs n = lenStrsRs (mkStrsCpp n)
+strsRPy n = lenStrsPy (mkStrsR n)
+strsRCpp n = lenStrsCpp (mkStrsR n)
+strsRR n = lenStrsR (mkStrsR n)
+strsRRs n = lenStrsRs (mkStrsR n)
+strsRsPy n = lenStrsPy (mkStrsRs n)
+strsRsCpp n = lenStrsCpp (mkStrsRs n)
+strsRsR n = lenStrsR (mkStrsRs n)
+strsRsRs n = lenStrsRs (mkStrsRs n)

@@ -1,0 +1,23 @@
+module main (mkInts, mkU64s, mkReals, mkBools, mkStrs, lenInts, lenU64s, lenReals, lenBools, lenStrs)
+
+import root-cpp
+
+source Cpp from "f.hpp"
+  ( "mk_ints" as mkInts, "mk_u64s" as mkU64s, "mk_reals" as mkReals
+  , "mk_bools" as mkBools, "mk_strs" as mkStrs
+  , "len" as lenInts, "len" as lenU64s, "len" as lenReals, "len" as lenBools
+  , "len" as lenStrs
+  )
+
+-- `Int` is here only to measure its wire size (ENC-2); performance code
+-- uses a fixed-width type.
+mkInts :: I64 -> [Int]
+mkU64s :: I64 -> [U64]
+mkReals :: I64 -> [Real]
+mkBools :: I64 -> [Bool]
+mkStrs :: I64 -> [Str]
+lenInts :: [Int] -> I64
+lenU64s :: [U64] -> I64
+lenReals :: [Real] -> I64
+lenBools :: [Bool] -> I64
+lenStrs :: [Str] -> I64

@@ -1,0 +1,8 @@
+nexus
+*-build
+*build.tmp*
+pools
+__pycache__
+/par-scaling/cpp
+/par-scaling/py
+/par-scaling/rs

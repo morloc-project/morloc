@@ -12,13 +12,13 @@ it is solved, and a file when it is empty.
 - [cache.md](cache.md): stale results after a source edit, unverified keys, log and summary leaks into nested runs
 - [cli-directives.md](cli-directives.md): cross-language @fold, @render type check and -f, multi-output gaps
 - [mcp.md](mcp.md): streaming calls refused off the CLI, MCP stdio server in one-shot mode, front-end line cap checked after copying
-- [nexus-cli.md](nexus-cli.md): `daemon` mistakes an option's value for the program
+- [nexus-cli.md](nexus-cli.md): `daemon` mistakes an option's value for the program; `-f voidstar` output of a large value is labelled a shared-memory reference
 - [tables-tensors.md](tables-tensors.md): column type inference, NaN in JSON, tensor dims unchecked, table spec mismatches
 - [build-and-text.md](build-and-text.md): non-atomic build swap, stale help text and comments, dead code, morloc.h expression structs drifted from Rust; ABI version never gated, crate versions out of lockstep, mlcKind/morloc.h untested
 - [streams.md](streams.md): written streams: nexus stdout lock, open questions on deferred completion, dead openers, stdout placement, @tell, reopen after a daemon call; measured speedups (nested element append, stdin read-ahead)
 - [alignment.md](alignment.md): 64-byte numeric array alignment not delivered on every path; guarantee or preference, and for which sizes (deferred)
 - [kept-connections.md](kept-connections.md): kept caller connections into Python and R fork pools; affinity deadlock, options (deferred)
-- [flaky-tests.md](flaky-tests.md): intermittent test failures with no known cause
+- [flaky-tests.md](flaky-tests.md): intermittent test failures with no known cause; the integration suite deletes every morloc run's shm and tmp dirs; a nexus waits forever when its run dir is deleted
 - [pools-and-ipc.md](pools-and-ipc.md): pool readiness latency, per-pid sweep race, R close-on-exec, C++ path truncation
 - [remote-dispatch.md](remote-dispatch.md): SLURM jobs: inherited parent environment, endless poll on empty sacct, job directories left by a killed parent
 - [rust-closures-threads.md](rust-closures-threads.md): function values on callback threads: host panics end the pool, late calls unspecified, refcount contention, boxed direct closures; opaque capture front-end error

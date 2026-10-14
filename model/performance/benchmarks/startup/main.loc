@@ -1,0 +1,23 @@
+module main (py, cpp, r, rs, pyCpp, all4)
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+source Py from "f.py" ("ident" as idPy)
+source Cpp from "f.hpp" ("ident" as idCpp)
+source R from "f.R" ("ident" as idR)
+source Rust from "f.rs" ("ident" as idRs)
+
+idPy :: I64 -> I64
+idCpp :: I64 -> I64
+idR :: I64 -> I64
+idRs :: I64 -> I64
+
+py x = idPy x
+cpp x = idCpp x
+r x = idR x
+rs x = idRs x
+pyCpp x = idCpp (idPy x)
+all4 x = idRs (idR (idCpp (idPy x)))

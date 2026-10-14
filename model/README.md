@@ -10,6 +10,9 @@ The specification of morloc, as three specs held to one standard:
 - `runtime/`: processes, threads, locks, shared memory, fork, the daemon,
   streams and panics in the built program. Its PlusCal models are in
   `runtime/tla/`.
+- `performance/`: what operations cost, as models with parameters fitted by
+  the benchmarks in `performance/benchmarks/`. Its own README gives the
+  item fields and measurement rules.
 
 The spec states intent. The code is measured against it, not the reverse.
 
@@ -55,6 +58,7 @@ Every rule is one item with a stable ID:
 | Spec | Prefixes |
 |---|---|
 | runtime | FORK SHM DAEMON SLOT STATE INIT PANIC NET |
+| performance | START XL ENC ZIP PAR TYCK BUILD |
 | language | see `language/README.md` |
 | compiler | see `compiler/README.md` |
 
@@ -109,3 +113,5 @@ tests. It fails when:
 
 It applies the full check to `language/` and `compiler/`. Until the runtime
 items migrate to this format, it reads `runtime/` only for IDs and prefixes.
+It reads `performance/` only for IDs and prefixes; its goals, limits and
+run-to-run regressions are checked by `performance/benchmarks/compare.py`.

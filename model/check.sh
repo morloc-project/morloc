@@ -25,7 +25,7 @@ cited = {}
 def spec_files(sub):
     base = os.path.join(model, sub)
     for d, dirs, files in os.walk(base):
-        dirs[:] = sorted(x for x in dirs if x != "tla")
+        dirs[:] = sorted(x for x in dirs if x not in ("tla", "benchmarks"))
         for fn in sorted(files):
             if fn.endswith(".md") and fn != "README.md":
                 yield os.path.relpath(os.path.join(d, fn), model)
@@ -49,7 +49,7 @@ def define(rel, n, prefix, num):
                    "where": f"{rel}:{n}", "full": False}
     return item
 
-for rel in spec_files("runtime"):
+for rel in [*spec_files("runtime"), *spec_files("performance")]:
     for n, line in enumerate(read(rel), 1):
         m = re.match(r"### ([A-Z]+)-(\d+) ", line)
         if m:

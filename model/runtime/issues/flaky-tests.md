@@ -34,3 +34,24 @@
   (morloc-runtime/src/fork_pool.rs ~l.626); five isolated reruns and two
   full runtime runs passed. Which assertion failed (both pings, or the
   coordinator's exit status within 10 s) was not captured.
+- **A wall-clock typecheck test times out under load.** [reproduced once
+  2026-10-14] `long non-tuple composition chain stays linear`
+  (morloc-test) has a 1 s timeout; under `-j 6` it hit TIMEOUT at 1.05 s,
+  while alone it takes 0.07 s (3 runs). A wall-clock bound in a parallel
+  suite measures the machine; counting steps would test linearity.
+- **The integration suite deletes every morloc run's resources on the
+  machine.** [reproduced 2026-10-14] Gap: no item says what a test may
+  remove. `cleanupMorlocResources`
+  (test-suite/integration/Morloc/Test/Common.hs:456) runs `rm -f
+  /dev/shm/mlc-*` and `rm -rf /tmp/morloc.*` at the start of each stress
+  and shm test. The suite defaults to one thread for this reason, but a
+  bare `stack test` given `--ta '-j 6'` passes it to both test suites
+  and overrides that: the stress groups delete each other's live pool
+  directories, every group reports leaks, and a `cpp-py` nexus (`run ...
+  foo 2`) sleeps forever with its pools alive and idle. The same deletion
+  hits any morloc program the user runs during the suite. Scope the
+  cleanup and the counts to the test's own run (its pids or workDir).
+- **A nexus whose run directory is deleted waits forever.** [observed
+  once, under the deletion above] The nexus sat in `hrtimer_nanosleep`
+  for 55 minutes while its Python pools polled. Which wait it was is not
+  known; no item bounds it, and no peer died.
