@@ -18,8 +18,12 @@
 - [read] schema.rs:1141-1147, 1230-1233: `a:0` means "any length".
 - [read] voidstar.rs:381-392: rebase turns an empty array's null into
   `shift - 1`; empty arrays lose a canonical form.
-- [speculative] data/lang/cpp/cppmorloc.hpp:1393: bulk read checks element
-  width but not numeric kind.
+- **Python and R quiet signalling NaNs in `F32` scalars.** [read] Breaks
+  WIRE-7. Both hold an `F32` scalar as a double: pymorloc.c's reader
+  `PyFloat_FromDouble(*(float*)data)` and the R reader widen with a C cast,
+  which sets the quiet bit on x86, and `morloc_f32_from_f64` narrows the
+  same way. Vectors are bulk copies and keep the bits. Fix: move NaN
+  payloads between widths by bits (f32 payload << 29) in both directions.
 - [read, unreachable] nested tables handled three ways (voidstar.rs:476,
   1017, 1096); TAB-4 says tables may nest, the compiler rejects it.
 - [reproduced] dangling `^` back-reference through an alias:

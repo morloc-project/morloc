@@ -638,7 +638,9 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
             case MORLOC_UINT32:  *(uint32_t*)dest = check_range_narrow<uint32_t>(data, "U32"); break;
             case MORLOC_UINT64:  *(uint64_t*)dest = check_range_narrow<uint64_t>(data, "U64"); break;
             case MORLOC_FLOAT32:
-                if (morloc_f32_from_f64(static_cast<double>(data), (float*)dest) != 0) {
+                if constexpr (std::is_same_v<T, float>) {
+                    *(float*)dest = data;
+                } else if (morloc_f32_from_f64(static_cast<double>(data), (float*)dest) != 0) {
                     throw std::overflow_error("value out of range for F32");
                 }
                 break;
@@ -1386,12 +1388,16 @@ struct MlcNode {
                 }
                 const char* start = (const char*)resolve_array_cpp(array->data, array->size, elem->width, w.space);
                 if constexpr (std::is_arithmetic_v<ElemT> && !std::is_same_v<ElemT, bool>) {
-                    // Fixed-width primitives whose C++ width matches the
-                    // wire width are one bulk copy; bool is excluded
-                    // because a wire byte outside {0,1} must be normalised.
-                    if (elem->fixed_width && sizeof(ElemT) == elem->width) {
-                        const ElemT* first = (const ElemT*)start;
-                        out->assign(first, first + array->size);
+                    // bool is excluded because a wire byte outside {0,1}
+                    // must be normalised.
+                    if (vector_is_bulk_copyable<ElemT>(elem)) {
+                        if (reinterpret_cast<uintptr_t>(start) % alignof(ElemT) == 0) {
+                            const ElemT* first = (const ElemT*)start;
+                            out->assign(first, first + array->size);
+                        } else {
+                            out->resize(array->size);
+                            std::memcpy(out->data(), start, array->size * sizeof(ElemT));
+                        }
                         return;
                     }
                 }

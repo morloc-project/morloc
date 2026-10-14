@@ -48,3 +48,23 @@ Code: unaudited
 A function value passed to another language is called there as a native
 callable; each call runs the function in the language where it was built
 (see `EFF`).
+
+### WIRE-7 A float crosses bit for bit, NaN payloads included
+Intent: ruled 2026-10-14
+Code: deviates runtime/issues/value-encoding.md (Python and R `F32` scalars)
+
+An `F32` or `F64` value, alone or in a vector, arrives with the bits it was
+sent with when the receiving type has the same width, signalling NaNs
+included. A crossing between widths converts to the nearest value (NUM-4).
+
+### WIRE-8 A `Bool` byte is not validated on read
+Intent: ruled 2026-10-14
+Code: unaudited
+
+Writers write only 0 or 1. A reader may meet another byte only in corrupt
+data, and pays nothing to detect it: the value it reads is defined, but
+language-specific (C++ and Rust read it as false), never undefined
+behaviour.
+
+Why: a check on every `Bool` costs every program; corrupt data is caught by
+checks made for it, not by a coincidental `Bool`.

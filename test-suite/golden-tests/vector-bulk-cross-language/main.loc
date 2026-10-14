@@ -1,0 +1,80 @@
+-- Primitive vectors crossing between Rust and C++ pools, in both
+-- directions, long enough that each side's bulk copy is the path taken
+-- (model/performance/issues/rust-vector-encode.md). Each check sums or
+-- counts on the receiving side with position weights, so a byte lost,
+-- reordered or misread in either encoder or decoder changes the value.
+-- Floats cross bit for bit, signalling NaNs included, alone and in
+-- vectors (WIRE-7): the receiver prints the bits it got.
+
+module main
+  ( u8RustToCpp, u8CppToRust
+  , i32RustToCpp, i32CppToRust
+  , f32RustToCpp, f32CppToRust
+  , realRustToCpp, realCppToRust
+  , boolRustToCpp, boolCppToRust
+  , nanRustToCpp, nanCppToRust, nanVecRustToCpp, nanVecCppToRust
+  )
+
+import root-cpp
+import root-rust
+
+mkU8Rust :: U64 -> [U8]
+mkI32Rust :: U64 -> [I32]
+mkF32Rust :: U64 -> [F32]
+mkRealRust :: U64 -> [Real]
+mkBoolRust :: U64 -> [Bool]
+sumU8Rust :: [U8] -> U64
+sumI32Rust :: [I32] -> I64
+sumF32Rust :: [F32] -> Real
+sumRealRust :: [Real] -> Real
+countBoolRust :: [Bool] -> U64
+snanRust :: U64 -> F32
+snanVecRust :: U64 -> [F32]
+bitsRust :: F32 -> U32
+bitsVecRust :: [F32] -> [U32]
+source Rust from "h.rs"
+  ( "mk_u8" as mkU8Rust, "mk_i32" as mkI32Rust, "mk_f32" as mkF32Rust
+  , "mk_real" as mkRealRust, "mk_bool" as mkBoolRust
+  , "sum_u8" as sumU8Rust, "sum_i32" as sumI32Rust, "sum_f32" as sumF32Rust
+  , "sum_real" as sumRealRust, "count_bool" as countBoolRust
+  , "snan" as snanRust, "snan_vec" as snanVecRust
+  , "bits" as bitsRust, "bits_vec" as bitsVecRust
+  )
+
+mkU8Cpp :: U64 -> [U8]
+mkI32Cpp :: U64 -> [I32]
+mkF32Cpp :: U64 -> [F32]
+mkRealCpp :: U64 -> [Real]
+mkBoolCpp :: U64 -> [Bool]
+sumU8Cpp :: [U8] -> U64
+sumI32Cpp :: [I32] -> I64
+sumF32Cpp :: [F32] -> Real
+sumRealCpp :: [Real] -> Real
+countBoolCpp :: [Bool] -> U64
+snanCpp :: U64 -> F32
+snanVecCpp :: U64 -> [F32]
+bitsCpp :: F32 -> U32
+bitsVecCpp :: [F32] -> [U32]
+source Cpp from "h.hpp"
+  ( "mk_u8" as mkU8Cpp, "mk_i32" as mkI32Cpp, "mk_f32" as mkF32Cpp
+  , "mk_real" as mkRealCpp, "mk_bool" as mkBoolCpp
+  , "sum_u8" as sumU8Cpp, "sum_i32" as sumI32Cpp, "sum_f32" as sumF32Cpp
+  , "sum_real" as sumRealCpp, "count_bool" as countBoolCpp
+  , "snan" as snanCpp, "snan_vec" as snanVecCpp
+  , "bits" as bitsCpp, "bits_vec" as bitsVecCpp
+  )
+
+u8RustToCpp n = sumU8Cpp (mkU8Rust n)
+u8CppToRust n = sumU8Rust (mkU8Cpp n)
+i32RustToCpp n = sumI32Cpp (mkI32Rust n)
+i32CppToRust n = sumI32Rust (mkI32Cpp n)
+f32RustToCpp n = sumF32Cpp (mkF32Rust n)
+f32CppToRust n = sumF32Rust (mkF32Cpp n)
+realRustToCpp n = sumRealCpp (mkRealRust n)
+realCppToRust n = sumRealRust (mkRealCpp n)
+boolRustToCpp n = countBoolCpp (mkBoolRust n)
+boolCppToRust n = countBoolRust (mkBoolCpp n)
+nanRustToCpp n = bitsCpp (snanRust n)
+nanCppToRust n = bitsRust (snanCpp n)
+nanVecRustToCpp n = bitsVecCpp (snanVecRust n)
+nanVecCppToRust n = bitsVecRust (snanVecCpp n)

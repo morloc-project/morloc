@@ -806,6 +806,7 @@ impl Drop for RecurScope {
 /// Normalize a possibly-Recur schema to its named declaration. Non-Recur
 /// schemas pass through unchanged (so callers can use it unconditionally at
 /// the top of a walk). Panics (compiler-bug abort) on an unresolvable back-ref.
+#[inline]
 pub fn resolve_recur(schema: &Schema) -> &Schema {
     if schema.serial_type != SerialType::Recur {
         return schema;
@@ -1225,6 +1226,19 @@ pub trait ToVoidstar {
     fn arrow_export(&self) -> Option<(FFI_ArrowArray, FFI_ArrowSchema)> {
         None
     }
+    /// Write `xs` as an array's element data in one copy. Only a scalar
+    /// whose bytes are exactly `elem`'s (same kind, same width) does so;
+    /// false leaves the caller to write element by element.
+    ///
+    /// # Safety
+    /// `dst` must have room for `xs.len() * elem.width` bytes.
+    unsafe fn write_array(xs: &[Self], elem: &Schema, dst: *mut u8) -> bool
+    where
+        Self: Sized,
+    {
+        let _ = (xs, elem, dst);
+        false
+    }
 }
 pub trait FromVoidstar: Sized {
     /// A scalar: read directly, never given a frame.
@@ -1263,6 +1277,16 @@ pub trait FromVoidstar: Sized {
     /// `array` and `schema` must be valid, unreleased structs.
     unsafe fn arrow_import(array: FFI_ArrowArray, schema: &FFI_ArrowSchema) -> Option<Self> {
         let _ = (array, schema);
+        None
+    }
+    /// Read `n` elements of array data in one pass, under the rule of
+    /// `ToVoidstar::write_array`; None leaves the caller to read element
+    /// by element.
+    ///
+    /// # Safety
+    /// `src` must point at `n * elem.width` readable bytes, at any alignment.
+    unsafe fn read_array(elem: &Schema, src: *const u8, n: usize) -> Option<Vec<Self>> {
+        let _ = (elem, src, n);
         None
     }
 }
@@ -1863,8 +1887,30 @@ fn handle_kind(t: SerialType) -> u8 {
     }
 }
 
+/// One copy of `xs`' bytes to `dst`. Valid for any `T` all of whose bytes
+/// are its wire form.
+#[inline]
+unsafe fn copy_array_out<T>(xs: &[T], dst: *mut u8) {
+    core::ptr::copy_nonoverlapping(xs.as_ptr() as *const u8, dst, std::mem::size_of_val(xs));
+}
+
+/// One copy of `n` `T`s from a possibly misaligned `src`. Valid for any `T`
+/// for which every bit pattern is a value.
+#[inline]
+unsafe fn copy_array_in<T>(src: *const u8, n: usize) -> Vec<T> {
+    let mut v = Vec::<T>::with_capacity(n);
+    core::ptr::copy_nonoverlapping(src, v.as_mut_ptr() as *mut u8, n * std::mem::size_of::<T>());
+    v.set_len(n);
+    v
+}
+
+#[inline]
+fn is_own_kind<T>(elem: &Schema, kind: SerialType) -> bool {
+    elem.serial_type == kind && elem.width == std::mem::size_of::<T>()
+}
+
 macro_rules! int_impl {
-    ($t:ty) => {
+    ($t:ty, $kind:ident) => {
         impl ToVoidstar for $t {
             const IS_LEAF: bool = true;
             #[inline]
@@ -1902,6 +1948,14 @@ macro_rules! int_impl {
                     | SerialType::Enum => write_int(schema, dest, *self as i128),
                 }
             }
+            #[inline]
+            unsafe fn write_array(xs: &[Self], elem: &Schema, dst: *mut u8) -> bool {
+                if !is_own_kind::<$t>(elem, SerialType::$kind) {
+                    return false;
+                }
+                copy_array_out(xs, dst);
+                true
+            }
         }
         impl FromVoidstar for $t {
             const IS_LEAF: bool = true;
@@ -1927,11 +1981,15 @@ macro_rules! int_impl {
                     SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant | SerialType::Enum => read_int(schema, data) as $t,
                 }
             }
+            #[inline]
+            unsafe fn read_array(elem: &Schema, src: *const u8, n: usize) -> Option<Vec<Self>> {
+                is_own_kind::<$t>(elem, SerialType::$kind).then(|| copy_array_in(src, n))
+            }
         }
     };
 }
-int_impl!(i8); int_impl!(i16); int_impl!(i32); int_impl!(i64);
-int_impl!(u8); int_impl!(u16); int_impl!(u32); int_impl!(u64);
+int_impl!(i8, Sint8); int_impl!(i16, Sint16); int_impl!(i32, Sint32); int_impl!(i64, Sint64);
+int_impl!(u8, Uint8); int_impl!(u16, Uint16); int_impl!(u32, Uint32); int_impl!(u64, Uint64);
 
 // Write `v` at the schema's own width, which may be narrower or wider than
 // the Rust integer it came from; a value the slot cannot hold is an error,
@@ -1989,7 +2047,7 @@ unsafe fn read_int(schema: &Schema, data: *const u8) -> i128 {
 }
 
 macro_rules! float_impl {
-    ($t:ty) => {
+    ($t:ty, $kind:ident, $to_f32:expr) => {
         impl ToVoidstar for $t {
             const IS_LEAF: bool = true;
             #[inline]
@@ -1998,11 +2056,7 @@ macro_rules! float_impl {
             unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, schema: &Schema) {
                 // At the schema's own width, which may differ from `$t`'s.
                 match schema.serial_type {
-                    SerialType::Float32 => core::ptr::write_unaligned(
-                        dest as *mut f32,
-                        morloc_runtime_types::width::f32_nearest(f64::from(*self))
-                            .unwrap_or_else(|e| morloc_throw(e.to_string())),
-                    ),
+                    SerialType::Float32 => core::ptr::write_unaligned(dest as *mut f32, $to_f32(*self)),
                     SerialType::Float64 => core::ptr::write_unaligned(dest as *mut f64, *self as f64),
                     SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16
                     | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16
@@ -2013,6 +2067,14 @@ macro_rules! float_impl {
                         "cannot write a float where the schema holds {:?}", schema.serial_type
                     )),
                 }
+            }
+            #[inline]
+            unsafe fn write_array(xs: &[Self], elem: &Schema, dst: *mut u8) -> bool {
+                if !is_own_kind::<$t>(elem, SerialType::$kind) {
+                    return false;
+                }
+                copy_array_out(xs, dst);
+                true
             }
         }
         impl FromVoidstar for $t {
@@ -2032,10 +2094,16 @@ macro_rules! float_impl {
                     )),
                 }
             }
+            #[inline]
+            unsafe fn read_array(elem: &Schema, src: *const u8, n: usize) -> Option<Vec<Self>> {
+                is_own_kind::<$t>(elem, SerialType::$kind).then(|| copy_array_in(src, n))
+            }
         }
     };
 }
-float_impl!(f32); float_impl!(f64);
+float_impl!(f32, Float32, |x: f32| x);
+float_impl!(f64, Float64, |x: f64| morloc_runtime_types::width::f32_nearest(x)
+    .unwrap_or_else(|e| morloc_throw(e.to_string())));
 
 impl ToVoidstar for bool {
     const IS_LEAF: bool = true;
@@ -2045,12 +2113,25 @@ impl ToVoidstar for bool {
     unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {
         core::ptr::write_unaligned(dest, if *self { 1u8 } else { 0u8 });
     }
+    #[inline]
+    unsafe fn write_array(xs: &[Self], elem: &Schema, dst: *mut u8) -> bool {
+        if !is_own_kind::<bool>(elem, SerialType::Bool) {
+            return false;
+        }
+        copy_array_out(xs, dst);
+        true
+    }
 }
 impl FromVoidstar for bool {
     const IS_LEAF: bool = true;
     #[inline]
     unsafe fn read(_schema: &Schema, data: *const u8, _space: MorlocSpace) -> Self {
         core::ptr::read_unaligned(data) == 1
+    }
+    #[inline]
+    unsafe fn read_array(elem: &Schema, src: *const u8, n: usize) -> Option<Vec<Self>> {
+        is_own_kind::<bool>(elem, SerialType::Bool)
+            .then(|| core::slice::from_raw_parts(src, n).iter().map(|&b| b == 1).collect())
     }
 }
 
@@ -2106,16 +2187,31 @@ impl FromVoidstar for String {
 }
 
 // ---- sequences (Array wire form): Vec (List) and VecDeque (Deque) ----------
-// Both serialize identically -- a contiguous Array of elements written and read
-// one at a time (no bulk memcpy, so a VecDeque's ring buffer is fine); they
-// differ only in the container constructor and back-insert method. `$push` is
-// amortized O(1) for both, so neither adds a copy over the other.
+// Both serialize identically -- a contiguous Array of elements, copied in bulk
+// when the element type's `write_array`/`read_array` allows it and otherwise
+// written and read one at a time; they differ only in the container
+// constructor, back-insert method, and how the elements are seen as slices.
+// `$push` is amortized O(1) for both, so neither adds a copy over the other.
 //
 // In a framed walk a sequence is visited once per element: the step handles
 // element `idx` and re-pushes its own frame beneath the element's, so the
 // frame stack stays proportional to depth rather than to element count. A
 // framed read keeps the growing container on the value stack and moves each
 // finished element into it on the next visit.
+trait TwoSlices<T> {
+    fn two_slices(&self) -> (&[T], &[T]);
+}
+impl<T> TwoSlices<T> for Vec<T> {
+    fn two_slices(&self) -> (&[T], &[T]) {
+        (self.as_slice(), &[])
+    }
+}
+impl<T> TwoSlices<T> for VecDeque<T> {
+    fn two_slices(&self) -> (&[T], &[T]) {
+        self.as_slices()
+    }
+}
+
 macro_rules! seq_impl {
     ($container:ident, $push:ident) => {
 impl<T: ToVoidstar> ToVoidstar for $container<T> {
@@ -2124,7 +2220,7 @@ impl<T: ToVoidstar> ToVoidstar for $container<T> {
         if idx == 0 {
             // width slot + worst-case cursor alignment padding + element data
             w.total += (schema.width + (elem.array_data_alignment() - 1)) as isize;
-            if elem.is_primitive_numeric() {
+            if elem.is_primitive_numeric() || elem.serial_type == SerialType::Bool {
                 w.total += (self.len() * elem.width) as isize;
                 return;
             }
@@ -2157,6 +2253,10 @@ impl<T: ToVoidstar> ToVoidstar for $container<T> {
             *w.cursor = start.add(n * width);
             core::ptr::write_unaligned(dest as *mut Array, Array { size: n, data: to_rel(start) });
             if T::IS_LEAF || w.flat(elem) {
+                let (a, b) = self.two_slices();
+                if T::write_array(a, elem, start) && T::write_array(b, elem, start.add(a.len() * width)) {
+                    return;
+                }
                 for (i, x) in self.iter().enumerate() {
                     w.child(x, start.add(i * width), elem);
                 }
@@ -2201,6 +2301,9 @@ impl<T: FromVoidstar> FromVoidstar for $container<T> {
         let elem = resolve_recur(&schema.parameters[0]);
         let start = resolve_array(a.data, a.size, elem.width, w.space);
         let width = elem.width;
+        if let Some(v) = T::read_array(elem, start, a.size) {
+            return $container::from(v);
+        }
         let mut out = $container::with_capacity(a.size);
         for i in 0..a.size {
             out.$push(w.child_read::<T>(elem, start.add(i * width)));
@@ -4274,6 +4377,212 @@ mod tests {
             assert_eq!(roundtrip::<Vec<String>>("as", &vs), vs);
             let vv = vec![vec![1i64, 2], vec![3], vec![]];
             assert_eq!(roundtrip::<Vec<Vec<i64>>>("aai8", &vv), vv);
+        }
+    }
+
+    unsafe fn try_roundtrip<T: ToVoidstar + FromVoidstar>(schema_str: &str, value: &T) -> Result<T, String> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| roundtrip(schema_str, value)))
+            .map_err(|e| e.downcast_ref::<MorlocThrow>().map(|t| t.0.clone()).unwrap_or_default())
+    }
+
+    /// Write `xs` as `schema_str` and return the element data the array
+    /// header points at, checking its alignment.
+    unsafe fn array_data<T: ToVoidstar>(schema_str: &str, xs: &T, align: usize) -> Vec<u8> {
+        let schema = parse_schema(schema_str).expect("parse schema");
+        let total = xs.shm_size(&schema).max(1);
+        let mut buf = vec![0u8; total + 64];
+        let base = buf.as_mut_ptr();
+        TEST_BASE.with(|b| b.set(Some(base as usize)));
+        let mut cursor = base.add(schema.width);
+        xs.write(base, &mut cursor, &schema);
+        TEST_BASE.with(|b| b.set(None));
+        let a = core::ptr::read_unaligned(base as *const Array);
+        if a.size == 0 {
+            return Vec::new();
+        }
+        let p = base.add(a.data as usize);
+        assert_eq!(p as usize % align, 0, "{schema_str}: element data misaligned");
+        assert!(p.add(a.size * schema.parameters[0].width) <= base.add(total), "{schema_str}: wrote past its size");
+        core::slice::from_raw_parts(p, a.size * schema.parameters[0].width).to_vec()
+    }
+
+    macro_rules! check_primitive_vectors {
+        ($t:ty, $schema:expr, $gen:expr) => {
+            for n in [0usize, 1, 63, 64, 65, 1 << 20] {
+                let xs: Vec<$t> = (0..n).map($gen).collect();
+                let bytes: Vec<u8> = xs.iter().flat_map(|x| x.to_le_bytes()).collect();
+                unsafe {
+                    assert_eq!(array_data($schema, &xs, 64), bytes, "{} n={n}", $schema);
+                    assert_eq!(roundtrip::<Vec<$t>>($schema, &xs), xs, "{} n={n}", $schema);
+                }
+            }
+        };
+    }
+
+    /// Primitive vectors under their own schema: 64-byte aligned element
+    /// data holding exactly the values' bytes, and a lossless round trip.
+    #[test]
+    fn primitive_vectors_under_their_own_schema() {
+        check_primitive_vectors!(u8, "au1", |i| i as u8);
+        check_primitive_vectors!(i8, "ai1", |i| (i as i8).wrapping_sub(100));
+        check_primitive_vectors!(u16, "au2", |i| (i * 7) as u16);
+        check_primitive_vectors!(i16, "ai2", |i| ((i * 7) as i16).wrapping_neg());
+        check_primitive_vectors!(u32, "au4", |i| (i as u32).wrapping_mul(2654435761));
+        check_primitive_vectors!(i32, "ai4", |i| (i as i32).wrapping_neg());
+        check_primitive_vectors!(u64, "au8", |i| (i as u64).wrapping_mul(0x9E3779B97F4A7C15));
+        check_primitive_vectors!(i64, "ai8", |i| -(i as i64) * 1_000_003);
+        check_primitive_vectors!(f32, "af4", |i| i as f32 * 0.5 - 3.0);
+        check_primitive_vectors!(f64, "af8", |i| i as f64 * 0.25 - 1e9);
+        for n in [0usize, 1, 63, 64, 65, 1 << 20] {
+            let xs: Vec<bool> = (0..n).map(|i| i % 3 == 0).collect();
+            let bytes: Vec<u8> = xs.iter().map(|&b| b as u8).collect();
+            unsafe {
+                assert_eq!(array_data("ab", &xs, 1), bytes, "ab n={n}");
+                if n > 0 {
+                    let mut buf = vec![0u8; xs.shm_size(&parse_schema("ab").unwrap()) + 64];
+                    let base = buf.as_mut_ptr();
+                    let start = align_up(base as usize, 64) as *mut u8;
+                    let s = parse_schema("ab").unwrap();
+                    TEST_BASE.with(|b| b.set(Some(start as usize)));
+                    let mut cursor = start.add(s.width);
+                    xs.write(start, &mut cursor, &s);
+                    TEST_BASE.with(|b| b.set(None));
+                    let a = core::ptr::read_unaligned(start as *const Array);
+                    assert_eq!(a.data as usize, s.width, "Bool data was padded: alignment is 1 on the wire");
+                }
+                assert_eq!(roundtrip::<Vec<bool>>("ab", &xs), xs, "ab n={n}");
+            }
+        }
+    }
+
+    /// The bulk hooks are taken exactly when the element schema is the
+    /// type's own kind and width. The bytes are the same either way, so
+    /// only this test notices a fall back to element-by-element copying.
+    #[test]
+    fn bulk_array_hooks_taken_only_for_own_kind_and_width() {
+        unsafe fn takes<T: ToVoidstar + FromVoidstar + Clone>(schema: &str, x: T) -> (bool, bool) {
+            let s = parse_schema(schema).unwrap();
+            let xs = vec![x; 3];
+            let mut dst = vec![0u8; 3 * s.width.max(16)];
+            let w = T::write_array(&xs, &s, dst.as_mut_ptr());
+            let r = T::read_array(&s, dst.as_ptr(), 3).is_some();
+            (w, r)
+        }
+        unsafe {
+            assert_eq!(takes("u1", 1u8), (true, true));
+            assert_eq!(takes("i1", 1i8), (true, true));
+            assert_eq!(takes("u2", 1u16), (true, true));
+            assert_eq!(takes("i4", 1i32), (true, true));
+            assert_eq!(takes("u8", 1u64), (true, true));
+            assert_eq!(takes("i8", 1i64), (true, true));
+            assert_eq!(takes("f4", 1f32), (true, true));
+            assert_eq!(takes("f8", 1f64), (true, true));
+            assert_eq!(takes("b", true), (true, true));
+            assert_eq!(takes("i1", 1u8), (false, false));
+            assert_eq!(takes("u1", 1i8), (false, false));
+            assert_eq!(takes("i4", 1i64), (false, false));
+            assert_eq!(takes("i8", 1i32), (false, false));
+            assert_eq!(takes("f4", 1f64), (false, false));
+            assert_eq!(takes("f4", 1u32), (false, false));
+            assert_eq!(takes("u4", 1f32), (false, false));
+            assert_eq!(takes("j", 1i64), (false, false));
+            assert_eq!(takes("u1", true), (false, false));
+            assert_eq!(takes("b", 1u8), (false, false));
+            assert_eq!(takes("u8", Some(1u64)), (false, false));
+        }
+    }
+
+    /// Off the bulk path, element-by-element range checks and conversions
+    /// still apply.
+    #[test]
+    fn mismatched_vectors_keep_their_checks() {
+        unsafe {
+            assert!(try_roundtrip::<Vec<u8>>("ai1", &vec![1, 200]).is_err(), "200 fit in an i8");
+            assert!(try_roundtrip::<Vec<i64>>("ai4", &vec![1, i64::from(i32::MAX) + 1]).is_err(), "fit in an i32");
+            assert_eq!(roundtrip::<Vec<i64>>("ai4", &vec![-5, 7]), vec![-5, 7]);
+            assert_eq!(roundtrip::<Vec<f64>>("af4", &vec![0.1, 2.5]), vec![0.1f32 as f64, 2.5]);
+            assert_eq!(array_data("aj", &vec![3i64, -4], 1).len(), 32, "Int slots are 16 bytes");
+            assert_eq!(roundtrip::<Vec<i64>>("aj", &vec![3, -4]), vec![3, -4]);
+            let f = parse_schema("af4").unwrap();
+            let xs = vec![1.5f32];
+            let total = xs.shm_size(&f) + 64;
+            let mut buf = vec![0u8; total];
+            let base = buf.as_mut_ptr();
+            TEST_BASE.with(|b| b.set(Some(base as usize)));
+            let mut cursor = base.add(f.width);
+            xs.write(base, &mut cursor, &f);
+            let r = std::panic::catch_unwind(|| <Vec<u32> as FromVoidstar>::read(&f, base, MorlocSpace::payload(base, total)));
+            TEST_BASE.with(|b| b.set(None));
+            assert!(r.is_err(), "a u32 vector read a float's bits");
+        }
+    }
+
+    /// A Bool byte other than 0 or 1 reads as false, element by element and
+    /// in bulk.
+    #[test]
+    fn bool_bytes_other_than_one_read_false() {
+        let s = parse_schema("b").unwrap();
+        let bytes = [0u8, 1, 2, 255];
+        let v = unsafe { <bool as FromVoidstar>::read_array(&s, bytes.as_ptr(), 4) }.unwrap();
+        assert_eq!(v, vec![false, true, false, false]);
+        let one = unsafe { <bool as FromVoidstar>::read(&s, [2u8].as_ptr(), MorlocSpace::SHM) };
+        assert!(!one);
+    }
+
+    /// The source of a bulk read need not be aligned for the element type.
+    #[test]
+    fn bulk_reads_accept_a_misaligned_source() {
+        let s = parse_schema("f8").unwrap();
+        let xs = [1.5f64, -2.0, 1e300];
+        let mut buf = vec![0u8; 8 * xs.len() + 1];
+        for (i, x) in xs.iter().enumerate() {
+            buf[1 + 8 * i..9 + 8 * i].copy_from_slice(&x.to_le_bytes());
+        }
+        let v = unsafe { <f64 as FromVoidstar>::read_array(&s, buf.as_ptr().add(1), xs.len()) }.unwrap();
+        assert_eq!(v, xs);
+    }
+
+    /// NaN payloads, signalling ones included, survive scalars and vectors
+    /// bit for bit.
+    #[test]
+    fn float_nan_payloads_are_bit_exact() {
+        let s32 = f32::from_bits(0x7f80_0001);
+        let q32 = f32::from_bits(0xffc0_1234);
+        let s64 = f64::from_bits(0x7ff0_0000_0000_0001);
+        let q64 = f64::from_bits(0xfff8_0000_dead_beef);
+        unsafe {
+            for x in [s32, q32] {
+                assert_eq!(roundtrip::<f32>("f4", &x).to_bits(), x.to_bits());
+                let v = roundtrip::<Vec<f32>>("af4", &vec![x, x]);
+                assert!(v.iter().all(|y| y.to_bits() == x.to_bits()));
+            }
+            for x in [s64, q64] {
+                assert_eq!(roundtrip::<f64>("f8", &x).to_bits(), x.to_bits());
+                let v = roundtrip::<Vec<f64>>("af8", &vec![x, x]);
+                assert!(v.iter().all(|y| y.to_bits() == x.to_bits()));
+            }
+        }
+    }
+
+    /// A VecDeque whose ring buffer has wrapped writes both halves in order.
+    #[test]
+    fn wrapped_deques_round_trip() {
+        let mut d: VecDeque<u16> = VecDeque::with_capacity(8);
+        for i in 0..6 {
+            d.push_back(i);
+        }
+        for _ in 0..4 {
+            d.pop_front();
+        }
+        for i in 6..11 {
+            d.push_back(i);
+        }
+        let (a, b) = d.as_slices();
+        assert!(!a.is_empty() && !b.is_empty(), "the deque did not wrap");
+        unsafe {
+            assert_eq!(roundtrip::<VecDeque<u16>>("au2", &d), d);
+            let bytes: Vec<u8> = d.iter().flat_map(|x| x.to_le_bytes()).collect();
+            assert_eq!(array_data("au2", &d, 64), bytes);
         }
     }
 

@@ -1,0 +1,59 @@
+-- A constructor field read from a value the frame just built may take the
+-- payload instead of copying it, but only when nothing else can read that
+-- payload (consumableProjectionLets). Rust and C++ pools: a `@try` result
+-- projected once (taken), a subject matched twice (copied), a two-field arm
+-- (copied), and a projection inside a tail loop, where the subject is built
+-- again on every iteration. Each must compile and give the same values.
+module main
+  ( onceRust, twiceRust, pairRust, loopRust
+  , onceCpp, twiceCpp, pairCpp, loopCpp
+  )
+
+import root-rust
+import root-cpp
+
+data Two = Two [U8] [U8]
+
+mkRust :: U64 -> [U8]
+lenRust :: [U8] -> U64
+addRust :: U64 -> U64 -> U64
+source Rust from "h.rs" ("mk" as mkRust, "len" as lenRust, "add" as addRust)
+
+mkCpp :: U64 -> [U8]
+lenCpp :: [U8] -> U64
+addCpp :: U64 -> U64 -> U64
+source Cpp from "h.hpp" ("mk" as mkCpp, "len" as lenCpp, "add" as addCpp)
+
+onceRust :: U64 -> U64
+onceRust n = match (@try (mkRust n)) | (Ok v) = lenRust v | (Err _) = 0
+
+twiceRust :: U64 -> U64
+twiceRust n =
+  let t = @try (mkRust n)
+  in addRust (match t | (Ok v) = lenRust v | (Err _) = 0)
+             (match t | (Ok w) = lenRust w | (Err _) = 0)
+
+pairRust :: U64 -> U64
+pairRust n = match (Two (mkRust n) (mkRust (addRust n 1))) | (Two a b) = addRust (lenRust a) (lenRust b)
+
+loopRust :: U64 -> U64 -> U64
+loopRust k acc
+  ? k == 0 = acc
+  : loopRust (k - 1) (addRust acc (match (@try (mkRust k)) | (Ok v) = lenRust v | (Err _) = 0))
+
+onceCpp :: U64 -> U64
+onceCpp n = match (@try (mkCpp n)) | (Ok v) = lenCpp v | (Err _) = 0
+
+twiceCpp :: U64 -> U64
+twiceCpp n =
+  let t = @try (mkCpp n)
+  in addCpp (match t | (Ok v) = lenCpp v | (Err _) = 0)
+            (match t | (Ok w) = lenCpp w | (Err _) = 0)
+
+pairCpp :: U64 -> U64
+pairCpp n = match (Two (mkCpp n) (mkCpp (addCpp n 1))) | (Two a b) = addCpp (lenCpp a) (lenCpp b)
+
+loopCpp :: U64 -> U64 -> U64
+loopCpp k acc
+  ? k == 0 = acc
+  : loopCpp (k - 1) (addCpp acc (match (@try (mkCpp k)) | (Ok v) = lenCpp v | (Err _) = 0))
