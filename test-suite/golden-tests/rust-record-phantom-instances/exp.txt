@@ -1,0 +1,4 @@
+220
+[{"seqid":3,"start":30},{"seqid":3,"start":300}]
+build_rejected
+0
