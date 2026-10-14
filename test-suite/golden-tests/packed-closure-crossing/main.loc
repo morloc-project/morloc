@@ -80,9 +80,7 @@ record Ops where
 record Rust => Ops = "Ops"
 record Py => Ops = "dict"
 
-addWrappedRust :: Int -> Wrapped -> Int
 tickRust :: <IO> Int
-mkPy :: Int -> Wrapped
 useOps :: Ops -> Wrapped -> Int
 
 mkOps :: Int -> <IO> Ops

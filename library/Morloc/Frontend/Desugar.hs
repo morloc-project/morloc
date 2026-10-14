@@ -3286,13 +3286,21 @@ bodyLambdaParams (Loc _ (CParenE b)) = bodyLambdaParams b
 bodyLambdaParams _ = return []
 
 -- Reject where-clause bindings that shadow a function parameter or
--- duplicate a sibling where-binding. Only inspects value bindings
--- (CAssE/CGuardedAssE); type signatures (CSigE) may legally repeat the
--- term name.
+-- duplicate a sibling where-binding, and a second signature for one name
+-- (SIG-6). A signature and a binding of one name are expected.
 checkWhereScope :: [Loc CstIrrefPat] -> [Loc CstExpr] -> D ()
-checkWhereScope params decls =
+checkWhereScope params decls = do
   go (Set.fromList (map fst (concatMap irrefPatBoundNames params))) Set.empty decls
+  sigs Set.empty decls
   where
+    sigs :: Set.Set Text -> [Loc CstExpr] -> D ()
+    sigs _ [] = return ()
+    sigs seen (d@(Loc _ (CSigE (EV n) _)) : rest)
+      | Set.member n seen =
+          dfail (startPos d) ("a second signature for " ++ T.unpack n ++ " in one where-clause: a term has one signature")
+      | otherwise = sigs (Set.insert n seen) rest
+    sigs seen (_ : rest) = sigs seen rest
+
     go :: Set.Set Text -> Set.Set Text -> [Loc CstExpr] -> D ()
     go _ _ [] = return ()
     go ps seen (d : rest) = case bindingName d of

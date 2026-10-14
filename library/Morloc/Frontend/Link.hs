@@ -61,10 +61,65 @@ synth ::
   [(MVar, [AliasedSymbol], LinkState)] ->
   MorlocMonad LinkState
 synth k0 e0 edges = do
-  inheritedState <- mapM (realiasLinkState k0) edges >>= mergeLinkStates k0
+  inheritedState <- mapM (realiasLinkState k0) edges >>= mergeLinkStates k0 (localSignatureNames e0)
+  checkOneSignature inheritedState e0
   finalState <- addLocalState k0 e0 inheritedState
   _ <- linkLocalTerms k0 finalState e0
   return finalState
+
+-- | A module gives a term at most one signature (SIG-6), counting class
+-- method signatures. A signature for a term the module imports by name
+-- contradicts the import (SIG-8); one for a term that came in with a whole
+-- module declares a new term in its place (SIG-7), since the link of the
+-- module's own terms starts from its own signatures.
+checkOneSignature :: LinkState -> ExprI -> MorlocMonad ()
+checkOneSignature imported (ExprI _ (ModE _ es)) = go Set.empty sigs
+  where
+    sigs =
+      [ (i, v)
+      | ExprI i e <- es
+      , v <- case e of
+          SigE (Signature v' _ _) -> [v']
+          ClsE (Typeclass _ _ _ ms) -> [v' | Signature v' _ _ <- ms]
+          _ -> []
+      ]
+    -- names an un-namespaced import list brings into scope, with the name
+    -- each is exported as; a class brings its methods
+    named = Map.fromList $
+      [ (alias, orig)
+      | ExprI _ (ImpE (Import _ (Just syms) _ Nothing)) <- es
+      , AliasedTerm orig alias <- syms
+      ]
+        <> [ (m, m)
+           | ExprI _ (ImpE (Import _ (Just syms) _ Nothing)) <- es
+           , cls <- concatMap className syms
+           , Just (_, _, methods) <- [Map.lookup cls (linkClasses imported)]
+           , m <- Map.keys methods
+           ]
+    -- an upper-case name in an import list is a type or a class
+    className (AliasedClass c) = [c]
+    className (AliasedType (TV t) _) = [ClassName t]
+    className _ = []
+    go :: Set.Set EVar -> [(Int, EVar)] -> MorlocMonad ()
+    go _ [] = return ()
+    go seen ((i, v) : rest)
+      | Just orig <- Map.lookup v named =
+          MM.throwSourcedError i $
+            "A signature for" <+> squotes (pretty v)
+              <> ", which this module imports by name: a term has one signature."
+              <+> "Import it under another name (`" <> pretty orig <+> "as other`),"
+              <+> "or leave it out of the import list to declare a new" <+> squotes (pretty v) <> "."
+      | Set.member v seen =
+          MM.throwSourcedError i $
+            "A second signature for" <+> squotes (pretty v)
+              <> ": a term has one signature, though it may have many implementations."
+      | otherwise = go (Set.insert v seen) rest
+checkOneSignature _ _ = return ()
+
+-- | The names a module gives its own signatures (SIG-7).
+localSignatureNames :: ExprI -> Set.Set EVar
+localSignatureNames (ExprI _ (ModE _ es)) = Set.fromList [v | ExprI _ (SigE (Signature v _ _)) <- es]
+localSignatureNames _ = Set.empty
 
 -- Will raise error if any import term is absent in the linkstate list
 realiasLinkState ::
@@ -97,8 +152,8 @@ throwInheritanceError m msg = MM.throwSystemError $ "In module" <+> squotes (pre
 -- imported terms are first pooled, then iterated through one-by-one checking
 -- for conflicts. Term identity is based on index, which maps one-to-one to type
 -- or class signature.
-mergeLinkStates :: MVar -> [(MVar, MVar, LinkState)] -> MorlocMonad LinkState
-mergeLinkStates m0 imps = do
+mergeLinkStates :: MVar -> Set.Set EVar -> [(MVar, MVar, LinkState)] -> MorlocMonad LinkState
+mergeLinkStates m0 shadowed imps = do
   -- Set EVar
   let terms = Set.unions $ [Map.keysSet s | (_, _, LinkState s _) <- imps]
       -- Set ClassName
@@ -124,6 +179,8 @@ mergeLinkStates m0 imps = do
     mergeTerms _ [(_, _, i)] = return i
     mergeTerms v ((m1, importMod1, i) : (_, importMod2, j) : xs)
       | i == j = mergeTerms v ((m1, importMod1, j) : xs)
+      -- the module declares its own term of this name (SIG-7)
+      | Set.member v shadowed = return i
       | otherwise =
           throwInheritanceError m0 $
             "Illegal masking of type signatures for" <+> squotes (pretty v)

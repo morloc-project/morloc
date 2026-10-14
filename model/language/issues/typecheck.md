@@ -91,14 +91,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   ascribed in a lambda. The `parallel` module docstring advertises the
   failing form. Repro: web/morloc-studio/public/assets/home-examples/streams
   with `@collect (psmap complexity (@next s))` inlined.
-- **A local signature replaces an imported term's.** [reproduced,
-  0.109.0] Spec gap. `sub.loc`: `record Bar where x :: Int`, `foo :: Int
-  -> Bar`; `main.loc`: `import .sub (foo, Bar)`, `foo :: Int -> Int`, `baz
-  :: Int -> Bar`, `baz = foo`. The only error is at `baz = foo` (expected
-  `Int -> Bar`, inferred `Int -> Int`): the local signature silently wins.
-  Two IMPORTED signatures for one name are rejected ("Illegal masking of
-  type signatures"), so the paths disagree. Open: error, or require equal
-  types?
 - **Effect rows with two tails, or left labels the right row lacks, are
   solved rather than included.** [read] Violates EFF-8. Two guard branches
   whose rows carry different tails (a rigid `e` in one, an existential from

@@ -35,6 +35,7 @@ specTests =
     , localOption (mkTimeout 5000000) dimTests
     , localOption (mkTimeout 2000000) patTests
     , localOption (mkTimeout 2000000) lexTests
+    , localOption (mkTimeout 2000000) sigTests
     , localOption (mkTimeout 2000000) ifaceTests
     , localOption (mkTimeout 20000000) annTests
     , modelCheck
@@ -996,6 +997,168 @@ patTests =
         f :: Vector 2 Int -> Int
         f | [x, y] = y
           | _ = 0
+        |]
+    ]
+
+sigTests :: TestTree
+sigTests =
+  testGroup
+    "SIG"
+    [ rejectUser
+        "spec-sig-6-1"
+        [r|
+        module main (bar)
+          foo :: Int -> Int
+          foo :: Int -> Int
+          bar :: Int -> Int
+          bar x = foo x
+        |]
+    , accept
+        "spec-sig-6-3"
+        [r|
+        module main (bar)
+          foo :: Int -> Int
+          bar :: Int -> Int
+          bar x = foo x
+        |]
+    , reject
+        "spec-sig-6-4"
+        [r|
+        module main (f)
+          f :: Int -> Int
+          f x = go x
+            where
+            go :: Int -> Int
+            go :: Int -> Int
+            go y = y
+        |]
+    , rejectUser
+        "spec-sig-6-5"
+        [r|
+        module main (bar)
+          class C a where
+            foo :: a -> a
+          foo :: Int -> Int
+          bar :: Int -> Int
+          bar x = foo x
+        |]
+    , accept
+        "spec-sig-6-2"
+        [r|
+        module main (f, g)
+          f :: Int -> Int
+          f x = go x
+            where
+            go :: Int -> Int
+            go y = y
+          g :: Int -> Int
+          g x = go x
+            where
+            go :: Int -> Int
+            go y = y
+        |]
+    , accept
+        "spec-sig-7-1"
+        [r|
+        module lib (foo)
+          foo :: Int -> Int
+        module main (bar)
+          import lib
+          foo :: Int -> Str
+          bar :: Int -> Str
+          bar x = foo x
+        |]
+    , accept
+        "spec-sig-7-3"
+        [r|
+        module liba (foo)
+          foo :: Int -> Int
+        module libb (foo)
+          foo :: Int -> Str
+        module main (bar)
+          import liba
+          import libb
+          foo :: Int -> Bool
+          bar :: Int -> Bool
+          bar x = foo x
+        |]
+    , rejectUser
+        "spec-sig-8-1"
+        [r|
+        module lib (foo)
+          foo :: Int -> Int
+        module main (bar)
+          import lib (foo)
+          foo :: Int -> Str
+          bar :: Int -> Str
+          bar x = foo x
+        |]
+    , rejectUser
+        "spec-sig-8-2"
+        [r|
+        module lib (foo)
+          foo :: Int -> Int
+        module main (bar)
+          import lib (foo)
+          foo :: Int -> Int
+          bar :: Int -> Int
+          bar x = foo x
+        |]
+    , accept
+        "spec-sig-8-3"
+        [r|
+        module lib (foo)
+          foo :: Int -> Int
+        module main (bar)
+          import lib (foo as libFoo)
+          foo :: Int -> Str
+          bar :: Int -> Int
+          bar x = libFoo x
+        |]
+    , accept
+        "spec-sig-8-4"
+        [r|
+        module lib (foo)
+          foo :: Int -> Int
+        module main (bar)
+          import lib as l (foo)
+          foo :: Int -> Str
+          bar :: Int -> Str
+          bar x = foo x
+        |]
+    , rejectUser
+        "spec-sig-8-5"
+        [r|
+        module lib (C)
+          class C a where
+            foo :: a -> a
+        module main (bar)
+          import lib (C)
+          foo :: Int -> Int
+          bar :: Int -> Int
+          bar x = foo x
+        |]
+    , rejectUser
+        "spec-sig-9-2"
+        [r|
+        module lib (foo)
+          foo :: Int -> Int
+        module main (bar)
+          import lib (foo)
+          foo x = x
+          bar :: Int -> Str
+          bar x = foo x
+        |]
+    , accept
+        "spec-sig-9-1"
+        [r|
+        module lib (foo)
+          foo :: Int -> Int
+        module main (bar)
+          import lib (foo)
+          foo x = x
+          bar :: Int -> Int
+          bar x = foo x
         |]
     ]
 

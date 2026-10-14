@@ -1,0 +1,14 @@
+-- Spec SIG-7: `mid` imports `sub` whole and declares its own `foo`, a new
+-- term whose only implementation is mid's (R). `sub`'s Python `foo` is
+-- dropped: were it kept, the realizer would choose it here, since `foo`'s
+-- result goes straight to a Python function, and print 2 and 3.
+module main (bar)
+
+import root-py
+import .mid (foo)
+
+source Py from "main.py" ("ident")
+ident :: Int -> Int
+
+bar :: Int -> Int
+bar x = ident (foo x)
