@@ -7,16 +7,23 @@ Stream files written with `@write level` and read back.
 - Levels 0-9 map to zstd 0, 1, 3, 6, 9, 12, 15, 19, 21, 22, with long-range
   mode (window 2^27) from 7 (`CompressionLevel::zstd_level`, `use_long`;
   morloc-runtime-types compression.rs).
-- A payload is cut into independent zstd frames of at most F = 16 MiB of
-  raw bytes (`FRAME_CHUNK_SIZE`). A stream's write buffer also flushes at
-  16 MiB (`WRITE_BUFFER_BYTES_DEFAULT`), and each `@flush` ends a
-  sub-packet, so a frame never spans a flush.
-- Frames compress on write-behind threads and decompress on frame workers,
+- A payload is cut into independent zstd frames of at most F raw bytes.
+  A stream sub-packet uses F = 2 MiB at levels 1-6 and 16 MiB at 7-9
+  (`subpacket_frame_size`, ZIP-9); a saved value or packet uses 16 MiB
+  (`FRAME_CHUNK_SIZE`). A stream's write buffer flushes at 16 MiB
+  (`WRITE_BUFFER_BYTES_DEFAULT`), and each `@flush` ends a sub-packet, so
+  a frame never spans a flush.
+- Each frame of a stream sub-packet is its own write-behind job, so one
+  sub-packet compresses on several threads; frames decompress on frame
+  workers,
   both capped by `frame_workers()`: `MORLOC_FRAME_WORKERS` (1-16) if set,
   else `available_parallelism()` capped at 16. On Linux the latter follows
   the CPU affinity mask, so `taskset` also limits it. At most
-  `MORLOC_WRITE_BEHIND_DEPTH` (default 7) batches are outstanding per
-  stream.
+  `MORLOC_WRITE_BEHIND_DEPTH` batches are outstanding per stream (default
+  `frame_workers()` clamped to 2..4; above 7, the most a stream holds, it
+  is reduced to 7 with a warning). At level 3, 600 MiB in 10 MiB batches
+  without `@flush` (C++, 12 threads): depth 2 3.2 s at 114 MiB peak, 4 2.5
+  s at 191 MiB, 7 2.5 s at 199-351 MiB.
 
 Consequences the models below must carry: no frame shares context with
 another, so ratio depends on frame and batch size; parallelism is at most
@@ -44,7 +51,8 @@ does not resemble any of them.
 
 ## Experiments
 
-m is raw bytes (the size of the level-0 file), F = 16 MiB, w the worker
+m is raw bytes (the size of the level-0 file), F = 16 MiB (the write
+buffer, and the frame size at levels 7-9; levels 1-6 cut 2 MiB frames), w the worker
 count, k a number of frames or batches. Times subtract the same
 experiment's level-0 time, which carries generation, encoding and the file
 write, so a level's parameter is the cost of compressing alone.
@@ -93,7 +101,11 @@ Model: `.time` = b_z / b_zstd and `.ratio` = rho_z / rho_zstd, against `zstd -T1
 Measured: pending
 Limit: str-fastq.z3.time <= 1.3 x, str-fastq.z3.ratio <= 1.03 x, u64-small.z3.time <= 1.3 x
 
-`.ratio` above 1 is the cost of 16 MiB frames. `.long` near 1 for levels
+`.ratio` above 1 is the cost of cutting frames (2 MiB at levels 1-6).
+Measured before ZIP-9 with zstd 6 on read data, as compressed size over
+one frame's: 1.0016 at 4 MiB frames, 1.007 at 1 MiB; 2 MiB lies between.
+On lib/biolib/runtime-bench's 600 MiB of bases the level-3 file grew from
+177.3 to 177.4 MiB. `.long` near 1 for levels
 7-9 would mean long-range mode buys nothing inside a 16 MiB frame. Open,
 once measured: whether levels 7-9 keep long-range mode.
 
@@ -138,3 +150,17 @@ Level 3 (zstd 6) compresses better than gzip's default and is the level to
 reach for. Levels 7-9 (zstd 19-22 with long-range mode) are for data
 written once and kept cold; their ZIP-1 rate is orders of magnitude below
 level 3's.
+
+### ZIP-9 A stream sub-packet is cut into frames of a size fixed by its level
+Intent: ruled 2026-10-14
+Bench: compression
+Model: F = 2 MiB at levels 1-6, 16 MiB at 7-9; frames per sub-packet = ceil(payload / F)
+Measured: 2026-10-14, lib/biolib/runtime-bench, 600 MiB as 60 x 10 MiB at level 3 with `@flush` per batch, C++: 11.32 -> 4.32 s; level-3 read 0.80 -> 0.36 s
+
+The frame size depends on the level alone, never on cores or queue state,
+so a stream's bytes are the same on every host. Small frames let a
+flushed batch compress, and a sub-packet decompress, on several threads;
+levels 7-9 keep 16 MiB frames, whose long-range window is their point.
+
+Why: reverses the 2026-09-29 ruling of one 16 MiB frame per sub-packet,
+which left a flushed write at the speed of one zstd thread.

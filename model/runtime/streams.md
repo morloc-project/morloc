@@ -257,3 +257,16 @@ a handle's slots in the process stay within `MORLOC_IFILE_CACHE_BYTES`:
 a slot evicts its own entries to make room, and serves a sub-packet
 uncached when the handle has no room for it.
 
+
+### SLOT-24 A batch's block outlives every compression job that reads it
+Status: implemented
+Checked by: compressed_subpackets_are_cut_into_frames_fixed_by_the_level, frames_of_a_payload_join_in_order_and_settle_returns
+
+The custodian hands a compressed batch to the compression pool as one
+split job, which compacts the block and submits a job per frame (ZIP-9).
+The custodian releases the block only after the split job has finished
+and every frame job has finished or was withdrawn before it started,
+whatever any of them returned (a job that panics ends the process,
+PANIC-1). No compression job waits on another, so the pool cannot deadlock however
+few threads it has, and with none at all a job runs on the thread that
+submits it.

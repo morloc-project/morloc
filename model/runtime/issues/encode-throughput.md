@@ -76,6 +76,11 @@ per-sub-packet bookkeeping. Each 10 MiB batch is its own `@write`.
 
 ## 3. `@flush` after each `@write` makes zstd writes 2.4x slower
 
+Since 2026-10-14 a sub-packet compresses as several frames in parallel
+(ZIP-9): 600 MiB written at level 3 with `@flush` per 10 MiB batch takes
+4.3 s in C++ (was 11.3 s), against 2.4 s without `@flush`. The table
+below predates that.
+
 lib/biolib (formerly biobase) saved streams with
 `writeBatch level o xs = do { Ok _ <- @write level o xs; @flush o; () }`.
 Ingesting 1M FASTQ pairs (Rust reader) into a stream file:

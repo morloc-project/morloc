@@ -33,7 +33,11 @@
   `fork_pool::tests::a_worker_that_ends_unretired_ends_the_pool`
   (morloc-runtime/src/fork_pool.rs ~l.626); five isolated reruns and two
   full runtime runs passed. Which assertion failed (both pings, or the
-  coordinator's exit status within 10 s) was not captured.
+  coordinator's exit status within 10 s) was not captured. 2026-10-14:
+  it and `a_fork_pool_serves_calls_and_stops_on_sigterm` ("a call went
+  unanswered") failed in 2 of 3 `cargo test -p morloc-runtime --lib` runs
+  while another test compressed 34 MiB at zstd 19 on all cores, and in 0
+  of 3 without it: they fail under CPU load, not by chance.
 - **A wall-clock typecheck test times out under load.** [reproduced once
   2026-10-14] `long non-tuple composition chain stays linear`
   (morloc-test) has a 1 s timeout; under `-j 6` it hit TIMEOUT at 1.05 s,

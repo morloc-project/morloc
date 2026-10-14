@@ -9,7 +9,7 @@ use morloc_runtime_types::wait_word;
 use crate::error::MorlocError;
 
 pub(crate) const QUEUE_SLOTS: usize = 8;
-const MAX_DEPTH: usize = QUEUE_SLOTS - 1;
+pub(crate) const MAX_DEPTH: usize = QUEUE_SLOTS - 1;
 const LEVEL0_DEPTH: usize = 1;
 
 pub(crate) const ENTRY_BUFFER: u32 = 1;
@@ -600,9 +600,6 @@ impl Writer {
                     self.q.finish(1);
                 } else if item.level == 0 {
                     self.commit_now(item);
-                } else if self.payload_len(&item) > morloc_runtime_types::compression::FRAME_CHUNK_SIZE {
-                    self.commit_all();
-                    self.commit_framed(item);
                 } else {
                     let ticket = crate::compression::CompressionLevel::from_u8(item.level)
                         .and_then(|level| {
@@ -690,33 +687,6 @@ impl Writer {
                 }
                 Err(e) => self.fail(FAILED_IO, &e.to_string()),
             }
-        }
-        self.release(&item);
-        self.q.finish(1);
-    }
-
-    fn payload_len(&self, item: &Item) -> usize {
-        if item.kind == ENTRY_BUFFER {
-            16 + item.elems as usize * self.elem_schema.width + item.data_used as usize
-        } else {
-            item.len as usize
-        }
-    }
-
-    /// Compress a payload too large for one frame in parallel frames, here.
-    fn commit_framed(&mut self, item: Item) {
-        let res = self.compact(&item).and_then(|bytes| {
-            let level = crate::compression::CompressionLevel::from_u8(item.level)?;
-            let (out, frames) = crate::compression::compress_payload_zstd(bytes, level)?;
-            Ok(crate::stream_format::PreparedPayload {
-                bytes: std::borrow::Cow::Owned(out),
-                frames: Some(frames),
-                uncompressed_len: bytes.len(),
-            })
-        });
-        match res {
-            Ok(prepared) => self.emit(prepared, &item),
-            Err(e) => self.fail(FAILED_IO, &e.to_string()),
         }
         self.release(&item);
         self.q.finish(1);

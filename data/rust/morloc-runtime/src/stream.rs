@@ -8636,6 +8636,101 @@ mod tests {
         assert_eq!(held, vec![3, 1, 2]);
     }
 
+    /// Mostly zero, so the long-mode levels compress it quickly, with a
+    /// marked byte every 4093 that shows where each frame's bytes landed.
+    fn frame_test_byte(i: usize) -> u8 {
+        if i % 4093 == 0 { (i / 4093 % 251) as u8 + 1 } else { 0 }
+    }
+
+    /// Write one element, a vector of `n` bytes, at `level`, close, and
+    /// return its one sub-packet's bytes and frame sizes.
+    fn write_bytes_stream(p: &str, level: u8, n: usize) -> (Vec<u8>, Vec<u64>) {
+        use morloc_runtime_types::shm_types::Array;
+        let w = shared_open_ostream_with_schema(p, "aau1").unwrap();
+        let v = shm::shmalloc(32 + n).unwrap();
+        unsafe {
+            let inner = v.add(16);
+            let data = v.add(32);
+            for i in 0..n {
+                *data.add(i) = frame_test_byte(i);
+            }
+            *(v as *mut Array) = Array { size: 1, data: shm::abs2rel(inner).unwrap() };
+            *(inner as *mut Array) = Array { size: n, data: shm::abs2rel(data).unwrap() };
+        }
+        let lvl = crate::compression::CompressionLevel::from_u8(level).unwrap();
+        shared_write_subpacket(w, lvl, v).unwrap();
+        shm::shfree(v).unwrap();
+        shared_close_handle(w).unwrap();
+        let bytes = std::fs::read(p).unwrap();
+        let mut at = 0usize;
+        let mut found = Vec::new();
+        while at + 32 <= bytes.len() && bytes[at..at + 4] == [0x6d, 0xf8, 0x07, 0x07] {
+            let offset = u32::from_le_bytes(bytes[at + 20..at + 24].try_into().unwrap()) as usize;
+            let length = u64::from_le_bytes(bytes[at + 24..at + 32].try_into().unwrap()) as usize;
+            if bytes[at + 15] == morloc_runtime_types::packet::PACKET_COMPRESSION_ZSTD {
+                let frames = morloc_runtime_types::packet::read_frame_index_from_meta(&bytes[at..at + 32 + offset])
+                    .unwrap()
+                    .expect("a compressed sub-packet has a frame index");
+                found.push((bytes[at..at + 32 + offset + length].to_vec(), frames));
+            }
+            // A stream packet (type 3, FMT-2) encloses the sub-packets.
+            at += 32 + offset + if bytes[at + 12] == 3 { 0 } else { length };
+        }
+        assert_eq!(found.len(), 1, "expected one compressed sub-packet");
+        let (sub, frames) = found.remove(0);
+        (sub, frames.iter().map(|f| f.uncompressed_size).collect())
+    }
+
+    struct TestDepth;
+    impl TestDepth {
+        fn set(depth: usize) -> TestDepth {
+            crate::write_behind::set_test_depth(Some(depth));
+            TestDepth
+        }
+    }
+    impl Drop for TestDepth {
+        fn drop(&mut self) {
+            crate::write_behind::set_test_depth(None);
+        }
+    }
+
+    /// ZIP-9, SLOT-24: a compressed sub-packet is cut into frames whose
+    /// size is a function of the level alone, so its bytes never depend on
+    /// the queue; frames decode back to the elements written. 17 MiB is
+    /// larger than a write buffer, so it also takes the oversize path, and
+    /// at level 7 makes a full 16 MiB frame and a short one.
+    #[test]
+    fn compressed_subpackets_are_cut_into_frames_fixed_by_the_level() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("frames_per_level");
+        for (level, n, frame) in [(3u8, (5 << 20) + 3, 2u64 << 20), (3, (17 << 20) + 5, 2 << 20), (7, (17 << 20) + 5, 16 << 20)] {
+            let p = dir.join(format!("l{level}-{n}.idx")).to_str().unwrap().to_string();
+            let (bytes, frames) = write_bytes_stream(&p, level, n);
+            let payload: u64 = frames.iter().sum();
+            assert_eq!(frames.len() as u64, payload.div_ceil(frame), "level {level}: {frames:?}");
+            assert!(frames[..frames.len() - 1].iter().all(|&f| f == frame), "level {level}: {frames:?}");
+            assert!(frames.len() >= 2, "level {level}, {n} bytes: one frame proves nothing about the cut");
+
+            let again = {
+                let _depth = TestDepth::set(1);
+                write_bytes_stream(&p, level, n).0
+            };
+            assert!(bytes == again, "level {level}: the sub-packet's bytes depend on the queue depth");
+
+            let r = open_istream(&p).unwrap();
+            let got = shared_next_frame(r).unwrap().expect("one sub-packet");
+            let outer = unsafe { &*(got as *const morloc_runtime_types::shm_types::Array) };
+            assert_eq!(outer.size, 1);
+            let arr = unsafe { &*(shm::rel2abs(outer.data).unwrap() as *const morloc_runtime_types::shm_types::Array) };
+            assert_eq!(arr.size, n);
+            let data = shm::rel2abs(arr.data).unwrap();
+            let read = unsafe { std::slice::from_raw_parts(data as *const u8, n) };
+            assert!(read.iter().enumerate().all(|(i, &b)| b == frame_test_byte(i)), "level {level}: data changed");
+            shm::shfree(got).unwrap();
+            shared_close_handle(r).unwrap();
+        }
+    }
+
     #[test]
     fn a_saved_value_is_not_appended_to() {
         let _shm = crate::own_test_registry();

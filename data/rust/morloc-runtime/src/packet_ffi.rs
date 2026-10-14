@@ -1460,9 +1460,7 @@ pub(crate) unsafe fn normalize_data_packet_to_fd(
     buffered_packet_to_fd(packet, packet_size, compression_level, fd, errmsg)
 }
 
-// Matches the `choose_workers` 1 MiB threshold: below it the buffered
-// alloc + memcpy beats the streaming setup cost, and the encoder would
-// be single-threaded anyway.
+// Below 1 MiB the buffered alloc + memcpy beats the streaming setup cost.
 const STREAMING_THRESHOLD: u64 = 1 << 20;
 
 // Run the existing in-memory normalizer, then write the resulting

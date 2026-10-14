@@ -58,6 +58,19 @@ use crate::packet::{
 /// worker count with comfortable per-worker memory.
 pub const FRAME_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
+/// The size of the frames a compressed stream sub-packet is cut into: a
+/// function of the level alone, so a stream's bytes never depend on the
+/// host, its cores or its queue. Small frames let one sub-packet compress
+/// and decompress on several threads; the long-mode levels (7-9) keep
+/// whole frames, whose window is what they are for.
+pub fn subpacket_frame_size(lvl: CompressionLevel) -> usize {
+    if lvl.use_long() {
+        FRAME_CHUNK_SIZE
+    } else {
+        2 * 1024 * 1024
+    }
+}
+
 /// Worst-case bytes the metadata-entry payload occupies for an index
 /// covering up to `max_frames` frames. The streaming encoder reserves
 /// this many bytes upfront, then patches the actual index in after
@@ -584,26 +597,6 @@ impl CompressionLevel {
     }
 }
 
-// ── Worker-count heuristic ────────────────────────────────────────────────
-
-/// Choose the number of zstd worker threads to spawn for a payload of
-/// the given size. Returns 0 (single-threaded) below the threshold where
-/// the spawn and bookkeeping cost would exceed the parallelization win.
-///
-/// Heuristic: ~1 worker per 4 MiB of input, capped at the number of
-/// available cores and at 16 to avoid pathological scaling on big
-/// servers where marginal returns vanish.
-pub fn choose_workers(payload_bytes: usize) -> u32 {
-    if payload_bytes < (1 << 20) {
-        return 0;
-    }
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    let by_size = (payload_bytes / (4 << 20)).max(1);
-    by_size.min(cores).min(16) as u32
-}
-
 // ── Long-mode window logs ─────────────────────────────────────────────────
 
 /// Encoder window log used when long-mode is active. 27 == 128 MiB,
@@ -624,7 +617,7 @@ const STREAM_INPUT_BUFFER: usize = 256 * 1024;
 
 /// Compress raw bytes with zstd. Single entry point for every
 /// compression site in the runtime: takes a user-facing level (0..=9)
-/// and decides threading internally via `choose_workers`. Long-mode
+/// and compresses frames on `frame_workers()` threads. Long-mode
 /// kicks in for preset 7+. Level 0 returns a clean copy of `raw`
 /// (no zstd frame), so callers don't have to special-case it.
 pub fn compress_payload_zstd(
@@ -1321,13 +1314,6 @@ mod tests {
     }
 
     #[test]
-    fn choose_workers_thresholds() {
-        assert_eq!(choose_workers(512 * 1024), 0, "sub-MiB single-threaded");
-        assert!(choose_workers(1 << 20) >= 1, "1 MiB triggers >=1 worker");
-        assert!(choose_workers(8usize << 30) <= 16, "cap at 16 workers");
-    }
-
-    #[test]
     fn decompress_packet_if_needed_passes_through_non_packet() {
         // Raw JSON-looking bytes (no morloc magic) must come back unchanged.
         let bytes = b"{\"x\":1}".to_vec();
@@ -1540,10 +1526,8 @@ mod tests {
 
     #[test]
     fn roundtrip_spans_threading_threshold() {
-        // 64 KiB sits below choose_workers' 1 MiB threshold (single-
-        // threaded encode). 1 MiB exactly hits it. 16 MiB is well into
-        // multithreaded territory (~4 workers on a typical box). All
-        // three must roundtrip identically across levels 1, 3, 9.
+        // One small frame, one frame of exactly 1 MiB, and one full
+        // 16 MiB frame must roundtrip identically across levels 1, 3, 9.
         for &size in &[64 * 1024usize, 1 << 20, 16 << 20] {
             let original = synthetic_packet(size);
             for n in [1u8, 3, 9] {
