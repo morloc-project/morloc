@@ -68,15 +68,8 @@
   include core.rs in every Rust pool, whose flat namespace then clashes with
   user files (E0252/E0428); R pools `source()` into one environment, so an
   extra file can silently shadow a function; and a user who defined the
-  struct themselves gets a duplicate definition. Candidates: (a) the form
-  names its file (`record Rust => FragHits = "BioFragHits" from "bio.rs"`,
-  a syntax change); (b) the rule above restricted to C++ and Rust `record`
-  forms of user modules, accepting the duplicate-definition break; (c) leave
-  it to the library (current workaround).
-
-- **`choose_workers` is dead and its doc is stale.** [read] Gap: none;
-  stale text. morloc-runtime-types/src/compression.rs:596 `choose_workers`
-  (one worker per 4 MiB) has no caller outside its own unit test, and the
-  doc of `compress_payload_zstd` (~627) says threading is decided "via
-  `choose_workers`"; every path uses `frame_workers()`
-  (`MORLOC_FRAME_WORKERS`, else `available_parallelism` capped at 16).
+  struct themselves gets a duplicate definition. Direction ruled
+  2026-10-14: language-specific type forms move into `source` blocks, so a
+  form travels with the file it is declared from; `type L =>` keeps working
+  with a deprecation warning. Proposal and open questions:
+  /work/plans/source-type-forms.md.
