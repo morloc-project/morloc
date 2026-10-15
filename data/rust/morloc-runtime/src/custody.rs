@@ -694,16 +694,16 @@ impl Writer {
 
     fn compact(&self, item: &Item) -> Result<&'static [u8], MorlocError> {
         let base = self.block_of(item)?;
-        let len = if item.kind == ENTRY_BUFFER {
+        let (start, len) = if item.kind == ENTRY_BUFFER {
             crate::write_behind::compact_sealed_buffer(
                 base, item.elems, item.index_cap, item.data_used, &self.elem_schema,
             )?
         } else {
-            item.len as usize
+            (0, item.len as usize)
         };
-        // SAFETY: SLOT-10: the block holds `len` payload bytes and is the
-        // writer's until it is released.
-        Ok(unsafe { std::slice::from_raw_parts(base as *const u8, len) })
+        // SAFETY: SLOT-10: the block holds `len` payload bytes from `start`
+        // and is the writer's until it is released.
+        Ok(unsafe { std::slice::from_raw_parts(base.add(start) as *const u8, len) })
     }
 
     fn commit_now(&mut self, item: Item) {

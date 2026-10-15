@@ -3363,28 +3363,20 @@ pub fn shared_discard_handle(handle: i64) -> Result<(), MorlocError> {
 // concurrent pools writing to or reading from the same handle stay
 // consistent.
 
-/// A sub-packet payload in portable form: every stream-handle field already
-/// names its file by path (`TAG_PATH`), never by a slot of this nexus's
-/// registry. Every payload the writer builds is portable -- elements are
-/// flattened with [`crate::voidstar::flatten_into_portable`], and a
-/// fixed-width run cannot hold a stream field -- so emitting one needs no
-/// scan or rewrite. Constructed only where such a payload is built.
-struct PortablePayload<'a>(&'a [u8]);
-
-impl<'a> PortablePayload<'a> {
-    fn new(bytes: &'a [u8], schema: &Schema) -> Result<Self, MorlocError> {
-        if cfg!(debug_assertions) {
-            let fields = crate::handle_scan::collect_stream_fields(bytes, schema)?;
-            assert!(
-                fields.iter().all(|f| unsafe {
-                    morloc_runtime_types::stream_handle::read_tag(bytes.as_ptr().add(f.offset))
-                        != morloc_runtime_types::stream_handle::TAG_HANDLE
-                }),
-                "a sub-packet payload holds a registry handle",
-            );
-        }
-        Ok(PortablePayload(bytes))
+/// Debug check that a sub-packet payload is portable: every stream-handle
+/// field names its file by path (`TAG_PATH`), never by a registry slot.
+fn debug_assert_portable(bytes: &[u8], schema: &Schema) -> Result<(), MorlocError> {
+    if cfg!(debug_assertions) {
+        let fields = crate::handle_scan::collect_stream_fields(bytes, schema)?;
+        assert!(
+            fields.iter().all(|f| unsafe {
+                morloc_runtime_types::stream_handle::read_tag(bytes.as_ptr().add(f.offset))
+                    != morloc_runtime_types::stream_handle::TAG_HANDLE
+            }),
+            "a sub-packet payload holds a registry handle",
+        );
     }
+    Ok(())
 }
 
 /// Read the current handle for a slot under its lock. Both fields are
@@ -3498,7 +3490,8 @@ fn queue_buffer_then(slot: &RegistrySlot, refill: bool) -> Result<(), MorlocErro
         let size = unsafe { crate::shm::shm_block_size(crate::shm::rel2abs(full)?) }.ok_or_else(|| {
             MorlocError::Other("stream write buffer is not an SHM block".into())
         })?;
-        let abs = crate::shm::shcalloc(1, size)?;
+        // SLOT-20: every byte of a buffer a file receives is written first.
+        let abs = crate::shm::shmalloc(size)?;
         slot_owns(crate::shm::abs2rel(abs)?)
     };
     let item = Item {
@@ -3527,13 +3520,31 @@ fn queue_buffer_then(slot: &RegistrySlot, refill: bool) -> Result<(), MorlocErro
     Ok(())
 }
 
+struct Unqueued(AbsPtr);
+
+impl Drop for Unqueued {
+    fn drop(&mut self) {
+        let _ = crate::shm::shfree(self.0);
+    }
+}
+
 // SLOT-12
-fn queue_block(slot: &RegistrySlot, payload: &[u8], elems: u64, oversize: bool) -> Result<(), MorlocError> {
+fn queue_filled_block(
+    slot: &RegistrySlot,
+    local: &ProcessLocalSlot,
+    len: usize,
+    elems: u64,
+    oversize: bool,
+    fill: impl FnOnce(*mut u8) -> Result<(), MorlocError>,
+) -> Result<(), MorlocError> {
     use crate::custody::{Item, ENTRY_BLOCK};
     let q = slot_queue(slot)?;
-    let abs = crate::shm::shmalloc(payload.len().max(1))?;
-    // SAFETY: the block holds at least `payload.len()` bytes.
-    unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), abs as *mut u8, payload.len()) };
+    let block = Unqueued(crate::shm::shmalloc(len.max(1))?);
+    fill(block.0)?;
+    // SAFETY: SLOT-20: `fill` defined all `len` bytes of the block.
+    debug_assert_portable(unsafe { std::slice::from_raw_parts(block.0 as *const u8, len) }, &local.value_schema)?;
+    let abs = block.0;
+    std::mem::forget(block);
     let rel = slot_owns(crate::shm::abs2rel(abs)?);
     let item = Item {
         kind: ENTRY_BLOCK,
@@ -3542,7 +3553,7 @@ fn queue_block(slot: &RegistrySlot, payload: &[u8], elems: u64, oversize: bool) 
         elems,
         index_cap: 0,
         data_used: 0,
-        len: payload.len() as u64,
+        len: len as u64,
         oversize,
         level: slot.compression_level.get(),
     };
@@ -3567,16 +3578,25 @@ fn flush_write_buffer(
         return Ok(());
     }
     let buf_abs = crate::shm::rel2abs(slot.write_buffer.get())?;
-    let payload_len = crate::write_behind::compact_sealed_buffer(
-        buf_abs,
-        n,
-        slot.write_buffer_index_cap.get(),
-        slot.write_buffer_data_used.get(),
-        &local.elem_schema,
-    )?;
-    let payload_slice = unsafe { std::slice::from_raw_parts(buf_abs, payload_len) };
-    let payload = PortablePayload::new(payload_slice, &local.value_schema)?;
-    channel_enqueue(slot, local, payload)?;
+    let elem = &local.elem_schema;
+    let w = elem.width;
+    let cap = slot.write_buffer_index_cap.get() as usize;
+    let data_used = slot.write_buffer_data_used.get() as usize;
+    let records = n as usize * w;
+    let len = 16 + records + data_used;
+    let landing = voidstar::Landing::new(len)?;
+    let dst = landing.as_mut_ptr();
+    // SAFETY: SLOT-20: the buffer holds `n` records at 16 and `data_used`
+    // bytes at its data region; the landing holds `len` bytes.
+    unsafe {
+        std::ptr::write_unaligned(dst as *mut shm_types_crate::Array, shm_types_crate::Array { size: n as usize, data: 16 });
+        std::ptr::copy_nonoverlapping(buf_abs.add(16), dst.add(16), records);
+        std::ptr::copy_nonoverlapping(buf_abs.add(16 + cap * w), dst.add(16 + records), data_used);
+        crate::write_behind::shift_records(dst, n as usize, (cap - n as usize) * w, data_used, elem)?;
+    }
+    debug_assert_portable(unsafe { std::slice::from_raw_parts(dst as *const u8, len) }, &local.value_schema)?;
+    let arr = landing.relocate(&array_schema(elem), 0)?;
+    channel_push(slot, arr)?;
     slot.write_buffer_index_count.set(0);
     slot.write_buffer_data_used.set(0);
     Ok(())
@@ -3714,7 +3734,6 @@ fn append_one_element(
     local: &mut ProcessLocalSlot,
     elem_src: AbsPtr,
     buf_size: usize,
-    scratch: &mut Vec<u8>,
     elem: &Schema,
     res: &crate::recur::Resolver<'_>,
 ) -> Result<(), MorlocError> {
@@ -3725,12 +3744,9 @@ fn append_one_element(
     let inline_int = elem.serial_type == SerialType::Int
         // SAFETY: an Int's slot starts with its limb count.
         && unsafe { *(elem_src as *const usize) } <= 1;
-    let via_scratch = elem.serial_type == SerialType::Table;
+    let table = elem.serial_type == SerialType::Table;
     let flat_len = if inline_int {
         w
-    } else if via_scratch {
-        crate::voidstar::flatten_into_portable_with(scratch, elem_src, elem, res)?;
-        scratch.len()
     } else {
         crate::ffi::calc_voidstar_size_portable_with(elem_src, elem, res)?
     };
@@ -3763,38 +3779,25 @@ fn append_one_element(
     // that minimum exceeds buf_size, the element is truly oversize.
     let min_required = (16 + w).checked_add(variable_size).ok_or_else(too_big)?;
     if min_required > buf_size {
-        // A one-element `[a]`: its 16-byte header, then the element's flat
-        // form with offsets relative to the header.
         flush_write_buffer(slot, local)?;
         let oversize_len = 16usize.checked_add(flat_len).ok_or_else(too_big)?;
-        let mut oversize_payload = vec![0u8; oversize_len];
-        let arr_hdr = shm_types_crate::Array { size: 1, data: 16 as RelPtr };
-        // SAFETY: the payload holds the 16-byte header.
-        unsafe { std::ptr::write_unaligned(oversize_payload.as_mut_ptr() as *mut shm_types_crate::Array, arr_hdr) };
-        let payload_base = oversize_payload.as_mut_ptr();
-        if via_scratch {
-            oversize_payload[16..].copy_from_slice(scratch);
-            unsafe {
-                crate::voidstar::shift_buffer_relptrs(
-                    payload_base, oversize_len, 16, &local.elem_schema, 16isize,
-                )?;
+        let fill = |base: *mut u8| unsafe {
+            let arr_hdr = shm_types_crate::Array { size: 1, data: 16 as RelPtr };
+            std::ptr::write_unaligned(base as *mut shm_types_crate::Array, arr_hdr);
+            if table || inline_int {
+                std::ptr::copy_nonoverlapping(elem_src as *const u8, base.add(16), flat_len);
+                crate::voidstar::shift_buffer_relptrs(base, oversize_len, 16, elem, 16isize)
+            } else {
+                crate::voidstar::flatten_portable_in_place(base, 16, 16 + w, flat_len, elem_src, elem, res)
             }
-        } else if inline_int {
-            // SAFETY: the element's slot holds `w` bytes.
-            unsafe { std::ptr::copy_nonoverlapping(elem_src as *const u8, payload_base.add(16), w) };
-        } else {
-            // SAFETY: the payload holds the slot and `flat_len - w` bytes after it.
-            unsafe {
-                crate::voidstar::flatten_portable_in_place(payload_base, 16, 16 + w, flat_len, elem_src, elem, res)?;
-            }
+        };
+        if slot.kind.get() != MLC_KIND_CHANNEL {
+            return queue_filled_block(slot, local, oversize_len, 1, true, fill);
         }
-        let payload = PortablePayload::new(&oversize_payload, &local.value_schema)?;
-        if slot.kind.get() == MLC_KIND_CHANNEL {
-            channel_enqueue(slot, local, payload)?;
-        } else {
-            queue_block(slot, payload.0, 1, true)?;
-        }
-        return Ok(());
+        let landing = voidstar::Landing::new(oversize_len)?;
+        fill(landing.as_mut_ptr())?;
+        let arr = landing.relocate(&array_schema(&local.elem_schema), 0)?;
+        return channel_push(slot, arr);
     }
 
     // Try to fit one more element. If neither growing the index nor
@@ -3842,19 +3845,16 @@ fn append_one_element(
     let data_region_start = 16 + (slot.write_buffer_index_cap.get() as usize) * w;
     let data_offset = data_region_start + (slot.write_buffer_data_used.get() as usize);
 
-    if via_scratch || inline_int {
+    if table || inline_int {
         // SAFETY: SLOT-20: room for the slot and `variable_size` bytes.
         unsafe {
-            if inline_int {
-                std::ptr::copy_nonoverlapping(elem_src as *const u8, buf_abs.add(index_offset), w);
-            } else {
-                std::ptr::copy_nonoverlapping(scratch.as_ptr(), buf_abs.add(index_offset), w);
-                std::ptr::copy_nonoverlapping(scratch.as_ptr().add(w), buf_abs.add(data_offset), raw_variable_size);
-            }
+            let src = elem_src as *const u8;
+            std::ptr::copy_nonoverlapping(src, buf_abs.add(index_offset), w);
+            std::ptr::copy_nonoverlapping(src.add(w), buf_abs.add(data_offset), raw_variable_size);
             std::ptr::write_bytes(buf_abs.add(data_offset + raw_variable_size), 0, variable_size - raw_variable_size);
         }
         let shift: isize = (data_offset as isize) - (w as isize);
-        if via_scratch && shift != 0 {
+        if table && shift != 0 {
             unsafe {
                 crate::voidstar::shift_element_relptrs(
                     buf_abs, data_offset + raw_variable_size, index_offset,
@@ -3954,8 +3954,6 @@ pub fn shared_write_subpacket(
         // Walk the elements and append each. element_count updates
         // here (not at flush) so @flen reflects buffered elements too.
         // SLOT-20: the capacity is the stream's, fixed at open.
-        // One scratch buffer is reused for every element's flatten.
-        let mut scratch: Vec<u8> = Vec::new();
         forget_write_room();
         if slot.staged.get() != 0 {
             // One batch, one sub-packet: the whole `[a]` is flattened and
@@ -3964,9 +3962,18 @@ pub fn shared_write_subpacket(
             if slot.write_buffer_index_count.get() > 0 {
                 flush_write_buffer(slot, local)?;
             }
-            crate::voidstar::flatten_into_portable(&mut scratch, payload_voidstar, &local.value_schema)?;
-            let payload = PortablePayload::new(&scratch, &local.value_schema)?;
-            queue_block(slot, payload.0, n_elements, false)?;
+            let schema = &local.value_schema;
+            let res = crate::recur::Resolver::new(schema);
+            let total = crate::ffi::calc_voidstar_size_portable_with(payload_voidstar, schema, &res)?;
+            let table = schema.serial_type == SerialType::Table;
+            queue_filled_block(slot, local, total, n_elements, false, |base| unsafe {
+                if table {
+                    std::ptr::copy_nonoverlapping(payload_voidstar as *const u8, base, total);
+                    Ok(())
+                } else {
+                    crate::voidstar::flatten_portable_in_place(base, 0, schema.width, total, payload_voidstar, schema, &res)
+                }
+            })?;
             slot.element_count.set(slot.element_count.get() + n_elements);
             return Ok(());
         }
@@ -3999,7 +4006,7 @@ pub fn shared_write_subpacket(
                 continue;
             }
             let elem_src = unsafe { elem_data_base.add((i as usize) * w) };
-            append_one_element(slot, local, elem_src, buf_size, &mut scratch, &elem, &res)?;
+            append_one_element(slot, local, elem_src, buf_size, &elem, &res)?;
             slot.element_count.set(slot.element_count.get() + 1);
             i += 1;
         }
@@ -11257,13 +11264,7 @@ fn channel_wait_room(handle: i64) -> Result<(), MorlocError> {
     }
 }
 
-/// Queue one flushed sub-packet. Caller holds the slot lock.
-fn channel_enqueue(
-    slot: &RegistrySlot,
-    local: &ProcessLocalSlot,
-    payload: PortablePayload<'_>,
-) -> Result<(), MorlocError> {
-    let arr = payload_into_shm(payload.0, &local.elem_schema, 0)?;
+fn channel_push(slot: &RegistrySlot, arr: AbsPtr) -> Result<(), MorlocError> {
     let node_abs = match crate::shm::shmalloc(std::mem::size_of::<ChannelNode>()) {
         Ok(n) => n,
         Err(e) => {

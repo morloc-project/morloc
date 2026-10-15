@@ -225,18 +225,19 @@ fn run_task(compressors: &mut Vec<(u8, FrameCompressor)>, task: Task) {
 }
 
 fn split(input: SplitInput, level: CompressionLevel) -> Result<Vec<Arc<FrameJob>>, MorlocError> {
-    let len = match input.sealed {
+    let (start, len) = match input.sealed {
         Some(Sealed { n, cap, data_used, elem }) => {
             compact_sealed_buffer(input.base as AbsPtr, n, cap, data_used, &elem)?
         }
-        None => input.len,
+        None => (0, input.len),
     };
+    let base = input.base + start;
     let frame = subpacket_frame_size(level);
     let mut jobs = Vec::with_capacity(len.div_ceil(frame).max(1));
     let mut at = 0;
     loop {
         let n = frame.min(len - at);
-        let job = FrameJob::new(FrameInput { base: input.base + at, len: n }, level);
+        let job = FrameJob::new(FrameInput { base: base + at, len: n }, level);
         jobs.push(job.clone());
         submit(Task::Frame(job));
         at += n;
@@ -266,45 +267,60 @@ fn compress_frame(
     Ok(Compressed { bytes, frames, uncompressed_len: payload.len() })
 }
 
+/// # Safety
+/// `base` must hold `16 + n * elem.width + data_used` bytes laid out so.
+pub(crate) unsafe fn shift_records(
+    base: AbsPtr,
+    n: usize,
+    wasted: usize,
+    data_used: usize,
+    elem: &Schema,
+) -> Result<(), MorlocError> {
+    if wasted == 0 || data_used == 0 {
+        return Ok(());
+    }
+    let w = elem.width;
+    let res = crate::recur::Resolver::new(elem);
+    let shallow = crate::voidstar::shallow_array_slots(elem);
+    for i in 0..n {
+        crate::voidstar::shift_element_relptrs(
+            base, 16 + n * w + data_used, 16 + i * w, elem, -(wasted as isize), &res, shallow.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
 /// Close the gap between the used index slots and the data region of a
 /// write buffer, shifting relptrs to match, and write its Array header.
-/// Returns the payload length. Pure buffer arithmetic: safe off the
-/// writer's thread on a detached buffer.
+/// Returns the payload's offset in the buffer and its length.
 pub(crate) fn compact_sealed_buffer(
     buf: AbsPtr,
     n: u64,
     cap: u64,
     data_used: u64,
     elem: &Schema,
-) -> Result<usize, MorlocError> {
+) -> Result<(usize, usize), MorlocError> {
     let w = elem.width;
     let n = n as usize;
     let data_used = data_used as usize;
     let wasted = (cap as usize - n) * w;
+    let records_end = 16 + n * w;
+    let mut start = 0;
     if wasted > 0 && data_used > 0 {
-        let old_data_offset = 16 + cap as usize * w;
-        let new_data_offset = 16 + n * w;
-        unsafe {
-            std::ptr::copy(buf.add(old_data_offset), buf.add(new_data_offset), data_used);
+        if records_end < data_used {
+            unsafe { std::ptr::copy(buf, buf.add(wasted), records_end) };
+            start = wasted;
+        } else {
+            unsafe { std::ptr::copy(buf.add(16 + cap as usize * w), buf.add(records_end), data_used) };
         }
-        let res = crate::recur::Resolver::new(elem);
-        let shallow = crate::voidstar::shallow_array_slots(elem);
-        for i in 0..n {
-            let inline_off = 16 + i * w;
-            unsafe {
-                crate::voidstar::shift_element_relptrs(
-                    buf, new_data_offset + data_used, inline_off, elem, -(wasted as isize), &res,
-                    shallow.as_deref(),
-                )?;
-            }
-        }
+        unsafe { shift_records(buf.add(start), n, wasted, data_used, elem)? };
     }
     unsafe {
-        let hdr = buf as *mut morloc_runtime_types::shm_types::Array;
+        let hdr = buf.add(start) as *mut morloc_runtime_types::shm_types::Array;
         (*hdr).size = n;
         (*hdr).data = 16 as morloc_runtime_types::shm_types::RelPtr;
     }
-    Ok(16 + n * w + data_used)
+    Ok((start, records_end + data_used))
 }
 
 /// A batch being compressed: a split job and, once it has run, its frame
@@ -376,6 +392,61 @@ pub(crate) fn compress_slice(base: AbsPtr, len: usize, level: CompressionLevel) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sealed buffer of `xs` with room for `cap` records, laid out as the
+    /// write path lays it out.
+    fn sealed(schema: &str, xs: &[String], cap: usize) -> (Vec<u64>, usize, Schema) {
+        let elem = morloc_runtime_types::schema::parse_schema(schema).unwrap();
+        let res = crate::recur::Resolver::new(&elem);
+        let w = elem.width;
+        let vs: Vec<AbsPtr> = xs.iter().map(|x| crate::json::read_json_with_schema(x, &elem).unwrap()).collect();
+        let flats: Vec<usize> =
+            vs.iter().map(|&v| crate::ffi::calc_voidstar_size_portable_with(v, &elem, &res).unwrap()).collect();
+        let total: usize = flats.iter().map(|f| (f - w).next_multiple_of(8)).sum();
+        let mut buf = vec![0xffu64; (16 + cap * w + total).div_ceil(8)];
+        let base = buf.as_mut_ptr() as *mut u8;
+        let mut used = 0;
+        for (i, (&v, &flat)) in vs.iter().zip(&flats).enumerate() {
+            let var = (flat - w).next_multiple_of(8);
+            unsafe {
+                crate::voidstar::flatten_portable_in_place(base, 16 + i * w, 16 + cap * w + used, w + var, v, &elem, &res)
+                    .unwrap();
+            }
+            crate::shm::shfree(v).unwrap();
+            used += var;
+        }
+        (buf, used, elem)
+    }
+
+    /// Compaction gives the payload bytes of a buffer that had no room to
+    /// spare, whichever side it moves: the data (short records) or the
+    /// header and records (long ones).
+    #[test]
+    fn compaction_gives_the_same_bytes_whichever_side_moves() {
+        let _shm = crate::own_test_registry();
+        let quote = |x: String| format!("{:?}", x);
+        let short: Vec<String> = (0..300).map(|i| quote("x".repeat(i % 3))).collect();
+        let long: Vec<String> = (0..5).map(|i| quote("y".repeat(1000 + i * 37))).collect();
+        let nested_short: Vec<String> =
+            (0..200).map(|i| format!("[{}]", vec![quote("z".repeat(i % 2)); i % 3].join(","))).collect();
+        let nested_long: Vec<String> =
+            (0..4).map(|i| format!("[{}]", vec![quote("w".repeat(700 + i)); 3].join(","))).collect();
+        for (schema, xs) in [("s", short), ("s", long), ("as", nested_short), ("as", nested_long)] {
+            let n = xs.len();
+            let (mut tight, used, elem) = sealed(schema, &xs, n);
+            let (s0, l0) =
+                compact_sealed_buffer(tight.as_mut_ptr() as AbsPtr, n as u64, n as u64, used as u64, &elem).unwrap();
+            let want = unsafe { std::slice::from_raw_parts((tight.as_ptr() as *const u8).add(s0), l0) }.to_vec();
+            let (mut loose, used2, _) = sealed(schema, &xs, n * 3 + 7);
+            let (s1, l1) =
+                compact_sealed_buffer(loose.as_mut_ptr() as AbsPtr, n as u64, (n * 3 + 7) as u64, used2 as u64, &elem)
+                    .unwrap();
+            let got = unsafe { std::slice::from_raw_parts((loose.as_ptr() as *const u8).add(s1), l1) }.to_vec();
+            assert_eq!(s0, 0);
+            assert_eq!(s1 != 0, 16 + n * elem.width < used2, "the larger side moved");
+            assert!(got == want, "{n} records: compaction changed the payload");
+        }
+    }
 
     /// SLOT-24: a payload's frames join in payload order and decode to the
     /// payload; settling a ticket returns once nothing reads the payload.

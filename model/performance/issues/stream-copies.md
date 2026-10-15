@@ -8,8 +8,18 @@ pairs unchanged within noise. The size walk remains. R1 fixed 2026-10-14
 (SLOT-25): C++ and Rust pools decode an uncompressed, aligned batch where
 it is mapped; level-0 reads of 600 MiB of `[Vector U8]`, C++ 0.27 -> 0.18
 s, Rust 0.40 -> 0.26 s; 1M pairs, C++ 0.80 -> 0.49 s, Rust 1.14 -> 0.76 s
-(`cat` 0.07 s). Compressed batches still land in shared memory (R2).
-Others open.
+(`cat` 0.07 s). W2 fixed 2026-10-15: compaction moves the smaller side
+(the header and index, or the data); a channel batch, a staged batch and
+an oversize element are built once in the block that is queued, with no
+staging copy and the write buffer untouched until the queue takes the
+batch. Interleaved A/B, C++ writes of 600 MiB: `[Vector U8]` level 0 CPU
+2.03 -> 1.96 s, flushed level 3 wall 4.29 -> 4.14 s; pairs flushed level
+3 4.86 -> 4.77 s. Compressed batches still land in shared memory (R2).
+Still copied on the write side: a stdout stream joins header and payload
+into one buffer before writing (`send_stdio`, custody.rs), and a
+multi-frame compressed batch joins its frames into one buffer before the
+write (`Ticket::wait`, write_behind.rs); both could hand an iovec to
+`pwritev`/`writev` instead. Others open.
 Parent: runtime/issues/encode-throughput.md sections 1b and 2. Source:
 lib/biolib/runtime-bench README sections 2 and 6.
 
@@ -165,14 +175,17 @@ No type or API change, each measurable alone:
 - **R2.** Decompress into a reused, bounded private buffer and decode in
   payload space (with R1's callback), skipping the shared-memory block
   and its scrub. A thread-local buffer needs a STATE-1 registry row.
-  Tried 2026-10-14 and rejected by measurement: decode-ahead (SLOT-26/27)
+  Tried 2026-10-14 and set aside, not settled: decode-ahead (SLOT-26/27)
   already serves compressed batches from reused shared-memory landings
-  without a scrub, and on the synchronous path a fresh private buffer
-  costs page faults and kernel zeroing where a shared-memory block comes
-  from a pre-faulted volume. Interleaved A/B over 5 rounds, C++ level-3
-  reads of 600 MiB: default 0.27 -> 0.29 s (bytes), 0.555 -> 0.574 s
-  (pairs); cache off 0.36 -> 0.374 s, 0.70 -> 0.72 s. Deeper decode-ahead
-  passes (32 MiB, 4 spares) were no better (0.38 s) and used more memory.
+  without a scrub, so only the synchronous path (several readers, cache
+  off, one worker) could gain, and with the cache off a fresh private
+  buffer pays page faults and zeroing per batch. The A/B (C++ level-3
+  reads of 600 MiB; default 0.27 -> 0.29 s bytes, 0.555 -> 0.574 s pairs;
+  cache off 0.36 -> 0.374 s, 0.70 -> 0.72 s) compared a plain release
+  build against the one `morloc init` makes, so build settings may account
+  for the difference; redo it with both built alike before deciding.
+  Deeper decode-ahead passes (32 MiB, 4 spares) were no better (0.38 s)
+  and used more memory.
 
 Rejected: scrubbing large blocks with `MADV_REMOVE`/hole punching instead
 of a memset. Re-allocating freed tmpfs pages on a full `/dev/shm` raises

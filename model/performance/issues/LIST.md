@@ -8,5 +8,5 @@ its issue is fixed.
 
 From lib/biolib/runtime-bench (runtime/issues/encode-throughput.md):
 
-- [stream-copies.md](stream-copies.md): stream copies: compressed batches land in shared memory, move the index not the data, then views (flatten into the buffer and decode in place fixed)
+- [stream-copies.md](stream-copies.md): stream copies: compressed batches land in shared memory, stdio and frame joins copy, then views (flatten into the buffer, decode in place, move the index fixed)
 - [stream-compression-pipeline.md](stream-compression-pipeline.md): compressed streams: memory bounded per stream, not per process; oversize elements copied four times (frames per level fixed; decode-ahead fixed, SLOT-26, SLOT-27)
