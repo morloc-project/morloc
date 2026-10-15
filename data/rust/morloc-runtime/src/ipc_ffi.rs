@@ -974,9 +974,10 @@ const CONN_SLOTS: usize = 256;
 static CONN_FDS: [std::sync::atomic::AtomicI32; CONN_SLOTS] =
     [const { std::sync::atomic::AtomicI32::new(-1) }; CONN_SLOTS];
 
+// NET-7: sequentially consistent with the fork count `connect_to` reads after it.
 fn track_conn(fd: i32) -> bool {
     use std::sync::atomic::Ordering;
-    CONN_FDS.iter().any(|s| s.compare_exchange(-1, fd, Ordering::AcqRel, Ordering::Relaxed).is_ok())
+    CONN_FDS.iter().any(|s| s.compare_exchange(-1, fd, Ordering::SeqCst, Ordering::Relaxed).is_ok())
 }
 
 fn untrack_conn(fd: i32) {
@@ -1069,14 +1070,23 @@ pub(crate) fn drop_cached_connections() {
 /// Connect to `socket_path`, retrying while the pool starts. The descriptor
 /// is tracked when there is room, which allows it to be reused.
 unsafe fn connect_to(socket_path: *const c_char) -> Result<(i32, bool), MorlocError> {
-    let mut err: *mut c_char = ptr::null_mut();
-    let client_fd = new_socket(&mut err);
-    if client_fd < 0 {
-        let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-        libc::free(err as *mut c_void);
-        return Err(MorlocError::Ipc(msg));
-    }
-    let tracked = track_conn(client_fd);
+    let (client_fd, tracked) = loop {
+        let seq = crate::fork_policy::fork_seq_settled();
+        let mut err: *mut c_char = ptr::null_mut();
+        let fd = new_socket(&mut err);
+        if fd < 0 {
+            let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+            libc::free(err as *mut c_void);
+            return Err(MorlocError::Ipc(msg));
+        }
+        let tracked = track_conn(fd);
+        if crate::fork_policy::fork_seq() == seq {
+            break (fd, tracked);
+        }
+        // NET-7: a child forked before the socket was tracked keeps a copy
+        // the fork handler does not close; it has carried nothing yet.
+        drop_conn(fd);
+    };
     let fail = |e: MorlocError| {
         drop_conn(client_fd);
         Err(e)
@@ -2258,6 +2268,9 @@ mod reuse_tests {
         Keep,
         Close,
         DieAfterRead,
+        // NET-7: answers with `return_ping` and closes, as the accept loop
+        // and the Python and R pools answer a ping.
+        Pong,
     }
 
     struct TestCallee {
@@ -2292,7 +2305,9 @@ mod reuse_tests {
             for conn in listener.incoming() {
                 let Ok(mut conn) = conn else { return };
                 accepts.fetch_add(1, Ordering::SeqCst);
-                conns.lock().unwrap().push(conn.try_clone().unwrap());
+                if behaviour != Callee::Pong {
+                    conns.lock().unwrap().push(conn.try_clone().unwrap());
+                }
                 let (runs, eofs) = (runs.clone(), eofs.clone());
                 std::thread::spawn(move || loop {
                     let mut header = [0u8; PKT_HEADER_SIZE];
@@ -2303,6 +2318,14 @@ mod reuse_tests {
                     runs.fetch_add(1, Ordering::SeqCst);
                     if behaviour == Callee::DieAfterRead {
                         let _ = conn.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
+                    if behaviour == Callee::Pong {
+                        let mut err: *mut c_char = ptr::null_mut();
+                        let pong = unsafe { crate::packet_ffi::return_ping(header.as_ptr(), &mut err) };
+                        assert!(!pong.is_null(), "return_ping refused a ping");
+                        let _ = conn.write_all(unsafe { std::slice::from_raw_parts(pong, PKT_HEADER_SIZE) });
+                        unsafe { libc::free(pong as *mut c_void) };
                         return;
                     }
                     let keep = behaviour == Callee::Keep && mode_of(&header) & MODE_KEEP != 0;
@@ -2354,6 +2377,19 @@ mod reuse_tests {
         assert_eq!(cached_connections(), 1);
         drop_cached_connections();
         assert!(eventually(|| t.eofs.load(Ordering::SeqCst) == 1), "closing the cache ends the callee's wait");
+        let _ = std::fs::remove_dir_all(&t.dir);
+    }
+
+    // NET-7: a pong keeps the connection only if the callee says so itself;
+    // one that answers and closes is never reused.
+    #[test]
+    fn a_ping_answered_by_a_callee_that_closes_is_not_kept() {
+        let t = callee(Callee::Pong);
+        for _ in 0..3 {
+            assert_eq!(call(&t), Ok(0));
+            assert_eq!(cached_connections(), 0, "a pong from a closing callee was kept");
+        }
+        assert_eq!(t.accepts.load(Ordering::SeqCst), 3);
         let _ = std::fs::remove_dir_all(&t.dir);
     }
 

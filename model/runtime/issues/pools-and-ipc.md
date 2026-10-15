@@ -32,3 +32,11 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   while a copy of its descriptor lives on, or `connect` to a full backlog,
   blocks in the kernel and never reaches `send_parts`' once-a-second
   `Peer::alive` check. Only the reply read is liveness-checked.
+
+- **On macOS a socket is not close-on-exec from birth.** [read 2026-10-15]
+  Against FORK-3 and NET-7. `morloc_runtime_types::fd::socket` sets
+  `FD_CLOEXEC` after `socket()` on non-Linux hosts. A process spawned by
+  another thread in between (Rust's `Command` uses `posix_spawn`, which
+  runs no fork handlers) inherits a caller's connection; the fork count
+  `connect_to` checks does not see it, so the connection may be kept, and
+  its C++ or Rust callee then waits on it until that process exits.

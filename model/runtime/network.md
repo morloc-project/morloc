@@ -110,16 +110,22 @@ reported and the daemon serves without it.
 
 ### NET-7 A local connection carries one call at a time and is reused only when its callee keeps it
 Status: implemented
-Checked by: a_kept_connection_carries_the_next_calls, a_callee_that_does_not_keep_gets_a_connection_per_call, a_kept_connection_whose_callee_is_gone_is_retried_once_on_a_new_one, a_call_whose_callee_dies_after_reading_it_fails_without_a_retry, a_forked_child_does_not_hold_its_parents_connections_open, the_keep_bit_is_cleared_from_a_reply, tla:CrossingConn, tla:CrossingConn_fork, tla:CrossingConn_death, tla:CrossingConn_abandon, tla:CrossingConn_child_uses_inherited.bug, tla:CrossingConn_child_keeps_inherited.bug, tla:CrossingConn_retry_after_complete_send.bug, tla:CrossingConn_keep_after_error.bug
+Checked by: a_kept_connection_carries_the_next_calls, a_callee_that_does_not_keep_gets_a_connection_per_call, a_ping_answered_by_a_callee_that_closes_is_not_kept, a_kept_connection_whose_callee_is_gone_is_retried_once_on_a_new_one, a_call_whose_callee_dies_after_reading_it_fails_without_a_retry, a_forked_child_does_not_hold_its_parents_connections_open, the_keep_bit_is_cleared_from_a_reply, tla:CrossingConn, tla:CrossingConn_fork, tla:CrossingConn_death, tla:CrossingConn_abandon, tla:CrossingConn_child_uses_inherited.bug, tla:CrossingConn_child_keeps_inherited.bug, tla:CrossingConn_retry_after_complete_send.bug, tla:CrossingConn_keep_after_error.bug, tla:CrossingConn_keep_across_fork_window.bug, neither_side_of_a_fork_waits_on_it_afterwards
 
 A caller thread keeps at most one connection per callee and sends the next
 request on it only after it has read the whole reply to the last. The
 request asks the callee to keep the connection (a mode bit, FMT-1); the
 caller reuses it only when the reply says the callee keeps it, clears that
 bit before handing the reply on, and drops the connection after any error.
+A ping is answered like a call: its reply asks to keep only when the
+callee keeps, so an echo of the request never carries the request's bit.
 C++ and Rust pools keep; Python and R pools close after each reply. The connection is owned by the caller's
 fork generation: a forked child closes the cached connections it inherited
-and never uses them (FORK-14). A callee that keeps a connection never
+and never uses them (FORK-14). A socket is registered for the child's
+close only after it exists, so a fork in between leaves a child a copy it
+does not close: the caller drops a socket made across a fork, which has
+carried nothing, and makes another; it makes none while a fork is under
+way. A callee that keeps a connection never
 closes it while it lives. A send that fails because the callee's end is
 closed delivered nothing, and is retried once on a new connection; a
 connection that ends after a complete send means the callee is gone, and

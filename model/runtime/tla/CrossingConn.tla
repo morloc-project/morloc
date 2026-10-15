@@ -8,7 +8,10 @@
 (* because the callee's end is closed delivered nothing and is retried     *)
 (* once on a fresh connection; a closed end after a complete send is the   *)
 (* callee's death and is never retried. A forked child closes the cached   *)
-(* connections it inherited. Shutdown wakes pinned workers.                *)
+(* connections it inherited. Shutdown wakes pinned workers. A connection   *)
+(* is tracked for the fork handler only after its socket exists; a fork   *)
+(* in between leaves the child a copy it does not close, so the caller    *)
+(* drops that socket, which carried nothing yet, and makes another.       *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Variant, Faults
@@ -21,6 +24,8 @@ CONSTANTS Variant, Faults
 \* "keep_after_error": a caller that abandons a call keeps its connection.
 \* "join_pinned_without_shutdown_wake": shutdown waits for pinned workers'
 \*   connections to close.
+\* "keep_across_fork_window": a connection whose socket was made before a
+\*   fork and tracked after it is used, so a child holds an untracked copy.
 
 Callers == {"c", "cb", "k"}  \* c: a caller; cb: called back while a worker waits; k: c's forked child
 \* As many workers as connections: every connection pins at most one worker,
@@ -55,11 +60,16 @@ VARIABLES
     shutdown,
     cbWanted,   \* a worker waits on a callback call
     falseCrash,
-    wrongReply
+    wrongReply,
+    tk          \* connection -> [untracked: socket made, not yet tracked;
+                \*   across: a fork happened while it was untracked]
 
 vars == <<cst, cache, cur, calls, abandoned, cs, owner, copy, inbox, outbox, kept,
           killed, queue, ws, wc, held, runs, pool, deaths, shutdown, cbWanted,
-          falseCrash, wrongReply>>
+          falseCrash, wrongReply, tk>>
+
+NoTrack == [untracked |-> FALSE, across |-> FALSE]
+Untracked == [untracked |-> TRUE, across |-> FALSE]
 
 Req(c) == [caller |-> c, n |-> calls[c] + 1]
 ReqIds == [caller : Callers, n : 1..MaxCalls]
@@ -88,6 +98,7 @@ Init ==
     /\ cbWanted = FALSE
     /\ falseCrash = FALSE
     /\ wrongReply = FALSE
+    /\ tk = [x \in Conns |-> NoTrack]
 
 CallerOpen(x) == cs[x] \in {"open", "sclosed"}
 CalleeOpen(x) == cs[x] \in {"open", "cclosed"}
@@ -101,7 +112,7 @@ MayCall(c) ==
     /\ IF c = "cb" THEN cbWanted ELSE TRUE
     /\ ~shutdown
 
-\* Send on a fresh connection: the accept loop queues it.
+\* Make the socket of a fresh connection; it is tracked and sent in Track.
 Connect(c, r) ==
     /\ pool = "up"
     /\ Fresh # {}
@@ -109,9 +120,9 @@ Connect(c, r) ==
          /\ cs' = [cs EXCEPT ![x] = "open"]
          /\ owner' = [owner EXCEPT ![x] = c]
          /\ inbox' = [inbox EXCEPT ![x] = r]
-         /\ queue' = queue \cup {x}
          /\ cur' = [cur EXCEPT ![c] = x]
-         /\ cst' = [cst EXCEPT ![c] = "sent"]
+         /\ cst' = [cst EXCEPT ![c] = "connecting"]
+         /\ tk' = [tk EXCEPT ![x] = Untracked]
 
 Call(c) ==
     /\ MayCall(c)
@@ -122,7 +133,7 @@ Call(c) ==
               /\ inbox' = [inbox EXCEPT ![x] = Req(c)]
               /\ cur' = [cur EXCEPT ![c] = x]
               /\ cst' = [cst EXCEPT ![c] = "sent"]
-              /\ UNCHANGED <<cs, owner, queue, cache>>
+              /\ UNCHANGED <<cs, owner, queue, cache, tk>>
          ELSE \* EPIPE: nothing delivered; drop it and retry on a fresh one
               /\ cache' = [cache EXCEPT ![c] = None]
               /\ LET x2 == CHOOSE y \in Fresh : TRUE IN
@@ -131,12 +142,38 @@ Call(c) ==
                    /\ cs' = [cs EXCEPT ![x] = "closed", ![x2] = "open"]
                    /\ owner' = [owner EXCEPT ![x2] = c]
                    /\ inbox' = [inbox EXCEPT ![x2] = Req(c)]
-                   /\ queue' = queue \cup {x2}
                    /\ cur' = [cur EXCEPT ![c] = x2]
-                   /\ cst' = [cst EXCEPT ![c] = "sent"]
+                   /\ cst' = [cst EXCEPT ![c] = "connecting"]
+                   /\ tk' = [tk EXCEPT ![x2] = Untracked]
+                   /\ UNCHANGED queue
        ELSE /\ Connect(c, Req(c))
-            /\ UNCHANGED cache
+            /\ UNCHANGED <<cache, queue>>
     /\ UNCHANGED <<calls, abandoned, copy, outbox, kept, killed, ws, wc, held, runs,
+                   pool, deaths, shutdown, cbWanted, falseCrash, wrongReply>>
+
+\* The socket is tracked, then connected: the request reaches the accept
+\* loop. If a fork came between making and tracking it, the socket, which
+\* has carried nothing, is dropped and another made; the child's copy of it
+\* is never connected.
+Track(c) ==
+    /\ cst[c] = "connecting"
+    /\ pool = "up"
+    /\ LET x == cur[c] IN
+       IF tk[x].across /\ Variant # "keep_across_fork_window"
+       THEN /\ Fresh # {}
+            /\ LET x2 == CHOOSE y \in Fresh : TRUE IN
+                 /\ cs' = [cs EXCEPT ![x] = "closed", ![x2] = "open"]
+                 /\ copy' = [copy EXCEPT ![x] = FALSE]
+                 /\ owner' = [owner EXCEPT ![x2] = c]
+                 /\ inbox' = [inbox EXCEPT ![x] = NoReq, ![x2] = inbox[x]]
+                 /\ cur' = [cur EXCEPT ![c] = x2]
+                 /\ tk' = [tk EXCEPT ![x] = NoTrack, ![x2] = Untracked]
+            /\ UNCHANGED <<cst, queue>>
+       ELSE /\ queue' = queue \cup {x}
+            /\ tk' = [tk EXCEPT ![x] = [untracked |-> FALSE, across |-> tk[x].across]]
+            /\ cst' = [cst EXCEPT ![c] = "sent"]
+            /\ UNCHANGED <<cs, copy, owner, inbox, cur>>
+    /\ UNCHANGED <<cache, calls, abandoned, outbox, kept, killed, ws, wc, held, runs,
                    pool, deaths, shutdown, cbWanted, falseCrash, wrongReply>>
 
 CloseCallerEnd(x) ==
@@ -162,7 +199,7 @@ Receive(c) ==
                  /\ cs' = CloseCallerEnd(x)
     /\ Finish(c)
     /\ UNCHANGED <<cur, abandoned, owner, copy, inbox, kept, killed, queue, ws, wc, held,
-                   runs, pool, deaths, shutdown, falseCrash>>
+                   runs, pool, deaths, shutdown, falseCrash, tk>>
 
 \* End of file after a complete send: the callee is gone.
 PeerGone(c) ==
@@ -185,7 +222,7 @@ PeerGone(c) ==
                  /\ Finish(c)
                  /\ UNCHANGED <<owner, inbox, queue, cur>>
     /\ UNCHANGED <<abandoned, copy, outbox, kept, killed, ws, wc, held, runs, pool,
-                   deaths, shutdown, wrongReply>>
+                   deaths, shutdown, wrongReply, tk>>
 
 \* The caller gives up on a call for a reason of its own, without its reply.
 Abandon(c) ==
@@ -201,7 +238,7 @@ Abandon(c) ==
             /\ cs' = CloseCallerEnd(cur[c])
     /\ Finish(c)
     /\ UNCHANGED <<cur, owner, copy, inbox, outbox, kept, killed, queue, ws, wc, held,
-                   runs, pool, deaths, shutdown, falseCrash, wrongReply>>
+                   runs, pool, deaths, shutdown, falseCrash, wrongReply, tk>>
 
 \* The caller thread exits: its cache is closed.
 Exit(c) ==
@@ -214,20 +251,22 @@ Exit(c) ==
     /\ cache' = [cache EXCEPT ![c] = None]
     /\ UNCHANGED <<cur, calls, abandoned, owner, copy, inbox, outbox, kept, killed,
                    queue, ws, wc, held, runs, pool, deaths, shutdown, cbWanted,
-                   falseCrash, wrongReply>>
+                   falseCrash, wrongReply, tk>>
 
 \* The caller's process forks; the child is k.
+\* Another thread may fork while c makes a socket: the child's copy of an
+\* untracked socket is not closed by the fork handler.
 Fork ==
     /\ "fork" \in Faults
     /\ cst["k"] = "unborn"
-    /\ cst["c"] = "idle"
+    /\ cst["c"] \in {"idle", "connecting"}
     /\ cst' = [cst EXCEPT !["k"] = "idle"]
     /\ cache' = IF Variant = "child_uses_inherited"
                 THEN [cache EXCEPT !["k"] = cache["c"]]
                 ELSE cache
-    /\ copy' = IF Variant = "child_keeps_inherited" /\ cache["c"] # None
-               THEN [copy EXCEPT ![cache["c"]] = TRUE]
-               ELSE copy
+    /\ copy' = [x \in Conns |-> copy[x] \/ tk[x].untracked
+                  \/ (Variant = "child_keeps_inherited" /\ cache["c"] = x)]
+    /\ tk' = [x \in Conns |-> IF tk[x].untracked THEN [tk[x] EXCEPT !.across = TRUE] ELSE tk[x]]
     /\ UNCHANGED <<cur, calls, abandoned, cs, owner, inbox, outbox, kept, killed,
                    queue, ws, wc, held, runs, pool, deaths, shutdown, cbWanted,
                    falseCrash, wrongReply>>
@@ -246,7 +285,7 @@ Spawn ==
          /\ ws' = [ws EXCEPT ![w] = "idle"]
     /\ UNCHANGED <<cst, cache, cur, calls, abandoned, cs, owner, copy, inbox,
                    outbox, kept, killed, queue, wc, held, runs, pool, deaths, shutdown,
-                   cbWanted, falseCrash, wrongReply>>
+                   cbWanted, falseCrash, wrongReply, tk>>
 
 Take(w) ==
     /\ pool = "up"
@@ -258,7 +297,7 @@ Take(w) ==
          /\ ws' = [ws EXCEPT ![w] = "serving"]
     /\ UNCHANGED <<held, cst, cache, cur, calls, abandoned, cs, owner, copy, inbox,
                    outbox, kept, killed, runs, pool, deaths, shutdown, cbWanted,
-                   falseCrash, wrongReply>>
+                   falseCrash, wrongReply, tk>>
 
 \* A serving or pinned worker reads its connection's request and runs it.
 \* The first call from c calls back: the worker blocks until cb's call ends.
@@ -279,7 +318,7 @@ Run(w) ==
                  /\ kept' = [kept EXCEPT ![x] = TRUE]
                  /\ UNCHANGED <<held, cbWanted>>
     /\ UNCHANGED <<cst, cache, cur, calls, abandoned, cs, owner, copy, killed,
-                   queue, wc, pool, deaths, shutdown, falseCrash, wrongReply>>
+                   queue, wc, pool, deaths, shutdown, falseCrash, wrongReply, tk>>
 
 \* The callback has returned: the blocked worker replies.
 Resume(w) ==
@@ -292,7 +331,7 @@ Resume(w) ==
     /\ held' = [held EXCEPT ![w] = NoReq]
     /\ UNCHANGED <<cst, cache, cur, calls, abandoned, cs, owner, copy, inbox,
                    killed, queue, wc, runs, pool, deaths, shutdown, cbWanted,
-                   falseCrash, wrongReply>>
+                   falseCrash, wrongReply, tk>>
 
 \* A pinned worker sees end of file: it closes its end and is free again.
 Unpin(w) ==
@@ -304,21 +343,22 @@ Unpin(w) ==
     /\ wc' = [wc EXCEPT ![w] = None]
     /\ UNCHANGED <<cst, cache, cur, calls, abandoned, owner, copy, inbox, outbox,
                    kept, killed, queue, held, runs, pool, deaths, shutdown,
-                   cbWanted, falseCrash, wrongReply>>
+                   cbWanted, falseCrash, wrongReply, tk>>
+
 
 CloseCalleeEnd(x) == IF cs[x] = "cclosed" THEN "closed" ELSE "sclosed"
 
 \* Shutdown, with no call in flight anywhere.
 Shutdown ==
     /\ ~shutdown
-    /\ \A c \in Callers : cst[c] # "sent"
+    /\ \A c \in Callers : cst[c] \notin {"sent", "connecting"}
     /\ \A w \in Workers : ws[w] \notin {"serving", "blocked"}
     /\ queue = {}
     /\ ~cbWanted
     /\ shutdown' = TRUE
     /\ UNCHANGED <<cst, cache, cur, calls, abandoned, cs, owner, copy, inbox,
                    outbox, kept, killed, queue, ws, wc, held, runs, pool, deaths,
-                   cbWanted, falseCrash, wrongReply>>
+                   cbWanted, falseCrash, wrongReply, tk>>
 
 \* A worker that is idle, or pinned and woken by shutdown, exits.
 Leave(w) ==
@@ -331,7 +371,7 @@ Leave(w) ==
     /\ ws' = [ws EXCEPT ![w] = "gone"]
     /\ UNCHANGED <<cst, cache, cur, calls, abandoned, owner, copy, inbox, outbox,
                    kept, killed, queue, wc, held, runs, pool, deaths, shutdown,
-                   cbWanted, falseCrash, wrongReply>>
+                   cbWanted, falseCrash, wrongReply, tk>>
 
 \* The pool dies: every callee end closes with it.
 Die ==
@@ -345,10 +385,10 @@ Die ==
     /\ wc' = [w \in Workers |-> None]
     /\ held' = [w \in Workers |-> NoReq]
     /\ queue' = {}
-    /\ cs' = [x \in Conns |-> IF CalleeOpen(x) THEN CloseCalleeEnd(x) ELSE cs[x]]
-    /\ killed' = [x \in Conns |-> killed[x] \/ CalleeOpen(x)]
+    /\ cs' = [x \in Conns |-> IF CalleeOpen(x) /\ ~tk[x].untracked THEN CloseCalleeEnd(x) ELSE cs[x]]
+    /\ killed' = [x \in Conns |-> killed[x] \/ (CalleeOpen(x) /\ ~tk[x].untracked)]
     /\ UNCHANGED <<cst, cache, cur, calls, abandoned, owner, copy, inbox, outbox,
-                   kept, runs, shutdown, cbWanted, falseCrash, wrongReply>>
+                   kept, runs, shutdown, cbWanted, falseCrash, wrongReply, tk>>
 
 Restart ==
     /\ pool = "dead"
@@ -356,7 +396,7 @@ Restart ==
     /\ ws' = [ws EXCEPT !["w1"] = "idle"]
     /\ UNCHANGED <<cst, cache, cur, calls, abandoned, cs, owner, copy, inbox,
                    outbox, kept, killed, queue, wc, held, runs, deaths, shutdown,
-                   cbWanted, falseCrash, wrongReply>>
+                   cbWanted, falseCrash, wrongReply, tk>>
 
 \* A connection closed at both ends and held by no live worker or call
 \* frees its id, as the kernel reuses a descriptor number.
@@ -370,12 +410,13 @@ Recycle(x) ==
     /\ kept' = [kept EXCEPT ![x] = FALSE]
     /\ killed' = [killed EXCEPT ![x] = FALSE]
     /\ copy' = [copy EXCEPT ![x] = FALSE]
+    /\ tk' = [tk EXCEPT ![x] = NoTrack]
     /\ wc' = [w \in Workers |-> IF wc[w] = x THEN None ELSE wc[w]]
     /\ UNCHANGED <<cst, cache, cur, calls, abandoned, owner, queue, ws, held, runs,
                    pool, deaths, shutdown, cbWanted, falseCrash, wrongReply>>
 
 Next ==
-    \/ \E c \in Callers : Call(c) \/ Receive(c) \/ PeerGone(c) \/ Abandon(c) \/ Exit(c)
+    \/ \E c \in Callers : Call(c) \/ Track(c) \/ Receive(c) \/ PeerGone(c) \/ Abandon(c) \/ Exit(c)
     \/ Fork
     \/ Spawn
     \/ \E w \in Workers : Take(w) \/ Run(w) \/ Resume(w) \/ Unpin(w) \/ Leave(w)
@@ -388,7 +429,7 @@ Next ==
 Spec ==
     /\ Init
     /\ [][Next]_vars
-    /\ \A c \in Callers : WF_vars(Receive(c)) /\ WF_vars(PeerGone(c))
+    /\ \A c \in Callers : WF_vars(Receive(c)) /\ WF_vars(PeerGone(c)) /\ WF_vars(Track(c))
     /\ WF_vars(Call("cb"))  \* the call back is part of the call that waits on it
     /\ WF_vars(Spawn)
     /\ WF_vars(Restart)

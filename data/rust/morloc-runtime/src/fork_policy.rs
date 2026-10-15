@@ -228,6 +228,25 @@ unsafe impl Sync for ForkHeldSlot {}
 
 static FORK_HELD: ForkHeldSlot = ForkHeldSlot(std::cell::UnsafeCell::new(None));
 
+// NET-7: odd from this process's prepare handler to its after-fork handler.
+static FORK_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// NET-7: the count once no fork of this process is in progress.
+pub(crate) fn fork_seq_settled() -> u64 {
+    loop {
+        let seq = FORK_SEQ.load(Ordering::SeqCst);
+        if seq % 2 == 0 {
+            return seq;
+        }
+        std::thread::yield_now();
+    }
+}
+
+// NET-7
+pub(crate) fn fork_seq() -> u64 {
+    FORK_SEQ.load(Ordering::SeqCst)
+}
+
 fn take_fork_held() -> Option<ForkHeld> {
     // SAFETY: FORK-5: called by the forking thread, which holds every held lock.
     unsafe { (*FORK_HELD.0.get()).take() }
@@ -287,6 +306,8 @@ fn prepare_fork_body() {
     }
     held.lease = staged;
     held.lease_rels = rels;
+    // NET-7: under every held lock, so forks move the count one at a time.
+    FORK_SEQ.fetch_add(1, Ordering::SeqCst);
     // SAFETY: FORK-5: this thread now holds every held lock.
     unsafe { *FORK_HELD.0.get() = Some(held) };
 }
@@ -297,6 +318,8 @@ extern "C" fn after_fork_in_parent() {
 }
 
 fn after_fork_in_parent_body() {
+    // NET-7: before the held locks are released.
+    FORK_SEQ.fetch_add(1, Ordering::SeqCst);
     crate::lease::note_forked();
     if let Some(mut held) = take_fork_held() {
         let (lease, rels) = (held.lease.take(), std::mem::take(&mut held.lease_rels));
@@ -315,6 +338,7 @@ extern "C" fn after_fork_in_child() {
 }
 
 fn after_fork_in_child_body() {
+    FORK_SEQ.fetch_add(1, Ordering::SeqCst);
     morloc_runtime_types::fork_generation::bump_in_child();
     crate::ipc_ffi::after_fork_in_child();
     // FORK-16: the dispatches running anywhere in the parent, none of which
@@ -635,6 +659,14 @@ mod tests {
             }
             pid > 0 && wait_status(pid) == 7
         }));
+    }
+
+    // NET-7: a fork is in progress only between the handlers; afterwards
+    // neither side waits on it.
+    #[test]
+    fn neither_side_of_a_fork_waits_on_it_afterwards() {
+        assert!(exits_cleanly_in_a_forked_child(|| super::fork_seq_settled() % 2 == 0));
+        assert_eq!(super::fork_seq_settled() % 2, 0);
     }
 
     #[test]

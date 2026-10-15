@@ -107,6 +107,7 @@ morloc-runtime/fork_policy.rs::-::Held.mutex	instance
 morloc-runtime/fork_policy.rs::-::FORK_HELD	fork-scoped		
 morloc-runtime/fork_policy.rs::-::ResetBox.mutex	instance		
 morloc-runtime/fork_policy.rs::-::INHERITED_DISPATCHES	fork-scoped		
+morloc-runtime/fork_policy.rs::-::FORK_SEQ	fork-scoped		
 morloc-runtime/fork_policy.rs::-::PROBE	test-only		
 morloc-runtime/intrinsics.rs::-::TEMP_REGISTRY	reset		
 morloc-runtime/intrinsics.rs::-::TEMP_OWNER_COUNTER	counter		

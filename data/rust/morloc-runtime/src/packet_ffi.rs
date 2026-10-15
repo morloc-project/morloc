@@ -183,6 +183,9 @@ pub(crate) unsafe fn return_ping(
         return ptr::null_mut();
     }
     ptr::copy_nonoverlapping(packet, buf, size);
+    // NET-7: the echo must not claim the callee keeps the connection; a
+    // callee that keeps sets the bit on its reply itself.
+    crate::ipc_ffi::take_keep_bit(buf);
     buf
 }
 
