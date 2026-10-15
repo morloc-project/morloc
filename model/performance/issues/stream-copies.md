@@ -19,7 +19,13 @@ Still copied on the write side: a stdout stream joins header and payload
 into one buffer before writing (`send_stdio`, custody.rs), and a
 multi-frame compressed batch joins its frames into one buffer before the
 write (`Ticket::wait`, write_behind.rs); both could hand an iovec to
-`pwritev`/`writev` instead. Others open.
+`pwritev`/`writev` instead. Both run on the stream's writer thread, off
+the producer's path: the frame join copies only compressed bytes, and the
+stdout join would need the one-buffer sink of SLOT-16 to take parts or
+let other output fall between them; left until a measurement shows the
+writer thread is the bottleneck. Index growth (`grow_index_capacity`)
+moves the data region under the slot lock only in a stream's first
+sub-packet, since the capacity carries over to the next. Others open.
 Parent: runtime/issues/encode-throughput.md sections 1b and 2. Source:
 lib/biolib/runtime-bench README sections 2 and 6.
 
