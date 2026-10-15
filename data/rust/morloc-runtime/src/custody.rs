@@ -79,6 +79,8 @@ pub(crate) struct CustodyQueue {
     spare_tail: AtomicU32,
     spare_head: AtomicU32,
     depth: AtomicU32,
+    // SLOT-32
+    cap: AtomicU32,
     host_pid: AtomicU32,
     host_start: AtomicU64,
     err_len: AtomicU32,
@@ -202,6 +204,7 @@ impl CustodyQueue {
         self.host_start.store(0, Ordering::Relaxed);
         self.stopped.store(0, Ordering::Relaxed);
         self.set_depth(depth);
+        self.cap.store(MAX_DEPTH as u32, Ordering::Release);
         self.epoch.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -226,8 +229,21 @@ impl CustodyQueue {
     }
 
     pub(crate) fn depth(&self) -> u32 {
-        self.depth.load(Ordering::Acquire).clamp(1, MAX_DEPTH as u32)
+        self.depth.load(Ordering::Acquire).min(self.cap.load(Ordering::Acquire)).clamp(1, MAX_DEPTH as u32)
     }
+
+    // SLOT-32: a raised cap wakes producers waiting for room.
+    fn set_cap(&self, cap: usize) {
+        let cap = cap.clamp(1, MAX_DEPTH) as u32;
+        if self.cap.swap(cap, Ordering::AcqRel) < cap {
+            wait_word::wake_all(&self.done);
+        }
+    }
+
+    pub(crate) fn spares_held(&self) -> u32 {
+        self.spare_tail.load(Ordering::Acquire).wrapping_sub(self.spare_head.load(Ordering::Acquire))
+    }
+
 
     pub(crate) fn failure(&self) -> Option<MorlocError> {
         match self.failed.load(Ordering::Acquire) {
@@ -271,6 +287,11 @@ impl CustodyQueue {
     /// Wait until the queue has room; a buffer the custodian finished is
     /// then among the spares.
     pub(crate) fn wait_room(&self) -> Result<(), MorlocError> {
+        self.wait_room_for(None)
+    }
+
+    // SLOT-12, SLOT-32: `most` outstanding, the depth when `None`.
+    pub(crate) fn wait_room_for(&self, most: Option<u32>) -> Result<(), MorlocError> {
         loop {
             if let Some(e) = self.failure() {
                 return Err(e);
@@ -279,7 +300,7 @@ impl CustodyQueue {
                 return Err(Self::closed_error());
             }
             let d = self.done.load(Ordering::Acquire);
-            if self.tail.load(Ordering::Relaxed).wrapping_sub(d) < self.depth() {
+            if self.tail.load(Ordering::Relaxed).wrapping_sub(d) < most.unwrap_or_else(|| self.depth()) {
                 return Ok(());
             }
             if !self.host_alive() {
@@ -341,7 +362,6 @@ impl CustodyQueue {
         self.tail.load(Ordering::Acquire)
     }
 
-    #[cfg(test)]
     pub(crate) fn outstanding(&self) -> u32 {
         self.tail.load(Ordering::Acquire).wrapping_sub(self.done.load(Ordering::Acquire))
     }
@@ -519,7 +539,16 @@ pub(crate) struct Writer {
     inflight: std::collections::VecDeque<(crate::write_behind::Ticket, Item)>,
     failed: bool,
     stdio_out: Vec<u8>,
+    share: Option<Share>,
 }
+
+// SLOT-32
+#[derive(Default)]
+struct ShareFlags {
+    ended: std::sync::atomic::AtomicBool,
+    idle: std::sync::atomic::AtomicBool,
+}
+type Share = std::sync::Arc<ShareFlags>;
 
 // SAFETY: SLOT-10: the writer alone uses the blocks it references while it runs.
 unsafe impl Send for Writer {}
@@ -546,6 +575,7 @@ impl Writer {
             inflight: Default::default(),
             failed: false,
             stdio_out: Vec::new(),
+            share: None,
         }
     }
 
@@ -559,6 +589,12 @@ impl Writer {
     pub(crate) fn run(mut self, stop: &AtomicU32) {
         let q = self.q;
         self.serve_queue(stop);
+        if let Some(share) = &self.share {
+            // SLOT-32: no share is set on a queue after its writer leaves it.
+            let hosted = HOSTED.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
+            share.ended.store(true, Ordering::Release);
+            shares(&hosted);
+        }
         // SLOT-10: from here this writer touches the queue no more.
         q.leave();
     }
@@ -599,6 +635,8 @@ impl Writer {
                     self.release(&item);
                     self.q.finish(1);
                 } else if item.level == 0 {
+                    // SLOT-32: an uncompressed stream takes no share.
+                    self.go_idle();
                     self.commit_now(item);
                 } else {
                     let ticket = crate::compression::CompressionLevel::from_u8(item.level)
@@ -634,6 +672,7 @@ impl Writer {
                 false
             }
             ENTRY_CLOSE => {
+                self.go_idle();
                 self.commit_all();
                 self.close(item.status);
                 self.q.finish(1);
@@ -825,7 +864,12 @@ impl Writer {
         if item.block == RELNULL {
             return;
         }
-        if item.kind == ENTRY_BUFFER && self.q.give_spare(item.block) {
+        // SLOT-32: at most one spare, and only within the depth.
+        if item.kind == ENTRY_BUFFER
+            && self.q.spares_held() == 0
+            && self.q.outstanding() <= self.q.depth()
+            && self.q.give_spare(item.block)
+        {
             return;
         }
         if let Ok(abs) = crate::shm::rel2abs(item.block) {
@@ -836,6 +880,16 @@ impl Writer {
     fn fail(&mut self, kind: u32, msg: &str) {
         self.failed = true;
         self.q.fail(kind, msg);
+        self.go_idle();
+    }
+
+    // SLOT-32
+    fn go_idle(&self) {
+        if let Some(share) = self.share.as_ref().filter(|s| !s.idle.load(Ordering::Acquire)) {
+            let hosted = HOSTED.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
+            share.idle.store(true, Ordering::Release);
+            shares(&hosted);
+        }
     }
 }
 
@@ -854,6 +908,8 @@ struct Hosted {
     thread: Option<std::thread::JoinHandle<()>>,
     slot_idx: usize,
     gen: u64,
+    block: usize,
+    share: Share,
 }
 
 // SAFETY: SLOT-10: `queue` points into SHM that outlives the hosted writer.
@@ -872,10 +928,13 @@ pub(crate) fn is_host() -> bool {
     HOST_GENERATION.load(Ordering::Acquire) == crate::fork_policy::generation() + 1
 }
 
-pub(crate) fn host_spawn(writer: Writer) -> Result<(), MorlocError> {
+pub(crate) fn host_spawn(mut writer: Writer) -> Result<(), MorlocError> {
+    let share = Share::default();
+    writer.share = Some(share.clone());
     let queue = writer.q;
     let slot_idx = writer.slot_idx;
     let gen = writer.gen;
+    let writer_block = crate::stream::write_buffer_capacity(writer.slot).unwrap_or(crate::stream::WRITE_BUFFER_BYTES_DEFAULT);
     queue.consumer.store(CONSUMER, Ordering::Release);
     let stop = std::sync::Arc::new(AtomicU32::new(STOP_NONE));
     let thread_stop = stop.clone();
@@ -900,8 +959,20 @@ pub(crate) fn host_spawn(writer: Writer) -> Result<(), MorlocError> {
             true
         }
     });
-    hosted.push(Hosted { queue, stop, thread: Some(thread), slot_idx, gen });
+    hosted.push(Hosted { queue, stop, thread: Some(thread), slot_idx, gen, block: writer_block, share });
+    shares(&hosted);
     Ok(())
+}
+
+// SLOT-32: the compressed streams this process writes share the queue
+// bytes, each held to the depth its share holds, and never below one batch.
+fn shares(hosted: &[Hosted]) {
+    let live = |h: &&Hosted| !h.share.ended.load(Ordering::Acquire) && !h.share.idle.load(Ordering::Acquire);
+    let n = hosted.iter().filter(live).count().max(1);
+    let limit = crate::write_behind::queue_bytes();
+    for h in hosted.iter().filter(live) {
+        h.queue.set_cap(limit / n / h.block.max(1));
+    }
 }
 
 /// The slot and generation of each stream this process writes and has not
@@ -922,9 +993,11 @@ pub(crate) fn take_custody(q: &CustodyQueue) {
 pub fn host_stop_all(status: u8) {
     let taken = {
         let mut hosted = HOSTED.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
-        std::mem::take(&mut *hosted)
+        let taken = std::mem::take(&mut *hosted);
+        signal_stop(&taken, status);
+        taken
     };
-    stop_and_join(taken, status);
+    join_all(taken);
 }
 
 /// Stop the writer of the stream in `slot_idx`, as `host_stop_all` does.
@@ -932,18 +1005,27 @@ pub fn host_stop_all(status: u8) {
 pub(crate) fn host_stop(slot_idx: usize, status: u8) {
     let taken: Vec<Hosted> = {
         let mut hosted = HOSTED.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
-        let (stop, keep) = std::mem::take(&mut *hosted).into_iter().partition(|h| h.slot_idx == slot_idx);
+        let (stop, keep): (Vec<Hosted>, Vec<Hosted>) =
+            std::mem::take(&mut *hosted).into_iter().partition(|h| h.slot_idx == slot_idx);
         *hosted = keep;
+        signal_stop(&stop, status);
         stop
     };
-    stop_and_join(taken, status);
+    join_all(taken);
 }
 
-fn stop_and_join(taken: Vec<Hosted>, status: u8) {
-    for h in &taken {
+// SLOT-32: under the HOSTED lock, so a writer that has not ended has not left
+// its queue.
+fn signal_stop(taken: &[Hosted], status: u8) {
+    for h in taken {
         h.stop.store(status as u32, Ordering::Release);
-        wait_word::wake_all(&h.queue.tail);
+        if !h.share.ended.load(Ordering::Acquire) {
+            wait_word::wake_all(&h.queue.tail);
+        }
     }
+}
+
+fn join_all(taken: Vec<Hosted>) {
     for mut h in taken {
         if let Some(t) = h.thread.take() {
             let _ = t.join();

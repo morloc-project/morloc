@@ -121,8 +121,9 @@ Checked by: outstanding_batches_never_exceed_the_queue_depth, a_full_queue_makes
 Under a slot lock a pool copies elements, moves SHM pointers and, when the
 queue is full, waits for the custodian to make room. The queue holds at most
 its depth of unfinished batches (`MORLOC_WRITE_BEHIND_DEPTH`, at most 7; 1
-for an uncompressed stream), and a writer waits for room before reusing a
-buffer, so a stream's shared memory does not grow with its length. A
+for an uncompressed stream; lowered as more streams are written, SLOT-32,
+so a batch queued before it was lowered may stand past it), and a writer
+waits for room before reusing a buffer, so a stream's shared memory does not grow with its length. A
 writer fills a buffer up to the sub-packet size its publisher fixed
 (SLOT-20), whatever its own process's setting. The
 custodian takes no slot lock and waits on no pool, so no wait cycle passes
@@ -340,6 +341,30 @@ blocks it allocated where the slot releases them. Before the stream
 registry is unmapped, the passes of every idle slot are joined and their
 blocks released. Joining waits for one pass at most: dropping or resetting
 a slot, which joins, waits that long. Model: `tla/AheadJob.tla`.
+
+### SLOT-32 The streams one process writes share a bound on queued bytes
+Status: implemented
+Checked by: streams_share_the_queue_bytes_and_keep_no_more_spares_than_their_depth, many_compressed_streams_stay_within_the_queue_bytes
+
+The process that writes streams (SLOT-10) holds the queue of each stream
+it counts to a depth of at most `L / (n * s)`, never below one, where `L`
+is 1 GiB, `n` the streams it counts and `s` the stream's sub-packet size
+(SLOT-20). It counts a stream from its start until it ends, is closed,
+fails or queues an uncompressed batch, and sets the depths again at each
+of these; a writer stops being counted before it leaves its queue, so no
+depth is set on a queue after its writer has left it. A producer waiting
+under a lowered depth sees a raised one within its wait slice, and
+batches queued before a depth was lowered stand until written. A stream
+keeps at most one written buffer for reuse. A block larger than `s` (an
+oversize element or a staged batch) is queued only into an empty queue,
+so a stream holds at most two: one queued and one being filled.
+
+So, beside blocks larger than `s`, the batches queued by the streams a
+process counts take at most `max(L, n * s)` bytes once earlier depths
+have drained; every stream it writes also holds its write buffer, the
+block it is filling, at most one spare, and, when uncompressed, one
+queued batch; and the compressed copy of each batch being written lives
+in the writing process. No producer waits on any stream but its own.
 
 ## Reading a stream file's end
 

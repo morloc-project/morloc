@@ -3544,6 +3544,10 @@ fn queue_filled_block(
     let q = slot_queue(slot)?;
     let block = Unqueued(crate::shm::shmalloc(len.max(1))?);
     fill(block.0)?;
+    // SLOT-32: a block larger than a sub-packet waits for an empty queue.
+    if len > write_buffer_capacity(slot)? {
+        q.wait_room_for(Some(1))?;
+    }
     // SAFETY: SLOT-20: `fill` defined all `len` bytes of the block.
     debug_assert_portable(unsafe { std::slice::from_raw_parts(block.0 as *const u8, len) }, &local.value_schema)?;
     let abs = block.0;
@@ -3609,7 +3613,7 @@ fn flush_write_buffer(
 
 
 // SLOT-20: the size a sub-packet is cut at, fixed when the stream opened.
-fn write_buffer_capacity(slot: &RegistrySlot) -> Result<usize, MorlocError> {
+pub(crate) fn write_buffer_capacity(slot: &RegistrySlot) -> Result<usize, MorlocError> {
     match slot.write_buffer_limit.get() as usize {
         0 => Err(MorlocError::Other("stream has no write buffer size".into())),
         limit => Ok(limit),
@@ -12094,6 +12098,102 @@ mod write_behind_tests {
         unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize) };
         assert_eq!(footer.unwrap().expect("a final footer").footer_status, morloc_runtime_types::packet::FOOTER_STATUS_FAILED);
         assert_eq!(read_strs(&path), first);
+    }
+
+    // SLOT-32
+    #[test]
+    fn streams_share_the_queue_bytes_and_keep_no_more_spares_than_their_depth() {
+        let _shm = crate::own_test_registry();
+        const BLOCK: usize = 64 * 1024;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::stream::set_test_write_buffer_bytes(None);
+                crate::write_behind::set_test_queue_bytes(None);
+                crate::write_behind::set_test_depth(None);
+            }
+        }
+        crate::stream::set_test_write_buffer_bytes(Some(BLOCK));
+        crate::write_behind::set_test_queue_bytes(Some(4 * BLOCK));
+        crate::write_behind::set_test_depth(Some(4));
+        let _reset = Reset;
+        let dir = test_dir("queue_bytes");
+        let depth_of = |h: i64| slot_queue(slot_ref(unpack_handle(h).1).unwrap()).unwrap().depth();
+        let hs: Vec<i64> = (0..8)
+            .map(|i| shared_open_ostream_with_schema(dir.join(format!("{i}.idx")).to_str().unwrap(), "ai4").unwrap())
+            .collect();
+        assert!(hs.iter().all(|&h| depth_of(h) == 1), "eight streams sharing four batches each hold more than one");
+        let schema = parse_schema("ai4").unwrap();
+        let batch = format!("[{}]", (0..20_000).map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+        for _ in 0..6 {
+            let v = crate::json::read_json_with_schema(&batch, &schema).unwrap();
+            shared_write_subpacket(hs[0], CompressionLevel::from_u8(3).unwrap(), v).unwrap();
+            shm::shfree(v).unwrap();
+        }
+        let q0 = slot_queue(slot_ref(unpack_handle(hs[0]).1).unwrap()).unwrap();
+        assert!(q0.spares_held() <= 1, "{} spares behind a stream of depth 1", q0.spares_held());
+        for &h in &hs[2..] {
+            shared_close_handle(h).unwrap();
+        }
+        let began = std::time::Instant::now();
+        while depth_of(hs[0]) != 2 && began.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(depth_of(hs[0]), 2, "the two streams left did not take the others' share");
+        for &h in &hs[..2] {
+            shared_close_handle(h).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // SLOT-32
+    #[test]
+    fn many_compressed_streams_stay_within_the_queue_bytes() {
+        let _shm = crate::own_test_registry();
+        const BLOCK: usize = 1 << 20;
+        const N: usize = 24;
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::stream::set_test_write_buffer_bytes(None);
+                crate::write_behind::set_test_queue_bytes(None);
+                crate::write_behind::set_test_depth(None);
+            }
+        }
+        let _reset = Reset;
+        crate::stream::set_test_write_buffer_bytes(Some(BLOCK));
+        crate::write_behind::set_test_depth(Some(4));
+        let dir = test_dir("many_streams");
+        let schema = parse_schema("ai4").unwrap();
+        let batch = format!("[{}]", (0..(BLOCK / 4)).map(|i| (i * 7919 % 100_003).to_string()).collect::<Vec<_>>().join(","));
+        let peak_with = |limit: usize| {
+            crate::write_behind::set_test_queue_bytes(Some(limit));
+            let mut hist = [0usize; 64];
+            let base = crate::shm::live_block_stats(&mut hist).1;
+            let hs: Vec<i64> = (0..N)
+                .map(|i| shared_open_ostream_with_schema(dir.join(format!("{limit}-{i}.idx")).to_str().unwrap(), "ai4").unwrap())
+                .collect();
+            let mut peak = 0;
+            for _ in 0..6 {
+                for &h in &hs {
+                    let v = crate::json::read_json_with_schema(&batch, &schema).unwrap();
+                    shared_write_subpacket(h, CompressionLevel::from_u8(3).unwrap(), v).unwrap();
+                    shm::shfree(v).unwrap();
+                    peak = peak.max(crate::shm::live_block_stats(&mut hist).1.saturating_sub(base));
+                }
+            }
+            for h in hs {
+                shared_close_handle(h).unwrap();
+            }
+            peak
+        };
+        let limit = 4 * BLOCK;
+        let bounded = peak_with(limit);
+        let unbounded = peak_with(usize::MAX / 2);
+        eprintln!("{N} streams of {BLOCK}-byte batches: peak {bounded} bytes held, {unbounded} without the bound");
+        let allowed = limit.max(N * BLOCK) + 2 * N * BLOCK;
+        assert!(bounded <= allowed, "{bounded} bytes held, more than {allowed}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // SLOT-20

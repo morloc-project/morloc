@@ -62,3 +62,10 @@
   once, under the deletion above] The nexus sat in `hrtimer_nanosleep`
   for 55 minutes while its Python pools polled. Which wait it was is not
   known; no item bounds it, and no peer died.
+- **Nested arena reader test fails under a full lib run.** [reproduced
+  once] `test_arena_lock_tests::a_nested_reader_is_not_blocked_by_a_queued_writer`
+  (morloc-runtime/src/lib.rs, ~line 160) failed in one full
+  `cargo test -p morloc-runtime --lib` on 2026-10-15 (load average about 5)
+  and passed in three isolated runs. The test sleeps 100 ms for the writer
+  to queue, so a writer scheduled later than that may change what it
+  observes; the failure message was not kept.

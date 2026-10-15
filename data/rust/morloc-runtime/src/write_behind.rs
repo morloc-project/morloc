@@ -47,6 +47,28 @@ pub(crate) fn depth() -> usize {
     })
 }
 
+const QUEUE_BYTES: usize = 1 << 30;
+
+// SLOT-32
+pub(crate) fn queue_bytes() -> usize {
+    #[cfg(test)]
+    {
+        let b = TEST_QUEUE_BYTES.load(std::sync::atomic::Ordering::SeqCst);
+        if b != usize::MAX {
+            return b;
+        }
+    }
+    QUEUE_BYTES
+}
+
+#[cfg(test)]
+static TEST_QUEUE_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+#[cfg(test)]
+pub(crate) fn set_test_queue_bytes(bytes: Option<usize>) {
+    TEST_QUEUE_BYTES.store(bytes.unwrap_or(usize::MAX), std::sync::atomic::Ordering::SeqCst);
+}
+
 #[cfg(test)]
 static TEST_DEPTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
 

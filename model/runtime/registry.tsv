@@ -300,6 +300,7 @@ morloc-runtime/daemon_ffi.rs::-::ENDPOINT_LOCKS	exec-only
 morloc-runtime/daemon_ffi.rs::-::ENDPOINT_TESTS	test-only		
 morloc-runtime/write_behind.rs::depth::DEPTH	lazy		
 morloc-runtime/write_behind.rs::-::TEST_DEPTH	test-only		
+morloc-runtime/write_behind.rs::-::TEST_QUEUE_BYTES	test-only		
 morloc-runtime/stream.rs::-::TEST_WRITE_BUFFER_BYTES	test-only		
 morloc-runtime/stream.rs::-::TEST_IFILE_CACHE_BYTES	test-only		
 morloc-runtime/shm.rs::-::SEGMENTS_CLOSED	lazy		

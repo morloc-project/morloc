@@ -1,7 +1,15 @@
-# Compressed streams: memory bounded per stream, oversize elements copied
+# Compressed streams: which process grows
 
 Status: open. Parent: runtime/issues/encode-throughput.md section 3.
 Source: lib/biolib/runtime-bench.
+
+Fixed 2026-10-15 (SLOT-32): the streams one process writes share 1 GiB
+of queued batches; each stream's depth is lowered to its share, never
+below one, and set again as streams start and end, and a stream keeps no
+more spare buffers than its depth. 24 streams of 1 MiB batches at level 3
+peaked at 24.0 MiB of shared memory held, 36.0 MiB without the bound. A
+budget shared through a wait word was rejected: it left spares uncounted
+and made producers wait on other streams' writers.
 
 Fixed 2026-10-14: a compressed sub-packet is cut into frames whose size
 is fixed by the level (2 MiB at levels 1-6, 16 MiB at 7-9; ZIP-9), each
@@ -24,30 +32,7 @@ data/rust/morloc-runtime-types/src.
 
 ## Open
 
-- **The memory bound is per stream (gap in SLOT-12).** N open compressed
-  streams may hold N x depth x (a 16 MiB block + its compressed output). A
-  writer splitting reads into 96 barcode files at L3 is compression-bound,
-  so every stream fills to depth: several GiB of shared memory on a 14 GiB
-  host, an OOM or `shmalloc` failure instead of backpressure. [inferred
-  from read]
-- **An oversize element is copied four times in the pool.** An element
-  larger than the 16 MiB write buffer goes through `R/stream.rs`'s
-  oversize path: source voidstar, `scratch`, `oversize_payload`, the queued
-  block, ~8 GiB for a 2 GiB chromosome. See stream-copies.md W1, which
-  removes the `scratch` copy for every write.
 - **Unmeasured: which process grows.** lib/biolib/runtime-bench's
   measure.py reports the largest process's VmHWM, which counts shared
   pages it touched; per-process RssShmem and RssAnon would locate the
   remaining L3 growth (211 MiB against 110 at L0).
-
-## Solutions
-
-- **S2. A process-wide block budget.** Cap outstanding work across all
-  streams of a process (the ring has 8 slots, so the count can only be
-  capped, not replaced), counting shared-memory block sizes, and admit
-  one batch when the stream has none outstanding (a budget below one
-  buffer would deadlock). Closes the N-streams OOM. A shared budget makes
-  one stream's producer wait on another stream's writer, so SLOT-12's
-  "no wait cycle passes through a slot" must be re-derived (a stdio sink
-  blocked on an external reader is a way in): model first, in
-  tla/StreamQueue.
