@@ -2281,13 +2281,17 @@ mod poison_tests {
         let _shm = crate::own_test_registry();
         set_poison_on_free(true);
         let p = shmalloc(256).unwrap();
+        let p_size = block_size(p);
         unsafe { std::ptr::write_bytes(p, 7, 256) };
         let freed = unsafe { std::slice::from_raw_parts(p, 256).to_vec() };
         shfree(p).unwrap();
         let after = unsafe { std::slice::from_raw_parts(p, 256).to_vec() };
+        unpoison(p, p_size);
         let q = shmalloc(256).unwrap();
+        let q_size = block_size(q);
         let fresh = unsafe { std::slice::from_raw_parts(q, 256).to_vec() };
         shfree(q).unwrap();
+        unpoison(q, q_size);
         set_poison_on_free(false);
         assert!(freed.iter().all(|&b| b == 7));
         assert!(after.iter().all(|&b| b == POISON_BYTE), "a released block was not poisoned");
@@ -2304,15 +2308,30 @@ mod poison_tests {
             let want = if poison { POISON_BYTE } else { 0 };
             for n in [NONTEMPORAL_SCRUB_BYTES - 3, NONTEMPORAL_SCRUB_BYTES, NONTEMPORAL_SCRUB_BYTES + 37, (16 << 20) + 1] {
                 let p = shmalloc(n).unwrap();
-                let size = unsafe { (*(p.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)).size() };
+                let size = block_size(p);
                 unsafe { std::ptr::write_bytes(p, 7, size) };
                 shfree(p).unwrap();
                 let after = unsafe { std::slice::from_raw_parts(p, size) };
                 let bad = after.iter().position(|&b| b != want);
+                if poison {
+                    unpoison(p, size);
+                }
                 assert_eq!(bad, None, "block of {n} bytes, poison {poison}");
             }
         }
         set_poison_on_free(false);
+    }
+
+    fn block_size(p: AbsPtr) -> usize {
+        unsafe { shm_block_size(p) }.unwrap()
+    }
+
+    // SHM-6: with poisoning off a new block is not cleared, and the arena is
+    // shared by every test in the process; a test that poisoned a block
+    // clears it again as soon as it is free, before anything else is made
+    // over it.
+    fn unpoison(p: AbsPtr, size: usize) {
+        unsafe { std::ptr::write_bytes(p, 0, size) };
     }
 }
 

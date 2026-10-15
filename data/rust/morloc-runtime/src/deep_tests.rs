@@ -46,6 +46,29 @@ unsafe fn put<T: Copy>(p: AbsPtr, off: usize, v: T) {
     std::ptr::write_unaligned(p.add(off) as *mut T, v);
 }
 
+thread_local! {
+    static BUILT: std::cell::RefCell<Vec<AbsPtr>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A zeroed node of `width` bytes that `FreeBuilt` releases.
+fn alloc_node(width: usize) -> AbsPtr {
+    let p = shm::shcalloc(1, width).unwrap();
+    BUILT.with(|b| b.borrow_mut().push(p));
+    p
+}
+
+/// Releases the nodes this thread's builders made; a census in a later test
+/// counts what is left in the shared arena.
+pub struct FreeBuilt;
+
+impl Drop for FreeBuilt {
+    fn drop(&mut self) {
+        for p in BUILT.with(|b| std::mem::take(&mut *b.borrow_mut())) {
+            let _ = shm::shfree(p);
+        }
+    }
+}
+
 /// Build the `LL` chain. Returns the root node.
 pub fn build_ll(depth: usize) -> (AbsPtr, Schema) {
     let schema = parse_schema(LL_SCHEMA).unwrap();
@@ -53,7 +76,7 @@ pub fn build_ll(depth: usize) -> (AbsPtr, Schema) {
     let mut prev: RelPtr = RELNULL;
     let mut node = std::ptr::null_mut();
     for i in 0..depth {
-        node = shm::shcalloc(1, w).unwrap();
+        node = alloc_node(w);
         unsafe {
             put(node, schema.offsets[0], i as i64);
             put(node, schema.offsets[1], prev);
@@ -67,21 +90,21 @@ pub fn build_ll(depth: usize) -> (AbsPtr, Schema) {
 pub fn build_tree(depth: usize) -> (AbsPtr, Schema) {
     let schema = parse_schema(TREE_SCHEMA).unwrap();
     let node_arm = &schema.parameters[1];
-    let slot = shm::shcalloc(1, schema.width).unwrap();
+    let slot = alloc_node(schema.width);
     unsafe {
         put(slot, 0, 0u8);
         put(slot, 8, RELNULL);
     }
     let mut cur = slot;
     for i in 0..depth {
-        let payload = shm::shcalloc(1, node_arm.width).unwrap();
+        let payload = alloc_node(node_arm.width);
         unsafe {
             put(payload, node_arm.offsets[0], i as i64);
             put(payload, node_arm.offsets[1], 0u8);
             put(payload, node_arm.offsets[1] + 8, RELNULL);
             std::ptr::copy_nonoverlapping(cur, payload.add(node_arm.offsets[2]), schema.width);
         }
-        let next = shm::shcalloc(1, schema.width).unwrap();
+        let next = alloc_node(schema.width);
         unsafe {
             put(next, 0, 1u8);
             put(next, 8, shm::abs2rel(payload).unwrap());
@@ -97,17 +120,17 @@ pub fn build_mutual(depth: usize) -> (AbsPtr, Schema) {
     let acons = &schema.parameters[1];
     let b = &acons.parameters[1];
     let bcons = &b.parameters[0];
-    let mut a = shm::shcalloc(1, schema.width).unwrap();
+    let mut a = alloc_node(schema.width);
     unsafe {
         put(a, 0, 0u8);
         put(a, 8, RELNULL);
     }
     for i in 0..depth {
         // B holding the current A, then a new A holding that B.
-        let bp = shm::shcalloc(1, bcons.width).unwrap();
-        let bslot = shm::shcalloc(1, b.width).unwrap();
-        let ap = shm::shcalloc(1, acons.width).unwrap();
-        let aslot = shm::shcalloc(1, schema.width).unwrap();
+        let bp = alloc_node(bcons.width);
+        let bslot = alloc_node(b.width);
+        let ap = alloc_node(acons.width);
+        let aslot = alloc_node(schema.width);
         unsafe {
             put(bp, bcons.offsets[0], i as i64);
             std::ptr::copy_nonoverlapping(a, bp.add(bcons.offsets[1]), schema.width);
@@ -129,16 +152,16 @@ pub fn build_rose(depth: usize) -> (AbsPtr, Schema) {
     let kids = &schema.parameters[1];
     let w = schema.width;
     // The innermost node has no kids.
-    let mut node = shm::shcalloc(1, w).unwrap();
+    let mut node = alloc_node(w);
     unsafe {
         put(node, schema.offsets[0], 0i64);
         put(node, schema.offsets[1], Array { size: 0, data: RELNULL });
     }
     for i in 1..=depth {
         // One element, laid out inline in the array's data block.
-        let elems = shm::shcalloc(1, w).unwrap();
+        let elems = alloc_node(w);
         unsafe { std::ptr::copy_nonoverlapping(node, elems, w) };
-        let parent = shm::shcalloc(1, w).unwrap();
+        let parent = alloc_node(w);
         unsafe {
             put(parent, schema.offsets[0], i as i64);
             put(parent, schema.offsets[1], Array { size: 1, data: shm::abs2rel(elems).unwrap() });
@@ -293,6 +316,7 @@ mod tests {
     fn flatten_rebase_and_shift_are_flat_over_deep_chains() {
         on_small_stack(|| {
             let _shm = crate::own_test_registry();
+            let _built = FreeBuilt;
             for (root, schema, count) in [
                 {
                     let (r, s) = build_ll(DEPTH);
@@ -304,6 +328,7 @@ mod tests {
                 // Into fresh SHM: every pointer rebased from the buffer.
                 let back = crate::voidstar::read_binary(&flat, &schema).unwrap();
                 assert_eq!(count_ll(back, &schema), count);
+                shm::shfree(back).unwrap();
                 // Moved 64 bytes down inside a buffer: every pointer shifted.
                 let mut moved = vec![0u8; 64];
                 moved.extend_from_slice(&flat);
@@ -319,6 +344,7 @@ mod tests {
                 assert_eq!(crate::ffi::calc_voidstar_size_inner(back, &schema).unwrap(), size);
                 let again = crate::voidstar::flatten_to_buffer(back, &schema).unwrap();
                 assert_eq!(again, flat);
+                shm::shfree(back).unwrap();
             }
         });
     }
@@ -327,6 +353,7 @@ mod tests {
     fn json_writer_is_flat_over_deep_chains() {
         on_small_stack(|| {
             let _shm = crate::own_test_registry();
+            let _built = FreeBuilt;
             let (ll, lls) = build_ll(DEPTH);
             let text = crate::json::voidstar_to_json_string(ll, &lls).unwrap();
             // {"head":N,"tail":  per level, then null and the closing braces.
@@ -365,9 +392,11 @@ mod tests {
     fn json_loader_is_flat_and_linear_over_deep_chains() {
         on_small_stack(|| {
             let _shm = crate::own_test_registry();
+            let _built = FreeBuilt;
             let schema = parse_schema(LL_SCHEMA).unwrap();
             let root = crate::json::read_json_with_schema(&ll_json(DEPTH), &schema).unwrap();
             assert_eq!(count_ll(root, &schema), DEPTH);
+            shm::shfree(root).unwrap();
             // A variant chain, a mutual chain and a caterpillar written by
             // the JSON writer load back to the same bytes.
             for (root, schema) in [build_tree(DEPTH), build_mutual(DEPTH), build_rose(DEPTH)] {
@@ -377,6 +406,7 @@ mod tests {
                     crate::voidstar::flatten_to_buffer(back, &schema).unwrap(),
                     crate::voidstar::flatten_to_buffer(root, &schema).unwrap()
                 );
+                shm::shfree(back).unwrap();
             }
             // Four times the depth must not cost far more than four times
             // the time: the load scans its text once.
@@ -386,8 +416,10 @@ mod tests {
                 (0..5)
                     .map(|_| {
                         let t = std::time::Instant::now();
-                        crate::json::read_json_with_schema(&text, &schema).unwrap();
-                        t.elapsed()
+                        let v = crate::json::read_json_with_schema(&text, &schema).unwrap();
+                        let took = t.elapsed();
+                        shm::shfree(v).unwrap();
+                        took
                     })
                     .min()
                     .unwrap()
@@ -402,6 +434,7 @@ mod tests {
     fn flat_writer_is_flat_and_linear_over_deep_chains() {
         on_small_stack(|| {
             let _shm = crate::own_test_registry();
+            let _built = FreeBuilt;
             for (root, schema) in [build_ll(DEPTH), build_tree(DEPTH), build_mutual(DEPTH), build_rose(DEPTH)] {
                 let flat = crate::voidstar::flatten_to_buffer(root, &schema).unwrap();
                 let mut w0: Vec<u8> = Vec::new();
@@ -417,6 +450,7 @@ mod tests {
                 assert_eq!(w7.len(), n);
                 let back = crate::voidstar::read_binary_with_hint(&w7, &schema, 7).unwrap();
                 assert_eq!(crate::voidstar::flatten_to_buffer(back, &schema).unwrap(), flat);
+                shm::shfree(back).unwrap();
             }
             // Four times the depth must not cost far more than four times
             // the time.
@@ -445,6 +479,7 @@ mod tests {
     #[test]
     fn flat_writer_matches_flatten_on_random_values() {
         let _shm = crate::own_test_registry();
+        let _built = FreeBuilt;
         let mut g = Gen(0x2545f4914f6cdd1d);
         for schema_str in SHAPES {
             let schema = parse_schema(schema_str).unwrap();
@@ -462,7 +497,9 @@ mod tests {
                     }
                     let back = crate::voidstar::read_binary_with_hint(&w, &schema, vol).unwrap();
                     assert_eq!(crate::json::voidstar_to_json_string(back, &schema).unwrap(), printed, "{schema_str}: {text} at vol {vol}");
+                    shm::shfree(back).unwrap();
                 }
+                shm::shfree(ptr).unwrap();
             }
         }
     }
@@ -471,6 +508,7 @@ mod tests {
     fn msgpack_hash_and_deep_copy_are_flat_over_deep_chains() {
         on_small_stack(|| {
             let _shm = crate::own_test_registry();
+            let _built = FreeBuilt;
             for (root, schema) in [build_ll(DEPTH), build_tree(DEPTH), build_mutual(DEPTH), build_rose(DEPTH)] {
                 let flat = crate::voidstar::flatten_to_buffer(root, &schema).unwrap();
                 // Through msgpack and back to the same bytes.
@@ -481,7 +519,10 @@ mod tests {
                 let h = crate::cache::hash_voidstar_value(root, &schema, 0).unwrap();
                 assert_eq!(crate::cache::hash_voidstar_value(back, &schema, 0).unwrap(), h);
                 assert_ne!(crate::cache::hash_voidstar_value(root, &schema, 1).unwrap(), h);
-                // A deep copy into a fresh slot reproduces the value.
+                shm::shfree(back).unwrap();
+                // A deep copy into a fresh slot reproduces the value. The
+                // copy's blocks are freed with the arena.
+                let _copy = crate::eval_arena::enter().unwrap();
                 let dst = shm::shmalloc(schema.width).unwrap();
                 unsafe { crate::voidstar::deep_copy(root, dst, &schema).unwrap() };
                 assert_eq!(crate::voidstar::flatten_to_buffer(dst, &schema).unwrap(), flat);
@@ -500,6 +541,7 @@ mod tests {
     fn size_walk_is_flat_over_deep_chains() {
         on_small_stack(|| {
             let _shm = crate::own_test_registry();
+            let _built = FreeBuilt;
             let (ll, lls) = build_ll(DEPTH);
             // Root record (16), then per link the pointer's alignment slack
             // beyond the slot (7) and the next record (16).
@@ -526,6 +568,7 @@ mod tests {
     #[test]
     fn builders_produce_chains_of_the_requested_depth() {
         let _shm = crate::own_test_registry();
+        let _built = FreeBuilt;
         let (root, schema) = build_ll(1000);
         assert_eq!(count_ll(root, &schema), 1000);
         let (tree, ts) = build_tree(50);

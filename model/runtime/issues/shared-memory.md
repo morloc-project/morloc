@@ -30,3 +30,15 @@ Changes here touch locks and ownership: model first.
   arena, which closes it at a failed `@catch` body's rollback and at the
   arena's end; other opens rely on the call sweep alone. Should every open
   be recorded, or none?
+
+- **Freeing in an eval arena scans the arena.** [measured 2026-10-15]
+  Gap: no item bounds the cost of a free. `eval_arena::forget_if_active`
+  (morloc-runtime/src/eval_arena.rs) finds the freed block with a linear
+  search of every block recorded in the scope, so a scope that records n
+  blocks and frees them one at a time costs O(n^2): a JSON load of a
+  100,000-deep list, whose consolidation frees its pieces, took 13.7 s at
+  80,000 levels against 0.88 s at 20,000 inside an arena (16x for 4x the
+  depth), and is linear outside one. A pool call that builds and frees a
+  large value pays this. An index from pointer to position (checkpoints
+  compare recorded counts, so `rollback_to` must keep working) would make
+  a free O(1); ownership change, model first.

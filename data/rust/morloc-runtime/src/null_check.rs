@@ -426,6 +426,7 @@ mod tests {
             assert!(path.starts_with(".tail(some).tail(some)"), "{path}");
             assert!(path.contains("(some)[..99984 segments..].tail(some)"), "{path}");
             assert!(path.ends_with(".tail(some).head (byte 1 of 2)"), "{path}");
+            crate::shm::shfree(ptr).unwrap();
         });
     }
 

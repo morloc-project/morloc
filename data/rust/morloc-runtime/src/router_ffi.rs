@@ -1020,7 +1020,14 @@ mod forward_tests {
         let pid = child.id() as i32;
         let sock = format!("{}/mlc-router-refused-{}.sock", std::env::temp_dir().display(), std::process::id());
         let _ = std::fs::remove_file(&sock);
-        drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
+        unsafe {
+            let fd = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            assert!(fd >= 0);
+            let addr = crate::utility::unix_socket_addr(sock.as_bytes()).unwrap();
+            let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+            assert_eq!(libc::bind(fd, &addr as *const libc::sockaddr_un as *const libc::sockaddr, len), 0);
+            libc::close(fd);
+        }
         let mut t = test_router(&sock, pid);
         let err = unsafe { forward_call(&mut *t.router) }.expect_err("a call reached a daemon with no listener");
         assert!(err.contains("Failed to connect"), "{err}");

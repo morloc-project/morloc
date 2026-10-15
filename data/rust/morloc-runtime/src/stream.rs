@@ -7969,6 +7969,7 @@ mod tests {
             if !open {
                 eprintln!("open: {} blockers", morloc_retire_blockers());
             }
+            shared_close_handle(h).unwrap();
             open
         }));
     }
@@ -8278,6 +8279,9 @@ mod tests {
             first.join().unwrap();
             claimed
         });
+        // SLOT-10: the child, in a pid namespace of its own, cannot close the
+        // stream through this process, which hosts its writer.
+        crate::custody::stop_before_unmap();
         assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid waited on its ancestor's thread");
     }
 
