@@ -1,0 +1,2 @@
+def readT(p):
+    return []

@@ -362,6 +362,9 @@ macro_rules! stream_fast_path_or_fallthrough {
     };
 }
 
+const TABLE_NOT_INLINE: &str =
+    "a `@form table` argument is a path to a table file or `-` for stdin, not an inline value";
+
 /// What to do with a table argument that names its data rather than
 /// spelling it out.
 pub(crate) enum TableArg {
@@ -386,12 +389,24 @@ pub(crate) enum TableArg {
 pub(crate) unsafe fn try_table_file_packet(
     classified: &Classified,
     schema: *const CSchema,
+    form_table: bool,
 ) -> Result<TableArg, MorlocError> {
     if schema.is_null() || !crate::arrow_ffi::is_arrow_table_schema(&CSchema::to_rust(schema)) {
         return Ok(TableArg::NotHandled);
     }
     let effective: *const c_char = match classified.kind {
         ArgSource::Inline => return Ok(TableArg::NotHandled),
+        // Checking a header reads the file here, before the pool reads it
+        // by name; a pipe read twice loses what was read first, so it is
+        // spooled like stdin.
+        ArgSource::File if form_table && !is_regular_file(classified.effective) => {
+            let name = CStr::from_ptr(classified.effective).to_string_lossy().into_owned();
+            let mut f = std::fs::File::open(&name)
+                .map_err(|e| MorlocError::Other(format!("reading '{}': {}", name, e)))?;
+            let path = std::ffi::CString::new(spool_to_temp(&mut f, &name)?)
+                .map_err(|_| MorlocError::Other("spooled table path has an embedded NUL".into()))?;
+            Box::leak(path.into_boxed_c_str()).as_ptr()
+        }
         ArgSource::File => classified.effective,
         // A pipe cannot be handed on by name, and cannot be rewound once
         // read, so it is spooled to a file the nexus removes at exit. The
@@ -399,7 +414,7 @@ pub(crate) unsafe fn try_table_file_packet(
         // falls through to it, holds only a pointer.
         ArgSource::Stdin => {
             claim_stdin()?;
-            let path = std::ffi::CString::new(spool_stdin_to_temp()?)
+            let path = std::ffi::CString::new(spool_to_temp(&mut std::io::stdin().lock(), "stdin")?)
                 .map_err(|_| MorlocError::Other("spooled table path has an embedded NUL".into()))?;
             Box::leak(path.into_boxed_c_str()).as_ptr()
         }
@@ -409,6 +424,9 @@ pub(crate) unsafe fn try_table_file_packet(
     if peek_packet_header_via_pread(effective).is_some() {
         return Ok(TableArg::Reclassified(Classified { kind: ArgSource::File, effective }));
     }
+    if form_table {
+        check_table_head(&CStr::from_ptr(effective).to_string_lossy(), &CSchema::to_rust(schema))?;
+    }
     let packet = crate::packet_ffi::make_table_file_packet(effective, schema);
     if packet.is_null() {
         return Err(MorlocError::Packet("could not build the table argument packet".into()));
@@ -416,16 +434,106 @@ pub(crate) unsafe fn try_table_file_packet(
     Ok(TableArg::ByName(packet))
 }
 
-/// Copy standard input to a temporary file and return its path. The file
-/// is unlinked when the process exits, so nothing survives the run.
-unsafe fn spool_stdin_to_temp() -> Result<String, MorlocError> {
-    use std::io::{Read, Write};
+/// Check the start of a table file a pool will read under `@form table`:
+/// not JSON, and a header naming the declared columns (CLI-13, CLI-14).
+/// Arrow IPC and Parquet name their columns themselves and are checked
+/// where they are decoded.
+fn check_table_head(path: &str, rs: &crate::schema::Schema) -> Result<(), MorlocError> {
+    use std::io::Read;
+    const LIMIT: u64 = 1 << 20;
+    let mut head = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(LIMIT).read_to_end(&mut head))
+        .map_err(|e| MorlocError::Other(format!("reading '{}': {}", path, e)))?;
+    if crate::arrow_ipc_reader::is_arrow_file_magic(&head)
+        || crate::arrow_ipc_reader::is_arrow_stream_start(&head)
+        || head.starts_with(b"PAR1")
+    {
+        return Ok(());
+    }
+    if crate::delimited::looks_like_json(&head) {
+        return Err(MorlocError::Other(format!(
+            "'{}' is JSON; a `@form table` argument is CSV, TSV, Arrow IPC, Parquet or a morloc packet",
+            path
+        )));
+    }
+    if head.len() as u64 == LIMIT && !head.contains(&b'\n') {
+        return Err(MorlocError::Other(format!("'{}': the header row is longer than 1 MiB", path)));
+    }
+    let expect = if rs.keys.is_empty() {
+        crate::delimited::Expect::Open
+    } else {
+        crate::delimited::Expect::Contains(&rs.keys)
+    };
+    crate::delimited::read_header(&head, expect)
+        .map(drop)
+        .map_err(|e| MorlocError::Other(format!("'{}': {}", path, e)))
+}
+
+/// Read a `@form table` argument of a list-of-records type (CLI-13): a
+/// headed delimited table, Arrow IPC, Parquet, or a morloc packet of the
+/// declared type. Takes ownership of `data`.
+unsafe fn try_table_rows(
+    data: *mut u8,
+    data_size: usize,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    let bytes: &[u8] = if data.is_null() { &[] } else { std::slice::from_raw_parts(data, data_size) };
+    if bytes.len() >= 4 && u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) == packet::PACKET_MAGIC {
+        return load_morloc_data_file(ptr::null(), data, data_size, schema, errmsg);
+    }
+    let rs = CSchema::to_rust(schema);
+    let json: Result<String, MorlocError> = match rs.parameters.first() {
+        Some(row) if rs.serial_type == crate::schema::SerialType::Array
+            && row.serial_type == crate::schema::SerialType::Map =>
+        {
+            if crate::delimited::looks_like_json(bytes) {
+                Err(MorlocError::Other(
+                    "the input is JSON; a `@form table` argument is CSV, TSV, Arrow IPC, Parquet or a morloc packet".into(),
+                ))
+            } else {
+                match crate::arrow_ipc_reader::columnar_rows_json(bytes, row) {
+                    Ok(Some(j)) => Ok(j),
+                    Ok(None) => crate::delimited::rows_to_json(bytes, row).map_err(MorlocError::Other),
+                    Err(e) => Err(e),
+                }
+            }
+        }
+        _ => Err(MorlocError::Other("`@form table` needs a table or a list of records".into())),
+    };
+    if !data.is_null() {
+        libc::free(data as *mut c_void);
+    }
+    let json = match json.and_then(|j| {
+        std::ffi::CString::new(j).map_err(|_| MorlocError::Other("a table cell holds a NUL byte".into()))
+    }) {
+        Ok(j) => j,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return ptr::null_mut();
+        }
+    };
+    crate::json_ffi::read_json_with_schema(ptr::null_mut(), json.as_ptr() as *mut c_char, schema, errmsg) as *mut c_void
+}
+
+unsafe fn is_regular_file(path: *const c_char) -> bool {
+    std::fs::metadata(CStr::from_ptr(path).to_string_lossy().as_ref())
+        .map(|m| m.is_file())
+        .unwrap_or(true)
+}
+
+/// Copy `input` to a temporary file and return its path. The file is
+/// unlinked when the process exits, so nothing survives the run.
+fn spool_to_temp(input: &mut dyn std::io::Read, what: &str) -> Result<String, MorlocError> {
+    use std::io::Write;
     let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
     let mut template: Vec<u8> = format!("{}/morloc-table-XXXXXX", dir.trim_end_matches('/')).into_bytes();
     template.push(0);
-    let fd = morloc_runtime_types::fd::mkstemp(template.as_mut_ptr() as *mut c_char);
+    // SAFETY: `template` is a NUL-terminated buffer mkstemp may rewrite.
+    let fd = unsafe { morloc_runtime_types::fd::mkstemp(template.as_mut_ptr() as *mut c_char) };
     if fd < 0 {
-        return Err(MorlocError::Other("could not open a temporary file for the table on stdin".into()));
+        return Err(MorlocError::Other(format!("could not open a temporary file for the table on {}", what)));
     }
     let path = String::from_utf8_lossy(&template[..template.len() - 1]).into_owned();
     // Unlinking now would take the name the pool needs, so the file is
@@ -433,12 +541,12 @@ unsafe fn spool_stdin_to_temp() -> Result<String, MorlocError> {
     SPOOLED.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock()).push(path.clone());
     let mut out = {
         use std::os::fd::FromRawFd;
-        std::fs::File::from_raw_fd(fd)
+        // SAFETY: mkstemp returned a fresh descriptor nothing else owns.
+        unsafe { std::fs::File::from_raw_fd(fd) }
     };
     let mut buf = vec![0u8; 1 << 20];
-    let mut stdin = std::io::stdin().lock();
     loop {
-        let n = stdin.read(&mut buf).map_err(MorlocError::Io)?;
+        let n = input.read(&mut buf).map_err(MorlocError::Io)?;
         if n == 0 { break; }
         out.write_all(&buf[..n]).map_err(MorlocError::Io)?;
     }
@@ -1836,7 +1944,7 @@ fn augment_with_header_hint(
     MorlocError::Other(format!(
         "{}\n  hint: the first row (`{}`) looks like a column-name \
          header. `form: list` is headerless -- remove the header row, \
-         or declare the argument as `Table` if you need column names.",
+         or read the file with `@form table`, which binds columns by name.",
         err, first,
     ))
 }
@@ -2409,19 +2517,6 @@ pub(crate) unsafe fn load_morloc_data_file(
     let mut err: *mut c_char = ptr::null_mut();
 
     // 1. Extension-based dispatch
-    if arrow_target && (path_str.ends_with(".csv") || path_str.ends_with(".tsv")) {
-        let delim: u8 = if path_str.ends_with(".tsv") { b'\t' } else { b',' };
-        let mut err: *mut c_char = ptr::null_mut();
-        let relptr = crate::arrow_ipc_reader::read_csv_to_shm(
-            data, data_size, delim, schema, &mut err,
-        );
-        libc::free(data as *mut c_void);
-        if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
-        return match shm::rel2abs(relptr) {
-            Ok(p) => p as *mut c_void,
-            Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
-        };
-    }
     if path_str.ends_with(".json") {
         if arrow_target {
             return arrow_load_json(data, data_size, schema, errmsg);
@@ -2527,6 +2622,31 @@ pub(crate) unsafe fn load_morloc_data_file(
                     return ptr::null_mut();
                 }
             }
+        }
+    }
+
+    // A table that is not a packet is told apart by its bytes, as the pool
+    // tells it (`sniff_table_format`, CLI-15).
+    if arrow_target {
+        use crate::arrow_ipc_reader::TableFormat;
+        let full = std::slice::from_raw_parts(data, data_size);
+        let tail4 = if data_size >= 4 { &full[data_size - 4..] } else { &[][..] };
+        let format = crate::arrow_ipc_reader::sniff_table_format(&full[..data_size.min(1024)], tail4);
+        if !matches!(format, TableFormat::Json) {
+            let mut err: *mut c_char = ptr::null_mut();
+            let relptr = match format {
+                TableFormat::ArrowIpc => crate::arrow_ipc_reader::read_arrow_ipc_to_shm(data, data_size, schema, &mut err),
+                TableFormat::Parquet => crate::arrow_ipc_reader::read_parquet_to_shm(data, data_size, schema, &mut err),
+                TableFormat::Delimited | TableFormat::Json => {
+                    crate::arrow_ipc_reader::read_csv_to_shm(data, data_size, schema, &mut err)
+                }
+            };
+            libc::free(data as *mut c_void);
+            if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
+            return match shm::rel2abs(relptr) {
+                Ok(p) => p as *mut c_void,
+                Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
+            };
         }
     }
 
@@ -3554,6 +3674,14 @@ unsafe fn dispatch_shape_core(
         }
     };
 
+    if form_code == 5 && source_kind == ArgSource::Inline {
+        if !data.is_null() {
+            libc::free(data as *mut c_void);
+        }
+        set_errmsg(errmsg, &MorlocError::Other(TABLE_NOT_INLINE.into()));
+        return ptr::null_mut();
+    }
+
     // `form: list` + inline argv: route through the JSON path when
     // the argv looks like a JSON array (`[...]`). No overlap with
     // realistic filenames: files whose first byte is `[` are not
@@ -3638,6 +3766,7 @@ unsafe fn dispatch_shape_core(
         2 => try_bytes_hybrid(data, data_size, schema, &mut atom_err),
         3 => try_list_with_config(data, data_size, schema, list_cfg, &mut atom_err),
         4 => try_bytes_only(data, data_size, schema, &mut atom_err),
+        5 => try_table_rows(data, data_size, schema, &mut atom_err),
         other => {
             if !data.is_null() {
                 libc::free(data as *mut c_void);
@@ -3694,6 +3823,8 @@ impl FieldShape {
 ///   - 2 (Bytes): sniff packet magic, fall back to packed raw bytes
 ///   - 3 (List): UTF-8 split on newlines; per-element pipeline
 ///   - 4 (BytesOnly): packed raw bytes, never sniff
+///   - 5 (Table): a headed table (CLI-13); a `Table` is passed on by
+///     name after its header is checked, a list of records is read here
 ///
 /// `list_config_json` carries the per-element overrides when
 /// `form_code == 3`; null / empty means defaults.
@@ -3740,7 +3871,7 @@ pub(crate) unsafe fn parse_cli_data_argument_shaped(
             if c.kind == ArgSource::File {
                 stream_fast_path_or_fallthrough!(c.effective, schema, errmsg);
             }
-            match try_table_file_packet(&c, schema) {
+            match try_table_file_packet(&c, schema, false) {
                 Ok(TableArg::ByName(pkt)) => return pkt,
                 // A packet read through the shape pipeline keeps its
                 // ordinary route; only the name may have changed.
@@ -3751,6 +3882,33 @@ pub(crate) unsafe fn parse_cli_data_argument_shaped(
         }
     } else if form_code == 1 && source_code == 2 {
         stream_fast_path_or_fallthrough!((*arg).value, schema, errmsg);
+    } else if form_code == 5
+        && !schema.is_null()
+        && crate::arrow_ffi::is_arrow_table_schema(&CSchema::to_rust(schema))
+    {
+        let c = match source_code {
+            2 => Classified { kind: ArgSource::File, effective: (*arg).value },
+            _ => match classify_arg_source((*arg).value) {
+                Ok(c) => c,
+                Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+            },
+        };
+        if c.kind == ArgSource::Inline {
+            set_errmsg(errmsg, &MorlocError::Other(TABLE_NOT_INLINE.into()));
+            return ptr::null_mut();
+        }
+        match try_table_file_packet(&c, schema, true) {
+            Ok(TableArg::ByName(pkt)) => return pkt,
+            Ok(TableArg::Reclassified(c)) => {
+                let voidstar = dispatch_shape_core(c.effective as *mut c_char, schema, 2, 0, &list_cfg, errmsg);
+                if voidstar.is_null() {
+                    return ptr::null_mut();
+                }
+                return wrap_voidstar_as_packet(voidstar, schema, errmsg);
+            }
+            Ok(TableArg::NotHandled) => {}
+            Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+        }
     }
 
     let voidstar = dispatch_shape_core(
@@ -3782,7 +3940,7 @@ pub(crate) unsafe fn parse_cli_data_argument(
             if classified.kind == ArgSource::File {
                 stream_fast_path_or_fallthrough!(classified.effective, schema, errmsg);
             }
-            match try_table_file_packet(&classified, schema) {
+            match try_table_file_packet(&classified, schema, false) {
                 Ok(TableArg::ByName(pkt)) => return pkt,
                 Ok(TableArg::Reclassified(c)) => table_spool = Some(c),
                 Ok(TableArg::NotHandled) => {}

@@ -1,0 +1,31 @@
+-- Spec CLI-13: `@form table` reads a list of records and a Table, with or
+-- without declared columns, from delimited text, Arrow IPC, Parquet, a
+-- morloc packet, stdin or a named pipe; inline values and JSON are
+-- refused.
+module main (rows, table, open)
+
+import root-py
+import table-py
+
+source Py from "src.py" ("py_id")
+py_id :: a -> a
+
+record Row = Row { x :: Int, y :: Str }
+
+--' Records as read, through a Python pool
+rows ::
+  --' @form table
+  [Row] -> [Row]
+rows xs = py_id xs
+
+--' A table as read, through a Python pool
+table ::
+  --' @form table
+  Table n {x=Int, y=Str} -> Table n {x=Int, y=Str}
+table t = py_id t
+
+--' A table of any columns, through a Python pool
+open ::
+  --' @form table
+  Table n r -> Table n r
+open t = py_id t

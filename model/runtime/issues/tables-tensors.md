@@ -21,3 +21,18 @@
 - [read] Arrow block doc (arrow_shm.rs) describes a metadata section never
   written.
 - [speculative] pymorloc.c:2591-2593 leaks a moved schema on failure.
+
+CSV input to a `Table` argument (reader: arrow_ipc_reader.rs
+`delimited_batch`, rules CLI-13..CLI-19).
+
+- **Bad table input kills the Python pool.** [reproduced, 0.109.0] Violates
+  the failure classification (failure-classification.md: user data decode
+  is classified infrastructure). A `Table` is read in the pool, so a bad
+  cell (`99999999999999999999` in an `Int` column,
+  test-suite/golden-tests/spec-cli-17-1) or an empty file raises
+  MorlocInternalError in pybinding__get_value and ends the pool. Under
+  `@form table` the nexus checks the header first, so only cell errors
+  reach the pool. This is CLI-20's deviation.
+- **A packet without schema metadata skips the schema check.** [read]
+  cli.rs ~2036 decodes it under the requested schema; a record packet with
+  swapped same-typed fields would bind wrong.

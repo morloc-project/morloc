@@ -114,3 +114,12 @@ as JSON and 69 as MessagePack; a `[U64]` packet costs 18. Not located.
 - None for 1 and 2: read pairs are still stored as morloc stream files, and
   the benchmarks in lib/biolib/{bio,biotrim,bioseqqc}/bench record the cost
   (bench/history.tsv) so a fix shows up as a measured change.
+
+- **Record-list tables go through JSON both ways.** [read] A `@form
+  table` list of records is read as CSV -> JSON text -> CString -> the
+  JSON loader (cli.rs `try_table_rows`), and written as voidstar -> JSON
+  -> one HashMap of RawValue per row -> CSV (arrow_ipc_reader.rs
+  `write_rows_csv_to_buffer`): about 3-4x the data held at once and an
+  allocation per row. A Parquet input is also copied once more
+  (`decode_columnar`, `Bytes::copy_from_slice`). Not measured. Fix: build
+  the voidstar from parsed cells, and walk it to write.

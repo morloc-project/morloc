@@ -1147,6 +1147,10 @@ data ArgShape
       --   The ASCII byte-sequence shortcut.
   | AsListLines ListPipeline
       -- ^ `form: list` with per-line dispatch.
+  | AsTable
+      -- ^ `form: table` on a `Table` or a list of records: a headed
+      --   table read from a file or stdin (CLI-13). The element types
+      --   are checked against the 'SerialAST'.
   deriving (Eq, Show)
 
 -- ── Schema-text utilities ─────────────────────────────────────────
@@ -1337,6 +1341,7 @@ validateList schema elemS docs = do
         else Right AsListDefault
     (Just SourceInline, Just FormList) -> Left
       "`@source inline` is contradictory with `@form list`; splitting a single argv string on newlines is not meaningful. Use `@source file` (or omit `@source`)."
+    (_, Just FormTable) -> tableArm docs
     (_, Just FormList) ->
       AsListLines <$> validateLinesPipeline elemS docs
     (mSrc, Just FormBytes)     -> bytesArm schema elemS mSrc Bytes docs
@@ -1419,9 +1424,27 @@ validateLinesPipeline elemS docs =
           "`@list.form bytes`/`bytes-only` requires every leaf to be a fixed-width scalar; got element wire schema `"
           <> es <> "`."
 
--- | Tuples, records, maps: no shape modifiers.
+-- | `form: table`: a file or stdin, never inline, with no other shape
+-- modifier.
+tableArm :: ArgDocVars -> Either Text ArgShape
+tableArm docs = do
+  when' (docSource docs /= Nothing)
+    "`@source` is not used with `@form table`; a table argument is always a path, or `-` for stdin."
+  when' (not (null (docChecks docs))) "`@check.*` is not allowed with `@form table`."
+  when' (hasAnyListField docs) "`@list.*` fields are not allowed with `@form table`."
+  Right AsTable
+
+isTableWireSchema :: Text -> Bool
+isTableWireSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
+  Just ('T', _) -> True
+  _ -> False
+
+-- | Tuples, records, maps: no shape modifiers. A `Table` may take
+-- `form: table`.
 validateOtherCompound :: Text -> ArgDocVars -> Either Text ArgShape
-validateOtherCompound schema docs = do
+validateOtherCompound schema docs
+  | docForm docs == Just FormTable && isTableWireSchema schema = tableArm docs
+  | otherwise = do
   let banIf b name = if b then Left
         ("`" <> name <> "` is not allowed on this compound type (wire schema `"
          <> schema <> "`).") else Right ()

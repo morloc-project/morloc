@@ -54,11 +54,9 @@ re-checked.
 
 ## Output (IFACE-9)
 
-- **Non-finite floats.** [read, survey] Lists and records write the
-  strings `"nan"`/`"inf"` (morloc-runtime/src/json.rs:1818-1822) where the
-  advertised schema says `number`; a Table writes bare `nan`
-  (arrow_ffi.rs:349-350), invalid JSON, which HTTP then wraps as one JSON
-  string (daemon_ffi.rs:1292-1295) and MCP sends as invalid text.
+- **Non-finite floats.** [read, survey] Lists, records and tables write
+  the strings `"nan"`/`"inf"` (morloc-runtime/src/json.rs `write_float`,
+  arrow_ffi.rs `push_float`) where the advertised schema says `number`.
 
 ## Failure (IFACE-10)
 

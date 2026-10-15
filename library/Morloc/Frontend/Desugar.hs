@@ -387,24 +387,26 @@ parseSourceAtom raw = case T.strip raw of
         Left $ "unknown source value '" <> s
             <> "'; expected one of: inline, file."
 
--- | Parse the value of a `form:` field. The four meaningful atoms are
--- `list`, `bytes`, `bytes-only`, and `packet`. OR-chains are rejected.
+-- | Parse the value of a `form:` field. The meaningful atoms are
+-- `list`, `table`, `bytes`, `bytes-only`, and `packet`. OR-chains are
+-- rejected.
 parseFormAtom :: Text -> Either Text FormAtom
 parseFormAtom raw = case T.strip raw of
   "packet" -> Right FormPacket
   "bytes" -> Right FormBytes
   "bytes-only" -> Right FormBytesOnly
   "list" -> Right FormList
+  "table" -> Right FormTable
   s | T.isInfixOf "|" s ->
         Left $ "OR-chains in `@form` (e.g. `packet|bytes`) are no longer"
             <> " supported; pick a single value."
     | s == "auto" ->
         Left $ "`@form auto` is not a writable value; auto is the implicit"
-            <> " default. Either drop the field or pick `list`, `bytes`,"
-            <> " `bytes-only`, or `packet`."
+            <> " default. Either drop the field or pick `list`, `table`,"
+            <> " `bytes`, `bytes-only`, or `packet`."
     | otherwise ->
         Left $ "unknown form value '" <> s
-            <> "'; expected one of: list, bytes, bytes-only, packet."
+            <> "'; expected one of: list, table, bytes, bytes-only, packet."
 
 -- | Parse a formatter directive value:
 -- @\<flag-spec\> = \<handler\>[(\<arg\>[, \<arg\>]*)] [\<\@modifier\>]*@.
@@ -814,6 +816,8 @@ processArgDocLines = finalize . foldl step ([], [], defaultValue, Nothing)
         ["mime"] -> case parseMediaType v of
           Right mt -> (errs, ws, d {docMime = Just mt})
           Left e   -> (errs <> ["in `@mime " <> v <> "`: " <> e], ws, d)
+        ("table" : _ : _) ->
+          (errs <> ["`@" <> k <> "`: the `@table.` directives are reserved, and none is defined yet"], ws, d)
         _ ->
           let w = unknownDirectiveWarning argDocDirectiveKeys k line
            in (errs, ws <> w, d {docLines = docLines d <> [docDescLine line]})
@@ -4910,6 +4914,7 @@ classifyParseArg pos (EV cmd) quantified t d
       when (docMany d == Just True) $ reject "`@many` arguments cannot be parsed"
       when (docUnroll d == Just True) $ reject "`@unroll` arguments cannot be parsed"
       when (docForm d == Just FormList) $ reject "`@form list` arguments cannot be parsed"
+      when (docForm d == Just FormTable) $ reject "`@form table` arguments cannot be parsed"
       when (isJust (docTrue d) || isJust (docFalse d)) $ reject "flags cannot be parsed"
       Just <$> case t of
         OptionalU inner

@@ -650,8 +650,9 @@ data SourceAtom = SourceInline | SourceFile
 -- through to raw bytes, so raw-byte interpretation is opt-in via
 -- `FormBytes` (sniff packet -> raw bytes, the friendly path) or
 -- `FormBytesOnly` (raw bytes only, never sniff). `FormPacket` is the
--- strictness guarantee (packet only, loud-fail otherwise).
-data FormAtom = FormPacket | FormBytes | FormBytesOnly | FormList
+-- strictness guarantee (packet only, loud-fail otherwise). `FormTable`
+-- reads a headed table (CLI-13).
+data FormAtom = FormPacket | FormBytes | FormBytesOnly | FormList | FormTable
   deriving (Show, Ord, Eq)
 
 -- | Path-permission subset, e.g. "r", "w", "c", "rw", "rwc".

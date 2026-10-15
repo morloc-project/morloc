@@ -46,3 +46,13 @@
   floats open): `parse_float` (morloc-runtime/src/json.rs) reads any
   spelling `f64::from_str` accepts ("Infinity", "NaN", any case), while
   the writer emits only "nan", "inf", "-inf".
+
+- **A numpy integer returned as `Int` is refused.** [reproduced, dev
+  6915296a+] Violates the docs' census example
+  (docs src/content/features-tables.asc, `summarize`, shown printing
+  54585374). `summarize :: Table n {state = Str, pop = Int} -> Int;
+  summarize t = fold (+) 0 (getCol "pop" t)` with root-py, table-py and
+  vector-py fails for every input, JSON included: "Expected int for
+  MORLOC_INT, but got numpy.int64" (pymorloc.c py_size_step, the
+  `PyLong_Check` in the MORLOC_INT arm, unchanged since 139b83e1). Cause
+  unknown: what changed is that the fold now yields a numpy scalar.

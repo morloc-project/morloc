@@ -313,7 +313,7 @@
             "list_source": "inline",
             "list_form": "auto",
             "list_checks": [],
-            "format": "path to file with one row entry line (JSON or table)"
+            "format": "path to file with one row per line: JSON, or cells without a header"
           }
         }
       ],

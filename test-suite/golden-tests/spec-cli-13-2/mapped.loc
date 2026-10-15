@@ -1,0 +1,12 @@
+-- A twin of accept.loc that `@form table` rejects (spec CLI-13).
+module main (f)
+
+import root-py
+import table-py
+import map-py
+
+--' f
+f ::
+  --' @form table
+  Map Str Int -> U64
+f xs = size xs

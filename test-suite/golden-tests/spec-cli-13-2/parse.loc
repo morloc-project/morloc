@@ -1,0 +1,17 @@
+-- A twin of accept.loc that `@form table` rejects (spec CLI-13).
+module main (f)
+
+import root-py
+import table-py
+
+record R = R { a :: Int, b :: ?Str }
+
+source Py from "h.py" ("readT")
+readT :: Str -> [R]
+
+--' f
+f ::
+  --' @form table
+  --' @parse csv=readT .csv
+  [R] -> Int
+f xs = 0

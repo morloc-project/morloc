@@ -27,3 +27,50 @@
   speculative: that function inlines the referenced data but copies the
   original header, so a reply large enough to travel by shared memory keeps
   its RPTR source byte.
+
+- **`@form list` row errors do not say what is wrong.** [reproduced,
+  0.109.0] Same gap. The TAB, comma, whitespace passes
+  (morloc-runtime/src/cli.rs, `try_list_with_config`) keep only the last
+  failure, so every rejected CSV row of a record or tuple reports `form:
+  list whitespace fallback: line 1 has 1 whitespace-separated columns;
+  expected N`: a non-integer cell (`a,b,1,x,0.5,true`), an extra column, a
+  short row on line 2 (still reported as line 1), and a header alike. The
+  header hint also fires on a data row whose bad cell is a word
+  (`a,b,1,x,...`, `...,nan,...`). A type error that reaches the loader is
+  reported against the rebuilt JSON (`expected value at line 1 column
+  10`), not the user's row and field. Wanted: row number, field name,
+  cell text and expected type. Reproduction:
+  test-suite/golden-tests/form-list-record-rows (inputs badint, wide,
+  narrow, header; obs.err).
+
+- **UNSOUND: `@form list` loads a header row as data.** [reproduced,
+  0.109.0] Spec gap: no rule tells a header from a row. `record Gene =
+  Gene { name :: Str, chrom :: Str }`, `--' @form list [Gene] -> [Gene]`
+  on `name,chrom\ntp53,chr17\n` returns two records, the first
+  `{"name":"name","chrom":"chrom"}`; with the header `chrom,name` the
+  values are bound in declaration order, so names and chromosomes swap
+  with no error. A header is caught only when a name fails its column's
+  type. Headed files now have `@form table` (CLI-13, CLI-14); `@form list`
+  still has no rule that tells a header from a row.
+
+- **`@form list` rejects `nan`/`inf` cells for `Real`.** [reproduced,
+  0.109.0] Violates the loader's own non-finite rule (json.rs
+  `parse_nonfinite` accepts `"nan"`, `"inf"`, `"-inf"`): row `a,b,1,2,nan,true`
+  fails because `format_field_as_json` passes non-string cells through
+  verbatim and bare `nan` is not JSON.
+
+- **Empty cell for an optional field is undefined.** [reproduced, 0.109.0]
+  Spec gap: no rule for absent values in `@form list` rows. Record
+  `{label :: Str, n :: ?Int}`: row `b,` is rejected, only `b,null` gives
+  null. An empty `Str` cell gives `""`, so `?Str` empty is ambiguous.
+  Needs a ruling.
+
+- **`@form list` bool cells accept only `true`/`false`.** [reproduced,
+  0.109.0] Spec gap: `True`, `TRUE`, `1` are rejected; whether table
+  cells follow JSON spelling needs a ruling.
+
+- **A typo in a directive name on a `@form table` argument only warns.**
+  [read] Gap in CLI-13: Desugar.hs appends an unknown key to the
+  description with a warning, so `@tabel.header none` is accepted and the
+  header-required default applies. Only `@table.*` is reserved. Open:
+  should every unknown key be an error on an argument with `@form table`?

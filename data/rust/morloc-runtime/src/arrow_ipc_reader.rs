@@ -18,6 +18,7 @@ use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, RelPtr};
+use crate::delimited::{self, CellType, ColType, Expect, Value};
 
 /// True iff `data` starts with the Arrow IPC file magic. The file format
 /// places "ARROW1\0\0" at offset 0; the streaming format does not, so this
@@ -41,6 +42,11 @@ unsafe fn batches_to_shm(
     rs: &Schema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
+    let names: Vec<String> = file_schema.fields().iter().map(|f| f.name().clone()).collect();
+    if let Err(e) = delimited::check_names(&names) {
+        set_errmsg(errmsg, &MorlocError::Other(e.replacen("line 1: ", "", 1)));
+        return shm::RELNULL;
+    }
     let batch = if batches.is_empty() {
         RecordBatch::new_empty(file_schema)
     } else if batches.len() == 1 {
@@ -61,6 +67,16 @@ unsafe fn batches_to_shm(
             shm::RELNULL
         }
     }
+}
+
+/// Put `path` in front of the error a reader left in `errmsg`.
+unsafe fn prefix_errmsg(errmsg: *mut *mut c_char, path: &str) {
+    if errmsg.is_null() || (*errmsg).is_null() {
+        return;
+    }
+    let e = morloc_runtime_types::error::take_reason(*errmsg);
+    *errmsg = ptr::null_mut();
+    set_errmsg(errmsg, &MorlocError::Other(format!("'{}': {}", path, e)));
 }
 
 /// Copy a byte vector into a libc-allocated buffer the caller frees.
@@ -205,7 +221,6 @@ unsafe fn write_csv_to_buffer_impl(
     out_len: *mut usize,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    use arrow_csv::writer::WriterBuilder;
     *out_buf = ptr::null_mut();
     *out_len = 0;
     let batch = match arrow_shm::shm_to_batch(header) {
@@ -215,15 +230,103 @@ unsafe fn write_csv_to_buffer_impl(
             return 1;
         }
     };
-    let mut buf: Vec<u8> = Vec::new();
-    {
-        let mut writer = WriterBuilder::new().with_header(true).with_delimiter(delimiter).build(&mut buf);
-        if let Err(e) = writer.write(&batch) {
-            set_errmsg(errmsg, &MorlocError::Other(format!("CSV write: {}", e)));
-            return 1;
+    match batch_to_delimited(&batch, delimiter) {
+        Ok(buf) => hand_out(buf, out_buf, out_len, errmsg),
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            1
         }
     }
-    hand_out(buf, out_buf, out_len, errmsg)
+}
+
+/// A table as headed delimited text, in the cell spellings the reader
+/// accepts (CLI-17).
+fn batch_to_delimited(batch: &RecordBatch, delim: u8) -> Result<Vec<u8>, MorlocError> {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::*;
+    use arrow_array::Array;
+    use arrow_cast::display::{ArrayFormatter, FormatOptions};
+    let mut out: Vec<u8> = Vec::new();
+    for (i, f) in batch.schema().fields().iter().enumerate() {
+        if i > 0 {
+            out.push(delim);
+        }
+        delimited::push_text_cell(&mut out, f.name().as_bytes(), delim);
+    }
+    out.push(b'\n');
+    let options = FormatOptions::default();
+    let mut formatters = Vec::with_capacity(batch.num_columns());
+    for col in batch.columns() {
+        formatters.push(
+            ArrayFormatter::try_new(col.as_ref(), &options)
+                .map_err(|e| MorlocError::Other(format!("CSV write: {}", e)))?,
+        );
+    }
+    for r in 0..batch.num_rows() {
+        for (j, col) in batch.columns().iter().enumerate() {
+            if j > 0 {
+                out.push(delim);
+            }
+            if col.data_type() == &DataType::Null || col.is_null(r) {
+                continue;
+            }
+            match col.data_type() {
+                DataType::Utf8 => delimited::push_text_cell(&mut out, col.as_string::<i32>().value(r).as_bytes(), delim),
+                DataType::LargeUtf8 => delimited::push_text_cell(&mut out, col.as_string::<i64>().value(r).as_bytes(), delim),
+                DataType::Utf8View => delimited::push_text_cell(&mut out, col.as_string_view().value(r).as_bytes(), delim),
+                DataType::Boolean => out.extend_from_slice(if col.as_boolean().value(r) { b"true" } else { b"false" }),
+                DataType::Float32 => delimited::push_float_cell(&mut out, f64::from(col.as_primitive::<Float32Type>().value(r)), true),
+                DataType::Float64 => delimited::push_float_cell(&mut out, col.as_primitive::<Float64Type>().value(r), false),
+                _ => {
+                    let text = formatters[j].value(r).to_string();
+                    delimited::push_text_cell(&mut out, text.as_bytes(), delim);
+                }
+            }
+        }
+        out.push(b'\n');
+    }
+    Ok(out)
+}
+
+/// Write a list of records as a headed delimited table (CLI-17). The
+/// buffer convention is `write_arrow_ipc_to_buffer`'s.
+///
+/// # Safety
+/// `data` must be a live value laid out as `schema`, a list of records.
+pub(crate) unsafe fn write_rows_csv_to_buffer(
+    data: *const std::ffi::c_void,
+    schema: *const CSchema,
+    delimiter: u8,
+    out_buf: *mut *mut u8,
+    out_len: *mut usize,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    *out_buf = ptr::null_mut();
+    *out_len = 0;
+    if data.is_null() || schema.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("NULL data or schema".into()));
+        return 1;
+    }
+    let rs = CSchema::to_rust(schema);
+    let row = match rs.parameters.first() {
+        Some(row) if rs.serial_type == SerialType::Array && row.serial_type == SerialType::Map => row,
+        _ => {
+            set_errmsg(errmsg, &MorlocError::Other(
+                "--format=csv|tsv requires a Table or a list of records whose fields are table cells".into(),
+            ));
+            return 1;
+        }
+    };
+    let written = crate::json::voidstar_to_json_string(data as shm::AbsPtr, &rs)
+        .and_then(|json| delimited::rows_from_json(&json, row, delimiter).map_err(MorlocError::Other));
+    match written {
+        Ok(buf) => hand_out(buf, out_buf, out_len, errmsg),
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            1
+        }
+    }
 }
 
 /// Read an Arrow IPC file (ARROW1 magic) or stream into a table block
@@ -298,58 +401,36 @@ pub(crate) fn validate_batches(batches: &[RecordBatch], full: bool) -> Result<()
     Ok(())
 }
 
-/// The table format a file holds, decided by what the bytes say and, only
-/// where they say nothing, by the name. Arrow IPC and Parquet announce
-/// themselves; delimited text does not, so a reader that has only a pipe
-/// to go on has to try parsing it.
+/// The table format a file holds, decided by its bytes alone: Arrow IPC
+/// and Parquet by their magic numbers, JSON by a leading `[` or `{`, and
+/// anything else is delimited text, whose delimiter its header decides
+/// (CLI-15).
 pub enum TableFormat {
     ArrowIpc,
     Parquet,
-    Delimited(u8),
+    Delimited,
     Json,
 }
 
-/// Recognise a table file from its leading bytes, its last four, and its
-/// name. `head` should hold at least a kibibyte where the file is that
-/// long: enough for the magic numbers and for a delimited-text parse to
-/// be worth trying.
-pub fn sniff_table_format(head: &[u8], tail4: &[u8], path: &str) -> Option<TableFormat> {
-    if is_arrow_file_magic(head) {
-        return Some(TableFormat::ArrowIpc);
+/// True iff `data` starts like an Arrow IPC stream: a continuation
+/// marker, which is not valid UTF-8 and so cannot begin delimited text.
+pub fn is_arrow_stream_start(data: &[u8]) -> bool {
+    data.len() >= 4 && data[..4] == [0xFF, 0xFF, 0xFF, 0xFF]
+}
+
+/// Recognise a table file from its leading bytes and its last four.
+pub fn sniff_table_format(head: &[u8], tail4: &[u8]) -> TableFormat {
+    if is_arrow_file_magic(head) || is_arrow_stream_start(head) {
+        return TableFormat::ArrowIpc;
     }
     if head.len() >= 4 && &head[..4] == b"PAR1" && tail4 == b"PAR1" {
-        return Some(TableFormat::Parquet);
+        return TableFormat::Parquet;
     }
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".tsv") {
-        return Some(TableFormat::Delimited(b'\t'));
+    if delimited::looks_like_json(head) {
+        TableFormat::Json
+    } else {
+        TableFormat::Delimited
     }
-    if lower.ends_with(".csv") {
-        return Some(TableFormat::Delimited(b','));
-    }
-    if lower.ends_with(".json") {
-        return Some(TableFormat::Json);
-    }
-    // Nothing named it, so ask the bytes. A leading `[` or `{` is JSON;
-    // otherwise try each delimiter and take the first that parses as a
-    // table of more than one column, which is what tells a real delimited
-    // file from a column of plain text.
-    match head.iter().find(|b| !b.is_ascii_whitespace()) {
-        Some(b'[') | Some(b'{') => return Some(TableFormat::Json),
-        None => return None,
-        _ => {}
-    }
-    for delim in [b',', b'\t'] {
-        let format = arrow_csv::reader::Format::default().with_header(true).with_delimiter(delim);
-        // PANIC-2
-        let sniffed = crate::error::decode("sniffing a table", || format.infer_schema(&mut Cursor::new(head), csv_sniff_rows()));
-        if let Ok(Ok((schema, rows))) = sniffed {
-            if rows > 0 && schema.fields().len() > 1 {
-                return Some(TableFormat::Delimited(delim));
-            }
-        }
-    }
-    None
 }
 
 /// Read a table file into a fresh block under the declared schema,
@@ -394,17 +475,15 @@ unsafe fn read_table_file_to_shm_impl(
     }
     let head = &bytes[..bytes.len().min(1024)];
     let tail4 = if bytes.len() >= 4 { &bytes[bytes.len() - 4..] } else { &[][..] };
-    match sniff_table_format(head, tail4, path_str) {
-        Some(TableFormat::ArrowIpc) => read_arrow_ipc_to_shm(bytes.as_ptr(), bytes.len(), schema, errmsg),
-        Some(TableFormat::Parquet) => read_parquet_bytes_to_shm(bytes::Bytes::from(bytes), schema, errmsg),
-        Some(TableFormat::Delimited(d)) => read_csv_to_shm(bytes.as_ptr(), bytes.len(), d, schema, errmsg),
-        Some(TableFormat::Json) => crate::arrow_ffi::read_json_bytes_to_arrow_shm(&bytes, schema, errmsg),
-        None => {
-            set_errmsg(errmsg, &MorlocError::Other(format!(
-                "'{}' is not a table: it is not Arrow IPC or Parquet, and its text does not \
-                 parse as delimited or JSON", path_str)));
-            shm::RELNULL
+    match sniff_table_format(head, tail4) {
+        TableFormat::ArrowIpc => read_arrow_ipc_to_shm(bytes.as_ptr(), bytes.len(), schema, errmsg),
+        TableFormat::Parquet => read_parquet_bytes_to_shm(bytes::Bytes::from(bytes), schema, errmsg),
+        TableFormat::Delimited => {
+            let r = read_csv_to_shm(bytes.as_ptr(), bytes.len(), schema, errmsg);
+            prefix_errmsg(errmsg, path_str);
+            r
         }
+        TableFormat::Json => crate::arrow_ffi::read_json_bytes_to_arrow_shm(&bytes, schema, errmsg),
     }
 }
 
@@ -616,50 +695,6 @@ fn declared_field(key: &str, p: &Schema) -> Result<Field, MorlocError> {
     Ok(Field::new(key, dt, nullable))
 }
 
-/// The CSV parse type for a column the declaration does not mention:
-/// arrow-csv's inference for the numeric and text families, and the raw
-/// cell text for anything else, which round-trips without lossy coercion.
-fn inferred_csv_type(dt: &DataType) -> DataType {
-    match dt {
-        DataType::Boolean
-        | DataType::Int8
-        | DataType::Int16
-        | DataType::Int32
-        | DataType::Int64
-        | DataType::UInt8
-        | DataType::UInt16
-        | DataType::UInt32
-        | DataType::UInt64
-        | DataType::Float32
-        | DataType::Float64
-        | DataType::Utf8
-        | DataType::LargeUtf8 => dt.clone(),
-        _ => DataType::Utf8,
-    }
-}
-
-/// The schema a CSV is parsed with: the header's columns in header order,
-/// since the parser binds fields to columns by position. A declared
-/// column is parsed as declared; any other is parsed as inferred and
-/// nullable. A declared column absent from the header is an error. The
-/// declared-first order the block carries is applied afterwards by
-/// `align_to_declared`.
-fn csv_parse_schema(rs: &Schema, inferred: &ArrowSchema) -> Result<ArrowSchema, MorlocError> {
-    for k in rs.keys.iter() {
-        if inferred.index_of(k).is_err() {
-            return Err(MorlocError::Other(format!("Declared column '{}' missing from CSV header", k)));
-        }
-    }
-    let mut fields: Vec<Field> = Vec::with_capacity(inferred.fields().len());
-    for f in inferred.fields() {
-        match rs.keys.iter().position(|k| k == f.name()) {
-            Some(i) => fields.push(declared_field(f.name(), &rs.parameters[i])?),
-            None => fields.push(Field::new(f.name(), inferred_csv_type(f.data_type()), true)),
-        }
-    }
-    Ok(ArrowSchema::new(fields))
-}
-
 /// Resolve the sniff-window size for CSV type inference: 100 records by
 /// default, overridden by `MORLOC_CSV_SNIFF_ROWS` (0 disables inference
 /// and reads every column as text). Never `None`, which would scan the
@@ -752,9 +787,9 @@ unsafe fn morloc_csv_infer_impl(
     true
 }
 
-/// Read a CSV / TSV file into a table block. The declared columns are
-/// parsed as declared; the header's other columns are appended with
-/// inferred types.
+/// Read a headed CSV / TSV table into a table block (CLI-13..CLI-16).
+/// The delimiter comes from the header; declared columns are parsed as
+/// declared and every other column is read as `?Str`.
 ///
 /// # Safety
 /// `data` must point to `data_len` valid bytes; `schema` must be a valid
@@ -762,77 +797,371 @@ unsafe fn morloc_csv_infer_impl(
 pub(crate) unsafe fn read_csv_to_shm(
     data: *const u8,
     data_len: usize,
-    delimiter: u8,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
     clear_errmsg(errmsg);
-    read_csv_to_shm_impl(data, data_len, delimiter, schema, errmsg)
+    read_csv_to_shm_impl(data, data_len, schema, errmsg)
 }
 
 unsafe fn read_csv_to_shm_impl(
     data: *const u8,
     data_len: usize,
-    delimiter: u8,
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    use arrow_csv::ReaderBuilder;
-
-    if data.is_null() || schema.is_null() || data_len == 0 {
+    if schema.is_null() || (data.is_null() && data_len > 0) {
         set_errmsg(errmsg, &MorlocError::Other("NULL data or schema".into()));
         return shm::RELNULL;
     }
-    let bytes = std::slice::from_raw_parts(data, data_len);
+    let bytes: &[u8] = if data_len == 0 { &[] } else { std::slice::from_raw_parts(data, data_len) };
     let rs = CSchema::to_rust(schema);
     if !is_arrow_table_schema(&rs) {
         set_errmsg(errmsg, &MorlocError::Other("CSV reader requires a Table schema".into()));
         return shm::RELNULL;
     }
-
-    let format = arrow_csv::reader::Format::default().with_header(true).with_delimiter(delimiter);
-    let mut sniff_cursor = Cursor::new(bytes);
     // PANIC-2
-    let inferred = match crate::error::decode("inferring CSV columns", || format.infer_schema(&mut sniff_cursor, csv_sniff_rows())) {
-        Ok(Ok((s, _))) => s,
-        Ok(Err(e)) => {
-            set_errmsg(errmsg, &MorlocError::Other(format!("Failed to infer CSV schema: {}", e)));
-            return shm::RELNULL;
-        }
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            return shm::RELNULL;
-        }
-    };
-    let parse_schema = match csv_parse_schema(&rs, &inferred) {
-        Ok(s) => Arc::new(s),
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            return shm::RELNULL;
-        }
-    };
-
-    // PANIC-2
-    let parsed = crate::error::decode("parsing CSV", || {
-        let reader = ReaderBuilder::new(parse_schema.clone())
-            .with_header(true)
-            .with_delimiter(delimiter)
-            .build(Cursor::new(bytes))
-            .map_err(|e| MorlocError::Other(format!("Failed to open CSV: {}", e)))?;
-        let batches = reader
-            .collect::<Result<Vec<RecordBatch>, _>>()
-            .map_err(|e| MorlocError::Other(format!("Failed to read CSV: {}", e)))?;
-        validate_schema(&parse_schema)?;
-        validate_batches(&batches, false)?;
-        Ok(batches)
-    })
-    .and_then(|r| r);
+    let parsed = crate::error::decode("parsing a delimited table", || delimited_batch(bytes, &rs))
+        .and_then(|r| r);
     match parsed {
-        Ok(batches) => batches_to_shm(batches, parse_schema, &rs, errmsg),
+        Ok((file_schema, batch)) => batches_to_shm(vec![batch], file_schema, &rs, errmsg),
         Err(e) => {
             set_errmsg(errmsg, &e);
             shm::RELNULL
         }
+    }
+}
+
+/// One column under construction.
+enum ColumnBuilder {
+    Bool(arrow_array::builder::BooleanBuilder),
+    I8(arrow_array::builder::Int8Builder),
+    I16(arrow_array::builder::Int16Builder),
+    I32(arrow_array::builder::Int32Builder),
+    I64(arrow_array::builder::Int64Builder),
+    U8(arrow_array::builder::UInt8Builder),
+    U16(arrow_array::builder::UInt16Builder),
+    U32(arrow_array::builder::UInt32Builder),
+    U64(arrow_array::builder::UInt64Builder),
+    F32(arrow_array::builder::Float32Builder),
+    F64(arrow_array::builder::Float64Builder),
+    Str(arrow_array::builder::StringBuilder),
+}
+
+impl ColumnBuilder {
+    fn for_type(t: &CellType) -> Option<ColumnBuilder> {
+        use arrow_array::builder::*;
+        Some(match t {
+            CellType::Bool => ColumnBuilder::Bool(BooleanBuilder::new()),
+            CellType::I8 => ColumnBuilder::I8(Int8Builder::new()),
+            CellType::I16 => ColumnBuilder::I16(Int16Builder::new()),
+            CellType::I32 => ColumnBuilder::I32(Int32Builder::new()),
+            CellType::I64 | CellType::TableInt => ColumnBuilder::I64(Int64Builder::new()),
+            CellType::U8 => ColumnBuilder::U8(UInt8Builder::new()),
+            CellType::U16 => ColumnBuilder::U16(UInt16Builder::new()),
+            CellType::U32 => ColumnBuilder::U32(UInt32Builder::new()),
+            CellType::U64 => ColumnBuilder::U64(UInt64Builder::new()),
+            CellType::F32 => ColumnBuilder::F32(Float32Builder::new()),
+            CellType::F64 => ColumnBuilder::F64(Float64Builder::new()),
+            CellType::Str => ColumnBuilder::Str(StringBuilder::new()),
+            CellType::Int | CellType::Enum(_) => return None,
+        })
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn push(&mut self, v: Value<'_>) {
+        match (self, v) {
+            (ColumnBuilder::Bool(b), Value::Null) => b.append_null(),
+            (ColumnBuilder::I8(b), Value::Null) => b.append_null(),
+            (ColumnBuilder::I16(b), Value::Null) => b.append_null(),
+            (ColumnBuilder::I32(b), Value::Null) => b.append_null(),
+            (ColumnBuilder::I64(b), Value::Null) => b.append_null(),
+            (ColumnBuilder::U8(b), Value::Null) => b.append_null(),
+            (ColumnBuilder::U16(b), Value::Null) => b.append_null(),
+            (ColumnBuilder::U32(b), Value::Null) => b.append_null(),
+            (ColumnBuilder::U64(b), Value::Null) => b.append_null(),
+            (ColumnBuilder::F32(b), Value::Null) => b.append_null(),
+            (ColumnBuilder::F64(b), Value::Null) => b.append_null(),
+            (ColumnBuilder::Str(b), Value::Null) => b.append_null(),
+            (ColumnBuilder::Bool(b), Value::Bool(x)) => b.append_value(x),
+            (ColumnBuilder::I8(b), Value::Signed(x)) => b.append_value(x as i8),
+            (ColumnBuilder::I16(b), Value::Signed(x)) => b.append_value(x as i16),
+            (ColumnBuilder::I32(b), Value::Signed(x)) => b.append_value(x as i32),
+            (ColumnBuilder::I64(b), Value::Signed(x)) => b.append_value(x),
+            (ColumnBuilder::U8(b), Value::Unsigned(x)) => b.append_value(x as u8),
+            (ColumnBuilder::U16(b), Value::Unsigned(x)) => b.append_value(x as u16),
+            (ColumnBuilder::U32(b), Value::Unsigned(x)) => b.append_value(x as u32),
+            (ColumnBuilder::U64(b), Value::Unsigned(x)) => b.append_value(x),
+            (ColumnBuilder::F32(b), Value::F32(x)) => b.append_value(x),
+            (ColumnBuilder::F64(b), Value::F64(x)) => b.append_value(x),
+            (ColumnBuilder::Str(b), Value::Str(x)) => b.append_value(x.as_ref()),
+            (_, v) => unreachable!("parse_cell gave {:?} for this column's type", v),
+        }
+    }
+
+    fn finish(self) -> arrow_array::ArrayRef {
+        match self {
+            ColumnBuilder::Bool(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::I8(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::I16(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::I32(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::I64(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::U8(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::U16(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::U32(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::U64(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::F32(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::F64(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::Str(mut b) => Arc::new(b.finish()),
+        }
+    }
+}
+
+/// The column types and Arrow fields of a delimited table's header: a
+/// declared column as declared, any other as `?Str` (CLI-14).
+fn delimited_columns(names: &[String], rs: &Schema) -> Result<(Vec<ColType>, Vec<Field>), MorlocError> {
+    let declared: std::collections::HashMap<&str, usize> =
+        rs.keys.iter().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
+    let mut types = Vec::with_capacity(names.len());
+    let mut fields = Vec::with_capacity(names.len());
+    for name in names {
+        match declared.get(name.as_str()).copied() {
+            Some(i) => {
+                let p = &rs.parameters[i];
+                fields.push(declared_field(name, p)?);
+                let mut ct = ColType::from_schema(p).ok_or_else(|| {
+                    MorlocError::Other(format!("column `{}` cannot be read from a table cell", name))
+                })?;
+                if ct.ty == CellType::Int {
+                    ct.ty = CellType::TableInt;
+                }
+                types.push(ct);
+            }
+            None => {
+                fields.push(Field::new(name, DataType::Utf8, true));
+                types.push(ColType { ty: CellType::Str, optional: true });
+            }
+        }
+    }
+    Ok((types, fields))
+}
+
+fn delimited_batch(bytes: &[u8], rs: &Schema) -> Result<(SchemaRef, RecordBatch), MorlocError> {
+    let expect = if rs.keys.is_empty() { Expect::Open } else { Expect::Contains(&rs.keys) };
+    let header = delimited::read_header(bytes, expect).map_err(MorlocError::Other)?;
+    let (types, fields) = delimited_columns(&header.names, rs)?;
+    let mut builders: Vec<ColumnBuilder> = Vec::with_capacity(types.len());
+    for (t, n) in types.iter().zip(header.names.iter()) {
+        builders.push(ColumnBuilder::for_type(&t.ty).ok_or_else(|| {
+            MorlocError::Other(format!("column `{}`: a table cannot hold {}", n, t.name()))
+        })?);
+    }
+    let ncol = header.names.len();
+    let mut tok = delimited::Tokenizer::new(bytes, header.body, header.body_line, header.delim);
+    while let Some(rec) = tok.next_record().map_err(MorlocError::Other)? {
+        if rec.cells.len() != ncol {
+            return Err(MorlocError::Other(format!(
+                "line {}: {}, but the header names {} columns",
+                rec.line,
+                delimited::count_cells(rec.cells.len()),
+                ncol
+            )));
+        }
+        for (j, c) in rec.cells.into_iter().enumerate() {
+            let v = delimited::parse_cell(c, &types[j]).map_err(|e| {
+                MorlocError::Other(format!("line {}, column `{}`: {}", rec.line, header.names[j], e))
+            })?;
+            builders[j].push(v);
+        }
+    }
+    let file_schema: SchemaRef = Arc::new(ArrowSchema::new(fields));
+    let columns: Vec<arrow_array::ArrayRef> = builders.into_iter().map(ColumnBuilder::finish).collect();
+    let batch = RecordBatch::try_new(file_schema.clone(), columns)
+        .map_err(|e| MorlocError::Other(format!("building the table: {}", e)))?;
+    validate_schema(&file_schema)?;
+    validate_batches(std::slice::from_ref(&batch), false)?;
+    Ok((file_schema, batch))
+}
+
+/// Decode Arrow IPC (file or stream) or Parquet bytes into batches, or
+/// `None` when the bytes are none of these.
+fn decode_columnar(bytes: &[u8]) -> Result<Option<(SchemaRef, Vec<RecordBatch>)>, MorlocError> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let parquet = is_parquet_magic(bytes);
+    if !(is_arrow_file_magic(bytes) || is_arrow_stream_start(bytes) || parquet) {
+        return Ok(None);
+    }
+    // PANIC-2
+    crate::error::decode("decoding a columnar table", || {
+        let (schema, batches) = if parquet {
+            let builder = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::copy_from_slice(bytes))
+                .map_err(|e| MorlocError::Other(format!("Failed to open Parquet file: {}", e)))?;
+            let schema = builder.schema().clone();
+            let reader = builder
+                .build()
+                .map_err(|e| MorlocError::Other(format!("Failed to build Parquet reader: {}", e)))?;
+            let batches = reader
+                .collect::<Result<Vec<RecordBatch>, _>>()
+                .map_err(|e| MorlocError::Other(format!("Failed to read Parquet record batches: {}", e)))?;
+            (schema, batches)
+        } else if is_arrow_file_magic(bytes) {
+            read_ipc_file(bytes)?
+        } else {
+            read_ipc_stream(bytes)?
+        };
+        validate_schema(&schema)?;
+        validate_batches(&batches, true)?;
+        Ok(Some((schema, batches)))
+    })
+    .and_then(|r| r)
+}
+
+/// Read Arrow IPC or Parquet bytes as a list of records `row`, written as
+/// the JSON array the value loader reads; `None` when the bytes are
+/// neither. Columns bind to fields by name, as a header does (CLI-14).
+pub(crate) fn columnar_rows_json(bytes: &[u8], row: &Schema) -> Result<Option<String>, MorlocError> {
+    let (file_schema, batches) = match decode_columnar(bytes)? {
+        Some(x) => x,
+        None => return Ok(None),
+    };
+    let names: Vec<String> = file_schema.fields().iter().map(|f| f.name().clone()).collect();
+    let idx = delimited::field_index(&names, row).map_err(|e| MorlocError::Other(e.replacen("line 1: ", "", 1)))?;
+    let types = delimited::field_types(row).map_err(MorlocError::Other)?;
+    let mut parts: Vec<String> = vec![String::new(); row.keys.len()];
+    let mut out = String::from("[");
+    let mut n = 0usize;
+    for batch in &batches {
+        let columns = batch
+            .columns()
+            .iter()
+            .map(|c| match c.data_type() {
+                DataType::Dictionary(_, value) => arrow_cast::cast::cast(c, value)
+                    .map_err(|e| MorlocError::Other(format!("decoding a dictionary column: {}", e))),
+                _ => Ok(c.clone()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for r in 0..batch.num_rows() {
+            n += 1;
+            for (j, col) in columns.iter().enumerate() {
+                let f = idx[j];
+                let v = columnar_cell(col, r, &types[f])
+                    .map_err(|e| MorlocError::Other(format!("row {}, column `{}`: {}", n, names[j], e)))?;
+                parts[f].clear();
+                delimited::push_json(&mut parts[f], &v, &types[f]);
+            }
+            if n > 1 {
+                out.push(',');
+            }
+            out.push('{');
+            for (f, k) in row.keys.iter().enumerate() {
+                if f > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(k).unwrap_or_else(|_| "\"\"".into()));
+                out.push(':');
+                out.push_str(&parts[f]);
+            }
+            out.push('}');
+        }
+    }
+    out.push(']');
+    Ok(Some(out))
+}
+
+fn columnar_int(col: &dyn arrow_array::Array, i: usize) -> Option<i128> {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::*;
+    Some(match col.data_type() {
+        DataType::Int8 => i128::from(col.as_primitive::<Int8Type>().value(i)),
+        DataType::Int16 => i128::from(col.as_primitive::<Int16Type>().value(i)),
+        DataType::Int32 => i128::from(col.as_primitive::<Int32Type>().value(i)),
+        DataType::Int64 => i128::from(col.as_primitive::<Int64Type>().value(i)),
+        DataType::UInt8 => i128::from(col.as_primitive::<UInt8Type>().value(i)),
+        DataType::UInt16 => i128::from(col.as_primitive::<UInt16Type>().value(i)),
+        DataType::UInt32 => i128::from(col.as_primitive::<UInt32Type>().value(i)),
+        DataType::UInt64 => i128::from(col.as_primitive::<UInt64Type>().value(i)),
+        _ => return None,
+    })
+}
+
+fn columnar_str(col: &dyn arrow_array::Array, i: usize) -> Option<String> {
+    use arrow_array::cast::AsArray;
+    Some(match col.data_type() {
+        DataType::Utf8 => col.as_string::<i32>().value(i).to_string(),
+        DataType::LargeUtf8 => col.as_string::<i64>().value(i).to_string(),
+        DataType::Utf8View => col.as_string_view().value(i).to_string(),
+        _ => return None,
+    })
+}
+
+/// One value of a columnar table as `ct`. Integers convert between widths
+/// when the value fits; `F32` widens to `Real`; nothing else converts.
+fn columnar_cell(col: &arrow_array::ArrayRef, i: usize, ct: &ColType) -> Result<Value<'static>, String> {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::*;
+    let col: &dyn arrow_array::Array = col.as_ref();
+    if col.data_type() == &DataType::Null || col.is_null(i) {
+        return if ct.optional {
+            Ok(Value::Null)
+        } else {
+            Err(format!("a null, but the column is {}, not optional", ct.name()))
+        };
+    }
+    let mismatch = || format!("a {} column cannot be read as {}", col.data_type(), ct.name());
+    let out_of_range = |v: i128| format!("{} is out of range for {}", v, ct.name());
+    let signed = |lo: i128, hi: i128| -> Result<Value<'static>, String> {
+        let v = columnar_int(col, i).ok_or_else(mismatch)?;
+        if v < lo || v > hi {
+            return Err(out_of_range(v));
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(Value::Signed(v as i64))
+    };
+    let unsigned = |hi: i128| -> Result<Value<'static>, String> {
+        let v = columnar_int(col, i).ok_or_else(mismatch)?;
+        if v < 0 || v > hi {
+            return Err(out_of_range(v));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Ok(Value::Unsigned(v as u64))
+    };
+    match &ct.ty {
+        CellType::Str => {
+            let s = columnar_str(col, i).ok_or_else(mismatch)?;
+            if s.contains('\0') {
+                return Err("the cell holds a NUL byte".into());
+            }
+            Ok(Value::Str(s.into()))
+        }
+        CellType::Enum(keys) => {
+            let s = columnar_str(col, i).ok_or_else(mismatch)?;
+            keys.iter()
+                .position(|k| *k == s)
+                .map(Value::Enum)
+                .ok_or_else(|| format!("\"{}\" is not {}", s, ct.name()))
+        }
+        CellType::Bool => match col.data_type() {
+            DataType::Boolean => Ok(Value::Bool(col.as_boolean().value(i))),
+            _ => Err(mismatch()),
+        },
+        CellType::I8 => signed(i128::from(i8::MIN), i128::from(i8::MAX)),
+        CellType::I16 => signed(i128::from(i16::MIN), i128::from(i16::MAX)),
+        CellType::I32 => signed(i128::from(i32::MIN), i128::from(i32::MAX)),
+        CellType::I64 | CellType::TableInt => signed(i128::from(i64::MIN), i128::from(i64::MAX)),
+        CellType::U8 => unsigned(i128::from(u8::MAX)),
+        CellType::U16 => unsigned(i128::from(u16::MAX)),
+        CellType::U32 => unsigned(i128::from(u32::MAX)),
+        CellType::U64 => unsigned(i128::from(u64::MAX)),
+        CellType::Int => Ok(Value::Big(columnar_int(col, i).ok_or_else(mismatch)?.to_string())),
+        CellType::F64 => match col.data_type() {
+            DataType::Float64 => Ok(Value::F64(col.as_primitive::<Float64Type>().value(i))),
+            DataType::Float32 => Ok(Value::F64(f64::from(col.as_primitive::<Float32Type>().value(i)))),
+            _ => Err(mismatch()),
+        },
+        CellType::F32 => match col.data_type() {
+            DataType::Float32 => Ok(Value::F32(col.as_primitive::<Float32Type>().value(i))),
+            _ => Err(mismatch()),
+        },
     }
 }
 
@@ -1018,7 +1347,7 @@ mod tests {
 
     fn read_csv(text: &[u8], schema: *mut CSchema) -> RecordBatch {
         let mut err: *mut c_char = ptr::null_mut();
-        let rel = unsafe { read_csv_to_shm(text.as_ptr(), text.len(), b',', schema, &mut err) };
+        let rel = unsafe { read_csv_to_shm(text.as_ptr(), text.len(), schema, &mut err) };
         assert!(err.is_null(), "{}", unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy());
         let base = shm::rel2abs(rel).unwrap();
         unsafe { arrow_shm::shm_to_batch(base as *const ArrowShmHeader) }.unwrap()
@@ -1060,10 +1389,41 @@ mod tests {
     }
 
     #[test]
+    fn undeclared_columns_stay_text_and_written_tables_read_back() {
+        let _guard = crate::init_test_shm();
+        let schema = declared(&[("x", SerialType::Sint64)]);
+        let back = read_csv(b"zip\tx\n02134\t1\n\t2\n\"\"\t3\n", schema);
+        use arrow_array::Array;
+        let zip = back.column_by_name("zip").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(zip.value(0), "02134");
+        assert!(zip.is_null(1));
+        assert!(!zip.is_null(2) && zip.value(2).is_empty());
+        let text = batch_to_delimited(&back, b',').unwrap();
+        assert_eq!(text, b"x,zip\n1,02134\n2,\n3,\"\"\n".to_vec());
+        let again = read_csv(&text, schema);
+        unsafe { CSchema::free(schema) };
+        assert_eq!(again, back);
+    }
+
+    #[test]
+    fn delimited_table_errors_are_refusals() {
+        let _guard = crate::init_test_shm();
+        let schema = declared(&[("x", SerialType::Sint64)]);
+        for bad in [&b""[..], b"y\n1\n", b"x\n1x\n", b"x\n\n", b"x,y\n1\n"] {
+            let mut err: *mut c_char = ptr::null_mut();
+            let rel = unsafe { read_csv_to_shm(bad.as_ptr(), bad.len(), schema, &mut err) };
+            assert_eq!(rel, shm::RELNULL, "{:?}", String::from_utf8_lossy(bad));
+            assert!(!err.is_null());
+            unsafe { libc::free(err as *mut libc::c_void) };
+        }
+        unsafe { CSchema::free(schema) };
+    }
+
+    #[test]
     fn damaged_csv_is_refused_not_fatal() {
         let csv = b"x,s\n1,a\n2,\"b,b\"\n3,ccc\n";
         survives_mutations("csv", csv, &|b, s, e| unsafe {
-            read_csv_to_shm(b.as_ptr(), b.len(), b',', s, e)
+            read_csv_to_shm(b.as_ptr(), b.len(), s, e)
         });
     }
 }
@@ -1087,6 +1447,11 @@ mod c_abi {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn write_rows_csv_to_buffer(data: *const std::ffi::c_void, schema: *const CSchema, delimiter: u8, out_buf: *mut *mut u8, out_len: *mut usize, errmsg: *mut *mut c_char) -> i32 {
+        super::write_rows_csv_to_buffer(data, schema, delimiter, out_buf, out_len, errmsg)
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn read_arrow_ipc_to_shm(data: *const u8, data_len: usize, schema: *const CSchema, errmsg: *mut *mut c_char) -> RelPtr {
         super::read_arrow_ipc_to_shm(data, data_len, schema, errmsg)
     }
@@ -1102,8 +1467,8 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn read_csv_to_shm(data: *const u8, data_len: usize, delimiter: u8, schema: *const CSchema, errmsg: *mut *mut c_char) -> RelPtr {
-        super::read_csv_to_shm(data, data_len, delimiter, schema, errmsg)
+    pub unsafe extern "C" fn read_csv_to_shm(data: *const u8, data_len: usize, schema: *const CSchema, errmsg: *mut *mut c_char) -> RelPtr {
+        super::read_csv_to_shm(data, data_len, schema, errmsg)
     }
 
     #[no_mangle]

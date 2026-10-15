@@ -283,31 +283,16 @@ pub(crate) fn arrow_copied_bytes() -> u64 {
 
 // -- Printers ----------------------------------------------------------------
 
-/// A finite float as the JSON writer writes it (`json::FloatText`); a
-/// non-finite one as C's `%g` writes it (bare `nan`, `inf`), which is not
-/// what the JSON writer writes (model/language/issues/interfaces.md).
+/// A float as the JSON writer writes it: `json::FloatText`, or the quoted
+/// `"nan"`, `"inf"`, `"-inf"`.
 fn push_float(out: &mut String, v: f64, single: bool) {
-    if v.is_finite() {
-        out.push_str(crate::json::FloatText::new(v, single).as_str());
+    if v.is_nan() {
+        out.push_str("\"nan\"");
+    } else if v.is_infinite() {
+        out.push_str(if v > 0.0 { "\"inf\"" } else { "\"-inf\"" });
     } else {
-        out.push_str(&fmt_g(v, if single { 7 } else { 15 }));
+        out.push_str(crate::json::FloatText::new(v, single).as_str());
     }
-}
-
-/// C's `%.<prec>g` rendering of a double.
-fn fmt_g(v: f64, prec: i32) -> String {
-    let mut buf = [0u8; 64];
-    let n = unsafe {
-        libc::snprintf(
-            buf.as_mut_ptr() as *mut c_char,
-            buf.len(),
-            b"%.*g\0".as_ptr() as *const c_char,
-            prec,
-            v,
-        )
-    };
-    let n = n.clamp(0, buf.len() as i32 - 1) as usize;
-    String::from_utf8_lossy(&buf[..n]).into_owned()
 }
 
 fn json_escape(s: &str, out: &mut String) {
@@ -893,6 +878,15 @@ fn json_column(
             })
             .collect()
     }
+    /// The non-finite spellings the JSON writer uses for a float.
+    fn nonfinite(v: &serde_json::Value) -> Option<f64> {
+        match v.as_str()? {
+            "nan" => Some(f64::NAN),
+            "inf" => Some(f64::INFINITY),
+            "-inf" => Some(f64::NEG_INFINITY),
+            _ => None,
+        }
+    }
     fn floats(values: &[&serde_json::Value], nullable: bool, name: &str) -> Result<Vec<Option<f64>>, MorlocError> {
         values
             .iter()
@@ -901,7 +895,7 @@ fn json_column(
                 if v.is_null() {
                     return if nullable { Ok(None) } else { Err(bad(name, i, "number")) };
                 }
-                v.as_f64().map(Some).ok_or_else(|| bad(name, i, "number"))
+                v.as_f64().or_else(|| nonfinite(v)).map(Some).ok_or_else(|| bad(name, i, "number"))
             })
             .collect()
     }
@@ -914,6 +908,10 @@ fn json_column(
             .map(|(i, v)| {
                 if v.is_null() {
                     return if nullable { Ok(None) } else { Err(bad(name, i, "number")) };
+                }
+                if let Some(f) = nonfinite(v) {
+                    #[allow(clippy::cast_possible_truncation)]
+                    return Ok(Some(f as f32));
                 }
                 let n = v.as_number().ok_or_else(|| bad(name, i, "number"))?;
                 let f = n.as_str().parse::<f32>().map_err(|_| bad(name, i, "number"))?;
@@ -988,6 +986,29 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(json).unwrap();
         let rs = table(&[("c", st)]);
         json_value_to_batch(&v, &rs).map(|b| b.column(0).clone())
+    }
+
+    #[test]
+    fn table_json_reads_back_its_non_finite_floats() {
+        use arrow_array::cast::AsArray;
+        use arrow_array::types::{Float32Type, Float64Type};
+        let a = column(SerialType::Float64, r#"[{"c":"nan"},{"c":"inf"},{"c":"-inf"},{"c":0.5}]"#).unwrap();
+        let a = a.as_primitive::<Float64Type>();
+        assert!(a.value(0).is_nan());
+        assert_eq!((a.value(1), a.value(2), a.value(3)), (f64::INFINITY, f64::NEG_INFINITY, 0.5));
+        let b = column(SerialType::Float32, r#"[{"c":"-inf"}]"#).unwrap();
+        assert_eq!(b.as_primitive::<Float32Type>().value(0), f32::NEG_INFINITY);
+        assert!(column(SerialType::Float64, r#"[{"c":"NaN"}]"#).is_err());
+    }
+
+    #[test]
+    fn table_json_quotes_non_finite_floats() {
+        let mut out = String::new();
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.5] {
+            push_float(&mut out, v, false);
+            out.push(' ');
+        }
+        assert_eq!(out, "\"nan\" \"inf\" \"-inf\" 0.5 ");
     }
 
     #[test]

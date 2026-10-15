@@ -20,7 +20,8 @@ failure (a fail packet). Several sites are misclassified.
   Violates PANIC-6 / FAIL-4: decoding an argument
   (`get_morloc_data_packet_value`) is wrapped INFRA in pymorloc.c:2769,
   rmorloc.c:3318 and :3518, pool.cpp:391, so a bad CSV cell (`zz` in a
-  declared Int column) kills the pool instead of failing the call. Probably
+  declared Int column) kills the pool instead of failing the call; CLI-20
+  deviates on this. Probably
   also a wrong-length tensor (unconfirmed). Open: should the C ABI report an
   error class with every message?
 - **A reply wait checks the listener, not the worker.** [read] NET-5

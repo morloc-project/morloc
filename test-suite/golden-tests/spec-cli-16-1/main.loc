@@ -1,0 +1,17 @@
+-- Spec CLI-16: an unquoted empty cell is null, which only an optional
+-- field may hold; a quoted empty cell is the empty Str.
+module main (rows)
+
+import root-py
+import table-py
+
+source Py from "src.py" ("py_id")
+py_id :: a -> a
+
+record Opt = Opt { n :: ?Int, s :: ?Str, t :: Str }
+
+--' Records as read, through a Python pool
+rows ::
+  --' @form table
+  [Opt] -> [Opt]
+rows xs = py_id xs

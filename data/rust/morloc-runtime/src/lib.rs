@@ -70,6 +70,7 @@ pub mod arrow_shm;
 pub mod lease;
 pub mod arrow_ffi;
 pub mod arrow_ipc_reader;
+pub mod delimited;
 pub mod pool_ffi;
 pub mod fork_pool;
 pub mod crash;

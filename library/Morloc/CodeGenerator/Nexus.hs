@@ -1330,6 +1330,7 @@ formAtomJson FormPacket    = jsonStr "packet"
 formAtomJson FormBytes     = jsonStr "bytes"
 formAtomJson FormBytesOnly = jsonStr "bytes-only"
 formAtomJson FormList      = jsonStr "list"
+formAtomJson FormTable     = jsonStr "table"
 
 -- | Encode a single check as `{"kind": ..., "value": ...}`. Each future
 -- check kind adds a constructor and a matching JSON shape; the runtime
@@ -1416,6 +1417,8 @@ renderFormatHint :: Maybe Text -> Bool
                  -> Maybe Text
 renderFormatHint mschema many mSrc mForm cks mLSrc mLForm lcks
   | many = Just "one or more argv tokens, each parsed as the element type"
+  | mForm == Just FormTable = Just
+      "path to a table whose header row names its columns (CSV or TSV), Arrow IPC, Parquet or a morloc packet; `-` reads stdin"
   | otherwise = case mschema of
       Nothing -> Nothing
       Just s -> case classifySchema s of
@@ -1528,7 +1531,7 @@ formListHint elemSchema mLSrc mLForm lcks =
       CatEnum          -> "path to text file with one constructor name per line"
       CatScalarPrim    -> "path to text file with one value per line"
       CatList _        -> "path to text file with one JSON array per line"
-      CatOtherCompound -> "path to file with one row entry line (JSON or table)"
+      CatOtherCompound -> "path to file with one row per line: JSON, or cells without a header"
 
     -- For `[[UInt8]]` etc., the bytes-family description uses the
     -- innermost element width.
@@ -1842,19 +1845,70 @@ validateArgSpecs i cmdargs asts schemas = do
         CmdArgPos r -> do
           checkManyWire argLoc (argPosDocMany r) schemaText
           checkArgShape argLoc schemaText arg
+          checkTableForm argLoc (argPosDocForm r) ast
         CmdArgOpt r -> do
           checkManyWire argLoc (argOptDocMany r) schemaText
           checkDefault  argLoc ast (argOptDocDefault r)
           checkArgShape argLoc schemaText arg
+          checkTableOption argLoc (argOptDocForm r)
         CmdArgFlag _ -> return ()
         CmdArgGrp r  -> validateGroup argLoc r ast
         CmdArgAlt r  -> validateAlt argLoc r ast
+
+    checkTableForm :: MDoc -> Maybe FormAtom -> SerialAST -> MorlocMonad ()
+    checkTableForm argLoc (Just FormTable) ast = case tableFormProblem ast of
+      Nothing -> return ()
+      Just e  -> MM.throwSystemError $ argLoc <> ": " <> pretty e
+    checkTableForm _ _ _ = return ()
+
+    checkTableOption :: MDoc -> Maybe FormAtom -> MorlocMonad ()
+    checkTableOption argLoc (Just FormTable) = MM.throwSystemError $ argLoc
+      <> ": `@form table` is only for a positional argument; an option's"
+      <> " `@default` is JSON, which a table argument does not read"
+    checkTableOption _ _ = return ()
 
     checkArgShape :: MDoc -> Text -> CmdArg -> MorlocMonad ()
     checkArgShape argLoc schemaText arg =
       case Docstrings.validateCmdArg schemaText arg of
         Right _ -> return ()
         Left e  -> MM.throwSystemError $ argLoc <> ": " <> pretty e
+
+-- | Why `@form table` cannot read a value of this type, if it cannot
+-- (CLI-13): it reads a `Table`, or a list of records whose fields are
+-- table cells. An enum is a cell of a record list but not of a table.
+tableFormProblem :: SerialAST -> Maybe Text
+tableFormProblem ast = case ast of
+  SerialObject NamTable _ _ cols -> firstBad False cols
+  SerialList _ _ (SerialObject o _ _ fields) | o /= NamTable -> firstBad True fields
+  SerialList _ _ _ ->
+    Just "`@form table` reads a list of records; this list's elements are not records"
+  _ -> Just "`@form table` reads a `Table` or a list of records"
+  where
+    firstBad enumOk entries = listToMaybe
+      [ "`@form table`: field `" <> unKey k <> "` cannot be a table cell"
+          <> " (a cell holds Str, Bool, Int, a sized number, Real"
+          <> (if enumOk then ", an enum" else "") <> ", or an optional of one)"
+      | (k, a) <- entries, not (cell enumOk a) ]
+    cell enumOk (SerialOptional _ a) = scalar enumOk a
+    cell enumOk a = scalar enumOk a
+    scalar enumOk a = case a of
+      SerialString _  -> True
+      SerialBool _    -> True
+      SerialInt _     -> True
+      SerialInt8 _    -> True
+      SerialInt16 _   -> True
+      SerialInt32 _   -> True
+      SerialInt64 _   -> True
+      SerialUInt _    -> True
+      SerialUInt8 _   -> True
+      SerialUInt16 _  -> True
+      SerialUInt32 _  -> True
+      SerialUInt64 _  -> True
+      SerialReal _    -> True
+      SerialFloat32 _ -> True
+      SerialFloat64 _ -> True
+      SerialEnum {}   -> enumOk
+      _               -> False
 
 -- | Wire-schema category. Drives the per-shape rules: each category
 -- has its own narrow vocabulary for `source:` / `form:` / `list.*:`.
@@ -1983,6 +2037,8 @@ validateGroup loc r ast = case peelGroupAst ast of
             let subSchema = render (Serial.serialAstToMsgpackSchema subAst)
             checkManyWire entryLoc (argOptDocMany opt) subSchema
             checkDefault entryLoc subAst (argOptDocDefault opt)
+            when (argOptDocForm opt == Just FormTable) $ MM.throwSystemError $
+              entryLoc <> ": `@form table` is only for a positional argument, not a field of an unrolled record"
             case Docstrings.validateCmdArg subSchema (CmdArgOpt opt) of
               Right _ -> return ()
               Left e  -> MM.throwSystemError $ entryLoc <> ": " <> pretty e

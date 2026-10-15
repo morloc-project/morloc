@@ -706,6 +706,8 @@ pub enum FormAtom {
     Bytes,
     BytesOnly,
     List,
+    /// A headed table (CLI-13).
+    Table,
 }
 
 /// A value-invariant check carried alongside the argument. The compiler

@@ -1674,11 +1674,13 @@ pub(crate) fn print_result_c(
             }
         }
         OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv | OutputFormat::Tsv => {
-            // Table-only output formats: the result is a table block,
-            // serialized from there.
-            if !is_arrow {
+            // A table block is serialized from the block; a list of
+            // records may also be written as CSV or TSV (CLI-17).
+            let rows_csv = !is_arrow
+                && matches!(config.output_format, OutputFormat::Csv | OutputFormat::Tsv);
+            if !is_arrow && !rows_csv {
                 eprintln!(
-                    "Error: --format=arrow|parquet|csv|tsv requires a Table return type"
+                    "Error: --format=arrow|parquet requires a Table return type"
                 );
                 process::clean_exit(1);
             }
@@ -1702,12 +1704,25 @@ pub(crate) fn print_result_c(
                     out_len: *mut usize,
                     errmsg: *mut *mut std::ffi::c_char,
                 ) -> i32;
+                fn write_rows_csv_to_buffer(
+                    data: *const std::ffi::c_void,
+                    schema: *const std::ffi::c_void,
+                    delimiter: u8,
+                    out_buf: *mut *mut u8,
+                    out_len: *mut usize,
+                    errmsg: *mut *mut std::ffi::c_char,
+                ) -> i32;
             }
             let mut buf: *mut u8 = std::ptr::null_mut();
             let mut len: usize = 0;
             let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+            let delimiter = if matches!(config.output_format, OutputFormat::Tsv) { b'\t' } else { b',' };
             let rc = unsafe {
                 match config.output_format {
+                    _ if rows_csv => write_rows_csv_to_buffer(
+                        ptr as *const std::ffi::c_void, schema as *const std::ffi::c_void,
+                        delimiter, &mut buf, &mut len, &mut err,
+                    ),
                     OutputFormat::Arrow => write_arrow_ipc_to_buffer(
                         ptr as *const std::ffi::c_void, &mut buf, &mut len, &mut err,
                     ),

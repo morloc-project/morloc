@@ -7,8 +7,9 @@
 //!   2. Content-parse checks against a probe window (up to 1024 B):
 //!      MessagePack via a recursive marker walker, JSON via
 //!      `serde_json`'s streaming parser, CSV via libmorloc's
-//!      `morloc_csv_infer` FFI (the same arrow-csv inference morloc's
-//!      runtime uses), and UTF-8 text via `str::from_utf8`.
+//!      `morloc_csv_infer` FFI (arrow-csv type inference, for display
+//!      only: a table argument reads undeclared columns as text, CLI-14),
+//!      and UTF-8 text via `str::from_utf8`.
 //!   3. Anything left is `Unknown`.
 //!
 //! The morloc-packet branch is seek-based — even a multi-gigabyte

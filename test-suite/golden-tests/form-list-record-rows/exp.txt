@@ -1,0 +1,13 @@
+[{"name":"a","tag":"b","x":1,"y":2,"w":0.5,"ok":true},{"name":"c","tag":"d","x":3,"y":4,"w":1000,"ok":false}]
+[{"name":"a","tag":"b","x":1,"y":2,"w":0.5,"ok":true}]
+[{"name":"a","tag":"b","x":1,"y":2,"w":0.5,"ok":true}]
+[{"name":"a","tag":"b","x":1,"y":2,"w":0.5,"ok":true},{"name":"c","tag":"d","x":3,"y":4,"w":1,"ok":false}]
+[{"name":"x, y","tag":"say \"hi\"","x":1,"y":2,"w":0.5,"ok":true},{"name":"","tag":"e","x":5,"y":6,"w":2,"ok":true}]
+[{"name":"a","tag":"b","x":1,"y":2,"w":0.5,"ok":true}]
+[{"name":"a","tag":"b","x":1,"y":2,"w":0.5,"ok":true}]
+[]
+[{"label":"a","n":1},{"label":"b","n":null}]
+OK
+OK
+OK
+OK

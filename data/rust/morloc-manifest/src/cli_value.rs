@@ -235,6 +235,7 @@ pub fn form_atom_code(atom: FormAtom) -> u8 {
         FormAtom::Bytes => 2,
         FormAtom::List => 3,
         FormAtom::BytesOnly => 4,
+        FormAtom::Table => 5,
     }
 }
 
@@ -253,6 +254,7 @@ pub fn form_atom_name(atom: FormAtom) -> &'static str {
         FormAtom::Bytes => "bytes",
         FormAtom::List => "list",
         FormAtom::BytesOnly => "bytes-only",
+        FormAtom::Table => "table",
     }
 }
 

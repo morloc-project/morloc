@@ -1,0 +1,15 @@
+-- Spec CLI-13: the type and docstring rules of `@form table`. accept.loc
+-- builds; every other file differs from it in one respect and is a
+-- build error.
+module main (f)
+
+import root-py
+import table-py
+
+record R = R { a :: Int, b :: ?Str }
+
+--' f
+f ::
+  --' @form table
+  [R] -> Int
+f xs = 0
