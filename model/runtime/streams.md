@@ -210,7 +210,7 @@ the slot lock that the slot still holds the stream being closed.
 
 ### SLOT-20 A write buffer grows to its stream's sub-packet size
 Status: implemented
-Checked by: a_write_buffer_starts_small_and_sub_packets_keep_their_size, written_elements_do_not_depend_on_a_reused_buffer, flattening_in_place_writes_the_flat_form_moved
+Checked by: a_write_buffer_starts_small_and_sub_packets_keep_their_size, written_elements_do_not_depend_on_a_reused_buffer, flattening_in_place_writes_the_flat_form_moved, where_a_batch_is_cut_does_not_depend_on_the_buffer_block
 
 The size a stream's sub-packets are cut at is fixed when the stream opens
 and kept in its slot, so every writer cuts at the same points. The write
@@ -219,7 +219,8 @@ least twice as large, up to that size, when an append needs more room; its
 bytes move with it, since offsets inside a buffer are relative to it. A
 refill takes a block of the size the previous buffer reached. An element is
 written into the buffer at its place, every byte of the room it takes
-defined, so nothing a reused buffer held before reaches a file.
+defined, so nothing a reused buffer held before reaches a file. Where a
+sub-packet is cut never depends on the size of the block the buffer holds.
 
 ### SLOT-21 A channel's reader and writer sleep until the channel changes
 Status: implemented

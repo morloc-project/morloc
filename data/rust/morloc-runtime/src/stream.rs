@@ -710,7 +710,10 @@ pub struct RegistrySlot {
     /// buffer's first 16 bytes are
     /// reserved for the Array header (filled at flush); bytes 16..
     /// 16+`index_cap`*elem_width are the inline element index; the
-    /// remainder is the variable-data section. Cross-pool writers
+    /// remainder is the variable-data section. The block holds the
+    /// records in use and, once any element has variable bytes, the
+    /// whole index and data section; with none, the index may end past
+    /// the block. Cross-pool writers
     /// append to this same buffer under the slot lock.
     pub write_buffer:           std::sync::atomic::AtomicIsize,                        // off 288..296
 
@@ -3591,7 +3594,9 @@ fn flush_write_buffer(
     unsafe {
         std::ptr::write_unaligned(dst as *mut shm_types_crate::Array, shm_types_crate::Array { size: n as usize, data: 16 });
         std::ptr::copy_nonoverlapping(buf_abs.add(16), dst.add(16), records);
-        std::ptr::copy_nonoverlapping(buf_abs.add(16 + cap * w), dst.add(16 + records), data_used);
+        if data_used > 0 {
+            std::ptr::copy_nonoverlapping(buf_abs.add(16 + cap * w), dst.add(16 + records), data_used);
+        }
         crate::write_behind::shift_records(dst, n as usize, (cap - n as usize) * w, data_used, elem)?;
     }
     debug_assert_portable(unsafe { std::slice::from_raw_parts(dst as *const u8, len) }, &local.value_schema)?;
@@ -3672,14 +3677,22 @@ fn initial_index_cap(buf_size: usize, w: usize) -> u64 {
     (WRITE_BUFFER_INDEX_INITIAL_CAP as usize).min(max_index_cap).max(1) as u64
 }
 
+// SLOT-20
+fn full_index_cap(buf_size: usize, w: usize) -> u64 {
+    let max_cap = (buf_size.saturating_sub(16) / w.max(1)) as u64;
+    let mut cap = initial_index_cap(buf_size, w);
+    while cap.saturating_mul(2) <= max_cap {
+        cap *= 2;
+    }
+    cap
+}
+
 /// Append `n` elements of a fixed-width type, laid out contiguously at
 /// `src`, to the write buffer: one memcpy per buffer-full, flushing a
 /// sub-packet whenever the buffer's record region fills. A fixed-width
 /// element holds no pointer and its padding is zero, so its bytes are
-/// already its flattened form and no per-element walk is needed. The
-/// record region grows to the capacity `append_one_element` reaches --
-/// the initial capacity doubled while it fits -- so sub-packets are cut
-/// where they always were. Caller MUST hold the slot lock.
+/// already its flattened form and no per-element walk is needed.
+/// Sub-packets are cut at `full_index_cap`. Caller MUST hold the slot lock.
 fn append_flat_run(
     slot: &RegistrySlot,
     local: &mut ProcessLocalSlot,
@@ -3688,11 +3701,7 @@ fn append_flat_run(
     buf_size: usize,
 ) -> Result<(), MorlocError> {
     let w = local.elem_schema.width;
-    let max_cap = ((buf_size - 16) / w) as u64;
-    let mut cap = initial_index_cap(buf_size, w);
-    while cap.saturating_mul(2) <= max_cap {
-        cap *= 2;
-    }
+    let cap = full_index_cap(buf_size, w);
     let mut done = 0usize;
     debug_assert_eq!(slot.write_buffer_data_used.get(), 0, "fixed-width elements have no variable bytes");
     while done < n {
@@ -3703,13 +3712,16 @@ fn append_flat_run(
         }
         let k = (cap - count).min((n - done) as u64) as usize;
         let at = 16 + count as usize * w;
-        // SLOT-20: the block grows to hold these records, and the index
-        // grows only as far as the block holds; sub-packets are still cut
-        // at `cap`.
+        // SLOT-20: the index capacity never depends on the block's size.
+        let mut index_cap = match slot.write_buffer_index_cap.get() {
+            0 => initial_index_cap(buf_size, w),
+            c => c,
+        };
+        while index_cap < count + k as u64 {
+            index_cap *= 2;
+        }
         ensure_write_room(slot, at + k * w)?;
-        let fits = ((write_buffer_block_size(slot)? - 16) / w) as u64;
-        // With no variable bytes behind the index, resizing it moves nothing.
-        slot.write_buffer_index_cap.set(fits.min(cap));
+        slot.write_buffer_index_cap.set(index_cap.min(cap).max(count + k as u64));
         let buf_abs = crate::shm::rel2abs(slot.write_buffer.get())?;
         // SAFETY: SLOT-20: the block holds `at + k * w` bytes and `src`
         // holds `n` elements.
@@ -12084,6 +12096,56 @@ mod write_behind_tests {
         assert_eq!(read_strs(&path), first);
     }
 
+    // SLOT-20
+    #[test]
+    fn where_a_batch_is_cut_does_not_depend_on_the_buffer_block() {
+        let _shm = crate::own_test_registry();
+        const LIMIT: usize = 1 << 20;
+        struct Limit;
+        impl Drop for Limit {
+            fn drop(&mut self) {
+                crate::stream::set_test_write_buffer_bytes(None);
+            }
+        }
+        crate::stream::set_test_write_buffer_bytes(Some(LIMIT));
+        let _limit = Limit;
+        let dir = test_dir("cut_by_block");
+        let schema = parse_schema("aj").unwrap();
+        let ints = (0..100).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let first = format!("[{ints}]");
+        let then = format!("[{ints},{}]", vec!["1180591620717411303424"; 60000].join(","));
+        let sizes_of = |name: &str, full_block: bool| {
+            let path = dir.join(name);
+            let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "aj").unwrap();
+            if full_block {
+                let slot = slot_ref(unpack_handle(h).1).unwrap();
+                let old = crate::shm::rel2abs(slot.write_buffer.get()).unwrap();
+                let fresh = crate::shm::shmalloc(LIMIT).unwrap();
+                slot.write_buffer.set(slot_owns(crate::shm::abs2rel(fresh).unwrap()));
+                free_uncounted(old);
+            }
+            for json in [&first, &then] {
+                let v = crate::json::read_json_with_schema(json, &schema).unwrap();
+                shared_write_subpacket(h, CompressionLevel::from_u8(0).unwrap(), v).unwrap();
+                shm::shfree(v).unwrap();
+            }
+            shared_close_handle(h).unwrap();
+            let r = shared_open_istream(path.to_str().unwrap()).unwrap();
+            let mut sizes = Vec::new();
+            while let Some(frame) = shared_next_frame(r).unwrap() {
+                sizes.push(unsafe { (*(frame as *const shm_types_crate::Array)).size });
+                shm::shfree(frame).unwrap();
+            }
+            let _ = shared_close_handle(r);
+            sizes
+        };
+        let small = sizes_of("small.idx", false);
+        let full = sizes_of("full.idx", true);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(small.len() > 1, "the elements fit in one sub-packet: {small:?}");
+        assert_eq!(full, small, "the cuts depend on the block the buffer holds");
+    }
+
     // SLOT-20: a write buffer starts small and grows as elements arrive,
     // while sub-packets are still cut at the stream's configured size.
     #[test]
@@ -12103,10 +12165,10 @@ mod write_behind_tests {
         shared_write_subpacket(h, CompressionLevel::from_u8(0).unwrap(), v).unwrap();
         shm::shfree(v).unwrap();
         let block = unsafe { crate::shm::shm_block_size(crate::shm::rel2abs(slot.write_buffer.get()).unwrap()) }.unwrap();
-        let index_end = 16 + slot.write_buffer_index_cap.get() as usize * 4;
+        let records_end = 16 + slot.write_buffer_index_count.get() as usize * 4;
         shared_close_handle(h).unwrap();
         crate::stream::set_test_write_buffer_bytes(None);
-        assert!(index_end <= block, "the index ({index_end} bytes) runs past its {block}-byte block");
+        assert!(records_end <= block, "the records ({records_end} bytes) run past their {block}-byte block");
         let r = shared_open_istream(path.to_str().unwrap()).unwrap();
         let mut sizes = Vec::new();
         while let Some(frame) = shared_next_frame(r).unwrap() {
@@ -12116,11 +12178,7 @@ mod write_behind_tests {
         let _ = shared_close_handle(r);
         assert!(first < LIMIT, "the first buffer took the whole {LIMIT} bytes");
         assert_eq!(sizes.iter().sum::<usize>(), n as usize);
-        let mut cut = initial_index_cap(LIMIT, 4) as usize;
-        while cut * 2 <= (LIMIT - 16) / 4 {
-            cut *= 2;
-        }
-        assert_eq!(sizes[0], cut, "the first sub-packet was not cut at the configured size");
+        assert_eq!(sizes[0], full_index_cap(LIMIT, 4) as usize, "the first sub-packet was not cut at the configured size");
     }
 
     // FORK-2: a child's shutdown leaves the writer threads its parent runs.
