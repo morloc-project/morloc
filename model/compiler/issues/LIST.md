@@ -6,4 +6,4 @@ reproduced, read (verified by reading), speculative. Delete an entry when
 it is solved, and a file when it is empty.
 
 - [typecheck-output.md](typecheck-output.md): undetermined and non-`Type` types reach code generation (TC-3), locations lost after typechecking
-- [codegen-ownership.md](codegen-ownership.md): a value taken by a consumable projection is still read afterwards (C++ `@show` in a throw arm)
+- [codegen-ownership.md](codegen-ownership.md): the `Ok`/`Err` unwrap of a fresh `@try` result copies its payload (uses summed across branches)

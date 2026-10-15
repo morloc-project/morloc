@@ -11,12 +11,16 @@
 -- `match` (secondMatchRust), not `@show` in a throw arm (showAfterRust), and
 -- not from inside a `@try` body the subject was bound outside of
 -- (tryBodyRust); a `data` type the user maps to their own Rust enum keeps a
--- plain Box and is copied (userRust). The last line counts the moves in the
--- generated Rust, so a projection that could move but clones shows.
+-- plain Box and is copied (userRust). A throw arm that shows the subject
+-- after the projection reads the payload, so neither language may take it
+-- (showAfterRust, showAfterCpp with n = 2), nor when the projection is in an
+-- earlier let's right-hand side (showLetCpp). The last line counts the moves
+-- in the generated Rust and the next in the generated C++, so a projection
+-- that could move but copies shows.
 module main
   ( onceRust, twiceRust, pairRust, loopRust
   , userRust, secondMatchRust, showAfterRust, tryBodyRust
-  , onceCpp, twiceCpp, pairCpp, loopCpp
+  , onceCpp, twiceCpp, pairCpp, loopCpp, showAfterCpp, showLetCpp
   )
 
 import root-rust
@@ -93,3 +97,16 @@ loopCpp :: U64 -> U64 -> U64
 loopCpp k acc
   ? k == 0 = acc
   : loopCpp (k - 1) (addCpp acc (match (@try (mkCpp k)) | (Ok v) = lenCpp v | (Err _) = 0))
+
+showAfterCpp :: U64 -> U64
+showAfterCpp n =
+  let t = @try (mkCpp n)
+  in match t
+     | (Ok v) = (? lenCpp v > 3 = lenCpp v : @throw (@show t))
+     | (Err _) = 0
+
+showLetCpp :: U64 -> U64
+showLetCpp n =
+  let t = @try (mkCpp n)
+  in let k = match t | (Ok v) = lenCpp v | (Err _) = lenCpp (mkCpp 0)
+     in (? k > 3 = k : @throw (@show t))

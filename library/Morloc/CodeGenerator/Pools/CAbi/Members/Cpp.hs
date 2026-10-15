@@ -508,7 +508,7 @@ translate srcs es = do
         , translatorCScope = mergedCppScope
         , translatorDebugInfo = debugInfo
         , translatorDebugMode = debugMode
-        , translatorConsumableLets = consumableProjectionLets es
+        , translatorConsumableLets = consumableProjectionLets True es
         }
       (code, stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
   mapM_ (MM.throwSystemError . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)

@@ -1166,12 +1166,19 @@ borrowableRoot e = isBorrowableProjection e
 --     the spot and hands back the only reference to it;
 --   * the projection is the subject's only use that could read or share that
 --     payload. A tag test reads the discriminant and never the payload, and
---     an arm that ends in a throw cannot be followed by anything, so neither
---     is counted. Every other mention -- a second projection, a capture, a
---     pass to a call, a @\@show@ on a path that continues -- disqualifies it.
+--     an arm that ends in a throw returns nothing, so neither is counted.
+--     Every other mention -- a second projection, a capture, a pass to a
+--     call -- disqualifies it;
+--   * walking the manifold in evaluation order, nothing names the subject
+--     after the projection on the path that runs it (a throw's argument may
+--     read it), and no suspension or closure names the subject or holds the
+--     projection of a subject bound outside it, since it may run later or
+--     more than once. @tagAfterMove@ allows a tag test after the
+--     projection; a member sets it when its projection leaves the
+--     discriminant readable.
 --
 -- A member consuming this set must render a bare-throw arm as non-returning,
--- which is what makes the second exemption sound.
+-- which is what makes the throw exemption sound.
 -- A let index names one binding within a manifold, not within a pool: two
 -- manifolds routinely bind the same index to different values. So each
 -- top-level manifold -- with every manifold nested in it -- is scanned as one
@@ -1184,18 +1191,146 @@ borrowableRoot e = isBorrowableProjection e
 -- A let index that two projections in one scan share is never a candidate:
 -- the decision is keyed by the index, so it would also reach the projection
 -- the conditions were not checked for.
-consumableProjectionLets :: [SerialManifold] -> Set.Set (Int, Int)
-consumableProjectionLets sms =
+consumableProjectionLets :: Bool -> [SerialManifold] -> Set.Set (Int, Int)
+consumableProjectionLets tagAfterMove sms =
   Set.fromList
     [ (root, letIdx)
-    | sm@(SerialManifold root _ _ _ _) <- sms
+    | sm@(SerialManifold root _ _ _ body) <- sms
     , let scan = scanSM sm
           projected = Map.fromListWith (+) [(l, 1 :: Int) | (l, _) <- csProjections scan]
     , (letIdx, subjIdx) <- csProjections scan
     , Map.lookup letIdx projected == Just 1
     , maybe False buildsFreshValue (Map.lookup subjIdx (csDefs scan))
     , Map.findWithDefault 0 subjIdx (csUses scan) == 1
+    , isJust (moveWalk tagAfterMove subjIdx letIdx False (RS body))
     ]
+
+-- | A node of the IR, for walks that cross between its kinds.
+data RNode
+  = RS SerialExpr
+  | RN NativeExpr
+  | RSM SerialManifold
+  | RNM NativeManifold
+  | RLS (LoopBody NativeExpr SerialExpr SerialExpr)
+  | RLN (LoopBody NativeExpr SerialExpr NativeExpr)
+
+-- | A node's children, in the order the generated code evaluates them.
+rnodeChildren :: RNode -> [RNode]
+rnodeChildren (RSM (SerialManifold _ _ _ _ e)) = [RS e]
+rnodeChildren (RNM (NativeManifold _ _ _ e)) = [RN e]
+rnodeChildren (RS e) = case e of
+  ManS sm -> [RSM sm]
+  AppPoolS _ _ args -> map serialArg args
+  AppRecS _ _ es -> map RS es
+  AppForeignRecS _ _ _ es -> map RS es
+  CacheBodyS _ _ _ _ _ x -> [RS x]
+  DebugWrapS _ _ _ x -> [RS x]
+  ReturnS x -> [RS x]
+  SerialLetS _ a b -> [RS a, RS b]
+  NativeLetS _ a b -> [RN a, RS b]
+  LetVarS _ _ -> []
+  BndVarS _ _ -> []
+  SerializeS _ x -> [RN x]
+  LoopS _ _ body -> [RLS body]
+  where
+    serialArg (SerialArgManifold sm) = RSM sm
+    serialArg (SerialArgExpr x) = RS x
+rnodeChildren (RN e) = case e of
+  ManN nm -> [RNM nm]
+  AppExeN _ _ args -> map nativeArg args
+  ReturnN x -> [RN x]
+  SerialLetN _ a b -> [RS a, RN b]
+  NativeLetN _ a b -> [RN a, RN b]
+  LetVarN _ _ -> []
+  BndVarN _ _ -> []
+  DeserializeN _ _ x -> [RS x]
+  ExeN _ _ -> []
+  ListN _ _ xs -> map RN xs
+  TupleN _ xs -> map RN xs
+  RecordN _ _ _ kvs -> map (RN . snd) kvs
+  LogN _ _ -> []
+  RealN _ _ -> []
+  IntN _ _ -> []
+  StrN _ _ -> []
+  EnumN _ _ _ -> []
+  VariantN _ _ _ xs -> map RN xs
+  NullN _ -> []
+  DoBlockN _ x -> [RN x]
+  EvalN _ x -> [RN x]
+  CoerceN _ _ x -> [RN x]
+  IfN _ c t f -> [RN c, RN t, RN f]
+  IntrinsicN _ _ _ xs -> map RN xs
+  MapOptionalN _ _ _ x -> [RN x]
+  LoopN _ starts body -> map (RN . snd) starts <> [RLN body]
+  where
+    nativeArg (NativeArgManifold nm) = RNM nm
+    nativeArg (NativeArgExpr x) = RN x
+rnodeChildren (RLS b) = loopChildren RS RLS b
+rnodeChildren (RLN b) = loopChildren RN RLN b
+
+loopChildren :: (b -> RNode) -> (LoopBody NativeExpr SerialExpr b -> RNode) -> LoopBody NativeExpr SerialExpr b -> [RNode]
+loopChildren _ wrap (LoopIf c t f) = [RN c, wrap t, wrap f]
+loopChildren _ wrap (LoopNLet _ a b) = [RN a, wrap b]
+loopChildren _ wrap (LoopSLet _ a b) = [RS a, wrap b]
+loopChildren base _ (LoopBase x) = [base x]
+loopChildren _ _ (LoopContinue xs) = map RN xs
+
+-- | The native variable a let binds, its right-hand side and its body.
+rnodeLet :: RNode -> Maybe (Int, RNode, RNode)
+rnodeLet (RN (NativeLetN i a b)) = Just (i, RN a, RN b)
+rnodeLet (RS (NativeLetS i a b)) = Just (i, RN a, RS b)
+rnodeLet (RLS (LoopNLet i a b)) = Just (i, RN a, RLS b)
+rnodeLet (RLN (LoopNLet i a b)) = Just (i, RN a, RLN b)
+rnodeLet _ = Nothing
+
+-- | Whether a node names native variable @i@: a reference, or a manifold that
+-- captures it.
+rnodeNames :: Int -> RNode -> Bool
+rnodeNames i n = here n || any (rnodeNames i) (rnodeChildren n)
+  where
+    here (RN (LetVarN _ j)) = i == j
+    here (RN (BndVarN _ j)) = i == j
+    here (RSM (SerialManifold _ _ form _ _)) = any (\(Arg j _) -> j == i) (manifoldContext form)
+    here (RNM (NativeManifold _ _ form _)) = any (\(Arg j _) -> j == i) (manifoldContext form)
+    here _ = False
+
+-- | Whether a let binding native variable @i@ lies under a node.
+rnodeBinds :: Int -> RNode -> Bool
+rnodeBinds i n = maybe False (\(j, _, _) -> i == j) (rnodeLet n) || any (rnodeBinds i) (rnodeChildren n)
+
+-- | Walk a node in evaluation order, knowing whether subject @subj@ has been
+-- moved by projection let @k@: the state after it, or Nothing when the
+-- subject is named after the move, or moved from inside a closure that did
+-- not bind it. With @tagAfterMove@, a tag test may read the subject after
+-- the move.
+moveWalk :: Bool -> Int -> Int -> Bool -> RNode -> Maybe Bool
+moveWalk tagAfterMove subj k moved n = case n of
+  RN (IntrinsicN _ IntrTagTest _ (LetVarN _ j : rest))
+    | tagAfterMove && j == subj -> foldM (moveWalk tagAfterMove subj k) moved (map RN rest)
+  RN (LetVarN _ j) | j == subj -> if moved then Nothing else Just moved
+  RN (BndVarN _ j) | j == subj -> if moved then Nothing else Just moved
+  RN (IfN _ c t f) -> branch (RN c) (RN t) (RN f)
+  RLS (LoopIf c t f) -> branch (RN c) (RLS t) (RLS f)
+  RLN (LoopIf c t f) -> branch (RN c) (RLN t) (RLN f)
+  RN (DoBlockN _ _) -> closure
+  RNM _ -> closure
+  RSM _ -> closure
+  _ -> case rnodeLet n of
+    Just (i, rhs, body)
+      | i == k -> moveWalk tagAfterMove subj k moved rhs >> moveWalk tagAfterMove subj k True body
+      | i == subj -> moveWalk tagAfterMove subj k moved rhs >> moveWalk tagAfterMove subj k False body
+      | otherwise -> moveWalk tagAfterMove subj k moved rhs >>= \m -> moveWalk tagAfterMove subj k m body
+    Nothing -> foldM (moveWalk tagAfterMove subj k) moved (rnodeChildren n)
+  where
+    branch c t f = do
+      m <- moveWalk tagAfterMove subj k moved c
+      mt <- moveWalk tagAfterMove subj k m t
+      mf <- moveWalk tagAfterMove subj k m f
+      return (mt || mf)
+    closure
+      | rnodeBinds k n = if rnodeBinds subj n then foldM (moveWalk tagAfterMove subj k) moved (rnodeChildren n) else Nothing
+      | rnodeNames subj n = Nothing
+      | otherwise = Just moved
 
 -- | What 'consumableProjectionLets' gathers in one pass: every native let's
 -- right-hand side, every payload projection paired with the index it reads
@@ -1333,8 +1468,8 @@ scanNE (NullN _) = mempty
 scanNE (DoBlockN _ e) = scanNE e
 scanNE (EvalN _ e) = scanNE e
 scanNE (CoerceN _ _ e) = scanNE e
--- An arm that ends in a throw cannot be followed by anything, so what it
--- mentions can never be read after the conditional.
+-- An arm that ends in a throw returns nothing, so it is not counted; whether
+-- it runs after the projection is 'moveWalk''s question.
 scanNE (IfN _ c t f) = scanNE c <> scanArm t <> scanArm f
 -- A tag test reads the discriminant, never the payload, so naming a variable
 -- here does not make its payload observable. The discriminant is the
