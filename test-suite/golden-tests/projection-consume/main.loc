@@ -14,13 +14,18 @@
 -- plain Box and is copied (userRust). A throw arm that shows the subject
 -- after the projection reads the payload, so neither language may take it
 -- (showAfterRust, showAfterCpp with n = 2), nor when the projection is in an
--- earlier let's right-hand side (showLetCpp). The last line counts the moves
+-- earlier let's right-hand side (showLetCpp). The two arms of an unwrap
+-- never both run, so each takes its own field (unwrapRust, unwrapCpp: the
+-- value and the error message), also when the match yields the vector
+-- itself (unwrapVecCpp), with the error message intact when the Err arm
+-- runs (failRustUnwrap, failCppUnwrap), when the other arm names the
+-- subject (otherArmCpp), and in a tail loop (loopUnwrapCpp). The last line counts the moves
 -- in the generated Rust and the next in the generated C++, so a projection
 -- that could move but copies shows.
 module main
   ( onceRust, twiceRust, pairRust, loopRust
-  , userRust, secondMatchRust, showAfterRust, tryBodyRust
-  , onceCpp, twiceCpp, pairCpp, loopCpp, showAfterCpp, showLetCpp
+  , userRust, secondMatchRust, showAfterRust, tryBodyRust, unwrapRust, failRustUnwrap
+  , onceCpp, twiceCpp, pairCpp, loopCpp, showAfterCpp, showLetCpp, unwrapCpp, unwrapVecCpp, failCppUnwrap, otherArmCpp, loopUnwrapCpp
   )
 
 import root-rust
@@ -34,12 +39,14 @@ data Rust => (Holder a) = "MyHolder<$1>" a
 mkRust :: U64 -> [U8]
 lenRust :: [U8] -> U64
 addRust :: U64 -> U64 -> U64
-source Rust from "h.rs" ("mk" as mkRust, "len" as lenRust, "add" as addRust)
+failRust :: U64 -> [U8]
+source Rust from "h.rs" ("mk" as mkRust, "len" as lenRust, "add" as addRust, "fail" as failRust)
 
 mkCpp :: U64 -> [U8]
 lenCpp :: [U8] -> U64
 addCpp :: U64 -> U64 -> U64
-source Cpp from "h.hpp" ("mk" as mkCpp, "len" as lenCpp, "add" as addCpp)
+failCpp :: U64 -> [U8]
+source Cpp from "h.hpp" ("mk" as mkCpp, "len" as lenCpp, "add" as addCpp, "fail" as failCpp)
 
 onceRust :: U64 -> U64
 onceRust n = match (@try (mkRust n)) | (Ok v) = lenRust v | (Err _) = 0
@@ -110,3 +117,30 @@ showLetCpp n =
   let t = @try (mkCpp n)
   in let k = match t | (Ok v) = lenCpp v | (Err _) = lenCpp (mkCpp 0)
      in (? k > 3 = k : @throw (@show t))
+
+unwrapRust :: U64 -> U64
+unwrapRust n = match (@try (mkRust n)) | (Ok v) = lenRust v | (Err e) = @throw e
+
+unwrapCpp :: U64 -> U64
+unwrapCpp n = match (@try (mkCpp n)) | (Ok v) = lenCpp v | (Err e) = @throw e
+
+unwrapVecCpp :: U64 -> U64
+unwrapVecCpp n = lenCpp (match (@try (mkCpp n)) | (Ok v) = v | (Err e) = @throw e)
+
+failRustUnwrap :: U64 -> U64
+failRustUnwrap n = match (@try (failRust n)) | (Ok v) = lenRust v | (Err e) = @throw e
+
+failCppUnwrap :: U64 -> U64
+failCppUnwrap n = match (@try (failCpp n)) | (Ok v) = lenCpp v | (Err e) = @throw e
+
+otherArmCpp :: U64 -> U64
+otherArmCpp n =
+  let t = @try (mkCpp n)
+  in match t
+     | (Ok v) = lenCpp v
+     | (Err _) = lenCpp (match t | (Ok w) = w | (Err _) = mkCpp 1)
+
+loopUnwrapCpp :: U64 -> U64 -> U64
+loopUnwrapCpp k acc
+  ? k == 0 = acc
+  : match (@try (mkCpp k)) | (Ok v) = loopUnwrapCpp (k - 1) (addCpp acc (lenCpp v)) | (Err e) = @throw e

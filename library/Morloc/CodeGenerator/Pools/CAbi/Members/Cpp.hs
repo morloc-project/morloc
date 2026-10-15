@@ -1358,8 +1358,8 @@ PROPAGATE_ERROR(errmsg)|]
             -- which '_mlc_try' calls before returning. A by-reference
             -- capture that escaped would dangle. A binding that takes its
             -- referent is a separate decision and a far narrower one
-            -- ('consumableProjectionLets'): it requires the referent to have
-            -- no other use at all, so it cannot strand an alias.
+            -- ('consumableProjectionLets'): nothing else may use the referent
+            -- on the path that runs it, so it cannot strand an alias.
             -- Scalars are excluded ('isScalarCppType'): borrowing an int/double
             -- saves nothing and a 'const T&' can't bind a 'source Cpp' non-const
             -- 'T&' parameter, so keep the cheap by-value copy for them.

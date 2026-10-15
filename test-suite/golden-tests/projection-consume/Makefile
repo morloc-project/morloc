@@ -18,6 +18,13 @@ all:
 	./nexus showAfterCpp 2 2>&1 | grep -o '"Ok":\[\[[0-9,]*\]\]' >> obs.txt
 	./nexus showLetCpp 5 >> obs.txt 2>> obs.err
 	./nexus showLetCpp 2 2>&1 | grep -o '"Ok":\[\[[0-9,]*\]\]' >> obs.txt
+	./nexus unwrapRust 5 >> obs.txt 2>> obs.err
+	./nexus unwrapCpp 5 >> obs.txt 2>> obs.err
+	./nexus unwrapVecCpp 5 >> obs.txt 2>> obs.err
+	./nexus failRustUnwrap 3 2>&1 | grep -o 'no batch 3' >> obs.txt
+	./nexus failCppUnwrap 3 2>&1 | grep -o 'no batch 3' >> obs.txt
+	./nexus otherArmCpp 5 >> obs.txt 2>> obs.err
+	./nexus loopUnwrapCpp 10 0 >> obs.txt 2>> obs.err
 	grep -c 'try_into_inner()' nexus-build/pools/rust/src/main.rs >> obs.txt
 	grep -c "= std::move(std::get<" nexus-build/pools/cpp/pool.cpp >> obs.txt
 

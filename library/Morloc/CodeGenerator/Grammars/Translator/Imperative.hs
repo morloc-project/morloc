@@ -1165,10 +1165,11 @@ borrowableRoot e = isBorrowableProjection e
 --     result or a constructor literal, each of which allocates its payload on
 --     the spot and hands back the only reference to it;
 --   * the projection is the subject's only use that could read or share that
---     payload. A tag test reads the discriminant and never the payload, and
---     an arm that ends in a throw returns nothing, so neither is counted.
---     Every other mention -- a second projection, a capture, a pass to a
---     call -- disqualifies it;
+--     payload on the path that runs it. A tag test reads the discriminant
+--     and never the payload, and an arm that ends in a throw returns
+--     nothing, so neither is counted, and of a conditional's two arms only
+--     the one that uses the subject more is. Every other mention -- a
+--     second projection, a capture, a pass to a call -- disqualifies it;
 --   * walking the manifold in evaluation order, nothing names the subject
 --     after the projection on the path that runs it (a throw's argument may
 --     read it), and no suspension or closure names the subject or holds the
@@ -1438,7 +1439,7 @@ scanLoop scanB lbody =
   let inner = go lbody
    in inner {csProjections = [p | p@(_, subj) <- csProjections inner, Map.member subj (csDefs inner)]}
   where
-    go (LoopIf e t f) = scanNE e <> go t <> go f
+    go (LoopIf e t f) = scanNE e <> eitherArm (go t) (go f)
     go (LoopNLet i rhs body) = scanLet i rhs <> scanNE rhs <> go body
     go (LoopSLet _ e body) = scanSE e <> go body
     go (LoopBase e) = scanB e
@@ -1469,8 +1470,9 @@ scanNE (DoBlockN _ e) = scanNE e
 scanNE (EvalN _ e) = scanNE e
 scanNE (CoerceN _ _ e) = scanNE e
 -- An arm that ends in a throw returns nothing, so it is not counted; whether
--- it runs after the projection is 'moveWalk''s question.
-scanNE (IfN _ c t f) = scanNE c <> scanArm t <> scanArm f
+-- it runs after the projection is 'moveWalk''s question. Only one arm runs,
+-- so an index is used as often as the arm that uses it most.
+scanNE (IfN _ c t f) = scanNE c <> eitherArm (scanArm t) (scanArm f)
 -- A tag test reads the discriminant, never the payload, so naming a variable
 -- here does not make its payload observable. The discriminant is the
 -- variant's own index and lives outside the pointer the fields hang off, so
@@ -1480,6 +1482,13 @@ scanNE (IntrinsicN _ IntrTagTest _ (LetVarN _ _ : rest)) = mconcat (map scanNE r
 scanNE (IntrinsicN _ IntrTagTest _ (BndVarN _ _ : rest)) = mconcat (map scanNE rest)
 scanNE (IntrinsicN _ _ _ es) = mconcat (map scanNE es)
 scanNE (MapOptionalN _ _ _ e) = scanNE e
+
+eitherArm :: ConsumeScan -> ConsumeScan -> ConsumeScan
+eitherArm a b =
+  ConsumeScan
+    (dropColliding (csDefs a) (csDefs b))
+    (csProjections a <> csProjections b)
+    (Map.unionWith max (csUses a) (csUses b))
 
 scanArm :: NativeExpr -> ConsumeScan
 scanArm e
