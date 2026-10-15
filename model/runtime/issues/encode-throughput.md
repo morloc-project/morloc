@@ -101,6 +101,21 @@ buffers ~400 MiB. Open: what `@flush` is for in a file that is only read
 after `@close`; whether write-behind should bound its buffer (403 MiB peak
 for 1 MiB batches is a lot of memory for a streaming writer).
 
+Status 2026-10-15 (read, not re-measured; lib/biolib rnaseq R19/R20):
+- The cost that remains is what a flush means: SLOT-15 returns only once
+  the batches are in the file, so compression and the write cannot
+  overlap the caller. Fixing it is SLOT-15's open question (return at
+  once, move the wait to readers), which waits on a benchmark. Re-measure
+  the table above on current code first: it predates ZIP-9 and the
+  per-process bound on queued bytes (95709b1b), which also changes the
+  403 MiB no-flush peak.
+- Coalescing is the specified behaviour: SLOT-20 fixes the size a stream's
+  sub-packets are cut at when it opens, whatever the writes; only a flush
+  or close cuts early. Gap: SLOT-20 does not say outright that a reader's
+  batch (`@next`) is a sub-packet, not a write, so a program must not rely
+  on write boundaries. Add that sentence and drop this point. lib/biolib's
+  `writeBatch` without `@flush` is then correct use, not a workaround.
+
 ## 4. Writing `[Str]` as voidstar or packet costs more than as JSON
 
 [measured] model/performance ENC-3, run
