@@ -675,7 +675,9 @@ instance FromJSON LocalDep where
 --     conda-forge R name must be a bare CRAN name (no @r-@ prefix).
 checkPackageDeps :: PackageMeta -> Either Text ()
 checkPackageDeps pm =
-  mapM_ checkGroup groups >> mapM_ checkLocalGroup (Map.toList (packageLocalDeps pm))
+  mapM_ checkGroup groups
+    >> mapM_ checkTool (Map.toList (packageToolDeps pm))
+    >> mapM_ checkLocalGroup (Map.toList (packageLocalDeps pm))
   where
     groups =
       [ ("py", packagePyDeps pm)
@@ -685,6 +687,15 @@ checkPackageDeps pm =
       ]
 
     checkGroup (lang, m) = mapM_ (checkDep lang) (Map.toList m)
+
+    -- A tool is a conda package, whatever source the language groups allow.
+    checkTool (name, ds) = case dsReg ds of
+      RegDefault -> Right ()
+      RegConda _ -> Right ()
+      _ ->
+        Left $
+          "tool dependency '" <> name <> "' must be a conda package (tool-deps "
+            <> "take a version and optionally a conda channel)"
 
     checkDep lang (name, ds) = do
       _ <- resolveSource lang name ds
@@ -800,6 +811,9 @@ data PackageMeta
   -- | External C++ libraries (name -> 'DepSpec') needed by the C++ pool; the
   -- structured, version-managed successor to 'packageDependencies'.
   , packageCppDeps :: Map Text DepSpec
+  -- | Conda packages (name -> 'DepSpec') whose executables the module runs as
+  -- programs, whatever its pools' languages. Propagates transitively.
+  , packageToolDeps :: Map Text DepSpec
   -- | Local (filesystem-path) dependencies, grouped by language
   -- (lang -> name -> 'LocalDep'). Non-portable until frozen; honored only from
   -- the root/entry module. Supported languages: py, rust (see 'ldpLocalInstall').
@@ -1101,6 +1115,7 @@ instance Defaultable PackageMeta where
       , packagePyDeps = Map.empty
       , packageRDeps = Map.empty
       , packageCppDeps = Map.empty
+      , packageToolDeps = Map.empty
       , packageLocalDeps = Map.empty
       , packageLangVersions = Map.empty
       , packageInclude = Nothing
@@ -1160,6 +1175,7 @@ instance FromJSON PackageMeta where
       <*> o .:? "py-deps" .!= Map.empty
       <*> o .:? "r-deps" .!= Map.empty
       <*> o .:? "cpp-deps" .!= Map.empty
+      <*> o .:? "tool-deps" .!= Map.empty
       <*> o .:? "local-deps" .!= Map.empty
       <*> o .:? "lang-versions" .!= Map.empty
       <*> o .:? "include"

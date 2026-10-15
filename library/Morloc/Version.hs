@@ -24,11 +24,13 @@ import qualified Morloc.Data.Text as MT
 versionStr :: String
 versionStr = showVersion Paths_morloc.version
 
--- | @envspec.json@ @envspec_version@ (integer): the single schema version the
--- compiler emits and the manager accepts. v2 adds the @local@ package source
+-- | @envspec.json@ @envspec_version@ (integer): the schema version the
+-- compiler emits; the manager accepts it and the older versions it can still
+-- read. v2 adds the @local@ package source
 -- (local filesystem-path dependencies) and makes @source@ a discriminated tag.
+-- v3 adds @tools@, the conda packages whose executables a program runs.
 envspecVersion :: Int
-envspecVersion = 2
+envspecVersion = 3
 
 -- | @morloc lang-support@ @schema_version@ (semver "MAJOR.MINOR"). A new language
 -- or field is a MINOR bump; a breaking change is a MAJOR bump.

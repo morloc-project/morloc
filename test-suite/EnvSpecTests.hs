@@ -204,7 +204,7 @@ envSpecTests =
     , testGroup
         "buildEnvSpec aggregation"
         [ testCase "schema + morloc version" $ do
-            esVersion spec @?= 2
+            esVersion spec @?= 3
             esMorlocVersion spec @?= "0.98.2"
         , testCase "languages carry version + cpp std" $
             esLanguages spec
@@ -242,6 +242,39 @@ envSpecTests =
             let m1 = pm {packagePyDeps = Map.fromList [("samtools", chanDep "*" "bioconda")]}
                 m2 = pm {packagePyDeps = Map.fromList [("samtools", chanDep "*" "custom")]}
              in assertLeft (fmap (const ()) (buildEnvSpec "0.0.0" [makeLang "py" "py"] [m1, m2]))
+        ]
+    , testGroup
+        "tool-deps (conda packages a module runs as programs)"
+        [ testCase "package.yaml tool-deps parse with their channel" $
+            fmap packageToolDeps (decodeMeta "{\"tool-deps\": {\"star\": {\"version\": \"2.7.11b\", \"channel\": \"bioconda\"}}}")
+              @?= Right (Map.fromList [("star", chanDep "2.7.11b" "bioconda")])
+        , testCase "tool deps are emitted as tools, apart from the language groups" $
+            let m = pm {packageToolDeps = Map.fromList [("star", chanDep "2.7.11b" "bioconda"), ("pigz", noSrc "*")]}
+                s = forceSpec (buildEnvSpec "0.0.0" [makeLang "rust" "rs"] [m])
+             in (esPackages s, esTools s)
+                  @?= ([], [ReqRegistry "pigz" "*" SrcConda Nothing, ReqRegistry "star" "2.7.11b" SrcConda (Just "bioconda")])
+        , testCase "tool deps union across modules" $
+            let m1 = pm {packageToolDeps = Map.fromList [("star", chanDep ">=2.7" "bioconda")]}
+                m2 = pm {packageToolDeps = Map.fromList [("star", chanDep "<2.8" "bioconda")]}
+                s = forceSpec (buildEnvSpec "0.0.0" [] [m1, m2])
+             in esTools s @?= [ReqRegistry "star" ">=2.7,<2.8" SrcConda (Just "bioconda")]
+        , testCase "a tool dep from pypi or crates is rejected" $ do
+            assertLeft (checkPackageDeps (pm {packageToolDeps = Map.fromList [("x", dep "*" SrcPypi)]}))
+            assertLeft (checkPackageDeps (pm {packageToolDeps = Map.fromList [("x", dep "*" SrcCrates)]}))
+        , testCase "a conda tool dep with or without a channel is accepted" $
+            assertRight (checkPackageDeps (pm {packageToolDeps = Map.fromList [("star", chanDep "*" "bioconda"), ("pigz", noSrc "*")]}))
+        , testCase "one package from two channels in different groups is a hard error" $
+            let m1 = pm {packagePyDeps = Map.fromList [("samtools", chanDep "*" "conda-forge")]}
+                m2 = pm {packageToolDeps = Map.fromList [("samtools", chanDep "*" "bioconda")]}
+             in assertLeft (fmap (const ()) (buildEnvSpec "0.0.0" [makeLang "py" "py"] [m1, m2]))
+        , testCase "one package from one channel in different groups is accepted" $
+            let m1 = pm {packagePyDeps = Map.fromList [("samtools", chanDep "*" "bioconda")]}
+                m2 = pm {packageToolDeps = Map.fromList [("samtools", chanDep "*" "bioconda")]}
+             in assertRight (fmap (const ()) (buildEnvSpec "0.0.0" [makeLang "py" "py"] [m1, m2]))
+        , testCase "a conda-forge R dependency does not share a name with a tool" $
+            let m1 = pm {packageRDeps = Map.fromList [("ape", noSrc "*")]}
+                m2 = pm {packageToolDeps = Map.fromList [("ape", chanDep "*" "bioconda")]}
+             in assertRight (fmap (const ()) (buildEnvSpec "0.0.0" [makeLang "r" "R"] [m1, m2]))
         ]
     , testGroup
         "constraint union across the DAG (union, do not error)"
@@ -313,18 +346,20 @@ envSpecTests =
 
     minimal =
       EnvSpec
-        { esVersion = 2
+        { esVersion = 3
         , esMorlocVersion = "0.98.2"
         , esLanguages = [LangReq "py" Nothing Nothing]
         , esPackages = [("py", [ReqRegistry "numpy" ">=2" SrcConda Nothing])]
+        , esTools = [ReqRegistry "star" "2.7.11b" SrcConda (Just "bioconda")]
         , esSystem = []
         , esModules = []
         }
     minimalJson :: Text
     minimalJson =
-      "{\"envspec_version\":2,\"morloc_version\":\"0.98.2\","
+      "{\"envspec_version\":3,\"morloc_version\":\"0.98.2\","
         <> "\"languages\":[{\"lang\":\"py\"}],"
         <> "\"packages\":{\"py\":[{\"name\":\"numpy\",\"constraint\":\">=2\",\"source\":\"conda\"}]},"
+        <> "\"tools\":[{\"name\":\"star\",\"constraint\":\"2.7.11b\",\"source\":\"conda\",\"channel\":\"bioconda\"}],"
         <> "\"system\":[],\"modules\":[]}"
 
     channelSpec =

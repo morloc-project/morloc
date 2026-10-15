@@ -23,3 +23,4 @@ it is solved, and a file when it is empty.
 - [remote-dispatch.md](remote-dispatch.md): SLURM jobs: inherited parent environment, endless poll on empty sacct, job directories left by a killed parent
 - [rust-closures-threads.md](rust-closures-threads.md): function values on callback threads: host panics end the pool, late calls unspecified, refcount contention, boxed direct closures; opaque capture front-end error
 - [encode-throughput.md](encode-throughput.md): perf: stream decode copies every field (slower than parsing the text), @write slower than a synced plain write, @flush per batch ~1.8x with zstd; analyses and reviewed fixes in [../../performance/issues/](../../performance/issues/LIST.md)
+- [environment-deps.md](environment-deps.md): declared tools resolve through the inherited PATH; unknown package.yaml keys are ignored
