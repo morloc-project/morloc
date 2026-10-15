@@ -101,6 +101,13 @@ buffers ~400 MiB. Open: what `@flush` is for in a file that is only read
 after `@close`; whether write-behind should bound its buffer (403 MiB peak
 for 1 MiB batches is a lot of memory for a streaming writer).
 
+## 4. Writing `[Str]` as voidstar or packet costs more than as JSON
+
+[measured] model/performance ENC-3, run
+2026-10-15-0459-6915296a+dirty-simd-audit (C++ producer, 8-byte strings,
+`-o` file): 112 ns per element as packet and 101 as voidstar, against 88
+as JSON and 69 as MessagePack; a `[U64]` packet costs 18. Not located.
+
 ## Workarounds in lib/biolib (remove when fixed)
 
 - lib/biolib/stream `writeBatch` no longer calls `@flush`.

@@ -828,6 +828,7 @@ dependencies = [
  "parquet",
  "quote",
  "rmp",
+ "ryu",
  "serde",
  "serde_json",
  "syn",
@@ -840,6 +841,7 @@ name = "morloc-runtime-types"
 version = "0.87.0"
 dependencies = [
  "libc",
+ "memchr",
  "serde",
  "serde_json",
  "thiserror",

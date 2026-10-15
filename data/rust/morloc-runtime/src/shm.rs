@@ -1892,14 +1892,47 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
             // reads as in-use, so the block cannot be handed to anyone until
             // the store below.
             let scrub = if poison_on_free() { POISON_BYTE } else { 0 };
-            unsafe {
-                std::ptr::write_bytes(ptr, scrub, blk.size());
-            }
+            unsafe { scrub_block(ptr, scrub, blk.size()) };
             crate::shm_stats::on_release(blk.size());
             blk.reference_count.store(0, Ordering::Release);
         }
         return Ok(());
     }
+}
+
+// SHM-6: a fill this large leaves the cache to the next owner either way.
+const NONTEMPORAL_SCRUB_BYTES: usize = 8 << 20;
+
+// SHM-6: every byte is stored before the caller's release store publishes
+// the block; streaming stores are fenced to keep that order.
+// SAFETY: SHM-6: `ptr` must address `len` writable bytes.
+unsafe fn scrub_block(ptr: *mut u8, byte: u8, len: usize) {
+    #[cfg(target_arch = "x86_64")]
+    if len >= NONTEMPORAL_SCRUB_BYTES {
+        use std::arch::x86_64::{__m128i, _mm_set1_epi8, _mm_sfence, _mm_stream_si128};
+        let head = ptr.align_offset(16).min(len);
+        let body = (len - head) & !63;
+        // SAFETY: SHM-6: head, body and tail partition the caller's bytes;
+        // the body starts 16-aligned, as a streaming store requires.
+        unsafe {
+            std::ptr::write_bytes(ptr, byte, head);
+            let v = _mm_set1_epi8(byte as i8);
+            let mut p = ptr.add(head);
+            let end = p.add(body);
+            while p < end {
+                _mm_stream_si128(p as *mut __m128i, v);
+                _mm_stream_si128(p.add(16) as *mut __m128i, v);
+                _mm_stream_si128(p.add(32) as *mut __m128i, v);
+                _mm_stream_si128(p.add(48) as *mut __m128i, v);
+                p = p.add(64);
+            }
+            std::ptr::write_bytes(end, byte, len - head - body);
+            _mm_sfence();
+        }
+        return;
+    }
+    // SAFETY: SHM-6: the caller's bytes.
+    unsafe { std::ptr::write_bytes(ptr, byte, len) };
 }
 
 // SHM-10: the header of published volume `idx`.
@@ -2259,6 +2292,27 @@ mod poison_tests {
         assert!(freed.iter().all(|&b| b == 7));
         assert!(after.iter().all(|&b| b == POISON_BYTE), "a released block was not poisoned");
         assert!(fresh.iter().all(|&b| b == 0), "a newly allocated block was not zeroed");
+    }
+
+    // SHM-6: a block large enough to be scrubbed past the cache reads as
+    // scrubbed throughout, its unaligned tail included.
+    #[test]
+    fn a_large_released_block_is_scrubbed_throughout() {
+        let _shm = crate::own_test_registry();
+        for poison in [true, false] {
+            set_poison_on_free(poison);
+            let want = if poison { POISON_BYTE } else { 0 };
+            for n in [NONTEMPORAL_SCRUB_BYTES - 3, NONTEMPORAL_SCRUB_BYTES, NONTEMPORAL_SCRUB_BYTES + 37, (16 << 20) + 1] {
+                let p = shmalloc(n).unwrap();
+                let size = unsafe { (*(p.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)).size() };
+                unsafe { std::ptr::write_bytes(p, 7, size) };
+                shfree(p).unwrap();
+                let after = unsafe { std::slice::from_raw_parts(p, size) };
+                let bad = after.iter().position(|&b| b != want);
+                assert_eq!(bad, None, "block of {n} bytes, poison {poison}");
+            }
+        }
+        set_poison_on_free(false);
     }
 }
 

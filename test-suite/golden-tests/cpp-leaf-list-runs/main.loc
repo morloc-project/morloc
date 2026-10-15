@@ -1,0 +1,17 @@
+-- C++ reads and writes lists of Bool and Int a whole run at a time: a
+-- Bool list is packed and unpacked 64 elements per word, with the rest
+-- one by one, and an Int that does not fit the C++ int still fails.
+module main (flipBools, flipPyBools, bumpInts)
+
+import root-cpp
+import root-py
+
+source Cpp from "impl.hpp" ("flipBools", "bumpInts")
+source Py from "impl.py" ("py_bools" as pyBools)
+
+flipBools :: [Bool] -> [Bool]
+bumpInts :: [Int] -> [Int]
+pyBools :: Int -> [Bool]
+
+flipPyBools :: Int -> [Bool]
+flipPyBools n = flipBools (pyBools n)

@@ -1,0 +1,14 @@
+-- WIRE-9: a float in JSON is the shortest text that reads back as the
+-- same value of its type, in C's %g layout. F64 values that need 16 or 17
+-- digits keep them; an F32 is read from its text with one rounding.
+module main (reals, echoReals, echoF32s)
+
+import root-py
+import root-cpp
+
+source Py from "impl.py" ("reals", "echo" as echoReals)
+source Cpp from "impl.hpp" ("echoF32s")
+
+reals :: Int -> [Real]
+echoReals :: [Real] -> [Real]
+echoF32s :: [F32] -> [F32]

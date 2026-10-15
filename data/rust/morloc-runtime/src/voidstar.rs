@@ -436,6 +436,44 @@ impl<'a, 'r> RebaseWalk<'a, 'r> {
         }
     }
 
+    /// `n` consecutive string or array headers whose elements are
+    /// `elem_w` bytes wide and hold no pointer, rebased as `step` rebases
+    /// each one, without a frame per header.
+    ///
+    /// # Safety
+    /// `first` points at `n` headers, as `step`'s `data` points at one.
+    unsafe fn headers(&self, first: *mut Array, n: usize, elem_w: usize) -> Result<(), MorlocError> {
+        let Some(RelWindow { lo, hi }) = self.window else {
+            return Err(MorlocError::Shm("a run of headers is rebased only inside a window".into()));
+        };
+        let shift = self.shift();
+        let checking = matches!(self.mode, Rebase::Check { .. });
+        let buffer = matches!(self.mode, Rebase::Buffer { .. });
+        for i in 0..n {
+            // SAFETY: the caller's `n` headers.
+            let arr = unsafe { &mut *first.add(i) };
+            if arr.size == 0 {
+                if !(buffer || checking) {
+                    arr.data = lo;
+                }
+                continue;
+            }
+            if buffer && arr.data <= 0 {
+                continue;
+            }
+            let rel = arr.data + shift;
+            if !checking {
+                arr.data = rel;
+            }
+            let extent = arr.size.checked_mul(elem_w).and_then(|e| isize::try_from(e).ok());
+            match extent.and_then(|e| rel.checked_add(e)) {
+                Some(end) if rel >= lo && end <= hi => {}
+                _ => return self.check(rel, arr.size.checked_mul(elem_w)),
+            }
+        }
+        Ok(())
+    }
+
     fn child(
         &mut self,
         st: &mut Stack<()>,
@@ -507,6 +545,11 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                     let w = elem_schema.width;
                     let data_rel = if matches!(self.mode, Rebase::Check { .. }) { arr.data + shift } else { arr.data };
                     let elems = self.target(data_rel)?;
+                    if self.window.is_some() && w == std::mem::size_of::<Array>() {
+                        if let Some(ew) = header_elem_width(self.res.resolve(elem_schema)?) {
+                            return self.headers(elems.add(f.idx * w) as *mut Array, arr.size - f.idx, ew);
+                        }
+                    }
                     let flat_elem = self.res.flat(elem_schema);
                     for i in f.idx..arr.size {
                         let p = elems.add(i * w);
@@ -583,6 +626,24 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
             }
         }
         Ok(())
+    }
+}
+
+/// The width of the elements of a string or array whose elements hold no
+/// pointer, when an array of `s` is a run of such headers that
+/// `RebaseWalk::headers` rebases.
+fn header_elem_width(s: &Schema) -> Option<usize> {
+    if s.width != std::mem::size_of::<Array>() {
+        return None;
+    }
+    match s.serial_type {
+        SerialType::String => Some(1),
+        SerialType::Array => s.parameters.first().filter(|e| e.is_fixed_width()).map(|e| e.width),
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32
+        | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64
+        | SerialType::Float32 | SerialType::Float64 | SerialType::Tuple | SerialType::Map | SerialType::Optional
+        | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream
+        | SerialType::IStream | SerialType::Enum | SerialType::Variant => None,
     }
 }
 
@@ -758,10 +819,27 @@ unsafe fn walk_root_array_parallel(
         let res = Resolver::new(schema);
         let mut w = RebaseWalk { res: &res, mode: mode.rebase(), window: Some(window) };
         let mut st = Stack::new();
+        let header_w = res
+            .resolve(elem_schema)
+            .ok()
+            .and_then(header_elem_width)
+            .filter(|_| width == std::mem::size_of::<Array>());
         loop {
             let start = next.fetch_add(chunk, std::sync::atomic::Ordering::Relaxed);
             if start >= n {
                 return;
+            }
+            if let Some(ew) = header_w {
+                let end = (start + chunk).min(n);
+                // SAFETY: elements start..end lie inside the region the
+                // header check admitted.
+                let first = unsafe { (elems as *mut u8).add(start * width) } as *mut Array;
+                if let Err(e) = unsafe { w.headers(first, end - start, ew) } {
+                    failed.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(e);
+                    next.store(n, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+                continue;
             }
             for i in start..(start + chunk).min(n) {
                 // SAFETY: element i lies inside the region the header check
@@ -2821,5 +2899,110 @@ mod shallow_shift_tests {
             assert!(shallow_array_slots(&parse_schema(schema).unwrap()).is_none(), "{schema}");
         }
         assert_eq!(shallow_array_slots(&parse_schema("t2i4f8").unwrap()), Some(vec![]));
+    }
+}
+
+#[cfg(test)]
+mod header_run_tests {
+    //! An array of strings is rebased as a run of headers; an array of
+    //! one-field tuples of a string has the same bytes and is rebased one
+    //! element at a time. Every mode must treat the two alike.
+    use super::*;
+    use crate::schema::parse_schema;
+
+    /// `[Str]` in a buffer: root header, `n` string headers, the bytes.
+    /// Every relptr is its offset plus `k`. Every 7th string is empty with
+    /// a stray pointer; `bad`, when set, is a string that overruns.
+    fn blob(n: usize, k: isize, bad: Option<usize>, nonpositive: Option<usize>) -> Vec<u8> {
+        let hdr = std::mem::size_of::<Array>();
+        let mut heads = Vec::with_capacity(n);
+        let mut bytes = Vec::new();
+        let base = hdr + n * hdr;
+        for i in 0..n {
+            if i % 7 == 3 {
+                heads.push((0usize, 12345isize));
+                continue;
+            }
+            let s = format!("s{}", i * 31);
+            heads.push((s.len(), (base + bytes.len()) as isize + k));
+            bytes.extend_from_slice(s.as_bytes());
+        }
+        let total = base + bytes.len();
+        if let Some(b) = bad {
+            heads[b] = (64, (total - 8) as isize + k);
+        }
+        if let Some(z) = nonpositive {
+            heads[z] = (5, -3);
+        }
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&n.to_ne_bytes());
+        out.extend_from_slice(&((hdr as isize + k) as isize).to_ne_bytes());
+        for (size, data) in heads {
+            out.extend_from_slice(&size.to_ne_bytes());
+            out.extend_from_slice(&data.to_ne_bytes());
+        }
+        out.extend_from_slice(&bytes);
+        out
+    }
+
+    fn cases() -> Vec<(usize, Option<usize>)> {
+        vec![(50, None), (50, Some(20)), (700_000, None), (700_000, Some(650_001))]
+    }
+
+    #[test]
+    fn buffer_shift_of_a_header_run_matches_per_element() {
+        let strs = parse_schema("as").unwrap();
+        let tups = parse_schema("at1s").unwrap();
+        for (n, bad) in cases() {
+            let src = blob(n, 8, bad, Some(n / 2 + 1));
+            let mut a = src.clone();
+            let mut b = src.clone();
+            let ra = unsafe { shift_buffer_relptrs(a.as_mut_ptr(), a.len(), 0, &strs, -8) };
+            let rb = unsafe { shift_buffer_relptrs(b.as_mut_ptr(), b.len(), 0, &tups, -8) };
+            assert_eq!(ra.as_ref().map_err(|e| e.to_string()), rb.as_ref().map_err(|e| e.to_string()), "n {n} bad {bad:?}");
+            assert_eq!(a, b, "n {n} bad {bad:?}");
+        }
+    }
+
+    #[test]
+    fn in_place_check_of_a_header_run_matches_per_element() {
+        let strs = parse_schema("as").unwrap();
+        let tups = parse_schema("at1s").unwrap();
+        for (n, bad) in cases() {
+            let src = blob(n, 0, bad, None);
+            let ra = check_in_place(&src, &strs, 0).map_err(|e| e.to_string());
+            let rb = check_in_place(&src, &tups, 0).map_err(|e| e.to_string());
+            assert_eq!(ra, rb, "n {n} bad {bad:?}");
+            assert_eq!(ra.is_err(), bad.is_some(), "n {n} bad {bad:?}");
+        }
+    }
+
+    #[test]
+    fn relocation_of_a_header_run_matches_per_element() {
+        let _shm = crate::init_test_shm();
+        let strs = parse_schema("as").unwrap();
+        let tups = parse_schema("at1s").unwrap();
+        for (n, bad) in cases() {
+            let src = blob(n, 0, bad, None);
+            let ra = read_binary(&src, &strs);
+            let rb = read_binary(&src, &tups);
+            assert_eq!(ra.is_err(), rb.is_err(), "n {n} bad {bad:?}");
+            assert_eq!(ra.is_err(), bad.is_some(), "n {n} bad {bad:?}");
+            let (Ok(pa), Ok(pb)) = (ra, rb) else { continue };
+            let base_a = shm::abs2rel(pa).unwrap();
+            let base_b = shm::abs2rel(pb).unwrap();
+            let words = src.len() / 8;
+            for i in 0..2 + 2 * n {
+                let wa = unsafe { *(pa as *const isize).add(i) };
+                let wb = unsafe { *(pb as *const isize).add(i) };
+                if i % 2 == 0 {
+                    assert_eq!(wa, wb, "size word {i}");
+                } else {
+                    assert_eq!(wa - base_a, wb - base_b, "data word {i} of {words}");
+                }
+            }
+            shm::shfree(pa).unwrap();
+            shm::shfree(pb).unwrap();
+        }
     }
 }

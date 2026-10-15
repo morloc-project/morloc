@@ -283,6 +283,17 @@ pub(crate) fn arrow_copied_bytes() -> u64 {
 
 // -- Printers ----------------------------------------------------------------
 
+/// A finite float as the JSON writer writes it (`json::FloatText`); a
+/// non-finite one as C's `%g` writes it (bare `nan`, `inf`), which is not
+/// what the JSON writer writes (model/language/issues/interfaces.md).
+fn push_float(out: &mut String, v: f64, single: bool) {
+    if v.is_finite() {
+        out.push_str(crate::json::FloatText::new(v, single).as_str());
+    } else {
+        out.push_str(&fmt_g(v, if single { 7 } else { 15 }));
+    }
+}
+
 /// C's `%.<prec>g` rendering of a double.
 fn fmt_g(v: f64, prec: i32) -> String {
     let mut buf = [0u8; 64];
@@ -346,8 +357,8 @@ fn json_cell(col: &dyn Array, i: usize, out: &mut String) {
         DataType::UInt16 => prim!(UInt16Type),
         DataType::UInt32 => prim!(UInt32Type),
         DataType::UInt64 => prim!(UInt64Type),
-        DataType::Float32 => out.push_str(&fmt_g(col.as_primitive::<Float32Type>().value(i) as f64, 7)),
-        DataType::Float64 => out.push_str(&fmt_g(col.as_primitive::<Float64Type>().value(i), 15)),
+        DataType::Float32 => push_float(out, f64::from(col.as_primitive::<Float32Type>().value(i)), true),
+        DataType::Float64 => push_float(out, col.as_primitive::<Float64Type>().value(i), false),
         DataType::Utf8 => json_escape(col.as_string::<i32>().value(i), out),
         DataType::LargeUtf8 => json_escape(col.as_string::<i64>().value(i), out),
         DataType::Binary => hex(col.as_binary::<i32>().value(i), out),
@@ -894,18 +905,23 @@ fn json_column(
             })
             .collect()
     }
-    /// A double narrowed to single precision only when the value survives
-    /// the round trip (a finite value beyond f32's range would become
-    /// infinite; precision loss is the accepted cost of declaring Float32).
+    /// Each number read as the nearest single-precision value, rounded once
+    /// from its text; a finite number beyond f32's range is an error.
     fn float32s(values: &[&serde_json::Value], nullable: bool, name: &str) -> Result<Vec<Option<f32>>, MorlocError> {
-        floats(values, nullable, name)?
-            .into_iter()
+        values
+            .iter()
             .enumerate()
-            .map(|(i, o)| match o {
-                None => Ok(None),
-                Some(x) => morloc_runtime_types::width::f32_nearest(x)
-                    .map(Some)
-                    .map_err(|_| overflow(name, i, values[i], SerialType::Float32)),
+            .map(|(i, v)| {
+                if v.is_null() {
+                    return if nullable { Ok(None) } else { Err(bad(name, i, "number")) };
+                }
+                let n = v.as_number().ok_or_else(|| bad(name, i, "number"))?;
+                let f = n.as_str().parse::<f32>().map_err(|_| bad(name, i, "number"))?;
+                if f.is_finite() {
+                    Ok(Some(f))
+                } else {
+                    Err(overflow(name, i, v, SerialType::Float32))
+                }
             })
             .collect()
     }

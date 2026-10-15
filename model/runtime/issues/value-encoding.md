@@ -36,3 +36,13 @@
 - **Voidstar byte order is unspecified.** Gap in FMT-6: FMT-1 fixes only
   the packet header as little-endian; a stream file of voidstar values
   moved between hosts of different byte order reads wrongly.
+
+- **The JSON NUL guard accepts malformed scalars.** [read] Gap: no spec
+  item governs the guard (morloc-runtime-types/src/null_check.rs
+  `first_null_in_json_text`). Its scalar arm runs to the next `,` `]` `}`
+  or space, so `[1"\u0000"]`, `[tru]` and `{"a":1:2}` scan as clean
+  instead of malformed.
+- **Lenient non-finite spellings.** [read] Gap in IFACE-9 (non-finite
+  floats open): `parse_float` (morloc-runtime/src/json.rs) reads any
+  spelling `f64::from_str` accepts ("Infinity", "NaN", any case), while
+  the writer emits only "nan", "inf", "-inf".

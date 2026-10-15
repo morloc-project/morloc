@@ -68,3 +68,19 @@ behaviour.
 
 Why: a check on every `Bool` costs every program; corrupt data is caught by
 checks made for it, not by a coincidental `Bool`.
+
+### WIRE-9 A float in JSON is the shortest text that reads back as the same value
+Intent: ruled 2026-10-15
+Tests: spec-wire-9-1
+Code: conforms 2026-10-15
+
+A finite `F64` or `F32` is written in JSON with the fewest significant
+digits that read back as the same value of its type, laid out as C's
+`%.15g` (`%.7g` for `F32`) lays out digits: a normal `F64` that layout
+already wrote exactly is written as before. An `F32` is read from its
+decimal text with one rounding, never through an `F64`, and a decimal
+beyond the range of its type is an error, not an infinity. How a
+non-finite float is written is open (IFACE-9).
+
+Why: `%.15g` and `%.7g` lost digits, so no JSON interface round tripped,
+and `F64::MAX` was written as a number above it.

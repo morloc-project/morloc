@@ -122,8 +122,8 @@ A typed value delivered as JSON is the JSON the CLI prints with `-f json`,
 on every interface. A `@render` action's output is its handler's bytes
 (CLI-8) on every interface, with its `@mime` type or, without one,
 `text/plain; charset=utf-8` for `Str` and `application/octet-stream` for
-bytes. A value whose type carries `@mime` is its bytes (IFACE-19). Whether JSON floats must round trip, and how a non-finite
-float is written, is open (WIRE).
+bytes. A value whose type carries `@mime` is its bytes (IFACE-19). A finite float is written as WIRE-9 says; how a non-finite
+float is written is open.
 
 ### IFACE-10 One failure, one class
 Intent: ruled 2026-10-12

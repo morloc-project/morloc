@@ -58,8 +58,7 @@ re-checked.
   strings `"nan"`/`"inf"` (morloc-runtime/src/json.rs:1818-1822) where the
   advertised schema says `number`; a Table writes bare `nan`
   (arrow_ffi.rs:349-350), invalid JSON, which HTTP then wraps as one JSON
-  string (daemon_ffi.rs:1292-1295) and MCP sends as invalid text. Floats
-  are written `%.15g` (json.rs:1522), so no JSON interface round trips.
+  string (daemon_ffi.rs:1292-1295) and MCP sends as invalid text.
 
 ## Failure (IFACE-10)
 

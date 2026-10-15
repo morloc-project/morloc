@@ -28,6 +28,7 @@
   Seen again 2026-10-13 in a full workspace run with held = 6105935:
   not a block or two off, so the census walked a volume that changed
   under it (torn down or reinitialised), not one stray allocation.
+  Again 2026-10-15 (held 902006 against 32770), 1 in 7 full lib runs.
 - **Fork-pool unretired-worker test fails under load.** [reproduced once]
   Against SHM-8. `cargo test --workspace` on 2026-10-12 failed
   `fork_pool::tests::a_worker_that_ends_unretired_ends_the_pool`
@@ -68,4 +69,22 @@
   `cargo test -p morloc-runtime --lib` on 2026-10-15 (load average about 5)
   and passed in three isolated runs. The test sleeps 100 ms for the writer
   to queue, so a writer scheduled later than that may change what it
-  observes; the failure message was not kept.
+  observes. Later on 2026-10-15 it failed in 4 of 5 full runs of HEAD
+  6915296a at load average 2-5: "nested readers deadlocked behind a
+  queued writer: Timeout".
+- **Queue-bytes share test fails under a full lib run.** [reproduced, 1
+  in 5 runs of HEAD 6915296a, 2 in 7 with later edits]
+  `stream::write_behind_tests::streams_share_the_queue_bytes_and_keep_no_more_spares_than_their_depth`
+  (SLOT-32): "the two streams left did not take the others' share", depth
+  1 against 2 after its 10 s wait. Passes alone.
+- **A failed-publish test fails under a full lib run.** [reproduced once,
+  1 in 5 runs of HEAD 6915296a]
+  `stream::tests::a_failed_publish_frees_the_blocks_the_slot_never_took`;
+  message not kept.
+- **A full lib run hung.** [observed once, 2026-10-15, 1 in about 12 full
+  runs] `cargo test -p morloc-runtime --lib` ran 24 min (normally 85 s);
+  11 `stream::tests::*` threads, a `stream::channel*` thread, write-behind
+  and custodian threads sat in futex waits and 6 `ipc_ffi::reuse_*` /
+  `arrow_ipc_reade*` threads in socket reads. Killed before the names of
+  the stuck tests were captured (output was filtered); no gdb or perf in
+  the container.

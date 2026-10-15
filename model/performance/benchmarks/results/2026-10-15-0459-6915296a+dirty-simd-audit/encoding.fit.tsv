@@ -1,0 +1,78 @@
+# encoding 2026-10-15 04:59 load=1.89 morloc=0.109.0 commit=6915296a+dirty cpu=AMD Ryzen 5 7535U with Radeon Graphics cores=12
+item	param	value	unit	note
+ENC-2	Ints.json.bytes	5	B	per element
+ENC-2	Ints.mpk.bytes	3	B	per element
+ENC-2	Ints.voidstar.bytes	16	B	per element
+ENC-2	Ints.packet.bytes	16	B	per element
+ENC-2	U64s.json.bytes	5	B	per element
+ENC-2	U64s.mpk.bytes	3	B	per element
+ENC-2	U64s.voidstar.bytes	8	B	per element
+ENC-2	U64s.packet.bytes	8	B	per element
+ENC-2	Reals.json.bytes	5	B	per element
+ENC-2	Reals.mpk.bytes	9	B	per element
+ENC-2	Reals.voidstar.bytes	8	B	per element
+ENC-2	Reals.packet.bytes	8	B	per element
+ENC-2	Bools.json.bytes	5.5	B	per element
+ENC-2	Bools.mpk.bytes	1	B	per element
+ENC-2	Bools.voidstar.bytes	1	B	per element
+ENC-2	Bools.packet.bytes	1	B	per element
+ENC-2	Strs.json.bytes	11	B	per element
+ENC-2	Strs.mpk.bytes	9	B	per element
+ENC-2	Strs.voidstar.bytes	24	B	per element
+ENC-2	Strs.packet.bytes	24	B	per element
+ENC-3	out:U64s.json.c	17.6127	ms	r2=0.9976
+ENC-3	out:U64s.json.b	45.7116	ns	r2=0.9976 per element
+ENC-1	in:U64s.json.c	12.2815	ms	r2=0.9993
+ENC-1	in:U64s.json.b	71.4195	ns	r2=0.9993 per element
+ENC-3	out:U64s.mpk.c	14.8115	ms	r2=0.9984
+ENC-3	out:U64s.mpk.b	28.3235	ns	r2=0.9984 per element
+ENC-1	in:U64s.mpk.c	15.5138	ms	r2=0.9995
+ENC-1	in:U64s.mpk.b	28.3858	ns	r2=0.9995 per element
+ENC-3	out:U64s.voidstar.c	15.7435	ms	r2=0.9993
+ENC-3	out:U64s.voidstar.b	23.911	ns	r2=0.9993 per element
+ENC-3	out:U64s.packet.c	19.1761	ms	r2=0.9981
+ENC-3	out:U64s.packet.b	17.5059	ns	r2=0.9981 per element
+ENC-1	in:U64s.packet.c	14.5317	ms	r2=0.9988
+ENC-1	in:U64s.packet.b	12.9938	ns	r2=0.9988 per element
+ENC-3	out:Reals.json.c	14.6758	ms	r2=0.9996
+ENC-3	out:Reals.json.b	95.903	ns	r2=0.9996 per element
+ENC-1	in:Reals.json.c	13.9683	ms	r2=0.9999
+ENC-1	in:Reals.json.b	86.8141	ns	r2=0.9999 per element
+ENC-3	out:Reals.mpk.c	16.2067	ms	r2=0.9992
+ENC-3	out:Reals.mpk.b	33.8254	ns	r2=0.9992 per element
+ENC-1	in:Reals.mpk.c	14.9961	ms	r2=0.9997
+ENC-1	in:Reals.mpk.b	29.7996	ns	r2=0.9997 per element
+ENC-3	out:Reals.voidstar.c	18.3598	ms	r2=0.9998
+ENC-3	out:Reals.voidstar.b	23.4002	ns	r2=0.9998 per element
+ENC-3	out:Reals.packet.c	14.1162	ms	r2=0.9965
+ENC-3	out:Reals.packet.b	20.8817	ns	r2=0.9965 per element
+ENC-1	in:Reals.packet.c	14.6331	ms	r2=0.9991
+ENC-1	in:Reals.packet.b	13.9325	ns	r2=0.9991 per element
+ENC-3	out:Bools.json.c	15.4853	ms	r2=0.9983
+ENC-3	out:Bools.json.b	21.107	ns	r2=0.9983 per element
+ENC-1	in:Bools.json.c	15.3483	ms	r2=0.9999
+ENC-1	in:Bools.json.b	45.4109	ns	r2=0.9999 per element
+ENC-3	out:Bools.mpk.c	15.713	ms	r2=0.9998
+ENC-3	out:Bools.mpk.b	8.82584	ns	r2=0.9998 per element
+ENC-1	in:Bools.mpk.c	15.5628	ms	r2=0.9993
+ENC-1	in:Bools.mpk.b	11.7248	ns	r2=0.9993 per element
+ENC-3	out:Bools.voidstar.c	15.7862	ms	r2=0.9981
+ENC-3	out:Bools.voidstar.b	3.80625	ns	r2=0.9981 per element
+ENC-3	out:Bools.packet.c	15.9201	ms	r2=0.9983
+ENC-3	out:Bools.packet.b	3.22153	ns	r2=0.9983 per element
+ENC-1	in:Bools.packet.c	15.8491	ms	r2=0.9713
+ENC-1	in:Bools.packet.b	1.08012	ns	r2=0.9713 per element
+ENC-3	out:Strs.json.c	26.2634	ms	r2=0.9964
+ENC-3	out:Strs.json.b	88.0767	ns	r2=0.9964 per element
+ENC-1	in:Strs.json.c	38.3951	ms	r2=0.9977
+ENC-1	in:Strs.json.b	247.161	ns	r2=0.9977 per element
+ENC-3	out:Strs.mpk.c	27.9395	ms	r2=0.9932
+ENC-3	out:Strs.mpk.b	69.0455	ns	r2=0.9932 per element
+ENC-1	in:Strs.mpk.c	23.3325	ms	r2=0.9943
+ENC-1	in:Strs.mpk.b	63.9063	ns	r2=0.9943 per element
+ENC-3	out:Strs.voidstar.c	23.8867	ms	r2=0.9954
+ENC-3	out:Strs.voidstar.b	101.487	ns	r2=0.9954 per element
+ENC-3	out:Strs.packet.c	23.6192	ms	r2=0.9960
+ENC-3	out:Strs.packet.b	111.851	ns	r2=0.9960 per element
+ENC-1	in:Strs.packet.c	23.0141	ms	r2=0.9864
+ENC-1	in:Strs.packet.b	44.3829	ns	r2=0.9864 per element

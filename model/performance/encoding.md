@@ -8,8 +8,16 @@ the size of a value in each form. Formats themselves are in
 Intent: proposed
 Bench: encoding
 Model: t(n) = c + b*n per form (json, mpk, packet) and element type ([U64], [Real], [Bool], [Str]); C++ consumer
-Measured: pending
-Limit: in:Reals.packet.b <= 100 ns, in:Reals.mpk.b <= 300 ns, in:Reals.json.b <= 1000 ns
+Measured: 2026-10-15-0459-6915296a+dirty-simd-audit, load 1.9. b in ns per element:
+
+| element | json | mpk | packet |
+|---|---|---|---|
+| U64 | 71 | 28 | 13 |
+| Real | 87 | 30 | 14 |
+| Bool | 45 | 12 | 1.1 |
+| Str (8 bytes) | 247 | 64 | 44 |
+
+Limit: in:Reals.packet.b <= 100 ns, in:Reals.mpk.b <= 300 ns, in:Reals.json.b <= 1000 ns, in:Bools.packet.b <= 5 ns
 
 A voidstar file is not read back: one of a large value cannot be
 (runtime/issues/nexus-cli.md).
@@ -40,5 +48,19 @@ sizes depend on the values (here 0..n-1 and multiples of 0.5).
 Intent: proposed
 Bench: encoding
 Model: t(n) = c + b*n per `-f` form and element type, written to a file with `-o`
-Measured: pending
-Limit: out:Reals.packet.b <= 100 ns, out:Reals.json.b <= 1000 ns
+Measured: 2026-10-15-0459-6915296a+dirty-simd-audit, load 1.9. b in ns per element:
+
+| element | json | mpk | voidstar | packet |
+|---|---|---|---|---|
+| U64 | 46 | 28 | 24 | 18 |
+| Real | 96 | 34 | 23 | 21 |
+| Bool | 21 | 8.8 | 3.8 | 3.2 |
+| Str (8 bytes) | 88 | 69 | 101 | 112 |
+
+Limit: out:Reals.packet.b <= 100 ns, out:Reals.json.b <= 1000 ns, out:Bools.packet.b <= 10 ns
+
+A C++ `[Bool]` is packed and unpacked a word at a time (runtime-bench
+before this: 2.7 ns per element encode, 1.7 decode, in the codec alone).
+JSON floats are written by ryu (WIRE-9); `%.15g` cost about 260 ns per
+`Real` in the writer. Open: `[Str]` written as voidstar or packet costs
+more per element than as JSON.

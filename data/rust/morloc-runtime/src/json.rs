@@ -5,8 +5,8 @@
 //! All SHM pointer operations are encapsulated in `ShmWriter` (write) and
 //! `ShmReader` (read). Each has a single `unsafe fn new()` constructor;
 //! all subsequent reads/writes through the handle are safe methods.
-//! The only remaining `unsafe` blocks are `libc::snprintf` for float
-//! formatting and constructing readers/writers at known-valid offsets.
+//! The only remaining `unsafe` blocks construct readers/writers at
+//! known-valid offsets.
 
 // A value crossing this module is user data: a narrowing or sign change
 // goes through a checked conversion or a named helper, never `as`.
@@ -617,8 +617,7 @@ fn write_leaf(
         SerialType::Uint32 => { let w = alloc(dest, 4)?; w.write_val::<u32>(0, parse_int::<u32>(text)?); Ok(w.as_ptr()) }
         SerialType::Uint64 => { let w = alloc(dest, 8)?; w.write_val::<u64>(0, parse_int::<u64>(text)?); Ok(w.as_ptr()) }
         SerialType::Float32 => {
-            let v = parse_float(text, "F32")?;
-            let f = width::f32_nearest(v)?;
+            let f = parse_f32(text)?;
             let w = alloc(dest, 4)?; w.write_val::<f32>(0, f); Ok(w.as_ptr())
         }
         SerialType::Float64 => { let w = alloc(dest, 8)?; w.write_val::<f64>(0, parse_float(text, "F64")?);        Ok(w.as_ptr()) }
@@ -1521,8 +1520,8 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
             SerialType::Uint16 => map_io(write!(w, "{}", r.read_val::<u16>(0)))?,
             SerialType::Uint32 => map_io(write!(w, "{}", r.read_val::<u32>(0)))?,
             SerialType::Uint64 => map_io(write!(w, "{}", r.read_val::<u64>(0)))?,
-            SerialType::Float32 => write_float(w, r.read_val::<f32>(0) as f64, b"%.7g\0")?,
-            SerialType::Float64 => write_float(w, r.read_val::<f64>(0), b"%.15g\0")?,
+            SerialType::Float32 => write_float(w, f64::from(r.read_val::<f32>(0)), true)?,
+            SerialType::Float64 => write_float(w, r.read_val::<f64>(0), false)?,
 
             SerialType::Int => {
                 // Inline layout: [size:i64, value_or_relptr:i64]
@@ -1779,29 +1778,56 @@ fn parse_int<T: IntSlot>(text: &str) -> Result<T, MorlocError> {
     })
 }
 
-// Non-finite IEEE-754 values cannot appear as numeric literals in RFC 8259
-// JSON. We follow the spec's recommended workaround: represent them as
-// strings. The emit form is compact lowercase ("nan", "inf", "-inf"); the
-// decoder accepts case-insensitive variants of every common spelling
-// (nan/inf/infinity, with optional sign), as well as bareword `null` for
-// best-effort recovery of payloads written by older morloc runtimes that
-// emitted `null` for non-finites.
-fn parse_float(text: &str, name: &str) -> Result<f64, MorlocError> {
+/// A number's text without surrounding whitespace or the double quotes of
+/// a JSON string (the encoder emits "nan"/"inf"/"-inf"; RawValue text for a
+/// JSON string includes the quotes verbatim).
+fn number_text(text: &str) -> &str {
     let t = text.trim();
-    // Strip surrounding double-quotes if the value arrived as a JSON string
-    // (the encoder emits "nan"/"inf"/"-inf"). RawValue text for a JSON
-    // string includes the quotes verbatim.
-    let unquoted = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+    if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
         &t[1..t.len() - 1]
     } else {
         t
-    };
+    }
+}
+
+// Non-finite IEEE-754 values cannot appear as numeric literals in RFC 8259
+// JSON, so they are written as the strings "nan", "inf" and "-inf". Those
+// tokens read back, as does any spelling `f64::from_str` accepts
+// ("Infinity", "NaN", in any case); a finite decimal beyond the type's
+// range is an error.
+fn parse_float(text: &str, name: &str) -> Result<f64, MorlocError> {
+    let t = text.trim();
+    let unquoted = number_text(text);
     if let Some(v) = parse_nonfinite(unquoted) {
         return Ok(v);
     }
-    f64::from_str(unquoted).map_err(|_| MorlocError::Serialization(format!(
+    let v = f64::from_str(unquoted).map_err(|_| MorlocError::Serialization(format!(
         "expected {}, got {}", name, truncate_for_msg(t)
-    )))
+    )))?;
+    if v.is_infinite() && unquoted.bytes().any(|c| c.is_ascii_digit()) {
+        return Err(MorlocError::Serialization(format!(
+            "value {} out of range for {}", truncate_for_msg(t), name
+        )));
+    }
+    Ok(v)
+}
+
+/// `parse_float` for an `F32`: the decimal is rounded once, to the nearest
+/// `F32`, never through an `F64`.
+fn parse_f32(text: &str) -> Result<f32, MorlocError> {
+    let unquoted = number_text(text);
+    if let Some(v) = parse_nonfinite(unquoted) {
+        return width::f32_nearest(v);
+    }
+    let f = f32::from_str(unquoted).map_err(|_| MorlocError::Serialization(format!(
+        "expected F32, got {}", truncate_for_msg(text.trim())
+    )))?;
+    if f.is_infinite() && unquoted.bytes().any(|c| c.is_ascii_digit()) {
+        return Err(MorlocError::Serialization(format!(
+            "value {} out of range for F32", truncate_for_msg(text.trim())
+        )));
+    }
+    Ok(f)
 }
 
 // Recognise the canonical non-finite wire tokens. Case-sensitive,
@@ -1817,20 +1843,118 @@ fn parse_nonfinite(s: &str) -> Option<f64> {
     }
 }
 
-fn write_float(w: &mut dyn Write, f: f64, fmt: &[u8]) -> Result<(), MorlocError> {
+fn write_float(w: &mut dyn Write, f: f64, single: bool) -> Result<(), MorlocError> {
     if f.is_nan() {
         return map_io(w.write_all(b"\"nan\""));
     }
     if f.is_infinite() {
         return map_io(w.write_all(if f > 0.0 { b"\"inf\"" } else { b"\"-inf\"" }));
     }
-    let mut cbuf = [0u8; 64];
-    // SAFETY: snprintf writes to stack-local buffer with explicit size limit
-    let n = unsafe { libc::snprintf(cbuf.as_mut_ptr() as *mut libc::c_char, cbuf.len(), fmt.as_ptr() as *const libc::c_char, f) };
-    match usize::try_from(n) {
-        // snprintf produces ASCII digits/sign/exponent -- no UTF-8 check needed.
-        Ok(k) if k > 0 && k < cbuf.len() => map_io(w.write_all(&cbuf[..k])),
-        _ => Err(MorlocError::Serialization(format!("could not format the float {}", f))),
+    map_io(w.write_all(FloatText::new(f, single).as_bytes()))
+}
+
+/// A finite float as JSON text: the fewest significant digits that read
+/// back as the same F64 (or F32 when `single`), laid out as C's `%.15g`
+/// (`%.7g`) lays out digits, so a normal F64 that `%.15g` already wrote
+/// exactly is written the same.
+pub(crate) struct FloatText {
+    buf: [u8; 40],
+    len: usize,
+}
+
+impl FloatText {
+    pub(crate) fn new(v: f64, single: bool) -> FloatText {
+        let mut rb = ryu::Buffer::new();
+        #[allow(clippy::cast_possible_truncation)]
+        let shortest = if single { rb.format_finite(v as f32) } else { rb.format_finite(v) };
+        let (neg, s) = match shortest.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, shortest),
+        };
+        let (mant, exp) = match s.find('e') {
+            Some(i) => (&s[..i], s[i + 1..].parse::<i32>().expect("ryu writes a decimal exponent")),
+            None => (s, 0),
+        };
+        let int_len = mant.find('.').unwrap_or(mant.len());
+        // `x` is the decimal exponent of the first significant digit.
+        let mut x = i32::try_from(int_len).expect("ryu writes a short mantissa") - 1 + exp;
+        let mut digits = [0u8; 20];
+        let mut nd = 0;
+        for &c in mant.as_bytes().iter().filter(|&&c| c != b'.') {
+            if nd == 0 && c == b'0' {
+                x -= 1;
+            } else {
+                digits[nd] = c;
+                nd += 1;
+            }
+        }
+        while nd > 0 && digits[nd - 1] == b'0' {
+            nd -= 1;
+        }
+
+        let mut t = FloatText { buf: [0u8; 40], len: 0 };
+        if neg {
+            t.push(b'-');
+        }
+        if nd == 0 {
+            t.push(b'0');
+            return t;
+        }
+        let digits = &digits[..nd];
+        let precision = if single { 7 } else { 15 };
+        if x < -4 || x >= precision {
+            t.push(digits[0]);
+            if nd > 1 {
+                t.push(b'.');
+                t.extend(&digits[1..]);
+            }
+            t.push(b'e');
+            t.push(if x < 0 { b'-' } else { b'+' });
+            let e = x.unsigned_abs();
+            let digit = |d: u32| b'0' + u8::try_from(d % 10).expect("a decimal digit");
+            if e >= 100 {
+                t.push(digit(e / 100));
+            }
+            t.push(digit(e / 10));
+            t.push(digit(e));
+        } else if x >= 0 {
+            let int_digits = usize::try_from(x).expect("x is not negative here") + 1;
+            if nd <= int_digits {
+                t.extend(digits);
+                for _ in nd..int_digits {
+                    t.push(b'0');
+                }
+            } else {
+                t.extend(&digits[..int_digits]);
+                t.push(b'.');
+                t.extend(&digits[int_digits..]);
+            }
+        } else {
+            t.extend(b"0.");
+            for _ in 0..(-x - 1) {
+                t.push(b'0');
+            }
+            t.extend(digits);
+        }
+        t
+    }
+
+    fn push(&mut self, b: u8) {
+        self.buf[self.len] = b;
+        self.len += 1;
+    }
+
+    fn extend(&mut self, bs: &[u8]) {
+        self.buf[self.len..self.len + bs.len()].copy_from_slice(bs);
+        self.len += bs.len();
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        std::str::from_utf8(self.as_bytes()).expect("float text is ASCII")
     }
 }
 
@@ -2133,5 +2257,112 @@ mod tests {
         // failing -- the walker isn't buffering the whole JSON in memory
         // before writing the first byte.
         assert!(!sink.written.is_empty(), "walker held back all output before first failure");
+    }
+
+    fn bits_stream(seed: u64) -> impl Iterator<Item = u64> {
+        let mut x = seed;
+        std::iter::repeat_with(move || {
+            x = x.wrapping_add(0x9e3779b97f4a7c15);
+            let mut z = x;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+            z ^ (z >> 31)
+        })
+    }
+
+    fn c_g(v: f64, prec: i32) -> String {
+        let mut buf = [0u8; 64];
+        let n = unsafe {
+            libc::snprintf(buf.as_mut_ptr() as *mut libc::c_char, buf.len(), b"%.*g\0".as_ptr() as *const libc::c_char, prec, v)
+        };
+        String::from_utf8(buf[..usize::try_from(n).unwrap()].to_vec()).unwrap()
+    }
+
+    /// Every finite F64 written as JSON reads back as the same bits.
+    #[test]
+    fn json_f64_round_trips() {
+        let _shm = setup();
+        let schema = parse_schema("af8").unwrap();
+        let mut xs: Vec<f64> = bits_stream(1).map(f64::from_bits).filter(|x| x.is_finite()).take(50_000).collect();
+        xs.extend([0.1 + 0.2, 1.0 / 3.0, 9007199254740994.0, -0.0, 0.0, f64::MAX, f64::MIN_POSITIVE, 5e-324, 1e15, 1e16, 1e-5, 1e-4, 123456789012345680.0]);
+        let text = serde_json::to_string(&xs).unwrap();
+        let p = read_json_with_schema(&text, &schema).unwrap();
+        let out = voidstar_to_json_string(p, &schema).unwrap();
+        crate::shm::shfree(p).unwrap();
+        let q = read_json_with_schema(&out, &schema).unwrap();
+        let arr = unsafe { &*(q as *const crate::shm_types::Array) };
+        let data = crate::shm::rel2abs(arr.data).unwrap() as *const f64;
+        for (i, x) in xs.iter().enumerate() {
+            let y = unsafe { *data.add(i) };
+            assert_eq!(x.to_bits(), y.to_bits(), "{x:e} came back as {y:e}");
+        }
+        crate::shm::shfree(q).unwrap();
+    }
+
+    /// Every finite F32 written as JSON reads back as the same bits,
+    /// including values whose shortest text is misread through an F64.
+    #[test]
+    fn json_f32_round_trips() {
+        let _shm = setup();
+        let schema = parse_schema("af4").unwrap();
+        let mut xs: Vec<f32> = bits_stream(2).map(|b| f32::from_bits(u32::try_from(b >> 32).unwrap())).filter(|x| x.is_finite()).take(50_000).collect();
+        xs.extend([16777215.0, 0.33333334, f32::MAX, f32::MIN_POSITIVE, 1e-45, f32::from_bits(0x15ae43fd), f32::from_bits(0x95ae43fd)]);
+        let p = read_json_with_schema(&serde_json::to_string(&xs).unwrap(), &schema).unwrap();
+        let out = voidstar_to_json_string(p, &schema).unwrap();
+        crate::shm::shfree(p).unwrap();
+        let q = read_json_with_schema(&out, &schema).unwrap();
+        let arr = unsafe { &*(q as *const crate::shm_types::Array) };
+        let data = crate::shm::rel2abs(arr.data).unwrap() as *const f32;
+        for (i, x) in xs.iter().enumerate() {
+            let y = unsafe { *data.add(i) };
+            assert_eq!(x.to_bits(), y.to_bits(), "{x:e} came back as {y:e}");
+        }
+        crate::shm::shfree(q).unwrap();
+    }
+
+    /// A decimal beyond the range of its float type is an error, not an
+    /// infinity; the infinity tokens still read.
+    #[test]
+    fn json_float_overflow_is_an_error() {
+        let _shm = setup();
+        for sch in ["f8", "f4", "af8"] {
+            let schema = parse_schema(sch).unwrap();
+            let text = if sch.starts_with('a') { "[1, 1e400]" } else { "-1e400" };
+            assert!(read_json_with_schema(text, &schema).is_err(), "{sch} {text}");
+            let p = read_json_with_schema(if sch.starts_with('a') { "[\"inf\"]" } else { "\"-inf\"" }, &schema).unwrap();
+            crate::shm::shfree(p).unwrap();
+        }
+    }
+
+    /// The decimal nearest an F32 is read as that F32, not as the F32
+    /// nearest the F64 nearest the decimal.
+    #[test]
+    fn json_f32_reads_without_double_rounding() {
+        let _shm = setup();
+        let schema = parse_schema("f4").unwrap();
+        let p = read_json_with_schema("7.038531e-26", &schema).unwrap();
+        assert_eq!(unsafe { *(p as *const u32) }, 0x15ae43fd);
+        crate::shm::shfree(p).unwrap();
+    }
+
+    /// A normal F64 that `%.15g` already wrote exactly is written as before.
+    #[test]
+    fn json_f64_text_matches_printf_where_printf_round_trips() {
+        let _shm = setup();
+        let schema = parse_schema("f8").unwrap();
+        let short = bits_stream(3).take(20_000).map(|b| {
+            let digits = (b % 1_000_000_000_000_000) as f64;
+            digits * 10f64.powi(i32::try_from(b >> 50).unwrap() % 40 - 30)
+        });
+        let wide = bits_stream(4).map(f64::from_bits).filter(|x| x.is_finite()).take(20_000);
+        for x in short.chain(wide).chain([1e15, 1e-5, 1e-4, 0.0, -0.0, 100.0, 1.5e300]) {
+            let old = c_g(x, 15);
+            if !(x.is_normal() || x == 0.0) || old.parse::<f64>().unwrap().to_bits() != x.to_bits() {
+                continue;
+            }
+            let p = read_json_with_schema(&serde_json::to_string(&x).unwrap(), &schema).unwrap();
+            assert_eq!(voidstar_to_json_string(p, &schema).unwrap(), old, "{x:e}");
+            crate::shm::shfree(p).unwrap();
+        }
     }
 }

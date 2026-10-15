@@ -75,3 +75,10 @@
   form travels with the file it is declared from; `type L =>` keeps working
   with a deprecation warning. Proposal and open questions:
   /work/plans/source-type-forms.md.
+
+- **`cargo clippy` fails on morloc-runtime.** [reproduced 2026-10-15]
+  `clippy::not_unsafe_ptr_arg_deref` (deny by default) at
+  morloc-runtime/src/stream.rs:3990: a safe public function passes a raw
+  pointer it may dereference to `voidstar::flatten_portable_in_place`.
+  The crate's own lint denials (json.rs casts) go unchecked while this
+  stops the run.

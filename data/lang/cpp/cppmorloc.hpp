@@ -674,6 +674,17 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
     }
 }
 
+// A wire number as the native type T: an integral T must hold it exactly
+// (NUM-4), a floating T takes the nearest value.
+template<typename T, typename W>
+T mlc_wire_to_native(W v) {
+    if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {
+        return check_range_narrow<T>(v, "the native integer type");
+    } else {
+        return static_cast<T>(v);
+    }
+}
+
 // Read a leaf at schema width and convert to the C++ type, so a narrow
 // concrete type (e.g. `int` for Int) works with a wider schema.
 template<typename T>
@@ -716,16 +727,16 @@ T mlc_leaf_read(const Schema* schema, const void* data, morloc_space_t space) {
                 }
                 return static_cast<T>(handle);
             }
-            case MORLOC_SINT8:   return static_cast<T>(*(const int8_t*)data);
-            case MORLOC_SINT16:  return static_cast<T>(*(const int16_t*)data);
-            case MORLOC_SINT32:  return static_cast<T>(*(const int32_t*)data);
-            case MORLOC_SINT64:  return static_cast<T>(*(const int64_t*)data);
-            case MORLOC_UINT8:   return static_cast<T>(*(const uint8_t*)data);
-            case MORLOC_UINT16:  return static_cast<T>(*(const uint16_t*)data);
-            case MORLOC_UINT32:  return static_cast<T>(*(const uint32_t*)data);
-            case MORLOC_UINT64:  return static_cast<T>(*(const uint64_t*)data);
-            case MORLOC_FLOAT32: return static_cast<T>(*(const float*)data);
-            case MORLOC_FLOAT64: return static_cast<T>(*(const double*)data);
+            case MORLOC_SINT8:   return mlc_wire_to_native<T>(*(const int8_t*)data);
+            case MORLOC_SINT16:  return mlc_wire_to_native<T>(*(const int16_t*)data);
+            case MORLOC_SINT32:  return mlc_wire_to_native<T>(*(const int32_t*)data);
+            case MORLOC_SINT64:  return mlc_wire_to_native<T>(*(const int64_t*)data);
+            case MORLOC_UINT8:   return mlc_wire_to_native<T>(*(const uint8_t*)data);
+            case MORLOC_UINT16:  return mlc_wire_to_native<T>(*(const uint16_t*)data);
+            case MORLOC_UINT32:  return mlc_wire_to_native<T>(*(const uint32_t*)data);
+            case MORLOC_UINT64:  return mlc_wire_to_native<T>(*(const uint64_t*)data);
+            case MORLOC_FLOAT32: return mlc_wire_to_native<T>(*(const float*)data);
+            case MORLOC_FLOAT64: return mlc_wire_to_native<T>(*(const double*)data);
             case MORLOC_INT: {
                 // Inline BigInt: [size, value_or_relptr]
                 const int64_t* fields = (const int64_t*)data;
@@ -774,6 +785,172 @@ T mlc_leaf_read(const Schema* schema, const void* data, morloc_space_t space) {
                 break;
         }
         throw std::runtime_error("cannot read a number where the schema holds a non-numeric type");
+    }
+}
+
+// The 64-bit words of a std::vector<bool>, element i at bit i % 64 of word
+// i / 64, or nullptr where the library does not expose them or the byte
+// order is not the one the bit packing below assumes.
+inline uint64_t* mlc_bool_words(std::vector<bool>& v) {
+#if defined(__GLIBCXX__) && !defined(_GLIBCXX_DEBUG) && defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if constexpr (sizeof(std::_Bit_type) == sizeof(uint64_t)) {
+        return reinterpret_cast<uint64_t*>(v.begin()._M_p);
+    }
+#endif
+    (void)v;
+    return nullptr;
+}
+
+inline const uint64_t* mlc_bool_words(const std::vector<bool>& v) {
+    return mlc_bool_words(const_cast<std::vector<bool>&>(v));
+}
+
+// Bit k of the result is set iff byte k of `x` is 1.
+inline uint64_t mlc_bytes_eq1_to_bits(uint64_t x) {
+    const uint64_t lo7 = 0x7f7f7f7f7f7f7f7full;
+    uint64_t m = x ^ 0x0101010101010101ull;
+    uint64_t nonzero = ((m & lo7) + lo7) | m;
+    uint64_t ones = (~nonzero >> 7) & 0x0101010101010101ull;
+    return (ones * 0x0102040810204080ull) >> 56;
+}
+
+// Byte k of the result is bit k of `bits` (0 or 1).
+inline uint64_t mlc_bits_to_bytes(uint64_t bits) {
+    const uint64_t lo7 = 0x7f7f7f7f7f7f7f7full;
+    uint64_t y = ((bits & 0xff) * 0x0101010101010101ull) & 0x8040201008040201ull;
+    return ((((y & lo7) + lo7) | y) >> 7) & 0x0101010101010101ull;
+}
+
+// Read `n` leaves of `elem` at stride `elem->width` into `out` (already of
+// size n) with one type dispatch for the whole run. False when the element
+// type has no such loop; the caller then reads each leaf. An element a loop
+// cannot take as it is (an Int out of range) is read by mlc_leaf_read, which
+// throws as it would for that element alone.
+template<typename ElemT>
+bool mlc_read_leaf_run(const Schema* elem, const char* start, size_t n, std::vector<ElemT>& out, morloc_space_t space) {
+    const size_t width = elem->width;
+    if constexpr (std::is_same_v<ElemT, bool>) {
+        if (elem->type != MORLOC_BOOL) return false;
+        uint64_t* words = mlc_bool_words(out);
+        size_t i = 0;
+        if (words != nullptr && width == 1) {
+            for (; i + 64 <= n; i += 64) {
+                uint64_t word = 0;
+                for (int k = 0; k < 8; k++) {
+                    uint64_t x;
+                    std::memcpy(&x, start + i + 8 * k, 8);
+                    word |= mlc_bytes_eq1_to_bits(x) << (8 * k);
+                }
+                words[i / 64] = word;
+            }
+        }
+        for (; i < n; i++) out[i] = *(const uint8_t*)(start + i * width) == 1;
+        return true;
+    } else if constexpr (std::is_arithmetic_v<ElemT>) {
+        auto run = [&](auto wire) {
+            using W = decltype(wire);
+            for (size_t i = 0; i < n; i++) {
+                W v;
+                std::memcpy(&v, start + i * width, sizeof(W));
+                out[i] = mlc_wire_to_native<ElemT>(v);
+            }
+            return true;
+        };
+        switch (elem->type) {
+            case MORLOC_SINT8:   return run(int8_t{});
+            case MORLOC_SINT16:  return run(int16_t{});
+            case MORLOC_SINT32:  return run(int32_t{});
+            case MORLOC_SINT64:  return run(int64_t{});
+            case MORLOC_UINT8:   return run(uint8_t{});
+            case MORLOC_UINT16:  return run(uint16_t{});
+            case MORLOC_UINT32:  return run(uint32_t{});
+            case MORLOC_UINT64:  return run(uint64_t{});
+            case MORLOC_FLOAT32: return run(float{});
+            case MORLOC_FLOAT64: return run(double{});
+            case MORLOC_INT:
+                for (size_t i = 0; i < n; i++) {
+                    const char* slot = start + i * width;
+                    int64_t fields[2];
+                    std::memcpy(fields, slot, sizeof fields);
+                    int64_t val = fields[0] == 0 ? 0 : fields[1];
+                    bool fits = fields[0] <= 1;
+                    if constexpr (std::is_integral_v<ElemT>) {
+                        if constexpr (std::is_signed_v<ElemT>) {
+                            fits = fits && val >= static_cast<int64_t>(std::numeric_limits<ElemT>::min())
+                                        && val <= static_cast<int64_t>(std::numeric_limits<ElemT>::max());
+                        } else {
+                            fits = fits && val >= 0
+                                        && static_cast<uint64_t>(val) <= static_cast<uint64_t>(std::numeric_limits<ElemT>::max());
+                        }
+                    }
+                    out[i] = fits ? static_cast<ElemT>(val) : mlc_leaf_read<ElemT>(elem, slot, space);
+                }
+                return true;
+            default:
+                return false;
+        }
+    } else {
+        return false;
+    }
+}
+
+// Write `n` leaves of `data` as `elem` at stride `elem->width` from `start`,
+// with one type dispatch for the whole run; false when the element type has
+// no such loop. Range checks are those of mlc_leaf_write.
+template<typename ElemT>
+bool mlc_write_leaf_run(const Schema* elem, char* start, const std::vector<ElemT>& data) {
+    const size_t width = elem->width;
+    const size_t n = data.size();
+    if constexpr (std::is_same_v<ElemT, bool>) {
+        if (elem->type != MORLOC_BOOL) return false;
+        const uint64_t* words = mlc_bool_words(data);
+        size_t i = 0;
+        if (words != nullptr && width == 1) {
+            for (; i + 64 <= n; i += 64) {
+                uint64_t word = words[i / 64];
+                for (int k = 0; k < 8; k++) {
+                    uint64_t x = mlc_bits_to_bytes(word >> (8 * k));
+                    std::memcpy(start + i + 8 * k, &x, 8);
+                }
+            }
+        }
+        for (; i < n; i++) *(uint8_t*)(start + i * width) = data[i] ? 1 : 0;
+        return true;
+    } else if constexpr (std::is_arithmetic_v<ElemT>) {
+        auto run = [&](auto wire, const char* name) {
+            using W = decltype(wire);
+            for (size_t i = 0; i < n; i++) {
+                W v = check_range_narrow<W>(data[i], name);
+                std::memcpy(start + i * width, &v, sizeof(W));
+            }
+            return true;
+        };
+        switch (elem->type) {
+            case MORLOC_SINT8:   return run(int8_t{}, "I8");
+            case MORLOC_SINT16:  return run(int16_t{}, "I16");
+            case MORLOC_SINT32:  return run(int32_t{}, "I32");
+            case MORLOC_SINT64:  return run(int64_t{}, "I64");
+            case MORLOC_UINT8:   return run(uint8_t{}, "U8");
+            case MORLOC_UINT16:  return run(uint16_t{}, "U16");
+            case MORLOC_UINT32:  return run(uint32_t{}, "U32");
+            case MORLOC_UINT64:  return run(uint64_t{}, "U64");
+            case MORLOC_FLOAT64:
+                for (size_t i = 0; i < n; i++) {
+                    double v = static_cast<double>(data[i]);
+                    std::memcpy(start + i * width, &v, sizeof v);
+                }
+                return true;
+            case MORLOC_INT:
+                for (size_t i = 0; i < n; i++) {
+                    int64_t fields[2] = {1, check_range_narrow<int64_t>(data[i], "Int")};
+                    std::memcpy(start + i * width, fields, sizeof fields);
+                }
+                return true;
+            default:
+                return false;
+        }
+    } else {
+        return false;
     }
 }
 
@@ -1332,6 +1509,7 @@ struct MlcNode {
                     }
                 }
                 if constexpr (mlc_is_leaf_v<ElemT>) {
+                    if (mlc_write_leaf_run<ElemT>(elem, start, data)) return;
                     for (size_t i = 0; i < data.size(); ++i) {
                         if constexpr (std::is_same_v<ElemT, bool>) {
                             // std::vector<bool>::operator[] is a bit proxy.
@@ -1403,6 +1581,7 @@ struct MlcNode {
                 }
                 out->resize(array->size);
                 if constexpr (mlc_is_leaf_v<ElemT>) {
+                    if (mlc_read_leaf_run<ElemT>(elem, start, array->size, *out, w.space)) return;
                     for (size_t i = 0; i < array->size; i++) {
                         (*out)[i] = mlc_leaf_read<ElemT>(elem, start + i * elem->width, w.space);
                     }
