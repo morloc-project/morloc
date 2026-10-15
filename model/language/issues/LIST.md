@@ -14,6 +14,7 @@ it is solved, and a file when it is empty.
 - [manual.md](manual.md): manual text that contradicts a spec item or itself
 - [typeclasses.md](typeclasses.md): compiler crashes in instance bodies, catch-all fallthrough depends on instance body (CLS-12), unchecked class obligations and superclasses (CLS-5)
 - [records.md](records.md): design decision pending: are inline (anonymous) record types legal?; a generic Rust struct cannot carry a phantom parameter, a phantom parameter still needs a Python form when a Python function takes the record
+- [tables.md](tables.md): a table cannot be streamed; it is loaded whole before the command runs
 - [interfaces.md](interfaces.md): CLI, daemon HTTP/LP, MCP and front end disagree on commands served, argument decoding and defaults, `@default`, render bytes, failure classes, discovery, limits and eval gating (IFACE)
 - [labels.md](labels.md): unmeasured stage work of a labeled partial application, constants a labeled function computes evaluated outside its hooks
 - [host-calls.md](host-calls.md): a host-returned function keeps its declared grouping only when an effect forces an adapter (HOST-4)

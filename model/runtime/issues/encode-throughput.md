@@ -108,18 +108,37 @@ for 1 MiB batches is a lot of memory for a streaming writer).
 `-o` file): 112 ns per element as packet and 101 as voidstar, against 88
 as JSON and 69 as MessagePack; a `[U64]` packet costs 18. Not located.
 
+## 5. Table arguments break TBL-1 and TBL-2
+
+[measured] model/performance/tables.md, run
+2026-10-15-1223-dc9bc32a+dirty, 1M rows of a six-column CSV (48 MB),
+C++ consumer, against a plain Rust reader.
+
+- **Record and tuple lists go through JSON.** [measured; path read] A
+  `@form table` list of records is read as CSV -> JSON text -> CString ->
+  the JSON loader (cli.rs `try_table_rows`); `@form list` rows go the same
+  way (`try_list_with_config`). Records: 8.0x the standard's time per row
+  (`@form table`), 9.6x (`@form list`), tuples 5.9x; peak 10.7x, 13.0x
+  and 10.9x the value's packet size, 637-776 MiB in the nexus alone. The
+  same records read from a morloc packet take 0.26 s against the
+  standard's 0.28 s, so the pool's conversion is not the cost. Written
+  results go voidstar -> JSON -> one HashMap of RawValue per row -> CSV
+  (arrow_ipc_reader.rs `write_rows_csv_to_buffer`); not measured. A Parquet
+  input is also copied once more (`decode_columnar`,
+  `Bytes::copy_from_slice`). Fix: parse a bounded chunk of rows at a time
+  and append its cells straight to the voidstar list, with no text form
+  between; write by walking the voidstar.
+- **A `Table` argument costs 2.8x the standard per row and 3.3x its size
+  in memory.** [measured] Both `@form table` and the default path. Read
+  from a morloc packet the same table still peaks at about 140 MiB over a
+  header-only run against 46 MiB of value, so most of the memory is in how
+  the loaded table is held or handed to the pool, not in the CSV parse.
+  Not located. The CSV parse costs about 300 ns per row against the
+  standard's 169.
+
 ## Workarounds in lib/biolib (remove when fixed)
 
 - lib/biolib/stream `writeBatch` no longer calls `@flush`.
 - None for 1 and 2: read pairs are still stored as morloc stream files, and
   the benchmarks in lib/biolib/{bio,biotrim,bioseqqc}/bench record the cost
   (bench/history.tsv) so a fix shows up as a measured change.
-
-- **Record-list tables go through JSON both ways.** [read] A `@form
-  table` list of records is read as CSV -> JSON text -> CString -> the
-  JSON loader (cli.rs `try_table_rows`), and written as voidstar -> JSON
-  -> one HashMap of RawValue per row -> CSV (arrow_ipc_reader.rs
-  `write_rows_csv_to_buffer`): about 3-4x the data held at once and an
-  allocation per row. A Parquet input is also copied once more
-  (`decode_columnar`, `Bytes::copy_from_slice`). Not measured. Fix: build
-  the voidstar from parsed cells, and walk it to write.

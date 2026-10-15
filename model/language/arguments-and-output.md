@@ -121,7 +121,8 @@ delimiters, line feeds and doubled quotes, and must end at a delimiter or
 record end. A `"` later in an unquoted cell is a literal character. A record
 ends at LF or CRLF; a CR elsewhere outside quotes is an error. Every line
 ending ends a record and the last needs none, so a blank line is a record of
-one empty cell. A record with a different number of cells from the header is
+one empty cell; in a one-column table a trailing blank line is a null row
+(ruled 2026-10-15). A record with a different number of cells from the header is
 an error.
 
 ### CLI-19 A table result writes as headed text

@@ -1,0 +1,52 @@
+module main (recsTable, recsList, tupsList, tableTable, tableDefault, idRecs, idTable)
+
+import root-cpp
+import table-cpp
+
+record Gene where
+  name :: Str
+  chrom :: Str
+  start :: I64
+  end :: I64
+  score :: Real
+  keep :: Bool
+record Cpp => Gene = "gene_t"
+
+source Cpp from "rows.hpp" ("count", "table_rows", "ident")
+
+count :: [a] -> I64
+table_rows :: Table n r -> I64
+ident :: a -> a
+
+recsTable ::
+  --' @form table
+  [Gene] -> I64
+recsTable xs = count xs
+
+recsList ::
+  --' @form list
+  [Gene] -> I64
+recsList xs = count xs
+
+tupsList ::
+  --' @form list
+  [(Str, Str, I64, I64, Real, Bool)] -> I64
+tupsList xs = count xs
+
+tableTable ::
+  --' @form table
+  Table n {name = Str, chrom = Str, start = I64, end = I64, score = Real, keep = Bool} -> I64
+tableTable t = table_rows t
+
+tableDefault :: Table n {name = Str, chrom = Str, start = I64, end = I64, score = Real, keep = Bool} -> I64
+tableDefault t = table_rows t
+
+idRecs ::
+  --' @form table
+  [Gene] -> [Gene]
+idRecs xs = ident xs
+
+idTable ::
+  --' @form table
+  Table n {name = Str, chrom = Str, start = I64, end = I64, score = Real, keep = Bool} -> Table n {name = Str, chrom = Str, start = I64, end = I64, score = Real, keep = Bool}
+idTable t = ident t

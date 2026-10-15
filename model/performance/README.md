@@ -10,6 +10,7 @@ Chapters:
 - `startup.md` (START): nexus start, pool start per language, pools started together
 - `cross-language.md` (XL): cost of a call between pools, by language pair and payload
 - `encoding.md` (ENC): CLI input and output forms; bytes per element on the wire
+- `tables.md` (TBL): reading a table argument against a plain Rust reader; time and peak memory
 - `compression.md` (ZIP): stream write and read throughput by compression level
 - `parallelism.md` (PAR): `pmap` scaling with workers; per-element dispatch overhead
 - `typechecking.md` (TYCK): `morloc typecheck` time against program size and shape
