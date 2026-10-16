@@ -26,7 +26,12 @@
   printed (executable/Subcommands.hs:734) and unit-tested
   (test-suite/AbiTests.hs). tooling/morloc-manager mim/src/provision.rs:8
   calls the gate deferred and relies on one release tag. A runtime built
-  from another release's source loads silently.
+  from another release's source loads silently. [reproduced] A program
+  built before `morloc init` installs a newer runtime keeps its generated
+  pool code against the new libraries: after 7205b50c an older R pool fails
+  every call with `could not find function ".mlc_entry"`, which the new
+  librmorloc dispatch calls. Nothing marks a built program with the runtime
+  it was built for.
 - **Crate versions claim a lockstep they lack.** [read]
   morloc-runtime-types (0.87.0) and rustmorloc (0.95.0) say "Version
   locked with morloc-runtime" (0.109.0); scripts/bump-version.sh:36 bumps

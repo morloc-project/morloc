@@ -117,12 +117,3 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   subtype path solves it to `<> Unit`. With the signature `pick2 :: Bool ->
   (Int -> <e> ()) -> <e> ()` it typechecks. Open: instantiate an
   existential branch to a suspension with a fresh row before joining.
-- [reproduced] A recursive function over an opaque sourced type does not
-  build. With `type Counted`, `type Cpp => Counted = "Counted"` (no
-  newtype, no `Packable`), sourced `make :: Int -> Counted` and
-  `bump :: Counted -> Counted`, the definition
-  `upC n ? n == 0 = make 0 : bump (upC (n - 1))` and a caller
-  `up n = tally (upC n)` fail with `Cannot find constructor in VarF
-  "Counted"` at the call; the same calls without recursion build. Same in
-  Rust. Spec gap: no item says whether an opaque type may cross a
-  recursive function's native entry.

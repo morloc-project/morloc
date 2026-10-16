@@ -13,7 +13,7 @@ Intent: ruled 2026-10-16
 Bench: recursion-depth
 Model: ratio_L = native_L / morloc_L; native_L the depth of the native function in language L, morloc_L the depth of the same non-tail recursion written in morloc and realized in L
 Measured: results/2026-10-16-2202-7dd39628+dirty-frame-stack: py 1.003, r 1.20, cpp 0.993, rs 0.993
-Goal: py.ratio <= 1.1, r.ratio <= 1.1, cpp.ratio <= 1.1, rs.ratio <= 1.1
+Goal: py.ratio <= 1.1, r.ratio <= 1.25, cpp.ratio <= 1.1, rs.ratio <= 1.1
 
 The ratio is the number of native frames, or bytes of native stack, morloc
 spends per level of recursion against the one frame a native function

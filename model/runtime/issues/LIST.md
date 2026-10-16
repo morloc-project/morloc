@@ -25,4 +25,3 @@ it is solved, and a file when it is empty.
 - [encode-throughput.md](encode-throughput.md): perf: stream decode copies every field (slower than parsing the text), @write slower than a synced plain write, @flush per batch ~1.8x with zstd, table arguments over TBL-1/TBL-2 (record lists through JSON); analyses and reviewed fixes in [../../performance/issues/](../../performance/issues/LIST.md)
 - [environment-deps.md](environment-deps.md): declared tools resolve through the inherited PATH; unknown package.yaml keys are ignored
 - [ifile-access.md](ifile-access.md): IFile index does not compile in Rust pools; projections after an IFile bracket decode whole elements
-- [perf-limits.md](perf-limits.md): XL-2 R limit is below the native R loop's own cost

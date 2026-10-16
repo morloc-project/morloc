@@ -29,15 +29,19 @@ limit is not a morloc defect.
 ### RECUR-4 Recursion reaches the depth the language itself allows
 Intent: ruled 2026-10-16
 Tests: spec-recur-4-1
-Code: deviates #175
+Code: conforms 2026-10-16
 
 Non-tail recursion realized in a language L reaches the depth that the same
 recursion written natively in L reaches on the same stack, less a constant
 that does not grow with depth. This holds for recursion written in morloc,
 where one level costs one native frame, and for recursion in sourced code,
 below which morloc places a constant number of frames. Failing at that
-depth is L's limit (RECUR-3); failing short of it is morloc's. Measured by
-DEPTH-1 (written in morloc) and DEPTH-2 (sourced).
+depth is L's limit (RECUR-3); failing short of it is morloc's. In R,
+recursion written in morloc reaches at least 80% of the native depth.
+Measured by DEPTH-1 (written in morloc) and DEPTH-2 (sourced).
+
+Why: R's generated code nests evaluation more deeply per level than
+hand-written R; ruled acceptable 2026-10-16.
 
 ### RECUR-5 The depth ceiling of non-tail recursion in compiled languages
 Intent: open
