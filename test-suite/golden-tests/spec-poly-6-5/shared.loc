@@ -1,0 +1,14 @@
+-- Spec POLY-6: main.loc's index in a helper two exports share, which the
+-- error still locates at the bound.
+module main (f, g)
+
+import root-py
+
+h :: [Str] -> U64 -> Str
+h xs x = .[tryInto x] xs
+
+f :: [Str] -> U64 -> Str
+f xs x = h xs x
+
+g :: [Str] -> U64 -> Str
+g xs x = h xs x

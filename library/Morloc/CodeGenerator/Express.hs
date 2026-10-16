@@ -865,8 +865,8 @@ expressBracketSlice callLang midx inputs out xsExpr =
             Nothing -> do
               getSliceSrc <- requireInstance midx
                 (firstJustM
-                  [ resolveInstanceForType findSliceableGetSlice    callLang rcvT
-                  , resolveInstanceForType findSliceableDimGetSliceDim callLang rcvT
+                  [ resolveInstanceForType findSliceableGetSlice midx callLang rcvT
+                  , resolveInstanceForType findSliceableDimGetSliceDim midx callLang rcvT
                   ])
                 callLang "Sliceable.__get_slice__ or SliceableDim.__get_slice_dim__" rcvT
               sW <- wrapBoundInToIndex callLang midx sT sE
@@ -919,7 +919,7 @@ expressBracketIndex callLang midx inputs out xsExpr =
             Just p -> return p
             Nothing -> do
               accessSrc <- requireInstance midx
-                (resolveInstanceForType findIndexableAccessIndex callLang rcvT)
+                (resolveInstanceForType findIndexableAccessIndex midx callLang rcvT)
                 callLang "Indexable.__access_index__" rcvT
               iW <- wrapBoundInToIndex callLang midx iT iE
               let fT = FunT [optI64T, rcvT] out
@@ -1030,7 +1030,7 @@ tryPatternAccessible callLang midx out steps rcvT bounds rcvE = do
   if Map.notMember (EV BT.extractPatternMethod) sigmap
     then return Nothing
     else do
-      mSrc <- resolveInstanceForType findPatternAccessibleExtract callLang rcvT
+      mSrc <- resolveInstanceForType findPatternAccessibleExtract midx callLang rcvT
       case mSrc of
         Nothing -> return Nothing
         Just src -> Just <$>
@@ -1163,7 +1163,7 @@ wrapBoundInToIndex
   -> PolyExpr
   -> MorlocMonad PolyExpr
 wrapBoundInToIndex lang midx boundType expr = do
-  mSrc <- resolveInstanceForType findIndexLikeToIndex lang boundType
+  mSrc <- resolveInstanceForType findIndexLikeToIndex midx lang boundType
   case mSrc of
     Just src ->
       let wrapFT = FunT [boundType] optI64T
@@ -1598,6 +1598,7 @@ expressPolyExpr
       (AppS f@(AnnoS (Idx _ ft@(FunT _ _)) (Idx cidxCall callLang, _) (ExeS (PatCall pat))) xs)
     )
     | isLocal = do
+        mapM_ requireBoundDetermined (bracketBounds pat xs)
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
         dispatchPatCall callLang midx cidxCall pat inputs out xsExpr
           (expressPolyApp parentLang f xsExpr >>= stripPolyReturn)
@@ -1616,6 +1617,7 @@ expressPolyExpr
     -- PolyRemoteInterface structure used by the generic not-isLocal
     -- handler.
     | not isLocal = do
+        mapM_ requireBoundDetermined (bracketBounds pat xs)
         let idxInputTypes = zipWith mkIdx xs inputs
         mayXs <- safeZipWithM (expressPolyArg callLang) idxInputTypes xs
         let xsExpr = fromJust mayXs
@@ -1651,6 +1653,13 @@ expressPolyExpr
       isLocal = isNothing remote
       stripPolyReturn (PolyReturn e) = return e
       stripPolyReturn e = return e
+      -- POLY-6 at the bound itself rather than at the bracket.
+      requireBoundDetermined (AnnoS (Idx i t) _ _) = requireDetermined i t
+      bracketBounds PatternBracketIndex as = take (length as - 1) as
+      bracketBounds PatternBracketSlice as = take (length as - 1) as
+      bracketBounds (PatternStruct sel) as
+        | length as == bracketArity sel + 1 = take (bracketArity sel) as
+      bracketBounds _ _ = []
 expressPolyExpr
   findRemote
   parentLang
@@ -2048,7 +2057,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (Intri
       let AnnoS (Idx _ listT) _ _ = listE
           AnnoS (Idx _ funcT) _ _ = funcE
       mapSrc <- requireInstance midx
-        (resolveInstanceForType findFunctorMap lang listT)
+        (resolveInstanceForType findFunctorMap midx lang listT)
         lang "Functor.map" listT
       funcExpr <- expressPolyExprWrap lang (mkIdx funcE funcT) funcE
       listExpr <- expressPolyExprWrap lang (mkIdx listE listT) listE

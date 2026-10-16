@@ -1,0 +1,7 @@
+-- Spec POLY-6: the slice-bound twin of main.loc.
+module main (f)
+
+import root-py
+
+f :: [Str] -> U64 -> [Str]
+f xs x = .[tryInto x :] xs

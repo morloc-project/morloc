@@ -2476,12 +2476,20 @@ stripEffect t             = t
 -- codegen error citing the inferred type and the bound's role
 -- (start / stop / step / index).
 validateBracketBound :: Text -> AnnoS (Indexed Type) One () -> MorlocMonad ()
-validateBracketBound role (AnnoS (Idx i t) _ _) =
-  if isIntegralPureBound t
+validateBracketBound role (AnnoS (Idx i t) _ _) = do
+  Infer.requireDetermined i t
+  gscope <- MM.getGeneralScope
+  let integral u = case u of
+        OptionalU x -> integral x
+        EffectU _ x -> integral x
+        _ -> isIntegralPureBound (typeOf u) || case TE.reduceType gscope u of
+          Just u' | u' /= u -> integral u'
+          _ -> False
+  if integral (type2typeu t)
     then return ()
     else MM.throwSourcedError i $
       "Bracket" <+> pretty role <+> "bound must be an integer wire type"
-      <+> "in pure morloc (one of Int, I8/16/32/64, U8/16/32/64);"
+      <+> "in pure morloc (one of Int, UInt, I8/16/32/64, U8/16/32/64);"
       <+> "got" <+> pretty t
 
 -- | True if the receiver expression has an IFile-headed type. Used to

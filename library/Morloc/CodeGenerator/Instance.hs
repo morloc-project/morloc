@@ -13,6 +13,7 @@ module Morloc.CodeGenerator.Instance
   , resolveInstanceForType
   ) where
 
+import Morloc.CodeGenerator.Infer (requireDetermined)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
@@ -53,13 +54,16 @@ findFunctorMap lang receiverType =
 -- 'Nothing' if the chain is exhausted. This is the key mechanism by
 -- which @type Array a = List a@ inherits @instance Indexable List@:
 -- the call site type @Array Int@ misses on @Array@, reduces to
--- @List Int@, then hits.
+-- @List Int@, then hits. A type nothing determined selects no instance
+-- and is rejected at @i@ (POLY-6).
 resolveInstanceForType
   :: (Lang -> TypeU -> MorlocMonad (Maybe Source))
+  -> Int
   -> Lang
   -> Type
   -> MorlocMonad (Maybe Source)
-resolveInstanceForType perTypeLookup lang originalType = do
+resolveInstanceForType perTypeLookup i lang originalType = do
+  requireDetermined i originalType
   scope <- MM.getGeneralScope
   go scope (type2typeu originalType)
   where

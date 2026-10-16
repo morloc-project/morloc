@@ -20,6 +20,7 @@ module Morloc.CodeGenerator.Infer
   , inferConcreteVar
   , undeterminedError
   , rejectUndetermined
+  , requireDetermined
   , recordUndeterminedSites
   , canHoldType
   , evalGeneralStep
@@ -66,13 +67,7 @@ inferConcreteType :: Lang -> Indexed Type -> MorlocMonad TypeF
 inferConcreteType lang (Idx i t0) = do
   let generalType = type2typeu t0
   (cscope0, gscope0) <- getScope lang
-  -- POLY-6: a variable nothing determined has no native form. The arguments
-  -- of a `data` type are exempt here: one its fields use is checked when
-  -- the fields are resolved, and one they do not use is never spelled.
-  when (containsUnk t0) $
-    case undetermined gscope0 generalType of
-      [] -> return ()
-      vs -> undeterminedError i vs
+  requireDetermined i t0
   anc <- CMS.gets stateVariantAncestors
   -- A `data` type already being expanded resolves to its NAME and stops.
   -- The check belongs here, at the single entry point, rather than deeper:
@@ -86,6 +81,16 @@ inferConcreteType lang (Idx i t0) = do
       concreteType <- inferConcreteTypeU lang (Idx i generalType)
       (_, gscope) <- getScope lang
       inferConcreteTypeStructural lang i gscope generalType concreteType
+
+-- | POLY-6: a variable nothing determined has no native form. The arguments
+-- of a `data` type are exempt here: one its fields use is checked when the
+-- fields are resolved, and one they do not use is never spelled.
+requireDetermined :: Int -> Type -> MorlocMonad ()
+requireDetermined i t = when (containsUnk t) $ do
+  gscope <- MM.getGeneralScope
+  case undetermined gscope (type2typeu t) of
+    [] -> return ()
+    vs -> undeterminedError i vs
 
 -- | The variables of a type that nothing determined ('UnkT', a variable
 -- quantified over itself in 'TypeU'), outside the arguments of a `data` type.

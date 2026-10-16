@@ -961,7 +961,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
       return $ PolyIntrinsic (Idx g (OptionalT aThere)) IntrMapOptional [each, var]
     AppT (VarT h) ts -> do
       mapSrc <- case ts of
-        [_] -> resolveInstanceForType findFunctorMap lang t
+        [_] -> resolveInstanceForType findFunctorMap g lang t
         _ -> return Nothing
       case (mapSrc, ts) of
         (Just src, [a]) -> do
