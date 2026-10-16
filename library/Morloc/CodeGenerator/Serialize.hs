@@ -299,24 +299,72 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       Int ->
       MonoExpr ->
       MorlocMonad NativeArg
-    nativeArg _ e@(MonoManifold m _ _ _) = do
-      ne <- nativeExpr m e
+    nativeArg p e@MonoManifold {} = do
+      ne <- nativeExpr p e
       case ne of
         (ManN nm) -> return $ NativeArgManifold nm
-        _ -> error "Unreachable?"
+        _ -> return $ NativeArgExpr ne
     nativeArg _ MonoPoolCall {} = error "This step should be unreachable"
     nativeArg _ (MonoExe _ _) = error "This step should be unreachable"
     nativeArg _ (MonoReturn _) = error "Return should not happen here (really I should remove this term completely)"
     nativeArg m e = NativeArgExpr <$> nativeExpr m e
 
+    -- A manifold written as a function of its own.
+    ownManifold :: Int -> ManifoldForm (Or TypeS TypeF) TypeF -> MonoExpr -> MorlocMonad NativeExpr
+    ownManifold m form' e = do
+      ne <- nativeExpr m e
+      return . ManN $ NativeManifold m lang form' ne
+
     nativeExpr ::
       Int ->
       MonoExpr ->
       MorlocMonad NativeExpr
-    nativeExpr _ (MonoManifold m form _ e) = do
-      ne <- nativeExpr m e
+    nativeExpr p (MonoManifold m form kind e) = do
       form' <- abimapM (\i _ -> contextArg i) (\i _ -> boundArg i) form
-      return . ManN $ NativeManifold m lang form' ne
+      named <- Map.member m <$> MM.gets stateName
+      debugMode <- MM.gets stateDebugTrace
+      -- EMIT-1: an application that is not a call of a named function, a
+      -- closure or labeled is written where it is used, in its caller's
+      -- code, rather than as a function of its own.
+      case stripReturn e of
+        Just body
+          | kind == Transparent
+          , not (isClosureForm form)
+          , not named
+          , not debugMode
+          , all (\(Arg _ t) -> hasNative t) (manifoldContext form')
+          , inlinable body -> nativeExpr p body
+        _ -> ownManifold m form' e
+      where
+        hasNative (L _) = False
+        hasNative _ = True
+        stripReturn (MonoReturn x) = Just x
+        stripReturn (MonoLet i a b) = MonoLet i a <$> stripReturn b
+        stripReturn (MonoIf c t f) = MonoIf c <$> stripReturn t <*> stripReturn f
+        stripReturn _ = Nothing
+        -- The forms written in place: ones whose code needs nothing of the
+        -- manifold boundary (a pool call, loop, suspension or wrap does).
+        inlinable x = case x of
+          MonoApp (MonoExe _ _) xs -> all inlinable xs
+          MonoApp (MonoLetVar _ _) xs -> all inlinable xs
+          MonoManifold _ _ _ b -> inlinable b
+          MonoReturn b -> inlinable b
+          MonoLet _ a b -> inlinable a && inlinable b
+          MonoIf c t f -> all inlinable [c, t, f]
+          MonoList _ _ xs -> all inlinable xs
+          MonoTuple _ xs -> all (inlinable . snd) xs
+          MonoRecord _ _ _ rs -> all (inlinable . snd . snd) rs
+          MonoCoerce _ _ b -> inlinable b
+          MonoBndVar {} -> True
+          MonoLetVar {} -> True
+          MonoExe {} -> True
+          MonoLog {} -> True
+          MonoReal {} -> True
+          MonoInt {} -> True
+          MonoStr {} -> True
+          MonoNull {} -> True
+          MonoEnum {} -> True
+          _ -> False
     nativeExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to NativeExpr"
     -- The native entry of a loop called from its own pool: native arguments
     -- in, a native value out. The manifold's parameters are read-only, so the
@@ -486,9 +534,22 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- and lost the args (see the @PolyNull@ comment in Namespace.hs).
     nativeExpr _ (MonoNull v) = NullN <$> inferType v
     nativeExpr m (MonoIf cond thenE elseE) = do
-      condNe <- nativeExpr m cond
-      thenNe <- nativeExpr m thenE
-      elseNe <- nativeExpr m elseE
+      -- EMIT-1: an operand of `&&` or `||` stays a call of its own, so a
+      -- chain is written as the language's operator rather than as nested
+      -- conditionals, whose depth some parsers bound.
+      let shortCircuit = case (thenE, elseE) of
+            (_, MonoLog _ False) -> True
+            (MonoLog _ True, _) -> True
+            _ -> False
+          operand x@(MonoManifold mo form _ e)
+            | shortCircuit = do
+                form' <- abimapM (\i _ -> contextArg i) (\i _ -> boundArg i) form
+                ownManifold mo form' e
+            | otherwise = nativeExpr m x
+          operand x = nativeExpr m x
+      condNe <- operand cond
+      thenNe <- operand thenE
+      elseNe <- operand elseE
       -- The arms agree on one type (a suspension arm meets a suspension
       -- arm, both closures); a Null arm defers to its sibling's type.
       let ifType = case (thenNe, elseNe) of

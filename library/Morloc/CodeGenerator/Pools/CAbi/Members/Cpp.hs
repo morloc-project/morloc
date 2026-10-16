@@ -118,10 +118,24 @@ class HasCppType a where
 
   cppArgOf :: CallSemantics -> Arg a -> CppTranslator MDoc
 
+-- A scalar is passed by value: a reference to it would make the caller keep
+-- the value in memory for each call. It stays const, so a sourced function
+-- taking a non-const reference cannot change the caller's value.
 setCallSemantics :: CallSemantics -> MDoc -> MDoc
 setCallSemantics Copy typestr = typestr
-setCallSemantics Reference typestr = "const" <+> typestr <> "&"
+setCallSemantics Reference typestr
+  | isScalarCppType typestr = "const" <+> typestr
+  | otherwise = "const" <+> typestr <> "&"
 setCallSemantics ConstPtr typestr = "const" <+> typestr
+
+-- | Cheap-to-copy scalar C++ types: a copy is a register move.
+isScalarCppType :: MDoc -> Bool
+isScalarCppType t = render t `elem`
+  [ "int8_t", "int16_t", "int32_t", "int64_t"
+  , "uint8_t", "uint16_t", "uint32_t", "uint64_t"
+  , "int", "unsigned int", "long", "unsigned long", "long long", "unsigned long long"
+  , "short", "unsigned short", "char", "signed char", "unsigned char", "size_t"
+  , "float", "double", "bool" ]
 
 -- | The capture list of a do-block thunk ('lcMakeDoBlock'). By value: a
 -- thunk may outlive the frame that built it.
@@ -995,6 +1009,21 @@ PROPAGATE_ERROR(errmsg)|]
     , lcReleaseStmt = \v -> "_release_packet(" <> pretty v <> ", true);"
     , lcReleaseBorrowedStmt = \v -> "_release_packet(" <> pretty v <> ", false);"
     , lcReturn = \e -> "return(" <> e <> ");"
+    -- EMIT-3: the pop follows the result's construction, and the result is
+    -- returned by name, so it is elided, moved or copied as it would be
+    -- without the pop: a returned local is returned as it is, and any other
+    -- result first initializes a local of the return type.
+    , lcFrameReturn = \callIndex manifoldType byName e -> do
+        state <- CMS.get
+        case frameLineLit state callIndex of
+          Nothing -> return Nothing
+          Just _ -> do
+            rt <- returnType manifoldType
+            let pop = "mlc::frame_pop();"
+            return . Just $ case () of
+              _ | render rt == "void" -> vsep [e <> ";", pop, "return;"]
+                | byName -> vsep [pop, "return(" <> e <> ");"]
+                | otherwise -> vsep [rt <+> "_mlc_r =" <+> e <> ";", pop, "return(_mlc_r);"]
     , lcDupPacket = \e -> "_dup_packet(" <> e <> ")"
     , lcOwnedArg = \e -> "mlc::Packet(" <> e <> ").get()"
     -- A consumable projection takes its payload, as 'makeLet' does for a
@@ -1041,6 +1070,7 @@ PROPAGATE_ERROR(errmsg)|]
           , poolPriorLines = initLines <> [resultDecl, whileDoc]
           , poolPriorExprs = concatMap poolPriorExprs leaves
           , poolReturnFlag = True
+          , poolBorrowedLocal = Nothing
           }
     , lcShortCircuit = \isAnd a b -> a <+> (if isAnd then "&&" else "||") <+> b
     , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do
@@ -1089,6 +1119,7 @@ PROPAGATE_ERROR(errmsg)|]
           , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
           , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
           , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
+          , poolBorrowedLocal = Nothing
           }
     , lcMakeDoBlock = \t stmts expr ->
         let isUnit = case t of
@@ -1154,7 +1185,7 @@ PROPAGATE_ERROR(errmsg)|]
           _ -> error "lcReflectClosureParsed: expected SerialClosure"
     -- A variant's generated marshaller converts its own closures.
     , lcDivertNestedClosure = not . null . serialClosuresOutsideVariants
-    , lcMakeFunction = \callIndex mname args manifoldType priorLines body headForm -> do
+    , lcMakeFunction = \callIndex mname args manifoldType priorLines body headForm isClosure -> do
         state <- CMS.get
         let alreadyDone = case headForm of
               (Just HeadManifoldFormRemoteWorker) -> Set.member callIndex (translatorRemoteManifoldSet state)
@@ -1179,14 +1210,10 @@ PROPAGATE_ERROR(errmsg)|]
                 (userName, srclocStr)
                   | debugMode = translatorDebugInfo state callIndex
                   | otherwise = maybe ("", "") id traceLabel
-                nameOut = if T.null userName then "_" else userName
-                srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
                 -- Raw text with a literal newline; escapeCxxStringLit converts
                 -- '\n' -> "\\n" so the emitted C++ string literal contains the
                 -- escape, not an actual newline byte.
-                frameName = nameOut
-                          <> " [cpp] (mid=" <> T.pack (show callIndex)
-                          <> srclocSuffix <> ")"
+                frameName = cppFrameName callIndex userName srclocStr
                 frameLine = "\n  at " <> frameName
                 frameLit :: MDoc
                 frameLit = dquotes (pretty (escapeCxxStringLit frameLine))
@@ -1220,9 +1247,22 @@ PROPAGATE_ERROR(errmsg)|]
                   , block 4 "catch (...)"
                       (appendFrame frameLit "std::string(\"An unknown error occurred\")")
                   ]
+                -- STATE-5: a named function records its call; the pop is in
+                -- its return statement ('lcFrameReturn'). STATE-6: a closure,
+                -- which code outside morloc may call and whose failure it may
+                -- catch, restores the depth it found when a failure leaves it.
+                framePush = case frameLineLit state callIndex of
+                  Just lit -> ["mlc::frame_push(" <> lit <> ");"]
+                  Nothing -> []
                 innerBlock
-                  | not debugMode, Nothing <- traceLabel = vsep (priorLines <> [body])
-                  | otherwise = tryBody <+> catchBody
+                  | debugMode = tryBody <+> catchBody
+                  | isClosure =
+                      vsep
+                        [ "size_t _mlc_saved = mlc::frame_enter();"
+                        , block 4 "try" (vsep (framePush <> priorLines <> [body]))
+                            <+> block 4 "catch (...)" "_mlc_closure_rethrow(_mlc_saved);"
+                        ]
+                  | otherwise = vsep (framePush <> priorLines <> [body])
             -- Wrap labeled manifolds with a chrono start/pass/fail shim,
             -- using user-supplied templates (from YAML 'log-template').
             -- Each event has its own pre-rendered template; a 'Nothing'
@@ -1390,25 +1430,19 @@ PROPAGATE_ERROR(errmsg)|]
             | otherwise =
                 [idoc|#{typestr} #{namer letIndex} = #{poolExpr p1};|]
           rs = poolPriorLines p1 <> [letAssignment] <> poolPriorLines p2
+          letName = render (namer letIndex)
+          byReference = binding == BindBorrow && not (isScalarCppType typestr)
+          borrowedLocal
+            | render (poolExpr p2) == letName = if byReference then Just letName else Nothing
+            | otherwise = poolBorrowedLocal p2
        in PoolDocs
             { poolCompleteManifolds = poolCompleteManifolds p1 <> poolCompleteManifolds p2
             , poolExpr = poolExpr p2
             , poolPriorLines = rs
             , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
             , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
+            , poolBorrowedLocal = borrowedLocal
             }
-
-    -- Cheap-to-copy scalar C++ types. Borrowing one by const-reference saves
-    -- nothing (the copy is a register move) and would newly break a 'source
-    -- Cpp' function taking a non-const 'T&' (a 'const T&' cannot bind there);
-    -- so the borrow optimization is restricted to the container/aggregate
-    -- types (Str, Vector, Tuple, records) where copying the projected
-    -- sub-value actually costs.
-    isScalarCppType :: MDoc -> Bool
-    isScalarCppType t = render t `elem`
-      [ "int8_t", "int16_t", "int32_t", "int64_t"
-      , "uint8_t", "uint16_t", "uint32_t", "uint64_t"
-      , "float", "double", "bool" ]
 
     -- Match only bare 'Unit' -- a suspension of Unit is
     -- 'std::function<mlc::Unit()>', an assignable function value, not a
@@ -1423,6 +1457,22 @@ PROPAGATE_ERROR(errmsg)|]
 
     returnType :: TypeM -> CppTranslator MDoc
     returnType = cppTypeOf
+
+    -- The trace line, as a C++ literal, of a manifold that records its call
+    -- on the frame stack: outside --debug, a call of a named function,
+    -- labeled with its definition (DIAG-5).
+    cppFrameName :: Int -> Text -> Text -> Text
+    cppFrameName callIndex userName srclocStr =
+      (if T.null userName then "_" else userName)
+        <> " [cpp] (mid=" <> T.pack (show callIndex)
+        <> (if T.null srclocStr then "" else ", " <> srclocStr) <> ")"
+
+    frameLineLit :: CppTranslatorState -> Int -> Maybe MDoc
+    frameLineLit state callIndex
+      | translatorDebugMode state = Nothing
+      | otherwise =
+          (\(userName, srclocStr) -> dquotes (pretty (escapeCxxStringLit ("\n  at " <> cppFrameName callIndex userName srclocStr))))
+            <$> translatorTraceInfo state callIndex
 
 -- Use `#include "foo.h"` rather than `#include <foo.h>`
 translateSource ::
@@ -1447,6 +1497,7 @@ serialize v0 s = do
       , poolPriorLines = map CP.printStmt stmts
       , poolPriorExprs = []
       , poolReturnFlag = False
+      , poolBorrowedLocal = Nothing
       }
 
 -- | Whether a rendered expression is a call (rather than a variable, a
@@ -1567,6 +1618,7 @@ cppCacheBody resSa lbl midx args bodyPool = do
     , poolCompleteManifolds = poolCompleteManifolds bodyPool
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
+    , poolBorrowedLocal = Nothing
     }
 
 -- | C++ debug-trace wrap. Wraps the manifold body in @try {...}
@@ -1651,6 +1703,7 @@ cppDebugWrap midx args bodyPool = do
     , poolCompleteManifolds = poolCompleteManifolds bodyPool
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
+    , poolBorrowedLocal = Nothing
     }
 
 -- | Serialize a single C++ cache arg. Native bindings are routed

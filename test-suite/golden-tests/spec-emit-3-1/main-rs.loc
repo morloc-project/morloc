@@ -1,0 +1,46 @@
+-- Spec EMIT-3: recording a named function on the frame stack adds no copy
+-- or move of its result. Each export returns the value, then the copies
+-- and moves of a Counted made in the run (C++), or its clones (Rust).
+-- The recursive functions are emitted as functions of their own.
+module main (direct, named, up, pick)
+
+import root-rust
+
+newtype Counted = Int
+type Rust => Counted = "Counted"
+
+instance Packable Int Counted where
+  source Rust from "counted.rs" ("pack_counted" as pack, "unpack_counted" as unpack)
+
+source Rust from "counted.rs" ("make", "bump", "tally")
+
+make :: Int -> Counted
+bump :: Counted -> Counted
+tally :: Counted -> [Int]
+
+viaCall :: Int -> Counted
+viaCall n = bump (make n)
+
+-- Each level returns the result of a call.
+upC :: Int -> Counted
+upC n
+  ? n == 0 = make 0
+  : bump (upC (n - 1))
+
+-- The base case returns a parameter.
+pickC :: Int -> Counted -> Counted
+pickC n c
+  ? n == 0 = c
+  : bump (pickC (n - 1) c)
+
+direct :: Int -> [Int]
+direct n = tally (bump (make n))
+
+named :: Int -> [Int]
+named n = tally (viaCall n)
+
+up :: Int -> [Int]
+up n = tally (upC n)
+
+pick :: Int -> [Int]
+pick n = tally (pickC n (make 0))

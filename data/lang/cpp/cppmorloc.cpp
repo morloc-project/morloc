@@ -4,12 +4,17 @@
 #include <cstring>
 #include <cstdio>
 #include <unistd.h>
+#include <pthread.h>
+#include <sys/mman.h>
+#include <atomic>
+#include <new>
 
-#include "morloc.h"
+#include "cppmorloc.hpp"
 
-// The innermost manifold this thread is executing, for the crash handler's
-// report. The slot lives in the pool binary, so a handler on the faulting
-// thread reads it from the static thread-local block without allocating.
+// Under --debug, the innermost manifold this thread is executing, for the
+// crash handler's report. The slot lives in the pool binary, so a handler on
+// the faulting thread reads it from the static thread-local block without
+// allocating.
 static thread_local const char* mlc_frame_ = nullptr;
 
 extern "C" const char* mlc_frame_enter(const char* frame) {
@@ -22,8 +27,124 @@ extern "C" void mlc_frame_leave(const char* prev) {
     mlc_frame_ = prev;
 }
 
+namespace mlc {
+// STATE-5. Constant-initialised and trivially destructible, so generated
+// code reads it from the static thread-local block with no init check; the
+// entries live in a mapping a thread-exit key unmaps.
+thread_local constinit frame_stack frames_ = {nullptr, 0, 0};
+
+static pthread_key_t frames_key_;
+static pthread_once_t frames_key_once_ = PTHREAD_ONCE_INIT;
+
+static size_t frames_bytes(size_t cap) {
+    return cap * sizeof(const char*) + static_cast<size_t>(sysconf(_SC_PAGESIZE));
+}
+
+static void frames_free(void* base) {
+    if (frames_.base == base) {
+        size_t cap = frames_.cap;
+        frames_.base = nullptr;
+        frames_.cap = 0;
+        frames_.depth = 0;
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        munmap(base, frames_bytes(cap));
+    }
+}
+
+static void frames_key_make() {
+    if (pthread_key_create(&frames_key_, frames_free) != 0) {
+        std::abort();
+    }
+}
+
+// The bytes of machine stack the calling thread has, or 0 if unknown.
+static size_t thread_stack_bytes() {
+#if defined(__APPLE__)
+    return pthread_get_stacksize_np(pthread_self());
+#else
+    size_t n = 0;
+    pthread_attr_t attr;
+    if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+        pthread_attr_getstacksize(&attr, &n);
+        pthread_attr_destroy(&attr);
+    }
+    return n;
+#endif
+}
+
+// Lazily committed address space for 2^28 calls, or eight per 16 bytes of
+// the thread's machine stack if that is more: more calls than the machine
+// stack holds however many the optimizer inlines into one frame. Where the
+// system will not reserve that much, the eight per 16 bytes alone. Its
+// untouched pages are no part of a core dump.
+static void* frames_map(size_t bytes) {
+    size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_NORESERVE
+    flags |= MAP_NORESERVE;
+#endif
+    void* p = mmap(nullptr, bytes + page, PROT_READ | PROT_WRITE, flags, -1, 0);
+#ifdef MADV_DONTDUMP
+    if (p != MAP_FAILED) madvise(p, bytes + page, MADV_DONTDUMP);
+#endif
+    return p;
+}
+
+static void* frames_reserve(size_t& bytes) {
+    size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    size_t stack = thread_stack_bytes();
+    if (stack == 0) stack = size_t(64) << 20;
+    size_t needed = ((stack / 16 * 8 + 2) * sizeof(const char*) + page - 1) / page * page;
+    bytes = (size_t(1) << 28) * sizeof(const char*);
+    if (bytes < needed) bytes = needed;
+    void* p = frames_map(bytes);
+    if (p != MAP_FAILED || bytes == needed) return p;
+    bytes = needed;
+    return frames_map(bytes);
+}
+
+void frame_init() {
+    size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    size_t bytes = 0;
+    void* p = frames_reserve(bytes);
+    if (p == MAP_FAILED) throw std::bad_alloc();
+    if (mprotect(static_cast<char*>(p) + bytes, page, PROT_NONE) != 0) {
+        munmap(p, bytes + page);
+        throw std::bad_alloc();
+    }
+    pthread_once(&frames_key_once_, frames_key_make);
+    if (pthread_setspecific(frames_key_, p) != 0) {
+        munmap(p, bytes + page);
+        throw std::bad_alloc();
+    }
+    frames_.cap = bytes / sizeof(const char*);
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+    frames_.base = static_cast<const char**>(p);
+}
+
+std::string frame_take(size_t saved) {
+    frame_stack& s = frames_;
+    size_t depth = s.depth;
+    s.depth = saved;
+    std::string out;
+    for (size_t k = depth; k > saved && k < s.cap; k--) out += s.base[k];
+    return out;
+}
+}
+
+// The frame a crash report names: under --debug the marked manifold, else
+// the top of the frame stack (STATE-5) without its trace-line prefix.
 extern "C" const char* mlc_current_frame(size_t* len) {
     const char* f = mlc_frame_;
+    if (f == nullptr) {
+        size_t depth = mlc::frames_.depth;
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        if (depth > 0 && depth < mlc::frames_.cap) {
+            f = mlc::frames_.base[depth];
+            static const char prefix[] = "\n  at ";
+            if (strncmp(f, prefix, sizeof(prefix) - 1) == 0) f += sizeof(prefix) - 1;
+        }
+    }
     *len = f ? strlen(f) : 0;
     return f;
 }

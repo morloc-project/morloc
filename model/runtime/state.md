@@ -53,6 +53,63 @@ first. The registry is `exec-only`: no process that links the Rust runtime
 forks a worker (FORK-6). Model: `tla/FnRegistry.tla` (`FnRegistry` passes;
 `remove_after_free` and `register_after_escape` lose an entry).
 
+### STATE-5 A thread's frame stack lists the named morloc calls active on it
+Status: implemented
+Checked by: a_boundary_takes_the_calls_above_its_depth_innermost_first_and_restores_it, the_crash_report_names_the_innermost_recorded_call, each_thread_has_its_own_frame_stack, tla:FrameStack, tla:FrameStack_ring.bug, tla:FrameStack_pop_before_value.bug, tla:FrameStack_no_pop_without_return.bug, golden:spec-diag-5-1, golden:spec-emit-3-1, golden:spec-recur-4-1, golden:pool-crash-report
+
+In the C++ and Rust pools each thread has a frame stack: a depth and the
+labels of the calls below it. A call of a named function (DIAG-5) pushes
+its label on entry and pops it once its result is computed, before its
+locals are released; a failure skips the pop. With no failure in flight,
+entries 1..depth are exactly the named calls on the thread that have not
+computed their result, outermost first, and the crash report names the
+top one. While a failure unwinds, the entries above the depth of the
+boundary that will catch it (STATE-6) are the named calls it has unwound
+through. A thread reaches generated code only through a boundary, and
+the first boundary it enters reserves its stack: lazily committed address
+space, left out of core dumps, for 2^28 calls or eight per 16 bytes of the
+thread's machine stack, whichever is more. That is more calls than the
+machine stack holds however many the optimizer inlines into one frame, so
+the stack drops no entry and a push makes no check. Where the system will
+not reserve that much, the reservation is the eight per 16 bytes alone. A
+guard page follows it, so a stack that outgrows it faults rather than
+overwrites. When no reservation can be made, a C++ boundary fails
+the call it was entering; in Rust, as on any failed allocation, the pool
+ends.
+
+A thread's stack holds only that thread's calls. A closure run on another
+thread starts at that thread's depth. Its failure, carried back and raised
+on the calling thread, gains the calling thread's calls at that thread's
+next boundary. A forked child keeps the forking thread's stack.
+
+Pushing writes the label and the depth; popping writes the depth. Neither
+copies or moves the result.
+Model: `tla/FrameStack.tla` (`FrameStack` passes; `ring`, a fixed ring of
+slots tagged with their depth, loses active calls; `pop_before_value`
+drops the call whose result fails; `no_pop_without_return` leaves a pushed
+call behind).
+
+### STATE-6 A trace boundary leaves the frame stack at the depth it found
+Status: implemented
+Checked by: a_closure_boundary_carries_the_calls_a_panic_unwound_and_restores_the_depth, a_closed_pipe_passes_a_closure_boundary_unchanged_and_restores_the_depth, tla:FrameStack, tla:FrameStack_reset_at_dispatch.bug, tla:FrameStack_no_closure_boundary.bug, tla:FrameStack_pass_keeps_depth.bug, golden:spec-diag-5-1, golden:frame-stack-suspension-boundary
+
+The boundaries are a pool's dispatch, `@try` and every closure: a function
+value code outside morloc may call and whose failure it may catch,
+whether a lambda, a partial application or a suspension. The thunk `@try`
+makes of a pure body is run by the `@try` at once and is no boundary. Each
+saves the depth on entry and sets no depth but that one. Left normally,
+it finds the saved depth; dispatch checks this, which covers every
+boundary inside it, and a mismatch is a broken runtime invariant that
+ends the pool (PANIC-13). Left by a failure, it restores the saved depth
+on every path. A user failure also takes the labels above the saved depth,
+innermost first, into its message: `@try` and dispatch report it, and a
+closure raises it again as a failure carrying that message. A closed pipe
+or an infrastructure error passes through unchanged and carries no trace.
+So sourced code that catches a failure, or enters a nested dispatch on the
+same thread, finds the stack as it left it. Model: `tla/FrameStack.tla`
+(`reset_at_dispatch`, `no_closure_boundary` and `pass_keeps_depth` each
+leave a stack that no longer lists the calls).
+
 ### INIT-1 A process-wide value is initialised once, by a fork-safe primitive
 Status: implemented
 Checked by: tla:LazyInit, tla:LazyInit_unlocked.bug, tla:LazyInit_unheld.bug, golden:futhark-basic

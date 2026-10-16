@@ -103,6 +103,10 @@ data PoolDocs = PoolDocs
   -- that rebind the body's expression to a temp) can still treat the
   -- expression as a value. lowerManifold applies lcReturn when the
   -- flag is set, right before passing the body to lcMakeFunction.
+
+  , poolBorrowedLocal :: Maybe Text
+  -- ^ The name of a local bound by reference, when 'poolExpr' is that
+  -- name. Returning it copies its referent.
   }
 
 instance Defaultable PoolDocs where
@@ -113,6 +117,7 @@ instance Defaultable PoolDocs where
       , poolPriorLines = []
       , poolPriorExprs = []
       , poolReturnFlag = False
+      , poolBorrowedLocal = Nothing
       }
 
 {- | Merge a series of pools, keeping prior lines, expression and manifolds, but
@@ -127,6 +132,7 @@ mergePoolDocs f ms =
     , poolPriorLines = concatMap poolPriorLines ms
     , poolPriorExprs = concatMap poolPriorExprs ms
     , poolReturnFlag = any poolReturnFlag ms
+    , poolBorrowedLocal = Nothing
     }
 
 -- | Split a call's arguments into successive call groups according to the

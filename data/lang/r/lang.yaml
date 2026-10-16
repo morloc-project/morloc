@@ -94,11 +94,7 @@ ldResourcePackTemplate: "list(memory={{mem}}L, time={{time}}L, cpus={{cpus}}L, g
 ldReturnTemplate: "return({{expr}})"
 ldFuncDefHeader: "{{name}} <- function({{args}})"
 ldBlockStyle: braces
-ldErrorWrapOpen: "tryCatch({"
-ldErrorWrapClose:
-  - "}, error = function(e) {"
-  - "    stop(paste0(conditionMessage(e), \"\\n  at {{name}} [r] (mid={{mid}}{{srcloc_suffix}})\"), call.=FALSE)"
-  - "})"
+ldFrameLabelStmt: "attr({{fname}}, \"morloc_frame\") <- \"{{label}}\""
 ldPatternStyle: concat_call
 ldConcatFn: "paste0"
 ldQuoteTerminator: '"'

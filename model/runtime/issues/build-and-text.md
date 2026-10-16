@@ -82,3 +82,5 @@
   pointer it may dereference to `voidstar::flatten_portable_in_place`.
   The crate's own lint denials (json.rs casts) go unchecked while this
   stops the run.
+- [reproduced] `morloc init -f` exits 0 when data/lang/cpp/cppmorloc.cpp
+  fails to compile, leaving the previous libcppmorloc.a installed.

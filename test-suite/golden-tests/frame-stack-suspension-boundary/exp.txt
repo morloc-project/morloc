@@ -1,0 +1,23 @@
+cpp caught 3
+2
+cpp caughtThenFails 3
+boom
+  at bad [cpp]
+  [previous line repeated 1 more time]
+  at caughtThenFails [cpp]
+cpp threaded 3
+3
+cpp threadedFails 3
+boom
+  at bad [cpp]
+  [previous line repeated 3 more times]
+  at threadedFails [cpp]
+rs caught 3
+2
+rs caughtThenFails 3
+Rust code panicked: boom
+  at bad [rust]
+  [previous line repeated 1 more time]
+  at caughtThenFails [rust]
+rs threaded 3
+3

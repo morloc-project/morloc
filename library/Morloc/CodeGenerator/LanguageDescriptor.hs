@@ -208,6 +208,10 @@ data LangDescriptor = LangDescriptor
   , -- Error wrapping
     ldErrorWrapOpen :: !Text -- "try:" for Python, "" for others
   , ldErrorWrapClose :: ![Text] -- Except block lines with {{name}} template var
+  , ldFrameLabelStmt :: !Text
+    -- ^ Written after a named function's definition, for a language that
+    -- reads its trace from the call stack (EMIT-3): {{fname}} the generated
+    -- function, {{label}} its trace label. Empty for none.
   , -- Pattern/string interpolation support
     ldPatternStyle :: !PatternStyle
   , ldConcatFn :: !Text -- For ConcatCall: "paste0", "string"
@@ -362,6 +366,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldBlockStyle" (Y.String "indent")
             . ins "ldErrorWrapOpen" (Y.String "")
             . ins "ldErrorWrapClose" (Y.Array mempty)
+            . ins "ldFrameLabelStmt" (Y.String "")
             . ins "ldPatternStyle" (Y.String "fstring")
             . ins "ldConcatFn" (Y.String "")
             . ins "ldQuoteTerminator" (Y.String "\"")
@@ -463,6 +468,7 @@ defaultLangDescriptor name ext =
     , ldBlockStyle = IndentBlock
     , ldErrorWrapOpen = ""
     , ldErrorWrapClose = []
+    , ldFrameLabelStmt = ""
     , ldPatternStyle = FStringPattern
     , ldConcatFn = ""
     , ldQuoteTerminator = "\""

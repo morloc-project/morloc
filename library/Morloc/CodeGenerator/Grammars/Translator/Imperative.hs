@@ -76,7 +76,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Tuple (swap)
-import Data.Char (isAlphaNum)
+import Data.Char (isAlpha, isAlphaNum)
 import qualified Data.Text as T
 import Data.Word (Word8)
 import GHC.Generics (Generic)
@@ -661,6 +661,12 @@ data LowerConfig m = LowerConfig
   -- it can be applied later or passed on. Only the shared memory is given
   -- back; the buffer stays.
   , lcReturn :: MDoc -> MDoc
+  , lcFrameReturn :: Int -> TypeM -> Bool -> MDoc -> m (Maybe MDoc)
+  -- ^ For a manifold that records its call on the frame stack (STATE-5):
+  -- its return statement, which pops the call once the result is computed
+  -- (EMIT-3), given its mid, return type, whether the returned expression
+  -- names a local the function owns, and the expression. Nothing for a
+  -- manifold that records nothing, which returns with 'lcReturn'.
   , -- | A copy of an argument packet the manifold returns as its result.
     -- The argument lives in the incoming call, which is released before the
     -- result is sent, so a language that frees packets by hand must return
@@ -763,8 +769,10 @@ data LowerConfig m = LowerConfig
       [MDoc] ->
       MDoc ->
       Maybe HeadManifoldForm ->
+      Bool ->
       m (Maybe MDoc)
-  -- ^ mid, name, all args, return (body) type, priorLines, body, headForm
+  -- ^ mid, name, all args, return (body) type, priorLines, body, headForm,
+  -- and whether the function is a closure (code outside morloc may call it)
   -- Returns Nothing if dedup'd (C++), Just funcDef otherwise. The mid
   -- is threaded so the per-manifold error-wrap can look up user name
   -- and srcloc for the trace line.
@@ -1745,6 +1753,7 @@ shortCircuit cfg thenE elseE condDocs thenDocs elseDocs = case (thenE, elseE) of
       , poolPriorLines = poolPriorLines condDocs
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs other
       , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag other
+      , poolBorrowedLocal = Nothing
       }
 
 lowerNativeExprRaw ::
@@ -1784,6 +1793,7 @@ lowerNativeExprRaw cfg _ (AppExeN_ t (PatCallP p) xs) = do
       , poolPriorLines = concatMap poolPriorLines es
       , poolPriorExprs = concatMap poolPriorExprs es
       , poolReturnFlag = any poolReturnFlag es
+      , poolBorrowedLocal = Nothing
       }
 -- Manifold-call arguments go through lcSourcedArg too (identity for most
 -- languages; the Rust member borrows every native arg so a value can fan out to
@@ -2429,16 +2439,28 @@ lowerManifold ::
   PoolDocs ->
   m PoolDocs
 lowerManifold cfg m form headForm bodyType bodyPool = do
-  let PoolDocs completeManifolds bodyExpr priorLines priorExprs retFlag = bodyPool
-      -- Apply lcReturn at the manifold boundary if a nested ReturnS_/ReturnN_
-      -- set the return flag. Deferring lcReturn to here lets intermediate
-      -- handlers (notably the serialize-let-wrap that rebinds the body
-      -- expression to a temp before emitting a release call) keep
-      -- poolExpr as a value rather than a return statement.
-      body = if retFlag then lcReturn cfg bodyExpr else bodyExpr
+  let PoolDocs completeManifolds bodyExpr priorLines priorExprs retFlag borrowed = bodyPool
+      returned = render bodyExpr
+      -- A parameter or a local bound by reference is copied when returned;
+      -- any other name is a local the function owns.
+      ownedByName =
+        isIdentifierText returned
+          && returned `notElem` map (render . argNamer) (typeMofForm form)
+          && borrowed /= Just returned
+  framed <- lcFrameReturn cfg m bodyType ownedByName bodyExpr
+  -- Apply the return at the manifold boundary if a nested ReturnS_/ReturnN_
+  -- set the return flag. Deferring it to here lets intermediate handlers
+  -- (notably the serialize-let-wrap that rebinds the body expression to a
+  -- temp before emitting a release call) keep poolExpr as a value rather
+  -- than a return statement.
+  let body = case (retFlag, framed) of
+        (True, Just ret) -> ret
+        (True, Nothing) -> lcReturn cfg bodyExpr
+        (False, Nothing) -> bodyExpr
+        (False, Just _) -> error $ "EMIT-3: manifold " <> show m <> " records its call but its body has no return"
       args = typeMofForm form
       mname = manNamer m
-  maybeNewManifold <- lcMakeFunction cfg m mname args bodyType priorLines body headForm
+  maybeNewManifold <- lcMakeFunction cfg m mname args bodyType priorLines body headForm (isClosureForm form)
   call <- case form of
         (ManifoldPass _) -> do
           -- An unapplied manifold's callable signature is its whole type:
@@ -2478,6 +2500,7 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
       , poolPriorLines = []
       , poolPriorExprs = priorExprs
       , poolReturnFlag = False
+      , poolBorrowedLocal = Nothing
       }
 
 -- | Bundle all six fold callbacks into a single FoldWithManifoldM record.
@@ -2532,3 +2555,8 @@ armIndex :: Text -> [Text] -> Int
 armIndex n names = case [i | (i, m) <- zip [0 ..] names, m == n] of
   (i : _) -> i
   [] -> error ("compiler bug: no tag for constructor " <> show n)
+
+isIdentifierText :: Text -> Bool
+isIdentifierText t = case T.uncons t of
+  Just (c, rest) -> (isAlpha c || c == '_') && T.all (\x -> isAlphaNum x || x == '_') rest
+  Nothing -> False

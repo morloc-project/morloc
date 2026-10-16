@@ -633,15 +633,18 @@ where
 {
     // The body is a SUSPENSION, so it is taken as one: that accepts an inline
     // thunk and a suspension held in a variable alike.
+    // STATE-6
+    let saved = frame_depth();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.invoke())) {
         Ok(v) => ok(v),
-        Err(payload) if payload.is::<MorlocPipeClosed>() => std::panic::resume_unwind(payload),
+        Err(payload) if payload.is::<MorlocPipeClosed>() => {
+            frame_restore(saved);
+            std::panic::resume_unwind(payload)
+        }
         Err(payload) => {
             // PANIC-6: a runtime panic ended the pool before it reached here.
             unsafe { morloc_panic_caught() };
-            // The message carries the frames it unwound through (DIAG-5),
-            // taken so they do not leak into a later error's traceback.
-            let trace = TRACEBACK.with(|t| std::mem::take(&mut *t.borrow_mut()));
+            let trace = frame_take(saved);
             err(format!("{}{}", panic_message(payload.as_ref()), trace))
         }
     }
@@ -983,35 +986,212 @@ pub fn dispatch_flush() {
         }
         t.0.set(Vec::new());
     });
-    // Reset any stale traceback frames from a prior dispatch (defensive; the
-    // guard normally drains them when it forms the fail packet).
-    TRACEBACK.with(|t| t.borrow_mut().clear());
 }
 
 // ---------------------------------------------------------------------------
-// Error traceback. Each manifold holds a `FrameGuard` bound to its precomputed
-// frame line (`\n  at <name> [rust] (mid=N, file:line:col)`). On a panic
-// unwind the guard appends the line to a thread-local buffer -- innermost
-// manifold first, matching the C++ member's catch-append-rethrow chain (which
-// accumulates the same lines onto the exception message). `dispatch_guard`
-// drains the buffer onto the throw message when it forms the fail packet, so
-// the message + full manifold trace crosses the pool boundary as one string.
+// The thread's frame stack (STATE-5): entries 1..depth are the trace lines
+// (`\n  at <name> [rust] (mid=N, file:line:col)`) of the named calls recorded
+// on it, outermost first. A named function pushes its line on entry and pops
+// it in its return statement; a panic skips the pops, so a boundary
+// (dispatch, `@try`, a closure) finds the calls it unwound through above the
+// depth it saved (STATE-6). Const-initialised and without a destructor, so a
+// generated function and the crash handler read it from the static
+// thread-local block; the entries live in a mapping FRAMES_FREE unmaps when
+// the thread ends.
 // ---------------------------------------------------------------------------
+struct FrameStack {
+    base: Cell<*mut &'static str>,
+    cap: Cell<usize>,
+    depth: Cell<usize>,
+}
+
+struct FramesFree;
+
+impl Drop for FramesFree {
+    fn drop(&mut self) {
+        FRAMES.with(|s| {
+            let base = s.base.replace(std::ptr::null_mut());
+            let cap = s.cap.replace(0);
+            s.depth.set(0);
+            std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+            if !base.is_null() {
+                unsafe { libc::munmap(base as *mut c_void, frames_bytes(cap)) };
+            }
+        });
+    }
+}
+
 thread_local! {
-    static TRACEBACK: RefCell<String> = RefCell::new(String::new());
-    // The innermost manifold this thread is executing, as the frame line
-    // without its "at" prefix, for the crash handler's report. Const-
-    // initialised and without a destructor, so it lives in the static
-    // thread-local block and a handler reads it without allocating.
-    static CURRENT_FRAME: Cell<(*const u8, usize)> = const { Cell::new((std::ptr::null(), 0)) };
+    static FRAMES: FrameStack = const {
+        FrameStack { base: Cell::new(std::ptr::null_mut()), cap: Cell::new(0), depth: Cell::new(0) }
+    };
+    static FRAMES_FREE: FramesFree = const { FramesFree };
 }
 
-/// RAII manifold-frame marker. Marks the manifold as the one executing on
-/// the thread for the crash report (two stores); on a panic unwind it also
-/// records its frame line to the thread-local traceback.
-/// Held by a generated function that calls sourced code and has no
-/// 'FrameGuard': its drop runs after the call, so the call is never compiled
-/// to a tail jump that would leave no frame at the call (PANIC-15).
+const FRAME_PREFIX: &str = "\n  at ";
+
+fn page_bytes() -> usize {
+    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
+}
+
+fn frames_bytes(cap: usize) -> usize {
+    cap * std::mem::size_of::<&'static str>() + page_bytes()
+}
+
+/// The bytes of machine stack the calling thread has, or 0 if unknown.
+fn thread_stack_bytes() -> usize {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        libc::pthread_get_stacksize_np(libc::pthread_self())
+    }
+    #[cfg(not(target_os = "macos"))]
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        let mut n: usize = 0;
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) == 0 {
+            libc::pthread_attr_getstacksize(&attr, &mut n);
+            libc::pthread_attr_destroy(&mut attr);
+        }
+        n
+    }
+}
+
+/// Lazily committed address space for 2^28 calls, or eight per 16 bytes of
+/// the thread's machine stack if that is more: more calls than the machine
+/// stack holds however many the optimizer inlines into one frame. Where the
+/// system will not reserve that much, the eight per 16 bytes alone. Its
+/// untouched pages are no part of a core dump.
+fn frames_map(bytes: usize) -> *mut c_void {
+    let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE;
+    let prot = libc::PROT_READ | libc::PROT_WRITE;
+    let len = bytes + page_bytes();
+    let p = unsafe { libc::mmap(std::ptr::null_mut(), len, prot, flags, -1, 0) };
+    #[cfg(target_os = "linux")]
+    if p != libc::MAP_FAILED {
+        unsafe { libc::madvise(p, len, libc::MADV_DONTDUMP) };
+    }
+    p
+}
+
+fn frames_reserve() -> (*mut c_void, usize) {
+    let page = page_bytes();
+    let entry = std::mem::size_of::<&'static str>();
+    let mut stack = thread_stack_bytes();
+    if stack == 0 {
+        stack = 64 << 20;
+    }
+    let needed = ((stack / 16 * 8 + 2) * entry).div_ceil(page) * page;
+    let bytes = ((1usize << 28) * entry).max(needed);
+    let p = frames_map(bytes);
+    if p != libc::MAP_FAILED || bytes == needed {
+        return (p, bytes);
+    }
+    (frames_map(needed), needed)
+}
+
+/// Reserves the calling thread's stack, with a guard page after it. A thread
+/// reaches generated code only through a boundary, which calls this first
+/// (`frame_enter`).
+#[cold]
+#[inline(never)]
+fn frame_init() {
+    let page = page_bytes();
+    let (p, bytes) = frames_reserve();
+    if p == libc::MAP_FAILED {
+        morloc_infra_abort("cannot reserve the frame stack");
+    }
+    if unsafe { libc::mprotect((p as *mut u8).add(bytes) as *mut c_void, page, libc::PROT_NONE) } != 0 {
+        morloc_infra_abort("cannot guard the frame stack");
+    }
+    // A thread already releasing its thread-locals keeps the mapping until
+    // it exits.
+    let _ = FRAMES_FREE.try_with(|_| ());
+    let s = frame_stack();
+    s.cap.set(bytes / std::mem::size_of::<&'static str>());
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    s.base.set(p as *mut &'static str);
+}
+
+// The calling thread's stack. The closure captures nothing, so where `with`
+// is not inlined the call passes nothing through memory, and the push and
+// pop that use the stack are inlined into the generated function.
+#[inline(always)]
+fn frame_stack() -> &'static FrameStack {
+    FRAMES.with(|s| unsafe { &*(s as *const FrameStack) })
+}
+
+/// The reservation holds every call the thread's machine stack can, so a
+/// push needs no check; a stack deeper than it was sized for faults on the
+/// guard page.
+#[inline(always)]
+pub fn frame_push(line: &'static str) {
+    let s = frame_stack();
+    let depth = s.depth.get() + 1;
+    unsafe { *s.base.get().add(depth) = line };
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    s.depth.set(depth);
+}
+
+#[inline(always)]
+pub fn frame_pop() {
+    let s = frame_stack();
+    s.depth.set(s.depth.get().wrapping_sub(1));
+}
+
+#[inline(always)]
+pub fn frame_depth() -> usize {
+    frame_stack().depth.get()
+}
+
+/// STATE-6: a boundary's entry; the depth it saves.
+#[inline(always)]
+pub fn frame_enter() -> usize {
+    let s = frame_stack();
+    if s.base.get().is_null() {
+        frame_init();
+    }
+    s.depth.get()
+}
+
+#[inline(always)]
+pub fn frame_restore(saved: usize) {
+    frame_stack().depth.set(saved)
+}
+
+/// STATE-6: restores `saved` and returns the lines above it, innermost first.
+pub fn frame_take(saved: usize) -> String {
+    FRAMES.with(|s| {
+        let depth = s.depth.replace(saved);
+        let mut out = String::new();
+        let mut k = depth;
+        while k > saved && k < s.cap.get() {
+            out.push_str(unsafe { *s.base.get().add(k) });
+            k -= 1;
+        }
+        out
+    })
+}
+
+/// STATE-6: the catch of a closure, which code outside morloc may call and
+/// whose panic it may catch. A closed pipe passes on as it is; any other
+/// panic is raised again as a throw carrying its message and trace, without
+/// the hook, which already decided at the panic (PANIC-9).
+#[cold]
+#[inline(never)]
+pub fn closure_rethrow(saved: usize, payload: Box<dyn std::any::Any + Send>) -> ! {
+    if payload.is::<MorlocPipeClosed>() {
+        frame_restore(saved);
+        std::panic::resume_unwind(payload)
+    }
+    let msg = panic_message(payload.as_ref());
+    let trace = frame_take(saved);
+    std::panic::resume_unwind(Box::new(MorlocThrow(format!("{msg}{trace}"))))
+}
+
+/// Held by a generated function that calls sourced code and records no
+/// call: its drop runs after the call, so the call is never compiled to a
+/// tail jump that would leave no frame at the call (PANIC-15). A function
+/// that records its call pops after its result, which does the same.
 pub struct CallFrame;
 
 impl Drop for CallFrame {
@@ -1021,37 +1201,28 @@ impl Drop for CallFrame {
     }
 }
 
-pub struct FrameGuard {
-    frame: &'static str,
-    prev: (*const u8, usize),
-}
-
-const FRAME_PREFIX: &str = "\n  at ";
-
-impl FrameGuard {
-    #[inline]
-    pub fn new(frame: &'static str) -> FrameGuard {
-        let name = frame.strip_prefix(FRAME_PREFIX).unwrap_or(frame);
-        let prev = CURRENT_FRAME.with(|c| c.replace((name.as_ptr(), name.len())));
-        FrameGuard { frame, prev }
-    }
-}
-
-impl Drop for FrameGuard {
-    #[inline]
-    fn drop(&mut self) {
-        CURRENT_FRAME.with(|c| c.set(self.prev));
-        if std::thread::panicking() {
-            TRACEBACK.with(|t| t.borrow_mut().push_str(self.frame));
-        }
-    }
-}
-
 /// The frame the calling thread is executing, for the crash handler.
 unsafe extern "C" fn current_frame(len: *mut usize) -> *const c_char {
-    let (p, n) = CURRENT_FRAME.with(|c| c.get());
-    *len = n;
-    p as *const c_char
+    let line = FRAMES.with(|s| {
+        let depth = s.depth.get();
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+        if depth > 0 && depth < s.cap.get() {
+            Some(unsafe { *s.base.get().add(depth) })
+        } else {
+            None
+        }
+    });
+    match line {
+        Some(l) => {
+            let name = l.strip_prefix(FRAME_PREFIX).unwrap_or(l);
+            *len = name.len();
+            name.as_ptr() as *const c_char
+        }
+        None => {
+            *len = 0;
+            std::ptr::null()
+        }
+    }
 }
 
 /// Report a fatal signal with the executing manifold, then die of it.
@@ -3759,6 +3930,8 @@ where
     // PANIC-6: libmorloc's hook lets a panic outside this runtime's own
     // frames unwind to here.
     let outer = unsafe { morloc_catch_scope(MORLOC_SCOPE_HOST) };
+    // STATE-6
+    let saved = frame_enter();
     let outer_reply = REPLY.with(|r| r.replace(std::ptr::null_mut()));
     let result = std::panic::catch_unwind(f);
     let built = REPLY.with(|r| r.replace(outer_reply));
@@ -3767,22 +3940,23 @@ where
         unsafe { libc::free(built as *mut c_void) };
     }
     match result {
-        Ok(p) => p,
+        Ok(p) => {
+            if frame_depth() != saved {
+                morloc_infra_abort(format!(
+                    "frame stack depth {} at the end of a dispatch that began at {saved}",
+                    frame_depth()
+                ));
+            }
+            p
+        }
         Err(payload) if payload.is::<MorlocPipeClosed>() => {
-            TRACEBACK.with(|t| t.borrow_mut().clear());
+            frame_restore(saved);
             let msg = CString::new(PIPE_CLOSED_MESSAGE).unwrap();
             unsafe { make_pipe_closed_packet(msg.as_ptr()) }
         }
         Err(payload) => {
             let msg = panic_message(payload.as_ref());
-            // Append the manifold trace accumulated during unwind, so the
-            // message + traceback crosses the pool boundary as one string.
-            let full = TRACEBACK.with(|t| {
-                let mut tb = t.borrow_mut();
-                let s = format!("{}{}", msg, tb);
-                tb.clear();
-                s
-            });
+            let full = format!("{}{}", msg, frame_take(saved));
             unsafe { fail_packet(&full) }
         }
     }
@@ -5123,4 +5297,100 @@ mod tests {
         assert_eq!(out[2], ("p-23".to_string(), 6, 5, 1));
     }
 
+}
+
+#[cfg(test)]
+mod frame_stack_tests {
+    use super::*;
+
+    fn in_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::spawn(f).join().unwrap()
+    }
+
+    #[test]
+    fn a_boundary_takes_the_calls_above_its_depth_innermost_first_and_restores_it() {
+        in_thread(|| {
+            let outer = frame_enter();
+            frame_push("\n  at a");
+            let saved = frame_enter();
+            frame_push("\n  at b");
+            frame_push("\n  at c");
+            assert_eq!(frame_take(saved), "\n  at c\n  at b");
+            assert_eq!(frame_depth(), saved);
+            frame_pop();
+            assert_eq!(frame_depth(), outer);
+        })
+    }
+
+    #[test]
+    fn the_crash_report_names_the_innermost_recorded_call() {
+        in_thread(|| {
+            frame_enter();
+            frame_push("\n  at outer [rust] (mid=1)");
+            frame_push("\n  at inner [rust] (mid=2)");
+            let mut len = 0usize;
+            let p = unsafe { current_frame(&mut len) };
+            let name = unsafe { std::str::from_utf8(std::slice::from_raw_parts(p as *const u8, len)).unwrap() };
+            assert_eq!(name, "inner [rust] (mid=2)");
+        })
+    }
+
+    #[test]
+    fn a_closure_boundary_carries_the_calls_a_panic_unwound_and_restores_the_depth() {
+        in_thread(|| {
+            let saved = frame_enter();
+            frame_push("\n  at caller");
+            let inner = frame_depth();
+            let caught = std::panic::catch_unwind(|| {
+                let boundary = frame_enter();
+                match std::panic::catch_unwind(|| {
+                    frame_push("\n  at f");
+                    frame_push("\n  at g");
+                    panic!("boom");
+                }) {
+                    Ok(()) => (),
+                    Err(p) => closure_rethrow(boundary, p),
+                }
+            });
+            assert_eq!(frame_depth(), inner);
+            let payload = caught.unwrap_err();
+            let MorlocThrow(msg) = payload.downcast_ref::<MorlocThrow>().unwrap();
+            assert!(msg.ends_with("boom\n  at g\n  at f"), "{msg}");
+            frame_pop();
+            assert_eq!(frame_depth(), saved);
+        })
+    }
+
+    #[test]
+    fn a_closed_pipe_passes_a_closure_boundary_unchanged_and_restores_the_depth() {
+        in_thread(|| {
+            let saved = frame_enter();
+            let caught = std::panic::catch_unwind(|| {
+                let boundary = frame_enter();
+                match std::panic::catch_unwind(|| {
+                    frame_push("\n  at f");
+                    std::panic::resume_unwind(Box::new(MorlocPipeClosed));
+                }) {
+                    Ok(()) => (),
+                    Err(p) => closure_rethrow(boundary, p),
+                }
+            });
+            assert!(caught.unwrap_err().is::<MorlocPipeClosed>());
+            assert_eq!(frame_depth(), saved);
+        })
+    }
+
+    #[test]
+    fn each_thread_has_its_own_frame_stack() {
+        in_thread(|| {
+            frame_enter();
+            frame_push("\n  at here");
+            let other = in_thread(|| {
+                frame_enter();
+                frame_depth()
+            });
+            assert_eq!(other, 0);
+            assert_eq!(frame_depth(), 1);
+        })
+    }
 }

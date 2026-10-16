@@ -3762,7 +3762,10 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
     }
     free_morloc_call(call);
 
-    SEXP r_call = PROTECT(Rf_lcons(fn, pairlist));
+    // .mlc_entry (pool.R) runs the manifold and adds the failure trace.
+    SEXP entry_args = PROTECT(Rf_cons(fn, pairlist));
+    nprotect++;
+    SEXP r_call = PROTECT(Rf_lcons(Rf_install(".mlc_entry"), entry_args));
     nprotect++;
 
     // Single crossing into R: evaluate the manifold

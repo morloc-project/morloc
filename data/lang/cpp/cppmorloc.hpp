@@ -18,7 +18,9 @@
 #include <string>
 #include <sstream>
 #include <limits>
+#include <cmath>
 #include <type_traits>
+#include <atomic>
 
 #include "morloc.h"
 #include "mlc_rec.hpp"
@@ -28,8 +30,8 @@ extern "C" void mlc_frame_leave(const char* prev);
 extern "C" const char* mlc_current_frame(size_t* len);
 
 namespace mlc {
-// Marks the manifold this thread is executing for the duration of a scope,
-// so a fatal signal is reported against it. Two stores per manifold call.
+// Under --debug, marks the manifold this thread is executing for the
+// duration of a scope, so a fatal signal is reported against it.
 struct frame_scope {
     const char* prev;
     explicit frame_scope(const char* frame) noexcept : prev(mlc_frame_enter(frame)) {}
@@ -37,6 +39,50 @@ struct frame_scope {
     frame_scope(const frame_scope&) = delete;
     frame_scope& operator=(const frame_scope&) = delete;
 };
+
+// The thread's frame stack (STATE-5): base[1..depth] are the trace lines of
+// the named calls recorded on it, outermost first.
+struct frame_stack {
+    const char** base;
+    size_t cap;
+    size_t depth;
+};
+// A pool links libcppmorloc.a into its executable, so on ELF the stack is
+// addressed at a fixed offset from the thread pointer and a push holds no
+// register across the calls that follow it.
+#if defined(__ELF__)
+extern thread_local constinit frame_stack frames_ __attribute__((tls_model("local-exec")));
+#else
+extern thread_local constinit frame_stack frames_;
+#endif
+
+// Reserves the calling thread's stack. A thread reaches generated code only
+// through a boundary, which calls this first ('frame_enter').
+void frame_init();
+
+// The reservation holds more calls than the thread's machine stack can, so
+// a push needs no check; a guard page follows it.
+inline void frame_push(const char* line) {
+    size_t depth = frames_.depth + 1;
+    frames_.base[depth] = line;
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+    frames_.depth = depth;
+}
+
+// STATE-6: a boundary's entry; the depth it saves.
+inline size_t frame_enter() {
+    if (frames_.base == nullptr) [[unlikely]] frame_init();
+    return frames_.depth;
+}
+
+inline void frame_pop() noexcept { frames_.depth--; }
+
+inline size_t frame_depth() noexcept { return frames_.depth; }
+
+inline void frame_restore(size_t saved) noexcept { frames_.depth = saved; }
+
+// STATE-6: restores `saved` and returns the lines above it, innermost first.
+std::string frame_take(size_t saved);
 }
 
 // ============================================================

@@ -12,7 +12,7 @@ worker's stack size, so a ratio compares frames, not stacks (RECUR-5).
 Intent: ruled 2026-10-16
 Bench: recursion-depth
 Model: ratio_L = native_L / morloc_L; native_L the depth of the native function in language L, morloc_L the depth of the same non-tail recursion written in morloc and realized in L
-Measured: results/2026-10-16-1616-ba28426d+dirty-recursion-depth-baseline: py 2.01, r 18.2, cpp 13.9, rs 10.9
+Measured: results/2026-10-16-2202-7dd39628+dirty-frame-stack: py 1.003, r 1.20, cpp 0.993, rs 0.993
 Goal: py.ratio <= 1.1, r.ratio <= 1.1, cpp.ratio <= 1.1, rs.ratio <= 1.1
 
 The ratio is the number of native frames, or bytes of native stack, morloc
@@ -23,7 +23,7 @@ spends.
 Intent: ruled 2026-10-16
 Bench: recursion-depth
 Model: gap_L = native_L - sourced_L; sourced_L the depth of the native function sourced into morloc and called once
-Measured: results/2026-10-16-1616-ba28426d+dirty-recursion-depth-baseline: py 2, r 15, cpp -1029, rs -1127
+Measured: results/2026-10-16-2202-7dd39628+dirty-frame-stack: py 2, r 18, cpp -971, rs -860
 Limit: py.gap <= 50, r.gap <= 50, cpp.gap <= 2000, rs.gap <= 2000
 
 The frames morloc places below a sourced function are a constant, so the
@@ -35,5 +35,5 @@ the loader's frames, a worker thread's does not.
 Intent: ruled 2026-10-16
 Bench: recursion-depth
 Model: tail_L = the largest depth up to 10^6 that tail recursion written in morloc reaches in L
-Measured: results/2026-10-16-1616-ba28426d+dirty-recursion-depth-baseline: 10^6 in every language
+Measured: results/2026-10-16-2202-7dd39628+dirty-frame-stack: 10^6 in every language
 Limit: py.tail >= 1000000, r.tail >= 1000000, cpp.tail >= 1000000, rs.tail >= 1000000

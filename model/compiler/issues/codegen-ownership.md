@@ -63,3 +63,11 @@ same name sees what was taken.
   this copies the transcript models three times, plus the QC references and
   the rRNA screen, for every batch on every worker thread. Seen in the
   generated pool for `rnaseq` (pools/rust/src/main.rs, `n1625.models.clone()`).
+- **A C++ conditional moves its result twice.** [reproduced] Cost, not
+  correctness; no item bounds the moves a lowered conditional adds. A
+  `? :` result is assigned to a default-constructed helper
+  (`helper0 = std::move(n4)`) and then moved into the returned local
+  (`T n5 = std::move(helper0)`), so each level of a recursion returning a
+  value moves it twice, where a native conditional return moves it at most
+  once, and the type needs a default constructor. Seen in
+  golden:spec-emit-3-1 (`up 3`: 8 moves).

@@ -70,3 +70,4 @@ release.
 - `tla/RouterForward.tla`: concurrent requests forwarded to one program's daemon
 - `tla/EndpointClaim.tla`: daemons claiming one socket path
 - `tla/StreamQueue.tla`: writers, the queue and the custodian of a written stream
+- `tla/FrameStack.tla`: a thread's frame stack across failures, catches and nested dispatch

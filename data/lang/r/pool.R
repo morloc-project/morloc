@@ -121,10 +121,7 @@ morloc_mlc_replay <- function(schema, handle, fn) {
   NULL
 }
 
-# @throw: raise a classed condition. The pool's manifold-level tryCatch
-# (from ldErrorWrapOpen/Close in lang.yaml) catches all conditions and
-# appends the frame info to `conditionMessage`, so the class tag survives
-# only at the innermost frame; the message propagates outward.
+# @throw: raise a classed condition.
 morloc_mlc_throw <- function(msg) {
   stop(structure(
     class = c("MorlocException", "error", "condition"),
@@ -150,9 +147,41 @@ morloc_mlc_pipe_closed <- function() {
 # this Try is represented in R. An interrupt is not an "error" condition in
 # R, so tryCatch lets it past without help.
 morloc_mlc_try <- function(body, ok, err) {
+  n0 <- sys.nframe()
+  trace <- NULL
   tryCatch(
-    ok(body()),
-    error = function(e) err(conditionMessage(e))
+    withCallingHandlers(ok(body()), error = function(e) {
+      if (is.null(trace)) trace <<- .mlc_trace_below(n0)
+    }),
+    error = function(e) err(paste0(conditionMessage(e), trace))
+  )
+}
+
+# A failure's trace (DIAG-5, EMIT-3): each named generated function carries
+# its label as its "morloc_frame" attribute, and the frames between the
+# failure and frame `n0` are read from the stack when an error is signalled,
+# innermost first. Nothing is done per call.
+.mlc_trace_below <- function(n0) {
+  n <- sys.nframe()
+  if (n <= n0) return("")
+  labels <- character(0)
+  for (i in seq.int(n, n0 + 1L)) {
+    label <- attr(sys.function(i), "morloc_frame", exact = TRUE)
+    if (!is.null(label)) labels <- c(labels, label)
+  }
+  if (length(labels) == 0L) "" else paste0("\n  at ", labels, collapse = "")
+}
+
+# A call from the dispatch: the trace is appended to the message of a failure
+# that escapes it.
+.mlc_entry <- function(fn, ...) {
+  n0 <- sys.nframe()
+  trace <- NULL
+  tryCatch(
+    withCallingHandlers(fn(...), error = function(e) {
+      if (is.null(trace)) trace <<- .mlc_trace_below(n0)
+    }),
+    error = function(e) stop(paste0(conditionMessage(e), trace), call. = FALSE)
   )
 }
 morloc_fork_pool_run_r               <- function(...){ .Call("morloc_fork_pool_run_r",               ...) }

@@ -572,6 +572,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         -- nothing to hold back.
         , lcReleaseBorrowedStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
+        , lcFrameReturn = \_ _ _ _ -> return Nothing
         , lcDupPacket = id
         , lcOwnedArg = \e -> if T.null (ldOwnedArgFn desc) then e else pretty (ldOwnedArgFn desc) <> "(" <> e <> ")"
         , lcLoopLetRhs = \_ _ d -> return d
@@ -608,7 +609,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         -- engine -- its dict/list records are structural, so all shapes divert.
         , lcDivertNestedClosure =
             \s -> not (T.null (ldClosureRegisterEntry desc)) && containsClosure s
-        , lcMakeFunction = \m mname args _ priorLines body headForm ->
+        , lcMakeFunction = \m mname args _ priorLines body headForm _ ->
             let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
                 makeExt _ = ""
                 fullName = render (mname <> makeExt headForm)
@@ -647,7 +648,17 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
                                     nest 4 . vsep $
                                       map (\l -> pretty $ substituteT l substs) closeLines
                                in [vsep [tryBlock, exceptBlock]]
-             in return . Just $ case ldBlockStyle desc of
+                -- A language that reads its trace from the call stack labels
+                -- each named function once, where it is defined (EMIT-3).
+                frameLabel = case traceInfo m of
+                  Just (nameOut, srclocStr)
+                    | not debugMode, not (T.null (ldFrameLabelStmt desc)) ->
+                        let srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
+                            label = nameOut <> " [" <> ldName desc <> "] (mid=" <> MT.pack (show m) <> srclocSuffix <> ")"
+                            esc = T.replace "\"" "\\\"" . T.replace "\\" "\\\\"
+                         in [pretty (substituteT (ldFrameLabelStmt desc) [("fname", fullName), ("label", esc label)])]
+                  _ -> []
+             in return . Just . vsep . (: frameLabel) $ case ldBlockStyle desc of
                   IndentBlock ->
                     nest 4 (vsep [header, vsep (wrapError (priorLines <> [body]))])
                   BraceBlock ->
@@ -797,6 +808,7 @@ genericCacheBody desc cfg resSa lbl midx args bodyPool = do
     , poolCompleteManifolds = poolCompleteManifolds bodyPool
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
+    , poolBorrowedLocal = Nothing
     }
 
 -- | Debug-trace wrap. Wraps the manifold body in a per-language
@@ -879,6 +891,7 @@ genericDebugWrap desc cfg debugInfo midx args bodyPool = do
     , poolCompleteManifolds = poolCompleteManifolds bodyPool
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
+    , poolBorrowedLocal = Nothing
     }
 
 -- | For a single cache arg produce: (the packet expression, the
@@ -973,6 +986,7 @@ genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
       , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
       , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
+      , poolBorrowedLocal = Nothing
       }
 
 -- Native tail-loop assembly. Walks the 'LoopBody' decision tree, emitting
@@ -1008,6 +1022,7 @@ genericMakeLoop desc cfg _ carried body = do
       , poolPriorLines = initLines <> [resultDecl, whileDoc]
       , poolPriorExprs = concatMap poolPriorExprs leaves
       , poolReturnFlag = True
+      , poolBorrowedLocal = Nothing
       }
   where
     assign = pretty (ldAssignOp desc)
@@ -1100,6 +1115,7 @@ genericMakeLet desc namer i p1 p2 =
         , poolPriorLines = rs
         , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
         , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
+        , poolBorrowedLocal = Nothing
         }
 
 -- | Generic expression printer driven by descriptor

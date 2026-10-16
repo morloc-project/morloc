@@ -1,0 +1,14 @@
+# recursion-depth 2026-10-16 22:02 load=1.16 morloc=0.109.0 commit=7dd39628+dirty cpu=AMD Ryzen 5 7535U with Radeon Graphics cores=12
+item	param	value	unit	note
+DEPTH-1	py.ratio	1.00302	x	native 998, morloc-written 995, sourced 996
+DEPTH-2	py.gap	2	levels	native 998, morloc-written 995, sourced 996
+DEPTH-3	py.tail	1e+06	levels	
+DEPTH-1	r.ratio	1.2	x	native 4992, morloc-written 4160, sourced 4974
+DEPTH-2	r.gap	18	levels	native 4992, morloc-written 4160, sourced 4974
+DEPTH-3	r.tail	1e+06	levels	
+DEPTH-1	cpp.ratio	0.99257	x	native 129711, morloc-written 130682, sourced 130682
+DEPTH-2	cpp.gap	-971	levels	native 129711, morloc-written 130682, sourced 130682
+DEPTH-3	cpp.tail	1e+06	levels	
+DEPTH-1	rs.ratio	0.993418	x	native 129800, morloc-written 130660, sourced 130660
+DEPTH-2	rs.gap	-860	levels	native 129800, morloc-written 130660, sourced 130660
+DEPTH-3	rs.tail	1e+06	levels	

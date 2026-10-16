@@ -1,5 +1,8 @@
 id	class	rank	cites
 data/lang/cpp/cppmorloc.cpp::-::mlc_frame_	thread		
+data/lang/cpp/cppmorloc.cpp::-::frames_	thread		
+data/lang/cpp/cppmorloc.cpp::-::frames_key_	lazy		
+data/lang/cpp/cppmorloc.cpp::-::frames_key_once_	lazy		
 data/lang/cpp/cppmorloc.hpp::recur_env::stack	thread		
 data/lang/cpp/mlc_rec.hpp::-::q	thread		
 data/lang/cpp/pool.cpp::-::_shm_tracker_store	thread		
@@ -228,8 +231,8 @@ rustmorloc/lib.rs::-::READING_RUNTIME_VALUE	thread
 rustmorloc/lib.rs::-::REPLY	thread		
 rustmorloc/lib.rs::-::RECUR_ENV	thread		
 rustmorloc/lib.rs::-::SHM_TRACKER	thread		
-rustmorloc/lib.rs::-::TRACEBACK	thread		
-rustmorloc/lib.rs::-::CURRENT_FRAME	thread		
+rustmorloc/lib.rs::-::FRAMES	thread		
+rustmorloc/lib.rs::-::FRAMES_FREE	thread		
 rustmorloc/lib.rs::-::QUEUE	thread		
 rustmorloc/lib.rs::-::TMPDIR	startup		
 rustmorloc/lib.rs::-::REGISTERED	startup		

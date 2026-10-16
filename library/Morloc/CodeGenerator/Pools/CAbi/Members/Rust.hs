@@ -90,8 +90,8 @@ data RustState = RustState
   , rsLocalSet :: Set.Set Int
   , rsRemoteSet :: Set.Set Int
   , rsDebugInfo :: Int -> Maybe (Text, Text)
-  -- ^ A manifold's frame label @(name, srcloc)@, baked into its 'FrameGuard'
-  -- line for error tracebacks: every manifold under @--debug@
+  -- ^ A manifold's frame label @(name, srcloc)@, from which the trace
+  -- line it pushes for error tracebacks is built: every manifold under @--debug@
   -- ('makeManifoldDebugInfoLookup'), otherwise only a call of a named
   -- function, labeled with its definition ('makeTraceLabelLookup', DIAG-5).
   , rsLogTemplates :: Map.Map Int RenderedTemplate
@@ -566,6 +566,7 @@ rustCacheBody resSa lbl midx args bodyPool = do
     , poolCompleteManifolds = poolCompleteManifolds bodyPool
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
+    , poolBorrowedLocal = Nothing
     }
 
 -- | Prepare one cache argument: a native arg is serialized to a packet via
@@ -2393,6 +2394,12 @@ rustLowerConfig mask =
     , lcReleaseStmt = \v -> "unsafe { rustmorloc::release_packet(" <> pretty v <> ", true) };"
     , lcReleaseBorrowedStmt = \v -> "unsafe { rustmorloc::release_packet(" <> pretty v <> ", false) };"
     , lcReturn = \e -> "return" <+> rustReply e <> ";"
+    -- EMIT-3: the pop follows the result's construction (a move).
+    , lcFrameReturn = \i _ _ e -> do
+        st <- CMS.get
+        return $ case rustFrameLine st i of
+          Nothing -> Nothing
+          Just _ -> Just (vsep ["let _mlc_r =" <+> rustReply e <> ";", "rustmorloc::frame_pop();", "return _mlc_r;"])
     , lcDupPacket = \e -> "rustmorloc::dup_packet(" <> e <> ")"
     , lcOwnedArg = \e -> "rustmorloc::Packet::new(" <> e <> ").as_ptr()"
     , lcLoopLetRhs = rustConsumeLetRhs
@@ -2534,6 +2541,7 @@ rustMakeLet namer letIndex mt _ p1 p2 = do
       , poolPriorLines = rs
       , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
       , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
+      , poolBorrowedLocal = Nothing
       }
 
 -- | Native tail-loop assembly. Walks the 'LoopBody' decision tree into a Rust
@@ -2566,6 +2574,7 @@ rustMakeLoop res carried body = do
     , poolPriorLines = initLines <> [resultDecl]
     , poolPriorExprs = concatMap poolPriorExprs leaves
     , poolReturnFlag = True
+    , poolBorrowedLocal = Nothing
     }
   where
     ids = map fst carried
@@ -2627,14 +2636,28 @@ rustMakeIf origExpr condDocs thenDocs elseDocs = do
       , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
       , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
+      , poolBorrowedLocal = Nothing
       }
 
 -- | Emit a manifold function definition (@unsafe fn m{i}(..) -> ..@).
 -- Deduplicated per (local/remote) so a manifold visited from multiple sites is
 -- defined once, matching the C++ member.
+-- | The trace line, as a Rust literal, of a manifold that records its call on
+-- the frame stack (STATE-5): a call of a named function, labeled with its
+-- definition (DIAG-5).
+rustFrameLine :: RustState -> Int -> Maybe MDoc
+rustFrameLine st callIndex = case rsDebugInfo st callIndex of
+  Nothing -> Nothing
+  Just (userName, srclocStr) ->
+    let nameOut = if T.null userName then "_" else userName
+        srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
+        frameText =
+          "\n  at " <> nameOut <> " [rust] (mid=" <> T.pack (show callIndex) <> srclocSuffix <> ")"
+     in Just (dquotes (pretty (RP.rustEscape frameText)))
+
 rustMakeFunction ::
-  Int -> MDoc -> [Arg TypeM] -> TypeM -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> RustM (Maybe MDoc)
-rustMakeFunction callIndex mname args manifoldType priorLines body headForm = do
+  Int -> MDoc -> [Arg TypeM] -> TypeM -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> Bool -> RustM (Maybe MDoc)
+rustMakeFunction callIndex mname args manifoldType priorLines body headForm isClosure = do
   st <- CMS.get
   let isRemote = case headForm of
         Just HeadManifoldFormRemoteWorker -> True
@@ -2657,24 +2680,17 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm = do
       typedArgs <- mapM rustArgOf args
       let fullName = mname <> if isRemote then "_remote" else ""
           decl = "unsafe fn" <+> fullName <> tupled typedArgs <+> "->" <+> retStr
-          -- Per-manifold traceback frame: on a panic unwind the FrameGuard
-          -- appends this line to the thread-local trace, which dispatch_guard
-          -- folds onto the throw message (mirrors the C++ member's frame).
-          -- A function that calls sourced code keeps a frame at the call
-          -- (PANIC-15); a FrameGuard already does, its drop following the call.
+          -- STATE-5: a named function records its call; the pop is in its
+          -- return statement ('lcFrameReturn'), which follows any sourced
+          -- call. A function that records nothing and calls sourced code
+          -- keeps a frame at the call (PANIC-15).
+          frameStmts = case rustFrameLine st callIndex of
+            Nothing -> []
+            Just lit -> ["rustmorloc::frame_push(" <> lit <> ");"]
           callFrame
             | null frameStmts && T.any (== userCallMark) (render (vsep (priorLines ++ [body]))) =
                 ["let _mlc_call = rustmorloc::CallFrame;"]
             | otherwise = []
-          frameStmts = case rsDebugInfo st callIndex of
-            Nothing -> []
-            Just (userName, srclocStr) ->
-              let nameOut = if T.null userName then "_" else userName
-                  srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
-                  frameText =
-                    "\n  at " <> nameOut <> " [rust] (mid=" <> T.pack (show callIndex) <> srclocSuffix <> ")"
-               in [ "let _mlc_frame = rustmorloc::FrameGuard::new("
-                      <> dquotes (pretty (RP.rustEscape frameText)) <> ");" ]
           -- A labeled manifold is wrapped in a LogGuard: start on
           -- construction, pass or fail on drop. Nothing is placed after the
           -- body because a generated body ends in `return <expr>;`, which
@@ -2700,8 +2716,22 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm = do
                            ])
                       <> ");"
                in guardStmt : priorLines ++ [body]
+      -- STATE-6: a closure, which code outside morloc may call and whose
+      -- panic it may catch, restores the depth it found when a panic
+      -- leaves it.
+      let inner = frameStmts ++ callFrame ++ bodyLines
+          fnBody
+            | isClosure =
+                [ "let _mlc_saved = rustmorloc::frame_enter();"
+                , "match std::panic::catch_unwind(std::panic::AssertUnwindSafe(||" <+> "{"
+                , indent 4 (vsep inner)
+                , "})) {"
+                , indent 4 (vsep ["Ok(v) => v,", "Err(p) => rustmorloc::closure_rethrow(_mlc_saved, p),"])
+                , "}"
+                ]
+            | otherwise = inner
       return . Just $
-        vsep [decl <+> "{", indent 4 (vsep (frameStmts ++ callFrame ++ bodyLines)), "}"]
+        vsep [decl <+> "{", indent 4 (vsep fnBody), "}"]
 
 -- | Whether a closure wire form has a closure among its arguments or as its
 -- result.

@@ -20,3 +20,12 @@
   types" with "then-branch" and "else-branch", constructs the program does
   not contain: `match` reaches Typecheck.hs:1476 through IfS. Repro: in a
   `do` block, `match r | (Err e) = Err e | (Ok xs) = do { f xs; Ok xs }`.
+- [reproduced] Violates DIAG-5. A call of a named, non-recursive morloc
+  function is beta-reduced into its caller (LambdaEval `reduce`), so it has
+  no generated function and no trace line: with `inner x = boom (boom x)`,
+  `middle x = inner (boom x)`, `outer x = middle (boom x)` and a C++ `boom`
+  that throws past 2, `outer 0` reports only `at outer`. The application is
+  named only on some reduction paths, and a name on an index with no
+  generated function prints nothing. With the frame stack (STATE-5) an
+  inlined named call could push its label around its inlined statements
+  and need no function of its own.

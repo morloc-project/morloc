@@ -28,6 +28,7 @@ limit is not a morloc defect.
 
 ### RECUR-4 Recursion reaches the depth the language itself allows
 Intent: ruled 2026-10-16
+Tests: spec-recur-4-1
 Code: deviates #175
 
 Non-tail recursion realized in a language L reaches the depth that the same
