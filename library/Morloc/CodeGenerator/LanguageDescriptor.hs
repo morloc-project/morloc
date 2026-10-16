@@ -134,6 +134,15 @@ data LangDescriptor = LangDescriptor
     ldForeignCallFn :: !Text -- "morloc.foreign_call" or "morloc_foreign_call"
   , ldForeignCallIntSuffix :: !Text -- "L" for R, "" for others
   , ldIntLiteralSuffix :: !Text -- "L" for R, "" for others
+  , ldIntLiteralSuffixLimit :: !(Maybe Integer)
+    -- ^ The suffix is written only on a literal whose magnitude is at most
+    -- this (R: 2147483647, since an R integer is 32-bit and its minimum is NA)
+  , ldIntLiteralPlainTypes :: ![Text]
+    -- ^ Concrete types whose integer literals never take the suffix
+    -- (R: "numeric", which is a double)
+  , ldIntLiteralWide :: !(Map.Map Text Text)
+    -- ^ Concrete type -> template for a literal that takes no suffix, with
+    -- {{n}} for its digits (R: bit64 -> bit64::as.integer64("{{n}}"))
   , -- Remote call
     ldRemoteCallFn :: !Text -- "morloc.remote_call" or "morloc_remote_call"
   , -- Record access
@@ -319,6 +328,9 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldRealNegInf" (Y.String "")
             . ins "ldRealNaN" (Y.String "")
             . ins "ldIntLiteralSuffix" (Y.String "")
+            . ins "ldIntLiteralSuffixLimit" Y.Null
+            . ins "ldIntLiteralPlainTypes" (Y.Array mempty)
+            . ins "ldIntLiteralWide" (Y.Object mempty)
             . ins "ldIntrinsicPrefix" (Y.String "")
             . ins "ldHelperVarPrefix" (Y.String "__morloc_")
             . ins "ldRemoteCallFn" (Y.String "")
@@ -414,6 +426,9 @@ defaultLangDescriptor name ext =
     , ldForeignCallFn = "morloc.foreign_call"
     , ldForeignCallIntSuffix = ""
     , ldIntLiteralSuffix = ""
+    , ldIntLiteralSuffixLimit = Nothing
+    , ldIntLiteralPlainTypes = []
+    , ldIntLiteralWide = Map.empty
     , ldRemoteCallFn = ""
     , ldDictStyleRecords = False
     , ldEnumLitByName = False

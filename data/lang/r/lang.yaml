@@ -60,6 +60,10 @@ ldHelperVarPrefix: ".morloc_"
 ldForeignCallFn: "morloc_foreign_call"
 ldForeignCallIntSuffix: "L"
 ldIntLiteralSuffix: "L"
+ldIntLiteralSuffixLimit: 2147483647
+ldIntLiteralPlainTypes: ["numeric"]
+ldIntLiteralWide:
+  bit64: 'bit64::as.integer64("{{n}}")'
 
 # Remote call
 ldRemoteCallFn: "morloc_remote_call"

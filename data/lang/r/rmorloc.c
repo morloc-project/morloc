@@ -356,6 +356,17 @@ static int64_t i64_from_sexp(SEXP obj) {
     return 0;
 }
 
+// The value of an R integer, double or bit64 integer64 scalar as a double;
+// NA for R's NA in any of them.
+static double r_number(SEXP obj) {
+    if (is_integer64(obj)) {
+        int64_t v;
+        memcpy(&v, &REAL(obj)[0], sizeof(int64_t));
+        return v == INT64_MIN ? NA_REAL : (double)v;
+    }
+    return asReal(obj);
+}
+
 // }}} bit64 helpers
 
 // {{{ marshalling walks
@@ -864,7 +875,7 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
         if (!(isInteger(obj) || isReal(obj))) { \
             MORLOC_ERROR("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
         } \
-        double value = asReal(obj); \
+        double value = r_number(obj); \
         if (ISNAN(value)) { \
             MORLOC_ERROR("Cannot pack NA or NaN into %s", #CTYPE); \
         } \
@@ -933,7 +944,7 @@ static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code)
         if (!(isInteger(obj) || isReal(obj))) { \
             MORLOC_ERROR("Expected integer for %s, but got %s", #CTYPE, type2char(TYPEOF(obj))); \
         } \
-        double value = asReal(obj); \
+        double value = r_number(obj); \
         if (ISNAN(value)) { \
             MORLOC_ERROR("Cannot pack NA or NaN into %s", #CTYPE); \
         } \
@@ -955,19 +966,20 @@ static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code)
         if (is_integer64(obj)) { \
             int64_t v; \
             memcpy(&v, &REAL(obj)[0], sizeof(int64_t)); \
+            if (v == INT64_MIN) { \
+                MORLOC_ERROR("Cannot pack NA or NaN into int64_t"); \
+            } \
             *(int64_t*)dest = v; \
             break; \
         } \
         if (!(isInteger(obj) || isReal(obj))) { \
             MORLOC_ERROR("Expected integer for int64_t, but got %s", type2char(TYPEOF(obj))); \
         } \
-        double value = asReal(obj); \
+        double value = r_number(obj); \
         if (ISNAN(value)) { \
             MORLOC_ERROR("Cannot pack NA or NaN into int64_t"); \
         } \
-        if (value != trunc(value)) { \
-            MORLOC_ERROR("Expected integer for int64_t, got non-integer numeric %.17g", value); \
-        } \
+        value = trunc(value); \
         if (value < -(double)R_DOUBLE_INT_MAX || value > (double)R_DOUBLE_INT_MAX) { \
             MORLOC_ERROR( \
                 "Integer %.0f does not fit in R's numeric type" \
@@ -983,19 +995,20 @@ static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code)
         if (is_integer64(obj)) { \
             int64_t v; \
             memcpy(&v, &REAL(obj)[0], sizeof(int64_t)); \
+            if (v < 0) { \
+                MORLOC_ERROR("Negative integer64 %lld for uint64_t (R cannot hold values >= 2^63)", (long long)v); \
+            } \
             *(uint64_t*)dest = (uint64_t)v; \
             break; \
         } \
         if (!(isInteger(obj) || isReal(obj))) { \
             MORLOC_ERROR("Expected integer for uint64_t, but got %s", type2char(TYPEOF(obj))); \
         } \
-        double value = asReal(obj); \
+        double value = r_number(obj); \
         if (ISNAN(value)) { \
             MORLOC_ERROR("Cannot pack NA or NaN into uint64_t"); \
         } \
-        if (value != trunc(value)) { \
-            MORLOC_ERROR("Expected integer for uint64_t, got non-integer numeric %.17g", value); \
-        } \
+        value = trunc(value); \
         if (value < 0 || value > (double)R_DOUBLE_INT_MAX) { \
             MORLOC_ERROR( \
                 "Unsigned integer %.0f does not fit in R's numeric type" \
@@ -1105,16 +1118,25 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             break;
         case MORLOC_INT: {
             // Inline BigInt: [size=1, value] -- no allocation needed
+            if (is_integer64(obj)) {
+                int64_t v;
+                memcpy(&v, &REAL(obj)[0], sizeof(int64_t));
+                if (v == INT64_MIN) {
+                    MORLOC_ERROR("Cannot pack NA or NaN into MORLOC_INT");
+                }
+                int64_t* fields = (int64_t*)dest;
+                fields[0] = 1;
+                fields[1] = v;
+                break;
+            }
             if (!(isInteger(obj) || isReal(obj))) {
                 MORLOC_ERROR("Expected integer or numeric for MORLOC_INT, but got %s", type2char(TYPEOF(obj)));
             }
-            double value = asReal(obj);
+            double value = r_number(obj);
             if (ISNAN(value)) {
                 MORLOC_ERROR("Cannot pack NA or NaN into MORLOC_INT");
             }
-            if (value != trunc(value)) {
-                MORLOC_ERROR("Expected integer value for MORLOC_INT, got non-integer double");
-            }
+            value = trunc(value);
             if (value < -(double)R_DOUBLE_INT_MAX || value > (double)R_DOUBLE_INT_MAX) {
                 // (double)INT64_MAX rounds to 2^63 and defeats the bound check;
                 // anything outside [-2^53, 2^53] cannot have come from R as a
@@ -1357,11 +1379,28 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                     // (which would strip the integer64 class).
                     if (is_integer64(obj) && (element_schema->type == MORLOC_SINT64
                                               || element_schema->type == MORLOC_UINT64)) {
+                        for (size_t i = 0; i < array->size; i++) {
+                            if (((const int64_t*)REAL(obj))[i] == INT64_MIN) {
+                                MORLOC_ERROR("Cannot pack NA into an int64 element at index %zu", i);
+                            }
+                        }
+                        if (element_schema->type == MORLOC_UINT64) {
+                            const int64_t* v = (const int64_t*)REAL(obj);
+                            for (size_t i = 0; i < array->size; i++) {
+                                if (v[i] < 0) {
+                                    MORLOC_ERROR("Negative integer64 %lld for uint64_t at index %zu (R cannot hold values >= 2^63)",
+                                                 (long long)v[i], i);
+                                }
+                            }
+                        }
                         memcpy(start, REAL(obj), array->size * sizeof(int64_t));
                         break;
                     }
+                    int elem_i64 = is_integer64(obj);
                     for (int i = 0; i < array->size; i++) {
-                        SEXP elem = PROTECT(ScalarReal(REAL(obj)[i]));
+                        SEXP elem = PROTECT(elem_i64
+                            ? make_integer64_scalar(((const int64_t*)REAL(obj))[i])
+                            : ScalarReal(REAL(obj)[i]));
                         r_write_step(w, element_schema, start + i * element_schema->width, elem, 0);
                         UNPROTECT(1);
                     }
@@ -1581,14 +1620,14 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
             obj = ScalarReal((double)(*(int32_t*)data));
             break;
         case MORLOC_SINT64: {
-            // Int64 maps to bit64::integer64 in R. The S3 class is a
-            // tagged REALSXP whose 8 bytes are the int64; we memcpy the
-            // value into the storage and set the class. No range check
-            // is needed -- integer64 covers the full Int64 range
-            // losslessly. (NA_INTEGER64 is INT64_MIN; legitimate
-            // INT64_MIN values become NA, which is a known bit64
-            // tradeoff; we let the wire value through unchanged.)
+            // Int64 maps to bit64::integer64 in R: a REALSXP whose 8 bytes
+            // are the int64, tagged with its class. bit64 reserves
+            // INT64_MIN for NA, so that one value cannot enter R.
             int64_t val = *(int64_t*)data;
+            if (val == INT64_MIN) {
+                MORLOC_ERROR("Int64 value %lld is bit64's NA and does not fit in R's integer64",
+                             (long long)val);
+            }
             obj = PROTECT(make_integer64_scalar(val));
             UNPROTECT(1);
             break;
@@ -1617,6 +1656,10 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
             // we tag (uint64_t)val by reinterpret. No range check
             // needed; the full UInt64 range round-trips bit-for-bit.
             uint64_t val = *(uint64_t*)data;
+            if (val > (uint64_t)INT64_MAX) {
+                MORLOC_ERROR("UInt64 value %llu does not fit in R's integer64 (max 2^63-1)",
+                             (unsigned long long)val);
+            }
             int64_t bits = (int64_t)val;
             obj = PROTECT(make_integer64_scalar(bits));
             UNPROTECT(1);
@@ -1634,16 +1677,12 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
             int64_t bigint_size = fields[0];
             if (bigint_size <= 1) {
                 int64_t val = (bigint_size == 0) ? 0 : fields[1];
-                if (val >= INT32_MIN && val <= INT32_MAX) {
+                if (val > INT32_MIN && val <= INT32_MAX) {
                     obj = ScalarInteger((int)val);
-                } else if (val >= -R_DOUBLE_INT_MAX && val <= R_DOUBLE_INT_MAX) {
-                    obj = ScalarReal((double)val);
                 } else {
-                    // Single-limb BigInt that fits int64 but exceeds 2^53:
-                    // representable on the wire, not in R's numeric.
                     MORLOC_ERROR(
-                        "Integer overflow: BigInt value %lld does not fit in R's numeric type"
-                        " (max 2^53 = 9007199254740992 for integer precision).",
+                        "Integer overflow: Int value %lld does not fit in R's integer"
+                        " (-2147483647 to 2147483647).",
                         (long long)val);
                 }
             } else {
@@ -1759,6 +1798,11 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             break;
                         }
                         start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
+                        for (size_t i = 0; i < array->size; i++) {
+                            if (((const int64_t*)start)[i] == INT64_MIN) {
+                                MORLOC_ERROR("Int64 value at index %zu is bit64's NA (-2^63) and does not fit in R's integer64", i);
+                            }
+                        }
                         memcpy(REAL(obj), start, array->size * sizeof(int64_t));
                         UNPROTECT(1);
                         break;
@@ -1826,6 +1870,13 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             break;
                         }
                         start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
+                        for (size_t i = 0; i < array->size; i++) {
+                            uint64_t u = ((const uint64_t*)start)[i];
+                            if (u > (uint64_t)INT64_MAX) {
+                                MORLOC_ERROR("UInt64 value %llu at index %zu does not fit in R's integer64 (max 2^63-1)",
+                                             (unsigned long long)u, i);
+                            }
+                        }
                         memcpy(REAL(obj), start, array->size * sizeof(uint64_t));
                         UNPROTECT(1);
                         break;
@@ -1878,10 +1929,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                     case MORLOC_INT:
                         {
                             // Inline BigInt array: each element is [size:i64, value_or_relptr:i64].
-                            // First pass: validate each element is single-limb AND fits 2^53.
-                            // Multi-limb or beyond-2^53 elements cannot be represented in R's
-                            // numeric type and would silently corrupt if cast through double.
-                            int all_fit_int32 = 1;
+                            // Int is R's 32-bit integer; validate every element before allocating.
                             size_t elem_w = element_schema->width; // 16
                             if (array->size > 0) {
                                 start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
@@ -1896,31 +1944,19 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                                             i, (long long)bigint_size);
                                     }
                                     int64_t val = (bigint_size == 0) ? 0 : f[1];
-                                    if (val < INT32_MIN || val > INT32_MAX) all_fit_int32 = 0;
-                                    if (val < -R_DOUBLE_INT_MAX || val > R_DOUBLE_INT_MAX) {
+                                    if (val <= INT32_MIN || val > INT32_MAX) {
                                         MORLOC_ERROR(
-                                            "Integer overflow at array index %zu: BigInt value %lld"
-                                            " does not fit in R's numeric type"
-                                            " (max 2^53 = 9007199254740992 for integer precision).",
+                                            "Integer overflow at array index %zu: Int value %lld"
+                                            " does not fit in R's integer (-2147483647 to 2147483647).",
                                             i, (long long)val);
                                     }
                                 }
                             }
-                            if (all_fit_int32) {
-                                obj = PROTECT(allocVector(INTSXP, array->size));
-                                if (array->size > 0) {
-                                    for (size_t i = 0; i < array->size; i++) {
-                                        const int64_t* f = (const int64_t*)(start + i * elem_w);
-                                        INTEGER(obj)[i] = (int)((f[0] == 0) ? 0 : f[1]);
-                                    }
-                                }
-                            } else {
-                                obj = PROTECT(allocVector(REALSXP, array->size));
-                                if (array->size > 0) {
-                                    for (size_t i = 0; i < array->size; i++) {
-                                        const int64_t* f = (const int64_t*)(start + i * elem_w);
-                                        REAL(obj)[i] = (double)((f[0] == 0) ? 0 : f[1]);
-                                    }
+                            obj = PROTECT(allocVector(INTSXP, array->size));
+                            if (array->size > 0) {
+                                for (size_t i = 0; i < array->size; i++) {
+                                    const int64_t* f = (const int64_t*)(start + i * elem_w);
+                                    INTEGER(obj)[i] = (int)((f[0] == 0) ? 0 : f[1]);
                                 }
                             }
                             UNPROTECT(1);

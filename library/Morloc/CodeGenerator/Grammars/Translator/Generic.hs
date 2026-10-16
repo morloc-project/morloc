@@ -1106,7 +1106,14 @@ genericPrintExpr desc = go
     -- A language that does not distinguish its unit from its none
     -- spells both the same way.
     go IUnitLit = pretty (ldNullLiteral desc)
-    go (IIntLit _ i) = viaShow i <> pretty (ldIntLiteralSuffix desc)
+    go (IIntLit t i)
+      | suffixed = viaShow i <> pretty (ldIntLiteralSuffix desc)
+      | Just tmpl <- t >>= (`Map.lookup` ldIntLiteralWide desc) =
+          pretty (T.replace "{{n}}" (T.pack (show i)) tmpl)
+      | otherwise = viaShow i
+      where
+        suffixed = maybe True (`notElem` ldIntLiteralPlainTypes desc) t
+          && maybe True (abs i <=) (ldIntLiteralSuffixLimit desc)
     go (IRealLit _ (RealFinite r)) = viaShow r
     go (IRealLit _ RealPosInf) = pretty (ldRealPosInf desc)
     go (IRealLit _ RealNegInf) = pretty (ldRealNegInf desc)

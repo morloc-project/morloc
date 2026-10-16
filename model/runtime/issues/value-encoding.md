@@ -1,18 +1,11 @@
 # Schemas, voidstar and codecs
 
-- **R integer literals ignore their type.** [reproduced 2026-10-16]
-  Generic.hs genericPrintExpr writes every `IIntLit` with R's `L` suffix,
-  though root-r maps U64/U32/I32 to `numeric` and I64 to `bit64`. One morloc
-  value then has two R representations. `hu x ? x == 0 = 0 : x` over `[U64]`
-  with `map`: `[5,0]` gives `[5,0]`, `[0,5]` fails "values must be type
-  'integer', but FUN(X[[1]]) result is type 'double'" (root-r
-  `morloc_map` takes its vapply type from the first result). Breaks
-  tests/sumtypes/01-chemistry-smiles R.
-- **R `==` on I64 compares bit patterns.** [reproduced 2026-10-16] root-r
-  `morloc_eq` unclasses and strips attributes, which turns a bit64
-  `integer64` into the double holding its bits. `.0 (rr 5 5 7) == 5` with
-  `rr lo hi s = (lo + s % (hi - lo + 1), s)` over I64 gives false. Breaks
-  tests/sumtypes/03-procgen-bsp-dungeon R.
+- **R type map says U64 is numeric; the R codec gives integer64.** [read
+  2026-10-16] root-r main.loc `type R => U64 = "numeric"` while rmorloc.c
+  decodes U64 as bit64 integer64. Code generated from the map writes a U64
+  literal as a plain double, so one above 2^53 is rounded. Mapping U64 to
+  "bit64" instead makes a U64 list literal `c(5L, bit64::as.integer64(..))`,
+  whose `c` dispatches on its first argument and strips the class.
 - **Non-ASCII names break the schema.** [reproduced] Violates FMT-7 (name
   lengths are bytes). `encodeKey` (library/Morloc/CodeGenerator/Serial.hs:390)
   writes a character count; morloc-runtime-types/src/schema.rs:575-586 reads
