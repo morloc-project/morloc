@@ -150,9 +150,12 @@ readIfPresentBytes path = do
 -- cross-crate thin LTO, which re-optimizes rustmorloc and the Arrow crates on
 -- every pool link (seconds of CPU per test) and, because concurrent cargo
 -- builds serialize on the shared target-dir lock, stalls every other Rust
--- test in flight. The suite turns it off unless the caller has already set
--- @MORLOC_LANG_PARAMS@; a test that must exercise the shipped profile passes
--- @-X rust:lto=thin@ in its Makefile, which outranks the environment.
+-- test in flight. C++ pools are built with @-ffp-contract=off@: compilers
+-- that fuse @a*b+c@ by default (clang, and GCC on arm64) round once where
+-- x86-64 rounds twice, so a golden float would depend on the host. Both
+-- defaults apply unless the caller has already set @MORLOC_LANG_PARAMS@; a
+-- test that must exercise the shipped profile passes @-X rust:lto=thin@ in
+-- its Makefile, which outranks the environment.
 --
 -- Where the system has no @timeout@ (macOS ships none), @shims@ goes on PATH
 -- so the tests that bound a run with it still run it.
@@ -165,7 +168,7 @@ runQuietly shims args = do
   hasTimeout <- maybe False (const True) <$> findExecutable "timeout"
   let env' = case lookup langParamsVar env of
         Just _ -> env
-        Nothing -> (langParamsVar, "rust:lto=off") : env
+        Nothing -> (langParamsVar, "rust:lto=off;cpp:flags=-ffp-contract=off") : env
       env'' =
         if hasTimeout
           then env'
