@@ -5,6 +5,9 @@ Language and typing
  * `|` clauses, `match` and refutable `<-` binds can match fixed-length lists:
    `[]`, `[x]`, `[0, y]`
 
+Errors
+ * A conflicting type declaration error shows every declaration in conflict
+
 0.109.0 [2026-10-07]
 --------------------
 

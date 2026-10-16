@@ -836,6 +836,15 @@ typeAliasTests =
          
            foo :: A -> A -> A
         |]
+      , testCase "conflicting forms name the other declaration" $ do
+          result <-
+            runFront
+              "module main (f)\nnewtype Foo = Int\ntype Py => Foo = \"int\"\ntype Py => Foo = \"float\"\nf :: Foo -> Foo\n"
+          case result of
+            Left (SourcedError _ d) ->
+              assertBool (MT.unpack (render d)) (":3:1" `MT.isInfixOf` render d)
+            Left e -> assertFailure $ "expected a sourced error, got " <> show e
+            Right _ -> assertFailure "expected failure"
       , expectError
           "fail on conflicting types (Map vs List)"
           [r|

@@ -1160,9 +1160,18 @@ checkConflictingForms modules lang scope =
             <+> hsep (punctuate "," (map (squotes . pretty) vs))
             <> "; a type is declared once, and has one form per language for each parameter pattern"
           decls = [(i, paramPattern ps) | (i, ps) <- concatMap (typedefDecls lang v0) modules]
-          repeats = [i | (k, (i, pat)) <- zip [0 :: Int ..] decls, pat `elem` map snd (take k decls)]
-       in case repeats ++ map fst (drop 1 decls) of
-            (i : _) -> MM.throwSourcedError i msg
+          repeats = [(i, pat) | (k, (i, pat)) <- zip [0 :: Int ..] decls, pat `elem` map snd (take k decls)]
+       in case repeats ++ drop 1 decls of
+            (i, pat) : _ -> do
+              let samePattern = [j | (j, pat') <- decls, j /= i, pat' == pat]
+                  others = if null samePattern then [j | (j, _) <- decls, j /= i] else samePattern
+              sites <- mapM MM.sourceAt others
+              MM.throwSourcedError i $
+                msg
+                  <> line
+                  <> vsep ["Also declared at" <+> s | s <- sites]
+                  <> line
+                  <> "and here:"
             [] -> MM.throwSystemError msg
   where
     what = maybe "declarations" (\l -> pretty l <+> "forms") lang

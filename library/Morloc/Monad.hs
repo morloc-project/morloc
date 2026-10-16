@@ -23,6 +23,7 @@ module Morloc.Monad
   , runMorlocMonad
   , writeMorlocReturn
   , makeMorlocError
+  , sourceAt
   , runCommand
   , runCommandWith
   , logFile
@@ -258,6 +259,15 @@ makeMorlocError st (UnificationError lhs rhs context msg) =
   where
     srcMap = stateSourceMap st
     note = listToMaybe (mapMaybe (`Map.lookup` stateErrorNotes st) [lhs, rhs, context])
+
+-- | The source location of an index followed by its snippet, for naming a
+-- second site in an error.
+sourceAt :: Int -> MorlocMonad MDoc
+sourceAt i = do
+  st <- get
+  return $ case Map.lookup i (stateSourceMap st) of
+    Just loc -> pretty loc <> ":" <> snippet st loc
+    Nothing -> "<unknown location>"
 
 {- | Render a source code snippet with error location markers.
 For single-line spans: ^~~~^ underline from start to end column.
