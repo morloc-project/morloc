@@ -15,6 +15,7 @@ Chapters:
 - `parallelism.md` (PAR): `pmap` scaling with workers; per-element dispatch overhead
 - `typechecking.md` (TYCK): `morloc typecheck` time against program size and shape
 - `build.md` (BUILD): `morloc make` time per language
+- `recursion.md` (DEPTH): recursion depth in morloc against the native depth in each language
 
 ## Items
 

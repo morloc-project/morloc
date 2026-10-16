@@ -40,3 +40,4 @@ from different hosts compares the hosts; each run's header names its CPU.
 | par-scaling | PAR-1, PAR-2 |
 | typechecking | TYCK-1..5 |
 | build | BUILD-1 |
+| recursion-depth | DEPTH-1..3 |

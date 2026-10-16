@@ -1,0 +1,28 @@
+module main (morlocNT, morlocT, sourcedNT)
+
+import root-py
+
+source Py from "f.py" ("depth" as depthSrc)
+
+depthSrc :: Int -> Int
+
+-- non-tail recursion written in morloc
+depthNT :: Int -> Int
+depthNT n
+  ? n == 0 = 0
+  : 1 + depthNT (n - 1)
+
+-- tail recursion written in morloc
+depthT :: Int -> Int -> Int
+depthT acc n
+  ? n == 0 = acc
+  : depthT (acc + 1) (n - 1)
+
+morlocNT :: Int -> Int
+morlocNT n = depthNT n
+
+morlocT :: Int -> Int
+morlocT n = depthT 0 n
+
+sourcedNT :: Int -> Int
+sourcedNT n = depthSrc n

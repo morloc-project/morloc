@@ -6,3 +6,6 @@ __pycache__
 /par-scaling/cpp
 /par-scaling/py
 /par-scaling/rs
+nexus-*
+native-cpp
+native-rs

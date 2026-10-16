@@ -58,7 +58,7 @@ Every rule is one item with a stable ID:
 | Spec | Prefixes |
 |---|---|
 | runtime | FORK SHM DAEMON SLOT STATE INIT PANIC NET |
-| performance | START XL ENC ZIP PAR TYCK BUILD |
+| performance | START XL ENC TBL ZIP PAR TYCK BUILD DEPTH |
 | language | see `language/README.md` |
 | compiler | see `compiler/README.md` |
 

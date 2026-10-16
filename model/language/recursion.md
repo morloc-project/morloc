@@ -11,11 +11,12 @@ The recursion is carried out in the language that realizes the terms.
 
 ### RECUR-2 Morloc owes tail-call optimization in every language
 Intent: ruled 2026-10-05
-Code: unaudited
+Tests: spec-recur-2-1
+Code: conforms 2026-10-16
 
 A call in tail position does not grow the stack, in every target language,
 including languages that do not optimize tail calls themselves. Tail
-recursion runs in constant stack space at any depth.
+recursion runs in constant stack space at any depth. Measured by DEPTH-3.
 
 ### RECUR-3 A host's own recursion limit is the host's, not morloc's
 Intent: ruled 2026-10-05
@@ -25,13 +26,17 @@ Non-tail recursion in Python or R that reaches that language's own
 recursion limit fails as the same recursion written natively would. That
 limit is not a morloc defect.
 
-### RECUR-4 Morloc does not spend several native frames per recursion level
-Intent: ruled 2026-10-05
+### RECUR-4 Recursion reaches the depth the language itself allows
+Intent: ruled 2026-10-16
 Code: deviates #175
 
-One level of morloc recursion costs about one native frame in the language
-that runs it, so morloc reaches about the depth the same recursion written
-natively reaches.
+Non-tail recursion realized in a language L reaches the depth that the same
+recursion written natively in L reaches on the same stack, less a constant
+that does not grow with depth. This holds for recursion written in morloc,
+where one level costs one native frame, and for recursion in sourced code,
+below which morloc places a constant number of frames. Failing at that
+depth is L's limit (RECUR-3); failing short of it is morloc's. Measured by
+DEPTH-1 (written in morloc) and DEPTH-2 (sourced).
 
 ### RECUR-5 The depth ceiling of non-tail recursion in compiled languages
 Intent: open
