@@ -53,6 +53,7 @@ restructure s = do
 
   resolveImports s -- rewrite DAG edges to map imported terms to their aliases
     >>= handleBinops -- resolve binary operators
+    >>= DAG.mapNodeM shortCircuitForms -- `&&` and `||` become conditionals
     >>= resolveTypeNames -- every type name to the declaration it denotes
     >>= checkForSelfRecursion -- bare self-recursion is rejected; guarded forms pass
     >>= checkMutualRecursion -- typedef cycles no `data` cuts are rejected
@@ -851,8 +852,8 @@ handleBinops d0 = do
       let clsOps = Map.unions $ findClassOps e : [filterClsOps ss cs | (_, ss, (_, cs, _)) <- es]
           clsOpSet = Set.fromList . concat $ Map.elems clsOps
 
-      fixityMap <-
-        mergeFixityMaps $ thisFixityMap : [filterTerms clsOpSet m ss | (_, ss, (_, _, m)) <- es]
+      fixityMap <- Map.union builtinFixities <$>
+        mergeFixityMaps (thisFixityMap : [filterTerms clsOpSet m ss | (_, ss, (_, _, m)) <- es])
       e' <- updateBinopExprs fixityMap e
       return (e', clsOps, fixityMap)
 
@@ -959,6 +960,65 @@ handleBinops d0 = do
                 [] -> return ()
               let lhs' = ExprI outerI $ AppE (ExprI opI (VarE defaultValue op)) [lhs, rhsParsed]
               pratt minPrec lhs' remaining
+
+-- | The fixities of the built-in special forms, which no module declares.
+builtinFixities :: Map EVar (Associativity, Int)
+builtinFixities = Map.fromList [(andOp, (InfixR, 3)), (orOp, (InfixR, 2))]
+
+andOp, orOp :: EVar
+andOp = EV "&&"
+orOp = EV "||"
+
+isShortCircuit :: EVar -> Bool
+isShortCircuit v = v == andOp || v == orOp
+
+-- | `&&` and `||` are special forms, not functions (BASE-3). An application to
+-- both operands becomes a conditional, so the second operand is evaluated
+-- only when the first does not decide the result; a reference applied to
+-- fewer becomes a lambda. Nothing may define or declare either.
+shortCircuitForms :: ExprI -> MorlocMonad ExprI
+shortCircuitForms = decl
+  where
+    decl (ExprI i (ModE m es)) = ExprI i . ModE m <$> mapM decl es
+    decl (ExprI i (AssE v e es)) = do
+      reserved i v
+      ExprI i <$> (AssE v <$> expr e <*> mapM decl es)
+    decl (ExprI i (IstE cls ctx ts es)) = ExprI i . IstE cls ctx ts <$> mapM decl es
+    decl e@(ExprI i (SigE (Signature v _ _))) = reserved i v >> return e
+    decl e@(ExprI i (SrcE src)) = reserved i (srcAlias src) >> return e
+    decl e@(ExprI i (FixE fx)) = mapM_ (reserved i) (fixityOperators fx) >> return e
+    decl e@(ExprI i (ClsE (Typeclass _ _ _ sigs))) = mapM_ (\(Signature v _ _) -> reserved i v) sigs >> return e
+    decl e = expr e
+
+    expr (ExprI i (AppE (ExprI _ (VarE _ op)) args))
+      | isShortCircuit op = mapM expr args >>= form i op
+    expr (ExprI i (VarE _ op))
+      | isShortCircuit op = form i op []
+    expr (ExprI i e) = ExprI i <$> AST.mapExprIChildrenM expr e
+
+    form :: Int -> EVar -> [ExprI] -> MorlocMonad ExprI
+    form i op [a, b] = do
+      j <- newIndex i
+      let lit = ExprI j . LogE
+      return . ExprI i $ if op == andOp then IfE a b (lit False) else IfE a (lit True) b
+    form i op [a] = do
+      let v = EV (unEVar op <> "`rhs")
+      j <- newIndex i
+      k <- newIndex i
+      body <- form k op [a, ExprI j (VarE defaultValue v)]
+      return (ExprI i (LamE [v] body))
+    form i op [] = do
+      let (l, r) = (EV (unEVar op <> "`lhs"), EV (unEVar op <> "`rhs"))
+      j <- newIndex i
+      k <- newIndex i
+      m <- newIndex i
+      body <- form m op [ExprI j (VarE defaultValue l), ExprI k (VarE defaultValue r)]
+      return (ExprI i (LamE [l, r] body))
+    form i op _ = MM.throwSourcedError i $ squotes (pretty op) <+> "takes two operands"
+
+    reserved :: Int -> EVar -> MorlocMonad ()
+    reserved i v = when (isShortCircuit v) . MM.throwSourcedError i $
+      squotes (pretty v) <+> "is a built-in special form and cannot be defined or declared"
 
 -- | Hoist user-written '!' (EvalE) markers into fresh do-block binds.
 --

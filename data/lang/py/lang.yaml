@@ -74,6 +74,8 @@ ldQualifiedImports: true
 ldNamePattern: "[A-Za-z_][A-Za-z0-9_.]*"
 ldOperatorPattern: "[-!%&*+./<=>^|$~@:?]+"
 ldAssignOp: "="
+ldAndOp: "and"
+ldOrOp: "or"
 ldLambdaTemplate: "lambda {{args}}: {{body}}"
 ldDoBlockExpr: "(lambda: {{expr}})"
 ldDoBlockBlock: ""

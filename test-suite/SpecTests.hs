@@ -36,6 +36,7 @@ specTests =
     , localOption (mkTimeout 2000000) patTests
     , localOption (mkTimeout 2000000) lexTests
     , localOption (mkTimeout 2000000) sigTests
+    , localOption (mkTimeout 2000000) baseTests
     , localOption (mkTimeout 2000000) ifaceTests
     , localOption (mkTimeout 20000000) annTests
     , modelCheck
@@ -997,6 +998,30 @@ patTests =
         f :: Vector 2 Int -> Int
         f | [x, y] = y
           | _ = 0
+        |]
+    ]
+
+baseTests :: TestTree
+baseTests =
+  testGroup
+    "BASE"
+    [ rejectUser
+        "spec-base-3-2"
+        [r|
+        module main (f)
+          (&&) :: Bool -> Bool -> Bool
+          (&&) x y = x
+          f :: Bool -> Bool
+          f x = x && x
+        |]
+    , accept
+        "spec-base-3-3"
+        [r|
+        module main (f)
+          (&.) :: Bool -> Bool -> Bool
+          (&.) x y = x
+          f :: Bool -> Bool
+          f x = x &. x
         |]
     ]
 

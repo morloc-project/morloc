@@ -16,12 +16,16 @@ Code: unaudited
 the JSON `true` and `false`.
 
 ### BASE-3 `&&` and `||` short-circuit
-Intent: proposed
-Code: unaudited
+Intent: ruled 2026-10-16
+Tests: spec-base-3-1, spec-base-3-2, spec-base-3-3
+Code: conforms 2026-10-16
 
 `a && b` does not evaluate `b` when `a ~> False`, and `a || b` does not
-evaluate `b` when `a ~> True`, whichever languages `a` and `b` run in.
-`&&` is `infixr 3` and `||` is `infixr 2`.
+evaluate `b` when `a ~> True`, in every language, wherever `a` and `b` run.
+They are special forms, not functions: every other application evaluates
+its arguments first (EVAL-1), and no module may define or declare either.
+Used as a value, each is the function of two `Bool`s it denotes. `&&` is
+`infixr 3` and `||` is `infixr 2`.
 
 ### BASE-4 A `Str` value survives every language that can hold it
 Intent: proposed

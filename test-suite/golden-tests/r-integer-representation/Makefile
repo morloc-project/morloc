@@ -31,6 +31,7 @@ all:
 	./nexus tryInt -2147483647 >> obs.txt 2>> obs.err || echo error >> obs.txt
 	./nexus tryInt -2147483648 > /dev/null 2>> obs.err && echo accepted >> obs.txt || echo rejected >> obs.txt
 	./nexus intoInt -2147483648 > /dev/null 2>> obs.err && echo accepted >> obs.txt || echo rejected >> obs.txt
+	./nexus listEq '[0,1,2]' >> obs.txt 2>> obs.err || echo error >> obs.txt
 	grep -c "qualified with L" obs.err >> obs.txt || true
 
 clean:

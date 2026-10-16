@@ -571,8 +571,20 @@ invertSerialManifold sm0 =
     -- coercion is transparent: pass through like EvalN
     invertNativeExprM (CoerceN_ c t (D ne lets)) = atomize (CoerceN c t ne) lets
     -- keep dependencies inside if branches (like suspend)
+    -- In a conditional with a Bool literal arm (a short-circuit form, BASE-3)
+    -- a part that binds a value only to return it is that value, so the
+    -- translator can write the language's own operator. Elsewhere the let
+    -- stays: a projection bound by one may be moved rather than copied.
     invertNativeExprM (IfN_ t (D condNe condLets) (D thenNe thenLets) (D elseNe elseLets)) =
-      atomize (IfN t (weave (D condNe condLets)) (weave (D thenNe thenLets)) (weave (D elseNe elseLets))) []
+      let c = weave (D condNe condLets)
+          a = weave (D thenNe thenLets)
+          b = weave (D elseNe elseLets)
+       in atomize (if isLit a || isLit b then IfN t (part c) (part a) (part b) else IfN t c a b) []
+      where
+        isLit LogN {} = True
+        isLit _ = False
+        part (NativeLetN i rhs (LetVarN _ j)) | i == j = rhs
+        part e = e
     invertNativeExprM (IntrinsicN_ t intr msch nes) =
       atomize (IntrinsicN t intr msch (map unD nes)) (concatMap getDeps nes)
     invertNativeExprM (MapOptionalN_ t wt src (D ne lets)) =

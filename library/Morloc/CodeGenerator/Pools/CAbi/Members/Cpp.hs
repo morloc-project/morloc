@@ -1042,6 +1042,7 @@ PROPAGATE_ERROR(errmsg)|]
           , poolPriorExprs = concatMap poolPriorExprs leaves
           , poolReturnFlag = True
           }
+    , lcShortCircuit = \isAnd a b -> a <+> (if isAnd then "&&" else "||") <+> b
     , lcMakeIf = \origExpr condDocs thenDocs elseDocs -> do
         idx <- getCounter
         let v = helperNamer idx

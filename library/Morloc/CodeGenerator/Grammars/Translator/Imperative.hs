@@ -688,6 +688,10 @@ data LowerConfig m = LowerConfig
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
   -- Produces language-specific if/else structure using a temp result variable
+  , lcShortCircuit :: Bool -> MDoc -> MDoc -> MDoc
+  -- ^ The language's own short-circuit operator applied to two expressions:
+  -- @True@ for and, @False@ for or. A conditional with a Bool literal arm
+  -- and an arm that needs no statements is written with it (BASE-3).
   , lcMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> LoopBody PoolDocs PoolDocs PoolDocs -> m PoolDocs
   -- ^ Tail-loop assembly. Args: what a base leaf yields; each loop-carried
   -- native local id, with the value it starts from when the loop declares
@@ -1726,6 +1730,23 @@ isValueArg (NativeArgExpr e) = case e of
   _ -> False
 isValueArg (NativeArgManifold _) = False
 
+-- | @if c then b else False@ is @c && b@ and @if c then True else b@ is
+-- @c || b@, written with the language's operator when @b@ needs no
+-- statements, so its evaluation stays where the conditional put it.
+shortCircuit :: LowerConfig m -> NativeExpr -> NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> Maybe PoolDocs
+shortCircuit cfg thenE elseE condDocs thenDocs elseDocs = case (thenE, elseE) of
+  (_, LogN _ False) | null (poolPriorLines thenDocs) -> Just (combine True thenDocs)
+  (LogN _ True, _) | null (poolPriorLines elseDocs) -> Just (combine False elseDocs)
+  _ -> Nothing
+  where
+    combine isAnd other = PoolDocs
+      { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds other
+      , poolExpr = parens (lcShortCircuit cfg isAnd (poolExpr condDocs) (poolExpr other))
+      , poolPriorLines = poolPriorLines condDocs
+      , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs other
+      , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag other
+      }
+
 lowerNativeExprRaw ::
   (Monad m) =>
   LowerConfig m ->
@@ -1960,7 +1981,9 @@ lowerNativeExprRaw cfg _ (CoerceN_ CoerceToOptional _ x) =
 lowerNativeExprRaw cfg origExpr@(IfN _ _ thenE elseE) (IfN_ _ condDocs thenDocs elseDocs) = do
   thenDocs' <- adaptOwnedElem cfg thenE thenDocs
   elseDocs' <- adaptOwnedElem cfg elseE elseDocs
-  lcMakeIf cfg origExpr condDocs thenDocs' elseDocs'
+  case shortCircuit cfg thenE elseE condDocs thenDocs' elseDocs' of
+    Just docs -> return docs
+    Nothing -> lcMakeIf cfg origExpr condDocs thenDocs' elseDocs'
 lowerNativeExprRaw cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do

@@ -563,6 +563,8 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcCacheBody = genericCacheBody desc cfg
         , lcDebugWrap = genericDebugWrap desc cfg debugInfo
         , lcMakeIf = genericMakeIf desc cfg
+        , lcShortCircuit = \isAnd a b ->
+            a <+> pretty (if isAnd then ldAndOp desc else ldOrOp desc) <+> b
         , lcMakeLoop = genericMakeLoop desc cfg
         , lcMakeLet = \namer i _ _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"

@@ -2399,6 +2399,7 @@ rustLowerConfig mask =
     , lcLetRhs = rustConsumeLetRhs
     , lcOwnPacketDecl = \v e -> Just ("let" <+> v <+> "= rustmorloc::Packet::new(" <> e <> ");", v <> ".as_ptr()")
     , lcMakeIf = rustMakeIf
+    , lcShortCircuit = \isAnd a b -> a <+> (if isAnd then "&&" else "||") <+> b
     , lcMakeLoop = rustMakeLoop
     -- An effect thunk captures by value only when it can outlive the frame that
     -- builds it. The only such position is a manifold return typed

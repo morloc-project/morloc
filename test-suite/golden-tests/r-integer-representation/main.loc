@@ -3,7 +3,7 @@
 -- a fraction truncates and a value outside the wire type is an error.
 module main
   ( mapU64, mapI64, mapLitU64, mapLitI64, mapInt, eqI64, eqU64, sortI64
-  , negI64, bigLit, litI64, litU64, litInt, litI32, tryU64, tryInt, intoInt, narrowI32, narrowU8, truncI32, negU64, idU64, idInt
+  , negI64, bigLit, litI64, litU64, litInt, litI32, tryU64, tryInt, intoInt, listEq, narrowI32, narrowU8, truncI32, negU64, idU64, idInt
   )
 
 import root-r
@@ -101,3 +101,6 @@ tryInt x = tryInto x
 
 intoInt :: I32 -> Int
 intoInt x = into x
+
+listEq :: [Int] -> Bool
+listEq xs = map (\x -> x + 0) xs == [0, 1, 2]
