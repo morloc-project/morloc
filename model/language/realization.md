@@ -30,6 +30,6 @@ fails naming the term. It is never a run-time error.
 Intent: open
 Code: unaudited
 
-Open: what the choice minimizes (per-language cost, number of crossings,
-data volume crossed), and whether a program may pin a call to a language.
+Open: whether a program may pin a call to a language. What the choice
+minimizes is proposed in cost.md (COST-1).
 A pin would make REAL-1 checkable by building both ways.

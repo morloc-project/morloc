@@ -1,0 +1,32 @@
+# Realization
+
+Defects in how the realizer (CodeGenerator/Realize.hs) prices a placement,
+found reviewing /work/plans/realization-cost-model.md. Gap: model/language
+realization.md leaves open what the choice minimizes; each entry is wrong
+under any reading of it. [read; not reproduced]
+
+- **A list, tuple or record is priced by its cheapest element.**
+  `scoreMany` (~665-682) builds one merged table of every element's scores
+  and takes the per-language minimum, which is right for alternatives of one
+  term (`VarS (Many ..)`, one is chosen) and wrong for the components of a
+  container (all must exist): in `[pyA, rustB]` placed in Rust, `pyA`'s
+  crossing costs nothing whenever `rustB` is cheaper. Sum the components.
+- **A use of a let-bound value is priced from where it was computed.**
+  `refTable` (~529-557) prices a reference in language l as moving the value
+  from its home h to l, but the value lives where the let runs; for a value
+  computed in Rust, bound in a Python do-block and used in Rust, the second
+  crossing costs nothing. lib/biolib rnaseq R36 is this shape.
+- **A parameter is free in every language.** A non-function `BndS` scores 0
+  everywhere (~514-519), so a value passed in and used in two pools is never
+  priced.
+- **Collapse and scoring price an edge differently.** Collapse picks a
+  child's language with `transScore` (`cost`, ~776; `chooseLanguage`,
+  ~1037), scoring with `crossScore`; once the payload term is non-zero the
+  DP is no longer exact. `holding` (~420, ~432) also uses `transScore`.
+- **A morloc-defined head prices its function arguments twice**, once
+  inside its body (re-scoring through `rBndVars`, ~514-518) and again at the
+  outer `scoreApp` (~502-505).
+- **Merging two signatures keeps only the first one's docstrings.**
+  `mergeEdocs x _ = x` (Frontend/Merge.hs ~83-84): a directive on the second
+  signature of one term is dropped, depending on order. Affects any
+  directive, cost directives included.

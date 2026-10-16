@@ -7,3 +7,4 @@ it is solved, and a file when it is empty.
 
 - [typecheck-output.md](typecheck-output.md): undetermined and non-`Type` types reach code generation (TC-3), locations lost after typechecking
 - [codegen-ownership.md](codegen-ownership.md): deciding a payload take walks the manifold once per candidate
+- [realization.md](realization.md): containers priced by their cheapest element, let-bound and parameter values not priced where used, collapse and scoring disagree, function arguments priced twice, merged signatures drop docstrings
