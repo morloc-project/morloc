@@ -66,3 +66,31 @@
   Unconfirmed guess: a channel test holding the exclusive guard waits
   forever. gdb cannot attach in the container (no CAP_SYS_PTRACE); run the
   test binary as gdb's inferior and interrupt it to see every stack.
+- **Stream depth-share test may see other tests' writers.** [speculative,
+  from review] `streams_share_the_queue_bytes_and_keep_no_more_spares_than_their_depth`
+  (morloc-runtime/src/stream.rs) expects exact depths computed from the
+  process-wide list of hosted writers. A writer another test left open is
+  counted until it ends; the test waits up to 10 s for the depth to rise,
+  which covers writers that end, not one left open for the whole run.
+  Passed in every run so far (5 full lib runs, 2026-10-15).
+  Since d9b97d00 taking an exclusive guard reports and stops writers that
+  earlier tests left, and releasing one fails a test that leaves its own,
+  so a leaked writer no longer reaches this test; delete this entry if no
+  failure is seen.
+- **Bare-forked test children hold other tests' descriptors.** [read,
+  one failure reproduced 2026-10-15] Spec gap: FORK-3 covers exec, not a
+  fork without one. Tests fork without exec (`exits_cleanly_in_a_forked_child`,
+  fork_pool coordinators and workers, `as_pid_one`), and the child gets
+  every descriptor the test process holds at that instant, close-on-exec
+  or not: other tests' listeners, pipes and socket ends. A test that waits
+  for end of file or for a refused connection then waits on a copy held by
+  an unrelated child. Seen once: the router refusal test's dropped listener
+  still accepted (fixed in d9b97d00 by binding a socket that never listens).
+  Other tests that rely on a close being seen are exposed the same way;
+  none is known to fail. A child could close every descriptor it was not
+  handed (`close_range` with a keep-list) right after the fork.
+- **Reuse tests leave their listener threads running.** [read]
+  morloc-runtime/src/ipc_ffi.rs `reuse_tests::callee` spawns an accept
+  loop on `listener.incoming()` that never ends; every reuse test leaves
+  one blocked thread (and its socket) for the rest of the run. Harmless so
+  far, but they were mistaken for stuck tests in a hang's thread list.

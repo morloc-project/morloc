@@ -134,3 +134,46 @@ here touch locks and ownership: model first.
   its own, and a later pass may decode the same offsets again. Both copies
   are correct and counted against the bound; they hold room until the
   cursor passes them.
+- **A raised stream depth reaches a waiting producer only at its wait
+  slice.** [read] Against SLOT-22's discipline (a waker moves the word it
+  wakes on). When streams end, `CustodyQueue::set_cap` (custody.rs) raises
+  the depth caps of SLOT-32 and calls `wake_all(&done)` without moving
+  `done`, so a producer that compared under the old cap and is about to
+  sleep misses the wake and waits up to `WAIT_SLICE` (100 ms). Speed only.
+  A fix moves a word the producer sleeps on: a per-queue room word bumped
+  by both `finish` and `set_cap`, which changes the QueueWake model.
+- **The stream queue bound has no setting.** [read] Open ruling, SLOT-32.
+  `write_behind::queue_bytes` is a fixed 1 GiB. A setting would be one more
+  environment read, and source_rules.rs caps those (`MAX_ENV_READS`, 67)
+  as a ratchet; adding one needs that cap raised, or an existing read
+  folded into a shared settings read.
+- **The SLOT-32 bound is per writing process, not per host.** [read] Gap in
+  SLOT-32. The depths come from the writers one process hosts
+  (`HOSTED`, custody.rs), so each process that hosts stream writers (the
+  nexus of each concurrent run, a daemon) shares its own 1 GiB, and a host
+  running k of them may queue k GiB; and an adopted stdout or stderr counts as a share until
+  its first batch shows it uncompressed. Whether the bound should be
+  host-wide (a shared-memory counter across runs) is undecided.
+
+- **Every daemon call sweeps the whole stream registry.** [read 2026-10-15]
+  Gap in SLOT-9. After each local call the daemon runs `stream::sweep_call`,
+  which loads `state` in every registry slot (4096 slots of 512 bytes by
+  default, up to 65536: 2-32 MiB of shared memory touched) to close streams
+  the call left open, even when the call opened none. The call could record
+  the slots it opens and sweep only those (a shared list where a custodian
+  or another process opens for it).
+- **Per-operation scans over growing process lists.** [read 2026-10-15, from
+  a code survey; not measured] `stream.rs` `allocate_slot_cas_for` probes
+  linearly per open and degrades as the registry fills;
+  `cache_get_or_materialize` searches its entries per IFile index hit;
+  `drop_ended_slots` walks every attached handle per doorbell ring and per
+  fork-pool retire check; `unlock_and_close` filters every locked
+  descriptor per close; `custody::shares` revisits every hosted writer per
+  open, idle and end (quadratic in streams opened); `cell.rs` scans every
+  cell ever made per new cell and per dispatch end, and every thread per
+  fold step; `intrinsics.rs` scans every temp file per `@close` and per
+  dispatch end; `arrow_shm.rs` `try_borrow` walks every live view per Arrow
+  table returned and `borrow_forget` per view released (quadratic to
+  release them all); `daemon_ffi.rs` counts remote jobs in the whole queue
+  per accept. Each is bounded in practice today; an index (map or free
+  stack) would make each O(1).

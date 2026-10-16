@@ -40,3 +40,12 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   runs no fork handlers) inherits a caller's connection; the fork count
   `connect_to` checks does not see it, so the connection may be kept, and
   its C++ or Rust callee then waits on it until that process exits.
+
+- **A connection made across a fork leaves the child a socket nobody
+  closes.** [read 2026-10-15, from review] NET-7. When a fork lands between
+  making a caller's socket and registering it, `connect_to` drops its copy
+  and makes another (302ef7f1), but the child keeps its copy of the dropped
+  socket: never connected, so no callee waits on it, but a descriptor the
+  child holds for its lifetime. A long-lived child forked often while
+  callers connect accumulates them. The retry has no bound; it ends as soon
+  as a fork does not land in the few microseconds between the two steps.
