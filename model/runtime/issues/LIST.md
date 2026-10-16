@@ -8,7 +8,7 @@ it is solved, and a file when it is empty.
 - [failure-classification.md](failure-classification.md): misclassified failures (peer death exits 70, bad user data kills the pool) and unbounded or bounded waits
 - [wire-bounds.md](wire-bounds.md): unchecked lengths and offsets in packets, stream files and allocation sizes
 - [shared-memory.md](shared-memory.md): new blocks not zeroed (SHM-6), registry slot count, two speculative races, stale spec text; a free in an eval arena scans the arena (quadratic scopes); the block census counts only mapped volumes; an allocation that misses its cursor walks the volume
-- [value-encoding.md](value-encoding.md): non-ASCII schema names, missing record keys, MessagePack decoder bugs, record alignment, canonical bytes; Python and R `F32` scalars lose signalling NaNs (WIRE-7)
+- [value-encoding.md](value-encoding.md): R integer literals ignore their type (U64 map fails by input order), R `==` on I64 compares bit patterns; non-ASCII schema names, missing record keys, MessagePack decoder bugs, record alignment, canonical bytes; Python and R `F32` scalars lose signalling NaNs (WIRE-7)
 - [cache.md](cache.md): stale results after a source edit, unverified keys, log and summary leaks into nested runs
 - [cli-directives.md](cli-directives.md): cross-language @fold, @render type check and -f, multi-output gaps
 - [mcp.md](mcp.md): streaming calls refused off the CLI, MCP stdio server in one-shot mode, front-end line cap checked after copying
