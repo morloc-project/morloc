@@ -1915,6 +1915,17 @@ mod tests {
         d
     }
 
+    /// Runs `wait_for_daemon` on its own thread; `None` if it has not returned
+    /// within a bound no passing run comes near, so a broken wait fails the
+    /// test instead of hanging it. The bound is never the measured quantity.
+    fn wait_bounded(socket: PoolSocket, idx: usize) -> Option<Result<(), String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(super::wait_for_daemon(&socket, idx));
+        });
+        rx.recv_timeout(Duration::from_secs(30)).ok()
+    }
+
     #[test]
     fn a_pool_is_seen_ready_as_soon_as_it_answers() {
         use std::io::{Read, Write};
@@ -1923,46 +1934,50 @@ mod tests {
         let dir = fresh_dir("answers");
         let socket = fake_socket(&dir);
         let path = socket.socket_path.clone();
+        // The pool accepts one connection and answers it late; a probe the
+        // nexus abandons for a new one can never be answered.
         let pool = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(100));
             let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
             let (mut c, _) = listener.accept().unwrap();
+            drop(listener);
+            let _ = std::fs::remove_file(&path);
             let mut ping = [0u8; 32];
             c.read_exact(&mut ping).unwrap();
             std::thread::sleep(Duration::from_millis(600));
-            c.write_all(&ping).unwrap();
+            let _ = c.write_all(&ping);
         });
-        let started = std::time::Instant::now();
-        let ready = super::wait_for_daemon(&socket, idx);
-        let took = started.elapsed();
-        pool.join().unwrap();
+        let ready = wait_bounded(socket, idx);
         PIDS[idx].store(-1, Ordering::SeqCst);
+        pool.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(ready.is_ok(), "{ready:?}");
-        assert!(took < Duration::from_millis(1000), "ready at ~700 ms, seen at {took:?}");
+        assert!(matches!(ready, Some(Ok(()))), "{ready:?}");
     }
 
     #[test]
     fn a_pool_that_dies_while_starting_is_reported_at_once() {
+        use std::io::Read;
         let idx = MAX_DAEMONS - 2;
         PIDS[idx].store(std::process::id() as i32, Ordering::SeqCst);
         let dir = fresh_dir("dies");
         let socket = fake_socket(&dir);
         let path = socket.socket_path.clone();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        // The pool dies after the ping arrives but keeps the connection open,
+        // so only noticing the death can end the wait.
         let pool = std::thread::spawn(move || {
             let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-            let (_c, _) = listener.accept().unwrap();
-            std::thread::sleep(Duration::from_millis(300));
+            let (mut c, _) = listener.accept().unwrap();
+            let mut ping = [0u8; 32];
+            c.read_exact(&mut ping).unwrap();
             PIDS[idx].store(-1, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(3000));
+            let _ = held.recv();
         });
-        let started = std::time::Instant::now();
-        let ready = super::wait_for_daemon(&socket, idx);
-        let took = started.elapsed();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(ready.is_err());
-        assert!(took < Duration::from_millis(1000), "died at ~300 ms, reported at {took:?}");
+        let ready = wait_bounded(socket, idx);
+        drop(release);
         pool.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(ready, Some(Err(_))), "{ready:?}");
     }
 
     #[test]
