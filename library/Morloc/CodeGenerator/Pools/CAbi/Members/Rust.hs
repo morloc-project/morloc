@@ -89,9 +89,11 @@ data RustState = RustState
   , rsSchemas :: Map.Map Text Int
   , rsLocalSet :: Set.Set Int
   , rsRemoteSet :: Set.Set Int
-  , rsDebugInfo :: Int -> (Text, Text)
-  -- ^ Per-manifold @(userName, srcloc)@ (from 'makeManifoldDebugInfoLookup'),
-  -- baked into each manifold's 'FrameGuard' frame line for error tracebacks.
+  , rsDebugInfo :: Int -> Maybe (Text, Text)
+  -- ^ A manifold's frame label @(name, srcloc)@, baked into its 'FrameGuard'
+  -- line for error tracebacks: every manifold under @--debug@
+  -- ('makeManifoldDebugInfoLookup'), otherwise only a call of a named
+  -- function, labeled with its definition ('makeTraceLabelLookup', DIAG-5).
   , rsLogTemplates :: Map.Map Int RenderedTemplate
   -- ^ Rendered @log:@ / @benchmark:@ templates per labeled manifold midx.
   -- Drives the 'rustmorloc::LogGuard' wrap in 'rustMakeFunction'.
@@ -131,7 +133,7 @@ data RustState = RustState
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty Set.empty 0 []
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty Set.empty 0 []
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -1311,7 +1313,10 @@ translate srcs es = do
   let userDirs = unique (map takeDirectory absSrcs ++ localCrateDirs)
       includeDocs = map rustSourceInclude absSrcs ++ ["mod mlc_user_ops;", rustUserFiles absSrcs userDirs]
 
-  debugInfo <- makeManifoldDebugInfoLookup
+  debugMode <- MM.gets stateDebugTrace
+  debugInfo <- if debugMode
+    then (\f i -> Just (f i)) <$> makeManifoldDebugInfoLookup
+    else makeTraceLabelLookup
 
   -- Merge the general typedef scope into the Rust concrete scope so a record
   -- field declared via a general alias resolves through its Rust mapping (as
@@ -2654,14 +2659,21 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm = do
           -- Per-manifold traceback frame: on a panic unwind the FrameGuard
           -- appends this line to the thread-local trace, which dispatch_guard
           -- folds onto the throw message (mirrors the C++ member's frame).
-          (userName, srclocStr) = rsDebugInfo st callIndex
-          nameOut = if T.null userName then "_" else userName
-          srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
-          frameText =
-            "\n  at " <> nameOut <> " [rust] (mid=" <> T.pack (show callIndex) <> srclocSuffix <> ")"
-          frameStmt =
-            "let _mlc_frame = rustmorloc::FrameGuard::new("
-              <> dquotes (pretty (RP.rustEscape frameText)) <> ");"
+          -- A function that calls sourced code keeps a frame at the call
+          -- (PANIC-15); a FrameGuard already does, its drop following the call.
+          callFrame
+            | null frameStmts && T.any (== userCallMark) (render (vsep (priorLines ++ [body]))) =
+                ["let _mlc_call = rustmorloc::CallFrame;"]
+            | otherwise = []
+          frameStmts = case rsDebugInfo st callIndex of
+            Nothing -> []
+            Just (userName, srclocStr) ->
+              let nameOut = if T.null userName then "_" else userName
+                  srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
+                  frameText =
+                    "\n  at " <> nameOut <> " [rust] (mid=" <> T.pack (show callIndex) <> srclocSuffix <> ")"
+               in [ "let _mlc_frame = rustmorloc::FrameGuard::new("
+                      <> dquotes (pretty (RP.rustEscape frameText)) <> ");" ]
           -- A labeled manifold is wrapped in a LogGuard: start on
           -- construction, pass or fail on drop. Nothing is placed after the
           -- body because a generated body ends in `return <expr>;`, which
@@ -2688,7 +2700,7 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm = do
                       <> ");"
                in guardStmt : priorLines ++ [body]
       return . Just $
-        vsep [decl <+> "{", indent 4 (vsep (frameStmt : bodyLines)), "}"]
+        vsep [decl <+> "{", indent 4 (vsep (frameStmts ++ callFrame ++ bodyLines)), "}"]
 
 -- | Whether a closure wire form has a closure among its arguments or as its
 -- result.

@@ -38,9 +38,8 @@ crashRust x = crashRustRaw x
 crashR :: Int -> Int
 crashR x = crashRRaw x
 
--- A signal the process sends itself, two manifolds deep in the C++ pool:
--- the innermost one is the one named (an inlined helper is named by the
--- site it was inlined at).
+-- A signal the process sends itself, two calls deep in the C++ pool: the
+-- innermost named function is the one reported, as in a failure's trace.
 inner :: Int -> Int
 inner x = crashRaisedRaw (idcpp x)
 

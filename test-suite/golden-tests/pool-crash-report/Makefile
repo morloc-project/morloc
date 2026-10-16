@@ -10,7 +10,7 @@ all:
 	grep -qF "Pool 'cpp' Pool process crashed with signal 11" obs.cpp.err && echo cpp_signal >> obs.txt || echo NO_CPP_SIGNAL >> obs.txt
 	grep -qF "while executing crashCpp [cpp] (mid=" obs.cpp.err && echo cpp_manifold >> obs.txt || echo NO_CPP_MANIFOLD >> obs.txt
 	./nexus viaCpp 1 > /dev/null 2> obs.via.err && echo UNEXPECTED_SUCCESS >> obs.txt || echo via_failed >> obs.txt
-	grep -qF "while executing _ [cpp] (mid=" obs.via.err && echo via_innermost >> obs.txt || echo NO_VIA_INNERMOST >> obs.txt
+	grep -qF "while executing inner [cpp] (mid=" obs.via.err && echo via_innermost >> obs.txt || echo NO_VIA_INNERMOST >> obs.txt
 	grep -qF "while executing viaCpp" obs.via.err && echo UNEXPECTED_OUTER >> obs.txt || echo via_not_outer >> obs.txt
 	./nexus crashRust 1 > /dev/null 2> obs.rust.err && echo UNEXPECTED_SUCCESS >> obs.txt || echo rust_failed >> obs.txt
 	grep -qF "Pool 'rust' Pool process crashed with signal 11" obs.rust.err && echo rust_signal >> obs.txt || echo NO_RUST_SIGNAL >> obs.txt

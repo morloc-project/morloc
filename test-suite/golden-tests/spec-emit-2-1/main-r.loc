@@ -1,0 +1,10 @@
+-- Spec EMIT-2: an application that is emitted inline stays where its value
+-- is used, so one in the branch not taken is never evaluated.
+module main (f)
+
+import root-r
+
+f :: Int -> Int
+f x
+  ? x == 0 = 0
+  : 100 // x + 100 // (x + 1)

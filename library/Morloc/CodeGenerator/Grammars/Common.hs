@@ -68,6 +68,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , makeManifoldIndexer
   , renderPoolDocs
   , makeManifoldDebugInfoLookup
+  , makeTraceLabelLookup
   ) where
 
 import Morloc.Frontend.Rename (displayName)
@@ -1139,6 +1140,25 @@ calls this once during 'LowerConfig' setup and stores the closure in
 metadata without touching 'MorlocMonad'. Both strings are empty when
 no info is attached; the runtime treats empties as "omit".
 -}
+-- | The trace label of a manifold outside @--debug@ (DIAG-5): the name of
+-- the morloc function it is a call of, and the source position of that
+-- function's definition. 'Nothing' for a manifold that is not a call of a
+-- named function, which a trace does not list.
+makeTraceLabelLookup :: MorlocMonad (Int -> Maybe (Text, Text))
+makeTraceLabelLookup = do
+  nameMap <- MM.gets stateName
+  srcMap <- MM.gets stateSourceMap
+  GMap idmap _ <- MM.gets stateSignatures
+  nameSource <- MM.gets stateNameSource
+  defSite <- MM.gets stateDefinitionSite
+  let definition i = case Map.lookup i nameSource of
+        Just j | j /= i -> definition j
+        _ -> Map.lookup i idmap >>= (`Map.lookup` defSite)
+      position i = maybe "" id (definition i >>= (`Map.lookup` srcMap) >>= renderSrcLocForDebug)
+  return $ \i -> case sanitizeManifoldName . unEVar . displayName <$> Map.lookup i nameMap of
+    Just n | not (MT.null n) -> Just (n, position i)
+    _ -> Nothing
+
 makeManifoldDebugInfoLookup :: MorlocMonad (Int -> (Text, Text))
 makeManifoldDebugInfoLookup = do
   nameMap <- MM.gets stateName

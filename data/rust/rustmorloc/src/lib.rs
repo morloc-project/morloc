@@ -639,10 +639,10 @@ where
         Err(payload) => {
             // PANIC-6: a runtime panic ended the pool before it reached here.
             unsafe { morloc_panic_caught() };
-            // The caught error's partial trace must not leak into a later
-            // error's traceback.
-            TRACEBACK.with(|t| t.borrow_mut().clear());
-            err(panic_message(payload.as_ref()))
+            // The message carries the frames it unwound through (DIAG-5),
+            // taken so they do not leak into a later error's traceback.
+            let trace = TRACEBACK.with(|t| std::mem::take(&mut *t.borrow_mut()));
+            err(format!("{}{}", panic_message(payload.as_ref()), trace))
         }
     }
 }
@@ -1009,6 +1009,18 @@ thread_local! {
 /// RAII manifold-frame marker. Marks the manifold as the one executing on
 /// the thread for the crash report (two stores); on a panic unwind it also
 /// records its frame line to the thread-local traceback.
+/// Held by a generated function that calls sourced code and has no
+/// 'FrameGuard': its drop runs after the call, so the call is never compiled
+/// to a tail jump that would leave no frame at the call (PANIC-15).
+pub struct CallFrame;
+
+impl Drop for CallFrame {
+    #[inline(always)]
+    fn drop(&mut self) {
+        std::hint::black_box(());
+    }
+}
+
 pub struct FrameGuard {
     frame: &'static str,
     prev: (*const u8, usize),

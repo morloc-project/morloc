@@ -29,4 +29,4 @@ never repairs the input or guesses.
 | codegen/serialize.md | SER | every crossing has a wire form |
 | codegen/emit.md | EMIT | generated pools and the manifest |
 
-Only `frontend/typecheck.md` and `codegen/effect-boundaries.md` are started.
+Only `frontend/typecheck.md`, `codegen/effect-boundaries.md` and `codegen/emit.md` are started.

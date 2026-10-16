@@ -194,6 +194,7 @@ addNativeRecEntries phs = do
             s { stateNativeRecEntries = Map.insert midx midx' (stateNativeRecEntries s)
               , stateName = maybe (stateName s)
                   (\n -> Map.insert midx' n (stateName s)) (Map.lookup midx name)
+              , stateNameSource = Map.insert midx' midx (stateNameSource s)
               }
           -- a body that is this manifold's own (same id) is what the native
           -- entry runs; left wrapped it would be emitted as a second

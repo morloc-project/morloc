@@ -1244,7 +1244,11 @@ addStageEntries modified helpers = do
         let stageV = EV (unEVar v <> "@stage")
             stageT = FunT (take k ts) (FunT (drop k ts) r)
         AnnoS (Idx gi' _) c' e' <- reindexOne t
-        MM.modify (\st -> st {stateName = Map.insert gi' stageV (stateName st)})
+        let AnnoS (Idx source _) _ _ = t
+        MM.modify (\st -> st
+          { stateName = Map.insert gi' stageV (stateName st)
+          , stateNameSource = Map.insert gi' source (stateNameSource st)
+          })
         return (v, stageV, k, stageT, AnnoS (Idx gi' stageT) c' e')
     | (v, t@(AnnoS (Idx _ (FunT ts r)) _ (LamS vs body))) <- helpers
     , let k = length vs

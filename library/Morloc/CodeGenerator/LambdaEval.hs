@@ -502,6 +502,15 @@ reduce ai
           (e1 : es)
         )
     ) = do
+    -- The application of a named function is a call of it: the value it
+    -- reduces to keeps the application's index, which takes the function's
+    -- name for the failure trace (DIAG-5).
+    MM.modify $ \st -> case Map.lookup i2 (stateName st) of
+      Just name | Map.notMember i1n (stateName st) ->
+        st { stateName = Map.insert i1n name (stateName st)
+           , stateNameSource = Map.insert i1n i2 (stateNameSource st)
+           }
+      _ -> st
     -- A non-value is normalized here, once, to decide whether it reduces
     -- to a value; the result is reused below.
     let raw = isValue e1

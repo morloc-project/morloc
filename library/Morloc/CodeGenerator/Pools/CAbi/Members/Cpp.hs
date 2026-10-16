@@ -404,6 +404,9 @@ data CppTranslatorState = CppTranslatorState
   , translatorDebugInfo :: Int -> (Text, Text)
   -- ^ Snapshot of per-manifold @(name, srcloc)@ metadata (from
   -- 'makeManifoldDebugInfoLookup'); consumed by 'cppDebugWrap'.
+  , translatorTraceInfo :: Int -> Maybe (Text, Text)
+  -- ^ Snapshot of 'makeTraceLabelLookup': the trace label of a call of a
+  -- named function, 'Nothing' for any other manifold (DIAG-5).
   , translatorDebugMode :: Bool
   -- ^ Snapshot of 'stateDebugTrace'. When True, DebugWrapS drains the
   -- traceback in 'cppDebugWrap'; the manifold-level catch in
@@ -432,6 +435,7 @@ instance Defaultable CppTranslatorState where
       , translatorSchemas = Map.empty
       , translatorCScope = Map.empty
       , translatorDebugInfo = \_ -> ("", "")
+      , translatorTraceInfo = \_ -> Nothing
       , translatorDebugMode = False
       , translatorConsumableLets = Set.empty
       , translatorCurrentRoot = 0
@@ -497,6 +501,7 @@ translate srcs es = do
   templates <- collectRenderedTemplates cppLang
 
   debugInfo <- makeManifoldDebugInfoLookup
+  traceInfo <- makeTraceLabelLookup
   debugMode <- MM.gets stateDebugTrace
   closureTable <- computeClosureSchemas cppLang es
   stageTable <- stageTableEntries
@@ -507,6 +512,7 @@ translate srcs es = do
         , translatorLogTemplates = templates
         , translatorCScope = mergedCppScope
         , translatorDebugInfo = debugInfo
+        , translatorTraceInfo = traceInfo
         , translatorDebugMode = debugMode
         , translatorConsumableLets = consumableProjectionLets True es
         }
@@ -1164,10 +1170,16 @@ PROPAGATE_ERROR(errmsg)|]
                   (\s -> s {translatorLocalManifoldSet = Set.insert callIndex (translatorLocalManifoldSet s)})
             returnTypeStr <- returnType manifoldType
             typedArgs <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) args
-            let (userName, srclocStr) = translatorDebugInfo state callIndex
+            let debugMode = translatorDebugMode state
+                -- Outside --debug a frame is a call of a named function,
+                -- labeled with its definition (DIAG-5); any other manifold
+                -- has no frame of its own.
+                traceLabel = translatorTraceInfo state callIndex
+                (userName, srclocStr)
+                  | debugMode = translatorDebugInfo state callIndex
+                  | otherwise = maybe ("", "") id traceLabel
                 nameOut = if T.null userName then "_" else userName
                 srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
-                debugMode = translatorDebugMode state
                 -- Raw text with a literal newline; escapeCxxStringLit converts
                 -- '\n' -> "\\n" so the emitted C++ string literal contains the
                 -- escape, not an actual newline byte.
@@ -1207,7 +1219,9 @@ PROPAGATE_ERROR(errmsg)|]
                   , block 4 "catch (...)"
                       (appendFrame frameLit "std::string(\"An unknown error occurred\")")
                   ]
-                innerBlock = tryBody <+> catchBody
+                innerBlock
+                  | not debugMode, Nothing <- traceLabel = vsep (priorLines <> [body])
+                  | otherwise = tryBody <+> catchBody
             -- Wrap labeled manifolds with a chrono start/pass/fail shim,
             -- using user-supplied templates (from YAML 'log-template').
             -- Each event has its own pre-rendered template; a 'Nothing'

@@ -111,9 +111,10 @@ translateBuiltin lang desc srcs es = do
   let preambleDocs = map (substitutePreamble home lib state opt homeDir) preambleTemplates
 
   debugInfo <- makeManifoldDebugInfoLookup
+  traceInfo <- makeTraceLabelLookup
   debugMode <- gets stateDebugTrace
   let (mDocs, schemas) = runIndex 0 $ do
-        docs <- mapM (translateSegment desc srcNamer debugInfo debugMode) es
+        docs <- mapM (translateSegment desc srcNamer debugInfo traceInfo debugMode) es
         tbl <- getSchemaTable
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
@@ -168,9 +169,10 @@ translateExternal cmd lang desc srcs es = do
           else \src -> pretty (srcName src)
 
   debugInfo <- makeManifoldDebugInfoLookup
+  traceInfo <- makeTraceLabelLookup
   debugMode <- gets stateDebugTrace
   let (mDocs, schemas) = runIndex 0 $ do
-        docs <- mapM (translateSegment desc srcNamer debugInfo debugMode) es
+        docs <- mapM (translateSegment desc srcNamer debugInfo traceInfo debugMode) es
         tbl <- getSchemaTable
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
@@ -399,11 +401,12 @@ translateSegment ::
   LangDescriptor ->
   (Source -> MDoc) ->
   (Int -> (Text, Text)) ->
+  (Int -> Maybe (Text, Text)) ->
   Bool ->
   SerialManifold ->
   IndexM MDoc
-translateSegment desc srcNamer debugInfo debugMode m0 =
-  let cfg = genericLowerConfig desc srcNamer debugInfo debugMode
+translateSegment desc srcNamer debugInfo traceInfo debugMode m0 =
+  let cfg = genericLowerConfig desc srcNamer debugInfo traceInfo debugMode
    in renderPoolDocs <$> foldWithSerialManifoldM (defaultFoldRules cfg) m0
 
 -- | Build a LowerConfig from a LangDescriptor, a source-name function,
@@ -414,9 +417,10 @@ genericLowerConfig ::
   LangDescriptor ->
   (Source -> MDoc) ->
   (Int -> (Text, Text)) ->
+  (Int -> Maybe (Text, Text)) ->
   Bool ->
   LowerConfig IndexM
-genericLowerConfig desc srcNamer debugInfo debugMode = cfg
+genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
   where
     -- Shared arg-schema list + result-schema doc for the two reflect hooks;
     -- mlc_reflect and mlc_reflect_from_tuple differ only in whether the wire
@@ -618,13 +622,14 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                 -- In --debug mode DebugWrapS wraps every manifold body
                 -- and the drain provides the traceback; emitting an
                 -- "at" line here too would double every frame.
+                -- Only a call of a named function is a frame of the trace
+                -- (DIAG-5); any other manifold gets no handler.
                 wrapError xs
                   | debugMode = xs
-                  | otherwise =
+                  | Nothing <- traceInfo m = xs
+                  | Just (nameOut, srclocStr) <- traceInfo m =
                       let openLine = ldErrorWrapOpen desc
                           closeLines = ldErrorWrapClose desc
-                          (userName, srclocStr) = debugInfo m
-                          nameOut = if T.null userName then "_" else userName
                           srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
                           substs =
                             [ ("name", nameOut)

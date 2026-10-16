@@ -189,22 +189,28 @@ impl Default for NexusConfig {
     }
 }
 
-/// Collapse runs of adjacent identical lines in an error message.
-///
-/// When an error bubbles up through deep recursion across pool boundaries,
-/// each layer may prepend the same wrapper string to the inner cause. The
-/// result is N copies of the same line burying the root cause. This pass
-/// keeps the first occurrence of each adjacent duplicate and drops the rest.
-/// Non-adjacent duplicates are preserved (they may be legitimate repeats).
+/// Print a run of adjacent identical lines in an error message once, followed
+/// by the number of repeats (DIAG-5), so a trace through deep recursion does
+/// not bury the root cause. Non-adjacent duplicates are kept.
 fn collapse_duplicate_lines(msg: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for line in msg.split_inclusive('\n') {
-        if out.last().map_or(false, |prev| *prev == line) {
-            continue;
+    let mut out = String::with_capacity(msg.len());
+    let mut lines = msg.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        out.push_str(line);
+        let mut repeats = 0usize;
+        while lines.peek() == Some(&line) {
+            lines.next();
+            repeats += 1;
         }
-        out.push(line);
+        if repeats > 0 {
+            let plural = if repeats == 1 { "" } else { "s" };
+            out.push_str(&format!("\n  [previous line repeated {repeats} more time{plural}]"));
+        }
+        if lines.peek().is_some() {
+            out.push('\n');
+        }
     }
-    out.concat()
+    out
 }
 
 const STDOUT_BUF_CAPACITY: usize = 64 * 1024;
@@ -2105,8 +2111,11 @@ mod tests {
     }
 
     #[test]
-    fn collapse_drops_adjacent_duplicates() {
-        assert_eq!(collapse_duplicate_lines("A\nA\nB\nA\n"), "A\nB\nA\n");
+    fn collapse_counts_adjacent_duplicates() {
+        assert_eq!(
+            collapse_duplicate_lines("A\nA\nB\nA\n"),
+            "A\n  [previous line repeated 1 more time]\nB\nA\n"
+        );
     }
 
     #[test]
@@ -2117,12 +2126,12 @@ mod tests {
     #[test]
     fn collapse_collapses_long_run() {
         let input = "boom\n".repeat(20);
-        assert_eq!(collapse_duplicate_lines(&input), "boom\n");
+        assert_eq!(collapse_duplicate_lines(&input), "boom\n  [previous line repeated 19 more times]\n");
     }
 
     #[test]
     fn collapse_handles_no_trailing_newline() {
-        assert_eq!(collapse_duplicate_lines("A\nA"), "A\nA");
+        assert_eq!(collapse_duplicate_lines("A\nA"), "A\n  [previous line repeated 1 more time]");
     }
 
     #[test]

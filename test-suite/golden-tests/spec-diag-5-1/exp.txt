@@ -1,0 +1,36 @@
+== py deep
+Error: run failed
+boom
+  at down [py] (main-py.loc:13:1)
+  [previous line repeated 2 more times]
+  at deep [py] (main-py.loc:18:1)
+== py caught
+Error: run failed
+{"Err":["boom\n  at down [py] (main-py.loc:13:1)\n  at down [py] (main-py.loc:13:1)\n  at down [py] (main-py.loc:13:1)"]}
+== r deep
+Error: run failed
+boom
+  at down [r] (main-r.loc:13:1)
+  [previous line repeated 2 more times]
+  at deep [r] (main-r.loc:18:1)
+== r caught
+Error: run failed
+{"Err":["boom\n  at down [r] (main-r.loc:13:1)\n  at down [r] (main-r.loc:13:1)\n  at down [r] (main-r.loc:13:1)"]}
+== cpp deep
+Error: run failed
+boom
+  at down [cpp] (main-cpp.loc:13:1)
+  [previous line repeated 2 more times]
+  at deep [cpp] (main-cpp.loc:18:1)
+== cpp caught
+Error: run failed
+{"Err":["boom\n  at down [cpp] (main-cpp.loc:13:1)\n  at down [cpp] (main-cpp.loc:13:1)\n  at down [cpp] (main-cpp.loc:13:1)"]}
+== rs deep
+Error: run failed
+Rust code panicked: boom
+  at down [rust] (main-rs.loc:13:1)
+  [previous line repeated 2 more times]
+  at deep [rust] (main-rs.loc:18:1)
+== rs caught
+Error: run failed
+{"Err":["Rust code panicked: boom\n  at down [rust] (main-rs.loc:13:1)\n  at down [rust] (main-rs.loc:13:1)\n  at down [rust] (main-rs.loc:13:1)"]}

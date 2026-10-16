@@ -306,6 +306,12 @@ data MorlocState = MorlocState
   -- records no type of its own, and a closure capturing it still has to
   -- know what it holds.
   , stateManifoldEffects :: Map Int (Set.Set EffectLabel)
+  , stateDefinitionSite :: Map Int Int
+  -- ^ Signature index of a named term -> index of the declaration that
+  -- defines it, whose source position a failure's trace reports (DIAG-5).
+  , stateNameSource :: Map Int Int
+  -- ^ An index minted during code generation and given a term's name ->
+  -- the index it took the name from.
   -- ^ Map from export manifold ID to its original return effect labels
   , stateProjectRoot :: Maybe Path
   -- ^ Project root directory (directory of the entry-point file)
@@ -1076,6 +1082,8 @@ instance Defaultable MorlocState where
       , stateHostOriginClosures = Set.empty
       , stateArgTypes = Map.empty
       , stateManifoldEffects = Map.empty
+      , stateDefinitionSite = Map.empty
+      , stateNameSource = Map.empty
       , stateProjectRoot = Nothing
       , stateEnvSpecLangs = []
       , stateEvalMode = False

@@ -268,6 +268,7 @@ freeBound bs (AnnoS _ _ e) = case e of
 -- place of their parameters, which it no longer takes.
 specialize :: EVar -> Helper -> Map.Map Int Tree -> MorlocMonad (EVar, Tree)
 specialize h hp fixedArgs = do
+  let AnnoS (Idx source _) _ _ = hTree hp
   AnnoS (Idx gi t) c root <- reindexTree (hTree hp)
   let name = EV (unEVar h <> MT.pack ("@static" <> show gi))
       dropped = Map.keysSet fixedArgs
@@ -282,6 +283,7 @@ specialize h hp fixedArgs = do
   tree <- applyPoolLambdas (AnnoS (Idx gi (dropInputs dropped t)) c (LamS (dropAt dropped params) body'))
   MM.modify $ \s ->
     s { stateName = Map.insert gi name (stateName s)
+      , stateNameSource = Map.insert gi source (stateNameSource s)
       , stateRecursionTargets = Map.insert name gi (stateRecursionTargets s)
       }
   return (name, tree)

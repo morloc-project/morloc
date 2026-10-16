@@ -387,7 +387,10 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                   tt' = tt {termConcrete = srcTerm : termConcrete tt}
                   sigmap' = Map.insert termIdx (Monomorphic tt') sigmap
                   idmap' = Map.insert i termIdx idmap
-              MM.modify (\s -> s {stateSignatures = GMap idmap' sigmap'})
+              MM.modify (\s -> s
+                { stateSignatures = GMap idmap' sigmap'
+                , stateDefinitionSite = Map.insertWith (\_ old -> old) termIdx i (stateDefinitionSite s)
+                })
             (Just (Polymorphic cls _ _ _)) ->
               MM.throwSourcedError i $
                 "Source term"
@@ -412,7 +415,10 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
               let tt' = tt {termDecl = e : termDecl tt}
                   sigmap' = Map.insert termIdx (Monomorphic tt') sigmap
                   idmap' = Map.insert i termIdx idmap
-              MM.modify (\ms -> ms {stateSignatures = GMap idmap' sigmap'})
+              MM.modify (\ms -> ms
+                { stateSignatures = GMap idmap' sigmap'
+                , stateDefinitionSite = Map.insert termIdx i (stateDefinitionSite ms)
+                })
               linkScoped bnds c termIdx e es
             (Just (Polymorphic cls _ _ _)) ->
               MM.throwSourcedError i $
@@ -592,8 +598,9 @@ linkInstance linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
       let et' = et {etype = t}
       let tt = TermTypes (Just et') [(m0, Idx i src)] []
       linkTermTypes v et tt stateIdx
-    linkExpr (ExprI _ (AssE v e es)) = do
+    linkExpr (ExprI ai (AssE v e es)) = do
       (Signature _ _ et, stateIdx) <- lookupInfo v
+      MM.modify (\ms -> ms {stateDefinitionSite = Map.insert stateIdx ai (stateDefinitionSite ms)})
       linker stateIdx e es
       t <- substituteInstanceTypes params0 (etype et)
       let et' = et {etype = t}
