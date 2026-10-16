@@ -1741,20 +1741,33 @@ isValueArg (NativeArgManifold _) = False
 -- | @if c then b else False@ is @c && b@ and @if c then True else b@ is
 -- @c || b@, written with the language's operator when @b@ needs no
 -- statements, so its evaluation stays where the conditional put it.
-shortCircuit :: LowerConfig m -> NativeExpr -> NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> Maybe PoolDocs
-shortCircuit cfg thenE elseE condDocs thenDocs elseDocs = case (thenE, elseE) of
-  (_, LogN _ False) | null (poolPriorLines thenDocs) -> Just (combine True thenDocs)
-  (LogN _ True, _) | null (poolPriorLines elseDocs) -> Just (combine False elseDocs)
+-- An operand that is itself a chain of the same operator is written without
+-- its parentheses, so a chain is flat however long it is: both operators are
+-- associative and evaluate their operands left to right in every language.
+shortCircuit :: LowerConfig m -> NativeExpr -> NativeExpr -> NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> Maybe PoolDocs
+shortCircuit cfg condE thenE elseE condDocs thenDocs elseDocs = case (thenE, elseE) of
+  (_, LogN _ False) | null (poolPriorLines thenDocs) -> Just (combine True thenE thenDocs)
+  (LogN _ True, _) | null (poolPriorLines elseDocs) -> Just (combine False elseE elseDocs)
   _ -> Nothing
   where
-    combine isAnd other = PoolDocs
+    combine isAnd otherE other = PoolDocs
       { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds other
-      , poolExpr = parens (lcShortCircuit cfg isAnd (poolExpr condDocs) (poolExpr other))
+      , poolExpr = parens (lcShortCircuit cfg isAnd (operand isAnd condE condDocs) (operand isAnd otherE other))
       , poolPriorLines = poolPriorLines condDocs
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs other
       , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag other
       , poolBorrowedLocal = Nothing
       }
+    -- A chain written by 'combine' is exactly its operator expression in
+    -- parentheses; one that needed statements is a variable instead.
+    operand isAnd e docs
+      | chainOperator e == Just isAnd
+      , Just inner <- T.stripPrefix "(" (render (poolExpr docs)) >>= T.stripSuffix ")" =
+          pretty inner
+      | otherwise = poolExpr docs
+    chainOperator (IfN _ _ _ (LogN _ False)) = Just True
+    chainOperator (IfN _ _ (LogN _ True) _) = Just False
+    chainOperator _ = Nothing
 
 lowerNativeExprRaw ::
   (Monad m) =>
@@ -1988,10 +2001,10 @@ lowerNativeExprRaw cfg _ (CoerceN_ CoerceToOptional _ x) =
   return $ x {poolExpr = lcCoerceOptional cfg (poolExpr x)}
 -- The two arms feed the conditional's owned result sink, so adapt each to an
 -- owned value (like every other owned sink); the condition is not a sink.
-lowerNativeExprRaw cfg origExpr@(IfN _ _ thenE elseE) (IfN_ _ condDocs thenDocs elseDocs) = do
+lowerNativeExprRaw cfg origExpr@(IfN _ condE thenE elseE) (IfN_ _ condDocs thenDocs elseDocs) = do
   thenDocs' <- adaptOwnedElem cfg thenE thenDocs
   elseDocs' <- adaptOwnedElem cfg elseE elseDocs
-  case shortCircuit cfg thenE elseE condDocs thenDocs' elseDocs' of
+  case shortCircuit cfg condE thenE elseE condDocs thenDocs' elseDocs' of
     Just docs -> return docs
     Nothing -> lcMakeIf cfg origExpr condDocs thenDocs' elseDocs'
 lowerNativeExprRaw cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =

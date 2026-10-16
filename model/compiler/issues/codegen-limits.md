@@ -2,11 +2,11 @@
 
 Generated code that a language's own tools refuse.
 
-- [read] R's parser bounds nesting at 50 contexts (`contextstack overflow`),
-  each `(`, `[`, `{` and `if` one. A chain of more than about 50 `&&` or
-  `||` operands is written as nested parenthesized operators, and a guard
-  chain (`? c1 = .. : ? c2 = .. : ..`) of about 25 cases as nested
-  `if`/`else` blocks, so either fails to load in an R pool. Spec gap: no
-  item bounds the nesting of generated code. Flat forms exist for both
-  (an `else if` chain; a `repeat` block that breaks at the first operand
-  that decides the result).
+- [reproduced] R's parser refuses nesting past about 50 levels
+  (`contextstack overflow`): 50 nested `if`/`else` blocks fail, where the
+  same logic written as `if .. else if ..` parses at any length. morloc
+  writes a guard chain (`? c1 = .. : ? c2 = .. : ..`) as nested `if`/`else`
+  blocks, so a chain of about 50 cases fails to load in an R pool. Fix:
+  write it as `else if` where a case's condition needs no statements of
+  its own. Spec gap: no item bounds the nesting of generated code
+  (EMIT-4 covers `&&`/`||` chains only).

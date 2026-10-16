@@ -50,3 +50,14 @@ initializes a local of the return type that is then returned by name. A
 named function's body always ends in a return, and the compiler rejects
 one that does not. The boundaries of STATE-6 are the only generated
 handlers. Serves RECUR-4 and DIAG-5.
+
+### EMIT-4 A chain of `&&` or `||` is written flat
+Intent: ruled 2026-10-16
+Tests: spec-emit-4-1
+Code: conforms 2026-10-16
+
+A chain of operands of one of the two operators is written as the
+language's operator between them, with no parentheses inside the chain,
+so it loads at any length: R's parser refuses nesting past about 50
+levels. A chain of mixed operators keeps the parentheses its grouping
+needs, and a chain inside a larger expression is parenthesized as a whole.

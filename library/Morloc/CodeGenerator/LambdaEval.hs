@@ -522,7 +522,7 @@ reduce ai
     wrapLets i1 tb1 hoisted =<< case () of
       _ | isFunctionType tv, AnnoS (Idx ti _) tc (IntrinsicS IntrThrow msg) <- e1n ->
             retypeThrow ti i1t tc msg
-        | isValue e1n && (ai || nrefs <= 1) ->
+        | isValue e1n && (ai || nrefs <= 1 || isScalarLiteral e1n) ->
             substituteAnnoS v e1n e2 >>= reduce ai . rebuild
         | isValue e1n -> share normalized v e1n e2
         -- A function built by a computation, on the nexus path. The pure
@@ -885,3 +885,14 @@ reindexAnnoS (AnnoS (Idx i t) c e) = do
   i' <- newIndex i
   e' <- mapExprSM reindexAnnoS e
   return (AnnoS (Idx i' t) c e')
+
+-- A literal that costs nothing to write at each use, so binding it once to
+-- share it saves nothing; a string or a container is built at each use.
+isScalarLiteral :: AnnoS e f c -> Bool
+isScalarLiteral (AnnoS _ _ e) = case e of
+  IntS _ _ -> True
+  RealS _ _ -> True
+  LogS _ -> True
+  NullS -> True
+  UniS -> True
+  _ -> False
