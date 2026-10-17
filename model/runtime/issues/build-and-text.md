@@ -89,3 +89,13 @@
   stops the run.
 - [reproduced] `morloc init -f` exits 0 when data/lang/cpp/cppmorloc.cpp
   fails to compile, leaving the previous libcppmorloc.a installed.
+- [observed once] A `morloc make` run with the current compiler on PATH
+  (`~/.local/bin/morloc`, built 2026-10-17) produced a Rust pool whose code
+  only morloc 0.100.2 emits (`rustmorloc::FrameGuard`, removed in
+  7205b50c). The environment sets `MORLOC_BIN=/opt/morloc-runtime/morloc`,
+  which is 0.100.2 (2026-09-03), and `morloc make` provisions through
+  `MORLOC_BUILD_HOOK` (mim sync), so some step ran the older compiler. A
+  rebuild in the same directory, and a build in a fresh one, both used the
+  current compiler. Repro attempt: the #179 program under
+  /work/plans/issues-2026-10-05/r5-rust-loop-clone/mapped, built in a new
+  directory right after a compiler reinstall.

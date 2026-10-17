@@ -2,7 +2,7 @@
 -- of the carried value, so it copies nothing per step: walking a chain of n
 -- links costs at most one copy of the chain, made where the loop starts,
 -- not one copy of the remaining chain per step.
-module main (walk)
+module main (walk, walkMatch)
 
 import root-rust
 
@@ -23,6 +23,17 @@ count :: Int -> Chain -> Int
 count | acc (Link _ rest) = count (acc + 1) rest
       | acc _ = acc
 
+-- The same walk written with `match`, which binds the carried value to a
+-- local of its own before taking the tail.
+countMatch :: Int -> Chain -> Int
+countMatch k c = match c
+  | End = k
+  | (Link _ rest) = countMatch (k + 1) rest
+
 --' The links counted, then the links copied while counting
 walk :: Int -> (Int, Int)
 walk n = clones (count 0 (build n End))
+
+--' The same, walking with the `match` form
+walkMatch :: Int -> (Int, Int)
+walkMatch n = clones (countMatch 0 (build n End))

@@ -2563,7 +2563,8 @@ rustMakeLoop res carried body = do
     LoopResultSerial -> return "*mut u8"
     LoopResultNative t -> rustTypeOf t
   let resultVar = helperNamer resultIdx
-  bodyLines <- walk (fst (moveLastUses (map (render . nvarNamer . fst) carried) body))
+  let owned = map fst carried <> boundIn body
+  bodyLines <- walk (fst (moveLastUses (map (render . nvarNamer) owned) body))
   -- A native loop's locals are its own, started from their initializers.
   let initLines = concat [poolPriorLines d <> ["let mut" <+> nvarNamer i <+> "=" <+> poolExpr d <> ";"] | (i, Just d) <- carried]
       loopExpr = vsep ["loop {", indent 4 (vsep bodyLines), "}"]
@@ -2579,6 +2580,11 @@ rustMakeLoop res carried body = do
     }
   where
     ids = map fst carried
+    -- The native locals the iteration binds, owned like the carried ones.
+    boundIn (LoopNLet i _ b) = i : boundIn b
+    boundIn (LoopSLet _ _ b) = boundIn b
+    boundIn (LoopIf _ t e) = boundIn t <> boundIn e
+    boundIn _ = []
     walk (LoopBase seDocs) =
       return $ poolPriorLines seDocs <> ["break" <+> poolExpr seDocs <> ";"]
     walk (LoopContinue contDocs) = do
@@ -2605,9 +2611,10 @@ rustMakeLoop res carried body = do
             ]
       return $ poolPriorLines guardDocs <> [ifBlock]
 
--- | A carried value's last use on every path through an iteration takes the
--- value instead of copying it, since the value is reassigned or the loop
--- ends before anything reads it again. A use qualifies when it is the only
+-- | A value the loop owns, carried or bound in the iteration, is taken
+-- instead of copied at its last use on every path through an iteration,
+-- since it is reassigned, out of scope or the loop ends before anything
+-- reads it again. A use qualifies when it is the only
 -- mention of the value in its step and no later step on any path mentions
 -- it, and no loop or closure in the step can run that mention twice: a
 -- copied value is then the value itself, and a constructor field is taken
