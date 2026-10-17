@@ -22,19 +22,22 @@ compile error.
 Intent: ruled 2026-10-07
 Code: unaudited
 
-Anonymous records are not supported. A record literal has the record type
-that a signature or an annotation gives it; the field names alone never
-determine its type.
+A record literal has the record type that a signature or an annotation
+gives it; the field names alone never determine its type.
 
-### REC-4 A record literal with no type from context
-Intent: open
-Code: unaudited
+### REC-4 An instance never gives a record literal its type
+Intent: ruled 2026-10-17
+Tests: spec-rec-4-1, spec-rec-4-2
+Code: conforms 2026-10-17
 
-When no signature or annotation gives a record literal its type, is the
-program (a) rejected at compile time, at the literal, or (b) accepted, with
-the failure left to the build or to a pool at run time? REC-3 rules out
-inferring an anonymous type, so (b) means accepting a program whose meaning
-is undefined.
+A record literal that no signature or annotation types is an anonymous
+record. Instance resolution does not choose a type for it: a literal that
+would get its type only from the instance a class method resolves to, as
+in `{num = n, den = 2} == {num = 2 * n, den = 4}` with `instance Eq Q`, is
+rejected at compile time, at the literal.
+
+Why: ruled 2026-10-17 (#160); rejecting every untyped literal would remove
+anonymous records, which pure nexus code, getters and views use.
 
 ### REC-5 Field access and update are getter and setter patterns
 Intent: proposed

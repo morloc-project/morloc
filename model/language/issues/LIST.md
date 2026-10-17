@@ -12,7 +12,7 @@ it is solved, and a file when it is empty.
 - [values.md](values.md): newtype native form dropped (NEWT-4), `data` comparison in R and C++ (SUM-5), `@savem`/`@load` digits, numpy.int64 table column in Python
 - [programs.md](programs.md): single-export command name, argument numbering, `@check.path`/`@stdin` help, `@default` messages, unlocated CLI build errors, benchmark `{lang}`
 - [manual.md](manual.md): manual text that contradicts a spec item or itself
-- [typeclasses.md](typeclasses.md): compiler crashes in instance bodies, catch-all fallthrough depends on instance body (CLS-12), unchecked class obligations and superclasses (CLS-5)
+- [typeclasses.md](typeclasses.md): compiler crashes in instance bodies, catch-all fallthrough depends on instance body (CLS-12), unchecked class obligations and superclasses (CLS-5), a method used at another type inside its own instance calls that instance (CLS-2, #160)
 - [records.md](records.md): design decision pending: are inline (anonymous) record types legal?; a generic Rust struct cannot carry a phantom parameter, a phantom parameter still needs a Python form when a Python function takes the record
 - [tables.md](tables.md): a table cannot be streamed; it is loaded whole before the command runs
 - [interfaces.md](interfaces.md): CLI, daemon HTTP/LP, MCP and front end disagree on commands served, argument decoding and defaults, `@default`, render bytes, failure classes, discovery, limits and eval gating (IFACE)

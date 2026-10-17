@@ -148,7 +148,63 @@ resolvePendingNumLits g0 entries = do
 typecheck ::
   [AnnoS Int ManyPoly Int] ->
   MorlocMonad [AnnoS (Indexed TypeU) Many Int]
-typecheck = mapM (typecheckRoot >=> assertStructuralTypesExpanded)
+typecheck = mapM typecheckRoot
+
+-- | A recursive call reaches the one function its definition becomes, so it
+-- has that definition's type. A class method named inside its own instance
+-- at another type resolves by that type (CLS-2); bound to the instance
+-- being defined instead, it would run that instance on values of the wrong
+-- type (#160), so a ground mismatch stops the build here.
+assertBackEdgeTypes :: AnnoS (Indexed TypeU) Many Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
+assertBackEdgeTypes root = go Map.empty root >> return root
+  where
+    go :: Map.Map EVar TypeU -> AnnoS (Indexed TypeU) Many Int -> MorlocMonad ()
+    go env (AnnoS (Idx i t) _ e) = case e of
+      CallS v -> case Map.lookup v env of
+        Just tdef
+          | groundU t
+          , groundU tdef
+          , typeOf t /= typeOf tdef ->
+              MM.throwCompilerBugAt i $
+                "the call of" <+> squotes (pretty v) <+> "here is bound to its own definition, of type"
+                  <+> pretty tdef <> ", at another type," <+> pretty t
+        _ -> return ()
+      VarS v (Many xs) -> mapM_ (go (Map.insert v t env)) xs
+      _ -> mapM_ (go env) (foldExprS (: []) e)
+    groundU ty = case ty of
+      ExistU {} -> False
+      VarU _ -> False
+      KVarU _ -> False
+      ListVarU _ -> False
+      SetVarU _ -> False
+      ForallU _ _ -> False
+      FunU ts x -> all groundU (x : ts)
+      AppU x ts -> all groundU (x : ts)
+      NamU _ _ ps rs -> all groundU ps && all (groundU . snd) rs
+      EffectU _ x -> groundU x
+      OptionalU x -> groundU x
+      OpU _ ts -> all groundU ts
+      LabeledU _ x -> groundU x
+      _ -> True
+
+-- | The record literals whose type checking left open, before instance
+-- resolution (REC-4).
+openRecordLiterals :: AnnoS (Indexed TypeU) ManyPoly Int -> Set.Set Int
+openRecordLiterals t = Set.fromList [i | AnnoS (Idx i (ExistU {})) _ (NamS _) <- annoNodes t]
+
+-- | REC-4: an instance never gives a record literal its type. A literal that
+-- was open before instance resolution and has a type after it is rejected
+-- at the literal; one still open stays an anonymous record.
+rejectInstanceTypedRecords :: Set.Set Int -> AnnoS (Indexed TypeU) Many Int -> MorlocMonad ()
+rejectInstanceTypedRecords open t =
+  case [i | AnnoS (Idx i ty) _ (NamS _) <- annoNodes t, Set.member i open, not (isExist ty)] of
+    [] -> return ()
+    (i : _) ->
+      MM.throwSourcedError i
+        "This record literal has no type of its own: a class method cannot give it one. Give it a type with a signature or an annotation"
+  where
+    isExist ExistU {} = True
+    isExist _ = False
 
 -- | Every alias of an arrow, effect or optional type is expanded where it is
 -- declared (see 'expandStructuralAliases'), and later stages read those
@@ -167,11 +223,11 @@ assertStructuralTypesExpanded = mapAnnoSGM check
 -- | Check one tree on its own: its outermost 'VarS' is the definition being
 -- checked, and nothing outside the tree constrains it.
 typecheckRoot :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
-typecheckRoot = typecheckWith Nothing
+typecheckRoot = typecheckWith Nothing >=> assertStructuralTypesExpanded >=> assertBackEdgeTypes
 
 -- | Check one tree against a type, as a use of it at that type is checked.
 typecheckRootAt :: TypeU -> AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
-typecheckRootAt t = typecheckWith (Just t)
+typecheckRootAt t = typecheckWith (Just t) >=> assertStructuralTypesExpanded >=> assertBackEdgeTypes
 
 typecheckWith :: Maybe TypeU -> AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
 typecheckWith expected = run
@@ -203,6 +259,7 @@ typecheckWith expected = run
       insetSay "========================================================"
       e2 <- coerceLiteralsToOptional . mapAnnoSG (fmap normalizeType) . applyGen g1 $ e1
 
+      let openRecords = openRecordLiterals e2
       (g2, e3) <- resolveInstances g1 e2
       let g3 = apply g2 g2
 
@@ -303,6 +360,7 @@ typecheckWith expected = run
       -- solved by now, so reject it here.
       let finalE = mapAnnoSG (fmap normalizeType) (applyGen g3 e3)
       _ <- mapAnnoSGM checkFinalType finalE
+      rejectInstanceTypedRecords openRecords finalE
       return finalE
 
     -- Problems that only become visible once every kind variable is solved.

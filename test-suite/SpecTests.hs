@@ -166,6 +166,34 @@ modTests =
           f :: Int -> Int
           f x = mkP x
         |]
+    , reject
+        "spec-rec-4-1"
+        [r|
+        module main (g)
+          record Q where
+            num :: Int
+            den :: Int
+          class Same a where
+            same :: a -> a -> Bool
+          instance Same Q where
+            same a b = True
+          g :: Int -> Bool
+          g n = same {num = n, den = 2} {num = n, den = 4}
+        |]
+    , accept
+        "spec-rec-4-2"
+        [r|
+        module main (g)
+          record Q where
+            num :: Int
+            den :: Int
+          class Same a where
+            same :: a -> a -> Bool
+          instance Same Q where
+            same a b = True
+          g :: Int -> Bool
+          g n = same ({num = n, den = 2} :: Q) {num = n, den = 4}
+        |]
     ]
 
 aliasTests :: TestTree
