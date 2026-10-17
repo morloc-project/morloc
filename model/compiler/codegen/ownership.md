@@ -85,3 +85,18 @@ bound to such a part is a borrow too, unless its index is bound twice or
 its type is one a copy of costs nothing. Walking a borrowed structure then
 copies none of it, however deep it is. A carried value that some iteration
 replaces with a value it builds is owned, and starts from a copy.
+
+### OWN-7 A function that keeps an argument takes it from its caller
+Intent: ruled 2026-10-17
+Tests: spec-own-7-1
+Code: conforms 2026-10-17
+
+A fully applied manifold takes a parameter by value instead of by
+reference when its body reads that parameter once, on every evaluation, and
+keeps what it reads: as the start of a loop value that is not a borrow
+(OWN-6), or as an element of a value it builds. A parameter kept on only
+one branch stays a reference, so the branch that drops it copies nothing. Each call then moves the argument when the caller
+reads it for the last time, and copies it otherwise, so a copy happens at
+most once per call and only where the caller still needs the value. A
+closure keeps taking its parameters by reference, since its signature is
+shared by every caller.

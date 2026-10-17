@@ -71,18 +71,7 @@ same name sees what was taken.
   value moves it twice, where a native conditional return moves it at most
   once, and the type needs a default constructor. Seen in
   golden:spec-emit-3-1 (`up 3`: 8 moves).
-- **A Rust tail loop copies a borrowed parameter it owns at entry.**
-  [reproduced] Cost, and a crash for a deep value, which RECUR-4 makes a
-  bug. A carried local that
-  some iteration replaces with a value the loop builds owns its value
-  (OWN-6), so it starts from a copy of the manifold's `&T` parameter:
-  `let mut n18 = n8.clone();` in `build` (golden:spec-eval-7-2). For a user
-  chain with a recursive `Clone`, a loop handed a chain of a million links
-  as its accumulator dies in that clone at the native stack limit: with
-  spec-own-6-1's `chain.rs`, `grow n = clones (count 0 (build 2 (build n
-  End)))` gives `[1002,1000]` at n = 1000 and SIGSEGV in `build` at n =
-  10^6, though the caller passes a temporary it never reads again. A caller
-  that moves its last use of the argument into the call would avoid it;
-  that is a change to the argument convention, not to loops. A local also
-  owns its value when its next value comes through an `if` (`tl c` inlined
-  as a `match`), which OWN-6 does not see through.
+- **A Rust loop local owns its value when its next value comes through an
+  `if`.** [reproduced] Cost; OWN-6 does not see through an inlined `match`,
+  so `dropC k c ? k == 0 = c : dropC (k - 1) (tl c)` with `tl` a `match`
+  copies its parameter at entry.

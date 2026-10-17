@@ -1,0 +1,84 @@
+-- Spec OWN-7: a function that keeps a value it is given takes it from the
+-- caller instead of copying it. A loop that builds onto a chain handed to it
+-- takes the chain, and so does a constructor; a caller that still needs the
+-- chain copies it once, at the call. The counting Clone recurses down the
+-- chain, so a copy of a million links would not fit a 2 MiB stack. A chain
+-- read from the command line is handed over, not copied; a call from a loop,
+-- a lambda or a non-tail recursion copies what it still needs; and a chain
+-- kept on one branch only is not copied on the other.
+module main (grow, wrapped, kept, given, inLoop, inLambda, nonTail, maybeKept)
+
+import root-rust
+
+data Chain = End | Link Int Chain
+
+data Rust => Chain = "Chain"
+
+source Rust from "chain.rs" ("clones")
+
+clones :: Int -> (Int, Int)
+
+build :: Int -> Chain -> Chain
+build n acc
+  ? n == 0 = acc
+  : build (n - 1) (Link n acc)
+
+count :: Int -> Chain -> Int
+count | acc (Link _ rest) = count (acc + 1) rest
+      | acc _ = acc
+
+prepend :: Int -> Chain -> Chain
+prepend x c = Link x c
+
+--' The links counted after two more are built onto a chain of n, then the links copied
+grow :: Int -> (Int, Int)
+grow n = clones (count 0 (build 2 (build n End)))
+
+--' The same, with one link put on by a constructor
+wrapped :: Int -> (Int, Int)
+wrapped n = clones (count 0 (prepend 0 (build n End)))
+
+--' Both a longer chain and the chain it was built from, counted
+kept :: Int -> (Int, Int)
+kept n = clones (count 0 (build 1 c) + count 0 c)
+  where
+    c = build n End
+
+--' The links counted after two more are built onto a chain given as input, then the links copied
+given :: Chain -> (Int, Int)
+given c = clones (count 0 (build 2 c))
+
+rep :: Int -> Chain -> Int -> Int
+rep k c acc
+  ? k == 0 = acc
+  : rep (k - 1) c (acc + count 0 (build 1 c))
+
+--' Three times the links of a chain one longer than n, then the links copied
+inLoop :: Int -> (Int, Int)
+inLoop n = clones (rep 3 (build n End) 0)
+
+--' The links of chains one, two and three longer than n
+inLambda :: Int -> [Int]
+inLambda n = map (\k -> count 0 (build k c)) [1, 2, 3]
+  where
+    c = build n End
+
+depth :: Int -> Chain -> Int
+depth k c
+  ? k == 0 = count 0 c
+  : 1 + depth (k - 1) (build 1 c)
+
+--' Three plus the links of a chain three longer than n
+nonTail :: Int -> Int
+nonTail n = depth 3 (build n End)
+
+keepIf :: Bool -> Chain -> Chain
+keepIf b c
+  ? b = Link 0 c
+  : End
+
+--' The links kept from a chain of n that is dropped, then the links copied
+maybeKept :: Int -> (Int, Int)
+maybeKept n = clones (count 0 (keepIf False (build n End)) + count 0 (keepIf False c))
+  where
+    c = build n End

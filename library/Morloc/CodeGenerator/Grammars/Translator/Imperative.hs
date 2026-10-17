@@ -61,6 +61,8 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , consumableProjectionLets
   , markLastReads
   , loopBorrowLocals
+  , consumedParams
+  , nativeManifoldsUnder
   , RNode (..)
   , isLastRead
   , isBorrowableProjection
@@ -428,8 +430,9 @@ data ArgSite
   = SourcedArg Source Int
   -- ^ i-th argument of a sourced foreign call (carries the declared signature
   -- so a member can, e.g., pass a type-variable parameter by reference)
-  | ManifoldArg
-  -- ^ argument of a generated manifold call
+  | ManifoldArg Int Int
+  -- ^ argument of a generated manifold call: the callee and the position of
+  -- its parameter
   | ClosureArg
   -- ^ argument of a native closure application (a function-valued variable)
 
@@ -1478,6 +1481,40 @@ loopBorrowLocals mayBorrow g root = go root
     isManifold (RSM _) = True
     isManifold _ = False
 
+-- | The candidate parameters OWN-7 passes by value. The sinks are found
+-- only on the part of the body every evaluation runs.
+consumedParams :: (TypeF -> Bool) -> Set.Set Int -> NativeManifold -> Set.Set Int
+consumedParams mayBorrow cands nm@(NativeManifold _ _ _ body) =
+  Set.filter (\p -> Set.member p kept && readCount p (RN body) == 1) cands
+  where
+    kept = sinks (RN body)
+    borrows = loopBorrowLocals mayBorrow cands (RNM nm)
+    sinks n = case n of
+      RN (IfN _ c _ _) -> sinks (RN c)
+      RN (LoopN _ starts _) -> here n <> mconcat [sinks (RN x) | (_, x) <- starts]
+      RN (DoBlockN _ _) -> Set.empty
+      _ -> here n <> mconcat (map sinks (filter (not . isManifold) (rnodeChildren n)))
+    here (RN e) = case e of
+      LoopN _ starts _ -> Set.fromList [p | (s, BndVarN _ p _) <- starts, not (Set.member s borrows)]
+      VariantN _ _ _ xs -> vars xs
+      ListN _ _ xs -> vars xs
+      TupleN _ xs -> vars xs
+      RecordN _ _ _ kvs -> vars (map snd kvs)
+      _ -> Set.empty
+    here _ = Set.empty
+    vars xs = Set.fromList [p | BndVarN _ p _ <- xs]
+    isManifold (RNM _) = True
+    isManifold (RSM _) = True
+    isManifold _ = False
+
+-- | Every native manifold under a node, nested ones included.
+nativeManifoldsUnder :: RNode -> [NativeManifold]
+nativeManifoldsUnder n = here <> concatMap nativeManifoldsUnder (rnodeChildren n)
+  where
+    here = case n of
+      RNM nm -> [nm]
+      _ -> []
+
 loopBorrows :: (TypeF -> Bool) -> Set.Set Int -> Set.Set Int -> [(Int, NativeExpr)] -> LoopBody NativeExpr SerialExpr NativeExpr -> Set.Set Int
 loopBorrows mayBorrow g reused starts body = settle (Set.fromList [i | (i, s) <- starts, borrowVar g s, not (Set.member i reused)])
   where
@@ -2011,7 +2048,7 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ _ (RecCallP mid _) xs0) = do
   xs <- bindCallArgs cfg origExpr xs0
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
-  return $ mergePoolDocs (\es -> manNamer mid <> tupled (zipWith3 (\own t e -> lcSourcedArg cfg ManifoldArg own t e) owns argTypes es)) (map snd xs)
+  return $ mergePoolDocs (\es -> manNamer mid <> tupled (zipWith4 (\j own t e -> lcSourcedArg cfg (ManifoldArg mid j) own t e) [0 ..] owns argTypes es)) (map snd xs)
 lowerNativeExprRaw _ _ (ManN_ call) = return call
 -- The manifold return is an owned sink: adapt the returned value to an owned
 -- value (Rust clones a borrowed/place value; other members are unchanged) so a
@@ -2674,13 +2711,14 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
           -- variables, so their ownership is read in the caller's scope. A
           -- non-Native (serialized) argument is an owned deserialized value.
           callArgs <- lcWithCallerScope cfg $
-            mapM
-              ( \a@(Arg i t) -> do
+            zipWithM
+              ( \j a@(Arg i t) -> do
                   own <- case t of
                     Native tf -> lcOwnership cfg (BndVarN tf i KeptRead)
                     _ -> return Owned
-                  return $ lcSourcedArg cfg ManifoldArg own t (argNamer a)
+                  return $ lcSourcedArg cfg (ManifoldArg m j) own t (argNamer a)
               )
+              [0 ..]
               (typeMofRs rs)
           return $ mname <> tupled callArgs
         (ManifoldPart rs vs) -> do

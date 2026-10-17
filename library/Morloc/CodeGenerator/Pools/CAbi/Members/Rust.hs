@@ -56,6 +56,8 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , consumableProjectionLets
   , markLastReads
   , loopBorrowLocals
+  , consumedParams
+  , nativeManifoldsUnder
   , RNode (RNM, RSM)
   , papplySteps
   , defaultDeserialize
@@ -133,10 +135,12 @@ data RustState = RustState
   , rsCurrentRoot :: Int
   -- ^ The top-level manifold being lowered (see 'rsConsumable').
   , rsErrors :: [Text]
+  , rsConsumed :: Map.Map Int (Set.Set Int)
+  -- ^ 'rustConsumedParams'.
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty Set.empty 0 []
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty Set.empty 0 [] Map.empty
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -679,14 +683,14 @@ prepareRustCacheArg wrapIdx (j, (a@(Arg i tm), sa)) = do
 -- excluding them is unsound: an owned use followed by a later borrow would slip
 -- through to a use-after-move); the two arms of an 'IfN' are combined by MAX
 -- (they are mutually exclusive at runtime, so a value used once per arm is one
--- use per run); a captured value (a nested manifold's context arg) counts as a
--- use. Descends into nested manifolds; any resulting over-count is safe (an
--- extra clone, never a missed one).
+-- use per run). A nested manifold counts as one use of each of its context
+-- args, the call or capture that hands them over; its body reads are its own
+-- scope's.
 varUseCountOps :: FoldManifoldM Identity (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int)
 varUseCountOps =
   FoldManifoldM
-    { opSerialManifoldM = \full@(SerialManifold_ _ _ form _ _) -> return (ctxOf form `add` foldlSM add mempty full)
-    , opNativeManifoldM = \full@(NativeManifold_ _ _ form _) -> return (ctxOf form `add` foldlNM add mempty full)
+    { opSerialManifoldM = \(SerialManifold_ _ _ form _ _) -> return (ctxOf form)
+    , opNativeManifoldM = \(NativeManifold_ _ _ form _) -> return (ctxOf form)
     , opSerialExprM = \node -> return (foldlSE add mempty node)
     , opNativeExprM = \node -> return $ case node of
         BndVarN_ _ i _ -> Map.singleton i 1
@@ -799,12 +803,12 @@ thinClosures sinks stageTable heads es =
 -- | The shared indices of a serial manifold: variables used at more than one
 -- point in its body (see 'varUseCountOps').
 sharedIndicesSM :: SerialManifold -> Set.Set Int
-sharedIndicesSM = sharedOf . runIdentity . foldSerialManifoldM varUseCountOps
+sharedIndicesSM (SerialManifold _ _ _ _ e) = sharedOf (runIdentity (foldSerialExprM varUseCountOps e))
 
 -- | The shared indices of a native manifold (used as an argument). Counting its
 -- own context args (captures from the enclosing scope) only over-clones (safe).
 sharedIndicesNM :: NativeManifold -> Set.Set Int
-sharedIndicesNM = sharedOf . runIdentity . foldNativeManifoldM varUseCountOps
+sharedIndicesNM (NativeManifold _ _ _ e) = sharedOf (runIdentity (foldNativeExprM varUseCountOps e))
 
 -- | The spec's @owner(e, Gamma)@ as a PURE function: the ownership of a native
 -- expression given @Gamma@ (the borrowed @&T@ parameter indices) and @Shared@
@@ -1427,7 +1431,7 @@ translate srcs es0 = do
   let closureTable = Map.map closureSchemaTexts closureAsts
   logTemplates <- collectRenderedTemplates rustLang
   stageTable <- stageTableEntries
-  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsConsumable = rustMovableProjections es}
+  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsConsumable = rustMovableProjections es, rsConsumed = rustConsumedParams es}
       (code, stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwSystemError . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
 
@@ -2108,6 +2112,26 @@ loopCarriedIdsSM (SerialManifold _ _ _ _ se) = go se
     go (DebugWrapS _ _ _ x) = go x
     go _ = Set.empty
 
+-- | Per fully applied native manifold, the positions of its parameters
+-- OWN-7 passes by value.
+rustConsumedParams :: [SerialManifold] -> Map.Map Int (Set.Set Int)
+rustConsumedParams sms =
+  Map.fromList
+    [ (m, positions)
+    | nm@(NativeManifold m _ form@(ManifoldFull _) _) <- concatMap (nativeManifoldsUnder . RSM) sms
+    , let args = typeMofForm form
+          cands = Set.fromList [i | Arg i (Native tf) <- args, not (rustIsCopy tf)]
+          consumed = consumedParams (not . rustIsCopy) cands nm
+          positions = Set.fromList [j | (j, Arg i _) <- zip [0 ..] args, Set.member i consumed]
+    , not (Set.null positions)
+    ]
+
+-- | The parameter indices manifold @m@ takes by value.
+consumedIndices :: Int -> ManifoldForm (Or TypeS TypeF) TypeF -> RustM (Set.Set Int)
+consumedIndices m form = do
+  positions <- CMS.gets (Map.findWithDefault Set.empty m . rsConsumed)
+  return $ Set.fromList [i | (j, Arg i _) <- zip [0 :: Int ..] (typeMofForm form), Set.member j positions]
+
 -- | Track each manifold's borrowed parameters as the body is folded, so
 -- 'rustOwnership' can tell a borrowed @&T@ parameter from an owned value. For a
 -- native-loop manifold the loop-carried locals are additionally recorded (for
@@ -2119,9 +2143,10 @@ rustSurround =
         let carried = loopCarriedIdsSM sm
             borrowed = borrowedIndicesOfForm form
          in withManifoldScope (borrowed <> loopBorrowLocals (not . rustIsCopy) borrowed (RSM sm)) (sharedIndicesSM sm `Set.union` carried) carried (recurse sm)
-    , surroundNativeManifoldM = \recurse nm@(NativeManifold _ _ form _) ->
-        let borrowed = borrowedIndicesOfForm form
-         in withManifoldScope (borrowed <> loopBorrowLocals (not . rustIsCopy) borrowed (RNM nm)) (sharedIndicesNM nm) Set.empty (recurse nm)
+    , surroundNativeManifoldM = \recurse nm@(NativeManifold m _ form _) -> do
+        consumed <- consumedIndices m form
+        let borrowed = borrowedIndicesOfForm form `Set.difference` consumed
+        withManifoldScope (borrowed <> loopBorrowLocals (not . rustIsCopy) borrowed (RNM nm)) (sharedIndicesNM nm) Set.empty (recurse nm)
     }
 
 translateSegment :: SerialManifold -> RustM MDoc
@@ -2129,7 +2154,8 @@ translateSegment m0@(SerialManifold root _ _ _ _) = do
   resetCounter
   CMS.modify (\st -> st {rsCurrentRoot = root})
   mask <- CMS.gets rsSrcTypeVarMask
-  e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask)) m0
+  consumed <- CMS.gets rsConsumed
+  e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask consumed)) m0
   return $ renderPoolDocs e
 
 -- | Local (filesystem-path) Rust crates declared in @local-deps: {rust: ...}@,
@@ -2325,8 +2351,8 @@ makeTheMaker crateName locks = do
 -- closures/partial application, remote calls, caching, and pattern evaluation
 -- raise a clear v1-unsupported error and are unreachable for the pool shapes
 -- v1 supports.
-rustLowerConfig :: Map.Map SrcName [(Bool, Bool)] -> LowerConfig RustM
-rustLowerConfig mask =
+rustLowerConfig :: Map.Map SrcName [(Bool, Bool)] -> Map.Map Int (Set.Set Int) -> LowerConfig RustM
+rustLowerConfig mask consumed =
   LowerConfig
     { lcSrcName = \src -> pretty (T.cons userCallMark (unSrcName (srcName src)))
     , lcOperator = rustOperator
@@ -2370,6 +2396,9 @@ rustLowerConfig mask =
               Native tf
                 | ClosureArg <- site -> rustRef own x
                 | isVar -> rustRef own x
+                | ManifoldArg m j <- site
+                , Set.member j (Map.findWithDefault Set.empty m consumed) ->
+                    rustOwn own tf x
                 | otherwise -> byType tf
               _ -> x
     , lcOwnership = rustOwnership
@@ -2542,8 +2571,8 @@ rustLowerConfig mask =
           , "|mlcTryV|" <+> okWrap "mlcTryV"
           , "|mlcTryM|" <+> errWrap "mlcTryM"
           ]
-    , lcSerialize = defaultSerialize (rustLowerConfig mask)
-    , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask)
+    , lcSerialize = defaultSerialize (rustLowerConfig mask consumed)
+    , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask consumed)
     -- Reify a crossing closure to its wire tuple via the arity-indexed trait
     -- method `reifyN` (`ClosureOrigin` = `(String, i64, Vec<Vec<u8>>)`). This is
     -- uniform across a closure built here and a proxy reflected from another
@@ -2798,7 +2827,12 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm isCl
       -- closure names no lifetime: it owns what it captures ('capInit')
       -- and a captured function value is an `Arc` clone, not a borrow.
       retStr <- rustReturnType manifoldType
-      typedArgs <- mapM rustArgOf args
+      kept <- CMS.gets (Map.findWithDefault Set.empty callIndex . rsConsumed)
+      typedArgs <-
+        zipWithM
+          (\j a@(Arg _ t) -> if Set.member j kept then (\ts -> argNamer a <> ":" <+> ts) <$> rustArgType t else rustArgOf a)
+          [0 :: Int ..]
+          args
       let fullName = mname <> if isRemote then "_remote" else ""
           decl = "unsafe fn" <+> fullName <> tupled typedArgs <+> "->" <+> retStr
           -- STATE-5: a named function records its call; the pop is in its
