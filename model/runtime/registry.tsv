@@ -3,8 +3,11 @@ data/lang/cpp/cppmorloc.cpp::-::mlc_frame_	thread
 data/lang/cpp/cppmorloc.cpp::-::frames_	thread		
 data/lang/cpp/cppmorloc.cpp::-::frames_key_	lazy		
 data/lang/cpp/cppmorloc.cpp::-::frames_key_once_	lazy		
+data/lang/cpp/cppmorloc.cpp::-::arm_depth_	thread		
+data/lang/cpp/cppmorloc.cpp::-::arm_jobs_	thread		
+data/lang/cpp/cppmorloc.cpp::-::arm_jobs_key_	lazy		
+data/lang/cpp/cppmorloc.cpp::-::arm_jobs_key_once_	lazy		
 data/lang/cpp/cppmorloc.hpp::recur_env::stack	thread		
-data/lang/cpp/mlc_rec.hpp::-::q	thread		
 data/lang/cpp/pool.cpp::-::_shm_tracker_store	thread		
 data/lang/py/pymorloc.c::-::shm_view_ctx	thread		
 data/lang/py/pymorloc.c::-::shm_tracker	thread		

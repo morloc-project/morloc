@@ -875,9 +875,9 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     -- Each arm is its own struct (two arms with the same field types must
     -- stay distinguishable), so a value is that struct braced-initialised
     -- and implicitly converted into the variant.
-    -- Each arm lives behind a pointer inside the variant (a generated
-    -- type's `mlc::rec_ptr`, which releases a deep chain iteratively; a
-    -- user-mapped type's own `std::shared_ptr`). That gives a recursive arm
+    -- Each arm lives behind a `std::shared_ptr` inside the variant, made by
+    -- `mlc::make_arm` so that releasing a deep chain takes bounded stack
+    -- (STATE-8), for generated and user-mapped types alike. That gives a recursive arm
     -- a finite size and lets an arm holding another `data` type need only
     -- a forward declaration, so declaration order between two variants
     -- stops mattering. The variant is built from a fresh shared_ptr, which
@@ -885,13 +885,13 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     -- is the wire tag for generated and user-mapped types alike.
     , lcVariantLit = \ty n _ xs ->
         let arm = CP.armName ty n
-        in ty <> "{std::make_shared<" <> arm <> ">"
+        in ty <> "{mlc::make_arm<" <> arm <> ">"
              <> parens (arm <> encloseSep "{" "}" ", " xs) <> "}"
     , lcEnumLit = \ty _ n _ -> ty <> "::" <> pretty n
     , lcVariantTagTest = \_ _ tag subj ->
         parens (parens subj <> ".v.index() ==" <+> pretty tag)
     , lcCtorField = \_ _ tag i subj ->
-        "std::get<" <> pretty tag <> ">" <> parens (parens subj <> ".v") <> "->f" <> pretty i
+        "mlc::arm(std::get<" <> pretty tag <> ">" <> parens (parens subj <> ".v") <> ")->f" <> pretty i
     , lcEnumTagTest = \ty _ n _ subj ->
         parens (subj <+> "==" <+> ty <> "::" <> pretty n)
     , lcListLenTest = \subj n -> parens (parens subj <> ".size() ==" <+> pretty n)

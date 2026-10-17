@@ -119,6 +119,23 @@ with the stack a native program's main thread gets: the soft stack limit
 (`ulimit -s`), or 8 MiB when that is unlimited or unreadable. This carries
 out RECUR-5.
 
+### STATE-8 A value morloc builds is released in bounded stack
+Status: implemented
+Checked by: golden:deep-release-user-mapped-cpp, golden:deep-value-paths-cpp, golden:recursion-deep-value-cpp
+
+In C++ every constructor arm morloc allocates, of a generated or a
+user-mapped type, built in generated code or read from a packet, is a plain
+`std::shared_ptr` whose allocator destroys it in place while fewer than 128
+releases are nested on the thread. Past that depth the arm's contents move,
+or are copied when the arm cannot be moved, to a heap object on the
+thread's worklist and the arm is destroyed at once,
+so neither the pointer's control block nor a `weak_ptr` ever sees a
+deferred step; the outermost release empties the worklist, and the
+worklist is freed when its thread ends. An arm that can be neither moved
+nor copied, and a value user code builds itself, are released as C++
+releases them. In Rust a generated type's arms are
+`RecBox`es, which release a deep chain the same way.
+
 ### INIT-1 A process-wide value is initialised once, by a fork-safe primitive
 Status: implemented
 Checked by: tla:LazyInit, tla:LazyInit_unlocked.bug, tla:LazyInit_unheld.bug, golden:futhark-basic

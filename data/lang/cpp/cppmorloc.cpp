@@ -122,6 +122,65 @@ void frame_init() {
     frames_.base = static_cast<const char**>(p);
 }
 
+// STATE-8
+thread_local constinit int arm_depth_ = 0;
+
+struct arm_job {
+    void (*free_fn)(void*);
+    void* p;
+};
+struct arm_jobs {
+    arm_job* items;
+    size_t len;
+    size_t cap;
+};
+static thread_local constinit arm_jobs* arm_jobs_ = nullptr;
+static pthread_key_t arm_jobs_key_;
+static pthread_once_t arm_jobs_key_once_ = PTHREAD_ONCE_INIT;
+
+static void arm_jobs_free(void* jobs) {
+    arm_jobs* j = static_cast<arm_jobs*>(jobs);
+    if (arm_jobs_ == j) arm_jobs_ = nullptr;
+    std::free(j->items);
+    std::free(j);
+}
+
+static void arm_jobs_key_make() {
+    if (pthread_key_create(&arm_jobs_key_, arm_jobs_free) != 0) std::abort();
+}
+
+bool arm_defer(void (*free_fn)(void*), void* p) noexcept {
+    arm_jobs* j = arm_jobs_;
+    if (j == nullptr) {
+        j = static_cast<arm_jobs*>(std::calloc(1, sizeof(arm_jobs)));
+        if (j == nullptr) return false;
+        pthread_once(&arm_jobs_key_once_, arm_jobs_key_make);
+        if (pthread_setspecific(arm_jobs_key_, j) != 0) {
+            std::free(j);
+            return false;
+        }
+        arm_jobs_ = j;
+    }
+    if (j->len == j->cap) {
+        size_t cap = j->cap ? j->cap * 2 : 256;
+        void* items = std::realloc(j->items, cap * sizeof(arm_job));
+        if (items == nullptr) return false;
+        j->items = static_cast<arm_job*>(items);
+        j->cap = cap;
+    }
+    j->items[j->len++] = arm_job{free_fn, p};
+    return true;
+}
+
+void arm_drain() noexcept {
+    arm_jobs* j = arm_jobs_;
+    while (j != nullptr && j->len > 0) {
+        arm_job job = j->items[--j->len];
+        job.free_fn(job.p);
+        j = arm_jobs_;
+    }
+}
+
 std::string frame_take(size_t saved) {
     frame_stack& s = frames_;
     size_t depth = s.depth;

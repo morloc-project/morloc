@@ -374,10 +374,9 @@ printRecordTemplate ts = encloseSep "<" ">" "," ts
 --
 -- The wrapper is a struct rather than a bare alias so the type can be
 -- forward-declared: a recursive arm holds the wrapper by value behind the
--- variant's @mlc::rec_ptr@, and an alias to @std::variant<...>@ cannot be
--- named before its alternatives are complete. The pointer is a
--- @rec_ptr@ rather than a bare @std::shared_ptr@ so that releasing a deep
--- chain of arms runs iteratively instead of one destructor frame per level.
+-- variant's @std::shared_ptr@, and an alias to @std::variant<...>@ cannot be
+-- named before its alternatives are complete. Arms are made by
+-- @mlc::make_arm@, so releasing a deep chain takes bounded stack (STATE-8).
 -- | The marshalling node of a generated type: the @MlcNode@ specialization
 -- with its three walk steps declared.
 --
@@ -439,7 +438,7 @@ printCppVariantDecl name arms =
     [ vsep ["struct" <+> armName name c <> ";" | (c, _) <- arms]
     , "struct" <+> name <+> "{"
     , indent 4 ("std::variant<"
-                  <> hsep (punctuate "," ["mlc::rec_ptr<" <> armName name c <> ">" | (c, _) <- arms])
+                  <> hsep (punctuate "," ["std::shared_ptr<" <> armName name c <> ">" | (c, _) <- arms])
                   <> "> v;")
     , "};"
     ]
@@ -523,8 +522,8 @@ printCppVariantSerializers name arms =
             , indent 4 $ vsep
                 [ "case" <+> pretty i <> ":" <+>
                     (if null ts
-                       then "out->v = std::make_shared<" <> armName name c <> ">(); break;"
-                       else "{ auto arm = std::make_shared<" <> armName name c
+                       then "out->v = mlc::make_arm<" <> armName name c <> ">(); break;"
+                       else "{ auto arm = mlc::make_arm<" <> armName name c
                               <> ">(); out->v = arm; w.variant_payload(schema->parameters["
                               <> pretty i <> "], data, arm.get()); break; }")
                 | (i, (c, ts)) <- idxArms ]
