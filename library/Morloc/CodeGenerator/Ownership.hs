@@ -10,10 +10,13 @@ renders from the plans.
 module Morloc.CodeGenerator.Ownership
   ( OwnCaps (..)
   , PoolPlan (..)
+  , emptyPoolPlan
   , planPool
   , ManifoldPlan (..)
   , planSerialManifold
   , planNativeManifold
+  , LetMode (..)
+  , letMode
   ) where
 
 import Control.Monad.Identity (Identity, runIdentity)
@@ -23,6 +26,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( RNode (RNM, RSM)
   , consumableProjectionLets
   , consumedParams
+  , isBorrowableProjection
   , loopBorrowLocals
   , nativeManifoldsUnder
   )
@@ -46,6 +50,9 @@ data PoolPlan = PoolPlan
   -- value (OWN-7)
   }
 
+emptyPoolPlan :: PoolPlan
+emptyPoolPlan = PoolPlan {ppTakes = Set.empty, ppByValue = Map.empty}
+
 planPool :: OwnCaps -> [SerialManifold] -> PoolPlan
 planPool caps sms =
   PoolPlan
@@ -68,6 +75,19 @@ byValueIndices pp m form =
   Set.fromList [i | (j, Arg i _) <- zip [0 :: Int ..] (typeMofForm form), Set.member j positions]
   where
     positions = Map.findWithDefault Set.empty m (ppByValue pp)
+
+-- | How a native let binds its right-hand side: a copy, a reference to a
+-- projection out of a live value, or the projected payload taken (OWN-5).
+data LetMode = LetCopy | LetBorrow | LetTake
+  deriving (Eq, Show)
+
+-- | The mode of let @i@ in top-level manifold @root@ with right-hand side
+-- @rhs@.
+letMode :: PoolPlan -> Int -> Int -> NativeExpr -> LetMode
+letMode pp root i rhs
+  | not (isBorrowableProjection rhs) = LetCopy
+  | Set.member (root, i) (ppTakes pp) = LetTake
+  | otherwise = LetBorrow
 
 -- | The decisions within one manifold's body.
 data ManifoldPlan = ManifoldPlan

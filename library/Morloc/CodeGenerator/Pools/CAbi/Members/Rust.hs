@@ -139,7 +139,7 @@ data RustState = RustState
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty (PoolPlan Set.empty Map.empty) 0 []
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan 0 []
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -2535,11 +2535,11 @@ isFunctionTypeF _ = False
 -- read does ('rustTakeField'). Every other projection borrows the subject and
 -- clones the field.
 rustConsumeLetRhs :: Int -> NativeExpr -> PoolDocs -> RustM PoolDocs
-rustConsumeLetRhs i (IntrinsicN _ IntrCtorField _ [LetVarN t@(VariantF {}) subj _, StrN _ n, IntN _ k]) d = do
-  consumable <- CMS.gets (ppTakes . rsPool)
+rustConsumeLetRhs i rhs@(IntrinsicN _ IntrCtorField _ [LetVarN t@(VariantF {}) subj _, StrN _ n, IntN _ k]) d = do
+  pp <- CMS.gets rsPool
   root <- CMS.gets rsCurrentRoot
   borrowed <- asks oeCurrent
-  if Set.member (root, i) consumable && not (Set.member subj borrowed)
+  if letMode pp root i rhs == LetTake && not (Set.member subj borrowed)
     then do
       ty <- rustTypeOf t
       return d {poolExpr = rustTakeField ty n (fromIntegral k) (nvarNamer subj)}
@@ -2610,15 +2610,16 @@ rustTakeField ty n i subj =
     <+> "_ => unreachable!()"
     <+> "} }"
 
--- The borrow-safe flag ('isBorrowableProjection') is unused: Rust binds owned
--- locals and adapts a borrowed/place RHS via 'adaptOwnedElem' upstream.
-rustMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Bool -> PoolDocs -> PoolDocs -> RustM PoolDocs
-rustMakeLet namer letIndex mt _ p1 p2 = do
+-- | A native let of the IR that holds a borrow (OWN-6) is typed as a
+-- reference; every other let binds the value its right-hand side was adapted
+-- to upstream.
+rustMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Maybe NativeExpr -> PoolDocs -> PoolDocs -> RustM PoolDocs
+rustMakeLet namer letIndex mt mrhs p1 p2 = do
   borrowed <- asks oeCurrent
   annDoc <- case mt of
     Just t | isFunctionTypeF t -> return ""
     Just t
-      | render (namer letIndex) == render (nvarNamer letIndex)
+      | isJust mrhs
       , Set.member letIndex borrowed -> do ts <- rustTypeOf t; return (":" <+> "&" <> ts)
     Just t -> do ts <- rustTypeOf t; return (":" <+> ts)
     Nothing -> return (":" <+> "*mut u8")

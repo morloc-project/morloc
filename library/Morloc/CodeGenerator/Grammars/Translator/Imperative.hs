@@ -661,12 +661,11 @@ data LowerConfig m = LowerConfig
   -- lcDebugWrap closes over its own manifold @(name, srcloc)@ lookup
   -- (from 'makeManifoldDebugInfoLookup') and bakes the strings into the
   -- codegen'd call so the runtime can render them next to @mid=@.
-  , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Bool -> PoolDocs -> PoolDocs -> m PoolDocs
-  -- ^ Let binding assembly at the PoolDocs level. The 'Bool' marks a
-  -- borrow-safe RHS: a field/index projection rooted at a live variable
-  -- (see 'isBorrowableProjection'). A statically typed member may bind such
-  -- a RHS by reference to avoid copying the projected sub-value; members for
-  -- which this is meaningless ignore it.
+  , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Maybe NativeExpr -> PoolDocs -> PoolDocs -> m PoolDocs
+  -- ^ Let binding assembly at the PoolDocs level. A native let of the IR
+  -- passes its right-hand side, from which a member decides how the local
+  -- binds it ('Morloc.CodeGenerator.Ownership.letMode'); a serial or helper
+  -- let passes nothing.
   , lcReleaseStmt :: Text -> MDoc
   -- ^ Produce a statement finishing with a let-bound packet variable:
   -- releasing the shared memory it owns, and, for a member that manages
@@ -703,9 +702,8 @@ data LowerConfig m = LowerConfig
   -- loop walker rather than 'lcMakeLet', so a member that binds some lets by
   -- taking their value (see 'consumableProjectionLets') applies it here.
   , lcLetRhs :: Int -> NativeExpr -> PoolDocs -> m PoolDocs
-  -- ^ As 'lcLoopLetRhs', for a native let outside a loop: a member whose
-  -- 'lcMakeLet' cannot see the original right-hand side takes consumable
-  -- projections here.
+  -- ^ As 'lcLoopLetRhs', for a native let outside a loop: a member may
+  -- rewrite the lowered right-hand side here, before 'lcMakeLet' binds it.
   , lcOwnPacketDecl :: MDoc -> MDoc -> Maybe (MDoc, MDoc)
   -- ^ Given an owner variable and a fresh packet expression, a statement
   -- declaring the owner (which releases the packet when its scope ends) and
@@ -1094,7 +1092,7 @@ lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
   -- temp as the new pool expression. This makes the SHM ref's lifetime
   -- end exactly at the body's last use of the bound variable rather than
   -- carrying it to the outer dispatch boundary.
-  letResult <- lcMakeLet cfg svarNamer i Nothing False e1 e2
+  letResult <- lcMakeLet cfg svarNamer i Nothing Nothing e1 e2
   if bodyIsBoundVar i e2
     then return letResult
     else do
@@ -1105,16 +1103,16 @@ lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
               { poolExpr = helperNamer tmpIdx
               , poolPriorLines = [releaseLine]
               }
-      lcMakeLet cfg helperNamer tmpIdx Nothing False letResult releaseBody
+      lcMakeLet cfg helperNamer tmpIdx Nothing Nothing letResult releaseBody
 lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) =
-  lcMakeLet cfg svarNamer i Nothing False e1 e2
+  lcMakeLet cfg svarNamer i Nothing Nothing e1 e2
 -- As for a native let ('NativeLetN_'): the bound local is owned, so its RHS
 -- is an owned sink.
 lowerSerialExpr cfg (NativeLetS _ rhsE _) (NativeLetS_ i e1 e2) = do
   e1' <- adaptOwnedElem cfg rhsE e1 >>= lcLetRhs cfg i rhsE
-  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) e1' e2
-lowerSerialExpr cfg _ (NativeLetS_ i e1 e2) =
-  lcMakeLet cfg nvarNamer i Nothing False e1 e2
+  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (Just rhsE) e1' e2
+lowerSerialExpr _ _ (NativeLetS_ i _ _) =
+  error ("morloc bug: native let " <> show i <> " lowered without its original")
 lowerSerialExpr _ _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
 lowerSerialExpr _ _ (BndVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
 lowerSerialExpr cfg (SerializeS _ origE) (SerializeS_ s e) = do
@@ -2129,7 +2127,7 @@ lowerNativeExprRaw cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2
   -- via SerialLetN -- e.g., the m1417-style wrapper around a foreign call.
   -- The body is a NativeExpr, so the temp's declared type must match it
   -- (rather than falling back to the serial type used for SerialLetS).
-  letResult <- lcMakeLet cfg svarNamer i Nothing False x1 x2
+  letResult <- lcMakeLet cfg svarNamer i Nothing Nothing x1 x2
   if bodyIsBoundVar i x2
     then return letResult
     else do
@@ -2141,7 +2139,7 @@ lowerNativeExprRaw cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2
               { poolExpr = helperNamer tmpIdx
               , poolPriorLines = [releaseLine]
               }
-      lcMakeLet cfg helperNamer tmpIdx (Just bodyT) False letResult releaseBody
+      lcMakeLet cfg helperNamer tmpIdx (Just bodyT) Nothing letResult releaseBody
 lowerNativeExprRaw cfg (SerialLetN _ rhs body) (SerialLetN_ i x1 x2)
   | isCallResult rhs = do
   -- The let RHS is a call into another pool, so the bound variable owns
@@ -2152,7 +2150,7 @@ lowerNativeExprRaw cfg (SerialLetN _ rhs body) (SerialLetN_ i x1 x2)
   -- at the body's last use rather than at the dispatch boundary. Without
   -- this a loop that calls into another pool holds every result it has
   -- ever received until the whole loop is done.
-  letResult <- lcMakeLet cfg svarNamer i Nothing False x1 x2
+  letResult <- lcMakeLet cfg svarNamer i Nothing Nothing x1 x2
   tmpIdx <- lcNewIndex cfg
   let bodyT = typeFof body
       releaseLine = releaseStmtFor cfg bodyT (render (svarNamer i))
@@ -2161,15 +2159,16 @@ lowerNativeExprRaw cfg (SerialLetN _ rhs body) (SerialLetN_ i x1 x2)
           { poolExpr = helperNamer tmpIdx
           , poolPriorLines = [releaseLine]
           }
-  lcMakeLet cfg helperNamer tmpIdx (Just bodyT) False letResult releaseBody
-lowerNativeExprRaw cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing False x1 x2
+  lcMakeLet cfg helperNamer tmpIdx (Just bodyT) Nothing letResult releaseBody
+lowerNativeExprRaw cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing Nothing x1 x2
 -- A native let binds an owned local, so its RHS is an owned sink: adapt the
 -- bound value (Rust clones a borrowed/place RHS -- e.g. a getter through a
 -- borrowed receiver -- to match the owned binding type; other members unchanged).
 lowerNativeExprRaw cfg (NativeLetN _ rhsE _) (NativeLetN_ i x1 x2) = do
   x1' <- loopBorrowOr cfg i rhsE x1 (adaptOwnedElem cfg rhsE x1 >>= lcLetRhs cfg i rhsE)
-  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) x1' x2
-lowerNativeExprRaw cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing False x1 x2
+  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (Just rhsE) x1' x2
+lowerNativeExprRaw _ _ (NativeLetN_ i _ _) =
+  error ("morloc bug: native let " <> show i <> " lowered without its original")
 lowerNativeExprRaw _ _ (LetVarN_ _ i _) = return $ defaultValue {poolExpr = nvarNamer i}
 lowerNativeExprRaw _ _ (BndVarN_ _ i _) = return $ defaultValue {poolExpr = nvarNamer i}
 lowerNativeExprRaw cfg _ (DeserializeN_ t s x) = do

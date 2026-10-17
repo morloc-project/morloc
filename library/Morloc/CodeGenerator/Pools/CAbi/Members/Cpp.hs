@@ -36,7 +36,6 @@ import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( LoopResult (..)
   , infixOperator
-  , isBorrowableProjection
   , papplySteps
   , containsClosure
   , IType (..)
@@ -57,7 +56,7 @@ import qualified Morloc.Build.Params as BP
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Ownership (OwnCaps (..), PoolPlan (..), planPool)
+import Morloc.CodeGenerator.Ownership (LetMode (..), OwnCaps (..), PoolPlan, emptyPoolPlan, letMode, planPool)
 import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -91,8 +90,7 @@ isNativeThrow (IntrinsicN _ IntrThrow _ _) = True
 isNativeThrow (DoBlockN _ e) = isNativeThrow e
 isNativeThrow _ = False
 
--- | True when a conditional arm's value is a let bound inside the arm. The
--- arm's block ends at the assignment of that value, so it can be moved.
+-- | Whether a conditional arm's value is a let bound inside the arm.
 armOwnsResult :: NativeExpr -> Bool
 armOwnsResult = go Set.empty
   where
@@ -105,13 +103,6 @@ serialType :: MDoc
 serialType = "uint8_t*"
 
 data CallSemantics = Copy | Reference | ConstPtr
-
--- | How a let binds its right-hand side. A projection out of a live value can
--- be aliased instead of copied ('isBorrowableProjection'), and a projection
--- that is the last thing able to read a payload this frame built can take it
--- ('consumableProjectionLets'); everything else copies.
-data LetBinding = BindCopy | BindBorrow | BindConsume
-  deriving (Eq)
 
 class HasCppType a where
   cppTypeOf :: a -> CppTranslator MDoc
@@ -431,13 +422,12 @@ data CppTranslatorState = CppTranslatorState
   -- ^ Snapshot of 'stateDebugTrace'. When True, DebugWrapS drains the
   -- traceback in 'cppDebugWrap'; the manifold-level catch in
   -- 'lcMakeFunction' skips its frame-line append to avoid duplicates.
-  , translatorConsumableLets :: Set.Set (Int, Int)
-  -- ^ The payload projections whose let may take the payload instead of
-  -- copying it ('consumableProjectionLets'), keyed by the top-level manifold
-  -- they sit in and the let's index, because a let index names a binding
-  -- within a manifold and two manifolds may share one.
+  , translatorPool :: PoolPlan
+  -- ^ The pool's ownership decisions; its takes are keyed by the top-level
+  -- manifold and the let index, because a let index names a binding within
+  -- a manifold and two manifolds may share one.
   , translatorCurrentRoot :: Int
-  -- ^ The top-level manifold being lowered (see 'translatorConsumableLets').
+  -- ^ The top-level manifold being lowered (see 'translatorPool').
   , translatorErrors :: [Text]
   }
 
@@ -457,7 +447,7 @@ instance Defaultable CppTranslatorState where
       , translatorDebugInfo = \_ -> ("", "")
       , translatorTraceInfo = \_ -> Nothing
       , translatorDebugMode = False
-      , translatorConsumableLets = Set.empty
+      , translatorPool = emptyPoolPlan
       , translatorCurrentRoot = 0
       , translatorErrors = []
       }
@@ -534,7 +524,7 @@ translate srcs es = do
         , translatorDebugInfo = debugInfo
         , translatorTraceInfo = traceInfo
         , translatorDebugMode = debugMode
-        , translatorConsumableLets = ppTakes (planPool cppCaps es)
+        , translatorPool = planPool cppCaps es
         }
       (code, stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
   mapM_ (MM.throwSystemError . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)
@@ -1002,16 +992,13 @@ char* errmsg = NULL;|]
 );
 PROPAGATE_ERROR(errmsg)|]
         return $ defaultValue {poolExpr = call, poolPriorLines = [setup]}
-    , lcMakeLet = \namer letIndex mt borrowSafe e1 e2 -> do
+    , lcMakeLet = \namer letIndex mt mrhs e1 e2 -> do
         typestr <- case mt of
           (Just t) -> cppTypeOf t
           Nothing -> return serialType
-        consumable <- CMS.gets translatorConsumableLets
+        pp <- CMS.gets translatorPool
         root <- CMS.gets translatorCurrentRoot
-        let binding
-              | not borrowSafe = BindCopy
-              | Set.member (root, letIndex) consumable = BindConsume
-              | otherwise = BindBorrow
+        let binding = maybe LetCopy (letMode pp root letIndex) mrhs
         return $ makeLet namer letIndex typestr (isUnitTypeF mt) binding e1 e2
     , lcReleaseStmt = \v -> "_release_packet(" <> pretty v <> ", true);"
     , lcReleaseBorrowedStmt = \v -> "_release_packet(" <> pretty v <> ", false);"
@@ -1037,11 +1024,11 @@ PROPAGATE_ERROR(errmsg)|]
     -- A consumable projection takes its payload, as 'makeLet' does for a
     -- let outside a loop.
     , lcLoopLetRhs = \i orhs d -> do
-        consumable <- CMS.gets translatorConsumableLets
+        pp <- CMS.gets translatorPool
         root <- CMS.gets translatorCurrentRoot
         typestr <- cppTypeOf (typeFof orhs)
         return $
-          if Set.member (root, i) consumable && isBorrowableProjection orhs && not (isScalarCppType typestr)
+          if letMode pp root i orhs == LetTake && not (isScalarCppType typestr)
             then d {poolExpr = "std::move(" <> poolExpr d <> ")"}
             else d
     , lcLetRhs = \_ _ d -> return d
@@ -1401,7 +1388,7 @@ PROPAGATE_ERROR(errmsg)|]
     -- fires, the caller's 'Unit' variable is present, and any subsequent
     -- reference to @ni@ still type-checks. A bare variable has no effect,
     -- so it is not emitted as a statement.
-    makeLet :: (Int -> MDoc) -> Int -> MDoc -> Bool -> LetBinding -> PoolDocs -> PoolDocs -> PoolDocs
+    makeLet :: (Int -> MDoc) -> Int -> MDoc -> Bool -> LetMode -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet namer letIndex typestr isUnit binding p1 p2 =
       let letAssignment
             | isUnit && isIdentifierExpr (poolExpr p1) =
@@ -1431,15 +1418,15 @@ PROPAGATE_ERROR(errmsg)|]
             -- rather than being copied or aliased ('consumableProjectionLets').
             -- Scalars are excluded for the same reason they are excluded from
             -- the borrow: a move of an int is a copy of an int.
-            | binding == BindConsume && not (isScalarCppType typestr) =
+            | binding == LetTake && not (isScalarCppType typestr) =
                 [idoc|#{typestr} #{namer letIndex} = std::move(#{poolExpr p1});|]
-            | binding == BindBorrow && not (isScalarCppType typestr) =
+            | binding == LetBorrow && not (isScalarCppType typestr) =
                 [idoc|const #{typestr}& #{namer letIndex} = #{poolExpr p1};|]
             | otherwise =
                 [idoc|#{typestr} #{namer letIndex} = #{poolExpr p1};|]
           rs = poolPriorLines p1 <> [letAssignment] <> poolPriorLines p2
           letName = render (namer letIndex)
-          byReference = binding == BindBorrow && not (isScalarCppType typestr)
+          byReference = binding == LetBorrow && not (isScalarCppType typestr)
           borrowedLocal
             | render (poolExpr p2) == letName = if byReference then Just letName else Nothing
             | otherwise = poolBorrowedLocal p2
