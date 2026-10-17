@@ -75,12 +75,14 @@ for all but one of those reads.
 
 ### OWN-6 A loop that only walks what it was lent borrows it
 Intent: ruled 2026-10-17
-Tests: spec-own-6-1, spec-own-6-2, spec-own-6-3, spec-own-6-4, spec-own-6-5, spec-own-6-6, spec-own-6-7, spec-own-6-8, spec-own-6-9
+Tests: spec-own-6-1, spec-own-6-2, spec-own-6-3, spec-own-6-4, spec-own-6-5, spec-own-6-6, spec-own-6-7, spec-own-6-8, spec-own-6-9, spec-own-6-10, spec-own-6-11, spec-own-6-12, spec-own-6-13
 Code: conforms 2026-10-17
 
 A value a tail loop carries is a borrow, not a copy, when it starts from a
 value the loop's manifold borrows and every iteration replaces it with that
-value itself, a constructor field or a record field of a borrow. A loop let
+value itself, a constructor field or a record field of a borrow, or a
+`match` of a local against one constructor per arm whose every arm is such a
+part or the failure when no arm matches. A loop let
 bound to such a part is a borrow too, unless its index is bound twice or
 its type is one a copy of costs nothing. Walking a borrowed structure then
 copies none of it, however deep it is. A carried value that some iteration

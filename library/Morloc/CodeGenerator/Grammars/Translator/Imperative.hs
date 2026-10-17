@@ -61,6 +61,8 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , consumableProjectionLets
   , markLastReads
   , loopBorrowLocals
+  , BorrowPart (..)
+  , borrowPartOf
   , consumedParams
   , nativeManifoldsUnder
   , RNode (..)
@@ -1531,15 +1533,49 @@ loopBorrows mayBorrow g reused starts body = settle (Set.fromList [i | (i, s) <-
     scan _ (LoopBase _) = (Set.empty, Set.empty)
     scan env (LoopContinue xs) = (Set.empty, Set.fromList [i | (i, x) <- zip ids xs, not (borrowPart env x)])
 
-    borrowPart env e = mayBorrow (typeFof e) && case e of
-      IntrinsicN _ IntrCtorField _ [s, StrN _ _, IntN _ _] -> borrowVar env s
-      AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr s] ->
-        not (selectorHasBracket sel) && length (ungroup sel) == 1 && borrowVar env s
-      _ -> borrowVar env e
+    borrowPart env e = isJust (borrowPartOf mayBorrow (`Set.member` env) e)
 
-    borrowVar env (LetVarN _ j _) = Set.member j env
-    borrowVar env (BndVarN _ j _) = Set.member j env
-    borrowVar _ _ = False
+    borrowVar env x = maybe False (`Set.member` env) (varIndex x)
+
+-- | The index a variable read reads.
+varIndex :: NativeExpr -> Maybe Int
+varIndex (LetVarN _ j _) = Just j
+varIndex (BndVarN _ j _) = Just j
+varIndex _ = Nothing
+
+-- | An expression whose value is a part of a borrow (OWN-6), in the shape a
+-- member renders it as a reference.
+data BorrowPart
+  = BorrowVar Int
+  | BorrowCtorField TypeF Int Text Integer
+  -- ^ the subject's type, the subject, the arm and the field
+  | BorrowField Int [Either Int Text]
+  -- ^ a getter of one path
+  | BorrowIf TypeF Int Text BorrowPart BorrowPart
+  -- ^ a test of a variant subject's arm, then the two arms
+  | BorrowLet Int BorrowPart BorrowPart
+  | BorrowFail TypeF Text
+  -- ^ the type that fails to be made, and the message
+
+-- | The part of a borrow an expression names, given which types may be
+-- borrowed and which locals hold a borrow.
+borrowPartOf :: (TypeF -> Bool) -> (Int -> Bool) -> NativeExpr -> Maybe BorrowPart
+borrowPartOf mayBorrow = go
+  where
+    go env e
+      | not (mayBorrow (typeFof e)) = Nothing
+      | otherwise = case e of
+          IntrinsicN _ IntrCtorField _ [s, StrN _ n, IntN _ k] -> (\j -> BorrowCtorField (typeFof s) j n k) <$> var env s
+          AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr s]
+            | not (selectorHasBracket sel), [path] <- ungroup sel -> (`BorrowField` path) <$> var env s
+          IfN _ (IntrinsicN _ IntrTagTest _ [s, StrN _ n]) a b
+            | Just j <- varIndex s, not (isEnum (typeFof s)) -> BorrowIf (typeFof s) j n <$> go env a <*> go env b
+          NativeLetN i rhs body -> BorrowLet i <$> go env rhs <*> go (\j -> j == i || env j) body
+          IntrinsicN t IntrThrow _ [StrN _ msg] -> Just (BorrowFail t msg)
+          _ -> BorrowVar <$> var env e
+    var env x = varIndex x >>= \j -> if env j then Just j else Nothing
+    isEnum EnumF {} = True
+    isEnum _ = False
 
 -- | What 'consumableProjectionLets' gathers in one pass: every native let's
 -- right-hand side, every payload projection paired with the index it reads
@@ -1761,7 +1797,7 @@ adaptOwnedElems cfg origEs xs
 loopBorrowOr :: (Monad m) => LowerConfig m -> Int -> NativeExpr -> PoolDocs -> m PoolDocs -> m PoolDocs
 loopBorrowOr cfg i oe d fallback = do
   borrowed <- lcLoopBorrow cfg i oe
-  maybe fallback (\x -> return d {poolExpr = x}) borrowed
+  maybe fallback (\x -> return d {poolExpr = x, poolPriorLines = []}) borrowed
 
 -- | Own-adapt a native loop body's owned sinks, pairing the lowered body with
 -- the original IR. A 'LoopContinue' argument feeds a loop-carried reassignment

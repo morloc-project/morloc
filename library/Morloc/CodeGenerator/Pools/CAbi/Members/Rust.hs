@@ -56,6 +56,9 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , consumableProjectionLets
   , markLastReads
   , loopBorrowLocals
+  , BorrowPart (..)
+  , borrowPartOf
+  , IExpr (IStrLit)
   , consumedParams
   , nativeManifoldsUnder
   , RNode (RNM, RSM)
@@ -2635,26 +2638,39 @@ rustConsumeLetRhs _ _ d = return d
 
 -- | A loop local 'loopBorrowLocals' found is a reference into what the loop
 -- borrowed (OWN-6), so it joins the manifold's borrowed set; its expression
--- is a reborrow of a borrowed local or of a field of one.
+-- is rendered as that reference.
 rustLoopBorrow :: Int -> NativeExpr -> RustM (Maybe MDoc)
 rustLoopBorrow i e = do
   borrowed <- asks oeCurrent
   if not (Set.member i borrowed)
     then return Nothing
-    else Just <$> case e of
-      IntrinsicN _ IntrCtorField _ [s, StrN _ n, IntN _ k] -> do
-        ty <- rustTypeOf (typeFof s)
+    else case borrowPartOf (const True) (const True) e of
+      Just part -> Just <$> render part
+      Nothing -> error ("rustLoopBorrow: a borrowed loop local bound to " <> show e)
+  where
+    render part = case part of
+      BorrowVar j -> return (nvarNamer j)
+      BorrowCtorField t j n k -> do
+        ty <- rustTypeOf t
         return $
-          "match" <+> var s <+> "{"
+          "match" <+> nvarNamer j <+> "{"
             <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b) => &mlc_b." <> pretty k <> ","
             <+> "_ => unreachable!() }"
-      AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr s]
-        | [ss] <- ungroup sel -> return ("&" <> writeSelectorRust (var s) ss)
-      _ -> return (var e)
-  where
-    var (LetVarN _ j _) = nvarNamer j
-    var (BndVarN _ j _) = nvarNamer j
-    var x = error ("rustLoopBorrow: a borrowed loop local bound to " <> show x)
+      BorrowField j path -> return ("&" <> writeSelectorRust (nvarNamer j) path)
+      BorrowIf t j n a b -> do
+        ty <- rustTypeOf t
+        a' <- render a
+        b' <- render b
+        return $
+          "if matches!(" <> nvarNamer j <> "," <+> RP.typeHead ty <> "::" <> pretty n <+> "{ .. })"
+            <+> "{" <+> a' <+> "} else {" <+> b' <+> "}"
+      BorrowLet j rhs body -> do
+        rhs' <- render rhs
+        body' <- render body
+        return ("{ let" <+> nvarNamer j <+> "=" <+> rhs' <> ";" <+> body' <+> "}")
+      BorrowFail t msg -> do
+        ty <- rustTypeOf t
+        return ("rustmorloc::morloc_throw_as::<&" <> ty <> ">(" <> RP.printExpr (IStrLit Nothing msg) <> ")")
 
 -- | Take field @i@ out of arm @n@'s payload (OWN-5): the box gives the
 -- field up when it holds the only handle, and the field is cloned otherwise

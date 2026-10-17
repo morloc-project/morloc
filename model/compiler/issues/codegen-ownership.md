@@ -71,7 +71,31 @@ same name sees what was taken.
   value moves it twice, where a native conditional return moves it at most
   once, and the type needs a default constructor. Seen in
   golden:spec-emit-3-1 (`up 3`: 8 moves).
-- **A Rust loop local owns its value when its next value comes through an
-  `if`.** [reproduced] Cost; OWN-6 does not see through an inlined `match`,
-  so `dropC k c ? k == 0 = c : dropC (k - 1) (tl c)` with `tl` a `match`
-  copies its parameter at entry.
+- **An owned Rust loop local stepped through a `match` copies the rest of
+  its value every step.** [reproduced] Cost; OWN-2 counts the `match`'s tag
+  tests and its field read as reads in one step, so the field is copied
+  rather than taken (OWN-5). A loop whose local is owned (it is replaced by
+  a built value on some iteration) and steps with `tl c`, `tl` a `match`
+  returning a constructor field, copies the tail each iteration: quadratic,
+  and with a recursive `Clone` a deep value overflows the stack. Open
+  question for a ruling: may a conditional's test be sequenced before its
+  arms, so a read in the chosen arm is the last read?
+- **A nested constructor pattern in Rust copies each inner field it tests.**
+  [reproduced] Cost; no ownership item covers a projection read only to be
+  tested or projected again. `match c | (Link _ (Link _ rest)) = rest`
+  renders the inner field as `match &(c) { Chain::Link(mlc_b) =>
+  mlc_b.1.clone(), .. }` both inside the `matches!` tag test and under the
+  outer projection, so every nested match copies the inner value twice. For
+  a user type with a recursive `Clone` (a `Box` chain) the copy is the whole
+  rest of the value, so a loop stepping with such a match is quadratic and a
+  deep value overflows the stack. Because of these copies OWN-6 does not
+  treat a nested match as a part either: its test is a `Bool` local and its
+  field is read from a field.
+- **A Rust loop stepped by a function that returns part of its argument
+  copies the part.** [reproduced] Cost; OWN-6 sees only parts the loop body
+  reads itself. A `match` with a guarded arm is not inlined, so
+  `tlG c = match c | (Link x rest) ? x > 0 = rest : c | _ = c` stays a
+  manifold returning an owned `Chain`, and `dropG (k - 1) (tlG c)` copies
+  the rest of the chain each step (3 steps over 1000 links: 2994 clones).
+  Open question: a result that borrows from an argument needs a by-reference
+  return convention, which no item states.

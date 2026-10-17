@@ -56,9 +56,27 @@ borrowCases =
     , testCase "spec-own-6-8" $
         borrows [(1, par 5)] (LoopIf (rd 1) (LoopNLet 10 (field 1) (LoopContinue [rd 10])) (LoopNLet 10 (tup [rd 1]) (LoopBase (rd 10))))
           @?= []
+    -- a local bound to a match whose every arm is a part, or fails, is a borrow
+    , testCase "spec-own-6-10" $
+        borrows [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "End") (rd 1) (IfN ty (tag 1 "Link") (NativeLetN 11 (field 1) (rd 11)) failed)) (LoopContinue [rd 10]))
+          @?= [1, 10]
+    -- a match with an arm that builds a value owns its value
+    , testCase "spec-own-6-11" $
+        borrows [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "End") (tup [rd 1]) (field 1)) (LoopContinue [rd 10]))
+          @?= []
+    -- a match whose arm binds a type that may not be borrowed owns its value
+    , testCase "spec-own-6-12" $
+        borrowsIf (/= cheap) [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "Link") (NativeLetN 11 (IntrinsicN cheap IntrCtorField Nothing [rd 1, StrN fv "Link", IntN fv 0]) (rd 11)) (rd 1)) (LoopContinue [rd 10]))
+          @?= []
+    -- a conditional on anything but a constructor tag owns its value
+    , testCase "spec-own-6-13" $
+        borrows [(1, par 5)] (LoopNLet 10 (IfN ty (rd 2) (field 1) (rd 1)) (LoopContinue [rd 10]))
+          @?= []
     ]
   where
     par i = BndVarN ty i KeptRead
+    tag i n = IntrinsicN ty IntrTagTest Nothing [rd i, StrN fv n]
+    failed = IntrinsicN ty IntrThrow Nothing [StrN fv "no clause matched the argument"]
     cheap = VarF (FV (TV "i") (CV "i"))
     field i = IntrinsicN ty IntrCtorField Nothing [rd i, StrN fv "Link", IntN fv 1]
     borrows = borrowsIf (const True)
