@@ -307,9 +307,19 @@ pub(crate) fn worker_idle_timeout() -> std::time::Duration {
 
 // ── Worker thread ────────────────────────────────────────────────────────────
 
-// A worker runs on the std default stack (RUST_MIN_STACK overrides it). No
-// operation on a value spends a machine frame per level of the value, so
-// the stack bounds the recursion of user code only.
+// STATE-7
+const WORKER_STACK_SIZE: usize = 8 << 20;
+
+fn worker_stack_size() -> usize {
+    let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: STATE-7: getrlimit only writes the struct it is given.
+    let known = unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut lim) } == 0;
+    if known && lim.rlim_cur != libc::RLIM_INFINITY && lim.rlim_cur > 0 {
+        usize::try_from(lim.rlim_cur).unwrap_or(WORKER_STACK_SIZE)
+    } else {
+        WORKER_STACK_SIZE
+    }
+}
 
 // Alternate signal stack of a worker thread. Without one, a stack overflow in
 // the worker cannot run the process's SIGSEGV handler at all: the kernel has
@@ -354,7 +364,7 @@ unsafe fn spawn_worker(
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let q = Arc::clone(queue);
     let cfg = ptr::read(config); // Copy config for thread
-    std::thread::Builder::new().spawn(move || {
+    std::thread::Builder::new().stack_size(worker_stack_size()).spawn(move || {
         let _altstack = AltStack::install();
         worker_loop(&q, &cfg, retire_after);
     })

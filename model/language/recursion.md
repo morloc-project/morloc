@@ -43,14 +43,16 @@ Measured by DEPTH-1 (written in morloc) and DEPTH-2 (sourced).
 Why: R's generated code nests evaluation more deeply per level than
 hand-written R; ruled acceptable 2026-10-16.
 
-### RECUR-5 The depth ceiling of non-tail recursion in compiled languages
-Intent: open
-Code: unaudited
+### RECUR-5 A compiled pool runs calls on a native main thread's stack
+Intent: ruled 2026-10-16
+Tests: spec-recur-5-1
+Code: conforms 2026-10-16
 
-Non-tail recursion in C++ and Rust runs on worker threads whose stacks may
-be smaller than a native program's main stack. Open: (a) size worker stacks
-to match a native main thread; (b) make the size configurable; (c) leave it.
-And at the ceiling: a crash, or a failure catchable by `@try`?
+A C++ or Rust pool runs every call on a worker thread with the stack a
+native program's main thread gets: the soft stack limit (`ulimit -s`, 8 MiB
+by default), or 8 MiB when that is unlimited. So recursion in sourced C++
+or Rust reaches the depth it reaches natively (RECUR-4). At the ceiling the
+pool crashes, as the native program would (RECUR-3).
 
 ### RECUR-6 Tail calls that cross a language boundary
 Intent: open

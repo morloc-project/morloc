@@ -6,9 +6,9 @@ import os
 import subprocess
 
 LANGS = ["py", "r", "cpp", "rs"]
-# C++ and Rust natives run on a pool worker's stack size, so the ratio
-# measures frames, not the difference between worker and main stacks.
-WORKER_STACK_KIB = 2048
+# C++ and Rust natives run on the 8 MiB stack a pool worker has (RECUR-5),
+# so the ratio measures frames, not a difference between stacks.
+WORKER_STACK_KIB = 8192
 TAIL_DEPTH = 1_000_000
 
 

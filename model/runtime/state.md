@@ -110,6 +110,15 @@ same thread, finds the stack as it left it. Model: `tla/FrameStack.tla`
 (`reset_at_dispatch`, `no_closure_boundary` and `pass_keeps_depth` each
 leave a stack that no longer lists the calls).
 
+### STATE-7 A pool worker thread has a native main thread's stack
+Status: implemented
+Checked by: golden:spec-recur-5-1
+
+A C++ or Rust pool's worker threads, which run every call, are created
+with the stack a native program's main thread gets: the soft stack limit
+(`ulimit -s`), or 8 MiB when that is unlimited or unreadable. This carries
+out RECUR-5.
+
 ### INIT-1 A process-wide value is initialised once, by a fork-safe primitive
 Status: implemented
 Checked by: tla:LazyInit, tla:LazyInit_unlocked.bug, tla:LazyInit_unheld.bug, golden:futhark-basic

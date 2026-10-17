@@ -5,8 +5,9 @@ natively in each language. These are the measurements for RECUR-2 and
 RECUR-4 in `language/recursion.md`. A depth is the largest n for which a
 recursion n levels deep returns n, found by bisection. The native program
 is the sourced function run by a plain driver in the same language; C++ and
-Rust are built with the pools' optimization level and run on a pool
-worker's stack size, so a ratio compares frames, not stacks (RECUR-5).
+Rust are built with the pools' optimization level and run on the 8 MiB
+stack a pool worker also has (RECUR-5), so a ratio compares frames, not
+stacks.
 
 ### DEPTH-1 Recursion written in morloc reaches the native depth
 Intent: ruled 2026-10-16

@@ -1,0 +1,10 @@
+-- Spec RECUR-5: a C++ or Rust pool runs calls on worker threads with the
+-- 8 MiB stack of a native program's main thread, so sourced recursion
+-- 400000 levels deep, past what a 2 MiB stack holds, completes.
+module main (depth)
+
+import root-rust
+
+source Rust from "deep.rs" ("depth")
+
+depth :: I64 -> I64
