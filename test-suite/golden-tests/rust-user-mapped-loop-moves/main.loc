@@ -1,0 +1,28 @@
+-- A tail loop over a user-mapped Rust data type takes each link's fields out
+-- of the carried value, so it copies nothing per step: walking a chain of n
+-- links costs at most one copy of the chain, made where the loop starts,
+-- not one copy of the remaining chain per step.
+module main (walk)
+
+import root-rust
+
+data Chain = End | Link Int Chain
+
+data Rust => Chain = "Chain"
+
+source Rust from "chain.rs" ("clones")
+
+clones :: Int -> (Int, Int)
+
+build :: Int -> Chain -> Chain
+build n acc
+  ? n == 0 = acc
+  : build (n - 1) (Link n acc)
+
+count :: Int -> Chain -> Int
+count | acc (Link _ rest) = count (acc + 1) rest
+      | acc _ = acc
+
+--' The links counted, then the links copied while counting
+walk :: Int -> (Int, Int)
+walk n = clones (count 0 (build n End))

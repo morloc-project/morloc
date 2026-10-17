@@ -2742,6 +2742,53 @@ impl<T> RecBox<T> {
     }
 }
 
+/// The box around a constructor's payload, taken apart at the last use of
+/// the value that holds it: the payload is moved out when the box is its
+/// only owner, and otherwise the part needed is cloned from it. A generated
+/// type's arms are `RecBox`es; a user-mapped type may use `Box`, `Rc` or
+/// `Arc`.
+pub trait MlcTake: Sized {
+    type Payload;
+    fn take_with<R>(self, owned: impl FnOnce(Self::Payload) -> R, shared: impl FnOnce(&Self::Payload) -> R) -> R;
+}
+
+impl<T> MlcTake for Box<T> {
+    type Payload = T;
+    fn take_with<R>(self, owned: impl FnOnce(T) -> R, _shared: impl FnOnce(&T) -> R) -> R {
+        owned(*self)
+    }
+}
+
+impl<T> MlcTake for RecBox<T> {
+    type Payload = T;
+    fn take_with<R>(self, owned: impl FnOnce(T) -> R, shared: impl FnOnce(&T) -> R) -> R {
+        match self.try_into_inner() {
+            Ok(v) => owned(v),
+            Err(b) => shared(&b),
+        }
+    }
+}
+
+impl<T> MlcTake for std::rc::Rc<T> {
+    type Payload = T;
+    fn take_with<R>(self, owned: impl FnOnce(T) -> R, shared: impl FnOnce(&T) -> R) -> R {
+        match std::rc::Rc::try_unwrap(self) {
+            Ok(v) => owned(v),
+            Err(rc) => shared(&rc),
+        }
+    }
+}
+
+impl<T> MlcTake for std::sync::Arc<T> {
+    type Payload = T;
+    fn take_with<R>(self, owned: impl FnOnce(T) -> R, shared: impl FnOnce(&T) -> R) -> R {
+        match std::sync::Arc::try_unwrap(self) {
+            Ok(v) => owned(v),
+            Err(arc) => shared(&arc),
+        }
+    }
+}
+
 impl<T> From<T> for RecBox<T> {
     fn from(v: T) -> Self {
         RecBox::new(v)

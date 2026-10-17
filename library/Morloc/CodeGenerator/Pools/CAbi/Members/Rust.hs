@@ -35,6 +35,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Rust
 import Control.Monad.Identity (Identity, runIdentity)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import qualified Control.Monad.State.Strict as CMS
+import Data.Char (isAlphaNum, isDigit)
 import Data.Function (on)
 import Data.Ord (comparing)
 import qualified Data.Set as Set
@@ -2551,10 +2552,10 @@ rustMakeLet namer letIndex mt _ p1 p2 = do
 -- value followed by reassignment of the loop-carried locals. The loop-carried
 -- vars are the manifold's own owned native locals (deserialized once at entry and
 -- bound @let mut@ by 'rustMakeLet'); every continue value was already owned by
--- 'adaptLoopBodyOwned' (a passthrough carried var cloned, a fresh value moved), so
--- computing all temps before any reassignment is safe against the
--- parallel-assignment hazard (a temp reads a carried var by borrow/clone, never
--- moving it out from under a later temp).
+-- 'adaptLoopBodyOwned' (a passthrough carried var cloned, a fresh value moved).
+-- All temps are computed before any reassignment, and 'moveLastUses' moves a
+-- carried var only where it is the var's single mention among all the temps,
+-- so no temp reads a var an earlier temp moved out.
 rustMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> LoopBody PoolDocs PoolDocs PoolDocs -> RustM PoolDocs
 rustMakeLoop res carried body = do
   resultIdx <- getCounter
@@ -2562,7 +2563,7 @@ rustMakeLoop res carried body = do
     LoopResultSerial -> return "*mut u8"
     LoopResultNative t -> rustTypeOf t
   let resultVar = helperNamer resultIdx
-  bodyLines <- walk body
+  bodyLines <- walk (fst (moveLastUses (map (render . nvarNamer . fst) carried) body))
   -- A native loop's locals are its own, started from their initializers.
   let initLines = concat [poolPriorLines d <> ["let mut" <+> nvarNamer i <+> "=" <+> poolExpr d <> ";"] | (i, Just d) <- carried]
       loopExpr = vsep ["loop {", indent 4 (vsep bodyLines), "}"]
@@ -2603,6 +2604,103 @@ rustMakeLoop res carried body = do
             , "}"
             ]
       return $ poolPriorLines guardDocs <> [ifBlock]
+
+-- | A carried value's last use on every path through an iteration takes the
+-- value instead of copying it, since the value is reassigned or the loop
+-- ends before anything reads it again. A use qualifies when it is the only
+-- mention of the value in its step and no later step on any path mentions
+-- it, and no loop or closure in the step can run that mention twice: a
+-- copied value is then the value itself, and a constructor field is taken
+-- out of its payload ('rustmorloc::MlcTake'). Guards are left alone.
+-- A move this misplaces fails to compile; it never runs.
+moveLastUses ::
+  [Text] ->
+  LoopBody PoolDocs PoolDocs PoolDocs ->
+  (LoopBody PoolDocs PoolDocs PoolDocs, Map.Map Text Int)
+moveLastUses names = go
+  where
+    go (LoopBase d) = let (d', m) = step Map.empty d in (LoopBase d', m)
+    go (LoopContinue ds) =
+      let total = Map.unionsWith (+) (map mentionsIn ds)
+          ds' = map (\d -> fst (stepWith total Map.empty d)) ds
+       in (LoopContinue ds', total)
+    go (LoopNLet i d b) =
+      let (b', after) = go b
+          (d', m) = step after d
+       in (LoopNLet i d' b', Map.unionWith (+) m after)
+    go (LoopSLet i d b) =
+      let (b', after) = go b
+          (d', m) = step after d
+       in (LoopSLet i d' b', Map.unionWith (+) m after)
+    go (LoopIf g t e) =
+      let (t', mt) = go t
+          (e', me) = go e
+       in (LoopIf g t' e', Map.unionsWith (+) [mentionsIn g, mt, me])
+
+    step after d = stepWith (mentionsIn d) after d
+
+    stepWith here after d =
+      let movable =
+            [ v
+            | not (repeats (docText d))
+            , v <- names
+            , Map.findWithDefault 0 v here == 1
+            , Map.findWithDefault 0 v after == 0
+            ]
+          d' = foldl (\acc v -> rewrite v acc) d movable
+       in (d', mentionsIn d)
+
+    mentionsIn d = Map.fromList [(v, n) | v <- names, let n = countToken v (docText d), n > 0]
+
+    docText d = render (vsep (poolPriorLines d ++ [poolExpr d]))
+
+    -- A step holding a loop or a closure may run a mention more than once.
+    repeats t = any (`T.isInfixOf` t) ["loop {", "while ", "for ", "|"]
+
+    rewrite v d =
+      let lines' = map (pretty . moveIn v . render) (poolPriorLines d)
+       in d {poolPriorLines = lines', poolExpr = pretty (moveIn v (render (poolExpr d)))}
+
+    -- The single mention of v in t, if it is a copy or a field projection.
+    moveIn v t
+      | countToken v t /= 1 = t
+      | otherwise = case T.breakOn ("match &(" <> v <> ") {") t of
+          (pre, rest) | not (T.null rest) -> pre <> takeField v (T.drop (T.length ("match &(" <> v <> ") {")) rest)
+          _ -> case T.breakOn (v <> ".clone()") t of
+            (pre, rest) | not (T.null rest), boundaryBefore pre ->
+              pre <> v <> T.drop (T.length (v <> ".clone()")) rest
+            _ -> t
+
+    -- "<arm>(mlc_b) => mlc_b.K.clone(), _ => unreachable!() }..." becomes a
+    -- take of field K from the payload.
+    takeField v rest =
+      let (armPat, afterArm) = T.breakOn " => mlc_b." rest
+          afterDot = T.drop (T.length " => mlc_b.") afterArm
+          (field, afterField) = T.span isDigit afterDot
+          tailText = ".clone(), _ => unreachable!() }"
+       in if T.null afterArm || T.null field || not (tailText `T.isPrefixOf` afterField)
+            then "match &(" <> v <> ") {" <> rest
+            else
+              "match " <> v <> " {" <> armPat
+                <> " => rustmorloc::MlcTake::take_with(mlc_b, |mlc_v| mlc_v." <> field
+                <> ", |mlc_v| mlc_v." <> field <> ".clone()), _ => unreachable!() }"
+                <> T.drop (T.length tailText) afterField
+
+    boundaryBefore pre = case T.unsnoc pre of
+      Just (_, c) -> not (isIdentChar c)
+      Nothing -> True
+
+    countToken v t =
+      length
+        [ ()
+        | (pre, rest) <- T.breakOnAll v t
+        , boundaryBefore pre
+        , case T.uncons (T.drop (T.length v) rest) of
+            Just (c, _) -> not (isIdentChar c)
+            Nothing -> True
+        ]
+
+    isIdentChar c = isAlphaNum c || c == '_'
 
 -- | Native @if@ expression, bound to a fresh temp so it composes as a value.
 -- The arms are already adapted to the owned result type by the shared 'IfN_'
