@@ -10,8 +10,8 @@
 -- the projection: not a second
 -- `match` (secondMatchRust), not `@show` in a throw arm (showAfterRust), and
 -- not from inside a `@try` body the subject was bound outside of
--- (tryBodyRust); a `data` type the user maps to their own Rust enum keeps a
--- plain Box and is copied (userRust). A throw arm that shows the subject
+-- (tryBodyRust); a `data` type the user maps to their own Rust enum takes
+-- its field out of the plain Box (userRust). A throw arm that shows the subject
 -- after the projection reads the payload, so neither language may take it
 -- (showAfterRust, showAfterCpp with n = 2), nor when the projection is in an
 -- earlier let's right-hand side (showLetCpp). The two arms of an unwrap

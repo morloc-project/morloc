@@ -35,7 +35,6 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Rust
 import Control.Monad.Identity (Identity, runIdentity)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import qualified Control.Monad.State.Strict as CMS
-import Data.Char (isAlphaNum, isDigit)
 import Data.Function (on)
 import Data.Ord (comparing)
 import qualified Data.Set as Set
@@ -55,6 +54,9 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , LowerConfig (..)
   , buildProgramM
   , consumableProjectionLets
+  , markLastReads
+  , loopBorrowLocals
+  , RNode (RNM, RSM)
   , papplySteps
   , defaultDeserialize
   , defaultFoldRules
@@ -518,6 +520,87 @@ writeSelectorRust d [] = d
 writeSelectorRust d (Right k : rs) = writeSelectorRust (d <> "." <> RP.rustFieldIdent (Key k)) rs
 writeSelectorRust d (Left i : rs) = writeSelectorRust (d <> "." <> pretty i) rs
 
+-- | A getter on an owned receiver (OWN-5): the leaf it names, or a tuple of
+-- its leaves in order. A record is opened through a pattern naming every
+-- field of the record and no others. A receiver that is not a record or a
+-- tuple renders as 'lcEvalPattern' would.
+rustTakeGetter :: TypeF -> Selector -> MDoc -> RustM (Maybe MDoc)
+rustTakeGetter t0 sel0 subj0
+  | opens t0 = do
+      (stmts, leaves) <- node t0 subj0 (zip [0 :: Int ..] (ungroup sel0))
+      let result = case map snd (sortOn fst leaves) of
+            [x] -> x
+            xs -> tupled xs
+      return (Just ("{" <+> hsep stmts <+> result <+> "}"))
+  | otherwise = return Nothing
+  where
+    opens (NamF NamRecord _ _ _) = True
+    opens t = isJust (tupleArgs t)
+
+    tupleArgs (AppF (VarF (FV (TV gv) _)) ts)
+      | T.isPrefixOf "Tuple" gv = Just (fst (partitionKindArgsF ts))
+    tupleArgs _ = Nothing
+
+    -- The value @v@ is owned; each path is a result index and the steps
+    -- left to it.
+    node _ v [(k, [])] = return ([], [(k, v)])
+    node t v paths
+      | any (null . snd) paths = do
+          n <- getCounter
+          let whole = "mlc_v" <> pretty n
+              (lastWhole, others) = case reverse [k | (k, []) <- paths] of
+                (k : ks) -> (k, ks)
+                [] -> error "rustTakeGetter: no whole leaf"
+              copies =
+                [ (k, "mlc_c" <> pretty n <> "_" <> pretty k, "(&" <> whole <> ")" <> writeSelectorRust "" ss <> ".clone()")
+                | (k, ss) <- paths
+                , not (null ss) || k `elem` others
+                ]
+          tys <- rustTypeOf t
+          return
+            ( ("let" <+> whole <> ":" <+> tys <+> "=" <+> v <> ";") : ["let" <+> c <+> "=" <+> e <> ";" | (_, c, e) <- copies]
+            , (lastWhole, whole) : [(k, c) | (k, c, _) <- copies]
+            )
+    node t@(NamF NamRecord _ _ rs) v paths
+      | all (isKey . snd) paths
+      , Just _ <- mapM (\h -> lookup h rs') (heads paths) = do
+          n <- getCounter
+          tys <- rustTypeOf t
+          ctor <- rustStructCtor t
+          let shell = "mlc_s" <> pretty n
+              fieldLocal j = "mlc_" <> pretty n <> "_" <> pretty j
+              locals = map fieldLocal [0 .. length rs - 1]
+              open =
+                [ "let" <+> shell <+> "= ::std::mem::ManuallyDrop::<" <> tys <> ">::new(" <> v <> ");"
+                , "let" <+> ctor <+> "{" <+> RP.rustRecordFields (zip (map fst rs) locals) <+> "} = &*" <> shell <> ";"
+                , "let" <+> tupleOf locals <+> "= unsafe {" <+> tupleOf ["::std::ptr::read(" <> l <> ")" | l <- locals] <+> "};"
+                ]
+          subs <- mapM
+            (\(j, (key, ft)) -> node ft (fieldLocal j) [(k, ss) | (k, Right h : ss) <- paths, h == unKey key])
+            [x | x@(_, (key, _)) <- zip [0 :: Int ..] rs, unKey key `elem` heads paths]
+          return (open <> concatMap fst subs, concatMap snd subs)
+      where
+        rs' = [(unKey key, ft) | (key, ft) <- rs]
+    node t v paths
+      | Just ts <- tupleArgs t
+      , all (isIdx . snd) paths
+      , all (\j -> j >= 0 && j < length ts) [j | (_, Left j : _) <- paths] = do
+          n <- getCounter
+          let tup = "mlc_t" <> pretty n
+          subs <- mapM
+            (\j -> node (ts !! j) (tup <> "." <> pretty j) [(k, ss) | (k, Left i : ss) <- paths, i == j])
+            (Set.toList (Set.fromList [j | (_, Left j : _) <- paths]))
+          return (("let" <+> tup <+> "=" <+> v <> ";") : concatMap fst subs, concatMap snd subs)
+    node _ v paths = return ([], [(k, writeSelectorRust v ss) | (k, ss) <- paths])
+
+    heads paths = [h | (_, Right h : _) <- paths]
+    isKey (Right _ : _) = True
+    isKey _ = False
+    isIdx (Left _ : _) = True
+    isIdx _ = False
+    tupleOf [x] = "(" <> x <> ",)"
+    tupleOf xs = tupled xs
+
 -- | Wrap a manifold body in an on-disk content-addressed cache lookup (`a@fn`
 -- / @cache). Mirrors the C++ @cppCacheBody@: serialize native args to packets,
 -- compute the key, look it up; on a hit return the cached packet, on a miss run
@@ -581,7 +664,7 @@ prepareRustCacheArg wrapIdx (j, (a@(Arg i tm), sa)) = do
       sid <- rustRegisterSchema schemaStr
       -- The cache-key value is only read, through a 'ToVoidstar' (&T)
       -- 'put_value' sink, so a borrowed arg is reborrowed ('rustReadPlace').
-      own <- rustOwnership (BndVarN tf i)
+      own <- rustOwnership (BndVarN tf i KeptRead)
       -- The packet exists only to key and store the cache entry, so its
       -- owner releases it when the manifold's scope ends.
       let argVar = "__mlc_ca_" <> pretty wrapIdx <> "_" <> pretty j
@@ -606,8 +689,8 @@ varUseCountOps =
     , opNativeManifoldM = \full@(NativeManifold_ _ _ form _) -> return (ctxOf form `add` foldlNM add mempty full)
     , opSerialExprM = \node -> return (foldlSE add mempty node)
     , opNativeExprM = \node -> return $ case node of
-        BndVarN_ _ i -> Map.singleton i 1
-        LetVarN_ _ i -> Map.singleton i 1
+        BndVarN_ _ i _ -> Map.singleton i 1
+        LetVarN_ _ i _ -> Map.singleton i 1
         IfN_ _ c t e -> c `add` Map.unionWith max t e
         _ -> foldlNE add mempty node
     , opSerialArgM = \node -> return (foldlSA add mempty node)
@@ -734,8 +817,9 @@ sharedIndicesNM = sharedOf . runIdentity . foldNativeManifoldM varUseCountOps
 ownerPure :: Set.Set Int -> Set.Set Int -> NativeExpr -> IOwnership
 -- A bound variable and a let variable both render as `n<i>` and share the index
 -- namespace, so both classify the same way ('classifyIndex').
-ownerPure g s (BndVarN _ i) = classifyIndex g s i
-ownerPure g s (LetVarN _ i) = classifyIndex g s i
+-- A last read of a value the pool owns takes it (OWN-2).
+ownerPure g s (BndVarN _ i r) = classifyRead g s i r
+ownerPure g s (LetVarN _ i r) = classifyRead g s i r
 ownerPure g s (ReturnN e) = ownerPure g s e
 ownerPure g s (NativeLetN _ _ e) = ownerPure g s e
 ownerPure g s (SerialLetN _ _ e) = ownerPure g s e
@@ -763,6 +847,11 @@ classifyIndex g s i
 argOwnerPure :: Set.Set Int -> Set.Set Int -> NativeArg -> IOwnership
 argOwnerPure g s (NativeArgExpr e) = ownerPure g s e
 argOwnerPure _ _ (NativeArgManifold _) = Owned
+
+classifyRead :: Set.Set Int -> Set.Set Int -> Int -> VarRead -> IOwnership
+classifyRead g s i r = case classifyIndex g s i of
+  BorrowedPlace | r == LastRead -> Owned
+  o -> o
 
 rustOwnership :: NativeExpr -> RustM IOwnership
 rustOwnership e = do
@@ -1308,7 +1397,8 @@ buildSrcTypeVarMask = do
     isFunParam _ = False
 
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
-translate srcs es = do
+translate srcs es0 = do
+  let es = map markLastReads es0
   let rustSrcs = unique $ mapMaybe srcPath [s | s <- srcs, srcLang s == rustLang]
   absSrcs <- liftIO $ mapM MS.canonicalizePath rustSrcs
   localCrateDirs <- Map.elems <$> rustLocalDeps
@@ -2027,9 +2117,11 @@ rustSurround =
   defaultValue
     { surroundSerialManifoldM = \recurse sm@(SerialManifold _ _ form _ _) ->
         let carried = loopCarriedIdsSM sm
-         in withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesSM sm `Set.union` carried) carried (recurse sm)
+            borrowed = borrowedIndicesOfForm form
+         in withManifoldScope (borrowed <> loopBorrowLocals (not . rustIsCopy) borrowed (RSM sm)) (sharedIndicesSM sm `Set.union` carried) carried (recurse sm)
     , surroundNativeManifoldM = \recurse nm@(NativeManifold _ _ form _) ->
-        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesNM nm) Set.empty (recurse nm)
+        let borrowed = borrowedIndicesOfForm form
+         in withManifoldScope (borrowed <> loopBorrowLocals (not . rustIsCopy) borrowed (RNM nm)) (sharedIndicesNM nm) Set.empty (recurse nm)
     }
 
 translateSegment :: SerialManifold -> RustM MDoc
@@ -2316,12 +2408,17 @@ rustLowerConfig mask =
     -- what hands an owned value on from a borrowed place. A field that is
     -- itself a `data` value clones as a shared box, so a loop that walks a
     -- spine by projection stays linear.
-    , lcCtorField = \ty n _ i subj ->
-        "match" <+> "&" <> parens subj <+> "{"
-          <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
-          <+> "=> mlc_b." <> pretty i <> ".clone(),"
-          <+> "_ => unreachable!()"
-          <+> "}"
+    -- At the subject's last read the field is taken out of the payload
+    -- instead ('rustmorloc::MlcTake').
+    , lcCtorField = \taken ty n _ i subj ->
+        if taken
+          then rustTakeField ty n i subj
+          else
+            "match" <+> "&" <> parens subj <+> "{"
+              <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
+              <+> "=> mlc_b." <> pretty i <> ".clone(),"
+              <+> "_ => unreachable!()"
+              <+> "}"
     , lcEnumTagTest = \ty _ n _ subj ->
         parens (subj <+> "==" <+> "<" <> ty <> ">::" <> pretty n)
     , lcListLenTest = \subj n -> parens (parens subj <> ".len() ==" <+> pretty n)
@@ -2350,6 +2447,7 @@ rustLowerConfig mask =
     , lcPrintExpr = RP.printExpr
     , lcPrintStmt = RP.printStmt
     , lcEvalPattern = rustEvalPattern
+    , lcTakeGetter = rustTakeGetter
     , lcListConstructor = \_ _ es -> "vec![" <> hcat (punctuate ", " es) <> "]"
     , lcTupleConstructor = \_ _ es -> tupled es
     , lcRecordConstructor = \recType _ _ _ rs -> do
@@ -2403,6 +2501,7 @@ rustLowerConfig mask =
           Just _ -> Just (vsep ["let _mlc_r =" <+> rustReply e <> ";", "rustmorloc::frame_pop();", "return _mlc_r;"])
     , lcDupPacket = \e -> "rustmorloc::dup_packet(" <> e <> ")"
     , lcOwnedArg = \e -> "rustmorloc::Packet::new(" <> e <> ").as_ptr()"
+    , lcLoopBorrow = rustLoopBorrow
     , lcLoopLetRhs = rustConsumeLetRhs
     , lcLetRhs = rustConsumeLetRhs
     , lcOwnPacketDecl = \v e -> Just ("let" <+> v <+> "= rustmorloc::Packet::new(" <> e <> ");", v <> ".as_ptr()")
@@ -2490,31 +2589,56 @@ isFunctionTypeF :: TypeF -> Bool
 isFunctionTypeF (FunF _ _) = True
 isFunctionTypeF _ = False
 
--- | A projection in 'rustMovableProjections' matches the subject by value and
--- takes the field through @RecBox::try_into_inner@, falling back to a clone
--- of the field, so the field's type needs only what the borrowing form needs.
--- Every other projection borrows the subject and clones the field.
+-- | A projection in 'rustMovableProjections' takes its field like a last
+-- read does ('rustTakeField'). Every other projection borrows the subject and
+-- clones the field.
 rustConsumeLetRhs :: Int -> NativeExpr -> PoolDocs -> RustM PoolDocs
-rustConsumeLetRhs i (IntrinsicN _ IntrCtorField _ [LetVarN t@(VariantF (FV gv (CV cv)) _ _) subj, StrN _ n, IntN _ k]) d = do
+rustConsumeLetRhs i (IntrinsicN _ IntrCtorField _ [LetVarN t@(VariantF {}) subj _, StrN _ n, IntN _ k]) d = do
   consumable <- CMS.gets rsConsumable
   root <- CMS.gets rsCurrentRoot
-  userMapped <- rustUserMapsVariant gv cv
-  if Set.member (root, i) consumable && not userMapped
+  borrowed <- asks oeCurrent
+  if Set.member (root, i) consumable && not (Set.member subj borrowed)
     then do
       ty <- rustTypeOf t
-      return d
-        { poolExpr =
-            "match" <+> nvarNamer subj <+> "{"
-              <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
-              <+> "=> match mlc_b.try_into_inner() {"
-              <+> "::std::result::Result::Ok(mlc_v) => mlc_v." <> pretty k <> ","
-              <+> "::std::result::Result::Err(mlc_b) => mlc_b." <> pretty k <> ".clone(),"
-              <+> "},"
-              <+> "_ => unreachable!()"
-              <+> "}"
-        }
+      return d {poolExpr = rustTakeField ty n (fromIntegral k) (nvarNamer subj)}
     else return d
 rustConsumeLetRhs _ _ d = return d
+
+-- | A loop local 'loopBorrowLocals' found is a reference into what the loop
+-- borrowed (OWN-6), so it joins the manifold's borrowed set; its expression
+-- is a reborrow of a borrowed local or of a field of one.
+rustLoopBorrow :: Int -> NativeExpr -> RustM (Maybe MDoc)
+rustLoopBorrow i e = do
+  borrowed <- asks oeCurrent
+  if not (Set.member i borrowed)
+    then return Nothing
+    else Just <$> case e of
+      IntrinsicN _ IntrCtorField _ [s, StrN _ n, IntN _ k] -> do
+        ty <- rustTypeOf (typeFof s)
+        return $
+          "match" <+> var s <+> "{"
+            <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b) => &mlc_b." <> pretty k <> ","
+            <+> "_ => unreachable!() }"
+      AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr s]
+        | [ss] <- ungroup sel -> return ("&" <> writeSelectorRust (var s) ss)
+      _ -> return (var e)
+  where
+    var (LetVarN _ j _) = nvarNamer j
+    var (BndVarN _ j _) = nvarNamer j
+    var x = error ("rustLoopBorrow: a borrowed loop local bound to " <> show x)
+
+-- | Take field @i@ out of arm @n@'s payload (OWN-5): the box gives the
+-- field up when it holds the only handle, and the field is cloned otherwise
+-- ('rustmorloc::MlcTake'). An arm's one field is its box, so reading the box
+-- out and forgetting the shell moves the whole value.
+rustTakeField :: MDoc -> Text -> Int -> MDoc -> MDoc
+rustTakeField ty n i subj =
+  "{ let mlc_s = ::std::mem::ManuallyDrop::new(" <> subj <> "); match &*mlc_s {"
+    <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
+    <+> "=> rustmorloc::MlcTake::take_with(unsafe { ::std::ptr::read(mlc_b) }, |mlc_v| mlc_v." <> pretty i
+    <> ", |mlc_v| mlc_v." <> pretty i <> ".clone()),"
+    <+> "_ => unreachable!()"
+    <+> "} }"
 
 -- | The projections Rust renders by value; no tag test may follow one
 -- (see the projection-consume golden's secondMatchRust).
@@ -2549,13 +2673,9 @@ rustMakeLet namer letIndex mt _ p1 p2 = do
 -- @loop { ... }@ expression bound to the serial result: guards render to
 -- @if/else@, native/serial lets to @let@ locals, a base leaf to @break <base>;@
 -- (the loop expression's value), and a continue leaf to @let@ temps for each new
--- value followed by reassignment of the loop-carried locals. The loop-carried
--- vars are the manifold's own owned native locals (deserialized once at entry and
--- bound @let mut@ by 'rustMakeLet'); every continue value was already owned by
--- 'adaptLoopBodyOwned' (a passthrough carried var cloned, a fresh value moved).
--- All temps are computed before any reassignment, and 'moveLastUses' moves a
--- carried var only where it is the var's single mention among all the temps,
--- so no temp reads a var an earlier temp moved out.
+-- value followed by reassignment of the loop-carried locals. Every temp is
+-- computed before any reassignment; which reads move is OWN-2's, and which
+-- locals are borrows is OWN-6's.
 rustMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> LoopBody PoolDocs PoolDocs PoolDocs -> RustM PoolDocs
 rustMakeLoop res carried body = do
   resultIdx <- getCounter
@@ -2563,8 +2683,7 @@ rustMakeLoop res carried body = do
     LoopResultSerial -> return "*mut u8"
     LoopResultNative t -> rustTypeOf t
   let resultVar = helperNamer resultIdx
-  let owned = map fst carried <> boundIn body
-  bodyLines <- walk (fst (moveLastUses (map (render . nvarNamer) owned) body))
+  bodyLines <- walk body
   -- A native loop's locals are its own, started from their initializers.
   let initLines = concat [poolPriorLines d <> ["let mut" <+> nvarNamer i <+> "=" <+> poolExpr d <> ";"] | (i, Just d) <- carried]
       loopExpr = vsep ["loop {", indent 4 (vsep bodyLines), "}"]
@@ -2580,11 +2699,6 @@ rustMakeLoop res carried body = do
     }
   where
     ids = map fst carried
-    -- The native locals the iteration binds, owned like the carried ones.
-    boundIn (LoopNLet i _ b) = i : boundIn b
-    boundIn (LoopSLet _ _ b) = boundIn b
-    boundIn (LoopIf _ t e) = boundIn t <> boundIn e
-    boundIn _ = []
     walk (LoopBase seDocs) =
       return $ poolPriorLines seDocs <> ["break" <+> poolExpr seDocs <> ";"]
     walk (LoopContinue contDocs) = do
@@ -2610,104 +2724,6 @@ rustMakeLoop res carried body = do
             , "}"
             ]
       return $ poolPriorLines guardDocs <> [ifBlock]
-
--- | A value the loop owns, carried or bound in the iteration, is taken
--- instead of copied at its last use on every path through an iteration,
--- since it is reassigned, out of scope or the loop ends before anything
--- reads it again. A use qualifies when it is the only
--- mention of the value in its step and no later step on any path mentions
--- it, and no loop or closure in the step can run that mention twice: a
--- copied value is then the value itself, and a constructor field is taken
--- out of its payload ('rustmorloc::MlcTake'). Guards are left alone.
--- A move this misplaces fails to compile; it never runs.
-moveLastUses ::
-  [Text] ->
-  LoopBody PoolDocs PoolDocs PoolDocs ->
-  (LoopBody PoolDocs PoolDocs PoolDocs, Map.Map Text Int)
-moveLastUses names = go
-  where
-    go (LoopBase d) = let (d', m) = step Map.empty d in (LoopBase d', m)
-    go (LoopContinue ds) =
-      let total = Map.unionsWith (+) (map mentionsIn ds)
-          ds' = map (\d -> fst (stepWith total Map.empty d)) ds
-       in (LoopContinue ds', total)
-    go (LoopNLet i d b) =
-      let (b', after) = go b
-          (d', m) = step after d
-       in (LoopNLet i d' b', Map.unionWith (+) m after)
-    go (LoopSLet i d b) =
-      let (b', after) = go b
-          (d', m) = step after d
-       in (LoopSLet i d' b', Map.unionWith (+) m after)
-    go (LoopIf g t e) =
-      let (t', mt) = go t
-          (e', me) = go e
-       in (LoopIf g t' e', Map.unionsWith (+) [mentionsIn g, mt, me])
-
-    step after d = stepWith (mentionsIn d) after d
-
-    stepWith here after d =
-      let movable =
-            [ v
-            | not (repeats (docText d))
-            , v <- names
-            , Map.findWithDefault 0 v here == 1
-            , Map.findWithDefault 0 v after == 0
-            ]
-          d' = foldl (\acc v -> rewrite v acc) d movable
-       in (d', mentionsIn d)
-
-    mentionsIn d = Map.fromList [(v, n) | v <- names, let n = countToken v (docText d), n > 0]
-
-    docText d = render (vsep (poolPriorLines d ++ [poolExpr d]))
-
-    -- A step holding a loop or a closure may run a mention more than once.
-    repeats t = any (`T.isInfixOf` t) ["loop {", "while ", "for ", "|"]
-
-    rewrite v d =
-      let lines' = map (pretty . moveIn v . render) (poolPriorLines d)
-       in d {poolPriorLines = lines', poolExpr = pretty (moveIn v (render (poolExpr d)))}
-
-    -- The single mention of v in t, if it is a copy or a field projection.
-    moveIn v t
-      | countToken v t /= 1 = t
-      | otherwise = case T.breakOn ("match &(" <> v <> ") {") t of
-          (pre, rest) | not (T.null rest) -> pre <> takeField v (T.drop (T.length ("match &(" <> v <> ") {")) rest)
-          _ -> case T.breakOn (v <> ".clone()") t of
-            (pre, rest) | not (T.null rest), boundaryBefore pre ->
-              pre <> v <> T.drop (T.length (v <> ".clone()")) rest
-            _ -> t
-
-    -- "<arm>(mlc_b) => mlc_b.K.clone(), _ => unreachable!() }..." becomes a
-    -- take of field K from the payload.
-    takeField v rest =
-      let (armPat, afterArm) = T.breakOn " => mlc_b." rest
-          afterDot = T.drop (T.length " => mlc_b.") afterArm
-          (field, afterField) = T.span isDigit afterDot
-          tailText = ".clone(), _ => unreachable!() }"
-       in if T.null afterArm || T.null field || not (tailText `T.isPrefixOf` afterField)
-            then "match &(" <> v <> ") {" <> rest
-            else
-              "match " <> v <> " {" <> armPat
-                <> " => rustmorloc::MlcTake::take_with(mlc_b, |mlc_v| mlc_v." <> field
-                <> ", |mlc_v| mlc_v." <> field <> ".clone()), _ => unreachable!() }"
-                <> T.drop (T.length tailText) afterField
-
-    boundaryBefore pre = case T.unsnoc pre of
-      Just (_, c) -> not (isIdentChar c)
-      Nothing -> True
-
-    countToken v t =
-      length
-        [ ()
-        | (pre, rest) <- T.breakOnAll v t
-        , boundaryBefore pre
-        , case T.uncons (T.drop (T.length v) rest) of
-            Just (c, _) -> not (isIdentChar c)
-            Nothing -> True
-        ]
-
-    isIdentChar c = isAlphaNum c || c == '_'
 
 -- | Native @if@ expression, bound to a fresh temp so it composes as a value.
 -- The arms are already adapted to the owned result type by the shared 'IfN_'

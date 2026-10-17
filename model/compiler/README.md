@@ -27,6 +27,7 @@ never repairs the input or guesses.
 | codegen/realize.md | RLZ | one implementation and one language per call |
 | codegen/effect-boundaries.md | EBND | suspensions made explicit at every language boundary |
 | codegen/serialize.md | SER | every crossing has a wire form |
+| codegen/ownership.md | OWN | each read of a value is a borrow, a copy or a move |
 | codegen/emit.md | EMIT | generated pools and the manifest |
 
-Only `frontend/typecheck.md`, `codegen/effect-boundaries.md` and `codegen/emit.md` are started.
+Only `frontend/typecheck.md`, `codegen/effect-boundaries.md`, `codegen/ownership.md` and `codegen/emit.md` are started.

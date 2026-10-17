@@ -314,7 +314,7 @@ instance Dependable NativeExpr where
     | isAtomic e = return $ D e deps
     | otherwise = do
         i <- newIndex
-        return $ D (LetVarN (typeFof e) i) ((i, Right e) : deps)
+        return $ D (LetVarN (typeFof e) i KeptRead) ((i, Right e) : deps)
 
   isAtomic (AppExeN _ _ _) = False
   isAtomic ManN {} = False
@@ -361,8 +361,8 @@ instance Dependable SerialExpr where
 
 -- | Detect a trivial native variable reference.
 nativeTrivialVar :: NativeExpr -> Maybe Int
-nativeTrivialVar (LetVarN _ j) = Just j
-nativeTrivialVar (BndVarN _ j) = Just j
+nativeTrivialVar (LetVarN _ j _) = Just j
+nativeTrivialVar (BndVarN _ j _) = Just j
 nativeTrivialVar _ = Nothing
 
 -- | Detect a trivial serial variable reference.
@@ -380,8 +380,8 @@ renameNE old new = go where
   go (ReturnN ne) = ReturnN (go ne)
   go (SerialLetN i se ne) = SerialLetN (ri i) (renameSE old new se) (go ne)
   go (NativeLetN i ne1 ne2) = NativeLetN (ri i) (go ne1) (go ne2)
-  go (LetVarN t i) = LetVarN t (ri i)
-  go (BndVarN t i) = BndVarN t (ri i)
+  go (LetVarN t i r) = LetVarN t (ri i) r
+  go (BndVarN t i r) = BndVarN t (ri i) r
   go (DeserializeN t s se) = DeserializeN t s (renameSE old new se)
   go (ExeN t exe) = ExeN t (renameExe old new exe)
   go (ListN v t nes) = ListN v t (map go nes)
@@ -556,8 +556,8 @@ invertSerialManifold sm0 =
           return $ D (renameNE i j ne2) (renameDeps i j lets2 <> lets1)
       | otherwise =
           return $ D ne2 (lets2 <> ((i, Right ne1) : lets1))
-    invertNativeExprM (LetVarN_ t i) = atomize (LetVarN t i) []
-    invertNativeExprM (BndVarN_ t i) = atomize (BndVarN t i) []
+    invertNativeExprM (LetVarN_ t i r) = atomize (LetVarN t i r) []
+    invertNativeExprM (BndVarN_ t i r) = atomize (BndVarN t i r) []
     invertNativeExprM (DeserializeN_ t s (D se lets)) = atomize (DeserializeN t s se) lets
     invertNativeExprM (ExeN_ t x) = atomize (ExeN t x) []
     invertNativeExprM (ListN_ v t nes) = atomize (ListN v t (map unD nes)) (concatMap getDeps nes)
@@ -589,7 +589,7 @@ invertSerialManifold sm0 =
       where
         isLit LogN {} = True
         isLit _ = False
-        part (NativeLetN i rhs (LetVarN _ j)) | i == j = rhs
+        part (NativeLetN i rhs (LetVarN _ j _)) | i == j = rhs
         part e = e
     invertNativeExprM (IntrinsicN_ t intr msch nes) =
       atomize (IntrinsicN t intr msch (map unD nes)) (concatMap getDeps nes)
@@ -640,8 +640,8 @@ maxIndex = (+ 1) . runIdentity . foldSerialManifoldM fm
     findSerialIndices e = return $ foldlSE max 0 e
 
     findNativeIndices :: (Monad m) => NativeExpr_ Int Int Int Int Int -> m Int
-    findNativeIndices (LetVarN_ _ i) = return i
-    findNativeIndices (BndVarN_ _ i) = return i
+    findNativeIndices (LetVarN_ _ i _) = return i
+    findNativeIndices (BndVarN_ _ i _) = return i
     findNativeIndices e = return $ foldlNE max 0 e
 
 {- | A record entry stores the common name, keys, and types of records that are

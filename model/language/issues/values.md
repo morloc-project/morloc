@@ -24,3 +24,11 @@ on 0.109.0 unless marked.
   t)` fails for CSV, Parquet, inline JSON and stdin input: "Expected int for
   MORLOC_INT, but got numpy.int64" (pymorloc.c:744, py_size_step). The
   manual shows `54585374`.
+- **No rule forbids a sourced function mutating its argument.** [read] A
+  gap in EVAL-7. In Python a morloc value read twice is one shared object,
+  so a sourced `def f(xs): xs.sort(); return len(xs)` changes the value
+  every other reader of `xs` sees, and whether it does depends on whether
+  the compiler shared or copied it. EVAL-7 requires that copying be
+  unobservable but says nothing about mutation; R copies on modify, C++ and
+  Rust pass shared values as `const&`/`&`. Needs a ruling: forbid it
+  (unchecked, as EVAL-7 is) or have the Python pool copy arguments.

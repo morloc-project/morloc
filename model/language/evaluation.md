@@ -58,3 +58,37 @@ The manual says once, when the lambda is built; EVAL-3 would place it in the
 body, once per call. Either (a) at construction, so a failing value fails
 even if the lambda is never called; (b) on each call; or (c) at construction
 only when it does not depend on the lambda's parameters and cannot fail.
+
+## Values
+
+### EVAL-7 A type that crosses into morloc behaves as a value
+Intent: ruled 2026-10-17
+Tests: spec-eval-7-1, spec-eval-7-2
+Code: conforms 2026-10-17
+
+morloc lets each language's code stay idiomatic, but a native type that a
+morloc type maps to, or that sourced code returns into morloc, must behave
+as a value:
+
+- a copy is an independent value equal to the original, and changing one
+  never changes the other;
+- copying it, moving it and releasing it have no effect a program depends
+  on: no output, no counter, no resource opened, closed or locked.
+
+morloc makes as many or as few copies of a value as it likes, moves a value
+instead of copying it, and releases each copy wherever it is done with it.
+How many times a type's copy constructor or `Clone` runs, and when its
+destructor or `Drop` runs, is unspecified, and changes between versions of
+the compiler. This is how C++ already treats copy elision.
+
+So a program means the same for every placement of copies, moves and
+releases that gives each read a value equal to the one named. The compiler
+relies on this to choose a placement (OWN).
+
+Work that must happen at a definite time, such as writing to a file or
+releasing a lock, is an effect (`EFF`), done by a function morloc calls in
+order, not a side effect of copying or releasing a value.
+
+Why: moving a value at its last use is what keeps a loop over a Rust
+`Box`-armed type linear (#179); a type whose copies or releases carry
+effects would see them change with every such improvement.

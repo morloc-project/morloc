@@ -9,7 +9,7 @@ it is solved, and a file when it is empty.
 - [kinds-dimensions.md](kinds-dimensions.md): signature Nat variables are not rigid, unchecked newtype kinds, reserved-type kinds, operator classification, misplaced or renamed variables in kind diagnostics
 - [diagnostics-docs.md](diagnostics-docs.md): generated names in POLY-6 errors, `@mime` lost on structural aliases, stale manual docstring example, `match` branch errors reported as guard/if, inlined named calls missing from traces (DIAG-5)
 - [typecheck.md](typecheck.md): programs that typecheck and fail later, unlocated rejections, Rec self-equality, integer literal in a point-free section, stale manual table examples
-- [values.md](values.md): newtype native form dropped (NEWT-4), `data` comparison in R and C++ (SUM-5), `@savem`/`@load` digits, numpy.int64 table column in Python
+- [values.md](values.md): newtype native form dropped (NEWT-4), `data` comparison in R and C++ (SUM-5), `@savem`/`@load` digits, numpy.int64 table column in Python, no rule against a Python source mutating a shared argument (EVAL-7)
 - [programs.md](programs.md): single-export command name, argument numbering, `@check.path`/`@stdin` help, `@default` messages, unlocated CLI build errors, benchmark `{lang}`
 - [manual.md](manual.md): manual text that contradicts a spec item or itself
 - [typeclasses.md](typeclasses.md): compiler crashes in instance bodies, catch-all fallthrough depends on instance body (CLS-12), unchecked class obligations and superclasses (CLS-5), a method used at another type inside its own instance calls that instance (CLS-2, #160)

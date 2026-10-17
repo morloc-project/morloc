@@ -379,7 +379,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       fresh <- mapM (const MM.getCounter) ids
       let rename b (i, i') = trimap (renameNE i i') (renameSE i i') (renameNE i i') b
           body1 = foldl rename body0 (zip ids fresh)
-          starts = [(i', BndVarN tf i) | (i, i', tf) <- zip3 ids fresh carried]
+          starts = [(i', BndVarN tf i KeptRead) | (i, i', tf) <- zip3 ids fresh carried]
       return (LoopN t' starts body1)
     nativeExpr _ (MonoLoopContinue {}) = error "morloc bug: MonoLoopContinue in native position"
     nativeExpr m (MonoLet i e1 e2) =
@@ -392,7 +392,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
               ne1 <- nativeExpr m1 e1'
               ne2 <- nativeExpr m e2
               return $ NativeLetN i ne1 ne2
-    nativeExpr _ (MonoLetVar t i) = LetVarN <$> inferType t <*> pure i
+    nativeExpr _ (MonoLetVar t i) = LetVarN <$> inferType t <*> pure i <*> pure KeptRead
     nativeExpr m (MonoReturn e) = ReturnN <$> nativeExpr m e
     -- Recursive call. The Express-time 'crossLang' mark was decided relative to
     -- the recursion's TEXTUAL parent pool, but segmentation can relocate a
@@ -475,9 +475,9 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoBndVar (A _) _) = error "MonoBndVar must have a type if used in native context"
     nativeExpr _ (MonoBndVar (B _) i) =
       case Map.lookup i typemap of
-        (Just (Right t)) -> BndVarN <$> inferType t <*> pure i
+        (Just (Right t)) -> BndVarN <$> inferType t <*> pure i <*> pure KeptRead
         _ -> error "No type found"
-    nativeExpr _ (MonoBndVar (C t) i) = BndVarN <$> inferType t <*> pure i
+    nativeExpr _ (MonoBndVar (C t) i) = BndVarN <$> inferType t <*> pure i <*> pure KeptRead
     -- Resolve the head FVar via the FULL applied type so that
     -- parametrised typedefs (e.g. R's @type Vector n Bool = "logical"@
     -- vs @type Vector n a = "list"@) pick the rule that matches the
@@ -1264,7 +1264,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
         (Just SerialContent) -> SerialLetS i <$> serializeS "b" m0 (typeFof ne1) ne1 <*> pure se2
         (Just NativeAndSerialContent) -> do
           let tf = typeFof ne1
-          sv <- serializeS "b" m0 tf (LetVarN tf i)
+          sv <- serializeS "b" m0 tf (LetVarN tf i KeptRead)
           return $ NativeLetS i ne1 (SerialLetS i sv se2)
         _ -> return $ NativeLetS i ne1 se2
       return (req', e')
@@ -1322,7 +1322,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
         foldlM
           ( \b i ->
               let tf = carriedTM Map.! i
-               in (\se -> LoopSLet i se b) <$> serializeS "loop-reserialize" m0 tf (BndVarN tf i)
+               in (\se -> LoopSLet i se b) <$> serializeS "loop-reserialize" m0 tf (BndVarN tf i KeptRead)
           )
           body'
           serialUsed
@@ -1364,7 +1364,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
             (Just SerialContent) | not (isFunF (typeFof ne)) ->
               (\se -> LoopSLet i se b') <$> serializeS "loop-nat-to-ser" m0 (typeFof ne) ne
             (Just NativeAndSerialContent) | not (isFunF (typeFof ne)) -> do
-              sv <- serializeS "loop-nat-to-ser" m0 (typeFof ne) (LetVarN (typeFof ne) i)
+              sv <- serializeS "loop-nat-to-ser" m0 (typeFof ne) (LetVarN (typeFof ne) i KeptRead)
               return (LoopNLet i ne (LoopSLet i sv b'))
             _ -> return (LoopNLet i ne b')
           return (Map.unionWith (<>) rn rb, leaf)
@@ -1385,8 +1385,8 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
     wireNativeExpr ::
       NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) ->
       MorlocMonad (D NativeExpr)
-    wireNativeExpr (LetVarN_ t i) = return (Map.singleton i NativeContent, LetVarN t i)
-    wireNativeExpr (BndVarN_ t i) = return (Map.singleton i NativeContent, BndVarN t i)
+    wireNativeExpr (LetVarN_ t i r) = return (Map.singleton i NativeContent, LetVarN t i r)
+    wireNativeExpr (BndVarN_ t i r) = return (Map.singleton i NativeContent, BndVarN t i r)
     -- A function value applied through its index is a native use of that
     -- variable: a closure that arrived as a packet (a parameter of function
     -- type, reflected from another pool) must be deserialized before the
@@ -1418,7 +1418,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
         (Just SerialContent) -> SerialLetN i <$> serializeS "b" m0 (typeFof ne1) ne1 <*> pure ne2
         (Just NativeAndSerialContent) -> do
           let tf = typeFof ne1
-          sv <- serializeS "b" m0 tf (LetVarN tf i)
+          sv <- serializeS "b" m0 tf (LetVarN tf i KeptRead)
           return $ NativeLetN i ne1 (SerialLetN i sv ne2)
         _ -> return $ NativeLetN i ne1 ne2
       return (req', e')
@@ -1459,8 +1459,8 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
 
         wrapAsNeeded :: (IsSerializable e) => e -> (Int, Request) -> MorlocMonad e
         wrapAsNeeded e (i, req) = case (req, Map.lookup i formMap) of
-          (SerialContent, Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 1" m t (BndVarN t i) <*> pure e
-          (NativeAndSerialContent, Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 2" m t (BndVarN t i) <*> pure e
+          (SerialContent, Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 1" m t (BndVarN t i KeptRead) <*> pure e
+          (NativeAndSerialContent, Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 2" m t (BndVarN t i KeptRead) <*> pure e
           (NativeContent, Just (SerialContent, Just t)) -> nativeLet i <$> naturalizeN "wan 3" m lang t (BndVarS (Just t) i) <*> pure e
           (NativeAndSerialContent, Just (SerialContent, Just t)) -> nativeLet i <$> naturalizeN "wan 4" m lang t (BndVarS (Just t) i) <*> pure e
           _ -> return e

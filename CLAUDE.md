@@ -62,7 +62,8 @@ format in `model/README.md`: `model/language/` (what programs mean),
 `model/compiler/` (internal contracts) and `model/runtime/` (below).
 `bash model/check.sh` checks the items and their test citations. A spec
 test is named for its item (`spec-alias-3-1`): a case in
-`test-suite/SpecTests.hs`, or a golden `test-suite/golden-tests/spec-*/`.
+`test-suite/SpecTests.hs` (or another test-suite module, for a compiler
+item), or a golden `test-suite/golden-tests/spec-*/`.
 Before changing behavior a spec item governs, read the item; a `ruled`
 item outranks the code.
 

@@ -30,12 +30,14 @@ import SpecTests (specTests)
 import VariantMergeTests (variantMergeTests)
 import SystemConfigTests (systemConfigTests)
 import UnitTypeTests
+import LastReadTests (lastReadTests)
 import VersionConstraintTests (versionConstraintTests)
 
 unitTests :: [TestTree]
 unitTests =
   [ specTests
   , unitTypeTests
+  , lastReadTests
   , recSolverTests
   , abiTests
   , buildParamsTests

@@ -98,7 +98,7 @@ armOwnsResult = go Set.empty
   where
     go bound (NativeLetN i _ body) = go (Set.insert i bound) body
     go bound (SerialLetN _ _ body) = go bound body
-    go bound (LetVarN _ j) = Set.member j bound
+    go bound (LetVarN _ j _) = Set.member j bound
     go _ _ = False
 
 serialType :: MDoc
@@ -890,7 +890,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     , lcEnumLit = \ty _ n _ -> ty <> "::" <> pretty n
     , lcVariantTagTest = \_ _ tag subj ->
         parens (parens subj <> ".v.index() ==" <+> pretty tag)
-    , lcCtorField = \_ _ tag i subj ->
+    , lcCtorField = \_ _ _ tag i subj ->
         "mlc::arm(std::get<" <> pretty tag <> ">" <> parens (parens subj <> ".v") <> ")->f" <> pretty i
     , lcEnumTagTest = \ty _ n _ subj ->
         parens (subj <+> "==" <+> ty <> "::" <> pretty n)
@@ -911,6 +911,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     , lcNewIndex = getCounter
     , lcPrintExpr = CP.printExpr
     , lcPrintStmt = CP.printStmt
+    , lcTakeGetter = \_ _ _ -> return Nothing
     , lcEvalPattern = \t p xs -> do
         state <- CMS.get
         return $ evaluatePattern state t p xs
@@ -1026,6 +1027,7 @@ PROPAGATE_ERROR(errmsg)|]
                 | otherwise -> vsep [rt <+> "_mlc_r =" <+> e <> ";", pop, "return(_mlc_r);"]
     , lcDupPacket = \e -> "_dup_packet(" <> e <> ")"
     , lcOwnedArg = \e -> "mlc::Packet(" <> e <> ").get()"
+    , lcLoopBorrow = \_ _ -> return Nothing
     -- A consumable projection takes its payload, as 'makeLet' does for a
     -- let outside a loop.
     , lcLoopLetRhs = \i orhs d -> do

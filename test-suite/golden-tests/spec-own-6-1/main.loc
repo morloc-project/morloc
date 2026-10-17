@@ -1,7 +1,7 @@
--- A tail loop over a user-mapped Rust data type takes each link's fields out
--- of the carried value, so it copies nothing per step: walking a chain of n
--- links costs at most one copy of the chain, made where the loop starts,
--- not one copy of the remaining chain per step.
+-- Spec OWN-6: a tail loop that only walks into the value it was lent
+-- carries a reference into it, so it copies none of the value. A chain of
+-- a million links is walked here, with a Clone that recurses down the
+-- chain and so could not copy it on a 2 MiB stack.
 module main (walk, walkMatch)
 
 import root-rust
@@ -23,8 +23,6 @@ count :: Int -> Chain -> Int
 count | acc (Link _ rest) = count (acc + 1) rest
       | acc _ = acc
 
--- The same walk written with `match`, which binds the carried value to a
--- local of its own before taking the tail.
 countMatch :: Int -> Chain -> Int
 countMatch k c = match c
   | End = k

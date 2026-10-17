@@ -479,7 +479,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
             if ldEnumLitByName desc
               then parens (subj <> "[[1]]" <+> "==" <+> dquotes (pretty n))
               else parens (parens subj <> "[0]" <+> "==" <+> dquotes (pretty n))
-        , lcCtorField = \_ _ _ i subj ->
+        , lcCtorField = \_ _ _ _ i subj ->
             if ldEnumLitByName desc
               -- R indexes from one, so a field's position is its wire index
               -- plus one; the wire index is what the compiler carries.
@@ -526,6 +526,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcPrintExpr = genericPrintExpr desc
         , lcPrintStmt = genericPrintStmt desc
         , lcEvalPattern = \t p xs -> return $ genericEvalPattern desc t p xs
+        , lcTakeGetter = \_ _ _ -> return Nothing
         , lcListConstructor = \v _ es -> case ldListStyle desc of
             BracketList -> list es
             FunctionCallList -> pretty (ldGenericListFn desc) <> tupled es
@@ -575,6 +576,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcFrameReturn = \_ _ _ _ -> return Nothing
         , lcDupPacket = id
         , lcOwnedArg = \e -> if T.null (ldOwnedArgFn desc) then e else pretty (ldOwnedArgFn desc) <> "(" <> e <> ")"
+        , lcLoopBorrow = \_ _ -> return Nothing
         , lcLoopLetRhs = \_ _ d -> return d
         , lcLetRhs = \_ _ d -> return d
         , lcOwnPacketDecl = \v e ->

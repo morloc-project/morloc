@@ -25,7 +25,7 @@ all:
 	./nexus failCppUnwrap 3 2>&1 | grep -o 'no batch 3' >> obs.txt
 	./nexus otherArmCpp 5 >> obs.txt 2>> obs.err
 	./nexus loopUnwrapCpp 10 0 >> obs.txt 2>> obs.err
-	grep -c 'try_into_inner()' nexus-build/pools/rust/src/main.rs >> obs.txt
+	grep -c 'MlcTake::take_with(' nexus-build/pools/rust/src/main.rs >> obs.txt
 	grep -c "= std::move(mlc::arm(std::get<" nexus-build/pools/cpp/pool.cpp >> obs.txt
 
 clean:

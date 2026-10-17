@@ -100,8 +100,8 @@ prettyFoldManifold =
       return $ x {poolExpr = "ReturnN(" <> poolExpr x <> ")"}
     makeNativeExpr _ (SerialLetN_ i x1 x2) = return $ makeLet letNamerS "SerialLetN" i x1 x2
     makeNativeExpr _ (NativeLetN_ i x1 x2) = return $ makeLet letNamerN "NativeLetN" i x1 x2
-    makeNativeExpr _ (LetVarN_ _ i) = return $ defaultValue {poolExpr = letNamerN i}
-    makeNativeExpr _ (BndVarN_ _ i) = return $ defaultValue {poolExpr = bndNamerN i}
+    makeNativeExpr _ (LetVarN_ _ i _) = return $ defaultValue {poolExpr = letNamerN i}
+    makeNativeExpr _ (BndVarN_ _ i _) = return $ defaultValue {poolExpr = bndNamerN i}
     makeNativeExpr _ (DeserializeN_ _ _ e) = return $ e {poolExpr = "DeserializeN" <> parens (poolExpr e)}
     makeNativeExpr _ (ExeN_ _ (SrcCallP _ src)) = return $ defaultValue {poolExpr = pretty (srcName src)}
     makeNativeExpr _ (ExeN_ _ (PatCallP pat)) = return $ defaultValue {poolExpr = pretty pat}

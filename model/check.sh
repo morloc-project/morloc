@@ -13,7 +13,7 @@ import os, re, sys
 root = sys.argv[1]
 only = sys.argv[2]
 model = os.path.join(root, "model")
-unit = os.path.join(root, "test-suite", "SpecTests.hs")
+unit = os.path.join(root, "test-suite")
 golden = os.path.join(root, "test-suite", "golden-tests")
 
 errors = []
@@ -96,7 +96,10 @@ if os.path.exists(readme):
             if m:
                 complete.add(os.path.join("language", m[1]))
 
-unit_tests = set(re.findall(r'"(spec-[a-z]+-\d+-\d+)"', open(unit).read())) if os.path.exists(unit) else set()
+unit_tests = set()
+for f in sorted(os.listdir(unit)) if os.path.isdir(unit) else []:
+    if f.endswith(".hs"):
+        unit_tests |= set(re.findall(r'"(spec-[a-z]+-\d+-\d+)"', open(os.path.join(unit, f)).read()))
 golden_tests = {d for d in os.listdir(golden) if d.startswith("spec-")} if os.path.isdir(golden) else set()
 for t in sorted(unit_tests & golden_tests):
     errors.append(f"{t} is both a unit and a golden test")

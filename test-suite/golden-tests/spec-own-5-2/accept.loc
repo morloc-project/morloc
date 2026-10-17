@@ -1,0 +1,19 @@
+-- Spec OWN-5: a getter reads a record's fields out through a pattern that
+-- names every field of the record. The accept twin of main.loc: the same
+-- program, its struct holding exactly the record's fields.
+module main (second)
+
+import root-rust
+
+record Pair where
+  a :: Int
+  b :: [Int]
+record Rust => Pair = "Pair"
+
+source Rust from "exact.rs" ("mk_pair" as mkPair)
+
+mkPair :: Int -> Pair
+
+--' The second field of a fresh pair
+second :: Int -> [Int]
+second n = .b (mkPair n)
