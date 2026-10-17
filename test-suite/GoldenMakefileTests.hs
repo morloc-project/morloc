@@ -204,15 +204,21 @@ readIfPresentBytes path = do
 -- Where the system has no @timeout@ (macOS ships none), @shims@ goes on PATH
 -- so the tests that bound a run with it still run it.
 --
+-- Every build checks its ownership decisions (@MORLOC_CHECK_OWNERSHIP=1@)
+-- unless the caller set the variable.
+--
 -- Returns make's stderr. It is collected outside the test directory because
 -- most recipes begin with @rm -f *.err@.
 runQuietly :: FilePath -> [String] -> IO BS.ByteString
 runQuietly shims args = do
   env <- getEnvironment
   hasTimeout <- maybe False (const True) <$> findExecutable "timeout"
-  let env' = case lookup langParamsVar env of
+  let env0 = case lookup "MORLOC_CHECK_OWNERSHIP" env of
         Just _ -> env
-        Nothing -> (langParamsVar, "rust:lto=off;cpp:flags=-ffp-contract=off") : env
+        Nothing -> ("MORLOC_CHECK_OWNERSHIP", "1") : env
+      env' = case lookup langParamsVar env0 of
+        Just _ -> env0
+        Nothing -> (langParamsVar, "rust:lto=off;cpp:flags=-ffp-contract=off") : env0
       env'' =
         if hasTimeout
           then env'

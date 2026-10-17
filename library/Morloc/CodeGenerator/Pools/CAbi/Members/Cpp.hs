@@ -57,6 +57,8 @@ import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Ownership (LetMode (..), OwnCaps (..), PoolPlan, emptyPoolPlan, letMode, planPool)
+import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
+import System.Environment (lookupEnv)
 import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -524,10 +526,16 @@ translate srcs es = do
         , translatorDebugInfo = debugInfo
         , translatorTraceInfo = traceInfo
         , translatorDebugMode = debugMode
-        , translatorPool = planPool cppCaps es
+        , translatorPool = pool
         }
+      pool = planPool cppCaps es
       (code, stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
   mapM_ (MM.throwSystemError . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)
+  checking <- liftIO (lookupEnv "MORLOC_CHECK_OWNERSHIP")
+  when (maybe False (`notElem` ["", "0"]) checking) $
+    case concat [checkManifold (letMode pool root) (ocTagAfterTake cppCaps) sm | sm@(SerialManifold root _ _ _ _) <- es] of
+      [] -> return ()
+      vs -> MM.throwSystemError ("C++ pool: ownership check failed (OWN-1):" <+> vsep (map pretty vs))
 
   maker <- makeTheMaker cxxFlags includeDirs
 

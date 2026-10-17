@@ -31,6 +31,7 @@ import VariantMergeTests (variantMergeTests)
 import SystemConfigTests (systemConfigTests)
 import UnitTypeTests
 import LastReadTests (lastReadTests)
+import OwnershipCheckTests (ownershipCheckTests)
 import VersionConstraintTests (versionConstraintTests)
 
 unitTests :: [TestTree]
@@ -38,6 +39,7 @@ unitTests =
   [ specTests
   , unitTypeTests
   , lastReadTests
+  , ownershipCheckTests
   , recSolverTests
   , abiTests
   , buildParamsTests

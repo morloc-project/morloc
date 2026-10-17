@@ -17,6 +17,20 @@ for primitive numeric elements. Deferred by the user 2026-10-12.
 - [read] Nothing relies on it: no generated pool or binding assumes more
   than natural alignment, and numpy checks only natural alignment
   (pymorloc.c `PyArray_ISALIGNED`).
+- [reproduced, 2026-10-17, bd61418a] Natural alignment is not met either,
+  and the C++ binding relies on it. Run with
+  `cpp:flags=-fsanitize=address,undefined;cpp:flags=-fno-sanitize-recover=all`,
+  23 of the 347 C++-only goldens stop at a misaligned read in
+  cppmorloc.hpp. The reads are a `const Array*` header (lines 732, 1595)
+  or an `int64_t` (765, 775) at addresses such as `...c7` and `...f5`, so
+  not even 8-aligned. Examples: string-interpolation, typeclasses-1,
+  cpp-copy-count, futhark-basic, parse-directive.
+
+  Undefined behaviour in C++: it works on x86, but a strict-alignment
+  target may trap, and the optimizer may assume alignment. Not traced:
+  whether the field offsets of a tuple or record are packed without
+  padding, or the buffer base itself is misaligned. Fix: read wire fields
+  with `memcpy` (or `std::bit_cast`), or align the layout.
 - [read] What it costs today: each writer's sizing pass reserves 63 bytes
   per numeric array and pads up to 63, which dominates for many small
   arrays (`[[Int8]]` rows of a few bytes).

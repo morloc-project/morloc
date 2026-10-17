@@ -20,7 +20,7 @@ share values by reference, so a copy there is never made.
 
 ### OWN-1 No path reads a value after it is moved
 Intent: ruled 2026-10-17
-Tests: spec-own-1-1
+Tests: spec-own-1-1, spec-own-1-2, spec-own-1-3, spec-own-1-4, spec-own-1-5, spec-own-1-6, spec-own-1-7, spec-own-1-8, spec-own-1-9, spec-own-1-10, spec-own-1-11, spec-own-1-12
 Code: conforms 2026-10-17
 
 In generated code, once a read moves a value, no later read on any path
