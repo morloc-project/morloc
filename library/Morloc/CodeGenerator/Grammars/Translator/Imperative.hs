@@ -56,18 +56,21 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , LoopResult (..)
   , ArgSite (..)
   , IOwnership (..)
+  , FieldRead (..)
 
     -- * Ownership of a projected value
   , consumableProjectionLets
   , markLastReads
   , loopBorrowLocals
   , BorrowPart (..)
+  , BorrowTest (..)
   , borrowPartOf
   , consumedParams
   , nativeManifoldsUnder
   , RNode (..)
   , isLastRead
   , isBorrowableProjection
+  , borrowableRoot
 
     -- * Default serialize/deserialize (for Python/R)
   , defaultSerialize
@@ -448,10 +451,16 @@ data IOwnership
   = Owned
   -- ^ an owned value (@T@): a literal, a call result, a constructor
   | BorrowedRef
-  -- ^ a shared reference (@&T@): a non-'Copy' bound variable
+  -- ^ a shared reference (@&T@): a non-'Copy' bound variable, or a
+  -- constructor field read in place (OWN-6)
   | BorrowedPlace
   -- ^ a place of type @T@ reached through a borrow (a field of a borrowed
   -- value): moving it out needs a clone, but it is not itself a reference
+  deriving (Eq, Show)
+
+-- | How a constructor field is read: taken out of its subject (OWN-5),
+-- borrowed where it lies (OWN-6), or copied out.
+data FieldRead = FieldTake | FieldBorrow | FieldCopy
   deriving (Eq, Show)
 
 -- | A sourced binary operator written between its operands.
@@ -537,11 +546,10 @@ data LowerConfig m = LowerConfig
   -- equality would compare payloads where a pattern must test the
   -- discriminant alone. Every backend asks a different way (@matches!@,
   -- @holds_alternative@, @isinstance@, @inherits@).
-  , lcCtorField :: Bool -> MDoc -> Text -> Int -> Int -> MDoc -> MDoc
-  -- ^ Read one field out of a value whose arm is already established:
-  -- whether this is the subject's last read ('markLastReads'), so the field
-  -- may be taken, the type's rendered spelling, the arm's name, its tag, the
-  -- field's index, the subject.
+  , lcCtorField :: FieldRead -> MDoc -> Text -> Int -> Int -> MDoc -> MDoc
+  -- ^ Read one field out of a value whose arm is already established: how
+  -- the field is read, the type's rendered spelling, the arm's name, its
+  -- tag, the field's index, the subject.
   --
   -- Only ever emitted under a passing tag test, and unreachable from
   -- surface syntax -- a getter aimed at a `data` type is rejected, because
@@ -912,7 +920,7 @@ nativeToWire cfg = go
       ty <- nominalTypeDoc cfg (serialAstToType var) cv
       resultType <- lcSerialAstType cfg var
       byVariantArm cfg resultType ty v arms $ \n i ss -> do
-        results <- zipWithM (\j s -> go (lcCtorField cfg False ty n i j v) s) [0 ..] ss
+        results <- zipWithM (\j s -> go (lcCtorField cfg FieldCopy ty n i j v) s) [0 ..] ss
         let (befores, exprs) = unzip results
         return (concat befores, IRawExpr (render (lcVariantLit cfg ty n i (map (lcPrintExpr cfg) exprs))))
     construct _ _ = error "Unreachable in nativeToWire"
@@ -1012,7 +1020,7 @@ wireToNative cfg = check
       ty <- nominalTypeDoc cfg (serialAstToType var) cv
       resultType <- lcDeserialAstType cfg var
       swap <$> byVariantArm cfg resultType ty v arms (\n i ss -> do
-        results <- zipWithM (\j s -> check (lcCtorField cfg False ty n i j v) s) [0 ..] ss
+        results <- zipWithM (\j s -> check (lcCtorField cfg FieldCopy ty n i j v) s) [0 ..] ss
         let (exprs, befores) = unzip results
         return (concat befores, IRawExpr (render (lcVariantLit cfg ty n i (map (lcPrintExpr cfg) exprs)))))
     construct _ _ = error "Unreachable in wireToNative"
@@ -1459,21 +1467,26 @@ isLastRead (LetVarN _ _ LastRead) = True
 isLastRead (BndVarN _ _ LastRead) = True
 isLastRead _ = False
 
--- | The locals of the native loops under a manifold that hold a borrow
--- rather than a value (OWN-6), given the manifold's borrowed parameters. A
--- carried local qualifies when it starts from a borrowed value and every
--- continue replaces it with part of one; a loop let qualifies when it names
--- part of one (OWN-6), given which types may be borrowed. A part is the
--- value itself, a constructor field or a record field. Nested manifolds are
--- left to their own scope, and an index bound more than once under the
--- manifold never qualifies.
+-- | The locals under a manifold that hold a borrow rather than a value
+-- (OWN-6), given the manifold's borrowed parameters and which types may be
+-- borrowed. A loop's carried local qualifies when it starts from a borrow
+-- and every continue replaces it with part of one; a let, in a loop or not,
+-- qualifies when it names part of one. A part is the value itself, a
+-- constructor field or a record field. Nested manifolds are left to their
+-- own scope, and an index bound more than once under the manifold never
+-- qualifies.
 loopBorrowLocals :: (TypeF -> Bool) -> Set.Set Int -> RNode -> Set.Set Int
-loopBorrowLocals mayBorrow g root = go root
+loopBorrowLocals mayBorrow g root = go g root
   where
-    go n = here n <> mconcat (map go (filter (not . isManifold) (rnodeChildren n)))
-    here n = case n of
-      RN (LoopN _ starts body) -> loopBorrows mayBorrow g reused starts body
-      _ -> Set.empty
+    go env n = case n of
+      RN (NativeLetN i rhs body)
+        | not (Set.member i reused)
+        , isJust (borrowPartOf mayBorrow (`Set.member` env) rhs) ->
+            Set.insert i (go env (RN rhs) <> go (Set.insert i env) (RN body))
+      RN (LoopN _ starts body) ->
+        let b = loopBorrows mayBorrow env reused starts body
+         in b <> mconcat (map (go (env <> b)) (filter (not . isManifold) (rnodeChildren n)))
+      _ -> mconcat (map (go env) (filter (not . isManifold) (rnodeChildren n)))
     reused = Map.keysSet (Map.filter (> (1 :: Int)) (Map.fromListWith (+) [(i, 1) | i <- bindings root]))
     bindings n = loopIds n <> maybe [] (\(i, _, _) -> [i]) (rnodeLet n) <> concatMap bindings (rnodeChildren n)
     loopIds (RN (LoopN _ starts _)) = map fst starts
@@ -1547,15 +1560,21 @@ varIndex _ = Nothing
 -- member renders it as a reference.
 data BorrowPart
   = BorrowVar Int
-  | BorrowCtorField TypeF Int Text Integer
+  | BorrowCtorField TypeF BorrowPart Text Integer
   -- ^ the subject's type, the subject, the arm and the field
   | BorrowField Int [Either Int Text]
   -- ^ a getter of one path
-  | BorrowIf TypeF Int Text BorrowPart BorrowPart
-  -- ^ a test of a variant subject's arm, then the two arms
+  | BorrowIf BorrowTest BorrowPart BorrowPart
+  -- ^ a test, then the two arms
   | BorrowLet Int BorrowPart BorrowPart
   | BorrowFail TypeF Text
   -- ^ the type that fails to be made, and the message
+
+-- | A test a match makes on parts, without copying them.
+data BorrowTest
+  = TestTag TypeF BorrowPart Text
+  -- ^ a variant subject's type, the subject and the arm tested for
+  | TestAnd BorrowTest BorrowTest
 
 -- | The part of a borrow an expression names, given which types may be
 -- borrowed and which locals hold a borrow.
@@ -1565,15 +1584,22 @@ borrowPartOf mayBorrow = go
     go env e
       | not (mayBorrow (typeFof e)) = Nothing
       | otherwise = case e of
-          IntrinsicN _ IntrCtorField _ [s, StrN _ n, IntN _ k] -> (\j -> BorrowCtorField (typeFof s) j n k) <$> var env s
+          IntrinsicN _ IntrCtorField _ [s, StrN _ n, IntN _ k] -> (\p -> BorrowCtorField (typeFof s) p n k) <$> go env s
           AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr s]
             | not (selectorHasBracket sel), [path] <- ungroup sel -> (`BorrowField` path) <$> var env s
-          IfN _ (IntrinsicN _ IntrTagTest _ [s, StrN _ n]) a b
-            | Just j <- varIndex s, not (isEnum (typeFof s)) -> BorrowIf (typeFof s) j n <$> go env a <*> go env b
+          IfN _ c a b
+            | Just t <- test env c -> BorrowIf t <$> go env a <*> go env b
           NativeLetN i rhs body -> BorrowLet i <$> go env rhs <*> go (\j -> j == i || env j) body
           IntrinsicN t IntrThrow _ [StrN _ msg] -> Just (BorrowFail t msg)
           _ -> BorrowVar <$> var env e
     var env x = varIndex x >>= \j -> if env j then Just j else Nothing
+    test env c = case c of
+      IntrinsicN _ IntrTagTest _ [s, StrN _ n]
+        | not (isEnum (typeFof s)) ->
+            (\p -> TestTag (typeFof s) p n) <$> maybe (go env s) (Just . BorrowVar) (varIndex s)
+      IfN _ c1 c2 (LogN _ False) -> TestAnd <$> test env c1 <*> test env c2
+      NativeLetN i rhs body | varIndex body == Just i -> test env rhs
+      _ -> Nothing
     isEnum EnumF {} = True
     isEnum _ = False
 
@@ -2141,7 +2167,7 @@ lowerNativeExprRaw cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothi
 -- bound value (Rust clones a borrowed/place RHS -- e.g. a getter through a
 -- borrowed receiver -- to match the owned binding type; other members unchanged).
 lowerNativeExprRaw cfg (NativeLetN _ rhsE _) (NativeLetN_ i x1 x2) = do
-  x1' <- adaptOwnedElem cfg rhsE x1 >>= lcLetRhs cfg i rhsE
+  x1' <- loopBorrowOr cfg i rhsE x1 (adaptOwnedElem cfg rhsE x1 >>= lcLetRhs cfg i rhsE)
   lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) x1' x2
 lowerNativeExprRaw cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing False x1 x2
 lowerNativeExprRaw _ _ (LetVarN_ _ i _) = return $ defaultValue {poolExpr = nvarNamer i}
@@ -2401,14 +2427,18 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n]) (IntrinsicN_ _ In
     t -> error $ "tag test on a type that is not a `data`: " <> show (pretty t)
 -- Reading one field out of a value whose arm a guarding tag test has already
 -- established. Emitted only under that guard, and with no surface spelling.
-lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n, IntN _ i]) (IntrinsicN_ _ IntrCtorField _ [subjectDocs, _, _]) =
+lowerNativeExprRaw cfg origE@(IntrinsicN _ _ _ [subjectE, StrN _ n, IntN _ i]) (IntrinsicN_ _ IntrCtorField _ [subjectDocs, _, _]) =
   case typeFof subjectE of
     t@(VariantF (FV _ cv) _ arms) -> do
       ty <- nominalTypeDoc cfg t cv
       own <- lcOwnership cfg subjectE
-      let taken = isLastRead subjectE && own == Owned
+      self <- lcOwnership cfg origE
+      let how
+            | isLastRead subjectE && own == Owned = FieldTake
+            | self == BorrowedRef = FieldBorrow
+            | otherwise = FieldCopy
       return $ mergePoolDocs
-        (const (lcCtorField cfg taken ty n (armIndex n (map fst arms)) (fromIntegral i) (poolExpr subjectDocs)))
+        (const (lcCtorField cfg how ty n (armIndex n (map fst arms)) (fromIntegral i) (poolExpr subjectDocs)))
         [subjectDocs]
     t -> error $ "constructor field projection on a non-variant: " <> show (pretty t)
 -- A list pattern's length test and element read. Like the tag test, each is

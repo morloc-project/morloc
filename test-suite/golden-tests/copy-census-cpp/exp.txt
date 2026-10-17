@@ -1,0 +1,116 @@
+--- baseBuild ---
+[0,100]
+--- baseWalk ---
+[5050,200]
+--- nestedOut ---
+[2,100]
+--- nestedLoop ---
+[2550,150]
+--- nestedLoop2 ---
+[5050,200]
+--- tagNested ---
+[1,100]
+--- tagField ---
+[1,100]
+--- fieldArg ---
+[100,2]
+--- fieldArgM ---
+[200,2]
+--- fieldRet ---
+[100,2]
+--- tupleArg ---
+[200,1]
+--- listPat ---
+[1101,6]
+--- listRet ---
+[100,5]
+--- listLit ---
+[2,4]
+--- listRecords ---
+[2003,10]
+--- listLoop ---
+[1200,206]
+--- listStep ---
+[110,6]
+--- twiceRead ---
+[200,0]
+--- twiceLet ---
+[200,0]
+--- twiceKeep ---
+[200,2]
+--- useAndKeep ---
+[200,1]
+--- twoSteps ---
+[200,1]
+--- partsBorrowed ---
+[5050,201]
+--- partsFresh ---
+[5055,203]
+--- setter ---
+[1002,3]
+--- setterFn ---
+[1002,3]
+--- tlOnce ---
+[5049,199]
+--- tlLoopRead ---
+[5044,197]
+--- tlLoopKeep ---
+[5044,197]
+--- tlLoopBuilt ---
+[5047,199]
+--- tlLoopInline ---
+[3,101]
+--- closureRead ---
+[306,1]
+--- closureFn ---
+[200,1]
+--- closureRef ---
+[200,1]
+--- closureDo ---
+[200,0]
+--- papRead ---
+[306,2]
+--- papHof ---
+[203,1]
+--- letOnce ---
+[100,0]
+--- letKeep ---
+[100,1]
+--- letSource ---
+[100,1]
+--- matchCond ---
+[100,1]
+--- matchCondFresh ---
+[100,0]
+--- matchRec ---
+[100,3]
+--- matchUnwrap ---
+[100,1]
+--- matchTry ---
+[100,0]
+--- throughTwo ---
+[100,1]
+--- throughLoop ---
+[100,2]
+--- loopFresh ---
+[1,102]
+--- loopGrow ---
+[1,102]
+--- loopCarried ---
+[300,1]
+--- loopField ---
+[300,3]
+--- loopTuple ---
+[300,2]
+--- tupleStep ---
+[4,202]
+--- nonTail ---
+[5050,300]
+--- guardLoop ---
+[9803,200]
+--- guardKeep ---
+[100,2]
+--- mixedLoop ---
+[323207,5149]
+--- matchedTwice ---
+[200,1]

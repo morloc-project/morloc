@@ -117,3 +117,11 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   subtype path solves it to `<> Unit`. With the signature `pick2 :: Bool ->
   (Int -> <e> ()) -> <e> ()` it typechecks. Open: instantiate an
   existential branch to a suspension with a fresh row before joining.
+- **A complete set of nested patterns is rejected as not exhaustive.**
+  [reproduced, 2026-10-17, 9f24abe4] Violates PAT-3.
+  `data L = Nil | Cons Str L`;
+  `f xs = match xs | (Cons x (Cons y rest)) = 2 | (Cons x Nil) = 1 | Nil = 0`
+  fails "`|` patterns for 'match' are not exhaustive; missing Cons" though
+  the clauses cover every value; writing `(Cons x _)` for the second clause
+  builds. The check is `checkRefutCoverage`
+  (library/Morloc/Frontend/Desugar.hs); cause not traced.

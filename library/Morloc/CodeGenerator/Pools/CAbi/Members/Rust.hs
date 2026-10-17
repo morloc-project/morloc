@@ -57,6 +57,10 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , markLastReads
   , loopBorrowLocals
   , BorrowPart (..)
+  , BorrowTest (..)
+  , FieldRead (..)
+  , borrowableRoot
+  , isLastRead
   , borrowPartOf
   , IExpr (IStrLit)
   , consumedParams
@@ -819,8 +823,9 @@ sharedIndicesNM (NativeManifold _ _ _ e) = sharedOf (runIdentity (foldNativeExpr
 -- (not fold state), the result is correct regardless of the fold's evaluation
 -- order. A bound variable is a @&T@ reference only when it is a borrowed
 -- parameter; a shared value is a place (borrowed at reference sinks, cloned at
--- owned sinks -- never moved); a field of a borrowed value is a place;
--- everything else is an owned value.
+-- owned sinks -- never moved); a getter of a borrowed value is a place; a
+-- constructor field that is not taken is a reference (OWN-6); everything else
+-- is an owned value.
 ownerPure :: Set.Set Int -> Set.Set Int -> NativeExpr -> IOwnership
 -- A bound variable and a let variable both render as `n<i>` and share the index
 -- namespace, so both classify the same way ('classifyIndex').
@@ -834,6 +839,11 @@ ownerPure g s (AppExeN _ (PatCallP (PatternStruct _)) [recv]) =
   case argOwnerPure g s recv of
     Owned -> Owned
     _ -> BorrowedPlace
+ownerPure g s (IntrinsicN t IntrCtorField _ (subj : _))
+  | not (rustIsCopy t)
+  , borrowableRoot subj
+  , not (isLastRead subj && ownerPure g s subj == Owned) =
+      BorrowedRef
 ownerPure _ _ _ = Owned
 
 -- | Classify a variable index: a borrowed parameter (in @Gamma@) is a @&T@
@@ -2442,15 +2452,10 @@ rustLowerConfig mask consumed =
     -- spine by projection stays linear.
     -- At the subject's last read the field is taken out of the payload
     -- instead ('rustmorloc::MlcTake').
-    , lcCtorField = \taken ty n _ i subj ->
-        if taken
-          then rustTakeField ty n i subj
-          else
-            "match" <+> "&" <> parens subj <+> "{"
-              <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
-              <+> "=> mlc_b." <> pretty i <> ".clone(),"
-              <+> "_ => unreachable!()"
-              <+> "}"
+    , lcCtorField = \how ty n _ i subj -> case how of
+        FieldTake -> rustTakeField ty n i subj
+        FieldBorrow -> parens (rustArmField ty n ("&" <> parens subj) ("&mlc_b." <> pretty i))
+        FieldCopy -> rustArmField ty n ("&" <> parens subj) ("mlc_b." <> pretty i <> ".clone()")
     , lcEnumTagTest = \ty _ n _ subj ->
         parens (subj <+> "==" <+> "<" <> ty <> ">::" <> pretty n)
     , lcListLenTest = \subj n -> parens (parens subj <> ".len() ==" <+> pretty n)
@@ -2650,20 +2655,16 @@ rustLoopBorrow i e = do
   where
     render part = case part of
       BorrowVar j -> return (nvarNamer j)
-      BorrowCtorField t j n k -> do
+      BorrowCtorField t p n k -> do
         ty <- rustTypeOf t
-        return $
-          "match" <+> nvarNamer j <+> "{"
-            <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b) => &mlc_b." <> pretty k <> ","
-            <+> "_ => unreachable!() }"
+        p' <- render p
+        return (rustArmField ty n p' ("&mlc_b." <> pretty k))
       BorrowField j path -> return ("&" <> writeSelectorRust (nvarNamer j) path)
-      BorrowIf t j n a b -> do
-        ty <- rustTypeOf t
+      BorrowIf c a b -> do
+        c' <- renderTest c
         a' <- render a
         b' <- render b
-        return $
-          "if matches!(" <> nvarNamer j <> "," <+> RP.typeHead ty <> "::" <> pretty n <+> "{ .. })"
-            <+> "{" <+> a' <+> "} else {" <+> b' <+> "}"
+        return ("if" <+> c' <+> "{" <+> a' <+> "} else {" <+> b' <+> "}")
       BorrowLet j rhs body -> do
         rhs' <- render rhs
         body' <- render body
@@ -2671,6 +2672,25 @@ rustLoopBorrow i e = do
       BorrowFail t msg -> do
         ty <- rustTypeOf t
         return ("rustmorloc::morloc_throw_as::<&" <> ty <> ">(" <> RP.printExpr (IStrLit Nothing msg) <> ")")
+    renderTest c = case c of
+      TestTag t p n -> do
+        ty <- rustTypeOf t
+        p' <- render p
+        return ("matches!(" <> p' <> "," <+> RP.typeHead ty <> "::" <> pretty n <+> "{ .. })")
+      TestAnd x y -> do
+        x' <- renderTest x
+        y' <- renderTest y
+        return (parens (x' <+> "&&" <+> y'))
+
+-- | Match a subject already known to be in arm @n@ and yield an expression
+-- over its payload, @mlc_b@.
+rustArmField :: MDoc -> Text -> MDoc -> MDoc -> MDoc
+rustArmField ty n subj yield =
+  "match" <+> subj <+> "{"
+    <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
+    <+> "=>" <+> yield <> ","
+    <+> "_ => unreachable!()"
+    <+> "}"
 
 -- | Take field @i@ out of arm @n@'s payload (OWN-5): the box gives the
 -- field up when it holds the only handle, and the field is cloned otherwise
@@ -2694,8 +2714,12 @@ rustMovableProjections = consumableProjectionLets False
 -- locals and adapts a borrowed/place RHS via 'adaptOwnedElem' upstream.
 rustMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Bool -> PoolDocs -> PoolDocs -> RustM PoolDocs
 rustMakeLet namer letIndex mt _ p1 p2 = do
+  borrowed <- asks oeCurrent
   annDoc <- case mt of
     Just t | isFunctionTypeF t -> return ""
+    Just t
+      | render (namer letIndex) == render (nvarNamer letIndex)
+      , Set.member letIndex borrowed -> do ts <- rustTypeOf t; return (":" <+> "&" <> ts)
     Just t -> do ts <- rustTypeOf t; return (":" <+> ts)
     Nothing -> return (":" <+> "*mut u8")
   -- A loop-carried local's entry deserialize let is reassigned each iteration by

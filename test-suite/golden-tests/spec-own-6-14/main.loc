@@ -1,0 +1,264 @@
+-- Spec OWN-6: a constructor field read from a borrowed value is a reference
+-- into it, so a nested pattern copies none of what it tests or binds, in a
+-- loop or not. Each shape runs on a Rust type whose Clone counts the links
+-- it copies (Chain) and on a type the pool generates (G):
+--   nested    a nested pattern once, and stepped in a tail loop
+--   owned     a nested pattern in a loop whose carried value is owned
+--   orNew     a field returned from one arm, a constructor from the other
+--   uses      a field captured, passed to a sourced function and returned
+--   cheap     a field of a cheap-copy type
+--   taken     a field taken from a value the function built
+--   loop*     a field of a borrowed argument compared, applied as a
+--             function, mapped, captured, chosen by a condition, and read
+--             in a suspension
+--   keepBoth  a field read and its value kept in one call
+module main
+  ( nested, nestedG, owned, ownedG, orNew, orNewG
+  , uses, usesG, cheap, cheapG, taken, takenG, takenRec
+  , loopOwned, loopFields, loopFn, loopPap, loopClose, loopArgIf, loopSusp
+  , keepBoth, keepBothLoop )
+
+import root-rust
+
+data Chain = End | Link Int Chain
+data Rust => Chain = "Chain"
+
+data G = GEnd | GLink Int G
+
+record Holder where
+  c :: Chain
+  k :: Int
+record Rust => Holder = "Holder"
+
+source Rust from "chain.rs"
+  ( "clones", "mk_chain" as mkChain, "chain_len" as chainLen )
+
+clones :: Int -> (Int, Int)
+mkChain :: Int -> Chain
+chainLen :: Chain -> Int
+
+count :: Int -> Chain -> Int
+count | acc (Link _ rest) = count (acc + 1) rest
+      | acc _ = acc
+
+buildG :: Int -> G -> G
+buildG n acc
+  ? n == 0 = acc
+  : buildG (n - 1) (GLink n acc)
+
+countG :: Int -> G -> Int
+countG | acc (GLink _ rest) = countG (acc + 1) rest
+       | acc _ = acc
+
+tl2 :: Chain -> Chain
+tl2 c = match c
+  | (Link _ (Link _ rest)) = rest
+  | _ = c
+
+tl2G :: G -> G
+tl2G g = match g
+  | (GLink _ (GLink _ rest)) = rest
+  | _ = g
+
+second :: Chain -> Int
+second c = match c
+  | (Link _ (Link y _)) = y
+  | _ = 0
+
+secondG :: G -> Int
+secondG g = match g
+  | (GLink _ (GLink y _)) = y
+  | _ = 0
+
+drop2 :: Int -> Chain -> Int
+drop2 k c
+  ? k == 0 = count 0 c + second c
+  : drop2 (k - 1) (tl2 c)
+
+drop2G :: Int -> G -> Int
+drop2G k g
+  ? k == 0 = countG 0 g + secondG g
+  : drop2G (k - 1) (tl2G g)
+
+--' The links left after dropping pairs, plus the second key, then the links copied
+nested :: Int -> (Int, Int)
+nested n = clones (drop2 10 (mkChain n))
+
+nestedG :: Int -> Int
+nestedG n = drop2G 10 (buildG n GEnd)
+
+stepOrGrow :: Int -> Chain -> Int
+stepOrGrow k c
+  ? k == 0 = count 0 c
+  : ? k == 3 = stepOrGrow (k - 1) (Link 9 c)
+  : stepOrGrow (k - 1) (tl2 c)
+
+stepOrGrowG :: Int -> G -> Int
+stepOrGrowG k g
+  ? k == 0 = countG 0 g
+  : ? k == 3 = stepOrGrowG (k - 1) (GLink 9 g)
+  : stepOrGrowG (k - 1) (tl2G g)
+
+--' The links left when a loop drops pairs and once grows the chain
+owned :: Int -> (Int, Int)
+owned n = clones (stepOrGrow 6 (mkChain n))
+
+ownedG :: Int -> Int
+ownedG n = stepOrGrowG 6 (buildG n GEnd)
+
+restOrNew :: Chain -> Chain
+restOrNew c = match c
+  | (Link _ rest) = rest
+  | End = Link 0 End
+
+restOrNewG :: G -> G
+restOrNewG g = match g
+  | (GLink _ rest) = rest
+  | GEnd = GLink 0 GEnd
+
+--' The links of a chain's rest, and of a new chain for an empty one
+orNew :: Int -> (Int, Int)
+orNew n = clones (count 0 (restOrNew (mkChain n)) + count 0 (restOrNew End))
+
+orNewG :: Int -> Int
+orNewG n = countG 0 (restOrNewG (buildG n GEnd)) + countG 0 (restOrNewG GEnd)
+
+useRest :: Chain -> (Int, Int, Chain)
+useRest c = match c
+  | (Link _ rest) = (chainLen rest, sum (map (\k -> k + chainLen rest) [1, 2]), rest)
+  | End = (0, 0, End)
+
+useRestG :: G -> (Int, Int, G)
+useRestG g = match g
+  | (GLink _ rest) = (countG 0 rest, sum (map (\k -> k + countG 0 rest) [1, 2]), rest)
+  | GEnd = (0, 0, GEnd)
+
+--' A chain's rest measured, measured in a lambda, and returned
+uses :: Int -> (Int, Int, Chain)
+uses n = useRest (mkChain n)
+
+usesG :: Int -> (Int, Int, G)
+usesG n = useRestG (buildG n GEnd)
+
+headPlus :: Chain -> Int
+headPlus c = match c
+  | (Link x _) = x + 1
+  | End = 0
+
+headPlusG :: G -> Int
+headPlusG g = match g
+  | (GLink x _) = x + 1
+  | GEnd = 0
+
+--' The first key plus one, then the links copied
+cheap :: Int -> (Int, Int)
+cheap n = clones (headPlus (mkChain n))
+
+cheapG :: Int -> Int
+cheapG n = headPlusG (buildG n GEnd)
+
+--' A key and the links of a chain built here and taken apart
+taken :: Int -> (Int, Int)
+taken n = clones (
+  let r = Link n (mkChain n)
+  in match r
+    | (Link x rest) = x + count 0 rest
+    | End = 0)
+
+takenG :: Int -> Int
+takenG n =
+  let r = GLink n (buildG n GEnd)
+  in match r
+    | (GLink x rest) = x + countG 0 rest
+    | GEnd = 0
+
+--' A record built here, read by a field and by a getter of its chain
+takenRec :: Int -> (Int, Int)
+takenRec n = clones (
+  let h = {c = mkChain n, k = 3} :: Holder
+  in .k h + chainLen (.c h))
+
+data Res = Bad Str | Good [Int]
+data Pair = Pair [Int] [Int]
+data Job = Job (Int -> Int)
+
+loopO :: Int -> Res -> Int -> Int
+loopO k r acc
+  ? k == 0 = acc
+  : ? (match r | (Good ys) = ys == [1, 2, 3] | (Bad s) = s == "no") = loopO (k - 1) r (acc + 1)
+  : loopO (k - 1) r acc
+
+loopOwned :: Int -> Int
+loopOwned n = loopO n (Good [1, 2, 3]) 0 + loopO n (Bad "no") 0
+
+loopF :: Int -> Pair -> Int -> Int
+loopF k p acc
+  ? k == 0 = acc
+  : ? (match p | (Pair a b) = a == b) = loopF (k - 1) p (acc + 1)
+  : loopF (k - 1) p acc
+
+loopFields :: Int -> Int
+loopFields n = loopF n (Pair [n] [n]) 0
+
+loopJ :: Int -> Job -> Int -> Int
+loopJ k j acc
+  ? k == 0 = acc
+  : loopJ (k - 1) j (match j | (Job f) = f acc)
+
+loopFn :: Int -> Int
+loopFn n = loopJ n (Job (\x -> x + 2)) 0
+
+loopP :: Int -> Job -> [Int] -> [Int]
+loopP k j acc
+  ? k == 0 = acc
+  : loopP (k - 1) j (match j | (Job f) = map f acc)
+
+loopPap :: Int -> [Int]
+loopPap n = loopP n (Job (\x -> x * 2)) [1, 2]
+
+loopC :: Int -> Pair -> [Int] -> [Int]
+loopC k p acc
+  ? k == 0 = acc
+  : loopC (k - 1) p (match p | (Pair a _) = map (\x -> x + length a) acc)
+
+loopClose :: Int -> [Int]
+loopClose n = loopC n (Pair [1, 2, 3] []) [0]
+
+loopA :: Int -> Pair -> Int -> Int
+loopA k p acc
+  ? k == 0 = acc
+  : loopA (k - 1) p (acc + length (match p | (Pair a b) = ? acc > 2 = a : b))
+
+loopArgIf :: Int -> Int
+loopArgIf n = loopA n (Pair [1, 2] [1, 2, 3]) 0
+
+loopS :: Int -> Pair -> Int -> <IO> Int
+loopS k p acc
+  ? k == 0 = do
+    acc
+  : do
+    let m = match p | (Pair a _) = length a
+    loopS (k - 1) p (acc + m)
+
+loopSusp :: Int -> <IO> Int
+loopSusp n = loopS n (Pair [1, 2] []) 0
+
+data W = W Int Pair
+
+wrap :: Int -> Pair -> W
+wrap k p = W k p
+
+wk :: W -> Int
+wk w = match w | (W k (Pair xs _)) = k + length xs
+
+--' A field's length, and the value it came from, kept together
+keepBoth :: Int -> Int
+keepBoth n = wk (let p = Pair [n, n] [] in wrap (match p | (Pair xs _) = length xs) p)
+
+loopK :: Int -> Pair -> Int -> Int
+loopK k p acc
+  ? k == 0 = acc
+  : loopK (k - 1) (Pair [k] []) (acc + wk (wrap (match p | (Pair xs _) = length xs) p))
+
+keepBothLoop :: Int -> Int
+keepBothLoop n = loopK n (Pair [1, 2] []) 0

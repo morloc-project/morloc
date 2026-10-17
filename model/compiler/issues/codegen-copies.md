@@ -1,0 +1,71 @@
+# Copies in generated C++ and Rust
+
+Where an owning backend copies a value that no later read needs. All of
+these are cost, not correctness, and gaps in model/compiler/codegen/ownership.md:
+OWN-1..7 cover Rust tail loops and by-value parameters only, and C++ is held
+to none of them. Python and R share values by reference and copy only at the
+wire. Reproduced 2026-10-17 at 9f24abe4 by counting copies (a counting Rust
+`Clone`, C++ allocations of a 64 KiB payload); entries already in
+codegen-ownership.md are not repeated.
+
+Generated `data` arms are shared boxes in both languages (Rust `RecBox`, C++
+`shared_ptr`), so a copy of a `data` value is O(1); lists, strings, tuples,
+records and user-mapped types copy deeply.
+
+- **A projection is copied when its consumer only reads it.** [reproduced]
+  Rust: a field of a borrowed tuple or record bound by a let (`n16.0.clone()`,
+  1000 clones for a 1000-link chain), a list pattern element
+  (`(n)[0].clone()`, always), a tag test on a nested field, a conditional
+  whose arms are fields (`count 0 (match r | Good c = c ...)`), and a
+  non-tail recursion that rebuilds a chain (`inc`, quadratic). Rust binds
+  a let to a reference only when its root is borrowed, so a getter on a
+  record the function built and reads twice copies the field
+  (`let h = {c = mkChain n, k = 3} in .k h + chainLen (.c h)`: 100 clones;
+  golden spec-own-6-14 takenRec). C++: lets borrow, but a
+  tail loop's lets and a list element do not (`auto n = ...`), so a nested
+  pattern in a loop copies each bound field per step.
+- **A `match` arm that builds a constant makes a walking loop own its
+  value.** [reproduced] `tl c = match c | End = End | (Link _ rest) = rest`
+  stepped in a Rust tail loop copies the rest of the chain each step
+  (golden copy-census-rust tlLoopRead: 294 clones for 3 steps over 100
+  links), because the `End` arm is a value the loop builds (OWN-6). The
+  same loop with `End = c` copies nothing (spec-own-6-1 walkTail); the
+  constant was borrowed only where an earlier pass hoisted it into a
+  parameter.
+- **Last reads are marked only inside Rust tail loops.** [reproduced]
+  Outside them a value read twice is copied at every keeping use including
+  the last (`prepend 1 c` then `prepend 2 c`: 2 copies, 1 needed), a field
+  taken from a value the frame owns needs the value used once and built by
+  a constructor or `@try` (a sourced call's result is never taken), and a
+  value matched twice is copied. C++ never moves at a last use: constructor,
+  tuple, record and list literals, continue temps, `std::bind` captures,
+  conditional arms, a loop's exit and by-value source arguments all copy an
+  owned local (`accL`: 2k+3 copies for k+1 values built). A C++ list literal
+  copies each element twice (an initializer list).
+- **OWN-2's one-step rule moves neither of a borrowing and a moving read.**
+  [reproduced] `eat (acc + chainLen rest) (Link 0 rest)` in a Rust tail loop
+  copies `rest` each step (quadratic), though the borrowing read is
+  evaluated into a temporary before the move.
+- **OWN-7 does not compose through a call.** [reproduced] A parameter passed
+  on to a callee that takes it by value is not itself taken by value
+  (`effL x = build 1 x`: 1000 clones), and a context argument of a nested
+  manifold is never taken by value (`let a = chainLen c in a + count 0
+  (prepend 0 c)`). C++ has no by-value parameter at all: a loop copies every
+  carried parameter at entry, changed or not.
+- **Captures and setters copy a dead owned value.** [reproduced] Rust
+  closure captures and partial applications clone a by-reference type even
+  at its last use; a setter on a dead owned record clones every unchanged
+  field. C++ `std::bind` and `[=]` captures copy likewise.
+- **Closure and wire paths copy what they only serialize.** [read] Rust:
+  staged closures re-clone every earlier argument at each level (about n^2
+  argument clones for an n-ary function); a reflected closure's origin,
+  captured packet bytes included, is cloned twice when reflected and once
+  per application; a closure's non-closure slots are cloned into the wire
+  tuple; a variant arm needing wire conversion clones each field, though on
+  the deserialize side the raw value is dead. C++: `IMapList` binds
+  `auto x = coll[i]` and `IIfNotNull` copies the optional's value.
+- **A comment states a convention OWN-7 broke.** [read] `borrowableRoot`
+  (library/Morloc/CodeGenerator/Grammars/Translator/Imperative.hs) says
+  every native manifold parameter is passed by const reference, as the
+  reason a projection take may not move out of a bound variable. A Rust
+  parameter taken by value is owned. No wrong take was found.

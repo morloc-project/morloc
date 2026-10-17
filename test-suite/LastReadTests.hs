@@ -59,7 +59,7 @@ borrowCases =
     -- a local bound to a match whose every arm is a part, or fails, is a borrow
     , testCase "spec-own-6-10" $
         borrows [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "End") (rd 1) (IfN ty (tag 1 "Link") (NativeLetN 11 (field 1) (rd 11)) failed)) (LoopContinue [rd 10]))
-          @?= [1, 10]
+          @?= [1, 10, 11]
     -- a match with an arm that builds a value owns its value
     , testCase "spec-own-6-11" $
         borrows [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "End") (tup [rd 1]) (field 1)) (LoopContinue [rd 10]))
@@ -68,10 +68,20 @@ borrowCases =
     , testCase "spec-own-6-12" $
         borrowsIf (/= cheap) [(1, par 5)] (LoopNLet 10 (IfN ty (tag 1 "Link") (NativeLetN 11 (IntrinsicN cheap IntrCtorField Nothing [rd 1, StrN fv "Link", IntN fv 0]) (rd 11)) (rd 1)) (LoopContinue [rd 10]))
           @?= []
-    -- a conditional on anything but a constructor tag owns its value
+    -- a conditional on anything but constructor tags owns its value
     , testCase "spec-own-6-13" $
         borrows [(1, par 5)] (LoopNLet 10 (IfN ty (rd 2) (field 1) (rd 1)) (LoopContinue [rd 10]))
           @?= []
+    -- a let outside a loop naming part of a borrow is a borrow, and so is
+    -- one naming part of it
+    , testCase "spec-own-6-15" $
+        Set.toList (loopBorrowLocals (const True) (Set.singleton 5) (RN (NativeLetN 10 (field 5) (NativeLetN 11 (field 10) (rd 11)))))
+          @?= [10, 11]
+    -- a nested pattern: a test of both tags, bound to a local, then a field
+    -- of a field
+    , testCase "spec-own-6-16" $
+        borrows [(1, par 5)] (LoopContinue [IfN ty (NativeLetN 12 (IfN ty (tag 1 "Link") (IntrinsicN ty IntrTagTest Nothing [field 1, StrN fv "Link"]) (LogN fv False)) (rd 12)) (NativeLetN 11 (IntrinsicN ty IntrCtorField Nothing [field 1, StrN fv "Link", IntN fv 1]) (rd 11)) (rd 1)])
+          @?= [1, 11]
     ]
   where
     par i = BndVarN ty i KeptRead

@@ -69,8 +69,11 @@ same name sees what was taken.
   (`helper0 = std::move(n4)`) and then moved into the returned local
   (`T n5 = std::move(helper0)`), so each level of a recursion returning a
   value moves it twice, where a native conditional return moves it at most
-  once, and the type needs a default constructor. Seen in
-  golden:spec-emit-3-1 (`up 3`: 8 moves).
+  once (the default constructor it needs is in codegen-limits.md). Seen in
+  golden:spec-emit-3-1 (`up 3`: 8 moves). An arm whose value is a
+  borrowed `const T&` local is "moved" too (`helper0 = std::move(n54)`),
+  which copies while reading as a move, since `armOwnsResult` counts a
+  borrowed let as owned.
 - **An owned Rust loop local stepped through a `match` copies the rest of
   its value every step.** [reproduced] Cost; OWN-2 counts the `match`'s tag
   tests and its field read as reads in one step, so the field is copied

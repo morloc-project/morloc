@@ -32,3 +32,10 @@ on 0.109.0 unless marked.
   unobservable but says nothing about mutation; R copies on modify, C++ and
   Rust pass shared values as `const&`/`&`. Needs a ruling: forbid it
   (unchecked, as EVAL-7 is) or have the Python pool copy arguments.
+- **A `where` binding that names a parameter is rejected as cyclic.**
+  [reproduced, 2026-10-17, 9f24abe4] `f x = d where d = x` typechecks but
+  `morloc make` fails "Self-referential or cyclic binding: 'd`1467'";
+  `let d = x in d` builds. `hasGround` returns False for a bound variable
+  (library/Morloc/Frontend/Valuecheck.hs, `groundCheck`), so a binding whose
+  only definition is a parameter counts as ungrounded. Spec gap: no item
+  says what a binding may name, and `typecheck` and `make` disagree.
