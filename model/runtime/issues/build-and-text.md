@@ -3,6 +3,14 @@
 - **Build swap not atomic.** [read] Violates ART-3. `swapIn`
   (library/Morloc/ProgramBuilder/Build.hs) deletes the old build, then
   renames staging in; a kill between leaves no build.
+- **A killed build leaves its staging tree forever.** [reproduced,
+  2026-10-17] Spec gap beside ART-3: nothing says what a failed build may
+  leave behind. `morloc make` stages into `<target>.tmp.<pid>`
+  (`ensureStagingDir`, library/Morloc/ProgramBuilder/Build.hs) and removes
+  it only on an error the build itself catches; a SIGKILL (memguard, a
+  timeout) leaves it, and later builds have other pids, so none removes it.
+  The golden tree holds 8, dated 2026-09-02 to 2026-10-17, two of them
+  from a suite run stopped on 2026-10-17.
 - Stale text: `morloc-nexus --help` says launchers pass the wrapper (they
   pass the manifest); ProgramBuilder/Install.hs names
   `exe/<name>/manifest.json` (real: `exe/<name>/<name>-build/manifest.json`);

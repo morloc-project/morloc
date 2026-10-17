@@ -36,7 +36,6 @@ import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( LoopResult (..)
   , infixOperator
-  , consumableProjectionLets
   , isBorrowableProjection
   , papplySteps
   , containsClosure
@@ -58,6 +57,7 @@ import qualified Morloc.Build.Params as BP
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Ownership (OwnCaps (..), PoolPlan (..), planPool)
 import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
@@ -170,6 +170,12 @@ renderTemplatedType :: Text -> [MDoc] -> Int -> MDoc
 renderTemplatedType name argDocs kindCount
   | T.any (== '$') name = pretty $ expandMacro name (map render argDocs) kindCount
   | otherwise = pretty name <> CP.printRecordTemplate argDocs
+
+-- | Every native parameter is a reference ('chooseCallSemantics'), so no
+-- type is passed by value; a tag test may read a value a field was taken
+-- from, since the payload stays in its arm.
+cppCaps :: OwnCaps
+cppCaps = OwnCaps {ocCheap = const False, ocTagAfterTake = True}
 
 chooseCallSemantics :: TypeM -> CallSemantics
 chooseCallSemantics Passthrough = ConstPtr -- const uint8_t* packet
@@ -528,7 +534,7 @@ translate srcs es = do
         , translatorDebugInfo = debugInfo
         , translatorTraceInfo = traceInfo
         , translatorDebugMode = debugMode
-        , translatorConsumableLets = consumableProjectionLets True es
+        , translatorConsumableLets = ppTakes (planPool cppCaps es)
         }
       (code, stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
   mapM_ (MM.throwSystemError . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)

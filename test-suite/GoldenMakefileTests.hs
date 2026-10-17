@@ -10,6 +10,10 @@ is discovered and run; none has to be registered anywhere.
 With @MORLOC_TEST_SHARD@ set, only this run's share of the directories is
 considered (see "GoldenShard").
 
+With @MORLOC_GOLDEN_SNAPSHOT@ set to a directory, the pool sources each test
+generated are copied under it (@<dir>/<test>/...@) before the test cleans
+up, so two runs can be compared file by file.
+
 A directory containing a @SKIP@ file is not run. The file's contents are the
 reason, listed once before the suite starts, so that a disabled test stays
 visible and its justification lives next to the test rather than in a source
@@ -21,9 +25,9 @@ module GoldenMakefileTests
   ) where
 
 import Control.Exception (bracket)
-import Control.Monad (filterM, unless, void)
+import Control.Monad (filterM, unless, void, when)
 import qualified Data.ByteString as BS
-import Data.List (isPrefixOf, sort)
+import Data.List (isInfixOf, isPrefixOf, sort)
 import GoldenShard (Shard, selectShard)
 import System.Directory
   ( doesDirectoryExist
@@ -32,10 +36,13 @@ import System.Directory
   , getTemporaryDirectory
   , listDirectory
   , makeAbsolute
+  , copyFile
+  , createDirectoryIfMissing
+  , removeDirectoryRecursive
   , removeFile
   )
-import System.Environment (getEnvironment)
-import System.FilePath (takeDirectory, (</>))
+import System.Environment (getEnvironment, lookupEnv)
+import System.FilePath (makeRelative, takeDirectory, takeExtension, takeFileName, (</>))
 import qualified System.IO as SI
 import qualified System.Process as SP
 import Test.Tasty
@@ -130,10 +137,47 @@ makeManifoldFile path = do
   let shims = takeDirectory (takeDirectory abspath) </> "shims"
   err <- runQuietly shims ["-C", abspath, "--quiet"]
   BS.writeFile (abspath </> "make.err") err
+  snap <- lookupEnv "MORLOC_GOLDEN_SNAPSHOT"
+  case snap of
+    Just dir | not (null dir) -> snapshotPools abspath dir
+    _ -> return ()
   matched <- outputMatched abspath
   if matched
     then void (runQuietly shims ["-C", abspath, "--quiet", "clean"])
     else return ()
+
+-- | Copy the generated pool sources under a test directory's build trees
+-- into @snap/<test>/@, keeping their paths relative to the test. Staging
+-- trees a killed build left behind (@*.tmp.<pid>@) are skipped.
+snapshotPools :: FilePath -> FilePath -> IO ()
+snapshotPools testdir snap = do
+  files <- poolSources testdir
+  let dest = snap </> takeFileName testdir
+  stale <- doesDirectoryExist dest
+  when stale (removeDirectoryRecursive dest)
+  mapM_
+    ( \f -> do
+        let to = dest </> makeRelative testdir f
+        createDirectoryIfMissing True (takeDirectory to)
+        copyFile f to
+    )
+    files
+  where
+    poolSources d = do
+      entries <- map (d </>) <$> listDirectory d
+      fmap concat . mapM (visit False) $ entries
+    visit inPools p = do
+      isDir <- doesDirectoryExist p
+      let name = takeFileName p
+      if isDir
+        then
+          if name `elem` ["target", ".git"] || ".tmp." `isInfixOf` name
+            then return []
+            else do
+              entries <- map (p </>) <$> listDirectory p
+              concat <$> mapM (visit (inPools || name == "pools")) entries
+        else
+          return [p | inPools, takeExtension p `elem` [".rs", ".cpp", ".hpp", ".h", ".py", ".R", ".toml"]]
 
 outputMatched :: FilePath -> IO Bool
 outputMatched dir = do

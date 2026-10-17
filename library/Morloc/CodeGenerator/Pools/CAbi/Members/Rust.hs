@@ -53,9 +53,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , IOwnership (..)
   , LowerConfig (..)
   , buildProgramM
-  , consumableProjectionLets
   , markLastReads
-  , loopBorrowLocals
   , BorrowPart (..)
   , BorrowTest (..)
   , FieldRead (..)
@@ -63,9 +61,6 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , isLastRead
   , borrowPartOf
   , IExpr (IStrLit)
-  , consumedParams
-  , nativeManifoldsUnder
-  , RNode (RNM, RSM)
   , papplySteps
   , defaultDeserialize
   , defaultFoldRules
@@ -73,6 +68,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , toIType
   )
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Ownership
 import Morloc.Build.CargoLock (mergeCargoLocks)
 import qualified Morloc.Build.Params as BP
 import qualified Morloc.Data.PoolHash as PH
@@ -135,19 +131,15 @@ data RustState = RustState
   , rsStageTable :: Map.Map Int StageEntry
   , rsPapplyHeads :: Set.Set Text
   -- ^ The stored types of the function values this pool partially applies.
-  , rsConsumable :: Set.Set (Int, Int)
-  -- ^ The projections whose let may take the payload out of its subject
-  -- instead of cloning it, keyed by top-level manifold and let index
-  -- ('rustMovableProjections').
+  , rsPool :: PoolPlan
   , rsCurrentRoot :: Int
-  -- ^ The top-level manifold being lowered (see 'rsConsumable').
+  -- ^ The top-level manifold being lowered (the takes in 'rsPool' are keyed
+  -- by it).
   , rsErrors :: [Text]
-  , rsConsumed :: Map.Map Int (Set.Set Int)
-  -- ^ 'rustConsumedParams'.
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty Set.empty 0 [] Map.empty
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty (PoolPlan Set.empty Map.empty) 0 []
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -161,11 +153,10 @@ data OwnEnv = OwnEnv
   { oeCurrent :: Set.Set Int
   , oeParent :: Set.Set Int
   , oeShared :: Set.Set Int
-  -- ^ Indices used at more than one point in the current manifold (the "shared"
-  -- set, see 'sharedIndicesSM'). A non-'Copy' shared local must be BORROWED at
-  -- reference sinks and CLONED at owned sinks so it survives every use -- never
-  -- moved. Kept SEPARATE from 'oeCurrent' (a shared owned local is a value, not
-  -- a @&T@ reference: tagging it 'BorrowedRef' would miscompile reference sinks).
+  -- ^ Indices used at more than one point in the current manifold
+  -- ('mpShared', OWN-2). Kept separate from 'oeCurrent': a shared owned local
+  -- is a value, not a @&T@ reference, so tagging it 'BorrowedRef' would
+  -- miscompile reference sinks.
   , oeParentShared :: Set.Set Int
   -- ^ The enclosing (caller) manifold's shared set. A captured context argument
   -- names a caller variable, so a SHARED non-'Copy' capture must be cloned into
@@ -685,35 +676,6 @@ prepareRustCacheArg wrapIdx (j, (a@(Arg i tm), sa)) = do
       return (argVar, schemaStr, [decl])
     _ -> return (argNamer a, schemaStr, [])
 
--- | Per-index variable-use counts over a manifold, for the "shared" (used at
--- more than one point) determination. ALL uses are counted (borrows INCLUDED --
--- excluding them is unsound: an owned use followed by a later borrow would slip
--- through to a use-after-move); the two arms of an 'IfN' are combined by MAX
--- (they are mutually exclusive at runtime, so a value used once per arm is one
--- use per run). A nested manifold counts as one use of each of its context
--- args, the call or capture that hands them over; its body reads are its own
--- scope's.
-varUseCountOps :: FoldManifoldM Identity (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int)
-varUseCountOps =
-  FoldManifoldM
-    { opSerialManifoldM = \(SerialManifold_ _ _ form _ _) -> return (ctxOf form)
-    , opNativeManifoldM = \(NativeManifold_ _ _ form _) -> return (ctxOf form)
-    , opSerialExprM = \node -> return (foldlSE add mempty node)
-    , opNativeExprM = \node -> return $ case node of
-        BndVarN_ _ i _ -> Map.singleton i 1
-        LetVarN_ _ i _ -> Map.singleton i 1
-        IfN_ _ c t e -> c `add` Map.unionWith max t e
-        _ -> foldlNE add mempty node
-    , opSerialArgM = \node -> return (foldlSA add mempty node)
-    , opNativeArgM = \node -> return (foldlNA add mempty node)
-    }
-  where
-    add = Map.unionWith (+)
-    ctxOf form = Map.fromList [(i, 1) | Arg i _ <- manifoldContext form]
-
-sharedOf :: Map.Map Int Int -> Set.Set Int
-sharedOf = Map.keysSet . Map.filter (>= 2)
-
 -- | Whether a manifold body places a function value in a container (a list,
 -- tuple, record or optional whose type holds a function anywhere). A stored
 -- closure is a trait object behind `Arc`, which must outlive every frame, so a
@@ -806,16 +768,6 @@ thinClosures sinks stageTable heads es =
       | otherwise = return Nothing
       where
         name = render (manNamer i)
-
--- | The shared indices of a serial manifold: variables used at more than one
--- point in its body (see 'varUseCountOps').
-sharedIndicesSM :: SerialManifold -> Set.Set Int
-sharedIndicesSM (SerialManifold _ _ _ _ e) = sharedOf (runIdentity (foldSerialExprM varUseCountOps e))
-
--- | The shared indices of a native manifold (used as an argument). Counting its
--- own context args (captures from the enclosing scope) only over-clones (safe).
-sharedIndicesNM :: NativeManifold -> Set.Set Int
-sharedIndicesNM (NativeManifold _ _ _ e) = sharedOf (runIdentity (foldNativeExprM varUseCountOps e))
 
 -- | The spec's @owner(e, Gamma)@ as a PURE function: the ownership of a native
 -- expression given @Gamma@ (the borrowed @&T@ parameter indices) and @Shared@
@@ -1444,7 +1396,7 @@ translate srcs es0 = do
   let closureTable = Map.map closureSchemaTexts closureAsts
   logTemplates <- collectRenderedTemplates rustLang
   stageTable <- stageTableEntries
-  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsConsumable = rustMovableProjections es, rsConsumed = rustConsumedParams es}
+  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool rustCaps es}
       (code, stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwSystemError . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
 
@@ -2077,20 +2029,6 @@ isVarWidthF (AppF (VarF (FV (TV gv) _)) ts)
   | T.isPrefixOf "Tuple" gv = any isVarWidthF (fst (partitionKindArgsF ts))
 isVarWidthF _ = True
 
--- | The bound-variable indices that are borrowed (@&T@) parameters of a
--- manifold: its non-'Copy' NATIVE parameters. Serial (dispatch) parameters
--- deserialize to owned locals, so they are excluded.
-borrowedIndicesOfForm :: (HasTypeM t) => ManifoldForm (Or TypeS TypeF) t -> Set.Set Int
-borrowedIndicesOfForm form =
-  Set.fromList [i | Arg i tm <- typeMofForm form, isBorrowed tm]
-  where
-    -- A function-typed parameter is rendered `&Arc<dyn Fn>` (see 'rustArgOf'),
-    -- so it too is a borrowed reference; tracking it keeps a captured function
-    -- from being double-referenced when it is forwarded into a nested closure.
-    isBorrowed (Native tf) = not (rustIsCopy tf)
-    isBorrowed (Function _ _) = True
-    isBorrowed _ = False
-
 -- | Lower a manifold body in its own ownership scope: 'oeCurrent' becomes the
 -- manifold's borrowed parameter indices, 'oeParent' the enclosing manifold's
 -- ('oeCurrent' from before), and 'oeShared' the manifold's used-more-than-once
@@ -2109,42 +2047,6 @@ withManifoldScope borrowed shared carried =
 rustWithCallerScope :: RustM a -> RustM a
 rustWithCallerScope = local (\e -> e {oeCurrent = oeParent e, oeShared = oeParentShared e, oeLoopCarried = Set.empty})
 
--- | The loop-carried variable indices of a manifold body, or empty if the body
--- is not a native loop. 'addLoopWraps' makes the loop the whole body (possibly
--- under structural wrappers and the entry deserialize lets), so walk that spine.
--- The wrapper set must stay in sync with 'Serialize.loopCarriedTypes', which
--- walks the identical spine to resolve the carried slots' types.
-loopCarriedIdsSM :: SerialManifold -> Set.Set Int
-loopCarriedIdsSM (SerialManifold _ _ _ _ se) = go se
-  where
-    go (LoopS _ ids _) = Set.fromList ids
-    go (ReturnS x) = go x
-    go (SerialLetS _ _ x) = go x
-    go (NativeLetS _ _ x) = go x
-    go (CacheBodyS _ _ _ _ _ x) = go x
-    go (DebugWrapS _ _ _ x) = go x
-    go _ = Set.empty
-
--- | Per fully applied native manifold, the positions of its parameters
--- OWN-7 passes by value.
-rustConsumedParams :: [SerialManifold] -> Map.Map Int (Set.Set Int)
-rustConsumedParams sms =
-  Map.fromList
-    [ (m, positions)
-    | nm@(NativeManifold m _ form@(ManifoldFull _) _) <- concatMap (nativeManifoldsUnder . RSM) sms
-    , let args = typeMofForm form
-          cands = Set.fromList [i | Arg i (Native tf) <- args, not (rustIsCopy tf)]
-          consumed = consumedParams (not . rustIsCopy) cands nm
-          positions = Set.fromList [j | (j, Arg i _) <- zip [0 ..] args, Set.member i consumed]
-    , not (Set.null positions)
-    ]
-
--- | The parameter indices manifold @m@ takes by value.
-consumedIndices :: Int -> ManifoldForm (Or TypeS TypeF) TypeF -> RustM (Set.Set Int)
-consumedIndices m form = do
-  positions <- CMS.gets (Map.findWithDefault Set.empty m . rsConsumed)
-  return $ Set.fromList [i | (j, Arg i _) <- zip [0 :: Int ..] (typeMofForm form), Set.member j positions]
-
 -- | Track each manifold's borrowed parameters as the body is folded, so
 -- 'rustOwnership' can tell a borrowed @&T@ parameter from an owned value. For a
 -- native-loop manifold the loop-carried locals are additionally recorded (for
@@ -2152,22 +2054,25 @@ consumedIndices m form = do
 rustSurround :: SurroundManifoldM RustM PoolDocs PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs)
 rustSurround =
   defaultValue
-    { surroundSerialManifoldM = \recurse sm@(SerialManifold _ _ form _ _) ->
-        let carried = loopCarriedIdsSM sm
-            borrowed = borrowedIndicesOfForm form
-         in withManifoldScope (borrowed <> loopBorrowLocals (not . rustIsCopy) borrowed (RSM sm)) (sharedIndicesSM sm `Set.union` carried) carried (recurse sm)
-    , surroundNativeManifoldM = \recurse nm@(NativeManifold m _ form _) -> do
-        consumed <- consumedIndices m form
-        let borrowed = borrowedIndicesOfForm form `Set.difference` consumed
-        withManifoldScope (borrowed <> loopBorrowLocals (not . rustIsCopy) borrowed (RNM nm)) (sharedIndicesNM nm) Set.empty (recurse nm)
+    { surroundSerialManifoldM = \recurse sm -> withPlan (planSerialManifold rustCaps sm) (recurse sm)
+    , surroundNativeManifoldM = \recurse nm -> do
+        pp <- CMS.gets rsPool
+        withPlan (planNativeManifold rustCaps pp nm) (recurse nm)
     }
+  where
+    withPlan p = withManifoldScope (mpBorrowed p) (mpShared p) (mpCarried p)
+
+-- | No tag test may follow a take (see the projection-consume golden's
+-- secondMatchRust).
+rustCaps :: OwnCaps
+rustCaps = OwnCaps {ocCheap = rustIsCopy, ocTagAfterTake = False}
 
 translateSegment :: SerialManifold -> RustM MDoc
 translateSegment m0@(SerialManifold root _ _ _ _) = do
   resetCounter
   CMS.modify (\st -> st {rsCurrentRoot = root})
   mask <- CMS.gets rsSrcTypeVarMask
-  consumed <- CMS.gets rsConsumed
+  consumed <- CMS.gets (ppByValue . rsPool)
   e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask consumed)) m0
   return $ renderPoolDocs e
 
@@ -2626,12 +2531,12 @@ isFunctionTypeF :: TypeF -> Bool
 isFunctionTypeF (FunF _ _) = True
 isFunctionTypeF _ = False
 
--- | A projection in 'rustMovableProjections' takes its field like a last
+-- | A projection in the pool plan's takes takes its field like a last
 -- read does ('rustTakeField'). Every other projection borrows the subject and
 -- clones the field.
 rustConsumeLetRhs :: Int -> NativeExpr -> PoolDocs -> RustM PoolDocs
 rustConsumeLetRhs i (IntrinsicN _ IntrCtorField _ [LetVarN t@(VariantF {}) subj _, StrN _ n, IntN _ k]) d = do
-  consumable <- CMS.gets rsConsumable
+  consumable <- CMS.gets (ppTakes . rsPool)
   root <- CMS.gets rsCurrentRoot
   borrowed <- asks oeCurrent
   if Set.member (root, i) consumable && not (Set.member subj borrowed)
@@ -2650,24 +2555,24 @@ rustLoopBorrow i e = do
   if not (Set.member i borrowed)
     then return Nothing
     else case borrowPartOf (const True) (const True) e of
-      Just part -> Just <$> render part
+      Just part -> Just <$> renderPart part
       Nothing -> error ("rustLoopBorrow: a borrowed loop local bound to " <> show e)
   where
-    render part = case part of
+    renderPart part = case part of
       BorrowVar j -> return (nvarNamer j)
       BorrowCtorField t p n k -> do
         ty <- rustTypeOf t
-        p' <- render p
+        p' <- renderPart p
         return (rustArmField ty n p' ("&mlc_b." <> pretty k))
       BorrowField j path -> return ("&" <> writeSelectorRust (nvarNamer j) path)
       BorrowIf c a b -> do
         c' <- renderTest c
-        a' <- render a
-        b' <- render b
+        a' <- renderPart a
+        b' <- renderPart b
         return ("if" <+> c' <+> "{" <+> a' <+> "} else {" <+> b' <+> "}")
       BorrowLet j rhs body -> do
-        rhs' <- render rhs
-        body' <- render body
+        rhs' <- renderPart rhs
+        body' <- renderPart body
         return ("{ let" <+> nvarNamer j <+> "=" <+> rhs' <> ";" <+> body' <+> "}")
       BorrowFail t msg -> do
         ty <- rustTypeOf t
@@ -2675,7 +2580,7 @@ rustLoopBorrow i e = do
     renderTest c = case c of
       TestTag t p n -> do
         ty <- rustTypeOf t
-        p' <- render p
+        p' <- renderPart p
         return ("matches!(" <> p' <> "," <+> RP.typeHead ty <> "::" <> pretty n <+> "{ .. })")
       TestAnd x y -> do
         x' <- renderTest x
@@ -2704,11 +2609,6 @@ rustTakeField ty n i subj =
     <> ", |mlc_v| mlc_v." <> pretty i <> ".clone()),"
     <+> "_ => unreachable!()"
     <+> "} }"
-
--- | The projections Rust renders by value; no tag test may follow one
--- (see the projection-consume golden's secondMatchRust).
-rustMovableProjections :: [SerialManifold] -> Set.Set (Int, Int)
-rustMovableProjections = consumableProjectionLets False
 
 -- The borrow-safe flag ('isBorrowableProjection') is unused: Rust binds owned
 -- locals and adapts a borrowed/place RHS via 'adaptOwnedElem' upstream.
@@ -2867,7 +2767,7 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm isCl
       -- closure names no lifetime: it owns what it captures ('capInit')
       -- and a captured function value is an `Arc` clone, not a borrow.
       retStr <- rustReturnType manifoldType
-      kept <- CMS.gets (Map.findWithDefault Set.empty callIndex . rsConsumed)
+      kept <- CMS.gets (Map.findWithDefault Set.empty callIndex . ppByValue . rsPool)
       typedArgs <-
         zipWithM
           (\j a@(Arg _ t) -> if Set.member j kept then (\ts -> argNamer a <> ":" <+> ts) <$> rustArgType t else rustArgOf a)
