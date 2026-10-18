@@ -13,12 +13,15 @@ many times the function uses it. A suspension argument is passed as the
 suspension, not run (see `EFF`).
 
 ### EVAL-2 Pure work may be reordered; only effects are ordered
-Intent: proposed
+Intent: ruled 2026-10-18
 Code: unaudited
 
-The compiler may move, parallelize or reorder pure work. Only effect
+The compiler chooses the order of pure work. It may move, parallelize or
+reorder it, including the arguments of one call, to make it faster or to
+let a later read take a value an earlier one only looked at. Only effect
 statements in a `do` block keep their written order, and none is shared,
-duplicated or dropped (see `EFF`). When a pure abort happens is unspecified.
+duplicated or dropped (see `EFF`). When a pure abort happens, and which of
+two pure aborts is reported, is unspecified.
 
 ## Named values
 
@@ -73,7 +76,24 @@ as a value:
 - a copy is an independent value equal to the original, and changing one
   never changes the other;
 - copying it, moving it and releasing it have no effect a program depends
-  on: no output, no counter, no resource opened, closed or locked.
+  on: no output, no counter, no resource opened, closed or locked;
+- it refers into no other value: it holds no reference, pointer or view
+  (a C++ `std::string_view`, `std::span`, `T*` or `T&`, or a struct holding
+  one) into data that something else owns, so a sourced function never
+  returns one into its arguments (ruled 2026-10-18);
+- it can be built from, assigned from and passed moved values: in C++ a
+  mapped record's constructor takes no field by non-const lvalue
+  reference, and no field type deletes its move constructor (ruled
+  2026-10-18).
+
+Sourced code never changes a value it is given: no C++ parameter of type
+`T&`, no in-place change of a Python or R argument. A sourced function
+that needs to mutate works on its own copy. This holds until morloc has a
+way to say where a value may be changed (ruled 2026-10-18).
+
+A program that breaks one of these rules has no defined result: what it
+computes may change with the compiler's placement of copies and moves, and
+a view may outlive the value it refers into.
 
 morloc makes as many or as few copies of a value as it likes, moves a value
 instead of copying it, and releases each copy wherever it is done with it.

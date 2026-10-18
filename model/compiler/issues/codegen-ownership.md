@@ -21,13 +21,14 @@ same name sees what was taken.
   whole batch per step of a stream drain, in a C++ or Rust pool. Sites in
   lib/stdlib parallel/main.loc: `psconcatMapWithPure`, `psfoldPureLoop`,
   `psmapWithPure`, `psfilterWithPure`, `pullParts` (the `runParts` case of
-  golden cpp-copy-count counts this copy). Open question for a ruling: may
-  the value a forced `<IO> (Try e a)` returns be treated as the frame's
-  own? A suspension the program passed in may return a value it also
-  keeps (a closure over a captured `Try`), so the rule needs either a
-  proof that the forced result is fresh (it came from a `@try` or a
-  constructor inside the suspension) or a by-value convention for
-  suspension results.
+  golden cpp-copy-count counts this copy). Ruled 2026-10-18: a forced
+  suspension's result is the frame's own, provided every case where the
+  suspension returns something it captured is handled. Read so far: C++
+  types a suspension `std::function<R()>` and Rust `Arc<dyn Fn() -> R>`,
+  so a body returning a capture copies it (C++) or must clone it (rustc);
+  a crossing result is deserialized fresh; no renderer emits a thunk
+  returning a reference. Each case needs a test before the copy is
+  removed.
 - **`otherArmCpp` copies though no path reads the payload after a take.**
   [reproduced] Cost; same gap. In test-suite/golden-tests/projection-consume,
   `match t | (Ok v) = lenCpp v | (Err _) = lenCpp (match t | (Ok w) = w | ...)`
@@ -111,23 +112,24 @@ same name sees what was taken.
   the let with the same index in the other. That is wrong only if the
   twins' let indices differ; no golden showed it, and the ownership check
   reported nothing. C++ moves (OWN-2) are planned per segment.
-- **A C++ move into a user-mapped record needs an rvalue-accepting field.**
-  [read] An owned local at its last read is moved into a record literal
-  (`T a = {std::move(x)}`). A user type mapped with `record Cpp => R =
-  "user_t"` whose constructor takes a field by non-const lvalue reference,
-  or whose field type deletes its move constructor, built before and now
-  fails to compile. Open question, beside rule S (whether a C++ source may
-  take a non-const `T&`): what a mapped C++ type must accept.
-- **A C++ source's result may refer into its arguments (rule F).** [read]
-  A C++ source can return a view into an argument (`std::string_view`,
-  `std::span`, a struct holding a pointer). A let declared with its C++
-  type rejects a view at compile time (`std::string n = viewOf(x)`, tried);
-  a struct mapped for the type, or a let declared `auto` (a loop let whose
-  IR is known), would keep it, and it would then outlive a move of the
-  argument and read a moved-from value. A shape reaching `auto` from
-  source was not found. No item says whether a sourced result may do this. Until it
-  is ruled, C++ never moves a local named in the arguments of a sourced call
-  whose result is not a scalar or the unit, nor what that local refers into
-  (`sourceViewArgs`, Cpp.hs). Rust states borrows in a source's signature,
-  so there it is a build failure. Open question: may a sourced result refer
-  into its arguments?
+- **C++ copies a value a sourced call read, though no source may return
+  a view into it.** [read] Cost. EVAL-7 (ruled 2026-10-18) forbids a
+  sourced result referring into its arguments, but C++ still never moves a
+  local named in the arguments of a sourced call whose result is not a
+  scalar or the unit, nor what that local refers into (`sourceViewArgs`,
+  Cpp.hs).
+- **A C++ source taking `T&` silently changes a shared value.** [read]
+  Violates EVAL-7 (ruled 2026-10-18), unchecked. Parameters are `const T&`
+  but owned lets are plain `T n`, so a source declared `void f(T&)` or
+  `int f(T&)` compiles against a let and changes the value every later
+  reader of that let sees. Passing each lvalue argument of a sourced call
+  as `std::as_const(n)` would make every such source a build error, at no
+  run-time cost.
+- **A C++ view returned into a temporary dangles.** [read] Violates EVAL-7
+  (ruled 2026-10-18), unchecked. A nested sourced call renders inline
+  (`census(m6087(n3))`, copy-census-cpp baseWalk), so a source returning a
+  view or a struct holding a pointer into its argument refers into a
+  temporary destroyed at the end of that line, with no move involved. A
+  mapping whose C++ type is a pointer, a reference, `std::string_view` or
+  `std::span` could be rejected at build; a user struct holding a pointer
+  cannot be detected.

@@ -48,13 +48,15 @@ records and user-mapped types copy deeply.
 - **OWN-2's one-step rule moves neither of a borrowing and a moving read.**
   [reproduced] `eat (acc + chainLen rest) (Link 0 rest)` in a Rust tail loop
   copies `rest` each step (quadratic), though the borrowing read is
-  evaluated into a temporary before the move.
+  evaluated into a temporary before the move. EVAL-2 (ruled 2026-10-18)
+  lets the compiler run the borrowing read first; OWN-2 still says a value
+  read twice in one step is moved by neither read.
 - **A C++ loop copies a carried value no step changes.** [reproduced] A
   loop slot every continue passes on unchanged is a borrow in Rust (OWN-6)
   but a copy of its start in C++ (golden copy-census-cpp throughLoop,
   loopCarried). Binding it by const reference was tried and dropped: it
-  blocks the move of the slot into the loop's result, and a C++ source that
-  takes a non-const `T&` (rule S, unruled) would stop compiling.
+  blocks the move of the slot into the loop's result. EVAL-7 (ruled
+  2026-10-18) forbids a source taking `T&`, which was the other obstacle.
 - **Some captures copy a dead owned value.** [reproduced] A C++ closure that
   may cross a pool (a `MorlocClosure`, pap or staged form) copies its
   captures, since its reify thunk or stage call names them again, and a
