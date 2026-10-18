@@ -17,6 +17,8 @@ module Morloc.CodeGenerator.Ownership
   , planNativeManifold
   , LetMode (..)
   , letMode
+  , unchangedSlot
+  , changedSlots
   ) where
 
 import Control.Monad.Identity (Identity, runIdentity)
@@ -98,6 +100,24 @@ letMode pp root i rhs
       AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr s] ->
         not (selectorHasBracket sel) && length (ungroup sel) == 1 && (borrowableRoot s || isPlace s)
       _ -> False
+
+-- | Whether a loop continue gives carried slot @i@ the value it already
+-- holds, so the slot need not be reassigned.
+unchangedSlot :: Int -> NativeExpr -> Bool
+unchangedSlot i e = case e of
+  LetVarN _ j _ -> i == j
+  BndVarN _ j _ -> i == j
+  _ -> False
+
+-- | The carried slots a continue reassigns, paired with their new values:
+-- every slot, less those whose IR value is the slot itself when the IR
+-- continue is known. The carried slots and the values must match in number.
+changedSlots :: [Int] -> Maybe [NativeExpr] -> [a] -> [(Int, a)]
+changedSlots ids origs vals
+  | length ids /= length vals = error "morloc bug: a loop continue whose values do not match its carried slots"
+  | otherwise = case origs of
+      Just os | length os == length vals -> [(i, v) | (i, o, v) <- zip3 ids os vals, not (unchangedSlot i o)]
+      _ -> zip ids vals
 
 -- | The decisions within one manifold's body.
 data ManifoldPlan = ManifoldPlan

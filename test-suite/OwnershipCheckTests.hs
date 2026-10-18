@@ -10,13 +10,32 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Ownership (LetMode (..))
+import Morloc.CodeGenerator.Ownership (LetMode (..), changedSlots)
 import Morloc.CodeGenerator.OwnershipCheck (checkNative)
 
 -- | OWN-1 over the take and borrow decisions a member renders: let 10 takes
 -- a field of 1, let 11 binds a reference to a field of 1.
 ownershipCheckTests :: TestTree
-ownershipCheckTests =
+ownershipCheckTests = testGroup "ownership checks" [takeCases, slotCases]
+
+-- | Which carried slots a continue reassigns.
+slotCases :: TestTree
+slotCases =
+  testGroup
+    "carried slots a continue changes"
+    [ testCase "a slot given itself is left alone" $
+        changedSlots [1, 2] (Just [rd 1, IntN fv 0]) "ab" @?= [(2, 'b')]
+    , testCase "a slot given another slot is changed" $
+        changedSlots [1, 2] (Just [rd 2, rd 1]) "ab" @?= [(1, 'a'), (2, 'b')]
+    , testCase "without the IR every slot is changed" $
+        changedSlots [1, 2] Nothing "ab" @?= [(1, 'a'), (2, 'b')]
+    ]
+  where
+    fv = FV (TV "a") (CV "a")
+    rd i = LetVarN (VarF fv) i KeptRead
+
+takeCases :: TestTree
+takeCases =
   testGroup
     "no read sees a taken payload"
     -- a read of a value after its payload was taken

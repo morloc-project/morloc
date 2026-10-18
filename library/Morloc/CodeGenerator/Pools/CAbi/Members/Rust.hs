@@ -2642,18 +2642,18 @@ rustMakeLet namer letIndex mt mrhs p1 p2 = do
 -- | Native tail-loop assembly. Walks the 'LoopBody' decision tree into a Rust
 -- @loop { ... }@ expression bound to the serial result: guards render to
 -- @if/else@, native/serial lets to @let@ locals, a base leaf to @break <base>;@
--- (the loop expression's value), and a continue leaf to @let@ temps for each new
--- value followed by reassignment of the loop-carried locals. Every temp is
--- computed before any reassignment; which reads move is OWN-2's, and which
--- locals are borrows is OWN-6's.
+-- (the loop expression's value), and a continue leaf to @let@ temps for the
+-- new value of each slot it changes, followed by reassignment of those slots
+-- ('changedSlots'). Every temp is computed before any reassignment; which
+-- reads move is OWN-2's, and which locals are borrows is OWN-6's.
 rustMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> Maybe (LoopBody NativeExpr SerialExpr ()) -> LoopBody PoolDocs PoolDocs PoolDocs -> RustM PoolDocs
-rustMakeLoop res carried _ body = do
+rustMakeLoop res carried origBody body = do
   resultIdx <- getCounter
   resT <- case res of
     LoopResultSerial -> return "*mut u8"
     LoopResultNative t -> rustTypeOf t
   let resultVar = helperNamer resultIdx
-  bodyLines <- walk body
+  bodyLines <- walk origBody body
   -- A native loop's locals are its own, started from their initializers.
   let initLines = concat [poolPriorLines d <> ["let mut" <+> nvarNamer i <+> "=" <+> poolExpr d <> ";"] | (i, Just d) <- carried]
       loopExpr = vsep ["loop {", indent 4 (vsep bodyLines), "}"]
@@ -2669,23 +2669,29 @@ rustMakeLoop res carried _ body = do
     }
   where
     ids = map fst carried
-    walk (LoopBase seDocs) =
+    walk _ (LoopBase seDocs) =
       return $ poolPriorLines seDocs <> ["break" <+> poolExpr seDocs <> ";"]
-    walk (LoopContinue contDocs) = do
-      tmpVars <- map helperNamer <$> mapM (const getCounter) contDocs
-      let priors = concatMap poolPriorLines contDocs
-          tmpAssigns = zipWith (\tv cd -> "let" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars contDocs
-          reassigns = zipWith (\i tv -> nvarNamer i <+> "=" <+> tv <> ";") ids tmpVars
+    -- The IR body, when known, is walked beside the lowered one, so a slot
+    -- the continue leaves as it is gets no temporary.
+    walk o (LoopContinue contDocs) = do
+      let changed = changedSlots ids (case o of Just (LoopContinue os) -> Just os; _ -> Nothing) contDocs
+      tmpVars <- map helperNamer <$> mapM (const getCounter) changed
+      let priors = concatMap (poolPriorLines . snd) changed
+          tmpAssigns = zipWith (\tv (_, cd) -> "let" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars changed
+          reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> "=" <+> tv <> ";") changed tmpVars
       return $ priors <> tmpAssigns <> reassigns
-    walk (LoopNLet i neDocs b) = do
-      rest <- walk b
+    walk o (LoopNLet i neDocs b) = do
+      rest <- walk (case o of Just (LoopNLet j _ k) | j == i -> Just k; _ -> Nothing) b
       return $ poolPriorLines neDocs <> ["let" <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"] <> rest
-    walk (LoopSLet i seDocs b) = do
-      rest <- walk b
+    walk o (LoopSLet i seDocs b) = do
+      rest <- walk (case o of Just (LoopSLet j _ k) | j == i -> Just k; _ -> Nothing) b
       return $ poolPriorLines seDocs <> ["let" <+> svarNamer i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
-    walk (LoopIf guardDocs t e) = do
-      tLines <- walk t
-      eLines <- walk e
+    walk o (LoopIf guardDocs t e) = do
+      let (ot, oe) = case o of
+            Just (LoopIf _ a b) -> (Just a, Just b)
+            _ -> (Nothing, Nothing)
+      tLines <- walk ot t
+      eLines <- walk oe e
       let ifBlock = vsep
             [ "if" <+> poolExpr guardDocs <+> "{"
             , indent 4 (vsep tLines)

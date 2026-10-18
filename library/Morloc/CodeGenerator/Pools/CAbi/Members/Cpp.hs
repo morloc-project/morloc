@@ -56,7 +56,7 @@ import qualified Morloc.Build.Params as BP
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Ownership (LetMode (..), OwnCaps (..), PoolPlan, emptyPoolPlan, letMode, planPool)
+import Morloc.CodeGenerator.Ownership (LetMode (..), OwnCaps (..), PoolPlan, changedSlots, emptyPoolPlan, letMode, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
 import qualified Morloc.CodeGenerator.Platform as P
@@ -809,14 +809,6 @@ tupleKey i v = [idoc|std::get<#{pretty i}>(#{v})|]
 recordAccess :: MDoc -> MDoc -> MDoc
 recordAccess record field = record <> "." <> field
 
--- | Walk a lowered 'LoopBody' into C++ statement lines for the loop body.
--- Guards -> if/else; native/serial lets -> @auto@ locals; a base leaf ->
--- @resultVar = <base>; break;@; a continue leaf -> compute each new value into
--- an @auto@ temp, then move it into the loop-carried local.
--- | Whether a continue value is the carried local itself, unchanged.
-isSameLocal :: Int -> PoolDocs -> Bool
-isSameLocal i d = null (poolPriorLines d) && render (poolExpr d) == render (nvarNamer i)
-
 -- | How let @i@ with right-hand side @rhs@ binds in C++: 'letMode', except
 -- that a scalar is always copied, as a reference to one saves nothing.
 cppLetMode :: Int -> NativeExpr -> CppTranslatorM LetMode
@@ -829,8 +821,12 @@ cppLetMode i rhs = do
       typestr <- cppTypeOf (typeFof rhs)
       return (if isScalarCppType typestr then LetCopy else mode)
 
--- The IR body, when it is known, is walked beside the lowered one; a let
--- whose IR node is not at the same place, with the same index, binds a copy.
+-- | Walk a lowered 'LoopBody' into C++ statement lines for the loop body.
+-- Guards -> if/else; native/serial lets -> locals; a base leaf ->
+-- @resultVar = <base>; break;@; a continue leaf -> compute each new value of
+-- a slot it changes into an @auto@ temp, then move it into the slot. The IR
+-- body, when it is known, is walked beside the lowered one; a let whose IR
+-- node is not at the same place, with the same index, binds a copy.
 cppWalkLoopBody :: (MDoc -> MDoc) -> [Int] -> Maybe (LoopBody NativeExpr SerialExpr ()) -> LoopBody PoolDocs PoolDocs PoolDocs -> CppTranslatorM [MDoc]
 cppWalkLoopBody setResult ids = go
   where
@@ -838,10 +834,10 @@ cppWalkLoopBody setResult ids = go
       return $ poolPriorLines seDocs <> [setResult (poolExpr seDocs), "break;"]
     -- A slot whose new value is itself is left alone: copying it into a temp
     -- and back would copy the whole value every iteration.
-    go _ (LoopContinue contDocs) = do
-      let changed = [(i, cd) | (i, cd) <- zip ids contDocs, not (isSameLocal i cd)]
+    go o (LoopContinue contDocs) = do
+      let changed = changedSlots ids (case o of Just (LoopContinue os) -> Just os; _ -> Nothing) contDocs
       tmpVars <- map helperNamer <$> mapM (const getCounter) changed
-      let priors = concatMap poolPriorLines contDocs
+      let priors = concatMap (poolPriorLines . snd) changed
           tmpAssigns = zipWith (\tv (_, cd) -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars changed
           reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") changed tmpVars
       return $ priors <> tmpAssigns <> reassigns
@@ -854,7 +850,7 @@ cppWalkLoopBody setResult ids = go
       rest <- go ob b
       return $ poolPriorLines neDocs <> [decl <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"] <> rest
     go o (LoopSLet i seDocs b) = do
-      rest <- go (case o of Just (LoopSLet _ _ k) -> Just k; _ -> Nothing) b
+      rest <- go (case o of Just (LoopSLet j _ k) | j == i -> Just k; _ -> Nothing) b
       return $ poolPriorLines seDocs <> ["auto" <+> svarNamer i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
     go o (LoopIf guardDocs t e) = do
       let (ot, oe) = case o of
