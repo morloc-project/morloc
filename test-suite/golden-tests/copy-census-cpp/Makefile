@@ -117,6 +117,8 @@ all:
 	./nexus mixedLoop 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	echo "--- matchedTwice ---" >> obs.txt
 	./nexus matchedTwice 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- twoLets ---" >> obs.txt
+	./nexus twoLets 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__

@@ -35,6 +35,7 @@
 --   guardLoop guardKeep        guarded arms projecting the subject
 --   mixedLoop                  loop step with a borrowing and a moving read
 --   matchedTwice               one value matched twice
+--   twoLets                    one value kept by two lets in turn
 module main
   ( baseBuild, baseWalk, nestedOut, nestedLoop, nestedLoop2, tagNested, tagField
   , fieldArg, fieldArgM, fieldRet, tupleArg
@@ -47,7 +48,7 @@ module main
   , matchCond, matchCondFresh, matchRec, matchUnwrap, matchTry
   , throughTwo, throughLoop
   , loopFresh, loopGrow, loopCarried, loopField, loopTuple, tupleStep
-  , nonTail, guardLoop, guardKeep, mixedLoop, matchedTwice
+  , nonTail, guardLoop, guardKeep, mixedLoop, matchedTwice, twoLets
   )
 
 import root
@@ -477,3 +478,11 @@ mixedLoop n = census (eat 0 (build n End))
 
 matchedTwice :: Int -> (Int, Int)
 matchedTwice n = census (let r = Good (mkL n) in (match r | (Good c) = keyL c | (Bad _) = 0) + (match r | (Good d) = keyL d | (Bad _) = 0))
+
+--' Two chains built from one payload in two lets, then the copies
+twoLets :: Int -> (Int, Int)
+twoLets n = census (
+  let ys = mkL n
+  in let a = Link ys End
+  in let b = Link ys End
+  in sumKeys 0 a + sumKeys 0 b)

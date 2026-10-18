@@ -4,6 +4,7 @@ all:
 	./nexus grow 1000000 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	./nexus wrapped 1000000 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	./nexus kept 1000 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	./nexus keptAfter 1000 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	./nexus given '{"Link":[1,{"Link":[2,"End"]}]}' >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	./nexus inLoop 5 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	./nexus inLambda 5 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt

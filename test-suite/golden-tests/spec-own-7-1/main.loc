@@ -1,12 +1,13 @@
 -- Spec OWN-7: a function that keeps a value it is given takes it from the
 -- caller instead of copying it. A loop that builds onto a chain handed to it
--- takes the chain, and so does a constructor; a caller that still needs the
--- chain copies it once, at the call. The counting Clone recurses down the
+-- takes the chain, and so does a constructor; a caller that reads the chain
+-- after the call copies it once, at the call, and one whose other reads all
+-- come first hands it over. The counting Clone recurses down the
 -- chain, so a copy of a million links would not fit a 2 MiB stack. A chain
 -- read from the command line is handed over, not copied; a call from a loop,
 -- a lambda or a non-tail recursion copies what it still needs; and a chain
 -- kept on one branch only is not copied on the other.
-module main (grow, wrapped, kept, given, inLoop, inLambda, nonTail, maybeKept)
+module main (grow, wrapped, kept, keptAfter, given, inLoop, inLambda, nonTail, maybeKept)
 
 import root-rust
 
@@ -40,7 +41,13 @@ wrapped n = clones (count 0 (prepend 0 (build n End)))
 
 --' Both a longer chain and the chain it was built from, counted
 kept :: Int -> (Int, Int)
-kept n = clones (count 0 (build 1 c) + count 0 c)
+kept n = clones (let a = count 0 c in a + count 0 (build 1 c))
+  where
+    c = build n End
+
+--' A longer chain built first, then it and the chain it was built from, counted
+keptAfter :: Int -> (Int, Int)
+keptAfter n = clones (let d = build 1 c in count 0 d + count 0 c)
   where
     c = build n End
 

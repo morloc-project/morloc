@@ -13,7 +13,7 @@ import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck (testProperty)
 
 import qualified Data.Set as Set
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (RNode (..), loopBorrowLocals, markLastReads, markLastReadsWith)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (RNode (..), loopBorrowLocals, markLastReads, markLastReadsInBody, markLastReadsWith)
 import Morloc.CodeGenerator.Namespace
 
 lastReadTests :: TestTree
@@ -135,6 +135,26 @@ lastReadCases =
     , testCase "spec-own-2-9" $
         marksWith (Map.fromList [(10, 1), (11, 10)]) (loop [1] (LoopNLet 10 (rd 1) (LoopNLet 11 (rd 10) (LoopNLet 12 (rd 10) (LoopBase (rd 11))))))
           @?= [[], [], [], [11]]
+    -- outside a loop, the later of two reads in different steps is the last
+    , testCase "spec-own-2-10" $
+        bodyMarks (lets [IntN fv 0, tup [rd 10], tup [rd 10, rd 11]])
+          @?= [[], [], [10, 11]]
+    -- two reads in one step are both kept
+    , testCase "spec-own-2-11" $
+        bodyMarks (lets [IntN fv 0, tup [rd 10, rd 10]])
+          @?= [[], []]
+    -- a conditional's reads are counted along its paths: one read in each
+    -- arm is the last read in each
+    , testCase "spec-own-2-12" $ do
+        bodyMarks (lets [IntN fv 0, IfN ty (rd 2) (rd 10) (tup [rd 10, IntN fv 1])])
+          @?= [[], [10, 10]]
+        bodyMarks (lets [IntN fv 0, IfN ty (rd 2) (rd 10) (tup [rd 10, rd 10])])
+          @?= [[], []]
+    -- a value a do block bound by a let reads is never moved, before the
+    -- block or after it
+    , testCase "spec-own-3-2" $
+        bodyMarks (lets [IntN fv 0, DoBlockN ty (rd 10), tup [rd 10, rd 11]])
+          @?= [[], [], [11]]
     -- a guard is never marked
     , testCase "spec-own-4-1" $
         marks (loop [1] (LoopIf (rd 1) (LoopBase (IntN fv 0)) (LoopBase (IntN fv 1))))
@@ -180,6 +200,21 @@ loop ids = LoopN ty [(i, IntN fv 0) | i <- ids]
 marks :: NativeExpr -> [[Int]]
 marks = marksWith Map.empty
 
+-- | A serial body of native lets 10, 11, ... bound to the given right-hand
+-- sides in turn.
+lets :: [NativeExpr] -> SerialExpr
+lets = go 10
+  where
+    go i (x : xs) = NativeLetS i x (go (i + 1) xs)
+    go _ [] = ReturnS (LetVarS Nothing 0)
+
+-- | The variables each let of a body marks, in order.
+bodyMarks :: SerialExpr -> [[Int]]
+bodyMarks = spine . markLastReadsInBody
+  where
+    spine (NativeLetS _ x b) = marked x : spine b
+    spine _ = []
+
 -- | 'marks' with locals that refer into other values.
 marksWith :: Map.Map Int Int -> NativeExpr -> [[Int]]
 marksWith aliases e = case markLastReadsWith aliases e of
@@ -196,6 +231,7 @@ marked :: NativeExpr -> [Int]
 marked (LetVarN _ i LastRead) = [i]
 marked (TupleN _ xs) = concatMap marked xs
 marked (DoBlockN _ x) = marked x
+marked (IfN _ c a b) = marked c <> marked a <> marked b
 marked _ = []
 
 carriedVars :: [Int]

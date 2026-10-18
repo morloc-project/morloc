@@ -28,6 +28,7 @@
 --   guardTwice guardLoop guardKeep  guarded arms projecting the subject
 --   mixedLoop                  loop step with a borrowing and a moving read
 --   matchedTwice               one value matched twice
+--   twoLets                    one value kept by two lets in turn
 module main
   ( nestedOut, nestedLoop, tagNested, tagField
   , fieldArg, fieldSrc, fieldSrcLit, fieldRet, tupleArg, tupleFresh
@@ -37,7 +38,7 @@ module main
   , closureRead, closureKeep, papRead, papHof
   , letOnce, letParam, letField, matchUnwrap, matchArg, matchTry
   , throughTwo, throughLoop, throughCli, nonTail
-  , guardTwice, guardLoop, guardKeep, mixedLoop, matchedTwice
+  , guardTwice, guardLoop, guardKeep, mixedLoop, matchedTwice, twoLets
   )
 
 import root-rust
@@ -341,3 +342,11 @@ mixedLoop n = clones (eat 0 (mkChain n))
 
 matchedTwice :: Int -> (Int, Int)
 matchedTwice n = clones (let r = Good (mkChain n) in (match r | (Good c) = chainLen c | (Bad _) = 0) + (match r | (Good d) = chainLen d | (Bad _) = 0))
+
+--' Two chains built from one in two lets, then the links copied
+twoLets :: Int -> (Int, Int)
+twoLets n = clones (
+  let c = mkChain n
+  in let a = Link 1 c
+  in let b = Link 2 c
+  in count 0 a + count 0 b)
