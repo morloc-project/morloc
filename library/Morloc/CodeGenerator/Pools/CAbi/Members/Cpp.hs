@@ -431,6 +431,10 @@ data CppTranslatorState = CppTranslatorState
   -- a manifold and two manifolds may share one.
   , translatorCurrentRoot :: Int
   -- ^ The top-level manifold being lowered (see 'translatorPool').
+  , translatorMoves :: Set.Set Int
+  -- ^ The owned lets of the segment being lowered (OWN-2).
+  , translatorLowered :: [(SerialManifold, [(Int, NativeExpr, LetMode)])]
+  -- ^ Each segment as lowered, last reads marked, with its let modes.
   , translatorErrors :: [Text]
   }
 
@@ -452,6 +456,8 @@ instance Defaultable CppTranslatorState where
       , translatorDebugMode = False
       , translatorPool = emptyPoolPlan
       , translatorCurrentRoot = 0
+      , translatorMoves = Set.empty
+      , translatorLowered = []
       , translatorErrors = []
       }
 
@@ -531,25 +537,10 @@ translate srcs es = do
         , translatorPool = pool
         }
       pool = planPool cppCaps es
-      -- How each let binds, as the pool renders it; last reads are marked
-      -- and checked only when the check is on, as nothing else reads them.
-      lets sm@(SerialManifold root _ _ _ _) = do
-        CMS.modify (\st -> st {translatorCurrentRoot = root})
-        mapM (\(i, rhs) -> (\m -> (i, rhs, m)) <$> cppLetMode i rhs) (nativeLets sm)
-      prepare sm
-        | checkOn = do
-            modes <- lets sm
-            let plan = letPlan modes
-            return (markLastReadsWith (lpAliases plan) (lpHeld plan) sm, modes)
-        | otherwise = return (sm, [])
-      run = do
-        ps <- mapM prepare es
-        c <- makeCppCode labels srcs' (map fst ps) universalScopeMap closureTable stageTable nativeEntries
-        return (c, ps)
-      ((code, prepared), stEnd) = CMS.runState run translatorState
+      (code, stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
   mapM_ (MM.throwSystemError . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)
   when checkOn $
-    case concatMap checkOne prepared of
+    case concatMap checkOne (translatorLowered stEnd) of
       [] -> return ()
       vs -> MM.throwSystemError ("C++ pool: ownership check failed (OWN-1):" <+> vsep (map pretty vs))
 
@@ -845,6 +836,17 @@ cppLetMode i rhs = do
       typestr <- cppTypeOf (typeFof rhs)
       return (if isScalarCppType typestr then LetCopy else mode)
 
+-- | A kept element (OWN-2); a scalar is copied.
+cppKeepElem :: NativeExpr -> MDoc -> CppTranslatorM MDoc
+cppKeepElem (LetVarN t i LastRead) x = do
+  moves <- CMS.gets translatorMoves
+  if Set.member i moves
+    then do
+      typestr <- cppTypeOf t
+      return (if isScalarCppType typestr then x else "std::move(" <> x <> ")")
+    else return x
+cppKeepElem _ x = return x
+
 -- | Walk a lowered 'LoopBody' into C++ statement lines for the loop body.
 -- Guards -> if/else; native/serial lets -> locals; a base leaf ->
 -- @resultVar = <base>; break;@; a continue leaf -> compute each new value of
@@ -1004,6 +1006,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
                 _ -> v
             decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map wrapField rs) <> ";"
         return $ defaultValue {poolExpr = v', poolPriorLines = [decl]}
+    , lcKeepElem = cppKeepElem
     , lcStoreField = \_ v -> return v
     , lcApplyClosure = \callee args -> callee <> tupled args
     , lcPapply = \t argTypes f xs -> case t of
@@ -1928,7 +1931,11 @@ translateSegment :: ClosureGen -> SerialManifold -> CppTranslator MDoc
 translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
   resetCounter
   CMS.modify (\st -> st {translatorCurrentRoot = root})
-  e <- foldWithSerialManifoldM (defaultFoldRules (cppLowerConfig closureGen)) m0
+  modes <- mapM (\(i, rhs) -> (\m -> (i, rhs, m)) <$> cppLetMode i rhs) (nativeLets m0)
+  let plan = letPlan modes
+      m1 = markLastReadsWith (lpAliases plan) (lpHeld plan) m0
+  CMS.modify (\st -> st {translatorMoves = lpOwned plan, translatorLowered = (m1, modes) : translatorLowered st})
+  e <- foldWithSerialManifoldM (defaultFoldRules (cppLowerConfig closureGen)) m1
   return $ renderPoolDocs e
 
 -- handle string interpolation

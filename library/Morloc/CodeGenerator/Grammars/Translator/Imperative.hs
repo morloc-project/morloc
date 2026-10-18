@@ -631,6 +631,9 @@ data LowerConfig m = LowerConfig
   -- is not yet plumbed through Express -> Mono -> TupleN's FVar).
   , lcRecordConstructor :: TypeF -> NamType -> FVar -> [TypeF] -> [(Key, MDoc)] -> m PoolDocs
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
+  , lcKeepElem :: NativeExpr -> MDoc -> m MDoc
+  -- ^ Adapt a tuple, record or constructor element, or the value an optional
+  -- coercion wraps, given its original (OWN-2).
   , lcStoreField :: TypeF -> MDoc -> m MDoc
   -- ^ Adapt a value to its stored representation inside an aggregate (given the
   -- element/field type). Applied to record fields AND list/tuple elements.
@@ -1500,7 +1503,9 @@ markSpineS env owned e = case e of
 -- | Reads of owned values in one step, a read through an alias counting for
 -- every value its chain passes through.
 stepReads :: MarkEnv -> [Int] -> RNode -> Map.Map Int Int
-stepReads env owned n = Map.fromList [(v, k) | v <- owned, let k = sum [readCount j n | j <- meNames env v], k > 0]
+stepReads env owned n = Map.fromList [(v, k) | v <- owned, let k = sum [Map.findWithDefault 0 j counts | j <- meNames env v], k > 0]
+  where
+    counts = readCounts n
 
 -- | Mark, in a step, the reads of the values it reads once and nothing reads
 -- after it.
@@ -1555,18 +1560,22 @@ markLoopBody env baseNode markBase carried = fst . go (filter (`Set.notMember` m
 -- | How many times native variable @v@ is read under a node, where a read
 -- that may run more than once counts as two.
 readCount :: Int -> RNode -> Int
-readCount v n = case n of
-  RN (LetVarN _ j _) -> if j == v then 1 else 0
-  RN (BndVarN _ j _) -> if j == v then 1 else 0
-  RN (IfN _ c a b) -> readCount v (RN c) + max (readCount v (RN a)) (readCount v (RN b))
-  RN (DoBlockN _ _) -> repeated
-  RN (LoopN _ starts body) -> sum [readCount v (RN x) | (_, x) <- starts] + (if rnodeNames v (RLN body) then 2 else 0)
-  RS (LoopS {}) -> repeated
-  RNM _ -> repeated
-  RSM _ -> repeated
-  _ -> sum (map (readCount v) (rnodeChildren n))
+readCount v n = Map.findWithDefault 0 v (readCounts n)
+
+-- | 'readCount' for every native variable read under a node.
+readCounts :: RNode -> Map.Map Int Int
+readCounts n = case n of
+  RN (LetVarN _ j _) -> Map.singleton j 1
+  RN (BndVarN _ j _) -> Map.singleton j 1
+  RN (IfN _ c a b) -> Map.unionWith (+) (readCounts (RN c)) (Map.unionWith max (readCounts (RN a)) (readCounts (RN b)))
+  RN (DoBlockN _ _) -> repeated n
+  RN (LoopN _ starts body) -> Map.unionsWith (+) (repeated (RLN body) : [readCounts (RN x) | (_, x) <- starts])
+  RS (LoopS {}) -> repeated n
+  RNM _ -> repeated n
+  RSM _ -> repeated n
+  _ -> Map.unionsWith (+) (map readCounts (rnodeChildren n))
   where
-    repeated = if rnodeNames v n then 2 else 0
+    repeated m = Map.fromSet (const 2) (namedIn m)
 
 -- | Mark the reads of native variable @v@ under a node as its last, leaving
 -- closures, manifolds and nested loops alone.
@@ -2020,6 +2029,15 @@ adaptLoopBodyOwned cfg adaptBase ids origBody body = go origBody body
     mentionsVar v d = any (== v) (T.split (not . isIdentChar) (render (vsep (poolPriorLines d <> [poolExpr d]))))
     isIdentChar c = isAlphaNum c || c == '_'
 
+-- | Adapt each element of a tuple, record or constructor through
+-- 'lcKeepElem', given its original. Passes through unchanged when the
+-- original expression list is unavailable (length mismatch), mirroring
+-- 'adaptOwnedElems'.
+keepElems :: (Monad m) => LowerConfig m -> [NativeExpr] -> [PoolDocs] -> m [PoolDocs]
+keepElems cfg origEs xs
+  | length origEs == length xs = zipWithM (\e pd -> (\v -> pd {poolExpr = v}) <$> lcKeepElem cfg e (poolExpr pd)) origEs xs
+  | otherwise = return xs
+
 -- | Adapt each aggregate element/field to its stored representation via
 -- 'lcStoreField' (e.g. Rust boxes a function value into its @Arc<dyn Fn>@
 -- element type). Passes through unchanged when the original expression list is
@@ -2332,11 +2350,11 @@ lowerNativeExprRaw cfg origExpr (TupleN_ v xs) = do
         AppF _ ts -> ts
         _ -> []
       elemEs = case origExpr of TupleN _ es -> es; _ -> []
-  xs' <- adaptOwnedElems cfg elemEs xs >>= storeElems cfg elemEs
+  xs' <- adaptOwnedElems cfg elemEs xs >>= keepElems cfg elemEs >>= storeElems cfg elemEs
   return $ mergePoolDocs (lcTupleConstructor cfg v slotTypes) xs'
 lowerNativeExprRaw cfg origExpr (RecordN_ o v ps rs) = do
   let fieldEs = case origExpr of RecordN _ _ _ kvs -> map snd kvs; _ -> []
-  es <- adaptOwnedElems cfg fieldEs (map snd rs) >>= storeElems cfg fieldEs
+  es <- adaptOwnedElems cfg fieldEs (map snd rs) >>= keepElems cfg fieldEs >>= storeElems cfg fieldEs
   let recType = typeFof origExpr
   rec' <- lcRecordConstructor cfg recType o v ps (zip (map fst rs) (map poolExpr es))
   return $
@@ -2376,7 +2394,7 @@ lowerNativeExprRaw cfg origExpr (VariantN_ t n i xs)
   | VariantF (FV _ cv) _ _ <- t = do
       ty <- nominalTypeDoc cfg t cv
       let fieldEs = case origExpr of VariantN _ _ _ es -> es; _ -> []
-      xs' <- adaptOwnedElems cfg fieldEs xs >>= storeElems cfg fieldEs
+      xs' <- adaptOwnedElems cfg fieldEs xs >>= keepElems cfg fieldEs >>= storeElems cfg fieldEs
       return $ mergePoolDocs (lcVariantLit cfg ty n i) xs'
   | otherwise = error $ "constructor literal carries a non-variant type: " <> show (pretty t)
 -- The unit value. @UniS@ and @NullS@ share this node -- the wire form is
@@ -2412,10 +2430,11 @@ lowerNativeExprRaw cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcApplyClosure cf
 -- `Option<T>` the sink expects, so a borrowed/place inner is cloned before wrapping.
 lowerNativeExprRaw cfg (CoerceN _ _ innerE) (CoerceN_ CoerceToOptional _ x) = do
   x' <- adaptOwnedElem cfg innerE x
+  kept <- lcKeepElem cfg innerE (poolExpr x')
   -- Adapt the inner to its stored representation before wrapping (Rust boxes a
   -- closure into `Arc<dyn Fn>` so the payload matches the boxed
   -- `Option<Arc<dyn Fn>>` element type), mirroring list/tuple/record.
-  boxed <- lcStoreField cfg (typeFof innerE) (poolExpr x')
+  boxed <- lcStoreField cfg (typeFof innerE) kept
   return $ x' {poolExpr = lcCoerceOptional cfg boxed}
 lowerNativeExprRaw cfg _ (CoerceN_ CoerceToOptional _ x) =
   return $ x {poolExpr = lcCoerceOptional cfg (poolExpr x)}

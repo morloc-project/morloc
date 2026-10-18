@@ -15,8 +15,10 @@ and a release have no observable effect. EVAL-7 requires exactly that of
 every native type, so any placement that keeps the target affine is correct,
 and the items below choose one that copies less.
 
-The items govern generated Rust. C++ is not yet held to them. Python and R
-share values by reference, so a copy there is never made.
+The items govern generated Rust and C++. C++ moves at only some keeping
+positions, so it copies more than they allow
+(compiler/issues/codegen-copies.md). Python and R share values by reference,
+so a copy there is never made.
 
 ### OWN-1 No path reads a value after it is moved
 Intent: ruled 2026-10-17

@@ -13,13 +13,13 @@
 --- tagField ---
 [1,100]
 --- fieldArg ---
-[100,2]
+[100,1]
 --- fieldArgM ---
-[200,2]
---- fieldRet ---
-[100,2]
---- tupleArg ---
 [200,1]
+--- fieldRet ---
+[100,1]
+--- tupleArg ---
+[200,0]
 --- listPat ---
 [1101,4]
 --- listRet ---
@@ -27,7 +27,7 @@
 --- listLit ---
 [2,4]
 --- listRecords ---
-[2003,8]
+[2003,6]
 --- listLoop ---
 [1200,6]
 --- listStep ---
@@ -37,19 +37,19 @@
 --- twiceLet ---
 [200,0]
 --- twiceKeep ---
-[200,2]
+[200,1]
 --- useAndKeep ---
 [200,1]
 --- twoSteps ---
-[200,1]
+[200,0]
 --- partsBorrowed ---
 [5050,101]
 --- partsFresh ---
-[5055,102]
+[5055,101]
 --- setter ---
-[1002,3]
+[1002,2]
 --- setterFn ---
-[1002,3]
+[1002,2]
 --- tlOnce ---
 [5049,100]
 --- tlLoopRead ---
@@ -75,7 +75,7 @@
 --- letOnce ---
 [100,0]
 --- letKeep ---
-[100,1]
+[100,0]
 --- letSource ---
 [100,1]
 --- matchCond ---
@@ -85,11 +85,11 @@
 --- matchRec ---
 [100,3]
 --- matchUnwrap ---
-[100,1]
+[100,0]
 --- matchTry ---
 [100,0]
 --- throughTwo ---
-[100,1]
+[100,0]
 --- throughLoop ---
 [100,2]
 --- loopFresh ---
@@ -99,22 +99,22 @@
 --- loopCarried ---
 [300,1]
 --- loopField ---
-[300,3]
---- loopTuple ---
 [300,2]
+--- loopTuple ---
+[300,1]
 --- tupleStep ---
-[4,202]
+[4,201]
 --- nonTail ---
 [5050,200]
 --- guardLoop ---
 [9803,100]
 --- guardKeep ---
-[100,2]
+[100,1]
 --- mixedLoop ---
 [323207,198]
 --- matchedTwice ---
-[200,1]
+[200,0]
 --- twoLets ---
-[200,2]
+[200,1]
 --- aliasKeep ---
-[102,2]
+[102,1]

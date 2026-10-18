@@ -32,15 +32,15 @@ records and user-mapped types copy deeply.
   same loop with `End = c` copies nothing (spec-own-6-1 walkTail); the
   constant was borrowed only where an earlier pass hoisted it into a
   parameter.
-- **Last reads are marked only inside Rust tail loops.** [reproduced]
+- **A last read moves only at some keeping positions.** [reproduced]
   Outside them a value read twice is copied at every keeping use including
   the last (`prepend 1 c` then `prepend 2 c`: 2 copies, 1 needed), a field
   taken from a value the frame owns needs the value used once and built by
   a constructor or `@try` (a sourced call's result is never taken), and a
-  value matched twice is copied. C++ never moves at a last use: constructor,
-  tuple, record and list literals, continue temps, `std::bind` captures,
-  conditional arms, a loop's exit and by-value source arguments all copy an
-  owned local (`accL`: 2k+3 copies for k+1 values built). A C++ list literal
+  value matched twice is copied. C++ moves an owned local at its last read
+  into a constructor, tuple or record only; list literals, continue temps,
+  `std::bind` captures, conditional arms, a loop's exit and by-value source
+  arguments still copy one (`accL`: 2k+3 copies for k+1 values built). A C++ list literal
   copies each element twice (an initializer list).
 - **OWN-2's one-step rule moves neither of a borrowing and a moving read.**
   [reproduced] `eat (acc + chainLen rest) (Link 0 rest)` in a Rust tail loop

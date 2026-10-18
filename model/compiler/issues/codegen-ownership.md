@@ -102,3 +102,19 @@ same name sees what was taken.
   the rest of the chain each step (3 steps over 1000 links: 2994 clones).
   Open question: a result that borrows from an argument needs a by-reference
   return convention, which no item states.
+- **A function's local and remote-worker segments share one plan key.**
+  [read, speculative impact] A C++ or Rust pool can hold two segments for
+  one manifold id, the local one and its remote-worker twin
+  (`emittedId`, library/Morloc/CodeGenerator/Emit.hs). The pool plan keys
+  payload takes (OWN-5) by manifold id and let index
+  (`consumableProjectionLets`), so a take found in one twin also applies to
+  the let with the same index in the other. That is wrong only if the
+  twins' let indices differ; no golden showed it, and the ownership check
+  reported nothing. C++ moves (OWN-2) are planned per segment.
+- **A C++ move into a user-mapped record needs an rvalue-accepting field.**
+  [read] An owned local at its last read is moved into a record literal
+  (`T a = {std::move(x)}`). A user type mapped with `record Cpp => R =
+  "user_t"` whose constructor takes a field by non-const lvalue reference,
+  or whose field type deletes its move constructor, built before and now
+  fails to compile. Open question, beside rule S (whether a C++ source may
+  take a non-const `T&`): what a mapped C++ type must accept.

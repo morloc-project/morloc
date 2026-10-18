@@ -2398,6 +2398,7 @@ rustLowerConfig mask consumed =
     -- A function value already IS its stored representation, so storing one
     -- is the identity; re-boxing it would cost an allocation and an
     -- indirection on every store, and lose its registry identity (STATE-4).
+    , lcKeepElem = \_ v -> return v
     , lcStoreField = \_ v -> return v
     -- Apply a function value with call syntax: a concrete closure inlines, an
     -- `Arc<dyn Fn>` dispatches through its vtable.
