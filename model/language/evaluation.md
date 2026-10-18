@@ -99,6 +99,9 @@ A program that breaks one of these rules has no defined result: what it
 computes may change with the compiler's placement of copies and moves, and
 a view may outlive the value it refers into.
 
+Each language's form of these rules is in its chapter: CPP, RUST, PY and
+RLANG.
+
 morloc makes as many or as few copies of a value as it likes, moves a value
 instead of copying it, and releases each copy wherever it is done with it.
 How many times a type's copy constructor or `Clone` runs, and when its

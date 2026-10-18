@@ -96,6 +96,20 @@ split later.
 | [data-crossing.md](data-crossing.md) | WIRE | how each type's values cross between languages: wire form, round trip, copying and sharing |
 | [guest-languages.md](guest-languages.md) | GUEST | languages compiled into another language's pool |
 
+### Languages
+
+Each file states the rules a language's sourced code and mapped types must
+follow, in that language's terms, citing the language-neutral rule each one
+applies (mostly EVAL-7), and lists the items about that language stated in
+other chapters.
+
+| File | Prefix | Scope |
+|---|---|---|
+| [lang-cpp.md](lang-cpp.md) | CPP | sourced C++ functions and mapped C++ types |
+| [lang-rust.md](lang-rust.md) | RUST | sourced Rust functions and mapped Rust types |
+| [lang-python.md](lang-python.md) | PY | sourced Python functions |
+| [lang-r.md](lang-r.md) | RLANG | sourced R functions |
+
 ### Programs
 
 | File | Prefix | Scope |
