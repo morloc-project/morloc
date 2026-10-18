@@ -39,11 +39,11 @@
 --- tlOnce ---
 [99,0]
 --- tlLoopRead ---
-[97,294]
+[97,0]
 --- tlLoopKeep ---
-[97,294]
+[97,0]
 --- tlLoopBuilt ---
-[98,295]
+[98,0]
 --- closureRead ---
 [306,100]
 --- closureKeep ---
@@ -79,7 +79,7 @@
 --- guardKeep ---
 [100,0]
 --- mixedLoop ---
-[4756,4753]
+[4756,0]
 --- matchedTwice ---
 [200,0]
 --- twoLets ---

@@ -37,7 +37,7 @@ local by copy each step until its loop lets read projections in place
 Intent: proposed
 Bench: copies
 Model: net = s * q * u; k steps of `tl` down a chain of n (s = k), q about n - k/2
-Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: k=1000 n=10000: t 0.274 s, net 0.238 s, per_step 9500, u 25.1 ns
+Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: k=1000 n=10000: t 0.274 s, net 0.238 s, per_step 9500, u 25.1 ns; results/2026-10-18-1437-f2ec7b91+dirty-s5-float: t 0.0577 s, per_step 0
 
 The loop value is only read (`chainLen` at the end), yet each step copies
 the rest of the chain that `tl` returns. The same loop in C++ copies
@@ -59,7 +59,7 @@ Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: rs k=1000 n=10
 Intent: proposed
 Bench: copies
 Model: net = s * q * u; k steps carrying `(.0 t, k)` (s = k), q = 2
-Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: k=250000: t 0.632 s, net 0.595 s, per_step 2, u 1190 ns
+Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: k=250000: t 0.632 s, net 0.595 s, per_step 2, u 1190 ns; results/2026-10-18-1437-f2ec7b91+dirty-s5-float: t 0.363 s, net 0.303 s, per_step 1, u 1213 ns
 
 The tuple is built from its own projection each step, which a move could
 hand over without copying.
@@ -68,7 +68,7 @@ hand over without copying.
 Intent: proposed
 Bench: copies
 Model: net = s * q * u; a walk of a chain of n whose step past the second link reads the rest of the chain (`sumKeys 0 rest`) and builds `Link (mkL 0) rest` (s = n), q the payload copies per step
-Measured: results/2026-10-18-0115-38da1c87+dirty-s3-cpp-places: n=400: t 0.0682 s, net 0.0247 s, per_step 2
+Measured: results/2026-10-18-0115-38da1c87+dirty-s3-cpp-places: n=400: t 0.0682 s, net 0.0247 s, per_step 2; results/2026-10-18-1437-f2ec7b91+dirty-s5-float: t 0.0799 s, per_step 0
 
 The borrowing read and the keeping read of `rest` are in one step. Before
 C++ read fields in place, the walk inside the step copied each payload it

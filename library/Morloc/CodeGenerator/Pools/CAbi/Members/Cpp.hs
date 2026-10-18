@@ -853,6 +853,10 @@ cppKeptLet (LetVarN _ i LastRead) x
       return (if Set.member i moves then Just ("std::move(" <> x <> ")") else Nothing)
 cppKeptLet _ _ = return Nothing
 
+isFunctionValue :: TypeF -> Bool
+isFunctionValue FunF {} = True
+isFunctionValue _ = False
+
 -- | Walk a lowered 'LoopBody' into C++ statement lines for the loop body.
 -- Guards -> if/else; native/serial lets -> locals; a base leaf ->
 -- @resultVar = <base>; break;@; a continue leaf -> compute each new value of
@@ -884,9 +888,17 @@ cppWalkLoopBody setResult ids = go
             Just (LoopNLet j r k) | j == i -> (Just r, Just k)
             _ -> (Nothing, Nothing)
       mode <- maybe (return LetCopy) (cppLetMode i) orhs
-      let decl = if mode == LetBorrow then "const auto&" else "auto"
+      -- A function value keeps its own type; a std::function would allocate.
+      typestr <- case orhs of
+        Just r | not (isFunctionValue (typeFof r)) -> cppTypeOf (typeFof r)
+        _ -> return "auto"
+      let decl = if mode == LetBorrow then "const" <+> typestr <> "&" else typestr
+          letLine
+            | render typestr == "mlc::Unit" && isIdentifierExpr (poolExpr neDocs) = [typestr <+> nvarNamer i <> "{};"]
+            | render typestr == "mlc::Unit" = [poolExpr neDocs <> ";", typestr <+> nvarNamer i <> "{};"]
+            | otherwise = [decl <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"]
       rest <- go ob b
-      return $ poolPriorLines neDocs <> [decl <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"] <> rest
+      return $ poolPriorLines neDocs <> letLine <> rest
     go o (LoopSLet i seDocs b) = do
       rest <- go (case o of Just (LoopSLet j _ k) | j == i -> Just k; _ -> Nothing) b
       return $ poolPriorLines seDocs <> ["auto" <+> svarNamer i <+> "=" <+> poolExpr seDocs <> ";"] <> rest

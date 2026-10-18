@@ -16,6 +16,8 @@ helpers, and the fold framework ('FoldRules', 'foldWithSerialManifoldM').
 -}
 module Morloc.CodeGenerator.Grammars.Common
   ( invertSerialManifold
+  , sealLoop
+  , D (..)
   , renameNE
   , renameSE
   , PoolDocs (..)
@@ -300,6 +302,36 @@ unD (D a _) = a
 getDeps :: D a -> [(Int, Either SerialExpr NativeExpr)]
 getDeps (D _ d) = d
 
+-- | Seal a loop body: every leaf's work stays inside the iteration. The
+-- native lets a continue's values or a base's value depend on become loop
+-- lets in front of the leaf, in the order they run (each value in turn, a
+-- value's own lets in dependency order), so each is a step of its own
+-- (OWN-2); a let two values share is bound once. A leaf that depends on a
+-- serial let, or whose lets bind one index to two right-hand sides, keeps
+-- its lets inside its values.
+sealLoop :: (Dependable b) => LoopBody (D NativeExpr) (D SerialExpr) (D b) -> LoopBody NativeExpr SerialExpr b
+sealLoop body = case body of
+  LoopIf g t e -> LoopIf (weave g) (sealLoop t) (sealLoop e)
+  LoopNLet i r k -> LoopNLet i (weave r) (sealLoop k)
+  LoopSLet i r k -> LoopSLet i (weave r) (sealLoop k)
+  LoopContinue ds -> floated (concatMap (reverse . getDeps) ds) (LoopContinue (map unD ds)) (LoopContinue (map weave ds))
+  LoopBase d -> floated (reverse (getDeps d)) (LoopBase (unD d)) (LoopBase (weave d))
+  where
+    floated deps leaf fallback = case mapM native deps of
+      Just lets
+        | null (duplicates (map fst once)) -> foldr (\(i, ne) k -> LoopNLet i ne k) leaf once
+        where
+          once = nubOrdOn (\(i, ne) -> (i, show ne)) lets
+      _ -> fallback
+    native (i, Right ne) = Just (i, ne)
+    native (_, Left _) = Nothing
+    nubOrdOn key = go Set.empty
+      where
+        go _ [] = []
+        go seen (x : xs)
+          | Set.member (key x) seen = go seen xs
+          | otherwise = x : go (Set.insert (key x) seen) xs
+
 class Dependable a where
   weave :: D a -> a
   atomize :: a -> [(Int, Either SerialExpr NativeExpr)] -> Index (D a)
@@ -526,13 +558,14 @@ invertSerialManifold sm0 =
       -- still want the catch block to fire and record the frame.
       return $ D (DebugWrapS t mid args (weave (D body lets))) []
     invertSerialExprM (SerializeS_ s (D ne lets)) = atomize (SerializeS s ne) lets
-    -- SEAL the loop: 'weave' each leaf's let-bindings INSIDE the leaf and
-    -- propagate ZERO deps upward ('D ... []'). Per-iteration work (guards,
-    -- bases, continue values, and any 'LoopSLet'/'LoopNLet' RHS) must never be
-    -- atomized/hoisted above the loop, where it would run once on a stale
-    -- first-iteration value. No loop-invariant hoisting here by design.
+    -- SEAL the loop ('sealLoop'): each leaf's let-bindings stay inside the
+    -- iteration and ZERO deps propagate upward ('D ... []'). Per-iteration
+    -- work (guards, bases, continue values, and any 'LoopSLet'/'LoopNLet' RHS)
+    -- must never be atomized/hoisted above the loop, where it would run once
+    -- on a stale first-iteration value. No loop-invariant hoisting here by
+    -- design.
     invertSerialExprM (LoopS_ t ids bodyD) =
-      return $ D (LoopS t ids (trimap weave weave weave bodyD)) []
+      return $ D (LoopS t ids (sealLoop bodyD)) []
 
     invertNativeExprM ::
       NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) ->
@@ -600,7 +633,7 @@ invertSerialManifold sm0 =
     -- loop, so their dependencies go outward.
     invertNativeExprM (LoopN_ t starts bodyD) =
       atomize
-        (LoopN t (map (second unD) starts) (trimap weave weave weave bodyD))
+        (LoopN t (map (second unD) starts) (sealLoop bodyD))
         (concatMap (getDeps . snd) starts)
 
     invertSerialArgM :: SerialArg_ (D SerialManifold) (D SerialExpr) -> Index (D SerialArg)

@@ -13,6 +13,7 @@ import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck (testProperty)
 
 import qualified Data.Set as Set
+import Morloc.CodeGenerator.Grammars.Common (D (..), sealLoop)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative (RNode (..), loopBorrowLocals, markLastReads, markLastReadsInBody, markLastReadsInNative, markLastReadsWith)
 import Morloc.CodeGenerator.Namespace
 
@@ -168,6 +169,17 @@ lastReadCases =
     , testCase "spec-own-2-16" $
         nativeMarks (NativeLetN 10 (IntN fv 0) (NativeLetN 11 (NativeLetN 20 (rd 10) (tup [rd 20])) (tup [rd 11])))
           @?= [10, 20, 11]
+    -- a loop's next values run the lets they depend on first, one value
+    -- after another, each a step of its own
+    , testCase "spec-own-2-17" $ do
+        sealed (sealLoop (LoopContinue [D (rd 10) [(10, Right (tup [rd 1]))], D (rd 12) [(12, Right (tup [rd 11])), (11, Right (rd 1))]]))
+          @?= ([10, 11, 12], [False, False])
+        -- a let two values share is bound once
+        sealed (sealLoop (LoopContinue [D (rd 10) [(10, Right (rd 1))], D (tup [rd 10]) [(10, Right (rd 1))]]))
+          @?= ([10], [False, False])
+        -- a leaf that depends on a serial let keeps its lets in its values
+        sealed (sealLoop (LoopContinue [D (rd 10) [(10, Right (rd 1))], D (rd 11) [(11, Left (LetVarS Nothing 3))]]))
+          @?= ([], [True, False])
     -- a do block a let's value holds through a conditional's arm holds what
     -- it reads
     , testCase "spec-own-3-3" $
@@ -237,6 +249,13 @@ bodyMarks = spine . markLastReadsInBody
   where
     spine (NativeLetS _ x b) = marked x : spine b
     spine _ = []
+
+-- | The loop lets in front of a sealed continue, in order, and whether each
+-- of its values still binds a let of its own.
+sealed :: LoopBody NativeExpr SerialExpr NativeExpr -> ([Int], [Bool])
+sealed (LoopNLet i _ k) = let (is, vs) = sealed k in (i : is, vs)
+sealed (LoopContinue xs) = ([], [case x of NativeLetN {} -> True; _ -> False | x <- xs])
+sealed _ = ([], [])
 
 -- | The variables a native body marks, in the order they are written.
 nativeMarks :: NativeExpr -> [Int]

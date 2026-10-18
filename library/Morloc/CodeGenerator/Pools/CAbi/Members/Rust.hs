@@ -2616,14 +2616,7 @@ rustTakeField ty n i subj =
 -- to upstream.
 rustMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Maybe NativeExpr -> PoolDocs -> PoolDocs -> RustM PoolDocs
 rustMakeLet namer letIndex mt mrhs p1 p2 = do
-  borrowed <- asks oeCurrent
-  annDoc <- case mt of
-    Just t | isFunctionTypeF t -> return ""
-    Just t
-      | isJust mrhs
-      , Set.member letIndex borrowed -> do ts <- rustTypeOf t; return (":" <+> "&" <> ts)
-    Just t -> do ts <- rustTypeOf t; return (":" <+> ts)
-    Nothing -> return (":" <+> "*mut u8")
+  annDoc <- rustLetAnnotation letIndex mt (isJust mrhs)
   -- A loop-carried local's entry deserialize let is reassigned each iteration by
   -- the loop's continue, so it must bind mutably.
   carried <- asks oeLoopCarried
@@ -2639,6 +2632,19 @@ rustMakeLet namer letIndex mt mrhs p1 p2 = do
       , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
       , poolBorrowedLocal = Nothing
       }
+
+-- | The type annotation of let @letIndex@ of type @mt@ (Nothing: a serial
+-- packet), given whether it binds a native right-hand side.
+rustLetAnnotation :: Int -> Maybe TypeF -> Bool -> RustM MDoc
+rustLetAnnotation letIndex mt native = do
+  borrowed <- asks oeCurrent
+  case mt of
+    Just t | isFunctionTypeF t -> return ""
+    Just t
+      | native
+      , Set.member letIndex borrowed -> do ts <- rustTypeOf t; return (":" <+> "&" <> ts)
+    Just t -> do ts <- rustTypeOf t; return (":" <+> ts)
+    Nothing -> return (":" <+> "*mut u8")
 
 -- | Native tail-loop assembly. Walks the 'LoopBody' decision tree into a Rust
 -- @loop { ... }@ expression bound to the serial result: guards render to
@@ -2682,8 +2688,12 @@ rustMakeLoop res carried origBody body = do
           reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> "=" <+> tv <> ";") changed tmpVars
       return $ priors <> tmpAssigns <> reassigns
     walk o (LoopNLet i neDocs b) = do
-      rest <- walk (case o of Just (LoopNLet j _ k) | j == i -> Just k; _ -> Nothing) b
-      return $ poolPriorLines neDocs <> ["let" <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"] <> rest
+      let (orhs, ob) = case o of
+            Just (LoopNLet j r k) | j == i -> (Just r, Just k)
+            _ -> (Nothing, Nothing)
+      ann <- maybe (return "") (\r -> rustLetAnnotation i (Just (typeFof r)) True) orhs
+      rest <- walk ob b
+      return $ poolPriorLines neDocs <> ["let" <+> nvarNamer i <> ann <+> "=" <+> poolExpr neDocs <> ";"] <> rest
     walk o (LoopSLet i seDocs b) = do
       rest <- walk (case o of Just (LoopSLet j _ k) | j == i -> Just k; _ -> Nothing) b
       return $ poolPriorLines seDocs <> ["let" <+> svarNamer i <+> "=" <+> poolExpr seDocs <> ";"] <> rest

@@ -1,17 +1,17 @@
 --- baseBuild ---
-[0,100]
+[0,0]
 --- baseWalk ---
-[5050,100]
+[5050,0]
 --- nestedOut ---
-[2,100]
+[2,0]
 --- nestedLoop ---
-[2550,100]
+[2550,0]
 --- nestedLoop2 ---
-[5050,100]
+[5050,0]
 --- tagNested ---
-[1,100]
+[1,0]
 --- tagField ---
-[1,100]
+[1,0]
 --- fieldArg ---
 [100,1]
 --- fieldArgM ---
@@ -43,23 +43,23 @@
 --- twoSteps ---
 [200,0]
 --- partsBorrowed ---
-[5050,101]
+[5050,1]
 --- partsFresh ---
-[5055,101]
+[5055,1]
 --- setter ---
 [1002,2]
 --- setterFn ---
 [1002,2]
 --- tlOnce ---
-[5049,100]
+[5049,0]
 --- tlLoopRead ---
-[5044,100]
+[5044,0]
 --- tlLoopKeep ---
-[5044,100]
+[5044,0]
 --- tlLoopBuilt ---
-[5047,101]
+[5047,0]
 --- tlLoopInline ---
-[3,100]
+[3,0]
 --- closureRead ---
 [306,1]
 --- closureFn ---
@@ -93,9 +93,9 @@
 --- throughLoop ---
 [100,2]
 --- loopFresh ---
-[1,102]
+[1,2]
 --- loopGrow ---
-[1,102]
+[1,2]
 --- loopCarried ---
 [300,1]
 --- loopField ---
@@ -103,21 +103,21 @@
 --- loopTuple ---
 [300,1]
 --- tupleStep ---
-[4,201]
+[4,101]
 --- loopLet ---
 [5051,1]
 --- loopLetTwice ---
-[5051,101]
+[5051,1]
 --- loopLetAlias ---
 [5051,101]
 --- nonTail ---
-[5050,200]
+[5050,100]
 --- guardLoop ---
-[9803,100]
+[9803,0]
 --- guardKeep ---
 [100,1]
 --- mixedLoop ---
-[323207,198]
+[323207,0]
 --- matchedTwice ---
 [200,0]
 --- twoLets ---
