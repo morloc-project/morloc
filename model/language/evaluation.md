@@ -80,7 +80,11 @@ as a value:
 - it refers into no other value: it holds no reference, pointer or view
   (a C++ `std::string_view`, `std::span`, `T*` or `T&`, or a struct holding
   one) into data that something else owns, so a sourced function never
-  returns one into its arguments (ruled 2026-10-18);
+  returns one into its arguments. A `std::shared_ptr<const T>` shares
+  ownership of data no one changes, so it is a value; a `std::weak_ptr` is
+  not (ruled 2026-10-18);
+- reading it through a `const` reference or a Rust `&` is safe from
+  several threads at once (ruled 2026-10-18);
 - it can be built from, assigned from and passed moved values: in C++ a
   mapped record's constructor takes no field by non-const lvalue
   reference, and no field type deletes its move constructor (ruled
