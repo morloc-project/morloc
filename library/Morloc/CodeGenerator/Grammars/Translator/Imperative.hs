@@ -70,6 +70,9 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , consumedParams
   , nativeManifoldsUnder
   , RNode (..)
+  , rnodeChildren
+  , rnodeLet
+  , aliasChain
   , isLastRead
   , isBorrowableProjection
   , borrowableRoot
@@ -1374,20 +1377,22 @@ moveWalk tagAfterMove subj k moved n = case n of
 -- | Mark the last reads of the values a native loop owns, carried or bound
 -- in the iteration (OWN-2, OWN-3, OWN-4).
 markLastReads :: (MFunctor a) => a -> a
-markLastReads = markLastReadsWith Map.empty
+markLastReads = markLastReadsWith Map.empty Set.empty
 
 -- | 'markLastReads' where a local may refer into another value: @aliases@
--- maps such a local to the value it refers into (OWN-2).
-markLastReadsWith :: (MFunctor a) => Map.Map Int Int -> a -> a
-markLastReadsWith aliases =
+-- maps such a local to the value it refers into (OWN-2), and no read of a
+-- value in @held@ is marked.
+markLastReadsWith :: (MFunctor a) => Map.Map Int Int -> Set.Set Int -> a -> a
+markLastReadsWith aliases held =
   mmap (defaultValue {mapSerialExpr = onS, mapNativeExpr = onN, mapSerialManifold = onSM, mapNativeManifold = onNM})
   where
-    onS (LoopS t ids b) = LoopS t ids (markLoopBody (markEnv aliases (RLS b)) RS lastReadIn ids b)
+    env n = let e = markEnv aliases n in e {meHeld = meHeld e <> held}
+    onS (LoopS t ids b) = LoopS t ids (markLoopBody (env (RLS b)) RS lastReadIn ids b)
     onS e = e
-    onN (LoopN t starts b) = LoopN t starts (markLoopBody (markEnv aliases (RLN b)) RN lastReadIn (map fst starts) b)
+    onN (LoopN t starts b) = LoopN t starts (markLoopBody (env (RLN b)) RN lastReadIn (map fst starts) b)
     onN e = e
-    onSM (SerialManifold m l f h e) = SerialManifold m l f h (fst (markSpineS (markEnv aliases (RS e)) [] e))
-    onNM (NativeManifold m l f e) = NativeManifold m l f (fst (markSpineN (markEnv aliases (RN e)) [] e))
+    onSM (SerialManifold m l f h e) = SerialManifold m l f h (fst (markSpineS (env (RS e)) [] e))
+    onNM (NativeManifold m l f e) = NativeManifold m l f (fst (markSpineN (env (RN e)) [] e))
 
 -- | What marking a body needs: the locals whose reads are reads of a value,
 -- and the values a @do@ block bound by a let reads, which none of their

@@ -19,13 +19,18 @@ module Morloc.CodeGenerator.Ownership
   , letMode
   , unchangedSlot
   , changedSlots
+  , LetPlan (..)
+  , letPlan
+  , nativeLets
   ) where
 
 import Control.Monad.Identity (Identity, runIdentity)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( RNode (RNM, RSM)
+  ( RNode (..)
+  , rnodeChildren
+  , rnodeLet
   , consumableProjectionLets
   , consumedParams
   , borrowableRoot
@@ -100,6 +105,44 @@ letMode pp root i rhs
       AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr s] ->
         not (selectorHasBracket sel) && length (ungroup sel) == 1 && (borrowableRoot s || isPlace s)
       _ -> False
+
+-- | What last-read marking and the move check need to know about a
+-- manifold's lets, given how a member binds each one: the references, each
+-- mapped to the variable at the base of its projection (OWN-2); the lets
+-- that hold a value of their own; and the values that must never move. An
+-- index bound more than once is never moved, and neither is anything one of
+-- its bindings refers into.
+data LetPlan = LetPlan
+  { lpAliases :: Map.Map Int Int
+  , lpOwned :: Set.Set Int
+  , lpHeld :: Set.Set Int
+  }
+
+letPlan :: [(Int, NativeExpr, LetMode)] -> LetPlan
+letPlan lets =
+  LetPlan
+    { lpAliases = Map.fromList [(i, r) | (i, rhs, LetBorrow) <- lets, not (Set.member i reused), Just r <- [baseVar rhs]]
+    , lpOwned = Set.fromList [i | (i, _, mode) <- lets, mode /= LetBorrow, not (Set.member i reused)]
+    , lpHeld = Set.fromList ([i | i <- Set.toList reused] <> [r | (i, rhs, LetBorrow) <- lets, Set.member i reused, Just r <- [baseVar rhs]])
+    }
+  where
+    reused = Map.keysSet (Map.filter (> (1 :: Int)) (Map.fromListWith (+) [(i, 1) | (i, _, _) <- lets]))
+    baseVar e = case e of
+      LetVarN _ j _ -> Just j
+      BndVarN _ j _ -> Just j
+      IntrinsicN _ IntrCtorField _ (x : _) -> baseVar x
+      IntrinsicN _ IntrListElem _ (x : _) -> baseVar x
+      AppExeN _ (PatCallP (PatternStruct _)) [NativeArgExpr x] -> baseVar x
+      _ -> Nothing
+
+-- | Every native let under a manifold, with its right-hand side, nested
+-- manifolds included.
+nativeLets :: SerialManifold -> [(Int, NativeExpr)]
+nativeLets sm = go (RSM sm)
+  where
+    go n = maybe [] (\(i, rhs, _) -> [(i, rhsExpr rhs)]) (rnodeLet n) <> concatMap go (rnodeChildren n)
+    rhsExpr (RN e) = e
+    rhsExpr _ = error "morloc bug: a native let whose right-hand side is not native"
 
 -- | Whether a loop continue gives carried slot @i@ the value it already
 -- holds, so the slot need not be reassigned.

@@ -6,6 +6,7 @@ Description : Which reads 'checkNative' reports as seeing a taken payload
 -}
 module OwnershipCheckTests (ownershipCheckTests) where
 
+import qualified Data.Set as Set
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
 
@@ -44,7 +45,7 @@ takeCases =
     -- a tag test after a take reads only the tag, where the member allows it
     , testCase "spec-own-1-3" $ do
         ok (NativeLetN 10 (field 1) (tup [rd 10, tag 1]))
-        assertBool "no tag test after a take" (not (null (checkNative mode False (NativeLetN 10 (field 1) (tup [rd 10, tag 1])))))
+        assertBool "no tag test after a take" (not (null (checkNative mode False Set.empty (NativeLetN 10 (field 1) (tup [rd 10, tag 1])))))
     -- the arm that does not take may read the value
     , testCase "spec-own-1-4" $
         ok (IfN ty (rd 2) (NativeLetN 10 (field 1) (rd 10)) (rd 1))
@@ -78,10 +79,42 @@ takeCases =
     -- a reference to an element of a list is a reference into the list
     , testCase "spec-own-1-13" $
         bad (NativeLetN 11 (IntrinsicN ty IntrListElem Nothing [rd 1, IntN fv 0]) (NativeLetN 10 (field 1) (tup [rd 10, rd 11])))
+    -- a let moved at its last read in a value being built is not read again
+    , testCase "spec-own-1-15" $ do
+        okMoving (NativeLetN 2 (IntN fv 0) (tup [lastRd 2]))
+        badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (tup [lastRd 2]) (rd 2)))
+    -- a move and another read of the same local in one step
+    , testCase "spec-own-1-16" $
+        badMoving (NativeLetN 2 (IntN fv 0) (tup [lastRd 2, rd 2]))
+    -- a reference into a moved local sees the move; a copy of it does not
+    , testCase "spec-own-1-17" $ do
+        badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 11 (field 2) (NativeLetN 3 (tup [lastRd 2]) (rd 11))))
+        okMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 12 (field 2) (NativeLetN 3 (tup [lastRd 2]) (rd 12))))
+    -- every keeping position moves: a constructor, a record, an optional and
+    -- a loop's next values
+    , testCase "spec-own-1-18" $ do
+        badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (VariantN ty "Link" 1 [lastRd 2]) (rd 2)))
+        badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (RecordN NamRecord fv [] [(Key "a", lastRd 2)]) (rd 2)))
+        badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (CoerceN CoerceToOptional ty (lastRd 2)) (rd 2)))
+        badMoving (LoopN ty [(1, IntN fv 0)] (LoopNLet 2 (IntN fv 0) (LoopContinue [tup [lastRd 2, rd 2]])))
+    -- a copy of a moved local is its own value; a reference into the copy is
+    -- not a reference into what was moved, and the reverse
+    , testCase "spec-own-1-19" $ do
+        okMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 12 (rd 2) (tup [lastRd 2, rd 12])))
+        badMoving (NativeLetN 1 (IntN fv 0) (NativeLetN 2 (rd 1) (NativeLetN 11 (field 2) (NativeLetN 3 (tup [lastRd 2]) (rd 11)))))
+    -- a value moved after a body that may run later read it
+    , testCase "spec-own-1-20" $
+        badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 4 (DoBlockN ty (rd 2)) (tup [lastRd 2, rd 4])))
+    -- a tag test after a move
+    , testCase "spec-own-1-21" $
+        badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (tup [lastRd 2]) (tag 2)))
     ]
   where
-    ok e = checkNative mode True e @?= []
-    bad e = assertBool "a read sees a taken payload" (not (null (checkNative mode True e)))
+    ok e = checkNative mode True Set.empty e @?= []
+    okMoving e = checkNative mode True (Set.fromList [2]) e @?= []
+    badMoving e = assertBool "a read sees a moved local" (not (null (checkNative mode True (Set.fromList [2]) e)))
+    lastRd i = LetVarN ty i LastRead
+    bad e = assertBool "a read sees a taken payload" (not (null (checkNative mode True Set.empty e)))
     mode i _
       | i == 10 = LetTake
       | i == 11 = LetBorrow

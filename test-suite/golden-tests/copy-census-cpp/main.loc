@@ -36,6 +36,7 @@
 --   mixedLoop                  loop step with a borrowing and a moving read
 --   matchedTwice               one value matched twice
 --   twoLets                    one value kept by two lets in turn
+--   aliasKeep                  a value kept while a reference into it is still read
 module main
   ( baseBuild, baseWalk, nestedOut, nestedLoop, nestedLoop2, tagNested, tagField
   , fieldArg, fieldArgM, fieldRet, tupleArg
@@ -48,7 +49,7 @@ module main
   , matchCond, matchCondFresh, matchRec, matchUnwrap, matchTry
   , throughTwo, throughLoop
   , loopFresh, loopGrow, loopCarried, loopField, loopTuple, tupleStep
-  , nonTail, guardLoop, guardKeep, mixedLoop, matchedTwice, twoLets
+  , nonTail, guardLoop, guardKeep, mixedLoop, matchedTwice, twoLets, aliasKeep
   )
 
 import root
@@ -486,3 +487,11 @@ twoLets n = census (
   in let a = Link ys End
   in let b = Link ys End
   in sumKeys 0 a + sumKeys 0 b)
+
+--' A tuple's first part read after the tuple is put into another, then the copies
+aliasKeep :: Int -> (Int, Int)
+aliasKeep n = census (
+  let t = (mkL n, 1)
+  in let ys = .0 t
+  in let u = (t, 2)
+  in keyL ys + .1 u)

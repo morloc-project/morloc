@@ -175,7 +175,7 @@ lastReadCases =
     -- the same, where lets refer into the values they are bound to
     , testProperty "spec-own-1-14" $
         forAll ((,) <$> genBody <*> genAliases) $ \(b, aliases) ->
-          let b' = case markLastReadsWith aliases (loop carriedVars b) of
+          let b' = case markLastReadsWith aliases Set.empty (loop carriedVars b) of
                 LoopN _ _ m -> m
                 _ -> b
            in all (pathSoundWith aliases) (paths b')
@@ -217,7 +217,7 @@ bodyMarks = spine . markLastReadsInBody
 
 -- | 'marks' with locals that refer into other values.
 marksWith :: Map.Map Int Int -> NativeExpr -> [[Int]]
-marksWith aliases e = case markLastReadsWith aliases e of
+marksWith aliases e = case markLastReadsWith aliases Set.empty e of
   LoopN _ _ b -> steps b
   _ -> []
   where

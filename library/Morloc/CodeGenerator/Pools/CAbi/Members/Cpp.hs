@@ -43,6 +43,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , LowerConfig (..)
   , buildProgramM
   , defaultFoldRules
+  , markLastReadsWith
   , expandDeserialize
   , expandSerialize
   , nativeToWire
@@ -56,7 +57,7 @@ import qualified Morloc.Build.Params as BP
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Ownership (LetMode (..), OwnCaps (..), PoolPlan, changedSlots, emptyPoolPlan, letMode, planPool)
+import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
 import qualified Morloc.CodeGenerator.Platform as P
@@ -509,6 +510,7 @@ translate srcs es = do
   -- `-I/abs/src` because the `src/` prefix was duplicated.
   (srcs', cxxFlags, includeDirs) <- handleFlagsAndPaths srcs
 
+  checkOn <- maybe False (`notElem` ["", "0"]) <$> liftIO (lookupEnv "MORLOC_CHECK_OWNERSHIP")
   labels <- collectLogLabels <$> MM.gets stateManifoldConfig
   templates <- collectRenderedTemplates cppLang
 
@@ -529,11 +531,25 @@ translate srcs es = do
         , translatorPool = pool
         }
       pool = planPool cppCaps es
-      (code, stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
+      -- How each let binds, as the pool renders it; last reads are marked
+      -- and checked only when the check is on, as nothing else reads them.
+      lets sm@(SerialManifold root _ _ _ _) = do
+        CMS.modify (\st -> st {translatorCurrentRoot = root})
+        mapM (\(i, rhs) -> (\m -> (i, rhs, m)) <$> cppLetMode i rhs) (nativeLets sm)
+      prepare sm
+        | checkOn = do
+            modes <- lets sm
+            let plan = letPlan modes
+            return (markLastReadsWith (lpAliases plan) (lpHeld plan) sm, modes)
+        | otherwise = return (sm, [])
+      run = do
+        ps <- mapM prepare es
+        c <- makeCppCode labels srcs' (map fst ps) universalScopeMap closureTable stageTable nativeEntries
+        return (c, ps)
+      ((code, prepared), stEnd) = CMS.runState run translatorState
   mapM_ (MM.throwSystemError . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)
-  checking <- liftIO (lookupEnv "MORLOC_CHECK_OWNERSHIP")
-  when (maybe False (`notElem` ["", "0"]) checking) $
-    case concat [checkManifold (letMode pool root) (ocTagAfterTake cppCaps) sm | sm@(SerialManifold root _ _ _ _) <- es] of
+  when checkOn $
+    case concatMap checkOne prepared of
       [] -> return ()
       vs -> MM.throwSystemError ("C++ pool: ownership check failed (OWN-1):" <+> vsep (map pretty vs))
 
@@ -808,6 +824,14 @@ tupleKey i v = [idoc|std::get<#{pretty i}>(#{v})|]
 
 recordAccess :: MDoc -> MDoc -> MDoc
 recordAccess record field = record <> "." <> field
+
+-- | The ownership check (OWN-1) of one marked top-level manifold, given how
+-- the pool binds each of its lets.
+checkOne :: (SerialManifold, [(Int, NativeExpr, LetMode)]) -> [Text]
+checkOne (sm, modes) = checkManifold mode (ocTagAfterTake cppCaps) (lpOwned (letPlan modes)) sm
+  where
+    byIndex = Map.fromListWith (\_ old -> old) [(i, m) | (i, _, m) <- modes]
+    mode i _ = Map.findWithDefault LetCopy i byIndex
 
 -- | How let @i@ with right-hand side @rhs@ binds in C++: 'letMode', except
 -- that a scalar is always copied, as a reference to one saves nothing.
