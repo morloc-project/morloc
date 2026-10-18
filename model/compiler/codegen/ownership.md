@@ -22,7 +22,7 @@ so a copy there is never made.
 
 ### OWN-1 No path reads a value after it is moved
 Intent: ruled 2026-10-17
-Tests: spec-own-1-1, spec-own-1-2, spec-own-1-3, spec-own-1-4, spec-own-1-5, spec-own-1-6, spec-own-1-7, spec-own-1-8, spec-own-1-9, spec-own-1-10, spec-own-1-11, spec-own-1-12, spec-own-1-13, spec-own-1-14, spec-own-1-15, spec-own-1-16, spec-own-1-17, spec-own-1-18, spec-own-1-19, spec-own-1-20, spec-own-1-21
+Tests: spec-own-1-1, spec-own-1-2, spec-own-1-3, spec-own-1-4, spec-own-1-5, spec-own-1-6, spec-own-1-7, spec-own-1-8, spec-own-1-9, spec-own-1-10, spec-own-1-11, spec-own-1-12, spec-own-1-13, spec-own-1-14, spec-own-1-15, spec-own-1-16, spec-own-1-17, spec-own-1-18, spec-own-1-19, spec-own-1-20, spec-own-1-21, spec-own-1-22
 Code: conforms 2026-10-17
 
 In generated code, once a read moves a value, no later read on any path

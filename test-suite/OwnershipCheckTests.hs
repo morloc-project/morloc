@@ -109,6 +109,12 @@ takeCases =
     -- a tag test after a move
     , testCase "spec-own-1-21" $
         badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (tup [lastRd 2]) (tag 2)))
+    -- a let bound to a local at its last read, directly or at the end of a
+    -- chain of lets, moves it, and the new let holds the value itself
+    , testCase "spec-own-1-22" $ do
+        badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (lastRd 2) (rd 2)))
+        badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (NativeLetN 20 (IntN fv 1) (lastRd 2)) (rd 2)))
+        okMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (lastRd 2) (tup [rd 3, rd 3])))
     ]
   where
     ok e = checkNative mode True Set.empty e @?= []

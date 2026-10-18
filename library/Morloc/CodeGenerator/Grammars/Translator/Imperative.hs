@@ -64,6 +64,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , markLastReadsWith
   , markLastReadsInBody
   , markLastReadsInNative
+  , namedIn
   , loopBorrowLocals
   , BorrowPart (..)
   , BorrowTest (..)
@@ -632,8 +633,9 @@ data LowerConfig m = LowerConfig
   , lcRecordConstructor :: TypeF -> NamType -> FVar -> [TypeF] -> [(Key, MDoc)] -> m PoolDocs
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
   , lcKeepElem :: NativeExpr -> MDoc -> m MDoc
-  -- ^ Adapt a tuple, record or constructor element, or the value an optional
-  -- coercion wraps, given its original (OWN-2).
+  -- ^ Adapt a tuple, record or constructor element, the value an optional
+  -- coercion wraps, or the value a let's right-hand side ends in, given its
+  -- original (OWN-2).
   , lcStoreField :: TypeF -> MDoc -> m MDoc
   -- ^ Adapt a value to its stored representation inside an aggregate (given the
   -- element/field type). Applied to record fields AND list/tuple elements.
@@ -1119,7 +1121,7 @@ lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) =
 -- As for a native let ('NativeLetN_'): the bound local is owned, so its RHS
 -- is an owned sink.
 lowerSerialExpr cfg (NativeLetS _ rhsE _) (NativeLetS_ i e1 e2) = do
-  e1' <- adaptOwnedElem cfg rhsE e1 >>= lcLetRhs cfg i rhsE
+  e1' <- adaptOwnedElem cfg rhsE e1 >>= keepRhs cfg rhsE >>= lcLetRhs cfg i rhsE
   lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (Just rhsE) e1' e2
 lowerSerialExpr _ _ (NativeLetS_ i _ _) =
   error ("morloc bug: native let " <> show i <> " lowered without its original")
@@ -1990,8 +1992,10 @@ adaptLoopBodyOwned ::
 adaptLoopBodyOwned cfg adaptBase ids origBody body = go origBody body
   where
     go (LoopIf _ ot oe) (LoopIf c t e) = LoopIf c <$> go ot t <*> go oe e
-    go (LoopNLet _ orhs ob) (LoopNLet i rhs b) = do
-      rhs' <- loopBorrowOr cfg i orhs rhs (adaptOwnedElem cfg orhs rhs >>= lcLoopLetRhs cfg i orhs)
+    -- A let kept only when its original is the same let.
+    go (LoopNLet j orhs ob) (LoopNLet i rhs b) = do
+      let keep = if j == i then keepRhs cfg orhs else return
+      rhs' <- loopBorrowOr cfg i orhs rhs (adaptOwnedElem cfg orhs rhs >>= keep >>= lcLoopLetRhs cfg i orhs)
       LoopNLet i rhs' <$> go ob b
     go (LoopSLet _ orhs ob) (LoopSLet i rhs b) = do
       rhs' <- ownLoopPacket i orhs rhs
@@ -2029,13 +2033,25 @@ adaptLoopBodyOwned cfg adaptBase ids origBody body = go origBody body
     mentionsVar v d = any (== v) (T.split (not . isIdentChar) (render (vsep (poolPriorLines d <> [poolExpr d]))))
     isIdentChar c = isAlphaNum c || c == '_'
 
+-- | Adapt a let's right-hand side through 'lcKeepElem', given its original:
+-- the value a chain of lets ends in is kept.
+keepRhs :: (Monad m) => LowerConfig m -> NativeExpr -> PoolDocs -> m PoolDocs
+keepRhs cfg rhsE = keepOne cfg (valueOf rhsE)
+  where
+    valueOf (NativeLetN _ _ b) = valueOf b
+    valueOf e = e
+
+-- | Adapt one kept value through 'lcKeepElem', given its original.
+keepOne :: (Monad m) => LowerConfig m -> NativeExpr -> PoolDocs -> m PoolDocs
+keepOne cfg e pd = (\v -> pd {poolExpr = v}) <$> lcKeepElem cfg e (poolExpr pd)
+
 -- | Adapt each element of a tuple, record or constructor through
 -- 'lcKeepElem', given its original. Passes through unchanged when the
 -- original expression list is unavailable (length mismatch), mirroring
 -- 'adaptOwnedElems'.
 keepElems :: (Monad m) => LowerConfig m -> [NativeExpr] -> [PoolDocs] -> m [PoolDocs]
 keepElems cfg origEs xs
-  | length origEs == length xs = zipWithM (\e pd -> (\v -> pd {poolExpr = v}) <$> lcKeepElem cfg e (poolExpr pd)) origEs xs
+  | length origEs == length xs = zipWithM (keepOne cfg) origEs xs
   | otherwise = return xs
 
 -- | Adapt each aggregate element/field to its stored representation via
@@ -2323,7 +2339,7 @@ lowerNativeExprRaw cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothi
 -- bound value (Rust clones a borrowed/place RHS -- e.g. a getter through a
 -- borrowed receiver -- to match the owned binding type; other members unchanged).
 lowerNativeExprRaw cfg (NativeLetN _ rhsE _) (NativeLetN_ i x1 x2) = do
-  x1' <- loopBorrowOr cfg i rhsE x1 (adaptOwnedElem cfg rhsE x1 >>= lcLetRhs cfg i rhsE)
+  x1' <- loopBorrowOr cfg i rhsE x1 (adaptOwnedElem cfg rhsE x1 >>= keepRhs cfg rhsE >>= lcLetRhs cfg i rhsE)
   lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (Just rhsE) x1' x2
 lowerNativeExprRaw _ _ (NativeLetN_ i _ _) =
   error ("morloc bug: native let " <> show i <> " lowered without its original")
@@ -2429,12 +2445,11 @@ lowerNativeExprRaw cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcApplyClosure cf
 -- The wrapped value must be OWNED first: `Some(&T)` is an `Option<&T>`, not the
 -- `Option<T>` the sink expects, so a borrowed/place inner is cloned before wrapping.
 lowerNativeExprRaw cfg (CoerceN _ _ innerE) (CoerceN_ CoerceToOptional _ x) = do
-  x' <- adaptOwnedElem cfg innerE x
-  kept <- lcKeepElem cfg innerE (poolExpr x')
+  x' <- adaptOwnedElem cfg innerE x >>= keepOne cfg innerE
   -- Adapt the inner to its stored representation before wrapping (Rust boxes a
   -- closure into `Arc<dyn Fn>` so the payload matches the boxed
   -- `Option<Arc<dyn Fn>>` element type), mirroring list/tuple/record.
-  boxed <- lcStoreField cfg (typeFof innerE) kept
+  boxed <- lcStoreField cfg (typeFof innerE) (poolExpr x')
   return $ x' {poolExpr = lcCoerceOptional cfg boxed}
 lowerNativeExprRaw cfg _ (CoerceN_ CoerceToOptional _ x) =
   return $ x {poolExpr = lcCoerceOptional cfg (poolExpr x)}

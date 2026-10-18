@@ -118,3 +118,17 @@ same name sees what was taken.
   or whose field type deletes its move constructor, built before and now
   fails to compile. Open question, beside rule S (whether a C++ source may
   take a non-const `T&`): what a mapped C++ type must accept.
+- **A C++ source's result may refer into its arguments (rule F).** [read]
+  A C++ source can return a view into an argument (`std::string_view`,
+  `std::span`, a struct holding a pointer). A let declared with its C++
+  type rejects a view at compile time (`std::string n = viewOf(x)`, tried);
+  a struct mapped for the type, or a let declared `auto` (a loop let whose
+  IR is known), would keep it, and it would then outlive a move of the
+  argument and read a moved-from value. A shape reaching `auto` from
+  source was not found. No item says whether a sourced result may do this. Until it
+  is ruled, C++ never moves a local named in the arguments of a sourced call
+  whose result is not a scalar or the unit, nor what that local refers into
+  (`sourceViewArgs`, Cpp.hs). Rust states borrows in a source's signature,
+  so there it is a build failure. Open question: may a sourced result refer
+  into its arguments?
+

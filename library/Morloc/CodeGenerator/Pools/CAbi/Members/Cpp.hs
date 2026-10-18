@@ -44,6 +44,10 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , buildProgramM
   , defaultFoldRules
   , markLastReadsWith
+  , namedIn
+  , aliasChain
+  , RNode (..)
+  , rnodeChildren
   , expandDeserialize
   , expandSerialize
   , nativeToWire
@@ -433,8 +437,9 @@ data CppTranslatorState = CppTranslatorState
   -- ^ The top-level manifold being lowered (see 'translatorPool').
   , translatorMoves :: Set.Set Int
   -- ^ The owned lets of the segment being lowered (OWN-2).
-  , translatorLowered :: [(SerialManifold, [(Int, NativeExpr, LetMode)])]
-  -- ^ Each segment as lowered, last reads marked, with its let modes.
+  , translatorLowered :: [(SerialManifold, [(Int, NativeExpr, LetMode)], Set.Set Int)]
+  -- ^ Each segment as lowered, last reads marked, with its let modes and the
+  -- lets a last read moves.
   , translatorErrors :: [Text]
   }
 
@@ -818,8 +823,8 @@ recordAccess record field = record <> "." <> field
 
 -- | The ownership check (OWN-1) of one marked top-level manifold, given how
 -- the pool binds each of its lets.
-checkOne :: (SerialManifold, [(Int, NativeExpr, LetMode)]) -> [Text]
-checkOne (sm, modes) = checkManifold mode (ocTagAfterTake cppCaps) (lpOwned (letPlan modes)) sm
+checkOne :: (SerialManifold, [(Int, NativeExpr, LetMode)], Set.Set Int) -> [Text]
+checkOne (sm, modes, moves) = checkManifold mode (ocTagAfterTake cppCaps) moves sm
   where
     byIndex = Map.fromListWith (\_ old -> old) [(i, m) | (i, _, m) <- modes]
     mode i _ = Map.findWithDefault LetCopy i byIndex
@@ -836,20 +841,16 @@ cppLetMode i rhs = do
       typestr <- cppTypeOf (typeFof rhs)
       return (if isScalarCppType typestr then LetCopy else mode)
 
--- | A kept element (OWN-2); a scalar is copied.
+-- | A kept element (OWN-2).
 cppKeepElem :: NativeExpr -> MDoc -> CppTranslatorM MDoc
 cppKeepElem e x = fromMaybe x <$> cppKeptLet e x
 
 -- | The move of a kept let (OWN-2), when its lowered form is the let itself.
 cppKeptLet :: NativeExpr -> MDoc -> CppTranslatorM (Maybe MDoc)
-cppKeptLet (LetVarN t i LastRead) x
+cppKeptLet (LetVarN _ i LastRead) x
   | render x == render (nvarNamer i) = do
       moves <- CMS.gets translatorMoves
-      typestr <- cppTypeOf t
-      return $
-        if Set.member i moves && not (isScalarCppType typestr)
-          then Just ("std::move(" <> x <> ")")
-          else Nothing
+      return (if Set.member i moves then Just ("std::move(" <> x <> ")") else Nothing)
 cppKeptLet _ _ = return Nothing
 
 -- | Walk a lowered 'LoopBody' into C++ statement lines for the loop body.
@@ -1943,11 +1944,31 @@ translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
   resetCounter
   CMS.modify (\st -> st {translatorCurrentRoot = root})
   modes <- mapM (\(i, rhs) -> (\m -> (i, rhs, m)) <$> cppLetMode i rhs) (nativeLets m0)
+  viewed <- sourceViewArgs (RSM m0)
   let plan = letPlan modes
-      m1 = markLastReadsWith (lpAliases plan) (lpHeld plan) m0
-  CMS.modify (\st -> st {translatorMoves = lpOwned plan, translatorLowered = (m1, modes) : translatorLowered st})
+      held = lpHeld plan <> Set.fromList [t | j <- Set.toList viewed, t <- j : aliasChain (lpAliases plan) j]
+      m1 = markLastReadsWith (lpAliases plan) held m0
+  cheap <- Set.fromList . map fst . filter snd <$> mapM (\(i, rhs, _) -> (\t -> (i, isScalarCppType t || render t == "mlc::Unit")) <$> cppTypeOf (typeFof rhs)) modes
+  let moves = lpOwned plan `Set.difference` cheap
+  CMS.modify (\st -> st {translatorMoves = moves, translatorLowered = (m1, modes, moves) : translatorLowered st})
   e <- foldWithSerialManifoldM (defaultFoldRules (cppLowerConfig closureGen)) m1
   return $ renderPoolDocs e
+
+-- | The locals named in the arguments of a call to a C++ source whose result
+-- is neither a scalar nor the unit: the result may refer into them, so none
+-- of them moves while it lives (rule F, model/compiler/issues/codegen-ownership.md).
+sourceViewArgs :: RNode -> CppTranslator (Set.Set Int)
+sourceViewArgs n = do
+  here <- case n of
+    RN (AppExeN t (SrcCallP _ _) args) -> do
+      typestr <- cppTypeOf t
+      return $
+        if isScalarCppType typestr || render typestr == "mlc::Unit"
+          then Set.empty
+          else Set.unions [namedIn (RN x) | NativeArgExpr x <- args]
+    _ -> return Set.empty
+  rest <- mapM sourceViewArgs (rnodeChildren n)
+  return (Set.unions (here : rest))
 
 -- handle string interpolation
 evaluatePattern :: CppTranslatorState -> TypeF -> Pattern -> [MDoc] -> MDoc

@@ -23,7 +23,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (aliasChain)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (RNode (..), aliasChain, rnodeChildren)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Ownership (LetMode (..))
 
@@ -34,16 +34,18 @@ data St = St
   , stCaptured :: Set.Set Int
   , stMoved :: Set.Set Int
   -- ^ locals moved whole, which only a reference into them still sees
+  , stHeld :: Set.Set Int
+  -- ^ locals a @do@ block bound by a let reads (OWN-3)
   }
   deriving (Eq)
 
 -- | Either of two states, or both.
 joinSt :: St -> St -> St
-joinSt a b = St (stTaken a <> stTaken b) (stCaptured a <> stCaptured b) (stMoved a <> stMoved b)
+joinSt a b = St (stTaken a <> stTaken b) (stCaptured a <> stCaptured b) (stMoved a <> stMoved b) (stHeld a <> stHeld b)
 
 -- | A state without the given locals, which are bound again.
 forget :: Set.Set Int -> St -> St
-forget vs st = St (stTaken st `Set.difference` vs) (stCaptured st `Set.difference` vs) (stMoved st `Set.difference` vs)
+forget vs st = St (stTaken st `Set.difference` vs) (stCaptured st `Set.difference` vs) (stMoved st `Set.difference` vs) (stHeld st `Set.difference` vs)
 
 
 -- | What evaluating a node did: the state once it is done; the values it
@@ -84,7 +86,7 @@ checkNative :: (Int -> NativeExpr -> LetMode) -> Bool -> Set.Set Int -> NativeEx
 checkNative mode tagOk moves e = rViol (walkN (Env mode tagOk Map.empty moves Map.empty) start e)
 
 start :: St
-start = St Set.empty Set.empty Set.empty
+start = St Set.empty Set.empty Set.empty Set.empty
 
 num :: Int -> Text
 num = T.pack . show
@@ -164,7 +166,7 @@ keepPart :: Env -> St -> NativeExpr -> Eval
 keepPart env s x = case x of
   LetVarN _ i LastRead | Set.member i (envMoves env) ->
     let r = readVar env s i
-        later = ["n" <> num i <> " is moved after a body that may run later captured it" | Set.member i (stCaptured s)]
+        later = ["n" <> num i <> " is moved while a do block bound by a let holds it" | Set.member i (stHeld s)]
      in r {rSt = (rSt r) {stMoved = Set.insert i (stMoved (rSt r))}, rMoves = Set.insert i (rMoves r), rViol = later <> rViol r}
   _ -> walkN env s x
 
@@ -208,12 +210,55 @@ bindLet env s i rhs body =
         (LetBorrow, Just root)
           | Just base <- projectionBase rhs ->
               body env {envAlias = Map.insert i root (envAlias env), envBorrow = Map.insert i base (envBorrow env)} rebound
+        _ | Just j <- movedIn -> case Map.lookup j (envAlias env) of
+          Just root -> body unaliased {envAlias = Map.insert i root (envAlias env)} rebound
+          Nothing -> body unaliased rebound
         (_, Just root) -> body env {envAlias = Map.insert i root (envAlias env), envBorrow = Map.delete i (envBorrow env)} rebound
         _ -> body unaliased rebound
    in (rhsR `andThen` const (b {rBound = Set.insert i (rBound b)}), x)
   where
-    rhsR = walkN env s rhs
-    t = rSt rhsR
+    rhsR = keepValue env s rhs
+    t = (rSt rhsR) {stHeld = stHeld (rSt rhsR) <> Set.fromList [v | j <- Set.toList (heldBy rhs), v <- j : aliasChain (envAlias env) j]}
+    -- the local the right-hand side ends in, when it was moved there
+    movedIn = case valueOf rhs of
+      LetVarN _ j _ | Set.member j (rMoves rhsR) -> Just j
+      _ -> Nothing
+    valueOf (NativeLetN _ _ v) = valueOf v
+    valueOf v = v
+
+-- | The locals a @do@ block in a let's value reads: the value itself, a
+-- conditional's arm, the value a chain of lets ends in, or a part of a value
+-- being built.
+heldBy :: NativeExpr -> Set.Set Int
+heldBy e = case e of
+  DoBlockN _ x -> namesIn x
+  IfN _ _ a b -> heldBy a <> heldBy b
+  NativeLetN _ _ b -> heldBy b
+  TupleN _ xs -> foldMap heldBy xs
+  RecordN _ _ _ kvs -> foldMap (heldBy . snd) kvs
+  VariantN _ _ _ xs -> foldMap heldBy xs
+  ListN _ _ xs -> foldMap heldBy xs
+  CoerceN _ _ x -> heldBy x
+  _ -> Set.empty
+
+-- | Every native local named under an expression, the context arguments of
+-- the manifolds under it included.
+namesIn :: NativeExpr -> Set.Set Int
+namesIn = go . RN
+  where
+    go n = here n <> foldMap go (rnodeChildren n)
+    here n = case n of
+      RN (LetVarN _ j _) -> Set.singleton j
+      RN (BndVarN _ j _) -> Set.singleton j
+      RNM (NativeManifold _ _ form _) -> Set.fromList [j | Arg j _ <- manifoldContext form]
+      RSM (SerialManifold _ _ form _ _) -> Set.fromList [j | Arg j _ <- manifoldContext form]
+      _ -> Set.empty
+
+-- | A let's right-hand side: the value it ends in is kept (OWN-2).
+keepValue :: Env -> St -> NativeExpr -> Eval
+keepValue env s e = case e of
+  NativeLetN j rhs body -> bindLet_ env s j rhs (\env' s' -> keepValue env' s' body)
+  _ -> keepPart env s e
 
 -- | 'bindLet' for a body with nothing to report but its result.
 bindLet_ :: Env -> St -> Int -> NativeExpr -> (Env -> St -> Eval) -> Eval
@@ -290,7 +335,7 @@ region r =
   let outside = (rTakes r <> rMoves r) `Set.difference` rBound r
       st = rSt r
    in r
-        { rSt = St (stTaken st `Set.difference` rTakes r) (stCaptured st <> (rReads r `Set.difference` rBound r)) (stMoved st `Set.difference` rMoves r)
+        { rSt = St (stTaken st `Set.difference` rTakes r) (stCaptured st <> (rReads r `Set.difference` rBound r)) (stMoved st `Set.difference` rMoves r) (stHeld st)
         , rTakes = Set.empty
         , rMoves = Set.empty
         , rViol = rViol r <> ["n" <> num v <> " is taken or moved in a body that may run more than once" | v <- Set.toList outside]
