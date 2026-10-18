@@ -61,6 +61,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
     -- * Ownership of a projected value
   , consumableProjectionLets
   , markLastReads
+  , markLastReadsWith
   , loopBorrowLocals
   , BorrowPart (..)
   , BorrowTest (..)
@@ -1372,23 +1373,36 @@ moveWalk tagAfterMove subj k moved n = case n of
 -- | Mark the last reads of the values a native loop owns, carried or bound
 -- in the iteration (OWN-2, OWN-3, OWN-4).
 markLastReads :: (MFunctor a) => a -> a
-markLastReads = mmap (defaultValue {mapSerialExpr = onS, mapNativeExpr = onN})
+markLastReads = markLastReadsWith Map.empty
+
+-- | 'markLastReads' where a local may refer into another value: @aliases@
+-- maps such a local to the value it refers into (OWN-2).
+markLastReadsWith :: (MFunctor a) => Map.Map Int Int -> a -> a
+markLastReadsWith aliases = mmap (defaultValue {mapSerialExpr = onS, mapNativeExpr = onN})
   where
-    onS (LoopS t ids b) = LoopS t ids (markLoopBody RS lastReadIn ids b)
+    onS (LoopS t ids b) = LoopS t ids (markLoopBody aliases RS lastReadIn ids b)
     onS e = e
-    onN (LoopN t starts b) = LoopN t starts (markLoopBody RN lastReadIn (map fst starts) b)
+    onN (LoopN t starts b) = LoopN t starts (markLoopBody aliases RN lastReadIn (map fst starts) b)
     onN e = e
 
 markLoopBody ::
+  Map.Map Int Int ->
   (b -> RNode) ->
   (Int -> b -> b) ->
   [Int] ->
   LoopBody NativeExpr SerialExpr b ->
   LoopBody NativeExpr SerialExpr b
-markLoopBody baseNode markBase carried = fst . go carried
+markLoopBody aliases baseNode markBase carried = fst . go carried
   where
+    -- The locals whose reads are reads of @v@: @v@ and every local whose
+    -- chain of aliases passes through it.
+    namesOf v = v : Map.findWithDefault [] v referrers
+    referrers = Map.fromListWith (<>) [(t, [a]) | a <- Map.keys aliases, t <- chain a]
+    chain a = follow (Set.singleton a) (Map.lookup a aliases)
+    follow seen (Just t) | not (Set.member t seen) = t : follow (Set.insert t seen) (Map.lookup t aliases)
+    follow _ _ = []
     -- @owned@ holds the carried values and the iteration's lets in scope.
-    readsIn owned n = Map.fromList [(v, k) | v <- owned, let k = readCount v n, k > 0]
+    readsIn owned n = Map.fromList [(v, k) | v <- owned, let k = sum [readCount j n | j <- namesOf v], k > 0]
 
     lastIn :: Map.Map Int Int -> Map.Map Int Int -> [Int]
     lastIn here after = [v | (v, 1) <- Map.toList here, Map.findWithDefault 0 v after == 0]

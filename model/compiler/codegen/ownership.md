@@ -20,7 +20,7 @@ share values by reference, so a copy there is never made.
 
 ### OWN-1 No path reads a value after it is moved
 Intent: ruled 2026-10-17
-Tests: spec-own-1-1, spec-own-1-2, spec-own-1-3, spec-own-1-4, spec-own-1-5, spec-own-1-6, spec-own-1-7, spec-own-1-8, spec-own-1-9, spec-own-1-10, spec-own-1-11, spec-own-1-12, spec-own-1-13
+Tests: spec-own-1-1, spec-own-1-2, spec-own-1-3, spec-own-1-4, spec-own-1-5, spec-own-1-6, spec-own-1-7, spec-own-1-8, spec-own-1-9, spec-own-1-10, spec-own-1-11, spec-own-1-12, spec-own-1-13, spec-own-1-14
 Code: conforms 2026-10-17
 
 In generated code, once a read moves a value, no later read on any path
@@ -30,14 +30,16 @@ out of scope.
 
 ### OWN-2 A move happens only at a last read
 Intent: ruled 2026-10-17
-Tests: spec-own-2-1, spec-own-2-2, spec-own-2-3, spec-own-2-4, spec-own-2-5, spec-own-2-6
+Tests: spec-own-2-1, spec-own-2-2, spec-own-2-3, spec-own-2-4, spec-own-2-5, spec-own-2-6, spec-own-2-7, spec-own-2-8, spec-own-2-9
 Code: conforms 2026-10-17
 
 A read may move a value it owns only if no later read on its path reads
 that value, and no other read in the same step does. A step is one let's
 right-hand side, one result, or the values one loop iteration passes to the
 next taken together. Reads within a step happen in an unspecified order
-(EVAL-2), so a value read twice in one step is moved by neither read.
+(EVAL-2), so a value read twice in one step is moved by neither read. A
+read of a local that refers into a value, directly or through other such
+locals, is also a read of that value.
 
 ### OWN-3 A read that may run more than once never moves
 Intent: ruled 2026-10-17

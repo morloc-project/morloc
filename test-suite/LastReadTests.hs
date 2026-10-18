@@ -13,7 +13,7 @@ import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck (testProperty)
 
 import qualified Data.Set as Set
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (RNode (..), loopBorrowLocals, markLastReads)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (RNode (..), loopBorrowLocals, markLastReads, markLastReadsWith)
 import Morloc.CodeGenerator.Namespace
 
 lastReadTests :: TestTree
@@ -120,6 +120,21 @@ lastReadCases =
     , testCase "spec-own-2-5" $
         marks (loop [1] (LoopIf (rd 2) (LoopBase (rd 1)) (LoopContinue [tup [rd 1]])))
           @?= [[], [1], [1]]
+    -- a read of a local that refers into a value is a read of the value, in
+    -- its own step
+    , testCase "spec-own-2-7" $
+        marksWith (Map.fromList [(10, 1)]) (loop [1] (LoopNLet 10 (rd 1) (LoopBase (tup [rd 10, rd 1]))))
+          @?= [[], [10]]
+    -- and after it
+    , testCase "spec-own-2-8" $ do
+        marks (loop [1] (LoopNLet 10 (rd 1) (LoopNLet 11 (rd 1) (LoopBase (rd 10)))))
+          @?= [[], [1], [10]]
+        marksWith (Map.fromList [(10, 1)]) (loop [1] (LoopNLet 10 (rd 1) (LoopNLet 11 (rd 1) (LoopBase (rd 10)))))
+          @?= [[], [], [10]]
+    -- a chain of locals referring into one another counts toward each link
+    , testCase "spec-own-2-9" $
+        marksWith (Map.fromList [(10, 1), (11, 10)]) (loop [1] (LoopNLet 10 (rd 1) (LoopNLet 11 (rd 10) (LoopNLet 12 (rd 10) (LoopBase (rd 11))))))
+          @?= [[], [], [], [11]]
     -- a guard is never marked
     , testCase "spec-own-4-1" $
         marks (loop [1] (LoopIf (rd 1) (LoopBase (IntN fv 0)) (LoopBase (IntN fv 1))))
@@ -137,6 +152,13 @@ lastReadCases =
            in checkCoverage $
                 cover 30 (any (\(Step _ _ x) -> not (null (marked x))) (concat (paths b'))) "marks a read" $
                   all pathSound (paths b')
+    -- the same, where lets refer into the values they are bound to
+    , testProperty "spec-own-1-14" $
+        forAll ((,) <$> genBody <*> genAliases) $ \(b, aliases) ->
+          let b' = case markLastReadsWith aliases (loop carriedVars b) of
+                LoopN _ _ m -> m
+                _ -> b
+           in all (pathSoundWith aliases) (paths b')
     ]
 
 ty :: TypeF
@@ -156,7 +178,11 @@ loop ids = LoopN ty [(i, IntN fv 0) | i <- ids]
 
 -- | The variables each step marks, in the order the steps are written.
 marks :: NativeExpr -> [[Int]]
-marks e = case markLastReads e of
+marks = marksWith Map.empty
+
+-- | 'marks' with locals that refer into other values.
+marksWith :: Map.Map Int Int -> NativeExpr -> [[Int]]
+marksWith aliases e = case markLastReadsWith aliases e of
   LoopN _ _ b -> steps b
   _ -> []
   where
@@ -203,17 +229,30 @@ closureMarks _ = []
 -- binds its variable afresh. The continue reassigns every carried variable
 -- and a base leaf ends the loop, so one path is one whole iteration.
 pathSound :: [Step] -> Bool
-pathSound = go []
+pathSound = pathSoundWith Map.empty
+
+-- | 'pathSound' where a read of a local is also a read of every value its
+-- chain of aliases passes through.
+pathSoundWith :: Map.Map Int Int -> [Step] -> Bool
+pathSoundWith aliases = go []
   where
+    -- genAliases only refers to lower indices, so a chain ends.
+    through j = j : maybe [] through (Map.lookup j aliases)
     go _ [] = True
     go moved (Step guard binds x : rest) =
-      let r = reads' x
+      let r = Map.fromListWith (+) [(v, k) | (j, k) <- Map.toList (reads' x), v <- through j]
           ms = marked x
        in null (closureMarks x)
             && all (`Map.notMember` r) moved
             && (null ms || not guard)
             && all (\v -> Map.lookup v r == Just 1) ms
             && go (filter (\v -> Just v /= binds) (moved <> ms)) rest
+
+-- | Lets 10 and up referring into a carried value or an earlier let.
+genAliases :: Gen (Map.Map Int Int)
+genAliases = Map.fromList . concat <$> mapM pick [10 .. 14]
+  where
+    pick i = frequency [(1, pure []), (1, (\t -> [(i, t)]) <$> elements (carriedVars <> [10 .. i - 1]))]
 
 genBody :: Gen (LoopBody NativeExpr SerialExpr NativeExpr)
 genBody = sized (go (10 :: Int))
