@@ -107,6 +107,12 @@ all:
 	./nexus loopTuple 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	echo "--- tupleStep ---" >> obs.txt
 	./nexus tupleStep 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- loopLet ---" >> obs.txt
+	./nexus loopLet 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- loopLetTwice ---" >> obs.txt
+	./nexus loopLetTwice 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	echo "--- loopLetAlias ---" >> obs.txt
+	./nexus loopLetAlias 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	echo "--- nonTail ---" >> obs.txt
 	./nexus nonTail 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	echo "--- guardLoop ---" >> obs.txt

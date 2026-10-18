@@ -2675,7 +2675,7 @@ rustMakeLoop res carried origBody body = do
     -- The IR body, when known, is walked beside the lowered one, so a slot
     -- the continue leaves as it is gets no temporary.
     walk o (LoopContinue contDocs) = do
-      let changed = changedSlots ids (case o of Just (LoopContinue os) -> Just os; _ -> Nothing) contDocs
+      let changed = [(i, v) | (i, v, _) <- changedSlots ids (case o of Just (LoopContinue os) -> Just os; _ -> Nothing) contDocs]
       tmpVars <- map helperNamer <$> mapM (const getCounter) changed
       let priors = concatMap (poolPriorLines . snd) changed
           tmpAssigns = zipWith (\tv (_, cd) -> "let" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars changed

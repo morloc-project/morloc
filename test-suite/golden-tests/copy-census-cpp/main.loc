@@ -31,6 +31,8 @@
 --   matchCond matchCondFresh matchRec matchUnwrap matchTry  match and conditional results
 --   throughTwo throughLoop     value kept through a chain of calls
 --   loopFresh loopGrow loopCarried loopField loopTuple tupleStep  carried loop values
+--   loopLet loopLetTwice loopLetAlias  a let passed on to the next iteration, alone,
+--                              read again in the step, read through a reference
 --   nonTail                    non-tail recursion rebuilding a chain
 --   guardLoop guardKeep        guarded arms projecting the subject
 --   mixedLoop                  loop step with a borrowing and a moving read
@@ -48,7 +50,7 @@ module main
   , letOnce, letKeep, letSource
   , matchCond, matchCondFresh, matchRec, matchUnwrap, matchTry
   , throughTwo, throughLoop
-  , loopFresh, loopGrow, loopCarried, loopField, loopTuple, tupleStep
+  , loopFresh, loopGrow, loopCarried, loopField, loopTuple, tupleStep, loopLet, loopLetTwice, loopLetAlias
   , nonTail, guardLoop, guardKeep, mixedLoop, matchedTwice, twoLets, aliasKeep
   )
 
@@ -444,6 +446,30 @@ tupStep k t
 
 tupleStep :: Int -> (Int, Int)
 tupleStep n = census (tupStep n (mkL 3, 0))
+
+letStep :: Int -> [Int] -> Int -> Int
+letStep k acc s
+  ? k == 0 = s + keyL acc
+  : (let ys = grow acc k in let a = keyL ys in letStep (k - 1) ys (s + a))
+
+loopLet :: Int -> (Int, Int)
+loopLet n = census (letStep n (mkL 0) 0)
+
+twiceStep :: Int -> [Int] -> Int -> Int
+twiceStep k acc s
+  ? k == 0 = s + keyL acc
+  : (let ys = grow acc k in twiceStep (k - 1) ys (s + keyL ys))
+
+loopLetTwice :: Int -> (Int, Int)
+loopLetTwice n = census (twiceStep n (mkL 0) 0)
+
+aliasStep :: Int -> ([Int], Int) -> Int -> Int
+aliasStep k t s
+  ? k == 0 = s + keyL (.0 t)
+  : (let u = (grow (.0 t) k, k) in let ys = .0 u in aliasStep (k - 1) u (s + keyL ys))
+
+loopLetAlias :: Int -> (Int, Int)
+loopLetAlias n = census (aliasStep n (mkL 0, 0) 0)
 
 mapC :: Chain -> Chain
 mapC c = match c

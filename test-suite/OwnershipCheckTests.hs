@@ -25,13 +25,14 @@ slotCases =
   testGroup
     "carried slots a continue changes"
     [ testCase "a slot given itself is left alone" $
-        changedSlots [1, 2] (Just [rd 1, IntN fv 0]) "ab" @?= [(2, 'b')]
+        slots (changedSlots [1, 2] (Just [rd 1, IntN fv 0]) "ab") @?= [(2, 'b')]
     , testCase "a slot given another slot is changed" $
-        changedSlots [1, 2] (Just [rd 2, rd 1]) "ab" @?= [(1, 'a'), (2, 'b')]
+        slots (changedSlots [1, 2] (Just [rd 2, rd 1]) "ab") @?= [(1, 'a'), (2, 'b')]
     , testCase "without the IR every slot is changed" $
-        changedSlots [1, 2] Nothing "ab" @?= [(1, 'a'), (2, 'b')]
+        slots (changedSlots [1, 2] Nothing "ab") @?= [(1, 'a'), (2, 'b')]
     ]
   where
+    slots xs = [(i, v) | (i, v, _) <- xs]
     fv = FV (TV "a") (CV "a")
     rd i = LetVarN (VarF fv) i KeptRead
 

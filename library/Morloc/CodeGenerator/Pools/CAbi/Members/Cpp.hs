@@ -838,14 +838,19 @@ cppLetMode i rhs = do
 
 -- | A kept element (OWN-2); a scalar is copied.
 cppKeepElem :: NativeExpr -> MDoc -> CppTranslatorM MDoc
-cppKeepElem (LetVarN t i LastRead) x = do
-  moves <- CMS.gets translatorMoves
-  if Set.member i moves
-    then do
+cppKeepElem e x = fromMaybe x <$> cppKeptLet e x
+
+-- | The move of a kept let (OWN-2), when its lowered form is the let itself.
+cppKeptLet :: NativeExpr -> MDoc -> CppTranslatorM (Maybe MDoc)
+cppKeptLet (LetVarN t i LastRead) x
+  | render x == render (nvarNamer i) = do
+      moves <- CMS.gets translatorMoves
       typestr <- cppTypeOf t
-      return (if isScalarCppType typestr then x else "std::move(" <> x <> ")")
-    else return x
-cppKeepElem _ x = return x
+      return $
+        if Set.member i moves && not (isScalarCppType typestr)
+          then Just ("std::move(" <> x <> ")")
+          else Nothing
+cppKeptLet _ _ = return Nothing
 
 -- | Walk a lowered 'LoopBody' into C++ statement lines for the loop body.
 -- Guards -> if/else; native/serial lets -> locals; a base leaf ->
@@ -860,13 +865,19 @@ cppWalkLoopBody setResult ids = go
       return $ poolPriorLines seDocs <> [setResult (poolExpr seDocs), "break;"]
     -- A slot whose new value is itself is left alone: copying it into a temp
     -- and back would copy the whole value every iteration.
+    -- A let moved into its slot needs no temp, as no slot reassignment
+    -- changes it.
     go o (LoopContinue contDocs) = do
       let changed = changedSlots ids (case o of Just (LoopContinue os) -> Just os; _ -> Nothing) contDocs
-      tmpVars <- map helperNamer <$> mapM (const getCounter) changed
-      let priors = concatMap (poolPriorLines . snd) changed
-          tmpAssigns = zipWith (\tv (_, cd) -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars changed
-          reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") changed tmpVars
-      return $ priors <> tmpAssigns <> reassigns
+      moved <- mapM (\(_, cd, oe) -> maybe (return Nothing) (\e -> cppKeptLet e (poolExpr cd)) oe) changed
+      let viaTemp = [(i, cd) | ((i, cd, _), Nothing) <- zip changed moved]
+          direct = [(i, x) | ((i, _, _), Just x) <- zip changed moved]
+      tmpVars <- map helperNamer <$> mapM (const getCounter) viaTemp
+      let priors = concatMap (\(_, cd, _) -> poolPriorLines cd) changed
+          tmpAssigns = zipWith (\tv (_, cd) -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars viaTemp
+          reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") viaTemp tmpVars
+          moves = [nvarNamer i <+> "=" <+> x <> ";" | (i, x) <- direct]
+      return $ priors <> tmpAssigns <> reassigns <> moves
     go o (LoopNLet i neDocs b) = do
       let (orhs, ob) = case o of
             Just (LoopNLet j r k) | j == i -> (Just r, Just k)

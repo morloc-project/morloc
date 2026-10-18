@@ -38,9 +38,12 @@ records and user-mapped types copy deeply.
   taken from a value the frame owns needs the value used once and built by
   a constructor or `@try` (a sourced call's result is never taken), and a
   value matched twice is copied. C++ moves an owned local at its last read
-  into a constructor, tuple or record only; list literals, continue temps,
-  `std::bind` captures, conditional arms, a loop's exit and by-value source
-  arguments still copy one (`accL`: 2k+3 copies for k+1 values built). A C++ list literal
+  into a constructor, tuple, record, optional or loop continue only; a let
+  whose right-hand side ends in one, as when a call result is hoisted into
+  a typed local and then copied into the let (golden copy-census-cpp
+  loopLet and loopGrow: 1 copy per step), list literals, `std::bind` captures, conditional arms, a loop's
+  exit and by-value source arguments still copy one (`accL`: 2k+3 copies
+  for k+1 values built). A C++ list literal
   copies each element twice (an initializer list).
 - **OWN-2's one-step rule moves neither of a borrowing and a moving read.**
   [reproduced] `eat (acc + chainLen rest) (Link 0 rest)` in a Rust tail loop

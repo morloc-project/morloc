@@ -104,6 +104,12 @@
 [300,1]
 --- tupleStep ---
 [4,201]
+--- loopLet ---
+[5051,101]
+--- loopLetTwice ---
+[5051,201]
+--- loopLetAlias ---
+[5051,201]
 --- nonTail ---
 [5050,200]
 --- guardLoop ---
