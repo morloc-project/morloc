@@ -125,3 +125,31 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   the clauses cover every value; writing `(Cons x _)` for the second clause
   builds. The check is `checkRefutCoverage`
   (library/Morloc/Frontend/Desugar.hs); cause not traced.
+- **A class variable that only a constraint mentions.** [reproduced,
+  2026-10-18, 0.109.0] Violates POLY-6 and DIAG-2. In `f :: C a => Int ->
+  Str`, nothing at any call can fix `a`, but the signature is accepted and
+  `typecheck` passes every caller; what happens next depends on the body
+  and on how many instances are in scope:
+  - `class Gen a where gen :: Int -> [a]`, `render :: Gen a => Int -> Str;
+    render n = showList (gen n)`, `useIt n = render n`. With only `instance
+    Gen Int` in scope, `make` builds and `./prog useIt 5` prints `"[5]"`: the
+    sole instance is chosen though nothing chose it. Add `instance Gen Str`
+    and `make` fails "The type of this term is not determined: nothing in
+    the program fixes 'a'" at `gen n`. An instance added by an unrelated
+    import changes a working program into a rejected one.
+  - The same with a body that calls a library function: `ingest :: C a =>
+    Int -> Str -> Str -> <IO> (); ingest l i o = saveSource l o (readFormat
+    i)` fails at `@open` inside the library's `saveSource`, not at
+    `ingest`.
+  - Two-parameter class: `class Conv f a where conv :: f -> [a]`; `size ::
+    Conv f a => f -> Int; size x = length (conv x)` fails in typecheck with
+    "This definition needs Conv f (a) but its signature does not declare it
+    (the signature's constraints and their superclasses give Conv f a)",
+    which reads as a missing constraint the signature visibly has. The
+    message should say `a` is undetermined.
+  - `count :: Named a => Int -> Int; count n = n + 0` (no method used)
+    builds silently.
+  Gap: no item says when a constrained signature is ambiguous. Candidate:
+  a signature whose constraint names a variable that its type does not
+  mention (and that no other constraint ties to one it does) is rejected at
+  the signature, naming the variable.
