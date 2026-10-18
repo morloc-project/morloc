@@ -56,6 +56,9 @@ ownershipCheckTests =
     -- seen when it runs
     , testCase "spec-own-1-12" $
         bad (NativeLetN 3 (DoBlockN ty (rd 1)) (NativeLetN 10 (field 1) (tup [rd 10, rd 3])))
+    -- a reference to an element of a list is a reference into the list
+    , testCase "spec-own-1-13" $
+        bad (NativeLetN 11 (IntrinsicN ty IntrListElem Nothing [rd 1, IntN fv 0]) (NativeLetN 10 (field 1) (tup [rd 10, rd 11])))
     ]
   where
     ok e = checkNative mode True e @?= []

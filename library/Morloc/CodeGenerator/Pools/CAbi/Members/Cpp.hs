@@ -817,29 +817,51 @@ recordAccess record field = record <> "." <> field
 isSameLocal :: Int -> PoolDocs -> Bool
 isSameLocal i d = null (poolPriorLines d) && render (poolExpr d) == render (nvarNamer i)
 
-cppWalkLoopBody :: (MDoc -> MDoc) -> [Int] -> LoopBody PoolDocs PoolDocs PoolDocs -> CppTranslatorM [MDoc]
+-- | How let @i@ with right-hand side @rhs@ binds in C++: 'letMode', except
+-- that a scalar is always copied, as a reference to one saves nothing.
+cppLetMode :: Int -> NativeExpr -> CppTranslatorM LetMode
+cppLetMode i rhs = do
+  pp <- CMS.gets translatorPool
+  root <- CMS.gets translatorCurrentRoot
+  case letMode pp root i rhs of
+    LetCopy -> return LetCopy
+    mode -> do
+      typestr <- cppTypeOf (typeFof rhs)
+      return (if isScalarCppType typestr then LetCopy else mode)
+
+-- The IR body, when it is known, is walked beside the lowered one; a let
+-- whose IR node is not at the same place, with the same index, binds a copy.
+cppWalkLoopBody :: (MDoc -> MDoc) -> [Int] -> Maybe (LoopBody NativeExpr SerialExpr ()) -> LoopBody PoolDocs PoolDocs PoolDocs -> CppTranslatorM [MDoc]
 cppWalkLoopBody setResult ids = go
   where
-    go (LoopBase seDocs) =
+    go _ (LoopBase seDocs) =
       return $ poolPriorLines seDocs <> [setResult (poolExpr seDocs), "break;"]
     -- A slot whose new value is itself is left alone: copying it into a temp
     -- and back would copy the whole value every iteration.
-    go (LoopContinue contDocs) = do
+    go _ (LoopContinue contDocs) = do
       let changed = [(i, cd) | (i, cd) <- zip ids contDocs, not (isSameLocal i cd)]
       tmpVars <- map helperNamer <$> mapM (const getCounter) changed
       let priors = concatMap poolPriorLines contDocs
           tmpAssigns = zipWith (\tv (_, cd) -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars changed
           reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") changed tmpVars
       return $ priors <> tmpAssigns <> reassigns
-    go (LoopNLet i neDocs b) = do
-      rest <- go b
-      return $ poolPriorLines neDocs <> ["auto" <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"] <> rest
-    go (LoopSLet i seDocs b) = do
-      rest <- go b
+    go o (LoopNLet i neDocs b) = do
+      let (orhs, ob) = case o of
+            Just (LoopNLet j r k) | j == i -> (Just r, Just k)
+            _ -> (Nothing, Nothing)
+      mode <- maybe (return LetCopy) (cppLetMode i) orhs
+      let decl = if mode == LetBorrow then "const auto&" else "auto"
+      rest <- go ob b
+      return $ poolPriorLines neDocs <> [decl <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"] <> rest
+    go o (LoopSLet i seDocs b) = do
+      rest <- go (case o of Just (LoopSLet _ _ k) -> Just k; _ -> Nothing) b
       return $ poolPriorLines seDocs <> ["auto" <+> svarNamer i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
-    go (LoopIf guardDocs t e) = do
-      tLines <- go t
-      eLines <- go e
+    go o (LoopIf guardDocs t e) = do
+      let (ot, oe) = case o of
+            Just (LoopIf _ a b) -> (Just a, Just b)
+            _ -> (Nothing, Nothing)
+      tLines <- go ot t
+      eLines <- go oe e
       let ifBlock = vsep
             [ "if" <+> parens (poolExpr guardDocs) <+> "{"
             , indent 4 (vsep tLines)
@@ -1004,9 +1026,7 @@ PROPAGATE_ERROR(errmsg)|]
         typestr <- case mt of
           (Just t) -> cppTypeOf t
           Nothing -> return serialType
-        pp <- CMS.gets translatorPool
-        root <- CMS.gets translatorCurrentRoot
-        let binding = maybe LetCopy (letMode pp root letIndex) mrhs
+        binding <- maybe (return LetCopy) (cppLetMode letIndex) mrhs
         return $ makeLet namer letIndex typestr (isUnitTypeF mt) binding e1 e2
     , lcReleaseStmt = \v -> "_release_packet(" <> pretty v <> ", true);"
     , lcReleaseBorrowedStmt = \v -> "_release_packet(" <> pretty v <> ", false);"
@@ -1032,16 +1052,14 @@ PROPAGATE_ERROR(errmsg)|]
     -- A consumable projection takes its payload, as 'makeLet' does for a
     -- let outside a loop.
     , lcLoopLetRhs = \i orhs d -> do
-        pp <- CMS.gets translatorPool
-        root <- CMS.gets translatorCurrentRoot
-        typestr <- cppTypeOf (typeFof orhs)
+        mode <- cppLetMode i orhs
         return $
-          if letMode pp root i orhs == LetTake && not (isScalarCppType typestr)
+          if mode == LetTake
             then d {poolExpr = "std::move(" <> poolExpr d <> ")"}
             else d
     , lcLetRhs = \_ _ d -> return d
     , lcOwnPacketDecl = \v e -> Just ("mlc::Packet" <+> v <> "(" <> e <> ");", v <> ".get()")
-    , lcMakeLoop = \res carried body -> do
+    , lcMakeLoop = \res carried origBody body -> do
         -- Tail-loop. Walk the 'LoopBody' tree into C++ control flow. The
         -- loop-carried vars are native locals ('nvarNamer id'), non-const,
         -- reassigned in place: the manifold's deserialized parameters in a
@@ -1064,7 +1082,7 @@ PROPAGATE_ERROR(errmsg)|]
             return ( "std::optional<" <> tStr <> ">" <+> resultVar <> ";"
                    , \e -> resultVar <> ".emplace(" <> e <> ");"
                    , "std::move(*" <> resultVar <> ")" )
-        bodyLines <- cppWalkLoopBody setResult ids body
+        bodyLines <- cppWalkLoopBody setResult ids origBody body
         let whileDoc = vsep ["while (true) {", indent 4 (vsep bodyLines), "}"]
             leaves = loopBodyLeaves body <> [d | (_, Just d) <- carried]
         return $ PoolDocs

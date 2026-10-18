@@ -1005,9 +1005,10 @@ genericMakeLoop ::
   LowerConfig IndexM ->
   LoopResult ->
   [(Int, Maybe PoolDocs)] ->
+  Maybe (LoopBody NativeExpr SerialExpr ()) ->
   LoopBody PoolDocs PoolDocs PoolDocs ->
   IndexM PoolDocs
-genericMakeLoop desc cfg _ carried body = do
+genericMakeLoop desc cfg _ carried _ body = do
   resultIdx <- lcNewIndex cfg
   let resultVar = helperNamer resultIdx
       ids = map fst carried

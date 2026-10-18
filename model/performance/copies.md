@@ -25,12 +25,13 @@ included.
 Intent: proposed
 Bench: copies
 Model: net = s * q * u; Rust: a chain of n walked two links per step (s = n/2), q about n; C++: k walks of a 100-link chain, two links per step (s = 50k), q = 1
-Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: rs n=4000: t 0.236 s, net 0.202 s, per_step 4001, u 25.2 ns; cpp k=10000: t 0.822 s, net 0.779 s, per_step 1, u 1557 ns
+Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: rs n=4000: t 0.236 s, net 0.202 s, per_step 4001, u 25.2 ns; cpp k=10000: t 0.822 s, net 0.779 s, per_step 1, u 1557 ns; results/2026-10-18-0115-38da1c87+dirty-s3-cpp-places: rs n=4000: t 0.0435 s, per_step 0; cpp k=10000: t 0.0547 s, per_step 0
 
 Rust reads the inner field in place (OWN-6), so q = 0; the cited run
 predates that, when the field was copied under both the tag test and the
-projection and a walk was quadratic. In C++ each step binds the inner
-payload to a local by copy.
+projection and a walk was quadratic. C++ bound the inner payload to a
+local by copy each step until its loop lets read projections in place
+(OWN-6); both are now 0.
 
 ### COPY-2 A Rust loop stepped by `tl` copies the rest of its value
 Intent: proposed
@@ -46,7 +47,7 @@ nothing (golden `copy-census-cpp`, `tlLoopRead`), so it has no series here.
 Intent: proposed
 Bench: copies
 Model: net = s * q * u; k steps reading both elements of a carried two-element list (s = k); Rust: chains of n, q = 2n; C++: q = 2
-Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: rs k=1000 n=5000: t 0.297 s, net 0.261 s, per_step 10000, u 26.1 ns; cpp k=250000: t 0.363 s, net 0.327 s, per_step 2, u 654 ns
+Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: rs k=1000 n=5000: t 0.297 s, net 0.261 s, per_step 10000, u 26.1 ns; cpp k=250000: t 0.363 s, net 0.327 s, per_step 2, u 654 ns; results/2026-10-18-0115-38da1c87+dirty-s3-cpp-places: cpp k=250000: t 0.0468 s, per_step 0 (rs unchanged)
 
 ### COPY-4 A lambda copies the value it captures
 Intent: proposed
@@ -62,3 +63,14 @@ Measured: results/2026-10-17-1847-9f24abe4+dirty-copies-baseline: k=250000: t 0.
 
 The tuple is built from its own projection each step, which a move could
 hand over without copying.
+
+### COPY-6 A C++ loop step that reads a value and builds onto it copies the value
+Intent: proposed
+Bench: copies
+Model: net = s * q * u; a walk of a chain of n whose step past the second link reads the rest of the chain (`sumKeys 0 rest`) and builds `Link (mkL 0) rest` (s = n), q the payload copies per step
+Measured: results/2026-10-18-0115-38da1c87+dirty-s3-cpp-places: n=400: t 0.0682 s, net 0.0247 s, per_step 2
+
+The borrowing read and the keeping read of `rest` are in one step. Before
+C++ read fields in place, the walk inside the step copied each payload it
+read, so q grew with the rest of the chain and the walk was quadratic
+(golden `copy-census-cpp`, `mixedLoop`: 5149 copies at n=100, now 198).

@@ -125,6 +125,7 @@ projectionRoot env e = case e of
   LetVarN _ i _ -> Just (rootOf env i)
   BndVarN _ i _ -> Just (rootOf env i)
   IntrinsicN _ IntrCtorField _ (x : _) -> projectionRoot env x
+  IntrinsicN _ IntrListElem _ (x : _) -> projectionRoot env x
   AppExeN _ (PatCallP (PatternStruct _)) [NativeArgExpr x] -> projectionRoot env x
   _ -> Nothing
 

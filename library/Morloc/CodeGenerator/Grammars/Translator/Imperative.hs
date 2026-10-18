@@ -721,11 +721,12 @@ data LowerConfig m = LowerConfig
   -- ^ The language's own short-circuit operator applied to two expressions:
   -- @True@ for and, @False@ for or. A conditional with a Bool literal arm
   -- and an arm that needs no statements is written with it (BASE-3).
-  , lcMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> LoopBody PoolDocs PoolDocs PoolDocs -> m PoolDocs
+  , lcMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> Maybe (LoopBody NativeExpr SerialExpr ()) -> LoopBody PoolDocs PoolDocs PoolDocs -> m PoolDocs
   -- ^ Tail-loop assembly. Args: what a base leaf yields; each loop-carried
   -- native local id, with the value it starts from when the loop declares
-  -- it; and the loop body as a 'LoopBody' tree whose leaves are already
-  -- lowered to 'PoolDocs'. Emits @while(1){ <walk the tree: guards -> if/else,
+  -- it; the loop body as the IR gives it, base leaves dropped, when it is
+  -- known, so a member can decide how each let binds; and the body with its
+  -- leaves already lowered to 'PoolDocs'. Emits @while(1){ <walk the tree: guards -> if/else,
   -- lets -> assignments, LoopBase -> result = base; break, LoopContinue ->
   -- reassign the loop-locals via temps> }@. The result 'PoolDocs' carries the
   -- loop as prior lines with the return flag set (a base value is the
@@ -1082,9 +1083,9 @@ lowerSerialExpr cfg (ReturnS (BndVarS _ _)) (ReturnS_ x) =
 lowerSerialExpr _ _ (ReturnS_ x) = return $ x {poolReturnFlag = True}
 lowerSerialExpr cfg (LoopS _ _ origBody) (LoopS_ _ ids body) = do
   body' <- adaptLoopBodyOwned cfg (\_ d -> return d) ids origBody body
-  lcMakeLoop cfg LoopResultSerial [(i, Nothing) | i <- ids] body'
+  lcMakeLoop cfg LoopResultSerial [(i, Nothing) | i <- ids] (Just (trimap id id (const ()) origBody)) body'
 lowerSerialExpr cfg _ (LoopS_ _ ids body) =
-  lcMakeLoop cfg LoopResultSerial [(i, Nothing) | i <- ids] body
+  lcMakeLoop cfg LoopResultSerial [(i, Nothing) | i <- ids] Nothing body
 lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
   -- The let RHS is a SerializeS, so the bound variable owns a put_value
   -- tracker entry. Wrap the body to bind its result to a temp helper var,
@@ -2680,7 +2681,7 @@ lowerNativeExprRaw _ _ (IntrinsicN_ _ intr _ _) =
 lowerNativeExprRaw cfg (LoopN t origInits origBody) (LoopN_ _ starts body) = do
   starts' <- zipWithM (\(_, oe) (i, d) -> (,) i . Just <$> loopBorrowOr cfg i oe d (adaptOwnedElem cfg oe d)) origInits starts
   body' <- adaptLoopBodyOwned cfg (adaptOwnedElem cfg) (map fst origInits) origBody body
-  lcMakeLoop cfg (LoopResultNative t) starts' body'
+  lcMakeLoop cfg (LoopResultNative t) starts' (Just (trimap id id (const ()) origBody)) body'
 lowerNativeExprRaw _ _ (LoopN_ {}) =
   error "morloc bug: a native loop lowered without its original expression"
 lowerNativeExprRaw cfg origExpr (MapOptionalN_ _ wireTf src innerDocs) = do

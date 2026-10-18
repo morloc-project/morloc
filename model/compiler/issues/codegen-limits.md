@@ -34,3 +34,14 @@ Generated code that a language's own tools refuse.
   is emitted once per site: a Rust pool held 19 identical loop bodies for
   `count`, a C++ pool about 9 for `build`. Code size and build time only.
   Spec gap: no item says when two specializations are one function.
+- [speculative, 2026-10-18] Two hazards in the C++ tail-loop walk, read
+  but not reproduced:
+  - Its temporaries and copied lets are declared `auto`, so an element
+    of a `std::vector<bool>` would be a proxy into the vector, which a
+    later reassignment of a carried slot could free before the proxy is
+    read. A `match` on a carried list first copies it into a local of the
+    iteration (`auto n5 = n12`), so the swapping loop `go k [a, b] acc =
+    go (k - 1) [b, a] a` reads correctly under ASan.
+  - A loop let bound to a void C++ call would become `auto n = f();`. A
+    unit-valued let in a loop body lowers through the ordinary let path
+    (`f(n); mlc::Unit n17{};`) in the shape tried.

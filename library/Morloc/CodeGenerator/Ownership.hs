@@ -26,6 +26,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( RNode (RNM, RSM)
   , consumableProjectionLets
   , consumedParams
+  , borrowableRoot
   , isBorrowableProjection
   , loopBorrowLocals
   , nativeManifoldsUnder
@@ -82,12 +83,21 @@ data LetMode = LetCopy | LetBorrow | LetTake
   deriving (Eq, Show)
 
 -- | The mode of let @i@ in top-level manifold @root@ with right-hand side
--- @rhs@.
+-- @rhs@ (OWN-5, OWN-6). A take is a payload projection the pool plan
+-- takes; a borrow is any projection of a variable, through fields and list
+-- elements.
 letMode :: PoolPlan -> Int -> Int -> NativeExpr -> LetMode
 letMode pp root i rhs
-  | not (isBorrowableProjection rhs) = LetCopy
-  | Set.member (root, i) (ppTakes pp) = LetTake
-  | otherwise = LetBorrow
+  | isBorrowableProjection rhs && Set.member (root, i) (ppTakes pp) = LetTake
+  | isPlace rhs = LetBorrow
+  | otherwise = LetCopy
+  where
+    isPlace e = case e of
+      IntrinsicN _ IntrListElem _ (s : _) -> borrowableRoot s || isPlace s
+      IntrinsicN _ IntrCtorField _ (s : _) -> borrowableRoot s || isPlace s
+      AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr s] ->
+        not (selectorHasBracket sel) && length (ungroup sel) == 1 && (borrowableRoot s || isPlace s)
+      _ -> False
 
 -- | The decisions within one manifold's body.
 data ManifoldPlan = ManifoldPlan

@@ -1,6 +1,6 @@
 -- Copy-heavy C++ shapes timed by bench.py; each prints its result and the
 -- payload copies made. The shapes are those of golden copy-census-cpp.
-module main (nestedLoop, tupleStep, listLoop, closure)
+module main (nestedLoop, tupleStep, listLoop, closure, mixedLoop)
 
 import root
 import root-cpp
@@ -59,3 +59,17 @@ clLoop k ys acc
 --' k steps each calling a lambda that captures a carried list
 closure :: Int -> (Int, Int)
 closure k = census (clLoop k (mkL 3) 0)
+
+sumKeys :: Int -> Chain -> Int
+sumKeys acc c = match c
+  | End = acc
+  | (Link ys rest) = sumKeys (acc + keyL ys) rest
+
+eat :: Int -> Chain -> Int
+eat acc c = match c
+  | (Link ys rest) ? keyL ys > 2 = eat (acc + sumKeys 0 rest) (Link (mkL 0) rest) : eat (acc + keyL ys) rest
+  | End = acc
+
+--' A walk whose every step both reads the rest of the chain and builds onto it
+mixedLoop :: Int -> (Int, Int)
+mixedLoop n = census (eat 0 (build n End))

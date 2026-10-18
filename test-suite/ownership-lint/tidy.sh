@@ -9,6 +9,9 @@
 # no C++ pool. Warnings inside headers are left out. Needs clang-tidy on PATH
 # (or CLANG_TIDY set) and g++ for the standard headers. MORLOC_PREFIX and
 # MORLOC_STATE name the install (default /opt/morloc and /opt/morloc-state).
+# A pool whose test builds in a directory its clean removes, and includes a
+# header from there by absolute path (paths-with-spaces), cannot be parsed
+# from the snapshot and is reported as an error.
 set -euo pipefail
 snap=${1:?usage: tidy.sh SNAPDIR [JOBS]}
 snap=${snap%/}
@@ -25,21 +28,17 @@ gccinc=$(echo | g++ -std=c++20 -xc++ -E -v - 2>&1 \
   | grep '^ ' | sed 's/^ /-isystem/' | tr '\n' ' ')
 export snap golden tidy prefix state gccinc
 one() {
-  f=$1
+  local f=$1 t out status=0
   t=${f#"$snap"/}; t=${t%%/*}
   # $gccinc is a list of flags, split on purpose.
   # shellcheck disable=SC2086
-  if out=$("$tidy" --quiet \
+  out=$("$tidy" --quiet \
       --checks='-*,bugprone-use-after-move,bugprone-dangling-handle,clang-analyzer-cplusplus.Move' \
       "$f" -- -std=c++20 -nostdinc++ $gccinc -include morloc_pch.hpp \
       -I"$prefix/include" -I"$state/modules/include" \
       -I"$state/modules/include/tensor-cpp" -I"$(dirname "$f")" \
       -iquote "$golden/$t" -idirafter "$golden/$t" \
-      -iquote "$state/src/morloc/plane/default/root-cpp" 2>&1); then
-    status=0
-  else
-    status=$?
-  fi
+      -iquote "$state/src/morloc/plane/default/root-cpp" 2>&1) || status=$?
   echo "$out" | grep -E "^$f:[0-9]+:[0-9]+: warning:|error:" | sed "s|^|$t: |" || true
   # clang-tidy exits 1 for errors it printed; anything else is a failure of
   # its own.

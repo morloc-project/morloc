@@ -2646,8 +2646,8 @@ rustMakeLet namer letIndex mt mrhs p1 p2 = do
 -- value followed by reassignment of the loop-carried locals. Every temp is
 -- computed before any reassignment; which reads move is OWN-2's, and which
 -- locals are borrows is OWN-6's.
-rustMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> LoopBody PoolDocs PoolDocs PoolDocs -> RustM PoolDocs
-rustMakeLoop res carried body = do
+rustMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> Maybe (LoopBody NativeExpr SerialExpr ()) -> LoopBody PoolDocs PoolDocs PoolDocs -> RustM PoolDocs
+rustMakeLoop res carried _ body = do
   resultIdx <- getCounter
   resT <- case res of
     LoopResultSerial -> return "*mut u8"
