@@ -68,18 +68,25 @@ planPool :: OwnCaps -> [SerialManifold] -> PoolPlan
 planPool caps sms =
   PoolPlan
     { ppTakes = consumableProjectionLets (ocTagAfterTake caps) sms
-    , ppByValue =
-        Map.filter (not . Set.null) . Map.fromListWith Set.intersection $
-          [ (m, positions)
-          | nm@(NativeManifold m _ form@(ManifoldFull _) _) <- concatMap (nativeManifoldsUnder . RSM) sms
-          , not (Set.member m asValues)
-          , let args = typeMofForm form
-                cands = Set.fromList [i | Arg i (Native tf) <- args, not (ocCheap caps tf)]
-                kept = consumedParams (ocListKeeps caps) (not . ocCheap caps) cands nm
-                positions = Set.fromList [j | (j, Arg i _) <- zip [0 ..] args, Set.member i kept]
-          ]
+    , ppByValue = settle Map.empty
     }
   where
+    -- A parameter passed on to a by-value parameter is kept too, so the
+    -- positions grow from the callees up until nothing changes (OWN-7).
+    settle known =
+      let next = byValueGiven known
+       in if next == known then known else settle next
+    byValueGiven known =
+      Map.filter (not . Set.null) . Map.fromListWith Set.intersection $
+        [ (m, positions)
+        | nm@(NativeManifold m _ form@(ManifoldFull _) _) <- natives
+        , not (Set.member m asValues)
+        , let args = typeMofForm form
+              cands = Set.fromList [i | Arg i (Native tf) <- args, not (ocCheap caps tf)]
+              kept = consumedParams (ocListKeeps caps) (\c -> Map.findWithDefault Set.empty c known) (not . ocCheap caps) cands nm
+              positions = Set.fromList [j | (j, Arg i _) <- zip [0 ..] args, Set.member i kept]
+        ]
+    natives = concatMap (nativeManifoldsUnder . RSM) sms
     -- A manifold also used as a function value is called with what its
     -- caller holds, and one occurring more than once takes by value only
     -- what every occurrence does (OWN-7).

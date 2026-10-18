@@ -49,7 +49,7 @@ locals, is also a read of that value.
 
 ### OWN-3 A read that may run more than once never moves
 Intent: ruled 2026-10-18
-Tests: spec-own-3-1, spec-own-3-2, spec-own-3-3
+Tests: spec-own-3-1, spec-own-3-2, spec-own-3-3, spec-own-3-4
 Code: conforms 2026-10-18
 
 A read inside a lambda, a nested loop, a separate manifold or a `do` block
@@ -109,7 +109,7 @@ replaces with a value it builds is owned, and starts from a copy.
 ### OWN-7 A function that keeps an argument takes it from its caller
 Intent: ruled 2026-10-18
 Tests: spec-own-7-1, spec-own-7-2
-Code: deviates compiler/issues/codegen-copies.md (C++ calls through a nested manifold)
+Code: conforms 2026-10-18
 
 A fully applied manifold takes a parameter by value instead of by
 reference when its body reads that parameter once, on every evaluation, and

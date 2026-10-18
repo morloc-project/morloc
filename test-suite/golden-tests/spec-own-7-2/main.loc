@@ -6,8 +6,9 @@
 -- it was given and replaces it each step takes it; a caller that reads the
 -- list after the call copies it once, at the call; a function also used as
 -- a function value takes its arguments by reference, and still gives the
--- right values.
-module main (handed, readAfter, asValue)
+-- right values; and a function that only passes the list on to one that
+-- takes it by value takes it by value too.
+module main (handed, readAfter, asValue, composed, partPassed)
 
 import root
 import root-cpp
@@ -34,3 +35,14 @@ readAfter n = census (let ys = mkL n in let z = keyL (accL 3 ys) in z + keyL ys)
 --' The loop also applied as a function value
 asValue :: Int -> (Int, Int)
 asValue n = census (sum (map keyL (map (accL 1) [mkL n, mkL (n + 1)])))
+
+passOn :: [Int] -> [Int]
+passOn ys = accL 3 ys
+
+--' A list handed through a function that passes it on to the loop
+composed :: Int -> (Int, Int)
+composed n = census (keyL (passOn (mkL n)))
+
+--' A part of a pair handed through the same function, the pair read after
+partPassed :: Int -> (Int, Int)
+partPassed n = census (let p = (mkL n, mkL (n + 1)) in let a = .1 p in let b = keyL (passOn a) in b + keyL (.0 p))

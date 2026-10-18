@@ -61,17 +61,17 @@
 --- tlLoopInline ---
 [3,0]
 --- closureRead ---
-[306,1]
+[306,0]
 --- closureFn ---
-[200,1]
+[200,0]
 --- closureRef ---
-[200,1]
+[200,0]
 --- closureDo ---
 [200,0]
 --- papRead ---
-[306,2]
+[306,1]
 --- papHof ---
-[203,1]
+[203,0]
 --- letOnce ---
 [100,0]
 --- letKeep ---

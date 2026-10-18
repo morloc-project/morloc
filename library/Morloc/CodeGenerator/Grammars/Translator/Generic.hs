@@ -545,6 +545,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
                       <> tupled [pretty k <+> "=" <+> v | (k, v) <- rs]
                 }
         , lcTakeSetter = \_ _ _ _ -> return Nothing
+        , lcKeepContextArg = \_ _ _ _ v -> return v
         , lcKeepCallArg = \_ _ _ v -> return v
         , lcKeepSlot = \_ _ v -> return v
         , lcKeepElem = \_ v -> return v

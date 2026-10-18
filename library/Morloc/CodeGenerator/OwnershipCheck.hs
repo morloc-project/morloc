@@ -75,18 +75,20 @@ data Env = Env
   -- ^ the locals that are references, to what they refer into
   , envByValue :: Int -> Set.Set Int
   -- ^ the argument positions a native manifold takes by value (OWN-7)
+  , envMovedBuilds :: Set.Set (Int, Int)
+  -- ^ the (manifold, local) pairs moved into a manifold as it is built
   }
 
 -- | The violations in a top-level manifold's tree, where the lets and
 -- parameters in @moves@ are moved at a last read in a keeping position, and
 -- native manifold @m@ takes the arguments at @byValue m@ by value.
-checkManifold :: (Int -> NativeExpr -> LetMode) -> Bool -> Set.Set Int -> (Int -> Set.Set Int) -> SerialManifold -> [Text]
-checkManifold mode tagOk moves byValue (SerialManifold m _ _ _ e) =
-  map (\v -> "manifold " <> num m <> ": " <> v) (rViol (walkS (Env mode tagOk Map.empty moves Map.empty byValue) start e))
+checkManifold :: (Int -> NativeExpr -> LetMode) -> Bool -> Set.Set Int -> (Int -> Set.Set Int) -> Set.Set (Int, Int) -> SerialManifold -> [Text]
+checkManifold mode tagOk moves byValue built (SerialManifold m _ _ _ e) =
+  map (\v -> "manifold " <> num m <> ": " <> v) (rViol (walkS (Env mode tagOk Map.empty moves Map.empty byValue built) start e))
 
 -- | The violations in a native expression evaluated from scratch.
 checkNative :: (Int -> NativeExpr -> LetMode) -> Bool -> Set.Set Int -> NativeExpr -> [Text]
-checkNative mode tagOk moves e = rViol (walkN (Env mode tagOk Map.empty moves Map.empty (const Set.empty)) start e)
+checkNative mode tagOk moves e = rViol (walkN (Env mode tagOk Map.empty moves Map.empty (const Set.empty) Set.empty) start e)
 
 start :: St
 start = St Set.empty Set.empty Set.empty Set.empty
@@ -342,10 +344,17 @@ serialFrame env s (SerialManifold m _ form _ body) =
 -- that may run later, so it captures what it reads.
 frame :: Env -> St -> Int -> ManifoldForm a b -> [Text] -> Eval
 frame env s m form inner =
-  let ctx = step s [\s' -> readVar env s' i | Arg i _ <- manifoldContext form]
+  let ctx = step s [arg i | Arg i _ <- manifoldContext form]
+      -- a local moved into the manifold as it is built (OWN-3, OWN-7)
+      arg i s'
+        | Set.member (m, i) (envMovedBuilds env) =
+            let r = readVar env s' i
+                held = ["n" <> num i <> " is moved while a do block bound by a let holds it" | Set.member i (stHeld s')]
+             in r {rSt = (rSt r) {stMoved = Set.insert i (stMoved (rSt r))}, rMoves = Set.insert i (rMoves r), rViol = held <> rViol r}
+        | otherwise = readVar env s' i
       later = case form of
         ManifoldFull _ -> Set.empty
-        _ -> rReads ctx
+        _ -> rReads ctx `Set.difference` rMoves ctx
       st = rSt ctx
    in ctx
         { rSt = st {stCaptured = stCaptured st <> later}

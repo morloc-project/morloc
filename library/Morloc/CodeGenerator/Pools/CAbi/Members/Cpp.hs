@@ -44,6 +44,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , buildProgramM
   , defaultFoldRules
   , markLastReadsSeeded
+  , lastBuilds
   , namedIn
   , nativeManifoldsUnder
   , aliasChain
@@ -439,9 +440,16 @@ data CppTranslatorState = CppTranslatorState
   -- ^ The owned lets of the segment being lowered (OWN-2).
   , translatorParamMoves :: Set.Set Int
   -- ^ The parameters the segment's native manifolds take by value (OWN-7).
-  , translatorLowered :: [(SerialManifold, [(Int, NativeExpr, LetMode)], Set.Set Int)]
-  -- ^ Each segment as lowered, last reads marked, with its let modes and the
-  -- lets a last read moves.
+  , translatorLets :: Set.Set Int
+  -- ^ Every let index of the segment being lowered.
+  , translatorBuilds :: Set.Set (Int, Int)
+  -- ^ The (manifold, local) pairs whose building is the local's last read.
+  , translatorMovedBuilds :: Set.Set (Int, Int)
+  -- ^ The pairs among them the segment's code moves.
+  , translatorLowered :: [(SerialManifold, [(Int, NativeExpr, LetMode)], Set.Set Int, Set.Set (Int, Int))]
+  -- ^ Each segment as lowered, last reads marked, with its let modes, the
+  -- lets and parameters a last read moves, and the (manifold, local) pairs
+  -- its code moves into a manifold as it is built.
   , translatorErrors :: [Text]
   }
 
@@ -465,6 +473,9 @@ instance Defaultable CppTranslatorState where
       , translatorCurrentRoot = 0
       , translatorMoves = Set.empty
       , translatorParamMoves = Set.empty
+      , translatorLets = Set.empty
+      , translatorBuilds = Set.empty
+      , translatorMovedBuilds = Set.empty
       , translatorLowered = []
       , translatorErrors = []
       }
@@ -826,8 +837,8 @@ recordAccess record field = record <> "." <> field
 
 -- | The ownership check (OWN-1) of one marked top-level manifold, given how
 -- the pool binds each of its lets.
-checkOne :: PoolPlan -> (SerialManifold, [(Int, NativeExpr, LetMode)], Set.Set Int) -> [Text]
-checkOne pp (sm, modes, moves) = checkManifold mode (ocTagAfterTake cppCaps) moves (\m -> Map.findWithDefault Set.empty m (ppByValue pp)) sm
+checkOne :: PoolPlan -> (SerialManifold, [(Int, NativeExpr, LetMode)], Set.Set Int, Set.Set (Int, Int)) -> [Text]
+checkOne pp (sm, modes, moves, moved) = checkManifold mode (ocTagAfterTake cppCaps) moves (\m -> Map.findWithDefault Set.empty m (ppByValue pp)) moved sm
   where
     byIndex = Map.fromListWith (\_ old -> old) [(i, m) | (i, _, m) <- modes]
     mode i _ = Map.findWithDefault LetCopy i byIndex
@@ -895,6 +906,33 @@ cppKeepCallArg m j e x = do
   pp <- CMS.gets translatorPool
   if Set.member j (Map.findWithDefault Set.empty m (ppByValue pp)) then cppKeepElem e x else return x
 
+-- | Whether building manifold @m@ moves local @i@ of type @t@ into it: the
+-- building is its last read and it is an owned let or by-value parameter
+-- worth moving (OWN-3). A move is recorded for the ownership check.
+cppMovesInto :: Int -> Int -> TypeF -> CppTranslatorM Bool
+cppMovesInto m i t = do
+  st <- CMS.get
+  let owned
+        | Set.member i (translatorLets st) = Set.member i (translatorMoves st)
+        | otherwise = Set.member i (translatorParamMoves st)
+  if Set.member (m, i) (translatorBuilds st) && owned
+    then do
+      cheap <- cppNoMove t
+      unless cheap $ CMS.modify (\s -> s {translatorMovedBuilds = Set.insert (m, i) (translatorMovedBuilds s)})
+      return (not cheap)
+    else return False
+
+-- | Context argument @j@, local @i@, of a fully applied call of manifold @m@:
+-- moved into a parameter it takes by value (OWN-7).
+cppKeepContextArg :: Int -> Int -> Int -> TypeF -> MDoc -> CppTranslatorM MDoc
+cppKeepContextArg m j i t x = do
+  pp <- CMS.gets translatorPool
+  if Set.member j (Map.findWithDefault Set.empty m (ppByValue pp)) && not (isFunctionValue t) && render x == render (nvarNamer i)
+    then do
+      moves <- cppMovesInto m i t
+      return (if moves then "std::move(" <> x <> ")" else x)
+    else return x
+
 -- | The parameter at position @j@ of manifold @m@: one it takes by value is
 -- declared as a value (OWN-7).
 cppParamOf :: Int -> Int -> Arg TypeM -> CppTranslator MDoc
@@ -906,6 +944,21 @@ cppParamOf m j r@(Arg _ t) = do
       , not (isFunctionValue tf) -> not <$> cppNoMove tf
     _ -> return False
   cppArgOf (if byValue then Copy else chooseCallSemantics t) r
+
+-- | A segment with the reads of the parameters manifold @m@ takes by value
+-- (@seeds m@) written as reads of a parameter: such a parameter shares its
+-- index with what its caller passes, which may be one of the caller's lets.
+paramReads :: (Int -> [Int]) -> SerialManifold -> SerialManifold
+paramReads seeds = mmap (defaultValue {mapNativeManifold = onNM})
+  where
+    onNM (NativeManifold m l f e) = case seeds m of
+      [] -> NativeManifold m l f e
+      ps -> NativeManifold m l f (asParams (Set.fromList ps) e)
+    asParams ps = mgatedMap gate (defaultValue {mapNativeExpr = rd})
+      where
+        rd (LetVarN t i r) | Set.member i ps = BndVarN t i r
+        rd x = x
+    gate = defaultValue {gateNativeManifold = const False, gateSerialManifold = const False}
 
 -- | The carried locals of every loop under a node.
 loopSlots :: RNode -> Set.Set Int
@@ -1091,6 +1144,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
                 _ -> v
         return $ defaultValue {poolExpr = t <> encloseSep "{" "}" "," (map wrapField rs)}
     , lcKeepCallArg = cppKeepCallArg
+    , lcKeepContextArg = cppKeepContextArg
     , lcKeepSlot = cppKeepSlot
     , lcKeepElem = cppKeepElem
     , lcStoreField = \_ v -> return v
@@ -1471,7 +1525,7 @@ PROPAGATE_ERROR(errmsg)|]
           -- name minus its leading "m".
           midDoc = pretty (MT.drop 1 (render mname))
           stage = stageOf mname
-       in return $ case (Map.lookup (render mname) reifyThunks, stage) of
+       in case (Map.lookup (render mname) reifyThunks, stage) of
             -- A staged closure: applied to the arguments before its stage
             -- point, it runs its stage entry (bound to the same captured
             -- values) once and becomes the closure the stage returns.
@@ -1479,7 +1533,7 @@ PROPAGATE_ERROR(errmsg)|]
               | nctx == length contextArgs ->
                   let (reifier, schemas) = fromMaybe ("mlc_unreifiable", "std::vector<Schema*>{}") thunk
                       stageArgs = cat (punctuate "," (manNamer smid : (ctxNames ++ take k vs')))
-                   in [idoc|mlc_staged_sig<#{pretty k}, #{sig}>::make(std::bind(#{bindArgs}), #{midDoc}, #{reifier}, "cpp", #{schemas}, std::bind(#{stageArgs}))|]
+                   in return [idoc|mlc_staged_sig<#{pretty k}, #{sig}>::make(std::bind(#{bindArgs}), #{midDoc}, #{reifier}, "cpp", #{schemas}, std::bind(#{stageArgs}))|]
               | otherwise ->
                   error $ "C++: staged closure " <> show (render midDoc) <> " captures " <> show (length contextArgs)
                     <> " values but its stage entry takes " <> show nctx
@@ -1490,12 +1544,20 @@ PROPAGATE_ERROR(errmsg)|]
             -- this has the same C++ type as the thin form below.)
             (Just (reifyThunk, schemas), Nothing)
               | Set.member (render sig) papplyHeads ->
-                  [idoc|mlc_pap_sig<#{sig}>::make(std::bind(#{bindArgs}), #{midDoc}, #{reifyThunk}, "cpp", #{schemas})|]
+                  return [idoc|mlc_pap_sig<#{sig}>::make(std::bind(#{bindArgs}), #{midDoc}, #{reifyThunk}, "cpp", #{schemas})|]
               | otherwise ->
-                  [idoc|MorlocClosure<#{sig}>{ std::bind(#{bindArgs}), #{midDoc}, #{reifyThunk} }|]
-            -- A closure that never crosses: a plain std::bind.
-            (Nothing, Nothing) ->
-              [idoc|std::bind(#{bindArgs})|]
+                  return [idoc|MorlocClosure<#{sig}>{ std::bind(#{bindArgs}), #{midDoc}, #{reifyThunk} }|]
+            -- A closure that never crosses: a plain std::bind (OWN-3). The
+            -- other forms name their captures twice.
+            (Nothing, Nothing) -> do
+              ctxDocs <- mapM capture contextArgs
+              return [idoc|std::bind(#{cat (punctuate "," (mname : (ctxDocs ++ vs')))})|]
+      where
+        capture a@(Arg i (Native tf))
+          | Just m <- readMay (T.unpack (MT.drop 1 (render mname))), not (isFunctionValue tf) = do
+              moves <- cppMovesInto m i tf
+              return (if moves then "std::move(" <> argNamer a <> ")" else argNamer a)
+        capture a = return (argNamer a)
 
     -- For serialization, records become tuples (that's what _put_value/to_voidstar expects)
     -- Serialize/raw-deserialize types use the WIRE form: a closure nested in an
@@ -2025,10 +2087,14 @@ translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
       byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | NativeManifold m _ form@(ManifoldFull _) _ <- nativeManifoldsUnder (RSM m0)]
       params = Set.unions (Map.elems byValue) `Set.difference` loopSlots (RSM m0)
       seeds m = Set.toList (Map.findWithDefault Set.empty m byValue `Set.intersection` params)
-      m1 = markLastReadsSeeded (lpAliases plan) held seeds m0
+      m0' = paramReads seeds m0
+      m1 = markLastReadsSeeded (lpAliases plan) held seeds m0'
+      builds = lastBuilds (lpAliases plan) held seeds [m0']
   let moves = lpOwned plan
-  CMS.modify (\st -> st {translatorMoves = moves, translatorParamMoves = params, translatorLowered = (m1, modes, moves <> params) : translatorLowered st})
+  CMS.modify (\st -> st {translatorMoves = moves, translatorParamMoves = params, translatorLets = Set.fromList [i | (i, _, _) <- modes], translatorBuilds = builds, translatorMovedBuilds = Set.empty})
   e <- foldWithSerialManifoldM (defaultFoldRules (cppLowerConfig closureGen)) m1
+  moved <- CMS.gets translatorMovedBuilds
+  CMS.modify (\st -> st {translatorLowered = (m1, modes, moves <> params, moved) : translatorLowered st})
   return $ renderPoolDocs e
 
 -- | The locals named in the arguments of a call to a C++ source whose result

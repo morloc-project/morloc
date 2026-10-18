@@ -49,17 +49,18 @@ records and user-mapped types copy deeply.
   [reproduced] `eat (acc + chainLen rest) (Link 0 rest)` in a Rust tail loop
   copies `rest` each step (quadratic), though the borrowing read is
   evaluated into a temporary before the move.
-- **OWN-7 does not compose through a call.** [reproduced] A parameter passed
-  on to a callee that takes it by value is not itself taken by value
-  (`effL x = build 1 x`: 1000 clones), and a context argument of a nested
-  manifold is never taken by value (`let a = chainLen c in a + count 0
-  (prepend 0 c)`). C++ has no by-value parameter at all: a loop copies every
-  carried parameter at entry, changed or not.
-- **Captures copy a dead owned value.** [reproduced] Rust closure captures
-  and partial applications clone a by-reference type even at its last use;
-  C++ `std::bind` and `[=]` captures copy likewise. A setter on a
-  loop-carried record copies every unchanged field each iteration, as the
-  carried local is not among the lets a setter may take.
+- **A C++ loop copies a carried value no step changes.** [reproduced] A
+  loop slot every continue passes on unchanged is a borrow in Rust (OWN-6)
+  but a copy of its start in C++ (golden copy-census-cpp throughLoop,
+  loopCarried). Binding it by const reference was tried and dropped: it
+  blocks the move of the slot into the loop's result, and a C++ source that
+  takes a non-const `T&` (rule S, unruled) would stop compiling.
+- **Some captures copy a dead owned value.** [reproduced] A C++ closure that
+  may cross a pool (a `MorlocClosure`, pap or staged form) copies its
+  captures, since its reify thunk or stage call names them again, and a
+  `[=]` do-block thunk copies. A setter on a loop-carried record copies
+  every unchanged field each iteration, as the carried local is not among
+  the lets a setter may take.
 - **Closure and wire paths copy what they only serialize.** [read] Rust:
   staged closures re-clone every earlier argument at each level (about n^2
   argument clones for an n-ary function); a reflected closure's origin,
@@ -82,11 +83,3 @@ records and user-mapped types copy deeply.
 - **Rust staged closures clone what the stage call only borrows.** [read]
   At the level that calls the stage, every earlier argument and the capture
   tuple are cloned though the call borrows them (`stagedDoc`, Rust.hs).
-- **C++ calls through a nested manifold copy a by-value argument.** [read]
-  C++ takes OWN-7 parameters by value and moves an owned let into one at a
-  call of a native entry, but a fully applied nested manifold reads its
-  arguments as context arguments, which last-read marking has no read node
-  for, so the caller passes an lvalue and the parameter is copied at the
-  call (OWN-7 `given`: a chain read from the command line is copied). The
-  copy costs what the callee's copy did before.
-

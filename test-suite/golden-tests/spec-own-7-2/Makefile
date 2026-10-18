@@ -4,6 +4,8 @@ all:
 	./nexus handed 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	./nexus readAfter 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 	./nexus asValue 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	./nexus composed 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
+	./nexus partPassed 100 >> obs.txt 2>> obs.err || echo "failed" >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__ *.err

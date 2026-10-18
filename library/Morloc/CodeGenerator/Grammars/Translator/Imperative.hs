@@ -63,6 +63,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , markLastReads
   , markLastReadsWith
   , markLastReadsSeeded
+  , lastBuilds
   , markLastReadsInBody
   , markLastReadsInNative
   , namedIn
@@ -637,6 +638,9 @@ data LowerConfig m = LowerConfig
   -- is not yet plumbed through Express -> Mono -> TupleN's FVar).
   , lcRecordConstructor :: TypeF -> NamType -> FVar -> [TypeF] -> [(Key, MDoc)] -> m PoolDocs
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
+  , lcKeepContextArg :: Int -> Int -> Int -> TypeF -> MDoc -> m MDoc
+  -- ^ Adapt context argument @j@, local @i@ of the given type, of a fully
+  -- applied call of native manifold @m@ (OWN-3, OWN-7).
   , lcKeepCallArg :: Int -> Int -> NativeExpr -> MDoc -> m MDoc
   -- ^ Adapt argument @j@ of a call of native manifold @m@, given its
   -- original (OWN-7).
@@ -1408,15 +1412,53 @@ markLastReadsSeeded :: (MFunctor a) => Map.Map Int Int -> Set.Set Int -> (Int ->
 markLastReadsSeeded aliases held params =
   mmap (defaultValue {mapSerialExpr = onS, mapNativeExpr = onN, mapSerialManifold = onSM, mapNativeManifold = onNM})
   where
-    env n = let e = markEnv aliases n in e {meHeld = meHeld e <> held}
-    onS (LoopS t ids b) = LoopS t ids (markLoopBody (env (RLS b)) RS lastReadIn ids b)
+    mk = markers aliases held params
+    onS e@(LoopS t ids b) = maybe e (LoopS t ids . fst) (mkLoopS mk ids b)
     onS e = e
-    onN (LoopN t starts b) = LoopN t starts (markLoopBody (env (RLN b)) RN lastReadIn (map fst starts) b)
+    onN e@(LoopN t starts b) = maybe e (LoopN t starts . fst) (mkLoopN mk (map fst starts) b)
     onN e = e
-    onSM (SerialManifold m l f h e) = SerialManifold m l f h (fst (markSpineS (env (RS e)) [] e))
-    onNM (NativeManifold m l f e) =
-      let en = env (RN e)
-       in NativeManifold m l f (fst (markSpineN en (filter (`Set.notMember` meHeld en) (params m)) [] e))
+    onSM (SerialManifold m l f h e) = SerialManifold m l f h (fst (mkSerial mk e))
+    onNM (NativeManifold m l f e) = NativeManifold m l f (fst (mkNative mk m e))
+
+-- | How one body is marked, for 'markLastReadsSeeded' and 'lastBuilds' alike.
+data Markers = Markers
+  { mkNative :: Int -> NativeExpr -> (NativeExpr, [(Int, Int)])
+  , mkSerial :: SerialExpr -> (SerialExpr, [(Int, Int)])
+  , mkLoopN :: [Int] -> LoopBody NativeExpr SerialExpr NativeExpr -> Maybe (LoopBody NativeExpr SerialExpr NativeExpr, [(Int, Int)])
+  , mkLoopS :: [Int] -> LoopBody NativeExpr SerialExpr SerialExpr -> Maybe (LoopBody NativeExpr SerialExpr SerialExpr, [(Int, Int)])
+  }
+
+markers :: Map.Map Int Int -> Set.Set Int -> (Int -> [Int]) -> Markers
+markers aliases held params =
+  Markers
+    { mkNative = \m e ->
+        let en = env (RN e)
+            (e', (_, caps)) = markSpineN en (filter (`Set.notMember` meHeld en) (params m)) [] e
+         in (e', caps)
+    , mkSerial = \e -> let (e', (_, caps)) = markSpineS (env (RS e)) [] e in (e', caps)
+    , mkLoopN = \ids b -> Just (markLoopBody (env (RLN b)) RN ids b)
+    , mkLoopS = \ids b -> Just (markLoopBody (env (RLS b)) RS ids b)
+    }
+  where
+    env n = let e = markEnv aliases n in e {meHeld = meHeld e <> held}
+
+-- | The (manifold, value) pairs under some segments whose building is the
+-- value's last read at every place the manifold is built (OWN-3), marked as
+-- 'markLastReadsSeeded' marks them.
+lastBuilds :: Map.Map Int Int -> Set.Set Int -> (Int -> [Int]) -> [SerialManifold] -> Set.Set (Int, Int)
+lastBuilds aliases held params sms =
+  Set.fromList [mv | (mv, k) <- Map.toList found, Just k == Map.lookup (fst mv) sites]
+  where
+    mk = markers aliases held params
+    found = Map.fromListWith (+) [(mv, 1 :: Int) | sm <- sms, mv <- concatMap bodyBuilds (nodes (RSM sm))]
+    sites = Map.fromListWith (+) [(m, 1 :: Int) | sm <- sms, RNM (NativeManifold m _ _ _) <- nodes (RSM sm)]
+    nodes n = n : concatMap nodes (rnodeChildren n)
+    bodyBuilds n = case n of
+      RNM (NativeManifold m _ _ e) -> snd (mkNative mk m e)
+      RSM (SerialManifold _ _ _ _ e) -> snd (mkSerial mk e)
+      RN (LoopN _ starts b) -> maybe [] snd (mkLoopN mk (map fst starts) b)
+      RS (LoopS _ ids b) -> maybe [] snd (mkLoopS mk ids b)
+      _ -> []
 
 -- | What marking a body needs: the locals whose reads are reads of a value,
 -- and the values a @do@ block bound by a let reads, which none of their
@@ -1472,53 +1514,62 @@ markLastReadsInBody e = fst (markSpineS (markEnv Map.empty (RS e)) [] e)
 markLastReadsInNative :: NativeExpr -> NativeExpr
 markLastReadsInNative e = fst (markSpineN (markEnv Map.empty (RN e)) [] [] e)
 
+-- | What marking a body found besides its marks: the reads of owned values
+-- it makes, and the (manifold, value) pairs whose building is the value's
+-- last read (OWN-3).
+type Found = (Map.Map Int Int, [(Int, Int)])
+
 -- | A let binding @i@ to a right-hand side, over a body the continuation
 -- marks: @i@ is owned in the body unless a @do@ block holds it. The
 -- right-hand side is marked last, given the reads of the body.
-markLet :: MarkEnv -> [Int] -> Int -> (Map.Map Int Int -> (x, Map.Map Int Int)) -> ([Int] -> (b, Map.Map Int Int)) -> ((x, b), Map.Map Int Int)
+markLet :: MarkEnv -> [Int] -> Int -> (Map.Map Int Int -> (x, Found)) -> ([Int] -> (b, Found)) -> ((x, b), Found)
 markLet env owned i rhs body =
   let owned' = if Set.member i (meHeld env) then owned else i : owned
-      (body', after) = body owned'
+      (body', (after, cb)) = body owned'
       rest = Map.delete i after
-      (rhs', here) = rhs rest
-   in ((rhs', body'), Map.unionWith (+) here rest)
+      (rhs', (here, cr)) = rhs rest
+   in ((rhs', body'), (Map.unionWith (+) here rest, cr <> cb))
 
 -- | Mark the last reads of the native lets of a body along its spine of
 -- lets and conditionals, every right-hand side a spine of its own: a step is
 -- a conditional's test or the value a spine ends in (OWN-2). @owned@ holds
 -- the lets in scope and @later@ the reads that follow the body; the result
--- pairs the marked body with the reads of owned values it makes.
-markSpineN :: MarkEnv -> [Int] -> [Map.Map Int Int] -> NativeExpr -> (NativeExpr, Map.Map Int Int)
+-- pairs the marked body with what it found.
+markSpineN :: MarkEnv -> [Int] -> [Map.Map Int Int] -> NativeExpr -> (NativeExpr, Found)
 markSpineN env owned later e = case e of
   NativeLetN i rhs body ->
     let ((rhs', body'), r) = markLet env owned i (\rest -> markSpineN env owned (rest : later) rhs) (\o -> markSpineN env o later body)
      in (NativeLetN i rhs' body', r)
   IfN t c a b ->
-    let (a', ma) = markSpineN env owned later a
-        (b', mb) = markSpineN env owned later b
+    let (a', (ma, ca)) = markSpineN env owned later a
+        (b', (mb, cb)) = markSpineN env owned later b
         arms = Map.unionWith max ma mb
         here = stepReads env owned (RN c)
-     in (IfN t (markStep here (arms : later) c) a' b', Map.unionWith (+) here arms)
+        (c', cc) = markStep here (arms : later) c
+     in (IfN t c' a' b', (Map.unionWith (+) here arms, cc <> ca <> cb))
   _ ->
     let here = stepReads env owned (RN e)
-     in (markStep here later e, here)
+        (e', ce) = markStep here later e
+     in (e', (here, ce))
 
-markSpineS :: MarkEnv -> [Int] -> SerialExpr -> (SerialExpr, Map.Map Int Int)
+markSpineS :: MarkEnv -> [Int] -> SerialExpr -> (SerialExpr, Found)
 markSpineS env owned e = case e of
   NativeLetS i rhs body ->
     let ((rhs', body'), r) = markLet env owned i (\rest -> markSpineN env owned [rest] rhs) (\o -> markSpineS env o body)
      in (NativeLetS i rhs' body', r)
   SerialLetS i rhs body ->
-    let (body', after) = markSpineS env owned body
+    let (body', (after, cb)) = markSpineS env owned body
         here = stepReads env owned (RS rhs)
-     in (SerialLetS i (markStep here [after] rhs) body', Map.unionWith (+) here after)
+        (rhs', cr) = markStep here [after] rhs
+     in (SerialLetS i rhs' body', (Map.unionWith (+) here after, cr <> cb))
   ReturnS x -> let (x', r) = markSpineS env owned x in (ReturnS x', r)
   SerializeS ast x -> let (x', r) = markSpineN env owned [] x in (SerializeS ast x', r)
   DebugWrapS t m args x -> let (x', r) = markSpineS env owned x in (DebugWrapS t m args x', r)
   CacheBodyS t ast lbl m args x -> let (x', r) = markSpineS env owned x in (CacheBodyS t ast lbl m args x', r)
   _ ->
     let here = stepReads env owned (RS e)
-     in (markStep here [] e, here)
+        (e', ce) = markStep here [] e
+     in (e', (here, ce))
 
 -- | Reads of owned values in one step, a read through an alias counting for
 -- every value its chain passes through.
@@ -1528,13 +1579,27 @@ stepReads env owned n = Map.fromList [(v, k) | v <- owned, let k = sum [Map.find
     counts = readCounts n
 
 -- | Mark, in a step, the reads of the values it reads once and nothing reads
--- after it.
-markStep :: (LastReadIn a) => Map.Map Int Int -> [Map.Map Int Int] -> a -> a
-markStep here later x = foldr lastReadIn x (lastReadsOf here later)
+-- after it, and find the manifolds the step builds whose building is such a
+-- read.
+markStep :: (LastReadIn a) => Map.Map Int Int -> [Map.Map Int Int] -> a -> (a, [(Int, Int)])
+markStep here later x =
+  let vs = lastReadsOf here later
+   in (foldr lastReadIn x vs, [(m, v) | (m, ctx) <- builtIn (asNode x), v <- ctx, v `elem` vs])
 
 -- | The values a step reads once and nothing reads after it.
 lastReadsOf :: Map.Map Int Int -> [Map.Map Int Int] -> [Int]
 lastReadsOf here later = [v | (v, 1) <- Map.toList here, all (Map.notMember v) later]
+
+-- | The native manifolds a step builds, with the locals each reads to be
+-- built: none inside a body that may run more than once.
+builtIn :: RNode -> [(Int, [Int])]
+builtIn n = case n of
+  RNM (NativeManifold m _ f _) -> [(m, [i | Arg i _ <- manifoldContext f])]
+  RSM _ -> []
+  RN (DoBlockN _ _) -> []
+  RN (LoopN _ starts _) -> concatMap (builtIn . RN . snd) starts
+  RS (LoopS {}) -> []
+  _ -> concatMap builtIn (rnodeChildren n)
 
 -- | The locals whose reads are reads of a value: the value and every local
 -- whose chain of aliases passes through it. Built once per alias map.
@@ -1551,31 +1616,34 @@ aliasChain aliases a = follow (Set.singleton a) (Map.lookup a aliases)
     follow _ _ = []
 
 markLoopBody ::
+  (LastReadIn b) =>
   MarkEnv ->
   (b -> RNode) ->
-  (Int -> b -> b) ->
   [Int] ->
   LoopBody NativeExpr SerialExpr b ->
-  LoopBody NativeExpr SerialExpr b
-markLoopBody env baseNode markBase carried = fst . go (filter (`Set.notMember` meHeld env) carried)
+  (LoopBody NativeExpr SerialExpr b, [(Int, Int)])
+markLoopBody env baseNode carried b0 = let (b', (_, caps)) = go (filter (`Set.notMember` meHeld env) carried) b0 in (b', caps)
   where
     go owned (LoopBase x) =
       let here = stepReads env owned (baseNode x)
-       in (LoopBase (foldr markBase x (lastReadsOf here [])), here)
+          (x', cx) = markStep here [] x
+       in (LoopBase x', (here, cx))
     go owned (LoopContinue xs) =
       let total = Map.unionsWith (+) (map (stepReads env owned . RN) xs)
-       in (LoopContinue (map (markStep total []) xs), total)
+          marked = map (markStep total []) xs
+       in (LoopContinue (map fst marked), (total, concatMap snd marked))
     go owned (LoopNLet i x b) =
       let ((x', b'), r) = markLet env owned i (\rest -> markSpineN env owned [rest] x) (\o -> go o b)
        in (LoopNLet i x' b', r)
     go owned (LoopSLet i x b) =
-      let (b', after) = go owned b
+      let (b', (after, cb)) = go owned b
           here = stepReads env owned (RS x)
-       in (LoopSLet i (markStep here [after] x) b', Map.unionWith (+) here after)
+          (x', cx) = markStep here [after] x
+       in (LoopSLet i x' b', (Map.unionWith (+) here after, cx <> cb))
     go owned (LoopIf g t e) =
-      let (t', mt) = go owned t
-          (e', me) = go owned e
-       in (LoopIf g t' e', Map.unionWith (+) (stepReads env owned (RN g)) (Map.unionWith max mt me))
+      let (t', (mt, ct)) = go owned t
+          (e', (me, ce)) = go owned e
+       in (LoopIf g t' e', (Map.unionWith (+) (stepReads env owned (RN g)) (Map.unionWith max mt me), ct <> ce))
 
 -- | How many times native variable @v@ is read under a node, where a read
 -- that may run more than once counts as two.
@@ -1591,22 +1659,35 @@ readCounts n = case n of
   RN (DoBlockN _ _) -> repeated n
   RN (LoopN _ starts body) -> Map.unionsWith (+) (repeated (RLN body) : [readCounts (RN x) | (_, x) <- starts])
   RS (LoopS {}) -> repeated n
-  RNM _ -> repeated n
+  RNM (NativeManifold _ _ f body) -> Map.unionWith (+) (Map.fromListWith (+) [(i, 1) | Arg i _ <- manifoldContext f]) (Map.fromSet (const 2) (outside f body))
   RSM _ -> repeated n
   _ -> Map.unionsWith (+) (map readCounts (rnodeChildren n))
   where
     repeated m = Map.fromSet (const 2) (namedIn m)
+    -- a native manifold reads each context argument once, when it is built
+    -- (OWN-3); a local its body names that is neither one of those nor its
+    -- own counts as read any number of times
+    outside f body = namedIn (RN body) `Set.difference` (Set.fromList [i | Arg i _ <- typeMofForm f] <> boundIn (RN body))
+    boundIn m = Set.fromList (maybe [] (\(i, _, _) -> [i]) (rnodeLet m) <> slots m) <> Set.unions (map boundIn (rnodeChildren m))
+    slots (RN (LoopN _ starts _)) = map fst starts
+    slots (RS (LoopS _ ids _)) = ids
+    slots (RNM (NativeManifold _ _ g _)) = [i | Arg i _ <- typeMofForm g]
+    slots (RSM (SerialManifold _ _ g _ _)) = [i | Arg i _ <- typeMofForm g]
+    slots _ = []
 
 -- | Mark the reads of native variable @v@ under a node as its last, leaving
 -- closures, manifolds and nested loops alone.
 class LastReadIn a where
   lastReadIn :: Int -> a -> a
+  asNode :: a -> RNode
 
 instance LastReadIn NativeExpr where
   lastReadIn v = mgatedMap lastReadGate (lastReadMap v)
+  asNode = RN
 
 instance LastReadIn SerialExpr where
   lastReadIn v = mgatedMap lastReadGate (lastReadMap v)
+  asNode = RS
 
 lastReadGate :: GateMap
 lastReadGate =
@@ -1665,29 +1746,38 @@ loopBorrowLocals mayBorrow g root = go g root
 
 -- | The candidate parameters OWN-7 passes by value. The sinks are found
 -- only on the part of the body every evaluation runs.
-consumedParams :: Bool -> (TypeF -> Bool) -> Set.Set Int -> NativeManifold -> Set.Set Int
-consumedParams listKeeps mayBorrow cands nm@(NativeManifold _ _ _ body) =
-  Set.filter (\p -> Set.member p kept && readCount p (RN body) == 1) cands
+consumedParams :: Bool -> (Int -> Set.Set Int) -> (TypeF -> Bool) -> Set.Set Int -> NativeManifold -> Set.Set Int
+consumedParams listKeeps byValue mayBorrow cands nm@(NativeManifold _ _ _ body) =
+  Set.filter (\p -> Set.member p kept && Map.lookup p counts == Just 1) cands
   where
+    counts = readCounts (RN body)
     kept = sinks (RN body)
     borrows = loopBorrowLocals mayBorrow cands (RNM nm)
     sinks n = case n of
       RN (IfN _ c _ _) -> sinks (RN c)
       RN (LoopN _ starts _) -> here n <> mconcat [sinks (RN x) | (_, x) <- starts]
       RN (DoBlockN _ _) -> Set.empty
-      _ -> here n <> mconcat (map sinks (filter (not . isManifold) (rnodeChildren n)))
+      RNM (NativeManifold m _ form@(ManifoldFull _) _) -> Set.fromList [p | (j, Arg p _) <- zip [0 ..] (typeMofForm form), Set.member j (byValue m)]
+      _ -> here n <> mconcat (map sinks (filter (not . isValueManifold) (rnodeChildren n)))
     here (RN e) = case e of
       LoopN _ starts _ -> Set.fromList [p | (s, BndVarN _ p _) <- starts, not (Set.member s borrows)]
       VariantN _ _ _ xs -> vars xs
       ListN _ _ xs | listKeeps -> vars xs
       TupleN _ xs -> vars xs
       RecordN _ _ _ kvs -> vars (map snd kvs)
+      AppExeN _ (RecCallP mid _) args -> Set.fromList [p | (j, NativeArgExpr a) <- zip [0 ..] args, Just p <- [readOf a], Set.member j (byValue mid)]
       _ -> Set.empty
     here _ = Set.empty
     vars xs = Set.fromList [p | BndVarN _ p _ <- xs]
-    isManifold (RNM _) = True
-    isManifold (RSM _) = True
-    isManifold _ = False
+    -- a nested manifold reads a parameter under its caller's index
+    readOf (BndVarN _ p _) = Just p
+    readOf (LetVarN _ p _) = Just p
+    readOf _ = Nothing
+    -- a fully applied manifold is a call, whose arguments may keep (OWN-7)
+    isValueManifold (RNM (NativeManifold _ _ ManifoldFull {} _)) = False
+    isValueManifold (RNM _) = True
+    isValueManifold (RSM _) = True
+    isValueManifold _ = False
 
 -- | Every native manifold under a node, nested ones included.
 nativeManifoldsUnder :: RNode -> [NativeManifold]
@@ -2985,7 +3075,10 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
                   own <- case t of
                     Native tf -> lcOwnership cfg (BndVarN tf i KeptRead)
                     _ -> return Owned
-                  return $ lcSourcedArg cfg (ManifoldArg m j) own t (argNamer a)
+                  x <- case t of
+                    Native tf -> lcKeepContextArg cfg m j i tf (argNamer a)
+                    _ -> return (argNamer a)
+                  return $ lcSourcedArg cfg (ManifoldArg m j) own t x
               )
               [0 ..]
               (typeMofRs rs)

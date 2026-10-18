@@ -48,6 +48,9 @@ import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedT
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( LoopResult (..)
+  , RNode (RSM)
+  , lastBuilds
+  , nativeManifoldsUnder
   , infixOperator
   , ArgSite (..)
   , IOwnership (..)
@@ -132,6 +135,9 @@ data RustState = RustState
   , rsPapplyHeads :: Set.Set Text
   -- ^ The stored types of the function values this pool partially applies.
   , rsPool :: PoolPlan
+  , rsBuilds :: Set.Set (Int, Int)
+  -- ^ The (manifold, local) pairs whose building is the local's last read
+  -- (OWN-3).
   , rsCurrentRoot :: Int
   -- ^ The top-level manifold being lowered (the takes in 'rsPool' are keyed
   -- by it).
@@ -139,7 +145,7 @@ data RustState = RustState
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan 0 []
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 []
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -910,7 +916,10 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
   boundTyped <- mapM (\a@(Arg _ t) -> do
                         base <- closureParamType t
                         return (argNamer a <> ":" <+> base)) boundArgs
-  capInits <- mapM capInit ctxArgs
+  builds <- CMS.gets rsBuilds
+  let mid = readMay (MT.unpack (MT.drop 1 (render mname))) :: Maybe Int
+      dead i = maybe False (\m -> Set.member (m, i) builds) mid
+  capInits <- mapM (\a@(Arg i _) -> capInit (dead i) a) ctxArgs
   let n = length boundArgs
       capsT = rustTuple capTypes
       -- Whether the callee takes this capture by reference is the same
@@ -1088,11 +1097,12 @@ isPacketCapture (Serial _) = True
 isPacketCapture Passthrough = True
 isPacketCapture _ = False
 
--- | Copy one captured value into the tuple the closure owns. A function
--- value is an 'Arc' clone (a refcount bump); a non-'Copy' value is cloned so
--- the caller's copy stays live; a 'Copy' scalar is taken as it is.
-capInit :: Arg TypeM -> RustM MDoc
-capInit a@(Arg i t) = do
+-- | Copy one captured value into the tuple the closure owns: an 'Arc' clone
+-- for a function value, a clone for a non-'Copy' value unless building the
+-- closure is its last read in a frame that owns it (OWN-3), and a 'Copy'
+-- scalar as it is.
+capInit :: Bool -> Arg TypeM -> RustM MDoc
+capInit dead a@(Arg i t) = do
   parentBorrowed <- asks oeParent
   let name = argNamer a
       deref = if Set.member i parentBorrowed then "(*" <> name <> ")" else name
@@ -1103,7 +1113,13 @@ capInit a@(Arg i t) = do
   return $
     if isPacketCapture t
       then "rustmorloc::PacketRef::new(" <> name <> ")"
-      else if rustArgIsRef t then deref <> ".clone()" else deref
+      else if rustArgIsRef t && not (dead && not (Set.member i parentBorrowed)) then deref <> ".clone()" else deref
+
+-- | The parameters each fully applied native manifold takes by value (OWN-7).
+rustSeeds :: PoolPlan -> [SerialManifold] -> Int -> [Int]
+rustSeeds pp sms = \m -> Set.toList (Map.findWithDefault Set.empty m byValue)
+  where
+    byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | sm <- sms, NativeManifold m _ form@(ManifoldFull _) _ <- nativeManifoldsUnder (RSM sm)]
 
 -- | How a proxy hands one of its arguments to the wire: a value is put as it
 -- is; a closure is reified first (its wire form is its origin tuple).
@@ -1417,7 +1433,7 @@ translate srcs es0 = do
   let closureTable = Map.map closureSchemaTexts closureAsts
   logTemplates <- collectRenderedTemplates rustLang
   stageTable <- stageTableEntries
-  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool rustCaps es}
+  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool rustCaps es, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds (planPool rustCaps es) es0) es0}
       (code, stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwSystemError . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
 
@@ -2420,6 +2436,7 @@ rustLowerConfig mask consumed =
     -- is the identity; re-boxing it would cost an allocation and an
     -- indirection on every store, and lose its registry identity (STATE-4).
     , lcTakeSetter = rustTakeSetter
+    , lcKeepContextArg = \_ _ _ _ v -> return v
     , lcKeepCallArg = \_ _ _ v -> return v
     , lcKeepSlot = \_ _ v -> return v
     , lcKeepElem = \_ v -> return v

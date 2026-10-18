@@ -45,13 +45,13 @@
 --- tlLoopBuilt ---
 [98,0]
 --- closureRead ---
-[306,100]
+[306,0]
 --- closureKeep ---
-[303,400]
+[303,300]
 --- papRead ---
-[306,100]
+[306,0]
 --- papHof ---
-[203,100]
+[203,0]
 --- letOnce ---
 [101,0]
 --- letParam ---
@@ -67,7 +67,7 @@
 --- throughTwo ---
 [101,0]
 --- throughLoop ---
-[101,100]
+[101,0]
 --- throughCli ---
 [3,0]
 --- nonTail ---
