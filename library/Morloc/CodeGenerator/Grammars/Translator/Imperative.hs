@@ -617,6 +617,10 @@ data LowerConfig m = LowerConfig
   , lcEvalPattern :: TypeF -> Pattern -> [MDoc] -> m MDoc
   -- ^ Pattern evaluation (language-specific because patterns use
   -- language-specific constructors for tuples/records)
+  , lcTakeSetter :: NativeExpr -> TypeF -> Selector -> [MDoc] -> m (Maybe MDoc)
+  -- ^ A setter whose receiver is kept (OWN-2): the receiver's original, the
+  -- result type, the selector, and the receiver and values. 'Nothing'
+  -- renders it with 'lcEvalPattern'.
   , lcTakeGetter :: TypeF -> Selector -> MDoc -> m (Maybe MDoc)
   -- ^ A getter on a receiver it owns (OWN-5): the receiver's type, the
   -- selector and the receiver. 'Nothing' renders it with 'lcEvalPattern'.
@@ -2264,6 +2268,8 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ t (PatCallP p) xs) = do
           if own == Owned
             then lcTakeGetter cfg (nativeArgTypeF recv) sel (poolExpr e)
             else return Nothing
+    (PatternStruct sel, AppExeN _ _ (NativeArgExpr recv : _ : _), _)
+      | not (selectorHasBracket sel) -> lcTakeSetter cfg recv t sel (map poolExpr es)
     _ -> return Nothing
   patResult <- maybe (lcEvalPattern cfg t p (map poolExpr es)) return taken
   return $

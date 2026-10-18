@@ -1,0 +1,24 @@
+-- A setter on a record with a recursive field, on a value nothing reads
+-- again (its unchanged fields are moved out) and on one read again after.
+module main (setDead, setLive)
+
+import root
+import root-cpp
+
+source Cpp from "ll.hpp" ("bump", "depth")
+bump :: Int -> Int
+depth :: LL -> Int
+
+record LL where
+  head :: Int
+  tail :: ?LL
+record Cpp => LL = "ll_t"
+
+mkLL :: Int -> LL
+mkLL n = {head = bump n, tail = {head = n, tail = Null}}
+
+setDead :: Int -> (Int, Int)
+setDead n = (\l -> (depth l, .head l)) (.(.head = 5) (mkLL n))
+
+setLive :: Int -> (Int, Int, Int)
+setLive n = (\l -> (depth (.(.head = 5) l), .head l, depth l)) (mkLL n)

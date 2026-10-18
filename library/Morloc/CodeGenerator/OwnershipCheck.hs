@@ -282,6 +282,10 @@ walkN env s e = case e of
     where
       arg j (NativeArgExpr x) | Set.member j (envByValue env mid) = \s' -> keepPart env s' x
       arg _ a = \s' -> walkArg env s' a
+  -- a setter keeps its receiver
+  AppExeN _ (PatCallP (PatternStruct sel)) (NativeArgExpr recv : vals@(_ : _))
+    | not (selectorHasBracket sel) ->
+    step s ((\s' -> keepPart env s' recv) : map (\a s' -> walkArg env s' a) vals)
   AppExeN _ _ args -> step s (map (\a s' -> walkArg env s' a) args)
   ReturnN x -> walkN env s x
   DeserializeN _ _ x -> walkS env s x

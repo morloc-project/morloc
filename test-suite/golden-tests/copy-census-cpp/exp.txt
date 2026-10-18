@@ -13,11 +13,11 @@
 --- tagField ---
 [1,0]
 --- fieldArg ---
-[100,1]
+[100,0]
 --- fieldArgM ---
-[200,1]
+[200,0]
 --- fieldRet ---
-[100,1]
+[100,0]
 --- tupleArg ---
 [200,0]
 --- listPat ---
@@ -27,7 +27,7 @@
 --- listLit ---
 [2,4]
 --- listRecords ---
-[2003,6]
+[2003,4]
 --- listLoop ---
 [1200,6]
 --- listStep ---
@@ -47,9 +47,9 @@
 --- partsFresh ---
 [5055,1]
 --- setter ---
-[1002,2]
+[1002,0]
 --- setterFn ---
-[1002,2]
+[1002,0]
 --- tlOnce ---
 [5049,0]
 --- tlLoopRead ---
@@ -99,7 +99,7 @@
 --- loopCarried ---
 [300,1]
 --- loopField ---
-[300,2]
+[300,1]
 --- loopTuple ---
 [300,1]
 --- tupleStep ---

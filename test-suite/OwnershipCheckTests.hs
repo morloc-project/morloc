@@ -121,6 +121,10 @@ takeCases =
         okMoving (tup [BndVarN ty 2 LastRead])
         badMoving (NativeLetN 3 (tup [BndVarN ty 2 LastRead]) (BndVarN ty 2 KeptRead))
         badMoving (NativeLetN 3 (LoopN ty [(1, BndVarN ty 2 LastRead)] (LoopBase (rd 1))) (BndVarN ty 2 KeptRead))
+    -- a setter keeps its receiver
+    , testCase "spec-own-1-24" $ do
+        okMoving (NativeLetN 2 (IntN fv 0) (setK (lastRd 2)))
+        badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (setK (lastRd 2)) (rd 2)))
     ]
   where
     ok e = checkNative mode True Set.empty e @?= []
@@ -138,4 +142,5 @@ takeCases =
     tup = TupleN (FV (TV "t") (CV "t"))
     field i = IntrinsicN ty IntrCtorField Nothing [rd i, StrN fv "Link", IntN fv 1]
     tag i = IntrinsicN ty IntrTagTest Nothing [rd i, StrN fv "Link"]
+    setK r = AppExeN ty (PatCallP (PatternStruct (SelectorKey ("k", SelectorEnd) []))) [NativeArgExpr r, NativeArgExpr (IntN fv 2)]
     loop starts body = LoopN ty starts body

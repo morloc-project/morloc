@@ -55,10 +55,11 @@ records and user-mapped types copy deeply.
   manifold is never taken by value (`let a = chainLen c in a + count 0
   (prepend 0 c)`). C++ has no by-value parameter at all: a loop copies every
   carried parameter at entry, changed or not.
-- **Captures and setters copy a dead owned value.** [reproduced] Rust
-  closure captures and partial applications clone a by-reference type even
-  at its last use; a setter on a dead owned record clones every unchanged
-  field. C++ `std::bind` and `[=]` captures copy likewise.
+- **Captures copy a dead owned value.** [reproduced] Rust closure captures
+  and partial applications clone a by-reference type even at its last use;
+  C++ `std::bind` and `[=]` captures copy likewise. A setter on a
+  loop-carried record copies every unchanged field each iteration, as the
+  carried local is not among the lets a setter may take.
 - **Closure and wire paths copy what they only serialize.** [read] Rust:
   staged closures re-clone every earlier argument at each level (about n^2
   argument clones for an n-ary function); a reflected closure's origin,
@@ -72,10 +73,6 @@ records and user-mapped types copy deeply.
   every native manifold parameter is passed by const reference, as the
   reason a projection take may not move out of a bound variable. A Rust
   parameter taken by value is owned. No wrong take was found.
-- **A C++ record literal is copied into its let.** [read] The record
-  constructor builds the literal into a temporary (`aN`) and returns its
-  name, so the let renders `mlc_R_2 n20 = a0;`, a copy of a value nothing
-  reads again (golden copy-census-cpp fieldArg, setter).
 - **C++ crossing closures copy each capture about four times.** [read] A
   closure that may cross a pool is a `MorlocClosure`, pap or staged value
   holding a `std::bind` binder and a reify thunk that copies the same

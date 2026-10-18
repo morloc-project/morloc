@@ -501,6 +501,27 @@ rustEvalPattern t0 (PatternStruct s0) (m0 : xs0)
 rustEvalPattern _ p args =
   error $ "Rust v1: unsupported pattern " <> show p <> " with " <> show (length args) <> " args"
 
+-- | A setter on an owned local at its last read (OWN-2) updates it in place,
+-- so its unchanged fields are neither copied nor rebuilt. It applies only
+-- when the result has the receiver's type and no path repeats or extends
+-- another, where the rebuild keeps one write per node.
+rustTakeSetter :: NativeExpr -> TypeF -> Selector -> [MDoc] -> RustM (Maybe MDoc)
+rustTakeSetter recv t sel (m : xs)
+  | isLastRead recv
+  , typeFof recv == t
+  , not (null xs)
+  , length paths == length xs
+  , not (any overlaps (zip [0 :: Int ..] paths)) = do
+      own <- rustOwnership recv
+      return $
+        if own == Owned
+          then Just ("{ let mut __r = " <> m <> "; " <> hsep [writeSelectorRust "__r" p <+> "=" <+> x <> ";" | (p, x) <- zip paths xs] <+> "__r }")
+          else Nothing
+  where
+    paths = ungroup sel
+    overlaps (i, p) = or [q `isPrefixOf` p | (j, q) <- zip [0 ..] paths, j /= i]
+rustTakeSetter _ _ _ _ = return Nothing
+
 -- | Walk a 'Selector' that may contain bracket steps, emitting Rust source per
 -- step: @.field@ (record), @.i@ (tuple), @morloc_at(idx, &(rcv))@ (index),
 -- @morloc_slice(..)@ (slice). Multi-sibling groups emit a Rust tuple. Threads
@@ -2398,6 +2419,7 @@ rustLowerConfig mask consumed =
     -- A function value already IS its stored representation, so storing one
     -- is the identity; re-boxing it would cost an allocation and an
     -- indirection on every store, and lose its registry identity (STATE-4).
+    , lcTakeSetter = rustTakeSetter
     , lcKeepCallArg = \_ _ _ v -> return v
     , lcKeepSlot = \_ _ v -> return v
     , lcKeepElem = \_ v -> return v

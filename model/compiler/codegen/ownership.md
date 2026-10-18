@@ -22,7 +22,7 @@ so a copy there is never made.
 
 ### OWN-1 No path reads a value after it is moved
 Intent: ruled 2026-10-17
-Tests: spec-own-1-1, spec-own-1-2, spec-own-1-3, spec-own-1-4, spec-own-1-5, spec-own-1-6, spec-own-1-7, spec-own-1-8, spec-own-1-9, spec-own-1-10, spec-own-1-11, spec-own-1-12, spec-own-1-13, spec-own-1-14, spec-own-1-15, spec-own-1-16, spec-own-1-17, spec-own-1-18, spec-own-1-19, spec-own-1-20, spec-own-1-21, spec-own-1-22, spec-own-1-23
+Tests: spec-own-1-1, spec-own-1-2, spec-own-1-3, spec-own-1-4, spec-own-1-5, spec-own-1-6, spec-own-1-7, spec-own-1-8, spec-own-1-9, spec-own-1-10, spec-own-1-11, spec-own-1-12, spec-own-1-13, spec-own-1-14, spec-own-1-15, spec-own-1-16, spec-own-1-17, spec-own-1-18, spec-own-1-19, spec-own-1-20, spec-own-1-21, spec-own-1-22, spec-own-1-23, spec-own-1-24
 Code: conforms 2026-10-17
 
 In generated code, once a read moves a value, no later read on any path
@@ -48,16 +48,22 @@ read of a local that refers into a value, directly or through other such
 locals, is also a read of that value.
 
 ### OWN-3 A read that may run more than once never moves
-Intent: ruled 2026-10-17
+Intent: ruled 2026-10-18
 Tests: spec-own-3-1, spec-own-3-2, spec-own-3-3
 Code: conforms 2026-10-18
 
 A read inside a lambda, a nested loop, a separate manifold or a `do` block
 counts as unboundedly many reads. Such a read never moves, and no earlier
-read of the same value moves either. A `do` block bound by a let may hold
-a reference to what it reads for as long as the let lives, so no read of a
-value such a block reads moves, later ones included. In linear logic this is the promotion
-rule: a term that may be duplicated captures only unrestricted values.
+read of the same value moves either. A lambda or separate manifold that
+holds its own copy of each value it captures reads each of them once, when
+it is built; that read belongs to the step that builds it and may move like
+any other read there (OWN-2), while the reads inside read the copy and never
+move it. A block that refers to a value instead of holding a copy reads it
+for as long as it lives: a `do` block bound by a let may hold a reference
+to what it reads for as long as the let lives, so no read of a value such a
+block reads moves, later ones included. In linear logic this is the
+promotion rule: a term that may be duplicated captures only unrestricted
+values.
 
 ### OWN-4 A loop's guard borrows
 Intent: ruled 2026-10-17
@@ -101,14 +107,16 @@ copies none of it, however deep it is. A carried value that some iteration
 replaces with a value it builds is owned, and starts from a copy.
 
 ### OWN-7 A function that keeps an argument takes it from its caller
-Intent: ruled 2026-10-17
+Intent: ruled 2026-10-18
 Tests: spec-own-7-1, spec-own-7-2
 Code: deviates compiler/issues/codegen-copies.md (C++ calls through a nested manifold)
 
 A fully applied manifold takes a parameter by value instead of by
 reference when its body reads that parameter once, on every evaluation, and
 keeps what it reads: as the start of a loop value that is not a borrow
-(OWN-6), or as an element of a value it builds. A parameter kept on only
+(OWN-6), as an element of a value it builds, or as an argument a fully
+applied manifold it calls takes by value, so the mode carries up a chain of
+calls. A parameter kept on only
 one branch stays a reference, so the branch that drops it copies nothing. Each call then moves the argument when the caller
 reads it for the last time, and copies it otherwise, so a copy happens at
 most once per call and only where the caller still needs the value. A

@@ -870,10 +870,14 @@ cppKeepSlot ids e x = case e of
 
 -- | The move of a kept let (OWN-2), when its lowered form is the let itself.
 cppKeptLet :: NativeExpr -> MDoc -> CppTranslatorM (Maybe MDoc)
-cppKeptLet (LetVarN _ i LastRead) x
+cppKeptLet (LetVarN t i LastRead) x
   | render x == render (nvarNamer i) = do
       moves <- CMS.gets translatorMoves
-      return (if Set.member i moves then Just ("std::move(" <> x <> ")") else Nothing)
+      if Set.member i moves
+        then do
+          cheap <- cppNoMove t
+          return (if cheap then Nothing else Just ("std::move(" <> x <> ")"))
+        else return Nothing
 cppKeptLet (BndVarN t i LastRead) x
   | render x == render (nvarNamer i) = do
       params <- CMS.gets translatorParamMoves
@@ -1045,13 +1049,12 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     , lcEvalPattern = \t p xs -> do
         state <- CMS.get
         return $ evaluatePattern state t p xs
+    , lcTakeSetter = cppTakeSetter
     , lcListConstructor = \_ _ es -> encloseSep "{" "}" "," es
     , lcTupleConstructor = \_ _ -> ((<>) "std::make_tuple" . tupled)
     , lcRecordConstructor = \recType _ _ _ rs -> do
         t <- cppTypeOf recType
-        idx <- getCounter
-        let v' = "a" <> pretty idx
-            -- For a field at a recursive-cycle position the field's
+        let -- For a field at a recursive-cycle position the field's
             -- C++ type is a pointer-shape (default std::shared_ptr<T>)
             -- while the value in hand is a bare T (or std::nullopt
             -- when the source was Null). Wrap through
@@ -1086,8 +1089,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
                 Just ft | needsWrap ft ->
                   "mlc::wrap_field<decltype(" <> t <> "::" <> pretty k <> ")>(" <> v <> ")"
                 _ -> v
-            decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map wrapField rs) <> ";"
-        return $ defaultValue {poolExpr = v', poolPriorLines = [decl]}
+        return $ defaultValue {poolExpr = t <> encloseSep "{" "}" "," (map wrapField rs)}
     , lcKeepCallArg = cppKeepCallArg
     , lcKeepSlot = cppKeepSlot
     , lcKeepElem = cppKeepElem
@@ -2024,8 +2026,7 @@ translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
       params = Set.unions (Map.elems byValue) `Set.difference` loopSlots (RSM m0)
       seeds m = Set.toList (Map.findWithDefault Set.empty m byValue `Set.intersection` params)
       m1 = markLastReadsSeeded (lpAliases plan) held seeds m0
-  cheap <- Set.fromList . map fst . filter snd <$> mapM (\(i, rhs, _) -> (,) i <$> cppNoMove (typeFof rhs)) modes
-  let moves = lpOwned plan `Set.difference` cheap
+  let moves = lpOwned plan
   CMS.modify (\st -> st {translatorMoves = moves, translatorParamMoves = params, translatorLowered = (m1, modes, moves <> params) : translatorLowered st})
   e <- foldWithSerialManifoldM (defaultFoldRules (cppLowerConfig closureGen)) m1
   return $ renderPoolDocs e
@@ -2072,20 +2073,7 @@ evaluatePattern _ _ (PatternStruct s) args
             _ -> error $ "evaluatePattern: bracket-in-Selector expected 1 receiver, \
                          \got " <> show (length receivers)
       in fst (walkCppSelectorBrackets receiver bracketArgs s)
-evaluatePattern state0 t0 (PatternStruct s0) (m0 : xs0) =
-  patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet m0 t0 s0 xs0
-  where
-    makeTuple (AppF _ ts) xs =
-      let tupleTypes = CMS.evalState (mapM cppTypeOf ts) state0
-       in "std::tuple" <> encloseSep "<" ">" "," tupleTypes <> tupled xs
-    makeTuple _ _ = error "Unreachable"
-
-    makeRecord _ xs = encloseSep "{" "}" ", " xs
-
-    accessTuple _ m i = "std::get<" <> pretty i <> ">(" <> m <> ")"
-    accessRecord _ d k = d <> "." <> pretty k
-    -- C++ copies an unchanged field by value into the aggregate init; no wrapper.
-    finalizeSet _ v = v
+evaluatePattern state0 t0 (PatternStruct s0) (m0 : xs0) = setterOf False state0 t0 s0 m0 xs0
 evaluatePattern _ _ (PatternStruct _) [] = error "Unreachable illegal pattern"
 -- C++ bracket index: List and Vector both use std::vector<T> on the wire,
 -- so the same morloc_at helper works for both. Args: [index, receiver].
@@ -2099,6 +2087,37 @@ evaluatePattern _ _ PatternBracketSlice [start, stop, step, m] =
   "morloc_slice" <> tupled [start, stop, step, m]
 evaluatePattern _ _ PatternBracketSlice args =
   error $ "PatternBracketSlice expects 4 args, got " <> show (length args)
+
+-- | A setter on receiver @m0@ with values @xs0@: the receiver rebuilt with
+-- the set fields changed; when nothing reads the receiver again (@dead@),
+-- its unchanged fields are moved rather than copied.
+setterOf :: Bool -> CppTranslatorState -> TypeF -> Selector -> MDoc -> [MDoc] -> MDoc
+setterOf dead state0 t0 s0 m0 xs0 =
+  patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet m0 t0 s0 xs0
+  where
+    makeTuple (AppF _ ts) xs =
+      let tupleTypes = CMS.evalState (mapM cppTypeOf ts) state0
+       in "std::tuple" <> encloseSep "<" ">" "," tupleTypes <> tupled xs
+    makeTuple _ _ = error "Unreachable"
+
+    makeRecord _ xs = encloseSep "{" "}" ", " xs
+
+    accessTuple _ m i = "std::get<" <> pretty i <> ">(" <> m <> ")"
+    accessRecord _ d k = d <> "." <> pretty k
+    -- An unchanged field is copied into the aggregate init, or moved out of
+    -- a receiver nothing reads again (OWN-2).
+    finalizeSet _ v
+      | dead = "std::move(" <> v <> ")"
+      | otherwise = v
+
+-- | A setter whose receiver is a kept let or by-value parameter at its last
+-- read (OWN-2): its unchanged fields are moved out.
+cppTakeSetter :: NativeExpr -> TypeF -> Selector -> [MDoc] -> CppTranslatorM (Maybe MDoc)
+cppTakeSetter recv t sel (m : xs) = do
+  kept <- isJust <$> cppKeptLet recv m
+  state <- CMS.get
+  return (if kept then Just (setterOf True state t sel m xs) else Nothing)
+cppTakeSetter _ _ _ [] = return Nothing
 
 writeSelector :: MDoc -> [Either Int Text] -> MDoc
 writeSelector d [] = d
