@@ -11,6 +11,7 @@ module Morloc.CodeGenerator.Ownership
   ( OwnCaps (..)
   , PoolPlan (..)
   , emptyPoolPlan
+  , byValueIndices
   , planPool
   , ManifoldPlan (..)
   , planSerialManifold
@@ -46,6 +47,8 @@ data OwnCaps = OwnCaps
   -- ^ a type whose copy costs nothing
   , ocTagAfterTake :: Bool
   -- ^ whether a tag test may read a value after a field was taken from it
+  , ocListKeeps :: Bool
+  -- ^ whether a list literal's element is kept without a copy of its own
   }
 
 -- | The decisions that span a pool's manifolds.
@@ -66,16 +69,28 @@ planPool caps sms =
   PoolPlan
     { ppTakes = consumableProjectionLets (ocTagAfterTake caps) sms
     , ppByValue =
-        Map.fromList
+        Map.filter (not . Set.null) . Map.fromListWith Set.intersection $
           [ (m, positions)
           | nm@(NativeManifold m _ form@(ManifoldFull _) _) <- concatMap (nativeManifoldsUnder . RSM) sms
+          , not (Set.member m asValues)
           , let args = typeMofForm form
                 cands = Set.fromList [i | Arg i (Native tf) <- args, not (ocCheap caps tf)]
-                kept = consumedParams (not . ocCheap caps) cands nm
+                kept = consumedParams (ocListKeeps caps) (not . ocCheap caps) cands nm
                 positions = Set.fromList [j | (j, Arg i _) <- zip [0 ..] args, Set.member i kept]
-          , not (Set.null positions)
           ]
     }
+  where
+    -- A manifold also used as a function value is called with what its
+    -- caller holds, and one occurring more than once takes by value only
+    -- what every occurrence does (OWN-7).
+    asValues = Set.unions (map (valueIds . RSM) sms)
+    valueIds n = here n <> Set.unions (map valueIds (rnodeChildren n))
+      where
+        here (RNM (NativeManifold m _ form _)) | notFull form = Set.singleton m
+        here (RSM (SerialManifold m _ form _ _)) | notFull form = Set.singleton m
+        here _ = Set.empty
+    notFull ManifoldFull {} = False
+    notFull _ = True
 
 -- | The parameter indices manifold @m@ takes by value.
 byValueIndices :: PoolPlan -> Int -> ManifoldForm (Or TypeS TypeF) TypeF -> Set.Set Int

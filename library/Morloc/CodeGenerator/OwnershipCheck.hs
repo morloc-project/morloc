@@ -73,17 +73,20 @@ data Env = Env
   -- ^ the lets whose last read in a keeping position moves them
   , envBorrow :: Map.Map Int Int
   -- ^ the locals that are references, to what they refer into
+  , envByValue :: Int -> Set.Set Int
+  -- ^ the argument positions a native manifold takes by value (OWN-7)
   }
 
--- | The violations in a top-level manifold's tree, where the lets in
--- @moves@ are moved at a last read in a keeping position.
-checkManifold :: (Int -> NativeExpr -> LetMode) -> Bool -> Set.Set Int -> SerialManifold -> [Text]
-checkManifold mode tagOk moves (SerialManifold m _ _ _ e) =
-  map (\v -> "manifold " <> num m <> ": " <> v) (rViol (walkS (Env mode tagOk Map.empty moves Map.empty) start e))
+-- | The violations in a top-level manifold's tree, where the lets and
+-- parameters in @moves@ are moved at a last read in a keeping position, and
+-- native manifold @m@ takes the arguments at @byValue m@ by value.
+checkManifold :: (Int -> NativeExpr -> LetMode) -> Bool -> Set.Set Int -> (Int -> Set.Set Int) -> SerialManifold -> [Text]
+checkManifold mode tagOk moves byValue (SerialManifold m _ _ _ e) =
+  map (\v -> "manifold " <> num m <> ": " <> v) (rViol (walkS (Env mode tagOk Map.empty moves Map.empty byValue) start e))
 
 -- | The violations in a native expression evaluated from scratch.
 checkNative :: (Int -> NativeExpr -> LetMode) -> Bool -> Set.Set Int -> NativeExpr -> [Text]
-checkNative mode tagOk moves e = rViol (walkN (Env mode tagOk Map.empty moves Map.empty) start e)
+checkNative mode tagOk moves e = rViol (walkN (Env mode tagOk Map.empty moves Map.empty (const Set.empty)) start e)
 
 start :: St
 start = St Set.empty Set.empty Set.empty Set.empty
@@ -164,6 +167,7 @@ refRead env s i =
 -- of a let in 'envMoves' there moves it.
 keepPart :: Env -> St -> NativeExpr -> Eval
 keepPart env s x = case x of
+  BndVarN t i LastRead -> keepPart env s (LetVarN t i LastRead)
   LetVarN _ i LastRead | Set.member i (envMoves env) ->
     let r = readVar env s i
         later = ["n" <> num i <> " is moved while a do block bound by a let holds it" | Set.member i (stHeld s)]
@@ -274,6 +278,10 @@ walkN env s e = case e of
     walkN env s c `andThen` \s' -> eitherArm (walkN env s' a) (walkN env s' b)
   IntrinsicN _ IntrTagTest _ (LetVarN _ i _ : rest)
     | envTagAfterTake env -> step s ((\s' -> refRead env s' i) : map (\x s' -> walkN env s' x) rest)
+  AppExeN _ (RecCallP mid _) args -> step s [arg j a | (j, a) <- zip [0 ..] args]
+    where
+      arg j (NativeArgExpr x) | Set.member j (envByValue env mid) = \s' -> keepPart env s' x
+      arg _ a = \s' -> walkArg env s' a
   AppExeN _ _ args -> step s (map (\a s' -> walkArg env s' a) args)
   ReturnN x -> walkN env s x
   DeserializeN _ _ x -> walkS env s x
@@ -288,7 +296,7 @@ walkN env s e = case e of
   MapOptionalN _ _ _ x -> walkN env s x
   ManN nm -> nativeFrame env s nm
   LoopN _ starts body ->
-    parts (map snd starts) `andThen` \s' -> loop env s' (map fst starts) body (\env' s'' b -> walkN env' s'' b)
+    keeps (map snd starts) `andThen` \s' -> loop env s' (map fst starts) body (\env' s'' b -> endValue env' s'' (map fst starts) b)
   ExeN {} -> done s
   LogN {} -> done s
   RealN {} -> done s
@@ -299,6 +307,19 @@ walkN env s e = case e of
   where
     parts xs = step s (map (\x s' -> walkN env s' x) xs)
     keeps xs = step s (map (\x s' -> keepPart env s' x) xs)
+
+-- | The value a native loop ends with: a carried local at its last read is
+-- moved, as nothing reads it once the loop is done.
+endValue :: Env -> St -> [Int] -> NativeExpr -> Eval
+endValue env s ids x = case x of
+  LetVarN _ j LastRead | j `elem` ids -> movedOut j
+  BndVarN _ j LastRead | j `elem` ids -> movedOut j
+  _ -> walkN env s x
+  where
+    movedOut j =
+      let r = readVar env s j
+          held = ["n" <> num j <> " is moved while a do block bound by a let holds it" | Set.member j (stHeld s)]
+       in r {rSt = (rSt r) {stMoved = Set.insert j (stMoved (rSt r))}, rMoves = Set.insert j (rMoves r), rViol = held <> rViol r}
 
 walkArg :: Env -> St -> NativeArg -> Eval
 walkArg env s (NativeArgExpr x) = walkN env s x

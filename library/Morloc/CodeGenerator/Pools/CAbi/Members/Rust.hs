@@ -2065,7 +2065,7 @@ rustSurround =
 -- | No tag test may follow a take (see the projection-consume golden's
 -- secondMatchRust).
 rustCaps :: OwnCaps
-rustCaps = OwnCaps {ocCheap = rustIsCopy, ocTagAfterTake = False}
+rustCaps = OwnCaps {ocCheap = rustIsCopy, ocTagAfterTake = False, ocListKeeps = True}
 
 translateSegment :: SerialManifold -> RustM MDoc
 translateSegment m0@(SerialManifold root _ _ _ _) = do
@@ -2398,6 +2398,8 @@ rustLowerConfig mask consumed =
     -- A function value already IS its stored representation, so storing one
     -- is the identity; re-boxing it would cost an allocation and an
     -- indirection on every store, and lose its registry identity (STATE-4).
+    , lcKeepCallArg = \_ _ _ v -> return v
+    , lcKeepSlot = \_ _ v -> return v
     , lcKeepElem = \_ v -> return v
     , lcStoreField = \_ v -> return v
     -- Apply a function value with call syntax: a concrete closure inlines, an

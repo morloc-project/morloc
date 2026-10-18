@@ -131,12 +131,3 @@ same name sees what was taken.
   (`sourceViewArgs`, Cpp.hs). Rust states borrows in a source's signature,
   so there it is a build failure. Open question: may a sourced result refer
   into its arguments?
-- **The pool plan's by-value positions take the last of duplicate ids.**
-  [read, speculative impact] `planPool` (library/Morloc/CodeGenerator/Ownership.hs)
-  builds `ppByValue` with `Map.fromList` over every fully applied native
-  manifold, so when one id occurs twice (a call-site copy, a specialisation)
-  the last occurrence's positions win, and nothing excludes an id that is
-  also used as a function value (a `std::function`, `std::bind`, a Rust
-  `Arc<dyn Fn>`), whose callers pass lvalues. OWN-7 needs the intersection
-  over occurrences and the exclusion.
-

@@ -62,6 +62,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , consumableProjectionLets
   , markLastReads
   , markLastReadsWith
+  , markLastReadsSeeded
   , markLastReadsInBody
   , markLastReadsInNative
   , namedIn
@@ -632,6 +633,12 @@ data LowerConfig m = LowerConfig
   -- is not yet plumbed through Express -> Mono -> TupleN's FVar).
   , lcRecordConstructor :: TypeF -> NamType -> FVar -> [TypeF] -> [(Key, MDoc)] -> m PoolDocs
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
+  , lcKeepCallArg :: Int -> Int -> NativeExpr -> MDoc -> m MDoc
+  -- ^ Adapt argument @j@ of a call of native manifold @m@, given its
+  -- original (OWN-7).
+  , lcKeepSlot :: [Int] -> NativeExpr -> MDoc -> m MDoc
+  -- ^ Adapt the value a native loop ends with, given the loop's carried
+  -- locals and the value's original (OWN-2).
   , lcKeepElem :: NativeExpr -> MDoc -> m MDoc
   -- ^ Adapt a tuple, record or constructor element, the value an optional
   -- coercion wraps, or the value a let's right-hand side ends in, given its
@@ -1389,7 +1396,12 @@ markLastReads = markLastReadsWith Map.empty Set.empty
 -- maps such a local to the value it refers into (OWN-2), and no read of a
 -- value in @held@ is marked.
 markLastReadsWith :: (MFunctor a) => Map.Map Int Int -> Set.Set Int -> a -> a
-markLastReadsWith aliases held =
+markLastReadsWith aliases held = markLastReadsSeeded aliases held (const [])
+
+-- | 'markLastReadsWith' where native manifold @m@ also owns the parameters
+-- @params m@ (OWN-7).
+markLastReadsSeeded :: (MFunctor a) => Map.Map Int Int -> Set.Set Int -> (Int -> [Int]) -> a -> a
+markLastReadsSeeded aliases held params =
   mmap (defaultValue {mapSerialExpr = onS, mapNativeExpr = onN, mapSerialManifold = onSM, mapNativeManifold = onNM})
   where
     env n = let e = markEnv aliases n in e {meHeld = meHeld e <> held}
@@ -1398,7 +1410,9 @@ markLastReadsWith aliases held =
     onN (LoopN t starts b) = LoopN t starts (markLoopBody (env (RLN b)) RN lastReadIn (map fst starts) b)
     onN e = e
     onSM (SerialManifold m l f h e) = SerialManifold m l f h (fst (markSpineS (env (RS e)) [] e))
-    onNM (NativeManifold m l f e) = NativeManifold m l f (fst (markSpineN (env (RN e)) [] [] e))
+    onNM (NativeManifold m l f e) =
+      let en = env (RN e)
+       in NativeManifold m l f (fst (markSpineN en (filter (`Set.notMember` meHeld en) (params m)) [] e))
 
 -- | What marking a body needs: the locals whose reads are reads of a value,
 -- and the values a @do@ block bound by a let reads, which none of their
@@ -1647,8 +1661,8 @@ loopBorrowLocals mayBorrow g root = go g root
 
 -- | The candidate parameters OWN-7 passes by value. The sinks are found
 -- only on the part of the body every evaluation runs.
-consumedParams :: (TypeF -> Bool) -> Set.Set Int -> NativeManifold -> Set.Set Int
-consumedParams mayBorrow cands nm@(NativeManifold _ _ _ body) =
+consumedParams :: Bool -> (TypeF -> Bool) -> Set.Set Int -> NativeManifold -> Set.Set Int
+consumedParams listKeeps mayBorrow cands nm@(NativeManifold _ _ _ body) =
   Set.filter (\p -> Set.member p kept && readCount p (RN body) == 1) cands
   where
     kept = sinks (RN body)
@@ -1661,7 +1675,7 @@ consumedParams mayBorrow cands nm@(NativeManifold _ _ _ body) =
     here (RN e) = case e of
       LoopN _ starts _ -> Set.fromList [p | (s, BndVarN _ p _) <- starts, not (Set.member s borrows)]
       VariantN _ _ _ xs -> vars xs
-      ListN _ _ xs -> vars xs
+      ListN _ _ xs | listKeeps -> vars xs
       TupleN _ xs -> vars xs
       RecordN _ _ _ kvs -> vars (map snd kvs)
       _ -> Set.empty
@@ -2279,10 +2293,18 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ t (PapplyP idx) xs0) = do
   call <- lcPapply cfg t argTypes (nvarNamer idx) es
   return $ mergePoolDocs (const call) (map snd xs)
 lowerNativeExprRaw cfg origExpr (AppExeN_ _ (RecCallP mid _) xs0) = do
-  xs <- bindCallArgs cfg origExpr xs0
+  xs1 <- bindCallArgs cfg origExpr xs0
+  xs <- case origExpr of
+    AppExeN _ _ args
+      | length args == length xs1 ->
+          sequence [(,) t <$> keepArg j a d | (j, a, (t, d)) <- zip3 [0 ..] args xs1]
+    _ -> return xs1
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
   return $ mergePoolDocs (\es -> manNamer mid <> tupled (zipWith4 (\j own t e -> lcSourcedArg cfg (ManifoldArg mid j) own t e) [0 ..] owns argTypes es)) (map snd xs)
+  where
+    keepArg j (NativeArgExpr e) d = (\v -> d {poolExpr = v}) <$> lcKeepCallArg cfg mid j e (poolExpr d)
+    keepArg _ _ d = return d
 lowerNativeExprRaw _ _ (ManN_ call) = return call
 -- The manifold return is an owned sink: adapt the returned value to an owned
 -- value (Rust clones a borrowed/place value; other members are unchanged) so a
@@ -2852,8 +2874,10 @@ lowerNativeExprRaw _ _ (IntrinsicN_ _ intr _ _) =
 -- copies of the manifold's read-only parameters) and a base leaf is the
 -- loop's native value, an owned sink like any returned value.
 lowerNativeExprRaw cfg (LoopN t origInits origBody) (LoopN_ _ starts body) = do
-  starts' <- zipWithM (\(_, oe) (i, d) -> (,) i . Just <$> loopBorrowOr cfg i oe d (adaptOwnedElem cfg oe d)) origInits starts
-  body' <- adaptLoopBodyOwned cfg (adaptOwnedElem cfg) (map fst origInits) origBody body
+  starts' <- zipWithM (\(_, oe) (i, d) -> (,) i . Just <$> loopBorrowOr cfg i oe d (adaptOwnedElem cfg oe d >>= keepOne cfg oe)) origInits starts
+  let ids = map fst origInits
+      keepBase ob d = adaptOwnedElem cfg ob d >>= \d' -> (\v -> d' {poolExpr = v}) <$> lcKeepSlot cfg ids ob (poolExpr d')
+  body' <- adaptLoopBodyOwned cfg keepBase ids origBody body
   lcMakeLoop cfg (LoopResultNative t) starts' (Just (trimap id id (const ()) origBody)) body'
 lowerNativeExprRaw _ _ (LoopN_ {}) =
   error "morloc bug: a native loop lowered without its original expression"

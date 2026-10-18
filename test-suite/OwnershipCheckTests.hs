@@ -115,6 +115,12 @@ takeCases =
         badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (lastRd 2) (rd 2)))
         badMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (NativeLetN 20 (IntN fv 1) (lastRd 2)) (rd 2)))
         okMoving (NativeLetN 2 (IntN fv 0) (NativeLetN 3 (lastRd 2) (tup [rd 3, rd 3])))
+    -- a parameter taken by value moves at its last read like an owned let,
+    -- into a value being built or a loop's start
+    , testCase "spec-own-1-23" $ do
+        okMoving (tup [BndVarN ty 2 LastRead])
+        badMoving (NativeLetN 3 (tup [BndVarN ty 2 LastRead]) (BndVarN ty 2 KeptRead))
+        badMoving (NativeLetN 3 (LoopN ty [(1, BndVarN ty 2 LastRead)] (LoopBase (rd 1))) (BndVarN ty 2 KeptRead))
     ]
   where
     ok e = checkNative mode True Set.empty e @?= []

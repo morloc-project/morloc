@@ -72,3 +72,24 @@ records and user-mapped types copy deeply.
   every native manifold parameter is passed by const reference, as the
   reason a projection take may not move out of a bound variable. A Rust
   parameter taken by value is owned. No wrong take was found.
+- **A C++ record literal is copied into its let.** [read] The record
+  constructor builds the literal into a temporary (`aN`) and returns its
+  name, so the let renders `mlc_R_2 n20 = a0;`, a copy of a value nothing
+  reads again (golden copy-census-cpp fieldArg, setter).
+- **C++ crossing closures copy each capture about four times.** [read] A
+  closure that may cross a pool is a `MorlocClosure`, pap or staged value
+  holding a `std::bind` binder and a reify thunk that copies the same
+  captures; the runtime's `mlc_pap::make`/`mlc_staged::make` take the binder
+  by value and copy it into their state and again into the apply lambda,
+  and a pap step copies each applied argument twice.
+- **Rust staged closures clone what the stage call only borrows.** [read]
+  At the level that calls the stage, every earlier argument and the capture
+  tuple are cloned though the call borrows them (`stagedDoc`, Rust.hs).
+- **C++ calls through a nested manifold copy a by-value argument.** [read]
+  C++ takes OWN-7 parameters by value and moves an owned let into one at a
+  call of a native entry, but a fully applied nested manifold reads its
+  arguments as context arguments, which last-read marking has no read node
+  for, so the caller passes an lvalue and the parameter is copied at the
+  call (OWN-7 `given`: a chain read from the command line is copied). The
+  copy costs what the callee's copy did before.
+

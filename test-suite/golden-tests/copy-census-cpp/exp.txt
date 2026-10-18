@@ -83,7 +83,7 @@
 --- matchCondFresh ---
 [100,0]
 --- matchRec ---
-[100,3]
+[100,2]
 --- matchUnwrap ---
 [100,0]
 --- matchTry ---
@@ -91,11 +91,11 @@
 --- throughTwo ---
 [100,0]
 --- throughLoop ---
-[100,2]
+[100,1]
 --- loopFresh ---
-[1,2]
+[1,0]
 --- loopGrow ---
-[1,2]
+[1,1]
 --- loopCarried ---
 [300,1]
 --- loopField ---
@@ -103,13 +103,13 @@
 --- loopTuple ---
 [300,1]
 --- tupleStep ---
-[4,101]
+[4,100]
 --- loopLet ---
-[5051,1]
+[5051,0]
 --- loopLetTwice ---
-[5051,1]
+[5051,0]
 --- loopLetAlias ---
-[5051,101]
+[5051,100]
 --- nonTail ---
 [5050,100]
 --- guardLoop ---

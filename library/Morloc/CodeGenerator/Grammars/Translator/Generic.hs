@@ -544,6 +544,8 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
                     pretty (ldRecordConstructor desc)
                       <> tupled [pretty k <+> "=" <+> v | (k, v) <- rs]
                 }
+        , lcKeepCallArg = \_ _ _ v -> return v
+        , lcKeepSlot = \_ _ v -> return v
         , lcKeepElem = \_ v -> return v
         , lcStoreField = \_ v -> return v
         , lcApplyClosure = \callee args -> callee <> tupled args

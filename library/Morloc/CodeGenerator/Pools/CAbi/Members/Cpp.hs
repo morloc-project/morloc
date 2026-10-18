@@ -43,8 +43,9 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , LowerConfig (..)
   , buildProgramM
   , defaultFoldRules
-  , markLastReadsWith
+  , markLastReadsSeeded
   , namedIn
+  , nativeManifoldsUnder
   , aliasChain
   , RNode (..)
   , rnodeChildren
@@ -61,7 +62,7 @@ import qualified Morloc.Build.Params as BP
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
+import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
 import qualified Morloc.CodeGenerator.Platform as P
@@ -169,11 +170,10 @@ renderTemplatedType name argDocs kindCount
   | T.any (== '$') name = pretty $ expandMacro name (map render argDocs) kindCount
   | otherwise = pretty name <> CP.printRecordTemplate argDocs
 
--- | Every native parameter is a reference ('chooseCallSemantics'), so no
--- type is passed by value; a tag test may read a value a field was taken
--- from, since the payload stays in its arm.
+-- | No type is cheap enough to copy rather than reference; a tag test may
+-- read a value a field was taken from, since the payload stays in its arm.
 cppCaps :: OwnCaps
-cppCaps = OwnCaps {ocCheap = const False, ocTagAfterTake = True}
+cppCaps = OwnCaps {ocCheap = const False, ocTagAfterTake = True, ocListKeeps = False}
 
 chooseCallSemantics :: TypeM -> CallSemantics
 chooseCallSemantics Passthrough = ConstPtr -- const uint8_t* packet
@@ -437,6 +437,8 @@ data CppTranslatorState = CppTranslatorState
   -- ^ The top-level manifold being lowered (see 'translatorPool').
   , translatorMoves :: Set.Set Int
   -- ^ The owned lets of the segment being lowered (OWN-2).
+  , translatorParamMoves :: Set.Set Int
+  -- ^ The parameters the segment's native manifolds take by value (OWN-7).
   , translatorLowered :: [(SerialManifold, [(Int, NativeExpr, LetMode)], Set.Set Int)]
   -- ^ Each segment as lowered, last reads marked, with its let modes and the
   -- lets a last read moves.
@@ -462,6 +464,7 @@ instance Defaultable CppTranslatorState where
       , translatorPool = emptyPoolPlan
       , translatorCurrentRoot = 0
       , translatorMoves = Set.empty
+      , translatorParamMoves = Set.empty
       , translatorLowered = []
       , translatorErrors = []
       }
@@ -545,7 +548,7 @@ translate srcs es = do
       (code, stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
   mapM_ (MM.throwSystemError . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)
   when checkOn $
-    case concatMap checkOne (translatorLowered stEnd) of
+    case concatMap (checkOne pool) (translatorLowered stEnd) of
       [] -> return ()
       vs -> MM.throwSystemError ("C++ pool: ownership check failed (OWN-1):" <+> vsep (map pretty vs))
 
@@ -811,7 +814,7 @@ makeSignature nativeEntries = foldWithSerialManifoldM fm
         else do
           let formArgs = typeMofForm form
 
-          args <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) formArgs
+          args <- zipWithM (cppParamOf i) [0 ..] formArgs
           CMS.put (s {translatorSignatureSet = Set.insert i (translatorSignatureSet s)})
           return [typestr <+> manNamer i <> tupled args <> ";"]
 
@@ -823,8 +826,8 @@ recordAccess record field = record <> "." <> field
 
 -- | The ownership check (OWN-1) of one marked top-level manifold, given how
 -- the pool binds each of its lets.
-checkOne :: (SerialManifold, [(Int, NativeExpr, LetMode)], Set.Set Int) -> [Text]
-checkOne (sm, modes, moves) = checkManifold mode (ocTagAfterTake cppCaps) moves sm
+checkOne :: PoolPlan -> (SerialManifold, [(Int, NativeExpr, LetMode)], Set.Set Int) -> [Text]
+checkOne pp (sm, modes, moves) = checkManifold mode (ocTagAfterTake cppCaps) moves (\m -> Map.findWithDefault Set.empty m (ppByValue pp)) sm
   where
     byIndex = Map.fromListWith (\_ old -> old) [(i, m) | (i, _, m) <- modes]
     mode i _ = Map.findWithDefault LetCopy i byIndex
@@ -845,13 +848,68 @@ cppLetMode i rhs = do
 cppKeepElem :: NativeExpr -> MDoc -> CppTranslatorM MDoc
 cppKeepElem e x = fromMaybe x <$> cppKeptLet e x
 
+-- | Whether a value of a type is not worth moving: a scalar or the unit.
+cppNoMove :: TypeF -> CppTranslatorM Bool
+cppNoMove t = do
+  typestr <- cppTypeOf t
+  return (isScalarCppType typestr || render typestr == "mlc::Unit")
+
+-- | The value a native loop ends with (OWN-2): one of its carried locals at
+-- its last read is moved.
+cppKeepSlot :: [Int] -> NativeExpr -> MDoc -> CppTranslatorM MDoc
+cppKeepSlot ids e x = case e of
+  LetVarN t j LastRead -> slot t j
+  BndVarN t j LastRead -> slot t j
+  _ -> return x
+  where
+    slot t j
+      | j `elem` ids && render x == render (nvarNamer j) = do
+          cheap <- cppNoMove t
+          return (if cheap then x else "std::move(" <> x <> ")")
+      | otherwise = return x
+
 -- | The move of a kept let (OWN-2), when its lowered form is the let itself.
 cppKeptLet :: NativeExpr -> MDoc -> CppTranslatorM (Maybe MDoc)
 cppKeptLet (LetVarN _ i LastRead) x
   | render x == render (nvarNamer i) = do
       moves <- CMS.gets translatorMoves
       return (if Set.member i moves then Just ("std::move(" <> x <> ")") else Nothing)
+cppKeptLet (BndVarN t i LastRead) x
+  | render x == render (nvarNamer i) = do
+      params <- CMS.gets translatorParamMoves
+      if Set.member i params
+        then do
+          cheap <- cppNoMove t
+          return (if cheap then Nothing else Just ("std::move(" <> x <> ")"))
+        else return Nothing
 cppKeptLet _ _ = return Nothing
+
+-- | An argument of a call of native manifold @m@: one it takes by value is
+-- kept (OWN-7).
+cppKeepCallArg :: Int -> Int -> NativeExpr -> MDoc -> CppTranslatorM MDoc
+cppKeepCallArg m j e x = do
+  pp <- CMS.gets translatorPool
+  if Set.member j (Map.findWithDefault Set.empty m (ppByValue pp)) then cppKeepElem e x else return x
+
+-- | The parameter at position @j@ of manifold @m@: one it takes by value is
+-- declared as a value (OWN-7).
+cppParamOf :: Int -> Int -> Arg TypeM -> CppTranslator MDoc
+cppParamOf m j r@(Arg _ t) = do
+  pp <- CMS.gets translatorPool
+  byValue <- case t of
+    Native tf
+      | Set.member j (Map.findWithDefault Set.empty m (ppByValue pp))
+      , not (isFunctionValue tf) -> not <$> cppNoMove tf
+    _ -> return False
+  cppArgOf (if byValue then Copy else chooseCallSemantics t) r
+
+-- | The carried locals of every loop under a node.
+loopSlots :: RNode -> Set.Set Int
+loopSlots n = here n <> Set.unions (map loopSlots (rnodeChildren n))
+  where
+    here (RN (LoopN _ starts _)) = Set.fromList (map fst starts)
+    here (RS (LoopS _ ids _)) = Set.fromList ids
+    here _ = Set.empty
 
 isFunctionValue :: TypeF -> Bool
 isFunctionValue FunF {} = True
@@ -1030,6 +1088,8 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
                 _ -> v
             decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map wrapField rs) <> ";"
         return $ defaultValue {poolExpr = v', poolPriorLines = [decl]}
+    , lcKeepCallArg = cppKeepCallArg
+    , lcKeepSlot = cppKeepSlot
     , lcKeepElem = cppKeepElem
     , lcStoreField = \_ v -> return v
     , lcApplyClosure = \callee args -> callee <> tupled args
@@ -1269,7 +1329,7 @@ PROPAGATE_ERROR(errmsg)|]
                 CMS.modify
                   (\s -> s {translatorLocalManifoldSet = Set.insert callIndex (translatorLocalManifoldSet s)})
             returnTypeStr <- returnType manifoldType
-            typedArgs <- mapM (\r@(Arg _ t) -> cppArgOf (chooseCallSemantics t) r) args
+            typedArgs <- zipWithM (cppParamOf callIndex) [0 ..] args
             let debugMode = translatorDebugMode state
                 -- Outside --debug a frame is a call of a named function,
                 -- labeled with its definition (DIAG-5); any other manifold
@@ -1957,12 +2017,16 @@ translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
   CMS.modify (\st -> st {translatorCurrentRoot = root})
   modes <- mapM (\(i, rhs) -> (\m -> (i, rhs, m)) <$> cppLetMode i rhs) (nativeLets m0)
   viewed <- sourceViewArgs (RSM m0)
+  pp <- CMS.gets translatorPool
   let plan = letPlan modes
       held = lpHeld plan <> Set.fromList [t | j <- Set.toList viewed, t <- j : aliasChain (lpAliases plan) j]
-      m1 = markLastReadsWith (lpAliases plan) held m0
-  cheap <- Set.fromList . map fst . filter snd <$> mapM (\(i, rhs, _) -> (\t -> (i, isScalarCppType t || render t == "mlc::Unit")) <$> cppTypeOf (typeFof rhs)) modes
+      byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | NativeManifold m _ form@(ManifoldFull _) _ <- nativeManifoldsUnder (RSM m0)]
+      params = Set.unions (Map.elems byValue) `Set.difference` loopSlots (RSM m0)
+      seeds m = Set.toList (Map.findWithDefault Set.empty m byValue `Set.intersection` params)
+      m1 = markLastReadsSeeded (lpAliases plan) held seeds m0
+  cheap <- Set.fromList . map fst . filter snd <$> mapM (\(i, rhs, _) -> (,) i <$> cppNoMove (typeFof rhs)) modes
   let moves = lpOwned plan `Set.difference` cheap
-  CMS.modify (\st -> st {translatorMoves = moves, translatorLowered = (m1, modes, moves) : translatorLowered st})
+  CMS.modify (\st -> st {translatorMoves = moves, translatorParamMoves = params, translatorLowered = (m1, modes, moves <> params) : translatorLowered st})
   e <- foldWithSerialManifoldM (defaultFoldRules (cppLowerConfig closureGen)) m1
   return $ renderPoolDocs e
 
