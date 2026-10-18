@@ -29,15 +29,15 @@
 --- twoSteps ---
 [201,100]
 --- partsBorrowed ---
-[100,99]
+[100,0]
 --- partsFresh ---
-[101,100]
+[101,0]
 --- setter ---
 [100,100]
 --- setterFn ---
 [100,100]
 --- tlOnce ---
-[99,99]
+[99,0]
 --- tlLoopRead ---
 [97,294]
 --- tlLoopKeep ---
@@ -77,7 +77,7 @@
 --- guardLoop ---
 [9803,0]
 --- guardKeep ---
-[100,100]
+[100,0]
 --- mixedLoop ---
 [4756,4753]
 --- matchedTwice ---

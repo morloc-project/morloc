@@ -30,21 +30,23 @@ out of scope.
 
 ### OWN-2 A move happens only at a last read
 Intent: ruled 2026-10-17
-Tests: spec-own-2-1, spec-own-2-2, spec-own-2-3, spec-own-2-4, spec-own-2-5, spec-own-2-6, spec-own-2-7, spec-own-2-8, spec-own-2-9, spec-own-2-10, spec-own-2-11, spec-own-2-12
-Code: conforms 2026-10-17
+Tests: spec-own-2-1, spec-own-2-2, spec-own-2-3, spec-own-2-4, spec-own-2-5, spec-own-2-6, spec-own-2-7, spec-own-2-8, spec-own-2-9, spec-own-2-10, spec-own-2-11, spec-own-2-12, spec-own-2-13, spec-own-2-14, spec-own-2-15, spec-own-2-16
+Code: conforms 2026-10-18
 
 A read may move a value it owns only if no later read on its path reads
-that value, and no other read in the same step does. A step is one let's
-right-hand side, one result, or the values one loop iteration passes to the
-next taken together. Reads within a step happen in an unspecified order
+that value, and no other read in the same step does. A step is a
+conditional's test, the value a body ends in, or the values one loop
+iteration passes to the next taken together. A let's right-hand side is a
+body of its own, and each arm of a conditional is a path of its own, so a
+let bound to a conditional splits into the test and one body per arm. Reads within a step happen in an unspecified order
 (EVAL-2), so a value read twice in one step is moved by neither read. A
 read of a local that refers into a value, directly or through other such
 locals, is also a read of that value.
 
 ### OWN-3 A read that may run more than once never moves
 Intent: ruled 2026-10-17
-Tests: spec-own-3-1, spec-own-3-2
-Code: conforms 2026-10-17
+Tests: spec-own-3-1, spec-own-3-2, spec-own-3-3
+Code: conforms 2026-10-18
 
 A read inside a lambda, a nested loop, a separate manifold or a `do` block
 counts as unboundedly many reads. Such a read never moves, and no earlier

@@ -63,6 +63,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , markLastReads
   , markLastReadsWith
   , markLastReadsInBody
+  , markLastReadsInNative
   , loopBorrowLocals
   , BorrowPart (..)
   , BorrowTest (..)
@@ -1392,7 +1393,7 @@ markLastReadsWith aliases held =
     onN (LoopN t starts b) = LoopN t starts (markLoopBody (env (RLN b)) RN lastReadIn (map fst starts) b)
     onN e = e
     onSM (SerialManifold m l f h e) = SerialManifold m l f h (fst (markSpineS (env (RS e)) [] e))
-    onNM (NativeManifold m l f e) = NativeManifold m l f (fst (markSpineN (env (RN e)) [] e))
+    onNM (NativeManifold m l f e) = NativeManifold m l f (fst (markSpineN (env (RN e)) [] [] e))
 
 -- | What marking a body needs: the locals whose reads are reads of a value,
 -- and the values a @do@ block bound by a let reads, which none of their
@@ -1405,15 +1406,27 @@ data MarkEnv = MarkEnv
 markEnv :: Map.Map Int Int -> RNode -> MarkEnv
 markEnv aliases n = MarkEnv (namesOf aliases) (Set.fromList [t | j <- Set.toList (heldReads n), t <- j : aliasChain aliases j])
 
--- | The variables read in the @do@ blocks a let binds under a node.
+-- | The variables read in the @do@ blocks a let binds under a node, a block
+-- the let's value holds through a conditional's arm, a nested let or a
+-- container included.
 heldReads :: RNode -> Set.Set Int
 heldReads n = here n <> Set.unions (map heldReads (rnodeChildren n))
   where
     here m = case m of
-      RN (NativeLetN _ (DoBlockN _ x) _) -> namedIn (RN x)
-      RS (NativeLetS _ (DoBlockN _ x) _) -> namedIn (RN x)
-      RLN (LoopNLet _ (DoBlockN _ x) _) -> namedIn (RN x)
-      RLS (LoopNLet _ (DoBlockN _ x) _) -> namedIn (RN x)
+      RN (NativeLetN _ rhs _) -> blocks rhs
+      RS (NativeLetS _ rhs _) -> blocks rhs
+      RLN (LoopNLet _ rhs _) -> blocks rhs
+      RLS (LoopNLet _ rhs _) -> blocks rhs
+      _ -> Set.empty
+    blocks e = case e of
+      DoBlockN _ x -> namedIn (RN x)
+      IfN _ _ a b -> blocks a <> blocks b
+      NativeLetN _ _ b -> blocks b
+      TupleN _ xs -> foldMap blocks xs
+      RecordN _ _ _ kvs -> foldMap (blocks . snd) kvs
+      VariantN _ _ _ xs -> foldMap blocks xs
+      ListN _ _ xs -> foldMap blocks xs
+      CoerceN _ _ x -> blocks x
       _ -> Set.empty
 
 -- | Every native variable named under a node, the context arguments of the
@@ -1432,51 +1445,57 @@ namedIn n = here n <> Set.unions (map namedIn (rnodeChildren n))
 markLastReadsInBody :: SerialExpr -> SerialExpr
 markLastReadsInBody e = fst (markSpineS (markEnv Map.empty (RS e)) [] e)
 
--- | A let binding @i@ to @rhs@, over a body the continuation marks: the
--- right-hand side is one step, and @i@ is owned in the body unless a @do@
--- block holds it.
-markLet :: (LastReadIn x) => MarkEnv -> [Int] -> Int -> x -> RNode -> ([Int] -> (b, Map.Map Int Int)) -> ((x, b), Map.Map Int Int)
-markLet env owned i rhs rhsNode body =
+-- | 'markLastReads' over one native body, with no aliases.
+markLastReadsInNative :: NativeExpr -> NativeExpr
+markLastReadsInNative e = fst (markSpineN (markEnv Map.empty (RN e)) [] [] e)
+
+-- | A let binding @i@ to a right-hand side, over a body the continuation
+-- marks: @i@ is owned in the body unless a @do@ block holds it. The
+-- right-hand side is marked last, given the reads of the body.
+markLet :: MarkEnv -> [Int] -> Int -> (Map.Map Int Int -> (x, Map.Map Int Int)) -> ([Int] -> (b, Map.Map Int Int)) -> ((x, b), Map.Map Int Int)
+markLet env owned i rhs body =
   let owned' = if Set.member i (meHeld env) then owned else i : owned
       (body', after) = body owned'
-      here = stepReads env owned rhsNode
-   in ((markStep here after rhs, body'), Map.unionWith (+) here (Map.delete i after))
+      rest = Map.delete i after
+      (rhs', here) = rhs rest
+   in ((rhs', body'), Map.unionWith (+) here rest)
 
--- | Mark the last reads of the native lets of a body, along its spine of
--- lets and conditionals: a let's right-hand side is one step, and so is the
--- value the spine ends in (OWN-2). @owned@ holds the lets in scope; the
--- result pairs the marked body with the reads of owned values it makes.
-markSpineN :: MarkEnv -> [Int] -> NativeExpr -> (NativeExpr, Map.Map Int Int)
-markSpineN env owned e = case e of
+-- | Mark the last reads of the native lets of a body along its spine of
+-- lets and conditionals, every right-hand side a spine of its own: a step is
+-- a conditional's test or the value a spine ends in (OWN-2). @owned@ holds
+-- the lets in scope and @later@ the reads that follow the body; the result
+-- pairs the marked body with the reads of owned values it makes.
+markSpineN :: MarkEnv -> [Int] -> [Map.Map Int Int] -> NativeExpr -> (NativeExpr, Map.Map Int Int)
+markSpineN env owned later e = case e of
   NativeLetN i rhs body ->
-    let ((rhs', body'), r) = markLet env owned i rhs (RN rhs) (\o -> markSpineN env o body)
+    let ((rhs', body'), r) = markLet env owned i (\rest -> markSpineN env owned (rest : later) rhs) (\o -> markSpineN env o later body)
      in (NativeLetN i rhs' body', r)
   IfN t c a b ->
-    let (a', ma) = markSpineN env owned a
-        (b', mb) = markSpineN env owned b
-        after = Map.unionWith max ma mb
+    let (a', ma) = markSpineN env owned later a
+        (b', mb) = markSpineN env owned later b
+        arms = Map.unionWith max ma mb
         here = stepReads env owned (RN c)
-     in (IfN t (markStep here after c) a' b', Map.unionWith (+) here after)
+     in (IfN t (markStep here (arms : later) c) a' b', Map.unionWith (+) here arms)
   _ ->
     let here = stepReads env owned (RN e)
-     in (markStep here Map.empty e, here)
+     in (markStep here later e, here)
 
 markSpineS :: MarkEnv -> [Int] -> SerialExpr -> (SerialExpr, Map.Map Int Int)
 markSpineS env owned e = case e of
   NativeLetS i rhs body ->
-    let ((rhs', body'), r) = markLet env owned i rhs (RN rhs) (\o -> markSpineS env o body)
+    let ((rhs', body'), r) = markLet env owned i (\rest -> markSpineN env owned [rest] rhs) (\o -> markSpineS env o body)
      in (NativeLetS i rhs' body', r)
   SerialLetS i rhs body ->
     let (body', after) = markSpineS env owned body
         here = stepReads env owned (RS rhs)
-     in (SerialLetS i (markStep here after rhs) body', Map.unionWith (+) here after)
+     in (SerialLetS i (markStep here [after] rhs) body', Map.unionWith (+) here after)
   ReturnS x -> let (x', r) = markSpineS env owned x in (ReturnS x', r)
-  SerializeS ast x -> let (x', r) = markSpineN env owned x in (SerializeS ast x', r)
+  SerializeS ast x -> let (x', r) = markSpineN env owned [] x in (SerializeS ast x', r)
   DebugWrapS t m args x -> let (x', r) = markSpineS env owned x in (DebugWrapS t m args x', r)
   CacheBodyS t ast lbl m args x -> let (x', r) = markSpineS env owned x in (CacheBodyS t ast lbl m args x', r)
   _ ->
     let here = stepReads env owned (RS e)
-     in (markStep here Map.empty e, here)
+     in (markStep here [] e, here)
 
 -- | Reads of owned values in one step, a read through an alias counting for
 -- every value its chain passes through.
@@ -1485,8 +1504,12 @@ stepReads env owned n = Map.fromList [(v, k) | v <- owned, let k = sum [readCoun
 
 -- | Mark, in a step, the reads of the values it reads once and nothing reads
 -- after it.
-markStep :: (LastReadIn a) => Map.Map Int Int -> Map.Map Int Int -> a -> a
-markStep here after x = foldr lastReadIn x [v | (v, 1) <- Map.toList here, Map.findWithDefault 0 v after == 0]
+markStep :: (LastReadIn a) => Map.Map Int Int -> [Map.Map Int Int] -> a -> a
+markStep here later x = foldr lastReadIn x (lastReadsOf here later)
+
+-- | The values a step reads once and nothing reads after it.
+lastReadsOf :: Map.Map Int Int -> [Map.Map Int Int] -> [Int]
+lastReadsOf here later = [v | (v, 1) <- Map.toList here, all (Map.notMember v) later]
 
 -- | The locals whose reads are reads of a value: the value and every local
 -- whose chain of aliases passes through it. Built once per alias map.
@@ -1513,23 +1536,21 @@ markLoopBody env baseNode markBase carried = fst . go (filter (`Set.notMember` m
   where
     go owned (LoopBase x) =
       let here = stepReads env owned (baseNode x)
-       in (LoopBase (foldr markBase x (lastOf here Map.empty)), here)
+       in (LoopBase (foldr markBase x (lastReadsOf here [])), here)
     go owned (LoopContinue xs) =
       let total = Map.unionsWith (+) (map (stepReads env owned . RN) xs)
-       in (LoopContinue (map (markStep total Map.empty) xs), total)
+       in (LoopContinue (map (markStep total []) xs), total)
     go owned (LoopNLet i x b) =
-      let ((x', b'), r) = markLet env owned i x (RN x) (\o -> go o b)
+      let ((x', b'), r) = markLet env owned i (\rest -> markSpineN env owned [rest] x) (\o -> go o b)
        in (LoopNLet i x' b', r)
     go owned (LoopSLet i x b) =
       let (b', after) = go owned b
           here = stepReads env owned (RS x)
-       in (LoopSLet i (markStep here after x) b', Map.unionWith (+) here after)
+       in (LoopSLet i (markStep here [after] x) b', Map.unionWith (+) here after)
     go owned (LoopIf g t e) =
       let (t', mt) = go owned t
           (e', me) = go owned e
        in (LoopIf g t' e', Map.unionWith (+) (stepReads env owned (RN g)) (Map.unionWith max mt me))
-    lastOf :: Map.Map Int Int -> Map.Map Int Int -> [Int]
-    lastOf here after = [v | (v, 1) <- Map.toList here, Map.findWithDefault 0 v after == 0]
 
 -- | How many times native variable @v@ is read under a node, where a read
 -- that may run more than once counts as two.

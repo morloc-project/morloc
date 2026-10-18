@@ -13,7 +13,7 @@ import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck (testProperty)
 
 import qualified Data.Set as Set
-import Morloc.CodeGenerator.Grammars.Translator.Imperative (RNode (..), loopBorrowLocals, markLastReads, markLastReadsInBody, markLastReadsWith)
+import Morloc.CodeGenerator.Grammars.Translator.Imperative (RNode (..), loopBorrowLocals, markLastReads, markLastReadsInBody, markLastReadsInNative, markLastReadsWith)
 import Morloc.CodeGenerator.Namespace
 
 lastReadTests :: TestTree
@@ -149,7 +149,30 @@ lastReadCases =
         bodyMarks (lets [IntN fv 0, IfN ty (rd 2) (rd 10) (tup [rd 10, IntN fv 1])])
           @?= [[], [10, 10]]
         bodyMarks (lets [IntN fv 0, IfN ty (rd 2) (rd 10) (tup [rd 10, rd 10])])
-          @?= [[], []]
+          @?= [[], [10]]
+    -- a conditional bound by a let marks each arm as a body of its own, its
+    -- lets included
+    , testCase "spec-own-2-13" $
+        bodyMarks (lets [IntN fv 0, IfN ty (rd 2) (NativeLetN 20 (rd 10) (tup [rd 20, rd 10])) (rd 10)])
+          @?= [[], [20, 10, 10]]
+    -- a read after a let-bound conditional keeps the reads in its arms
+    , testCase "spec-own-2-14" $
+        bodyMarks (lets [IntN fv 0, IfN ty (rd 2) (NativeLetN 20 (rd 10) (tup [rd 20, rd 10])) (rd 10), tup [rd 10]])
+          @?= [[], [20], [10]]
+    -- the same in a loop body
+    , testCase "spec-own-2-15" $
+        marks (loop [1] (LoopNLet 10 (IfN ty (rd 2) (NativeLetN 20 (rd 1) (tup [rd 20])) (rd 1)) (LoopBase (tup [rd 10, rd 1]))))
+          @?= [[20], [10, 1]]
+    -- and in a native manifold's body, where a let's right-hand side that is
+    -- a body of lets marks its own lets
+    , testCase "spec-own-2-16" $
+        nativeMarks (NativeLetN 10 (IntN fv 0) (NativeLetN 11 (NativeLetN 20 (rd 10) (tup [rd 20])) (tup [rd 11])))
+          @?= [10, 20, 11]
+    -- a do block a let's value holds through a conditional's arm holds what
+    -- it reads
+    , testCase "spec-own-3-3" $
+        bodyMarks (lets [IntN fv 0, IfN ty (rd 2) (DoBlockN ty (rd 10)) (DoBlockN ty (IntN fv 1)), tup [rd 10, rd 11]])
+          @?= [[], [], [11]]
     -- a value a do block bound by a let reads is never moved, before the
     -- block or after it
     , testCase "spec-own-3-2" $
@@ -215,6 +238,10 @@ bodyMarks = spine . markLastReadsInBody
     spine (NativeLetS _ x b) = marked x : spine b
     spine _ = []
 
+-- | The variables a native body marks, in the order they are written.
+nativeMarks :: NativeExpr -> [Int]
+nativeMarks = marked . markLastReadsInNative
+
 -- | 'marks' with locals that refer into other values.
 marksWith :: Map.Map Int Int -> NativeExpr -> [[Int]]
 marksWith aliases e = case markLastReadsWith aliases Set.empty e of
@@ -232,6 +259,7 @@ marked (LetVarN _ i LastRead) = [i]
 marked (TupleN _ xs) = concatMap marked xs
 marked (DoBlockN _ x) = marked x
 marked (IfN _ c a b) = marked c <> marked a <> marked b
+marked (NativeLetN _ x b) = marked x <> marked b
 marked _ = []
 
 carriedVars :: [Int]
@@ -243,10 +271,18 @@ data Step = Step Bool (Maybe Int) NativeExpr
 
 paths :: LoopBody NativeExpr SerialExpr NativeExpr -> [[Step]]
 paths (LoopIf g t f) = map (Step True Nothing g :) (paths t <> paths f)
-paths (LoopNLet i x b) = map (Step False (Just i) x :) (paths b)
+paths (LoopNLet i x b) = [p <> q | p <- spinePaths i x, q <- paths b]
 paths (LoopSLet _ _ b) = paths b
 paths (LoopBase x) = [[Step False Nothing x]]
 paths (LoopContinue xs) = [[Step False Nothing (tup xs)]]
+
+-- | The paths through a right-hand side bound to @i@: a conditional's test is
+-- a step and each arm a path, a let's right-hand side a body of its own, and
+-- the value the body ends in a step that binds @i@.
+spinePaths :: Int -> NativeExpr -> [[Step]]
+spinePaths i (IfN _ c a b) = map (Step False Nothing c :) (spinePaths i a <> spinePaths i b)
+spinePaths i (NativeLetN j x b) = [p <> q | p <- spinePaths j x, q <- spinePaths i b]
+spinePaths i x = [[Step False (Just i) x]]
 
 -- | Reads of each variable, a read inside a closure counting twice.
 reads' :: NativeExpr -> Map.Map Int Int
@@ -300,14 +336,33 @@ genBody = sized (go (10 :: Int))
             [ (2, leaf)
             , (2, LoopIf <$> genExpr <*> go next (n `div` 2) <*> go next (n `div` 2))
             , (3, LoopNLet next <$> genExpr <*> go (next + 1) (n - 1))
+            , (2, LoopNLet next <$> genSpine (100 * next) 2 <*> go (next + 1) (n - 1))
             ]
     leaf = oneof [LoopBase <$> genExpr, LoopContinue <$> vectorOf (length carriedVars) genExpr]
 
+-- | A right-hand side that is a conditional or a let, its lets numbered from
+-- @base@ and read by what follows them.
+genSpine :: Int -> Int -> Gen NativeExpr
+genSpine base depth
+  | depth <= 0 = genExprWith (inner base)
+  | otherwise =
+      frequency
+        [ (1, genExprWith (inner base))
+        , (2, IfN ty <$> genExprWith (inner base) <*> genSpine (base + 10) (depth - 1) <*> genSpine (base + 20) (depth - 1))
+        , (2, NativeLetN base <$> genExprWith (inner base) <*> genSpine (base + 1) (depth - 1))
+        ]
+  where
+    inner b = [b - k | k <- [1 .. 3], b - k > 100 * (b `div` 100)]
+
 genExpr :: Gen NativeExpr
-genExpr = sized (\n -> go (min n 4))
+genExpr = genExprWith []
+
+-- | 'genExpr', also reading the given locals.
+genExprWith :: [Int] -> Gen NativeExpr
+genExprWith extra = sized (\n -> go (min n 4))
   where
     go :: Int -> Gen NativeExpr
-    go 0 = oneof [rd <$> elements (carriedVars <> [10, 11, 12, 7]), pure (IntN fv 0)]
+    go 0 = oneof [rd <$> elements (carriedVars <> [10, 11, 12, 7] <> extra), pure (IntN fv 0)]
     go n =
       frequency
         [ (3, go 0)
