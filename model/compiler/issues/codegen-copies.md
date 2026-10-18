@@ -45,12 +45,6 @@ records and user-mapped types copy deeply.
   exit and by-value source arguments still copy one (`accL`: 2k+3 copies
   for k+1 values built). A C++ list literal
   copies each element twice (an initializer list).
-- **OWN-2's one-step rule moves neither of a borrowing and a moving read.**
-  [reproduced] `eat (acc + chainLen rest) (Link 0 rest)` in a Rust tail loop
-  copies `rest` each step (quadratic), though the borrowing read is
-  evaluated into a temporary before the move. EVAL-2 (ruled 2026-10-18)
-  lets the compiler run the borrowing read first; OWN-2 still says a value
-  read twice in one step is moved by neither read.
 - **A C++ loop copies a carried value no step changes.** [reproduced] A
   loop slot every continue passes on unchanged is a borrow in Rust (OWN-6)
   but a copy of its start in C++ (golden copy-census-cpp throughLoop,
@@ -63,6 +57,20 @@ records and user-mapped types copy deeply.
   `[=]` do-block thunk copies. A setter on a loop-carried record copies
   every unchanged field each iteration, as the carried local is not among
   the lets a setter may take.
+- **A Rust staged closure deep-copies the captures it just took.** [read]
+  Rust.hs ~1073 emits `let __sc = __caps.clone();` for every closure with a
+  stage, right after `capInit` filled `__caps` by moving dead values, so
+  the OWN-3 move is undone and each capture is copied once more. The
+  per-level `__xj.clone()` of a pap with no stage feeds only `pap(&...)`
+  and could borrow.
+- **C++ closure forms copy each capture several times.** [read] Per
+  capture not moved: a `MorlocClosure` 2 (binder and reify thunk), a pap 6
+  (pool.cpp ~1391-1392 copy `fn` and `reify` into the closure, then into
+  `apply1`), a staged form 8; each pap step copies every capture and the
+  applied argument 6-8 times (pool.cpp ~1371, ~1394-1395: named
+  by-value parameters). Reify reads through `const&` and needs no copy.
+  copy-census-cpp does not reach these forms: they are built only for
+  closures that cross (`crossingClosures`, Common.hs).
 - **Closure and wire paths copy what they only serialize.** [read] Rust:
   staged closures re-clone every earlier argument at each level (about n^2
   argument clones for an n-ary function); a reflected closure's origin,

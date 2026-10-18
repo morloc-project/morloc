@@ -124,7 +124,9 @@ same name sees what was taken.
   `int f(T&)` compiles against a let and changes the value every later
   reader of that let sees. Passing each lvalue argument of a sourced call
   as `std::as_const(n)` would make every such source a build error, at no
-  run-time cost.
+  run-time cost. The same holds inside root-cpp's higher-order templates,
+  which call a passed function on a non-const local (`y = f(y, x)` in
+  core.hpp folds), so a `B f(B&, A)` passed to `foldl` would still compile.
 - **A C++ view returned into a temporary dangles.** [read] Violates EVAL-7
   (ruled 2026-10-18), unchecked. A nested sourced call renders inline
   (`census(m6087(n3))`, copy-census-cpp baseWalk), so a source returning a
