@@ -89,3 +89,12 @@ records and user-mapped types copy deeply.
   `MapOptionalN` and the optional-map intrinsic render `auto src = ...;
   T u = src.value();` (CppPrinter.hs ~269-275), copying the optional and
   then its value; `const auto&` would copy neither.
+- **`map unpack` over a newtype with no native form copies every element.**
+  [reproduced] The cast is erased in native code (NEWT-7), but the `map`
+  around it is not: Rust renders `morloc_map_vec` with an identity
+  function, cloning each element. biolib stream's `unpackReader` (`mapReader
+  (map unpack)`) pays it on every batch: ingesting a 100 Mb FASTA through
+  bio's `readFasta` takes ~0.70 s and 271 MiB against ~0.67 s and 254 MiB
+  with the tagged reader directly; the stream files are identical. A map
+  whose function is a representation cast could be the identity on the
+  list.
