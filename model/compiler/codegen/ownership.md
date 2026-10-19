@@ -123,3 +123,40 @@ reads it for the last time, and copies it otherwise, so a copy happens at
 most once per call and only where the caller still needs the value. A
 closure keeps taking its parameters by reference, since its signature is
 shared by every caller.
+
+### OWN-8 A function that returns part of what it borrowed returns a reference
+Intent: open
+Code: unaudited
+
+A manifold that takes a value by reference and returns a part of it -- a
+constructor field, a record field, a list element, the tail of a chain --
+returns a reference into its argument instead of an owned copy, when every
+caller reads the result only while the argument lives. It pays only where
+copying the part is deep (a list, string, record, tuple, or a Rust `data`
+type mapped with `Box` arms; a generated `data` value already copies as a
+reference count), where the function is not inlined (a small accessor
+already reads in place once inlined), and where the result is read in a
+loop: the case recorded in compiler/issues/codegen-ownership.md ("A Rust
+loop stepped by a function that returns part of its argument copies the
+part"). It needs lifetime parameters on generated Rust signatures, a check
+that no C++ reference outlives its root (OWN-1), and a parameter mode that
+OWN-7's solve accounts for. Open: which callers may receive a reference,
+and whether a returned reference may cross a loop's continue.
+
+### OWN-9 A dead `data` arm is reused for a constructor of the same shape
+Intent: open
+Code: unaudited
+
+When a manifold reads the last of a `data` value it holds alone and builds
+a constructor whose arm has the same layout, the new arm is written into
+the old one instead of freeing it and allocating anew (reset and reuse).
+It pays for persistent structures updated in place -- a chain rebuilt link
+by link, a tree insert, a syntax tree rewrite -- saving an allocation and a
+free per node, and only when the value is unshared at run time; otherwise
+the arm is allocated as today. Lists are not `data` arms and gain nothing.
+It needs OWN-5's run-time sharing test, and it shares the open question of
+compiler/issues/codegen-ownership.md ("A C++ `Try` bound from a suspension's
+result is copied when unwrapped"): writing into an arm is sound only for an
+arm morloc allocated, so either the arms morloc allocates are tagged, or
+sourced code is ruled never to build a const arm nor keep a weak reference
+to one. That one decision settles both.
