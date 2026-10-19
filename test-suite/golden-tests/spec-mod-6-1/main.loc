@@ -1,0 +1,14 @@
+-- Spec MOD-6: a local import resolves from the root of the package that
+-- holds it. This program and the package it imports both have a
+-- `lib/types.loc`; each of their `.lib.types` imports reaches its own.
+module main (fromMain, fromPkg)
+
+import root-py
+import pkg (pkgValue)
+import .lib.types (localValue)
+
+fromMain :: Int
+fromMain = localValue
+
+fromPkg :: Int
+fromPkg = pkgValue

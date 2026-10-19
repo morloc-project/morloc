@@ -18,6 +18,7 @@ Handles all aspects of the morloc module system:
 -}
 module Morloc.Module
   ( findModule
+  , findLocalModuleAt
   , findBareModuleMaybe
   , isLocalImport
   , autoInstallDep
@@ -386,7 +387,12 @@ findLocalModule currentModule importModule = do
     Nothing -> MM.throwSystemError $
       "Cannot resolve local import" <+> squotes (pretty importModule)
         <+> "without a project root (are you reading from stdin?)"
-    Just root -> do
+    Just root -> findLocalModuleAt currentModule root importModule
+
+-- | Resolve a local import from the root of the package that contains it.
+-- e.g., .foo.bar -> <root>/foo/bar.loc or <root>/foo/bar/main.loc
+findLocalModuleAt :: MVar -> Path -> MVar -> MorlocMonad Path
+findLocalModuleAt currentModule root importModule = do
       let MV importText = importModule
           nameParts = map MT.unpack $ MT.splitOn "." (MT.drop 1 importText)
           candidates =

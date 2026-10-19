@@ -51,13 +51,23 @@ The answer fixes the module identity that MOD-14 and MOD-17 rely on.
 
 ## Imports
 
-### MOD-6 A dotted import resolves from the project root
-Intent: proposed
-Code: unaudited
+### MOD-6 A dotted import resolves from its package's root
+Intent: ruled 2026-10-19
+Tests: spec-mod-6-1
+Code: conforms 2026-10-19
 
-The project root is the directory of the entry file given to the compiler.
-`import .a.b` names `a/b.loc` or `a/b/main.loc` under that root. The
-same import line names the same module in every file of the project.
+A module belongs to a package: the program, whose root is the directory of
+the entry file given to the compiler, or a package reached by a dotless
+import, whose root is the directory of that package's file. A local module
+belongs to the package of the module that imports it. `import .a.b` names
+`a/b.loc` or `a/b/main.loc` under the root of the importing module's
+package, so a package's local imports mean the same wherever it is
+imported. In a package `p` other than the program, the module it names is
+`p.a.b`, distinct from any other package's `.a.b`.
+
+Why: a package's own files are relative to it; resolving them from the
+program that imports it made an installed package with submodules
+unloadable.
 
 ### MOD-7 A dotless import is a system module
 Intent: proposed

@@ -136,7 +136,7 @@ parse f (Code code) = do
         { stateModuleDoc = psModuleDoc mainState
         , stateModuleEpilogues = psModuleEpilogues mainState
         })
-      parseImports mainDag mainState Map.empty
+      parseImports mainDag mainState Map.empty Map.empty Map.empty
   where
     -- Resolve an import to a file path. Local (.dot) imports are project
     -- files and are never downloaded. A missing bare/namespaced import is
@@ -161,12 +161,22 @@ parse f (Code code) = do
               Mod.findModule (mainPath, mainModule) importedModule
 
     -- descend recursively into imports
+    --
+    -- A module's local imports resolve from the root of its own package
+    -- (MOD-6): the entry file's directory for the program, the directory of
+    -- a package reached by a bare import for that package. In such a
+    -- package, a local import `.x` becomes the module `p.x` (p the package),
+    -- so two packages' local modules of one name stay distinct. @pkgs@ holds
+    -- each module's package, absent for the program's own modules; @rw@
+    -- holds each renamed import's package root and written name.
     parseImports ::
       DAG MVar Import ExprI ->
       PState ->
       Map.Map MVar Path ->
+      Map.Map MVar (MVar, Path) ->
+      Map.Map MVar (Path, MVar) ->
       MorlocMonad (DAG MVar Import ExprI)
-    parseImports d s m = case unimported of
+    parseImports d s m pkgs rw = case unimported of
       [] -> do
         -- transfer source positions from parser state into MorlocState
         MM.modify (\st -> st
@@ -182,7 +192,9 @@ parse f (Code code) = do
       ((mainModule, importedModule) : _) -> do
         when (mainModule == importedModule) . MM.throwSystemError $
           "Module" <+> pretty importedModule <+> "imports itself"
-        importPath <- resolveImport (Map.lookup mainModule m) mainModule importedModule
+        importPath <- case Map.lookup importedModule rw of
+          Just (root, written) -> Mod.findLocalModuleAt mainModule root written
+          Nothing -> resolveImport (Map.lookup mainModule m) mainModule importedModule
 
         -- Load the <main>.yaml file associated with the main morloc package file
         moduleConfig <- Config.loadModuleConfig (Just importPath)
@@ -198,13 +210,41 @@ parse f (Code code) = do
             -- import edge targets ".units"). Reconcile by renaming the DAG
             -- entry to match the import name.
             let d'' = reconcileModuleName importedModule d d'
-            in parseImports d'' s' (maybe m (\v -> Map.insert importedModule v m) childPath)
+                pkg = case Map.lookup importedModule rw of
+                  Just _ -> Map.lookup mainModule pkgs
+                  Nothing
+                    | Mod.isLocalImport importedModule -> Map.lookup mainModule pkgs
+                    | otherwise -> Just (importedModule, MS.takeDirectory importPath)
+                (d3, renamed) = case pkg of
+                  Just (p, root) -> renameLocalImports p root importedModule d''
+                  Nothing -> (d'', [])
+                pkgs' = maybe pkgs (\v -> Map.insert importedModule v pkgs) pkg
+                rw' = Map.union rw (Map.fromList renamed)
+            in parseImports d3 s' (maybe m (\v -> Map.insert importedModule v m) childPath) pkgs' rw'
       where
         -- all modules that have already been parsed
         parsed = Map.keysSet d
         -- find all (module to module) edges in the graph where the imported
         -- module has not yet been parsed
         unimported = filter (\(_, importMod) -> not (Set.member importMod parsed)) (MDD.edgelist d)
+
+    -- Give a package module's local imports their package-qualified names,
+    -- returning each new name's package root and written name.
+    renameLocalImports ::
+      MVar -> Path -> MVar -> DAG MVar Import ExprI -> (DAG MVar Import ExprI, [(MVar, (Path, MVar))])
+    renameLocalImports (MV p) root k dag = case Map.lookup k dag of
+      Nothing -> (dag, [])
+      Just (ExprI i e, edges) ->
+        let locals = [v | (v, _) <- edges, Mod.isLocalImport v]
+            qualified v@(MV t) = if Mod.isLocalImport v then MV (p <> t) else v
+            renameImport imp = imp {importModuleName = qualified (importModuleName imp)}
+            renameExpr (ExprI j (ModE n es)) = ExprI j (ModE n (map renameExpr es))
+            renameExpr (ExprI j (ImpE imp)) = ExprI j (ImpE (renameImport imp))
+            renameExpr x = x
+            edges' = [(qualified v, renameImport imp) | (v, imp) <- edges]
+         in ( Map.insert k (renameExpr (ExprI i e), edges') dag
+            , [(qualified v, (root, v)) | v <- locals]
+            )
 
     -- If readProgram added a key that doesn't match importedModule, rename it.
     -- This happens when a local import (".units") parses a file that declares
