@@ -578,7 +578,11 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
               -- When multiple distinct instances exist (e.g. Integral Int
               -- and Integral Real), don't propagate -- solving to one
               -- would break the others.
-              singleGroup = length deduped <= 1
+              -- A cast is one more implementation of its newtype's instance,
+              -- however that instance names its variables.
+              explicitGroups = nubBy (\t1 t2 -> eval t1 == eval t2)
+                [etype t | (t, rs) <- rssSubtypes, chosen t, not (all isRepresentationCast rs)]
+              singleGroup = length explicitGroups <= 1
           g1 <- connectInstance singleGroup g0 es0
           return (g1, es0)
 

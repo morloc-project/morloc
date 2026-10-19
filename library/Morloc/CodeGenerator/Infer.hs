@@ -175,11 +175,16 @@ undeterminedError i0 vs = do
   let i = case mapMaybe (`Map.lookup` sites) vs of
         (site : _) -> site
         [] -> i0
-  MM.throwSourcedError i $
-    "The type of this term is not determined: nothing in the program fixes"
-      <+> hsep (punctuate "," (map (squotes . pretty . written) vs))
-      <> ". Add a signature or an annotation that does."
+  MM.throwSourcedError i $ case filter (not . generated) vs of
+    [] -> "The type of this term is not determined. Add a signature or an annotation that fixes it."
+    named ->
+      "The type of this term is not determined: nothing in the program fixes"
+        <+> hsep (punctuate "," (map (squotes . pretty . written) named))
+        <> ". Add a signature or an annotation that does."
   where
+    -- a variable the compiler made up, as for an accessor, names nothing the
+    -- reader wrote
+    generated (TV n) = "_" `MT.isPrefixOf` n
     -- the name as written: without the suffix that makes it unique, or
     -- without the prefix and counter 'toExistential' gives a class method's
     -- variable

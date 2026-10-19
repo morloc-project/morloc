@@ -51,7 +51,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import Morloc.Typecheck.Internal (apply, emptyGamma, mapTypeUChildren, qualify, substitute, subtype, typeUChildren, unqualify)
+import Morloc.Typecheck.Internal (apply, emptyGamma, isSubtypeOf2, mapTypeUChildren, qualify, substitute, subtype, typeUChildren, unqualify)
 import qualified Data.List as List
 import Morloc.Frontend.TypeNames (isReservedTypeName)
 
@@ -1475,24 +1475,25 @@ packerSources lang m0 pin = case Map.lookup lang (piSources pin) of
 findCoveringPacker :: Lang -> Int -> Type -> MorlocMonad (Maybe Source)
 findCoveringPacker lang m0 t = do
   instances <- findPackerInstances
-  let key = extractKey (type2typeu t)
-      -- coverage is decided by the head alone; the pair stands in for the
-      -- sources 'resolvePacker' reads
-      candidates =
-        [ pin {piSources = Map.singleton lang (p, p)}
+  gscope <- MM.getGeneralScope
+  let useT = type2typeu t
+      -- Coverage is a property of the general types: a head covers the
+      -- use site when it specializes to it, any of its variables (a
+      -- dimension included) standing for anything.
+      generic h =
+        let (vs, body) = unqualify h
+         in qualify (List.nub (vs <> occurrences body)) body
+      occurrences (VarU v@(TV n)) = [v | Just (c, _) <- [DT.uncons n], C.isLower c]
+      occurrences (KVarU (v, _)) = [v]
+      occurrences x = concatMap occurrences (typeUChildren x)
+      covers pin = isSubtypeOf2 gscope (generic (piHead pin)) useT
+      matches =
+        [ pin
         | pin <- instances
-        , extractKey (piHead pin) == key
-        , Just p <- [Map.lookup lang (piPacks pin)]
+        , extractKey (piHead pin) == extractKey useT
+        , Map.member lang (piPacks pin)
+        , covers pin
         ]
-  matches <- case candidates of
-    [] -> return []
-    _ -> do
-      tf <- inferConcreteType lang (Idx m0 t)
-      case tf of
-        AppF _ _ -> do
-          resolved <- mapM (resolvePacker lang m0 tf) candidates
-          return [pin | (pin, Right _) <- zip candidates resolved]
-        _ -> return candidates
   let maxima = mostSpecific (map piHead matches)
   case [pin | pin <- matches, any (equivalent (piHead pin)) maxima] of
     [] -> return Nothing
