@@ -502,7 +502,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
               else parens
                 (pretty (substituteT (ldListLengthTemplate desc) [("expr", render subj)])
                   <+> "==" <+> pretty n)
-        , lcListElem = \subj i -> case ldIndexStyle desc of
+        , lcListElem = \_ subj i -> case ldIndexStyle desc of
             ZeroBracket -> parens subj <> "[" <> pretty i <> "]"
             OneBracket -> parens subj <> "[" <> pretty (i + 1) <> "]"
             OneDoubleBracket -> parens subj <> "[[" <> pretty (i + 1) <> "]]"

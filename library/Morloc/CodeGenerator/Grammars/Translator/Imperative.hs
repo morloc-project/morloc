@@ -72,6 +72,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , BorrowPart (..)
   , BorrowTest (..)
   , borrowPartOf
+  , varIndex
   , consumedParams
   , nativeManifoldsUnder
   , RNode (..)
@@ -585,7 +586,8 @@ data LowerConfig m = LowerConfig
   , lcListLenTest :: MDoc -> Int -> MDoc
   -- ^ Test whether a list has exactly this many elements ('IntrListLenTest'):
   -- the subject and the length.
-  , lcListElem :: MDoc -> Int -> MDoc
+  , lcListElem :: Bool -> MDoc -> Int -> MDoc
+  -- ^ Read element @i@ of a list; the flag marks an element read in place.
   -- ^ Read the element at a 0-based index of a list ('IntrListElem'): the
   -- subject and the index. Only ever emitted under a passing
   -- 'lcListLenTest', so the index is in range.
@@ -1827,6 +1829,8 @@ data BorrowPart
   -- ^ the subject's type, the subject, the arm and the field
   | BorrowField Int [Either Int Text]
   -- ^ a getter of one path
+  | BorrowElem BorrowPart Integer
+  -- ^ a list subject and the element's index
   | BorrowIf BorrowTest BorrowPart BorrowPart
   -- ^ a test, then the two arms
   | BorrowLet Int BorrowPart BorrowPart
@@ -1848,6 +1852,7 @@ borrowPartOf mayBorrow = go
       | not (mayBorrow (typeFof e)) = Nothing
       | otherwise = case e of
           IntrinsicN _ IntrCtorField _ [s, StrN _ n, IntN _ k] -> (\p -> BorrowCtorField (typeFof s) p n k) <$> go env s
+          IntrinsicN _ IntrListElem _ [s, IntN _ k] -> (`BorrowElem` k) <$> go env s
           AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr s]
             | not (selectorHasBracket sel), [path] <- ungroup sel -> (`BorrowField` path) <$> var env s
           IfN _ c a b
@@ -2789,9 +2794,10 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, IntN _ n]) (IntrinsicN_ _ IntrListL
   return $ mergePoolDocs
     (const (lcListLenTest cfg (poolExpr subjectDocs) (fromIntegral n)))
     [subjectDocs]
-lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, IntN _ i]) (IntrinsicN_ _ IntrListElem _ [subjectDocs, _]) =
+lowerNativeExprRaw cfg origE@(IntrinsicN _ _ _ [_, IntN _ i]) (IntrinsicN_ _ IntrListElem _ [subjectDocs, _]) = do
+  self <- lcOwnership cfg origE
   return $ mergePoolDocs
-    (const (lcListElem cfg (poolExpr subjectDocs) (fromIntegral i)))
+    (const (lcListElem cfg (self == BorrowedRef) (poolExpr subjectDocs) (fromIntegral i)))
     [subjectDocs]
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFSchema _ [pathDocs]) =
   return $ pathDocs

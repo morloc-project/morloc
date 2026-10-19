@@ -15,7 +15,9 @@ records and user-mapped types copy deeply.
 - **A projection is copied when its consumer only reads it.** [reproduced]
   Rust: a field of a borrowed tuple or record bound by a let (`n16.0.clone()`,
   1000 clones for a 1000-link chain), a list pattern element
-  (`(n)[0].clone()`, always), a tag test on a nested field, a conditional
+  of a list the frame owns, where an owned sink needs it, and a field of an
+  element (`[Link _ rest]` clones `rest`, since a list element is not a
+  borrowable projection root), a tag test on a nested field, a conditional
   whose arms are fields (`count 0 (match r | Good c = c ...)`), and a
   non-tail recursion that rebuilds a chain (`inc`, quadratic). Rust binds
   a let to a reference only when its root is borrowed, so a getter on a

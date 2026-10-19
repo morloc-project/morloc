@@ -19,7 +19,7 @@
 --- tupleFresh ---
 [100,0]
 --- listPat ---
-[200,200]
+[200,0]
 --- listRet ---
 [100,100]
 --- twiceRead ---

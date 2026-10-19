@@ -91,14 +91,15 @@ for all but one of those reads.
 
 ### OWN-6 A loop that only walks what it was lent borrows it
 Intent: ruled 2026-10-17
-Tests: spec-own-6-1, spec-own-6-2, spec-own-6-3, spec-own-6-4, spec-own-6-5, spec-own-6-6, spec-own-6-7, spec-own-6-8, spec-own-6-9, spec-own-6-10, spec-own-6-11, spec-own-6-12, spec-own-6-13, spec-own-6-14, spec-own-6-15, spec-own-6-16
+Tests: spec-own-6-1, spec-own-6-2, spec-own-6-3, spec-own-6-4, spec-own-6-5, spec-own-6-6, spec-own-6-7, spec-own-6-8, spec-own-6-9, spec-own-6-10, spec-own-6-11, spec-own-6-12, spec-own-6-13, spec-own-6-14, spec-own-6-15, spec-own-6-16, spec-own-6-17
 Code: conforms 2026-10-17
 
 A value a tail loop carries is a borrow, not a copy, when it starts from a
 value the loop's manifold borrows and every iteration replaces it with that
-value itself, a constructor field or a record field of a borrow or of
-such a part, or a `match` against constructors of such parts whose every
-arm is such a part or the failure when no arm matches. A let, in a loop or
+value itself, a constructor field, a record field or a list element of a
+borrow or of such a part (list elements ruled 2026-10-19), or a `match`
+against constructors of such parts whose every arm is such a part or the
+failure when no arm matches. A let, in a loop or
 not, bound to such a part is a borrow too, unless its index is bound twice
 or its type is one a copy of costs nothing. A constructor field read from a
 value that is not taken there is read in place, and copied only where a

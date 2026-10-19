@@ -63,6 +63,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , borrowableRoot
   , isLastRead
   , borrowPartOf
+  , varIndex
   , IExpr (IStrLit)
   , papplySteps
   , defaultDeserialize
@@ -803,8 +804,8 @@ thinClosures sinks stageTable heads es =
 -- order. A bound variable is a @&T@ reference only when it is a borrowed
 -- parameter; a shared value is a place (borrowed at reference sinks, cloned at
 -- owned sinks -- never moved); a getter of a borrowed value is a place; a
--- constructor field that is not taken is a reference (OWN-6); everything else
--- is an owned value.
+-- constructor field that is not taken, and a list element of a variable or
+-- of such a field, is a reference (OWN-6); everything else is an owned value.
 ownerPure :: Set.Set Int -> Set.Set Int -> NativeExpr -> IOwnership
 -- A bound variable and a let variable both render as `n<i>` and share the index
 -- namespace, so both classify the same way ('classifyIndex').
@@ -822,6 +823,11 @@ ownerPure g s (IntrinsicN t IntrCtorField _ (subj : _))
   | not (rustIsCopy t)
   , borrowableRoot subj
   , not (isLastRead subj && ownerPure g s subj == Owned) =
+      BorrowedRef
+ownerPure g s (IntrinsicN t IntrListElem _ (subj : _))
+  | not (rustIsCopy t)
+  , borrowableRoot subj
+  , isJust (varIndex subj) || ownerPure g s subj == BorrowedRef =
       BorrowedRef
 ownerPure _ _ _ = Owned
 
@@ -2408,9 +2414,11 @@ rustLowerConfig mask consumed =
     , lcEnumTagTest = \ty _ n _ subj ->
         parens (subj <+> "==" <+> "<" <> ty <> ">::" <> pretty n)
     , lcListLenTest = \subj n -> parens (parens subj <> ".len() ==" <+> pretty n)
-    -- Indexing yields a place, not a value, so the element is cloned out of
-    -- it, as a constructor field is.
-    , lcListElem = \subj i -> parens subj <> "[" <> pretty i <> "].clone()"
+    -- Indexing yields a place, not a value: an element read in place is a
+    -- reference into it, and any other is cloned out, as a constructor field
+    -- is.
+    , lcListElem = \inPlace subj i ->
+        if inPlace then rustElemRef subj (fromIntegral i) else parens subj <> "[" <> pretty i <> "].clone()"
     , lcCoerceOptional = \x -> "Some(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> rustTypeOf t
     -- The serialize / raw-deserialize types use the WIRE form: a closure nested
@@ -2614,6 +2622,7 @@ rustLoopBorrow i e = do
         p' <- renderPart p
         return (rustArmField ty n p' ("&mlc_b." <> pretty k))
       BorrowField j path -> return ("&" <> writeSelectorRust (nvarNamer j) path)
+      BorrowElem p k -> (`rustElemRef` k) <$> renderPart p
       BorrowIf c a b -> do
         c' <- renderTest c
         a' <- renderPart a
@@ -2635,6 +2644,10 @@ rustLoopBorrow i e = do
         x' <- renderTest x
         y' <- renderTest y
         return (parens (x' <+> "&&" <+> y'))
+
+-- | A reference to element @k@ of a list.
+rustElemRef :: MDoc -> Integer -> MDoc
+rustElemRef subj k = parens ("&" <> parens subj <> "[" <> pretty k <> "]")
 
 -- | Match a subject already known to be in arm @n@ and yield an expression
 -- over its payload, @mlc_b@.
