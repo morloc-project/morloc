@@ -3,6 +3,10 @@
 - [read] POLY-6 says the error names the variable; for a variable from a
   library signature the name may be a generated one (e.g. `itemType_6`).
   Only the `@` suffix is stripped (Infer.undeterminedError).
+  [reproduced] Two variables written with one name print as that name twice:
+  `ingest loadSource 3 p q` (biolib stream, both signatures say `a`) gives
+  "nothing in the program fixes 'a', 'a'", which does not say which terms
+  they belong to.
 - [read] Violates DOC-3. A `@mime` on an optional or effect alias is
   dropped where the alias is expanded: Restructure.writtenAliasDocs carries
   the alias's other directives into the signature but not its media type,

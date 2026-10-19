@@ -17,5 +17,5 @@ it is solved, and a file when it is empty.
 - [tables.md](tables.md): a table cannot be streamed; it is loaded whole before the command runs
 - [interfaces.md](interfaces.md): CLI, daemon HTTP/LP, MCP and front end disagree on commands served, argument decoding and defaults, `@default`, render bytes, failure classes, discovery, limits and eval gating (IFACE)
 - [labels.md](labels.md): unmeasured stage work of a labeled partial application, constants a labeled function computes evaluated outside its hooks
-- [host-calls.md](host-calls.md): a host-returned function keeps its declared grouping only when an effect forces an adapter (HOST-4)
+- [host-calls.md](host-calls.md): a host-returned function keeps its declared grouping only when an effect forces an adapter (HOST-4); a point-free reader over a Rust function fails when Python both collects and writes it (WIRE-6)
 - [syntax.md](syntax.md): blocks opened mid-line are not closed by `,` `;` `:` `where`; a missing `let` in `do { y = 1; ... }` is reported as a record
