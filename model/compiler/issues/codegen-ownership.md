@@ -72,7 +72,10 @@ same name sees what was taken.
   golden:spec-emit-3-1 (`up 3`: 8 moves). An arm whose value is a
   borrowed `const T&` local is "moved" too (`helper0 = std::move(n54)`),
   which copies while reading as a move, since `armOwnsResult` counts a
-  borrowed let as owned.
+  borrowed let as owned. Binding the let as `T&&` to the helper was tried
+  (2026-10-19) and gains nothing where the let is returned: the return
+  then moves instead of eliding; the helper itself would have to be the
+  returned variable.
 - **An owned Rust loop local stepped through a `match` copies the rest of
   its value every step.** [reproduced] Cost; OWN-2 counts the `match`'s tag
   tests and its field read as reads in one step, so the field is copied
