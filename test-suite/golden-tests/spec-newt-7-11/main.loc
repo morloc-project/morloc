@@ -1,0 +1,26 @@
+-- Spec NEWT-7: a representation cast passed as a function value, as `map`
+-- uses it, holds each element as its own value in Rust and C++.
+module main (untagRust, tagRust, untagCpp, tagCpp)
+
+import root-rust
+import root-cpp
+
+newtype Tag a = a deriving (Packable)
+
+source Rust from "main.rs" ("rust_join" as rustJoin)
+rustJoin :: [Str] -> Str
+
+source Cpp from "main.hpp" ("cpp_join" as cppJoin)
+cppJoin :: [Str] -> Str
+
+untagRust :: [Tag Str] -> Str
+untagRust xs = rustJoin (map unpack xs)
+
+tagRust :: [Str] -> [Tag Str]
+tagRust xs = map pack (map unpack (map pack xs :: [Tag Str]) :: [Str])
+
+untagCpp :: [Tag Str] -> Str
+untagCpp xs = cppJoin (map unpack xs)
+
+tagCpp :: [Str] -> Str
+tagCpp xs = cppJoin (map unpack (map pack xs :: [Tag Str]))

@@ -559,6 +559,9 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoDoBlock _ _) =
       error "morloc bug: a suspension reached serialization unlowered (Suspension.lowerSuspensions runs first)"
     nativeExpr m (MonoEval t e) = EvalN <$> inferType t <*> nativeExpr m e
+    -- A cast runs only where the newtype has its representation's native form
+    -- (NEWT-7), so natively it is its argument.
+    nativeExpr m (MonoCoerce (CoerceNewtype _ _) _ e) = nativeExpr m e
     nativeExpr m (MonoCoerce c t e) = CoerceN c <$> inferType t <*> nativeExpr m e
     -- Runtime intrinsics (save/load, streams, @try, ...). The C functions
     -- are eager; an intrinsic declared with a suspension result reaches

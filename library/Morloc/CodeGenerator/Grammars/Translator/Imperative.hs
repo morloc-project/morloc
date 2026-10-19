@@ -2603,8 +2603,8 @@ lowerNativeExprRaw cfg (CoerceN _ _ innerE) (CoerceN_ CoerceToOptional _ x) = do
   return $ x' {poolExpr = lcCoerceOptional cfg boxed}
 lowerNativeExprRaw cfg _ (CoerceN_ CoerceToOptional _ x) =
   return $ x {poolExpr = lcCoerceOptional cfg (poolExpr x)}
--- A cast is realized only where the newtype and its representation share a
--- native form (NEWT-7), so the value is unchanged.
+-- Casts are removed when native expressions are built (Serialize); one that
+-- reached here would be its argument.
 lowerNativeExprRaw _ _ (CoerceN_ (CoerceNewtype _ _) _ x) = return x
 -- The two arms feed the conditional's owned result sink, so adapt each to an
 -- owned value (like every other owned sink); the condition is not a sink.

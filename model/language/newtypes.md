@@ -55,7 +55,7 @@ error.
 
 ### NEWT-7 A newtype with a representation can be unwrapped
 Intent: ruled 2026-10-18
-Tests: spec-newt-7-1, spec-newt-7-2, spec-newt-7-3, spec-newt-7-4, spec-newt-7-5, spec-newt-7-6, spec-newt-7-7, spec-newt-7-8, spec-newt-7-9, spec-newt-7-10
+Tests: spec-newt-7-1, spec-newt-7-2, spec-newt-7-3, spec-newt-7-4, spec-newt-7-5, spec-newt-7-6, spec-newt-7-7, spec-newt-7-8, spec-newt-7-9, spec-newt-7-10, spec-newt-7-11
 Code: unaudited
 
 `newtype N vs = T`, declared where the compiler's `Packable` class is in
