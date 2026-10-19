@@ -13,22 +13,20 @@ same name sees what was taken.
   evaluation order with a verdict per subject could replace both the count
   (with its throw-arm exemption and max over arms) and the per-candidate
   walks.
-- **A `Try` bound from a suspension's result is copied when unwrapped.**
-  [read] Cost, not correctness; same gap. `buildsFreshValue`
-  (library/Morloc/CodeGenerator/Grammars/Translator/Imperative.hs) accepts
-  only a `@try` or a constructor literal as the subject, so
-  `r <- pull; match r | (Err e) = @throw e | (Ok xs) = ...` copies `xs`: a
-  whole batch per step of a stream drain, in a C++ or Rust pool. Sites in
-  lib/stdlib parallel/main.loc: `psconcatMapWithPure`, `psfoldPureLoop`,
-  `psmapWithPure`, `psfilterWithPure`, `pullParts` (the `runParts` case of
-  golden cpp-copy-count counts this copy). Ruled 2026-10-18: a forced
-  suspension's result is the frame's own, provided every case where the
-  suspension returns something it captured is handled. Read so far: C++
-  types a suspension `std::function<R()>` and Rust `Arc<dyn Fn() -> R>`,
-  so a body returning a capture copies it (C++) or must clone it (rustc);
-  a crossing result is deserialized fresh; no renderer emits a thunk
-  returning a reference. Each case needs a test before the copy is
-  removed.
+- **A C++ `Try` bound from a suspension's result is copied when unwrapped.**
+  [reproduced] Cost; gap in OWN-5. `r <- pull; match r | (Ok xs) = ...`
+  copies `xs` (golden cpp-copy-count `runParts`: 4 allocations per batch, 3
+  with a take; Rust already takes through `take_with`). Treating a forced
+  result as a take subject was tried and reverted: its arms may come from a
+  sourced function, built as a const object or also held by a user's
+  `std::weak_ptr`, and `mlc::take_field` moves through `const_cast` after a
+  `use_count` test that sees neither. Options: tag the arms morloc
+  allocates (a deleter costs a second allocation per arm), or rule that
+  sourced code never builds a const arm nor keeps a weak reference to one.
+  Stdlib sites: parallel `psconcatMapWithPure`, `psfoldPureLoop`,
+  `psmapWithPure`, `psfilterWithPure`, `pullParts`. Ruled 2026-10-18: a
+  forced result is the frame's own once every way a suspension can return
+  what it captured is handled; the arm origin above is what remains.
 - **`otherArmCpp` copies though no path reads the payload after a take.**
   [reproduced] Cost; same gap. In test-suite/golden-tests/projection-consume,
   `match t | (Ok v) = lenCpp v | (Err _) = lenCpp (match t | (Ok w) = w | ...)`
