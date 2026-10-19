@@ -9,12 +9,6 @@
   Open: is the signature legal (checked against the instance type) or a
   located rejection?
 
-- **Annotation inside an instance method body crashes the compiler.**
-  [reproduced] Violates DIAG-1. `instance Foo Int where foo x = (x :: Int)`
-  dies with "Bug in collectExprS" (Frontend/Treeify.hs:750):
-  linkAndRemoveAnnotations (Treeify.hs:433) never descends into instance
-  bodies. Default bodies in classes (CLS-7) would take the same path.
-
 - **Whether an omitted method falls through to a catch-all instance depends
   on whether the instance has a body.** [reproduced] Spec gap: CLS-12.
   With `instance C a` sourcing `f` and `g`: `instance C Int where f x = ...`
@@ -79,4 +73,13 @@
   and `Numeric` (literal defaulting, library/Morloc/BaseTypes.hs) are
   declared in stdlib `root`, so a replacement prelude without them breaks
   code generation.
-
+- **A sourced function with a class constraint ignores the instance.**
+  [reproduced] Violates CLS-2 / DERIV-2. root's `sort :: Ord a => [a] ->
+  [a]` is sourced in every root-* as `morloc_sort`, which uses the native
+  comparison, not the selected `Ord` instance. With
+  `newtype Z = Real deriving (Eq, Ord)`, Python `sort [0.0, -0.0]` gives
+  `[0,-0]` while `<=` and `min` on the same values order `-0` first. On a
+  `data` type deriving `Ord`, C++ `sort` fails in g++ (no `operator<` for
+  the generated struct) instead of being rejected or using `<=`. The same
+  holds for hand-written instances and any other sourced constrained
+  function.

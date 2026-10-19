@@ -494,7 +494,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
 
 resolveInstances ::
   Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
-resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
+resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
   gscope <- MM.getGeneralScope
   (g', e1) <- f gscope g e0
   return (g', AnnoS gi ci e1)
@@ -549,12 +549,12 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       (g2, es1) <- case mostSpecific [t | (EType t _ _ _, _) <- rssSubtypes] of
         -- if there are no suitable instances, die
         [] ->
-          throwTypeError genIndex $
+          throwTypeError ci $
             "No instance found for" <+> pretty clsName
               <> "::"
               <> pretty v
               <+> "at type" <+> prettyTypeU gtEval
-              <> "\n  Are you missing a top-level type signature?"
+              <> noInstanceAdvice scope clsName v gtEval
         -- There may be many suitable instances from the general type level,
         -- however, they may differ at the concrete level, so keep all for know
         -- and let the concrete inference code sort things out later.
@@ -804,6 +804,32 @@ isKindTypeU' (NatSubU _ _) = True
 isKindTypeU' (NatDivU _ _) = True
 isKindTypeU' NatVoidU = True
 isKindTypeU' _ = False
+
+-- | The advice for a method with no instance at a type. A signature can only
+-- help while the type is still undetermined; a bodied newtype that lacks
+-- 'pack' is missing its deriving clause (NEWT-8).
+noInstanceAdvice :: Scope -> ClassName -> EVar -> TypeU -> MDoc
+noInstanceAdvice scope cls v t
+  | not (determined t) = "\n  Are you missing a top-level type signature?"
+  | cls == ClassName "Packable", v == EV "pack", FunU _ out <- t, Just n <- bodiedNewtype out =
+      "\n  The newtype" <+> squotes (pretty n) <+> "has no 'pack'; add 'deriving (Packable)' to its declaration"
+        <+> "or declare a Packable instance."
+  | otherwise = mempty
+  where
+    determined (VarU (TV n)) = not (isTypeVariableName n)
+    determined ExistU {} = False
+    determined (ForallU _ _) = False
+    determined x = all determined (typeUChildren x)
+
+    bodiedNewtype x = case x of
+      VarU n -> newtypeName n
+      AppU (VarU n) _ -> newtypeName n
+      _ -> Nothing
+
+    newtypeName n = case Map.lookup n scope of
+      Just ((_, NamU {}, _, _, _) : _) -> Nothing
+      Just ((_, _, _, _, TypedefNewtype) : _) -> Just n
+      _ -> Nothing
 
 -- prepare a general, indexed typechecking error
 throwTypeError :: Int -> MDoc -> MorlocMonad a

@@ -46,3 +46,9 @@ says whether it reproduces.
   :58 say `<= 64k`; :17 and :89 call temp files MessagePack `.mpk`.
 - cli-intro.asc:320, :337 run `sift total needle ./notes`; `total` takes one
   `Str`.
+- types-newtype.asc "Declarations with no body" says a bodiless
+  `newtype Map key val` with native forms takes a `Packable` instance;
+  NEWT-9 now rejects any Packable instance on a bodiless type (stdlib `Map`
+  is `newtype Map a b = [(a, b)]`). The "Sharing a wire format" snippet
+  shows `instance Packable (List a) (Deque a)`, which root no longer
+  declares; its `unpack` is NEWT-7's.

@@ -73,7 +73,7 @@ alternatives to it (REAL-1).
 
 ### NEWT-8 `deriving (Packable)` adds `pack`
 Intent: ruled 2026-10-18
-Tests: spec-newt-8-1, spec-newt-8-2, spec-newt-8-3, spec-newt-8-4, spec-newt-8-5, spec-newt-8-6, spec-newt-8-7, spec-newt-8-8
+Tests: spec-newt-8-1, spec-newt-8-2, spec-newt-8-3, spec-newt-8-4, spec-newt-8-5, spec-newt-8-6, spec-newt-8-7, spec-newt-8-8, spec-newt-8-9
 Code: unaudited
 
 `newtype N vs = T deriving (Packable)` also gives `pack :: T -> N vs`, a
