@@ -814,6 +814,26 @@ pub(crate) unsafe fn mlc_hash(
     }
 }
 
+// -- mlc_compare: order two voidstar values --
+
+/// -1, 0 or 1 as `a` orders before, with or after `b` (INTR-7).
+pub(crate) unsafe fn mlc_compare(
+    a: *const c_void,
+    b: *const c_void,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> libc::c_int {
+    clear_errmsg(errmsg);
+    let rs = CSchema::to_rust(schema);
+    match crate::compare::compare_voidstar_values(a as *const u8, b as *const u8, &rs) {
+        Ok(o) => o as libc::c_int,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            0
+        }
+    }
+}
+
 // ── mlc_show: serialize to JSON string ─────────────────────────────────────
 
 pub(crate) unsafe fn mlc_show(
@@ -2531,6 +2551,11 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_show(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char {
         super::mlc_show(data, schema, errmsg)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn mlc_compare(a: *const c_void, b: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> libc::c_int {
+        super::mlc_compare(a, b, schema, errmsg)
     }
 
     #[no_mangle]

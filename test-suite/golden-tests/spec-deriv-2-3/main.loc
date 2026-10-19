@@ -1,0 +1,35 @@
+-- Spec DERIV-2: derived Eq, Ord, Show and Hashable act on the wire value,
+-- with the same results in every language.
+module main (checks, texts)
+
+import root-r
+
+newtype Name = Str
+  deriving (Eq, Ord, Show, Hashable)
+
+data Shape = Circle Real | Rect Real Real | Dot
+  deriving (Eq, Ord, Show)
+
+record Point
+  deriving (Eq, Ord, Show)
+  where
+  x :: Int
+  y :: Int
+record R => Point = "list"
+
+checks :: [Bool]
+checks =
+  [ (idr ("ab" :: Name)) == ("ab" :: Name)
+  , (idr ("ab" :: Name)) < ("b" :: Name)
+  , (idr (Circle 1.0)) == Circle 1.0
+  , (idr (Rect 1.0 2.0)) < Rect 1.0 1.0
+  , (idr Dot) > Circle 5.0
+  , (idr ({x = 1, y = 2} :: Point)) < ({x = 1, y = 3} :: Point)
+  ]
+
+texts :: [Str]
+texts =
+  [ show (idr ("ab" :: Name))
+  , show (idr (Rect 1.0 2.0))
+  , hash (idr ("ab" :: Name))
+  ]

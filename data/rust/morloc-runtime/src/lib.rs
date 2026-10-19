@@ -11,6 +11,7 @@ pub mod error;
 pub mod schema;
 pub mod recur;
 pub mod walk;
+pub mod compare;
 #[cfg(test)]
 pub mod deep_tests;
 #[cfg(test)]

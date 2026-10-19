@@ -10,7 +10,7 @@ Replaced by CLS-7: a class may give a method a default body.
 
 ### CLS-2 The type at the use site selects the instance
 Intent: proposed
-Tests: spec-cls-2-1
+Tests: spec-cls-2-1, spec-cls-2-2, spec-cls-2-3, spec-cls-2-4
 Code: unaudited
 
 A method used at type `T` runs an implementation of the instance for `T`.
@@ -134,3 +134,14 @@ has no default is (a) rejected where the instance is declared, or (b)
 rejected only where the method is used at that type (REAL-3), as today.
 Implementations of one instance may come from several modules, so either
 check needs the whole program.
+
+### CLS-15 A class the compiler refers to is declared in `internal`
+Intent: ruled 2026-10-18
+Code: deviates (issues/typeclasses.md)
+
+`root` is a prelude a program may replace (MOD-18); `internal` is what the
+compiler assumes. A class the compiler names (to decide literal patterns,
+to derive instances, to serialize) is declared in `internal`: `Packable`,
+`Eq`, `Ord`, `Show`, `Hashable` and the indexing classes. The operators
+defined from a class's methods (`<`, `!=`, ...) may stay in `root`.
+

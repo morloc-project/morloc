@@ -593,8 +593,10 @@ typedef enum {
                             // fields written out of line as a tuple. A
                             // constructor with no arguments is its tag byte
                             // and needs no node.
-    MORLOC_X_LIST_LEN_TEST  // (list) + a length -> Bool. A list pattern's
+    MORLOC_X_LIST_LEN_TEST, // (list) + a length -> Bool. A list pattern's
                             // length test, answered in the nexus.
+    MORLOC_X_EQUAL,         // (a, b) -> Bool: the two values are equal (@eq).
+    MORLOC_X_LESS_EQ        // (a, b) -> Bool: a orders before or with b (@le).
 } morloc_expression_type;
 
 typedef enum { APPLY_PATTERN, APPLY_LAMBDA, APPLY_FORMAT } morloc_app_expression_type;
@@ -1691,6 +1693,8 @@ int mlc_save_voidstar(const void* data, const Schema* schema, int64_t level, con
 void* mlc_load(const char* path, const Schema* schema, ERRMSG);
 char* mlc_hash(const void* data, const Schema* schema, ERRMSG);
 char* mlc_show(const void* data, const Schema* schema, ERRMSG);
+// @eq / @le: -1, 0 or 1 as `a` orders before, with or after `b`.
+int mlc_compare(const void* a, const void* b, const Schema* schema, ERRMSG);
 void* mlc_read(const char* json_str, const Schema* schema, ERRMSG);
 
 // -- Stream-handle intrinsics ---------------------------------------------

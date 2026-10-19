@@ -11,7 +11,7 @@ module pairing (mkTree)
 
 import root-py
 
-newtype RTree n e l
+newtype RTree n e l = ([n], [(Int, Int, e)], [l])
 
 type Py => (RTree n e l) = "dict" n e l
 

@@ -566,6 +566,21 @@ std::string _mlc_hash(const T& value, Schema* schema) {
     return result;
 }
 
+// Order two values of one schema: -1, 0 or 1 (@eq, @le)
+template <typename T>
+int _mlc_compare(const T& a, const T& b, Schema* schema) {
+    void* va = to_voidstar(schema, a);
+    void* vb = to_voidstar(schema, b);
+    char* errmsg = NULL;
+    int order = mlc_compare(va, vb, schema, &errmsg);
+    shfree_cpp(va);
+    shfree_cpp(vb);
+    if (errmsg != NULL) {
+        PROPAGATE_ERROR(errmsg)
+    }
+    return order;
+}
+
 // Save a value to file in msgpack format. The `level` arg is accepted
 // for ABI uniformity with mlc_save_voidstar and forwarded; the runtime
 // ignores it for non-packet formats.

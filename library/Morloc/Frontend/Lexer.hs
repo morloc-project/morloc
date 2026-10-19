@@ -531,6 +531,7 @@ classifyWord "True" = TokTrue
 classifyWord "False" = TokFalse
 classifyWord "type" = TokType
 classifyWord "newtype" = TokNewtype
+classifyWord "deriving" = TokDeriving
 classifyWord "data" = TokData
 classifyWord "record" = TokRecord
 classifyWord "object" = TokObject

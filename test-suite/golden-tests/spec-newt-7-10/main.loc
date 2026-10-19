@@ -1,0 +1,18 @@
+-- Spec NEWT-7: a more specific instance does not hide the representation
+-- cast. Foo has no form of its own anywhere; its only explicit instance is
+-- for Foo Int and is implemented in C++, which this program does not use.
+module main (total)
+
+import root-py
+
+newtype Foo a = [a]
+
+instance Packable [Int] (Foo Int) where
+  source Cpp from "main.hpp" ("ident" as pack, "ident" as unpack)
+
+source Py from "main.py" ("make_foo" as makeFoo, "list_sum" as listSum)
+makeFoo :: Int -> Foo Int
+listSum :: [Int] -> Int
+
+total :: Int -> Int
+total n = listSum (unpack (makeFoo n))

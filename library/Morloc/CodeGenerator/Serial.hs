@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Serial
   , checkTableColumns
   , checkPackerCoherence
   , findPackerInstances
+  , findCoveringPacker
   , PackerInstance (..)
   , wireSerialAstToType
   , containsFunT
@@ -50,7 +51,9 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import Morloc.Typecheck.Internal (apply, emptyGamma, qualify, substitute, subtype, unqualify)
+import Morloc.Typecheck.Internal (apply, emptyGamma, mapTypeUChildren, qualify, substitute, subtype, typeUChildren, unqualify)
+import qualified Data.List as List
+import Morloc.Frontend.TypeNames (isReservedTypeName)
 
 -- | Classification of how an aliased outer type maps onto the wire form.
 -- Computed by 'makeSerialAST'' from the gscope alias body's outer head.
@@ -585,6 +588,9 @@ data PackerInstance = PackerInstance
   { piHead :: TypeU
   , piWire :: TypeU
   , piSources :: Map.Map Lang (Source, Source)
+  , piPacks :: Map.Map Lang Source
+  -- ^ the languages that implement @pack@, whether or not they also
+  -- implement @unpack@
   }
 
 -- | Every @Packable@ instance in the program, with its two methods paired.
@@ -655,14 +661,33 @@ findPackerInstances = do
         { piHead = qualify vs1 b1
         , piWire = qualify vs1 a1
         , piSources = pairByLang packSrcs unpackSrcs
+        , piPacks = Map.fromList [(srcLang p, p) | p <- packSrcs]
         }
     | ((vs1, FunU [a1] b1), packSrcs) <- packs
     , ((vs2, FunU [a2] b2), unpackSrcs) <- unpacks
     , length vs1 == length vs2
-    , a1 == b2
-    , b1 == a2
+    , canonical vs1 (FunU [a1] b1) == canonical vs2 (FunU [b2] a2)
     ]
   where
+    -- The two signatures come from one instance, but merging instances with
+    -- equal heads may leave them with different variable names, so they are
+    -- compared up to renaming.
+    canonical :: [TVar] -> TypeU -> TypeU
+    canonical vs t =
+      let order = List.nub [v | v <- occurrences t, v `elem` vs]
+          names = Map.fromList (zip order [TV ("_" <> DT.pack (show k)) | k <- [(0 :: Int) ..]])
+       in rename names t
+
+    occurrences :: TypeU -> [TVar]
+    occurrences (VarU v) = [v]
+    occurrences (KVarU (v, _)) = [v]
+    occurrences t = concatMap occurrences (typeUChildren t)
+
+    rename :: Map.Map TVar TVar -> TypeU -> TypeU
+    rename m (VarU v) = VarU (Map.findWithDefault v v m)
+    rename m (KVarU (v, k)) = KVarU (Map.findWithDefault v v m, k)
+    rename m t = mapTypeUChildren (rename m) t
+
     methodSignatures :: EVar -> Map.Map EVar Instance -> [(([TVar], TypeU), [Source])]
     methodSignatures name sigmap = case Map.lookup name sigmap of
       (Just (Instance _ _ _ ts)) -> concatMap sigOf ts
@@ -1164,11 +1189,39 @@ makeSerialAST m lang t0 = do
               -- carries the dim. Macro indices are unaffected (they
               -- count type args only).
               AliasIsNone
-                | finalVar == Just BT.list ->
-                    applyDimsToList dims . SerialList fv Nothing <$> makeSerialAST' gscope typepackers anc (head runtimeTs)
-                | finalVar == Just (BT.tuple (length runtimeTs)) ->
-                    SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers anc) runtimeTs
+                | finalVar == Just BT.list -> do
+                    serves <- shapeServes BT.list
+                    if serves
+                      then applyDimsToList dims . SerialList fv Nothing <$> makeSerialAST' gscope typepackers anc (head runtimeTs)
+                      else packableFallback
+                | finalVar == Just (BT.tuple (length runtimeTs)) -> do
+                    serves <- shapeServes (BT.tuple (length runtimeTs))
+                    if serves
+                      then SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers anc) runtimeTs
+                      else packableFallback
                 | otherwise -> packableFallback
+        -- Whether the list or tuple form above can stand in for the type's
+        -- Packable instance in this language. That form serializes the type's
+        -- own arguments as the elements, which is its body only when the
+        -- body's elements are those arguments (@Vector n a = List a@, not
+        -- @Map a b = [(a, b)]@); and it builds the type's native form only
+        -- when that is the body's (Python's @Deque@ is a list) or the type is
+        -- one the runtime builds itself (@Vector@).
+        shapeServes :: TVar -> MorlocMonad Bool
+        shapeServes shapeHead
+          | not bodyHoldsArgs = return False
+          | not (Map.member generalTypeName typepackers) = return True
+          | isReservedTypeName (unTVar generalTypeName) = return True
+          | otherwise = do
+              FV _ shapeCv <- inferConcreteVar lang (Idx m shapeHead)
+              let FV _ ownCv = fv
+              return (ownCv == shapeCv)
+
+        bodyHoldsArgs = case (generalType, evaluatedType) of
+          (_, Nothing) -> True
+          (AppU _ args, Just (AppU _ bodyArgs)) ->
+            filter (not . isKindTypeU) bodyArgs == filter (not . isKindTypeU) args
+          _ -> False
         -- Classify the outer alias body's wire shape. Empty when the type
         -- is its own head (no aliasing); otherwise tagged by the body's
         -- structural head (List, Tuple, or anything else).
@@ -1416,6 +1469,38 @@ packerSources lang m0 pin = case Map.lookup lang (piSources pin) of
     MM.throwSourcedError m0 $
       "No" <+> pretty lang <+> "implementation of the Packable instance for"
         <+> squotes (pretty (piHead pin))
+
+-- | The @pack@ source of the most specific instance whose head covers @t@
+-- and that implements @pack@ in @lang@, or Nothing when none does.
+findCoveringPacker :: Lang -> Int -> Type -> MorlocMonad (Maybe Source)
+findCoveringPacker lang m0 t = do
+  instances <- findPackerInstances
+  let key = extractKey (type2typeu t)
+      -- coverage is decided by the head alone; the pair stands in for the
+      -- sources 'resolvePacker' reads
+      candidates =
+        [ pin {piSources = Map.singleton lang (p, p)}
+        | pin <- instances
+        , extractKey (piHead pin) == key
+        , Just p <- [Map.lookup lang (piPacks pin)]
+        ]
+  matches <- case candidates of
+    [] -> return []
+    _ -> do
+      tf <- inferConcreteType lang (Idx m0 t)
+      case tf of
+        AppF _ _ -> do
+          resolved <- mapM (resolvePacker lang m0 tf) candidates
+          return [pin | (pin, Right _) <- zip candidates resolved]
+        _ -> return candidates
+  let maxima = mostSpecific (map piHead matches)
+  case [pin | pin <- matches, any (equivalent (piHead pin)) maxima] of
+    [] -> return Nothing
+    [pin] -> return (Map.lookup lang (piPacks pin))
+    pins ->
+      MM.throwSourcedError m0 $
+        "Ambiguous Packable instances for" <+> squotes (pretty t) <> ":"
+          <> "\n" <> indent 2 (vsep (map (pretty . piHead) pins))
 
 resolvePacker ::
   Lang ->

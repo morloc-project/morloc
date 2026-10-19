@@ -95,6 +95,8 @@ pub enum MorlocExpressionType {
                        // tagged-pointer form from the arm's field values.
     ListLenTest = 34,  // (list) + a length -> Bool. Answered in the nexus,
                        // like TagTest, from the Array header it already holds.
+    Equal = 35,        // (a, b) -> Bool: the two values are equal (@eq).
+    LessEq = 36,       // (a, b) -> Bool: a orders before or with b (@le).
 }
 
 #[repr(C)]
@@ -1003,7 +1005,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             Ok(result)
         }
 
-        "show" | "read" | "hash" | "load" => {
+        "show" | "read" | "hash" | "load" | "eq" | "le" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
             let schema = c_schema(schema_str)?;
             let child = build_expr(je.get("child").unwrap_or(&serde_json::Value::Null))?;
@@ -1013,6 +1015,8 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
                 "read" => MorlocExpressionType::Read,
                 "hash" => MorlocExpressionType::Hash,
                 "load" => MorlocExpressionType::Load,
+                "eq" => MorlocExpressionType::Equal,
+                "le" => MorlocExpressionType::LessEq,
                 _ => unreachable!(),
             };
             (*expr).schema = schema;

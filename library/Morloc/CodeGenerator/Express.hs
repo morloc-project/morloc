@@ -49,6 +49,7 @@ import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal (findPackableWireForm, unqualify)
+import Morloc.CodeGenerator.Serial (findCoveringPacker)
 
 mkIdx :: AnnoS g One (Indexed c, d) -> Type -> Indexed Type
 mkIdx (AnnoS _ (Idx i _, _) _) = Idx i
@@ -741,32 +742,6 @@ expressPolyArg parentLang pc@(Idx _ (EffectT _ _)) (AnnoS (Idx midx t@(EffectT _
   expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyArg l pc e = expressPolyExprWrap l pc e
 
--- | Look up the @Packable@ @pack@ source for a native type with outer
--- TVar @nativeTv@ in language @lang@. In @class Packable a b where
--- pack :: a -> b@, @a@ is the decomposed/directly-serialisable form
--- and @b@ is the wrapped form; @pack@ is the constructor direction
--- (build the wrapped @b@ from its decomposed @a@). Pack/unpack
--- compose recursively to marshal data toward the wire format. The
--- instance head is identified by @pack@'s output type (the wrapped
--- native). Returns @Nothing@ if no matching instance is present.
-findPackablePack :: Lang -> TVar -> MorlocMonad (Maybe Source)
-findPackablePack lang nativeTv = do
-  sigmap <- MM.gets stateTypeclasses
-  case Map.lookup (EV "pack") sigmap of
-    Nothing -> return Nothing
-    Just inst -> return $ listToMaybe
-      [ src
-      | TermTypes (Just et) cs _ <- instanceTerms inst
-      , termOutputHead et == nativeTv
-      , (_, Idx _ src) <- cs
-      , srcLang src == lang
-      ]
-  where
-    termOutputHead :: EType -> TVar
-    termOutputHead et = case snd (unqualify (etype et)) of
-      FunU _ out -> extractKey out
-      other      -> extractKey other
-
 -- | Look up the @IndexLike@ @__to_index__@ instance for an input type
 -- in language @lang@. In @class IndexLike i where __to_index__ :: i ->
 -- ?Int64@, instances are keyed by the WHOLE first-argument type --
@@ -1239,10 +1214,20 @@ maybePackableWrap midx lang nativeT wireT = do
       wireTF   <- inferConcreteType lang (Idx midx wireT)
       let nativeRendered = renderConcreteForm nativeTF
           wireRendered   = renderConcreteForm wireTF
-      if nativeRendered == wireRendered
+          -- A form whose template has no placeholders (R's "list") renders
+          -- alike for every argument, so the arguments of a form the type
+          -- declares are compared too. A type with no form of its own here
+          -- has its representation's (NEWT-2).
+          typeArgs (AppF _ args) = Just (map renderConcreteForm (fst (partitionKindArgsF args)))
+          typeArgs _ = Nothing
+      ownForm <- Map.member nativeTv <$> MM.getConcreteScope lang
+      let argsAgree = case (typeArgs nativeTF, typeArgs wireTF) of
+            (Just as, Just bs) -> as == bs
+            _ -> True
+      if not ownForm || (nativeRendered == wireRendered && argsAgree)
         then return Nothing
         else do
-          maySrc <- findPackablePack lang nativeTv
+          maySrc <- findCoveringPacker lang midx nativeT
           case maySrc of
             Just src -> return (Just src)
             Nothing -> MM.throwSourcedError midx $
@@ -1897,25 +1882,20 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(VarT v)) (Idx cidx lang,
 -- type, and the result is wrapped with the @Packable@ @unpack@ source.
 -- This is the codegen counterpart to the typecheck-side tier-2 lookup
 -- in 'Morloc.Frontend.Typecheck.checkE'.
-expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT v) _)) (Idx cidx lang, args) (LstS xs)) = do
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT _) _)) (Idx cidx lang, args) (LstS xs)) = do
   mayWire <- findPackableWireForm (type2typeu userT)
   case mayWire of
     Just wireTU
       | AppT (VarT wireV) wireArgs <- typeOf wireTU
       , [elemT] <- filter (not . isKindTypeT) wireArgs -> do
           xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x elemT) x) xs
-          maySrc <- findPackablePack lang v
-          case maySrc of
-            Just src ->
-              let inner = PolyList (Idx cidx wireV) (map (Idx cidx) wireArgs) xs'
-                  funT = FunT [AppT (VarT wireV) wireArgs] userT
-              in expressContainer pc (Idx midx parentLang) (Idx cidx lang) args
-                   (PolyApp (PolyExe (Idx midx funT) (SrcCallP Nothing src)) [inner])
-            Nothing -> MM.throwSourcedError midx $
-              "Packable wire form for"
-              <+> squotes (pretty v)
-              <+> "is list-shaped but no 'unpack' source is declared for"
-              <+> pretty lang <> "."
+          let wireT = AppT (VarT wireV) wireArgs
+              inner = PolyList (Idx cidx wireV) (map (Idx cidx) wireArgs) xs'
+          maySrc <- maybePackableWrap midx lang userT wireT
+          expressContainer pc (Idx midx parentLang) (Idx cidx lang) args $ case maySrc of
+            Just src -> PolyApp (PolyExe (Idx midx (FunT [wireT] userT)) (SrcCallP Nothing src)) [inner]
+            -- the type's form here is its wire form's
+            Nothing -> inner
     _ -> tryReduceLstS userT
   where
     tryReduceLstS t = do
@@ -1970,7 +1950,7 @@ expressPolyExpr _ pl pc (AnnoS (Idx midx t) c@(Idx cidx lang, _) e@(TupS _)) = d
   case TE.expandWireParent scope (type2typeu t) of
     Just t' -> do
       let bodyT = typeOf t'
-      maySrc <- findPackablePack lang (extractKey (type2typeu t))
+      maySrc <- maybePackableWrap midx lang t bodyT
       case maySrc of
         Just src -> do
           inner <- expressPolyExprWrap lang (Idx cidx bodyT) (AnnoS (Idx midx bodyT) c e)
@@ -2020,8 +2000,14 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (DoBlo
   x' <- expressPolyExprWrap lang (mkIdx x innerT) x
   let e = PolyDoBlock (Idx cidx t) x'
   expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
-expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _, _) (CoerceS coercion x)) = do
-  let innerType = unapplyCoercion coercion t
+-- A newtype cast runs in the language realization chose for it, where the
+-- newtype has no form of its own (NEWT-7); a crossing to it is the cast.
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (CoerceS coercion@(CoerceNewtype _ _) x)) = do
+  x' <- expressPolyExprWrap lang (mkIdx x (annoTypeOf x)) x
+  expressContainer pc (Idx midx parentLang) (Idx cidx lang) args (PolyCoerce coercion (Idx cidx t) x')
+  where
+    annoTypeOf (AnnoS (Idx _ tx) _ _) = tx
+expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _, _) (CoerceS coercion x@(AnnoS (Idx _ innerType) _ _))) = do
   x' <- expressPolyExprWrap parentLang (Idx cidx innerType) x
   return $ PolyCoerce coercion (Idx cidx t) x'
 expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _lang, _) (EvalS x@(AnnoS (Idx _ tx) _ _))) = do

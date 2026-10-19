@@ -4,6 +4,7 @@ How each type's values cross between languages: wire form, round trip, copying a
 
 ### WIRE-1 A value crosses between languages unchanged
 Intent: proposed
+Tests: spec-wire-1-1, spec-wire-1-2
 Code: unaudited
 
 A value of a serializable type that crosses from one language to another

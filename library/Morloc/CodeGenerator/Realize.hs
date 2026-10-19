@@ -581,6 +581,14 @@ realizeWithRegistry registry tables seedLangs s0 = do
     scoreExpr rstat (EvalS x, i) = do
       x' <- scoreAnnoS rstat x
       return (EvalS x', Idx i (scoresOf x'))
+    scoreExpr rstat (CoerceS c@(CoerceNewtype dir target) x, i) = do
+      x' <- scoreAnnoS rstat x
+      let childScores = scoresOf x'
+      (candidates, allowed) <- castLangs (castHead dir target (annoType x')) (rLangs rstat <> map fst childScores)
+      let best = case allowed of
+            [] -> [(l, noScore) | l <- candidates]
+            _ -> scoreApp [(l, (0, 0)) | l <- allowed] [(annoType x', childScores)]
+      return (CoerceS c x', Idx i best)
     scoreExpr rstat (CoerceS c x, i) = do
       x' <- scoreAnnoS rstat x
       return (CoerceS c x', Idx i (scoresOf x'))
@@ -708,6 +716,22 @@ realizeWithRegistry registry tables seedLangs s0 = do
           <+> ("parent=" <> maybe "general" pretty l1)
           <+> ("chose=" <> maybe "general" pretty mlang)
       return (AnnoS gi ci' e')
+
+    -- The newtype a cast converts: the argument's type when unwrapping, the
+    -- result's when wrapping.
+    castHead :: CastDir -> TypeU -> Type -> TVar
+    castHead Unwrap _ argT = extractKey (type2typeu argT)
+    castHead Wrap target _ = extractKey target
+
+    -- These languages with the program's pool languages, and those of them
+    -- where a cast of newtype @n@ changes no value: @n@ declares no form
+    -- there (NEWT-7).
+    castLangs :: TVar -> [Lang] -> MorlocMonad ([Lang], [Lang])
+    castLangs n langs = do
+      scopes <- MM.gets stateConcreteTypedefs
+      let candidates = unique (langs <> map (LR.poolOf registry) (Map.keys scopes))
+      allowed <- filterM (\l -> not . Map.member n <$> MM.getConcreteScope l) candidates
+      return (candidates, allowed)
 
     -- Sentinel "no realization" score. Cost dominates, so the switch component
     -- is irrelevant. Got 10 billion nodes in your AST? I didn't think so.
@@ -972,6 +996,29 @@ realizeWithRegistry registry tables seedLangs s0 = do
       lang <- pickLanguage heads l1 [x] ss
       x' <- collapseAnnoS heads lang x
       return (EvalS x', Idx i lang)
+    -- Every path that gives a cast its language comes through here: the
+    -- choice (including a recursion head's) must be one where the newtype
+    -- has no form of its own (NEWT-7), else the cheapest one that is.
+    collapseExpr heads _ l1 (CoerceS c@(CoerceNewtype dir target) x, Idx i ss) = do
+      picked <- pickLanguage heads l1 [x] ss
+      let n = castHead dir target (annoType x)
+          -- a cast given no language of its own runs in its parent's
+          effective = maybe l1 Just picked
+      (_, allowed) <- castLangs n (maybe [] pure effective <> map fst ss)
+      lang <- case effective of
+        Just l
+          | l `notElem` allowed ->
+              case [(l2, s) | (l2, s) <- ss, l2 `elem` allowed] of
+                [] ->
+                  MM.throwSourcedError i $
+                    "Cannot convert between" <+> squotes (pretty n)
+                      <+> "and its representation in" <+> pretty l
+                      <> ":" <+> pretty n <+> "has a" <+> pretty l
+                      <+> "form of its own, and no language without one is available."
+                usable -> chooseLanguage l1 usable
+        _ -> return picked
+      x' <- collapseAnnoS heads lang x
+      return (CoerceS c x', Idx i lang)
     collapseExpr heads _ l1 (CoerceS c x, Idx i ss) = do
       lang <- pickLanguage heads l1 [x] ss
       x' <- collapseAnnoS heads lang x
@@ -1007,8 +1054,8 @@ realizeWithRegistry registry tables seedLangs s0 = do
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
-    collapseCarried heads lang x@(AnnoS (Idx _ t) _ _)
-      | isClosureType t = do
+    collapseCarried heads lang x@(AnnoS (Idx _ t) _ e)
+      | isClosureType t, not (isNewtypeCast e) = do
           AnnoS g (Idx i _) e' <- collapseAnnoS heads lang x
           return (AnnoS g (Idx i lang) e')
       | otherwise = collapseAnnoS heads lang x
@@ -1026,6 +1073,12 @@ realizeWithRegistry registry tables seedLangs s0 = do
     isSourceHead (AnnoS _ _ (ExeS (SrcCall _))) = True
     isSourceHead (AnnoS _ _ (VarS _ (One x))) = isSourceHead x
     isSourceHead _ = False
+
+    -- A cast keeps the language chosen for it (NEWT-7); it is not carried
+    -- into its container's.
+    isNewtypeCast :: ExprS g f c -> Bool
+    isNewtypeCast (CoerceS (CoerceNewtype _ _) _) = True
+    isNewtypeCast _ = False
 
     isClosureType :: Type -> Bool
     isClosureType (FunT _ _) = True

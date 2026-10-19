@@ -1,0 +1,19 @@
+-- Spec CLS-2: a literal is built by the instance whose `pack` the language
+-- implements, even when that instance implements `unpack` elsewhere.
+module main (viaLit)
+
+import root-py
+import root-cpp
+
+newtype Frozen a = [a]
+type Py => (Frozen a) = "tuple" a
+
+instance Packable [a] (Frozen a) where
+  source Py from "main.py" ("freeze" as pack)
+  source Cpp from "main.hpp" ("thaw" as unpack)
+
+source Py from "main.py" ("keep")
+keep :: Frozen Int -> Int
+
+viaLit :: Int
+viaLit = keep ([1, 2, 3] :: Frozen Int)

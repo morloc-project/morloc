@@ -556,7 +556,7 @@ contractRoots (ExprI _ (ModE _ es)) = do
         (_, body') <- collectAnnoS (Namer Map.empty 0 Map.empty Set.empty (Just k) Nothing) body
         let et' = et {econs = Set.union (econs et) (Set.fromList ctx)}
         return (AnnoS i i (VarS v (MonomorphicExpr (Just et') [body'])))
-    | ExprI _ (IstE _ ctx _ ies) <- es
+    | ExprI _ (IstE _ _ ctx _ ies) <- es
     , ExprI i (AssE v body@(ExprI bi _) _) <- ies
     , Just (k, et) <- [Map.lookup bi bodyType]
     ]
@@ -565,7 +565,7 @@ contractRoots _ = return ([], Map.empty)
 
 -- | The root module's instance declarations: index, class, instance types.
 rootInstances :: ExprI -> [(Int, ClassName, [TypeU])]
-rootInstances (ExprI _ (ModE _ es)) = [(i, cls, ts) | ExprI i (IstE cls _ ts _) <- es]
+rootInstances (ExprI _ (ModE _ es)) = [(i, cls, ts) | ExprI i (IstE _ cls _ ts _) <- es]
 rootInstances _ = []
 
 -- | A class constraint names the type it constrains: @Ord a =>@, never a

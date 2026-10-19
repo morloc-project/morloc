@@ -157,18 +157,20 @@ data CstSigType = CstSigType
 
 data CstTypeDef
   = CstTypeAlias (Maybe Located) (TVar, [Either (TVar, Kind) TypeU]) (TypeU, Bool)
-  | CstNewtype (TVar, [Either (TVar, Kind) TypeU]) TypeU
+  | CstNewtype (TVar, [Either (TVar, Kind) TypeU]) TypeU [(Located, Text)]
+  -- ^ the classes of its @deriving@ clause, each with its token
   | CstTypeAliasForward (TVar, [Either (TVar, Kind) TypeU])
-  | CstNamTypeWhere NamType (TVar, [Either (TVar, Kind) TypeU]) [(Located, Key, TypeU)]
+  | CstNamTypeWhere NamType (TVar, [Either (TVar, Kind) TypeU]) [(Located, Key, TypeU)] [(Located, Text)]
   | CstNamTypeLegacy (Maybe Located) NamType (TVar, [Either (TVar, Kind) TypeU]) (Text, Bool, [TypeU]) [(Located, Key, TypeU)]
   -- | A `data` declaration. Each entry is a constructor: its source
   -- position, its name, and its argument types. Stage 1 accepts only
   -- argument-free constructors; the list is carried so that the arity
   -- check reports at the offending constructor rather than the
   -- declaration, and so payload arms need no grammar change later.
-  | CstDataDef (TVar, [Either (TVar, Kind) TypeU]) [(Located, Located, Text, [TypeU])]
+  | CstDataDef (TVar, [Either (TVar, Kind) TypeU]) [(Located, Located, Text, [TypeU])] [(Located, Text)]
   -- ^ Each constructor: the `=` or `|` introducing it (where its docstring
-  -- attaches), its own token, its name, and its field types.
+  -- attaches), its own token, its name, and its field types; then the
+  -- classes of its @deriving@ clause.
   deriving (Show, Eq)
 
 data CstClassHead

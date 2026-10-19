@@ -17,6 +17,7 @@ module Morloc.Frontend.Link (link) where
 
 import Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
@@ -423,8 +424,43 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
             (Just (Polymorphic cls _ _ _)) ->
               MM.throwSourcedError i $
                 "Declared term" <+> squotes (pretty v) <+> " overlaps a term in typeclass" <+> squotes (pretty cls)
-    linkLocal bnds c _ (ExprI i (IstE cls _ ts es)) = do
+    linkLocal bnds c _ (ExprI i (IstE origin cls _ ts es)) = do
       case Map.lookup cls (linkClasses c) of
+        -- The runtime handles' representation is an address, not a value
+        -- of their own (NEWT-7).
+        _ | origin == Derived
+          , m0 == MV "internal"
+          , [_, h] <- ts
+          , extractKey h `elem` [BT.ifileVar, BT.istreamVar, BT.ostreamVar, BT.cellVar, BT.patternChainVar] ->
+              return ()
+        -- A derived instance is of the compiler's class: one that merely
+        -- shares its name is not given it. A newtype's own conversions are
+        -- skipped without that class; a `deriving` clause cannot be.
+        found
+          | origin == Derived
+          , not (isCompilerClass found) ->
+              if unTVar' cls /= "Packable" || any isPackDef es
+                then
+                  MM.throwSourcedError i $
+                    "deriving" <+> parens (pretty cls) <+> "needs the class" <+> pretty cls
+                      <+> "in the scope of module" <+> squotes (pretty m0)
+                      <> "; import root"
+                else return ()
+          where
+            unTVar' (ClassName c) = c
+            expectedMethods = case unTVar' cls of
+              "Packable" -> [EV "pack", EV "unpack"]
+              "Eq" -> [EV "=="]
+              "Ord" -> [EV "<="]
+              "Show" -> [EV "show"]
+              "Hashable" -> [EV "hash"]
+              _ -> []
+            isCompilerClass (Just (_, Typeclass _ _ vs sigs, _)) =
+              length vs == length ts
+                && Set.fromList [v | Signature v _ _ <- sigs] == Set.fromList expectedMethods
+            isCompilerClass Nothing = False
+            isPackDef (ExprI _ (AssE (EV "pack") _ _)) = True
+            isPackDef _ = False
         Nothing ->
           MM.throwSourcedError i $
             "There is no typeclass declaration for instance"
@@ -448,7 +484,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                   -- This enables typechecking without requiring sources.
                   linkEmptyInstance m0 cls (zip vs ts) sigs emap
                 else
-                  mapM_ (linkInstance (linkScoped bnds c) m0 cls (zip vs ts) sigs emap) es
+                  mapM_ (linkInstance origin (linkScoped bnds c) m0 cls (zip vs ts) sigs emap) es
     linkLocal bnds _ cs (ExprI termIdx (VarE _ v))
       | Set.member v bnds = return ()
       | otherwise = case Map.lookup v cs of
@@ -581,6 +617,7 @@ linkEmptyInstance _ cls0 params0 sigs emap = mapM_ go sigs
 --   SignatureSet in stateSignatures. This will be a polymorphic case.
 --     Polymorphic ClassName EVar EType [TermTypes]
 linkInstance ::
+  InstanceOrigin ->
   (Int -> ExprI -> [ExprI] -> MorlocMonad ()) ->
   MVar ->
   ClassName ->
@@ -589,7 +626,7 @@ linkInstance ::
   Map EVar Int ->
   ExprI ->
   MorlocMonad ()
-linkInstance linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
+linkInstance origin linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
   where
     linkExpr (ExprI i (SrcE src)) = do
       let v = srcAlias src
@@ -600,7 +637,9 @@ linkInstance linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
       linkTermTypes v et tt stateIdx
     linkExpr (ExprI ai (AssE v e es)) = do
       (Signature _ _ et, stateIdx) <- lookupInfo v
-      MM.modify (\ms -> ms {stateDefinitionSite = Map.insert stateIdx ai (stateDefinitionSite ms)})
+      -- a derived body is not a definition anyone wrote
+      when (origin == Declared) $
+        MM.modify (\ms -> ms {stateDefinitionSite = Map.insert stateIdx ai (stateDefinitionSite ms)})
       linker stateIdx e es
       t <- substituteInstanceTypes params0 (etype et)
       let et' = et {etype = t}

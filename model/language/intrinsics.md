@@ -49,3 +49,18 @@ Code: unaudited
 implementation REAL picks. Either (a) allowed, and REAL's interchangeability
 excludes `@lang`; or (b) `@lang` is restricted to positions that cannot reach
 a result, such as logging.
+
+### INTR-7 `@eq` and `@le` compare wire values
+Intent: ruled 2026-10-18
+Tests: spec-intr-7-1, spec-intr-7-2, spec-intr-7-3, spec-intr-7-4, spec-intr-7-5
+Code: conforms 2026-10-18
+
+`@eq a b :: Bool` and `@le a b :: Bool` take two values of one type and
+compare them as DERIV-3 orders them, in whichever language or in the nexus.
+
+### INTR-8 `@show` and `@hash` depend only on the wire value
+Intent: proposed
+Code: unaudited
+
+A value gives the same `@show` text and the same `@hash` in every language.
+

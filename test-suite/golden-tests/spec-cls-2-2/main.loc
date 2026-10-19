@@ -1,0 +1,13 @@
+-- Spec CLS-2: a literal is packed by the instance that covers its type.
+-- R's only Map instance covers `Map Str val`, so a `Map Int Str` literal
+-- consumed in R has no instance and the build is rejected.
+module main (viaLit)
+
+import root-r
+import map-r
+
+source R from "main.R" ("rshow")
+rshow :: Map Int Str -> Str
+
+viaLit :: Str
+viaLit = rshow ([(2, "a"), (5, "b")] :: Map Int Str)

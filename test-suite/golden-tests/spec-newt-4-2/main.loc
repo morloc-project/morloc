@@ -1,0 +1,17 @@
+-- Spec NEWT-4: with a Packable instance in L, a tuple literal of a newtype
+-- whose native form differs from its representation is built through it.
+module main (viaLit)
+
+import root-cpp
+
+newtype Pt = (Int, Int)
+type Cpp => Pt = "Pt"
+
+instance Packable (Int, Int) Pt where
+  source Cpp from "main.hpp" ("packPt" as pack, "unpackPt" as unpack)
+
+source Cpp from "main.hpp" ("ptSum")
+ptSum :: Pt -> Int
+
+viaLit :: Int
+viaLit = ptSum ((1, 2) :: Pt)

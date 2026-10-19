@@ -36,7 +36,7 @@ import qualified Morloc.TypeEval as TE
 import Morloc.Frontend.Rename (renameLocals)
 import Morloc.Frontend.TerminalActions (synthesizeTerminalActions)
 import Morloc.Frontend.TypeNames (isReservedTypeName, resolveTypeNames)
-import Morloc.Typecheck.Internal (expandStructuralAliases, mapTypeUChildren, structuralAliasHead, structuralAliasesIn, traverseTypeUChildren, typeUChildren)
+import Morloc.Typecheck.Internal (expandStructuralAliases, expandTransparentAliases, isSubtypeOf2, mapTypeUChildren, structuralAliasHead, structuralAliasesIn, traverseTypeUChildren, typeUChildren)
 
 -- | Resolve type aliases, term aliases and import/exports
 restructure ::
@@ -803,7 +803,7 @@ resolveImports d0 =
     -- The definition of an instance does not automatically imply export or make
     -- the values available. The instance is ALWAYS relative to the class
     -- definition (either local or imported).
-    findSymbols (ExprI _ (IstE cls _ _ _)) = Set.singleton $ ClassSymbol cls
+    findSymbols (ExprI _ (IstE _ cls _ _ _)) = Set.singleton $ ClassSymbol cls
     findSymbols _ = Set.empty
 
     unSymbol :: Symbol -> Text
@@ -898,7 +898,7 @@ handleBinops d0 = do
       where
         f e@(ExprI _ BopE {}) = resolveBinop m0 e >>= f
         f (ExprI i (ModE m es)) = ModE m <$> mapM f es |>> ExprI i
-        f (ExprI i (IstE cls ctx ts es)) = IstE cls ctx ts <$> mapM f es |>> ExprI i
+        f (ExprI i (IstE o cls ctx ts es)) = IstE o cls ctx ts <$> mapM f es |>> ExprI i
         f (ExprI i (AssE v e es)) = AssE v <$> f e <*> mapM f es |>> ExprI i
         f (ExprI i (LstE es)) = LstE <$> mapM f es |>> ExprI i
         f (ExprI i (TupE es)) = TupE <$> mapM f es |>> ExprI i
@@ -983,7 +983,7 @@ shortCircuitForms = decl
     decl (ExprI i (AssE v e es)) = do
       reserved i v
       ExprI i <$> (AssE v <$> expr e <*> mapM decl es)
-    decl (ExprI i (IstE cls ctx ts es)) = ExprI i . IstE cls ctx ts <$> mapM decl es
+    decl (ExprI i (IstE o cls ctx ts es)) = ExprI i . IstE o cls ctx ts <$> mapM decl es
     decl e@(ExprI i (SigE (Signature v _ _))) = reserved i v >> return e
     decl e@(ExprI i (SrcE src)) = reserved i (srcAlias src) >> return e
     decl e@(ExprI i (FixE fx)) = mapM_ (reserved i) (fixityOperators fx) >> return e
@@ -1036,7 +1036,7 @@ hoistEvals = DAG.mapNodeM hoistNode
   where
     hoistNode :: ExprI -> MorlocMonad ExprI
     hoistNode (ExprI i (ModE m es)) = ExprI i . ModE m <$> mapM hoistNode es
-    hoistNode (ExprI i (IstE cls ctx ts es)) = ExprI i . IstE cls ctx ts <$> mapM hoistNode es
+    hoistNode (ExprI i (IstE o cls ctx ts es)) = ExprI i . IstE o cls ctx ts <$> mapM hoistNode es
     hoistNode (ExprI i (AssE v rhs whereDecls)) = do
       rhs' <- hoistBoundary rhs
       whereDecls' <- mapM hoistNode whereDecls
@@ -1298,6 +1298,96 @@ checkTypeInvariants dag = do
   -- Invariant 4: a transparent alias is applied to all of its parameters.
   checkAliasApplications dag gscope
 
+  -- NEWT-9: a type with a Packable instance has a representation, and the
+  -- instance packs from it.
+  checkPackableRepresentations dag gscope
+
+  -- DERIV-5: a type does not both derive a class and implement it by hand.
+  checkDerivedConflicts dag gscope
+
+-- | The head of every @Packable@ instance has a representation, and the
+-- instance's wire type is that representation at the head's arguments.
+-- The compiler's reserved types are exempt; a record or data type, which has
+-- a wire form of its own, has no Packable instance.
+checkPackableRepresentations :: DAG MVar a ExprI -> Scope -> MorlocMonad ()
+checkPackableRepresentations dag gscope =
+  mapM_ check
+    [ (i, stripForall w, stripForall n)
+    | (_, (e, _)) <- Map.toList dag
+    , ExprI i (IstE _ (ClassName "Packable") _ [w, n] _) <- instancesIn e
+    ]
+  where
+    instancesIn x@(ExprI _ (IstE {})) = [x]
+    instancesIn (ExprI _ (ModE _ es)) = concatMap instancesIn es
+    instancesIn _ = []
+
+    stripForall (ForallU _ t) = stripForall t
+    stripForall t = t
+
+    check :: (Int, TypeU, TypeU) -> MorlocMonad ()
+    check (i, w, n) =
+      let v@(TV name) = extractKey n
+          entries = Map.findWithDefault [] v gscope
+          isNewtype (_, body, _, _, k) = k == TypedefNewtype && not (isRecordBody body)
+          hasOwnWireForm (_, body, _, _, k) = k == TypedefEnum || (k == TypedefNewtype && isRecordBody body)
+          norm = expandTransparentAliases gscope
+          sameType a b = isSubtypeOf2 gscope a b && isSubtypeOf2 gscope b a
+       in if any hasOwnWireForm entries
+            then
+              MM.throwSourcedError i $
+                "The Packable instance for" <+> squotes (pretty n)
+                  <+> "is not allowed:" <+> squotes (pretty v)
+                  <+> "is a record or data type, whose wire form is its own."
+          else if null entries && not (isReservedTypeName name)
+            then
+              MM.throwSourcedError i $
+                "The Packable instance for" <+> squotes (pretty n)
+                  <+> "needs" <+> squotes (pretty v) <+> "to have a representation;"
+                  <+> "declare it as" <+> squotes ("newtype" <+> pretty v <+> "... = <wire type>") <> "."
+            else case (any isNewtype entries, TE.expandWireParent gscope n) of
+              (True, Just body)
+                | not (sameType (norm body) (norm w)) ->
+                    MM.throwSourcedError i $
+                      "The Packable instance for" <+> squotes (pretty n)
+                        <+> "packs from" <+> squotes (pretty w)
+                        <> ", but the representation of" <+> squotes (pretty n)
+                        <+> "is" <+> squotes (pretty body) <> "."
+              _ -> return ()
+
+    isRecordBody NamU {} = True
+    isRecordBody _ = False
+
+-- | A @deriving@ clause and a hand-written instance of the same class for
+-- the same type conflict (DERIV-5). A newtype's automatic @unpack@ is not a
+-- clause: an explicit Packable instance beside it is an alternative.
+checkDerivedConflicts :: DAG MVar a ExprI -> Scope -> MorlocMonad ()
+checkDerivedConflicts dag gscope =
+  case [ (i, cls, h)
+       | (i, Declared, cls, h, _) <- instances
+       , (_, Derived, cls', h', es) <- instances
+       , cls == cls'
+       , cls /= ClassName "Packable" || any isPackDef es
+       , isSubtypeOf2 gscope h h' && isSubtypeOf2 gscope h' h
+       ] of
+    [] -> return ()
+    ((i, cls, h) : _) ->
+      MM.throwSourcedError i $
+        "The instance" <+> pretty cls <+> parens (pretty h)
+          <+> "is also derived by its type's deriving clause; keep one."
+  where
+    instances =
+      [ (i, origin, cls, stripForall (last ts), es)
+      | (_, (e, _)) <- Map.toList dag
+      , ExprI i (IstE origin cls _ ts@(_ : _) es) <- instancesIn e
+      ]
+    instancesIn x@(ExprI _ (IstE {})) = [x]
+    instancesIn (ExprI _ (ModE _ es)) = concatMap instancesIn es
+    instancesIn _ = []
+    stripForall (ForallU _ t) = stripForall t
+    stripForall t = t
+    isPackDef (ExprI _ (AssE (EV "pack") _ _)) = True
+    isPackDef _ = False
+
 -- | Enforce Invariant 1: a transparent @type Foo = Bar@ alias may not
 -- carry a per-language form. Primitives and newtypes are exempt -- both
 -- are nominally distinct base forms and own their per-language overrides.
@@ -1436,7 +1526,7 @@ checkInstanceOnRoot dag gscope =
     findInstanceTypes :: ExprI -> [(Int, [TypeU])]
     findInstanceTypes = go
       where
-        go (ExprI i (IstE _ _ ts _)) = [(i, ts)]
+        go (ExprI i (IstE _ _ _ ts _)) = [(i, ts)]
         go (ExprI _ (ModE _ es)) = concatMap go es
         go _ = []
 
@@ -1528,7 +1618,7 @@ refineKinds dag = do
     collectAllTypeDefParams (ExprI _ (ModE _ es)) = concatMap collectAllTypeDefParams es
     collectAllTypeDefParams (ExprI _ (TypE (ExprTypeE _ v ps _ _ _))) = [(v, ps)]
     collectAllTypeDefParams (ExprI _ (AssE _ e es)) = concatMap collectAllTypeDefParams (e:es)
-    collectAllTypeDefParams (ExprI _ (IstE _ _ _ es)) = concatMap collectAllTypeDefParams es
+    collectAllTypeDefParams (ExprI _ (IstE _ _ _ _ es)) = concatMap collectAllTypeDefParams es
     collectAllTypeDefParams _ = []
 
     refineExprKinds :: Map TVar [Kind] -> ExprI -> MorlocMonad ExprI
@@ -1555,8 +1645,8 @@ refineKinds dag = do
       in ExprI i (SigE (Signature v lng et { etype = newType, econs = newCons }))
     promoteLabelKindsExpr (ExprI i (AssE v e es)) =
       ExprI i (AssE v (promoteLabelKindsExpr e) (map promoteLabelKindsExpr es))
-    promoteLabelKindsExpr (ExprI i (IstE c ctx ts es)) =
-      ExprI i (IstE c ctx ts (map promoteLabelKindsExpr es))
+    promoteLabelKindsExpr (ExprI i (IstE o c ctx ts es)) =
+      ExprI i (IstE o c ctx ts (map promoteLabelKindsExpr es))
     promoteLabelKindsExpr e = e
 
     -- | Given the @enatLabels@ map (var -> arg index) and the function
@@ -1604,8 +1694,8 @@ refineKinds dag = do
       ExprI i (ModE m (map augmentImplicitConstraints es))
     augmentImplicitConstraints (ExprI i (AssE v e es)) =
       ExprI i (AssE v (augmentImplicitConstraints e) (map augmentImplicitConstraints es))
-    augmentImplicitConstraints (ExprI i (IstE c ctx ts es)) =
-      ExprI i (IstE c ctx ts (map augmentImplicitConstraints es))
+    augmentImplicitConstraints (ExprI i (IstE o c ctx ts es)) =
+      ExprI i (IstE o c ctx ts (map augmentImplicitConstraints es))
     augmentImplicitConstraints e = e
 
     -- Walk a TypeU and collect implicit constraints from the recognised
@@ -2121,7 +2211,7 @@ typedefsIn :: ExprI -> [(Int, ExprTypeE)]
 typedefsIn (ExprI i (TypE d)) = [(i, d)]
 typedefsIn (ExprI _ (ModE _ es)) = concatMap typedefsIn es
 typedefsIn (ExprI _ (AssE _ e es)) = concatMap typedefsIn (e : es)
-typedefsIn (ExprI _ (IstE _ _ _ es)) = concatMap typedefsIn es
+typedefsIn (ExprI _ (IstE _ _ _ _ es)) = concatMap typedefsIn es
 typedefsIn _ = []
 
 -- | The declarations of a type, general or in one language: each one's index
@@ -2303,7 +2393,7 @@ writtenTypes (ExprI i e) = here ++ concatMap writtenTypes children
       SigE (Signature _ _ et) -> (i, etype et) : concatMap (constraintTypes i) (Set.toList (econs et))
       AnnE _ t -> [(i, t)]
       TypE (ExprTypeE Nothing _ ps t _ _) -> (i, t) : [(i, t') | Right t' <- ps]
-      IstE _ ctx ts _ -> map ((,) i) ts ++ concatMap (constraintTypes i) ctx
+      IstE _ _ ctx ts _ -> map ((,) i) ts ++ concatMap (constraintTypes i) ctx
       ClsE (Typeclass cs _ _ sigs) ->
         concatMap (constraintTypes i) cs
           ++ concat [(i, etype et) : concatMap (constraintTypes i) (Set.toList (econs et)) | Signature _ _ et <- sigs]
@@ -2311,7 +2401,7 @@ writtenTypes (ExprI i e) = here ++ concatMap writtenTypes children
     children = case e of
       ModE _ es -> es
       AssE _ x xs -> x : xs
-      IstE _ _ _ xs -> xs
+      IstE _ _ _ _ xs -> xs
       _ -> AST.exprIChildren e
     constraintTypes j (Constraint _ ts) = map ((,) j) ts
     constraintTypes j (CMember a b) = [(j, a), (j, b)]
@@ -2526,7 +2616,7 @@ inferAliasParamKinds dag = do
     rewrite :: Map TVar [Kind] -> ExprI -> ExprI
     rewrite km (ExprI i (ModE m es)) = ExprI i (ModE m (map (rewrite km) es))
     rewrite km (ExprI i (AssE v e es)) = ExprI i (AssE v (rewrite km e) (map (rewrite km) es))
-    rewrite km (ExprI i (IstE c ctx ts es)) = ExprI i (IstE c ctx ts (map (rewrite km) es))
+    rewrite km (ExprI i (IstE o c ctx ts es)) = ExprI i (IstE o c ctx ts (map (rewrite km) es))
     rewrite km (ExprI i (TypE (ExprTypeE Nothing v ps body doc TypedefAlias)))
       | Just ks <- Map.lookup v km
       , all isLeft ps

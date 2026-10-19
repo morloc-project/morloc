@@ -1213,6 +1213,10 @@ genericPrintExpr desc = go
     go (IIntrinsicHash sid e) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_hash(" <> go e <> ", " <> schemaRef sid <> ")"
+    go (IIntrinsicCompare intr sid a b) =
+      let prefix = ldIntrinsicPrefix desc
+       in "(" <> pretty prefix <> "mlc_compare(" <> go a <> ", " <> go b <> ", " <> schemaRef sid <> ")"
+            <> (if intr == IntrEq then " == 0)" else " <= 0)")
     go (IIntrinsicSave fmt sid level e path) =
       let prefix = ldIntrinsicPrefix desc
           saveFn :: Text

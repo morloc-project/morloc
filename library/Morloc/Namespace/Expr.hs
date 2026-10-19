@@ -66,8 +66,9 @@ module Morloc.Namespace.Expr
   , AnnoS (..)
   , ExprS (..)
   , Coercion (..)
+  , CastDir (..)
+  , InstanceOrigin (..)
   , applyCoercion
-  , unapplyCoercion
   , ManyPoly (..)
   , mapAnnoSM
   , mapExprSM
@@ -397,6 +398,8 @@ data Intrinsic
   | IntrSaveJ     -- ^ @savej :: Str -> a -> <IO> (Try Str ())    -- raw JSON file
   | IntrLoad      -- ^ @load  :: Str -> <IO> (Try Str a)          -- auto-detect format, auto-decompress packets; failure is an Err arm
   | IntrHash      -- ^ @hash   :: a -> Str           -- xxhash, hex string
+  | IntrEq        -- ^ @eq     :: a -> a -> Bool     -- equal wire values (INTR-7)
+  | IntrLe        -- ^ @le     :: a -> a -> Bool     -- wire order (INTR-7)
   | IntrVersion   -- ^ @version :: Str               -- compiler version
   | IntrCompiled  -- ^ @compiled :: Str              -- compile timestamp
   | IntrLang      -- ^ @lang    :: Str               -- current pool language
@@ -425,6 +428,11 @@ data Intrinsic
                   -- host adapter ('Morloc.CodeGenerator.EffectBoundary'),
                   -- which rebuilds an optional holding a function value in
                   -- the convention of the side it crosses to. NOT user-facing.
+  | IntrNewtypeUnwrap -- ^ implicit @N vs -> T@ representation cast, emitted
+                  -- only in derived @unpack@ bodies (NEWT-7). NOT user-facing;
+                  -- the typechecker replaces it with a 'CoerceNewtype'.
+  | IntrNewtypeWrap -- ^ implicit @T -> N vs@, its inverse, in derived @pack@
+                  -- bodies (NEWT-8).
   | IntrTagTest   -- ^ implicit @a -> a -> Bool@ tag test, emitted only by the
                   -- desugar's constructor-pattern lowering. NOT user-facing --
                   -- there is no entry in 'parseIntrinsic', as with 'IntrMap'.
@@ -588,6 +596,8 @@ intrinsicName IntrSaveM = "savem"
 intrinsicName IntrSaveJ = "savej"
 intrinsicName IntrLoad = "load"
 intrinsicName IntrHash = "hash"
+intrinsicName IntrEq = "eq"
+intrinsicName IntrLe = "le"
 intrinsicName IntrVersion = "version"
 intrinsicName IntrCompiled = "compiled"
 intrinsicName IntrLang = "lang"
@@ -603,6 +613,8 @@ intrinsicName IntrFSchema = "fschema"
 intrinsicName IntrMap = "map"
 intrinsicName IntrMapOptional = "mapoptional"
 intrinsicName IntrTagTest = "tagtest"
+intrinsicName IntrNewtypeUnwrap = "unwrap"
+intrinsicName IntrNewtypeWrap = "wrap"
 intrinsicName IntrCtorField = "ctorfield"
 intrinsicName IntrListLenTest = "listlentest"
 intrinsicName IntrListElem = "listelem"
@@ -675,6 +687,8 @@ intrinsicIsIO IntrSpawn = True
 intrinsicIsIO IntrSettle = True
 -- No IO: safe to write directly in a sandboxed eval.
 intrinsicIsIO IntrHash = False
+intrinsicIsIO IntrEq = False
+intrinsicIsIO IntrLe = False
 intrinsicIsIO IntrVersion = False
 intrinsicIsIO IntrCompiled = False
 intrinsicIsIO IntrLang = False
@@ -687,6 +701,8 @@ intrinsicIsIO IntrUnpack = True
 intrinsicIsIO IntrMap = False
 intrinsicIsIO IntrMapOptional = False
 intrinsicIsIO IntrTagTest = False
+intrinsicIsIO IntrNewtypeUnwrap = False
+intrinsicIsIO IntrNewtypeWrap = False
 intrinsicIsIO IntrCtorField = False
 intrinsicIsIO IntrListLenTest = False
 intrinsicIsIO IntrListElem = False
@@ -700,6 +716,8 @@ parseIntrinsic "savem" = Just IntrSaveM
 parseIntrinsic "savej" = Just IntrSaveJ
 parseIntrinsic "load" = Just IntrLoad
 parseIntrinsic "hash" = Just IntrHash
+parseIntrinsic "eq" = Just IntrEq
+parseIntrinsic "le" = Just IntrLe
 parseIntrinsic "version" = Just IntrVersion
 parseIntrinsic "compiled" = Just IntrCompiled
 parseIntrinsic "lang" = Just IntrLang
@@ -735,6 +753,8 @@ parseIntrinsic _ = Nothing
 intrinsicArity :: Intrinsic -> Int
 intrinsicArity IntrSave = 3
 intrinsicArity IntrTagTest = 2
+intrinsicArity IntrNewtypeUnwrap = 1
+intrinsicArity IntrNewtypeWrap = 1
 intrinsicArity IntrCtorField = 3
 intrinsicArity IntrListLenTest = 2
 intrinsicArity IntrListElem = 2
@@ -742,6 +762,8 @@ intrinsicArity IntrSaveM = 2
 intrinsicArity IntrSaveJ = 2
 intrinsicArity IntrLoad = 1
 intrinsicArity IntrHash = 1
+intrinsicArity IntrEq = 2
+intrinsicArity IntrLe = 2
 intrinsicArity IntrVersion = 0
 intrinsicArity IntrCompiled = 0
 intrinsicArity IntrLang = 0
@@ -789,9 +811,9 @@ data ExprI = ExprI Int Expr
 data Expr
   = ModE MVar [ExprI]
   | ClsE (Typeclass Signature)
-  | IstE ClassName [Constraint] [TypeU] [ExprI]
-  -- ^ class, the instance's context (constraints its body may assume),
-  -- instance types, body
+  | IstE InstanceOrigin ClassName [Constraint] [TypeU] [ExprI]
+  -- ^ origin, class, the instance's context (constraints its body may
+  -- assume), instance types, body
   | EffE EffectLabel Bool  -- ^ effect declaration: label, isEscapable
   | TypE ExprTypeE
   | ImpE Import
@@ -921,6 +943,17 @@ data E
 -- Extensible: future coercions (e.g., numeric widening) add constructors here.
 data Coercion
   = CoerceToOptional
+  -- | Between a newtype and its representation (NEWT-7, NEWT-8), to the
+  -- type it carries.
+  | CoerceNewtype CastDir TypeU
+  deriving (Show, Eq, Ord)
+
+data CastDir = Unwrap | Wrap
+  deriving (Show, Eq, Ord)
+
+-- | Whether an instance was written in the program or derived by the
+-- compiler from a declaration.
+data InstanceOrigin = Declared | Derived
   deriving (Show, Eq, Ord)
 
 -- | Apply a coercion to a type, returning the coerced type.
@@ -930,12 +963,8 @@ data Coercion
 applyCoercion :: Coercion -> TypeU -> TypeU
 applyCoercion CoerceToOptional (EffectU e t) = EffectU e (OptionalU t)
 applyCoercion CoerceToOptional t = OptionalU t
+applyCoercion (CoerceNewtype _ t) _ = t
 
--- | Invert a coercion on a resolved Type.
-unapplyCoercion :: Coercion -> Type -> Type
-unapplyCoercion CoerceToOptional (EffectT e (OptionalT t)) = EffectT e t
-unapplyCoercion CoerceToOptional (OptionalT t) = t
-unapplyCoercion CoerceToOptional t = t  -- defensive fallback
 
 data ExecutableExpr = SrcCall Source | PatCall Pattern
   deriving (Ord, Eq, Show)
@@ -1325,7 +1354,7 @@ instance Pretty Expr where
         [] -> ""
         [c] -> pretty c <+> "=> "
         _ -> tupled (map pretty constraints) <+> "=> "
-  pretty (IstE cls _ ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
+  pretty (IstE _ cls _ ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
   pretty (EffE lbl esc) = (if esc then "escapable effect" else "effect") <+> pretty lbl
   pretty (TypE (ExprTypeE lang v vs t _ kind)) = case kind of
     TypedefPrimitive ->

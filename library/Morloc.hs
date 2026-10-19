@@ -304,7 +304,7 @@ checkEvalRestrictions dag = do
       MM.throwSourcedError i "source statements are not allowed in eval mode"
     checkExpr _ (ExprI i (ClsE _)) =
       MM.throwSourcedError i "class declarations are not allowed in eval mode"
-    checkExpr _ (ExprI i (IstE _ _ _ _)) =
+    checkExpr _ (ExprI i (IstE Declared _ _ _ _)) =
       MM.throwSourcedError i "instance declarations are not allowed in eval mode"
     checkExpr _ (ExprI i (TypE _)) =
       MM.throwSourcedError i "type declarations are not allowed in eval mode"

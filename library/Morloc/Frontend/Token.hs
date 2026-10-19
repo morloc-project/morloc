@@ -127,6 +127,7 @@ data Token
   | TokFalse
   | TokType
   | TokNewtype
+  | TokDeriving
   | TokData
   | TokRecord
   | TokObject
@@ -242,6 +243,7 @@ showToken TokTrue = "'True'"
 showToken TokFalse = "'False'"
 showToken TokType = "'type'"
 showToken TokNewtype = "'newtype'"
+showToken TokDeriving = "'deriving'"
 showToken TokData = "'data'"
 showToken TokRecord = "'record'"
 showToken TokObject = "'object'"

@@ -1,0 +1,24 @@
+-- Spec INTR-7: @eq and @le compare wire values, the same in every
+-- language: integers by value, strings by bytes, -0.0 before 0.0, a
+-- constructor by its declaration order then its fields, an absent optional
+-- before a present one, and lists lexicographically. Each value passes
+-- through the language, so the comparison runs there.
+module main (results)
+
+import root-py
+
+data Shape = Circle Real | Rect Real Real | Dot
+
+results :: [Bool]
+results =
+  [ @le (idpy 2) 10
+  , @le (idpy 10) 2
+  , @eq (idpy "ab") "ab"
+  , @le (idpy "ab") "b"
+  , @eq (idpy (negate 0.0)) 0.0
+  , @le (idpy (Circle 9.0)) (Rect 1.0 1.0)
+  , @le (idpy (Rect 1.0 2.0)) (Rect 1.0 1.0)
+  , @eq (idpy Dot) Dot
+  , @le (idpy ([1, 2] :: [Int])) [1, 2, 0]
+  , @le (idpy (Null :: ?Int)) (0 :: ?Int)
+  ]

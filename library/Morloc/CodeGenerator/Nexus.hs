@@ -227,6 +227,7 @@ data NexusExpr
   | ShowX Text NexusExpr  -- schema (return type = Str), child expression
   | ReadX Text NexusExpr  -- schema (return type = ?a), child expression
   | HashX Text NexusExpr  -- schema + child -> Str (xxhash hex)
+  | CompareX Text Text NexusExpr -- "eq" or "le", schema (Bool), the pair compared
   | SaveX Text Text NexusExpr NexusExpr NexusExpr
   -- ^ format + schema + level + value + path -> (). For "voidstar" the
   -- level is a 0-9 zstd-preset expression evaluated at runtime; for
@@ -1024,6 +1025,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       outerSchema <- type2schema t
       childX <- toNexusExpr e
       return $ OptX outerSchema childX
+    -- A newtype and its representation share a wire form.
+    toNexusExpr (AnnoS _ _ (CoerceS (CoerceNewtype _ _) e)) = toNexusExpr e
     -- IntrMap: the desugar-emitted implicit map for bracket-accessor
     -- chains. The runtime evaluator's Map intrinsic handles this as a
     -- per-element loop over the input array, applying the lambda body
@@ -1069,6 +1072,11 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrRead [arg])) =
       Serial.checkReadDataType ix IntrRead t >>
       withTryResult t (\inner -> ReadX <$> type2schema inner <*> toNexusExpr arg)
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr [a@(AnnoS (Idx _ ta) _ _), b]))
+      | intr `elem` [IntrEq, IntrLe] = do
+          pairSchema <- type2schema (AppT (VarT (MBT.tuple 2)) [ta, ta])
+          pair <- TupX pairSchema <$> mapM toNexusExpr [a, b]
+          CompareX (intrinsicName intr) <$> type2schema t <*> pure pair
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrHash [arg])) =
       HashX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrSave [levelExpr, path, valExpr])) =
@@ -2980,6 +2988,12 @@ exprToJson (ShowX schema child) =
 exprToJson (ReadX schema child) =
   jsonObj
     [ ("tag", jsonStr "read")
+    , ("schema", jsonStr schema)
+    , ("child", exprToJson child)
+    ]
+exprToJson (CompareX tag schema child) =
+  jsonObj
+    [ ("tag", jsonStr tag)
     , ("schema", jsonStr schema)
     , ("child", exprToJson child)
     ]

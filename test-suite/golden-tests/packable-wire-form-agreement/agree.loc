@@ -6,7 +6,7 @@ module agree (roundTrip)
 import root-py
 import root-cpp
 
-newtype Box a
+newtype Box a = [a]
 
 type Py  => (Box a) = "dict" a
 type Cpp => (Box a) = "BoxV<$1>" a

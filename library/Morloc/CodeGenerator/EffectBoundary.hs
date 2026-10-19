@@ -876,7 +876,7 @@ adapt dir lang g hv@(HostView scope _ _ _ _) d t0 e
                   Nothing -> return (k, (Idx i ty, x))
               | (k, (Idx i ty, x)) <- rs ]
             return $ PolyRecord o v ps rs'
-      PolyCoerce c (Idx i ty) x
+      PolyCoerce c@CoerceToOptional (Idx i ty) x
         | OptionalT a <- t -> do
             x' <- adapt dir lang g hv (declOptional hv d) a x
             return $ PolyCoerce c (Idx i (hostType hv d ty)) x'

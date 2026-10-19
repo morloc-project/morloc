@@ -182,6 +182,7 @@ data IExpr
   | IIntrinsicSave Text Int IExpr IExpr IExpr -- format, schemaId, level, data, path
   | IIntrinsicLoad Int (Maybe IType) IExpr -- schemaId, returnType, path -> result (nullable)
   | IIntrinsicHash Int IExpr -- schemaId, data -> hex string
+  | IIntrinsicCompare Intrinsic Int IExpr IExpr -- @eq or @le, schemaId, two values -> Bool
   | IIntrinsicShow Int IExpr -- schemaId, data -> JSON string
   | IIntrinsicRead Int (Maybe IType) IExpr -- schemaId, returnType, json_string -> typed data (nullable)
   | IIntrinsicUnpack Int (Maybe IType) IExpr -- schemaId, returnType, packet bytes -> typed data
@@ -2571,6 +2572,9 @@ lowerNativeExprRaw cfg (CoerceN _ _ innerE) (CoerceN_ CoerceToOptional _ x) = do
   return $ x' {poolExpr = lcCoerceOptional cfg boxed}
 lowerNativeExprRaw cfg _ (CoerceN_ CoerceToOptional _ x) =
   return $ x {poolExpr = lcCoerceOptional cfg (poolExpr x)}
+-- A cast is realized only where the newtype and its representation share a
+-- native form (NEWT-7), so the value is unchanged.
+lowerNativeExprRaw _ _ (CoerceN_ (CoerceNewtype _ _) _ x) = return x
 -- The two arms feed the conditional's owned result sink, so adapt each to an
 -- owned value (like every other owned sink); the condition is not a sink.
 lowerNativeExprRaw cfg origExpr@(IfN _ condE thenE elseE) (IfN_ _ condDocs thenDocs elseDocs) = do
@@ -2587,6 +2591,14 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrHash (Just 
   -- 'lcReadArg'.
   dataDocs' <- adaptReadElem cfg dataE dataDocs
   return $ dataDocs' {poolExpr = lcPrintExpr cfg (IIntrinsicHash sid (IRawExpr (render (poolExpr dataDocs'))))}
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [aE, bE]) (IntrinsicN_ _ intr (Just schema) [aDocs, bDocs])
+  | intr `elem` [IntrEq, IntrLe] = do
+      sid <- lcRegisterSchema cfg schema
+      -- both values are only read, as @hash's is
+      aDocs' <- adaptReadElem cfg aE aDocs
+      bDocs' <- adaptReadElem cfg bE bDocs
+      let raw d = IRawExpr (render (poolExpr d))
+      return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicCompare intr sid (raw aDocs') (raw bDocs'))) [aDocs', bDocs']
 -- @save takes source args in (level, path, value) order; path-first
 -- (after the level) mirrors @savem/@savej. The runtime ABI is unchanged:
 -- IIntrinsicSave keeps (level, data, path).

@@ -58,7 +58,7 @@ topDecl :: ExprI -> MorlocMonad ExprI
 topDecl (ExprI i (AssE v e es)) = do
   (e', es') <- definition Map.empty e es
   return (ExprI i (AssE v e' es'))
-topDecl (ExprI i (IstE cls ctx ts es)) = ExprI i . IstE cls ctx ts <$> mapM topDecl es
+topDecl (ExprI i (IstE o cls ctx ts es)) = ExprI i . IstE o cls ctx ts <$> mapM topDecl es
 topDecl e = expr Map.empty e
 
 -- | A definition's body and where-block, which see the parameters and every
@@ -116,7 +116,7 @@ expr env (ExprI i e0) = ExprI i <$> go e0
       (e', es') <- definition env e es
       return (AssE (lookupName env v) e' es')
     go (ModE m es) = ModE m <$> mapM topDecl es
-    go (IstE cls ctx ts es) = IstE cls ctx ts <$> mapM topDecl es
+    go (IstE o cls ctx ts es) = IstE o cls ctx ts <$> mapM topDecl es
     go (LstE es) = LstE <$> mapM rec es
     go (TupE es) = TupE <$> mapM rec es
     go (NamE kes) = NamE <$> mapM (\(k, x) -> (,) k <$> rec x) kes

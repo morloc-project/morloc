@@ -1,0 +1,17 @@
+-- Spec NEWT-7: a Bytes value made in Python is unwrapped where Bytes has no
+-- form of its own, so the Python consumer of the representation receives a
+-- str, not the bytes object.
+module main (roundTrip)
+
+import root-py
+import root-cpp
+
+newtype Bytes = Str
+type Py => Bytes = "bytes"
+
+source Py from "main.py" ("shout", "to_bytes" as toBytes)
+shout :: Str -> Str
+toBytes :: Str -> Bytes
+
+roundTrip :: Str -> Str
+roundTrip s = shout (unpack (toBytes s))

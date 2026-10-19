@@ -1,0 +1,19 @@
+-- Spec WIRE-1: a value crosses into a language and back unchanged. Pairs
+-- has a representation that is a list of tuples and a Python form that is
+-- a dict; it crosses through its Packable instance, not as a list of its
+-- own type arguments.
+module main (roundTrip)
+
+import root-py
+
+newtype Pairs a b = [(a, b)]
+type Py => (Pairs a b) = "dict" a b
+
+instance Packable [(a, b)] (Pairs a b) where
+  source Py from "main.py" ("to_dict" as pack, "from_dict" as unpack)
+
+source Py from "main.py" ("keep")
+keep :: Pairs Str Int -> Pairs Str Int
+
+roundTrip :: Pairs Str Int -> Pairs Str Int
+roundTrip x = keep x

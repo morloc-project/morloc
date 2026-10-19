@@ -43,7 +43,7 @@ import qualified Data.Text as T
 import qualified Data.Map as Map
 import Morloc.CodeGenerator.Grammars.Common (DispatchEntry (..), manNamer)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-import Morloc.CodeGenerator.Namespace (MDoc, RealLit (..))
+import Morloc.CodeGenerator.Namespace (Intrinsic (..), MDoc, RealLit (..))
 import Morloc.Data.Doc
 import Morloc.DataFiles as DF
 import Morloc.Quasi
@@ -107,6 +107,8 @@ printExpr (IRawExpr d) = pretty d
 printExpr (IEval e) = printExpr e <> "()"
 printExpr (IIntrinsicHash sid e) =
   [idoc|_mlc_hash(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
+printExpr (IIntrinsicCompare intr sid a b) =
+  [idoc|(_mlc_compare(#{printExpr a}, #{printExpr b}, mlc_schema_table[#{pretty sid}]) #{if intr == IntrEq then "==" else "<=" :: MDoc} 0)|]
 printExpr (IIntrinsicSave fmt sid level e path)
   | fmt == "json" = [idoc|_mlc_save_json(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr path})|]
   | fmt == "voidstar" = [idoc|_mlc_save_voidstar(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr path})|]

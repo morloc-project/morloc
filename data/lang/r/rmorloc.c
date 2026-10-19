@@ -2433,6 +2433,45 @@ SEXP morloc_mlc_hash(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     return result;
 }
 
+// @eq / @le :: order two values of one schema: -1, 0 or 1.
+SEXP morloc_mlc_compare(SEXP a_r, SEXP b_r, SEXP schema_str_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_compare: schema must be a single string");
+    }
+    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
+    free(schema_str);
+
+    void* va = to_voidstar(a_r, schema);
+    if (!va) {
+        free_schema(schema);
+        MORLOC_ERROR("mlc_compare: failed to convert R object to voidstar");
+    }
+    void* vb = to_voidstar(b_r, schema);
+    if (!vb) {
+        char* err = NULL;
+        shfree(va, &err);
+        free(err);
+        free_schema(schema);
+        MORLOC_ERROR("mlc_compare: failed to convert R object to voidstar");
+    }
+
+    int order = R_TRY_WITH(
+        { char* err = NULL; shfree(va, &err); free(err); err = NULL; shfree(vb, &err); free(err); free_schema(schema); },
+        mlc_compare, va, vb, schema);
+
+    {
+        char* err = NULL;
+        shfree(va, &err);
+        free(err);
+        err = NULL;
+        shfree(vb, &err);
+        free(err);
+    }
+    free_schema(schema);
+    return ScalarInteger(order);
+}
+
 // @load :: Str -> <IO, Err> a. Missing file / decode failure raises
 // via MORLOC_ERROR (an R error condition catchable by morloc_mlc_catch).
 SEXP morloc_mlc_load(SEXP schema_str_r, SEXP path_r) { MAYFAIL
@@ -4241,6 +4280,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_save", (DL_FUNC) &morloc_mlc_save, 4},
         {"morloc_mlc_save_json", (DL_FUNC) &morloc_mlc_save_json, 4},
         {"morloc_mlc_hash", (DL_FUNC) &morloc_mlc_hash, 2},
+        {"morloc_mlc_compare", (DL_FUNC) &morloc_mlc_compare, 3},
         {"morloc_mlc_load", (DL_FUNC) &morloc_mlc_load, 2},
         {"morloc_mlc_read", (DL_FUNC) &morloc_mlc_read, 2},
         {NULL, NULL, 0}

@@ -1,0 +1,21 @@
+-- Spec NEWT-8: a newtype that derives Packable can be built from its
+-- representation and unwrapped again, in either language.
+module main (viaPy, viaCpp)
+
+import root-py
+import root-cpp
+
+newtype Tagged a = a
+  deriving (Packable)
+
+source Py from "main.py" ("py_bump" as pyBump)
+pyBump :: Tagged Int -> Tagged Int
+
+source Cpp from "main.hpp" ("cpp_double" as cppDouble)
+cppDouble :: Int -> Int
+
+viaPy :: Int -> Int
+viaPy x = cppDouble (unpack (pyBump (pack x)))
+
+viaCpp :: Int -> Int
+viaCpp x = unpack (pyBump (pack (cppDouble x)))

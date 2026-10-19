@@ -567,8 +567,12 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
                 Right et -> et
                 Left _ -> t
               deduped = nubBy (\t1 t2 -> eval t1 == eval t2) manyTypes
-              es0 = concat [rs | (t, rs) <- rssSubtypes,
-                            any (\d -> eval (etype t) == eval d) deduped]
+              chosen t = any (\d -> eval (etype t) == eval d) deduped
+              -- A representation cast agrees with every instance of its
+              -- newtype, so a more specific instance does not shadow it
+              -- (NEWT-7).
+              es0 = concat [rs | (t, rs) <- rssSubtypes, chosen t]
+                <> concat [filter isRepresentationCast rs | (t, rs) <- rssSubtypes, not (chosen t)]
               -- When all matching instances are alias-equivalent (single
               -- deduped entry), propagate existential solutions normally.
               -- When multiple distinct instances exist (e.g. Integral Int
@@ -638,6 +642,15 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
         (Right g1)
           | singleGroup -> connectInstance singleGroup g1 es
           | otherwise   -> connectInstance singleGroup g0 es
+
+-- | A derived @pack@ or @unpack@: a lambda over a representation cast,
+-- which no program can write. Instance bodies reach resolution typechecked,
+-- so the cast is already a coercion.
+isRepresentationCast :: AnnoS g f c -> Bool
+isRepresentationCast (AnnoS _ _ (LamS _ (AnnoS _ _ (CoerceS (CoerceNewtype _ _) _)))) = True
+isRepresentationCast (AnnoS _ _ (LamS _ (AnnoS _ _ (IntrinsicS intr _)))) =
+  intr `elem` [IntrNewtypeUnwrap, IntrNewtypeWrap]
+isRepresentationCast _ = False
 
 -- | Filter typeclass instances to only those reachable from @gt@ by
 -- walking its alias chain to a matching root-headed candidate.
@@ -1558,7 +1571,7 @@ synthE i g (DoBlockS e) = do
       return (g1', EffectU collected bareT, DoBlockS e1)
 synthE _ g (CoerceS coercion e) = do
   (g1, t1, e1) <- synthG g e
-  return (g1, applyCoercion coercion t1, CoerceS coercion e1)
+  return (g1, apply g1 (applyCoercion coercion t1), CoerceS coercion e1)
 synthE _ g (LabelS k e) = do
   (g1, t1, e1) <- synthG g e
   return (g1, t1, LabelS k e1)
@@ -1600,6 +1613,28 @@ synthE _ g (IntrinsicS IntrMap [funcE, listE]) = do
   return (g5, apply g5 resultT, IntrinsicS IntrMap [funcE', listE'])
 synthE _ _ (IntrinsicS IntrMap args) =
   error $ "IntrMap expects 2 args (lambda, list), got " <> show (length args)
+-- IntrEq / IntrLe: two values of one type, compared on the wire (INTR-7).
+synthE _ g (IntrinsicS intr [aE, bE])
+  | intr `elem` [IntrEq, IntrLe] = do
+      (g1, ta, aE') <- synthG g aE
+      (g2, _, bE') <- checkG g1 bE (apply g1 ta)
+      return (g2, BT.boolU, IntrinsicS intr [aE', bE'])
+-- IntrNewtypeUnwrap: the representation cast of a derived @unpack@
+-- (NEWT-7). The argument's type is a newtype; the result is its
+-- representation at the newtype's arguments.
+synthE i g (IntrinsicS IntrNewtypeUnwrap [xE]) = do
+  (g1, tx, xE') <- synthG g xE
+  scope <- MM.getGeneralScope
+  let tx' = apply g1 tx
+  case TE.expandWireParent scope tx' of
+    Just body -> return (g1, body, CoerceS (CoerceNewtype Unwrap body) xE')
+    Nothing ->
+      MM.throwSourcedError i $
+        "Cannot unwrap" <+> squotes (pretty tx') <> ": it is not a newtype with a representation."
+synthE _ _ (IntrinsicS IntrNewtypeUnwrap args) =
+  error $ "IntrNewtypeUnwrap expects one argument, got " <> show (length args)
+synthE i _ (IntrinsicS IntrNewtypeWrap _) =
+  MM.throwSourcedError i "A newtype wrap needs the newtype it builds from its context."
 -- IntrTagTest: the constructor-pattern tag test.
 --
 -- The second argument is the constructor's NAME, carried as data by the
@@ -1924,6 +1959,8 @@ intrinsicType IntrSaveM = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
 intrinsicType IntrSaveJ = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
 intrinsicType IntrLoad = EffectU ioEffectSet (BT.tryU BT.strU (ExistU (TV "load_a") ([], Open) ([], Open)))
 intrinsicType IntrHash = BT.strU
+intrinsicType IntrEq = error "intrinsicType: IntrEq must be typed via synthE's dedicated clause"
+intrinsicType IntrLe = error "intrinsicType: IntrLe must be typed via synthE's dedicated clause"
 intrinsicType IntrVersion = BT.strU
 intrinsicType IntrCompiled = BT.strU
 intrinsicType IntrLang = BT.strU
@@ -1980,6 +2017,10 @@ intrinsicType IntrMapOptional =
   error "intrinsicType: IntrMapOptional is emitted after typechecking"
 intrinsicType IntrTagTest =
   error "intrinsicType: IntrTagTest must be typed via synthE's dedicated clause"
+intrinsicType IntrNewtypeUnwrap =
+  error "intrinsicType: IntrNewtypeUnwrap must be typed via synthE's dedicated clause"
+intrinsicType IntrNewtypeWrap =
+  error "intrinsicType: IntrNewtypeWrap must be typed via checkE's dedicated clause"
 intrinsicType IntrCtorField =
   error "intrinsicType: IntrCtorField must be typed via synthE's dedicated clause"
 intrinsicType IntrListLenTest =
@@ -2410,6 +2451,18 @@ checkE i g0 (LamS vs body) t@(FunU as b)
 checkE i g1 e1 (ForallU v a) = case gammaRigid g1 of
   Just rigid -> checkE' i (g1 {gammaRigid = Just (Set.insert v rigid)} +> VarG v) e1 a
   Nothing -> checkE' i (g1 +> v) e1 (substitute v a)
+-- IntrNewtypeWrap: the representation cast of a derived @pack@ (NEWT-8),
+-- from the representation of the newtype it is checked against.
+checkE i g (IntrinsicS IntrNewtypeWrap [xE]) t = do
+  scope <- MM.getGeneralScope
+  let t' = apply g t
+  case TE.expandWireParent scope t' of
+    Just body -> do
+      (g1, _, xE') <- checkG g xE body
+      return (g1, apply g1 t', CoerceS (CoerceNewtype Wrap (apply g1 t')) xE')
+    Nothing ->
+      MM.throwSourcedError i $
+        "Cannot wrap a value as" <+> squotes (pretty t') <> ": it is not a newtype with a representation."
 checkE i g (IfS cond thenE elseE) t = do
   (g1, condType, cond') <- synthG g cond
   g2 <- subtype' i condType (VarU (TV "Bool")) g1

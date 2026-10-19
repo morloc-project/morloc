@@ -1,0 +1,24 @@
+-- Spec INTR-7: @eq and @le compare wire values, the same in every
+-- language: integers by value, strings by bytes, -0.0 before 0.0, a
+-- constructor by its declaration order then its fields, an absent optional
+-- before a present one, and lists lexicographically. Each value passes
+-- through the language, so the comparison runs there.
+module main (results)
+
+import root-cpp
+
+data Shape = Circle Real | Rect Real Real | Dot
+
+results :: [Bool]
+results =
+  [ @le (idcpp 2) 10
+  , @le (idcpp 10) 2
+  , @eq (idcpp "ab") "ab"
+  , @le (idcpp "ab") "b"
+  , @eq (idcpp (negate 0.0)) 0.0
+  , @le (idcpp (Circle 9.0)) (Rect 1.0 1.0)
+  , @le (idcpp (Rect 1.0 2.0)) (Rect 1.0 1.0)
+  , @eq (idcpp Dot) Dot
+  , @le (idcpp ([1, 2] :: [Int])) [1, 2, 0]
+  , @le (idcpp (Null :: ?Int)) (0 :: ?Int)
+  ]

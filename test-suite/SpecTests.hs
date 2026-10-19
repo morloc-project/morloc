@@ -32,6 +32,7 @@ specTests =
     , localOption (mkTimeout 2000000) kindTests
     , localOption (mkTimeout 2000000) teqTests
     , localOption (mkTimeout 2000000) newtTests
+    , localOption (mkTimeout 2000000) derivTests
     , localOption (mkTimeout 5000000) dimTests
     , localOption (mkTimeout 2000000) patTests
     , localOption (mkTimeout 2000000) lexTests
@@ -919,6 +920,86 @@ teqTests =
         |]
     ]
 
+derivTests :: TestTree
+derivTests =
+  testGroup
+    "DERIV"
+    [ accept
+        "spec-deriv-1-1"
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+        class Ord a where
+          (<=) :: a -> a -> Bool
+        class Show a where
+          show :: a -> Str
+        class Hashable a where
+          hash :: a -> Str
+        newtype Name = Str deriving (Eq, Ord, Show, Hashable)
+        data Shape = Circle Real | Dot deriving (Eq, Ord, Show)
+        record Point deriving (Eq, Show) where
+          x :: Int
+          y :: Int
+        f :: Name -> Shape -> Point -> (Bool, Bool, Str)
+        f n s p = (n == n, s <= s, show p)
+        |]
+    , reject
+        "spec-deriv-1-2"
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+        class Ord a where
+          (<=) :: a -> a -> Bool
+        class Show a where
+          show :: a -> Str
+        class Hashable a where
+          hash :: a -> Str
+        newtype Name = Str deriving (Functor)
+        f :: Name -> Int
+        |]
+    , rejectUser
+        "spec-deriv-1-3"
+        [r|
+        module main (f)
+        newtype Name = Str deriving (Eq)
+        f :: Name -> Int
+        |]
+    , rejectUser
+        "spec-deriv-5-1"
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+        class Ord a where
+          (<=) :: a -> a -> Bool
+        class Show a where
+          show :: a -> Str
+        class Hashable a where
+          hash :: a -> Str
+        newtype Name = Str deriving (Eq)
+        instance Eq Name
+        f :: Name -> Int
+        |]
+    , accept
+        "spec-deriv-5-2"
+        [r|
+        module main (f)
+        class Eq a where
+          (==) :: a -> a -> Bool
+        class Ord a where
+          (<=) :: a -> a -> Bool
+        class Show a where
+          show :: a -> Str
+        class Hashable a where
+          hash :: a -> Str
+        newtype Name = Str deriving (Show)
+        instance Eq Name
+        f :: Name -> Int
+        |]
+    ]
+
 newtTests :: TestTree
 newtTests =
   testGroup
@@ -929,6 +1010,163 @@ newtTests =
         module main (f)
         newtype Buffer (n :: Nat) a = List a
         f :: Buffer 3 Int -> Int
+        |]
+    , rejectUser
+        "spec-newt-9-1"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Foo = Int
+        instance Packable Str Foo
+        f :: Foo -> Int
+        |]
+    , accept
+        "spec-newt-9-2"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Foo = Int
+        instance Packable Int Foo
+        f :: Foo -> Int
+        |]
+    , rejectUser
+        "spec-newt-9-3"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Box a
+        instance Packable [a] (Box a)
+        f :: Box Int -> Int
+        |]
+    , accept
+        "spec-newt-9-4"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype MyMap a b = [(a, b)]
+        instance Packable [(Str, v)] (MyMap Str v)
+        f :: MyMap Str Int -> Int
+        |]
+    , accept
+        "spec-newt-9-5"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype V (n :: Nat) a = List a
+        newtype Mat (m :: Nat) (n :: Nat) a = ((Int, Int), V (m * n) a)
+        instance Packable ((Int, Int), V (d1 * d2) a) (Mat d1 d2 a)
+        f :: Mat 2 3 Int -> Int
+        |]
+    , accept
+        "spec-newt-8-1"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Gff3 a = a deriving (Packable)
+        f :: Gff3 Int -> Int
+        |]
+    , reject
+        "spec-newt-8-2"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Buf (n :: Nat) a = List a deriving (Packable)
+        f :: Buf 3 Int -> Int
+        |]
+    , reject
+        "spec-newt-8-3"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype V (n :: Nat) a = List a
+        newtype Mat (m :: Nat) (n :: Nat) a = ((Int, Int), V (m * n) a) deriving (Packable)
+        f :: Mat 2 3 Int -> Int
+        |]
+    , accept
+        "spec-newt-8-4"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Pt = (Int, Int) deriving Packable
+        f :: Pt -> Int
+        |]
+    , reject
+        "spec-newt-8-5"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        data Color = Red | Green deriving (Packable)
+        f :: Color -> Int
+        |]
+    , accept
+        "spec-newt-9-6"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype V (n :: Nat) a = List a
+        newtype Mat (m :: Nat) (n :: Nat) a = ((Int, Int), V (m * n) a)
+        instance Packable ((Int, Int), V (d2 * d1) a) (Mat d1 d2 a)
+        f :: Mat 2 3 Int -> Int
+        |]
+    , rejectUser
+        "spec-newt-9-7"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        data Color = Red | Green
+        instance Packable Int Color
+        f :: Color -> Int
+        |]
+    , accept
+        "spec-newt-7-7"
+        [r|
+        module main (f)
+        class Packable a where
+          pack :: a -> Int
+        newtype Name = Str
+        f :: Name -> Int
+        |]
+    , reject
+        "spec-newt-8-7"
+        [r|
+        module main (f)
+        newtype Name = Str deriving (Packable)
+        f :: Name -> Int
+        |]
+    , accept
+        "spec-newt-7-9"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Cell = (Int, Int) deriving (Packable)
+        f :: Cell -> (Int, Int)
+        f c = unpack c
         |]
     ]
 

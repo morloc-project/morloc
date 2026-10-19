@@ -2035,7 +2035,7 @@ freeVarsE (ExprI _ e) = case e of
   IntrinsicE _ es     -> Set.unions (map freeVarsE es)
   ParenE inner        -> freeVarsE inner
   AssE _ body wheres  -> Set.union (freeVarsE body) (Set.unions (map freeVarsE wheres))
-  IstE _ _ _ body     -> Set.unions (map freeVarsE body)
+  IstE _ _ _ _ body   -> Set.unions (map freeVarsE body)
   ModE _ body         -> Set.unions (map freeVarsE body)
   -- Leaf value expressions (no names bound or referenced)
   UniE                -> Set.empty
@@ -3008,7 +3008,7 @@ expandCollectE self@(ExprI i e) = case e of
     expandCollectBody self body'
   ModE v xs -> ExprI i . ModE v <$> mapM expandCollectE xs
   AssE v b ws -> (\b' ws' -> ExprI i (AssE v b' ws')) <$> expandCollectE b <*> mapM expandCollectE ws
-  IstE cn ctx ts b -> ExprI i . IstE cn ctx ts <$> mapM expandCollectE b
+  IstE o cn ctx ts b -> ExprI i . IstE o cn ctx ts <$> mapM expandCollectE b
   LstE es -> ExprI i . LstE <$> mapM expandCollectE es
   TupE es -> ExprI i . TupE <$> mapM expandCollectE es
   NamE kes -> ExprI i . NamE <$> mapM (\(k, x) -> (,) k <$> expandCollectE x) kes
@@ -3219,7 +3219,7 @@ desugarTopLevel (Loc sp (CClsE classHead sigs)) = do
   return [e]
 desugarTopLevel (Loc sp (CIstE ctx cn types body)) = do
   bodyExprs <- concatMapM desugarTopLevel body
-  e <- freshExprSpan sp (IstE cn ctx (map quantifyType types) bodyExprs)
+  e <- freshExprSpan sp (IstE Declared cn ctx (map quantifyType types) bodyExprs)
   return [e]
 desugarTopLevel (Loc sp (CEffE lbl esc)) = do
   e <- freshExprSpan sp (EffE lbl esc)
@@ -3410,7 +3410,7 @@ checkCtorUniqueness body =
         "Constructor '" ++ T.unpack name ++ "' is already declared by another \
         \`data` type; constructor names must be unique"
   where
-    declCtors (Loc _ (CTypE (CstDataDef _ ctors))) =
+    declCtors (Loc _ (CTypE (CstDataDef _ ctors _))) =
       dedupeByName [(name, locPos tok) | (_, tok, name, _) <- ctors]
     declCtors _ = []
     dedupeByName = go Set.empty
@@ -3419,6 +3419,79 @@ checkCtorUniqueness body =
         go seen (x@(n, _) : xs)
           | Set.member n seen = go seen xs
           | otherwise = x : go (Set.insert n seen) xs
+
+-- | The Packable instance of a newtype with a representation: @unpack@
+-- always (NEWT-7) and @pack@ when the declaration derives Packable
+-- (NEWT-8), both representation casts.
+derivedPackable :: Span -> TVar -> [Either (TVar, Kind) TypeU] -> TypeU -> Bool -> D [ExprI]
+derivedPackable sp v vs t withPack = do
+  unpackE <- castMethod "unpack" IntrNewtypeUnwrap
+  packE <- if withPack then (: []) <$> castMethod "pack" IntrNewtypeWrap else return []
+  inst <- freshExprSpan sp (IstE Derived (ClassName "Packable") [] [quantifyType t, quantifyType (declHead v vs)] (unpackE : packE))
+  return [inst]
+  where
+    castMethod name intr = do
+      x <- freshIrrefLamParam sp
+      xRef <- freshExprSpan sp (VarE defaultValue x)
+      cast <- freshExprSpan sp (IntrinsicE intr [xRef])
+      lam <- freshExprSpan sp (LamE [x] cast)
+      freshExprSpan sp (AssE (EV name) lam [])
+
+-- | The type a declaration names, applied to its parameters.
+declHead :: TVar -> [Either (TVar, Kind) TypeU] -> TypeU
+declHead v vs = if null vs then VarU v else AppU (VarU v) (map (either (VarU . fst) id) vs)
+
+-- | The instances a @deriving@ clause names other than Packable: each
+-- method acts on the wire value (DERIV-2).
+derivedWireInstances :: Span -> TVar -> [Either (TVar, Kind) TypeU] -> [(Located, Text)] -> D [ExprI]
+derivedWireInstances sp v vs ders = concat <$> mapM one ders
+  where
+    one (_, "Packable") = return []
+    one (_, "Eq") = inst "Eq" "==" IntrEq 2
+    one (_, "Ord") = inst "Ord" "<=" IntrLe 2
+    one (_, "Show") = inst "Show" "show" IntrShow 1
+    one (_, "Hashable") = inst "Hashable" "hash" IntrHash 1
+    one (tok, cls) = notDerivable tok cls
+    inst :: Text -> Text -> Intrinsic -> Int -> D [ExprI]
+    inst cls method intr arity = do
+      params <- mapM (const (freshIrrefLamParam sp)) [1 .. arity]
+      refs <- mapM (freshExprSpan sp . VarE defaultValue) params
+      body <- freshExprSpan sp (IntrinsicE intr refs)
+      lam <- freshExprSpan sp (LamE params body)
+      ass <- freshExprSpan sp (AssE (EV method) lam [])
+      i <- freshExprSpan sp (IstE Derived (ClassName cls) [] [quantifyType (declHead v vs)] [ass])
+      return [i]
+
+-- | Whether a newtype's @deriving@ clause asks for @pack@. Packable is
+-- derivable only when the representation determines every parameter
+-- (NEWT-8): each occurs in it outside Nat arithmetic and type functions.
+newtypeDerives :: TVar -> [Either (TVar, Kind) TypeU] -> TypeU -> [(Located, Text)] -> D Bool
+newtypeDerives v vs t ders = or <$> mapM one ders
+  where
+    one (tok, "Packable") =
+          case [p | Left (p, _) <- vs, not (Set.member p (determinedVars t))] of
+            [] -> return True
+            ps ->
+              dfail (locPos tok) $
+                "'" ++ T.unpack (unTVar v) ++ "' cannot derive Packable: its representation does not determine "
+                  ++ intercalate ", " ["'" ++ T.unpack (unTVar p) ++ "'" | p <- ps]
+    one _ = return False
+
+notDerivable :: Located -> Text -> D a
+notDerivable tok cls =
+  dfail (locPos tok) ("cannot derive '" ++ T.unpack cls ++ "'; a declaration may derive Eq, Ord, Show and Hashable, and a newtype also Packable")
+
+-- | The variables a type fixes when it is matched against a value's type:
+-- those outside Nat arithmetic, label and type-function positions.
+determinedVars :: TypeU -> Set.Set TVar
+determinedVars (VarU w) = Set.singleton w
+determinedVars (KVarU (w, _)) = Set.singleton w
+determinedVars (AppU h ts) = Set.unions (map determinedVars (h : ts))
+determinedVars (FunU ts r) = Set.unions (map determinedVars (r : ts))
+determinedVars (NamU _ _ ps rs) = Set.unions (map determinedVars (ps <> map snd rs))
+determinedVars (OptionalU x) = determinedVars x
+determinedVars (EffectU _ x) = determinedVars x
+determinedVars _ = Set.empty
 
 desugarTypeDef :: Span -> CstTypeDef -> D [ExprI]
 desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
@@ -3455,7 +3528,7 @@ desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
   rejectDeclDirectivesHere (startPos sp) "a type alias" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars) TypedefAlias))
   return [e]
-desugarTypeDef sp (CstNewtype (v, vs) t) = do
+desugarTypeDef sp (CstNewtype (v, vs) t ders) = do
   when (isVacuousAlias v vs t) $
     dfail (startPos sp) $
       "Newtype '" ++ T.unpack (unTVar v) ++
@@ -3464,7 +3537,10 @@ desugarTypeDef sp (CstNewtype (v, vs) t) = do
   docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
   rejectDeclDirectivesHere (startPos sp) "a newtype declaration" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefNewtype))
-  return [e]
+  withPack <- newtypeDerives v vs t ders
+  derived <- derivedPackable sp v vs t withPack
+  wire <- derivedWireInstances sp v vs ders
+  return (e : derived <> wire)
 desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
   -- A bare @type Foo@ (no RHS) is a built-in primitive declaration:
   -- the type is recognised by the compiler, has its own per-language
@@ -3477,7 +3553,9 @@ desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
   rejectDeclDirectivesHere (startPos sp) "a primitive type declaration" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefPrimitive))
   return [e]
-desugarTypeDef sp (CstDataDef (v, vs) ctors) = do
+desugarTypeDef sp (CstDataDef (v, vs) ctors ders) = do
+  mapM_ (\(tok, _) -> dfail (locPos tok) "only a newtype may derive Packable") [d | d@(_, "Packable") <- ders]
+  wire <- derivedWireInstances sp v vs ders
   -- A `data` declaration: a closed set of named alternatives.
   --
   -- The ordinal IS the wire tag, so declaration order is part of the type's
@@ -3524,7 +3602,7 @@ desugarTypeDef sp (CstDataDef (v, vs) ctors) = do
   -- bindings is what gives uniqueness its teeth: a name already bound
   -- collides through the existing duplicate-binding check.
   ctorDecls <- concatMapM (mkCtor sp v resultT) (zip [0 ..] entries)
-  return (typeDecl : ctorDecls)
+  return (typeDecl : ctorDecls <> wire)
   where
     -- A constructor that takes arguments is a FUNCTION into its type, so it
     -- is bound to a lambda that builds the value; one that takes none is
@@ -3545,7 +3623,9 @@ desugarTypeDef sp (CstDataDef (v, vs) ctors) = do
       ass <- freshExprSpan sp' (AssE (EV name) body [])
       return [sig, ass]
 
-desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
+desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries ders) = do
+  mapM_ (\(tok, _) -> dfail (locPos tok) "only a newtype may derive Packable") [d | d@(_, "Packable") <- ders]
+  wire <- derivedWireInstances sp v vs ders
   -- A record / object / table declaration. These types are always
   -- nominal and own their per-language form; they behave structurally
   -- like newtypes (no typeclass inheritance, opaque to reduction). The
@@ -3558,7 +3638,7 @@ desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
   let entries = [(k, ty) | (_, k, ty) <- locEntries]
       t = NamU nt v (map (either (VarU . fst) id) vs) entries
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t doc TypedefNewtype))
-  return [e]
+  return (e : wire)
 desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal, conArgs) locEntries) = do
   -- Legacy form covers both general @record Foo = Constructor ...@
   -- (lang=Nothing, behaves like CstNamTypeWhere -> TypedefNewtype) and
@@ -4009,7 +4089,7 @@ subExprs :: Expr -> [ExprI]
 subExprs e = case e of
   ModE _ xs -> xs
   AssE _ b ws -> b : ws
-  IstE _ _ _ b -> b
+  IstE _ _ _ _ b -> b
   LstE es -> es
   TupE es -> es
   NamE kes -> map snd kes
@@ -4193,7 +4273,7 @@ collectStreamType sigs body = findCollectArg body >>= streamTypeOfProducer sigs
       IntrinsicE IntrCollect (a : _) -> Just a
       ModE _ xs -> firstSome (map findCollectArg xs)
       AssE _ b ws -> firstSome (map findCollectArg (b : ws))
-      IstE _ _ _ b -> firstSome (map findCollectArg b)
+      IstE _ _ _ _ b -> firstSome (map findCollectArg b)
       LstE es -> firstSome (map findCollectArg es)
       TupE es -> firstSome (map findCollectArg es)
       NamE kes -> firstSome (map (findCollectArg . snd) kes)
@@ -4416,7 +4496,7 @@ rewriteCollectWith wrap = go
         wrap self arg'
       ModE v xs -> mapM go xs >>= freshExprFrom self . ModE v
       AssE v b ws -> do { b' <- go b; ws' <- mapM go ws; freshExprFrom self (AssE v b' ws') }
-      IstE cn ctx ts b -> mapM go b >>= freshExprFrom self . IstE cn ctx ts
+      IstE o cn ctx ts b -> mapM go b >>= freshExprFrom self . IstE o cn ctx ts
       LstE es -> mapM go es >>= freshExprFrom self . LstE
       TupE es -> mapM go es >>= freshExprFrom self . TupE
       NamE kes -> mapM (\(k, x) -> (,) k <$> go x) kes >>= freshExprFrom self . NamE

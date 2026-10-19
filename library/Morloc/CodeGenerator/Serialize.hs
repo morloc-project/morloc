@@ -687,6 +687,11 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       | intr `elem` [IntrSaveM, IntrSaveJ, IntrCellPut] = do
           rest' <- packDataArg m dataArg
           return (pathArg : rest' ++ rest)
+    unpackDataArgIfNeeded m intr [aArg, bArg]
+      | intr `elem` [IntrEq, IntrLe] = do
+          aArgs <- packDataArg m aArg
+          bArgs <- packDataArg m bArg
+          return (aArgs ++ bArgs)
     unpackDataArgIfNeeded m intr (dataArg : rest)
       | intr `elem` [IntrShow, IntrHash, IntrCellNew] = do
           rest' <- packDataArg m dataArg
@@ -740,7 +745,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m intr _ (dataArg:_)
-      | intr `elem` [IntrHash, IntrShow, IntrSchema, IntrCellNew] = do
+      | intr `elem` [IntrHash, IntrShow, IntrSchema, IntrCellNew, IntrEq, IntrLe] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema _ IntrTypeof _ (dataArg:_) =

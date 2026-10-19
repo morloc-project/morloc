@@ -1270,6 +1270,29 @@ unsafe fn morloc_eval_r(
             ptr::copy_nonoverlapping(&arr as *const shm::Array as *const u8, dest, width);
         }
 
+        MorlocExpressionType::Equal | MorlocExpressionType::LessEq => {
+            // The child is the pair of values; compare its two fields.
+            let child = (*expr).expr.unary_expr;
+            let pair = CSchema::to_rust((*child).schema);
+            let pair_ptr = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)? as *const u8;
+            let (elem, offsets) = match (pair.parameters.first(), pair.offsets.as_slice()) {
+                (Some(e), [o1, o2]) => (e, (*o1, *o2)),
+                _ => {
+                    return Err(MorlocError::Other(
+                        "a comparison takes a pair of values".to_string(),
+                    ))
+                }
+            };
+            let o = crate::compare::compare_voidstar_values(pair_ptr.add(offsets.0), pair_ptr.add(offsets.1), elem)?;
+            let holds = match (*expr).etype {
+                MorlocExpressionType::Equal => o == std::cmp::Ordering::Equal,
+                _ => o != std::cmp::Ordering::Greater,
+            };
+            if !dest.is_null() {
+                *dest = u8::from(holds);
+            }
+        }
+
         MorlocExpressionType::Save => {
             // Save value to file at path
             let save = (*expr).expr.save_expr;

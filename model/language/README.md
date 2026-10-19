@@ -52,6 +52,7 @@ split later.
 | [kinds.md](kinds.md) | KIND | kinds of types (types, naturals, strings, constructors) and kind checking |
 | [aliases.md](aliases.md) | ALIAS | `type` aliases: parameters, transparency, expansion |
 | [newtypes.md](newtypes.md) | NEWT | `newtype`: a distinct type over a representation, and conversion to and from it |
+| [deriving.md](deriving.md) | DERIV | `deriving` clauses: instances the compiler builds from a declaration |
 | [native-types.md](native-types.md) | NATIVE | per-language type mappings (`type Py => X = ...`, `record Cpp => R`) and their agreement |
 | [type-equality.md](type-equality.md) | TEQ | when two types are the same type |
 | [base-types.md](base-types.md) | BASE | `Unit`, `Bool`, `Str`: value spaces and operations |

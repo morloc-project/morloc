@@ -6,7 +6,7 @@ module natGeneric (howVec4)
 
 import root-py
 
-newtype Vec n a
+newtype Vec n a = [a]
 
 type Py => (Vec n a) = "dict" n a
 

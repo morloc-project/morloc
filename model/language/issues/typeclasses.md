@@ -73,3 +73,10 @@
   the build fails with "Cannot resolve recursive call to ==`t...@..." from
   CodeGenerator/Express.hs, with no source location: the inner `==` became
   a back-edge, the shape of #160.
+- **Classes the compiler names still live in `root`.** [read] Violates
+  CLS-15. `Functor` (`map`, found by name in
+  library/Morloc/CodeGenerator/Instance.hs `findFunctorMap`) and `Integral`
+  and `Numeric` (literal defaulting, library/Morloc/BaseTypes.hs) are
+  declared in stdlib `root`, so a replacement prelude without them breaks
+  code generation.
+

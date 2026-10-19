@@ -8,31 +8,15 @@ on 0.109.0 unless marked.
   source Py from "native.py" ("kind" as pathKind); pathKind :: Path -> Str`
   with `def kind(x): return type(x).__name__` builds without a warning;
   `./prog pathKind notes/report.txt` prints `"str"`.
-  Second route, through a literal: `import root-cpp; newtype Pt = (Int,
-  Int); type Cpp => Pt = "Pt"`, a C++ `struct Pt` and `ptSum :: Pt -> Int`;
-  `viaLit = ptSum ((1, 2) :: Pt)` passes morloc and fails in g++ "invalid
-  initialization of reference of type 'const Pt&' from expression of type
-  'std::tuple<int, int>'". The tuple-literal arm of `expressPolyExpr`
-  (library/Morloc/CodeGenerator/Express.hs, after the `TupS` tuple arm)
-  falls back to the body when `findPackablePack` finds no source, without
-  the native/wire form comparison the scalar arm makes (Express.hs ~1238).
-- **A literal uses an instance that does not cover its type.**
-  [reproduced, 2026-10-18, 0.109.0] Violates CLS-2 (wrong value, silent).
-  map-r declares only `instance Packable [(Str, val)] (Map Str val)`.
-  `import root-py; import root-r; import map-py; import map-r`, an R
-  `rshow :: Map Int Str -> Str` (`paste(names(m), unlist(m), sep="=",
-  collapse=",")`) and `viaLit = rshow ([(2, "a"), (5, "b")] :: Map Int
-  Str)` builds and prints `"=a,=b"`: R's `pack` assigns `result[[2]]`
-  positionally and the keys are lost. The same map arriving from a Python
-  function is rejected at build ("No Packable instance covers 'Map Int
-  Str' ... list character val does not cover list integer character").
-  Cause: `findPackablePack` (Express.hs) matches an instance by its head
-  constructor alone and takes the first source in the language; the list
-  literal arm (Express.hs ~1900) and the scalar arm (~1245) use it, so
-  they skip the coverage check the serializer makes (Serial.hs
-  `selectPacker` and its callers). Literals must select the instance by
-  the full type, as crossings do; specialized instances (`Map Str val` in
-  R) depend on it.
+- **A literal of a newtype over a Packable type is rejected.** [reproduced,
+  2026-10-18] `import root-py; import map-py; newtype Holder = Map Str Int`;
+  `[("a", 1)] :: Holder` fails "Cannot construct a value of 'Holder' from a
+  List literal in py ... declare 'instance Packable List Holder'", though
+  `pack ([("a", 1)] :: Map Str Int)` (with `deriving (Packable)`) builds the
+  same value. The literal code (library/Morloc/CodeGenerator/Express.hs,
+  `maybePackableWrap`) looks for an instance of the outer newtype only and
+  does not compose the one of the type it wraps. Gap: no item says how a
+  literal reaches a type through several representations.
 - **Comparison on `data` with fields.** [reproduced] Violates SUM-5.
   `data Shape = Circle Real | Rect Real Real | Dot`, `lt a b = a < b`,
   `eq a b = a == b`. Python is correct. R: `==` works, `<` fails at run

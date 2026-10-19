@@ -111,6 +111,7 @@ extern "C" {
     // RPC to the nexus) lives behind these symbols in libmorloc, so each Rust
     // shim below is a thin wrapper, mirroring the C++ pool's `_mlc_*` helpers.
     fn mlc_hash(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char;
+    fn mlc_compare(a: *const c_void, b: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32;
     fn mlc_save(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
@@ -3508,6 +3509,11 @@ pub unsafe fn hash<T: ToVoidstar>(value: &T, schema: &Schema) -> String {
         failed_without_reason("@hash");
     }
     cstr_take(h)
+}
+
+/// @eq / @le: -1, 0 or 1 as `a` orders before, with or after `b`.
+pub unsafe fn compare<T: ToVoidstar>(a: &T, b: &T, schema: &Schema) -> i32 {
+    with_voidstar(a, schema, |va, cs, _| with_voidstar(b, schema, |vb, _, err| mlc_compare(va, vb, cs, err)))
 }
 
 /// @save: write a value to disk in the voidstar packet format. `level` is the

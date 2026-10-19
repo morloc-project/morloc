@@ -1,0 +1,18 @@
+-- Spec WIRE-1: a value crosses through its Packable instance whatever the
+-- instance names its type variables, and wherever it is declared relative
+-- to the type.
+module main (roundTrip)
+
+import root-py
+
+instance Packable [b] (Frozen b) where
+  source Py from "main.py" ("freeze" as pack, "thaw" as unpack)
+
+newtype Frozen a = [a]
+type Py => (Frozen a) = "tuple" a
+
+source Py from "main.py" ("keep")
+keep :: Frozen Int -> Frozen Int
+
+roundTrip :: Frozen Int -> Frozen Int
+roundTrip x = keep x

@@ -1,7 +1,7 @@
 module lib.json (JsonObj, Str)
 
 type Py => Str = "str"
-newtype JsonObj
+newtype JsonObj = Str
 type Py => JsonObj = "dict"
 
 class Packable a b where

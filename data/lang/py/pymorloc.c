@@ -3524,6 +3524,53 @@ error:
     return NULL;
 }
 
+// Order two values of one schema: -1, 0 or 1 (@eq, @le).
+static PyObject* pybinding__mlc_compare(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* a_obj;
+    PyObject* b_obj;
+    const char* schema_str;
+    Schema* schema = NULL;
+    void* va = NULL;
+    void* vb = NULL;
+    int order = 0;
+
+    PARSE_ARGS_OR_ABORT(args, "OOs", &a_obj, &b_obj, &schema_str);
+
+    schema = PyTRY(parse_schema, schema_str);
+
+    va = to_voidstar(schema, a_obj);
+    PyTRACE(va == NULL)
+    vb = to_voidstar(schema, b_obj);
+    PyTRACE(vb == NULL)
+
+    order = PyTRY(mlc_compare, va, vb, schema);
+
+    {
+        char* shfree_errmsg = NULL;
+        shfree(va, &shfree_errmsg);
+        free(shfree_errmsg);
+        shfree_errmsg = NULL;
+        shfree(vb, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return PyLong_FromLong(order);
+
+error:
+    if (va) {
+        char* shfree_errmsg = NULL;
+        shfree(va, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    if (vb) {
+        char* shfree_errmsg = NULL;
+        shfree(vb, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
 static PyObject* pybinding__mlc_hash(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* obj;
     const char* schema_str;
@@ -4609,6 +4656,7 @@ static PyMethodDef Methods[] = {
     {"make_pipe_closed_packet", pybinding__make_pipe_closed_packet, METH_VARARGS, "Create a fail packet for a closed downstream pipe"},
     {"remote_call", pybinding__remote_call, METH_VARARGS, "Make a call to a remote cluster"},
     {"mlc_hash", pybinding__mlc_hash, METH_VARARGS, "Hash a value using xxhash"},
+    {"mlc_compare", pybinding__mlc_compare, METH_VARARGS, "Order two values of one schema"},
     {"mlc_save", pybinding__mlc_save, METH_VARARGS, "Save a value to file in msgpack format"},
     {"mlc_save_voidstar", pybinding__mlc_save_voidstar, METH_VARARGS, "Save a value to file in flat voidstar binary format"},
     {"mlc_save_json", pybinding__mlc_save_json, METH_VARARGS, "Save a value to file in JSON format"},
