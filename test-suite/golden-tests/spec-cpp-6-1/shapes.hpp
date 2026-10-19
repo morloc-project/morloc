@@ -15,7 +15,7 @@ template <class B> B growGen(B b) {
     using Arm = std::remove_const_t<typename std::variant_alternative_t<0, decltype(b.v)>::element_type>;
     Arm a = *std::get<0>(b.v);
     a.f0.push_back(9);
-    b.v = std::make_shared<const Arm>(std::move(a));
+    b.v = std::make_shared<Arm>(std::move(a));
     return b;
 }
 
@@ -31,7 +31,7 @@ inline Shape grow(Shape s) {
     if (auto p = std::get_if<std::shared_ptr<const Shape_Circle>>(&s.v)) {
         Shape_Circle a = **p;
         a.f0.push_back(9);
-        s.v = std::make_shared<const Shape_Circle>(std::move(a));
+        s.v = std::make_shared<Shape_Circle>(std::move(a));
     }
     return s;
 }
@@ -53,7 +53,7 @@ inline int lenL(const ll_t& l) {
 }
 
 inline ll_t prepend(int x, ll_t l) {
-    return ll_t{x, std::make_shared<const ll_t>(std::move(l))};
+    return ll_t{x, std::make_shared<ll_t>(std::move(l))};
 }
 
 // Built front to back through non-const handles, then stored as const.

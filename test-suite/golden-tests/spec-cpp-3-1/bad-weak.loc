@@ -1,0 +1,15 @@
+-- CPP-3: a type mapped to std::weak_ptr is rejected (see ok.loc).
+module badweak (bad)
+
+import root
+import root-cpp
+
+source Cpp from "bad-weak.hpp" ("mkWeak", "weakOk")
+
+newtype Weak = Int
+type Cpp => Weak = "Weak"
+mkWeak :: Int -> Weak
+weakOk :: Weak -> Int
+
+bad :: Int -> Int
+bad n = weakOk (mkWeak n)

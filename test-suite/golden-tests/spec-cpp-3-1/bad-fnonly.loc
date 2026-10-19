@@ -1,0 +1,16 @@
+-- CPP-3: a type mapped to std::string_view that appears only inside a
+-- function type is rejected (see ok.loc).
+module badfnonly (bad)
+
+import root
+import root-cpp
+
+source Cpp from "bad-fnonly.hpp" ("withName", "nameLen")
+
+newtype Name = Str
+type Cpp => Name = "Name"
+withName :: (Name -> Int) -> Int
+nameLen :: Name -> Int
+
+bad :: Int -> Int
+bad n = n + withName nameLen

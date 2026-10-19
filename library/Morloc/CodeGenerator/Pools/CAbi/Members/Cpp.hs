@@ -23,6 +23,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Cpp
   , cppLang
   ) where
 
+import Data.Char (isUpper)
 import Control.Monad.Identity (Identity, runIdentity)
 import qualified Control.Monad.State as CMS
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter as CP
@@ -46,9 +47,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , defaultFoldRules
   , markLastReadsSeeded
   , lastBuilds
-  , namedIn
   , nativeManifoldsUnder
-  , aliasChain
   , RNode (..)
   , rnodeChildren
   , expandDeserialize
@@ -617,6 +616,7 @@ makeCppCode labels srcs es univeralScopeMap closureTable0 stageTable nativeEntri
   -- Converting marshallers follow the template's closure machinery.
   let signatures = stageLookupDoc stageTable : varLate <> signatures0
   enumDecl <- generateCppEnums es
+  valueChecks <- cppValueChecks es
   -- Declaration order is forced by what holds what by value. An enum is a
   -- byte, so it leads. A variant's wrapper holds its arms through pointers,
   -- so every wrapper is complete before any arm body or record exists; a
@@ -629,6 +629,7 @@ makeCppCode labels srcs es univeralScopeMap closureTable0 stageTable nativeEntri
         enumDecl ++ varWrappers ++ autoDecl ++ varArms
           ++ varFwds ++ autoFwds ++ srcFwds
           ++ varSerial ++ autoSerial ++ srcSerial ++ srcDeserial
+          ++ valueChecks
 
   -- build the program (translates each manifold tree)
   program <- buildProgramM labels templates includeDocs [] es (translateSegment closureGen) getCppSchemaTable (Map.map closureSchemaTexts closureTable)
@@ -2097,10 +2098,9 @@ translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
   resetCounter
   CMS.modify (\st -> st {translatorCurrentRoot = root})
   modes <- mapM (\(i, rhs) -> (\m -> (i, rhs, m)) <$> cppLetMode i rhs) (nativeLets m0)
-  viewed <- sourceViewArgs (RSM m0)
   pp <- CMS.gets translatorPool
   let plan = letPlan modes
-      held = lpHeld plan <> Set.fromList [t | j <- Set.toList viewed, t <- j : aliasChain (lpAliases plan) j]
+      held = lpHeld plan
       byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | NativeManifold m _ form@(ManifoldFull _) _ <- nativeManifoldsUnder (RSM m0)]
       params = Set.unions (Map.elems byValue) `Set.difference` loopSlots (RSM m0)
       seeds m = Set.toList (Map.findWithDefault Set.empty m byValue `Set.intersection` params)
@@ -2113,22 +2113,6 @@ translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
   moved <- CMS.gets translatorMovedBuilds
   CMS.modify (\st -> st {translatorLowered = (m1, modes, moves <> params, moved) : translatorLowered st})
   return $ renderPoolDocs e
-
--- | The locals named in the arguments of a call to a C++ source whose result
--- is neither a scalar nor the unit: the result may refer into them, so none
--- of them moves while it lives (rule F, model/compiler/issues/codegen-ownership.md).
-sourceViewArgs :: RNode -> CppTranslator (Set.Set Int)
-sourceViewArgs n = do
-  here <- case n of
-    RN (AppExeN t (SrcCallP _ _) args) -> do
-      typestr <- cppTypeOf t
-      return $
-        if isScalarCppType typestr || render typestr == "mlc::Unit"
-          then Set.empty
-          else Set.unions [namedIn (RN x) | NativeArgExpr x <- args]
-    _ -> return Set.empty
-  rest <- mapM sourceViewArgs (rnodeChildren n)
-  return (Set.unions (here : rest))
 
 -- handle string interpolation
 evaluatePattern :: CppTranslatorState -> TypeF -> Pattern -> [MDoc] -> MDoc
@@ -2243,6 +2227,82 @@ mergeLongest =
     -- `Try Str ()` and `Try Str (IFile a)` into a single declaration
     -- and the second use would name a type that was never emitted.
     . map (\e@(FV _ cv, _) -> (cv, e))
+
+-- | Every native type reachable in this pool that names no type variable,
+-- with each part of it.
+collectCppTypes :: (TVar -> Text -> Bool) -> [SerialManifold] -> [TypeF]
+collectCppTypes mapped =
+  unique
+    . filter concrete
+    . concatMap parts
+    . concatMap (runIdentity . foldWithSerialManifoldM fm)
+  where
+    fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
+    ne _ (DeserializeN_ t _ xs) = return $ t : xs
+    ne efull e = return $ foldlNE (<>) [typeFof efull] e
+    se _ e = return $ foldlSE (<>) [] e
+
+    -- A record's or a variant's type parameters are not descended into:
+    -- one may be phantom, naming a type no value carries.
+    parts t = t : case t of
+      AppF _ ts -> concatMap parts ts
+      NamF _ _ _ rs -> concatMap (parts . snd) rs
+      OptionalF x -> parts x
+      VariantF _ _ as -> concatMap (concatMap parts . snd) as
+      FunF ts r -> concatMap parts (r : ts)
+      _ -> []
+
+    concrete t = case t of
+      VarF (FV (TV v) (CV c)) -> typeName v && (v /= c || mapped (TV v) c)
+      AppF h ts -> concrete h && all concrete ts
+      NamF _ (FV (TV v) _) ps _ -> typeName v && all concrete ps
+      OptionalF x -> concrete x
+      VariantF _ ps _ -> all concrete ps
+      EnumF {} -> True
+      NatLitF _ -> True
+      StrLitF _ -> True
+      _ -> False
+    typeName v = case T.uncons (T.takeWhileEnd (/= '.') v) of
+      Just (c, _) -> isUpper c
+      Nothing -> False
+
+-- | The build-time checks that each C++ type the pool uses is a value
+-- (CPP-3) and that each mapped record accepts moved fields (CPP-4) and
+-- holds its recursive fields as shared const values (CPP-6).
+cppValueChecks :: [SerialManifold] -> CppTranslator [MDoc]
+cppValueChecks es = do
+  cscope <- CMS.gets translatorCScope
+  let mapped gv c = case Map.lookup gv cscope of
+        Just entries -> any (\(_, body, _, _, _) -> outer body == Just c) entries
+        Nothing -> False
+      outer body = case body of
+        VarU (TV n) -> Just n
+        AppU (VarU (TV n)) _ -> Just n
+        NamU _ (TV n) _ _ -> Just n
+        _ -> Nothing
+  docs <- mapM check [t | t <- collectCppTypes mapped es, checked t]
+  return (map pretty (unique (map render (concat docs))))
+  where
+    checked t = case t of
+      NatLitF _ -> False
+      StrLitF _ -> False
+      _ -> True
+    check t = do
+      ty <- cppTypeOf t
+      let name = render ty
+          valueOf x what = "static_assert(mlc::is_value_type_v<" <> x <> ">, \"CPP-3: " <> what <> " is a value type\");"
+      fields <- case t of
+        NamF NamRecord _ _ rs -> return
+          [ valueOf ("decltype(" <> ty <> "::" <> pretty k <> ")") ("field " <> pretty k <> " of " <> pretty name)
+          | (Key k, _) <- rs ]
+        _ -> return []
+      let movable = case t of
+            NamF NamRecord _ _ rs@(_ : _) ->
+              [ "static_assert(mlc::builds_from<" <> ty <> ", "
+                  <> hsep (punctuate "," ["decltype(" <> ty <> "::" <> pretty k <> ")" | (Key k, _) <- rs])
+                  <> ">, \"CPP-4: " <> pretty name <> " is built from moved fields\");" ]
+            _ -> []
+      return $ if isScalarCppType ty || T.isInfixOf "\"" name then [] else valueOf ty (pretty name) : fields <> movable
 
 -- | Every argument-free @data@ type reachable in this pool.
 collectCppEnums :: [SerialManifold] -> [(FVar, [Text])]

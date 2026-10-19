@@ -35,7 +35,8 @@ result (EVAL-7).
 
 ### CPP-3 A mapped C++ type is a value type
 Intent: ruled 2026-10-18
-Code: deviates compiler/issues/codegen-ownership.md (not checked at build)
+Tests: spec-cpp-3-1
+Code: conforms 2026-10-19
 
 A C++ type that a morloc type maps to (`type Cpp => T = "..."`, `record
 Cpp => R = "..."`) is not a pointer, a reference, a view or a
@@ -47,7 +48,8 @@ program's error (EVAL-7).
 
 ### CPP-4 A mapped C++ record accepts moved fields
 Intent: ruled 2026-10-18
-Code: deviates compiler/issues/codegen-ownership.md (not checked at build)
+Tests: spec-cpp-4-1
+Code: conforms 2026-10-19
 
 Morloc may build a mapped record from moved field values, and move a
 record into a function or another value. A mapped record's constructor
@@ -66,7 +68,7 @@ copying it.
 ### CPP-6 A C++ `data` value and a recursive record field are shared and never changed
 Intent: ruled 2026-10-19
 Tests: spec-cpp-6-1
-Code: deviates compiler/issues/codegen-ownership.md (a recursive field of a record that never crosses is unchecked)
+Code: conforms 2026-10-19
 
 A `data` type with payloads is a struct holding
 `std::variant<std::shared_ptr<const T_C>...> v`, one alternative per
@@ -75,11 +77,14 @@ constructor in declaration order, where `T_C` is the struct for constructor
 same way. A `?R` field that leads back to its own record is a
 `std::shared_ptr<const R>`, with `nullptr` meaning absent. A copy shares the
 arm, and nothing changes an arm after it is built: to change a value, copy
-the arm, change the copy, and wrap it in a new `std::make_shared<const
-T_C>`. Code that is still building a value may hold a `std::shared_ptr<T>`
-to a non-const `T` and store it into a const field. A raw pointer, a
-`std::unique_ptr`, or a `std::shared_ptr` to a non-const type in these
-positions is rejected at build (EVAL-7, CPP-3).
+the arm, change the copy, and wrap it in a new `std::make_shared<T_C>`,
+which converts to the const holder. An arm is never itself a const object:
+one made by `std::make_shared<const T_C>` has no defined result, since
+morloc may move a field out of an arm it holds alone. Code that is still
+building a value may hold a `std::shared_ptr<T>` to a non-const `T` and
+store it into a const field. A raw pointer, a `std::unique_ptr`, or a
+`std::shared_ptr` to a non-const type in these positions is rejected at
+build (EVAL-7, CPP-3).
 
 Morloc moves a field out of an arm only when it built the arm itself and no
 other holder shares it, and copies it otherwise (OWN-5). An arm built with

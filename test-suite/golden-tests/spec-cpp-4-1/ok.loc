@@ -1,0 +1,37 @@
+-- CPP-4: a mapped C++ record accepts moved fields: morloc may build it from
+-- moved field values. A constructor that takes a field by non-const
+-- reference is rejected at build (bad-ctor.loc); a field type that cannot be
+-- moved is a CPP-3 rejection. An aggregate and a constructor taking its
+-- fields by value build and run here.
+module ok (agg, byValue)
+
+import root
+import root-cpp
+
+source Cpp from "ok.hpp" ("mk", "total", "totalB")
+
+record R where
+  xs :: [Int]
+  k :: Int
+record Cpp => R = "rec_t"
+
+record B where
+  xs :: [Int]
+  k :: Int
+record Cpp => B = "byval_t"
+
+mk :: Int -> [Int]
+total :: R -> Int
+totalB :: B -> Int
+
+mkR :: Int -> R
+mkR n = {xs = mk n, k = 1}
+
+mkB :: Int -> B
+mkB n = {xs = mk n, k = 2}
+
+agg :: Int -> Int
+agg n = total (mkR n)
+
+byValue :: Int -> Int
+byValue n = totalB (mkB n)

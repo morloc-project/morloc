@@ -1,0 +1,15 @@
+-- CPP-3: a type mapped to std::string_view is rejected (see ok.loc).
+module badview (bad)
+
+import root
+import root-cpp
+
+source Cpp from "bad-view.hpp" ("mkName", "nameLen")
+
+newtype Name = Str
+type Cpp => Name = "Name"
+mkName :: Int -> Name
+nameLen :: Name -> Int
+
+bad :: Int -> Int
+bad n = nameLen (mkName n)

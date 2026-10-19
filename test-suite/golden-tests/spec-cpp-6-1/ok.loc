@@ -4,7 +4,8 @@
 -- value only by copying an arm and rebuilding it, and the caller's value is
 -- untouched (boxAfter, shapeAfter, listShare). Changing an arm or a recursive
 -- field in place, and mapping a type whose arms or recursive field are not
--- `shared_ptr<const T>`, is rejected at build (bad-*.loc). The deserialize
+-- `shared_ptr<const T>`, is rejected at build (bad-*.loc), also for a record
+-- that only passes between C++ sources (bad-recsrc). The deserialize
 -- paths (`lenArg`, `shapeArg`) and a constructor take (`taken`) build arms
 -- from the wire and from a literal.
 module ok (boxAfter, shapeAfter, listLen, listShare, lenArg, shapeArg, shapeOut, taken)

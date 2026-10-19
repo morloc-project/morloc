@@ -5,6 +5,7 @@ rejected tail
 rejected mapped
 rejected rec
 rejected unique
+rejected recsrc
 43
 [4,3]
 4

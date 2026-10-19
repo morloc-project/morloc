@@ -1,0 +1,20 @@
+-- CPP-3: a mapped record with a std::string_view field is rejected (see ok.loc).
+module badfield (bad)
+
+import root
+import root-cpp
+
+source Cpp from "bad-field.hpp" ("docLen", "mkStr")
+
+record Doc where
+  name :: Str
+  k :: Int
+record Cpp => Doc = "doc_t"
+docLen :: Doc -> Int
+mkStr :: Int -> Str
+
+mkDoc :: Int -> Doc
+mkDoc n = {name = mkStr n, k = 1}
+
+bad :: Int -> Int
+bad n = docLen (mkDoc n)

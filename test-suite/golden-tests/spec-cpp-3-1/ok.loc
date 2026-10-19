@@ -1,0 +1,43 @@
+-- CPP-3: a C++ type a morloc type maps to is a value type: not a pointer, a
+-- reference, a view or a std::weak_ptr, and move constructible, and so is
+-- every field of a mapped record. A std::shared_ptr<const T> is a value.
+-- Each mapping the program's C++ code uses is checked at build: a
+-- std::string_view, a typedef of a pointer, a std::weak_ptr, a
+-- std::shared_ptr to a non-const type, a record field that is a view, and a
+-- view that appears only inside a function type are rejected (bad-*.loc).
+-- Their value-typed twins build and run here.
+module ok (names, shared, docs)
+
+import root
+import root-cpp
+
+source Cpp from "ok.hpp" ("mkName", "nameLen", "mkShared", "sharedAt", "docLen", "mkStr")
+
+newtype Name = Str
+type Cpp => Name = "Name"
+mkName :: Int -> Name
+nameLen :: Name -> Int
+
+newtype Shared = Int
+type Cpp => Shared = "Shared"
+mkShared :: Int -> Shared
+sharedAt :: Shared -> Int
+
+record Doc where
+  name :: Str
+  k :: Int
+record Cpp => Doc = "doc_t"
+docLen :: Doc -> Int
+mkStr :: Int -> Str
+
+mkDoc :: Int -> Doc
+mkDoc n = {name = mkStr n, k = 1}
+
+names :: Int -> Int
+names n = nameLen (mkName n)
+
+shared :: Int -> Int
+shared n = sharedAt (mkShared n)
+
+docs :: Int -> Int
+docs n = docLen (mkDoc n)

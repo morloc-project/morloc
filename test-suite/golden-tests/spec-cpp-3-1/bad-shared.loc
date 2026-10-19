@@ -1,0 +1,15 @@
+-- CPP-3: a type mapped to a std::shared_ptr of a non-const type is rejected (see ok.loc).
+module badshared (bad)
+
+import root
+import root-cpp
+
+source Cpp from "bad-shared.hpp" ("mkShared", "sharedAt")
+
+newtype Shared = Int
+type Cpp => Shared = "Shared"
+mkShared :: Int -> Shared
+sharedAt :: Shared -> Int
+
+bad :: Int -> Int
+bad n = sharedAt (mkShared n)

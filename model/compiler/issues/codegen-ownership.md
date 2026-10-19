@@ -112,25 +112,3 @@ same name sees what was taken.
   the let with the same index in the other. That is wrong only if the
   twins' let indices differ; no golden showed it, and the ownership check
   reported nothing. C++ moves (OWN-2) are planned per segment.
-- **C++ copies a value a sourced call read, though no source may return
-  a view into it.** [read] Cost. EVAL-7 (ruled 2026-10-18) forbids a
-  sourced result referring into its arguments, but C++ still never moves a
-  local named in the arguments of a sourced call whose result is not a
-  scalar or the unit, nor what that local refers into (`sourceViewArgs`,
-  Cpp.hs).
-- **A C++ view returned into a temporary dangles.** [read] Violates EVAL-7
-  (ruled 2026-10-18), unchecked. A nested sourced call renders inline
-  (`census(m6087(n3))`, copy-census-cpp baseWalk), so a source returning a
-  view or a struct holding a pointer into its argument refers into a
-  temporary destroyed at the end of that line, with no move involved. A
-  mapping whose C++ type is a pointer, a reference, `std::string_view` or
-  `std::span` could be rejected at build; a user struct holding a pointer
-  cannot be detected.
-- **A C++ record's recursive field is checked only where morloc marshals or
-  builds it.** [read] Deviates from CPP-6. The const check lives in
-  `pointer_traits` and the generic marshaller, so a mapped record with a
-  `std::shared_ptr<R>` field that only passes between C++ sources in one
-  pool builds, and a source can change a shared tail through a copy. Fix: a
-  `static_assert` per mapped type the pool's C++ code uses (with the CPP-3
-  check).
-

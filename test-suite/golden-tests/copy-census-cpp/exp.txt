@@ -95,7 +95,7 @@
 --- loopFresh ---
 [1,0]
 --- loopGrow ---
-[1,1]
+[1,0]
 --- loopCarried ---
 [300,1]
 --- loopField ---

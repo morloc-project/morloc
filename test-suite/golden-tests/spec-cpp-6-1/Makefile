@@ -7,6 +7,7 @@ all:
 	morloc make -o bad-mapped bad-mapped.loc 2> build-mapped.err && echo "UNEXPECTED_SUCCESS mapped" >> obs.txt || (grep -q "CPP-6" build-mapped.err && echo "rejected mapped" || echo "UNEXPECTED_ERROR mapped") >> obs.txt
 	morloc make -o bad-rec bad-rec.loc 2> build-rec.err && echo "UNEXPECTED_SUCCESS rec" >> obs.txt || (grep -q "CPP-6" build-rec.err && echo "rejected rec" || echo "UNEXPECTED_ERROR rec") >> obs.txt
 	morloc make -o bad-unique bad-unique.loc 2> build-unique.err && echo "UNEXPECTED_SUCCESS unique" >> obs.txt || (grep -q "CPP-6" build-unique.err && echo "rejected unique" || echo "UNEXPECTED_ERROR unique") >> obs.txt
+	morloc make -o bad-recsrc bad-recsrc.loc 2> build-recsrc.err && echo "UNEXPECTED_SUCCESS recsrc" >> obs.txt || (grep -q "CPP-3: field tail" build-recsrc.err && echo "rejected recsrc" || echo "UNEXPECTED_ERROR recsrc") >> obs.txt
 	morloc make -o nexus ok.loc 2> build.err
 	./nexus boxAfter 3 >> obs.txt 2>> obs.err
 	./nexus shapeAfter 3 >> obs.txt 2>> obs.err
@@ -18,6 +19,6 @@ all:
 	./nexus taken 5 >> obs.txt 2>> obs.err
 
 clean:
-	rm -rf nexus bad-arm bad-raw bad-visit bad-tail bad-mapped bad-rec bad-unique pools __pycache__
+	rm -rf nexus bad-arm bad-raw bad-visit bad-tail bad-mapped bad-rec bad-unique bad-recsrc pools __pycache__
 	rm -f *.err
 	rm -rf *-build *build.tmp*

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <memory>
 #include <new>
+#include <ranges>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -93,6 +94,25 @@ auto take_field(const std::shared_ptr<const T>& p, Get get)
 
 template <class T> struct is_const_shared_ptr : std::false_type {};
 template <class T> struct is_const_shared_ptr<std::shared_ptr<const T>> : std::true_type {};
+
+template <class T> struct is_weak_ptr : std::false_type {};
+template <class T> struct is_weak_ptr<std::weak_ptr<T>> : std::true_type {};
+template <class T> struct is_shared_ptr : std::false_type {};
+template <class T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
+template <class T> struct is_unique_ptr : std::false_type {};
+template <class T, class D> struct is_unique_ptr<std::unique_ptr<T, D>> : std::true_type {};
+
+// A C++ type a morloc type maps to (CPP-3, CPP-6).
+template <class T>
+inline constexpr bool is_value_type_v =
+    !std::is_pointer_v<T> && !std::is_reference_v<T> && !std::ranges::view<T>
+    && !is_weak_ptr<T>::value && !is_unique_ptr<T>::value
+    && (!is_shared_ptr<T>::value || is_const_shared_ptr<T>::value)
+    && std::is_move_constructible_v<T>;
+
+// A record built the way generated code builds it, from moved fields (CPP-4).
+template <class T, class... F>
+concept builds_from = requires(F&&... f) { T{std::forward<F>(f)...}; };
 
 // Every arm of a `data` type is a std::shared_ptr<const T> (CPP-6).
 template <class V> struct const_arms;
