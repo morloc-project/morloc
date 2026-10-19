@@ -98,3 +98,14 @@ records and user-mapped types copy deeply.
   with the tagged reader directly; the stream files are identical. A map
   whose function is a representation cast could be the identity on the
   list.
+- **A Rust value kept inside an inlined nested function is cloned there.**
+  [reproduced 2026-10-19] Gap in OWN-7. `both a c = a + count 0 c` called
+  as `both (chainLen c) (prepend 0 c)` (or with the arguments swapped)
+  reads `c` with `chain_len(&c)` first, then passes `&c` to a manifold
+  whose nested manifold builds `Link(0, n6.clone())`: one full clone of the
+  chain (100 for 100 links), though the caller's read is its last. The
+  order of the two reads is already right in and out of loops, in C++ and
+  Rust; the copy is the nested manifold's parameter mode, which stays a
+  borrow although it keeps the value. C++ copies nothing here (`data`
+  arms are shared).
+
