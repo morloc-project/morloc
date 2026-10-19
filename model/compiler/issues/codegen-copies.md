@@ -57,13 +57,15 @@ records and user-mapped types copy deeply.
   every unchanged field each iteration, as the carried local is not among
   the lets a setter may take (`setLoop (.(.k = j) r) (j - 1)` emits
   `{n4.xs, n5}`: 100 copies over 100 steps, 2026-10-19).
-- **A Rust staged closure deep-copies the captures it just took.** [read]
-  Rust.hs ~1073 emits `let __sc = __caps.clone();` for every closure with a
-  stage, right after `capInit` filled `__caps` by moving dead values, so
-  the OWN-3 move is undone and each capture is copied once more. The
-  per-level `__xj.clone()` of a pap with no stage feeds only `pap(&...)`
-  and could borrow.
-- **C++ closure forms copy each capture several times.** [read] Per
+- **A Rust staged function passed as a value also builds an unused closure.**
+  [reproduced 2026-10-19] Cost. `capStaged` in copy-census-rust (`f x =
+  let z = chainLen c + x in \y -> z + y`, `f` passed to a function that
+  applies it) emits `let n14 = { let __caps = (n9.clone(),); local1(...) }`
+  that nothing reads, besides the staged value: one full clone of the
+  captured chain (100 of the shape's 100). The per-level `__xj.clone()` of
+  a pap with no stage feeds only `pap(&...)` and could borrow.
+- **C++ closure forms copy each capture several times.** [read; not
+  reproduced 2026-10-19] Per
   capture not moved: a `MorlocClosure` 2 (binder and reify thunk), a pap 6
   (pool.cpp ~1391-1392 copy `fn` and `reify` into the closure, then into
   `apply1`), a staged form 8; each pap step copies every capture and the
@@ -71,6 +73,10 @@ records and user-mapped types copy deeply.
   by-value parameters). Reify reads through `const&` and needs no copy.
   copy-census-cpp does not reach these forms: they are built only for
   closures that cross (`crossingClosures`, Common.hs).
+  Measured at the floor in every shape tried (spec-own-3-4's census and a
+  probe: a crossing lambda and pap with one and two captures, each dead or
+  read again): one large allocation per capture that crosses, none locally;
+  the remaining claim is pap steps applied one argument at a time.
 - **Closure and wire paths copy what they only serialize.** [read] Rust:
   staged closures re-clone every earlier argument at each level (about n^2
   argument clones for an n-ary function), including at the level that

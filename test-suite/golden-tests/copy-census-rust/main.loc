@@ -29,6 +29,7 @@
 --   mixedLoop                  loop step with a borrowing and a moving read
 --   matchedTwice               one value matched twice
 --   twoLets                    one value kept by two lets in turn
+--   capStaged capStagedKeep    a staged function capturing a chain, passed as a value
 module main
   ( nestedOut, nestedLoop, tagNested, tagField
   , fieldArg, fieldSrc, fieldSrcLit, fieldRet, tupleArg, tupleFresh
@@ -39,6 +40,7 @@ module main
   , letOnce, letParam, letField, matchUnwrap, matchArg, matchTry
   , throughTwo, throughLoop, throughCli, nonTail
   , guardTwice, guardLoop, guardKeep, mixedLoop, matchedTwice, twoLets
+  , capStaged, capStagedKeep
   )
 
 import root-rust
@@ -350,3 +352,18 @@ twoLets n = clones (
   in let a = Link 1 c
   in let b = Link 2 c
   in count 0 a + count 0 b)
+
+applyAfter :: (Int -> Int -> Int) -> Int -> Int
+applyAfter f k
+  ? k == 0 = f 1 2
+  : applyAfter f (k - 1)
+
+capStaged :: Int -> (Int, Int)
+capStaged n = clones (applyAfter f 3) where
+  c = mkChain n
+  f x = let z = chainLen c + x in \y -> z + y
+
+capStagedKeep :: Int -> (Int, Int)
+capStagedKeep n = clones (applyAfter f 3 + chainLen c) where
+  c = mkChain n
+  f x = let z = chainLen c + x in \y -> z + y

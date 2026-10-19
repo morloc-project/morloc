@@ -900,10 +900,11 @@ rustTuple xs = tupled xs
 -- | Build a function value: the one construction site, and the only place
 -- that decides a function value's form.
 --
--- The captured context is copied ONCE into a tuple moved into the closure,
--- so no generated signature needs a lifetime. Both the call and the origin
--- builder are NON-CAPTURING closures over that tuple, so each is a plain
--- function pointer reading the single copy.
+-- The captured context is gathered into one tuple, held in an 'Arc' when a
+-- staged closure's stage entry reads it too (OWN-3), so no generated
+-- signature needs a lifetime. Both the call and the origin builder are
+-- NON-CAPTURING closures over that tuple, so each is a plain function
+-- pointer.
 --
 -- A closure that can cross is registered (STATE-4) and builds its origin on
 -- first reify. A closure whose manifold has no dispatch entry cannot be
@@ -928,13 +929,13 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
       capRef i (Arg _ t) = captureArg t ("__c." <> pretty (i :: Int))
       callArgs = zipWith capRef [0 ..] ctxArgs
                    <> [rustBridgeArg t (argNamer a) | a@(Arg _ t) <- boundArgs]
-      callFn =
-        "|__c: &" <> capsT <> hcat [", " <> b | b <- boundTyped] <> "|"
+      callFn ct =
+        "|__c: &" <> ct <> hcat [", " <> b | b <- boundTyped] <> "|"
           <+> "unsafe {" <+> mname <> tupled callArgs <+> "}"
   reifyInfo <- CMS.gets rsReifyInfo
   (ctor, mkArgs) <- case Map.lookup (render mname) reifyInfo of
     -- no dispatch entry: nothing can call back into this closure
-    Nothing -> return ("rustmorloc::local" <> pretty n, [])
+    Nothing -> return ("rustmorloc::local" <> pretty n, const [])
     Just (mid, capWire, _)
       -- The capture list the dispatch wrapper decodes and the one the closure
       -- carries are built from different projections of the manifold form; a
@@ -951,12 +952,13 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
                 | (i, (sid, _), reify) <- zip3 [(0 :: Int) ..] capWire reifiers
                 , let fld = "__c." <> pretty i
                 ]
-              mkFn =
-                "|__c: &" <> capsT <> "|"
+              mkFn ct =
+                "|__c: &" <> ct <> "|"
                   <+> "(\"rust\".to_string(), " <> pretty mid <> "i64, vec!["
                   <> hcat (punctuate ", " capExprs) <> "])"
-          return ("rustmorloc::crossing" <> pretty n, [mkFn])
-  let ctorArgs = ["__caps", callFn] <> mkArgs
+          return ("rustmorloc::crossing" <> pretty n, \ct -> [mkFn ct])
+  let ctorArgsFor ct = ["__caps", callFn ct] <> mkArgs ct
+      ctorArgs = ctorArgsFor capsT
       boxedDoc =
         vsep
           [ "{"
@@ -1007,10 +1009,10 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
       | nctx /= length ctxArgs ->
           error $ "Rust: staged closure " <> show (render mname) <> " captures " <> show (length ctxArgs)
             <> " values but its stage entry takes " <> show nctx
-      | otherwise -> stagedDoc (Just (k, smid)) bndWire capsT capInits ctorArgs ctor
+      | otherwise -> stagedDoc (Just (k, smid)) bndWire capsT capInits ctorArgsFor ctor
     Nothing
       | isJust bndWire && Set.member (render sig) heads ->
-          stagedDoc Nothing bndWire capsT capInits ctorArgs ctor
+          stagedDoc Nothing bndWire capsT capInits ctorArgsFor ctor
       | Set.member (render mname) thin -> return (if null ctxArgs then thinDoc else sinkDoc)
       | otherwise -> return boxedDoc
   where
@@ -1019,7 +1021,7 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
     -- staged closure runs its stage entry once it has the arguments before
     -- the stage point; a closure that can cross keeps its origin, with each
     -- argument appended to its captured values.
-    stagedDoc stage bndWire capsT capInits ctorArgs ctor = do
+    stagedDoc stage bndWire capsT capInits ctorArgsFor ctor = do
       bts <- mapM (\(Arg _ t) -> rustStoredType t) boundArgs
       resT <- case sigType of
         Function _ o -> rustStoredType o
@@ -1033,6 +1035,10 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
               return $ "Some((|__v: &" <> bt <> "| unsafe { rustmorloc::reify_capture(" <> v <> ", " <> sch sid <> ") }) as fn(&" <> bt <> ") -> Vec<u8>)"
           | ((sid, ast), bt) <- zip ws bts ]
       let n = length boundArgs
+          shared = isJust stage && not (null capInits)
+          heldT = if shared then "std::sync::Arc<" <> capsT <> ">" else capsT
+          held x = if shared then "std::sync::Arc::new(" <> x <> ")" else x
+          stagedArgs = ctorArgsFor heldT
           dynT ts = rustFnValueType ts resT
           capRefS i (Arg _ t) = captureArg t ("__sc." <> pretty (i :: Int))
           stageCall smid kk =
@@ -1069,9 +1075,9 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
           [ "{"
           , indent 4 $
               vsep
-                ( [ "let __caps:" <+> capsT <+> "=" <+> rustTuple capInits <> ";" ]
+                ( [ "let __caps:" <+> heldT <+> "=" <+> held (rustTuple capInits) <> ";" ]
                     <> ["let __sc = __caps.clone();" | isJust stage]
-                    <> [ "let __f0 =" <+> ctor <> tupled ctorArgs <> ";"
+                    <> [ "let __f0 =" <+> ctor <> tupled stagedArgs <> ";"
                        , level 0 "__f0"
                        ]
                 )
