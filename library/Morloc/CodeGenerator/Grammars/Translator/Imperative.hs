@@ -496,6 +496,10 @@ data LowerConfig m = LowerConfig
   -- shared, borrows every argument of a closure application to match the
   -- by-reference @Fn(&T, ...)@ calling convention, and clones/derefs a borrowed
   -- argument passed to a by-value parameter.
+  , lcConstArg :: Maybe [TypeM] -> TypeM -> MDoc -> MDoc
+  -- ^ Pass an argument that names a value ('namedArgs') to a sourced call or
+  -- a function value so the callee cannot change it (CPP-1). For an operand
+  -- of a sourced operator, the operand types are given. Default is identity.
   , lcOwnership :: NativeExpr -> m IOwnership
   -- ^ The ownership form a native expression evaluates to (default: always
   -- 'Owned'). Computed from the original IR so a use site can adapt it; monadic
@@ -2323,6 +2327,32 @@ shortCircuit cfg condE thenE elseE condDocs thenDocs elseDocs = case (thenE, els
     chainOperator (IfN _ _ (LogN _ True) _) = Just False
     chainOperator _ = Nothing
 
+-- | For each argument of a call, whether it names a value: a variable, a
+-- newtype cast of one, a single-path field of one, or a constructor field or
+-- list element of one.
+namedArgs :: NativeExpr -> Int -> [Bool]
+namedArgs (AppExeN _ _ args) n | length args == n = map named args
+  where
+    named (NativeArgExpr e) = namesValue e
+    named _ = False
+    namesValue LetVarN {} = True
+    namesValue BndVarN {} = True
+    namesValue (CoerceN (CoerceNewtype _ _) _ x) = namesValue x
+    namesValue (IntrinsicN _ IntrCtorField _ (x : _)) = namesValue x
+    namesValue (IntrinsicN _ IntrListElem _ (x : _)) = namesValue x
+    namesValue (AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr x]) =
+      not (selectorHasBracket sel) && length (ungroup sel) == 1 && namesValue x
+    namesValue _ = False
+namedArgs e n = error $ "namedArgs: " <> show n <> " lowered arguments for " <> show e
+
+-- | Pass each argument of a call that names a value through 'lcConstArg';
+-- the operand types are given for a sourced operator.
+constArgs :: LowerConfig m -> Maybe [TypeM] -> NativeExpr -> [(TypeM, PoolDocs)] -> [(TypeM, PoolDocs)]
+constArgs cfg operands origExpr xs = zipWith wrap xs (namedArgs origExpr (length xs))
+  where
+    wrap (t, d) True = (t, d {poolExpr = lcConstArg cfg operands t (poolExpr d)})
+    wrap x False = x
+
 lowerNativeExprRaw ::
   (Monad m) =>
   LowerConfig m ->
@@ -2330,11 +2360,12 @@ lowerNativeExprRaw ::
   NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
   m PoolDocs
 -- Binary operator: emit (lhs op rhs) instead of function call
-lowerNativeExprRaw cfg _ (AppExeN_ _ (SrcCallP _ src) (map snd -> [lhs, rhs]))
+lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es0@[_, _])
   | srcOperator src =
-      return $ mergePoolDocs (\xs -> case xs of [l, r] -> lcOperator cfg src l r; _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
-lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es0) = do
-  es <- bindCallArgs cfg origExpr es0
+      let operands = map snd (constArgs cfg (Just (map fst es0)) origExpr es0)
+       in return $ mergePoolDocs (\xs -> case xs of [l, r] -> lcOperator cfg src l r; _ -> error "binary operator requires exactly 2 args") operands
+lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es1) = do
+  es <- bindCallArgs cfg origExpr (constArgs cfg Nothing origExpr es1)
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst es
       -- Only the FIRST group is passed to the source function; every later
@@ -2376,7 +2407,7 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ t (PatCallP p) xs) = do
 -- languages; the Rust member borrows every native arg so a value can fan out to
 -- several manifold calls as shared borrows instead of a move-after-move).
 lowerNativeExprRaw cfg origExpr (AppExeN_ _ (LocalCallP idx) xs0) = do
-  xs <- bindCallArgs cfg origExpr xs0
+  xs <- bindCallArgs cfg origExpr (constArgs cfg Nothing origExpr xs0)
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
   return $ mergePoolDocs (\es -> lcApplyClosure cfg (nvarNamer idx) (zipWith3 (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns argTypes es)) (map snd xs)

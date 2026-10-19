@@ -118,15 +118,6 @@ same name sees what was taken.
   local named in the arguments of a sourced call whose result is not a
   scalar or the unit, nor what that local refers into (`sourceViewArgs`,
   Cpp.hs).
-- **A C++ source taking `T&` silently changes a shared value.** [read]
-  Violates EVAL-7 (ruled 2026-10-18), unchecked. Parameters are `const T&`
-  but owned lets are plain `T n`, so a source declared `void f(T&)` or
-  `int f(T&)` compiles against a let and changes the value every later
-  reader of that let sees. Passing each lvalue argument of a sourced call
-  as `std::as_const(n)` would make every such source a build error, at no
-  run-time cost. The same holds inside root-cpp's higher-order templates,
-  which call a passed function on a non-const local (`y = f(y, x)` in
-  core.hpp folds), so a `B f(B&, A)` passed to `foldl` would still compile.
 - **A C++ view returned into a temporary dangles.** [read] Violates EVAL-7
   (ruled 2026-10-18), unchecked. A nested sourced call renders inline
   (`census(m6087(n3))`, copy-census-cpp baseWalk), so a source returning a
@@ -135,3 +126,28 @@ same name sees what was taken.
   mapping whose C++ type is a pointer, a reference, `std::string_view` or
   `std::span` could be rejected at build; a user struct holding a pointer
   cannot be detected.
+- **A copy of a C++ `data` value shares a payload its holder can change.**
+  [reproduced] Unsound; violates EVAL-7 (a copy is an independent value).
+  Arms are `std::variant<std::shared_ptr<Arm>...>` (CppPrinter.hs ~443) and
+  recursive `?R` fields `std::shared_ptr<R>` (Cpp.hs ~346), so a copy
+  shares the arm, and const does not pass through the pointer. A source
+  that takes a `Box` by value and changes its own copy, as CPP-1 permits,
+  changes the caller's value: `template <class B> B growBox(B b) {
+  mlc::arm(std::get<0>(b.v))->f0.push_back(9); return b; }` with
+  `after g b = 10 * boxSize g + boxSize b` and `armAfter n = let b = Box
+  (mk n) in after (growBox b) b` prints 44 for n = 3, not 43. The same
+  holds through a `const Box&` (`std::get<0>(x.v)->f0 = ...` compiles).
+  Fix direction: arms and recursive fields as `shared_ptr<const T>`, with
+  the payload take moving only when the arm is unique, else copying (the
+  guarded take that a forced suspension's result needs too).
+- **A C++ recursive record field may be a raw or unique pointer.** [read]
+  Violates CPP-3. `pointer_traits` accepts `T*` (cppmorloc.hpp ~185) and
+  `std::unique_ptr` (~170) at a `?R` position; a raw pointer is not a
+  value, and a `unique_ptr` makes the record move-only, though generated
+  code copies records.
+- **A C++ recursive record cannot be a value type.** [read] Deviates from
+  EVAL-7 and CPP-3, which call `std::shared_ptr<const T>` a value: the
+  generated field type at a `?R` position is always `std::shared_ptr<R>`
+  (Cpp.hs ~348), and the user struct must spell it so, so its pointee is
+  changeable through every copy.
+

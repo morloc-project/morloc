@@ -2356,6 +2356,7 @@ rustLowerConfig mask consumed =
                     rustOwn own tf x
                 | otherwise -> byType tf
               _ -> x
+    , lcConstArg = \_ _ x -> x
     , lcOwnership = rustOwnership
     , lcArgManifoldOwnership = \_ -> return Owned
     , lcBindCallArgs = False

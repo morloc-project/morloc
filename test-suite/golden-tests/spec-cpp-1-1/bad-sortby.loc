@@ -1,0 +1,7 @@
+-- CPP-1: a `T&` source given a comparator passed to the stdlib's sortBy is rejected (see ok.loc).
+module badsortby (badSortBy)
+
+import .common
+
+badSortBy :: Int -> [Int]
+badSortBy n = sortBy ltRef [n, 1, 2]

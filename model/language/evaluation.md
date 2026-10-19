@@ -67,7 +67,7 @@ only when it does not depend on the lambda's parameters and cannot fail.
 ### EVAL-7 A type that crosses into morloc behaves as a value
 Intent: ruled 2026-10-17
 Tests: spec-eval-7-1, spec-eval-7-2
-Code: conforms 2026-10-17
+Code: deviates compiler/issues/codegen-ownership.md (a C++ `data` copy shares its payload)
 
 morloc lets each language's code stay idiomatic, but a native type that a
 morloc type maps to, or that sourced code returns into morloc, must behave

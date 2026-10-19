@@ -433,6 +433,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcOperator = infixOperator
         , lcApplySrcGroup = \f as -> f <+> tupled as
         , lcSourcedArg = \_ _ _ x -> x
+        , lcConstArg = \_ _ x -> x
         , lcOwnership = \_ -> return Owned
         , lcArgManifoldOwnership = \_ -> return Owned
         , lcBindCallArgs = ldLazyArgs desc

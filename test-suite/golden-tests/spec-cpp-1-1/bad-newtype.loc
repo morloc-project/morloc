@@ -1,0 +1,7 @@
+-- CPP-1: a `T&` source given a newtype cast of a value is rejected (see ok.loc).
+module badnewtype (badNewtype)
+
+import .common
+
+badNewtype :: Int -> Int
+badNewtype n = let ns = (pack (mk n) :: Names) in bumpRef (unpack ns) + sizeV (unpack ns)

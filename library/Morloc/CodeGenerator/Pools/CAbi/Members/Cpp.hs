@@ -119,8 +119,7 @@ class HasCppType a where
   cppArgOf :: CallSemantics -> Arg a -> CppTranslator MDoc
 
 -- A scalar is passed by value: a reference to it would make the caller keep
--- the value in memory for each call. It stays const, so a sourced function
--- taking a non-const reference cannot change the caller's value.
+-- the value in memory for each call. It stays const (CPP-1).
 setCallSemantics :: CallSemantics -> MDoc -> MDoc
 setCallSemantics Copy typestr = typestr
 setCallSemantics Reference typestr
@@ -1037,6 +1036,16 @@ cppWalkLoopBody setResult ids = go
 -- signatures of the function values this pool partially applies.
 data ClosureGen = ClosureGen (Map.Map Text (MDoc, MDoc)) (Map.Map Int StageEntry) (Set.Set Text)
 
+-- | Operands that are all scalars reach only a built-in operator (CPP-1).
+cppConstArg :: Maybe [TypeM] -> TypeM -> MDoc -> MDoc
+cppConstArg operands _ x
+  | Just ts <- operands, all isScalar ts = x
+  | otherwise = "std::as_const" <> parens x
+  where
+    isScalar (Native (VarF (FV _ (CV c)))) = isScalarCppType (pretty c)
+    isScalar (Serial (VarF (FV _ (CV c)))) = isScalarCppType (pretty c)
+    isScalar _ = False
+
 cppLowerConfig :: ClosureGen -> LowerConfig CppTranslatorM
 cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
   LowerConfig
@@ -1044,6 +1053,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     , lcOperator = infixOperator
     , lcApplySrcGroup = \f as -> f <+> tupled as
     , lcSourcedArg = \_ _ _ x -> x
+    , lcConstArg = cppConstArg
     , lcOwnership = \_ -> return Owned
     , lcArgManifoldOwnership = \_ -> return Owned
     , lcBindCallArgs = False
@@ -1608,8 +1618,7 @@ PROPAGATE_ERROR(errmsg)|]
             -- ('consumableProjectionLets'): nothing else may use the referent
             -- on the path that runs it, so it cannot strand an alias.
             -- Scalars are excluded ('isScalarCppType'): borrowing an int/double
-            -- saves nothing and a 'const T&' can't bind a 'source Cpp' non-const
-            -- 'T&' parameter, so keep the cheap by-value copy for them.
+            -- saves nothing, so keep the cheap by-value copy for them.
             -- The projection is the last thing that can read the payload of a
             -- value this frame built, so the payload moves into the binding
             -- rather than being copied or aliased ('consumableProjectionLets').

@@ -85,3 +85,7 @@ records and user-mapped types copy deeply.
   every native manifold parameter is passed by const reference, as the
   reason a projection take may not move out of a bound variable. A Rust
   parameter taken by value is owned. No wrong take was found.
+- **A C++ optional mapped through a function is copied twice.** [read]
+  `MapOptionalN` and the optional-map intrinsic render `auto src = ...;
+  T u = src.value();` (CppPrinter.hs ~269-275), copying the optional and
+  then its value; `const auto&` would copy neither.

@@ -1,0 +1,7 @@
+-- CPP-1: a `T&` source given a scalar operand beside a class operand is rejected (see ok.loc).
+module badmixed (badMixed)
+
+import .common
+
+badMixed :: Int -> Int
+badMixed n = let s = n + 1 in let v = mk 2 in (s <*> v) + s

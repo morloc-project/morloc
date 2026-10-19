@@ -1,0 +1,7 @@
+-- CPP-1: a `T&` source given a let-bound value is rejected (see ok.loc).
+module badlet (badLet)
+
+import .common
+
+badLet :: Int -> Int
+badLet n = let v = mk n in bumpRef v + sizeV v

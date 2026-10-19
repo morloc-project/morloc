@@ -1,0 +1,68 @@
+-- CPP-1: a sourced C++ function takes each argument by value or by const
+-- reference, and one that takes `T&` is rejected at build. Generated code
+-- passes every named value through `std::as_const`, so a `T&` parameter
+-- cannot bind (bad-*.loc, each rejected: a let, a field, a parameter, an
+-- operator operand, a newtype cast, a scalar beside a class operand, a
+-- function value, and a source passed to the stdlib's fold and sortBy). Every other argument shape
+-- still builds and runs here: let-bound and parameter values to `const T&`,
+-- by-value and forwarding parameters, a field, a loop slot, literals, an enum
+-- constructor, function values (also to a `const F&` template), sourced operators, a newtype cast, and
+-- sources passed to fold and sortBy. `ovl` has a const and a non-const
+-- overload; the const one must be chosen.
+module ok
+  (letConst, forward, overload, literals, getter, loop, param, op, lambda, folded, sorted, newtyped, mixedOp, fnConst)
+
+import .common
+
+letConst :: Int -> Int
+letConst n = let v = mk n in bumpConst v + sizeV v
+
+forward :: Int -> Int
+forward n = let v = mk n in fwdSize v + sizeV v
+
+overload :: Int -> Int
+overload n = let v = mk n in ovl v + sizeV v
+
+literals :: Int -> Int
+literals n = pick True n + colorCode Red + applyFn inc n
+
+getter :: Int -> Int
+getter n = let r = mkR n in bumpConst (.xs r) + .k r
+
+loopC :: [Int] -> Int -> Int -> Int
+loopC v j acc
+  ? j == 0 = acc + sizeV v
+  : loopC v (j - 1) (acc + bumpConst v)
+
+loop :: Int -> Int
+loop n = loopC (mk n) 3 0
+
+twice :: [Int] -> Int
+twice v = bumpConst v + sizeV v
+
+param :: Int -> Int
+param n = twice (mk n)
+
+op :: Int -> Int
+op n = let a = mk n in let b = mk 2 in (a <-> b) + sizeV a
+
+lambda :: Int -> Int
+lambda n = applyFn (\x -> x + n) n
+
+folded :: Int -> Int
+folded n = fold addConst 0 (mk n)
+
+sorted :: Int -> [Int]
+sorted n = sortBy ltConst [n, 1, 2]
+
+newtyped :: Int -> Int
+newtyped n = let ns = (pack (mk n) :: Names) in bumpConst (unpack ns) + sizeV (unpack ns)
+
+mixedOp :: Int -> Int
+mixedOp n = let s = n + 1 in let v = mk 2 in (s </> v) + s
+
+useC :: (Int -> Int) -> Int
+useC f = applyFnConst f 1 + applyFnConst f 2
+
+fnConst :: Int -> Int
+fnConst n = useC (\x -> x + n)

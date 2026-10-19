@@ -1,0 +1,7 @@
+-- CPP-1: a sourced operator taking `T&` is rejected (see ok.loc).
+module badop (badOp)
+
+import .common
+
+badOp :: Int -> Int
+badOp n = let a = mk n in let b = mk 2 in (a <+> b) + sizeV a

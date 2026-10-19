@@ -1,0 +1,7 @@
+-- CPP-1: a `T&` source given a record field is rejected (see ok.loc).
+module badgetter (badGetter)
+
+import .common
+
+badGetter :: Int -> Int
+badGetter n = let r = mkR n in bumpRef (.xs r) + .k r

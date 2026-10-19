@@ -10,7 +10,8 @@ division), OWN (how generated C++ borrows, copies and moves).
 
 ### CPP-1 A sourced C++ function takes each argument by value or by `const T&`
 Intent: ruled 2026-10-18
-Code: deviates compiler/issues/codegen-ownership.md (a `T&` source compiles)
+Tests: spec-cpp-1-1
+Code: conforms 2026-10-19
 
 A parameter of a sourced C++ function is `T`, `const T&`, or a template
 parameter that deduces one of these. A parameter of type `T&` is rejected at
