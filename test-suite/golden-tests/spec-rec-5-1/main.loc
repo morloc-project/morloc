@@ -1,0 +1,17 @@
+-- Spec REC-5: a setter in a guarded do arm, the new field read from another
+-- record, builds in Rust and leaves both records unchanged.
+module main (swap)
+
+import root-rust
+
+record Pair where
+  left :: [Int]
+  right :: [Int]
+record Rust => Pair = "struct"
+
+swap :: Pair -> Pair -> <IO> (Pair, Pair, Pair)
+swap main d = do
+  ? length (.left main) == 1 = do
+      (.(.left = .left d) main, main, d)
+  : do
+      @throw "no"

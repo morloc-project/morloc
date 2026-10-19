@@ -2382,7 +2382,11 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es1) = do
           (g0 : gs) -> foldl (lcApplySrcGroup cfg) (lcSrcName cfg src <> (if null g0 then tupled g0 else tupledNoFold g0)) gs
   return $ mergePoolDocs handleFunctionArgs (map snd es)
 lowerNativeExprRaw cfg origExpr (AppExeN_ t (PatCallP p) xs) = do
-  let es = map snd xs
+  es <- case (p, origExpr, map snd xs) of
+    -- A setter's new values are stored in the rebuilt record, an owned sink.
+    (PatternStruct sel, AppExeN _ _ (_ : vals), e0 : evs)
+      | not (selectorHasBracket sel), length vals == length evs -> (e0 :) <$> zipWithM ownedVal vals evs
+    (_, _, es0) -> return es0
   taken <- case (p, origExpr, es) of
     (PatternStruct sel, AppExeN _ _ [recv], [e])
       | not (selectorHasBracket sel) -> do
@@ -2403,6 +2407,9 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ t (PatCallP p) xs) = do
       , poolReturnFlag = any poolReturnFlag es
       , poolBorrowedLocal = Nothing
       }
+  where
+    ownedVal (NativeArgExpr e) d = adaptOwnedElem cfg e d
+    ownedVal (NativeArgManifold _) d = return d
 -- Manifold-call arguments go through lcSourcedArg too (identity for most
 -- languages; the Rust member borrows every native arg so a value can fan out to
 -- several manifold calls as shared borrows instead of a move-after-move).

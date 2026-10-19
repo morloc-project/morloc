@@ -41,6 +41,7 @@ anonymous records, which pure nexus code, getters and views use.
 
 ### REC-5 Field access and update are getter and setter patterns
 Intent: proposed
+Tests: spec-rec-5-1
 Code: unaudited
 
 `.f r` is the value of field `f` of `r`. `.(.f = e) r` is a new record equal
