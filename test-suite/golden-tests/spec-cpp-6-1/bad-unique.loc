@@ -1,0 +1,17 @@
+-- CPP-6: a mapped record whose recursive field is a unique_ptr is rejected (see ok.loc).
+module badunique (bad)
+
+import root
+import root-cpp
+
+source Cpp from "bad-unique.hpp" ("mk", "unodeLen")
+
+mk :: Int -> [Int]
+record UNode where
+  head :: Int
+  tail :: ?UNode
+record Cpp => UNode = "unode_t"
+unodeLen :: UNode -> Int
+
+bad :: Int -> Int
+bad n = unodeLen {head = n, tail = {head = n, tail = Null}}

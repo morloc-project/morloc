@@ -124,8 +124,9 @@ Status: implemented
 Checked by: golden:deep-release-user-mapped-cpp, golden:deep-value-paths-cpp, golden:recursion-deep-value-cpp
 
 In C++ every constructor arm morloc allocates, of a generated or a
-user-mapped type, built in generated code or read from a packet, is a plain
-`std::shared_ptr` whose allocator destroys it in place while fewer than 128
+user-mapped type, built in generated code or read from a packet, is held by
+a `std::shared_ptr<const T>` (CPP-6) whose allocator destroys it in place
+while fewer than 128
 releases are nested on the thread. Past that depth the arm's contents move,
 or are copied when the arm cannot be moved, to a heap object on the
 thread's worklist and the arm is destroyed at once,

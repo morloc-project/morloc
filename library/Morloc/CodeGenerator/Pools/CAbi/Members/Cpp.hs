@@ -35,6 +35,7 @@ import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( LoopResult (..)
+  , armIndex
   , infixOperator
   , papplySteps
   , containsClosure
@@ -333,7 +334,8 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
           _ | Set.member gv variantNames -> return (pretty (nativeTypeName gvName))
           _ -> leakError (unTVar gv)
       -- Recursive optional (?T where T points back to a containing record)
-      -- collapses to a single `std::shared_ptr<T>` with `nullptr == absent`.
+      -- collapses to a single `std::shared_ptr<const T>` with `nullptr ==
+      -- absent` (CPP-6).
       -- C++'s incomplete-type rule forbids `optional<T>` inside T's own
       -- body (optional needs `sizeof(T)`, not yet known while T is being
       -- parsed), so the cycle must be broken by a pointer. shared_ptr is
@@ -345,7 +347,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- known and inline storage is leaner.
       f (OptionalF t@(RecF _)) = do
         t' <- f t
-        return $ "std::shared_ptr<" <> t' <> ">"
+        return $ "std::shared_ptr<const " <> t' <> ">"
       f (OptionalF t) = do
         t' <- f t
         return $ "std::optional<" <> t' <> ">"
@@ -1036,6 +1038,15 @@ cppWalkLoopBody setResult ids = go
 -- signatures of the function values this pool partially applies.
 data ClosureGen = ClosureGen (Map.Map Text (MDoc, MDoc)) (Map.Map Int StageEntry) (Set.Set Text)
 
+-- | A constructor field a let takes ('consumableProjectionLets') out of its
+-- subject's arm (OWN-5, CPP-6).
+cppTakeField :: NativeExpr -> MDoc
+cppTakeField (IntrinsicN _ IntrCtorField _ [LetVarN t j _, StrN _ n, IntN _ i])
+  | VariantF _ _ arms <- t =
+      "mlc::take_field(std::get<" <> pretty (armIndex n (map fst arms)) <> ">("
+        <> nvarNamer j <> ".v), [](auto& a) -> auto& { return a.f" <> pretty i <> "; })"
+cppTakeField e = error $ "cppTakeField: not a constructor field of a let: " <> show e
+
 -- | Operands that are all scalars reach only a built-in operator (CPP-1).
 cppConstArg :: Maybe [TypeM] -> TypeM -> MDoc -> MDoc
 cppConstArg operands _ x
@@ -1200,7 +1211,10 @@ PROPAGATE_ERROR(errmsg)|]
           (Just t) -> cppTypeOf t
           Nothing -> return serialType
         binding <- maybe (return LetCopy) (cppLetMode letIndex) mrhs
-        return $ makeLet namer letIndex typestr (isUnitTypeF mt) binding e1 e2
+        let e1' = case (binding, mrhs) of
+              (LetTake, Just rhs) -> e1 {poolExpr = cppTakeField rhs}
+              _ -> e1
+        return $ makeLet namer letIndex typestr (isUnitTypeF mt) binding e1' e2
     , lcReleaseStmt = \v -> "_release_packet(" <> pretty v <> ", true);"
     , lcReleaseBorrowedStmt = \v -> "_release_packet(" <> pretty v <> ", false);"
     , lcReturn = \e -> "return(" <> e <> ");"
@@ -1228,7 +1242,7 @@ PROPAGATE_ERROR(errmsg)|]
         mode <- cppLetMode i orhs
         return $
           if mode == LetTake
-            then d {poolExpr = "std::move(" <> poolExpr d <> ")"}
+            then d {poolExpr = cppTakeField orhs}
             else d
     , lcLetRhs = \_ _ d -> return d
     , lcOwnPacketDecl = \v e -> Just ("mlc::Packet" <+> v <> "(" <> e <> ");", v <> ".get()")
@@ -1618,14 +1632,8 @@ PROPAGATE_ERROR(errmsg)|]
             -- ('consumableProjectionLets'): nothing else may use the referent
             -- on the path that runs it, so it cannot strand an alias.
             -- Scalars are excluded ('isScalarCppType'): borrowing an int/double
-            -- saves nothing, so keep the cheap by-value copy for them.
-            -- The projection is the last thing that can read the payload of a
-            -- value this frame built, so the payload moves into the binding
-            -- rather than being copied or aliased ('consumableProjectionLets').
-            -- Scalars are excluded for the same reason they are excluded from
-            -- the borrow: a move of an int is a copy of an int.
-            | binding == LetTake && not (isScalarCppType typestr) =
-                [idoc|#{typestr} #{namer letIndex} = std::move(#{poolExpr p1});|]
+            -- saves nothing, so keep the cheap by-value copy for them. A take
+            -- ('cppTakeField') arrives here as an ordinary right-hand side.
             | binding == LetBorrow && not (isScalarCppType typestr) =
                 [idoc|const #{typestr}& #{namer letIndex} = #{poolExpr p1};|]
             | otherwise =

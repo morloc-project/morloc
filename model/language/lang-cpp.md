@@ -62,3 +62,26 @@ Calling a `const` member function of a mapped type, or reading it through
 a `const T&`, is safe while other threads do the same with the same object
 (EVAL-7). Morloc may share one object between parallel workers instead of
 copying it.
+
+### CPP-6 A C++ `data` value and a recursive record field are shared and never changed
+Intent: ruled 2026-10-19
+Tests: spec-cpp-6-1
+Code: deviates compiler/issues/codegen-ownership.md (a recursive field of a record that never crosses is unchecked)
+
+A `data` type with payloads is a struct holding
+`std::variant<std::shared_ptr<const T_C>...> v`, one alternative per
+constructor in declaration order, where `T_C` is the struct for constructor
+`C`. Morloc generates this form, and a mapped `data` type is written the
+same way. A `?R` field that leads back to its own record is a
+`std::shared_ptr<const R>`, with `nullptr` meaning absent. A copy shares the
+arm, and nothing changes an arm after it is built: to change a value, copy
+the arm, change the copy, and wrap it in a new `std::make_shared<const
+T_C>`. Code that is still building a value may hold a `std::shared_ptr<T>`
+to a non-const `T` and store it into a const field. A raw pointer, a
+`std::unique_ptr`, or a `std::shared_ptr` to a non-const type in these
+positions is rejected at build (EVAL-7, CPP-3).
+
+Morloc moves a field out of an arm only when it built the arm itself and no
+other holder shares it, and copies it otherwise (OWN-5). An arm built with
+`mlc::make_arm` (from `mlc_rec.hpp`) is released in bounded stack (STATE-8);
+one built with `std::make_shared` is released recursively.

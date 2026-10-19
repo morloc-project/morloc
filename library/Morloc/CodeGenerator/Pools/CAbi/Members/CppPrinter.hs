@@ -440,7 +440,7 @@ printCppVariantDecl name arms =
     [ vsep ["struct" <+> armName name c <> ";" | (c, _) <- arms]
     , "struct" <+> name <+> "{"
     , indent 4 ("std::variant<"
-                  <> hsep (punctuate "," ["std::shared_ptr<" <> armName name c <> ">" | (c, _) <- arms])
+                  <> hsep (punctuate "," ["std::shared_ptr<const " <> armName name c <> ">" | (c, _) <- arms])
                   <> "> v;")
     , "};"
     ]
@@ -484,7 +484,9 @@ printCppVariantSerializers name arms =
         [ "void MlcNode<" <> name <> ">::size_step(MlcSizeWalk& w, const Schema* schema, const"
             <+> name <> "& obj, size_t) {"
         , indent 4 $ vsep
-            [ "switch (obj.v.index()) {"
+            [ "static_assert(mlc::const_arms<decltype(obj.v)>::value,"
+            , indent 4 ("\"CPP-6: every arm of a data type is a std::shared_ptr<const T>\");")
+            , "switch (obj.v.index()) {"
             , indent 4 $ vsep
                 [ "case" <+> pretty i <> ":" <+>
                     (if null ts

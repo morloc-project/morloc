@@ -1,0 +1,7 @@
+-- CPP-6: changing a recursive record field in place is rejected (see ok.loc).
+module badtail (bad)
+
+import .badlib
+
+bad :: Int -> Int
+bad n = let l = mkLL n in .head (bumpTail l) + .head l

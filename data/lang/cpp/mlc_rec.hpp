@@ -1,10 +1,12 @@
 #ifndef MLC_REC_HPP
 #define MLC_REC_HPP
 
+#include <atomic>
 #include <memory>
 #include <new>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
 // Constructor arms made by `mlc::make_arm` are released in bounded stack
 // (STATE-8).
@@ -69,14 +71,33 @@ template <class T> struct arm_allocator {
     template <class U> bool operator!=(const arm_allocator<U>&) const noexcept { return false; }
 };
 
-// A constructor arm (or any recursive node), released per STATE-8.
-template <class T, class... A> std::shared_ptr<T> make_arm(A&&... a) {
-    return std::allocate_shared<T>(arm_allocator<T>{}, std::forward<A>(a)...);
+// A constructor arm (or any recursive node), released per STATE-8 (CPP-6).
+template <class T, class... A> std::shared_ptr<std::remove_const_t<T>> make_arm(A&&... a) {
+    using U = std::remove_const_t<T>;
+    return std::allocate_shared<U>(arm_allocator<U>{}, std::forward<A>(a)...);
 }
 
-// The arm behind a held pointer, const when the holder is (STATE-8).
-template <class T> T* arm(std::shared_ptr<T>& p) noexcept { return p.get(); }
+// The arm behind a held pointer (CPP-6).
 template <class T> const T* arm(const std::shared_ptr<T>& p) noexcept { return p.get(); }
+
+// A field taken out of an arm (OWN-5, CPP-6).
+template <class T, class Get>
+auto take_field(const std::shared_ptr<const T>& p, Get get)
+    -> std::remove_cvref_t<decltype(get(*p))> {
+    if (p.use_count() == 1) {
+        std::atomic_thread_fence(std::memory_order_acquire);
+        return std::move(get(*const_cast<T*>(p.get())));
+    }
+    return get(*p);
+}
+
+template <class T> struct is_const_shared_ptr : std::false_type {};
+template <class T> struct is_const_shared_ptr<std::shared_ptr<const T>> : std::true_type {};
+
+// Every arm of a `data` type is a std::shared_ptr<const T> (CPP-6).
+template <class V> struct const_arms;
+template <class... A> struct const_arms<std::variant<A...>>
+    : std::bool_constant<(is_const_shared_ptr<A>::value && ...)> {};
 
 } // namespace mlc
 

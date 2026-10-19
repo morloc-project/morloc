@@ -60,6 +60,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 
     -- * Ownership of a projected value
   , consumableProjectionLets
+  , armIndex
   , markLastReads
   , markLastReadsWith
   , markLastReadsSeeded

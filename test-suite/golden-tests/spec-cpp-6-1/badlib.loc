@@ -1,0 +1,26 @@
+module badlib (*)
+
+import root
+import root-cpp
+
+source Cpp from "bad.hpp" ("mk", "sz", "growArm", "growRaw", "growVisit", "bumpTail")
+
+mk :: Int -> [Int]
+sz :: [Int] -> Int
+
+data Box = Box [Int]
+growArm :: Box -> Box
+growRaw :: Box -> Box
+growVisit :: Box -> Box
+
+record LL where
+  head :: Int
+  tail :: ?LL
+record Cpp => LL = "tl_t"
+bumpTail :: LL -> LL
+
+boxSize :: Box -> Int
+boxSize b = match b | (Box xs) = sz xs
+
+mkLL :: Int -> LL
+mkLL n = {head = n, tail = {head = n, tail = Null}}

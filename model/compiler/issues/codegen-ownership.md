@@ -126,28 +126,11 @@ same name sees what was taken.
   mapping whose C++ type is a pointer, a reference, `std::string_view` or
   `std::span` could be rejected at build; a user struct holding a pointer
   cannot be detected.
-- **A copy of a C++ `data` value shares a payload its holder can change.**
-  [reproduced] Unsound; violates EVAL-7 (a copy is an independent value).
-  Arms are `std::variant<std::shared_ptr<Arm>...>` (CppPrinter.hs ~443) and
-  recursive `?R` fields `std::shared_ptr<R>` (Cpp.hs ~346), so a copy
-  shares the arm, and const does not pass through the pointer. A source
-  that takes a `Box` by value and changes its own copy, as CPP-1 permits,
-  changes the caller's value: `template <class B> B growBox(B b) {
-  mlc::arm(std::get<0>(b.v))->f0.push_back(9); return b; }` with
-  `after g b = 10 * boxSize g + boxSize b` and `armAfter n = let b = Box
-  (mk n) in after (growBox b) b` prints 44 for n = 3, not 43. The same
-  holds through a `const Box&` (`std::get<0>(x.v)->f0 = ...` compiles).
-  Fix direction: arms and recursive fields as `shared_ptr<const T>`, with
-  the payload take moving only when the arm is unique, else copying (the
-  guarded take that a forced suspension's result needs too).
-- **A C++ recursive record field may be a raw or unique pointer.** [read]
-  Violates CPP-3. `pointer_traits` accepts `T*` (cppmorloc.hpp ~185) and
-  `std::unique_ptr` (~170) at a `?R` position; a raw pointer is not a
-  value, and a `unique_ptr` makes the record move-only, though generated
-  code copies records.
-- **A C++ recursive record cannot be a value type.** [read] Deviates from
-  EVAL-7 and CPP-3, which call `std::shared_ptr<const T>` a value: the
-  generated field type at a `?R` position is always `std::shared_ptr<R>`
-  (Cpp.hs ~348), and the user struct must spell it so, so its pointee is
-  changeable through every copy.
+- **A C++ record's recursive field is checked only where morloc marshals or
+  builds it.** [read] Deviates from CPP-6. The const check lives in
+  `pointer_traits` and the generic marshaller, so a mapped record with a
+  `std::shared_ptr<R>` field that only passes between C++ sources in one
+  pool builds, and a source can change a shared tail through a copy. Fix: a
+  `static_assert` per mapped type the pool's C++ code uses (with the CPP-3
+  check).
 

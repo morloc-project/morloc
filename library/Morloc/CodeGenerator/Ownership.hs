@@ -117,7 +117,7 @@ data LetMode = LetCopy | LetBorrow | LetTake
 -- elements.
 letMode :: PoolPlan -> Int -> Int -> NativeExpr -> LetMode
 letMode pp root i rhs
-  | isBorrowableProjection rhs && Set.member (root, i) (ppTakes pp) = LetTake
+  | IntrinsicN _ IntrCtorField _ (LetVarN {} : _) <- rhs, Set.member (root, i) (ppTakes pp) = LetTake
   | isPlace rhs = LetBorrow
   | otherwise = LetCopy
   where

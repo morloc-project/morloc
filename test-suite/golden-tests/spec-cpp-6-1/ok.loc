@@ -1,0 +1,64 @@
+-- CPP-6: a C++ `data` value and a recursive record field are shared and
+-- never changed. Arms are `std::shared_ptr<const T>`, generated or mapped, and
+-- a recursive `?R` field is `std::shared_ptr<const R>`, so a source changes a
+-- value only by copying an arm and rebuilding it, and the caller's value is
+-- untouched (boxAfter, shapeAfter, listShare). Changing an arm or a recursive
+-- field in place, and mapping a type whose arms or recursive field are not
+-- `shared_ptr<const T>`, is rejected at build (bad-*.loc). The deserialize
+-- paths (`lenArg`, `shapeArg`) and a constructor take (`taken`) build arms
+-- from the wire and from a literal.
+module ok (boxAfter, shapeAfter, listLen, listShare, lenArg, shapeArg, shapeOut, taken)
+
+import root
+import root-cpp
+
+source Cpp from "shapes.hpp" ("mk", "sz", "growGen", "grow", "area", "lenL", "prepend", "buildList")
+
+mk :: Int -> [Int]
+sz :: [Int] -> Int
+
+data Box = Box [Int]
+growGen :: Box -> Box
+
+data Shape = Circle [Int] | Dot
+data Cpp => Shape = "Shape"
+grow :: Shape -> Shape
+area :: Shape -> Int
+
+record LL where
+  head :: Int
+  tail :: ?LL
+record Cpp => LL = "ll_t"
+lenL :: LL -> Int
+prepend :: Int -> LL -> LL
+buildList :: Int -> LL
+
+boxSize :: Box -> Int
+boxSize b = match b | (Box xs) = sz xs
+
+after :: Box -> Box -> Int
+after g b = 10 * boxSize g + boxSize b
+
+boxAfter :: Int -> Int
+boxAfter n = let b = Box (mk n) in after (growGen b) b
+
+shapeAfter :: Int -> (Int, Int)
+shapeAfter n = let s = Circle (mk n) in (area (grow s), area s)
+
+listLen :: Int -> Int
+listLen n = lenL (buildList n)
+
+listShare :: Int -> (Int, Int)
+listShare n = let l = buildList n in (lenL (prepend 0 l), lenL l)
+
+lenArg :: LL -> Int
+lenArg l = lenL l
+
+shapeArg :: Shape -> Int
+shapeArg s = area (grow s)
+
+shapeOut :: Int -> Shape
+shapeOut n = grow (Circle (mk n))
+
+taken :: Int -> Int
+taken n = match (Box (mk n)) | (Box xs) = sz xs

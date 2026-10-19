@@ -1,0 +1,15 @@
+-- CPP-6: a mapped `data` type whose arm is not const is rejected (see ok.loc).
+module badmapped (bad)
+
+import root
+import root-cpp
+
+source Cpp from "bad-mapped.hpp" ("mk", "ptSize")
+
+mk :: Int -> [Int]
+data Pt = P [Int]
+data Cpp => Pt = "Pt"
+ptSize :: Pt -> Int
+
+bad :: Int -> Int
+bad n = ptSize (P (mk n))

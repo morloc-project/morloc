@@ -1,0 +1,33 @@
+# copies 2026-10-19 15:54 load=5.92 morloc=0.109.0 commit=ee516029+dirty cpu=AMD Ryzen 5 7535U with Radeon Graphics cores=12
+item	param	value	unit	note
+COPY-1	rs.nestedLoop.t	0.0668091	s	args [4000], 0 copies over 1999 steps
+COPY-1	rs.nestedLoop.net	0.00101466	s	args [4000], 0 copies over 1999 steps
+COPY-1	rs.nestedLoop.per_step	0	copies	args [4000], 0 copies over 1999 steps
+COPY-1	cpp.nestedLoop.t	0.0782388	s	args [10000, 100], 0 copies over 500000 steps
+COPY-1	cpp.nestedLoop.net	0.00678406	s	args [10000, 100], 0 copies over 500000 steps
+COPY-1	cpp.nestedLoop.per_step	0	copies	args [10000, 100], 0 copies over 500000 steps
+COPY-2	rs.tlLoop.t	0.0655618	s	args [1000, 10000], 0 copies over 1000 steps
+COPY-2	rs.tlLoop.net	-0.000406967	s	args [1000, 10000], 0 copies over 1000 steps
+COPY-2	rs.tlLoop.per_step	0	copies	args [1000, 10000], 0 copies over 1000 steps
+COPY-3	rs.listLoop.t	0.356156	s	args [1000, 5000], 10000000 copies over 1000 steps
+COPY-3	rs.listLoop.net	0.290446	s	args [1000, 5000], 10000000 copies over 1000 steps
+COPY-3	rs.listLoop.per_step	10000	copies	args [1000, 5000], 10000000 copies over 1000 steps
+COPY-3	rs.listLoop.u	29.0446	ns	net time per copy
+COPY-3	cpp.listLoop.t	0.0659633	s	args [250000], 0 copies over 250000 steps
+COPY-3	cpp.listLoop.net	-0.000375538	s	args [250000], 0 copies over 250000 steps
+COPY-3	cpp.listLoop.per_step	0	copies	args [250000], 0 copies over 250000 steps
+COPY-4	rs.closure.t	0.362898	s	args [1000, 10000], 10000000 copies over 1000 steps
+COPY-4	rs.closure.net	0.282919	s	args [1000, 10000], 10000000 copies over 1000 steps
+COPY-4	rs.closure.per_step	10000	copies	args [1000, 10000], 10000000 copies over 1000 steps
+COPY-4	rs.closure.u	28.2919	ns	net time per copy
+COPY-4	cpp.closure.t	0.735938	s	args [500000], 500000 copies over 500000 steps
+COPY-4	cpp.closure.net	0.669131	s	args [500000], 500000 copies over 500000 steps
+COPY-4	cpp.closure.per_step	1	copies	args [500000], 500000 copies over 500000 steps
+COPY-4	cpp.closure.u	1338.26	ns	net time per copy
+COPY-5	cpp.tupleStep.t	0.379005	s	args [250000], 250000 copies over 250000 steps
+COPY-5	cpp.tupleStep.net	0.312029	s	args [250000], 250000 copies over 250000 steps
+COPY-5	cpp.tupleStep.per_step	1	copies	args [250000], 250000 copies over 250000 steps
+COPY-5	cpp.tupleStep.u	1248.12	ns	net time per copy
+COPY-6	cpp.mixedLoop.t	0.0890669	s	args [400], 0 copies over 398 steps
+COPY-6	cpp.mixedLoop.net	0.0223112	s	args [400], 0 copies over 398 steps
+COPY-6	cpp.mixedLoop.per_step	0	copies	args [400], 0 copies over 398 steps

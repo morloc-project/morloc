@@ -9,7 +9,7 @@ struct pt_t {
 
 struct node_t {
     int v;
-    std::shared_ptr<node_t> next;
+    std::shared_ptr<const node_t> next;
 };
 
 template <typename T>

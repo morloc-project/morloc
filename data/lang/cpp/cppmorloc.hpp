@@ -138,19 +138,14 @@ inline constexpr bool is_non_vector_container_v =
 //   - `?T` -> some pointer-shape (null == absent) at recursive-cycle
 //     positions where sizeof(T) is not yet known.
 //
-// Pointer-shape is polymorphic within a closed set (shared_ptr,
-// unique_ptr, raw T*). The codegen emits generic wrap/deref calls and
-// the C++ template machinery resolves which wrapper to use at compile
-// time. The value/pointer axis is enforced by static_assert: a user-
-// supplied struct that puts optional<T> where the rule says pointer
-// (or vice versa) gets a clear error.
+// The pointer-shape is std::shared_ptr<const T> (CPP-6). The codegen emits
+// generic wrap/deref calls; the value/pointer axis is enforced by
+// static_assert: a user-supplied struct that puts optional<T> where the rule
+// says pointer (or vice versa) gets a clear error.
 
 namespace mlc {
 
-template<typename T> struct is_pointer_shape : std::false_type {};
-template<typename T> struct is_pointer_shape<std::shared_ptr<T>> : std::true_type {};
-template<typename T> struct is_pointer_shape<std::unique_ptr<T>> : std::true_type {};
-template<typename T> struct is_pointer_shape<T*>                 : std::true_type {};
+template<typename T> using is_pointer_shape = is_std_shared_ptr<T>;
 
 // Pointer-shape traits. Primary intentionally undefined; only
 // recognized pointer kinds get specializations.
@@ -158,46 +153,14 @@ template<typename FieldT> struct pointer_traits;
 
 template<typename T>
 struct pointer_traits<std::shared_ptr<T>> {
-    using inner = T;
-    static std::shared_ptr<T> wrap(T&& v)              { return mlc::make_arm<T>(std::move(v)); }
-    static std::shared_ptr<T> wrap(const T& v)         { return mlc::make_arm<T>(v); }
+    static_assert(std::is_const_v<T>,
+        "CPP-6: a recursive record field is a std::shared_ptr<const T>");
+    using inner = std::remove_const_t<T>;
+    static std::shared_ptr<T> wrap(inner&& v)          { return mlc::make_arm<inner>(std::move(v)); }
+    static std::shared_ptr<T> wrap(const inner& v)     { return mlc::make_arm<inner>(v); }
     static std::shared_ptr<T> absent()                 { return nullptr; }
-    static const T& deref(const std::shared_ptr<T>& p) { return *p; }
+    static const inner& deref(const std::shared_ptr<T>& p) { return *p; }
     static bool has_value(const std::shared_ptr<T>& p) { return p != nullptr; }
-};
-
-template<typename T>
-struct pointer_traits<std::unique_ptr<T>> {
-    using inner = T;
-    static std::unique_ptr<T> wrap(T&& v)              { return std::make_unique<T>(std::move(v)); }
-    static std::unique_ptr<T> wrap(const T& v)         { return std::make_unique<T>(v); }
-    static std::unique_ptr<T> absent()                 { return nullptr; }
-    static const T& deref(const std::unique_ptr<T>& p) { return *p; }
-    static bool has_value(const std::unique_ptr<T>& p) { return p != nullptr; }
-};
-
-// Raw pointer T*: READ-ONLY at field positions. The codegen has no
-// way to manage the pointee's lifetime when constructing a value, so
-// `wrap` is armed with a static_assert that fires at any call site
-// the codegen tries to materialize a T* field from a fresh value.
-// Useful for FFI consumer-side scenarios where the user's struct
-// already holds a T* owned by external code.
-template<typename T>
-struct pointer_traits<T*> {
-    using inner = T;
-    static T* wrap(T&&) {
-        static_assert(sizeof(T*) == 0,
-            "Cannot construct a field of type T* natively in C++. "
-            "Raw pointers carry no ownership information, so the morloc "
-            "codegen has no way to manage the pointee's lifetime. Use "
-            "std::shared_ptr or std::unique_ptr if native construction "
-            "is needed; or restrict the enclosing record to consumer-"
-            "side use only.");
-        return nullptr;
-    }
-    static T* absent()                  { return nullptr; }
-    static const T& deref(T* p)         { return *p; }
-    static bool has_value(T* p)         { return p != nullptr; }
 };
 
 template<typename FieldT>
@@ -237,8 +200,8 @@ FieldT wrap_field(Inner&& v) {
             || is_std_optional<InnerBare>::value
             || std::is_constructible_v<FieldT, Inner>,
         "Field type doesn't match the morloc encoding rule. "
-        "?T at a recursive-cycle position expects a pointer-shape "
-        "(std::shared_ptr<T>, std::unique_ptr<T>, or T*); "
+        "?T at a recursive-cycle position expects "
+        "std::shared_ptr<const T> (CPP-6); "
         "?T everywhere else expects std::optional<T>; "
         "non-optional fields expect T directly."
     );
@@ -1425,9 +1388,16 @@ void mlc_container_fill(MlcReadWalk&, const Schema*, const void* data, void* out
     *static_cast<T*>(out) = std::move(result);
 }
 
+template<typename T> struct is_std_unique_ptr : std::false_type {};
+template<typename T, typename D> struct is_std_unique_ptr<std::unique_ptr<T, D>> : std::true_type {};
+
 template<typename T>
 struct MlcNode {
     static_assert(!mlc_is_leaf_v<T>, "a leaf has no node");
+    static_assert(!std::is_pointer_v<T> && !is_std_unique_ptr<T>::value,
+        "CPP-6: a recursive field is a std::shared_ptr<const T>, not a raw or unique pointer");
+    static_assert(!is_std_shared_ptr<T>::value || mlc::is_const_shared_ptr<T>::value,
+        "CPP-6: a recursive field is a std::shared_ptr<const T>");
 
     static void size_step(MlcSizeWalk& w, const Schema* schema, const T& data, size_t idx) {
         if constexpr (is_std_vector<T>::value) {
@@ -1652,13 +1622,14 @@ struct MlcNode {
         } else if constexpr (is_std_shared_ptr<T>::value) {
             // shared_ptr<T> is the C++ surface form for `?T` at a recursive
             // cycle. The wire slot is a single relptr (RELNULL == absent).
-            using PointeeT = typename T::element_type;
+            using PointeeT = std::remove_const_t<typename T::element_type>;
             relptr_t relptr = *(const relptr_t*)data;
             if (relptr == RELNULL) {
                 out->reset();
             } else {
-                *out = mlc::make_arm<PointeeT>();
-                w.child(schema->parameters[0], resolve_region_cpp(relptr, resolve_recur(schema->parameters[0])->width, w.space), out->get());
+                auto p = mlc::make_arm<PointeeT>();
+                w.child(schema->parameters[0], resolve_region_cpp(relptr, resolve_recur(schema->parameters[0])->width, w.space), p.get());
+                *out = std::move(p);
             }
         } else {
             mlc_no_marshaller(schema);

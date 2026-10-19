@@ -7,7 +7,7 @@
 // Forward-declared recursive struct types.
 // - tree_t: cycle broken by std::vector<tree_t> (vector's internal
 //   indirection breaks the incomplete-type problem).
-// - ll_t: cycle broken by std::shared_ptr<ll_t> at the optional field.
+// - ll_t: cycle broken by std::shared_ptr<const ll_t> at the optional field.
 //   `nullptr == absent` matches the morloc-level ?LL semantics directly
 //   (the morloc encoding rule maps `?(recursive T)` to a single
 //   pointer-shape with null == absent).
@@ -15,12 +15,12 @@ struct tree_t;
 struct ll_t;
 
 // container_t<T>: parameterized recursive record.
-// `sub` cycle broken by std::shared_ptr<container_t<T>>; nullptr == absent
+// `sub` cycle broken by std::shared_ptr<const container_t<T>>; nullptr == absent
 // matches the morloc-level `?(Container a)` semantics.
 template<typename T>
 struct container_t {
     T val;
-    std::shared_ptr<container_t<T>> sub;
+    std::shared_ptr<const container_t<T>> sub;
 };
 
 struct tree_t {
@@ -30,7 +30,7 @@ struct tree_t {
 
 struct ll_t {
     int64_t head;
-    std::shared_ptr<ll_t> tail;
+    std::shared_ptr<const ll_t> tail;
 };
 
 inline int64_t sum_tree(const tree_t& t) {
