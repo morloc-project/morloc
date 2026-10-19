@@ -22,7 +22,7 @@ change depends on where the compiler shares and copies (EVAL-7). It holds
 until morloc has a way to say where a value may be changed.
 
 ### PY-2 A Python result may share objects with its arguments
-Intent: proposed
+Intent: ruled 2026-10-19
 Code: unaudited
 
 A sourced Python function may return an argument, a part of one, or a

@@ -38,13 +38,12 @@ records and user-mapped types copy deeply.
   taken from a value the frame owns needs the value used once and built by
   a constructor or `@try` (a sourced call's result is never taken), and a
   value matched twice is copied. C++ moves an owned local at its last read
-  into a constructor, tuple, record, optional or loop continue only; a let
-  whose right-hand side ends in one, as when a call result is hoisted into
-  a typed local and then copied into the let (golden copy-census-cpp
-  loopLet and loopGrow: 1 copy per step), list literals, `std::bind` captures, conditional arms, a loop's
-  exit and by-value source arguments still copy one (`accL`: 2k+3 copies
-  for k+1 values built). A C++ list literal
-  copies each element twice (an initializer list).
+  into a constructor, tuple, record, optional, loop continue, local closure
+  capture or by-value manifold argument; list literals, conditional arms
+  and by-value source arguments still copy one (golden copy-census-cpp
+  letSource and matchCond: 1 copy each; re-checked 2026-10-19 at
+  25d09170). A C++ list literal copies each element twice (an initializer
+  list).
 - **A C++ loop copies a carried value no step changes.** [reproduced] A
   loop slot every continue passes on unchanged is a borrow in Rust (OWN-6)
   but a copy of its start in C++ (golden copy-census-cpp throughLoop,
@@ -56,7 +55,8 @@ records and user-mapped types copy deeply.
   captures, since its reify thunk or stage call names them again, and a
   `[=]` do-block thunk copies. A setter on a loop-carried record copies
   every unchanged field each iteration, as the carried local is not among
-  the lets a setter may take.
+  the lets a setter may take (`setLoop (.(.k = j) r) (j - 1)` emits
+  `{n4.xs, n5}`: 100 copies over 100 steps, 2026-10-19).
 - **A Rust staged closure deep-copies the captures it just took.** [read]
   Rust.hs ~1073 emits `let __sc = __caps.clone();` for every closure with a
   stage, right after `capInit` filled `__caps` by moving dead values, so
@@ -73,7 +73,8 @@ records and user-mapped types copy deeply.
   closures that cross (`crossingClosures`, Common.hs).
 - **Closure and wire paths copy what they only serialize.** [read] Rust:
   staged closures re-clone every earlier argument at each level (about n^2
-  argument clones for an n-ary function); a reflected closure's origin,
+  argument clones for an n-ary function), including at the level that
+  calls the stage, which only borrows them (`stagedDoc`, Rust.hs); a reflected closure's origin,
   captured packet bytes included, is cloned twice when reflected and once
   per application; a closure's non-closure slots are cloned into the wire
   tuple; a variant arm needing wire conversion clones each field, though on
@@ -84,12 +85,3 @@ records and user-mapped types copy deeply.
   every native manifold parameter is passed by const reference, as the
   reason a projection take may not move out of a bound variable. A Rust
   parameter taken by value is owned. No wrong take was found.
-- **C++ crossing closures copy each capture about four times.** [read] A
-  closure that may cross a pool is a `MorlocClosure`, pap or staged value
-  holding a `std::bind` binder and a reify thunk that copies the same
-  captures; the runtime's `mlc_pap::make`/`mlc_staged::make` take the binder
-  by value and copy it into their state and again into the apply lambda,
-  and a pap step copies each applied argument twice.
-- **Rust staged closures clone what the stage call only borrows.** [read]
-  At the level that calls the stage, every earlier argument and the capture
-  tuple are cloned though the call borrows them (`stagedDoc`, Rust.hs).
