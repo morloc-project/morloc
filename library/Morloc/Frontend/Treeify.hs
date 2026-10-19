@@ -496,6 +496,7 @@ linkAndRemoveAnnotations = f
       f e -- notice the topology change
       -- everything below is boilerplate (this is why I need recursion schemes)
     f (ExprI i (ModE v es)) = ExprI i <$> (ModE v <$> mapM f es)
+    f (ExprI i (IstE o c ctx ts es)) = ExprI i <$> (IstE o c ctx ts <$> mapM f es)
     f (ExprI i (AssE v e es)) = ExprI i <$> (AssE v <$> f e <*> mapM f es)
     f (ExprI i (LstE es)) = ExprI i <$> (LstE <$> mapM f es)
     f (ExprI i (TupE es)) = ExprI i <$> (TupE <$> mapM f es)

@@ -33,6 +33,7 @@ specTests =
     , localOption (mkTimeout 2000000) teqTests
     , localOption (mkTimeout 2000000) newtTests
     , localOption (mkTimeout 2000000) derivTests
+    , localOption (mkTimeout 2000000) instanceAnnotationTests
     , localOption (mkTimeout 5000000) dimTests
     , localOption (mkTimeout 2000000) patTests
     , localOption (mkTimeout 2000000) lexTests
@@ -917,6 +918,30 @@ teqTests =
         type Two = Pair Int
         f :: Two -> (Int, Str)
         f x = x
+        |]
+    ]
+
+-- An annotation inside an instance method's body is an ordinary annotation.
+instanceAnnotationTests :: TestTree
+instanceAnnotationTests =
+  testGroup
+    "CLS annotations"
+    [ acceptTypecheck
+        "spec-cls-2-5"
+        [r|
+        module main (f)
+        class Size a where
+          size :: a -> Int
+        newtype Box = Int
+        instance Size Int where
+          size x = 1
+        instance Size Box where
+          size b = (size :: Int -> Int) (unpack b)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        f :: Box -> Int
+        f b = size b
         |]
     ]
 
