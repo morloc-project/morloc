@@ -69,7 +69,7 @@ more per element than as JSON.
 Intent: proposed
 Bench: pure-args
 Model: t(n) = c + b*n per element type ([Str], [?Real], [[I64]]); a JSON file read and written back by a pure command, no pool
-Measured: pending (a smoke run on 2026-10-20 at load 7.7 fitted b = 600, 290 and 570 ns)
+Measured: 2026-10-20-0959-74a5fc0a+dirty, load 0.8. b in ns per element: Strs 616, OptReals 337, Nested 639 (r2 >= 0.994)
 Limit: pure:Strs.json.b <= 2000 ns, pure:OptReals.json.b <= 2000 ns, pure:Nested.json.b <= 2000 ns
 
 A value whose elements are separate blocks (strings, present optionals,
