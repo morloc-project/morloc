@@ -873,6 +873,26 @@ unsafe fn walk_root_array_parallel(
 /// would, writing nothing: every pointer and the bytes it addresses lie
 /// inside `bytes`, every variant tag names an arm.
 pub fn check_in_place(bytes: &[u8], schema: &Schema, vol_idx_hint: u16) -> Result<(), MorlocError> {
+    check_window(bytes, schema, -shm::encode_relptr(vol_idx_hint as usize, 0))
+}
+
+/// Whether the value of `schema` at the start of `block` lies wholly inside
+/// that block (SHM-15): every pointer below it, and the bytes it addresses.
+///
+/// # Safety
+/// `block` must be a live shared-memory block holding a value of `schema`.
+pub unsafe fn within_its_block(block: AbsPtr, schema: &Schema) -> bool {
+    if schema_holds(schema, SerialType::Table) {
+        return false;
+    }
+    let (Some(len), Ok(rel)) = (shm::shm_block_size(block), shm::abs2rel(block)) else {
+        return false;
+    };
+    check_window(std::slice::from_raw_parts(block, len), schema, -rel).is_ok()
+}
+
+/// [`check_in_place`] for relptrs that `shift` turns into offsets into `bytes`.
+fn check_window(bytes: &[u8], schema: &Schema, shift: RelPtr) -> Result<(), MorlocError> {
     if bytes.len() < schema.width {
         return Err(MorlocError::Serialization(format!(
             "a voidstar value of {} bytes is shorter than its {}-byte root", bytes.len(), schema.width
@@ -880,7 +900,6 @@ pub fn check_in_place(bytes: &[u8], schema: &Schema, vol_idx_hint: u16) -> Resul
     }
     let hi = isize::try_from(bytes.len())
         .map_err(|_| MorlocError::Serialization("a voidstar value too large to address".into()))?;
-    let shift = -shm::encode_relptr(vol_idx_hint as usize, 0);
     let window = RelWindow { lo: 0, hi };
     // SAFETY: checking writes nothing; `bytes` holds at least one root.
     let mode = RebaseMode::Check { base: bytes.as_ptr() as usize, shift };
@@ -2502,6 +2521,28 @@ mod one_block_copy_tests {
             // everything below the root has to live inside it.
             shm::shfree(copy).unwrap();
             shm::shfree(src).unwrap();
+        }
+    }
+
+    /// SHM-15: a copy into one block lies within it, and a value read into a
+    /// root its caller gave, whose parts are blocks of their own, does not.
+    #[test]
+    fn only_a_value_in_one_block_lies_within_it() {
+        let _shm = crate::own_test_registry();
+        for (schema_str, json) in SHAPES {
+            let schema = parse_schema(schema_str).unwrap();
+            let src = read_json_with_schema(json, &schema).unwrap();
+            let copy = unsafe { deep_copy_to_block(src, &schema) }.unwrap();
+            assert!(unsafe { within_its_block(copy, &schema) }, "copy of {schema_str} {json}");
+            shm::shfree(copy).unwrap();
+            shm::shfree(src).unwrap();
+        }
+        let _arena = crate::eval_arena::enter().unwrap();
+        for (schema_str, json) in [("af8", "[1.5,2.5]"), ("as", "[\"a\"]"), ("m21ai41cs", "{\"a\":7,\"c\":\"seven\"}")] {
+            let schema = parse_schema(schema_str).unwrap();
+            let root = shm::shcalloc(1, schema.width).unwrap();
+            crate::json::read_json_with_schema_dest(Some(root), json, &schema).unwrap();
+            assert!(!unsafe { within_its_block(root, &schema) }, "graph of {schema_str} {json}");
         }
     }
 

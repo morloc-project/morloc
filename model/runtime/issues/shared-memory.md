@@ -54,22 +54,21 @@ Changes here touch locks and ownership: model first.
   size with coalescing on free would bound it; the allocator is shared across
   processes, so model first (tla/AllocWait).
 
-- **An inline argument loads as a graph of blocks.** [read 2026-10-20] Gap
-  in SHM-7/SHM-8 (a value is one block, freed by one pointer;
-  voidstar.rs `consolidate` doc). cli.rs `parse_cli_data_argument_classified`
-  preallocates the root for inline JSON and json.rs returns it without
-  consolidating, so its parts are owned only by the caller's eval arena.
-  On the daemon's remote path the pool increfs only the root of an RPTR
-  argument; safe only while no receiver keeps the argument past the
-  request. Outside an arena the parts, and on a failed load the root, are
-  never freed; callers outside an arena not yet enumerated.
-  A Python pool reading such an argument makes numpy arrays that view the
-  inner data block in place (pymorloc.c `PyArray_SimpleNewFromData` ~1955)
-  while the view's owner references only the block being read, the root
-  (pymorloc.c `shm_view_owner`); a pool that keeps the array past the
-  request (module global, lru_cache) reads freed or reused memory once the
-  daemon's arena ends. [read, not reproduced: a Python pool caching its
-  numpy argument across two daemon calls with inline arguments]
+- **Argument blocks outside an eval arena are never freed.** [read
+  2026-10-20] Gap in SHM-15 (who releases an argument's blocks after it is
+  sent). The nexus remote path (morloc-nexus dispatch.rs
+  `run_remote_command`) opens no eval arena, so an argument the nexus
+  reads stays allocated until the run ends; a record unrolled from flags
+  or an `@many` list, which SHM-15 copies into one block before sending,
+  is held twice for that time. A failed `@many` element leaves the
+  elements read before it (cli.rs `parse_cli_data_argument_list`), and
+  `cli_token_to_json` never frees its scratch root or the value it read.
+
+- **SHM-15 is checked only for arguments the nexus and daemon build.**
+  [read 2026-10-20] A pool sends its results and its calls to other pools
+  through `make_data_packet_auto` without the check; the C++, Python, R
+  and Rust writers lay a value out in one block by construction, which no
+  test covers.
 
 - **A pure command cannot `@load` a table.** [read 2026-10-20] A
   table's value is a whole Arrow block, not a slot of its schema's width,
@@ -79,10 +78,9 @@ Changes here touch locks and ownership: model first.
   with no pool fails. No golden covers it. Gap: what a table value is
   inside the eval.
 
-- **An eval scope keeps every intermediate until it ends.** [read
-  2026-10-20] Gap: no item bounds a scope's memory. Bindings alias by
-  pointer and results bit-copy relptrs, so the arena (SHM-14) is the only
-  releaser, and the eval keeps each block a read or load returns
-  (eval_ffi.rs `take_value`). A pure command or daemon call that loops over
-  `@next` holds every batch until it returns: memory grows with the
-  stream, not the batch.
+- Not a bug, recorded so it is not re-reported: an eval scope keeps every
+  intermediate until it ends (SHM-14; eval_ffi.rs `take_value`), but the
+  nexus never evaluates a loop. A recursive function compiles to a pool
+  command (checked 2026-10-20: a pure recursive `@next` drain built as
+  `"type":"remote"`), so a scope's memory is bounded by the program text
+  times the size of each value, not by the length of a stream.

@@ -818,7 +818,7 @@ pub(crate) unsafe fn revoke_packet_reference(packet: *const u8) {
 
 /// The shared-memory block a data packet names by reference, or `None` for
 /// a packet whose payload travels inside it.
-unsafe fn packet_rptr_block(packet: *const u8) -> Result<Option<AbsPtr>, MorlocError> {
+pub(crate) unsafe fn packet_rptr_block(packet: *const u8) -> Result<Option<AbsPtr>, MorlocError> {
     if packet.is_null() {
         return Ok(None);
     }
@@ -1044,6 +1044,18 @@ pub(crate) unsafe fn make_data_packet_auto(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
+    make_data_packet_with(voidstar, relptr, schema, false, errmsg)
+}
+
+/// [`make_data_packet_auto`]; when `whole`, a value sent by reference that
+/// spans several blocks is first copied into one (SHM-15).
+pub(crate) unsafe fn make_data_packet_with(
+    voidstar: *mut c_void,
+    relptr: RelPtr,
+    schema: *const CSchema,
+    whole: bool,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
     clear_errmsg(errmsg);
     let rs = CSchema::to_rust(schema);
 
@@ -1077,6 +1089,14 @@ pub(crate) unsafe fn make_data_packet_auto(
     }
 
     if crate::packet::shm_enabled() {
+        if whole && !crate::voidstar::within_its_block(voidstar as crate::shm::AbsPtr, &rs) {
+            return match crate::voidstar::deep_copy_to_block(voidstar as *const u8, &rs)
+                .and_then(|copy| crate::shm::abs2rel(copy))
+            {
+                Ok(rel) => make_standard_data_packet(rel, schema),
+                Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
+            };
+        }
         make_standard_data_packet(relptr, schema)
     } else {
         make_file_data_packet_voidstar(voidstar, schema, &rs, errmsg)

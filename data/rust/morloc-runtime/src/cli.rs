@@ -615,7 +615,7 @@ pub(crate) unsafe fn try_load_stream_packet_file(
             };
             sh::write_field(field_ptr, sh::TAG_HANDLE, sh::handle_payload(handle));
             let mut inner_err: *mut c_char = ptr::null_mut();
-            let pkt = wrap_voidstar_as_packet(
+            let pkt = argument_packet(
                 field_ptr as *mut c_void,
                 schema,
                 &mut inner_err,
@@ -624,7 +624,7 @@ pub(crate) unsafe fn try_load_stream_packet_file(
                 let _ = shm::shfree(field_ptr as shm::AbsPtr);
                 let _ = crate::stream::shared_discard_handle(handle);
                 let msg = if inner_err.is_null() {
-                    format!("wrap_voidstar_as_packet failed for stream file '{}'", path_str)
+                    format!("argument_packet failed for stream file '{}'", path_str)
                 } else {
                     let s = CStr::from_ptr(inner_err).to_string_lossy().into_owned();
                     libc::free(inner_err as *mut c_void);
@@ -1785,17 +1785,9 @@ unsafe fn try_list_with_config(
         }
     };
 
-    let dest = match shm::shcalloc(1, rs.width) {
-        Ok(p) => p,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            return ptr::null_mut();
-        }
-    };
-
     let mut err: *mut c_char = ptr::null_mut();
     let result = read_json_with_schema(
-        dest,
+        ptr::null_mut(),
         json_c.as_ptr() as *mut c_char,
         schema,
         &mut err,
@@ -1805,7 +1797,6 @@ unsafe fn try_list_with_config(
         return result as *mut c_void;
     }
     // JSON pass failed.
-    let _ = shm::shfree(dest);
     if !tuple_fallback_available {
         *errmsg = err;
         return ptr::null_mut();
@@ -1852,16 +1843,9 @@ unsafe fn try_list_with_config(
                 continue;
             }
         };
-        let dest_n = match shm::shcalloc(1, rs.width) {
-            Ok(p) => p,
-            Err(e) => {
-                last_err = Some(e);
-                continue;
-            }
-        };
         let mut err_n: *mut c_char = ptr::null_mut();
         let result_n = read_json_with_schema(
-            dest_n,
+            ptr::null_mut(),
             outer_c.as_ptr() as *mut c_char,
             schema,
             &mut err_n,
@@ -1870,7 +1854,6 @@ unsafe fn try_list_with_config(
         if err_n.is_null() {
             return result_n as *mut c_void;
         }
-        let _ = shm::shfree(dest_n);
         let msg = CStr::from_ptr(err_n).to_string_lossy().into_owned();
         libc::free(err_n as *mut c_void);
         last_err = Some(MorlocError::Other(msg));
@@ -2348,17 +2331,9 @@ pub(crate) unsafe fn load_morloc_data_file(
                                 return ptr::null_mut();
                             }
                         };
-                        let dest = match shm::shcalloc(1, rs.width) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                libc::free(data as *mut c_void);
-                                set_errmsg(errmsg, &e);
-                                return ptr::null_mut();
-                            }
-                        };
                         let mut err: *mut c_char = ptr::null_mut();
                         let result = read_json_with_schema(
-                            dest,
+                            ptr::null_mut(),
                             json_c.as_ptr() as *mut c_char,
                             schema,
                             &mut err,
@@ -2366,7 +2341,6 @@ pub(crate) unsafe fn load_morloc_data_file(
                         drop(json_c);
                         libc::free(data as *mut c_void);
                         if !err.is_null() {
-                            let _ = shm::shfree(dest);
                             *errmsg = err;
                             return ptr::null_mut();
                         }
@@ -2434,17 +2408,9 @@ pub(crate) unsafe fn load_morloc_data_file(
                             return ptr::null_mut();
                         }
                     };
-                    let dest = match shm::shcalloc(1, rs.width) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            libc::free(data as *mut c_void);
-                            set_errmsg(errmsg, &e);
-                            return ptr::null_mut();
-                        }
-                    };
                     let mut err: *mut c_char = ptr::null_mut();
                     let result = read_json_with_schema(
-                        dest,
+                        ptr::null_mut(),
                         json_c.as_ptr() as *mut c_char,
                         schema,
                         &mut err,
@@ -2452,7 +2418,6 @@ pub(crate) unsafe fn load_morloc_data_file(
                     drop(json_c);
                     libc::free(data as *mut c_void);
                     if !err.is_null() {
-                        let _ = shm::shfree(dest);
                         *errmsg = err;
                         return ptr::null_mut();
                     }
@@ -2818,12 +2783,6 @@ unsafe fn parse_cli_data_argument_classified(
                 Ok(p) => p,
                 Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
             };
-        }
-        if dest.is_null() {
-            match shm::shcalloc(1, rs.width) {
-                Ok(p) => dest = p,
-                Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
-            }
         }
         dest = read_json_with_schema(dest, effective as *mut c_char, schema, &mut err);
         if !err.is_null() {
@@ -3368,20 +3327,7 @@ pub(crate) unsafe fn parse_cli_data_argument_list(
         hdr,
     );
 
-    // Wrap into a packet just like `parse_cli_data_argument` does.
-    // Arrow-table targets cannot be the element type of a many-arg
-    // (the manifest's `many` flag is gated on `[a]`, not Table), so
-    // the auto path is always correct here.
-    let relptr = match shm::abs2rel(dest) {
-        Ok(r) => r,
-        Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
-    };
-    crate::packet_ffi::make_data_packet_auto(
-        dest as *mut c_void,
-        relptr,
-        list_schema,
-        errmsg,
-    )
+    argument_packet(dest as *mut c_void, list_schema, errmsg)
 }
 
 // ── Shape-aware dispatch ───────────────────────────────────────────────────
@@ -3506,6 +3452,26 @@ pub(crate) unsafe fn wrap_voidstar_as_packet(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
+    packet_of(voidstar, schema, false, errmsg)
+}
+
+/// The packet of a call argument: [`wrap_voidstar_as_packet`], except that a
+/// value sent by reference is first copied into one block if it spans
+/// several (SHM-15), since its receiver may keep it by that block.
+pub(crate) unsafe fn argument_packet(
+    voidstar: *mut c_void,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
+    packet_of(voidstar, schema, true, errmsg)
+}
+
+unsafe fn packet_of(
+    voidstar: *mut c_void,
+    schema: *const CSchema,
+    whole: bool,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
     if voidstar.is_null() {
         return ptr::null_mut();
     }
@@ -3523,7 +3489,7 @@ pub(crate) unsafe fn wrap_voidstar_as_packet(
     if arrow {
         crate::packet_ffi::make_arrow_data_packet(relptr, schema)
     } else {
-        crate::packet_ffi::make_data_packet_auto(voidstar, relptr, schema, errmsg)
+        crate::packet_ffi::make_data_packet_with(voidstar, relptr, schema, whole, errmsg)
     }
 }
 
@@ -3902,7 +3868,7 @@ pub(crate) unsafe fn parse_cli_data_argument_shaped(
                 if voidstar.is_null() {
                     return ptr::null_mut();
                 }
-                return wrap_voidstar_as_packet(voidstar, schema, errmsg);
+                return argument_packet(voidstar, schema, errmsg);
             }
             Ok(TableArg::NotHandled) => {}
             Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
@@ -3915,7 +3881,7 @@ pub(crate) unsafe fn parse_cli_data_argument_shaped(
     if voidstar.is_null() {
         return ptr::null_mut();
     }
-    wrap_voidstar_as_packet(voidstar, schema, errmsg)
+    argument_packet(voidstar, schema, errmsg)
 }
 
 // ── parse_cli_data_argument ──────────────────────────────────────────────────
@@ -3966,34 +3932,7 @@ pub(crate) unsafe fn parse_cli_data_argument(
         return ptr::null_mut();
     }
 
-    let relptr = match shm::abs2rel(result) {
-        Ok(r) => r,
-        Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
-    };
-
-    // Arrow tables need a PACKET_FORMAT_ARROW header so the receiver routes
-    // to arrow_from_shm rather than voidstar deserialization. For non-arrow
-    // payloads we route through make_data_packet_auto, which inlines small
-    // values (<= MORLOC_INLINE_THRESHOLD bytes) into PACKET_SOURCE_MESG +
-    // PACKET_FORMAT_VOIDSTAR packets and ships larger ones as
-    // PACKET_SOURCE_RPTR. Inlining avoids the cross-process SHM round-trip
-    // and the rel2abs lookup on the receiver, which dominates latency for
-    // tiny args (the common case for scalar inputs and small lists).
-    let arrow = !schema.is_null() && {
-        let rs = CSchema::to_rust(schema);
-        crate::arrow_ffi::is_arrow_table_schema(&rs)
-    };
-
-    if arrow {
-        crate::packet_ffi::make_arrow_data_packet(relptr, schema)
-    } else {
-        crate::packet_ffi::make_data_packet_auto(
-            result as *mut c_void,
-            relptr,
-            schema,
-            errmsg,
-        )
-    }
+    argument_packet(result as *mut c_void, schema, errmsg)
 }
 
 // ── parse_cli_data_argument_group_shaped ─────────────────────────────────────
@@ -4049,7 +3988,7 @@ pub(crate) unsafe fn parse_cli_data_argument_group_shaped(
         *errmsg = err;
         return ptr::null_mut();
     }
-    wrap_voidstar_as_packet(result as *mut c_void, schema, errmsg)
+    argument_packet(result as *mut c_void, schema, errmsg)
 }
 
 // -- make_call_packet --
@@ -4159,6 +4098,76 @@ pub(crate) unsafe fn make_call_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Check that a call argument's packet names a block and that the value
+    /// lies wholly inside it.
+    unsafe fn sent_in_one_block(arg: &morloc_manifest::call_args::CallArg, schema: &str) {
+        let rs = crate::schema::parse_schema(schema).unwrap();
+        let cs = CSchema::from_rust(&rs);
+        let packet = call_arg_packet(arg, cs).unwrap();
+        let block = crate::packet_ffi::packet_rptr_block(packet).unwrap().expect("a reference packet");
+        assert!(crate::voidstar::within_its_block(block, &rs), "{schema}: the value spans several blocks");
+        libc::free(packet as *mut c_void);
+        CSchema::free(cs);
+    }
+
+    /// SHM-15: an argument already in one block is sent by that block; one
+    /// spread over several is sent by a copy in one block.
+    #[test]
+    fn an_argument_is_copied_only_when_it_spans_several_blocks() {
+        let _shm = crate::own_test_registry();
+        let _arena = crate::eval_arena::enter().unwrap();
+        let rs = crate::schema::parse_schema("af8").unwrap();
+        let cs = CSchema::from_rust(&rs);
+        let n = 2 * crate::packet::inline_threshold() / 8 + 1;
+        let json = format!("[{}]", vec!["1.5"; n].join(","));
+        unsafe {
+            let sent = |value: shm::AbsPtr| {
+                let mut err: *mut c_char = ptr::null_mut();
+                let packet = argument_packet(value as *mut c_void, cs, &mut err);
+                assert!(err.is_null() && !packet.is_null());
+                let block = crate::packet_ffi::packet_rptr_block(packet).unwrap().expect("a reference packet");
+                libc::free(packet as *mut c_void);
+                block
+            };
+            let whole = crate::json::read_json_with_schema(&json, &rs).unwrap();
+            assert_eq!(sent(whole), whole);
+            let root = shm::shcalloc(1, rs.width).unwrap();
+            crate::json::read_json_with_schema_dest(Some(root), &json, &rs).unwrap();
+            let copy = sent(root);
+            assert_ne!(copy, root);
+            assert!(crate::voidstar::within_its_block(copy, &rs));
+            assert_eq!(
+                crate::json::voidstar_to_json_string(copy, &rs).unwrap(),
+                crate::json::voidstar_to_json_string(whole, &rs).unwrap(),
+            );
+            CSchema::free(cs);
+        }
+    }
+
+    #[test]
+    fn an_argument_sent_by_reference_is_one_block() {
+        use morloc_manifest::call_args::CallArg;
+        let _shm = crate::own_test_registry();
+        let _arena = crate::eval_arena::enter().unwrap();
+        let n = 2 * crate::packet::inline_threshold() / 8 + 1;
+        let reals = format!("[{}]", vec!["1.5"; n].join(","));
+        let strs = format!("[{}]", vec!["\"abcdefgh\""; n].join(","));
+        let value = |text: &str| CallArg::Value { text: text.to_string(), shape: None, supplied: true };
+        unsafe {
+            sent_in_one_block(&value(&reals), "af8");
+            sent_in_one_block(&value(&strs), "as");
+            sent_in_one_block(&value(&format!("{{\"xs\":{reals},\"name\":\"r\"}}")), "m22xsaf84names");
+            sent_in_one_block(
+                &CallArg::Group {
+                    bundle: None,
+                    fields: vec![Some(reals.clone()), Some("\"r\"".into())],
+                    defaults: vec![None, None],
+                },
+                "m22xsaf84names",
+            );
+        }
+    }
 
     #[test]
     fn a_served_call_cannot_claim_stdin() {

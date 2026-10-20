@@ -192,3 +192,16 @@ the rest. The arena releases a block only while it still has the
 generation it was recorded with (SHM-13) and a reference left. Under
 these rules an arena never releases a reference that a handle or
 structure holds, and nothing it recorded outlives it.
+
+### SHM-15 An argument sent by reference lies in the block it names
+Status: implemented
+Checked by: an_argument_sent_by_reference_is_one_block, an_argument_is_copied_only_when_it_spans_several_blocks, only_a_value_in_one_block_lies_within_it
+
+An argument the nexus or the daemon sends to a pool in a packet that
+names a block lies wholly inside that block, so the pool holds the whole
+value with the one reference it is handed (SHM-3), however long it keeps
+it (a Python pool's numpy views of an argument). Arguments read from text
+are read into one block; one built from several values (a record unrolled
+from flags, an `@many` list) that does not lie in its root's block is
+copied into one before it is sent. A table below the root counts as
+another block, which such a copy refuses.

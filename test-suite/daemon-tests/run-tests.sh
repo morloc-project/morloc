@@ -3283,6 +3283,50 @@ print('OK')
 fi
 
 # ======================================================================
+# Test Group 19: A pool keeps a view of an inline argument
+# ======================================================================
+#
+# SHM-7: an argument sent by reference is one block. A Python pool reads a
+# large numeric argument as a numpy view and keeps it past the call; the
+# daemon read the argument from inline JSON. A later call totals the kept
+# views, which must still hold the values sent.
+
+if should_run "kept-view"; then
+    echo "${BOLD}[kept-view] A pool keeps a view of an inline argument${RESET}"
+
+    KV_DIR=$(mktemp -d)
+    WORK_DIRS+=("$KV_DIR")
+    if ! compile_program "kept-view.loc" "$KV_DIR"; then
+        TOTAL=$((TOTAL + 1))
+        FAILED=$((FAILED + 1))
+        FAILURES+=("kept-view: compilation failed")
+    else
+        KV_PORT=$(pick_port)
+        start_daemon "$KV_DIR" --http-port "$KV_PORT"
+        wait_for_http "$KV_PORT" 15
+        KV_DAEMON_PID=$LAST_DAEMON_PID
+
+        kv_keep() {
+            python3 -c "import json; print(json.dumps([[$1] * 20000]))" \
+                | curl -s --max-time 30 -X POST "http://127.0.0.1:${KV_PORT}/call/keepView" \
+                    -H "Content-Type: application/json" --data-binary @-
+        }
+        views=""
+        for x in 1.0 2.0 3.0; do
+            views="${views}$(json_field "$(kv_keep "$x")" result)"
+        done
+        assert_test "each argument arrives as a view" "111" "$views"
+        total=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${KV_PORT}/call/keptTotal" \
+            -H "Content-Type: application/json" -d '[0]')
+        assert_test "kept views hold the values sent" "120000" "$(json_field "$total" result)"
+
+        stop_daemon "$KV_DAEMON_PID"
+    fi
+
+    echo ""
+fi
+
+# ======================================================================
 # Results
 # ======================================================================
 
