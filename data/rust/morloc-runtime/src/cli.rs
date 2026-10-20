@@ -60,13 +60,11 @@ fn arg_looks_like_file_path(arg: &str) -> bool {
 /// errors clearly instead of silently reading zero bytes after the
 /// first reader drained it.
 ///
-/// A CLI run parses its arguments once per process, so nothing resets
-/// the flag there. A process that parses several commands' arguments
-/// must call [`reset_stdin_claim`] before each.
+/// A CLI run parses its arguments once per process; a served call has no
+/// standard input.
 static STDIN_CLAIMED: AtomicBool = AtomicBool::new(false);
 
-/// Reset the stdin-claim flag before parsing another command's
-/// arguments in the same process.
+#[cfg(test)]
 pub fn reset_stdin_claim() {
     STDIN_CLAIMED.store(false, Ordering::Relaxed);
 }

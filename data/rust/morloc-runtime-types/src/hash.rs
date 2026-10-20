@@ -60,3 +60,25 @@ mod tests {
         assert_ne!(ab, ba);
     }
 }
+
+/// A hasher for maps keyed by an address: one multiply, its high bits
+/// folded down so aligned addresses spread over the low bits.
+#[derive(Default)]
+pub struct AddrHasher(u64);
+
+impl Hasher for AddrHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ *b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_usize(&mut self, n: usize) {
+        let h = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 = h ^ (h >> 29);
+    }
+}
+
+pub type AddrMap<V> = std::collections::HashMap<usize, V, std::hash::BuildHasherDefault<AddrHasher>>;

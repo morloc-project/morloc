@@ -31,25 +31,6 @@ Changes here touch locks and ownership: model first.
   arena's end; other opens rely on the call sweep alone. Should every open
   be recorded, or none?
 
-- **Freeing in an eval arena scans the arena.** [measured 2026-10-15]
-  Gap: no item bounds the cost of a free. `eval_arena::forget_if_active`
-  (morloc-runtime/src/eval_arena.rs) finds the freed block with a linear
-  search of every block recorded in the scope, so a scope that records n
-  blocks and frees them one at a time costs O(n^2): a JSON load of a
-  100,000-deep list, whose consolidation frees its pieces, took 13.7 s at
-  80,000 levels against 0.88 s at 20,000 inside an arena (16x for 4x the
-  depth), and is linear outside one. Reproduced on a user path 2026-10-15:
-  a pure command `idOpt :: [?Real] -> [?Real]` (scopes are open around the
-  nexus's pure commands and the daemon's calls, whose JSON arguments load
-  inside them) took 0.15, 0.32, 1.03 and 5.86 s for 40k, 80k, 160k and 320k
-  elements, half null, against 0.09-0.14 s for `[Real]`: each present
-  optional, nested array or variant payload is a separate block that
-  `voidstar::consolidate` frees one by one, oldest first. A free of a block
-  not in the arena scans it all and misses, and `rollback_to` partitions the
-  whole arena and then frees the drained blocks against the rest, O(m*k) per
-  `@catch` fallback. An index from pointer to position would make a free
-  O(1).
-
 - **The block census counts only volumes this process has mapped.**
   [reproduced 2026-10-15] Gap in SHM-12 (a process uses volumes others
   made, mapping them when it needs them). `shm::live_block_stats` walks the
@@ -73,16 +54,35 @@ Changes here touch locks and ownership: model first.
   size with coalescing on free would bound it; the allocator is shared across
   processes, so model first (tla/AllocWait).
 
-- **A rollback drops an entry recorded before its checkpoint.** [read
-  2026-10-15] Violates SHM-7 (a checkpoint names the entries recorded after
-  it; freeing one drops one entry). `eval_arena::rollback_to` takes the
-  entries recorded after the checkpoint out of the arena and frees each with
-  `shm::shfree`, which also calls `forget_if_active`. When the same block
-  has an entry from before the checkpoint (a stream cache hit before a
-  `@catch` and again inside it, stream.rs `cache_get_or_materialize`; or an
-  adopted reply sharing a block with an argument, daemon_ffi.rs
-  `adopt_rptr_result`), that earlier entry is removed too: one reference is
-  released for two entries dropped, and the reference the earlier entry
-  stood for is never released (a leak until the process ends). The drained
-  entries should be released with `shm::release`, which leaves the arena
-  alone. tla:ArenaCheckpoint does not model the forget inside the release.
+- **An inline argument loads as a graph of blocks.** [read 2026-10-20] Gap
+  in SHM-7/SHM-8 (a value is one block, freed by one pointer;
+  voidstar.rs `consolidate` doc). cli.rs `parse_cli_data_argument_classified`
+  preallocates the root for inline JSON and json.rs returns it without
+  consolidating, so its parts are owned only by the caller's eval arena.
+  On the daemon's remote path the pool increfs only the root of an RPTR
+  argument; safe only while no receiver keeps the argument past the
+  request. Outside an arena the parts, and on a failed load the root, are
+  never freed; callers outside an arena not yet enumerated.
+  A Python pool reading such an argument makes numpy arrays that view the
+  inner data block in place (pymorloc.c `PyArray_SimpleNewFromData` ~1955)
+  while the view's owner references only the block being read, the root
+  (pymorloc.c `shm_view_owner`); a pool that keeps the array past the
+  request (module global, lru_cache) reads freed or reused memory once the
+  daemon's arena ends. [read, not reproduced: a Python pool caching its
+  numpy argument across two daemon calls with inline arguments]
+
+- **A pure command cannot `@load` a table.** [read 2026-10-20] A
+  table's value is a whole Arrow block, not a slot of its schema's width,
+  so the eval refuses to place it in a slot ("a table cannot be copied
+  into a slot", eval_ffi.rs `take_value`, voidstar.rs `deep_copy`). A
+  `@load` of an `.arrow` or `.parquet` file typed as a table in a command
+  with no pool fails. No golden covers it. Gap: what a table value is
+  inside the eval.
+
+- **An eval scope keeps every intermediate until it ends.** [read
+  2026-10-20] Gap: no item bounds a scope's memory. Bindings alias by
+  pointer and results bit-copy relptrs, so the arena (SHM-14) is the only
+  releaser, and the eval keeps each block a read or load returns
+  (eval_ffi.rs `take_value`). A pure command or daemon call that loops over
+  `@next` holds every batch until it returns: memory grows with the
+  stream, not the batch.

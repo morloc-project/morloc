@@ -15,6 +15,8 @@ pub mod compare;
 #[cfg(test)]
 pub mod deep_tests;
 #[cfg(test)]
+mod arena_ref_tests;
+#[cfg(test)]
 mod alloc_bench;
 #[cfg(test)]
 mod stream_bench;

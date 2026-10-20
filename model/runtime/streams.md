@@ -307,8 +307,8 @@ them all. File bytes at an offset do not change while the stream is open
 kept sub-packet is the one a claim would decode. Each block is reserved in
 the handle's bound (SLOT-23) before it is decoded, and a cache of capacity
 0 keeps nothing (SLOT-6). Kept blocks are the cache's references (SHM-7):
-none is recorded in an arena while kept, and a served one is recorded as a
-fresh block is. Speculation never fails a claim: a block that cannot be
+none is recorded in an arena while kept, and a served one is given to the
+arena (SHM-14). Speculation never fails a claim: a block that cannot be
 reserved or allocated ends the pass, and a sub-packet that does not decode
 is simply not kept.
 

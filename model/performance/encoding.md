@@ -64,3 +64,15 @@ before this: 2.7 ns per element encode, 1.7 decode, in the codec alone).
 JSON floats are written by ryu (WIRE-9); `%.15g` cost about 260 ns per
 `Real` in the writer. Open: `[Str]` written as voidstar or packet costs
 more per element than as JSON.
+
+### ENC-4 A pure command reads an argument file at a constant cost per element
+Intent: proposed
+Bench: pure-args
+Model: t(n) = c + b*n per element type ([Str], [?Real], [[I64]]); a JSON file read and written back by a pure command, no pool
+Measured: pending (a smoke run on 2026-10-20 at load 7.7 fitted b = 600, 290 and 570 ns)
+Limit: pure:Strs.json.b <= 2000 ns, pure:OptReals.json.b <= 2000 ns, pure:Nested.json.b <= 2000 ns
+
+A value whose elements are separate blocks (strings, present optionals,
+inner lists) is merged into one block inside the command's eval arena;
+the cost of freeing the pieces must not grow with their number
+(runtime/shm.md SHM-14). b includes writing the result.

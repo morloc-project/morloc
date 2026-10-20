@@ -11,7 +11,8 @@
 
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
+use morloc_runtime_types::hash::AddrMap;
+use std::hash::BuildHasherDefault;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
@@ -46,25 +47,7 @@ struct Entry {
     step: Option<(TypeId, usize)>,
 }
 
-#[derive(Default)]
-struct AddrHasher(u64);
-
-impl Hasher for AddrHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-    fn write(&mut self, bytes: &[u8]) {
-        for b in bytes {
-            self.0 = (self.0.rotate_left(8) ^ *b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        }
-    }
-    fn write_usize(&mut self, n: usize) {
-        let h = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        self.0 = h ^ (h >> 29);
-    }
-}
-
-type Shard = RwLock<HashMap<usize, Entry, BuildHasherDefault<AddrHasher>>>;
+type Shard = RwLock<AddrMap<Entry>>;
 
 const SHARDS: usize = 64;
 
@@ -76,7 +59,7 @@ static REGISTRY: [Shard; SHARDS] =
 static STAGED_LIVE: AtomicUsize = AtomicUsize::new(0);
 
 // The shard comes from bits the map's own hash does not use for its tags
-// (the top bits of `AddrHasher`).
+// (the top bits of `morloc_runtime_types::hash::AddrHasher`).
 fn shard(key: usize) -> &'static Shard {
     &REGISTRY[(((key as u64) >> 4).wrapping_mul(0xD6E8_FEB8_6659_FD93) >> 32) as usize & (SHARDS - 1)]
 }

@@ -1943,30 +1943,38 @@ pub(crate) unsafe fn top_level_err(want_packet: bool, voidstar: *const c_void, s
     Some(text)
 }
 
+// SHM-3
+struct ReplyRef(crate::shm::AbsPtr);
+
+impl Drop for ReplyRef {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SHM-14: the reply's reference is the daemon's, never an arena's.
+            let _ = crate::shm::release(self.0);
+        }
+    }
+}
+
 /// # Safety
 /// `packet` must be a well-formed morloc packet.
-unsafe fn adopt_rptr_result(packet: *const u8) {
+unsafe fn reply_reference(packet: *const u8) -> ReplyRef {
     use crate::packet::{PacketHeader, PACKET_SOURCE_RPTR};
     use crate::shm::RelPtr;
+    let none = ReplyRef(ptr::null_mut());
     if packet.is_null() {
-        return;
+        return none;
     }
     let header = packet as *const PacketHeader;
     if (*header).command.data.source != PACKET_SOURCE_RPTR {
-        return;
+        return none;
     }
     let payload_start = 32 + (*header).offset as usize;
     if ((*header).length as usize) < std::mem::size_of::<RelPtr>() {
-        return;
+        return none;
     }
     let relptr = *(packet.add(payload_start) as *const RelPtr);
-    if let Ok(abs) = crate::shm::rel2abs(relptr) {
-        // The producer took a reference on this block before the packet left
-        // it, and that reference is ours now. Take ownership rather than a
-        // second reference: acquiring here would be too late anyway, since
-        // the interval this is meant to cover has already elapsed.
-        crate::eval_arena::record_if_active(abs);
-    }
+    // SHM-3: the pool took this reference for the daemon before the reply left.
+    crate::shm::rel2abs(relptr).map_or(none, ReplyRef)
 }
 
 // -- Dispatch -----------------------------------------------------------------
@@ -2573,7 +2581,7 @@ unsafe fn dispatch_request(
                     (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = err;
                 } else {
-                    adopt_rptr_result(result_packet);
+                    let _reply = reply_reference(result_packet);
 
                     let packet_error =
                         get_morloc_data_packet_error_message(result_packet, &mut err);
@@ -4718,5 +4726,36 @@ mod endpoint_claim_tests {
             let _ = std::fs::remove_dir_all(dir);
             true
         }));
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+
+    // SHM-3, SHM-14: the reference a reply carries is released when the
+    // daemon is done with it, without touching the arena.
+    #[test]
+    fn a_replys_reference_is_released_with_its_guard() {
+        let _shm = crate::init_test_shm();
+        let cs = crate::cschema::CSchema::from_rust(&morloc_runtime_types::schema::parse_schema("i8").unwrap());
+        let block = crate::shm::shmalloc(8).unwrap();
+        unsafe { crate::shm::shincref(block) }.unwrap();
+        let packet = unsafe { crate::packet_ffi::make_standard_data_packet(crate::shm::abs2rel(block).unwrap(), cs) };
+        let g = crate::eval_arena::enter().unwrap();
+        let held = {
+            let _reply = unsafe { reply_reference(packet) };
+            unsafe { crate::shm::reference_count(block) }.unwrap()
+        };
+        let recorded = crate::eval_arena::has_entry(block);
+        drop(g);
+        let left = unsafe { crate::shm::reference_count(block) }.unwrap();
+        crate::shm::release(block).unwrap();
+        unsafe {
+            libc::free(packet as *mut c_void);
+            crate::cschema::CSchema::free(cs);
+        }
+        assert_eq!((held, left), (2, 1));
+        assert!(!recorded);
     }
 }

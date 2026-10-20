@@ -106,6 +106,7 @@ morloc-runtime/debug.rs::-::CACHE_MAX	lazy
 morloc-runtime/debug.rs::-::RECURSION_CAP	lazy		
 morloc-runtime/debug.rs::-::OVERFLOW_REPORTED	counter		
 morloc-runtime/eval_arena.rs::-::ARENA	thread		
+morloc-runtime/eval_arena.rs::-::BROKEN	test-only		
 morloc-runtime/eval_arena.rs::-::TEARDOWN_PROBE	test-only		
 morloc-runtime/fork_policy.rs::-::HELD_RANKS	thread		
 morloc-runtime/fork_policy.rs::-::RESETS_HELD	thread		

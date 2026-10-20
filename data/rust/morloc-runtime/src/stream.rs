@@ -4143,7 +4143,7 @@ pub fn shared_next_with(
                     voidstar::MorlocSpace { base: payload_base as *const u8, len: payload_len as usize },
                 );
             }
-            SubpacketSrc::Shm { arr_base } => decode(*arr_base as *const u8, voidstar::MorlocSpace::SHM),
+            SubpacketSrc::Shm { arr_base, .. } => decode(*arr_base as *const u8, voidstar::MorlocSpace::SHM),
         }
         match src {
             // SLOT-25: the decoder has returned and kept nothing of the block.
@@ -4236,13 +4236,12 @@ fn claimed_subpacket(
     }
     ahead_join(&mut local.cache);
     if let Some(block) = ahead_take(&mut local.cache, off) {
-        // SHM-7: the cache's reference becomes the caller's, which the
-        // arena records as it records a fresh block.
+        // SHM-14: the cache held the block alone; its reference becomes the arena's.
         crate::eval_arena::record_if_active(block);
         if alone {
             ahead_schedule(local, off + size, end);
         }
-        return Ok(SubpacketSrc::Shm { arr_base: block });
+        return Ok(SubpacketSrc::Shm { arr_base: block, acquired: false });
     }
     let (header, _, _) = read_subpacket_header(local, off)?;
     let compressed = unsafe { header.command.data }.compression == PACKET_COMPRESSION_ZSTD;
@@ -5774,17 +5773,25 @@ pub(crate) enum SubpacketSrc {
         vol_idx_hint: u16,
     },
     Shm {
-        /// AbsPtr to the SHM-resident Array struct (refcount = 1
-        /// owned by the caller of `cache_get_or_materialize`).
+        /// SHM-7: the caller's reference.
         arr_base: AbsPtr,
+        /// SHM-14: taken on a block the cache holds.
+        acquired: bool,
     },
 }
 
 // The `File` variant's mapping is owned by its slot.
 impl Drop for SubpacketSrc {
     fn drop(&mut self) {
-        if let SubpacketSrc::Shm { arr_base } = *self {
-            let _ = shm::shfree(arr_base);
+        match *self {
+            // SHM-14: a reference taken for itself leaves the arena alone.
+            SubpacketSrc::Shm { arr_base, acquired: true } => {
+                let _ = shm::release(arr_base);
+            }
+            SubpacketSrc::Shm { arr_base, acquired: false } => {
+                let _ = shm::shfree(arr_base);
+            }
+            SubpacketSrc::File { .. } => {}
         }
     }
 }
@@ -5793,15 +5800,16 @@ impl SubpacketSrc {
     pub(crate) fn arr_base(&self) -> AbsPtr {
         match *self {
             SubpacketSrc::File { arr_base, .. } => arr_base,
-            SubpacketSrc::Shm { arr_base } => arr_base,
+            SubpacketSrc::Shm { arr_base, .. } => arr_base,
         }
     }
-    /// Drop the caller's reference to the source; the cache's own
-    /// reference keeps the block for later hits.
+    // SHM-7
     pub(crate) fn release(self) {}
 
     /// Hand the caller's reference on with the block.
     pub(crate) fn into_block(self) -> AbsPtr {
+        // SHM-14: only a reference the arena may hold is handed on.
+        assert!(!matches!(self, SubpacketSrc::Shm { acquired: true, .. }));
         let p = self.arr_base();
         std::mem::forget(self);
         p
@@ -6262,7 +6270,7 @@ fn materialize_subpacket_at_offset(
             )
         };
         let base = payload_into_shm(bytes, &local.elem_schema, vol_idx_hint)?;
-        return Ok((SubpacketSrc::Shm { arr_base: base }, on_disk_size));
+        return Ok((SubpacketSrc::Shm { arr_base: base, acquired: false }, on_disk_size));
     }
     if data.compression == PACKET_COMPRESSION_NONE {
         if payload_len < width::u64_from_usize(std::mem::size_of::<shm_types_crate::Array>()) {
@@ -6298,7 +6306,7 @@ fn materialize_subpacket_at_offset(
         )
     };
     let base = compressed_payload_into_shm(packet, &local.elem_schema, vol_idx_hint)?;
-    Ok((SubpacketSrc::Shm { arr_base: base }, on_disk_size))
+    Ok((SubpacketSrc::Shm { arr_base: base, acquired: false }, on_disk_size))
 }
 
 /// Decompress a zstd sub-packet's payload into one fresh SHM block and
@@ -6592,9 +6600,7 @@ fn cache_get_or_materialize(
             ce.clock_bit = 1;
             // SAFETY: a cached entry holds a live SHM packet.
             unsafe { shm::shincref(ce.shm_packet) }?;
-            // SHM-7: the caller's reference is the arena's, as on a miss.
-            crate::eval_arena::record_if_active(ce.shm_packet);
-            return Ok(SubpacketSrc::Shm { arr_base: ce.shm_packet });
+            return Ok(SubpacketSrc::Shm { arr_base: ce.shm_packet, acquired: true });
         }
     }
     // Miss: materialise. For uncompressed sub-packets this returns a
@@ -6604,7 +6610,7 @@ fn cache_get_or_materialize(
 
     // Cache compressed (Shm) sub-packets; uncompressed (File) ones
     // don't need our cache -- the kernel pagecache handles them.
-    if let (SubpacketSrc::Shm { arr_base }, true) = (&src, local.cache.capacity_bytes > 0) {
+    if let (SubpacketSrc::Shm { arr_base, .. }, true) = (&src, local.cache.capacity_bytes > 0) {
         let arr_base = *arr_base;
         let size_bytes = unsafe { shm::shm_block_size(arr_base).unwrap_or(0) } as u64;
         cache_make_room_for(&mut local.cache, size_bytes);
@@ -6987,7 +6993,7 @@ struct RunPlan<'s> {
 fn src_payload_len(src: &SubpacketSrc) -> Result<usize, MorlocError> {
     match *src {
         SubpacketSrc::File { payload_len, .. } => Ok(payload_len as usize),
-        SubpacketSrc::Shm { arr_base } => unsafe { shm::shm_block_size(arr_base) }
+        SubpacketSrc::Shm { arr_base, .. } => unsafe { shm::shm_block_size(arr_base) }
             .ok_or_else(|| MorlocError::Shm("sub-packet block has no size".into())),
     }
 }
@@ -10290,6 +10296,108 @@ mod tests {
         let left = unsafe { shm::reference_count(block) }.unwrap();
         shm::release(block).unwrap();
         assert_eq!(left, 1, "the eval's cached sub-packet references outlived the arena");
+    }
+
+    // SHM-14: a cache hit's reference is the reader's alone; dropping it
+    // leaves the arena entry the miss recorded.
+    #[test]
+    fn a_cache_hit_leaves_the_arena_entry_of_its_miss() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("cache_hit_entry");
+        let path = dir.join("h.idx");
+        write_compressed_runs(&path, 2, 5);
+        let f = open_ifile(path.to_str().unwrap()).unwrap();
+        let g = crate::eval_arena::enter().unwrap();
+        let (block, after_hit, after_miss) = with_process_local_slot(f, |local, _| {
+            let miss = cache_get_or_materialize(local, 0)?;
+            let block = miss.arr_base();
+            let recorded = crate::eval_arena::has_entry(block);
+            let hit = cache_get_or_materialize(local, 0)?;
+            drop(hit);
+            let after_hit = recorded && crate::eval_arena::has_entry(block);
+            drop(miss);
+            Ok((block, after_hit, crate::eval_arena::has_entry(block)))
+        })
+        .unwrap();
+        unsafe { shm::shincref(block) }.unwrap();
+        shared_close_handle(f).unwrap();
+        drop(g);
+        let left = unsafe { shm::reference_count(block) }.unwrap();
+        shm::release(block).unwrap();
+        assert!(after_hit, "dropping the hit took the miss's arena entry");
+        assert!(!after_miss, "the miss kept its arena entry after it was freed");
+        assert_eq!(left, 1);
+    }
+
+    // SHM-14: every way of reading a compressed stream inside an arena,
+    // decode-ahead and its spare blocks included, leaves no block behind
+    // and releases none twice.
+    #[test]
+    fn reading_a_stream_inside_an_arena_leaves_no_block() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("arena_reads");
+        let path = dir.join("r.idx");
+        write_compressed_runs(&path, 24, 50);
+        let before = live_blocks();
+        {
+            let _g = crate::eval_arena::enter().unwrap();
+            let h = open_istream(path.to_str().unwrap()).unwrap();
+            let mut got = Vec::new();
+            for i in 0.. {
+                let batch = if i % 2 == 0 {
+                    next_ints(h)
+                } else {
+                    let mut b = Vec::new();
+                    shared_next_with(h, &mut |data, _| {
+                        let a = unsafe { &*(data as *const shm_types_crate::Array) };
+                        if a.size > 0 {
+                            let d = shm::rel2abs(a.data).unwrap() as *const i64;
+                            b.extend((0..a.size).map(|k| unsafe { *d.add(k) }));
+                        }
+                    })
+                    .unwrap();
+                    b
+                };
+                if batch.is_empty() {
+                    break;
+                }
+                got.extend(batch);
+            }
+            shared_close_handle(h).unwrap();
+            assert_eq!(got, (0..1200).collect::<Vec<i64>>());
+            let f = open_ifile(path.to_str().unwrap()).unwrap();
+            for k in [151i64, 151, 351, 1, 1151, 351] {
+                let p = ifile_bracket_index(f, k).unwrap();
+                assert_eq!(unsafe { *(p as *const i64) }, k);
+            }
+            shared_close_handle(f).unwrap();
+        }
+        assert_eq!(live_blocks(), before, "reads inside an arena changed the live blocks");
+    }
+
+    // SHM-14: a rollback discards the streams opened after its checkpoint and
+    // keeps those opened before.
+    #[test]
+    fn a_rollback_discards_the_streams_opened_after_its_checkpoint() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("arena_slots");
+        let open = |name: &str| {
+            let h = shared_open_ostream_with_schema(dir.join(name).to_str().unwrap(), "ai8").unwrap();
+            crate::eval_arena::record_slot_if_active(h);
+            h
+        };
+        let g = crate::eval_arena::enter().unwrap();
+        let early = open("early.idx");
+        let cp = crate::eval_arena::checkpoint();
+        let late = open("late.idx");
+        crate::eval_arena::rollback_to(cp);
+        let late_gone = shared_close_handle(late).is_err();
+        let early_open = with_process_local_slot(early, |_, _| Ok(())).is_ok();
+        drop(g);
+        let early_gone = shared_close_handle(early).is_err();
+        assert!(late_gone, "the rollback kept a stream opened after its checkpoint");
+        assert!(early_open, "the rollback discarded a stream opened before its checkpoint");
+        assert!(early_gone, "the arena's end kept a stream it recorded");
     }
 
     // A slice that fails part way gives back the sub-packets it read.

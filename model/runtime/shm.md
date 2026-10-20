@@ -58,18 +58,15 @@ process that maps the volume follows it.
 
 ### SHM-7 Arguments and results are owned separately, even when one block
 Status: implemented
-Checked by: a_holders_release_leaves_the_arenas_reference, a_free_before_the_checkpoint_keeps_later_entries_in_the_rollback, an_arena_releases_cached_sub_packets_its_eval_left, tla:ArenaRelease, tla:ArenaRelease_evict_forgets.bug, tla:ArenaRelease_hit_unrecorded.bug, tla:ArenaRelease_handoff_keeps_entry.bug, tla:ArenaCheckpoint, tla:ArenaCheckpoint_length_checkpoint.bug
+Checked by: a_holders_release_leaves_the_arenas_reference, an_arena_releases_cached_sub_packets_its_eval_left, a_cache_hit_leaves_the_arena_entry_of_its_miss, a_replys_reference_is_released_with_its_guard, tla:ArenaRefs, tla:ArenaRefs_acquired_shfree.bug, tla:ArenaRefs_struct_forgets.bug
 
 A result that aliases an argument has two holders and two references. On
-a thread with an eval arena, the arena holds exactly the references
-recorded in it: each allocation's, a reply reference the daemon adopts,
-and each reference a stream read hands to the eval, from its cache or not.
-Freeing one of those drops one entry for the block and releases one
-reference. A reference held by a runtime structure (a stream's cache, a
-cell, an Arrow view) is released without touching the arena, and a
-hand-off of a recorded reference to such a holder drops one entry. A
-checkpoint names the entries recorded after it, so a rollback releases
-those and keeps the earlier ones, whichever were freed in between.
+a thread with an eval arena, the arena holds the reference of each block
+allocated there and of each block a holder that held it alone gives it
+(SHM-14). A reference anything else takes on a block -- a stream's cache,
+a cache hit the eval reads, a cell, an Arrow view, the daemon's copy of a
+pool's reply -- belongs to its holder, which releases it without touching
+the arena.
 
 ### SHM-8 A dead holder's references are recoverable
 Status: implemented
@@ -174,3 +171,24 @@ new owner. The check detects a reference used after its allocation ended
 (a protocol slip); it does not prevent one, and a generation repeats
 after 65535 claims of one address. Interior relptrs and releases by
 address are not checked.
+
+### SHM-14 An arena releases only references it alone holds
+Status: implemented
+Checked by: an_arena_conserves_the_references_it_records, recording_a_block_twice_is_refused, keeping_a_shared_block_is_reported, a_block_released_behind_its_entry_is_not_released_again, a_taken_value_is_kept_by_the_arena, a_rollback_after_compaction_releases_what_followed_its_checkpoint, a_free_before_the_checkpoint_keeps_later_entries_in_the_rollback, files_go_at_the_rollback_after_them_and_at_the_end, a_rollback_discards_the_streams_opened_after_its_checkpoint, reading_a_stream_inside_an_arena_leaves_no_block, tla:ArenaRefs, tla:ArenaRefs_hit_recorded.bug, tla:ArenaRefs_hit_recorded_swap.bug, tla:ArenaRefs_handoff_keeps_entry.bug, tla:ArenaRefs_length_checkpoint.bug
+
+An eval arena holds at most one entry per block, standing for the one
+reference the arena holds on it. The entry is made when the block is
+allocated on the arena's thread, or when a holder that held the block
+alone gives the arena its reference (a block decoded ahead of a stream
+read, a value the eval keeps from a read or a load). Freeing the block
+through its holder, or handing it to a structure, takes the entry.
+Recording a block that already has an entry, or giving the arena a block
+another holder keeps, is reported: the first means its earlier reference
+was released without the arena. Entries keep the order they
+were recorded in, so a checkpoint is the number of entries recorded, and
+a rollback releases exactly the entries recorded after it, with the
+temporary files and streams recorded after it; the arena's end releases
+the rest. The arena releases a block only while it still has the
+generation it was recorded with (SHM-13) and a reference left. Under
+these rules an arena never releases a reference that a handle or
+structure holds, and nothing it recorded outlives it.
