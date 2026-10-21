@@ -64,6 +64,7 @@ module Morloc.Typecheck.RecSolver
   , isGround
   , groundFields
   , freeRecVars
+  , groundEq
   , canonToRecExpr
   , mkCanon
   ) where

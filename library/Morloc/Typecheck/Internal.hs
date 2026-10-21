@@ -1282,9 +1282,12 @@ subtype scope t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
 -- Records are nominal: a named record is its name and its parameters, so
 -- same-fielded records are distinct and a phantom parameter is compared. The
 -- anonymous forms (the generic Record and a closed row bridged to Rec) match
--- any record with the same fields.
-subtype scope t1@(NamU _ v1 ps1 rs1) t2@(NamU _ v2 ps2 rs2) g
+-- any record with the same fields in the same order. An object is a native
+-- class, not a record, so no anonymous form matches it.
+subtype scope t1@(NamU k1 v1 ps1 rs1) t2@(NamU k2 v2 ps2 rs2) g
   | v1 == BT.record || v2 == BT.record, null rs1, null rs2 = return g
+  | isAnonymousRecord v1 || isAnonymousRecord v2
+  , NamObject `elem` [k1, k2] = subtypeError t1 t2 "An object is not an anonymous record"
   | isAnonymousRecord v1 || isAnonymousRecord v2 = subtypeFields t1 t2 scope rs1 rs2 g
   | v1 /= v2 = subtypeError t1 t2 "Record names differ"
   | otherwise =
@@ -1669,16 +1672,18 @@ typeUChildren = getConst . traverseTypeUChildren (\x -> Const [x])
 isAnonymousRecord :: TVar -> Bool
 isAnonymousRecord v = v == BT.record || v == anonRecordVar
 
--- | Subtype record fields by key, in any order.
+-- | Subtype record fields pairwise. A record travels positionally, so two
+-- records are one type only if they have the same fields in the same order,
+-- the rule a Rec row follows too.
 subtypeFields :: TypeU -> TypeU -> Scope -> [(Key, TypeU)] -> [(Key, TypeU)] -> Gamma -> Either MDoc Gamma
-subtypeFields _ _ _ [] [] g = return g
-subtypeFields t1 t2 scope ((k1, x1) : rs1) es2 g =
-  case filterApart (\(k2, _) -> k2 == k1) es2 of
-    (Nothing, _) -> subtypeError t1 t2 "NamU - Unequal fields"
-    (Just (_, x2), rs2) -> do
-      g' <- subtype scope (apply g x1) (apply g x2) g
-      subtypeFields t1 t2 scope rs1 rs2 g'
-subtypeFields t1 t2 _ _ _ _ = subtypeError t1 t2 "NamU - Unequal number of fields"
+subtypeFields t1 t2 scope rs1 rs2 g0 =
+  case RS.groundEq (named rs1) (named rs2) of
+    Left (RS.RecContradiction msg) -> subtypeError t1 t2 (pretty msg)
+    Left _ -> subtypeError t1 t2 "Record fields differ"
+    Right _ -> foldM step g0 (zip rs1 rs2)
+  where
+    named rs = [(k, t) | (Key k, t) <- rs]
+    step g ((_, x1), (_, x2)) = subtype scope (apply g x1) (apply g x2) g
 
 zipSubtype :: TypeU -> TypeU -> Scope -> [TypeU] -> [TypeU] -> Gamma -> Either MDoc Gamma
 zipSubtype _ _ _ [] [] g' = return g'
@@ -3271,7 +3276,7 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (RecSingletonU k v) = "Singleton" <+> f False k <+> f False v
     f _ (LabeledU (TV n) t) = pretty n <> "@" <> f False t
     f _ (NamU _ n [] rs)
-      | n == anonRecordVar = braces (hsep (punctuate "," [pretty k <+> "::" <+> f True t | (k, t) <- rs]))
+      | n == anonRecordVar = braces (hsep (punctuate "," [pretty k <> "=" <> f True t | (k, t) <- rs]))
       | otherwise = pretty n
     f False t = parens (f True t)
     f _ (ExistU v (ts, _) (rs, _)) =

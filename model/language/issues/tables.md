@@ -12,3 +12,9 @@ Holes against model/language/tables.md (TAB).
   streamed table has (an `IStream` of `Table` batches, of records, or
   both), how its schema is fixed and checked at open (STRM-1), and how a
   table result is written out batch by batch.
+- **Is a table's column order part of its type?** [reproduced,
+  2026-10-21] Gap in TAB-1 and TEQ-4. `Table n A` (record `A {x, y}`)
+  against `Table n {y = Int, x = Int}` is rejected "Rec field order
+  differs", the same rule as for records, which travel positionally. Arrow
+  columns are named, so a reordered table may be sound to convert; no item
+  says whether to accept it (reordering columns by name) or reject it.

@@ -65,6 +65,7 @@ unitTests =
   , typeIdentityTests
   , aliasExpansionTests
   , accessorInWhereTests
+  , anonymousRecordOrderTests
   , solvedKindCheckTests
   , substituteTVarTests
   , subtypeTests

@@ -46,26 +46,15 @@
   and it builds). Seen in the bio suite, whose checks run in Python on
   `Mapping Transcript Genome` values.
 
-- **UNSOUND: a record converts to an anonymous record type with its fields
-  reordered, swapping values.** [reproduced, 2026-10-21] Breaks TEQ-6
-  (records are nominal today) and the field-order rule of c74060f6.
-  `record A where x :: Int; y :: Int` (root-py),
-  `f :: A -> {y = Int, x = Int}; f r = r`: `./e4 f '{"x":1,"y":2}'` prints
-  `{"y":1,"x":2}`. Anonymous-to-anonymous with different order is rejected
-  ("Rec field order differs"), and a missing field is rejected, so only
-  the record-vs-anonymous path ignores order. Two distinct records then
-  convert through it: with `record B {y, x}`,
-  `toAnon :: A -> {x = Int, y = Int}; f :: A -> B; f r = toAnon r`
-  typechecks (`f r = r` is rejected) and swaps values. Equality is not
-  transitive. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/teq/e4.loc, e6.loc. Cause not located (record
-  vs anonymous arm of subtyping).
 - **TEQ-4 contradicts the code's field-order rule.** [reproduced] TEQ-4
   (proposed) says `{x = Int, y = Str} == {y = Str, x = Int}`; c74060f6
   made field order part of a Rec, and `Frame {x,y}` vs `Frame {y,x}` is
   rejected "Rec field order differs" (/work/plans/model-audit-2026-10-21/repro/B/t/kind/fo.loc). Needs a ruling:
   (a) amend TEQ-4, order is part of a Rec (matches the positional wire
-  layout); (b) keep TEQ-4 and reorder at boundaries. The unsound entry
-  above depends on the answer.
+  layout); (b) keep TEQ-4 and reorder at boundaries. The code now rejects
+  a conversion between a record and an anonymous type in another order,
+  which is sound under either answer; (b) would replace that rejection
+  with an inserted reordering.
 - **A record literal in Python or R needs a native form.** [reproduced,
   2026-10-21] Violates NATIVE-3 (Python and R need no native definition).
   `record P = P { a :: Int, b :: Str }; lit n = inc { b = "z", a = n }`

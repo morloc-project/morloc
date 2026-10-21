@@ -28,6 +28,7 @@ module UnitTypeTests
   , typeIdentityTests
   , aliasExpansionTests
   , accessorInWhereTests
+  , anonymousRecordOrderTests
   , solvedKindCheckTests
   , complexityRegressionTests
   , definitionArityTests
@@ -4034,6 +4035,114 @@ infixOperatorTests =
           (+) :: Int -> Int -> Int
           z = 1 + 2
         |]
+      ]
+
+-- A record and an anonymous record type are one type only when their
+-- fields come in the same order.
+anonymousRecordOrderTests :: TestTree
+anonymousRecordOrderTests =
+  localOption (mkTimeout 2000000) $
+    testGroup
+      "A record and an anonymous record type agree only in field order"
+      [ expectPass
+          "a record converts to an anonymous type with its own field order"
+          [r|
+module main (f, g, h)
+record A where
+  x :: Int
+  y :: Int
+f :: A -> {x = Int, y = Int}
+f r = r
+g :: {x = Int, y = Int} -> A
+g r = r
+h :: Int -> A
+h n = {y = n, x = 0}
+|]
+      , expectError
+          "a record does not convert to its fields in another order"
+          [r|
+module main (f)
+record A where
+  x :: Int
+  y :: Int
+f :: A -> {y = Int, x = Int}
+f r = r
+|]
+      , expectError
+          "an anonymous type does not convert to a record in another order"
+          [r|
+module main (g)
+record A where
+  x :: Int
+  y :: Int
+g :: {y = Int, x = Int} -> A
+g r = r
+|]
+      , expectError
+          "a reordered conversion nested in a list is rejected"
+          [r|
+module main (f)
+record A where
+  x :: Int
+  y :: Int
+f :: [A] -> [{y = Int, x = Int}]
+f rs = rs
+|]
+      , expectError
+          "a reordered conversion through an alias is rejected"
+          [r|
+module main (f)
+record A where
+  x :: Int
+  y :: Int
+type P = {y = Int, x = Int}
+f :: A -> P
+f r = r
+|]
+      , expectError
+          "two records with swapped fields do not convert through an anonymous type"
+          [r|
+module main (f)
+record A where
+  x :: Int
+  y :: Int
+record B where
+  y :: Int
+  x :: Int
+toAnon :: A -> {x = Int, y = Int}
+toAnon r = r
+f :: A -> B
+f r = toAnon r
+|]
+      , expectPass
+          "a conversion nested in a list keeps its field order"
+          [r|
+module main (f)
+record A where
+  x :: Int
+  y :: Int
+f :: [A] -> [{x = Int, y = Int}]
+f rs = rs
+|]
+      , expectPass
+          "a conversion through an alias keeps its field order"
+          [r|
+module main (f)
+record A where
+  x :: Int
+  y :: Int
+type P = {x = Int, y = Int}
+f :: A -> P
+f r = r
+|]
+      , expectError
+          "an object does not convert to an anonymous record"
+          [r|
+module main (f)
+object Person = Person {name :: Str, age :: Int}
+f :: Person -> {name = Str, age = Int}
+f p = p
+|]
       ]
 
 {- | C3: Record literal field order is by-name. Permuted literals must
