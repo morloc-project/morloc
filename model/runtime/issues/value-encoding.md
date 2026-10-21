@@ -72,3 +72,19 @@
   Violates WIRE-8. data/lang/py/pymorloc.c:1769 `PyBool_FromLong(*(bool*)
   data)` is undefined on a byte other than 0 or 1; R (rmorloc.c:1618), C++
   and Rust compare a `uint8_t`.
+- **Packet landing is checked by convention, not by type.** [read,
+  2026-10-21] `@load` and pool sidecar loads go through
+  `cli::load_packet_file`; CLI argument files keep their own copy of the
+  sequence (stdin, error labels). Each path calls
+  `check_packet_schema_matches` before landing (INTR-3), but
+  `voidstar::land_compressed_frames` and `read_binary_with_hint`
+  still accept any schema, so a new caller can skip the check. A
+  `CheckedSchema` value only the check can make would close that.
+  `packet::get_data_value` (pool IPC) and cache.rs's reads of cached
+  packets land without comparing schemas; a cache file is not trusted
+  input. The check passes a packet with no schema entry: no item says
+  whether such a packet is accepted.
+  `load_packet_file` opens a small file up to four times (header peek,
+  each fast path, the read) and reads the header three times; one read of
+  header and metadata could choose the path. A FIFO path is opened and
+  closed by the peek before the real read.

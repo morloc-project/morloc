@@ -705,9 +705,6 @@ pub(crate) unsafe fn mlc_load(
 ) -> *mut c_void {
     clear_errmsg(errmsg);
 
-    use crate::utility::read_binary_file;
-    use crate::cli::load_morloc_data_file;
-
     if path.is_null() {
         set_errmsg(errmsg, &MorlocError::NullPointer);
         return ptr::null_mut();
@@ -718,74 +715,13 @@ pub(crate) unsafe fn mlc_load(
         return ptr::null_mut();
     }
 
-    // Stream-packet path: a MORLOC_STREAM_PACKET file holds its `[a]`
-    // list value across many sub-packets (constant-memory gathers write
-    // one sub-packet per flush). The data-packet loaders below only
-    // understand single self-contained packets, so detect the stream
-    // shape first and materialise every sub-packet into one voidstar
-    // `[a]` list. Non-stream files fall through to the existing paths.
-    match crate::cli::peek_packet_header_via_pread(path) {
-        Some(h) if h.is_stream() => {
-            let path_str = CStr::from_ptr(path).to_string_lossy().into_owned();
-            let requested = (!schema.is_null()).then(|| CSchema::to_rust(schema));
-            match crate::stream::shared_load_stream_file_as_array(&path_str, requested.as_ref()) {
-                Ok(ptr) => return ptr as *mut c_void,
-                Err(e) => {
-                    set_errmsg(errmsg, &e);
-                    return ptr::null_mut();
-                }
-            }
-        }
-        _ => { /* not a stream packet; fall through */ }
-    }
-
-    // Layer 2 fast path: large MESG+VOIDSTAR packets `pread` straight
-    // into a fresh SHM allocation, skipping the libc::malloc + read +
-    // shmalloc + memcpy chain. On failure (e.g. schema mismatch), the
-    // error is propagated to the caller via errmsg, not swallowed to
-    // stderr -- @catch downstream needs the classified failure to
-    // intercept.
-    match crate::cli::try_load_voidstar_packet_via_mmap(path, schema) {
-        Ok(Some(ptr)) => return ptr as *mut c_void,
-        Ok(None) => { /* fall through */ }
+    match crate::cli::load_packet_file(path, schema) {
+        Ok(p) => p,
         Err(e) => {
             set_errmsg(errmsg, &e);
-            return ptr::null_mut();
+            ptr::null_mut()
         }
     }
-    // Compressed-VOIDSTAR fast path: stream-decompress a zstd frame
-    // directly into a fresh SHM allocation. Same memory shape as the
-    // uncompressed mmap path -- one X of the decompressed payload --
-    // and avoids the multi-Vec / libc::malloc round-trip the generic
-    // fallback below takes.
-    match crate::cli::try_load_compressed_voidstar_via_shm(path, schema) {
-        Ok(Some(ptr)) => return ptr as *mut c_void,
-        Ok(None) => { /* fall through */ }
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            return ptr::null_mut();
-        }
-    }
-
-    let mut err: *mut c_char = ptr::null_mut();
-    let mut file_size: usize = 0;
-    let data = read_binary_file(path, &mut file_size, &mut err);
-    if data.is_null() {
-        // Propagate the file-read error verbatim so the caller sees
-        // (for example) "no such file or directory" rather than a
-        // generic NULL return; @catch relies on this text.
-        set_errmsg(errmsg, &take_reason(err));
-        return ptr::null_mut();
-    }
-
-    // Decompression is now handled inside `load_morloc_data_file`,
-    // which is the single choke point all packet-load paths share.
-    // Any error message it sets flows through to the caller's errmsg.
-    let result = load_morloc_data_file(path, data, file_size, schema, &mut err);
-    if result.is_null() {
-        set_errmsg(errmsg, &take_reason(err));
-    }
-    result
 }
 
 // ── mlc_hash: hash voidstar data ───────────────────────────────────────────
@@ -2416,12 +2352,6 @@ mod tests {
         (!err.is_null()).then(|| CString::from_raw(err).into_string().unwrap())
     }
 
-    fn list_schema() -> *mut CSchema {
-        let mut err: *mut c_char = ptr::null_mut();
-        let s = unsafe { crate::ffi::parse_schema(c"as".as_ptr(), &mut err) };
-        assert!(!s.is_null());
-        s
-    }
 
     #[test]
     fn loading_a_missing_file_fails_with_a_reason() {
@@ -2481,6 +2411,67 @@ mod tests {
         assert_ne!(rc, 0);
         assert!(unsafe { reason(err) }.is_some());
         unsafe { crate::ffi::free_schema(schema) };
+    }
+
+    fn schema_of(code: &std::ffi::CStr) -> *mut CSchema {
+        let mut err: *mut c_char = ptr::null_mut();
+        let s = unsafe { crate::ffi::parse_schema(code.as_ptr(), &mut err) };
+        assert!(!s.is_null());
+        s
+    }
+
+    fn list_schema() -> *mut CSchema {
+        schema_of(c"as")
+    }
+
+    // INTR-3: a saved file loads only at the type it was saved with, by
+    // every load path: uncompressed or compressed, small or past the
+    // fast-path threshold, under a packet name or a `.json` name.
+    #[test]
+    fn a_saved_file_loads_only_at_its_own_type() {
+        let _shm = crate::init_test_shm();
+        let ints = schema_of(c"aj");
+        let reals = schema_of(c"af8");
+        // A pseudo-random sequence, so a large list stays large compressed.
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut noise = |n: usize| -> String {
+            let v: Vec<String> = (0..n).map(|_| {
+                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                (x >> 1).to_string()
+            }).collect();
+            format!("[{}]", v.join(","))
+        };
+        for (n, level, ext) in [(3usize, 0i64, "bin"), (3, 3, "bin"), (300_000, 0, "bin"),
+                                (300_000, 3, "bin"), (3, 0, "json"), (3, 3, "mpk")] {
+            let cjson = CString::new(noise(n)).unwrap();
+            let mut err: *mut c_char = ptr::null_mut();
+            let value = unsafe { mlc_read(cjson.as_ptr(), ints, &mut err) };
+            assert!(!value.is_null());
+            let path = std::env::temp_dir()
+                .join(format!("morloc-load-type-{}-{n}-{level}.{ext}", std::process::id()));
+            let cpath = CString::new(path.to_str().unwrap()).unwrap();
+            let rc = unsafe { mlc_save_voidstar(value, ints, level, cpath.as_ptr(), &mut err) };
+            assert_eq!(rc, 0, "{:?}", unsafe { reason(err) });
+            if n > 3 && level > 0 {
+                let size = std::fs::metadata(&path).unwrap().len();
+                assert!(size >= 1 << 20, "a large compressed file is {size} bytes, below the fast path");
+            }
+            let wrong = unsafe { mlc_load(cpath.as_ptr(), reals, &mut err) };
+            let refused = unsafe { reason(err) }.is_some();
+            err = ptr::null_mut();
+            let right = unsafe { mlc_load(cpath.as_ptr(), ints, &mut err) };
+            let _ = std::fs::remove_file(&path);
+            assert!(wrong.is_null() && refused, "n={n} level={level} .{ext} loaded at the wrong type");
+            assert!(!right.is_null(), "n={n} level={level} .{ext}: {:?}", unsafe { reason(err) });
+            unsafe {
+                let _ = crate::shm::shfree(value as *mut u8);
+                let _ = crate::shm::shfree(right as *mut u8);
+            }
+        }
+        unsafe {
+            crate::ffi::free_schema(ints);
+            crate::ffi::free_schema(reals);
+        }
     }
 
     #[test]

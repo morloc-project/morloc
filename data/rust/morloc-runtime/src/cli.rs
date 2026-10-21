@@ -1066,6 +1066,7 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
     data: *const u8,
     data_size: usize,
     schema: *const CSchema,
+    path_hint: &str,
 ) -> Result<Option<*mut c_void>, MorlocError> {
     if data.is_null() || data_size < 32 {
         return Ok(None);
@@ -1104,6 +1105,7 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
 
     let compressed = std::slice::from_raw_parts(data.add(payload_offset), payload_size);
     let full_meta = std::slice::from_raw_parts(data, payload_offset);
+    check_packet_schema_matches(&full_meta[32..], schema, path_hint)?;
     let hint = packet::read_vol_index_from_meta(full_meta)
         .ok()
         .flatten()
@@ -2181,6 +2183,49 @@ unsafe fn arrow_load_json(
     }
 }
 
+/// Load a data packet file as a value of `schema`, choosing the path by the
+/// file's shape: a stream file is gathered into a list, a large voidstar
+/// packet is landed in shared memory directly, anything else is read whole.
+/// Every path compares the file's stored schema with `schema` (INTR-3).
+pub(crate) unsafe fn load_packet_file(
+    path: *const c_char,
+    schema: *const CSchema,
+) -> Result<*mut c_void, MorlocError> {
+    if let Some(h) = peek_packet_header_via_pread(path) {
+        if h.is_stream() {
+            let path_str = CStr::from_ptr(path).to_string_lossy().into_owned();
+            let requested = (!schema.is_null()).then(|| CSchema::to_rust(schema));
+            return crate::stream::shared_load_stream_file_as_array(&path_str, requested.as_ref())
+                .map(|p| p as *mut c_void);
+        }
+    }
+    if let Some(p) = try_load_voidstar_packet_via_mmap(path, schema)? {
+        return Ok(p as *mut c_void);
+    }
+    if let Some(p) = try_load_compressed_voidstar_via_shm(path, schema)? {
+        return Ok(p as *mut c_void);
+    }
+    let mut err: *mut c_char = ptr::null_mut();
+    let mut file_size: usize = 0;
+    let data = crate::utility::read_binary_file(path, &mut file_size, &mut err);
+    if data.is_null() {
+        return Err(reason_or_unreadable(err, path));
+    }
+    let result = load_morloc_data_file(path, data, file_size, schema, &mut err);
+    if result.is_null() {
+        return Err(reason_or_unreadable(err, path));
+    }
+    Ok(result)
+}
+
+unsafe fn reason_or_unreadable(err: *mut c_char, path: *const c_char) -> MorlocError {
+    if err.is_null() {
+        MorlocError::Other(format!("cannot load '{}'", CStr::from_ptr(path).to_string_lossy()))
+    } else {
+        take_reason(err)
+    }
+}
+
 /// The single entry point that loads a morloc data file's bytes into
 /// SHM. Every caller that wants to *use* on-disk bytes as a morloc
 /// value (CLI argument parsing, @load intrinsic, bundle reader,
@@ -2225,8 +2270,17 @@ pub(crate) unsafe fn load_morloc_data_file(
     // entirely. The helper is a no-op (returns Ok(None)) for anything
     // else, so other compressed formats (JSON/msgpack/Arrow) still flow
     // through the generic decompression below.
+    // Callers that resolved bytes without a path (e.g. `try_packet_strict`
+    // on a per-line list element) pass a null `path` pointer; they get no
+    // extension-based dispatch below.
+    let path_str: std::borrow::Cow<str> = if path.is_null() {
+        std::borrow::Cow::Borrowed("")
+    } else {
+        CStr::from_ptr(path).to_string_lossy()
+    };
+
     if !data.is_null() && data_size >= 32 {
-        match try_decompress_voidstar_bytes_to_shm(data, data_size, schema) {
+        match try_decompress_voidstar_bytes_to_shm(data, data_size, schema, &path_str) {
             Ok(Some(voidstar)) => {
                 // Free the compressed input now that the decompressed
                 // payload lives in SHM. This drops peak resident set to
@@ -2468,19 +2522,12 @@ pub(crate) unsafe fn load_morloc_data_file(
         }
     }
 
-    // Callers that resolved bytes without a path (e.g. `try_packet_strict`
-    // on a per-line list element) pass a null `path` pointer. Skip the
-    // extension-based dispatch entirely in that case and fall straight
-    // through to the magic-byte-driven packet / format detection below.
-    let path_str: std::borrow::Cow<str> = if path.is_null() {
-        std::borrow::Cow::Borrowed("")
-    } else {
-        CStr::from_ptr(path).to_string_lossy()
-    };
     let mut err: *mut c_char = ptr::null_mut();
 
-    // 1. Extension-based dispatch
-    if path_str.ends_with(".json") {
+    // 1. Extension-based dispatch, for a file that is not a packet: a
+    // packet is recognized by its bytes whatever its name (INTR-3, CLI-1).
+    let is_packet = data_size >= 32 && *(data as *const u32) == packet::PACKET_MAGIC;
+    if !is_packet && path_str.ends_with(".json") {
         if arrow_target {
             return arrow_load_json(data, data_size, schema, errmsg);
         }
@@ -2501,7 +2548,7 @@ pub(crate) unsafe fn load_morloc_data_file(
         return result as *mut c_void;
     }
 
-    if path_str.ends_with(".mpk") || path_str.ends_with(".msgpack") {
+    if !is_packet && (path_str.ends_with(".mpk") || path_str.ends_with(".msgpack")) {
         let mut result: *mut c_void = ptr::null_mut();
         unpack_with_schema(data as *const c_char, data_size, schema, &mut result, &mut err);
         libc::free(data as *mut c_void);

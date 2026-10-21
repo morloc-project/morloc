@@ -687,12 +687,7 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
                 }
             } else if format == PACKET_FORMAT_DATA {
                 // Indirection: the file at `filename` is a complete
-                // morloc data packet. Tiered load mirrors mlc_load's
-                // paths but with strict error propagation -- a missing
-                // sidecar or corrupt payload surfaces to the caller
-                // rather than being consumed as an @load-style miss.
-                use crate::utility::read_binary_file;
-                use crate::cli::load_morloc_data_file;
+                // morloc data packet, loaded as `@load` loads a file.
                 let filename_cstr = match std::ffi::CString::new(filename) {
                     Ok(c) => c,
                     Err(_) => {
@@ -702,43 +697,10 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
                         return ptr::null_mut();
                     }
                 };
-                // A stream file is read whole, every sub-packet in order, into
-                // the list its elements make: the `[a]` receiver of a stream.
-                if crate::cli::file_is_stream_packet(filename_cstr.as_ptr()) == 1 {
-                    let requested = (!schema.is_null()).then(|| crate::cschema::CSchema::to_rust(schema));
-                    return match crate::stream::shared_load_stream_file_as_array(filename, requested.as_ref()) {
-                        Ok(p) => p as *mut u8,
-                        Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
-                    };
+                match crate::cli::load_packet_file(filename_cstr.as_ptr(), schema) {
+                    Ok(p) => p as *mut u8,
+                    Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                 }
-                // Fast path: uncompressed voidstar mmap'd straight into SHM.
-                match crate::cli::try_load_voidstar_packet_via_mmap(
-                    filename_cstr.as_ptr(), schema,
-                ) {
-                    Ok(Some(ptr)) => return ptr,
-                    Ok(None) => { /* fall through */ }
-                    Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
-                }
-                // Fast path: compressed voidstar decompressed into SHM.
-                match crate::cli::try_load_compressed_voidstar_via_shm(
-                    filename_cstr.as_ptr(), schema,
-                ) {
-                    Ok(Some(ptr)) => return ptr,
-                    Ok(None) => { /* fall through */ }
-                    Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
-                }
-                // Slow path: bulk read + generic dispatch.
-                let mut file_size: usize = 0;
-                let file_data = read_binary_file(
-                    filename_cstr.as_ptr(), &mut file_size, errmsg,
-                );
-                if file_data.is_null() {
-                    return ptr::null_mut();
-                }
-                load_morloc_data_file(
-                    filename_cstr.as_ptr(), file_data, file_size,
-                    schema, errmsg,
-                ) as *mut u8
             } else {
                 set_errmsg(errmsg, &MorlocError::Packet(
                     format!("Invalid format from file: 0x{:02x}", format)

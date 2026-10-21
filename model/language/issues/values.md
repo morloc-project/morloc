@@ -115,17 +115,6 @@ on 0.109.0 unless marked.
   2026-10-21] data/lang/r/rmorloc.c:1701-1704: a multi-limb `Int` arriving
   in R fails "does not fit in R's numeric type (max 2^53 ...)"; `[[Int]]_R`
   is R integer, as the single-limb branch (:1694-1697) says.
-- **UNSOUND: a compressed `@save` file loads as any type.** [reproduced,
-  2026-10-21] Violates INTR-3. `saveZ p xs = @save 3 p xs` (`[Int]`), then
-  `loadReals p = @load p` at `Try Str [Real]` gives
-  `{"Ok":[[5e-324,5e-324,5e-324]]}`, at `[Str]` NUL strings; `@save 0` gives
-  the right "schema mismatch" Err. A compressed record loaded as `[Int]`
-  gives "rebased relptr ... leaves its block". Cause: `mlc_load`
-  (morloc-runtime/src/intrinsics.rs:700) sends a compressed packet under
-  1 MiB past `try_load_compressed_voidstar_via_shm` (cli.rs:878,
-  `FAST_PATH_THRESHOLD`) to `try_decompress_voidstar_bytes_to_shm`
-  (cli.rs:~1065), which never calls `check_packet_schema_matches`
-  (cli.rs:2106). Repro: /work/plans/model-audit-2026-10-21/repro/E/load/main2.loc.
 - **`@schema` and `@typeof` evaluate their argument.** [reproduced,
   2026-10-21] Violates INTR-4. `schemaBoom x = @schema (boom x)` with a
   raising Python `boom` fails "run failed / boom". features-intrinsics.asc:
