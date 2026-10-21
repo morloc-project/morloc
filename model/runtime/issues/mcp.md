@@ -27,18 +27,19 @@ under data/rust/.
   (`Frontend::forward`, `.to_vec()`), and only `media_result` compares it
   with the cap. A request field telling the daemon the caller's cap would
   refuse it first.
-- **A served call can write into the server's stdout and stderr through
-  a descriptor path or a symlink.** [reproduced, 2026-10-21] Violates
-  DAEMON-15. `writeTo path = do { Ok s <- @open path :: <IO> (Try Str
-  (OStream Int)); @write 0 s [10, 20, 30]; @close s; 1 }` served by
-  `morloc-nexus daemon --http-port=...`: `/call/writeTo` with
-  `["/proc/<daemon pid>/fd/1"]` writes the stream into the daemon's stdout;
-  `.../fd/2` truncates its log; a symlink to `/dev/stdout` is accepted.
-  `/dev/stdout`, `/dev//stdout`, `/proc/self/fd/1` are refused.
-  `names_server_stdio` (stream.rs:2923) matches path text, and the
-  custodian opens the file in the nexus (SLOT-10). Fix: compare the opened
-  file's dev/ino with fds 0-2. DAEMON-15 should say a path is compared by
-  the file it opens. Repro: /work/plans/model-audit-2026-10-21/repro/I2/d15/main.loc.
+- **DAEMON-15 is checked by path, not by file.** [read, 2026-10-21] A
+  served path is refused when, with each directory on the way resolved and
+  each final link followed, it is a stdio sentinel, `/dev/std*` or a
+  descriptor link under `/dev/fd` or any `/proc/<pid>/[task/<tid>/]fd`.
+  Still open: a link swapped between the check and the open; the real path
+  of a file the server's stdout was redirected to; the check's file system
+  calls run while the nexus decodes a request, so a hung mount stalls it.
+  A check by identity (fstat of the opened file against every descriptor
+  the server holds, with OStream opened without `O_TRUNC` until it
+  passes) would close the first two; reads are opened in the pool, so the
+  server's identities would have to be shared with pools. Outside a
+  server, the race guard on the nexus's own stdio (`reject_dev_stdio_path`,
+  `is_stdin_device`, handle_scan.rs:260) still matches literal paths only.
 - **The daemon's HTTP parser truncates path and query at 255 bytes.**
   [read, 2026-10-21] http_ffi.rs:209-214 copies into 256-byte arrays, so a
   longer `/call/<cmd>` or `?render=` is routed by its prefix, not refused.

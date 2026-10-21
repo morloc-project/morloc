@@ -2921,13 +2921,63 @@ pub(crate) fn served_stdio_path(path: &str) -> bool {
     serving() && names_server_stdio(path)
 }
 
+// DAEMON-15
 pub(crate) fn names_server_stdio(path: &str) -> bool {
-    path == STDIO_SENTINEL_STD
-        || path == STDIO_SENTINEL_ERR
-        || matches!(path, "/dev/stdin" | "/dev/stdout" | "/dev/stderr")
-        || path.starts_with("/dev/fd/")
-        || path.starts_with("/proc/self/fd/")
-        || path.starts_with("/proc/thread-self/fd/")
+    path == STDIO_SENTINEL_STD || path == STDIO_SENTINEL_ERR || names_descriptor(std::path::Path::new(path))
+}
+
+fn names_descriptor(path: &std::path::Path) -> bool {
+    use std::io::ErrorKind;
+    let mut p = path.to_path_buf();
+    for _ in 0..40 {
+        if is_descriptor_path(&p) {
+            return true;
+        }
+        let (Some(dir), Some(name)) = (p.parent(), p.file_name()) else {
+            return std::fs::canonicalize(&p).map_or(false, |c| is_descriptor_path(&c));
+        };
+        let dir = if dir.as_os_str().is_empty() { std::path::Path::new(".") } else { dir };
+        let dir = match std::fs::canonicalize(dir) {
+            Ok(d) => d,
+            Err(e) if e.kind() == ErrorKind::NotFound => return false,
+            Err(_) => return true,
+        };
+        let here = dir.join(name);
+        if is_descriptor_path(&here) {
+            return true;
+        }
+        match std::fs::read_link(&here) {
+            Ok(target) => p = if target.is_relative() { dir.join(target) } else { target },
+            Err(e) if e.kind() == ErrorKind::NotFound || e.raw_os_error() == Some(libc::EINVAL) => {
+                return false
+            }
+            Err(_) => return true,
+        }
+    }
+    true
+}
+
+fn is_descriptor_path(p: &std::path::Path) -> bool {
+    use std::path::Component;
+    let mut parts = [""; 6];
+    let mut n = 0;
+    for c in p.components() {
+        match c {
+            Component::RootDir => {}
+            Component::Normal(s) if n < parts.len() => {
+                parts[n] = s.to_str().unwrap_or("");
+                n += 1;
+            }
+            _ => return false,
+        }
+    }
+    matches!(
+        &parts[..n],
+        ["dev", "stdin" | "stdout" | "stderr"]
+            | ["dev", "fd", _]
+            | ["proc", _, "fd", _]
+            | ["proc", _, "task", _, "fd", _]
+    )
 }
 
 pub(crate) fn served_stdio_error(path: &str) -> MorlocError {
@@ -12161,12 +12211,39 @@ mod write_behind_tests {
     // DAEMON-15
     #[test]
     fn a_served_path_may_not_name_the_servers_stdio() {
-        for p in ["-", "-2", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/fd/0", "/proc/self/fd/1"] {
+        for p in ["-", "-2", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/fd/0", "/proc/self/fd/1",
+                  "/proc/1234/fd/1", "/proc/1234/task/1235/fd/2", "/dev//stdout", "/dev/./stdout",
+                  "/proc/thread-self/fd/0"] {
             assert!(names_server_stdio(p), "{p}");
         }
-        for p in ["/dev/null", "/tmp/x", "-x", "data/-"] {
+        for p in ["/dev/null", "/tmp/x", "-x", "data/-", "/proc/1234/status", "/proc/self/fdinfo/1"] {
             assert!(!names_server_stdio(p), "{p}");
         }
+        for p in ["/tmp/../proc/self/fd/1", "/proc/self/task/../fd/1", "/proc/self/root/proc/self/fd/1",
+                  "/dev/fd/../fd/1"] {
+            assert!(names_server_stdio(p), "{p}");
+        }
+        struct Gone(std::path::PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Gone(std::env::temp_dir().join(format!("morloc-d15-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&dir.0);
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let link = |name: &str, to: &str| {
+            let p = dir.0.join(name);
+            std::os::unix::fs::symlink(to, &p).unwrap();
+            p
+        };
+        let named = |p: &std::path::Path| names_server_stdio(p.to_str().unwrap());
+        assert!(named(&link("out", "/dev/stdout")), "a link to /dev/stdout");
+        assert!(named(&link("chain", "out")), "a relative link to a link to /dev/stdout");
+        assert!(named(&link("up", "../../proc/self/fd/1")), "a relative link through ..");
+        assert!(named(&link("fds", "/proc/self/fd").join("1")), "a path through a linked directory");
+        assert!(!named(&link("plain", "/tmp")), "a link to an ordinary directory");
+        assert!(!named(&dir.0.join("new-file")), "a file that does not exist yet");
     }
 
     // DAEMON-15
