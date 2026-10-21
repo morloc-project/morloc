@@ -146,18 +146,6 @@ treeify d
                     | g <- groups
                     ]
 
-            -- Validate command groups
-            let ungroupedNames = Set.fromList [v | (_, TermSymbol v) <- Set.toList symbols]
-                groupNames = Set.fromList [exportGroupName g | g <- groups]
-                collisions = Set.intersection (Set.map unEVar ungroupedNames) groupNames
-            -- group names must not collide with ungrouped command names
-            if not (Set.null collisions)
-              then
-                MM.throwSystemError $
-                  "Command group names collide with ungrouped command names:"
-                    <+> list (map pretty (Set.toList collisions))
-              else return ()
-
             -- - store all exported indices in state
             -- - Add the export name to state. Failing to do so here, will lose
             --   the name of terms that are exported but not defined, this leads

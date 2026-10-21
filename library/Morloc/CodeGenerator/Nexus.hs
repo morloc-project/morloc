@@ -3740,6 +3740,29 @@ generate cs rASTs helperRASTs = do
           | (gname, (desc, _)) <- Map.toList exportGroups
           ]
 
+  -- CMD-4: no two commands share a name, and no ungrouped command takes a
+  -- group's.
+  let commandNames =
+        [(fdataSubcommand fd, fdataTermName fd, fdataMid fd) | fd <- fdata]
+          <> [(commandName g, commandTermName g, commandMid g) | g <- gasts]
+  CM.foldM_
+    ( \seen (n, term, i) -> case Map.lookup n seen of
+        Just other
+          | other == term -> MM.throwSourcedError i $
+              squotes (pretty term) <+> "is exported twice; export each term once"
+          | otherwise -> MM.throwSourcedError i $
+              "Two commands are named" <+> squotes (pretty n) <> ":"
+                <+> squotes (pretty other) <+> "and" <+> squotes (pretty term)
+                <> "; rename one with @name"
+        Nothing
+          | Map.member n groupDescs, not (Map.member i indexToGroup) ->
+              MM.throwSourcedError i $
+                "The command" <+> squotes (pretty n) <+> "has the name of a command group"
+          | otherwise -> return (Map.insert n term seen)
+    )
+    Map.empty
+    commandNames
+
   moduleDoc <- MM.gets stateModuleDoc
   moduleEpilogues <- MM.gets stateModuleEpilogues
   unsafeSkipNullCheck <- MM.gets stateUnsafeSkipNullCheck

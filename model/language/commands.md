@@ -19,7 +19,7 @@ form. The build warns, naming it, and builds the other commands.
 
 ### CMD-3 `--* group:` lines in an export list group commands
 Intent: proposed
-Code: deviates (issues/programs.md)
+Code: conforms 2026-10-21
 
 A `--* group: g` line opens group `g`; the following `--*` lines describe it,
 and each export listed after it, until the next group line, is a subcommand

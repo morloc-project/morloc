@@ -1,0 +1,24 @@
+-- Every interface names a command by its name alone (CMD-4), so a build
+-- refuses two commands with one name, within or across groups, and an
+-- ungrouped command named after a group. Commands with distinct names in
+-- groups build and run.
+
+module main
+  ( --* group: math
+    --* Arithmetic
+    f
+  , --* group: text
+    --* Strings
+    g
+  )
+
+import root-py
+
+--' Add one
+f :: Int -> Int
+f x = x + 1
+
+--' Echo a string
+--' @name echo
+g :: Str -> Str
+g x = x

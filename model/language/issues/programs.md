@@ -51,15 +51,12 @@ Reproduced on 0.109.0 unless marked.
   exist. MOD-12 (open) rejects one name from two modules even with equal
   signatures, so a user `|>` cannot be imported beside root-py's; the
   ruling should cover the prelude case.
-- **UNSOUND: a grouped command runs another group's command of the same
-  name.** [reproduced, 2026-10-21] Violates CMD-3 and IFACE-1. Exports `f`
-  (group math, `Int -> Int`) and `g` (group text, `--' @name f`, `Str ->
-  Str`): `text f -h` describes g, but `text f 5` prints 6 (math's f ran)
-  and `text f hi` fails "JSON parse error". Cause: morloc-nexus/src/
-  phase2.rs:217-221 picks the manifest command by name and ignores the
-  group. A duplicate `@name` within one group (`@name version` beside an
-  export `version`) builds silently and one command is unreachable; CMD-4
-  should say names are unique within a group. Repro: /work/plans/model-audit-2026-10-21/repro/G/cmd/c3.loc, c1.
+- **Two commands with one name.** [2026-10-21] CMD-4 is open. The build
+  now refuses two commands with one name, within or across groups, and an
+  ungrouped command named after a group, since the daemon's `/call/<cmd>`,
+  MCP tools and the CLI each find a command by name alone (IFACE-1). This
+  is CMD-4 (a) widened to the whole program; the other answer, names
+  scoped by group, needs the serving interfaces to carry the group.
 - **`@stdin` is accepted on `?Str`.** [reproduced, 2026-10-21] Violates
   CLI-3. It builds; the value can never be null (`f null` -> "check.path:
   r requires path 'null' to exist"); omitted it is `"/dev/stdin"`. CLI-3
