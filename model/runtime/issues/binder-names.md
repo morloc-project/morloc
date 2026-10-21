@@ -21,6 +21,18 @@ may use.
   `m<N>`). A user `struct Schema` is a redefinition, a user `std::string
   g_tmpdir` a conflicting declaration, and a user `foreign_call` an
   ambiguous overload.
+- [read] C++: binder templates call their own helpers unqualified with
+  dependent arguments (`to_voidstar`, `from_voidstar`, `to_vector`,
+  `wrap_field`), so argument-dependent lookup also finds a user's global
+  function of that name; a forwarding template `template<class... A> auto
+  to_vector(A&&...)` is a better match and is called silently.
+- [read] C++, R, Python: libmorloc exports C symbols with unprefixed names
+  (`pack`, `hex`, `quoted`, `shinit`, `remote_call`, `pool_main`,
+  `daemon_run`, ...). C linkage ignores namespaces, so a user `extern "C"`
+  declaration of one with another signature is an error, and a user library
+  exporting one is picked by the pool's calls through symbol interposition.
+  Needs a ruling: rename the exports to a reserved prefix (an ABI change) or
+  list them as reserved names.
 - [read] Manifold locals and sourced names share a frame: a manifold's
   formals and temporaries are `n<N>`, `s<N>`, `helper<N>` (Grammars/Common.hs
   argNamer and friends), and R, Python and Rust call sourced functions by
