@@ -1446,11 +1446,10 @@ PROPAGATE_ERROR(errmsg)|]
                   if debugMode
                     then "throw std::runtime_error(" <> e <> ");"
                     else "throw std::runtime_error(" <> e <> " + " <> lit <> ");"
-                -- A closed pipe and an infrastructure failure keep their
-                -- class through every frame, so no outer @try takes them.
+                -- A closed pipe keeps its class through every frame, so no
+                -- outer @try takes it.
                 catchBody = vsep
                   [ block 4 "catch (const MorlocPipeClosed&)" "throw;"
-                  , block 4 "catch (const MorlocInfraError&)" "throw;"
                   , block 4 "catch (const std::exception& e)"
                       (appendFrame frameLit "std::string(e.what())")
                   , block 4 "catch (const char* e)"

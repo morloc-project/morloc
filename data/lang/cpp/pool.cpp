@@ -75,28 +75,14 @@ public:
       throw MorlocException(errmsg_buffer); \
     }
 
-// A failure of the machinery that carries values between pools: IPC, packet
-// construction and decode, shared-memory resolution. None of these are
-// attributable to user data, paths or foreign-function behavior, and none
-// leave the pool able to continue, so they must not be interceptable by
-// @try. Deliberately NOT a MorlocException subclass, for the same reason
-// MorlocPipeClosed is not: `@try` lets it pass.
-//
-// The top-level dispatch turns this into an abort rather than a fail packet.
-// A caller in another pool then sees its socket read fail, which is itself an
-// infrastructure failure there, so fatality propagates across pools without
-// the fail packet needing to carry a classification.
-class MorlocInfraError : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
-
+// PANIC-5: a failure of the machinery that carries values between pools
+// (IPC, packet construction and decode, shared-memory resolution) ends the
+// pool where it happens, so no catch in user code or in `@try` can hold it.
 #define PROPAGATE_INFRA_ERROR(errmsg) \
     if(errmsg != NULL) { \
-      char errmsg_buffer[MAX_ERRMSG_SIZE] = { 0 }; \
-      snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error C++ pool (%s:%d in %s):\n%s" , __FILE__, __LINE__, __func__, errmsg); \
+      std::string infra_msg_(errmsg); \
       free(errmsg); \
-      throw MorlocInfraError(errmsg_buffer); \
+      MLC_INTERNAL_ABORT(infra_msg_.c_str()); \
     }
 
 // Terminal helper for morloc-compiler / runtime invariant violations
@@ -281,7 +267,7 @@ static void _release_packet(const uint8_t* packet, bool owned) {
             + sizeof(morloc_packet_header_t) + hdr->offset);
         char* resolve_err = NULL;
         void* voidstar = rel2abs(relptr, &resolve_err);
-        if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+        PROPAGATE_INFRA_ERROR(resolve_err)
         if (voidstar) {
             _shm_tracker_release_one((absptr_t)voidstar);
         }
@@ -322,9 +308,8 @@ uint8_t* _put_value(const T& value, Schema* schema, bool self_contained = false)
         mlc::ArrowTable& tbl = const_cast<mlc::ArrowTable&>(value);
         relptr_t relptr = tbl.move_to_shm(schema);
 
+        void* shm_ptr = rel2abs_cpp(relptr);
         char* err = nullptr;
-        void* shm_ptr = rel2abs(relptr, &err);
-        if (err) { free(err); }
 
         uint8_t* packet = nullptr;
         if (self_contained) {
@@ -357,10 +342,7 @@ uint8_t* _put_value(const T& value, Schema* schema, bool self_contained = false)
             uint8_t* packet = self_contained
                 ? make_inline_data_packet(voidstar, schema, &errmsg)
                 : make_data_packet_auto(voidstar, relptr, schema, &errmsg);
-            if (errmsg) {
-                shfree_cpp(voidstar);
-                PROPAGATE_INFRA_ERROR(errmsg);
-            }
+            PROPAGATE_INFRA_ERROR(errmsg);
 
             const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
             if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
@@ -641,13 +623,17 @@ std::string _mlc_show(const T& value, Schema* schema) {
 
 // MorlocPipeClosed signals that the downstream consumer closed @stdout /
 // @stderr (a broken pipe). It is an <IO> condition, NOT a user-recoverable
-// <Err>, so it is deliberately NOT a subclass of MorlocException: `@try`
-// lets it propagate rather than routing it into an `Err`. The pool's
-// top-level dispatch converts it to a distinguished fail packet (the nexus,
-// which owns fd 1 and already saw the EPIPE, decides the exit status).
-class MorlocPipeClosed : public std::runtime_error {
+// <Err>: `@try` lets it propagate, and it is not a std::exception, so a
+// sourced `catch (const std::exception&)` does not hold it either
+// (PANIC-13). The pool's top-level dispatch converts it to a distinguished
+// fail packet (the nexus, which owns fd 1 and already saw the EPIPE,
+// decides the exit status).
+class MorlocPipeClosed {
 public:
-    using std::runtime_error::runtime_error;
+    explicit MorlocPipeClosed(std::string msg) : msg_(std::move(msg)) {}
+    const char* what() const noexcept { return msg_.c_str(); }
+private:
+    std::string msg_;
 };
 
 
@@ -752,11 +738,10 @@ T _mlc_throw_as(const std::string& msg) {
 // value, `err` the message; codegen supplies both because only it knows how
 // this Try is represented in C++.
 //
-// MorlocPipeClosed and MorlocInfraError are re-thrown ahead of the broad
-// catch. A broken pipe is an <IO> condition and an infrastructure failure is
-// not attributable to user code, so neither is a user-recoverable error and
-// both must escape rather than being turned into an Err arm. All other
-// std::exceptions (@throw, foreign helpers that raise) become Err.
+// MorlocPipeClosed is re-thrown ahead of the broad catch: a broken pipe is
+// an <IO> condition, not a user-recoverable error, so it escapes rather than
+// becoming an Err arm. All other exceptions (@throw, foreign helpers that
+// raise) become Err.
 // The return type is deduced from `err` rather than `ok`: a Unit-returning
 // intrinsic's body is `void`, so `ok(body())` is ill-formed as a deduction
 // context even though the void branch never evaluates it.
@@ -774,7 +759,6 @@ auto _mlc_try(MlcBody&& body, MlcOk&& ok, MlcErr&& err) -> decltype(err(std::str
         }
     }
     catch (const MorlocPipeClosed&) { mlc::frame_restore(saved); throw; }
-    catch (const MorlocInfraError&) { mlc::frame_restore(saved); throw; }
     MLC_CATCH_FORCED_UNWIND(saved)
     catch (const std::exception& e) {
         std::string msg(e.what());
@@ -796,7 +780,6 @@ auto _mlc_try(MlcBody&& body, MlcOk&& ok, MlcErr&& err) -> decltype(err(std::str
         throw;
     }
     catch (const MorlocPipeClosed&) { mlc::frame_restore(saved); throw; }
-    catch (const MorlocInfraError&) { mlc::frame_restore(saved); throw; }
     MLC_CATCH_FORCED_UNWIND(saved)
     catch (const std::exception& e) {
         std::string msg(e.what());
@@ -1165,8 +1148,8 @@ mlc::Unit _mlc_replay(Schema* schema, int64_t handle, F fn) {
 // list of argument packets to the pool listening on `socket_filename`. Used by
 // the variadic `foreign_call` below and by defunctionalized-closure reflection,
 // where the captured-argument count is only known at runtime. The caller owns
-// `args_array`; on an error this throws (via PROPAGATE_ERROR), so the caller's
-// container unwinds normally.
+// `args_array`. A failure the callee reports is thrown, so the caller's
+// container unwinds; a failure to reach the callee ends the pool (PANIC-5).
 uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t** args_array, size_t nargs) {
     char* errmsg = NULL;
 
@@ -1205,7 +1188,7 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
             size_t relptr = *(size_t*)(result + res_header->offset + sizeof(morloc_packet_header_t));
             char* resolve_err = NULL;
             void* res_voidstar = rel2abs(relptr, &resolve_err);
-            if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+            PROPAGATE_INFRA_ERROR(resolve_err)
             if (res_voidstar) {
                 // The callee took a reference before sending; it is ours
                 // now. Inherit it rather than adding another.
@@ -1560,12 +1543,6 @@ uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
         // Broken pipe: a distinguished, non-abort failure. The nexus owns
         // fd 1 and decides the pipeline exit status.
         return make_pipe_closed_packet(e.what());
-    } catch (const MorlocInfraError& e) {
-        // Not recoverable and not the user's doing. Aborting rather than
-        // returning a fail packet is what keeps it fatal across pools: a
-        // caller's socket read fails, which it classifies as infrastructure
-        // in turn, so no fail packet has to carry the classification.
-        MLC_INTERNAL_ABORT(e.what());
     } catch (const std::exception& e) {
         return make_fail_packet_with_trace(e.what(), saved);
     } catch (const char* e) {
@@ -1599,12 +1576,6 @@ uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
         // Broken pipe: a distinguished, non-abort failure. The nexus owns
         // fd 1 and decides the pipeline exit status.
         return make_pipe_closed_packet(e.what());
-    } catch (const MorlocInfraError& e) {
-        // Not recoverable and not the user's doing. Aborting rather than
-        // returning a fail packet is what keeps it fatal across pools: a
-        // caller's socket read fails, which it classifies as infrastructure
-        // in turn, so no fail packet has to carry the classification.
-        MLC_INTERNAL_ABORT(e.what());
     } catch (const std::exception& e) {
         return make_fail_packet_with_trace(e.what(), saved);
     } catch (const char* e) {

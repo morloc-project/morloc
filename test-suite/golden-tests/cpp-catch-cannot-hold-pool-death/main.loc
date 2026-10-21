@@ -1,0 +1,17 @@
+-- A pool's death is not an error a sourced catch can hold (PANIC-5): a C++
+-- function that catches std::exception around a callback into a Python
+-- pool that dies still fails the run.
+
+module main (run)
+
+import root-cpp
+import root-py
+
+source Cpp from "s.hpp" ("safeApply")
+source Py from "p.py" ("die")
+
+safeApply :: (Int -> Int) -> Int -> Int
+die :: Int -> Int
+
+run :: Int -> Int
+run x = safeApply die x

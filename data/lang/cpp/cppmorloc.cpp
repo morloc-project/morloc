@@ -215,34 +215,31 @@ extern "C" const char* mlc_current_frame(size_t* len) {
     _exit(70);
 }
 
+[[noreturn]] void mlc_defect_take(char* errmsg) {
+    std::string msg(errmsg ? errmsg : "a runtime call failed without giving a reason");
+    free(errmsg);
+    mlc_runtime_defect(msg);
+}
+
 // PANIC-13: both resolve pointers into blocks this pool allocated.
 absptr_t rel2abs_cpp(relptr_t ptr){
     char* errmsg = NULL;
     absptr_t absptr = rel2abs(ptr, &errmsg);
-    if(errmsg != NULL){
-        std::string msg(errmsg); free(errmsg);
-        mlc_runtime_defect(msg);
-    }
+    if(errmsg != NULL) mlc_defect_take(errmsg);
     return absptr;
 }
 
 relptr_t abs2rel_cpp(absptr_t ptr){
     char* errmsg = NULL;
     relptr_t relptr = abs2rel(ptr, &errmsg);
-    if(errmsg != NULL){
-        std::string msg(errmsg); free(errmsg);
-        mlc_runtime_defect(msg);
-    }
+    if(errmsg != NULL) mlc_defect_take(errmsg);
     return relptr;
 }
 
 bool shfree_cpp(absptr_t ptr){
     char* errmsg = NULL;
     bool success = shfree(ptr, &errmsg);
-    if(errmsg != NULL){
-        std::string msg(errmsg); free(errmsg);
-        throw std::runtime_error(msg);
-    }
+    if(errmsg != NULL) mlc_defect_take(errmsg);
     return success;
 }
 

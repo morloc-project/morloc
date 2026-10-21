@@ -36,17 +36,19 @@ failure (a fail packet). Several sites are misclassified.
 - **Top-level `Err` keyed by arm name.** Gap: morloc-nexus/src/dispatch.rs
   `die_on_top_level_err` fails the run for any variant arm named `Err`, not
   only `Try`. Open: should only `Try`'s `Err` fail the run?
-- **Sourced C++ code catches morloc's infrastructure failures; the run
-  then exits 0.** [reproduced 3/3, 2026-10-21] Violates PANIC-5,
-  PANIC-13 and DAEMON-14. `MorlocInfraError` and `MorlocPipeClosed`
-  (data/lang/cpp/pool.cpp:89, :648) derive from `std::runtime_error`.
-  `safeApply f x = try { return f(x); } catch (const std::exception&)
-  { return -1; }` (C++), `die x = os._exit(9)` (py), `run x = safeApply
-  die x`: `run 3` reports the Python pool ended, prints `-1`, exits 0. The
-  nexus also does not turn a recorded pool death into a failed exit when
-  the call returned. Exiting at the site, as R does, closes it (not
-  deriving from std::exception still leaves `catch (...)`). Repro:
-  /work/plans/model-audit-2026-10-21/repro/I2/p5/.
+- **A closed pipe can still be held by a catch-all in user code.**
+  [read, 2026-10-21] PANIC-13: no catch holds a closed pipe. C++
+  `MorlocPipeClosed` is no longer a `std::exception`, but a sourced
+  `catch (...)` still holds it, and a Rust `catch_unwind` holds the
+  `MorlocPipeClosed` payload. Closing it needs a sticky thread-local flag
+  set at the throw sites, checked after each sourced call returns and at
+  each dispatch's end (reset only at the outermost dispatch), not an exit,
+  since the pool survives a closed pipe.
+- **Other C++ runtime failures still throw `std::runtime_error`.** [read,
+  2026-10-21] A relptr that does not resolve with a reason
+  (cppmorloc.hpp:306, :319), `parse_schema_cpp`, `shmalloc_cpp` and
+  `frame_init`'s `bad_alloc` throw catchable exceptions; whether running
+  out of shared memory is recoverable needs a ruling (PANIC-5, PANIC-13).
 - **A panic during a user panic's unwinding in a Rust pool aborts with
   SIGABRT.** [reproduced, 2026-10-21] Violates PANIC-1 (exits 70). A
   source `twice` whose local's `Drop` panics after `panic!("first")`
@@ -79,3 +81,15 @@ failure (a fail packet). Several sites are misclassified.
     `extern "C"` callback inside a runtime catch scope (e.g. Arrow
     `get_next` inside `decode`, arrow_ffi.rs:143) aborts unless wrapped in
     `outside_scope`; no source rule checks the wrapping.
+- **A run exits 0 after a pool died during its call.** [reproduced,
+  2026-10-21] Violates DAEMON-14 (a one-shot run exits as failed). When a
+  catch in user code holds the failure a dead pool caused -- a Python
+  `except BaseException:` or bare `except:` around a callback, a Rust
+  `catch_unwind` -- the call returns a value, the nexus logs the pool's
+  death and exits 0. (C++ no longer: its infrastructure failures end the
+  C++ pool at the site.) Failing the run once the nexus reaps a pool during
+  the call would close it for every language at once.
+- **Untested C++ changes.** [read, 2026-10-21] No test covers
+  `MorlocPipeClosed` not being a `std::exception` (a sourced
+  `catch (const std::exception&)` around an `@stdout` write into a closed
+  pipe) or a failed `shfree_cpp` ending the pool.

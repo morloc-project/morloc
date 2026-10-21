@@ -293,6 +293,8 @@ absptr_t rel2abs_cpp(relptr_t ptr);
 relptr_t abs2rel_cpp(absptr_t ptr);
 // A defect in this runtime: report it and end the pool (PANIC-5).
 [[noreturn]] void mlc_runtime_defect(const std::string& msg);
+// Ends the pool with the reason a runtime call gave, and frees it.
+[[noreturn]] void mlc_defect_take(char* errmsg);
 
 // Resolve `relptr` to `extent` readable bytes in `space`, throwing when the
 // region is not there (see resolve_region in morloc.h).
