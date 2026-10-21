@@ -4,7 +4,7 @@ Tail calls, recursion depth, and recursion across languages. Prefix: RECUR.
 
 ### RECUR-1 Functions may be recursive and mutually recursive
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A term may refer to itself, and terms may refer to each other in a cycle.
 The recursion is carried out in the language that realizes the terms.
@@ -20,7 +20,7 @@ recursion runs in constant stack space at any depth. Measured by DEPTH-3.
 
 ### RECUR-3 A host's own recursion limit is the host's, not morloc's
 Intent: ruled 2026-10-05
-Code: unaudited
+Code: conforms 2026-10-21
 
 Non-tail recursion in Python or R that reaches that language's own
 recursion limit fails as the same recursion written natively would. That

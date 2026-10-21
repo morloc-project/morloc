@@ -6,7 +6,7 @@ Evaluation order, strictness, sharing of named values, and what may be reordered
 
 ### EVAL-1 Pure application is strict
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A pure argument expression is evaluated once, at the application, however
 many times the function uses it. A suspension argument is passed as the
@@ -27,7 +27,7 @@ two pure aborts is reported, is unspecified.
 
 ### EVAL-3 A named value is computed at most once per evaluation of its scope
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A `where` or `let` binding, a pure `let` in a `do` block, or a top-level
 constant is computed at most once each time its scope is evaluated, at the
@@ -37,7 +37,7 @@ and passed to each.
 
 ### EVAL-4 Placement respects `@try` regions and effect barriers
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A value read only inside a `@try` argument is computed inside it, so its
 failure is that `@try`'s `Err`. A pure `let` in a `do` block is never

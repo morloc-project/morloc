@@ -13,7 +13,7 @@ a default.
 
 ### COST-1 The realizer minimizes estimated time
 Intent: proposed
-Code: deviates model/compiler/issues/realization.md
+Code: deviates (../compiler/issues/realization.md)
 
 Of the placements REAL-2 allows, the realizer chooses one of least total
 cost, the sum of COST-2 over calls and COST-3 over crossings, in seconds.
@@ -22,7 +22,7 @@ language can realize is excluded, never priced.
 
 ### COST-2 A call costs its language's coefficient times its runtime, plus the language's call overhead
 Intent: proposed
-Code: unaudited
+Code: deviates (../compiler/issues/realization.md)
 
     call(f, L) = coeff(L) * runtime(f) + overhead(L)
 
@@ -33,7 +33,7 @@ nothing. A function defined in morloc costs the sum of its body.
 
 ### COST-3 A crossing costs a latency plus per-element and per-byte terms
 Intent: proposed
-Code: unaudited
+Code: deviates (../compiler/issues/realization.md)
 
 A value that a call in language A produces and a call in language B
 consumes costs, when A and B are in different pools,
@@ -47,7 +47,7 @@ wiresize come from COST-8.
 
 ### COST-4 A callback costs its body times its call count
 Intent: proposed
-Code: unaudited
+Code: deviates (../compiler/issues/realization.md)
 
 A function value passed to a function `h` costs, per call of `h`, its call
 count times the cost of one call of it: its own call (COST-2) and every
@@ -61,7 +61,7 @@ morloc the count comes from its body, never from a default.
 
 ### COST-5 `@wiresize` and `@dimension` state the size of a value
 Intent: proposed
-Code: unaudited
+Code: deviates (../compiler/issues/realization.md)
 
 `@wiresize <bytes>` states a value's expected size on the wire.
 `@dimension <f1> ... <fk>` states its shape: factors whose product is its
@@ -75,7 +75,7 @@ independent.
 
 ### COST-6 `@calls` and `@runtime` state counts and times
 Intent: proposed
-Code: unaudited
+Code: deviates (../compiler/issues/realization.md)
 
 Above a function-typed argument, `@calls <formula>` states how many times
 the function calls it, and `@runtime <name>` binds the name to that
@@ -85,7 +85,7 @@ term defined in morloc is an error: its cost is its body's.
 
 ### COST-7 A formula is arithmetic over a signature's names, with units
 Intent: proposed
-Code: unaudited
+Code: deviates (../compiler/issues/realization.md)
 
 A formula has numbers with units, names, `+ - * / ^`, `log` (natural),
 `log2` and parentheses. Units: `B KB MB GB TB` (powers of 1000), `KiB MiB
@@ -102,7 +102,7 @@ as the default (COST-9) for that position.
 
 ### COST-8 A value's size comes from what made it
 Intent: proposed
-Code: unaudited
+Code: deviates (../compiler/issues/realization.md)
 
 The size of a value at an edge is, first that applies:
 
@@ -122,7 +122,7 @@ different sizes for one position are an error.
 
 ### COST-9 Defaults follow the structure of the type
 Intent: proposed
-Code: unaudited
+Code: deviates (../compiler/issues/realization.md)
 
 A fixed-width value is its width. A variable-width leaf (`Str`, a byte
 vector) is 4 KB. A list is n elements times its element, with n = 10. A
@@ -136,7 +136,7 @@ An unbound name is 10.
 
 ### COST-10 Coefficients come from the performance model
 Intent: proposed
-Code: unaudited
+Code: deviates (../compiler/issues/realization.md)
 
 `latency`, `slope_e` and `slope_b` per pair of pools, and `coeff` and
 `overhead` per language, are one table shipped with the compiler, filled
@@ -145,7 +145,7 @@ the only place they are stated.
 
 ### COST-11 Every place the realizer prices an edge prices it the same way
 Intent: proposed
-Code: deviates model/compiler/issues/realization.md
+Code: deviates (../compiler/issues/realization.md)
 
 Choosing and scoring use one edge cost (COST-3). A use of a let-bound value
 or of a parameter is priced from the language the value lives in to the

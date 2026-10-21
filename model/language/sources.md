@@ -4,7 +4,7 @@
 
 ### SRC-1 A sourced name is a foreign symbol, checked against the language's name patterns
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 The name in a `source` declaration must match the language's identifier or
 operator pattern. Anything else, such as raw code (`lambda x: x`), is
@@ -13,7 +13,7 @@ compiler.
 
 ### SRC-2 `as` and `--' name:` rename a sourced term, and are equivalent
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 The parenthesized form with `as` and the block form with a `--' name:`
 docstring declare the same thing. Without either, the morloc name is the
@@ -21,7 +21,7 @@ foreign name.
 
 ### SRC-3 A sourced signature is a claim the compiler does not check
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 The general type of a sourced term, including its effect row, is the
 author's assertion about the foreign code. Effect rows are required there and
@@ -47,7 +47,7 @@ language allows; or (b) the failure is a run-time error naming the term.
 
 ### SRC-6 A source cannot take a name the pool reserves for itself
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A language reserves name prefixes for what its pool defines (lang.yaml
 `ldReservedPrefixes`: Python `__mm_`, `__morloc`; R `.__mm_`, `.__morloc`,

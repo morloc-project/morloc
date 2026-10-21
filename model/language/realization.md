@@ -4,7 +4,7 @@ Choosing an implementation and a language for each call; implementations are int
 
 ### REAL-1 Implementations of one term are interchangeable
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/values.md)
 
 A term with several implementations, in one language or several, gives the
 same value whichever is chosen. Declaring them under one name is the
@@ -12,7 +12,7 @@ author's claim that this holds. The choice changes cost, never meaning.
 
 ### REAL-2 The compiler chooses an implementation and a language for each call
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A term defined in morloc has no fixed language; it is realized in whatever
 language its calls need. The choice is the same each time the same program
@@ -20,7 +20,7 @@ is built by the same compiler.
 
 ### REAL-3 A call with no realizable implementation is rejected at build
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/diagnostics-docs.md)
 
 If no implementation of a term can be used where it is called, for example
 because a type it needs has no native mapping in that language, the build

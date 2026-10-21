@@ -4,7 +4,7 @@ Which exports become commands, and their names. Prefix: CMD.
 
 ### CMD-1 Every exported term is a command named after the term
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 Each term a program's main module exports becomes a subcommand. `--' @name n`
 on its signature names the command `n` instead. The first line of its
@@ -12,14 +12,14 @@ docstring is its summary, and the module's docstring describes the program.
 
 ### CMD-2 A generic export is not a command
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 An exported term whose type still has a type variable has no command line
 form. The build warns, naming it, and builds the other commands.
 
 ### CMD-3 `--* group:` lines in an export list group commands
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/programs.md)
 
 A `--* group: g` line opens group `g`; the following `--*` lines describe it,
 and each export listed after it, until the next group line, is a subcommand

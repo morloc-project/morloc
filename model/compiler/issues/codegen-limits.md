@@ -74,3 +74,24 @@ Generated code that a language's own tools refuse.
   `data Tag a = Tag Int` used as `Tag Color`, Color an argument-free `data`
   reached nowhere else, the C++ pool renders `Tag<Color>` without declaring
   Color. Not reproduced.
+- **Python and C++ write a `&&`/`||` chain as nested conditionals; a
+  Python chain of ~100 operands fails to load.** [reproduced, 2026-10-21]
+  Violates EMIT-4 and EMIT-1. `noneOf x = x != 0 && x != 1 && ... && x !=
+  119` (root-py) builds; `noneOf 500` fails `IndentationError: too many
+  levels of indentation` and the pool dies. Python and C++ nest one `if`
+  per operand; R and Rust write the chain flat with each operand a
+  function. Cause [read]: Translator/Imperative.hs `shortCircuit` writes
+  the operator only when the second operand has no prior statements; in
+  Python and C++ `x != k` (root `(!=) x y = not (x == y)`) arrives inlined
+  with statements rather than as the operand manifold Serialize.hs keeps.
+  Why only these two languages was not traced. spec-emit-4-1 misses it:
+  its `x > -k`/`x == k` operands do not trigger it. Repro: /work/plans/model-audit-2026-10-21/repro/H/chain/.
+- **Python gives every named function a per-call `try`/`except` that
+  re-raises as `RuntimeError`.** [reproduced in generated code,
+  2026-10-21] Violates EMIT-3. `fib`'s native recursive entry `__mm_1780`
+  wraps its body in `try: ... except Exception as e: raise
+  RuntimeError(f"{e!s}\n  at fib [py] ...")`, so the exception type is lost
+  and a failure at depth d builds O(d^2) message characters. Source:
+  data/lang/py/lang.yaml `ldErrorWrapOpen`/`ldErrorWrapClose`, applied by
+  Grammars/Translator/Generic.hs `lcMakeFunction` `wrapError`.
+  spec-emit-3-1 covers only C++ and Rust. Repro: /work/plans/model-audit-2026-10-21/repro/H/rec/.

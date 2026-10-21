@@ -33,3 +33,40 @@
   generated function prints nothing. With the frame stack (STATE-5) an
   inlined named call could push its label around its inlined statements
   and need no function of its own.
+- **Conflicting native-form error mislabels its snippets.** [reproduced,
+  2026-10-21] Module m: `type Py => T = "int"`; main: `type Py => T =
+  "float"`. The header says `main.loc:4:1` above m.loc's line, then "and
+  here:" shows main.loc's line twice. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/nat/n6.
+- **`-hh` drops the blank line between a docstring's first line and its
+  detail.** [reproduced, 2026-10-21] The detail prints directly under the
+  first line.
+- **REAL-3's rejection names neither the term nor a location.**
+  [reproduced, 2026-10-21] Violates REAL-3. `type Foo; type Py => Foo =
+  "dict"`, Cpp-sourced `getv :: Foo -> Int`, `g x = getv x` fails "Failed
+  to infer concrete universal type for lang cpp for type Foo ... missing a
+  language-specific type definition", naming no term. Repro:
+  /work/plans/model-audit-2026-10-21/repro/F/real/r3.loc.
+- **An R pool load failure is printed twice.** [reproduced, 2026-10-21]
+  A sourced R file assigning `.__morloc` prints "failed to load pool
+  sources: cannot change value of locked binding" bare and again after
+  "Error: run failed". Repro: /work/plans/model-audit-2026-10-21/repro/F/src/s6R.loc.
+- **The compiler dies with an uncaught exception on three inputs.**
+  [reproduced, 2026-10-21] Violates DIAG-1 and DIAG-2.
+  - A non-UTF-8 source: "morloc: bin.loc: hGetContents: invalid argument
+    (cannot decode byte sequence ...)".
+  - A malformed `package.yaml`: `morloc: LoadSettingsException
+    "./package.yaml" (InvalidYaml (Just (YamlParseException ...)))`.
+  - `import nosuchmod`: auto-install runs `git clone
+    https://github.com/morloclib/nosuchmod`, then "morloc: callProcess: git
+    ... (exit 128): failed". A typo in an import triggers a network fetch
+    and an unlocated process exception.
+  Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/bin.loc, nomod.loc, cfg/.
+- **Wrong or internal wording.** [reproduced, 2026-10-21] `@render` on an
+  argument is reported as `@with` (Frontend/Desugar.hs:1101-1110
+  `rejectWithHere`). `--' @literal` is not warned deprecated while
+  `literal: true` is. A duplicate definition (`f x = x` twice) reports
+  "Unification error: Error in value checker: Cannot check beyond source
+  boundary". Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/mis2.loc, lit*.loc, dupdef.loc.
+- **A literal `-0.0` loses its sign in the nexus.** [reproduced,
+  2026-10-21] `c = -0.0` is stored as `"value":"0.0"` in the manifest and
+  prints `0`; the same value from a CSV cell prints `-0`.

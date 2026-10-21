@@ -4,7 +4,7 @@ What a signature declares: one term with many implementations, terms without sig
 
 ### SIG-1 A signature declares one term
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `f :: T` declares the term `f` with general type `T`. Every morloc
 definition of `f` and every sourced function named `f` in scope is an
@@ -12,7 +12,7 @@ implementation of that one term, and each must have type `T`.
 
 ### SIG-2 `=` states substitutability, not binding
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `f = e1` and `f = e2` together state that `e1` and `e2` may each stand for
 `f`. A second definition adds an alternative; it never shadows the first.
@@ -20,7 +20,7 @@ Which alternative a program runs is chosen by realization (realization.md).
 
 ### SIG-3 Definitions whose literal values disagree are a compile error
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 Two definitions of one term that reduce to different literals, or to
 containers of different sizes, are rejected. Disagreement the compiler

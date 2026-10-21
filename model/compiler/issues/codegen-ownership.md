@@ -113,3 +113,14 @@ same name sees what was taken.
   the let with the same index in the other. That is wrong only if the
   twins' let indices differ; no golden showed it, and the ownership check
   reported nothing. C++ moves (OWN-2) are planned per segment.
+- **The C++ OWN-1 check runs only under `MORLOC_CHECK_OWNERSHIP`.**
+  [read, 2026-10-21] Against compiler/README.md (fail loudly).
+  Pools/CAbi/Members/Cpp.hs:540 reads the variable; only
+  GoldenMakefileTests.hs sets it, so a user build compiles a C++ pool that
+  reads a moved-from value. Rust relies on rustc, whose error does not
+  name OWN-1. Cost of enabling it by default is unmeasured.
+- **Do OWN-1..7 bind C++?** [read, 2026-10-21] ownership.md's preamble
+  and codegen-copies.md say C++ copies more than OWN-1..7 allow, yet the
+  items name no language, are marked conforms, and Cpp.hs cites OWN-2/3/5/7.
+  Either each item says it is Rust-only, or C++ is `deviates` against
+  codegen-copies.md.

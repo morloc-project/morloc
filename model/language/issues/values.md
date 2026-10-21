@@ -48,3 +48,97 @@ on 0.109.0 unless marked.
   (library/Morloc/Frontend/Valuecheck.hs, `groundCheck`), so a binding whose
   only definition is a parameter counts as ungrounded. Spec gap: no item
   says what a binding may name, and `typecheck` and `make` disagree.
+- **NEWT-4, output side: an unsupported native form crashes at run time.**
+  [reproduced, 2026-10-21] `newtype Path = Str; type Py => Path =
+  "pathlib.Path"`, Py `mk :: Str -> Path` returning `pathlib.Path(s)`, Cpp
+  caller `u s = unpack (mk s)`: builds with no warning; running `u
+  notes.txt` fails "Expected str or bytes for MORLOC_STRING, but got
+  PosixPath (pymorloc.c:892)". Repro: /work/plans/model-audit-2026-10-21/repro/B/t/n7/c2.loc.
+- **An unmapped record passed to a sourced C++ function does not compile.**
+  [reproduced, 2026-10-21] Violates NATIVE-4; contradicts NATIVE-3.
+  `record P where x :: Int; y :: Real`, no `record Cpp =>`, sourced
+  `getx :: P -> Int` (`template <class T> int getx(const T& p)`),
+  `f p = getx p`: g++ fails "pool.cpp:137: 'P' was not declared in this
+  scope". With no sourced function (`f p = .x p`) the same record builds
+  and runs in C++ and Rust, so a struct is generated on one path only,
+  though NATIVE-3 (ruled) requires a user struct. Either reject naming P
+  and Cpp, or always generate (#66). Repro: /work/plans/model-audit-2026-10-21/repro/B/t/nat/b.loc, a.loc, c.loc.
+- **A Python record class form is accepted and ignored.** [reproduced,
+  2026-10-21] Gap in NATIVE-5 (open). `record Py => P = "MyCls"` builds;
+  the Python function receives a `dict`. No candidate answer describes a
+  silent drop. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/nat/n5.loc.
+- **Out-of-range list index gives a wrong value in C++ and R.**
+  [reproduced, 2026-10-21] Violates COLL-3 (same result in every language);
+  every COLL-4 candidate excludes a silent wrong value. With a pool-computed
+  list (`ir xs = (.[5] (incR xs)) + 1.0`): R prints `"nan"` for `[1,2,3]`,
+  `"NA"` for a `[Str]`, and `.[-5]` on 3 elements gives the wrong element
+  (R drop-index); an `[Int]` fails "Cannot pack NA or NaN into MORLOC_INT".
+  C++ `.[5]` on 3 elements returns garbage (`1`); `.[-1]` on `[]` is
+  SIGSEGV. Python and the nexus raise "index out of range"; Rust throws.
+  Cause: root-cpp core.hpp:72-77 `morloc_at` has no bound check; root-r
+  R/core.R:207-216 adds `length(xs)` and indexes `xs[i + 1]`. Repro:
+  /work/plans/model-audit-2026-10-21/repro/C/coll/i-r.loc, /work/plans/model-audit-2026-10-21/repro/C/num/get-cpp.loc.
+- **`size` of a `Str` counts code points in Python and R, bytes in C++ and
+  Rust.** [reproduced, 2026-10-21] BASE-5 is open, but the languages
+  disagree today (COLL-3). `slen s = size s` on U+00E9: 1 in py and r, 2 in
+  cpp and rust. Repro: /work/plans/model-audit-2026-10-21/repro/C/num/, /work/plans/model-audit-2026-10-21/repro/C/lit/nul.loc.
+- **R drops `Null` values from a `Map Str ?v`.** [reproduced, 2026-10-21]
+  Violates OPT-1. `optmap xs = pack xs` (`[(Str, ?Int)] -> Map Str ?Int`,
+  map-r) on `[["b",null],["a",2]]` prints `[["a",2]]`; py and cpp keep both
+  keys. Cause: map-r R/map.R:10-16 and :30-36 assign `result[[k]] <- NULL`,
+  which deletes the key.
+- **C++ realizes `?(?T)` as a nested `std::optional`.** [reproduced,
+  2026-10-21] Violates OPT-2 and OPT-4. A sourced
+  `cnest :: ?(?Int) -> Str` written as `std::string cnest(const
+  std::optional<int>&)` fails to compile: the pool passes
+  `std::optional<std::optional<int>>`. Python and R collapse. Repro:
+  /work/plans/model-audit-2026-10-21/repro/C/opt/n.loc. Related: tables-tensors.md `?(?Int)` column.
+- **NUM-3's text is stale.** [reproduced, 2026-10-21] NUM-3 (ruled
+  2026-10-04) says R holds `I64`/`U64` as doubles exact below 2^53; the
+  2026-10-16 ruling and the code use bit64 `integer64` (`cI64 5` has class
+  integer64; I64 9007199254740993 round-trips; U64 2^64-1 fails "does not
+  fit in R's integer64"). That ruling also makes `[U8]` an R `raw` and
+  truncates fractional doubles at integer slots; no item records either.
+  Needs NUM-3 rewritten from the newer ruling.
+- **Number rules with no item.** [reproduced, 2026-10-21] Gaps in
+  numbers.md.
+  - Real division by zero: `1.0 / 0.0` is `inf` in cpp, r and rust, an
+    error "float division by zero" in py (likewise `//`). Candidates: IEEE
+    everywhere; failure everywhere; stated per language.
+  - Real `%` is floored in all four (`-7.0 % 2.0` is `1`) but in no item.
+  - `x :: Int; x = 3000000000 + 1` under root-cpp builds and prints
+    -1294967295: NUM-5 does not say whether an `Int` literal is checked
+    against `[[Int]]_L` of its realization (/work/plans/model-audit-2026-10-21/repro/C/lit/intc.loc).
+  - Map pair order: py and r keep insertion order, cpp sorts by key. Is
+    order part of a map's value (COLL-5 covers repeated keys only)?
+- **R overflow message names the wrong R type for `Int`.** [reproduced,
+  2026-10-21] data/lang/r/rmorloc.c:1701-1704: a multi-limb `Int` arriving
+  in R fails "does not fit in R's numeric type (max 2^53 ...)"; `[[Int]]_R`
+  is R integer, as the single-limb branch (:1694-1697) says.
+- **UNSOUND: a compressed `@save` file loads as any type.** [reproduced,
+  2026-10-21] Violates INTR-3. `saveZ p xs = @save 3 p xs` (`[Int]`), then
+  `loadReals p = @load p` at `Try Str [Real]` gives
+  `{"Ok":[[5e-324,5e-324,5e-324]]}`, at `[Str]` NUL strings; `@save 0` gives
+  the right "schema mismatch" Err. A compressed record loaded as `[Int]`
+  gives "rebased relptr ... leaves its block". Cause: `mlc_load`
+  (morloc-runtime/src/intrinsics.rs:700) sends a compressed packet under
+  1 MiB past `try_load_compressed_voidstar_via_shm` (cli.rs:878,
+  `FAST_PATH_THRESHOLD`) to `try_decompress_voidstar_bytes_to_shm`
+  (cli.rs:~1065), which never calls `check_packet_schema_matches`
+  (cli.rs:2106). Repro: /work/plans/model-audit-2026-10-21/repro/E/load/main2.loc.
+- **`@schema` and `@typeof` evaluate their argument.** [reproduced,
+  2026-10-21] Violates INTR-4. `schemaBoom x = @schema (boom x)` with a
+  raising Python `boom` fails "run failed / boom". features-intrinsics.asc:
+  449-450 says the argument is not evaluated. Repro: /work/plans/model-audit-2026-10-21/repro/E/intr/main.loc.
+- **REAL-1 vs NUM-1: the realizer's choice changes a program's value.**
+  [reproduced, 2026-10-21] REAL-1 says the choice changes cost, never
+  meaning; NUM-1 (ruled) makes `Int` width per language. With sourced
+  identities `pid` (py) and `cid` (cpp), `hc x = pid (cid x * 3)` prints
+  -1294967296 for 1000000000 (the realizer placed `* 3` in C++) and
+  `hp x = pid (pid x * 3)` prints 3000000000. C++ signed overflow is also
+  undefined behaviour, not an overflow behavior. Same for `size` of a
+  `Str` and real division by zero (above). Candidates: (a) REAL-1 holds
+  only for values every candidate language represents, stated so; (b)
+  `Int` arithmetic is pinned to one checked semantics; (c) the realizer
+  may move `Int` arithmetic only between languages of equal width.
+  Repro: /work/plans/model-audit-2026-10-21/repro/F/wire/re.loc.

@@ -4,7 +4,7 @@ The `@` intrinsics (`@load`, `@read`, `@stdin`, ...): their types and meaning. P
 
 ### INTR-1 An intrinsic that touches the world carries `<IO>`; one that can fail returns `Try`
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A missing file, a full disk, a broken pipe or a decode mismatch is an `Err`
 arm, never an effect label (see `FAIL`). `@read` is fallible and pure.
@@ -13,7 +13,7 @@ arm, never an effect label (see `FAIL`). `@read` is fallible and pure.
 
 ### INTR-2 A data-reading intrinsic yields data
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 The result type of `@load`, `@read`, `@next`, `@open` and `@stdin` contains
 no suspension and no function. If inference solves it to one, the build is
@@ -21,21 +21,21 @@ rejected and asks for an annotation.
 
 ### INTR-3 What `@save`, `@savem` or `@savej` writes, `@load` reads back equal
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/values.md)
 
 `@load` detects the format from the bytes and returns a value equal to the
 one written, or `Err` if the file does not hold a value of the expected type.
 
 ### INTR-4 `@schema` and `@typeof` depend only on their argument's type
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/values.md)
 
 The argument is not evaluated. `@typeof` gives the morloc type as written in
 a signature, never a language-native name.
 
 ### INTR-5 `@version`, `@compiled` and `@datafile` are fixed when the program is built
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `@datafile p` is the installed location of data file `p`, or `p` unchanged
 when the program is not installed.
@@ -60,7 +60,7 @@ compare them as DERIV-3 orders them, in whichever language or in the nexus.
 
 ### INTR-8 `@show` and `@hash` depend only on the wire value
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A value gives the same `@show` text and the same `@hash` in every language.
 

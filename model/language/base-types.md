@@ -4,13 +4,13 @@
 
 ### BASE-1 `Unit` has one value
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 The value `()` is the only value of `Unit`.
 
 ### BASE-2 `Bool` has two values
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `True` and `False` are the values of `Bool`; on the command line they are
 the JSON `true` and `false`.
@@ -29,7 +29,7 @@ Used as a value, each is the function of two `Bool`s it denotes. `&&` is
 
 ### BASE-4 A `Str` value survives every language that can hold it
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A `Str` is a sequence of Unicode characters that may include U+0000. Passed
 to a language that cannot represent it, it is rejected: a literal when the

@@ -84,3 +84,15 @@ Changes here touch locks and ownership: model first.
   command (checked 2026-10-20: a pure recursive `@next` drain built as
   `"type":"remote"`), so a scope's memory is bounded by the program text
   times the size of each value, not by the length of a stream.
+- **A view registered while another thread forks keeps its references
+  for the run.** [read, 2026-10-21] Violates FORK-15. fork_policy.rs
+  `prepare_fork_body` decides whether to stage a lease from
+  `arrow_shm::any_views()`, a Relaxed read of VIEW_COUNT (arrow_shm.rs:
+  1379), before it takes BORROWABLE. A view registered (borrow_register,
+  :1383) in that gap leaves `staged == None` with `rels` non-empty: the
+  child's references are taken, "could not record a forked child's view
+  references" is printed, and they are never released. Reachable where
+  user code forks a multithreaded process holding Arrow/NumPy views. Fix
+  direction: stage speculatively and discard. tla/Lease.tla does not model
+  the pre-check. Status stays `implemented` until fixed, since the Rust
+  model check forbids a deviation that names tests.

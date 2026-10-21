@@ -23,7 +23,7 @@ until morloc has a way to say where a value may be changed.
 
 ### PY-2 A Python result may share objects with its arguments
 Intent: ruled 2026-10-19
-Code: unaudited
+Code: conforms 2026-10-21
 
 A sourced Python function may return an argument, a part of one, or a
 numpy view onto one. Reference counting keeps what it refers to alive,

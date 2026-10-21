@@ -4,14 +4,14 @@
 
 ### OPT-1 `?T` is a `T` or `Null`
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `?` applies to any type. `Null` is the only absent value and has type `?T`
 for every `T`.
 
 ### OPT-2 `?T` is idempotent
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/values.md)
 
     ?(?T) == ?T
 
@@ -23,7 +23,7 @@ Why: `?T` lowers to each language's structureless native null.
 
 ### OPT-3 A `T` is accepted where a `?T` is expected
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
     T <: ?T
 
@@ -32,7 +32,7 @@ boundary. Whether it lifts through other type constructors is SUB-5.
 
 ### OPT-4 `?T` is the language's own missing value
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `[[Null]]_Py` is `None`, `[[Null]]_R` is `NULL`, and `[[?T]]_Cpp` is
 `std::optional<[[T]]_Cpp>`. A present value is the plain `[[T]]_L` in

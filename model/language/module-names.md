@@ -6,14 +6,14 @@ Modules, imports, exports, and which declaration a name refers to across modules
 
 ### MOD-1 A file holds one or more modules
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 Each `module` keyword starts a new module, which runs until the next
 `module` keyword or the end of the file. A module body may be empty.
 
 ### MOD-2 An export list names exactly what a module exports
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `module m (a, b)` exports `a` and `b`. `module m ()` exports no terms.
 Exporting a name the module has no definition for is a load error.
@@ -31,7 +31,7 @@ should expose only some terms uses an explicit list.
 
 ### MOD-4 An anonymous module takes its name from the import that reaches it
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `module (*)` in `utils.loc`, reached by `import .utils`, is named `utils`.
 
@@ -71,7 +71,7 @@ unloadable.
 
 ### MOD-7 A dotless import is a system module
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/programs.md)
 
 `import m` names the installed module `m`, and `import .m` names a local
 one. A local module and a system module never collide.
@@ -87,7 +87,7 @@ If both `a/b.loc` and `a/b/main.loc` exist, `import .a.b` either:
 
 ### MOD-9 Selectors limit what an import brings into scope
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 Without a selector, `import m` brings every term `m` exports into scope.
 `import m (a, b)` brings only `a` and `b`, and naming a term that `m`
@@ -95,7 +95,7 @@ does not export is a load error.
 
 ### MOD-10 Methods are not imported by name
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A typeclass method has no identity apart from its class. If `x` is a method,
 `import m (x)` is a load error, and the message names the class.
@@ -120,7 +120,7 @@ the general type, the class constraints, the docstrings?
 
 ### MOD-13 A `source` path resolves against the file that names it
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A module moves together with the native files it sources.
 
@@ -161,7 +161,7 @@ two types in the program share the name, and nowhere else.
 
 ### MOD-18 Built-in type names are ordinary declarations
 Intent: ruled 2026-10-04
-Code: unaudited
+Code: conforms 2026-10-21
 
 `Int`, `Str` and the other base names have no reserved meaning to the name
 system. A module other than the standard library may declare them, which

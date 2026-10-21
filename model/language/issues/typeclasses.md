@@ -83,3 +83,7 @@
   the generated struct) instead of being rejected or using `<=`. The same
   holds for hand-written instances and any other sourced constrained
   function.
+- **An instance that omits a method is reported as no instance.**
+  [reproduced, 2026-10-21] `instance Foo Int` gives `m` but not `n`; using
+  `n` at Int says "No instance found for Foo::n at type Int -> Int". It
+  should say the instance lacks `n` (CLS-5). Repro: /work/plans/model-audit-2026-10-21/repro/D/cls/c14.

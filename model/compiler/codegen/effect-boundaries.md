@@ -5,7 +5,7 @@ Prefix: EBND.
 
 ### EBND-1 Every boundary agrees with its declared type
 Intent: proposed
-Code: unaudited
+Code: deviates (../issues/effect-boundaries.md)
 
 After boundary insertion, at every point where a value's declared type and
 the convention of the code receiving it differ by a suspension layer, an
@@ -14,7 +14,7 @@ verifies this on every tree before lowering; a failure is an internal error.
 
 ### EBND-2 A root manifold takes exactly its command's inputs
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 The manifold for an exported function takes one argument per input in its
 type, since the nexus sends a command's arguments by type (CMD). Any other
@@ -22,7 +22,7 @@ count is an internal error.
 
 ### EBND-3 No pass after boundary insertion adds or removes a run
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 Later passes may move and rename code, but the number of runs of each
 suspension on every path is fixed once boundaries are inserted (EFF-3).

@@ -4,7 +4,7 @@ Record declarations, literals, field access and update. Prefix: REC.
 
 ### REC-1 A record declaration names a fixed set of typed fields
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `record R = R { f1 :: T1, ..., fn :: Tn }`, or the equivalent `where` form,
 declares a type `R` with exactly the fields `f1 ... fn`. Field names are
@@ -12,7 +12,7 @@ unique within the declaration.
 
 ### REC-2 A record literal binds every declared field by name exactly once
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 Field order in a literal is irrelevant. A literal that misses a declared
 field, names a field the record does not have, or names a field twice is a
@@ -20,7 +20,7 @@ compile error.
 
 ### REC-3 A record literal takes its type from context
 Intent: ruled 2026-10-07
-Code: unaudited
+Code: conforms 2026-10-21
 
 A record literal has the record type that a signature or an annotation
 gives it; the field names alone never determine its type.
@@ -42,7 +42,7 @@ anonymous records, which pure nexus code, getters and views use.
 ### REC-5 Field access and update are getter and setter patterns
 Intent: proposed
 Tests: spec-rec-5-1
-Code: unaudited
+Code: conforms 2026-10-21
 
 `.f r` is the value of field `f` of `r`. `.(.f = e) r` is a new record equal
 to `r` except that `f` is `e`; `r` itself is unchanged. Naming a field the
@@ -50,7 +50,7 @@ record type does not have is a compile error.
 
 ### REC-6 A native record form names only the container
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `record L => R = "name"` names the representation of `R` in language `L`.
 Field names and types come from the general declaration and are not

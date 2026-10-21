@@ -6,7 +6,7 @@ Syntax of numeric, string, boolean, list, tuple and record literals. Prefix: LIT
 
 ### LIT-1 Integer literals are decimal, hexadecimal, octal or binary
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `42`, `0xff`, `0o755`, `0b101`; the base letter and hex digits are case
 insensitive. A prefixed literal containing a digit invalid for its base is a
@@ -22,7 +22,7 @@ real literal never takes an integer type. `Inf` and `NaN` are real literals.
 
 ### LIT-3 A `-` against a digit is part of the literal
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `-1`, `-1.5` and `-Inf` are atomic literals, legal wherever a literal is.
 Any other prefix `-e` is `negate e`.
@@ -41,7 +41,7 @@ realized at.
 
 ### LIT-5 String literals
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/syntax.md)
 
 A string is double-quoted. The escapes are `\n \t \r \0 \\ \"` and any other
 is a lexical error. In a `"""` or `'''` string, leading spaces through the
@@ -51,7 +51,7 @@ into the string, and requires `G |- e : Str`.
 
 ### LIT-6 Container literals
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `True`, `False` and `Null` are literals. `[e1, ..., en]` is a list,
 `(e1, ..., en)` with n >= 2 a tuple of arity n, `()` the unit value. A record

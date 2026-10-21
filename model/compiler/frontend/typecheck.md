@@ -4,14 +4,14 @@ What the typechecker may assume and must produce. Prefix: TC.
 
 ### TC-1 Every type name reaching the typechecker names one declaration
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 Name resolution has bound each type name to its declaring module (MOD-14).
 The typechecker never resolves a type name by its spelling alone.
 
 ### TC-2 Aliases are compared by expansion
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 The typechecker keeps alias names in the types it reports, and wherever two
 types are compared or decomposed it unfolds an alias head first, so no

@@ -25,3 +25,26 @@
   message carries neither the path nor the operation, so a program that
   throws it reports an unplaceable error. Gap in model/runtime/streams.md:
   no item says what an `@open` error states.
+- **UNSOUND: `@open` of an IFile never checks the element schema, nor
+  does an IStream opened in the nexus.** [reproduced, 2026-10-21] Violates
+  STRM-1. After writing an `OStream Int`, `@open path :: <IO> (Try Str
+  (IStream Real))` in the nexus reads `[5e-324,...]`; an `IFile [Real]`
+  open in the nexus or a Python pool reads the Int bits as doubles. A
+  pool IStream open does fail "schema mismatch". Causes: the nexus `open`
+  node carries only the handle schema (CodeGenerator/Nexus.hs:1115-1135,
+  manifest `"schema": "I"`) and eval_ffi.rs:1452-1500 calls
+  `mlc_probe_packet`/`mlc_open` with no element schema, so the check in
+  stream.rs:7295-7323 never runs; pools lower IFile to `IIntrinsicOpen`
+  with no schema (Translator/Imperative.hs:2742-2745). Repro:
+  /work/plans/model-audit-2026-10-21/repro/E/strm/main.loc, b.loc.
+- **`@stdin` checks the element schema at the first `@next`.**
+  [reproduced, 2026-10-21] Gap in STRM-1, which says a mismatch is an
+  `Err` at open; for a pipe the schema arrives with the bytes. STRM-1 needs
+  a stdin clause.
+- **A stream refuses a second compression level.** [reproduced,
+  2026-10-21] Gap in STRM-2. `@write 3 o [1,2,3]` then `@write 0 o [4,5]`
+  fails "@write level mismatch ... All sub-packets must share a level";
+  the buffered `[1,2,3]` is lost and the file has no footer. No item says
+  a stream has one level, and `@write` takes one per call. Either the
+  level belongs on the open, or it is per sub-packet. The failed write
+  losing earlier data is a bug either way.

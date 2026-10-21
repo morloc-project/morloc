@@ -38,3 +38,64 @@ Reproduced on 0.109.0 unless marked.
   Spec gap: no item says whether trailing blank docstring lines belong to
   the description. `--' Search notes` / `--'` / `--' @epilogue` on a module
   gives `--json-help` `program.description` `["Search notes", ""]`.
+- **A dotless import collides with a same-named local module.**
+  [reproduced, 2026-10-21] Violates MOD-7. With a local `math.loc`,
+  `import math (sqrt)` fails "Ambiguous import 'math' ... Found in system
+  ... Found locally: ./math.loc". Module.hs:416 `bareModulePaths` adds
+  local paths whenever `stateAllowLocalModules` (default True,
+  Namespace/State.hs:1090); `findBareModule` (Module.hs:494-506) throws on
+  both. Repro: /work/plans/model-audit-2026-10-21/repro/A/mod/m7.
+- **Module rules with no item.** [read, 2026-10-21] Gaps in module-names.md.
+  No item covers namespaced imports (`import m as n`, `n.f`, the `f.g`
+  composition ambiguity in Lexer.hs:476-498) though `namespace-*` goldens
+  exist. MOD-12 (open) rejects one name from two modules even with equal
+  signatures, so a user `|>` cannot be imported beside root-py's; the
+  ruling should cover the prelude case.
+- **UNSOUND: a grouped command runs another group's command of the same
+  name.** [reproduced, 2026-10-21] Violates CMD-3 and IFACE-1. Exports `f`
+  (group math, `Int -> Int`) and `g` (group text, `--' @name f`, `Str ->
+  Str`): `text f -h` describes g, but `text f 5` prints 6 (math's f ran)
+  and `text f hi` fails "JSON parse error". Cause: morloc-nexus/src/
+  phase2.rs:217-221 picks the manifest command by name and ignores the
+  group. A duplicate `@name` within one group (`@name version` beside an
+  export `version`) builds silently and one command is unreachable; CMD-4
+  should say names are unique within a group. Repro: /work/plans/model-audit-2026-10-21/repro/G/cmd/c3.loc, c1.
+- **`@stdin` is accepted on `?Str`.** [reproduced, 2026-10-21] Violates
+  CLI-3. It builds; the value can never be null (`f null` -> "check.path:
+  r requires path 'null' to exist"); omitted it is `"/dev/stdin"`. CLI-3
+  should also state the omitted value. Repro: /work/plans/model-audit-2026-10-21/repro/G/args/s3.loc.
+- **CLI-2 errors are not at the docstring line.** [reproduced, 2026-10-21]
+  `@form list|table`, `@form auto`, `@source auto`, `@check.path r|w` are
+  reported at the type line; `@form table`/`@form bytes`/`@stdin` on `Int`
+  carry no location and use the old `form:` spelling. Repro: /work/plans/model-audit-2026-10-21/repro/G/args/b.loc.
+- **`--json-help` epilogues lose trailing spaces.** [reproduced,
+  2026-10-21] Violates CLI-12. `--'   indented  ` becomes `"  indented"`.
+  Repro: /work/plans/model-audit-2026-10-21/repro/G/cmd/e.loc.
+- **`@stdin` and a bare `@arg` above a function are dropped silently.**
+  [reproduced, 2026-10-21] Against DIAG-4's common ground (every other
+  misplaced argument directive is an error). CodeGenerator/Docstrings.hs:
+  313-330 `validateCommandLevelDirectives` lists no `stdin`; a value-less
+  `@arg` sets no `docArg`. Repro: /work/plans/model-audit-2026-10-21/repro/G/diag/mis3.loc, dirarg.loc.
+- **More unlocated rejections.** [reproduced, 2026-10-21] DIAG-2: "Command
+  group names collide with ungrouped command names: [math]"; "Source file
+  not found: ./nofile.py"; unknown-directive and `@literal` warnings;
+  `morloc eval` allow-list refusal. `morloc eval -e 'import root-py;
+  @write "x" 1'` is located at `<expr>:3:1-12`, a generated wrapper line.
+- **Program rules with no item.** [reproduced, 2026-10-21]
+  - Command names: `@name @` and `@name -x` make a command unreachable,
+    `@name a b` holds a space. Candidates: a name matches
+    `[a-z][a-z0-9-]*` or is a located error; any name, quoted.
+  - Sink handlers: CLI-8 makes a non-`Str`/bytes `@render` handler a
+    build error, but the manual's `rep` (cli-actions.asc:150-176) renders
+    through `tabulate :: Int -> [(Str, Int)] -> <IO> ()` and builds.
+  - When an impossible `-f` is reported: the command runs first, then
+    "Error: --format=csv|tsv requires ..." (no `--format` flag exists;
+    it is `-f/--output-form`); with `-o q.arrow` an empty file is left.
+    IFACE-12 requires limits before the work; the manual says refused
+    before the run. Check: dispatch.rs:1681-1690,
+    arrow_ipc_reader.rs:316. Repro: /work/plans/model-audit-2026-10-21/repro/G/act/ac.loc.
+  - argv `Bool` takes only lower-case JSON; a table cell (CLI-17) takes
+    any case.
+  - Which docstring heads a single-export program's `-h` (it prints the
+    module's; cli-zones.asc:95-108 shows the command's).
+  - An empty `.loc` builds a program with no commands.

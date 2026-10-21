@@ -10,7 +10,7 @@ labels are tags. The compiler gives them no operational meaning.
 
 ### EFF-1 A suspension is a value distinct from its result
 Intent: ruled 2026-09-12
-Code: unaudited
+Code: conforms 2026-10-21
 
 `<E> T` and `T` are different types. A suspension is never erased,
 stripped, or treated as an annotation on `T`: in every language it is a
@@ -20,7 +20,7 @@ Why: the doctrine "effects are erased" produced #54 and #58.
 
 ### EFF-2 A suspension is the same value in every position
 Intent: ruled 2026-09-12
-Code: unaudited
+Code: deviates (issues/effects.md)
 
 Argument, parameter, `let`, return value, record field, list element, sum
 arm, optional payload, instance of a type variable, and wire: a suspension
@@ -29,7 +29,7 @@ back to its home pool once per run. Its wire form is WIRE's to state.
 
 ### EFF-3 Every run of a suspension runs the computation again
 Intent: ruled 2026-09-12
-Code: unaudited
+Code: conforms 2026-10-21
 
 The compiler never shares, hoists, memoizes, duplicates or drops a run.
 Only explicit instrumentation chosen by the user (ANN) may make a
@@ -39,7 +39,7 @@ suspension idempotent.
 
 ### EFF-4 `do` is the only way to build a suspension from statements
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/effects.md)
 
 `do { s1; ...; sn; tail }` builds one suspension. A pure tail is returned;
 a suspension tail is run. A `do` that runs nothing still builds a
@@ -47,7 +47,7 @@ suspension: `do 42 :: <> Int`.
 
 ### EFF-5 There is no coercion between `T` and `<E> T`
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A pure value in a suspension slot is a type error; `do v` is the only lift.
 A suspension where a pure value is expected is a type error.
@@ -57,7 +57,7 @@ error, never a bare value; the type error was chosen.
 
 ### EFF-6 Only a bind runs a suspension
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `x <- t` and a bare statement `t` in a do-block run `t`. Application,
 binding, projection, passing, returning and crossing a pool run nothing.
@@ -65,7 +65,7 @@ Running a value that is not a suspension is a type error.
 
 ### EFF-7 `!e` is a bind at the nearest enclosing do-block
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/effects.md)
 
 `!e` inserts `x <- e` above the statement that contains it, with `x` in its
 place. A `!` with no enclosing do-block is a type error.
@@ -75,7 +75,7 @@ place. A `!` with no enclosing do-block is a type error.
 ### EFF-8 Rows compare by inclusion
 Intent: proposed
 Tests: spec-eff-8-1
-Code: unaudited
+Code: conforms 2026-10-21
 
     E1 subset of E2      T1 <: T2
     -----------------------------
@@ -86,14 +86,14 @@ A row variable with no other constraint is `<>` at ground.
 
 ### EFF-9 Nested suspensions are never merged
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `<E> (<E'> T)` is two layers and is not `<E,E'> T`. It is written only with
 parentheses; `<E> <E'> T` is a parse error.
 
 ### EFF-10 A body's effects must fit its declared row
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 The effects a definition's body runs must be a subset of the row in its
 signature. Declaring effects the body does not run is legal.

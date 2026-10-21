@@ -36,7 +36,7 @@ of its own, so what is inlined there stays there.
 ### EMIT-3 A generated function adds no per-call error handler
 Intent: ruled 2026-10-16
 Tests: spec-emit-3-1
-Code: conforms 2026-10-16
+Code: deviates (../issues/codegen-limits.md)
 
 A generated function that is not a boundary has no handler for a failure
 and no destructor that inspects one. The trace of DIAG-5 is assembled
@@ -54,7 +54,7 @@ handlers. Serves RECUR-4 and DIAG-5.
 ### EMIT-4 A chain of `&&` or `||` is written flat
 Intent: ruled 2026-10-16
 Tests: spec-emit-4-1
-Code: conforms 2026-10-16
+Code: deviates (../issues/codegen-limits.md)
 
 A chain of operands of one of the two operators is written as the
 language's operator between them, with no parentheses inside the chain,

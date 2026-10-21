@@ -27,3 +27,18 @@ under data/rust/.
   (`Frontend::forward`, `.to_vec()`), and only `media_result` compares it
   with the cap. A request field telling the daemon the caller's cap would
   refuse it first.
+- **A served call can write into the server's stdout and stderr through
+  a descriptor path or a symlink.** [reproduced, 2026-10-21] Violates
+  DAEMON-15. `writeTo path = do { Ok s <- @open path :: <IO> (Try Str
+  (OStream Int)); @write 0 s [10, 20, 30]; @close s; 1 }` served by
+  `morloc-nexus daemon --http-port=...`: `/call/writeTo` with
+  `["/proc/<daemon pid>/fd/1"]` writes the stream into the daemon's stdout;
+  `.../fd/2` truncates its log; a symlink to `/dev/stdout` is accepted.
+  `/dev/stdout`, `/dev//stdout`, `/proc/self/fd/1` are refused.
+  `names_server_stdio` (stream.rs:2923) matches path text, and the
+  custodian opens the file in the nexus (SLOT-10). Fix: compare the opened
+  file's dev/ino with fds 0-2. DAEMON-15 should say a path is compared by
+  the file it opens. Repro: /work/plans/model-audit-2026-10-21/repro/I2/d15/main.loc.
+- **The daemon's HTTP parser truncates path and query at 255 bytes.**
+  [read, 2026-10-21] http_ffi.rs:209-214 copies into 256-byte arrays, so a
+  longer `/call/<cmd>` or `?render=` is routed by its prefix, not refused.

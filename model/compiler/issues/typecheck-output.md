@@ -20,3 +20,6 @@ model/language/issues/typecheck.md.
   diagnostic raised after the typechecker names the construct that caused
   it (DIAG-2). Every code-generation rejection above is reported at the
   module's export list (`main.loc:1:14`).
+- **`morloc typecheck` drops class constraints from signed exports.**
+  [reproduced, 2026-10-21] `f :: Integral a => a -> a` and `s ::
+  Semigroup a => a -> a` print as `f :: a -> a`, `s :: a -> a`.

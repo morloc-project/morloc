@@ -23,7 +23,7 @@ has a way to say where a value may be changed.
 
 ### CPP-2 A sourced C++ function returns a value that owns its data
 Intent: ruled 2026-10-18
-Code: unaudited
+Code: conforms 2026-10-21
 
 A sourced C++ function's result refers into none of its arguments: it is
 not, and does not hold, a reference, pointer, `std::string_view`,

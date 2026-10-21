@@ -1,9 +1,9 @@
 # Realization
 
 Defects in how the realizer (CodeGenerator/Realize.hs) prices a placement,
-found reviewing /work/plans/realization-cost-model.md. Gap: model/language
-realization.md leaves open what the choice minimizes; each entry is wrong
-under any reading of it. [read; not reproduced]
+found reviewing /work/plans/realization-cost-model.md. The objective is
+COST-1 (proposed); each entry is wrong under any reading of it. [read; not
+reproduced]
 
 - **A list, tuple or record is priced by its cheapest element.**
   `scoreMany` (~665-682) builds one merged table of every element's scores
@@ -30,3 +30,10 @@ under any reading of it. [read; not reproduced]
   `mergeEdocs x _ = x` (Frontend/Merge.hs ~83-84): a directive on the second
   signature of one term is dropped, depending on order. Affects any
   directive, cost directives included.
+- **The cost model is not implemented.** [reproduced, 2026-10-21]
+  COST-2..COST-10 (proposed) have no code. `@wiresize`, `@dimension`,
+  `@calls` and `@runtime` warn "docstring directive ... is not recognized"
+  and are dropped; call and crossing costs are the integer tables in
+  data/lang/languages.yaml and each lang.yaml `cost:` (LangRegistry.hs:
+  145-150; Realize.hs:380-392, 792 `crossingPayloadCost _ = 0`, 805). No
+  manual page covers the directives. Unbuilt design, not a regression.

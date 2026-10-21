@@ -4,7 +4,7 @@
 
 ### TAB-1 A table type carries its row count and schema
 Intent: proposed
-Code: unaudited
+Code: deviates (../runtime/issues/tables-tensors.md)
 
 In `Table n r`, `n :: Nat` is the row count and `r :: Rec` maps column names
 to column types. Both are erased at run time. `Table` is opaque: each
@@ -12,14 +12,14 @@ language supplies its own form.
 
 ### TAB-2 Merging schemas that share a column name is a type error
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `r1 + r2` where `r1` and `r2` have a key in common is a type error, whether
 the result type is written or inferred.
 
 ### TAB-3 Naming a column the schema does not have is a type error
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/typecheck.md)
 
 A field lookup or projection of a schema by a name or names known at
 compile time fails at typechecking when a name is not in the schema. It

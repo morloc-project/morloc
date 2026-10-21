@@ -177,3 +177,21 @@ here touch locks and ownership: model first.
   release them all); `daemon_ffi.rs` counts remote jobs in the whole queue
   per accept. Each is bounded in practice today; an index (map or free
   stack) would make each O(1).
+- **SLOT-28's table misstates where a PAUSED footer comes from.** [read,
+  2026-10-21] The code writes a PAUSED footer (unflushed elements first)
+  from the daemon call sweep (stream.rs:5554-5581), a reopen after the
+  opener died (:3080), a stdio claim whose owner died (:2418),
+  `pool_reclaim_stdio_after_dispatch` (:5615), and stdout/stderr at the end
+  of a successful run (morloc-nexus main.rs:73-82). The table's one source,
+  "a remote child returns the stream without @close", has no code path. So
+  a stream left open by a daemon call ends PAUSED with its elements
+  written, while at the end of a CLI run it is discarded (SLOT-13); SLOT-13
+  and SLOT-19 give two endings without saying so.
+- **Idle slots per handle are capped at 16.** [read, 2026-10-21] Violates
+  SLOT-23 (one per processor): stream.rs:1100 `idle_slots_kept` clamps to
+  16. Speed only.
+- **SLOT-29 is silent on a present but corrupt footer.** [read,
+  2026-10-21] stream_format.rs:112 treats `Ok(None) | Err(_)` alike, so a
+  damaged footer silently falls back to a forward scan. Belongs with the
+  SLOT-31 ruling. `MORLOC_WRITE_BEHIND_DEPTH=0` is clamped to 1 silently
+  (custody.rs:191).

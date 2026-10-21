@@ -4,7 +4,7 @@ The `<:` relation and where it is applied. Effect rows: see effects.md (EFF). Pr
 
 ### SUB-1 An expected type is met by subtyping
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 Where a term of inferred type `T` meets an expected type `U` (an argument,
 an annotation, a declared signature), `T <: U` must hold. Otherwise the
@@ -12,7 +12,7 @@ program is rejected.
 
 ### SUB-2 Dimensions are compared for equality
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
     n == m
     -----------------
@@ -22,13 +22,13 @@ for a Nat position, after both sides are reduced (DIM-2).
 
 ### SUB-3 A known dimension is a subtype of an unknown one
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `F 3 a <: F a`, where the second omits the Nat argument (DIM-4).
 
 ### SUB-4 The only value coercion is into an optional
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `T <: ?T` (OPT-3). No other implicit conversion exists between distinct
 types: `Int` is not a subtype of `Real`, and a suspension `<E> T` is neither

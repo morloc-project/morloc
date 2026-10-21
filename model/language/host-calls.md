@@ -4,7 +4,7 @@ How morloc and sourced code call each other: arguments, callbacks, suspensions. 
 
 ### HOST-1 Morloc calls a sourced function by the arity of its source signature
 Intent: ruled 2026-09-24
-Code: unaudited
+Code: conforms 2026-10-21
 
 The number of arguments passed in each call to a sourced function follows its
 source signature. On the morloc side `a -> b -> c` and `a -> (b -> c)` are
@@ -13,7 +13,7 @@ one type (see `APP`).
 ### HOST-2 A sourced function calls a callback by the callback's type as written
 Intent: ruled 2026-09-24
 Tests: spec-host-2-1
-Code: unaudited
+Code: conforms 2026-10-21
 
 A callback parameter written `(a -> b -> c)` in the source signature is
 called with both arguments at once; one written `(a -> (b -> c))` is called
@@ -22,7 +22,7 @@ type in that grouping, however it was defined.
 
 ### HOST-3 `rsize` declares the call groups of a curried foreign function
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/host-calls.md)
 
 `--' rsize: n1 n2 ...` gives the sizes of the leading call groups; the last
 group takes the rest. Each size is at least 1 and leaves at least one
@@ -39,7 +39,7 @@ replacing `rsize`; or (b) only `rsize` does, and the asymmetry is the rule.
 
 ### HOST-5 A suspension at a host boundary is a callable of no arguments
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A host has no thunks: calling is forcing. The adapter between morloc and a
 host is decided by type at the boundary, follows the source signature, and
@@ -48,7 +48,7 @@ rules are `EFF`'s.
 
 ### HOST-6 A foreign exception is a failure of the call that raised it
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 An exception escaping a sourced function, in any language and across any
 number of pools, reaches morloc as a failure that `@try` can catch (see
@@ -57,7 +57,7 @@ number of pools, reaches morloc as a failure that `@try` can catch (see
 ### HOST-7 A function value may be called on threads its sourced callee starts
 Intent: proposed
 Tests: spec-host-7-1
-Code: unaudited
+Code: conforms 2026-10-21
 
 A sourced function may call a function value it was given from threads it
 starts and joins before it returns, concurrently, as a parallel map does.
@@ -72,7 +72,7 @@ propagates it; a panic in host code on such a thread is PANIC-6's.
 ### HOST-8 A Rust function value is a plain `Arc<dyn Fn>` taking every argument by reference
 Intent: proposed
 Tests: spec-host-8-1
-Code: unaudited
+Code: conforms 2026-10-21
 
 [[a1 -> .. -> an -> b]]_Rust, held as a value, is
 `std::sync::Arc<dyn Fn(&A1, .., &An) -> B + Send + Sync>`, called `f(&x1, ..)`;

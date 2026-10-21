@@ -4,14 +4,14 @@ Quantifiers, instantiation, generalization, scope of type variables. Prefix: POL
 
 ### POLY-1 Type variables in a signature are universally quantified
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/typecheck.md)
 
 A lowercase name in a type signature is a type variable, quantified over
 the whole signature. Every use of the term may instantiate it differently.
 
 ### POLY-2 All polymorphism is resolved before the program runs
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 Every type variable in a realized program is instantiated to a concrete
 type at compile time. No value crosses a language boundary at a type that
@@ -19,7 +19,7 @@ still contains a variable.
 
 ### POLY-3 A variable's kind comes from its declaration or its label
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 An unannotated type parameter has kind `Type`. `(n :: K)` in a type
 declaration gives kind `K`. In a signature, `x@Int` binds a `Nat`, `x@Str`

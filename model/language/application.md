@@ -4,7 +4,7 @@ Application, partial application, arity and arrow grouping. Prefix: APP.
 
 ### APP-1 Arrow grouping is not part of a morloc type
 Intent: ruled 2026-09-24
-Code: unaudited
+Code: conforms 2026-10-21
 
 `a -> b -> c` and `a -> (b -> c)` are one type. Neither the nesting of a
 definition's lambdas nor the grouping in a general signature changes how a
@@ -15,14 +15,14 @@ Why: languages disagree on grouping, so a general signature cannot decide it.
 
 ### APP-2 Partial application yields a function of the remaining arguments
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 Applying a function of n arguments to k < n arguments yields a function of
 the other n - k. Operators apply partially on either side (OP).
 
 ### APP-3 Pure application is eager and runs nothing suspended
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A pure argument is evaluated once, at the application. Applying a function
 whose result is a suspension builds that suspension and runs nothing (EFF-6).

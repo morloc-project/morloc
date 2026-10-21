@@ -62,3 +62,13 @@
   MORLOC_INT, but got numpy.int64" (pymorloc.c py_size_step, the
   `PyLong_Check` in the MORLOC_INT arm, unchanged since 139b83e1). Cause
   unknown: what changed is that the fold now yields a numpy scalar.
+- **Multi-limb `Int` overflow messages omit the value.** [reproduced,
+  2026-10-21] Violates WIRE-3. Python `x * 2**70` into Rust `Int`:
+  "Integer overflow: 2-limb integer does not fit in a fixed-width type" (no
+  value, no target type); into C++: "2-limb integer (128 bits) does not fit
+  in 32-bit type". Single-limb messages name the value. Repro:
+  /work/plans/model-audit-2026-10-21/repro/F/wire/w3.loc.
+- **Python reads a `Bool` byte through `*(bool*)`.** [read, 2026-10-21]
+  Violates WIRE-8. data/lang/py/pymorloc.c:1769 `PyBool_FromLong(*(bool*)
+  data)` is undefined on a byte other than 0 or 1; R (rmorloc.c:1618), C++
+  and Rust compare a `uint8_t`.

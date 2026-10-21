@@ -153,3 +153,80 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   a signature whose constraint names a variable that its type does not
   mention (and that no other constraint ties to one it does) is rejected at
   the signature, naming the variable.
+- **UNSOUND: bracket getters accept any `f a` receiver, slices any
+  receiver; the built program segfaults.** [reproduced, 2026-10-21]
+  Violates PAT-5. `f :: Int -> Int; f x = .[0:1] x` typechecks and builds;
+  `f 5` exits 139 (SIGSEGV). `g :: (Int, Int, Int) -> (Int, Int, Int);
+  g x = .[0:2] x` and `tidx :: (Int, Int) -> Int; tidx p = .[0] p` build
+  and fail "rel2abs: relptr 1 is in volume 0, which is never mapped".
+  Cause [read]: Frontend/Typecheck.hs:1200-1209 types the index receiver as
+  `AppU fExist [elem]` (so `(,) Int` matches `(Int, Int)`); :1224-1251 put
+  no constraint on a slice receiver. Repro: /work/plans/model-audit-2026-10-21/repro/A/pat/sl.loc, rt.loc.
+- **A tuple pattern of smaller arity matches a larger tuple.** [reproduced,
+  2026-10-21] Violates PAT-1. `part :: (Int, Int, Int) -> Int;
+  part = \(a, b) -> a + b` builds; `part [1,2,3]` prints 3. Repro:
+  /work/plans/model-audit-2026-10-21/repro/A/pat/rt.loc.
+- **Mutually recursive `where` functions are accepted; value cycles crash
+  `make`.** [reproduced, 2026-10-21] Violates BIND-2. `f x = ev x where
+  ev n = ? n == 0 = True : od (n - 1); od n = ? n == 0 = False : ev (n - 1)`
+  builds and `f 4` prints `true` (/work/plans/model-audit-2026-10-21/repro/A/bind/b9.loc). `f x = a where a = b +
+  1; b = a + 1` passes typecheck and `make` dies "This step should be
+  unreachable" (CodeGenerator/Serialize.hs:308; /work/plans/model-audit-2026-10-21/repro/A/bind/b2.loc). A
+  top-level cycle `a = b + 1; b = a + 1; f = a` dies "Can represent MonoSrc
+  as SerialExpr" (Serialize.hs:241; /work/plans/model-audit-2026-10-21/repro/A/lex/x3.loc) instead of the cyclic
+  binding error. Either BIND-2 or the code must move for functions; value
+  cycles need a located rejection either way.
+- **A newtype over a `type` alias reports a phantom instance.** [reproduced,
+  2026-10-21] `type Meters = Int; newtype Wrapped = Meters` fails "Cannot
+  declare instance on transparent alias 'Meters'" though no instance is
+  written. No NEWT item says an alias may not be a representation.
+- **Poor diagnostics on getters.** [reproduced, 2026-10-21] `.[0] p` on a
+  record: "Subtype error: Type mismatch fall through a b <: P"; `.a` on a
+  list prints "expected: a [] [(a, b)]", an internal row encoding
+  (/work/plans/model-audit-2026-10-21/repro/A/pat/s5.loc, s1.loc). "Conflicting fixity definitions for <+>" and
+  "Module 'main' does not export ... [nope]" (an export of an undefined
+  name, worded backwards) carry no location (DIAG-2; /work/plans/model-audit-2026-10-21/repro/A/op/o8.loc,
+  /work/plans/model-audit-2026-10-21/repro/A/mod/m2).
+- **A clause after a catch-all is accepted.** [reproduced, 2026-10-21]
+  Violates SUM-3. `data A = Foo | Bar; f | Foo = 1 | _ = 2 | Bar = 3`
+  builds; `f Bar` prints 2. A repeated constructor clause is rejected; only
+  clauses shadowed by `_` are missed. Repro: /work/plans/model-audit-2026-10-21/repro/C/sum/dead.loc.
+- **Internal names in record and constructor errors.** [reproduced,
+  2026-10-21] `g p = .c p` on `record P {a, b}` fails "expected: a []
+  [(c, b)] ... Error in NamU with conflicting open keysets ... hint: 'P' is
+  a newtype"; it should name the missing field. `f x = match x | Foo = 1 |
+  (Bar n) = n` with no signature fails "'Foo' is not a constructor of
+  *x`1560@1_x1" (SUM-6 (b) promises a request for a signature). Repro:
+  /work/plans/model-audit-2026-10-21/repro/C/rec/getbad.loc, /work/plans/model-audit-2026-10-21/repro/C/sum/sum6.loc.
+- **A type variable in a local signature can never be instantiated.**
+  [reproduced, 2026-10-21] Violates POLY-1. `f :: Int -> Int; f x = g x
+  where { g :: a -> a; g y = y }` fails "expected: a, inferred: Int ...
+  Cannot compare types Int and a@q0" at `g x`. Without its signature `g` is
+  generalized and works. POLY-4 also names `let` signatures, which do not
+  parse ("unexpected '::'"). Repro: /work/plans/model-audit-2026-10-21/repro/D/poly4c, poly4d, poly5.
+- **Literal defaulting exports a constrained generic at Int.**
+  [reproduced, 2026-10-21] Gap in SIG-5 and POLY-6. `f :: Integral a => a
+  -> a; f x = x + x` is skipped with a warning (SIG-5), but `f x = x + 1`
+  is exported at Int with no warning: `f 1.5` fails "expected integer for
+  Int", while `g y = f y` at Real gives 2.5. Candidates: (a) a constrained
+  export is skipped or rejected regardless of literals; (b) class
+  variables default (Integral -> Int, Numeric -> Real) and SIG-5/POLY-6
+  say so. Repro: /work/plans/model-audit-2026-10-21/repro/D/sig5b, sig5c.
+- **SIG-4's premise is stale.** [reproduced, 2026-10-21] It says
+  inference fails for a point-free use of class methods; `g = (+)` and
+  `concatTo = fold (<>)` build and run unsigned. Only constructor matching
+  still fails, with "'Ci' is not a constructor of *s`1591@1_x1" rather than
+  a request for a signature (SIG-4 (a)). Repro: /work/plans/model-audit-2026-10-21/repro/D/sig4, sig4b.
+- **EVAL-5's candidates miss what the code does.** [reproduced,
+  2026-10-21] An unused `let` is computed (`let y = boom x in x` fails),
+  an unused `where` is not, and a used `let` is placed at its use, so an
+  untaken branch skips it. That is a third answer, (c), which
+  features-where.asc:126-135 describes. Repro: /work/plans/model-audit-2026-10-21/repro/E/eval.
+- **The `@read` rejection suggests `@load`.** [reproduced, 2026-10-21]
+  For a function result type the message proposes "`@load path :: <IO>
+  (Try Str Int)`". Repro: /work/plans/model-audit-2026-10-21/repro/E/intr2/c.loc.
+- **`[Int] ++ [Int]` does not typecheck.** [reproduced, 2026-10-21]
+  `pick n xs ++ xs` fails "Cannot compare types [Int] and *f@q1 m@n3
+  *a@q2": root's `(++) :: f m a -> f n a -> f (m+n) a` admits only sized
+  containers, so plain lists have no `++`. Gap in collections.md: no item
+  says how lists are appended.

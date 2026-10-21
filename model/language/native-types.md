@@ -19,7 +19,7 @@ with no form in `L` has its representation's (NEWT-2).
 
 ### NATIVE-3 In C++ and Rust a record needs a user-defined struct
 Intent: ruled 2026-10-05
-Code: unaudited
+Code: deviates (issues/values.md)
 
 A record used in C++ is a struct the user defines and links with
 `record Cpp => R = "R"`; in Rust, with `record Rust => R`. Python and R need
@@ -27,7 +27,7 @@ no user-written native definition.
 
 ### NATIVE-4 An unmapped record in C++ or Rust is a compile error
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/values.md)
 
 A program that needs a record in C++ or Rust with no linked struct is
 rejected with an error naming the record and the language. It never builds

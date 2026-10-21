@@ -6,7 +6,7 @@ Argument shapes, parsing, stdin, `@parse`, `@render`, output rendering. Prefix: 
 
 ### CLI-1 An argument is read by its wire type
 Intent: proposed
-Code: unaudited
+Code: deviates (../runtime/issues/nexus-cli.md)
 
 A number, a `Bool` or a `Str` is its argv token, verbatim. Any other type is
 inline JSON or a path to a file whose format (JSON, MessagePack, a morloc
@@ -15,7 +15,7 @@ form, not the type's name: a type that packs to `[(a, b)]` reads as one.
 
 ### CLI-2 Argument shape is one atom per docstring field
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/programs.md)
 
 `source: inline|file`, `form: list|table|bytes|bytes-only|packet` and `check.path`
 each take one value, and the `list.` forms do the same per element. No field
@@ -24,7 +24,7 @@ does not allow is a build error at the docstring line that wrote it.
 
 ### CLI-3 At most one argument per command reads standard input
 Intent: proposed
-Code: unaudited
+Code: deviates (issues/programs.md)
 
 A second `-` in one run is a run-time error. An `@stdin` argument is a `Str`,
 the last positional, and at most one per command; anything else is a build
@@ -154,7 +154,7 @@ failure (the deviation).
 
 ### CLI-5 A command writes its result to stdout in the `-f` form
 Intent: proposed
-Code: unaudited
+Code: deviates (../runtime/issues/nexus-cli.md)
 
 A `-f` form the result type cannot produce is an error, never an
 approximation. In JSON, a top-level `()` or `Null` prints nothing unless
@@ -165,7 +165,7 @@ inside a value is always written.
 
 ### CLI-6 An output action is a flag that applies a handler to the output
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `--' @with -s/--name=f` and `--' @render -s/--name=f` each add a flag
 `-s/--name[=PATH]` to the command. `f :: A -> B` with `A` unifying with what
@@ -175,7 +175,7 @@ run. `@with` keeps `B` typed, so it is written in the `-f` form (CLI-5).
 
 ### CLI-7 Which output reaches standard output
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 In order, the first that applies:
 
@@ -210,7 +210,7 @@ CLI-5 forbids. Either (a) `@render` actions are exempt from `-f`; or (b)
 ### CLI-10 An absent optional help field is left empty
 Intent: ruled 2026-10-10
 Tests: spec-cli-10-1
-Code: unaudited
+Code: conforms 2026-10-21
 
 When a value help would show was not declared (a description, for one), its
 slot is printed empty. Help never fills it with a different field, such as
@@ -234,7 +234,7 @@ description lines. A command with actions prints `Return:` and then:
 ### CLI-12 `--json-help` carries every epilogue verbatim
 Intent: ruled 2026-10-10
 Tests: spec-cli-12-1
-Code: conforms 2026-10-10
+Code: deviates (issues/programs.md)
 
 `program.epilogues` and each command's `epilogues` list that docstring's
 `@epilogue` blocks in order, one string per block, its lines joined by

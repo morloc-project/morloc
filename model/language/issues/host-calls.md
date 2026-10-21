@@ -42,3 +42,13 @@
   [1, 2, 3]`, the list inlined at the call, and dropping `touch p`.
   `concatSources` written with a recursive `mapE_` fails the same way. The
   same program shape built before the compiler of 2026-10-19 17:27.
+- **An invalid `rsize` is accepted until the term is called.**
+  [reproduced, 2026-10-21] Violates HOST-3. `--' rsize: 2` on `shift ::
+  Real -> [Real] -> [Real]` builds when `shift` is never called;
+  Express.hs:561-581 checks at the call site, though the arity is known
+  from the signature. Repro: /work/plans/model-audit-2026-10-21/repro/F/host/h3b.loc.
+- **Two spellings of source directives.** [reproduced, 2026-10-21] HOST-3
+  and the manual write `--' rsize: 1`; goldens spec-host-7-1/8-1 write
+  `--' @rsize 1`, and the parse error suggests `@rsize 1`
+  (Desugar.hs:918). Both build; no item names the canonical form (same for
+  `name:`/`@name`).

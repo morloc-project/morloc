@@ -11,7 +11,7 @@ Replaced by CLS-7: a class may give a method a default body.
 ### CLS-2 The type at the use site selects the instance
 Intent: proposed
 Tests: spec-cls-2-1, spec-cls-2-2, spec-cls-2-3, spec-cls-2-4, spec-cls-2-5, spec-cls-2-6
-Code: unaudited
+Code: deviates (issues/typeclasses.md)
 
 A method used at type `T` runs an implementation of the instance for `T`.
 That instance's implementations are those it gives, in any language and any
@@ -20,20 +20,20 @@ of SIG-2.
 
 ### CLS-3 A method name belongs to one class
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 Two classes in scope that declare the same method name are a compile error.
 Methods are not importable by name (MOD-10).
 
 ### CLS-4 A constraint with no argument is a compile error
 Intent: ruled 2026-09-23
-Code: deviates (unfiled; accepted today)
+Code: conforms 2026-10-21
 
 `C => T`, where the constraint names a class but no type, is rejected.
 
 ### CLS-5 Superclasses and instance contexts are obligations
 Intent: proposed
-Code: deviates (unfiled; see issues/typeclasses.md)
+Code: deviates (issues/typeclasses.md)
 
 `class C a => D a` requires an instance `C T` for every instance `D T`, and
 a `D a` constraint grants the methods of `C`. `instance C a => C (F a)`

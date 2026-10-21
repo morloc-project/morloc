@@ -74,3 +74,21 @@
   description with a warning, so `@tabel.header none` is accepted and the
   header-required default applies. Only `@table.*` is reserved. Open:
   should every unknown key be an error on an argument with `@form table`?
+- **Argument files are read by extension before their bytes.**
+  [reproduced, 2026-10-21] Violates CLI-1. A MessagePack packet copied to
+  `p.json` fails "serialization error: JSON parse error"; as `p.txt` it
+  works. cli.rs:2483 (`ends_with(".json")`) and :2502 (`.mpk`/`.msgpack`)
+  dispatch before the packet and magic checks. A missing `p.mp` gets "is
+  not inline JSON ... set `source: file`" (old spelling); a missing
+  `p.json` gets "not found". Repro: /work/plans/model-audit-2026-10-21/repro/G/args/a1.loc.
+- **`-f packet`/`-f voidstar` of a top-level null or `()` writes
+  nothing.** [reproduced, 2026-10-21] Violates CLI-5. `nul x = Null`:
+  `-f packet nul 1 | wc -c` is 0 (`-f mpk` writes `c0`; `--keep-null`
+  restores it), so a downstream `-` reader cannot tell no value from a
+  broken pipe. Deliberate in morloc-nexus dispatch.rs:941-947, to avoid a
+  phantom packet after an `@stdout` stream. Either CLI-5 carves out
+  streaming commands or the code narrows the condition. Repro:
+  /work/plans/model-audit-2026-10-21/repro/G/out/o.loc.
+- **Help formats a flag's default two ways.** [reproduced, 2026-10-21]
+  `scan -h`: `-i` shows `type: Bool` then `default: false` on its own line;
+  `-m` shows `type: Int [default: 0]`.

@@ -117,3 +117,16 @@
   current compiler. Repro attempt: the #179 program under
   /work/plans/issues-2026-10-05/r5-rust-loop-clone/mapped, built in a new
   directory right after a compiler reinstall.
+- **A refused rebuild leaves its staging tree.** [reproduced, 2026-10-21]
+  Against ART-2/ART-3. With a plain `q-build/` (no marker) or a symlink
+  `r-build`, `morloc make -o q main.loc` fails "Refusing to overwrite
+  '.../q-build': not a morloc build directory" and leaves
+  `q-build.tmp.<pid>/`. Build.hs:194 `liftIO $ swapIn ...` raises an
+  IOException (`ioError . userError`, :340) that the MorlocMonad
+  `catchError` (:196) does not catch, so `discardStagingDir` never runs;
+  any IO exception in `buildAll` escapes the same way. Repro: /work/plans/model-audit-2026-10-21/repro/I1/p1/.
+- **A failed owner record leaks an unsweepable run directory.** [read,
+  2026-10-21] process.rs make_tmpdir (1682-1710): if writing or renaming
+  `.owner.tmp` fails it returns Err after mkdtemp, leaving
+  `/tmp/morloc.XXXXXX`; the startup sweep skips directories without
+  `.owner` (process.rs:1760). Remove the directory on that path.

@@ -4,7 +4,7 @@
 
 ### FAIL-1 Failure is a value, not an effect
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A fallible operation returns `Try e a`, an ordinary `data` type with arms
 `Err e` and `Ok a`. There is no failure effect, and no catch construct for
@@ -12,7 +12,7 @@ effects.
 
 ### FAIL-2 `@throw` abandons the computation
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
     @throw :: Str -> a
 
@@ -21,7 +21,7 @@ It has no effect row.
 
 ### FAIL-3 `@try` turns a recoverable failure into `Err`
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
     @try :: <e> a -> <e> (Try Str a)
 
@@ -31,7 +31,7 @@ passes through unchanged, and a pure argument gives a pure result.
 
 ### FAIL-4 `@try` catches every recoverable failure, and nothing else
 Intent: ruled 2026-07-18
-Code: unaudited
+Code: conforms 2026-10-21
 
 Morloc throws and the native exceptions of sourced code are alike
 recoverable failures, and `@try` catches both. Internal morloc errors
@@ -39,7 +39,7 @@ recoverable failures, and `@try` catches both. Internal morloc errors
 
 ### FAIL-5 A failure crosses languages unchanged
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A recoverable failure raised in a call realized in another language than the
 `@try` is caught as if it were raised in the same language.

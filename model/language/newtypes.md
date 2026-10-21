@@ -56,7 +56,7 @@ error.
 ### NEWT-7 A newtype with a representation can be unwrapped
 Intent: ruled 2026-10-18
 Tests: spec-newt-7-1, spec-newt-7-2, spec-newt-7-3, spec-newt-7-4, spec-newt-7-5, spec-newt-7-6, spec-newt-7-7, spec-newt-7-8, spec-newt-7-9, spec-newt-7-10, spec-newt-7-11, spec-newt-7-12
-Code: unaudited
+Code: conforms 2026-10-21
 
 `newtype N vs = T`, declared where the compiler's `Packable` class is in
 scope, gives `unpack :: N vs -> T`, as if `instance Packable T (N vs)` gave
@@ -74,7 +74,7 @@ alternatives to it (REAL-1).
 ### NEWT-8 `deriving (Packable)` adds `pack`
 Intent: ruled 2026-10-18
 Tests: spec-newt-8-1, spec-newt-8-2, spec-newt-8-3, spec-newt-8-4, spec-newt-8-5, spec-newt-8-6, spec-newt-8-7, spec-newt-8-8, spec-newt-8-9
-Code: unaudited
+Code: conforms 2026-10-21
 
 `newtype N vs = T deriving (Packable)` also gives `pack :: T -> N vs`, a
 representation cast realized as in NEWT-7. It is rejected unless every
@@ -88,7 +88,7 @@ determine (a dimension, a phantom tag) would be claimed unchecked.
 ### NEWT-9 A type with a `Packable` instance has a representation
 Intent: ruled 2026-10-18
 Tests: spec-newt-9-1, spec-newt-9-2, spec-newt-9-3, spec-newt-9-4, spec-newt-9-5, spec-newt-9-6, spec-newt-9-7
-Code: unaudited
+Code: conforms 2026-10-21
 
 An instance `Packable W (N as)` requires `newtype N vs = T`, and `W` is
 `T[vs := as]` as types (aliases expanded, Nat expressions normalized). The

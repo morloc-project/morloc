@@ -6,7 +6,7 @@ Stream types, file-backed streams, `@collect`, `@fold`. Prefix: STRM.
 
 ### STRM-1 A stream's element type is fixed at open and checked against the file
 Intent: proposed
-Code: unaudited
+Code: deviates (../runtime/issues/ifile-access.md)
 
 `@open`, `@append`, `@stdin`, `@stdout` and `@stderr` take their element type
 from an inline ascription. Opening a file whose recorded schema differs is an
@@ -14,7 +14,7 @@ from an inline ascription. Opening a file whose recorded schema differs is an
 
 ### STRM-2 A closed `OStream` reads back as the elements written, in order
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 Compression level, `@flush` and buffer size change sub-packet boundaries,
 never the elements. An `IStream` yields them in order, one batch per `@next`,
@@ -34,7 +34,7 @@ means.
 
 ### STRM-4 A `@collect` command's output is every batch its sink receives, in order
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 The producer is handed a sink and calls it once per batch. An action applies
 to everything the command streams, whatever the shape of its body: several

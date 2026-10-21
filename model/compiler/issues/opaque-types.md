@@ -36,3 +36,12 @@ serialize unless a `Packable` instance gives it a wire form.
   required only where a value crosses a pool or reaches the nexus, with a
   located error naming the type there, or is an opaque type allowed only
   with a Packable instance?
+
+- **An opaque type crossing a boundary is rejected with an internal
+  message.** [reproduced, 2026-10-21] NEWT-5's rejection is right but the
+  diagnostic is "Cannot find constructor in VarF "int" finalType=Box":
+  `type Box` with Py and Cpp forms, Py `mk :: Int -> Box`, Cpp
+  `unbox :: Box -> Int`, `go x = unbox (mk x)`. Returning `Box` to the
+  nexus gives the same message located at the export list. It should say
+  `Box` has no wire form and cannot cross from py to cpp. Repro:
+  /work/plans/model-audit-2026-10-21/repro/B/t/n5/a.loc, b.loc.

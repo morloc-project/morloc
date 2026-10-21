@@ -27,7 +27,7 @@ Code: unaudited
 
 ### TEQ-4 Record schemas are equal up to field order
 Intent: proposed
-Code: deviates (issues/typecheck.md)
+Code: deviates (issues/typecheck.md, issues/records.md)
 
 `{x = Int, y = Str} == {y = Str, x = Int}` at kind `Rec`. A type-level
 expression is equal to an identical expression, whether or not it reduces.

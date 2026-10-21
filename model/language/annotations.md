@@ -20,14 +20,14 @@ instrumented (see `EFF`).
 
 ### ANN-3 Logging and benchmarking never change a program's value or stdout
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 Log and benchmark lines go to stderr. A program with every label's `log` and
 `benchmark` turned off computes and prints the same result.
 
 ### ANN-4 A cached call returns the value the uncached call would
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `cache: true` is the user's claim that the labeled call is idempotent. A
 hit requires the same code and equal argument values. A call that fails is

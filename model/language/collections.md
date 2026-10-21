@@ -4,20 +4,20 @@ Lists, tuples and maps: construction, access, slicing. Prefix: COLL.
 
 ### COLL-1 A list is homogeneous and of any length
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `[T]` is the same type as `List T`. Every element of a `[T]` has type `T`.
 
 ### COLL-2 A tuple of n types is `TupleN` of those types, for any n
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `(T1, ..., Tn) == TupleN T1 ... Tn` for n >= 2, and there is no upper bound
 on n. Tuple types and tuple values share the same parenthesized syntax.
 
 ### COLL-3 Indexing and slicing follow Python's semantics
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 `.[i]` picks an element, `.[i:j]` a sub-range and `.[i:j:k]` a strided
 sub-range. A negative index counts from the end, out-of-range slice bounds

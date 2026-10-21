@@ -11,7 +11,7 @@ moves).
 
 ### RUST-1 A sourced Rust function never takes `&mut`
 Intent: ruled 2026-10-18
-Code: unaudited
+Code: conforms 2026-10-21
 
 Morloc passes a `Copy` argument by value and any other value as `&T`,
 so a parameter of type `&mut T` does not build. A type with interior
@@ -22,7 +22,7 @@ holds until morloc has a way to say where a value may be changed.
 
 ### RUST-2 A sourced Rust function returns an owned value
 Intent: ruled 2026-10-18
-Code: unaudited
+Code: conforms 2026-10-21
 
 A sourced Rust function's result borrows from none of its arguments: its
 type has no lifetime tied to a parameter. Morloc binds results as owned

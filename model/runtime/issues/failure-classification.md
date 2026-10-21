@@ -36,3 +36,46 @@ failure (a fail packet). Several sites are misclassified.
 - **Top-level `Err` keyed by arm name.** Gap: morloc-nexus/src/dispatch.rs
   `die_on_top_level_err` fails the run for any variant arm named `Err`, not
   only `Try`. Open: should only `Try`'s `Err` fail the run?
+- **Sourced C++ code catches morloc's infrastructure failures; the run
+  then exits 0.** [reproduced 3/3, 2026-10-21] Violates PANIC-5,
+  PANIC-13 and DAEMON-14. `MorlocInfraError` and `MorlocPipeClosed`
+  (data/lang/cpp/pool.cpp:89, :648) derive from `std::runtime_error`.
+  `safeApply f x = try { return f(x); } catch (const std::exception&)
+  { return -1; }` (C++), `die x = os._exit(9)` (py), `run x = safeApply
+  die x`: `run 3` reports the Python pool ended, prints `-1`, exits 0. The
+  nexus also does not turn a recorded pool death into a failed exit when
+  the call returned. Exiting at the site, as R does, closes it (not
+  deriving from std::exception still leaves `catch (...)`). Repro:
+  /work/plans/model-audit-2026-10-21/repro/I2/p5/.
+- **A panic during a user panic's unwinding in a Rust pool aborts with
+  SIGABRT.** [reproduced, 2026-10-21] Violates PANIC-1 (exits 70). A
+  source `twice` whose local's `Drop` panics after `panic!("first")`
+  prints "thread caused non-unwinding panic. aborting." and "Pool process
+  crashed with signal 6"; neither message is reported. Cause:
+  morloc-runtime-types/src/panic.rs:156-160 returns UnwindQuietly for a
+  nested panic in SCOPE_HOST. Repro: /work/plans/model-audit-2026-10-21/repro/I2/p1/.
+- **Requests queued at daemon shutdown are closed unanswered.** [read,
+  2026-10-21] Violates DAEMON-6 (refusals answered 503). daemon_run pops
+  every queued job and `close`s it (daemon_ffi.rs:3666-3671); workers stop
+  popping once SHUTDOWN_REQUESTED is set (:3738). Only a popped request
+  gets "Daemon shutting down." (:2062).
+- **Rules with no answer.** [read, 2026-10-21]
+  - NET-5 bounds a reply wait to an unnamed callee at 30 s; the code waits
+    forever (ipc_ffi.rs:713-720), as DAEMON-6 (no call deadline) requires.
+    Candidates: the wait ends only at end of file; or the callee names
+    itself.
+  - A 503 refusal's class: NET-3's busy refusal is `{"error":"too many
+    connections"}` with no `status`/`class`; shutdown reuses `recovering`
+    (meant for restarting a crashed pool). deploy-serving.asc:143-152 lists
+    neither, nor 401/403.
+  - PANIC-4 says a thread finding a poisoned lock never uses the data;
+    fv.rs:69/113/160 (STATE-4), voidstar.rs:838, compression.rs:915,
+    shm.rs:1978, stream.rs:4316/4424 take it by design. State the exception
+    or route them through `poisoned_lock()`.
+  - Which user catches may hold morloc failures: a Rust `catch_unwind`, a
+    Python bare `except:`, a C++ `catch (...)` all can. Say the guarantee
+    covers morloc's catches only, or end the pool at the site.
+  - [speculative] The panic hook ignores `can_unwind`: a panic in an
+    `extern "C"` callback inside a runtime catch scope (e.g. Arrow
+    `get_next` inside `decode`, arrow_ffi.rs:143) aborts unless wrapped in
+    `outside_scope`; no source rule checks the wrapping.

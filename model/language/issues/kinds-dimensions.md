@@ -37,3 +37,26 @@
   reads an under-applied kinded head three ways: collectKindedVarsFromScope
   matches arguments to parameters by position, fillMissingKindArgs by kind
   bucket, and alias kind inference treats every argument as Type.
+- **Division by zero at the Nat level is not reported as such.**
+  [reproduced, 2026-10-21] Gap in KIND-3. `g :: Buf (7 / 0) -> Int` against
+  `Buf 3` fails "cannot decide whether these kind-level equations have a
+  solution". Candidates: a located type error where reduced; undefined.
+- **Recursive newtypes through a container.** [reproduced, 2026-10-21] Gap
+  in NEWT-6. `newtype T = [T]` and `newtype T = (Int, ?T)` are accepted
+  (the latter round-trips `[1,[2,null]]`), but `newtype A = [B]; newtype
+  B = (C, Int); newtype C = A` is rejected as mutual recursion. Candidates:
+  (a) a cycle guarded by `[ ]`/`?` is legal, self or mutual (as ALIAS-7);
+  (b) every representation cycle is an error. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/rec1.loc,
+  rec2.loc, cyc3.loc.
+- **Hand-written Packable instances bypass NEWT-8's determinacy rule.**
+  [read, 2026-10-21] NEWT-8 forbids deriving `pack` for a parameter the
+  representation does not determine, since the claim would be unchecked,
+  but NEWT-9 allows `instance Packable (List a) (Buffer n a)` (manual
+  buffer.loc, stdlib `Vector`). No item says whether such a `pack` is
+  trusted, checked at run time, or illegal.
+- **A slice of a `Vector` takes any length.** [reproduced, 2026-10-21]
+  Violates DIM-3 on a path the compiler creates. `s3 :: Vector 3 Real ->
+  Vector 7 Real; s3 y = .[0:2] y` typechecks and prints `[1,2]`; the
+  manual's conv example then returns 7 elements typed `Vector 6`. No item
+  types a slice of `Vector n a` (COLL-3 covers `[T]`). Repro: /work/plans/model-audit-2026-10-21/repro/C/dim/sl.loc,
+  conv.loc.

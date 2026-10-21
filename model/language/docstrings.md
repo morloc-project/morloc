@@ -4,7 +4,7 @@
 
 ### DOC-1 A docstring attaches to what follows it
 Intent: proposed
-Code: unaudited
+Code: conforms 2026-10-21
 
 A `--'` block attaches to the next module header, signature, type inside a
 signature, `source` list item, `type`/`newtype`/`record` declaration, or
@@ -14,7 +14,7 @@ directive is kept as prose with a warning.
 
 ### DOC-2 A docstring above a signature describes the term
 Intent: ruled 2026-10-08
-Code: unaudited
+Code: conforms 2026-10-21
 
 It is the term's description, never the description of the signature's
 types or of the return type.

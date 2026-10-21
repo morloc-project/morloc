@@ -45,3 +45,43 @@
   phantom-py-arg/ (`morloc make -o phantom main.loc`; drop `pyPos` from `f`
   and it builds). Seen in the bio suite, whose checks run in Python on
   `Mapping Transcript Genome` values.
+
+- **UNSOUND: a record converts to an anonymous record type with its fields
+  reordered, swapping values.** [reproduced, 2026-10-21] Breaks TEQ-6
+  (records are nominal today) and the field-order rule of c74060f6.
+  `record A where x :: Int; y :: Int` (root-py),
+  `f :: A -> {y = Int, x = Int}; f r = r`: `./e4 f '{"x":1,"y":2}'` prints
+  `{"y":1,"x":2}`. Anonymous-to-anonymous with different order is rejected
+  ("Rec field order differs"), and a missing field is rejected, so only
+  the record-vs-anonymous path ignores order. Two distinct records then
+  convert through it: with `record B {y, x}`,
+  `toAnon :: A -> {x = Int, y = Int}; f :: A -> B; f r = toAnon r`
+  typechecks (`f r = r` is rejected) and swaps values. Equality is not
+  transitive. Repro: /work/plans/model-audit-2026-10-21/repro/B/t/teq/e4.loc, e6.loc. Cause not located (record
+  vs anonymous arm of subtyping).
+- **TEQ-4 contradicts the code's field-order rule.** [reproduced] TEQ-4
+  (proposed) says `{x = Int, y = Str} == {y = Str, x = Int}`; c74060f6
+  made field order part of a Rec, and `Frame {x,y}` vs `Frame {y,x}` is
+  rejected "Rec field order differs" (/work/plans/model-audit-2026-10-21/repro/B/t/kind/fo.loc). Needs a ruling:
+  (a) amend TEQ-4, order is part of a Rec (matches the positional wire
+  layout); (b) keep TEQ-4 and reorder at boundaries. The unsound entry
+  above depends on the answer.
+- **A record literal in Python or R needs a native form.** [reproduced,
+  2026-10-21] Violates NATIVE-3 (Python and R need no native definition).
+  `record P = P { a :: Int, b :: Str }; lit n = inc { b = "z", a = n }`
+  under root-py or root-r fails at make "No concrete py type for record
+  'P'"; getters and setters alone build; `record Py => P = "dict"` fixes it.
+  Cause: CodeGenerator/Infer.hs:869 (`namesRecord`) throws for every
+  language. This is also why the manual writes `record Py` lines
+  (manual.md). Repro: /work/plans/model-audit-2026-10-21/repro/C/rec/set-py.loc, nolit-py.loc.
+- **Recursive records: SUM-4 contradicts ALIAS-7, and the code splits the
+  difference.** [reproduced, 2026-10-21] SUM-4 makes a cycle of records
+  and aliases alone an error; ALIAS-7 (ruled) allows a guarded recursive
+  alias. `type T = (Int, [T])` and `record R { v :: Int, next :: ?R }` build
+  and run in py; two records cycling through `?` are rejected as mutual
+  recursion. The self-recursive record fails in g++ (`MlcNode<R>` before
+  `R`). Question: is a record cycle guarded by `?`/`[ ]` legal, self and
+  mutual alike? Repro: /work/plans/model-audit-2026-10-21/repro/C/sum/cyc1..4.loc.
+- **A JSON record argument with unknown keys is accepted.** [reproduced,
+  2026-10-21] `'{"a":1,"b":"x","c":4}'` for `P {a, b}` runs in py, cpp and
+  r; a missing key is refused. No item covers extra keys on input.
