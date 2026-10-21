@@ -21,3 +21,9 @@ What a label (`lab@f`) wraps. ANN-7 to ANN-12.
   says the next equal call is served "in this run or any later one".
   Candidates: key per function and argument values; or per call site, and
   ANN-4 says so. Repro: /work/plans/model-audit-2026-10-21/repro/E/ann/s2.loc, s3.loc.
+- **Log template checks the manual promises are missing.** [reproduced,
+  2026-10-21] runs-logging.asc:78-79 says a `log-template` with all three
+  subfields `null` and `log: true` is rejected at compile time; only a
+  per-label one is, and a program-wide one builds and logs nothing.
+  :99-100 says an unknown placeholder error cites the YAML entry; it cites
+  the `.loc` label site.

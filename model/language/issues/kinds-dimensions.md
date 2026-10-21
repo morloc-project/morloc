@@ -60,3 +60,7 @@
   manual's conv example then returns 7 elements typed `Vector 6`. No item
   types a slice of `Vector n a` (COLL-3 covers `[T]`). Repro: /work/plans/model-audit-2026-10-21/repro/C/dim/sl.loc,
   conv.loc.
+- **A Rec alias used as a term's type fails at code generation.**
+  [reproduced, 2026-10-21] Violates KIND-2. The types-kinds.asc recdef
+  example (a `type` alias of kind Rec used to type a term) passes typecheck
+  and fails at make with an internal message instead of a kind error.

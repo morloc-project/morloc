@@ -9,15 +9,11 @@ code. Found by the 2026-10-21 audit [read unless marked].
   (shm_types.rs ShmHeader/BlockHeader) has a `poison` word where
   "reserved" is, `next_index` and `grow_lock` after `cursor`, a zeroed
   absorbed header (no DEAD magic), and a 16-bit generation in the top bits
-  of the size word. arch-build-shm.asc:28-38, :50, :52 repeat the stale
-  layout; :58 says first-fit (it is next-fit) and :20-21 "twice the last"
-  (it is twice the largest this process maps, SHM-12).
+  of the size word. (The manual's arch-build-shm.asc now describes the
+  code.)
 - **FMT-2 omits the reference generation.** Data packets carry the SHM-13
   generation at command bytes 18-19 (little-endian, 0 = unchecked;
-  packet.rs:447). FMT-2 and arch-build-packets.asc:45-55 list bytes 13-17
-  only. arch-build-packets.asc:21 calls `mode` reserved (bit 0 is
-  MODE_KEEP, FMT-1, NET-7) and :87-88 says each call opens and closes its
-  own connection, against NET-7 and arch-build-workers.asc:161-164.
+  packet.rs:447). FMT-2 lists data bytes 13-17 only.
 - **SHM-6 does not say who zeroes a new block under poison.** Under
   MORLOC_SHM_POISON=1 a released block holds 0xDB; shcalloc relies on a new
   block reading zero (shm.rs:1203), which holds because shmalloc_unlocked
@@ -37,11 +33,11 @@ code. Found by the 2026-10-21 audit [read unless marked].
   by user code while another thread is inside `frames_key_make` waits
   forever at its first frame. The window is one `pthread_key_create`.
   FORK-11 covers only std stream/env locks.
-- **Undocumented runtime variables.** environmental-variables.asc omits
-  MORLOC_SHM_POISON (SHM-6), MORLOC_PY_POOL, MORLOC_CHANNEL_DEPTH,
-  MORLOC_WRITE_BEHIND_DEPTH, MORLOC_ARROW_NO_BORROW, MORLOC_MALLOC_TUNING,
-  MORLOC_R_GC_BUDGET, MORLOC_FORBID_SELF_CALL, MORLOC_REQUIRE_NAMESPACES,
-  MORLOC_MCP_TOKEN, MORLOC_EVAL_ALLOW_NO_AUTH. Some may be internal.
+- **Runtime variables with no ruling on whether users set them.** [read]
+  MORLOC_CHANNEL_DEPTH (default 4), MORLOC_ARROW_NO_BORROW (disables table
+  pass-through), MORLOC_MALLOC_TUNING (`off` skips glibc tuning) and
+  MORLOC_R_GC_BUDGET (bytes, default 32 MiB, 0 off) are read by the runtime
+  and absent from environmental-variables.asc.
 - **arch-build-artifacts.asc:35-37** says a failed build leaves the
   previous build in place; false for ART-3's kill window and for a refused
   rebuild (build-and-text.md). Build.hs:328's "Atomically replace" comment
@@ -60,12 +56,3 @@ code. Found by the 2026-10-21 audit [read unless marked].
   models; items also cite RunSweep, DaemonShutdown, CrossingConn,
   ForkPool, PanicExit, SlotSeqlock, LocalSweep, QueueHandoff,
   SlotRelease, ChannelWait, QueueWake, AheadJob.
-- **Streaming and serving pages.** arch-build-streaming.asc:96-97 gives the
-  queue bound as 7 (the maximum; the default is `frame_workers().clamp(2,
-  4)`, lowered by SLOT-32); :109-112 and :42 give only the CLI ending of an
-  unclosed stream. arch-build-workers.asc:11-13 says the MCP server runs a
-  fixed worker set; it serves up to 128 connections and limits only
-  `tools/call` (DAEMON-16). environmental-variables.asc also omits
-  XDG_RUNTIME_DIR (NET-4) and MORLOC_STATE, and does not state
-  MORLOC_WRITE_BUFFER_BYTES's 4096 floor or MORLOC_REGISTRY_SLOT_COUNT's
-  65536 cap and 0-as-default (SLOT-17).

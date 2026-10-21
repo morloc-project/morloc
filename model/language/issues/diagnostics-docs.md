@@ -12,11 +12,6 @@
   the alias's other directives into the signature but not its media type,
   because the signature-level check (Docstrings.rejectAuthoredMime) would
   read it as written there.
-- [reproduced] The manual's docstring-inheritance example
-  (docs repo, types-newtype.asc "Docstring inheritance") shows
-  `Return: CipherText` and says metavars are not printed in `--help`; the
-  compiler prints `type: Str`, `Return: Str`. Repro:
-  `/work/plans/issues/164/repro/a2-crypt/`.
 - [reproduced] Unused imports warned at library/Morloc/Frontend/Treeify.hs:38
   (Control.Monad.IO.Class).
 - [reproduced] A `match` whose branches differ in type (a value beside a
@@ -70,3 +65,8 @@
 - **A literal `-0.0` loses its sign in the nexus.** [reproduced,
   2026-10-21] `c = -0.0` is stored as `"value":"0.0"` in the manifest and
   prints `0`; the same value from a CSV cell prints `-0`.
+- **A pool error prints runtime-internal detail and the wrong location.**
+  [reproduced, 2026-10-21] The cli-output.asc sift example (`total f = do`
+  reading a stream) now prints "Error (pymorloc.c:4088 in
+  pybinding__mlc_next):" before the message and locates it at the `total f =
+  do` line rather than the `@next` call (DIAG-3).
