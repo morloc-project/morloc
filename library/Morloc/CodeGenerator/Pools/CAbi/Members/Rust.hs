@@ -72,6 +72,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , toIType
   )
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.ValueArgs (appValueArgs, valueArgsF)
 import Morloc.CodeGenerator.Ownership
 import Morloc.Build.CargoLock (mergeCargoLocks)
 import qualified Morloc.Build.Params as BP
@@ -115,6 +116,9 @@ data RustState = RustState
   , rsCScope :: Scope
   -- ^ The merged Rust concrete typedef scope; resolves a recursive back-ref
   -- (@RecF@) to its concrete struct name (as C++'s translatorCScope does).
+  , rsGScope :: Scope
+  -- ^ The general typedef scope: the declared kind of each type parameter,
+  -- which decides the arguments that are values ('valueArgsF').
   , rsThinClosures :: Set.Set Text
   -- ^ Closure manifolds emitted as a plain closure: see 'thinClosures'.
   , rsSrcTypeVarMask :: Map.Map SrcName [(Bool, Bool)]
@@ -146,7 +150,7 @@ data RustState = RustState
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 []
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 []
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -1445,7 +1449,7 @@ translate srcs es0 = do
   let closureTable = Map.map closureSchemaTexts closureAsts
   logTemplates <- collectRenderedTemplates rustLang
   stageTable <- stageTableEntries
-  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool rustCaps es, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds (planPool rustCaps es) es0) es0}
+  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsGScope = generalScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool rustCaps es, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds (planPool rustCaps es) es0) es0}
       (code, stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwSystemError . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
 
@@ -1759,8 +1763,8 @@ stageLookupDoc tbl =
 -- one representative field list (from a use site). Unlike the shared recmap
 -- (which only collects @= "struct"@ records), this also collects user-mapped
 -- records (@record Rust => X = "Name"@) so their marshalling impls are emitted.
-collectRustRecords :: [SerialManifold] -> [(FVar, [TypeF], [(Key, TypeF)])]
-collectRustRecords =
+collectRustRecords :: Scope -> [SerialManifold] -> [(FVar, [TypeF], [(Key, TypeF)])]
+collectRustRecords gscope =
   -- One entry per record; keep the first field list. A generated struct
   -- covers every instantiation with generic parameters, so it is one entry
   -- per general name. A user-mapped struct may be a template the user
@@ -1780,12 +1784,12 @@ collectRustRecords =
     -- A table is an Arrow record batch with its own marshalling in
     -- rustmorloc, not a struct to generate.
     seek (NamF NamTable _ _ _) = []
-    seek (NamF _ v ps rs) = (v, ps, rs) : concatMap seek ps <> concatMap (seek . snd) rs
+    seek (NamF _ v@(FV gv _) ps rs) = (v, ps, rs) : concatMap seek (valueArgsF gscope gv ps) <> concatMap (seek . snd) rs
     -- A record reachable only as a `data` arm's field still needs its
     -- struct emitted, so the walk descends through arms as the enum
     -- collector's does.
-    seek (VariantF _ ps as) = concatMap seek ps <> concatMap (concatMap seek . snd) as
-    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (VariantF (FV gv _) ps as) = concatMap seek (valueArgsF gscope gv ps) <> concatMap (concatMap seek . snd) as
+    seek (AppF t ts) = seek t <> concatMap seek (appValueArgs gscope t ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
     seek _ = []
@@ -1798,8 +1802,8 @@ bodyName (NamU _ (TV n) _ _) = Just n
 bodyName _ = Nothing
 
 -- | Every argument-free @data@ type used in these manifolds, unmerged.
-collectRustEnums :: [SerialManifold] -> [(FVar, [TypeF], [Text])]
-collectRustEnums = concatMap (runIdentity . foldWithSerialManifoldM fm)
+collectRustEnums :: Scope -> [SerialManifold] -> [(FVar, [TypeF], [Text])]
+collectRustEnums gscope = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
     ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
@@ -1808,17 +1812,17 @@ collectRustEnums = concatMap (runIdentity . foldWithSerialManifoldM fm)
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [TypeF], [Text])]
-    seek (EnumF v ps ns) = (v, ps, ns) : concatMap seek ps
-    seek (VariantF _ ps as) = concatMap seek ps <> concatMap (concatMap seek . snd) as
+    seek (EnumF v@(FV gv _) ps ns) = (v, ps, ns) : concatMap seek (valueArgsF gscope gv ps)
+    seek (VariantF (FV gv _) ps as) = concatMap seek (valueArgsF gscope gv ps) <> concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
-    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (AppF t ts) = seek t <> concatMap seek (appValueArgs gscope t ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
     seek _ = []
 
 -- | Every payload-bearing @data@ type used in these manifolds, unmerged.
-collectRustVariants :: [SerialManifold] -> [(FVar, [TypeF], [(Text, [TypeF])])]
-collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
+collectRustVariants :: Scope -> [SerialManifold] -> [(FVar, [TypeF], [(Text, [TypeF])])]
+collectRustVariants gscope = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
     ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
@@ -1827,9 +1831,9 @@ collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [TypeF], [(Text, [TypeF])])]
-    seek (VariantF v ps as) = (v, ps, as) : concatMap seek ps <> concatMap (concatMap seek . snd) as
+    seek (VariantF v@(FV gv _) ps as) = (v, ps, as) : concatMap seek (valueArgsF gscope gv ps) <> concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
-    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (AppF t ts) = seek t <> concatMap seek (appValueArgs gscope t ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
     seek _ = []
@@ -1840,7 +1844,8 @@ collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
 -- sourced Rust and gets only the impls.
 generateRustVariants :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> RustM [MDoc]
 generateRustVariants closureAsts es = do
-  named <- mapM occurrence (collectRustVariants es)
+  gscope <- CMS.gets rsGScope
+  named <- mapM occurrence (collectRustVariants gscope es)
   wireArms <- variantWireArms rustTypeOf closureAsts es
   -- Merged by rendered name: one declaration per name.
   concat <$> mapM (uncurry (merged wireArms)) (Map.toList (Map.fromListWith (flip (<>)) named))
@@ -1909,8 +1914,9 @@ rustUserMapsVariant gv cvText = do
 -- unless the user maps it.
 generateRustEnums :: [SerialManifold] -> RustM [MDoc]
 generateRustEnums es = do
+  gscope <- CMS.gets rsGScope
   named <- mapM (\(v, ps, ns) -> (\n -> (render n, (v, ps, ns))) <$> rustTypeOf (EnumF v ps ns))
-                (collectRustEnums es)
+                (collectRustEnums gscope es)
   -- The longest constructor list is the complete one.
   concat <$> mapM makeOne (Map.elems (Map.fromListWith longest named))
   where
@@ -1940,7 +1946,8 @@ generateRustEnums es = do
 -- emitted for them.
 generateRustStructs :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> RustM [MDoc]
 generateRustStructs closureAsts es = do
-  keyed <- concat <$> mapM makeOne (collectRustRecords es)
+  gscope <- CMS.gets rsGScope
+  keyed <- concat <$> mapM makeOne (collectRustRecords gscope es)
   -- A Rust struct gets one impl. Instantiations of a user-mapped record that
   -- render the same struct must agree on its fields (they differ only in
   -- parameters no field uses); otherwise one struct cannot hold both.

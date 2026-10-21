@@ -63,6 +63,7 @@ import qualified Morloc.Build.Params as BP
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.ValueArgs (appValueArgs, valueArgsF)
 import Morloc.CodeGenerator.Ownership (LetMode (..), LetPlan (..), OwnCaps (..), PoolPlan (..), byValueIndices, changedSlots, emptyPoolPlan, letMode, letPlan, nativeLets, planPool)
 import Morloc.CodeGenerator.OwnershipCheck (checkManifold)
 import System.Environment (lookupEnv)
@@ -295,10 +296,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
             params <- typeParams (zip (map snd (recFields rec)) (map snd rs))
             return $ recName rec <> params
           Nothing -> error $ "Record missing from recmap: " <> show t <> " from map: " <> show recmap
-      -- Typed `Table n r` (NamF tagged NamTable) lowers to mlc::ArrowTable
-      -- the same way as the kindless form. The concrete-name slot is
-      -- empty post-refactor; the structural NamTable identifier carries
-      -- the dispatch.
+      -- A table's wire shape ('serialAstToType' of its serial form).
       f (NamF NamTable _ _ _) = return "mlc::ArrowTable"
       f (NamF _ (FV _ (CV s)) ps _) = do
         let (typeTs, kindCount) = partitionKindArgsF ps
@@ -420,6 +418,9 @@ data CppTranslatorState = CppTranslatorState
   -- Without this disambiguation, the inline @gv == cv@ leak guard would
   -- false-positive on case 1.
   , translatorCScope :: Scope
+  , translatorGScope :: Scope
+  -- ^ The general typedef scope: the declared kind of each type parameter,
+  -- which decides the arguments that are values ('valueArgsF').
   , translatorDebugInfo :: Int -> (Text, Text)
   -- ^ Snapshot of per-manifold @(name, srcloc)@ metadata (from
   -- 'makeManifoldDebugInfoLookup'); consumed by 'cppDebugWrap'.
@@ -466,6 +467,7 @@ instance Defaultable CppTranslatorState where
       , translatorVariantNames = Set.empty
       , translatorSchemas = Map.empty
       , translatorCScope = Map.empty
+      , translatorGScope = Map.empty
       , translatorDebugInfo = \_ -> ("", "")
       , translatorTraceInfo = \_ -> Nothing
       , translatorDebugMode = False
@@ -550,6 +552,7 @@ translate srcs es = do
         , translatorEffectLabels = effectMap
         , translatorLogTemplates = templates
         , translatorCScope = mergedCppScope
+        , translatorGScope = generalScope
         , translatorDebugInfo = debugInfo
         , translatorTraceInfo = traceInfo
         , translatorDebugMode = debugMode
@@ -594,8 +597,9 @@ makeCppCode ::
 makeCppCode labels srcs es univeralScopeMap closureTable0 stageTable nativeEntries = do
   -- Seeded before any type is rendered: 'cppTypeOf' consults it to tell a
   -- back-reference into a generated `data` type from an unmapped alias.
+  gscope <- CMS.gets translatorGScope
   CMS.modify $ \st -> st
-    { translatorVariantNames = Set.fromList [gv | (FV gv _, _, _) <- collectCppVariants es] }
+    { translatorVariantNames = Set.fromList [gv | (FV gv _, _, _) <- collectCppVariants gscope es] }
   templates <- CMS.gets translatorLogTemplates
   (srcFwds, srcSerial, srcDeserial) <- generateSourcedSerializers univeralScopeMap es
 
@@ -732,8 +736,8 @@ cppDecode pkt typeStr ast = do
 
 -- | Collect TVar names of all named (non-anonymous) record types used
 -- in a SerialManifold tree.
-collectNamedRecordTVars :: SerialManifold -> Set.Set TVar
-collectNamedRecordTVars e0 =
+collectNamedRecordTVars :: Scope -> SerialManifold -> Set.Set TVar
+collectNamedRecordTVars gscope e0 =
   runIdentity $ foldWithSerialManifoldM fm e0
   where
     fm = defaultValue
@@ -755,11 +759,11 @@ collectNamedRecordTVars e0 =
       | c /= "struct" = Set.insert v (Set.unions (map (seekNamedRecs . snd) rs))
     seekNamedRecs (NamF _ _ _ rs) = Set.unions (map (seekNamedRecs . snd) rs)
     seekNamedRecs (FunF ts t) = Set.unions (map seekNamedRecs (t : ts))
-    seekNamedRecs (AppF t ts) = Set.unions (map seekNamedRecs (t : ts))
+    seekNamedRecs (AppF t ts) = Set.unions (map seekNamedRecs (t : appValueArgs gscope t ts))
     seekNamedRecs (OptionalF t) = seekNamedRecs t
     -- A record held in a constructor's payload needs its marshaller as
     -- much as one held in a field.
-    seekNamedRecs (VariantF _ ps as) = Set.unions (map seekNamedRecs (ps ++ concatMap snd as))
+    seekNamedRecs (VariantF (FV gv _) ps as) = Set.unions (map seekNamedRecs (valueArgsF gscope gv ps ++ concatMap snd as))
     seekNamedRecs _ = Set.empty
 
 makeTheMaker :: [Text] -> [Path] -> MorlocMonad [SysCommand]
@@ -2305,8 +2309,8 @@ cppValueChecks es = do
       return $ if isScalarCppType ty || T.isInfixOf "\"" name then [] else valueOf ty (pretty name) : fields <> movable
 
 -- | Every argument-free @data@ type reachable in this pool.
-collectCppEnums :: [SerialManifold] -> [(FVar, [Text])]
-collectCppEnums =
+collectCppEnums :: Scope -> [SerialManifold] -> [(FVar, [Text])]
+collectCppEnums gscope =
   mergeLongest
     . concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
@@ -2320,7 +2324,7 @@ collectCppEnums =
     seek (EnumF v _ ns) = [(v, ns)]
     seek (VariantF _ _ as) = concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
-    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (AppF t ts) = seek t <> concatMap seek (appValueArgs gscope t ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
     seek _ = []
@@ -2328,7 +2332,9 @@ collectCppEnums =
 -- | Declare each unmapped enum. A user-mapped type supplies its own
 -- definition, exactly as a mapped record does.
 generateCppEnums :: [SerialManifold] -> CppTranslator [MDoc]
-generateCppEnums es = concat <$> mapM makeOne (collectCppEnums es)
+generateCppEnums es = do
+  gscope <- CMS.gets translatorGScope
+  concat <$> mapM makeOne (collectCppEnums gscope es)
   where
     makeOne (FV gv (CV cvText), ctors) = do
       userMapped <- variantIsUserMapped gv cvText
@@ -2340,8 +2346,8 @@ generateCppEnums es = concat <$> mapM makeOne (collectCppEnums es)
 -- a template instantiated twice is two types, a generated type is one per
 -- instantiation whatever it was applied to -- and rendering needs the
 -- translator, so the merge happens in 'generateCppVariants'.
-collectCppVariants :: [SerialManifold] -> [(FVar, [TypeF], [(Text, [TypeF])])]
-collectCppVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
+collectCppVariants :: Scope -> [SerialManifold] -> [(FVar, [TypeF], [(Text, [TypeF])])]
+collectCppVariants gscope = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
     ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
@@ -2350,9 +2356,9 @@ collectCppVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [TypeF], [(Text, [TypeF])])]
-    seek (VariantF v ps as) = (v, ps, as) : concatMap seek ps <> concatMap (concatMap seek . snd) as
+    seek (VariantF v@(FV gv _) ps as) = (v, ps, as) : concatMap seek (valueArgsF gscope gv ps) <> concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
-    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (AppF t ts) = seek t <> concatMap seek (appValueArgs gscope t ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
     seek _ = []
@@ -2365,7 +2371,8 @@ generateCppVariants ::
   [SerialManifold] ->
   CppTranslator ([MDoc], [MDoc], [MDoc], [MDoc], [MDoc])
 generateCppVariants cfg closureAsts es = do
-  named <- mapM occurrence (collectCppVariants es)
+  gscope <- CMS.gets translatorGScope
+  named <- mapM occurrence (collectCppVariants gscope es)
   wireArms <- variantWireArms cppTypeOf closureAsts es
   -- Merged by rendered name: one declaration per name.
   parts <- mapM (uncurry (merged wireArms)) (Map.toList (Map.fromListWith (flip (<>)) named))
@@ -2510,7 +2517,8 @@ generateSourcedSerializers univeralScopeMap es0 = do
   -- named records referenced in its manifolds, closed under the records
   -- their fields name. A marshaller for a record no manifold references
   -- would name a struct whose header no source pulls in.
-  let keep = closeRecordDeps scope (Set.unions (map collectNamedRecordTVars es0))
+  gscope <- CMS.gets translatorGScope
+  let keep = closeRecordDeps scope (Set.unions (map (collectNamedRecordTVars gscope) es0))
       typedef = Map.filterWithKey (\k entries -> Set.member k keep && not (null entries)) scope
 
   foldl groupTriple ([], [], []) . concat . Map.elems <$> Map.mapWithKeyM (makeSerials scope) typedef

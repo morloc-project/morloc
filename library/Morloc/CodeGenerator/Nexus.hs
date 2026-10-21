@@ -2757,7 +2757,7 @@ namedTypesJson packedHeads instances recordTypes dataTypes ts =
             | otherwise ->
                 let nm = render (pretty v)
                     seen' = nm : seen
-                in (o, nm, map (fmap (unwrapColumn o)) fields)
+                in (o, nm, fields)
                      : concatMap (go seen') ps
                      <> concatMap (go seen' . snd) fields
           AppT f as -> go seen f <> concatMap (go seen) as
@@ -2765,11 +2765,6 @@ namedTypesJson packedHeads instances recordTypes dataTypes ts =
           EffectT _ b -> go seen b
           OptionalT b -> go seen b
           _ -> []
-
-    -- A table stores each column as an array; the author wrote the
-    -- element type, so that is what the definition shows.
-    unwrapColumn NamTable (AppT (VarT (TV "List")) [el]) = el
-    unwrapColumn _ t = t
 
     dedup = dedupOn defName
 

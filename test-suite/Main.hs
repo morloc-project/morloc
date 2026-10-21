@@ -28,6 +28,7 @@ import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
 import SpecTests (specTests)
 import VariantMergeTests (variantMergeTests)
+import ValueArgsTests (valueArgsTests)
 import SystemConfigTests (systemConfigTests)
 import UnitTypeTests
 import LastReadTests (lastReadTests)
@@ -110,6 +111,7 @@ unitTests =
   , versionConstraintTests
   , sizeParseTests
   , variantMergeTests
+  , valueArgsTests
   , patternChainTests
   , irrefutablePatternLexerTests
   , refutablePatternTests

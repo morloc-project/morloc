@@ -69,3 +69,8 @@ Generated code that a language's own tools refuse.
   the compiler at ee516029 on 2026-10-19 and fails now, so this is
   probably a regression in ee516029..d352b5d4. A passthrough result needs
   a copy into a reply packet (or the caller should keep its own packet).
+- [read, 2026-10-21] The C++ enum collector (Cpp.hs `collectCppEnums`) does
+  not descend into a `data` type's parameters, where the Rust one does. With
+  `data Tag a = Tag Int` used as `Tag Color`, Color an argument-free `data`
+  reached nowhere else, the C++ pool renders `Tag<Color>` without declaring
+  Color. Not reproduced.

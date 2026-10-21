@@ -30,6 +30,7 @@ import qualified Control.Monad.State as CMS
 import Control.Monad.Except (catchError)
 import Data.Functor.Const (Const (..))
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.ValueArgs (appValueArgsT, valueArgsT)
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
@@ -796,11 +797,10 @@ canHoldType' declaredRecords lang i t = do
       return (isJust (dataHeadOf gscope (VarU v)) || Map.member v cscope)
     -- the records a type holds, whether written out or named
     recordNames g ty = case ty of
-      NamT NamTable _ ps rs -> concatMap (recordNames g) (ps <> map snd rs)
-      NamT _ v ps rs -> v : concatMap (recordNames g) (ps <> map snd rs)
+      NamT _ v ps rs -> v : concatMap (recordNames g) (valueArgsT g v ps <> map snd rs)
       VarT v -> [v | namesRecord g v]
       FunT ins out -> concatMap (recordNames g) (out : ins)
-      AppT f xs -> concatMap (recordNames g) (f : xs)
+      AppT f xs -> concatMap (recordNames g) (f : appValueArgsT g f xs)
       OptionalT x -> recordNames g x
       EffectT _ x -> recordNames g x
       _ -> []
@@ -808,7 +808,7 @@ canHoldType' declaredRecords lang i t = do
 -- | Whether a general type name is a record.
 namesRecord :: Scope -> TVar -> Bool
 namesRecord g v = case Map.lookup v g of
-  Just ((_, NamU o _ _ _, _, _, _) : _) -> o /= NamTable
+  Just ((_, NamU {}, _, _, _) : _) -> True
   _ -> False
 
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
