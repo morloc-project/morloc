@@ -1475,8 +1475,9 @@ translate srcs es0 = do
   -- pools resolved. Cargo prunes the entries the pool does not use and never
   -- re-resolves what the lock pins, so the shared target-dir holds one build
   -- of each dependency rather than one per registry-index snapshot, and the
-  -- registry is consulted only for a crate no pool in this environment has
-  -- needed before; the pins cargo adds are merged back after the build.
+  -- registry is consulted only for a crate the lock does not pin; the pins
+  -- cargo adds are merged back after the build where they agree with the
+  -- base (Build/CargoLock.hs).
   locks <- rustLockPaths
   lockText <- mergeCargoLocks <$> readRustLock (rlBase locks) <*> readLockIfPresent (rlEnv locks)
   maker <- makeTheMaker crateName locks
@@ -1520,7 +1521,7 @@ rustLockPaths = do
   return
     RustLocks
       { rlBase = home </> "rust" </> "Cargo.lock"
-      , rlEnv = state </> "cache" </> "rust-env.lock"
+      , rlEnv = state </> "cache" </> "rust-env.v2.lock"
       }
 
 readRustLock :: FilePath -> MorlocMonad Text
