@@ -89,6 +89,16 @@
   with a deprecation warning. Proposal and open questions:
   /work/plans/source-type-forms.md.
 
+- **Sourced files are identified loosely.** [read, d352b5d4] For
+  source-type-forms, which owns per-file scope. Python binds each file to
+  `__morloc_src_<name>`, where `makeNamespace` (Generic.hs) maps `/`, `-`
+  and `.` to `_` and lowercases, so `a-b.py` and `a_b.py`, or `Foo.py` and
+  `foo.py`, share a binding and the later import wins. Rust dedups source
+  paths before canonicalizing them (Rust.hs, the `include!` list), so one
+  file reached by two relative paths is included twice; and the Rust
+  source type-variable mask is keyed by the bare source name, so two files
+  that each define `f` share one mask.
+
 - **`cargo clippy` fails on morloc-runtime.** [reproduced 2026-10-15]
   `clippy::not_unsafe_ptr_arg_deref` (deny by default) at
   morloc-runtime/src/stream.rs:3990: a safe public function passes a raw
