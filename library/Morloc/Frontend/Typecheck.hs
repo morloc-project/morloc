@@ -620,6 +620,12 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
     f _ g0 (ConS tv n i xs) = do
       (g1, xs') <- statefulMapM resolveInstances g0 xs
       return (g1, ConS tv n i xs')
+    f scope g0 (ExeS x@(PatCall p))
+      | Just (what, pos, methods) <- bracketRule p
+      , FunU args _ <- gt
+      , length args > pos = do
+          checkBracketReceiver scope ci what methods (args !! pos)
+          return (g0, ExeS x)
     f _ g0 (ExeS x) = return (g0, ExeS x)
     f _ g0 (DoBlockS e) = resolveInstances g0 e |>> second DoBlockS
     f _ g0 (EvalS e) = resolveInstances g0 e |>> second EvalS
@@ -646,6 +652,18 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
         (Right g1)
           | singleGroup -> connectInstance singleGroup g1 es
           | otherwise   -> connectInstance singleGroup g0 es
+
+-- | PAT-5: a bracket step's receiver is a list or an IFile, which every
+-- back end brackets natively, or reaches some instance of the step's
+-- classes. A receiver nothing has determined yet is left to code
+-- generation (POLY-6).
+checkBracketReceiver :: Scope -> Int -> MDoc -> [(EVar, Int)] -> TypeU -> MorlocMonad ()
+checkBracketReceiver scope i what methods rcv = do
+  heads <- concat <$> mapM (uncurry instanceReceiverHeads) methods
+  when (classifyBracketReceiver scope heads rcv == ReceiverNone) $
+    throwTypeError i $
+      "A bracket step needs a receiver with" <+> what <+> "instance, but"
+        <+> prettyTypeU rcv <+> "has none"
 
 -- | A derived @pack@ or @unpack@: a lambda over a representation cast,
 -- which no program can write. Instance bodies reach resolution typechecked,
@@ -1055,8 +1073,8 @@ synthE i g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) args)
       -- Receiver synth + IFile transparency.
       (gsyn, rcvSyn, rcvExpr) <- synthG gArgs rcvArg
       let rcvResolved = apply gsyn rcvSyn
-      (gReady, expectedInner, isIFile) <- case (extractKey rcvResolved, rcvResolved) of
-        (v, AppU _ (innerType : _))
+      (gReady, expectedInner, isIFile) <- case (headTVar rcvResolved, rcvResolved) of
+        (Just v, AppU _ (innerType : _))
           | v == BT.ifileVar -> return (gsyn, innerType, True)
         _                    -> return (gsyn, rcvResolved, False)
       -- Generate the structural existential the selector expects of
@@ -1101,8 +1119,8 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) =
   -- on the existing structural-existential unification path.
   (gsyn, rcvSyn, e0Syn) <- synthG g0 e0
   let rcvResolved = apply gsyn rcvSyn
-  case (extractKey rcvResolved, rcvResolved) of
-    (v, AppU _ (innerType : _)) | v == BT.ifileVar -> do
+  case (headTVar rcvResolved, rcvResolved) of
+    (Just v, AppU _ (innerType : _)) | v == BT.ifileVar -> do
       -- Generate the structural existential and unify with the
       -- IFile's inner type. The function's input stays as IFile a
       -- so codegen can detect it.
@@ -1185,8 +1203,8 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketIndex))) [iExp
   -- on the existing structural-existential path.
   (gsyn, rcvSyn, rcvSynExpr) <- synthG g0 rcvExpr
   let rcvResolved = apply gsyn rcvSyn
-  case (extractKey rcvResolved, rcvResolved) of
-    (v, AppU _ (innerType : _)) | v == BT.ifileVar -> do
+  case (headTVar rcvResolved, rcvResolved) of
+    (Just v, AppU _ (innerType : _)) | v == BT.ifileVar -> do
       let (g1, elemType) = newvar "bidx_elem_" gsyn
           (g2, fExist)   = newvar "bidx_f_" g1
           (g3, idxType)  = newvar "bidx_idx_" g2
@@ -1240,7 +1258,7 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall PatternBracketSlice))) [star
   -- reasons (see PatternBracketIndex above). Non-IFile receivers use
   -- the existing bracketSliceResultType logic.
   let resolvedRcv = apply g7 rcvType'
-      isIFile = extractKey resolvedRcv == BT.ifileVar
+      isIFile = headTVar resolvedRcv == Just BT.ifileVar
       resultType =
         if isIFile
           then case resolvedRcv of

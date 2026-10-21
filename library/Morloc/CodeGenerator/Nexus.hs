@@ -836,6 +836,18 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
         tryInner (AppT (VarT v) [_, a]) | v == MBT.tryVar = Just a
         tryInner _ = Nothing
 
+    -- PAT-5: the nexus brackets only a value that is a list on the wire.
+    -- Another receiver an instance accepts is reached only through that
+    -- instance, in a pool.
+    requireListReceiver (AnnoS (Idx ri rt) _ _) = do
+      Infer.requireDetermined ri rt
+      sch <- type2schema rt
+      case (MT.isPrefixOf "?" (peelHint (peelRecDecl sch)), classifySchema sch) of
+        (False, CatList _) -> return ()
+        _ -> MM.throwSourcedError ri $
+          "A bracket step on" <+> pretty rt
+            <+> "needs its instance, which no language here can call"
+
     type2schema :: Type -> MorlocMonad Text
     type2schema t = (render . Serial.serialAstToMsgpackSchema) <$> generalTypeToSerialAST i t
 
@@ -891,12 +903,16 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       validateBracketBound "step"  pE
       if recvIsIFile rE
         then emitIFileWalkX t rE IFile.bracketSliceSteps [sE, eE, pE]
-        else AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [sE, eE, pE, rE]
+        else do
+          requireListReceiver rE
+          AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [sE, eE, pE, rE]
     toNexusExpr (AnnoS (Idx _ t) _ (AppS funcE@(AnnoS _ _ (ExeS (PatCall PatternBracketIndex))) [iE, rE])) = do
       validateBracketBound "index" iE
       if recvIsIFile rE
         then emitIFileWalkX t rE IFile.bracketIndexSteps [iE]
-        else AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [iE, rE]
+        else do
+          requireListReceiver rE
+          AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [iE, rE]
     -- PatternStruct app with brackets in the Selector. The first
     -- bracketArity(sel) args are the bracket bounds (DFS order) and
     -- the LAST arg is the receiver. IFile receivers route to the

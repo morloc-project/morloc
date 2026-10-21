@@ -18,6 +18,7 @@ module Morloc.TypeEval
   , evaluateStep
   , pairEval
   , reduceType
+  , aliasChain
   , reduceTypeLeaves
   , expandHeadOnly
   , expandWireParent
@@ -143,6 +144,10 @@ reduceType scope t0 =
   case evaluateStep scope t0 of
     (Just t1) -> if t1 == t0 then Nothing else Just t1
     Nothing -> Nothing
+
+-- | A type followed by each one-step reduction of it, until none applies.
+aliasChain :: Scope -> TypeU -> [TypeU]
+aliasChain scope t = t : maybe [] (aliasChain scope) (reduceType scope t)
 
 -- | Reduce aliases one step inside compound types. When the top-level
 -- constructor is not an alias (e.g., FunU), reduceType returns Nothing.

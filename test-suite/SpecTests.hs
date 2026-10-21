@@ -1290,6 +1290,112 @@ patTests =
         f | [x, y] = y
           | _ = 0
         |]
+    , accept
+        "spec-pat-5-1"
+        [r|
+        module main (f, g, h)
+        class Indexable f where
+          __access_index__ :: ?I64 -> f a -> a
+        class Sliceable f where
+          __get_slice__ :: ?I64 -> ?I64 -> ?I64 -> f a -> f a
+        instance Indexable List
+        instance Sliceable List
+        f :: [Int] -> Int
+        f x = .[0] x
+        g :: [Int] -> [Int]
+        g x = .[0:1] x
+        map :: (a -> b) -> [a] -> [b]
+        h :: [[Int]] -> [Int]
+        h xss = map .[0] xss
+        |]
+    , reject
+        "spec-pat-5-2"
+        [r|
+        module main (f)
+        class Indexable f where
+          __access_index__ :: ?I64 -> f a -> a
+        instance Indexable List
+        f :: (Int, Int) -> Int
+        f x = .[0] x
+        |]
+    , reject
+        "spec-pat-5-3"
+        [r|
+        module main (g)
+        class Sliceable f where
+          __get_slice__ :: ?I64 -> ?I64 -> ?I64 -> f a -> f a
+        instance Sliceable List
+        g :: Int -> Int
+        g x = .[0:1] x
+        |]
+    , reject
+        "spec-pat-5-4"
+        [r|
+        module main (f)
+        class Indexable f where
+          __access_index__ :: ?I64 -> f a -> a
+        instance Indexable List
+        newtype Deque a = List a
+        f :: Deque Int -> Int
+        f x = .[0] x
+        |]
+    , reject
+        "spec-pat-5-5"
+        [r|
+        module main (k)
+        class Indexable f where
+          __access_index__ :: ?I64 -> f a -> a
+        instance Indexable List
+        f :: g a -> a
+        f x = .[0] x
+        k :: (Int, Int) -> Int
+        k p = f p
+        |]
+    , reject
+        "spec-pat-5-6"
+        [r|
+        module main (h)
+        class Indexable f where
+          __access_index__ :: ?I64 -> f a -> a
+        instance Indexable List
+        map :: (a -> b) -> [a] -> [b]
+        h :: [(Int, Int)] -> [Int]
+        h xss = map .[0] xss
+        |]
+    , reject
+        "spec-pat-5-7"
+        [r|
+        module main (g)
+        class Sliceable f where
+          __get_slice__ :: ?I64 -> ?I64 -> ?I64 -> f a -> f a
+        instance Sliceable List
+        g :: ?[Int] -> ?[Int]
+        g x = .[0:1] x
+        |]
+    , rejectUser
+        "spec-pat-5-8"
+        [r|
+        module main (g)
+        class Sliceable f where
+          __get_slice__ :: ?I64 -> ?I64 -> ?I64 -> f a -> f a
+        instance Sliceable List
+        g :: (Int -> Int) -> (Int -> Int)
+        g f = .[0:1] f
+        |]
+    , reject
+        "spec-pat-5-9"
+        [r|
+        module main (g)
+        g :: IFile Int -> Int
+        g h = .[0:2] h
+        |]
+    , accept
+        "spec-pat-5-10"
+        [r|
+        module main (g)
+        g :: IFile [Int] -> [Int]
+        g h = .[0:2] h
+        |]
     ]
 
 baseTests :: TestTree

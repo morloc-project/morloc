@@ -909,13 +909,7 @@ expressBracketIndex callLang midx inputs out xsExpr =
 typeHeadIs :: TVar -> Type -> MorlocMonad Bool
 typeHeadIs target originalType = do
   scope <- MM.getGeneralScope
-  go scope (type2typeu originalType)
-  where
-    go scope t
-      | extractKey t == target = return True
-      | otherwise = case TE.reduceType scope t of
-          Just t' | t' /= t -> go scope t'
-          _ -> return False
+  return $ any ((== target) . extractKey) (TE.aliasChain scope (type2typeu originalType))
 
 -- | Emit a unified @IntrIFileWalk@ call for any pattern application
 -- on an IFile receiver. The walk-step chain (struct fields followed

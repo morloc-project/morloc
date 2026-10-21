@@ -32,7 +32,7 @@ import qualified Morloc.Frontend.Link as MFL
 import Morloc.Frontend.Rename (displayName, renameLocals)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
-import Morloc.Typecheck.Internal (collectEffLabels, unqualify)
+import Morloc.Typecheck.Internal (collectEffLabels, instanceArgHead)
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.Config as MC
 import Control.Monad.IO.Class (liftIO)
@@ -493,14 +493,10 @@ collectReceiverHeads method pos = do
     Just inst -> return $ Map.fromList
       [ (h, i)
       | tt@(TermTypes (Just et) _ _) <- instanceTerms inst
-      , (h : _) <- [receiverHeads et]
+      , Just h <- [instanceArgHead pos et]
       , Just i <- [instanceIndex tt]
       ]
   where
-    receiverHeads :: EType -> [TVar]
-    receiverHeads et = case snd (unqualify (etype et)) of
-      FunU args _ | length args > pos -> [extractKey (args !! pos)]
-      _                               -> []
 
     instanceIndex :: TermTypes -> Maybe Int
     instanceIndex (TermTypes _ ((_, Idx ix _) : _) _) = Just ix

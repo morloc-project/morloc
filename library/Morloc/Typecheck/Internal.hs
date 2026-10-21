@@ -24,6 +24,12 @@ module Morloc.Typecheck.Internal
   , evarname
   , qualify
   , unqualify
+  , headTVar
+  , instanceArgHead
+  , instanceReceiverHeads
+  , BracketReceiver (..)
+  , bracketRule
+  , classifyBracketReceiver
   , emptyGamma
 
     -- * Typeclasses
@@ -143,6 +149,72 @@ emptyGamma =
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
     , gammaRigid = Nothing, gammaScoped = Map.empty, gammaUnfolded = Set.empty
     }
+
+-- | The type constructor at the head of a type, if it has one.
+headTVar :: TypeU -> Maybe TVar
+headTVar (VarU v) = Just v
+headTVar (AppU t _) = headTVar t
+headTVar (NamU _ v _ _) = Just v
+headTVar (ForallU _ t) = headTVar t
+headTVar _ = Nothing
+
+-- | The head of argument @pos@ of an instance method's type: the
+-- container an instance of a class over a type constructor is for.
+instanceArgHead :: Int -> EType -> Maybe TVar
+instanceArgHead pos et = case snd (unqualify (etype et)) of
+  FunU args _ | length args > pos -> headTVar (args !! pos)
+  _                               -> Nothing
+
+-- | The containers the instances of @method@ are for, read at argument
+-- @pos@ of each instance's type.
+instanceReceiverHeads :: EVar -> Int -> MorlocMonad [TVar]
+instanceReceiverHeads method pos = do
+  sigmap <- MM.gets stateTypeclasses
+  return
+    [ h
+    | Just inst <- [Map.lookup method sigmap]
+    , TermTypes (Just et) _ _ <- instanceTerms inst
+    , Just h <- [instanceArgHead pos et]
+    ]
+
+-- | PAT-5: for a bracket step, what its receiver needs (for diagnostics),
+-- the receiver's position in the step's function type, and the instance
+-- methods, with their receiver positions, that can supply it.
+bracketRule :: Pattern -> Maybe (MDoc, Int, [(EVar, Int)])
+bracketRule PatternBracketIndex =
+  Just ("an Indexable", 1, [(EV "__access_index__", 1), (EV BT.extractPatternMethod, 2)])
+bracketRule PatternBracketSlice =
+  Just ( "a Sliceable or SliceableDim", 3
+       , [(EV "__get_slice__", 3), (EV "__get_slice_dim__", 3), (EV BT.extractPatternMethod, 2)] )
+bracketRule _ = Nothing
+
+data BracketReceiver
+  = ReceiverUndetermined -- ^ nothing has fixed the receiver yet (POLY-6)
+  | ReceiverNative       -- ^ a list, or an IFile over a bracketable type
+  | ReceiverInstance     -- ^ reached through an instance of the step's classes
+  | ReceiverNone
+  deriving (Eq, Show)
+
+-- | PAT-5: classify a bracket step's receiver, given the containers the
+-- step's instances are for. The alias chain is walked outermost first, so
+-- the first list, IFile or instance head found decides.
+classifyBracketReceiver :: Scope -> [TVar] -> TypeU -> BracketReceiver
+classifyBracketReceiver scope heads rcv = case appHead rcv of
+  ExistU {} -> ReceiverUndetermined
+  _ -> go (TE.aliasChain scope rcv)
+  where
+    appHead (AppU t _) = appHead t
+    appHead t = t
+    go [] = ReceiverNone
+    go (t : ts) = case headTVar t of
+      Just v
+        | v == BT.list -> ReceiverNative
+        | v == BT.ifileVar -> case t of
+            AppU _ (inner : _)
+              | classifyBracketReceiver scope heads inner /= ReceiverNone -> ReceiverNative
+            _ -> ReceiverNone
+        | v `elem` heads -> ReceiverInstance
+      _ -> go ts
 
 unqualify :: TypeU -> ([TVar], TypeU)
 unqualify (ForallU v (unqualify -> (vs, t))) = (v : vs, t)

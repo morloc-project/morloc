@@ -37,3 +37,17 @@ reproduced]
   data/lang/languages.yaml and each lang.yaml `cost:` (LangRegistry.hs:
   145-150; Realize.hs:380-392, 792 `crossingPayloadCost _ = 0`, 805). No
   manual page covers the directives. Unbuilt design, not a regression.
+- **A bracket step through an instance is never placed in a pool.**
+  [read, 2026-10-21] Realize gives a PatCall no language (Realize.hs:521),
+  so a pure `f m = .[0] m` on a receiver that is not a list on the wire
+  (a newtype over a tuple with a sourced `Indexable` instance) stays on the
+  nexus, which refuses it ("needs its instance, which no language here can
+  call") although a pool could run it. Placement should require a language
+  that has the instance whenever the receiver is not a list or IFile.
+- **The nexus brackets a newtype over a list natively.** [read, 2026-10-21]
+  Gap in PAT-5. `newtype Deque a = List a` with its own `Indexable`
+  instance is a list on the wire, so the nexus indexes it as a list while a
+  pool calls the instance; the two agree only if the instance means list
+  indexing (true of stdlib `Vector`). Needs a ruling: an instance on a
+  list-represented newtype must agree with its representation, or such
+  brackets must go to a pool.

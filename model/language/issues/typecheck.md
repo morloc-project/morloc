@@ -153,15 +153,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   a signature whose constraint names a variable that its type does not
   mention (and that no other constraint ties to one it does) is rejected at
   the signature, naming the variable.
-- **UNSOUND: bracket getters accept any `f a` receiver, slices any
-  receiver; the built program segfaults.** [reproduced, 2026-10-21]
-  Violates PAT-5. `f :: Int -> Int; f x = .[0:1] x` typechecks and builds;
-  `f 5` exits 139 (SIGSEGV). `g :: (Int, Int, Int) -> (Int, Int, Int);
-  g x = .[0:2] x` and `tidx :: (Int, Int) -> Int; tidx p = .[0] p` build
-  and fail "rel2abs: relptr 1 is in volume 0, which is never mapped".
-  Cause [read]: Frontend/Typecheck.hs:1200-1209 types the index receiver as
-  `AppU fExist [elem]` (so `(,) Int` matches `(Int, Int)`); :1224-1251 put
-  no constraint on a slice receiver. Repro: /work/plans/model-audit-2026-10-21/repro/A/pat/sl.loc, rt.loc.
 - **A tuple pattern of smaller arity matches a larger tuple.** [reproduced,
   2026-10-21] Violates PAT-1. `part :: (Int, Int, Int) -> Int;
   part = \(a, b) -> a + b` builds; `part [1,2,3]` prints 3. Repro:

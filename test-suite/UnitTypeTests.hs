@@ -8631,7 +8631,10 @@ literalDispatchTests =
           __to_index__ :: i -> I64
         instance IndexLike Int where
           source Py ("identity" as __to_index__)
+        class Indexable f where
+          __access_index__ :: ?I64 -> f a -> a
         newtype Vec (n :: Nat) a = List a
+        instance Indexable (Vec n)
         f :: Vec 5 Int -> Int
         f x = .[0] x
           |]

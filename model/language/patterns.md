@@ -56,11 +56,16 @@ instance.
 
 ### PAT-5 A chain step must fit the shape of its receiver
 Intent: proposed
-Code: deviates (issues/typecheck.md)
+Tests: spec-pat-5-1, spec-pat-5-2, spec-pat-5-3, spec-pat-5-4, spec-pat-5-5, spec-pat-5-6, spec-pat-5-7, spec-pat-5-8, spec-pat-5-9, spec-pat-5-10
+Code: conforms 2026-10-21
 
-The head of a getter or setter chain matches the receiver: a list takes a
-bracket step `.[i]` or `.[i:j:k]`, a record a key step `.k`, a tuple an index
-step `.n`. A key or index step on a list is a type error.
+The head of a getter or setter chain matches the receiver: a record takes a
+key step `.k`, a tuple an index step `.n`, and a list or `IFile` a bracket
+step `.[i]` or `.[i:j:k]`. Any other receiver takes a bracket step only
+through an instance of `Indexable` (for `.[i]`), `Sliceable` or
+`SliceableDim` (for a slice), or `PatternAccessible`; a newtype does not
+inherit its representation's instance (NEWT-1). Anything else is a type
+error, as is a key or index step on a list.
 
 ### PAT-6 Only a bracket slice broadcasts its tail
 Intent: proposed
