@@ -37,6 +37,21 @@
   stream.rs:7295-7323 never runs; pools lower IFile to `IIntrinsicOpen`
   with no schema (Translator/Imperative.hs:2742-2745). Repro:
   /work/plans/model-audit-2026-10-21/repro/E/strm/main.loc, b.loc.
+  DEFERRED 2026-10-21, design reviewed: checking at `@open` is not enough.
+  An IFile crosses pools as a path (handle_scan.rs:271) and the receiver
+  reopens it in `mlc_read_stream_field` (intrinsics.rs:1844-1899) with only
+  a kind, so every path-to-handle point must check against the static
+  type it knows, or a program can open `p`, rewrite it, and hand it on. One
+  entry `mlc_open_typed(path, kind, schema)` for `@open` (nexus and pools)
+  and the field reopen, comparing the whole stored schema of the IFile's
+  argument (`IFile [Real]` -> `af8`; stream files store `[a]`) read from
+  the handle (`shared_handle_schema_str`), not re-read from the path; an
+  empty schema is an error, including in `open_dispatch_istream`
+  (stream.rs:7359), which skips the check today. Needs: IR and the three
+  printers, bindings in pymorloc.c, rmorloc.c/pool.R, pool.cpp,
+  rustmorloc, morloc.h (decide whether a new symbol bumps the ABI
+  version), the nexus open node's schema, and a test that a file written
+  in one language opens in another at the same type.
 - **`@stdin` checks the element schema at the first `@next`.**
   [reproduced, 2026-10-21] Gap in STRM-1, which says a mismatch is an
   `Err` at open; for a pipe the schema arrives with the bytes. STRM-1 needs
