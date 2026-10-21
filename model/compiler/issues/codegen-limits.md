@@ -57,4 +57,15 @@ Generated code that a language's own tools refuse.
   call today (a Deque's Python form is its representation's, so no pack is
   inserted); a pack whose source is shared and whose form differs would.
   Candidate: give a compiler-built call the instance method it implements.
-
+- [reproduced, 2026-10-20, d352b5d4] A Rust manifold whose body is a
+  value it received serialized does not build: it returns its
+  `*const u8` argument as its `*mut u8` result (`return s1;`, E0308 "types
+  differ in mutability"). It arises when a Python caller hands a
+  Rust-made value to a Rust `do` branch that only yields it. With
+  `record R where on :: Bool; n :: Int` (Rust "RR", Py "dict"),
+  `noR = mkR 0` from Rust and `pyR :: Str -> <IO> R` from Python,
+  `riboOf path = do ? path == "" = do noR : do pyR path` fails to build.
+  biolib rnaseq (`riboOf` in lib/prepare.loc, the same shape) built with
+  the compiler at ee516029 on 2026-10-19 and fails now, so this is
+  probably a regression in ee516029..d352b5d4. A passthrough result needs
+  a copy into a reply packet (or the caller should keep its own packet).

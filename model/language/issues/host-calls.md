@@ -20,3 +20,25 @@
   reader, `mapReader (\xs -> xs)` in place of `gffEntries`, and the same
   body with no Python. biolib's bio defines its readers with the path
   argument for this reason.
+
+- **A point-free source built from a list of sources stops the build when a
+  Python call follows its use.** [reproduced, compiler 4443cc47] Internal
+  error "a lambda value is realized in rust inside an expression realized in
+  py" (CodeGenerator/Express.hs, the lambda-language check), located at
+  `src (writeBatch level o)` in biolib stream's `saveSource`. With stream
+  and stream-rust installed:
+
+      source Py from "h.py" ("tmp_path" as tmpPath, "touch" as touch)
+      numbers :: Source Int
+      numbers = concatSources [listSource [1, 2], listSource [3]]
+      go :: Int -> <IO> Int
+      go n = do
+        p <- tmpPath "a.mlc"
+        saveSource 0 p numbers
+        touch p
+        n
+
+  Builds: `numbers sink = concatSources [...] sink`, `numbers = listSource
+  [1, 2, 3]`, the list inlined at the call, and dropping `touch p`.
+  `concatSources` written with a recursive `mapE_` fails the same way. The
+  same program shape built before the compiler of 2026-10-19 17:27.

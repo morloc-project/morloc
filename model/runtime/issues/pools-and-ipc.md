@@ -49,3 +49,20 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   child holds for its lifetime. A long-lived child forked often while
   callers connect accumulates them. The retry has no bound; it ends as soon
   as a fork does not land in the few microseconds between the two steps.
+
+- **A one-pool C++ program takes about 55 ms on an empty input; the same
+  work native takes 3 ms.** [reproduced, compiler 4443cc47] biolib
+  `stream/bench` `ingestFa` on a one-entry FASTA. Under `strace -f -tt`
+  (128 ms traced), the parts that are not work:
+  - the nexus lists all of `/tmp` at startup (40 `getdents64` calls over
+    12,222 entries here, about 20 ms traced); the cost grows with
+    `/tmp`, which holds many leaked `morloc-daemon.*`, `morloc-mcp.*`
+    entries;
+  - connecting to the pool polls with sleeps of 1, 2, 4 and 8 ms
+    (15 ms) while the pool links libstdc++ and binds;
+  - at exit the main thread joins the `morloc-custody` thread, which
+    after its `fdatasync` sleeps 20 ms in `clock_nanosleep`; the join
+    waits out the sleep (about 17 ms);
+  - `fdatasync` of the output stream file (6 ms);
+  - the `/bin/sh` wrapper forks `dirname` before exec'ing the nexus.
+  `-h`, which starts no pool, takes 25-48 ms.
