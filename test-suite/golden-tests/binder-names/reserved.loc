@@ -1,0 +1,14 @@
+--' A user source may not define a name the R pool reserves
+module main (viaReserved)
+
+import root
+import root-r
+
+source R from "reserved.R" ("r_id" as idR)
+
+--' Return the argument
+idR :: Int -> Int
+
+--' Call a function from a source that defines reserved names
+viaReserved :: Int -> Int
+viaReserved = idR

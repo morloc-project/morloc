@@ -44,11 +44,22 @@
 // Set when a stream write found its reader gone during the current dispatch.
 static int r_pipe_closed = 0;
 
+// The environment pool.R defines the pool's own names in: that of the
+// worker init function it passes to morloc_fork_pool_run_r.
+static SEXP r_pool_env = NULL;
+
+static SEXP pool_env(void) {
+    if (r_pool_env == NULL) {
+        Rf_error("morloc internal error: the R pool environment is not set");
+    }
+    return r_pool_env;
+}
+
 // Raise the closed-pipe condition (pool.R), which ends the call.
 static void raise_pipe_closed(void) {
     r_pipe_closed = 1;
     SEXP call = PROTECT(Rf_lang1(Rf_install("morloc_mlc_pipe_closed")));
-    Rf_eval(call, R_GlobalEnv);
+    Rf_eval(call, pool_env());
     UNPROTECT(1);
 }
 
@@ -3810,7 +3821,7 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
     // Single crossing into R: evaluate the manifold
     int eval_err = 0;
     r_pipe_closed = 0;
-    SEXP result = R_tryEvalSilent(r_call, R_GlobalEnv, &eval_err);
+    SEXP result = R_tryEvalSilent(r_call, pool_env(), &eval_err);
     // A process forked by user code during this call exits here (FORK-12).
     morloc_exit_if_forked();
     // SLOT-16: output the call left on stdout is written before its reply.
@@ -3996,6 +4007,7 @@ SEXP morloc_fork_pool_run_r(SEXP socket_path_r, SEXP tmpdir_r, SEXP shm_basename
     static r_fork_pool_ctx ctx;
     ctx.init = init_r;
     R_PreserveObject(init_r);
+    r_pool_env = CLOENV(init_r);
     morloc_fork_pool_t cfg = {
         .lang = "R",
         .ctx = &ctx,

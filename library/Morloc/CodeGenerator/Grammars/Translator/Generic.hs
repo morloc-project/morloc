@@ -558,7 +558,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcStoreField = \_ v -> return v
         , lcApplyClosure = \callee args -> callee <> tupled args
         , lcPapply = \_ _ callee args ->
-            return $ "mlc_papply" <> tupled
+            return $ pool desc "mlc_papply" <> tupled
               [ callee
               , case ldListStyle desc of
                   BracketList -> list args
@@ -599,14 +599,14 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
         , lcSerialize = defaultSerialize cfg
         , lcDeserialize = \_ -> defaultDeserialize cfg
         , lcReifyClosure = \v _ ->
-            return $ "mlc_reify" <> tupled [v, dquotes (pretty (ldName desc))]
+            return $ pool desc "mlc_reify" <> tupled [v, dquotes (pretty (ldName desc))]
         , lcReflectClosure = \pkt s ->
             case s of
               SerialClosure ins out ->
                 let tupleSchema = render (Serial.serialAstToMsgpackSchema s)
                     (argListDoc, resDoc) = reflectSchemas ins out
                  in return $
-                      "mlc_reflect"
+                      pool desc "mlc_reflect"
                         <> tupled [pkt, dquotes (pretty tupleSchema), argListDoc, resDoc]
               _ -> error "lcReflectClosure: expected SerialClosure"
         , lcReflectClosureParsed = \tup s ->
@@ -614,7 +614,7 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
               SerialClosure ins out ->
                 let (argListDoc, resDoc) = reflectSchemas ins out
                  in return $
-                      "mlc_reflect_from_tuple" <> tupled [tup, argListDoc, resDoc]
+                      pool desc "mlc_reflect_from_tuple" <> tupled [tup, argListDoc, resDoc]
               _ -> error "lcReflectClosureParsed: expected SerialClosure"
         -- A language that supports producing crossing closures (a non-empty
         -- 'ldClosureRegisterEntry', i.e. Python and R) reifies/reflects a closure
@@ -738,9 +738,9 @@ genericRecordAccessor desc namType _constructor record field
 -- for languages whose container literals are 1-based.
 genericSchemaRef :: LangDescriptor -> Int -> MDoc
 genericSchemaRef desc sid = case ldIndexStyle desc of
-  ZeroBracket -> "mlc_schema_table[" <> pretty sid <> "]"
-  OneBracket -> "mlc_schema_table[" <> pretty (sid + 1) <> "]"
-  OneDoubleBracket -> "mlc_schema_table[[" <> pretty (sid + 1) <> "]]"
+  ZeroBracket -> pool desc "mlc_schema_table" <> "[" <> pretty sid <> "]"
+  OneBracket -> pool desc "mlc_schema_table" <> "[" <> pretty (sid + 1) <> "]"
+  OneDoubleBracket -> pool desc "mlc_schema_table" <> "[[" <> pretty (sid + 1) <> "]]"
 
 -- | Wrap a labeled manifold's body in a cache check. The body's
 -- serialized result is what lands on disk, so cross-pool and
@@ -1300,7 +1300,7 @@ genericPrintExpr desc = go
        in pretty prefix <> "mlc_open_channel(" <> schemaRef sid <> ")"
     -- The producer is reified by the pool, which alone knows its closures.
     go (IIntrinsicSpawn sid handle fn) =
-      "mlc_spawn(" <> go fn <> ", " <> go handle <> ", " <> schemaRef sid <> ")"
+      pool desc "mlc_spawn" <> "(" <> go fn <> ", " <> go handle <> ", " <> schemaRef sid <> ")"
     go (IIntrinsicSettle handle) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_settle(" <> go handle <> ")"
@@ -1583,9 +1583,10 @@ printProgram desc prog =
           | (i, tmpl) <- Map.toAscList (ipLogTemplates prog)
           ]
 
-    -- The wrap helper name varies per language (Python: @__mlc_wrap_log@;
-    -- R: @.mlc_wrap_log@). The 'ldLogWrap' field carries the bare helper
-    -- name; an empty string opts the language out of logging.
+    -- The wrap helper varies per language (Python: @__mlc_wrap_log@; R:
+    -- @.__morloc$.mlc_wrap_log@). The 'ldLogWrap' field carries the helper as
+    -- generated code refers to it; an empty string opts the language out of
+    -- logging.
     wrapFn :: LangDescriptor -> MDoc
     wrapFn d = pretty (ldLogWrap d)
 
@@ -1774,13 +1775,17 @@ pyTuple xs = tupled xs
 -- a function whose result is a suspension is described all the way down.
 codecDoc :: LangDescriptor -> SerialAST -> MDoc
 codecDoc desc s@(SerialClosure ins out) =
-  "mlc_closure_codec"
+  pool desc "mlc_closure_codec"
     <> tupled
       [ dquotes (pretty (render (Serial.serialAstToMsgpackSchema s)))
       , codecList desc (map (codecDoc desc) ins)
       , codecDoc desc out
       ]
 codecDoc _ s = dquotes (pretty (render (Serial.serialAstToMsgpackSchema s)))
+
+-- | A name the pool runtime defines, as generated code refers to it.
+pool :: LangDescriptor -> Text -> MDoc
+pool desc name = pretty (ldPoolQualifier desc <> name)
 
 -- | A list of codecs in the language's own list style.
 codecList :: LangDescriptor -> [MDoc] -> MDoc

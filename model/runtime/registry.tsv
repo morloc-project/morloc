@@ -30,6 +30,7 @@ data/lang/r/rmorloc.c::-::recur_env_stack	thread
 data/lang/r/rmorloc.c::-::recur_env_depth	thread		
 data/lang/r/rmorloc.c::-::recur_env_cap	thread		
 data/lang/r/rmorloc.c::-::r_pipe_closed	thread		
+data/lang/r/rmorloc.c::-::r_pool_env	startup		
 data/lang/r/rmorloc.c::-::r_frames	thread		
 data/lang/r/rmorloc.c::-::r_frames_cap	thread		
 data/lang/r/rmorloc.c::-::daemon_creator_generation	fork-scoped		

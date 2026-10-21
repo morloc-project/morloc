@@ -120,8 +120,8 @@ data LangDescriptor = LangDescriptor
   , ldKeyAccess :: !Text -- "bracket" -> e["k"], "double_bracket" -> e[["k"]]
   , ldFieldAccess :: !FieldAccessStyle
   , -- Serialize/deserialize function names
-    ldSerializeFn :: !Text -- "morloc.put_value" or "morloc_put_value"
-  , ldDeserializeFn :: !Text -- "morloc.get_value" or "morloc_get_value"
+    ldSerializeFn :: !Text -- "morloc.put_value" or ".__morloc$morloc_put_value"
+  , ldDeserializeFn :: !Text -- "morloc.get_value" or ".__morloc$morloc_get_value"
   , ldReleasePacketFn :: !Text -- "morloc.release_packet_shm" or equivalent
   , ldOwnedArgFn :: !Text -- wraps a packet made for one call's argument list so it is released once the call returns; "" where the language cannot scope it
   , -- Intrinsic function prefix (for mlc_show, mlc_hash, etc.)
@@ -132,7 +132,7 @@ data LangDescriptor = LangDescriptor
     -- underscore in identifiers (R) use a leading dot instead.
     ldHelperVarPrefix :: !Text -- "__morloc_" for Python/C++, ".morloc_" for R
   , -- Foreign call template
-    ldForeignCallFn :: !Text -- "morloc.foreign_call" or "morloc_foreign_call"
+    ldForeignCallFn :: !Text -- "morloc.foreign_call" or ".__morloc$morloc_foreign_call"
   , ldForeignCallIntSuffix :: !Text -- "L" for R, "" for others
   , ldIntLiteralSuffix :: !Text -- "L" for R, "" for others
   , ldIntLiteralSuffixLimit :: !(Maybe Integer)
@@ -145,7 +145,7 @@ data LangDescriptor = LangDescriptor
     -- ^ Concrete type -> template for a literal that takes no suffix, with
     -- {{n}} for its digits (R: bit64 -> bit64::as.integer64("{{n}}"))
   , -- Remote call
-    ldRemoteCallFn :: !Text -- "morloc.remote_call" or "morloc_remote_call"
+    ldRemoteCallFn :: !Text -- "morloc.remote_call" or ".__morloc$morloc_remote_call"
   , -- Record access
     ldDictStyleRecords :: !Bool -- True: NamRecord/dict use bracket access, others use dot (Python)
   , ldEnumLitByName :: !Bool
@@ -207,6 +207,9 @@ data LangDescriptor = LangDescriptor
     ldFuncDefHeader :: !Text -- e.g. "def {{name}}({{args}}):"
   , ldManifoldPrefix :: !Text
     -- ^ A manifold's function is this prefix followed by its id.
+  , ldPoolQualifier :: !Text
+    -- ^ Prepended to a name the pool runtime defines where generated code
+    -- refers to it (R: the runtime's environment).
   , ldBlockStyle :: !BlockStyle
   , -- Error wrapping
     ldErrorWrapOpen :: !Text -- "try:" for Python, "" for others
@@ -254,8 +257,8 @@ data LangDescriptor = LangDescriptor
   , ldClosureTableHeader :: !Text
     -- ^ Statement that initializes the per-pool @mlc_closure_table@ (mid ->
     -- captured-argument schemas), consulted by the reify helper. Emitted once
-    -- before the per-closure entries. Example Python: @"mlc_closure_table = {}"@;
-    -- R: @"mlc_closure_table <- list()"@.
+    -- before the per-closure entries; empty where the pool template
+    -- initializes the table (R). Example Python: @"mlc_closure_table = {}"@.
   , ldClosureTableEntry :: !Text
     -- ^ Per-closure entry populating @mlc_closure_table@. Substitutions: {{mid}}
     -- and {{caps}} (list literal of the captured-argument schema strings).
@@ -387,6 +390,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldDispatchRemoteFooter" (Y.String "")
             . ins "ldLogWrap" (Y.String "")
             . ins "ldManifoldPrefix" (Y.String "m")
+            . ins "ldPoolQualifier" (Y.String "")
             . ins "ldClosureRegisterEntry" (Y.String "")
             . ins "ldClosureTableHeader" (Y.String "")
             . ins "ldClosureTableEntry" (Y.String "")
@@ -490,6 +494,7 @@ defaultLangDescriptor name ext =
     , ldDispatchRemoteFooter = ""
     , ldLogWrap = ""
     , ldManifoldPrefix = "m"
+    , ldPoolQualifier = ""
     , ldClosureRegisterEntry = ""
     , ldClosureTableHeader = ""
     , ldClosureTableEntry = ""

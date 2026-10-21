@@ -44,3 +44,16 @@ Code: unaudited
 A Python source naming a builtin or a missing function builds and fails when
 called. Either (a) the build checks that each sourced name exists, where the
 language allows; or (b) the failure is a run-time error naming the term.
+
+### SRC-6 A source cannot take a name the pool reserves for itself
+Intent: proposed
+Code: unaudited
+
+A language reserves name prefixes for what its pool defines (lang.yaml
+`ldReservedPrefixes`: Python `__mm_`, `__morloc`; R `.__mm_`, `.__morloc`,
+`.morloc_`). A sourced name with a reserved prefix is a compile error. The
+R pool keeps its runtime in one environment, `.__morloc`, and its
+manifolds as global `.__mm_<id>`; an R source that defines, replaces or
+removes one of these fails to load, and so does a call that assigns one.
+The helpers user R files call, `.morloc.source`, `.morloc.pooldir` and
+`.morloc.libdir`, are bound globally.

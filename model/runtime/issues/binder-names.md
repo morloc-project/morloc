@@ -24,17 +24,6 @@ may use.
   `m<N>`). A user `struct Schema` is a redefinition, a user `std::string
   g_tmpdir` a conflicting declaration, and a user `foreign_call` an
   ambiguous overload.
-- [reproduced, d352b5d4] R, a silent wrong value: user files are `source()`d into `globalenv()`, which also holds
-  every pool name: the rmorloc `.Call` wrappers (`morloc_*`), pool
-  internals (`mlc_*`, `.mlc_*`), manifolds (`m<N>`) and generic names
-  (`main`, `args`, `status`, `tmpdir`, `socket_path`, `global_state`,
-  `worker_init`). Sources load after the pool defines these, so a user
-  definition replaces one silently and later lookups by name see it. The
-  dispatch table captures the top-level manifolds before sources load, but
-  manifold bodies look up `morloc_get_value`, `mlc_schema_table` and other
-  manifolds by name at call time: with `ap <- function(f, x) f(x)` and
-  `viaR2 n = ap (\x -> inc (inc x)) n`, a user `m1657 <- function(...)
-  -1000L` (the lambda's manifold) makes `viaR2 3` print -1000, not 5.
 - [read] Manifold locals and sourced names share a frame: a manifold's
   formals and temporaries are `n<N>`, `s<N>`, `helper<N>` (Grammars/Common.hs
   argNamer and friends), and R and Python call sourced functions by their
@@ -42,10 +31,6 @@ may use.
   `n3` is shadowed by a manifold parameter `n3`, silently when it is passed
   as a value. Needs reserved local names per language, from the same namer
   machinery as the manifold names.
-- [read] Python identifies a manifold function by its `__name__`
-  (`_mlc_manifold_id` in data/lang/py/pool.py): a host function a user
-  source returns that happens to be named `m5` is reified as manifold 5,
-  and the far side calls the wrong function.
 - [read] Generated R code calls base functions (`c`, `list`, `lapply`,
   `paste0`, `tryCatch`, ...) by name from the global environment, where a
   user source may have redefined them, as R's own code would see them.
@@ -55,5 +40,11 @@ may use.
   name in pool.py's module scope, which holds the pool's own names
   (`dispatch`, `global_state`, `mlc_*`), so `source Py ("dispatch" as d)`
   binds d to the pool's dispatch table rather than failing.
+- [reproduced, 2026-10-21] R's JIT compiles a small function only where
+  its environment is the global one, so the R runtime's functions in
+  `.__morloc` run interpreted (about 0.5 us more per call than compiled)
+  except the twelve pool.R compiles at load (about 20 ms per pool start).
+  Shipping the runtime as an installed R package would have R byte-compile
+  its namespace once, at install.
 - Python files are isolated: each sourced file is its own module and calls
   are qualified (`__morloc_src_<name>.f`).

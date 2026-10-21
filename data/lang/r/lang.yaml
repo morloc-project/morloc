@@ -27,6 +27,9 @@ preamble:
   # package there loads with library(). Guarded so a missing dir adds no noise.
   - 'if (dir.exists(.morloc.libdir)) .libPaths(c(.morloc.libdir, .libPaths()))'
   - '.morloc.source <- function(p) source(if (startsWith(p, "/")) p else { src <- normalizePath(file.path(.morloc.pooldir, "..", "..", "..", p), mustWork=FALSE); cwd <- file.path(".", p); if (file.exists(src)) src else if (file.exists(cwd)) cwd else file.path(.morloc.libdir, p) }, chdir=TRUE)'
+  # User R files load further files with .morloc.source and may read these
+  # paths, so they are also bound where user files run.
+  - 'local(for (name in c(".morloc.source", ".morloc.pooldir", ".morloc.libdir")) assign(name, get(name), envir = globalenv()))'
 
 # Literals
 ldBoolTrue: "TRUE"
@@ -49,15 +52,15 @@ ldKeyAccess: "double_bracket"
 ldFieldAccess: dollar
 
 # Serialize/deserialize
-ldSerializeFn: "morloc_put_value"
-ldTableImportFn: "mlc_table_import"
-ldDeserializeFn: "morloc_get_value"
-ldReleasePacketFn: "morloc_release_packet_shm"
-ldIntrinsicPrefix: "morloc_"
+ldSerializeFn: ".__morloc$morloc_put_value"
+ldTableImportFn: ".__morloc$mlc_table_import"
+ldDeserializeFn: ".__morloc$morloc_get_value"
+ldReleasePacketFn: ".__morloc$morloc_release_packet_shm"
+ldIntrinsicPrefix: ".__morloc$morloc_"
 ldHelperVarPrefix: ".morloc_"
 
 # Foreign call
-ldForeignCallFn: "morloc_foreign_call"
+ldForeignCallFn: ".__morloc$morloc_foreign_call"
 ldForeignCallIntSuffix: "L"
 ldIntLiteralSuffix: "L"
 ldIntLiteralSuffixLimit: 2147483647
@@ -66,7 +69,7 @@ ldIntLiteralWide:
   bit64: 'bit64::as.integer64("{{n}}")'
 
 # Remote call
-ldRemoteCallFn: "morloc_remote_call"
+ldRemoteCallFn: ".__morloc$morloc_remote_call"
 
 # Record handling
 ldDictStyleRecords: false
@@ -89,11 +92,12 @@ ldDoBlockBlock: "(function(){\n{{body}}\n})"
 ldPassTemplate: "structure({{fn}}, morloc_mid = {{mid}}L, morloc_captured = list())"
 ldPartialTemplate: "local({ {{bind_context}}mlc_clo <- function({{bound_args}}) { {{fn}}({{all_args}}) }; attr(mlc_clo, \"morloc_mid\") <- {{mid}}L; attr(mlc_clo, \"morloc_captured\") <- {{captured_list}}; mlc_clo })"
 ldImportTemplate: ".morloc.source(\"{{path}}\")"
-ldSocketPathTemplate: "paste0(global_state$tmpdir, \"/\", {{socket}})"
+ldSocketPathTemplate: "paste0(.__morloc$global_state$tmpdir, \"/\", {{socket}})"
 ldResourcePackTemplate: "list(memory={{mem}}L, time={{time}}L, cpus={{cpus}}L, gpus={{gpus}}L)"
 ldReturnTemplate: "return({{expr}})"
 ldReservedPrefixes: [".__mm_", ".__morloc", ".morloc_"]
 ldManifoldPrefix: ".__mm_"
+ldPoolQualifier: ".__morloc$"
 ldFuncDefHeader: "{{name}} <- function({{args}})"
 ldBlockStyle: braces
 ldFrameLabelStmt: "attr({{fname}}, \"morloc_frame\") <- \"{{label}}\""
@@ -108,15 +112,15 @@ ldStrLiteralMap:
   character: ""
 ldMapStyle: apply_callback
 ldDispatchLocalHeader: ".dispatch <- list()"
-ldDispatchLocalEntry: ".dispatch[[{{mid}}L]] <- {{name}}"
+ldDispatchLocalEntry: ".dispatch[[{{mid}}L]] <- mlc_manifold({{mid}}L)"
 ldDispatchLocalFooter: ""
 ldDispatchRemoteHeader: ".remote_dispatch <- list()"
-ldDispatchRemoteEntry: ".remote_dispatch[[{{mid}}L]] <- {{name}}_remote"
+ldDispatchRemoteEntry: ".remote_dispatch[[{{mid}}L]] <- get(\"{{name}}_remote\", envir = globalenv(), inherits = FALSE)"
 ldDispatchRemoteFooter: ""
-ldClosureRegisterEntry: ".dispatch[[{{mid}}L]] <- mlc_make_closure_dispatch({{mid}}, {{args}}, {{res}})"
-ldClosureTableHeader: "mlc_closure_table <- list()"
+ldClosureRegisterEntry: ".dispatch[[{{mid}}L]] <- mlc_make_closure_dispatch({{mid}}L, {{args}}, {{res}})"
+ldClosureTableHeader: ""
 ldClosureTableEntry: "mlc_closure_table[[\"{{mid}}\"]] <- list({{caps}}, {{bnds}})"
-ldLogWrap: ".mlc_wrap_log"
+ldLogWrap: ".__morloc$.mlc_wrap_log"
 
 # Pool template (loaded from pool.R, left empty here)
 ldPoolTemplate: ""

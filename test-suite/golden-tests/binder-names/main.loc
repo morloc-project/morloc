@@ -1,0 +1,85 @@
+--' User sources do not collide with the pool's own names
+--'
+--' The R source defines names that are also the R pool's own (main, args,
+--' status, tmpdir, global_state, the morloc_* wrappers, .dispatch, get,
+--' conditionMessage, ...), defines an S4 class, and loads a further file
+--' with .morloc.source;
+--' the Python source defines `m1` and binds `sys` and `struct`, which the
+--' pool also imports. Each command must still call the user's own
+--' definitions and the pool's own machinery: `viaR` passes a lambda, so one
+--' manifold calls another; `viaPartial` passes a partially applied
+--' function; `viaCross` sends an R function to Python, which Python calls
+--' back; `viaFail` and `viaClassed` fail, and their messages must be the
+--' user's, through the user's own condition method in the second.
+module main (viaR, viaPartial, viaCross, viaHelper, viaBox, viaFail, viaClassed, viaPy)
+
+import root
+import root-r
+import root-py
+
+source R from "src.R"
+  ( "r_count" as countR
+  , "r_ap" as apR
+  , "r_add" as addR
+  , "r_twice" as twiceR
+  , "r_fail" as failR
+  , "r_fail_classed" as failClassedR
+  , "r_box" as boxR
+  )
+source Py from "src.py" ("py_ap" as apPy)
+source Py from "user.py" ("py_count" as countPy)
+
+--' Count with the user's helpers
+countR :: Int -> Int
+--' Apply a function
+apR :: (Int -> Int) -> Int -> Int
+--' Add two numbers
+addR :: Int -> Int -> Int
+--' Double through a helper the source loads
+twiceR :: Int -> Int
+--' Fail
+failR :: Int -> Int
+--' Fail with a condition of the user's own class
+failClassedR :: Int -> Int
+--' Add one through an S4 object
+boxR :: Int -> Int
+--' Apply a function in Python
+apPy :: (Int -> Int) -> Int -> Int
+--' Count with the user's Python helpers
+countPy :: Int -> Int
+
+--' Count twice through a lambda
+viaR :: Int -> Int
+viaR n = apR (\x -> countR (countR x)) n
+
+--' Apply a partially applied function value
+partialVia :: (Int -> Int -> Int) -> Int -> Int
+partialVia f n = apR (f n) n
+
+--' Add a number to itself through a partial application
+viaPartial :: Int -> Int
+viaPartial n = partialVia addR n
+
+--' Call an R function from Python
+viaCross :: Int -> Int
+viaCross n = apPy countR n
+
+--' Call a function from a file the source loaded
+viaHelper :: Int -> Int
+viaHelper = twiceR
+
+--' Use the user's S4 class
+viaBox :: Int -> Int
+viaBox = boxR
+
+--' Fail in R
+viaFail :: Int -> Int
+viaFail = failR
+
+--' Fail in R with the user's condition class
+viaClassed :: Int -> Int
+viaClassed = failClassedR
+
+--' Count in Python
+viaPy :: Int -> Int
+viaPy = countPy
