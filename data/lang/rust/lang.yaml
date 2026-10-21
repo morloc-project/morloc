@@ -13,3 +13,7 @@ allow_string_null: true
 # A sourced symbol is a Rust path identifier (allowing ::).
 ldNamePattern: "[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*"
 ldOperatorPattern: "[-!%&*+./<=>^|~]+"
+ldReservedPrefixes: ["__mm_", "__morloc", "__Morloc", "__MORLOC"]
+# The pool's entry point shares the crate root with sourced files.
+ldReservedNames: ["main"]
+ldManifoldPrefix: "__mm_"

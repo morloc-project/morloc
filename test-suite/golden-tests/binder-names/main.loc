@@ -5,17 +5,35 @@
 --' conditionMessage, ...), defines an S4 class, and loads a further file
 --' with .morloc.source;
 --' the Python source defines `m1` and binds `sys` and `struct`, which the
---' pool also imports. Each command must still call the user's own
+--' pool also imports; the Rust source imports `Schema`, `CString` and
+--' `OnceLock` and defines `schema`, `init_schemas`, `m1`, `SizeWalk`,
+--' `PoolConfig`, `read_variant_tag`, `local_dispatch`, `mlc_stage_lookup`
+--' and `mlc_user_ops`, and its commands pass a Rust record, a Rust enum
+--' and a Rust function to Python. Each command must still call the user's own
 --' definitions and the pool's own machinery: `viaR` passes a lambda, so one
 --' manifold calls another; `viaPartial` passes a partially applied
 --' function; `viaCross` sends an R function to Python, which Python calls
 --' back; `viaFail` and `viaClassed` fail, and their messages must be the
 --' user's, through the user's own condition method in the second.
-module main (viaR, viaPartial, viaCross, viaHelper, viaBox, viaFail, viaClassed, viaPy)
+module main (viaR, viaPartial, viaCross, viaHelper, viaBox, viaFail, viaClassed, viaPy, viaRust, viaRustRecord, viaRustCross, viaRustEnum)
 
 import root
 import root-r
 import root-py
+import root-rust
+
+--' A point
+record Pt where
+  --' First coordinate
+  a :: Int
+  --' Second coordinate
+  b :: Real
+record Rust => Pt = "Pt"
+record Py => Pt = "dict"
+
+--' A direction
+data Dir = North | South
+data Rust => Dir = "Dir"
 
 source R from "src.R"
   ( "r_count" as countR
@@ -26,8 +44,9 @@ source R from "src.R"
   , "r_fail_classed" as failClassedR
   , "r_box" as boxR
   )
-source Py from "src.py" ("py_ap" as apPy)
+source Py from "src.py" ("py_ap" as apPy, "py_pt_a" as ptAPy, "py_flip" as flipPy)
 source Py from "user.py" ("py_count" as countPy)
+source Rust from "src.rs" ("rs_count" as countRust, "rs_pt" as ptRust, "rs_inc" as incRust, "rs_flip" as flipRust)
 
 --' Count with the user's helpers
 countR :: Int -> Int
@@ -47,6 +66,18 @@ boxR :: Int -> Int
 apPy :: (Int -> Int) -> Int -> Int
 --' Count with the user's Python helpers
 countPy :: Int -> Int
+--' Count with the user's Rust helpers
+countRust :: Int -> Int
+--' Make a point in Rust
+ptRust :: Int -> Pt
+--' Increment in Rust
+incRust :: Int -> Int
+--' Read a point's first coordinate in Python
+ptAPy :: Pt -> Int
+--' Turn around in Rust
+flipRust :: Dir -> Dir
+--' Turn around in Python
+flipPy :: Dir -> Dir
 
 --' Count twice through a lambda
 viaR :: Int -> Int
@@ -83,3 +114,19 @@ viaClassed = failClassedR
 --' Count in Python
 viaPy :: Int -> Int
 viaPy = countPy
+
+--' Count in Rust
+viaRust :: Int -> Int
+viaRust = countRust
+
+--' Pass a Rust record to Python
+viaRustRecord :: Int -> Int
+viaRustRecord n = ptAPy (ptRust n)
+
+--' Call a Rust function from Python
+viaRustCross :: Int -> Int
+viaRustCross n = apPy incRust n
+
+--' Turn around in Python, then in Rust
+viaRustEnum :: Dir -> Dir
+viaRustEnum d = flipRust (flipPy d)

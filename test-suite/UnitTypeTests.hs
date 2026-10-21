@@ -11385,6 +11385,41 @@ sourceNameTests =
           g :: Int -> Int
           f x = g x
         |]
+    , expectError "Rust: a name the pool reserves is not a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("__morloc_schema" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Rust: a path into the pool's names is not a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("crate::__mm_3" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Rust: the pool's entry point is not a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("main" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectPass "Rust: a name containing a reserved one is a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("main_loop" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Rust: a manifold's name is not a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("__mm_3" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
     , expectPass "Python: a name that only resembles a reserved one is a source name"
           [r|
           module main (f)

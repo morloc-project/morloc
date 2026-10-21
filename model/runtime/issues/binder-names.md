@@ -6,16 +6,13 @@ user sources live, so a user file can collide with them. Spec gap:
 model/language/sources.md says nothing about which names a sourced file
 may use.
 
-- [reproduced, 2026-10-20, d352b5d4] Rust: a sourced file with `use
-  rustmorloc::arrow_schema::{DataType, Field, Schema};` fails with E0252
-  (`Schema` defined twice), because the pool template imports
-  `rustmorloc::Schema` at the crate root (data/lang/rust/pool.rs `use`
-  lines). Sourced files are `include!`d at the root, so any of those
-  imports (`CString`, `OnceLock`, `ToVoidstar`, ...) and any generated root
-  item (`schema`, `init_schemas`, `local_dispatch`, `PoolConfig`, `m<N>`,
-  ...) collides the same way (reproduced: helpers named `schema`,
-  `init_schemas`, `m1` fail with E0428). golden/arrow-conformance works
-  around it with `Schema as ArrowSchema`.
+- [read] Rust: sourced files are `include!`d at the crate root, where
+  generated code still names the standard prelude (`Vec`, `Option`,
+  `Result`, `Box`, `String`) and its macros (`vec!`, `format!`) unqualified,
+  and native type forms (`Vec<$1>`) are user-written text. A user file that
+  defines `struct Vec` or `macro_rules! vec` changes what generated code
+  means. Runtime items and generated items are already reached by path or
+  a reserved `__morloc` name.
 - [reproduced, d352b5d4] C++: user headers are included after the precompiled header,
   which brings the libmorloc C API into the global namespace (`typedef
   struct Schema`, about 180 functions), and before cppmorloc.hpp, whose
@@ -26,10 +23,10 @@ may use.
   ambiguous overload.
 - [read] Manifold locals and sourced names share a frame: a manifold's
   formals and temporaries are `n<N>`, `s<N>`, `helper<N>` (Grammars/Common.hs
-  argNamer and friends), and R and Python call sourced functions by their
-  bare or module-qualified name in that frame. An R sourced function named
-  `n3` is shadowed by a manifold parameter `n3`, silently when it is passed
-  as a value. Needs reserved local names per language, from the same namer
+  argNamer and friends), and R, Python and Rust call sourced functions by
+  their bare or module-qualified name in that frame. An R or Rust sourced
+  function named `n3` is shadowed by a manifold parameter `n3`, silently
+  when it is passed as a value. Needs reserved local names per language, from the same namer
   machinery as the manifold names.
 - [read] Generated R code calls base functions (`c`, `list`, `lapply`,
   `paste0`, `tryCatch`, ...) by name from the global environment, where a

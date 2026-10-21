@@ -42,7 +42,7 @@ import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.LanguageDescriptor
-  (declaredNamePatterns, declaredReservedPrefixes, matchNamePattern)
+  (declaredNamePatterns, declaredReservedNames, declaredReservedPrefixes, matchNamePattern)
 
 -- | Every term must either be sourced or declared.
 data TermOrigin = Declared ExprI | Sourced Source
@@ -353,16 +353,19 @@ checkSourceNames d = mapM_ (AST.checkExprI checkNode) (DAG.nodes d)
     checkReserved i src yamlText = do
       let lang = ML.langName (srcLang src)
           nm = unSrcName (srcName src)
-      case yamlText >>= declaredReservedPrefixes of
+          -- each segment of a path, so `crate::x` is checked as `x`
+          segments = nm : MT.splitOn "::" nm
+          taken prefixes names s = s `elem` names || any (`MT.isPrefixOf` s) prefixes
+      case (,) <$> (yamlText >>= declaredReservedPrefixes) <*> (yamlText >>= declaredReservedNames) of
         Left why ->
           MM.throwSourcedError i $
             "Cannot check" <+> pretty lang <+> "source" <+> squotes (pretty nm) <> ":" <+> pretty why
-        Right prefixes -> case filter (`MT.isPrefixOf` nm) prefixes of
-          (prefix : _) ->
+        Right (prefixes, names) -> case filter (taken prefixes names) segments of
+          (s : _) ->
             MM.throwSourcedError i $
-              "The" <+> pretty lang <+> "source" <+> squotes (pretty nm)
-                <+> "starts with" <+> squotes (pretty prefix) <> ","
-                <+> "which is reserved for names the" <+> pretty lang <+> "pool defines."
+              "The" <+> pretty lang <+> "source" <+> squotes (pretty nm) <+> "uses"
+                <+> squotes (pretty s) <> ","
+                <+> "a name reserved for what the" <+> pretty lang <+> "pool defines."
           [] -> return ()
 
 -- | A language's lang.yaml: the embedded one, else a plugin's under the

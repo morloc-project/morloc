@@ -43,7 +43,7 @@ import qualified Data.Text as T
 import qualified Data.ByteString as BS
 import qualified Data.Text.Encoding as TE
 import qualified System.Info as SI
-import Morloc.CodeGenerator.Grammars.Common
+import Morloc.CodeGenerator.Grammars.Common hiding (manNamer, manifoldIdOf)
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
@@ -109,7 +109,7 @@ data RustState = RustState
   -- function, labeled with its definition ('makeTraceLabelLookup', DIAG-5).
   , rsLogTemplates :: Map.Map Int RenderedTemplate
   -- ^ Rendered @log:@ / @benchmark:@ templates per labeled manifold midx.
-  -- Drives the 'rustmorloc::LogGuard' wrap in 'rustMakeFunction'.
+  -- Drives the '::rustmorloc::LogGuard' wrap in 'rustMakeFunction'.
   , rsRecmap :: RecMap
   -- ^ Unified record types used in this pool; drives struct generation, the
   -- concrete struct name in 'rustTypeOf', and per-record marshalling impls.
@@ -367,7 +367,7 @@ rustStoredType Passthrough = return "*const u8"
 -- @std::sync::Arc<dyn Fn(&A1, .., &An) -> R + Send + Sync>@.
 rustFnValueType :: [MDoc] -> MDoc -> MDoc
 rustFnValueType argTs retT =
-  "std::sync::Arc<dyn Fn(" <> hcat (punctuate ", " ["&" <> a | a <- argTs]) <> ") -> " <> retT <> " + Send + Sync>"
+  "::std::sync::Arc<dyn Fn(" <> hcat (punctuate ", " ["&" <> a | a <- argTs]) <> ") -> " <> retT <> " + Send + Sync>"
 
 -- | The Rust return type of a manifold: a serial result is an owned packet;
 -- a function value (a closure over its context, a suspension when it takes
@@ -397,7 +397,7 @@ rustFieldType t = rustTypeOf t
 -- Option OF this tuple. Mirrors the C++ 'cppClosureWireLeaf'. `ClosureOrigin` is
 -- the rustmorloc alias for @(String, i64, Vec<Vec<u8>>)@.
 rustClosureWireLeaf :: TypeF
-rustClosureWireLeaf = VarF (FV (TV "Closure") (CV "rustmorloc::ClosureOrigin"))
+rustClosureWireLeaf = VarF (FV (TV "Closure") (CV "::rustmorloc::ClosureOrigin"))
 
 -- | Whether Rust routes this aggregate node through the shared structural
 -- (reify/reflect-in-place) path: True iff it carries a closure leaf reachable
@@ -455,7 +455,7 @@ rustEvalPattern :: TypeF -> Pattern -> [MDoc] -> RustM MDoc
 -- String interpolation: interweave compile-time fragments with the rendered
 -- insertion expressions (each forced to an owned String for a uniform slice).
 rustEvalPattern _ (PatternText s ss) xs =
-  return $ "rustmorloc::interweave_strings(&["
+  return $ "::rustmorloc::interweave_strings(&["
     <> hcat (punctuate ", " [dquotes (pretty (RP.rustEscape frag)) | frag <- s : ss])
     <> "], &["
     <> hcat (punctuate ", " [parens x <> ".as_str()" | x <- xs])
@@ -661,13 +661,13 @@ rustCacheBody resSa lbl midx args bodyPool = do
       argSetupLines = concatMap (\(_, _, ss) -> ss) preparedArgs
       packetsArr = "&[" <> hcat (punctuate ", " argRefs) <> "]"
       schemasArr = "&[" <> hcat (punctuate ", " [dquotes (pretty (RP.rustEscape s)) | s <- argSchemas]) <> "]"
-      keyStmt = "let" <+> keyVar <> ": u64 = rustmorloc::cache_key("
+      keyStmt = "let" <+> keyVar <> ": u64 = ::rustmorloc::cache_key("
                   <> pretty midx <> ", " <> packetsArr <> ", " <> schemasArr <> ");"
-      lookupStmt = "let" <+> cachedVar <> ": *mut u8 = rustmorloc::cache_lookup("
+      lookupStmt = "let" <+> cachedVar <> ": *mut u8 = ::rustmorloc::cache_lookup("
                   <> keyVar <> ", " <> labelLit <> ");"
       missLines = poolPriorLines bodyPool
         ++ [ "let" <+> bodyVar <> ": *mut u8 =" <+> poolExpr bodyPool <> ";"
-           , "rustmorloc::cache_store(" <> keyVar <> ", " <> labelLit <> ", "
+           , "::rustmorloc::cache_store(" <> keyVar <> ", " <> labelLit <> ", "
                <> bodyVar <> ", " <> dquotes (pretty (RP.rustEscape resSchema)) <> ");"
            , bodyVar
            ]
@@ -702,8 +702,8 @@ prepareRustCacheArg wrapIdx (j, (a@(Arg i tm), sa)) = do
       -- The packet exists only to key and store the cache entry, so its
       -- owner releases it when the manifold's scope ends.
       let argVar = "__mlc_ca_" <> pretty wrapIdx <> "_" <> pretty j
-          decl = "let" <+> argVar <> "_own = rustmorloc::Packet::new(rustmorloc::put_value(&("
-                   <> rustReadPlace own (argNamer a) <> "), " <> sch sid <> "));"
+          decl = "let" <+> argVar <> "_own = ::rustmorloc::Packet::new(" <> RP.putValueFn <> "(&("
+                   <> rustReadPlace own (argNamer a) <> "), " <> RP.schemaRef sid <> "));"
                    <+> "let" <+> argVar <> ": *const u8 =" <+> argVar <> "_own.as_ptr();"
       return (argVar, schemaStr, [decl])
     _ -> return (argNamer a, schemaStr, [])
@@ -739,7 +739,7 @@ thinSinkNames mask es = Set.filter occursOnlyHere sites
     occursOnlyHere n = Map.findWithDefault (0 :: Int) n allCounts == 1
     allCounts =
       Map.fromListWith (+)
-        [ (render (manNamer i), 1)
+        [ (render (RP.rustManifoldName i), 1)
         | sm <- es
         , NativeManifold i _ form _ <- collectClosureManifolds sm
         , isClosureForm form
@@ -763,7 +763,7 @@ thinSinkNames mask es = Set.filter occursOnlyHere sites
             (g : _) -> g
             [] -> []
        in Set.fromList
-            [ render (manNamer i)
+            [ render (RP.rustManifoldName i)
             | (k, NativeArgManifold (NativeManifold i _ form _)) <- firstGroup
             , isClosureForm form
             , funParamAt src k
@@ -799,7 +799,7 @@ thinClosures sinks stageTable heads es =
           return (if Set.member sig heads then Nothing else Just name)
       | otherwise = return Nothing
       where
-        name = render (manNamer i)
+        name = render (RP.rustManifoldName i)
 
 -- | The spec's @owner(e, Gamma)@ as a PURE function: the ownership of a native
 -- expression given @Gamma@ (the borrowed @&T@ parameter indices) and @Shared@
@@ -891,13 +891,6 @@ rustReadPlace :: IOwnership -> MDoc -> MDoc
 rustReadPlace BorrowedRef x = "(*" <> x <> ")"
 rustReadPlace _ x = x
 
--- | Reference the pool's schema for a registered schema id via the crate-root
--- @schema(<id>)@ accessor. Fully qualified (@crate::@) so it resolves even inside
--- a scope that binds a local @schema@ -- e.g. a record's generated
--- @ToVoidstar@/@FromVoidstar@ impl, whose closure fields inline a reflect proxy
--- that looks up the closure's own arg/result schemas.
-sch :: Int -> MDoc
-sch sid = "crate::schema(" <> pretty sid <> ")"
 
 -- | A Rust tuple: the unit, a ONE-tuple (which needs the trailing comma --
 -- @(x)@ is a parenthesized value, not a tuple, and its fields do not exist),
@@ -920,16 +913,15 @@ rustTuple xs = tupled xs
 -- first reify. A closure whose manifold has no dispatch entry cannot be
 -- called back into, so it is built unregistered and reifying it fails by
 -- name rather than by fabricating an identity.
-rustClosureWrapper :: MDoc -> TypeM -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> RustM MDoc
-rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
+rustClosureWrapper :: Int -> MDoc -> TypeM -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> RustM MDoc
+rustClosureWrapper mid sig sigType mname ctxArgs boundArgs = do
   -- the owned type of each capture, naming the tuple the fn pointers read
   capTypes <- mapM (\(Arg _ t) -> captureType t) ctxArgs
   boundTyped <- mapM (\a@(Arg _ t) -> do
                         base <- closureParamType t
                         return (argNamer a <> ":" <+> base)) boundArgs
   builds <- CMS.gets rsBuilds
-  let mid = readMay (MT.unpack (MT.drop 1 (render mname))) :: Maybe Int
-      dead i = maybe False (\m -> Set.member (m, i) builds) mid
+  let dead i = Set.member (mid, i) builds
   capInits <- mapM (\a@(Arg i _) -> capInit (dead i) a) ctxArgs
   let n = length boundArgs
       capsT = rustTuple capTypes
@@ -945,8 +937,8 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
   reifyInfo <- CMS.gets rsReifyInfo
   (ctor, mkArgs) <- case Map.lookup (render mname) reifyInfo of
     -- no dispatch entry: nothing can call back into this closure
-    Nothing -> return ("rustmorloc::local" <> pretty n, const [])
-    Just (mid, capWire, _)
+    Nothing -> return ("::rustmorloc::local" <> pretty n, const [])
+    Just (_, capWire, _)
       -- The capture list the dispatch wrapper decodes and the one the closure
       -- carries are built from different projections of the manifold form; a
       -- length disagreement would pair a capture's value with another's
@@ -958,7 +950,7 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
       | otherwise -> do
           reifiers <- mapM (reifyInPlace . snd) capWire
           let capExprs =
-                [ "unsafe { rustmorloc::reify_capture(&" <> maybe fld ($ fld) reify <> ", " <> sch sid <> ") }"
+                [ "unsafe { ::rustmorloc::reify_capture(&" <> maybe fld ($ fld) reify <> ", " <> RP.schemaRef sid <> ") }"
                 | (i, (sid, _), reify) <- zip3 [(0 :: Int) ..] capWire reifiers
                 , let fld = "__c." <> pretty i
                 ]
@@ -966,7 +958,7 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
                 "|__c: &" <> ct <> "|"
                   <+> "(\"rust\".to_string(), " <> pretty mid <> "i64, vec!["
                   <> hcat (punctuate ", " capExprs) <> "])"
-          return ("rustmorloc::crossing" <> pretty n, \ct -> [mkFn ct])
+          return ("::rustmorloc::crossing" <> pretty n, \ct -> [mkFn ct])
   let ctorArgsFor ct = ["__caps", callFn ct] <> mkArgs ct
       ctorArgs = ctorArgsFor capsT
       boxedDoc =
@@ -989,7 +981,7 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
       -- neither satisfies, so a bad choice is a type error in the generated
       -- Rust rather than a wrong answer at run time.
       thinDoc =
-        "rustmorloc::fn_ptr" <> pretty n
+        "::rustmorloc::fn_ptr" <> pretty n
           <> parens ("|" <> hcat (punctuate ", " boundTyped) <> "|"
                        <+> "unsafe {" <+> mname <> tupled callArgs <+> "}")
       -- A closure that captures and is passed straight to a sourced
@@ -1010,7 +1002,7 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
   thin <- CMS.gets rsThinClosures
   stageTable <- CMS.gets rsStageTable
   heads <- CMS.gets rsPapplyHeads
-  let stage = manifoldIdOf mname >>= (`Map.lookup` stageTable)
+  let stage = Map.lookup mid stageTable
       bndWire = case Map.lookup (render mname) reifyInfo of
         Just (_, _, ws) -> Just ws
         Nothing -> Nothing
@@ -1027,7 +1019,7 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
       | otherwise -> return boxedDoc
   where
     -- The function value, wrapped so that each application to its first
-    -- argument (see 'rustmorloc::apply1_N') is the one morloc means: a
+    -- argument (see '::rustmorloc::apply1_N') is the one morloc means: a
     -- staged closure runs its stage entry once it has the arguments before
     -- the stage point; a closure that can cross keeps its origin, with each
     -- argument appended to its captured values.
@@ -1042,19 +1034,19 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
           [ do
               toWire <- reifyInPlace ast
               let v = maybe "__v" (\f -> "&" <> parens (f "__v")) toWire
-              return $ "Some((|__v: &" <> bt <> "| unsafe { rustmorloc::reify_capture(" <> v <> ", " <> sch sid <> ") }) as fn(&" <> bt <> ") -> Vec<u8>)"
+              return $ "Some((|__v: &" <> bt <> "| unsafe { ::rustmorloc::reify_capture(" <> v <> ", " <> RP.schemaRef sid <> ") }) as fn(&" <> bt <> ") -> Vec<u8>)"
           | ((sid, ast), bt) <- zip ws bts ]
       let n = length boundArgs
           shared = isJust stage && not (null capInits)
-          heldT = if shared then "std::sync::Arc<" <> capsT <> ">" else capsT
-          held x = if shared then "std::sync::Arc::new(" <> x <> ")" else x
+          heldT = if shared then "::std::sync::Arc<" <> capsT <> ">" else capsT
+          held x = if shared then "::std::sync::Arc::new(" <> x <> ")" else x
           stagedArgs = ctorArgsFor heldT
           dynT ts = rustFnValueType ts resT
           capRefS i (Arg _ t) = captureArg t ("__sc." <> pretty (i :: Int))
           stageCall smid kk =
             let args = zipWith capRefS [0 ..] ctxArgs
                          <> [rustBridgeArg t ("&__x" <> pretty j) | (j, Arg _ t) <- zip [(0 :: Int) ..] (take kk boundArgs)]
-             in "unsafe {" <+> manNamer smid <> tupled args <+> "}"
+             in "unsafe {" <+> RP.rustManifoldName smid <> tupled args <+> "}"
           level i fv
             | i >= n = fv
             | otherwise =
@@ -1067,14 +1059,14 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
                       Just (kk, smid) | i + 1 == kk -> stageCall smid kk
                       _ ->
                         vsep
-                          [ "let __g = rustmorloc::pap" <> pretty (n - i) <> "(&__fc, &__x" <> pretty i <> ", " <> (wires !! i) <> ");"
+                          [ "let __g = ::rustmorloc::pap" <> pretty (n - i) <> "(&__fc, &__x" <> pretty i <> ", " <> (wires !! i) <> ");"
                           , level (i + 1) "__g"
                           ]
                  in vsep
                       [ "{"
                       , indent 4 $ vsep
                           [ "let __fc = " <> fv <> ".clone();"
-                          , "rustmorloc::staged" <> pretty (n - i) <> "(__fc.clone(), std::sync::Arc::new(move |__xr: &" <> bt <> "| -> " <> dynT (drop (i + 1) bts) <> " {"
+                          , "::rustmorloc::staged" <> pretty (n - i) <> "(__fc.clone(), ::std::sync::Arc::new(move |__xr: &" <> bt <> "| -> " <> dynT (drop (i + 1) bts) <> " {"
                           , indent 4 (vsep (clones <> [own, rest]))
                           , "}))"
                           ]
@@ -1095,10 +1087,10 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
           ]
 
 -- | The type of a capture in the tuple a closure owns: a packet is held as
--- a 'rustmorloc::PacketRef' (STATE-3), anything else as its stored type.
+-- a '::rustmorloc::PacketRef' (STATE-3), anything else as its stored type.
 captureType :: TypeM -> RustM MDoc
 captureType t
-  | isPacketCapture t = return "rustmorloc::PacketRef"
+  | isPacketCapture t = return "::rustmorloc::PacketRef"
   | otherwise = rustStoredType t
 
 -- | A capture read out of the tuple as the argument of the manifold call.
@@ -1128,7 +1120,7 @@ capInit dead a@(Arg i t) = do
   -- a packet pointer is wrapped ('captureType').
   return $
     if isPacketCapture t
-      then "rustmorloc::PacketRef::new(" <> name <> ")"
+      then "::rustmorloc::PacketRef::new(" <> name <> ")"
       else if rustArgIsRef t && not (dead && not (Set.member i parentBorrowed)) then deref <> ".clone()" else deref
 
 -- | The parameters each fully applied native manifold takes by value (OWN-7).
@@ -1146,7 +1138,7 @@ closureArgPush i ast sid = do
       v = maybe a (\f -> "&" <> parens (f a)) toWire
   -- The packet belongs to this application alone: its owner releases it
   -- when the proxy body ends, after the result has been read.
-  return $ "let __own" <> pretty i <> " = rustmorloc::Packet::new(rustmorloc::put_value(" <> v <> ", " <> sch sid <> "));"
+  return $ "let __own" <> pretty i <> " = ::rustmorloc::Packet::new(" <> RP.putValueFn <> "(" <> v <> ", " <> RP.schemaRef sid <> "));"
     <+> "__pkts.push(__own" <> pretty i <> ".as_ptr());"
 
 -- | How a proxy reads the result of its call off the wire: a value is got
@@ -1156,7 +1148,7 @@ closureResultRead :: SerialAST -> MDoc -> Int -> RustM MDoc
 closureResultRead out call sid = do
   fromWire <- reflectInPlace out
   wireT <- rustTypeOf (wireSerialAstToType rustClosureWireLeaf out)
-  let got = "rustmorloc::get_value::<" <> wireT <> ">(" <> call <> ", " <> sch sid <> ")"
+  let got = "::rustmorloc::get_value::<" <> wireT <> ">(" <> call <> ", " <> RP.schemaRef sid <> ")"
   return $ maybe got ($ got) fromWire
 
 -- | Where a value differs between the form a pool holds and the form it
@@ -1239,7 +1231,7 @@ renderReflect (OverTuple ps) = do
 -- because both are driven by the same 'WirePath'.
 renderReify :: WirePath -> RustM (MDoc -> MDoc)
 renderReify (AtClosure (SerialClosure ins _)) =
-  return $ \v -> "rustmorloc::require_origin(rustmorloc::reify(&" <> parens v <> "))"
+  return $ \v -> "::rustmorloc::require_origin(::rustmorloc::reify(&" <> parens v <> "))"
 renderReify (AtClosure _) = error "renderReify: a closure node is a SerialClosure"
 -- The inverse: unpack to the form the wire carries, then reduce that.
 renderReify (AtPack p inner) = do
@@ -1281,7 +1273,7 @@ rustReflectClosure :: MDoc -> SerialAST -> RustM MDoc
 rustReflectClosure pkt ast@(SerialClosure _ _) = do
   tupSid <- rustRegisterSchema (render (serialAstToMsgpackSchema ast))
   assemble <- rustReflectClosureAssembler ast
-  return $ assemble ("rustmorloc::get_value(" <> pkt <> ", " <> sch tupSid <> ")")
+  return $ assemble ("::rustmorloc::get_value(" <> pkt <> ", " <> RP.schemaRef tupSid <> ")")
 rustReflectClosure _ _ = error "rustReflectClosure: expected SerialClosure"
 
 -- | Compute the schema-dependent pieces of an origin-preserving reflect ONCE
@@ -1309,16 +1301,16 @@ rustReflectClosureAssembler (SerialClosure ins out) = do
           restDyn = rustFnValueType restArgTs restResT
       return . Just $
         vsep
-          [ "std::sync::Arc::new(move |__x: &" <> a0T <> "| -> " <> restDyn <> " {"
+          [ "::std::sync::Arc::new(move |__x: &" <> a0T <> "| -> " <> restDyn <> " {"
           , indent 4 $ vsep
-              [ "let mut __o: rustmorloc::ClosureOrigin = __clo_s.clone();"
-              , "__o.2.push(unsafe { rustmorloc::reify_capture(" <> v <> ", " <> sch a0Sid <> ") });"
-              , "if let Some((__n, __k, __s)) = crate::mlc_stage_lookup(__o.1) {"
+              [ "let mut __o: ::rustmorloc::ClosureOrigin = __clo_s.clone();"
+              , "__o.2.push(unsafe { ::rustmorloc::reify_capture(" <> v <> ", " <> RP.schemaRef a0Sid <> ") });"
+              , "if let Some((__n, __k, __s)) = crate::__morloc_stage_lookup(__o.1) {"
               , indent 4 $ vsep
                   [ "if __o.2.len() == __n + __k {"
                   , indent 4 $ vsep
                       [ "let __pkts: Vec<*const u8> = __o.2.iter().map(|__p| __p.as_ptr()).collect();"
-                      , "__o = unsafe { rustmorloc::get_value(rustmorloc::Packet::new(rustmorloc::foreign_call(&format!(\"pipe-{}\", __o.0), __s as u32, &__pkts)).as_ptr(), " <> sch restSid <> ") };"
+                      , "__o = unsafe { ::rustmorloc::get_value(::rustmorloc::Packet::new(::rustmorloc::foreign_call(&format!(\"pipe-{}\", __o.0), __s as u32, &__pkts)).as_ptr(), " <> RP.schemaRef restSid <> ") };"
                       ]
                   , "}"
                   ]
@@ -1331,7 +1323,7 @@ rustReflectClosureAssembler (SerialClosure ins out) = do
   resT <- rustTypeOf (serialAstToNativeType out)
   argSids <- mapM (rustRegisterSchema . render . serialAstToMsgpackSchema) ins
   resSid <- rustRegisterSchema (render (serialAstToMsgpackSchema out))
-  resultDoc <- closureResultRead out "rustmorloc::Packet::new(rustmorloc::foreign_call(__sock, __c.1.1 as u32, &__pkts)).as_ptr()" resSid
+  resultDoc <- closureResultRead out "::rustmorloc::Packet::new(::rustmorloc::foreign_call(__sock, __c.1.1 as u32, &__pkts)).as_ptr()" resSid
   pushes <- sequence [closureArgPush i ast sid | (i, ast, sid) <- zip3 [(0 :: Int) ..] ins argSids]
   let n = length ins
       params = ["__a" <> pretty i <> ": &" <> t | (i, t) <- zip [(0 :: Int) ..] argTs]
@@ -1348,14 +1340,14 @@ rustReflectClosureAssembler (SerialClosure ins out) = do
       [ "{"
       , indent 4 $
           vsep
-            ( [ "let __clo: rustmorloc::ClosureOrigin = " <> tup <> ";" ]
+            ( [ "let __clo: ::rustmorloc::ClosureOrigin = " <> tup <> ";" ]
                 <> ["let __clo_s = __clo.clone();" | isJust step]
                 <> [ "let __caps = (format!(\"pipe-{}\", __clo.0), __clo.clone());"
-                   , "let __p = rustmorloc::proxy" <> pretty n <> "("
+                   , "let __p = ::rustmorloc::proxy" <> pretty n <> "("
                    , indent 4 $
                        vsep
                          [ "__caps,"
-                         , "|__c: &(String, rustmorloc::ClosureOrigin)"
+                         , "|__c: &(String, ::rustmorloc::ClosureOrigin)"
                              <> hcat [", " <> pr | pr <- params] <> "| -> " <> resT <> " { unsafe {"
                          , indent 4 bodyDoc
                          , "} },"
@@ -1364,7 +1356,7 @@ rustReflectClosureAssembler (SerialClosure ins out) = do
                    , ");"
                    ]
                 <> [ case step of
-                       Just st -> "rustmorloc::staged" <> pretty n <> "(__p, " <> st <> ")"
+                       Just st -> "::rustmorloc::staged" <> pretty n <> "(__p, " <> st <> ")"
                        Nothing -> "__p"
                    ]
             )
@@ -1425,7 +1417,7 @@ translate srcs es0 = do
   absSrcs <- liftIO $ mapM MS.canonicalizePath rustSrcs
   localCrateDirs <- Map.elems <$> rustLocalDeps
   let userDirs = unique (map takeDirectory absSrcs ++ localCrateDirs)
-      includeDocs = map rustSourceInclude absSrcs ++ ["mod mlc_user_ops;", rustUserFiles absSrcs userDirs]
+      includeDocs = map rustSourceInclude absSrcs ++ ["mod __morloc_user_ops;", rustUserFiles absSrcs userDirs]
 
   debugMode <- MM.gets stateDebugTrace
   debugInfo <- if debugMode
@@ -1497,7 +1489,7 @@ translate srcs es0 = do
                 [ File "Cargo.toml" (Code (render cargoToml))
                 , File "Cargo.lock" (Code lockText)
                 , File "build.rs" (Code (render buildRs))
-                , Dir "src" [File "main.rs" (Code poolSrc), File "mlc_user_ops.rs" (Code rustUserOps)]
+                , Dir "src" [File "main.rs" (Code poolSrc), File "__morloc_user_ops.rs" (Code rustUserOps)]
                 ]
             ]
       , scriptMake = maker
@@ -1555,11 +1547,11 @@ rustPathLiteral = dquotes . pretty . RP.rustEscape . MT.pack
 -- directories of the sources and of the local crates.
 rustUserFiles :: [Path] -> [Path] -> MDoc
 rustUserFiles absPaths dirs =
-  "const MLC_USER_FILES: &[&str] = &["
+  "const __MORLOC_USER_FILES: &[&str] = &["
     <> hsep (punctuate "," (map rustPathLiteral absPaths ++ opsFiles ++ map (rustPathLiteral . addSlash) dirs))
     <> "];"
   where
-    opsFiles = ["\"src/mlc_user_ops.rs\"", "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/mlc_user_ops.rs\")"]
+    opsFiles = ["\"src/__morloc_user_ops.rs\"", "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/__morloc_user_ops.rs\")"]
     addSlash d = if "/" `isSuffixOf` d then d else d <> "/"
 
 -- | Sourced Rust binary operators applied through shims in a generated user
@@ -1569,16 +1561,16 @@ rustUserFiles absPaths dirs =
 -- than consumes its operands.
 rustOperatorShims :: [(Text, (Text, Text, Bool))]
 rustOperatorShims =
-  [ ("+", ("add", "std::ops::Add", False))
-  , ("-", ("sub", "std::ops::Sub", False))
-  , ("*", ("mul", "std::ops::Mul", False))
-  , ("/", ("div", "std::ops::Div", False))
-  , ("%", ("rem", "std::ops::Rem", False))
-  , ("&", ("bitand", "std::ops::BitAnd", False))
-  , ("|", ("bitor", "std::ops::BitOr", False))
-  , ("^", ("bitxor", "std::ops::BitXor", False))
-  , ("<<", ("shl", "std::ops::Shl", False))
-  , (">>", ("shr", "std::ops::Shr", False))
+  [ ("+", ("add", "::std::ops::Add", False))
+  , ("-", ("sub", "::std::ops::Sub", False))
+  , ("*", ("mul", "::std::ops::Mul", False))
+  , ("/", ("div", "::std::ops::Div", False))
+  , ("%", ("rem", "::std::ops::Rem", False))
+  , ("&", ("bitand", "::std::ops::BitAnd", False))
+  , ("|", ("bitor", "::std::ops::BitOr", False))
+  , ("^", ("bitxor", "::std::ops::BitXor", False))
+  , ("<<", ("shl", "::std::ops::Shl", False))
+  , (">>", ("shr", "::std::ops::Shr", False))
   , ("==", ("eq", "PartialEq", True))
   , ("!=", ("ne", "PartialEq", True))
   , ("<", ("lt", "PartialOrd", True))
@@ -1610,21 +1602,21 @@ takeUserCallMarks src =
 -- at one of these positions is the user's.
 rustUserCalls :: [(Int, Int)] -> Text
 rustUserCalls calls =
-  "const MLC_USER_CALLS: &[(u32, u32)] = &["
+  "const __MORLOC_USER_CALLS: &[(u32, u32)] = &["
     <> T.intercalate ", " [T.pack ("(" <> show l <> ", " <> show c <> ")") | (l, c) <- calls]
     <> "];"
 
 -- | A manifold returns its serialized result as the dispatch's reply
 -- (PANIC-10).
 rustReply :: MDoc -> MDoc
-rustReply e = case T.stripPrefix "rustmorloc::put_value(" (render e) of
-  Just rest -> "rustmorloc::put_reply(" <> pretty rest
+rustReply e = case T.stripPrefix (render RP.putValueFn <> "(") (render e) of
+  Just rest -> "::rustmorloc::put_reply(" <> pretty rest
   Nothing -> e
 
 rustOperator :: Source -> MDoc -> MDoc -> MDoc
 rustOperator src l r = case lookup (unSrcName (srcName src)) rustOperatorShims of
-  Just (shim, _, True) -> "mlc_user_ops::" <> pretty shim <> tupled ["&(" <> l <> ")", "&(" <> r <> ")"]
-  Just (shim, _, False) -> "mlc_user_ops::" <> pretty shim <> tupled [l, r]
+  Just (shim, _, True) -> "__morloc_user_ops::" <> pretty shim <> tupled ["&(" <> l <> ")", "&(" <> r <> ")"]
+  Just (shim, _, False) -> "__morloc_user_ops::" <> pretty shim <> tupled [l, r]
   Nothing -> infixOperator src l r
 
 rustUserOps :: Text
@@ -1654,7 +1646,7 @@ makeRustCode includeDocs closureAsts closureTable0 es = do
   -- crosses; a thin closure cannot cross, so it is kept out rather than given
   -- a dispatch entry (and with it the boxed form).
   closureTable <-
-    Map.filterWithKey (\i _ -> not (Set.member (render (manNamer i)) thin))
+    Map.filterWithKey (\i _ -> not (Set.member (render (RP.rustManifoldName i)) thin))
       <$> crossingClosures closureRustSig stageTable es closureTable0
   -- Per crossing closure: a home-pool serial dispatch wrapper (so a foreign pool
   -- can apply it) and the reify info (mid + captured schema ids) that
@@ -1719,30 +1711,30 @@ makeClosureDispatch closureAsts closureTable es = do
           -- Deserialize each argument packet to the closure body's native param
           -- form: a Copy value by value, a non-Copy value by shared reference.
           deser t sid copy j refl =
-            let raw = "rustmorloc::get_value::<" <> t <> ">(a(" <> pretty j <> "), " <> sch sid <> ")"
+            let raw = "::rustmorloc::get_value::<" <> t <> ">(a(" <> pretty j <> "), " <> RP.schemaRef sid <> ")"
                 g = case refl of
                   Just assemble -> assemble raw
                   Nothing -> raw
              in if copy then g else rustRef Owned g
-          call = manNamer i <> tupled argExprs
+          call = RP.rustManifoldName i <> tupled argExprs
           result = case resAst of
             SerialClosure ins _ ->
-              "rustmorloc::require_origin(rustmorloc::reify(&(" <> call <> ")))"
+              "::rustmorloc::require_origin(::rustmorloc::reify(&(" <> call <> ")))"
             _ -> call
           wrapper =
             vsep
-              [ "unsafe fn mlc_closure_dispatch_" <> pretty i <> "(args: *const *const u8, nargs: usize) -> *mut u8 {"
+              [ "unsafe fn __morloc_closure_dispatch_" <> pretty i <> "(args: *const *const u8, nargs: usize) -> *mut u8 {"
               , indent 4 $
                   vsep
-                    [ "let a = |k: usize| -> *const u8 { if k < nargs { unsafe { *args.add(k) } } else { std::ptr::null() } };"
-                    , "rustmorloc::put_reply(&(" <> result <> "), " <> sch resSid <> ")"
+                    [ "let a = |k: usize| -> *const u8 { if k < nargs { unsafe { *args.add(k) } } else { ::std::ptr::null() } };"
+                    , "::rustmorloc::put_reply(&(" <> result <> "), " <> RP.schemaRef resSid <> ")"
                     ]
               , "}"
               ]
       -- The wire form of each capture travels with its schema id: the origin
       -- builder reduces the value through the same 'wirePath' the dispatch
       -- wrapper rebuilds it through.
-      return (wrapper, (render (manNamer i), (i, zip capSids capAsts, zip (drop (length capScs) argSids) bndAsts)))
+      return (wrapper, (render (RP.rustManifoldName i), (i, zip capSids capAsts, zip (drop (length capScs) argSids) bndAsts)))
 
 -- | The stage table ('StageEntry'), for the reflect proxies of closures from
 -- other pools.
@@ -1750,7 +1742,7 @@ stageLookupDoc :: Map.Map Int StageEntry -> MDoc
 stageLookupDoc tbl =
   vsep
     [ "#[allow(dead_code)]"
-    , "fn mlc_stage_lookup(mid: i64) -> Option<(usize, usize, i64)> {"
+    , "fn __morloc_stage_lookup(mid: i64) -> Option<(usize, usize, i64)> {"
     , indent 4 $ vsep
         ( "match mid {"
             : [ indent 4 (pretty f <+> "=> Some((" <> pretty n <> ", " <> pretty k <> ", " <> pretty st <> ")),")
@@ -2362,7 +2354,7 @@ rustLowerConfig mask consumed =
               -- borrows it.
               Function ts _
                 | isFunParam ->
-                    "rustmorloc::IntoCallback" <> pretty (length ts) <> "::into_callback"
+                    "::rustmorloc::IntoCallback" <> pretty (length ts) <> "::into_callback"
                       <> parens (case own of Owned -> x; _ -> parens x <> ".clone()")
                 | otherwise -> rustRef own x
               -- A closure application and a sourced type-variable parameter are
@@ -2414,7 +2406,7 @@ rustLowerConfig mask consumed =
     -- itself a `data` value clones as a shared box, so a loop that walks a
     -- spine by projection stays linear.
     -- At the subject's last read the field is taken out of the payload
-    -- instead ('rustmorloc::MlcTake').
+    -- instead ('::rustmorloc::MlcTake').
     , lcCtorField = \how ty n _ i subj -> case how of
         FieldTake -> rustTakeField ty n i subj
         FieldBorrow -> parens (rustArmField ty n ("&" <> parens subj) ("&mlc_b." <> pretty i))
@@ -2475,14 +2467,14 @@ rustLowerConfig mask consumed =
           restTs <- mapM (rustStoredType . typeMof) rins
           resT <- rustStoredType (typeMof out)
           let step ts acc x =
-                "rustmorloc::apply1_" <> pretty (length ts + length restTs)
+                "::rustmorloc::apply1_" <> pretty (length ts + length restTs)
                   <> "::<" <> hcat (punctuate ", " (ts ++ restTs ++ [resT])) <> ">"
                   <> tupled ["&" <> acc, x]
           return (papplySteps step argTs f xs)
         _ -> return f
     , lcForeignCall = \socketFile mid args ->
         let argList = "&[" <> hcat (punctuate ", " [a <+> "as *const u8" | a <- args]) <> "]"
-         in [idoc|rustmorloc::foreign_call(#{dquotes socketFile}, #{pretty mid}, #{argList})|]
+         in [idoc|::rustmorloc::foreign_call(#{dquotes socketFile}, #{pretty mid}, #{argList})|]
     -- A remote call: args are already-serialized packet pointers (like a
     -- foreign call), so no put_value here. Resources fill the C `resources_t`
     -- with the C++ defaults (-1 for memory/time/cpus, 0 for gpus).
@@ -2490,28 +2482,28 @@ rustLowerConfig mask consumed =
         let (rmem, rtime, rcpu, rgpu) = remoteResourceInts res
             (resMem, resTime, resCPU, resGPU) = (pretty rmem, pretty rtime, pretty rcpu, pretty rgpu)
             argList = "&[" <> hcat (punctuate ", " [a <+> "as *const u8" | a <- args]) <> "]"
-            call = "rustmorloc::remote_call(" <> pretty mid <> ", " <> dquotes socketFile
+            call = "::rustmorloc::remote_call(" <> pretty mid <> ", " <> dquotes socketFile
                      <> ", \".morloc-cache\", " <> resMem <> ", " <> resTime <> ", "
                      <> resCPU <> ", " <> resGPU <> ", " <> argList <> ")"
          in return $ defaultValue {poolExpr = call}
     , lcCacheBody = rustCacheBody
     , lcDebugWrap = \_ _ body -> return body
     , lcMakeLet = rustMakeLet
-    , lcReleaseStmt = \v -> "unsafe { rustmorloc::release_packet(" <> pretty v <> ", true) };"
-    , lcReleaseBorrowedStmt = \v -> "unsafe { rustmorloc::release_packet(" <> pretty v <> ", false) };"
+    , lcReleaseStmt = \v -> "unsafe { ::rustmorloc::release_packet(" <> pretty v <> ", true) };"
+    , lcReleaseBorrowedStmt = \v -> "unsafe { ::rustmorloc::release_packet(" <> pretty v <> ", false) };"
     , lcReturn = \e -> "return" <+> rustReply e <> ";"
     -- EMIT-3: the pop follows the result's construction (a move).
     , lcFrameReturn = \i _ _ e -> do
         st <- CMS.get
         return $ case rustFrameLine st i of
           Nothing -> Nothing
-          Just _ -> Just (vsep ["let _mlc_r =" <+> rustReply e <> ";", "rustmorloc::frame_pop();", "return _mlc_r;"])
-    , lcDupPacket = \e -> "rustmorloc::dup_packet(" <> e <> ")"
-    , lcOwnedArg = \e -> "rustmorloc::Packet::new(" <> e <> ").as_ptr()"
+          Just _ -> Just (vsep ["let _mlc_r =" <+> rustReply e <> ";", "::rustmorloc::frame_pop();", "return _mlc_r;"])
+    , lcDupPacket = \e -> "::rustmorloc::dup_packet(" <> e <> ")"
+    , lcOwnedArg = \e -> "::rustmorloc::Packet::new(" <> e <> ").as_ptr()"
     , lcLoopBorrow = rustLoopBorrow
     , lcLoopLetRhs = rustConsumeLetRhs
     , lcLetRhs = rustConsumeLetRhs
-    , lcOwnPacketDecl = \v e -> Just ("let" <+> v <+> "= rustmorloc::Packet::new(" <> e <> ");", v <> ".as_ptr()")
+    , lcOwnPacketDecl = \v e -> Just ("let" <+> v <+> "= ::rustmorloc::Packet::new(" <> e <> ");", v <> ".as_ptr()")
     , lcMakeIf = rustMakeIf
     , lcShortCircuit = \isAnd a b -> a <+> (if isAnd then "&&" else "||") <+> b
     , lcMakeLoop = rustMakeLoop
@@ -2544,7 +2536,7 @@ rustLowerConfig mask consumed =
     -- (which decides what is catchable) stays in rustmorloc; the arms are
     -- built here because only the caller knows this Try's representation.
     , lcMakeTry = \thunk _ okWrap errWrap ->
-        "rustmorloc::mlc_try" <> tupled
+        "::rustmorloc::mlc_try" <> tupled
           [ thunk
           , "|mlcTryV|" <+> okWrap "mlcTryV"
           , "|mlcTryM|" <+> errWrap "mlcTryM"
@@ -2561,7 +2553,7 @@ rustLowerConfig mask consumed =
     -- aggregate that receives it is owned, so it is cloned here.
     , lcReifyClosure = \v s -> case s of
         SerialClosure ins _ ->
-          return $ "rustmorloc::require_origin(rustmorloc::reify(&" <> parens v <> "))"
+          return $ "::rustmorloc::require_origin(::rustmorloc::reify(&" <> parens v <> "))"
         _ -> error "Rust lcReifyClosure: expected SerialClosure"
     , lcReflectClosure = \pkt s -> rustReflectClosure pkt s
     , lcReflectClosureParsed = \tup s -> rustReflectClosureParsed tup s
@@ -2576,9 +2568,9 @@ rustLowerConfig mask consumed =
     -- A bare function passed to a HOF is a closure over all its params with no
     -- captured context; a lambda/section is a closure over its remaining params
     -- with the applied args captured. Both are the same safe wrapper.
-    , lcManifoldName = manNamer
-    , lcMakePass = \_ sig sigType mname params -> rustClosureWrapper sig sigType mname [] params
-    , lcMakeLambda = const rustClosureWrapper
+    , lcManifoldName = RP.rustManifoldName
+    , lcMakePass = \m sig sigType mname params -> rustClosureWrapper m sig sigType mname [] params
+    , lcMakeLambda = rustClosureWrapper
     -- A closure's own type IS its rendered function-value type: one
     -- trait object, the same spelling it has in every other position.
     , lcClosureSig = rustStoredType
@@ -2643,7 +2635,7 @@ rustLoopBorrow i e = do
         return ("{ let" <+> nvarNamer j <+> "=" <+> rhs' <> ";" <+> body' <+> "}")
       BorrowFail t msg -> do
         ty <- rustTypeOf t
-        return ("rustmorloc::morloc_throw_as::<&" <> ty <> ">(" <> RP.printExpr (IStrLit Nothing msg) <> ")")
+        return ("::rustmorloc::morloc_throw_as::<&" <> ty <> ">(" <> RP.printExpr (IStrLit Nothing msg) <> ")")
     renderTest c = case c of
       TestTag t p n -> do
         ty <- rustTypeOf t
@@ -2670,13 +2662,13 @@ rustArmField ty n subj yield =
 
 -- | Take field @i@ out of arm @n@'s payload (OWN-5): the box gives the
 -- field up when it holds the only handle, and the field is cloned otherwise
--- ('rustmorloc::MlcTake'). An arm's one field is its box, so reading the box
+-- ('::rustmorloc::MlcTake'). An arm's one field is its box, so reading the box
 -- out and forgetting the shell moves the whole value.
 rustTakeField :: MDoc -> Text -> Int -> MDoc -> MDoc
 rustTakeField ty n i subj =
   "{ let mlc_s = ::std::mem::ManuallyDrop::new(" <> subj <> "); match &*mlc_s {"
     <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
-    <+> "=> rustmorloc::MlcTake::take_with(unsafe { ::std::ptr::read(mlc_b) }, |mlc_v| mlc_v." <> pretty i
+    <+> "=> ::rustmorloc::MlcTake::take_with(unsafe { ::std::ptr::read(mlc_b) }, |mlc_v| mlc_v." <> pretty i
     <> ", |mlc_v| mlc_v." <> pretty i <> ".clone()),"
     <+> "_ => unreachable!()"
     <+> "} }"
@@ -2869,10 +2861,10 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm isCl
           -- keeps a frame at the call (PANIC-15).
           frameStmts = case rustFrameLine st callIndex of
             Nothing -> []
-            Just lit -> ["rustmorloc::frame_push(" <> lit <> ");"]
+            Just lit -> ["::rustmorloc::frame_push(" <> lit <> ");"]
           callFrame
             | null frameStmts && T.any (== userCallMark) (render (vsep (priorLines ++ [body]))) =
-                ["let _mlc_call = rustmorloc::CallFrame;"]
+                ["let _mlc_call = ::rustmorloc::CallFrame;"]
             | otherwise = []
           -- A labeled manifold is wrapped in a LogGuard: start on
           -- construction, pass or fail on drop. Nothing is placed after the
@@ -2889,7 +2881,7 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm isCl
             Nothing -> priorLines ++ [body]
             Just tmpl ->
               let guardStmt =
-                    "let _mlc_log = rustmorloc::LogGuard::new("
+                    "let _mlc_log = ::rustmorloc::LogGuard::new("
                       <> hsep (punctuate ","
                            [ dquotes (pretty (RP.rustEscape (renderedGroup tmpl)))
                            , litOrEmpty (renderedStart tmpl)
@@ -2905,11 +2897,11 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm isCl
       let inner = frameStmts ++ callFrame ++ bodyLines
           fnBody
             | isClosure =
-                [ "let _mlc_saved = rustmorloc::frame_enter();"
-                , "match std::panic::catch_unwind(std::panic::AssertUnwindSafe(||" <+> "{"
+                [ "let _mlc_saved = ::rustmorloc::frame_enter();"
+                , "match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(||" <+> "{"
                 , indent 4 (vsep inner)
                 , "})) {"
-                , indent 4 (vsep ["Ok(v) => v,", "Err(p) => rustmorloc::closure_rethrow(_mlc_saved, p),"])
+                , indent 4 (vsep ["Ok(v) => v,", "Err(p) => ::rustmorloc::closure_rethrow(_mlc_saved, p),"])
                 , "}"
                 ]
             | otherwise = inner

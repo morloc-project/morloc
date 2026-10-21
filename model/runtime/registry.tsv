@@ -38,8 +38,8 @@ data/lang/r/rmorloc.c::mlc_trace_ipc::cached	thread
 data/lang/r/rmorloc.c::run_job_c::budget	thread		
 data/lang/r/rmorloc.c::run_job_c::budget_read	thread		
 library/Morloc/CodeGenerator/Guest/Futhark.hs::-::cur	fork-scoped		
-library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::SCHEMA_STRS	startup		
-library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::SCHEMA_TABLE	startup		
+library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::__MORLOC_SCHEMA_STRS	startup		
+library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::__MORLOC_SCHEMA_TABLE	startup		
 morloc-runtime/arrow_ffi.rs::stats_enabled::FLAG	lazy		
 morloc-runtime/arrow_shm.rs::-::COPIED_BYTES	counter		
 morloc-runtime/arrow_shm.rs::-::LIVE_VIEW_BYTES	counter		

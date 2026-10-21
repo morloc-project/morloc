@@ -51,7 +51,9 @@ Code: unaudited
 
 A language reserves name prefixes for what its pool defines (lang.yaml
 `ldReservedPrefixes`: Python `__mm_`, `__morloc`; R `.__mm_`, `.__morloc`,
-`.morloc_`). A sourced name with a reserved prefix is a compile error. The
+`.morloc_`; Rust `__mm_`, `__morloc`, `__Morloc`, `__MORLOC`) and exact names
+(`ldReservedNames`: Rust `main`). A sourced name, or any `::` segment of
+one, that has a reserved prefix or is a reserved name is a compile error. The
 R pool keeps its runtime in one environment, `.__morloc`, and its
 manifolds as global `.__mm_<id>`; an R source that defines, replaces or
 removes one of these fails to load, and so does a call that assigns one.

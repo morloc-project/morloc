@@ -8,9 +8,10 @@ module ManifoldNameTests (manifoldNameTests) where
 import qualified Data.Text as T
 import Morloc.CodeGenerator.Grammars.Translator.Generic (manifoldName)
 import Morloc.CodeGenerator.LanguageDescriptor
-  (LangDescriptor (..), declaredReservedPrefixes, defaultLangDescriptor, loadLangDescriptorFromText)
+  (LangDescriptor (..), declaredManifoldPrefix, declaredReservedPrefixes, defaultLangDescriptor, loadLangDescriptorFromText)
 import Morloc.Data.Doc (render)
 import qualified Morloc.DataFiles as DF
+import Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter (rustManifoldName)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
 
@@ -35,6 +36,12 @@ manifoldNameTests =
         mapM_
           (\(n, f) -> either (assertFailure . ((n <> ": ") <>)) (const (return ())) (declaredReservedPrefixes (DF.embededFileText f)))
           DF.langRegistryFiles
+    , testCase "the Rust pool names its manifolds with the prefix lang.yaml reserves" $
+        let yaml = maybe "" DF.embededFileText (lookup "rust" DF.langRegistryFiles)
+         in either assertFailure (\(prefix, reserved) -> do
+              assertBool "prefix" (T.isPrefixOf prefix (render (rustManifoldName 7)))
+              assertBool "reserved" (any (`T.isPrefixOf` prefix) reserved))
+              ((,) <$> declaredManifoldPrefix yaml <*> declaredReservedPrefixes yaml)
     , testCase "a generic pool reserves its manifold names and spells their prefix as lang.yaml does" $
         mapM_ templateAgrees [("py", "_MLC_MANIFOLD_PREFIX = \""), ("r", "MLC_MANIFOLD_PREFIX <- \"")]
     ]

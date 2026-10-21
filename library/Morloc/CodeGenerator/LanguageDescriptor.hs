@@ -26,6 +26,8 @@ module Morloc.CodeGenerator.LanguageDescriptor
   , matchNamePattern
   , declaredNamePatterns
   , declaredReservedPrefixes
+  , declaredReservedNames
+  , declaredManifoldPrefix
   ) where
 
 import qualified Data.Aeson as Aeson
@@ -525,6 +527,24 @@ declaredReservedPrefixes content = do
   v <- either (Left . Y.prettyPrintParseException) Right (Y.decodeEither' (TE.encodeUtf8 content))
   AesonTypes.parseEither
     (Aeson.withObject "lang.yaml" $ \o -> fmap (maybe [] id) (o Aeson..:? "ldReservedPrefixes"))
+    (v :: Aeson.Value)
+
+-- | The prefix a lang.yaml gives its manifolds' names (ldManifoldPrefix);
+-- "m" when the key is absent.
+declaredManifoldPrefix :: Text -> Either String Text
+declaredManifoldPrefix content = do
+  v <- either (Left . Y.prettyPrintParseException) Right (Y.decodeEither' (TE.encodeUtf8 content))
+  AesonTypes.parseEither
+    (Aeson.withObject "lang.yaml" $ \o -> fmap (maybe "m" id) (o Aeson..:? "ldManifoldPrefix"))
+    (v :: Aeson.Value)
+
+-- | The exact names a lang.yaml reserves for its pool (ldReservedNames);
+-- none when the key is absent.
+declaredReservedNames :: Text -> Either String [Text]
+declaredReservedNames content = do
+  v <- either (Left . Y.prettyPrintParseException) Right (Y.decodeEither' (TE.encodeUtf8 content))
+  AesonTypes.parseEither
+    (Aeson.withObject "lang.yaml" $ \o -> fmap (maybe [] id) (o Aeson..:? "ldReservedNames"))
     (v :: Aeson.Value)
 
 -- Anchored regex-subset matcher. The pattern lives entirely in the

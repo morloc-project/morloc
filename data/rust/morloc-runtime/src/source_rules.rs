@@ -98,6 +98,12 @@ fn last_ident(s: &str) -> Option<String> {
     (!name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit())).then(|| name.to_string())
 }
 
+// The `:` of a Rust `name: Type` declaration: one that is not half of `::`.
+fn type_colon(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    (0..b.len()).find(|&i| b[i] == b':' && b.get(i + 1) != Some(&b':') && (i == 0 || b[i - 1] != b':'))
+}
+
 fn first_ident(s: &str) -> Option<String> {
     let name: String = s.trim_start().chars().take_while(|c| is_ident_char(*c)).collect();
     (!name.is_empty()).then_some(name)
@@ -571,8 +577,10 @@ fn scan_templates(out: &mut Vec<Found>) {
                         continue;
                     }
                     let head = &rest[..end];
-                    let rust_style = head.contains(':') && !head.contains("::");
-                    let name = if rust_style { last_ident(head.split(':').next().unwrap()) } else { last_ident(head) };
+                    let name = match type_colon(head) {
+                        Some(at) => last_ident(&head[..at]),
+                        None => last_ident(head),
+                    };
                     if let Some(name) = name {
                         out.push(other_found(&f, "-", name, Kind::Template));
                     }

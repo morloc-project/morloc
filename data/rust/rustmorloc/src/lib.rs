@@ -4052,7 +4052,7 @@ mod panic_classifier_tests {
         }
         if !untrusted {
             fs.push(("rustmorloc::panic_is_runtime".into(), Some(rt)));
-            fs.push(("pool::mlc_classify_panic".into(), Some(POOL.into())));
+            fs.push(("pool::__morloc_classify_panic".into(), Some(POOL.into())));
         }
         fs.push(("std[h]::panicking::panic_with_hook".into(), Some("/rustc/H/library/std/src/panicking.rs".into())));
         fs.push(("std[h]::sys::backtrace::__rust_end_short_backtrace".into(), Some("/rustc/H/library/std/src/sys/backtrace.rs".into())));

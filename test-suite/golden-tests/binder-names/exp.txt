@@ -4,6 +4,10 @@ viaCross 13
 viaHelper 6
 viaBox 4
 viaPy 16
+viaRust 5
+viaRustRecord 3
+viaRustCross 4
+viaRustEnum "North"
 viaFail exit=1 boom
 viaClassed exit=1 classed
 viaReserved exit=1 refused
