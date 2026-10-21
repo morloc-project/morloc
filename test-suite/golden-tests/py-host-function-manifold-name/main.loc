@@ -1,0 +1,32 @@
+--' A host function named like a manifold is a host function
+--'
+--' A Python source returns a function named `__mm_7`, the form of a
+--' generated manifold's name, and the same function under a plain name.
+--' Both cross to R the same way; neither is taken for manifold 7.
+module main (viaPlain, viaLookalike)
+
+import root
+import root-py
+import root-r
+
+source Py from "src.py" ("make_plain" as makePlain, "make_lookalike" as makeLookalike)
+source R from "src.R" ("apply_r" as applyR)
+
+--' A function under a plain name
+makePlain :: Int -> <IO> (Int -> Int)
+--' The same function under a manifold-like name
+makeLookalike :: Int -> <IO> (Int -> Int)
+--' Apply a function in R
+applyR :: (Int -> Int) -> Int -> Int
+
+--' Apply the plainly named function in R
+viaPlain :: Int -> <IO> Int
+viaPlain k = do
+  f <- makePlain 0
+  applyR f k
+
+--' Apply the manifold-named function in R
+viaLookalike :: Int -> <IO> Int
+viaLookalike k = do
+  f <- makeLookalike 0
+  applyR f k

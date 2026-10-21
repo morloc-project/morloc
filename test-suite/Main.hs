@@ -29,6 +29,7 @@ import SizeParseTests (sizeParseTests)
 import SpecTests (specTests)
 import VariantMergeTests (variantMergeTests)
 import ValueArgsTests (valueArgsTests)
+import ManifoldNameTests (manifoldNameTests)
 import SystemConfigTests (systemConfigTests)
 import UnitTypeTests
 import LastReadTests (lastReadTests)
@@ -112,6 +113,7 @@ unitTests =
   , sizeParseTests
   , variantMergeTests
   , valueArgsTests
+  , manifoldNameTests
   , patternChainTests
   , irrefutablePatternLexerTests
   , refutablePatternTests

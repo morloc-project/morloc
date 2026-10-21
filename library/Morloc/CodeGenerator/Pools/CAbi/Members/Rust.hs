@@ -2576,8 +2576,9 @@ rustLowerConfig mask consumed =
     -- A bare function passed to a HOF is a closure over all its params with no
     -- captured context; a lambda/section is a closure over its remaining params
     -- with the applied args captured. Both are the same safe wrapper.
-    , lcMakePass = \sig sigType mname params -> rustClosureWrapper sig sigType mname [] params
-    , lcMakeLambda = rustClosureWrapper
+    , lcManifoldName = manNamer
+    , lcMakePass = \_ sig sigType mname params -> rustClosureWrapper sig sigType mname [] params
+    , lcMakeLambda = const rustClosureWrapper
     -- A closure's own type IS its rendered function-value type: one
     -- trait object, the same spelling it has in every other position.
     , lcClosureSig = rustStoredType

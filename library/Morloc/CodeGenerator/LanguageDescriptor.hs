@@ -25,6 +25,7 @@ module Morloc.CodeGenerator.LanguageDescriptor
   , defaultLangDescriptor
   , matchNamePattern
   , declaredNamePatterns
+  , declaredReservedPrefixes
   ) where
 
 import qualified Data.Aeson as Aeson
@@ -204,6 +205,8 @@ data LangDescriptor = LangDescriptor
     ldReturnTemplate :: !Text -- e.g. "return({{expr}})"
   , -- Function definition
     ldFuncDefHeader :: !Text -- e.g. "def {{name}}({{args}}):"
+  , ldManifoldPrefix :: !Text
+    -- ^ A manifold's function is this prefix followed by its id.
   , ldBlockStyle :: !BlockStyle
   , -- Error wrapping
     ldErrorWrapOpen :: !Text -- "try:" for Python, "" for others
@@ -383,6 +386,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldDispatchRemoteEntry" (Y.String "")
             . ins "ldDispatchRemoteFooter" (Y.String "")
             . ins "ldLogWrap" (Y.String "")
+            . ins "ldManifoldPrefix" (Y.String "m")
             . ins "ldClosureRegisterEntry" (Y.String "")
             . ins "ldClosureTableHeader" (Y.String "")
             . ins "ldClosureTableEntry" (Y.String "")
@@ -485,6 +489,7 @@ defaultLangDescriptor name ext =
     , ldDispatchRemoteEntry = ""
     , ldDispatchRemoteFooter = ""
     , ldLogWrap = ""
+    , ldManifoldPrefix = "m"
     , ldClosureRegisterEntry = ""
     , ldClosureTableHeader = ""
     , ldClosureTableEntry = ""
@@ -507,6 +512,15 @@ declaredNamePatterns content = do
     valid (key, pat)
       | T.null pat = Left (key <> " is empty")
       | otherwise = either (\e -> Left (key <> ": " <> e)) (const (Right ())) (matchNamePattern pat "")
+
+-- | The name prefixes a lang.yaml reserves for the names its pool defines
+-- (ldReservedPrefixes); none when the key is absent.
+declaredReservedPrefixes :: Text -> Either String [Text]
+declaredReservedPrefixes content = do
+  v <- either (Left . Y.prettyPrintParseException) Right (Y.decodeEither' (TE.encodeUtf8 content))
+  AesonTypes.parseEither
+    (Aeson.withObject "lang.yaml" $ \o -> fmap (maybe [] id) (o Aeson..:? "ldReservedPrefixes"))
+    (v :: Aeson.Value)
 
 -- Anchored regex-subset matcher. The pattern lives entirely in the
 -- language descriptor (lang.yaml); no language-specific identifier rule

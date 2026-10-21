@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Generic
   , preprocess
   , CodegenManifest (..)
   , printProgram
+  , manifoldName
   ) where
 
 import qualified Data.Aeson as Aeson
@@ -409,6 +410,10 @@ translateSegment desc srcNamer debugInfo traceInfo debugMode m0 =
   let cfg = genericLowerConfig desc srcNamer debugInfo traceInfo debugMode
    in renderPoolDocs <$> foldWithSerialManifoldM (defaultFoldRules cfg) m0
 
+-- | The name of a manifold's function in a descriptor's language.
+manifoldName :: LangDescriptor -> Int -> MDoc
+manifoldName desc i = pretty (ldManifoldPrefix desc) <> viaShow i
+
 -- | Build a LowerConfig from a LangDescriptor, a source-name function,
 -- and a manifold debug-info lookup (precomputed from 'stateName' and
 -- 'stateSourceMap' by the caller because IndexM has no access to
@@ -672,11 +677,12 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
                   BraceBlock ->
                     block 4 header (vsep $ wrapError (priorLines <> [body]))
         , lcClosureSig = \_ -> return ""
-        , lcMakePass = \_sig _ mname _ ->
+        , lcManifoldName = manifoldName desc
+        , lcMakePass = \m _sig _ mname _ ->
             return . pretty $
               substituteT (ldPassTemplate desc)
-                [("fn", render mname), ("mid", T.drop 1 (render mname))]
-        , lcMakeLambda = \_sig _ mname contextArgs boundArgs ->
+                [("fn", render mname), ("mid", T.pack (show m))]
+        , lcMakeLambda = \m _sig _ mname contextArgs boundArgs ->
             let ctxNames = map argNamer contextArgs
                 bndNames = map argNamer boundArgs
                 tmpl = ldPartialTemplate desc
@@ -686,11 +692,10 @@ genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
                 fnWithCtx = render (hsep (punctuate "," fnWithCtxList))
                 allArgs = render (hsep (punctuate "," allArgsList))
                 boundArgsText = render (hsep (punctuate "," bndNames))
-                -- manNamer is "m<mid>", so the mid is the name minus its leading
-                -- "m". {{mid}} and {{captured_list}} let a language that cannot
+                -- {{mid}} and {{captured_list}} let a language that cannot
                 -- introspect its closures (R) tag them with their manifold id and
                 -- captured values at construction, for later reification.
-                midText = T.drop 1 (render mname)
+                midText = T.pack (show m)
                 -- Each context value bound again in the closure's own scope,
                 -- for a language whose closures capture names rather than
                 -- values (R): a later rebinding of the name, as a loop
@@ -1566,14 +1571,14 @@ printProgram desc prog =
     logRebindings
       | T.null (ldLogWrap desc) = []
       | otherwise =
-          [ manNamer i <+> pretty (ldAssignOp desc) <+> wrapFn desc
+          [ manifoldName desc i <+> pretty (ldAssignOp desc) <+> wrapFn desc
               <> tupled
                 [ quoteString (renderedGroup tmpl)
                 , quoteOrNone (renderedStart tmpl)
                 , quoteOrNone (renderedPass tmpl)
                 , quoteOrNone (renderedFail tmpl)
                 , quoteOrNone (renderedBenchKey tmpl)
-                , manNamer i
+                , manifoldName desc i
                 ]
           | (i, tmpl) <- Map.toAscList (ipLogTemplates prog)
           ]
@@ -1608,7 +1613,7 @@ printProgram desc prog =
         renderEntry :: Text -> DispatchEntry -> MDoc
         renderEntry entryTmpl (DispatchEntry i _ _) =
           pretty $
-            substituteT entryTmpl [("mid", T.pack (show i)), ("name", render (manNamer i))]
+            substituteT entryTmpl [("mid", T.pack (show i)), ("name", render (manifoldName desc i))]
 
         localD =
           let hdr = ldDispatchLocalHeader desc

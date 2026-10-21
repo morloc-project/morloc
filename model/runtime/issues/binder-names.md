@@ -35,5 +35,25 @@ may use.
   manifolds by name at call time: with `ap <- function(f, x) f(x)` and
   `viaR2 n = ap (\x -> inc (inc x)) n`, a user `m1657 <- function(...)
   -1000L` (the lambda's manifold) makes `viaR2 3` print -1000, not 5.
-- Python is isolated: each sourced file is its own module and calls are
-  qualified (`__morloc_src_<name>.f`).
+- [read] Manifold locals and sourced names share a frame: a manifold's
+  formals and temporaries are `n<N>`, `s<N>`, `helper<N>` (Grammars/Common.hs
+  argNamer and friends), and R and Python call sourced functions by their
+  bare or module-qualified name in that frame. An R sourced function named
+  `n3` is shadowed by a manifold parameter `n3`, silently when it is passed
+  as a value. Needs reserved local names per language, from the same namer
+  machinery as the manifold names.
+- [read] Python identifies a manifold function by its `__name__`
+  (`_mlc_manifold_id` in data/lang/py/pool.py): a host function a user
+  source returns that happens to be named `m5` is reified as manifold 5,
+  and the far side calls the wrong function.
+- [read] Generated R code calls base functions (`c`, `list`, `lapply`,
+  `paste0`, `tryCatch`, ...) by name from the global environment, where a
+  user source may have redefined them, as R's own code would see them.
+  Needs a ruling: the user's responsibility, a load-time check that none
+  is redefined, or reserved aliases.
+- [read] Python: a builtin source (no `from` path) is emitted as a bare
+  name in pool.py's module scope, which holds the pool's own names
+  (`dispatch`, `global_state`, `mlc_*`), so `source Py ("dispatch" as d)`
+  binds d to the pool's dispatch table rather than failing.
+- Python files are isolated: each sourced file is its own module and calls
+  are qualified (`__morloc_src_<name>.f`).

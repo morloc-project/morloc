@@ -11371,6 +11371,27 @@ sourceNameTests =
           g :: Int -> Int
           f x = g x
         |]
+    , expectError "Python: a manifold's name is not a source name"
+          [r|
+          module main (f)
+          source Py from "m" ("__mm_3" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Python: a name the pool reserves is not a source name"
+          [r|
+          module main (f)
+          source Py from "m" ("__morloc_encode" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectPass "Python: a name that only resembles a reserved one is a source name"
+          [r|
+          module main (f)
+          source Py from "m" ("mm_3" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
     , testCase "every built-in language declares patterns that compile" $
         mapM_
           (\(n, f) -> case declaredNamePatterns (DF.embededFileText f) of

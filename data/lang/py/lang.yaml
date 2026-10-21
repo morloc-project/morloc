@@ -84,6 +84,8 @@ ldImportTemplate: "{{namespace}} = _mlc_import_source(\"{{module_path}}\")"
 ldSocketPathTemplate: "os.path.join(global_state[\"tmpdir\"], {{socket}})"
 ldResourcePackTemplate: "struct.pack('iiii', {{mem}}, {{time}}, {{cpus}}, {{gpus}})"
 ldReturnTemplate: "return({{expr}})"
+ldReservedPrefixes: ["__mm_", "__morloc"]
+ldManifoldPrefix: "__mm_"
 ldFuncDefHeader: "def {{name}}({{args}}):"
 ldBlockStyle: indent
 ldErrorWrapOpen: "try:"

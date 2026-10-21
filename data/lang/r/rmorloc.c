@@ -3776,7 +3776,7 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
 
     if (fn == R_NilValue) {
         char msg[128];
-        snprintf(msg, sizeof(msg), "%s function not found: m%d", label, midx);
+        snprintf(msg, sizeof(msg), "%s no function for manifold %d", label, midx);
         send_fail_to_client(client_fd, msg);
         free_morloc_call(call);
         return;

@@ -42,7 +42,7 @@ import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.LanguageDescriptor
-  (declaredNamePatterns, matchNamePattern)
+  (declaredNamePatterns, declaredReservedPrefixes, matchNamePattern)
 
 -- | Every term must either be sourced or declared.
 data TermOrigin = Declared ExprI | Sourced Source
@@ -311,7 +311,9 @@ checkSourceNames d = mapM_ (AST.checkExprI checkNode) (DAG.nodes d)
     -- entirely: they are the user's explicit "trust me, emit this string
     -- verbatim as an infix operator" opt-out for keyword-shaped foreign
     -- operators (Python `and`, R `%in%`, etc.).
-    checkNode (ExprI _ (SrcE src)) | srcBacktick src = return ()
+    checkNode (ExprI i (SrcE src)) | srcBacktick src = do
+      yamlText <- languageDescriptorText (ML.langName (srcLang src))
+      checkReserved i src yamlText
     checkNode (ExprI i (SrcE src)) = do
       let lang = ML.langName (srcLang src)
           nm = unSrcName (srcName src)
@@ -323,6 +325,7 @@ checkSourceNames d = mapM_ (AST.checkExprI checkNode) (DAG.nodes d)
               "Cannot check" <+> pretty lang <+> "source" <+> pretty kind
                 <+> squotes (pretty nm) <> ":" <+> pretty why
       yamlText <- languageDescriptorText lang
+      checkReserved i src yamlText
       case yamlText >>= declaredNamePatterns of
         Left why -> refuse why
         Right (namePat, opPat) -> do
@@ -344,6 +347,23 @@ checkSourceNames d = mapM_ (AST.checkExprI checkNode) (DAG.nodes d)
                   <+> "Expected pattern"
                   <+> squotes (pretty pat) <> "."
     checkNode _ = return ()
+
+    -- A sourced name may not take a name the pool defines for itself.
+    checkReserved :: Int -> Source -> Either String MT.Text -> MorlocMonad ()
+    checkReserved i src yamlText = do
+      let lang = ML.langName (srcLang src)
+          nm = unSrcName (srcName src)
+      case yamlText >>= declaredReservedPrefixes of
+        Left why ->
+          MM.throwSourcedError i $
+            "Cannot check" <+> pretty lang <+> "source" <+> squotes (pretty nm) <> ":" <+> pretty why
+        Right prefixes -> case filter (`MT.isPrefixOf` nm) prefixes of
+          (prefix : _) ->
+            MM.throwSourcedError i $
+              "The" <+> pretty lang <+> "source" <+> squotes (pretty nm)
+                <+> "starts with" <+> squotes (pretty prefix) <> ","
+                <+> "which is reserved for names the" <+> pretty lang <+> "pool defines."
+          [] -> return ()
 
 -- | A language's lang.yaml: the embedded one, else a plugin's under the
 -- morloc home, as the code generator finds it.

@@ -92,6 +92,8 @@ ldImportTemplate: ".morloc.source(\"{{path}}\")"
 ldSocketPathTemplate: "paste0(global_state$tmpdir, \"/\", {{socket}})"
 ldResourcePackTemplate: "list(memory={{mem}}L, time={{time}}L, cpus={{cpus}}L, gpus={{gpus}}L)"
 ldReturnTemplate: "return({{expr}})"
+ldReservedPrefixes: [".__mm_", ".__morloc", ".morloc_"]
+ldManifoldPrefix: ".__mm_"
 ldFuncDefHeader: "{{name}} <- function({{args}})"
 ldBlockStyle: braces
 ldFrameLabelStmt: "attr({{fname}}, \"morloc_frame\") <- \"{{label}}\""

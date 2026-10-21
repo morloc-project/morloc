@@ -1534,11 +1534,12 @@ PROPAGATE_ERROR(errmsg)|]
         _ -> return ""
     -- An unapplied manifold is its function, unless it is staged or can
     -- cross, which takes the closure form
-    , lcMakePass = \sig _ mname args ->
+    , lcManifoldName = manNamer
+    , lcMakePass = \_ sig _ mname args ->
         if isJust (stageOf mname) || Map.member (render mname) reifyThunks
           then makeLambda sig mname [] args
           else return mname
-    , lcMakeLambda = \sig _ -> makeLambda sig
+    , lcMakeLambda = \_ sig _ -> makeLambda sig
     , lcRegisterSchema = cppRegisterSchema
     , lcTableImportFn = Nothing
     }

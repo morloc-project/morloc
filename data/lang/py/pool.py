@@ -180,7 +180,7 @@ def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, bench_key, fn):
 
 
 # Defunctionalized-closure support. A morloc function value is a
-# functools.partial over a manifold function m<mid>; when it crosses a language
+# functools.partial over a manifold function __mm_<mid>; when it crosses a language
 # boundary it travels as the wire tuple (home_language, manifold_id,
 # captured_packets) and is applied on the far side by calling back to this pool.
 
@@ -235,14 +235,14 @@ def mlc_table_import(batch, typename):
 def mlc_reify(f, home_lang):
     # Recover (home, mid, captured) from a closure and serialize its captured
     # values. A closure built here is a functools.partial over a manifold
-    # function m<mid>, with the captured values in the manifold's
+    # function __mm_<mid>, with the captured values in the manifold's
     # context-argument order; mlc_closure_table[mid] holds their codecs. A
     # closure reflected from another pool carries its origin and is passed
     # back as it came.
     origin = getattr(f, "__mlc_origin__", None)
     if origin is not None:
         return origin
-    if isinstance(f, functools.partial):
+    if isinstance(f, functools.partial) and not f.keywords:
         mid = _mlc_manifold_id(f.func)
         captured = list(f.args)
     else:
@@ -253,7 +253,7 @@ def mlc_reify(f, home_lang):
     # count that disagrees, would otherwise serialize the wrong captures
     # (a zip truncates silently), so the far side would call back with
     # arguments the closure never had.
-    if mid not in mlc_closure_table:
+    if mid not in globals().get("mlc_closure_table", {}):
         raise RuntimeError(
             f"morloc: no closure codecs for manifold {mid}; it was not "
             "registered as a crossing closure")
@@ -282,15 +282,30 @@ def mlc_spawn(f, handle, schema):
     morloc.mlc_spawn(sock, mid, packets, handle)
 
 
-def _mlc_manifold_id(f):
-    # A morloc-made callable is a generated manifold named m<mid>. Anything
-    # else -- a callable the host created, or one morloc received and did
-    # not record an origin for -- cannot be reified: the far side has no
-    # manifold to call back into. Mirrors the C++ pool's
-    # "cannot reify a non-morloc closure".
+_MLC_MANIFOLD_PREFIX = "__mm_"
+
+
+def _mlc_mid_of(f):
+    # The id of the generated manifold that f is, or None. The name alone
+    # does not decide it: a host function may share the name.
     name = getattr(f, "__name__", None)
-    if name is not None and name.startswith("m") and name[1:].isdigit():
-        return int(name[1:])
+    if name is None or not name.startswith(_MLC_MANIFOLD_PREFIX):
+        return None
+    digits = name[len(_MLC_MANIFOLD_PREFIX):]
+    if digits.isdigit() and globals().get(name) is f:
+        return int(digits)
+    return None
+
+
+def _mlc_manifold_id(f):
+    # Anything but a generated manifold -- a callable the host created, or
+    # one morloc received and did not record an origin for -- cannot be
+    # reified: the far side has no manifold to call back into. Mirrors the
+    # C++ pool's "cannot reify a non-morloc closure".
+    mid = _mlc_mid_of(f)
+    if mid is not None:
+        return mid
+    name = getattr(f, "__name__", None)
     raise RuntimeError(
         "morloc: cannot reify a callable that morloc did not create "
         f"({name!r}); a function value made by host code has no identity "
@@ -369,21 +384,20 @@ def mlc_papply(f, xs):
     origin = getattr(f, "__mlc_origin__", None)
     if origin is not None:
         return _mlc_papply_remote(f, origin, xs)
-    if isinstance(f, functools.partial):
+    if isinstance(f, functools.partial) and not f.keywords:
         fn = f.func
         caps = list(f.args)
     else:
         fn = f
         caps = []
-    name = getattr(fn, "__name__", None)
-    if not (name is not None and name.startswith("m") and name[1:].isdigit()):
+    mid = _mlc_mid_of(fn)
+    if mid is None:
         # a function host code made: it has no stages morloc knows of
         return functools.partial(f, *xs)
-    mid = int(name[1:])
     take, smid = _mlc_stage_take(mid, len(caps))
     if take is None or len(xs) < take:
         return functools.partial(fn, *caps, *xs)
-    g = globals()["m" + str(smid)](*caps, *xs[:take])
+    g = globals()[_MLC_MANIFOLD_PREFIX + str(smid)](*caps, *xs[:take])
     return mlc_papply(g, xs[take:])
 
 
@@ -420,7 +434,7 @@ def mlc_make_closure_dispatch(mid, arg_codecs, res_codec):
     # captured ++ bound argument packets, call the native manifold, and
     # encode the result. Registered under the closure's mid so a foreign
     # apply reaches it.
-    fn = globals()["m" + str(mid)]
+    fn = globals()[_MLC_MANIFOLD_PREFIX + str(mid)]
     def _wrapper(*sargs):
         args = [mlc_decode(s, sch) for s, sch in zip(sargs, arg_codecs)]
         return mlc_encode(fn(*args), res_codec)

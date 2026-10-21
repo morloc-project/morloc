@@ -239,6 +239,7 @@ global_state <- list()
 # (home_language, manifold_id, captured_packets) and is applied on the far side
 # by calling back to this pool.
 
+MLC_MANIFOLD_PREFIX <- ".__mm_"
 MLC_HOME_LANG <- "r"
 
 # The schema of every closure's wire tuple (home, manifold id, captured
@@ -369,7 +370,7 @@ mlc_papply <- function(f, xs) {
   st <- mlc_stage_take(mid, length(caps))
   if (is.null(st) || length(xs) < st$take) return(mlc_pap(mid, caps, xs))
   take <- st$take
-  g <- do.call(get(paste0("m", st$stage)), c(caps, xs[seq_len(take)]))
+  g <- do.call(get(paste0(MLC_MANIFOLD_PREFIX, st$stage)), c(caps, xs[seq_len(take)]))
   mlc_papply(g, xs[seq_along(xs) > take])
 }
 
@@ -383,7 +384,7 @@ mlc_stage_take <- function(mid, ncaptured) {
 
 # A closure of manifold mid over captured values and applied arguments.
 mlc_pap <- function(mid, caps, xs) {
-  fn <- get(paste0("m", mid))
+  fn <- get(paste0(MLC_MANIFOLD_PREFIX, mid))
   captured <- c(caps, xs)
   g <- function(...) do.call(fn, c(captured, list(...)))
   attr(g, "morloc_mid") <- mid
@@ -422,7 +423,7 @@ mlc_reflect <- function(pkt, tuple_schema, arg_codecs, res_codec) {
 }
 
 mlc_make_closure_dispatch <- function(mid, arg_codecs, res_codec) {
-  fn <- get(paste0("m", mid))
+  fn <- get(paste0(MLC_MANIFOLD_PREFIX, mid))
   function(...) {
     sargs <- list(...)
     args <- lapply(seq_along(sargs), function(i) mlc_decode(sargs[[i]], arg_codecs[[i]]))

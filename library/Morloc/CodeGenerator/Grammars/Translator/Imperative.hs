@@ -834,7 +834,9 @@ data LowerConfig m = LowerConfig
   -- Returns Nothing if dedup'd (C++), Just funcDef otherwise. The mid
   -- is threaded so the per-manifold error-wrap can look up user name
   -- and srcloc for the trace line.
-  , lcMakePass :: MDoc -> TypeM -> MDoc -> [Arg TypeM] -> m MDoc
+  , lcManifoldName :: Int -> MDoc
+  -- ^ The name of a manifold's function, given its id.
+  , lcMakePass :: Int -> MDoc -> TypeM -> MDoc -> [Arg TypeM] -> m MDoc
   -- ^ Render a whole function/operator passed to a higher-order function
   -- (@ManifoldPass@), given the closure's own callable signature (from
   -- 'lcClosureSig'), the manifold name and its parameters. Most
@@ -842,7 +844,7 @@ data LowerConfig m = LowerConfig
   -- closure that adapts each argument to the manifold's parameter convention
   -- (deref a Copy scalar, forward a reference) since a bare @unsafe fn@ does
   -- not implement @Fn@.
-  , lcMakeLambda :: MDoc -> TypeM -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> m MDoc
+  , lcMakeLambda :: Int -> MDoc -> TypeM -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> m MDoc
   -- ^ closureSig, name, contextArgs, boundArgs - partial application
   -- expression. @closureSig@ is the language's rendering of the closure's own
   -- callable signature (from 'lcClosureSig'); languages that do not need it
@@ -1101,11 +1103,11 @@ lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ socketFile) ForeignCa
 lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ socketFile) (RemoteCall res) args) _) =
   lcRemoteCall cfg socketFile mid res (map argNamer args)
 lowerSerialExpr cfg (AppRecS _ _ origEs) (AppRecS_ _ mid es) = do
-  return $ mergePoolDocs ((<>) (manNamer mid) . tupled) (ownFreshArgs cfg origEs es)
+  return $ mergePoolDocs ((<>) (lcManifoldName cfg mid) . tupled) (ownFreshArgs cfg origEs es)
 lowerSerialExpr cfg (AppForeignRecS _ _ _ origEs) (AppForeignRecS_ _ mid (Socket _ socketFile) es) = do
   return $ mergePoolDocs (\args -> lcForeignCall cfg socketFile mid args) (ownFreshArgs cfg origEs es)
-lowerSerialExpr _ _ (AppRecS_ _ mid es) = do
-  return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
+lowerSerialExpr cfg _ (AppRecS_ _ mid es) = do
+  return $ mergePoolDocs ((<>) (lcManifoldName cfg mid) . tupled) es
 lowerSerialExpr cfg _ (AppForeignRecS_ _ mid (Socket _ socketFile) es) = do
   return $ mergePoolDocs (\args -> lcForeignCall cfg socketFile mid args) es
 lowerSerialExpr cfg _ (CacheBodyS_ _ resSa lbl mid args body) =
@@ -2442,7 +2444,7 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ _ (RecCallP mid _) xs0) = do
     _ -> return xs1
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
-  return $ mergePoolDocs (\es -> manNamer mid <> tupled (zipWith4 (\j own t e -> lcSourcedArg cfg (ManifoldArg mid j) own t e) [0 ..] owns argTypes es)) (map snd xs)
+  return $ mergePoolDocs (\es -> lcManifoldName cfg mid <> tupled (zipWith4 (\j own t e -> lcSourcedArg cfg (ManifoldArg mid j) own t e) [0 ..] owns argTypes es)) (map snd xs)
   where
     keepArg j (NativeArgExpr e) d = (\v -> d {poolExpr = v}) <$> lcKeepCallArg cfg mid j e (poolExpr d)
     keepArg _ _ d = return d
@@ -2519,7 +2521,7 @@ lowerNativeExprRaw cfg _ (ExeN_ _ (SrcCallP _ src)) = return $ defaultValue {poo
 lowerNativeExprRaw _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
 lowerNativeExprRaw _ _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
 lowerNativeExprRaw _ _ (ExeN_ _ (PapplyP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
-lowerNativeExprRaw _ _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}
+lowerNativeExprRaw cfg _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = lcManifoldName cfg mid}
 lowerNativeExprRaw cfg origExpr (ListN_ v t xs) = do
   let elemEs = case origExpr of ListN _ _ es -> es; _ -> []
   xs' <- adaptOwnedElems cfg elemEs xs >>= storeElems cfg elemEs
@@ -3109,7 +3111,7 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
         (False, Nothing) -> bodyExpr
         (False, Just _) -> error $ "EMIT-3: manifold " <> show m <> " records its call but its body has no return"
       args = typeMofForm form
-      mname = manNamer m
+      mname = lcManifoldName cfg m
   maybeNewManifold <- lcMakeFunction cfg m mname args bodyType priorLines body headForm (isClosureForm form)
   call <- case form of
         (ManifoldPass _) -> do
@@ -3117,7 +3119,7 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
           -- every parameter is still to come.
           let sigType = Function [t | Arg _ t <- args] bodyType
           sig <- lcClosureSig cfg sigType
-          lcMakePass cfg sig sigType mname args
+          lcMakePass cfg m sig sigType mname args
         -- Wrap each manifold-call argument through lcSourcedArg (identity for
         -- most languages; the Rust member adapts each native arg to the callee's
         -- convention by ownership, so an already-borrowed arg passes as `&T` and
@@ -3146,7 +3148,7 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
           -- from the bound args and the body's type.
           let sigType = Function [typeMof t | Arg _ t <- vs] bodyType
           sig <- lcClosureSig cfg sigType
-          lcMakeLambda cfg sig sigType mname (typeMofRs rs) [Arg i (typeMof t) | Arg i t <- vs]
+          lcMakeLambda cfg m sig sigType mname (typeMofRs rs) [Arg i (typeMof t) | Arg i t <- vs]
   return $
     PoolDocs
       { poolCompleteManifolds = completeManifolds <> maybeToList maybeNewManifold

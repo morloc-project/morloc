@@ -5,7 +5,7 @@ all:
 	./nexus crashPy 1 > /dev/null 2> obs.py.err && echo UNEXPECTED_SUCCESS >> obs.txt || echo py_failed >> obs.txt
 	grep -qE "morloc py pool: worker [0-9]+ crashed with signal 11|Pool 'py' Pool process crashed with signal 11" obs.py.err && echo py_signal >> obs.txt || echo NO_PY_SIGNAL >> obs.txt
 	grep -qF "while running 'crashPy' (mid=" obs.py.err && echo py_command >> obs.txt || echo NO_PY_COMMAND >> obs.txt
-	grep -qF "in m" obs.py.err && echo py_frames >> obs.txt || echo NO_PY_FRAMES >> obs.txt
+	grep -qF "in __mm_" obs.py.err && echo py_frames >> obs.txt || echo NO_PY_FRAMES >> obs.txt
 	./nexus crashCpp 1 > /dev/null 2> obs.cpp.err && echo UNEXPECTED_SUCCESS >> obs.txt || echo cpp_failed >> obs.txt
 	grep -qF "Pool 'cpp' Pool process crashed with signal 11" obs.cpp.err && echo cpp_signal >> obs.txt || echo NO_CPP_SIGNAL >> obs.txt
 	grep -qF "while executing crashCpp [cpp] (mid=" obs.cpp.err && echo cpp_manifold >> obs.txt || echo NO_CPP_MANIFOLD >> obs.txt
