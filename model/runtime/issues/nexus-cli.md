@@ -19,6 +19,12 @@
   parse: no item says whether a group may hold a group. `.[i]` on a Str is
   accepted by the pattern checker and refused by the walker at run time.
 
+- **`-f mpk` output read back as an argument file is sniffed.** [read]
+  Headerless MessagePack is told apart from JSON and text only by a `.mpk`
+  or `.msgpack` name (cli.rs `load_morloc_data_file`); `./prog f -f mpk >
+  x; ./prog g x` reads a one-byte value 48..57 as a JSON digit. Gap in
+  CLI-1; MessagePack is slated for deprecation.
+
 - **`-f voidstar` writes a packet labelled as a shared-memory reference.**
   [reproduced, 0.109.0 a2e21e97+dirty] Gap in language/arguments-and-output.md:
   CLI-5 does not say what `-f voidstar` writes, and CLI-1 does not say
@@ -86,7 +92,10 @@
   works. cli.rs:2483 (`ends_with(".json")`) and :2502 (`.mpk`/`.msgpack`)
   dispatch before the packet and magic checks. A missing `p.mp` gets "is
   not inline JSON ... set `source: file`" (old spelling); a missing
-  `p.json` gets "not found". Repro: /work/plans/model-audit-2026-10-21/repro/G/args/a1.loc.
+  `p.json` gets "not found". `@load` shares the loader (INTR-3): `@savej
+  "v.mpk" 49` reads back through the MessagePack decoder. The `.mpk` name
+  is what keeps a one-byte MessagePack value 48..57 from reading as a JSON
+  digit, so bytes-only detection waits on MessagePack's deprecation. Repro: /work/plans/model-audit-2026-10-21/repro/G/args/a1.loc.
 - **`-f packet`/`-f voidstar` of a top-level null or `()` writes
   nothing.** [reproduced, 2026-10-21] Violates CLI-5. `nul x = Null`:
   `-f packet nul 1 | wc -c` is 0 (`-f mpk` writes `c0`; `--keep-null`

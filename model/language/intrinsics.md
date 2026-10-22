@@ -19,13 +19,16 @@ The result type of `@load`, `@read`, `@next`, `@open` and `@stdin` contains
 no suspension and no function. If inference solves it to one, the build is
 rejected and asks for an annotation.
 
-### INTR-3 What `@save`, `@savem` or `@savej` writes, `@load` reads back equal
-Intent: proposed
-Tests: spec-intr-3-1
-Code: deviates (issues/values.md)
+### INTR-3 What `@save` or `@savej` writes, `@load` reads back equal
+Intent: ruled 2026-10-22
+Tests: spec-intr-3-1, spec-intr-3-2
+Code: deviates (../runtime/issues/nexus-cli.md)
 
-`@load` detects the format from the bytes and returns a value equal to the
-one written, or `Err` if the file does not hold a value of the expected type.
+`@load` returns a value equal to the one written, or `Err` if the file does
+not hold a value of the expected type. A file that is not a packet is read
+as an argument file is, by its bytes and the expected type: unquoted text
+is a value of a text type, and at `?T` for such a type the token `null` is
+`Null`.
 
 ### INTR-4 `@schema` and `@typeof` depend only on their argument's type
 Intent: proposed

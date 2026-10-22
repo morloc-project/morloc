@@ -2363,7 +2363,9 @@ pub(crate) unsafe fn load_morloc_data_file(
                 .find(|b| !b.is_ascii_whitespace())
                 .copied();
             let looks_json_string = first_non_ws == Some(b'"');
-            if !looks_json_string {
+            let null_token = rs.serial_type == SerialType::Optional
+                && std::str::from_utf8(bytes).map_or(false, |s| s.trim() == "null");
+            if !looks_json_string && !null_token {
                 match std::str::from_utf8(bytes) {
                     Ok(s) => {
                         // Strip a single trailing newline (the common
@@ -4262,6 +4264,41 @@ mod tests {
             libc::free(err as *mut c_void);
             assert!(msg.contains("shared-memory reference"), "{msg}");
             crate::cschema::CSchema::free(cschema);
+        }
+    }
+
+    /// At an optional of a bare-text type, the token `null` is Null and
+    /// any other text is the value; the text "null" is written quoted.
+    #[test]
+    fn null_at_an_optional_text_type_is_null() {
+        let _shm = crate::init_test_shm();
+        let cases: [(&str, &[u8], &str); 5] = [
+            ("?s", b"null", "null"),
+            ("?s", b"  null\n", "null"),
+            ("?s", b"\"null\"", "\"null\""),
+            ("?s", b"nullable\n", "\"nullable\""),
+            ("s", b"null", "\"null\""),
+        ];
+        for (schema_str, bytes, expected) in cases {
+            let schema = crate::schema::parse_schema(schema_str).unwrap();
+            let cschema = crate::cschema::CSchema::from_rust(&schema);
+            let mut err: *mut c_char = ptr::null_mut();
+            unsafe {
+                let data = libc::malloc(bytes.len()) as *mut u8;
+                ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
+                let path = std::ffi::CString::new("x.txt").unwrap();
+                let got = load_morloc_data_file(path.as_ptr(), data, bytes.len(), cschema, &mut err);
+                if got.is_null() {
+                    panic!("{schema_str} {:?}: {}", String::from_utf8_lossy(bytes), take_reason(err));
+                }
+                let json = crate::json_ffi::voidstar_to_json_string(got, cschema, &mut err);
+                assert!(!json.is_null());
+                let shown = CStr::from_ptr(json).to_string_lossy().into_owned();
+                libc::free(json as *mut c_void);
+                let _ = shm::shfree(got as shm::AbsPtr);
+                assert_eq!(shown, expected, "{schema_str} {:?}", String::from_utf8_lossy(bytes));
+                crate::cschema::CSchema::free(cschema);
+            }
         }
     }
 

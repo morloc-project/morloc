@@ -15,7 +15,7 @@
 --   * [Str] -- nested Array<Array<u8>>: variable-width elements
 --   * (Int, Str) -- Tuple with mixed fixed and variable elements
 --   * [(Int, Real)] -- Array of fixed-width Tuple (bulk-copy path)
--- across the three save formats (binary voidstar, msgpack, json).
+-- across the two save formats (binary voidstar, json).
 --
 -- @load and @save both raise Err on failure now; the round-trip
 -- signatures declare `<IO>` so that propagates. The missing-file
@@ -24,22 +24,16 @@
 module main
 
   ( binInt
-  , msgInt
   , jsonInt
   , binReal
-  , msgReal
   , jsonReal
   , binStr
-  , msgStr
   , jsonStr
   , binList
-  , msgList
   , jsonList
   , binTup
-  , msgTup
   , jsonTup
   , binFixedTupList
-  , msgFixedTupList
   , jsonFixedTupList
   , loadMissing
   )
@@ -57,12 +51,6 @@ binInt x path = do
   Ok _tailv45 <- @load path
   _tailv45
 
-msgInt :: Int -> Str -> <IO> Int
-msgInt x path = do
-  @savem path x
-  Ok _tailv46 <- @load path
-  _tailv46
-
 jsonInt :: Int -> Str -> <IO> Int
 jsonInt x path = do
   @savej path x
@@ -74,12 +62,6 @@ binReal x path = do
   @save 0 path x
   Ok _tailv48 <- @load path
   _tailv48
-
-msgReal :: Real -> Str -> <IO> Real
-msgReal x path = do
-  @savem path x
-  Ok _tailv49 <- @load path
-  _tailv49
 
 jsonReal :: Real -> Str -> <IO> Real
 jsonReal x path = do
@@ -93,12 +75,6 @@ binStr s path = do
   Ok _tailv51 <- @load path
   _tailv51
 
-msgStr :: Str -> Str -> <IO> Str
-msgStr s path = do
-  @savem path s
-  Ok _tailv52 <- @load path
-  _tailv52
-
 jsonStr :: Str -> Str -> <IO> Str
 jsonStr s path = do
   @savej path s
@@ -110,12 +86,6 @@ binList xs path = do
   @save 0 path xs
   Ok _tailv54 <- @load path
   _tailv54
-
-msgList :: [Str] -> Str -> <IO> [Str]
-msgList xs path = do
-  @savem path xs
-  Ok _tailv55 <- @load path
-  _tailv55
 
 jsonList :: [Str] -> Str -> <IO> [Str]
 jsonList xs path = do
@@ -129,12 +99,6 @@ binTup t path = do
   Ok _tailv57 <- @load path
   _tailv57
 
-msgTup :: (Int, Str) -> Str -> <IO> (Int, Str)
-msgTup t path = do
-  @savem path t
-  Ok _tailv58 <- @load path
-  _tailv58
-
 jsonTup :: (Int, Str) -> Str -> <IO> (Int, Str)
 jsonTup t path = do
   @savej path t
@@ -146,12 +110,6 @@ binFixedTupList xs path = do
   @save 0 path xs
   Ok _tailv60 <- @load path
   _tailv60
-
-msgFixedTupList :: [(Int, Real)] -> Str -> <IO> [(Int, Real)]
-msgFixedTupList xs path = do
-  @savem path xs
-  Ok _tailv61 <- @load path
-  _tailv61
 
 jsonFixedTupList :: [(Int, Real)] -> Str -> <IO> [(Int, Real)]
 jsonFixedTupList xs path = do

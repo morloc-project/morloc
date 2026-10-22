@@ -4,5 +4,5 @@ all:
 	./nexus langstr > obs.txt 2> obs.err
 
 clean:
-	rm -rf nexus pools *err z zj zp
+	rm -rf nexus pools *err z zj
 	rm -rf *-build *build.tmp*

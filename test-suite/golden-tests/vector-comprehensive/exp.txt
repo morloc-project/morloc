@@ -74,12 +74,10 @@
 8
 --- rcPerm ---
 8
-=== (4) File IO @save / @savej / @savem round-trip ===
+=== (4) File IO @save / @savej round-trip ===
 --- fileBin ---
 [1,2,3,4,5,6,7,8,9,10]
 --- fileJson ---
-[1,2,3,4,5,6,7,8,9,10]
---- fileMsg ---
 [1,2,3,4,5,6,7,8,9,10]
 --- fileSumBin ---
 55

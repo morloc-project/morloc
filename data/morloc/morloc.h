@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 13
+#define MORLOC_ABI_VERSION 14
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -1684,7 +1684,6 @@ morloc_expression_t* build_manifest_expr(const char* json_str, ERRMSG);
 // Section 24: Function declarations -- Intrinsics
 // ========================================================================
 
-int mlc_save(const void* data, const Schema* schema, int64_t level, const char* path, ERRMSG);
 int mlc_save_json(const void* data, const Schema* schema, int64_t level, const char* path, ERRMSG);
 // @save voidstar: produces a morloc data packet. When level > 0 the
 // packet's payload is zstd-compressed and the header carries

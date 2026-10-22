@@ -17,7 +17,7 @@
 --       reverse axis order. A specific element-position probe (corners
 --       of a Tensor3) catches axis swaps that sums hide.
 --
---   (4) File IO cycle: @save / @savej / @savem on a Matrix. The wire
+--   (4) File IO cycle: @save / @savej on a Matrix. The wire
 --       form involves nat arithmetic (Vector (d1*d2)) -- not exercised
 --       by the existing intrinsic-load tests.
 --
@@ -42,7 +42,7 @@ module main
     -- (3) row/column-major: 3D corner extraction across pairs
   , cornersCpToPy, cornersCpToR, cornersRtoCp, cornersPyToR
     -- (4) file IO for Matrix
-  , matFileBin, matFileJson, matFileMsg
+  , matFileBin, matFileJson
   , matFileSumBin, matFileSumJson
     -- (5) Matrix element types
   , matI32CpPy, matI32PyCp
@@ -358,7 +358,7 @@ cornersPyToR :: [Real]
 cornersPyToR = rCornersT3 pyMakeT3
 
 -- =========================================================================
--- (4) File IO: @save/@savej/@savem of a Matrix. The wire form is
+-- (4) File IO: @save/@savej of a Matrix. The wire form is
 -- ((Int,Int), Vector (d1*d2) a) which has never been pushed through @save.
 -- =========================================================================
 matFileBin :: Str -> <IO> (Matrix 3 4 Real)
@@ -372,12 +372,6 @@ matFileJson path = do
   @savej path cppMakeMat34
   Ok _tailv39 <- @load path
   _tailv39
-
-matFileMsg :: Str -> <IO> (Matrix 3 4 Real)
-matFileMsg path = do
-  @savem path cppMakeMat34
-  Ok _tailv40 <- @load path
-  _tailv40
 
 matFileSumBin :: Str -> <IO> Real
 matFileSumBin path = do

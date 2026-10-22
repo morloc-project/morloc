@@ -51,7 +51,7 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
 #include "cppmorloc.hpp"
 
 // Defines mlc::Unit, which the generator emits for do-blocks whose final
-// expression is void-returning (e.g. @save/@savej/@savem). Needs to follow
+// expression is void-returning (e.g. @save/@savej). Needs to follow
 // the user-source includes so foreign code can use mlc::Unit too.
 #include "mlccpptypes/prelude.hpp"
 
@@ -561,20 +561,6 @@ int _mlc_compare(const T& a, const T& b, Schema* schema) {
         PROPAGATE_ERROR(errmsg)
     }
     return order;
-}
-
-// Save a value to file in msgpack format. The `level` arg is accepted
-// for ABI uniformity with mlc_save_voidstar and forwarded; the runtime
-// ignores it for non-packet formats.
-template <typename T>
-void _mlc_save(const T& value, Schema* schema, int64_t level, const std::string& path) {
-    void* voidstar = to_voidstar(schema, value);
-    char* errmsg = NULL;
-    mlc_save(voidstar, schema, level, path.c_str(), &errmsg);
-    shfree_cpp(voidstar);
-    if (errmsg != NULL) {
-        PROPAGATE_ERROR(errmsg)
-    }
 }
 
 // Save a value to file in flat voidstar binary format. `level` is the

@@ -1227,9 +1227,8 @@ genericPrintExpr desc = go
       let prefix = ldIntrinsicPrefix desc
           saveFn :: Text
           saveFn = case fmt of
-            "json"     -> "mlc_save_json"
-            "voidstar" -> "mlc_save_voidstar"
-            _          -> "mlc_save"
+            SaveJson     -> "mlc_save_json"
+            SaveVoidstar -> "mlc_save_voidstar"
        in pretty prefix <> pretty saveFn
             <> "(" <> go e
             <> ", " <> schemaRef sid

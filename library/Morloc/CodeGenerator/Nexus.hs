@@ -228,11 +228,11 @@ data NexusExpr
   | ReadX Text NexusExpr  -- schema (return type = ?a), child expression
   | HashX Text NexusExpr  -- schema + child -> Str (xxhash hex)
   | CompareX Text Text NexusExpr -- "eq" or "le", schema (Bool), the pair compared
-  | SaveX Text Text NexusExpr NexusExpr NexusExpr
-  -- ^ format + schema + level + value + path -> (). For "voidstar" the
-  -- level is a 0-9 zstd-preset expression evaluated at runtime; for
-  -- "msgpack"/"json" the level is currently always a zero literal
-  -- because those formats are not packets and don't carry compression.
+  | SaveX SaveFormat Text NexusExpr NexusExpr NexusExpr
+  -- ^ format + schema + level + value + path -> (). For a voidstar save
+  -- the level is a 0-9 zstd-preset expression evaluated at runtime; for
+  -- JSON it is always a zero literal, since a JSON file carries no
+  -- compression.
   | LoadX Text NexusExpr  -- schema + path -> ?a
   | OptX Text NexusExpr   -- ?T schema wrapping a child of inner type T
                           -- (Just-coerce: at runtime sets tag=1 and writes
@@ -1097,26 +1097,18 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       HashX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrSave [levelExpr, path, valExpr])) =
       writeCheck ix IntrSave valExpr >>
-      withTryResult t (\inner -> SaveX "voidstar"
+      withTryResult t (\inner -> SaveX SaveVoidstar
         <$> type2schema inner
         <*> toNexusExpr levelExpr
         <*> toNexusExpr valExpr
         <*> toNexusExpr path)
-    -- @savem/@savej take source args in (path, value) order for
-    -- partial-application ergonomics. They carry no compression level;
+    -- @savej takes source args in (path, value) order for
+    -- partial-application ergonomics. It carries no compression level;
     -- emit a zero literal so the nexus dispatch (which always reads a
-    -- level field from save_expr) has a uniform shape. The runtime
-    -- ignores the field for non-voidstar formats.
-    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrSaveM [path, valExpr])) =
-      writeCheck ix IntrSaveM valExpr >>
-      withTryResult t (\inner -> SaveX "msgpack"
-        <$> type2schema inner
-        <*> pure (LitX IntX "0")
-        <*> toNexusExpr valExpr
-        <*> toNexusExpr path)
+    -- level field from save_expr) has a uniform shape.
     toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrSaveJ [path, valExpr])) =
       writeCheck ix IntrSaveJ valExpr >>
-      withTryResult t (\inner -> SaveX "json"
+      withTryResult t (\inner -> SaveX SaveJson
         <$> type2schema inner
         <*> pure (LitX IntX "0")
         <*> toNexusExpr valExpr
@@ -3017,7 +3009,7 @@ exprToJson (HashX schema child) =
 exprToJson (SaveX fmt schema level value path) =
   jsonObj
     [ ("tag", jsonStr "save")
-    , ("format", jsonStr fmt)
+    , ("format", jsonStr (saveFormatName fmt))
     , ("schema", jsonStr schema)
     , ("level", exprToJson level)
     , ("value", exprToJson value)

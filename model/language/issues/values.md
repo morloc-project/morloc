@@ -24,10 +24,6 @@ on 0.109.0 unless marked.
   C++: `==` and `<` fail to build (root-cpp core.hpp:654, :659 "no match for
   operator==/operator<=" on `Shape`). Enum-only `data Color = Red | Green |
   Blue` works in all three.
-- **`@savem`/`@load` corrupts 48-57.** [reproduced] Violates INTR-3.
-  docs reports/0079 program: saving `v` then loading returns `v - 48` for
-  48..57 (`49` -> `1`); 47 and 58 round-trip. The file holds the single
-  byte `49`: an ASCII digit, so the reader takes it as JSON.
 - **Table column sum fails in Python.** [reproduced] Violates WIRE-1.
   Census table built with `addCol`; `summarize t = fold (+) 0 (getCol "pop"
   t)` fails for CSV, Parquet, inline JSON and stdin input: "Expected int for

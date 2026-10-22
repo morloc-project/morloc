@@ -54,50 +54,10 @@ unsafe fn level_or_errmsg(
         .ok()
 }
 
-// ── mlc_save: serialize to msgpack file ────────────────────────────────────
-
-// `level` is accepted and range-checked for ABI uniformity with
-// mlc_save_voidstar, but otherwise unused here: the msgpack file is not a
-// morloc packet and has no header in which to record a compression
-// algorithm. Compressing the file as a whole is the deferred "compressed
-// JSON/MPK input" workstream.
-pub(crate) unsafe fn mlc_save(
-    data: *const c_void,
-    schema: *const CSchema,
-    level: i64,
-    path: *const c_char,
-    errmsg: *mut *mut c_char,
-) -> i32 {
-    clear_errmsg(errmsg);
-    if level_or_errmsg(level, errmsg).is_none() {
-        return 1;
-    }
-
-    use crate::ffi::pack_with_schema;
-    use crate::utility::write_atomic;
-
-    let mut err: *mut c_char = ptr::null_mut();
-    let mut mpk: *mut c_char = ptr::null_mut();
-    let mut mpk_size: usize = 0;
-
-    let rc = pack_with_schema(data, schema, &mut mpk, &mut mpk_size, &mut err);
-    if rc != 0 {
-        set_errmsg(errmsg, &take_reason(err));
-        return 1;
-    }
-
-    let wrc = write_atomic(path, mpk as *const u8, mpk_size, &mut err);
-    libc::free(mpk as *mut c_void);
-    if wrc != 0 {
-        set_errmsg(errmsg, &take_reason(err));
-        return 1;
-    }
-    0
-}
-
 // ── mlc_save_json: serialize to JSON file ──────────────────────────────────
 
-// `level` is range-checked but otherwise unused; see mlc_save.
+// `level` is range-checked but otherwise unused: a JSON file has no header
+// in which to record a compression algorithm.
 pub(crate) unsafe fn mlc_save_json(
     data: *const c_void,
     schema: *const CSchema,
@@ -2493,11 +2453,6 @@ mod tests {
 
 mod c_abi {
     use super::*;
-
-    #[no_mangle]
-    pub unsafe extern "C" fn mlc_save(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
-        super::mlc_save(data, schema, level, path, errmsg)
-    }
 
     #[no_mangle]
     pub unsafe extern "C" fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32 {

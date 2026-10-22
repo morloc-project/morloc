@@ -1308,7 +1308,7 @@ unsafe fn morloc_eval_r(
             let level_expr = (*save).level;
             let value_expr = (*save).value;
             let path_expr = (*save).path;
-            let fmt = CStr::from_ptr((*save).format).to_str().unwrap_or("voidstar");
+            let fmt = CStr::from_ptr((*save).format).to_str().unwrap_or("");
 
             let value_schema = (*value_expr).schema;
             // The level is a user Int; the save entry points range-check it.
@@ -1329,12 +1329,15 @@ unsafe fn morloc_eval_r(
             ptr::copy_nonoverlapping(path_abs, path_cstr as *mut u8, path_arr.size);
             *path_cstr.add(path_arr.size) = 0;
 
-            use crate::intrinsics::{mlc_save, mlc_save_json, mlc_save_voidstar};
+            use crate::intrinsics::{mlc_save_json, mlc_save_voidstar};
             let mut err: *mut c_char = ptr::null_mut();
             let rc = match fmt {
                 "json" => mlc_save_json(value_result as *const c_void, value_schema, level, path_cstr, &mut err),
-                "msgpack" => mlc_save(value_result as *const c_void, value_schema, level, path_cstr, &mut err),
-                _ => mlc_save_voidstar(value_result as *const c_void, value_schema, level, path_cstr, &mut err),
+                "voidstar" => mlc_save_voidstar(value_result as *const c_void, value_schema, level, path_cstr, &mut err),
+                other => {
+                    libc::free(path_cstr as *mut c_void);
+                    return Err(MorlocError::Other(format!("@save: unknown format '{other}' in the manifest")));
+                }
             };
             libc::free(path_cstr as *mut c_void);
             if rc != 0 {

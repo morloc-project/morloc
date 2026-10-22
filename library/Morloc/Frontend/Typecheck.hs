@@ -2003,7 +2003,6 @@ checkCellHandle g handleE = do
 -- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
 intrinsicType :: Intrinsic -> TypeU
 intrinsicType IntrSave = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
-intrinsicType IntrSaveM = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
 intrinsicType IntrSaveJ = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
 intrinsicType IntrLoad = EffectU ioEffectSet (BT.tryU BT.strU (ExistU (TV "load_a") ([], Open) ([], Open)))
 intrinsicType IntrHash = BT.strU
@@ -2122,13 +2121,12 @@ checkIntrinsicArgs i g intr argTypes = do
       case (intr, argTypes) of
         -- @save: Int -> Str -> a -> <IO>(). Level constrained to integer
         -- domain; path must be Str; the value is unconstrained. Path-first
-        -- (after the level) mirrors @savem/@savej.
+        -- (after the level) mirrors @savej.
         (IntrSave, [levelT, pathT, _]) -> do
           g' <- subtype' i levelT BT.intU g
           subtype' i pathT BT.strU g'
-        -- @savem/@savej: Str -> a -> <IO>(). Path-first makes
-        -- @savem path a reusable one-arg sink for callbacks.
-        (IntrSaveM, [pathT, _]) -> subtype' i pathT BT.strU g
+        -- @savej: Str -> a -> <IO>(). Path-first makes
+        -- @savej path a reusable one-arg sink for callbacks.
         (IntrSaveJ, [pathT, _]) -> subtype' i pathT BT.strU g
         -- @load: Str -> {?a}
         (IntrLoad, [pathT]) -> subtype' i pathT BT.strU g

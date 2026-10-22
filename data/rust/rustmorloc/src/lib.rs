@@ -112,7 +112,6 @@ extern "C" {
     // shim below is a thin wrapper, mirroring the C++ pool's `_mlc_*` helpers.
     fn mlc_hash(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char;
     fn mlc_compare(a: *const c_void, b: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32;
-    fn mlc_save(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_load(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
@@ -3516,18 +3515,6 @@ pub unsafe fn compare<T: ToVoidstar>(a: &T, b: &T, schema: &Schema) -> i32 {
     with_voidstar(a, schema, |va, cs, _| with_voidstar(b, schema, |vb, _, err| mlc_compare(va, vb, cs, err)))
 }
 
-/// @save: write a value to disk in the voidstar packet format. `level` is the
-/// compression level, range-checked by the runtime. Returns unit.
-pub unsafe fn save<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
-    let path_c = cstr_arg(path, "@save");
-    let rc = with_voidstar(value, schema, |vs, cs, err| {
-        mlc_save(vs, cs, level, path_c.as_ptr(), err)
-    });
-    if rc != 0 {
-        failed_without_reason("@save");
-    }
-}
-
 /// @savej: write a value to disk as JSON.
 pub unsafe fn save_json<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
     let path_c = cstr_arg(path, "@savej");
@@ -3539,14 +3526,15 @@ pub unsafe fn save_json<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, p
     }
 }
 
-/// @savem: write a value to disk as a raw voidstar block.
-pub unsafe fn save_voidstar<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
-    let path_c = cstr_arg(path, "@savem");
+/// @save: write a value to disk as a voidstar data packet. `level` is the
+/// compression level, range-checked by the runtime. Returns unit.
+pub unsafe fn save<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
+    let path_c = cstr_arg(path, "@save");
     let rc = with_voidstar(value, schema, |vs, cs, err| {
         mlc_save_voidstar(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
-        failed_without_reason("@savem");
+        failed_without_reason("@save");
     }
 }
 

@@ -10,7 +10,8 @@ Code: deviates (../runtime/issues/nexus-cli.md)
 
 A number, a `Bool` or a `Str` is its argv token, verbatim. Any other type is
 inline JSON or a path to a file whose format (JSON, MessagePack, a morloc
-packet) is detected from its bytes, not its name. The shape follows the wire
+packet) is detected from its bytes, not its name. A file at an optional text
+type whose content is the token `null` is `Null`. The shape follows the wire
 form, not the type's name: a type that packs to `[(a, b)]` reads as one.
 
 ### CLI-2 Argument shape is one atom per docstring field

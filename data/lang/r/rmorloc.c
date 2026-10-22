@@ -2395,15 +2395,6 @@ SEXP morloc_mlc_save_voidstar(SEXP obj_r, SEXP schema_str_r,
                                     mlc_save_voidstar, "mlc_save_voidstar");
 }
 
-// @savem :: msgpack file format. The runtime ignores `level` for the
-// msgpack path (no packet header in which to record compression), but
-// the ABI keeps it for uniformity with the voidstar family.
-SEXP morloc_mlc_save(SEXP obj_r, SEXP schema_str_r,
-                    SEXP level_r, SEXP path_r) {
-    return morloc_mlc_save_dispatch(obj_r, schema_str_r, level_r, path_r,
-                                    mlc_save, "mlc_save");
-}
-
 // @savej :: JSON file format. `level` is currently ignored.
 SEXP morloc_mlc_save_json(SEXP obj_r, SEXP schema_str_r,
                          SEXP level_r, SEXP path_r) {
@@ -4289,7 +4280,6 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_concat", (DL_FUNC) &morloc_mlc_concat, 2},
         {"morloc_mlc_flush", (DL_FUNC) &morloc_mlc_flush, 1},
         {"morloc_mlc_save_voidstar", (DL_FUNC) &morloc_mlc_save_voidstar, 4},
-        {"morloc_mlc_save", (DL_FUNC) &morloc_mlc_save, 4},
         {"morloc_mlc_save_json", (DL_FUNC) &morloc_mlc_save_json, 4},
         {"morloc_mlc_hash", (DL_FUNC) &morloc_mlc_hash, 2},
         {"morloc_mlc_compare", (DL_FUNC) &morloc_mlc_compare, 3},

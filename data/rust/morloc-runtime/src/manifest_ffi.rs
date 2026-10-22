@@ -1031,7 +1031,15 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             // value's own schema travels on `value_expr.schema` and is
             // read by the Save handler from there.
             let schema = c_schema("z")?;
-            let fmt_str = je.get("format").and_then(|v| v.as_str()).unwrap_or("voidstar");
+            let fmt_str = match je.get("format").and_then(|v| v.as_str()) {
+                Some(f @ ("voidstar" | "json")) => f,
+                other => {
+                    return Err(MorlocError::Other(format!(
+                        "manifest: save node has format {:?}; expected \"voidstar\" or \"json\"",
+                        other
+                    )))
+                }
+            };
             let c_fmt = CString::new(fmt_str).unwrap_or_default();
             let level = build_expr(je.get("level").unwrap_or(&serde_json::Value::Null))?;
             let value = build_expr(je.get("value").unwrap_or(&serde_json::Value::Null))?;

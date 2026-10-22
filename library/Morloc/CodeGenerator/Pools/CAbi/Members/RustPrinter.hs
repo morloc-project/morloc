@@ -47,7 +47,7 @@ import qualified Data.Text as T
 import Text.Printf (printf)
 import Morloc.CodeGenerator.Grammars.Common (DispatchEntry (..))
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-import Morloc.CodeGenerator.Namespace (Intrinsic (..), MDoc, RealLit (..), Key (..))
+import Morloc.CodeGenerator.Namespace (Intrinsic (..), MDoc, RealLit (..), Key (..), SaveFormat (..))
 import Morloc.Data.Doc
 import Morloc.DataFiles as DF
 
@@ -139,10 +139,9 @@ printExpr (IIntrinsicHash sid e) =
 printExpr (IIntrinsicCompare intr sid a b) =
   "(::rustmorloc::compare(" <> refExpr a <> ", " <> refExpr b <> ", " <> schemaRef sid <> ")"
     <> (if intr == IntrEq then " == 0)" else " <= 0)")
-printExpr (IIntrinsicSave fmt sid level e path)
-  | fmt == "json" = saveCall "save_json"
-  | fmt == "voidstar" = saveCall "save_voidstar"
-  | otherwise = saveCall "save"
+printExpr (IIntrinsicSave fmt sid level e path) = case fmt of
+  SaveJson -> saveCall "save_json"
+  SaveVoidstar -> saveCall "save"
   where
     saveCall f =
       "::rustmorloc::" <> f <> "(" <> refExpr e <> ", " <> schemaRef sid

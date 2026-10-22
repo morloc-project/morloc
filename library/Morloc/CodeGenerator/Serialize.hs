@@ -568,7 +568,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- here as the body of the closure manifold that suspends it
     -- ('Suspension.lowerSuspensions'), typed by its result.
     nativeExpr m (MonoIntrinsic t@(Idx tidx gt) intr es)
-      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad, IntrRead, IntrUnpack,
+      | intr `elem` [IntrSave, IntrSaveJ, IntrLoad, IntrRead, IntrUnpack,
                      IntrOpen, IntrClose, IntrFSchema,
                      IntrFLength, IntrStreamLayout, IntrNext, IntrStream,
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
@@ -585,7 +585,6 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
                 in Serial.checkWriteDataType tidx intr (Serial.containsFunF dtf) (pretty (renderTypeFName dtf))
           case (intr, esBase) of
             (IntrSave, _ : _ : d : _) -> writeCheck d
-            (IntrSaveM, _ : d : _) -> writeCheck d
             (IntrSaveJ, _ : d : _) -> writeCheck d
             (IntrWrite, _ : _ : d : _) -> writeCheck d
             -- An accumulator crosses into the runtime the same way a
@@ -653,7 +652,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           return $ AppExeN tf (SrcCallP Nothing packerSrc) [NativeArgExpr raw]
         Nothing -> return raw
 
-    -- For data-bearing runtime intrinsics (@save/@savej/@savem/@show/@hash),
+    -- For data-bearing runtime intrinsics (@save/@savej/@show/@hash),
     -- the runtime expects the value in *wire form*. The normal cross-pool
     -- path inserts the unpacker in expandSerialize's SerialPack arm; we
     -- mirror that here so intrinsics flow through the same pack/unpack
@@ -684,10 +683,10 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     unpackDataArgIfNeeded m IntrWrite (levelArg : handleArg : dataArg : rest) = do
       rest' <- packDataArg m dataArg
       return (levelArg : handleArg : rest' ++ rest)
-    -- @savem/@savej/@cellput's args are [path-or-handle, value]; the value
+    -- @savej/@cellput's args are [path-or-handle, value]; the value
     -- is at index 1.
     unpackDataArgIfNeeded m intr (pathArg : dataArg : rest)
-      | intr `elem` [IntrSaveM, IntrSaveJ, IntrCellPut] = do
+      | intr `elem` [IntrSaveJ, IntrCellPut] = do
           rest' <- packDataArg m dataArg
           return (pathArg : rest' ++ rest)
     unpackDataArgIfNeeded m intr [aArg, bArg]
@@ -741,10 +740,10 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrSave _ (_levelArg : _pathArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
-    -- @savem/@savej/@cellput's data is the second positional arg (after the
+    -- @savej/@cellput's data is the second positional arg (after the
     -- path or handle).
     intrinsicSchema m intr _ (_pathArg : dataArg : _)
-      | intr `elem` [IntrSaveM, IntrSaveJ, IntrCellPut] = do
+      | intr `elem` [IntrSaveJ, IntrCellPut] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m intr _ (dataArg:_)

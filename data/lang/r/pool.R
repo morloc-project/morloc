@@ -100,7 +100,6 @@ morloc_get_value                     <- function(packet, schema, check_nul = TRU
 morloc_put_value                     <- function(value, schema, self_contained = FALSE){ .Call("morloc_put_value", value, schema, self_contained) }
 morloc_release_packet_shm            <- function(...){ .Call("morloc_release_packet_shm",            ...) }
 morloc_mlc_show                      <- function(...){ .Call("morloc_mlc_show",                      ...) }
-morloc_mlc_save                      <- function(...){ .Call("morloc_mlc_save",                      ...) }
 morloc_mlc_save_voidstar             <- function(...){ .Call("morloc_mlc_save_voidstar",             ...) }
 morloc_mlc_save_json                 <- function(...){ .Call("morloc_mlc_save_json",                 ...) }
 morloc_mlc_load                      <- function(...){ .Call("morloc_mlc_load",                      ...) }

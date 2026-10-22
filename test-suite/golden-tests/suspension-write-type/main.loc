@@ -1,4 +1,4 @@
--- A data-writing intrinsic (@savem here, also @save, @savej, @write)
+-- A data-writing intrinsic (@savej here, also @save, @write)
 -- writes data, and a suspension or a function is not data: it is a
 -- closure whose manifold id means nothing outside this build. The build
 -- refuses the write in every backend rather than letting the pool fail
@@ -15,6 +15,6 @@ get :: Int -> <IO> Int
 saved :: Str -> <IO> Int
 saved path = do
   v <- get 41
-  @savem path v
+  @savej path v
   Ok w <- @load path
   do (w + 1)

@@ -194,7 +194,7 @@ checkReadDataType i intr t0
       EffectT _ inner -> inner
       _ -> t0
 
--- | The counterpart for a data-writing intrinsic (@save, @savem, @savej,
+-- | The counterpart for a data-writing intrinsic (@save, @savej,
 -- @write): what it writes must be data. A suspension or function is a
 -- closure naming a manifold of this build, which means nothing in a file.
 checkWriteDataType :: Int -> Intrinsic -> Bool -> MDoc -> MorlocMonad ()

@@ -181,7 +181,7 @@ data IExpr
   | IPack Text IExpr -- packer(expr)
   | IRawExpr Text
   | IEval IExpr -- eval: call effect with no args
-  | IIntrinsicSave Text Int IExpr IExpr IExpr -- format, schemaId, level, data, path
+  | IIntrinsicSave SaveFormat Int IExpr IExpr IExpr -- format, schemaId, level, data, path
   | IIntrinsicLoad Int (Maybe IType) IExpr -- schemaId, returnType, path -> result (nullable)
   | IIntrinsicHash Int IExpr -- schemaId, data -> hex string
   | IIntrinsicCompare Intrinsic Int IExpr IExpr -- @eq or @le, schemaId, two values -> Bool
@@ -2646,37 +2646,28 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [aE, bE]) (IntrinsicN_ _ intr (Just sch
       let raw d = IRawExpr (render (poolExpr d))
       return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicCompare intr sid (raw aDocs') (raw bDocs'))) [aDocs', bDocs']
 -- @save takes source args in (level, path, value) order; path-first
--- (after the level) mirrors @savem/@savej. The runtime ABI is unchanged:
+-- (after the level) mirrors @savej. The runtime ABI is unchanged:
 -- IIntrinsicSave keeps (level, data, path).
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, _, dataE]) (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- The saved value is only read, through a 'ToVoidstar' (&T) sink (see
   -- @hash above). level and path are scalar/Str, not value sinks.
   dataDocs' <- adaptReadElem cfg dataE dataDocs
-  let fmt = "voidstar"
+  let fmt = SaveVoidstar
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr (render (poolExpr levelDocs)))
                    (IRawExpr (render (poolExpr dataDocs')))
                    (IRawExpr (render (poolExpr pathDocs)))
    in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, pathDocs, dataDocs']
--- @savem/@savej take source args in (path, value) order for
--- partial-application ergonomics (`@savem path` is a reusable sink).
+-- @savej takes source args in (path, value) order for
+-- partial-application ergonomics (`@savej path` is a reusable sink).
 -- The runtime ABI is unchanged: IIntrinsicSave keeps (level, data, path).
--- They are not packet formats; codegen always passes a zero level
+-- JSON is not a packet format; codegen always passes a zero level
 -- expression so the printed call shape is uniform with @save.
-lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveM (Just schema) [pathDocs, dataDocs]) = do
-  sid <- lcRegisterSchema cfg schema
-  dataDocs' <- adaptReadElem cfg dataE dataDocs
-  let fmt = "msgpack"
-      saveExpr = IIntrinsicSave fmt sid
-                   (IRawExpr "0")
-                   (IRawExpr (render (poolExpr dataDocs')))
-                   (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs']
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveJ (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   dataDocs' <- adaptReadElem cfg dataE dataDocs
-  let fmt = "json"
+  let fmt = SaveJson
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr "0")
                    (IRawExpr (render (poolExpr dataDocs')))

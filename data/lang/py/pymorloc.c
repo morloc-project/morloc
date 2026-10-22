@@ -3611,44 +3611,6 @@ error:
     return NULL;
 }
 
-static PyObject* pybinding__mlc_save(PyObject* self, PyObject* args) { MAYFAIL
-    PyObject* obj;
-    const char* schema_str;
-    long long level_ll;
-    const char* path;
-    Schema* schema = NULL;
-    void* voidstar = NULL;
-
-    // Args: (value, schema, level, path). The level is accepted for ABI
-    // uniformity with mlc_save_voidstar; the runtime range-checks it, but
-    // a msgpack file has no header to record it in.
-    PARSE_ARGS_OR_ABORT(args, "OsLs", &obj, &schema_str, &level_ll, &path);
-
-    schema = PyTRY(parse_schema, schema_str);
-
-    voidstar = to_voidstar(schema, obj);
-    PyTRACE(voidstar == NULL)
-
-    PyTRY(mlc_save, voidstar, schema, level_ll, path);
-
-    {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    Py_RETURN_NONE;
-
-error:
-    if (voidstar) {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    return NULL;
-}
-
 static PyObject* pybinding__mlc_save_voidstar(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* obj;
     const char* schema_str;
@@ -4657,7 +4619,6 @@ static PyMethodDef Methods[] = {
     {"remote_call", pybinding__remote_call, METH_VARARGS, "Make a call to a remote cluster"},
     {"mlc_hash", pybinding__mlc_hash, METH_VARARGS, "Hash a value using xxhash"},
     {"mlc_compare", pybinding__mlc_compare, METH_VARARGS, "Order two values of one schema"},
-    {"mlc_save", pybinding__mlc_save, METH_VARARGS, "Save a value to file in msgpack format"},
     {"mlc_save_voidstar", pybinding__mlc_save_voidstar, METH_VARARGS, "Save a value to file in flat voidstar binary format"},
     {"mlc_save_json", pybinding__mlc_save_json, METH_VARARGS, "Save a value to file in JSON format"},
     {"mlc_load", pybinding__mlc_load, METH_VARARGS, "Load a value from file"},

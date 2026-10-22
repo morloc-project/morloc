@@ -78,13 +78,11 @@ all:
 	./nexus crPerm >> obs.txt 2>> obs.err
 	echo "--- rcPerm ---" >> obs.txt
 	./nexus rcPerm >> obs.txt 2>> obs.err
-	echo "=== (4) File IO @save / @savej / @savem round-trip ===" >> obs.txt
+	echo "=== (4) File IO @save / @savej round-trip ===" >> obs.txt
 	echo "--- fileBin ---" >> obs.txt
 	./nexus --keep-null fileBin "/tmp/vector-comprehensive-bin.dat"  >> obs.txt 2>> obs.err
 	echo "--- fileJson ---" >> obs.txt
 	./nexus --keep-null fileJson "/tmp/vector-comprehensive-json.dat" >> obs.txt 2>> obs.err
-	echo "--- fileMsg ---" >> obs.txt
-	./nexus --keep-null fileMsg "/tmp/vector-comprehensive-msg.dat"  >> obs.txt 2>> obs.err
 	echo "--- fileSumBin ---" >> obs.txt
 	./nexus --keep-null fileSumBin "/tmp/vector-comprehensive-sum-bin.dat"  >> obs.txt 2>> obs.err
 	echo "--- fileSumJson ---" >> obs.txt

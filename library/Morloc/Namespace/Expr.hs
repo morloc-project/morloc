@@ -44,6 +44,8 @@ module Morloc.Namespace.Expr
   , unappliedPatternArity
   , Pattern (..)
   , Intrinsic (..)
+  , SaveFormat (..)
+  , saveFormatName
   , intrinsicName
   , intrinsicArity
   , intrinsicIsIO
@@ -391,10 +393,20 @@ unappliedPatternArity (PatternStruct s) = bracketArity s + 1
 unappliedPatternArity PatternBracketIndex = 2
 unappliedPatternArity PatternBracketSlice = 4
 
+-- | The file format a save intrinsic writes.
+data SaveFormat
+  = SaveVoidstar -- ^ @save: a voidstar data packet
+  | SaveJson     -- ^ @savej: a JSON text file
+  deriving (Show, Eq, Ord)
+
+-- | The format's name in generated code and the nexus manifest.
+saveFormatName :: SaveFormat -> Text
+saveFormatName SaveVoidstar = "voidstar"
+saveFormatName SaveJson = "json"
+
 -- | Compiler intrinsics: functions the compiler generates specialized code for.
 data Intrinsic
   = IntrSave      -- ^ @save  :: Int -> Str -> a -> <IO> (Try Str ()) -- voidstar packet, with zstd level 0-9
-  | IntrSaveM     -- ^ @savem :: Str -> a -> <IO> (Try Str ())    -- raw msgpack file
   | IntrSaveJ     -- ^ @savej :: Str -> a -> <IO> (Try Str ())    -- raw JSON file
   | IntrLoad      -- ^ @load  :: Str -> <IO> (Try Str a)          -- auto-detect format, auto-decompress packets; failure is an Err arm
   | IntrHash      -- ^ @hash   :: a -> Str           -- xxhash, hex string
@@ -592,7 +604,6 @@ data Intrinsic
 -- | Map intrinsic to its canonical name
 intrinsicName :: Intrinsic -> Text
 intrinsicName IntrSave = "save"
-intrinsicName IntrSaveM = "savem"
 intrinsicName IntrSaveJ = "savej"
 intrinsicName IntrLoad = "load"
 intrinsicName IntrHash = "hash"
@@ -652,7 +663,6 @@ intrinsicName IntrIFileWalk = "ifile_walk"
 -- IO/pure classification rather than silently defaulting to allowed.
 intrinsicIsIO :: Intrinsic -> Bool
 intrinsicIsIO IntrSave = True
-intrinsicIsIO IntrSaveM = True
 intrinsicIsIO IntrSaveJ = True
 intrinsicIsIO IntrLoad = True
 intrinsicIsIO IntrOpen = True
@@ -712,7 +722,6 @@ intrinsicIsIO IntrTry = False
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
 parseIntrinsic :: Text -> Maybe Intrinsic
 parseIntrinsic "save" = Just IntrSave
-parseIntrinsic "savem" = Just IntrSaveM
 parseIntrinsic "savej" = Just IntrSaveJ
 parseIntrinsic "load" = Just IntrLoad
 parseIntrinsic "hash" = Just IntrHash
@@ -758,7 +767,6 @@ intrinsicArity IntrNewtypeWrap = 1
 intrinsicArity IntrCtorField = 3
 intrinsicArity IntrListLenTest = 2
 intrinsicArity IntrListElem = 2
-intrinsicArity IntrSaveM = 2
 intrinsicArity IntrSaveJ = 2
 intrinsicArity IntrLoad = 1
 intrinsicArity IntrHash = 1
