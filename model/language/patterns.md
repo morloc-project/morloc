@@ -56,7 +56,7 @@ instance.
 
 ### PAT-5 A chain step must fit the shape of its receiver
 Intent: proposed
-Tests: spec-pat-5-1, spec-pat-5-2, spec-pat-5-3, spec-pat-5-4, spec-pat-5-5, spec-pat-5-6, spec-pat-5-7, spec-pat-5-8, spec-pat-5-9, spec-pat-5-10
+Tests: spec-pat-5-1, spec-pat-5-2, spec-pat-5-3, spec-pat-5-4, spec-pat-5-5, spec-pat-5-6, spec-pat-5-7, spec-pat-5-8, spec-pat-5-9, spec-pat-5-10, spec-pat-5-11
 Code: conforms 2026-10-21
 
 The head of a getter or setter chain matches the receiver: a record takes a

@@ -2424,7 +2424,7 @@ mod tests {
         schema_of(c"as")
     }
 
-    // INTR-3: a saved file loads only at the type it was saved with, by
+    // A saved file loads only at the type it was saved with, by
     // every load path: uncompressed or compressed, small or past the
     // fast-path threshold, under a packet name or a `.json` name.
     #[test]

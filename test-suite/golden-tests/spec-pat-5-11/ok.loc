@@ -1,0 +1,14 @@
+-- The accept twin of main.loc: the same bracket on a list, which the nexus
+-- evaluator brackets natively.
+
+module main (first)
+
+import root-py
+
+newtype Two a = (a, a)
+
+instance Indexable Two where
+  source Py from "two.py" ("at" as __access_index__)
+
+first :: [Int] -> Int
+first p = .[0] p

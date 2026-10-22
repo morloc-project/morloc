@@ -98,7 +98,7 @@ rule for locks shared between processes.
 
 ### PANIC-5 A pool never answers a panic
 Status: implemented
-Checked by: golden:py-systemexit-ends-pool, golden:r-internal-error-ends-pool, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_holding_a_runtime_lock_inside_a_format_library_call_ends_the_process, tla:PanicExit_continue_after_catch.bug
+Checked by: golden:py-systemexit-ends-pool, golden:r-internal-error-ends-pool, golden:cpp-catch-cannot-hold-pool-death, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_holding_a_runtime_lock_inside_a_format_library_call_ends_the_process, tla:PanicExit_continue_after_catch.bug
 
 A panic in a pool's runtime code -- a Rust panic outside user code, a C++
 infrastructure error -- ends the pool by PANIC-1. It is never turned into
@@ -200,7 +200,7 @@ cache's object files.
 
 ### PANIC-13 A broken runtime invariant in the Rust pool ends the pool
 Status: implemented
-Checked by: loading_a_missing_file_fails_with_a_reason, loading_a_null_path_fails_with_a_reason, reading_malformed_json_fails_with_a_reason, reading_a_null_string_fails_with_a_reason, saving_to_a_null_path_fails_with_a_reason, a_runtime_value_failure_without_a_reason_ends_the_pool, a_runtime_handle_failure_without_a_reason_ends_the_pool, a_runtime_failure_with_a_reason_is_a_catchable_error, a_closed_pipe_passes_through_try, a_closed_pipe_fails_the_call_with_its_own_message, a_callee_failure_without_a_reason_ends_the_process_even_inside_a_catch_scope, a_callee_whose_pipe_closed_ends_the_callers_call_past_try, a_pipe_closed_packet_is_a_failure_that_says_so, golden:rust-thunk-capture, golden:stdio-pipe-closed
+Checked by: loading_a_missing_file_fails_with_a_reason, loading_a_null_path_fails_with_a_reason, reading_malformed_json_fails_with_a_reason, reading_a_null_string_fails_with_a_reason, saving_to_a_null_path_fails_with_a_reason, a_runtime_value_failure_without_a_reason_ends_the_pool, a_runtime_handle_failure_without_a_reason_ends_the_pool, a_runtime_failure_with_a_reason_is_a_catchable_error, a_closed_pipe_passes_through_try, a_closed_pipe_fails_the_call_with_its_own_message, a_callee_failure_without_a_reason_ends_the_process_even_inside_a_catch_scope, a_callee_whose_pipe_closed_ends_the_callers_call_past_try, a_pipe_closed_packet_is_a_failure_that_says_so, golden:rust-thunk-capture, golden:stdio-pipe-closed, golden:cpp-catch-cannot-hold-closed-pipe
 
 A check whose failing value can come from outside the runtime -- a client
 or peer packet, a file, a user value, handle or type mapping, bytes a user

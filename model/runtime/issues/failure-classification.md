@@ -89,7 +89,7 @@ failure (a fail packet). Several sites are misclassified.
   death and exits 0. (C++ no longer: its infrastructure failures end the
   C++ pool at the site.) Failing the run once the nexus reaps a pool during
   the call would close it for every language at once.
-- **Untested C++ changes.** [read, 2026-10-21] No test covers
-  `MorlocPipeClosed` not being a `std::exception` (a sourced
-  `catch (const std::exception&)` around an `@stdout` write into a closed
-  pipe) or a failed `shfree_cpp` ending the pool.
+- **Untested C++ failure sites.** [read, 2026-10-21] No test covers a
+  failed `shfree_cpp`, or an unresolved result, release or Arrow pointer,
+  ending the C++ pool: reaching them needs corrupted shared memory, and
+  the runtime has no fault-injection hook.

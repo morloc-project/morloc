@@ -2186,7 +2186,7 @@ unsafe fn arrow_load_json(
 /// Load a data packet file as a value of `schema`, choosing the path by the
 /// file's shape: a stream file is gathered into a list, a large voidstar
 /// packet is landed in shared memory directly, anything else is read whole.
-/// Every path compares the file's stored schema with `schema` (INTR-3).
+/// Every path compares the file's stored schema with `schema`.
 pub(crate) unsafe fn load_packet_file(
     path: *const c_char,
     schema: *const CSchema,
@@ -2525,7 +2525,7 @@ pub(crate) unsafe fn load_morloc_data_file(
     let mut err: *mut c_char = ptr::null_mut();
 
     // 1. Extension-based dispatch, for a file that is not a packet: a
-    // packet is recognized by its bytes whatever its name (INTR-3, CLI-1).
+    // packet is recognized by its bytes whatever its name.
     let is_packet = data_size >= 32 && *(data as *const u32) == packet::PACKET_MAGIC;
     if !is_packet && path_str.ends_with(".json") {
         if arrow_target {

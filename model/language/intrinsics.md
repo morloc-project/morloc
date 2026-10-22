@@ -21,6 +21,7 @@ rejected and asks for an annotation.
 
 ### INTR-3 What `@save`, `@savem` or `@savej` writes, `@load` reads back equal
 Intent: proposed
+Tests: spec-intr-3-1
 Code: deviates (issues/values.md)
 
 `@load` detects the format from the bytes and returns a value equal to the

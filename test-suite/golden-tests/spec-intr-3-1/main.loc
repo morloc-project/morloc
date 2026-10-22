@@ -1,7 +1,7 @@
 -- A saved file loads only at the type it was saved with (INTR-3),
 -- uncompressed and compressed, through @load and as a command-line
--- argument file: each wrong-type load is refused as a schema mismatch and
--- each right-type load gives the saved values back.
+-- argument file: each wrong-type load is an Err (or a refused argument)
+-- and each right-type load gives the saved values back.
 
 module main (save0, save3, loadInts, loadReals, sumInts, sumReals)
 

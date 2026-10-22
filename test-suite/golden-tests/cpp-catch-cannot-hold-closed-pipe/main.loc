@@ -1,0 +1,22 @@
+-- A closed downstream pipe ends the call even inside a sourced catch
+-- (PANIC-13): a C++ function that catches std::exception around a thunk
+-- streaming to a closed @stdout does not return its fallback, and the run
+-- ends with the SIGPIPE status.
+
+module main (run)
+
+import root-cpp
+
+source Cpp from "guard.hpp" ("guarded")
+
+guarded :: <IO> Int -> <IO> Int
+
+stream :: <IO> Int
+stream = do
+  o <- @stdout :: <IO> (OStream Int)
+  @write 0 o (range 0 100000)
+  @close o
+  0
+
+run :: <IO> Int
+run = guarded stream
