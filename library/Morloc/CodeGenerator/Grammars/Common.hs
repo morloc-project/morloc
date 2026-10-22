@@ -1184,13 +1184,6 @@ orNativeType (R t) = Just t
 orNativeType (LR _ t) = Just t
 orNativeType (L _) = Nothing
 
-{- | Build a pure @midx -> (name, srcloc)@ closure by snapshotting
-'stateName' and 'stateSourceMap' from the monad. Each translator
-calls this once during 'LowerConfig' setup and stores the closure in
-'lcManifoldDebugInfo' so the debug-wrap emitter can look up per-frame
-metadata without touching 'MorlocMonad'. Both strings are empty when
-no info is attached; the runtime treats empties as "omit".
--}
 -- | The trace label of a manifold outside @--debug@ (DIAG-5): the name of
 -- the morloc function it is a call of, and the source position of that
 -- function's definition. 'Nothing' for a manifold that is not a call of a
@@ -1210,13 +1203,22 @@ makeTraceLabelLookup = do
     Just n | not (MT.null n) -> Just (n, position i)
     _ -> Nothing
 
+-- | The @--debug@ trace label of every manifold: the morloc name it carries,
+-- or else the sourced function it calls, and its call site, or for an
+-- exported head (which has no call site) its definition (DIAG-5). Each
+-- translator snapshots it once during 'LowerConfig' setup; an empty string
+-- means the runtime omits that part.
 makeManifoldDebugInfoLookup :: MorlocMonad (Int -> (Text, Text))
 makeManifoldDebugInfoLookup = do
   nameMap <- MM.gets stateName
+  calleeMap <- MM.gets stateDebugCallee
   srcMap <- MM.gets stateSourceMap
-  let sanitized = Map.map (sanitizeManifoldName . unEVar . displayName) nameMap
-      srclocs = Map.mapMaybe renderSrcLocForDebug srcMap
-  return $ \i ->
-    ( Map.findWithDefault "" i sanitized
-    , Map.findWithDefault "" i srclocs
-    )
+  exports <- Set.fromList <$> MM.gets stateExports
+  traceLabel <- makeTraceLabelLookup
+  let render = sanitizeManifoldName . unEVar . displayName
+      name i = maybe "" render (Map.lookup i nameMap <|> Map.lookup i calleeMap)
+      callSite i = maybe "" id (Map.lookup i srcMap >>= renderSrcLocForDebug)
+      position i = case traceLabel i of
+        Just (_, def) | Set.member i exports && not (MT.null def) -> def
+        _ -> callSite i
+  return $ \i -> (name i, position i)

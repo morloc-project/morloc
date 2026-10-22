@@ -70,3 +70,22 @@
   reading a stream) now prints "Error (pymorloc.c:4088 in
   pybinding__mlc_next):" before the message and locates it at the `total f =
   do` line rather than the `@next` call (DIAG-3).
+- [reproduced, 0.109.0] Violates DIAG-5 under `--debug`: named calls
+  reduced by LambdaEval (`viaHelper n = idpy (helper n)`) have no frame
+  (the same loss as the default-build entry above). Cause class: a
+  manifold's label lives in hand-maintained `Int`-keyed side maps
+  (`stateName`, `stateSourceMap`, `stateNameSource`, `stateDefinitionSite`,
+  `stateDebugCallee`) that each minting site updates partially; carrying
+  the callee on the manifold node would close it.
+- [read] Violates DIAG-5 under `--debug` in Rust: `lcDebugWrap` is the
+  identity (CodeGenerator/Grammars/Translator/Rust.hs, `lcDebugWrap = \_ _
+  body -> return body`), so a Rust pool dumps no arguments; its frame
+  labels use the debug lookup and push an empty name for every manifold.
+- [speculative] Under `--debug`, frames are drained only at the dispatcher
+  (py pool.py, cpp pool.cpp, rmorloc.c) and flushed when a dispatch starts:
+  a failure caught by `@try` leaves its frames and spends the dump budget,
+  so a later uncaught failure in the same dispatch may print stale frames.
+  The debug wrap re-raises unchanged, so a `@try` `Err` message in a
+  `--debug` build may carry no trace (DIAG-5 requires one). Frames, the
+  dump count and the overflow note are per thread, so a catch on a helper
+  thread (C++ parallel stdlib) is never drained or reset. Needs repros.

@@ -1,0 +1,32 @@
+-- DIAG-5 under --debug: every frame is named (a call of a sourced
+-- function by that function), a call is placed at its call site and an
+-- exported head at its definition, an argument already dumped points at
+-- its file without spending the dump budget, and arguments past the
+-- budget are listed bare with one note at the end of the trace.
+
+module main (boomP, boomC, boomR, ratio)
+
+import root-py
+import root-cpp
+import root-r
+
+source Py from "f.py" ("pyThrowAtZero", "pyDivide")
+source Cpp from "f.hpp" ("cppThrowAtZero")
+source R from "f.R" ("rThrowAtZero")
+
+pyThrowAtZero :: Real -> Real
+pyDivide :: Real -> Real -> Real
+cppThrowAtZero :: Real -> Real
+rThrowAtZero :: Real -> Real
+
+boomP :: Real -> Real
+boomP n = idpy (pyThrowAtZero n)
+
+boomC :: Real -> Real
+boomC n = idcpp (cppThrowAtZero n)
+
+boomR :: Real -> Real
+boomR n = idr (rThrowAtZero n)
+
+ratio :: Real -> Real -> Real
+ratio a b = idpy (pyDivide a b)

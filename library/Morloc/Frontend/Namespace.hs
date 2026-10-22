@@ -140,6 +140,7 @@ copyState oldIdx newIdx = do
       , stateManifoldEffects = stateManifoldEffects s
       , stateDefinitionSite = stateDefinitionSite s
       , stateNameSource = stateNameSource s
+      , stateDebugCallee = stateDebugCallee s
       , stateProjectRoot = stateProjectRoot s
       , stateEnvSpecLangs = stateEnvSpecLangs s
       , stateEvalMode = stateEvalMode s

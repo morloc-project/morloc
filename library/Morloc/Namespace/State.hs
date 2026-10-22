@@ -309,6 +309,10 @@ data MorlocState = MorlocState
   , stateDefinitionSite :: Map Int Int
   -- ^ Signature index of a named term -> index of the declaration that
   -- defines it, whose source position a failure's trace reports (DIAG-5).
+  , stateDebugCallee :: Map Int EVar
+  -- ^ Under @--debug@, a manifold that applies a sourced function -> that
+  -- function's name, which labels its trace frame. Only the debug trace
+  -- lookup reads it.
   , stateNameSource :: Map Int Int
   -- ^ An index minted during code generation and given a term's name ->
   -- the index it took the name from.
@@ -1084,6 +1088,7 @@ instance Defaultable MorlocState where
       , stateManifoldEffects = Map.empty
       , stateDefinitionSite = Map.empty
       , stateNameSource = Map.empty
+      , stateDebugCallee = Map.empty
       , stateProjectRoot = Nothing
       , stateEnvSpecLangs = []
       , stateEvalMode = False

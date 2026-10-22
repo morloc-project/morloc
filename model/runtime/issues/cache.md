@@ -27,3 +27,12 @@ There is no cache spec yet; these are gaps until one is written.
 - [read] Dead hit/miss counters with a false comment (cache.rs:209-253);
   `start.json` described in run.rs:20-21, never written (golden
   `workdir-basics` skipped).
+
+- **`cache: true` under `--debug` references an unbound argument.**
+  [reproduced, 2026-10-22] Violates DIAG-5. `boomP n =
+  idpy (big@pyThrowAtZero n)` with `labeled-groups: {big: {cache: true}}`,
+  built `--debug` (py): the label manifold takes `n0`, but the inlined inner
+  manifold's cache key and debug frame read `[s0]`, so `./prog 0` fails
+  "name 's0' is not defined" instead of "float division by zero"; the
+  build without `--debug` reports the real error. The label wrapper's frame
+  is unnamed (`at _`): its body is the inner manifold, not a call.

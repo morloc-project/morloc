@@ -511,6 +511,9 @@ hasDebugWrapAt _ _ = False
 debugWrapExpr :: PolyExpr -> MorlocMonad PolyExpr
 debugWrapExpr (PolyManifold l m form k inner) = do
   inner' <- debugWrapExpr inner
+  case sourcedCallee inner of
+    Just v -> MM.modify (\s -> s {stateDebugCallee = Map.insert m v (stateDebugCallee s)})
+    Nothing -> return ()
   let argsList = collectArgs form
   return $ PolyManifold l m form k (PolyDebugWrap m argsList inner')
 debugWrapExpr (PolyApp head' args') =
@@ -538,6 +541,20 @@ debugWrapExpr (PolyIntrinsic ti intr xs) =
 debugWrapExpr (PolyRemoteInterface l ti is rf inner) =
   PolyRemoteInterface l ti is rf <$> debugWrapExpr inner
 debugWrapExpr leaf = return leaf
+
+-- | The user-written sourced function a manifold body ends in a call of,
+-- looking through the returns, bindings and wrappers around that call.
+sourcedCallee :: PolyExpr -> Maybe EVar
+sourcedCallee (PolyReturn e) = sourcedCallee e
+sourcedCallee (PolyLet _ _ e) = sourcedCallee e
+sourcedCallee (PolyDoBlock _ e) = sourcedCallee e
+sourcedCallee (PolyEval _ e) = sourcedCallee e
+sourcedCallee (PolyCoerce _ _ e) = sourcedCallee e
+sourcedCallee (PolyDebugWrap _ _ e) = sourcedCallee e
+sourcedCallee (PolyCacheBody _ _ _ e) = sourcedCallee e
+sourcedCallee (PolyApp (PolyExe _ (SrcCallP (Just _) src)) _) = Just (srcAlias src)
+sourcedCallee (PolyExe _ (SrcCallP (Just _) src)) = Just (srcAlias src)
+sourcedCallee _ = Nothing
 
 -- | Look up @midx@ in 'stateManifoldConfig'; return its label group
 -- when the manifold has @cache: true@ AND a label, otherwise

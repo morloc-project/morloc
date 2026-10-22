@@ -105,7 +105,7 @@ morloc-runtime/debug.rs::-::MIDX_COUNTERS	thread
 morloc-runtime/debug.rs::-::CACHE_DEPTH	lazy		
 morloc-runtime/debug.rs::-::CACHE_MAX	lazy		
 morloc-runtime/debug.rs::-::RECURSION_CAP	lazy		
-morloc-runtime/debug.rs::-::OVERFLOW_REPORTED	counter		
+morloc-runtime/debug.rs::-::OVERFLOW_REPORTED	thread		
 morloc-runtime/eval_arena.rs::-::ARENA	thread		
 morloc-runtime/eval_arena.rs::-::BROKEN	test-only		
 morloc-runtime/eval_arena.rs::-::TEARDOWN_PROBE	test-only		
