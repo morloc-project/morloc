@@ -1373,8 +1373,9 @@ pub fn rel2abs_extent(ptr: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError>
     let offset = relptr_offset(ptr);
     if vol_idx == 0 {
         return Err(MorlocError::Shm(format!(
-            "rel2abs: relptr {} is in volume 0, which is never mapped: a buffer- or \
-             file-relative offset reached shared memory without being rebased",
+            "rel2abs: relptr {} is in volume 0, which is never mapped: either a \
+             buffer-relative offset was not rebased, or the word was read with the \
+             wrong layout",
             ptr
         )));
     }

@@ -6186,16 +6186,7 @@ pub fn ifile_walk(
 /// Container schema = Array(elem_schema). Used to build per-subpacket
 /// payload schemas from a cached element schema.
 pub(crate) fn array_schema(elem: &Schema) -> Schema {
-    Schema {
-        serial_type: SerialType::Array,
-        size: 1,
-        width: std::mem::size_of::<shm_types_crate::Array>(),
-        offsets: Vec::new(),
-        hint: None,
-        parameters: vec![elem.clone()],
-        keys: Vec::new(),
-        name: None,
-    }
+    Schema::array(elem.clone())
 }
 
 /// Split a parsed on-disk schema into (value, elem). Streams and IFile

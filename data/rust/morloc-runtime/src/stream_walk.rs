@@ -2,6 +2,7 @@
 //! following it through a materialized sub-packet. Pure: no registry, lock
 //! or process state.
 
+use morloc_runtime_types::pattern::{check_pattern_against_schema, LinearStep, Path};
 use morloc_runtime_types::schema::{Schema, SerialType};
 use morloc_runtime_types::shm_types::{self as shm_types_crate};
 use morloc_runtime_types::{slice, width};
@@ -132,9 +133,8 @@ pub(crate) enum WalkStep {
     /// Array. Legal inside group children and as a leaf in any chain.
     BracketIndex,
     /// Bracket-slice step: consumes 3 runtime args (start, stop, step).
-    /// Result schema is the surrounding Array type (length may change).
-    /// Bracket-slice steps are TERMINAL within a chain: the path
-    /// "...[:]X" with anything after is rejected.
+    /// Result schema is the surrounding Array type (length may change);
+    /// steps after it apply to each element.
     BracketSlice,
     /// Multi-field group: each child is its own sub-walk that
     /// operates at the same position. Result is a fresh tuple of the
@@ -817,114 +817,43 @@ pub(crate) fn materialize_group(
     Ok(())
 }
 
-/// Compute the static schema produced by walking `chain` from
-/// `start`. Pure static walk -- no disk reads. Used to size the
-/// output buffer up front and to lay out tuple slots for groups.
+/// The schema produced by walking `chain` from `start`: the one
+/// `check_pattern_against_schema` gives, so a reader that type-checked the
+/// pattern reads the value with the layout it was built in.
 pub(crate) fn infer_chain_schema(
     start: &Schema,
     chain: &[WalkStep],
 ) -> Result<Schema, MorlocError> {
-    let mut cur = start.clone();
-    for (step_i, step) in chain.iter().enumerate() {
+    check_pattern_against_schema(&chain_to_path(chain)?, start)
+        .map_err(|e| MorlocError::Other(format!("walk: {}", e)))
+}
+
+fn chain_to_path(chain: &[WalkStep]) -> Result<Path, MorlocError> {
+    let mut prefix = Vec::with_capacity(chain.len());
+    for step in chain {
         match step {
-            WalkStep::Field(f) => {
-                let field_idx = match f {
-                    FieldStep::Index(i) => *i,
-                    FieldStep::Key(k) => cur.keys.iter().position(|sk| sk == k).ok_or_else(|| {
-                        MorlocError::Other(format!(
-                            "field '{}' not found at step {} during schema inference",
-                            k, step_i
-                        ))
-                    })?,
-                };
-                if field_idx >= cur.parameters.len() {
-                    return Err(MorlocError::Other(format!(
-                        "field index {} out of range at step {} during schema inference",
-                        field_idx, step_i
-                    )));
-                }
-                cur = cur.parameters[field_idx].clone();
+            WalkStep::Field(FieldStep::Index(i)) => {
+                let i = u32::try_from(*i).map_err(|_| {
+                    MorlocError::Other(format!("walk: tuple index {} is out of range", i))
+                })?;
+                prefix.push(LinearStep::TupleIdx(i))
             }
-            WalkStep::BracketIndex => {
-                if cur.serial_type != SerialType::Array {
-                    return Err(MorlocError::Other(format!(
-                        "bracket-index at step {} requires an Array, got {:?}",
-                        step_i, cur.serial_type
-                    )));
-                }
-                if cur.parameters.is_empty() {
-                    return Err(MorlocError::Other(
-                        "Array schema missing element type".into(),
-                    ));
-                }
-                cur = cur.parameters[0].clone();
-            }
-            WalkStep::BracketSlice => {
-                if cur.serial_type != SerialType::Array {
-                    return Err(MorlocError::Other(format!(
-                        "bracket-slice at step {} requires an Array, got {:?}",
-                        step_i, cur.serial_type
-                    )));
-                }
-                // Terminal slice: shape unchanged. Slice with a tail:
-                // broadcast the tail over each element, so the result
-                // becomes `Array<tail_result_from_elem>`.
-                let remaining = &chain[step_i + 1..];
-                if !remaining.is_empty() {
-                    if cur.parameters.is_empty() {
-                        return Err(MorlocError::Other(
-                            "Array schema missing element type at slice broadcast".into(),
-                        ));
-                    }
-                    let elem = cur.parameters[0].clone();
-                    let tail_result = infer_chain_schema(&elem, remaining)?;
-                    return Ok(array_schema(&tail_result));
-                }
-                // Else: cur stays unchanged (terminal slice).
-            }
-            WalkStep::Group(inner_chains) => {
-                if inner_chains.is_empty() {
-                    // Empty group -> unit / Nil schema.
-                    return Ok(Schema::primitive(SerialType::Nil));
-                }
-                let mut child_schemas = Vec::with_capacity(inner_chains.len());
-                for c in inner_chains {
-                    child_schemas.push(infer_chain_schema(&cur, c)?);
-                }
-                let (width, offsets) = tuple_layout(&child_schemas);
-                return Ok(Schema {
-                    serial_type: SerialType::Tuple,
-                    size: child_schemas.len(),
-                    width,
-                    offsets,
-                    hint: None,
-                    parameters: child_schemas,
-                    keys: Vec::new(),
-                    name: None,
+            WalkStep::Field(FieldStep::Key(k)) => prefix.push(LinearStep::Field(k.clone())),
+            WalkStep::BracketIndex => prefix.push(LinearStep::BracketIndex { arg: None }),
+            WalkStep::BracketSlice => prefix.push(LinearStep::BracketSlice {
+                start: None,
+                stop: None,
+                step: None,
+            }),
+            WalkStep::Group(chains) => {
+                return Ok(Path::Group {
+                    prefix,
+                    children: chains.iter().map(|c| chain_to_path(c)).collect::<Result<_, _>>()?,
                 });
             }
         }
     }
-    Ok(cur)
-}
-
-/// Voidstar tuple layout: each field sits at the natural alignment of
-/// its type, total width is rounded up to the max field alignment.
-/// Mirrors `morloc_runtime_types::schema::calculate_tuple_layout`
-/// (which is private to that crate).
-pub(crate) fn tuple_layout(params: &[Schema]) -> (usize, Vec<usize>) {
-    let mut offsets = Vec::with_capacity(params.len());
-    let mut offset: usize = 0;
-    let mut max_align: usize = 1;
-    for p in params {
-        let a = p.alignment();
-        if a > max_align { max_align = a; }
-        offset = (offset + a - 1) & !(a - 1);
-        offsets.push(offset);
-        offset += p.width;
-    }
-    let width = (offset + max_align - 1) & !(max_align - 1);
-    (width, offsets)
+    Ok(Path::Linear(prefix))
 }
 
 /// Deep-copy a value of the sub-packet, resolving through its space.

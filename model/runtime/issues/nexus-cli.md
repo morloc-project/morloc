@@ -13,6 +13,12 @@
   `daemon_listener_options` (cli.rs:2360) passes because it calls clap's
   `parse` directly and never runs the pre-scan.
 
+- **`view --pattern` side defects.** [reproduced, 0.109.0] A failed `view
+  -o` leaves an empty output file (`print_result_c` writes after
+  `redirect_stdout_to`, dispatch.rs/process.rs). `.(.0;(.1;.0))` does not
+  parse: no item says whether a group may hold a group. `.[i]` on a Str is
+  accepted by the pattern checker and refused by the walker at run time.
+
 - **`-f voidstar` writes a packet labelled as a shared-memory reference.**
   [reproduced, 0.109.0 a2e21e97+dirty] Gap in language/arguments-and-output.md:
   CLI-5 does not say what `-f voidstar` writes, and CLI-1 does not say
