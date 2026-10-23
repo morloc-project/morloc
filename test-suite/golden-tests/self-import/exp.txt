@@ -1,1 +1,3 @@
-Cyclical import dependency in resolveImports
+Import cycle: main -> main
+Import cycle: module .b imports the entry file ./a.loc as .a
+Loading ./lib.loc for the import of .lib defined no module of that name; it declares helper, lib

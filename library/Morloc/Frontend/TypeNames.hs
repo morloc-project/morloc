@@ -79,7 +79,7 @@ resolveTypeNames d = do
         | otherwise = bare m
   result <- DAG.synthesize (resolveModule canonical) rewriteEdge d
   case result of
-    Nothing -> MM.throwSystemError "Cyclic module dependency in type name resolution"
+    Nothing -> MM.throwCompilerBug "the module graph has a cycle after loading"
     Just d' -> return (DAG.mapNode fst d')
   where
     rewriteEdge ::

@@ -96,3 +96,13 @@ Reproduced on 0.109.0 unless marked.
   - Which docstring heads a single-export program's `-h` (it prints the
     module's; cli-zones.asc:95-108 shows the command's).
   - An empty `.loc` builds a program with no commands.
+- **A dotted import of a file that declares several modules fails.**
+  [reproduced, 2026-10-23] MOD-1 allows several modules in a file, but
+  `import .lib` of a lib.loc declaring `helper` and `lib` loads no module
+  named `.lib` (the loader renames a file's module to the import name only
+  when the file declares exactly one). It used to loop forever and is now a
+  load error naming the declared modules. Needs a rule: does `.lib` select
+  the module named `lib` in that file? Related to MOD-5 (open): a file
+  reached under two names is loaded as two modules; importing the entry
+  file is now rejected as a cycle, but no other identity question is
+  settled.

@@ -513,7 +513,7 @@ resolveImports ::
   MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
 resolveImports d0 =
   DAG.synthesize resolveExports resolveEdge d0
-    >>= maybe (MM.throwSystemError "Cyclical import dependency in resolveImports") return
+    >>= maybe (MM.throwCompilerBug "the module graph has a cycle after loading") return
   where
     -- Map every typeclass method name in the DAG to the class that owns it.
     -- Used to produce a targeted diagnostic when a user attempts to selectively
@@ -839,7 +839,7 @@ handleBinops d0 = do
   mayN <- DAG.synthesize updateNode (\e _ _ -> return e) d0
   case mayN of
     (Just e') -> return $ DAG.mapNode (\(e, _, _) -> e) e'
-    Nothing -> error "Unreachable?"
+    Nothing -> MM.throwCompilerBug "the module graph has a cycle after loading"
   where
     updateNode ::
       MVar ->

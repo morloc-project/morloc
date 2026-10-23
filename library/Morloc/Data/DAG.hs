@@ -22,6 +22,7 @@ module Morloc.Data.DAG
   , mapEdge
   , synthesize
   , synthesizeNodes
+  , findCycle
   ) where
 
 import qualified Data.Set as Set
@@ -66,6 +67,26 @@ mapNodeWithKeyM f = Map.mapWithKeyM (\k (n, xs) -> f k n >>= (\n' -> return (n',
 -- | Map a pure function over edge data, leaving nodes unchanged
 mapEdge :: (e1 -> e2) -> DAG k e1 n -> DAG k e2 n
 mapEdge f = Map.map (\(n, xs) -> (n, [(k, f e) | (k, e) <- xs]))
+
+-- | A cycle as the path @[k1, k2, .., k1]@, or 'Nothing' if there is none.
+-- Edges to keys absent from the map are ignored.
+findCycle :: (Ord k) => DAG k e n -> Maybe [k]
+findCycle d = go Set.empty (Map.keys d)
+  where
+    go _ [] = Nothing
+    go done (k : ks) = case visit done [] k of
+      Left cyc -> Just cyc
+      Right done' -> go done' ks
+
+    -- Left: a cycle found; Right: the keys now known to reach no cycle
+    visit done path k
+      | Set.member k done = Right done
+      | k `elem` path = Left (k : reverse (takeWhile (/= k) path) <> [k])
+      | otherwise = case Map.lookup k d of
+          Nothing -> Right done
+          Just (_, xs) -> do
+            done' <- foldlM (\acc (j, _) -> visit acc (k : path) j) done xs
+            return (Set.insert k done')
 
 -- | Like 'synthesize' but keeps original edge data unchanged
 synthesizeNodes ::

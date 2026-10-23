@@ -53,7 +53,7 @@ link :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 link d0 = do
   mayResult <- DAG.synthesizeNodes synth d0
   case mayResult of
-    Nothing -> error "cyclical"
+    Nothing -> MM.throwCompilerBug "the module graph has a cycle after loading"
     (Just _) -> return ()
 
 synth ::

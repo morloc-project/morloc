@@ -39,7 +39,7 @@ import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.ProgramBuilder.Install as Install
 import qualified Morloc.System as MS
-import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
+import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, listDirectory)
 
 {- | Parse a morloc source file and all its imports into a module DAG.
 Recursively discovers and parses imported modules.
@@ -136,7 +136,10 @@ parse f (Code code) = do
         { stateModuleDoc = psModuleDoc mainState
         , stateModuleEpilogues = psModuleEpilogues mainState
         })
-      parseImports mainDag mainState Map.empty Map.empty Map.empty
+      entryPath <- case f of
+        Just path -> Just <$> MM.liftIO (canonicalizePath path)
+        Nothing -> return Nothing
+      parseImports entryPath mainDag mainState Map.empty Map.empty Map.empty
   where
     -- Resolve an import to a file path. Local (.dot) imports are project
     -- files and are never downloaded. A missing bare/namespaced import is
@@ -170,13 +173,14 @@ parse f (Code code) = do
     -- each module's package, absent for the program's own modules; @rw@
     -- holds each renamed import's package root and written name.
     parseImports ::
+      Maybe Path ->
       DAG MVar Import ExprI ->
       PState ->
       Map.Map MVar Path ->
       Map.Map MVar (MVar, Path) ->
       Map.Map MVar (Path, MVar) ->
       MorlocMonad (DAG MVar Import ExprI)
-    parseImports d s m pkgs rw = case unimported of
+    parseImports entryPath d s m pkgs rw = case unimported of
       [] -> do
         -- transfer source positions from parser state into MorlocState
         MM.modify (\st -> st
@@ -188,13 +192,21 @@ parse f (Code code) = do
         case psWarnings s of
           [] -> return ()
           ws -> MM.tell ws
-        return d
+        case MDD.findCycle d of
+          Nothing -> return d
+          Just cyc -> MM.throwSystemError $
+            "Import cycle:" <+> hsep (punctuate " ->" (map pretty cyc))
       ((mainModule, importedModule) : _) -> do
-        when (mainModule == importedModule) . MM.throwSystemError $
-          "Module" <+> pretty importedModule <+> "imports itself"
         importPath <- case Map.lookup importedModule rw of
           Just (root, written) -> Mod.findLocalModuleAt mainModule root written
           Nothing -> resolveImport (Map.lookup mainModule m) mainModule importedModule
+
+        -- Every loaded module is reached from the entry file, so importing
+        -- the entry file closes a cycle.
+        canonPath <- MM.liftIO $ canonicalizePath importPath
+        when (Just canonPath == entryPath) . MM.throwSystemError $
+          "Import cycle: module" <+> pretty mainModule <+> "imports the entry file"
+            <+> pretty importPath <+> "as" <+> pretty importedModule
 
         -- Load the <main>.yaml file associated with the main morloc package file
         moduleConfig <- Config.loadModuleConfig (Just importPath)
@@ -220,7 +232,14 @@ parse f (Code code) = do
                   Nothing -> (d'', [])
                 pkgs' = maybe pkgs (\v -> Map.insert importedModule v pkgs) pkg
                 rw' = Map.union rw (Map.fromList renamed)
-            in parseImports d3 s' (maybe m (\v -> Map.insert importedModule v m) childPath) pkgs' rw'
+            in if Map.member importedModule d3
+                 then parseImports entryPath d3 s' (maybe m (\v -> Map.insert importedModule v m) childPath) pkgs' rw'
+                 else MM.throwSystemError $
+                   "Loading" <+> pretty importPath <+> "for the import of" <+> pretty importedModule
+                     <+> "defined no module of that name;"
+                     <+> case newModules d d' of
+                           [] -> "every module it declares was already loaded"
+                           ms -> "it declares" <+> hsep (punctuate "," (map pretty ms))
       where
         -- all modules that have already been parsed
         parsed = Map.keysSet d
@@ -250,6 +269,9 @@ parse f (Code code) = do
     -- This happens when a local import (".units") parses a file that declares
     -- "module units (...)". We rename the DAG key and the ModE name to match
     -- the import edge target.
+    newModules :: DAG MVar Import ExprI -> DAG MVar Import ExprI -> [MVar]
+    newModules dOld dNew = filter (`Map.notMember` dOld) (Map.keys dNew)
+
     reconcileModuleName :: MVar -> DAG MVar Import ExprI -> DAG MVar Import ExprI -> DAG MVar Import ExprI
     reconcileModuleName importName dOld dNew =
       case newKeys of
