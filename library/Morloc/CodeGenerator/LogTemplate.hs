@@ -52,6 +52,7 @@ import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
+import Morloc.Frontend.Rename (displayName)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Version as MV
 
@@ -150,9 +151,7 @@ renderOne lang programDefault names srcMap (midx, cfg) = do
       groupTxt = case manifoldConfigLabel cfg of
         Just g -> g
         Nothing -> ""
-      nameTxt = case Map.lookup (fromMaybe midx (manifoldConfigLabelIdx cfg)) names of
-        Just (EV t) -> t
-        Nothing -> ""
+      nameTxt = labelName names cfg midx
       benchKey
         | manifoldConfigBenchmark cfg == Just True =
             Just (T.intercalate "\t" [groupTxt, nameTxt, langName lang])
@@ -191,21 +190,18 @@ mergeTemplates perLabel program builtin =
     orElse j@(Just _) _ = j
     orElse Nothing y = y
 
--- | Static placeholder bindings for a labeled midx. The labeled idx
--- (the original VarE position, set by 'collectTags' in
--- 'manifoldConfigLabelIdx') is preferred over the manifold midx for
--- source-position lookups, because label propagation can have moved
--- the config to a different midx whose source position is the AppS
--- rather than the labeled reference.
+-- | Static placeholder bindings for a labeled midx, read at the labeled
+-- reference ('manifoldConfigLabelIdx') rather than at the manifold.
+-- | The name a label is written on, as the user wrote it.
+labelName :: Map Int EVar -> ManifoldConfig -> Int -> Text
+labelName names cfg midx =
+  maybe "" (unEVar . displayName) (Map.lookup (fromMaybe midx (manifoldConfigLabelIdx cfg)) names)
+
 staticBindings ::
   Lang -> Map Int EVar -> Map Int SrcLoc -> ManifoldConfig -> Int -> [(Text, Text)]
 staticBindings lang names srcMap cfg midx =
-  let labelIdx = case manifoldConfigLabelIdx cfg of
-        Just i -> i
-        Nothing -> midx
-      nameTxt = case Map.lookup labelIdx names of
-        Just (EV t) -> t
-        Nothing -> ""
+  let labelIdx = fromMaybe midx (manifoldConfigLabelIdx cfg)
+      nameTxt = labelName names cfg midx
       srcInfo = case Map.lookup labelIdx srcMap of
         Just (SrcLoc path ln col _ _) ->
           [ ("module", maybe "" T.pack path)

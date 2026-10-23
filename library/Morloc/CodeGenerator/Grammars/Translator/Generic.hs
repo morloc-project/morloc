@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Generic
   , preprocess
   , CodegenManifest (..)
   , printProgram
+  , manifoldName
   ) where
 
 import qualified Data.Aeson as Aeson
@@ -111,9 +112,10 @@ translateBuiltin lang desc srcs es = do
   let preambleDocs = map (substitutePreamble home lib state opt homeDir) preambleTemplates
 
   debugInfo <- makeManifoldDebugInfoLookup
+  traceInfo <- makeTraceLabelLookup
   debugMode <- gets stateDebugTrace
   let (mDocs, schemas) = runIndex 0 $ do
-        docs <- mapM (translateSegment desc srcNamer debugInfo debugMode) es
+        docs <- mapM (translateSegment desc srcNamer debugInfo traceInfo debugMode) es
         tbl <- getSchemaTable
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
@@ -168,9 +170,10 @@ translateExternal cmd lang desc srcs es = do
           else \src -> pretty (srcName src)
 
   debugInfo <- makeManifoldDebugInfoLookup
+  traceInfo <- makeTraceLabelLookup
   debugMode <- gets stateDebugTrace
   let (mDocs, schemas) = runIndex 0 $ do
-        docs <- mapM (translateSegment desc srcNamer debugInfo debugMode) es
+        docs <- mapM (translateSegment desc srcNamer debugInfo traceInfo debugMode) es
         tbl <- getSchemaTable
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
@@ -328,10 +331,6 @@ translateSource desc p = do
   unless exists . MM.throwSystemError $
     "Source file not found:" <+> pretty p
   let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
-      -- For languages whose import is resolved relative to the pool FILE
-      -- (Julia's `include`), reach the source root: the pool sits at
-      -- <root>/<key>-build/pools/<lang>/, so sources are three levels up.
-      p'' = if ldIncludeRelToFile desc then "../../../" <> p' else p'
   if ldQualifiedImports desc
     then do
       lib <- MT.pack <$> asks MC.configLibrary
@@ -350,7 +349,7 @@ translateSource desc p = do
           ]
     else do
       let tmpl = ldImportTemplate desc
-      return . pretty $ substituteT tmpl [("path", p'')]
+      return . pretty $ substituteT tmpl [("path", p')]
 
 -- | Prefix for the pool-side name a sourced file is bound to.
 --
@@ -403,12 +402,17 @@ translateSegment ::
   LangDescriptor ->
   (Source -> MDoc) ->
   (Int -> (Text, Text)) ->
+  (Int -> Maybe (Text, Text)) ->
   Bool ->
   SerialManifold ->
   IndexM MDoc
-translateSegment desc srcNamer debugInfo debugMode m0 =
-  let cfg = genericLowerConfig desc srcNamer debugInfo debugMode
+translateSegment desc srcNamer debugInfo traceInfo debugMode m0 =
+  let cfg = genericLowerConfig desc srcNamer debugInfo traceInfo debugMode
    in renderPoolDocs <$> foldWithSerialManifoldM (defaultFoldRules cfg) m0
+
+-- | The name of a manifold's function in a descriptor's language.
+manifoldName :: LangDescriptor -> Int -> MDoc
+manifoldName desc i = pretty (ldManifoldPrefix desc) <> viaShow i
 
 -- | Build a LowerConfig from a LangDescriptor, a source-name function,
 -- and a manifold debug-info lookup (precomputed from 'stateName' and
@@ -418,9 +422,10 @@ genericLowerConfig ::
   LangDescriptor ->
   (Source -> MDoc) ->
   (Int -> (Text, Text)) ->
+  (Int -> Maybe (Text, Text)) ->
   Bool ->
   LowerConfig IndexM
-genericLowerConfig desc srcNamer debugInfo debugMode = cfg
+genericLowerConfig desc srcNamer debugInfo traceInfo debugMode = cfg
   where
     -- Shared arg-schema list + result-schema doc for the two reflect hooks;
     -- mlc_reflect and mlc_reflect_from_tuple differ only in whether the wire
@@ -433,6 +438,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcOperator = infixOperator
         , lcApplySrcGroup = \f as -> f <+> tupled as
         , lcSourcedArg = \_ _ _ x -> x
+        , lcConstArg = \_ _ x -> x
         , lcOwnership = \_ -> return Owned
         , lcArgManifoldOwnership = \_ -> return Owned
         , lcBindCallArgs = ldLazyArgs desc
@@ -479,7 +485,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
             if ldEnumLitByName desc
               then parens (subj <> "[[1]]" <+> "==" <+> dquotes (pretty n))
               else parens (parens subj <> "[0]" <+> "==" <+> dquotes (pretty n))
-        , lcCtorField = \_ _ _ i subj ->
+        , lcCtorField = \_ _ _ _ i subj ->
             if ldEnumLitByName desc
               -- R indexes from one, so a field's position is its wire index
               -- plus one; the wire index is what the compiler carries.
@@ -494,6 +500,17 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
             if ldEnumLitByName desc
               then parens (subj <+> "==" <+> dquotes (pretty n))
               else parens (subj <+> "==" <+> pretty i)
+        , lcListLenTest = \subj n ->
+            if MT.null (ldListLengthTemplate desc)
+              then error $ "language " <> MT.unpack (ldName desc)
+                     <> " declares no ldListLengthTemplate, so it cannot match a list pattern"
+              else parens
+                (pretty (substituteT (ldListLengthTemplate desc) [("expr", render subj)])
+                  <+> "==" <+> pretty n)
+        , lcListElem = \_ subj i -> case ldIndexStyle desc of
+            ZeroBracket -> parens subj <> "[" <> pretty i <> "]"
+            OneBracket -> parens subj <> "[" <> pretty (i + 1) <> "]"
+            OneDoubleBracket -> parens subj <> "[[" <> pretty (i + 1) <> "]]"
         , lcCoerceOptional = id
         , lcTypeOf = \_ -> return Nothing
         , lcSerialAstType = \_ -> return Nothing
@@ -515,6 +532,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcPrintExpr = genericPrintExpr desc
         , lcPrintStmt = genericPrintStmt desc
         , lcEvalPattern = \t p xs -> return $ genericEvalPattern desc t p xs
+        , lcTakeGetter = \_ _ _ -> return Nothing
         , lcListConstructor = \v _ es -> case ldListStyle desc of
             BracketList -> list es
             FunctionCallList -> pretty (ldGenericListFn desc) <> tupled es
@@ -530,12 +548,17 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
               defaultValue
                 { poolExpr =
                     pretty (ldRecordConstructor desc)
-                      <> tupled [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> v | (k, v) <- rs]
+                      <> tupled [pretty k <+> "=" <+> v | (k, v) <- rs]
                 }
+        , lcTakeSetter = \_ _ _ _ -> return Nothing
+        , lcKeepContextArg = \_ _ _ _ v -> return v
+        , lcKeepCallArg = \_ _ _ v -> return v
+        , lcKeepSlot = \_ _ v -> return v
+        , lcKeepElem = \_ v -> return v
         , lcStoreField = \_ v -> return v
         , lcApplyClosure = \callee args -> callee <> tupled args
         , lcPapply = \_ _ callee args ->
-            return $ "mlc_papply" <> tupled
+            return $ pool desc "mlc_papply" <> tupled
               [ callee
               , case ldListStyle desc of
                   BracketList -> list args
@@ -552,6 +575,8 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcCacheBody = genericCacheBody desc cfg
         , lcDebugWrap = genericDebugWrap desc cfg debugInfo
         , lcMakeIf = genericMakeIf desc cfg
+        , lcShortCircuit = \isAnd a b ->
+            a <+> pretty (if isAnd then ldAndOp desc else ldOrOp desc) <+> b
         , lcMakeLoop = genericMakeLoop desc cfg
         , lcMakeLet = \namer i _ _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
@@ -559,9 +584,12 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         -- nothing to hold back.
         , lcReleaseBorrowedStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
+        , lcFrameReturn = \_ _ _ _ -> return Nothing
         , lcDupPacket = id
         , lcOwnedArg = \e -> if T.null (ldOwnedArgFn desc) then e else pretty (ldOwnedArgFn desc) <> "(" <> e <> ")"
+        , lcLoopBorrow = \_ _ -> return Nothing
         , lcLoopLetRhs = \_ _ d -> return d
+        , lcLetRhs = \_ _ d -> return d
         , lcOwnPacketDecl = \v e ->
             if T.null (ldOwnedArgFn desc)
               then Nothing
@@ -571,14 +599,14 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcSerialize = defaultSerialize cfg
         , lcDeserialize = \_ -> defaultDeserialize cfg
         , lcReifyClosure = \v _ ->
-            return $ "mlc_reify" <> tupled [v, dquotes (pretty (ldName desc))]
+            return $ pool desc "mlc_reify" <> tupled [v, dquotes (pretty (ldName desc))]
         , lcReflectClosure = \pkt s ->
             case s of
               SerialClosure ins out ->
                 let tupleSchema = render (Serial.serialAstToMsgpackSchema s)
                     (argListDoc, resDoc) = reflectSchemas ins out
                  in return $
-                      "mlc_reflect"
+                      pool desc "mlc_reflect"
                         <> tupled [pkt, dquotes (pretty tupleSchema), argListDoc, resDoc]
               _ -> error "lcReflectClosure: expected SerialClosure"
         , lcReflectClosureParsed = \tup s ->
@@ -586,7 +614,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
               SerialClosure ins out ->
                 let (argListDoc, resDoc) = reflectSchemas ins out
                  in return $
-                      "mlc_reflect_from_tuple" <> tupled [tup, argListDoc, resDoc]
+                      pool desc "mlc_reflect_from_tuple" <> tupled [tup, argListDoc, resDoc]
               _ -> error "lcReflectClosureParsed: expected SerialClosure"
         -- A language that supports producing crossing closures (a non-empty
         -- 'ldClosureRegisterEntry', i.e. Python and R) reifies/reflects a closure
@@ -594,7 +622,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         -- engine -- its dict/list records are structural, so all shapes divert.
         , lcDivertNestedClosure =
             \s -> not (T.null (ldClosureRegisterEntry desc)) && containsClosure s
-        , lcMakeFunction = \m mname args _ priorLines body headForm ->
+        , lcMakeFunction = \m mname args _ priorLines body headForm _ ->
             let makeExt (Just HeadManifoldFormRemoteWorker) = "_remote"
                 makeExt _ = ""
                 fullName = render (mname <> makeExt headForm)
@@ -610,13 +638,14 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                 -- In --debug mode DebugWrapS wraps every manifold body
                 -- and the drain provides the traceback; emitting an
                 -- "at" line here too would double every frame.
+                -- Only a call of a named function is a frame of the trace
+                -- (DIAG-5); any other manifold gets no handler.
                 wrapError xs
                   | debugMode = xs
-                  | otherwise =
+                  | Nothing <- traceInfo m = xs
+                  | Just (nameOut, srclocStr) <- traceInfo m =
                       let openLine = ldErrorWrapOpen desc
                           closeLines = ldErrorWrapClose desc
-                          (userName, srclocStr) = debugInfo m
-                          nameOut = if T.null userName then "_" else userName
                           srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
                           substs =
                             [ ("name", nameOut)
@@ -632,20 +661,28 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                                     nest 4 . vsep $
                                       map (\l -> pretty $ substituteT l substs) closeLines
                                in [vsep [tryBlock, exceptBlock]]
-             in return . Just $ case ldBlockStyle desc of
+                -- A language that reads its trace from the call stack labels
+                -- each named function once, where it is defined (EMIT-3).
+                frameLabel = case traceInfo m of
+                  Just (nameOut, srclocStr)
+                    | not debugMode, not (T.null (ldFrameLabelStmt desc)) ->
+                        let srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
+                            label = nameOut <> " [" <> ldName desc <> "] (mid=" <> MT.pack (show m) <> srclocSuffix <> ")"
+                            esc = T.replace "\"" "\\\"" . T.replace "\\" "\\\\"
+                         in [pretty (substituteT (ldFrameLabelStmt desc) [("fname", fullName), ("label", esc label)])]
+                  _ -> []
+             in return . Just . vsep . (: frameLabel) $ case ldBlockStyle desc of
                   IndentBlock ->
                     nest 4 (vsep [header, vsep (wrapError (priorLines <> [body]))])
                   BraceBlock ->
                     block 4 header (vsep $ wrapError (priorLines <> [body]))
-                  EndKeywordBlock ->
-                    let endKw = ldBlockEnd desc
-                     in vsep [header, indent 4 (vsep $ wrapError (priorLines <> [body])), pretty endKw]
         , lcClosureSig = \_ -> return ""
-        , lcMakePass = \_sig _ mname _ ->
+        , lcManifoldName = manifoldName desc
+        , lcMakePass = \m _sig _ mname _ ->
             return . pretty $
               substituteT (ldPassTemplate desc)
-                [("fn", render mname), ("mid", T.drop 1 (render mname))]
-        , lcMakeLambda = \_sig _ mname contextArgs boundArgs ->
+                [("fn", render mname), ("mid", T.pack (show m))]
+        , lcMakeLambda = \m _sig _ mname contextArgs boundArgs ->
             let ctxNames = map argNamer contextArgs
                 bndNames = map argNamer boundArgs
                 tmpl = ldPartialTemplate desc
@@ -655,11 +692,10 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                 fnWithCtx = render (hsep (punctuate "," fnWithCtxList))
                 allArgs = render (hsep (punctuate "," allArgsList))
                 boundArgsText = render (hsep (punctuate "," bndNames))
-                -- manNamer is "m<mid>", so the mid is the name minus its leading
-                -- "m". {{mid}} and {{captured_list}} let a language that cannot
+                -- {{mid}} and {{captured_list}} let a language that cannot
                 -- introspect its closures (R) tag them with their manifold id and
                 -- captured values at construction, for later reification.
-                midText = T.drop 1 (render mname)
+                midText = T.pack (show m)
                 -- Each context value bound again in the closure's own scope,
                 -- for a language whose closures capture names rather than
                 -- values (R): a later rebinding of the name, as a loop
@@ -702,9 +738,9 @@ genericRecordAccessor desc namType _constructor record field
 -- for languages whose container literals are 1-based.
 genericSchemaRef :: LangDescriptor -> Int -> MDoc
 genericSchemaRef desc sid = case ldIndexStyle desc of
-  ZeroBracket -> "mlc_schema_table[" <> pretty sid <> "]"
-  OneBracket -> "mlc_schema_table[" <> pretty (sid + 1) <> "]"
-  OneDoubleBracket -> "mlc_schema_table[[" <> pretty (sid + 1) <> "]]"
+  ZeroBracket -> pool desc "mlc_schema_table" <> "[" <> pretty sid <> "]"
+  OneBracket -> pool desc "mlc_schema_table" <> "[" <> pretty (sid + 1) <> "]"
+  OneDoubleBracket -> pool desc "mlc_schema_table" <> "[[" <> pretty (sid + 1) <> "]]"
 
 -- | Wrap a labeled manifold's body in a cache check. The body's
 -- serialized result is what lands on disk, so cross-pool and
@@ -778,13 +814,6 @@ genericCacheBody desc cfg resSa lbl midx args bodyPool = do
           , indent 4 (vsep missLines)
           , "}"
           ]
-        EndKeywordBlock -> vsep
-          [ "if" <+> condE
-          , indent 4 (vsep hitLines)
-          , "else"
-          , indent 4 (vsep missLines)
-          , "end"
-          ]
       priorLines = serializeStmts ++ [keyCompute, cacheLookup, ifBlock]
   return $ defaultValue
     { poolExpr = resultVar
@@ -792,6 +821,7 @@ genericCacheBody desc cfg resSa lbl midx args bodyPool = do
     , poolCompleteManifolds = poolCompleteManifolds bodyPool
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
+    , poolBorrowedLocal = Nothing
     }
 
 -- | Debug-trace wrap. Wraps the manifold body in a per-language
@@ -868,26 +898,13 @@ genericDebugWrap desc cfg debugInfo midx args bodyPool = do
           , indent 4 "stop(" <> excVar <> ")"
           , "})"
           ]
-        EndKeywordBlock -> vsep
-          -- No supported lang uses EndKeyword for try/catch today;
-          -- placeholder mirroring Ruby/Lua idioms.
-          [ "begin"
-          , indent 4 (vsep (poolPriorLines bodyPool
-              ++ [resultVar <+> assign <+> poolExpr bodyPool]))
-          , "rescue" <+> excVar
-          , indent 4 "begin"
-          , indent 8 (vsep catchStmts)
-          , indent 4 "rescue"
-          , indent 4 "end"
-          , indent 4 "raise"
-          , "end"
-          ]
   return $ defaultValue
     { poolExpr = resultVar
     , poolPriorLines = [catchBlock]
     , poolCompleteManifolds = poolCompleteManifolds bodyPool
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
+    , poolBorrowedLocal = Nothing
     }
 
 -- | For a single cache arg produce: (the packet expression, the
@@ -929,16 +946,19 @@ genericRemoteCall desc socketFile mid res args = do
             , ("cpus", resCPU)
             , ("gpus", resGPU)
             ]
+      argsDoc = case ldListStyle desc of
+        BracketList -> list args
+        _ -> pretty (ldGenericListFn desc) <> tupled args
       call =
         remoteFn
-          <> tupled [pretty mid, dquotes socketFile, dquotes ".morloc-cache", resPacked, list args]
+          <> tupled
+            [ pretty mid <> pretty (ldForeignCallIntSuffix desc)
+            , dquotes socketFile
+            , dquotes ".morloc-cache"
+            , resPacked
+            , argsDoc
+            ]
   return $ defaultValue {poolExpr = call}
-
--- | Format a record key: bare identifier or quoted string
-makeRecordKey :: LangDescriptor -> Key -> MDoc
-makeRecordKey desc k
-  | ldQuoteRecordKeys desc = dquotes (pretty k)
-  | otherwise = pretty k
 
 makeGenericSocketPath :: LangDescriptor -> MDoc -> MDoc
 makeGenericSocketPath desc socketFileBasename =
@@ -972,15 +992,6 @@ genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
             , indent 4 (vsep elseBlock)
             , "}"
             ]
-        EndKeywordBlock ->
-          let endKw = ldBlockEnd desc
-           in vsep
-                [ v <+> "<-" <+> "if" <+> parens condE <+> "{"
-                , indent 4 (vsep (poolPriorLines thenDocs <> [thenE]))
-                , "} else {"
-                , indent 4 (vsep (poolPriorLines elseDocs <> [elseE]))
-                , "}" <+> pretty endKw
-                ]
   return $
     PoolDocs
       { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds thenDocs <> poolCompleteManifolds elseDocs
@@ -988,6 +999,7 @@ genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
       , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
       , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
+      , poolBorrowedLocal = Nothing
       }
 
 -- Native tail-loop assembly. Walks the 'LoopBody' decision tree, emitting
@@ -1004,9 +1016,10 @@ genericMakeLoop ::
   LowerConfig IndexM ->
   LoopResult ->
   [(Int, Maybe PoolDocs)] ->
+  Maybe (LoopBody NativeExpr SerialExpr ()) ->
   LoopBody PoolDocs PoolDocs PoolDocs ->
   IndexM PoolDocs
-genericMakeLoop desc cfg _ carried body = do
+genericMakeLoop desc cfg _ carried _ body = do
   resultIdx <- lcNewIndex cfg
   let resultVar = helperNamer resultIdx
       ids = map fst carried
@@ -1023,6 +1036,7 @@ genericMakeLoop desc cfg _ carried body = do
       , poolPriorLines = initLines <> [resultDecl, whileDoc]
       , poolPriorExprs = concatMap poolPriorExprs leaves
       , poolReturnFlag = True
+      , poolBorrowedLocal = Nothing
       }
   where
     assign = pretty (ldAssignOp desc)
@@ -1051,20 +1065,15 @@ genericMakeLoop desc cfg _ carried body = do
           eLines <- go e
           return $ poolPriorLines guardDocs <> [renderIf (poolExpr guardDocs) tLines eLines]
         sameLocal i d = null (poolPriorLines d) && render (poolExpr d) == render (nvarNamer i)
-    -- Block-style rendering (IndentBlock=py, BraceBlock=r, EndKeywordBlock=julia
-    -- kept for consistency with sibling emitters though gated out today).
+    -- Block-style rendering (IndentBlock=py, BraceBlock=r).
     renderIf g tLines eLines = case ldBlockStyle desc of
       IndentBlock ->
         vsep [nest 4 (vsep (("if" <+> g <> ":") : tLines)), nest 4 (vsep ("else:" : eLines))]
       BraceBlock ->
         vsep ["if" <+> parens g <+> "{", indent 4 (vsep tLines), "} else {", indent 4 (vsep eLines), "}"]
-      EndKeywordBlock ->
-        vsep ["if" <+> g, indent 4 (vsep tLines), "else", indent 4 (vsep eLines), pretty (ldBlockEnd desc)]
     renderWhile bodyLines = case ldBlockStyle desc of
       IndentBlock -> nest 4 (vsep (("while" <+> trueLit <> ":") : bodyLines))
       BraceBlock -> vsep ["while" <+> parens trueLit <+> "{", indent 4 (vsep bodyLines), "}"]
-      EndKeywordBlock -> vsep ["while" <+> trueLit, indent 4 (vsep bodyLines), pretty (ldBlockEnd desc)]
-
 -- Build a suspended do-block thunk. When the thunk form can hold
 -- statements (non-empty ldDoBlockBlock, e.g. an R closure body) the
 -- prior statements are absorbed into that block. When it cannot (empty
@@ -1091,8 +1100,6 @@ genericMakeDoBlock desc cfg _ stmts expr
           retLine = pretty $ substituteT (ldReturnTemplate desc) [("expr", render expr)]
           def = case ldBlockStyle desc of
             BraceBlock -> block 4 header (vsep (stmts <> [retLine]))
-            EndKeywordBlock ->
-              vsep [header, indent 4 (vsep (stmts <> [retLine])), pretty (ldBlockEnd desc)]
             IndentBlock -> nest 4 (vsep [header, vsep (stmts <> [retLine])])
       return ([def], nm)
   where
@@ -1122,6 +1129,7 @@ genericMakeLet desc namer i p1 p2 =
         , poolPriorLines = rs
         , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
         , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
+        , poolBorrowedLocal = Nothing
         }
 
 -- | Generic expression printer driven by descriptor
@@ -1135,7 +1143,14 @@ genericPrintExpr desc = go
     -- A language that does not distinguish its unit from its none
     -- spells both the same way.
     go IUnitLit = pretty (ldNullLiteral desc)
-    go (IIntLit _ i) = viaShow i <> pretty (ldIntLiteralSuffix desc)
+    go (IIntLit t i)
+      | suffixed = viaShow i <> pretty (ldIntLiteralSuffix desc)
+      | Just tmpl <- t >>= (`Map.lookup` ldIntLiteralWide desc) =
+          pretty (T.replace "{{n}}" (T.pack (show i)) tmpl)
+      | otherwise = viaShow i
+      where
+        suffixed = maybe True (`notElem` ldIntLiteralPlainTypes desc) t
+          && maybe True (abs i <=) (ldIntLiteralSuffixLimit desc)
     go (IRealLit _ (RealFinite r)) = viaShow r
     go (IRealLit _ RealPosInf) = pretty (ldRealPosInf desc)
     go (IRealLit _ RealNegInf) = pretty (ldRealNegInf desc)
@@ -1155,7 +1170,7 @@ genericPrintExpr desc = go
       name -> pretty name <> tupled (map go es)
     go (IRecordLit _ _ entries) =
       pretty (ldRecordConstructor desc)
-        <> tupled [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> go e | (k, e) <- entries]
+        <> tupled [pretty k <+> "=" <+> go e | (k, e) <- entries]
     go (IAccess e (IIdx i)) = case ldIndexStyle desc of
       ZeroBracket -> go e <> "[" <> pretty i <> "]"
       OneBracket -> go e <> "[" <> pretty (i + 1) <> "]"
@@ -1204,13 +1219,16 @@ genericPrintExpr desc = go
     go (IIntrinsicHash sid e) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_hash(" <> go e <> ", " <> schemaRef sid <> ")"
+    go (IIntrinsicCompare intr sid a b) =
+      let prefix = ldIntrinsicPrefix desc
+       in "(" <> pretty prefix <> "mlc_compare(" <> go a <> ", " <> go b <> ", " <> schemaRef sid <> ")"
+            <> (if intr == IntrEq then " == 0)" else " <= 0)")
     go (IIntrinsicSave fmt sid level e path) =
       let prefix = ldIntrinsicPrefix desc
           saveFn :: Text
           saveFn = case fmt of
-            "json"     -> "mlc_save_json"
-            "voidstar" -> "mlc_save_voidstar"
-            _          -> "mlc_save"
+            SaveJson     -> "mlc_save_json"
+            SaveVoidstar -> "mlc_save_voidstar"
        in pretty prefix <> pretty saveFn
             <> "(" <> go e
             <> ", " <> schemaRef sid
@@ -1281,7 +1299,7 @@ genericPrintExpr desc = go
        in pretty prefix <> "mlc_open_channel(" <> schemaRef sid <> ")"
     -- The producer is reified by the pool, which alone knows its closures.
     go (IIntrinsicSpawn sid handle fn) =
-      "mlc_spawn(" <> go fn <> ", " <> go handle <> ", " <> schemaRef sid <> ")"
+      pool desc "mlc_spawn" <> "(" <> go fn <> ", " <> go handle <> ", " <> schemaRef sid <> ")"
     go (IIntrinsicSettle handle) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_settle(" <> go handle <> ")"
@@ -1430,14 +1448,6 @@ genericPrintStmt desc = go
             , indent 4 (vsep (map go elseStmts ++ [pretty resultVar <+> pretty (ldAssignOp desc) <+> printE elseExpr <> ";"]))
             , "}"
             ]
-        EndKeywordBlock ->
-          vsep
-                [ pretty resultVar <+> "<-" <+> "if" <+> parens (printE condExpr) <+> "{"
-                , indent 4 (vsep (map go thenStmts ++ [printE thenExpr]))
-                , "} else {"
-                , indent 4 (vsep (map go elseStmts ++ [printE elseExpr]))
-                , "}"
-                ]
     go (IIfNotNull resultVar _ source unwrapVar _ bodyStmts bodyExpr) =
       let srcVar = unwrapVar <> "_src"
           srcDoc = pretty srcVar
@@ -1464,15 +1474,6 @@ genericPrintStmt desc = go
                 , pretty resultVar <+> pretty (ldAssignOp desc) <+> pretty (ldNullLiteral desc) <> ";"
                 , "if" <+> parens condDoc <+> "{"
                 , indent 4 (vsep (bindUnwrap <> ";" : map go bodyStmts ++ [pretty resultVar <+> pretty (ldAssignOp desc) <+> printE bodyExpr <> ";"]))
-                , "}"
-                ]
-            EndKeywordBlock ->
-              vsep
-                [ srcBind
-                , pretty resultVar <+> "<-" <+> "if" <+> parens condDoc <+> "{"
-                , indent 4 (vsep (bindUnwrap : map go bodyStmts ++ [printE bodyExpr]))
-                , "} else {"
-                , indent 4 (pretty (ldNullLiteral desc))
                 , "}"
                 ]
     go (IFunDef _ _ _ _) = error "IFunDef not yet implemented for generic printer"
@@ -1569,21 +1570,22 @@ printProgram desc prog =
     logRebindings
       | T.null (ldLogWrap desc) = []
       | otherwise =
-          [ manNamer i <+> pretty (ldAssignOp desc) <+> wrapFn desc
+          [ manifoldName desc i <+> pretty (ldAssignOp desc) <+> wrapFn desc
               <> tupled
                 [ quoteString (renderedGroup tmpl)
                 , quoteOrNone (renderedStart tmpl)
                 , quoteOrNone (renderedPass tmpl)
                 , quoteOrNone (renderedFail tmpl)
                 , quoteOrNone (renderedBenchKey tmpl)
-                , manNamer i
+                , manifoldName desc i
                 ]
           | (i, tmpl) <- Map.toAscList (ipLogTemplates prog)
           ]
 
-    -- The wrap helper name varies per language (Python: @__mlc_wrap_log@;
-    -- R: @.mlc_wrap_log@). The 'ldLogWrap' field carries the bare helper
-    -- name; an empty string opts the language out of logging.
+    -- The wrap helper varies per language (Python: @__mlc_wrap_log@; R:
+    -- @.__morloc$.mlc_wrap_log@). The 'ldLogWrap' field carries the helper as
+    -- generated code refers to it; an empty string opts the language out of
+    -- logging.
     wrapFn :: LangDescriptor -> MDoc
     wrapFn d = pretty (ldLogWrap d)
 
@@ -1611,7 +1613,7 @@ printProgram desc prog =
         renderEntry :: Text -> DispatchEntry -> MDoc
         renderEntry entryTmpl (DispatchEntry i _ _) =
           pretty $
-            substituteT entryTmpl [("mid", T.pack (show i)), ("name", render (manNamer i))]
+            substituteT entryTmpl [("mid", T.pack (show i)), ("name", render (manifoldName desc i))]
 
         localD =
           let hdr = ldDispatchLocalHeader desc
@@ -1698,7 +1700,7 @@ genericEvalPattern desc t0 (PatternStruct s0) (m0 : xs0) =
     makeRecord (NamF _ _ _ rs) xs =
       pretty (ldRecordConstructor desc)
         <> tupled
-          [makeRecordKey desc k <+> pretty (ldRecordSeparator desc) <+> x | (k, x) <- zip (map fst rs) xs]
+          [pretty k <+> "=" <+> x | (k, x) <- zip (map fst rs) xs]
     makeRecord _ _ = error "Incorrectly typed record setter"
 
     accessTuple _ m i = case ldIndexStyle desc of
@@ -1772,13 +1774,17 @@ pyTuple xs = tupled xs
 -- a function whose result is a suspension is described all the way down.
 codecDoc :: LangDescriptor -> SerialAST -> MDoc
 codecDoc desc s@(SerialClosure ins out) =
-  "mlc_closure_codec"
+  pool desc "mlc_closure_codec"
     <> tupled
       [ dquotes (pretty (render (Serial.serialAstToMsgpackSchema s)))
       , codecList desc (map (codecDoc desc) ins)
       , codecDoc desc out
       ]
 codecDoc _ s = dquotes (pretty (render (Serial.serialAstToMsgpackSchema s)))
+
+-- | A name the pool runtime defines, as generated code refers to it.
+pool :: LangDescriptor -> Text -> MDoc
+pool desc name = pretty (ldPoolQualifier desc <> name)
 
 -- | A list of codecs in the language's own list style.
 codecList :: LangDescriptor -> [MDoc] -> MDoc

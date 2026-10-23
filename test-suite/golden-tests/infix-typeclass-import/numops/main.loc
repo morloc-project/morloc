@@ -12,11 +12,9 @@ infixl 4 >=
 
 source Py from "ops.py"
   ( "morloc_not" as not
-  , "morloc_and" as (&&)
   , "morloc_if" as ifelse
   )
 not :: Bool -> Bool
-(&&) :: Bool -> Bool -> Bool
 ifelse :: Bool -> a -> a -> a
 
 (<) :: a -> a -> Bool

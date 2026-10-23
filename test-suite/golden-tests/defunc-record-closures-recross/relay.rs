@@ -1,3 +1,3 @@
-pub fn forward(fs: &Vec<std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>>>) -> Vec<std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>>> {
+pub fn forward(fs: &Vec<std::sync::Arc<dyn Fn(&i64) -> i64 + Send + Sync>>) -> Vec<std::sync::Arc<dyn Fn(&i64) -> i64 + Send + Sync>> {
     fs.clone()
 }

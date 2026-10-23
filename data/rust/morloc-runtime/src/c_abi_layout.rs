@@ -157,7 +157,8 @@ mod tests {
             | "morloc_serial_type"
             | "morloc_expression_type"
             | "morloc_app_expression_type"
-            | "morloc_pattern_type" => (4, 4),
+            | "morloc_pattern_type"
+            | "daemon_method_t" => (4, 4),
             // A composite embedded by value: measure it from the header too.
             _ => match aggregate_of(ty) {
                 (Kind::Union, body) => union_layout(&body),
@@ -209,6 +210,12 @@ mod tests {
             return (format!("__anon:{size}:{align}"), name);
         }
         let decl = decl.trim();
+        // A function pointer, `ret (*name)(args)`, is pointer-sized.
+        if let Some(star) = decl.find("(*") {
+            let rest = &decl[star + 2..];
+            let name = &rest[..rest.find(')').expect("a function pointer names its field")];
+            return ("void*".to_string(), name.trim().to_string());
+        }
         let split = decl
             .rfind(|c: char| c.is_whitespace() || c == '*')
             .expect("field declaration must have a type and a name");
@@ -352,6 +359,20 @@ mod tests {
     }
 
     #[test]
+    fn fork_pool_config_matches_the_header() {
+        use crate::fork_pool::ForkPoolConfig;
+        assert_same_layout!(ForkPoolConfig, "morloc_fork_pool_s", [
+            lang => "lang",
+            ctx => "ctx",
+            fork => "fork",
+            worker_init => "worker_init",
+            serve => "serve",
+            before_retire => "before_retire",
+            worker_exit => "worker_exit",
+        ]);
+    }
+
+    #[test]
     fn manifest_structs_match_the_header() {
         assert_same_layout!(ManifestBuild, "manifest_build_t", [
             path => "path",
@@ -417,6 +438,7 @@ mod tests {
             description => "description",
             render => "render",
             default => "is_default",
+            kind => "kind",
         ]);
         assert_same_layout!(ManifestCommand, "manifest_command_t", [
             name => "name",
@@ -438,6 +460,30 @@ mod tests {
             terminals => "terminals",
             n_terminals => "n_terminals",
             internal => "internal",
+            streams => "streams",
+        ]);
+        assert_same_layout!(crate::http_ffi::DaemonRequest, "daemon_request_t", [
+            id => "id",
+            method => "method",
+            command => "command",
+            args_json => "args_json",
+            expr => "expr",
+            name => "name",
+            render => "render",
+            media => "media",
+            render_default => "render_default",
+        ]);
+        assert_same_layout!(crate::daemon_ffi::DaemonResponse, "daemon_response_t", [
+            id => "id",
+            success => "success",
+            error_kind => "error_kind",
+            result_json => "result_json",
+            error => "error",
+            result_bytes => "result_bytes",
+            result_len => "result_len",
+            mime => "mime",
+            action => "action",
+            result_text => "result_text",
         ]);
         assert_same_layout!(ManifestService, "manifest_service_t", [
             stype => "stype",
@@ -458,6 +504,7 @@ mod tests {
             service => "service",
             metadata_json => "metadata_json",
             unsafe_skip_null_check => "unsafe_skip_null_check",
+            rust => "rust",
         ]);
     }
 
@@ -503,6 +550,10 @@ mod tests {
             func => "func",
             list => "list",
         ]);
+        assert_same_layout!(MorlocListLenTestExpression, "morloc_list_len_test_expression_s", [
+            subject => "subject",
+            length => "length",
+        ]);
         assert_same_layout!(MorlocIfExpression, "morloc_if_expression_s", [
             cond => "cond",
             then_branch => "then_branch",
@@ -542,16 +593,16 @@ mod tests {
         let expr = header_enum_variants("morloc_expression_type");
         assert_eq!(
             expr.len(),
-            MorlocExpressionType::CtorMake as usize + 1,
+            MorlocExpressionType::LessEq as usize + 1,
             "morloc.h names {} expression types, the Rust enum has {}: {:?}",
             expr.len(),
-            MorlocExpressionType::CtorMake as usize + 1,
+            MorlocExpressionType::LessEq as usize + 1,
             expr
         );
         assert_eq!(expr.first().map(String::as_str), Some("MORLOC_X_DAT"));
         assert_eq!(
             expr.last().map(String::as_str),
-            Some("MORLOC_X_CTOR_MAKE")
+            Some("MORLOC_X_LESS_EQ")
         );
 
         let pat = header_enum_variants("morloc_pattern_type");

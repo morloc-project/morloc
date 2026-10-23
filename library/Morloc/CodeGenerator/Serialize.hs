@@ -264,8 +264,6 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           condNe <- nativeExpr m cond
           LoopIf condNe <$> go thenB <*> go elseB
         go (MonoReturn e) = go e
-        -- Descend a do-block on the continue path: its inner binds (per-iteration
-        -- effects) become loop-body lets emitted before the continue reassignment.
         go (MonoLoopContinue args)
           | length args == length ids = LoopContinue <$> mapM (nativeExpr m) args
           | otherwise = error $
@@ -299,24 +297,72 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       Int ->
       MonoExpr ->
       MorlocMonad NativeArg
-    nativeArg _ e@(MonoManifold m _ _ _) = do
-      ne <- nativeExpr m e
+    nativeArg p e@MonoManifold {} = do
+      ne <- nativeExpr p e
       case ne of
         (ManN nm) -> return $ NativeArgManifold nm
-        _ -> error "Unreachable?"
+        _ -> return $ NativeArgExpr ne
     nativeArg _ MonoPoolCall {} = error "This step should be unreachable"
     nativeArg _ (MonoExe _ _) = error "This step should be unreachable"
     nativeArg _ (MonoReturn _) = error "Return should not happen here (really I should remove this term completely)"
     nativeArg m e = NativeArgExpr <$> nativeExpr m e
 
+    -- A manifold written as a function of its own.
+    ownManifold :: Int -> ManifoldForm (Or TypeS TypeF) TypeF -> MonoExpr -> MorlocMonad NativeExpr
+    ownManifold m form' e = do
+      ne <- nativeExpr m e
+      return . ManN $ NativeManifold m lang form' ne
+
     nativeExpr ::
       Int ->
       MonoExpr ->
       MorlocMonad NativeExpr
-    nativeExpr _ (MonoManifold m form _ e) = do
-      ne <- nativeExpr m e
+    nativeExpr p (MonoManifold m form kind e) = do
       form' <- abimapM (\i _ -> contextArg i) (\i _ -> boundArg i) form
-      return . ManN $ NativeManifold m lang form' ne
+      named <- Map.member m <$> MM.gets stateName
+      debugMode <- MM.gets stateDebugTrace
+      -- EMIT-1: an application that is not a call of a named function, a
+      -- closure or labeled is written where it is used, in its caller's
+      -- code, rather than as a function of its own.
+      case stripReturn e of
+        Just body
+          | kind == Transparent
+          , not (isClosureForm form)
+          , not named
+          , not debugMode
+          , all (\(Arg _ t) -> hasNative t) (manifoldContext form')
+          , inlinable body -> nativeExpr p body
+        _ -> ownManifold m form' e
+      where
+        hasNative (L _) = False
+        hasNative _ = True
+        stripReturn (MonoReturn x) = Just x
+        stripReturn (MonoLet i a b) = MonoLet i a <$> stripReturn b
+        stripReturn (MonoIf c t f) = MonoIf c <$> stripReturn t <*> stripReturn f
+        stripReturn _ = Nothing
+        -- The forms written in place: ones whose code needs nothing of the
+        -- manifold boundary (a pool call, loop, suspension or wrap does).
+        inlinable x = case x of
+          MonoApp (MonoExe _ _) xs -> all inlinable xs
+          MonoApp (MonoLetVar _ _) xs -> all inlinable xs
+          MonoManifold _ _ _ b -> inlinable b
+          MonoReturn b -> inlinable b
+          MonoLet _ a b -> inlinable a && inlinable b
+          MonoIf c t f -> all inlinable [c, t, f]
+          MonoList _ _ xs -> all inlinable xs
+          MonoTuple _ xs -> all (inlinable . snd) xs
+          MonoRecord _ _ _ rs -> all (inlinable . snd . snd) rs
+          MonoCoerce _ _ b -> inlinable b
+          MonoBndVar {} -> True
+          MonoLetVar {} -> True
+          MonoExe {} -> True
+          MonoLog {} -> True
+          MonoReal {} -> True
+          MonoInt {} -> True
+          MonoStr {} -> True
+          MonoNull {} -> True
+          MonoEnum {} -> True
+          _ -> False
     nativeExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to NativeExpr"
     -- The native entry of a loop called from its own pool: native arguments
     -- in, a native value out. The manifold's parameters are read-only, so the
@@ -331,7 +377,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       fresh <- mapM (const MM.getCounter) ids
       let rename b (i, i') = trimap (renameNE i i') (renameSE i i') (renameNE i i') b
           body1 = foldl rename body0 (zip ids fresh)
-          starts = [(i', BndVarN tf i) | (i, i', tf) <- zip3 ids fresh carried]
+          starts = [(i', BndVarN tf i KeptRead) | (i, i', tf) <- zip3 ids fresh carried]
       return (LoopN t' starts body1)
     nativeExpr _ (MonoLoopContinue {}) = error "morloc bug: MonoLoopContinue in native position"
     nativeExpr m (MonoLet i e1 e2) =
@@ -344,7 +390,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
               ne1 <- nativeExpr m1 e1'
               ne2 <- nativeExpr m e2
               return $ NativeLetN i ne1 ne2
-    nativeExpr _ (MonoLetVar t i) = LetVarN <$> inferType t <*> pure i
+    nativeExpr _ (MonoLetVar t i) = LetVarN <$> inferType t <*> pure i <*> pure KeptRead
     nativeExpr m (MonoReturn e) = ReturnN <$> nativeExpr m e
     -- Recursive call. The Express-time 'crossLang' mark was decided relative to
     -- the recursion's TEXTUAL parent pool, but segmentation can relocate a
@@ -427,9 +473,9 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoBndVar (A _) _) = error "MonoBndVar must have a type if used in native context"
     nativeExpr _ (MonoBndVar (B _) i) =
       case Map.lookup i typemap of
-        (Just (Right t)) -> BndVarN <$> inferType t <*> pure i
+        (Just (Right t)) -> BndVarN <$> inferType t <*> pure i <*> pure KeptRead
         _ -> error "No type found"
-    nativeExpr _ (MonoBndVar (C t) i) = BndVarN <$> inferType t <*> pure i
+    nativeExpr _ (MonoBndVar (C t) i) = BndVarN <$> inferType t <*> pure i <*> pure KeptRead
     -- Resolve the head FVar via the FULL applied type so that
     -- parametrised typedefs (e.g. R's @type Vector n Bool = "logical"@
     -- vs @type Vector n a = "list"@) pick the rule that matches the
@@ -486,9 +532,22 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- and lost the args (see the @PolyNull@ comment in Namespace.hs).
     nativeExpr _ (MonoNull v) = NullN <$> inferType v
     nativeExpr m (MonoIf cond thenE elseE) = do
-      condNe <- nativeExpr m cond
-      thenNe <- nativeExpr m thenE
-      elseNe <- nativeExpr m elseE
+      -- EMIT-1: an operand of `&&` or `||` stays a call of its own, so a
+      -- chain is written as the language's operator rather than as nested
+      -- conditionals, whose depth some parsers bound.
+      let shortCircuit = case (thenE, elseE) of
+            (_, MonoLog _ False) -> True
+            (MonoLog _ True, _) -> True
+            _ -> False
+          operand x@(MonoManifold mo form _ e)
+            | shortCircuit = do
+                form' <- abimapM (\i _ -> contextArg i) (\i _ -> boundArg i) form
+                ownManifold mo form' e
+            | otherwise = nativeExpr m x
+          operand x = nativeExpr m x
+      condNe <- operand cond
+      thenNe <- operand thenE
+      elseNe <- operand elseE
       -- The arms agree on one type (a suspension arm meets a suspension
       -- arm, both closures); a Null arm defers to its sibling's type.
       let ifType = case (thenNe, elseNe) of
@@ -498,13 +557,16 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoDoBlock _ _) =
       error "morloc bug: a suspension reached serialization unlowered (Suspension.lowerSuspensions runs first)"
     nativeExpr m (MonoEval t e) = EvalN <$> inferType t <*> nativeExpr m e
+    -- A cast runs only where the newtype has its representation's native form
+    -- (NEWT-7), so natively it is its argument.
+    nativeExpr m (MonoCoerce (CoerceNewtype _ _) _ e) = nativeExpr m e
     nativeExpr m (MonoCoerce c t e) = CoerceN c <$> inferType t <*> nativeExpr m e
     -- Runtime intrinsics (save/load, streams, @try, ...). The C functions
     -- are eager; an intrinsic declared with a suspension result reaches
     -- here as the body of the closure manifold that suspends it
     -- ('Suspension.lowerSuspensions'), typed by its result.
     nativeExpr m (MonoIntrinsic t@(Idx tidx gt) intr es)
-      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad, IntrRead, IntrUnpack,
+      | intr `elem` [IntrSave, IntrSaveJ, IntrLoad, IntrRead, IntrUnpack,
                      IntrOpen, IntrClose, IntrFSchema,
                      IntrFLength, IntrStreamLayout, IntrNext, IntrStream,
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
@@ -521,7 +583,6 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
                 in Serial.checkWriteDataType tidx intr (Serial.containsFunF dtf) (pretty (renderTypeFName dtf))
           case (intr, esBase) of
             (IntrSave, _ : _ : d : _) -> writeCheck d
-            (IntrSaveM, _ : d : _) -> writeCheck d
             (IntrSaveJ, _ : d : _) -> writeCheck d
             (IntrWrite, _ : _ : d : _) -> writeCheck d
             -- An accumulator crosses into the runtime the same way a
@@ -562,7 +623,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
               raw = IntrinsicN rawInnerTf intr msch es''
           packed <- case mPacker of
             Just (packerSrc, _) ->
-              return $ AppExeN payloadTf (SrcCallP packerSrc) [NativeArgExpr raw]
+              return $ AppExeN payloadTf (SrcCallP Nothing packerSrc) [NativeArgExpr raw]
             Nothing -> return raw
           -- Reuse @try rather than a bespoke wrap: converting a raised
           -- failure into an Ok/Err value is exactly what it does, and
@@ -586,10 +647,10 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           raw = IntrinsicN rawTf intr msch es''
       case mPacker of
         Just (packerSrc, _) ->
-          return $ AppExeN tf (SrcCallP packerSrc) [NativeArgExpr raw]
+          return $ AppExeN tf (SrcCallP Nothing packerSrc) [NativeArgExpr raw]
         Nothing -> return raw
 
-    -- For data-bearing runtime intrinsics (@save/@savej/@savem/@show/@hash),
+    -- For data-bearing runtime intrinsics (@save/@savej/@show/@hash),
     -- the runtime expects the value in *wire form*. The normal cross-pool
     -- path inserts the unpacker in expandSerialize's SerialPack arm; we
     -- mirror that here so intrinsics flow through the same pack/unpack
@@ -620,12 +681,17 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     unpackDataArgIfNeeded m IntrWrite (levelArg : handleArg : dataArg : rest) = do
       rest' <- packDataArg m dataArg
       return (levelArg : handleArg : rest' ++ rest)
-    -- @savem/@savej/@cellput's args are [path-or-handle, value]; the value
+    -- @savej/@cellput's args are [path-or-handle, value]; the value
     -- is at index 1.
     unpackDataArgIfNeeded m intr (pathArg : dataArg : rest)
-      | intr `elem` [IntrSaveM, IntrSaveJ, IntrCellPut] = do
+      | intr `elem` [IntrSaveJ, IntrCellPut] = do
           rest' <- packDataArg m dataArg
           return (pathArg : rest' ++ rest)
+    unpackDataArgIfNeeded m intr [aArg, bArg]
+      | intr `elem` [IntrEq, IntrLe] = do
+          aArgs <- packDataArg m aArg
+          bArgs <- packDataArg m bArg
+          return (aArgs ++ bArgs)
     unpackDataArgIfNeeded m intr (dataArg : rest)
       | intr `elem` [IntrShow, IntrHash, IntrCellNew] = do
           rest' <- packDataArg m dataArg
@@ -642,7 +708,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         SerialPack _ (packer, _) -> do
           let unpackerSrc = typePackerReverse packer
               unpackedType = typePackerUnpacked packer
-          return [AppExeN unpackedType (SrcCallP unpackerSrc) [NativeArgExpr dataArg]]
+          return [AppExeN unpackedType (SrcCallP Nothing unpackerSrc) [NativeArgExpr dataArg]]
         _ -> return [dataArg]
 
     -- Symmetric to unpackDataArgIfNeeded: @load and @read return the wire
@@ -672,14 +738,14 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrSave _ (_levelArg : _pathArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
-    -- @savem/@savej/@cellput's data is the second positional arg (after the
+    -- @savej/@cellput's data is the second positional arg (after the
     -- path or handle).
     intrinsicSchema m intr _ (_pathArg : dataArg : _)
-      | intr `elem` [IntrSaveM, IntrSaveJ, IntrCellPut] = do
+      | intr `elem` [IntrSaveJ, IntrCellPut] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m intr _ (dataArg:_)
-      | intr `elem` [IntrHash, IntrShow, IntrSchema, IntrCellNew] = do
+      | intr `elem` [IntrHash, IntrShow, IntrSchema, IntrCellNew, IntrEq, IntrLe] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema _ IntrTypeof _ (dataArg:_) =
@@ -840,16 +906,19 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
                         sa <- case tm of
                           Native tf -> Serial.makeSerialAST m lang tf
                           Serial tf -> Serial.makeSerialAST m lang tf
-                          Passthrough -> MM.throwCompilerBug
-                            $ "lowerCacheBody: cannot hash a Passthrough arg (arg "
-                            <> pretty i <> "); the cache wrap needs a schema for"
-                            <+> "each arg, so passthrough args must be resolved upstream"
-                          Function _ _ -> MM.throwCompilerBug
-                            $ "lowerCacheBody: cannot hash a Function arg (arg "
-                            <> pretty i <> "); function values have no wire form"
+                          Passthrough -> MM.throwSourcedError midx
+                            $ "The cached call under label" <+> squotes (pretty lbl)
+                            <+> "depends on a value this language cannot read, so it has no cache key"
+                          Function _ _ -> MM.throwSourcedError midx
+                            $ "The cached call under label" <+> squotes (pretty lbl)
+                            <+> "depends on a function value, which has no cache key;"
+                            <+> "label a call whose inputs are data"
                         return (arg, sa)
                     ) args
       t' <- serialResultType "CacheBody" body'
+      case t' of
+        FunF _ _ -> MM.throwCompilerBug $ "a cache wrap around a function value, label" <+> squotes (pretty lbl)
+        _ -> return ()
       resSa <- Serial.makeSerialAST m lang t'
       return $ CacheBodyS t' resSa lbl midx args' body'
 
@@ -1200,7 +1269,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
         (Just SerialContent) -> SerialLetS i <$> serializeS "b" m0 (typeFof ne1) ne1 <*> pure se2
         (Just NativeAndSerialContent) -> do
           let tf = typeFof ne1
-          sv <- serializeS "b" m0 tf (LetVarN tf i)
+          sv <- serializeS "b" m0 tf (LetVarN tf i KeptRead)
           return $ NativeLetS i ne1 (SerialLetS i sv se2)
         _ -> return $ NativeLetS i ne1 se2
       return (req', e')
@@ -1258,7 +1327,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
         foldlM
           ( \b i ->
               let tf = carriedTM Map.! i
-               in (\se -> LoopSLet i se b) <$> serializeS "loop-reserialize" m0 tf (BndVarN tf i)
+               in (\se -> LoopSLet i se b) <$> serializeS "loop-reserialize" m0 tf (BndVarN tf i KeptRead)
           )
           body'
           serialUsed
@@ -1300,7 +1369,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
             (Just SerialContent) | not (isFunF (typeFof ne)) ->
               (\se -> LoopSLet i se b') <$> serializeS "loop-nat-to-ser" m0 (typeFof ne) ne
             (Just NativeAndSerialContent) | not (isFunF (typeFof ne)) -> do
-              sv <- serializeS "loop-nat-to-ser" m0 (typeFof ne) (LetVarN (typeFof ne) i)
+              sv <- serializeS "loop-nat-to-ser" m0 (typeFof ne) (LetVarN (typeFof ne) i KeptRead)
               return (LoopNLet i ne (LoopSLet i sv b'))
             _ -> return (LoopNLet i ne b')
           return (Map.unionWith (<>) rn rb, leaf)
@@ -1321,8 +1390,8 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
     wireNativeExpr ::
       NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) ->
       MorlocMonad (D NativeExpr)
-    wireNativeExpr (LetVarN_ t i) = return (Map.singleton i NativeContent, LetVarN t i)
-    wireNativeExpr (BndVarN_ t i) = return (Map.singleton i NativeContent, BndVarN t i)
+    wireNativeExpr (LetVarN_ t i r) = return (Map.singleton i NativeContent, LetVarN t i r)
+    wireNativeExpr (BndVarN_ t i r) = return (Map.singleton i NativeContent, BndVarN t i r)
     -- A function value applied through its index is a native use of that
     -- variable: a closure that arrived as a packet (a parameter of function
     -- type, reflected from another pool) must be deserialized before the
@@ -1354,7 +1423,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
         (Just SerialContent) -> SerialLetN i <$> serializeS "b" m0 (typeFof ne1) ne1 <*> pure ne2
         (Just NativeAndSerialContent) -> do
           let tf = typeFof ne1
-          sv <- serializeS "b" m0 tf (LetVarN tf i)
+          sv <- serializeS "b" m0 tf (LetVarN tf i KeptRead)
           return $ NativeLetN i ne1 (SerialLetN i sv ne2)
         _ -> return $ NativeLetN i ne1 ne2
       return (req', e')
@@ -1395,8 +1464,8 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
 
         wrapAsNeeded :: (IsSerializable e) => e -> (Int, Request) -> MorlocMonad e
         wrapAsNeeded e (i, req) = case (req, Map.lookup i formMap) of
-          (SerialContent, Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 1" m t (BndVarN t i) <*> pure e
-          (NativeAndSerialContent, Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 2" m t (BndVarN t i) <*> pure e
+          (SerialContent, Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 1" m t (BndVarN t i KeptRead) <*> pure e
+          (NativeAndSerialContent, Just (NativeContent, Just t)) -> serialLet i <$> serializeS "wan 2" m t (BndVarN t i KeptRead) <*> pure e
           (NativeContent, Just (SerialContent, Just t)) -> nativeLet i <$> naturalizeN "wan 3" m lang t (BndVarS (Just t) i) <*> pure e
           (NativeAndSerialContent, Just (SerialContent, Just t)) -> nativeLet i <$> naturalizeN "wan 4" m lang t (BndVarS (Just t) i) <*> pure e
           _ -> return e

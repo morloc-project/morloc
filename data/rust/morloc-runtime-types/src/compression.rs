@@ -58,6 +58,19 @@ use crate::packet::{
 /// worker count with comfortable per-worker memory.
 pub const FRAME_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
+/// The size of the frames a compressed stream sub-packet is cut into: a
+/// function of the level alone, so a stream's bytes never depend on the
+/// host, its cores or its queue. Small frames let one sub-packet compress
+/// and decompress on several threads; the long-mode levels (7-9) keep
+/// whole frames, whose window is what they are for.
+pub fn subpacket_frame_size(lvl: CompressionLevel) -> usize {
+    if lvl.use_long() {
+        FRAME_CHUNK_SIZE
+    } else {
+        2 * 1024 * 1024
+    }
+}
+
 /// Worst-case bytes the metadata-entry payload occupies for an index
 /// covering up to `max_frames` frames. The streaming encoder reserves
 /// this many bytes upfront, then patches the actual index in after
@@ -584,26 +597,6 @@ impl CompressionLevel {
     }
 }
 
-// ── Worker-count heuristic ────────────────────────────────────────────────
-
-/// Choose the number of zstd worker threads to spawn for a payload of
-/// the given size. Returns 0 (single-threaded) below the threshold where
-/// the spawn and bookkeeping cost would exceed the parallelization win.
-///
-/// Heuristic: ~1 worker per 4 MiB of input, capped at the number of
-/// available cores and at 16 to avoid pathological scaling on big
-/// servers where marginal returns vanish.
-pub fn choose_workers(payload_bytes: usize) -> u32 {
-    if payload_bytes < (1 << 20) {
-        return 0;
-    }
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    let by_size = (payload_bytes / (4 << 20)).max(1);
-    by_size.min(cores).min(16) as u32
-}
-
 // ── Long-mode window logs ─────────────────────────────────────────────────
 
 /// Encoder window log used when long-mode is active. 27 == 128 MiB,
@@ -624,7 +617,7 @@ const STREAM_INPUT_BUFFER: usize = 256 * 1024;
 
 /// Compress raw bytes with zstd. Single entry point for every
 /// compression site in the runtime: takes a user-facing level (0..=9)
-/// and decides threading internally via `choose_workers`. Long-mode
+/// and compresses frames on `frame_workers()` threads. Long-mode
 /// kicks in for preset 7+. Level 0 returns a clean copy of `raw`
 /// (no zstd frame), so callers don't have to special-case it.
 pub fn compress_payload_zstd(
@@ -844,6 +837,108 @@ pub fn parallel_decompress_frames(
             None => Ok(()),
         }
     })
+}
+
+/// One payload for [`parallel_decompress_frame_sets`]: its frame index, its
+/// compressed bytes and where its decompressed bytes go.
+pub struct FrameSet<'a> {
+    pub frames: &'a [FrameEntry],
+    pub compressed: &'a [u8],
+    pub dest: &'a mut [u8],
+}
+
+/// Decompress the frames of several payloads on one set of `frame_workers()`
+/// threads, so payloads of a frame or two each still decode in parallel.
+/// Each set is checked as [`parallel_decompress_frames`] checks its one
+/// payload before anything is decoded; the result is the first error, or
+/// `Ok` when every frame of every set decoded to its indexed size.
+pub fn parallel_decompress_frame_sets(sets: &mut [FrameSet<'_>]) -> Result<(), MorlocError> {
+    // (set, comp_off, comp_len, unc_off, unc_len)
+    let mut work: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
+    for (k, set) in sets.iter().enumerate() {
+        let (unc, comp) = crate::packet::frame_totals(set.frames)?;
+        if comp != set.compressed.len() {
+            return Err(MorlocError::Packet(format!(
+                "compressed buffer is {} bytes; frame index sums to {}",
+                set.compressed.len(),
+                comp
+            )));
+        }
+        if unc != set.dest.len() {
+            return Err(MorlocError::Packet(format!(
+                "dest buffer is {} bytes; frame index sums to {}",
+                set.dest.len(),
+                unc
+            )));
+        }
+        let (mut comp_off, mut unc_off) = (0usize, 0usize);
+        for f in set.frames {
+            let cs = crate::width::usize_from_u64(f.compressed_size);
+            let us = crate::width::usize_from_u64(f.uncompressed_size);
+            work.push((k, comp_off, cs, unc_off, us));
+            comp_off += cs;
+            unc_off += us;
+        }
+    }
+    if work.is_empty() {
+        return Ok(());
+    }
+    let dests: Vec<(usize, usize)> = sets.iter_mut().map(|s| (s.dest.as_mut_ptr() as usize, s.dest.len())).collect();
+    let comps: Vec<&[u8]> = sets.iter().map(|s| s.compressed).collect();
+    let decode_one = |decoder: &mut zstd::bulk::Decompressor<'_>, i: usize| -> Result<(), MorlocError> {
+        let (k, comp_off, cs, unc_off, us) = work[i];
+        let comp_slice = &comps[k][comp_off..comp_off + cs];
+        // SAFETY: frame `i`'s destination range lies inside set k's dest
+        // (checked against the index above) and no other frame's overlaps it.
+        let dest_slice = unsafe { std::slice::from_raw_parts_mut((dests[k].0 as *mut u8).add(unc_off), us) };
+        let written = decoder.decompress_to_buffer(comp_slice, dest_slice).map_err(MorlocError::Io)?;
+        if written != us {
+            return Err(MorlocError::Packet(format!(
+                "frame {} decompressed {} bytes, expected {}",
+                i, written, us
+            )));
+        }
+        Ok(())
+    };
+    let n_workers = frame_workers().min(work.len());
+    if n_workers <= 1 {
+        let mut decoder = make_bulk_decompressor().map_err(MorlocError::Io)?;
+        for i in 0..work.len() {
+            decode_one(&mut decoder, i)?;
+        }
+        return Ok(());
+    }
+    let next_idx = std::sync::atomic::AtomicUsize::new(0);
+    let first_err: std::sync::Mutex<Option<MorlocError>> = std::sync::Mutex::new(None);
+    let work = || {
+        let fail = |e: MorlocError| {
+            first_err.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(e);
+            next_idx.store(usize::MAX / 2, std::sync::atomic::Ordering::Relaxed);
+        };
+        let mut decoder = match make_bulk_decompressor() {
+            Ok(d) => d,
+            Err(e) => return fail(MorlocError::Io(e)),
+        };
+        loop {
+            let i = next_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if i >= work.len() {
+                return;
+            }
+            if let Err(e) = decode_one(&mut decoder, i) {
+                return fail(e);
+            }
+        }
+    };
+    std::thread::scope(|s| {
+        // The calling thread works too, so a refused spawn only narrows it.
+        for _ in 1..n_workers {
+            if std::thread::Builder::new().spawn_scoped(s, &work).is_err() {
+                break;
+            }
+        }
+        work();
+    });
+    first_err.into_inner().unwrap_or_else(|p| p.into_inner()).map_or(Ok(()), Err)
 }
 
 // ── Streaming encoders (no intermediate Vec for the compressed bytes) ────
@@ -1321,13 +1416,6 @@ mod tests {
     }
 
     #[test]
-    fn choose_workers_thresholds() {
-        assert_eq!(choose_workers(512 * 1024), 0, "sub-MiB single-threaded");
-        assert!(choose_workers(1 << 20) >= 1, "1 MiB triggers >=1 worker");
-        assert!(choose_workers(8usize << 30) <= 16, "cap at 16 workers");
-    }
-
-    #[test]
     fn decompress_packet_if_needed_passes_through_non_packet() {
         // Raw JSON-looking bytes (no morloc magic) must come back unchanged.
         let bytes = b"{\"x\":1}".to_vec();
@@ -1540,10 +1628,8 @@ mod tests {
 
     #[test]
     fn roundtrip_spans_threading_threshold() {
-        // 64 KiB sits below choose_workers' 1 MiB threshold (single-
-        // threaded encode). 1 MiB exactly hits it. 16 MiB is well into
-        // multithreaded territory (~4 workers on a typical box). All
-        // three must roundtrip identically across levels 1, 3, 9.
+        // One small frame, one frame of exactly 1 MiB, and one full
+        // 16 MiB frame must roundtrip identically across levels 1, 3, 9.
         for &size in &[64 * 1024usize, 1 << 20, 16 << 20] {
             let original = synthetic_packet(size);
             for n in [1u8, 3, 9] {

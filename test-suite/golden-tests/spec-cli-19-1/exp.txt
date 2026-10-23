@@ -1,0 +1,29 @@
+s,n,r,b
+"a,b",1,0.5,true
+"",,nan,false
+"say ""hi""	x",-3,1e+300,true
+"two
+lines",4,-inf,false
+s	n	r	b
+"a,b"	1	0.5	true
+""		nan	false
+"say ""hi""	x"	-3	1e+300	true
+"two
+lines"	4	-inf	false
+s,n,r,b
+"a,b",1,0.5,true
+"",,nan,false
+"say ""hi""	x",-3,1e+300,true
+"two
+lines",4,-inf,false
+s	n	r	b
+"a,b"	1	0.5	true
+""		nan	false
+"say ""hi""	x"	-3	1e+300	true
+"two
+lines"	4	-inf	false
+[{"s":"a,b","n":1,"r":0.5,"b":true},{"s":"","n":null,"r":"nan","b":false},{"s":"say \"hi\"\tx","n":-3,"r":1e+300,"b":true},{"s":"two\nlines","n":4,"r":"-inf","b":false}]
+[{"s":"a,b","n":1,"r":0.5,"b":true},{"s":"","n":null,"r":"nan","b":false},{"s":"say \"hi\"\tx","n":-3,"r":1e+300,"b":true},{"s":"two\nlines","n":4,"r":"-inf","b":false}]
+[{"s":"a,b","n":1,"r":0.5,"b":true},{"s":"","n":null,"r":"nan","b":false},{"s":"say \"hi\"\tx","n":-3,"r":1e+300,"b":true},{"s":"two\nlines","n":4,"r":"-inf","b":false}]
+[{"s":"a,b","n":1,"r":0.5,"b":true},{"s":"","n":null,"r":"nan","b":false},{"s":"say \"hi\"\tx","n":-3,"r":1e+300,"b":true},{"s":"two\nlines","n":4,"r":"-inf","b":false}]
+[{"s":"a,b","n":1,"r":0.5,"b":true},{"s":"","n":null,"r":"nan","b":false},{"s":"say \"hi\"\tx","n":-3,"r":1e+300,"b":true},{"s":"two\nlines","n":4,"r":"-inf","b":false}]

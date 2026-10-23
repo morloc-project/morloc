@@ -1,27 +1,13 @@
 //! Nexus-side stdio RPC server.
 //!
-//! The nexus is the sole owner of fd 0/1/2. Pools reach stdin/stdout/
-//! stderr through synchronous RPCs over a dedicated Unix socket exported
-//! via `MORLOC_NEXUS_STDIO_SOCK`.
+//! The nexus is the sole owner of fd 0/1/2. Pools reach it over a Unix
+//! socket exported via `MORLOC_NEXUS_STDIO_SOCK`; the opcodes and status
+//! bytes are in `morloc_runtime_types::stdio_proto`. Bytes never travel over
+//! the socket in bulk: sub-packets ride in shared memory and only a `RelPtr`
+//! moves.
 //!
-//! Wire protocol (all little-endian):
-//!
-//!   Request:  [opcode: u8]
-//!             [slot_id: i64]                       (both directions)
-//!             [payload_relptr: i64][size: u64]     (WRITE_STDIO only)
-//!
-//!   Response: [status: u8]
-//!             where status = 0 (ok), 1 (err), 2 (eof)
-//!     if ok and NEXT_STDIO: [relptr: i64][size: u64]
-//!     if err:                [err_len: u32][err_bytes...]
-//!
-//! Bytes never travel over the socket in bulk: sub-packets ride in the
-//! shared SHM arena and only a `RelPtr` moves.
-//!
-//! Concurrency: three separate mutexes for stdin / stdout / stderr so a
-//! slow downstream consumer of stdout doesn't stall reads on stdin. The
-//! mutex is held only across the underlying `read(2)` / `write(2)`
-//! syscall (plus the fixed-cost header parse for stdin).
+//! Written stdout and stderr streams do not use the socket: the custodian
+//! hands each sub-packet to `stdio_sink` (SLOT-16).
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -29,7 +15,7 @@ use std::sync::Mutex;
 
 use morloc_runtime_types::packet::{PacketHeader, StreamDiag, SubpacketEntry};
 use morloc_runtime_types::stdio_proto::{
-    OP_NEXT_STDIO, OP_WRITE_STDIO, OP_SPAWN,
+    OP_NEXT_STDIO, OP_SPAWN, OP_OPEN_STREAM, OP_ADOPT_STREAM,
     STATUS_OK, STATUS_ERR, STATUS_EOF, STATUS_PIPE_CLOSED,
     STDIO_KIND_STDOUT, STDIO_KIND_STDERR,
 };
@@ -199,6 +185,8 @@ pub fn start(tmpdir: &str, output_format: OutputFormat, daemon: bool) {
         }
         NEXUS_PID.store(std::process::id() as i32, std::sync::atomic::Ordering::Release);
         set_daemon_mode(daemon);
+        crate::custody_host_start();
+        unsafe { morloc_custody_set_stdio_sink(stdio_sink as *const std::ffi::c_void) };
 
         // SIGPIPE ignore. One-liner but easy to miss; without it a
         // `write(1)` to a closed downstream pipe kills the nexus.
@@ -238,8 +226,7 @@ fn accept_loop(listener: UnixListener, _socket_path: String) {
                     .spawn(move || {
                         // Per-connection: drain requests until the client
                         // closes or errors. A single pool may send many
-                        // `NEXT_STDIO` / `WRITE_STDIO` requests over the
-                        // same connection to amortise the connect cost.
+                        // requests over the same connection to amortise the connect cost.
                         let _ = handle_connection(stream);
                     })
                     .ok();
@@ -263,13 +250,14 @@ fn handle_connection(mut stream: UnixStream) -> std::io::Result<()> {
                 let slot_id = i64::from_le_bytes(req);
                 serve_op(&mut stream, |_| Ok(do_next(slot_id)))?;
             }
-            OP_WRITE_STDIO => {
-                let mut req = [0u8; 24];
+            OP_OPEN_STREAM => {
+                serve_op(&mut stream, do_open_stream)?;
+            }
+            OP_ADOPT_STREAM => {
+                let mut req = [0u8; 8];
                 stream.read_exact(&mut req)?;
-                let slot_id = i64::from_le_bytes(req[0..8].try_into().unwrap());
-                let relptr = i64::from_le_bytes(req[8..16].try_into().unwrap());
-                let size = u64::from_le_bytes(req[16..24].try_into().unwrap());
-                serve_op(&mut stream, |_| Ok(do_write(slot_id, relptr, size)))?;
+                let handle = i64::from_le_bytes(req);
+                serve_op(&mut stream, |_| Ok(do_adopt_stream(handle)))?;
             }
             OP_SPAWN => {
                 serve_op(&mut stream, do_spawn)?;
@@ -289,10 +277,31 @@ pub(crate) fn set_daemon_mode(daemon: bool) {
     DAEMON_MODE.store(daemon, std::sync::atomic::Ordering::Release);
 }
 
+extern "C" {
+    fn morloc_shm_user_enter() -> *mut std::ffi::c_void;
+    fn morloc_shm_user_leave(user: *mut std::ffi::c_void);
+}
+
+struct ShmUser(*mut std::ffi::c_void);
+
+impl Drop for ShmUser {
+    fn drop(&mut self) {
+        unsafe { morloc_shm_user_leave(self.0) };
+    }
+}
+
 pub(crate) fn serve_op(
     stream: &mut UnixStream,
     compute: impl FnOnce(&mut UnixStream) -> std::io::Result<Resp>,
 ) -> std::io::Result<()> {
+    // DAEMON-1
+    let user = unsafe { morloc_shm_user_enter() };
+    if user.is_null() {
+        let why = "the daemon is recovering from a pool crash";
+        write_response(stream, Resp::Err(why.into()))?;
+        return Err(std::io::Error::other(why));
+    }
+    let _user = ShmUser(user);
     match morloc_runtime_types::panic::catch(|| compute(stream)) {
         Ok(resp) => write_response(stream, resp?),
         Err(_) => {
@@ -309,7 +318,7 @@ pub(crate) fn serve_op(
 
 pub(crate) enum Resp {
     Ok(i64, u64), // relptr, size (NEXT_STDIO success)
-    Ack,           // WRITE_STDIO success
+    Ack,           // write success
     Eof,
     Err(String),
     PipeClosed,    // downstream consumer closed the pipe (EPIPE)
@@ -323,7 +332,7 @@ fn write_resp(r: Result<(), crate::stdio_bridge::WriteError>) -> Resp {
     match r {
         Ok(()) => Resp::Ack,
         Err(WriteError::BrokenPipe) => pipe_closed_resp(),
-        Err(WriteError::Other(e)) => Resp::Err(format!("WRITE_STDIO body: {}", e)),
+        Err(WriteError::Other(e)) => Resp::Err(format!("stdio write: {}", e)),
     }
 }
 
@@ -333,10 +342,104 @@ fn write_resp(r: Result<(), crate::stdio_bridge::WriteError>) -> Resp {
 /// this never returns. In daemon mode the nexus serves other clients, so
 /// it returns `PipeClosed` to fail just the current call instead.
 fn pipe_closed_resp() -> Resp {
-    if DAEMON_MODE.load(std::sync::atomic::Ordering::Acquire) {
-        Resp::PipeClosed
+    if !DAEMON_MODE.load(std::sync::atomic::Ordering::Acquire) {
+        crate::process::mark_broken_pipe();
+        // The stream writer calling this must not run the teardown that
+        // stops it.
+        static EXITING: std::sync::Once = std::sync::Once::new();
+        EXITING.call_once(|| {
+            let _ = std::thread::Builder::new()
+                .name("morloc-broken-pipe".into())
+                .spawn(|| crate::process::exit_broken_pipe());
+        });
+    }
+    Resp::PipeClosed
+}
+
+extern "C" {
+    fn morloc_custody_open(
+        mode: u8,
+        path: *const u8,
+        path_len: usize,
+        schema: *const u8,
+        schema_len: usize,
+        pid: u32,
+        start: u64,
+        call_id: u64,
+        errmsg: *mut *mut std::ffi::c_char,
+    ) -> i64;
+    fn morloc_custody_adopt(handle: i64, errmsg: *mut *mut std::ffi::c_char) -> i32;
+    fn morloc_custody_set_stdio_sink(sink: *const std::ffi::c_void);
+}
+
+fn take_errmsg(err: *mut std::ffi::c_char) -> String {
+    if err.is_null() {
+        return "unknown error".into();
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned();
+    unsafe { libc::free(err as *mut libc::c_void) };
+    s
+}
+
+/// `OP_OPEN_STREAM`: open a file `OStream` for a pool (SLOT-10).
+fn do_open_stream(stream: &mut UnixStream) -> std::io::Result<Resp> {
+    let mut head = [0u8; 1 + 4 + 8 + 8];
+    stream.read_exact(&mut head)?;
+    let mode = head[0];
+    let pid = u32::from_le_bytes(head[1..5].try_into().unwrap());
+    let start = u64::from_le_bytes(head[5..13].try_into().unwrap());
+    let call_id = u64::from_le_bytes(head[13..21].try_into().unwrap());
+    let path = read_sized(stream)?;
+    let schema = read_sized(stream)?;
+    let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+    let handle = unsafe {
+        morloc_custody_open(mode, path.as_ptr(), path.len(), schema.as_ptr(), schema.len(), pid, start, call_id, &mut err)
+    };
+    Ok(if handle < 0 { Resp::Err(take_errmsg(err)) } else { Resp::Ok(handle, 0) })
+}
+
+fn read_sized(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
+    let mut len = [0u8; 4];
+    stream.read_exact(&mut len)?;
+    let n = u32::from_le_bytes(len) as usize;
+    const MAX_FIELD: usize = 1 << 20;
+    if n > MAX_FIELD {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "request field too long"));
+    }
+    let mut v = vec![0u8; n];
+    stream.read_exact(&mut v)?;
+    Ok(v)
+}
+
+/// `OP_ADOPT_STREAM`: start writing a pool's stdout or stderr stream (SLOT-16).
+fn do_adopt_stream(handle: i64) -> Resp {
+    let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+    if unsafe { morloc_custody_adopt(handle, &mut err) } != 0 {
+        Resp::Err(take_errmsg(err))
     } else {
-        crate::process::exit_broken_pipe()
+        Resp::Ok(0, 0)
+    }
+}
+
+/// The custodian's sink for stdout and stderr streams (SLOT-16).
+pub(crate) unsafe extern "C" fn stdio_sink(
+    handle: i64,
+    bytes: *const u8,
+    len: u64,
+    errmsg: *mut *mut std::ffi::c_char,
+) -> i32 {
+    // SAFETY: SLOT-16: the custodian passes `len` readable bytes.
+    let bytes = if len == 0 { &[][..] } else { std::slice::from_raw_parts(bytes, len as usize) };
+    match do_write(handle, bytes) {
+        Resp::Ack | Resp::Ok(..) | Resp::Eof => 0,
+        Resp::PipeClosed => 2,
+        Resp::Err(m) => {
+            if !errmsg.is_null() {
+                let c = std::ffi::CString::new(m.replace('\0', " ")).unwrap_or_default();
+                *errmsg = libc::strdup(c.as_ptr());
+            }
+            1
+        }
     }
 }
 
@@ -554,7 +657,7 @@ fn check_incoming_schema(meta: &[u8], expected_schema: &str, what: &str) -> Resu
     Ok(())
 }
 
-/// Handle a `WRITE_STDIO` request.
+/// Write one sub-packet of a stdout or stderr stream.
 ///
 /// **stderr** stays the raw diagnostic channel: the first call emits the
 /// stream-packet header, subsequent calls append sub-packet/footer bytes
@@ -566,29 +669,28 @@ fn check_incoming_schema(meta: &[u8], expected_schema: &str, what: &str) -> Resu
 /// immediately (jsonl / json array / packet / voidstar -- constant
 /// memory) or, for the table/msgpack formats which cannot be produced
 /// chunk-by-chunk, rejected with an actionable error.
-fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
+fn do_write(slot_id: i64, bytes: &[u8]) -> Resp {
     use crate::stdio_bridge as br;
 
     // Which stdio kind? Read from the SHM registry via the runtime.
     let stdio_kind = match unsafe { br::stdio_kind_of(slot_id) } {
         Ok(Some(k)) => k,
         Ok(None) => return Resp::Err(format!(
-            "WRITE_STDIO: slot {:#x} is not stdio-bound", slot_id,
+            "stdio write: slot {:#x} is not stdio-bound", slot_id,
         )),
-        Err(e) => return Resp::Err(format!("WRITE_STDIO: {}", e)),
+        Err(e) => return Resp::Err(format!("stdio write: {}", e)),
     };
-    // `WRITE_STDIO` on a stdin-bound slot is a caller bug (writer on
-    // a reader).
+    // A write to a stdin-bound slot is a caller bug.
     let slot_mtx = match stdio_kind {
         STDIO_KIND_STDOUT => &STDOUT_SLOT,
         STDIO_KIND_STDERR => &STDERR_SLOT,
         _ => return Resp::Err(format!(
-            "WRITE_STDIO: unsupported stdio_kind {} for write path", stdio_kind,
+            "stdio write: unsupported stdio_kind {} for write path", stdio_kind,
         )),
     };
     let route = if stdio_kind == STDIO_KIND_STDOUT { stdout_route() } else { StdoutRoute::Direct };
     if route == StdoutRoute::Save {
-        if let Err(e) = stage_write(slot_id, relptr, size) {
+        if let Err(e) = stage_write(slot_id, bytes) {
             return Resp::Err(format!("saving the stdout stream: {}", e));
         }
         if !crate::stage::stdout_on()
@@ -609,30 +711,26 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
             match unsafe { br::write_stream_header_for_slot(slot.fd, slot_id) } {
                 Ok(_) => { slot.header_done = true; }
                 Err(br::WriteError::BrokenPipe) => return pipe_closed_resp(),
-                Err(br::WriteError::Other(e)) => return Resp::Err(format!("WRITE_STDIO header: {}", e)),
+                Err(br::WriteError::Other(e)) => return Resp::Err(format!("stdio write header: {}", e)),
             }
         }
-        return write_resp(unsafe { br::write_shm_bytes_to_fd(slot.fd, relptr, size) });
+        return write_resp(unsafe { br::write_bytes_to_fd(slot.fd, bytes) });
     }
 
     // stdout: transcode per -f. Classify from the 32-byte header only;
     // the transcoding branches read the full sub-packet lazily so the
     // packet pass-through path stays zero-copy for large streams.
     let cfg = render_cfg();
-    let hdr_vec = match unsafe { br::read_shm_bytes(relptr, 32) } {
-        Ok(h) => h,
-        Err(e) => return Resp::Err(format!("WRITE_STDIO read: {}", e)),
-    };
-    if hdr_vec.len() < 32 {
+    if bytes.len() < 32 {
         return Resp::Err(format!(
-            "WRITE_STDIO: blob is {} bytes, smaller than a packet header", hdr_vec.len(),
+            "stdio write: blob is {} bytes, smaller than a packet header", bytes.len(),
         ));
     }
     let mut hdr = [0u8; 32];
-    hdr.copy_from_slice(&hdr_vec[..32]);
+    hdr.copy_from_slice(&bytes[..32]);
     let header = match PacketHeader::from_bytes(&hdr) {
         Ok(h) => h,
-        Err(e) => return Resp::Err(format!("WRITE_STDIO header parse: {}", e)),
+        Err(e) => return Resp::Err(format!("stdio write header parse: {}", e)),
     };
     let is_footer = header.is_footer();
     let is_data = header.is_data();
@@ -648,7 +746,7 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
                     unsafe { br::write_stream_header_for_slot(slot.fd, slot_id) }?;
                     slot.header_done = true;
                 }
-                unsafe { br::write_shm_bytes_to_fd(slot.fd, relptr, size) }?;
+                unsafe { br::write_bytes_to_fd(slot.fd, bytes) }?;
                 if is_footer {
                     slot.header_done = false;
                 }
@@ -659,31 +757,28 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
             // them), and each pool footer is folded into the single final
             // footer written by `finish_stdout`.
             OutputFormat::Packet | OutputFormat::VoidStar => {
-                write_logical_packet(&mut slot, slot_id, relptr, size, is_footer, is_data)
+                write_logical_packet(&mut slot, slot_id, bytes, is_footer, is_data)
             }
             OutputFormat::Jsonl => {
                 if is_data {
-                    let bytes = unsafe { br::read_shm_bytes(relptr, size) }?;
-                    let schema = br::subpacket_value_schema_str(&bytes)?;
-                    unsafe { br::emit_subpacket_jsonl(&bytes, &schema) }
+                    let schema = br::subpacket_value_schema_str(bytes)?;
+                    unsafe { br::emit_subpacket_jsonl(bytes, &schema) }
                 } else {
                     Ok(()) // footer: jsonl has no closing frame
                 }
             }
             OutputFormat::Raw => {
                 if is_data {
-                    let bytes = unsafe { br::read_shm_bytes(relptr, size) }?;
-                    let schema = br::subpacket_value_schema_str(&bytes)?;
-                    unsafe { br::emit_subpacket_raw(&bytes, &schema) }
+                    let schema = br::subpacket_value_schema_str(bytes)?;
+                    unsafe { br::emit_subpacket_raw(bytes, &schema) }
                 } else {
                     Ok(()) // footer: raw has no closing frame
                 }
             }
             OutputFormat::Json => {
                 if is_data {
-                    let bytes = unsafe { br::read_shm_bytes(relptr, size) }?;
-                    let schema = br::subpacket_value_schema_str(&bytes)?;
-                    let inner = unsafe { br::subpacket_json_inner(&bytes, &schema) }?;
+                    let schema = br::subpacket_value_schema_str(bytes)?;
+                    let inner = unsafe { br::subpacket_json_inner(bytes, &schema) }?;
                     if !slot.json_open {
                         unsafe { br::write_bytes_to_fd(slot.fd, b"[") }?;
                         slot.json_open = true;
@@ -740,8 +835,7 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
 fn write_logical_packet(
     slot: &mut StdioSlot,
     slot_id: i64,
-    relptr: i64,
-    size: u64,
+    bytes: &[u8],
     is_footer: bool,
     is_data: bool,
 ) -> Result<(), crate::stdio_bridge::WriteError> {
@@ -765,12 +859,11 @@ fn write_logical_packet(
         slot.header_done = true;
     }
     if is_footer {
-        let bytes = unsafe { br::read_shm_bytes(relptr, size) }?;
-        fold_pool_footer(slot, &bytes).map_err(br::WriteError::Other)
+        fold_pool_footer(slot, bytes).map_err(br::WriteError::Other)
     } else {
         let offset = slot.bytes_out;
-        unsafe { br::write_shm_bytes_to_fd(slot.fd, relptr, size) }?;
-        slot.bytes_out += size;
+        unsafe { br::write_bytes_to_fd(slot.fd, bytes) }?;
+        slot.bytes_out += bytes.len() as u64;
         if is_data {
             slot.pending.push(offset);
         }
@@ -779,16 +872,15 @@ fn write_logical_packet(
 }
 
 /// Save one frame of the stdout stream to the stage file.
-fn stage_write(slot_id: i64, relptr: i64, size: u64) -> Result<(), String> {
+fn stage_write(slot_id: i64, bytes: &[u8]) -> Result<(), String> {
     use crate::stdio_bridge as br;
-    let hdr_vec = unsafe { br::read_shm_bytes(relptr, 32) }?;
-    let hdr: [u8; 32] = hdr_vec
+    let hdr: [u8; 32] = bytes
         .get(..32)
         .and_then(|h| h.try_into().ok())
         .ok_or("frame smaller than a packet header")?;
     let header = PacketHeader::from_bytes(&hdr).map_err(|e| e.to_string())?;
     let mut slot = STAGE_SLOT.lock().map_err(|e| e.to_string())?;
-    write_logical_packet(&mut slot, slot_id, relptr, size, header.is_footer(), header.is_data())
+    write_logical_packet(&mut slot, slot_id, bytes, header.is_footer(), header.is_data())
         .map_err(|e| match e {
             br::WriteError::BrokenPipe => "the stage file closed".to_string(),
             br::WriteError::Other(m) => m,
@@ -950,14 +1042,14 @@ fn read_one_subpacket_into_shm(slot: &mut StdioSlot) -> Result<Option<(i64, u64)
         let header = PacketHeader::from_bytes(prefix[..32].try_into().unwrap())
             .map_err(|e| format!("stdin data-packet header parse: {}", e))?;
         reject_unreadable_subpacket(&header)?;
-        let payload_len = header.length as usize;
-        let base = prefix.len();
-        let mut buf = prefix;
-        buf.resize(base + payload_len, 0);
-        if payload_len > 0 && !read_exact_fd(slot.fd, &mut buf[base..])? {
-            return Err("stdin: EOF inside data-packet payload".into());
+        let fd = slot.fd;
+        return unsafe {
+            crate::stdio_bridge::read_into_shm(
+                &prefix, header.length as usize, |b| read_exact_fd(fd, b),
+                "stdin: EOF inside data-packet payload",
+            )
         }
-        return unsafe { crate::stdio_bridge::copy_into_shm(&buf) }.map(Some);
+        .map(Some);
     }
     // A lone data packet's single batch was already emitted -> end of stream.
     if slot.single_data {
@@ -977,20 +1069,16 @@ fn read_one_subpacket_into_shm(slot: &mut StdioSlot) -> Result<Option<(i64, u64)
         return Ok(None);
     }
     reject_unreadable_subpacket(&header)?;
-    let meta_len = header.offset as u64;
-    let payload_len = header.length;
-    let total = 32u64
-        .checked_add(meta_len)
-        .and_then(|n| n.checked_add(payload_len))
+    let rest = (header.offset as u64)
+        .checked_add(header.length)
+        .and_then(|n| usize::try_from(n).ok())
         .ok_or_else(|| "subpacket size overflow".to_string())?;
-    let usize_total = total as usize;
-    let mut buf = vec![0u8; usize_total];
-    buf[..32].copy_from_slice(&hdr);
-    if usize_total > 32 && !read_exact_fd(fd, &mut buf[32..])? {
-        return Err("stdin: EOF inside sub-packet body".into());
+    unsafe {
+        crate::stdio_bridge::read_into_shm(
+            &hdr, rest, |b| read_exact_fd(fd, b), "stdin: EOF inside sub-packet body",
+        )
     }
-    unsafe { crate::stdio_bridge::copy_into_shm(&buf) }
-        .map(Some)
+    .map(Some)
 }
 
 /// Reject a stdin sub-packet the pool decoder can't consume: a non-MESG

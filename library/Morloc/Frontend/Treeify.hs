@@ -29,10 +29,10 @@ import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Frontend.Link as MFL
-import Morloc.Frontend.Rename (renameLocals)
+import Morloc.Frontend.Rename (displayName, renameLocals)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
-import Morloc.Typecheck.Internal (collectEffLabels, unqualify)
+import Morloc.Typecheck.Internal (collectEffLabels, instanceArgHead)
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.Config as MC
 import Control.Monad.IO.Class (liftIO)
@@ -42,7 +42,7 @@ import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.LanguageDescriptor
-  (declaredNamePatterns, matchNamePattern)
+  (declaredNamePatterns, declaredReservedNames, declaredReservedPrefixes, matchNamePattern)
 
 -- | Every term must either be sourced or declared.
 data TermOrigin = Declared ExprI | Sourced Source
@@ -145,18 +145,6 @@ treeify d
                       )
                     | g <- groups
                     ]
-
-            -- Validate command groups
-            let ungroupedNames = Set.fromList [v | (_, TermSymbol v) <- Set.toList symbols]
-                groupNames = Set.fromList [exportGroupName g | g <- groups]
-                collisions = Set.intersection (Set.map unEVar ungroupedNames) groupNames
-            -- group names must not collide with ungrouped command names
-            if not (Set.null collisions)
-              then
-                MM.throwSystemError $
-                  "Command group names collide with ungrouped command names:"
-                    <+> list (map pretty (Set.toList collisions))
-              else return ()
 
             -- - store all exported indices in state
             -- - Add the export name to state. Failing to do so here, will lose
@@ -311,7 +299,9 @@ checkSourceNames d = mapM_ (AST.checkExprI checkNode) (DAG.nodes d)
     -- entirely: they are the user's explicit "trust me, emit this string
     -- verbatim as an infix operator" opt-out for keyword-shaped foreign
     -- operators (Python `and`, R `%in%`, etc.).
-    checkNode (ExprI _ (SrcE src)) | srcBacktick src = return ()
+    checkNode (ExprI i (SrcE src)) | srcBacktick src = do
+      yamlText <- languageDescriptorText (ML.langName (srcLang src))
+      checkReserved i src yamlText
     checkNode (ExprI i (SrcE src)) = do
       let lang = ML.langName (srcLang src)
           nm = unSrcName (srcName src)
@@ -323,6 +313,7 @@ checkSourceNames d = mapM_ (AST.checkExprI checkNode) (DAG.nodes d)
               "Cannot check" <+> pretty lang <+> "source" <+> pretty kind
                 <+> squotes (pretty nm) <> ":" <+> pretty why
       yamlText <- languageDescriptorText lang
+      checkReserved i src yamlText
       case yamlText >>= declaredNamePatterns of
         Left why -> refuse why
         Right (namePat, opPat) -> do
@@ -344,6 +335,26 @@ checkSourceNames d = mapM_ (AST.checkExprI checkNode) (DAG.nodes d)
                   <+> "Expected pattern"
                   <+> squotes (pretty pat) <> "."
     checkNode _ = return ()
+
+    -- A sourced name may not take a name the pool defines for itself.
+    checkReserved :: Int -> Source -> Either String MT.Text -> MorlocMonad ()
+    checkReserved i src yamlText = do
+      let lang = ML.langName (srcLang src)
+          nm = unSrcName (srcName src)
+          -- each segment of a path, so `crate::x` is checked as `x`
+          segments = nm : MT.splitOn "::" nm
+          taken prefixes names s = s `elem` names || any (`MT.isPrefixOf` s) prefixes
+      case (,) <$> (yamlText >>= declaredReservedPrefixes) <*> (yamlText >>= declaredReservedNames) of
+        Left why ->
+          MM.throwSourcedError i $
+            "Cannot check" <+> pretty lang <+> "source" <+> squotes (pretty nm) <> ":" <+> pretty why
+        Right (prefixes, names) -> case filter (taken prefixes names) segments of
+          (s : _) ->
+            MM.throwSourcedError i $
+              "The" <+> pretty lang <+> "source" <+> squotes (pretty nm) <+> "uses"
+                <+> squotes (pretty s) <> ","
+                <+> "a name reserved for what the" <+> pretty lang <+> "pool defines."
+          [] -> return ()
 
 -- | A language's lang.yaml: the embedded one, else a plugin's under the
 -- morloc home, as the code generator finds it.
@@ -470,14 +481,10 @@ collectReceiverHeads method pos = do
     Just inst -> return $ Map.fromList
       [ (h, i)
       | tt@(TermTypes (Just et) _ _) <- instanceTerms inst
-      , (h : _) <- [receiverHeads et]
+      , Just h <- [instanceArgHead pos et]
       , Just i <- [instanceIndex tt]
       ]
   where
-    receiverHeads :: EType -> [TVar]
-    receiverHeads et = case snd (unqualify (etype et)) of
-      FunU args _ | length args > pos -> [extractKey (args !! pos)]
-      _                               -> []
 
     instanceIndex :: TermTypes -> Maybe Int
     instanceIndex (TermTypes _ ((_, Idx ix _) : _) _) = Just ix
@@ -496,6 +503,7 @@ linkAndRemoveAnnotations = f
       f e -- notice the topology change
       -- everything below is boilerplate (this is why I need recursion schemes)
     f (ExprI i (ModE v es)) = ExprI i <$> (ModE v <$> mapM f es)
+    f (ExprI i (IstE o c ctx ts es)) = ExprI i <$> (IstE o c ctx ts <$> mapM f es)
     f (ExprI i (AssE v e es)) = ExprI i <$> (AssE v <$> f e <*> mapM f es)
     f (ExprI i (LstE es)) = ExprI i <$> (LstE <$> mapM f es)
     f (ExprI i (TupE es)) = ExprI i <$> (TupE <$> mapM f es)
@@ -556,7 +564,7 @@ contractRoots (ExprI _ (ModE _ es)) = do
         (_, body') <- collectAnnoS (Namer Map.empty 0 Map.empty Set.empty (Just k) Nothing) body
         let et' = et {econs = Set.union (econs et) (Set.fromList ctx)}
         return (AnnoS i i (VarS v (MonomorphicExpr (Just et') [body'])))
-    | ExprI _ (IstE _ ctx _ ies) <- es
+    | ExprI _ (IstE _ _ ctx _ ies) <- es
     , ExprI i (AssE v body@(ExprI bi _) _) <- ies
     , Just (k, et) <- [Map.lookup bi bodyType]
     ]
@@ -565,7 +573,7 @@ contractRoots _ = return ([], Map.empty)
 
 -- | The root module's instance declarations: index, class, instance types.
 rootInstances :: ExprI -> [(Int, ClassName, [TypeU])]
-rootInstances (ExprI _ (ModE _ es)) = [(i, cls, ts) | ExprI i (IstE cls _ ts _) <- es]
+rootInstances (ExprI _ (ModE _ es)) = [(i, cls, ts) | ExprI i (IstE _ cls _ ts _) <- es]
 rootInstances _ = []
 
 -- | A class constraint names the type it constrains: @Ord a =>@, never a
@@ -618,6 +626,18 @@ collectAnnoS namer e@(ExprI gi _) = collectExprS namer e |>> second (AnnoS gi gi
 collectExprS :: Namer -> ExprI -> MorlocMonad (Namer, ExprS Int ManyPoly Int)
 collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
   where
+    -- A labeled reference is the reference wrapped in a label whose
+    -- configuration moves to a key no node carries.
+    f namer (VarE cfg v)
+      | Just _ <- manifoldConfigLabel cfg = do
+          (namer', e) <- f namer (VarE defaultValue v)
+          inner <- newIndex gi0
+          k <- MM.getCounter
+          MM.modify $ \st ->
+            st { stateManifoldConfig = Map.insert k cfg {manifoldConfigLabelIdx = Just gi0} (stateManifoldConfig st)
+               , stateName = Map.insertWith (\_ old -> old) gi0 (displayName v) (stateName st)
+               }
+          return (namer', LabelS k (AnnoS inner inner e))
     f namer (VarE _ v) = do
       MM.sayVVV $
         "collectExprS VarE"
@@ -722,24 +742,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
           -- bound variable is unused) don't collide across inlinings.
           e2@(ExprI ci _) <- reindexExprI e
           (n', e') <- collectExprS n e2
-          -- The labeled call config 'Restructure.collectTags' parked at
-          -- the source VarE's idx gets propagated by reindexExprI's
-          -- copyState to @ci@, but the wrapping AnnoS here uses @gi0@
-          -- as its outer idx -- so without an extra copy from @ci@ to
-          -- @gi0@ the label config sits at an idx that no AnnoS in
-          -- the rAST references, leaving downstream codegen unable to
-          -- detect the labeled call (this manifests as @cache: true@
-          -- or @log: true@ silently failing on point-free bindings).
-          st <- MM.get
-          case Map.lookup ci (stateManifoldConfig st) of
-            Just cfg | hasLabel cfg ->
-              MM.modify (\s -> s {stateManifoldConfig = Map.insert gi0 cfg (stateManifoldConfig s)})
-            _ -> return ()
           return (n', AnnoS gi0 ci e')
-          where
-            hasLabel cfg = case manifoldConfigLabel cfg of
-              Just _ -> True
-              Nothing -> False
     f namer (LstE es) = statefulMapM collectAnnoS namer es |>> second LstS
     f namer (TupE es) = statefulMapM collectAnnoS namer es |>> second TupS
     f namer (NamE rs) = do

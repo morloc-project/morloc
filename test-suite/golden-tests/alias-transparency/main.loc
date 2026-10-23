@@ -1,0 +1,46 @@
+-- A transparent alias is fully substitutable with its right-hand side
+-- (manual: types-newtype.asc). Each export uses an alias where the
+-- written-out type works:
+--   leavesOf: constructor patterns on an alias of a data type
+--   sizeOf:   an alias under a constructor class (Foldable)
+--   depth:    aliases whose parameters sit in Nat slots
+module main (leavesOf, sizeOf, depth)
+
+import root-py
+import vector-py
+import tensor-py
+
+data Tree a = Leaf a | Node (Tree a) (Tree a)
+type IntTree = Tree Int
+
+mk :: Int -> IntTree
+mk x = Node (Leaf x) (Node (Leaf x) (Leaf x))
+
+leaves :: IntTree -> Int
+leaves t = match t
+  | (Leaf _) = 1
+  | (Node a b) = leaves a + leaves b
+
+leavesOf :: Int -> Int
+leavesOf x = leaves (mk x)
+
+type Model k v = [(k, v)]
+
+sizeOf :: Model Int Int -> Int
+sizeOf xs = length xs
+
+type Image h w = Tensor3 h w 3 U8
+type Labels h w = Matrix h w Int
+
+source Py from "lib.py" ("load", "sp", "graph")
+load :: Str -> <IO> Image h w
+sp :: Int -> Image h w -> Labels h w
+graph :: Image h w -> Labels h w -> Int
+
+merges :: Image h w -> Labels h w -> Int
+merges img labels = graph img labels
+
+depth :: Int -> Str -> <IO> Int
+depth n path = do
+  img <- load path
+  merges img (sp n img)

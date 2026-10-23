@@ -1,0 +1,67 @@
+-- Spec OWN-6: a tail loop that only walks into the value it was lent
+-- carries a reference into it, so it copies none of the value. A chain of
+-- a million links is walked here, with a Clone that recurses down the
+-- chain and so could not copy it on a 2 MiB stack. A walk that steps
+-- through a function that matches on the chain borrows it too, and one that
+-- steps past the end fails where the match does.
+module main (walk, walkMatch, walkTail, walkPast)
+
+import root-rust
+
+data Chain = End | Link Int Chain
+
+data Rust => Chain = "Chain"
+
+source Rust from "chain.rs" ("clones")
+
+clones :: Int -> (Int, Int)
+
+build :: Int -> Chain -> Chain
+build n acc
+  ? n == 0 = acc
+  : build (n - 1) (Link n acc)
+
+count :: Int -> Chain -> Int
+count | acc (Link _ rest) = count (acc + 1) rest
+      | acc _ = acc
+
+countMatch :: Int -> Chain -> Int
+countMatch k c = match c
+  | End = k
+  | (Link _ rest) = countMatch (k + 1) rest
+
+--' The links counted, then the links copied while counting
+walk :: Int -> (Int, Int)
+walk n = clones (count 0 (build n End))
+
+--' The same, walking with the `match` form
+walkMatch :: Int -> (Int, Int)
+walkMatch n = clones (countMatch 0 (build n End))
+
+tl :: Chain -> Chain
+tl c = match c
+  | End = c
+  | (Link _ rest) = rest
+
+dropC :: Int -> Chain -> Int
+dropC k c
+  ? k == 0 = count 0 c
+  : dropC (k - 1) (tl c)
+
+--' The links left after all but two are dropped, then the links copied
+walkTail :: Int -> (Int, Int)
+walkTail n = clones (dropC (n - 2) (build n End))
+
+rest :: Chain -> Chain
+rest c = match c
+  | (Link _ r) = r
+  | End = @throw "walked past the end"
+
+past :: Int -> Chain -> Int
+past k c
+  ? k == 0 = count 0 c
+  : past (k - 1) (rest c)
+
+--' The links left after one more than n are dropped
+walkPast :: Int -> Int
+walkPast n = past (n + 1) (build n End)

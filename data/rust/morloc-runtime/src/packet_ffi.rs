@@ -91,6 +91,18 @@ pub(crate) unsafe fn morloc_packet_size(
 
 // ── Duplicate ────────────────────────────────────────────────────────────────
 
+/// Finish with a reply received over a socket: give back the shared-memory
+/// reference its sender donated, if it names a block, and free the packet.
+pub(crate) unsafe fn release_received_packet(packet: *mut u8) {
+    if packet.is_null() {
+        return;
+    }
+    if let Ok(Some(block)) = packet_rptr_block(packet) {
+        let _ = shm::shfree(block);
+    }
+    libc::free(packet as *mut c_void);
+}
+
 /// A copy of `packet` a pool can return as its own result when the result
 /// is one of its arguments, unchanged.
 ///
@@ -104,18 +116,6 @@ pub(crate) unsafe fn morloc_packet_size(
 /// removed when that evaluation ends, not when a packet naming it is freed;
 /// the caller waiting on this call is inside that evaluation, so a copy of
 /// the packet is as valid as the argument itself.
-/// Finish with a reply received over a socket: give back the shared-memory
-/// reference its sender donated, if it names a block, and free the packet.
-pub(crate) unsafe fn release_received_packet(packet: *mut u8) {
-    if packet.is_null() {
-        return;
-    }
-    if let Ok(Some(block)) = packet_rptr_block(packet) {
-        let _ = shm::shfree(block);
-    }
-    libc::free(packet as *mut c_void);
-}
-
 pub(crate) unsafe fn morloc_dup_packet(
     packet: *const u8,
     block_out: *mut *mut c_void,
@@ -150,7 +150,7 @@ pub(crate) unsafe fn morloc_dup_packet(
     let copy = libc::malloc(size) as *mut u8;
     if copy.is_null() {
         if !block.is_null() {
-            let _ = shm::shfree(block);
+            let _ = shm::release(block);
         }
         set_errmsg(errmsg, &MorlocError::Other("morloc_dup_packet: out of memory".into()));
         return ptr::null_mut();
@@ -183,17 +183,9 @@ pub(crate) unsafe fn return_ping(
         return ptr::null_mut();
     }
     ptr::copy_nonoverlapping(packet, buf, size);
-    buf
-}
-
-pub(crate) fn make_ping_packet() -> *mut u8 {
-    // SAFETY: calloc returns null or a valid pointer to 32 zeroed bytes.
-    let buf = unsafe { libc::calloc(32, 1) as *mut u8 };
-    if buf.is_null() { return ptr::null_mut(); }
-    let header = PacketHeader::ping();
-    let bytes = header.to_bytes();
-    // SAFETY: buf points to 32 bytes; bytes is exactly 32 bytes from to_bytes().
-    unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), buf, 32) };
+    // NET-7: the echo must not claim the callee keeps the connection; a
+    // callee that keeps sets the bit on its reply itself.
+    crate::ipc_ffi::take_keep_bit(buf);
     buf
 }
 
@@ -263,7 +255,7 @@ unsafe fn make_data_packet_raw(
         compression: cmpr,
         encryption: encr,
         status,
-        padding: [0; 2],
+        generation: [0; 2],
     };
     let header = PacketHeader {
         magic: PACKET_MAGIC,
@@ -331,6 +323,7 @@ pub(crate) unsafe fn make_standard_data_packet(
     let header = &*(packet as *const PacketHeader);
     let payload_offset = 32 + header.offset as usize;
     *(packet.add(payload_offset) as *mut RelPtr) = relptr;
+    stamp_generation(packet, relptr);
 
     packet
 }
@@ -354,8 +347,34 @@ pub(crate) unsafe fn make_arrow_data_packet(
     let header = &*(packet as *const PacketHeader);
     let payload_offset = 32 + header.offset as usize;
     *(packet.add(payload_offset) as *mut RelPtr) = relptr;
+    stamp_generation(packet, relptr);
 
     packet
+}
+
+// SHM-13: the packet names the allocation its block holds now.
+unsafe fn stamp_generation(packet: *mut u8, relptr: RelPtr) {
+    if let Some(g) = shm::rel2abs(relptr).ok().and_then(|abs| shm::block_generation(abs)) {
+        ptr::copy_nonoverlapping(g.to_le_bytes().as_ptr(), packet.add(PKT_GENERATION_OFF), 2);
+    }
+}
+
+// SHM-13: the block a reference packet names, provided it is still the
+// allocation the packet was made for. Otherwise the packet is disarmed, so
+// that no release through it reaches the block's new owner.
+unsafe fn checked_rptr_block(packet: *const u8, payload: *const u8) -> Result<AbsPtr, MorlocError> {
+    let relptr = *(payload as *const RelPtr);
+    let abs = shm::rel2abs(relptr)?;
+    let stamp = u16::from_le_bytes([*packet.add(PKT_GENERATION_OFF), *packet.add(PKT_GENERATION_OFF + 1)]);
+    let found = shm::block_generation(abs);
+    if stamp == 0 || found == Some(stamp) {
+        return Ok(abs);
+    }
+    *(payload as *mut RelPtr) = shm::RELNULL;
+    Err(MorlocError::Shm(format!(
+        "a reference packet names a shared-memory block that was released and reused \
+         (generation {stamp} expected, {found:?} found)"
+    )))
 }
 
 // ── Msgpack packets ──────────────────────────────────────────────────────────
@@ -443,129 +462,6 @@ pub(crate) unsafe fn make_data_packet_from_mpk(
 }
 
 // ── get_data_packet_as_mpk ───────────────────────────────────────────────────
-
-pub(crate) unsafe fn get_data_packet_as_mpk(
-    packet: *const u8,
-    schema: *const CSchema,
-    mpk_out: *mut *mut c_char,
-    mpk_size_out: *mut usize,
-    errmsg: *mut *mut c_char,
-) -> i32 {
-    clear_errmsg(errmsg);
-    *mpk_out = ptr::null_mut();
-    *mpk_size_out = 0;
-
-    let header = read_morloc_packet_header(packet, errmsg);
-    if header.is_null() { return 0; }
-
-    if (*header).command_type() != PACKET_TYPE_DATA {
-        set_errmsg(errmsg, &MorlocError::Packet("Expected a data packet".into()));
-        return 0;
-    }
-
-    // Check for error
-    if (*header).is_fail() {
-        let payload_start = 32 + (*header).offset as usize;
-        let payload_len = (*header).length as usize;
-        let msg = std::str::from_utf8_unchecked(
-            std::slice::from_raw_parts(packet.add(payload_start), payload_len)
-        );
-        set_errmsg(errmsg, &MorlocError::Packet(format!("\n{}", msg)));
-        return 0;
-    }
-
-    let rs = CSchema::to_rust(schema);
-    let source = (*header).command.data.source;
-    let format = (*header).command.data.format;
-    let payload_start = 32 + (*header).offset as usize;
-    let payload_len = (*header).length as usize;
-    let payload = std::slice::from_raw_parts(packet.add(payload_start), payload_len);
-
-    if source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_MSGPACK {
-        // Inline msgpack: copy directly
-        let buf = libc::malloc(payload_len) as *mut c_char;
-        if buf.is_null() {
-            set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
-            return 0;
-        }
-        ptr::copy_nonoverlapping(payload.as_ptr(), buf as *mut u8, payload_len);
-        *mpk_out = buf;
-        *mpk_size_out = payload_len;
-    } else if source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR {
-        // Inline voidstar: load into SHM then convert to msgpack
-        match crate::voidstar::read_binary(payload, &rs) {
-            Ok(abs) => {
-                match crate::mpack::pack_with_schema(abs, &rs) {
-                    Ok(data) => {
-                        let buf = libc::malloc(data.len()) as *mut u8;
-                        if buf.is_null() {
-                            set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
-                            return 0;
-                        }
-                        ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
-                        *mpk_out = buf as *mut c_char;
-                        *mpk_size_out = data.len();
-                    }
-                    Err(e) => { set_errmsg(errmsg, &e); return 0; }
-                }
-                // Free SHM. shm::shfree zeros the whole block on final ref-drop;
-                // since `abs` came from read_binary's single-block layout, one
-                // shfree releases the wrapper and all packed sub-data.
-                let _ = shm::shfree(abs);
-            }
-            Err(e) => { set_errmsg(errmsg, &e); return 0; }
-        }
-    } else if source == PACKET_SOURCE_FILE && format == PACKET_FORMAT_MSGPACK {
-        // File-based msgpack: read the file
-        let filename_bytes = &payload[..payload_len.min(4096)];
-        let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
-        let filename = filename.trim_end_matches('\0');
-        match std::fs::read(filename) {
-            Ok(data) => {
-                let buf = libc::malloc(data.len()) as *mut u8;
-                if buf.is_null() {
-                    set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
-                    return 0;
-                }
-                ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
-                *mpk_out = buf as *mut c_char;
-                *mpk_size_out = data.len();
-            }
-            Err(e) => {
-                set_errmsg(errmsg, &MorlocError::Io(e));
-                return 0;
-            }
-        }
-    } else if source == PACKET_SOURCE_RPTR && format == PACKET_FORMAT_VOIDSTAR {
-        // Voidstar via relptr: convert to msgpack
-        let relptr = *(payload.as_ptr() as *const RelPtr);
-        match shm::rel2abs(relptr) {
-            Ok(abs) => {
-                match crate::mpack::pack_with_schema(abs, &rs) {
-                    Ok(data) => {
-                        let buf = libc::malloc(data.len()) as *mut u8;
-                        if buf.is_null() {
-                            set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
-                            return 0;
-                        }
-                        ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
-                        *mpk_out = buf as *mut c_char;
-                        *mpk_size_out = data.len();
-                    }
-                    Err(e) => { set_errmsg(errmsg, &e); return 0; }
-                }
-            }
-            Err(e) => { set_errmsg(errmsg, &e); return 0; }
-        }
-    } else {
-        set_errmsg(errmsg, &MorlocError::Packet(
-            format!("Unsupported packet source/format: 0x{:02x}/0x{:02x}", source, format)
-        ));
-        return 0;
-    }
-
-    1 // true
-}
 
 // ── Schema from metadata ─────────────────────────────────────────────────────
 
@@ -791,12 +687,7 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
                 }
             } else if format == PACKET_FORMAT_DATA {
                 // Indirection: the file at `filename` is a complete
-                // morloc data packet. Tiered load mirrors mlc_load's
-                // paths but with strict error propagation -- a missing
-                // sidecar or corrupt payload surfaces to the caller
-                // rather than being consumed as an @load-style miss.
-                use crate::utility::read_binary_file;
-                use crate::cli::load_morloc_data_file;
+                // morloc data packet, loaded as `@load` loads a file.
                 let filename_cstr = match std::ffi::CString::new(filename) {
                     Ok(c) => c,
                     Err(_) => {
@@ -806,43 +697,10 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
                         return ptr::null_mut();
                     }
                 };
-                // A stream file is read whole, every sub-packet in order, into
-                // the list its elements make: the `[a]` receiver of a stream.
-                if crate::cli::file_is_stream_packet(filename_cstr.as_ptr()) == 1 {
-                    let requested = (!schema.is_null()).then(|| crate::cschema::CSchema::to_rust(schema));
-                    return match crate::stream::shared_load_stream_file_as_array(filename, requested.as_ref()) {
-                        Ok(p) => p as *mut u8,
-                        Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
-                    };
+                match crate::cli::load_packet_file(filename_cstr.as_ptr(), schema) {
+                    Ok(p) => p as *mut u8,
+                    Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                 }
-                // Fast path: uncompressed voidstar mmap'd straight into SHM.
-                match crate::cli::try_load_voidstar_packet_via_mmap(
-                    filename_cstr.as_ptr(), schema,
-                ) {
-                    Ok(Some(ptr)) => return ptr,
-                    Ok(None) => { /* fall through */ }
-                    Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
-                }
-                // Fast path: compressed voidstar decompressed into SHM.
-                match crate::cli::try_load_compressed_voidstar_via_shm(
-                    filename_cstr.as_ptr(), schema,
-                ) {
-                    Ok(Some(ptr)) => return ptr,
-                    Ok(None) => { /* fall through */ }
-                    Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
-                }
-                // Slow path: bulk read + generic dispatch.
-                let mut file_size: usize = 0;
-                let file_data = read_binary_file(
-                    filename_cstr.as_ptr(), &mut file_size, errmsg,
-                );
-                if file_data.is_null() {
-                    return ptr::null_mut();
-                }
-                load_morloc_data_file(
-                    filename_cstr.as_ptr(), file_data, file_size,
-                    schema, errmsg,
-                ) as *mut u8
             } else {
                 set_errmsg(errmsg, &MorlocError::Packet(
                     format!("Invalid format from file: 0x{:02x}", format)
@@ -852,8 +710,7 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
         }
         PACKET_SOURCE_RPTR => {
             if format == PACKET_FORMAT_VOIDSTAR || format == PACKET_FORMAT_ARROW {
-                let relptr = *(data.add(payload_start) as *const RelPtr);
-                match shm::rel2abs(relptr) {
+                match checked_rptr_block(data, data.add(payload_start)) {
                     Ok(abs) => abs,
                     Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                 }
@@ -917,13 +774,13 @@ pub(crate) unsafe fn morloc_inherit_reply(packet: *const u8) {
 pub(crate) unsafe fn revoke_packet_reference(packet: *const u8) {
     if let Ok(Some(abs)) = packet_rptr_block(packet) {
         crate::shm::take_on_reference();
-        let _ = crate::shm::shfree(abs);
+        let _ = crate::shm::release(abs);
     }
 }
 
 /// The shared-memory block a data packet names by reference, or `None` for
 /// a packet whose payload travels inside it.
-unsafe fn packet_rptr_block(packet: *const u8) -> Result<Option<AbsPtr>, MorlocError> {
+pub(crate) unsafe fn packet_rptr_block(packet: *const u8) -> Result<Option<AbsPtr>, MorlocError> {
     if packet.is_null() {
         return Ok(None);
     }
@@ -934,8 +791,7 @@ unsafe fn packet_rptr_block(packet: *const u8) -> Result<Option<AbsPtr>, MorlocE
     {
         return Ok(None);
     }
-    let relptr = *(packet.add(32 + (*header).offset as usize) as *const RelPtr);
-    crate::shm::rel2abs(relptr).map(Some)
+    checked_rptr_block(packet, packet.add(32 + (*header).offset as usize)).map(Some)
 }
 
 unsafe fn make_call_packet_gen(
@@ -1106,25 +962,7 @@ pub(crate) unsafe fn free_morloc_call(call: *mut MorlocCall) {
     libc::free(call as *mut c_void);
 }
 
-
 // ── write_voidstar_binary (for intrinsics.c) ─────────────────────────────────
-
-pub(crate) unsafe fn write_voidstar_binary(
-    fd: i32,
-    data: *const c_void,
-    schema: *const CSchema,
-    errmsg: *mut *mut c_char,
-) -> RelPtr {
-    clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
-    match crate::voidstar::write_binary_to_fd(fd, data as AbsPtr, &rs) {
-        Ok(n) => n as RelPtr,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            -1isize as RelPtr
-        }
-    }
-}
 
 // ── flatten_voidstar_to_buffer ───────────────────────────────────────────────
 
@@ -1160,7 +998,6 @@ pub(crate) unsafe fn flatten_voidstar_to_buffer(
     }
 }
 
-
 // ── make_data_packet_auto ────────────────────────────────────────────────────
 
 pub(crate) unsafe fn make_data_packet_auto(
@@ -1169,11 +1006,23 @@ pub(crate) unsafe fn make_data_packet_auto(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
+    make_data_packet_with(voidstar, relptr, schema, false, errmsg)
+}
+
+/// [`make_data_packet_auto`]; when `whole`, a value sent by reference that
+/// spans several blocks is first copied into one (SHM-15).
+pub(crate) unsafe fn make_data_packet_with(
+    voidstar: *mut c_void,
+    relptr: RelPtr,
+    schema: *const CSchema,
+    whole: bool,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
     clear_errmsg(errmsg);
     let rs = CSchema::to_rust(schema);
 
     let threshold = crate::packet::inline_threshold();
-    let t_sz = std::time::Instant::now();
+    let t_sz = crate::log::trace_enabled().then(std::time::Instant::now);
     // Bounded size walk: we only need to know whether the serialized
     // form fits inline (i.e. is `<= threshold`), so cap the walk at
     // `threshold + 1`. For payloads that clearly overflow inline the
@@ -1194,7 +1043,7 @@ pub(crate) unsafe fn make_data_packet_auto(
         "[make_data_packet_auto] calc_voidstar_size_bounded ({} KiB cap) = {} bytes in {:.2?}",
         threshold / 1024,
         flat_size,
-        t_sz.elapsed()
+        t_sz.map(|t| t.elapsed()).unwrap_or_default()
     );
 
     if flat_size <= threshold {
@@ -1202,6 +1051,14 @@ pub(crate) unsafe fn make_data_packet_auto(
     }
 
     if crate::packet::shm_enabled() {
+        if whole && !crate::voidstar::within_its_block(voidstar as crate::shm::AbsPtr, &rs) {
+            return match crate::voidstar::deep_copy_to_block(voidstar as *const u8, &rs)
+                .and_then(|copy| crate::shm::abs2rel(copy))
+            {
+                Ok(rel) => make_standard_data_packet(rel, schema),
+                Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
+            };
+        }
         make_standard_data_packet(relptr, schema)
     } else {
         make_file_data_packet_voidstar(voidstar, schema, &rs, errmsg)
@@ -1588,11 +1445,8 @@ pub(crate) unsafe fn normalize_data_packet_to_fd(
     buffered_packet_to_fd(packet, packet_size, compression_level, fd, errmsg)
 }
 
-// Matches the `choose_workers` 1 MiB threshold: below it the buffered
-// alloc + memcpy beats the streaming setup cost, and the encoder would
-// be single-threaded anyway.
+// Below 1 MiB the buffered alloc + memcpy beats the streaming setup cost.
 const STREAMING_THRESHOLD: u64 = 1 << 20;
-
 
 // Run the existing in-memory normalizer, then write the resulting
 // buffer to the fd in one syscall. Used for every non-streamed path.
@@ -1650,7 +1504,6 @@ fn create_packet_file(
     }
     Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name for a file packet"))
 }
-
 
 // Write `len` bytes from `buf` to `fd`, retrying on partial writes
 // and EINTR. Returns bytes written or -1 with errmsg set.
@@ -2624,8 +2477,8 @@ mod auto_routing_tests {
     ///
     /// Acquires [`TEST_CONFIG_LOCK`] for the duration of the call so
     /// the read of [`crate::packet::inline_threshold`] inside
-    /// `make_data_packet_auto` can't race with a write from a
-    /// concurrent `config_ffi::tests` test.
+    /// `make_data_packet_auto` can't race with a concurrent test's
+    /// write.
     fn auto_route_source_for(n: usize) -> u8 {
         let _guard = TEST_CONFIG_LOCK.lock().unwrap();
         let _shm = ensure_shm();
@@ -2773,11 +2626,6 @@ mod c_abi {
     use super::*;
 
     #[no_mangle]
-    pub unsafe extern "C" fn read_morloc_packet_header(msg: *const u8, errmsg: *mut *mut c_char) -> *mut PacketHeader {
-        super::read_morloc_packet_header(msg, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn packet_is_ping(packet: *const u8, errmsg: *mut *mut c_char) -> bool {
         super::packet_is_ping(packet, errmsg)
     }
@@ -2790,11 +2638,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn packet_is_remote_call(packet: *const u8, errmsg: *mut *mut c_char) -> bool {
         super::packet_is_remote_call(packet, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn morloc_packet_size_from_header(header: *const PacketHeader) -> usize {
-        super::morloc_packet_size_from_header(header)
     }
 
     #[no_mangle]
@@ -2813,11 +2656,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub extern "C" fn make_ping_packet() -> *mut u8 {
-        super::make_ping_packet()
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn make_standard_data_packet(relptr: RelPtr, schema: *const CSchema) -> *mut u8 {
         super::make_standard_data_packet(relptr, schema)
     }
@@ -2828,16 +2666,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn make_mpk_data_packet(mpk_filename: *const c_char, schema: *const CSchema) -> *mut u8 {
-        super::make_mpk_data_packet(mpk_filename, schema)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn make_data_indirection_packet(dat_filename: *const c_char, schema: *const CSchema) -> *mut u8 {
-        super::make_data_indirection_packet(dat_filename, schema)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn make_table_file_packet(path: *const c_char, schema: *const CSchema) -> *mut u8 {
         super::make_table_file_packet(path, schema)
     }
@@ -2845,16 +2673,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn make_data_packet_from_mpk(mpk: *const c_char, mpk_size: usize, schema: *const CSchema) -> *mut u8 {
         super::make_data_packet_from_mpk(mpk, mpk_size, schema)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn get_data_packet_as_mpk(packet: *const u8, schema: *const CSchema, mpk_out: *mut *mut c_char, mpk_size_out: *mut usize, errmsg: *mut *mut c_char) -> i32 {
-        super::get_data_packet_as_mpk(packet, schema, mpk_out, mpk_size_out, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn read_schema_from_packet_meta(packet: *const u8, errmsg: *mut *mut c_char) -> *mut c_char {
-        super::read_schema_from_packet_meta(packet, errmsg)
     }
 
     #[no_mangle]
@@ -2893,11 +2711,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn make_morloc_remote_call_packet(midx: u32, arg_packets: *const *const u8, nargs: usize, errmsg: *mut *mut c_char) -> *mut u8 {
-        super::make_morloc_remote_call_packet(midx, arg_packets, nargs, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn read_morloc_call_packet(packet: *const u8, errmsg: *mut *mut c_char) -> *mut MorlocCall {
         super::read_morloc_call_packet(packet, errmsg)
     }
@@ -2905,16 +2718,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn free_morloc_call(call: *mut MorlocCall) {
         super::free_morloc_call(call)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn write_voidstar_binary(fd: i32, data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> RelPtr {
-        super::write_voidstar_binary(fd, data, schema, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn flatten_voidstar_to_buffer(data: *const c_void, schema: *const CSchema, out_buf: *mut *mut u8, out_size: *mut usize, errmsg: *mut *mut c_char) -> i32 {
-        super::flatten_voidstar_to_buffer(data, schema, out_buf, out_size, errmsg)
     }
 
     #[no_mangle]
@@ -2959,5 +2762,61 @@ mod packet_file_tests {
         assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
         assert_eq!(std::fs::read(&path).unwrap(), b"packet");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    // SHM-13: a reference packet names the allocation it was made for; one
+    // whose block was released and reused is refused, and disarmed so that
+    // no later release through it touches the new owner's block.
+    #[test]
+    fn a_packet_naming_a_reused_block_is_refused_and_disarmed() {
+        let _arena = crate::own_test_shm();
+        let _fallback = crate::shm::tests::small_volume("gp");
+        let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
+        let cs = CSchema::from_rust(&schema);
+        let abs = crate::shm::shmalloc(64).expect("allocate");
+        let packet = unsafe { make_standard_data_packet(crate::shm::abs2rel(abs).unwrap(), cs) };
+        crate::shm::shfree(abs).unwrap();
+        let (again, held) = crate::shm::tests::reallocate_at(abs, 64);
+        let mut err: *mut c_char = ptr::null_mut();
+        let got = unsafe { get_morloc_data_packet_value(packet, cs, &mut err) };
+        let disarmed = unsafe { packet_rptr_block(packet) }.ok().flatten().is_none();
+        let count = unsafe { crate::shm::reference_count(again) };
+        for p in held.into_iter().chain([again]) {
+            crate::shm::shfree(p).unwrap();
+        }
+        crate::shm::shclose().unwrap();
+        unsafe {
+            if !err.is_null() {
+                libc::free(err as *mut c_void);
+            }
+            libc::free(packet as *mut c_void);
+            CSchema::free(cs);
+        }
+        assert!(got.is_null() && !err.is_null(), "a packet for a released block was read");
+        assert!(disarmed, "the refused packet still names the block");
+        assert_eq!(count, Some(1), "the new owner's count changed");
+    }
+
+    #[test]
+    fn a_packet_for_a_live_block_is_read() {
+        let _shm = crate::own_test_registry();
+        let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
+        let cs = CSchema::from_rust(&schema);
+        let abs = crate::shm::shmalloc(64).expect("allocate");
+        let packet = unsafe { make_standard_data_packet(crate::shm::abs2rel(abs).unwrap(), cs) };
+        let mut err: *mut c_char = ptr::null_mut();
+        let got = unsafe { get_morloc_data_packet_value(packet, cs, &mut err) };
+        crate::shm::shfree(abs).unwrap();
+        unsafe {
+            libc::free(packet as *mut c_void);
+            CSchema::free(cs);
+        }
+        assert!(err.is_null());
+        assert_eq!(got, abs as *mut u8);
     }
 }

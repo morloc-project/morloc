@@ -1,0 +1,6 @@
+module sub (foo)
+
+import root-py
+
+source Py from "sub.py" ("plus_one" as foo)
+foo :: Int -> Int

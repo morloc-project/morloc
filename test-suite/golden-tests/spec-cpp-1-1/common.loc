@@ -1,0 +1,48 @@
+module common (*)
+
+import root
+import root-cpp
+
+source Cpp from "srcs.hpp"
+  ( "mk", "bumpRef", "bumpConst", "sizeV", "fwdSize", "ovl", "pick"
+  , "applyFn", "inc", "colorCode", "addRef", "addConst"
+  , "ltRef", "ltConst", "applyFnRef", "applyFnConst"
+  , "+" as (<+>)
+  , "-" as (<->)
+  , "*" as (<*>)
+  , "/" as (</>)
+  )
+
+mk :: Int -> [Int]
+bumpRef :: [Int] -> Int
+bumpConst :: [Int] -> Int
+sizeV :: [Int] -> Int
+fwdSize :: [Int] -> Int
+ovl :: [Int] -> Int
+pick :: Bool -> Int -> Int
+applyFn :: (Int -> Int) -> Int -> Int
+inc :: Int -> Int
+colorCode :: Color -> Int
+addRef :: Int -> Int -> Int
+addConst :: Int -> Int -> Int
+(<+>) :: [Int] -> [Int] -> Int
+(<->) :: [Int] -> [Int] -> Int
+(<*>) :: Int -> [Int] -> Int
+(</>) :: Int -> [Int] -> Int
+ltRef :: Int -> Int -> Bool
+ltConst :: Int -> Int -> Bool
+applyFnRef :: (Int -> Int) -> Int -> Int
+applyFnConst :: (Int -> Int) -> Int -> Int
+
+newtype Names = [Int] deriving (Packable)
+
+data Color = Red | Green
+data Cpp => Color = "Color"
+
+record R where
+  xs :: [Int]
+  k :: Int
+record Cpp => R = "struct"
+
+mkR :: Int -> R
+mkR n = {xs = mk n, k = 1}

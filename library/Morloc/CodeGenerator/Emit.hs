@@ -10,6 +10,7 @@ Maintainer  : z@morloc.io
 -}
 module Morloc.CodeGenerator.Emit
   ( pool
+  , checkManifoldIds
   , emit
   , TranslateFn
   ) where
@@ -18,6 +19,8 @@ import Morloc.CodeGenerator.Grammars.Common (invertSerialManifold)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.LangRegistry as LR
+import Morloc.Data.Doc (pretty, (<+>))
+import Morloc.Monad (runIdentity)
 import qualified Morloc.Monad as MM
 
 {- | Callback type for language-specific translation.
@@ -31,9 +34,35 @@ type TranslateFn = Lang -> [Source] -> [SerialManifold] -> MorlocMonad Script
 -- For non-member languages 'poolOf' is identity, so this is unchanged.
 pool :: LR.LangRegistry -> [SerialManifold] -> [(Lang, [SerialManifold])]
 pool reg es =
-  let (langs, indexedSegments) = unzip . groupSort . map (\x@(SerialManifold i lang _ _ _) -> (LR.poolOf reg lang, (i, x))) $ es
+  let (langs, indexedSegments) = unzip . groupSort . map (\x@(SerialManifold i lang _ hf _) -> (LR.poolOf reg lang, (emittedId i hf, x))) $ es
       uniqueSegments = map (Map.elems . Map.fromList) indexedSegments
    in zip langs uniqueSegments
+
+-- | A manifold's name in its pool: its id, and whether it is the job-side
+-- entry of a remote call, which is emitted with a suffix beside the local
+-- manifold of the same id.
+emittedId :: Int -> HeadManifoldForm -> (Int, Bool)
+emittedId i HeadManifoldFormRemoteWorker = (i, True)
+emittedId i _ = (i, False)
+
+-- | A pool defines each manifold, nested ones included, under its emitted
+-- name, and 'pool' keeps one segment per name, so two different manifolds
+-- with one name in one pool would leave a caller running the other.
+checkManifoldIds :: LR.LangRegistry -> [SerialManifold] -> MorlocMonad ()
+checkManifoldIds reg ms =
+  case [i | ((_, (i, _)), ds) <- Map.toList byId, length (nubOrd ds) > 1] of
+    [] -> return ()
+    (i : _) -> MM.throwCompilerBug $ "two different manifolds in one pool share the id" <+> pretty i
+  where
+    byId = Map.fromListWith (<>) [((LR.poolOf reg lang, i), [d]) | (i, lang, d) <- concatMap defs ms]
+    defs = runIdentity . foldWithSerialManifoldM ops
+    ops =
+      defaultValue
+        { opFoldWithSerialManifoldM = \m full@(SerialManifold_ i lang _ hf _) ->
+            return ((emittedId i hf, lang, show m) : foldlSM mappend mempty full)
+        , opFoldWithNativeManifoldM = \m full@(NativeManifold_ i lang _ _) ->
+            return (((i, False), lang, show m) : foldlNM mappend mempty full)
+        }
 
 -- | Translate a pool of serialized manifolds to target language source code
 emit ::
@@ -57,8 +86,8 @@ findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
         , opSerialManifoldM = nativeSerialSrcs
         }
 
-    nativeExprSrcs (AppExeN_ _ (SrcCallP src) xss) = return (src : concat xss)
-    nativeExprSrcs (ExeN_ _ (SrcCallP src)) = return [src]
+    nativeExprSrcs (AppExeN_ _ (SrcCallP _ src) xss) = return (src : concat xss)
+    nativeExprSrcs (ExeN_ _ (SrcCallP _ src)) = return [src]
     nativeExprSrcs (DeserializeN_ _ s xs) = return $ serialASTsources s <> xs
     nativeExprSrcs e = return $ foldlNE (<>) [] e
 

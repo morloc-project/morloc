@@ -1,0 +1,9 @@
+-- A command whose whole body is an imported constant. See main.loc.
+
+module imported (aliasImported)
+
+import root-py
+import .lib (flag)
+
+aliasImported :: Bool
+aliasImported = flag

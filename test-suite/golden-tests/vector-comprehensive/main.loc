@@ -38,7 +38,7 @@ module main
   , cpI8Min, pcI8Min
   , cpU8Max, pcU8Max
   , cpPerm, pcPerm, prPerm, rpPerm, crPerm, rcPerm
-  , fileBin, fileJson, fileMsg
+  , fileBin, fileJson
   , fileSumBin, fileSumJson
   , zcShmPyPy, zcInlinePyPy
   , zcShmCpToPy, zcInlineCpToPy
@@ -384,7 +384,7 @@ rcPerm :: Int
 rcPerm = cppAtIdx3 rMakePerm
 
 -- =========================================================================
--- (4) File IO: @save / @savej / @savem of a Vector, then @load.
+-- (4) File IO: @save / @savej of a Vector, then @load.
 -- Vector with a Nat parameter has never gone through @save in the test
 -- suite. Each format takes a different code path inside voidstar.
 -- =========================================================================
@@ -399,12 +399,6 @@ fileJson path = do
   @savej path cppMakeReal10
   Ok _tailv106 <- @load path
   _tailv106
-
-fileMsg :: Str -> <IO> (Vector 10 Real)
-fileMsg path = do
-  @savem path cppMakeReal10
-  Ok _tailv107 <- @load path
-  _tailv107
 
 -- File IO + computation: after the round-trip, sum the loaded vector
 -- through the Python pool. Verifies that @load returns a value usable

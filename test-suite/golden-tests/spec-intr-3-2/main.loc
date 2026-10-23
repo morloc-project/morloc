@@ -1,0 +1,31 @@
+-- INTR-3: what @savej writes, @load reads back equal. At an optional text
+-- type, the token `null` is Null, from @load and from an argument file. A
+-- MessagePack file written by `-f mpk` loads by its `.mpk` name, digit
+-- bytes included.
+
+module main (roundTrip, wrap, ints, int49, loadInts, loadInt)
+
+import root-py
+
+roundTrip :: Str -> <IO> (Try Str ?Str)
+roundTrip p = do
+  @savej p (Null :: ?Str)
+  @load p
+
+wrap ::
+  --' @source file
+  ?Str ->
+  [?Str]
+wrap x = [x]
+
+ints :: [Int]
+ints = [1, 49, 50]
+
+int49 :: Int
+int49 = 49
+
+loadInts :: Str -> <IO> (Try Str [Int])
+loadInts p = @load p
+
+loadInt :: Str -> <IO> (Try Str Int)
+loadInt p = @load p

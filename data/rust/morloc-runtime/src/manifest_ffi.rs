@@ -93,6 +93,10 @@ pub enum MorlocExpressionType {
                        // has established.
     CtorMake = 33,     // fields + a tag -> a `data` value. Builds the
                        // tagged-pointer form from the arm's field values.
+    ListLenTest = 34,  // (list) + a length -> Bool. Answered in the nexus,
+                       // like TagTest, from the Array header it already holds.
+    Equal = 35,        // (a, b) -> Bool: the two values are equal (@eq).
+    LessEq = 36,       // (a, b) -> Bool: a orders before or with b (@le).
 }
 
 #[repr(C)]
@@ -252,6 +256,14 @@ pub struct MorlocCtorFieldExpression {
     pub index: u32,
 }
 
+// A list-pattern length test: a list and the length it must have.
+// See MorlocExpressionType::ListLenTest.
+#[repr(C)]
+pub struct MorlocListLenTestExpression {
+    pub subject: *mut MorlocExpression,
+    pub length: usize,
+}
+
 // Constructing a payload-bearing `data` value: the arm's tag and one
 // expression per field. The arm's schema describes the fields as a tuple,
 // which is what the payload is written as.
@@ -292,7 +304,6 @@ pub struct MorlocIFileWalkExpression {
     pub n_args: u64,
 }
 
-
 #[repr(C)]
 pub union ExprUnion {
     pub app_expr: *mut MorlocAppExpression,
@@ -308,6 +319,7 @@ pub union ExprUnion {
     pub tag_test_expr: *mut MorlocTagTestExpression,
     pub ctor_field_expr: *mut MorlocCtorFieldExpression,
     pub ctor_make_expr: *mut MorlocCtorMakeExpression,
+    pub list_len_test_expr: *mut MorlocListLenTestExpression,
     pub if_expr: *mut MorlocIfExpression,
     // IFile-family expressions.
     pub open_expr: *mut MorlocOpenExpression,
@@ -455,6 +467,9 @@ pub struct ManifestTerminal {
     pub description: *mut c_char,
     pub render: bool,
     pub default: bool,
+    /// How the handler consumes the output: 0 value, 1 gather, 2 stream,
+    /// 3 fold (`morloc_manifest::ActionKind`).
+    pub kind: u8,
 }
 
 #[repr(C)]
@@ -484,6 +499,9 @@ pub struct ManifestCommand {
     /// True for synthesized internal commands (e.g. `@render` entries): hidden
     /// from `/discover` but still callable by name.
     pub internal: bool,
+    /// True when the command streams its output: a known stream type, or an
+    /// action that consumes a stream.
+    pub streams: bool,
 }
 
 #[repr(C)]
@@ -510,9 +528,17 @@ pub struct Manifest {
     /// When true, skip the runtime NUL-in-Str scan at cross-pool
     /// boundaries. Set by `morloc make --unsafe-skip-null-check`.
     pub unsafe_skip_null_check: bool,
+    /// The parsed manifest this one was built from.
+    pub rust: *mut morloc_manifest::Manifest,
 }
 
 impl Manifest {
+    /// The parsed manifest, for what the C view leaves out (argument keys,
+    /// shapes, defaults). None for a manifest not built by `parse_manifest`.
+    pub unsafe fn parsed(&self) -> Option<&morloc_manifest::Manifest> {
+        self.rust.as_ref()
+    }
+
     /// Find a command by name (linear scan; manifests are small). Skips
     /// null-named entries defensively. Single source for the by-name lookups
     /// the daemon dispatch, render resolution, and discovery all need.
@@ -979,7 +1005,7 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             Ok(result)
         }
 
-        "show" | "read" | "hash" | "load" => {
+        "show" | "read" | "hash" | "load" | "eq" | "le" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
             let schema = c_schema(schema_str)?;
             let child = build_expr(je.get("child").unwrap_or(&serde_json::Value::Null))?;
@@ -989,6 +1015,8 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
                 "read" => MorlocExpressionType::Read,
                 "hash" => MorlocExpressionType::Hash,
                 "load" => MorlocExpressionType::Load,
+                "eq" => MorlocExpressionType::Equal,
+                "le" => MorlocExpressionType::LessEq,
                 _ => unreachable!(),
             };
             (*expr).schema = schema;
@@ -1003,7 +1031,15 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             // value's own schema travels on `value_expr.schema` and is
             // read by the Save handler from there.
             let schema = c_schema("z")?;
-            let fmt_str = je.get("format").and_then(|v| v.as_str()).unwrap_or("voidstar");
+            let fmt_str = match je.get("format").and_then(|v| v.as_str()) {
+                Some(f @ ("voidstar" | "json")) => f,
+                other => {
+                    return Err(MorlocError::Other(format!(
+                        "manifest: save node has format {:?}; expected \"voidstar\" or \"json\"",
+                        other
+                    )))
+                }
+            };
             let c_fmt = CString::new(fmt_str).unwrap_or_default();
             let level = build_expr(je.get("level").unwrap_or(&serde_json::Value::Null))?;
             let value = build_expr(je.get("value").unwrap_or(&serde_json::Value::Null))?;
@@ -1094,6 +1130,26 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             (*expr).etype = MorlocExpressionType::CtorField;
             (*expr).schema = schema;
             (*expr).expr.ctor_field_expr = fe;
+            Ok(expr)
+        }
+
+        "listlentest" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let schema = c_schema(schema_str)?;
+            let subject = build_expr(je.get("subject").unwrap_or(&serde_json::Value::Null))?;
+            let length = je
+                .get("length")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| MorlocError::Other("listlentest: missing length".into()))?
+                as usize;
+            let le = libc::calloc(1, std::mem::size_of::<MorlocListLenTestExpression>())
+                as *mut MorlocListLenTestExpression;
+            (*le).subject = subject;
+            (*le).length = length;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::ListLenTest;
+            (*expr).schema = schema;
+            (*expr).expr.list_len_test_expr = le;
             Ok(expr)
         }
 
@@ -1682,12 +1738,20 @@ unsafe fn populate_terminal(dst: *mut ManifestTerminal, src: &morloc_manifest::T
     (*dst).description = c_strdup(&src.description);
     (*dst).render = src.render;
     (*dst).default = src.default;
+    (*dst).kind = match src.kind {
+        morloc_manifest::ActionKind::Value => 0,
+        morloc_manifest::ActionKind::Gather => 1,
+        morloc_manifest::ActionKind::Stream => 2,
+        morloc_manifest::ActionKind::Fold => 3,
+    };
 }
 
 unsafe fn populate_command(dst: *mut ManifestCommand, src: &morloc_manifest::Command) -> Result<(), MorlocError> {
     (*dst).name = c_strdup(&src.name);
     (*dst).is_pure = src.is_pure();
     (*dst).internal = src.internal;
+    (*dst).streams = src.stream.is_some()
+        || src.terminals.iter().any(|t| t.kind.of_streaming_command());
     (*dst).mid = src.mid;
     (*dst).pool_index = src.pool_index;
     if !src.needed_pools.is_empty() {
@@ -1834,6 +1898,7 @@ pub(crate) unsafe fn parse_manifest(
         for (i, c) in parsed.commands.iter().enumerate() {
             if let Err(e) = populate_command((*m).commands.add(i), c) {
                 set_errmsg(errmsg, &e);
+                free_manifest(m);
                 return ptr::null_mut();
             }
         }
@@ -1852,14 +1917,15 @@ pub(crate) unsafe fn parse_manifest(
     }
 
     // service
-    if let Some(svc) = parsed.service {
+    if let Some(svc) = &parsed.service {
         (*m).service =
             libc::calloc(1, std::mem::size_of::<ManifestService>()) as *mut ManifestService;
-        populate_service((*m).service, &svc);
+        populate_service((*m).service, svc);
     }
 
     (*m).metadata_json = populate_metadata(&parsed.metadata);
     (*m).unsafe_skip_null_check = parsed.unsafe_skip_null_check;
+    (*m).rust = Box::into_raw(Box::new(parsed));
 
     m
 }
@@ -2033,6 +2099,9 @@ pub(crate) unsafe fn free_manifest(manifest: *mut Manifest) {
         return;
     }
     let m = &*manifest;
+    if !m.rust.is_null() {
+        drop(Box::from_raw(m.rust));
+    }
     if !m.name.is_null() {
         libc::free(m.name as *mut c_void);
     }
@@ -2390,18 +2459,4 @@ mod c_abi {
         super::parse_manifest(text, errmsg)
     }
 
-    #[no_mangle]
-    pub unsafe extern "C" fn read_manifest(path: *const c_char, errmsg: *mut *mut c_char) -> *mut Manifest {
-        super::read_manifest(path, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn free_manifest(manifest: *mut Manifest) {
-        super::free_manifest(manifest)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn manifest_to_discovery_json(manifest: *const Manifest) -> *mut c_char {
-        super::manifest_to_discovery_json(manifest)
-    }
 }

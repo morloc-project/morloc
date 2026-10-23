@@ -258,7 +258,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- Language SELECTION is environment-aware in strict mode: a language is set up
   -- only when its toolchain resolves INSIDE the conda prefix -- the conda env IS
   -- the intended language set. A host tool for a language the env does not
-  -- include (e.g. a stray /usr/bin/julia on a CI runner) is NOT built, so we
+  -- include (e.g. a stray /usr/bin/R on a CI runner) is NOT built, so we
   -- never compile a shim that mixes a host toolchain with conda's libmorloc.
   -- In non-strict mode, selection stays PATH-based (any tool on PATH), preserving
   -- lenient system-toolchain dev installs.
@@ -743,8 +743,8 @@ checkCondaCoherence verbose mPrefix =
     -- coherent (resolves inside the env) or simply not part of this env. A tool
     -- resolving OUTSIDE the prefix is only a problem when the env actually
     -- provides it and a host copy is shadowing it -- NOT when the env never
-    -- included that language (e.g. a stray host /usr/bin/julia in an env with no
-    -- julia). The C/C++ compiler (gcc/g++, via $CC/$CXX) is the exception: it is
+    -- included that language (e.g. a stray host /usr/bin/R in an env with no
+    -- R). The C/C++ compiler (gcc/g++, via $CC/$CXX) is the exception: it is
     -- always required, so a host compiler is always a fatal mix.
     locateTool :: FilePath -> String -> IO (Maybe (String, FilePath, Incoherence))
     locateTool prefixAbs tool = do
@@ -810,7 +810,7 @@ strictCondaPrefix = do
 -- the conda env. Auxiliary tools (git, make, pkg-config) are not ABI-bearing and
 -- may come from the host even in strict mode.
 abiBearingTools :: [String]
-abiBearingTools = ["gcc", "g++", "python3", "R", "julia", "cargo"]
+abiBearingTools = ["gcc", "g++", "python3", "R", "cargo"]
 
 -- | Is a language's tool available for THIS environment? The tool must resolve
 -- (findExecutable, honoring $CC/$CXX for gcc/g++). In strict mode an ABI-bearing

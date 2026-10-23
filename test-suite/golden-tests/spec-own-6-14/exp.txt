@@ -1,0 +1,44 @@
+--- nested ---
+[102,0]
+--- nestedG ---
+102
+--- owned ---
+[91,472]
+--- ownedG ---
+91
+--- orNew ---
+[100,0]
+--- orNewG ---
+100
+--- uses ---
+[99,201,{"Link":[2,{"Link":[3,{"Link":[4,{"Link":[5,{"Link":[6,{"Link":[7,{"Link":[8,{"Link":[9,{"Link":[10,{"Link":[11,{"Link":[12,{"Link":[13,{"Link":[14,{"Link":[15,{"Link":[16,{"Link":[17,{"Link":[18,{"Link":[19,{"Link":[20,{"Link":[21,{"Link":[22,{"Link":[23,{"Link":[24,{"Link":[25,{"Link":[26,{"Link":[27,{"Link":[28,{"Link":[29,{"Link":[30,{"Link":[31,{"Link":[32,{"Link":[33,{"Link":[34,{"Link":[35,{"Link":[36,{"Link":[37,{"Link":[38,{"Link":[39,{"Link":[40,{"Link":[41,{"Link":[42,{"Link":[43,{"Link":[44,{"Link":[45,{"Link":[46,{"Link":[47,{"Link":[48,{"Link":[49,{"Link":[50,{"Link":[51,{"Link":[52,{"Link":[53,{"Link":[54,{"Link":[55,{"Link":[56,{"Link":[57,{"Link":[58,{"Link":[59,{"Link":[60,{"Link":[61,{"Link":[62,{"Link":[63,{"Link":[64,{"Link":[65,{"Link":[66,{"Link":[67,{"Link":[68,{"Link":[69,{"Link":[70,{"Link":[71,{"Link":[72,{"Link":[73,{"Link":[74,{"Link":[75,{"Link":[76,{"Link":[77,{"Link":[78,{"Link":[79,{"Link":[80,{"Link":[81,{"Link":[82,{"Link":[83,{"Link":[84,{"Link":[85,{"Link":[86,{"Link":[87,{"Link":[88,{"Link":[89,{"Link":[90,{"Link":[91,{"Link":[92,{"Link":[93,{"Link":[94,{"Link":[95,{"Link":[96,{"Link":[97,{"Link":[98,{"Link":[99,{"Link":[100,"End"]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]
+--- usesG ---
+[99,201,{"GLink":[2,{"GLink":[3,{"GLink":[4,{"GLink":[5,{"GLink":[6,{"GLink":[7,{"GLink":[8,{"GLink":[9,{"GLink":[10,{"GLink":[11,{"GLink":[12,{"GLink":[13,{"GLink":[14,{"GLink":[15,{"GLink":[16,{"GLink":[17,{"GLink":[18,{"GLink":[19,{"GLink":[20,{"GLink":[21,{"GLink":[22,{"GLink":[23,{"GLink":[24,{"GLink":[25,{"GLink":[26,{"GLink":[27,{"GLink":[28,{"GLink":[29,{"GLink":[30,{"GLink":[31,{"GLink":[32,{"GLink":[33,{"GLink":[34,{"GLink":[35,{"GLink":[36,{"GLink":[37,{"GLink":[38,{"GLink":[39,{"GLink":[40,{"GLink":[41,{"GLink":[42,{"GLink":[43,{"GLink":[44,{"GLink":[45,{"GLink":[46,{"GLink":[47,{"GLink":[48,{"GLink":[49,{"GLink":[50,{"GLink":[51,{"GLink":[52,{"GLink":[53,{"GLink":[54,{"GLink":[55,{"GLink":[56,{"GLink":[57,{"GLink":[58,{"GLink":[59,{"GLink":[60,{"GLink":[61,{"GLink":[62,{"GLink":[63,{"GLink":[64,{"GLink":[65,{"GLink":[66,{"GLink":[67,{"GLink":[68,{"GLink":[69,{"GLink":[70,{"GLink":[71,{"GLink":[72,{"GLink":[73,{"GLink":[74,{"GLink":[75,{"GLink":[76,{"GLink":[77,{"GLink":[78,{"GLink":[79,{"GLink":[80,{"GLink":[81,{"GLink":[82,{"GLink":[83,{"GLink":[84,{"GLink":[85,{"GLink":[86,{"GLink":[87,{"GLink":[88,{"GLink":[89,{"GLink":[90,{"GLink":[91,{"GLink":[92,{"GLink":[93,{"GLink":[94,{"GLink":[95,{"GLink":[96,{"GLink":[97,{"GLink":[98,{"GLink":[99,{"GLink":[100,"GEnd"]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]
+--- cheap ---
+[2,0]
+--- cheapG ---
+2
+--- taken ---
+[200,0]
+--- takenG ---
+200
+--- takenRec ---
+[103,100]
+--- loopOwned ---
+6
+--- loopFields ---
+3
+--- loopFn ---
+6
+--- loopPap ---
+[4,8]
+--- loopClose ---
+[6]
+--- loopArgIf ---
+9
+--- loopSusp ---
+6
+--- keepBoth ---
+4
+--- keepBothLoop ---
+8

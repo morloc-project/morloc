@@ -18,6 +18,12 @@
 6
 --- pairSwap ---
 [7,"a"]
+--- twinSum ---
+7
+--- pointSum ---
+7
+--- pointLit ---
+7
 --- pathSuffix ---
 ".txt"
 --- bytesDecode ---

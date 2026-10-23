@@ -1,0 +1,58 @@
+-- Spec OWN-6 in Rust: an element of a list that is part of a borrow is a
+-- part of the borrow too. A loop stepping into a list element of a
+-- constructor field borrows each step (descend); one whose frame owns the
+-- tree walks it the same way (descendOwned); and the elements a list pattern
+-- binds from a borrowed list, in a loop, are read in place (pairs). Each
+-- export prints its result and the chain clones made; a borrowed element
+-- that went wrong would show in the result.
+module main (descend, descendOwned, pairs)
+
+import root-rust
+
+data Chain = End | Link Int Chain
+data Rust => Chain = "Chain"
+
+record Holder where
+  c :: Chain
+  k :: Int
+record Rust => Holder = "Holder"
+
+source Rust from "chain.rs"
+  ( "clones", "mk_chain" as mkChain, "chain_len" as chainLen
+  , "mk_holder" as mkHolder, "mk_tup" as mkTup )
+
+clones :: Int -> (Int, Int)
+mkChain :: Int -> Chain
+chainLen :: Chain -> Int
+mkHolder :: Int -> Holder
+mkTup :: Int -> (Chain, Int)
+
+data Tree = Leaf Chain | Node [Tree]
+
+walk :: Tree -> Int
+walk t = match t
+  | (Leaf c) = chainLen c
+  | (Node [k, _]) = walk k
+  | (Node _) = 0
+
+grow :: Int -> Tree -> Tree
+grow k t
+  ? k == 0 = t
+  : grow (k - 1) (Node [t, Leaf End])
+
+--' A borrowed tree walked down its first children
+descend :: Int -> (Int, Int)
+descend n = clones (walk (grow 5 (Leaf (mkChain n))))
+
+--' The same walk over a tree the frame owns
+descendOwned :: Int -> (Int, Int)
+descendOwned n = clones (let t = grow 5 (Leaf (mkChain n)) in walk t + walk t)
+
+lpLoop :: Int -> [Chain] -> Int -> Int
+lpLoop k xs acc
+  ? k == 0 = acc
+  : lpLoop (k - 1) xs (acc + (match xs | [a, b] = chainLen a + chainLen b | _ = 0))
+
+--' Elements of a borrowed list bound by a pattern in a loop
+pairs :: Int -> (Int, Int)
+pairs n = clones (lpLoop 3 [mkChain n, mkChain n] 0)

@@ -1,0 +1,23 @@
+-- Spec STATE-8: a deep value morloc builds is released in bounded stack,
+-- here a user-mapped type with the std::shared_ptr arms the manual
+-- documents. morloc builds a chain 10^6 links deep with a tail loop, the
+-- sourced function measures it, and the pool releases it.
+module main (len)
+
+import root-cpp
+
+data Chain = End | Link Int Chain
+
+data Cpp => Chain = "Chain"
+
+source Cpp from "chain.hpp" ("chainLength")
+
+chainLength :: Chain -> Int
+
+build :: Int -> Chain -> Chain
+build n acc
+  ? n == 0 = acc
+  : build (n - 1) (Link n acc)
+
+len :: Int -> Int
+len n = chainLength (build n End)

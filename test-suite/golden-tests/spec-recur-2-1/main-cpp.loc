@@ -1,0 +1,13 @@
+-- Spec RECUR-2: tail recursion runs in constant stack, here a million
+-- levels deep, far past the native recursion limit of the language.
+module main (count)
+
+import root-cpp
+
+countFrom :: Int -> Int -> Int
+countFrom acc n
+  ? n == 0 = acc
+  : countFrom (acc + 1) (n - 1)
+
+count :: Int -> Int
+count n = countFrom 0 n

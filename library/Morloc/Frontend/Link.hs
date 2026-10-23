@@ -17,6 +17,7 @@ module Morloc.Frontend.Link (link) where
 
 import Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
@@ -52,7 +53,7 @@ link :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 link d0 = do
   mayResult <- DAG.synthesizeNodes synth d0
   case mayResult of
-    Nothing -> error "cyclical"
+    Nothing -> MM.throwCompilerBug "the module graph has a cycle after loading"
     (Just _) -> return ()
 
 synth ::
@@ -61,10 +62,65 @@ synth ::
   [(MVar, [AliasedSymbol], LinkState)] ->
   MorlocMonad LinkState
 synth k0 e0 edges = do
-  inheritedState <- mapM (realiasLinkState k0) edges >>= mergeLinkStates k0
+  inheritedState <- mapM (realiasLinkState k0) edges >>= mergeLinkStates k0 (localSignatureNames e0)
+  checkOneSignature inheritedState e0
   finalState <- addLocalState k0 e0 inheritedState
   _ <- linkLocalTerms k0 finalState e0
   return finalState
+
+-- | A module gives a term at most one signature (SIG-6), counting class
+-- method signatures. A signature for a term the module imports by name
+-- contradicts the import (SIG-8); one for a term that came in with a whole
+-- module declares a new term in its place (SIG-7), since the link of the
+-- module's own terms starts from its own signatures.
+checkOneSignature :: LinkState -> ExprI -> MorlocMonad ()
+checkOneSignature imported (ExprI _ (ModE _ es)) = go Set.empty sigs
+  where
+    sigs =
+      [ (i, v)
+      | ExprI i e <- es
+      , v <- case e of
+          SigE (Signature v' _ _) -> [v']
+          ClsE (Typeclass _ _ _ ms) -> [v' | Signature v' _ _ <- ms]
+          _ -> []
+      ]
+    -- names an un-namespaced import list brings into scope, with the name
+    -- each is exported as; a class brings its methods
+    named = Map.fromList $
+      [ (alias, orig)
+      | ExprI _ (ImpE (Import _ (Just syms) _ Nothing)) <- es
+      , AliasedTerm orig alias <- syms
+      ]
+        <> [ (m, m)
+           | ExprI _ (ImpE (Import _ (Just syms) _ Nothing)) <- es
+           , cls <- concatMap className syms
+           , Just (_, _, methods) <- [Map.lookup cls (linkClasses imported)]
+           , m <- Map.keys methods
+           ]
+    -- an upper-case name in an import list is a type or a class
+    className (AliasedClass c) = [c]
+    className (AliasedType (TV t) _) = [ClassName t]
+    className _ = []
+    go :: Set.Set EVar -> [(Int, EVar)] -> MorlocMonad ()
+    go _ [] = return ()
+    go seen ((i, v) : rest)
+      | Just orig <- Map.lookup v named =
+          MM.throwSourcedError i $
+            "A signature for" <+> squotes (pretty v)
+              <> ", which this module imports by name: a term has one signature."
+              <+> "Import it under another name (`" <> pretty orig <+> "as other`),"
+              <+> "or leave it out of the import list to declare a new" <+> squotes (pretty v) <> "."
+      | Set.member v seen =
+          MM.throwSourcedError i $
+            "A second signature for" <+> squotes (pretty v)
+              <> ": a term has one signature, though it may have many implementations."
+      | otherwise = go (Set.insert v seen) rest
+checkOneSignature _ _ = return ()
+
+-- | The names a module gives its own signatures (SIG-7).
+localSignatureNames :: ExprI -> Set.Set EVar
+localSignatureNames (ExprI _ (ModE _ es)) = Set.fromList [v | ExprI _ (SigE (Signature v _ _)) <- es]
+localSignatureNames _ = Set.empty
 
 -- Will raise error if any import term is absent in the linkstate list
 realiasLinkState ::
@@ -97,8 +153,8 @@ throwInheritanceError m msg = MM.throwSystemError $ "In module" <+> squotes (pre
 -- imported terms are first pooled, then iterated through one-by-one checking
 -- for conflicts. Term identity is based on index, which maps one-to-one to type
 -- or class signature.
-mergeLinkStates :: MVar -> [(MVar, MVar, LinkState)] -> MorlocMonad LinkState
-mergeLinkStates m0 imps = do
+mergeLinkStates :: MVar -> Set.Set EVar -> [(MVar, MVar, LinkState)] -> MorlocMonad LinkState
+mergeLinkStates m0 shadowed imps = do
   -- Set EVar
   let terms = Set.unions $ [Map.keysSet s | (_, _, LinkState s _) <- imps]
       -- Set ClassName
@@ -124,6 +180,8 @@ mergeLinkStates m0 imps = do
     mergeTerms _ [(_, _, i)] = return i
     mergeTerms v ((m1, importMod1, i) : (_, importMod2, j) : xs)
       | i == j = mergeTerms v ((m1, importMod1, j) : xs)
+      -- the module declares its own term of this name (SIG-7)
+      | Set.member v shadowed = return i
       | otherwise =
           throwInheritanceError m0 $
             "Illegal masking of type signatures for" <+> squotes (pretty v)
@@ -330,7 +388,10 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                   tt' = tt {termConcrete = srcTerm : termConcrete tt}
                   sigmap' = Map.insert termIdx (Monomorphic tt') sigmap
                   idmap' = Map.insert i termIdx idmap
-              MM.modify (\s -> s {stateSignatures = GMap idmap' sigmap'})
+              MM.modify (\s -> s
+                { stateSignatures = GMap idmap' sigmap'
+                , stateDefinitionSite = Map.insertWith (\_ old -> old) termIdx i (stateDefinitionSite s)
+                })
             (Just (Polymorphic cls _ _ _)) ->
               MM.throwSourcedError i $
                 "Source term"
@@ -355,13 +416,51 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
               let tt' = tt {termDecl = e : termDecl tt}
                   sigmap' = Map.insert termIdx (Monomorphic tt') sigmap
                   idmap' = Map.insert i termIdx idmap
-              MM.modify (\ms -> ms {stateSignatures = GMap idmap' sigmap'})
+              MM.modify (\ms -> ms
+                { stateSignatures = GMap idmap' sigmap'
+                , stateDefinitionSite = Map.insert termIdx i (stateDefinitionSite ms)
+                })
               linkScoped bnds c termIdx e es
             (Just (Polymorphic cls _ _ _)) ->
               MM.throwSourcedError i $
                 "Declared term" <+> squotes (pretty v) <+> " overlaps a term in typeclass" <+> squotes (pretty cls)
-    linkLocal bnds c _ (ExprI i (IstE cls _ ts es)) = do
+    linkLocal bnds c _ (ExprI i (IstE origin cls _ ts es)) = do
       case Map.lookup cls (linkClasses c) of
+        -- The runtime handles' representation is an address, not a value
+        -- of their own (NEWT-7).
+        _ | origin == Derived
+          , m0 == MV "internal"
+          , [_, h] <- ts
+          , extractKey h `elem` [BT.ifileVar, BT.istreamVar, BT.ostreamVar, BT.cellVar, BT.patternChainVar] ->
+              return ()
+        -- A derived instance is of the compiler's class: one that merely
+        -- shares its name is not given it. A newtype's own conversions are
+        -- skipped without that class; a `deriving` clause cannot be.
+        found
+          | origin == Derived
+          , not (isCompilerClass found) ->
+              if unTVar' cls /= "Packable" || any isPackDef es
+                then
+                  MM.throwSourcedError i $
+                    "deriving" <+> parens (pretty cls) <+> "needs the class" <+> pretty cls
+                      <+> "in the scope of module" <+> squotes (pretty m0)
+                      <> "; import root"
+                else return ()
+          where
+            unTVar' (ClassName c) = c
+            expectedMethods = case unTVar' cls of
+              "Packable" -> [EV "pack", EV "unpack"]
+              "Eq" -> [EV "=="]
+              "Ord" -> [EV "<="]
+              "Show" -> [EV "show"]
+              "Hashable" -> [EV "hash"]
+              _ -> []
+            isCompilerClass (Just (_, Typeclass _ _ vs sigs, _)) =
+              length vs == length ts
+                && Set.fromList [v | Signature v _ _ <- sigs] == Set.fromList expectedMethods
+            isCompilerClass Nothing = False
+            isPackDef (ExprI _ (AssE (EV "pack") _ _)) = True
+            isPackDef _ = False
         Nothing ->
           MM.throwSourcedError i $
             "There is no typeclass declaration for instance"
@@ -385,7 +484,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                   -- This enables typechecking without requiring sources.
                   linkEmptyInstance m0 cls (zip vs ts) sigs emap
                 else
-                  mapM_ (linkInstance (linkScoped bnds c) m0 cls (zip vs ts) sigs emap) es
+                  mapM_ (linkInstance origin (linkScoped bnds c) m0 cls (zip vs ts) sigs emap) es
     linkLocal bnds _ cs (ExprI termIdx (VarE _ v))
       | Set.member v bnds = return ()
       | otherwise = case Map.lookup v cs of
@@ -518,6 +617,7 @@ linkEmptyInstance _ cls0 params0 sigs emap = mapM_ go sigs
 --   SignatureSet in stateSignatures. This will be a polymorphic case.
 --     Polymorphic ClassName EVar EType [TermTypes]
 linkInstance ::
+  InstanceOrigin ->
   (Int -> ExprI -> [ExprI] -> MorlocMonad ()) ->
   MVar ->
   ClassName ->
@@ -526,7 +626,7 @@ linkInstance ::
   Map EVar Int ->
   ExprI ->
   MorlocMonad ()
-linkInstance linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
+linkInstance origin linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
   where
     linkExpr (ExprI i (SrcE src)) = do
       let v = srcAlias src
@@ -535,8 +635,11 @@ linkInstance linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
       let et' = et {etype = t}
       let tt = TermTypes (Just et') [(m0, Idx i src)] []
       linkTermTypes v et tt stateIdx
-    linkExpr (ExprI _ (AssE v e es)) = do
+    linkExpr (ExprI ai (AssE v e es)) = do
       (Signature _ _ et, stateIdx) <- lookupInfo v
+      -- a derived body is not a definition anyone wrote
+      when (origin == Declared) $
+        MM.modify (\ms -> ms {stateDefinitionSite = Map.insert stateIdx ai (stateDefinitionSite ms)})
       linker stateIdx e es
       t <- substituteInstanceTypes params0 (etype et)
       let et' = et {etype = t}

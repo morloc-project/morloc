@@ -263,6 +263,7 @@ compile_program() {
     cp "$SCRIPT_DIR/$loc_file" "$work_dir/"
     cp "$SCRIPT_DIR"/*.py "$work_dir/" 2>/dev/null || true
     cp "$SCRIPT_DIR"/*.R "$work_dir/" 2>/dev/null || true
+    cp "$SCRIPT_DIR"/*.hpp "$work_dir/" 2>/dev/null || true
 
     if ! (cd "$work_dir" && morloc make -o nexus "$loc_file" > /dev/null 2>"$work_dir/build-${name}.err"); then
         echo "COMPILE FAIL: $loc_file" >&2
@@ -461,6 +462,12 @@ if should_run "http"; then
     assert_http_status "OPTIONS returns 204" "204" "http://127.0.0.1:${HTTP_PORT}/call/add" \
         -X OPTIONS
 
+    # A body past the cap is answered as a limit (NET-10).
+    BIG_BODY=$(mktemp)
+    WORK_DIRS+=("$BIG_BODY")
+    head -c $((5 * 1024 * 1024)) /dev/zero | tr '\0' '1' > "$BIG_BODY"
+    assert_http_status "POST a 5 MiB body -> 413" "413" \
+        "http://127.0.0.1:${HTTP_PORT}/call/add" -X POST -H 'Expect:' --data-binary "@$BIG_BODY"
     stop_daemon "$LAST_DAEMON_PID"
     echo ""
 fi
@@ -523,6 +530,95 @@ if should_run "render"; then
     assert_http_status "POST /call/mlcp_echo_shout (internal) -> 404" "404" \
         "http://127.0.0.1:${HTTP_PORT}/call/mlcp_echo_shout" \
         -X POST -H "Content-Type: application/json" -d '["hi"]'
+
+    # A @render with no @mime is its bytes, typed by what they are.
+    curl -s -D "$RENDER_DIR/p.hdr" -o "$RENDER_DIR/p.body" -X POST \
+        "http://127.0.0.1:${HTTP_PORT}/call/echo?render=plain" \
+        -H "Content-Type: application/json" -d '["Hi"]'
+    pct=$(grep -i '^content-type:' "$RENDER_DIR/p.hdr" | tr -d '\r' | cut -d' ' -f2-)
+    assert_test "?render=plain Content-Type" "text/plain; charset=utf-8" "$pct"
+    assert_test "?render=plain raw body" "hi" "$(cat "$RENDER_DIR/p.body")"
+
+    # A typed @with action is JSON.
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/echo?render=size" \
+        -H "Content-Type: application/json" -d '["four"]')
+    assert_test "?render=size returns typed value" "4" "$(json_field "$result" "result")"
+
+    assert_http_status "POST /call/guarded (pool Err) -> 500" "500" \
+        "http://127.0.0.1:${HTTP_PORT}/call/guarded" \
+        -X POST -H "Content-Type: application/json" -d '["toolong"]'
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/guarded" \
+        -H "Content-Type: application/json" -d '["toolong"]')
+    assert_test "a pool Err is class failure" "failure" "$(json_field "$result" "class")"
+    for p in '-' '/dev/stdin' '/dev/fd/0'; do
+        result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/readFrom" \
+            -H "Content-Type: application/json" -d "[\"$p\"]")
+        assert_contains "readFrom $p is refused, not read from the server's stdin" \
+            "standard input" "$(json_field "$result" "error")"
+    done
+    assert_http_status "POST /call/echo?render=a&render=b -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/call/echo?render=shout&render=plain" \
+        -X POST -H "Content-Type: application/json" -d '["hi"]'
+    stop_daemon "$LAST_DAEMON_PID"
+
+    # The socket protocol: a bare call is the own value; a selection is
+    # echoed and a @render's output comes back as bytes.
+    RENDER_SOCK="/tmp/morloc-test-render-$$.sock"
+    SOCKET_FILES+=("$RENDER_SOCK")
+    start_daemon "$RENDER_DIR" --socket "$RENDER_SOCK"
+    wait_for_daemon "$LAST_DAEMON_LOG" 10
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"echo","args":["hi"]}')
+    assert_test "LP bare call is the own value" "hi" "$(json_field "$lp" "result")"
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"echo","args":["hi"],"render":"shout"}')
+    assert_test "LP render echoes the action" "shout" "$(json_field "$lp" "action")"
+    assert_test "LP render is bytes" "SEk=" "$(json_field "$lp" "result_b64")"
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"echo","args":["hi"],"render_default":true}')
+    assert_test "LP render_default runs @default" "shout" "$(json_field "$lp" "action")"
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"echo","args":["hi"],"render":null}')
+    assert_test "LP null render is refused" "error" "$(json_field "$lp" "status")"
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"echo","args":["hi"],"render":"shout","render_default":true}')
+    assert_test "LP render with render_default is refused" "error" "$(json_field "$lp" "status")"
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"guarded","args":["toolong"]}')
+    assert_test "LP pool Err is class failure" "failure" "$(json_field "$lp" "class")"
+    lp=$(lp_request "$RENDER_SOCK" '{"method":"call","command":"echo","args":[]}')
+    assert_test "LP wrong arity is class bad-request" "bad-request" "$(json_field "$lp" "class")"
+    stop_daemon "$LAST_DAEMON_PID"
+
+    # MCP: every action is a `_render` value; a bare call runs @default.
+    mcp_out=$(printf '%s\n' \
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' \
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"Hi"}}}' \
+        '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"Hi","_render":"plain"}}}' \
+        '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"four","_render":"size"}}}' \
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"Hi","_render":"raw"}}}' \
+        '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"echo","arguments":{"_1":"Hi","_render":"nope"}}}' \
+        '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"guarded","arguments":{"_1":"toolong"}}}' \
+        '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"readFrom","arguments":{"_1":"-"}}}' \
+        '{"jsonrpc":"2.0","id":9,"method":"ping"}' \
+        | (cd "$RENDER_DIR" && timeout 60 morloc-nexus mcp ./nexus 2>/dev/null))
+    mcp_get() {
+        echo "$mcp_out" | python3 -c '
+import json, sys
+want, path = int(sys.argv[1]), sys.argv[2].split(".")
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get("id") == want:
+        v = m
+        for k in path:
+            v = v[int(k)] if k.isdigit() else v.get(k, "")
+        print(v)
+' "$1" "$2"
+    }
+    assert_test "MCP bare call runs @default" "HI" "$(mcp_get 2 result.content.0.resource.text)"
+    assert_test "MCP @default keeps its media type" "text/plain" "$(mcp_get 2 result.content.0.resource.mimeType)"
+    assert_test "MCP _render=plain is text" "hi" "$(mcp_get 3 result.content.0.resource.text)"
+    assert_test "MCP _render=size is JSON" "4" "$(mcp_get 4 result.content.0.text)"
+    assert_test "MCP _render=raw is the own value" '"Hi"' "$(mcp_get 5 result.content.0.text)"
+    assert_test "MCP unknown action is invalid params" "-32602" "$(mcp_get 6 error.code)"
+    assert_test "MCP pool Err is isError" "True" "$(mcp_get 7 result.isError)"
+    assert_test "MCP readFrom - is refused" "True" "$(mcp_get 8 result.isError)"
+    assert_test "the MCP session survives it" "{}" "$(mcp_get 9 result)"
 fi
 
 # ======================================================================
@@ -538,7 +634,7 @@ if should_run "http-status"; then
     echo "${BOLD}[http-status] HTTP status code classification${RESET}"
 
     HTTP_PORT=$(pick_port)
-    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval --eval-allow-no-auth
     wait_for_http "$HTTP_PORT" 10
 
     # 200 happy path (regression guard).
@@ -609,7 +705,7 @@ if should_run "http-eval-timeout"; then
     echo "${BOLD}[http-eval-timeout] /eval CPU budget -> 408${RESET}"
 
     HTTP_PORT=$(pick_port)
-    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval-timeout 1 \
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval --eval-allow-no-auth --eval-timeout 1 \
         --eval-allowed-modules root-py
     wait_for_http "$HTTP_PORT" 10
 
@@ -650,7 +746,7 @@ if should_run "http-typecheck-eval"; then
     echo "${BOLD}[http-typecheck-eval] /typecheck and /eval expressions${RESET}"
 
     HTTP_PORT=$(pick_port)
-    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" \
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval --eval-allow-no-auth \
         --eval-allowed-modules root-py
     wait_for_http "$HTTP_PORT" 10
 
@@ -685,6 +781,47 @@ if should_run "http-typecheck-eval"; then
     bad_status=$(json_field "$bad_resp" "status")
     assert_test "POST /typecheck ill-typed status=error" "error" "$bad_status"
 
+    stop_daemon "$LAST_DAEMON_PID"
+
+    # Eval is off unless asked for, and over HTTP it needs a token or the
+    # waiver (IFACE-13).
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    wait_for_http "$HTTP_PORT" 10
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -H "Content-Type: application/json" -d '{"expr":"2 + 2"}')
+    assert_test "POST /eval without --eval is not found" "not-found" "$(json_field "$result" "class")"
+    assert_http_status "POST /eval {} without --eval -> 404" "404" \
+        "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -X POST -H "Content-Type: application/json" -d '{}'
+    stop_daemon "$LAST_DAEMON_PID"
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval
+    wait_for_http "$HTTP_PORT" 10
+    assert_http_status "POST /eval with --eval and no token -> 403" "403" \
+        "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -X POST -H "Content-Type: application/json" -d '{}'
+    stop_daemon "$LAST_DAEMON_PID"
+    HTTP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval --auth-token s3cret --eval-allowed-modules root-py
+    wait_for_http "$HTTP_PORT" 10
+    result=$(curl -s --max-time 60 -X POST "http://127.0.0.1:${HTTP_PORT}/eval" \
+        -H "Authorization: Bearer s3cret" -H "Content-Type: application/json" -d '{"expr":"import root-py\n2 + 2"}')
+    assert_test "POST /eval with --eval and the token runs" "4" "$(json_field "$result" "result")"
+    stop_daemon "$LAST_DAEMON_PID"
+    EVAL_SOCK="/tmp/morloc-test-eval-$$.sock"
+    SOCKET_FILES+=("$EVAL_SOCK")
+    TCP_PORT=$(pick_port)
+    start_daemon "$ARITH_DIR" --socket "$EVAL_SOCK"
+    wait_for_daemon "$LAST_DAEMON_LOG" 10
+    lp=$(lp_request "$EVAL_SOCK" '{"method":"eval","expr":"2 + 2"}')
+    assert_test "LP eval without --eval is not found" "not-found" "$(json_field "$lp" "class")"
+    stop_daemon "$LAST_DAEMON_PID"
+    start_daemon "$ARITH_DIR" --port "$TCP_PORT" --eval
+    wait_for_daemon "$LAST_DAEMON_LOG" 10
+    lp=$(lp_request "127.0.0.1:$TCP_PORT" '{"method":"eval","expr":"2 + 2"}')
+    assert_test "TCP eval with --eval and no waiver is forbidden" "forbidden" "$(json_field "$lp" "class")"
+    assert_contains "a locked eval is logged at startup" "LOCKED on TCP" "$(cat "$LAST_DAEMON_LOG")"
     stop_daemon "$LAST_DAEMON_PID"
     echo ""
 fi
@@ -755,6 +892,63 @@ if should_run "http-json-args"; then
     assert_test "strlen of 'say \"hi\"' (object form) -> 8" "8" "$val"
 
     stop_daemon "$LAST_DAEMON_PID"
+
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 1b2: arguments by name
+#
+# An omitted option, flag or record field takes the value the command line
+# gives it (IFACE-5); names the command line would not take are refused.
+# ======================================================================
+
+if should_run "http-named-args"; then
+    echo "${BOLD}[http-named-args] Arguments by name${RESET}"
+
+    NAMED_DIR=$(mktemp -d)
+    WORK_DIRS+=("$NAMED_DIR")
+    compile_program "named.loc" "$NAMED_DIR"
+    HTTP_PORT=$(pick_port)
+    NAMED_SOCK="$NAMED_DIR/named.sock"
+    start_daemon "$NAMED_DIR" --http-port "$HTTP_PORT" --socket "$NAMED_SOCK"
+    wait_for_http "$HTTP_PORT" 10
+
+    named_call() {
+        curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/$1" \
+            -H "Content-Type: application/json" -d "$2"
+    }
+    named_result() {
+        json_field "$(named_call "$1" "$2")" "result"
+    }
+
+    assert_test "omitted option and flag take their defaults" \
+        "6" "$(named_result shift '{"args":{"_1":1}}')"
+    assert_test "named option and flag" \
+        "-3" "$(named_result shift '{"args":{"_1":1,"gap":2,"neg":true}}')"
+    assert_test "positional form fills every slot" \
+        "3" "$(named_result shift '[1,2,false]')"
+    assert_test "record fields default one by one" \
+        "none:3" "$(named_result configure '{"args":{"count":3}}')"
+    assert_test "no arguments at all takes every default" \
+        "none:1" "$(named_result configure '')"
+    assert_test "a field overrides the whole record" \
+        "y:4" "$(named_result configure '{"args":{"opts":{"count":4},"label":"y"}}')"
+    assert_test "a partial record is completed from defaults" \
+        "none:7" "$(named_result configure '[{"count":7}]')"
+    for body in '{"args":{"gap":2}}' '{"args":{"_1":1,"bogus":1}}' \
+                '{"args":{"_1":1,"neg":"yes"}}' '{"args":{"_1":1,"_1":2}}'; do
+        assert_http_status "refused: $body" "400" \
+            "http://127.0.0.1:${HTTP_PORT}/call/shift" \
+            -X POST -H "Content-Type: application/json" -d "$body"
+    done
+    assert_contains "a missing required argument is named" \
+        "missing required argument '_1'" "$(named_call shift '{"args":{"gap":2}}')"
+    result=$(lp_request "$NAMED_SOCK" '{"method":"call","command":"shift","args":{"_1":10,"neg":true}}')
+    assert_test "the socket takes arguments by name" "-15" "$(json_field "$result" "result")"
+
+    stop_daemon "$LAST_DAEMON_PID"
+
     echo ""
 fi
 
@@ -966,6 +1160,41 @@ if should_run "http-pure"; then
         -H "Content-Type: application/json" -d '[1, 2]')
     assert_contains "POST /call/swapLadder [1,2] calls named functions" '[2,1]' "$result"
 
+    # A top-level Err is a failed call, and the reply names its class.
+    assert_http_status "POST /call/checkErr -> 500" "500" \
+        "http://127.0.0.1:${HTTP_PORT}/call/checkErr" \
+        -X POST -H "Content-Type: application/json" -d '[]'
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/checkErr" \
+        -H "Content-Type: application/json" -d '[]')
+    assert_test "a top-level Err is class failure" "failure" "$(json_field "$result" "class")"
+    assert_contains "a top-level Err names its value" "nope" "$(json_field "$result" "error")"
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/checkOk" \
+        -H "Content-Type: application/json" -d '[]')
+    assert_test "a top-level Ok is a success" "ok" "$(json_field "$result" "status")"
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/nosuch" \
+        -H "Content-Type: application/json" -d '[]')
+    assert_test "an unknown command is class not-found" "not-found" "$(json_field "$result" "class")"
+    # A zero-argument command does not run on a body that holds no args.
+    for body in '{"args":5}' '{"x":1}' '5'; do
+        assert_http_status "POST /call/checkInt $body -> 400" "400" \
+            "http://127.0.0.1:${HTTP_PORT}/call/checkInt" \
+            -X POST -H "Content-Type: application/json" -d "$body"
+    done
+    assert_http_status "POST /call/checkInt non-UTF-8 body -> 400" "400" \
+        "http://127.0.0.1:${HTTP_PORT}/call/checkInt" \
+        -X POST -H "Content-Type: application/json" --data-binary $'\xff'
+    assert_http_status "POST /call/checkInt empty body -> 200" "200" \
+        "http://127.0.0.1:${HTTP_PORT}/call/checkInt" -X POST
+    stop_daemon "$LAST_DAEMON_PID"
+    PURE_SOCK="/tmp/morloc-test-pureargs-$$.sock"
+    SOCKET_FILES+=("$PURE_SOCK")
+    start_daemon "$PURE_DIR" --socket "$PURE_SOCK"
+    wait_for_daemon "$LAST_DAEMON_LOG" 10
+    lp=$(lp_request "$PURE_SOCK" '{"method":"call","command":"checkInt","args":null}')
+    assert_test "LP args null is refused, not run without args" "bad-request" "$(json_field "$lp" "class")"
+    lp=$(lp_request "$PURE_SOCK" '{"method":"call","command":"checkInt","args":{"x":1}}')
+    assert_test "LP named args are refused until supported" "bad-request" "$(json_field "$lp" "class")"
+
     stop_daemon "$LAST_DAEMON_PID"
     echo ""
 fi
@@ -1007,6 +1236,8 @@ if should_run "http-auth"; then
     code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
         -H "Content-Type: application/json" -d '[3, 4]')
     assert_test "a request with no token is refused" "401" "$code"
+    probe=$(curl -s "http://127.0.0.1:${HTTP_PORT}/health")
+    assert_test "the liveness probe needs no token and says only ok" '{"status":"ok"}' "$probe"
     code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${HTTP_PORT}/call/add" \
         -H "Authorization: Bearer nope" -H "Content-Type: application/json" -d '[3, 4]')
     assert_test "a request with a wrong token is refused" "401" "$code"
@@ -1066,6 +1297,18 @@ if should_run "socket"; then
     status=$(json_field "$result" "status")
     assert_test "socket unknown command returns error" "error" "$status"
 
+    # A request past the socket's cap is answered as a limit, not dropped (IFACE-12).
+    over=$(python3 -c "
+import json, socket, struct, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sys.argv[1])
+s.settimeout(10)
+body = b'x' * (70 * 1024 * 1024)
+s.sendall(struct.pack('>I', len(body)) + body)
+n = struct.unpack('>I', s.recv(4, socket.MSG_WAITALL))[0]
+print(json.loads(s.recv(n, socket.MSG_WAITALL)).get('class'))
+" "$SOCK_PATH" 2>/dev/null) || over=""
+    assert_test "socket: an oversized request sent whole is a limit" "limit" "$over"
     stop_daemon "$LAST_DAEMON_PID"
     echo ""
 fi
@@ -1526,12 +1769,12 @@ if should_run "worker-crash"; then
     echo "${BOLD}[worker-crash] a worker killed inside a call is recovered${RESET}"
 
     CRASH_DIR=$(mktemp -d)
+    # The retirement checks below wait seconds, not the default minute.
+    MORLOC_POOL_IDLE_TIMEOUT_MS=3000; export MORLOC_POOL_IDLE_TIMEOUT_MS
     WORK_DIRS+=("$CRASH_DIR")
     compile_program "crash.loc" "$CRASH_DIR"
     HTTP_PORT=$(pick_port)
-    MORLOC_PY_TRACE_RETIRE=1; export MORLOC_PY_TRACE_RETIRE
     start_daemon "$CRASH_DIR" --http-port "$HTTP_PORT"
-    unset MORLOC_PY_TRACE_RETIRE
     wait_for_http "$HTTP_PORT" 15
     local_pid=$LAST_DAEMON_PID
 
@@ -1556,21 +1799,11 @@ if should_run "worker-crash"; then
 
 
     # A worker started for a call blocked in another language retires once
-    # idle; a retirement ends nothing. Fork-mode workers are processes,
-    # thread-mode workers (the macOS default) are threads of one process.
+    # idle; a retirement ends nothing. Workers are processes.
     workers_of() { (pgrep -f "$CRASH_DIR/.*pools/py" 2>/dev/null || true) | wc -l | tr -d ' '; }
-    threads_of() {
-        tpid=$( (pgrep -f "$CRASH_DIR/.*pools/py" 2>/dev/null || true) | head -n 1)
-        [ -z "$tpid" ] && { echo 0; return; }
-        tn=$(ps -o nlwp= -p "$tpid" 2>/dev/null | tr -d ' \n')
-        case "$tn" in
-            ''|*[!0-9]*) ps -M -p "$tpid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ' ;;
-            *) echo "$tn" ;;
-        esac
-    }
     retire_check() {
         rc_label=$1
-        if [ "$2" = thread ]; then rc_count=threads_of; else rc_count=workers_of; fi
+        rc_count=workers_of
         recoveries=$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)
         base=$($rc_count)
         log_mark=$(wc -l < "$LAST_DAEMON_LOG" | tr -d ' ')
@@ -1588,26 +1821,22 @@ if should_run "worker-crash"; then
         after=$($rc_count)
         assert_test "worker-crash${rc_label}: an idle extra worker retires" "yes" "$([ "$after" -lt "$peak" ] && echo yes || echo no)"
         if [ "$after" -ge "$peak" ]; then
-            echo "      $2 pool, counting $rc_count: base $base, peak $peak, after $after; calls took ${calls_took}s"
+            echo "      counting $rc_count: base $base, peak $peak, after $after; calls took ${calls_took}s"
             echo "      every 0.5 s:$timeline"
             ps -axo pid,ppid,stat,etime,command 2>/dev/null | grep "$CRASH_DIR" | grep -v grep | cut -c1-200 | sed 's/^/      ps: /' || true
             tail -n "+$((log_mark + 1))" "$LAST_DAEMON_LOG" | cut -c1-200 | sed 's/^/      log: /'
             late=""
             for _ in $(seq 1 30); do sleep 1; late="$late $($rc_count)"; done
             echo "      30 more seconds, every 1 s:$late"
-            grep "py worker .*\(retiring\|cannot retire\)" "$LAST_DAEMON_LOG" | tail -n 5 | cut -c1-200 | sed 's/^/      late log: /' || true
+            grep "py worker .*cannot retire" "$LAST_DAEMON_LOG" | tail -n 5 | cut -c1-200 | sed 's/^/      late log: /' || true
         fi
         assert_test "worker-crash${rc_label}: a retirement starts no recovery" "$recoveries" \
             "$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)"
         result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/pyOk" -d '[9]')
         assert_test "worker-crash${rc_label}: works after a retirement" "9" "$(json_field "$result" "result")"
     }
-    case "${MORLOC_PY_POOL:-}" in
-        fork|thread) default_mode=$MORLOC_PY_POOL ;;
-        *) if [ "$(uname)" = Darwin ]; then default_mode=thread; else default_mode=fork; fi ;;
-    esac
     # A worker leaving by an exception no handler catches (SystemExit) ends
-    # the pool in either mode, so the daemon recovers what it held.
+    # the pool, so the daemon recovers what it held.
     exit_check() {
         ec_label=$1
         recoveries=$(grep -c "coordinated recovery starting" "$LAST_DAEMON_LOG" || true)
@@ -1622,24 +1851,12 @@ if should_run "worker-crash"; then
         result=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${HTTP_PORT}/call/pyOk" -d '[5]')
         assert_test "worker-crash${ec_label}: works after a SystemExit" "5" "$(json_field "$result" "result")"
     }
-    retire_check "" "$default_mode"
+    retire_check ""
     exit_check ""
 
     stop_daemon "$local_pid"
     pkill -9 -f "$CRASH_DIR" 2>/dev/null || true
-
-    if [ "$default_mode" = fork ]; then
-        HTTP_PORT=$(pick_port)
-        MORLOC_PY_POOL=thread; MORLOC_PY_TRACE_RETIRE=1; export MORLOC_PY_POOL MORLOC_PY_TRACE_RETIRE
-        start_daemon "$CRASH_DIR" --http-port "$HTTP_PORT"
-        unset MORLOC_PY_POOL MORLOC_PY_TRACE_RETIRE
-        wait_for_http "$HTTP_PORT" 15
-        local_pid=$LAST_DAEMON_PID
-        retire_check " thread pool" thread
-        exit_check " thread pool"
-        stop_daemon "$local_pid"
-        pkill -9 -f "$CRASH_DIR" 2>/dev/null || true
-    fi
+    unset MORLOC_POOL_IDLE_TIMEOUT_MS
     echo ""
 fi
 
@@ -1729,7 +1946,7 @@ if should_run "shutdown-wedged"; then
     # An /eval still compiling at shutdown is stopped with the daemon, not
     # left to run out its own limits.
     HTTP_PORT=$(pick_port)
-    start_daemon "$WEDGE_DIR" --http-port "$HTTP_PORT" --eval-timeout 120 \
+    start_daemon "$WEDGE_DIR" --http-port "$HTTP_PORT" --eval --eval-allow-no-auth --eval-timeout 120 \
         --eval-allowed-modules root-py
     wait_for_http "$HTTP_PORT" 10
     local_pid=$LAST_DAEMON_PID
@@ -1835,6 +2052,9 @@ if should_run "router"; then
         val=$(json_field "$result" "result" 2>/dev/null) || val=""
         assert_test "router call add status=ok" "ok" "$status"
         assert_test "router call add [5,10] result=15" "15" "$val"
+        result=$(curl -s -X POST "http://127.0.0.1:${ROUTER_PORT}/call/arithmetic/add" \
+            -H "Content-Type: application/json" -d '{"args":{"_2":10,"_1":5}}' 2>/dev/null) || result=""
+        assert_test "router call add by name result=15" "15" "$(json_field "$result" "result" 2>/dev/null)"
 
         # Call through router: square(4) -> 16
         result=$(curl -s -X POST "http://127.0.0.1:${ROUTER_PORT}/call/arithmetic/square" \
@@ -1863,6 +2083,13 @@ if should_run "router"; then
         assert_http_status "router POST /call/arithmetic/add 200 happy" "200" \
             "http://127.0.0.1:${ROUTER_PORT}/call/arithmetic/add" \
             -X POST -d '[1,2]'
+        # A child's failure keeps its class through the front end (IFACE-2).
+        assert_http_status "router POST /call/arithmetic/nosuch -> 404 (child's class)" "404" \
+            "http://127.0.0.1:${ROUTER_PORT}/call/arithmetic/nosuch" \
+            -X POST -d '[1,2]'
+        assert_http_status "router POST /call/arithmetic/add?render=nope -> 400" "400" \
+            "http://127.0.0.1:${ROUTER_PORT}/call/arithmetic/add?render=nope" \
+            -X POST -d '[1,2]'
 
         # Shutdown router
         stop_daemon "$ROUTER_PID"
@@ -1882,6 +2109,138 @@ if should_run "router"; then
             FAILURES+=("router cleans up child daemons")
         fi
     fi
+
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 10b: Served calls overlap (DAEMON-16)
+#
+# Two slow calls to one module through the front end, and two over MCP on
+# HTTP, finish in about the time of one; a ping during them is not held.
+# ======================================================================
+
+if should_run "concurrent-calls"; then
+    echo "${BOLD}[concurrent-calls] Served calls overlap${RESET}"
+
+    NAP_FDB=$(mktemp -d)
+    WORK_DIRS+=("$NAP_FDB")
+    mkdir -p "$NAP_FDB/nap"
+    compile_program "nap.loc" "$NAP_FDB/nap"
+    ln -s "$NAP_FDB/nap/nexus-build" "$NAP_FDB/nap/nap-build"
+    NEXUS_PATH="$(which morloc-nexus 2>/dev/null || echo "$HOME/.local/bin/morloc-nexus")"
+
+    # Prints the seconds two concurrent POSTs took, then the seconds a third
+    # request sent while they run took to answer.
+    overlap() {
+        python3 - "$@" <<'PY'
+import json, sys, threading, time, urllib.request
+url, body, probe_url, probe_body = sys.argv[1:5]
+headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+if len(sys.argv) > 5:
+    headers["Mcp-Session-Id"] = sys.argv[5]
+def post(u, b):
+    data = b.encode() if b else None
+    return urllib.request.urlopen(urllib.request.Request(u, data=data, headers=headers), timeout=60).read()
+results = []
+def call():
+    try:
+        reply = json.loads(post(url, body))
+        results.append(reply.get("status") == "ok" or ("result" in reply and not reply["result"].get("isError")))
+    except Exception:
+        results.append(False)
+began = time.time()
+calls = [threading.Thread(target=call) for _ in range(2)]
+for c in calls:
+    c.start()
+time.sleep(0.5)
+t = time.time()
+post(probe_url, probe_body)
+probe = time.time() - t
+for c in calls:
+    c.join()
+took = time.time() - began
+print("%.2f %.2f" % (took, probe) if results == [True, True] else "failed %.2f" % probe)
+PY
+    }
+    # True when $1 < $2 (seconds).
+    less_than() { python3 -c "import sys; sys.exit(0 if '$1' != 'failed' and float('$1') < float('$2') else 1)"; }
+
+    ROUTER_PORT=$(pick_port)
+    (exec "$NEXUS_PATH" router --http-port "$ROUTER_PORT" --fdb "$NAP_FDB" \
+        --program nap 2>"$NAP_FDB/router.log") &
+    NAP_ROUTER_PID=$!
+    DAEMON_PIDS+=("$NAP_ROUTER_PID")
+    wait_for_http "$ROUTER_PORT" 15 || true
+    # The first call starts the child daemon.
+    curl -s -X POST "http://127.0.0.1:${ROUTER_PORT}/call/nap/nap" -d '[0]' >/dev/null
+    read -r took probe <<<"$(overlap "http://127.0.0.1:${ROUTER_PORT}/call/nap/nap" '[2]' \
+        "http://127.0.0.1:${ROUTER_PORT}/health" '')"
+    TOTAL=$((TOTAL + 1))
+    printf "  %-50s " "front end: two 2 s calls to one module overlap"
+    if less_than "$took" 3.5; then
+        printf "%sPASS%s (%ss)\n" "$GREEN" "$RESET" "$took"; PASSED=$((PASSED + 1))
+    else
+        printf "%sFAIL%s (%ss)\n" "$RED" "$RESET" "$took"; FAILED=$((FAILED + 1))
+        FAILURES+=("front end: two calls to one module overlap (${took}s)")
+    fi
+    TOTAL=$((TOTAL + 1))
+    printf "  %-50s " "front end: a health probe during them is not held"
+    if less_than "$probe" 0.5; then
+        printf "%sPASS%s (%ss)\n" "$GREEN" "$RESET" "$probe"; PASSED=$((PASSED + 1))
+    else
+        printf "%sFAIL%s (%ss)\n" "$RED" "$RESET" "$probe"; FAILED=$((FAILED + 1))
+        FAILURES+=("front end: health probe held by calls (${probe}s)")
+    fi
+    stop_daemon "$NAP_ROUTER_PID"
+
+    MCP_PORT=$(pick_port)
+    (cd "$NAP_FDB/nap" && exec morloc-nexus mcp ./nexus --http-port "$MCP_PORT" 2>"$NAP_FDB/mcp.log") &
+    NAP_MCP_PID=$!
+    DAEMON_PIDS+=("$NAP_MCP_PID")
+    for _ in $(seq 1 50); do
+        curl -s "http://127.0.0.1:${MCP_PORT}/health" >/dev/null 2>&1 && break
+        sleep 0.2
+    done
+    MCP_URL="http://127.0.0.1:${MCP_PORT}/mcp"
+    sid=$(curl -s -D - -o /dev/null -X POST "$MCP_URL" -H "Content-Type: application/json" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}' \
+        | tr -d '\r' | awk -F': ' 'tolower($1)=="mcp-session-id"{print $2}')
+    curl -s -X POST "$MCP_URL" -H "Content-Type: application/json" -H "Mcp-Session-Id: $sid" \
+        -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
+    read -r took probe <<<"$(overlap "$MCP_URL" \
+        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nap","arguments":{"_1":2}}}' \
+        "$MCP_URL" '{"jsonrpc":"2.0","id":3,"method":"ping"}' "$sid")"
+    TOTAL=$((TOTAL + 1))
+    printf "  %-50s " "MCP over HTTP: two 2 s calls overlap"
+    if less_than "$took" 3.5; then
+        printf "%sPASS%s (%ss)\n" "$GREEN" "$RESET" "$took"; PASSED=$((PASSED + 1))
+    else
+        printf "%sFAIL%s (%ss)\n" "$RED" "$RESET" "$took"; FAILED=$((FAILED + 1))
+        FAILURES+=("MCP over HTTP: two calls overlap (${took}s)")
+    fi
+    TOTAL=$((TOTAL + 1))
+    printf "  %-50s " "MCP over HTTP: a ping during them is not held"
+    if less_than "$probe" 0.5; then
+        printf "%sPASS%s (%ss)\n" "$GREEN" "$RESET" "$probe"; PASSED=$((PASSED + 1))
+    else
+        printf "%sFAIL%s (%ss)\n" "$RED" "$RESET" "$probe"; FAILED=$((FAILED + 1))
+        FAILURES+=("MCP over HTTP: ping held by calls (${probe}s)")
+    fi
+    # A body past the cap is answered as a limit (NET-10).
+    big=$(python3 -c "
+import sys, urllib.request, urllib.error
+body = b'x' * (64 * 1024 * 1024 + 1)
+try:
+    urllib.request.urlopen(urllib.request.Request(sys.argv[1], data=body, headers={'Content-Type': 'application/json'}), timeout=30)
+    print('accepted')
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception as e:
+    print(type(e).__name__)
+" "$MCP_URL")
+    assert_test "MCP over HTTP: an oversized body is 413" "413" "$big"
+    stop_daemon "$NAP_MCP_PID"
 
     echo ""
 fi
@@ -2048,7 +2407,6 @@ if should_run "soak"; then
         SOAK_CHURN="--workers $SOAK_W --requests 25 --rounds 60"
         SOAK_PIN_CHURN="--workers $SOAK_W --requests 20 --rounds 60"
         SOAK_PIN_CONC="--workers $SOAK_WB --requests 100 --rounds 40"
-        SOAK_THREAD_CHURN="--workers $SOAK_W --requests 20 --rounds 30"
     else
         SOAK_CHURN="--workers $SOAK_W --requests 12 --rounds 2"
         SOAK_PIN_CHURN="--workers $SOAK_W --requests 10 --rounds 2"
@@ -2255,65 +2613,8 @@ if should_run "soak"; then
             stop_daemon "$PIN_PID"
         fi
 
-        # The Python pool picks its concurrency model by platform: worker
-        # processes on Linux, worker threads on macOS, because forking a live
-        # interpreter aborts there. The two share almost no code path, so a
-        # run on Linux says nothing about the model macOS actually ships --
-        # and the threaded one, where workers share an address space, is
-        # where a concurrency fault has room to do damage. A long run on any
-        # other platform therefore takes a pass with it forced on, so whoever
-        # is hunting covers the model they are not otherwise testing. On
-        # macOS this is already what ran, three phases ago.
-        if [ "$MORLOC_TEST_LEVEL" = "long" ] && [ "$(uname -s)" != "Darwin" ]; then
-            THR_PORT=$(pick_port)
-            THR_LOG="$SOAK_DIR/threaded.log"
-            (cd "$SOAK_DIR" && export MORLOC_PY_POOL=thread && \
-                exec morloc-nexus daemon ./nexus \
-                --http-port "$THR_PORT" 2>"$THR_LOG") &
-            THR_PID=$!
-            DAEMON_PIDS+=("$THR_PID")
-            wait_for_http "$THR_PORT" 20 || true
-            curl -s -o /dev/null --max-time 30 -X POST \
-                "http://127.0.0.1:${THR_PORT}/call/pyEcho" \
-                -H "Content-Type: application/json" -d '[[1,2,3]]'
-
-            # Confirm the setting reached the pool rather than assuming it.
-            # A test that quietly exercises the default model while claiming
-            # otherwise is worse than not running: it reports coverage of the
-            # one platform nobody else is testing.
-            thr_pools=0
-            for cp in $(pgrep -P "$THR_PID" 2>/dev/null); do
-                if tr '\0' '\n' < "/proc/$cp/environ" 2>/dev/null |  # portable: this phase runs off macOS only
-                        grep -q '^MORLOC_PY_POOL=thread$'; then
-                    thr_pools=$((thr_pools + 1))
-                fi
-            done
-            assert_test "threaded pool model actually in force" "yes" \
-                "$([ "$thr_pools" -gt 0 ] && echo yes || echo no)"
-
-            thr_out=$(python3 "$SCRIPT_DIR/soak-client.py" "$THR_PORT" churn \
-                $SOAK_THREAD_CHURN 2>&1) && thr_rc=0 || thr_rc=$?
-            assert_test "correct under the threaded pool model" "0" "$thr_rc"
-            if [ "$thr_rc" != "0" ]; then
-                echo "      $thr_out"
-            fi
-
-            thr_noise=$(grep -vE \
-                -e '^morloc-daemon: listening ' \
-                -e '^morloc daemon: pool crash detected' \
-                -e '^ *pool [0-9]+: Pool process crashed with signal ' \
-                -e '^morloc daemon: recovery complete ' \
-                "$THR_LOG" 2>/dev/null | grep -c .) || thr_noise=0
-            assert_test "threaded pool logged nothing unexpected" "0" "$thr_noise"
-            if [ "$thr_noise" != "0" ]; then
-                sed 's/^/      /' "$THR_LOG"
-            fi
-
-            stop_daemon "$THR_PID"
-        fi
-
         if [ "$FAILED" -gt "$SOAK_FAILED_BEFORE" ]; then
-            for lg in "$SOAK_LOG" "$SOAK_DIR/pinned.log" "$SOAK_DIR/threaded.log"; do
+            for lg in "$SOAK_LOG" "$SOAK_DIR/pinned.log"; do
                 [ -s "$lg" ] || continue
                 echo "      --- $(basename "$lg") ---"
                 sed 's/^/      /' "$lg"
@@ -2976,6 +3277,50 @@ print('OK')
         echo "      first pass=${first_pass} B (working set)  second pass=${delta_size} B  new_volumes=${delta_count}"
 
         stop_daemon "$IT_DAEMON_PID"
+    fi
+
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 19: A pool keeps a view of an inline argument
+# ======================================================================
+#
+# SHM-7: an argument sent by reference is one block. A Python pool reads a
+# large numeric argument as a numpy view and keeps it past the call; the
+# daemon read the argument from inline JSON. A later call totals the kept
+# views, which must still hold the values sent.
+
+if should_run "kept-view"; then
+    echo "${BOLD}[kept-view] A pool keeps a view of an inline argument${RESET}"
+
+    KV_DIR=$(mktemp -d)
+    WORK_DIRS+=("$KV_DIR")
+    if ! compile_program "kept-view.loc" "$KV_DIR"; then
+        TOTAL=$((TOTAL + 1))
+        FAILED=$((FAILED + 1))
+        FAILURES+=("kept-view: compilation failed")
+    else
+        KV_PORT=$(pick_port)
+        start_daemon "$KV_DIR" --http-port "$KV_PORT"
+        wait_for_http "$KV_PORT" 15
+        KV_DAEMON_PID=$LAST_DAEMON_PID
+
+        kv_keep() {
+            python3 -c "import json; print(json.dumps([[$1] * 20000]))" \
+                | curl -s --max-time 30 -X POST "http://127.0.0.1:${KV_PORT}/call/keepView" \
+                    -H "Content-Type: application/json" --data-binary @-
+        }
+        views=""
+        for x in 1.0 2.0 3.0; do
+            views="${views}$(json_field "$(kv_keep "$x")" result)"
+        done
+        assert_test "each argument arrives as a view" "111" "$views"
+        total=$(curl -s --max-time 30 -X POST "http://127.0.0.1:${KV_PORT}/call/keptTotal" \
+            -H "Content-Type: application/json" -d '[0]')
+        assert_test "kept views hold the values sent" "120000" "$(json_field "$total" result)"
+
+        stop_daemon "$KV_DAEMON_PID"
     fi
 
     echo ""

@@ -1,0 +1,137 @@
+-- A label wraps each call made through the labeled name, and nothing else:
+-- what the callee's body is, how the result is used, and the calls the
+-- callee makes itself do not change the count. Each export runs alone, so
+-- each benchmark summary row counts the calls one command made through one
+-- label.
+module main
+  ( letBody, guardBody, matchBody, opBody
+  , recOuter, recInner
+  , bindIO, letIO, bangIO, finalIO
+  , whereHelper, mapped, partial, inTuple, inBranch
+  , crossLang, lambdaBound, letBound, tailRec, staged
+  )
+
+import root
+import root-py
+import root-cpp
+
+source Py from "lib.py" ("double", "incr", "add2", "apply_py" as applyPy, "slow")
+source Cpp from "lib.hpp" ("triple")
+
+double :: Int -> Int
+incr :: Int -> <IO> Int
+add2 :: Int -> Int -> Int
+applyPy :: (Int -> Int) -> Int -> Int
+triple :: Int -> Int
+slow :: Int -> Int
+
+data Parity = Even | Odd
+
+parity :: Int -> Parity
+parity x
+  ? x % 2 == 0 = Even
+  : Odd
+
+quadLet :: Int -> Int
+quadLet x = let y = double x in double y
+
+quadGuard :: Int -> Int
+quadGuard x
+  ? x > 0 = double (double x)
+  : double x
+
+quadMatch :: Int -> Int
+quadMatch x = match parity x
+  | Even = double (double x)
+  | Odd = double x
+
+quadOp :: Int -> Int
+quadOp x = double x + double x
+
+count :: [Int] -> Int
+count xs = ? length xs == 0 = 0 : 1 + count (.[1:] xs)
+
+countIn :: [Int] -> Int
+countIn xs = ? length xs == 0 = 0 : 1 + l@countIn (.[1:] xs)
+
+run :: Int -> <IO> Int
+run x = do
+  incr x
+
+letBody :: Int -> Int
+letBody x = l@quadLet x
+
+guardBody :: Int -> Int
+guardBody x = l@quadGuard x
+
+matchBody :: Int -> Int
+matchBody x = l@quadMatch x
+
+opBody :: Int -> Int
+opBody x = l@quadOp x
+
+recOuter :: [Int] -> Int
+recOuter xs = l@count xs
+
+recInner :: [Int] -> Int
+recInner xs = countIn xs
+
+bindIO :: Int -> <IO> Int
+bindIO x = do
+  y <- l@run x
+  y
+
+letIO :: Int -> <IO> Int
+letIO x = do
+  let y = l@run x
+  y
+
+bangIO :: Int -> <IO> Int
+bangIO x = do
+  incr !(l@run x)
+
+finalIO :: Int -> <IO> Int
+finalIO x = do
+  l@run x
+
+whereHelper :: Int -> Int
+whereHelper x = h x + h (x + 1)
+  where
+    h y = l@double y
+
+mapped :: [Int] -> [Int]
+mapped xs = map l@quadLet xs
+
+partial :: [Int] -> [Int]
+partial xs = map (l@add2 1) xs
+
+inTuple :: Int -> (Int, Int)
+inTuple x = (l@double x, double x)
+
+inBranch :: Int -> Int
+inBranch x
+  ? x > 0 = l@double x
+  : double x
+
+crossLang :: Int -> Int
+crossLang x = double (l@triple x)
+
+lambdaBound :: Int -> Int
+lambdaBound x = applyQ double x
+  where
+    applyQ q y = l@q y
+
+letBound :: Int -> Int
+letBound x = let g = double in l@g x
+
+go :: Int -> Int -> Int
+go n acc = ? n == 0 = acc : l@go (n - 1) (add2 acc n)
+
+tailRec :: Int -> Int
+tailRec n = go n 0
+
+st :: Int -> Int -> Int
+st a = let k = slow a in \b -> add2 k b
+
+staged :: [Int] -> [Int]
+staged xs = map (l@st 1) xs

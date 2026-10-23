@@ -34,10 +34,10 @@ Morloc runs natively on Linux, macOS (new ARM chips), and Windows WSL.
 Run this to install the Morloc Installation Manager (`mim`):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/morloc-project/morloc-manager/main/scripts/install.sh | sh
-mim new     # bulid the environment
+curl -fsSL https://morloc.io/install.sh | sh
+mim new     # build the environment
 mim shell   # drop into a shell
-mim demo    # pull cool morloc demos
+mim demos   # pull cool morloc demos
 ```
 
 The build is native by default, add the `--engine docker` flag to build in a

@@ -1,0 +1,23 @@
+rejected let
+rejected getter
+rejected param
+rejected op
+rejected hof
+rejected newtype
+rejected mixed
+rejected sortby
+rejected fn
+11
+10
+10
+12
+7
+23
+11
+8
+10
+5
+[1,2,5]
+11
+18
+13

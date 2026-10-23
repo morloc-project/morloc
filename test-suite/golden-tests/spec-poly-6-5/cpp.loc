@@ -1,0 +1,7 @@
+-- Spec POLY-6: main.loc's index in a C++ pool.
+module main (f)
+
+import root-cpp
+
+f :: [Str] -> U64 -> Str
+f xs x = .[tryInto x] xs

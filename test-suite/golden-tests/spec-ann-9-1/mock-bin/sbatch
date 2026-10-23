@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Mock sbatch: runs the --wrap command synchronously in the submitting
+# directory, as sbatch does, with MOCK_NODE=worker; records the job state
+# for the mock sacct and its resource options, and prints a job id.
+# MOCK_SBATCH_STATE=<STATE> skips the command and records STATE.
+set -u
+dir="$MOCK_SLURM_DIR"
+out=/dev/null
+err=/dev/null
+wrap=
+opts=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        -e) err="$2"; shift 2 ;;
+        --wrap=*) wrap="${1#--wrap=}"; shift ;;
+        --parsable) shift ;;
+        *) opts="$opts $1"; shift ;;
+    esac
+done
+mkdir -p "$dir"
+id=$(( $(cat "$dir/next" 2>/dev/null || echo 100) + 1 ))
+echo "$id" > "$dir/next"
+echo "$id" >> "$dir/jobs"
+echo "${opts# }" >> "$dir/options"
+if [ -n "${MOCK_SBATCH_STATE:-}" ]; then
+    echo "$MOCK_SBATCH_STATE" > "$dir/state-$id"
+else
+    if (MOCK_NODE=worker bash -c "$wrap" > "$out" 2> "$err"); then
+        echo COMPLETED > "$dir/state-$id"
+    else
+        echo FAILED > "$dir/state-$id"
+    fi
+fi
+echo "$id"

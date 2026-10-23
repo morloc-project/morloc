@@ -5,7 +5,7 @@ source Py from "foo.py" ("foo")
 foo :: Str -> JsonObj
 
 type Py => Str = "str"
-newtype JsonObj
+newtype JsonObj = Str
 type Py => JsonObj = "dict"
 
 class Packable a b where

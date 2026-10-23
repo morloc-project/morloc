@@ -12,7 +12,11 @@
 //! builder, schema parser, pool send/receive) and for evaluating
 //! pure commands via `morloc_eval`.
 
-use crate::manifest::{Arg, Check, Command, FormAtom, Manifest, SourceAtom};
+use crate::manifest::{Check, Command, Manifest, SourceAtom};
+pub use morloc_manifest::cli_value::{
+    build_list_config_json, element_schema_str, maybe_float_special_to_json, schema_is_float_scalar,
+    shaped_dispatch_codes, ArgShape,
+};
 use crate::process::{self, PoolSocket};
 
 /// Output format enum.
@@ -185,22 +189,28 @@ impl Default for NexusConfig {
     }
 }
 
-/// Collapse runs of adjacent identical lines in an error message.
-///
-/// When an error bubbles up through deep recursion across pool boundaries,
-/// each layer may prepend the same wrapper string to the inner cause. The
-/// result is N copies of the same line burying the root cause. This pass
-/// keeps the first occurrence of each adjacent duplicate and drops the rest.
-/// Non-adjacent duplicates are preserved (they may be legitimate repeats).
+/// Print a run of adjacent identical lines in an error message once, followed
+/// by the number of repeats (DIAG-5), so a trace through deep recursion does
+/// not bury the root cause. Non-adjacent duplicates are kept.
 fn collapse_duplicate_lines(msg: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for line in msg.split_inclusive('\n') {
-        if out.last().map_or(false, |prev| *prev == line) {
-            continue;
+    let mut out = String::with_capacity(msg.len());
+    let mut lines = msg.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        out.push_str(line);
+        let mut repeats = 0usize;
+        while lines.peek() == Some(&line) {
+            lines.next();
+            repeats += 1;
         }
-        out.push(line);
+        if repeats > 0 {
+            let plural = if repeats == 1 { "" } else { "s" };
+            out.push_str(&format!("\n  [previous line repeated {repeats} more time{plural}]"));
+        }
+        if lines.peek().is_some() {
+            out.push('\n');
+        }
     }
-    out.concat()
+    out
 }
 
 const STDOUT_BUF_CAPACITY: usize = 64 * 1024;
@@ -412,169 +422,6 @@ pub fn dispatch_command_parsed(
     }
 }
 
-/// CLI-shape directives pulled out of a manifest arg. Single-atom
-/// fields under the simplified grammar (no OR-chains).
-#[derive(Debug, Clone)]
-pub struct ArgShape<'a> {
-    pub source: SourceAtom,
-    pub form: FormAtom,
-    pub checks: &'a [Check],
-    pub list_source: SourceAtom,
-    pub list_form: FormAtom,
-    pub list_checks: &'a [Check],
-}
-
-impl<'a> ArgShape<'a> {
-    /// Extract the shape view from a manifest arg, returning `None` for
-    /// variants (Flag, Group) that have no shape vocabulary.
-    pub fn from_arg(arg: &'a Arg) -> Option<ArgShape<'a>> {
-        match arg {
-            Arg::Positional { source, form, checks, list_source, list_form, list_checks, .. } |
-            Arg::Optional   { source, form, checks, list_source, list_form, list_checks, .. } => {
-                Some(ArgShape {
-                    source: *source,
-                    form: *form,
-                    checks: checks.as_slice(),
-                    list_source: *list_source,
-                    list_form: *list_form,
-                    list_checks: list_checks.as_slice(),
-                })
-            }
-            Arg::Flag { .. } | Arg::Group { .. } | Arg::Alt { .. } => None,
-        }
-    }
-
-    /// True when every field is at its compiler-emitted default
-    /// (`source = Auto`, `form = Auto`, no checks, `list_source =
-    /// Inline`, `list_form = Auto`, no list_checks). The default shape
-    /// carries the same semantics as the existing
-    /// `parse_cli_data_argument` path, so the caller can skip the
-    /// shape-aware route entirely.
-    pub fn is_default(&self) -> bool {
-        self.source == SourceAtom::Auto
-            && self.form == FormAtom::Auto
-            && self.checks.is_empty()
-            && self.list_source == SourceAtom::Inline
-            && self.list_form == FormAtom::Auto
-            && self.list_checks.is_empty()
-    }
-}
-
-/// If the wire schema is a list (`aT` or `aT:<dim>`), return its
-/// element schema as a string. Returns `None` for non-list schemas.
-pub fn element_schema_str(schema_str: &str) -> Option<String> {
-    let mut s = schema_str.trim();
-    if let Some(rest) = s.strip_prefix('<') {
-        if let Some(end) = rest.find('>') {
-            s = &rest[end + 1..];
-        }
-    }
-    let rest = s.strip_prefix('a')?;
-    let rest = if let Some(after_colon) = rest.strip_prefix(':') {
-        after_colon.trim_start_matches(|c: char| c.is_ascii_digit())
-    } else {
-        rest
-    };
-    Some(rest.to_string())
-}
-
-/// True if the rendered wire schema reduces to a scalar `Float32`
-/// (`f4`) or `Float64` (`f8`) primitive (with optional `?` and hint
-/// wrapping). Used to decide whether an argv token like `inf`,
-/// `-inf`, or `nan` should be reinterpreted as an IEEE 754 special.
-pub fn schema_is_float_scalar(schema_str: &str) -> bool {
-    let mut s = schema_str.trim();
-    if let Some(rest) = s.strip_prefix('?') {
-        s = rest;
-    }
-    if let Some(rest) = s.strip_prefix('<') {
-        if let Some(end) = rest.find('>') {
-            s = &rest[end + 1..];
-        }
-    }
-    s == "f4" || s == "f8"
-}
-
-/// If the argv string is a recognized IEEE 754 special-value literal,
-/// return its JSON-quoted form (`"inf"`, `"-inf"`, `"nan"`). The morloc
-/// JSON wire layer accepts these quoted lowercase variants per the
-/// non-finite-Real convention; this helper lets a user type
-/// `inf` / `nan` / `\-inf` on the command line. `\-inf` is the
-/// shell-safe spelling of `-inf` — the leading backslash bypasses
-/// clap's flag-cluster interpretation of the bare `-i`/`-n`/`-f`
-/// sequence.
-pub fn maybe_float_special_to_json(argv: &str) -> Option<String> {
-    let trimmed = argv.trim();
-    let stripped = trimmed.strip_prefix('\\').unwrap_or(trimmed);
-    let inner = match stripped {
-        "inf" => "inf",
-        "-inf" => "-inf",
-        "nan" => "nan",
-        _ => return None,
-    };
-    Some(format!("\"{}\"", inner))
-}
-
-/// Process inline byte-string escape sequences. The default mapping is
-/// "argv char -> UTF-8 bytes"; the recognized escapes let users encode
-/// arbitrary byte values that wouldn't otherwise survive the shell or
-/// argv layer.
-///
-/// Recognized escapes (errors on anything else):
-///   `\\`  literal backslash
-///   `\n`  byte 0x0A
-///   `\t`  byte 0x09
-///   `\r`  byte 0x0D
-///   `\0`  byte 0x00
-///   `\xNN` byte with the given two-digit hex value
-///
-/// A `\0` escape produces a real NUL byte in the output buffer even
-/// though argv itself cannot contain NUL.
-pub fn process_inline_bytes_escapes(argv: &str) -> Result<Vec<u8>, String> {
-    let mut out: Vec<u8> = Vec::with_capacity(argv.len());
-    let mut chars = argv.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            let mut buf = [0u8; 4];
-            let s = c.encode_utf8(&mut buf);
-            out.extend_from_slice(s.as_bytes());
-            continue;
-        }
-        match chars.next() {
-            Some('\\') => out.push(b'\\'),
-            Some('n') => out.push(b'\n'),
-            Some('t') => out.push(b'\t'),
-            Some('r') => out.push(b'\r'),
-            Some('0') => out.push(0),
-            Some('x') => {
-                let h1 = chars
-                    .next()
-                    .ok_or_else(|| "incomplete `\\x` escape: needs two hex digits".to_string())?;
-                let h2 = chars
-                    .next()
-                    .ok_or_else(|| "incomplete `\\x` escape: needs two hex digits".to_string())?;
-                if !h1.is_ascii_hexdigit() || !h2.is_ascii_hexdigit() {
-                    return Err(format!(
-                        "invalid `\\x` escape: `\\x{}{}` must be two hex digits",
-                        h1, h2
-                    ));
-                }
-                let byte = (h1.to_digit(16).unwrap() as u8) * 16
-                    + (h2.to_digit(16).unwrap() as u8);
-                out.push(byte);
-            }
-            Some(other) => {
-                return Err(format!(
-                    "unrecognized escape: `\\{}`; supported: \\\\ \\n \\t \\r \\0 \\xNN",
-                    other
-                ));
-            }
-            None => return Err("trailing backslash with no escape character".to_string()),
-        }
-    }
-    Ok(out)
-}
-
 /// If `argv` is the Unix stdin/stdout shorthand `-` and the arg
 /// names a file, return the OS path that selects the corresponding
 /// standard stream (so the pool's `fopen` etc. can open it as a regular
@@ -770,116 +617,12 @@ pub fn preprocess_cli_value(
     if quoted_flag { quoted(&v) } else { v }
 }
 
-/// Apply the shape directives to a raw argv token: run any nexus-side
-/// transforms (inline bytes -> JSON array) and value-invariant checks
-/// (`check.path`). Any error aborts via `die_with_error`.
-///
-/// Special case: when `source: inline` and `form: bytes` (or
-/// `bytes-only`), the argv is escape-processed to a `Vec<u8>` and
-/// JSON-encoded as `[byte, byte, ...]`. The runtime then sees a JSON
-/// inline value and decodes it through `read_json_with_schema`. This
-/// is the DNA-style ASCII-bytes shortcut on `[UInt8]`.
+/// `morloc_manifest::cli_value::shape_argv` for argument `i`, ending the
+/// run on a malformed token.
 pub fn apply_shape_to_argv(raw: String, shape: Option<&ArgShape>, i: usize) -> String {
-    let shape = match shape {
-        Some(s) if !s.is_default() => s,
-        _ => return raw,
-    };
-
-    let inline_bytes_shortcut = shape.source == SourceAtom::Inline
-        && (shape.form == FormAtom::Bytes || shape.form == FormAtom::BytesOnly);
-    if inline_bytes_shortcut {
-        let bytes = match process_inline_bytes_escapes(&raw) {
-            Ok(b) => b,
-            Err(e) => crate::runlog::die_with_error(&format!("argument #{}: {}", i, e)),
-        };
-        let parts: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
-        return format!("[{}]", parts.join(","));
-    }
-
-    raw
-}
-
-/// Return the `(source_code, form_code)` pair to pass through the
-/// shape-aware FFI, or `None` when the runtime can use the cheaper
-/// default path. The default case includes the `source: inline +
-/// form: bytes/bytes-only` shortcut on `[UInt8]`, which is already
-/// JSON-encoded by `apply_shape_to_argv`.
-pub fn shaped_dispatch_codes(shape: &ArgShape) -> Option<(u8, u8)> {
-    let inline_bytes_shortcut = shape.source == SourceAtom::Inline
-        && (shape.form == FormAtom::Bytes || shape.form == FormAtom::BytesOnly);
-    if shape.is_default() || inline_bytes_shortcut {
-        return None;
-    }
-    Some((source_atom_code(shape.source), form_atom_code(shape.form)))
-}
-
-/// Serialize the per-element shape portion of an ArgShape into the
-/// JSON the runtime's `parse_cli_data_argument_shaped` expects.
-/// Returns `None` when every per-element field is at its default, so
-/// the runtime can skip the per-element pipeline entirely.
-pub fn build_list_config_json(shape: &ArgShape) -> Option<String> {
-    let list_source_is_default = shape.list_source == SourceAtom::Inline;
-    let list_form_is_default = shape.list_form == FormAtom::Auto;
-    if list_source_is_default && list_form_is_default && shape.list_checks.is_empty() {
-        return None;
-    }
-    let source_str = source_atom_name(shape.list_source);
-    let form_str = form_atom_name(shape.list_form);
-    let checks_parts: Vec<String> = shape
-        .list_checks
-        .iter()
-        .map(|c| match c {
-            Check::Path(p) => format!(
-                "{{\"kind\":\"path\",\"value\":{}}}",
-                serde_json::to_string(p).unwrap_or_else(|_| "\"\"".to_string())
-            ),
-        })
-        .collect();
-    Some(format!(
-        "{{\"source\":\"{}\",\"form\":\"{}\",\"checks\":[{}]}}",
-        source_str,
-        form_str,
-        checks_parts.join(",")
-    ))
-}
-
-/// Wire-stable u8 code for a source atom. Must match the dispatch
-/// arms in the runtime.
-pub fn source_atom_code(atom: SourceAtom) -> u8 {
-    match atom {
-        SourceAtom::Auto => 0,
-        SourceAtom::Inline => 1,
-        SourceAtom::File => 2,
-    }
-}
-
-/// Wire-stable u8 code for a form atom. Must match the dispatch arms
-/// in `parse_cli_data_argument_shaped` (morloc-runtime).
-pub fn form_atom_code(atom: FormAtom) -> u8 {
-    match atom {
-        FormAtom::Auto => 0,
-        FormAtom::Packet => 1,
-        FormAtom::Bytes => 2,
-        FormAtom::List => 3,
-        FormAtom::BytesOnly => 4,
-    }
-}
-
-fn source_atom_name(atom: SourceAtom) -> &'static str {
-    match atom {
-        SourceAtom::Auto => "auto",
-        SourceAtom::Inline => "inline",
-        SourceAtom::File => "file",
-    }
-}
-
-fn form_atom_name(atom: FormAtom) -> &'static str {
-    match atom {
-        FormAtom::Auto => "auto",
-        FormAtom::Packet => "packet",
-        FormAtom::Bytes => "bytes",
-        FormAtom::List => "list",
-        FormAtom::BytesOnly => "bytes-only",
+    match morloc_manifest::cli_value::shape_argv(raw, shape) {
+        Ok(text) => text,
+        Err(e) => crate::runlog::die_with_error(&format!("argument #{}: {}", i, e)),
     }
 }
 
@@ -1150,6 +893,9 @@ fn run_remote_command(
     }
     unsafe { morloc_inherit_reply(full_packet.as_ptr()) };
 
+    if reply_is_pipe_closed(&full_packet) {
+        process::exit_broken_pipe();
+    }
     // Check for error
     match packet::get_error_message(&full_packet) {
         Ok(Some(err_msg)) => {
@@ -1187,7 +933,7 @@ fn run_remote_command(
         process::clean_exit(1);
     }
 
-    die_on_top_level_err(result_ptr, &return_schema, c_schema);
+    die_on_top_level_err(result_ptr, c_schema);
 
     // A table-typed result is a block whatever packet form carried it
     // (a reference, or a file a cached result was read back from).
@@ -1563,33 +1309,22 @@ unsafe fn json_arg_packet(
 /// already shows.
 fn die_on_top_level_err(
     result_ptr: *mut u8,
-    return_schema: &morloc_runtime_types::schema::Schema,
     c_schema: *const morloc_runtime_types::cschema::CSchema,
 ) {
     extern "C" {
-        fn mlc_show(
+        fn morloc_top_level_err(
             voidstar: *const std::ffi::c_void,
             schema: *const morloc_runtime_types::cschema::CSchema,
-            errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut std::ffi::c_char;
     }
-    if morloc_runtime_types::schema::SerialType::Variant != return_schema.serial_type {
+    let out = unsafe { morloc_top_level_err(result_ptr as *const std::ffi::c_void, c_schema) };
+    if out.is_null() {
         return;
     }
-    let tag = unsafe { *result_ptr } as usize;
-    if !return_schema.keys.get(tag).map(|k| k == "Err").unwrap_or(false) {
-        return;
-    }
-    let mut show_err: *mut std::ffi::c_char = std::ptr::null_mut();
     let rendered = unsafe {
-        let out = mlc_show(result_ptr as *const std::ffi::c_void, c_schema, &mut show_err);
-        if out.is_null() {
-            process::take_c_errmsg(show_err).unwrap_or_else(|| "unknown error".into())
-        } else {
-            let text = std::ffi::CStr::from_ptr(out).to_string_lossy().into_owned();
-            libc::free(out as *mut std::ffi::c_void);
-            text
-        }
+        let text = std::ffi::CStr::from_ptr(out).to_string_lossy().into_owned();
+        libc::free(out as *mut std::ffi::c_void);
+        text
     };
     crate::runlog::record_error(&rendered);
     eprintln!("Error: run failed\n{}", rendered);
@@ -1643,6 +1378,7 @@ pub(crate) fn print_result_c(
 
     // A command that streamed to stdout and then returns a value prints the
     // completed stream first.
+    crate::custody_finish(true);
     crate::stdio_server::finish_stdout();
 
     // A stage saves the result for the actions, and prints it only when
@@ -1944,11 +1680,13 @@ pub(crate) fn print_result_c(
             }
         }
         OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv | OutputFormat::Tsv => {
-            // Table-only output formats: the result is a table block,
-            // serialized from there.
-            if !is_arrow {
+            // A table block is serialized from the block; a list of
+            // records may also be written as CSV or TSV (CLI-17).
+            let rows_csv = !is_arrow
+                && matches!(config.output_format, OutputFormat::Csv | OutputFormat::Tsv);
+            if !is_arrow && !rows_csv {
                 eprintln!(
-                    "Error: --format=arrow|parquet|csv|tsv requires a Table return type"
+                    "Error: --format=arrow|parquet requires a Table return type"
                 );
                 process::clean_exit(1);
             }
@@ -1972,12 +1710,25 @@ pub(crate) fn print_result_c(
                     out_len: *mut usize,
                     errmsg: *mut *mut std::ffi::c_char,
                 ) -> i32;
+                fn write_rows_csv_to_buffer(
+                    data: *const std::ffi::c_void,
+                    schema: *const std::ffi::c_void,
+                    delimiter: u8,
+                    out_buf: *mut *mut u8,
+                    out_len: *mut usize,
+                    errmsg: *mut *mut std::ffi::c_char,
+                ) -> i32;
             }
             let mut buf: *mut u8 = std::ptr::null_mut();
             let mut len: usize = 0;
             let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+            let delimiter = if matches!(config.output_format, OutputFormat::Tsv) { b'\t' } else { b',' };
             let rc = unsafe {
                 match config.output_format {
+                    _ if rows_csv => write_rows_csv_to_buffer(
+                        ptr as *const std::ffi::c_void, schema as *const std::ffi::c_void,
+                        delimiter, &mut buf, &mut len, &mut err,
+                    ),
                     OutputFormat::Arrow => write_arrow_ipc_to_buffer(
                         ptr as *const std::ffi::c_void, &mut buf, &mut len, &mut err,
                     ),
@@ -2284,7 +2035,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
         process::clean_exit(1);
     }
 
-    die_on_top_level_err(result_ptr, &return_schema, c_return_schema);
+    die_on_top_level_err(result_ptr, c_return_schema);
     print_result_c(result_ptr, c_return_schema, &pkt_bytes, false, config);
 
     // Cleanup
@@ -2297,9 +2048,28 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     }
 }
 
+/// Whether a pool's reply says the run's stdout reader closed the pipe, which
+/// ends the run as a broken pipe rather than as a failure.
+pub(crate) fn reply_is_pipe_closed(packet: &[u8]) -> bool {
+    let Some(header) = packet.get(..32) else { return false };
+    let header: &[u8; 32] = header.try_into().expect("32 bytes");
+    morloc_runtime_types::packet::PacketHeader::from_bytes(header).map_or(false, |h| h.is_pipe_closed())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reply_that_reports_a_closed_pipe_is_told_from_a_failure() {
+        use morloc_runtime_types::packet::{CommandData, PacketHeader, PACKET_STATUS_PIPE_CLOSED, PKT_CMD_OFF};
+        let fail = PacketHeader::fail(0).to_bytes();
+        assert!(!reply_is_pipe_closed(&fail));
+        let mut closed = fail;
+        closed[PKT_CMD_OFF + std::mem::offset_of!(CommandData, status)] = PACKET_STATUS_PIPE_CLOSED;
+        assert!(reply_is_pipe_closed(&closed));
+        assert!(!reply_is_pipe_closed(&closed[..10]));
+    }
 
     fn positional(schema: &str) -> crate::manifest::Arg {
         serde_json::from_str(&format!(
@@ -2341,8 +2111,11 @@ mod tests {
     }
 
     #[test]
-    fn collapse_drops_adjacent_duplicates() {
-        assert_eq!(collapse_duplicate_lines("A\nA\nB\nA\n"), "A\nB\nA\n");
+    fn collapse_counts_adjacent_duplicates() {
+        assert_eq!(
+            collapse_duplicate_lines("A\nA\nB\nA\n"),
+            "A\n  [previous line repeated 1 more time]\nB\nA\n"
+        );
     }
 
     #[test]
@@ -2353,12 +2126,12 @@ mod tests {
     #[test]
     fn collapse_collapses_long_run() {
         let input = "boom\n".repeat(20);
-        assert_eq!(collapse_duplicate_lines(&input), "boom\n");
+        assert_eq!(collapse_duplicate_lines(&input), "boom\n  [previous line repeated 19 more times]\n");
     }
 
     #[test]
     fn collapse_handles_no_trailing_newline() {
-        assert_eq!(collapse_duplicate_lines("A\nA"), "A\nA");
+        assert_eq!(collapse_duplicate_lines("A\nA"), "A\n  [previous line repeated 1 more time]");
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpMethod};
 // -- Constants ----------------------------------------------------------------
 
 const DEFAULT_XXHASH_SEED: u64 = 0;
-const MAX_LP_MESSAGE: u32 = 64 * 1024 * 1024;
+pub(crate) const MAX_LP_MESSAGE: u32 = 64 * 1024 * 1024;
 
 // -- Global state -------------------------------------------------------------
 
@@ -211,14 +211,6 @@ fn set_current_output_packet(new: bool) -> bool {
 }
 
 thread_local! {
-    /// Per-thread flag: when set, `daemon_dispatch` does `?render=` output-
-    /// projection resolution against the command's terminals (the `@default`
-    /// terminal when no render is given). HTTP-only -- LP/MCP callers select
-    /// their projection before dispatch, so this stays false for them. See also
-    /// `CURRENT_OUTPUT_MEDIA_BYTES`, which governs the raw-bytes response form
-    /// and is shared with the in-process MCP server.
-    static CURRENT_OUTPUT_HTTP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-
     /// Per-thread flag: when set, `daemon_dispatch`'s `call` path returns the
     /// raw content bytes of a media-typed (`@mime`) return on
     /// `resp.result_bytes` plus the media type on `resp.mime`, instead of a JSON
@@ -228,11 +220,6 @@ thread_local! {
     /// content block, via `daemon_set_output_media_bytes`). Off for everyone
     /// else, so their dispatches stay JSON.
     static CURRENT_OUTPUT_MEDIA_BYTES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Read the current thread's HTTP-output flag.
-fn current_output_http() -> bool {
-    CURRENT_OUTPUT_HTTP.with(|c| c.get())
 }
 
 /// Read the current thread's raw-media-output flag.
@@ -258,71 +245,56 @@ pub(crate) fn daemon_set_output_media_bytes(on: bool) -> bool {
     set_current_output_media_bytes(on)
 }
 
-/// Set the current thread's HTTP-output flag, returning the previous value.
-fn set_current_output_http(new: bool) -> bool {
-    CURRENT_OUTPUT_HTTP.with(|c| {
-        let old = c.get();
-        c.set(new);
-        old
-    })
-}
-
-/// Resolve the HTTP output projection for a `/call`: the command to actually
-/// dispatch given `?render=<flag>`. Null render = fire the `@default` terminal
-/// (matching the CLI's no-flag behavior); `"raw"` = the command's own typed
-/// value (the `-f json` analog); a flag = that terminal's entry command. `Err`
-/// for an unknown render flag.
 unsafe fn resolve_render_target<'a>(
     mv: *const crate::manifest_ffi::Manifest,
     cmd: &'a crate::manifest_ffi::ManifestCommand,
     render: *const c_char,
-) -> Result<&'a crate::manifest_ffi::ManifestCommand, String> {
-    // The terminal the request names, or the `@default` one when it names
-    // none; no terminal at all means the command's own typed value.
-    let (terminal, named) = if render.is_null() {
-        (find_terminal(cmd, None), None)
-    } else {
+    use_default: bool,
+) -> Result<(&'a crate::manifest_ffi::ManifestCommand, Option<&'a crate::manifest_ffi::ManifestTerminal>), String> {
+    let cmd_name = || CStr::from_ptr(cmd.name).to_string_lossy();
+    let (terminal, named) = if !render.is_null() {
         let r = CStr::from_ptr(render).to_str().unwrap_or("");
         if r == "raw" {
-            return Ok(cmd);
+            return Ok((cmd, None));
         }
         match find_terminal(cmd, Some(r)) {
             Some(t) => (Some(t), Some(r)),
-            None => {
-                return Err(format!(
-                    "unknown render '{}' for command '{}'",
-                    r,
-                    CStr::from_ptr(cmd.name).to_string_lossy()
-                ))
-            }
+            None => return Err(format!("unknown render '{}' for command '{}'", r, cmd_name())),
         }
+    } else if use_default {
+        (find_terminal(cmd, None), None)
+    } else {
+        (None, None)
     };
-    let Some(t) = terminal else { return Ok(cmd) };
-    // An action with no entry applies to the command's whole streamed output,
-    // which only the command line saves and replays.
+    let Some(t) = terminal else { return Ok((cmd, None)) };
+    let which = || match named {
+        Some(r) => format!("render '{}'", r),
+        None => "the default render".to_string(),
+    };
     if t.entry.is_null() {
-        let which = match named {
-            Some(r) => format!("render '{}'", r),
-            None => "the default render".to_string(),
-        };
         return Err(format!(
-            "{} of command '{}' runs only from the command line; request render=raw \
-             for the command's own output",
-            which,
-            CStr::from_ptr(cmd.name).to_string_lossy()
+            "{} of command '{}' runs only from the command line; select raw for \
+             the command's own output",
+            which(),
+            cmd_name()
+        ));
+    }
+    // DAEMON-15
+    if t.kind == 2 {
+        return Err(format!(
+            "{} of command '{}' streams its output, which reaches a caller only \
+             from the command line; select raw or another action",
+            which(),
+            cmd_name()
         ));
     }
     let m: &'a crate::manifest_ffi::Manifest = &*mv;
-    m.command_by_name(CStr::from_ptr(t.entry)).ok_or_else(|| {
-        format!(
-            "render entry '{}' not found",
-            CStr::from_ptr(t.entry).to_string_lossy()
-        )
-    })
+    let entry = m.command_by_name(CStr::from_ptr(t.entry)).ok_or_else(|| {
+        format!("render entry '{}' not found", CStr::from_ptr(t.entry).to_string_lossy())
+    })?;
+    Ok((entry, Some(t)))
 }
 
-/// The first terminal whose long flag is `match_long`, or with `None` the
-/// `@default` terminal.
 unsafe fn find_terminal<'a>(
     cmd: &'a crate::manifest_ffi::ManifestCommand,
     match_long: Option<&str>,
@@ -378,6 +350,7 @@ pub fn is_recovering() -> bool {
 /// skip the recovery sequence).
 pub fn begin_recovery() -> bool {
     let _requests = requests_in_flight();
+    let _users = shm_users();
     RECOVERY_IN_PROGRESS
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
@@ -412,12 +385,53 @@ pub(crate) fn enter_request() -> Option<InFlight> {
     Some(InFlight(()))
 }
 
+static SHM_USERS: Mutex<usize> = Mutex::new(0);
+static SHM_USERS_DONE: Condvar = Condvar::new();
+
+fn shm_users() -> std::sync::MutexGuard<'static, usize> {
+    SHM_USERS.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock())
+}
+
+pub(crate) struct ShmUser(());
+
+impl Drop for ShmUser {
+    fn drop(&mut self) {
+        let mut n = shm_users();
+        *n -= 1;
+        if *n == 0 {
+            SHM_USERS_DONE.notify_all();
+        }
+    }
+}
+
+// DAEMON-1: a nexus thread outside any request that reads shared memory.
+// Only recovery refuses it: a request draining at shutdown may still need it.
+pub(crate) fn enter_shm_user() -> Option<ShmUser> {
+    let mut n = shm_users();
+    if RECOVERY_IN_PROGRESS.load(Ordering::SeqCst) {
+        return None;
+    }
+    *n += 1;
+    Some(ShmUser(()))
+}
+
+// DAEMON-1: every admitted request and shared-memory user has left.
 pub fn wait_for_requests(timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
     let n = requests_in_flight();
     let (n, _) = REQUESTS_DRAINED
         .wait_timeout_while(n, timeout, |n| *n > 0)
         .unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
-    *n == 0
+    if *n != 0 {
+        return false;
+    }
+    drop(n);
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    let u = shm_users();
+    let (u, _) = SHM_USERS_DONE
+        .wait_timeout_while(u, left, |u| *u > 0)
+        .unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
+    *u == 0
 }
 
 /// Mark recovery as complete. Workers will start accepting requests again.
@@ -539,33 +553,18 @@ pub struct DaemonConfig {
     pub emergency_exit_fn: Option<unsafe extern "C" fn(i32)>,
 }
 
-/// Error classification for a daemon dispatch failure.
-///
-/// `success = true` -> `error_kind = OK`. On failure, the kind drives
-/// HTTP status mapping in `handle_http_connection` (and in the router's
-/// equivalent). Unix/TCP clients keep reading the `success` boolean and
-/// the `{"status":"error","error":"..."}` JSON envelope; they don't see
-/// the kind on the wire today.
-pub const DAEMON_ERROR_OK:          i32 = 0;
-pub const DAEMON_ERROR_BAD_REQUEST: i32 = 1;
-pub const DAEMON_ERROR_NOT_FOUND:   i32 = 2;
-pub const DAEMON_ERROR_TIMEOUT:     i32 = 3;
-pub const DAEMON_ERROR_RECOVERING:  i32 = 4;
-pub const DAEMON_ERROR_INTERNAL:    i32 = 5;
+pub const DAEMON_ERROR_OK: i32 = morloc_runtime_types::daemon_error::OK;
+pub const DAEMON_ERROR_BAD_REQUEST: i32 = morloc_runtime_types::daemon_error::BAD_REQUEST;
+pub const DAEMON_ERROR_NOT_FOUND: i32 = morloc_runtime_types::daemon_error::NOT_FOUND;
+pub const DAEMON_ERROR_TIMEOUT: i32 = morloc_runtime_types::daemon_error::TIMEOUT;
+pub const DAEMON_ERROR_RECOVERING: i32 = morloc_runtime_types::daemon_error::RECOVERING;
+pub const DAEMON_ERROR_INTERNAL: i32 = morloc_runtime_types::daemon_error::INTERNAL;
+pub const DAEMON_ERROR_FAILED: i32 = morloc_runtime_types::daemon_error::FAILED;
+pub const DAEMON_ERROR_LIMIT: i32 = morloc_runtime_types::daemon_error::LIMIT;
+pub const DAEMON_ERROR_REPLY_LIMIT: i32 = morloc_runtime_types::daemon_error::REPLY_LIMIT;
 
-/// Translate a `DAEMON_ERROR_*` kind to its HTTP status code.
 pub fn daemon_error_kind_to_http_status(kind: i32, success: bool) -> i32 {
-    if success {
-        return 200;
-    }
-    match kind {
-        DAEMON_ERROR_BAD_REQUEST => 400,
-        DAEMON_ERROR_NOT_FOUND   => 404,
-        DAEMON_ERROR_TIMEOUT     => 408,
-        DAEMON_ERROR_RECOVERING  => 503,
-        // OK with success=false shouldn't happen, but treat as internal.
-        _ => 500,
-    }
+    morloc_runtime_types::daemon_error::http_status(kind, success)
 }
 
 /// Matches daemon_response_t from daemon.h. `error_kind` is one of the
@@ -590,6 +589,8 @@ pub struct DaemonResponse {
     /// the `Content-Type`. Null in JSON/packet modes. `libc::strdup`'d; freed in
     /// `daemon_free_response`. Appended last so earlier C-ABI offsets are stable.
     pub mime: *mut c_char,
+    pub action: *mut c_char,
+    pub result_text: bool,
 }
 
 // -- Binding store (replaces linear-probe hash table with HashMap) ------------
@@ -927,17 +928,6 @@ fn compile_binding(base_dir: &str, hv: u64, expr: &str, eval_timeout: i32) -> Op
 
 // -- C-exported binding store functions ---------------------------------------
 
-pub(crate) unsafe fn binding_store_init(base_dir: *const c_char) -> *mut BindingStore {
-    let dir = CStr::from_ptr(base_dir).to_string_lossy().into_owned();
-    Box::into_raw(Box::new(BindingStore::new(&dir)))
-}
-
-pub(crate) unsafe fn binding_store_free(store: *mut BindingStore) {
-    if !store.is_null() {
-        drop(Box::from_raw(store));
-    }
-}
-
 // -- Request parsing (serde_json) ---------------------------------------------
 
 #[derive(serde::Deserialize)]
@@ -948,11 +938,20 @@ struct JsonRequest {
     /// Kept as the text the client sent: it goes to the pool verbatim,
     /// so an integer wider than a double keeps its digits and a value of
     /// any depth passes, neither of which a tree-shaped parse allows.
+    #[serde(default, deserialize_with = "present")]
     args: Option<Box<serde_json::value::RawValue>>,
     expr: Option<String>,
     name: Option<String>,
     #[serde(default)]
     media: Option<bool>,
+    #[serde(default, deserialize_with = "present")]
+    render: Option<Box<serde_json::value::RawValue>>,
+    #[serde(default)]
+    render_default: Option<bool>,
+}
+
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Box<serde_json::value::RawValue>>, D::Error> {
+    serde::Deserialize::deserialize(d).map(Some)
 }
 
 pub(crate) unsafe fn daemon_parse_request(json: *const c_char, len: usize, errmsg: *mut *mut c_char) -> *mut DaemonRequest {
@@ -1027,7 +1026,15 @@ pub(crate) unsafe fn parse_request(
     }
 
     if let Some(args) = &parsed.args {
-        let c = CString::new(args.get()).unwrap_or_default();
+        let text = match morloc_runtime_types::call_body::args_value(args.get()) {
+            Ok(t) => t,
+            Err(e) => {
+                daemon_free_request(req);
+                set_errmsg(errmsg, &MorlocError::Other(e));
+                return ptr::null_mut();
+            }
+        };
+        let c = CString::new(text).unwrap_or_default();
         (*req).args_json = libc::strdup(c.as_ptr());
     }
 
@@ -1042,6 +1049,25 @@ pub(crate) unsafe fn parse_request(
     }
 
     (*req).media = parsed.media.unwrap_or(false);
+    (*req).render_default = parsed.render_default.unwrap_or(false);
+    if let Some(r) = &parsed.render {
+        match serde_json::from_str::<String>(r.get()) {
+            Ok(name) if !(*req).render_default => {
+                let c = CString::new(name).unwrap_or_default();
+                (*req).render = libc::strdup(c.as_ptr());
+            }
+            Ok(_) => {
+                daemon_free_request(req);
+                set_errmsg(errmsg, &MorlocError::Other("'render' and 'render_default' are exclusive".into()));
+                return ptr::null_mut();
+            }
+            Err(_) => {
+                daemon_free_request(req);
+                set_errmsg(errmsg, &MorlocError::Other("'render' must be a string".into()));
+                return ptr::null_mut();
+            }
+        }
+    }
 
     req
 }
@@ -1060,6 +1086,9 @@ struct JsonResponse {
     /// daemon_serialize_response). Reconstructed onto result_bytes/mime.
     result_b64: Option<String>,
     mime: Option<String>,
+    action: Option<String>,
+    text: Option<bool>,
+    class: Option<String>,
 }
 
 /// The response as written to the socket. The member order is the wire
@@ -1070,9 +1099,15 @@ struct WireResponse {
     id: Option<String>,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    class: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     result_b64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<Box<serde_json::value::RawValue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1125,14 +1160,10 @@ pub(crate) unsafe fn daemon_parse_response(
         .as_deref()
         .map(|s| s == "ok")
         .unwrap_or(false);
-    // The wire JSON envelope does not carry error_kind, so a parsed
-    // error response defaults to INTERNAL. Callers that received a real
-    // dispatch response (not a re-parse) will already have the correct
-    // kind set directly on DaemonResponse.
     (*resp).error_kind = if (*resp).success {
         DAEMON_ERROR_OK
     } else {
-        DAEMON_ERROR_INTERNAL
+        morloc_runtime_types::daemon_error::kind_of_class(parsed.class.as_deref().unwrap_or("failure"))
     };
 
     // Media (`@mime`) return: decode base64 back to raw bytes + mime, mirroring
@@ -1155,6 +1186,7 @@ pub(crate) unsafe fn daemon_parse_response(
                         (*resp).result_len = len;
                         let c = CString::new(mime.as_str()).unwrap_or_default();
                         (*resp).mime = libc::strdup(c.as_ptr());
+                        (*resp).result_text = parsed.text.unwrap_or(false);
                         None
                     }
                 }
@@ -1174,6 +1206,10 @@ pub(crate) unsafe fn daemon_parse_response(
     if let Some(error) = &parsed.error {
         let c = CString::new(error.as_str()).unwrap_or_default();
         (*resp).error = libc::strdup(c.as_ptr());
+    }
+    if let Some(action) = &parsed.action {
+        let c = CString::new(action.as_str()).unwrap_or_default();
+        (*resp).action = libc::strdup(c.as_ptr());
     }
 
     resp
@@ -1225,14 +1261,13 @@ pub(crate) unsafe fn daemon_free_response(resp: *mut DaemonResponse) {
     if !(*resp).mime.is_null() {
         libc::free((*resp).mime as *mut c_void);
     }
+    if !(*resp).action.is_null() {
+        libc::free((*resp).action as *mut c_void);
+    }
     libc::free(resp as *mut c_void);
 }
 
 // -- Response serialization (serde_json) --------------------------------------
-
-pub(crate) unsafe fn daemon_serialize_response(response: *mut DaemonResponse, out_len: *mut usize) -> *mut c_char {
-    serialize_response(response, out_len)
-}
 
 pub(crate) unsafe fn serialize_response(
     response: *mut DaemonResponse,
@@ -1243,8 +1278,12 @@ pub(crate) unsafe fn serialize_response(
     let mut wire = WireResponse {
         id: owned((*response).id),
         status: if (*response).success { "ok" } else { "error" },
+        class: (!(*response).success)
+            .then(|| morloc_runtime_types::daemon_error::class_name((*response).error_kind)),
+        action: owned((*response).action),
         result_b64: None,
         mime: None,
+        text: None,
         result: None,
         error: None,
     };
@@ -1258,6 +1297,7 @@ pub(crate) unsafe fn serialize_response(
         let bytes = std::slice::from_raw_parts((*response).result_bytes, (*response).result_len);
         wire.result_b64 = Some(base64::engine::general_purpose::STANDARD.encode(bytes));
         wire.mime = owned((*response).mime);
+        wire.text = (*response).result_text.then_some(true);
     } else if (*response).success && !(*response).result_json.is_null() {
         // The value goes out as the text it is; text that is not JSON is
         // carried as a JSON string.
@@ -1289,11 +1329,6 @@ pub(crate) unsafe fn daemon_build_discovery(manifest: *mut crate::manifest_ffi::
 
 // -- Eval timeout -------------------------------------------------------------
 
-pub(crate) fn daemon_set_eval_timeout(timeout_sec: i32) {
-    let t = if timeout_sec > 0 { timeout_sec } else { 30 };
-    G_EVAL_TIMEOUT.store(t, Ordering::Relaxed);
-}
-
 /// Set the eval sandbox policy applied to forked `morloc eval`/`--save`.
 /// `sandbox` enables the sandbox; `allowed` is a NUL-terminated, comma-
 /// separated module allow-list (may be null/empty). The nexus calls this
@@ -1313,6 +1348,45 @@ pub(crate) fn daemon_set_eval_timeout(timeout_sec: i32) {
 pub(crate) unsafe fn daemon_set_http_access(address: u32, token: *const c_char) {
     let token = (!token.is_null()).then(|| CStr::from_ptr(token).to_string_lossy().into_owned());
     *http_access() = HttpAccess { address, token };
+}
+
+static G_EVAL_EXPOSED: AtomicBool = AtomicBool::new(false);
+static G_EVAL_ALLOW_NO_AUTH: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn daemon_set_eval_exposure(exposed: bool, allow_no_auth: bool) {
+    G_EVAL_EXPOSED.store(exposed, Ordering::Relaxed);
+    G_EVAL_ALLOW_NO_AUTH.store(allow_no_auth, Ordering::Relaxed);
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Transport {
+    Unix,
+    Tcp,
+    Http,
+}
+
+fn is_eval_family(method: DaemonMethod) -> bool {
+    matches!(
+        method,
+        DaemonMethod::Eval | DaemonMethod::Typecheck | DaemonMethod::Bind | DaemonMethod::Bindings | DaemonMethod::Unbind
+    )
+}
+
+// NET-1, NET-4
+fn eval_refusal(method: DaemonMethod, transport: Transport) -> Option<(i32, &'static str)> {
+    use morloc_runtime_types::daemon_error::{EVAL_NEEDS_TOKEN, EVAL_NOT_EXPOSED, FORBIDDEN, NOT_FOUND};
+    if !is_eval_family(method) {
+        return None;
+    }
+    if !G_EVAL_EXPOSED.load(Ordering::Relaxed) {
+        return Some((NOT_FOUND, EVAL_NOT_EXPOSED));
+    }
+    let uncredentialed = match transport {
+        Transport::Unix => false,
+        Transport::Tcp => true,
+        Transport::Http => http_token().is_none(),
+    };
+    (uncredentialed && !G_EVAL_ALLOW_NO_AUTH.load(Ordering::Relaxed)).then_some((FORBIDDEN, EVAL_NEEDS_TOKEN))
 }
 
 pub(crate) unsafe fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) {
@@ -1739,7 +1813,7 @@ unsafe fn set_packet_error(
     default_msg: &str,
 ) {
     (*resp).success = false;
-    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+    (*resp).error_kind = DAEMON_ERROR_FAILED;
     if (*err).is_null() {
         let c = CString::new(default_msg).unwrap_or_default();
         (*resp).error = libc::strdup(c.as_ptr());
@@ -1811,43 +1885,96 @@ unsafe fn emit_raw_media(
     schema: *const CSchema,
     mime: *const c_char,
 ) {
-    let mut err: *mut c_char = ptr::null_mut();
-    let mut raw_len: usize = 0;
-    let raw = crate::json_ffi::voidstar_to_raw_bytes(voidstar, schema, &mut raw_len, &mut err);
-    if raw.is_null() || !err.is_null() {
-        set_packet_error(resp, &mut err, "failed to serialize media return");
-        return;
-    }
+    use morloc_runtime_types::schema::SerialType;
+    let rs = CSchema::to_rust(schema);
+    let textual = rs.serial_type == SerialType::String
+        || (rs.serial_type == SerialType::Array
+            && rs.parameters.first().is_some_and(|p| p.serial_type == SerialType::String));
+    let (raw, raw_len) = if morloc_runtime_types::is_top_null(schema, voidstar as *const u8) {
+        (libc::malloc(1) as *mut u8, 0)
+    } else {
+        let mut err: *mut c_char = ptr::null_mut();
+        let mut raw_len: usize = 0;
+        let raw = crate::json_ffi::voidstar_to_raw_bytes(voidstar, schema, &mut raw_len, &mut err);
+        if raw.is_null() || !err.is_null() {
+            set_packet_error(resp, &mut err, "failed to serialize media return");
+            return;
+        }
+        (raw, raw_len)
+    };
+    let utf8 = textual && std::str::from_utf8(std::slice::from_raw_parts(raw, raw_len)).is_ok();
     (*resp).success = true;
     (*resp).result_bytes = raw;
     (*resp).result_len = raw_len;
-    (*resp).mime = libc::strdup(mime);
+    (*resp).result_text = utf8;
+    (*resp).mime = if !mime.is_null() {
+        libc::strdup(mime)
+    } else if utf8 {
+        libc::strdup(c"text/plain; charset=utf-8".as_ptr())
+    } else {
+        libc::strdup(c"application/octet-stream".as_ptr())
+    };
+}
+
+pub(crate) unsafe fn top_level_err(want_packet: bool, voidstar: *const c_void, schema: *const CSchema) -> Option<String> {
+    use morloc_runtime_types::schema::SerialType;
+    if want_packet || voidstar.is_null() || (*schema).serial_type != SerialType::Variant as u32 {
+        return None;
+    }
+    let rs = CSchema::to_rust(schema);
+    let tag = *(voidstar as *const u8) as usize;
+    if rs.keys.get(tag).map(String::as_str) != Some("Err") {
+        return None;
+    }
+    let mut err: *mut c_char = ptr::null_mut();
+    let out = crate::intrinsics::mlc_show(voidstar, schema, &mut err);
+    if out.is_null() {
+        let msg = if err.is_null() {
+            "the call returned Err".to_string()
+        } else {
+            let m = CStr::from_ptr(err).to_string_lossy().into_owned();
+            libc::free(err as *mut c_void);
+            m
+        };
+        return Some(msg);
+    }
+    let text = CStr::from_ptr(out).to_string_lossy().into_owned();
+    libc::free(out as *mut c_void);
+    Some(text)
+}
+
+// SHM-3
+struct ReplyRef(crate::shm::AbsPtr);
+
+impl Drop for ReplyRef {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SHM-14: the reply's reference is the daemon's, never an arena's.
+            let _ = crate::shm::release(self.0);
+        }
+    }
 }
 
 /// # Safety
 /// `packet` must be a well-formed morloc packet.
-unsafe fn adopt_rptr_result(packet: *const u8) {
+unsafe fn reply_reference(packet: *const u8) -> ReplyRef {
     use crate::packet::{PacketHeader, PACKET_SOURCE_RPTR};
     use crate::shm::RelPtr;
+    let none = ReplyRef(ptr::null_mut());
     if packet.is_null() {
-        return;
+        return none;
     }
     let header = packet as *const PacketHeader;
     if (*header).command.data.source != PACKET_SOURCE_RPTR {
-        return;
+        return none;
     }
     let payload_start = 32 + (*header).offset as usize;
     if ((*header).length as usize) < std::mem::size_of::<RelPtr>() {
-        return;
+        return none;
     }
     let relptr = *(packet.add(payload_start) as *const RelPtr);
-    if let Ok(abs) = crate::shm::rel2abs(relptr) {
-        // The producer took a reference on this block before the packet left
-        // it, and that reference is ours now. Take ownership rather than a
-        // second reference: acquiring here would be too late anyway, since
-        // the interval this is meant to cover has already elapsed.
-        crate::eval_arena::record_if_active(abs);
-    }
+    // SHM-3: the pool took this reference for the daemon before the reply left.
+    crate::shm::rel2abs(relptr).map_or(none, ReplyRef)
 }
 
 // -- Dispatch -----------------------------------------------------------------
@@ -1895,6 +2022,17 @@ impl Drop for OwnedSchema {
 
 fn internal(e: *mut c_char) -> (i32, *mut c_char) {
     (DAEMON_ERROR_INTERNAL, e)
+}
+
+unsafe fn arena_error(resp: *mut DaemonResponse, why: &str) {
+    (*resp).success = false;
+    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+    let msg = CString::new(format!("eval arena error: {}", why)).unwrap_or_default();
+    (*resp).error = libc::strdup(msg.as_ptr());
+}
+
+fn failed(e: *mut c_char) -> (i32, *mut c_char) {
+    (DAEMON_ERROR_FAILED, e)
 }
 
 fn bad_request(e: *mut c_char) -> (i32, *mut c_char) {
@@ -1956,6 +2094,13 @@ unsafe fn dispatch_request(
         DaemonMethod::Discover => {
             (*resp).success = true;
             (*resp).result_json = daemon_build_discovery(manifest);
+            return resp;
+        }
+        method if eval_refusal(method, Transport::Unix).is_some() => {
+            let (kind, msg) = eval_refusal(method, Transport::Unix).unwrap_or_default();
+            (*resp).success = false;
+            (*resp).error_kind = kind;
+            (*resp).error = libc::strdup(CString::new(msg).unwrap_or_default().as_ptr());
             return resp;
         }
         DaemonMethod::Eval => {
@@ -2132,10 +2277,8 @@ unsafe fn dispatch_request(
 
     use crate::ffi::parse_schema;
     use crate::ffi::free_schema;
-    use crate::cli::initialize_positional;
-    use crate::cli::free_argument_t;
-    use crate::cli::parse_cli_data_argument;
-    use crate::cli::make_call_packet_from_cli;
+    use crate::cli::call_arg_packet;
+    use crate::cli::make_call_packet;
     use crate::ipc_ffi::send_and_receive_over_socket;
     use crate::packet_ffi::get_morloc_data_packet_error_message;
     use crate::packet_ffi::get_morloc_data_packet_value;
@@ -2160,28 +2303,37 @@ unsafe fn dispatch_request(
             return resp;
         }
     };
-    // HTTP output selection: `?render=<flag>` (or the command's `@default`
-    // terminal when absent) re-points dispatch to that projection's entry
-    // command -- same argument shape by construction, so parsing below is
-    // unchanged. Gated on the HTTP transport so LP / MCP callers are unaffected:
-    // a bare LP `/call` runs the command's own typed value, never the @default
-    // projection (LP framing carries no render selector and its clients decode
-    // the typed value directly). The @default asymmetry is intentional.
-    let cmd = if current_output_http() {
-        match resolve_render_target(mv, cmd, (*request).render) {
-            Ok(c) => c,
-            Err(msg) => {
-                (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-                let ce = CString::new(msg).unwrap_or_default();
-                (*resp).error = libc::strdup(ce.as_ptr());
-                return resp;
-            }
+    let selected = !(*request).render.is_null() || (*request).render_default;
+    let refuse = |resp: *mut DaemonResponse, msg: String| {
+        (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
+        let ce = CString::new(msg).unwrap_or_default();
+        (*resp).error = libc::strdup(ce.as_ptr());
+        resp
+    };
+    let (target, terminal) = if selected {
+        match resolve_render_target(mv, cmd, (*request).render, (*request).render_default) {
+            Ok(r) => r,
+            Err(msg) => return refuse(resp, msg),
         }
     } else {
-        cmd
+        (cmd, None)
     };
-    let expected_nargs = cmd.n_args;
+    // DAEMON-15
+    if terminal.is_none() && cmd.streams {
+        return refuse(resp, format!(
+            "command '{}' streams its output, which reaches a caller only from \
+             the command line",
+            CStr::from_ptr(cmd.name).to_string_lossy()
+        ));
+    }
+    if selected {
+        (*resp).action = match terminal {
+            Some(t) => libc::strdup(t.long),
+            None => libc::strdup(c"raw".as_ptr()),
+        };
+    }
+    let cmd = target;
 
     // Result-form policy for this dispatch. `want_packet` is a per-thread flag
     // set only by the raw-packet (Unix socket / TCP) wire; the HTTP handler and
@@ -2189,99 +2341,48 @@ unsafe fn dispatch_request(
     // below. When set, both the pure-eval and remote sub-cases emit a morloc
     // data packet (compressed per `compression`) on `resp.result_bytes`.
     let want_packet = current_output_packet();
-    // Raw-media output: when a raw-media consumer (the HTTP handler or the
-    // in-process MCP server) is active AND the command's return type carries a
-    // `@mime`, emit the raw content bytes + media type instead of JSON. The HTTP
-    // handler turns this into a `Content-Type` body; MCP base64s it into a
-    // content block. Both skip the wasteful JSON int-array round-trip.
-    let want_media_bytes = current_output_media_bytes() && !cmd.ret.mime.is_null();
+    if want_packet && terminal.is_some() {
+        return refuse(resp, "a packet client cannot select an output action; select raw".into());
+    }
+    let renders = terminal.is_some_and(|t| t.render);
+    let want_media_bytes = !want_packet
+        && (current_output_media_bytes() || terminal.is_some())
+        && (!cmd.ret.mime.is_null() || renders);
     let compression = G_DAEMON_COMPRESSION.load(Ordering::Relaxed);
 
-    // Parse JSON args into argument_t** array
     let mut err: *mut c_char = ptr::null_mut();
-    let args: *mut *mut crate::cli::ArgumentT;
-
-    if !(*request).args_json.is_null() {
-        // Parse the JSON array
-        let args_str = CStr::from_ptr((*request).args_json).to_string_lossy();
-        let parsed_args: Vec<&serde_json::value::RawValue> = match serde_json::from_str(&args_str) {
-            Ok(v) => v,
-            Err(e) => {
-                (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-                let c = CString::new(format!("Failed to parse args: {}", e)).unwrap_or_default();
-                (*resp).error = libc::strdup(c.as_ptr());
-                return resp;
-            }
-        };
-
-        if parsed_args.len() != expected_nargs {
+    let call_cmd = match (*mv).parsed().and_then(|m| m.command_by_name(&CStr::from_ptr(cmd.name).to_string_lossy())) {
+        Some(c) => c,
+        None => {
             (*resp).success = false;
-            (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-            let c = CString::new(format!(
-                "Expected {} arguments, got {}",
-                expected_nargs,
-                parsed_args.len()
-            ))
-            .unwrap_or_default();
-            (*resp).error = libc::strdup(c.as_ptr());
+            (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+            (*resp).error = libc::strdup(c"the command's arguments are not in the manifest".as_ptr());
             return resp;
         }
-
-        // Each argument goes to the pool as the JSON text it arrived in. A
-        // NUL inside a JSON string is the escape `\u0000`, and a raw NUL
-        // anywhere is a syntax error the parse above rejects, so the
-        // CString cannot fail. Done before the allocation below so a
-        // failure returns without leaking the argument array.
-        let mut arg_texts: Vec<CString> = Vec::with_capacity(expected_nargs);
-        for val in parsed_args.iter() {
-            let encoded = CString::new(val.get()).map_err(|e| e.to_string());
-            match encoded {
-                Ok(c) => arg_texts.push(c),
-                Err(e) => {
-                    (*resp).success = false;
-                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-                    let c = CString::new(format!(
-                        "Failed to encode argument {}: {}",
-                        arg_texts.len() + 1,
-                        e
-                    ))
-                    .unwrap_or_default();
-                    (*resp).error = libc::strdup(c.as_ptr());
-                    return resp;
-                }
-            }
-        }
-
-        args = libc::calloc(expected_nargs + 1, std::mem::size_of::<*mut c_void>())
-            as *mut *mut crate::cli::ArgumentT;
-        for (i, c) in arg_texts.iter().enumerate() {
-            let dup = libc::strdup(c.as_ptr());
-            *args.add(i) = initialize_positional(dup);
-            libc::free(dup as *mut c_void);
-        }
-        *args.add(expected_nargs) = ptr::null_mut();
-    } else {
-        if expected_nargs > 0 {
-            // Check if any are positional (required)
-            // For simplicity, match the C behavior: require args if n_args > 0
+    };
+    let args_text = (!(*request).args_json.is_null())
+        .then(|| CStr::from_ptr((*request).args_json).to_string_lossy());
+    let args = match morloc_manifest::call_args::resolve(call_cmd, args_text.as_deref()) {
+        Ok(a) => a,
+        Err(morloc_manifest::call_args::ResolveError::Request(msg)) => return refuse(resp, msg),
+        Err(morloc_manifest::call_args::ResolveError::Default(msg)) => {
             (*resp).success = false;
-            (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-            let c = CString::new("Missing 'args' field in call request").unwrap();
-            (*resp).error = libc::strdup(c.as_ptr());
+            (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+            (*resp).error = libc::strdup(CString::new(msg).unwrap_or_default().as_ptr());
             return resp;
         }
-        args =
-            libc::calloc(1, std::mem::size_of::<*mut c_void>()) as *mut *mut crate::cli::ArgumentT;
-        *args = ptr::null_mut();
+    };
+
+    if args.len() != cmd.n_args {
+        (*resp).success = false;
+        (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+        (*resp).error = libc::strdup(c"the manifest's two views of the command disagree".as_ptr());
+        return resp;
     }
 
     if cmd.is_pure {
         // Pure command: evaluate expression tree
-        let mut nargs: usize = 0;
-        while !(*args.add(nargs)).is_null() {
-            nargs += 1;
-        }
+        let nargs = args.len();
 
         // v2: schemas live on each ManifestArg. Walk cmd.args in
         // declaration order, INCLUDING flags (they consume an arg
@@ -2319,11 +2420,7 @@ unsafe fn dispatch_request(
         let arena_guard = match crate::eval_arena::enter() {
             Ok(g) => Some(g),
             Err(e) => {
-                (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
-                let msg = CString::new(format!("eval arena error: {}", e))
-                    .unwrap_or_default();
-                (*resp).error = libc::strdup(msg.as_ptr());
+                arena_error(resp, &e.to_string());
                 cleanup_and_fail = true;
                 None
             }
@@ -2332,8 +2429,7 @@ unsafe fn dispatch_request(
         // Tag this dispatch with a unique `call_id` so every @open
         // it issues records the id in its slot. After the response
         // is sent below (`drop(arena_guard)` and the libc cleanup
-        // loop), we enqueue a per-call sweep to the dedicated
-        // sweeper thread, which discards any slot left open at the
+        // loop), a call sweep closes any stream left open at the
         // call's tail. Stored in TLS for the duration of morloc_eval.
         let call_id = crate::stream::generate_call_id();
         let prev_call_id = crate::stream::set_current_call_id(call_id);
@@ -2343,15 +2439,19 @@ unsafe fn dispatch_request(
                 for i in 0..nargs {
                     let schema_str = arg_schema_strs.get(i).copied().unwrap_or(ptr::null_mut());
                     *arg_schemas_arr.add(i) = checked(|e| parse_schema(schema_str, e)).map_err(internal)?;
-                    *arg_packets.add(i) = checked(|e| parse_cli_data_argument(ptr::null_mut(), *args.add(i), *arg_schemas_arr.add(i), e))
-                        .map_err(bad_request)?;
+                    *arg_packets.add(i) = call_arg_packet(&args[i], *arg_schemas_arr.add(i))
+                        .map_err(|m| bad_request(libc::strdup(CString::new(m).unwrap_or_default().as_ptr())))?;
                     *arg_voidstars.add(i) = checked(|e| get_morloc_data_packet_value(*arg_packets.add(i), *arg_schemas_arr.add(i), e))
                         .map_err(bad_request)?;
                 }
                 let owned = OwnedSchema(checked(|e| parse_schema(cmd.ret.schema, e)).map_err(internal)?);
                 let return_schema = owned.0;
                 let result_abs = checked(|e| morloc_eval(cmd.expr, return_schema, arg_voidstars, arg_schemas_arr, nargs, e))
-                    .map_err(internal)?;
+                    .map_err(failed)?;
+                if let Some(msg) = top_level_err(want_packet, result_abs as *const c_void, return_schema as *const CSchema) {
+                    let c = CString::new(msg).unwrap_or_default();
+                    return Err(failed(libc::strdup(c.as_ptr())));
+                }
                 if want_media_bytes {
                     // Raw-media return: raw content bytes + media type, so the
                     // consumer (HTTP `Content-Type` body / MCP content block)
@@ -2413,13 +2513,9 @@ unsafe fn dispatch_request(
         libc::free(arg_packets as *mut c_void);
         libc::free(arg_voidstars as *mut c_void);
 
-        // Clear the per-thread call_id BEFORE enqueueing the sweep
-        // so the sweeper sees the slot as belonging to a finished
-        // call (TLS restore happens-before the queue push by
-        // sequential program order on this thread). The sweep runs
-        // on a separate thread and is off the user latency path.
+        // SLOT-19: the reply is sent; the sweep does not wait for writers.
         crate::stream::set_current_call_id(prev_call_id);
-        crate::stream::sweeper_enqueue_call(call_id);
+        crate::stream::sweep_call(call_id);
     } else {
         // Remote command: send call packet to pool. v2 stores schemas
         // per-arg, but make_call_packet_from_cli wants a NULL-terminated
@@ -2439,37 +2535,17 @@ unsafe fn dispatch_request(
         let skip = (*mv).unsafe_skip_null_check
             || crate::null_check::env_skip_null_check();
         if !skip && !target_pool.allow_string_null {
-            if !(*request).args_json.is_null() {
-                let args_str = CStr::from_ptr((*request).args_json).to_string_lossy();
-                let lang = CStr::from_ptr(target_pool.lang).to_string_lossy();
-                let rejection = match crate::null_check::first_null_in_json_text(&args_str) {
-                    Ok(None) => None,
-                    Ok(Some(p)) => Some(format!(
-                        "{} does not support embedded NUL bytes in strings (at {})",
-                        lang, p
-                    )),
-                    Err(e) => Some(format!("Failed to scan args for NUL bytes: {}", e)),
-                };
-                if let Some(msg) = rejection {
-                    (*resp).success = false;
-                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-                    let c = CString::new(msg).unwrap_or_default();
-                    (*resp).error = libc::strdup(c.as_ptr());
-                    // Cleanup the args array allocated above.
-                    if !args.is_null() {
-                        let mut i = 0;
-                        loop {
-                            let p = *args.add(i);
-                            if p.is_null() {
-                                break;
-                            }
-                            free_argument_t(p);
-                            i += 1;
-                        }
-                        libc::free(args as *mut c_void);
-                    }
-                    return resp;
-                }
+            let lang = CStr::from_ptr(target_pool.lang).to_string_lossy();
+            let rejection = match morloc_manifest::call_args::first_null(&args) {
+                Ok(None) => None,
+                Ok(Some(p)) => Some(format!(
+                    "{} does not support embedded NUL bytes in strings (at {})",
+                    lang, p
+                )),
+                Err(e) => Some(format!("Failed to scan args for NUL bytes: {}", e)),
+            };
+            if let Some(msg) = rejection {
+                return refuse(resp, msg);
             }
         }
 
@@ -2479,120 +2555,121 @@ unsafe fn dispatch_request(
         // in the call packet shipped to the pool); the pool's arg ingress
         // shincref's any RPTR args it consumes, so we can safely shfree
         // our originals when the arena drops here.
-        let _arena = match crate::eval_arena::enter() {
-            Ok(g) => Some(g),
-            Err(_) => None,  // already active is unexpected here; proceed without
-        };
-        let arg_schemas_flat = cmd.build_arg_schemas_array();
-        let call_packet = make_call_packet_from_cli(
-            ptr::null_mut(),
-            cmd.mid,
-            args,
-            arg_schemas_flat,
-            &mut err,
-        );
-        libc::free(arg_schemas_flat as *mut c_void);
-        if !err.is_null() {
-            (*resp).success = false;
-            (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-            (*resp).error = err;
-        } else {
-            let socket_path = (*sockets.add(cmd.pool_index)).socket_filename;
-            let result_packet =
-                send_and_receive_over_socket(socket_path, call_packet, &mut err);
-            libc::free(call_packet as *mut c_void);
-
-            if !err.is_null() {
+        'remote: {
+            let _arena_guard = match crate::eval_arena::enter() {
+                Ok(g) => g,
+                Err(e) => {
+                    arena_error(resp, &e.to_string());
+                    break 'remote;
+                }
+            };
+            let arg_schemas_flat = cmd.build_arg_schemas_array();
+            let call_packet = make_call_packet(cmd.mid, &args, arg_schemas_flat);
+            libc::free(arg_schemas_flat as *mut c_void);
+            if let Err(msg) = &call_packet {
                 (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
-                (*resp).error = err;
-            } else {
-                adopt_rptr_result(result_packet);
+                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
+                (*resp).error = libc::strdup(CString::new(msg.as_str()).unwrap_or_default().as_ptr());
+            } else if let Ok(call_packet) = call_packet {
+                let socket_path = (*sockets.add(cmd.pool_index)).socket_filename;
+                let result_packet =
+                    send_and_receive_over_socket(socket_path, call_packet, &mut err);
+                libc::free(call_packet as *mut c_void);
 
-                let packet_error =
-                    get_morloc_data_packet_error_message(result_packet, &mut err);
-                if !packet_error.is_null() {
-                    (*resp).success = false;
-                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
-                    (*resp).error = libc::strdup(packet_error);
-                    libc::free(result_packet as *mut c_void);
-                } else if !err.is_null() {
+                if !err.is_null() {
                     (*resp).success = false;
                     (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = err;
-                    libc::free(result_packet as *mut c_void);
-                } else if want_packet {
-                    // Packet mode: forward the pool's result packet as
-                    // self-contained bytes -- no JSON round-trip, no schema
-                    // parse. A pool FAIL packet was already turned into
-                    // `resp.error` by the `packet_error` check above.
-                    packetize_data_packet(resp, result_packet, compression, &mut err);
-                    libc::free(result_packet as *mut c_void);
                 } else {
-                    let return_schema = parse_schema(cmd.ret.schema, &mut err);
-                    if !err.is_null() {
+                    let _reply = reply_reference(result_packet);
+
+                    let packet_error =
+                        get_morloc_data_packet_error_message(result_packet, &mut err);
+                    if !packet_error.is_null() {
+                        (*resp).success = false;
+                        (*resp).error_kind = DAEMON_ERROR_FAILED;
+                        (*resp).error = libc::strdup(packet_error);
+                        libc::free(result_packet as *mut c_void);
+                    } else if !err.is_null() {
                         (*resp).success = false;
                         (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                         (*resp).error = err;
                         libc::free(result_packet as *mut c_void);
+                    } else if want_packet {
+                        // Packet mode: forward the pool's result packet as
+                        // self-contained bytes -- no JSON round-trip, no schema
+                        // parse. A pool FAIL packet was already turned into
+                        // `resp.error` by the `packet_error` check above.
+                        packetize_data_packet(resp, result_packet, compression, &mut err);
+                        libc::free(result_packet as *mut c_void);
                     } else {
-                        let packet_value = get_morloc_data_packet_value(
-                            result_packet,
-                            return_schema as *const CSchema,
-                            &mut err,
-                        );
+                        let return_schema = parse_schema(cmd.ret.schema, &mut err);
                         if !err.is_null() {
                             (*resp).success = false;
                             (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                             (*resp).error = err;
-                        } else if want_media_bytes {
-                            // Raw-media return: raw content bytes + media type
-                            // from the pool's result value.
-                            emit_raw_media(
-                                resp,
-                                packet_value as *mut c_void,
-                                return_schema as *const CSchema,
-                                cmd.ret.mime,
-                            );
+                            libc::free(result_packet as *mut c_void);
                         } else {
-                            // Same reason as the eval path above: a table is
-                            // an Arrow block, not a generic voidstar.
-                            let returns_table =
-                                (*(return_schema as *const CSchema)).serial_type
-                                    == morloc_runtime_types::schema::SerialType::Table as u32;
-                            let json = if returns_table {
-                                arrow_to_json_string(packet_value as *const c_void, &mut err)
+                            let packet_value = get_morloc_data_packet_value(
+                                result_packet,
+                                return_schema as *const CSchema,
+                                &mut err,
+                            );
+                            let failed = if err.is_null() {
+                                top_level_err(want_packet, packet_value as *const c_void, return_schema as *const CSchema)
                             } else {
-                                voidstar_to_json_string(
-                                    packet_value as *const c_void,
-                                    return_schema as *const CSchema,
-                                    &mut err,
-                                )
+                                None
                             };
                             if !err.is_null() {
                                 (*resp).success = false;
                                 (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                                 (*resp).error = err;
+                            } else if let Some(msg) = failed {
+                                (*resp).success = false;
+                                (*resp).error_kind = DAEMON_ERROR_FAILED;
+                                let c = CString::new(msg).unwrap_or_default();
+                                (*resp).error = libc::strdup(c.as_ptr());
+                            } else if want_media_bytes {
+                                // Raw-media return: raw content bytes + media type
+                                // from the pool's result value.
+                                emit_raw_media(
+                                    resp,
+                                    packet_value as *mut c_void,
+                                    return_schema as *const CSchema,
+                                    cmd.ret.mime,
+                                );
                             } else {
-                                (*resp).success = true;
-                                (*resp).result_json = json;
+                                // Same reason as the eval path above: a table is
+                                // an Arrow block, not a generic voidstar.
+                                let returns_table =
+                                    (*(return_schema as *const CSchema)).serial_type
+                                        == morloc_runtime_types::schema::SerialType::Table as u32;
+                                let json = if returns_table {
+                                    arrow_to_json_string(packet_value as *const c_void, &mut err)
+                                } else {
+                                    voidstar_to_json_string(
+                                        packet_value as *const c_void,
+                                        return_schema as *const CSchema,
+                                        &mut err,
+                                    )
+                                };
+                                if !err.is_null() {
+                                    (*resp).success = false;
+                                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+                                    (*resp).error = err;
+                                } else {
+                                    (*resp).success = true;
+                                    (*resp).result_json = json;
+                                }
                             }
+                            free_schema(return_schema);
+                            libc::free(result_packet as *mut c_void);
                         }
-                        free_schema(return_schema);
-                        libc::free(result_packet as *mut c_void);
                     }
                 }
             }
         }
     }
-
-    // Free args
-    let mut i = 0;
-    while !(*args.add(i)).is_null() {
-        free_argument_t(*args.add(i));
-        i += 1;
-    }
-    libc::free(args as *mut c_void);
 
     resp
 }
@@ -2655,7 +2732,9 @@ unsafe fn read_lp_message(
     remote: bool,
     out_len: *mut usize,
     errmsg: *mut *mut c_char,
+    too_large: &mut bool,
 ) -> *mut c_char {
+    *too_large = false;
     use morloc_runtime_types::net_limits::{body_limit, HEAD_LIMIT};
     clear_errmsg(errmsg);
 
@@ -2680,6 +2759,10 @@ unsafe fn read_lp_message(
         | (len_buf[3] as u32);
 
     if msg_len > MAX_LP_MESSAGE {
+        *too_large = true;
+        if !out_len.is_null() {
+            *out_len = msg_len as usize;
+        }
         set_errmsg(
             errmsg,
             &MorlocError::Other(format!("Message too large: {} bytes", msg_len)),
@@ -2687,27 +2770,42 @@ unsafe fn read_lp_message(
         return ptr::null_mut();
     }
 
-    let msg = libc::malloc(msg_len as usize + 1) as *mut c_char;
-    if msg.is_null() {
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other("Failed to allocate message buffer".into()),
-        );
-        return ptr::null_mut();
+    // NET-10: the buffer grows as the body arrives.
+    const CHUNK: usize = 1 << 20;
+    let want = msg_len as usize;
+    let lim = limit(body_limit(want));
+    let mut msg: *mut c_char = ptr::null_mut();
+    let mut cap = 0usize;
+    let mut got = 0usize;
+    loop {
+        let n = (want - got).min(CHUNK);
+        if got + n + 1 > cap {
+            cap = (cap * 2).max(got + n + 1).min(want + 1);
+            let grown = libc::realloc(msg as *mut c_void, cap) as *mut c_char;
+            if grown.is_null() {
+                libc::free(msg as *mut c_void);
+                set_errmsg(errmsg, &MorlocError::Other("Failed to allocate message buffer".into()));
+                return ptr::null_mut();
+            }
+            msg = grown;
+        }
+        if let Err(total) = recv_exact(fd, msg.add(got) as *mut u8, n, &lim) {
+            libc::free(msg as *mut c_void);
+            set_errmsg(
+                errmsg,
+                &MorlocError::Other(format!(
+                    "Failed to read message body (got {} of {} bytes)",
+                    got + total, msg_len
+                )),
+            );
+            return ptr::null_mut();
+        }
+        got += n;
+        if got == want {
+            break;
+        }
     }
-
-    if let Err(total) = recv_exact(fd, msg as *mut u8, msg_len as usize, &limit(body_limit(msg_len as usize))) {
-        libc::free(msg as *mut c_void);
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other(format!(
-                "Failed to read message body (got {} of {} bytes)",
-                total, msg_len
-            )),
-        );
-        return ptr::null_mut();
-    }
-    *msg.add(msg_len as usize) = 0;
+    *msg.add(want) = 0;
 
     if !out_len.is_null() {
         *out_len = msg_len as usize;
@@ -2722,6 +2820,11 @@ unsafe fn write_lp_message(
     errmsg: *mut *mut c_char,
 ) -> bool {
     clear_errmsg(errmsg);
+    // NET-10
+    if len > u32::MAX as usize {
+        set_errmsg(errmsg, &MorlocError::Other(format!("a {len}-byte message exceeds the socket protocol's 4 GiB frame")));
+        return false;
+    }
     note_reply_started();
 
     let len_buf: [u8; 4] = [
@@ -2752,6 +2855,41 @@ unsafe fn write_lp_message(
     true
 }
 
+// NET-10: the payload alone is past the frame, so the envelope is never built.
+unsafe fn reply_past_frame(resp: *mut DaemonResponse) -> Option<usize> {
+    let payload = if !(*resp).success {
+        0
+    } else if !(*resp).mime.is_null() && !(*resp).result_bytes.is_null() {
+        (*resp).result_len.div_ceil(3).saturating_mul(4)
+    } else if !(*resp).result_json.is_null() {
+        libc::strlen((*resp).result_json)
+    } else {
+        0
+    };
+    (payload > u32::MAX as usize).then_some(payload)
+}
+
+fn too_large_reply(len: usize) -> String {
+    format!("the reply is {len} bytes, more than the socket protocol's 4 GiB frame carries")
+}
+
+unsafe fn write_lp_error(fd: i32, kind: i32, message: &str) {
+    let mut resp: DaemonResponse = std::mem::zeroed();
+    resp.error_kind = kind;
+    resp.error = libc::strdup(CString::new(message).unwrap_or_default().as_ptr());
+    let mut len: usize = 0;
+    let json = serialize_response(&mut resp, &mut len);
+    let mut err: *mut c_char = ptr::null_mut();
+    write_lp_message(fd, json, len, &mut err);
+    libc::free(json as *mut c_void);
+    libc::free(resp.error as *mut c_void);
+    if !err.is_null() {
+        libc::free(err as *mut c_void);
+    }
+}
+
+use morloc_runtime_types::net_limits::linger_close;
+
 // -- Connection handlers ------------------------------------------------------
 
 unsafe fn handle_lp_connection(
@@ -2775,11 +2913,20 @@ unsafe fn handle_lp_connection(
         return;
     }
 
-    let msg = read_lp_message(client_fd, remote, &mut msg_len, &mut errmsg);
+    let mut too_large = false;
+    let msg = read_lp_message(client_fd, remote, &mut msg_len, &mut errmsg, &mut too_large);
     if !errmsg.is_null() {
-        let err_str = CStr::from_ptr(errmsg).to_string_lossy();
-        eprintln!("morloc-daemon: read error: {}", err_str);
+        let err_str = CStr::from_ptr(errmsg).to_string_lossy().into_owned();
         libc::free(errmsg as *mut c_void);
+        if too_large {
+            // NET-10
+            write_lp_error(client_fd, DAEMON_ERROR_LIMIT, &format!(
+                "the request is {msg_len} bytes; this daemon's socket takes at most {MAX_LP_MESSAGE}"
+            ));
+            linger_close(client_fd);
+            return;
+        }
+        eprintln!("morloc-daemon: read error: {}", err_str);
         libc::close(client_fd);
         return;
     }
@@ -2804,6 +2951,14 @@ unsafe fn handle_lp_connection(
         return;
     }
 
+    let transport = if remote { Transport::Tcp } else { Transport::Unix };
+    if let Some((kind, msg)) = eval_refusal((*req).method, transport) {
+        write_lp_error(client_fd, kind, &msg);
+        daemon_free_request(req);
+        libc::close(client_fd);
+        return;
+    }
+
     // Packet output applies only to `call` results on this raw-packet (Unix
     // socket / TCP) wire. Scoped per-thread around the dispatch so the shared
     // `daemon_dispatch` stays JSON for HTTP and control methods.
@@ -2822,7 +2977,11 @@ unsafe fn handle_lp_connection(
     set_current_output_packet(prev);
 
     let mut write_err: *mut c_char = ptr::null_mut();
-    if want_packet && !(*resp).result_bytes.is_null() {
+    if want_packet && !(*resp).result_bytes.is_null() && (*resp).result_len > u32::MAX as usize {
+        // NET-10
+        let fail = morloc_runtime_types::packet::make_fail_packet_bytes(&too_large_reply((*resp).result_len));
+        write_lp_message(client_fd, fail.as_ptr() as *const c_char, fail.len(), &mut write_err);
+    } else if want_packet && !(*resp).result_bytes.is_null() {
         // Success (or a forwarded FAIL packet): raw bytes, no JSON envelope.
         write_lp_message(
             client_fd,
@@ -2845,10 +3004,18 @@ unsafe fn handle_lp_connection(
             fail.len(),
             &mut write_err,
         );
+    } else if let Some(len) = reply_past_frame(resp) {
+        // NET-10
+        write_lp_error(client_fd, DAEMON_ERROR_REPLY_LIMIT, &too_large_reply(len));
     } else {
         let mut resp_len: usize = 0;
         let resp_json = serialize_response(resp, &mut resp_len);
-        write_lp_message(client_fd, resp_json, resp_len, &mut write_err);
+        if resp_len > u32::MAX as usize {
+            // NET-10
+            write_lp_error(client_fd, DAEMON_ERROR_REPLY_LIMIT, &too_large_reply(resp_len));
+        } else {
+            write_lp_message(client_fd, resp_json, resp_len, &mut write_err);
+        }
         libc::free(resp_json as *mut c_void);
     }
     if !write_err.is_null() {
@@ -2873,29 +3040,64 @@ unsafe fn handle_http_connection(
     use crate::http_ffi::http_to_daemon_request;
 
     let mut errmsg: *mut c_char = ptr::null_mut();
-    let http_req = http_parse_request(client_fd, &mut errmsg);
+    let mut too_large = false;
+    let http_req = http_parse_request(client_fd, &mut errmsg, &mut too_large);
     if !errmsg.is_null() {
-        let body = b"{\"status\":\"error\",\"error\":\"Bad request\"}\0";
-        let ct = b"application/json\0";
+        let (status, body) = if too_large {
+            // NET-10
+            let why = CStr::from_ptr(errmsg).to_string_lossy();
+            (
+                morloc_runtime_types::daemon_error::http_status(DAEMON_ERROR_LIMIT, false),
+                morloc_runtime_types::daemon_error::error_body(DAEMON_ERROR_LIMIT, &why),
+            )
+        } else {
+            (400, "{\"status\":\"error\",\"class\":\"bad-request\",\"error\":\"Bad request\"}".to_string())
+        };
         crate::http_ffi::write_response(
             client_fd,
-            400,
-            ct.as_ptr() as *const c_char,
+            status,
+            c"application/json".as_ptr(),
             body.as_ptr() as *const c_char,
-            body.len() - 1,
+            body.len(),
         );
         libc::free(errmsg as *mut c_void);
-        libc::close(client_fd);
+        if too_large {
+            linger_close(client_fd);
+        } else {
+            libc::close(client_fd);
+        }
         return;
     }
 
+    let head = (*http_req).method == HttpMethod::Head;
+    REPLY_WITHOUT_BODY.with(|r| r.set(head));
+    if head {
+        (*http_req).method = HttpMethod::Get;
+    }
+    // NET-1: the liveness probe needs no token.
+    let is_probe = (*http_req).method == HttpMethod::Get
+        && CStr::from_ptr((*http_req).path.as_ptr()).to_bytes()
+            == morloc_runtime_types::bearer::LIVENESS_PATH.as_bytes();
+    if is_probe && !(*http_req).authorized {
+        let body = morloc_runtime_types::bearer::LIVENESS_BODY;
+        crate::http_ffi::write_response(
+            client_fd,
+            200,
+            c"application/json".as_ptr(),
+            body.as_ptr() as *const c_char,
+            body.len(),
+        );
+        http_free_request(http_req);
+        libc::close(client_fd);
+        return;
+    }
     // CORS preflight short-circuit. Browser-issued OPTIONS requests
     // should get 204 No Content with the standard CORS headers, never
     // reaching daemon_dispatch (which would otherwise process them
     // through the Health pipeline -- including the recovery gate).
     // NET-1
     if (*http_req).method != HttpMethod::Options && !(*http_req).authorized {
-        let body = b"{\"status\":\"error\",\"error\":\"unauthorized\"}";
+        let body = b"{\"status\":\"error\",\"class\":\"unauthorized\",\"error\":\"unauthorized\"}";
         crate::http_ffi::write_response_ex(
             client_fd,
             401,
@@ -2923,6 +3125,21 @@ unsafe fn handle_http_connection(
         return;
     }
 
+    if let Some(method) = crate::http_ffi::eval_route(http_req) {
+        if let Some((kind, msg)) = eval_refusal(method, Transport::Http) {
+            let body = morloc_runtime_types::daemon_error::error_body(kind, msg);
+            crate::http_ffi::write_response(
+                client_fd,
+                daemon_error_kind_to_http_status(kind, false),
+                c"application/json".as_ptr(),
+                body.as_ptr() as *const c_char,
+                body.len(),
+            );
+            http_free_request(http_req);
+            libc::close(client_fd);
+            return;
+        }
+    }
     let mut route_kind: i32 = DAEMON_ERROR_BAD_REQUEST;
     let req = http_to_daemon_request(http_req, &mut errmsg, &mut route_kind);
     if !errmsg.is_null() {
@@ -2932,7 +3149,8 @@ unsafe fn handle_http_connection(
         // routes correctly.
         let err_str = CStr::from_ptr(errmsg).to_string_lossy();
         let body = format!(
-            "{{\"status\":\"error\",\"error\":{}}}\n",
+            "{{\"status\":\"error\",\"class\":\"{}\",\"error\":{}}}\n",
+            morloc_runtime_types::daemon_error::class_name(route_kind),
             serde_json::Value::String(err_str.into_owned())
         );
         let body_c = CString::new(body.as_str()).unwrap_or_default();
@@ -2956,11 +3174,9 @@ unsafe fn handle_http_connection(
     // the raw-media response form: a return whose type carries a `@mime` comes
     // back as raw bytes + media type rather than JSON, so we can set
     // `Content-Type` below.
-    let prev_http = set_current_output_http(true);
     let prev_media = set_current_output_media_bytes(true);
     let resp = dispatch(manifest as *mut crate::manifest_ffi::Manifest, req, sockets, shm_basename);
     set_current_output_media_bytes(prev_media);
-    set_current_output_http(prev_http);
 
     let status = daemon_error_kind_to_http_status(
         (*resp).error_kind, (*resp).success,
@@ -3355,7 +3571,8 @@ pub(crate) unsafe fn daemon_run(
         shm_basename,
     });
 
-    let n_workers = n_pools.saturating_add(4).clamp(4, 32);
+    // DAEMON-16
+    let n_workers = morloc_runtime_types::daemon_socket::daemon_workers(n_pools);
     let mut workers = Vec::with_capacity(n_workers);
     for _ in 0..n_workers {
         let ctx = Arc::clone(&ctx);
@@ -3560,6 +3777,13 @@ thread_local! {
     // whether any of a reply has been written.
     static REPLY_IS_PACKET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static REPLY_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REPLY_WITHOUT_BODY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the HTTP reply being written answers a `HEAD`, and so carries
+/// headers only.
+pub(crate) fn reply_without_body() -> bool {
+    REPLY_WITHOUT_BODY.with(|r| r.get())
 }
 
 pub(crate) fn note_reply_started() {
@@ -3631,7 +3855,7 @@ unsafe fn answer_panicked_request(job: DaemonJob) {
             libc::free(err as *mut c_void);
         }
     } else if job.conn_type == 2 {
-        let body = format!("{{\"status\":\"error\",\"error\":\"{}\"}}", message);
+        let body = format!("{{\"status\":\"error\",\"class\":\"panic\",\"error\":\"{}\"}}", message);
         let ct = b"application/json\0";
         crate::http_ffi::write_response(
             job.client_fd,
@@ -3667,6 +3891,43 @@ extern "C" fn daemon_signal_handler_fn(_sig: i32) {
             SHUTDOWN_ESCALATED.store(true, Ordering::SeqCst);
         }
     })
+}
+
+#[cfg(test)]
+mod frame_limit_tests {
+    use super::*;
+
+    #[test]
+    fn a_reply_is_refused_before_it_is_built_only_when_its_payload_is_past_the_frame() {
+        let mut resp: DaemonResponse = unsafe { std::mem::zeroed() };
+        resp.success = true;
+        resp.result_bytes = ptr::NonNull::dangling().as_ptr();
+        resp.result_len = 3_300_000_000;
+        assert_eq!(unsafe { reply_past_frame(&mut resp) }, None, "bytes without a media type are not sent");
+        resp.mime = c"image/png".as_ptr() as *mut c_char;
+        assert_eq!(unsafe { reply_past_frame(&mut resp) }, Some(4_400_000_000));
+        resp.success = false;
+        assert_eq!(unsafe { reply_past_frame(&mut resp) }, None, "a failure carries no payload");
+    }
+
+    #[test]
+    fn a_message_past_the_frame_is_refused_unsent() {
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) }, 0);
+        let mut err: *mut c_char = ptr::null_mut();
+        let sent = unsafe { write_lp_message(fds[0], ptr::NonNull::dangling().as_ptr(), u32::MAX as usize + 1, &mut err) };
+        assert!(!sent);
+        let msg = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
+        assert!(msg.contains("4 GiB"), "{msg}");
+        let mut b = [0u8; 1];
+        let n = unsafe { libc::recv(fds[1], b.as_mut_ptr() as *mut c_void, 1, libc::MSG_DONTWAIT) };
+        assert_eq!(n, -1, "bytes of a refused message were sent");
+        unsafe {
+            libc::free(err as *mut c_void);
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3815,8 +4076,39 @@ mod recovery_gate_tests {
     use super::*;
     use std::time::Duration;
 
+    static RECOVERY_FLAG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // DAEMON-1: a nexus thread outside any request that reads shared memory
+    // (a stdio connection, a spawn watcher) holds off the unmap too.
+    #[test]
+    fn recovery_waits_for_a_thread_reading_shared_memory_and_admits_none() {
+        let _flag = RECOVERY_FLAG.lock().unwrap_or_else(|e| e.into_inner());
+        let (inside_tx, inside_rx) = std::sync::mpsc::channel();
+        let (leave_tx, leave_rx) = std::sync::mpsc::channel::<()>();
+        let reader = std::thread::spawn(move || {
+            let guard = enter_shm_user().expect("admitted before recovery");
+            inside_tx.send(()).unwrap();
+            leave_rx.recv().unwrap();
+            drop(guard);
+        });
+        inside_rx.recv().unwrap();
+        assert!(begin_recovery());
+        let admitted_during = enter_shm_user().is_some();
+        let drained_while_reading = wait_for_requests(Duration::from_millis(200));
+        leave_tx.send(()).unwrap();
+        let drained_after = wait_for_requests(Duration::from_secs(5));
+        reader.join().unwrap();
+        end_recovery();
+        let admitted_after = enter_shm_user().is_some();
+        assert!(!admitted_during, "a reader was admitted during recovery");
+        assert!(!drained_while_reading, "recovery saw no readers while one was reading");
+        assert!(drained_after, "recovery never saw the reader finish");
+        assert!(admitted_after, "readers were refused after recovery ended");
+    }
+
     #[test]
     fn recovery_waits_for_requests_already_running_and_admits_none() {
+        let _flag = RECOVERY_FLAG.lock().unwrap_or_else(|e| e.into_inner());
         let (inside_tx, inside_rx) = std::sync::mpsc::channel();
         let (leave_tx, leave_rx) = std::sync::mpsc::channel::<()>();
         let request = std::thread::spawn(move || {
@@ -3914,7 +4206,7 @@ mod lp_message_tests {
                 tid_tx.send(libc::pthread_self()).unwrap();
                 let mut len = 0usize;
                 let mut err: *mut c_char = ptr::null_mut();
-                let msg = read_lp_message(reader, false, &mut len, &mut err);
+                let msg = read_lp_message(reader, false, &mut len, &mut err, &mut false);
                 let ok = !msg.is_null() && err.is_null() && len == 5
                     && std::slice::from_raw_parts(msg as *const u8, 5) == b"hello";
                 if !msg.is_null() {
@@ -3984,6 +4276,38 @@ mod panic_tests {
                 && SHUTDOWN_REQUESTED.load(Ordering::SeqCst);
             if !ok {
                 eprintln!("panicked {panicked}, reply {reply:?}");
+            }
+            ok
+        }));
+    }
+
+    #[test]
+    fn a_liveness_probe_needs_no_token_and_says_only_that_the_daemon_answers() {
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            http_access().token = Some("s3cret".into());
+            let ask = |request: &[u8]| -> String {
+                let sv = pair();
+                unsafe {
+                    libc::write(sv[1], request.as_ptr() as *const c_void, request.len());
+                    libc::shutdown(sv[1], libc::SHUT_WR);
+                    handle_http_connection(sv[0], ptr::null_mut(), ptr::null_mut(), ptr::null());
+                }
+                String::from_utf8_lossy(&read_all(sv[1])).into_owned()
+            };
+            let get = ask(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n");
+            let head = ask(b"HEAD /health HTTP/1.1\r\nHost: x\r\n\r\n");
+            let head_other = ask(b"HEAD /discover HTTP/1.1\r\nHost: x\r\n\r\n");
+            let call = ask(b"POST /call/f HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n[]");
+            let ok = get.starts_with("HTTP/1.1 200")
+                && get.ends_with("{\"status\":\"ok\"}")
+                && head.starts_with("HTTP/1.1 200")
+                && head.contains("Content-Length: 15\r\n")
+                && head.ends_with("\r\n\r\n")
+                && head_other.starts_with("HTTP/1.1 401")
+                && head_other.ends_with("\r\n\r\n")
+                && call.starts_with("HTTP/1.1 401");
+            if !ok {
+                eprintln!("get {get:?}\nhead {head:?}\nhead_other {head_other:?}\ncall {call:?}");
             }
             ok
         }));
@@ -4192,7 +4516,7 @@ mod child_output_tests {
             false
         });
         if !gone {
-            unsafe { libc::kill(grandchild, libc::SIGKILL) };
+            crate::signal_test_child(grandchild, libc::SIGKILL);
         }
         assert!(!finished);
         assert!(gone, "process {grandchild} started by the eval outlived its limit");
@@ -4236,6 +4560,25 @@ mod c_abi {
         super::morloc_daemon_wait_for_requests(timeout_ms)
     }
 
+    /// DAEMON-1: null while recovery runs; give it back with `morloc_shm_user_leave`.
+    #[no_mangle]
+    pub extern "C" fn morloc_shm_user_enter() -> *mut c_void {
+        match super::enter_shm_user() {
+            Some(u) => Box::into_raw(Box::new(u)) as *mut c_void,
+            None => std::ptr::null_mut(),
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `user` is null or came from `morloc_shm_user_enter` and is given back once.
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_shm_user_leave(user: *mut c_void) {
+        if !user.is_null() {
+            drop(Box::from_raw(user as *mut super::ShmUser));
+        }
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn morloc_daemon_end_recovery() {
         super::morloc_daemon_end_recovery()
@@ -4258,28 +4601,26 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn binding_store_init(base_dir: *const c_char) -> *mut BindingStore {
-        super::binding_store_init(base_dir)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn binding_store_free(store: *mut BindingStore) {
-        super::binding_store_free(store)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn daemon_parse_request(json: *const c_char, len: usize, errmsg: *mut *mut c_char) -> *mut DaemonRequest {
         super::daemon_parse_request(json, len, errmsg)
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn daemon_parse_response(json: *const c_char, len: usize, errmsg: *mut *mut c_char) -> *mut DaemonResponse {
-        super::daemon_parse_response(json, len, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn daemon_free_request(req: *mut DaemonRequest) {
         super::daemon_free_request(req)
+    }
+
+    /// # Safety
+    /// `voidstar` is null or a value of `schema`.
+    #[no_mangle]
+    pub unsafe extern "C" fn morloc_top_level_err(voidstar: *const c_void, schema: *const CSchema) -> *mut c_char {
+        match super::top_level_err(false, voidstar, schema) {
+            Some(msg) => {
+                let c = CString::new(msg).unwrap_or_default();
+                libc::strdup(c.as_ptr())
+            }
+            None => ptr::null_mut(),
+        }
     }
 
     #[no_mangle]
@@ -4288,18 +4629,8 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn daemon_serialize_response(response: *mut DaemonResponse, out_len: *mut usize) -> *mut c_char {
-        super::daemon_serialize_response(response, out_len)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn daemon_build_discovery(manifest: *mut crate::manifest_ffi::Manifest) -> *mut c_char {
-        super::daemon_build_discovery(manifest)
-    }
-
-    #[no_mangle]
-    pub extern "C" fn daemon_set_eval_timeout(timeout_sec: i32) {
-        super::daemon_set_eval_timeout(timeout_sec)
+    pub extern "C" fn daemon_set_eval_exposure(exposed: bool, allow_no_auth: bool) {
+        super::daemon_set_eval_exposure(exposed, allow_no_auth)
     }
 
     #[no_mangle]
@@ -4365,38 +4696,66 @@ mod endpoint_claim_tests {
     #[test]
     fn a_live_listener_keeps_its_path_and_a_stale_file_is_replaced() {
         let _endpoints = ENDPOINT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("mlc-claim-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("d.sock");
-        let cpath = CString::new(path.to_str().unwrap()).unwrap();
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let dir = std::env::temp_dir().join(format!("mlc-claim-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("d.sock");
+            let cpath = CString::new(path.to_str().unwrap()).unwrap();
 
-        let live = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        let ino = std::fs::metadata(&path).unwrap().ino();
-        let (fd, addr) = unbound(&path);
-        let refused = unsafe { claim_and_bind(fd, &cpath, &addr) };
-        unsafe { libc::close(fd) };
-        assert!(refused.unwrap_err().contains("already serving"));
-        assert!(ENDPOINTS[LOCK_ENDPOINT + SOCKET_ENDPOINT].path.load(Ordering::SeqCst).is_null(), "a refused claim left its lock file to be removed");
-        assert_eq!(std::fs::metadata(&path).unwrap().ino(), ino);
-        assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
+            let live = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            let ino = std::fs::metadata(&path).unwrap().ino();
+            let (fd, addr) = unbound(&path);
+            let refused = unsafe { claim_and_bind(fd, &cpath, &addr) };
+            unsafe { libc::close(fd) };
+            assert!(refused.unwrap_err().contains("already serving"));
+            assert!(ENDPOINTS[LOCK_ENDPOINT + SOCKET_ENDPOINT].path.load(Ordering::SeqCst).is_null(), "a refused claim left its lock file to be removed");
+            assert_eq!(std::fs::metadata(&path).unwrap().ino(), ino);
+            assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
 
-        drop(live);
-        let (fd, addr) = unbound(&path);
-        unsafe { claim_and_bind(fd, &cpath, &addr) }.unwrap();
-        unsafe { libc::listen(fd, 1) };
-        assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
+            drop(live);
+            let (fd, addr) = unbound(&path);
+            unsafe { claim_and_bind(fd, &cpath, &addr) }.unwrap();
+            unsafe { libc::listen(fd, 1) };
+            assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
 
-        let (fd2, addr2) = unbound(&path);
-        let second = unsafe { claim_and_bind(fd2, &cpath, &addr2) };
-        let second = second.unwrap_err();
-        assert!(second.contains("another daemon holds"), "{second}");
+            let (fd2, addr2) = unbound(&path);
+            let second = unsafe { claim_and_bind(fd2, &cpath, &addr2) };
+            let second = second.unwrap_err();
+            assert!(second.contains("another daemon holds"), "{second}");
+            let _ = std::fs::remove_dir_all(dir);
+            true
+        }));
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+
+    // SHM-3, SHM-14: the reference a reply carries is released when the
+    // daemon is done with it, without touching the arena.
+    #[test]
+    fn a_replys_reference_is_released_with_its_guard() {
+        let _shm = crate::init_test_shm();
+        let cs = crate::cschema::CSchema::from_rust(&morloc_runtime_types::schema::parse_schema("i8").unwrap());
+        let block = crate::shm::shmalloc(8).unwrap();
+        unsafe { crate::shm::shincref(block) }.unwrap();
+        let packet = unsafe { crate::packet_ffi::make_standard_data_packet(crate::shm::abs2rel(block).unwrap(), cs) };
+        let g = crate::eval_arena::enter().unwrap();
+        let held = {
+            let _reply = unsafe { reply_reference(packet) };
+            unsafe { crate::shm::reference_count(block) }.unwrap()
+        };
+        let recorded = crate::eval_arena::has_entry(block);
+        drop(g);
+        let left = unsafe { crate::shm::reference_count(block) }.unwrap();
+        crate::shm::release(block).unwrap();
         unsafe {
-            libc::close(fd2);
-            libc::close(fd);
-            libc::close(ENDPOINT_LOCKS[SOCKET_ENDPOINT].swap(-1, Ordering::SeqCst));
+            libc::free(packet as *mut c_void);
+            crate::cschema::CSchema::free(cs);
         }
-        ENDPOINTS[LOCK_ENDPOINT + SOCKET_ENDPOINT].path.store(ptr::null_mut(), Ordering::SeqCst);
-        let _ = std::fs::remove_dir_all(dir);
+        assert_eq!((held, left), (2, 1));
+        assert!(!recorded);
     }
 }

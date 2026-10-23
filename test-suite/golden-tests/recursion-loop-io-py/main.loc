@@ -1,4 +1,4 @@
-module main (baseEffect, perIter)
+module main (baseEffect, perIter, doBase)
 
 import root-py
 
@@ -24,3 +24,14 @@ perIter n
   : do
       _ <- emit n
       perIter (n - 1)
+
+-- <IO> tail loop whose base case is a do-block, deep enough that it runs only
+-- as a loop.
+countDo :: Int -> Int -> <IO> Int
+countDo acc n
+  ? n == 0 = do
+      emit acc
+  : countDo (acc + 1) (n - 1)
+
+doBase :: Int -> <IO> Int
+doBase n = countDo 0 n

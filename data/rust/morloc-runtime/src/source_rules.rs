@@ -5,7 +5,7 @@ use syn::visit::Visit;
 
 const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc", "morloc-nexus"];
 const PREPARE_HANDLERS: &[&str] = &["prepare_fork_body"];
-const MAX_DEVIATING_ROWS: usize = 3;
+const MAX_DEVIATING_ROWS: usize = 2;
 const MAX_ENV_READS: usize = 67;
 const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/cell.rs::proc_tag",
@@ -17,11 +17,14 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-runtime/packet_ffi.rs::make_file_data_packet_voidstar",
     "morloc-runtime/run.rs::publish_run",
     "morloc-runtime/run.rs::gen_id",
+    "morloc-runtime/slurm_ffi.rs::make_job_dir",
     "morloc-runtime/stream.rs::with_process_local_slot",
     "morloc-runtime/stream.rs::allocate_slot_cas",
-    "morloc-runtime/stream.rs::read_pid_start_time",
+    "morloc-runtime-types/process.rs::own_start_time",
     "morloc-runtime/stream.rs::verify_stdio_opener_pid",
-    "morloc-runtime/stream.rs::note_sealed",
+    "morloc-runtime/custody.rs::push_with",
+    "morloc-runtime/custody.rs::take_custody",
+    "morloc-runtime/custody.rs::open",
     "morloc-runtime-types/process.rs::token",
     "morloc-runtime-types/recoverable_lock.rs::ensure_ready",
     "morloc-nexus/process.rs::make_tmpdir",
@@ -32,17 +35,17 @@ const PID_READ_SITES: &[&str] = &[
     "morloc-nexus/main.rs::run_call_packet",
     "morloc-nexus/process.rs::init_shm",
     "morloc-nexus/mcp.rs::new_session_id",
-    "morloc-runtime/ipc_ffi.rs::read_packet",
+    "morloc-runtime/ipc_ffi.rs::recv",
+    "morloc-runtime/fork_pool.rs::worker",
     "morloc-runtime/stream.rs::is_this_process",
     "morloc-runtime/daemon_ffi.rs::write_port_file_atomic",
-    "morloc-runtime/ipc_ffi.rs::wait_for_client_with_timeout",
+    "morloc-runtime/ipc_ffi.rs::accept_or_watch",
     "morloc-runtime/ipc_ffi.rs::try_answer_ping",
     "morloc-runtime/ipc_ffi.rs::close_socket",
-    "morloc-runtime/ipc_ffi.rs::send_and_receive_over_socket_wait",
+    "morloc-runtime/ipc_ffi.rs::send_and_receive_over_socket",
     "morloc-runtime/utility.rs::create_beside",
 ];
-// SHM-8: pool.py's retiring worker names itself to its coordinator.
-const BINDER_PID_READS: &[(&str, usize)] = &[("data/lang/r/rmorloc.c", 1), ("data/lang/py/pool.py", 1)];
+const BINDER_PID_READS: &[(&str, usize)] = &[("data/lang/r/rmorloc.c", 1)];
 const CLASSES: &[&str] = &[
     "held", "reset", "unreachable", "exec-only", "startup", "lazy", "fork-scoped", "counter", "thread",
     "instance", "paired", "test-only",
@@ -57,7 +60,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn model_dir() -> PathBuf {
-    repo_root().join("model")
+    repo_root().join("model").join("runtime")
 }
 
 fn walk(dir: &Path, exts: &[&str], skip: &[&str]) -> Vec<PathBuf> {
@@ -93,6 +96,12 @@ fn last_ident(s: &str) -> Option<String> {
     let start = t.len() - t.chars().rev().take_while(|c| is_ident_char(*c)).map(char::len_utf8).sum::<usize>();
     let name = &t[start..];
     (!name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit())).then(|| name.to_string())
+}
+
+// The `:` of a Rust `name: Type` declaration: one that is not half of `::`.
+fn type_colon(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    (0..b.len()).find(|&i| b[i] == b':' && b.get(i + 1) != Some(&b':') && (i == 0 || b[i - 1] != b':'))
 }
 
 fn first_ident(s: &str) -> Option<String> {
@@ -500,7 +509,7 @@ fn other_found(file: &Path, scope: &str, name: String, kind: Kind) -> Found {
 
 fn scan_c(out: &mut Vec<Found>) {
     let locks = ["std::mutex", "std::once_flag", "pthread_mutex_t", "pthread_once_t", "std::condition_variable"];
-    for f in walk(&repo_root().join("data/lang"), &["c", "cpp", "hpp", "h"], &["nanoarrow", "/julia"]) {
+    for f in walk(&repo_root().join("data/lang"), &["c", "cpp", "hpp", "h"], &["nanoarrow"]) {
         let text = std::fs::read_to_string(&f).unwrap();
         let mut scope = "-".to_string();
         for line in text.lines() {
@@ -538,7 +547,7 @@ fn scan_py(out: &mut Vec<Found>) {
         "threading.Lock(", "threading.RLock(", "threading.Condition(", "threading.Event(",
         "threading.Semaphore(", "threading.BoundedSemaphore(", "queue.Queue(", "queue.SimpleQueue(",
     ];
-    for f in walk(&repo_root().join("data/lang"), &["py"], &["/julia"]) {
+    for f in walk(&repo_root().join("data/lang"), &["py"], &[]) {
         for line in std::fs::read_to_string(&f).unwrap().lines() {
             if let Some((lhs, rhs)) = line.split_once('=') {
                 if ctors.iter().any(|k| rhs.trim_start().starts_with(k)) {
@@ -568,8 +577,10 @@ fn scan_templates(out: &mut Vec<Found>) {
                         continue;
                     }
                     let head = &rest[..end];
-                    let rust_style = head.contains(':') && !head.contains("::");
-                    let name = if rust_style { last_ident(head.split(':').next().unwrap()) } else { last_ident(head) };
+                    let name = match type_colon(head) {
+                        Some(at) => last_ident(&head[..at]),
+                        None => last_ident(head),
+                    };
                     if let Some(name) = name {
                         out.push(other_found(&f, "-", name, Kind::Template));
                     }
@@ -644,7 +655,7 @@ fn parse_registry(text: &str) -> Result<Vec<Row>, String> {
 
 fn rows() -> Vec<Row> {
     let text = std::fs::read_to_string(model_dir().join("registry.tsv")).unwrap();
-    parse_registry(&text).unwrap_or_else(|e| panic!("model/registry.tsv: {e}"))
+    parse_registry(&text).unwrap_or_else(|e| panic!("model/runtime/registry.tsv: {e}"))
 }
 
 #[test]
@@ -790,7 +801,7 @@ fn model_items_are_checked() {
                     }
                 }
             }
-            Some("deviation") | Some("retired") => {
+            Some("deviation") | Some("draft") | Some("retired") => {
                 if !item.checks.is_empty() {
                     problems.push(format!("{} ({at}) is not implemented but names tests", item.id));
                 }
@@ -823,14 +834,14 @@ fn every_process_wide_value_is_registered() {
         .filter(|f| !ids.contains(f.id.as_str()))
         .map(|f| format!("{}\t?\t\t   ({:?}{})", f.id, f.kind, if f.test_only { ", test-only" } else { "" }))
         .collect();
-    assert!(missing.is_empty(), "process-wide values missing from model/registry.tsv:\n{}", missing.join("\n"));
+    assert!(missing.is_empty(), "process-wide values missing from model/runtime/registry.tsv:\n{}", missing.join("\n"));
 }
 
 #[test]
 fn every_registry_row_names_a_value_in_code() {
     let found: HashSet<String> = all_found(&scan_rust()).into_iter().map(|f| f.id).collect();
     let stale: Vec<String> = rows().into_iter().filter(|r| !found.contains(&r.id)).map(|r| r.id).collect();
-    assert!(stale.is_empty(), "model/registry.tsv rows with no value in code:\n{}", stale.join("\n"));
+    assert!(stale.is_empty(), "model/runtime/registry.tsv rows with no value in code:\n{}", stale.join("\n"));
 }
 
 #[test]
@@ -910,7 +921,7 @@ fn registry_rows_obey_their_class() {
             problems.push(format!("{site}: listed as a fork site but does not fork"));
         }
     }
-    assert!(problems.is_empty(), "model/registry.tsv disagrees with the code:\n{}", problems.join("\n"));
+    assert!(problems.is_empty(), "model/runtime/registry.tsv disagrees with the code:\n{}", problems.join("\n"));
 }
 
 #[test]
@@ -1023,18 +1034,20 @@ fn the_environment_is_written_only_by_its_checked_writers() {
         "morloc-nexus/process.rs::set_startup_env",
         "morloc-nexus/process.rs::remove_startup_env",
         "morloc-runtime/run.rs::publish_run",
+        "morloc-runtime/fork_policy.rs::set_test_env",
     ];
+    let writing = ["env::set_var", "env::remove_var", "libc::setenv", "libc::unsetenv", "libc::putenv", "libc::clearenv"];
     let writes: Vec<String> = scan_rust()
         .calls
         .iter()
-        .filter(|c| !c.test_only && (c.path.ends_with("env::set_var") || c.path.ends_with("env::remove_var")))
+        .filter(|c| writing.iter().any(|w| c.path.ends_with(w)))
         .filter(|c| !writers.contains(&c.site.as_str()))
         .map(|c| format!("{}: {}", c.site, c.path))
         .collect();
     assert!(
         writes.is_empty(),
         "FORK-11: the environment is written only while the process has one thread, through \
-         the nexus's set_startup_env / remove_startup_env:\n{}",
+         the nexus's set_startup_env / remove_startup_env, or in tests set_test_env:\n{}",
         writes.join("\n")
     );
 }
@@ -1063,7 +1076,7 @@ fn every_process_id_read_is_reviewed() {
     let scan = scan_rust();
     let reads: HashSet<&str> = scan.pid_reads.iter().map(|s| s.as_str()).collect();
     let mut binder_counts: HashMap<String, usize> = HashMap::new();
-    for f in walk(&repo_root().join("data/lang"), &["c", "cpp", "hpp", "h", "py", "R", "rs"], &["/julia", "nanoarrow"]) {
+    for f in walk(&repo_root().join("data/lang"), &["c", "cpp", "hpp", "h", "py", "R", "rs"], &["nanoarrow"]) {
         let text = std::fs::read_to_string(&f).unwrap();
         let n = text.lines().filter(|l| l.contains("getpid(") || l.contains("os.getpid") || l.contains("Sys.getpid")).count();
         if n > 0 {
@@ -1107,6 +1120,8 @@ fn only_catch_scopes_catch_a_panic() {
         "morloc-runtime/stream.rs::with_process_local_slot",
         "rustmorloc/lib.rs::dispatch_guard",
         "rustmorloc/lib.rs::mlc_try",
+        // SLOT-25: holds a decoder's throw across the runtime call, then resumes it.
+        "rustmorloc/lib.rs::next_decode",
         "rustmorloc/lib.rs::drop",
     ];
     let ours = ["morloc-runtime/", "morloc-runtime-types/", "morloc-nexus/", "rustmorloc/"];

@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.109.0
+version:          0.110.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description: |
@@ -53,11 +53,6 @@ extra-source-files:
   - data/lang/r/rmorloc.c
   - data/lang/r/pool.R
   - data/lang/r/init.sh
-  - data/lang/julia/juliabridge.c
-  - data/lang/julia/MorlocRuntime.jl
-  - data/lang/julia/lang.yaml
-  - data/lang/julia/pool.jl
-  - data/lang/julia/init.sh
 
 default-extensions:
   - TypeOperators

@@ -1,0 +1,18 @@
+-- A `data` type whose native form is a template cannot be instantiated at
+-- an argument that contains the type itself: `X` unfolds to `Rose ?X`, so
+-- `MyRose<$1>` would have to spell `MyRose<optional<MyRose<...>>>`. The
+-- build is rejected with a located error; with a generated native form the
+-- same program builds (spec-alias-7-3).
+module main (roundCpp)
+
+import root-cpp
+
+data Rose a = R a [Rose a]
+data Cpp => (Rose a) = "MyRose<$1>" a
+type X = Rose ?X
+
+source Cpp from "ops.hpp" ("ident" as idCpp)
+idCpp :: X -> X
+
+roundCpp :: X -> X
+roundCpp x = idCpp x

@@ -1,0 +1,10 @@
+-- Spec POLY-6: the twin of main.loc and slice.loc with the index type written.
+module main (f, g)
+
+import root-py
+
+f :: [Str] -> U64 -> Str
+f xs x = .[(tryInto x :: I64)] xs
+
+g :: [Str] -> U64 -> [Str]
+g xs x = .[(tryInto x :: I64) :] xs

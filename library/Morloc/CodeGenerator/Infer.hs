@@ -18,6 +18,10 @@ module Morloc.CodeGenerator.Infer
   , inferConcreteTypeUniversal
   , inferConcreteTypeU
   , inferConcreteVar
+  , undeterminedError
+  , rejectUndetermined
+  , requireDetermined
+  , recordUndeterminedSites
   , canHoldType
   , evalGeneralStep
   ) where
@@ -26,6 +30,7 @@ import qualified Control.Monad.State as CMS
 import Control.Monad.Except (catchError)
 import Data.Functor.Const (Const (..))
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.ValueArgs (appValueArgsT, valueArgsT)
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
@@ -34,7 +39,9 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
 import qualified Morloc.TypeEval as T
+import Morloc.Typecheck.Internal (typeUChildren)
 import Numeric (showHex)
+import Data.Char (isDigit)
 
 evalGeneralStep :: TypeU -> MorlocMonad (Maybe TypeU)
 evalGeneralStep t = T.evaluateStep <$> MM.getGeneralScope <*> pure t
@@ -58,10 +65,10 @@ inferConcreteTypeU' :: TypeU -> (Scope, Scope) -> Either MorlocError TypeU
 inferConcreteTypeU' generalType (cscope, gscope) = T.pairEval cscope gscope generalType
 
 inferConcreteType :: Lang -> Indexed Type -> MorlocMonad TypeF
-inferConcreteType _ (Idx i (UnkT _)) =
-  MM.throwSourcedError i "Cannot infer concrete type for UnkT. This may be an unsolved generic term"
-inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
+inferConcreteType lang (Idx i t0) = do
+  let generalType = type2typeu t0
   (cscope0, gscope0) <- getScope lang
+  requireDetermined i t0
   anc <- CMS.gets stateVariantAncestors
   -- A `data` type already being expanded resolves to its NAME and stops.
   -- The check belongs here, at the single entry point, rather than deeper:
@@ -75,6 +82,116 @@ inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
       concreteType <- inferConcreteTypeU lang (Idx i generalType)
       (_, gscope) <- getScope lang
       inferConcreteTypeStructural lang i gscope generalType concreteType
+
+-- | POLY-6: a variable nothing determined has no native form. The arguments
+-- of a `data` type are exempt here: one its fields use is checked when the
+-- fields are resolved, and one they do not use is never spelled.
+requireDetermined :: Int -> Type -> MorlocMonad ()
+requireDetermined i t = when (containsUnk t) $ do
+  gscope <- MM.getGeneralScope
+  case undetermined gscope (type2typeu t) of
+    [] -> return ()
+    vs -> undeterminedError i vs
+
+-- | The variables of a type that nothing determined ('UnkT', a variable
+-- quantified over itself in 'TypeU'), outside the arguments of a `data` type.
+undetermined :: Scope -> TypeU -> [TVar]
+undetermined gscope t = case t of
+  ForallU v (VarU v') | v == v' -> [v]
+  _ | Just _ <- dataHeadOf gscope t -> []
+  _ -> concatMap (undetermined gscope) (typeChildren gscope t)
+
+-- | The children of a type that classify values. A dimension or other
+-- non-`Type` argument is erased (KIND-2) and needs no value (DIM-6).
+typeChildren :: Scope -> TypeU -> [TypeU]
+typeChildren gscope t = case T.flattenApp t of
+  OpU {} -> []
+  AppU h@(VarU name) args
+    | Just ((ps, _, _, _, _) : _) <- Map.lookup name gscope ->
+        h : [a | (a, k) <- zip args (map paramKind ps <> repeat KindType), k == KindType]
+  t' -> typeUChildren t'
+  where
+    paramKind (Left (_, k)) = k
+    paramKind (Right _) = KindType
+
+-- | Record, for each undetermined variable, the outermost term whose type
+-- holds it. Code generation finds a variable deep inside a type, where the
+-- index at hand may be a declaration's rather than the term's.
+recordUndeterminedSites :: [AnnoS (Indexed Type) Many Int] -> MorlocMonad ()
+recordUndeterminedSites es = do
+  gscope <- MM.getGeneralScope
+  -- Names are unique within one tree only, so a name met in two trees
+  -- locates nothing.
+  let perTree = [sites gscope e | e <- es]
+      counts = Map.unionsWith (+) [Map.map (const (1 :: Int)) m | m <- perTree]
+      located = Map.filterWithKey (\v _ -> Map.lookup v counts == Just 1) (Map.unions perTree)
+  located `seq` CMS.modify (\st -> st { stateUndeterminedSites = located })
+  where
+    sites gscope e = Map.fromListWith (\_ old -> old)
+      [(v, ci) | (t, ci) <- ordered [e], containsUnk t, v <- needed gscope (type2typeu t)]
+    -- Terms outside any function come first, so a variable is reported at
+    -- the argument a caller wrote rather than inside the callee's body.
+    ordered [] = []
+    ordered roots =
+      let (values, functions, inner) = mconcat (map byNesting roots)
+      in values <> functions <> ordered inner
+    byNesting (AnnoS (Idx _ t) ci e) = case t of
+      FunT {} -> ([], [(t, ci)], foldExprS (: []) e)
+      _ -> ([(t, ci)], [], []) <> mconcat (map byNesting (foldExprS (: []) e))
+
+-- | The undetermined variables of a type that a native form needs: those
+-- outside any `data` type, and those a `data` type's fields use.
+needed :: Scope -> TypeU -> [TVar]
+needed gscope = go Set.empty
+  where
+    go seen t = case t of
+      ForallU v (VarU v') | v == v' -> [v]
+      _ | Just key@(name, args) <- dataHeadOf gscope t ->
+            if Set.member key seen || Set.size seen >= 64
+              then []
+              else concatMap (go (Set.insert key seen)) (fields name args)
+      _ -> concatMap (go seen) (typeChildren gscope t)
+    fields name args =
+      let params = case Map.lookup name gscope of
+            Just ((ps, _, _, _, _) : _) -> [tv | Left (tv, _) <- ps]
+            _ -> []
+          inst f = foldl (\acc (tv, a) -> substituteTVar tv a acc) f (zip params args)
+      in [inst f | Just cs <- [dataCtorsOfName gscope name], (_, fs) <- cs, f <- fs]
+
+-- | Reject a type holding a variable nothing determines that a native form
+-- needs and that occurs in a term of the program (POLY-6).
+rejectUndetermined :: Int -> Type -> MorlocMonad ()
+rejectUndetermined i t = do
+  gscope <- MM.getGeneralScope
+  sites <- CMS.gets stateUndeterminedSites
+  case filter (`Map.member` sites) (needed gscope (type2typeu t)) of
+    [] -> return ()
+    vs -> undeterminedError i vs
+
+-- | A type variable nothing in the program determines, where a native form
+-- needs it (POLY-6).
+undeterminedError :: Int -> [TVar] -> MorlocMonad a
+undeterminedError i0 vs = do
+  sites <- CMS.gets stateUndeterminedSites
+  let i = case mapMaybe (`Map.lookup` sites) vs of
+        (site : _) -> site
+        [] -> i0
+  MM.throwSourcedError i $ case filter (not . generated) vs of
+    [] -> "The type of this term is not determined. Add a signature or an annotation that fixes it."
+    named ->
+      "The type of this term is not determined: nothing in the program fixes"
+        <+> hsep (punctuate "," (map (squotes . pretty . written) named))
+        <> ". Add a signature or an annotation that does."
+  where
+    -- a variable the compiler made up, as for an accessor, names nothing the
+    -- reader wrote
+    generated (TV n) = "_" `MT.isPrefixOf` n
+    -- the name as written: without the suffix that makes it unique, or
+    -- without the prefix and counter 'toExistential' gives a class method's
+    -- variable
+    written (TV n) =
+      let base = MT.takeWhile (/= '@') n
+       in fromMaybe base (MT.stripPrefix "cls_" base >>= MT.stripSuffix "_" . MT.dropWhileEnd isDigit)
 
 -- | Parallel structural walk over (general, concrete) that handles the
 -- AppU/VarU mismatch case at any depth. Parameterised newtypes whose
@@ -110,19 +227,11 @@ inferConcreteTypeStructural lang i gscope g c
   -- (`data Rose = Rose [Rose]`) arrives. The back-edge carries the
   -- instantiation's arguments, as a direct field's does, so the element of
   -- a `[Rose a]` arm can still instantiate a template.
-  (VarU vG, VarU (TV vC))
-    | Just _ <- scopeDataCtors gscope vG -> do
-        anc0 <- CMS.gets stateVariantAncestors
-        if Set.member (vG, []) anc0
-          then backEdgeHere vG []
-          else inferVariantArms lang i gscope vG vC []
-  -- An APPLIED `data`, e.g. @Try Str a@. Same treatment as the bare case,
-  -- except the declaration's parameters must be instantiated with the
-  -- applied arguments before the arms are resolved -- otherwise an arm
-  -- mentioning a parameter resolves the bare variable and the type reaches
-  -- codegen as an AppF rather than a VariantF.
-  (AppU (VarU vG) tsG, _)
-    | Just _ <- scopeDataCtors gscope vG
+  -- An APPLIED `data`, e.g. @Try Str a@, has the declaration's parameters
+  -- instantiated with the applied arguments before the arms are resolved --
+  -- otherwise an arm mentioning a parameter resolves the bare variable and
+  -- the type reaches codegen as an AppF rather than a VariantF.
+  _ | Just (vG, tsG) <- dataHeadOf gscope g
     , Just vC <- concreteHeadName c -> do
         anc0 <- CMS.gets stateVariantAncestors
         if Set.member (vG, tsG) anc0
@@ -144,7 +253,7 @@ inferConcreteTypeStructural lang i gscope g c
 inferVariantArms
   :: Lang -> Int -> Scope -> TVar -> MT.Text -> [TypeU] -> MorlocMonad TypeF
 inferVariantArms lang i gscope vG vC targs = do
-  arms0 <- case scopeDataCtors gscope vG of
+  arms0 <- case dataCtorsOfName gscope vG of
     Just as -> return as
     Nothing -> return []
   -- Instantiate the declaration's parameters with the applied arguments.
@@ -165,7 +274,14 @@ inferVariantArms lang i gscope vG vC targs = do
   -- rendered, and a literal like `A :: Tag a` with no use of `a` is
   -- ordinary code. It is only a template that would try to spell it, and
   -- the native compiler reports that where it happens.
-  ps <- mapM (argType lang i) targs
+  --
+  -- The type is an ancestor while its arguments are resolved, so an
+  -- argument that contains the type itself (@type X = Rose ?X@, whose
+  -- argument is @?X@) ends at a back-edge rather than expanding forever.
+  anc0 <- CMS.gets stateVariantAncestors
+  CMS.modify (\st -> st { stateVariantAncestors = Set.insert (vG, targs) anc0 })
+  ps <- resolveArgs lang i (vG, targs)
+  CMS.modify (\st -> st { stateVariantAncestors = anc0 })
   if all (null . snd) arms
     then return $ EnumF (FV vG (CV vC)) ps (map fst arms)
     else do
@@ -243,8 +359,36 @@ argType lang i t = case typeOf t of
 
 backEdge :: Lang -> Int -> Scope -> TVar -> [TypeU] -> MorlocMonad TypeF
 backEdge lang i cscope v args = do
+  resolving <- CMS.gets stateVariantArgsResolving
+  if Set.member (v, args) resolving
+    -- Reached while resolving this instantiation's own arguments: an
+    -- argument contains the type itself, so its native spelling would be
+    -- infinite. A generated type is named by its arguments as written and
+    -- never spells them, so it needs none here; a user template would have
+    -- to spell them, and cannot.
+    then
+      if MT.any (== '$') name
+        then MM.throwSourcedError i $
+          "The native form of" <+> squotes (pretty v) <+> "is a template,"
+            <+> "but its argument" <+> hsep (map pretty args)
+            <+> "contains the type itself, so the template has no finite"
+            <+> "instance."
+        else return $ VariantF (FV v (CV name)) [] []
+    else do
+      ps <- resolveArgs lang i (v, args)
+      return $ VariantF (FV v (CV name)) ps []
+  where
+    name = instanceName cscope v args
+
+-- | Resolve the applied arguments of a `data` instantiation, marking it as
+-- resolving its arguments for the duration (see 'backEdge').
+resolveArgs :: Lang -> Int -> (TVar, [TypeU]) -> MorlocMonad [TypeF]
+resolveArgs lang i key@(_, args) = do
+  resolving <- CMS.gets stateVariantArgsResolving
+  CMS.modify (\st -> st { stateVariantArgsResolving = Set.insert key resolving })
   ps <- mapM (argType lang i) args
-  return $ VariantF (FV v (CV (instanceName cscope v args))) ps []
+  CMS.modify (\st -> st { stateVariantArgsResolving = resolving })
+  return ps
 
 -- | A short, deterministic suffix distinguishing one instantiation of a
 -- parameterized `data` from another in a language that declares types by
@@ -323,9 +467,13 @@ inferConcreteTypeWeave lang i gscope generalType concreteType =
         Just reducedGType
           | reducedGType /= generalType ->
               inferConcreteType lang (Idx i (typeOf reducedGType))
-        _ ->
-          MM.throwSourcedError i $
-            "Cannot infer concrete type for" <+> pretty generalType <> "\nCould not reduce type"
+        _ -> do
+          (cscope, _) <- getScope lang
+          case inheritedForm cscope gscope generalType of
+            Just parent -> inferConcreteType lang (Idx i (typeOf parent))
+            Nothing ->
+              MM.throwSourcedError i $
+                "Cannot infer concrete type for" <+> pretty generalType <> "\nCould not reduce type"
 
 -- | The index is the source position errors are reported against and the
 -- site a `data` type's arms are resolved at; the scopes themselves are the
@@ -354,11 +502,7 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c
   -- `data` is asked for as though it were an ordinary applied type, and
   -- answered with a demand for a `Packable` instance -- which a sum type
   -- no more needs than a tuple does.
-  (VarU vG, VarU (TV vC))
-    | Just _ <- scopeDataCtors gscopeUni vG ->
-        inferVariantArms lang i gscopeUni vG vC []
-  (AppU (VarU vG) tsG, _)
-    | Just _ <- scopeDataCtors gscopeUni vG
+  _ | Just (vG, tsG) <- dataHeadOf gscopeUni g
     , Just vC <- universalConcreteHead c ->
         inferVariantArms lang i gscopeUni vG vC tsG
   -- Same rule as in the module-scoped walk above.
@@ -391,10 +535,29 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c
         (Just reducedGType)
           | reducedGType /= g ->
               inferConcreteTypeUniversal lang i (typeOf reducedGType)
-        _ ->
-          MM.throwSystemError $
-            "Failed to infer concrete type for" <+> pretty t
-              <> ": Could not reduce type in broadest scope"
+        _ -> do
+          cscopeUni <- MM.getConcreteScope lang
+          case inheritedForm cscopeUni gscopeUni g of
+            Just parent -> inferConcreteTypeUniversal lang i (typeOf parent)
+            Nothing ->
+              MM.throwSystemError $
+                "Failed to infer concrete type for" <+> pretty t
+                  <> ": Could not reduce type in broadest scope"
+
+-- | The wire parent of a newtype that has no form in this language. Such a
+-- newtype takes its parent's native form (manual: "When a newtype needs a
+-- Packable instance").
+inheritedForm :: Scope -> Scope -> TypeU -> Maybe TypeU
+inheritedForm cscope gscope g = case g of
+  VarU v -> step v
+  AppU (VarU v) _ -> step v
+  _ -> Nothing
+  where
+    step v = case Map.lookup v gscope of
+      Just entries
+        | any (\(_, _, _, _, k) -> k == TypedefNewtype) entries
+        , not (Map.member v cscope) -> T.expandWireParent gscope g
+      _ -> Nothing
 
 -- | In a compiled language a record mapped to a type the program declares
 -- (@record Rust => Ops = "Ops"@) holds its fields as that declaration spells
@@ -521,7 +684,7 @@ weave gscope = w Set.empty
     -- otherwise only serialized positions (which come through SerialEnum)
     -- would see it, and a native-position enum would look like an opaque
     -- VarF with an unhelpful name.
-    w anc (VarU v1) (VarU (TV v2)) = return $ case scopeDataCtors gscope v1 of
+    w anc (VarU v1) (VarU (TV v2)) = return $ case T.dataHead gscope (T.whnf gscope (VarU v1)) of
       -- A type already being expanded stays an opaque name. Expansion
       -- reaches a constructor's field types, so a field naming an enclosing
       -- `data` would otherwise re-enter it forever -- and branch, once more
@@ -530,9 +693,9 @@ weave gscope = w Set.empty
       -- once, later, where the wire form is built and a name is available
       -- to tie the knot.
       _ | Set.member v1 anc -> VarF (FV v1 (CV v2))
-      Just ctors
+      Just (n, _, ctors)
         -- Every constructor argument-free: the one-byte form.
-        | all (null . snd) ctors -> EnumF (FV v1 (CV v2)) [] (map fst ctors)
+        | all (null . snd) ctors -> EnumF (FV n (CV v2)) [] (map fst ctors)
         -- Otherwise a tagged pointer. The arms are NOT expanded here: a
         -- field's concrete form is a per-language question and this walk
         -- has only the general scope, so weaving a field against itself
@@ -631,14 +794,13 @@ canHoldType' declaredRecords lang i t = do
   where
     declared gscope v = do
       cscope <- MM.getConcreteScope lang
-      return (isJust (scopeDataCtors gscope v) || Map.member v cscope)
+      return (isJust (dataHeadOf gscope (VarU v)) || Map.member v cscope)
     -- the records a type holds, whether written out or named
     recordNames g ty = case ty of
-      NamT NamTable _ ps rs -> concatMap (recordNames g) (ps <> map snd rs)
-      NamT _ v ps rs -> v : concatMap (recordNames g) (ps <> map snd rs)
+      NamT _ v ps rs -> v : concatMap (recordNames g) (valueArgsT g v ps <> map snd rs)
       VarT v -> [v | namesRecord g v]
       FunT ins out -> concatMap (recordNames g) (out : ins)
-      AppT f xs -> concatMap (recordNames g) (f : xs)
+      AppT f xs -> concatMap (recordNames g) (f : appValueArgsT g f xs)
       OptionalT x -> recordNames g x
       EffectT _ x -> recordNames g x
       _ -> []
@@ -646,7 +808,7 @@ canHoldType' declaredRecords lang i t = do
 -- | Whether a general type name is a record.
 namesRecord :: Scope -> TVar -> Bool
 namesRecord g v = case Map.lookup v g of
-  Just ((_, NamU o _ _ _, _, _, _) : _) -> o /= NamTable
+  Just ((_, NamU {}, _, _, _) : _) -> True
   _ -> False
 
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
@@ -682,7 +844,9 @@ inferConcreteVar lang t0@(Idx i v) = do
           -- to anything the user wrote. The pool generates a native
           -- definition under the type's own name, so that is the concrete
           -- name here.
-          isData = isJust (scopeDataCtors gscope v)
+          -- By name: an alias of a `data` type is chased through its
+          -- body below like any other alias.
+          isData = isJust (dataCtorsOfName gscope v)
         let
           -- Guard against self-recursive lookup: if the body's
           -- extracted key resolves back to v (e.g. a record whose
@@ -735,10 +899,7 @@ bodyNameOf _ = Nothing
 -- applied to. Two instantiations of one parameterized type are two types,
 -- so the arguments are part of the identity.
 dataHeadOf :: Scope -> TypeU -> Maybe (TVar, [TypeU])
-dataHeadOf gscope t = case t of
-  VarU v | Just _ <- scopeDataCtors gscope v -> Just (v, [])
-  AppU (VarU v) ts | Just _ <- scopeDataCtors gscope v -> Just (v, ts)
-  _ -> Nothing
+dataHeadOf gscope t = (\(v, ts, _) -> (v, ts)) <$> T.dataHead gscope (T.whnf gscope t)
 
 -- | A type's per-language name: its mapping when it declares one, its own
 -- name when the pool generates the type.

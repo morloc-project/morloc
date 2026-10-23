@@ -71,6 +71,7 @@ toE (AnnoS g _ (DoBlockS e)) = DoBlockP g (toE e)
 toE (AnnoS g _ (EvalS e)) = EvalP g (toE e)
 toE (AnnoS g _ (CoerceS c e)) = CoerceP c g (toE e)
 toE (AnnoS g _ (IntrinsicS intr es)) = IntrinsicP g intr (map toE es)
+toE (AnnoS _ _ (LabelS _ e)) = toE e
 
 indexOfE :: E -> Int
 indexOfE (BndP (Idx i _) _) = i

@@ -43,16 +43,28 @@ import qualified Data.Text as T
 import qualified Data.ByteString as BS
 import qualified Data.Text.Encoding as TE
 import qualified System.Info as SI
-import Morloc.CodeGenerator.Grammars.Common
+import Morloc.CodeGenerator.Grammars.Common hiding (manNamer, manifoldIdOf)
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( LoopResult (..)
+  , RNode (RSM)
+  , lastBuilds
+  , nativeManifoldsUnder
   , infixOperator
   , ArgSite (..)
   , IOwnership (..)
   , LowerConfig (..)
   , buildProgramM
+  , markLastReads
+  , BorrowPart (..)
+  , BorrowTest (..)
+  , FieldRead (..)
+  , borrowableRoot
+  , isLastRead
+  , borrowPartOf
+  , varIndex
+  , IExpr (IStrLit)
   , papplySteps
   , defaultDeserialize
   , defaultFoldRules
@@ -60,7 +72,9 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , toIType
   )
 import Morloc.CodeGenerator.Namespace
-import Morloc.Build.CargoLock (lockCoversCrates, mergeCargoLocks)
+import Morloc.CodeGenerator.ValueArgs (appValueArgs, valueArgsF)
+import Morloc.CodeGenerator.Ownership
+import Morloc.Build.CargoLock (mergeCargoLocks)
 import qualified Morloc.Build.Params as BP
 import qualified Morloc.Data.PoolHash as PH
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter as RP
@@ -88,43 +102,55 @@ data RustState = RustState
   , rsSchemas :: Map.Map Text Int
   , rsLocalSet :: Set.Set Int
   , rsRemoteSet :: Set.Set Int
-  , rsDebugInfo :: Int -> (Text, Text)
-  -- ^ Per-manifold @(userName, srcloc)@ (from 'makeManifoldDebugInfoLookup'),
-  -- baked into each manifold's 'FrameGuard' frame line for error tracebacks.
+  , rsDebugInfo :: Int -> Maybe (Text, Text)
+  -- ^ A manifold's frame label @(name, srcloc)@, from which the trace
+  -- line it pushes for error tracebacks is built: every manifold under @--debug@
+  -- ('makeManifoldDebugInfoLookup'), otherwise only a call of a named
+  -- function, labeled with its definition ('makeTraceLabelLookup', DIAG-5).
   , rsLogTemplates :: Map.Map Int RenderedTemplate
   -- ^ Rendered @log:@ / @benchmark:@ templates per labeled manifold midx.
-  -- Drives the 'rustmorloc::LogGuard' wrap in 'rustMakeFunction'.
+  -- Drives the '::rustmorloc::LogGuard' wrap in 'rustMakeFunction'.
   , rsRecmap :: RecMap
   -- ^ Unified record types used in this pool; drives struct generation, the
   -- concrete struct name in 'rustTypeOf', and per-record marshalling impls.
   , rsCScope :: Scope
   -- ^ The merged Rust concrete typedef scope; resolves a recursive back-ref
   -- (@RecF@) to its concrete struct name (as C++'s translatorCScope does).
+  , rsGScope :: Scope
+  -- ^ The general typedef scope: the declared kind of each type parameter,
+  -- which decides the arguments that are values ('valueArgsF').
   , rsThinClosures :: Set.Set Text
-  -- ^ Closure manifolds emitted as a plain function pointer: see 'thinClosures'.
+  -- ^ Closure manifolds emitted as a plain closure: see 'thinClosures'.
   , rsSrcTypeVarMask :: Map.Map SrcName [(Bool, Bool)]
   -- ^ Per sourced function, per parameter position: @(isBareTypeVar,
   -- isFunctionParam)@ from the declared morloc signature. @isBareTypeVar@: the
   -- parameter is a BARE type variable, so it is passed by reference (@&A@) even
   -- at a Copy instantiation (the sourced Rust fn is generic over @&A@).
   -- @isFunctionParam@: the parameter is itself function-typed (@F: Fn@), so a
-  -- function-valued argument is handed over through @ThinFn::thin@ rather than
-  -- borrowed.
+  -- function-valued argument is handed over through @IntoCallbackN@ rather
+  -- than borrowed.
   , rsReifyInfo :: Map.Map Text (Int, [(Int, SerialAST)], [(Int, SerialAST)])
   -- ^ Per crossing-closure body-manifold name: @(mid, capturedSchemaIds)@.
-  -- Only closures that reach a serialize boundary appear here (the rest stay
-  -- thin @impl Fn@/@Rc@ with no reify cost). Drives 'rustClosureWrapper' to
+  -- Only closures that reach a serialize boundary appear here (the rest are
+  -- built unregistered, with no reify cost). Drives 'rustClosureWrapper' to
   -- build the closure's @(home pool, mid, captured)@ origin lazily. The second
   -- list holds the bound arguments' schema ids, which a partial application
   -- of the closure appends to its origin.
   , rsStageTable :: Map.Map Int StageEntry
   , rsPapplyHeads :: Set.Set Text
   -- ^ The stored types of the function values this pool partially applies.
+  , rsPool :: PoolPlan
+  , rsBuilds :: Set.Set (Int, Int)
+  -- ^ The (manifold, local) pairs whose building is the local's last read
+  -- (OWN-3).
+  , rsCurrentRoot :: Int
+  -- ^ The top-level manifold being lowered (the takes in 'rsPool' are keyed
+  -- by it).
   , rsErrors :: [Text]
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) Map.empty [] Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty []
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> Nothing) Map.empty [] Map.empty Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty emptyPoolPlan Set.empty 0 []
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -138,11 +164,10 @@ data OwnEnv = OwnEnv
   { oeCurrent :: Set.Set Int
   , oeParent :: Set.Set Int
   , oeShared :: Set.Set Int
-  -- ^ Indices used at more than one point in the current manifold (the "shared"
-  -- set, see 'sharedIndicesSM'). A non-'Copy' shared local must be BORROWED at
-  -- reference sinks and CLONED at owned sinks so it survives every use -- never
-  -- moved. Kept SEPARATE from 'oeCurrent' (a shared owned local is a value, not
-  -- a @&T@ reference: tagging it 'BorrowedRef' would miscompile reference sinks).
+  -- ^ Indices used at more than one point in the current manifold
+  -- ('mpShared', OWN-2). Kept separate from 'oeCurrent': a shared owned local
+  -- is a value, not a @&T@ reference, so tagging it 'BorrowedRef' would
+  -- miscompile reference sinks.
   , oeParentShared :: Set.Set Int
   -- ^ The enclosing (caller) manifold's shared set. A captured context argument
   -- names a caller variable, so a SHARED non-'Copy' capture must be cloned into
@@ -218,7 +243,7 @@ rustTypeOf = f
       t' <- f t
       let (typeTs, kindCount) = partitionKindArgsF ts
       -- Type arguments are STORED positions (a Vec element, a tuple slot): a
-      -- function leaf among them must box to `Rc<dyn MorlocFnN>` (a bare
+      -- function leaf among them must box to `Arc<dyn Fn>` (a bare
       -- `impl Fn` is illegal in a container), which is exactly 'rustFieldType'.
       ts' <- mapM rustFieldType typeTs
       return . pretty $ expandMacro (render t') (map render ts') kindCount
@@ -333,10 +358,16 @@ rustStoredType :: TypeM -> RustM MDoc
 rustStoredType (Function as r) = do
   argTs <- mapM rustStoredType as
   retT <- rustStoredType r
-  return $ "std::rc::Rc<dyn rustmorloc::MorlocFn" <> pretty (length as) <> "<" <> hcat (punctuate ", " (argTs <> [retT])) <> ">>"
+  return $ rustFnValueType argTs retT
 rustStoredType (Native t) = rustTypeOf (typeFof t)
 rustStoredType (Serial _) = return "*const u8"
 rustStoredType Passthrough = return "*const u8"
+
+-- | The one spelling of a function value (HOST-8):
+-- @std::sync::Arc<dyn Fn(&A1, .., &An) -> R + Send + Sync>@.
+rustFnValueType :: [MDoc] -> MDoc -> MDoc
+rustFnValueType argTs retT =
+  "::std::sync::Arc<dyn Fn(" <> hcat (punctuate ", " ["&" <> a | a <- argTs]) <> ") -> " <> retT <> " + Send + Sync>"
 
 -- | The Rust return type of a manifold: a serial result is an owned packet;
 -- a function value (a closure over its context, a suspension when it takes
@@ -351,10 +382,9 @@ rustReturnType (Native t) = case typeFof t of
   FunF ts inner -> rustReturnType (Function (map typeMof ts) (typeMof inner))
   tf -> rustTypeOf tf
 
--- | The Rust type of a record field. A function-typed field is stored as a fat
--- trait object @Rc<dyn MorlocFnN<A1,..,An,R>>@ -- a bare @impl Fn@ is illegal in
--- a field, and the trait object carries the reify capability a crossing closure
--- needs. Everything else renders as its ordinary 'rustTypeOf'.
+-- | The Rust type of a record field. A function-typed field is stored as
+-- @Arc<dyn Fn(&A1,..,&An) -> R + Send + Sync>@ (a bare @impl Fn@ is illegal in
+-- a field). Everything else renders as its ordinary 'rustTypeOf'.
 rustFieldType :: TypeF -> RustM MDoc
 rustFieldType (FunF ts t) = rustStoredType (Function (map typeMof ts) (typeMof t))
 rustFieldType t = rustTypeOf t
@@ -367,7 +397,7 @@ rustFieldType t = rustTypeOf t
 -- Option OF this tuple. Mirrors the C++ 'cppClosureWireLeaf'. `ClosureOrigin` is
 -- the rustmorloc alias for @(String, i64, Vec<Vec<u8>>)@.
 rustClosureWireLeaf :: TypeF
-rustClosureWireLeaf = VarF (FV (TV "Closure") (CV "rustmorloc::ClosureOrigin"))
+rustClosureWireLeaf = VarF (FV (TV "Closure") (CV "::rustmorloc::ClosureOrigin"))
 
 -- | Whether Rust routes this aggregate node through the shared structural
 -- (reify/reflect-in-place) path: True iff it carries a closure leaf reachable
@@ -394,9 +424,9 @@ rustArgOf a@(Arg _ t) = do
   -- are `Copy` at the manifold-param level (`&T` is Copy), so a value fans out
   -- to several callees with no move. Serial/passthrough args are Copy pointers.
   --
-  -- A function value is taken by reference too (`&Rc<dyn MorlocFnN<..>>`), so
+  -- A function value is taken by reference too (`&Arc<dyn Fn(..)>`), so
   -- the manifold stays re-callable across a HOF's per-element calls; a sink
-  -- that wants it by value takes an `Rc` clone.
+  -- that wants it by value takes an `Arc` clone.
   let ts' = if rustArgIsRef t then "&" <> ts else ts
   return $ argNamer a <> ":" <+> ts'
 
@@ -425,7 +455,7 @@ rustEvalPattern :: TypeF -> Pattern -> [MDoc] -> RustM MDoc
 -- String interpolation: interweave compile-time fragments with the rendered
 -- insertion expressions (each forced to an owned String for a uniform slice).
 rustEvalPattern _ (PatternText s ss) xs =
-  return $ "rustmorloc::interweave_strings(&["
+  return $ "::rustmorloc::interweave_strings(&["
     <> hcat (punctuate ", " [dquotes (pretty (RP.rustEscape frag)) | frag <- s : ss])
     <> "], &["
     <> hcat (punctuate ", " [parens x <> ".as_str()" | x <- xs])
@@ -482,6 +512,27 @@ rustEvalPattern t0 (PatternStruct s0) (m0 : xs0)
 rustEvalPattern _ p args =
   error $ "Rust v1: unsupported pattern " <> show p <> " with " <> show (length args) <> " args"
 
+-- | A setter on an owned local at its last read (OWN-2) updates it in place,
+-- so its unchanged fields are neither copied nor rebuilt. It applies only
+-- when the result has the receiver's type and no path repeats or extends
+-- another, where the rebuild keeps one write per node.
+rustTakeSetter :: NativeExpr -> TypeF -> Selector -> [MDoc] -> RustM (Maybe MDoc)
+rustTakeSetter recv t sel (m : xs)
+  | isLastRead recv
+  , typeFof recv == t
+  , not (null xs)
+  , length paths == length xs
+  , not (any overlaps (zip [0 :: Int ..] paths)) = do
+      own <- rustOwnership recv
+      return $
+        if own == Owned
+          then Just ("{ let mut __r = " <> m <> "; " <> hsep [writeSelectorRust "__r" p <+> "=" <+> x <> ";" | (p, x) <- zip paths xs] <+> "__r }")
+          else Nothing
+  where
+    paths = ungroup sel
+    overlaps (i, p) = or [q `isPrefixOf` p | (j, q) <- zip [0 ..] paths, j /= i]
+rustTakeSetter _ _ _ _ = return Nothing
+
 -- | Walk a 'Selector' that may contain bracket steps, emitting Rust source per
 -- step: @.field@ (record), @.i@ (tuple), @morloc_at(idx, &(rcv))@ (index),
 -- @morloc_slice(..)@ (slice). Multi-sibling groups emit a Rust tuple. Threads
@@ -502,6 +553,87 @@ writeSelectorRust :: MDoc -> [Either Int Text] -> MDoc
 writeSelectorRust d [] = d
 writeSelectorRust d (Right k : rs) = writeSelectorRust (d <> "." <> RP.rustFieldIdent (Key k)) rs
 writeSelectorRust d (Left i : rs) = writeSelectorRust (d <> "." <> pretty i) rs
+
+-- | A getter on an owned receiver (OWN-5): the leaf it names, or a tuple of
+-- its leaves in order. A record is opened through a pattern naming every
+-- field of the record and no others. A receiver that is not a record or a
+-- tuple renders as 'lcEvalPattern' would.
+rustTakeGetter :: TypeF -> Selector -> MDoc -> RustM (Maybe MDoc)
+rustTakeGetter t0 sel0 subj0
+  | opens t0 = do
+      (stmts, leaves) <- node t0 subj0 (zip [0 :: Int ..] (ungroup sel0))
+      let result = case map snd (sortOn fst leaves) of
+            [x] -> x
+            xs -> tupled xs
+      return (Just ("{" <+> hsep stmts <+> result <+> "}"))
+  | otherwise = return Nothing
+  where
+    opens (NamF NamRecord _ _ _) = True
+    opens t = isJust (tupleArgs t)
+
+    tupleArgs (AppF (VarF (FV (TV gv) _)) ts)
+      | T.isPrefixOf "Tuple" gv = Just (fst (partitionKindArgsF ts))
+    tupleArgs _ = Nothing
+
+    -- The value @v@ is owned; each path is a result index and the steps
+    -- left to it.
+    node _ v [(k, [])] = return ([], [(k, v)])
+    node t v paths
+      | any (null . snd) paths = do
+          n <- getCounter
+          let whole = "mlc_v" <> pretty n
+              (lastWhole, others) = case reverse [k | (k, []) <- paths] of
+                (k : ks) -> (k, ks)
+                [] -> error "rustTakeGetter: no whole leaf"
+              copies =
+                [ (k, "mlc_c" <> pretty n <> "_" <> pretty k, "(&" <> whole <> ")" <> writeSelectorRust "" ss <> ".clone()")
+                | (k, ss) <- paths
+                , not (null ss) || k `elem` others
+                ]
+          tys <- rustTypeOf t
+          return
+            ( ("let" <+> whole <> ":" <+> tys <+> "=" <+> v <> ";") : ["let" <+> c <+> "=" <+> e <> ";" | (_, c, e) <- copies]
+            , (lastWhole, whole) : [(k, c) | (k, c, _) <- copies]
+            )
+    node t@(NamF NamRecord _ _ rs) v paths
+      | all (isKey . snd) paths
+      , Just _ <- mapM (\h -> lookup h rs') (heads paths) = do
+          n <- getCounter
+          tys <- rustTypeOf t
+          ctor <- rustStructCtor t
+          let shell = "mlc_s" <> pretty n
+              fieldLocal j = "mlc_" <> pretty n <> "_" <> pretty j
+              locals = map fieldLocal [0 .. length rs - 1]
+              open =
+                [ "let" <+> shell <+> "= ::std::mem::ManuallyDrop::<" <> tys <> ">::new(" <> v <> ");"
+                , "let" <+> ctor <+> "{" <+> RP.rustRecordFields (zip (map fst rs) locals) <+> "} = &*" <> shell <> ";"
+                , "let" <+> tupleOf locals <+> "= unsafe {" <+> tupleOf ["::std::ptr::read(" <> l <> ")" | l <- locals] <+> "};"
+                ]
+          subs <- mapM
+            (\(j, (key, ft)) -> node ft (fieldLocal j) [(k, ss) | (k, Right h : ss) <- paths, h == unKey key])
+            [x | x@(_, (key, _)) <- zip [0 :: Int ..] rs, unKey key `elem` heads paths]
+          return (open <> concatMap fst subs, concatMap snd subs)
+      where
+        rs' = [(unKey key, ft) | (key, ft) <- rs]
+    node t v paths
+      | Just ts <- tupleArgs t
+      , all (isIdx . snd) paths
+      , all (\j -> j >= 0 && j < length ts) [j | (_, Left j : _) <- paths] = do
+          n <- getCounter
+          let tup = "mlc_t" <> pretty n
+          subs <- mapM
+            (\j -> node (ts !! j) (tup <> "." <> pretty j) [(k, ss) | (k, Left i : ss) <- paths, i == j])
+            (Set.toList (Set.fromList [j | (_, Left j : _) <- paths]))
+          return (("let" <+> tup <+> "=" <+> v <> ";") : concatMap fst subs, concatMap snd subs)
+    node _ v paths = return ([], [(k, writeSelectorRust v ss) | (k, ss) <- paths])
+
+    heads paths = [h | (_, Right h : _) <- paths]
+    isKey (Right _ : _) = True
+    isKey _ = False
+    isIdx (Left _ : _) = True
+    isIdx _ = False
+    tupleOf [x] = "(" <> x <> ",)"
+    tupleOf xs = tupled xs
 
 -- | Wrap a manifold body in an on-disk content-addressed cache lookup (`a@fn`
 -- / @cache). Mirrors the C++ @cppCacheBody@: serialize native args to packets,
@@ -529,13 +661,13 @@ rustCacheBody resSa lbl midx args bodyPool = do
       argSetupLines = concatMap (\(_, _, ss) -> ss) preparedArgs
       packetsArr = "&[" <> hcat (punctuate ", " argRefs) <> "]"
       schemasArr = "&[" <> hcat (punctuate ", " [dquotes (pretty (RP.rustEscape s)) | s <- argSchemas]) <> "]"
-      keyStmt = "let" <+> keyVar <> ": u64 = rustmorloc::cache_key("
+      keyStmt = "let" <+> keyVar <> ": u64 = ::rustmorloc::cache_key("
                   <> pretty midx <> ", " <> packetsArr <> ", " <> schemasArr <> ");"
-      lookupStmt = "let" <+> cachedVar <> ": *mut u8 = rustmorloc::cache_lookup("
+      lookupStmt = "let" <+> cachedVar <> ": *mut u8 = ::rustmorloc::cache_lookup("
                   <> keyVar <> ", " <> labelLit <> ");"
       missLines = poolPriorLines bodyPool
         ++ [ "let" <+> bodyVar <> ": *mut u8 =" <+> poolExpr bodyPool <> ";"
-           , "rustmorloc::cache_store(" <> keyVar <> ", " <> labelLit <> ", "
+           , "::rustmorloc::cache_store(" <> keyVar <> ", " <> labelLit <> ", "
                <> bodyVar <> ", " <> dquotes (pretty (RP.rustEscape resSchema)) <> ");"
            , bodyVar
            ]
@@ -552,6 +684,7 @@ rustCacheBody resSa lbl midx args bodyPool = do
     , poolCompleteManifolds = poolCompleteManifolds bodyPool
     , poolPriorExprs = poolPriorExprs bodyPool
     , poolReturnFlag = poolReturnFlag bodyPool
+    , poolBorrowedLocal = Nothing
     }
 
 -- | Prepare one cache argument: a native arg is serialized to a packet via
@@ -565,48 +698,19 @@ prepareRustCacheArg wrapIdx (j, (a@(Arg i tm), sa)) = do
       sid <- rustRegisterSchema schemaStr
       -- The cache-key value is only read, through a 'ToVoidstar' (&T)
       -- 'put_value' sink, so a borrowed arg is reborrowed ('rustReadPlace').
-      own <- rustOwnership (BndVarN tf i)
+      own <- rustOwnership (BndVarN tf i KeptRead)
       -- The packet exists only to key and store the cache entry, so its
       -- owner releases it when the manifold's scope ends.
       let argVar = "__mlc_ca_" <> pretty wrapIdx <> "_" <> pretty j
-          decl = "let" <+> argVar <> "_own = rustmorloc::Packet::new(rustmorloc::put_value(&("
-                   <> rustReadPlace own (argNamer a) <> "), " <> sch sid <> "));"
+          decl = "let" <+> argVar <> "_own = ::rustmorloc::Packet::new(" <> RP.putValueFn <> "(&("
+                   <> rustReadPlace own (argNamer a) <> "), " <> RP.schemaRef sid <> "));"
                    <+> "let" <+> argVar <> ": *const u8 =" <+> argVar <> "_own.as_ptr();"
       return (argVar, schemaStr, [decl])
     _ -> return (argNamer a, schemaStr, [])
 
--- | Per-index variable-use counts over a manifold, for the "shared" (used at
--- more than one point) determination. ALL uses are counted (borrows INCLUDED --
--- excluding them is unsound: an owned use followed by a later borrow would slip
--- through to a use-after-move); the two arms of an 'IfN' are combined by MAX
--- (they are mutually exclusive at runtime, so a value used once per arm is one
--- use per run); a captured value (a nested manifold's context arg) counts as a
--- use. Descends into nested manifolds; any resulting over-count is safe (an
--- extra clone, never a missed one).
-varUseCountOps :: FoldManifoldM Identity (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int) (Map.Map Int Int)
-varUseCountOps =
-  FoldManifoldM
-    { opSerialManifoldM = \full@(SerialManifold_ _ _ form _ _) -> return (ctxOf form `add` foldlSM add mempty full)
-    , opNativeManifoldM = \full@(NativeManifold_ _ _ form _) -> return (ctxOf form `add` foldlNM add mempty full)
-    , opSerialExprM = \node -> return (foldlSE add mempty node)
-    , opNativeExprM = \node -> return $ case node of
-        BndVarN_ _ i -> Map.singleton i 1
-        LetVarN_ _ i -> Map.singleton i 1
-        IfN_ _ c t e -> c `add` Map.unionWith max t e
-        _ -> foldlNE add mempty node
-    , opSerialArgM = \node -> return (foldlSA add mempty node)
-    , opNativeArgM = \node -> return (foldlNA add mempty node)
-    }
-  where
-    add = Map.unionWith (+)
-    ctxOf form = Map.fromList [(i, 1) | Arg i _ <- manifoldContext form]
-
-sharedOf :: Map.Map Int Int -> Set.Set Int
-sharedOf = Map.keysSet . Map.filter (>= 2)
-
 -- | Whether a manifold body places a function value in a container (a list,
 -- tuple, record or optional whose type holds a function anywhere). A stored
--- closure is a trait object behind `Rc`, which must outlive every frame, so a
+-- closure is a trait object behind `Arc`, which must outlive every frame, so a
 -- closure built in such a frame must own its captures ('capInit'). A
 -- nested manifold's containers count too, which only over-clones.
 
@@ -635,7 +739,7 @@ thinSinkNames mask es = Set.filter occursOnlyHere sites
     occursOnlyHere n = Map.findWithDefault (0 :: Int) n allCounts == 1
     allCounts =
       Map.fromListWith (+)
-        [ (render (manNamer i), 1)
+        [ (render (RP.rustManifoldName i), 1)
         | sm <- es
         , NativeManifold i _ form _ <- collectClosureManifolds sm
         , isClosureForm form
@@ -652,23 +756,28 @@ thinSinkNames mask es = Set.filter occursOnlyHere sites
         , opFoldWithNativeArgM = \_ node -> return (foldlNA Set.union Set.empty node)
         }
 
-    atSite (AppExeN _ (SrcCallP src) args) =
-      Set.fromList
-        [ render (manNamer i)
-        | (k, NativeArgManifold (NativeManifold i _ form _)) <- zip [(0 :: Int) ..] args
-        , isClosureForm form
-        , funParamAt src k
-        ]
+    -- Only the first call group is passed to the sourced function itself;
+    -- a later group is applied to the function value it returned.
+    atSite (AppExeN _ (SrcCallP _ src) args) =
+      let firstGroup = case provideClosure src (zip [(0 :: Int) ..] args) of
+            (g : _) -> g
+            [] -> []
+       in Set.fromList
+            [ render (RP.rustManifoldName i)
+            | (k, NativeArgManifold (NativeManifold i _ form _)) <- firstGroup
+            , isClosureForm form
+            , funParamAt src k
+            ]
     atSite _ = Set.empty
 
     funParamAt src k = case Map.lookup (srcName src) mask of
       Just bs | k < length bs -> snd (bs !! k)
       _ -> False
 
--- | The closure manifolds emitted as a plain function pointer ('thinDoc'):
--- those in @sinks@ ('thinSinkNames') that capture nothing, have no stage
--- entry, and are not the function a partial application applies (both of
--- those take the staged form). One predicate decides the form and keeps the
+-- | The closure manifolds emitted as a plain closure ('thinDoc', 'sinkDoc'):
+-- those in @sinks@ ('thinSinkNames') that have no stage entry and are not
+-- the function a partial application applies (both of those take the staged
+-- form). One predicate decides the form and keeps the
 -- closure out of the crossing table, so the two cannot disagree.
 thinClosures ::
   Set.Set Text ->
@@ -681,7 +790,6 @@ thinClosures sinks stageTable heads es =
   where
     one nm@(NativeManifold i _ form _)
       | Set.member name sinks
-      , null (manifoldContext form)
       , not (Map.member i stageTable) = do
           let bnds = [t | Arg _ t <- manifoldBound form]
               out = case typeFof nm of
@@ -691,17 +799,7 @@ thinClosures sinks stageTable heads es =
           return (if Set.member sig heads then Nothing else Just name)
       | otherwise = return Nothing
       where
-        name = render (manNamer i)
-
--- | The shared indices of a serial manifold: variables used at more than one
--- point in its body (see 'varUseCountOps').
-sharedIndicesSM :: SerialManifold -> Set.Set Int
-sharedIndicesSM = sharedOf . runIdentity . foldSerialManifoldM varUseCountOps
-
--- | The shared indices of a native manifold (used as an argument). Counting its
--- own context args (captures from the enclosing scope) only over-clones (safe).
-sharedIndicesNM :: NativeManifold -> Set.Set Int
-sharedIndicesNM = sharedOf . runIdentity . foldNativeManifoldM varUseCountOps
+        name = render (RP.rustManifoldName i)
 
 -- | The spec's @owner(e, Gamma)@ as a PURE function: the ownership of a native
 -- expression given @Gamma@ (the borrowed @&T@ parameter indices) and @Shared@
@@ -709,13 +807,15 @@ sharedIndicesNM = sharedOf . runIdentity . foldNativeManifoldM varUseCountOps
 -- (not fold state), the result is correct regardless of the fold's evaluation
 -- order. A bound variable is a @&T@ reference only when it is a borrowed
 -- parameter; a shared value is a place (borrowed at reference sinks, cloned at
--- owned sinks -- never moved); a field of a borrowed value is a place;
--- everything else is an owned value.
+-- owned sinks -- never moved); a getter of a borrowed value is a place; a
+-- constructor field that is not taken, and a list element of a variable or
+-- of such a field, is a reference (OWN-6); everything else is an owned value.
 ownerPure :: Set.Set Int -> Set.Set Int -> NativeExpr -> IOwnership
 -- A bound variable and a let variable both render as `n<i>` and share the index
 -- namespace, so both classify the same way ('classifyIndex').
-ownerPure g s (BndVarN _ i) = classifyIndex g s i
-ownerPure g s (LetVarN _ i) = classifyIndex g s i
+-- A last read of a value the pool owns takes it (OWN-2).
+ownerPure g s (BndVarN _ i r) = classifyRead g s i r
+ownerPure g s (LetVarN _ i r) = classifyRead g s i r
 ownerPure g s (ReturnN e) = ownerPure g s e
 ownerPure g s (NativeLetN _ _ e) = ownerPure g s e
 ownerPure g s (SerialLetN _ _ e) = ownerPure g s e
@@ -723,6 +823,16 @@ ownerPure g s (AppExeN _ (PatCallP (PatternStruct _)) [recv]) =
   case argOwnerPure g s recv of
     Owned -> Owned
     _ -> BorrowedPlace
+ownerPure g s (IntrinsicN t IntrCtorField _ (subj : _))
+  | not (rustIsCopy t)
+  , borrowableRoot subj
+  , not (isLastRead subj && ownerPure g s subj == Owned) =
+      BorrowedRef
+ownerPure g s (IntrinsicN t IntrListElem _ (subj : _))
+  | not (rustIsCopy t)
+  , borrowableRoot subj
+  , isJust (varIndex subj) || ownerPure g s subj == BorrowedRef =
+      BorrowedRef
 ownerPure _ _ _ = Owned
 
 -- | Classify a variable index: a borrowed parameter (in @Gamma@) is a @&T@
@@ -743,6 +853,11 @@ classifyIndex g s i
 argOwnerPure :: Set.Set Int -> Set.Set Int -> NativeArg -> IOwnership
 argOwnerPure g s (NativeArgExpr e) = ownerPure g s e
 argOwnerPure _ _ (NativeArgManifold _) = Owned
+
+classifyRead :: Set.Set Int -> Set.Set Int -> Int -> VarRead -> IOwnership
+classifyRead g s i r = case classifyIndex g s i of
+  BorrowedPlace | r == LastRead -> Owned
+  o -> o
 
 rustOwnership :: NativeExpr -> RustM IOwnership
 rustOwnership e = do
@@ -776,13 +891,6 @@ rustReadPlace :: IOwnership -> MDoc -> MDoc
 rustReadPlace BorrowedRef x = "(*" <> x <> ")"
 rustReadPlace _ x = x
 
--- | Reference the pool's schema for a registered schema id via the crate-root
--- @schema(<id>)@ accessor. Fully qualified (@crate::@) so it resolves even inside
--- a scope that binds a local @schema@ -- e.g. a record's generated
--- @ToVoidstar@/@FromVoidstar@ impl, whose closure fields inline a reflect proxy
--- that looks up the closure's own arg/result schemas.
-sch :: Int -> MDoc
-sch sid = "crate::schema(" <> pretty sid <> ")"
 
 -- | A Rust tuple: the unit, a ONE-tuple (which needs the trailing comma --
 -- @(x)@ is a parenthesized value, not a tuple, and its fields do not exist),
@@ -795,44 +903,42 @@ rustTuple xs = tupled xs
 -- | Build a function value: the one construction site, and the only place
 -- that decides a function value's form.
 --
--- The captured context is copied ONCE into a tuple the closure owns (I2: a
--- closure owns what it holds, so nothing it captures can dangle and no
--- generated signature needs a lifetime). Both the call and the origin
--- builder are NON-CAPTURING closures over that tuple, so each is a plain
--- function pointer reading the single copy -- the whole value is one
--- allocation.
+-- The captured context is gathered into one tuple, held in an 'Arc' when a
+-- staged closure's stage entry reads it too (OWN-3), so no generated
+-- signature needs a lifetime. Both the call and the origin builder are
+-- NON-CAPTURING closures over that tuple, so each is a plain function
+-- pointer.
 --
--- The origin is built lazily by the runtime on first reify, so a closure
--- that never crosses a pool boundary pays nothing for the ability. A
--- closure whose manifold has no dispatch entry cannot be called back into,
--- so it is built with no origin builder at all and reifying it fails by
+-- A closure that can cross is registered (STATE-4) and builds its origin on
+-- first reify. A closure whose manifold has no dispatch entry cannot be
+-- called back into, so it is built unregistered and reifying it fails by
 -- name rather than by fabricating an identity.
-rustClosureWrapper :: MDoc -> TypeM -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> RustM MDoc
-rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
+rustClosureWrapper :: Int -> MDoc -> TypeM -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> RustM MDoc
+rustClosureWrapper mid sig sigType mname ctxArgs boundArgs = do
   -- the owned type of each capture, naming the tuple the fn pointers read
-  capTypes <- mapM (\(Arg _ t) -> rustStoredType t) ctxArgs
+  capTypes <- mapM (\(Arg _ t) -> captureType t) ctxArgs
   boundTyped <- mapM (\a@(Arg _ t) -> do
                         base <- closureParamType t
                         return (argNamer a <> ":" <+> base)) boundArgs
-  capInits <- mapM capInit ctxArgs
+  builds <- CMS.gets rsBuilds
+  let dead i = Set.member (mid, i) builds
+  capInits <- mapM (\a@(Arg i _) -> capInit (dead i) a) ctxArgs
   let n = length boundArgs
       capsT = rustTuple capTypes
       -- Whether the callee takes this capture by reference is the same
       -- question 'rustArgIsRef' answers for a manifold parameter, because
       -- that IS the parameter it is being passed to.
-      capRef i (Arg _ t) =
-        let fld = "__c." <> pretty (i :: Int)
-         in if rustArgIsRef t then "&" <> fld else fld
+      capRef i (Arg _ t) = captureArg t ("__c." <> pretty (i :: Int))
       callArgs = zipWith capRef [0 ..] ctxArgs
                    <> [rustBridgeArg t (argNamer a) | a@(Arg _ t) <- boundArgs]
-      callFn =
-        "|__c: &" <> capsT <> hcat [", " <> b | b <- boundTyped] <> "|"
+      callFn ct =
+        "|__c: &" <> ct <> hcat [", " <> b | b <- boundTyped] <> "|"
           <+> "unsafe {" <+> mname <> tupled callArgs <+> "}"
   reifyInfo <- CMS.gets rsReifyInfo
   (ctor, mkArgs) <- case Map.lookup (render mname) reifyInfo of
     -- no dispatch entry: nothing can call back into this closure
-    Nothing -> return ("rustmorloc::Closure" <> pretty n <> "::local", [])
-    Just (mid, capWire, _)
+    Nothing -> return ("::rustmorloc::local" <> pretty n, const [])
+    Just (_, capWire, _)
       -- The capture list the dispatch wrapper decodes and the one the closure
       -- carries are built from different projections of the manifold form; a
       -- length disagreement would pair a capture's value with another's
@@ -844,46 +950,59 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
       | otherwise -> do
           reifiers <- mapM (reifyInPlace . snd) capWire
           let capExprs =
-                [ "unsafe { rustmorloc::reify_capture(&" <> maybe fld ($ fld) reify <> ", " <> sch sid <> ") }"
+                [ "unsafe { ::rustmorloc::reify_capture(&" <> maybe fld ($ fld) reify <> ", " <> RP.schemaRef sid <> ") }"
                 | (i, (sid, _), reify) <- zip3 [(0 :: Int) ..] capWire reifiers
                 , let fld = "__c." <> pretty i
                 ]
-              mkFn =
-                "|__c: &" <> capsT <> "|"
+              mkFn ct =
+                "|__c: &" <> ct <> "|"
                   <+> "(\"rust\".to_string(), " <> pretty mid <> "i64, vec!["
                   <> hcat (punctuate ", " capExprs) <> "])"
-          return ("rustmorloc::Closure" <> pretty n <> "::new", [mkFn])
-  let ctorArgs = ["__caps", callFn] <> mkArgs
+          return ("::rustmorloc::crossing" <> pretty n, \ct -> [mkFn ct])
+  let ctorArgsFor ct = ["__caps", callFn ct] <> mkArgs ct
+      ctorArgs = ctorArgsFor capsT
       boxedDoc =
         vsep
           [ "{"
           , indent 4 $
               vsep
                 [ "let __caps:" <+> capsT <+> "=" <+> rustTuple capInits <> ";"
-                , "std::rc::Rc::new(" <> ctor <> tupled ctorArgs <> ") as" <+> sig
+                , ctor <> tupled ctorArgs
                 ]
           , "}"
           ]
-      -- A closure that captures nothing and has no dispatch entry holds no
-      -- state and carries no identity, so the trait object buys nothing it
-      -- could use: it is a plain function, and a plain function is a POINTER.
-      -- Emitting it as one lets a sourced higher-order parameter monomorphize
-      -- over a compile-time constant instead of loading a vtable and
-      -- allocating twice, once per element.
+      -- A closure that captures nothing and is passed straight to a sourced
+      -- function's callback parameter is a plain function, and a plain
+      -- function is a POINTER: the callee monomorphizes over a compile-time
+      -- constant instead of loading a vtable.
       --
-      -- This is the only position where a function value takes a second form,
-      -- and choosing it wrongly cannot miscompile: every position that needs a
-      -- value able to cross renders as the trait object, which a function
-      -- pointer does not satisfy, so a bad choice is a type error in the
-      -- generated Rust rather than a wrong answer at run time.
+      -- Choosing this form or 'sinkDoc' wrongly cannot miscompile: every
+      -- position that needs a stored value renders as `Arc<dyn Fn>`, which
+      -- neither satisfies, so a bad choice is a type error in the generated
+      -- Rust rather than a wrong answer at run time.
       thinDoc =
-        "rustmorloc::fn_ptr" <> pretty n
+        "::rustmorloc::fn_ptr" <> pretty n
           <> parens ("|" <> hcat (punctuate ", " boundTyped) <> "|"
                        <+> "unsafe {" <+> mname <> tupled callArgs <+> "}")
+      -- A closure that captures and is passed straight to a sourced
+      -- function's callback parameter cannot cross either, so it is a
+      -- concrete `move` closure over its captures: no allocation, and the
+      -- callee can inline it.
+      sinkDoc =
+        vsep
+          [ "{"
+          , indent 4 $
+              vsep
+                [ "let __c:" <+> capsT <+> "=" <+> rustTuple capInits <> ";"
+                , "move |" <> hcat (punctuate ", " boundTyped) <> "|"
+                    <+> "unsafe {" <+> mname <> tupled callArgs <+> "}"
+                ]
+          , "}"
+          ]
   thin <- CMS.gets rsThinClosures
   stageTable <- CMS.gets rsStageTable
   heads <- CMS.gets rsPapplyHeads
-  let stage = manifoldIdOf mname >>= (`Map.lookup` stageTable)
+  let stage = Map.lookup mid stageTable
       bndWire = case Map.lookup (render mname) reifyInfo of
         Just (_, _, ws) -> Just ws
         Nothing -> Nothing
@@ -892,19 +1011,19 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
       | nctx /= length ctxArgs ->
           error $ "Rust: staged closure " <> show (render mname) <> " captures " <> show (length ctxArgs)
             <> " values but its stage entry takes " <> show nctx
-      | otherwise -> stagedDoc (Just (k, smid)) bndWire capsT capInits ctorArgs ctor
+      | otherwise -> stagedDoc (Just (k, smid)) bndWire capsT capInits ctorArgsFor ctor
     Nothing
       | isJust bndWire && Set.member (render sig) heads ->
-          stagedDoc Nothing bndWire capsT capInits ctorArgs ctor
-      | Set.member (render mname) thin -> return thinDoc
+          stagedDoc Nothing bndWire capsT capInits ctorArgsFor ctor
+      | Set.member (render mname) thin -> return (if null ctxArgs then thinDoc else sinkDoc)
       | otherwise -> return boxedDoc
   where
     -- The function value, wrapped so that each application to its first
-    -- argument (see 'rustmorloc::apply1_N') is the one morloc means: a
+    -- argument (see '::rustmorloc::apply1_N') is the one morloc means: a
     -- staged closure runs its stage entry once it has the arguments before
     -- the stage point; a closure that can cross keeps its origin, with each
     -- argument appended to its captured values.
-    stagedDoc stage bndWire capsT capInits ctorArgs ctor = do
+    stagedDoc stage bndWire capsT capInits ctorArgsFor ctor = do
       bts <- mapM (\(Arg _ t) -> rustStoredType t) boundArgs
       resT <- case sigType of
         Function _ o -> rustStoredType o
@@ -915,17 +1034,19 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
           [ do
               toWire <- reifyInPlace ast
               let v = maybe "__v" (\f -> "&" <> parens (f "__v")) toWire
-              return $ "Some((|__v: &" <> bt <> "| unsafe { rustmorloc::reify_capture(" <> v <> ", " <> sch sid <> ") }) as fn(&" <> bt <> ") -> Vec<u8>)"
+              return $ "Some((|__v: &" <> bt <> "| unsafe { ::rustmorloc::reify_capture(" <> v <> ", " <> RP.schemaRef sid <> ") }) as fn(&" <> bt <> ") -> Vec<u8>)"
           | ((sid, ast), bt) <- zip ws bts ]
       let n = length boundArgs
-          dynT ts = "std::rc::Rc<dyn rustmorloc::MorlocFn" <> pretty (length ts) <> "<" <> hcat (punctuate ", " (ts <> [resT])) <> ">>"
-          capRefS i (Arg _ t) =
-            let fld = "__sc." <> pretty (i :: Int)
-             in if rustArgIsRef t then "&" <> fld else fld
+          shared = isJust stage && not (null capInits)
+          heldT = if shared then "::std::sync::Arc<" <> capsT <> ">" else capsT
+          held x = if shared then "::std::sync::Arc::new(" <> x <> ")" else x
+          stagedArgs = ctorArgsFor heldT
+          dynT ts = rustFnValueType ts resT
+          capRefS i (Arg _ t) = captureArg t ("__sc." <> pretty (i :: Int))
           stageCall smid kk =
             let args = zipWith capRefS [0 ..] ctxArgs
                          <> [rustBridgeArg t ("&__x" <> pretty j) | (j, Arg _ t) <- zip [(0 :: Int) ..] (take kk boundArgs)]
-             in "unsafe {" <+> manNamer smid <> tupled args <+> "}"
+             in "unsafe {" <+> RP.rustManifoldName smid <> tupled args <+> "}"
           level i fv
             | i >= n = fv
             | otherwise =
@@ -938,16 +1059,16 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
                       Just (kk, smid) | i + 1 == kk -> stageCall smid kk
                       _ ->
                         vsep
-                          [ "let __g = std::rc::Rc::new(rustmorloc::Pap" <> pretty (n - i) <> "::new(__fc.clone(), __x" <> pretty i <> ".clone(), " <> (wires !! i) <> ")) as " <> dynT (drop (i + 1) bts) <> ";"
+                          [ "let __g = ::rustmorloc::pap" <> pretty (n - i) <> "(&__fc, &__x" <> pretty i <> ", " <> (wires !! i) <> ");"
                           , level (i + 1) "__g"
                           ]
                  in vsep
                       [ "{"
                       , indent 4 $ vsep
                           [ "let __fc = " <> fv <> ".clone();"
-                          , "std::rc::Rc::new(rustmorloc::Staged" <> pretty (n - i) <> "::new(__fc.clone(), std::rc::Rc::new(move |__xr: &" <> bt <> "| -> " <> dynT (drop (i + 1) bts) <> " {"
+                          , "::rustmorloc::staged" <> pretty (n - i) <> "(__fc.clone(), ::std::sync::Arc::new(move |__xr: &" <> bt <> "| -> " <> dynT (drop (i + 1) bts) <> " {"
                           , indent 4 (vsep (clones <> [own, rest]))
-                          , "}))) as " <> dynT (drop i bts)
+                          , "}))"
                           ]
                       , "}"
                       ]
@@ -956,28 +1077,57 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
           [ "{"
           , indent 4 $
               vsep
-                ( [ "let __caps:" <+> capsT <+> "=" <+> rustTuple capInits <> ";" ]
+                ( [ "let __caps:" <+> heldT <+> "=" <+> held (rustTuple capInits) <> ";" ]
                     <> ["let __sc = __caps.clone();" | isJust stage]
-                    <> [ "let __f0 = std::rc::Rc::new(" <> ctor <> tupled ctorArgs <> ") as" <+> sig <> ";"
+                    <> [ "let __f0 =" <+> ctor <> tupled stagedArgs <> ";"
                        , level 0 "__f0"
                        ]
                 )
           , "}"
           ]
 
--- | Copy one captured value into the tuple the closure owns. A function
--- value is an 'Rc' clone (a refcount bump); a non-'Copy' value is cloned so
--- the caller's copy stays live; a 'Copy' scalar is taken as it is.
-capInit :: Arg TypeM -> RustM MDoc
-capInit a@(Arg i t) = do
+-- | The type of a capture in the tuple a closure owns: a packet is held as
+-- a '::rustmorloc::PacketRef' (STATE-3), anything else as its stored type.
+captureType :: TypeM -> RustM MDoc
+captureType t
+  | isPacketCapture t = return "::rustmorloc::PacketRef"
+  | otherwise = rustStoredType t
+
+-- | A capture read out of the tuple as the argument of the manifold call.
+captureArg :: TypeM -> MDoc -> MDoc
+captureArg t fld
+  | isPacketCapture t = fld <> ".get()"
+  | rustArgIsRef t = "&" <> fld
+  | otherwise = fld
+
+isPacketCapture :: TypeM -> Bool
+isPacketCapture (Serial _) = True
+isPacketCapture Passthrough = True
+isPacketCapture _ = False
+
+-- | Copy one captured value into the tuple the closure owns: an 'Arc' clone
+-- for a function value, a clone for a non-'Copy' value unless building the
+-- closure is its last read in a frame that owns it (OWN-3), and a 'Copy'
+-- scalar as it is.
+capInit :: Bool -> Arg TypeM -> RustM MDoc
+capInit dead a@(Arg i t) = do
   parentBorrowed <- asks oeParent
   let name = argNamer a
       deref = if Set.member i parentBorrowed then "(*" <> name <> ")" else name
   -- A capture the closure owns: a value that is passed by reference must be
-  -- cloned out of the frame ('Rc' clone for a function value, which is what
-  -- `.clone()` on an `Rc` already is), and a 'Copy' value -- a scalar, or a
-  -- raw packet pointer -- is taken as it is.
-  return $ if rustArgIsRef t then deref <> ".clone()" else deref
+  -- cloned out of the frame ('Arc' clone for a function value, which is what
+  -- `.clone()` on an `Arc` already is), a 'Copy' scalar is taken as it is, and
+  -- a packet pointer is wrapped ('captureType').
+  return $
+    if isPacketCapture t
+      then "::rustmorloc::PacketRef::new(" <> name <> ")"
+      else if rustArgIsRef t && not (dead && not (Set.member i parentBorrowed)) then deref <> ".clone()" else deref
+
+-- | The parameters each fully applied native manifold takes by value (OWN-7).
+rustSeeds :: PoolPlan -> [SerialManifold] -> Int -> [Int]
+rustSeeds pp sms = \m -> Set.toList (Map.findWithDefault Set.empty m byValue)
+  where
+    byValue = Map.fromListWith Set.intersection [(m, byValueIndices pp m form) | sm <- sms, NativeManifold m _ form@(ManifoldFull _) _ <- nativeManifoldsUnder (RSM sm)]
 
 -- | How a proxy hands one of its arguments to the wire: a value is put as it
 -- is; a closure is reified first (its wire form is its origin tuple).
@@ -988,7 +1138,7 @@ closureArgPush i ast sid = do
       v = maybe a (\f -> "&" <> parens (f a)) toWire
   -- The packet belongs to this application alone: its owner releases it
   -- when the proxy body ends, after the result has been read.
-  return $ "let __own" <> pretty i <> " = rustmorloc::Packet::new(rustmorloc::put_value(" <> v <> ", " <> sch sid <> "));"
+  return $ "let __own" <> pretty i <> " = ::rustmorloc::Packet::new(" <> RP.putValueFn <> "(" <> v <> ", " <> RP.schemaRef sid <> "));"
     <+> "__pkts.push(__own" <> pretty i <> ".as_ptr());"
 
 -- | How a proxy reads the result of its call off the wire: a value is got
@@ -998,7 +1148,7 @@ closureResultRead :: SerialAST -> MDoc -> Int -> RustM MDoc
 closureResultRead out call sid = do
   fromWire <- reflectInPlace out
   wireT <- rustTypeOf (wireSerialAstToType rustClosureWireLeaf out)
-  let got = "rustmorloc::get_value::<" <> wireT <> ">(" <> call <> ", " <> sch sid <> ")"
+  let got = "::rustmorloc::get_value::<" <> wireT <> ">(" <> call <> ", " <> RP.schemaRef sid <> ")"
   return $ maybe got ($ got) fromWire
 
 -- | Where a value differs between the form a pool holds and the form it
@@ -1081,7 +1231,7 @@ renderReflect (OverTuple ps) = do
 -- because both are driven by the same 'WirePath'.
 renderReify :: WirePath -> RustM (MDoc -> MDoc)
 renderReify (AtClosure (SerialClosure ins _)) =
-  return $ \v -> "rustmorloc::require_origin(" <> parens v <> ".reify" <> pretty (length ins) <> "())"
+  return $ \v -> "::rustmorloc::require_origin(::rustmorloc::reify(&" <> parens v <> "))"
 renderReify (AtClosure _) = error "renderReify: a closure node is a SerialClosure"
 -- The inverse: unpack to the form the wire carries, then reduce that.
 renderReify (AtPack p inner) = do
@@ -1123,12 +1273,12 @@ rustReflectClosure :: MDoc -> SerialAST -> RustM MDoc
 rustReflectClosure pkt ast@(SerialClosure _ _) = do
   tupSid <- rustRegisterSchema (render (serialAstToMsgpackSchema ast))
   assemble <- rustReflectClosureAssembler ast
-  return $ assemble ("rustmorloc::get_value(" <> pkt <> ", " <> sch tupSid <> ")")
+  return $ assemble ("::rustmorloc::get_value(" <> pkt <> ", " <> RP.schemaRef tupSid <> ")")
 rustReflectClosure _ _ = error "rustReflectClosure: expected SerialClosure"
 
 -- | Compute the schema-dependent pieces of an origin-preserving reflect ONCE
 -- (in 'RustM', which the schema table needs), returning a PURE assembler that
--- maps a parsed-'ClosureOrigin' expression to the reflected @Rc<dyn MorlocFnN>@.
+-- maps a parsed-'ClosureOrigin' expression to the reflected @Arc<dyn Fn>@.
 -- Reused by the nested-aggregate reflect ('rustReflectClosureParsed') and the
 -- record-field reflect ('printRecordImpls' via 'generateRustStructs'), which
 -- differ only in how the origin expression is obtained (an already-parsed tuple
@@ -1148,21 +1298,19 @@ rustReflectClosureAssembler (SerialClosure ins out) = do
       restResT <- rustTypeOf (serialAstToNativeType out)
       restAssemble <- rustReflectClosureAssembler (SerialClosure rest out)
       let v = maybe "__x" (\f -> "&" <> parens (f "__x")) toWire
-          restDyn =
-            "std::rc::Rc<dyn rustmorloc::MorlocFn" <> pretty (length rest)
-              <> "<" <> hcat (punctuate ", " (restArgTs <> [restResT])) <> ">>"
+          restDyn = rustFnValueType restArgTs restResT
       return . Just $
         vsep
-          [ "std::rc::Rc::new(move |__x: &" <> a0T <> "| -> " <> restDyn <> " {"
+          [ "::std::sync::Arc::new(move |__x: &" <> a0T <> "| -> " <> restDyn <> " {"
           , indent 4 $ vsep
-              [ "let mut __o: rustmorloc::ClosureOrigin = __clo_s.clone();"
-              , "__o.2.push(unsafe { rustmorloc::reify_capture(" <> v <> ", " <> sch a0Sid <> ") });"
-              , "if let Some((__n, __k, __s)) = crate::mlc_stage_lookup(__o.1) {"
+              [ "let mut __o: ::rustmorloc::ClosureOrigin = __clo_s.clone();"
+              , "__o.2.push(unsafe { ::rustmorloc::reify_capture(" <> v <> ", " <> RP.schemaRef a0Sid <> ") });"
+              , "if let Some((__n, __k, __s)) = crate::__morloc_stage_lookup(__o.1) {"
               , indent 4 $ vsep
                   [ "if __o.2.len() == __n + __k {"
                   , indent 4 $ vsep
                       [ "let __pkts: Vec<*const u8> = __o.2.iter().map(|__p| __p.as_ptr()).collect();"
-                      , "__o = unsafe { rustmorloc::get_value(rustmorloc::Packet::new(rustmorloc::foreign_call(&format!(\"pipe-{}\", __o.0), __s as u32, &__pkts)).as_ptr(), " <> sch restSid <> ") };"
+                      , "__o = unsafe { ::rustmorloc::get_value(::rustmorloc::Packet::new(::rustmorloc::foreign_call(&format!(\"pipe-{}\", __o.0), __s as u32, &__pkts)).as_ptr(), " <> RP.schemaRef restSid <> ") };"
                       ]
                   , "}"
                   ]
@@ -1175,13 +1323,10 @@ rustReflectClosureAssembler (SerialClosure ins out) = do
   resT <- rustTypeOf (serialAstToNativeType out)
   argSids <- mapM (rustRegisterSchema . render . serialAstToMsgpackSchema) ins
   resSid <- rustRegisterSchema (render (serialAstToMsgpackSchema out))
-  resultDoc <- closureResultRead out "rustmorloc::Packet::new(rustmorloc::foreign_call(__sock, __c.1.1 as u32, &__pkts)).as_ptr()" resSid
+  resultDoc <- closureResultRead out "::rustmorloc::Packet::new(::rustmorloc::foreign_call(__sock, __c.1.1 as u32, &__pkts)).as_ptr()" resSid
   pushes <- sequence [closureArgPush i ast sid | (i, ast, sid) <- zip3 [(0 :: Int) ..] ins argSids]
   let n = length ins
       params = ["__a" <> pretty i <> ": &" <> t | (i, t) <- zip [(0 :: Int) ..] argTs]
-      dynT =
-        "std::rc::Rc<dyn rustmorloc::MorlocFn" <> pretty n
-          <> "<" <> hcat (punctuate ", " (argTs <> [resT])) <> ">>"
       bodyDoc =
         vsep
           [ "let __sock = &__c.0;"
@@ -1195,23 +1340,23 @@ rustReflectClosureAssembler (SerialClosure ins out) = do
       [ "{"
       , indent 4 $
           vsep
-            ( [ "let __clo: rustmorloc::ClosureOrigin = " <> tup <> ";" ]
+            ( [ "let __clo: ::rustmorloc::ClosureOrigin = " <> tup <> ";" ]
                 <> ["let __clo_s = __clo.clone();" | isJust step]
                 <> [ "let __caps = (format!(\"pipe-{}\", __clo.0), __clo.clone());"
-                   , "let __p = std::rc::Rc::new(rustmorloc::Closure" <> pretty n <> "::proxy("
+                   , "let __p = ::rustmorloc::proxy" <> pretty n <> "("
                    , indent 4 $
                        vsep
                          [ "__caps,"
-                         , "|__c: &(String, rustmorloc::ClosureOrigin)"
+                         , "|__c: &(String, ::rustmorloc::ClosureOrigin)"
                              <> hcat [", " <> pr | pr <- params] <> "| -> " <> resT <> " { unsafe {"
                          , indent 4 bodyDoc
                          , "} },"
                          , "__clo,"
                          ]
-                   , ")) as " <> dynT <> ";"
+                   , ");"
                    ]
                 <> [ case step of
-                       Just st -> "std::rc::Rc::new(rustmorloc::Staged" <> pretty n <> "::new(__p, " <> st <> ")) as " <> dynT
+                       Just st -> "::rustmorloc::staged" <> pretty n <> "(__p, " <> st <> ")"
                        Nothing -> "__p"
                    ]
             )
@@ -1221,7 +1366,7 @@ rustReflectClosureAssembler _ = error "rustReflectClosureAssembler: expected Ser
 
 -- | Reflect a closure NESTED in an aggregate: the enclosing get_value already
 -- produced the wire tuple, so @tup@ is the parsed 'ClosureOrigin' (not a raw
--- packet). Build an origin-preserving @Rc<dyn MorlocFnN>@: the reflected value
+-- packet). Build an origin-preserving @Arc<dyn Fn>@: the reflected value
 -- is a proxy carrying the ORIGINAL origin, so a later reify (@reifyN@)
 -- reproduces the producing pool (a re-cross A->B->C calls back to A, not B).
 rustReflectClosureParsed :: MDoc -> SerialAST -> RustM MDoc
@@ -1266,14 +1411,18 @@ buildSrcTypeVarMask = do
     isFunParam _ = False
 
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
-translate srcs es = do
+translate srcs es0 = do
+  let es = map markLastReads es0
   let rustSrcs = unique $ mapMaybe srcPath [s | s <- srcs, srcLang s == rustLang]
   absSrcs <- liftIO $ mapM MS.canonicalizePath rustSrcs
   localCrateDirs <- Map.elems <$> rustLocalDeps
   let userDirs = unique (map takeDirectory absSrcs ++ localCrateDirs)
-      includeDocs = map rustSourceInclude absSrcs ++ ["mod mlc_user_ops;", rustUserFiles absSrcs userDirs]
+      includeDocs = map rustSourceInclude absSrcs ++ ["mod __morloc_user_ops;", rustUserFiles absSrcs userDirs]
 
-  debugInfo <- makeManifoldDebugInfoLookup
+  debugMode <- MM.gets stateDebugTrace
+  debugInfo <- if debugMode
+    then (\f i -> Just (f i)) <$> makeManifoldDebugInfoLookup
+    else makeTraceLabelLookup
 
   -- Merge the general typedef scope into the Rust concrete scope so a record
   -- field declared via a general alias resolves through its Rust mapping (as
@@ -1292,7 +1441,7 @@ translate srcs es = do
   let closureTable = Map.map closureSchemaTexts closureAsts
   logTemplates <- collectRenderedTemplates rustLang
   stageTable <- stageTableEntries
-  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable}
+  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsGScope = generalScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool rustCaps es, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds (planPool rustCaps es) es0) es0}
       (code, stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
   mapM_ (MM.throwSystemError . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
 
@@ -1318,14 +1467,12 @@ translate srcs es = do
   -- pools resolved. Cargo prunes the entries the pool does not use and never
   -- re-resolves what the lock pins, so the shared target-dir holds one build
   -- of each dependency rather than one per registry-index snapshot, and the
-  -- registry is consulted only for a crate no pool in this environment has
-  -- needed before; the pins cargo adds are merged back after the build.
+  -- registry is consulted only for a crate the lock does not pin; the pins
+  -- cargo adds are merged back after the build where they agree with the
+  -- base (Build/CargoLock.hs).
   locks <- rustLockPaths
   lockText <- mergeCargoLocks <$> readRustLock (rlBase locks) <*> readLockIfPresent (rlEnv locks)
-  let registryCrates = Map.keys (Map.filterWithKey (\c _ -> not (Map.member c localCrates)) deps)
-      -- A local crate carries its own dependencies, which the lock cannot pin.
-      offline = Map.null localCrates && lockCoversCrates lockText registryCrates
-  maker <- makeTheMaker crateName offline locks
+  maker <- makeTheMaker crateName locks
   let poolSubdir = ML.poolDirKey rustLang
 
   -- The Rust pool is a real Cargo project: `src/main.rs` is the rendered pool
@@ -1342,7 +1489,7 @@ translate srcs es = do
                 [ File "Cargo.toml" (Code (render cargoToml))
                 , File "Cargo.lock" (Code lockText)
                 , File "build.rs" (Code (render buildRs))
-                , Dir "src" [File "main.rs" (Code poolSrc), File "mlc_user_ops.rs" (Code rustUserOps)]
+                , Dir "src" [File "main.rs" (Code poolSrc), File "__morloc_user_ops.rs" (Code rustUserOps)]
                 ]
             ]
       , scriptMake = maker
@@ -1366,7 +1513,7 @@ rustLockPaths = do
   return
     RustLocks
       { rlBase = home </> "rust" </> "Cargo.lock"
-      , rlEnv = state </> "cache" </> "rust-env.lock"
+      , rlEnv = state </> "cache" </> "rust-env.v2.lock"
       }
 
 readRustLock :: FilePath -> MorlocMonad Text
@@ -1395,16 +1542,16 @@ rustPathLiteral :: Path -> MDoc
 rustPathLiteral = dquotes . pretty . RP.rustEscape . MT.pack
 
 -- | The user's code as panic locations name it, so the pool can tell a user
--- panic from a runtime one (model/panic.md PANIC-9, PANIC-11): the included
+-- panic from a runtime one (model/runtime/panic.md PANIC-9, PANIC-11): the included
 -- sources, the generated operator shims, and, as entries ending in @/@, the
 -- directories of the sources and of the local crates.
 rustUserFiles :: [Path] -> [Path] -> MDoc
 rustUserFiles absPaths dirs =
-  "const MLC_USER_FILES: &[&str] = &["
+  "const __MORLOC_USER_FILES: &[&str] = &["
     <> hsep (punctuate "," (map rustPathLiteral absPaths ++ opsFiles ++ map (rustPathLiteral . addSlash) dirs))
     <> "];"
   where
-    opsFiles = ["\"src/mlc_user_ops.rs\"", "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/mlc_user_ops.rs\")"]
+    opsFiles = ["\"src/__morloc_user_ops.rs\"", "concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/__morloc_user_ops.rs\")"]
     addSlash d = if "/" `isSuffixOf` d then d else d <> "/"
 
 -- | Sourced Rust binary operators applied through shims in a generated user
@@ -1414,16 +1561,16 @@ rustUserFiles absPaths dirs =
 -- than consumes its operands.
 rustOperatorShims :: [(Text, (Text, Text, Bool))]
 rustOperatorShims =
-  [ ("+", ("add", "std::ops::Add", False))
-  , ("-", ("sub", "std::ops::Sub", False))
-  , ("*", ("mul", "std::ops::Mul", False))
-  , ("/", ("div", "std::ops::Div", False))
-  , ("%", ("rem", "std::ops::Rem", False))
-  , ("&", ("bitand", "std::ops::BitAnd", False))
-  , ("|", ("bitor", "std::ops::BitOr", False))
-  , ("^", ("bitxor", "std::ops::BitXor", False))
-  , ("<<", ("shl", "std::ops::Shl", False))
-  , (">>", ("shr", "std::ops::Shr", False))
+  [ ("+", ("add", "::std::ops::Add", False))
+  , ("-", ("sub", "::std::ops::Sub", False))
+  , ("*", ("mul", "::std::ops::Mul", False))
+  , ("/", ("div", "::std::ops::Div", False))
+  , ("%", ("rem", "::std::ops::Rem", False))
+  , ("&", ("bitand", "::std::ops::BitAnd", False))
+  , ("|", ("bitor", "::std::ops::BitOr", False))
+  , ("^", ("bitxor", "::std::ops::BitXor", False))
+  , ("<<", ("shl", "::std::ops::Shl", False))
+  , (">>", ("shr", "::std::ops::Shr", False))
   , ("==", ("eq", "PartialEq", True))
   , ("!=", ("ne", "PartialEq", True))
   , ("<", ("lt", "PartialOrd", True))
@@ -1455,21 +1602,21 @@ takeUserCallMarks src =
 -- at one of these positions is the user's.
 rustUserCalls :: [(Int, Int)] -> Text
 rustUserCalls calls =
-  "const MLC_USER_CALLS: &[(u32, u32)] = &["
+  "const __MORLOC_USER_CALLS: &[(u32, u32)] = &["
     <> T.intercalate ", " [T.pack ("(" <> show l <> ", " <> show c <> ")") | (l, c) <- calls]
     <> "];"
 
 -- | A manifold returns its serialized result as the dispatch's reply
 -- (PANIC-10).
 rustReply :: MDoc -> MDoc
-rustReply e = case T.stripPrefix "rustmorloc::put_value(" (render e) of
-  Just rest -> "rustmorloc::put_reply(" <> pretty rest
+rustReply e = case T.stripPrefix (render RP.putValueFn <> "(") (render e) of
+  Just rest -> "::rustmorloc::put_reply(" <> pretty rest
   Nothing -> e
 
 rustOperator :: Source -> MDoc -> MDoc -> MDoc
 rustOperator src l r = case lookup (unSrcName (srcName src)) rustOperatorShims of
-  Just (shim, _, True) -> "mlc_user_ops::" <> pretty shim <> tupled ["&(" <> l <> ")", "&(" <> r <> ")"]
-  Just (shim, _, False) -> "mlc_user_ops::" <> pretty shim <> tupled [l, r]
+  Just (shim, _, True) -> "__morloc_user_ops::" <> pretty shim <> tupled ["&(" <> l <> ")", "&(" <> r <> ")"]
+  Just (shim, _, False) -> "__morloc_user_ops::" <> pretty shim <> tupled [l, r]
   Nothing -> infixOperator src l r
 
 rustUserOps :: Text
@@ -1499,7 +1646,7 @@ makeRustCode includeDocs closureAsts closureTable0 es = do
   -- crosses; a thin closure cannot cross, so it is kept out rather than given
   -- a dispatch entry (and with it the boxed form).
   closureTable <-
-    Map.filterWithKey (\i _ -> not (Set.member (render (manNamer i)) thin))
+    Map.filterWithKey (\i _ -> not (Set.member (render (RP.rustManifoldName i)) thin))
       <$> crossingClosures closureRustSig stageTable es closureTable0
   -- Per crossing closure: a home-pool serial dispatch wrapper (so a foreign pool
   -- can apply it) and the reify info (mid + captured schema ids) that
@@ -1564,30 +1711,30 @@ makeClosureDispatch closureAsts closureTable es = do
           -- Deserialize each argument packet to the closure body's native param
           -- form: a Copy value by value, a non-Copy value by shared reference.
           deser t sid copy j refl =
-            let raw = "rustmorloc::get_value::<" <> t <> ">(a(" <> pretty j <> "), " <> sch sid <> ")"
+            let raw = "::rustmorloc::get_value::<" <> t <> ">(a(" <> pretty j <> "), " <> RP.schemaRef sid <> ")"
                 g = case refl of
                   Just assemble -> assemble raw
                   Nothing -> raw
              in if copy then g else rustRef Owned g
-          call = manNamer i <> tupled argExprs
+          call = RP.rustManifoldName i <> tupled argExprs
           result = case resAst of
             SerialClosure ins _ ->
-              "rustmorloc::require_origin((" <> call <> ").reify" <> pretty (length ins) <> "())"
+              "::rustmorloc::require_origin(::rustmorloc::reify(&(" <> call <> ")))"
             _ -> call
           wrapper =
             vsep
-              [ "unsafe fn mlc_closure_dispatch_" <> pretty i <> "(args: *const *const u8, nargs: usize) -> *mut u8 {"
+              [ "unsafe fn __morloc_closure_dispatch_" <> pretty i <> "(args: *const *const u8, nargs: usize) -> *mut u8 {"
               , indent 4 $
                   vsep
-                    [ "let a = |k: usize| -> *const u8 { if k < nargs { unsafe { *args.add(k) } } else { std::ptr::null() } };"
-                    , "rustmorloc::put_reply(&(" <> result <> "), " <> sch resSid <> ")"
+                    [ "let a = |k: usize| -> *const u8 { if k < nargs { unsafe { *args.add(k) } } else { ::std::ptr::null() } };"
+                    , "::rustmorloc::put_reply(&(" <> result <> "), " <> RP.schemaRef resSid <> ")"
                     ]
               , "}"
               ]
       -- The wire form of each capture travels with its schema id: the origin
       -- builder reduces the value through the same 'wirePath' the dispatch
       -- wrapper rebuilds it through.
-      return (wrapper, (render (manNamer i), (i, zip capSids capAsts, zip (drop (length capScs) argSids) bndAsts)))
+      return (wrapper, (render (RP.rustManifoldName i), (i, zip capSids capAsts, zip (drop (length capScs) argSids) bndAsts)))
 
 -- | The stage table ('StageEntry'), for the reflect proxies of closures from
 -- other pools.
@@ -1595,7 +1742,7 @@ stageLookupDoc :: Map.Map Int StageEntry -> MDoc
 stageLookupDoc tbl =
   vsep
     [ "#[allow(dead_code)]"
-    , "fn mlc_stage_lookup(mid: i64) -> Option<(usize, usize, i64)> {"
+    , "fn __morloc_stage_lookup(mid: i64) -> Option<(usize, usize, i64)> {"
     , indent 4 $ vsep
         ( "match mid {"
             : [ indent 4 (pretty f <+> "=> Some((" <> pretty n <> ", " <> pretty k <> ", " <> pretty st <> ")),")
@@ -1609,13 +1756,14 @@ stageLookupDoc tbl =
 -- one representative field list (from a use site). Unlike the shared recmap
 -- (which only collects @= "struct"@ records), this also collects user-mapped
 -- records (@record Rust => X = "Name"@) so their marshalling impls are emitted.
-collectRustRecords :: [SerialManifold] -> [(FVar, [TypeF], [(Key, TypeF)])]
-collectRustRecords =
+collectRustRecords :: Scope -> [SerialManifold] -> [(FVar, [TypeF], [(Key, TypeF)])]
+collectRustRecords gscope =
   -- One entry per record; keep the first field list. A generated struct
   -- covers every instantiation with generic parameters, so it is one entry
   -- per general name. A user-mapped struct may be a template the user
-  -- wrote, and each instantiation needs its own marshalling, so those are
-  -- one entry per (name, arguments).
+  -- wrote, whose instantiations each need their own marshalling, so those are
+  -- one entry per (name, arguments); 'generateRustStructs' keeps one impl
+  -- for instantiations that render the same struct.
   nubBy ((==) `on` \(FV gv cv, ps, _) -> (gv, if cv == CV "struct" then [] else ps))
     . concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
@@ -1629,12 +1777,12 @@ collectRustRecords =
     -- A table is an Arrow record batch with its own marshalling in
     -- rustmorloc, not a struct to generate.
     seek (NamF NamTable _ _ _) = []
-    seek (NamF _ v ps rs) = (v, ps, rs) : concatMap seek ps <> concatMap (seek . snd) rs
+    seek (NamF _ v@(FV gv _) ps rs) = (v, ps, rs) : concatMap seek (valueArgsF gscope gv ps) <> concatMap (seek . snd) rs
     -- A record reachable only as a `data` arm's field still needs its
     -- struct emitted, so the walk descends through arms as the enum
     -- collector's does.
-    seek (VariantF _ ps as) = concatMap seek ps <> concatMap (concatMap seek . snd) as
-    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (VariantF (FV gv _) ps as) = concatMap seek (valueArgsF gscope gv ps) <> concatMap (concatMap seek . snd) as
+    seek (AppF t ts) = seek t <> concatMap seek (appValueArgs gscope t ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
     seek _ = []
@@ -1647,8 +1795,8 @@ bodyName (NamU _ (TV n) _ _) = Just n
 bodyName _ = Nothing
 
 -- | Every argument-free @data@ type used in these manifolds, unmerged.
-collectRustEnums :: [SerialManifold] -> [(FVar, [TypeF], [Text])]
-collectRustEnums = concatMap (runIdentity . foldWithSerialManifoldM fm)
+collectRustEnums :: Scope -> [SerialManifold] -> [(FVar, [TypeF], [Text])]
+collectRustEnums gscope = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
     ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
@@ -1657,17 +1805,17 @@ collectRustEnums = concatMap (runIdentity . foldWithSerialManifoldM fm)
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [TypeF], [Text])]
-    seek (EnumF v ps ns) = (v, ps, ns) : concatMap seek ps
-    seek (VariantF _ ps as) = concatMap seek ps <> concatMap (concatMap seek . snd) as
+    seek (EnumF v@(FV gv _) ps ns) = (v, ps, ns) : concatMap seek (valueArgsF gscope gv ps)
+    seek (VariantF (FV gv _) ps as) = concatMap seek (valueArgsF gscope gv ps) <> concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
-    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (AppF t ts) = seek t <> concatMap seek (appValueArgs gscope t ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
     seek _ = []
 
 -- | Every payload-bearing @data@ type used in these manifolds, unmerged.
-collectRustVariants :: [SerialManifold] -> [(FVar, [TypeF], [(Text, [TypeF])])]
-collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
+collectRustVariants :: Scope -> [SerialManifold] -> [(FVar, [TypeF], [(Text, [TypeF])])]
+collectRustVariants gscope = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
     ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
@@ -1676,9 +1824,9 @@ collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [TypeF], [(Text, [TypeF])])]
-    seek (VariantF v ps as) = (v, ps, as) : concatMap seek ps <> concatMap (concatMap seek . snd) as
+    seek (VariantF v@(FV gv _) ps as) = (v, ps, as) : concatMap seek (valueArgsF gscope gv ps) <> concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
-    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (AppF t ts) = seek t <> concatMap seek (appValueArgs gscope t ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
     seek _ = []
@@ -1689,7 +1837,8 @@ collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
 -- sourced Rust and gets only the impls.
 generateRustVariants :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> RustM [MDoc]
 generateRustVariants closureAsts es = do
-  named <- mapM occurrence (collectRustVariants es)
+  gscope <- CMS.gets rsGScope
+  named <- mapM occurrence (collectRustVariants gscope es)
   wireArms <- variantWireArms rustTypeOf closureAsts es
   -- Merged by rendered name: one declaration per name.
   concat <$> mapM (uncurry (merged wireArms)) (Map.toList (Map.fromListWith (flip (<>)) named))
@@ -1710,7 +1859,7 @@ generateRustVariants closureAsts es = do
     -- A type holding a function gets impls only where it crosses: then each
     -- arm holding a closure crosses as its wire tuple.
     makeOne wireArms (FV gv (CV cvText), ps, arms) = do
-      userMapped <- cscopeDeclaresVariant gv cvText
+      userMapped <- rustUserMapsVariant gv cvText
       arms' <- mapM (\(n, ts) -> (,) n <$> mapM rustFieldType ts) arms
       name <- rustTypeOf (VariantF (FV gv (CV cvText)) ps arms)
       let hasFun = any (any containsFunF . snd) arms
@@ -1745,19 +1894,22 @@ generateRustVariants closureAsts es = do
               }
     armWire _ _ = return Nothing
 
-    cscopeDeclaresVariant :: TVar -> Text -> RustM Bool
-    cscopeDeclaresVariant gv cvText = do
-      cscope <- CMS.gets rsCScope
-      return $ case Map.lookup gv cscope of
-        Just entries -> any (\(_, body, _, _, _) -> bodyName body == Just cvText) entries
-        Nothing -> False
+-- | Whether the user maps this @data@ type to a Rust type of their own, whose
+-- arms box their payloads in a plain 'Box'.
+rustUserMapsVariant :: TVar -> Text -> RustM Bool
+rustUserMapsVariant gv cvText = do
+  cscope <- CMS.gets rsCScope
+  return $ case Map.lookup gv cscope of
+    Just entries -> any (\(_, body, _, _, _) -> bodyName body == Just cvText) entries
+    Nothing -> False
 
 -- | Impls for every nullary @data@ type in the pool, plus the enum itself
 -- unless the user maps it.
 generateRustEnums :: [SerialManifold] -> RustM [MDoc]
 generateRustEnums es = do
+  gscope <- CMS.gets rsGScope
   named <- mapM (\(v, ps, ns) -> (\n -> (render n, (v, ps, ns))) <$> rustTypeOf (EnumF v ps ns))
-                (collectRustEnums es)
+                (collectRustEnums gscope es)
   -- The longest constructor list is the complete one.
   concat <$> mapM makeOne (Map.elems (Map.fromListWith longest named))
   where
@@ -1786,13 +1938,36 @@ generateRustEnums es = do
 -- records provide their own struct (in sourced Rust), so only the impls are
 -- emitted for them.
 generateRustStructs :: Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> RustM [MDoc]
-generateRustStructs closureAsts es = concat <$> mapM makeOne (collectRustRecords es)
+generateRustStructs closureAsts es = do
+  gscope <- CMS.gets rsGScope
+  keyed <- concat <$> mapM makeOne (collectRustRecords gscope es)
+  -- A Rust struct gets one impl. Instantiations of a user-mapped record that
+  -- render the same struct must agree on its fields (they differ only in
+  -- parameters no field uses); otherwise one struct cannot hold both.
+  let users = Map.fromListWith (flip (<>))
+        [(render n, [(gv, render (fieldSig fs))]) | (Just (n, gv, fs), _) <- keyed]
+  forM_ (Map.toList users) $ \(n, xs) -> case (nubOrd (map fst xs), nubOrd (map snd xs)) of
+    ([_], [_]) -> return ()
+    (gvs@(_ : _ : _), _) -> rustError $
+      "the records " <> T.intercalate ", " (map unTVar gvs) <> " are all mapped to the Rust struct " <> n
+        <> ", whose marshalling only one of them can have"
+    _ -> rustError $
+      "the Rust struct " <> n <> " is the form of a record used at instantiations whose field types differ;"
+        <> " map the record to a generic struct that takes the varying parameters"
+  return (firstPerStruct Set.empty keyed)
   where
+    rustError :: Text -> RustM ()
+    rustError msg = CMS.modify (\s -> s {rsErrors = msg : rsErrors s})
+    fieldSig fs = hsep [fld <> ":" <+> ty | (fld, ty, _) <- fs]
+    firstPerStruct _ [] = []
+    firstPerStruct seen ((Nothing, d) : rest) = d : firstPerStruct seen rest
+    firstPerStruct seen ((Just (n, _, _), d) : rest)
+      | Set.member (render n) seen = firstPerStruct seen rest
+      | otherwise = d : firstPerStruct (Set.insert (render n) seen) rest
     -- Each record's closure fields (keyed by the record's general TVar + field
     -- Key), harvested from every (de)serialization site; the 'SerialClosure'
     -- carries the arg/result wire schemas the reify/reflect need. Duplicate keys
-    -- (the same record with a closure field at different arities) keep the last
-    -- -- a rare corner also collapsed by 'collectRustRecords' (nubBy general TVar).
+    -- (the same record with a closure field at different arities) keep the last.
     -- A record is also reached through a CLOSURE's captured or bound
     -- arguments, whose wire forms no manifold serializes directly -- the
     -- closure's own dispatch wrapper is what deserializes them. Harvesting
@@ -1812,7 +1987,7 @@ generateRustStructs closureAsts es = concat <$> mapM makeOne (collectRustRecords
         , (k, s@(SerialClosure _ _)) <- flds
         ]
 
-    -- A function field (needs `Rc<dyn MorlocFnN>` boxing + reify/reflect); a
+    -- A function field (needs `Arc<dyn Fn>` boxing + reify/reflect); a
     -- suspension field is one of arity zero.
     isFunF = isFunctionTypeF
 
@@ -1823,25 +1998,20 @@ generateRustStructs closureAsts es = concat <$> mapM makeOne (collectRustRecords
     fieldMarshal :: TVar -> Key -> TypeF -> RustM (Maybe RP.ClosureMarshal)
     fieldMarshal g k ty
       | isFunF ty = case Map.lookup (g, k) harvest of
-          Just s@(SerialClosure sins _) -> do
+          Just s@(SerialClosure _ _) -> do
             assembler <- rustReflectClosureAssembler s
-            return $
-              Just
-                RP.ClosureMarshal
-                  { RP.cmReify = "reify" <> pretty (length sins)
-                  , RP.cmReflect = assembler
-                  }
+            return $ Just RP.ClosureMarshal {RP.cmReflect = assembler}
           _ -> return Nothing
       | otherwise = return Nothing
 
-    makeOne :: (FVar, [TypeF], [(Key, TypeF)]) -> RustM [MDoc]
+    makeOne :: (FVar, [TypeF], [(Key, TypeF)]) -> RustM [(Maybe (MDoc, TVar, [(MDoc, MDoc, Bool)]), MDoc)]
     makeOne (v@(FV gv _), ps, rs) = case v of
       -- Autogenerated `= "struct"` record: drive from the unified RecEntry so a
       -- field whose native and wire types diverge (a custom-packer field)
       -- becomes a GENERIC parameter -- one struct `S<T1> { w: T1, .. }` covers
       -- both the native (`S<MyWrap>`) and wire (`S<i64>`) instantiations, the
       -- Rust analogue of C++'s template-field records. A closure field also
-      -- diverges (native `Rc<dyn MorlocFnN>` vs wire `ClosureOrigin`), so it is a
+      -- diverges (native `Arc<dyn Fn>` vs wire `ClosureOrigin`), so it is a
       -- generic param here and cannot carry a per-field reify/reflect -- an
       -- autogenerated struct with a function field is therefore struct-only (use
       -- a user-mapped `record Rust => X = "..."` for a crossing closure record).
@@ -1855,7 +2025,7 @@ generateRustStructs closureAsts es = concat <$> mapM makeOne (collectRustRecords
             let hasFun = any (containsFunF . snd) rs
                 fields4 = [(fld, ty, w, Nothing) | (fld, ty, w) <- fields]
                 impls = [RP.printRecordImpls RP.RenderedFieldTypes (recName rec) params fields4 | not hasFun]
-            return $ RP.printRustStruct (recName rec) params [(fld, ty) | (fld, ty, _) <- fields] : impls
+            return $ map ((,) Nothing) (RP.printRustStruct (recName rec) params [(fld, ty) | (fld, ty, _) <- fields] : impls)
           Nothing -> error $ "Rust: autogenerated record missing from recmap: " <> show v
       -- User-mapped record: the user writes the (monomorphic) struct, so only the
       -- marshalling impls are emitted, with concrete field types. A closure field
@@ -1871,7 +2041,7 @@ generateRustStructs closureAsts es = concat <$> mapM makeOne (collectRustRecords
             -- Emit the impl only when EVERY function field has a harvested marshal
             -- (a non-function field imposes no requirement); else struct-only.
             emitImpl = and (zipWith (\(_, ty) m -> not (isFunF ty) || maybe False (const True) m) rs marshals)
-        return [RP.printRecordImpls RP.StructFieldTypes name [] fields4 | emitImpl]
+        return [(Just (name, gv, fields), RP.printRecordImpls RP.StructFieldTypes name [] fields4) | emitImpl]
 
     -- Number the generic (native/=wire) fields `T1, T2, ...`; concrete fields
     -- keep their unified type.
@@ -1908,20 +2078,6 @@ isVarWidthF (AppF (VarF (FV (TV gv) _)) ts)
   | T.isPrefixOf "Tuple" gv = any isVarWidthF (fst (partitionKindArgsF ts))
 isVarWidthF _ = True
 
--- | The bound-variable indices that are borrowed (@&T@) parameters of a
--- manifold: its non-'Copy' NATIVE parameters. Serial (dispatch) parameters
--- deserialize to owned locals, so they are excluded.
-borrowedIndicesOfForm :: (HasTypeM t) => ManifoldForm (Or TypeS TypeF) t -> Set.Set Int
-borrowedIndicesOfForm form =
-  Set.fromList [i | Arg i tm <- typeMofForm form, isBorrowed tm]
-  where
-    -- A function-typed parameter is rendered `&Rc<dyn MorlocFnN>` (see 'rustArgOf'),
-    -- so it too is a borrowed reference; tracking it keeps a captured function
-    -- from being double-referenced when it is forwarded into a nested closure.
-    isBorrowed (Native tf) = not (rustIsCopy tf)
-    isBorrowed (Function _ _) = True
-    isBorrowed _ = False
-
 -- | Lower a manifold body in its own ownership scope: 'oeCurrent' becomes the
 -- manifold's borrowed parameter indices, 'oeParent' the enclosing manifold's
 -- ('oeCurrent' from before), and 'oeShared' the manifold's used-more-than-once
@@ -1940,22 +2096,6 @@ withManifoldScope borrowed shared carried =
 rustWithCallerScope :: RustM a -> RustM a
 rustWithCallerScope = local (\e -> e {oeCurrent = oeParent e, oeShared = oeParentShared e, oeLoopCarried = Set.empty})
 
--- | The loop-carried variable indices of a manifold body, or empty if the body
--- is not a native loop. 'addLoopWraps' makes the loop the whole body (possibly
--- under structural wrappers and the entry deserialize lets), so walk that spine.
--- The wrapper set must stay in sync with 'Serialize.loopCarriedTypes', which
--- walks the identical spine to resolve the carried slots' types.
-loopCarriedIdsSM :: SerialManifold -> Set.Set Int
-loopCarriedIdsSM (SerialManifold _ _ _ _ se) = go se
-  where
-    go (LoopS _ ids _) = Set.fromList ids
-    go (ReturnS x) = go x
-    go (SerialLetS _ _ x) = go x
-    go (NativeLetS _ _ x) = go x
-    go (CacheBodyS _ _ _ _ _ x) = go x
-    go (DebugWrapS _ _ _ x) = go x
-    go _ = Set.empty
-
 -- | Track each manifold's borrowed parameters as the body is folded, so
 -- 'rustOwnership' can tell a borrowed @&T@ parameter from an owned value. For a
 -- native-loop manifold the loop-carried locals are additionally recorded (for
@@ -1963,18 +2103,26 @@ loopCarriedIdsSM (SerialManifold _ _ _ _ se) = go se
 rustSurround :: SurroundManifoldM RustM PoolDocs PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs)
 rustSurround =
   defaultValue
-    { surroundSerialManifoldM = \recurse sm@(SerialManifold _ _ form _ _) ->
-        let carried = loopCarriedIdsSM sm
-         in withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesSM sm `Set.union` carried) carried (recurse sm)
-    , surroundNativeManifoldM = \recurse nm@(NativeManifold _ _ form _) ->
-        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesNM nm) Set.empty (recurse nm)
+    { surroundSerialManifoldM = \recurse sm -> withPlan (planSerialManifold rustCaps sm) (recurse sm)
+    , surroundNativeManifoldM = \recurse nm -> do
+        pp <- CMS.gets rsPool
+        withPlan (planNativeManifold rustCaps pp nm) (recurse nm)
     }
+  where
+    withPlan p = withManifoldScope (mpBorrowed p) (mpShared p) (mpCarried p)
+
+-- | No tag test may follow a take (see the projection-consume golden's
+-- secondMatchRust).
+rustCaps :: OwnCaps
+rustCaps = OwnCaps {ocCheap = rustIsCopy, ocTagAfterTake = False, ocListKeeps = True}
 
 translateSegment :: SerialManifold -> RustM MDoc
-translateSegment m0 = do
+translateSegment m0@(SerialManifold root _ _ _ _) = do
   resetCounter
+  CMS.modify (\st -> st {rsCurrentRoot = root})
   mask <- CMS.gets rsSrcTypeVarMask
-  e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask)) m0
+  consumed <- CMS.gets (ppByValue . rsPool)
+  e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask consumed)) m0
   return $ renderPoolDocs e
 
 -- | Local (filesystem-path) Rust crates declared in @local-deps: {rust: ...}@,
@@ -2115,16 +2263,16 @@ makeCargoDocs crateName deps localCrates home profile =
   in (cargoToml, buildRs)
 
 -- | Build the Rust pool with @cargo build@ (one unified dependency resolution
--- over rustmorloc + any external crates, pinned by the shipped Cargo.lock;
--- @offline@ when that lock already covers every crate), merge the pins cargo
+-- over rustmorloc + any external crates, pinned by the shipped Cargo.lock),
+-- merge the pins cargo
 -- added into the environment lock, then copy the binary to the
 -- @pool-rust.out@ path the manifest/nexus expect. @MORLOC_HOME@ is set on the
 -- command so rustmorloc's build.rs locates libmorloc.so. The @--target-dir@ is
 -- shared across programs so rustmorloc + deps compile once and cache (cargo's
 -- own lock serialises concurrent builds; the per-program @crateName@ keeps each
 -- program's output binary distinct within that shared dir).
-makeTheMaker :: Text -> Bool -> RustLocks -> MorlocMonad [SysCommand]
-makeTheMaker crateName offline locks = do
+makeTheMaker :: Text -> RustLocks -> MorlocMonad [SysCommand]
+makeTheMaker crateName locks = do
   -- cargo is required at make time (a Rust pool is a Cargo project). Fail fast
   -- with a clear message rather than a raw shell "command not found".
   cargoAvail <- liftIO (findExecutable "cargo")
@@ -2147,13 +2295,15 @@ makeTheMaker crateName offline locks = do
       homeD = pretty home
       -- Paths are single-quoted: they are interpolated into a shell string and
       -- $MORLOC_HOME (hence targetDir/binPath) may contain spaces.
-      -- With every crate pinned by the shipped Cargo.lock, cargo needs nothing
-      -- from the network; --offline makes an unexpected fetch a hard error
-      -- rather than a silent re-resolution against a newer registry index.
-      offlineFlag = if offline then " --offline" else "" :: MDoc
+      -- Cargo keeps every pin of a consistent lock and fetches only what the
+      -- lock lacks or the cache does not hold, so a pool whose crates are all
+      -- pinned and cached needs no network. The build is never forced
+      -- offline: a crate's features can need a dependency the lock has no
+      -- table for, which only an online resolution can add. A user without
+      -- a network sets CARGO_NET_OFFLINE.
       buildCmd =
         SysRun . Code . render $
-          [idoc|MORLOC_HOME='#{homeD}' cargo build --release#{offlineFlag} --manifest-path '#{manifestPath}' --target-dir '#{targetD}'|]
+          [idoc|MORLOC_HOME='#{homeD}' cargo build --release --manifest-path '#{manifestPath}' --target-dir '#{targetD}'|]
       copyCmd =
         SysRun . Code . render $
           if SI.os == "darwin"
@@ -2168,15 +2318,15 @@ makeTheMaker crateName offline locks = do
 -- closures/partial application, remote calls, caching, and pattern evaluation
 -- raise a clear v1-unsupported error and are unreachable for the pool shapes
 -- v1 supports.
-rustLowerConfig :: Map.Map SrcName [(Bool, Bool)] -> LowerConfig RustM
-rustLowerConfig mask =
+rustLowerConfig :: Map.Map SrcName [(Bool, Bool)] -> Map.Map Int (Set.Set Int) -> LowerConfig RustM
+rustLowerConfig mask consumed =
   LowerConfig
     { lcSrcName = \src -> pretty (T.cons userCallMark (unSrcName (srcName src)))
     , lcOperator = rustOperator
-    -- A curried host returns a function value, and a function value is
-    -- applied through its trait method -- Rust has no call syntax for one.
+    -- A curried host returns a function value, applied with call syntax; the
+    -- mark records where the call is (PANIC-16).
     , lcApplySrcGroup = \f as ->
-        parens f <> "." <> pretty (T.singleton userCallMark) <> "call" <> pretty (length as) <> tupled as
+        pretty (T.singleton userCallMark) <> parens f <> tupled as
     , lcSourcedArg = \site own tm x ->
         -- Pass each argument to match how the callee's parameter is written,
         -- adapting by the argument's ownership so no unnecessary copy is made.
@@ -2197,14 +2347,15 @@ rustLowerConfig mask =
               -- A function-typed argument is a function value (a saturated
               -- sub-manifold is typed by its result, so it never lands here).
               -- Host code may declare a higher-order parameter as
-              -- `F: Fn(&A..) -> R`, which a trait object cannot satisfy, so the
-              -- value is handed over through the runtime's one adapter; every
-              -- other function sink (a morloc-defined `&Rc<dyn MorlocFnN>`
+              -- `F: Fn(&A..) -> R`, which an `Arc` does not satisfy, so the
+              -- value is handed over through `IntoCallbackN`; every
+              -- other function sink (a morloc-defined `&Arc<dyn Fn>`
               -- parameter, a type-variable parameter, a closure application)
               -- borrows it.
-              Function _ _
+              Function ts _
                 | isFunParam ->
-                    "rustmorloc::ThinFn::thin" <> parens (rustRef own x)
+                    "::rustmorloc::IntoCallback" <> pretty (length ts) <> "::into_callback"
+                      <> parens (case own of Owned -> x; _ -> parens x <> ".clone()")
                 | otherwise -> rustRef own x
               -- A closure application and a sourced type-variable parameter are
               -- reference sinks; otherwise pass by the value type. (`isVar` is only
@@ -2212,8 +2363,12 @@ rustLowerConfig mask =
               Native tf
                 | ClosureArg <- site -> rustRef own x
                 | isVar -> rustRef own x
+                | ManifoldArg m j <- site
+                , Set.member j (Map.findWithDefault Set.empty m consumed) ->
+                    rustOwn own tf x
                 | otherwise -> byType tf
               _ -> x
+    , lcConstArg = \_ _ x -> x
     , lcOwnership = rustOwnership
     , lcArgManifoldOwnership = \_ -> return Owned
     , lcBindCallArgs = False
@@ -2250,20 +2405,26 @@ rustLowerConfig mask =
     -- what hands an owned value on from a borrowed place. A field that is
     -- itself a `data` value clones as a shared box, so a loop that walks a
     -- spine by projection stays linear.
-    , lcCtorField = \ty n _ i subj ->
-        "match" <+> "&" <> parens subj <+> "{"
-          <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
-          <+> "=> mlc_b." <> pretty i <> ".clone(),"
-          <+> "_ => unreachable!()"
-          <+> "}"
+    -- At the subject's last read the field is taken out of the payload
+    -- instead ('::rustmorloc::MlcTake').
+    , lcCtorField = \how ty n _ i subj -> case how of
+        FieldTake -> rustTakeField ty n i subj
+        FieldBorrow -> parens (rustArmField ty n ("&" <> parens subj) ("&mlc_b." <> pretty i))
+        FieldCopy -> rustArmField ty n ("&" <> parens subj) ("mlc_b." <> pretty i <> ".clone()")
     , lcEnumTagTest = \ty _ n _ subj ->
         parens (subj <+> "==" <+> "<" <> ty <> ">::" <> pretty n)
+    , lcListLenTest = \subj n -> parens (parens subj <> ".len() ==" <+> pretty n)
+    -- Indexing yields a place, not a value: an element read in place is a
+    -- reference into it, and any other is cloned out, as a constructor field
+    -- is.
+    , lcListElem = \inPlace subj i ->
+        if inPlace then rustElemRef subj (fromIntegral i) else parens subj <> "[" <> pretty i <> "].clone()"
     , lcCoerceOptional = \x -> "Some(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> rustTypeOf t
     -- The serialize / raw-deserialize types use the WIRE form: a closure nested
     -- in an aggregate travels as its reified `ClosureOrigin` tuple, so the closure
     -- slot is typed as that tuple ('rustClosureWireLeaf'), not the native
-    -- `impl Fn`/`Rc<dyn MorlocFnN>`. Mirrors the C++ 'cppClosureWireLeaf'.
+    -- `impl Fn`/`Arc<dyn Fn>`. Mirrors the C++ 'cppClosureWireLeaf'.
     , lcSerialAstType = \s -> Just . toIType <$> rustTypeOf (wireSerialAstToType rustClosureWireLeaf s)
     , lcDeserialAstType = \s -> Just . toIType <$> rustTypeOf (shallowType s)
     , lcRawDeserialAstType = \s -> Just . toIType <$> rustTypeOf (wireSerialAstToType rustClosureWireLeaf s)
@@ -2280,19 +2441,24 @@ rustLowerConfig mask =
     , lcPrintExpr = RP.printExpr
     , lcPrintStmt = RP.printStmt
     , lcEvalPattern = rustEvalPattern
+    , lcTakeGetter = rustTakeGetter
     , lcListConstructor = \_ _ es -> "vec![" <> hcat (punctuate ", " es) <> "]"
     , lcTupleConstructor = \_ _ es -> tupled es
     , lcRecordConstructor = \recType _ _ _ rs -> do
         name <- rustStructCtor recType
         return $ defaultValue {poolExpr = name <+> "{" <+> RP.rustRecordFields rs <+> "}"}
     -- A function value already IS its stored representation, so storing one
-    -- is the identity. Re-boxing would compile -- an `Rc<dyn MorlocFnN>` is
-    -- itself a `MorlocFnN`, so `Rc::new(rc) as Rc<dyn ..>` type-checks -- and
-    -- would silently cost an allocation and an indirection on every store.
+    -- is the identity; re-boxing it would cost an allocation and an
+    -- indirection on every store, and lose its registry identity (STATE-4).
+    , lcTakeSetter = rustTakeSetter
+    , lcKeepContextArg = \_ _ _ _ v -> return v
+    , lcKeepCallArg = \_ _ _ v -> return v
+    , lcKeepSlot = \_ _ v -> return v
+    , lcKeepElem = \_ v -> return v
     , lcStoreField = \_ v -> return v
-    -- Apply a function value via the MorlocFnN trait (`f.callN(args)`): a thin
-    -- closure monomorphizes and inlines, a boxed one dispatches. Zero-cost calls.
-    , lcApplyClosure = \callee args -> callee <> ".call" <> pretty (length args) <> tupled args
+    -- Apply a function value with call syntax: a concrete closure inlines, an
+    -- `Arc<dyn Fn>` dispatches through its vtable.
+    , lcApplyClosure = \callee args -> parens callee <> tupled args
     -- Partially apply a function value one argument at a time, each step
     -- typed explicitly so a borrowed head coerces to the trait object.
     , lcPapply = \t argTypes f xs -> case t of
@@ -2301,14 +2467,14 @@ rustLowerConfig mask =
           restTs <- mapM (rustStoredType . typeMof) rins
           resT <- rustStoredType (typeMof out)
           let step ts acc x =
-                "rustmorloc::apply1_" <> pretty (length ts + length restTs)
+                "::rustmorloc::apply1_" <> pretty (length ts + length restTs)
                   <> "::<" <> hcat (punctuate ", " (ts ++ restTs ++ [resT])) <> ">"
                   <> tupled ["&" <> acc, x]
           return (papplySteps step argTs f xs)
         _ -> return f
     , lcForeignCall = \socketFile mid args ->
         let argList = "&[" <> hcat (punctuate ", " [a <+> "as *const u8" | a <- args]) <> "]"
-         in [idoc|rustmorloc::foreign_call(#{dquotes socketFile}, #{pretty mid}, #{argList})|]
+         in [idoc|::rustmorloc::foreign_call(#{dquotes socketFile}, #{pretty mid}, #{argList})|]
     -- A remote call: args are already-serialized packet pointers (like a
     -- foreign call), so no put_value here. Resources fill the C `resources_t`
     -- with the C++ defaults (-1 for memory/time/cpus, 0 for gpus).
@@ -2316,25 +2482,34 @@ rustLowerConfig mask =
         let (rmem, rtime, rcpu, rgpu) = remoteResourceInts res
             (resMem, resTime, resCPU, resGPU) = (pretty rmem, pretty rtime, pretty rcpu, pretty rgpu)
             argList = "&[" <> hcat (punctuate ", " [a <+> "as *const u8" | a <- args]) <> "]"
-            call = "rustmorloc::remote_call(" <> pretty mid <> ", " <> dquotes socketFile
+            call = "::rustmorloc::remote_call(" <> pretty mid <> ", " <> dquotes socketFile
                      <> ", \".morloc-cache\", " <> resMem <> ", " <> resTime <> ", "
                      <> resCPU <> ", " <> resGPU <> ", " <> argList <> ")"
          in return $ defaultValue {poolExpr = call}
     , lcCacheBody = rustCacheBody
     , lcDebugWrap = \_ _ body -> return body
     , lcMakeLet = rustMakeLet
-    , lcReleaseStmt = \v -> "unsafe { rustmorloc::release_packet(" <> pretty v <> ", true) };"
-    , lcReleaseBorrowedStmt = \v -> "unsafe { rustmorloc::release_packet(" <> pretty v <> ", false) };"
+    , lcReleaseStmt = \v -> "unsafe { ::rustmorloc::release_packet(" <> pretty v <> ", true) };"
+    , lcReleaseBorrowedStmt = \v -> "unsafe { ::rustmorloc::release_packet(" <> pretty v <> ", false) };"
     , lcReturn = \e -> "return" <+> rustReply e <> ";"
-    , lcDupPacket = \e -> "rustmorloc::dup_packet(" <> e <> ")"
-    , lcOwnedArg = \e -> "rustmorloc::Packet::new(" <> e <> ").as_ptr()"
-    , lcLoopLetRhs = \_ _ d -> return d
-    , lcOwnPacketDecl = \v e -> Just ("let" <+> v <+> "= rustmorloc::Packet::new(" <> e <> ");", v <> ".as_ptr()")
+    -- EMIT-3: the pop follows the result's construction (a move).
+    , lcFrameReturn = \i _ _ e -> do
+        st <- CMS.get
+        return $ case rustFrameLine st i of
+          Nothing -> Nothing
+          Just _ -> Just (vsep ["let _mlc_r =" <+> rustReply e <> ";", "::rustmorloc::frame_pop();", "return _mlc_r;"])
+    , lcDupPacket = \e -> "::rustmorloc::dup_packet(" <> e <> ")"
+    , lcOwnedArg = \e -> "::rustmorloc::Packet::new(" <> e <> ").as_ptr()"
+    , lcLoopBorrow = rustLoopBorrow
+    , lcLoopLetRhs = rustConsumeLetRhs
+    , lcLetRhs = rustConsumeLetRhs
+    , lcOwnPacketDecl = \v e -> Just ("let" <+> v <+> "= ::rustmorloc::Packet::new(" <> e <> ");", v <> ".as_ptr()")
     , lcMakeIf = rustMakeIf
+    , lcShortCircuit = \isAnd a b -> a <+> (if isAnd then "&&" else "||") <+> b
     , lcMakeLoop = rustMakeLoop
     -- An effect thunk captures by value only when it can outlive the frame that
     -- builds it. The only such position is a manifold return typed
-    -- @impl MorlocFn0<T>@ ('rustReturnType'); every other renderer erases the
+    -- a function value of no arguments ('rustReturnType'); every other renderer erases the
     -- effect row, so a closure reaching one is already a type error. A thunk in
     -- any other frame is forced on the spot or handed to @mlc_try@, which
     -- runs it before returning, so it borrows what it reads and
@@ -2361,13 +2536,13 @@ rustLowerConfig mask =
     -- (which decides what is catchable) stays in rustmorloc; the arms are
     -- built here because only the caller knows this Try's representation.
     , lcMakeTry = \thunk _ okWrap errWrap ->
-        "rustmorloc::mlc_try" <> tupled
+        "::rustmorloc::mlc_try" <> tupled
           [ thunk
           , "|mlcTryV|" <+> okWrap "mlcTryV"
           , "|mlcTryM|" <+> errWrap "mlcTryM"
           ]
-    , lcSerialize = defaultSerialize (rustLowerConfig mask)
-    , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask)
+    , lcSerialize = defaultSerialize (rustLowerConfig mask consumed)
+    , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask consumed)
     -- Reify a crossing closure to its wire tuple via the arity-indexed trait
     -- method `reifyN` (`ClosureOrigin` = `(String, i64, Vec<Vec<u8>>)`). This is
     -- uniform across a closure built here and a proxy reflected from another
@@ -2378,7 +2553,7 @@ rustLowerConfig mask =
     -- aggregate that receives it is owned, so it is cloned here.
     , lcReifyClosure = \v s -> case s of
         SerialClosure ins _ ->
-          return $ "rustmorloc::require_origin(" <> parens v <> ".reify" <> pretty (length ins) <> "())"
+          return $ "::rustmorloc::require_origin(::rustmorloc::reify(&" <> parens v <> "))"
         _ -> error "Rust lcReifyClosure: expected SerialClosure"
     , lcReflectClosure = \pkt s -> rustReflectClosure pkt s
     , lcReflectClosureParsed = \tup s -> rustReflectClosureParsed tup s
@@ -2393,7 +2568,8 @@ rustLowerConfig mask =
     -- A bare function passed to a HOF is a closure over all its params with no
     -- captured context; a lambda/section is a closure over its remaining params
     -- with the applied args captured. Both are the same safe wrapper.
-    , lcMakePass = \sig sigType mname params -> rustClosureWrapper sig sigType mname [] params
+    , lcManifoldName = RP.rustManifoldName
+    , lcMakePass = \m sig sigType mname params -> rustClosureWrapper m sig sigType mname [] params
     , lcMakeLambda = rustClosureWrapper
     -- A closure's own type IS its rendered function-value type: one
     -- trait object, the same spelling it has in every other position.
@@ -2413,14 +2589,96 @@ isFunctionTypeF :: TypeF -> Bool
 isFunctionTypeF (FunF _ _) = True
 isFunctionTypeF _ = False
 
--- The borrow-safe flag ('isBorrowableProjection') is unused: Rust binds owned
--- locals and adapts a borrowed/place RHS via 'adaptOwnedElem' upstream.
-rustMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Bool -> PoolDocs -> PoolDocs -> RustM PoolDocs
-rustMakeLet namer letIndex mt _ p1 p2 = do
-  annDoc <- case mt of
-    Just t | isFunctionTypeF t -> return ""
-    Just t -> do ts <- rustTypeOf t; return (":" <+> ts)
-    Nothing -> return (":" <+> "*mut u8")
+-- | A projection in the pool plan's takes takes its field like a last
+-- read does ('rustTakeField'). Every other projection borrows the subject and
+-- clones the field.
+rustConsumeLetRhs :: Int -> NativeExpr -> PoolDocs -> RustM PoolDocs
+rustConsumeLetRhs i rhs@(IntrinsicN _ IntrCtorField _ [LetVarN t@(VariantF {}) subj _, StrN _ n, IntN _ k]) d = do
+  pp <- CMS.gets rsPool
+  root <- CMS.gets rsCurrentRoot
+  borrowed <- asks oeCurrent
+  if letMode pp root i rhs == LetTake && not (Set.member subj borrowed)
+    then do
+      ty <- rustTypeOf t
+      return d {poolExpr = rustTakeField ty n (fromIntegral k) (nvarNamer subj)}
+    else return d
+rustConsumeLetRhs _ _ d = return d
+
+-- | A loop local 'loopBorrowLocals' found is a reference into what the loop
+-- borrowed (OWN-6), so it joins the manifold's borrowed set; its expression
+-- is rendered as that reference.
+rustLoopBorrow :: Int -> NativeExpr -> RustM (Maybe MDoc)
+rustLoopBorrow i e = do
+  borrowed <- asks oeCurrent
+  if not (Set.member i borrowed)
+    then return Nothing
+    else case borrowPartOf (const True) (const True) e of
+      Just part -> Just <$> renderPart part
+      Nothing -> error ("rustLoopBorrow: a borrowed loop local bound to " <> show e)
+  where
+    renderPart part = case part of
+      BorrowVar j -> return (nvarNamer j)
+      BorrowCtorField t p n k -> do
+        ty <- rustTypeOf t
+        p' <- renderPart p
+        return (rustArmField ty n p' ("&mlc_b." <> pretty k))
+      BorrowField j path -> return ("&" <> writeSelectorRust (nvarNamer j) path)
+      BorrowElem p k -> (`rustElemRef` k) <$> renderPart p
+      BorrowIf c a b -> do
+        c' <- renderTest c
+        a' <- renderPart a
+        b' <- renderPart b
+        return ("if" <+> c' <+> "{" <+> a' <+> "} else {" <+> b' <+> "}")
+      BorrowLet j rhs body -> do
+        rhs' <- renderPart rhs
+        body' <- renderPart body
+        return ("{ let" <+> nvarNamer j <+> "=" <+> rhs' <> ";" <+> body' <+> "}")
+      BorrowFail t msg -> do
+        ty <- rustTypeOf t
+        return ("::rustmorloc::morloc_throw_as::<&" <> ty <> ">(" <> RP.printExpr (IStrLit Nothing msg) <> ")")
+    renderTest c = case c of
+      TestTag t p n -> do
+        ty <- rustTypeOf t
+        p' <- renderPart p
+        return ("matches!(" <> p' <> "," <+> RP.typeHead ty <> "::" <> pretty n <+> "{ .. })")
+      TestAnd x y -> do
+        x' <- renderTest x
+        y' <- renderTest y
+        return (parens (x' <+> "&&" <+> y'))
+
+-- | A reference to element @k@ of a list.
+rustElemRef :: MDoc -> Integer -> MDoc
+rustElemRef subj k = parens ("&" <> parens subj <> "[" <> pretty k <> "]")
+
+-- | Match a subject already known to be in arm @n@ and yield an expression
+-- over its payload, @mlc_b@.
+rustArmField :: MDoc -> Text -> MDoc -> MDoc -> MDoc
+rustArmField ty n subj yield =
+  "match" <+> subj <+> "{"
+    <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
+    <+> "=>" <+> yield <> ","
+    <+> "_ => unreachable!()"
+    <+> "}"
+
+-- | Take field @i@ out of arm @n@'s payload (OWN-5): the box gives the
+-- field up when it holds the only handle, and the field is cloned otherwise
+-- ('::rustmorloc::MlcTake'). An arm's one field is its box, so reading the box
+-- out and forgetting the shell moves the whole value.
+rustTakeField :: MDoc -> Text -> Int -> MDoc -> MDoc
+rustTakeField ty n i subj =
+  "{ let mlc_s = ::std::mem::ManuallyDrop::new(" <> subj <> "); match &*mlc_s {"
+    <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
+    <+> "=> ::rustmorloc::MlcTake::take_with(unsafe { ::std::ptr::read(mlc_b) }, |mlc_v| mlc_v." <> pretty i
+    <> ", |mlc_v| mlc_v." <> pretty i <> ".clone()),"
+    <+> "_ => unreachable!()"
+    <+> "} }"
+
+-- | A native let of the IR that holds a borrow (OWN-6) is typed as a
+-- reference; every other let binds the value its right-hand side was adapted
+-- to upstream.
+rustMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Maybe NativeExpr -> PoolDocs -> PoolDocs -> RustM PoolDocs
+rustMakeLet namer letIndex mt mrhs p1 p2 = do
+  annDoc <- rustLetAnnotation letIndex mt (isJust mrhs)
   -- A loop-carried local's entry deserialize let is reassigned each iteration by
   -- the loop's continue, so it must bind mutably.
   carried <- asks oeLoopCarried
@@ -2434,27 +2692,37 @@ rustMakeLet namer letIndex mt _ p1 p2 = do
       , poolPriorLines = rs
       , poolPriorExprs = poolPriorExprs p1 <> poolPriorExprs p2
       , poolReturnFlag = poolReturnFlag p1 || poolReturnFlag p2
+      , poolBorrowedLocal = Nothing
       }
+
+-- | The type annotation of let @letIndex@ of type @mt@ (Nothing: a serial
+-- packet), given whether it binds a native right-hand side.
+rustLetAnnotation :: Int -> Maybe TypeF -> Bool -> RustM MDoc
+rustLetAnnotation letIndex mt native = do
+  borrowed <- asks oeCurrent
+  case mt of
+    Just t | isFunctionTypeF t -> return ""
+    Just t
+      | native
+      , Set.member letIndex borrowed -> do ts <- rustTypeOf t; return (":" <+> "&" <> ts)
+    Just t -> do ts <- rustTypeOf t; return (":" <+> ts)
+    Nothing -> return (":" <+> "*mut u8")
 
 -- | Native tail-loop assembly. Walks the 'LoopBody' decision tree into a Rust
 -- @loop { ... }@ expression bound to the serial result: guards render to
 -- @if/else@, native/serial lets to @let@ locals, a base leaf to @break <base>;@
--- (the loop expression's value), and a continue leaf to @let@ temps for each new
--- value followed by reassignment of the loop-carried locals. The loop-carried
--- vars are the manifold's own owned native locals (deserialized once at entry and
--- bound @let mut@ by 'rustMakeLet'); every continue value was already owned by
--- 'adaptLoopBodyOwned' (a passthrough carried var cloned, a fresh value moved), so
--- computing all temps before any reassignment is safe against the
--- parallel-assignment hazard (a temp reads a carried var by borrow/clone, never
--- moving it out from under a later temp).
-rustMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> LoopBody PoolDocs PoolDocs PoolDocs -> RustM PoolDocs
-rustMakeLoop res carried body = do
+-- (the loop expression's value), and a continue leaf to @let@ temps for the
+-- new value of each slot it changes, followed by reassignment of those slots
+-- ('changedSlots'). Every temp is computed before any reassignment; which
+-- reads move is OWN-2's, and which locals are borrows is OWN-6's.
+rustMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> Maybe (LoopBody NativeExpr SerialExpr ()) -> LoopBody PoolDocs PoolDocs PoolDocs -> RustM PoolDocs
+rustMakeLoop res carried origBody body = do
   resultIdx <- getCounter
   resT <- case res of
     LoopResultSerial -> return "*mut u8"
     LoopResultNative t -> rustTypeOf t
   let resultVar = helperNamer resultIdx
-  bodyLines <- walk body
+  bodyLines <- walk origBody body
   -- A native loop's locals are its own, started from their initializers.
   let initLines = concat [poolPriorLines d <> ["let mut" <+> nvarNamer i <+> "=" <+> poolExpr d <> ";"] | (i, Just d) <- carried]
       loopExpr = vsep ["loop {", indent 4 (vsep bodyLines), "}"]
@@ -2466,26 +2734,37 @@ rustMakeLoop res carried body = do
     , poolPriorLines = initLines <> [resultDecl]
     , poolPriorExprs = concatMap poolPriorExprs leaves
     , poolReturnFlag = True
+    , poolBorrowedLocal = Nothing
     }
   where
     ids = map fst carried
-    walk (LoopBase seDocs) =
+    walk _ (LoopBase seDocs) =
       return $ poolPriorLines seDocs <> ["break" <+> poolExpr seDocs <> ";"]
-    walk (LoopContinue contDocs) = do
-      tmpVars <- map helperNamer <$> mapM (const getCounter) contDocs
-      let priors = concatMap poolPriorLines contDocs
-          tmpAssigns = zipWith (\tv cd -> "let" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars contDocs
-          reassigns = zipWith (\i tv -> nvarNamer i <+> "=" <+> tv <> ";") ids tmpVars
+    -- The IR body, when known, is walked beside the lowered one, so a slot
+    -- the continue leaves as it is gets no temporary.
+    walk o (LoopContinue contDocs) = do
+      let changed = [(i, v) | (i, v, _) <- changedSlots ids (case o of Just (LoopContinue os) -> Just os; _ -> Nothing) contDocs]
+      tmpVars <- map helperNamer <$> mapM (const getCounter) changed
+      let priors = concatMap (poolPriorLines . snd) changed
+          tmpAssigns = zipWith (\tv (_, cd) -> "let" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars changed
+          reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> "=" <+> tv <> ";") changed tmpVars
       return $ priors <> tmpAssigns <> reassigns
-    walk (LoopNLet i neDocs b) = do
-      rest <- walk b
-      return $ poolPriorLines neDocs <> ["let" <+> nvarNamer i <+> "=" <+> poolExpr neDocs <> ";"] <> rest
-    walk (LoopSLet i seDocs b) = do
-      rest <- walk b
+    walk o (LoopNLet i neDocs b) = do
+      let (orhs, ob) = case o of
+            Just (LoopNLet j r k) | j == i -> (Just r, Just k)
+            _ -> (Nothing, Nothing)
+      ann <- maybe (return "") (\r -> rustLetAnnotation i (Just (typeFof r)) True) orhs
+      rest <- walk ob b
+      return $ poolPriorLines neDocs <> ["let" <+> nvarNamer i <> ann <+> "=" <+> poolExpr neDocs <> ";"] <> rest
+    walk o (LoopSLet i seDocs b) = do
+      rest <- walk (case o of Just (LoopSLet j _ k) | j == i -> Just k; _ -> Nothing) b
       return $ poolPriorLines seDocs <> ["let" <+> svarNamer i <+> "=" <+> poolExpr seDocs <> ";"] <> rest
-    walk (LoopIf guardDocs t e) = do
-      tLines <- walk t
-      eLines <- walk e
+    walk o (LoopIf guardDocs t e) = do
+      let (ot, oe) = case o of
+            Just (LoopIf _ a b) -> (Just a, Just b)
+            _ -> (Nothing, Nothing)
+      tLines <- walk ot t
+      eLines <- walk oe e
       let ifBlock = vsep
             [ "if" <+> poolExpr guardDocs <+> "{"
             , indent 4 (vsep tLines)
@@ -2527,14 +2806,28 @@ rustMakeIf origExpr condDocs thenDocs elseDocs = do
       , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
       , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
       , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
+      , poolBorrowedLocal = Nothing
       }
 
 -- | Emit a manifold function definition (@unsafe fn m{i}(..) -> ..@).
 -- Deduplicated per (local/remote) so a manifold visited from multiple sites is
 -- defined once, matching the C++ member.
+-- | The trace line, as a Rust literal, of a manifold that records its call on
+-- the frame stack (STATE-5): a call of a named function, labeled with its
+-- definition (DIAG-5).
+rustFrameLine :: RustState -> Int -> Maybe MDoc
+rustFrameLine st callIndex = case rsDebugInfo st callIndex of
+  Nothing -> Nothing
+  Just (userName, srclocStr) ->
+    let nameOut = if T.null userName then "_" else userName
+        srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
+        frameText =
+          "\n  at " <> nameOut <> " [rust] (mid=" <> T.pack (show callIndex) <> srclocSuffix <> ")"
+     in Just (dquotes (pretty (RP.rustEscape frameText)))
+
 rustMakeFunction ::
-  Int -> MDoc -> [Arg TypeM] -> TypeM -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> RustM (Maybe MDoc)
-rustMakeFunction callIndex mname args manifoldType priorLines body headForm = do
+  Int -> MDoc -> [Arg TypeM] -> TypeM -> [MDoc] -> MDoc -> Maybe HeadManifoldForm -> Bool -> RustM (Maybe MDoc)
+rustMakeFunction callIndex mname args manifoldType priorLines body headForm isClosure = do
   st <- CMS.get
   let isRemote = case headForm of
         Just HeadManifoldFormRemoteWorker -> True
@@ -2552,22 +2845,27 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm = do
           else s {rsLocalSet = Set.insert callIndex (rsLocalSet s)}
       -- A function value is a trait object in every position, so a returned
       -- closure names no lifetime: it owns what it captures ('capInit')
-      -- and a captured function value is an `Rc` clone, not a borrow.
+      -- and a captured function value is an `Arc` clone, not a borrow.
       retStr <- rustReturnType manifoldType
-      typedArgs <- mapM rustArgOf args
+      kept <- CMS.gets (Map.findWithDefault Set.empty callIndex . ppByValue . rsPool)
+      typedArgs <-
+        zipWithM
+          (\j a@(Arg _ t) -> if Set.member j kept then (\ts -> argNamer a <> ":" <+> ts) <$> rustArgType t else rustArgOf a)
+          [0 :: Int ..]
+          args
       let fullName = mname <> if isRemote then "_remote" else ""
           decl = "unsafe fn" <+> fullName <> tupled typedArgs <+> "->" <+> retStr
-          -- Per-manifold traceback frame: on a panic unwind the FrameGuard
-          -- appends this line to the thread-local trace, which dispatch_guard
-          -- folds onto the throw message (mirrors the C++ member's frame).
-          (userName, srclocStr) = rsDebugInfo st callIndex
-          nameOut = if T.null userName then "_" else userName
-          srclocSuffix = if T.null srclocStr then "" else ", " <> srclocStr
-          frameText =
-            "\n  at " <> nameOut <> " [rust] (mid=" <> T.pack (show callIndex) <> srclocSuffix <> ")"
-          frameStmt =
-            "let _mlc_frame = rustmorloc::FrameGuard::new("
-              <> dquotes (pretty (RP.rustEscape frameText)) <> ");"
+          -- STATE-5: a named function records its call; the pop is in its
+          -- return statement ('lcFrameReturn'), which follows any sourced
+          -- call. A function that records nothing and calls sourced code
+          -- keeps a frame at the call (PANIC-15).
+          frameStmts = case rustFrameLine st callIndex of
+            Nothing -> []
+            Just lit -> ["::rustmorloc::frame_push(" <> lit <> ");"]
+          callFrame
+            | null frameStmts && T.any (== userCallMark) (render (vsep (priorLines ++ [body]))) =
+                ["let _mlc_call = ::rustmorloc::CallFrame;"]
+            | otherwise = []
           -- A labeled manifold is wrapped in a LogGuard: start on
           -- construction, pass or fail on drop. Nothing is placed after the
           -- body because a generated body ends in `return <expr>;`, which
@@ -2583,7 +2881,7 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm = do
             Nothing -> priorLines ++ [body]
             Just tmpl ->
               let guardStmt =
-                    "let _mlc_log = rustmorloc::LogGuard::new("
+                    "let _mlc_log = ::rustmorloc::LogGuard::new("
                       <> hsep (punctuate ","
                            [ dquotes (pretty (RP.rustEscape (renderedGroup tmpl)))
                            , litOrEmpty (renderedStart tmpl)
@@ -2593,8 +2891,22 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm = do
                            ])
                       <> ");"
                in guardStmt : priorLines ++ [body]
+      -- STATE-6: a closure, which code outside morloc may call and whose
+      -- panic it may catch, restores the depth it found when a panic
+      -- leaves it.
+      let inner = frameStmts ++ callFrame ++ bodyLines
+          fnBody
+            | isClosure =
+                [ "let _mlc_saved = ::rustmorloc::frame_enter();"
+                , "match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(||" <+> "{"
+                , indent 4 (vsep inner)
+                , "})) {"
+                , indent 4 (vsep ["Ok(v) => v,", "Err(p) => ::rustmorloc::closure_rethrow(_mlc_saved, p),"])
+                , "}"
+                ]
+            | otherwise = inner
       return . Just $
-        vsep [decl <+> "{", indent 4 (vsep (frameStmt : bodyLines)), "}"]
+        vsep [decl <+> "{", indent 4 (vsep fnBody), "}"]
 
 -- | Whether a closure wire form has a closure among its arguments or as its
 -- result.

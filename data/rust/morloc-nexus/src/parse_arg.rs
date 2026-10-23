@@ -266,10 +266,13 @@ fn report(c: &FailureContext, msg: &str) -> String {
     )
 }
 
-/// A caught failure's message with the trailing frame lines a pool appends
-/// (`  at <name> [<lang>] (mid=...)`) removed: they locate compiler-generated
+/// A caught failure's message with the trailing trace a pool appends removed:
+/// frame lines (`  at <name> [<lang>] (mid=...)`, or under `--debug` a
+/// `morloc trace [<lang> pool]:` header, `  at <name> (mid=...)` frames,
+/// their `arg[i]` lines and closing notes). They locate compiler-generated
 /// code, not the input.
 fn without_frames(msg: &str) -> &str {
+    let msg = without_debug_trace(msg);
     let mut end = msg.trim_end().len();
     loop {
         let head = &msg[..end];
@@ -283,6 +286,19 @@ fn without_frames(msg: &str) -> &str {
 fn is_frame_line(line: &str) -> bool {
     let l = line.trim_start();
     l.starts_with("at ") && l.contains(" [") && l.contains("(mid=")
+}
+
+/// `msg` without a trailing `--debug` trace: a `morloc trace ...:` header
+/// line and the indented frame, argument and note lines under it.
+fn without_debug_trace(msg: &str) -> &str {
+    let Some(start) = msg.rfind("\nmorloc trace") else { return msg };
+    let mut lines = msg[start + 1..].lines();
+    let header_ok = lines.next().map_or(false, |h| h.ends_with(':'));
+    if header_ok && lines.all(|l| l.is_empty() || l.starts_with("  ")) {
+        &msg[..start]
+    } else {
+        msg
+    }
 }
 
 #[cfg(test)]
@@ -323,6 +339,14 @@ mod tests {
         assert_eq!(select("reads.fq", &parse()), Selection::Format { index: 0, path: "reads.fq" });
         assert_eq!(select(".fq", &parse()), Selection::Unselected);
         assert_eq!(select("reads.json", &parse()), Selection::Unselected);
+    }
+
+    #[test]
+    fn a_debug_trace_is_stripped_like_frame_lines() {
+        let msg = "bad record at line 3\nmorloc trace [py pool]:\n  at parseReads (mid=4, m.loc:9:3)\n    arg[0] :: s -> /d/inputs/ab.pkt\n  at main (mid=1, m.loc:2:1)\n    arg[0] :: s\n  (1 arg not saved; raise --debug-cache-depth to save more)\n";
+        assert_eq!(without_frames(msg), "bad record at line 3");
+        let user = "bad header\narg[2] :: expected Int\nat row 4 (mid=section)";
+        assert_eq!(without_frames(user), user);
     }
 
     #[test]

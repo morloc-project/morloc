@@ -1,0 +1,15 @@
+-- Spec POLY-6: the error is located at the term where the undetermined
+-- variable occurs, here the constructor application, not the `data`
+-- declaration. Its twin is accept.loc.
+module main (f)
+
+import root-py
+
+data P a = P [a]
+
+g :: P a -> Int
+g p = match p
+  | (P xs) = length xs
+
+f :: Int -> Int
+f x = g (P [])

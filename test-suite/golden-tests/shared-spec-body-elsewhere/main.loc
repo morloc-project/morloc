@@ -1,0 +1,53 @@
+-- A definition large enough to be shared as one specialization (over the
+-- sharing threshold) is called from a Python manifold, while the realizer
+-- places its body in Rust. The Python caller must call it across pools: the
+-- copy realized for the Python use has a Python root around a Rust body.
+module main (run)
+
+import root
+import root-py
+import root-rust
+
+record Settings where
+  f0 :: Str
+  f1 :: Str
+  f2 :: Str
+  f3 :: Str
+  f4 :: Str
+  f5 :: Str
+  f6 :: Str
+  f7 :: Str
+  f8 :: Str
+  f9 :: Str
+
+record Rust => Settings = "struct"
+
+record Opts where
+  input :: Str
+  f0 :: Str
+  f1 :: Str
+  f2 :: Str
+  f3 :: Str
+  f4 :: Str
+  f5 :: Str
+  f6 :: Str
+  f7 :: Str
+  f8 :: Str
+  f9 :: Str
+
+record Rust => Opts = "struct"
+
+source Py from "f.py" ("show" as pyShow)
+pyShow :: Str -> <IO> ()
+
+optsOf :: Str -> Settings -> Opts
+optsOf x st = {input = x, f0 = .f0 st, f1 = .f1 st, f2 = .f2 st, f3 = .f3 st, f4 = .f4 st, f5 = .f5 st, f6 = .f6 st, f7 = .f7 st, f8 = .f8 st, f9 = .f9 st}
+
+firstField :: Opts -> Str
+firstField o = .f0 o
+
+run :: Str -> Settings -> <IO> Str
+run x st = do
+  let o = optsOf x st
+  pyShow (.input o)
+  firstField o

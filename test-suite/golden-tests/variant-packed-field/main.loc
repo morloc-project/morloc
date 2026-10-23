@@ -2,7 +2,7 @@
 -- directions: the packer and unpacker run on the field.
 module main (mk, size)
 import root-py
-newtype MyMap a b
+newtype MyMap a b = [(a, b)]
 type Py => (MyMap a b) = "dict" a b
 instance Packable (List (Tuple2 a b)) (MyMap a b) where
   source Py from "main.py" ("pack_mymap" as pack, "unpack_mymap" as unpack)

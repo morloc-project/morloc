@@ -4,4 +4,4 @@ import root
 import root-py
 
 put :: Str -> Int -> <IO> (Try Str ())
-put path x = @savem path x
+put path x = @savej path x

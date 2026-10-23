@@ -1,0 +1,39 @@
+== boomP 0
+Error: run failed
+pyThrowAtZero: n must be non-zero
+morloc trace [py pool]:
+  at pyThrowAtZero (main.loc:23:17)
+    arg[0] :: f8 -> dbg/inputs/H.pkt
+  at boomP (main.loc:23:1)
+    arg[0] :: f8 -> dbg/inputs/H.pkt
+
+== boomC 0
+Error: run failed
+cppThrowAtZero: n must be non-zero
+morloc trace [cpp pool]:
+  at cppThrowAtZero (main.loc:26:18)
+    arg[0] :: f8 -> dbg/inputs/H.pkt
+  at boomC (main.loc:26:1)
+    arg[0] :: f8 -> dbg/inputs/H.pkt
+
+== boomR 0
+Error: run failed
+rThrowAtZero: n must be non-zero
+morloc trace [r pool]:
+  at rThrowAtZero (main.loc:29:16)
+    arg[0] :: f8 -> dbg/inputs/H.pkt
+  at boomR (main.loc:29:1)
+    arg[0] :: f8 -> dbg/inputs/H.pkt
+
+== ratio 1 0
+Error: run failed
+pyDivide: b must be non-zero
+morloc trace [py pool]:
+  at pyDivide (main.loc:32:19)
+    arg[0] :: f8 -> dbg/inputs/H.pkt
+    arg[1] :: f8
+  at ratio (main.loc:32:1)
+    arg[0] :: f8 -> dbg/inputs/H.pkt
+    arg[1] :: f8
+  (1 value not saved; raise --debug-cache-depth to save more)
+

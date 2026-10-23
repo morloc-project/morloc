@@ -48,10 +48,7 @@ gDoBind :: Int -> <> Int
 gDoBind x = handleError (do { foo x })
 
 -- handleError takes an explicitly effect-typed parameter (<Error, e> a),
--- so the effectful do-block matches by EffectU subtyping. We apply it
--- as a direct application (parentheses) rather than via `($)`: `($) ::
--- (a -> b) -> a -> b` has a polymorphic `a`, and the type checker now
--- rejects unifying a bare type variable with an effectful type.
+-- so the effectful do-block matches by EffectU subtyping.
 gMany :: Int -> Int
 gMany x =
   let y = handleError (do

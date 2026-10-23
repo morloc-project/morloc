@@ -1,6 +1,15 @@
 #include <string>
 #include <iostream>
 #include <sstream>
+// A thread being cancelled unwinds with an exception a catch must raise
+// again unchanged.
+#if defined(__GLIBC__)
+#include <cxxabi.h>
+#define MLC_CATCH_FORCED_UNWIND(saved) \
+    catch (abi::__forced_unwind&) { mlc::frame_restore(saved); throw; }
+#else
+#define MLC_CATCH_FORCED_UNWIND(saved)
+#endif
 #include <functional>
 #include <tuple>
 #include <vector>
@@ -8,6 +17,8 @@
 #include <iterator>
 #include <climits>
 #include <stdexcept>
+#include <exception>
+#include <optional>
 #include <fstream>
 #include <system_error>
 #include <unordered_map>
@@ -40,7 +51,7 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
 #include "cppmorloc.hpp"
 
 // Defines mlc::Unit, which the generator emits for do-blocks whose final
-// expression is void-returning (e.g. @save/@savej/@savem). Needs to follow
+// expression is void-returning (e.g. @save/@savej). Needs to follow
 // the user-source includes so foreign code can use mlc::Unit too.
 #include "mlccpptypes/prelude.hpp"
 
@@ -64,28 +75,14 @@ public:
       throw MorlocException(errmsg_buffer); \
     }
 
-// A failure of the machinery that carries values between pools: IPC, packet
-// construction and decode, shared-memory resolution. None of these are
-// attributable to user data, paths or foreign-function behavior, and none
-// leave the pool able to continue, so they must not be interceptable by
-// @try. Deliberately NOT a MorlocException subclass, for the same reason
-// MorlocPipeClosed is not: the broad catch in _mlc_catch must let it pass.
-//
-// The top-level dispatch turns this into an abort rather than a fail packet.
-// A caller in another pool then sees its socket read fail, which is itself an
-// infrastructure failure there, so fatality propagates across pools without
-// the fail packet needing to carry a classification.
-class MorlocInfraError : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
-
+// PANIC-5: a failure of the machinery that carries values between pools
+// (IPC, packet construction and decode, shared-memory resolution) ends the
+// pool where it happens, so no catch in user code or in `@try` can hold it.
 #define PROPAGATE_INFRA_ERROR(errmsg) \
     if(errmsg != NULL) { \
-      char errmsg_buffer[MAX_ERRMSG_SIZE] = { 0 }; \
-      snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error C++ pool (%s:%d in %s):\n%s" , __FILE__, __LINE__, __func__, errmsg); \
+      std::string infra_msg_(errmsg); \
       free(errmsg); \
-      throw MorlocInfraError(errmsg_buffer); \
+      MLC_INTERNAL_ABORT(infra_msg_.c_str()); \
     }
 
 // Terminal helper for morloc-compiler / runtime invariant violations
@@ -157,8 +154,6 @@ struct ShmEntry { absptr_t ptr; };
 static void _shm_release_entries(std::vector<ShmEntry>& entries) {
     for (auto& e : entries) {
         char* err = NULL;
-        // shfree decrements the refcount and zeros the block on final
-        // ref-drop, so a separate metadata-zeroing pass is unnecessary.
         shfree(e.ptr, &err);
         if (err) { free(err); }
     }
@@ -272,7 +267,7 @@ static void _release_packet(const uint8_t* packet, bool owned) {
             + sizeof(morloc_packet_header_t) + hdr->offset);
         char* resolve_err = NULL;
         void* voidstar = rel2abs(relptr, &resolve_err);
-        if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+        PROPAGATE_INFRA_ERROR(resolve_err)
         if (voidstar) {
             _shm_tracker_release_one((absptr_t)voidstar);
         }
@@ -313,9 +308,8 @@ uint8_t* _put_value(const T& value, Schema* schema, bool self_contained = false)
         mlc::ArrowTable& tbl = const_cast<mlc::ArrowTable&>(value);
         relptr_t relptr = tbl.move_to_shm(schema);
 
+        void* shm_ptr = rel2abs_cpp(relptr);
         char* err = nullptr;
-        void* shm_ptr = rel2abs(relptr, &err);
-        if (err) { free(err); }
 
         uint8_t* packet = nullptr;
         if (self_contained) {
@@ -348,18 +342,14 @@ uint8_t* _put_value(const T& value, Schema* schema, bool self_contained = false)
             uint8_t* packet = self_contained
                 ? make_inline_data_packet(voidstar, schema, &errmsg)
                 : make_data_packet_auto(voidstar, relptr, schema, &errmsg);
-            if (errmsg) {
-                shfree_cpp(voidstar);
-                PROPAGATE_INFRA_ERROR(errmsg);
-            }
+            PROPAGATE_INFRA_ERROR(errmsg);
 
             const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
             if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
                 // SHM referenced by packet -- track for deferred cleanup
                 _shm_tracker_live().push_back({(absptr_t)voidstar});
             } else {
-                // Data inlined in packet -- free SHM immediately. shfree
-                // zeros the block on final ref-drop.
+                // Data inlined in packet -- free SHM immediately.
                 char* free_err = NULL;
                 shfree((absptr_t)voidstar, &free_err);
                 if (free_err) { free(free_err); }
@@ -558,18 +548,19 @@ std::string _mlc_hash(const T& value, Schema* schema) {
     return result;
 }
 
-// Save a value to file in msgpack format. The `level` arg is accepted
-// for ABI uniformity with mlc_save_voidstar and forwarded; the runtime
-// ignores it for non-packet formats.
+// Order two values of one schema: -1, 0 or 1 (@eq, @le)
 template <typename T>
-void _mlc_save(const T& value, Schema* schema, int64_t level, const std::string& path) {
-    void* voidstar = to_voidstar(schema, value);
+int _mlc_compare(const T& a, const T& b, Schema* schema) {
+    void* va = to_voidstar(schema, a);
+    void* vb = to_voidstar(schema, b);
     char* errmsg = NULL;
-    mlc_save(voidstar, schema, level, path.c_str(), &errmsg);
-    shfree_cpp(voidstar);
+    int order = mlc_compare(va, vb, schema, &errmsg);
+    shfree_cpp(va);
+    shfree_cpp(vb);
     if (errmsg != NULL) {
         PROPAGATE_ERROR(errmsg)
     }
+    return order;
 }
 
 // Save a value to file in flat voidstar binary format. `level` is the
@@ -618,13 +609,17 @@ std::string _mlc_show(const T& value, Schema* schema) {
 
 // MorlocPipeClosed signals that the downstream consumer closed @stdout /
 // @stderr (a broken pipe). It is an <IO> condition, NOT a user-recoverable
-// <Err>, so it is deliberately NOT a subclass of MorlocException: _mlc_catch
-// lets it propagate rather than routing it into a fallback. The pool's
-// top-level dispatch converts it to a distinguished fail packet (the nexus,
-// which owns fd 1 and already saw the EPIPE, decides the exit status).
-class MorlocPipeClosed : public std::runtime_error {
+// <Err>: `@try` lets it propagate, and it is not a std::exception, so a
+// sourced `catch (const std::exception&)` does not hold it either
+// (PANIC-13). The pool's top-level dispatch converts it to a distinguished
+// fail packet (the nexus, which owns fd 1 and already saw the EPIPE,
+// decides the exit status).
+class MorlocPipeClosed {
 public:
-    using std::runtime_error::runtime_error;
+    explicit MorlocPipeClosed(std::string msg) : msg_(std::move(msg)) {}
+    const char* what() const noexcept { return msg_.c_str(); }
+private:
+    std::string msg_;
 };
 
 
@@ -637,8 +632,8 @@ static inline void _mlc_throw_if_pipe_closed(int rc) {
 }
 
 // Deserialize a JSON string to a typed value.
-// @read :: Str -> <Err> a. Parse failure throws MorlocException so
-// _mlc_catch can intercept.
+// @read :: Str -> <Err> a. Parse failure throws MorlocException, which
+// `@try` catches.
 template <typename T>
 T _mlc_read(Schema* schema, const std::string& json_str) {
     char* errmsg = NULL;
@@ -669,7 +664,7 @@ T _mlc_unpack(Schema* schema, const std::vector<uint8_t>& packet) {
 
 // Load a value from file, auto-detecting format.
 // @load :: Str -> <IO, Err> a. Missing file / decode failure throws
-// MorlocException so _mlc_catch can intercept.
+// MorlocException, which `@try` catches.
 template <typename T>
 T _mlc_load(Schema* schema, const std::string& path) {
     char* errmsg = NULL;
@@ -729,16 +724,18 @@ T _mlc_throw_as(const std::string& msg) {
 // value, `err` the message; codegen supplies both because only it knows how
 // this Try is represented in C++.
 //
-// MorlocPipeClosed and MorlocInfraError are re-thrown ahead of the broad
-// catch. A broken pipe is an <IO> condition and an infrastructure failure is
-// not attributable to user code, so neither is a user-recoverable error and
-// both must escape rather than being turned into an Err arm. All other
-// std::exceptions (@throw, foreign helpers that raise) become Err.
+// MorlocPipeClosed is re-thrown ahead of the broad catch: a broken pipe is
+// an <IO> condition, not a user-recoverable error, so it escapes rather than
+// becoming an Err arm. All other exceptions (@throw, foreign helpers that
+// raise) become Err.
 // The return type is deduced from `err` rather than `ok`: a Unit-returning
 // intrinsic's body is `void`, so `ok(body())` is ill-formed as a deduction
 // context even though the void branch never evaluates it.
+
 template<typename MlcBody, typename MlcOk, typename MlcErr>
 auto _mlc_try(MlcBody&& body, MlcOk&& ok, MlcErr&& err) -> decltype(err(std::string())) {
+    // STATE-6
+    size_t saved = mlc::frame_depth();
     try {
         if constexpr (std::is_void_v<decltype(body())>) {
             body();
@@ -747,9 +744,39 @@ auto _mlc_try(MlcBody&& body, MlcOk&& ok, MlcErr&& err) -> decltype(err(std::str
             return ok(body());
         }
     }
-    catch (const MorlocPipeClosed&) { throw; }
-    catch (const MorlocInfraError&) { throw; }
-    catch (const std::exception& e) { return err(std::string(e.what())); }
+    catch (const MorlocPipeClosed&) { mlc::frame_restore(saved); throw; }
+    MLC_CATCH_FORCED_UNWIND(saved)
+    catch (const std::exception& e) {
+        std::string msg(e.what());
+        return err(msg + mlc::frame_take(saved));
+    }
+    catch (const char* e) {
+        std::string msg(e ? e : "An unknown error occurred");
+        return err(msg + mlc::frame_take(saved));
+    }
+    catch (const std::string& e) { return err(e + mlc::frame_take(saved)); }
+    catch (...) { return err(std::string("An unknown error occurred") + mlc::frame_take(saved)); }
+}
+
+// STATE-6: the catch of a closure, which code outside morloc may call and
+// whose failure it may catch. Called from that catch, so `throw;` raises the
+// failure being handled.
+[[noreturn, gnu::noinline, gnu::cold]] static void _mlc_closure_rethrow(size_t saved) {
+    try {
+        throw;
+    }
+    catch (const MorlocPipeClosed&) { mlc::frame_restore(saved); throw; }
+    MLC_CATCH_FORCED_UNWIND(saved)
+    catch (const std::exception& e) {
+        std::string msg(e.what());
+        throw std::runtime_error(msg + mlc::frame_take(saved));
+    }
+    catch (const char* e) {
+        std::string msg(e ? e : "An unknown error occurred");
+        throw std::runtime_error(msg + mlc::frame_take(saved));
+    }
+    catch (const std::string& e) { throw std::runtime_error(e + mlc::frame_take(saved)); }
+    catch (...) { throw std::runtime_error(std::string("An unknown error occurred") + mlc::frame_take(saved)); }
 }
 // @fschema: read a file's element schema string without opening it.
 inline std::string _mlc_fschema(const std::string& path) {
@@ -803,17 +830,31 @@ T _mlc_ifile_walk(
     return result;
 }
 
-// @next: materialise the IStream's current sub-packet as `[a]` and
-// advance the cursor. Empty list at EOF.
+// @next: decode the IStream's current sub-packet as `[a]` where it lies
+// and advance the cursor (SLOT-25). Empty list at EOF.
 template <typename T>
 T _mlc_next(Schema* schema, int64_t handle) {
+    struct Decoded {
+        Schema* schema;
+        std::optional<T> value;
+        std::exception_ptr error;
+    } ctx{schema, std::nullopt, nullptr};
+    mlc_next_decode_fn decode = [](void* c, const void* data, morloc_space_t space) -> int32_t {
+        Decoded* d = static_cast<Decoded*>(c);
+        try {
+            T* dummy = nullptr;
+            d->value.emplace(from_voidstar(d->schema, data, dummy, space));
+            return 0;
+        } catch (...) {
+            d->error = std::current_exception();
+            return 1;
+        }
+    };
     char* errmsg = NULL;
-    void* voidstar = mlc_next(handle, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    T* dummy = nullptr;
-    T result = from_voidstar(schema, voidstar, dummy);
-    shfree_cpp(voidstar);
-    return result;
+    int32_t rc = mlc_next_with(handle, decode, &ctx, &errmsg);
+    if (rc < 0) { PROPAGATE_ERROR(errmsg) }
+    if (ctx.error) { std::rethrow_exception(ctx.error); }
+    return std::move(*ctx.value);
 }
 
 // @streamLayout: per-sub-packet layout of an IFile as `[(U64,U64,U64)]`.
@@ -1093,20 +1134,17 @@ mlc::Unit _mlc_replay(Schema* schema, int64_t handle, F fn) {
 // list of argument packets to the pool listening on `socket_filename`. Used by
 // the variadic `foreign_call` below and by defunctionalized-closure reflection,
 // where the captured-argument count is only known at runtime. The caller owns
-// `args_array`; on an error this throws (via PROPAGATE_ERROR), so the caller's
-// container unwinds normally.
+// `args_array`. A failure the callee reports is thrown, so the caller's
+// container unwinds; a failure to reach the callee ends the pool (PANIC-5).
 uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t** args_array, size_t nargs) {
     char* errmsg = NULL;
 
-    char socket_path[128];
-    snprintf(socket_path, sizeof(socket_path), "%s/%s", g_tmpdir, socket_filename);
+    std::string socket_path = std::string(g_tmpdir) + "/" + socket_filename;
 
     uint8_t* packet = make_morloc_local_call_packet((uint32_t)mid, args_array, nargs, &errmsg);
     PROPAGATE_INFRA_ERROR(errmsg)
 
-    pool_mark_busy();
-    uint8_t* result = send_and_receive_over_socket(socket_path, packet, &errmsg);
-    pool_mark_idle();
+    uint8_t* result = send_and_receive_over_socket(socket_path.c_str(), packet, &errmsg);
 
     free(packet);
     PROPAGATE_INFRA_ERROR(errmsg)
@@ -1136,7 +1174,7 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
             size_t relptr = *(size_t*)(result + res_header->offset + sizeof(morloc_packet_header_t));
             char* resolve_err = NULL;
             void* res_voidstar = rel2abs(relptr, &resolve_err);
-            if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+            PROPAGATE_INFRA_ERROR(resolve_err)
             if (res_voidstar) {
                 // The callee took a reference before sending; it is ours
                 // now. Inherit it rather than adding another.
@@ -1444,14 +1482,12 @@ extern "C" void morloc_debug_record_frame(
 // AUTO dispatch end
 
 
-// Drain the debug-trace if --debug was compiled in. Concatenates the
-// rendered morloc trace with the caught exception's message so the
-// fail packet carries both. When --debug is off (or no frames were
-// recorded), the drain returns NULL and we forward the message
-// unchanged. Every manifold catch also appends its own "  at <name>
-// [cpp] (mid=..., srcloc)" line to the message via string concat,
-// so non-debug tracebacks still compose across pools.
-static uint8_t* make_fail_packet_with_trace(const char* msg) {
+// The fail packet of a failure that escaped a dispatch: its message, the
+// trace of named calls it unwound through (DIAG-5, STATE-6), and under
+// --debug the drained debug trace.
+static uint8_t* make_fail_packet_with_trace(const char* msg0, size_t saved) {
+    std::string withTrace = std::string(msg0) + mlc::frame_take(saved);
+    const char* msg = withTrace.c_str();
     char* trace = morloc_debug_drain_frames();
     if (trace == NULL) {
         return make_fail_packet(msg);
@@ -1465,6 +1501,15 @@ static uint8_t* make_fail_packet_with_trace(const char* msg) {
     return make_fail_packet(combined.c_str());
 }
 
+// STATE-6: a dispatch left normally finds the depth it saved.
+static inline uint8_t* _mlc_dispatch_balanced(uint8_t* result, size_t saved) {
+    if (mlc::frame_depth() != saved) {
+        mlc_runtime_defect("frame stack depth " + std::to_string(mlc::frame_depth())
+            + " at the end of a dispatch that began at " + std::to_string(saved));
+    }
+    return result;
+}
+
 // Wrappers to adapt compiler-generated dispatch functions to pool_dispatch_fn_t.
 // These catch C++ exceptions so the C pool_main never sees them. External
 // linkage so the (member-agnostic) host translation unit can register them.
@@ -1475,29 +1520,25 @@ uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
     // own entries are released as its reply is sent (release_dispatch).
     _shm_tracker_flush();
     morloc_debug_flush_dispatch();
+    size_t saved = 0;
     try {
-        return local_dispatch(mid, args);
+        saved = mlc::frame_enter();
+        return _mlc_dispatch_balanced(local_dispatch(mid, args), saved);
     } catch (const MorlocPipeClosed& e) {
+        mlc::frame_restore(saved);
         // Broken pipe: a distinguished, non-abort failure. The nexus owns
         // fd 1 and decides the pipeline exit status.
         return make_pipe_closed_packet(e.what());
-    } catch (const MorlocInfraError& e) {
-        // Not recoverable and not the user's doing. Aborting rather than
-        // returning a fail packet is what keeps it fatal across pools: a
-        // caller's socket read fails, which it classifies as infrastructure
-        // in turn, so no fail packet has to carry the classification.
-        MLC_INTERNAL_ABORT(e.what());
     } catch (const std::exception& e) {
-        return make_fail_packet_with_trace(e.what());
+        return make_fail_packet_with_trace(e.what(), saved);
     } catch (const char* e) {
-        // Codegen-emitted manifold catches usually normalize const char*
-        // throws into std::runtime_error already, but a foreign helper
-        // that throws outside a wrapped body reaches here directly.
-        return make_fail_packet_with_trace(e ? e : "An unknown error occurred");
+        // A sourced function's throw reaches here as thrown unless a
+        // closure's catch on the way normalized it.
+        return make_fail_packet_with_trace(e ? e : "An unknown error occurred", saved);
     } catch (const std::string& e) {
-        return make_fail_packet_with_trace(e.c_str());
+        return make_fail_packet_with_trace(e.c_str(), saved);
     } catch (...) {
-        return make_fail_packet_with_trace("An unknown error occurred");
+        return make_fail_packet_with_trace("An unknown error occurred", saved);
     }
 }
 
@@ -1512,43 +1553,36 @@ uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
     // the local dispatcher, and the two should not differ.
     _shm_tracker_flush();
     morloc_debug_flush_dispatch();
+    size_t saved = 0;
     try {
-        return remote_dispatch(mid, args);
+        saved = mlc::frame_enter();
+        return _mlc_dispatch_balanced(remote_dispatch(mid, args), saved);
     } catch (const MorlocPipeClosed& e) {
+        mlc::frame_restore(saved);
         // Broken pipe: a distinguished, non-abort failure. The nexus owns
         // fd 1 and decides the pipeline exit status.
         return make_pipe_closed_packet(e.what());
-    } catch (const MorlocInfraError& e) {
-        // Not recoverable and not the user's doing. Aborting rather than
-        // returning a fail packet is what keeps it fatal across pools: a
-        // caller's socket read fails, which it classifies as infrastructure
-        // in turn, so no fail packet has to carry the classification.
-        MLC_INTERNAL_ABORT(e.what());
     } catch (const std::exception& e) {
-        return make_fail_packet_with_trace(e.what());
+        return make_fail_packet_with_trace(e.what(), saved);
     } catch (const char* e) {
-        return make_fail_packet_with_trace(e ? e : "An unknown error occurred");
+        return make_fail_packet_with_trace(e ? e : "An unknown error occurred", saved);
     } catch (const std::string& e) {
-        return make_fail_packet_with_trace(e.c_str());
+        return make_fail_packet_with_trace(e.c_str(), saved);
     } catch (...) {
-        return make_fail_packet_with_trace("An unknown error occurred");
+        return make_fail_packet_with_trace("An unknown error occurred", saved);
     }
 }
 
 
 // Registration entry called by the member-agnostic host translation unit.
 // The host owns main() and the pool_main loop; this hook wires the C++
-// member's dispatchers, concurrency policy, tmpdir, and schema table into the
-// pool config. cpp_local_dispatch/cpp_remote_dispatch, g_tmpdir, POOL_THREADS,
-// and _init_schemas all live in this (member) translation unit.
+// member's dispatchers, tmpdir, and schema table into the pool config.
+// cpp_local_dispatch/cpp_remote_dispatch, g_tmpdir and _init_schemas all live in this (member) translation unit.
 void cpp_register(pool_config_t* config, const char* tmpdir) {
     g_tmpdir = strdup(tmpdir);
     config->local_dispatch = cpp_local_dispatch;
     config->remote_dispatch = cpp_remote_dispatch;
     config->dispatch_ctx = NULL;
-    config->concurrency = POOL_THREADS;
-    config->initial_workers = 1;
-    config->dynamic_scaling = true;
     config->release_dispatch = _shm_tracker_flush;
     _init_schemas();
 }

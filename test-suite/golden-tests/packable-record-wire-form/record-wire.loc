@@ -8,7 +8,7 @@ import root-py
 
 record Pair = Pair {left :: Int, right :: Str}
 
-newtype Box a
+newtype Box a = Pair
 
 type Py => (Box a) = "dict" a
 

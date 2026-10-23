@@ -1,0 +1,14 @@
+--' A call may not assign a name the R pool reserves
+module main (viaAssign)
+
+import root
+import root-r
+
+source R from "assign.R" ("r_assign" as assignR)
+
+--' Assign a manifold's name, then return the argument
+assignR :: Int -> Int
+
+--' Call a function that assigns a reserved name
+viaAssign :: Int -> Int
+viaAssign = assignR

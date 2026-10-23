@@ -1,0 +1,22 @@
+-- Spec NEWT-7: an unwrap whose argument comes from a recursive call still
+-- runs where the newtype has no form of its own. Bytes's Python form is
+-- bytes, so the unwrap runs in C++, though the recursion is Python's.
+module main (walk)
+
+import root-py
+import root-cpp
+
+newtype Bytes = Str
+type Py => Bytes = "bytes"
+
+source Py from "main.py" ("base", "step")
+base :: Str -> Bytes
+step :: Str -> Bytes
+
+g :: Int -> Bytes
+g k
+  ? k == 0 = base "a"
+  : step (unpack (g (k - 1)))
+
+walk :: Int -> Str
+walk k = unpack (g k)

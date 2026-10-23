@@ -10,10 +10,9 @@ Maintainer  : z@morloc.io
 A recursive helper that takes a function argument and passes it unchanged to
 every recursive call (a static argument) receives that function as a value:
 a closure its manifold is handed at entry. A closure value is heavier than the
-function it names. It is a trait object in Rust, where it cannot be shared
-between threads, so a sourced function that runs it on several threads cannot
-take it; and it is a proxy that calls back into the pool when the helper is
-entered through its serial interface, one round trip per application.
+function it names: an allocated callable, called indirectly, and a proxy
+that calls back into the pool when the helper is entered through its serial
+interface, one round trip per application.
 
 When a call site passes a closed function (a sourced function, or a lambda
 with no free variables) at such a position, this pass gives the call its own
@@ -39,7 +38,7 @@ module Morloc.CodeGenerator.StaticArgs
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.LambdaEval (applyLambdas, reindexTree)
+import Morloc.CodeGenerator.LambdaEval (applyPoolLambdas, reindexTree)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
@@ -122,28 +121,15 @@ helperTable :: [Tree] -> MorlocMonad (Map.Map EVar Helper)
 helperTable trees = do
   names <- MM.gets stateName
   stages <- MM.gets stateRecStages
-  config <- MM.gets stateManifoldConfig
   return $ Map.fromList
     [ (v, Helper t vs static)
     | t@(AnnoS (Idx gi ht) _ (LamS vs body)) <- trees
     , Just v <- [Map.lookup gi names]
     , not (Map.member v stages)
-    , not (maybe False observed (Map.lookup gi config))
     , maybe False (>= length vs) (inputCount ht)
     , Just static <- [staticPositions v vs body]
     , not (Set.null static)
     ]
-
--- | A manifold configuration that attaches something to the manifold's own
--- identity (a cache, a benchmark, a log line, a label, a remote placement),
--- which a copy would duplicate or detach.
-observed :: ManifoldConfig -> Bool
-observed c =
-  manifoldConfigCache c == Just True
-    || manifoldConfigBenchmark c == Just True
-    || manifoldConfigLog c == Just True
-    || isJust (manifoldConfigLabel c)
-    || isJust (manifoldConfigRemote c)
 
 -- | The number of inputs a function type shows, through any effect around it.
 -- Nothing for anything else (an alias is not looked through: a type whose
@@ -281,6 +267,7 @@ freeBound bs (AnnoS _ _ e) = case e of
 -- place of their parameters, which it no longer takes.
 specialize :: EVar -> Helper -> Map.Map Int Tree -> MorlocMonad (EVar, Tree)
 specialize h hp fixedArgs = do
+  let AnnoS (Idx source _) _ _ = hTree hp
   AnnoS (Idx gi t) c root <- reindexTree (hTree hp)
   let name = EV (unEVar h <> MT.pack ("@static" <> show gi))
       dropped = Map.keysSet fixedArgs
@@ -292,9 +279,10 @@ specialize h hp fixedArgs = do
   let body' = renameBackEdges h name dropped body
   -- A substituted lambda the body applies is a new redex; reduce the copy as
   -- every tree was reduced before this pass.
-  tree <- applyLambdas False (AnnoS (Idx gi (dropInputs dropped t)) c (LamS (dropAt dropped params) body'))
+  tree <- applyPoolLambdas (AnnoS (Idx gi (dropInputs dropped t)) c (LamS (dropAt dropped params) body'))
   MM.modify $ \s ->
     s { stateName = Map.insert gi name (stateName s)
+      , stateNameSource = Map.insert gi source (stateNameSource s)
       , stateRecursionTargets = Map.insert name gi (stateRecursionTargets s)
       }
   return (name, tree)

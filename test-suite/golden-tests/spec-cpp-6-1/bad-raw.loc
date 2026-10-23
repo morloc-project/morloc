@@ -1,0 +1,7 @@
+-- CPP-6: changing a generated arm through its pointer is rejected (see ok.loc).
+module badraw (bad)
+
+import .badlib
+
+bad :: Int -> Int
+bad n = let b = Box (mk n) in boxSize (growRaw b) + boxSize b

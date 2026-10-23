@@ -1,0 +1,9 @@
+-- Spec POLY-6: a bracket index whose type nothing determines is a located
+-- error. Nothing fixes the output type of `tryInto`, and the index needs a
+-- native form to be cast to an index.
+module main (f)
+
+import root-py
+
+f :: [Str] -> U64 -> Str
+f xs x = .[tryInto x] xs

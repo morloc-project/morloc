@@ -1,0 +1,20 @@
+-- Spec DOC-3: a function alias carries its docstring where a signature
+-- names it. `foo` is described by `Foo`; `bar`, written out, is not.
+module main (foo, bar)
+
+import root-py
+
+--' Wind speed in m/s
+--' @arg -w/--wind
+--' @default 3
+type WindSpeed = Int
+
+--' Minutes until the storm
+--' return: minutes from the alias
+type Foo = WindSpeed -> Int
+
+foo :: Foo
+foo w = w + 1
+
+bar :: WindSpeed -> Int
+bar w = w + 2

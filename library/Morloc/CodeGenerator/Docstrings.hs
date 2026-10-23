@@ -52,6 +52,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
+import qualified Morloc.TypeEval as TE
 
 -- Most of the transmogrification of docstrings occurs in the parser, but there
 -- are some limitations there since the types are not yet known. If a type in a
@@ -422,32 +423,6 @@ reduceArgDocFrom seen i t@(VarT v) arg
               <> "': '" <> pretty a <> "' and '" <> pretty b <> "'"
       _ -> return ()
 
-    inheritArgDocVars :: ArgDocVars -> ArgDocVars -> ArgDocVars
-    inheritArgDocVars r1 r2 =
-      ArgDocVars
-        { docLines = if (length (docLines r1) > 0) then docLines r1 else docLines r2
-        , docName = docName r1 <|> docName r2
-        , docLiteral = docLiteral r1 <|> docLiteral r2
-        , docMany = docMany r1 <|> docMany r2
-        , docStdin = docStdin r1 <|> docStdin r2
-        , docUnroll = docUnroll r1 <|> docUnroll r2
-        , docDefault = docDefault r1 <|> docDefault r2
-        , docMetavar = docMetavar r1 <|> docMetavar r2
-        , docArg = docArg r1 <|> docArg r2
-        , docTrue = docTrue r1 <|> docTrue r2
-        , docFalse = docFalse r1 <|> docFalse r2
-        , docReturn = docReturn r1 <|> docReturn r2
-        , docSource = docSource r1 <|> docSource r2
-        , docForm = docForm r1 <|> docForm r2
-        , docChecks = if null (docChecks r1) then docChecks r2 else docChecks r1
-        , docListSource = docListSource r1 <|> docListSource r2
-        , docListForm = docListForm r1 <|> docListForm r2
-        , docListChecks = if null (docListChecks r1) then docListChecks r2 else docListChecks r1
-        , docWith = if null (docWith r1) then docWith r2 else docWith r1
-        , docParse = docParse r1
-        , docMime = docMime r1 <|> docMime r2
-        , docEpilogues = if null (docEpilogues r1) then docEpilogues r2 else docEpilogues r1
-        }
 reduceArgDocFrom seen i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
   let args = map (ArgDocAlias . snd) rs
       keys = map fst rs
@@ -574,7 +549,7 @@ resolveAlt loc t r ctorDocs = do
         OptionalT (VarT v) -> (True, Just v)
         VarT v -> (False, Just v)
         _ -> (False, Nothing)
-  table <- case tv >>= scopeDataCtors scope of
+  table <- case tv >>= TE.dataCtors scope . TE.whnf scope . VarU of
     Just cs -> return cs
     Nothing ->
       MM.throwSystemError $
@@ -792,9 +767,10 @@ canonicalCtorDefault :: Type -> Text -> MorlocMonad Text
 canonicalCtorDefault t def = do
   scope <- MM.gets stateGeneralTypedefs
   let bare = MT.strip def
+      ctorsOf = TE.dataCtors scope . TE.whnf scope . VarU
       ctors = case t of
-        VarT v -> scopeDataCtors scope v
-        OptionalT (VarT v) -> scopeDataCtors scope v
+        VarT v -> ctorsOf v
+        OptionalT (VarT v) -> ctorsOf v
         _ -> Nothing
   return $ case ctors of
     Just table
@@ -1171,6 +1147,10 @@ data ArgShape
       --   The ASCII byte-sequence shortcut.
   | AsListLines ListPipeline
       -- ^ `form: list` with per-line dispatch.
+  | AsTable
+      -- ^ `form: table` on a `Table` or a list of records: a headed
+      --   table read from a file or stdin (CLI-13). The element types
+      --   are checked against the 'SerialAST'.
   deriving (Eq, Show)
 
 -- ── Schema-text utilities ─────────────────────────────────────────
@@ -1196,17 +1176,27 @@ peelHint t = case MT.uncons t of
       Just ('<', rest) -> skipBalanced rest (d + 1)
       Just (_, rest)   -> skipBalanced rest d
 
--- | Strip a leading `&<klen><name>` rec-decl prefix.
+-- | Strip a leading `&<klen><name>` rec-decl prefix, where @klen@ is the
+-- name's length in the encoding of 'Morloc.CodeGenerator.Serial.encode64'.
 peelRecDecl :: Text -> Text
 peelRecDecl t = case MT.uncons t of
-  Just ('&', tt) -> case MT.uncons tt of
-    Just (c, rest)
-      | c >= 'a' && c <= 'p' ->
-          let klen = fromEnum c - fromEnum 'a'
-              (_name, post) = MT.splitAt klen rest
-          in post
-    _ -> t
+  Just ('&', tt) | Just (klen, rest) <- decode64 tt -> MT.drop klen rest
   _ -> t
+  where
+    decode64 x = case MT.uncons x of
+      Just ('=', xs) -> do
+        (lo, xs') <- digit xs
+        (hi, xs'') <- decode64 xs'
+        return (lo + 64 * hi, xs'')
+      _ -> digit x
+    digit x = case MT.uncons x of
+      Just (c, xs)
+        | c >= '0' && c <= '9' -> Just (fromEnum c - fromEnum '0', xs)
+        | c >= 'a' && c <= 'z' -> Just (fromEnum c - fromEnum 'a' + 10, xs)
+        | c >= 'A' && c <= 'Z' -> Just (fromEnum c - fromEnum 'A' + 36, xs)
+        | c == '+' -> Just (62, xs)
+        | c == '/' -> Just (63, xs)
+      _ -> Nothing
 
 isStrWireSchema :: Text -> Bool
 isStrWireSchema s = peelHint (peelRecDecl s) == "s"
@@ -1224,10 +1214,15 @@ isArrayWireSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
   Just ('a', _) -> True
   _ -> False
 
+-- | The element schema of a list-shaped schema, past any `:N` dimension.
 listElementSchema :: Text -> Maybe Text
 listElementSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
-  Just ('a', rest) -> Just rest
+  Just ('a', rest) -> Just (skipDim rest)
   _ -> Nothing
+  where
+    skipDim t = case MT.uncons t of
+      Just (':', tt) -> MT.dropWhile (\c -> c >= '0' && c <= '9') tt
+      _ -> t
 
 isListOfStrWireSchema :: Text -> Bool
 isListOfStrWireSchema s = maybe False isStrWireSchema (listElementSchema s)
@@ -1361,6 +1356,7 @@ validateList schema elemS docs = do
         else Right AsListDefault
     (Just SourceInline, Just FormList) -> Left
       "`@source inline` is contradictory with `@form list`; splitting a single argv string on newlines is not meaningful. Use `@source file` (or omit `@source`)."
+    (_, Just FormTable) -> tableArm docs
     (_, Just FormList) ->
       AsListLines <$> validateLinesPipeline elemS docs
     (mSrc, Just FormBytes)     -> bytesArm schema elemS mSrc Bytes docs
@@ -1443,9 +1439,27 @@ validateLinesPipeline elemS docs =
           "`@list.form bytes`/`bytes-only` requires every leaf to be a fixed-width scalar; got element wire schema `"
           <> es <> "`."
 
--- | Tuples, records, maps: no shape modifiers.
+-- | `form: table`: a file or stdin, never inline, with no other shape
+-- modifier.
+tableArm :: ArgDocVars -> Either Text ArgShape
+tableArm docs = do
+  when' (docSource docs /= Nothing)
+    "`@source` is not used with `@form table`; a table argument is always a path, or `-` for stdin."
+  when' (not (null (docChecks docs))) "`@check.*` is not allowed with `@form table`."
+  when' (hasAnyListField docs) "`@list.*` fields are not allowed with `@form table`."
+  Right AsTable
+
+isTableWireSchema :: Text -> Bool
+isTableWireSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
+  Just ('T', _) -> True
+  _ -> False
+
+-- | Tuples, records, maps: no shape modifiers. A `Table` may take
+-- `form: table`.
 validateOtherCompound :: Text -> ArgDocVars -> Either Text ArgShape
-validateOtherCompound schema docs = do
+validateOtherCompound schema docs
+  | docForm docs == Just FormTable && isTableWireSchema schema = tableArm docs
+  | otherwise = do
   let banIf b name = if b then Left
         ("`" <> name <> "` is not allowed on this compound type (wire schema `"
          <> schema <> "`).") else Right ()

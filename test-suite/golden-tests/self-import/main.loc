@@ -1,3 +1,8 @@
+-- Import-graph errors end the build with a diagnostic, never a hang or an
+-- OOM (the Makefile bounds each run): a module importing itself and a
+-- module importing the entry file (a.loc via b.loc) are cycles; importing a
+-- file that declares no module of the imported name (c.loc -> lib.loc) is
+-- an error.
 module main (foo)
 
 import main

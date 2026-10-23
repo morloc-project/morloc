@@ -99,6 +99,7 @@ data MakeCommand = MakeCommand
   , makeDebugTrace :: Bool
   , makeLangParams :: [String]
   , makeOffline :: Bool
+  , makeSlurm :: Bool
   , makeScript :: String
   }
 
@@ -124,6 +125,7 @@ makeCommandParser =
     <*> optDebugTrace
     <*> optLangParams
     <*> optOffline
+    <*> optMakeSlurm
     <*> optScript
 
 makeSubcommand :: Mod CommandFields CliCommand
@@ -593,6 +595,13 @@ optMakeInstall =
         <> help "Install module to PATH"
     )
 
+optMakeSlurm :: Parser Bool
+optMakeSlurm =
+  switch
+    ( long "slurm"
+        <> help "Dispatch remote-labeled calls as SLURM jobs in this build, whatever 'morloc init' set"
+    )
+
 optOffline :: Parser Bool
 optOffline =
   switch
@@ -710,7 +719,7 @@ optType =
   switch
     ( long "type"
         <> short 't'
-        <> help "Parse a typestring instread of an expression"
+        <> help "Parse a typestring instead of an expression"
     )
 
 optListKind :: Parser (Maybe ListKind)

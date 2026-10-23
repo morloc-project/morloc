@@ -136,9 +136,10 @@ shapeTests env = testCase "tools/list shape (docstring -> MCP)" $ do
   assertJget "unrolled Bool field -> boolean" wd tools
     "t('configFlat')['inputSchema']['properties']['removeCaches']['type']" "boolean"
 
-  -- record arg: -> whole-object property named for the type
-  assertJget "group_opt single property" wd tools
-    "len(t('configWhole')['inputSchema']['properties'])" "1"
+  -- record arg: -> the whole record under its type's name, and each field
+  assertJget "group_opt record and fields" wd tools
+    "','.join(sorted(t('configWhole')['inputSchema']['properties']))"
+    "configwhole,numThreads,removeCaches,tmpDir"
   assertJget "group_opt property type object" wd tools
     "t('configWhole')['inputSchema']['properties']['configwhole']['type']" "object"
 
@@ -263,15 +264,16 @@ fdTests env = testCase "fd-discipline (stray pool stdout)" $ do
   assertBool "no stray bytes in result" (not ("STRAY-POOL-STDOUT" `isInfixOf` r))
 
 -- ======================================================================
--- Group: exclude -- unservable commands dropped from tools/list
+-- Group: a command that may read stdin is served, its input required
 -- ======================================================================
 
 excludeTests :: TestEnv -> TestTree
-excludeTests env = testCase "tool-surface exclusion (@stdin)" $ do
+excludeTests env = testCase "tool surface (@stdin served)" $ do
   wd <- compileMcpProgram env "excluded.loc"
   tools <- mcpList wd
   assertContains "control plainAdd present" "plainAdd" tools
-  assertBool "@stdin readStdin excluded" (not ("readStdin" `isInfixOf` tools))
+  assertJget "@stdin readStdin input required" wd tools
+    "','.join(t('readStdin')['inputSchema']['required'])" "_1"
 
 -- ======================================================================
 -- Top-level tree

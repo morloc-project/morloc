@@ -1,8 +1,8 @@
 -- Runtime closures nested in a record / list / tuple / optional crossing a pool
 -- boundary between two STATICALLY typed pools. Producer: C++ (reify). Consumer:
 -- Rust (reflect). C++ reifies each std::function field into the wire tuple; Rust
--- reflects each into an origin-preserving `Rc<dyn MorlocFnN>` FatClosure proxy
--- (applied with `.call1`) that RPCs back to the C++ home pool. The mirror of
+-- reflects each into an origin-preserving `Arc<dyn Fn>` FatClosure proxy
+-- (called as `f(&x)`) that RPCs back to the C++ home pool. The mirror of
 -- `defunc-record-closures-rust-cpp`.
 --
 -- The captured `a`/`b` are runtime CLI arguments (not constant folded), so the

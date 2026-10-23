@@ -779,6 +779,7 @@ dependencies = [
 name = "morloc-manifest"
 version = "0.109.0"
 dependencies = [
+ "morloc-runtime-types",
  "serde",
  "serde_json",
 ]
@@ -827,6 +828,7 @@ dependencies = [
  "parquet",
  "quote",
  "rmp",
+ "ryu",
  "serde",
  "serde_json",
  "syn",
@@ -839,6 +841,7 @@ name = "morloc-runtime-types"
 version = "0.87.0"
 dependencies = [
  "libc",
+ "memchr",
  "serde",
  "serde_json",
  "thiserror",

@@ -1,0 +1,19 @@
+-- A twin of accept.loc that `@form table` rejects (spec CLI-13).
+module main (f)
+
+import root-py
+import table-py
+
+record R = R { a :: Int, b :: ?Str }
+
+--' @unroll true
+record Opts where
+  --' rows
+  --' @arg --rows
+  --' @default []
+  --' @form table
+  rows :: [R]
+
+--' f
+f :: Opts -> Int
+f o = 0

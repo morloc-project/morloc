@@ -32,15 +32,16 @@ import qualified Data.Set as Set
 
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
 import Morloc.CodeGenerator.EffectBoundary (checkEffectBoundaries, insertEffectBoundaries)
-import Morloc.CodeGenerator.Emit (TranslateFn, emit, pool)
+import Morloc.CodeGenerator.Emit (TranslateFn, checkManifoldIds, emit, pool)
 import Morloc.CodeGenerator.StaticArgs (specializeStaticArgs)
 import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps, addLoopWraps, addNativeRecEntries, etaReduceForwarders)
-import Morloc.CodeGenerator.LambdaEval (applyLambdas)
+import Morloc.CodeGenerator.LambdaEval (applyLambdas, applyPoolLambdas)
 import Morloc.CodeGenerator.Namespace (Arg, PolyHead (..), SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Morloc.CodeGenerator.Parameterize (parameterize)
 import Morloc.CodeGenerator.Guest.Pass (lowerGuests)
 import Morloc.CodeGenerator.Realize (realityCheck)
+import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.Segment (segment)
 import Morloc.CodeGenerator.Serial (checkPackerCoherence)
 import Morloc.CodeGenerator.Reduce (reduce)
@@ -48,6 +49,7 @@ import Morloc.CodeGenerator.Serialize (serialize)
 import Morloc.CodeGenerator.Suspension (lowerSuspensions)
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Frontend.API as F
+import Morloc.Frontend.Labels (checkLabels)
 import Morloc.Frontend.AutoRequire (autoRequire)
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Restructure (restructure)
@@ -90,6 +92,8 @@ typecheck path code =
     >>= lowerGuests
     -- resolve all TypeU types to Type
     |>> map F.resolveTypes
+    >>= mapM checkLabels
+    >>= (\es -> Infer.recordUndeterminedSites es >> return es)
     -- fail fast on a discarded Try (types are concrete here, instances
     -- still Many, so one insertion covers every realization)
     >>= mapM autoRequire
@@ -101,13 +105,13 @@ typecheck path code =
 
 -- | Do everything except language specific code generation.
 --
--- Runs 'applyLambdas' first, matching the pool path in 'writeProgram': the
--- 'express' pipeline assumes lambdas have been reduced/lifted, so skipping it
--- lets a lambda reach 'expressPolyApp' as an un-handled head ("unexpected
--- LamS"). 'False' keeps a multiply-used lambda as a shared native closure
--- (rASTs become pools, not the pure nexus evaluator).
+-- Runs 'applyPoolLambdas' first, matching the pool path in 'writeProgram':
+-- the 'express' pipeline assumes lambdas have been reduced/lifted, so skipping
+-- it lets a lambda reach 'expressPolyApp' as an un-handled head ("unexpected
+-- LamS"). A multiply-used lambda is kept as a shared native closure (rASTs
+-- become pools, not the pure nexus evaluator).
 generatePools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
-generatePools rASTs = mapM (applyLambdas False) rASTs >>= specializeStaticArgs >>= lowerPools
+generatePools rASTs = mapM applyPoolLambdas rASTs >>= specializeStaticArgs >>= lowerPools
 
 -- | Lower realized pool trees to per-language serial manifolds. This is the
 -- whole path from parameterization to pool assembly, shared by 'writeProgram'
@@ -119,7 +123,7 @@ lowerPools rASTs = do
         [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]
   MM.modify (\s -> s { stateManifoldLang = langMap })
   reg <- MM.gets stateLangRegistry
-  mapM expressRoot paramRASTs
+  mapM (\r -> expressRoot r >>= checkHeadLang langMap) paramRASTs
     -- Wrap each cache:true manifold's body in a 'PolyCacheBody'.
     >>= mapM addCacheWraps
     -- When 'stateDebugTrace' (--debug), wrap every foreign-call
@@ -141,7 +145,17 @@ lowerPools rASTs = do
     >>= mapM segment |>> concat
     >>= mapM serialize
     >>= mapM reduce
-      |>> pool reg
+    >>= (\ms -> checkManifoldIds reg ms >> return (pool reg ms))
+
+-- | Callers of a root read its language from 'stateManifoldLang', so its head
+-- must be built there.
+checkHeadLang :: Map.Map Int Lang -> PolyHead -> MorlocMonad PolyHead
+checkHeadLang langMap h@(PolyHead lang midx _ _)
+  | Map.lookup midx langMap == Just lang = return h
+  | otherwise =
+      MM.throwCompilerBug $
+        "the manifold of root" <+> pretty midx <+> "is built in" <+> pretty lang
+          <+> "but its tree is realized in" <+> pretty (Map.lookup midx langMap)
 
 -- | Express a root. A root of function type is called with every input of
 -- its type (the nexus sends a command's arguments by its type), so its
@@ -182,7 +196,7 @@ writeProgram translateFn path code =
     -- cannot hold a native closure, so let-bound lambdas are always inlined
     -- there (True); rASTs become pools, where a multiply-used lambda is kept
     -- as a shared native closure to avoid exponential inlining (False).
-    >>= bimapM (mapM (applyLambdas True)) (mapM (applyLambdas False))
+    >>= bimapM (mapM (applyLambdas True)) (mapM applyPoolLambdas)
     -- Give a recursive helper its own copy for each closed function it is
     -- passed at a position every recursion passes through unchanged, so the
     -- function is referenced directly rather than carried as a closure value.
@@ -195,16 +209,22 @@ writeProgram translateFn path code =
     >>= \(gASTs, rASTs) ->
       do
         -- Filter out generic (polymorphic) exports -- they can't become CLI subcommands
+        exportIds <- Set.fromList <$> MM.gets stateExports
         let isConcreteExport (AnnoS (Idx _ t) _ _, _) = not (containsUnk t)
             (concreteGASTs, genericGASTs) = partition isConcreteExport gASTs
             (concreteRASTs, genericRASTs) = partition isConcreteExport rASTs
-            warnSkip (AnnoS (Idx i _) _ _) = do
-              name <- MM.metaName i
-              case name of
-                Just (EV n) -> MM.say $ "Warning: skipping generic export '" <> pretty n <> "'"
-                Nothing -> return ()
+            warnSkip (AnnoS (Idx i _) _ _)
+              | Set.member i exportIds = do
+                  name <- MM.metaName i
+                  case name of
+                    Just (EV n) -> MM.say $ "Warning: skipping generic export '" <> pretty n <> "'"
+                    Nothing -> return ()
+              | otherwise = return ()
         mapM_ (warnSkip . fst) genericGASTs
         mapM_ (warnSkip . fst) genericRASTs
+        let skippedEntry (AnnoS (Idx i t) _ _) = fmap (\v -> (v, (i, t))) <$> MM.metaName i
+        skipped <- (<>) <$> mapM (skippedEntry . fst) genericGASTs <*> mapM (skippedEntry . fst) genericRASTs
+        MM.modify (\st -> st {stateSkippedGeneric = Map.fromListWith (\_ old -> old) (catMaybes skipped)})
         -- Only exports become commands, but helper rASTs also flow to
         -- 'Nexus.generate' so it can see their languages for pool
         -- enumeration -- the export tree ends at a bare 'CallS' back-edge
@@ -284,7 +304,7 @@ checkEvalRestrictions dag = do
       MM.throwSourcedError i "source statements are not allowed in eval mode"
     checkExpr _ (ExprI i (ClsE _)) =
       MM.throwSourcedError i "class declarations are not allowed in eval mode"
-    checkExpr _ (ExprI i (IstE _ _ _ _)) =
+    checkExpr _ (ExprI i (IstE Declared _ _ _ _)) =
       MM.throwSourcedError i "instance declarations are not allowed in eval mode"
     checkExpr _ (ExprI i (TypE _)) =
       MM.throwSourcedError i "type declarations are not allowed in eval mode"

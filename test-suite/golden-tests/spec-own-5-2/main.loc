@@ -1,0 +1,18 @@
+-- Spec OWN-5: a struct holding a field its record does not name is rejected
+-- when a getter takes a field from it, since that field would be leaked.
+module main (second)
+
+import root-rust
+
+record Pair where
+  a :: Int
+  b :: [Int]
+record Rust => Pair = "Pair"
+
+source Rust from "extra.rs" ("mk_pair" as mkPair)
+
+mkPair :: Int -> Pair
+
+--' The second field of a fresh pair
+second :: Int -> [Int]
+second n = .b (mkPair n)

@@ -1,0 +1,13 @@
+-- Spec DOC-3: an optional alias carries its docstring at the argument
+-- position where a signature names it.
+module main (travel)
+
+import root-py
+
+--' Gust speed, if measured
+--' @arg -g/--gust
+--' @default 2
+type MaybeGust = ?Int
+
+travel :: MaybeGust -> Int
+travel g = 1

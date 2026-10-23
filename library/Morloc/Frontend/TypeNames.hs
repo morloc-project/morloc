@@ -79,7 +79,7 @@ resolveTypeNames d = do
         | otherwise = bare m
   result <- DAG.synthesize (resolveModule canonical) rewriteEdge d
   case result of
-    Nothing -> MM.throwSystemError "Cyclic module dependency in type name resolution"
+    Nothing -> MM.throwCompilerBug "the module graph has a cycle after loading"
     Just d' -> return (DAG.mapNode fst d')
   where
     rewriteEdge ::
@@ -220,8 +220,8 @@ rewriteExpr m names = go
         t' <- if isTerminal then terminal i v v' t else typ i t
         return (TypE (ExprTypeE form v' ps' t' doc k))
       AnnE e t -> AnnE <$> go e <*> typ i t
-      IstE cls ctx ts es ->
-        IstE cls <$> mapM (constraint i) ctx <*> mapM (typ i) ts <*> mapM go es
+      IstE o cls ctx ts es ->
+        IstE o cls <$> mapM (constraint i) ctx <*> mapM (typ i) ts <*> mapM go es
       ClsE (Typeclass cs cls vs sigs) ->
         ClsE <$> (Typeclass <$> mapM (constraint i) cs <*> pure cls <*> pure vs
                    <*> mapM (\(Signature v l et) -> Signature v l <$> resolveEType i et) sigs)

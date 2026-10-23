@@ -3,7 +3,7 @@
 //! Every volume carries a cross-process lock (`ShmLock`) over its block list.
 
 use crate::error::MorlocError;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use crate::fork_policy::Held;
 use morloc_runtime_types::shm_lock::{ShmGuard, ShmLock};
 
@@ -14,7 +14,7 @@ use morloc_runtime_types::shm_lock::{ShmGuard, ShmLock};
 pub use morloc_runtime_types::shm_types::{
     align_up, encode_relptr, relptr_is_sentinel, relptr_offset, relptr_volume_index,
     AbsPtr, Array, BlockHeader, MorlocVolEntry, RelPtr, ShmHeader, VolPtr,
-    BLK_ABSORBED, BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER, PRIMARY_VOLUME,
+    BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER, PRIMARY_VOLUME,
     OFFSET_MASK, RELNULL, SHM_MAGIC, VOLNULL,
 };
 
@@ -307,7 +307,7 @@ fn get_cstr_buf(buf: &[u8; MAX_FILENAME_SIZE]) -> &str {
 ///   (Relaxed -- readers ignore it until the gate flips), then store
 ///   `data_base` with Release. The Release pairs with the reader's
 ///   Acquire of `data_base` and makes `data_size` visible.
-/// * **Invalidate** (`shclose`/`reset_all`): store `data_base = null`
+/// * **Invalidate** (`shclose`): store `data_base = null`
 ///   with Release. Subsequent readers see null and fall through to the
 ///   FFI slow path, which will either find the segment unmapped or
 ///   trigger a fresh shopen.
@@ -354,6 +354,31 @@ fn unpublish_vol(idx: usize) {
         .store(std::ptr::null_mut(), Ordering::Release);
 }
 
+// SHM-10: the indices of published volumes, appended under VOLUMES and read
+// without a lock; only a quiesced recovery empties it (DAEMON-1).
+static PUBLISHED: [std::sync::atomic::AtomicU16; MAX_VOLUME_NUMBER] =
+    [const { std::sync::atomic::AtomicU16::new(0) }; MAX_VOLUME_NUMBER];
+static PUBLISHED_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// SHM-10: the published volume holding `ptr`: its index and data region.
+fn published_volume_of(ptr: AbsPtr) -> Option<(usize, *mut u8, usize)> {
+    let p = ptr as usize;
+    let n = PUBLISHED_LEN.load(Ordering::Acquire);
+    for slot in &PUBLISHED[..n] {
+        let idx = slot.load(Ordering::Relaxed) as usize;
+        let entry = &MORLOC_VOL_TABLE[idx];
+        let base = entry.data_base.load(Ordering::Acquire);
+        if base.is_null() {
+            continue;
+        }
+        let size = entry.data_size.load(Ordering::Relaxed);
+        if p >= base as usize && p < base as usize + size {
+            return Some((idx, base, size));
+        }
+    }
+    None
+}
+
 // ── Global state ───────────────────────────────────────────────────────────
 
 /// Hint for `find_free_block`: the slot index where the last allocation
@@ -391,75 +416,15 @@ pub(crate) static VOLUMES: Held<VolumeTable> = Held::new(6, VolumeTable {
     used: Vec::new(),
 });
 
-pub(crate) static ALLOC_MUTEX: Held<()> = Held::new(5, ());
+// SHM-11: one thread of a process grows the volumes at a time; fresh in a
+// forked child, so a fork never waits for a growth.
+static GROW: crate::fork_policy::Reset<()> = crate::fork_policy::Reset::new(|| ());
 
 /// Reference-count value marking a block whose last reference has been
 /// dropped and whose bytes are being scrubbed. It reads as in-use, so no
 /// allocator can claim the block until the scrub completes and publishes
 /// zero.
 const TEARING_DOWN: u32 = u32::MAX;
-
-// ── Thread-local PRNG (for random slot allocation) ─────────────────────────
-
-thread_local! {
-    static RNG_STATE: std::cell::Cell<u64> = std::cell::Cell::new(rng_seed());
-}
-
-fn rng_seed() -> u64 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    // SAFETY: pthread_self always succeeds; the value is opaque but unique
-    // per live thread, which is all we need to differentiate seeds.
-    let tid = unsafe { libc::pthread_self() as u64 };
-    let mut s = nanos
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add(tid.wrapping_mul(0xBF58_476D_1CE4_E5B9));
-    if s == 0 {
-        s = 0xA5A5_A5A5_A5A5_A5A5;
-    }
-    s
-}
-
-/// xorshift64 -- unbiased enough for random slot picking; not
-/// cryptographic. Local to this module; called only inside the
-/// allocator path.
-fn next_random_u64() -> u64 {
-    RNG_STATE.with(|cell| {
-        let mut x = cell.get();
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        cell.set(x);
-        x
-    })
-}
-
-/// Pick a random unoccupied slot in `slots`. Tries random uniform
-/// picks first (the common case at low occupancy), falls back to a
-/// linear probe from a random start (covers the dense case where
-/// random picks keep colliding).
-fn pick_free_slot(table: &VolumeTable) -> Option<usize> {
-    if table.used.len() >= MAX_VOLUME_NUMBER {
-        return None;
-    }
-    // Volume 0 is never mapped; see PRIMARY_VOLUME.
-    for _ in 0..8 {
-        let idx = (next_random_u64() as usize) & (MAX_VOLUME_NUMBER - 1);
-        if idx != 0 && table.slots[idx].is_null() {
-            return Some(idx);
-        }
-    }
-    let start = (next_random_u64() as usize) & (MAX_VOLUME_NUMBER - 1);
-    for off in 0..MAX_VOLUME_NUMBER {
-        let idx = (start + off) & (MAX_VOLUME_NUMBER - 1);
-        if idx != 0 && table.slots[idx].is_null() {
-            return Some(idx);
-        }
-    }
-    None
-}
 
 pub(crate) static COMMON_BASENAME: Held<[u8; MAX_FILENAME_SIZE]> = Held::new(9, [0u8; MAX_FILENAME_SIZE]);
 
@@ -506,29 +471,19 @@ fn run_shclose_hooks() {
     }
 }
 
-/// Variant for the atexit path: `try_lock` so a contended mutex doesn't
-/// wedge process shutdown.
-fn run_shclose_hooks_atexit() {
-    let hooks: Vec<ShcloseHook> = match SHCLOSE_HOOKS.try_lock() {
-        Some(hs) => hs.clone(),
-        None => return,
-    };
-    for h in hooks {
-        h();
-    }
-}
-
 /// atexit callback: remove the volumes' names if this process owns the
 /// program (see `OWNER_GENERATION`). Catches normal exit() calls that bypass
-/// an explicit shretire. Uses try_lock so a held mutex skips the cleanup
-/// instead of waiting inside atexit.
+/// an explicit shretire. Other threads hold these locks only briefly, so it
+/// waits for them; an exit from inside a runtime lock skips the cleanup.
 // DAEMON-5: names only; the mappings go with the last thread.
 extern "C" fn shclose_atexit() {
     EXITING.store(true, Ordering::SeqCst);
-    run_shclose_hooks_atexit();
-    if let Some(_vols) = VOLUMES.try_lock() {
-        retire_names();
+    if !crate::fork_policy::holds_no_runtime_lock() {
+        return;
     }
+    run_shclose_hooks();
+    let _vols = VOLUMES.lock();
+    retire_names();
 }
 
 fn set_cstr(buf: &mut [u8], s: &str) {
@@ -596,44 +551,41 @@ pub(crate) fn unlink_segment(name: &std::ffi::CStr) {
     }
 }
 
-/// Map volume `volume_index` of the program named `shm_basename`, creating
-/// it with `shm_size` data bytes when it does not exist yet. The process
-/// that creates the primary volume owns the program's volumes.
-pub fn shinit(
-    shm_basename: &str,
-    volume_index: usize,
-    shm_size: usize,
-) -> Result<*mut ShmHeader, MorlocError> {
+/// Map the primary volume of the program named `shm_basename`, creating it
+/// with `shm_size` data bytes when it does not exist yet. The process that
+/// creates it owns the program's volumes; the others are made by growth.
+pub fn shinit(shm_basename: &str, shm_size: usize) -> Result<*mut ShmHeader, MorlocError> {
     crate::stream::registry_reopen();
-    if volume_index == 0 || volume_index >= MAX_VOLUME_NUMBER {
-        return Err(MorlocError::Shm(format!(
-            "shinit: volume index {} is not usable (1..{})", volume_index, MAX_VOLUME_NUMBER
-        )));
-    }
     // Unmap (and, for the owner, remove) the volumes on any normal exit,
     // even one that bypasses an explicit shclose.
     if !ATEXIT_REGISTERED.swap(true, Ordering::SeqCst) {
         unsafe { libc::atexit(shclose_atexit) };
     }
     if get_common_basename() == shm_basename {
-        let mapped = VOLUMES.lock().slots[volume_index].ptr();
+        let mapped = VOLUMES.lock().slots[PRIMARY_VOLUME].ptr();
         if !mapped.is_null() {
             return Ok(mapped);
         }
+    }
+    // SHM-12: one program's volumes at a time; a new one follows shclose.
+    let current = get_common_basename();
+    if !current.is_empty() && current != shm_basename {
+        return Err(MorlocError::Shm(format!(
+            "shinit: shared memory is open for '{}'; close it before opening '{}'",
+            current, shm_basename
+        )));
     }
     {
         let mut cb = COMMON_BASENAME.lock();
         set_cstr(&mut *cb, shm_basename);
     }
-    let shm_name = volume_name(shm_basename, volume_index);
-    if let Some(shm) = create_and_register(&shm_name, volume_index, shm_size)? {
-        if volume_index == PRIMARY_VOLUME {
-            claim_program();
-        }
+    let shm_name = volume_name(shm_basename, PRIMARY_VOLUME);
+    if let Some(shm) = create_and_register(&shm_name, PRIMARY_VOLUME, shm_size)? {
+        claim_program();
         crate::shm_stats::init()?;
         return Ok(shm);
     }
-    match open_and_register(&shm_name, volume_index)? {
+    match open_and_register(&shm_name, PRIMARY_VOLUME)? {
         Ok(shm) => {
             crate::shm_stats::init()?;
             Ok(shm)
@@ -685,8 +637,7 @@ fn create_and_register(
     // SAFETY: this process created the volume and nothing can use it before
     // its magic is stored, which `init_volume` does last.
     unsafe { init_volume(shm, volume_index, &seg.label, data_size)? };
-    register_volume(volume_index, shm, data_size);
-    Ok(Some(shm))
+    Ok(Some(register_volume(volume_index, shm, data_size)))
 }
 
 /// Write a new volume's header and its single free block, then publish it
@@ -708,27 +659,57 @@ unsafe fn init_volume(
     set_cstr(&mut name_buf, label);
     (*shm).volume_name = name_buf;
     (*shm).volume_index = volume_index as i32;
-    // `relative_offset` is unused under the indexed-relptr encoding; each
-    // relptr carries its own volume index in the high bits.
-    (*shm).relative_offset = 0;
+    (*shm).poison = poison_on_free() as usize;
     (*shm).volume_size = data_size;
     ShmLock::init(std::ptr::addr_of_mut!((*shm).lock))?;
     (*shm).cursor = 0;
+    // SHM-12
+    (*shm).next_index.store(
+        if volume_index == PRIMARY_VOLUME { PRIMARY_VOLUME as u32 + 1 } else { 0 },
+        Ordering::Relaxed,
+    );
     let first_block = (shm as *mut u8).add(std::mem::size_of::<ShmHeader>()) as *mut BlockHeader;
-    (*first_block).magic = BLK_MAGIC;
-    (*first_block).reference_count = AtomicU32::new(0);
-    (*first_block).size = first_size;
+    (*first_block).set_magic(BLK_MAGIC);
+    (*first_block).reference_count.store(0, Ordering::Relaxed);
+    (*first_block).set_size(first_size);
     (*shm).magic.store(SHM_MAGIC, Ordering::Release);
     Ok(())
 }
 
-fn register_volume(volume_index: usize, shm: *mut ShmHeader, data_size: usize) {
-    {
-        let mut vols = VOLUMES.lock();
-        vols.slots[volume_index].set(shm, data_size);
-        vols.mark_used(volume_index);
+/// Take the program-wide settings a volume's header records: the primary
+/// volume's poison setting holds for every process (SHM-6).
+///
+/// # Safety
+/// `shm` must point to a published volume header.
+unsafe fn adopt_volume_settings(volume_index: usize, shm: *const ShmHeader) {
+    if volume_index == PRIMARY_VOLUME {
+        POISON.store(if (*shm).poison != 0 { 2 } else { 1 }, Ordering::Relaxed);
     }
+}
+
+// SHM-10: a volume this process already maps keeps that mapping; the new
+// one is dropped and the existing header returned.
+fn register_volume(volume_index: usize, shm: *mut ShmHeader, data_size: usize) -> *mut ShmHeader {
+    let mut vols = VOLUMES.lock();
+    let existing = vols.slots[volume_index].ptr();
+    if !existing.is_null() {
+        drop(vols);
+        // SAFETY: mapped by the caller with this length and not yet shared.
+        unsafe { libc::munmap(shm as *mut libc::c_void, data_size + std::mem::size_of::<ShmHeader>()) };
+        return existing;
+    }
+    unsafe { adopt_volume_settings(volume_index, shm) };
+    let listed = vols.used.iter().any(|&i| i as usize == volume_index);
+    vols.slots[volume_index].set(shm, data_size);
+    vols.mark_used(volume_index);
     publish_vol(volume_index, shm, data_size);
+    // SHM-10
+    if !listed && volume_index < MAX_VOLUME_NUMBER {
+        let n = PUBLISHED_LEN.load(Ordering::Relaxed);
+        PUBLISHED[n].store(volume_index as u16, Ordering::Relaxed);
+        PUBLISHED_LEN.store(n + 1, Ordering::Release);
+    }
+    shm
 }
 
 /// Map an existing, initialised volume at `volume_index`.
@@ -751,20 +732,15 @@ fn open_and_register(
             name, stored, volume_index
         )));
     }
-    register_volume(volume_index, shm, data_size);
-    Ok(Ok(shm))
+    Ok(Ok(register_volume(volume_index, shm, data_size)))
 }
 
-/// Reason `shopen` could not return a mapped volume. Each variant is
-/// distinguishable so callers (notably `rel2abs`) can render a precise
-/// diagnostic instead of the historical generic "volume not found".
+/// Reason `shopen_diag` could not return a mapped volume, so callers
+/// (notably `rel2abs`) can render a precise diagnostic.
 #[derive(Debug)]
 pub enum ShopenMiss {
-    /// COMMON_BASENAME is empty: this process never called `shinit`.
-    /// Post-refactor (rlib removal) this should not be reachable from
-    /// normal call paths -- there is one libmorloc.so per process and
-    /// the nexus/pool wire shinit before any allocation. Surfacing it
-    /// explicitly catches "someone touched a relptr before init" bugs.
+    /// COMMON_BASENAME is empty: this process never called `shinit`, so a
+    /// relptr was used before initialisation.
     NotInitialized,
     /// Basename is set but neither `/dev/shm/<basename>-<i>` nor the
     /// file-backed fallback at `<fallback_dir>/<basename>-<i>` could be
@@ -780,20 +756,8 @@ pub enum ShopenMiss {
     },
 }
 
-/// Open an existing SHM volume (or return cached pointer).
-/// Wrapper around `shopen_diag` that collapses miss reasons into
-/// `Ok(None)` for legacy callers; use `shopen_diag` directly when you
-/// need to render a specific diagnostic.
-pub fn shopen(volume_index: usize) -> Result<Option<*mut ShmHeader>, MorlocError> {
-    match shopen_diag(volume_index)? {
-        Ok(shm) => Ok(Some(shm)),
-        Err(_) => Ok(None),
-    }
-}
-
-/// Diagnostic version of `shopen`: distinguishes "not initialized"
-/// from "file missing" so `rel2abs` can give the user something
-/// actionable instead of the generic "volume not found".
+/// Map an existing volume (or return the cached mapping), or say why it
+/// could not be mapped.
 pub fn shopen_diag(
     volume_index: usize,
 ) -> Result<Result<*mut ShmHeader, ShopenMiss>, MorlocError> {
@@ -939,7 +903,6 @@ fn split_volume_name(name: &str) -> (String, usize) {
 /// rather than growing a volume that no owner would ever remove.
 pub fn shclose() -> Result<(), MorlocError> {
     run_shclose_hooks();
-    let _lock = ALLOC_MUTEX.lock();
     let mut vols = VOLUMES.lock();
     shclose_locked(&mut vols);
     CURRENT_VOLUME.store(0, Ordering::Release);
@@ -959,7 +922,6 @@ pub(crate) fn exiting() -> bool {
 pub fn shretire() -> Result<(), MorlocError> {
     EXITING.store(true, Ordering::SeqCst);
     run_shclose_hooks();
-    let _lock = ALLOC_MUTEX.lock();
     let vols = VOLUMES.lock();
     retire_names();
     drop(vols);
@@ -969,40 +931,11 @@ pub fn shretire() -> Result<(), MorlocError> {
 
 fn retire_names() {
     if owns_program() {
-        if let Some(cb) = COMMON_BASENAME.try_lock() {
-            let basename = get_cstr_buf(&cb).to_string();
-            drop(cb);
-            let fallback = FALLBACK_DIR.try_lock().map(|fb| get_cstr_buf(&fb).to_string()).unwrap_or_default();
-            remove_program_volumes(&basename, &fallback);
-        }
+        let basename = get_cstr_buf(&COMMON_BASENAME.lock()).to_string();
+        let fallback = get_cstr_buf(&FALLBACK_DIR.lock()).to_string();
+        remove_program_volumes(&basename, &fallback);
         OWNER_GENERATION.store(u64::MAX, Ordering::SeqCst);
     }
-}
-
-/// Drop every SHM volume currently held by this process as `shclose` does,
-/// and clear bookkeeping (VOLUMES / CURRENT_VOLUME / COMMON_BASENAME).
-///
-/// Intended for in-process recovery (pool-crash teardown) by the owner.
-/// After this returns, no SHM is mapped or named on disk for this basename, and the
-/// allocator is reset to its pre-`shinit` state. Caller is responsible
-/// for calling `shinit` again with a fresh basename and respawning any
-/// pools so they shopen the new files.
-///
-/// Holds `ALLOC_MUTEX` across the entire teardown, so any concurrent
-/// `shmalloc` or `shfree` blocks until reset completes. Callers that
-/// `shfree` after reset against a stale pointer will hit the
-/// "address not inside any mapped volume" guard added to `shfree` and
-/// no-op rather than segfault.
-pub fn reset_all() -> Result<(), MorlocError> {
-    let _lock = ALLOC_MUTEX.lock();
-    let mut vols = VOLUMES.lock();
-    shclose_locked(&mut vols);
-    CURRENT_VOLUME.store(0, std::sync::atomic::Ordering::Release);
-    let mut cb = COMMON_BASENAME.lock();
-    for b in cb.iter_mut() {
-        *b = 0;
-    }
-    Ok(())
 }
 
 /// Blocks currently held across every mapped volume, and the bytes they
@@ -1032,10 +965,10 @@ pub fn live_block_stats(hist: &mut [usize]) -> (usize, usize) {
             while (blk as *const u8) < end
                 && (end as usize) - (blk as usize) >= hdr_size
             {
-                if (*blk).magic != BLK_MAGIC {
+                if (*blk).magic() != BLK_MAGIC {
                     break;
                 }
-                let size = (*blk).size;
+                let size = (*blk).size();
                 if size == 0 || size > slot.data_size() {
                     break;
                 }
@@ -1056,10 +989,10 @@ pub fn live_block_stats(hist: &mut [usize]) -> (usize, usize) {
 
 /// Returns true if `ptr` falls inside any currently-mapped SHM volume.
 /// Used by `shfree` as a safety guard against being called with a
-/// stale pointer after `reset_all` (e.g. a worker that was holding an
+/// stale pointer after `shclose` (e.g. a worker that was holding an
 /// SHM ptr when its request was failed by the recovery quiesce).
 fn ptr_is_in_any_volume(ptr: AbsPtr) -> bool {
-    ptr_in_volumes(&VOLUMES.lock(), ptr)
+    published_volume_of(ptr).is_some()
 }
 
 fn ptr_in_volumes(vols: &VolumeTable, ptr: AbsPtr) -> bool {
@@ -1084,6 +1017,8 @@ fn shclose_locked(vols: &mut VolumeTable) {
     // Drain `used` once into a local list; `mark_free` would O(N) on
     // each removal otherwise.
     let used: Vec<u16> = std::mem::take(&mut vols.used);
+    // SHM-10, DAEMON-1
+    PUBLISHED_LEN.store(0, Ordering::Release);
     for slot_idx in used {
         let i = slot_idx as usize;
         let shm = vols.slots[i].ptr();
@@ -1120,8 +1055,14 @@ fn remove_program_volumes(basename: &str, fallback: &str) {
             .map_or(false, |hex| hex.len() == 4 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
     };
     if fallback.is_empty() {
-        // Nothing records this program's objects: try every index.
-        for i in 1..MAX_VOLUME_NUMBER {
+        // Nothing records this program's objects: try every numbered index,
+        // and the one being created if its creator died before counting it
+        // (SHM-12).
+        let last = published_header(PRIMARY_VOLUME)
+            .map(|p| unsafe { (*p).next_index.load(Ordering::Acquire) } as usize)
+            .filter(|&n| n > PRIMARY_VOLUME)
+            .map_or(MAX_VOLUME_NUMBER - 1, |n| n.min(MAX_VOLUME_NUMBER - 1));
+        for i in 1..=last {
             if let Ok(c) = std::ffi::CString::new(volume_name(basename, i)) {
                 unsafe { libc::shm_unlink(c.as_ptr()) };
             }
@@ -1146,25 +1087,6 @@ fn remove_program_volumes(basename: &str, fallback: &str) {
     }
 }
 
-/// Allocate at least `size` bytes from shared memory and return a pointer
-/// to the start of the data region.
-///
-/// **Size contract.** The returned block always has at least `BLOCK_ALIGN`
-/// usable bytes; requests for any size in `0..=BLOCK_ALIGN` all yield a
-/// `BLOCK_ALIGN`-byte block. Larger requests are rounded up to a multiple
-/// of `BLOCK_ALIGN`. Callers that ship "zero bytes of payload" (e.g. nil
-/// values, empty arrays whose width comes from `schema.width == 0`) get a
-/// real, freeable block back -- there is no zero-byte sentinel. This is
-/// load-bearing: the eval pipeline (`morloc_eval_r` shcalloc'ing the
-/// top-level wrapper at width 0 for nil), `unpack_with_schema`, and
-/// `read_binary` all rely on receiving a non-null pointer for nil-shaped
-/// allocations.
-///
-/// **Lifetime contract.** Every successful return must be paired with
-/// either an `shfree` or, when active on the current thread, registration
-/// in the per-eval arena (which auto-shfrees at scope drop). The arena
-/// hook fires here unconditionally on success; callers outside the arena
-/// see no behavioral difference.
 // SHM-8: the references this process holds, net of those it has handed on.
 static HELD_REFERENCES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
@@ -1193,7 +1115,7 @@ pub(crate) unsafe fn incref_held(vols: &VolumeTable, ptr: AbsPtr) -> bool {
         return false;
     }
     let blk = &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader);
-    if blk.magic != BLK_MAGIC {
+    if blk.magic() != BLK_MAGIC {
         return false;
     }
     loop {
@@ -1216,7 +1138,6 @@ pub(crate) unsafe fn incref_held(vols: &VolumeTable, ptr: AbsPtr) -> bool {
 // none is consulted.
 pub(crate) fn free_uncounted(abs: AbsPtr) {
     take_on_reference();
-    let _lock = ALLOC_MUTEX.lock();
     if ptr_is_in_any_volume(abs) {
         let _ = shfree_unlocked(abs);
     }
@@ -1227,21 +1148,31 @@ pub(crate) fn forget_held_references() {
     HELD_REFERENCES.store(0, Ordering::Relaxed);
 }
 
-pub(crate) fn morloc_held_references() -> i64 {
-    held_references()
-}
-
+/// Allocate at least `size` bytes from shared memory and return a pointer
+/// to the start of the data region.
+///
+/// **Size contract.** The returned block always has at least `BLOCK_ALIGN`
+/// usable bytes; requests for any size in `0..=BLOCK_ALIGN` all yield a
+/// `BLOCK_ALIGN`-byte block. Larger requests are rounded up to a multiple
+/// of `BLOCK_ALIGN`. Callers that ship "zero bytes of payload" (e.g. nil
+/// values, empty arrays whose width comes from `schema.width == 0`) get a
+/// real, freeable block back -- there is no zero-byte sentinel. This is
+/// load-bearing: the eval pipeline (`morloc_eval_r` shcalloc'ing the
+/// top-level wrapper at width 0 for nil), `unpack_with_schema`, and
+/// `read_binary` all rely on receiving a non-null pointer for nil-shaped
+/// allocations.
+///
+/// **Lifetime contract.** Every successful return must be paired with
+/// either an `shfree` or, when active on the current thread, registration
+/// in the per-eval arena (which auto-shfrees at scope drop). The arena
+/// hook fires here unconditionally on success; callers outside the arena
+/// see no behavioral difference.
 pub fn shmalloc(size: usize) -> Result<AbsPtr, MorlocError> {
     let size = if size == 0 { BLOCK_ALIGN } else { align_up(size, BLOCK_ALIGN) };
-    let first = {
-        let _lock = ALLOC_MUTEX.lock();
-        shmalloc_unlocked(size)
-    };
-    let ptr = match first {
+    let ptr = match shmalloc_unlocked(size) {
         Ok(p) => p,
         // FORK-15: blocks only gone children still lease may be released.
         Err(e) if crate::lease::any_created() && crate::lease::reclaim() > 0 => {
-            let _lock = ALLOC_MUTEX.lock();
             shmalloc_unlocked(size).map_err(|_| e)?
         }
         Err(e) => return Err(e),
@@ -1269,10 +1200,8 @@ pub fn shcalloc(nmemb: usize, size: usize) -> Result<AbsPtr, MorlocError> {
     let total = nmemb.checked_mul(size).ok_or_else(|| {
         MorlocError::Shm(format!("shcalloc: {nmemb} elements of {size} bytes overflows"))
     })?;
-    let ptr = shmalloc(total)?;
-    // SAFETY: ptr is a freshly allocated SHM block of `total` bytes.
-    unsafe { std::ptr::write_bytes(ptr, 0, total) };
-    Ok(ptr)
+    // SHM-6: a new block already reads as zero.
+    shmalloc(total)
 }
 
 /// Free a shared memory block (decrement reference count).
@@ -1281,13 +1210,14 @@ pub fn shfree(ptr: AbsPtr) -> Result<(), MorlocError> {
     // guard-drop won't attempt a second free. No-op if no arena is active
     // or if `ptr` was never tracked.
     crate::eval_arena::forget_if_active(ptr);
-    let _lock = ALLOC_MUTEX.lock();
-    // Pool-crash recovery: if `reset_all` has unmapped every volume since
-    // this caller obtained `ptr`, dereferencing the (now-unmapped) header
-    // would segfault. The recovery sequence is responsible for getting all
-    // workers to drop their references; this guard is just defense in
-    // depth for the in-flight case where a worker's arena drop race-loses
-    // to reset_all's munmap.
+    release(ptr)
+}
+
+/// Release one reference the caller took for itself, never one an eval
+/// arena records (SHM-7).
+pub fn release(ptr: AbsPtr) -> Result<(), MorlocError> {
+    // SHM-10: a pointer into no published volume is from a namespace a
+    // recovery discarded.
     if !ptr.is_null() && !ptr_is_in_any_volume(ptr) {
         return Ok(());
     }
@@ -1304,7 +1234,7 @@ pub unsafe fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
         return Err(MorlocError::Shm("Cannot incref NULL pointer".into()));
     }
     // A pointer into a volume that has since been unmapped (pool-crash
-    // recovery calls `reset_all`) must not be dereferenced. `shfree` takes
+    // recovery calls `shclose`) must not be dereferenced. `shfree` takes
     // the same guard.
     if !ptr_is_in_any_volume(ptr) {
         return Err(MorlocError::Shm(
@@ -1314,13 +1244,7 @@ pub unsafe fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
     // SAFETY: ptr was returned by shmalloc, which places a BlockHeader immediately before
     // the returned data pointer. Magic check below validates the header.
     let blk = unsafe { &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader) };
-    if blk.magic == BLK_ABSORBED {
-        return Err(MorlocError::Shm(
-            "Cannot incref a block that was merged into its predecessor \
-             (the caller is holding a stale pointer)".into(),
-        ));
-    }
-    if blk.magic != BLK_MAGIC {
+    if blk.magic() != BLK_MAGIC {
         return Err(MorlocError::Shm("Corrupted memory - invalid magic".into()));
     }
     // Refuse the same two states `shfree` refuses. Zero means the block is
@@ -1368,7 +1292,7 @@ pub unsafe fn reference_count(ptr: AbsPtr) -> Option<u32> {
     let blk = unsafe {
         &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)
     };
-    if blk.magic != BLK_MAGIC {
+    if blk.magic() != BLK_MAGIC {
         return None;
     }
     Some(blk.reference_count.load(Ordering::Acquire))
@@ -1400,10 +1324,27 @@ pub unsafe fn shm_block_size(ptr: AbsPtr) -> Option<usize> {
         return None;
     }
     let header = &*(header_ptr as *const BlockHeader);
-    if header.magic != BLK_MAGIC {
+    if header.magic() != BLK_MAGIC {
         return None;
     }
-    Some(header.size)
+    Some(header.size())
+}
+
+/// SHM-13: the generation of the block `ptr` heads, or `None` when no block
+/// heads it.
+///
+/// # Safety
+/// `ptr` must be null or point into a mapped volume's data.
+pub unsafe fn block_generation(ptr: AbsPtr) -> Option<u16> {
+    if ptr.is_null() {
+        return None;
+    }
+    let header_ptr = ptr.sub(std::mem::size_of::<BlockHeader>());
+    if !ptr_is_in_any_volume(header_ptr) {
+        return None;
+    }
+    let header = &*(header_ptr as *const BlockHeader);
+    (header.magic() == BLK_MAGIC).then(|| header.generation())
 }
 
 /// Convert relative pointer to absolute pointer. O(1) under the
@@ -1432,8 +1373,9 @@ pub fn rel2abs_extent(ptr: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError>
     let offset = relptr_offset(ptr);
     if vol_idx == 0 {
         return Err(MorlocError::Shm(format!(
-            "rel2abs: relptr {} is in volume 0, which is never mapped: a buffer- or \
-             file-relative offset reached shared memory without being rebased",
+            "rel2abs: relptr {} is in volume 0, which is never mapped: either a \
+             buffer-relative offset was not rebased, or the word was read with the \
+             wrong layout",
             ptr
         )));
     }
@@ -1582,31 +1524,11 @@ fn rel2abs_miss_error(
     }
 }
 
-/// Convert absolute pointer to relative pointer. Walks `USED_VOLUMES`
-/// (the packed list of K active slot indices) rather than scanning the
-/// 32 768-slot sparse `slots` array. Cost is O(K_active).
+/// Convert absolute pointer to relative pointer.
 pub fn abs2rel(ptr: AbsPtr) -> Result<RelPtr, MorlocError> {
-    let vols = VOLUMES.lock();
-    for &slot_idx in &vols.used {
-        let i = slot_idx as usize;
-        let slot = vols.slots[i];
-        if slot.is_null() {
-            continue;
-        }
-        // SAFETY: data_base = header + sizeof::<ShmHeader>(); the slot's
-        // cached data_size bounds the search range. ptr is matched
-        // against the half-open interval [data_start, data_start +
-        // data_size) before any pointer arithmetic returns.
-        unsafe {
-            let data_start = (slot.ptr() as *const u8)
-                .add(std::mem::size_of::<ShmHeader>());
-            let data_end = data_start.add(slot.data_size());
-            let p = ptr as *const u8;
-            if p >= data_start && p < data_end {
-                let offset = p.offset_from(data_start) as usize;
-                return Ok(encode_relptr(i, offset));
-            }
-        }
+    // SHM-10
+    if let Some((idx, base, _)) = published_volume_of(ptr) {
+        return Ok(encode_relptr(idx, ptr as usize - base as usize));
     }
     Err(MorlocError::Shm(format!(
         "Failed to find absptr {:?} in shared memory",
@@ -1614,39 +1536,6 @@ pub fn abs2rel(ptr: AbsPtr) -> Result<RelPtr, MorlocError> {
     )))
 }
 
-/// Find the ShmHeader for a given absolute pointer.
-pub fn abs2shm(ptr: AbsPtr) -> Result<*mut ShmHeader, MorlocError> {
-    let vols = VOLUMES.lock();
-    for &slot_idx in &vols.used {
-        let slot = vols.slots[slot_idx as usize];
-        if slot.is_null() {
-            continue;
-        }
-        // SAFETY: see abs2rel.
-        unsafe {
-            let data_start = (slot.ptr() as *const u8)
-                .add(std::mem::size_of::<ShmHeader>());
-            let data_end = data_start.add(slot.data_size());
-            let p = ptr as *const u8;
-            if p >= data_start && p < data_end {
-                return Ok(slot.ptr());
-            }
-        }
-    }
-    Err(MorlocError::Shm("Failed to find absptr in SHM".into()))
-}
-
-/// Register a pre-mapped ShmHeader-backed region as a volume.
-///
-/// `slot_hint = Some(i)` requests that index; if `i` is occupied, falls
-/// back to a randomly chosen free slot. `slot_hint = None` always picks
-/// random.
-///
-/// The caller owns the mmap'd region for as long as the volume is
-/// registered. Layer 2 (packet-as-volume) uses this to map an input
-/// file's data section directly into VOLUMES without a memcpy.
-///
-/// Returns the chosen slot index, or an error if every slot is taken.
 /// Bytes across every allocator volume plus every attached companion.
 pub fn total_shm_size() -> usize {
     let mut total = 0;
@@ -1947,7 +1836,7 @@ fn shmalloc_unlocked(size: usize) -> Result<AbsPtr, MorlocError> {
     unsafe {
         let data = (blk as *mut u8).add(std::mem::size_of::<BlockHeader>());
         if poison_on_free() {
-            std::ptr::write_bytes(data, 0, (*blk).size);
+            std::ptr::write_bytes(data, 0, (*blk).size());
         }
         Ok(data)
     }
@@ -1962,13 +1851,7 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
     let blk = unsafe {
         &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)
     };
-    if blk.magic == BLK_ABSORBED {
-        return Err(MorlocError::Shm(
-            "Cannot free a block that was merged into its predecessor \
-             (the caller is holding a stale pointer)".into(),
-        ));
-    }
-    if blk.magic != BLK_MAGIC {
+    if blk.magic() != BLK_MAGIC {
         return Err(MorlocError::Shm("Corrupted memory".into()));
     }
     // Scrub before publishing, not after. A count of zero is precisely what
@@ -2010,106 +1893,162 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
             // reads as in-use, so the block cannot be handed to anyone until
             // the store below.
             let scrub = if poison_on_free() { POISON_BYTE } else { 0 };
-            unsafe {
-                std::ptr::write_bytes(ptr, scrub, blk.size);
-            }
-            crate::shm_stats::on_release(blk.size);
+            unsafe { scrub_block(ptr, scrub, blk.size()) };
+            crate::shm_stats::on_release(blk.size());
             blk.reference_count.store(0, Ordering::Release);
         }
         return Ok(());
     }
 }
 
-fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
-    let cv = CURRENT_VOLUME.load(Ordering::Relaxed);
-    let vols = VOLUMES.lock();
+// SHM-6: a fill this large leaves the cache to the next owner either way.
+const NONTEMPORAL_SCRUB_BYTES: usize = 8 << 20;
 
-    // Try current volume first (allocation hint).
-    let shm = vols.slots[cv].ptr();
-    if !shm.is_null() {
+// SHM-6: every byte is stored before the caller's release store publishes
+// the block; streaming stores are fenced to keep that order.
+// SAFETY: SHM-6: `ptr` must address `len` writable bytes.
+unsafe fn scrub_block(ptr: *mut u8, byte: u8, len: usize) {
+    #[cfg(target_arch = "x86_64")]
+    if len >= NONTEMPORAL_SCRUB_BYTES {
+        use std::arch::x86_64::{__m128i, _mm_set1_epi8, _mm_sfence, _mm_stream_si128};
+        let head = ptr.align_offset(16).min(len);
+        let body = (len - head) & !63;
+        // SAFETY: SHM-6: head, body and tail partition the caller's bytes;
+        // the body starts 16-aligned, as a streaming store requires.
+        unsafe {
+            std::ptr::write_bytes(ptr, byte, head);
+            let v = _mm_set1_epi8(byte as i8);
+            let mut p = ptr.add(head);
+            let end = p.add(body);
+            while p < end {
+                _mm_stream_si128(p as *mut __m128i, v);
+                _mm_stream_si128(p.add(16) as *mut __m128i, v);
+                _mm_stream_si128(p.add(32) as *mut __m128i, v);
+                _mm_stream_si128(p.add(48) as *mut __m128i, v);
+                p = p.add(64);
+            }
+            std::ptr::write_bytes(end, byte, len - head - body);
+            _mm_sfence();
+        }
+        return;
+    }
+    // SAFETY: SHM-6: the caller's bytes.
+    unsafe { std::ptr::write_bytes(ptr, byte, len) };
+}
+
+// SHM-10: the header of published volume `idx`.
+fn published_header(idx: usize) -> Option<*mut ShmHeader> {
+    let base = MORLOC_VOL_TABLE.get(idx)?.data_base.load(Ordering::Acquire);
+    if base.is_null() {
+        return None;
+    }
+    // SAFETY: SHM-10: a published base is the data region just past its
+    // volume's header, mapped until a quiesced recovery.
+    Some(unsafe { base.sub(std::mem::size_of::<ShmHeader>()) } as *mut ShmHeader)
+}
+
+// SHM-11: try the published volumes, the hinted one first, holding no
+// process lock while each volume's own lock is awaited.
+fn find_in_published(size: usize) -> Result<Option<*mut BlockHeader>, MorlocError> {
+    let cv = CURRENT_VOLUME.load(Ordering::Relaxed);
+    if let Some(shm) = published_header(cv) {
         if let Some(blk) = find_free_block_in_volume(shm, size)? {
-            return Ok(blk);
+            return Ok(Some(blk));
         }
     }
-
-    // Fall back to scanning all currently-occupied volumes.
-    for &slot_idx in &vols.used {
-        let i = slot_idx as usize;
+    let n = PUBLISHED_LEN.load(Ordering::Acquire);
+    for slot in &PUBLISHED[..n] {
+        let i = slot.load(Ordering::Relaxed) as usize;
         if i == cv {
             continue;
         }
-        let shm = vols.slots[i].ptr();
-        if shm.is_null() {
-            continue;
-        }
+        let Some(shm) = published_header(i) else { continue };
         if let Some(blk) = find_free_block_in_volume(shm, size)? {
             CURRENT_VOLUME.store(i, Ordering::Relaxed);
-            return Ok(blk);
+            return Ok(Some(blk));
         }
     }
+    Ok(None)
+}
 
-    // No existing volume has space; grow into a randomly-chosen free
-    // slot. Geometric growth (K x previous size) keeps total capacity
-    // expanding exponentially so MAX_VOLUME_NUMBER is unreachable in
-    // practice.
-    const VOLUME_GROWTH_FACTOR: usize = 2;
-    let prev_volume_size = {
-        let last = vols.slots[cv];
-        if !last.is_null() {
-            last.data_size()
-        } else {
-            0xffff
-        }
-    };
-    let new_size = std::cmp::max(
-        size.saturating_add(std::mem::size_of::<BlockHeader>()),
-        prev_volume_size.saturating_mul(VOLUME_GROWTH_FACTOR),
-    );
+fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
+    if let Some(blk) = find_in_published(size)? {
+        return Ok(blk);
+    }
+    // SHM-11: a thread that grew meanwhile may have made room.
+    let _grow = GROW.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(blk) = find_in_published(size)? {
+        return Ok(blk);
+    }
 
-    drop(vols);
-    let basename = {
-        let cb = COMMON_BASENAME.lock();
-        get_cstr_buf(&cb).to_string()
-    };
+    let basename = get_common_basename();
     // No program to grow: shared memory is not initialised, or was closed.
     // A volume made now would be named for nothing and outlive the process.
-    if basename.is_empty() {
+    let Some(primary) = published_header(PRIMARY_VOLUME).filter(|_| !basename.is_empty()) else {
         return Err(MorlocError::Shm(format!(
             "cannot allocate {} bytes: shared memory is not initialised",
             size
         )));
+    };
+    // SHM-12: the volumes other processes made may have room.
+    map_numbered(&basename, primary);
+    if let Some(blk) = find_in_published(size)? {
+        return Ok(blk);
     }
-    // Another process may have created the index this process picks, since
-    // the choice is made from this process's own table. Such an index is
-    // mapped (a volume of the program like any other) and tried, and the
-    // search moves on.
-    const ATTEMPTS: usize = 16;
-    for _ in 0..ATTEMPTS {
-        let picked = pick_free_slot(&VOLUMES.lock());
-        let Some(idx) = picked else {
+    // SAFETY: SHM-10: the primary volume stays mapped.
+    let header = unsafe { &*primary };
+    // SHM-12: nothing under the lock is left torn by a holder's death.
+    let _ns = header.grow_lock.lock()?;
+    map_numbered(&basename, primary);
+    if let Some(blk) = find_in_published(size)? {
+        return Ok(blk);
+    }
+    let largest = {
+        let n = PUBLISHED_LEN.load(Ordering::Acquire);
+        PUBLISHED[..n]
+            .iter()
+            .map(|i| MORLOC_VOL_TABLE[i.load(Ordering::Relaxed) as usize].data_size.load(Ordering::Relaxed))
+            .max()
+            .unwrap_or(0xffff)
+    };
+    let new_size = std::cmp::max(
+        size.saturating_add(std::mem::size_of::<BlockHeader>()),
+        largest.saturating_mul(2),
+    );
+    loop {
+        let idx = header.next_index.load(Ordering::Acquire) as usize;
+        if idx >= MAX_VOLUME_NUMBER {
             return Err(MorlocError::Shm(format!(
-                "Could not find suitable block for {} bytes: all {} \
-                 volume slots are occupied",
+                "Could not find suitable block for {} bytes: all {} volume numbers are used",
                 size, MAX_VOLUME_NUMBER
             )));
-        };
+        }
         let name = volume_name(&basename, idx);
+        // SHM-12: a name that exists was made by a creator that died before
+        // counting it: used if initialised, skipped otherwise, never removed.
         let shm = match create_and_register(&name, idx, new_size)? {
-            Some(shm) => shm,
-            None => match open_and_register(&name, idx) {
-                Ok(Ok(shm)) => shm,
-                _ => continue,
-            },
+            Some(shm) => Some(shm),
+            None => open_and_register(&name, idx).ok().and_then(|r| r.ok()),
         };
-        if let Some(blk) = find_free_block_in_volume(shm, size)? {
-            CURRENT_VOLUME.store(idx, Ordering::Relaxed);
-            return Ok(blk);
+        header.next_index.store(idx as u32 + 1, Ordering::Release);
+        if let Some(shm) = shm {
+            if let Some(blk) = find_free_block_in_volume(shm, size)? {
+                CURRENT_VOLUME.store(idx, Ordering::Relaxed);
+                return Ok(blk);
+            }
         }
     }
-    Err(MorlocError::Shm(format!(
-        "Could not create a volume for {} bytes: {} volume indices in a row were taken",
-        size, ATTEMPTS
-    )))
+}
+
+// SHM-12: map every initialised volume numbered below the primary's count.
+fn map_numbered(basename: &str, primary: *mut ShmHeader) {
+    // SAFETY: SHM-10: the primary volume stays mapped.
+    let next = unsafe { (*primary).next_index.load(Ordering::Acquire) } as usize;
+    for idx in PRIMARY_VOLUME + 1..next.min(MAX_VOLUME_NUMBER) {
+        if published_header(idx).is_none() {
+            let _ = open_and_register(&volume_name(basename, idx), idx);
+        }
+    }
 }
 
 /// Take ownership of a free block, found and sized under the volume lock
@@ -2119,10 +2058,8 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
 /// count lives in shared memory where every process can see it. Handing a
 /// block back to a caller while it still reads zero publishes it as
 /// available to every other process for as long as it takes the caller to
-/// claim it -- and `ALLOC_MUTEX`, the only thing serialising the steps
-/// between, is an ordinary in-process mutex. It keeps this process's own
-/// threads apart and says nothing about the pools, which are separate
-/// processes allocating from these same volumes. Two of them would be given
+/// claim it, and the pools are separate processes allocating from these
+/// same volumes. Two of them would be given
 /// the same block, then write over each other's data, split the same block
 /// in two different ways, and each free it once.
 ///
@@ -2134,11 +2071,13 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
 /// `blk` must be a valid BlockHeader in the volume `_held` locks.
 #[inline]
 unsafe fn claim(_held: &ShmGuard<'_>, blk: *mut BlockHeader) -> Result<*mut BlockHeader, MorlocError> {
+    // SHM-13: published by the CAS below; 0 is left to packets to mean unchecked.
+    (*blk).bump_generation();
     (*blk)
         .reference_count
         .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
         .map(|_| {
-            crate::shm_stats::on_claim((*blk).size);
+            crate::shm_stats::on_claim((*blk).size());
             blk
         })
         .map_err(|n| {
@@ -2166,9 +2105,9 @@ fn find_free_block_in_volume(
             // Try cursor position first
             if cursor != VOLNULL {
                 let blk = vol2abs_raw(cursor, shm) as *mut BlockHeader;
-                if (*blk).magic == BLK_MAGIC
+                if (*blk).magic() == BLK_MAGIC
                     && (*blk).reference_count.load(Ordering::Acquire) == 0
-                    && (*blk).size >= size
+                    && (*blk).size() >= size
                 {
                     break 'found Some(blk);
                 }
@@ -2219,37 +2158,38 @@ unsafe fn scan_volume(
 ) -> Option<*mut BlockHeader> {
     let hdr_size = std::mem::size_of::<BlockHeader>();
     while (blk as *const u8).add(hdr_size + size) <= end {
-        if blk.is_null() || (*blk).magic != BLK_MAGIC {
+        if blk.is_null() || (*blk).magic() != BLK_MAGIC {
             return None;
         }
 
         // Merge adjacent free blocks
         while (*blk).reference_count.load(Ordering::Acquire) == 0 {
-            let next = (blk as *mut u8).add(hdr_size + (*blk).size) as *mut BlockHeader;
+            let next = (blk as *mut u8).add(hdr_size + (*blk).size()) as *mut BlockHeader;
             // The whole header must lie inside the region: starting inside it
             // is not enough, since the next thing done is a 16-byte read.
             if (next as *const u8) >= end
                 || (end as usize) - (next as usize) < hdr_size
-                || (*next).magic != BLK_MAGIC
+                || (*next).magic() != BLK_MAGIC
                 || (*next).reference_count.load(Ordering::Acquire) != 0
             {
                 break;
             }
-            // The absorbed header becomes interior bytes of the survivor.
-            // Stamp it so a pointer to the absorbed block stops reading as
-            // a block: leaving a valid header inside a live allocation is
-            // the allocator lying about its own structure, and every
-            // validating entry point believes it.
-            let next_size = (*next).size;
-            (*next).magic = BLK_ABSORBED;
-            (*blk).size += hdr_size + next_size;
+            // SHM-6: the absorbed header becomes interior bytes of the
+            // survivor, zero like the rest of a free block. A zero magic also
+            // stops a stale pointer to the absorbed block reading as a block.
+            let next_size = (*next).size();
+            // SHM-13: a header made here later starts past both generations.
+            let g = (*blk).generation().max((*next).generation());
+            (*blk).set_generation(g);
+            (*next).zero();
+            (*blk).set_size((*blk).size() + hdr_size + next_size);
         }
 
-        if (*blk).reference_count.load(Ordering::Acquire) == 0 && (*blk).size >= size {
+        if (*blk).reference_count.load(Ordering::Acquire) == 0 && (*blk).size() >= size {
             return Some(blk);
         }
 
-        blk = (blk as *mut u8).add(hdr_size + (*blk).size) as *mut BlockHeader;
+        blk = (blk as *mut u8).add(hdr_size + (*blk).size()) as *mut BlockHeader;
     }
     None
 }
@@ -2265,40 +2205,39 @@ unsafe fn split_block(
     blk: *mut BlockHeader,
     size: usize,
 ) -> Result<(), MorlocError> {
-    if (*blk).size == size {
+    if (*blk).size() == size {
         return Ok(());
     }
     // A block smaller than the request would underflow the remainder and
     // send the split below to write a header outside the mapping. The
     // search is supposed to return only blocks large enough; refuse rather
     // than trust it.
-    if (*blk).size < size {
+    if (*blk).size() < size {
         return Err(MorlocError::Shm(
             "Block smaller than the request reached the split".into(),
         ));
     }
-    let remaining = (*blk).size - size;
-    (*blk).size = size;
+    let remaining = (*blk).size() - size;
+    (*blk).set_size(size);
 
     let hdr_size = std::mem::size_of::<BlockHeader>();
     let new_free = (blk as *mut u8).add(hdr_size + size) as *mut BlockHeader;
 
     if remaining > hdr_size {
-        (*new_free).magic = BLK_MAGIC;
-        (*new_free).reference_count = AtomicU32::new(0);
-        (*new_free).size = remaining - hdr_size;
+        (*new_free).set_magic(BLK_MAGIC);
+        (*new_free).reference_count.store(0, Ordering::Relaxed);
+        (*new_free).set_size(remaining - hdr_size);
+        // SHM-13
+        (*new_free).set_generation((*blk).generation());
 
         // Update cursor
         let data_start = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
         (*shm).cursor = (new_free as *const u8).offset_from(data_start) as VolPtr;
     } else {
-        // Too small to head, so it becomes interior bytes of the block.
-        // Stamp whatever header may be sitting there, for the same reason
-        // the merge does.
-        if remaining >= std::mem::size_of::<u32>() {
-            (*new_free).magic = BLK_ABSORBED;
-        }
-        (*blk).size += remaining;
+        // SHM-6: too small to head, so it becomes interior bytes of the
+        // block, zeroed as the merge zeroes an absorbed header.
+        std::ptr::write_bytes(new_free as *mut u8, 0, remaining);
+        (*blk).set_size((*blk).size() + remaining);
         (*shm).cursor = VOLNULL;
     }
     Ok(())
@@ -2317,21 +2256,6 @@ unsafe fn vol2abs_raw(ptr: VolPtr, shm: *const ShmHeader) -> *mut u8 {
 
 // ── Pointer conversion helpers ─────────────────────────────────────────────
 
-#[inline]
-pub fn vol2rel(ptr: VolPtr, shm: &ShmHeader) -> RelPtr {
-    // Under the indexed-relptr encoding, the volume index lives in the
-    // high bits of the relptr and the volume-local offset (ptr) lives
-    // in the low 48 bits.
-    encode_relptr(shm.volume_index as usize, ptr as usize)
-}
-
-/// # Safety
-/// `shm` must be a valid mmap'd ShmHeader. `ptr` must be within the volume's data region.
-#[inline]
-pub unsafe fn vol2abs(ptr: VolPtr, shm: *const ShmHeader) -> AbsPtr {
-    vol2abs_raw(ptr, shm)
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2339,21 +2263,76 @@ mod poison_tests {
     use super::*;
 
     #[test]
+    fn every_process_poisons_as_the_program_does() {
+        let _shm = crate::own_test_registry();
+        let size = std::mem::size_of::<ShmHeader>() + 4096;
+        let mut backing = vec![0u64; size / 8 + 1];
+        let shm = backing.as_mut_ptr() as *mut ShmHeader;
+        set_poison_on_free(true);
+        unsafe { init_volume(shm, PRIMARY_VOLUME, "poison-test", 4096).unwrap() };
+        set_poison_on_free(false);
+        unsafe { adopt_volume_settings(PRIMARY_VOLUME, shm) };
+        let adopted = poison_on_free();
+        set_poison_on_free(false);
+        assert!(adopted, "a process whose own setting is off poisons like the program");
+    }
+
+    #[test]
     fn a_released_block_reads_as_poison_and_a_new_one_as_zero() {
         let _shm = crate::own_test_registry();
         set_poison_on_free(true);
         let p = shmalloc(256).unwrap();
+        let p_size = block_size(p);
         unsafe { std::ptr::write_bytes(p, 7, 256) };
         let freed = unsafe { std::slice::from_raw_parts(p, 256).to_vec() };
         shfree(p).unwrap();
         let after = unsafe { std::slice::from_raw_parts(p, 256).to_vec() };
+        unpoison(p, p_size);
         let q = shmalloc(256).unwrap();
+        let q_size = block_size(q);
         let fresh = unsafe { std::slice::from_raw_parts(q, 256).to_vec() };
         shfree(q).unwrap();
+        unpoison(q, q_size);
         set_poison_on_free(false);
         assert!(freed.iter().all(|&b| b == 7));
         assert!(after.iter().all(|&b| b == POISON_BYTE), "a released block was not poisoned");
         assert!(fresh.iter().all(|&b| b == 0), "a newly allocated block was not zeroed");
+    }
+
+    // SHM-6: a block large enough to be scrubbed past the cache reads as
+    // scrubbed throughout, its unaligned tail included.
+    #[test]
+    fn a_large_released_block_is_scrubbed_throughout() {
+        let _shm = crate::own_test_registry();
+        for poison in [true, false] {
+            set_poison_on_free(poison);
+            let want = if poison { POISON_BYTE } else { 0 };
+            for n in [NONTEMPORAL_SCRUB_BYTES - 3, NONTEMPORAL_SCRUB_BYTES, NONTEMPORAL_SCRUB_BYTES + 37, (16 << 20) + 1] {
+                let p = shmalloc(n).unwrap();
+                let size = block_size(p);
+                unsafe { std::ptr::write_bytes(p, 7, size) };
+                shfree(p).unwrap();
+                let after = unsafe { std::slice::from_raw_parts(p, size) };
+                let bad = after.iter().position(|&b| b != want);
+                if poison {
+                    unpoison(p, size);
+                }
+                assert_eq!(bad, None, "block of {n} bytes, poison {poison}");
+            }
+        }
+        set_poison_on_free(false);
+    }
+
+    fn block_size(p: AbsPtr) -> usize {
+        unsafe { shm_block_size(p) }.unwrap()
+    }
+
+    // SHM-6: with poisoning off a new block is not cleared, and the arena is
+    // shared by every test in the process; a test that poisoned a block
+    // clears it again as soon as it is free, before anything else is made
+    // over it.
+    fn unpoison(p: AbsPtr, size: usize) {
+        unsafe { std::ptr::write_bytes(p, 0, size) };
     }
 }
 
@@ -2367,7 +2346,103 @@ mod calloc_tests {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    // SHM-12: a process that runs out of room uses a volume another process
+    // made rather than making its own.
+    #[test]
+    fn a_process_out_of_room_uses_a_volume_another_made() {
+        let _shm = crate::own_test_registry();
+        const BIG: usize = 48 << 20;
+        let primary = super::published_header(super::PRIMARY_VOLUME).unwrap();
+        let count = || unsafe { (*primary).next_index.load(std::sync::atomic::Ordering::Acquire) };
+        assert!(crate::fork_policy::exits_cleanly_in_a_forked_child(|| {
+            let p = super::shmalloc(BIG).unwrap();
+            super::shfree(p).is_ok()
+        }));
+        let after_child = count();
+        let p = super::shmalloc(BIG).unwrap();
+        let after_parent = count();
+        super::shfree(p).unwrap();
+        assert!(after_child > super::PRIMARY_VOLUME as u32 + 1, "the child made no volume");
+        assert_eq!(after_parent, after_child, "the parent made a volume of its own");
+    }
+
+    // SHM-10: mapping a volume this process already maps keeps the first
+    // mapping, so pointers made from it still convert.
+    #[test]
+    fn a_volume_mapped_twice_keeps_its_first_mapping() {
+        let _shm = crate::own_test_registry();
+        let p = super::shmalloc(64).unwrap();
+        let (idx, base, _) = super::published_volume_of(p).unwrap();
+        let name = super::volume_name(&super::get_common_basename(), idx);
+        let again = super::open_and_register(&name, idx).unwrap().unwrap();
+        let first = unsafe { base.sub(std::mem::size_of::<super::ShmHeader>()) } as *mut super::ShmHeader;
+        let still = super::abs2rel(p).is_ok();
+        super::shfree(p).unwrap();
+        assert_eq!(again, first, "a second mapping replaced the first");
+        assert!(still, "a pointer from the first mapping no longer converts");
+    }
+
+    // SHM-6: without poisoning, a block made from freed and merged dirty
+    // blocks reads as zero, so shcalloc need not clear it.
+    #[test]
+    fn a_new_block_reads_as_zero_without_poisoning() {
+        let _shm = crate::own_test_registry();
+        if super::poison_on_free() {
+            return;
+        }
+        let blocks: Vec<_> = (0..8).map(|_| super::shmalloc(200).unwrap()).collect();
+        for &p in &blocks {
+            unsafe { std::ptr::write_bytes(p, 0xAB, 200) };
+        }
+        for &p in &blocks {
+            super::shfree(p).unwrap();
+        }
+        let big = super::shcalloc(1, 1500).unwrap();
+        let bytes = unsafe { std::slice::from_raw_parts(big, 1500) };
+        let dirty = bytes.iter().position(|&b| b != 0);
+        super::shfree(big).unwrap();
+        assert_eq!(dirty, None, "a new block held a released block's bytes");
+    }
+
+    // SHM-11: an allocation from a volume that has room waits on no process
+    // lock another thread holds.
+    #[test]
+    fn an_allocation_waits_on_no_process_lock() {
+        let _shm = crate::own_test_registry();
+        super::shfree(super::shmalloc(64).unwrap()).unwrap();
+        let held = super::VOLUMES.lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let ok = super::shmalloc(64).map(|p| super::shfree(p).is_ok()).unwrap_or(false);
+            tx.send(ok).unwrap();
+        });
+        let done = rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        worker.join().unwrap();
+        assert_eq!(done, Ok(true), "an allocation waited on the volume list");
+    }
+
+    // SHM-10: none of them waits while another thread holds the volume list.
+    #[test]
+    fn a_release_a_new_reference_and_a_conversion_take_no_process_lock() {
+        let _shm = crate::own_test_registry();
+        let p = super::shmalloc(64).unwrap() as usize;
+        let held = super::VOLUMES.lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let p = p as super::AbsPtr;
+            let rel = super::abs2rel(p).is_ok();
+            let incref = unsafe { super::shincref(p) }.is_ok();
+            let freed = super::shfree(p).is_ok() && super::shfree(p).is_ok();
+            tx.send(rel && incref && freed).unwrap();
+        });
+        let done = rx.recv_timeout(std::time::Duration::from_secs(5));
+        drop(held);
+        worker.join().unwrap();
+        assert_eq!(done, Ok(true), "a release, incref or abs2rel waited on the volume list");
+    }
+
     #[test]
     fn a_process_counts_the_references_it_holds() {
         let _shm = crate::own_test_registry();
@@ -2510,7 +2585,7 @@ mod tests {
                 libc::MAP_SHARED | libc::MAP_ANONYMOUS,
                 -1,
                 0,
-            ) as *const AtomicU32;
+            ) as *const std::sync::atomic::AtomicU32;
             assert_ne!(wins as *mut libc::c_void, libc::MAP_FAILED);
             let mut kids = Vec::new();
             for _ in 0..KIDS {
@@ -2591,7 +2666,8 @@ mod tests {
         let fallback = crate::ScopedFallback::new("own");
         let test_dir = fallback.path().to_path_buf();
         let base = format!("/morloc-{}-test-own", std::process::id());
-        shinit(&base, PRIMARY_VOLUME, 4096).unwrap();
+        let _ = shclose();
+        shinit(&base, 4096).unwrap();
         unsafe {
             let slot = libc::mmap(
                 std::ptr::null_mut(),
@@ -2621,6 +2697,66 @@ mod tests {
             rel2abs(r).expect("the child's volume outlives the child");
         }
         shclose().unwrap();
+        assert_eq!(live_segments(&test_dir, &base[1..]), Vec::<String>::new(), "the owner left volumes behind");
+    }
+
+    // DAEMON-5: the owner removes the names even when another thread is
+    // reading the program's basename as it closes.
+    #[test]
+    fn closing_while_the_basename_is_read_still_removes_the_volumes() {
+        let _arena = crate::own_test_shm();
+        shclose().unwrap();
+        let fallback = crate::ScopedFallback::new("bb");
+        let test_dir = fallback.path().to_path_buf();
+        let base = format!("/morloc-{}-test-bb", std::process::id());
+        shinit(&base, 4096).unwrap();
+        assert_eq!(live_segments(&test_dir, &base[1..]).len(), 1);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let cb = COMMON_BASENAME.lock();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(cb);
+        });
+        held_rx.recv().unwrap();
+        shclose().unwrap();
+        reader.join().unwrap();
+        assert_eq!(live_segments(&test_dir, &base[1..]), Vec::<String>::new(), "the owner left volumes behind");
+    }
+
+    // DAEMON-5: exiting removes the owner's names even when another thread
+    // is inside the volume table at that moment.
+    #[test]
+    fn exiting_while_the_volume_table_is_busy_still_removes_the_volumes() {
+        let _arena = crate::own_test_shm();
+        shclose().unwrap();
+        let fallback = crate::ScopedFallback::new("be");
+        let test_dir = fallback.path().to_path_buf();
+        let base = format!("/morloc-{}-test-be", std::process::id());
+        unsafe {
+            let pid = libc::fork();
+            assert!(pid >= 0);
+            if pid == 0 {
+                if shinit(&base, 4096).is_err() {
+                    libc::_exit(2);
+                }
+                if live_segments(&test_dir, &base[1..]).len() != 1 {
+                    libc::_exit(3);
+                }
+                let (held_tx, held_rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let vols = VOLUMES.lock();
+                    let _ = held_tx.send(());
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    drop(vols);
+                });
+                let _ = held_rx.recv();
+                libc::exit(0);
+            }
+            let mut status = 0;
+            libc::waitpid(pid, &mut status, 0);
+            assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "child failed: {status}");
+        }
         assert_eq!(live_segments(&test_dir, &base[1..]), Vec::<String>::new(), "the owner left volumes behind");
     }
 
@@ -2663,6 +2799,47 @@ mod tests {
         }));
     }
 
+    /// A program of one small volume, so that a freed block is soon the
+    /// only room left. The caller holds the exclusive test arena.
+    pub(crate) fn small_volume(tag: &str) -> crate::ScopedFallback {
+        let _ = shclose();
+        let fallback = crate::ScopedFallback::new(tag);
+        shinit(&format!("/morloc-{}-test-{tag}", std::process::id()), 4096).unwrap();
+        fallback
+    }
+
+    /// Allocate until `addr` is handed back; the other blocks taken on the way.
+    pub(crate) fn reallocate_at(addr: AbsPtr, size: usize) -> (AbsPtr, Vec<AbsPtr>) {
+        let mut held = Vec::new();
+        loop {
+            let q = shmalloc(size).unwrap();
+            if q == addr {
+                return (q, held);
+            }
+            held.push(q);
+            assert!(held.len() < 1000, "the allocator never reused {addr:p}");
+        }
+    }
+
+    // SHM-13
+    #[test]
+    fn a_reclaimed_address_gets_a_new_generation() {
+        let _arena = crate::own_test_shm();
+        let _fallback = small_volume("gen");
+        let p = shmalloc(64).unwrap();
+        let first = unsafe { block_generation(p) }.unwrap();
+        shfree(p).unwrap();
+        let (again, held) = reallocate_at(p, 64);
+        let second = unsafe { block_generation(again) }.unwrap();
+        for q in held.into_iter().chain([again]) {
+            shfree(q).unwrap();
+        }
+        shclose().unwrap();
+        assert_ne!(first, 0);
+        assert_ne!(second, 0);
+        assert_ne!(first, second, "the same generation names two allocations");
+    }
+
     #[test]
     fn allocating_after_close_fails_without_making_a_volume() {
         let _arena = crate::own_test_shm();
@@ -2686,7 +2863,8 @@ mod tests {
         let _arena = crate::own_test_shm();
         shclose().unwrap();
         let basename = format!("/morloc-{}-test-poison", std::process::id());
-        let shm = shinit(&basename, PRIMARY_VOLUME, 0x10000).unwrap();
+        let _ = shclose();
+        let shm = shinit(&basename, 0x10000).unwrap();
         unsafe {
             let holder = libc::fork();
             assert!(holder >= 0);
@@ -2741,7 +2919,7 @@ mod tests {
                 let mut waited = 0;
                 while libc::waitpid(pid, &mut status, libc::WNOHANG) == 0 {
                     if waited > 2000 {
-                        libc::kill(pid, libc::SIGKILL);
+                        crate::signal_test_child(pid, libc::SIGKILL);
                         libc::waitpid(pid, &mut status, 0);
                         hung += 1;
                         break;
@@ -2791,27 +2969,30 @@ mod tests {
         let first = base as *mut BlockHeader;
         let second = unsafe { base.add(hdr + body) as *mut BlockHeader };
         unsafe {
-            (*first).magic = BLK_MAGIC;
-            (*first).size = body;
-            (*first).reference_count = AtomicU32::new(0);
-            (*second).magic = BLK_MAGIC;
-            (*second).size = body;
-            (*second).reference_count = AtomicU32::new(0);
+            (*first).set_magic(BLK_MAGIC);
+            (*first).set_size(body);
+            (*first).reference_count = std::sync::atomic::AtomicU32::new(0);
+            (*second).set_magic(BLK_MAGIC);
+            (*second).set_size(body);
+            (*second).reference_count = std::sync::atomic::AtomicU32::new(0);
         }
 
         // Ask for more than either block alone can serve, forcing the merge.
         let found = unsafe { scan_volume(first, body + 8, end) };
         assert_eq!(found, Some(first), "expected the pair to merge");
         assert!(
-            unsafe { (*first).size } >= 2 * body,
+            unsafe { (*first).size() } >= 2 * body,
             "merged block did not absorb its neighbour",
         );
 
-        assert_eq!(
-            unsafe { (*second).magic }, BLK_ABSORBED,
+        assert_ne!(
+            unsafe { (*second).magic() }, BLK_MAGIC,
             "absorbed block still reads as a block, so a stale pointer to it \
              passes the header check and is acted on as live payload",
         );
+        // SHM-6: a free block's bytes are zero, absorbed headers included.
+        let data = unsafe { std::slice::from_raw_parts(base.add(hdr), (*first).size()) };
+        assert!(data.iter().all(|b| *b == 0), "the merged block holds the absorbed header's bytes");
 
     }
 
@@ -2937,7 +3118,8 @@ mod tests {
         let _fallback = crate::ScopedFallback::new("vt");
 
         let basename = format!("morloc-{}-test-vt", std::process::id());
-        let shm = shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
+        let _ = shclose();
+        let shm = shinit(&basename, 4096).unwrap();
 
         // shinit should have populated the primary volume's slot.
         let entry = &MORLOC_VOL_TABLE[PRIMARY_VOLUME];
@@ -2984,7 +3166,8 @@ mod tests {
         let _fallback = crate::ScopedFallback::new("idx");
 
         let basename = format!("morloc-{}-test-idx", std::process::id());
-        shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
+        let _ = shclose();
+        shinit(&basename, 4096).unwrap();
 
         // Force grow into several randomly-allocated volumes by
         // allocating much more than the initial 4 KiB volume can hold.
@@ -3036,7 +3219,8 @@ mod tests {
         let _fallback = crate::ScopedFallback::new("plain");
 
         let basename = format!("morloc-{}-test-shm", std::process::id());
-        let shm = shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
+        let _ = shclose();
+        let shm = shinit(&basename, 4096).unwrap();
         assert!(!shm.is_null());
         assert_eq!(unsafe { (*shm).magic.load(Ordering::Acquire) }, SHM_MAGIC);
 
@@ -3082,7 +3266,8 @@ mod tests {
         // returns >= 1 worker, and on Linux 5.14+ this exercises
         // `parallel_madvise_populate_write`.
         let alloc_size = 128 * 1024 * 1024;
-        shinit(&basename, PRIMARY_VOLUME, alloc_size).unwrap();
+        let _ = shclose();
+        shinit(&basename, alloc_size).unwrap();
         let p = shmalloc(alloc_size).unwrap();
         let ps = page_size();
         let n_pages = alloc_size / ps;
@@ -3112,11 +3297,6 @@ mod tests {
 }
 
 mod c_abi {
-
-    #[no_mangle]
-    pub extern "C" fn morloc_held_references() -> i64 {
-        super::morloc_held_references()
-    }
 
     #[no_mangle]
     pub extern "C" fn morloc_refuse_new_segments() {

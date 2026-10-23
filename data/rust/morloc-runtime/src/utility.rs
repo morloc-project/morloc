@@ -103,42 +103,6 @@ pub(crate) unsafe fn file_exists(filename: *const c_char) -> bool {
     std::path::Path::new(path.as_ref()).exists()
 }
 
-pub(crate) unsafe fn mkdir_p(path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
-    clear_errmsg(errmsg);
-    if path.is_null() {
-        set_errmsg(errmsg, &MorlocError::Other("NULL path".into()));
-        return -1;
-    }
-    let p = CStr::from_ptr(path).to_string_lossy();
-    match std::fs::create_dir_all(p.as_ref()) {
-        Ok(_) => 0,
-        Err(e) => {
-            set_errmsg(
-                errmsg,
-                &MorlocError::Io(e),
-            );
-            -1
-        }
-    }
-}
-
-pub(crate) unsafe fn delete_directory(path: *const c_char) {
-    if path.is_null() {
-        return;
-    }
-    let p = CStr::from_ptr(path).to_string_lossy();
-    let _ = std::fs::remove_dir_all(p.as_ref());
-}
-
-pub(crate) unsafe fn has_suffix(x: *const c_char, suffix: *const c_char) -> bool {
-    if x.is_null() || suffix.is_null() {
-        return false;
-    }
-    let xs = CStr::from_ptr(x).to_string_lossy();
-    let ss = CStr::from_ptr(suffix).to_string_lossy();
-    xs.ends_with(ss.as_ref())
-}
-
 /// Best-effort raise of the soft open-file limit (RLIMIT_NOFILE) toward the
 /// hard limit, so a process holding many concurrent connections/fds is bounded
 /// by the (large) hard limit rather than the common 1024 (Linux) or 256
@@ -534,37 +498,6 @@ pub(crate) unsafe fn hex(ptr: *const c_void, size: usize) {
     }
 }
 
-pub(crate) unsafe fn print_hex_dump(
-    data: *const u8,
-    size: usize,
-    errmsg: *mut *mut c_char,
-) -> bool {
-    clear_errmsg(errmsg);
-    if data.is_null() && size > 0 {
-        set_errmsg(errmsg, &MorlocError::Other("NULL data".into()));
-        return false;
-    }
-    let bytes = if size > 0 {
-        std::slice::from_raw_parts(data, size)
-    } else {
-        &[]
-    };
-    for (i, b) in bytes.iter().enumerate() {
-        if i > 0 && i % 4 == 0 {
-            if i % 24 == 0 {
-                println!();
-            } else {
-                print!(" ");
-            }
-        }
-        print!("{:02X}", b);
-    }
-    if !bytes.is_empty() {
-        println!();
-    }
-    true
-}
-
 // ── xxHash wrapper and mix ─────────────────────────────────────────────────
 
 /// Mix two 64-bit hash values. Matches the C implementation in cache.c.
@@ -574,18 +507,6 @@ pub(crate) fn mix(a: u64, b: u64) -> u64 {
     let mut a = a ^ b.wrapping_mul(PRIME64_1);
     a = (a << 31) | (a >> 33);
     a.wrapping_mul(PRIME64_2)
-}
-
-pub(crate) unsafe fn morloc_xxh64(
-    input: *const c_void,
-    length: usize,
-    seed: u64,
-) -> u64 {
-    if input.is_null() || length == 0 {
-        return crate::hash::xxh64_with_seed(&[], seed);
-    }
-    let data = std::slice::from_raw_parts(input as *const u8, length);
-    crate::hash::xxh64_with_seed(data, seed)
 }
 
 // ── String utilities ───────────────────────────────────────────────────────
@@ -695,48 +616,8 @@ mod c_abi {
     use super::*;
 
     #[no_mangle]
-    pub unsafe extern "C" fn file_exists(filename: *const c_char) -> bool {
-        super::file_exists(filename)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn mkdir_p(path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
-        super::mkdir_p(path, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn delete_directory(path: *const c_char) {
-        super::delete_directory(path)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn has_suffix(x: *const c_char, suffix: *const c_char) -> bool {
-        super::has_suffix(x, suffix)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn write_atomic(filename: *const c_char, data: *const u8, size: usize, errmsg: *mut *mut c_char) -> i32 {
-        super::write_atomic(filename, data, size, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn read_binary_file(filename: *const c_char, file_size: *mut usize, errmsg: *mut *mut c_char) -> *mut u8 {
         super::read_binary_file(filename, file_size, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn read_binary_fd(file: *mut libc::FILE, file_size: *mut usize, errmsg: *mut *mut c_char) -> *mut u8 {
-        super::read_binary_fd(file, file_size, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn write_binary_fd(fd: i32, buf: *const c_char, count: usize, errmsg: *mut *mut c_char) -> i32 {
-        super::write_binary_fd(fd, buf, count, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn print_binary(buf: *const c_char, count: usize, errmsg: *mut *mut c_char) -> i32 {
-        super::print_binary(buf, count, errmsg)
     }
 
     #[no_mangle]
@@ -745,18 +626,8 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn print_hex_dump(data: *const u8, size: usize, errmsg: *mut *mut c_char) -> bool {
-        super::print_hex_dump(data, size, errmsg)
-    }
-
-    #[no_mangle]
     pub extern "C" fn mix(a: u64, b: u64) -> u64 {
         super::mix(a, b)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn morloc_xxh64(input: *const c_void, length: usize, seed: u64) -> u64 {
-        super::morloc_xxh64(input, length, seed)
     }
 
     #[no_mangle]

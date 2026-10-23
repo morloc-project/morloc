@@ -18,7 +18,9 @@
 #include <string>
 #include <sstream>
 #include <limits>
+#include <cmath>
 #include <type_traits>
+#include <atomic>
 
 #include "morloc.h"
 #include "mlc_rec.hpp"
@@ -28,8 +30,8 @@ extern "C" void mlc_frame_leave(const char* prev);
 extern "C" const char* mlc_current_frame(size_t* len);
 
 namespace mlc {
-// Marks the manifold this thread is executing for the duration of a scope,
-// so a fatal signal is reported against it. Two stores per manifold call.
+// Under --debug, marks the manifold this thread is executing for the
+// duration of a scope, so a fatal signal is reported against it.
 struct frame_scope {
     const char* prev;
     explicit frame_scope(const char* frame) noexcept : prev(mlc_frame_enter(frame)) {}
@@ -37,6 +39,50 @@ struct frame_scope {
     frame_scope(const frame_scope&) = delete;
     frame_scope& operator=(const frame_scope&) = delete;
 };
+
+// The thread's frame stack (STATE-5): base[1..depth] are the trace lines of
+// the named calls recorded on it, outermost first.
+struct frame_stack {
+    const char** base;
+    size_t cap;
+    size_t depth;
+};
+// A pool links libcppmorloc.a into its executable, so on ELF the stack is
+// addressed at a fixed offset from the thread pointer and a push holds no
+// register across the calls that follow it.
+#if defined(__ELF__)
+extern thread_local constinit frame_stack frames_ __attribute__((tls_model("local-exec")));
+#else
+extern thread_local constinit frame_stack frames_;
+#endif
+
+// Reserves the calling thread's stack. A thread reaches generated code only
+// through a boundary, which calls this first ('frame_enter').
+void frame_init();
+
+// The reservation holds more calls than the thread's machine stack can, so
+// a push needs no check; a guard page follows it.
+inline void frame_push(const char* line) {
+    size_t depth = frames_.depth + 1;
+    frames_.base[depth] = line;
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+    frames_.depth = depth;
+}
+
+// STATE-6: a boundary's entry; the depth it saves.
+inline size_t frame_enter() {
+    if (frames_.base == nullptr) [[unlikely]] frame_init();
+    return frames_.depth;
+}
+
+inline void frame_pop() noexcept { frames_.depth--; }
+
+inline size_t frame_depth() noexcept { return frames_.depth; }
+
+inline void frame_restore(size_t saved) noexcept { frames_.depth = saved; }
+
+// STATE-6: restores `saved` and returns the lines above it, innermost first.
+std::string frame_take(size_t saved);
 }
 
 // ============================================================
@@ -76,9 +122,6 @@ template<typename T> struct is_std_optional<std::optional<T>> : std::true_type {
 // shape and handles the wire-format relptr at the field's slot.
 template<typename T> struct is_std_shared_ptr : std::false_type {};
 template<typename T> struct is_std_shared_ptr<std::shared_ptr<T>> : std::true_type {};
-// A rec_ptr slot has the same wire form and the same surface (null ==
-// absent, `*p`, `p.get()`, assignable from a fresh shared_ptr).
-template<typename T> struct is_std_shared_ptr<mlc::rec_ptr<T>> : std::true_type {};
 
 template<typename T>
 inline constexpr bool is_non_vector_container_v =
@@ -95,20 +138,14 @@ inline constexpr bool is_non_vector_container_v =
 //   - `?T` -> some pointer-shape (null == absent) at recursive-cycle
 //     positions where sizeof(T) is not yet known.
 //
-// Pointer-shape is polymorphic within a closed set (shared_ptr,
-// unique_ptr, raw T*). The codegen emits generic wrap/deref calls and
-// the C++ template machinery resolves which wrapper to use at compile
-// time. The value/pointer axis is enforced by static_assert: a user-
-// supplied struct that puts optional<T> where the rule says pointer
-// (or vice versa) gets a clear error.
+// The pointer-shape is std::shared_ptr<const T> (CPP-6). The codegen emits
+// generic wrap/deref calls; the value/pointer axis is enforced by
+// static_assert: a user-supplied struct that puts optional<T> where the rule
+// says pointer (or vice versa) gets a clear error.
 
 namespace mlc {
 
-template<typename T> struct is_pointer_shape : std::false_type {};
-template<typename T> struct is_pointer_shape<std::shared_ptr<T>> : std::true_type {};
-template<typename T> struct is_pointer_shape<std::unique_ptr<T>> : std::true_type {};
-template<typename T> struct is_pointer_shape<T*>                 : std::true_type {};
-template<typename T> struct is_pointer_shape<rec_ptr<T>>         : std::true_type {};
+template<typename T> using is_pointer_shape = is_std_shared_ptr<T>;
 
 // Pointer-shape traits. Primary intentionally undefined; only
 // recognized pointer kinds get specializations.
@@ -116,56 +153,14 @@ template<typename FieldT> struct pointer_traits;
 
 template<typename T>
 struct pointer_traits<std::shared_ptr<T>> {
-    using inner = T;
-    static std::shared_ptr<T> wrap(T&& v)              { return std::make_shared<T>(std::move(v)); }
-    static std::shared_ptr<T> wrap(const T& v)         { return std::make_shared<T>(v); }
+    static_assert(std::is_const_v<T>,
+        "CPP-6: a recursive record field is a std::shared_ptr<const T>");
+    using inner = std::remove_const_t<T>;
+    static std::shared_ptr<T> wrap(inner&& v)          { return mlc::make_arm<inner>(std::move(v)); }
+    static std::shared_ptr<T> wrap(const inner& v)     { return mlc::make_arm<inner>(v); }
     static std::shared_ptr<T> absent()                 { return nullptr; }
-    static const T& deref(const std::shared_ptr<T>& p) { return *p; }
+    static const inner& deref(const std::shared_ptr<T>& p) { return *p; }
     static bool has_value(const std::shared_ptr<T>& p) { return p != nullptr; }
-};
-
-template<typename T>
-struct pointer_traits<rec_ptr<T>> {
-    using inner = T;
-    static rec_ptr<T> wrap(T&& v)              { return std::make_shared<T>(std::move(v)); }
-    static rec_ptr<T> wrap(const T& v)         { return std::make_shared<T>(v); }
-    static rec_ptr<T> absent()                 { return rec_ptr<T>(); }
-    static const T& deref(const rec_ptr<T>& p) { return *p; }
-    static bool has_value(const rec_ptr<T>& p) { return static_cast<bool>(p); }
-};
-
-template<typename T>
-struct pointer_traits<std::unique_ptr<T>> {
-    using inner = T;
-    static std::unique_ptr<T> wrap(T&& v)              { return std::make_unique<T>(std::move(v)); }
-    static std::unique_ptr<T> wrap(const T& v)         { return std::make_unique<T>(v); }
-    static std::unique_ptr<T> absent()                 { return nullptr; }
-    static const T& deref(const std::unique_ptr<T>& p) { return *p; }
-    static bool has_value(const std::unique_ptr<T>& p) { return p != nullptr; }
-};
-
-// Raw pointer T*: READ-ONLY at field positions. The codegen has no
-// way to manage the pointee's lifetime when constructing a value, so
-// `wrap` is armed with a static_assert that fires at any call site
-// the codegen tries to materialize a T* field from a fresh value.
-// Useful for FFI consumer-side scenarios where the user's struct
-// already holds a T* owned by external code.
-template<typename T>
-struct pointer_traits<T*> {
-    using inner = T;
-    static T* wrap(T&&) {
-        static_assert(sizeof(T*) == 0,
-            "Cannot construct a field of type T* natively in C++. "
-            "Raw pointers carry no ownership information, so the morloc "
-            "codegen has no way to manage the pointee's lifetime. Use "
-            "std::shared_ptr or std::unique_ptr if native construction "
-            "is needed; or restrict the enclosing record to consumer-"
-            "side use only.");
-        return nullptr;
-    }
-    static T* absent()                  { return nullptr; }
-    static const T& deref(T* p)         { return *p; }
-    static bool has_value(T* p)         { return p != nullptr; }
 };
 
 template<typename FieldT>
@@ -205,8 +200,8 @@ FieldT wrap_field(Inner&& v) {
             || is_std_optional<InnerBare>::value
             || std::is_constructible_v<FieldT, Inner>,
         "Field type doesn't match the morloc encoding rule. "
-        "?T at a recursive-cycle position expects a pointer-shape "
-        "(std::shared_ptr<T>, std::unique_ptr<T>, or T*); "
+        "?T at a recursive-cycle position expects "
+        "std::shared_ptr<const T> (CPP-6); "
         "?T everywhere else expects std::optional<T>; "
         "non-optional fields expect T directly."
     );
@@ -298,6 +293,8 @@ absptr_t rel2abs_cpp(relptr_t ptr);
 relptr_t abs2rel_cpp(absptr_t ptr);
 // A defect in this runtime: report it and end the pool (PANIC-5).
 [[noreturn]] void mlc_runtime_defect(const std::string& msg);
+// Ends the pool with the reason a runtime call gave, and frees it.
+[[noreturn]] void mlc_defect_take(char* errmsg);
 
 // Resolve `relptr` to `extent` readable bytes in `space`, throwing when the
 // region is not there (see resolve_region in morloc.h).
@@ -328,7 +325,6 @@ static inline void* resolve_array_cpp(relptr_t relptr, size_t n, size_t width, m
 bool shfree_cpp(absptr_t ptr);
 Schema* parse_schema_cpp(const char* schema_ptr);
 void* shmalloc_cpp(size_t size);
-shm_t* shinit_cpp(const char* shm_basename, size_t volume_index, size_t shm_size);
 int pack_with_schema_cpp(const void* mlc, const Schema* schema, char** mpk, size_t* mpk_size);
 int unpack_with_schema_cpp(const char* mgk, size_t mgk_size, const Schema* schema, void** mlcptr);
 
@@ -639,7 +635,9 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
             case MORLOC_UINT32:  *(uint32_t*)dest = check_range_narrow<uint32_t>(data, "U32"); break;
             case MORLOC_UINT64:  *(uint64_t*)dest = check_range_narrow<uint64_t>(data, "U64"); break;
             case MORLOC_FLOAT32:
-                if (morloc_f32_from_f64(static_cast<double>(data), (float*)dest) != 0) {
+                if constexpr (std::is_same_v<T, float>) {
+                    *(float*)dest = data;
+                } else if (morloc_f32_from_f64(static_cast<double>(data), (float*)dest) != 0) {
                     throw std::overflow_error("value out of range for F32");
                 }
                 break;
@@ -670,6 +668,17 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
             case MORLOC_CLOSURE: case MORLOC_VARIANT:
                 throw std::runtime_error("cannot write a number where the schema holds a non-numeric type");
         }
+    }
+}
+
+// A wire number as the native type T: an integral T must hold it exactly
+// (NUM-4), a floating T takes the nearest value.
+template<typename T, typename W>
+T mlc_wire_to_native(W v) {
+    if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {
+        return check_range_narrow<T>(v, "the native integer type");
+    } else {
+        return static_cast<T>(v);
     }
 }
 
@@ -715,16 +724,16 @@ T mlc_leaf_read(const Schema* schema, const void* data, morloc_space_t space) {
                 }
                 return static_cast<T>(handle);
             }
-            case MORLOC_SINT8:   return static_cast<T>(*(const int8_t*)data);
-            case MORLOC_SINT16:  return static_cast<T>(*(const int16_t*)data);
-            case MORLOC_SINT32:  return static_cast<T>(*(const int32_t*)data);
-            case MORLOC_SINT64:  return static_cast<T>(*(const int64_t*)data);
-            case MORLOC_UINT8:   return static_cast<T>(*(const uint8_t*)data);
-            case MORLOC_UINT16:  return static_cast<T>(*(const uint16_t*)data);
-            case MORLOC_UINT32:  return static_cast<T>(*(const uint32_t*)data);
-            case MORLOC_UINT64:  return static_cast<T>(*(const uint64_t*)data);
-            case MORLOC_FLOAT32: return static_cast<T>(*(const float*)data);
-            case MORLOC_FLOAT64: return static_cast<T>(*(const double*)data);
+            case MORLOC_SINT8:   return mlc_wire_to_native<T>(*(const int8_t*)data);
+            case MORLOC_SINT16:  return mlc_wire_to_native<T>(*(const int16_t*)data);
+            case MORLOC_SINT32:  return mlc_wire_to_native<T>(*(const int32_t*)data);
+            case MORLOC_SINT64:  return mlc_wire_to_native<T>(*(const int64_t*)data);
+            case MORLOC_UINT8:   return mlc_wire_to_native<T>(*(const uint8_t*)data);
+            case MORLOC_UINT16:  return mlc_wire_to_native<T>(*(const uint16_t*)data);
+            case MORLOC_UINT32:  return mlc_wire_to_native<T>(*(const uint32_t*)data);
+            case MORLOC_UINT64:  return mlc_wire_to_native<T>(*(const uint64_t*)data);
+            case MORLOC_FLOAT32: return mlc_wire_to_native<T>(*(const float*)data);
+            case MORLOC_FLOAT64: return mlc_wire_to_native<T>(*(const double*)data);
             case MORLOC_INT: {
                 // Inline BigInt: [size, value_or_relptr]
                 const int64_t* fields = (const int64_t*)data;
@@ -773,6 +782,172 @@ T mlc_leaf_read(const Schema* schema, const void* data, morloc_space_t space) {
                 break;
         }
         throw std::runtime_error("cannot read a number where the schema holds a non-numeric type");
+    }
+}
+
+// The 64-bit words of a std::vector<bool>, element i at bit i % 64 of word
+// i / 64, or nullptr where the library does not expose them or the byte
+// order is not the one the bit packing below assumes.
+inline uint64_t* mlc_bool_words(std::vector<bool>& v) {
+#if defined(__GLIBCXX__) && !defined(_GLIBCXX_DEBUG) && defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if constexpr (sizeof(std::_Bit_type) == sizeof(uint64_t)) {
+        return reinterpret_cast<uint64_t*>(v.begin()._M_p);
+    }
+#endif
+    (void)v;
+    return nullptr;
+}
+
+inline const uint64_t* mlc_bool_words(const std::vector<bool>& v) {
+    return mlc_bool_words(const_cast<std::vector<bool>&>(v));
+}
+
+// Bit k of the result is set iff byte k of `x` is 1.
+inline uint64_t mlc_bytes_eq1_to_bits(uint64_t x) {
+    const uint64_t lo7 = 0x7f7f7f7f7f7f7f7full;
+    uint64_t m = x ^ 0x0101010101010101ull;
+    uint64_t nonzero = ((m & lo7) + lo7) | m;
+    uint64_t ones = (~nonzero >> 7) & 0x0101010101010101ull;
+    return (ones * 0x0102040810204080ull) >> 56;
+}
+
+// Byte k of the result is bit k of `bits` (0 or 1).
+inline uint64_t mlc_bits_to_bytes(uint64_t bits) {
+    const uint64_t lo7 = 0x7f7f7f7f7f7f7f7full;
+    uint64_t y = ((bits & 0xff) * 0x0101010101010101ull) & 0x8040201008040201ull;
+    return ((((y & lo7) + lo7) | y) >> 7) & 0x0101010101010101ull;
+}
+
+// Read `n` leaves of `elem` at stride `elem->width` into `out` (already of
+// size n) with one type dispatch for the whole run. False when the element
+// type has no such loop; the caller then reads each leaf. An element a loop
+// cannot take as it is (an Int out of range) is read by mlc_leaf_read, which
+// throws as it would for that element alone.
+template<typename ElemT>
+bool mlc_read_leaf_run(const Schema* elem, const char* start, size_t n, std::vector<ElemT>& out, morloc_space_t space) {
+    const size_t width = elem->width;
+    if constexpr (std::is_same_v<ElemT, bool>) {
+        if (elem->type != MORLOC_BOOL) return false;
+        uint64_t* words = mlc_bool_words(out);
+        size_t i = 0;
+        if (words != nullptr && width == 1) {
+            for (; i + 64 <= n; i += 64) {
+                uint64_t word = 0;
+                for (int k = 0; k < 8; k++) {
+                    uint64_t x;
+                    std::memcpy(&x, start + i + 8 * k, 8);
+                    word |= mlc_bytes_eq1_to_bits(x) << (8 * k);
+                }
+                words[i / 64] = word;
+            }
+        }
+        for (; i < n; i++) out[i] = *(const uint8_t*)(start + i * width) == 1;
+        return true;
+    } else if constexpr (std::is_arithmetic_v<ElemT>) {
+        auto run = [&](auto wire) {
+            using W = decltype(wire);
+            for (size_t i = 0; i < n; i++) {
+                W v;
+                std::memcpy(&v, start + i * width, sizeof(W));
+                out[i] = mlc_wire_to_native<ElemT>(v);
+            }
+            return true;
+        };
+        switch (elem->type) {
+            case MORLOC_SINT8:   return run(int8_t{});
+            case MORLOC_SINT16:  return run(int16_t{});
+            case MORLOC_SINT32:  return run(int32_t{});
+            case MORLOC_SINT64:  return run(int64_t{});
+            case MORLOC_UINT8:   return run(uint8_t{});
+            case MORLOC_UINT16:  return run(uint16_t{});
+            case MORLOC_UINT32:  return run(uint32_t{});
+            case MORLOC_UINT64:  return run(uint64_t{});
+            case MORLOC_FLOAT32: return run(float{});
+            case MORLOC_FLOAT64: return run(double{});
+            case MORLOC_INT:
+                for (size_t i = 0; i < n; i++) {
+                    const char* slot = start + i * width;
+                    int64_t fields[2];
+                    std::memcpy(fields, slot, sizeof fields);
+                    int64_t val = fields[0] == 0 ? 0 : fields[1];
+                    bool fits = fields[0] <= 1;
+                    if constexpr (std::is_integral_v<ElemT>) {
+                        if constexpr (std::is_signed_v<ElemT>) {
+                            fits = fits && val >= static_cast<int64_t>(std::numeric_limits<ElemT>::min())
+                                        && val <= static_cast<int64_t>(std::numeric_limits<ElemT>::max());
+                        } else {
+                            fits = fits && val >= 0
+                                        && static_cast<uint64_t>(val) <= static_cast<uint64_t>(std::numeric_limits<ElemT>::max());
+                        }
+                    }
+                    out[i] = fits ? static_cast<ElemT>(val) : mlc_leaf_read<ElemT>(elem, slot, space);
+                }
+                return true;
+            default:
+                return false;
+        }
+    } else {
+        return false;
+    }
+}
+
+// Write `n` leaves of `data` as `elem` at stride `elem->width` from `start`,
+// with one type dispatch for the whole run; false when the element type has
+// no such loop. Range checks are those of mlc_leaf_write.
+template<typename ElemT>
+bool mlc_write_leaf_run(const Schema* elem, char* start, const std::vector<ElemT>& data) {
+    const size_t width = elem->width;
+    const size_t n = data.size();
+    if constexpr (std::is_same_v<ElemT, bool>) {
+        if (elem->type != MORLOC_BOOL) return false;
+        const uint64_t* words = mlc_bool_words(data);
+        size_t i = 0;
+        if (words != nullptr && width == 1) {
+            for (; i + 64 <= n; i += 64) {
+                uint64_t word = words[i / 64];
+                for (int k = 0; k < 8; k++) {
+                    uint64_t x = mlc_bits_to_bytes(word >> (8 * k));
+                    std::memcpy(start + i + 8 * k, &x, 8);
+                }
+            }
+        }
+        for (; i < n; i++) *(uint8_t*)(start + i * width) = data[i] ? 1 : 0;
+        return true;
+    } else if constexpr (std::is_arithmetic_v<ElemT>) {
+        auto run = [&](auto wire, const char* name) {
+            using W = decltype(wire);
+            for (size_t i = 0; i < n; i++) {
+                W v = check_range_narrow<W>(data[i], name);
+                std::memcpy(start + i * width, &v, sizeof(W));
+            }
+            return true;
+        };
+        switch (elem->type) {
+            case MORLOC_SINT8:   return run(int8_t{}, "I8");
+            case MORLOC_SINT16:  return run(int16_t{}, "I16");
+            case MORLOC_SINT32:  return run(int32_t{}, "I32");
+            case MORLOC_SINT64:  return run(int64_t{}, "I64");
+            case MORLOC_UINT8:   return run(uint8_t{}, "U8");
+            case MORLOC_UINT16:  return run(uint16_t{}, "U16");
+            case MORLOC_UINT32:  return run(uint32_t{}, "U32");
+            case MORLOC_UINT64:  return run(uint64_t{}, "U64");
+            case MORLOC_FLOAT64:
+                for (size_t i = 0; i < n; i++) {
+                    double v = static_cast<double>(data[i]);
+                    std::memcpy(start + i * width, &v, sizeof v);
+                }
+                return true;
+            case MORLOC_INT:
+                for (size_t i = 0; i < n; i++) {
+                    int64_t fields[2] = {1, check_range_narrow<int64_t>(data[i], "Int")};
+                    std::memcpy(start + i * width, fields, sizeof fields);
+                }
+                return true;
+            default:
+                return false;
+        }
+    } else {
+        return false;
     }
 }
 
@@ -1215,9 +1390,16 @@ void mlc_container_fill(MlcReadWalk&, const Schema*, const void* data, void* out
     *static_cast<T*>(out) = std::move(result);
 }
 
+template<typename T> struct is_std_unique_ptr : std::false_type {};
+template<typename T, typename D> struct is_std_unique_ptr<std::unique_ptr<T, D>> : std::true_type {};
+
 template<typename T>
 struct MlcNode {
     static_assert(!mlc_is_leaf_v<T>, "a leaf has no node");
+    static_assert(!std::is_pointer_v<T> && !is_std_unique_ptr<T>::value,
+        "CPP-6: a recursive field is a std::shared_ptr<const T>, not a raw or unique pointer");
+    static_assert(!is_std_shared_ptr<T>::value || mlc::is_const_shared_ptr<T>::value,
+        "CPP-6: a recursive field is a std::shared_ptr<const T>");
 
     static void size_step(MlcSizeWalk& w, const Schema* schema, const T& data, size_t idx) {
         if constexpr (is_std_vector<T>::value) {
@@ -1267,7 +1449,7 @@ struct MlcNode {
         } else if constexpr (is_non_vector_container_v<T>) {
             // The container is walked as the vector of its elements, which
             // the walk keeps alive for as long as its frames refer to it.
-            auto v = std::make_shared<decltype(to_vector(data))>(to_vector(data));
+            auto v = mlc::make_arm<decltype(to_vector(data))>(to_vector(data));
             w.keep.push_back(v);
             w.child(schema, *v, false);
         } else if constexpr (is_std_tuple<T>::value) {
@@ -1331,6 +1513,7 @@ struct MlcNode {
                     }
                 }
                 if constexpr (mlc_is_leaf_v<ElemT>) {
+                    if (mlc_write_leaf_run<ElemT>(elem, start, data)) return;
                     for (size_t i = 0; i < data.size(); ++i) {
                         if constexpr (std::is_same_v<ElemT, bool>) {
                             // std::vector<bool>::operator[] is a bit proxy.
@@ -1352,7 +1535,7 @@ struct MlcNode {
                 }
             }
         } else if constexpr (is_non_vector_container_v<T>) {
-            auto v = std::make_shared<decltype(to_vector(data))>(to_vector(data));
+            auto v = mlc::make_arm<decltype(to_vector(data))>(to_vector(data));
             w.keep.push_back(v);
             w.child(schema, dest, *v);
         } else if constexpr (is_std_tuple<T>::value) {
@@ -1387,17 +1570,22 @@ struct MlcNode {
                 }
                 const char* start = (const char*)resolve_array_cpp(array->data, array->size, elem->width, w.space);
                 if constexpr (std::is_arithmetic_v<ElemT> && !std::is_same_v<ElemT, bool>) {
-                    // Fixed-width primitives whose C++ width matches the
-                    // wire width are one bulk copy; bool is excluded
-                    // because a wire byte outside {0,1} must be normalised.
-                    if (elem->fixed_width && sizeof(ElemT) == elem->width) {
-                        const ElemT* first = (const ElemT*)start;
-                        out->assign(first, first + array->size);
+                    // bool is excluded because a wire byte outside {0,1}
+                    // must be normalised.
+                    if (vector_is_bulk_copyable<ElemT>(elem)) {
+                        if (reinterpret_cast<uintptr_t>(start) % alignof(ElemT) == 0) {
+                            const ElemT* first = (const ElemT*)start;
+                            out->assign(first, first + array->size);
+                        } else {
+                            out->resize(array->size);
+                            std::memcpy(out->data(), start, array->size * sizeof(ElemT));
+                        }
                         return;
                     }
                 }
                 out->resize(array->size);
                 if constexpr (mlc_is_leaf_v<ElemT>) {
+                    if (mlc_read_leaf_run<ElemT>(elem, start, array->size, *out, w.space)) return;
                     for (size_t i = 0; i < array->size; i++) {
                         (*out)[i] = mlc_leaf_read<ElemT>(elem, start + i * elem->width, w.space);
                     }
@@ -1417,7 +1605,7 @@ struct MlcNode {
             // Read into a kept vector, then move its elements into the
             // container once they are all in.
             using ElemT = typename T::value_type;
-            auto v = std::make_shared<std::vector<ElemT>>();
+            auto v = mlc::make_arm<std::vector<ElemT>>();
             w.keep.push_back(v);
             w.after(&mlc_container_fill<T>, schema, v.get(), out);
             w.child(schema, data, v.get());
@@ -1436,13 +1624,14 @@ struct MlcNode {
         } else if constexpr (is_std_shared_ptr<T>::value) {
             // shared_ptr<T> is the C++ surface form for `?T` at a recursive
             // cycle. The wire slot is a single relptr (RELNULL == absent).
-            using PointeeT = typename T::element_type;
+            using PointeeT = std::remove_const_t<typename T::element_type>;
             relptr_t relptr = *(const relptr_t*)data;
             if (relptr == RELNULL) {
                 out->reset();
             } else {
-                *out = std::make_shared<PointeeT>();
-                w.child(schema->parameters[0], resolve_region_cpp(relptr, resolve_recur(schema->parameters[0])->width, w.space), out->get());
+                auto p = mlc::make_arm<PointeeT>();
+                w.child(schema->parameters[0], resolve_region_cpp(relptr, resolve_recur(schema->parameters[0])->width, w.space), p.get());
+                *out = std::move(p);
             }
         } else {
             mlc_no_marshaller(schema);

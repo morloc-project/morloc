@@ -18,6 +18,7 @@ pub enum HttpMethod {
     Post = 1,
     Delete = 2,
     Options = 3,
+    Head = 4,
 }
 
 #[repr(C)]
@@ -62,10 +63,33 @@ pub struct DaemonRequest {
     /// `@mime` return comes back as result_bytes+mime (base64 over the wire).
     /// Direct length-prefixed clients leave it false and keep the JSON `result`.
     pub media: bool,
+    /// Select the command's `@default` action (its own value when it has
+    /// none). Exclusive with `render`; both absent selects the own value.
+    pub render_default: bool,
 }
 
-
 // ── http_parse_request ───────────────────────────────────────────────────────
+
+/// The body length a request head declares: digits only, and every
+/// `Content-Length` header must agree (RFC 9110 8.6); none means 0.
+fn content_length_of(head: &str) -> Result<usize, String> {
+    let mut found: Option<&str> = None;
+    for line in head.split("\r\n").skip(1) {
+        let Some((name, value)) = line.split_once(':') else { continue };
+        if !name.trim().eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        let value = value.trim();
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("invalid Content-Length: {}", value));
+        }
+        match found {
+            Some(prev) if prev != value => return Err("conflicting Content-Length headers".into()),
+            _ => found = Some(value),
+        }
+    }
+    found.map_or(Ok(0), |v| v.parse().map_err(|_| format!("invalid Content-Length: {}", v)))
+}
 
 /// The value of the first header named `name` (case-insensitive).
 fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
@@ -75,59 +99,81 @@ fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
+/// Null with `errmsg` set on a refused request; `too_large` says the body was
+/// past the cap (NET-10).
 pub(crate) unsafe fn http_parse_request(
     fd: i32,
     errmsg: *mut *mut c_char,
+    too_large: &mut bool,
 ) -> *mut HttpRequest {
-    parse_request_within(fd, morloc_runtime_types::net_limits::HEAD_LIMIT, errmsg)
+    parse_request_within(fd, morloc_runtime_types::net_limits::HEAD_LIMIT, errmsg, too_large)
 }
 
 unsafe fn parse_request_within(
     fd: i32,
     head_limit: std::time::Duration,
     errmsg: *mut *mut c_char,
+    too_large: &mut bool,
 ) -> *mut HttpRequest {
     clear_errmsg(errmsg);
+    *too_large = false;
 
-    use morloc_runtime_types::net_limits::{body_limit, recv_by};
+    use morloc_runtime_types::net_limits::{body_limit, peek_by, recv_by};
     // NET-2
     let head_until = std::time::Instant::now() + head_limit;
 
-    // Read headers byte by byte until \r\n\r\n
+    // Peek, then consume only through the blank line, so the socket is left
+    // at the body.
     let mut header_buf = vec![0u8; HTTP_MAX_HEADERS];
     let mut header_len: usize = 0;
-    let mut header_end_pos: Option<usize> = None;
+    let mut head_done = false;
 
     while header_len < HTTP_MAX_HEADERS - 1 {
-        match recv_by(fd, header_buf.as_mut_ptr().add(header_len), 1, head_until) {
-            Ok(1) => {}
-            Ok(_) => {
+        let room = HTTP_MAX_HEADERS - 1 - header_len;
+        let n = match peek_by(fd, header_buf.as_mut_ptr().add(header_len), room, head_until) {
+            Ok(0) => {
                 set_errmsg(errmsg, &MorlocError::Other("Connection closed while reading HTTP headers".into()));
                 return ptr::null_mut();
             }
+            Ok(n) => n,
             Err(e) => {
                 set_errmsg(errmsg, &MorlocError::Other(format!("Reading HTTP headers: {e}")));
                 return ptr::null_mut();
             }
-        }
-        header_len += 1;
-
-        if header_len >= 4 {
-            let tail = &header_buf[header_len - 4..header_len];
-            if tail == b"\r\n\r\n" {
-                header_end_pos = Some(header_len - 4);
-                break;
+        };
+        let from = header_len.saturating_sub(3);
+        let take = match header_buf[from..header_len + n].windows(4).position(|w| w == b"\r\n\r\n") {
+            Some(p) => {
+                head_done = true;
+                from + p + 4 - header_len
             }
+            None => n,
+        };
+        let mut got = 0;
+        while got < take {
+            match recv_by(fd, header_buf.as_mut_ptr().add(header_len + got), take - got, head_until) {
+                Ok(k) if k > 0 => got += k,
+                failed => {
+                    let why = match failed {
+                        Err(e) => format!("Reading HTTP headers: {e}"),
+                        Ok(_) => "Connection closed while reading HTTP headers".to_string(),
+                    };
+                    set_errmsg(errmsg, &MorlocError::Other(why));
+                    return ptr::null_mut();
+                }
+            }
+        }
+        header_len += take;
+        if head_done {
+            break;
         }
     }
 
-    let header_end = match header_end_pos {
-        Some(p) => p,
-        None => {
-            set_errmsg(errmsg, &MorlocError::Other("HTTP headers too large or malformed".into()));
-            return ptr::null_mut();
-        }
-    };
+    if !head_done {
+        *too_large = true;
+        set_errmsg(errmsg, &MorlocError::Other("the request headers are larger than this server takes".into()));
+        return ptr::null_mut();
+    }
 
     let header_str = std::str::from_utf8(&header_buf[..header_len]).unwrap_or("");
 
@@ -147,6 +193,8 @@ unsafe fn parse_request_within(
         (*req).method = HttpMethod::Delete;
     } else if header_str.starts_with("OPTIONS ") {
         (*req).method = HttpMethod::Options;
+    } else if header_str.starts_with("HEAD ") {
+        (*req).method = HttpMethod::Head;
     } else {
         libc::free(req as *mut c_void);
         set_errmsg(errmsg, &MorlocError::Other("Unsupported HTTP method".into()));
@@ -174,24 +222,21 @@ unsafe fn parse_request_within(
         Some(token) => morloc_runtime_types::bearer::authorizes(header_value(header_str, "authorization"), &token),
     };
 
-    // Find Content-Length
-    let mut content_length: usize = 0;
-    let header_lower = header_str.to_ascii_lowercase();
-    if let Some(pos) = header_lower.find("content-length:") {
-        let after = &header_str[pos + 15..];
-        let trimmed = after.trim_start();
-        if let Some(end) = trimmed.find(|c: char| !c.is_ascii_digit()) {
-            content_length = trimmed[..end].parse().unwrap_or(0);
-        } else {
-            content_length = trimmed.parse().unwrap_or(0);
+    let content_length: usize = match content_length_of(header_str) {
+        Ok(n) => n,
+        Err(msg) => {
+            libc::free(req as *mut c_void);
+            set_errmsg(errmsg, &MorlocError::Other(msg));
+            return ptr::null_mut();
         }
-    }
+    };
 
     // Read body
     if content_length > 0 {
         if content_length > HTTP_MAX_REQUEST {
+            *too_large = true;
             libc::free(req as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Other(format!("HTTP body too large: {} bytes", content_length)));
+            set_errmsg(errmsg, &MorlocError::Other(format!("the request body is {} bytes; this server takes at most {}", content_length, HTTP_MAX_REQUEST)));
             return ptr::null_mut();
         }
 
@@ -202,16 +247,9 @@ unsafe fn parse_request_within(
             return ptr::null_mut();
         }
 
-        // Some body bytes may be in header_buf after \r\n\r\n
-        let after_headers = header_end + 4;
-        let already_read = (header_len - after_headers).min(content_length);
-        if already_read > 0 {
-            ptr::copy_nonoverlapping(header_buf.as_ptr().add(after_headers), body, already_read);
-        }
-
         // NET-2
         let body_until = std::time::Instant::now() + body_limit(content_length);
-        let mut total = already_read;
+        let mut total = 0;
         while total < content_length {
             match recv_by(fd, body.add(total), content_length - total, body_until) {
                 Ok(n) if n > 0 => total += n,
@@ -246,27 +284,7 @@ pub(crate) unsafe fn http_free_request(req: *mut HttpRequest) {
 // ── http_write_response ──────────────────────────────────────────────────────
 
 fn http_status_text(status: i32) -> &'static str {
-    match status {
-        200 => "OK",
-        204 => "No Content",
-        400 => "Bad Request",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        408 => "Request Timeout",
-        500 => "Internal Server Error",
-        503 => "Service Unavailable",
-        _ => "Unknown",
-    }
-}
-
-pub(crate) unsafe fn http_write_response(
-    fd: i32,
-    status: i32,
-    content_type: *const c_char,
-    body: *const c_char,
-    body_len: usize,
-) -> bool {
-    write_response(fd, status, content_type, body, body_len)
+    morloc_runtime_types::http_query::reason_phrase(status)
 }
 
 pub(crate) unsafe fn write_response(
@@ -277,10 +295,6 @@ pub(crate) unsafe fn write_response(
     body_len: usize,
 ) -> bool {
     write_response_ex(fd, status, content_type, body, body_len, ptr::null())
-}
-
-pub(crate) unsafe fn http_write_response_ex(fd: i32, status: i32, content_type: *const c_char, body: *const c_char, body_len: usize, extra_headers: *const c_char) -> bool {
-    write_response_ex(fd, status, content_type, body, body_len, extra_headers)
 }
 
 /// Same as `http_write_response`, plus an optional `extra_headers` block
@@ -312,7 +326,7 @@ pub(crate) unsafe fn write_response_ex(
          Content-Length: {}\r\n\
          Connection: close\r\n\
          Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+         Access-Control-Allow-Methods: GET, HEAD, POST, DELETE, OPTIONS\r\n\
          Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
          {}\r\n",
         status, http_status_text(status), ct, body_len, extra
@@ -324,7 +338,7 @@ pub(crate) unsafe fn write_response_ex(
         return false;
     }
 
-    if !body.is_null() && body_len > 0 {
+    if !body.is_null() && body_len > 0 && !crate::daemon_ffi::reply_without_body() {
         if !crate::ipc_ffi::send_all(fd, body as *const u8, body_len) {
             return false;
         }
@@ -363,10 +377,24 @@ unsafe fn body_string(
     match extract_json_string(body, key) {
         Ok(v) => Ok(v),
         Err(e) => {
-            libc::free(dreq as *mut c_void);
+            crate::daemon_ffi::daemon_free_request(dreq);
             set_errmsg(errmsg, &MorlocError::Other(format!("Malformed JSON in {} body: {}", route, e)));
             Err(())
         }
+    }
+}
+
+/// The eval-family method a request routes to, if any, read from its method
+/// and path alone, before its body.
+pub(crate) unsafe fn eval_route(req: *const HttpRequest) -> Option<DaemonMethod> {
+    let path = std::ffi::CStr::from_ptr((*req).path.as_ptr()).to_str().unwrap_or("");
+    match ((*req).method, path) {
+        (HttpMethod::Post, "/eval") => Some(DaemonMethod::Eval),
+        (HttpMethod::Post, "/typecheck") => Some(DaemonMethod::Typecheck),
+        (HttpMethod::Post, "/bind") => Some(DaemonMethod::Bind),
+        (HttpMethod::Get, "/bindings") => Some(DaemonMethod::Bindings),
+        (HttpMethod::Delete, p) if p.starts_with("/bindings/") => Some(DaemonMethod::Unbind),
+        _ => None,
     }
 }
 
@@ -375,16 +403,6 @@ unsafe fn body_string(
 /// classification (DAEMON_ERROR_BAD_REQUEST for malformed body / missing
 /// fields, DAEMON_ERROR_NOT_FOUND for an unrecognized route). `error_kind`
 /// may be NULL if the caller doesn't care.
-/// Extract a query-string parameter value (`key=value`) from a raw query, or
-/// None. First occurrence wins; values are used verbatim (render flags are
-/// simple identifiers, so no percent-decoding is needed).
-fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
-    query.split('&').find_map(|pair| match pair.split_once('=') {
-        Some((k, v)) if k == key => Some(v),
-        _ => None,
-    })
-}
-
 pub(crate) unsafe fn http_to_daemon_request(
     req: *mut HttpRequest,
     errmsg: *mut *mut c_char,
@@ -408,8 +426,14 @@ pub(crate) unsafe fn http_to_daemon_request(
     let method = (*req).method;
 
     let body_str = if !(*req).body.is_null() && (*req).body_len > 0 {
-        std::str::from_utf8(std::slice::from_raw_parts((*req).body as *const u8, (*req).body_len))
-            .unwrap_or("")
+        match std::str::from_utf8(std::slice::from_raw_parts((*req).body as *const u8, (*req).body_len)) {
+            Ok(text) => text,
+            Err(_) => {
+                crate::daemon_ffi::daemon_free_request(dreq);
+                set_errmsg(errmsg, &MorlocError::Other("the request body is not UTF-8".into()));
+                return ptr::null_mut();
+            }
+        }
     } else {
         ""
     };
@@ -437,7 +461,7 @@ pub(crate) unsafe fn http_to_daemon_request(
             (*dreq).expr = libc::strdup(c.as_ptr());
         }
         if (*dreq).expr.is_null() {
-            libc::free(dreq as *mut c_void);
+            crate::daemon_ffi::daemon_free_request(dreq);
             set_errmsg(errmsg, &MorlocError::Other("Missing 'expr' field in /eval request body".into()));
             return ptr::null_mut();
         }
@@ -455,7 +479,7 @@ pub(crate) unsafe fn http_to_daemon_request(
             (*dreq).expr = libc::strdup(c.as_ptr());
         }
         if (*dreq).expr.is_null() {
-            libc::free(dreq as *mut c_void);
+            crate::daemon_ffi::daemon_free_request(dreq);
             set_errmsg(errmsg, &MorlocError::Other("Missing 'expr' field in /typecheck request body".into()));
             return ptr::null_mut();
         }
@@ -480,7 +504,7 @@ pub(crate) unsafe fn http_to_daemon_request(
             (*dreq).name = libc::strdup(c.as_ptr());
         }
         if (*dreq).expr.is_null() {
-            libc::free(dreq as *mut c_void);
+            crate::daemon_ffi::daemon_free_request(dreq);
             set_errmsg(errmsg, &MorlocError::Other("Missing 'expr' field in /bind request body".into()));
             return ptr::null_mut();
         }
@@ -497,7 +521,7 @@ pub(crate) unsafe fn http_to_daemon_request(
     if method == HttpMethod::Delete && path.starts_with("/bindings/") {
         let name = &path[10..];
         if name.is_empty() {
-            libc::free(dreq as *mut c_void);
+            crate::daemon_ffi::daemon_free_request(dreq);
             set_errmsg(errmsg, &MorlocError::Other("Missing binding name in /bindings/ path".into()));
             return ptr::null_mut();
         }
@@ -511,7 +535,7 @@ pub(crate) unsafe fn http_to_daemon_request(
     if method == HttpMethod::Post && path.starts_with("/call/") {
         let cmd_name = &path[6..];
         if cmd_name.is_empty() {
-            libc::free(dreq as *mut c_void);
+            crate::daemon_ffi::daemon_free_request(dreq);
             set_errmsg(errmsg, &MorlocError::Other("Missing command name in /call/ path".into()));
             return ptr::null_mut();
         }
@@ -523,58 +547,34 @@ pub(crate) unsafe fn http_to_daemon_request(
         let query = std::ffi::CStr::from_ptr((*req).query.as_ptr())
             .to_str()
             .unwrap_or("");
-        if let Some(render) = query_param(query, "render") {
-            let rc = std::ffi::CString::new(render).unwrap_or_default();
-            (*dreq).render = libc::strdup(rc.as_ptr());
+        match morloc_runtime_types::http_query::render_selection(query) {
+            Ok(Some(render)) => {
+                let rc = std::ffi::CString::new(render).unwrap_or_default();
+                (*dreq).render = libc::strdup(rc.as_ptr());
+            }
+            Ok(None) => (*dreq).render_default = true,
+            Err(msg) => {
+                crate::daemon_ffi::daemon_free_request(dreq);
+                set_errmsg(errmsg, &MorlocError::Other(msg.into()));
+                return ptr::null_mut();
+            }
         }
 
-        // Parse body. Accepts either a bare JSON array (`[arg1, arg2]`)
-        // or an object with an `args` array (`{"args": [...]}`).
-        // serde_json correctly handles string escapes and nested
-        // brackets, replacing the previous bracket-counting parser that
-        // misclassified `]` characters inside string fields as array
-        // terminators.
-        // The args stay the text they arrived as, so an integer wider
-        // than a double and a value of any depth reach the pool intact.
-        let trimmed = body_str.trim();
-        if !trimmed.is_empty() {
-            use serde_json::value::RawValue;
-            let args_text: Result<Option<String>, serde_json::Error> = if trimmed.starts_with('[') {
-                // The whole body is the args array.
-                serde_json::from_str::<&RawValue>(trimmed).map(|_| Some(trimmed.to_string()))
-            } else if trimmed.starts_with('{') {
-                serde_json::from_str::<std::collections::HashMap<String, &RawValue>>(trimmed).map(|map| {
-                    map.get("args")
-                        .map(|a| a.get().trim())
-                        .filter(|a| a.starts_with('['))
-                        .map(str::to_string)
-                })
-            } else {
-                // JSON that is neither an array nor an object carries no
-                // args; downstream reports them missing. Anything else is
-                // malformed.
-                serde_json::from_str::<&RawValue>(trimmed).map(|_| None)
-            };
-            match args_text {
-                Ok(Some(s)) => {
-                    let c = std::ffi::CString::new(s).unwrap_or_default();
-                    (*dreq).args_json = libc::strdup(c.as_ptr());
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    // Malformed JSON. Fail fast with a clear message
-                    // rather than letting it fall through as "missing
-                    // args".
-                    libc::free(dreq as *mut c_void);
-                    set_errmsg(
-                        errmsg,
-                        &MorlocError::Other(format!(
-                            "Malformed JSON in /call body: {}",
-                            e
-                        )),
-                    );
-                    return ptr::null_mut();
-                }
+        let body = if (*req).body.is_null() {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts((*req).body as *const u8, (*req).body_len)
+        };
+        match morloc_runtime_types::call_body::args_of(body) {
+            Ok(Some(args)) => {
+                let c = std::ffi::CString::new(args).unwrap_or_default();
+                (*dreq).args_json = libc::strdup(c.as_ptr());
+            }
+            Ok(None) => {}
+            Err(e) => {
+                crate::daemon_ffi::daemon_free_request(dreq);
+                set_errmsg(errmsg, &MorlocError::Other(e));
+                return ptr::null_mut();
             }
         }
         return dreq;
@@ -585,12 +585,13 @@ pub(crate) unsafe fn http_to_daemon_request(
     // OPTIONS request somehow falls through here, treat it as an
     // unknown endpoint (NOT_FOUND below).
 
-    libc::free(dreq as *mut c_void);
+    crate::daemon_ffi::daemon_free_request(dreq);
     let method_str = match method {
         HttpMethod::Get => "GET",
         HttpMethod::Post => "POST",
         HttpMethod::Delete => "DELETE",
         HttpMethod::Options => "OPTIONS",
+        HttpMethod::Head => "HEAD",
     };
     if !error_kind.is_null() {
         *error_kind = crate::daemon_ffi::DAEMON_ERROR_NOT_FOUND;
@@ -617,7 +618,7 @@ mod body_tests {
         });
         let start = std::time::Instant::now();
         let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
-        let req = unsafe { super::parse_request_within(reader, std::time::Duration::from_millis(300), &mut err) };
+        let req = unsafe { super::parse_request_within(reader, std::time::Duration::from_millis(300), &mut err, &mut false) };
         assert!(req.is_null());
         assert!(!err.is_null());
         let msg = unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned();
@@ -628,6 +629,95 @@ mod body_tests {
             libc::close(reader);
         }
         dripper.join().unwrap();
+    }
+
+    fn parse(fd: i32) -> (String, String) {
+        let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+        let req = unsafe { super::parse_request_within(fd, std::time::Duration::from_secs(5), &mut err, &mut false) };
+        assert!(!req.is_null(), "{}", unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy());
+        let r = unsafe { &*req };
+        let path = unsafe { std::ffi::CStr::from_ptr(r.path.as_ptr()) }.to_string_lossy().into_owned();
+        let body = if r.body.is_null() {
+            String::new()
+        } else {
+            String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(r.body as *const u8, r.body_len) }).into_owned()
+        };
+        unsafe { super::http_free_request(req) };
+        (path, body)
+    }
+
+    fn pair() -> (i32, i32) {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) }, 0);
+        (fds[0], fds[1])
+    }
+
+    fn send_all(fd: i32, bytes: &[u8]) {
+        let n = unsafe { libc::send(fd, bytes.as_ptr() as *const libc::c_void, bytes.len(), libc::MSG_NOSIGNAL) };
+        assert_eq!(n, bytes.len() as isize);
+    }
+
+    #[test]
+    fn pipelined_requests_on_one_connection_parse_in_turn() {
+        let (reader, writer) = pair();
+        send_all(
+            writer,
+            b"POST /call/f HTTP/1.1\r\nContent-Length: 3\r\n\r\n[1]\
+              POST /call/g HTTP/1.1\r\ncontent-length: 4\r\n\r\n[22]\
+              GET /health HTTP/1.1\r\nHost: x\r\n\r\n",
+        );
+        assert_eq!(parse(reader), ("/call/f".to_string(), "[1]".to_string()));
+        assert_eq!(parse(reader), ("/call/g".to_string(), "[22]".to_string()));
+        assert_eq!(parse(reader), ("/health".to_string(), String::new()));
+        unsafe {
+            libc::close(reader);
+            libc::close(writer);
+        }
+    }
+
+    #[test]
+    fn a_content_length_is_digits_and_its_copies_agree() {
+        let head = |h: &str| format!("POST /call/f HTTP/1.1\r\n{}\r\n", h);
+        assert_eq!(super::content_length_of(&head("Content-Length: 5")), Ok(5));
+        assert_eq!(super::content_length_of(&head("Host: x")), Ok(0));
+        assert!(super::content_length_of(&head("Content-Length: +5")).is_err());
+        assert!(super::content_length_of(&head("Content-Length: 2\r\nContent-Length: 40")).is_err());
+        assert_eq!(super::content_length_of(&head("Content-Length: 2\r\ncontent-length: 2")), Ok(2));
+    }
+
+    #[test]
+    fn the_body_length_comes_from_the_content_length_header_alone() {
+        let (reader, writer) = pair();
+        send_all(
+            writer,
+            b"POST /call/f HTTP/1.1\r\nX-Note: content-length: 99\r\nContent-Length: 2\r\n\r\n[]\
+              GET /health HTTP/1.1\r\n\r\n",
+        );
+        assert_eq!(parse(reader), ("/call/f".to_string(), "[]".to_string()));
+        assert_eq!(parse(reader), ("/health".to_string(), String::new()));
+        unsafe {
+            libc::close(reader);
+            libc::close(writer);
+        }
+    }
+
+    #[test]
+    fn a_head_whose_end_is_split_across_sends_is_found() {
+        let (reader, writer) = pair();
+        let sender = std::thread::spawn(move || {
+            for part in [&b"POST /call/f HTTP/1.1\r\nContent-Length: 2\r"[..], b"\n\r", b"\n[", b"]GET /x HTTP/1.1\r\n\r\n"] {
+                send_all(writer, part);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            writer
+        });
+        assert_eq!(parse(reader), ("/call/f".to_string(), "[]".to_string()));
+        assert_eq!(parse(reader), ("/x".to_string(), String::new()));
+        let writer = sender.join().unwrap();
+        unsafe {
+            libc::close(reader);
+            libc::close(writer);
+        }
     }
 
     #[test]
@@ -675,12 +765,13 @@ mod body_tests {
         let (d, e) = to_daemon(HttpMethod::Post, "/call/f", &bare);
         assert_eq!(e, None);
         assert_eq!(args_of(d), bare);
-        let (d, e) = to_daemon(HttpMethod::Post, "/call/f", &format!(" {{\"args\": {bare} , \"x\": null}} "));
+        let (d, e) = to_daemon(HttpMethod::Post, "/call/f", &format!(" {{\"args\": {bare} }} "));
         assert_eq!(e, None);
         assert_eq!(args_of(d), bare);
+        let (d, e) = to_daemon(HttpMethod::Post, "/call/f", &format!(" {{\"args\": {bare} , \"x\": null}} "));
+        assert!(d.is_null() && e.is_some());
         let (d, e) = to_daemon(HttpMethod::Post, "/call/f", "[1,");
-        assert!(d.is_null());
-        assert!(e.unwrap().contains("Malformed JSON in /call body"));
+        assert!(d.is_null() && e.is_some());
     }
 
     #[test]
@@ -692,34 +783,5 @@ mod body_tests {
         let (d, e) = to_daemon(HttpMethod::Post, "/eval", "{\"expr\": ");
         assert!(d.is_null());
         assert!(e.unwrap().contains("Malformed JSON in /eval body"));
-    }
-}
-
-mod c_abi {
-    use super::*;
-
-    #[no_mangle]
-    pub unsafe extern "C" fn http_parse_request(fd: i32, errmsg: *mut *mut c_char) -> *mut HttpRequest {
-        super::http_parse_request(fd, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn http_free_request(req: *mut HttpRequest) {
-        super::http_free_request(req)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn http_write_response(fd: i32, status: i32, content_type: *const c_char, body: *const c_char, body_len: usize) -> bool {
-        super::http_write_response(fd, status, content_type, body, body_len)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn http_write_response_ex(fd: i32, status: i32, content_type: *const c_char, body: *const c_char, body_len: usize, extra_headers: *const c_char) -> bool {
-        super::http_write_response_ex(fd, status, content_type, body, body_len, extra_headers)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn http_to_daemon_request(req: *mut HttpRequest, errmsg: *mut *mut c_char, error_kind: *mut i32) -> *mut DaemonRequest {
-        super::http_to_daemon_request(req, errmsg, error_kind)
     }
 }

@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Serial
   , checkTableColumns
   , checkPackerCoherence
   , findPackerInstances
+  , findCoveringPacker
   , PackerInstance (..)
   , wireSerialAstToType
   , containsFunT
@@ -50,7 +51,9 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import Morloc.Typecheck.Internal (apply, emptyGamma, qualify, substitute, subtype, unqualify)
+import Morloc.Typecheck.Internal (apply, emptyGamma, isSubtypeOf2, mapTypeUChildren, qualify, substitute, subtype, typeUChildren, unqualify)
+import qualified Data.List as List
+import Morloc.Frontend.TypeNames (isReservedTypeName)
 
 -- | Classification of how an aliased outer type maps onto the wire form.
 -- Computed by 'makeSerialAST'' from the gscope alias body's outer head.
@@ -191,7 +194,7 @@ checkReadDataType i intr t0
       EffectT _ inner -> inner
       _ -> t0
 
--- | The counterpart for a data-writing intrinsic (@save, @savem, @savej,
+-- | The counterpart for a data-writing intrinsic (@save, @savej,
 -- @write): what it writes must be data. A suspension or function is a
 -- closure naming a manifold of this build, which means nothing in a file.
 checkWriteDataType :: Int -> Intrinsic -> Bool -> MDoc -> MorlocMonad ()
@@ -585,6 +588,9 @@ data PackerInstance = PackerInstance
   { piHead :: TypeU
   , piWire :: TypeU
   , piSources :: Map.Map Lang (Source, Source)
+  , piPacks :: Map.Map Lang Source
+  -- ^ the languages that implement @pack@, whether or not they also
+  -- implement @unpack@
   }
 
 -- | Every @Packable@ instance in the program, with its two methods paired.
@@ -655,14 +661,33 @@ findPackerInstances = do
         { piHead = qualify vs1 b1
         , piWire = qualify vs1 a1
         , piSources = pairByLang packSrcs unpackSrcs
+        , piPacks = Map.fromList [(srcLang p, p) | p <- packSrcs]
         }
     | ((vs1, FunU [a1] b1), packSrcs) <- packs
     , ((vs2, FunU [a2] b2), unpackSrcs) <- unpacks
     , length vs1 == length vs2
-    , a1 == b2
-    , b1 == a2
+    , canonical vs1 (FunU [a1] b1) == canonical vs2 (FunU [b2] a2)
     ]
   where
+    -- The two signatures come from one instance, but merging instances with
+    -- equal heads may leave them with different variable names, so they are
+    -- compared up to renaming.
+    canonical :: [TVar] -> TypeU -> TypeU
+    canonical vs t =
+      let order = List.nub [v | v <- occurrences t, v `elem` vs]
+          names = Map.fromList (zip order [TV ("_" <> DT.pack (show k)) | k <- [(0 :: Int) ..]])
+       in rename names t
+
+    occurrences :: TypeU -> [TVar]
+    occurrences (VarU v) = [v]
+    occurrences (KVarU (v, _)) = [v]
+    occurrences t = concatMap occurrences (typeUChildren t)
+
+    rename :: Map.Map TVar TVar -> TypeU -> TypeU
+    rename m (VarU v) = VarU (Map.findWithDefault v v m)
+    rename m (KVarU (v, k)) = KVarU (Map.findWithDefault v v m, k)
+    rename m t = mapTypeUChildren (rename m) t
+
     methodSignatures :: EVar -> Map.Map EVar Instance -> [(([TVar], TypeU), [Source])]
     methodSignatures name sigmap = case Map.lookup name sigmap of
       (Just (Instance _ _ _ ts)) -> concatMap sigOf ts
@@ -827,7 +852,7 @@ makeSerialAST m lang t0 = do
     -- whenever the scope has it, so the schema cannot be narrowed to
     -- whichever arm happened to be built here.
     makeSerialAST' gscope _ _ (EnumF v@(FV gv _) ps ns) =
-      return . SerialEnum v ps $ case scopeEnumCtors gscope gv of
+      return . SerialEnum v ps $ case TE.enumCtors gscope (TE.whnf gscope (VarU gv)) of
         Just declared | length declared >= length ns -> declared
         _ -> ns
     -- Cycle detection at the VariantF entry, as for NamF. A constructor
@@ -898,13 +923,17 @@ makeSerialAST m lang t0 = do
           | finalType == BT.u64U = return $ SerialUInt64 v
           -- A `data` type is nominal and closed; its constructor names
           -- come straight from the declaration.
-          | scopeDataIsEnum gscope gv
-          , Just ctorNames <- scopeEnumCtors gscope gv = return $ SerialEnum v [] ctorNames
+          --
+          -- By name: an alias of a `data` type is lowered by the alias
+          -- branch below, which keeps the `data` type's name on the binder
+          -- its fields refer back to.
+          | Just ctors <- dataCtorsOfName gscope gv
+          , all (null . snd) ctors = return $ SerialEnum v [] (map fst ctors)
           -- A payload-bearing `data` reached by name. Its arms are absent
           -- from the type because the walk that produced it is pure and
           -- cannot resolve a field's per-language form, so they are built
           -- from the declaration here, where the language is known.
-          | Just ctors <- scopeDataCtors gscope gv = withAncestorVar anc $ \anc' -> do
+          | Just ctors <- dataCtorsOfName gscope gv = withAncestorVar anc $ \anc' -> do
               as <- mapM
                 (\(n, fs) -> (,) n <$> mapM
                    (\fu -> inferConcreteType lang (Idx m (typeOf fu))
@@ -1086,7 +1115,7 @@ makeSerialAST m lang t0 = do
           -- type @Box Int@ reaches here as a plain application. Resolve it
           -- properly and lower the result; it comes back as the variant or
           -- enum form, which the branches above know how to cut and walk.
-          | Just _ <- scopeDataCtors gscope generalTypeName = do
+          | Just _ <- dataCtorsOfName gscope generalTypeName = do
               let (gt, _) = unweaveTypeF ft
               resolved <- inferConcreteType lang (Idx m (typeOf gt))
               case resolved of
@@ -1160,11 +1189,39 @@ makeSerialAST m lang t0 = do
               -- carries the dim. Macro indices are unaffected (they
               -- count type args only).
               AliasIsNone
-                | finalVar == Just BT.list ->
-                    applyDimsToList dims . SerialList fv Nothing <$> makeSerialAST' gscope typepackers anc (head runtimeTs)
-                | finalVar == Just (BT.tuple (length runtimeTs)) ->
-                    SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers anc) runtimeTs
+                | finalVar == Just BT.list -> do
+                    serves <- shapeServes BT.list
+                    if serves
+                      then applyDimsToList dims . SerialList fv Nothing <$> makeSerialAST' gscope typepackers anc (head runtimeTs)
+                      else packableFallback
+                | finalVar == Just (BT.tuple (length runtimeTs)) -> do
+                    serves <- shapeServes (BT.tuple (length runtimeTs))
+                    if serves
+                      then SerialTuple fv <$> mapM (makeSerialAST' gscope typepackers anc) runtimeTs
+                      else packableFallback
                 | otherwise -> packableFallback
+        -- Whether the list or tuple form above can stand in for the type's
+        -- Packable instance in this language. That form serializes the type's
+        -- own arguments as the elements, which is its body only when the
+        -- body's elements are those arguments (@Vector n a = List a@, not
+        -- @Map a b = [(a, b)]@); and it builds the type's native form only
+        -- when that is the body's (Python's @Deque@ is a list) or the type is
+        -- one the runtime builds itself (@Vector@).
+        shapeServes :: TVar -> MorlocMonad Bool
+        shapeServes shapeHead
+          | not bodyHoldsArgs = return False
+          | not (Map.member generalTypeName typepackers) = return True
+          | isReservedTypeName (unTVar generalTypeName) = return True
+          | otherwise = do
+              FV _ shapeCv <- inferConcreteVar lang (Idx m shapeHead)
+              let FV _ ownCv = fv
+              return (ownCv == shapeCv)
+
+        bodyHoldsArgs = case (generalType, evaluatedType) of
+          (_, Nothing) -> True
+          (AppU _ args, Just (AppU _ bodyArgs)) ->
+            filter (not . isKindTypeU) bodyArgs == filter (not . isKindTypeU) args
+          _ -> False
         -- Classify the outer alias body's wire shape. Empty when the type
         -- is its own head (no aliasing); otherwise tagged by the body's
         -- structural head (List, Tuple, or anything else).
@@ -1412,6 +1469,39 @@ packerSources lang m0 pin = case Map.lookup lang (piSources pin) of
     MM.throwSourcedError m0 $
       "No" <+> pretty lang <+> "implementation of the Packable instance for"
         <+> squotes (pretty (piHead pin))
+
+-- | The @pack@ source of the most specific instance whose head covers @t@
+-- and that implements @pack@ in @lang@, or Nothing when none does.
+findCoveringPacker :: Lang -> Int -> Type -> MorlocMonad (Maybe Source)
+findCoveringPacker lang m0 t = do
+  instances <- findPackerInstances
+  gscope <- MM.getGeneralScope
+  let useT = type2typeu t
+      -- Coverage is a property of the general types: a head covers the
+      -- use site when it specializes to it, any of its variables (a
+      -- dimension included) standing for anything.
+      generic h =
+        let (vs, body) = unqualify h
+         in qualify (List.nub (vs <> occurrences body)) body
+      occurrences (VarU v@(TV n)) = [v | Just (c, _) <- [DT.uncons n], C.isLower c]
+      occurrences (KVarU (v, _)) = [v]
+      occurrences x = concatMap occurrences (typeUChildren x)
+      covers pin = isSubtypeOf2 gscope (generic (piHead pin)) useT
+      matches =
+        [ pin
+        | pin <- instances
+        , extractKey (piHead pin) == extractKey useT
+        , Map.member lang (piPacks pin)
+        , covers pin
+        ]
+  let maxima = mostSpecific (map piHead matches)
+  case [pin | pin <- matches, any (equivalent (piHead pin)) maxima] of
+    [] -> return Nothing
+    [pin] -> return (Map.lookup lang (piPacks pin))
+    pins ->
+      MM.throwSourcedError m0 $
+        "Ambiguous Packable instances for" <+> squotes (pretty t) <> ":"
+          <> "\n" <> indent 2 (vsep (map (pretty . piHead) pins))
 
 resolvePacker ::
   Lang ->

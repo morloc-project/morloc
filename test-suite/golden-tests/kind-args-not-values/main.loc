@@ -1,0 +1,90 @@
+--' Kind-level arguments are not runtime values
+--'
+--' The row of a typed table (`{x = Int, y = Str}` in `Table n {x = Int, y =
+--' Str}`) is a Rec-kinded argument; code that collects the values a pool
+--' marshals must not take it for a record of its own. The table crosses
+--' Rust -> Python, Python -> Rust and stays in Rust; in C++ it is used
+--' natively, and held between two Python calls. A user record reached only
+--' as a list's element type, or as the payload of a `data` type that also
+--' takes a row, is a value and must still get its marshalling.
+module main (rustToPy, pyToRust, rustOnly, recordsInList, rowParamData, cppNative, cppHeld)
+
+import root
+import root-py
+import root-rust
+import root-cpp
+import table
+import table-cpp
+
+type Py => (Table (n :: Nat) (r :: Rec)) = "arrow" n r
+type Rust => (Table (n :: Nat) (r :: Rec)) = "rustmorloc::arrow_array::RecordBatch" n r
+
+--' A point
+record P where
+  --' First coordinate
+  a :: Int
+  --' Second coordinate
+  b :: Real
+record Rust => P = "P"
+record Py => P = "dict"
+
+--' A point tagged with a row type, or nothing
+data Box (r :: Rec) = Box P | Empty
+
+source Py from "src.py" ("mk" as mkPy, "describe" as describePy, "sumA")
+source Rust from "src.rs" ("mk" as mkRust, "describe" as describeRust, "nrow" as nrowRust, "points", "point")
+
+--' Build a table in Python
+mkPy :: Int -> Table n {x = Int, y = Str}
+--' Build a table in Rust
+mkRust :: Int -> Table n {x = Int, y = Str}
+--' Describe a table in Python
+describePy :: Table n {x = Int, y = Str} -> Str
+--' Describe a table in Rust
+describeRust :: Table n {x = Int, y = Str} -> Str
+--' Count a table's rows in Rust
+nrowRust :: Table n r -> Int
+--' Make points in Rust
+points :: Int -> [P]
+--' Make one point in Rust
+point :: Int -> P
+--' Sum the first coordinates in Python
+sumA :: [P] -> Int
+
+--' A Rust table read in Python
+rustToPy :: Int -> Str
+rustToPy k = describePy (mkRust k)
+
+--' A Python table read in Rust
+pyToRust :: Int -> Str
+pyToRust k = describeRust (mkPy k)
+
+--' A Rust table used in Rust
+rustOnly :: Int -> Int
+rustOnly k = nrowRust (mkRust k)
+
+--' A record reached only through a list
+recordsInList :: Int -> Int
+recordsInList k = sumA (points k)
+
+--' A record carried by a data type with a row parameter
+rowParamData :: Int -> Int
+rowParamData k = unbox (box (point k))
+
+--' Wrap a point
+box :: P -> Box {x = Int}
+box p = Box p
+
+--' Unwrap a point's first coordinate
+unbox :: Box {x = Int} -> Int
+unbox b = match b
+  | (Box p) = .a p
+  | Empty = 0
+
+--' A Python table used natively in C++
+cppNative :: Int -> Int
+cppNative k = nrow (sliceRows 0 2 (mkPy k))
+
+--' A Python table held in C++ between two Python calls
+cppHeld :: Int -> Str
+cppHeld k = describePy (sliceRows 1 k (mkPy k))

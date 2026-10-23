@@ -50,6 +50,7 @@ module Morloc.CodeGenerator.EffectBoundary
   , insertExportBoundaries
   , boundaryExpectsPlain
   , polyOuterType
+  , sourceSignature
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -429,9 +430,9 @@ substBndVar i i' t = go
 -- is not already a variable or a literal is bound outside the suspension, so
 -- running the suspension twice runs the host call twice and nothing else.
 sourceCall :: Lang -> PolyExpr -> [PolyExpr] -> MorlocMonad PolyExpr
-sourceCall lang fn@(PolyExe (Idx gidx exeT0) (SrcCallP src)) xs = do
+sourceCall lang fn@(PolyExe (Idx gidx exeT0) (SrcCallP origin src)) xs = do
   scope <- MM.getGeneralScope
-  (opaque, declared) <- declaredSignature gidx src
+  (opaque, declared) <- declaredSignature origin src
   -- The row may be spelled through an alias (@type IOInt = <IO> Int@).
   let exeT = expandT scope exeT0
       n = length xs
@@ -461,14 +462,14 @@ sourceCall lang fn@(PolyExe (Idx gidx exeT0) (SrcCallP src)) xs = do
       case ret of
         EffectT effs r | suspended -> do
           let dr = peelDecl dRet
-              fn' = PolyExe (Idx gidx (head' (hostType hv dr r))) (SrcCallP src)
+              fn' = PolyExe (Idx gidx (head' (hostType hv dr r))) (SrcCallP origin src)
           (binds, xs'') <- unzip <$> zipWithM bindArg hostIns xs'
           adapted <- adapt Inbound lang gidx hv dr r (PolyApp fn' xs'')
           let suspendedCall = PolyDoBlock (Idx gidx (EffectT effs r)) adapted
           return $ foldr (\(i, e) body -> PolyLet i e body) suspendedCall (concat binds)
         _
           | needsAdapt hv dRet ret || or (zipWith (needsAdapt hv) dIns ins) -> do
-              let fn' = PolyExe (Idx gidx (head' (hostType hv dRet ret))) (SrcCallP src)
+              let fn' = PolyExe (Idx gidx (head' (hostType hv dRet ret))) (SrcCallP origin src)
               adapt Inbound lang gidx hv dRet ret (PolyApp fn' xs')
           | otherwise -> return (PolyApp fn xs')
   where
@@ -575,25 +576,58 @@ splitAtArity n (FunT ins ret)
 splitAtArity 0 t = Just ([], t)
 splitAtArity _ _ = Nothing
 
+-- | A function type with the parameters of a function-typed result moved
+-- into its own: @a -> (b -> c)@ is @a -> b -> c@.
+flattenFunT :: Type -> Type
+flattenFunT (FunT ins ret) = case flattenFunT ret of
+  FunT ins' r -> FunT (ins <> ins') r
+  r -> FunT ins r
+flattenFunT t = t
+
 -- | The signature a source function is declared with, and the type
 -- variables it quantifies. The signature is found by the source it
 -- implements, since the call's own index may belong to the definition
 -- around it.
-declaredSignature :: Int -> Source -> MorlocMonad (Set.Set TVar, Maybe Type)
-declaredSignature _ src = do
-  sgmap <- MM.gets stateSignatures
-  let declared = [e | sg <- GMap.elems sgmap, Just e <- [signatureOf sg]]
-  return $ case declared of
-    (e : _) ->
+declaredSignature :: Maybe Int -> Source -> MorlocMonad (Set.Set TVar, Maybe Type)
+declaredSignature origin src = do
+  sig <- sourceSignature origin src
+  return $ case sig of
+    Just e ->
       let (vs, t) = unqualify (etype e)
        in (Set.fromList vs, Just (unresolvedType2type t))
-    [] -> (Set.empty, Nothing)
+    Nothing -> (Set.empty, Nothing)
+
+-- | The signature of the term a source call names. A call a user term makes
+-- carries its source expression, which names one term. A call the compiler
+-- builds carries none and is known only by its host function, so every
+-- signature of that host function must agree.
+sourceSignature :: Maybe Int -> Source -> MorlocMonad (Maybe EType)
+sourceSignature origin src = do
+  sgmap <- MM.gets stateSignatures
+  let sigs = GMap.elems sgmap
+      -- the term the index was linked to, or for an instance method (which
+      -- is not in the index map) the term that lists the index among its
+      -- implementations
+      ofTerm = case origin of
+        Just i
+          | GMapJust sg <- GMap.lookup i sgmap, Just e <- signatureOf sameSource sg -> Just e
+          | otherwise -> listToMaybe [e | sg <- sigs, Just e <- [signatureOf (\(Idx j _) -> j == i) sg]]
+        Nothing -> Nothing
+      ofHost = nubBy (\a b -> etype a == etype b) [e | sg <- sigs, Just e <- [signatureOf sameSource sg]]
+  case (ofTerm, ofHost) of
+    (Just e, _) -> return (Just e)
+    (Nothing, []) -> return Nothing
+    (Nothing, [e]) -> return (Just e)
+    (Nothing, _) ->
+      MM.throwCompilerBug $
+        "a call of" <+> squotes (pretty (srcName src))
+          <+> "names no term, and the host function has more than one signature"
   where
-    signatureOf (Monomorphic (TermTypes (Just e) srcs _))
-      | any (sameSource . snd) srcs = Just e
-    signatureOf (Polymorphic _ _ e ts)
-      | any (any (sameSource . snd) . termConcrete) ts = Just e
-    signatureOf _ = Nothing
+    signatureOf p (Monomorphic (TermTypes (Just e) srcs _))
+      | any (p . snd) srcs = Just e
+    signatureOf p (Polymorphic _ _ e ts)
+      | any (any (p . snd) . termConcrete) ts = Just e
+    signatureOf _ _ = Nothing
     -- The host function itself: its name in its language and file, whatever
     -- alias a module gives it.
     sameSource (Idx _ s) = srcName s == srcName src && srcPath s == srcPath src && srcLang s == srcLang src
@@ -677,6 +711,19 @@ opaqueAt :: HostView -> Maybe Type -> Bool
 opaqueAt (HostView _ vs _ _ _) (Just (VarT v)) = Set.member v vs
 opaqueAt _ _ = False
 
+-- | The parameters and result of a function as the host calls it: split at
+-- the arity of its declaration, so a declared @a -> c@ instantiated at
+-- @c = B -> D@ is called with one argument and returns a function, although
+-- its type reads @a -> B -> D@. Without a declared function type, split at
+-- the type's own outer parameters.
+calledAs :: HostView -> Maybe Type -> Type -> Maybe ([Type], Type)
+calledAs (HostView scope _ _ _ _) d t = case (expandT scope <$> d, flattenFunT t) of
+  (Just (FunT ds _), FunT as r)
+    | length ds < length as -> Just (take (length ds) as, FunT (drop (length ds) as) r)
+  _ -> case t of
+    FunT as r -> Just (as, r)
+    _ -> Nothing
+
 -- | The declared type of each part of a declared type, where its shape
 -- matches the value's; 'Nothing' where there is no declaration to consult,
 -- and the value's own type decides.
@@ -745,7 +792,7 @@ hostTypeOn hv@(HostView scope _ hostRecs _ _) seen0 d t
   | opaqueAt hv d = Nothing
   | any (`Set.member` seen0) here = Nothing
   | otherwise = case expandT scope t of
-      FunT as r ->
+      t'@(FunT _ _) | Just (as, r) <- calledAs hv d t' ->
         let (das, dr) = declFun hv (length as) d
             as' = zipWith (hostTypeOn hv seen) das as
             r' = case r of
@@ -793,7 +840,7 @@ adapt dir lang g hv@(HostView scope _ _ _ _) d t0 e
         hv' <- inPool l m hv t0
         PolyManifold l m f k <$> adapt dir l m hv' d t0 x
       PolyManifold l m f@(ManifoldPart _ _) k body
-        | Outbound <- dir, FunT as r <- t -> do
+        | Outbound <- dir, Just (as, r) <- calledAs hv d t -> do
             hv' <- inPool l m hv t0
             let (das, dr) = declFun hv' (length as) d
             body' <- case r of
@@ -829,7 +876,7 @@ adapt dir lang g hv@(HostView scope _ _ _ _) d t0 e
                   Nothing -> return (k, (Idx i ty, x))
               | (k, (Idx i ty, x)) <- rs ]
             return $ PolyRecord o v ps rs'
-      PolyCoerce c (Idx i ty) x
+      PolyCoerce c@CoerceToOptional (Idx i ty) x
         | OptionalT a <- t -> do
             x' <- adapt dir lang g hv (declOptional hv d) a x
             return $ PolyCoerce c (Idx i (hostType hv d ty)) x'
@@ -876,7 +923,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
         Inbound -> hostType hv d t
       var = PolyLetVar (Idx g here) v
   body <- case t of
-    FunT as r -> wrapFunction v here as r
+    FunT _ _ | Just (as, r) <- calledAs hv d t -> wrapFunction v here as r
     EffectT effs c -> do
       let dc = declEffect hv d
           forced = PolyEval (Idx g (case dir of Outbound -> c; Inbound -> hostType hv dc c)) var
@@ -914,14 +961,14 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
       return $ PolyIntrinsic (Idx g (OptionalT aThere)) IntrMapOptional [each, var]
     AppT (VarT h) ts -> do
       mapSrc <- case ts of
-        [_] -> resolveInstanceForType findFunctorMap lang t
+        [_] -> resolveInstanceForType findFunctorMap g lang t
         _ -> return Nothing
       case (mapSrc, ts) of
         (Just src, [a]) -> do
           let da = case declArgs hv 1 d of [x] -> x; _ -> Nothing
               there = case dir of Outbound -> hostType hv d t; Inbound -> t
           (each, aThere) <- element da a
-          return $ PolyApp (PolyExe (Idx g (FunT [FunT [elemHere da a] aThere, here] there)) (SrcCallP src)) [each, var]
+          return $ PolyApp (PolyExe (Idx g (FunT [FunT [elemHere da a] aThere, here] there)) (SrcCallP Nothing src)) [each, var]
         _ -> packed h ts var here
     _ -> refuse
   return (PolyLet v e body)
@@ -968,9 +1015,9 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
               wireHere = case dir of Outbound -> wireT; Inbound -> hostType hv dWire wireT
               wireThere = case dir of Outbound -> hostType hv dWire wireT; Inbound -> wireT
               there = case dir of Outbound -> hostType hv d t; Inbound -> t
-              unpacked = PolyApp (PolyExe (Idx g (FunT [here] wireHere)) (SrcCallP unpackSrc)) [var]
+              unpacked = PolyApp (PolyExe (Idx g (FunT [here] wireHere)) (SrcCallP Nothing unpackSrc)) [var]
           adapted <- adapt dir lang g hv dWire wireT unpacked
-          return $ PolyApp (PolyExe (Idx g (FunT [wireThere] there)) (SrcCallP packSrc)) [adapted]
+          return $ PolyApp (PolyExe (Idx g (FunT [wireThere] there)) (SrcCallP Nothing packSrc)) [adapted]
         [] -> refuse
 
     refuse :: MorlocMonad a

@@ -1,0 +1,369 @@
+-- Copy census for generated Rust: how many links each shape copies when it
+-- reads, projects, keeps or rebuilds a chain. `Chain` is a user-mapped Rust
+-- type whose Clone recurses and counts every link it copies; each export
+-- prints its result and the links copied in the run, so a wrong value and a
+-- changed copy count both fail. The counts are a baseline, not a target: a
+-- count that drops is progress and its line in exp.txt is updated with it.
+-- Shapes and their analysis: model/compiler/issues/codegen-copies.md and
+-- codegen-ownership.md; timings in model/performance/copies.md.
+--
+--   nestedOut nestedLoop       nested constructor pattern, once and in a loop
+--   tagNested tagField         tag test on a nested field, on a record field
+--   fieldArg fieldSrc fieldSrcLit  record field to a by-ref parameter
+--   fieldRet                   function returning a field of its parameter
+--   tupleArg tupleFresh        tuple projection, of a parameter and a fresh value
+--   listPat listRet            list pattern elements read, one returned
+--   twiceRead twiceKeep        one value used by two calls in one step
+--   twoSteps                   one value used in two steps
+--   partsBorrowed partsFresh   constructor built from the parts of another
+--   setter setterFn            record setter, inline and in a function
+--   tlOnce                     function returning the tail of its argument
+--   tlLoopRead tlLoopKeep tlLoopBuilt  loop stepped by tl: read, kept, rebuilt
+--   closureRead closureKeep    lambda capturing a chain
+--   papRead papHof             partial application capturing a chain
+--   letOnce letParam letField  let-bound value read once
+--   matchUnwrap matchArg matchTry  match result returned, passed, from @try
+--   throughTwo throughLoop throughCli  value kept through a chain of calls
+--   nonTail                    non-tail recursion rebuilding a chain
+--   guardTwice guardLoop guardKeep  guarded arms projecting the subject
+--   mixedLoop                  loop step with a borrowing and a moving read
+--   matchedTwice               one value matched twice
+--   twoLets                    one value kept by two lets in turn
+--   capStaged capStagedKeep    a staged function capturing a chain, passed as a value
+module main
+  ( nestedOut, nestedLoop, tagNested, tagField
+  , fieldArg, fieldSrc, fieldSrcLit, fieldRet, tupleArg, tupleFresh
+  , listPat, listRet, twiceRead, twiceKeep, twoSteps
+  , partsBorrowed, partsFresh, setter, setterFn
+  , tlOnce, tlLoopRead, tlLoopKeep, tlLoopBuilt
+  , closureRead, closureKeep, papRead, papHof
+  , letOnce, letParam, letField, matchUnwrap, matchArg, matchTry
+  , throughTwo, throughLoop, throughCli, nonTail
+  , guardTwice, guardLoop, guardKeep, mixedLoop, matchedTwice, twoLets
+  , capStaged, capStagedKeep
+  )
+
+import root-rust
+
+data Chain = End | Link Int Chain
+data Rust => Chain = "Chain"
+
+record Holder where
+  c :: Chain
+  k :: Int
+record Rust => Holder = "Holder"
+
+data Res = Bad Str | Good Chain
+
+source Rust from "chain.rs"
+  ( "clones", "mk_chain" as mkChain, "chain_len" as chainLen
+  , "mk_holder" as mkHolder, "mk_tup" as mkTup )
+
+clones :: Int -> (Int, Int)
+mkChain :: Int -> Chain
+chainLen :: Chain -> Int
+mkHolder :: Int -> Holder
+mkTup :: Int -> (Chain, Int)
+
+count :: Int -> Chain -> Int
+count | acc (Link _ rest) = count (acc + 1) rest
+      | acc _ = acc
+
+prepend :: Int -> Chain -> Chain
+prepend x c = Link x c
+
+second :: Chain -> Int
+second c = match c
+  | (Link _ (Link _ rest)) = chainLen rest
+  | _ = 0
+
+nestedOut :: Int -> (Int, Int)
+nestedOut n = clones (second (mkChain n))
+
+skip2 :: Int -> Chain -> Int
+skip2 acc c = match c
+  | (Link _ (Link _ rest)) = skip2 (acc + 1) rest
+  | _ = acc
+
+nestedLoop :: Int -> (Int, Int)
+nestedLoop n = clones (skip2 0 (mkChain n))
+
+lastOne :: Chain -> Int
+lastOne c = match c
+  | (Link _ End) = 1
+  | (Link _ _) = 2
+  | End = 0
+
+tagNested :: Int -> (Int, Int)
+tagNested n = clones (lastOne (mkChain n))
+
+hasLinks :: Holder -> Int
+hasLinks h = match (.c h)
+  | End = 0
+  | (Link _ _) = 1
+
+tagField :: Int -> (Int, Int)
+tagField n = clones (hasLinks {c = mkChain n, k = 1})
+
+fieldCount :: Holder -> Int
+fieldCount h = count 0 (.c h)
+
+fieldArg :: Int -> (Int, Int)
+fieldArg n = clones (fieldCount {c = mkChain n, k = 1})
+
+srcField :: Holder -> Int
+srcField h = chainLen (.c h)
+
+fieldSrc :: Int -> (Int, Int)
+fieldSrc n = clones (srcField {c = mkChain n, k = 1})
+
+fieldSrcLit :: Int -> (Int, Int)
+fieldSrcLit n = clones (chainLen (.c ({c = mkChain n, k = 1} :: Holder)))
+
+getC :: Holder -> Chain
+getC h = .c h
+
+fieldRet :: Int -> (Int, Int)
+fieldRet n = clones (count 0 (getC (mkHolder n)))
+
+tupCount :: (Chain, Int) -> Int
+tupCount t = count (.1 t) (.0 t)
+
+tupleArg :: Int -> (Int, Int)
+tupleArg n = clones (tupCount (mkChain n, 0))
+
+tupleFresh :: Int -> (Int, Int)
+tupleFresh n = clones (chainLen (.0 (mkTup n)))
+
+pairLen :: [Chain] -> Int
+pairLen xs = match xs
+  | [x, y] = count 0 x + count 0 y
+  | _ = 0
+
+listPat :: Int -> (Int, Int)
+listPat n = clones (pairLen [mkChain n, mkChain n])
+
+firstOf :: [Chain] -> Chain
+firstOf xs = match xs
+  | [x, _] = x
+  | _ = End
+
+listRet :: Int -> (Int, Int)
+listRet n = clones (count 0 (firstOf [mkChain n, mkChain n]))
+
+twiceRead :: Int -> (Int, Int)
+twiceRead n = clones (count 0 c + count 0 c)
+  where
+    c = mkChain n
+
+twiceKeep :: Int -> (Int, Int)
+twiceKeep n = clones (count 0 (prepend 1 c) + count 0 (prepend 2 c))
+  where
+    c = mkChain n
+
+twoSteps :: Int -> (Int, Int)
+twoSteps n = clones (let c = mkChain n in let a = chainLen c in a + count 0 (prepend 0 c))
+
+bump :: Chain -> Chain
+bump c = match c
+  | End = End
+  | (Link x rest) = Link (x + 1) rest
+
+partsBorrowed :: Int -> (Int, Int)
+partsBorrowed n = clones (count 0 (bump (mkChain n)))
+
+partsFresh :: Int -> (Int, Int)
+partsFresh n = clones (count 0 (bump (Link 5 (mkChain n))))
+
+setter :: Int -> (Int, Int)
+setter n = clones (chainLen (.c (.(.k = 2) (mkHolder n))))
+
+setK :: Holder -> Holder
+setK h = .(.k = 2) h
+
+setterFn :: Int -> (Int, Int)
+setterFn n = clones (chainLen (.c (setK (mkHolder n))))
+
+tl :: Chain -> Chain
+tl c = match c
+  | End = End
+  | (Link _ rest) = rest
+
+tlOnce :: Int -> (Int, Int)
+tlOnce n = clones (count 0 (tl (mkChain n)))
+
+lenAfter :: Int -> Chain -> Int
+lenAfter k c
+  ? k == 0 = chainLen c
+  : lenAfter (k - 1) (tl c)
+
+tlLoopRead :: Int -> (Int, Int)
+tlLoopRead n = clones (lenAfter 3 (mkChain n))
+
+dropN :: Int -> Chain -> Chain
+dropN k c
+  ? k == 0 = c
+  : dropN (k - 1) (tl c)
+
+tlLoopKeep :: Int -> (Int, Int)
+tlLoopKeep n = clones (count 0 (dropN 3 (mkChain n)))
+
+dropB :: Int -> Chain -> Int
+dropB k c
+  ? k == 0 = chainLen c
+  : ? k == 2 = dropB (k - 1) (Link 0 c)
+  : dropB (k - 1) (tl c)
+
+tlLoopBuilt :: Int -> (Int, Int)
+tlLoopBuilt n = clones (dropB 4 (mkChain n))
+
+closureRead :: Int -> (Int, Int)
+closureRead n = clones (sum (map (\k -> k + count 0 c) [1, 2, 3]))
+  where
+    c = mkChain n
+
+closureKeep :: Int -> (Int, Int)
+closureKeep n = clones (sum (map (\k -> count 0 (prepend k c)) [1, 2, 3]))
+  where
+    c = mkChain n
+
+lenPlus :: Chain -> Int -> Int
+lenPlus c k = k + count 0 c
+
+papRead :: Int -> (Int, Int)
+papRead n = clones (sum (map (lenPlus c) [1, 2, 3]))
+  where
+    c = mkChain n
+
+applyBoth :: (Chain -> Int -> Int) -> Chain -> Int
+applyBoth f c = sum (map (f c) [1, 2])
+
+papHof :: Int -> (Int, Int)
+papHof n = clones (applyBoth lenPlus (mkChain n))
+
+letOnce :: Int -> (Int, Int)
+letOnce n = clones (count 0 d)
+  where
+    d = prepend 0 (mkChain n)
+
+letP :: Chain -> Int
+letP x = let d = x in count 0 d
+
+letParam :: Int -> (Int, Int)
+letParam n = clones (letP (mkChain n))
+
+letF :: Holder -> Int
+letF h = let d = .c h in chainLen d
+
+letField :: Int -> (Int, Int)
+letField n = clones (letF (mkHolder n))
+
+unwrap :: Res -> Chain
+unwrap r = match r
+  | (Good c) = c
+  | (Bad _) = End
+
+matchUnwrap :: Int -> (Int, Int)
+matchUnwrap n = clones (count 0 (unwrap (Good (mkChain n))))
+
+unwrapCount :: Res -> Int
+unwrapCount r = count 0 (match r
+  | (Good c) = c
+  | (Bad _) = End)
+
+matchArg :: Int -> (Int, Int)
+matchArg n = clones (unwrapCount (Good (mkChain n)))
+
+matchTry :: Int -> (Int, Int)
+matchTry n = clones (match (@try (mkChain n))
+  | (Ok v) = count 0 v
+  | (Err _) = 0)
+
+gee :: Chain -> Chain
+gee x = Link 0 x
+
+eff :: Chain -> Chain
+eff x = gee x
+
+throughTwo :: Int -> (Int, Int)
+throughTwo n = clones (count 0 (eff (mkChain n)))
+
+build :: Int -> Chain -> Chain
+build k acc
+  ? k == 0 = acc
+  : build (k - 1) (Link k acc)
+
+effL :: Chain -> Chain
+effL x = build 1 x
+
+throughLoop :: Int -> (Int, Int)
+throughLoop n = clones (count 0 (effL (mkChain n)))
+
+throughCli :: Chain -> (Int, Int)
+throughCli c = clones (count 0 (eff c))
+
+inc :: Chain -> Chain
+inc c = match c
+  | End = End
+  | (Link x rest) = Link (x + 1) (inc rest)
+
+nonTail :: Int -> (Int, Int)
+nonTail n = clones (count 0 (inc (mkChain n)))
+
+pick :: Int -> Res -> Int
+pick k r = match r
+  | (Good c) ? chainLen c > k = 1000 + chainLen c : chainLen c
+  | (Bad _) = 0
+
+guardTwice :: Int -> (Int, Int)
+guardTwice n = clones (pick n (Good (mkChain n)) + pick 0 (Good (mkChain n)))
+
+walk :: Int -> Chain -> Int
+walk acc c = match c
+  | (Link x rest) ? x > 2 = walk (acc + 100) rest : walk (acc + x) rest
+  | End = acc
+
+guardLoop :: Int -> (Int, Int)
+guardLoop n = clones (walk 0 (mkChain n))
+
+keep :: Res -> Chain
+keep r = match r
+  | (Good c) ? chainLen c > 2 = c : Link 0 c
+  | _ = End
+
+guardKeep :: Int -> (Int, Int)
+guardKeep n = clones (chainLen (keep (Good (mkChain n))))
+
+eat :: Int -> Chain -> Int
+eat acc c = match c
+  | (Link x rest) ? x > 2 = eat (acc + chainLen rest) (Link 0 rest) : eat (acc + x) rest
+  | End = acc
+
+mixedLoop :: Int -> (Int, Int)
+mixedLoop n = clones (eat 0 (mkChain n))
+
+matchedTwice :: Int -> (Int, Int)
+matchedTwice n = clones (let r = Good (mkChain n) in (match r | (Good c) = chainLen c | (Bad _) = 0) + (match r | (Good d) = chainLen d | (Bad _) = 0))
+
+--' Two chains built from one in two lets, then the links copied
+twoLets :: Int -> (Int, Int)
+twoLets n = clones (
+  let c = mkChain n
+  in let a = Link 1 c
+  in let b = Link 2 c
+  in count 0 a + count 0 b)
+
+applyAfter :: (Int -> Int -> Int) -> Int -> Int
+applyAfter f k
+  ? k == 0 = f 1 2
+  : applyAfter f (k - 1)
+
+capStaged :: Int -> (Int, Int)
+capStaged n = clones (applyAfter f 3) where
+  c = mkChain n
+  f x = let z = chainLen c + x in \y -> z + y
+
+capStagedKeep :: Int -> (Int, Int)
+capStagedKeep n = clones (applyAfter f 3 + chainLen c) where
+  c = mkChain n
+  f x = let z = chainLen c + x in \y -> z + y

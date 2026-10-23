@@ -5,8 +5,8 @@
 module main (ida)
 import root
 
-type A = Int
-type B = Int
+newtype A = Int
+newtype B = Int
 
 type Py => A = "wrap_a" B
 type Py => B = "wrap_b" A

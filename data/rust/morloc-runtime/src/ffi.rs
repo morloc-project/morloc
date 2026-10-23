@@ -9,7 +9,7 @@ use std::ptr;
 
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::schema::{self};
-use crate::shm::{self, AbsPtr, BlockHeader, RelPtr, ShmHeader, VolPtr};
+use crate::shm::{self, AbsPtr, RelPtr, ShmHeader};
 pub use crate::cschema::CSchema;
 
 /// The ABI/wire-format version compiled into this libmorloc.so (see morloc.h's
@@ -43,23 +43,11 @@ macro_rules! ffi_try {
 
 pub(crate) unsafe fn shinit(
     shm_basename: *const c_char,
-    volume_index: usize,
     shm_size: usize,
     errmsg: *mut *mut c_char,
 ) -> *mut ShmHeader {
     let basename = CStr::from_ptr(shm_basename).to_string_lossy();
-    ffi_try!(errmsg, ptr::null_mut(), shm::shinit(&basename, volume_index, shm_size))
-}
-
-pub(crate) unsafe fn shopen(
-    volume_index: usize,
-    errmsg: *mut *mut c_char,
-) -> *mut ShmHeader {
-    ffi_try!(
-        errmsg,
-        ptr::null_mut(),
-        shm::shopen(volume_index).and_then(|opt| opt.ok_or(MorlocError::Shm("volume not found".into())))
-    )
+    ffi_try!(errmsg, ptr::null_mut(), shm::shinit(&basename, shm_size))
 }
 
 pub(crate) unsafe fn shclose(errmsg: *mut *mut c_char) -> bool {
@@ -88,35 +76,6 @@ pub(crate) unsafe fn stream_registry_init(
     ffi_try!(errmsg, usize::MAX, crate::stream::registry_init())
 }
 
-/// Enqueue a PID-sweep request to the dedicated sweeper thread.
-/// Used by the nexus when it detects a pool has died (clean exit or
-/// crash) so any slots that pool left open in the shared registry
-/// are released without waiting for the per-call sweep (which only
-/// fires when a dispatch ends normally).
-///
-/// `pid` and `start_time` together identify a unique process across
-/// PID reuse. The sweeper walks the registry and discards slots whose
-/// `(opener_pid, opener_pid_start_time)` matches both. Pass
-/// `start_time = 0` to skip the start-time check (accepts the rare
-/// PID-reuse false positive).
-///
-/// Non-blocking; the actual sweep runs on the sweeper thread.
-pub(crate) unsafe fn stream_sweep_pid(
-    pid: u32,
-    start_time: u64,
-) {
-    crate::stream::sweeper_enqueue_pid(pid, start_time);
-}
-
-/// The start stamp of `pid` (`process::start_time`), which the nexus pairs
-/// with a pool's pid when it enqueues a PID sweep. 0 when unreadable; the
-/// sweep then accepts a PID-only match.
-pub(crate) unsafe fn stream_pid_start_time(
-    pid: u32,
-) -> u64 {
-    morloc_runtime_types::process::start_time(pid)
-}
-
 pub(crate) unsafe fn shm_set_fallback_dir(dir: *const c_char) {
     if !dir.is_null() {
         let d = CStr::from_ptr(dir).to_string_lossy();
@@ -126,26 +85,6 @@ pub(crate) unsafe fn shm_set_fallback_dir(dir: *const c_char) {
 
 pub(crate) unsafe fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_void {
     ffi_try!(errmsg, ptr::null_mut(), shm::shmalloc(size).map(|p| p as *mut c_void))
-}
-
-pub(crate) unsafe fn shmemcpy(
-    src: *mut c_void,
-    size: usize,
-    errmsg: *mut *mut c_char,
-) -> *mut c_void {
-    ffi_try!(
-        errmsg,
-        ptr::null_mut(),
-        shm::shmemcpy(src as *const u8, size).map(|p| p as *mut c_void)
-    )
-}
-
-pub(crate) unsafe fn shcalloc(
-    nmemb: usize,
-    size: usize,
-    errmsg: *mut *mut c_char,
-) -> *mut c_void {
-    ffi_try!(errmsg, ptr::null_mut(), shm::shcalloc(nmemb, size).map(|p| p as *mut c_void))
 }
 
 /// Report blocks currently held across every mapped volume. Writes the
@@ -210,32 +149,6 @@ pub(crate) unsafe fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> RelP
     ffi_try!(errmsg, shm::RELNULL, shm::abs2rel(ptr as AbsPtr))
 }
 
-pub(crate) unsafe fn abs2shm(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut ShmHeader {
-    ffi_try!(errmsg, ptr::null_mut(), shm::abs2shm(ptr as AbsPtr))
-}
-
-pub(crate) unsafe fn abs2blk(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut BlockHeader {
-    clear_errmsg(errmsg);
-    if ptr.is_null() {
-        set_errmsg(errmsg, &MorlocError::NullPointer);
-        return ptr::null_mut();
-    }
-    let blk = (ptr as *mut u8).sub(std::mem::size_of::<BlockHeader>()) as *mut BlockHeader;
-    if (*blk).magic != shm::BLK_MAGIC {
-        set_errmsg(errmsg, &MorlocError::Shm("Bad block magic".into()));
-        return ptr::null_mut();
-    }
-    blk
-}
-
-pub(crate) unsafe fn vol2rel(ptr: VolPtr, shm_ptr: *const ShmHeader) -> RelPtr {
-    shm::vol2rel(ptr, &*shm_ptr)
-}
-
-pub(crate) unsafe fn vol2abs(ptr: VolPtr, shm_ptr: *const ShmHeader) -> *mut c_void {
-    shm::vol2abs(ptr, shm_ptr) as *mut c_void
-}
-
 // ── Schema functions ───────────────────────────────────────────────────────
 
 pub(crate) unsafe fn parse_schema(
@@ -268,7 +181,7 @@ pub(crate) unsafe fn schema_to_string(schema: *const CSchema) -> *mut c_char {
     let rs = CSchema::to_rust(schema);
     let s = schema::schema_to_string(&rs);
     match CString::new(s) {
-        Ok(cs) => cs.into_raw(),
+        Ok(cs) => crate::error::malloc_cstr(&cs),
         Err(_) => ptr::null_mut(),
     }
 }
@@ -374,25 +287,6 @@ pub(crate) unsafe fn unpack_with_schema(
 // are provided by json.c
 
 // ── Schema utility functions needed by C code ──────────────────────────────
-
-pub(crate) unsafe fn calculate_voidstar_size(
-    data: *const c_void,
-    schema: *const CSchema,
-    errmsg: *mut *mut c_char,
-) -> usize {
-    clear_errmsg(errmsg);
-    if data.is_null() || schema.is_null() {
-        return 0;
-    }
-    let rs = CSchema::to_rust(schema);
-    match calc_voidstar_size_inner(data as *const u8, &rs) {
-        Ok(size) => size,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            0
-        }
-    }
-}
 
 /// The size of the value at `data`, and an upper bound on the number of
 /// sub-allocations a deep copy of it takes.
@@ -721,18 +615,6 @@ impl<'a, 'r> crate::walk::Walker<bool> for SizeWalk<'a, 'r> {
     }
 }
 
-pub(crate) unsafe fn get_ptr(
-    schema: *const CSchema,
-    errmsg: *mut *mut c_char,
-) -> *mut c_void {
-    clear_errmsg(errmsg);
-    if schema.is_null() {
-        return ptr::null_mut();
-    }
-    let rs = CSchema::to_rust(schema);
-    ffi_try!(errmsg, ptr::null_mut(), shm::shmalloc(rs.width).map(|p| p as *mut c_void))
-}
-
 mod c_abi {
     use super::*;
 
@@ -742,13 +624,8 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn shinit(shm_basename: *const c_char, volume_index: usize, shm_size: usize, errmsg: *mut *mut c_char) -> *mut ShmHeader {
-        super::shinit(shm_basename, volume_index, shm_size, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn shopen(volume_index: usize, errmsg: *mut *mut c_char) -> *mut ShmHeader {
-        super::shopen(volume_index, errmsg)
+    pub unsafe extern "C" fn shinit(shm_basename: *const c_char, shm_size: usize, errmsg: *mut *mut c_char) -> *mut ShmHeader {
+        super::shinit(shm_basename, shm_size, errmsg)
     }
 
     #[no_mangle]
@@ -767,16 +644,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn stream_sweep_pid(pid: u32, start_time: u64) {
-        super::stream_sweep_pid(pid, start_time)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn stream_pid_start_time(pid: u32) -> u64 {
-        super::stream_pid_start_time(pid)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn shm_set_fallback_dir(dir: *const c_char) {
         super::shm_set_fallback_dir(dir)
     }
@@ -784,16 +651,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_void {
         super::shmalloc(size, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn shmemcpy(src: *mut c_void, size: usize, errmsg: *mut *mut c_char) -> *mut c_void {
-        super::shmemcpy(src, size, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn shcalloc(nmemb: usize, size: usize, errmsg: *mut *mut c_char) -> *mut c_void {
-        super::shcalloc(nmemb, size, errmsg)
     }
 
     #[no_mangle]
@@ -842,26 +699,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn abs2shm(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut ShmHeader {
-        super::abs2shm(ptr, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn abs2blk(ptr: *mut c_void, errmsg: *mut *mut c_char) -> *mut BlockHeader {
-        super::abs2blk(ptr, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn vol2rel(ptr: VolPtr, shm_ptr: *const ShmHeader) -> RelPtr {
-        super::vol2rel(ptr, shm_ptr)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn vol2abs(ptr: VolPtr, shm_ptr: *const ShmHeader) -> *mut c_void {
-        super::vol2abs(ptr, shm_ptr)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn parse_schema(schema_str: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema {
         super::parse_schema(schema_str, errmsg)
     }
@@ -896,13 +733,4 @@ mod c_abi {
         super::unpack_with_schema(mpk, mpk_size, schema, mlcptr, errmsg)
     }
 
-    #[no_mangle]
-    pub unsafe extern "C" fn calculate_voidstar_size(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> usize {
-        super::calculate_voidstar_size(data, schema, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn get_ptr(schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
-        super::get_ptr(schema, errmsg)
-    }
 }

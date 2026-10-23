@@ -1,4 +1,4 @@
-//! Directories only the running user can enter (model/network.md NET-4).
+//! Directories only the running user can enter (model/runtime/network.md NET-4).
 
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};

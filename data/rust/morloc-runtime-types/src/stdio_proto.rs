@@ -7,15 +7,26 @@
 /// `@next` on a stdio-bound IStream: request one sub-packet from stdin.
 pub const OP_NEXT_STDIO:  u8 = 1;
 
-/// `@write` / flush on a stdio-bound OStream: send one sub-packet to
-/// stdout / stderr.
-pub const OP_WRITE_STDIO: u8 = 2;
-
 /// `@spawn`: start a channel's producer and watch it from the nexus, the one
 /// process that outlives every pool worker. Request after the opcode:
 /// `[handle: i64][mid: u32][path_len: u32][path][nargs: u32]` then per
 /// argument packet `[len: u64][bytes]`. Response: ok, or err with a message.
 pub const OP_SPAWN: u8 = 4;
+
+/// `@open` or `@append` of a file `OStream`: the nexus opens, locks and
+/// starts writing the file, and publishes its slot. Request after the
+/// opcode: `[mode: u8][pid: u32][start: u64][call_id: u64][path_len: u32]
+/// [path][schema_len: u32][schema]`. Response: ok with the handle in the
+/// relptr field, or err with a message.
+pub const OP_OPEN_STREAM: u8 = 5;
+
+/// A stdout or stderr `OStream` a pool has published: the nexus starts
+/// writing it. Request after the opcode: `[handle: i64]`. Response: ok, or
+/// err with a message.
+pub const OP_ADOPT_STREAM: u8 = 6;
+
+pub const OPEN_CREATE: u8 = 0;
+pub const OPEN_APPEND: u8 = 1;
 
 pub const STATUS_OK:  u8 = 0;
 pub const STATUS_ERR: u8 = 1;

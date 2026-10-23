@@ -1,115 +1,123 @@
 #ifndef MLC_REC_HPP
 #define MLC_REC_HPP
 
+#include <atomic>
 #include <memory>
 #include <new>
-#include <vector>
+#include <ranges>
+#include <type_traits>
+#include <utility>
+#include <variant>
 
-// ============================================================
-// Deferred release of recursive values
-// ============================================================
-//
-// A generated `data` type keeps each constructor's fields behind a
-// `mlc::rec_ptr`, and those fields may hold the type again, so releasing
-// the last owner of a deep chain would otherwise run one destructor frame
-// per level and overflow the stack at a depth the heap could easily hold.
-// While one release is draining, every further last-owner release on the
-// thread hands its block to the drain's worklist and returns; the outermost
-// release pops and frees until the list is empty. Depth then costs heap.
-//
-// A user-mapped recursive record may hold its `?Self` field in a
-// `mlc::rec_ptr<Self>` to get the same guarantee; the marshallers treat it
-// exactly as a `std::shared_ptr` slot.
+// Constructor arms made by `mlc::make_arm` are released in bounded stack
+// (STATE-8).
 
 namespace mlc {
 
-struct rec_release {
-    // Trivially destructible thread-locals: a release can run while other
-    // thread-local and static objects are being destroyed at exit.
-    static bool& active() noexcept { thread_local bool a = false; return a; }
-    static std::vector<std::shared_ptr<void>>*& queue() noexcept {
-        thread_local std::vector<std::shared_ptr<void>>* q = nullptr;
-        return q;
-    }
-    // Hand a block to the running drain. May throw std::bad_alloc when the
-    // worklist cannot grow; the caller then releases synchronously.
-    static void enqueue(std::shared_ptr<void> p) {
-        auto*& q = queue();
-        if (!q) q = new std::vector<std::shared_ptr<void>>();
-        q->push_back(std::move(p));
-    }
-    struct drain_guard {
-        drain_guard() noexcept { active() = true; }
-        ~drain_guard() {
-            auto* q = queue();
-            if (q) {
-                while (!q->empty()) {
-                    std::shared_ptr<void> p = std::move(q->back());
-                    q->pop_back();
-                    p.reset();  // its fields' rec_ptrs enqueue rather than recurse
-                }
-            }
-            active() = false;
+constexpr int arm_max_depth = 128;
+
+#if defined(__ELF__)
+extern thread_local constinit int arm_depth_ __attribute__((tls_model("local-exec")));
+#else
+extern thread_local constinit int arm_depth_;
+#endif
+
+// Queue `p` to be freed by `free_fn` when the outermost release drains;
+// false when the worklist cannot grow.
+bool arm_defer(void (*free_fn)(void*), void* p) noexcept;
+// Free every queued object, and every object their release queues.
+void arm_drain() noexcept;
+
+template <class U> void arm_delete(void* p) noexcept { delete static_cast<U*>(p); }
+
+template <class T> struct arm_allocator {
+    using value_type = T;
+    arm_allocator() noexcept = default;
+    template <class U> arm_allocator(const arm_allocator<U>&) noexcept {}
+    T* allocate(std::size_t n) { return std::allocator<T>{}.allocate(n); }
+    void deallocate(T* p, std::size_t n) noexcept { std::allocator<T>{}.deallocate(p, n); }
+    template <class U, class... A> void construct(U* p, A&&... a) {
+        if constexpr (std::is_constructible_v<U, A...>) {
+            ::new (static_cast<void*>(p)) U(std::forward<A>(a)...);
+        } else {
+            ::new (static_cast<void*>(p)) U{std::forward<A>(a)...};
         }
-    };
+    }
+    template <class U> void destroy(U* p) noexcept {
+        if (arm_depth_ >= arm_max_depth && defer_contents(p)) return;
+        ++arm_depth_;
+        p->~U();
+        if (arm_depth_ == 1) arm_drain();
+        --arm_depth_;
+    }
+    // STATE-8: past the bound, the contents go to the worklist in a heap
+    // object of their own, moved or else copied; false if neither is made.
+    template <class U> static bool defer_contents(U* p) noexcept {
+        U* kept = nullptr;
+        if constexpr (std::is_move_constructible_v<U>) {
+            try { kept = new U(std::move(*p)); } catch (...) { kept = nullptr; }
+        } else if constexpr (std::is_copy_constructible_v<U>) {
+            try { kept = new U(*p); } catch (...) { kept = nullptr; }
+        }
+        if (kept == nullptr) return false;
+        p->~U();
+        if (!arm_defer(&arm_delete<U>, kept)) {
+            ++arm_depth_;
+            delete kept;
+            --arm_depth_;
+        }
+        return true;
+    }
+    template <class U> bool operator==(const arm_allocator<U>&) const noexcept { return true; }
+    template <class U> bool operator!=(const arm_allocator<U>&) const noexcept { return false; }
 };
 
-template<typename T>
-class rec_ptr {
-    std::shared_ptr<T> p_;
-public:
-    using element_type = T;
-    rec_ptr() noexcept = default;
-    // Neither a template nor explicit: a std::variant whose alternatives
-    // are rec_ptrs must convert a shared_ptr<T> to exactly one of them.
-    rec_ptr(std::shared_ptr<T> p) noexcept : p_(std::move(p)) {}
-    rec_ptr(const rec_ptr& o) noexcept : p_(o.p_) {}
-    rec_ptr(rec_ptr&& o) noexcept : p_(std::move(o.p_)) {}
-    // Assignment releases the old pointee through the drain, not through
-    // shared_ptr's own assignment, which would free it synchronously.
-    rec_ptr& operator=(const rec_ptr& o) noexcept {
-        if (this != &o) { release(); p_ = o.p_; }
-        return *this;
-    }
-    rec_ptr& operator=(rec_ptr&& o) noexcept {
-        if (this != &o) { release(); p_ = std::move(o.p_); }
-        return *this;
-    }
-    ~rec_ptr() { release(); }
-    // Const propagates to the pointee. A rec_ptr stands between a `data`
-    // value and its constructor's fields, so an accessor that returned a
-    // mutable pointer from a const member would hand out a writable
-    // reference into a value the holder had only borrowed -- and, since the
-    // copy constructor shares the control block, into every other value that
-    // copy came from. Taking a field out of a borrowed value would then
-    // compile and empty the owner's; with the pairs below it selects the
-    // copy, the way a plain record field already does.
-    T& operator*() noexcept { return *p_; }
-    const T& operator*() const noexcept { return *p_; }
-    T* operator->() noexcept { return p_.get(); }
-    const T* operator->() const noexcept { return p_.get(); }
-    T* get() noexcept { return p_.get(); }
-    const T* get() const noexcept { return p_.get(); }
-    explicit operator bool() const noexcept { return static_cast<bool>(p_); }
-    void reset() noexcept { release(); }
-    long use_count() const noexcept { return p_.use_count(); }
-private:
-    void release() noexcept {
-        if (!p_) return;
-        // A shared block only loses this owner's count; the last owner
-        // frees it, and only that release can recurse.
-        if (p_.use_count() != 1) { p_.reset(); return; }
-        if (rec_release::active()) {
-            try { rec_release::enqueue(std::move(p_)); return; }
-            catch (const std::bad_alloc&) { p_.reset(); return; }
-        }
-        rec_release::drain_guard g;
-        p_.reset();
-    }
-};
+// A constructor arm (or any recursive node), released per STATE-8 (CPP-6).
+template <class T, class... A> std::shared_ptr<std::remove_const_t<T>> make_arm(A&&... a) {
+    using U = std::remove_const_t<T>;
+    return std::allocate_shared<U>(arm_allocator<U>{}, std::forward<A>(a)...);
+}
 
-template<typename T> struct is_rec_ptr : std::false_type {};
-template<typename T> struct is_rec_ptr<rec_ptr<T>> : std::true_type {};
+// The arm behind a held pointer (CPP-6).
+template <class T> const T* arm(const std::shared_ptr<T>& p) noexcept { return p.get(); }
+
+// A field taken out of an arm (OWN-5, CPP-6).
+template <class T, class Get>
+auto take_field(const std::shared_ptr<const T>& p, Get get)
+    -> std::remove_cvref_t<decltype(get(*p))> {
+    if (p.use_count() == 1) {
+        std::atomic_thread_fence(std::memory_order_acquire);
+        return std::move(get(*const_cast<T*>(p.get())));
+    }
+    return get(*p);
+}
+
+template <class T> struct is_const_shared_ptr : std::false_type {};
+template <class T> struct is_const_shared_ptr<std::shared_ptr<const T>> : std::true_type {};
+
+template <class T> struct is_weak_ptr : std::false_type {};
+template <class T> struct is_weak_ptr<std::weak_ptr<T>> : std::true_type {};
+template <class T> struct is_shared_ptr : std::false_type {};
+template <class T> struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
+template <class T> struct is_unique_ptr : std::false_type {};
+template <class T, class D> struct is_unique_ptr<std::unique_ptr<T, D>> : std::true_type {};
+
+// A C++ type a morloc type maps to (CPP-3, CPP-6).
+template <class T>
+inline constexpr bool is_value_type_v =
+    !std::is_pointer_v<T> && !std::is_reference_v<T> && !std::ranges::view<T>
+    && !is_weak_ptr<T>::value && !is_unique_ptr<T>::value
+    && (!is_shared_ptr<T>::value || is_const_shared_ptr<T>::value)
+    && std::is_move_constructible_v<T>;
+
+// A record built the way generated code builds it, from moved fields (CPP-4).
+template <class T, class... F>
+concept builds_from = requires(F&&... f) { T{std::forward<F>(f)...}; };
+
+// Every arm of a `data` type is a std::shared_ptr<const T> (CPP-6).
+template <class V> struct const_arms;
+template <class... A> struct const_arms<std::variant<A...>>
+    : std::bool_constant<(is_const_shared_ptr<A>::value && ...)> {};
 
 } // namespace mlc
 

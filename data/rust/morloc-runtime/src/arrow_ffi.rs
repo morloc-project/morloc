@@ -283,20 +283,16 @@ pub(crate) fn arrow_copied_bytes() -> u64 {
 
 // -- Printers ----------------------------------------------------------------
 
-/// C's `%.<prec>g` rendering of a double.
-fn fmt_g(v: f64, prec: i32) -> String {
-    let mut buf = [0u8; 64];
-    let n = unsafe {
-        libc::snprintf(
-            buf.as_mut_ptr() as *mut c_char,
-            buf.len(),
-            b"%.*g\0".as_ptr() as *const c_char,
-            prec,
-            v,
-        )
-    };
-    let n = n.clamp(0, buf.len() as i32 - 1) as usize;
-    String::from_utf8_lossy(&buf[..n]).into_owned()
+/// A float as the JSON writer writes it: `json::FloatText`, or the quoted
+/// `"nan"`, `"inf"`, `"-inf"`.
+fn push_float(out: &mut String, v: f64, single: bool) {
+    if v.is_nan() {
+        out.push_str("\"nan\"");
+    } else if v.is_infinite() {
+        out.push_str(if v > 0.0 { "\"inf\"" } else { "\"-inf\"" });
+    } else {
+        out.push_str(crate::json::FloatText::new(v, single).as_str());
+    }
 }
 
 fn json_escape(s: &str, out: &mut String) {
@@ -346,8 +342,8 @@ fn json_cell(col: &dyn Array, i: usize, out: &mut String) {
         DataType::UInt16 => prim!(UInt16Type),
         DataType::UInt32 => prim!(UInt32Type),
         DataType::UInt64 => prim!(UInt64Type),
-        DataType::Float32 => out.push_str(&fmt_g(col.as_primitive::<Float32Type>().value(i) as f64, 7)),
-        DataType::Float64 => out.push_str(&fmt_g(col.as_primitive::<Float64Type>().value(i), 15)),
+        DataType::Float32 => push_float(out, f64::from(col.as_primitive::<Float32Type>().value(i)), true),
+        DataType::Float64 => push_float(out, col.as_primitive::<Float64Type>().value(i), false),
         DataType::Utf8 => json_escape(col.as_string::<i32>().value(i), out),
         DataType::LargeUtf8 => json_escape(col.as_string::<i64>().value(i), out),
         DataType::Binary => hex(col.as_binary::<i32>().value(i), out),
@@ -882,6 +878,15 @@ fn json_column(
             })
             .collect()
     }
+    /// The non-finite spellings the JSON writer uses for a float.
+    fn nonfinite(v: &serde_json::Value) -> Option<f64> {
+        match v.as_str()? {
+            "nan" => Some(f64::NAN),
+            "inf" => Some(f64::INFINITY),
+            "-inf" => Some(f64::NEG_INFINITY),
+            _ => None,
+        }
+    }
     fn floats(values: &[&serde_json::Value], nullable: bool, name: &str) -> Result<Vec<Option<f64>>, MorlocError> {
         values
             .iter()
@@ -890,22 +895,31 @@ fn json_column(
                 if v.is_null() {
                     return if nullable { Ok(None) } else { Err(bad(name, i, "number")) };
                 }
-                v.as_f64().map(Some).ok_or_else(|| bad(name, i, "number"))
+                v.as_f64().or_else(|| nonfinite(v)).map(Some).ok_or_else(|| bad(name, i, "number"))
             })
             .collect()
     }
-    /// A double narrowed to single precision only when the value survives
-    /// the round trip (a finite value beyond f32's range would become
-    /// infinite; precision loss is the accepted cost of declaring Float32).
+    /// Each number read as the nearest single-precision value, rounded once
+    /// from its text; a finite number beyond f32's range is an error.
     fn float32s(values: &[&serde_json::Value], nullable: bool, name: &str) -> Result<Vec<Option<f32>>, MorlocError> {
-        floats(values, nullable, name)?
-            .into_iter()
+        values
+            .iter()
             .enumerate()
-            .map(|(i, o)| match o {
-                None => Ok(None),
-                Some(x) => morloc_runtime_types::width::f32_nearest(x)
-                    .map(Some)
-                    .map_err(|_| overflow(name, i, values[i], SerialType::Float32)),
+            .map(|(i, v)| {
+                if v.is_null() {
+                    return if nullable { Ok(None) } else { Err(bad(name, i, "number")) };
+                }
+                if let Some(f) = nonfinite(v) {
+                    #[allow(clippy::cast_possible_truncation)]
+                    return Ok(Some(f as f32));
+                }
+                let n = v.as_number().ok_or_else(|| bad(name, i, "number"))?;
+                let f = n.as_str().parse::<f32>().map_err(|_| bad(name, i, "number"))?;
+                if f.is_finite() {
+                    Ok(Some(f))
+                } else {
+                    Err(overflow(name, i, v, SerialType::Float32))
+                }
             })
             .collect()
     }
@@ -972,6 +986,29 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(json).unwrap();
         let rs = table(&[("c", st)]);
         json_value_to_batch(&v, &rs).map(|b| b.column(0).clone())
+    }
+
+    #[test]
+    fn table_json_reads_back_its_non_finite_floats() {
+        use arrow_array::cast::AsArray;
+        use arrow_array::types::{Float32Type, Float64Type};
+        let a = column(SerialType::Float64, r#"[{"c":"nan"},{"c":"inf"},{"c":"-inf"},{"c":0.5}]"#).unwrap();
+        let a = a.as_primitive::<Float64Type>();
+        assert!(a.value(0).is_nan());
+        assert_eq!((a.value(1), a.value(2), a.value(3)), (f64::INFINITY, f64::NEG_INFINITY, 0.5));
+        let b = column(SerialType::Float32, r#"[{"c":"-inf"}]"#).unwrap();
+        assert_eq!(b.as_primitive::<Float32Type>().value(0), f32::NEG_INFINITY);
+        assert!(column(SerialType::Float64, r#"[{"c":"NaN"}]"#).is_err());
+    }
+
+    #[test]
+    fn table_json_quotes_non_finite_floats() {
+        let mut out = String::new();
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.5] {
+            push_float(&mut out, v, false);
+            out.push(' ');
+        }
+        assert_eq!(out, "\"nan\" \"inf\" \"-inf\" 0.5 ");
     }
 
     #[test]
@@ -1042,11 +1079,6 @@ mod c_abi {
     #[no_mangle]
     pub extern "C" fn arrow_live_view_bytes() -> usize {
         super::arrow_live_view_bytes()
-    }
-
-    #[no_mangle]
-    pub extern "C" fn arrow_copied_bytes() -> u64 {
-        super::arrow_copied_bytes()
     }
 
     #[no_mangle]

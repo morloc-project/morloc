@@ -1,0 +1,119 @@
+-- HOST-7: function values called from threads a sourced Rust function starts.
+--
+-- `parMap` runs its function on several threads, so Rust requires it to be
+-- `Sync`. Every kind of function value must satisfy that: a lambda capturing
+-- a scalar, a string, a record or another function, a partial application, a
+-- function taken from a list or a record field, a function built by host
+-- code, and a lambda whose body calls into another pool. Elements of a
+-- recursive type are shared with the threads, and results of one are sent
+-- back from them. A failure in a function called on a thread, raised by
+-- morloc or by another pool, is caught by `@try` around the call.
+
+module main
+  ( capInt
+  , capStr
+  , capRec
+  , partial
+  , capFun
+  , fnList
+  , fieldFn
+  , hostFn
+  , foreignCap
+  , treeSizes
+  , treeBuild
+  , tryThrow
+  , tryForeign
+  )
+
+import root-rust
+import root-py
+
+record Opts = Opts { lo :: Int, hi :: Int }
+record Rust => Opts = "Opts"
+
+record Fns = Fns { run :: Int -> Int, tag :: Int }
+record Rust => Fns = "Fns"
+
+source Rust from "lib.rs" ("par_map" as parMap)
+
+source Rust from "lib.rs" where
+  --' name: make_adder
+  --' @rsize 1
+  makeAdder
+parMap :: (a -> b) -> [a] -> [b]
+makeAdder :: Int -> (Int -> Int)
+
+source Py from "lib.py" ("pyadd", "pycheck")
+pyadd :: Int -> Int -> Int
+pycheck :: Int -> Int -> Int
+
+data Tree = Leaf Int | Node Tree Tree
+
+size :: Tree -> Int
+size t = match t
+  | (Leaf _) = 1
+  | (Node l r) = size l + size r
+
+total :: Tree -> Int
+total t = match t
+  | (Leaf x) = x
+  | (Node l r) = total l + total r
+
+build :: Int -> Tree
+build n = ? n <= 0 = Leaf 1 : Node (build (n - 1)) (Leaf n)
+
+clampWith :: Opts -> Int -> Int
+clampWith o x = ? x < (.lo o) = (.lo o) : ? x > (.hi o) = (.hi o) : x
+
+scale :: Int -> Int -> Int
+scale k x = k * x
+
+twice :: (Int -> Int) -> [Int] -> [Int]
+twice f xs = parMap (\x -> f (f x)) xs
+
+capInt :: Int -> [Int] -> [Int]
+capInt k xs = parMap (\x -> x + k) xs
+
+capStr :: Str -> [Str] -> [Str]
+capStr p xs = parMap (\x -> p <> x) xs
+
+capRec :: Int -> Int -> [Int] -> [Int]
+capRec a b xs = parMap (\x -> clampWith {lo = a, hi = b} x) xs
+
+partial :: Int -> [Int] -> [Int]
+partial k xs = parMap (scale k) xs
+
+capFun :: Int -> [Int] -> [Int]
+capFun k xs = twice (scale k) xs
+
+fnList :: Int -> [Int]
+fnList x = parMap (\f -> f x) [(\y -> y * 2), (\y -> y + x), scale x, makeAdder 100]
+
+mkFns :: Int -> Fns
+mkFns k = {run = scale k, tag = 0}
+
+fieldFn :: Int -> [Int] -> [Int]
+fieldFn k xs = parMap (.run (mkFns k)) xs
+
+hostFn :: Int -> [Int] -> [Int]
+hostFn k xs = parMap (makeAdder k) xs
+
+foreignCap :: Int -> [Int] -> [Int]
+foreignCap k xs = parMap (\x -> pyadd k x) xs
+
+treeSizes :: Int -> [Int]
+treeSizes n = parMap size [Leaf n, Node (Leaf 1) (Leaf n), build n, build (n + 3)]
+
+treeBuild :: [Int] -> [Int]
+treeBuild ns = map total (parMap build ns)
+
+caught :: Try Str [Int] -> Str
+caught t = match t
+  | (Err _) = "caught"
+  | (Ok _) = "missed"
+
+tryThrow :: Int -> [Int] -> Str
+tryThrow k xs = caught (@try (parMap (\x -> ? x == k = @throw "boom" : x + k) xs))
+
+tryForeign :: Int -> [Int] -> Str
+tryForeign k xs = caught (@try (parMap (\x -> pycheck k x) xs))

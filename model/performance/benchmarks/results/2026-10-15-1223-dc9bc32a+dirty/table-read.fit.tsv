@@ -1,0 +1,41 @@
+# table-read 2026-10-15 12:21 load=4.49 morloc=0.109.0 commit=dc9bc32a+dirty cpu=AMD Ryzen 5 7535U with Radeon Graphics cores=12
+item	param	value	unit	note
+TBL-1	input.bytes_per_row	47.9421	B	
+TBL-2	table.value_mib	46.2396	MiB	1000000 rows
+TBL-2	records.value_mib	75.9209	MiB	1000000 rows
+TBL-1	std.table.b	168.965	ns	r2=0.9999 per row
+TBL-1	std.table.c	1.8958	ms	
+TBL-1	std.records.b	277.533	ns	r2=0.9999 per row
+TBL-1	std.records.c	1.96016	ms	
+TBL-1	table:Table.b	467.531	ns	r2=0.9995 per row
+TBL-1	table:Table.c	14.8128	ms	
+TBL-1	table:Table.ratio	2.76702	x	per-row cost over std.table
+TBL-1	table:Table.whole_ratio	2.84803	x	whole run at 1000000 rows over std.table
+TBL-1	default:Table.b	459.752	ns	r2=0.9997 per row
+TBL-1	default:Table.c	15.3409	ms	
+TBL-1	default:Table.ratio	2.72098	x	per-row cost over std.table
+TBL-1	default:Table.whole_ratio	2.8005	x	whole run at 1000000 rows over std.table
+TBL-1	table:Records.b	2215.56	ns	r2=0.9997 per row
+TBL-1	table:Records.c	36.6085	ms	
+TBL-1	table:Records.ratio	7.98307	x	per-row cost over std.records
+TBL-1	table:Records.whole_ratio	8.05417	x	whole run at 1000000 rows over std.records
+TBL-1	list:Records.b	2657.88	ns	r2=0.9997 per row
+TBL-1	list:Records.c	26.9382	ms	
+TBL-1	list:Records.ratio	9.57683	x	per-row cost over std.records
+TBL-1	list:Records.whole_ratio	9.5971	x	whole run at 1000000 rows over std.records
+TBL-1	list:Tuples.b	1633.94	ns	r2=0.9998 per row
+TBL-1	list:Tuples.c	18.9614	ms	
+TBL-1	list:Tuples.ratio	5.88736	x	per-row cost over std.records
+TBL-1	list:Tuples.whole_ratio	5.91517	x	whole run at 1000000 rows over std.records
+TBL-2	std.table.peak_ratio	1.039	x	48.0 MiB added at 1000000 rows
+TBL-2	std.records.peak_ratio	1.83636	x	139.4 MiB added at 1000000 rows
+TBL-2	table:Table.peak_ratio	3.33183	x	154.1 MiB added, summed over processes, at 1000000 rows
+TBL-2	table:Table.peak_max_ratio	3.25614	x	150.6 MiB added in the largest process
+TBL-2	default:Table.peak_ratio	3.32457	x	153.7 MiB added, summed over processes, at 1000000 rows
+TBL-2	default:Table.peak_max_ratio	3.25614	x	150.6 MiB added in the largest process
+TBL-2	table:Records.peak_ratio	10.7073	x	812.9 MiB added, summed over processes, at 1000000 rows
+TBL-2	table:Records.peak_max_ratio	8.39134	x	637.1 MiB added in the largest process
+TBL-2	list:Records.peak_ratio	13.0443	x	990.3 MiB added, summed over processes, at 1000000 rows
+TBL-2	list:Records.peak_max_ratio	10.2256	x	776.3 MiB added in the largest process
+TBL-2	list:Tuples.peak_ratio	10.8992	x	827.5 MiB added, summed over processes, at 1000000 rows
+TBL-2	list:Tuples.peak_max_ratio	7.98894	x	606.5 MiB added in the largest process

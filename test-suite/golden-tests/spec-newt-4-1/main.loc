@@ -1,0 +1,15 @@
+-- Spec NEWT-4: a newtype with a native form in L that L cannot build from
+-- its representation needs a Packable instance in L. A tuple literal of
+-- such a type, with no instance, is rejected by morloc.
+module main (viaLit)
+
+import root-cpp
+
+newtype Pt = (Int, Int)
+type Cpp => Pt = "Pt"
+
+source Cpp from "main.hpp" ("ptSum")
+ptSum :: Pt -> Int
+
+viaLit :: Int
+viaLit = ptSum ((1, 2) :: Pt)

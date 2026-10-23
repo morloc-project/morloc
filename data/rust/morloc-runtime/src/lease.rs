@@ -284,11 +284,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub extern "C" fn morloc_reclaim_leases() {
-        super::morloc_reclaim_leases()
-    }
-
-    #[no_mangle]
     pub extern "C" fn morloc_remove_leases() {
         super::morloc_remove_leases()
     }

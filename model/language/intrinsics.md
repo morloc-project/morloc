@@ -1,0 +1,70 @@
+# Intrinsics
+
+The `@` intrinsics (`@load`, `@read`, `@stdin`, ...): their types and meaning. Prefix: INTR.
+
+### INTR-1 An intrinsic that touches the world carries `<IO>`; one that can fail returns `Try`
+Intent: proposed
+Code: conforms 2026-10-21
+
+A missing file, a full disk, a broken pipe or a decode mismatch is an `Err`
+arm, never an effect label (see `FAIL`). `@read` is fallible and pure.
+`@close`, `@tell`, `@stream`, `@stdout` and `@stderr` have no failure value.
+`@throw` and `@try` are `FAIL`'s.
+
+### INTR-2 A data-reading intrinsic yields data
+Intent: proposed
+Code: conforms 2026-10-21
+
+The result type of `@load`, `@read`, `@next`, `@open` and `@stdin` contains
+no suspension and no function. If inference solves it to one, the build is
+rejected and asks for an annotation.
+
+### INTR-3 What `@save` or `@savej` writes, `@load` reads back equal
+Intent: ruled 2026-10-22
+Tests: spec-intr-3-1, spec-intr-3-2
+Code: deviates (../runtime/issues/nexus-cli.md)
+
+`@load` returns a value equal to the one written, or `Err` if the file does
+not hold a value of the expected type. A file that is not a packet is read
+as an argument file is, by its bytes and the expected type: unquoted text
+is a value of a text type, and at `?T` for such a type the token `null` is
+`Null`.
+
+### INTR-4 `@schema` and `@typeof` depend only on their argument's type
+Intent: proposed
+Code: deviates (issues/values.md)
+
+The argument is not evaluated. `@typeof` gives the morloc type as written in
+a signature, never a language-native name.
+
+### INTR-5 `@version`, `@compiled` and `@datafile` are fixed when the program is built
+Intent: proposed
+Code: conforms 2026-10-21
+
+`@datafile p` is the installed location of data file `p`, or `p` unchanged
+when the program is not installed.
+
+### INTR-6 Whether `@lang` may expose the realization
+Intent: open
+Code: unaudited
+
+`@lang` is the canonical identifier of the language that evaluates it
+(`"morloc"` outside any pool), so a program's value can depend on which
+implementation REAL picks. Either (a) allowed, and REAL's interchangeability
+excludes `@lang`; or (b) `@lang` is restricted to positions that cannot reach
+a result, such as logging.
+
+### INTR-7 `@eq` and `@le` compare wire values
+Intent: ruled 2026-10-18
+Tests: spec-intr-7-1, spec-intr-7-2, spec-intr-7-3, spec-intr-7-4, spec-intr-7-5
+Code: conforms 2026-10-18
+
+`@eq a b :: Bool` and `@le a b :: Bool` take two values of one type and
+compare them as DERIV-3 orders them, in whichever language or in the nexus.
+
+### INTR-8 `@show` and `@hash` depend only on the wire value
+Intent: proposed
+Code: conforms 2026-10-21
+
+A value gives the same `@show` text and the same `@hash` in every language.
+

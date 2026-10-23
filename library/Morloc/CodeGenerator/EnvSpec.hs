@@ -93,6 +93,7 @@ data EnvSpec = EnvSpec
   , esMorlocVersion :: !Text
   , esLanguages     :: ![LangReq]
   , esPackages      :: ![(Text, [PackageReq])]  -- canonical lang name -> package reqs
+  , esTools         :: ![PackageReq]  -- conda packages whose executables are run
   , esSystem        :: ![SystemReq]
   , esModules       :: ![ModuleReq]
   }
@@ -109,12 +110,19 @@ buildEnvSpec
   -> Either Text EnvSpec
 buildEnvSpec morlocVersion langs metas = do
   packageGroups <- fmap (filter (not . null . snd)) (mapM mkGroup langDepFields)
+  tools <- unionDepSpecs [(packageName m, packageToolDeps m) | m <- metas]
+  _ <- unionDepSpecs condaAcrossGroups
+  let toolReqs =
+        [ ReqRegistry name (dsVersion ds) SrcConda (resolveChannel SrcConda (dsChannel ds))
+        | (name, ds) <- Map.toList tools
+        ]
   return
     EnvSpec
       { esVersion       = Morloc.Version.envspecVersion
       , esMorlocVersion = MT.pack morlocVersion
       , esLanguages     = map langReq langNames
       , esPackages      = packageGroups
+      , esTools         = toolReqs
       , esSystem        = systemReqs
       , esModules       = moduleReqs
       }
@@ -162,9 +170,22 @@ buildEnvSpec morlocVersion langs metas = do
       [ ("py",    packagePyDeps)
       , ("r",     packageRDeps)
       , ("cpp",   packageCppDeps)
-      , ("julia", packageJuliaDeps)
       , ("rust",  packageRustDeps)
       ]
+
+    -- Every group and the tools lower into one conda world, so one package
+    -- drawn from two channels by different groups is the same conflict as
+    -- within a group. A conda-forge R dependency is excluded: its conda name
+    -- is r-<name>.
+    condaAcrossGroups =
+      [ (packageName m, Map.filter (isConda lang) (pick m))
+      | (lang, pick) <- langDepFields
+      , m <- metas
+      ]
+        ++ [(packageName m, packageToolDeps m) | m <- metas]
+    isConda lang ds =
+      effectiveDepSource lang ds == Just SrcConda
+        && (lang /= "r" || maybe False (/= condaForgeChannel) (dsChannel ds))
 
     -- The bare C++ `-l` link libraries; provider is unknowable at compile time.
     systemReqs =
@@ -260,6 +281,7 @@ renderEnvSpec es =
     , ("languages", jsonArr (map langJson (esLanguages es)))
     , ("packages", jsonObj [ (lang, jsonArr (map pkgJson reqs))
                            | (lang, reqs) <- esPackages es ])
+    , ("tools", jsonArr (map pkgJson (esTools es)))
     , ("system", jsonArr (map sysJson (esSystem es)))
     , ("modules", jsonArr (map modJson (esModules es)))
     ]

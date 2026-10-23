@@ -1,0 +1,7 @@
+-- CPP-1: a `T&` source passed to a stdlib fold is rejected (see ok.loc).
+module badhof (badHof)
+
+import .common
+
+badHof :: Int -> Int
+badHof n = fold addRef 0 (mk n)

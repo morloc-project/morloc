@@ -1,0 +1,22 @@
+-- Spec DERIV-4: derived equality compares the wire form as it is. A Map's
+-- wire form lists its entries in the order the map holds them, so two maps
+-- with the same entries built in different orders are not equal.
+module main (sameOrder, otherOrder)
+
+import root-py
+import map-py
+
+newtype Holder = Map Str Int
+  deriving (Eq, Packable)
+
+ab :: Holder
+ab = pack ([("a", 1), ("b", 2)] :: Map Str Int)
+
+ba :: Holder
+ba = pack ([("b", 2), ("a", 1)] :: Map Str Int)
+
+sameOrder :: Bool
+sameOrder = idpy ab == ab
+
+otherOrder :: Bool
+otherOrder = idpy ab == ba

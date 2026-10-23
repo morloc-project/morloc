@@ -2,7 +2,8 @@
 -- needed when the newtype inherits its native form from that parent, and
 -- that holds whatever shape the parent has: a bare primitive (Name, Count),
 -- another newtype (Alias), a phantom-parameterised primitive (Tagged), a
--- list (Stack), a Nat-indexed list (Buf), or a tuple (Pair). This is the
+-- list (Stack), a Nat-indexed list (Buf), or a tuple (Pair, and Twin and
+-- Point, whose parameters do not line up with the tuple's slots). This is the
 -- rule the standard library already depends on -- vector-cpp declares no
 -- Packable instance for Vector at all.
 --
@@ -24,6 +25,9 @@ module main
   , bufRev
   , bufCross
   , pairSwap
+  , twinSum
+  , pointSum
+  , pointLit
   , pathSuffix
   , bytesDecode
   )
@@ -38,6 +42,8 @@ newtype Tagged a = Str
 newtype Stack a = List a
 newtype Buf (n :: Nat) a = List a
 newtype Pair a b = (a, b)
+newtype Twin a = (a, a)
+newtype Point = (Int, Int)
 
 -- Bytes declares a per-language form of its own without a Packable instance.
 -- It is still a Str on the wire, but natively it is Python's bytes, and the
@@ -61,7 +67,13 @@ source Py from "wire.py"
   , "suffix"
   , "decode_utf8" as decodeUtf8
   )
-source Cpp from "wire.hpp" ("str_len", "sum_ints" as sumStack, "sum_ints" as sumBuf)
+source Cpp from "wire.hpp"
+  ( "str_len"
+  , "sum_ints" as sumStack
+  , "sum_ints" as sumBuf
+  , "pair_sum" as sumTwin
+  , "pair_sum" as sumPoint
+  )
 
 shoutName   :: Name -> Name
 shoutAlias  :: Alias -> Alias
@@ -75,6 +87,8 @@ decodeUtf8  :: Bytes -> Str
 str_len     :: Name -> Int
 sumStack    :: Stack Int -> Int
 sumBuf      :: Buf 3 Int -> Int
+sumTwin     :: Twin Int -> Int
+sumPoint    :: Point -> Int
 
 nameRound   :: Name -> Name
 nameRound   = shoutName
@@ -105,6 +119,15 @@ bufCross    = sumBuf . revBuf
 
 pairSwap    :: Pair Str Int -> Pair Int Str
 pairSwap    = swap
+
+twinSum     :: Twin Int -> Int
+twinSum     = sumTwin
+
+pointSum    :: Point -> Int
+pointSum    = sumPoint
+
+pointLit    :: Int -> Int
+pointLit x  = sumPoint ((x, 4) :: Point)
 
 pathSuffix  :: Path -> Str
 pathSuffix  = suffix

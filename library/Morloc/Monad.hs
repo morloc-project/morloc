@@ -23,6 +23,7 @@ module Morloc.Monad
   , runMorlocMonad
   , writeMorlocReturn
   , makeMorlocError
+  , sourceAt
   , runCommand
   , runCommandWith
   , logFile
@@ -259,6 +260,15 @@ makeMorlocError st (UnificationError lhs rhs context msg) =
     srcMap = stateSourceMap st
     note = listToMaybe (mapMaybe (`Map.lookup` stateErrorNotes st) [lhs, rhs, context])
 
+-- | The source location of an index followed by its snippet, for naming a
+-- second site in an error.
+sourceAt :: Int -> MorlocMonad MDoc
+sourceAt i = do
+  st <- get
+  return $ case Map.lookup i (stateSourceMap st) of
+    Just loc -> pretty loc <> ":" <> snippet st loc
+    Nothing -> "<unknown location>"
+
 {- | Render a source code snippet with error location markers.
 For single-line spans: ^~~~^ underline from start to end column.
 For multi-line spans: Elm-style vertical bar in the gutter with ^ at start and end.
@@ -385,7 +395,8 @@ compilerBugMsg cs msg =
 systemCallError :: Text -> Text -> String -> MorlocMonad a
 systemCallError cmd loc msg =
   throwSystemError $
-    "System call failed at ("
+    maybe mempty (<> "\n\n") (buildFailureNote cmd msg)
+      <> "System call failed at ("
       <> pretty loc
       <> "):\n"
       <> " cmd> "
@@ -393,6 +404,24 @@ systemCallError cmd loc msg =
       <> "\n"
       <> " msg>\n"
       <> pretty msg
+
+-- | What a failed build means in morloc's terms, when its output shows a
+-- cause morloc introduced. rustc's own report follows it unchanged.
+buildFailureNote :: Text -> String -> Maybe MDoc
+buildFailureNote cmd msg
+  | "cargo build" `MT.isInfixOf` cmd
+  , any (`MT.isInfixOf` MT.pack msg)
+      [ "cannot be shared between threads safely"
+      , "cannot be sent between threads safely"
+      ] =
+      Just . vsep $
+        [ "A Rust function value (Arc<dyn Fn(..) + Send + Sync>) may be called from any"
+        , "thread, so every value a closure captures, and every value stored in a function"
+        , "value or in a recursive type, must be Send + Sync. If rustc's report below traces"
+        , "the type it names to a function value, a closure or a recursive type, make that"
+        , "type thread-safe (Arc and Mutex in place of Rc and RefCell)."
+        ]
+  | otherwise = Nothing
 
 -- | Execute a system call
 runCommand ::

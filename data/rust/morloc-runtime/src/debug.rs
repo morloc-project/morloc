@@ -7,11 +7,11 @@
 //! its args (each pre-serialized to a packet with a schema string).
 //! This module:
 //!
-//! 1. Materializes each arg's payload to msgpack bytes.
-//! 2. Content-addresses the bytes via xxh64.
-//! 3. Atomically writes `<debug_dir>/inputs/<hash>.pkt` (only if the
-//!    file doesn't already exist -- 5GB shared inputs hit disk once).
-//! 4. Appends a frame entry to the thread-local trace.
+//! 1. Content-addresses each arg's value via xxh64.
+//! 2. Writes `<debug_dir>/inputs/<hash>.pkt` as a data packet, unless
+//!    that file already exists or the dispatch's write budget is spent;
+//!    the packet is built only when it will be written.
+//! 3. Appends a frame entry to the thread-local trace.
 //!
 //! ## Runtime limits
 //!
@@ -24,12 +24,13 @@
 //!
 //! * `MORLOC_DEBUG_CACHE_DEPTH` (default 1) -- maximum number of
 //!   `.pkt` files written to disk per dispatch, in the order catch
-//!   blocks fire (innermost first). Counter only advances on a
-//!   successful write. `0` disables the limit.
+//!   blocks fire (innermost first). Counter only advances on a new
+//!   write; an arg whose file already exists points at it for free.
+//!   `0` disables the limit.
 //!
 //! * `MORLOC_DEBUG_CACHE_MAX` (default 0 = unlimited) -- per-arg
-//!   serialized-byte cap. Args whose msgpack form exceeds this are
-//!   recorded with hash only (no disk write).
+//!   serialized-byte cap. Args whose packet exceeds this are recorded
+//!   with hash only (no disk write).
 //!
 //! * `MORLOC_DEBUG_RECURSION_CAP` (default 3, 0 = unlimited) --
 //!   per-midx call cap. Once the same midx's catch has fired this
@@ -60,7 +61,6 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use morloc_runtime_types::publish_once::PublishOnce;
 
 /// NULL or empty C string -> `String::new()`; otherwise the borrowed
@@ -84,15 +84,15 @@ enum DumpStatus {
     TooLarge,
     /// Disk-write counter already at `MORLOC_DEBUG_CACHE_DEPTH`.
     DepthCapped,
-    /// `try_write` returned None -- mkdir/atomic-write IO error.
+    /// No debug dir, or the atomic write failed.
     WriteFailed,
-    /// `serialize_and_hash` returned None (no hash either).
+    /// The arg could not be decoded, hashed or packed.
     SerializeFailed,
 }
 
 struct ArgDump {
     schema: String,
-    /// Zero only when status == SerializeFailed.
+    /// Zero when the arg could not be decoded.
     hash: u64,
     status: DumpStatus,
 }
@@ -116,6 +116,8 @@ thread_local! {
     /// Per-midx fire count for the recursion cap.
     static MIDX_COUNTERS: RefCell<HashMap<u32, u32>> =
         RefCell::new(HashMap::new());
+    /// Set when a manifold's catch fired past the recursion cap.
+    static OVERFLOW_REPORTED: RefCell<bool> = const { RefCell::new(false) };
 }
 
 // ── Limit resolution (process-wide, cached) ─────────────────────────────
@@ -123,7 +125,6 @@ thread_local! {
 static CACHE_DEPTH: PublishOnce<u64> = PublishOnce::new();
 static CACHE_MAX: PublishOnce<u64> = PublishOnce::new();
 static RECURSION_CAP: PublishOnce<u32> = PublishOnce::new();
-static OVERFLOW_REPORTED: AtomicU64 = AtomicU64::new(0);
 
 fn cache_depth() -> u64 {
     *CACHE_DEPTH.get_or_init(|| {
@@ -171,21 +172,39 @@ fn resolve_debug_dir() -> Option<PathBuf> {
     std::env::current_dir().ok().map(|cwd| cwd.join(".morloc-debug"))
 }
 
-fn ensure_inputs_dir() -> Option<PathBuf> {
-    let base = resolve_debug_dir()?;
-    let inputs = base.join("inputs");
-    std::fs::create_dir_all(&inputs).ok()?;
-    Some(inputs)
+fn inputs_dir() -> Option<PathBuf> {
+    resolve_debug_dir().map(|base| base.join("inputs"))
 }
 
-/// Serialize one packet as a self-contained voidstar data packet
-/// and hash its content structurally. Returns `(content_hash, bytes)`
-/// where the bytes are ready to write to disk as `<hash>.pkt` and
-/// `morloc dump` can load directly. Never throws.
-unsafe fn serialize_and_hash(
+/// An arg's value, decoded from its packet, with its content hash. The
+/// persistence packet is built from it only when it will be written.
+struct DecodedArg {
+    hash: u64,
+    voidstar: *const u8,
+    schema: *mut crate::cschema::CSchema,
+}
+
+impl Drop for DecodedArg {
+    fn drop(&mut self) {
+        unsafe { crate::ffi::free_schema(self.schema) };
+    }
+}
+
+impl DecodedArg {
+    /// The self-contained data packet `morloc dump` and `@load` read.
+    unsafe fn persistence_bytes(&self) -> Option<Vec<u8>> {
+        let mut err: *mut c_char = ptr::null_mut();
+        let bytes = crate::cache::build_persistence_data_packet(self.voidstar, self.schema, &mut err);
+        if !err.is_null() { libc::free(err as *mut c_void); }
+        bytes
+    }
+}
+
+/// Decode one packet and hash its content structurally. Never throws.
+unsafe fn decode_and_hash(
     packet: *const u8,
     schema_cstr: *const c_char,
-) -> Option<(u64, Vec<u8>)> {
+) -> Option<DecodedArg> {
     use crate::ffi::parse_schema;
     use crate::ffi::free_schema;
     use crate::packet_ffi::get_morloc_data_packet_value;
@@ -207,36 +226,38 @@ unsafe fn serialize_and_hash(
         return None;
     }
     let mut hash_err: *mut c_char = ptr::null_mut();
-    let content_hash = hash_voidstar(
-        voidstar as *const c_void, schema, 0, &mut hash_err,
-    );
+    let hash = hash_voidstar(voidstar as *const c_void, schema, 0, &mut hash_err);
     if !hash_err.is_null() {
         libc::free(hash_err as *mut c_void);
         free_schema(schema);
         return None;
     }
-    let mut pkt_err: *mut c_char = ptr::null_mut();
-    let bytes = crate::cache::build_persistence_data_packet(
-        voidstar as *const u8, schema, &mut pkt_err,
-    );
-    free_schema(schema);
-    if !pkt_err.is_null() { libc::free(pkt_err as *mut c_void); }
-    let bytes = bytes?;
-    Some((content_hash, bytes))
+    Some(DecodedArg { hash, voidstar: voidstar as *const u8, schema })
 }
 
-/// Try to write `bytes` to `<debug_dir>/inputs/<hash>.pkt`. Returns
-/// the path on success (or when the file already exists due to
-/// content-addressed dedup). Returns `None` when the debug dir is
-/// unavailable or the write failed.
-fn try_write(hash_val: u64, bytes: &[u8]) -> Option<PathBuf> {
-    let dir = ensure_inputs_dir()?;
-    let path = dir.join(format!("{:016x}.pkt", hash_val));
-    if path.exists() {
-        return Some(path);
+/// What becomes of an arg whose hash is known, before its packet is built.
+#[derive(Debug, PartialEq, Eq)]
+enum Disposition {
+    /// Its file is already on disk: point at it, spending no budget.
+    Existing,
+    /// The dispatch's write budget is spent.
+    Capped,
+    /// Build the packet and write it.
+    Write,
+}
+
+fn dump_disposition(file_exists: bool, dumped: u64, depth_limit: u64) -> Disposition {
+    if file_exists {
+        Disposition::Existing
+    } else if depth_limit != 0 && dumped >= depth_limit {
+        Disposition::Capped
+    } else {
+        Disposition::Write
     }
-    crate::utility::write_atomic_path(&path, bytes).ok()?;
-    Some(path)
+}
+
+fn dump_file(inputs: &std::path::Path, hash_val: u64) -> PathBuf {
+    inputs.join(format!("{:016x}.pkt", hash_val))
 }
 
 /// Record one frame's args after an exception. Called from the
@@ -268,47 +289,47 @@ pub(crate) unsafe fn morloc_debug_record_frame(
         *c
     });
     if cap != 0 && count > cap {
-        // Report once per midx that overflowed so the trace can warn
-        // the user. We don't push a frame entry past the cap.
-        OVERFLOW_REPORTED.fetch_or(1u64 << (midx as u64 & 63), Ordering::Relaxed);
+        // The trace warns that frames were dropped; none is pushed past the cap.
+        OVERFLOW_REPORTED.with(|o| *o.borrow_mut() = true);
         return;
     }
 
     let depth_limit = cache_depth();
     let size_limit = cache_max();
+    let inputs = inputs_dir();
     let mut args: Vec<ArgDump> = Vec::with_capacity(n);
     for i in 0..n {
         let packet = *packets.add(i);
         let schema_cstr = *schemas.add(i);
         let schema = cstr_to_string(schema_cstr);
-        match serialize_and_hash(packet, schema_cstr) {
-            None => args.push(ArgDump {
-                schema,
-                hash: 0,
-                status: DumpStatus::SerializeFailed,
-            }),
-            Some((hash_val, bytes)) => {
-                // Resolve disposition: too-large beats depth-cap beats
-                // attempted-write. Only successful writes advance the
-                // depth counter.
-                let status = if size_limit != 0 && (bytes.len() as u64) > size_limit {
-                    DumpStatus::TooLarge
-                } else if depth_limit != 0
-                    && DUMPED_COUNT.with(|d| *d.borrow()) >= depth_limit
+        let Some(arg) = decode_and_hash(packet, schema_cstr) else {
+            args.push(ArgDump { schema, hash: 0, status: DumpStatus::SerializeFailed });
+            continue;
+        };
+        let path = inputs.as_deref().map(|d| dump_file(d, arg.hash));
+        let exists = path.as_ref().map_or(false, |p| p.exists());
+        let dumped = DUMPED_COUNT.with(|d| *d.borrow());
+        let status = match (dump_disposition(exists, dumped, depth_limit), path) {
+            (Disposition::Existing, Some(p)) => DumpStatus::Written(p),
+            (Disposition::Capped, _) => DumpStatus::DepthCapped,
+            (_, None) => DumpStatus::WriteFailed,
+            (Disposition::Write, Some(p)) => match arg.persistence_bytes() {
+                None => DumpStatus::SerializeFailed,
+                Some(bytes) if size_limit != 0 && (bytes.len() as u64) > size_limit => DumpStatus::TooLarge,
+                Some(bytes) => match inputs
+                    .as_deref()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .and_then(|()| crate::utility::write_atomic_path(&p, &bytes))
                 {
-                    DumpStatus::DepthCapped
-                } else {
-                    match try_write(hash_val, &bytes) {
-                        Some(p) => {
-                            DUMPED_COUNT.with(|d| *d.borrow_mut() += 1);
-                            DumpStatus::Written(p)
-                        }
-                        None => DumpStatus::WriteFailed,
+                    Ok(_) => {
+                        DUMPED_COUNT.with(|d| *d.borrow_mut() += 1);
+                        DumpStatus::Written(p)
                     }
-                };
-                args.push(ArgDump { schema, hash: hash_val, status });
-            }
-        }
+                    Err(_) => DumpStatus::WriteFailed,
+                },
+            },
+        };
+        args.push(ArgDump { schema, hash: arg.hash, status });
     }
     FRAMES.with(|f| {
         f.borrow_mut().push(FrameEntry {
@@ -330,7 +351,7 @@ pub(crate) fn morloc_debug_flush_dispatch() {
     FRAMES.with(|f| f.borrow_mut().clear());
     DUMPED_COUNT.with(|d| *d.borrow_mut() = 0);
     MIDX_COUNTERS.with(|m| m.borrow_mut().clear());
-    OVERFLOW_REPORTED.store(0, Ordering::Relaxed);
+    OVERFLOW_REPORTED.with(|o| *o.borrow_mut() = false);
 }
 
 
@@ -339,8 +360,8 @@ pub(crate) fn morloc_debug_flush_dispatch() {
 /// `libc::free`. Returns NULL when no frames were recorded.
 pub(crate) unsafe fn morloc_debug_drain_frames() -> *mut c_char {
     let frames: Vec<FrameEntry> = FRAMES.with(|f| std::mem::take(&mut *f.borrow_mut()));
-    let overflow = OVERFLOW_REPORTED.swap(0, Ordering::Relaxed);
-    if frames.is_empty() && overflow == 0 {
+    let overflow = OVERFLOW_REPORTED.with(|o| std::mem::take(&mut *o.borrow_mut()));
+    if frames.is_empty() && !overflow {
         return ptr::null_mut();
     }
     let mut out = String::with_capacity(256);
@@ -354,6 +375,7 @@ pub(crate) unsafe fn morloc_debug_drain_frames() -> *mut c_char {
     } else {
         out.push_str(&format!("morloc trace [{} pool]:\n", header_lang));
     }
+    let mut capped = std::collections::HashSet::new();
     for frame in frames.iter() {
         // Anonymous/synthesized nodes (compositions, IntrMap, tuple
         // projections, lambdas) render '_' so the header shape is
@@ -384,9 +406,10 @@ pub(crate) unsafe fn morloc_debug_drain_frames() -> *mut c_char {
                     "    arg[{}] :: {} (hash={:016x}, size exceeded MORLOC_DEBUG_CACHE_MAX)\n",
                     j, schema, arg.hash
                 )),
-                DumpStatus::DepthCapped => out.push_str(&format!(
-                    "    arg[{}] :: {}\n", j, schema
-                )),
+                DumpStatus::DepthCapped => {
+                    capped.insert(arg.hash);
+                    out.push_str(&format!("    arg[{}] :: {}\n", j, schema))
+                }
                 DumpStatus::WriteFailed => out.push_str(&format!(
                     "    arg[{}] :: {} (hash={:016x}, write failed -- check that the debug dir is writable)\n",
                     j, schema, arg.hash
@@ -397,14 +420,21 @@ pub(crate) unsafe fn morloc_debug_drain_frames() -> *mut c_char {
             }
         }
     }
-    if overflow != 0 {
+    if !capped.is_empty() {
+        out.push_str(&format!(
+            "  ({} {} not saved; raise --debug-cache-depth to save more)\n",
+            capped.len(),
+            if capped.len() == 1 { "value" } else { "values" }
+        ));
+    }
+    if overflow {
         out.push_str(
             "  (one or more manifolds exceeded MORLOC_DEBUG_RECURSION_CAP; \
             entries beyond the cap were dropped)\n",
         );
     }
     CString::new(out)
-        .map(|c| c.into_raw())
+        .map(|c| crate::error::malloc_cstr(&c))
         .unwrap_or(ptr::null_mut())
 }
 
@@ -446,7 +476,7 @@ mod tests {
     #[test]
     fn drain_returns_null_when_empty() {
         FRAMES.with(|f| f.borrow_mut().clear());
-        OVERFLOW_REPORTED.store(0, Ordering::Relaxed);
+        OVERFLOW_REPORTED.with(|o| *o.borrow_mut() = false);
         unsafe {
             assert!(morloc_debug_drain_frames().is_null());
         }
@@ -504,6 +534,43 @@ mod tests {
             assert!(s.contains("at _ (mid=7)"));
             assert!(s.contains("at namedonly (mid=3)"));
             assert!(s.contains("at _ (mid=4, other.loc:1:1)"));
+        }
+    }
+
+    #[test]
+    fn capped_args_are_bare_and_counted_once() {
+        FRAMES.with(|f| f.borrow_mut().clear());
+        let capped = |hash| ArgDump { schema: "f8".into(), hash, status: DumpStatus::DepthCapped };
+        push_test_frame(1, vec![capped(1)]);
+        push_test_frame(2, vec![capped(1), capped(2)]);
+        unsafe {
+            let p = morloc_debug_drain_frames();
+            let s = CStr::from_ptr(p).to_string_lossy().into_owned();
+            libc::free(p as *mut c_void);
+            assert!(s.contains("    arg[0] :: f8\n"));
+            assert_eq!(s.matches("not saved").count(), 1);
+            assert!(s.contains("(2 values not saved; raise --debug-cache-depth to save more)"));
+        }
+    }
+
+    #[test]
+    fn an_existing_dump_spends_no_budget() {
+        assert_eq!(dump_disposition(true, 1, 1), Disposition::Existing);
+        assert_eq!(dump_disposition(true, 0, 1), Disposition::Existing);
+        assert_eq!(dump_disposition(false, 1, 1), Disposition::Capped);
+        assert_eq!(dump_disposition(false, 0, 1), Disposition::Write);
+        assert_eq!(dump_disposition(false, 9, 0), Disposition::Write);
+    }
+
+    #[test]
+    fn an_overflow_note_stays_on_its_thread() {
+        FRAMES.with(|f| f.borrow_mut().clear());
+        OVERFLOW_REPORTED.with(|o| *o.borrow_mut() = false);
+        std::thread::spawn(|| OVERFLOW_REPORTED.with(|o| *o.borrow_mut() = true))
+            .join()
+            .unwrap();
+        unsafe {
+            assert!(morloc_debug_drain_frames().is_null());
         }
     }
 

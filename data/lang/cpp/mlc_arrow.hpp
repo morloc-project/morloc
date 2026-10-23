@@ -26,7 +26,7 @@ public:
     // callbacks) through pointers. The sources are marked released, so a
     // caller that releases them afterwards releases nothing.
     ArrowTable(struct ArrowSchema* schema, struct ArrowArray* array)
-        : impl_(std::make_shared<Impl>(*schema, *array, nullptr))
+        : impl_(mlc::make_arm<Impl>(*schema, *array, nullptr))
     {
         schema->release = nullptr;
         array->release = nullptr;
@@ -36,7 +36,7 @@ public:
     // copies passed in are consumed; the caller's originals still carry
     // their release callbacks and must not be released again.
     ArrowTable(struct ArrowSchema schema, struct ArrowArray array)
-        : impl_(std::make_shared<Impl>(schema, array, nullptr)) {}
+        : impl_(mlc::make_arm<Impl>(schema, array, nullptr)) {}
 
     ArrowTable(const ArrowTable&) = default;
     ArrowTable(ArrowTable&&) noexcept = default;
@@ -80,13 +80,13 @@ public:
     // lives, so the aliased memory stays valid. The pointer form marks the
     // sources released; the by-value form consumes the copies it is given.
     ArrowTable derive(struct ArrowSchema* schema, struct ArrowArray* array) const {
-        ArrowTable t(std::make_shared<Impl>(*schema, *array, impl_));
+        ArrowTable t(mlc::make_arm<Impl>(*schema, *array, impl_));
         schema->release = nullptr;
         array->release = nullptr;
         return t;
     }
     ArrowTable derive(struct ArrowSchema schema, struct ArrowArray array) const {
-        return ArrowTable(std::make_shared<Impl>(schema, array, impl_));
+        return ArrowTable(mlc::make_arm<Impl>(schema, array, impl_));
     }
 
     // Move this table's data into a fresh SHM block (or, when it is a
@@ -129,11 +129,15 @@ private:
         struct ArrowSchema schema;
         struct ArrowArray array;
         // A view keeps its source alive; a long chain of derived views is
-        // released through the drain rather than one frame per view.
-        mlc::rec_ptr<Impl> parent;
+        // released in bounded stack (STATE-8), which moves an Impl.
+        std::shared_ptr<Impl> parent;
 
         Impl(struct ArrowSchema s, struct ArrowArray a, std::shared_ptr<Impl> p)
             : schema(s), array(a), parent(std::move(p)) {}
+        Impl(Impl&& o) noexcept : schema(o.schema), array(o.array), parent(std::move(o.parent)) {
+            o.schema.release = nullptr;
+            o.array.release = nullptr;
+        }
         ~Impl() {
             if (array.release) array.release(&array);
             if (schema.release) schema.release(&schema);

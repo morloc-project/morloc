@@ -96,12 +96,8 @@ static PyObject* shm_view_owner(void) {
 #define SHM_TRACKER_INIT_CAP 16
 typedef struct {
     absptr_t ptr;
-    Schema* schema;
 } shm_entry_t;
-// Thread-local: each worker gets its own SHM tracking list so a per-dispatch
-// flush frees only that thread's in-flight SHM, never a sibling's. Required for
-// the thread-based pool (macOS); a no-op distinction under the single-threaded
-// fork worker (Linux). Mirrors the __thread recur_env_stack below.
+// Per thread: a dispatch's flush frees only what its own thread tracked.
 static __thread shm_entry_t* shm_tracker = NULL;
 static __thread size_t shm_tracker_count = 0;
 static __thread size_t shm_tracker_cap = 0;
@@ -112,16 +108,11 @@ static void shm_tracker_forget_inherited(void) {
     if (g == shm_tracker_gen) {
         return;
     }
-    for (size_t i = 0; i < shm_tracker_count; i++) {
-        if (shm_tracker[i].schema) {
-            free_schema(shm_tracker[i].schema);
-        }
-    }
     shm_tracker_count = 0;
     shm_tracker_gen = g;
 }
 
-static void shm_tracker_push(absptr_t ptr, Schema* schema) {
+static void shm_tracker_push(absptr_t ptr) {
     shm_tracker_forget_inherited();
     if (shm_tracker_count >= shm_tracker_cap) {
         size_t new_cap = shm_tracker_cap ? shm_tracker_cap * 2 : SHM_TRACKER_INIT_CAP;
@@ -136,7 +127,6 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
         shm_tracker_cap = new_cap;
     }
     shm_tracker[shm_tracker_count].ptr = ptr;
-    shm_tracker[shm_tracker_count].schema = schema;
     shm_tracker_count++;
 }
 
@@ -144,32 +134,25 @@ static void shm_tracker_flush(void) {
     shm_tracker_forget_inherited();
     for (size_t i = 0; i < shm_tracker_count; i++) {
         char* err = NULL;
-        // shm::shfree decrements the refcount and zeros the block on final
-        // ref-drop, so no separate metadata-zeroing pass is needed here.
         shfree(shm_tracker[i].ptr, &err);
         if (err) { free(err); }
-        if (shm_tracker[i].schema) {
-            free_schema(shm_tracker[i].schema);
-        }
     }
     shm_tracker_count = 0;
 }
 
-// Drop one tracker entry matching ptr (swap-with-last), shfree the
-// block, and free its schema. Used by release_packet_shm to free
+// Drop one tracker entry matching ptr (swap-with-last) and shfree the
+// block. Used by release_packet_shm to free
 // a put_value-tracked packet's SHM as soon as its codegen-determined
 // scope ends, rather than waiting for the next dispatch flush.
 static bool shm_tracker_release_one(absptr_t ptr) {
     shm_tracker_forget_inherited();
     for (size_t i = 0; i < shm_tracker_count; i++) {
         if (shm_tracker[i].ptr == ptr) {
-            Schema* schema = shm_tracker[i].schema;
             shm_tracker[i] = shm_tracker[shm_tracker_count - 1];
             shm_tracker_count--;
             char* err = NULL;
             shfree(ptr, &err);
             if (err) { free(err); }
-            if (schema) { free_schema(schema); }
             return true;
         }
     }
@@ -216,6 +199,8 @@ char* get_prior_err(){
             PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_); \
             free(prior_err); \
         } \
+        free(child_errmsg_); \
+        child_errmsg_ = NULL; \
         goto error; \
     }
 
@@ -268,6 +253,8 @@ static PyObject* PyMorlocPipeClosed = NULL;
             PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_); \
             free(prior_err); \
         } \
+        free(child_errmsg_); \
+        child_errmsg_ = NULL; \
         goto error; \
     }
 
@@ -277,6 +264,8 @@ static PyObject* PyMorlocPipeClosed = NULL;
         PyErr_Format(PyMorlocInternalError, \
                      "morloc internal error (Py pool, %s:%d in %s):\n%s", \
                      __FILE__, __LINE__, __func__, child_errmsg_); \
+        free(child_errmsg_); \
+        child_errmsg_ = NULL; \
         goto error; \
     }
 
@@ -302,19 +291,64 @@ PyObject* numpy_module = NULL;
 // is used. This avoids the agonizingly long numpy import time. Idempotent:
 // PyImport_ImportModule + import_array() reinitialize the C-API pointer table
 // on every call, so guard with numpy_module and short-circuit after first init.
-void* import_numpy() {
+// Returns 0, or -1 with a Python error set.
+int import_numpy(void) {
     if (numpy_module != NULL) {
-        return NULL;
+        return 0;
     }
     numpy_module = PyImport_ImportModule("numpy");
-    if(numpy_module == NULL){
-        PyRAISE("NumPy is not available");
+    if (numpy_module == NULL) {
+        return -1;
     }
+    if (_import_array() < 0) {
+        Py_CLEAR(numpy_module);
+        return -1;
+    }
+    return 0;
+}
 
-    import_array();
+// 1 if `obj` is a numpy ndarray the encoder can read, 0 if it is not an
+// ndarray, -1 with a Python error set. Never imports numpy: an ndarray
+// cannot exist unless numpy is already loaded. A masked array is refused,
+// since its mask has no place on the wire.
+static int py_is_ndarray(PyObject* obj) {
+    if (numpy_module == NULL) {
+        PyObject* np = PyDict_GetItemString(PyImport_GetModuleDict(), "numpy");
+        if (np == NULL || !PyModule_Check(np)) {
+            return 0;
+        }
+        if (import_numpy() != 0) return -1;
+    }
+    if (!PyArray_Check(obj)) return 0;
+    if (Py_TYPE(obj) == &PyArray_Type) return 1;
+    PyObject* ma = PyDict_GetItemString(PyImport_GetModuleDict(), "numpy.ma");
+    if (ma == NULL || !PyModule_Check(ma)) return 1;
+    PyObject* masked_type = PyObject_GetAttrString(ma, "MaskedArray");
+    if (masked_type == NULL) return -1;
+    int masked = PyObject_IsInstance(obj, masked_type);
+    Py_DECREF(masked_type);
+    if (masked < 0) return -1;
+    if (masked) {
+        PyErr_SetString(PyExc_TypeError,
+            "a numpy masked array cannot be written as a list: its mask would be lost");
+        return -1;
+    }
+    return 1;
+}
 
-error:
-    return NULL;
+// For a list-typed value, check that `obj` is a list, bytes, bytearray or
+// ndarray. Returns 0, or -1 with a Python error set.
+static int py_check_list_value(PyObject* obj) {
+    if (PyList_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj)) return 0;
+    int nd = py_is_ndarray(obj);
+    if (nd < 0) return -1;
+    if (nd == 0) {
+        PyErr_Format(PyExc_TypeError,
+            "Expected list, bytes, bytearray, or numpy array for a list, but got %s",
+            Py_TYPE(obj)->tp_name);
+        return -1;
+    }
+    return 0;
 }
 
 
@@ -327,9 +361,7 @@ error:
 // (name, schema) entries: push on entering a declaration, pop on exit.
 // A Recur node looks up its target by scanning the stack top-down.
 //
-// __thread keeps the stack per-thread so concurrent walks (e.g. the
-// daemon dispatcher and a foreign-call serializer running on another
-// thread) do not stomp on each other's environments.
+// The stack is per thread, so walks on different threads stay apart.
 typedef struct {
     const char* name;
     const Schema* schema;
@@ -547,6 +579,11 @@ typedef struct {
     unsigned char pop_env;     // sentinel: pop the recur env and nothing else
 } py_frame_t;
 
+typedef struct py_keyset {
+    const Schema* schema;
+    PyObject** keys;
+} py_keyset_t;
+
 typedef struct {
     py_frame_t* frames;
     size_t len;
@@ -560,6 +597,9 @@ typedef struct {
     size_t env_base;        // recur env depth at entry, restored on exit
     ssize_t total;          // size pass
     void** cursor;          // write pass
+    void* end;              // write pass: the end of the block the size pass measured
+    struct py_keyset* keysets; // record key objects made by this walk
+    size_t n_keysets;
     morloc_space_t space;   // read pass: where relptrs lead
     PyObject* result;       // read pass: the root, owned until returned
     PyObject* keep;         // references the walk holds until it ends
@@ -600,7 +640,76 @@ static void py_walk_free(py_walk_t* w) {
     free(w->frames);
     w->frames = NULL;
     Py_CLEAR(w->keep);
+    for (size_t i = 0; i < w->n_keysets; i++) {
+        for (size_t k = 0; k < w->keysets[i].schema->size; k++) {
+            Py_XDECREF(w->keysets[i].keys[k]);
+        }
+        free(w->keysets[i].keys);
+    }
+    free(w->keysets);
+    w->keysets = NULL;
+    w->n_keysets = 0;
     recur_env_depth = w->env_base;
+}
+
+// The key objects of a record schema, made once per walk rather than once
+// per record. NULL with a Python error set.
+static PyObject** py_record_keys(py_walk_t* w, const Schema* schema) {
+    for (size_t i = 0; i < w->n_keysets; i++) {
+        if (w->keysets[i].schema == schema) return w->keysets[i].keys;
+    }
+    py_keyset_t* grown = (py_keyset_t*)realloc(w->keysets, (w->n_keysets + 1) * sizeof(py_keyset_t));
+    if (grown == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    w->keysets = grown;
+    PyObject** keys = (PyObject**)calloc(schema->size ? schema->size : 1, sizeof(PyObject*));
+    if (keys == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    w->keysets[w->n_keysets].schema = schema;
+    w->keysets[w->n_keysets].keys = keys;
+    w->n_keysets++;
+    for (size_t k = 0; k < schema->size; k++) {
+        keys[k] = PyUnicode_InternFromString(schema->keys[k]);
+        if (keys[k] == NULL) return NULL;
+    }
+    return keys;
+}
+
+// A record field's value, or NULL with a Python error set when the dict
+// lacks the field.
+static PyObject* py_record_field(const Schema* schema, PyObject** keys, PyObject* dict, size_t i) {
+    PyObject* value = PyDict_GetItemWithError(dict, keys[i]);
+    if (value == NULL && !PyErr_Occurred()) {
+        PyErr_Format(PyExc_KeyError, "record field '%s' is missing", schema->keys[i]);
+    }
+    return value;
+}
+
+// An element the walk was about to visit is gone: Python code run during
+// the walk (a dict key's __eq__) changed the value. Returns -1.
+static int py_vanished(void) {
+    if (!PyErr_Occurred()) {
+        PyErr_SetString(PyExc_RuntimeError, "the value changed while it was being written");
+    }
+    return -1;
+}
+
+// Align the cursor to `align`, take `n` bytes there and return their
+// start; NULL with a Python error set, writing nothing, when they no longer
+// fit the space the size pass measured (the value changed between passes).
+static char* py_take(py_walk_t* w, size_t align, size_t n) {
+    char* at = (char*)ALIGN_UP((uintptr_t)*w->cursor, align);
+    if (at > (char*)w->end || n > (size_t)((char*)w->end - at)) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "the value changed while it was being written: it no longer fits the space measured for it");
+        return NULL;
+    }
+    *w->cursor = at + n;
+    return at;
 }
 
 static int py_push(py_walk_t* w, const py_frame_t* f) {
@@ -707,12 +816,18 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
 // Account for a child. `inline_slot` says the child's fixed width lies
 // inside the parent's (tuple and record fields), so only its tail is added.
 static int py_size_child(py_walk_t* w, const Schema* schema, PyObject* obj, int inline_slot) {
+    if (obj == NULL) return py_vanished();
     const Schema* s = py_resolve(schema);
     if (s == NULL) return -1;
     if (py_flat(w, s)) {
         if (inline_slot) w->total -= (ssize_t)s->width;
-        return py_size_step(w, s, obj, 0);
+        Py_INCREF(obj);
+        int r = py_size_step(w, s, obj, 0);
+        Py_DECREF(obj);
+        return r;
     }
+    Py_INCREF(obj);
+    if (py_keep(w, obj) != 0) return -1;
     py_frame_t f;
     memset(&f, 0, sizeof(f));
     f.schema = s;
@@ -782,9 +897,7 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
             if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) )) {
                 PyRAISE("Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
             }
-            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) {
-                PyRAISE("Expected list, bytes, bytearray, or numpy array for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
-            }
+            if (schema->type == MORLOC_ARRAY && idx == 0 && py_check_list_value(obj) != 0) return -1;
 
             const Schema* element_schema = py_resolve(schema->parameters[0]);
             if (element_schema == NULL) return -1;
@@ -855,8 +968,7 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                             }
                             break;  // one compound element per visit, below
                     }
-                } else if (PyObject_HasAttrString(obj, "__array_interface__")) {
-                    import_numpy();
+                } else if (schema->type == MORLOC_ARRAY && !PyBytes_Check(obj) && !PyByteArray_Check(obj)) {
                     PyArrayObject *arr = (PyArrayObject *)obj;
                     // A bulk or widening route copies `width` bytes per
                     // element; any other array is sized element by element.
@@ -940,13 +1052,12 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                 PyRAISE("Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
             }
             w->total += (ssize_t)schema->width;
+            PyObject** keys = py_record_keys(w, schema);
+            if (keys == NULL) return -1;
             for (size_t i = 0; i < schema->size; ++i) {
-                PyObject* key = PyUnicode_FromString(schema->keys[i]);
-                PyObject* value = PyDict_GetItem(obj, key);
-                Py_DECREF(key);
-                if (value) {
-                    if (py_size_child(w, schema->parameters[i], value, 1) != 0) return -1;
-                }
+                PyObject* value = py_record_field(schema, keys, obj, i);
+                if (value == NULL) return -1;
+                if (py_size_child(w, schema->parameters[i], value, 1) != 0) return -1;
             }
             return 0;
         }
@@ -1054,11 +1165,17 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
 // Write a child into its slot: a leaf now, a compound node by call or by
 // frame.
 static int py_write_child(py_walk_t* w, const Schema* schema, void* dest, PyObject* obj) {
+    if (obj == NULL) return py_vanished();
     const Schema* s = py_resolve(schema);
     if (s == NULL) return -1;
     if (py_flat(w, s)) {
-        return py_write_step(w, s, dest, obj, 0);
+        Py_INCREF(obj);
+        int r = py_write_step(w, s, dest, obj, 0);
+        Py_DECREF(obj);
+        return r;
     }
+    Py_INCREF(obj);
+    if (py_keep(w, obj) != 0) return -1;
     py_frame_t f;
     memset(&f, 0, sizeof(f));
     f.schema = s;
@@ -1182,13 +1299,14 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             } else {
                 // Overflow: allocate limb array, store relptr
                 fields[0] = (int64_t)nlimbs;
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, _Alignof(uint64_t));
+                char* limbs = py_take(w, _Alignof(uint64_t), nlimbs * sizeof(uint64_t));
+                if (limbs == NULL) goto error;
                 {
                     char* rel_err = NULL;
-                    *(relptr_t*)&fields[1] = abs2rel(*cursor, &rel_err);
+                    *(relptr_t*)&fields[1] = abs2rel(limbs, &rel_err);
                     if (rel_err) { free(rel_err); goto error; }
                 }
-                memset(*cursor, 0, nlimbs * sizeof(uint64_t));
+                memset(limbs, 0, nlimbs * sizeof(uint64_t));
                 // Python 3.13 added a trailing `with_exceptions` argument to
                 // _PyLong_AsByteArray; pass 1 to keep the exception-raising
                 // behavior that older Pythons had implicitly.
@@ -1198,13 +1316,12 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
 #  define MORLOC_ASBYTEARRAY_TAIL
 #endif
                 if (_PyLong_AsByteArray((PyLongObject*)obj,
-                                        (unsigned char*)*cursor,
+                                        (unsigned char*)limbs,
                                         nlimbs * sizeof(uint64_t),
                                         1, 1 MORLOC_ASBYTEARRAY_TAIL) < 0) {
                     goto error;
                 }
 #undef MORLOC_ASBYTEARRAY_TAIL
-                *cursor = (char*)*cursor + nlimbs * sizeof(uint64_t);
             }
             break;
         }
@@ -1228,9 +1345,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 PyRAISE("Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
             }
 
-            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) {
-                PyRAISE("Expected list, bytes, bytearray, or numpy array for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
-            }
+            if (schema->type == MORLOC_ARRAY && idx == 0 && py_check_list_value(obj) != 0) goto error;
 
             const Schema* element_schema = py_resolve(schema->parameters[0]);
             if (element_schema == NULL) goto error;
@@ -1293,8 +1408,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                             goto error;
                         }
                     }
-                } else if (schema->type == MORLOC_ARRAY && PyObject_HasAttrString(obj, "__array_interface__")) { // check if it is a numpy array
-                    import_numpy();
+                } else if (schema->type == MORLOC_ARRAY) {
                     PyArrayObject* arr = (PyArrayObject*)obj;
                     size = PyArray_SIZE(arr);
                     if (numpy_route(arr, element_schema, &np_route) != 0) goto error;
@@ -1322,17 +1436,17 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                     break;
                 }
 
-                // align cursor for element data placement.
-                // String stays at natural element alignment (1 byte for chars);
-                // Array bumps to 64 for primitive numeric elements (SIMD/BLAS).
-                {
-                    size_t buf_align = (schema->type == MORLOC_STRING)
-                        ? schema->parameters[0]->alignment
-                        : element_schema->data_alignment;
-                    *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, buf_align);
-                }
+                // Element data: strings stay at natural element alignment
+                // (1 byte for chars); arrays bump to 64 for primitive
+                // numeric elements (SIMD/BLAS). Bytes and strings have
+                // one-byte elements, so every branch fills size * width.
+                size_t buf_align = (schema->type == MORLOC_STRING)
+                    ? schema->parameters[0]->alignment
+                    : element_schema->data_alignment;
+                char* start = py_take(w, buf_align, (size_t)size * width);
+                if (start == NULL) goto error;
 
-                result->data = PyTRY(abs2rel, *cursor);
+                result->data = PyTRY(abs2rel, start);
 
                 if (PyList_Check(obj) || numpy_per_element) {
                     // Per-element walk: works for Python lists and numpy
@@ -1342,11 +1456,6 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                     // Element access differs (PyList_GetItem vs
                     // PyArray_GETITEM), but the wire layout is identical.
 
-                    // Move the cursor to the location immediately after the
-                    // fixed sized elements
-                    *cursor = (void*)(*(char**)cursor + size * width);
-
-                    char* start = (char*) PyTRY(rel2abs, result->data);
                     PyArrayObject* arr = numpy_per_element ? (PyArrayObject*)obj : NULL;
                     // Batched stream-handle-array write: one registry lock for all N handles.
                     if ((element_schema->type == MORLOC_IFILE
@@ -1410,29 +1519,19 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                     }
 
                 } else if (PyBytes_Check(obj) || PyByteArray_Check(obj)){
-                    absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
-                    memcpy(tmp_ptr, mutable_data, size);
-                    // move cursor to the location after the copied data
-                    *cursor = (void*)(*(char**)cursor + size);
+                    memcpy(start, mutable_data, size);
                 }
                 else if (np_route == NPY_ROUTE_CAST) {
-                    absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
                     PyArrayObject* cast = (PyArrayObject*)PyArray_FromArray(
                         (PyArrayObject*)obj,
                         PyArray_DescrFromType(schema_to_npy_type(element_schema->type)),
                         NPY_ARRAY_CARRAY);
                     if (!cast) goto error;
-                    memcpy(tmp_ptr, PyArray_DATA(cast), size * width);
+                    memcpy(start, PyArray_DATA(cast), size * width);
                     Py_DECREF(cast);
-                    *cursor = (void*)(*(char**)cursor + size * width);
                 }
                 else{
-                    absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
-                    memcpy(tmp_ptr, immutable_data, size * width);
-
-                    // Move the cursor to the location immediately after the
-                    // fixed sized elements
-                    *cursor = (void*)(*(char**)cursor + size * width);
+                    memcpy(start, immutable_data, size * width);
                 }
             }
             break;
@@ -1463,14 +1562,13 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             }
 
             {
+                PyObject** keys = py_record_keys(w, schema);
+                if (keys == NULL) goto error;
                 for (size_t i = 0; i < schema->size; ++i) {
-                    PyObject* key = PyUnicode_FromString(schema->keys[i]);
-                    PyObject* value = PyDict_GetItem(obj, key);
-                    Py_DECREF(key);
-                    if (value) {
-                        if (py_write_child(w, schema->parameters[i], (char*)dest + schema->offsets[i], value) != 0) {
-                            goto error;
-                        }
+                    PyObject* value = py_record_field(schema, keys, obj, i);
+                    if (value == NULL) goto error;
+                    if (py_write_child(w, schema->parameters[i], (char*)dest + schema->offsets[i], value) != 0) {
+                        goto error;
                     }
                 }
             }
@@ -1495,14 +1593,13 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 *(relptr_t*)((char*)dest + 8) = RELNULL;
             } else {
                 size_t warm_align = warm->alignment;
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, warm_align);
+                void* arm_dest = py_take(w, warm_align, warm->width);
+                if (arm_dest == NULL) goto error;
                 {
                     char* rel_err = NULL;
-                    *(relptr_t*)((char*)dest + 8) = abs2rel(*cursor, &rel_err);
+                    *(relptr_t*)((char*)dest + 8) = abs2rel(arm_dest, &rel_err);
                     if (rel_err) { free(rel_err); goto error; }
                 }
-                void* arm_dest = *cursor;
-                *cursor = (void*)((char*)*cursor + warm->width);
                 if (py_write_child(w, warm, arm_dest, wfields) != 0) {
                     goto error;
                 }
@@ -1522,14 +1619,13 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 const Schema* inner_schema = py_resolve(schema->parameters[0]);
                 if (inner_schema == NULL) goto error;
                 size_t inner_align = inner_schema->alignment;
-                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, inner_align);
+                void* inner_dest = py_take(w, inner_align, inner_schema->width);
+                if (inner_dest == NULL) goto error;
                 {
                     char* rel_err = NULL;
-                    *(relptr_t*)dest = abs2rel(*cursor, &rel_err);
+                    *(relptr_t*)dest = abs2rel(inner_dest, &rel_err);
                     if (rel_err) { free(rel_err); goto error; }
                 }
-                void* inner_dest = *cursor;
-                *cursor = (void*)((char*)*cursor + inner_schema->width);
                 if (py_write_child(w, inner_schema, inner_dest, obj) != 0) {
                     goto error;
                 }
@@ -1547,11 +1643,12 @@ error:
 }
 
 // Write `obj` into the slot at `dest`, appending variable-length parts at
-// the cursor. Returns 0, or -1 with a Python error set.
-int to_voidstar_inner(void* dest, void** cursor, const Schema* schema, PyObject* obj) {
+// the cursor, never past `end`. Returns 0, or -1 with a Python error set.
+int to_voidstar_inner(void* dest, void** cursor, void* end, const Schema* schema, PyObject* obj) {
     py_walk_t w;
     py_walk_init(&w, schema);
     w.cursor = cursor;
+    w.end = end;
     int result = -1;
     if (py_write_child(&w, schema, dest, obj) != 0) goto done;
     for (;;) {
@@ -1572,6 +1669,7 @@ void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
   // calculate the required size of the shared memory object
   ssize_t shm_size = get_shm_size(schema, obj);
   if(shm_size == -1){
+      if (PyErr_Occurred()) goto error;
       PyRAISE("Schema does not match object");
   }
 
@@ -1582,7 +1680,7 @@ void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
   void* cursor = (void*)((char*)dest + schema->width);
 
   // write the data to the block
-  int result = to_voidstar_inner(dest, &cursor, schema, obj);
+  int result = to_voidstar_inner(dest, &cursor, (char*)dest + shm_size, schema, obj);
   if (result != 0) {
       goto error;
   }
@@ -1834,7 +1932,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 // Boxed path: build dtype=object array and fill it element
                 // by element. Each slot stores a PyObject* pointer; SETITEM
                 // handles INCREF/DECREF correctly.
-                import_numpy();
+                if (import_numpy() != 0) goto error;
                 npy_intp dims[] = {array->size};
                 obj = PyArray_SimpleNew(1, dims, NPY_OBJECT);
                 if (obj == NULL) {
@@ -1842,7 +1940,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 }
                 elem_slot_kind = PY_SLOT_NPY;
             } else if (numpy_type_num >= 0) {
-                import_numpy();
+                if (import_numpy() != 0) goto error;
                 npy_intp dims[] = {array->size};
                 // Own the buffer when the source is inline (packet buffer is
                 // freed shortly after get_value returns; a view would see
@@ -2125,27 +2223,6 @@ static PyObject* pybinding__pool_hash(PyObject* self, PyObject* args) {
     return PyLong_FromUnsignedLongLong((unsigned long long)morloc_pool_hash());
 }
 
-static PyObject* pybinding__cache_path(PyObject* self, PyObject* args) {
-    const char* label;
-    if (!PyArg_ParseTuple(args, "z", &label)) {
-        return NULL;
-    }
-    char* errmsg = NULL;
-    char* path = morloc_cache_path(label, &errmsg);
-    if (!path) {
-        if (errmsg) {
-            PyErr_SetString(PyExc_RuntimeError, errmsg);
-            free(errmsg);
-        } else {
-            PyErr_SetString(PyExc_RuntimeError, "morloc_cache_path failed");
-        }
-        return NULL;
-    }
-    PyObject* result = PyUnicode_FromString(path);
-    free(path);
-    return result;
-}
-
 static PyObject* pybinding__cache_lookup(PyObject* self, PyObject* args) {
     unsigned long long key;
     const char* label;
@@ -2295,133 +2372,11 @@ static PyObject* pybinding__cache_record_store(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-static PyObject* pybinding__wait_for_client(PyObject* self, PyObject* args) { MAYFAIL
-    PyObject* daemon_capsule;
-    int timeout_us = 0;  // optional; 0 = block indefinitely
 
-    PARSE_ARGS_OR_ABORT(args, "O|i", &daemon_capsule, &timeout_us);
-
-    language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
-
-    // Release the GIL for the blocking accept: in the thread-based pool the
-    // listener thread sits here, and holding the GIL while blocked would starve
-    // every worker thread (deadlock). Harmless in the fork pool's listener
-    // process. Only the blocking wait is GIL-free. A positive timeout_us lets
-    // the listener wake periodically to observe shutdown (so it can be joined
-    // before the daemon struct is freed).
-    int client_fd;
-    Py_BEGIN_ALLOW_THREADS
-    client_fd = wait_for_client_with_timeout(daemon, timeout_us, &child_errmsg_);
-    Py_END_ALLOW_THREADS
-    if (child_errmsg_ != NULL) {
-        char* prior_err = get_prior_err();
-        if (prior_err == NULL) {
-            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
-        } else {
-            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
-            free(prior_err);
-        }
-        goto error;
-    }
-
-    return PyLong_FromLong((long)client_fd);
-
-error:
-    return NULL;
+static PyObject* pybinding__fork_generation(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    return PyLong_FromUnsignedLongLong((unsigned long long)morloc_fork_generation());
 }
-
-static PyObject* pybinding__start_daemon(PyObject* self, PyObject* args) { MAYFAIL
-    const char* socket_path;
-    const char* tmpdir;
-    const char* shm_basename;
-    size_t shm_default_size;
-    language_daemon_t* daemon = NULL;
-
-    if (!PyArg_ParseTuple(args, "sssk", &socket_path, &tmpdir, &shm_basename, &shm_default_size)) {
-      goto error;
-    }
-
-    daemon = PyTRY(
-        start_daemon,
-        socket_path,
-        tmpdir,
-        shm_basename,
-        shm_default_size
-    );
-
-    return PyCapsule_New(daemon, "language_daemon_t", NULL);
-
-error:
-    FREE(daemon)
-    return NULL;
-}
-
-
-// Record the socket this pool serves; see mlc_set_self_socket.
-static PyObject* pybinding__set_self_socket(PyObject* self, PyObject* args) {
-    const char* socket_path;
-    if (!PyArg_ParseTuple(args, "s", &socket_path)) {
-        return NULL;
-    }
-    mlc_set_self_socket(socket_path);
-    Py_RETURN_NONE;
-}
-
-// The lifeline descriptor this pool watches for its nexus's end, or -1.
-static PyObject* pybinding__lifeline_adopt(PyObject* self, PyObject* args) {
-    return PyLong_FromLong(morloc_lifeline_adopt());
-}
-
-// Shared-memory references this process holds (SHM-8).
-static PyObject* pybinding__held_references(PyObject* self, PyObject* args) {
-    return PyLong_FromLongLong((long long)morloc_held_references());
-}
-
-// Remove this process's temp directory (FORK-16).
-static PyObject* pybinding__remove_own_temps(PyObject* self, PyObject* args) {
-    morloc_remove_own_temps();
-    Py_RETURN_NONE;
-}
-
-// Release leases of forked children that are gone (FORK-15).
-static PyObject* pybinding__reclaim_leases(PyObject* self, PyObject* args) {
-    morloc_reclaim_leases();
-    Py_RETURN_NONE;
-}
-
-// Held references plus stream file locks (SHM-8).
-static PyObject* pybinding__retire_blockers(PyObject* self, PyObject* args) {
-    return PyLong_FromLongLong((long long)morloc_retire_blockers());
-}
-
-// The number of threads in this process, or -1 if it cannot be read.
-static PyObject* pybinding__thread_count(PyObject* self, PyObject* args) {
-    return PyLong_FromLong(morloc_thread_count());
-}
-
-// End this pool's process group once the watched lifeline reaches end of file.
-static PyObject* pybinding__lifeline_teardown(PyObject* self, PyObject* args) {
-    morloc_lifeline_teardown();
-    Py_RETURN_NONE;
-}
-
-static PyObject* pybinding__close_daemon(PyObject* self, PyObject* args) {
-    PyObject* daemon_capsule;
-
-    PARSE_ARGS_OR_ABORT(args, "O", &daemon_capsule);
-
-    language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
-
-    if(daemon != NULL){
-        close_daemon(&daemon);
-    }
-
-    Py_RETURN_NONE;
-
-error:
-    return NULL;
-}
-
 
 static PyObject*  pybinding__read_morloc_call_packet(PyObject* self, PyObject* args){ MAYFAIL
     char* packet;
@@ -2475,12 +2430,8 @@ static PyObject*  pybinding__send_reply(PyObject* self, PyObject* args){ MAYFAIL
 
     PARSE_ARGS_OR_ABORT(args, "iy#", &client_fd, &packet, &packet_size);
 
-    // Release the GIL around the blocking send: send_all can now wait (bounded)
-    // for socket writability when the send buffer is full, and holding the GIL
-    // across that wait would starve every sibling worker thread and the listener
-    // in the thread-based pool. Only the syscall is GIL-free; the Python C-API
-    // error handling below re-holds it. (Expanded PyTRY so Py_BEGIN/END wraps
-    // just the syscall, mirroring the stream_from_client binding.)
+    // The GIL is released only around the blocking send, so threads the
+    // user's code started keep running; error handling below re-holds it.
     size_t bytes_sent = 0;
     Py_BEGIN_ALLOW_THREADS
     bytes_sent = send_reply_to_foreign_server(client_fd, packet, shm_tracker_flush, &child_errmsg_);
@@ -2493,6 +2444,8 @@ static PyObject*  pybinding__send_reply(PyObject* self, PyObject* args){ MAYFAIL
             PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
             free(prior_err);
         }
+        free(child_errmsg_);
+        child_errmsg_ = NULL;
         goto error;
     }
 
@@ -2509,8 +2462,7 @@ static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){
 
     PARSE_ARGS_OR_ABORT(args, "i", &client_fd);
 
-    // Release the GIL for the blocking request read so sibling worker threads run
-    // in the thread-based pool; harmless in the single-threaded fork worker.
+    // The GIL is released only around the blocking read.
     Py_BEGIN_ALLOW_THREADS
     packet = stream_from_client(client_fd, &child_errmsg_);
     Py_END_ALLOW_THREADS
@@ -2522,6 +2474,8 @@ static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){
             PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
             free(prior_err);
         }
+        free(child_errmsg_);
+        child_errmsg_ = NULL;
         goto error;
     }
 
@@ -2539,6 +2493,127 @@ error:
 }
 
 
+
+
+// {{{ fork pool
+
+typedef struct {
+    PyObject* worker_init;
+    PyObject* serve;
+    PyObject* before_retire;
+    PyObject* worker_exit;
+} py_fork_pool_ctx;
+
+// A worker whose Python code raised past its handler ends with this status.
+#define PY_WORKER_FATAL 70
+
+// Print the pending exception and say whether the worker must end. Never
+// lets SystemExit reach PyErr_Print, which would finalize the interpreter.
+static int py_fork_pool_failed(const char* where) {
+    if (!PyErr_Occurred()) return 0;
+    if (PyErr_ExceptionMatches(PyExc_SystemExit) || PyErr_ExceptionMatches(PyExc_KeyboardInterrupt)) {
+        PyErr_Clear();
+        fprintf(stderr, "morloc py pool worker: %s raised SystemExit or KeyboardInterrupt\n", where);
+    } else {
+        fprintf(stderr, "morloc py pool worker: %s raised:\n", where);
+        PyErr_Print();
+    }
+    fflush(stderr);
+    return PY_WORKER_FATAL;
+}
+
+static int py_fork_pool_call(PyObject* f, PyObject* args, const char* where) {
+    if (f == NULL || f == Py_None) return 0;
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* r = PyObject_CallObject(f, args);
+    Py_XDECREF(r);
+    int status = r == NULL ? py_fork_pool_failed(where) : 0;
+    PyGILState_Release(g);
+    return status;
+}
+
+// The gated fork (FORK-6) between CPython's own fork handlers.
+static pid_t py_fork_pool_fork(void* ctx) {
+    (void)ctx;
+    PyGILState_STATE g = PyGILState_Ensure();
+    long threads = 0;
+    int err = 0;
+    PyOS_BeforeFork();
+    pid_t pid = morloc_fork_worker(&threads, &err);
+    if (pid == 0) {
+        PyOS_AfterFork_Child();
+    } else {
+        PyOS_AfterFork_Parent();
+    }
+    PyGILState_Release(g);
+    errno = err;
+    return pid;
+}
+
+static int py_fork_pool_worker_init(void* ctx) {
+    return py_fork_pool_call(((py_fork_pool_ctx*)ctx)->worker_init, NULL, "loading the worker");
+}
+
+static int py_fork_pool_serve(int client_fd, void* ctx) {
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* args = Py_BuildValue("(i)", client_fd);
+    int status = 0;
+    if (args == NULL) {
+        status = py_fork_pool_failed("a call");
+    } else {
+        PyObject* r = PyObject_CallObject(((py_fork_pool_ctx*)ctx)->serve, args);
+        Py_DECREF(args);
+        Py_XDECREF(r);
+        if (r == NULL) status = py_fork_pool_failed("a call");
+    }
+    PyGILState_Release(g);
+    return status;
+}
+
+static void py_fork_pool_before_retire(void* ctx) {
+    (void)py_fork_pool_call(((py_fork_pool_ctx*)ctx)->before_retire, NULL, "preparing to retire");
+}
+
+static void py_fork_pool_worker_exit(void* ctx, int status) {
+    PyGILState_STATE g = PyGILState_Ensure();
+    PyObject* args = Py_BuildValue("(i)", status);
+    if (args != NULL) {
+        PyObject* r = PyObject_CallObject(((py_fork_pool_ctx*)ctx)->worker_exit, args);
+        Py_DECREF(args);
+        Py_XDECREF(r);
+    }
+    if (PyErr_Occurred()) PyErr_Clear();
+    PyGILState_Release(g);
+}
+
+// fork_pool_run(socket_path, tmpdir, shm_basename, worker_init, serve,
+//               before_retire, worker_exit) -> exit status
+static PyObject* pybinding__fork_pool_run(PyObject* self, PyObject* args) {
+    const char* socket_path;
+    const char* tmpdir;
+    const char* shm_basename;
+    py_fork_pool_ctx ctx;
+    if (!PyArg_ParseTuple(args, "sssOOOO", &socket_path, &tmpdir, &shm_basename,
+                          &ctx.worker_init, &ctx.serve, &ctx.before_retire, &ctx.worker_exit)) {
+        return NULL;
+    }
+    morloc_fork_pool_t cfg = {
+        .lang = "py",
+        .ctx = &ctx,
+        .fork = py_fork_pool_fork,
+        .worker_init = py_fork_pool_worker_init,
+        .serve = py_fork_pool_serve,
+        .before_retire = ctx.before_retire == Py_None ? NULL : py_fork_pool_before_retire,
+        .worker_exit = py_fork_pool_worker_exit,
+    };
+    int status;
+    Py_BEGIN_ALLOW_THREADS
+    status = morloc_fork_pool_run(socket_path, tmpdir, shm_basename, &cfg);
+    Py_END_ALLOW_THREADS
+    return PyLong_FromLong(status);
+}
+
+// }}} fork pool
 
 static PyObject*  pybinding__close_socket(PyObject* self, PyObject* args){
     int socket_id = 0;
@@ -2659,7 +2734,7 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
         void* shm_ptr = rel2abs(relptr, &resolve_err);
         if (resolve_err) { free(resolve_err); }
         if (shm_ptr) {
-            shm_tracker_push((absptr_t)shm_ptr, NULL);
+            shm_tracker_push((absptr_t)shm_ptr);
         }
 
         if (self_contained) {
@@ -2699,11 +2774,10 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
         const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
         if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
             // SHM referenced by packet -- track for deferred cleanup
-            shm_tracker_push((absptr_t)voidstar, schema);
+            shm_tracker_push((absptr_t)voidstar);
             tracked = true;
         } else {
-            // Data inlined in packet -- free SHM immediately. shfree zeros
-            // the block on final ref-drop, so no metadata-walk needed.
+            // Data inlined in packet -- free SHM immediately.
             char* free_err = NULL;
             shfree((absptr_t)voidstar, &free_err);
             if (free_err) { free(free_err); }
@@ -2716,22 +2790,18 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     {
         PyObject* retval = PyBytes_FromStringAndSize((char*)packet, packet_size);
         free(packet);
-        if (!tracked) {
-            free_schema(schema);
-        }
+        free_schema(schema);
         return retval;
     }
 
 error:
     FREE(packet)
-    if (!tracked) {
-        if (voidstar && schema) {
-            char* free_err = NULL;
-            shfree((absptr_t)voidstar, &free_err);
-            if (free_err) { free(free_err); }
-        }
-        free_schema(schema);
+    if (!tracked && voidstar && schema) {
+        char* free_err = NULL;
+        shfree((absptr_t)voidstar, &free_err);
+        if (free_err) { free(free_err); }
     }
+    free_schema(schema);
     return NULL;
 }
 
@@ -3066,19 +3136,6 @@ static PyObject* pybinding__debug_drain_frames(PyObject* self, PyObject* args) {
     return result;
 }
 
-// Atomically add `delta` to the C int at `address` and return the new value.
-// The pool's worker processes share their counters in memory inherited
-// across fork; a Python read-then-write on it loses updates.
-static PyObject* pybinding__atomic_add_int(PyObject* self, PyObject* args) {
-    (void)self;
-    unsigned long long address;
-    int delta;
-    if (!PyArg_ParseTuple(args, "Ki", &address, &delta)) {
-        return NULL;
-    }
-    int value = __atomic_add_fetch((int*)(uintptr_t)address, delta, __ATOMIC_SEQ_CST);
-    return PyLong_FromLong(value);
-}
 
 // Reset per-dispatch debug state (recursion counters, write counter,
 // frame stack). Called by the pool's run_job at the start of each
@@ -3189,11 +3246,8 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     free(arg_packets);
     arg_packets = NULL;
 
-    // Release the GIL for the blocking round-trip to the foreign pool: this is
-    // what lets a sibling worker thread run and service a re-entrant callback in
-    // the thread-based pool (macOS). Harmless in the single-threaded fork worker
-    // (Linux). Only the blocking call is GIL-free; the error handling re-holds
-    // it. (Expanded PyTRY so the Py_BEGIN/END wraps just the syscall.)
+    // The GIL is released only around the blocking round trip to the
+    // foreign pool; the error handling re-holds it.
     Py_BEGIN_ALLOW_THREADS
     result = send_and_receive_over_socket(socket_path, packet, &child_errmsg_);
     Py_END_ALLOW_THREADS
@@ -3205,6 +3259,8 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
             PyErr_Format(PyMorlocInternalError, "%s\nmorloc internal error (Py pool, %s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
             free(prior_err);
         }
+        free(child_errmsg_);
+        child_errmsg_ = NULL;
         goto error;
     }
     free(packet);
@@ -3229,8 +3285,8 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
         }
     }
 
-    // Incref the result's SHM so the callee's tracker flush won't destroy
-    // data we may still need (e.g. forwarded result packets).
+    // Track the result's shared memory: the reference the callee donated
+    // with it is this pool's now.
     {
         const morloc_packet_header_t* res_header = (const morloc_packet_header_t*)result;
         if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
@@ -3241,7 +3297,7 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
             if (res_voidstar) {
                 // The callee took a reference before sending; it is ours
                 // now. Inherit it rather than adding another.
-                shm_tracker_push((absptr_t)res_voidstar, NULL);
+                shm_tracker_push((absptr_t)res_voidstar);
             }
         }
     }
@@ -3420,15 +3476,13 @@ static PyObject* pybinding__shinit(PyObject* self, PyObject* args) { MAYFAIL
     shm_t* shm = NULL;
     
     const char* shm_basename;
-    size_t volume_index;
     size_t shm_default_size;
 
-    PARSE_ARGS_OR_ABORT(args, "skk", &shm_basename, &volume_index, &shm_default_size);
+    PARSE_ARGS_OR_ABORT(args, "sk", &shm_basename, &shm_default_size);
 
     shm = PyTRY(
         shinit,
         shm_basename,
-        volume_index,
         shm_default_size
     );
 
@@ -3482,6 +3536,53 @@ error:
     return NULL;
 }
 
+// Order two values of one schema: -1, 0 or 1 (@eq, @le).
+static PyObject* pybinding__mlc_compare(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* a_obj;
+    PyObject* b_obj;
+    const char* schema_str;
+    Schema* schema = NULL;
+    void* va = NULL;
+    void* vb = NULL;
+    int order = 0;
+
+    PARSE_ARGS_OR_ABORT(args, "OOs", &a_obj, &b_obj, &schema_str);
+
+    schema = PyTRY(parse_schema, schema_str);
+
+    va = to_voidstar(schema, a_obj);
+    PyTRACE(va == NULL)
+    vb = to_voidstar(schema, b_obj);
+    PyTRACE(vb == NULL)
+
+    order = PyTRY(mlc_compare, va, vb, schema);
+
+    {
+        char* shfree_errmsg = NULL;
+        shfree(va, &shfree_errmsg);
+        free(shfree_errmsg);
+        shfree_errmsg = NULL;
+        shfree(vb, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return PyLong_FromLong(order);
+
+error:
+    if (va) {
+        char* shfree_errmsg = NULL;
+        shfree(va, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    if (vb) {
+        char* shfree_errmsg = NULL;
+        shfree(vb, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
 static PyObject* pybinding__mlc_hash(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* obj;
     const char* schema_str;
@@ -3519,44 +3620,6 @@ error:
     }
     free_schema(schema);
     FREE(hex)
-    return NULL;
-}
-
-static PyObject* pybinding__mlc_save(PyObject* self, PyObject* args) { MAYFAIL
-    PyObject* obj;
-    const char* schema_str;
-    long long level_ll;
-    const char* path;
-    Schema* schema = NULL;
-    void* voidstar = NULL;
-
-    // Args: (value, schema, level, path). The level is accepted for ABI
-    // uniformity with mlc_save_voidstar; the runtime range-checks it, but
-    // a msgpack file has no header to record it in.
-    PARSE_ARGS_OR_ABORT(args, "OsLs", &obj, &schema_str, &level_ll, &path);
-
-    schema = PyTRY(parse_schema, schema_str);
-
-    voidstar = to_voidstar(schema, obj);
-    PyTRACE(voidstar == NULL)
-
-    PyTRY(mlc_save, voidstar, schema, level_ll, path);
-
-    {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
-    Py_RETURN_NONE;
-
-error:
-    if (voidstar) {
-        char* shfree_errmsg = NULL;
-        shfree(voidstar, &shfree_errmsg);
-        free(shfree_errmsg);
-    }
-    free_schema(schema);
     return NULL;
 }
 
@@ -4145,7 +4208,7 @@ static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
     if (bytes < 0) { goto error; }
     voidstar = PyTRY(shmalloc, (size_t)bytes);
     void* cursor = (uint8_t*)voidstar + schema->width;
-    if (to_voidstar_inner(voidstar, &cursor, schema, value_obj) != 0) {
+    if (to_voidstar_inner(voidstar, &cursor, (uint8_t*)voidstar + bytes, schema, value_obj) != 0) {
         goto error;
     }
     {
@@ -4237,12 +4300,6 @@ error:
     return NULL;
 }
 
-// mlc_is_channel(handle) -> bool. A channel read or write may wait.
-static PyObject* pybinding__mlc_is_channel(PyObject* self, PyObject* args) {
-    long long handle_ll;
-    if (!PyArg_ParseTuple(args, "L", &handle_ll)) return NULL;
-    return PyBool_FromLong(mlc_is_channel((int64_t)handle_ll));
-}
 
 // mlc_settle(handle) -> None. Release the channel; raises the producer's
 // failure, unchanged, if a reader was handed it.
@@ -4539,7 +4596,6 @@ static PyMethodDef Methods[] = {
     {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
     {"bench_record", pybinding__bench_record, METH_VARARGS, "Record one benchmark timing via libmorloc"},
     {"pool_hash", pybinding__pool_hash, METH_NOARGS, "Return the pool's source fingerprint"},
-    {"cache_path", pybinding__cache_path, METH_VARARGS, "Resolve per-label cache directory"},
     {"cache_lookup", pybinding__cache_lookup, METH_VARARGS, "Cache lookup; returns bytes or None"},
     {"cache_store", pybinding__cache_store, METH_VARARGS, "Atomically store packet bytes in cache"},
     {"cache_key_compute", pybinding__cache_key_compute, METH_VARARGS, "Compute cache key from midx + per-arg bytes"},
@@ -4548,22 +4604,12 @@ static PyMethodDef Methods[] = {
     {"cache_record_store", pybinding__cache_record_store, METH_NOARGS, "Increment the cache store counter"},
     {"set_fallback_dir", pybinding__set_fallback_dir, METH_VARARGS, "Set fallback directory for file-backed shared memory"},
     {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
-    {"start_daemon", pybinding__start_daemon, METH_VARARGS, "Initialize the shared memory and socket for the python daemon"},
-    {"set_self_socket", pybinding__set_self_socket, METH_VARARGS, "Record the socket this pool serves"},
-    {"lifeline_adopt", pybinding__lifeline_adopt, METH_NOARGS, "The lifeline descriptor to watch for the nexus's end, or -1"},
-    {"lifeline_teardown", pybinding__lifeline_teardown, METH_NOARGS, "End this pool's process group after the nexus ended"},
-    {"thread_count", pybinding__thread_count, METH_NOARGS, "The number of threads in this process, or -1"},
-    {"held_references", pybinding__held_references, METH_NOARGS, "Shared-memory references this process holds"},
-    {"retire_blockers", pybinding__retire_blockers, METH_NOARGS, "Held references plus stream file locks"},
-    {"reclaim_leases", pybinding__reclaim_leases, METH_NOARGS, "Release leases of forked children that are gone"},
-    {"remove_own_temps", pybinding__remove_own_temps, METH_NOARGS, "Remove this process's temp directory"},
-    {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
-    {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
+    {"fork_generation", pybinding__fork_generation, METH_NOARGS, "This process's fork generation"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},
     {"send_reply", pybinding__send_reply, METH_VARARGS, "Send a dispatch's reply, releasing what the dispatch holds first"},
     // The name pools built by earlier compilers call.
-    {"send_packet_to_foreign_server", pybinding__send_reply, METH_VARARGS, "Same as send_reply"},
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
+    {"fork_pool_run", pybinding__fork_pool_run, METH_VARARGS, "Run this pool's coordinator and forked workers until the pool ends"},
     {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
     {"shm_live_bytes", pybinding__shm_live_bytes, METH_NOARGS, "Bytes of shared memory the program holds now (-1 unless MORLOC_SHM_STATS is set)"},
     {"shm_tracker_flush", pybinding__shm_tracker_flush, METH_NOARGS, "Free tracked SHM allocations from put_value calls"},
@@ -4573,7 +4619,6 @@ static PyMethodDef Methods[] = {
     {"debug_flush_dispatch", pybinding__debug_flush_dispatch, METH_NOARGS, "Reset per-dispatch debug state (recursion counters etc.)"},
     {"reclaim_stdio_after_dispatch", pybinding__reclaim_stdio_after_dispatch, METH_NOARGS, "Reclaim any stdio claim this dispatch left open"},
     {"foreign_call", pybinding__foreign_call, METH_VARARGS, "Send a call packet to a foreign pool"},
-    {"atomic_add_int", pybinding__atomic_add_int, METH_VARARGS, "Atomically add to a shared C int at an address"},
     {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},
     {"is_ping", pybinding__is_ping, METH_VARARGS, "Packet is a ping"},
@@ -4585,7 +4630,7 @@ static PyMethodDef Methods[] = {
     {"make_pipe_closed_packet", pybinding__make_pipe_closed_packet, METH_VARARGS, "Create a fail packet for a closed downstream pipe"},
     {"remote_call", pybinding__remote_call, METH_VARARGS, "Make a call to a remote cluster"},
     {"mlc_hash", pybinding__mlc_hash, METH_VARARGS, "Hash a value using xxhash"},
-    {"mlc_save", pybinding__mlc_save, METH_VARARGS, "Save a value to file in msgpack format"},
+    {"mlc_compare", pybinding__mlc_compare, METH_VARARGS, "Order two values of one schema"},
     {"mlc_save_voidstar", pybinding__mlc_save_voidstar, METH_VARARGS, "Save a value to file in flat voidstar binary format"},
     {"mlc_save_json", pybinding__mlc_save_json, METH_VARARGS, "Save a value to file in JSON format"},
     {"mlc_load", pybinding__mlc_load, METH_VARARGS, "Load a value from file"},
@@ -4610,7 +4655,6 @@ static PyMethodDef Methods[] = {
     {"mlc_concat", pybinding__mlc_concat, METH_VARARGS, "Concatenate stream files"},
     {"mlc_flush", pybinding__mlc_flush, METH_VARARGS, "Force OStream buffer to flush as a sub-packet"},
     {"mlc_open_channel", pybinding__mlc_open_channel, METH_VARARGS, "Open a channel for a streamed @parse argument"},
-    {"mlc_is_channel", pybinding__mlc_is_channel, METH_VARARGS, "Whether a handle is an open channel"},
     {"mlc_settle", pybinding__mlc_settle, METH_VARARGS, "Release a channel, raising the failure its reader saw"},
     {"mlc_spawn", pybinding__mlc_spawn, METH_VARARGS, "Start a producer on a channel without waiting for it"},
     {"mlc_tell", pybinding__mlc_tell, METH_NOARGS, "Elements written to @stdout so far"},

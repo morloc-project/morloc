@@ -268,6 +268,13 @@ data MorlocState = MorlocState
   -- | Answers of 'Infer.canHoldType', by (records must be declared, language,
   -- index, type).
   , stateHoldCache :: Map (Bool, Text, Int, Type) Bool
+  -- | The outermost term at which each undetermined type variable occurs,
+  -- where POLY-6 reports it.
+  , stateUndeterminedSites :: Map TVar Int
+  -- | Each tree left out of code generation because its type is not
+  -- concrete, by name: its index and type. A call that needs one reports
+  -- its undetermined variables (POLY-6).
+  , stateSkippedGeneric :: Map EVar (Int, Type)
   -- | Each staged closure value (by the index of its flat entry): its first
   -- stage point and the index of its stage entry.
   , stateStageEntries :: Map Int (Int, Int)
@@ -299,6 +306,16 @@ data MorlocState = MorlocState
   -- records no type of its own, and a closure capturing it still has to
   -- know what it holds.
   , stateManifoldEffects :: Map Int (Set.Set EffectLabel)
+  , stateDefinitionSite :: Map Int Int
+  -- ^ Signature index of a named term -> index of the declaration that
+  -- defines it, whose source position a failure's trace reports (DIAG-5).
+  , stateDebugCallee :: Map Int EVar
+  -- ^ Under @--debug@, a manifold that applies a sourced function -> that
+  -- function's name, which labels its trace frame. Only the debug trace
+  -- lookup reads it.
+  , stateNameSource :: Map Int Int
+  -- ^ An index minted during code generation and given a term's name ->
+  -- the index it took the name from.
   -- ^ Map from export manifold ID to its original return effect labels
   , stateProjectRoot :: Maybe Path
   -- ^ Project root directory (directory of the entry-point file)
@@ -370,6 +387,10 @@ data MorlocState = MorlocState
   -- identify a type: the inner @Box Int@ of a @Box (Box Int)@ is not the
   -- outer one, and leaving it opaque would say the value contains
   -- itself.
+  , stateVariantArgsResolving :: Set.Set (TVar, [TypeU])
+  -- ^ `data` type instantiations whose applied arguments are being resolved.
+  -- An argument that contains the instantiation itself, as in
+  -- @type X = Rose ?X@, meets it here.
   }
   deriving (Show)
 
@@ -458,7 +479,7 @@ data Config
 -- | The ecosystem (package database / index) a dependency is drawn from. This
 -- names WHERE a package comes from, never the tool that fetches it: 'SrcConda'
 -- (the conda package database), 'SrcPypi' (PyPI), 'SrcCran'/'SrcBioconductor'
--- (R registries), 'SrcCrates' (crates.io), 'SrcPkg' (Julia's General registry).
+-- (R registries), 'SrcCrates' (crates.io).
 -- A module declaring its sources is self-describing: the meaning of a name does
 -- not depend on which channels the builder happens to provide.
 data DepSource
@@ -467,7 +488,6 @@ data DepSource
   | SrcCran
   | SrcBioconductor
   | SrcCrates
-  | SrcPkg
   deriving (Show, Eq, Ord)
 
 -- | Which registry a dependency is drawn from, carrying only the fields that are
@@ -480,7 +500,6 @@ data RegDep
   = RegConda !(Maybe Text)   -- optional channel; Nothing means conda-forge
   | RegPypi
   | RegCrates
-  | RegPkg
   | RegCran
   | RegBioconductor
   | RegDefault
@@ -510,7 +529,6 @@ dsSource ds = case dsReg ds of
   RegConda _ -> Just SrcConda
   RegPypi -> Just SrcPypi
   RegCrates -> Just SrcCrates
-  RegPkg -> Just SrcPkg
   RegCran -> Just SrcCran
   RegBioconductor -> Just SrcBioconductor
   RegDefault -> Nothing
@@ -533,7 +551,6 @@ parseDepSource "pypi" = Just SrcPypi
 parseDepSource "cran" = Just SrcCran
 parseDepSource "bioconductor" = Just SrcBioconductor
 parseDepSource "crates" = Just SrcCrates
-parseDepSource "pkg" = Just SrcPkg
 parseDepSource _ = Nothing
 
 -- | Canonical name for a source (the inverse of 'parseDepSource'): the string
@@ -544,7 +561,6 @@ depSourceText SrcPypi = "pypi"
 depSourceText SrcCran = "cran"
 depSourceText SrcBioconductor = "bioconductor"
 depSourceText SrcCrates = "crates"
-depSourceText SrcPkg = "pkg"
 
 -- | A language's dependency-source policy: the sources honored today, sources
 -- recognized but not yet wired up, and the source assumed when the author omits
@@ -566,7 +582,6 @@ depPolicy "py" = LangDepPolicy [SrcConda, SrcPypi] [] Nothing True
 depPolicy "r" = LangDepPolicy [SrcConda] [SrcCran, SrcBioconductor] (Just SrcConda) False
 depPolicy "cpp" = LangDepPolicy [SrcConda] [] (Just SrcConda) False
 depPolicy "rust" = LangDepPolicy [SrcCrates] [] (Just SrcCrates) True
-depPolicy "julia" = LangDepPolicy [SrcPkg] [] (Just SrcPkg) False
 depPolicy _ = LangDepPolicy [SrcConda] [] (Just SrcConda) False
 
 -- | The source assumed for a language's dependency when none is declared.
@@ -576,7 +591,7 @@ defaultDepSource = ldpDefault . depPolicy
 -- | The languages with an explicit dependency policy, in display order. The
 -- capability table ('renderDepCapabilities') iterates these.
 knownDepLangs :: [Text]
-knownDepLangs = ["py", "r", "cpp", "rust", "julia"]
+knownDepLangs = ["py", "r", "cpp", "rust"]
 
 -- | Render the per-language dependency-capability table as plain lines, DERIVED
 -- entirely from 'depPolicy' (the single source of truth) so an advertised table
@@ -647,7 +662,6 @@ regOfSource :: DepSource -> RegDep
 regOfSource SrcConda = RegConda Nothing
 regOfSource SrcPypi = RegPypi
 regOfSource SrcCrates = RegCrates
-regOfSource SrcPkg = RegPkg
 regOfSource SrcCran = RegCran
 regOfSource SrcBioconductor = RegBioconductor
 
@@ -666,22 +680,32 @@ instance FromJSON LocalDep where
 --   * R: defaults to conda (the @r-@ feedstock); @cran@/@bioconductor@ are not
 --     yet supported (the R pool installs only through conda).
 --   * C++: conda only.
---   * Rust: crates.io only.  * Julia: the General registry only.
+--   * Rust: crates.io only.
 --   * @channel@ is conda-only: it may not accompany a non-conda source, and a
 --     conda-forge R name must be a bare CRAN name (no @r-@ prefix).
 checkPackageDeps :: PackageMeta -> Either Text ()
 checkPackageDeps pm =
-  mapM_ checkGroup groups >> mapM_ checkLocalGroup (Map.toList (packageLocalDeps pm))
+  mapM_ checkGroup groups
+    >> mapM_ checkTool (Map.toList (packageToolDeps pm))
+    >> mapM_ checkLocalGroup (Map.toList (packageLocalDeps pm))
   where
     groups =
       [ ("py", packagePyDeps pm)
       , ("r", packageRDeps pm)
       , ("cpp", packageCppDeps pm)
       , ("rust", packageRustDeps pm)
-      , ("julia", packageJuliaDeps pm)
       ]
 
     checkGroup (lang, m) = mapM_ (checkDep lang) (Map.toList m)
+
+    -- A tool is a conda package, whatever source the language groups allow.
+    checkTool (name, ds) = case dsReg ds of
+      RegDefault -> Right ()
+      RegConda _ -> Right ()
+      _ ->
+        Left $
+          "tool dependency '" <> name <> "' must be a conda package (tool-deps "
+            <> "take a version and optionally a conda channel)"
 
     checkDep lang (name, ds) = do
       _ <- resolveSource lang name ds
@@ -797,9 +821,9 @@ data PackageMeta
   -- | External C++ libraries (name -> 'DepSpec') needed by the C++ pool; the
   -- structured, version-managed successor to 'packageDependencies'.
   , packageCppDeps :: Map Text DepSpec
-  -- | External Julia packages (name -> 'DepSpec') needed by the Julia pool
-  -- (resolved by Pkg.jl).
-  , packageJuliaDeps :: Map Text DepSpec
+  -- | Conda packages (name -> 'DepSpec') whose executables the module runs as
+  -- programs, whatever its pools' languages. Propagates transitively.
+  , packageToolDeps :: Map Text DepSpec
   -- | Local (filesystem-path) dependencies, grouped by language
   -- (lang -> name -> 'LocalDep'). Non-portable until frozen; honored only from
   -- the root/entry module. Supported languages: py, rust (see 'ldpLocalInstall').
@@ -876,6 +900,8 @@ data Gamma = Gamma
   , gammaSolved :: Map TVar TypeU
   -- | Nat constraints that could not be solved (deferred)
   , gammaDeferred :: [(TypeU, TypeU)]
+  -- | The term at which each deferred constraint arose, for its report.
+  , gammaDeferredAt :: Map (TypeU, TypeU) Int
   -- | Solutions for kind-tagged variables (KVarU / NatVarU / StrVarU /
   -- RecVarU / ListVarU / SetVarU) from the per-kind constraint solvers.
   -- Keyed on (TVar, Kind) so all five previously-parallel gammaXSubs
@@ -909,6 +935,9 @@ data Gamma = Gamma
   -- distinguishes "outermost-not-seen-yet" from "outermost-seen-with-
   -- empty-econs", which a plain list cannot.
   , gammaAssumedConstraints :: Maybe [Constraint]
+  -- | Pairs assumed while their alias unfoldings are compared; see
+  -- 'Morloc.Typecheck.Internal.viaUnfold'.
+  , gammaUnfolded :: Set.Set (TypeU, TypeU)
   -- | Known constant values for let-bound variables (for nat label resolution).
   -- Tracks integers, tuples, and records so accessors like .0 can be evaluated.
   , gammaIntVals :: Map EVar ConstVal
@@ -1046,6 +1075,8 @@ instance Defaultable MorlocState where
       , stateWhereOwner = Map.empty
       , stateConstantOrigin = Map.empty
       , stateHoldCache = Map.empty
+      , stateUndeterminedSites = Map.empty
+      , stateSkippedGeneric = Map.empty
       , stateStageEntries = Map.empty
       , stateStageContext = Map.empty
       , stateRecStages = Map.empty
@@ -1055,6 +1086,9 @@ instance Defaultable MorlocState where
       , stateHostOriginClosures = Set.empty
       , stateArgTypes = Map.empty
       , stateManifoldEffects = Map.empty
+      , stateDefinitionSite = Map.empty
+      , stateNameSource = Map.empty
+      , stateDebugCallee = Map.empty
       , stateProjectRoot = Nothing
       , stateEnvSpecLangs = []
       , stateEvalMode = False
@@ -1070,6 +1104,7 @@ instance Defaultable MorlocState where
       , stateModuleDoc = []
       , stateModuleEpilogues = []
       , stateVariantAncestors = Set.empty
+      , stateVariantArgsResolving = Set.empty
       }
 
 instance Defaultable PackageMeta where
@@ -1093,7 +1128,7 @@ instance Defaultable PackageMeta where
       , packagePyDeps = Map.empty
       , packageRDeps = Map.empty
       , packageCppDeps = Map.empty
-      , packageJuliaDeps = Map.empty
+      , packageToolDeps = Map.empty
       , packageLocalDeps = Map.empty
       , packageLangVersions = Map.empty
       , packageInclude = Nothing
@@ -1153,7 +1188,7 @@ instance FromJSON PackageMeta where
       <*> o .:? "py-deps" .!= Map.empty
       <*> o .:? "r-deps" .!= Map.empty
       <*> o .:? "cpp-deps" .!= Map.empty
-      <*> o .:? "julia-deps" .!= Map.empty
+      <*> o .:? "tool-deps" .!= Map.empty
       <*> o .:? "local-deps" .!= Map.empty
       <*> o .:? "lang-versions" .!= Map.empty
       <*> o .:? "include"

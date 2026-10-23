@@ -127,6 +127,8 @@ copyState oldIdx newIdx = do
       , stateWhereOwner = stateWhereOwner s
       , stateConstantOrigin = updateMap (stateConstantOrigin s)
       , stateHoldCache = stateHoldCache s
+      , stateUndeterminedSites = stateUndeterminedSites s
+      , stateSkippedGeneric = stateSkippedGeneric s
       , stateStageEntries = stateStageEntries s
       , stateStageContext = stateStageContext s
       , stateRecStages = stateRecStages s
@@ -136,6 +138,9 @@ copyState oldIdx newIdx = do
       , stateHostOriginClosures = stateHostOriginClosures s
       , stateArgTypes = stateArgTypes s
       , stateManifoldEffects = stateManifoldEffects s
+      , stateDefinitionSite = stateDefinitionSite s
+      , stateNameSource = stateNameSource s
+      , stateDebugCallee = stateDebugCallee s
       , stateProjectRoot = stateProjectRoot s
       , stateEnvSpecLangs = stateEnvSpecLangs s
       , stateEvalMode = stateEvalMode s
@@ -151,6 +156,7 @@ copyState oldIdx newIdx = do
       , stateModuleDoc = stateModuleDoc s
       , stateModuleEpilogues = stateModuleEpilogues s
       , stateVariantAncestors = stateVariantAncestors s
+      , stateVariantArgsResolving = stateVariantArgsResolving s
       }
   where
     updateGMap g = case GMap.yIsX oldIdx newIdx g of

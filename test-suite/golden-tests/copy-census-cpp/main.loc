@@ -1,0 +1,523 @@
+-- Copy census for generated C++: how many payload lists each shape copies.
+-- A payload from `mkL k` is a list of 20000 + k ints, so `keyL` reads which
+-- payload arrived and every allocation of 64 KiB or more that `mkL` did not
+-- make is a copy of one. Each export prints its result and the copies made
+-- in the run, so a wrong value and a changed copy count both fail. The
+-- counts are a baseline, not a target: a count that drops is progress and
+-- its line in exp.txt is updated with it. `Chain` arms are shared boxes, so
+-- only the lists inside them are counted. Building a chain with `build`
+-- copies each payload once and walking it with `sumKeys` once more (the two
+-- base exports), and the shapes that use them include those copies.
+-- Shapes and their analysis:
+-- model/compiler/issues/codegen-copies.md and codegen-ownership.md; timings
+-- in model/performance/copies.md.
+--
+--   baseBuild baseWalk         a chain built, a chain built and walked
+--   nestedOut nestedLoop nestedLoop2  nested constructor pattern, once and in loops
+--   tagNested tagField         tag test on a nested field, on a record field
+--   fieldArg fieldArgM fieldRet  record field to a by-ref source, to a manifold, returned
+--   tupleArg                   tuple projection to a by-ref source
+--   listPat listRet listLit listRecords  list pattern, element returned, literals
+--   listLoop listStep          list pattern on a carried list, in a loop step
+--   twiceRead twiceLet twiceKeep useAndKeep  one value used twice in one step
+--   twoSteps                   one value used in two steps
+--   partsBorrowed partsFresh   constructor built from the parts of another
+--   setter setterFn            record setter, inline and in a function
+--   tlOnce                     function returning the tail of its argument
+--   tlLoopRead tlLoopKeep tlLoopBuilt tlLoopInline  loops stepped by tl
+--   closureRead closureFn closureRef closureDo  lambdas and do-blocks capturing a list
+--   papRead papHof             partial application capturing a list
+--   letOnce letKeep letSource  let-bound value read once
+--   matchCond matchCondFresh matchRec matchUnwrap matchTry  match and conditional results
+--   throughTwo throughLoop     value kept through a chain of calls
+--   loopFresh loopGrow loopCarried loopField loopTuple tupleStep  carried loop values
+--   loopLet loopLetTwice loopLetAlias  a let passed on to the next iteration, alone,
+--                              read again in the step, read through a reference
+--   nonTail                    non-tail recursion rebuilding a chain
+--   guardLoop guardKeep        guarded arms projecting the subject
+--   mixedLoop                  loop step with a borrowing and a moving read
+--   matchedTwice               one value matched twice
+--   twoLets                    one value kept by two lets in turn
+--   aliasKeep                  a value kept while a reference into it is still read
+module main
+  ( baseBuild, baseWalk, nestedOut, nestedLoop, nestedLoop2, tagNested, tagField
+  , fieldArg, fieldArgM, fieldRet, tupleArg
+  , listPat, listRet, listLit, listRecords, listLoop, listStep
+  , twiceRead, twiceLet, twiceKeep, useAndKeep, twoSteps
+  , partsBorrowed, partsFresh, setter, setterFn
+  , tlOnce, tlLoopRead, tlLoopKeep, tlLoopBuilt, tlLoopInline
+  , closureRead, closureFn, closureRef, closureDo, papRead, papHof
+  , letOnce, letKeep, letSource
+  , matchCond, matchCondFresh, matchRec, matchUnwrap, matchTry
+  , throughTwo, throughLoop
+  , loopFresh, loopGrow, loopCarried, loopField, loopTuple, tupleStep, loopLet, loopLetTwice, loopLetAlias
+  , nonTail, guardLoop, guardKeep, mixedLoop, matchedTwice, twoLets, aliasKeep
+  )
+
+import root
+import root-cpp
+
+source Cpp from "counted.hpp"
+  ("mkL", "grow", "keyL", "keyV", "applyF", "applyR", "census")
+
+mkL :: Int -> [Int]
+grow :: [Int] -> Int -> [Int]
+keyL :: [Int] -> Int
+keyV :: [Int] -> Int
+applyF :: (Int -> Int) -> Int -> Int
+applyR :: (Int -> Int) -> Int -> Int
+census :: Int -> (Int, Int)
+
+data Chain = End | Link [Int] Chain
+
+data Res = Bad Str | Good [Int]
+
+record R where
+  xs :: [Int]
+  k :: Int
+record Cpp => R = "struct"
+
+record B where
+  ch :: Chain
+  w :: Int
+record Cpp => B = "struct"
+
+build :: Int -> Chain -> Chain
+build k acc
+  ? k == 0 = acc
+  : build (k - 1) (Link (mkL k) acc)
+
+sumKeys :: Int -> Chain -> Int
+sumKeys acc c = match c
+  | End = acc
+  | (Link ys rest) = sumKeys (acc + keyL ys) rest
+
+firstKey :: Chain -> Int
+firstKey c = match c
+  | (Link ys _) = keyL ys
+  | End = 0
+
+isEnd :: Chain -> Int
+isEnd c = match c
+  | End = 1
+  | _ = 0
+
+baseBuild :: Int -> (Int, Int)
+baseBuild n = census (isEnd (build n End))
+
+baseWalk :: Int -> (Int, Int)
+baseWalk n = census (sumKeys 0 (build n End))
+
+mkR :: Int -> R
+mkR m = {xs = mkL m, k = 1}
+
+keyK :: R -> Int
+keyK r = 10 * keyL (.xs r) + .k r
+
+second :: Chain -> Int
+second c = match c
+  | (Link _ (Link ys _)) = keyL ys
+  | _ = 0
+
+nestedOut :: Int -> (Int, Int)
+nestedOut n = census (second (build n End))
+
+skip2 :: Int -> Chain -> Int
+skip2 acc c = match c
+  | (Link _ (Link ys rest)) = skip2 (acc + keyL ys) rest
+  | _ = acc
+
+nestedLoop :: Int -> (Int, Int)
+nestedLoop n = census (skip2 0 (build n End))
+
+firstTwo :: Int -> Chain -> Int
+firstTwo acc c = match c
+  | (Link a (Link b rest)) = firstTwo (acc + keyL a + keyL b) rest
+  | _ = acc
+
+nestedLoop2 :: Int -> (Int, Int)
+nestedLoop2 n = census (firstTwo 0 (build n End))
+
+isDeep :: Chain -> Int
+isDeep c = match c
+  | (Link _ (Link _ _)) = 1
+  | _ = 0
+
+tagNested :: Int -> (Int, Int)
+tagNested n = census (isDeep (build n End))
+
+fieldTag :: B -> Int
+fieldTag b = match (.ch b)
+  | End = 0
+  | (Link ys _) = keyL ys
+
+tagField :: Int -> (Int, Int)
+tagField n = census (fieldTag {ch = build n End, w = 1})
+
+useR :: R -> Int
+useR r = keyL (.xs r)
+
+fieldArg :: Int -> (Int, Int)
+fieldArg n = census (useR (mkR n))
+
+twice :: [Int] -> Int
+twice ys = keyL ys + keyL ys
+
+useRM :: R -> Int
+useRM r = twice (.xs r)
+
+fieldArgM :: Int -> (Int, Int)
+fieldArgM n = census (useRM (mkR n))
+
+rp :: R -> [Int]
+rp r = .xs r
+
+fieldRet :: Int -> (Int, Int)
+fieldRet n = census (keyL (rp (mkR n)))
+
+tp :: ([Int], Int) -> Int
+tp t = keyL (.0 t) + .1 t
+
+tupleArg :: Int -> (Int, Int)
+tupleArg n = census (tp (mkL n, n))
+
+lp :: [[Int]] -> Int
+lp | [a, b] = 10 * keyL a + keyL b
+   | _ = 0
+
+listPat :: Int -> (Int, Int)
+listPat n = census (lp [mkL n, mkL (n + 1)])
+
+firstOf :: [[Int]] -> [Int]
+firstOf xss = match xss
+  | [x, _] = x
+  | _ = mkL 0
+
+listRet :: Int -> (Int, Int)
+listRet n = census (keyL (firstOf [mkL n, mkL (n + 1)]))
+
+listLit :: Int -> (Int, Int)
+listLit n = census (length [mkL n, mkL n])
+
+sumR :: [R] -> Int
+sumR | [a, b] = keyK a + keyK b
+     | _ = 0
+
+listRecords :: Int -> (Int, Int)
+listRecords n = census (sumR [{xs = mkL n, k = 1}, {xs = mkL n, k = 2}])
+
+lpLoop :: Int -> [[Int]] -> Int -> Int
+lpLoop k xss acc
+  ? k == 0 = acc
+  : lpLoop (k - 1) xss (acc + (match xss | [a, b] = 10 * keyL a + keyL b | _ = 0))
+
+listLoop :: Int -> (Int, Int)
+listLoop n = census (lpLoop n [mkL 1, mkL 2] 0)
+
+walkLL :: [[Int]] -> Int -> Int
+walkLL xss acc = match xss
+  | [a, b] = acc + 10 * keyL a + keyL b
+  | _ = acc
+
+listStep :: Int -> (Int, Int)
+listStep n = census (walkLL [mkL 1, mkL n] 0)
+
+twiceRead :: Int -> (Int, Int)
+twiceRead n = census (twice (mkL n))
+
+twiceLet :: Int -> (Int, Int)
+twiceLet n = census (let ys = mkL n in keyL ys + keyL ys)
+
+twiceKeep :: Int -> (Int, Int)
+twiceKeep n = census (firstKey (Link ys End) + firstKey (Link ys End))
+  where
+    ys = mkL n
+
+useAndKeep :: Int -> (Int, Int)
+useAndKeep n = census (let ys = mkL n in keyL ys + keyL (match (Link ys End) | (Link zs _) = zs | End = ys))
+
+twoSteps :: Int -> (Int, Int)
+twoSteps n = census (let ys = mkL n in let a = keyL ys in a + firstKey (Link ys End))
+
+rebuild :: Chain -> Chain
+rebuild c = match c
+  | End = End
+  | (Link x rest) = Link x rest
+
+partsBorrowed :: Int -> (Int, Int)
+partsBorrowed n = census (sumKeys 0 (rebuild (build n End)))
+
+partsFresh :: Int -> (Int, Int)
+partsFresh n = census (sumKeys 0 (rebuild (Link (mkL 5) (build n End))))
+
+setter :: Int -> (Int, Int)
+setter n = census (keyK (.(.k = 2) (mkR n)))
+
+setK :: R -> R
+setK r = .(.k = 2) r
+
+setterFn :: Int -> (Int, Int)
+setterFn n = census (keyK (setK (mkR n)))
+
+tl :: Chain -> Chain
+tl c = match c
+  | End = c
+  | (Link _ rest) = rest
+
+tlOnce :: Int -> (Int, Int)
+tlOnce n = census (sumKeys 0 (tl (build n End)))
+
+lenAfter :: Int -> Chain -> Int
+lenAfter k c
+  ? k == 0 = sumKeys 0 c
+  : lenAfter (k - 1) (tl c)
+
+tlLoopRead :: Int -> (Int, Int)
+tlLoopRead n = census (lenAfter 3 (build n End))
+
+dropN :: Int -> Chain -> Chain
+dropN k c
+  ? k == 0 = c
+  : dropN (k - 1) (tl c)
+
+tlLoopKeep :: Int -> (Int, Int)
+tlLoopKeep n = census (sumKeys 0 (dropN 3 (build n End)))
+
+dropB :: Int -> Chain -> Int
+dropB k c
+  ? k == 0 = sumKeys 0 c
+  : ? k == 2 = dropB (k - 1) (Link (mkL 0) c)
+  : dropB (k - 1) (tl c)
+
+tlLoopBuilt :: Int -> (Int, Int)
+tlLoopBuilt n = census (dropB 4 (build n End))
+
+firstLen :: Int -> Chain -> Int
+firstLen k c
+  ? k == 0 = (match c | (Link ys _) = keyL ys | End = 0)
+  : firstLen (k - 1) (match c | (Link _ rest) = rest | End = c)
+
+tlLoopInline :: Int -> (Int, Int)
+tlLoopInline n = census (firstLen 2 (build n End))
+
+capt :: [Int] -> [Int] -> [Int]
+capt ys ns = map (\j -> j + keyL ys) ns
+
+closureRead :: Int -> (Int, Int)
+closureRead n = census (sum (capt (mkL n) [1, 2, 3]))
+
+closureFn :: Int -> (Int, Int)
+closureFn n = census (let ys = mkL n in applyF (\x -> x + keyL ys) n)
+
+closureRef :: Int -> (Int, Int)
+closureRef n = census (let ys = mkL n in applyR (\x -> x + keyL ys) n)
+
+closureDo :: Int -> <IO> (Int, Int)
+closureDo n = do
+  let ys = mkL n
+  m <- (do keyL ys)
+  census (m + n)
+
+lenPlus :: [Int] -> Int -> Int
+lenPlus ys j = j + keyL ys
+
+papRead :: Int -> (Int, Int)
+papRead n = census (sum (map (lenPlus ys) [1, 2, 3]))
+  where
+    ys = mkL n
+
+applyBoth :: ([Int] -> Int -> Int) -> [Int] -> Int
+applyBoth f ys = sum (map (f ys) [1, 2])
+
+papHof :: Int -> (Int, Int)
+papHof n = census (applyBoth lenPlus (mkL n))
+
+letOnce :: Int -> (Int, Int)
+letOnce n = census (let ys = mkL n in keyL ys)
+
+letKeep :: Int -> (Int, Int)
+letKeep n = census (firstKey (let ys = mkL n in Link ys End))
+
+letSource :: Int -> (Int, Int)
+letSource n = census (let ys = mkL n in keyV ys)
+
+pick :: Int -> [Int] -> [Int] -> [Int]
+pick j a b
+  ? j > 0 = a
+  : b
+
+matchCond :: Int -> (Int, Int)
+matchCond n = census (keyL (pick 1 (mkL n) (mkL (n + 1))))
+
+pickF :: Int -> Int -> [Int]
+pickF j m
+  ? j > 0 = mkL m
+  : mkL (m + 1)
+
+matchCondFresh :: Int -> (Int, Int)
+matchCondFresh n = census (keyL (pickF 1 n))
+
+pickR :: Int -> [Int] -> [Int] -> [Int]
+pickR j a b
+  ? j == 0 = a
+  : ? j == 1 = b
+  : pickR (j - 2) a b
+
+matchRec :: Int -> (Int, Int)
+matchRec n = census (keyL (pickR n (mkL n) (mkL (n + 1))))
+
+unwrap :: Res -> [Int]
+unwrap r = match r
+  | (Good ys) = ys
+  | (Bad _) = mkL 0
+
+matchUnwrap :: Int -> (Int, Int)
+matchUnwrap n = census (keyL (unwrap (Good (mkL n))))
+
+matchTry :: Int -> (Int, Int)
+matchTry n = census (match (@try (mkL n))
+  | (Ok v) = keyL v
+  | (Err _) = 0)
+
+gee :: [Int] -> Chain
+gee ys = Link ys End
+
+eff :: [Int] -> Chain
+eff ys = gee ys
+
+throughTwo :: Int -> (Int, Int)
+throughTwo n = census (firstKey (eff (mkL n)))
+
+keepN :: Int -> [Int] -> [Int]
+keepN k ys
+  ? k == 0 = ys
+  : keepN (k - 1) ys
+
+effL :: [Int] -> [Int]
+effL ys = keepN 3 ys
+
+throughLoop :: Int -> (Int, Int)
+throughLoop n = census (keyL (effL (mkL n)))
+
+accL :: Int -> [Int] -> [Int]
+accL k acc
+  ? k == 0 = acc
+  : accL (k - 1) (mkL k)
+
+loopFresh :: Int -> (Int, Int)
+loopFresh n = census (keyL (accL n (mkL 0)))
+
+growL :: Int -> [Int] -> [Int]
+growL k acc
+  ? k == 0 = acc
+  : growL (k - 1) (grow acc k)
+
+loopGrow :: Int -> (Int, Int)
+loopGrow n = census (keyL (growL n (mkL 0)))
+
+sumWith :: [Int] -> Int -> Int -> Int
+sumWith ys k acc
+  ? k == 0 = acc
+  : sumWith ys (k - 1) (acc + keyL ys)
+
+loopCarried :: Int -> (Int, Int)
+loopCarried n = census (sumWith (mkL 3) n 0)
+
+recLoop :: R -> Int -> Int -> Int
+recLoop r k acc
+  ? k == 0 = acc
+  : recLoop r (k - 1) (acc + keyL (.xs r))
+
+loopField :: Int -> (Int, Int)
+loopField n = census (recLoop (mkR 3) n 0)
+
+tupLoop :: ([Int], Int) -> Int -> Int -> Int
+tupLoop t k acc
+  ? k == 0 = acc
+  : tupLoop t (k - 1) (acc + keyL (.0 t))
+
+loopTuple :: Int -> (Int, Int)
+loopTuple n = census (tupLoop (mkL 3, 1) n 0)
+
+tupStep :: Int -> ([Int], Int) -> Int
+tupStep k t
+  ? k == 0 = keyL (.0 t) + .1 t
+  : tupStep (k - 1) (.0 t, k)
+
+tupleStep :: Int -> (Int, Int)
+tupleStep n = census (tupStep n (mkL 3, 0))
+
+letStep :: Int -> [Int] -> Int -> Int
+letStep k acc s
+  ? k == 0 = s + keyL acc
+  : (let ys = grow acc k in let a = keyL ys in letStep (k - 1) ys (s + a))
+
+loopLet :: Int -> (Int, Int)
+loopLet n = census (letStep n (mkL 0) 0)
+
+twiceStep :: Int -> [Int] -> Int -> Int
+twiceStep k acc s
+  ? k == 0 = s + keyL acc
+  : (let ys = grow acc k in twiceStep (k - 1) ys (s + keyL ys))
+
+loopLetTwice :: Int -> (Int, Int)
+loopLetTwice n = census (twiceStep n (mkL 0) 0)
+
+aliasStep :: Int -> ([Int], Int) -> Int -> Int
+aliasStep k t s
+  ? k == 0 = s + keyL (.0 t)
+  : (let u = (grow (.0 t) k, k) in let ys = .0 u in aliasStep (k - 1) u (s + keyL ys))
+
+loopLetAlias :: Int -> (Int, Int)
+loopLetAlias n = census (aliasStep n (mkL 0, 0) 0)
+
+mapC :: Chain -> Chain
+mapC c = match c
+  | End = End
+  | (Link x rest) = Link x (mapC rest)
+
+nonTail :: Int -> (Int, Int)
+nonTail n = census (sumKeys 0 (mapC (build n End)))
+
+walk :: Int -> Chain -> Int
+walk acc c = match c
+  | (Link ys rest) ? keyL ys > 2 = walk (acc + 100) rest : walk (acc + keyL ys) rest
+  | End = acc
+
+guardLoop :: Int -> (Int, Int)
+guardLoop n = census (walk 0 (build n End))
+
+keep :: Res -> [Int]
+keep r = match r
+  | (Good ys) ? keyL ys > 2 = ys : mkL 0
+  | _ = mkL 1
+
+guardKeep :: Int -> (Int, Int)
+guardKeep n = census (keyL (keep (Good (mkL n))))
+
+eat :: Int -> Chain -> Int
+eat acc c = match c
+  | (Link ys rest) ? keyL ys > 2 = eat (acc + sumKeys 0 rest) (Link (mkL 0) rest) : eat (acc + keyL ys) rest
+  | End = acc
+
+mixedLoop :: Int -> (Int, Int)
+mixedLoop n = census (eat 0 (build n End))
+
+matchedTwice :: Int -> (Int, Int)
+matchedTwice n = census (let r = Good (mkL n) in (match r | (Good c) = keyL c | (Bad _) = 0) + (match r | (Good d) = keyL d | (Bad _) = 0))
+
+--' Two chains built from one payload in two lets, then the copies
+twoLets :: Int -> (Int, Int)
+twoLets n = census (
+  let ys = mkL n
+  in let a = Link ys End
+  in let b = Link ys End
+  in sumKeys 0 a + sumKeys 0 b)
+
+--' A tuple's first part read after the tuple is put into another, then the copies
+aliasKeep :: Int -> (Int, Int)
+aliasKeep n = census (
+  let t = (mkL n, 1)
+  in let ys = .0 t
+  in let u = (t, 2)
+  in keyL ys + .1 u)

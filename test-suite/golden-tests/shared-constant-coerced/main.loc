@@ -1,0 +1,56 @@
+-- A shared value converted to an optional at some of its uses.
+--
+-- `expected` reads no parameters, so it is evaluated once per command and
+-- bound where its copies meet. A use checked against `?Int` is wrapped in a
+-- conversion; the wrapped copy is still a copy of `expected`, and the
+-- binding must enclose it, whichever arguments are converted.
+
+module main (both, firstOnly, secondOnly, mixedCount, whereH)
+
+import root-py
+
+source Py from "helpers.py" ("tick", "ticks")
+tick :: Int -> Int
+ticks :: a -> Int
+
+bothF :: ?Int -> ?Int -> Bool
+bothF x y = True
+
+firstF :: ?Int -> Int -> Bool
+firstF x y = True
+
+secondF :: Int -> ?Int -> Bool
+secondF x y = True
+
+both :: Bool
+both = bothF expected expected
+  where
+    expected = 3 + 4
+
+firstOnly :: Bool
+firstOnly = firstF expected expected
+  where
+    expected = 3 + 4
+
+secondOnly :: Bool
+secondOnly = secondF expected expected
+  where
+    expected = 3 + 4
+
+mixedCount :: Int
+mixedCount = ticks (firstF expected expected)
+  where
+    expected = tick 7
+
+data H = L Int
+
+wrap :: Int -> ?H
+wrap s = L s
+
+same :: a -> a -> Bool
+same x y = True
+
+whereH :: Bool
+whereH = same (wrap 7) expected && same (wrap 8) expected
+  where
+    expected = L 7

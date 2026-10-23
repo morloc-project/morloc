@@ -1,0 +1,17 @@
+-- CPP-6: a mapped record whose recursive field is not const is rejected (see ok.loc).
+module badrec (bad)
+
+import root
+import root-cpp
+
+source Cpp from "bad-rec.hpp" ("mk", "nodeLen")
+
+mk :: Int -> [Int]
+record Node where
+  head :: Int
+  tail :: ?Node
+record Cpp => Node = "node_t"
+nodeLen :: Node -> Int
+
+bad :: Int -> Int
+bad n = nodeLen {head = n, tail = {head = n, tail = Null}}

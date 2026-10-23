@@ -8,12 +8,6 @@ use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 
 // ── C types from call.h ──────────────────────────────────────────────────────
 
-#[repr(C)]
-pub struct ClientList {
-    pub fd: i32,
-    pub next: *mut ClientList,
-}
-
 // Mirrors C `language_daemon_t` in morloc.h; layout must stay in sync.
 #[repr(C)]
 pub struct LanguageDaemon {
@@ -23,10 +17,12 @@ pub struct LanguageDaemon {
     pub shm: *mut crate::shm::ShmHeader,
     pub shm_default_size: usize,
     pub server_fd: i32,
-    pub client_fds: *mut ClientList,
+    /// The socket file this pool bound, as (device, inode); (0, 0) if unknown.
+    pub socket_dev: u64,
+    pub socket_ino: u64,
+    /// Holds that file so its inode number cannot be reused (-1 if none).
+    pub socket_hold: i32,
 }
-
-const BUFFER_SIZE: usize = 65536;
 
 // Whether the accept loop still peeks each new connection for a readiness ping.
 // True until the first non-ping request is seen (readiness pings precede all
@@ -72,13 +68,23 @@ unsafe fn poll_wait(
     libc::poll(fds, nfds, timeout_ms)
 }
 
-// Ceiling on a single zero-progress wait for socket writability in send_all.
-// A reader that drains at all wakes the POLLOUT poll immediately and resets
-// this window (it bounds only a fully-stalled peer), so a large legitimate send
-// to a slow-but-progressing reader is never cut off; a peer that accepts zero
-// bytes for this long is treated as hung and the send fails instead of blocking
-// the caller (and, for a pool worker, its thread) forever.
+// Ceiling on a zero-progress wait for socket writability in send_all, for a
+// peer that cannot be named (a remote client, or a process in another pid
+// namespace). A reader that drains at all resets the window.
 const SEND_STALL_TIMEOUT_MS: i64 = 120_000;
+
+#[cfg(test)]
+thread_local! {
+    static SEND_STALL_LIMIT: std::cell::Cell<Option<std::time::Duration>> = const { std::cell::Cell::new(None) };
+}
+
+fn send_stall_limit() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(d) = SEND_STALL_LIMIT.with(|l| l.get()) {
+        return d;
+    }
+    std::time::Duration::from_millis(SEND_STALL_TIMEOUT_MS as u64)
+}
 
 // Send an entire buffer over a (possibly non-blocking) socket, polling for
 // writability on EAGAIN/EWOULDBLOCK rather than treating it as failure.
@@ -91,54 +97,91 @@ const SEND_STALL_TIMEOUT_MS: i64 = 120_000;
 // retries on EAGAIN; this mirrors it for the send side. Returns true only when
 // every byte was sent, false on a closed/hung peer.
 pub(crate) unsafe fn send_all(fd: i32, buf: *const u8, len: usize) -> bool {
+    let mut parts = [libc::iovec { iov_base: buf as *mut c_void, iov_len: len }];
+    send_parts(fd, &mut parts).is_ok()
+}
+
+/// Why a send ended before every byte went out.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SendFail {
+    /// The peer's end was closed: no byte sent from here on reached it.
+    PeerClosed,
+    Other,
+}
+
+/// Send `parts` in order as one stream of bytes. The iovecs are consumed.
+pub(crate) unsafe fn send_parts(fd: i32, parts: &mut [libc::iovec]) -> Result<(), SendFail> {
+    let stall_dur = send_stall_limit();
     let stall = libc::timespec {
-        tv_sec: SEND_STALL_TIMEOUT_MS / 1000,
-        tv_nsec: (SEND_STALL_TIMEOUT_MS % 1000) * 1_000_000,
+        tv_sec: stall_dur.as_secs() as libc::time_t,
+        tv_nsec: stall_dur.subsec_nanos() as libc::c_long,
     };
-    let stall_dur = std::time::Duration::from_millis(SEND_STALL_TIMEOUT_MS as u64);
-    // Wall-clock deadline for a zero-progress stall, reset on every byte sent.
+    // Wall-clock deadline for a zero-progress stall, started when a send
+    // first stalls and cleared on every byte sent.
     // Bounding on elapsed time (not just per-poll timeout) prevents a signal
     // storm -- e.g. SIGCHLD from exiting pool workers -- from turning
     // send->EAGAIN->poll->EINTR->send into an unbounded busy-loop that never
     // trips the per-poll ceiling.
-    let mut last_progress = std::time::Instant::now();
-    let mut total: usize = 0;
-    while total < len {
-        let n = libc::send(
-            fd,
-            buf.add(total) as *const c_void,
-            len - total,
-            crate::utility::SEND_NOSIGNAL,
-        );
+    let mut stalled_since: Option<std::time::Instant> = None;
+    // NET-5: a stalled send to a local peer that can be named waits as long
+    // as that peer lives; only one that cannot be named has the bound.
+    let mut peer: Option<Option<Peer>> = None;
+    let mut first = 0;
+    while first < parts.len() {
+        if parts[first].iov_len == 0 {
+            first += 1;
+            continue;
+        }
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_iov = parts[first..].as_mut_ptr();
+        msg.msg_iovlen = (parts.len() - first) as _;
+        let n = libc::sendmsg(fd, &msg, crate::utility::SEND_NOSIGNAL);
         if n > 0 {
-            total += n as usize;
-            last_progress = std::time::Instant::now();
+            let mut left = n as usize;
+            while left > 0 {
+                let take = left.min(parts[first].iov_len);
+                parts[first].iov_base = (parts[first].iov_base as *mut u8).add(take) as *mut c_void;
+                parts[first].iov_len -= take;
+                left -= take;
+                if parts[first].iov_len == 0 {
+                    first += 1;
+                }
+            }
+            stalled_since = None;
             continue;
         }
         if n == 0 {
-            return false; // peer closed; nothing more can be sent
+            return Err(SendFail::Other);
         }
         let e = crate::utility::errno_val();
         if e == libc::EINTR {
             continue;
+        }
+        if e == libc::EPIPE || e == libc::ECONNRESET {
+            return Err(SendFail::PeerClosed);
         }
         if e == libc::EAGAIN || e == libc::EWOULDBLOCK {
             // Send buffer full on a non-blocking socket. Bail if the peer has
             // accepted zero bytes for the whole stall window (checked on
             // wall-clock so an EINTR-interrupted poll can't reset it), else wait
             // (bounded) for writability and retry the same offset. A dead peer
-            // surfaces as POLLHUP/POLLERR -> the next send returns EPIPE and we
-            // bail on the hard-error path below.
-            if last_progress.elapsed() >= stall_dur {
-                return false;
-            }
+            // surfaces as POLLHUP/POLLERR -> the next send returns EPIPE.
             let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+            if let Some(p) = peer.get_or_insert_with(|| Peer::of(fd)) {
+                if poll_wait(&mut pfd, 1, &PEER_CHECK) == 0 && !p.alive() {
+                    return Err(SendFail::PeerClosed);
+                }
+                continue;
+            }
+            if stalled_since.get_or_insert_with(std::time::Instant::now).elapsed() >= stall_dur {
+                return Err(SendFail::Other);
+            }
             let _ = poll_wait(&mut pfd, 1, &stall); // EINTR just re-loops (deadline still bounds it)
             continue;
         }
-        return false; // EPIPE / ECONNRESET / other hard error
+        return Err(SendFail::Other);
     }
-    true
+    Ok(())
 }
 
 // Outcome of peeking a freshly accepted connection for a readiness ping.
@@ -253,18 +296,13 @@ pub(crate) unsafe fn close_daemon(daemon_ptr: *mut *mut LanguageDaemon) {
 
     close_socket((*daemon).server_fd);
 
-    // Free client list
-    let mut current = (*daemon).client_fds;
-    while !current.is_null() {
-        let next = (*current).next;
-        libc::close((*current).fd);
-        libc::free(current as *mut c_void);
-        current = next;
-    }
-
     if !(*daemon).socket_path.is_null() {
-        libc::unlink((*daemon).socket_path);
+        // DAEMON-10
+        unlink_if_ours((*daemon).socket_path, ((*daemon).socket_dev, (*daemon).socket_ino));
         libc::free((*daemon).socket_path as *mut c_void);
+    }
+    if (*daemon).socket_hold >= 0 {
+        libc::close((*daemon).socket_hold);
     }
     if !(*daemon).tmpdir.is_null() {
         libc::free((*daemon).tmpdir as *mut c_void);
@@ -281,6 +319,36 @@ pub(crate) unsafe fn close_daemon(daemon_ptr: *mut *mut LanguageDaemon) {
 }
 
 // ── Socket helpers ───────────────────────────────────────────────────────────
+
+/// The (device, inode) of the file at `path`, not following a symlink.
+fn socket_file_id(path: *const c_char) -> Option<(u64, u64)> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    (unsafe { libc::lstat(path, &mut st) } == 0).then(|| (st.st_dev as u64, st.st_ino as u64))
+}
+
+/// Hold the socket file at `path` open where the platform allows it, so its
+/// inode number is not reused while this pool lives, and return its identity.
+fn hold_socket_file(path: *const c_char) -> (i32, Option<(u64, u64)>) {
+    #[cfg(target_os = "linux")]
+    {
+        let fd = unsafe { libc::open(path, libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd >= 0 {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(fd, &mut st) } == 0 {
+                return (fd, Some((st.st_dev as u64, st.st_ino as u64)));
+            }
+            unsafe { libc::close(fd) };
+        }
+    }
+    (-1, socket_file_id(path))
+}
+
+/// Remove `path` only while it is still the file with identity `id`.
+unsafe fn unlink_if_ours(path: *const c_char, id: (u64, u64)) {
+    if id != (0, 0) && socket_file_id(path) == Some(id) {
+        libc::unlink(path);
+    }
+}
 
 unsafe fn new_socket(errmsg: *mut *mut c_char) -> i32 {
     clear_errmsg(errmsg);
@@ -360,6 +428,7 @@ pub(crate) unsafe fn start_daemon(
     }
 
     (*daemon).server_fd = -1;
+    (*daemon).socket_hold = -1;
     (*daemon).socket_path = libc::strdup(socket_path);
     (*daemon).tmpdir = libc::strdup(tmpdir);
     (*daemon).shm_basename = libc::strdup(shm_basename);
@@ -375,14 +444,13 @@ pub(crate) unsafe fn start_daemon(
     }
 
     (*daemon).shm_default_size = shm_default_size;
-    (*daemon).client_fds = ptr::null_mut();
 
     // Set fallback dir for file-backed SHM
     crate::shm::shm_set_fallback_dir(&CStr::from_ptr(tmpdir).to_string_lossy());
 
     // Init shared memory
     let mut err: *mut c_char = ptr::null_mut();
-    let shm = crate::ffi::shinit(shm_basename, morloc_runtime_types::shm_types::PRIMARY_VOLUME, shm_default_size, &mut err);
+    let shm = crate::ffi::shinit(shm_basename, shm_default_size, &mut err);
     if !err.is_null() {
         close_daemon(&mut (daemon as *mut LanguageDaemon));
         *errmsg = err;
@@ -409,6 +477,13 @@ pub(crate) unsafe fn start_daemon(
         *errmsg = err;
         return ptr::null_mut();
     }
+    // DAEMON-10
+    let (hold, id) = hold_socket_file(socket_path);
+    (*daemon).socket_hold = hold;
+    if let Some((dev, ino)) = id {
+        (*daemon).socket_dev = dev;
+        (*daemon).socket_ino = ino;
+    }
 
     // Set non-blocking mode
     let flags = libc::fcntl((*daemon).server_fd, libc::F_GETFL);
@@ -423,31 +498,62 @@ pub(crate) unsafe fn start_daemon(
     daemon
 }
 
-// ── stream_from_client_wait ──────────────────────────────────────────────────
-
-pub(crate) unsafe fn stream_from_client_wait(
-    client_fd: i32,
-    poll_timeout_us: i32,
-    recv_timeout_us: i32,
-    errmsg: *mut *mut c_char,
-) -> *mut u8 {
-    read_packet(client_fd, poll_timeout_us, recv_timeout_us, None, errmsg)
-}
-
 /// The process at the other end of a local socket, as it connected.
-pub(crate) struct Peer {
-    pid: u32,
-    start: u64,
+pub(crate) enum Peer {
+    /// Its pid and start stamp, read when the connection was taken.
+    Stamped { pid: u32, start: u64 },
+    /// Asked of the socket only when a wait stalls: the kernel keeps the
+    /// connecting process's identity with the socket, safe against pid reuse.
+    #[cfg(target_os = "linux")]
+    Deferred { fd: i32 },
 }
 
 impl Peer {
     pub(crate) fn of(fd: i32) -> Option<Peer> {
-        let pid = peer_pid(fd)?;
-        Some(Peer { pid, start: morloc_runtime_types::process::start_time(pid) })
+        Self::deferred(fd).or_else(|| Self::stamped(fd))
     }
 
-    fn alive(&self) -> bool {
-        morloc_runtime_types::process::alive(self.pid, self.start)
+    fn stamped(fd: i32) -> Option<Peer> {
+        let pid = peer_pid(fd)?;
+        Some(Peer::Stamped { pid, start: morloc_runtime_types::process::start_time(pid) })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn deferred(fd: i32) -> Option<Peer> {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        const UNKNOWN: u8 = 0;
+        const YES: u8 = 1;
+        const NO: u8 = 2;
+        static SUPPORTED: AtomicU8 = AtomicU8::new(UNKNOWN);
+        match SUPPORTED.load(Ordering::Relaxed) {
+            YES => Some(Peer::Deferred { fd }),
+            NO => None,
+            _ => match peer_pid(fd).map(|_| peer_pidfd(fd))? {
+                Err(e) if e.raw_os_error() == Some(libc::ENOPROTOOPT) => {
+                    SUPPORTED.store(NO, Ordering::Relaxed);
+                    None
+                }
+                Ok(pidfd) => {
+                    unsafe { libc::close(pidfd) };
+                    SUPPORTED.store(YES, Ordering::Relaxed);
+                    Some(Peer::Deferred { fd })
+                }
+                Err(_) => None,
+            },
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn deferred(_fd: i32) -> Option<Peer> {
+        None
+    }
+
+    pub(crate) fn alive(&self) -> bool {
+        match *self {
+            Peer::Stamped { pid, start } => morloc_runtime_types::process::alive(pid, start),
+            #[cfg(target_os = "linux")]
+            Peer::Deferred { fd } => deferred_alive(fd),
+        }
     }
 
     /// Read up to `len` bytes from `fd`, waiting as long as this peer lives.
@@ -481,6 +587,34 @@ fn peer_pid(fd: i32) -> Option<u32> {
     (rc == 0 && cred.pid > 0).then_some(cred.pid as u32)
 }
 
+#[cfg(target_os = "linux")]
+const SO_PEERPIDFD: libc::c_int = 77;
+
+/// A pidfd for the process that connected to `fd`. Fails with ENOPROTOOPT
+/// on kernels before 6.5, and EINVAL or ESRCH once that process is reaped.
+#[cfg(target_os = "linux")]
+fn peer_pidfd(fd: i32) -> std::io::Result<i32> {
+    let mut pidfd: libc::c_int = -1;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let rc = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, SO_PEERPIDFD, &mut pidfd as *mut _ as *mut c_void, &mut len) };
+    if rc == 0 { Ok(pidfd) } else { Err(std::io::Error::last_os_error()) }
+}
+
+/// A pidfd polls readable once its process has exited, reaped or not; a
+/// stopped process has not.
+#[cfg(target_os = "linux")]
+fn deferred_alive(fd: i32) -> bool {
+    match peer_pidfd(fd) {
+        Ok(pidfd) => {
+            let mut pfd = libc::pollfd { fd: pidfd, events: libc::POLLIN, revents: 0 };
+            let exited = unsafe { libc::poll(&mut pfd, 1, 0) } == 1;
+            unsafe { libc::close(pidfd) };
+            !exited
+        }
+        Err(e) => !matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ESRCH)),
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn peer_pid(fd: i32) -> Option<u32> {
     let mut pid: libc::pid_t = 0;
@@ -489,220 +623,243 @@ fn peer_pid(fd: i32) -> Option<u32> {
     (rc == 0 && pid > 0).then_some(pid as u32)
 }
 
-/// How long a sender whose process cannot be named may stall, in us.
-const UNNAMED_SENDER_STALL_US: i32 = 30_000_000;
+/// How long a sender whose process cannot be named may stall.
+const UNNAMED_SENDER_STALL: libc::timespec = libc::timespec { tv_sec: 30, tv_nsec: 0 };
 
 /// How often a wait on a living sender checks that it still lives.
 const PEER_CHECK: libc::timespec = libc::timespec { tv_sec: 1, tv_nsec: 0 };
 
+/// How long a read waits for the sender's next bytes.
+enum Wait<'a> {
+    /// While this process lives (NET-5).
+    Peer(&'a Peer),
+    /// Until no byte has arrived for a sender that cannot be named.
+    Stall,
+    /// Until the sender's end closes.
+    Forever,
+}
+
 // NET-5: with a peer, no time limit: a wait ends on end of file or when the peer is gone.
-unsafe fn read_packet(
-    client_fd: i32,
-    poll_timeout_us: i32,
-    recv_timeout_us: i32,
-    peer: Option<&Peer>,
-    errmsg: *mut *mut c_char,
-) -> *mut u8 {
+unsafe fn read_packet(client_fd: i32, wait: Wait, reply: bool, errmsg: *mut *mut c_char) -> *mut u8 {
     clear_errmsg(errmsg);
-
-    if libc::fcntl(client_fd, libc::F_GETFD) == -1 {
-        set_errmsg(errmsg, &MorlocError::Ipc("Invalid file descriptor".into()));
-        return ptr::null_mut();
+    match read_packet_raw(client_fd, wait, reply) {
+        Ok(p) => p,
+        Err(ReadFailure::Packet(e)) => {
+            *errmsg = e;
+            ptr::null_mut()
+        }
+        Err(ReadFailure::Io(why)) => {
+            set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
+            ptr::null_mut()
+        }
     }
+}
 
-    let buffer = libc::calloc(BUFFER_SIZE, 1) as *mut u8;
-    if buffer.is_null() {
-        set_errmsg(errmsg, &MorlocError::Ipc("calloc failed for buffer".into()));
-        return ptr::null_mut();
-    }
+pub(crate) enum ReadFailure {
+    Io(&'static str),
+    /// A malformed header; the C string is the caller's to free.
+    Packet(*mut c_char),
+}
 
-    // poll() instead of pselect/FD_SET: an fd_set can only hold descriptors
-    // below FD_SETSIZE (1024), and FD_SET on a higher fd is out-of-bounds. A
-    // pollfd imposes no ceiling on the fd value.
-    let mut pfd = libc::pollfd { fd: client_fd, events: libc::POLLIN, revents: 0 };
-
-    // Timeout setup
-    let mut ts_loop: libc::timespec = std::mem::zeroed();
-    let timeout_ptr = if peer.is_some() {
-        &PEER_CHECK as *const libc::timespec
-    } else if poll_timeout_us > 0 {
-        ts_loop.tv_sec = (poll_timeout_us / 1000000) as i64;
-        ts_loop.tv_nsec = ((poll_timeout_us % 1000000) * 1000) as i64;
-        &ts_loop as *const libc::timespec
-    } else {
-        ptr::null()
+unsafe fn read_packet_raw(client_fd: i32, wait: Wait, reply: bool) -> Result<*mut u8, ReadFailure> {
+    let mut reader = PacketReader {
+        fd: client_fd,
+        pfd: libc::pollfd { fd: client_fd, events: libc::POLLIN, revents: 0 },
+        wait,
+        spurious: 0,
+        wait_first: reply,
     };
+    let mut head = [0u8; HEAD_READ];
+    let mut have = 0usize;
+    while have < morloc_runtime_types::packet::PKT_HEADER_SIZE {
+        match reader.recv(head.as_mut_ptr().add(have), HEAD_READ - have, have == 0) {
+            Ok(n) => have += n,
+            Err(why) => return Err(ReadFailure::Io(why)),
+        }
+    }
 
-    // Initial receive: poll, then recv, retrying on EINTR (poll) and on a
-    // spurious EAGAIN/EWOULDBLOCK. A non-blocking socket can report readable via
-    // poll yet return EAGAIN on recv; on macOS an accepted fd inherits the listen
-    // socket's non-blocking flag, so this is reachable. Looping (rather than
-    // falling through with a negative length, which then copied uninitialized
-    // buffer bytes) keeps a garbage packet from being returned as success.
-    // Bound consecutive poll-readable-but-recv-EAGAIN spins so a peer that keeps
-    // the fd poll-readable without ever delivering data cannot defeat the
-    // per-iteration timeout and hang the reader indefinitely. The normal path
-    // sees zero or one spurious wakeup; this ceiling is orders of magnitude
-    // above that.
-    const MAX_SPURIOUS_WAKEUPS: u32 = 1024;
-    let mut spurious: u32 = 0;
-    let recv_length = loop {
-        let mut ready;
-        loop {
-            ready = poll_wait(&mut pfd, 1, timeout_ptr);
-            if !(ready < 0 && crate::utility::errno_val() == libc::EINTR) {
-                break;
+    let mut packet_err: *mut c_char = ptr::null_mut();
+    let packet_length = crate::packet_ffi::morloc_packet_size(head.as_ptr(), &mut packet_err);
+    if !packet_err.is_null() {
+        return Err(ReadFailure::Packet(packet_err));
+    }
+    let result = libc::malloc(packet_length.max(1)) as *mut u8;
+    if result.is_null() {
+        return Err(ReadFailure::Io("malloc failure"));
+    }
+    let copied = have.min(packet_length);
+    ptr::copy_nonoverlapping(head.as_ptr(), result, copied);
+    let mut got = copied;
+    while got < packet_length {
+        match reader.recv(result.add(got), packet_length - got, false) {
+            Ok(n) => got += n,
+            Err(why) => {
+                libc::free(result as *mut c_void);
+                return Err(ReadFailure::Io(if why == TIMEOUT_INITIAL { "Timeout waiting for remaining data" } else { why }));
             }
         }
+    }
+    Ok(result)
+}
 
-        if ready == 0 {
-            if peer.is_some_and(Peer::alive) {
+/// Bytes read before the header is parsed: a whole small packet.
+const HEAD_READ: usize = 4096;
+
+const TIMEOUT_INITIAL: &str = "Timeout waiting for initial data";
+
+/// The sender closed before the first byte of a packet.
+pub(crate) const CLOSED_BY_PEER: &str = "Connection closed by peer";
+
+// NET-5: a reply waits as long as the callee's process lives; a callee that
+// cannot be named is waited on until its end closes.
+fn reply_wait(peer: &Option<Peer>) -> Wait<'_> {
+    match peer {
+        Some(p) => Wait::Peer(p),
+        None => Wait::Forever,
+    }
+}
+
+// NET-5
+pub(crate) unsafe fn recv_frame(fd: i32) -> Result<Vec<u8>, &'static str> {
+    let peer = Peer::of(fd);
+    let mut reader = PacketReader {
+        fd,
+        pfd: libc::pollfd { fd, events: libc::POLLIN, revents: 0 },
+        wait: reply_wait(&peer),
+        spurious: 0,
+        wait_first: true,
+    };
+    let mut fill = |buf: &mut [u8], first: bool| -> Result<(), &'static str> {
+        let mut got = 0usize;
+        while got < buf.len() {
+            got += reader.recv(buf.as_mut_ptr().add(got), buf.len() - got, first && got == 0)?;
+        }
+        Ok(())
+    };
+    let mut len = [0u8; 4];
+    fill(&mut len, true)?;
+    let len = u32::from_be_bytes(len) as usize;
+    // NET-10: memory follows the bytes that arrive, not the length declared.
+    const CHUNK: usize = 1 << 20;
+    let mut body: Vec<u8> = Vec::new();
+    while body.len() < len {
+        let at = body.len();
+        let n = (len - at).min(CHUNK);
+        if at + n > body.capacity() {
+            body.reserve_exact((body.capacity() * 2).max(at + n).min(len) - at);
+        }
+        body.resize(at + n, 0);
+        fill(&mut body[at..], false)?;
+    }
+    Ok(body)
+}
+
+struct PacketReader<'a> {
+    fd: i32,
+    pfd: libc::pollfd,
+    wait: Wait<'a>,
+    spurious: u32,
+    /// A reply is not there yet when its read begins.
+    wait_first: bool,
+}
+
+impl PacketReader<'_> {
+    /// Receive at least one byte into `dst`, waiting as `wait` allows.
+    /// `first` says no byte of the packet has arrived yet.
+    unsafe fn recv(&mut self, dst: *mut u8, len: usize, first: bool) -> Result<usize, &'static str> {
+        // A non-blocking socket can report readable yet return EAGAIN (an
+        // accepted fd inherits the listener's flag on macOS); a sender that
+        // keeps the fd readable without delivering data is bounded here.
+        const MAX_SPURIOUS_WAKEUPS: u32 = 1024;
+        let mut polled = false;
+        if self.wait_first {
+            self.wait_first = false;
+            self.wait_readable()?;
+            polled = true;
+        }
+        loop {
+            let n = libc::recv(self.fd, dst as *mut c_void, len, libc::MSG_DONTWAIT);
+            if n > 0 {
+                return Ok(n as usize);
+            }
+            if n == 0 {
+                if trace_close_enabled() {
+                    eprintln!("[MLC_IPC] pid={} recv EOF (0 bytes) fd={}", libc::getpid(), self.fd);
+                }
+                return Err(if first { CLOSED_BY_PEER } else { "Connection closed early" });
+            }
+            let e = crate::utility::errno_val();
+            if e == libc::EINTR {
                 continue;
             }
-            libc::free(buffer as *mut c_void);
-            let why = if peer.is_some() { "The sending process is gone" } else { "Timeout waiting for initial data" };
-            set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
-            return ptr::null_mut();
-        }
-        if ready < 0 {
-            libc::free(buffer as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Ipc("poll error".into()));
-            return ptr::null_mut();
-        }
-        if !pfd_ready(&pfd) {
-            libc::free(buffer as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Ipc("Bad client file descriptor".into()));
-            return ptr::null_mut();
-        }
-
-        let n = libc::recv(client_fd, buffer as *mut c_void, BUFFER_SIZE, 0);
-        if n == 0 {
-            if trace_close_enabled() {
-                eprintln!("[MLC_IPC] pid={} recv EOF (0 bytes) fd={}", libc::getpid(), client_fd);
+            if e != libc::EWOULDBLOCK && e != libc::EAGAIN {
+                return Err("Recv error");
             }
-            libc::free(buffer as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Ipc("Connection closed by peer".into()));
-            return ptr::null_mut();
-        }
-        if n > 0 {
-            break n;
-        }
-        let e = crate::utility::errno_val();
-        if e == libc::EWOULDBLOCK || e == libc::EAGAIN {
-            spurious += 1;
-            if spurious > MAX_SPURIOUS_WAKEUPS {
-                libc::free(buffer as *mut c_void);
-                set_errmsg(errmsg, &MorlocError::Ipc("Timeout waiting for initial data".into()));
-                return ptr::null_mut();
+            if polled {
+                self.spurious += 1;
+                if self.spurious > MAX_SPURIOUS_WAKEUPS {
+                    return Err(TIMEOUT_INITIAL);
+                }
             }
-            continue; // no data yet despite poll; re-poll and retry
+            self.wait_readable()?;
+            polled = true;
         }
-        libc::free(buffer as *mut c_void);
-        set_errmsg(errmsg, &MorlocError::Ipc("Recv error".into()));
-        return ptr::null_mut();
-    };
-
-    // Get packet size from header
-    let mut packet_err: *mut c_char = ptr::null_mut();
-    let packet_length = crate::packet_ffi::morloc_packet_size(buffer, &mut packet_err);
-    if !packet_err.is_null() {
-        libc::free(buffer as *mut c_void);
-        *errmsg = packet_err;
-        return ptr::null_mut();
     }
 
-    let result = libc::calloc(packet_length, 1) as *mut u8;
-    if result.is_null() {
-        libc::free(buffer as *mut c_void);
-        set_errmsg(errmsg, &MorlocError::Ipc("calloc failure".into()));
-        return ptr::null_mut();
-    }
-
-    let copy_length = (recv_length as usize).min(packet_length);
-    ptr::copy_nonoverlapping(buffer, result, copy_length);
-    let mut data_ptr = result.add(copy_length);
-    libc::free(buffer as *mut c_void);
-
-    let attempts = 10;
-    while (data_ptr as usize - result as usize) < packet_length {
-        let mut packet_received = false;
-        let mut attempt = 0;
-        while attempt < attempts {
-            attempt += 1;
-            let recv_timeout_ptr = if peer.is_some() {
-                &PEER_CHECK as *const libc::timespec
-            } else if recv_timeout_us > 0 {
-                let total_us = recv_timeout_us as i64 * attempt as i64;
-                ts_loop.tv_sec = total_us / 1000000;
-                ts_loop.tv_nsec = (total_us % 1000000) * 1000;
-                &ts_loop as *const libc::timespec
-            } else {
-                ptr::null()
-            };
-
-            let ready = poll_wait(&mut pfd, 1, recv_timeout_ptr);
-
-            if ready == 0 {
-                if peer.is_some_and(Peer::alive) {
-                    attempt -= 1;
+    unsafe fn wait_readable(&mut self) -> Result<(), &'static str> {
+        let (timeout_ptr, peer) = match self.wait {
+            Wait::Peer(p) => (&PEER_CHECK as *const libc::timespec, Some(p)),
+            Wait::Stall => (&UNNAMED_SENDER_STALL as *const libc::timespec, None),
+            Wait::Forever => (ptr::null(), None),
+        };
+        loop {
+            let ready = poll_wait(&mut self.pfd, 1, timeout_ptr);
+            if ready < 0 {
+                if crate::utility::errno_val() == libc::EINTR {
                     continue;
                 }
-                libc::free(result as *mut c_void);
-                let why = if peer.is_some() { "The sending process is gone" } else { "Timeout waiting for remaining data" };
-                set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
-                return ptr::null_mut();
+                return Err("poll error");
             }
-            if ready < 0 && crate::utility::errno_val() != libc::EINTR {
-                libc::free(result as *mut c_void);
-                set_errmsg(errmsg, &MorlocError::Ipc("poll error".into()));
-                return ptr::null_mut();
+            if ready == 0 {
+                if peer.is_some_and(Peer::alive) {
+                    continue;
+                }
+                return Err(if peer.is_some() { "The sending process is gone" } else { TIMEOUT_INITIAL });
             }
-            if ready <= 0 { continue; }
-
-            if pfd_ready(&pfd) {
-                let remaining = packet_length - (data_ptr as usize - result as usize);
-                let recv_size = remaining.min(BUFFER_SIZE);
-                let n = libc::recv(client_fd, data_ptr as *mut c_void, recv_size, 0);
-                if n > 0 {
-                    data_ptr = data_ptr.add(n as usize);
-                    packet_received = true;
-                    break;
-                }
-                if n == 0 {
-                    libc::free(result as *mut c_void);
-                    set_errmsg(errmsg, &MorlocError::Ipc("Connection closed early".into()));
-                    return ptr::null_mut();
-                }
-                if n < 0 && crate::utility::errno_val() != libc::EWOULDBLOCK && crate::utility::errno_val() != libc::EAGAIN {
-                    libc::free(result as *mut c_void);
-                    set_errmsg(errmsg, &MorlocError::Ipc("Recv error".into()));
-                    return ptr::null_mut();
-                }
+            if !pfd_ready(&self.pfd) {
+                return Err("Bad client file descriptor");
             }
-        }
-        if !packet_received {
-            libc::free(result as *mut c_void);
-            set_errmsg(errmsg, &MorlocError::Ipc("Failed to retrieve packet".into()));
-            return ptr::null_mut();
+            return Ok(());
         }
     }
-
-    result
 }
 
 pub(crate) unsafe fn stream_from_client(
     client_fd: i32,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
+    clear_errmsg(errmsg);
+    match read_request(client_fd) {
+        Ok(p) => p,
+        Err(ReadFailure::Packet(e)) => {
+            *errmsg = e;
+            ptr::null_mut()
+        }
+        Err(ReadFailure::Io(why)) => {
+            set_errmsg(errmsg, &MorlocError::Ipc(why.into()));
+            ptr::null_mut()
+        }
+    }
+}
+
+pub(crate) unsafe fn read_request(client_fd: i32) -> Result<*mut u8, ReadFailure> {
     // NET-5: a sender that cannot be named has its stalls bounded instead.
     let request = match Peer::of(client_fd) {
-        Some(peer) => read_packet(client_fd, 0, 0, Some(&peer), errmsg),
-        None => read_packet(client_fd, UNNAMED_SENDER_STALL_US, UNNAMED_SENDER_STALL_US, None, errmsg),
-    };
-    if !request.is_null() {
-        REQUEST.with(|r| r.set((client_fd, crate::fork_policy::generation())));
-    }
-    request
+        Some(peer) => read_packet_raw(client_fd, Wait::Peer(&peer), false),
+        None => read_packet_raw(client_fd, Wait::Stall, false),
+    }?;
+    REQUEST.with(|r| r.set((client_fd, crate::fork_policy::generation())));
+    Ok(request)
 }
 
 thread_local! {
@@ -811,104 +968,198 @@ unsafe fn self_call_error(socket_path: *const c_char, packet: *const u8) -> Morl
 
 // ── send_and_receive_over_socket ─────────────────────────────────────────────
 
-pub(crate) unsafe fn send_and_receive_over_socket_wait(
-    socket_path: *const c_char,
-    packet: *const u8,
-    poll_timeout_us: i32,
-    recv_timeout_us: i32,
-    errmsg: *mut *mut c_char,
-) -> *mut u8 {
-    clear_errmsg(errmsg);
+// NET-7: every caller connection's descriptor, so the fork handler can
+// close a child's copies of them without a lock.
+const CONN_SLOTS: usize = 256;
+static CONN_FDS: [std::sync::atomic::AtomicI32; CONN_SLOTS] =
+    [const { std::sync::atomic::AtomicI32::new(-1) }; CONN_SLOTS];
 
-    // The callee may write a stream this pool has batches of in flight.
-    if let Err(e) = crate::stream::drain_before_handoff() {
-        set_errmsg(errmsg, &e);
-        return ptr::null_mut();
+// NET-7: sequentially consistent with the fork count `connect_to` reads after it.
+fn track_conn(fd: i32) -> bool {
+    use std::sync::atomic::Ordering;
+    CONN_FDS.iter().any(|s| s.compare_exchange(-1, fd, Ordering::SeqCst, Ordering::Relaxed).is_ok())
+}
+
+fn untrack_conn(fd: i32) {
+    use std::sync::atomic::Ordering;
+    for s in CONN_FDS.iter() {
+        if s.compare_exchange(fd, -1, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            return;
+        }
     }
+}
 
-    if forbid_self_call() && is_self_socket(socket_path) {
-        set_errmsg(errmsg, &self_call_error(socket_path, packet));
-        return ptr::null_mut();
+// NET-7: untracked before it is closed, so a child never closes a reused number.
+unsafe fn drop_conn(fd: i32) {
+    untrack_conn(fd);
+    close_socket(fd);
+}
+
+// NET-7: a forked child closes its copies of its parent's connections.
+pub(crate) fn after_fork_in_child() {
+    use std::sync::atomic::Ordering;
+    for s in CONN_FDS.iter() {
+        let fd = s.swap(-1, Ordering::AcqRel);
+        if fd >= 0 {
+            unsafe { libc::close(fd) };
+        }
     }
+}
 
-    let mut err: *mut c_char = ptr::null_mut();
-    let client_fd = new_socket(&mut err);
-    if client_fd < 0 {
-        *errmsg = err;
-        return ptr::null_mut();
+struct CachedConn {
+    path: Vec<u8>,
+    fd: i32,
+    generation: u64,
+}
+
+struct ConnCache(Vec<CachedConn>);
+
+impl Drop for ConnCache {
+    fn drop(&mut self) {
+        // FORK-14: an entry from before a fork was closed by the fork handler.
+        let generation = crate::fork_policy::generation();
+        for c in self.0.drain(..) {
+            if c.generation == generation {
+                unsafe { drop_conn(c.fd) };
+            }
+        }
     }
+}
 
+thread_local! {
+    // NET-7
+    static CONN_CACHE: std::cell::RefCell<ConnCache> = const { std::cell::RefCell::new(ConnCache(Vec::new())) };
+}
+
+fn take_cached(path: &[u8]) -> Option<i32> {
+    // FORK-14
+    let generation = crate::fork_policy::generation();
+    CONN_CACHE
+        .try_with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let i = cache.0.iter().position(|c| c.path == path)?;
+            let c = cache.0.swap_remove(i);
+            (c.generation == generation).then_some(c.fd)
+        })
+        .ok()
+        .flatten()
+}
+
+fn put_cached(path: &[u8], fd: i32) -> bool {
+    let generation = crate::fork_policy::generation();
+    CONN_CACHE
+        .try_with(|cache| cache.borrow_mut().0.push(CachedConn { path: path.to_vec(), fd, generation }))
+        .is_ok()
+}
+
+/// How many connections this thread holds open for reuse.
+#[cfg(test)]
+pub(crate) fn cached_connections() -> usize {
+    CONN_CACHE.with(|c| c.borrow().0.len())
+}
+
+#[cfg(test)]
+pub(crate) fn drop_cached_connections() {
+    CONN_CACHE.with(|c| {
+        for e in c.borrow_mut().0.drain(..) {
+            unsafe { drop_conn(e.fd) };
+        }
+    });
+}
+
+/// Connect to `socket_path`, retrying while the pool starts. The descriptor
+/// is tracked when there is room, which allows it to be reused.
+unsafe fn connect_to(socket_path: *const c_char) -> Result<(i32, bool), MorlocError> {
+    let (client_fd, tracked) = loop {
+        let seq = crate::fork_policy::fork_seq_settled();
+        let mut err: *mut c_char = ptr::null_mut();
+        let fd = new_socket(&mut err);
+        if fd < 0 {
+            let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+            libc::free(err as *mut c_void);
+            return Err(MorlocError::Ipc(msg));
+        }
+        let tracked = track_conn(fd);
+        if crate::fork_policy::fork_seq() == seq {
+            break (fd, tracked);
+        }
+        // NET-7: a child forked before the socket was tracked keeps a copy
+        // the fork handler does not close; it has carried nothing yet.
+        drop_conn(fd);
+    };
+    let fail = |e: MorlocError| {
+        drop_conn(client_fd);
+        Err(e)
+    };
     let addr = match new_server_addr(socket_path) {
         Ok(a) => a,
-        Err(e) => {
-            close_socket(client_fd);
-            set_errmsg(errmsg, &e);
-            return ptr::null_mut();
-        }
+        Err(e) => return fail(e),
     };
-
-    // Connect with retry (matching C WAIT macro behavior)
-    let mut retcode;
     let mut attempts = 0;
     loop {
-        retcode = libc::connect(client_fd, &addr as *const libc::sockaddr_un as *const libc::sockaddr,
-                                std::mem::size_of::<libc::sockaddr_un>() as u32);
-        if retcode == 0 { break; }
+        let retcode = libc::connect(client_fd, &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+                                    std::mem::size_of::<libc::sockaddr_un>() as u32);
+        if retcode == 0 {
+            return Ok((client_fd, tracked));
+        }
         attempts += 1;
         if crate::daemon_ffi::is_recovering() || crate::daemon_ffi::is_shutting_down() {
-            close_socket(client_fd);
-            set_errmsg(errmsg, &MorlocError::Ipc(format!(
+            return fail(MorlocError::Ipc(format!(
                 "Failed to connect to pipe '{}': the daemon is {}",
                 CStr::from_ptr(socket_path).to_string_lossy(),
                 if crate::daemon_ffi::is_recovering() { "recovering from a pool crash" } else { "shutting down" }
             )));
-            return ptr::null_mut();
         }
         if attempts > 300 { // ~30 seconds with 100ms sleep
-            close_socket(client_fd);
-            set_errmsg(errmsg, &MorlocError::Ipc(format!(
+            return fail(MorlocError::Ipc(format!(
                 "Failed to connect to pipe '{}'",
                 CStr::from_ptr(socket_path).to_string_lossy()
             )));
-            return ptr::null_mut();
         }
         libc::usleep(100_000); // 100ms
     }
+}
 
-    let packet_size = crate::packet_ffi::morloc_packet_size(packet, &mut err);
-    if !err.is_null() {
-        close_socket(client_fd);
-        *errmsg = err;
-        return ptr::null_mut();
+/// Send `packet` on `fd`, asking the callee to keep the connection when
+/// `keep`. The header goes from a copy, since the packet is the caller's.
+unsafe fn send_request(fd: i32, packet: *const u8, size: usize, keep: bool) -> Result<(), SendFail> {
+    use morloc_runtime_types::packet::{MODE_KEEP, PKT_HEADER_SIZE, PKT_MODE_OFF};
+    if !keep || size < PKT_HEADER_SIZE {
+        let mut parts = [libc::iovec { iov_base: packet as *mut c_void, iov_len: size }];
+        return send_parts(fd, &mut parts);
     }
+    let mut header = [0u8; PKT_HEADER_SIZE];
+    ptr::copy_nonoverlapping(packet, header.as_mut_ptr(), PKT_HEADER_SIZE);
+    let mode = u16::from_le_bytes([header[PKT_MODE_OFF], header[PKT_MODE_OFF + 1]]) | MODE_KEEP;
+    header[PKT_MODE_OFF..PKT_MODE_OFF + 2].copy_from_slice(&mode.to_le_bytes());
+    let mut parts = [
+        libc::iovec { iov_base: header.as_mut_ptr() as *mut c_void, iov_len: PKT_HEADER_SIZE },
+        libc::iovec { iov_base: packet.add(PKT_HEADER_SIZE) as *mut c_void, iov_len: size - PKT_HEADER_SIZE },
+    ];
+    send_parts(fd, &mut parts)
+}
 
-    // Send packet, retrying on a full send buffer (non-blocking client fd).
-    if !send_all(client_fd, packet, packet_size) {
-        close_socket(client_fd);
-        set_errmsg(errmsg, &MorlocError::Ipc(format!(
-            "Failed to send data to '{}'",
-            CStr::from_ptr(socket_path).to_string_lossy()
-        )));
-        return ptr::null_mut();
+/// Whether `packet`'s mode asks to keep the connection; clears the bit.
+pub(crate) unsafe fn take_keep_bit(packet: *mut u8) -> bool {
+    use morloc_runtime_types::packet::{MODE_KEEP, PKT_MODE_OFF};
+    let at = packet.add(PKT_MODE_OFF);
+    let mode = u16::from_le_bytes([*at, *at.add(1)]);
+    if mode & MODE_KEEP == 0 {
+        return false;
     }
+    let cleared = (mode & !MODE_KEEP).to_le_bytes();
+    *at = cleared[0];
+    *at.add(1) = cleared[1];
+    true
+}
 
-    if trace_close_enabled() {
-        eprintln!("[MLC_IPC] pid={} sent request fd={} bytes={} to '{}'",
-            libc::getpid(), client_fd, packet_size,
-            CStr::from_ptr(socket_path).to_string_lossy());
-    }
-
-    let result = stream_from_client_wait(client_fd, poll_timeout_us, recv_timeout_us, &mut err);
-    if !err.is_null() {
-        close_socket(client_fd);
-        *errmsg = err;
-        return ptr::null_mut();
-    }
-
-    close_socket(client_fd);
-    // SHM-8
-    crate::packet_ffi::inherit_reply(result);
-    result
+/// Set the keep bit on a reply the callee is about to send.
+pub(crate) unsafe fn set_keep_bit(packet: *mut u8) {
+    use morloc_runtime_types::packet::{MODE_KEEP, PKT_MODE_OFF};
+    let at = packet.add(PKT_MODE_OFF);
+    let mode = (u16::from_le_bytes([*at, *at.add(1)]) | MODE_KEEP).to_le_bytes();
+    *at = mode[0];
+    *at.add(1) = mode[1];
 }
 
 pub(crate) unsafe fn send_and_receive_over_socket(
@@ -916,7 +1167,73 @@ pub(crate) unsafe fn send_and_receive_over_socket(
     packet: *const u8,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
-    send_and_receive_over_socket_wait(socket_path, packet, 0, 0, errmsg)
+    clear_errmsg(errmsg);
+    // NET-9: a worker waiting on another pool counts busy.
+    let _busy = crate::fork_pool::busy();
+
+    if forbid_self_call() && is_self_socket(socket_path) {
+        set_errmsg(errmsg, &self_call_error(socket_path, packet));
+        return ptr::null_mut();
+    }
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let packet_size = crate::packet_ffi::morloc_packet_size(packet, &mut err);
+    if !err.is_null() {
+        *errmsg = err;
+        return ptr::null_mut();
+    }
+
+    // NET-7: a reused connection whose callee is gone fails its send with
+    // the peer closed, which delivered nothing; that alone is retried.
+    let path = CStr::from_ptr(socket_path).to_bytes();
+    let mut cached = take_cached(path);
+    let (client_fd, tracked) = loop {
+        let reused = cached.is_some();
+        let (fd, tracked) = match cached.take() {
+            Some(fd) => (fd, true),
+            None => match connect_to(socket_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    return ptr::null_mut();
+                }
+            },
+        };
+        match send_request(fd, packet, packet_size, tracked) {
+            Ok(()) => break (fd, tracked),
+            Err(SendFail::PeerClosed) if reused => drop_conn(fd),
+            Err(_) => {
+                drop_conn(fd);
+                set_errmsg(errmsg, &MorlocError::Ipc(format!(
+                    "Failed to send data to '{}'",
+                    CStr::from_ptr(socket_path).to_string_lossy()
+                )));
+                return ptr::null_mut();
+            }
+        }
+    };
+
+    if trace_close_enabled() {
+        eprintln!("[MLC_IPC] pid={} sent request fd={} bytes={} to '{}'",
+            libc::getpid(), client_fd, packet_size,
+            CStr::from_ptr(socket_path).to_string_lossy());
+    }
+
+    let peer = Peer::of(client_fd);
+    let result = read_packet(client_fd, reply_wait(&peer), true, &mut err);
+    if !err.is_null() {
+        drop_conn(client_fd);
+        *errmsg = err;
+        return ptr::null_mut();
+    }
+
+    let kept = take_keep_bit(result);
+    if !(kept && tracked && put_cached(path, client_fd)) {
+        drop_conn(client_fd);
+    }
+    // SHM-8
+    crate::packet_ffi::inherit_reply(result);
+    result
 }
 
 // -- mlc_spawn ----------------------------------------------------------------
@@ -1018,9 +1335,16 @@ pub(crate) unsafe fn mlc_spawn_watched(
         }
         return false;
     }
+    // DAEMON-1
+    let Some(user) = crate::daemon_ffi::enter_shm_user() else {
+        close_socket(fd);
+        set_errmsg(errmsg, &MorlocError::Ipc("the daemon is recovering from a pool crash".into()));
+        return false;
+    };
     std::thread::spawn(move || {
+        let _user = user;
         let mut err: *mut c_char = ptr::null_mut();
-        let result = stream_from_client_wait(fd, 0, 0, &mut err);
+        let result = read_packet(fd, Wait::Forever, true, &mut err);
         close_socket(fd);
         // SHM-8
         crate::packet_ffi::inherit_reply(result);
@@ -1103,28 +1427,30 @@ pub(crate) unsafe fn send_reply_to_foreign_server(
     size
 }
 
-// ── wait_for_client ──────────────────────────────────────────────────────────
+// ── Accept ──────────────────────────────────────────────────────────────────
 
-pub(crate) unsafe fn wait_for_client_with_timeout(
-    daemon: *mut LanguageDaemon,
-    timeout_us: i32,
-    errmsg: *mut *mut c_char,
-) -> i32 {
-    clear_errmsg(errmsg);
+/// What a wait on a listening socket, and on descriptors watched beside
+/// it, saw.
+pub(crate) enum Accepted {
+    /// A connection to serve.
+    Client(i32),
+    /// The watched descriptor at this index is readable or has hung up.
+    Watched(usize),
+    /// Nothing to act on: the wait timed out or was interrupted, or a
+    /// readiness ping was answered here.
+    Nothing,
+}
 
+/// Wait up to `timeout_us` (none if 0) for a connection on `server_fd` or
+/// for one of `watch` to become readable, and accept the connection.
+pub(crate) unsafe fn accept_or_watch(server_fd: i32, timeout_us: i32, watch: &[i32]) -> Result<Accepted, MorlocError> {
     // poll() instead of pselect/FD_SET so any fd value is accepted (an fd_set
-    // caps at FD_SETSIZE=1024). Index 0 is the listening socket; the client fds
-    // follow. Only the server slot is acted on (accept), matching the original;
-    // clients are included so activity on them still wakes the wait.
-    let mut pfds: Vec<libc::pollfd> = Vec::new();
-    pfds.push(libc::pollfd { fd: (*daemon).server_fd, events: libc::POLLIN, revents: 0 });
-    let mut client = (*daemon).client_fds;
-    while !client.is_null() {
-        pfds.push(libc::pollfd { fd: (*client).fd, events: libc::POLLIN, revents: 0 });
-        client = (*client).next;
-    }
+    // caps at FD_SETSIZE=1024).
+    let mut pfds: Vec<libc::pollfd> = std::iter::once(server_fd)
+        .chain(watch.iter().copied())
+        .map(|fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 })
+        .collect();
 
-    // Timeout
     let mut ts: libc::timespec = std::mem::zeroed();
     let timeout_ptr = if timeout_us > 0 {
         ts.tv_sec = (timeout_us / 1000000) as i64;
@@ -1137,84 +1463,48 @@ pub(crate) unsafe fn wait_for_client_with_timeout(
     let ready = poll_wait(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout_ptr);
     if ready < 0 {
         if crate::utility::errno_val() == libc::EINTR {
-            return 0;
+            return Ok(Accepted::Nothing);
         }
-        set_errmsg(errmsg, &MorlocError::Ipc("poll error".into()));
-        return -1;
+        return Err(MorlocError::Ipc("poll error".into()));
     }
     if ready == 0 {
-        return 0;
+        return Ok(Accepted::Nothing);
     }
-
-    // Check for new connection
-    if pfds[0].revents & libc::POLLIN != 0 {
-        let selected_fd = morloc_runtime_types::fd::accept((*daemon).server_fd, ptr::null_mut(), ptr::null_mut());
-        if selected_fd >= 0 {
-            if trace_close_enabled() {
-                eprintln!("[MLC_IPC] pid={} accept fd={}", libc::getpid(), selected_fd);
-            }
-            crate::utility::set_nosigpipe(selected_fd);
-            libc::fcntl(selected_fd, libc::F_SETFL, libc::O_NONBLOCK);
-
-            // Short-circuit readiness pings here (see try_answer_ping) so they
-            // never wait on a possibly-initializing worker. Peeking costs one
-            // extra recv per accept, so only do it during startup: readiness
-            // pings always precede the first real call, so once a non-ping
-            // request is seen the peek is disabled and steady-state calls pay
-            // nothing (a later recovery ping falls through to a now-warm worker,
-            // with the pool-side silent-pong-drop as backstop).
-            let mut handled = false;
-            if PING_PEEK_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
-                match try_answer_ping(selected_fd) {
-                    PingPeek::Answered => handled = true,
-                    PingPeek::NotPing => {
-                        PING_PEEK_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    PingPeek::Unknown => {}
-                }
-            }
-            if !handled {
-                let new_client = libc::calloc(1, std::mem::size_of::<ClientList>()) as *mut ClientList;
-                (*new_client).fd = selected_fd;
-                (*new_client).next = ptr::null_mut();
-
-                if (*daemon).client_fds.is_null() {
-                    (*daemon).client_fds = new_client;
-                } else {
-                    let mut last = (*daemon).client_fds;
-                    while !(*last).next.is_null() {
-                        last = (*last).next;
-                    }
-                    (*last).next = new_client;
-                }
-            }
-        }
-        else if out_of_descriptors() {
+    if let Some(i) = pfds[1..].iter().position(|p| pfd_ready(p)) {
+        return Ok(Accepted::Watched(i));
+    }
+    if pfds[0].revents & libc::POLLIN == 0 {
+        return Ok(Accepted::Nothing);
+    }
+    let selected_fd = morloc_runtime_types::fd::accept_nonblocking(server_fd);
+    if selected_fd < 0 {
+        if out_of_descriptors() {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        return Ok(Accepted::Nothing);
     }
-
-    if (*daemon).client_fds.is_null() {
-        return 0; // spurious wakeup
-    }
-
-    // Dequeue first client
-    let client_node = (*daemon).client_fds;
-    let return_fd = (*client_node).fd;
-    (*daemon).client_fds = (*client_node).next;
-    libc::free(client_node as *mut c_void);
-
     if trace_close_enabled() {
-        eprintln!("[MLC_IPC] pid={} wait_for_client return fd={}", libc::getpid(), return_fd);
+        eprintln!("[MLC_IPC] pid={} accept fd={}", libc::getpid(), selected_fd);
     }
-    return_fd
-}
+    crate::utility::set_nosigpipe(selected_fd);
 
-pub(crate) unsafe fn wait_for_client(
-    daemon: *mut LanguageDaemon,
-    errmsg: *mut *mut c_char,
-) -> i32 {
-    wait_for_client_with_timeout(daemon, 0, errmsg)
+    // Short-circuit readiness pings here (see try_answer_ping) so they
+    // never wait on a possibly-initializing worker. Peeking costs one
+    // extra recv per accept, so only do it during startup: readiness
+    // pings always precede the first real call, so once a non-ping
+    // request is seen the peek is disabled and steady-state calls pay
+    // nothing (a later recovery ping falls through to a now-warm worker,
+    // with the pool-side silent-pong-drop as backstop).
+    if PING_PEEK_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        match try_answer_ping(selected_fd) {
+            PingPeek::Answered => return Ok(Accepted::Nothing),
+            PingPeek::NotPing => {
+                PING_PEEK_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            PingPeek::Unknown => {}
+        }
+    }
+    Ok(Accepted::Client(selected_fd))
 }
 
 #[cfg(test)]
@@ -1307,9 +1597,8 @@ mod tests {
                 0
             );
             let (peer, server) = (fds[0], fds[1]);
-            let ping = crate::packet_ffi::make_ping_packet();
-            assert!(!ping.is_null());
-            assert_eq!(send_all(peer, ping, 32), true);
+            let ping = morloc_runtime_types::packet::PacketHeader::ping().to_bytes();
+            assert_eq!(send_all(peer, ping.as_ptr(), 32), true);
 
             assert!(
                 matches!(try_answer_ping(server), PingPeek::Answered),
@@ -1322,7 +1611,6 @@ mod tests {
             let mut e: *mut c_char = ptr::null_mut();
             assert!(crate::packet_ffi::packet_is_ping(pong.as_ptr(), &mut e));
             if !e.is_null() { libc::free(e as *mut c_void); }
-            libc::free(ping as *mut c_void);
             libc::close(peer);
 
             // -- non-ping: not consumed, left for the worker --
@@ -1365,11 +1653,7 @@ mod tests {
             let (peer, server) = (fds[0], fds[1]);
             // Start from a genuine ping header, then forge a nonzero length so
             // morloc_packet_size(hdr) != 32.
-            let ping = crate::packet_ffi::make_ping_packet();
-            assert!(!ping.is_null());
-            let mut hdr = [0u8; 32];
-            std::ptr::copy_nonoverlapping(ping, hdr.as_mut_ptr(), 32);
-            libc::free(ping as *mut c_void);
+            let mut hdr = morloc_runtime_types::packet::PacketHeader::ping().to_bytes();
             // PacketHeader length is the last 4 bytes (see morloc_packet_size =
             // 32 + offset + length); set a large length to force the over-read.
             hdr[28] = 0x00; hdr[29] = 0x10; hdr[30] = 0x00; hdr[31] = 0x00;
@@ -1397,6 +1681,34 @@ mod tests {
 #[cfg(test)]
 mod dispatch_fork_tests {
     use super::*;
+
+    // A pool's accept loop learns of a watched descriptor's end, such as
+    // the nexus's lifeline, without a thread of its own blocked on it.
+    #[test]
+    fn an_accept_wait_reports_a_watched_descriptor_that_ended() {
+        let (server, _path, dir) = listening_socket();
+        // A shutdown reaches the other end even when concurrent tests' forked
+        // children hold copies of this descriptor; a close would not.
+        let mut p = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, p.as_mut_ptr()) }, 0);
+        let quiet = unsafe { accept_or_watch(server, 20_000, &[p[0]]) }.unwrap();
+        unsafe { libc::shutdown(p[1], libc::SHUT_WR) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let ended = loop {
+            let got = unsafe { accept_or_watch(server, 1_000_000, &[p[0]]) }.unwrap();
+            if !matches!(got, Accepted::Nothing) || std::time::Instant::now() > deadline {
+                break got;
+            }
+        };
+        unsafe {
+            libc::close(p[0]);
+            libc::close(p[1]);
+            libc::close(server);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(quiet, Accepted::Nothing), "a live descriptor was reported");
+        assert!(matches!(ended, Accepted::Watched(0)), "the ended descriptor was not reported");
+    }
 
     fn listening_socket() -> (i32, std::ffi::CString, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("mlc-peer-{}-{:?}", std::process::id(), std::thread::current().id()));
@@ -1438,6 +1750,208 @@ mod dispatch_fork_tests {
         pid
     }
 
+    fn big_buffer() -> Vec<u8> {
+        vec![7u8; 8 << 20]
+    }
+
+    #[test]
+    fn a_reply_to_a_stopped_reader_waits_until_it_resumes() {
+        let (listener, path, dir) = listening_socket();
+        let client = unsafe { morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        let want = big_buffer().len();
+        let child = unsafe {
+            connecting_child(&path, client, |fd| {
+                libc::raise(libc::SIGSTOP);
+                let mut buf = vec![0u8; 1 << 16];
+                let mut got = 0usize;
+                loop {
+                    let n = libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len());
+                    if n <= 0 {
+                        break;
+                    }
+                    got += n as usize;
+                }
+                libc::_exit(if got == want { 0 } else { 3 });
+            })
+        };
+        unsafe { libc::close(client) };
+        let conn = unsafe { morloc_runtime_types::fd::accept(listener, ptr::null_mut(), ptr::null_mut()) };
+        assert!(conn >= 0);
+        unsafe { libc::fcntl(conn, libc::F_SETFL, libc::O_NONBLOCK) };
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, libc::WUNTRACED) }, child);
+        let resumer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+            crate::signal_test_child(child, libc::SIGCONT);
+        });
+        SEND_STALL_LIMIT.with(|l| l.set(Some(std::time::Duration::from_millis(1000))));
+        let buf = big_buffer();
+        let sent = unsafe { send_all(conn, buf.as_ptr(), buf.len()) };
+        SEND_STALL_LIMIT.with(|l| l.set(None));
+        unsafe { libc::close(conn) };
+        resumer.join().unwrap();
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        unsafe { libc::close(listener) };
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(sent, "a stopped reader is alive, so the send waits for it");
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "the reader got every byte: {status}");
+    }
+
+    /// A pipe whose read end a child waits on until the test closes the
+    /// write end (or 30 s pass, since concurrent tests' children may hold
+    /// copies of it).
+    fn hold_pipe() -> [libc::c_int; 2] {
+        let mut p = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { morloc_runtime_types::fd::pipe(p.as_mut_ptr()) }, 0);
+        p
+    }
+
+    /// In a forked child: fork a grandchild that keeps this process's
+    /// descriptors open until `hold` is released, then return.
+    unsafe fn leave_a_holder(hold: &[libc::c_int; 2]) {
+        let grandchild = libc::fork();
+        if grandchild == 0 {
+            libc::close(hold[1]);
+            let mut pfd = libc::pollfd { fd: hold[0], events: libc::POLLIN, revents: 0 };
+            libc::poll(&mut pfd, 1, 30_000);
+            libc::_exit(0);
+        }
+        if grandchild < 0 {
+            libc::_exit(5);
+        }
+    }
+
+    #[test]
+    fn a_reply_to_a_reader_that_died_ends_though_its_fd_lives_on() {
+        let (listener, path, dir) = listening_socket();
+        let client = unsafe { morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        let hold = hold_pipe();
+        let child = unsafe { connecting_child(&path, client, move |_| leave_a_holder(&hold)) };
+        unsafe {
+            libc::close(client);
+            libc::close(hold[0]);
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "the child failed: {status}");
+        let conn = unsafe { morloc_runtime_types::fd::accept(listener, ptr::null_mut(), ptr::null_mut()) };
+        assert!(conn >= 0);
+        unsafe { libc::fcntl(conn, libc::F_SETFL, libc::O_NONBLOCK) };
+        let started = std::time::Instant::now();
+        let buf = big_buffer();
+        let sent = unsafe { send_all(conn, buf.as_ptr(), buf.len()) };
+        let took = started.elapsed();
+        unsafe {
+            libc::close(hold[1]);
+            libc::close(conn);
+            libc::close(listener);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(!sent, "the reader is gone");
+        assert!(took < std::time::Duration::from_secs(5), "noticed within the liveness check: {took:?}");
+    }
+
+    #[test]
+    fn a_request_whose_header_arrives_in_pieces_is_read_whole() {
+        let (listener, path, dir) = listening_socket();
+        let client = unsafe { morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        let mut packet = crate::packet::PacketHeader::ping().to_bytes().to_vec();
+        let payload = b"0123456789abcdef";
+        let len = payload.len() as u64;
+        packet[morloc_runtime_types::packet::PKT_HEADER_SIZE - 8..].copy_from_slice(&len.to_le_bytes());
+        packet.extend_from_slice(payload);
+        let sent = packet.clone();
+        let child = unsafe {
+            connecting_child(&path, client, move |fd| {
+                libc::write(fd, sent.as_ptr() as *const c_void, 10);
+                libc::usleep(200_000);
+                libc::write(fd, sent[10..].as_ptr() as *const c_void, sent.len() - 10);
+                libc::sleep(2);
+            })
+        };
+        unsafe { libc::close(client) };
+        let conn = unsafe { morloc_runtime_types::fd::accept(listener, ptr::null_mut(), ptr::null_mut()) };
+        assert!(conn >= 0);
+        let mut err: *mut c_char = ptr::null_mut();
+        let got = unsafe { stream_from_client(conn, &mut err) };
+        unsafe {
+            crate::signal_test_child(child, libc::SIGKILL);
+            libc::waitpid(child, ptr::null_mut(), 0);
+            libc::close(conn);
+            libc::close(listener);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        assert!(err.is_null(), "{}", unsafe { CStr::from_ptr(err) }.to_string_lossy());
+        let size = unsafe { crate::packet_ffi::morloc_packet_size(got, &mut err) };
+        let bytes = unsafe { std::slice::from_raw_parts(got, size) }.to_vec();
+        unsafe { libc::free(got as *mut c_void) };
+        assert_eq!(bytes, packet);
+    }
+
+    #[test]
+    fn a_caller_whose_callee_died_stops_waiting_though_the_fd_lives_on() {
+        let dir = std::env::temp_dir().join(format!("mlc-reply-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pipe");
+        let cpath = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        // The callee makes its own listener: a caller names its callee by the
+        // process that listened. Prepared here, as the child must not allocate.
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (d, b) in addr.sun_path.iter_mut().zip(cpath.as_bytes()) {
+            *d = *b as c_char;
+        }
+        let ready = hold_pipe();
+        let hold = hold_pipe();
+        let callee = unsafe { libc::fork() };
+        assert!(callee >= 0, "fork failed");
+        if callee == 0 {
+            unsafe {
+                let lfd = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+                let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+                if lfd < 0 || libc::bind(lfd, &addr as *const _ as *const libc::sockaddr, len) != 0 || libc::listen(lfd, 1) != 0 {
+                    libc::_exit(2);
+                }
+                libc::write(ready[1], b"r".as_ptr() as *const c_void, 1);
+                let conn = morloc_runtime_types::fd::accept(lfd, ptr::null_mut(), ptr::null_mut());
+                if conn < 0 {
+                    libc::_exit(2);
+                }
+                let mut header = [0u8; morloc_runtime_types::packet::PKT_HEADER_SIZE];
+                let mut got = 0usize;
+                while got < header.len() {
+                    let n = libc::read(conn, header.as_mut_ptr().add(got) as *mut c_void, header.len() - got);
+                    if n <= 0 {
+                        break;
+                    }
+                    got += n as usize;
+                }
+                leave_a_holder(&hold);
+                libc::_exit(0);
+            }
+        }
+        unsafe {
+            libc::close(hold[0]);
+            libc::close(ready[1]);
+        }
+        let mut b = 0u8;
+        assert_eq!(unsafe { libc::read(ready[0], &mut b as *mut u8 as *mut c_void, 1) }, 1, "the callee did not start");
+        unsafe { libc::close(ready[0]) };
+        let reaper = std::thread::spawn(move || unsafe { libc::waitpid(callee, ptr::null_mut(), 0) });
+        let req = crate::packet::PacketHeader::ping().to_bytes();
+        let started = std::time::Instant::now();
+        let mut err: *mut c_char = ptr::null_mut();
+        let reply = unsafe { send_and_receive_over_socket(cpath.as_ptr(), req.as_ptr(), &mut err) };
+        let took = started.elapsed();
+        reaper.join().unwrap();
+        unsafe { libc::close(hold[1]) };
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(reply.is_null(), "no reply came");
+        unsafe { libc::free(err as *mut c_void) };
+        assert!(took < std::time::Duration::from_secs(5), "the dead callee was noticed: {took:?}");
+    }
+
     #[test]
     fn a_stopped_sender_keeps_its_request() {
         let (listener, path, dir) = listening_socket();
@@ -1454,7 +1968,7 @@ mod dispatch_fork_tests {
         assert!(conn >= 0);
         let resumer = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(2500));
-            unsafe { libc::kill(child, libc::SIGCONT) };
+            crate::signal_test_child(child, libc::SIGCONT);
         });
         let mut err: *mut c_char = ptr::null_mut();
         let request = unsafe { stream_from_client(conn, &mut err) };
@@ -1465,6 +1979,46 @@ mod dispatch_fork_tests {
         assert!(!request.is_null());
         unsafe {
             libc::free(request as *mut c_void);
+            libc::close(conn);
+            libc::close(listener);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_sender_counts_as_alive_until_it_exits_in_either_identity() {
+        let (listener, path, dir) = listening_socket();
+        let client = unsafe { morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        let child = unsafe {
+            connecting_child(&path, client, |_| {
+                libc::raise(libc::SIGSTOP);
+            })
+        };
+        let conn = unsafe { morloc_runtime_types::fd::accept(listener, ptr::null_mut(), ptr::null_mut()) };
+        assert!(conn >= 0);
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, libc::WUNTRACED) }, child);
+        assert!(libc::WIFSTOPPED(status));
+        let stamped = Peer::stamped(conn).unwrap();
+        let deferred = Peer::deferred(conn);
+        assert!(stamped.alive(), "a stopped sender is alive");
+        if let Some(d) = &deferred {
+            assert!(d.alive(), "a stopped sender is alive");
+        }
+        crate::signal_test_child(child, libc::SIGKILL);
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::waitid(libc::P_PID, child as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT) }, 0);
+        assert!(!stamped.alive(), "an unreaped sender is gone");
+        if let Some(d) = &deferred {
+            assert!(!d.alive(), "an unreaped sender is gone");
+        }
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(!stamped.alive(), "a reaped sender is gone");
+        if let Some(d) = &deferred {
+            assert!(!d.alive(), "a reaped sender is gone");
+        }
+        unsafe {
+            libc::close(client);
             libc::close(conn);
             libc::close(listener);
         }
@@ -1670,16 +2224,6 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn start_daemon(socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char, shm_default_size: usize, errmsg: *mut *mut c_char) -> *mut LanguageDaemon {
-        super::start_daemon(socket_path, tmpdir, shm_basename, shm_default_size, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn stream_from_client_wait(client_fd: i32, poll_timeout_us: i32, recv_timeout_us: i32, errmsg: *mut *mut c_char) -> *mut u8 {
-        super::stream_from_client_wait(client_fd, poll_timeout_us, recv_timeout_us, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn stream_from_client(client_fd: i32, errmsg: *mut *mut c_char) -> *mut u8 {
         super::stream_from_client(client_fd, errmsg)
     }
@@ -1687,16 +2231,6 @@ mod c_abi {
     #[no_mangle]
     pub extern "C" fn morloc_exit_if_forked() {
         super::morloc_exit_if_forked()
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn mlc_set_self_socket(socket_path: *const c_char) {
-        super::mlc_set_self_socket(socket_path)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn send_and_receive_over_socket_wait(socket_path: *const c_char, packet: *const u8, poll_timeout_us: i32, recv_timeout_us: i32, errmsg: *mut *mut c_char) -> *mut u8 {
-        super::send_and_receive_over_socket_wait(socket_path, packet, poll_timeout_us, recv_timeout_us, errmsg)
     }
 
     #[no_mangle]
@@ -1715,22 +2249,275 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn send_packet_to_foreign_server(client_fd: i32, packet: *mut u8, errmsg: *mut *mut c_char) -> usize {
-        super::send_packet_to_foreign_server(client_fd, packet, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn send_reply_to_foreign_server(client_fd: i32, packet: *mut u8, release: Option<unsafe extern "C" fn()>, errmsg: *mut *mut c_char) -> usize {
         super::send_reply_to_foreign_server(client_fd, packet, release, errmsg)
     }
+}
 
-    #[no_mangle]
-    pub unsafe extern "C" fn wait_for_client_with_timeout(daemon: *mut LanguageDaemon, timeout_us: i32, errmsg: *mut *mut c_char) -> i32 {
-        super::wait_for_client_with_timeout(daemon, timeout_us, errmsg)
+#[cfg(test)]
+mod reuse_tests {
+    use super::*;
+    use morloc_runtime_types::packet::{PacketHeader, MODE_KEEP, PKT_HEADER_SIZE, PKT_MODE_OFF};
+    use std::io::{Read, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Callee {
+        Keep,
+        Close,
+        DieAfterRead,
+        // NET-7: answers with `return_ping` and closes, as the accept loop
+        // and the Python and R pools answer a ping.
+        Pong,
     }
 
-    #[no_mangle]
-    pub unsafe extern "C" fn wait_for_client(daemon: *mut LanguageDaemon, errmsg: *mut *mut c_char) -> i32 {
-        super::wait_for_client(daemon, errmsg)
+    struct TestCallee {
+        path: std::ffi::CString,
+        dir: std::path::PathBuf,
+        accepts: Arc<AtomicUsize>,
+        runs: Arc<AtomicUsize>,
+        eofs: Arc<AtomicUsize>,
+        conns: Arc<Mutex<Vec<UnixStream>>>,
+    }
+
+    fn mode_of(header: &[u8]) -> u16 {
+        u16::from_le_bytes([header[PKT_MODE_OFF], header[PKT_MODE_OFF + 1]])
+    }
+
+    fn callee(behaviour: Callee) -> TestCallee {
+        let dir = std::env::temp_dir().join(format!("mlc-reuse-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("pipe");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let t = TestCallee {
+            path: std::ffi::CString::new(sock.to_str().unwrap()).unwrap(),
+            dir,
+            accepts: Arc::new(AtomicUsize::new(0)),
+            runs: Arc::new(AtomicUsize::new(0)),
+            eofs: Arc::new(AtomicUsize::new(0)),
+            conns: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (accepts, runs, eofs, conns) = (t.accepts.clone(), t.runs.clone(), t.eofs.clone(), t.conns.clone());
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { return };
+                accepts.fetch_add(1, Ordering::SeqCst);
+                if behaviour != Callee::Pong {
+                    conns.lock().unwrap().push(conn.try_clone().unwrap());
+                }
+                let (runs, eofs) = (runs.clone(), eofs.clone());
+                std::thread::spawn(move || loop {
+                    let mut header = [0u8; PKT_HEADER_SIZE];
+                    if conn.read_exact(&mut header).is_err() {
+                        eofs.fetch_add(1, Ordering::SeqCst);
+                        return;
+                    }
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    if behaviour == Callee::DieAfterRead {
+                        let _ = conn.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
+                    if behaviour == Callee::Pong {
+                        let mut err: *mut c_char = ptr::null_mut();
+                        let pong = unsafe { crate::packet_ffi::return_ping(header.as_ptr(), &mut err) };
+                        assert!(!pong.is_null(), "return_ping refused a ping");
+                        let _ = conn.write_all(unsafe { std::slice::from_raw_parts(pong, PKT_HEADER_SIZE) });
+                        unsafe { libc::free(pong as *mut c_void) };
+                        return;
+                    }
+                    let keep = behaviour == Callee::Keep && mode_of(&header) & MODE_KEEP != 0;
+                    let mut reply = PacketHeader::ping().to_bytes();
+                    if keep {
+                        reply[PKT_MODE_OFF..PKT_MODE_OFF + 2].copy_from_slice(&MODE_KEEP.to_le_bytes());
+                    }
+                    if conn.write_all(&reply).is_err() || !keep {
+                        return;
+                    }
+                });
+            }
+        });
+        t
+    }
+
+    fn call(t: &TestCallee) -> Result<u16, String> {
+        let req = PacketHeader::ping().to_bytes();
+        let mut err: *mut c_char = ptr::null_mut();
+        let reply = unsafe { send_and_receive_over_socket(t.path.as_ptr(), req.as_ptr(), &mut err) };
+        if reply.is_null() {
+            let m = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
+            unsafe { libc::free(err as *mut c_void) };
+            return Err(m);
+        }
+        let mode = mode_of(unsafe { std::slice::from_raw_parts(reply, PKT_HEADER_SIZE) });
+        unsafe { libc::free(reply as *mut c_void) };
+        Ok(mode)
+    }
+
+    fn eventually(what: impl Fn() -> bool) -> bool {
+        for _ in 0..100 {
+            if what() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        what()
+    }
+
+    #[test]
+    fn a_kept_connection_carries_the_next_calls() {
+        let t = callee(Callee::Keep);
+        for _ in 0..3 {
+            assert_eq!(call(&t), Ok(0), "the keep bit never reaches the caller's caller");
+        }
+        assert_eq!(t.accepts.load(Ordering::SeqCst), 1);
+        assert_eq!(t.runs.load(Ordering::SeqCst), 3);
+        assert_eq!(cached_connections(), 1);
+        drop_cached_connections();
+        assert!(eventually(|| t.eofs.load(Ordering::SeqCst) == 1), "closing the cache ends the callee's wait");
+        let _ = std::fs::remove_dir_all(&t.dir);
+    }
+
+    // NET-7: a pong keeps the connection only if the callee says so itself;
+    // one that answers and closes is never reused.
+    #[test]
+    fn a_ping_answered_by_a_callee_that_closes_is_not_kept() {
+        let t = callee(Callee::Pong);
+        for _ in 0..3 {
+            assert_eq!(call(&t), Ok(0));
+            assert_eq!(cached_connections(), 0, "a pong from a closing callee was kept");
+        }
+        assert_eq!(t.accepts.load(Ordering::SeqCst), 3);
+        let _ = std::fs::remove_dir_all(&t.dir);
+    }
+
+    #[test]
+    fn a_callee_that_does_not_keep_gets_a_connection_per_call() {
+        let t = callee(Callee::Close);
+        for _ in 0..3 {
+            assert_eq!(call(&t), Ok(0));
+        }
+        assert_eq!(t.accepts.load(Ordering::SeqCst), 3);
+        assert_eq!(cached_connections(), 0);
+        let _ = std::fs::remove_dir_all(&t.dir);
+    }
+
+    #[test]
+    fn a_kept_connection_whose_callee_is_gone_is_retried_once_on_a_new_one() {
+        let t = callee(Callee::Keep);
+        assert_eq!(call(&t), Ok(0));
+        for c in t.conns.lock().unwrap().drain(..) {
+            c.shutdown(std::net::Shutdown::Both).unwrap();
+        }
+        assert!(eventually(|| t.eofs.load(Ordering::SeqCst) == 1));
+        assert_eq!(call(&t), Ok(0));
+        assert_eq!(t.accepts.load(Ordering::SeqCst), 2);
+        assert_eq!(t.runs.load(Ordering::SeqCst), 2, "the request reached the callee once");
+        drop_cached_connections();
+        let _ = std::fs::remove_dir_all(&t.dir);
+    }
+
+    #[test]
+    fn a_call_whose_callee_dies_after_reading_it_fails_without_a_retry() {
+        let t = callee(Callee::DieAfterRead);
+        assert!(call(&t).is_err());
+        assert_eq!(t.runs.load(Ordering::SeqCst), 1, "the call ran once");
+        assert_eq!(t.accepts.load(Ordering::SeqCst), 1, "and was not sent again");
+        assert_eq!(cached_connections(), 0);
+        let _ = std::fs::remove_dir_all(&t.dir);
+    }
+
+    #[test]
+    fn a_forked_child_does_not_hold_its_parents_connections_open() {
+        let t = callee(Callee::Keep);
+        assert_eq!(call(&t), Ok(0));
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            unsafe {
+                libc::sleep(3);
+                libc::_exit(0);
+            }
+        }
+        drop_cached_connections();
+        let freed = eventually(|| t.eofs.load(Ordering::SeqCst) == 1);
+        unsafe {
+            crate::signal_test_child(child, libc::SIGKILL);
+            libc::waitpid(child, ptr::null_mut(), 0);
+        }
+        assert!(freed, "the callee saw the connection end while the child lived");
+        let _ = std::fs::remove_dir_all(&t.dir);
+    }
+
+    #[test]
+    fn the_keep_bit_is_cleared_from_a_reply() {
+        let mut p = PacketHeader::ping().to_bytes();
+        p[PKT_MODE_OFF..PKT_MODE_OFF + 2].copy_from_slice(&MODE_KEEP.to_le_bytes());
+        assert!(unsafe { take_keep_bit(p.as_mut_ptr()) });
+        assert_eq!(mode_of(&p), 0);
+        assert!(!unsafe { take_keep_bit(p.as_mut_ptr()) });
     }
 }
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn a_pool_removes_only_the_socket_file_it_bound() {
+        let dir = std::env::temp_dir().join(format!("mlc-endpoint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pipe");
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+
+        let ours = UnixListener::bind(&path).unwrap();
+        let (hold, id) = hold_socket_file(c.as_ptr());
+        drop(ours);
+        std::fs::remove_file(&path).unwrap();
+        let theirs = UnixListener::bind(&path).unwrap();
+        unsafe { unlink_if_ours(c.as_ptr(), id.unwrap()) };
+        assert!(path.exists(), "a file another pool bound at the path stays");
+        if hold >= 0 {
+            unsafe { libc::close(hold) };
+        }
+
+        let (hold, id) = hold_socket_file(c.as_ptr());
+        unsafe { unlink_if_ours(c.as_ptr(), id.unwrap()) };
+        assert!(!path.exists(), "the file this pool bound is removed");
+        if hold >= 0 {
+            unsafe { libc::close(hold) };
+        }
+        drop(theirs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod forward_reply_tests {
+    use super::*;
+
+    // DAEMON-6, NET-5
+    #[test]
+    fn a_reply_that_takes_its_time_is_read_and_a_closed_peer_ends_the_wait() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            let mut theirs = theirs;
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            theirs.write_all(&[0, 0, 0, 4]).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            theirs.write_all(b"abcd").unwrap();
+            theirs
+        });
+        let got = unsafe { recv_frame(ours.as_raw_fd()) };
+        assert_eq!(got.as_deref(), Ok(&b"abcd"[..]));
+        drop(writer.join().unwrap());
+        assert!(unsafe { recv_frame(ours.as_raw_fd()) }.is_err());
+    }
+}
+

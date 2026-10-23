@@ -1,0 +1,7 @@
+module mid (foo)
+
+import root-r
+import .sub
+
+source R from "mid.R" ("times_hundred" as foo)
+foo :: Int -> Int

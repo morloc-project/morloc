@@ -1,0 +1,16 @@
+-- One term exported in two groups: refused (CMD-4).
+
+module main
+  ( --* group: math
+    --* Arithmetic
+    f
+  , --* group: text
+    --* Strings
+    f
+  )
+
+import root-py
+
+--' Add one
+f :: Int -> Int
+f x = x + 1

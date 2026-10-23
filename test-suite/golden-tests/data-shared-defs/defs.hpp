@@ -17,10 +17,10 @@ struct Action_Chmod;
 struct Action_Noop;
 
 struct Action {
-    std::variant<std::shared_ptr<Action_Mkdir>,
-                 std::shared_ptr<Action_Rename>,
-                 std::shared_ptr<Action_Chmod>,
-                 std::shared_ptr<Action_Noop>> v;
+    std::variant<std::shared_ptr<const Action_Mkdir>,
+                 std::shared_ptr<const Action_Rename>,
+                 std::shared_ptr<const Action_Chmod>,
+                 std::shared_ptr<const Action_Noop>> v;
 };
 
 struct Action_Mkdir  { std::string f0; };
@@ -35,11 +35,11 @@ struct Step { int64_t n; Action action; };
 struct Plan { std::string label; Action first; Level level; };
 
 inline std::string cpp_describe(const Action& a) {
-    if (auto p = std::get_if<std::shared_ptr<Action_Mkdir>>(&a.v))
+    if (auto p = std::get_if<std::shared_ptr<const Action_Mkdir>>(&a.v))
         return "mkdir " + (*p)->f0;
-    if (auto p = std::get_if<std::shared_ptr<Action_Rename>>(&a.v))
+    if (auto p = std::get_if<std::shared_ptr<const Action_Rename>>(&a.v))
         return "rename " + (*p)->f0 + " " + (*p)->f1;
-    if (auto p = std::get_if<std::shared_ptr<Action_Chmod>>(&a.v))
+    if (auto p = std::get_if<std::shared_ptr<const Action_Chmod>>(&a.v))
         return "chmod " + (*p)->f0 + " " + std::to_string((*p)->f1);
     return "noop";
 }

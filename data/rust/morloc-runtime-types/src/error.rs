@@ -36,25 +36,30 @@ pub enum MorlocError {
     UserThrow(String),
 }
 
+/// A `malloc`ed copy of `s`, which the receiver releases with `free()`.
+pub fn malloc_cstr(s: &CStr) -> *mut c_char {
+    let bytes = s.to_bytes_with_nul();
+    unsafe {
+        let p = libc::malloc(bytes.len()) as *mut u8;
+        if p.is_null() {
+            crate::panic::fatal("out of memory copying a string for the caller")
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+        p as *mut c_char
+    }
+}
+
 /// Write a MorlocError into the C ERRMSG convention.
 ///
 /// # Safety
 /// `errmsg` must be a valid, non-dangling pointer to a `*mut c_char` (i.e., `char**`).
-/// The caller is responsible for freeing the allocated string via `CString::from_raw`
-/// or `libc::free`.
+/// The caller frees the string with `libc::free`.
 pub unsafe fn set_errmsg(errmsg: *mut *mut c_char, err: &MorlocError) {
     if !errmsg.is_null() {
-        let s = err.to_string();
-        match CString::new(s.clone()) {
-            Ok(cstr) => { *errmsg = cstr.into_raw(); }
-            Err(_) => {
-                // Interior NUL: substitute and still propagate.
-                let cleaned: String = s.chars().map(|c| if c == '\0' { '?' } else { c }).collect();
-                if let Ok(cstr) = CString::new(cleaned) {
-                    *errmsg = cstr.into_raw();
-                }
-            }
-        }
+        // An interior NUL is substituted so the message still propagates.
+        let cleaned: String = err.to_string().chars().map(|c| if c == '\0' { '?' } else { c }).collect();
+        let cstr = CString::new(cleaned).expect("NUL bytes were substituted");
+        *errmsg = malloc_cstr(&cstr);
     }
 }
 

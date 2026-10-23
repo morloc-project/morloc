@@ -36,6 +36,12 @@ all:
 	else \
 		echo "OK: truncated input rejected" >> obs.txt; \
 	fi
+	printf -- '--- truncated stdin payload ---\n' >> obs.txt
+	if head -c $$(( $$(wc -c < f.dat) - 4 )) f.dat | ./nexus readStream >> obs.txt 2>> obs.err; then \
+		echo "UNEXPECTED: truncated payload accepted" >> obs.txt; \
+	else \
+		echo "OK: truncated payload rejected" >> obs.txt; \
+	fi
 	# --- empty stdin is a legitimate empty batch ---
 	printf -- '--- empty stdin ---\n' >> obs.txt
 	printf '' | ./nexus readStream >> obs.txt 2>> obs.err

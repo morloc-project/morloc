@@ -1,6 +1,6 @@
 #[derive(Clone)]
 pub struct Ops {
-    pub inc: std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>>,
+    pub inc: std::sync::Arc<dyn Fn(&i64) -> i64 + Send + Sync>,
 }
 
 pub fn mark(s: &String) -> String {
@@ -12,15 +12,15 @@ pub fn str_len(s: &String) -> i64 {
 }
 
 pub fn use_ops(ops: &Ops, x: i64) -> i64 {
-    ops.inc.call1(&x)
+    (ops.inc)(&x)
 }
 
-pub fn use_list(fs: &Vec<std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>>>, x: i64) -> i64 {
-    fs[0].call1(&x) + fs[1].call1(&x)
+pub fn use_list(fs: &Vec<std::sync::Arc<dyn Fn(&i64) -> i64 + Send + Sync>>, x: i64) -> i64 {
+    fs[0](&x) + fs[1](&x)
 }
 
-pub fn apply_twice(f: impl rustmorloc::MorlocFn1<i64, i64>, x: i64) -> i64 {
-    f.call1(&f.call1(&x))
+pub fn apply_twice(f: impl Fn(&i64) -> i64, x: i64) -> i64 {
+    f(&f(&x))
 }
 
 pub fn tick(x: i64) -> i64 {

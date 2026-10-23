@@ -1,0 +1,10 @@
+numpyScalar rejected
+fakeArray rejected
+maskedArray rejected
+missingKey rejected
+growing rejected
+shrinking rejected
+[0,1,2]
+[0,1,2]
+0
+0

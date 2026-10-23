@@ -1,17 +1,12 @@
--- A list-of-tuples literal can inhabit a non-newtype-bodied type
--- (e.g. @MyMap a b@) when a @Packable@ instance declares the wire
--- form. In @class Packable a b where pack :: a -> b@, @a@ is the
--- wire and @b@ is the native, so the instance @Packable (List
--- (Tuple2 a b)) (MyMap a b)@ provides @pack :: List (Tuple a b) ->
--- MyMap a b@. The typechecker accepts the literal by walking the
--- Packable wire form; the code generator wraps the natural
--- wire-shaped value with the instance's @pack@ source.
+-- A list-of-tuples literal inhabits MyMap through its representation, and
+-- the code generator wraps the wire-shaped value with the Python native
+-- form's @pack@ source.
 
 module main (mapSize)
 
 import root-py
 
-newtype MyMap a b
+newtype MyMap a b = [(a, b)]
 type Py => (MyMap a b) = "dict" a b
 
 instance Packable (List (Tuple2 a b)) (MyMap a b) where

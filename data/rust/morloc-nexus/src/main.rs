@@ -5,7 +5,7 @@
 //! routes function calls to them over Unix sockets.
 
 #[cfg(not(panic = "unwind"))]
-compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
+compile_error!("morloc needs panic = \"unwind\" (model/runtime/panic.md PANIC-8)");
 mod cli;
 mod convert;
 mod dispatch;
@@ -56,6 +56,35 @@ fn watch_lifeline() {
         fn morloc_lifeline_guard();
     }
     unsafe { morloc_lifeline_guard() };
+}
+
+extern "C" {
+    fn morloc_custody_host_start();
+    fn morloc_custody_finish_all(status: u8);
+    fn morloc_custody_finish_stdio(status: u8);
+    fn morloc_custody_stop_all(status: u8);
+}
+
+/// Make the nexus the writer of every written stream (SLOT-10).
+pub(crate) fn custody_host_start() {
+    unsafe { morloc_custody_host_start() };
+}
+
+/// End the written streams still open: stdout and stderr only, or all.
+pub(crate) fn custody_finish(stdio_only: bool) {
+    let paused = morloc_runtime_types::packet::FOOTER_STATUS_PAUSED;
+    unsafe {
+        if stdio_only {
+            morloc_custody_finish_stdio(paused)
+        } else {
+            morloc_custody_finish_all(paused)
+        }
+    }
+}
+
+/// Stop every stream writer, finishing each file with `status`.
+pub(crate) fn custody_stop(status: u8) {
+    unsafe { morloc_custody_stop_all(status) };
 }
 
 fn main() {
@@ -109,7 +138,7 @@ fn main() {
     }
 
     // `morloc-nexus sweep-run <target> <nexus pid> <nexus start>`: started
-    // by a pool's teardown (model/daemon.md DAEMON-13), never by a user.
+    // by a pool's teardown (model/runtime/daemon.md DAEMON-13), never by a user.
     if std::env::args().nth(1).as_deref() == Some("sweep-run") {
         let args: Vec<String> = std::env::args().skip(2).collect();
         let (Some(target), Some(pid), Some(start)) = (
@@ -156,6 +185,7 @@ fn main() {
         }
         cli::Mode::View(ref vargs) => {
             process::init_shm();
+            custody_host_start();
             watch_lifeline();
             view::run(vargs);
         }
@@ -212,40 +242,25 @@ fn main() {
         }
     }
 
+    if let cli::Mode::Router(rargs) = &invocation.nexus.cmd {
+        let cfg = cli::router_args_to_config(rargs);
+        watch_lifeline();
+        run_router(&cfg);
+        std::process::exit(0);
+    }
+
     let mut manifest = match invocation.manifest {
         Some(m) => m,
         None => {
-            // Router mode or top-level help: still need to dispatch
-            // via the static `Nexus`. The legacy router branch below
-            // handles the only non-help case; help paths exited
-            // inside parse_invocation.
-            match invocation.nexus.cmd {
-                cli::Mode::Router(rargs) => {
-                    let cfg = cli::router_args_to_config(&rargs);
-                    watch_lifeline();
-                    run_router(&cfg);
-                    std::process::exit(0);
-                }
-                _ => {
-                    // clap rendered help and the process exited
-                    // inside parse_invocation; if we got here, the
-                    // user invoked a mode that needs a manifest
-                    // without supplying one and we should hand
-                    // control back to clap for a proper error.
-                    eprintln!("Error: missing required target argument");
-                    std::process::exit(2);
-                }
-            }
+            // Help paths exited inside parse_invocation, so this mode needs
+            // a manifest and none was given.
+            eprintln!("Error: missing required target argument");
+            std::process::exit(2);
         }
     };
 
     match invocation.nexus.cmd {
-        cli::Mode::Router(rargs) => {
-            let cfg = cli::router_args_to_config(&rargs);
-            watch_lifeline();
-            run_router(&cfg);
-            std::process::exit(0);
-        }
+        cli::Mode::Router(_) => unreachable!("router mode exits above"),
         cli::Mode::Run(rargs) => {
             format_explicit = rargs.common.output_form.is_some();
             let (mut cfg, _target) = cli::run_args_to_config(&rargs);
@@ -284,6 +299,19 @@ fn main() {
     // the protocol stream. See `mcp::rehome_stdout_for_protocol`.
     let mcp_protocol_fd: Option<i32> = if config.mcp_flag {
         Some(mcp::rehome_stdout_for_protocol())
+    } else {
+        None
+    };
+    // DAEMON-15: a served call cannot reach the server's own stdin; MCP over
+    // stdio keeps it, privately, as its request stream.
+    let mcp_protocol_in: Option<i32> = if config.mcp_flag || config.daemon_flag {
+        let saved = process::detach_stdin();
+        if config.mcp_flag && config.http_port.is_none() {
+            Some(saved)
+        } else {
+            unsafe { libc::close(saved) };
+            None
+        }
     } else {
         None
     };
@@ -492,8 +520,13 @@ fn main() {
     // @stderr through this dedicated socket; the fork-side child fd
     // hygiene installed in start_language_server takes fd 0/1 away
     // from the pool so the nexus keeps its bytes clean.
+    crate::process::remove_startup_env("MORLOC_STDOUT");
     if matches!(config.child, dispatch::ChildMode::Stage { .. }) {
-        crate::process::set_startup_env("MORLOC_STDOUT_STAGE", "1");
+        crate::process::set_startup_env("MORLOC_STDOUT", "stage");
+    }
+    // DAEMON-15
+    if config.daemon_flag || config.mcp_flag {
+        crate::process::set_startup_env("MORLOC_STDOUT", "refused");
     }
     stdio_server::start(&tmpdir, config.output_format, config.daemon_flag);
     watch_lifeline();
@@ -552,6 +585,7 @@ fn main() {
             &payload,
             &manifest,
             protocol_fd,
+            mcp_protocol_in.expect("stdio mcp keeps its request stream"),
         );
         // mcp::serve never returns.
     }
@@ -620,6 +654,8 @@ fn main() {
                 .find(|t| t.replay.as_deref() == Some(cmd.as_str()));
             if let Some(t) = term.filter(|t| t.render) {
                 set_render_output(&mut config, t.kind);
+            } else {
+                apply_value_form(&mut config, &manifest.commands[idx], format_explicit);
             }
             // Each input is a file the stage wrote, read as the manifest
             // says its argument is read (see `stageReplayArgs` in the
@@ -690,6 +726,7 @@ fn main() {
             }
             let (idx, values) =
                 parse_arg::redirect(&manifest, parsed.parent_index, parsed.values);
+            apply_value_form(&mut config, &manifest.commands[idx], format_explicit);
             dispatch::dispatch_command_parsed(
                 values,
                 &config,
@@ -712,6 +749,9 @@ fn main() {
         }
         let (cmd_index, values) = parse_arg::redirect(&manifest, parsed.cmd_index, parsed.values);
         let cmd = &manifest.commands[cmd_index];
+        if !parsed.render {
+            apply_value_form(&mut config, cmd, format_explicit);
+        }
         dispatch::dispatch_command_parsed(
             values,
             &config,
@@ -751,6 +791,14 @@ fn set_render_output(config: &mut dispatch::NexusConfig, kind: manifest::ActionK
     config.output_format = dispatch::OutputFormat::Raw;
     if kind == manifest::ActionKind::Stream {
         stdio_server::set_output_format(dispatch::OutputFormat::Raw);
+    }
+}
+
+/// A value whose type carries `@mime` is written as its bytes, as on every
+/// other interface, unless `-f` or `-p` asks for another form.
+fn apply_value_form(config: &mut dispatch::NexusConfig, cmd: &manifest::Command, format_explicit: bool) {
+    if !format_explicit && !config.print_flag && cmd.ret.mime.is_some() {
+        set_render_output(config, manifest::ActionKind::Value);
     }
 }
 
@@ -795,6 +843,7 @@ fn run_daemon(
         ) -> bool;
         fn parse_manifest(text: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
         fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char);
+        fn daemon_set_eval_exposure(exposed: bool, allow_no_auth: bool);
         fn daemon_set_http_access(address: u32, token: *const c_char);
     }
 
@@ -890,6 +939,21 @@ fn run_daemon(
             config.eval_sandbox,
             eval_allowed_cstr.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
         );
+        daemon_set_eval_exposure(config.eval_enabled, config.eval_allow_no_auth);
+    }
+    if config.eval_enabled && !config.eval_allow_no_auth {
+        let http_locked = config.http_port.is_some() && config.mcp_auth_token.is_none();
+        if http_locked || config.tcp_port.is_some() {
+            eprintln!(
+                "morloc-daemon: eval is exposed but LOCKED on {}. {}",
+                match (http_locked, config.tcp_port.is_some()) {
+                    (true, true) => "HTTP and TCP",
+                    (true, false) => "HTTP",
+                    _ => "TCP",
+                },
+                morloc_runtime_types::daemon_error::EVAL_NEEDS_TOKEN
+            );
+        }
     }
     let http_host = config.mcp_http_host.as_deref().unwrap_or("127.0.0.1");
     let http_token = config.mcp_auth_token.as_ref().map(|t| CString::new(t.as_str()).unwrap());
@@ -1156,6 +1220,9 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
     }
 
     // Check for error in response
+    if crate::dispatch::reply_is_pipe_closed(unsafe { std::slice::from_raw_parts(result_packet, 32) }) {
+        process::exit_broken_pipe();
+    }
     let run_err = unsafe { get_morloc_data_packet_error_message(result_packet, &mut errmsg) };
     if !run_err.is_null() {
         let s = unsafe { std::ffi::CStr::from_ptr(run_err) }.to_string_lossy().into_owned();

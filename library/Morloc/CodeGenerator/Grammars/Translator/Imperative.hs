@@ -56,10 +56,32 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , LoopResult (..)
   , ArgSite (..)
   , IOwnership (..)
+  , FieldRead (..)
 
     -- * Ownership of a projected value
   , consumableProjectionLets
+  , armIndex
+  , markLastReads
+  , markLastReadsWith
+  , markLastReadsSeeded
+  , lastBuilds
+  , markLastReadsInBody
+  , markLastReadsInNative
+  , namedIn
+  , loopBorrowLocals
+  , BorrowPart (..)
+  , BorrowTest (..)
+  , borrowPartOf
+  , varIndex
+  , consumedParams
+  , nativeManifoldsUnder
+  , RNode (..)
+  , rnodeChildren
+  , rnodeLet
+  , aliasChain
+  , isLastRead
   , isBorrowableProjection
+  , borrowableRoot
 
     -- * Default serialize/deserialize (for Python/R)
   , defaultSerialize
@@ -76,7 +98,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Tuple (swap)
-import Data.Char (isAlphaNum)
+import Data.Char (isAlpha, isAlphaNum)
 import qualified Data.Text as T
 import Data.Word (Word8)
 import GHC.Generics (Generic)
@@ -159,9 +181,10 @@ data IExpr
   | IPack Text IExpr -- packer(expr)
   | IRawExpr Text
   | IEval IExpr -- eval: call effect with no args
-  | IIntrinsicSave Text Int IExpr IExpr IExpr -- format, schemaId, level, data, path
+  | IIntrinsicSave SaveFormat Int IExpr IExpr IExpr -- format, schemaId, level, data, path
   | IIntrinsicLoad Int (Maybe IType) IExpr -- schemaId, returnType, path -> result (nullable)
   | IIntrinsicHash Int IExpr -- schemaId, data -> hex string
+  | IIntrinsicCompare Intrinsic Int IExpr IExpr -- @eq or @le, schemaId, two values -> Bool
   | IIntrinsicShow Int IExpr -- schemaId, data -> JSON string
   | IIntrinsicRead Int (Maybe IType) IExpr -- schemaId, returnType, json_string -> typed data (nullable)
   | IIntrinsicUnpack Int (Maybe IType) IExpr -- schemaId, returnType, packet bytes -> typed data
@@ -424,8 +447,9 @@ data ArgSite
   = SourcedArg Source Int
   -- ^ i-th argument of a sourced foreign call (carries the declared signature
   -- so a member can, e.g., pass a type-variable parameter by reference)
-  | ManifoldArg
-  -- ^ argument of a generated manifold call
+  | ManifoldArg Int Int
+  -- ^ argument of a generated manifold call: the callee and the position of
+  -- its parameter
   | ClosureArg
   -- ^ argument of a native closure application (a function-valued variable)
 
@@ -439,10 +463,16 @@ data IOwnership
   = Owned
   -- ^ an owned value (@T@): a literal, a call result, a constructor
   | BorrowedRef
-  -- ^ a shared reference (@&T@): a non-'Copy' bound variable
+  -- ^ a shared reference (@&T@): a non-'Copy' bound variable, or a
+  -- constructor field read in place (OWN-6)
   | BorrowedPlace
   -- ^ a place of type @T@ reached through a borrow (a field of a borrowed
   -- value): moving it out needs a clone, but it is not itself a reference
+  deriving (Eq, Show)
+
+-- | How a constructor field is read: taken out of its subject (OWN-5),
+-- borrowed where it lies (OWN-6), or copied out.
+data FieldRead = FieldTake | FieldBorrow | FieldCopy
   deriving (Eq, Show)
 
 -- | A sourced binary operator written between its operands.
@@ -459,8 +489,7 @@ data LowerConfig m = LowerConfig
   -- groups a source statement's @\@rsize@ declares). The first group is the
   -- call itself; each later group applies the function value the previous
   -- group returned. Default is juxtaposition, which is how a host language
-  -- with first-class callables spells it; Rust applies a function value
-  -- through its trait method instead.
+  -- with first-class callables spells it.
   , lcSourcedArg :: ArgSite -> IOwnership -> TypeM -> MDoc -> MDoc
   -- ^ How to pass one argument at a call, given the call kind ('ArgSite'), the
   -- argument's ownership ('IOwnership'), its 'TypeM', and its rendered
@@ -469,6 +498,10 @@ data LowerConfig m = LowerConfig
   -- shared, borrows every argument of a closure application to match the
   -- by-reference @Fn(&T, ...)@ calling convention, and clones/derefs a borrowed
   -- argument passed to a by-value parameter.
+  , lcConstArg :: Maybe [TypeM] -> TypeM -> MDoc -> MDoc
+  -- ^ Pass an argument that names a value ('namedArgs') to a sourced call or
+  -- a function value so the callee cannot change it (CPP-1). For an operand
+  -- of a sourced operator, the operand types are given. Default is identity.
   , lcOwnership :: NativeExpr -> m IOwnership
   -- ^ The ownership form a native expression evaluates to (default: always
   -- 'Owned'). Computed from the original IR so a use site can adapt it; monadic
@@ -529,10 +562,10 @@ data LowerConfig m = LowerConfig
   -- equality would compare payloads where a pattern must test the
   -- discriminant alone. Every backend asks a different way (@matches!@,
   -- @holds_alternative@, @isinstance@, @inherits@).
-  , lcCtorField :: MDoc -> Text -> Int -> Int -> MDoc -> MDoc
-  -- ^ Read one field out of a value whose arm is already established: the
-  -- type's rendered spelling, the arm's name, its tag, the field's index,
-  -- the subject.
+  , lcCtorField :: FieldRead -> MDoc -> Text -> Int -> Int -> MDoc -> MDoc
+  -- ^ Read one field out of a value whose arm is already established: how
+  -- the field is read, the type's rendered spelling, the arm's name, its
+  -- tag, the field's index, the subject.
   --
   -- Only ever emitted under a passing tag test, and unreachable from
   -- surface syntax -- a getter aimed at a `data` type is rejected, because
@@ -550,6 +583,14 @@ data LowerConfig m = LowerConfig
   -- deliberately compares against the bare constructor name rather than
   -- against the factor 'lcEnumLit' builds, which would allocate a whole
   -- level set per test.
+  , lcListLenTest :: MDoc -> Int -> MDoc
+  -- ^ Test whether a list has exactly this many elements ('IntrListLenTest'):
+  -- the subject and the length.
+  , lcListElem :: Bool -> MDoc -> Int -> MDoc
+  -- ^ Read element @i@ of a list; the flag marks an element read in place.
+  -- ^ Read the element at a 0-based index of a list ('IntrListElem'): the
+  -- subject and the index. Only ever emitted under a passing
+  -- 'lcListLenTest', so the index is in range.
   , lcCoerceOptional :: MDoc -> MDoc
   -- ^ Widen a value to an optional (@CoerceToOptional@). Default is identity: in
   -- C++/Python/R a @T@ is a valid @?T@ (their serializers are schema-driven). In
@@ -585,6 +626,13 @@ data LowerConfig m = LowerConfig
   , lcEvalPattern :: TypeF -> Pattern -> [MDoc] -> m MDoc
   -- ^ Pattern evaluation (language-specific because patterns use
   -- language-specific constructors for tuples/records)
+  , lcTakeSetter :: NativeExpr -> TypeF -> Selector -> [MDoc] -> m (Maybe MDoc)
+  -- ^ A setter whose receiver is kept (OWN-2): the receiver's original, the
+  -- result type, the selector, and the receiver and values. 'Nothing'
+  -- renders it with 'lcEvalPattern'.
+  , lcTakeGetter :: TypeF -> Selector -> MDoc -> m (Maybe MDoc)
+  -- ^ A getter on a receiver it owns (OWN-5): the receiver's type, the
+  -- selector and the receiver. 'Nothing' renders it with 'lcEvalPattern'.
   , lcListConstructor :: FVar -> [TypeF] -> [MDoc] -> MDoc
   -- ^ Build a list literal from rendered elements. R needs FVar to choose c() vs list().
   -- The [TypeF] is the FULL applied-type arg list (kind positions included).
@@ -598,11 +646,24 @@ data LowerConfig m = LowerConfig
   -- is not yet plumbed through Express -> Mono -> TupleN's FVar).
   , lcRecordConstructor :: TypeF -> NamType -> FVar -> [TypeF] -> [(Key, MDoc)] -> m PoolDocs
   -- ^ Build a record literal. C++ needs type lookup + counter for temp var.
+  , lcKeepContextArg :: Int -> Int -> Int -> TypeF -> MDoc -> m MDoc
+  -- ^ Adapt context argument @j@, local @i@ of the given type, of a fully
+  -- applied call of native manifold @m@ (OWN-3, OWN-7).
+  , lcKeepCallArg :: Int -> Int -> NativeExpr -> MDoc -> m MDoc
+  -- ^ Adapt argument @j@ of a call of native manifold @m@, given its
+  -- original (OWN-7).
+  , lcKeepSlot :: [Int] -> NativeExpr -> MDoc -> m MDoc
+  -- ^ Adapt the value a native loop ends with, given the loop's carried
+  -- locals and the value's original (OWN-2).
+  , lcKeepElem :: NativeExpr -> MDoc -> m MDoc
+  -- ^ Adapt a tuple, record or constructor element, the value an optional
+  -- coercion wraps, or the value a let's right-hand side ends in, given its
+  -- original (OWN-2).
   , lcStoreField :: TypeF -> MDoc -> m MDoc
   -- ^ Adapt a value to its stored representation inside an aggregate (given the
   -- element/field type). Applied to record fields AND list/tuple elements.
   -- Default is identity; the Rust member wraps a function value in
-  -- @Rc::new(..) as Rc<dyn MorlocFnN<..>>@ so it fits the boxed fat-trait-object
+  -- @Arc<dyn Fn>@ so it fits the boxed trait-object
   -- element type (a bare @impl Fn@ is illegal in a Vec/tuple/struct field, and
   -- the explicit cast is needed because a @vec![..]@ has no per-element declared
   -- type to drive the unsizing coercion). Monadic so the cast type can render.
@@ -613,9 +674,8 @@ data LowerConfig m = LowerConfig
   -- stage entry when it has one ('mlc_papply').
   , lcApplyClosure :: MDoc -> [MDoc] -> MDoc
   -- ^ Apply a local function value (a 'LocalCallP') to its arguments. Default is
-  -- a direct call @f(args)@; the Rust member emits @f.callN(args)@ (the fat/thin
-  -- trait method -- monomorphized and inlined for a thin closure, dispatched for
-  -- a boxed one) where N is the argument count.
+  -- a direct call @f(args)@; the Rust member parenthesizes the callee,
+  -- @(f)(args)@, since a field or call expression cannot be called bare.
   , lcForeignCall :: MDoc -> Int -> [MDoc] -> MDoc
   , lcRemoteCall :: MDoc -> Int -> RemoteResources -> [MDoc] -> m PoolDocs
   , lcCacheBody :: SerialAST -> Text -> Int -> [(Arg TypeM, SerialAST)] -> PoolDocs -> m PoolDocs
@@ -635,12 +695,11 @@ data LowerConfig m = LowerConfig
   -- lcDebugWrap closes over its own manifold @(name, srcloc)@ lookup
   -- (from 'makeManifoldDebugInfoLookup') and bakes the strings into the
   -- codegen'd call so the runtime can render them next to @mid=@.
-  , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Bool -> PoolDocs -> PoolDocs -> m PoolDocs
-  -- ^ Let binding assembly at the PoolDocs level. The 'Bool' marks a
-  -- borrow-safe RHS: a field/index projection rooted at a live variable
-  -- (see 'isBorrowableProjection'). A statically typed member may bind such
-  -- a RHS by reference to avoid copying the projected sub-value; members for
-  -- which this is meaningless ignore it.
+  , lcMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Maybe NativeExpr -> PoolDocs -> PoolDocs -> m PoolDocs
+  -- ^ Let binding assembly at the PoolDocs level. A native let of the IR
+  -- passes its right-hand side, from which a member decides how the local
+  -- binds it ('Morloc.CodeGenerator.Ownership.letMode'); a serial or helper
+  -- let passes nothing.
   , lcReleaseStmt :: Text -> MDoc
   -- ^ Produce a statement finishing with a let-bound packet variable:
   -- releasing the shared memory it owns, and, for a member that manages
@@ -656,16 +715,29 @@ data LowerConfig m = LowerConfig
   -- it can be applied later or passed on. Only the shared memory is given
   -- back; the buffer stays.
   , lcReturn :: MDoc -> MDoc
+  , lcFrameReturn :: Int -> TypeM -> Bool -> MDoc -> m (Maybe MDoc)
+  -- ^ For a manifold that records its call on the frame stack (STATE-5):
+  -- its return statement, which pops the call once the result is computed
+  -- (EMIT-3), given its mid, return type, whether the returned expression
+  -- names a local the function owns, and the expression. Nothing for a
+  -- manifold that records nothing, which returns with 'lcReturn'.
   , -- | A copy of an argument packet the manifold returns as its result.
     -- The argument lives in the incoming call, which is released before the
     -- result is sent, so a language that frees packets by hand must return
     -- a copy holding its own reference; a collected language returns it.
     lcDupPacket :: MDoc -> MDoc
+  , lcLoopBorrow :: Int -> NativeExpr -> m (Maybe MDoc)
+  -- ^ A native loop's local that holds a borrow ('loopBorrowLocals'): the
+  -- local, and the expression it is bound to, started from or replaced by,
+  -- rendered as a borrow. 'Nothing' when the local holds a value.
   , lcLoopLetRhs :: Int -> NativeExpr -> PoolDocs -> m PoolDocs
   -- ^ The right-hand side of a native let in a loop body, given the let's
   -- index and original expression. A loop let is emitted by the member's
   -- loop walker rather than 'lcMakeLet', so a member that binds some lets by
   -- taking their value (see 'consumableProjectionLets') applies it here.
+  , lcLetRhs :: Int -> NativeExpr -> PoolDocs -> m PoolDocs
+  -- ^ As 'lcLoopLetRhs', for a native let outside a loop: a member may
+  -- rewrite the lowered right-hand side here, before 'lcMakeLet' binds it.
   , lcOwnPacketDecl :: MDoc -> MDoc -> Maybe (MDoc, MDoc)
   -- ^ Given an owner variable and a fresh packet expression, a statement
   -- declaring the owner (which releases the packet when its scope ends) and
@@ -679,11 +751,16 @@ data LowerConfig m = LowerConfig
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
   -- Produces language-specific if/else structure using a temp result variable
-  , lcMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> LoopBody PoolDocs PoolDocs PoolDocs -> m PoolDocs
+  , lcShortCircuit :: Bool -> MDoc -> MDoc -> MDoc
+  -- ^ The language's own short-circuit operator applied to two expressions:
+  -- @True@ for and, @False@ for or. A conditional with a Bool literal arm
+  -- and an arm that needs no statements is written with it (BASE-3).
+  , lcMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> Maybe (LoopBody NativeExpr SerialExpr ()) -> LoopBody PoolDocs PoolDocs PoolDocs -> m PoolDocs
   -- ^ Tail-loop assembly. Args: what a base leaf yields; each loop-carried
   -- native local id, with the value it starts from when the loop declares
-  -- it; and the loop body as a 'LoopBody' tree whose leaves are already
-  -- lowered to 'PoolDocs'. Emits @while(1){ <walk the tree: guards -> if/else,
+  -- it; the loop body as the IR gives it, base leaves dropped, when it is
+  -- known, so a member can decide how each let binds; and the body with its
+  -- leaves already lowered to 'PoolDocs'. Emits @while(1){ <walk the tree: guards -> if/else,
   -- lets -> assignments, LoopBase -> result = base; break, LoopContinue ->
   -- reassign the loop-locals via temps> }@. The result 'PoolDocs' carries the
   -- loop as prior lines with the return flag set (a base value is the
@@ -750,12 +827,16 @@ data LowerConfig m = LowerConfig
       [MDoc] ->
       MDoc ->
       Maybe HeadManifoldForm ->
+      Bool ->
       m (Maybe MDoc)
-  -- ^ mid, name, all args, return (body) type, priorLines, body, headForm
+  -- ^ mid, name, all args, return (body) type, priorLines, body, headForm,
+  -- and whether the function is a closure (code outside morloc may call it)
   -- Returns Nothing if dedup'd (C++), Just funcDef otherwise. The mid
   -- is threaded so the per-manifold error-wrap can look up user name
   -- and srcloc for the trace line.
-  , lcMakePass :: MDoc -> TypeM -> MDoc -> [Arg TypeM] -> m MDoc
+  , lcManifoldName :: Int -> MDoc
+  -- ^ The name of a manifold's function, given its id.
+  , lcMakePass :: Int -> MDoc -> TypeM -> MDoc -> [Arg TypeM] -> m MDoc
   -- ^ Render a whole function/operator passed to a higher-order function
   -- (@ManifoldPass@), given the closure's own callable signature (from
   -- 'lcClosureSig'), the manifold name and its parameters. Most
@@ -763,7 +844,7 @@ data LowerConfig m = LowerConfig
   -- closure that adapts each argument to the manifold's parameter convention
   -- (deref a Copy scalar, forward a reference) since a bare @unsafe fn@ does
   -- not implement @Fn@.
-  , lcMakeLambda :: MDoc -> TypeM -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> m MDoc
+  , lcMakeLambda :: Int -> MDoc -> TypeM -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> m MDoc
   -- ^ closureSig, name, contextArgs, boundArgs - partial application
   -- expression. @closureSig@ is the language's rendering of the closure's own
   -- callable signature (from 'lcClosureSig'); languages that do not need it
@@ -874,7 +955,7 @@ nativeToWire cfg = go
       ty <- nominalTypeDoc cfg (serialAstToType var) cv
       resultType <- lcSerialAstType cfg var
       byVariantArm cfg resultType ty v arms $ \n i ss -> do
-        results <- zipWithM (\j s -> go (lcCtorField cfg ty n i j v) s) [0 ..] ss
+        results <- zipWithM (\j s -> go (lcCtorField cfg FieldCopy ty n i j v) s) [0 ..] ss
         let (befores, exprs) = unzip results
         return (concat befores, IRawExpr (render (lcVariantLit cfg ty n i (map (lcPrintExpr cfg) exprs))))
     construct _ _ = error "Unreachable in nativeToWire"
@@ -974,7 +1055,7 @@ wireToNative cfg = check
       ty <- nominalTypeDoc cfg (serialAstToType var) cv
       resultType <- lcDeserialAstType cfg var
       swap <$> byVariantArm cfg resultType ty v arms (\n i ss -> do
-        results <- zipWithM (\j s -> check (lcCtorField cfg ty n i j v) s) [0 ..] ss
+        results <- zipWithM (\j s -> check (lcCtorField cfg FieldCopy ty n i j v) s) [0 ..] ss
         let (exprs, befores) = unzip results
         return (concat befores, IRawExpr (render (lcVariantLit cfg ty n i (map (lcPrintExpr cfg) exprs)))))
     construct _ _ = error "Unreachable in wireToNative"
@@ -1022,11 +1103,11 @@ lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ socketFile) ForeignCa
 lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ socketFile) (RemoteCall res) args) _) =
   lcRemoteCall cfg socketFile mid res (map argNamer args)
 lowerSerialExpr cfg (AppRecS _ _ origEs) (AppRecS_ _ mid es) = do
-  return $ mergePoolDocs ((<>) (manNamer mid) . tupled) (ownFreshArgs cfg origEs es)
+  return $ mergePoolDocs ((<>) (lcManifoldName cfg mid) . tupled) (ownFreshArgs cfg origEs es)
 lowerSerialExpr cfg (AppForeignRecS _ _ _ origEs) (AppForeignRecS_ _ mid (Socket _ socketFile) es) = do
   return $ mergePoolDocs (\args -> lcForeignCall cfg socketFile mid args) (ownFreshArgs cfg origEs es)
-lowerSerialExpr _ _ (AppRecS_ _ mid es) = do
-  return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
+lowerSerialExpr cfg _ (AppRecS_ _ mid es) = do
+  return $ mergePoolDocs ((<>) (lcManifoldName cfg mid) . tupled) es
 lowerSerialExpr cfg _ (AppForeignRecS_ _ mid (Socket _ socketFile) es) = do
   return $ mergePoolDocs (\args -> lcForeignCall cfg socketFile mid args) es
 lowerSerialExpr cfg _ (CacheBodyS_ _ resSa lbl mid args body) =
@@ -1037,10 +1118,10 @@ lowerSerialExpr cfg (ReturnS (BndVarS _ _)) (ReturnS_ x) =
   return $ x {poolExpr = lcDupPacket cfg (poolExpr x), poolReturnFlag = True}
 lowerSerialExpr _ _ (ReturnS_ x) = return $ x {poolReturnFlag = True}
 lowerSerialExpr cfg (LoopS _ _ origBody) (LoopS_ _ ids body) = do
-  body' <- adaptLoopBodyOwned cfg (\_ d -> return d) origBody body
-  lcMakeLoop cfg LoopResultSerial [(i, Nothing) | i <- ids] body'
+  body' <- adaptLoopBodyOwned cfg (\_ d -> return d) ids origBody body
+  lcMakeLoop cfg LoopResultSerial [(i, Nothing) | i <- ids] (Just (trimap id id (const ()) origBody)) body'
 lowerSerialExpr cfg _ (LoopS_ _ ids body) =
-  lcMakeLoop cfg LoopResultSerial [(i, Nothing) | i <- ids] body
+  lcMakeLoop cfg LoopResultSerial [(i, Nothing) | i <- ids] Nothing body
 lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
   -- The let RHS is a SerializeS, so the bound variable owns a put_value
   -- tracker entry. Wrap the body to bind its result to a temp helper var,
@@ -1048,7 +1129,7 @@ lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
   -- temp as the new pool expression. This makes the SHM ref's lifetime
   -- end exactly at the body's last use of the bound variable rather than
   -- carrying it to the outer dispatch boundary.
-  letResult <- lcMakeLet cfg svarNamer i Nothing False e1 e2
+  letResult <- lcMakeLet cfg svarNamer i Nothing Nothing e1 e2
   if bodyIsBoundVar i e2
     then return letResult
     else do
@@ -1059,16 +1140,16 @@ lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
               { poolExpr = helperNamer tmpIdx
               , poolPriorLines = [releaseLine]
               }
-      lcMakeLet cfg helperNamer tmpIdx Nothing False letResult releaseBody
+      lcMakeLet cfg helperNamer tmpIdx Nothing Nothing letResult releaseBody
 lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) =
-  lcMakeLet cfg svarNamer i Nothing False e1 e2
+  lcMakeLet cfg svarNamer i Nothing Nothing e1 e2
 -- As for a native let ('NativeLetN_'): the bound local is owned, so its RHS
 -- is an owned sink.
 lowerSerialExpr cfg (NativeLetS _ rhsE _) (NativeLetS_ i e1 e2) = do
-  e1' <- adaptOwnedElem cfg rhsE e1
-  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) e1' e2
-lowerSerialExpr cfg _ (NativeLetS_ i e1 e2) =
-  lcMakeLet cfg nvarNamer i Nothing False e1 e2
+  e1' <- adaptOwnedElem cfg rhsE e1 >>= keepRhs cfg rhsE >>= lcLetRhs cfg i rhsE
+  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (Just rhsE) e1' e2
+lowerSerialExpr _ _ (NativeLetS_ i _ _) =
+  error ("morloc bug: native let " <> show i <> " lowered without its original")
 lowerSerialExpr _ _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
 lowerSerialExpr _ _ (BndVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
 lowerSerialExpr cfg (SerializeS _ origE) (SerializeS_ s e) = do
@@ -1136,8 +1217,8 @@ isBorrowableProjection _ = False
 -- 'LetVarN' is the only root a member may consider consuming, and even then
 -- only under 'consumableLetRoot'.
 borrowableRoot :: NativeExpr -> Bool
-borrowableRoot (LetVarN _ _) = True
-borrowableRoot (BndVarN _ _) = True
+borrowableRoot (LetVarN _ _ _) = True
+borrowableRoot (BndVarN _ _ _) = True
 borrowableRoot e = isBorrowableProjection e
 
 -- | The let indices whose constructor-payload projection may TAKE the payload
@@ -1156,13 +1237,21 @@ borrowableRoot e = isBorrowableProjection e
 --     result or a constructor literal, each of which allocates its payload on
 --     the spot and hands back the only reference to it;
 --   * the projection is the subject's only use that could read or share that
---     payload. A tag test reads the discriminant and never the payload, and
---     an arm that ends in a throw cannot be followed by anything, so neither
---     is counted. Every other mention -- a second projection, a capture, a
---     pass to a call, a @\@show@ on a path that continues -- disqualifies it.
+--     payload on the path that runs it. A tag test reads the discriminant
+--     and never the payload, and an arm that ends in a throw returns
+--     nothing, so neither is counted, and of a conditional's two arms only
+--     the one that uses the subject more is. Every other mention -- a
+--     second projection, a capture, a pass to a call -- disqualifies it;
+--   * walking the manifold in evaluation order, nothing names the subject
+--     after the projection on the path that runs it (a throw's argument may
+--     read it), and no suspension or closure names the subject or holds the
+--     projection of a subject bound outside it, since it may run later or
+--     more than once. @tagAfterMove@ allows a tag test after the
+--     projection; a member sets it when its projection leaves the
+--     discriminant readable.
 --
 -- A member consuming this set must render a bare-throw arm as non-returning,
--- which is what makes the second exemption sound.
+-- which is what makes the throw exemption sound.
 -- A let index names one binding within a manifold, not within a pool: two
 -- manifolds routinely bind the same index to different values. So each
 -- top-level manifold -- with every manifold nested in it -- is scanned as one
@@ -1171,16 +1260,618 @@ borrowableRoot e = isBorrowableProjection e
 -- scan merges the uses of any index two of its nested manifolds share, which
 -- can only make a candidate look more used than it is -- costing a copy,
 -- never permitting a take.
-consumableProjectionLets :: [SerialManifold] -> Set.Set (Int, Int)
-consumableProjectionLets sms =
+--
+-- A let index that two projections in one scan share is never a candidate:
+-- the decision is keyed by the index, so it would also reach the projection
+-- the conditions were not checked for.
+consumableProjectionLets :: Bool -> [SerialManifold] -> Set.Set (Int, Int)
+consumableProjectionLets tagAfterMove sms =
   Set.fromList
     [ (root, letIdx)
-    | sm@(SerialManifold root _ _ _ _) <- sms
+    | sm@(SerialManifold root _ _ _ body) <- sms
     , let scan = scanSM sm
+          projected = Map.fromListWith (+) [(l, 1 :: Int) | (l, _) <- csProjections scan]
     , (letIdx, subjIdx) <- csProjections scan
+    , Map.lookup letIdx projected == Just 1
     , maybe False buildsFreshValue (Map.lookup subjIdx (csDefs scan))
     , Map.findWithDefault 0 subjIdx (csUses scan) == 1
+    , isJust (moveWalk tagAfterMove subjIdx letIdx False (RS body))
     ]
+
+-- | A node of the IR, for walks that cross between its kinds.
+data RNode
+  = RS SerialExpr
+  | RN NativeExpr
+  | RSM SerialManifold
+  | RNM NativeManifold
+  | RLS (LoopBody NativeExpr SerialExpr SerialExpr)
+  | RLN (LoopBody NativeExpr SerialExpr NativeExpr)
+
+-- | A node's children, in the order the generated code evaluates them.
+rnodeChildren :: RNode -> [RNode]
+rnodeChildren (RSM (SerialManifold _ _ _ _ e)) = [RS e]
+rnodeChildren (RNM (NativeManifold _ _ _ e)) = [RN e]
+rnodeChildren (RS e) = case e of
+  ManS sm -> [RSM sm]
+  AppPoolS _ _ args -> map serialArg args
+  AppRecS _ _ es -> map RS es
+  AppForeignRecS _ _ _ es -> map RS es
+  CacheBodyS _ _ _ _ _ x -> [RS x]
+  DebugWrapS _ _ _ x -> [RS x]
+  ReturnS x -> [RS x]
+  SerialLetS _ a b -> [RS a, RS b]
+  NativeLetS _ a b -> [RN a, RS b]
+  LetVarS _ _ -> []
+  BndVarS _ _ -> []
+  SerializeS _ x -> [RN x]
+  LoopS _ _ body -> [RLS body]
+  where
+    serialArg (SerialArgManifold sm) = RSM sm
+    serialArg (SerialArgExpr x) = RS x
+rnodeChildren (RN e) = case e of
+  ManN nm -> [RNM nm]
+  AppExeN _ _ args -> map nativeArg args
+  ReturnN x -> [RN x]
+  SerialLetN _ a b -> [RS a, RN b]
+  NativeLetN _ a b -> [RN a, RN b]
+  LetVarN _ _ _ -> []
+  BndVarN _ _ _ -> []
+  DeserializeN _ _ x -> [RS x]
+  ExeN _ _ -> []
+  ListN _ _ xs -> map RN xs
+  TupleN _ xs -> map RN xs
+  RecordN _ _ _ kvs -> map (RN . snd) kvs
+  LogN _ _ -> []
+  RealN _ _ -> []
+  IntN _ _ -> []
+  StrN _ _ -> []
+  EnumN _ _ _ -> []
+  VariantN _ _ _ xs -> map RN xs
+  NullN _ -> []
+  DoBlockN _ x -> [RN x]
+  EvalN _ x -> [RN x]
+  CoerceN _ _ x -> [RN x]
+  IfN _ c t f -> [RN c, RN t, RN f]
+  IntrinsicN _ _ _ xs -> map RN xs
+  MapOptionalN _ _ _ x -> [RN x]
+  LoopN _ starts body -> map (RN . snd) starts <> [RLN body]
+  where
+    nativeArg (NativeArgManifold nm) = RNM nm
+    nativeArg (NativeArgExpr x) = RN x
+rnodeChildren (RLS b) = loopChildren RS RLS b
+rnodeChildren (RLN b) = loopChildren RN RLN b
+
+loopChildren :: (b -> RNode) -> (LoopBody NativeExpr SerialExpr b -> RNode) -> LoopBody NativeExpr SerialExpr b -> [RNode]
+loopChildren _ wrap (LoopIf c t f) = [RN c, wrap t, wrap f]
+loopChildren _ wrap (LoopNLet _ a b) = [RN a, wrap b]
+loopChildren _ wrap (LoopSLet _ a b) = [RS a, wrap b]
+loopChildren base _ (LoopBase x) = [base x]
+loopChildren _ _ (LoopContinue xs) = map RN xs
+
+-- | The native variable a let binds, its right-hand side and its body.
+rnodeLet :: RNode -> Maybe (Int, RNode, RNode)
+rnodeLet (RN (NativeLetN i a b)) = Just (i, RN a, RN b)
+rnodeLet (RS (NativeLetS i a b)) = Just (i, RN a, RS b)
+rnodeLet (RLS (LoopNLet i a b)) = Just (i, RN a, RLS b)
+rnodeLet (RLN (LoopNLet i a b)) = Just (i, RN a, RLN b)
+rnodeLet _ = Nothing
+
+-- | Whether a node names native variable @i@: a reference, or a manifold that
+-- captures it.
+rnodeNames :: Int -> RNode -> Bool
+rnodeNames i n = here n || any (rnodeNames i) (rnodeChildren n)
+  where
+    here (RN (LetVarN _ j _)) = i == j
+    here (RN (BndVarN _ j _)) = i == j
+    here (RSM (SerialManifold _ _ form _ _)) = any (\(Arg j _) -> j == i) (manifoldContext form)
+    here (RNM (NativeManifold _ _ form _)) = any (\(Arg j _) -> j == i) (manifoldContext form)
+    here _ = False
+
+-- | Whether a let binding native variable @i@ lies under a node.
+rnodeBinds :: Int -> RNode -> Bool
+rnodeBinds i n = maybe False (\(j, _, _) -> i == j) (rnodeLet n) || any (rnodeBinds i) (rnodeChildren n)
+
+-- | Walk a node in evaluation order, knowing whether subject @subj@ has been
+-- moved by projection let @k@: the state after it, or Nothing when the
+-- subject is named after the move, or moved from inside a closure that did
+-- not bind it. With @tagAfterMove@, a tag test may read the subject after
+-- the move.
+moveWalk :: Bool -> Int -> Int -> Bool -> RNode -> Maybe Bool
+moveWalk tagAfterMove subj k moved n = case n of
+  RN (IntrinsicN _ IntrTagTest _ (LetVarN _ j _ : rest))
+    | tagAfterMove && j == subj -> foldM (moveWalk tagAfterMove subj k) moved (map RN rest)
+  RN (LetVarN _ j _) | j == subj -> if moved then Nothing else Just moved
+  RN (BndVarN _ j _) | j == subj -> if moved then Nothing else Just moved
+  RN (IfN _ c t f) -> branch (RN c) (RN t) (RN f)
+  RLS (LoopIf c t f) -> branch (RN c) (RLS t) (RLS f)
+  RLN (LoopIf c t f) -> branch (RN c) (RLN t) (RLN f)
+  RN (DoBlockN _ _) -> closure
+  RNM _ -> closure
+  RSM _ -> closure
+  _ -> case rnodeLet n of
+    Just (i, rhs, body)
+      | i == k -> moveWalk tagAfterMove subj k moved rhs >> moveWalk tagAfterMove subj k True body
+      | i == subj -> moveWalk tagAfterMove subj k moved rhs >> moveWalk tagAfterMove subj k False body
+      | otherwise -> moveWalk tagAfterMove subj k moved rhs >>= \m -> moveWalk tagAfterMove subj k m body
+    Nothing -> foldM (moveWalk tagAfterMove subj k) moved (rnodeChildren n)
+  where
+    branch c t f = do
+      m <- moveWalk tagAfterMove subj k moved c
+      mt <- moveWalk tagAfterMove subj k m t
+      mf <- moveWalk tagAfterMove subj k m f
+      return (mt || mf)
+    closure
+      | rnodeBinds k n = if rnodeBinds subj n then foldM (moveWalk tagAfterMove subj k) moved (rnodeChildren n) else Nothing
+      | rnodeNames subj n = Nothing
+      | otherwise = Just moved
+
+-- | Mark the last reads of the values a native loop owns, carried or bound
+-- in the iteration (OWN-2, OWN-3, OWN-4).
+markLastReads :: (MFunctor a) => a -> a
+markLastReads = markLastReadsWith Map.empty Set.empty
+
+-- | 'markLastReads' where a local may refer into another value: @aliases@
+-- maps such a local to the value it refers into (OWN-2), and no read of a
+-- value in @held@ is marked.
+markLastReadsWith :: (MFunctor a) => Map.Map Int Int -> Set.Set Int -> a -> a
+markLastReadsWith aliases held = markLastReadsSeeded aliases held (const [])
+
+-- | 'markLastReadsWith' where native manifold @m@ also owns the parameters
+-- @params m@ (OWN-7).
+markLastReadsSeeded :: (MFunctor a) => Map.Map Int Int -> Set.Set Int -> (Int -> [Int]) -> a -> a
+markLastReadsSeeded aliases held params =
+  mmap (defaultValue {mapSerialExpr = onS, mapNativeExpr = onN, mapSerialManifold = onSM, mapNativeManifold = onNM})
+  where
+    mk = markers aliases held params
+    onS e@(LoopS t ids b) = maybe e (LoopS t ids . fst) (mkLoopS mk ids b)
+    onS e = e
+    onN e@(LoopN t starts b) = maybe e (LoopN t starts . fst) (mkLoopN mk (map fst starts) b)
+    onN e = e
+    onSM (SerialManifold m l f h e) = SerialManifold m l f h (fst (mkSerial mk e))
+    onNM (NativeManifold m l f e) = NativeManifold m l f (fst (mkNative mk m e))
+
+-- | How one body is marked, for 'markLastReadsSeeded' and 'lastBuilds' alike.
+data Markers = Markers
+  { mkNative :: Int -> NativeExpr -> (NativeExpr, [(Int, Int)])
+  , mkSerial :: SerialExpr -> (SerialExpr, [(Int, Int)])
+  , mkLoopN :: [Int] -> LoopBody NativeExpr SerialExpr NativeExpr -> Maybe (LoopBody NativeExpr SerialExpr NativeExpr, [(Int, Int)])
+  , mkLoopS :: [Int] -> LoopBody NativeExpr SerialExpr SerialExpr -> Maybe (LoopBody NativeExpr SerialExpr SerialExpr, [(Int, Int)])
+  }
+
+markers :: Map.Map Int Int -> Set.Set Int -> (Int -> [Int]) -> Markers
+markers aliases held params =
+  Markers
+    { mkNative = \m e ->
+        let en = env (RN e)
+            (e', (_, caps)) = markSpineN en (filter (`Set.notMember` meHeld en) (params m)) [] e
+         in (e', caps)
+    , mkSerial = \e -> let (e', (_, caps)) = markSpineS (env (RS e)) [] e in (e', caps)
+    , mkLoopN = \ids b -> Just (markLoopBody (env (RLN b)) RN ids b)
+    , mkLoopS = \ids b -> Just (markLoopBody (env (RLS b)) RS ids b)
+    }
+  where
+    env n = let e = markEnv aliases n in e {meHeld = meHeld e <> held}
+
+-- | The (manifold, value) pairs under some segments whose building is the
+-- value's last read at every place the manifold is built (OWN-3), marked as
+-- 'markLastReadsSeeded' marks them.
+lastBuilds :: Map.Map Int Int -> Set.Set Int -> (Int -> [Int]) -> [SerialManifold] -> Set.Set (Int, Int)
+lastBuilds aliases held params sms =
+  Set.fromList [mv | (mv, k) <- Map.toList found, Just k == Map.lookup (fst mv) sites]
+  where
+    mk = markers aliases held params
+    found = Map.fromListWith (+) [(mv, 1 :: Int) | sm <- sms, mv <- concatMap bodyBuilds (nodes (RSM sm))]
+    sites = Map.fromListWith (+) [(m, 1 :: Int) | sm <- sms, RNM (NativeManifold m _ _ _) <- nodes (RSM sm)]
+    nodes n = n : concatMap nodes (rnodeChildren n)
+    bodyBuilds n = case n of
+      RNM (NativeManifold m _ _ e) -> snd (mkNative mk m e)
+      RSM (SerialManifold _ _ _ _ e) -> snd (mkSerial mk e)
+      RN (LoopN _ starts b) -> maybe [] snd (mkLoopN mk (map fst starts) b)
+      RS (LoopS _ ids b) -> maybe [] snd (mkLoopS mk ids b)
+      _ -> []
+
+-- | What marking a body needs: the locals whose reads are reads of a value,
+-- and the values a @do@ block bound by a let reads, which none of their
+-- reads may move (OWN-3).
+data MarkEnv = MarkEnv
+  { meNames :: Int -> [Int]
+  , meHeld :: Set.Set Int
+  }
+
+markEnv :: Map.Map Int Int -> RNode -> MarkEnv
+markEnv aliases n = MarkEnv (namesOf aliases) (Set.fromList [t | j <- Set.toList (heldReads n), t <- j : aliasChain aliases j])
+
+-- | The variables read in the @do@ blocks a let binds under a node, a block
+-- the let's value holds through a conditional's arm, a nested let or a
+-- container included.
+heldReads :: RNode -> Set.Set Int
+heldReads n = here n <> Set.unions (map heldReads (rnodeChildren n))
+  where
+    here m = case m of
+      RN (NativeLetN _ rhs _) -> blocks rhs
+      RS (NativeLetS _ rhs _) -> blocks rhs
+      RLN (LoopNLet _ rhs _) -> blocks rhs
+      RLS (LoopNLet _ rhs _) -> blocks rhs
+      _ -> Set.empty
+    blocks e = case e of
+      DoBlockN _ x -> namedIn (RN x)
+      IfN _ _ a b -> blocks a <> blocks b
+      NativeLetN _ _ b -> blocks b
+      TupleN _ xs -> foldMap blocks xs
+      RecordN _ _ _ kvs -> foldMap (blocks . snd) kvs
+      VariantN _ _ _ xs -> foldMap blocks xs
+      ListN _ _ xs -> foldMap blocks xs
+      CoerceN _ _ x -> blocks x
+      _ -> Set.empty
+
+-- | Every native variable named under a node, the context arguments of the
+-- manifolds under it included.
+namedIn :: RNode -> Set.Set Int
+namedIn n = here n <> Set.unions (map namedIn (rnodeChildren n))
+  where
+    here m = case m of
+      RN (LetVarN _ j _) -> Set.singleton j
+      RN (BndVarN _ j _) -> Set.singleton j
+      RNM (NativeManifold _ _ f _) -> Set.fromList [i | Arg i _ <- manifoldContext f]
+      RSM (SerialManifold _ _ f _ _) -> Set.fromList [i | Arg i _ <- manifoldContext f]
+      _ -> Set.empty
+
+-- | 'markLastReads' over one serial body, with no aliases.
+markLastReadsInBody :: SerialExpr -> SerialExpr
+markLastReadsInBody e = fst (markSpineS (markEnv Map.empty (RS e)) [] e)
+
+-- | 'markLastReads' over one native body, with no aliases.
+markLastReadsInNative :: NativeExpr -> NativeExpr
+markLastReadsInNative e = fst (markSpineN (markEnv Map.empty (RN e)) [] [] e)
+
+-- | What marking a body found besides its marks: the reads of owned values
+-- it makes, and the (manifold, value) pairs whose building is the value's
+-- last read (OWN-3).
+type Found = (Map.Map Int Int, [(Int, Int)])
+
+-- | A let binding @i@ to a right-hand side, over a body the continuation
+-- marks: @i@ is owned in the body unless a @do@ block holds it. The
+-- right-hand side is marked last, given the reads of the body.
+markLet :: MarkEnv -> [Int] -> Int -> (Map.Map Int Int -> (x, Found)) -> ([Int] -> (b, Found)) -> ((x, b), Found)
+markLet env owned i rhs body =
+  let owned' = if Set.member i (meHeld env) then owned else i : owned
+      (body', (after, cb)) = body owned'
+      rest = Map.delete i after
+      (rhs', (here, cr)) = rhs rest
+   in ((rhs', body'), (Map.unionWith (+) here rest, cr <> cb))
+
+-- | Mark the last reads of the native lets of a body along its spine of
+-- lets and conditionals, every right-hand side a spine of its own: a step is
+-- a conditional's test or the value a spine ends in (OWN-2). @owned@ holds
+-- the lets in scope and @later@ the reads that follow the body; the result
+-- pairs the marked body with what it found.
+markSpineN :: MarkEnv -> [Int] -> [Map.Map Int Int] -> NativeExpr -> (NativeExpr, Found)
+markSpineN env owned later e = case e of
+  NativeLetN i rhs body ->
+    let ((rhs', body'), r) = markLet env owned i (\rest -> markSpineN env owned (rest : later) rhs) (\o -> markSpineN env o later body)
+     in (NativeLetN i rhs' body', r)
+  IfN t c a b ->
+    let (a', (ma, ca)) = markSpineN env owned later a
+        (b', (mb, cb)) = markSpineN env owned later b
+        arms = Map.unionWith max ma mb
+        here = stepReads env owned (RN c)
+        (c', cc) = markStep here (arms : later) c
+     in (IfN t c' a' b', (Map.unionWith (+) here arms, cc <> ca <> cb))
+  _ ->
+    let here = stepReads env owned (RN e)
+        (e', ce) = markStep here later e
+     in (e', (here, ce))
+
+markSpineS :: MarkEnv -> [Int] -> SerialExpr -> (SerialExpr, Found)
+markSpineS env owned e = case e of
+  NativeLetS i rhs body ->
+    let ((rhs', body'), r) = markLet env owned i (\rest -> markSpineN env owned [rest] rhs) (\o -> markSpineS env o body)
+     in (NativeLetS i rhs' body', r)
+  SerialLetS i rhs body ->
+    let (body', (after, cb)) = markSpineS env owned body
+        here = stepReads env owned (RS rhs)
+        (rhs', cr) = markStep here [after] rhs
+     in (SerialLetS i rhs' body', (Map.unionWith (+) here after, cr <> cb))
+  ReturnS x -> let (x', r) = markSpineS env owned x in (ReturnS x', r)
+  SerializeS ast x -> let (x', r) = markSpineN env owned [] x in (SerializeS ast x', r)
+  DebugWrapS t m args x -> let (x', r) = markSpineS env owned x in (DebugWrapS t m args x', r)
+  CacheBodyS t ast lbl m args x -> let (x', r) = markSpineS env owned x in (CacheBodyS t ast lbl m args x', r)
+  _ ->
+    let here = stepReads env owned (RS e)
+        (e', ce) = markStep here [] e
+     in (e', (here, ce))
+
+-- | Reads of owned values in one step, a read through an alias counting for
+-- every value its chain passes through.
+stepReads :: MarkEnv -> [Int] -> RNode -> Map.Map Int Int
+stepReads env owned n = Map.fromList [(v, k) | v <- owned, let k = sum [Map.findWithDefault 0 j counts | j <- meNames env v], k > 0]
+  where
+    counts = readCounts n
+
+-- | Mark, in a step, the reads of the values it reads once and nothing reads
+-- after it, and find the manifolds the step builds whose building is such a
+-- read.
+markStep :: (LastReadIn a) => Map.Map Int Int -> [Map.Map Int Int] -> a -> (a, [(Int, Int)])
+markStep here later x =
+  let vs = lastReadsOf here later
+   in (foldr lastReadIn x vs, [(m, v) | (m, ctx) <- builtIn (asNode x), v <- ctx, v `elem` vs])
+
+-- | The values a step reads once and nothing reads after it.
+lastReadsOf :: Map.Map Int Int -> [Map.Map Int Int] -> [Int]
+lastReadsOf here later = [v | (v, 1) <- Map.toList here, all (Map.notMember v) later]
+
+-- | The native manifolds a step builds, with the locals each reads to be
+-- built: none inside a body that may run more than once.
+builtIn :: RNode -> [(Int, [Int])]
+builtIn n = case n of
+  RNM (NativeManifold m _ f _) -> [(m, [i | Arg i _ <- manifoldContext f])]
+  RSM _ -> []
+  RN (DoBlockN _ _) -> []
+  RN (LoopN _ starts _) -> concatMap (builtIn . RN . snd) starts
+  RS (LoopS {}) -> []
+  _ -> concatMap builtIn (rnodeChildren n)
+
+-- | The locals whose reads are reads of a value: the value and every local
+-- whose chain of aliases passes through it. Built once per alias map.
+namesOf :: Map.Map Int Int -> Int -> [Int]
+namesOf aliases = \v -> v : Map.findWithDefault [] v referrers
+  where
+    referrers = Map.fromListWith (<>) [(t, [a]) | a <- Map.keys aliases, t <- aliasChain aliases a]
+
+-- | The values a local refers into, nearest first, stopping at a cycle.
+aliasChain :: Map.Map Int Int -> Int -> [Int]
+aliasChain aliases a = follow (Set.singleton a) (Map.lookup a aliases)
+  where
+    follow seen (Just t) | not (Set.member t seen) = t : follow (Set.insert t seen) (Map.lookup t aliases)
+    follow _ _ = []
+
+markLoopBody ::
+  (LastReadIn b) =>
+  MarkEnv ->
+  (b -> RNode) ->
+  [Int] ->
+  LoopBody NativeExpr SerialExpr b ->
+  (LoopBody NativeExpr SerialExpr b, [(Int, Int)])
+markLoopBody env baseNode carried b0 = let (b', (_, caps)) = go (filter (`Set.notMember` meHeld env) carried) b0 in (b', caps)
+  where
+    go owned (LoopBase x) =
+      let here = stepReads env owned (baseNode x)
+          (x', cx) = markStep here [] x
+       in (LoopBase x', (here, cx))
+    go owned (LoopContinue xs) =
+      let total = Map.unionsWith (+) (map (stepReads env owned . RN) xs)
+          marked = map (markStep total []) xs
+       in (LoopContinue (map fst marked), (total, concatMap snd marked))
+    go owned (LoopNLet i x b) =
+      let ((x', b'), r) = markLet env owned i (\rest -> markSpineN env owned [rest] x) (\o -> go o b)
+       in (LoopNLet i x' b', r)
+    go owned (LoopSLet i x b) =
+      let (b', (after, cb)) = go owned b
+          here = stepReads env owned (RS x)
+          (x', cx) = markStep here [after] x
+       in (LoopSLet i x' b', (Map.unionWith (+) here after, cx <> cb))
+    go owned (LoopIf g t e) =
+      let (t', (mt, ct)) = go owned t
+          (e', (me, ce)) = go owned e
+       in (LoopIf g t' e', (Map.unionWith (+) (stepReads env owned (RN g)) (Map.unionWith max mt me), ct <> ce))
+
+-- | How many times native variable @v@ is read under a node, where a read
+-- that may run more than once counts as two.
+readCount :: Int -> RNode -> Int
+readCount v n = Map.findWithDefault 0 v (readCounts n)
+
+-- | 'readCount' for every native variable read under a node.
+readCounts :: RNode -> Map.Map Int Int
+readCounts n = case n of
+  RN (LetVarN _ j _) -> Map.singleton j 1
+  RN (BndVarN _ j _) -> Map.singleton j 1
+  RN (IfN _ c a b) -> Map.unionWith (+) (readCounts (RN c)) (Map.unionWith max (readCounts (RN a)) (readCounts (RN b)))
+  RN (DoBlockN _ _) -> repeated n
+  RN (LoopN _ starts body) -> Map.unionsWith (+) (repeated (RLN body) : [readCounts (RN x) | (_, x) <- starts])
+  RS (LoopS {}) -> repeated n
+  RNM (NativeManifold _ _ f body) -> Map.unionWith (+) (Map.fromListWith (+) [(i, 1) | Arg i _ <- manifoldContext f]) (Map.fromSet (const 2) (outside f body))
+  RSM _ -> repeated n
+  _ -> Map.unionsWith (+) (map readCounts (rnodeChildren n))
+  where
+    repeated m = Map.fromSet (const 2) (namedIn m)
+    -- a native manifold reads each context argument once, when it is built
+    -- (OWN-3); a local its body names that is neither one of those nor its
+    -- own counts as read any number of times
+    outside f body = namedIn (RN body) `Set.difference` (Set.fromList [i | Arg i _ <- typeMofForm f] <> boundIn (RN body))
+    boundIn m = Set.fromList (maybe [] (\(i, _, _) -> [i]) (rnodeLet m) <> slots m) <> Set.unions (map boundIn (rnodeChildren m))
+    slots (RN (LoopN _ starts _)) = map fst starts
+    slots (RS (LoopS _ ids _)) = ids
+    slots (RNM (NativeManifold _ _ g _)) = [i | Arg i _ <- typeMofForm g]
+    slots (RSM (SerialManifold _ _ g _ _)) = [i | Arg i _ <- typeMofForm g]
+    slots _ = []
+
+-- | Mark the reads of native variable @v@ under a node as its last, leaving
+-- closures, manifolds and nested loops alone.
+class LastReadIn a where
+  lastReadIn :: Int -> a -> a
+  asNode :: a -> RNode
+
+instance LastReadIn NativeExpr where
+  lastReadIn v = mgatedMap lastReadGate (lastReadMap v)
+  asNode = RN
+
+instance LastReadIn SerialExpr where
+  lastReadIn v = mgatedMap lastReadGate (lastReadMap v)
+  asNode = RS
+
+lastReadGate :: GateMap
+lastReadGate =
+  defaultValue
+    { gateSerialManifold = const False
+    , gateNativeManifold = const False
+    , gateSerialExpr = \e -> case e of
+        LoopS {} -> False
+        _ -> True
+    , gateNativeExpr = \e -> case e of
+        DoBlockN {} -> False
+        _ -> True
+    }
+
+lastReadMap :: Int -> ManifoldMap
+lastReadMap v = defaultValue {mapNativeExpr = mark}
+  where
+    mark (LetVarN t j _) | j == v = LetVarN t j LastRead
+    mark (BndVarN t j _) | j == v = BndVarN t j LastRead
+    mark e = e
+
+-- | Whether an expression is a read of a native variable marked as its last.
+isLastRead :: NativeExpr -> Bool
+isLastRead (LetVarN _ _ LastRead) = True
+isLastRead (BndVarN _ _ LastRead) = True
+isLastRead _ = False
+
+-- | The locals under a manifold that hold a borrow rather than a value
+-- (OWN-6), given the manifold's borrowed parameters and which types may be
+-- borrowed. A loop's carried local qualifies when it starts from a borrow
+-- and every continue replaces it with part of one; a let, in a loop or not,
+-- qualifies when it names part of one. A part is the value itself, a
+-- constructor field or a record field. Nested manifolds are left to their
+-- own scope, and an index bound more than once under the manifold never
+-- qualifies.
+loopBorrowLocals :: (TypeF -> Bool) -> Set.Set Int -> RNode -> Set.Set Int
+loopBorrowLocals mayBorrow g root = go g root
+  where
+    go env n = case n of
+      RN (NativeLetN i rhs body)
+        | not (Set.member i reused)
+        , isJust (borrowPartOf mayBorrow (`Set.member` env) rhs) ->
+            Set.insert i (go env (RN rhs) <> go (Set.insert i env) (RN body))
+      RN (LoopN _ starts body) ->
+        let b = loopBorrows mayBorrow env reused starts body
+         in b <> mconcat (map (go (env <> b)) (filter (not . isManifold) (rnodeChildren n)))
+      _ -> mconcat (map (go env) (filter (not . isManifold) (rnodeChildren n)))
+    reused = Map.keysSet (Map.filter (> (1 :: Int)) (Map.fromListWith (+) [(i, 1) | i <- bindings root]))
+    bindings n = loopIds n <> maybe [] (\(i, _, _) -> [i]) (rnodeLet n) <> concatMap bindings (rnodeChildren n)
+    loopIds (RN (LoopN _ starts _)) = map fst starts
+    loopIds (RS (LoopS _ ids _)) = ids
+    loopIds _ = []
+    isManifold (RNM _) = True
+    isManifold (RSM _) = True
+    isManifold _ = False
+
+-- | The candidate parameters OWN-7 passes by value. The sinks are found
+-- only on the part of the body every evaluation runs.
+consumedParams :: Bool -> (Int -> Set.Set Int) -> (TypeF -> Bool) -> Set.Set Int -> NativeManifold -> Set.Set Int
+consumedParams listKeeps byValue mayBorrow cands nm@(NativeManifold _ _ _ body) =
+  Set.filter (\p -> Set.member p kept && Map.lookup p counts == Just 1) cands
+  where
+    counts = readCounts (RN body)
+    kept = sinks (RN body)
+    borrows = loopBorrowLocals mayBorrow cands (RNM nm)
+    sinks n = case n of
+      RN (IfN _ c _ _) -> sinks (RN c)
+      RN (LoopN _ starts _) -> here n <> mconcat [sinks (RN x) | (_, x) <- starts]
+      RN (DoBlockN _ _) -> Set.empty
+      RNM (NativeManifold m _ form@(ManifoldFull _) _) -> Set.fromList [p | (j, Arg p _) <- zip [0 ..] (typeMofForm form), Set.member j (byValue m)]
+      _ -> here n <> mconcat (map sinks (filter (not . isValueManifold) (rnodeChildren n)))
+    here (RN e) = case e of
+      LoopN _ starts _ -> Set.fromList [p | (s, BndVarN _ p _) <- starts, not (Set.member s borrows)]
+      VariantN _ _ _ xs -> vars xs
+      ListN _ _ xs | listKeeps -> vars xs
+      TupleN _ xs -> vars xs
+      RecordN _ _ _ kvs -> vars (map snd kvs)
+      AppExeN _ (RecCallP mid _) args -> Set.fromList [p | (j, NativeArgExpr a) <- zip [0 ..] args, Just p <- [readOf a], Set.member j (byValue mid)]
+      _ -> Set.empty
+    here _ = Set.empty
+    vars xs = Set.fromList [p | BndVarN _ p _ <- xs]
+    -- a nested manifold reads a parameter under its caller's index
+    readOf (BndVarN _ p _) = Just p
+    readOf (LetVarN _ p _) = Just p
+    readOf _ = Nothing
+    -- a fully applied manifold is a call, whose arguments may keep (OWN-7)
+    isValueManifold (RNM (NativeManifold _ _ ManifoldFull {} _)) = False
+    isValueManifold (RNM _) = True
+    isValueManifold (RSM _) = True
+    isValueManifold _ = False
+
+-- | Every native manifold under a node, nested ones included.
+nativeManifoldsUnder :: RNode -> [NativeManifold]
+nativeManifoldsUnder n = here <> concatMap nativeManifoldsUnder (rnodeChildren n)
+  where
+    here = case n of
+      RNM nm -> [nm]
+      _ -> []
+
+loopBorrows :: (TypeF -> Bool) -> Set.Set Int -> Set.Set Int -> [(Int, NativeExpr)] -> LoopBody NativeExpr SerialExpr NativeExpr -> Set.Set Int
+loopBorrows mayBorrow g reused starts body = settle (Set.fromList [i | (i, s) <- starts, borrowVar g s, not (Set.member i reused)])
+  where
+    ids = map fst starts
+    settle b =
+      let (lets, bad) = scan (Set.union g b) body
+          b' = Set.difference b bad
+       in if b' == b then Set.union b lets else settle b'
+    scan env (LoopNLet i rhs k)
+      | borrowPart env rhs && not (Set.member i reused) = let (l, bad) = scan (Set.insert i env) k in (Set.insert i l, bad)
+      | otherwise = scan (Set.delete i env) k
+    scan env (LoopSLet _ _ k) = scan env k
+    scan env (LoopIf _ t e) = scan env t <> scan env e
+    scan _ (LoopBase _) = (Set.empty, Set.empty)
+    scan env (LoopContinue xs) = (Set.empty, Set.fromList [i | (i, x) <- zip ids xs, not (borrowPart env x)])
+
+    borrowPart env e = isJust (borrowPartOf mayBorrow (`Set.member` env) e)
+
+    borrowVar env x = maybe False (`Set.member` env) (varIndex x)
+
+-- | The index a variable read reads.
+varIndex :: NativeExpr -> Maybe Int
+varIndex (LetVarN _ j _) = Just j
+varIndex (BndVarN _ j _) = Just j
+varIndex _ = Nothing
+
+-- | An expression whose value is a part of a borrow (OWN-6), in the shape a
+-- member renders it as a reference.
+data BorrowPart
+  = BorrowVar Int
+  | BorrowCtorField TypeF BorrowPart Text Integer
+  -- ^ the subject's type, the subject, the arm and the field
+  | BorrowField Int [Either Int Text]
+  -- ^ a getter of one path
+  | BorrowElem BorrowPart Integer
+  -- ^ a list subject and the element's index
+  | BorrowIf BorrowTest BorrowPart BorrowPart
+  -- ^ a test, then the two arms
+  | BorrowLet Int BorrowPart BorrowPart
+  | BorrowFail TypeF Text
+  -- ^ the type that fails to be made, and the message
+
+-- | A test a match makes on parts, without copying them.
+data BorrowTest
+  = TestTag TypeF BorrowPart Text
+  -- ^ a variant subject's type, the subject and the arm tested for
+  | TestAnd BorrowTest BorrowTest
+
+-- | The part of a borrow an expression names, given which types may be
+-- borrowed and which locals hold a borrow.
+borrowPartOf :: (TypeF -> Bool) -> (Int -> Bool) -> NativeExpr -> Maybe BorrowPart
+borrowPartOf mayBorrow = go
+  where
+    go env e
+      | not (mayBorrow (typeFof e)) = Nothing
+      | otherwise = case e of
+          IntrinsicN _ IntrCtorField _ [s, StrN _ n, IntN _ k] -> (\p -> BorrowCtorField (typeFof s) p n k) <$> go env s
+          IntrinsicN _ IntrListElem _ [s, IntN _ k] -> (`BorrowElem` k) <$> go env s
+          AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr s]
+            | not (selectorHasBracket sel), [path] <- ungroup sel -> (`BorrowField` path) <$> var env s
+          IfN _ c a b
+            | Just t <- test env c -> BorrowIf t <$> go env a <*> go env b
+          NativeLetN i rhs body -> BorrowLet i <$> go env rhs <*> go (\j -> j == i || env j) body
+          IntrinsicN t IntrThrow _ [StrN _ msg] -> Just (BorrowFail t msg)
+          _ -> BorrowVar <$> var env e
+    var env x = varIndex x >>= \j -> if env j then Just j else Nothing
+    test env c = case c of
+      IntrinsicN _ IntrTagTest _ [s, StrN _ n]
+        | not (isEnum (typeFof s)) ->
+            (\p -> TestTag (typeFof s) p n) <$> maybe (go env s) (Just . BorrowVar) (varIndex s)
+      IfN _ c1 c2 (LogN _ False) -> TestAnd <$> test env c1 <*> test env c2
+      NativeLetN i rhs body | varIndex body == Just i -> test env rhs
+      _ -> Nothing
+    isEnum EnumF {} = True
+    isEnum _ = False
 
 -- | What 'consumableProjectionLets' gathers in one pass: every native let's
 -- right-hand side, every payload projection paired with the index it reads
@@ -1225,7 +1916,7 @@ buildsFreshValue _ = False
 -- candidate: its subject is an alias, and an alias says nothing about who
 -- else holds the payload.
 projectionOf :: Int -> NativeExpr -> [(Int, Int)]
-projectionOf letIdx (IntrinsicN _ IntrCtorField _ (LetVarN _ subjIdx : _)) =
+projectionOf letIdx (IntrinsicN _ IntrCtorField _ (LetVarN _ subjIdx _ : _)) =
   [(letIdx, subjIdx)]
 projectionOf _ _ = []
 
@@ -1288,7 +1979,7 @@ scanLoop scanB lbody =
   let inner = go lbody
    in inner {csProjections = [p | p@(_, subj) <- csProjections inner, Map.member subj (csDefs inner)]}
   where
-    go (LoopIf e t f) = scanNE e <> go t <> go f
+    go (LoopIf e t f) = scanNE e <> eitherArm (go t) (go f)
     go (LoopNLet i rhs body) = scanLet i rhs <> scanNE rhs <> go body
     go (LoopSLet _ e body) = scanSE e <> go body
     go (LoopBase e) = scanB e
@@ -1300,8 +1991,8 @@ scanNE (AppExeN _ _ args) = mconcat (map scanNA args)
 scanNE (ReturnN e) = scanNE e
 scanNE (SerialLetN _ e1 e2) = scanSE e1 <> scanNE e2
 scanNE (NativeLetN i rhs body) = scanLet i rhs <> scanNE rhs <> scanNE body
-scanNE (LetVarN _ i) = scanUse i
-scanNE (BndVarN _ i) = scanUse i
+scanNE (LetVarN _ i _) = scanUse i
+scanNE (BndVarN _ i _) = scanUse i
 scanNE (DeserializeN _ _ e) = scanSE e
 scanNE (LoopN _ starts lbody) = mconcat (map (scanUse . fst) starts) <> mconcat (map (scanNE . snd) starts) <> scanLoop scanNE lbody
 scanNE (ExeN _ _) = mempty
@@ -1318,18 +2009,26 @@ scanNE (NullN _) = mempty
 scanNE (DoBlockN _ e) = scanNE e
 scanNE (EvalN _ e) = scanNE e
 scanNE (CoerceN _ _ e) = scanNE e
--- An arm that ends in a throw cannot be followed by anything, so what it
--- mentions can never be read after the conditional.
-scanNE (IfN _ c t f) = scanNE c <> scanArm t <> scanArm f
+-- An arm that ends in a throw returns nothing, so it is not counted; whether
+-- it runs after the projection is 'moveWalk''s question. Only one arm runs,
+-- so an index is used as often as the arm that uses it most.
+scanNE (IfN _ c t f) = scanNE c <> eitherArm (scanArm t) (scanArm f)
 -- A tag test reads the discriminant, never the payload, so naming a variable
 -- here does not make its payload observable. The discriminant is the
 -- variant's own index and lives outside the pointer the fields hang off, so
 -- it still reads correctly after a field has been taken -- a tag test that
 -- runs after the projection answers the same as one that runs before it.
-scanNE (IntrinsicN _ IntrTagTest _ (LetVarN _ _ : rest)) = mconcat (map scanNE rest)
-scanNE (IntrinsicN _ IntrTagTest _ (BndVarN _ _ : rest)) = mconcat (map scanNE rest)
+scanNE (IntrinsicN _ IntrTagTest _ (LetVarN _ _ _ : rest)) = mconcat (map scanNE rest)
+scanNE (IntrinsicN _ IntrTagTest _ (BndVarN _ _ _ : rest)) = mconcat (map scanNE rest)
 scanNE (IntrinsicN _ _ _ es) = mconcat (map scanNE es)
 scanNE (MapOptionalN _ _ _ e) = scanNE e
+
+eitherArm :: ConsumeScan -> ConsumeScan -> ConsumeScan
+eitherArm a b =
+  ConsumeScan
+    (dropColliding (csDefs a) (csDefs b))
+    (csProjections a <> csProjections b)
+    (Map.unionWith max (csUses a) (csUses b))
 
 scanArm :: NativeExpr -> ConsumeScan
 scanArm e
@@ -1347,6 +2046,10 @@ scanArm e
 argOwnerships :: (Monad m) => LowerConfig m -> NativeExpr -> m [IOwnership]
 argOwnerships cfg (AppExeN _ _ args) = mapM (nativeArgOwnership cfg) args
 argOwnerships _ _ = return (repeat Owned)
+
+nativeArgTypeF :: NativeArg -> TypeF
+nativeArgTypeF (NativeArgExpr e) = typeFof e
+nativeArgTypeF (NativeArgManifold nm) = typeFof nm
 
 nativeArgOwnership :: LowerConfig m -> NativeArg -> m IOwnership
 nativeArgOwnership cfg (NativeArgExpr e) = lcOwnership cfg e
@@ -1385,6 +2088,13 @@ adaptOwnedElems cfg origEs xs
   | length origEs == length xs = zipWithM (adaptOwnedElem cfg) origEs xs
   | otherwise = return xs
 
+-- | Render a loop local's expression as the borrow the local holds, or
+-- otherwise as the value the fallback makes.
+loopBorrowOr :: (Monad m) => LowerConfig m -> Int -> NativeExpr -> PoolDocs -> m PoolDocs -> m PoolDocs
+loopBorrowOr cfg i oe d fallback = do
+  borrowed <- lcLoopBorrow cfg i oe
+  maybe fallback (\x -> return d {poolExpr = x, poolPriorLines = []}) borrowed
+
 -- | Own-adapt a native loop body's owned sinks, pairing the lowered body with
 -- the original IR. A 'LoopContinue' argument feeds a loop-carried reassignment
 -- and an intermediate 'LoopNLet' RHS feeds a fresh local -- both owned sinks, so
@@ -1396,19 +2106,25 @@ adaptLoopBodyOwned ::
   (Monad m) =>
   LowerConfig m ->
   (b -> PoolDocs -> m PoolDocs) ->
+  [Int] ->
   LoopBody NativeExpr SerialExpr b ->
   LoopBody PoolDocs PoolDocs PoolDocs ->
   m (LoopBody PoolDocs PoolDocs PoolDocs)
-adaptLoopBodyOwned cfg adaptBase origBody body = go origBody body
+adaptLoopBodyOwned cfg adaptBase ids origBody body = go origBody body
   where
     go (LoopIf _ ot oe) (LoopIf c t e) = LoopIf c <$> go ot t <*> go oe e
-    go (LoopNLet _ orhs ob) (LoopNLet i rhs b) = do
-      rhs' <- adaptOwnedElem cfg orhs rhs >>= lcLoopLetRhs cfg i orhs
+    -- A let kept only when its original is the same let.
+    go (LoopNLet j orhs ob) (LoopNLet i rhs b) = do
+      let keep = if j == i then keepRhs cfg orhs else return
+      rhs' <- loopBorrowOr cfg i orhs rhs (adaptOwnedElem cfg orhs rhs >>= keep >>= lcLoopLetRhs cfg i orhs)
       LoopNLet i rhs' <$> go ob b
     go (LoopSLet _ orhs ob) (LoopSLet i rhs b) = do
       rhs' <- ownLoopPacket i orhs rhs
       LoopSLet i rhs' <$> go ob b
-    go (LoopContinue ones) (LoopContinue pds) = LoopContinue <$> adaptOwnedElems cfg ones pds
+    go (LoopContinue ones) (LoopContinue pds)
+      | length ones == length pds && length ids == length pds =
+          LoopContinue <$> sequence (zipWith3 (\i oe d -> loopBorrowOr cfg i oe d (adaptOwnedElem cfg oe d)) ids ones pds)
+      | otherwise = error "morloc bug: a loop continue whose values do not match its carried locals"
     go (LoopBase ob) (LoopBase d) = LoopBase <$> adaptBase ob d
     go _ lowered = return lowered
 
@@ -1438,8 +2154,29 @@ adaptLoopBodyOwned cfg adaptBase origBody body = go origBody body
     mentionsVar v d = any (== v) (T.split (not . isIdentChar) (render (vsep (poolPriorLines d <> [poolExpr d]))))
     isIdentChar c = isAlphaNum c || c == '_'
 
+-- | Adapt a let's right-hand side through 'lcKeepElem', given its original:
+-- the value a chain of lets ends in is kept.
+keepRhs :: (Monad m) => LowerConfig m -> NativeExpr -> PoolDocs -> m PoolDocs
+keepRhs cfg rhsE = keepOne cfg (valueOf rhsE)
+  where
+    valueOf (NativeLetN _ _ b) = valueOf b
+    valueOf e = e
+
+-- | Adapt one kept value through 'lcKeepElem', given its original.
+keepOne :: (Monad m) => LowerConfig m -> NativeExpr -> PoolDocs -> m PoolDocs
+keepOne cfg e pd = (\v -> pd {poolExpr = v}) <$> lcKeepElem cfg e (poolExpr pd)
+
+-- | Adapt each element of a tuple, record or constructor through
+-- 'lcKeepElem', given its original. Passes through unchanged when the
+-- original expression list is unavailable (length mismatch), mirroring
+-- 'adaptOwnedElems'.
+keepElems :: (Monad m) => LowerConfig m -> [NativeExpr] -> [PoolDocs] -> m [PoolDocs]
+keepElems cfg origEs xs
+  | length origEs == length xs = zipWithM (keepOne cfg) origEs xs
+  | otherwise = return xs
+
 -- | Adapt each aggregate element/field to its stored representation via
--- 'lcStoreField' (e.g. Rust boxes a function value into its @Rc<dyn MorlocFnN>@
+-- 'lcStoreField' (e.g. Rust boxes a function value into its @Arc<dyn Fn>@
 -- element type). Passes through unchanged when the original expression list is
 -- unavailable (length mismatch), mirroring 'adaptOwnedElems'.
 storeElems :: (Monad m) => LowerConfig m -> [NativeExpr] -> [PoolDocs] -> m [PoolDocs]
@@ -1567,6 +2304,63 @@ isValueArg (NativeArgExpr e) = case e of
   _ -> False
 isValueArg (NativeArgManifold _) = False
 
+-- | @if c then b else False@ is @c && b@ and @if c then True else b@ is
+-- @c || b@, written with the language's operator when @b@ needs no
+-- statements, so its evaluation stays where the conditional put it.
+-- An operand that is itself a chain of the same operator is written without
+-- its parentheses, so a chain is flat however long it is: both operators are
+-- associative and evaluate their operands left to right in every language.
+shortCircuit :: LowerConfig m -> NativeExpr -> NativeExpr -> NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> Maybe PoolDocs
+shortCircuit cfg condE thenE elseE condDocs thenDocs elseDocs = case (thenE, elseE) of
+  (_, LogN _ False) | null (poolPriorLines thenDocs) -> Just (combine True thenE thenDocs)
+  (LogN _ True, _) | null (poolPriorLines elseDocs) -> Just (combine False elseE elseDocs)
+  _ -> Nothing
+  where
+    combine isAnd otherE other = PoolDocs
+      { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds other
+      , poolExpr = parens (lcShortCircuit cfg isAnd (operand isAnd condE condDocs) (operand isAnd otherE other))
+      , poolPriorLines = poolPriorLines condDocs
+      , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs other
+      , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag other
+      , poolBorrowedLocal = Nothing
+      }
+    -- A chain written by 'combine' is exactly its operator expression in
+    -- parentheses; one that needed statements is a variable instead.
+    operand isAnd e docs
+      | chainOperator e == Just isAnd
+      , Just inner <- T.stripPrefix "(" (render (poolExpr docs)) >>= T.stripSuffix ")" =
+          pretty inner
+      | otherwise = poolExpr docs
+    chainOperator (IfN _ _ _ (LogN _ False)) = Just True
+    chainOperator (IfN _ _ (LogN _ True) _) = Just False
+    chainOperator _ = Nothing
+
+-- | For each argument of a call, whether it names a value: a variable, a
+-- newtype cast of one, a single-path field of one, or a constructor field or
+-- list element of one.
+namedArgs :: NativeExpr -> Int -> [Bool]
+namedArgs (AppExeN _ _ args) n | length args == n = map named args
+  where
+    named (NativeArgExpr e) = namesValue e
+    named _ = False
+    namesValue LetVarN {} = True
+    namesValue BndVarN {} = True
+    namesValue (CoerceN (CoerceNewtype _ _) _ x) = namesValue x
+    namesValue (IntrinsicN _ IntrCtorField _ (x : _)) = namesValue x
+    namesValue (IntrinsicN _ IntrListElem _ (x : _)) = namesValue x
+    namesValue (AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr x]) =
+      not (selectorHasBracket sel) && length (ungroup sel) == 1 && namesValue x
+    namesValue _ = False
+namedArgs e n = error $ "namedArgs: " <> show n <> " lowered arguments for " <> show e
+
+-- | Pass each argument of a call that names a value through 'lcConstArg';
+-- the operand types are given for a sourced operator.
+constArgs :: LowerConfig m -> Maybe [TypeM] -> NativeExpr -> [(TypeM, PoolDocs)] -> [(TypeM, PoolDocs)]
+constArgs cfg operands origExpr xs = zipWith wrap xs (namedArgs origExpr (length xs))
+  where
+    wrap (t, d) True = (t, d {poolExpr = lcConstArg cfg operands t (poolExpr d)})
+    wrap x False = x
+
 lowerNativeExprRaw ::
   (Monad m) =>
   LowerConfig m ->
@@ -1574,11 +2368,12 @@ lowerNativeExprRaw ::
   NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
   m PoolDocs
 -- Binary operator: emit (lhs op rhs) instead of function call
-lowerNativeExprRaw cfg _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
+lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es0@[_, _])
   | srcOperator src =
-      return $ mergePoolDocs (\xs -> case xs of [l, r] -> lcOperator cfg src l r; _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
-lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP src) es0) = do
-  es <- bindCallArgs cfg origExpr es0
+      let operands = map snd (constArgs cfg (Just (map fst es0)) origExpr es0)
+       in return $ mergePoolDocs (\xs -> case xs of [l, r] -> lcOperator cfg src l r; _ -> error "binary operator requires exactly 2 args") operands
+lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es1) = do
+  es <- bindCallArgs cfg origExpr (constArgs cfg Nothing origExpr es1)
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst es
       -- Only the FIRST group is passed to the source function; every later
@@ -1594,9 +2389,23 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP src) es0) = do
           [] -> lcSrcName cfg src
           (g0 : gs) -> foldl (lcApplySrcGroup cfg) (lcSrcName cfg src <> (if null g0 then tupled g0 else tupledNoFold g0)) gs
   return $ mergePoolDocs handleFunctionArgs (map snd es)
-lowerNativeExprRaw cfg _ (AppExeN_ t (PatCallP p) xs) = do
-  let es = map snd xs
-  patResult <- lcEvalPattern cfg t p (map poolExpr es)
+lowerNativeExprRaw cfg origExpr (AppExeN_ t (PatCallP p) xs) = do
+  es <- case (p, origExpr, map snd xs) of
+    -- A setter's new values are stored in the rebuilt record, an owned sink.
+    (PatternStruct sel, AppExeN _ _ (_ : vals), e0 : evs)
+      | not (selectorHasBracket sel), length vals == length evs -> (e0 :) <$> zipWithM ownedVal vals evs
+    (_, _, es0) -> return es0
+  taken <- case (p, origExpr, es) of
+    (PatternStruct sel, AppExeN _ _ [recv], [e])
+      | not (selectorHasBracket sel) -> do
+          own <- nativeArgOwnership cfg recv
+          if own == Owned
+            then lcTakeGetter cfg (nativeArgTypeF recv) sel (poolExpr e)
+            else return Nothing
+    (PatternStruct sel, AppExeN _ _ (NativeArgExpr recv : _ : _), _)
+      | not (selectorHasBracket sel) -> lcTakeSetter cfg recv t sel (map poolExpr es)
+    _ -> return Nothing
+  patResult <- maybe (lcEvalPattern cfg t p (map poolExpr es)) return taken
   return $
     PoolDocs
       { poolCompleteManifolds = concatMap poolCompleteManifolds es
@@ -1604,12 +2413,16 @@ lowerNativeExprRaw cfg _ (AppExeN_ t (PatCallP p) xs) = do
       , poolPriorLines = concatMap poolPriorLines es
       , poolPriorExprs = concatMap poolPriorExprs es
       , poolReturnFlag = any poolReturnFlag es
+      , poolBorrowedLocal = Nothing
       }
+  where
+    ownedVal (NativeArgExpr e) d = adaptOwnedElem cfg e d
+    ownedVal (NativeArgManifold _) d = return d
 -- Manifold-call arguments go through lcSourcedArg too (identity for most
 -- languages; the Rust member borrows every native arg so a value can fan out to
 -- several manifold calls as shared borrows instead of a move-after-move).
 lowerNativeExprRaw cfg origExpr (AppExeN_ _ (LocalCallP idx) xs0) = do
-  xs <- bindCallArgs cfg origExpr xs0
+  xs <- bindCallArgs cfg origExpr (constArgs cfg Nothing origExpr xs0)
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
   return $ mergePoolDocs (\es -> lcApplyClosure cfg (nvarNamer idx) (zipWith3 (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns argTypes es)) (map snd xs)
@@ -1623,10 +2436,18 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ t (PapplyP idx) xs0) = do
   call <- lcPapply cfg t argTypes (nvarNamer idx) es
   return $ mergePoolDocs (const call) (map snd xs)
 lowerNativeExprRaw cfg origExpr (AppExeN_ _ (RecCallP mid _) xs0) = do
-  xs <- bindCallArgs cfg origExpr xs0
+  xs1 <- bindCallArgs cfg origExpr xs0
+  xs <- case origExpr of
+    AppExeN _ _ args
+      | length args == length xs1 ->
+          sequence [(,) t <$> keepArg j a d | (j, a, (t, d)) <- zip3 [0 ..] args xs1]
+    _ -> return xs1
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
-  return $ mergePoolDocs (\es -> manNamer mid <> tupled (zipWith3 (\own t e -> lcSourcedArg cfg ManifoldArg own t e) owns argTypes es)) (map snd xs)
+  return $ mergePoolDocs (\es -> lcManifoldName cfg mid <> tupled (zipWith4 (\j own t e -> lcSourcedArg cfg (ManifoldArg mid j) own t e) [0 ..] owns argTypes es)) (map snd xs)
+  where
+    keepArg j (NativeArgExpr e) d = (\v -> d {poolExpr = v}) <$> lcKeepCallArg cfg mid j e (poolExpr d)
+    keepArg _ _ d = return d
 lowerNativeExprRaw _ _ (ManN_ call) = return call
 -- The manifold return is an owned sink: adapt the returned value to an owned
 -- value (Rust clones a borrowed/place value; other members are unchanged) so a
@@ -1645,7 +2466,7 @@ lowerNativeExprRaw cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2
   -- via SerialLetN -- e.g., the m1417-style wrapper around a foreign call.
   -- The body is a NativeExpr, so the temp's declared type must match it
   -- (rather than falling back to the serial type used for SerialLetS).
-  letResult <- lcMakeLet cfg svarNamer i Nothing False x1 x2
+  letResult <- lcMakeLet cfg svarNamer i Nothing Nothing x1 x2
   if bodyIsBoundVar i x2
     then return letResult
     else do
@@ -1657,7 +2478,7 @@ lowerNativeExprRaw cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2
               { poolExpr = helperNamer tmpIdx
               , poolPriorLines = [releaseLine]
               }
-      lcMakeLet cfg helperNamer tmpIdx (Just bodyT) False letResult releaseBody
+      lcMakeLet cfg helperNamer tmpIdx (Just bodyT) Nothing letResult releaseBody
 lowerNativeExprRaw cfg (SerialLetN _ rhs body) (SerialLetN_ i x1 x2)
   | isCallResult rhs = do
   -- The let RHS is a call into another pool, so the bound variable owns
@@ -1668,7 +2489,7 @@ lowerNativeExprRaw cfg (SerialLetN _ rhs body) (SerialLetN_ i x1 x2)
   -- at the body's last use rather than at the dispatch boundary. Without
   -- this a loop that calls into another pool holds every result it has
   -- ever received until the whole loop is done.
-  letResult <- lcMakeLet cfg svarNamer i Nothing False x1 x2
+  letResult <- lcMakeLet cfg svarNamer i Nothing Nothing x1 x2
   tmpIdx <- lcNewIndex cfg
   let bodyT = typeFof body
       releaseLine = releaseStmtFor cfg bodyT (render (svarNamer i))
@@ -1677,17 +2498,18 @@ lowerNativeExprRaw cfg (SerialLetN _ rhs body) (SerialLetN_ i x1 x2)
           { poolExpr = helperNamer tmpIdx
           , poolPriorLines = [releaseLine]
           }
-  lcMakeLet cfg helperNamer tmpIdx (Just bodyT) False letResult releaseBody
-lowerNativeExprRaw cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing False x1 x2
+  lcMakeLet cfg helperNamer tmpIdx (Just bodyT) Nothing letResult releaseBody
+lowerNativeExprRaw cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing Nothing x1 x2
 -- A native let binds an owned local, so its RHS is an owned sink: adapt the
 -- bound value (Rust clones a borrowed/place RHS -- e.g. a getter through a
 -- borrowed receiver -- to match the owned binding type; other members unchanged).
 lowerNativeExprRaw cfg (NativeLetN _ rhsE _) (NativeLetN_ i x1 x2) = do
-  x1' <- adaptOwnedElem cfg rhsE x1
-  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) x1' x2
-lowerNativeExprRaw cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing False x1 x2
-lowerNativeExprRaw _ _ (LetVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
-lowerNativeExprRaw _ _ (BndVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
+  x1' <- loopBorrowOr cfg i rhsE x1 (adaptOwnedElem cfg rhsE x1 >>= keepRhs cfg rhsE >>= lcLetRhs cfg i rhsE)
+  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (Just rhsE) x1' x2
+lowerNativeExprRaw _ _ (NativeLetN_ i _ _) =
+  error ("morloc bug: native let " <> show i <> " lowered without its original")
+lowerNativeExprRaw _ _ (LetVarN_ _ i _) = return $ defaultValue {poolExpr = nvarNamer i}
+lowerNativeExprRaw _ _ (BndVarN_ _ i _) = return $ defaultValue {poolExpr = nvarNamer i}
 lowerNativeExprRaw cfg _ (DeserializeN_ t s x) = do
   (deserialized, assignments) <- lcDeserialize cfg t (poolExpr x) s
   return $
@@ -1695,11 +2517,11 @@ lowerNativeExprRaw cfg _ (DeserializeN_ t s x) = do
       { poolExpr = deserialized
       , poolPriorLines = poolPriorLines x <> assignments
       }
-lowerNativeExprRaw cfg _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr = lcSrcName cfg src}
+lowerNativeExprRaw cfg _ (ExeN_ _ (SrcCallP _ src)) = return $ defaultValue {poolExpr = lcSrcName cfg src}
 lowerNativeExprRaw _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
 lowerNativeExprRaw _ _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
 lowerNativeExprRaw _ _ (ExeN_ _ (PapplyP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
-lowerNativeExprRaw _ _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}
+lowerNativeExprRaw cfg _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = lcManifoldName cfg mid}
 lowerNativeExprRaw cfg origExpr (ListN_ v t xs) = do
   let elemEs = case origExpr of ListN _ _ es -> es; _ -> []
   xs' <- adaptOwnedElems cfg elemEs xs >>= storeElems cfg elemEs
@@ -1709,11 +2531,11 @@ lowerNativeExprRaw cfg origExpr (TupleN_ v xs) = do
         AppF _ ts -> ts
         _ -> []
       elemEs = case origExpr of TupleN _ es -> es; _ -> []
-  xs' <- adaptOwnedElems cfg elemEs xs >>= storeElems cfg elemEs
+  xs' <- adaptOwnedElems cfg elemEs xs >>= keepElems cfg elemEs >>= storeElems cfg elemEs
   return $ mergePoolDocs (lcTupleConstructor cfg v slotTypes) xs'
 lowerNativeExprRaw cfg origExpr (RecordN_ o v ps rs) = do
   let fieldEs = case origExpr of RecordN _ _ _ kvs -> map snd kvs; _ -> []
-  es <- adaptOwnedElems cfg fieldEs (map snd rs) >>= storeElems cfg fieldEs
+  es <- adaptOwnedElems cfg fieldEs (map snd rs) >>= keepElems cfg fieldEs >>= storeElems cfg fieldEs
   let recType = typeFof origExpr
   rec' <- lcRecordConstructor cfg recType o v ps (zip (map fst rs) (map poolExpr es))
   return $
@@ -1753,7 +2575,7 @@ lowerNativeExprRaw cfg origExpr (VariantN_ t n i xs)
   | VariantF (FV _ cv) _ _ <- t = do
       ty <- nominalTypeDoc cfg t cv
       let fieldEs = case origExpr of VariantN _ _ _ es -> es; _ -> []
-      xs' <- adaptOwnedElems cfg fieldEs xs >>= storeElems cfg fieldEs
+      xs' <- adaptOwnedElems cfg fieldEs xs >>= keepElems cfg fieldEs >>= storeElems cfg fieldEs
       return $ mergePoolDocs (lcVariantLit cfg ty n i) xs'
   | otherwise = error $ "constructor literal carries a non-variant type: " <> show (pretty t)
 -- The unit value. @UniS@ and @NullS@ share this node -- the wire form is
@@ -1788,20 +2610,25 @@ lowerNativeExprRaw cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcApplyClosure cf
 -- The wrapped value must be OWNED first: `Some(&T)` is an `Option<&T>`, not the
 -- `Option<T>` the sink expects, so a borrowed/place inner is cloned before wrapping.
 lowerNativeExprRaw cfg (CoerceN _ _ innerE) (CoerceN_ CoerceToOptional _ x) = do
-  x' <- adaptOwnedElem cfg innerE x
+  x' <- adaptOwnedElem cfg innerE x >>= keepOne cfg innerE
   -- Adapt the inner to its stored representation before wrapping (Rust boxes a
-  -- closure into `Rc<dyn MorlocFnN>` so the payload matches the boxed
-  -- `Option<Rc<dyn MorlocFnN>>` element type), mirroring list/tuple/record.
+  -- closure into `Arc<dyn Fn>` so the payload matches the boxed
+  -- `Option<Arc<dyn Fn>>` element type), mirroring list/tuple/record.
   boxed <- lcStoreField cfg (typeFof innerE) (poolExpr x')
   return $ x' {poolExpr = lcCoerceOptional cfg boxed}
 lowerNativeExprRaw cfg _ (CoerceN_ CoerceToOptional _ x) =
   return $ x {poolExpr = lcCoerceOptional cfg (poolExpr x)}
+-- Casts are removed when native expressions are built (Serialize); one that
+-- reached here would be its argument.
+lowerNativeExprRaw _ _ (CoerceN_ (CoerceNewtype _ _) _ x) = return x
 -- The two arms feed the conditional's owned result sink, so adapt each to an
 -- owned value (like every other owned sink); the condition is not a sink.
-lowerNativeExprRaw cfg origExpr@(IfN _ _ thenE elseE) (IfN_ _ condDocs thenDocs elseDocs) = do
+lowerNativeExprRaw cfg origExpr@(IfN _ condE thenE elseE) (IfN_ _ condDocs thenDocs elseDocs) = do
   thenDocs' <- adaptOwnedElem cfg thenE thenDocs
   elseDocs' <- adaptOwnedElem cfg elseE elseDocs
-  lcMakeIf cfg origExpr condDocs thenDocs' elseDocs'
+  case shortCircuit cfg condE thenE elseE condDocs thenDocs' elseDocs' of
+    Just docs -> return docs
+    Nothing -> lcMakeIf cfg origExpr condDocs thenDocs' elseDocs'
 lowerNativeExprRaw cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
@@ -1810,38 +2637,37 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrHash (Just 
   -- 'lcReadArg'.
   dataDocs' <- adaptReadElem cfg dataE dataDocs
   return $ dataDocs' {poolExpr = lcPrintExpr cfg (IIntrinsicHash sid (IRawExpr (render (poolExpr dataDocs'))))}
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [aE, bE]) (IntrinsicN_ _ intr (Just schema) [aDocs, bDocs])
+  | intr `elem` [IntrEq, IntrLe] = do
+      sid <- lcRegisterSchema cfg schema
+      -- both values are only read, as @hash's is
+      aDocs' <- adaptReadElem cfg aE aDocs
+      bDocs' <- adaptReadElem cfg bE bDocs
+      let raw d = IRawExpr (render (poolExpr d))
+      return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicCompare intr sid (raw aDocs') (raw bDocs'))) [aDocs', bDocs']
 -- @save takes source args in (level, path, value) order; path-first
--- (after the level) mirrors @savem/@savej. The runtime ABI is unchanged:
+-- (after the level) mirrors @savej. The runtime ABI is unchanged:
 -- IIntrinsicSave keeps (level, data, path).
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, _, dataE]) (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- The saved value is only read, through a 'ToVoidstar' (&T) sink (see
   -- @hash above). level and path are scalar/Str, not value sinks.
   dataDocs' <- adaptReadElem cfg dataE dataDocs
-  let fmt = "voidstar"
+  let fmt = SaveVoidstar
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr (render (poolExpr levelDocs)))
                    (IRawExpr (render (poolExpr dataDocs')))
                    (IRawExpr (render (poolExpr pathDocs)))
    in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, pathDocs, dataDocs']
--- @savem/@savej take source args in (path, value) order for
--- partial-application ergonomics (`@savem path` is a reusable sink).
+-- @savej takes source args in (path, value) order for
+-- partial-application ergonomics (`@savej path` is a reusable sink).
 -- The runtime ABI is unchanged: IIntrinsicSave keeps (level, data, path).
--- They are not packet formats; codegen always passes a zero level
+-- JSON is not a packet format; codegen always passes a zero level
 -- expression so the printed call shape is uniform with @save.
-lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveM (Just schema) [pathDocs, dataDocs]) = do
-  sid <- lcRegisterSchema cfg schema
-  dataDocs' <- adaptReadElem cfg dataE dataDocs
-  let fmt = "msgpack"
-      saveExpr = IIntrinsicSave fmt sid
-                   (IRawExpr "0")
-                   (IRawExpr (render (poolExpr dataDocs')))
-                   (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs']
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveJ (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   dataDocs' <- adaptReadElem cfg dataE dataDocs
-  let fmt = "json"
+  let fmt = SaveJson
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr "0")
                    (IRawExpr (render (poolExpr dataDocs')))
@@ -1941,14 +2767,31 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n]) (IntrinsicN_ _ In
     t -> error $ "tag test on a type that is not a `data`: " <> show (pretty t)
 -- Reading one field out of a value whose arm a guarding tag test has already
 -- established. Emitted only under that guard, and with no surface spelling.
-lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n, IntN _ i]) (IntrinsicN_ _ IntrCtorField _ [subjectDocs, _, _]) =
+lowerNativeExprRaw cfg origE@(IntrinsicN _ _ _ [subjectE, StrN _ n, IntN _ i]) (IntrinsicN_ _ IntrCtorField _ [subjectDocs, _, _]) =
   case typeFof subjectE of
     t@(VariantF (FV _ cv) _ arms) -> do
       ty <- nominalTypeDoc cfg t cv
+      own <- lcOwnership cfg subjectE
+      self <- lcOwnership cfg origE
+      let how
+            | isLastRead subjectE && own == Owned = FieldTake
+            | self == BorrowedRef = FieldBorrow
+            | otherwise = FieldCopy
       return $ mergePoolDocs
-        (const (lcCtorField cfg ty n (armIndex n (map fst arms)) (fromIntegral i) (poolExpr subjectDocs)))
+        (const (lcCtorField cfg how ty n (armIndex n (map fst arms)) (fromIntegral i) (poolExpr subjectDocs)))
         [subjectDocs]
     t -> error $ "constructor field projection on a non-variant: " <> show (pretty t)
+-- A list pattern's length test and element read. Like the tag test, each is
+-- written in the target language with no runtime call.
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, IntN _ n]) (IntrinsicN_ _ IntrListLenTest _ [subjectDocs, _]) =
+  return $ mergePoolDocs
+    (const (lcListLenTest cfg (poolExpr subjectDocs) (fromIntegral n)))
+    [subjectDocs]
+lowerNativeExprRaw cfg origE@(IntrinsicN _ _ _ [_, IntN _ i]) (IntrinsicN_ _ IntrListElem _ [subjectDocs, _]) = do
+  self <- lcOwnership cfg origE
+  return $ mergePoolDocs
+    (const (lcListElem cfg (self == BorrowedRef) (poolExpr subjectDocs) (fromIntegral i)))
+    [subjectDocs]
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFSchema _ [pathDocs]) =
   return $ pathDocs
     { poolExpr = lcPrintExpr cfg
@@ -2177,9 +3020,11 @@ lowerNativeExprRaw _ _ (IntrinsicN_ _ intr _ _) =
 -- copies of the manifold's read-only parameters) and a base leaf is the
 -- loop's native value, an owned sink like any returned value.
 lowerNativeExprRaw cfg (LoopN t origInits origBody) (LoopN_ _ starts body) = do
-  starts' <- zipWithM (\(_, oe) (i, d) -> (,) i . Just <$> adaptOwnedElem cfg oe d) origInits starts
-  body' <- adaptLoopBodyOwned cfg (adaptOwnedElem cfg) origBody body
-  lcMakeLoop cfg (LoopResultNative t) starts' body'
+  starts' <- zipWithM (\(_, oe) (i, d) -> (,) i . Just <$> loopBorrowOr cfg i oe d (adaptOwnedElem cfg oe d >>= keepOne cfg oe)) origInits starts
+  let ids = map fst origInits
+      keepBase ob d = adaptOwnedElem cfg ob d >>= \d' -> (\v -> d' {poolExpr = v}) <$> lcKeepSlot cfg ids ob (poolExpr d')
+  body' <- adaptLoopBodyOwned cfg keepBase ids origBody body
+  lcMakeLoop cfg (LoopResultNative t) starts' (Just (trimap id id (const ()) origBody)) body'
 lowerNativeExprRaw _ _ (LoopN_ {}) =
   error "morloc bug: a native loop lowered without its original expression"
 lowerNativeExprRaw cfg origExpr (MapOptionalN_ _ wireTf src innerDocs) = do
@@ -2237,23 +3082,35 @@ lowerManifold ::
   PoolDocs ->
   m PoolDocs
 lowerManifold cfg m form headForm bodyType bodyPool = do
-  let PoolDocs completeManifolds bodyExpr priorLines priorExprs retFlag = bodyPool
-      -- Apply lcReturn at the manifold boundary if a nested ReturnS_/ReturnN_
-      -- set the return flag. Deferring lcReturn to here lets intermediate
-      -- handlers (notably the serialize-let-wrap that rebinds the body
-      -- expression to a temp before emitting a release call) keep
-      -- poolExpr as a value rather than a return statement.
-      body = if retFlag then lcReturn cfg bodyExpr else bodyExpr
+  let PoolDocs completeManifolds bodyExpr priorLines priorExprs retFlag borrowed = bodyPool
+      returned = render bodyExpr
+      -- A parameter or a local bound by reference is copied when returned;
+      -- any other name is a local the function owns.
+      ownedByName =
+        isIdentifierText returned
+          && returned `notElem` map (render . argNamer) (typeMofForm form)
+          && borrowed /= Just returned
+  framed <- lcFrameReturn cfg m bodyType ownedByName bodyExpr
+  -- Apply the return at the manifold boundary if a nested ReturnS_/ReturnN_
+  -- set the return flag. Deferring it to here lets intermediate handlers
+  -- (notably the serialize-let-wrap that rebinds the body expression to a
+  -- temp before emitting a release call) keep poolExpr as a value rather
+  -- than a return statement.
+  let body = case (retFlag, framed) of
+        (True, Just ret) -> ret
+        (True, Nothing) -> lcReturn cfg bodyExpr
+        (False, Nothing) -> bodyExpr
+        (False, Just _) -> error $ "EMIT-3: manifold " <> show m <> " records its call but its body has no return"
       args = typeMofForm form
-      mname = manNamer m
-  maybeNewManifold <- lcMakeFunction cfg m mname args bodyType priorLines body headForm
+      mname = lcManifoldName cfg m
+  maybeNewManifold <- lcMakeFunction cfg m mname args bodyType priorLines body headForm (isClosureForm form)
   call <- case form of
         (ManifoldPass _) -> do
           -- An unapplied manifold's callable signature is its whole type:
           -- every parameter is still to come.
           let sigType = Function [t | Arg _ t <- args] bodyType
           sig <- lcClosureSig cfg sigType
-          lcMakePass cfg sig sigType mname args
+          lcMakePass cfg m sig sigType mname args
         -- Wrap each manifold-call argument through lcSourcedArg (identity for
         -- most languages; the Rust member adapts each native arg to the callee's
         -- convention by ownership, so an already-borrowed arg passes as `&T` and
@@ -2263,13 +3120,17 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
           -- variables, so their ownership is read in the caller's scope. A
           -- non-Native (serialized) argument is an owned deserialized value.
           callArgs <- lcWithCallerScope cfg $
-            mapM
-              ( \a@(Arg i t) -> do
+            zipWithM
+              ( \j a@(Arg i t) -> do
                   own <- case t of
-                    Native tf -> lcOwnership cfg (BndVarN tf i)
+                    Native tf -> lcOwnership cfg (BndVarN tf i KeptRead)
                     _ -> return Owned
-                  return $ lcSourcedArg cfg ManifoldArg own t (argNamer a)
+                  x <- case t of
+                    Native tf -> lcKeepContextArg cfg m j i tf (argNamer a)
+                    _ -> return (argNamer a)
+                  return $ lcSourcedArg cfg (ManifoldArg m j) own t x
               )
+              [0 ..]
               (typeMofRs rs)
           return $ mname <> tupled callArgs
         (ManifoldPart rs vs) -> do
@@ -2278,7 +3139,7 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
           -- from the bound args and the body's type.
           let sigType = Function [typeMof t | Arg _ t <- vs] bodyType
           sig <- lcClosureSig cfg sigType
-          lcMakeLambda cfg sig sigType mname (typeMofRs rs) [Arg i (typeMof t) | Arg i t <- vs]
+          lcMakeLambda cfg m sig sigType mname (typeMofRs rs) [Arg i (typeMof t) | Arg i t <- vs]
   return $
     PoolDocs
       { poolCompleteManifolds = completeManifolds <> maybeToList maybeNewManifold
@@ -2286,6 +3147,7 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
       , poolPriorLines = []
       , poolPriorExprs = priorExprs
       , poolReturnFlag = False
+      , poolBorrowedLocal = Nothing
       }
 
 -- | Bundle all six fold callbacks into a single FoldWithManifoldM record.
@@ -2340,3 +3202,8 @@ armIndex :: Text -> [Text] -> Int
 armIndex n names = case [i | (i, m) <- zip [0 ..] names, m == n] of
   (i : _) -> i
   [] -> error ("compiler bug: no tag for constructor " <> show n)
+
+isIdentifierText :: Text -> Bool
+isIdentifierText t = case T.uncons t of
+  Just (c, rest) -> (isAlpha c || c == '_') && T.all (\x -> isAlphaNum x || x == '_') rest
+  Nothing -> False

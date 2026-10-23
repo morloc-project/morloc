@@ -53,8 +53,7 @@ walk lang (PolyIntrinsic (Idx i (EffectT _ t)) intr xs) = do
   suspend lang i (PolyIntrinsic (Idx i t) intr xs')
 walk _ (PolyManifold l m form k e) = do
   e' <- walk l e
-  moveLabelIntoSuspension m e'
-  return $ PolyManifold l m form k e'
+  PolyManifold l m form k <$> moveLabelIntoSuspension l m e'
 walk _ (PolyRemoteInterface l t is rf e) = PolyRemoteInterface l t is rf <$> walk l e
 walk lang (PolyLet i e1 e2) = PolyLet i <$> walk lang e1 <*> walk lang e2
 walk lang (PolyReturn e) = PolyReturn <$> walk lang e
@@ -90,29 +89,70 @@ suspend lang cidx e = do
   let ctx = [Arg i None | i <- Set.toList (polyFreeVars e)]
   return $ PolyManifold lang m (ManifoldPart ctx []) Transparent (returned e)
 
--- | A log label or benchmark on a manifold measures what the manifold
--- does. When the manifold's whole result is a suspension, applying it
--- only builds the closure, and the work happens each time the closure is
--- run; the label moves onto the closure manifold so every run is measured
--- and the application is not.
-moveLabelIntoSuspension :: Int -> PolyExpr -> MorlocMonad ()
-moveLabelIntoSuspension m body = case suspensionOf body of
-  Just m' -> do
-    cfgs <- MM.gets stateManifoldConfig
-    case Map.lookup m cfgs of
-      Just cfg | isMeasured cfg ->
-        MM.modify $ \s -> s { stateManifoldConfig =
-          Map.insert m' cfg { manifoldConfigCache = Nothing }
-            (Map.insert m cfg { manifoldConfigLog = Nothing, manifoldConfigBenchmark = Nothing } cfgs) }
-      _ -> return ()
-  Nothing -> return ()
+-- | A label on a manifold wraps what the manifold does. When the
+-- manifold's whole result is a suspension, applying it only builds the
+-- closure, and the work happens each time the closure is run; the label
+-- moves onto the closure manifold, so every run is logged, timed and
+-- cached, and the application is not (ANN-10). A cached run is keyed on the
+-- closure's context. A suspension the body does not build itself (a
+-- parameter, a call's result) is run inside a new closure that carries the
+-- label.
+moveLabelIntoSuspension :: Lang -> Int -> PolyExpr -> MorlocMonad PolyExpr
+moveLabelIntoSuspension lang m body = do
+  cfg <- MM.gets (Map.lookup m . stateManifoldConfig)
+  let (rewrap, cacheLbl, inner) = peel body
+      measured = maybe False isMeasured cfg
+  if not measured && isNothing cacheLbl
+    then return body
+    else do
+      (closures, inner') <- case suspensionsOf inner of
+        [] -> case polyOuterType inner of
+          Just (EffectT _ t) -> do
+            m' <- MM.freshManifoldIndex m
+            let run = PolyEval (Idx m' t) inner
+                ctx = [Arg i None | i <- Set.toList (polyFreeVars run)]
+            return ([m'], PolyReturn (cacheRun cacheLbl (PolyManifold lang m' (ManifoldPart ctx []) Transparent (PolyReturn run))))
+          _ -> return ([], inner)
+        ms -> return (ms, onSuspension (cacheRun cacheLbl) inner)
+      case cfg of
+        Just c | measured, not (null closures) ->
+          MM.modify $ \s -> s { stateManifoldConfig =
+            Map.insert m c { manifoldConfigLog = Nothing, manifoldConfigBenchmark = Nothing }
+              (foldr (\m' -> Map.insert m' c { manifoldConfigCache = Nothing }) (stateManifoldConfig s) closures) }
+        _ -> return ()
+      return $ if null closures then body else rewrap inner'
   where
-    isMeasured cfg = manifoldConfigLog cfg == Just True || manifoldConfigBenchmark cfg == Just True
-    -- The closure of no arguments a body returns, through its lets.
-    suspensionOf (PolyLet _ _ e2) = suspensionOf e2
-    suspensionOf (PolyReturn e) = suspensionOf e
-    suspensionOf (PolyManifold _ m' (ManifoldPart _ []) _ _) = Just m'
-    suspensionOf _ = Nothing
+    isMeasured c = manifoldConfigLog c == Just True || manifoldConfigBenchmark c == Just True
+    peel (PolyDebugWrap dm das (PolyCacheBody lbl _ _ b)) = (PolyDebugWrap dm das, Just lbl, b)
+    peel (PolyDebugWrap dm das b) = (PolyDebugWrap dm das, Nothing, b)
+    peel (PolyCacheBody lbl _ _ b) = (id, Just lbl, b)
+    peel b = (id, Nothing, b)
+    cacheRun (Just lbl) (PolyManifold l m' form@(ManifoldPart ctx []) k e) =
+      PolyManifold l m' form k (PolyCacheBody lbl m' [Arg i None | Arg i _ <- ctx] e)
+    cacheRun _ e = e
+
+-- | The closures of no arguments a body returns, through its lets, its
+-- branches and the calls it returns the result of.
+suspensionsOf :: PolyExpr -> [Int]
+suspensionsOf (PolyLet _ _ e2) = suspensionsOf e2
+suspensionsOf (PolyReturn e) = suspensionsOf e
+suspensionsOf (PolyDebugWrap _ _ e) = suspensionsOf e
+suspensionsOf (PolyIf _ a b) = case (suspensionsOf a, suspensionsOf b) of
+  (xs@(_ : _), ys@(_ : _)) -> xs <> ys
+  _ -> []
+suspensionsOf (PolyManifold _ m' (ManifoldPart _ []) _ _) = [m']
+suspensionsOf (PolyManifold _ _ (ManifoldFull _) Transparent e) = suspensionsOf e
+suspensionsOf _ = []
+
+-- | Rewrite the closures 'suspensionsOf' finds.
+onSuspension :: (PolyExpr -> PolyExpr) -> PolyExpr -> PolyExpr
+onSuspension f (PolyLet i e1 e2) = PolyLet i e1 (onSuspension f e2)
+onSuspension f (PolyReturn e) = PolyReturn (onSuspension f e)
+onSuspension f (PolyDebugWrap dm das e) = PolyDebugWrap dm das (onSuspension f e)
+onSuspension f (PolyIf c a b) = PolyIf c (onSuspension f a) (onSuspension f b)
+onSuspension f e@(PolyManifold _ _ (ManifoldPart _ []) _ _) = f e
+onSuspension f (PolyManifold l m form@(ManifoldFull _) Transparent e) = PolyManifold l m form Transparent (onSuspension f e)
+onSuspension _ e = e
 
 -- | A manifold body returns its tail. The return is pushed through lets to
 -- the tail; a tail that already returns is left alone.

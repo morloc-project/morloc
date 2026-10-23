@@ -25,6 +25,9 @@ module Morloc.CodeGenerator.LanguageDescriptor
   , defaultLangDescriptor
   , matchNamePattern
   , declaredNamePatterns
+  , declaredReservedPrefixes
+  , declaredReservedNames
+  , declaredManifoldPrefix
   ) where
 
 import qualified Data.Aeson as Aeson
@@ -41,14 +44,14 @@ import qualified Text.Parsec as P
 
 -- | How to access tuple/list elements by index
 data IndexStyle
-  = ZeroBracket -- e[i]     (Python, JS, Julia, Lua)
+  = ZeroBracket -- e[i]     (Python, JS, Lua)
   | OneBracket -- e[i+1]   (R-like with [], 1-indexed)
   | OneDoubleBracket -- e[[i+1]] (R with [[]], 1-indexed)
   deriving (Eq, Show, Generic)
 
 -- | How to access record fields
 data FieldAccessStyle
-  = DotAccess -- e.field  (Python, JS, Julia)
+  = DotAccess -- e.field  (Python, JS)
   | DollarAccess -- e$field  (R)
   deriving (Eq, Show, Generic)
 
@@ -56,7 +59,6 @@ data FieldAccessStyle
 data BlockStyle
   = IndentBlock -- Python-style: header + indented body
   | BraceBlock -- R/JS-style: header { body }
-  | EndKeywordBlock -- Julia/Ruby-style: header body end
   deriving (Eq, Show, Generic)
 
 -- | List iteration / map style
@@ -101,6 +103,10 @@ data LangDescriptor = LangDescriptor
     -- through an Optional. Examples: "{{expr}} is not None" (Python),
     -- "!is.null({{expr}})" (R). C++ handles its own form in CppPrinter.
     ldNullCheckTemplate :: !Text
+  , -- The length of a list, with {{expr}} placeholder: "len({{expr}})"
+    -- (Python), "length({{expr}})" (R). Used by list patterns. Empty means
+    -- the language cannot match a list pattern.
+    ldListLengthTemplate :: !Text
   , -- Non-finite Real literals: idiomatic source-level expressions for
     -- +Inf, -Inf, and NaN in the target language. Used by IRealLit
     -- printing when the literal payload is non-finite.
@@ -111,14 +117,13 @@ data LangDescriptor = LangDescriptor
     ldListStyle :: !ListStyle
   , ldTupleConstructor :: !Text -- "tuple" or "list" or ""
   , ldRecordConstructor :: !Text -- "dict" or "OrderedDict" or "list"
-  , ldRecordSeparator :: !Text -- "=" for Python/R, "=>" for Julia
   , -- Access styles
     ldIndexStyle :: !IndexStyle
   , ldKeyAccess :: !Text -- "bracket" -> e["k"], "double_bracket" -> e[["k"]]
   , ldFieldAccess :: !FieldAccessStyle
   , -- Serialize/deserialize function names
-    ldSerializeFn :: !Text -- "morloc.put_value" or "morloc_put_value"
-  , ldDeserializeFn :: !Text -- "morloc.get_value" or "morloc_get_value"
+    ldSerializeFn :: !Text -- "morloc.put_value" or ".__morloc$morloc_put_value"
+  , ldDeserializeFn :: !Text -- "morloc.get_value" or ".__morloc$morloc_get_value"
   , ldReleasePacketFn :: !Text -- "morloc.release_packet_shm" or equivalent
   , ldOwnedArgFn :: !Text -- wraps a packet made for one call's argument list so it is released once the call returns; "" where the language cannot scope it
   , -- Intrinsic function prefix (for mlc_show, mlc_hash, etc.)
@@ -129,11 +134,20 @@ data LangDescriptor = LangDescriptor
     -- underscore in identifiers (R) use a leading dot instead.
     ldHelperVarPrefix :: !Text -- "__morloc_" for Python/C++, ".morloc_" for R
   , -- Foreign call template
-    ldForeignCallFn :: !Text -- "morloc.foreign_call" or "morloc_foreign_call"
+    ldForeignCallFn :: !Text -- "morloc.foreign_call" or ".__morloc$morloc_foreign_call"
   , ldForeignCallIntSuffix :: !Text -- "L" for R, "" for others
   , ldIntLiteralSuffix :: !Text -- "L" for R, "" for others
+  , ldIntLiteralSuffixLimit :: !(Maybe Integer)
+    -- ^ The suffix is written only on a literal whose magnitude is at most
+    -- this (R: 2147483647, since an R integer is 32-bit and its minimum is NA)
+  , ldIntLiteralPlainTypes :: ![Text]
+    -- ^ Concrete types whose integer literals never take the suffix
+    -- (R: "numeric", which is a double)
+  , ldIntLiteralWide :: !(Map.Map Text Text)
+    -- ^ Concrete type -> template for a literal that takes no suffix, with
+    -- {{n}} for its digits (R: bit64 -> bit64::as.integer64("{{n}}"))
   , -- Remote call
-    ldRemoteCallFn :: !Text -- "morloc.remote_call" or "morloc_remote_call"
+    ldRemoteCallFn :: !Text -- "morloc.remote_call" or ".__morloc$morloc_remote_call"
   , -- Record access
     ldDictStyleRecords :: !Bool -- True: NamRecord/dict use bracket access, others use dot (Python)
   , ldEnumLitByName :: !Bool
@@ -141,10 +155,8 @@ data LangDescriptor = LangDescriptor
     -- R does, where an enum is a factor and a factor compares equal to its
     -- level label. False: by TAG, as Python does, where the runtime hands
     -- the pool a plain int and the ordinal is the value.
-  , ldQuoteRecordKeys :: !Bool -- True: "k" => v (Julia), False: k=v (Python, R)
   , -- Import syntax
     ldQualifiedImports :: !Bool -- True: qualify source names with module path (Python)
-  , ldIncludeRelToFile :: !Bool -- True if include() resolves relative to file (Julia), False for CWD (R)
   , -- Pool template
     ldPoolTemplate :: !Text -- pool template content
   , ldBreakMarker :: !Text -- "# <<<BREAK>>>"
@@ -155,7 +167,7 @@ data LangDescriptor = LangDescriptor
   , -- NUL-in-Str policy. False means the morloc runtime rejects any
     -- attempt to send a Str containing an interior NUL byte across the
     -- boundary into a pool of this language. Languages whose native
-    -- string type is length-prefixed (Python, C++, Julia) set this to
+    -- string type is length-prefixed (Python, C++) set this to
     -- True; languages where strings are NUL-terminated by convention
     -- (C) or whose stdlib refuses NUL strings (R) set it to False.
     ldAllowStringNull :: !Bool
@@ -171,6 +183,8 @@ data LangDescriptor = LangDescriptor
 
     -- Assignment
     ldAssignOp :: !Text -- "=" or "<-"
+  , ldAndOp :: !Text -- the short-circuit and: "and" or "&&"
+  , ldOrOp :: !Text -- the short-circuit or: "or" or "||"
   , -- Lambda
     ldLambdaTemplate :: !Text -- e.g. "lambda {{args}}: {{body}}"
   , -- Do-block (effect wrapper)
@@ -193,11 +207,19 @@ data LangDescriptor = LangDescriptor
     ldReturnTemplate :: !Text -- e.g. "return({{expr}})"
   , -- Function definition
     ldFuncDefHeader :: !Text -- e.g. "def {{name}}({{args}}):"
+  , ldManifoldPrefix :: !Text
+    -- ^ A manifold's function is this prefix followed by its id.
+  , ldPoolQualifier :: !Text
+    -- ^ Prepended to a name the pool runtime defines where generated code
+    -- refers to it (R: the runtime's environment).
   , ldBlockStyle :: !BlockStyle
-  , ldBlockEnd :: !Text -- "" or "end"
   , -- Error wrapping
     ldErrorWrapOpen :: !Text -- "try:" for Python, "" for others
   , ldErrorWrapClose :: ![Text] -- Except block lines with {{name}} template var
+  , ldFrameLabelStmt :: !Text
+    -- ^ Written after a named function's definition, for a language that
+    -- reads its trace from the call stack (EMIT-3): {{fname}} the generated
+    -- function, {{label}} its trace label. Empty for none.
   , -- Pattern/string interpolation support
     ldPatternStyle :: !PatternStyle
   , ldConcatFn :: !Text -- For ConcatCall: "paste0", "string"
@@ -237,8 +259,8 @@ data LangDescriptor = LangDescriptor
   , ldClosureTableHeader :: !Text
     -- ^ Statement that initializes the per-pool @mlc_closure_table@ (mid ->
     -- captured-argument schemas), consulted by the reify helper. Emitted once
-    -- before the per-closure entries. Example Python: @"mlc_closure_table = {}"@;
-    -- R: @"mlc_closure_table <- list()"@.
+    -- before the per-closure entries; empty where the pool template
+    -- initializes the table (R). Example Python: @"mlc_closure_table = {}"@.
   , ldClosureTableEntry :: !Text
     -- ^ Per-closure entry populating @mlc_closure_table@. Substitutions: {{mid}}
     -- and {{caps}} (list literal of the captured-argument schema strings).
@@ -266,7 +288,6 @@ instance Y.FromJSON BlockStyle where
   parseJSON = Y.withText "BlockStyle" $ \t -> case t of
     "indent" -> pure IndentBlock
     "braces" -> pure BraceBlock
-    "end_keyword" -> pure EndKeywordBlock
     _ -> fail $ "Unknown BlockStyle: " <> T.unpack t
 
 instance Y.FromJSON MapStyle where
@@ -317,9 +338,15 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldCodegenCommand" Y.Null
             . ins "ldTableImportFn" Y.Null
             . ins "ldRealPosInf" (Y.String "")
+            . ins "ldListLengthTemplate" (Y.String "")
             . ins "ldRealNegInf" (Y.String "")
             . ins "ldRealNaN" (Y.String "")
             . ins "ldIntLiteralSuffix" (Y.String "")
+            . ins "ldAndOp" (Y.String "&&")
+            . ins "ldOrOp" (Y.String "||")
+            . ins "ldIntLiteralSuffixLimit" Y.Null
+            . ins "ldIntLiteralPlainTypes" (Y.Array mempty)
+            . ins "ldIntLiteralWide" (Y.Object mempty)
             . ins "ldIntrinsicPrefix" (Y.String "")
             . ins "ldHelperVarPrefix" (Y.String "__morloc_")
             . ins "ldRemoteCallFn" (Y.String "")
@@ -327,7 +354,6 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldOwnedArgFn" (Y.String "")
             . ins "ldDictStyleRecords" (Y.Bool False)
             . ins "ldEnumLitByName" (Y.Bool False)
-            . ins "ldQuoteRecordKeys" (Y.Bool True)
             . ins "ldQualifiedImports" (Y.Bool False)
             . ins "ldRunCommand" (Y.Array mempty)
             . ins "ldIsCompiled" (Y.Bool False)
@@ -346,9 +372,9 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldReturnTemplate" (Y.String "return({{expr}})")
             . ins "ldFuncDefHeader" (Y.String "")
             . ins "ldBlockStyle" (Y.String "indent")
-            . ins "ldBlockEnd" (Y.String "")
             . ins "ldErrorWrapOpen" (Y.String "")
             . ins "ldErrorWrapClose" (Y.Array mempty)
+            . ins "ldFrameLabelStmt" (Y.String "")
             . ins "ldPatternStyle" (Y.String "fstring")
             . ins "ldConcatFn" (Y.String "")
             . ins "ldQuoteTerminator" (Y.String "\"")
@@ -365,6 +391,8 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldDispatchRemoteEntry" (Y.String "")
             . ins "ldDispatchRemoteFooter" (Y.String "")
             . ins "ldLogWrap" (Y.String "")
+            . ins "ldManifoldPrefix" (Y.String "m")
+            . ins "ldPoolQualifier" (Y.String "")
             . ins "ldClosureRegisterEntry" (Y.String "")
             . ins "ldClosureTableHeader" (Y.String "")
             . ins "ldClosureTableEntry" (Y.String "")
@@ -398,13 +426,13 @@ defaultLangDescriptor name ext =
     , ldBoolFalse = "False"
     , ldNullLiteral = "None"
     , ldNullCheckTemplate = "{{expr}} is not None"
+    , ldListLengthTemplate = "len({{expr}})"
     , ldRealPosInf = "float('inf')"
     , ldRealNegInf = "float('-inf')"
     , ldRealNaN = "float('nan')"
     , ldListStyle = BracketList
     , ldTupleConstructor = ""
     , ldRecordConstructor = "dict"
-    , ldRecordSeparator = "="
     , ldIndexStyle = ZeroBracket
     , ldKeyAccess = "bracket"
     , ldFieldAccess = DotAccess
@@ -417,12 +445,15 @@ defaultLangDescriptor name ext =
     , ldForeignCallFn = "morloc.foreign_call"
     , ldForeignCallIntSuffix = ""
     , ldIntLiteralSuffix = ""
+    , ldAndOp = "&&"
+    , ldOrOp = "||"
+    , ldIntLiteralSuffixLimit = Nothing
+    , ldIntLiteralPlainTypes = []
+    , ldIntLiteralWide = Map.empty
     , ldRemoteCallFn = ""
     , ldDictStyleRecords = False
     , ldEnumLitByName = False
-    , ldQuoteRecordKeys = True
     , ldQualifiedImports = False
-    , ldIncludeRelToFile = False
     , ldPoolTemplate = ""
     , ldBreakMarker = "# <<<BREAK>>>"
     , ldCommentMarker = "#"
@@ -445,9 +476,9 @@ defaultLangDescriptor name ext =
     , ldReturnTemplate = "return({{expr}})"
     , ldFuncDefHeader = ""
     , ldBlockStyle = IndentBlock
-    , ldBlockEnd = ""
     , ldErrorWrapOpen = ""
     , ldErrorWrapClose = []
+    , ldFrameLabelStmt = ""
     , ldPatternStyle = FStringPattern
     , ldConcatFn = ""
     , ldQuoteTerminator = "\""
@@ -464,6 +495,8 @@ defaultLangDescriptor name ext =
     , ldDispatchRemoteEntry = ""
     , ldDispatchRemoteFooter = ""
     , ldLogWrap = ""
+    , ldManifoldPrefix = "m"
+    , ldPoolQualifier = ""
     , ldClosureRegisterEntry = ""
     , ldClosureTableHeader = ""
     , ldClosureTableEntry = ""
@@ -486,6 +519,33 @@ declaredNamePatterns content = do
     valid (key, pat)
       | T.null pat = Left (key <> " is empty")
       | otherwise = either (\e -> Left (key <> ": " <> e)) (const (Right ())) (matchNamePattern pat "")
+
+-- | The name prefixes a lang.yaml reserves for the names its pool defines
+-- (ldReservedPrefixes); none when the key is absent.
+declaredReservedPrefixes :: Text -> Either String [Text]
+declaredReservedPrefixes content = do
+  v <- either (Left . Y.prettyPrintParseException) Right (Y.decodeEither' (TE.encodeUtf8 content))
+  AesonTypes.parseEither
+    (Aeson.withObject "lang.yaml" $ \o -> fmap (maybe [] id) (o Aeson..:? "ldReservedPrefixes"))
+    (v :: Aeson.Value)
+
+-- | The prefix a lang.yaml gives its manifolds' names (ldManifoldPrefix);
+-- "m" when the key is absent.
+declaredManifoldPrefix :: Text -> Either String Text
+declaredManifoldPrefix content = do
+  v <- either (Left . Y.prettyPrintParseException) Right (Y.decodeEither' (TE.encodeUtf8 content))
+  AesonTypes.parseEither
+    (Aeson.withObject "lang.yaml" $ \o -> fmap (maybe "m" id) (o Aeson..:? "ldManifoldPrefix"))
+    (v :: Aeson.Value)
+
+-- | The exact names a lang.yaml reserves for its pool (ldReservedNames);
+-- none when the key is absent.
+declaredReservedNames :: Text -> Either String [Text]
+declaredReservedNames content = do
+  v <- either (Left . Y.prettyPrintParseException) Right (Y.decodeEither' (TE.encodeUtf8 content))
+  AesonTypes.parseEither
+    (Aeson.withObject "lang.yaml" $ \o -> fmap (maybe [] id) (o Aeson..:? "ldReservedNames"))
+    (v :: Aeson.Value)
 
 -- Anchored regex-subset matcher. The pattern lives entirely in the
 -- language descriptor (lang.yaml); no language-specific identifier rule

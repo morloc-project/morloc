@@ -28,6 +28,7 @@ module UnitTypeTests
   , typeIdentityTests
   , aliasExpansionTests
   , accessorInWhereTests
+  , anonymousRecordOrderTests
   , solvedKindCheckTests
   , complexityRegressionTests
   , definitionArityTests
@@ -50,6 +51,7 @@ module UnitTypeTests
   , letBindingTests
   , irrefutablePatternTests
   , aliasConstructorTests
+  , aliasTransparencyTests
   , newtypeTests
   , literalDispatchTests
   , typedefKindVarTests
@@ -68,6 +70,7 @@ module UnitTypeTests
   , typeRenderParenTests
   , sourceNameTests
   , suspensionLawTests
+  , datafileTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend, generatePools)
@@ -145,6 +148,32 @@ runEvalSandbox allow =
 -- `morloc eval`): eval mode on, but the sandbox gates are inert.
 runEvalTrusted :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
 runEvalTrusted = runFrontWith (\s -> s {stateEvalMode = True})
+
+-- | @datafile is resolved at build time, so its argument must be a string
+-- literal (directly, or through a name bound to one).
+datafileTests :: TestTree
+datafileTests =
+  testGroup "@datafile path argument"
+    [ expectPass "literal path"
+        [r|
+        module main (f)
+        f :: Str
+        f = @datafile "x.txt"
+        |]
+    , expectPass "where-bound literal path"
+        [r|
+        module main (f)
+        f :: Str
+        f = @datafile p where
+          p = "x.txt"
+        |]
+    , expectError "parameter as path"
+        [r|
+        module main (f)
+        f :: Str -> Str
+        f q = @datafile q
+        |]
+    ]
 
 -- | Gate 1 of the eval sandbox: a directly-written IO intrinsic is refused,
 -- while pure intrinsics and trusted (dev) eval are unaffected. The check runs
@@ -410,11 +439,13 @@ listToGamma gs =
     , gammaExist = existMap
     , gammaSolved = Map.empty
     , gammaDeferred = []
+    , gammaDeferredAt = Map.empty
     , gammaKindSubs = Map.empty
     , gammaEffSubs = Map.empty
     , gammaIntVals = Map.empty
     , gammaConstraints = []
     , gammaAssumedConstraints = Nothing
+    , gammaUnfolded = Set.empty
     , gammaPendingNumLits = []
     , gammaRigid = Nothing
     , gammaScoped = Map.empty
@@ -833,6 +864,15 @@ typeAliasTests =
          
            foo :: A -> A -> A
         |]
+      , testCase "conflicting forms name the other declaration" $ do
+          result <-
+            runFront
+              "module main (f)\nnewtype Foo = Int\ntype Py => Foo = \"int\"\ntype Py => Foo = \"float\"\nf :: Foo -> Foo\n"
+          case result of
+            Left (SourcedError _ d) ->
+              assertBool (MT.unpack (render d)) (":3:1" `MT.isInfixOf` render d)
+            Left e -> assertFailure $ "expected a sourced error, got " <> show e
+            Right _ -> assertFailure "expected failure"
       , expectError
           "fail on conflicting types (Map vs List)"
           [r|
@@ -1261,8 +1301,8 @@ numericLiteralAliasTests =
         x :: Char
         x = 1.5
         |]
-        -- Nat-parameterized list aliases: `Vector 4 I32` reduces via
-        -- `type Vector (n :: Nat) a = List a` to `List I32`. The list
+        -- Nat-parameterized list newtypes: `Vector 4 I32` has the wire
+        -- form of `List I32` (`newtype Vector (n :: Nat) a = List a`). The list
         -- literal's elements must take on the reduced element type,
         -- not synthesize as `Int` and fail the subsequent subtype check.
         -- This is the user's original reproducer from the bug report.
@@ -1270,51 +1310,51 @@ numericLiteralAliasTests =
           "list literal :: Vector 4 I32  (Vector (n::Nat) a = List a)"
           [r|
         module main (x)
-        type Vector (n :: Nat) a = List a
+        newtype Vector (n :: Nat) a = List a
         x :: Vector 4 I32
         x = [1, 2, 3, 4]
         |]
-          (lst (var "I32"))
+          (arr "Vector" [NatLitU 4, var "I32"])
       , assertGeneralType
           "list literal :: Vector 3 I8  (other fixed-width int)"
           [r|
         module main (x)
-        type Vector (n :: Nat) a = List a
+        newtype Vector (n :: Nat) a = List a
         x :: Vector 3 I8
         x = [1, 2, 3]
         |]
-          (lst (var "I8"))
+          (arr "Vector" [NatLitU 3, var "I8"])
       , assertGeneralType
           "list literal :: Vector 2 U16  (unsigned fixed-width int)"
           [r|
         module main (x)
-        type Vector (n :: Nat) a = List a
+        newtype Vector (n :: Nat) a = List a
         x :: Vector 2 U16
         x = [1, 2]
         |]
-          (lst (var "U16"))
-        -- Nested nat-parameterized alias: Matrix m n a = [[a]] requires
+          (arr "Vector" [NatLitU 2, var "U16"])
+        -- Nested nat-parameterized newtype: Matrix m n a = [[a]] requires
         -- the element-type propagation to recurse through both layers.
       , assertGeneralType
           "nested list literal :: Matrix 2 2 I32"
           [r|
         module main (x)
-        type Matrix (m :: Nat) (n :: Nat) a = List (List a)
+        newtype Matrix (m :: Nat) (n :: Nat) a = List (List a)
         x :: Matrix 2 2 I32
         x = [[1, 2], [3, 4]]
         |]
-          (lst (lst (var "I32")))
-        -- Real literals through nat-parameterized aliases use the same
+          (arr "Matrix" [NatLitU 2, NatLitU 2, var "I32"])
+        -- Real literals through nat-parameterized newtypes use the same
         -- dispatch — confirm the RealS path is unaffected.
       , assertGeneralType
           "real list literal :: Vector 2 F32"
           [r|
         module main (x)
-        type Vector (n :: Nat) a = List a
+        newtype Vector (n :: Nat) a = List a
         x :: Vector 2 F32
         x = [1.5, 2.5]
         |]
-          (lst (var "F32"))
+          (arr "Vector" [NatLitU 2, var "F32"])
         -- Negative: Nat-dimension mismatch must still fail. The element
         -- type was successfully propagated (I32 accepted into the
         -- literals), but length 3 does not satisfy Nat dimension 4.
@@ -1323,7 +1363,7 @@ numericLiteralAliasTests =
           "list literal :: Vector 4 I32 with wrong length must fail"
           [r|
         module main (x)
-        type Vector (n :: Nat) a = List a
+        newtype Vector (n :: Nat) a = List a
         x :: Vector 4 I32
         x = [1, 2, 3]
         |]
@@ -1460,6 +1500,84 @@ pendingNumLitTests =
         x = add 1 y
         |]
           (var "I8")
+
+      -- ----- A later argument that is itself an application pins the literal -----
+      , assertGeneralType
+          "int literal adopts Real from a later applied argument"
+          [r|
+        module main (x)
+        pair :: a -> a -> (a, a)
+        toR :: Int -> Real
+        x = pair 7 (toR 1)
+        |]
+          (tuple [real, real])
+      , assertGeneralType
+          "int literal adopts ?Int from a later applied argument"
+          [r|
+        module main (x)
+        pair :: a -> a -> (a, a)
+        wrap :: Int -> ?Int
+        x = pair 7 (wrap 1)
+        |]
+          (tuple [OptionalU int, OptionalU int])
+      , assertGeneralType
+          "int literal in a list adopts Real from a later list argument"
+          [r|
+        module main (x)
+        pair :: a -> a -> (a, a)
+        toR :: Int -> Real
+        x = pair [7] [toR 1]
+        |]
+          (tuple [lst real, lst real])
+      , assertGeneralType
+          "int literal in a nested list adopts Real from a later argument"
+          [r|
+        module main (x)
+        pair :: a -> a -> (a, a)
+        toR :: Int -> Real
+        x = pair [[7]] [[toR 1]]
+        |]
+          (tuple [lst (lst real), lst (lst real)])
+      , assertGeneralType
+          "int literal in a tuple adopts Real from a later tuple argument"
+          [r|
+        module main (x)
+        pair :: a -> a -> (a, a)
+        toR :: Int -> Real
+        x = pair (7, 1) (toR 1, 2)
+        |]
+          (tuple [tuple [real, int], tuple [real, int]])
+      , assertGeneralType
+          "int literal at the head of a list adopts Real from a later element"
+          [r|
+        module main (x)
+        toR :: Int -> Real
+        x = [7, toR 1]
+        |]
+          (lst real)
+      , assertGeneralType
+          "list of int literals defaults to Int"
+          [r|
+        module main (x)
+        x = [7, 8, 9]
+        |]
+          (lst int)
+      , assertGeneralType
+          "tuple of an int and a real literal keeps both"
+          [r|
+        module main (x)
+        x = (7, 2.5)
+        |]
+          (tuple [int, real])
+      , assertGeneralType
+          "int literal before an applied Int argument stays Int"
+          [r|
+        module main (x)
+        pair :: a -> a -> (a, a)
+        inc :: Int -> Int
+        x = pair 7 (inc 1)
+        |]
+          (tuple [int, int])
 
       -- ----- Negative: numeric literal in a non-numeric slot fails -----
       , exprTestBad
@@ -2295,7 +2413,7 @@ unitTypeTests =
         assertGeneralType "primitive boolean" "True" bool
       , assertGeneralType "primitive string" "\"this is a string literal\"" str
       , -- The `\0` escape is intentionally legal at the source-level so
-        --   that NUL-tolerant pools (Python, C++, Julia) and the pure
+        --   that NUL-tolerant pools (Python, C++) and the pure
         --   morloc nexus can carry interior NULs. The dispatch-layer
         --   guard rejects NUL-bearing values only at boundaries into
         --   NUL-intolerant languages (R, C). See features-strings.asc.
@@ -3946,6 +4064,114 @@ infixOperatorTests =
         |]
       ]
 
+-- A record and an anonymous record type are one type only when their
+-- fields come in the same order.
+anonymousRecordOrderTests :: TestTree
+anonymousRecordOrderTests =
+  localOption (mkTimeout 2000000) $
+    testGroup
+      "A record and an anonymous record type agree only in field order"
+      [ expectPass
+          "a record converts to an anonymous type with its own field order"
+          [r|
+module main (f, g, h)
+record A where
+  x :: Int
+  y :: Int
+f :: A -> {x = Int, y = Int}
+f r = r
+g :: {x = Int, y = Int} -> A
+g r = r
+h :: Int -> A
+h n = {y = n, x = 0}
+|]
+      , expectError
+          "a record does not convert to its fields in another order"
+          [r|
+module main (f)
+record A where
+  x :: Int
+  y :: Int
+f :: A -> {y = Int, x = Int}
+f r = r
+|]
+      , expectError
+          "an anonymous type does not convert to a record in another order"
+          [r|
+module main (g)
+record A where
+  x :: Int
+  y :: Int
+g :: {y = Int, x = Int} -> A
+g r = r
+|]
+      , expectError
+          "a reordered conversion nested in a list is rejected"
+          [r|
+module main (f)
+record A where
+  x :: Int
+  y :: Int
+f :: [A] -> [{y = Int, x = Int}]
+f rs = rs
+|]
+      , expectError
+          "a reordered conversion through an alias is rejected"
+          [r|
+module main (f)
+record A where
+  x :: Int
+  y :: Int
+type P = {y = Int, x = Int}
+f :: A -> P
+f r = r
+|]
+      , expectError
+          "two records with swapped fields do not convert through an anonymous type"
+          [r|
+module main (f)
+record A where
+  x :: Int
+  y :: Int
+record B where
+  y :: Int
+  x :: Int
+toAnon :: A -> {x = Int, y = Int}
+toAnon r = r
+f :: A -> B
+f r = toAnon r
+|]
+      , expectPass
+          "a conversion nested in a list keeps its field order"
+          [r|
+module main (f)
+record A where
+  x :: Int
+  y :: Int
+f :: [A] -> [{x = Int, y = Int}]
+f rs = rs
+|]
+      , expectPass
+          "a conversion through an alias keeps its field order"
+          [r|
+module main (f)
+record A where
+  x :: Int
+  y :: Int
+type P = {x = Int, y = Int}
+f :: A -> P
+f r = r
+|]
+      , expectError
+          "an object does not convert to an anonymous record"
+          [r|
+module main (f)
+object Person = Person {name :: Str, age :: Int}
+f :: Person -> {name = Str, age = Int}
+f p = p
+|]
+      ]
+
 {- | C3: Record literal field order is by-name. Permuted literals must
 typecheck against the declared record type, while literals with mismatched
 key sets (missing / unknown fields) must be rejected.
@@ -4784,7 +5010,7 @@ effVar :: MT.Text -> TypeU -> TypeU
 effVar v = EffectU (EffectVar (TV v))
 
 -- | Effect subtyping covers four cases the spec lays out
--- ('model/effects.md' under "Subtyping" and "Effect Checking"):
+-- (EFF-8 and EFF-10):
 --
 --   1. Widening accepted: fewer effects can be used where more are
 --      expected.  This is the one direction the rule permits.
@@ -4909,7 +5135,7 @@ effectSubtypeTests =
 
 -- | Effect synthesis tests verify that the inferred effect set on a
 -- top-level export matches the spec's structural propagation rule
--- ('model/effects.md' under "Effect Inference"):
+-- (EFF-6):
 effectSynthesisTests :: TestTree
 effectSynthesisTests =
   localOption (mkTimeout 100000) $ -- 0.1 second timeout
@@ -6431,7 +6657,7 @@ natErrorTests =
         "nat arithmetic mismatch: (2+3) != 4"
         [r|
       module main (x)
-      type SizedList n a = [a]
+      newtype SizedList n a = [a]
       append :: SizedList m a -> SizedList n a -> SizedList (m + n) a
       a :: SizedList 2 Int
       b :: SizedList 3 Int
@@ -6448,13 +6674,13 @@ natDimTests =
         "list literal dimension mismatch (3 != 4)"
         [r|
       module main (foo)
-      type Matrix (m :: Nat) (n :: Nat) a = [[a]]
+      newtype Matrix (m :: Nat) (n :: Nat) a = [[a]]
       foo = [[1,2,3],[4,5,6]] :: Matrix 2 4 Int
         |]
     , testCase "list literal dimensions match" $ do
         result <- runFront [r|
           module main (foo)
-          type Matrix (m :: Nat) (n :: Nat) a = [[a]]
+          newtype Matrix (m :: Nat) (n :: Nat) a = [[a]]
           foo = [[1,2,3],[4,5,6]] :: Matrix 2 3 Int
             |]
         case result of
@@ -6463,7 +6689,7 @@ natDimTests =
     , testCase "infer nat dimensions from list literal" $ do
         result <- runFrontRaw [r|
           module main (foo)
-          type Matrix (m :: Nat) (n :: Nat) a = [[a]]
+          newtype Matrix (m :: Nat) (n :: Nat) a = [[a]]
           foo :: Matrix m n Int
           foo = [[1,2,3],[4,5,6]]
             |]
@@ -6485,21 +6711,21 @@ gradualDesugarTests =
       expectPass "concrete-Nat: `Vector 3 Int`"
         [r|
       module main (foo)
-      type Vector (n :: Nat) a = [a]
+      newtype Vector (n :: Nat) a = [a]
       foo :: Vector 3 Int -> Int
       foo _ = 0
         |]
     , expectPass "polymorphic-Nat: `Vector n Int`"
         [r|
       module main (foo)
-      type Vector (n :: Nat) a = [a]
+      newtype Vector (n :: Nat) a = [a]
       foo :: Vector n Int -> Int
       foo _ = 0
         |]
     , expectPass "Nat arithmetic: `Vector (2+3) Int`"
         [r|
       module main (foo)
-      type Vector (n :: Nat) a = [a]
+      newtype Vector (n :: Nat) a = [a]
       foo :: Vector (2+3) Int -> Int
       foo _ = 0
         |]
@@ -6508,21 +6734,21 @@ gradualDesugarTests =
     , expectPass "gradual `Vector Int` typechecks"
         [r|
       module main (foo)
-      type Vector (n :: Nat) a = [a]
+      newtype Vector (n :: Nat) a = [a]
       foo :: Vector Int -> Int
       foo _ = 0
         |]
     , expectPass "gradual `Vector Int` accepts list literal of any length"
         [r|
       module main (xs)
-      type Vector (n :: Nat) a = [a]
+      newtype Vector (n :: Nat) a = [a]
       xs :: Vector Int
       xs = [1, 2, 3, 4, 5]
         |]
     , expectPass "gradual `[Vector Int]` accepts het-length elements"
         [r|
       module main (xs)
-      type Vector (n :: Nat) a = [a]
+      newtype Vector (n :: Nat) a = [a]
       xs :: [Vector Int]
       xs = [[1, 2], [3, 4, 5], [6]]
         |]
@@ -6533,7 +6759,7 @@ gradualDesugarTests =
     , testCase "gradual `Vector Int` desugars to `AppU Vector [NatVoidU, Int]`" $ do
         result <- runFrontRaw [r|
           module main (foo)
-          type Vector (n :: Nat) a = [a]
+          newtype Vector (n :: Nat) a = [a]
           foo :: Vector Int -> Int
           foo _ = 0
             |]
@@ -6550,7 +6776,7 @@ gradualDesugarTests =
     , expectPass "concrete `Vector 3 Int` flows into `Vector Int` arg"
         [r|
       module main (result)
-      type Vector (n :: Nat) a = [a]
+      newtype Vector (n :: Nat) a = [a]
       f :: Vector Int -> Int
       f _ = 0
       xs :: Vector 3 Int
@@ -6561,7 +6787,7 @@ gradualDesugarTests =
     , expectPass "gradual `Vector Int` flows into `Vector 3 Int` arg"
         [r|
       module main (result)
-      type Vector (n :: Nat) a = [a]
+      newtype Vector (n :: Nat) a = [a]
       f :: Vector 3 Int -> Int
       f _ = 0
       xs :: Vector Int
@@ -6574,28 +6800,28 @@ gradualDesugarTests =
     , expectPass "gradual `Tensor3 Int` (3 Nat positions missing)"
         [r|
       module main (foo)
-      type Tensor3 (i :: Nat) (j :: Nat) (k :: Nat) a = [a]
+      newtype Tensor3 (i :: Nat) (j :: Nat) (k :: Nat) a = [a]
       foo :: Tensor3 Int -> Int
       foo _ = 0
         |]
     , expectPass "gradual `Tensor3 h Int` (2 Nat positions missing)"
         [r|
       module main (foo)
-      type Tensor3 (i :: Nat) (j :: Nat) (k :: Nat) a = [a]
+      newtype Tensor3 (i :: Nat) (j :: Nat) (k :: Nat) a = [a]
       foo :: Tensor3 h Int -> Int
       foo _ = 0
         |]
     , expectPass "gradual `Tensor3 h w Int` (1 Nat position missing)"
         [r|
       module main (foo)
-      type Tensor3 (i :: Nat) (j :: Nat) (k :: Nat) a = [a]
+      newtype Tensor3 (i :: Nat) (j :: Nat) (k :: Nat) a = [a]
       foo :: Tensor3 h w Int -> Int
       foo _ = 0
         |]
     , expectPass "fully-specified `Tensor3 2 3 5 Int` (no desugar)"
         [r|
       module main (foo)
-      type Tensor3 (i :: Nat) (j :: Nat) (k :: Nat) a = [a]
+      newtype Tensor3 (i :: Nat) (j :: Nat) (k :: Nat) a = [a]
       foo :: Tensor3 2 3 5 Int -> Int
       foo _ = 0
         |]
@@ -6604,14 +6830,14 @@ gradualDesugarTests =
     , expectPass "gradual `Table` (both Nat and Rec missing)"
         [r|
       module main (foo)
-      type Table (n :: Nat) (r :: Rec) = Int
+      newtype Table (n :: Nat) (r :: Rec) = Int
       foo :: Table -> Int
       foo _ = 0
         |]
     , expectPass "partial `Table 100` (only Rec missing)"
         [r|
       module main (foo)
-      type Table (n :: Nat) (r :: Rec) = Int
+      newtype Table (n :: Nat) (r :: Rec) = Int
       foo :: Table 100 -> Int
       foo _ = 0
         |]
@@ -6620,7 +6846,7 @@ gradualDesugarTests =
     , expectError "bare `Vector` (missing Type arg) is rejected"
         [r|
       module main (foo)
-      type Vector (n :: Nat) a = [a]
+      newtype Vector (n :: Nat) a = [a]
       foo :: Vector -> Int
       foo _ = 0
         |]
@@ -6629,7 +6855,7 @@ gradualDesugarTests =
     , expectPass "`g v = f v` with `Vector n Int` on both sides"
         [r|
       module main (g)
-      type Vector (n :: Nat) a = [a]
+      newtype Vector (n :: Nat) a = [a]
       f :: Vector n Int -> Int
       f _ = 0
       g :: Vector n Int -> Int
@@ -6682,7 +6908,7 @@ gradualDesugarTests =
         "unknown kind name is rejected with a source-located error"
         [r|
       module main (foo)
-      type Vector (n :: Nut) a = [a]
+      newtype Vector (n :: Nut) a = [a]
       foo :: Vector 3 Int -> Int
       foo _ = 0
         |]
@@ -6728,6 +6954,39 @@ natArithTests =
         in case NS.solveNat e1 e2 of
              Left NS.Contradiction -> return ()
              other -> assertFailure $ "Expected Contradiction, got: " ++ show other
+    , testCase "a quotient the solver cannot reduce is not zero: n / 2 + 3 ~ 3" $
+        let e1 = NS.NatAdd (NS.NatDiv (NS.NatVar (TV "n")) (NS.NatLit 2)) (NS.NatLit 3)
+            e2 = NS.NatLit 3
+        in case NS.solveNat e1 e2 of
+             Left (NS.Deferred _) -> return ()
+             other -> assertFailure $ "Expected Deferred, got: " ++ show other
+    , testCase "a ground quotient truncates: 7 / 2 ~ 3" $
+        case NS.solveNat (NS.NatDiv (NS.NatLit 7) (NS.NatLit 2)) (NS.NatLit 3) of
+          Right subs -> assertEqual "" Map.empty subs
+          other -> assertFailure $ "Expected success, got: " ++ show other
+    , testCase "an open linear equation with large constants is decided: n + m ~ 400" $
+        assertEqual "" (Just True)
+          (NS.naturalSolution [(NS.NatAdd (NS.NatVar (TV "n")) (NS.NatVar (TV "m")), NS.NatLit 400)])
+    , testCase "a linear equation off the coefficients' lattice has no solution: 2n + 4m ~ 7" $
+        assertEqual "" (Just False)
+          (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 2) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 4) (NS.NatVar (TV "m"))), NS.NatLit 7)])
+    , testCase "the coin problem below its bound: 3n + 5m ~ 7 has no solution" $
+        assertEqual "" (Just False)
+          (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 3) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 5) (NS.NatVar (TV "m"))), NS.NatLit 7)])
+    , testCase "the coin problem with large coefficients is decided quickly: 1000n + 999m ~ 998001" $
+        assertEqual "" (Just True)
+          (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 1000) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 999) (NS.NatVar (TV "m"))), NS.NatLit 998001)])
+    , testCase "a witness never passes through a negative difference: (3 - n) * (3 - n) ~ 16" $
+        let d = NS.NatSub (NS.NatLit 3) (NS.NatVar (TV "n"))
+        in assertBool "" (NS.naturalSolution [(NS.NatMul d d, NS.NatLit 16)] /= Just True)
+    , testCase "a solved Nat is never negative: m + 1 ~ 0" $
+        case NS.solveNat (NS.NatAdd (NS.NatVar (TV "m")) (NS.NatLit 1)) (NS.NatLit 0) of
+          Left NS.Contradiction -> return ()
+          other -> assertFailure $ "Expected Contradiction, got: " ++ show other
+    , testCase "an open equation keeps no solution that may be negative: n + m ~ 4" $
+        case NS.solveNat (NS.NatAdd (NS.NatVar (TV "n")) (NS.NatVar (TV "m"))) (NS.NatLit 4) of
+          Left (NS.Deferred _) -> return ()
+          other -> assertFailure $ "Expected Deferred, got: " ++ show other
     , testCase "subtraction with variable: n - 3 ~ 5 => n = 8" $
         let e1 = NS.NatSub (NS.NatVar (TV "n")) (NS.NatLit 3)
             e2 = NS.NatLit 5
@@ -6782,7 +7041,7 @@ natArithTests =
         "ground subtraction mismatch: (10-3) != 8 in type annotation"
         [r|
       module main (x)
-      type SizedList n a = [a]
+      newtype SizedList n a = [a]
       a :: SizedList (10 - 3) Int
       x :: SizedList 8 Int
       x = a
@@ -6791,7 +7050,7 @@ natArithTests =
         "ground division mismatch: (12/4) != 4 in type annotation"
         [r|
       module main (x)
-      type SizedList n a = [a]
+      newtype SizedList n a = [a]
       a :: SizedList (12 / 4) Int
       x :: SizedList 4 Int
       x = a
@@ -6801,7 +7060,7 @@ natArithTests =
         "deferred subtraction mismatch: m=8, n=3, but m-n used as 7"
         [r|
       module main (x)
-      type SizedList n a = [a]
+      newtype SizedList n a = [a]
       take :: SizedList (m - n) a -> SizedList n a -> SizedList m a
       a :: SizedList 7 Int
       b :: SizedList 3 Int
@@ -6812,7 +7071,7 @@ natArithTests =
         "deferred multiplication mismatch: n*m=12 but n=5 (no integer m)"
         [r|
       module main (x)
-      type SizedList n a = [a]
+      newtype SizedList n a = [a]
       split :: SizedList (n * m) a -> SizedList n a
       a :: SizedList 12 Int
       x :: SizedList 5 Int
@@ -6875,8 +7134,10 @@ typedefKindVarTests =
                           t
              Left e -> assertFailure $ "Expected expansion, got: " ++ show e
     , testCase "evaluateType: Nat typedef param leaves unrelated NatVarU intact" $
-        -- type Foo (n :: Nat) = Vector (k + n) Int
-        -- Foo 3 should give Vector (k + 3) Int (k stays NatVarU)
+        -- Substitution replaces only the parameter: in the body
+        -- Vector (k + n) Int, Foo 3 gives Vector (k + 3) Int. A declaration
+        -- with the free k is rejected before expansion (ALIAS-11); the
+        -- expander is tested on it directly.
         let bodyT = AppU (VarU (TV "Vector"))
                       [NatAddU (NatVarU (TV "k")) (NatVarU (TV "n")), VarU (TV "Int")]
             params = [Left (TV "n", KindNat)]
@@ -6976,47 +7237,47 @@ typedefKindVarTests =
         "Foo n m = Vector (n + m) Int; Foo 3 2 = [1..5]"
         [r|
       module main (x)
-      type Vector (n :: Nat) a = List a
+      newtype Vector (n :: Nat) a = List a
       type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
       x :: Foo 3 2
       x = [1, 2, 3, 4, 5]
         |]
-        (lst (var "Int"))
+        (arr "Vector" [NatLitU 5, var "Int"])
     , assertGeneralType
         "Foo n m = Vector (n - m) Int; Foo 5 3 = [1, 2]"
         [r|
       module main (x)
-      type Vector (n :: Nat) a = List a
+      newtype Vector (n :: Nat) a = List a
       type Foo (n :: Nat) (m :: Nat) = Vector (n - m) Int
       x :: Foo 5 3
       x = [1, 2]
         |]
-        (lst (var "Int"))
+        (arr "Vector" [NatLitU 2, var "Int"])
     , assertGeneralType
         "Foo n m = Vector (n * m) Int; Foo 3 2 = [1..6]"
         [r|
       module main (x)
-      type Vector (n :: Nat) a = List a
+      newtype Vector (n :: Nat) a = List a
       type Foo (n :: Nat) (m :: Nat) = Vector (n * m) Int
       x :: Foo 3 2
       x = [1, 2, 3, 4, 5, 6]
         |]
-        (lst (var "Int"))
+        (arr "Vector" [NatLitU 6, var "Int"])
     , assertGeneralType
         "Foo n m = Vector (n / m) Int; Foo 6 2 = [1..3]"
         [r|
       module main (x)
-      type Vector (n :: Nat) a = List a
+      newtype Vector (n :: Nat) a = List a
       type Foo (n :: Nat) (m :: Nat) = Vector (n / m) Int
       x :: Foo 6 2
       x = [1, 2, 3]
         |]
-        (lst (var "Int"))
+        (arr "Vector" [NatLitU 3, var "Int"])
     , expectError
         "Foo n m = Vector (n + m) Int; Foo 3 2 with wrong-length value fails"
         [r|
       module main (x)
-      type Vector (n :: Nat) a = List a
+      newtype Vector (n :: Nat) a = List a
       type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
       x :: Foo 3 2
       x = [1, 2, 3, 4, 5, 6]
@@ -7025,32 +7286,32 @@ typedefKindVarTests =
         "Mixed Type/Nat params: Foo (n :: Nat) a = Vector (n + 1) a; Foo 4 Int = [1..5]"
         [r|
       module main (x)
-      type Vector (n :: Nat) a = List a
+      newtype Vector (n :: Nat) a = List a
       type Foo (n :: Nat) a = Vector (n + 1) a
       x :: Foo 4 Int
       x = [1, 2, 3, 4, 5]
         |]
-        (lst (var "Int"))
+        (arr "Vector" [NatLitU 5, var "Int"])
     , assertGeneralType
         "Repeated Nat param: Foo (n :: Nat) = Vector (n + n) Int; Foo 3 = [1..6]"
         [r|
       module main (x)
-      type Vector (n :: Nat) a = List a
+      newtype Vector (n :: Nat) a = List a
       type Foo (n :: Nat) = Vector (n + n) Int
       x :: Foo 3
       x = [1, 2, 3, 4, 5, 6]
         |]
-        (lst (var "Int"))
+        (arr "Vector" [NatLitU 6, var "Int"])
     , assertGeneralType
         "Single Nat param: Foo (n :: Nat) = Vector (n + 1) Int; Foo 4 = [1..5]"
         [r|
       module main (x)
-      type Vector (n :: Nat) a = List a
+      newtype Vector (n :: Nat) a = List a
       type Foo (n :: Nat) = Vector (n + 1) Int
       x :: Foo 4
       x = [1, 2, 3, 4, 5]
         |]
-        (lst (var "Int"))
+        (arr "Vector" [NatLitU 5, var "Int"])
 
     -- Bare VarU classifies as a Nat expression (see typeUToNatExpr's
     -- VarU case in Typecheck/Internal.hs), so a synthetic pair that
@@ -7076,7 +7337,7 @@ natLabelTests =
         "labeled literal resolves dimension: makeVec 5 :: Tensor1 5 Real"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeVec :: n@Int -> Tensor1 n Real
       x = makeVec 5
         |]
@@ -7085,7 +7346,7 @@ natLabelTests =
         "labeled literal zero dimension: makeVec 0 :: Tensor1 0 Real"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeVec :: n@Int -> Tensor1 n Real
       x = makeVec 0
         |]
@@ -7094,7 +7355,7 @@ natLabelTests =
         "two labeled params resolve: makeMat 3 4 :: Tensor2 3 4 Real"
         [r|
       module main (x)
-      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      newtype Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       makeMat :: m@Int -> n@Int -> Tensor2 m n Real
       x = makeMat 3 4
         |]
@@ -7103,7 +7364,7 @@ natLabelTests =
         "labeled dims flow through generic op: id_ (makeVec 7) :: Tensor1 7 Real"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeVec :: n@Int -> Tensor1 n Real
       id_ :: Tensor1 n Real -> Tensor1 n Real
       x = id_ (makeVec 7)
@@ -7113,11 +7374,11 @@ natLabelTests =
         "labeled dims with nat arithmetic: conv output dims computed"
         [r|
       module main (x)
-      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      newtype Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
       makeImg :: h@Int -> w@Int -> Tensor2 h w Real
       makeK :: k@Int -> fh@Int -> fw@Int -> Tensor3 k fh fw Real
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeB :: k@Int -> Tensor1 k Real
       conv :: Tensor2 h w Real -> Tensor3 k fh fw Real -> Tensor1 k Real -> Tensor3 k (h - fh + 1) (w - fw + 1) Real
       x = conv (makeImg 5 5) (makeK 2 3 3) (makeB 2)
@@ -7128,7 +7389,7 @@ natLabelTests =
         [r|
       module main (x)
       type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeT :: a@Int -> b@Int -> c@Int -> Tensor3 a b c Real
       flatten :: Tensor3 a b c Real -> Tensor1 (a * b * c) Real
       x = flatten (makeT 2 3 3)
@@ -7138,7 +7399,7 @@ natLabelTests =
         "mixed labeled and unlabeled args"
         [r|
       module main (x)
-      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      newtype Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       makeT :: m@Int -> n@Int -> Tensor2 m n Real
       scale :: Real -> Tensor2 m n Real -> Tensor2 m n Real
       x = scale 2.0 (makeT 3 4)
@@ -7148,7 +7409,7 @@ natLabelTests =
         "same label var used in two positions (diagonal)"
         [r|
       module main (x)
-      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      newtype Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       eye :: n@Int -> Tensor2 n n Real
       x = eye 4
         |]
@@ -7159,7 +7420,7 @@ natLabelTests =
         "let-bound int resolves label: let n = 5 in makeVec n"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeVec :: n@Int -> Tensor1 n Real
       x = let n = 5 in makeVec n
         |]
@@ -7168,7 +7429,7 @@ natLabelTests =
         "chained let-bound: let a = 7 in let b = a in makeVec b"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeVec :: n@Int -> Tensor1 n Real
       x = let a = 7 in let b = a in makeVec b
         |]
@@ -7177,7 +7438,7 @@ natLabelTests =
         "multiple let-bound dims: let m=3, n=4 in makeMat m n"
         [r|
       module main (x)
-      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      newtype Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       makeMat :: m@Int -> n@Int -> Tensor2 m n Real
       x = let m = 3 in let n = 4 in makeMat m n
         |]
@@ -7188,7 +7449,7 @@ natLabelTests =
         "tuple accessor resolves: makeVec (.0 (5, 6))"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeVec :: n@Int -> Tensor1 n Real
       x = makeVec (.0 (5, 6))
         |]
@@ -7197,7 +7458,7 @@ natLabelTests =
         "let-bound tuple + accessor: let dims = (3,4) in makeMat (.0 dims) (.1 dims)"
         [r|
       module main (x)
-      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      newtype Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       makeMat :: m@Int -> n@Int -> Tensor2 m n Real
       x = let dims = (3, 4) in makeMat (.0 dims) (.1 dims)
         |]
@@ -7206,7 +7467,7 @@ natLabelTests =
         "chained let + accessor: let d=(8,9); let n=.0 d in makeVec n"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeVec :: n@Int -> Tensor1 n Real
       x = let d = (8, 9) in let n = .0 d in makeVec n
         |]
@@ -7217,7 +7478,7 @@ natLabelTests =
         "identity lambda: makeVec ((\\x -> x) 5)"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeVec :: n@Int -> Tensor1 n Real
       x = makeVec ((\n -> n) 5)
         |]
@@ -7226,7 +7487,7 @@ natLabelTests =
         "lambda + accessor: makeVec ((\\t -> .1 t) (1,2,3))"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeVec :: n@Int -> Tensor1 n Real
       x = makeVec ((\t -> .1 t) (1, 2, 3))
         |]
@@ -7235,7 +7496,7 @@ natLabelTests =
         "lambda selects first of two args: (\\x y -> x) 7 99"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeVec :: n@Int -> Tensor1 n Real
       x = makeVec ((\a b -> a) 7 99)
         |]
@@ -7246,7 +7507,7 @@ natLabelTests =
         "labeled dim mismatch: add (makeT 3 4) (makeT 3 5) fails"
         [r|
       module main (x)
-      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      newtype Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       makeT :: m@Int -> n@Int -> Tensor2 m n Real
       add :: Tensor2 m n Real -> Tensor2 m n Real -> Tensor2 m n Real
       x = add (makeT 3 4) (makeT 3 5)
@@ -7255,7 +7516,7 @@ natLabelTests =
         "labeled dim mismatch: dot product length mismatch"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeVec :: n@Int -> Tensor1 n Real
       dot :: Tensor1 n Real -> Tensor1 n Real -> Real
       x = dot (makeVec 3) (makeVec 5)
@@ -7264,9 +7525,9 @@ natLabelTests =
         "labeled dim mismatch through arithmetic: conv wrong kernel size"
         [r|
       module main (x)
-      type Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      newtype Tensor2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       type Tensor3 (d1 :: Nat) (d2 :: Nat) (d3 :: Nat) a
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeImg :: h@Int -> w@Int -> Tensor2 h w Real
       makeK :: k@Int -> fh@Int -> fw@Int -> Tensor3 k fh fw Real
       makeB :: k@Int -> Tensor1 k Real
@@ -7278,7 +7539,7 @@ natLabelTests =
         "annotated return type contradicts labeled resolution"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeVec :: n@Int -> Tensor1 n Real
       x :: Tensor1 99 Real
       x = makeVec 5
@@ -7289,7 +7550,7 @@ natLabelTests =
         "no labels: plain nat vars remain generic"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       id_ :: Tensor1 n Real -> Tensor1 n Real
       a :: Tensor1 5 Real
       x = id_ a
@@ -7299,7 +7560,7 @@ natLabelTests =
         "label on non-first param position"
         [r|
       module main (x)
-      type Tensor1 (d :: Nat) a = [a]
+      newtype Tensor1 (d :: Nat) a = [a]
       makeFrom :: Real -> n@Int -> Tensor1 n Real
       x = makeFrom 1.0 10
         |]
@@ -7322,7 +7583,7 @@ natKindPromotionTests =
         "with (:: Nat): labels resolve to concrete dimensions"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       makeVec :: n@Int -> T1 n Real
       x = makeVec 5
         |]
@@ -7332,7 +7593,7 @@ natKindPromotionTests =
         "without (:: Nat): labels do NOT resolve (dim stays generic)"
         [r|
       module main (x)
-      type T1 d a = [a]
+      newtype T1 d a = [a]
       makeVec :: n@Int -> T1 n Real
       x = makeVec 5
         |]
@@ -7348,7 +7609,7 @@ natKindPromotionTests =
         "with (:: Nat): dimension mismatch is caught (4 != 5)"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       dot :: T1 n Real -> T1 n Real -> Real
       a :: T1 4 Real
       b :: T1 5 Real
@@ -7362,7 +7623,7 @@ natKindPromotionTests =
         "without (:: Nat): dimension mismatch still caught via existentials"
         [r|
       module main (x)
-      type T1 d a = [a]
+      newtype T1 d a = [a]
       dot :: T1 n Real -> T1 n Real -> Real
       a :: T1 4 Real
       b :: T1 5 Real
@@ -7377,7 +7638,7 @@ natKindPromotionTests =
         "labeled dims propagate through 3-function chain"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: n@Int -> T1 n Real
       f :: T1 n Real -> T1 n Real
       g :: T1 n Real -> T1 n Real
@@ -7391,7 +7652,7 @@ natKindPromotionTests =
         "labeled dims propagate through let chain"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: n@Int -> T1 n Real
       f :: T1 n Real -> T1 n Real
       x = let a = make 4
@@ -7408,7 +7669,7 @@ natKindPromotionTests =
         "labeled subtraction: h=10 w=3, h-w+1 = 8"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: h@Int -> w@Int -> T1 (h - w + 1) Real
       x = make 10 3
         |]
@@ -7418,7 +7679,7 @@ natKindPromotionTests =
         "labeled multiplication: m=3 n=4, m*n = 12"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: m@Int -> n@Int -> T1 (m * n) Real
       x = make 3 4
         |]
@@ -7428,7 +7689,7 @@ natKindPromotionTests =
         "labeled division: n=12 d=4, n/d = 3"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: n@Int -> d@Int -> T1 (n / d) Real
       x = make 12 4
         |]
@@ -7438,7 +7699,7 @@ natKindPromotionTests =
         "compound arithmetic: a=6 b=2 c=1, (a*b)-c = 11"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: a@Int -> b@Int -> c@Int -> T1 (a * b - c) Real
       x = make 6 2 1
         |]
@@ -7452,7 +7713,7 @@ natKindPromotionTests =
         "labeled arithmetic mismatch: 10-3+1=8 but annotated as 7"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: h@Int -> w@Int -> T1 (h - w + 1) Real
       x :: T1 7 Real
       x = make 10 3
@@ -7462,7 +7723,7 @@ natKindPromotionTests =
         "labeled multiplication mismatch: 3*4=12 but used where 11 expected"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: m@Int -> n@Int -> T1 (m * n) Real
       consume :: T1 11 Real -> Int
       x = consume (make 3 4)
@@ -7476,7 +7737,7 @@ natKindPromotionTests =
         "optional tensor: ?(T1 n Real) with labeled dim"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       tryMake :: n@Int -> ?(T1 n Real)
       x = tryMake 5
         |]
@@ -7491,7 +7752,7 @@ natKindPromotionTests =
         [r|
       module main (x)
       effect IO
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       ioMake :: n@Int -> <IO> T1 n Real
       x = ioMake 5
         |]
@@ -7506,7 +7767,7 @@ natKindPromotionTests =
         "list of nat-parameterized type: [T1 n Real]"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: n@Int -> [T1 n Real]
       x = make 5
         |]
@@ -7516,7 +7777,7 @@ natKindPromotionTests =
         "tuple of nat-parameterized types"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: m@Int -> n@Int -> (T1 m Real, T1 n Real)
       x = make 3 7
         |]
@@ -7533,8 +7794,8 @@ natKindPromotionTests =
         "conversion between two nat-parameterized types"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
-      type T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      newtype T1 (d :: Nat) a = [a]
+      newtype T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       flatten :: T2 m n Real -> T1 (m * n) Real
       make :: m@Int -> n@Int -> T2 m n Real
       x = flatten (make 3 4)
@@ -7545,8 +7806,8 @@ natKindPromotionTests =
         "cross-type dim mismatch: flatten 3x4=12 but consume expects 11"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
-      type T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+      newtype T1 (d :: Nat) a = [a]
+      newtype T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
       flatten :: T2 m n Real -> T1 (m * n) Real
       make :: m@Int -> n@Int -> T2 m n Real
       consume :: T1 11 Real -> Int
@@ -7561,7 +7822,7 @@ natKindPromotionTests =
         "mixed params: first is Nat, second is Type"
         [r|
       module main (x)
-      type Sized (n :: Nat) a = [a]
+      newtype Sized (n :: Nat) a = [a]
       make :: n@Int -> Sized n Int
       x = make 10
         |]
@@ -7578,7 +7839,7 @@ natKindPromotionTests =
         "label on param that doesn't appear in return type: dim stays generic"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: n@Int -> T1 m Real
       x = make 5
         |]
@@ -7592,7 +7853,7 @@ natKindPromotionTests =
         "nat literal 0 in subtraction: n-0 = n"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: n@Int -> T1 (n - 0) Real
       x = make 7
         |]
@@ -7602,7 +7863,7 @@ natKindPromotionTests =
         "nat literal 1 in multiplication: n*1 = n"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: n@Int -> T1 (n * 1) Real
       x = make 7
         |]
@@ -7612,7 +7873,7 @@ natKindPromotionTests =
         "nat literal 0 in multiplication: n*0 = 0"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: n@Int -> T1 (n * 0) Real
       x = make 7
         |]
@@ -7625,7 +7886,7 @@ natKindPromotionTests =
     , testCase "multiple exports all resolve independently" $ do
         result <- runFrontRaw [r|
       module main (x, y)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: n@Int -> T1 n Real
       x = make 3
       y = make 7
@@ -7649,7 +7910,7 @@ natKindPromotionTests =
         "large nat literal: 1000000"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       make :: n@Int -> T1 n Real
       x = make 1000000
         |]
@@ -7663,7 +7924,7 @@ natKindPromotionTests =
         "labeled: same label used for different values"
         [r|
       module main (x)
-      type T1 (d :: Nat) a = [a]
+      newtype T1 (d :: Nat) a = [a]
       combine :: T1 n Real -> T1 n Real -> T1 n Real
       make :: n@Int -> T1 n Real
       x = combine (make 3) (make 5)
@@ -8506,7 +8767,10 @@ literalDispatchTests =
           __to_index__ :: i -> I64
         instance IndexLike Int where
           source Py ("identity" as __to_index__)
+        class Indexable f where
+          __access_index__ :: ?I64 -> f a -> a
         newtype Vec (n :: Nat) a = List a
+        instance Indexable (Vec n)
         f :: Vec 5 Int -> Int
         f x = .[0] x
           |]
@@ -9004,7 +9268,7 @@ postArgPropagationTests =
           "depth-1 nat label chain through monomorphic id_"
           [r|
         module main (x)
-        type T1 (d :: Nat) a = [a]
+        newtype T1 (d :: Nat) a = [a]
         make :: n@Int -> T1 n Real
         id_ :: T1 n Real -> T1 n Real
         x = id_ (make 5)
@@ -9017,7 +9281,7 @@ postArgPropagationTests =
           "depth-1 nat label chain through polymorphic id"
           [r|
         module main (x)
-        type T1 (d :: Nat) a = [a]
+        newtype T1 (d :: Nat) a = [a]
         make :: n@Int -> T1 n Real
         id :: a -> a
         x = id (make 6)
@@ -9031,7 +9295,7 @@ postArgPropagationTests =
           "depth-2 nat label chain"
           [r|
         module main (x)
-        type T1 (d :: Nat) a = [a]
+        newtype T1 (d :: Nat) a = [a]
         make :: n@Int -> T1 n Real
         f :: T1 n Real -> T1 n Real
         g :: T1 n Real -> T1 n Real
@@ -9046,7 +9310,7 @@ postArgPropagationTests =
           "depth-4 nat label chain"
           [r|
         module main (x)
-        type T1 (d :: Nat) a = [a]
+        newtype T1 (d :: Nat) a = [a]
         make :: n@Int -> T1 n Real
         f1 :: T1 n Real -> T1 n Real
         f2 :: T1 n Real -> T1 n Real
@@ -9063,7 +9327,7 @@ postArgPropagationTests =
           "two-label function chained through id_"
           [r|
         module main (x)
-        type T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
+        newtype T2 (d1 :: Nat) (d2 :: Nat) a = [[a]]
         make :: m@Int -> n@Int -> T2 m n Real
         id_ :: T2 m n Real -> T2 m n Real
         x = id_ (make 3 4)
@@ -9076,7 +9340,7 @@ postArgPropagationTests =
           "label propagates through second arg of multi-arg function"
           [r|
         module main (x)
-        type T1 (d :: Nat) a = [a]
+        newtype T1 (d :: Nat) a = [a]
         make :: n@Int -> T1 n Real
         scale :: Real -> T1 n Real -> T1 n Real
         x = scale 2.0 (make 8)
@@ -9092,7 +9356,7 @@ postArgPropagationTests =
           "shared label resolved by both args of binary op"
           [r|
         module main (x)
-        type T1 (d :: Nat) a = [a]
+        newtype T1 (d :: Nat) a = [a]
         make :: n@Int -> T1 n Real
         add :: T1 n Real -> T1 n Real -> T1 n Real
         x = add (make 4) (make 4)
@@ -9105,7 +9369,7 @@ postArgPropagationTests =
           "wrong-dim labelled arg at end of chain still rejected"
           [r|
         module main (x)
-        type T1 (d :: Nat) a = [a]
+        newtype T1 (d :: Nat) a = [a]
         make :: n@Int -> T1 n Real
         f :: T1 n Real -> T1 n Real
         g :: T1 n Real -> T1 n Real
@@ -9119,7 +9383,7 @@ postArgPropagationTests =
           "label disagreement across shared-var binary op rejected"
           [r|
         module main (x)
-        type T1 (d :: Nat) a = [a]
+        newtype T1 (d :: Nat) a = [a]
         make :: n@Int -> T1 n Real
         add :: T1 n Real -> T1 n Real -> T1 n Real
         x = add (make 3) (make 5)
@@ -9132,7 +9396,7 @@ postArgPropagationTests =
           "labelled nat arithmetic propagates through chain"
           [r|
         module main (x)
-        type T1 (d :: Nat) a = [a]
+        newtype T1 (d :: Nat) a = [a]
         make :: m@Int -> n@Int -> T1 (m * n) Real
         f :: T1 n Real -> T1 n Real
         g :: T1 n Real -> T1 n Real
@@ -9147,7 +9411,7 @@ postArgPropagationTests =
           "polymorphic id wrapping labelled call inside outer scale"
           [r|
         module main (x)
-        type T1 (d :: Nat) a = [a]
+        newtype T1 (d :: Nat) a = [a]
         make :: n@Int -> T1 n Real
         id :: a -> a
         scale :: Real -> T1 n Real -> T1 n Real
@@ -9163,7 +9427,7 @@ postArgPropagationTests =
           "tuple-arg's labelled element pins outer existential"
           [r|
         module main (x)
-        type T1 (d :: Nat) a = [a]
+        newtype T1 (d :: Nat) a = [a]
         make :: n@Int -> T1 n Real
         fst_ :: (a, Bool) -> a
         x = fst_ (make 5, True)
@@ -9178,7 +9442,7 @@ postArgPropagationTests =
           "regression: labelled dims propagate through 3-function chain"
           [r|
         module main (x)
-        type T1 (d :: Nat) a = [a]
+        newtype T1 (d :: Nat) a = [a]
         make :: n@Int -> T1 n Real
         f :: T1 n Real -> T1 n Real
         g :: T1 n Real -> T1 n Real
@@ -11246,6 +11510,62 @@ sourceNameTests =
           g :: Int -> Int
           f x = g x
         |]
+    , expectError "Python: a manifold's name is not a source name"
+          [r|
+          module main (f)
+          source Py from "m" ("__mm_3" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Python: a name the pool reserves is not a source name"
+          [r|
+          module main (f)
+          source Py from "m" ("__morloc_encode" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Rust: a name the pool reserves is not a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("__morloc_schema" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Rust: a path into the pool's names is not a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("crate::__mm_3" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Rust: the pool's entry point is not a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("main" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectPass "Rust: a name containing a reserved one is a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("main_loop" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectError "Rust: a manifold's name is not a source name"
+          [r|
+          module main (f)
+          source Rust from "m" ("__mm_3" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
+    , expectPass "Python: a name that only resembles a reserved one is a source name"
+          [r|
+          module main (f)
+          source Py from "m" ("mm_3" as g)
+          g :: Int -> Int
+          f x = g x
+        |]
     , testCase "every built-in language declares patterns that compile" $
         mapM_
           (\(n, f) -> case declaredNamePatterns (DF.embededFileText f) of
@@ -11266,3 +11586,347 @@ sourceNameTests =
     , testCase "a group must match whole" $
         matchNamePattern "a(::a)*" "a::" @?= Right False
     ]
+
+-- | Like 'expectError', but a compiler bug ('SystemError') does not count:
+-- the program must be rejected as a user error.
+expectUserError :: String -> MT.Text -> TestTree
+expectUserError msg code =
+  testCase msg $ do
+    result <- runFront code
+    case result of
+      (Right _) -> assertFailure "Expected failure"
+      (Left (SystemError e)) -> assertFailure $ "Expected a user error, got a compiler error: " <> show e
+      (Left _) -> return ()
+
+-- | The general type of the single export, with aliases as inference left
+-- them (no alias evaluation).
+rawGeneralType :: MT.Text -> IO (Either MorlocError TypeU)
+rawGeneralType code = do
+  result <- runFrontRaw code
+  return $ case result of
+    Right [x] -> Right (closeExistentials . MTI.cleanTypeName . renameExistentials . gtypeof $ x)
+    Right _ -> Left (SystemError "expected exactly one export")
+    Left e -> Left e
+
+-- | A program written with a transparent alias and the same program with the
+-- alias written out must get the same verdict and the same evaluated type.
+sameAsExpanded :: String -> MT.Text -> MT.Text -> TestTree
+sameAsExpanded msg aliased expanded =
+  testCase msg $ do
+    a <- runFront aliased
+    e <- runFront expanded
+    case (a, e) of
+      (Right [x], Right [y]) ->
+        assertEqual "" (norm y) (norm x)
+      (Left err, Right _) -> assertFailure $ "aliased program rejected: " <> show err
+      (Right _, Left err) -> assertFailure $ "expanded program rejected: " <> show err
+      (Left _, Left _) -> return ()
+      _ -> assertFailure "expected exactly one export"
+  where
+    norm = closeExistentials . MTI.cleanTypeName . renameExistentials . gtypeof
+
+aliasTransparencyTests :: TestTree
+aliasTransparencyTests =
+  localOption (mkTimeout 5000000) $
+    testGroup
+      "Transparent aliases are fully substitutable"
+      [ testGroup "constructor patterns through an alias"
+          [ expectPass "clauses on an alias of a data type"
+              [r|
+        module main (leaves)
+        data Tree a = Leaf a | Node (Tree a) (Tree a)
+        type IntTree = Tree Int
+        leaves :: IntTree -> Int
+        leaves | (Leaf _) = 1
+               | (Node a b) = leaves a
+              |]
+          , expectPass "match on an alias of a data type"
+              [r|
+        module main (leaves)
+        data Tree a = Leaf a | Node (Tree a) (Tree a)
+        type IntTree = Tree Int
+        leaves :: IntTree -> Int
+        leaves t = match t
+          | (Leaf _) = 1
+          | (Node a b) = leaves a
+              |]
+          , expectPass "clauses on a parameterized alias"
+              [r|
+        module main (leaves)
+        data Tree a = Leaf a | Node (Tree a) (Tree a)
+        type T a = Tree a
+        leaves :: T Int -> Int
+        leaves | (Leaf _) = 1
+               | (Node a b) = leaves a
+              |]
+          , expectPass "clauses on an alias chain"
+              [r|
+        module main (leaves)
+        data Tree a = Leaf a | Node (Tree a) (Tree a)
+        type IntTree = Tree Int
+        type IT2 = IntTree
+        leaves :: IT2 -> Int
+        leaves | (Leaf _) = 1
+               | (Node a b) = leaves a
+              |]
+          , expectPass "clauses on a recursive alias over a data type"
+              [r|
+        module main (top)
+        data Rose a = R a [Rose a]
+        type X = Rose ?X
+        top :: X -> Int
+        top | (R _ _) = 1
+              |]
+          , expectUserError "a constructor of another type is still rejected"
+              [r|
+        module main (f)
+        data Tree a = Leaf a | Node (Tree a) (Tree a)
+        data Opt a = None | Some a
+        type IntTree = Tree Int
+        f :: IntTree -> Int
+        f | (Some _) = 1
+          | None = 0
+              |]
+          ]
+      , testGroup "constructor classes through an alias"
+          [ sameAsExpanded "a partially used alias under Foldable"
+              [r|
+        module main (modelSize)
+        class Foldable f where
+          fold :: (b -> a -> b) -> b -> f a -> b
+        instance Foldable List
+        count :: Int -> a -> Int
+        length :: Foldable f => f a -> Int
+        length = fold count 0
+        type Model k v = [(k, v)]
+        sizeOf :: Model k Int -> Int
+        sizeOf xs = length xs
+        modelSize :: [(Int, Int)] -> Int
+        modelSize xs = sizeOf xs
+              |]
+              [r|
+        module main (modelSize)
+        class Foldable f where
+          fold :: (b -> a -> b) -> b -> f a -> b
+        instance Foldable List
+        count :: Int -> a -> Int
+        length :: Foldable f => f a -> Int
+        length = fold count 0
+        sizeOf :: [(k, Int)] -> Int
+        sizeOf xs = length xs
+        modelSize :: [(Int, Int)] -> Int
+        modelSize xs = sizeOf xs
+              |]
+          , expectPass "a partially used alias under Foldable, concrete"
+              [r|
+        module main (sizeOf)
+        class Foldable f where
+          fold :: (b -> a -> b) -> b -> f a -> b
+        instance Foldable List
+        count :: Int -> a -> Int
+        length :: Foldable f => f a -> Int
+        length = fold count 0
+        type Model k v = [(k, v)]
+        sizeOf :: Model Int Int -> Int
+        sizeOf xs = length xs
+              |]
+          , assertGeneralType "the element type of a fully applied alias is its body's"
+              [r|
+        module main (keys)
+        class Functor f where
+          fmap :: (a -> b) -> f a -> f b
+        instance Functor List
+        fst :: (a, b) -> a
+        type Pairs k = [(k, Int)]
+        keysOf :: Pairs k -> [k]
+        keysOf xs = fmap fst xs
+        keys :: [(Str, Int)] -> [Str]
+        keys xs = keysOf xs
+              |]
+              (fun [lst (tuple [str, int]), lst str])
+          , expectUserError "a recursive alias with no Foldable instance is rejected"
+              [r|
+        module main (f)
+        class Foldable f where
+          fold :: (b -> a -> b) -> b -> f a -> b
+        instance Foldable List
+        count :: Int -> a -> Int
+        length :: Foldable f => f a -> Int
+        length = fold count 0
+        type LL a = (a, ?(LL a))
+        f :: LL Int -> Int
+        f xs = length xs
+              |]
+          ]
+      , testGroup "inference keeps alias names"
+          [ testCase "an unsigned term keeps the alias of the term it calls" $ do
+              t <- rawGeneralType
+                [r|
+        module main (travel3)
+        type WindSpeed = Int
+        travel :: WindSpeed -> Int
+        travel3 x = travel x
+                |]
+              case t of
+                Right t' -> t' @?= fun [var "WindSpeed", int]
+                Left e -> assertFailure (show e)
+          ]
+      , testGroup "recursive aliases terminate"
+          [ expectPass "two recursive list aliases with equal unfoldings"
+              [r|
+        module main (f)
+        type P = [P]
+        type Q = [Q]
+        g :: Q -> Int
+        f :: P -> Int
+        f x = g x
+              |]
+          , expectPass "two recursive tuple aliases with equal unfoldings"
+              [r|
+        module main (f)
+        type L1 = (Int, ?L1)
+        type L2 = (Int, ?(Int, ?L2))
+        g :: L2 -> Int
+        f :: L1 -> Int
+        f x = g x
+              |]
+          , expectUserError "a recursive alias whose arguments change is rejected"
+              [r|
+        module main (f)
+        type N a = (a, [N [a]])
+        f :: N Int -> Int
+              |]
+          , expectPass "a recursive alias against its own two-step unfolding"
+              [r|
+        module main (f)
+        type Pair a = (a, ?(Pair a))
+        g :: (Int, ?(Int, ?(Pair Int))) -> Int
+        f :: Pair Int -> Int
+        f x = g x
+              |]
+          ]
+      , testGroup "alias declarations and applications are checked"
+          [ expectUserError "an alias applied to too few arguments in a signature"
+              [r|
+        module main (f)
+        type Model k v = [(k, v)]
+        f :: Model Int -> Int
+              |]
+          , expectUserError "an alias applied to too few arguments in a constraint"
+              [r|
+        module main (f)
+        class Foldable f where
+          fold :: (b -> a -> b) -> b -> f a -> b
+        instance Foldable List
+        type Model k v = [(k, v)]
+        f :: Foldable (Model k) => Model k Int -> Int
+              |]
+          , expectUserError "an alias applied to too many arguments"
+              [r|
+        module main (f)
+        data Tree a = Leaf a | Node (Tree a) (Tree a)
+        type L = Tree
+        f :: L Int -> Int
+              |]
+          , expectUserError "two declarations of one alias"
+              [r|
+        module main (f)
+        type A = Int
+        type A = Str
+        f :: A -> A
+              |]
+          , expectUserError "an alias parameter its body does not use"
+              [r|
+        module main (f)
+        type FixedPair (n :: Nat) a = (a, a)
+        f :: FixedPair 2 Int -> Int
+              |]
+          ]
+      , testGroup "alias parameter kinds come from the body"
+          [ expectPass "a parameter in a Nat slot is a Nat"
+              [r|
+        module main (merges)
+        newtype Grid (r :: Nat) (c :: Nat) a = List a
+        type Image h w = Grid h w Int
+        type Labels h w = Grid h w Real
+        graph :: Grid h w Int -> Grid h w Real -> Int
+        merges :: Image h w -> Labels h w -> Int
+        merges img labels = graph img labels
+              |]
+          , sameAsExpanded "aliases with inferred Nat parameters equal their expansion"
+              [r|
+        module main (merges)
+        newtype Grid (r :: Nat) (c :: Nat) a = List a
+        type Image h w = Grid h w Int
+        type Labels h w = Grid h w Real
+        graph :: Image h w -> Labels h w -> Int
+        merges :: Image h w -> Labels h w -> Int
+        merges img labels = graph img labels
+              |]
+              [r|
+        module main (merges)
+        newtype Grid (r :: Nat) (c :: Nat) a = List a
+        graph :: Grid h w Int -> Grid h w Real -> Int
+        merges :: Grid h w Int -> Grid h w Real -> Int
+        merges img labels = graph img labels
+              |]
+          , expectUserError "a parameter used at two kinds"
+              [r|
+        module main (f)
+        newtype Grid (r :: Nat) (c :: Nat) a = List a
+        type Bad h = (Grid h h Int, [h])
+        f :: Bad 2 -> Int
+              |]
+          , expectPass "a parameter used only inside a row operation is used"
+              [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type Bed3 r = {chrom = Str, start = Int} + r
+        f :: Tbl n (Bed3 r) -> Int
+              |]
+          , expectPass "a declared Nat parameter in a Type slot keeps its kind"
+              [r|
+        module main (f)
+        newtype T1 d a = [a]
+        type V (n :: Nat) a = T1 n a
+        f :: V 3 Int -> Int
+              |]
+          ]
+      , testGroup "aliases with Nat parameters"
+          [ assertGeneralType "a list literal through an alias of a phantom-Nat newtype"
+              [r|
+        module main (x)
+        newtype Vector (n :: Nat) a = List a
+        type MyVec (n :: Nat) a = Vector n a
+        x :: MyVec 3 Int
+        x = [1, 2, 3]
+              |]
+              (arr "Vector" [NatLitU 3, int])
+          , expectUserError "a dimension mismatch through the alias is caught"
+              [r|
+        module main (x)
+        newtype Vector (n :: Nat) a = List a
+        type MyVec (n :: Nat) a = Vector n a
+        x :: MyVec 4 Int
+        x = [1, 2, 3]
+              |]
+          , expectPass "an alias's arguments may differ where its expansions agree"
+              [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
+        g :: Foo 2 2 -> Int
+        f :: Foo 1 3 -> Int
+        f x = g x
+              |]
+          , expectUserError "an alias's arguments that expand differently are rejected"
+              [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        type Foo (n :: Nat) (m :: Nat) = Vector (n + m) Int
+        g :: Foo 2 3 -> Int
+        f :: Foo 1 3 -> Int
+        f x = g x
+              |]
+          ]
+      ]

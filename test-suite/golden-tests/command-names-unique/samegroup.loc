@@ -1,0 +1,19 @@
+-- Two commands named `f` in one group: refused (CMD-4).
+
+module main
+  ( --* group: math
+    --* Arithmetic
+    f
+  , h
+  )
+
+import root-py
+
+--' Add one
+f :: Int -> Int
+f x = x + 1
+
+--' Double
+--' @name f
+h :: Int -> Int
+h x = x * 2

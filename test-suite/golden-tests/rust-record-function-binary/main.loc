@@ -5,11 +5,11 @@ import root-rust
 source Rust from "own.rs" ("add" as add)
 add :: Int -> Int -> Int
 
--- A record with a TWO-ARGUMENT function field, exercising MorlocFn2 (the field
--- type `Rc<dyn MorlocFn2<i64,i64,i64>>`, application via `.call2(..)`). The
+-- A record with a TWO-ARGUMENT function field (the field type
+-- `Arc<dyn Fn(&i64, &i64) -> i64 + Send + Sync>`, called as `f(&a, &b)`). The
 -- extracted field `f` is applied inside a larger expression, so `f a b` is
 -- lowered into its own manifold; that manifold's function parameter must accept
--- the fat `Rc<dyn MorlocFn2>` value (typed `&impl MorlocFn2`, not `&impl Fn`).
+-- the function value itself (typed `&Arc<dyn Fn(..)>`, not `&impl Fn`).
 record BinOp where
   op :: Int -> Int -> Int
   seed :: Int

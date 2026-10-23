@@ -1,0 +1,19 @@
+-- An ungrouped `f` beside a grouped command named `f`: refused (CMD-4).
+
+module main
+  ( f
+  , --* group: text
+    --* Strings
+    g
+  )
+
+import root-py
+
+--' Add one
+f :: Int -> Int
+f x = x + 1
+
+--' Echo a string
+--' @name f
+g :: Str -> Str
+g x = x

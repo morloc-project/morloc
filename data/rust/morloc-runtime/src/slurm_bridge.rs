@@ -48,10 +48,19 @@ impl JobState {
         }
     }
 
+    /// The state as Slurm prints it.
+    pub fn name(&self) -> &str {
+        match self {
+            JobState::Pending => "PENDING",
+            JobState::Running => "RUNNING",
+            JobState::Completed => "COMPLETED",
+            JobState::Failed => "FAILED",
+            JobState::Cancelled => "CANCELLED",
+            JobState::Unknown(s) => s,
+        }
+    }
+
     /// True if no further progress is possible. Polling stops here.
-    /// Bare-metal `slurm_job_is_complete` treats FAILED/CANCELLED the
-    /// same as COMPLETED -- the result file (or its absence) is what
-    /// the caller checks next.
     pub fn is_terminal(&self) -> bool {
         match self {
             JobState::Completed | JobState::Failed | JobState::Cancelled => true,

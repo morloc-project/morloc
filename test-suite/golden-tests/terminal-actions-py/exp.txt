@@ -35,18 +35,20 @@ int(42)
   -p, --plain[=<PATH>]  Pure semicolon join (no IO effect on the terminal)
 --- describe -h lines (grep --say) ---
       --say[=<PATH>]  Human-readable form of an integer
-  --say:   Unit
+    --say: Unit
 --- fhead -h Return block (per-formatter return types) ---
 Return:
-  default:    [Str]
-  -l/--lines: Unit
-  -c/--csv:   Unit
-  -s/--sum:   Str
-  -p/--plain: Str
+  type: [Str]
+  actions:
+    -l/--lines: Unit
+    -c/--csv:   Unit
+    -s/--sum:   Str
+    -p/--plain: Str
 --- describe -h Return block (single terminal) ---
 Return:
-  default: Int
-  --say:   Unit
+  type: Int
+  actions:
+    --say: Unit
 --- fhead -l -c (should error) ---
 OK: sibling terminals rejected
 --- ./nexus mlcp_fhead_lines (should error) ---

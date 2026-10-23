@@ -1,0 +1,91 @@
+module main (writeU64, writeReal, writeStr, readU64, readReal, readStr)
+
+import root-cpp
+
+source Cpp from "corpus.hpp"
+  ( "gen_u64" as genU64, "gen_real" as genReal, "gen_str" as genStr
+  , "batch_len" as batchLen
+  , "count" as countU64, "count" as countReal, "count" as countStr
+  )
+
+genU64 :: I64 -> I64 -> I64 -> [U64]
+genReal :: I64 -> I64 -> [Real]
+genStr :: I64 -> I64 -> I64 -> [Str]
+batchLen :: I64 -> I64 -> I64 -> I64
+countU64 :: [U64] -> I64
+countReal :: [Real] -> I64
+countStr :: [Str] -> I64
+
+--' write<T> level kind n batch path: n elements of corpus `kind`; batch 0
+--' writes them with one @write, otherwise @write and @flush per `batch`
+--' elements. `kind` is ignored for Real.
+--' read<T> n path: decode the first n elements.
+
+writeU64 :: Int -> I64 -> I64 -> I64 -> Str -> <IO> I64
+writeU64 lvl kind n b path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream U64))
+  ? b <= 0 = do
+      @write lvl o (genU64 kind 0 n)
+      ()
+    : batchesU64 o lvl kind 0 n b
+  @close o
+  n
+
+batchesU64 :: OStream U64 -> Int -> I64 -> I64 -> I64 -> I64 -> <IO> ()
+batchesU64 o lvl kind i n b = ? i >= n = do
+    ()
+  : do
+    @write lvl o (genU64 kind i (batchLen i n b))
+    @flush o
+    batchesU64 o lvl kind (i + b) n b
+
+readU64 :: Int -> Str -> <IO> I64
+readU64 n path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [U64]))
+  countU64 (.[0:n] f)
+
+writeReal :: Int -> I64 -> I64 -> I64 -> Str -> <IO> I64
+writeReal lvl _ n b path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Real))
+  ? b <= 0 = do
+      @write lvl o (genReal 0 n)
+      ()
+    : batchesReal o lvl 0 n b
+  @close o
+  n
+
+batchesReal :: OStream Real -> Int -> I64 -> I64 -> I64 -> <IO> ()
+batchesReal o lvl i n b = ? i >= n = do
+    ()
+  : do
+    @write lvl o (genReal i (batchLen i n b))
+    @flush o
+    batchesReal o lvl (i + b) n b
+
+readReal :: Int -> Str -> <IO> I64
+readReal n path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Real]))
+  countReal (.[0:n] f)
+
+writeStr :: Int -> I64 -> I64 -> I64 -> Str -> <IO> I64
+writeStr lvl kind n b path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  ? b <= 0 = do
+      @write lvl o (genStr kind 0 n)
+      ()
+    : batchesStr o lvl kind 0 n b
+  @close o
+  n
+
+batchesStr :: OStream Str -> Int -> I64 -> I64 -> I64 -> I64 -> <IO> ()
+batchesStr o lvl kind i n b = ? i >= n = do
+    ()
+  : do
+    @write lvl o (genStr kind i (batchLen i n b))
+    @flush o
+    batchesStr o lvl kind (i + b) n b
+
+readStr :: Int -> Str -> <IO> I64
+readStr n path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Str]))
+  countStr (.[0:n] f)

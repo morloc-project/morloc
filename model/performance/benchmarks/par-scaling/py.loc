@@ -1,0 +1,12 @@
+module main (seqMap, parMap)
+
+import parallel.bench
+import parallel-py
+
+source Py from "benchcosts.py"
+  ( "spin"
+  , "spin_keep" as spinKeep
+  , "spin_list" as spinList
+  , "make_str" as makeStr
+  , "str_cost" as strCost
+  )

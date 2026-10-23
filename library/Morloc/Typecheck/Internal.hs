@@ -24,6 +24,12 @@ module Morloc.Typecheck.Internal
   , evarname
   , qualify
   , unqualify
+  , headTVar
+  , instanceArgHead
+  , instanceReceiverHeads
+  , BracketReceiver (..)
+  , bracketRule
+  , classifyBracketReceiver
   , emptyGamma
 
     -- * Typeclasses
@@ -71,10 +77,14 @@ module Morloc.Typecheck.Internal
   , expandStructuralAliases
   , expandTransparentAliases
   , structuralAliasesIn
+  , structuralAliasHead
+  , typeUChildren
+  , mapTypeUChildren
   , traverseTypeUChildren
   , isSubtypeOf2
   , isSubtypeOfOpen
   , recheckDeferred
+  , typeUToNatExpr
 
     -- * primitive constraint discharge (Stage 9 of the tables refactor)
   , reduceConstraint
@@ -134,11 +144,77 @@ emptyGamma :: Gamma
 emptyGamma =
   Gamma
     { gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty
-    , gammaSolved = Map.empty, gammaDeferred = [], gammaKindSubs = Map.empty
+    , gammaSolved = Map.empty, gammaDeferred = [], gammaDeferredAt = Map.empty, gammaKindSubs = Map.empty
     , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
-    , gammaRigid = Nothing, gammaScoped = Map.empty
+    , gammaRigid = Nothing, gammaScoped = Map.empty, gammaUnfolded = Set.empty
     }
+
+-- | The type constructor at the head of a type, if it has one.
+headTVar :: TypeU -> Maybe TVar
+headTVar (VarU v) = Just v
+headTVar (AppU t _) = headTVar t
+headTVar (NamU _ v _ _) = Just v
+headTVar (ForallU _ t) = headTVar t
+headTVar _ = Nothing
+
+-- | The head of argument @pos@ of an instance method's type: the
+-- container an instance of a class over a type constructor is for.
+instanceArgHead :: Int -> EType -> Maybe TVar
+instanceArgHead pos et = case snd (unqualify (etype et)) of
+  FunU args _ | length args > pos -> headTVar (args !! pos)
+  _                               -> Nothing
+
+-- | The containers the instances of @method@ are for, read at argument
+-- @pos@ of each instance's type.
+instanceReceiverHeads :: EVar -> Int -> MorlocMonad [TVar]
+instanceReceiverHeads method pos = do
+  sigmap <- MM.gets stateTypeclasses
+  return
+    [ h
+    | Just inst <- [Map.lookup method sigmap]
+    , TermTypes (Just et) _ _ <- instanceTerms inst
+    , Just h <- [instanceArgHead pos et]
+    ]
+
+-- | PAT-5: for a bracket step, what its receiver needs (for diagnostics),
+-- the receiver's position in the step's function type, and the instance
+-- methods, with their receiver positions, that can supply it.
+bracketRule :: Pattern -> Maybe (MDoc, Int, [(EVar, Int)])
+bracketRule PatternBracketIndex =
+  Just ("an Indexable", 1, [(EV "__access_index__", 1), (EV BT.extractPatternMethod, 2)])
+bracketRule PatternBracketSlice =
+  Just ( "a Sliceable or SliceableDim", 3
+       , [(EV "__get_slice__", 3), (EV "__get_slice_dim__", 3), (EV BT.extractPatternMethod, 2)] )
+bracketRule _ = Nothing
+
+data BracketReceiver
+  = ReceiverUndetermined -- ^ nothing has fixed the receiver yet (POLY-6)
+  | ReceiverNative       -- ^ a list, or an IFile over a bracketable type
+  | ReceiverInstance     -- ^ reached through an instance of the step's classes
+  | ReceiverNone
+  deriving (Eq, Show)
+
+-- | PAT-5: classify a bracket step's receiver, given the containers the
+-- step's instances are for. The alias chain is walked outermost first, so
+-- the first list, IFile or instance head found decides.
+classifyBracketReceiver :: Scope -> [TVar] -> TypeU -> BracketReceiver
+classifyBracketReceiver scope heads rcv = case appHead rcv of
+  ExistU {} -> ReceiverUndetermined
+  _ -> go (TE.aliasChain scope rcv)
+  where
+    appHead (AppU t _) = appHead t
+    appHead t = t
+    go [] = ReceiverNone
+    go (t : ts) = case headTVar t of
+      Just v
+        | v == BT.list -> ReceiverNative
+        | v == BT.ifileVar -> case t of
+            AppU _ (inner : _)
+              | classifyBracketReceiver scope heads inner /= ReceiverNone -> ReceiverNative
+            _ -> ReceiverNone
+        | v `elem` heads -> ReceiverInstance
+      _ -> go ts
 
 unqualify :: TypeU -> ([TVar], TypeU)
 unqualify (ForallU v (unqualify -> (vs, t))) = (v : vs, t)
@@ -149,7 +225,7 @@ toExistential g0 (unqualify -> (vs0, t0)) = f g0 vs0 t0
   where
     f g [] t = (g, t)
     f g (v : vs) t =
-      let (g', newVar) = newvar ("cls_" <> unTVar v) g
+      let (g', newVar) = newvar ("cls_" <> unTVar v <> "_") g
        in f g' vs (substituteTVar v newVar t)
 
 class Applicable a where
@@ -735,19 +811,16 @@ subtypeEffRows scope e1 e2 i1 i2 g =
             then solveEff t1 (EffectSet (Set.difference l2 l1)) g >>= recurse
             else
               subtypeError lhs rhs (missingMsg (Set.difference l1 l2))
-        -- closed <: right open : l2 must fit, solve the tail to the remainder.
-        -- The remainder is a lower bound on the tail; when it is empty (the
-        -- left row is <> or already covered) there is nothing to record, and
-        -- the tail stays open for a later constraint to solve.
+        -- closed <: right open : the labels the right row does not name
+        -- must come from its tail, so solve the tail to that remainder. The
+        -- remainder is a lower bound on the tail; when it is empty (the left
+        -- row is <> or already covered) there is nothing to record, and the
+        -- tail stays open for a later constraint to solve.
         ([], [t2]) ->
-          if Set.isSubsetOf l2 l1
-            then
-              let remainder = Set.difference l1 l2
-               in if Set.null remainder
-                    then recurse g
-                    else solveEff t2 (EffectSet remainder) g >>= recurse
-            else
-              subtypeError lhs rhs (missingMsg (Set.difference l2 l1))
+          let remainder = Set.difference l1 l2
+           in if Set.null remainder
+                then recurse g
+                else solveEff t2 (EffectSet remainder) g >>= recurse
         -- open <: open
         ([t1], [t2])
           -- shared tail variable: the tails cancel, subsumption on labels
@@ -1057,6 +1130,17 @@ subtype scope t1 t2 g | isNamOrExist t1, Just fs <- asClosedRec t2 = subtype sco
 -- NatVarU: identical nat variables are equal; different ones fall to isNatExpr path
 subtype _ (NatVarU v1) (NatVarU v2) g
   | v1 == v2 = return g
+-- A transparent alias is its expansion (ALIAS-1). When the heads differ and
+-- one is an alias, unfold it a step before any rule below takes the types
+-- apart; a structural rule would otherwise bind part of an alias
+-- application, as @f := Model k@ in @Model k Int <: f a@. Existentials are
+-- left to the instantiation rules, which solve them to the type as written.
+subtype scope t1 t2 g
+  | not (isExist t1)
+  , not (isExist t2)
+  , typeHead t1 /= typeHead t2
+  , Just (t1', t2') <- unfoldDifferingAlias scope t1 t2 =
+      viaUnfold scope (t1, t2) t1' t2' g
 -- VarU vs VarT
 subtype scope t1@(VarU a1) t2@(VarU a2) g
   -- If everything is the same, do nothing
@@ -1166,6 +1250,19 @@ subtype scope t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
   | AppU h2 inner2 <- v2, let t2' = AppU h2 (inner2 ++ vs2)
   , t2' /= t2
   = subtype scope t1 t2' g
+  -- Two applications of one alias are related exactly when their unfoldings
+  -- are (ALIAS-12). Their arguments are not compared pairwise: an alias may
+  -- use a parameter contravariantly, under arithmetic, or not injectively,
+  -- and matching arguments would solve a variable the unfoldings leave
+  -- open. Arguments that are one type are the cheap common case.
+  | v1 == v2, isAliasHead v1 =
+      if map (apply g) vs1 == map (apply g) vs2
+          || map (canonical . apply g) vs1 == map (canonical . apply g) vs2
+        then return g
+        else case (unfoldAlias scope t1, unfoldAlias scope t2) of
+          (Just t1', Just t2') -> viaUnfold scope (t1, t2) t1' t2' g
+          _ | length vs1 == length vs2 -> zipSubtype t1 t2 scope vs1 vs2 g
+          _ -> subtypeError t1 t2 "Cannot unfold the alias"
   | v1 == v2 && length vs1 == length vs2 = zipSubtype t1 t2 scope vs1 vs2 g
   -- Concrete-side type aliases for nat-parameterised types (e.g.
   -- `type Cpp => Vector (n :: Nat) a = "mlc::Tensor1<$1>" a`) drop Nat
@@ -1178,12 +1275,19 @@ subtype scope t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
   , length vs1' == length vs2' && length vs1' /= length vs1
   = zipSubtype t1 t2 scope vs1' vs2' g
   | otherwise = subtypeEvaluated scope t1 t2 g
+  where
+    isAliasHead (VarU v) = TE.isTransparentAlias scope v
+    isAliasHead _ = False
+    canonical = expandTransparentAliases scope . TE.flattenApp
 -- Records are nominal: a named record is its name and its parameters, so
 -- same-fielded records are distinct and a phantom parameter is compared. The
 -- anonymous forms (the generic Record and a closed row bridged to Rec) match
--- any record with the same fields.
-subtype scope t1@(NamU _ v1 ps1 rs1) t2@(NamU _ v2 ps2 rs2) g
+-- any record with the same fields in the same order. An object is a native
+-- class, not a record, so no anonymous form matches it.
+subtype scope t1@(NamU k1 v1 ps1 rs1) t2@(NamU k2 v2 ps2 rs2) g
   | v1 == BT.record || v2 == BT.record, null rs1, null rs2 = return g
+  | isAnonymousRecord v1 || isAnonymousRecord v2
+  , NamObject `elem` [k1, k2] = subtypeError t1 t2 "An object is not an anonymous record"
   | isAnonymousRecord v1 || isAnonymousRecord v2 = subtypeFields t1 t2 scope rs1 rs2 g
   | v1 /= v2 = subtypeError t1 t2 "Record names differ"
   | otherwise =
@@ -1421,16 +1525,71 @@ subtype scope t1 t2@(VarU _) g = subtypeEvaluated scope t1 t2 g
 -- fall through
 subtype _ a b _ = subtypeError a b "Type mismatch fall through"
 
--- | The name heading a type, bare or applied.
-aliasHeadName :: TypeU -> Maybe TVar
-aliasHeadName (VarU v) = Just v
-aliasHeadName (AppU (VarU v) _) = Just v
-aliasHeadName _ = Nothing
+-- | Compare a pair through the unfoldings @t1'@ and @t2'@ of its aliases.
+-- The pair is assumed while its unfoldings are compared, so meeting it again
+-- inside that comparison closes a cycle through recursive aliases, and the
+-- pair holds. The assumption ends with the comparison.
+--
+-- A failure is reported on the pair as written (ALIAS-5): a reason that
+-- names only the unfolded parts is replaced by it, a more specific reason is
+-- kept beneath it, and a failure already reported on an alias pair further
+-- in stands as it is.
+viaUnfold :: Scope -> (TypeU, TypeU) -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
+viaUnfold scope (w1, w2) t1' t2' g
+  | Set.member pair assumed = return g
+  | otherwise =
+      case subtype scope t1' t2' g {gammaUnfolded = Set.insert pair assumed} of
+        Right g' -> Right g' {gammaUnfolded = assumed}
+        Left e
+          | not (sameShape (expanded t1') (expanded t2')) -> Left written
+          | aliasMismatchPrefix `MT.isPrefixOf` render e -> Left e
+          | otherwise -> Left (written <> line <> e)
+  where
+    -- ALIAS-5: a mismatch at this position is reported as written; one
+    -- inside it, as the inner position was written.
+    expanded = expandAliasHead scope . TE.flattenApp . apply g
+    sameShape a b = case (a, b) of
+      (AppU (VarU x) xs, AppU (VarU y) ys) -> x == y && length xs == length ys
+      (FunU xs _, FunU ys _) -> length xs == length ys
+      (NamU _ x _ _, NamU _ y _ _) -> x == y
+      (EffectU _ _, EffectU _ _) -> True
+      (OptionalU _, OptionalU _) -> True
+      _ -> False
+    assumed = gammaUnfolded g
+    pair = (apply g w1, apply g w2)
+    written = pretty aliasMismatchPrefix <+> prettyTypeU w1 <+> "and" <+> prettyTypeU w2
+
+aliasMismatchPrefix :: MT.Text
+aliasMismatchPrefix = "Cannot compare the types"
+
+
+-- | The head of a type with nested applications flattened.
+typeHead :: TypeU -> Maybe TVar
+typeHead = TE.headName . TE.flattenApp
+
+isExist :: TypeU -> Bool
+isExist ExistU {} = True
+isExist _ = False
+
+-- | One step of the transparent alias heading either type, the left first.
+unfoldDifferingAlias :: Scope -> TypeU -> TypeU -> Maybe (TypeU, TypeU)
+unfoldDifferingAlias scope t1 t2 = case (unfoldAlias scope t1, unfoldAlias scope t2) of
+  (Just t1', _) -> Just (t1', t2)
+  (_, Just t2') -> Just (t1, t2')
+  _ -> Nothing
+
+-- | One step of the transparent alias heading a type.
+unfoldAlias :: Scope -> TypeU -> Maybe TypeU
+unfoldAlias scope t = case TE.headName t' of
+  Just v | TE.isTransparentAlias scope v -> TE.expandHeadOnly scope t'
+  _ -> Nothing
+  where
+    t' = TE.flattenApp t
 
 -- | One reduction step of a type whose head is an alias in scope. Nothing for
 -- anything else, including a rigid variable head.
 reduceAliasHead :: Scope -> TypeU -> Maybe TypeU
-reduceAliasHead scope t = case aliasHeadName t of
+reduceAliasHead scope t = case TE.headName t of
   Just v | Map.member v scope -> TE.reduceType scope t
   _ -> Nothing
 
@@ -1466,7 +1625,7 @@ expandStructuralAliases = expandAliasesWith . structuralAliasHead
 -- meaning even where that module's aliases are not in scope.
 expandTransparentAliases :: Scope -> TypeU -> TypeU
 expandTransparentAliases scope =
-  expandAliasesWith (\t -> (,) <$> aliasHeadName t <*> TE.expandHeadOnly scope t)
+  expandAliasesWith (\t -> (,) <$> TE.headName t <*> TE.expandHeadOnly scope t)
 
 -- | The aliases in a type that 'expandStructuralAliases' would expand.
 structuralAliasesIn :: Scope -> TypeU -> [TVar]
@@ -1478,7 +1637,7 @@ structuralAliasesIn scope t = case structuralAliasHead scope t of
 -- names.
 structuralAliasHead :: Scope -> TypeU -> Maybe (TVar, TypeU)
 structuralAliasHead scope t = do
-  v <- aliasHeadName t
+  v <- TE.headName t
   case expandAliasHead scope t of
     t'@(FunU _ _) -> Just (v, t')
     t'@(EffectU _ _) -> Just (v, t')
@@ -1500,6 +1659,7 @@ traverseTypeUChildren f t = case t of
   OpU op ts -> OpU op <$> traverse f ts
   LitU (LRec fs) -> LitU . LRec <$> traverse (traverse f) fs
   LitU (LList es) -> LitU . LList <$> traverse f es
+  LitU (LSet es) -> LitU . LSet <$> traverse f es
   LabeledU v x -> LabeledU v <$> f x
   _ -> pure t
 
@@ -1512,16 +1672,18 @@ typeUChildren = getConst . traverseTypeUChildren (\x -> Const [x])
 isAnonymousRecord :: TVar -> Bool
 isAnonymousRecord v = v == BT.record || v == anonRecordVar
 
--- | Subtype record fields by key, in any order.
+-- | Subtype record fields pairwise. A record travels positionally, so two
+-- records are one type only if they have the same fields in the same order,
+-- the rule a Rec row follows too.
 subtypeFields :: TypeU -> TypeU -> Scope -> [(Key, TypeU)] -> [(Key, TypeU)] -> Gamma -> Either MDoc Gamma
-subtypeFields _ _ _ [] [] g = return g
-subtypeFields t1 t2 scope ((k1, x1) : rs1) es2 g =
-  case filterApart (\(k2, _) -> k2 == k1) es2 of
-    (Nothing, _) -> subtypeError t1 t2 "NamU - Unequal fields"
-    (Just (_, x2), rs2) -> do
-      g' <- subtype scope (apply g x1) (apply g x2) g
-      subtypeFields t1 t2 scope rs1 rs2 g'
-subtypeFields t1 t2 _ _ _ _ = subtypeError t1 t2 "NamU - Unequal number of fields"
+subtypeFields t1 t2 scope rs1 rs2 g0 =
+  case RS.groundEq (named rs1) (named rs2) of
+    Left (RS.RecContradiction msg) -> subtypeError t1 t2 (pretty msg)
+    Left _ -> subtypeError t1 t2 "Record fields differ"
+    Right _ -> foldM step g0 (zip rs1 rs2)
+  where
+    named rs = [(k, t) | (Key k, t) <- rs]
+    step g ((_, x1), (_, x2)) = subtype scope (apply g x1) (apply g x2) g
 
 zipSubtype :: TypeU -> TypeU -> Scope -> [TypeU] -> [TypeU] -> Gamma -> Either MDoc Gamma
 zipSubtype _ _ _ [] [] g' = return g'
@@ -2552,7 +2714,9 @@ simplifyNats = go
     go t = t
 
     trySimplify nat = case typeUToNatExpr nat of
-      Just ne -> natExprToTypeU (NS.sopToNatExpr (NS.normalize ne))
+      Just ne
+        | NS.hasOpaqueDivision (NS.normalize ne) -> nat
+        | otherwise -> natExprToTypeU (NS.sopToNatExpr (NS.normalize ne))
       Nothing -> nat
 
 letterPool :: [TVar]
@@ -3112,7 +3276,7 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (RecSingletonU k v) = "Singleton" <+> f False k <+> f False v
     f _ (LabeledU (TV n) t) = pretty n <> "@" <> f False t
     f _ (NamU _ n [] rs)
-      | n == anonRecordVar = braces (hsep (punctuate "," [pretty k <+> "::" <+> f True t | (k, t) <- rs]))
+      | n == anonRecordVar = braces (hsep (punctuate "," [pretty k <> "=" <> f True t | (k, t) <- rs]))
       | otherwise = pretty n
     f False t = parens (f True t)
     f _ (ExistU v (ts, _) (rs, _)) =

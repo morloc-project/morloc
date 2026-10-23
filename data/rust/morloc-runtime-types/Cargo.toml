@@ -15,3 +15,4 @@ serde_json = { workspace = true }
 twox-hash = { workspace = true }
 thiserror = { workspace = true }
 zstd = { workspace = true }
+memchr = "2"

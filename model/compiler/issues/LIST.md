@@ -1,0 +1,18 @@
+# Known issues
+
+Each file holds a group of related issues, each framed against the model:
+a spec item the code violates, or a gap in the spec. Evidence levels:
+reproduced, read (verified by reading), speculative. Delete an entry when
+it is solved, and a file when it is empty.
+
+- [typecheck-output.md](typecheck-output.md): undetermined and non-`Type` types reach code generation (TC-3), locations lost after typechecking; `morloc typecheck` drops class constraints from signed exports
+- [codegen-ownership.md](codegen-ownership.md): deciding a payload take walks the manifold once per candidate; a C++ `Try` from `r <- pull` is copied when unwrapped; one variable passed for two parameters gives a Python function a duplicate parameter; a record field passed to a by-reference parameter is cloned first; a C++ conditional moves its result twice; an owned Rust loop local stepped through a `match` copies its rest each step; a nested Rust constructor pattern copies each inner field it tests; a Rust loop stepped by a function returning part of its argument copies the part; local and remote-worker segments share a plan key; C++ OWN-1 check opt-in only, do OWN-1..7 bind C++
+- [codegen-copies.md](codegen-copies.md): C++ and Rust copy projections only read, move only at some keeping positions, copy crossing-closure captures and loop-carried setters; C++ copies unchanged loop slots; `map unpack` over a newtype copies each element
+- [realization.md](realization.md): containers priced by their cheapest element, let-bound and parameter values not priced where used, collapse and scoring disagree, function arguments priced twice, merged signatures drop docstrings; COST-2..10 unimplemented (cost directives dropped); an argument computable in the caller is computed by a callback (needs COST-3 ruling)
+- [codegen-limits.md](codegen-limits.md): generated R nests long guard chains too deeply for its parser; a C++ conditional needs a default constructor; a recursive C++ builder of a `data` with a Packable-mapped field does not build; a Rust manifold returning a passthrough argument does not build; a C++ pool may not declare an enum reached only as a `data` type's argument; Python/C++ `&&` chains nest (a ~100-operand Python chain fails to load, EMIT-4), Python per-call try/except re-raising RuntimeError (EMIT-3); a sourced signature ending in a function-type alias does not build when partially applied; `Null` in a field of a parameterized record literal is not given a type
+- [opaque-types.md](opaque-types.md): recursion over an opaque sourced type does not build (wire form demanded with no crossing); an opaque type crossing a boundary rejected with an internal message
+- [kind-args.md](kind-args.md): a ground table row lowers as a value record: `$N` counts ground rows but not polymorphic ones (and Str labels at the `Type` level), C++ templates miscount Rec-kinded parameters, a few walks still collect `@REC`, Rec/List/Set placeholders lift back as Nat wildcards
+- [effect-boundaries.md](effect-boundaries.md): checker visits 3 of 7 boundaries (EBND-1), no check names its item, a label moves work into a suspension, a loop base returning a closure may be forced (speculative)
+- [language-registry.md](language-registry.md): no single language object; plugin languages half work (needs a ruling: supported or deleted); dead registry fields (lang.yaml `cost:`) and functions
+- [recursion-loops.md](recursion-loops.md): RECUR-2 tail calls kept as calls under `--debug`, on a labeled call, with a non-tail self-call beside them, or bound by `where`; dead effectful-loop gate
+- [internal-checks.md](internal-checks.md): ~340 plain `zip`s truncate on a length mismatch instead of failing

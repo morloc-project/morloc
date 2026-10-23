@@ -14,18 +14,18 @@ unapplied lambdas, never @(\\x -> body) arg@.
 -}
 module Morloc.CodeGenerator.LambdaEval
   ( applyLambdas
+  , applyPoolLambdas
   , reindexTree
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Grammars.Common (propagateManifoldLabel)
 import Morloc.Frontend.Namespace (newIndex)
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
-import qualified Morloc.Data.GMap as GMap
 import Morloc.Data.Doc (pretty, squotes, (<+>))
 import Morloc.CodeGenerator.Serial (containsFunT)
 import Morloc.CodeGenerator.Value (etaParts, isValue)
+import Morloc.CodeGenerator.EffectBoundary (sourceSignature)
 import qualified Morloc.Data.Text as MT
 import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 
@@ -123,9 +123,12 @@ import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 -- | Beta-reduce a tree, then give every function value the arity of its
 -- type (see 'saturate').
 applyLambdas :: Bool -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
-applyLambdas ai e = do
-  e' <- reduceRoot ai e >>= saturateAt True ai
-  if ai then return e' else groupCallbacks e'
+applyLambdas ai e = reduceRoot ai e >>= saturateAt True ai
+
+-- | 'applyLambdas' for a tree that becomes a pool: each function passed to a
+-- source is also given the grouping the source calls it with.
+applyPoolLambdas :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
+applyPoolLambdas e = applyLambdas False e >>= groupCallbacks
 
 -- | Reduce the root of a tree. A root of function type -- a command, a shared
 -- specialization, a recursive helper -- is called with every input of its
@@ -149,7 +152,7 @@ reduceRoot ai n@(AnnoS g@(Idx gi (FunT ts r)) c e) = case e of
           AnnoS g c . LamS (ps <> ws) <$> reduce ai app
   _ -> do
     ws <- mapM (const (freshClosureName (EV "w"))) ts
-    gi' <- newPlainIndex gi
+    gi' <- newIndex gi
     app <- applyTo (FunT ts r) (AnnoS (Idx gi' (FunT ts r)) c e) ws ts
     AnnoS g c . LamS ws <$> reduce ai app
   where
@@ -158,8 +161,8 @@ reduceRoot ai n@(AnnoS g@(Idx gi (FunT ts r)) c e) = case e of
       | length vs < length ts = params (vs <> ws) body
     params vs body = (vs, body)
     applyTo ft f ws wts = do
-      argIdxs <- mapM (const (newPlainIndex gi)) ws
-      appIdx <- newPlainIndex gi
+      argIdxs <- mapM (const (newIndex gi)) ws
+      appIdx <- newIndex gi
       let args = [AnnoS (Idx ix wt) c (BndS w) | (ix, w, wt) <- zip3 argIdxs ws wts]
           AnnoS (Idx fi _) fc fe = f
       return (AnnoS (Idx appIdx r) c (AppS (AnnoS (Idx fi ft) fc fe) args))
@@ -185,8 +188,8 @@ saturateAt top ai (AnnoS g@(Idx gi t@(FunT ts r)) c (LamS vs body))
       let extra = drop (length vs) ts
       ws <- mapM (\_ -> freshClosureName (EV "w")) extra
       body' <- saturate ai body
-      argIdxs <- mapM (const (newPlainIndex gi)) extra
-      appIdx <- newPlainIndex gi
+      argIdxs <- mapM (const (newIndex gi)) extra
+      appIdx <- newIndex gi
       let args = [AnnoS (Idx ix wt) c (BndS w) | (ix, w, wt) <- zip3 argIdxs ws extra]
           app = AnnoS (Idx appIdx r) c (AppS body' args)
       app' <- reduce ai app
@@ -199,7 +202,7 @@ saturateAt top ai (AnnoS g@(Idx gi t@(FunT ts r)) c (LamS vs body))
           stageBody <- reindexTree body'
           sIdx <- newIndex gi
           sName <- freshClosureName (EV "stage")
-          letIdx <- newPlainIndex gi
+          letIdx <- newIndex gi
           let stageT = FunT (take (length vs) ts) (FunT extra r)
               stageLam = AnnoS (Idx sIdx stageT) c (LamS vs stageBody)
           recordStage gi (length vs) sIdx
@@ -228,9 +231,9 @@ saturateAt top ai n@(AnnoS (Idx gi t@(FunT ts r)) c (LamS vs (AnnoS _ _ (AppS (A
                 then return value
                 else do
                   fName <- freshClosureName (EV "f")
-                  headIdx <- newPlainIndex gi
-                  appIdx <- newPlainIndex gi
-                  letIdx <- newPlainIndex gi
+                  headIdx <- newIndex gi
+                  appIdx <- newIndex gi
+                  letIdx <- newIndex gi
                   let partial = AnnoS (Idx appIdx t) c (AppS (AnnoS (Idx headIdx (FunT fullTs r)) c (LetBndS fName)) user)
                   return (AnnoS (Idx letIdx t) c (LetS fName value partial))
         _ -> return n
@@ -264,14 +267,14 @@ stagedValue gi c v stageV k caps ts r = do
   ys <- mapM (const (freshClosureName (EV "y"))) ts
   capsS <- mapM reindexTree caps
   capsF <- mapM reindexTree caps
-  aIdxs <- mapM (const (newPlainIndex gi)) as
-  yIdxs <- mapM (const (newPlainIndex gi)) ys
-  sHead <- newPlainIndex gi
-  sApp <- newPlainIndex gi
-  fHead <- newPlainIndex gi
-  fApp <- newPlainIndex gi
-  fIdx <- newPlainIndex gi
-  letIdx <- newPlainIndex gi
+  aIdxs <- mapM (const (newIndex gi)) as
+  yIdxs <- mapM (const (newIndex gi)) ys
+  sHead <- newIndex gi
+  sApp <- newIndex gi
+  fHead <- newIndex gi
+  fApp <- newIndex gi
+  fIdx <- newIndex gi
+  letIdx <- newIndex gi
   sIdx <- newIndex gi
   sName <- freshClosureName (EV "stage")
   let bnds idxs names types = [AnnoS (Idx ix bt) c (BndS x) | (ix, x, bt) <- zip3 idxs names types]
@@ -283,12 +286,10 @@ stagedValue gi c v stageV k caps ts r = do
   return (AnnoS (Idx letIdx (FunT ts r)) c (LetS sName stageLam flatLam))
 
 -- | Record flat entry @flat@ as staged after @k@ arguments, with stage entry
--- @stage@. The stage entry keeps the flat entry's configuration but for the
--- cache: only full calls are cached.
+-- @stage@.
 recordStage :: Int -> Int -> Int -> MorlocMonad ()
 recordStage flat k stage =
-  MM.modify (\st -> st { stateStageEntries = Map.insert flat (k, stage) (stateStageEntries st)
-                       , stateManifoldConfig = Map.adjust (\cfg -> cfg {manifoldConfigCache = Nothing}) stage (stateManifoldConfig st) })
+  MM.modify (\st -> st { stateStageEntries = Map.insert flat (k, stage) (stateStageEntries st) })
 
 -- | Hand each function a source is passed in the grouping the source calls it
 -- with. Morloc does not distinguish @a -> b -> c@ from @a -> (b -> c)@, but
@@ -297,21 +298,8 @@ recordStage flat k stage =
 -- with two arguments, @(a -> (b -> c))@ with one. A function taking more than
 -- that is passed as @\a1..an -> g a1..an@: a partial application of it, which
 -- runs any stage it reaches ('mlc_papply').
-groupCallbacks :: AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
-groupCallbacks e0 = do
-  sigs <- MM.gets stateSignatures
-  let grouping =
-        Map.fromList
-          [ (srcKey src, (map groups (params (etype et)), et))
-          | sig <- GMap.elems sigs
-          , (et, tts) <- case sig of
-              Monomorphic tt -> [(et, [tt]) | Just et <- [termGeneral tt]]
-              -- a method is called as its class declares it
-              Polymorphic _ _ et tts -> [(et, tts)]
-          , tt <- tts
-          , (_, Idx _ src) <- termConcrete tt
-          ]
-  go grouping e0
+groupCallbacks :: AnnoS (Indexed Type) One (Indexed Lang) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
+groupCallbacks = go
   where
     params (ForallU _ t) = params t
     params (FunU ts _) = ts
@@ -327,11 +315,13 @@ groupCallbacks e0 = do
     passesGrouped (FunU ts _) = any ((> 1) . length . groups) ts
     passesGrouped _ = False
 
-    go grouping (AnnoS g@(Idx gi _) c (AppS f xs)) = do
-      f' <- go grouping f
-      xs' <- mapM (go grouping) xs
-      xs'' <- case sourceOf f of
-        Just src | Just (gss, et) <- Map.lookup (srcKey src) grouping -> do
+    go (AnnoS g@(Idx gi _) c (AppS f xs)) = do
+      f' <- go f
+      xs' <- mapM go xs
+      sig <- maybe (return Nothing) (uncurry sourceSignature) (sourceOf f)
+      xs'' <- case (sourceOf f, sig) of
+        (Just (_, src), Just et) -> do
+          let gss = map groups (params (etype et))
           when (any passesGrouped (params (etype et))) $
             MM.throwSourcedError gi $
               "The source" <+> squotes (pretty (unEVar (srcAlias src)))
@@ -341,11 +331,9 @@ groupCallbacks e0 = do
           sequence [regroup x gs | (x, gs) <- zip xs' (gss ++ repeat [])]
         _ -> return xs'
       return (AnnoS g c (AppS f' xs''))
-    go grouping (AnnoS g c e) = AnnoS g c <$> mapExprSM (go grouping) e
+    go (AnnoS g c e) = AnnoS g c <$> mapExprSM go e
 
-    srcKey src = (srcName src, srcLang src, srcPath src)
-
-    sourceOf (AnnoS _ _ (ExeS (SrcCall src))) = Just src
+    sourceOf (AnnoS _ (Idx ci _) (ExeS (SrcCall src))) = Just (Just ci, src)
     sourceOf (AnnoS _ _ (VarS _ (One x))) = sourceOf x
     sourceOf _ = Nothing
 
@@ -357,11 +345,11 @@ groupCallbacks e0 = do
               restT = FunT more out
           gName <- freshClosureName (EV "g")
           as <- mapM (const (freshClosureName (EV "a"))) here
-          aIdxs <- mapM (const (newPlainIndex gi)) here
-          headIdx <- newPlainIndex gi
-          appIdx <- newPlainIndex gi
-          lamIdx <- newPlainIndex gi
-          letIdx <- newPlainIndex gi
+          aIdxs <- mapM (const (newIndex gi)) here
+          headIdx <- newIndex gi
+          appIdx <- newIndex gi
+          lamIdx <- newIndex gi
+          letIdx <- newIndex gi
           let args = [AnnoS (Idx ix at) c (BndS a) | (ix, a, at) <- zip3 aIdxs as here]
               call = AnnoS (Idx appIdx restT) c (AppS (AnnoS (Idx headIdx (FunT ins out)) c (LetBndS gName)) args)
           call' <- regroup call rest
@@ -378,7 +366,7 @@ bindArg ai x@(AnnoS (Idx xi xt) xc _)
   | otherwise = do
       x' <- reduce ai x
       v <- freshClosureName (EV "arg")
-      ri <- newPlainIndex xi
+      ri <- newIndex xi
       return ([(v, x')], AnnoS (Idx ri xt) xc (LetBndS v))
 
 reduce ::
@@ -391,12 +379,8 @@ reduce ::
   Bool ->
   AnnoS (Indexed Type) One a ->
   MorlocMonad (AnnoS (Indexed Type) One a)
--- Beta-reduce empty lambdas and empty applications. The discarded head
--- AnnoS may carry a user label (e.g. a labeled pointfree reference like
--- @big:sum@ whose body was eta-expanded by typecheck); transfer the
--- label to the surviving outer index so codegen still sees it.
-reduce ai (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx lamIdx _) _ (LamS [] (AnnoS _ c2 e))) [])) = do
-  void (propagateManifoldLabel g1Idx lamIdx)
+-- Beta-reduce empty lambdas and empty applications.
+reduce ai (AnnoS g1 _ (AppS (AnnoS _ _ (LamS [] (AnnoS _ c2 e))) [])) =
   reduce ai $ AnnoS g1 c2 e
 -- Over-applied curried lambda. Beta-reducing `(\base -> \y -> ..) 3 x`
 -- consumes `base`, leaving `AppS (LamS [] (\y -> ..)) [x]` -- an empty
@@ -404,12 +388,42 @@ reduce ai (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx lamIdx _) _ (LamS [] (Anno
 -- it returns. Unwrap it so the inner lambda meets the leftover args (the
 -- empty-args clause above only fires when no args remain, so without this
 -- the LamS survives to codegen and errors with "unexpected LamS").
-reduce ai (AnnoS g1@(Idx g1Idx _) c1 (AppS (AnnoS (Idx lamIdx _) _ (LamS [] body)) es@(_ : _))) = do
-  void (propagateManifoldLabel g1Idx lamIdx)
+reduce ai (AnnoS g1 c1 (AppS (AnnoS _ _ (LamS [] body)) es@(_ : _))) =
   reduce ai $ AnnoS g1 c1 (AppS body es)
-reduce ai (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx headIdx _) c2 e) [])) = do
-  void (propagateManifoldLabel g1Idx headIdx)
+reduce ai (AnnoS g1 _ (AppS (AnnoS _ c2 e) [])) =
   reduce ai $ AnnoS g1 c2 e
+-- A labeled function applied. Its arguments are evaluated by the caller,
+-- before the hooks; the label then wraps exactly one call of the function,
+-- at its type's arity, and any further arguments apply to its result. Applied
+-- to fewer, the label stays on the function the application computes.
+reduce ai (AnnoS g@(Idx gi appT) c (AppS (AnnoS (Idx _ ft) lc (LabelS k f)) es@(_ : _))) = do
+  (binds, es') <- unzip <$> mapM (bindArg ai) es
+  let n = case ft of
+        FunT ts _ -> length ts
+        _ -> 0
+      (now, rest) = splitAt n es'
+  callIdx <- newIndex gi
+  labelIdx <- newIndex gi
+  let callT = case (ft, rest) of
+        (FunT ts r, []) | length now < length ts -> FunT (drop (length now) ts) r
+        (FunT _ r, _) -> r
+        _ -> appT
+  call <- reduce ai (AnnoS (Idx callIdx callT) c (AppS f now))
+  -- a partial application that computes its function (a staged one) computes
+  -- it once, here, and the label wraps the calls of the function it built
+  labeled <-
+    if length now < n && not (isValue call)
+      then do
+        v <- freshClosureName (EV "labeled")
+        refIdx <- newIndex gi
+        letIdx <- newIndex gi
+        let ref = AnnoS (Idx refIdx callT) c (LetBndS v)
+        return (AnnoS (Idx letIdx callT) lc (LetS v call (AnnoS (Idx labelIdx callT) lc (LabelS k ref))))
+      else return (AnnoS (Idx labelIdx callT) lc (LabelS k call))
+  result <- case rest of
+    [] -> return labeled
+    _ -> reduce ai (AnnoS (Idx gi appT) c (AppS labeled rest))
+  wrapLets g c (concat binds) result
 -- A partial application the typechecker eta-expanded, @\\vs -> f pre vs@,
 -- with a head known to be a lambda: it is the application @f pre@, which the
 -- strict beta rule below evaluates once, running the work @f@ does before its
@@ -423,6 +437,7 @@ reduce ai n@(AnnoS g c (LamS _ _))
   where
     isKnownLambda (AnnoS _ _ (LamS _ _)) = True
     isKnownLambda (AnnoS _ _ (VarS _ (One x))) = isKnownLambda x
+    isKnownLambda (AnnoS _ _ (LabelS _ x)) = isKnownLambda x
     isKnownLambda _ = False
 -- The same, with a function value held in a variable as the head: it is the
 -- partial application @f pre@, its arguments evaluated once, first; the pool
@@ -466,7 +481,7 @@ reduce ai (AnnoS g1@(Idx _ appT) c1 (AppS (AnnoS (Idx gLet _) cLet (LetS v e1 bo
     AnnoS (Idx gLet appT) cLet $
       LetS v e1 (AnnoS g1 c1 (AppS body es))
 -- Beta-reduce an applied lambda. An argument is evaluated once, at the
--- application (model/effects.md, law 5), so only a value may be
+-- application (EVAL-1), so only a value may be
 -- substituted into the body: substituting anything else would evaluate it at
 -- each reference, or never if there is none. A value is substituted when its
 -- parameter is used at most once (a move: 'substituteAnnoS' reuses the
@@ -487,6 +502,15 @@ reduce ai
           (e1 : es)
         )
     ) = do
+    -- The application of a named function is a call of it: the value it
+    -- reduces to keeps the application's index, which takes the function's
+    -- name for the failure trace (DIAG-5).
+    MM.modify $ \st -> case Map.lookup i2 (stateName st) of
+      Just name | Map.notMember i1n (stateName st) ->
+        st { stateName = Map.insert i1n name (stateName st)
+           , stateNameSource = Map.insert i1n i2 (stateNameSource st)
+           }
+      _ -> st
     -- A non-value is normalized here, once, to decide whether it reduces
     -- to a value; the result is reused below.
     let raw = isValue e1
@@ -495,12 +519,10 @@ reduce ai
     -- are evaluated now, once, and the suspension built from their values.
     (hoisted, e1n) <- hoistThunkArgs e1n0
     let normalized x = if raw then reduce ai x else return x
-    -- The reduction's result is what the labeled application computes, so
-    -- a label, cache or log setting on the application moves to its root.
-    moveConfig i1n =<< wrapLets i1 tb1 hoisted =<< case () of
+    wrapLets i1 tb1 hoisted =<< case () of
       _ | isFunctionType tv, AnnoS (Idx ti _) tc (IntrinsicS IntrThrow msg) <- e1n ->
             retypeThrow ti i1t tc msg
-        | isValue e1n && (ai || nrefs <= 1) ->
+        | isValue e1n && (ai || nrefs <= 1 || isScalarLiteral e1n) ->
             substituteAnnoS v e1n e2 >>= reduce ai . rebuild
         | isValue e1n -> share normalized v e1n e2
         -- A function built by a computation, on the nexus path. The pure
@@ -525,7 +547,7 @@ reduce ai
             lam <- etaCall f tv e1n
             e2' <- substituteAnnoS v lam e2
             inner <- reduce ai (rebuild e2')
-            letIx <- newPlainIndex i1n
+            letIx <- newIndex i1n
             return (AnnoS (Idx letIx i1t) tb1 (LetS f e1n inner))
         -- A container holding function values, on the nexus path: its
         -- elements are bound once, in order, and the container of their
@@ -549,7 +571,7 @@ reduce ai
       e1' <- normalized e1n
       e2r <- rebindBndToLet x body
       inner <- reduce ai (rebuild e2r)
-      letIx <- newPlainIndex i1n
+      letIx <- newIndex i1n
       return (AnnoS (Idx letIx i1t) tb1 (LetS x e1' inner))
     -- The residual application with one parameter/argument pair consumed.
     -- The residual lambda is a value built at the application site, so it
@@ -589,7 +611,7 @@ reduce ai (AnnoS g c (AppS headA es)) = do
       esCopy <- mapM reindexTree es'
       let Idx _ appT = g
           branch b@(AnnoS (Idx bi _) bc _) xs = do
-            ix <- newPlainIndex bi
+            ix <- newIndex bi
             reduce ai (AnnoS (Idx ix appT) bc (AppS b xs))
       th' <- branch th es'
       el' <- branch el esCopy
@@ -684,39 +706,17 @@ bindData y@(AnnoS (Idx gi t) c _)
   | isValue y = return ([], y)
   | otherwise = do
       name <- freshClosureName (EV "arg")
-      refIx <- newPlainIndex gi
+      refIx <- newIndex gi
       return ([(name, y)], AnnoS (Idx refIx t) c (LetBndS name))
 
 isLam :: AnnoS g f c -> Bool
 isLam (AnnoS _ _ (LamS _ _)) = True
 isLam _ = False
 
--- | Move the manifold configuration at index @from@ to the root of @e@, when
--- the root is a different node.
-moveConfig :: Int -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
-moveConfig from e@(AnnoS (Idx to _) _ _)
-  | from == to = return e
-  | otherwise = do
-      MM.modify $ \s -> case Map.lookup from (stateManifoldConfig s) of
-        Nothing -> s
-        Just cfg ->
-          s { stateManifoldConfig = Map.insert to cfg (Map.delete from (stateManifoldConfig s)) }
-      return e
-
--- | A fresh index carrying @parent@'s index-keyed state except its manifold
--- configuration: a node the reduction introduces (a let, an eta-expansion)
--- computes nothing the user labeled, so a label, cache or log setting on the
--- expression it came from stays with that expression alone.
-newPlainIndex :: Int -> MorlocMonad Int
-newPlainIndex parent = do
-  i <- newIndex parent
-  MM.modify (\s -> s {stateManifoldConfig = Map.delete i (stateManifoldConfig s)})
-  return i
-
 -- | A throw at another type.
 retypeThrow :: Int -> Type -> c -> [AnnoS (Indexed Type) One c] -> MorlocMonad (AnnoS (Indexed Type) One c)
 retypeThrow from t c msg = do
-  ix <- newPlainIndex from
+  ix <- newIndex from
   return (AnnoS (Idx ix t) c (IntrinsicS IntrThrow msg))
 
 -- | Split a suspension-building application into the arguments that are not
@@ -748,7 +748,7 @@ wrapLets ::
 wrapLets _ _ [] body = return body
 wrapLets i@(Idx gi t) c ((v, rhs) : rest) body = do
   inner <- wrapLets i c rest body
-  letIx <- newPlainIndex gi
+  letIx <- newIndex gi
   return (AnnoS (Idx letIx t) c (LetS v rhs inner))
 
 isFunctionType :: Type -> Bool
@@ -790,16 +790,16 @@ freshClosureName (EV v) = do
 etaCall :: EVar -> Type -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
 etaCall f t@(FunT ins out) (AnnoS (Idx gi _) c _) = do
   ys <- mapM (const (freshClosureName (EV "eta"))) ins
-  lamIx <- newPlainIndex gi
-  appIx <- newPlainIndex gi
-  headIx <- newPlainIndex gi
-  argIxs <- mapM (\_ -> newPlainIndex gi) ins
+  lamIx <- newIndex gi
+  appIx <- newIndex gi
+  headIx <- newIndex gi
+  argIxs <- mapM (\_ -> newIndex gi) ins
   let args = [AnnoS (Idx ix ty) c (BndS y) | (ix, ty, y) <- zip3 argIxs ins ys]
       call = AnnoS (Idx appIx out) c (AppS (AnnoS (Idx headIx t) c (LetBndS f)) args)
   return (AnnoS (Idx lamIx t) c (LamS ys call))
 -- not a function type: the closure is referenced directly
 etaCall f _ (AnnoS (Idx gi t) c _) = do
-  headIx <- newPlainIndex gi
+  headIx <- newIndex gi
   return (AnnoS (Idx headIx t) c (LetBndS f))
 
 -- | Count free references to @v@, using the same shadowing rules as
@@ -885,3 +885,14 @@ reindexAnnoS (AnnoS (Idx i t) c e) = do
   i' <- newIndex i
   e' <- mapExprSM reindexAnnoS e
   return (AnnoS (Idx i' t) c e')
+
+-- A literal that costs nothing to write at each use, so binding it once to
+-- share it saves nothing; a string or a container is built at each use.
+isScalarLiteral :: AnnoS e f c -> Bool
+isScalarLiteral (AnnoS _ _ e) = case e of
+  IntS _ _ -> True
+  RealS _ _ -> True
+  LogS _ -> True
+  NullS -> True
+  UniS -> True
+  _ -> False

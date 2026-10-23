@@ -85,6 +85,7 @@ pub fn out_of_range<T: IntSlot>(shown: &dyn std::fmt::Display) -> MorlocError {
 /// # Safety
 ///
 /// `dest` must be writable for the slot's width.
+#[inline]
 pub unsafe fn write_int_slot(kind: SerialType, dest: *mut u8, v: i128) -> Option<Result<(), MorlocError>> {
     unsafe fn put<T: IntSlot>(dest: *mut u8, v: i128) -> Result<(), MorlocError> {
         std::ptr::write_unaligned(dest as *mut T, narrow_int::<T>(v)?);

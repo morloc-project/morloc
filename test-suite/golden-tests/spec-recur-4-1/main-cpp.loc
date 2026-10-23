@@ -1,0 +1,10 @@
+-- Spec RECUR-4: non-tail recursion written in morloc reaches close to the
+-- depth the same recursion written natively reaches (see DEPTH-1).
+module main (depth)
+
+import root-cpp
+
+depth :: Int -> Int
+depth n
+  ? n == 0 = 0
+  : 1 + depth (n - 1)

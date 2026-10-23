@@ -6,8 +6,8 @@ module nested (howOuter)
 
 import root-py
 
-newtype Inner a
-newtype Outer a
+newtype Inner a = [a]
+newtype Outer a = [Inner a]
 
 type Py => (Inner a) = "dict" a
 type Py => (Outer a) = "dict" a

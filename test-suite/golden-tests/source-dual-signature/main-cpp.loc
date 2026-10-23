@@ -1,0 +1,15 @@
+-- The pure-first case of main.loc in C++.
+
+module main (pureFirstIO, pureFirstPure)
+
+import root-cpp
+
+source Cpp from "lib.hpp" ("double_all" as doubleAll, "double_all" as doubleAllIO)
+doubleAll :: [I64] -> [I64]
+doubleAllIO :: [I64] -> <IO> [I64]
+
+pureFirstIO :: [I64] -> <IO> [I64]
+pureFirstIO xs = doubleAllIO xs
+
+pureFirstPure :: [I64] -> [I64]
+pureFirstPure xs = doubleAll xs

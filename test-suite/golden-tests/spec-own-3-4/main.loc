@@ -1,0 +1,55 @@
+-- Spec OWN-3 in C++: a closure that holds its own copy of a capture reads it
+-- once, when it is built, and that read moves the value when nothing reads
+-- it again. A payload from `mkL k` is a list of 20000 + k ints, `keyL` reads
+-- which payload arrived, and every allocation of 64 KiB or more that `mkL`
+-- did not make is a copy of one. Each export prints its result and the
+-- copies made; a value that went wrong would show in the result.
+module main (dead, readAfter, sameStep, twoClosures, inLoop, nested, crossing)
+
+import root
+import root-cpp
+import root-py
+
+source Cpp from "counted.hpp" ("mkL", "keyL", "applyF", "census")
+
+mkL :: Int -> [Int]
+keyL :: [Int] -> Int
+applyF :: (Int -> Int) -> Int -> Int
+census :: Int -> (Int, Int)
+
+source Py from "apply.py" ("applyPy")
+
+applyPy :: (Int -> Int) -> Int -> Int
+
+--' A capture that is the value's last read
+dead :: Int -> (Int, Int)
+dead n = census (let ys = mkL n in applyF (\x -> x + keyL ys) 1)
+
+--' Captured, then read again
+readAfter :: Int -> (Int, Int)
+readAfter n = census (let ys = mkL n in let a = applyF (\x -> x + keyL ys) 1 in a + keyL ys)
+
+--' Captured and read in the same step
+sameStep :: Int -> (Int, Int)
+sameStep n = census (let ys = mkL n in applyF (\x -> x + keyL ys) (keyL ys))
+
+--' Two closures capturing one value in one step
+twoClosures :: Int -> (Int, Int)
+twoClosures n = census (let ys = mkL n in applyF (\x -> x + keyL ys) 1 + applyF (\x -> x * keyL ys) 2)
+
+loopSum :: Int -> [Int] -> Int -> Int
+loopSum k ys acc
+  ? k == 0 = acc
+  : loopSum (k - 1) ys (acc + applyF (\x -> x + keyL ys) k)
+
+--' A closure built in each step of a loop over a value the loop keeps
+inLoop :: Int -> (Int, Int)
+inLoop n = census (loopSum 3 (mkL n) 0)
+
+--' A closure built inside a closure, capturing the outer closure's capture
+nested :: Int -> (Int, Int)
+nested n = census (let ys = mkL n in applyF (\x -> applyF (\y -> y + keyL ys) x) 1)
+
+--' A closure that crosses to another pool, capturing a value read nowhere else
+crossing :: Int -> (Int, Int)
+crossing n = census (let ys = mkL n in applyPy (\x -> x + keyL ys) 1)

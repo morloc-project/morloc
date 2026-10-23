@@ -1,0 +1,15 @@
+-- CPP-3: a type mapped to a typedef of a pointer is rejected (see ok.loc).
+module badptr (bad)
+
+import root
+import root-cpp
+
+source Cpp from "bad-ptr.hpp" ("mkHandle", "handleAt")
+
+newtype Handle = Int
+type Cpp => Handle = "Handle"
+mkHandle :: Int -> Handle
+handleAt :: Handle -> Int
+
+bad :: Int -> Int
+bad n = handleAt (mkHandle n)

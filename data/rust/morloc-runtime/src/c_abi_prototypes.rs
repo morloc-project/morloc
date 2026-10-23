@@ -31,6 +31,7 @@ mod tests {
         ("FFI_ArrowArrayStream", "struct ArrowArrayStream"),
         ("ShmHeader", "shm_t"),
         ("PacketHeader", "morloc_packet_header_t"),
+        ("ForkPoolConfig", "morloc_fork_pool_t"),
     ];
 
     /// `FooBar` -> `foo_bar_t`.
@@ -200,7 +201,23 @@ mod tests {
                     let (Some(lp), Some(rp)) = (d.find('('), d.rfind(')')) else { continue };
                     let name = d[..lp].trim().to_string();
                     let ret = d[rp + 1..].trim().strip_prefix("->").map(str::trim);
-                    let params: Vec<&str> = d[lp + 1..rp].split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
+                    // Split on the commas between parameters, not those
+                    // inside a function-pointer parameter's own list.
+                    let mut params: Vec<&str> = Vec::new();
+                    let (mut depth, mut from) = (0i32, lp + 1);
+                    for (i, ch) in d[lp + 1..rp].char_indices() {
+                        match ch {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            ',' if depth == 0 => {
+                                params.push(d[from..lp + 1 + i].trim());
+                                from = lp + 2 + i;
+                            }
+                            _ => {}
+                        }
+                    }
+                    params.push(d[from..rp].trim());
+                    params.retain(|p| !p.is_empty());
                     let mut cparams = Vec::new();
                     let mut ok = true;
                     for p in &params {

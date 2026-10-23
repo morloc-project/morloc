@@ -89,9 +89,6 @@ extern "C" {
     /// caller can memcpy in place before handing off the RelPtr.
     fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_void;
 
-    /// SHM address translation: relptr -> absolute pointer. Returns
-    /// null on failure. `errmsg` is set if provided.
-    fn rel2abs(relptr: isize, errmsg: *mut *mut c_char) -> *mut c_void;
 
     /// SHM address translation: absolute pointer -> relptr. Returns
     /// -1 on failure. RelPtr is `isize` in the runtime type system;
@@ -146,7 +143,7 @@ pub unsafe fn stdio_slot_schema(handle: i64) -> Result<String, String> {
 }
 
 /// Emit the `MORLOC_STREAM_PACKET` prefix for the given stdio slot to
-/// `fd`. Used lazily on the first `WRITE_STDIO` per slot.
+/// `fd`. Used lazily on the first write per slot.
 pub unsafe fn write_stream_header_for_slot(fd: i32, handle: i64) -> Result<u64, WriteError> {
     let mut buf: *mut u8 = std::ptr::null_mut();
     let mut len: usize = 0;
@@ -161,33 +158,42 @@ pub unsafe fn write_stream_header_for_slot(fd: i32, handle: i64) -> Result<u64, 
     r.map(|()| len as u64)
 }
 
-/// Read `size` bytes from the SHM block at `relptr` and write them to
-/// `fd`. Used by `WRITE_STDIO`. The bytes are the raw sub-packet
-/// (header + metadata + payload) the pool assembled in SHM.
-pub unsafe fn write_shm_bytes_to_fd(fd: i32, relptr: i64, size: u64) -> Result<(), WriteError> {
+/// Read a packet into a fresh SHM block: `prefix`, then `rest` more bytes
+/// that `fill` reads in place (`Ok(false)`: input ended first). Returns
+/// `(relptr, size)` for hand-off to the pool via the socket response; on
+/// any error the block is freed.
+pub unsafe fn read_into_shm(
+    prefix: &[u8],
+    rest: usize,
+    fill: impl FnOnce(&mut [u8]) -> Result<bool, String>,
+    short: &str,
+) -> Result<(i64, u64), String> {
+    let total = prefix
+        .len()
+        .checked_add(rest)
+        .ok_or_else(|| "stdin packet size overflow".to_string())?;
     let mut err: *mut c_char = std::ptr::null_mut();
-    let abs = rel2abs(relptr as isize, &mut err);
-    if abs.is_null() {
-        return Err(WriteError::Other(take_err(err)));
-    }
-    let slice = std::slice::from_raw_parts(abs as *const u8, size as usize);
-    write_all_fd(fd, slice)
-}
-
-/// Copy `bytes` into a fresh SHM block; return `(relptr, size)` for
-/// hand-off to the pool via the socket response.
-pub unsafe fn copy_into_shm(bytes: &[u8]) -> Result<(i64, u64), String> {
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let abs = shmalloc(bytes.len(), &mut err);
+    let abs = shmalloc(total, &mut err);
     if abs.is_null() {
         return Err(take_err(err));
     }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), abs as *mut u8, bytes.len());
-    let rel = abs2rel(abs, &mut err);
-    if rel < 0 {
-        return Err(take_err(err));
+    let block = std::slice::from_raw_parts_mut(abs as *mut u8, total);
+    block[..prefix.len()].copy_from_slice(prefix);
+    let r = match fill(&mut block[prefix.len()..]) {
+        Ok(true) => {
+            let rel = abs2rel(abs, &mut err);
+            if rel < 0 { Err(take_err(err)) } else { Ok((rel as i64, total as u64)) }
+        }
+        Ok(false) => Err(short.to_string()),
+        Err(e) => Err(e),
+    };
+    if r.is_err() {
+        let mut ferr: *mut c_char = std::ptr::null_mut();
+        if !shfree(abs, &mut ferr) {
+            drop(take_err(ferr));
+        }
     }
-    Ok((rel as i64, bytes.len() as u64))
+    r
 }
 
 /// Error from a stdout/stderr write. `BrokenPipe` is the `<IO>` condition
@@ -263,17 +269,6 @@ impl Drop for ShmVoidstar {
             self.0 = std::ptr::null_mut();
         }
     }
-}
-
-/// Copy `size` bytes of the SHM block at `relptr` into an owned `Vec`.
-pub unsafe fn read_shm_bytes(relptr: i64, size: u64) -> Result<Vec<u8>, String> {
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let abs = rel2abs(relptr as isize, &mut err);
-    if abs.is_null() {
-        return Err(take_err(err));
-    }
-    let slice = std::slice::from_raw_parts(abs as *const u8, size as usize);
-    Ok(slice.to_vec())
 }
 
 /// Extract the `[T]` value schema string from a sub-packet's

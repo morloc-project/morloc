@@ -44,6 +44,8 @@ module Morloc.Namespace.Expr
   , unappliedPatternArity
   , Pattern (..)
   , Intrinsic (..)
+  , SaveFormat (..)
+  , saveFormatName
   , intrinsicName
   , intrinsicArity
   , intrinsicIsIO
@@ -66,8 +68,9 @@ module Morloc.Namespace.Expr
   , AnnoS (..)
   , ExprS (..)
   , Coercion (..)
+  , CastDir (..)
+  , InstanceOrigin (..)
   , applyCoercion
-  , unapplyCoercion
   , ManyPoly (..)
   , mapAnnoSM
   , mapExprSM
@@ -204,11 +207,10 @@ data ManifoldConfig = ManifoldConfig
   , manifoldConfigLabel :: Maybe Text
   , manifoldConfigLogTemplate :: Maybe LogTemplate
   , manifoldConfigLabelIdx :: Maybe Int
-  -- ^ The ExprI index where the label was attached. Set by 'collectTags'
-  -- when a labeled VarE is registered and preserved by
-  -- 'propagateManifoldLabel'. Used at codegen to look up the source
-  -- position (for @{module}@/@{line}@/@{column}@) and the term name
-  -- (for @{name}@). Not user-facing; absent from YAML.
+  -- ^ The index of the labeled reference, set when the label is placed
+  -- (Treeify). Codegen looks up the source position (for
+  -- @{module}@/@{line}@/@{column}@) and the name (for @{name}@) there. Not
+  -- user-facing; absent from YAML.
   }
   deriving (Show, Ord, Eq, Generic)
 
@@ -391,13 +393,25 @@ unappliedPatternArity (PatternStruct s) = bracketArity s + 1
 unappliedPatternArity PatternBracketIndex = 2
 unappliedPatternArity PatternBracketSlice = 4
 
+-- | The file format a save intrinsic writes.
+data SaveFormat
+  = SaveVoidstar -- ^ @save: a voidstar data packet
+  | SaveJson     -- ^ @savej: a JSON text file
+  deriving (Show, Eq, Ord)
+
+-- | The format's name in generated code and the nexus manifest.
+saveFormatName :: SaveFormat -> Text
+saveFormatName SaveVoidstar = "voidstar"
+saveFormatName SaveJson = "json"
+
 -- | Compiler intrinsics: functions the compiler generates specialized code for.
 data Intrinsic
   = IntrSave      -- ^ @save  :: Int -> Str -> a -> <IO> (Try Str ()) -- voidstar packet, with zstd level 0-9
-  | IntrSaveM     -- ^ @savem :: Str -> a -> <IO> (Try Str ())    -- raw msgpack file
   | IntrSaveJ     -- ^ @savej :: Str -> a -> <IO> (Try Str ())    -- raw JSON file
   | IntrLoad      -- ^ @load  :: Str -> <IO> (Try Str a)          -- auto-detect format, auto-decompress packets; failure is an Err arm
   | IntrHash      -- ^ @hash   :: a -> Str           -- xxhash, hex string
+  | IntrEq        -- ^ @eq     :: a -> a -> Bool     -- equal wire values (INTR-7)
+  | IntrLe        -- ^ @le     :: a -> a -> Bool     -- wire order (INTR-7)
   | IntrVersion   -- ^ @version :: Str               -- compiler version
   | IntrCompiled  -- ^ @compiled :: Str              -- compile timestamp
   | IntrLang      -- ^ @lang    :: Str               -- current pool language
@@ -426,6 +440,11 @@ data Intrinsic
                   -- host adapter ('Morloc.CodeGenerator.EffectBoundary'),
                   -- which rebuilds an optional holding a function value in
                   -- the convention of the side it crosses to. NOT user-facing.
+  | IntrNewtypeUnwrap -- ^ implicit @N vs -> T@ representation cast, emitted
+                  -- only in derived @unpack@ bodies (NEWT-7). NOT user-facing;
+                  -- the typechecker replaces it with a 'CoerceNewtype'.
+  | IntrNewtypeWrap -- ^ implicit @T -> N vs@, its inverse, in derived @pack@
+                  -- bodies (NEWT-8).
   | IntrTagTest   -- ^ implicit @a -> a -> Bool@ tag test, emitted only by the
                   -- desugar's constructor-pattern lowering. NOT user-facing --
                   -- there is no entry in 'parseIntrinsic', as with 'IntrMap'.
@@ -452,6 +471,16 @@ data Intrinsic
                   -- this projection has already established the arm, and
                   -- short-circuiting in the emitted condition keeps the
                   -- projection from running against any other one.
+  | IntrListLenTest -- ^ implicit @List a -> Int -> Bool@: does the list have
+                  -- exactly this many elements. Emitted only by the
+                  -- desugar's list-pattern lowering, with a literal length,
+                  -- and NOT reachable from surface syntax. A primitive
+                  -- rather than a call to a size function so that matching
+                  -- needs no instance in scope.
+  | IntrListElem  -- ^ implicit @List a -> Int -> a@: the element at a
+                  -- literal index. Emitted only by the desugar's
+                  -- list-pattern lowering, under a passing 'IntrListLenTest'
+                  -- that puts the index in range.
   | IntrFLength     -- ^ @flen :: IFile a -> <IO> (Try Str Int)@ -- file element count.
                     -- Free from the footer's StreamDiag.element_count. Users
                     -- typically alias as @length@ via stdlib shims.
@@ -575,10 +604,11 @@ data Intrinsic
 -- | Map intrinsic to its canonical name
 intrinsicName :: Intrinsic -> Text
 intrinsicName IntrSave = "save"
-intrinsicName IntrSaveM = "savem"
 intrinsicName IntrSaveJ = "savej"
 intrinsicName IntrLoad = "load"
 intrinsicName IntrHash = "hash"
+intrinsicName IntrEq = "eq"
+intrinsicName IntrLe = "le"
 intrinsicName IntrVersion = "version"
 intrinsicName IntrCompiled = "compiled"
 intrinsicName IntrLang = "lang"
@@ -594,7 +624,11 @@ intrinsicName IntrFSchema = "fschema"
 intrinsicName IntrMap = "map"
 intrinsicName IntrMapOptional = "mapoptional"
 intrinsicName IntrTagTest = "tagtest"
+intrinsicName IntrNewtypeUnwrap = "unwrap"
+intrinsicName IntrNewtypeWrap = "wrap"
 intrinsicName IntrCtorField = "ctorfield"
+intrinsicName IntrListLenTest = "listlentest"
+intrinsicName IntrListElem = "listelem"
 intrinsicName IntrFLength = "flen"
 intrinsicName IntrStreamLayout = "streamlayout"
 intrinsicName IntrNext = "next"
@@ -629,7 +663,6 @@ intrinsicName IntrIFileWalk = "ifile_walk"
 -- IO/pure classification rather than silently defaulting to allowed.
 intrinsicIsIO :: Intrinsic -> Bool
 intrinsicIsIO IntrSave = True
-intrinsicIsIO IntrSaveM = True
 intrinsicIsIO IntrSaveJ = True
 intrinsicIsIO IntrLoad = True
 intrinsicIsIO IntrOpen = True
@@ -664,6 +697,8 @@ intrinsicIsIO IntrSpawn = True
 intrinsicIsIO IntrSettle = True
 -- No IO: safe to write directly in a sandboxed eval.
 intrinsicIsIO IntrHash = False
+intrinsicIsIO IntrEq = False
+intrinsicIsIO IntrLe = False
 intrinsicIsIO IntrVersion = False
 intrinsicIsIO IntrCompiled = False
 intrinsicIsIO IntrLang = False
@@ -676,17 +711,22 @@ intrinsicIsIO IntrUnpack = True
 intrinsicIsIO IntrMap = False
 intrinsicIsIO IntrMapOptional = False
 intrinsicIsIO IntrTagTest = False
+intrinsicIsIO IntrNewtypeUnwrap = False
+intrinsicIsIO IntrNewtypeWrap = False
 intrinsicIsIO IntrCtorField = False
+intrinsicIsIO IntrListLenTest = False
+intrinsicIsIO IntrListElem = False
 intrinsicIsIO IntrThrow = False
 intrinsicIsIO IntrTry = False
 
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
 parseIntrinsic :: Text -> Maybe Intrinsic
 parseIntrinsic "save" = Just IntrSave
-parseIntrinsic "savem" = Just IntrSaveM
 parseIntrinsic "savej" = Just IntrSaveJ
 parseIntrinsic "load" = Just IntrLoad
 parseIntrinsic "hash" = Just IntrHash
+parseIntrinsic "eq" = Just IntrEq
+parseIntrinsic "le" = Just IntrLe
 parseIntrinsic "version" = Just IntrVersion
 parseIntrinsic "compiled" = Just IntrCompiled
 parseIntrinsic "lang" = Just IntrLang
@@ -722,11 +762,16 @@ parseIntrinsic _ = Nothing
 intrinsicArity :: Intrinsic -> Int
 intrinsicArity IntrSave = 3
 intrinsicArity IntrTagTest = 2
+intrinsicArity IntrNewtypeUnwrap = 1
+intrinsicArity IntrNewtypeWrap = 1
 intrinsicArity IntrCtorField = 3
-intrinsicArity IntrSaveM = 2
+intrinsicArity IntrListLenTest = 2
+intrinsicArity IntrListElem = 2
 intrinsicArity IntrSaveJ = 2
 intrinsicArity IntrLoad = 1
 intrinsicArity IntrHash = 1
+intrinsicArity IntrEq = 2
+intrinsicArity IntrLe = 2
 intrinsicArity IntrVersion = 0
 intrinsicArity IntrCompiled = 0
 intrinsicArity IntrLang = 0
@@ -774,9 +819,9 @@ data ExprI = ExprI Int Expr
 data Expr
   = ModE MVar [ExprI]
   | ClsE (Typeclass Signature)
-  | IstE ClassName [Constraint] [TypeU] [ExprI]
-  -- ^ class, the instance's context (constraints its body may assume),
-  -- instance types, body
+  | IstE InstanceOrigin ClassName [Constraint] [TypeU] [ExprI]
+  -- ^ origin, class, the instance's context (constraints its body may
+  -- assume), instance types, body
   | EffE EffectLabel Bool  -- ^ effect declaration: label, isEscapable
   | TypE ExprTypeE
   | ImpE Import
@@ -906,6 +951,17 @@ data E
 -- Extensible: future coercions (e.g., numeric widening) add constructors here.
 data Coercion
   = CoerceToOptional
+  -- | Between a newtype and its representation (NEWT-7, NEWT-8), to the
+  -- type it carries.
+  | CoerceNewtype CastDir TypeU
+  deriving (Show, Eq, Ord)
+
+data CastDir = Unwrap | Wrap
+  deriving (Show, Eq, Ord)
+
+-- | Whether an instance was written in the program or derived by the
+-- compiler from a declaration.
+data InstanceOrigin = Declared | Derived
   deriving (Show, Eq, Ord)
 
 -- | Apply a coercion to a type, returning the coerced type.
@@ -915,12 +971,8 @@ data Coercion
 applyCoercion :: Coercion -> TypeU -> TypeU
 applyCoercion CoerceToOptional (EffectU e t) = EffectU e (OptionalU t)
 applyCoercion CoerceToOptional t = OptionalU t
+applyCoercion (CoerceNewtype _ t) _ = t
 
--- | Invert a coercion on a resolved Type.
-unapplyCoercion :: Coercion -> Type -> Type
-unapplyCoercion CoerceToOptional (EffectT e (OptionalT t)) = EffectT e t
-unapplyCoercion CoerceToOptional (OptionalT t) = t
-unapplyCoercion CoerceToOptional t = t  -- defensive fallback
 
 data ExecutableExpr = SrcCall Source | PatCall Pattern
   deriving (Ord, Eq, Show)
@@ -958,6 +1010,10 @@ data ExprS g f c
   | EvalS (AnnoS g f c)
   | CoerceS Coercion (AnnoS g f c)
   | IntrinsicS Intrinsic [AnnoS g f c]
+  -- | A labeled function (@lab\@h@), or a labeled call once applied. The
+  -- index keys the label's configuration in 'stateManifoldConfig'; it names
+  -- no node, so no pass renumbers it.
+  | LabelS Int (AnnoS g f c)
 
 data ManyPoly a = MonomorphicExpr (Maybe EType) [a] | PolymorphicExpr ClassName EVar EType [(EType, [a])]
   deriving (Show, Eq, Ord)
@@ -1136,6 +1192,7 @@ mapExprSM f (DoBlockS e) = DoBlockS <$> f e
 mapExprSM f (EvalS e) = EvalS <$> f e
 mapExprSM f (CoerceS c e) = CoerceS c <$> f e
 mapExprSM f (IntrinsicS intr es) = IntrinsicS intr <$> mapM f es
+mapExprSM f (LabelS k e) = LabelS k <$> f e
 
 mapAnnoSM ::
   (Traversable f, Monad m) =>
@@ -1190,8 +1247,19 @@ foldExprS f (IfS c t e)       = f c <> f t <> f e
 foldExprS f (DoBlockS x)      = f x
 foldExprS f (EvalS x)         = f x
 foldExprS f (CoerceS _ x)     = f x
+foldExprS f (LabelS _ x)      = f x
 foldExprS f (IntrinsicS _ xs) = foldMap f xs
-foldExprS _ _                 = mempty
+foldExprS f (ConS _ _ _ xs)   = foldMap f xs
+foldExprS _ UniS              = mempty
+foldExprS _ NullS             = mempty
+foldExprS _ (BndS _)          = mempty
+foldExprS _ (RealS _ _)       = mempty
+foldExprS _ (IntS _ _)        = mempty
+foldExprS _ (LogS _)          = mempty
+foldExprS _ (StrS _)          = mempty
+foldExprS _ (ExeS _)          = mempty
+foldExprS _ (LetBndS _)       = mempty
+foldExprS _ (CallS _)         = mempty
 
 -- | Fold a monoid over every 'AnnoS' node in a tree (including the root).
 foldAnnoS :: (Foldable f, Monoid m) => (AnnoS g f c -> m) -> AnnoS g f c -> m
@@ -1294,7 +1362,7 @@ instance Pretty Expr where
         [] -> ""
         [c] -> pretty c <+> "=> "
         _ -> tupled (map pretty constraints) <+> "=> "
-  pretty (IstE cls _ ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
+  pretty (IstE _ cls _ ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
   pretty (EffE lbl esc) = (if esc then "escapable effect" else "effect") <+> pretty lbl
   pretty (TypE (ExprTypeE lang v vs t _ kind)) = case kind of
     TypedefPrimitive ->
@@ -1394,6 +1462,7 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty (EvalS e) = "(EvalS" <+> pretty e <> ")"
   pretty (CoerceS c e) = "(CoerceS" <+> viaShow c <+> pretty e <> ")"
   pretty (IntrinsicS intr es) = "(IntrinsicS" <+> viaShow intr <+> list (map pretty es) <> ")"
+  pretty (LabelS k e) = "(LabelS" <+> pretty k <+> pretty e <> ")"
 
 instance Pretty ExecutableExpr where
   pretty (SrcCall src) = pretty src

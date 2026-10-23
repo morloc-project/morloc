@@ -1,0 +1,44 @@
+module main (pyPy, pyCpp, pyR, pyRs, cppPy, cppCpp, cppR, cppRs, rPy, rCpp, rR, rRs, rsPy, rsCpp, rsR, rsRs, nativePy, nativeCpp, nativeR, nativeRs)
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+source Py from "f.py" ("inc" as incPy, "mapf" as mapPy, "native" as nativePy)
+source Cpp from "f.hpp" ("inc" as incCpp, "mapf" as mapCpp, "native" as nativeCpp)
+source R from "f.R" ("inc" as incR, "mapf" as mapR, "native" as nativeR)
+source Rust from "f.rs" ("inc" as incRs, "mapf" as mapRs, "native" as nativeRs)
+
+incPy :: I64 -> I64
+mapPy :: (I64 -> I64) -> I64 -> I64
+incCpp :: I64 -> I64
+mapCpp :: (I64 -> I64) -> I64 -> I64
+incR :: I64 -> I64
+mapR :: (I64 -> I64) -> I64 -> I64
+incRs :: I64 -> I64
+mapRs :: (I64 -> I64) -> I64 -> I64
+
+nativePy :: I64 -> I64
+nativeCpp :: I64 -> I64
+nativeR :: I64 -> I64
+nativeRs :: I64 -> I64
+
+-- <outer><Inner> n: the outer language's loop calls the inner function n times.
+-- native<Lang> n: the same loop calling `inc` directly, without morloc.
+pyPy n = mapPy incPy n
+pyCpp n = mapPy incCpp n
+pyR n = mapPy incR n
+pyRs n = mapPy incRs n
+cppPy n = mapCpp incPy n
+cppCpp n = mapCpp incCpp n
+cppR n = mapCpp incR n
+cppRs n = mapCpp incRs n
+rPy n = mapR incPy n
+rCpp n = mapR incCpp n
+rR n = mapR incR n
+rRs n = mapR incRs n
+rsPy n = mapRs incPy n
+rsCpp n = mapRs incCpp n
+rsR n = mapRs incR n
+rsRs n = mapRs incRs n

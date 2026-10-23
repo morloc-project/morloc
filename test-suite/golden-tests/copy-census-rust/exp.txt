@@ -1,0 +1,90 @@
+--- nestedOut ---
+[98,98]
+--- nestedLoop ---
+[50,0]
+--- tagNested ---
+[2,0]
+--- tagField ---
+[1,0]
+--- fieldArg ---
+[100,0]
+--- fieldSrc ---
+[100,0]
+--- fieldSrcLit ---
+[100,0]
+--- fieldRet ---
+[100,0]
+--- tupleArg ---
+[100,0]
+--- tupleFresh ---
+[100,0]
+--- listPat ---
+[200,0]
+--- listRet ---
+[100,100]
+--- twiceRead ---
+[200,0]
+--- twiceKeep ---
+[202,200]
+--- twoSteps ---
+[201,100]
+--- partsBorrowed ---
+[100,0]
+--- partsFresh ---
+[101,0]
+--- setter ---
+[100,0]
+--- setterFn ---
+[100,0]
+--- tlOnce ---
+[99,0]
+--- tlLoopRead ---
+[97,0]
+--- tlLoopKeep ---
+[97,0]
+--- tlLoopBuilt ---
+[98,0]
+--- closureRead ---
+[306,0]
+--- closureKeep ---
+[303,300]
+--- papRead ---
+[306,0]
+--- papHof ---
+[203,0]
+--- letOnce ---
+[101,0]
+--- letParam ---
+[100,0]
+--- letField ---
+[100,0]
+--- matchUnwrap ---
+[100,0]
+--- matchArg ---
+[100,100]
+--- matchTry ---
+[100,0]
+--- throughTwo ---
+[101,0]
+--- throughLoop ---
+[101,0]
+--- throughCli ---
+[3,0]
+--- nonTail ---
+[100,0]
+--- guardTwice ---
+[1200,0]
+--- guardLoop ---
+[9803,0]
+--- guardKeep ---
+[100,0]
+--- mixedLoop ---
+[4756,0]
+--- matchedTwice ---
+[200,0]
+--- twoLets ---
+[202,100]
+--- capStaged ---
+[103,100]
+--- capStagedKeep ---
+[203,100]

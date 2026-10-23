@@ -1,0 +1,12 @@
+module main (idStrs, idOptReals, idNested)
+
+-- Pure commands: the nexus loads the argument and writes it back, with no
+-- pool.
+idStrs :: [Str] -> [Str]
+idStrs xs = xs
+
+idOptReals :: [?Real] -> [?Real]
+idOptReals xs = xs
+
+idNested :: [[I64]] -> [[I64]]
+idNested xs = xs

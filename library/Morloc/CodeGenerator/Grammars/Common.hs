@@ -16,6 +16,8 @@ helpers, and the fold framework ('FoldRules', 'foldWithSerialManifoldM').
 -}
 module Morloc.CodeGenerator.Grammars.Common
   ( invertSerialManifold
+  , sealLoop
+  , D (..)
   , renameNE
   , renameSE
   , PoolDocs (..)
@@ -60,7 +62,6 @@ module Morloc.CodeGenerator.Grammars.Common
   , orNativeType
   , collectLogLabels
   , collectManifoldIds
-  , propagateManifoldLabel
   , hasManifoldLabel
   , isForeignCalleeForm
 
@@ -69,6 +70,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , makeManifoldIndexer
   , renderPoolDocs
   , makeManifoldDebugInfoLookup
+  , makeTraceLabelLookup
   ) where
 
 import Morloc.Frontend.Rename (displayName)
@@ -103,6 +105,10 @@ data PoolDocs = PoolDocs
   -- that rebind the body's expression to a temp) can still treat the
   -- expression as a value. lowerManifold applies lcReturn when the
   -- flag is set, right before passing the body to lcMakeFunction.
+
+  , poolBorrowedLocal :: Maybe Text
+  -- ^ The name of a local bound by reference, when 'poolExpr' is that
+  -- name. Returning it copies its referent.
   }
 
 instance Defaultable PoolDocs where
@@ -113,6 +119,7 @@ instance Defaultable PoolDocs where
       , poolPriorLines = []
       , poolPriorExprs = []
       , poolReturnFlag = False
+      , poolBorrowedLocal = Nothing
       }
 
 {- | Merge a series of pools, keeping prior lines, expression and manifolds, but
@@ -127,6 +134,7 @@ mergePoolDocs f ms =
     , poolPriorLines = concatMap poolPriorLines ms
     , poolPriorExprs = concatMap poolPriorExprs ms
     , poolReturnFlag = any poolReturnFlag ms
+    , poolBorrowedLocal = Nothing
     }
 
 -- | Split a call's arguments into successive call groups according to the
@@ -294,6 +302,36 @@ unD (D a _) = a
 getDeps :: D a -> [(Int, Either SerialExpr NativeExpr)]
 getDeps (D _ d) = d
 
+-- | Seal a loop body: every leaf's work stays inside the iteration. The
+-- native lets a continue's values or a base's value depend on become loop
+-- lets in front of the leaf, in the order they run (each value in turn, a
+-- value's own lets in dependency order), so each is a step of its own
+-- (OWN-2); a let two values share is bound once. A leaf that depends on a
+-- serial let, or whose lets bind one index to two right-hand sides, keeps
+-- its lets inside its values.
+sealLoop :: (Dependable b) => LoopBody (D NativeExpr) (D SerialExpr) (D b) -> LoopBody NativeExpr SerialExpr b
+sealLoop body = case body of
+  LoopIf g t e -> LoopIf (weave g) (sealLoop t) (sealLoop e)
+  LoopNLet i r k -> LoopNLet i (weave r) (sealLoop k)
+  LoopSLet i r k -> LoopSLet i (weave r) (sealLoop k)
+  LoopContinue ds -> floated (concatMap (reverse . getDeps) ds) (LoopContinue (map unD ds)) (LoopContinue (map weave ds))
+  LoopBase d -> floated (reverse (getDeps d)) (LoopBase (unD d)) (LoopBase (weave d))
+  where
+    floated deps leaf fallback = case mapM native deps of
+      Just lets
+        | null (duplicates (map fst once)) -> foldr (\(i, ne) k -> LoopNLet i ne k) leaf once
+        where
+          once = nubOrdOn (\(i, ne) -> (i, show ne)) lets
+      _ -> fallback
+    native (i, Right ne) = Just (i, ne)
+    native (_, Left _) = Nothing
+    nubOrdOn key = go Set.empty
+      where
+        go _ [] = []
+        go seen (x : xs)
+          | Set.member (key x) seen = go seen xs
+          | otherwise = x : go (Set.insert (key x) seen) xs
+
 class Dependable a where
   weave :: D a -> a
   atomize :: a -> [(Int, Either SerialExpr NativeExpr)] -> Index (D a)
@@ -308,7 +346,7 @@ instance Dependable NativeExpr where
     | isAtomic e = return $ D e deps
     | otherwise = do
         i <- newIndex
-        return $ D (LetVarN (typeFof e) i) ((i, Right e) : deps)
+        return $ D (LetVarN (typeFof e) i KeptRead) ((i, Right e) : deps)
 
   isAtomic (AppExeN _ _ _) = False
   isAtomic ManN {} = False
@@ -355,8 +393,8 @@ instance Dependable SerialExpr where
 
 -- | Detect a trivial native variable reference.
 nativeTrivialVar :: NativeExpr -> Maybe Int
-nativeTrivialVar (LetVarN _ j) = Just j
-nativeTrivialVar (BndVarN _ j) = Just j
+nativeTrivialVar (LetVarN _ j _) = Just j
+nativeTrivialVar (BndVarN _ j _) = Just j
 nativeTrivialVar _ = Nothing
 
 -- | Detect a trivial serial variable reference.
@@ -374,8 +412,8 @@ renameNE old new = go where
   go (ReturnN ne) = ReturnN (go ne)
   go (SerialLetN i se ne) = SerialLetN (ri i) (renameSE old new se) (go ne)
   go (NativeLetN i ne1 ne2) = NativeLetN (ri i) (go ne1) (go ne2)
-  go (LetVarN t i) = LetVarN t (ri i)
-  go (BndVarN t i) = BndVarN t (ri i)
+  go (LetVarN t i r) = LetVarN t (ri i) r
+  go (BndVarN t i r) = BndVarN t (ri i) r
   go (DeserializeN t s se) = DeserializeN t s (renameSE old new se)
   go (ExeN t exe) = ExeN t (renameExe old new exe)
   go (ListN v t nes) = ListN v t (map go nes)
@@ -406,8 +444,8 @@ renameSE old new = go where
   go (AppPoolS t p args) = AppPoolS t (renamePoolCall old new p) (map goA args)
   go (AppRecS t m es) = AppRecS t m (map go es)
   go (AppForeignRecS t m s es) = AppForeignRecS t m s (map go es)
-  go (CacheBodyS t resSa lbl m args body) = CacheBodyS t resSa lbl m args (go body)
-  go (DebugWrapS t m args body) = DebugWrapS t m args (go body)
+  go (CacheBodyS t resSa lbl m args body) = CacheBodyS t resSa lbl m (map raPair args) (go body)
+  go (DebugWrapS t m args body) = DebugWrapS t m (map raPair args) (go body)
   go (ReturnS se) = ReturnS (go se)
   go (SerialLetS i se1 se2) = SerialLetS (ri i) (go se1) (go se2)
   go (NativeLetS i ne se) = NativeLetS (ri i) (renameNE old new ne) (go se)
@@ -417,6 +455,7 @@ renameSE old new = go where
   go (LoopS t ids body) = LoopS t (map ri ids) (trimap (renameNE old new) go go body)
   goA (SerialArgManifold sm) = SerialArgManifold (renameSM old new sm)
   goA (SerialArgExpr se) = SerialArgExpr (go se)
+  raPair (Arg i t, sa) = (Arg (ri i) t, sa)
 
 renameNM :: Int -> Int -> NativeManifold -> NativeManifold
 renameNM old new (NativeManifold m lang form body) =
@@ -519,13 +558,14 @@ invertSerialManifold sm0 =
       -- still want the catch block to fire and record the frame.
       return $ D (DebugWrapS t mid args (weave (D body lets))) []
     invertSerialExprM (SerializeS_ s (D ne lets)) = atomize (SerializeS s ne) lets
-    -- SEAL the loop: 'weave' each leaf's let-bindings INSIDE the leaf and
-    -- propagate ZERO deps upward ('D ... []'). Per-iteration work (guards,
-    -- bases, continue values, and any 'LoopSLet'/'LoopNLet' RHS) must never be
-    -- atomized/hoisted above the loop, where it would run once on a stale
-    -- first-iteration value. No loop-invariant hoisting here by design.
+    -- SEAL the loop ('sealLoop'): each leaf's let-bindings stay inside the
+    -- iteration and ZERO deps propagate upward ('D ... []'). Per-iteration
+    -- work (guards, bases, continue values, and any 'LoopSLet'/'LoopNLet' RHS)
+    -- must never be atomized/hoisted above the loop, where it would run once
+    -- on a stale first-iteration value. No loop-invariant hoisting here by
+    -- design.
     invertSerialExprM (LoopS_ t ids bodyD) =
-      return $ D (LoopS t ids (trimap weave weave weave bodyD)) []
+      return $ D (LoopS t ids (sealLoop bodyD)) []
 
     invertNativeExprM ::
       NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) ->
@@ -549,8 +589,8 @@ invertSerialManifold sm0 =
           return $ D (renameNE i j ne2) (renameDeps i j lets2 <> lets1)
       | otherwise =
           return $ D ne2 (lets2 <> ((i, Right ne1) : lets1))
-    invertNativeExprM (LetVarN_ t i) = atomize (LetVarN t i) []
-    invertNativeExprM (BndVarN_ t i) = atomize (BndVarN t i) []
+    invertNativeExprM (LetVarN_ t i r) = atomize (LetVarN t i r) []
+    invertNativeExprM (BndVarN_ t i r) = atomize (BndVarN t i r) []
     invertNativeExprM (DeserializeN_ t s (D se lets)) = atomize (DeserializeN t s se) lets
     invertNativeExprM (ExeN_ t x) = atomize (ExeN t x) []
     invertNativeExprM (ListN_ v t nes) = atomize (ListN v t (map unD nes)) (concatMap getDeps nes)
@@ -570,8 +610,20 @@ invertSerialManifold sm0 =
     -- coercion is transparent: pass through like EvalN
     invertNativeExprM (CoerceN_ c t (D ne lets)) = atomize (CoerceN c t ne) lets
     -- keep dependencies inside if branches (like suspend)
+    -- In a conditional with a Bool literal arm (a short-circuit form, BASE-3)
+    -- a part that binds a value only to return it is that value, so the
+    -- translator can write the language's own operator. Elsewhere the let
+    -- stays: a projection bound by one may be moved rather than copied.
     invertNativeExprM (IfN_ t (D condNe condLets) (D thenNe thenLets) (D elseNe elseLets)) =
-      atomize (IfN t (weave (D condNe condLets)) (weave (D thenNe thenLets)) (weave (D elseNe elseLets))) []
+      let c = weave (D condNe condLets)
+          a = weave (D thenNe thenLets)
+          b = weave (D elseNe elseLets)
+       in atomize (if isLit a || isLit b then IfN t (part c) (part a) (part b) else IfN t c a b) []
+      where
+        isLit LogN {} = True
+        isLit _ = False
+        part (NativeLetN i rhs (LetVarN _ j _)) | i == j = rhs
+        part e = e
     invertNativeExprM (IntrinsicN_ t intr msch nes) =
       atomize (IntrinsicN t intr msch (map unD nes)) (concatMap getDeps nes)
     invertNativeExprM (MapOptionalN_ t wt src (D ne lets)) =
@@ -581,7 +633,7 @@ invertSerialManifold sm0 =
     -- loop, so their dependencies go outward.
     invertNativeExprM (LoopN_ t starts bodyD) =
       atomize
-        (LoopN t (map (second unD) starts) (trimap weave weave weave bodyD))
+        (LoopN t (map (second unD) starts) (sealLoop bodyD))
         (concatMap (getDeps . snd) starts)
 
     invertSerialArgM :: SerialArg_ (D SerialManifold) (D SerialExpr) -> Index (D SerialArg)
@@ -621,8 +673,8 @@ maxIndex = (+ 1) . runIdentity . foldSerialManifoldM fm
     findSerialIndices e = return $ foldlSE max 0 e
 
     findNativeIndices :: (Monad m) => NativeExpr_ Int Int Int Int Int -> m Int
-    findNativeIndices (LetVarN_ _ i) = return i
-    findNativeIndices (BndVarN_ _ i) = return i
+    findNativeIndices (LetVarN_ _ i _) = return i
+    findNativeIndices (BndVarN_ _ i _) = return i
     findNativeIndices e = return $ foldlNE max 0 e
 
 {- | A record entry stores the common name, keys, and types of records that are
@@ -768,14 +820,8 @@ collectManifoldIds = Set.unions . map (runIdentity . foldSerialManifoldM ops)
             return (Set.insert i (foldlNM mappend mempty full))
         }
 
--- | Derive a (manifold-id -> log-label) map from 'stateManifoldConfig'.
--- A manifold ID is included only when its config has 'manifoldConfigLog'
--- set to @Just True@. The label string comes from 'manifoldConfigLabel'
--- (set by 'Desugar' when the source binding used the @label:var@ form
--- and propagated through 'Realize.extractRecursiveHelpers' as the
--- synthetic helper manifold's config). The invariant: a labeled call
--- site is always extracted to its own manifold whose midx carries the
--- label config, so a pure index-based lookup is sufficient.
+-- | Derive a (manifold-id -> log-label) map from 'stateManifoldConfig':
+-- the manifolds whose label asks for @log: true@.
 collectLogLabels ::
   Map.Map Int ManifoldConfig ->
   Map.Map Int Text
@@ -785,22 +831,6 @@ collectLogLabels =
         Just True -> manifoldConfigLabel cfg
         _ -> Nothing
     )
-
--- | If @srcIdx@ has a user-labeled 'ManifoldConfig' in 'stateManifoldConfig',
--- copy it to @dstIdx@ and return True. Otherwise return False. Plain @VarE@
--- configs without a label are skipped so this acts as a true label
--- propagator. Two call sites use this: 'Express.setManifoldConfig' walks
--- the head spine to attach a label to a manifold midx, and 'LambdaEval'
--- carries labels across beta-reduction sites that discard the labeled
--- head AnnoS.
-propagateManifoldLabel :: Int -> Int -> MorlocMonad Bool
-propagateManifoldLabel dstIdx srcIdx = do
-  mconfig <- MM.gets (Map.lookup srcIdx . stateManifoldConfig)
-  case mconfig of
-    Just cfg | isJust (manifoldConfigLabel cfg) -> do
-      MM.modify (\s -> s {stateManifoldConfig = Map.insert dstIdx cfg (stateManifoldConfig s)})
-      return True
-    _ -> return False
 
 -- | True iff @idx@ has a user-labeled 'ManifoldConfig'. Used to decide
 -- whether a call site needs to become a manifold for the label to attach.
@@ -838,29 +868,19 @@ populated from 'stateManifoldConfig' for manifolds whose 'ManifoldConfig'
 has @log: true@.
 -}
 extractLocalDispatch :: Map.Map Int Text -> [SerialManifold] -> [DispatchEntry]
-extractLocalDispatch labels = catMaybes . map localEntry
-  where
-    localEntry (SerialManifold _ _ _ HeadManifoldFormRemoteWorker _) = Nothing
-    localEntry (SerialManifold i _ form _ _) =
-      Just $ DispatchEntry i (getSize form) (Map.lookup i labels)
+extractLocalDispatch labels ms =
+  [dispatchEntry labels m | m@(SerialManifold _ _ _ hf _) <- ms, hf /= HeadManifoldFormRemoteWorker]
 
-    getSize :: ManifoldForm (Or TypeS TypeF) TypeS -> Int
-    getSize = sum . abilist (\_ _ -> 1) (\_ _ -> 1)
-
--- | Extract remote dispatch entries by walking the AST. The label map carries
--- the same role as in 'extractLocalDispatch'.
+-- | The remote dispatch entries of a pool: the job-side entries of the
+-- remote calls whose callee lives in this pool. The label map carries the
+-- same role as in 'extractLocalDispatch'.
 extractRemoteDispatch :: Map.Map Int Text -> [SerialManifold] -> [DispatchEntry]
-extractRemoteDispatch labels =
-  map (\(i, n) -> DispatchEntry i n (Map.lookup i labels)) . unique . concatMap getRemotes
-  where
-    getRemotes :: SerialManifold -> [(Int, Int)]
-    getRemotes = runIdentity . foldSerialManifoldM (defaultValue {opSerialExprM = getRemoteSE})
+extractRemoteDispatch labels ms =
+  [dispatchEntry labels m | m@(SerialManifold _ _ _ HeadManifoldFormRemoteWorker _) <- ms]
 
-    getRemoteSE ::
-      SerialExpr_ [(Int, Int)] [(Int, Int)] [(Int, Int)] [(Int, Int)] [(Int, Int)] ->
-      Identity [(Int, Int)]
-    getRemoteSE (AppPoolS_ _ (PoolCall i _ (RemoteCall _) _) xss) = return $ (i, length xss) : concat xss
-    getRemoteSE x = return $ foldlSE mappend mempty x
+dispatchEntry :: Map.Map Int Text -> SerialManifold -> DispatchEntry
+dispatchEntry labels (SerialManifold i _ form _ _) =
+  DispatchEntry i (sum (abilist (\_ _ -> 1) (\_ _ -> 1) form)) (Map.lookup i labels)
 
 -- | Collect every NESTED closure manifold (a 'ManifoldPart'/'ManifoldPass'
 -- with non-empty bound args) from a manifold tree. Such closures are
@@ -1164,20 +1184,41 @@ orNativeType (R t) = Just t
 orNativeType (LR _ t) = Just t
 orNativeType (L _) = Nothing
 
-{- | Build a pure @midx -> (name, srcloc)@ closure by snapshotting
-'stateName' and 'stateSourceMap' from the monad. Each translator
-calls this once during 'LowerConfig' setup and stores the closure in
-'lcManifoldDebugInfo' so the debug-wrap emitter can look up per-frame
-metadata without touching 'MorlocMonad'. Both strings are empty when
-no info is attached; the runtime treats empties as "omit".
--}
+-- | The trace label of a manifold outside @--debug@ (DIAG-5): the name of
+-- the morloc function it is a call of, and the source position of that
+-- function's definition. 'Nothing' for a manifold that is not a call of a
+-- named function, which a trace does not list.
+makeTraceLabelLookup :: MorlocMonad (Int -> Maybe (Text, Text))
+makeTraceLabelLookup = do
+  nameMap <- MM.gets stateName
+  srcMap <- MM.gets stateSourceMap
+  GMap idmap _ <- MM.gets stateSignatures
+  nameSource <- MM.gets stateNameSource
+  defSite <- MM.gets stateDefinitionSite
+  let definition i = case Map.lookup i nameSource of
+        Just j | j /= i -> definition j
+        _ -> Map.lookup i idmap >>= (`Map.lookup` defSite)
+      position i = maybe "" id (definition i >>= (`Map.lookup` srcMap) >>= renderSrcLocForDebug)
+  return $ \i -> case sanitizeManifoldName . unEVar . displayName <$> Map.lookup i nameMap of
+    Just n | not (MT.null n) -> Just (n, position i)
+    _ -> Nothing
+
+-- | The @--debug@ trace label of every manifold: the morloc name it carries,
+-- or else the sourced function it calls, and its call site, or for an
+-- exported head (which has no call site) its definition (DIAG-5). Each
+-- translator snapshots it once during 'LowerConfig' setup; an empty string
+-- means the runtime omits that part.
 makeManifoldDebugInfoLookup :: MorlocMonad (Int -> (Text, Text))
 makeManifoldDebugInfoLookup = do
   nameMap <- MM.gets stateName
+  calleeMap <- MM.gets stateDebugCallee
   srcMap <- MM.gets stateSourceMap
-  let sanitized = Map.map (sanitizeManifoldName . unEVar . displayName) nameMap
-      srclocs = Map.mapMaybe renderSrcLocForDebug srcMap
-  return $ \i ->
-    ( Map.findWithDefault "" i sanitized
-    , Map.findWithDefault "" i srclocs
-    )
+  exports <- Set.fromList <$> MM.gets stateExports
+  traceLabel <- makeTraceLabelLookup
+  let render = sanitizeManifoldName . unEVar . displayName
+      name i = maybe "" render (Map.lookup i nameMap <|> Map.lookup i calleeMap)
+      callSite i = maybe "" id (Map.lookup i srcMap >>= renderSrcLocForDebug)
+      position i = case traceLabel i of
+        Just (_, def) | Set.member i exports && not (MT.null def) -> def
+        _ -> callSite i
+  return $ \i -> (name i, position i)

@@ -1,0 +1,74 @@
+-- HOST-8: a Rust function value is a plain `Arc<dyn Fn(&A..) -> B + Send +
+-- Sync>`, and host code names no morloc type: it returns an `impl Fn`,
+-- stores values in its own struct fields, calls them as `f(&x)` on other
+-- threads, takes a stored value as a `'static` callback, and hands back the
+-- values it was given, reordered in a new list: each keeps its identity, so
+-- it can still cross to Python.
+-- A panic in host code inside a function value is the call's failure. A
+-- function value must be thread-safe, so host code that builds one holding
+-- a value that is not (an `Rc`, in unshareable.loc) fails to build, with a
+-- note naming the rule before rustc's report.
+
+module main (adder, viaOps, relayed, onThread, twiceChecked)
+
+import root-rust
+import root-py
+
+record Ops = Ops { run :: Int -> Int, later :: <IO> Int }
+record Rust => Ops = "Ops"
+
+source Rust from "host.rs"
+  ( "use_ops" as useOps
+  , "relay"
+  , "on_thread" as onThreadR
+  , "apply_twice" as applyTwice
+  , "checked"
+  )
+useOps :: Ops -> Int -> Int
+relay :: [Int -> Int] -> [Int -> Int]
+onThreadR :: (Int -> Int) -> Int -> Int
+applyTwice :: (Int -> Int) -> Int -> Int
+checked :: Int -> Int
+
+source Rust from "host.rs" where
+  --' name: make_adder
+  --' @rsize 1
+  makeAdder
+
+makeAdder :: Int -> (Int -> Int)
+
+source Py from "lib.py" ("py_apply_first" as pyApplyFirst)
+pyApplyFirst :: [Int -> Int] -> Int -> Int
+
+tenTimes :: Int -> <IO> Int
+tenTimes k = do
+  k * 10
+
+scale :: Int -> Int -> Int
+scale k x = k * x
+
+mkOps :: Int -> Ops
+mkOps k = {run = makeAdder k, later = tenTimes k}
+
+adder :: Int -> Int -> Int
+adder k x = makeAdder k x
+
+viaOps :: Int -> Int -> Int
+viaOps k x = useOps (mkOps k) x
+
+relayed :: Int -> Int -> Int
+relayed k x = pyApplyFirst (relay [scale (k + 1), scale k]) x
+
+pick :: Bool -> Int -> (Int -> Int)
+pick b k = ? b = scale k : makeAdder k
+
+onThread :: Bool -> Int -> Int -> Int
+onThread b k x = onThreadR (pick b k) x
+
+caught :: Try Str Int -> Int
+caught t = match t
+  | (Err _) = -1
+  | (Ok v) = v
+
+twiceChecked :: Int -> Int -> Int
+twiceChecked k x = caught (@try (applyTwice (\y -> checked (y + k)) x))

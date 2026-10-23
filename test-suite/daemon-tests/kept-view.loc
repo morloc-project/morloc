@@ -1,0 +1,23 @@
+-- Used by the [kept-view] group in run-tests.sh.
+
+--' A Python pool keeps views of its arguments across daemon calls
+module kept_view (keepView, keptTotal)
+
+import root
+import root-py
+import vector-py
+
+source Py from "kept_view.py" ("pyKeepView", "pyKeptTotal")
+
+--' Keep a view of the argument; 1 if it is a view
+pyKeepView :: Vector 20000 Real -> Int
+--' Total every kept view
+pyKeptTotal :: Int -> Real
+
+--' Keep a view of the argument for a later call
+keepView :: Vector 20000 Real -> Int
+keepView v = pyKeepView v
+
+--' Total every kept view
+keptTotal :: Int -> Real
+keptTotal n = pyKeptTotal n

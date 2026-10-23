@@ -7,7 +7,7 @@ module closure (rootLabel)
 
 import root-py
 
-newtype RootedTree n e l
+newtype RootedTree n e l = ([n], [(Int, Int, e)], [l])
 
 type Py => (RootedTree n e l) = "dict" n e l
 

@@ -1,0 +1,20 @@
+-- CPP-4: a mapped record whose constructor takes a field by non-const reference is rejected (see ok.loc).
+module badctor (bad)
+
+import root
+import root-cpp
+
+source Cpp from "bad-ctor.hpp" ("mk", "total")
+
+record R where
+  xs :: [Int]
+  k :: Int
+record Cpp => R = "rec_t"
+mk :: Int -> [Int]
+total :: R -> Int
+
+mkR :: Int -> R
+mkR n = {xs = mk n, k = 1}
+
+bad :: Int -> Int
+bad n = total (mkR n)

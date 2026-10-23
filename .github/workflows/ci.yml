@@ -36,7 +36,7 @@ jobs:
           key: tla2tools-1.7.4
 
       - name: Model-check the spec
-        run: bash model/tla/check.sh
+        run: bash model/runtime/tla/check.sh
 
   build-and-test:
     strategy:
@@ -258,9 +258,12 @@ jobs:
         if: matrix.shard == 1 && runner.os == 'Linux'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
+      # In a session of its own, so a test that signals its process group
+      # by mistake fails visibly instead of killing the runner.
       - name: Test rust runtime and nexus
         if: matrix.shard == 1
-        run: cargo test --workspace --manifest-path data/rust/Cargo.toml
+        run: |
+          perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' cargo test --workspace --manifest-path data/rust/Cargo.toml
         env:
           MORLOC_REQUIRE_NAMESPACES: ${{ runner.os == 'Linux' && '1' || '' }}
         timeout-minutes: 20

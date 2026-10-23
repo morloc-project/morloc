@@ -1,0 +1,21 @@
+-- Two groups each name a command `f`: refused (CMD-4).
+
+module main
+  ( --* group: math
+    --* Arithmetic
+    f
+  , --* group: text
+    --* Strings
+    g
+  )
+
+import root-py
+
+--' Add one
+f :: Int -> Int
+f x = x + 1
+
+--' Echo a string
+--' @name f
+g :: Str -> Str
+g x = x

@@ -27,7 +27,7 @@
 //!  * I8  All scalar pokes through the byte cursor use unaligned access.
 
 #[cfg(not(panic = "unwind"))]
-compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
+compile_error!("morloc needs panic = \"unwind\" (model/runtime/panic.md PANIC-8)");
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_char, c_void, CString};
@@ -102,8 +102,6 @@ extern "C" {
     fn send_and_receive_over_socket(socket_path: *const c_char, packet: *const u8,
                                     errmsg: *mut *mut c_char) -> *mut u8;
     fn get_morloc_data_packet_error_message(data: *const u8, errmsg: *mut *mut c_char) -> *mut c_char;
-    fn pool_mark_busy();
-    fn pool_mark_idle();
     // @show / @read : voidstar <-> JSON text.
     fn mlc_show(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char;
     fn mlc_read(json_str: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
@@ -113,7 +111,7 @@ extern "C" {
     // RPC to the nexus) lives behind these symbols in libmorloc, so each Rust
     // shim below is a thin wrapper, mirroring the C++ pool's `_mlc_*` helpers.
     fn mlc_hash(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char;
-    fn mlc_save(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_compare(a: *const c_void, b: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32;
     fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_load(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
@@ -122,7 +120,12 @@ extern "C" {
     fn mlc_unlink_tmp(path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_fschema(path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
     fn mlc_ifile_length(handle: i64, errmsg: *mut *mut c_char) -> i64;
-    fn mlc_next(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_next_with(
+        handle: i64,
+        decode: unsafe extern "C" fn(*mut c_void, *const c_void, MorlocSpace) -> i32,
+        ctx: *mut c_void,
+        errmsg: *mut *mut c_char,
+    ) -> i32;
     fn mlc_next_frame(handle: i64, eof: *mut i32, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_stream_layout(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;
@@ -469,24 +472,39 @@ fn runtime_symbol(symbol: &str) -> bool {
     })
 }
 
-/// A frame of this crate's closure convention (a `MorlocFnN::callN`), which
-/// only calls the function value it was given. Its symbol is a full path
-/// (`<F as rustmorloc::MorlocFn1<..>>::call1`) or, inlined, the bare method
-/// with its generics (`call1<..>`).
+/// A frame of a closure this crate builds for a function value (fv.rs), which
+/// only calls the function it was given; the registry code beside it is the
+/// runtime's.
 fn applies_a_function_value(f: &Frame<'_>) -> bool {
-    let in_this_crate = f.file.is_some_and(|p| {
-        let p = normalize(trim_dot(p));
-        this_crate_dirs().iter().any(|d| p.starts_with(normalize(trim_dot(d)).as_str()))
-    });
-    let method = match f.symbol.rfind(">::") {
-        Some(i) if f.symbol.starts_with('<') => &f.symbol[i + 3..],
-        _ => {
-            let base = f.symbol.split('<').next().unwrap_or("");
-            base.rsplit("::").next().unwrap_or(base)
+    // The path without generic arguments: its last segment is the closure,
+    // and the one before it, when the frame is not inlined, the function
+    // that built it.
+    let mut path = String::new();
+    let mut depth = 0;
+    let mut prev = ' ';
+    for c in f.symbol.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' if depth > 0 && prev != '-' => depth -= 1,
+            _ if depth == 0 => path.push(c),
+            _ => {}
         }
-    };
-    let method = method.split("::").next().unwrap_or(method);
-    in_this_crate && method.strip_prefix("call").is_some_and(all_digits)
+        prev = c;
+    }
+    let is_closure = |s: &str| s == "{{closure}}" || s.starts_with("{closure#");
+    let mut segs = path.rsplit("::");
+    let closure = segs.next().is_some_and(is_closure);
+    let builder = segs.find(|s| !s.is_empty() && !is_closure(s)).map_or(true, |p| {
+        let stem = p.trim_end_matches(|c: char| c.is_ascii_digit());
+        ["local", "crossing", "proxy", "pap", "staged", "into_callback"].contains(&stem)
+    });
+    closure && builder && f.file.is_some_and(|p| {
+        let p = normalize(trim_dot(p));
+        this_crate_dirs().iter().any(|d| {
+            let d = normalize(trim_dot(d));
+            p.strip_prefix(d.as_str()).is_some_and(|rest| rest == "fv.rs")
+        })
+    })
 }
 
 fn walk_is_runtime(trace: &str, pool_files: &[&str], user_files: &[&str], user_calls: &[(u32, u32)]) -> bool {
@@ -609,23 +627,25 @@ const PIPE_CLOSED_MESSAGE: &str = "@stdout: downstream pipe closed";
 /// it unwinds here (PANIC-5).
 pub fn mlc_try<T, R, F, OK, ERR>(body: F, ok: OK, err: ERR) -> R
 where
-    F: MorlocFn0<T>,
+    F: Invoke0<T>,
     OK: FnOnce(T) -> R,
     ERR: FnOnce(String) -> R,
 {
     // The body is a SUSPENSION, so it is taken as one: that accepts an inline
-    // thunk (through the `Fn` blanket) and an `Rc<dyn MorlocFn0>` held in a
-    // variable alike, rather than only the former.
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.call0())) {
+    // thunk and a suspension held in a variable alike.
+    // STATE-6
+    let saved = frame_depth();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.invoke())) {
         Ok(v) => ok(v),
-        Err(payload) if payload.is::<MorlocPipeClosed>() => std::panic::resume_unwind(payload),
+        Err(payload) if payload.is::<MorlocPipeClosed>() => {
+            frame_restore(saved);
+            std::panic::resume_unwind(payload)
+        }
         Err(payload) => {
             // PANIC-6: a runtime panic ended the pool before it reached here.
             unsafe { morloc_panic_caught() };
-            // The caught error's partial trace must not leak into a later
-            // error's traceback.
-            TRACEBACK.with(|t| t.borrow_mut().clear());
-            err(panic_message(payload.as_ref()))
+            let trace = frame_take(saved);
+            err(format!("{}{}", panic_message(payload.as_ref()), trace))
         }
     }
 }
@@ -794,6 +814,7 @@ impl Drop for RecurScope {
 /// Normalize a possibly-Recur schema to its named declaration. Non-Recur
 /// schemas pass through unchanged (so callers can use it unconditionally at
 /// the top of a walk). Panics (compiler-bug abort) on an unresolvable back-ref.
+#[inline]
 pub fn resolve_recur(schema: &Schema) -> &Schema {
     if schema.serial_type != SerialType::Recur {
         return schema;
@@ -910,6 +931,27 @@ impl Drop for Packet {
     }
 }
 
+/// A packet a closure holds among its captures, passed on to the manifold
+/// the closure calls. Read through `get`, so a closure captures the whole
+/// wrapper rather than the pointer inside it.
+#[derive(Clone, Copy)]
+pub struct PacketRef(*const u8);
+
+impl PacketRef {
+    pub fn new(p: *const u8) -> PacketRef {
+        PacketRef(p)
+    }
+    #[inline]
+    pub fn get(self) -> *const u8 {
+        self.0
+    }
+}
+
+// SAFETY: STATE-3
+unsafe impl Send for PacketRef {}
+// SAFETY: STATE-3
+unsafe impl Sync for PacketRef {}
+
 /// Drop one tracker entry for this block and give its reference back.
 /// Anything not tracked here belongs to someone else and is left alone.
 unsafe fn release_tracked(block: *mut c_void) {
@@ -944,63 +986,243 @@ pub fn dispatch_flush() {
         }
         t.0.set(Vec::new());
     });
-    // Reset any stale traceback frames from a prior dispatch (defensive; the
-    // guard normally drains them when it forms the fail packet).
-    TRACEBACK.with(|t| t.borrow_mut().clear());
 }
 
 // ---------------------------------------------------------------------------
-// Error traceback. Each manifold holds a `FrameGuard` bound to its precomputed
-// frame line (`\n  at <name> [rust] (mid=N, file:line:col)`). On a panic
-// unwind the guard appends the line to a thread-local buffer -- innermost
-// manifold first, matching the C++ member's catch-append-rethrow chain (which
-// accumulates the same lines onto the exception message). `dispatch_guard`
-// drains the buffer onto the throw message when it forms the fail packet, so
-// the message + full manifold trace crosses the pool boundary as one string.
+// The thread's frame stack (STATE-5): entries 1..depth are the trace lines
+// (`\n  at <name> [rust] (mid=N, file:line:col)`) of the named calls recorded
+// on it, outermost first. A named function pushes its line on entry and pops
+// it in its return statement; a panic skips the pops, so a boundary
+// (dispatch, `@try`, a closure) finds the calls it unwound through above the
+// depth it saved (STATE-6). Const-initialised and without a destructor, so a
+// generated function and the crash handler read it from the static
+// thread-local block; the entries live in a mapping FRAMES_FREE unmaps when
+// the thread ends.
 // ---------------------------------------------------------------------------
+struct FrameStack {
+    base: Cell<*mut &'static str>,
+    cap: Cell<usize>,
+    depth: Cell<usize>,
+}
+
+struct FramesFree;
+
+impl Drop for FramesFree {
+    fn drop(&mut self) {
+        FRAMES.with(|s| {
+            let base = s.base.replace(std::ptr::null_mut());
+            let cap = s.cap.replace(0);
+            s.depth.set(0);
+            std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+            if !base.is_null() {
+                unsafe { libc::munmap(base as *mut c_void, frames_bytes(cap)) };
+            }
+        });
+    }
+}
+
 thread_local! {
-    static TRACEBACK: RefCell<String> = RefCell::new(String::new());
-    // The innermost manifold this thread is executing, as the frame line
-    // without its "at" prefix, for the crash handler's report. Const-
-    // initialised and without a destructor, so it lives in the static
-    // thread-local block and a handler reads it without allocating.
-    static CURRENT_FRAME: Cell<(*const u8, usize)> = const { Cell::new((std::ptr::null(), 0)) };
-}
-
-/// RAII manifold-frame marker. Marks the manifold as the one executing on
-/// the thread for the crash report (two stores); on a panic unwind it also
-/// records its frame line to the thread-local traceback.
-pub struct FrameGuard {
-    frame: &'static str,
-    prev: (*const u8, usize),
+    static FRAMES: FrameStack = const {
+        FrameStack { base: Cell::new(std::ptr::null_mut()), cap: Cell::new(0), depth: Cell::new(0) }
+    };
+    static FRAMES_FREE: FramesFree = const { FramesFree };
 }
 
 const FRAME_PREFIX: &str = "\n  at ";
 
-impl FrameGuard {
-    #[inline]
-    pub fn new(frame: &'static str) -> FrameGuard {
-        let name = frame.strip_prefix(FRAME_PREFIX).unwrap_or(frame);
-        let prev = CURRENT_FRAME.with(|c| c.replace((name.as_ptr(), name.len())));
-        FrameGuard { frame, prev }
+fn page_bytes() -> usize {
+    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
+}
+
+fn frames_bytes(cap: usize) -> usize {
+    cap * std::mem::size_of::<&'static str>() + page_bytes()
+}
+
+/// The bytes of machine stack the calling thread has, or 0 if unknown.
+fn thread_stack_bytes() -> usize {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        libc::pthread_get_stacksize_np(libc::pthread_self())
+    }
+    #[cfg(not(target_os = "macos"))]
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        let mut n: usize = 0;
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) == 0 {
+            libc::pthread_attr_getstacksize(&attr, &mut n);
+            libc::pthread_attr_destroy(&mut attr);
+        }
+        n
     }
 }
 
-impl Drop for FrameGuard {
-    #[inline]
-    fn drop(&mut self) {
-        CURRENT_FRAME.with(|c| c.set(self.prev));
-        if std::thread::panicking() {
-            TRACEBACK.with(|t| t.borrow_mut().push_str(self.frame));
+/// Lazily committed address space for 2^28 calls, or eight per 16 bytes of
+/// the thread's machine stack if that is more: more calls than the machine
+/// stack holds however many the optimizer inlines into one frame. Where the
+/// system will not reserve that much, the eight per 16 bytes alone. Its
+/// untouched pages are no part of a core dump.
+fn frames_map(bytes: usize) -> *mut c_void {
+    let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE;
+    let prot = libc::PROT_READ | libc::PROT_WRITE;
+    let len = bytes + page_bytes();
+    let p = unsafe { libc::mmap(std::ptr::null_mut(), len, prot, flags, -1, 0) };
+    #[cfg(target_os = "linux")]
+    if p != libc::MAP_FAILED {
+        unsafe { libc::madvise(p, len, libc::MADV_DONTDUMP) };
+    }
+    p
+}
+
+fn frames_reserve() -> (*mut c_void, usize) {
+    let page = page_bytes();
+    let entry = std::mem::size_of::<&'static str>();
+    let mut stack = thread_stack_bytes();
+    if stack == 0 {
+        stack = 64 << 20;
+    }
+    let needed = ((stack / 16 * 8 + 2) * entry).div_ceil(page) * page;
+    let bytes = ((1usize << 28) * entry).max(needed);
+    let p = frames_map(bytes);
+    if p != libc::MAP_FAILED || bytes == needed {
+        return (p, bytes);
+    }
+    (frames_map(needed), needed)
+}
+
+/// Reserves the calling thread's stack, with a guard page after it. A thread
+/// reaches generated code only through a boundary, which calls this first
+/// (`frame_enter`).
+#[cold]
+#[inline(never)]
+fn frame_init() {
+    let page = page_bytes();
+    let (p, bytes) = frames_reserve();
+    if p == libc::MAP_FAILED {
+        morloc_infra_abort("cannot reserve the frame stack");
+    }
+    if unsafe { libc::mprotect((p as *mut u8).add(bytes) as *mut c_void, page, libc::PROT_NONE) } != 0 {
+        morloc_infra_abort("cannot guard the frame stack");
+    }
+    // A thread already releasing its thread-locals keeps the mapping until
+    // it exits.
+    let _ = FRAMES_FREE.try_with(|_| ());
+    let s = frame_stack();
+    s.cap.set(bytes / std::mem::size_of::<&'static str>());
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    s.base.set(p as *mut &'static str);
+}
+
+// The calling thread's stack. The closure captures nothing, so where `with`
+// is not inlined the call passes nothing through memory, and the push and
+// pop that use the stack are inlined into the generated function.
+#[inline(always)]
+fn frame_stack() -> &'static FrameStack {
+    FRAMES.with(|s| unsafe { &*(s as *const FrameStack) })
+}
+
+/// The reservation holds every call the thread's machine stack can, so a
+/// push needs no check; a stack deeper than it was sized for faults on the
+/// guard page.
+#[inline(always)]
+pub fn frame_push(line: &'static str) {
+    let s = frame_stack();
+    let depth = s.depth.get() + 1;
+    unsafe { *s.base.get().add(depth) = line };
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    s.depth.set(depth);
+}
+
+#[inline(always)]
+pub fn frame_pop() {
+    let s = frame_stack();
+    s.depth.set(s.depth.get().wrapping_sub(1));
+}
+
+#[inline(always)]
+pub fn frame_depth() -> usize {
+    frame_stack().depth.get()
+}
+
+/// STATE-6: a boundary's entry; the depth it saves.
+#[inline(always)]
+pub fn frame_enter() -> usize {
+    let s = frame_stack();
+    if s.base.get().is_null() {
+        frame_init();
+    }
+    s.depth.get()
+}
+
+#[inline(always)]
+pub fn frame_restore(saved: usize) {
+    frame_stack().depth.set(saved)
+}
+
+/// STATE-6: restores `saved` and returns the lines above it, innermost first.
+pub fn frame_take(saved: usize) -> String {
+    FRAMES.with(|s| {
+        let depth = s.depth.replace(saved);
+        let mut out = String::new();
+        let mut k = depth;
+        while k > saved && k < s.cap.get() {
+            out.push_str(unsafe { *s.base.get().add(k) });
+            k -= 1;
         }
+        out
+    })
+}
+
+/// STATE-6: the catch of a closure, which code outside morloc may call and
+/// whose panic it may catch. A closed pipe passes on as it is; any other
+/// panic is raised again as a throw carrying its message and trace, without
+/// the hook, which already decided at the panic (PANIC-9).
+#[cold]
+#[inline(never)]
+pub fn closure_rethrow(saved: usize, payload: Box<dyn std::any::Any + Send>) -> ! {
+    if payload.is::<MorlocPipeClosed>() {
+        frame_restore(saved);
+        std::panic::resume_unwind(payload)
+    }
+    let msg = panic_message(payload.as_ref());
+    let trace = frame_take(saved);
+    std::panic::resume_unwind(Box::new(MorlocThrow(format!("{msg}{trace}"))))
+}
+
+/// Held by a generated function that calls sourced code and records no
+/// call: its drop runs after the call, so the call is never compiled to a
+/// tail jump that would leave no frame at the call (PANIC-15). A function
+/// that records its call pops after its result, which does the same.
+pub struct CallFrame;
+
+impl Drop for CallFrame {
+    #[inline(always)]
+    fn drop(&mut self) {
+        std::hint::black_box(());
     }
 }
 
 /// The frame the calling thread is executing, for the crash handler.
 unsafe extern "C" fn current_frame(len: *mut usize) -> *const c_char {
-    let (p, n) = CURRENT_FRAME.with(|c| c.get());
-    *len = n;
-    p as *const c_char
+    let line = FRAMES.with(|s| {
+        let depth = s.depth.get();
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+        if depth > 0 && depth < s.cap.get() {
+            Some(unsafe { *s.base.get().add(depth) })
+        } else {
+            None
+        }
+    });
+    match line {
+        Some(l) => {
+            let name = l.strip_prefix(FRAME_PREFIX).unwrap_or(l);
+            *len = name.len();
+            name.as_ptr() as *const c_char
+        }
+        None => {
+            *len = 0;
+            std::ptr::null()
+        }
+    }
 }
 
 /// Report a fatal signal with the executing manifold, then die of it.
@@ -1192,6 +1414,19 @@ pub trait ToVoidstar {
     fn arrow_export(&self) -> Option<(FFI_ArrowArray, FFI_ArrowSchema)> {
         None
     }
+    /// Write `xs` as an array's element data in one copy. Only a scalar
+    /// whose bytes are exactly `elem`'s (same kind, same width) does so;
+    /// false leaves the caller to write element by element.
+    ///
+    /// # Safety
+    /// `dst` must have room for `xs.len() * elem.width` bytes.
+    unsafe fn write_array(xs: &[Self], elem: &Schema, dst: *mut u8) -> bool
+    where
+        Self: Sized,
+    {
+        let _ = (xs, elem, dst);
+        false
+    }
 }
 pub trait FromVoidstar: Sized {
     /// A scalar: read directly, never given a frame.
@@ -1230,6 +1465,16 @@ pub trait FromVoidstar: Sized {
     /// `array` and `schema` must be valid, unreleased structs.
     unsafe fn arrow_import(array: FFI_ArrowArray, schema: &FFI_ArrowSchema) -> Option<Self> {
         let _ = (array, schema);
+        None
+    }
+    /// Read `n` elements of array data in one pass, under the rule of
+    /// `ToVoidstar::write_array`; None leaves the caller to read element
+    /// by element.
+    ///
+    /// # Safety
+    /// `src` must point at `n * elem.width` readable bytes, at any alignment.
+    unsafe fn read_array(elem: &Schema, src: *const u8, n: usize) -> Option<Vec<Self>> {
+        let _ = (elem, src, n);
         None
     }
 }
@@ -1830,8 +2075,30 @@ fn handle_kind(t: SerialType) -> u8 {
     }
 }
 
+/// One copy of `xs`' bytes to `dst`. Valid for any `T` all of whose bytes
+/// are its wire form.
+#[inline]
+unsafe fn copy_array_out<T>(xs: &[T], dst: *mut u8) {
+    core::ptr::copy_nonoverlapping(xs.as_ptr() as *const u8, dst, std::mem::size_of_val(xs));
+}
+
+/// One copy of `n` `T`s from a possibly misaligned `src`. Valid for any `T`
+/// for which every bit pattern is a value.
+#[inline]
+unsafe fn copy_array_in<T>(src: *const u8, n: usize) -> Vec<T> {
+    let mut v = Vec::<T>::with_capacity(n);
+    core::ptr::copy_nonoverlapping(src, v.as_mut_ptr() as *mut u8, n * std::mem::size_of::<T>());
+    v.set_len(n);
+    v
+}
+
+#[inline]
+fn is_own_kind<T>(elem: &Schema, kind: SerialType) -> bool {
+    elem.serial_type == kind && elem.width == std::mem::size_of::<T>()
+}
+
 macro_rules! int_impl {
-    ($t:ty) => {
+    ($t:ty, $kind:ident) => {
         impl ToVoidstar for $t {
             const IS_LEAF: bool = true;
             #[inline]
@@ -1869,6 +2136,14 @@ macro_rules! int_impl {
                     | SerialType::Enum => write_int(schema, dest, *self as i128),
                 }
             }
+            #[inline]
+            unsafe fn write_array(xs: &[Self], elem: &Schema, dst: *mut u8) -> bool {
+                if !is_own_kind::<$t>(elem, SerialType::$kind) {
+                    return false;
+                }
+                copy_array_out(xs, dst);
+                true
+            }
         }
         impl FromVoidstar for $t {
             const IS_LEAF: bool = true;
@@ -1894,11 +2169,15 @@ macro_rules! int_impl {
                     SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant | SerialType::Enum => read_int(schema, data) as $t,
                 }
             }
+            #[inline]
+            unsafe fn read_array(elem: &Schema, src: *const u8, n: usize) -> Option<Vec<Self>> {
+                is_own_kind::<$t>(elem, SerialType::$kind).then(|| copy_array_in(src, n))
+            }
         }
     };
 }
-int_impl!(i8); int_impl!(i16); int_impl!(i32); int_impl!(i64);
-int_impl!(u8); int_impl!(u16); int_impl!(u32); int_impl!(u64);
+int_impl!(i8, Sint8); int_impl!(i16, Sint16); int_impl!(i32, Sint32); int_impl!(i64, Sint64);
+int_impl!(u8, Uint8); int_impl!(u16, Uint16); int_impl!(u32, Uint32); int_impl!(u64, Uint64);
 
 // Write `v` at the schema's own width, which may be narrower or wider than
 // the Rust integer it came from; a value the slot cannot hold is an error,
@@ -1956,7 +2235,7 @@ unsafe fn read_int(schema: &Schema, data: *const u8) -> i128 {
 }
 
 macro_rules! float_impl {
-    ($t:ty) => {
+    ($t:ty, $kind:ident, $to_f32:expr) => {
         impl ToVoidstar for $t {
             const IS_LEAF: bool = true;
             #[inline]
@@ -1965,11 +2244,7 @@ macro_rules! float_impl {
             unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, schema: &Schema) {
                 // At the schema's own width, which may differ from `$t`'s.
                 match schema.serial_type {
-                    SerialType::Float32 => core::ptr::write_unaligned(
-                        dest as *mut f32,
-                        morloc_runtime_types::width::f32_nearest(f64::from(*self))
-                            .unwrap_or_else(|e| morloc_throw(e.to_string())),
-                    ),
+                    SerialType::Float32 => core::ptr::write_unaligned(dest as *mut f32, $to_f32(*self)),
                     SerialType::Float64 => core::ptr::write_unaligned(dest as *mut f64, *self as f64),
                     SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16
                     | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16
@@ -1980,6 +2255,14 @@ macro_rules! float_impl {
                         "cannot write a float where the schema holds {:?}", schema.serial_type
                     )),
                 }
+            }
+            #[inline]
+            unsafe fn write_array(xs: &[Self], elem: &Schema, dst: *mut u8) -> bool {
+                if !is_own_kind::<$t>(elem, SerialType::$kind) {
+                    return false;
+                }
+                copy_array_out(xs, dst);
+                true
             }
         }
         impl FromVoidstar for $t {
@@ -1999,10 +2282,16 @@ macro_rules! float_impl {
                     )),
                 }
             }
+            #[inline]
+            unsafe fn read_array(elem: &Schema, src: *const u8, n: usize) -> Option<Vec<Self>> {
+                is_own_kind::<$t>(elem, SerialType::$kind).then(|| copy_array_in(src, n))
+            }
         }
     };
 }
-float_impl!(f32); float_impl!(f64);
+float_impl!(f32, Float32, |x: f32| x);
+float_impl!(f64, Float64, |x: f64| morloc_runtime_types::width::f32_nearest(x)
+    .unwrap_or_else(|e| morloc_throw(e.to_string())));
 
 impl ToVoidstar for bool {
     const IS_LEAF: bool = true;
@@ -2012,12 +2301,25 @@ impl ToVoidstar for bool {
     unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {
         core::ptr::write_unaligned(dest, if *self { 1u8 } else { 0u8 });
     }
+    #[inline]
+    unsafe fn write_array(xs: &[Self], elem: &Schema, dst: *mut u8) -> bool {
+        if !is_own_kind::<bool>(elem, SerialType::Bool) {
+            return false;
+        }
+        copy_array_out(xs, dst);
+        true
+    }
 }
 impl FromVoidstar for bool {
     const IS_LEAF: bool = true;
     #[inline]
     unsafe fn read(_schema: &Schema, data: *const u8, _space: MorlocSpace) -> Self {
         core::ptr::read_unaligned(data) == 1
+    }
+    #[inline]
+    unsafe fn read_array(elem: &Schema, src: *const u8, n: usize) -> Option<Vec<Self>> {
+        is_own_kind::<bool>(elem, SerialType::Bool)
+            .then(|| core::slice::from_raw_parts(src, n).iter().map(|&b| b == 1).collect())
     }
 }
 
@@ -2073,16 +2375,31 @@ impl FromVoidstar for String {
 }
 
 // ---- sequences (Array wire form): Vec (List) and VecDeque (Deque) ----------
-// Both serialize identically -- a contiguous Array of elements written and read
-// one at a time (no bulk memcpy, so a VecDeque's ring buffer is fine); they
-// differ only in the container constructor and back-insert method. `$push` is
-// amortized O(1) for both, so neither adds a copy over the other.
+// Both serialize identically -- a contiguous Array of elements, copied in bulk
+// when the element type's `write_array`/`read_array` allows it and otherwise
+// written and read one at a time; they differ only in the container
+// constructor, back-insert method, and how the elements are seen as slices.
+// `$push` is amortized O(1) for both, so neither adds a copy over the other.
 //
 // In a framed walk a sequence is visited once per element: the step handles
 // element `idx` and re-pushes its own frame beneath the element's, so the
 // frame stack stays proportional to depth rather than to element count. A
 // framed read keeps the growing container on the value stack and moves each
 // finished element into it on the next visit.
+trait TwoSlices<T> {
+    fn two_slices(&self) -> (&[T], &[T]);
+}
+impl<T> TwoSlices<T> for Vec<T> {
+    fn two_slices(&self) -> (&[T], &[T]) {
+        (self.as_slice(), &[])
+    }
+}
+impl<T> TwoSlices<T> for VecDeque<T> {
+    fn two_slices(&self) -> (&[T], &[T]) {
+        self.as_slices()
+    }
+}
+
 macro_rules! seq_impl {
     ($container:ident, $push:ident) => {
 impl<T: ToVoidstar> ToVoidstar for $container<T> {
@@ -2091,7 +2408,7 @@ impl<T: ToVoidstar> ToVoidstar for $container<T> {
         if idx == 0 {
             // width slot + worst-case cursor alignment padding + element data
             w.total += (schema.width + (elem.array_data_alignment() - 1)) as isize;
-            if elem.is_primitive_numeric() {
+            if elem.is_primitive_numeric() || elem.serial_type == SerialType::Bool {
                 w.total += (self.len() * elem.width) as isize;
                 return;
             }
@@ -2124,6 +2441,10 @@ impl<T: ToVoidstar> ToVoidstar for $container<T> {
             *w.cursor = start.add(n * width);
             core::ptr::write_unaligned(dest as *mut Array, Array { size: n, data: to_rel(start) });
             if T::IS_LEAF || w.flat(elem) {
+                let (a, b) = self.two_slices();
+                if T::write_array(a, elem, start) && T::write_array(b, elem, start.add(a.len() * width)) {
+                    return;
+                }
                 for (i, x) in self.iter().enumerate() {
                     w.child(x, start.add(i * width), elem);
                 }
@@ -2168,6 +2489,9 @@ impl<T: FromVoidstar> FromVoidstar for $container<T> {
         let elem = resolve_recur(&schema.parameters[0]);
         let start = resolve_array(a.data, a.size, elem.width, w.space);
         let width = elem.width;
+        if let Some(v) = T::read_array(elem, start, a.size) {
+            return $container::from(v);
+        }
         let mut out = $container::with_capacity(a.size);
         for i in 0..a.size {
             out.$push(w.child_read::<T>(elem, start.add(i * width)));
@@ -2301,20 +2625,16 @@ impl<T: FromVoidstar> FromVoidstar for Box<T> {
 //
 // The box is reference counted: cloning shares the pointee, which keeps a
 // projection out of a value (which clones the projected field) at a constant
-// cost instead of a copy of the whole subtree. Values never cross threads,
-// so a non-atomic count is enough.
+// cost instead of a copy of the whole subtree.
 pub mod rec_drain {
     use std::cell::Cell;
 
-    /// A block waiting to be freed: the raw `Rc` pointer and the function
+    /// A block waiting to be freed: the raw `Arc` pointer and the function
     /// that reconstitutes and drops it with its real type.
     pub type Entry = (*mut u8, unsafe fn(*mut u8));
 
     thread_local! {
-        static ACTIVE: Cell<bool> = const { Cell::new(false) };
-        // Allocated on first use and never freed, so no destructor runs at
-        // thread exit and the queue is usable while other thread-locals are
-        // being torn down.
+        // STATE-2: the running drain's worklist; null when none runs.
         static QUEUE: Cell<*mut Vec<Entry>> = const { Cell::new(std::ptr::null_mut()) };
     }
 
@@ -2328,9 +2648,9 @@ pub mod rec_drain {
     }
 
     pub fn state() -> State {
-        match ACTIVE.try_with(|a| a.get()) {
-            Ok(true) => State::Active,
-            Ok(false) => State::Inactive,
+        match QUEUE.try_with(|q| q.get().is_null()) {
+            Ok(false) => State::Active,
+            Ok(true) => State::Inactive,
             Err(_) => State::Unavailable,
         }
     }
@@ -2340,57 +2660,65 @@ pub mod rec_drain {
     pub fn push(e: Entry) -> Result<(), ()> {
         QUEUE
             .try_with(|q| {
-                let mut p = q.get();
+                let p = q.get();
                 if p.is_null() {
-                    p = Box::into_raw(Box::new(Vec::new()));
-                    q.set(p);
+                    return Err(());
                 }
-                // SAFETY: the queue is only ever touched from this thread and
-                // no reference to it is held across a drop call.
+                // SAFETY: STATE-2: non-null only inside 'run', which owns it.
                 unsafe { (*p).try_reserve(1).map_err(|_| ())?; (*p).push(e); }
                 Ok(())
             })
             .unwrap_or(Err(()))
     }
 
-    /// Marks a drain as running for its lifetime and drains the queue when
-    /// it ends, including while unwinding from a panic inside a drop.
-    pub struct Guard;
-
-    impl Guard {
-        pub fn begin() -> Guard {
-            let _ = ACTIVE.try_with(|a| a.set(true));
-            Guard
+    /// Run `release` as the outermost drop of a drain: every further
+    /// last-owner drop on this thread is queued while it runs, and the queue
+    /// is drained before this returns, including while unwinding from a
+    /// panic inside a drop.
+    pub fn run(release: impl FnOnce()) {
+        let mut queue: Vec<Entry> = Vec::new();
+        let guard = Guard(&mut queue);
+        if QUEUE.try_with(|q| q.set(guard.0)).is_err() {
+            drop(guard);
+            release();
+            return;
         }
+        release();
+        drop(guard);
     }
+
+    struct Guard(*mut Vec<Entry>);
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            let _ = QUEUE.try_with(|q| {
-                let p = q.get();
-                if p.is_null() {
-                    return;
+            // SAFETY: STATE-2: the worklist is declared before the guard in
+            // 'run'; an entry is popped before its drop, which may push more.
+            while let Some((ptr, f)) = unsafe { (*self.0).pop() } {
+                // A panic in one block's drop must not escape a drop that
+                // may itself be running during unwinding.
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { f(ptr) })).is_err() {
+                    unsafe { crate::morloc_panic_caught() };
                 }
-                // SAFETY: as in `push`; the entry is popped before its drop
-                // runs, and that drop may push more entries.
-                while let Some((ptr, f)) = unsafe { (*p).pop() } {
-                    // A panic in one block's drop must not escape a drop that
-                    // may itself be running during unwinding.
-                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { f(ptr) })).is_err() {
-                        unsafe { crate::morloc_panic_caught() };
-                    }
+            }
+            let _ = QUEUE.try_with(|q| {
+                if q.get() == self.0 {
+                    q.set(std::ptr::null_mut());
                 }
             });
-            let _ = ACTIVE.try_with(|a| a.set(false));
         }
+    }
+
+    #[cfg(test)]
+    pub fn idle() -> bool {
+        QUEUE.with(|q| q.get().is_null())
     }
 }
 
-pub struct RecBox<T>(std::mem::ManuallyDrop<std::rc::Rc<T>>);
+pub struct RecBox<T>(std::mem::ManuallyDrop<std::sync::Arc<T>>);
 
 impl<T> RecBox<T> {
     pub fn new(v: T) -> Self {
-        RecBox(std::mem::ManuallyDrop::new(std::rc::Rc::new(v)))
+        RecBox(std::mem::ManuallyDrop::new(std::sync::Arc::new(v)))
     }
 
     /// The value, moved out when this is the only owner and copied
@@ -2400,9 +2728,64 @@ impl<T> RecBox<T> {
         T: Clone,
     {
         let mut me = std::mem::ManuallyDrop::new(self);
-        // SAFETY: `me` is never dropped, so the Rc is taken exactly once.
+        // SAFETY: `me` is never dropped, so the Arc is taken exactly once.
         let rc = unsafe { std::mem::ManuallyDrop::take(&mut me.0) };
-        std::rc::Rc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone())
+        std::sync::Arc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone())
+    }
+
+    /// The value if `Arc::try_unwrap` gives it, else the box back.
+    pub fn try_into_inner(self) -> Result<T, RecBox<T>> {
+        let mut me = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `me` is not dropped and its Arc is not used after this take.
+        let rc = unsafe { std::mem::ManuallyDrop::take(&mut me.0) };
+        std::sync::Arc::try_unwrap(rc).map_err(|rc| RecBox(std::mem::ManuallyDrop::new(rc)))
+    }
+}
+
+/// The box around a constructor's payload, taken apart at the last use of
+/// the value that holds it: the payload is moved out when the box is its
+/// only owner, and otherwise the part needed is cloned from it. A generated
+/// type's arms are `RecBox`es; a user-mapped type may use `Box`, `Rc` or
+/// `Arc`.
+pub trait MlcTake: Sized {
+    type Payload;
+    fn take_with<R>(self, owned: impl FnOnce(Self::Payload) -> R, shared: impl FnOnce(&Self::Payload) -> R) -> R;
+}
+
+impl<T> MlcTake for Box<T> {
+    type Payload = T;
+    fn take_with<R>(self, owned: impl FnOnce(T) -> R, _shared: impl FnOnce(&T) -> R) -> R {
+        owned(*self)
+    }
+}
+
+impl<T> MlcTake for RecBox<T> {
+    type Payload = T;
+    fn take_with<R>(self, owned: impl FnOnce(T) -> R, shared: impl FnOnce(&T) -> R) -> R {
+        match self.try_into_inner() {
+            Ok(v) => owned(v),
+            Err(b) => shared(&b),
+        }
+    }
+}
+
+impl<T> MlcTake for std::rc::Rc<T> {
+    type Payload = T;
+    fn take_with<R>(self, owned: impl FnOnce(T) -> R, shared: impl FnOnce(&T) -> R) -> R {
+        match std::rc::Rc::try_unwrap(self) {
+            Ok(v) => owned(v),
+            Err(rc) => shared(&rc),
+        }
+    }
+}
+
+impl<T> MlcTake for std::sync::Arc<T> {
+    type Payload = T;
+    fn take_with<R>(self, owned: impl FnOnce(T) -> R, shared: impl FnOnce(&T) -> R) -> R {
+        match std::sync::Arc::try_unwrap(self) {
+            Ok(v) => owned(v),
+            Err(arc) => shared(&arc),
+        }
     }
 }
 
@@ -2421,7 +2804,7 @@ impl<T> std::ops::Deref for RecBox<T> {
 
 impl<T> Clone for RecBox<T> {
     fn clone(&self) -> Self {
-        RecBox(std::mem::ManuallyDrop::new(std::rc::Rc::clone(&self.0)))
+        RecBox(std::mem::ManuallyDrop::new(std::sync::Arc::clone(&self.0)))
     }
 }
 
@@ -2438,31 +2821,27 @@ impl<T: PartialEq> PartialEq for RecBox<T> {
 }
 
 unsafe fn rec_drop_thunk<T>(p: *mut u8) {
-    drop(std::rc::Rc::from_raw(p as *const T));
+    drop(std::sync::Arc::from_raw(p as *const T));
 }
 
 impl<T> Drop for RecBox<T> {
     fn drop(&mut self) {
         // SAFETY: the field is taken exactly once, here.
-        let rc = unsafe { std::mem::ManuallyDrop::take(&mut self.0) };
-        // A shared block only loses this owner's count; the last owner
-        // frees it, and only that drop can recurse.
-        if std::rc::Rc::strong_count(&rc) != 1 {
+        let mut rc = unsafe { std::mem::ManuallyDrop::take(&mut self.0) };
+        // STATE-2: uniqueness, not a count, picks the owner that drains.
+        if std::sync::Arc::get_mut(&mut rc).is_none() {
             drop(rc);
             return;
         }
         match rec_drain::state() {
             rec_drain::State::Active => {
-                let raw = std::rc::Rc::into_raw(rc) as *mut u8;
+                let raw = std::sync::Arc::into_raw(rc) as *mut u8;
                 if rec_drain::push((raw, rec_drop_thunk::<T>)).is_err() {
                     // SAFETY: `raw` came from `into_raw` just above.
                     unsafe { rec_drop_thunk::<T>(raw) };
                 }
             }
-            rec_drain::State::Inactive => {
-                let _g = rec_drain::Guard::begin();
-                drop(rc); // the pointee's RecBoxes queue rather than recurse
-            }
+            rec_drain::State::Inactive => rec_drain::run(|| drop(rc)),
             rec_drain::State::Unavailable => drop(rc),
         }
     }
@@ -2542,283 +2921,8 @@ tuple_impl!(A 0, B 1, C 2, D 3, E 4, F 5);
 tuple_impl!(A 0, B 1, C 2, D 3, E 4, F 5, G 6);
 tuple_impl!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7);
 
-// ---------------------------------------------------------------------------
-// Function values (defunctionalization). A morloc function stored in data (a
-// record/list field) or crossing a pool boundary is represented as a fat trait
-// object `Rc<dyn MorlocFnN<..>>`: callable via `callN`, and reifiable to its
-// origin via `reifyN`. A plain native closure is a THIN function value -- the
-// blanket impl makes any `Fn(&A..)->R` a `MorlocFnN`, so `callN` monomorphizes
-// (zero-cost, inlined) while a boxed one dispatches through the vtable. A
-// closure that can CROSS is built as a `FatClosure` carrying its
-// `(sockid, mid, captured)` origin, so `reifyN` returns `Some`; a thin one
-// returns `None`. Function ARGUMENTS to higher-order functions stay monomorphic
-// `impl Fn` (never boxed), so a local map/fold pays no dispatch cost.
-
-/// The reified origin of a crossing closure: (home socket name, home manifold
-/// id, serialized captured environment).
-pub type ClosureOrigin = (String, i64, Vec<Vec<u8>>);
-
-/// Raise on a function value that has no origin to send. A closure morloc
-/// built carries the manifold to call back into; a callable host code made
-/// has no such identity, and neither does a closure whose context is not
-/// wholly native (those cross by the serial path instead). Every site that
-/// needs an origin goes through here, so the failure names its cause once.
-pub fn require_origin(origin: Option<&ClosureOrigin>) -> ClosureOrigin {
-    match origin {
-        Some(o) => o.clone(),
-        None => morloc_throw(
-            "cannot send a function value that morloc did not create: it has no \
-             manifold to call back into. Apply it in the pool that received it, \
-             or have the host return the data it would compute."
-                .to_string(),
-        ),
-    }
-}
-
-macro_rules! morloc_fn {
-    ($trait:ident, $closure:ident, $fnptr:ident, $call:ident, $reify:ident,
-     $apply:ident, $prev:ident, $pcall:ident, $preify:ident, $pap:ident, $staged:ident, $apply1:ident,
-     ($H:ident, $h:ident) $(, ($T:ident, $t:ident))* ) => {
-        pub trait $trait<$H, $($T,)* R> {
-            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R;
-            fn $reify(&self) -> Option<&ClosureOrigin>;
-            /// Apply to the first argument the way morloc does, when this
-            /// value knows how (see '$apply1'); `None` otherwise.
-            fn $apply(&self, _x: &$H) -> Option<std::rc::Rc<dyn $prev<$($T,)* R>>> { None }
-        }
-        // A plain native closure. Host code declares a higher-order parameter
-        // as either `F: Fn(&A..) -> R` or `impl MorlocFnN<A.., R>`; this impl
-        // is what lets one generated form satisfy both. It has no origin, so a
-        // value reaching morloc this way cannot be sent onward.
-        impl<$H, $($T,)* R, F: Fn(&$H, $(&$T,)*) -> R> $trait<$H, $($T,)* R> for F {
-            #[inline]
-            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { self($h, $($t,)*) }
-            fn $reify(&self) -> Option<&ClosureOrigin> { None }
-        }
-        // A function value is held as `Rc<dyn $trait>`, and that is itself a
-        // function value, so it can be passed wherever one is taken.
-        impl<$H, $($T,)* R, T: $trait<$H, $($T,)* R> + ?Sized> $trait<$H, $($T,)* R> for std::rc::Rc<T> {
-            #[inline]
-            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { (**self).$call($h, $($t,)*) }
-            fn $reify(&self) -> Option<&ClosureOrigin> { (**self).$reify() }
-            fn $apply(&self, x: &$H) -> Option<std::rc::Rc<dyn $prev<$($T,)* R>>> { (**self).$apply(x) }
-        }
-        /// A morloc-built function value: the environment it captured, the
-        /// manifold call, and how to reify that environment. `call` and `mk`
-        /// are non-capturing, so they are plain function pointers reading the
-        /// one copy of the captures -- the whole value is a single allocation
-        /// and the captures are copied once.
-        pub struct $closure<C, $H, $($T,)* R> {
-            caps: C,
-            call: fn(&C, &$H, $(&$T,)*) -> R,
-            mk: Option<fn(&C) -> ClosureOrigin>,
-            origin: std::cell::OnceCell<ClosureOrigin>,
-        }
-        impl<C, $H, $($T,)* R> $closure<C, $H, $($T,)* R> {
-            /// A closure that can be reified: the origin is built on first
-            /// use and cached, so one that never crosses pays nothing.
-            pub fn new(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R, mk: fn(&C) -> ClosureOrigin) -> Self {
-                Self { caps, call, mk: Some(mk), origin: std::cell::OnceCell::new() }
-            }
-            /// A closure with no dispatch entry, so nothing can call back
-            /// into it and it has no origin to offer.
-            pub fn local(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R) -> Self {
-                Self { caps, call, mk: None, origin: std::cell::OnceCell::new() }
-            }
-            /// A closure reflected from another pool. It answers with the
-            /// origin it ARRIVED with, so a value crossing A -> B -> C calls
-            /// back to A rather than to B.
-            pub fn proxy(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R, origin: ClosureOrigin) -> Self {
-                let cell = std::cell::OnceCell::new();
-                let _ = cell.set(origin);
-                Self { caps, call, mk: None, origin: cell }
-            }
-        }
-        impl<C, $H, $($T,)* R> $trait<$H, $($T,)* R> for $closure<C, $H, $($T,)* R> {
-            #[inline]
-            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { (self.call)(&self.caps, $h, $($t,)*) }
-            fn $reify(&self) -> Option<&ClosureOrigin> {
-                if self.origin.get().is_none() {
-                    let mk = self.mk?;
-                    let _ = self.origin.set(mk(&self.caps));
-                }
-                self.origin.get()
-            }
-        }
-        /// A capture-free closure as a plain function pointer. Coercion happens
-        /// at this call, so a caller never has to name the result type -- which
-        /// it could not do anyway, since the arity of a partially applied
-        /// manifold's morloc type counts its captured context arguments.
-        pub fn $fnptr<$H, $($T,)* R>(f: fn(&$H, $(&$T,)*) -> R) -> fn(&$H, $(&$T,)*) -> R { f }
-
-        /// A function pointer is already the thinnest form there is, so the
-        /// adapter is the identity. Anchoring this on a CONCRETE self type is
-        /// what lets it coexist with the trait-object impl: the two self types
-        /// are disjoint, so there is no overlap to reason about, and both
-        /// parameters appear in the self type, so neither is unconstrained.
-        impl<$H, $($T,)* R> ThinFn for fn(&$H, $(&$T,)*) -> R {
-            type Out = Self;
-            fn thin(&self) -> Self { *self }
-        }
-
-        /// The ONE thin `Fn` adapter. Host code may declare a higher-order
-        /// parameter as `F: Fn(&A..) -> R`, which a trait object cannot
-        /// satisfy, so a function value is handed over as one of these.
-        ///
-        /// It is a trait rather than a family of named functions so the
-        /// ARITY comes from the value's own type: a caller cannot read the
-        /// arity off the morloc type at the call, because a partially
-        /// applied manifold's type counts its captured context arguments
-        /// too. The adapter has no origin, so a value that reaches morloc
-        /// back through a host parameter cannot be sent onward.
-        impl<$H: 'static, $($T: 'static,)* R: 'static> ThinFn for std::rc::Rc<dyn $trait<$H, $($T,)* R>> {
-            type Out = Box<dyn Fn(&$H, $(&$T,)*) -> R>;
-            fn thin(&self) -> Self::Out {
-                let v = self.clone();
-                Box::new(move |$h, $($t,)*| v.$call($h, $($t,)*))
-            }
-        }
-        /// A function value applied to its first argument, keeping the
-        /// argument: it calls the function with the rest. If the function
-        /// has an origin, so does this, with the argument appended to its
-        /// captured values (`wire` serializes it).
-        pub struct $pap<$H, $($T,)* R> {
-            f: std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
-            x: $H,
-            wire: Option<fn(&$H) -> Vec<u8>>,
-            origin: std::cell::OnceCell<Option<ClosureOrigin>>,
-        }
-        impl<$H, $($T,)* R> $pap<$H, $($T,)* R> {
-            pub fn new(f: std::rc::Rc<dyn $trait<$H, $($T,)* R>>, x: $H, wire: Option<fn(&$H) -> Vec<u8>>) -> Self {
-                Self { f, x, wire, origin: std::cell::OnceCell::new() }
-            }
-        }
-        impl<$H, $($T,)* R> $prev<$($T,)* R> for $pap<$H, $($T,)* R> {
-            #[inline]
-            fn $pcall(&self, $($t: &$T,)*) -> R { self.f.$call(&self.x, $($t,)*) }
-            fn $preify(&self) -> Option<&ClosureOrigin> {
-                self.origin
-                    .get_or_init(|| {
-                        let (home, mid, mut caps) = self.f.$reify()?.clone();
-                        let wire = self.wire?;
-                        caps.push(wire(&self.x));
-                        Some((home, mid, caps))
-                    })
-                    .as_ref()
-            }
-        }
-
-        /// A function value that knows how morloc applies it to its first
-        /// argument: `step` does it (a staged function runs its stage when
-        /// it has the arguments before the stage point). Called with every
-        /// argument, it is `flat`.
-        pub struct $staged<$H, $($T,)* R> {
-            flat: std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
-            step: std::rc::Rc<dyn Fn(&$H) -> std::rc::Rc<dyn $prev<$($T,)* R>>>,
-        }
-        impl<$H, $($T,)* R> $staged<$H, $($T,)* R> {
-            pub fn new(
-                flat: std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
-                step: std::rc::Rc<dyn Fn(&$H) -> std::rc::Rc<dyn $prev<$($T,)* R>>>,
-            ) -> Self {
-                Self { flat, step }
-            }
-        }
-        impl<$H, $($T,)* R> $trait<$H, $($T,)* R> for $staged<$H, $($T,)* R> {
-            #[inline]
-            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { self.flat.$call($h, $($t,)*) }
-            fn $reify(&self) -> Option<&ClosureOrigin> { self.flat.$reify() }
-            fn $apply(&self, x: &$H) -> Option<std::rc::Rc<dyn $prev<$($T,)* R>>> { Some((self.step)(x)) }
-        }
-
-        /// Apply a function value to its first argument: a value morloc made
-        /// knows how; any other keeps the argument.
-        pub fn $apply1<$H: Clone + 'static, $($T: 'static,)* R: 'static>(
-            f: &std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
-            x: &$H,
-        ) -> std::rc::Rc<dyn $prev<$($T,)* R>> {
-            match f.$apply(x) {
-                Some(g) => g,
-                None => std::rc::Rc::new($pap::new(f.clone(), x.clone(), None)),
-            }
-        }
-    };
-}
-
-// A function value of no arguments: a suspension. Written out because the
-// macro's argument list is non-empty.
-pub trait MorlocFn0<R> {
-    fn call0(&self) -> R;
-    fn reify0(&self) -> Option<&ClosureOrigin>;
-}
-impl<R, F: Fn() -> R> MorlocFn0<R> for F {
-    #[inline]
-    fn call0(&self) -> R { self() }
-    fn reify0(&self) -> Option<&ClosureOrigin> { None }
-}
-impl<R, T: MorlocFn0<R> + ?Sized> MorlocFn0<R> for std::rc::Rc<T> {
-    #[inline]
-    fn call0(&self) -> R { (**self).call0() }
-    fn reify0(&self) -> Option<&ClosureOrigin> { (**self).reify0() }
-}
-pub struct Closure0<C, R> {
-    caps: C,
-    call: fn(&C) -> R,
-    mk: Option<fn(&C) -> ClosureOrigin>,
-    origin: std::cell::OnceCell<ClosureOrigin>,
-}
-impl<C, R> Closure0<C, R> {
-    pub fn new(caps: C, call: fn(&C) -> R, mk: fn(&C) -> ClosureOrigin) -> Self {
-        Self { caps, call, mk: Some(mk), origin: std::cell::OnceCell::new() }
-    }
-    pub fn local(caps: C, call: fn(&C) -> R) -> Self {
-        Self { caps, call, mk: None, origin: std::cell::OnceCell::new() }
-    }
-    pub fn proxy(caps: C, call: fn(&C) -> R, origin: ClosureOrigin) -> Self {
-        let cell = std::cell::OnceCell::new();
-        let _ = cell.set(origin);
-        Self { caps, call, mk: None, origin: cell }
-    }
-}
-impl<C, R> MorlocFn0<R> for Closure0<C, R> {
-    #[inline]
-    fn call0(&self) -> R { (self.call)(&self.caps) }
-    fn reify0(&self) -> Option<&ClosureOrigin> {
-        if self.origin.get().is_none() {
-            let mk = self.mk?;
-            let _ = self.origin.set(mk(&self.caps));
-        }
-        self.origin.get()
-    }
-}
-/// A function value rendered as a plain `Fn`, for host code that declares a
-/// higher-order parameter that way. See the impls generated beside each
-/// `MorlocFnN`.
-pub trait ThinFn {
-    type Out;
-    fn thin(&self) -> Self::Out;
-}
-pub fn fn_ptr0<R>(f: fn() -> R) -> fn() -> R { f }
-impl<R> ThinFn for fn() -> R {
-    type Out = Self;
-    fn thin(&self) -> Self { *self }
-}
-impl<R: 'static> ThinFn for std::rc::Rc<dyn MorlocFn0<R>> {
-    type Out = Box<dyn Fn() -> R>;
-    fn thin(&self) -> Self::Out {
-        let v = self.clone();
-        Box::new(move || v.call0())
-    }
-}
-
-morloc_fn!(MorlocFn1, Closure1, fn_ptr1, call1, reify1, apply1, MorlocFn0, call0, reify0, Pap1, Staged1, apply1_1, (A1, a1));
-morloc_fn!(MorlocFn2, Closure2, fn_ptr2, call2, reify2, apply2, MorlocFn1, call1, reify1, Pap2, Staged2, apply1_2, (A1, a1), (A2, a2));
-morloc_fn!(MorlocFn3, Closure3, fn_ptr3, call3, reify3, apply3, MorlocFn2, call2, reify2, Pap3, Staged3, apply1_3, (A1, a1), (A2, a2), (A3, a3));
-morloc_fn!(MorlocFn4, Closure4, fn_ptr4, call4, reify4, apply4, MorlocFn3, call3, reify3, Pap4, Staged4, apply1_4, (A1, a1), (A2, a2), (A3, a3), (A4, a4));
-morloc_fn!(MorlocFn5, Closure5, fn_ptr5, call5, reify5, apply5, MorlocFn4, call4, reify4, Pap5, Staged5, apply1_5, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5));
-morloc_fn!(MorlocFn6, Closure6, fn_ptr6, call6, reify6, apply6, MorlocFn5, call5, reify5, Pap6, Staged6, apply1_6, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6));
-morloc_fn!(MorlocFn7, Closure7, fn_ptr7, call7, reify7, apply7, MorlocFn6, call6, reify6, Pap7, Staged7, apply1_7, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7));
-morloc_fn!(MorlocFn8, Closure8, fn_ptr8, call8, reify8, apply8, MorlocFn7, call7, reify7, Pap8, Staged8, apply1_8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7), (A8, a8));
+mod fv;
+pub use fv::*;
 
 // ---------------------------------------------------------------------------
 // Packet bridge (production). `put_value` serializes a native value into a
@@ -3099,9 +3203,7 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
         morloc_infra_abort(cstr_take(err));
     }
 
-    pool_mark_busy();
     let result = send_and_receive_over_socket(socket_path.as_ptr(), packet, &mut err);
-    pool_mark_idle();
     libc::free(packet as *mut c_void);
     if !err.is_null() {
         morloc_infra_abort(cstr_take(err));
@@ -3172,7 +3274,6 @@ pub unsafe fn remote_call(
     };
     let resources = Resources { memory: mem, time, cpus, gpus };
     let mut err: *mut c_char = std::ptr::null_mut();
-    pool_mark_busy();
     let result = remote_call_ffi(
         mid as i32,
         socket_c.as_ptr(),
@@ -3182,7 +3283,6 @@ pub unsafe fn remote_call(
         args.len(),
         &mut err,
     );
-    pool_mark_idle();
     if !err.is_null() {
         morloc_throw(cstr_take(err));
     }
@@ -3410,16 +3510,9 @@ pub unsafe fn hash<T: ToVoidstar>(value: &T, schema: &Schema) -> String {
     cstr_take(h)
 }
 
-/// @save: write a value to disk in the voidstar packet format. `level` is the
-/// compression level, range-checked by the runtime. Returns unit.
-pub unsafe fn save<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
-    let path_c = cstr_arg(path, "@save");
-    let rc = with_voidstar(value, schema, |vs, cs, err| {
-        mlc_save(vs, cs, level, path_c.as_ptr(), err)
-    });
-    if rc != 0 {
-        failed_without_reason("@save");
-    }
+/// @eq / @le: -1, 0 or 1 as `a` orders before, with or after `b`.
+pub unsafe fn compare<T: ToVoidstar>(a: &T, b: &T, schema: &Schema) -> i32 {
+    with_voidstar(a, schema, |va, cs, _| with_voidstar(b, schema, |vb, _, err| mlc_compare(va, vb, cs, err)))
 }
 
 /// @savej: write a value to disk as JSON.
@@ -3433,14 +3526,15 @@ pub unsafe fn save_json<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, p
     }
 }
 
-/// @savem: write a value to disk as a raw voidstar block.
-pub unsafe fn save_voidstar<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
-    let path_c = cstr_arg(path, "@savem");
+/// @save: write a value to disk as a voidstar data packet. `level` is the
+/// compression level, range-checked by the runtime. Returns unit.
+pub unsafe fn save<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
+    let path_c = cstr_arg(path, "@save");
     let rc = with_voidstar(value, schema, |vs, cs, err| {
         mlc_save_voidstar(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
-        failed_without_reason("@savem");
+        failed_without_reason("@save");
     }
 }
 
@@ -3495,18 +3589,52 @@ pub unsafe fn ifile_length(handle: u64) -> i64 {
     n
 }
 
-/// @next: materialise an IStream's current sub-packet as `[a]` and advance the
-/// cursor. An empty list at EOF is a valid (non-null) voidstar.
+/// @next: decode an IStream's current sub-packet as `[a]` where it lies and
+/// advance the cursor (SLOT-25); an empty list at the end.
 pub unsafe fn next<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
+    struct Decoded<'a, T> {
+        schema: &'a Schema,
+        value: Option<T>,
+        unwinding: Option<Box<dyn std::any::Any + Send>>,
+    }
+    // SLOT-25: a throw while decoding must not unwind through the runtime,
+    // so it is held here and resumed once the runtime has returned.
+    unsafe extern "C" fn next_decode<T: FromVoidstar>(c: *mut c_void, data: *const c_void, space: MorlocSpace) -> i32 {
+        let d = &mut *(c as *mut Decoded<T>);
+        let schema = d.schema;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _recur = RecurScope::enter(schema);
+            <T as FromVoidstar>::read(schema, data as *const u8, space)
+        })) {
+            Ok(v) => {
+                d.value = Some(v);
+                0
+            }
+            Err(p) => {
+                d.unwinding = Some(p);
+                1
+            }
+        }
+    }
+    let mut d = Decoded::<T> { schema, value: None, unwinding: None };
     let mut err: *mut c_char = std::ptr::null_mut();
-    let voidstar = mlc_next(handle as i64, &mut err);
-    read_voidstar(voidstar, err, schema, "@next")
+    let rc = mlc_next_with(handle as i64, next_decode::<T>, &mut d as *mut Decoded<T> as *mut c_void, &mut err);
+    if rc < 0 {
+        morloc_throw(format!("@next: {}", reason_or_abort(err, "@next")));
+    }
+    if let Some(p) = d.unwinding {
+        std::panic::resume_unwind(p);
+    }
+    match d.value {
+        Some(v) => v,
+        None => failed_without_reason("@next"),
+    }
 }
 
 /// @replay: call `f` on every frame (sub-packet) of the stream, in order,
 /// each as the list it holds. An empty frame is an empty list; only the end
 /// of the stream stops the loop.
-pub unsafe fn replay<E, F: MorlocFn1<Vec<E>, ()>>(schema: &Schema, handle: u64, f: F)
+pub unsafe fn replay<E, F: Invoke1<Vec<E>, ()>>(schema: &Schema, handle: u64, f: F)
 where
     Vec<E>: FromVoidstar,
 {
@@ -3518,7 +3646,7 @@ where
             break;
         }
         let frame: Vec<E> = read_voidstar(voidstar, err, schema, "@replay");
-        f.call1(&frame);
+        f.invoke(&frame);
     }
 }
 
@@ -3636,10 +3764,8 @@ pub unsafe fn cell_put<T: ToVoidstar>(schema: &Schema, handle: u64, value: &T) {
 ///
 /// The count is never zero -- an untouched cell answers with its seed -- so
 /// this always has a value to return.
-/// The combine is bounded on `MorlocFn2` rather than `Fn`: a morloc function
-/// value in a Rust pool is a defunctionalized closure, and the blanket impl
-/// beside the trait covers a plain `Fn` as well.
-pub unsafe fn cell_reduce<T: FromVoidstar, F: MorlocFn2<T, T, T>>(
+/// The combine may be an inline closure or a function value.
+pub unsafe fn cell_reduce<T: FromVoidstar, F: Invoke2<T, T, T>>(
     schema: &Schema,
     combine: F,
     handle: u64,
@@ -3668,7 +3794,7 @@ pub unsafe fn cell_reduce<T: FromVoidstar, F: MorlocFn2<T, T, T>>(
     let guard = FreeOnUnwind(handle as i64);
     let mut acc = slot(0);
     for i in 1..n {
-        acc = combine.call2(&acc, &slot(i));
+        acc = combine.invoke(&acc, &slot(i));
     }
     std::mem::forget(guard);
     let mut ferr: *mut c_char = std::ptr::null_mut();
@@ -3704,8 +3830,8 @@ pub unsafe fn open_channel(schema: &Schema) -> u64 {
 /// Start the producer `f` on the channel as a separate dispatch in its home
 /// pool, without waiting for it. The channel travels as the producer's
 /// OStream argument, after its captured values.
-pub unsafe fn spawn<R, F: MorlocFn1<u64, R>>(f: &F, handle: u64, schema: &Schema) {
-    let (home, mid, mut captured) = require_origin(f.reify1());
+pub unsafe fn spawn<R>(f: &FnValue1<u64, R>, handle: u64, schema: &Schema) {
+    let (home, mid, mut captured) = require_origin(reify(f));
     captured.push(reify_capture(&handle, schema));
     let ptrs: Vec<*const u8> = captured.iter().map(|c| c.as_ptr()).collect();
     let tmpdir = TMPDIR
@@ -3845,6 +3971,8 @@ where
     // PANIC-6: libmorloc's hook lets a panic outside this runtime's own
     // frames unwind to here.
     let outer = unsafe { morloc_catch_scope(MORLOC_SCOPE_HOST) };
+    // STATE-6
+    let saved = frame_enter();
     let outer_reply = REPLY.with(|r| r.replace(std::ptr::null_mut()));
     let result = std::panic::catch_unwind(f);
     let built = REPLY.with(|r| r.replace(outer_reply));
@@ -3853,22 +3981,23 @@ where
         unsafe { libc::free(built as *mut c_void) };
     }
     match result {
-        Ok(p) => p,
+        Ok(p) => {
+            if frame_depth() != saved {
+                morloc_infra_abort(format!(
+                    "frame stack depth {} at the end of a dispatch that began at {saved}",
+                    frame_depth()
+                ));
+            }
+            p
+        }
         Err(payload) if payload.is::<MorlocPipeClosed>() => {
-            TRACEBACK.with(|t| t.borrow_mut().clear());
+            frame_restore(saved);
             let msg = CString::new(PIPE_CLOSED_MESSAGE).unwrap();
             unsafe { make_pipe_closed_packet(msg.as_ptr()) }
         }
         Err(payload) => {
             let msg = panic_message(payload.as_ref());
-            // Append the manifold trace accumulated during unwind, so the
-            // message + traceback crosses the pool boundary as one string.
-            let full = TRACEBACK.with(|t| {
-                let mut tb = t.borrow_mut();
-                let s = format!("{}{}", msg, tb);
-                tb.clear();
-                s
-            });
+            let full = format!("{}{}", msg, frame_take(saved));
             unsafe { fail_packet(&full) }
         }
     }
@@ -3911,7 +4040,7 @@ mod panic_classifier_tests {
         }
         if !untrusted {
             fs.push(("rustmorloc::panic_is_runtime".into(), Some(rt)));
-            fs.push(("pool::mlc_classify_panic".into(), Some(POOL.into())));
+            fs.push(("pool::__morloc_classify_panic".into(), Some(POOL.into())));
         }
         fs.push(("std[h]::panicking::panic_with_hook".into(), Some("/rustc/H/library/std/src/panicking.rs".into())));
         fs.push(("std[h]::sys::backtrace::__rust_end_short_backtrace".into(), Some("/rustc/H/library/std/src/sys/backtrace.rs".into())));
@@ -3989,22 +4118,33 @@ mod panic_classifier_tests {
     }
 
     #[test]
-    fn a_closure_convention_frame_forwards_to_its_caller() {
-        let rt = format!("{}lib.rs", this_crate_dirs()[1]);
+    fn a_function_value_frame_forwards_to_its_caller() {
+        let fv = format!("{}fv.rs", this_crate_dirs()[1]);
         let call = format!("{POOL}:7:20");
-        let apply = ("<F as rustmorloc::MorlocFn1<i64, i64>>::call1", Some(rt.as_str()));
-        let inlined = ("call1<i64, i64, pool::curried::{closure_env#0}>", Some(rt.as_str()));
-        for frame in [apply, inlined] {
+        let closure = ("rustmorloc::fv::crossing1::{{closure}}", Some(fv.as_str()));
+        let inlined = ("{{closure}}<i64, i64>", Some(fv.as_str()));
+        let nested = ("rustmorloc::fv::staged2::<i64, i64, i64>::{{closure}}::{{closure}}", Some(fv.as_str()));
+        let callback = ("<alloc::sync::Arc<dyn Fn(&i64) -> i64> as rustmorloc::fv::IntoCallback1<i64, i64>>::into_callback::{{closure}}", Some(fv.as_str()));
+        for frame in [closure, inlined, nested, callback] {
             let t = trace(&[], &[("dep::f", Some("/elsewhere/dep.rs")), frame, ("pool::m1", Some(&call))], false);
-            assert!(!walk_is_runtime(&t, &[POOL], &[USER], &[(7, 20)]));
+            assert!(!walk_is_runtime(&t, &[POOL], &[USER], &[(7, 20)]), "{}", frame.0);
             assert!(walk_is_runtime(&t, &[POOL], &[USER], &[]));
         }
-        let elsewhere = ("call1<i64>", Some("/elsewhere/dep.rs"));
-        let t = trace(&[], &[("dep::f", Some("/elsewhere/dep.rs")), elsewhere, ("rustmorloc::x", Some(rt.as_str())), ("pool::m1", Some(&call))], false);
+        let rt = format!("{}lib.rs", this_crate_dirs()[1]);
+        let t = trace(&[], &[("dep::f", Some("/elsewhere/dep.rs")), ("rustmorloc::x", Some(rt.as_str())), ("pool::m1", Some(&call))], false);
         assert!(walk_is_runtime(&t, &[POOL], &[USER], &[(7, 20)]));
         let generated = format!("{POOL}:3:5");
-        let t = trace(&[], &[("pool::m1::{{closure}}", Some(&generated)), apply, ("pool::m1", Some(&call))], false);
+        let t = trace(&[], &[("pool::m1::{{closure}}", Some(&generated)), closure, ("pool::m1", Some(&call))], false);
         assert!(walk_is_runtime(&t, &[POOL], &[USER], &[(7, 20)]));
+        for registry in [
+            "rustmorloc::fv::apply1_2",
+            "rustmorloc::fv::reify_env::{{closure}}",
+            "<pool::m5::{{closure}} as rustmorloc::fv::Invoke0<i64>>::invoke",
+            "rustmorloc::fv::registered::<(i64,), rustmorloc::fv::crossing1::{closure#0}>",
+        ] {
+            let t = trace(&[], &[("dep::f", Some("/elsewhere/dep.rs")), (registry, Some(fv.as_str())), ("pool::m1", Some(&call))], false);
+            assert!(walk_is_runtime(&t, &[POOL], &[USER], &[(7, 20)]), "{registry}");
+        }
     }
 
     #[test]
@@ -4514,6 +4654,225 @@ mod tests {
         }
     }
 
+    unsafe fn try_roundtrip<T: ToVoidstar + FromVoidstar>(schema_str: &str, value: &T) -> Result<T, String> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| roundtrip(schema_str, value)))
+            .map_err(|e| e.downcast_ref::<MorlocThrow>().map(|t| t.0.clone()).unwrap_or_default())
+    }
+
+    /// Write `xs` as `schema_str` and return the element data the array
+    /// header points at, checking its alignment.
+    unsafe fn array_data<T: ToVoidstar>(schema_str: &str, xs: &T, align: usize) -> Vec<u8> {
+        let schema = parse_schema(schema_str).expect("parse schema");
+        let total = xs.shm_size(&schema).max(1);
+        let mut buf = vec![0u8; total + 64];
+        let base = buf.as_mut_ptr();
+        TEST_BASE.with(|b| b.set(Some(base as usize)));
+        let mut cursor = base.add(schema.width);
+        xs.write(base, &mut cursor, &schema);
+        TEST_BASE.with(|b| b.set(None));
+        let a = core::ptr::read_unaligned(base as *const Array);
+        if a.size == 0 {
+            return Vec::new();
+        }
+        let p = base.add(a.data as usize);
+        assert_eq!(p as usize % align, 0, "{schema_str}: element data misaligned");
+        assert!(p.add(a.size * schema.parameters[0].width) <= base.add(total), "{schema_str}: wrote past its size");
+        core::slice::from_raw_parts(p, a.size * schema.parameters[0].width).to_vec()
+    }
+
+    macro_rules! check_primitive_vectors {
+        ($t:ty, $schema:expr, $gen:expr) => {
+            for n in [0usize, 1, 63, 64, 65, 1 << 20] {
+                let xs: Vec<$t> = (0..n).map($gen).collect();
+                let bytes: Vec<u8> = xs.iter().flat_map(|x| x.to_le_bytes()).collect();
+                unsafe {
+                    assert_eq!(array_data($schema, &xs, 64), bytes, "{} n={n}", $schema);
+                    assert_eq!(roundtrip::<Vec<$t>>($schema, &xs), xs, "{} n={n}", $schema);
+                }
+            }
+        };
+    }
+
+    /// `try_into_inner` gives the value of a box with one handle and returns
+    /// a box that has another.
+    #[test]
+    fn a_rec_box_gives_up_its_value_only_when_unshared() {
+        let b = RecBox::new((vec![1u8, 2], 7i64));
+        assert_eq!(b.try_into_inner().map(|t| t.0).ok(), Some(vec![1, 2]));
+        let b = RecBox::new((vec![3u8], 8i64));
+        let other = b.clone();
+        let back = b.try_into_inner().err().expect("a shared box gave up its value");
+        assert_eq!((*back).1, 8);
+        assert_eq!((*other).0, vec![3]);
+    }
+
+    /// Primitive vectors under their own schema: 64-byte aligned element
+    /// data holding exactly the values' bytes, and a lossless round trip.
+    #[test]
+    fn primitive_vectors_under_their_own_schema() {
+        check_primitive_vectors!(u8, "au1", |i| i as u8);
+        check_primitive_vectors!(i8, "ai1", |i| (i as i8).wrapping_sub(100));
+        check_primitive_vectors!(u16, "au2", |i| (i * 7) as u16);
+        check_primitive_vectors!(i16, "ai2", |i| ((i * 7) as i16).wrapping_neg());
+        check_primitive_vectors!(u32, "au4", |i| (i as u32).wrapping_mul(2654435761));
+        check_primitive_vectors!(i32, "ai4", |i| (i as i32).wrapping_neg());
+        check_primitive_vectors!(u64, "au8", |i| (i as u64).wrapping_mul(0x9E3779B97F4A7C15));
+        check_primitive_vectors!(i64, "ai8", |i| -(i as i64) * 1_000_003);
+        check_primitive_vectors!(f32, "af4", |i| i as f32 * 0.5 - 3.0);
+        check_primitive_vectors!(f64, "af8", |i| i as f64 * 0.25 - 1e9);
+        for n in [0usize, 1, 63, 64, 65, 1 << 20] {
+            let xs: Vec<bool> = (0..n).map(|i| i % 3 == 0).collect();
+            let bytes: Vec<u8> = xs.iter().map(|&b| b as u8).collect();
+            unsafe {
+                assert_eq!(array_data("ab", &xs, 1), bytes, "ab n={n}");
+                if n > 0 {
+                    let mut buf = vec![0u8; xs.shm_size(&parse_schema("ab").unwrap()) + 64];
+                    let base = buf.as_mut_ptr();
+                    let start = align_up(base as usize, 64) as *mut u8;
+                    let s = parse_schema("ab").unwrap();
+                    TEST_BASE.with(|b| b.set(Some(start as usize)));
+                    let mut cursor = start.add(s.width);
+                    xs.write(start, &mut cursor, &s);
+                    TEST_BASE.with(|b| b.set(None));
+                    let a = core::ptr::read_unaligned(start as *const Array);
+                    assert_eq!(a.data as usize, s.width, "Bool data was padded: alignment is 1 on the wire");
+                }
+                assert_eq!(roundtrip::<Vec<bool>>("ab", &xs), xs, "ab n={n}");
+            }
+        }
+    }
+
+    /// The bulk hooks are taken exactly when the element schema is the
+    /// type's own kind and width. The bytes are the same either way, so
+    /// only this test notices a fall back to element-by-element copying.
+    #[test]
+    fn bulk_array_hooks_taken_only_for_own_kind_and_width() {
+        unsafe fn takes<T: ToVoidstar + FromVoidstar + Clone>(schema: &str, x: T) -> (bool, bool) {
+            let s = parse_schema(schema).unwrap();
+            let xs = vec![x; 3];
+            let mut dst = vec![0u8; 3 * s.width.max(16)];
+            let w = T::write_array(&xs, &s, dst.as_mut_ptr());
+            let r = T::read_array(&s, dst.as_ptr(), 3).is_some();
+            (w, r)
+        }
+        unsafe {
+            assert_eq!(takes("u1", 1u8), (true, true));
+            assert_eq!(takes("i1", 1i8), (true, true));
+            assert_eq!(takes("u2", 1u16), (true, true));
+            assert_eq!(takes("i4", 1i32), (true, true));
+            assert_eq!(takes("u8", 1u64), (true, true));
+            assert_eq!(takes("i8", 1i64), (true, true));
+            assert_eq!(takes("f4", 1f32), (true, true));
+            assert_eq!(takes("f8", 1f64), (true, true));
+            assert_eq!(takes("b", true), (true, true));
+            assert_eq!(takes("i1", 1u8), (false, false));
+            assert_eq!(takes("u1", 1i8), (false, false));
+            assert_eq!(takes("i4", 1i64), (false, false));
+            assert_eq!(takes("i8", 1i32), (false, false));
+            assert_eq!(takes("f4", 1f64), (false, false));
+            assert_eq!(takes("f4", 1u32), (false, false));
+            assert_eq!(takes("u4", 1f32), (false, false));
+            assert_eq!(takes("j", 1i64), (false, false));
+            assert_eq!(takes("u1", true), (false, false));
+            assert_eq!(takes("b", 1u8), (false, false));
+            assert_eq!(takes("u8", Some(1u64)), (false, false));
+        }
+    }
+
+    /// Off the bulk path, element-by-element range checks and conversions
+    /// still apply.
+    #[test]
+    fn mismatched_vectors_keep_their_checks() {
+        unsafe {
+            assert!(try_roundtrip::<Vec<u8>>("ai1", &vec![1, 200]).is_err(), "200 fit in an i8");
+            assert!(try_roundtrip::<Vec<i64>>("ai4", &vec![1, i64::from(i32::MAX) + 1]).is_err(), "fit in an i32");
+            assert_eq!(roundtrip::<Vec<i64>>("ai4", &vec![-5, 7]), vec![-5, 7]);
+            assert_eq!(roundtrip::<Vec<f64>>("af4", &vec![0.1, 2.5]), vec![0.1f32 as f64, 2.5]);
+            assert_eq!(array_data("aj", &vec![3i64, -4], 1).len(), 32, "Int slots are 16 bytes");
+            assert_eq!(roundtrip::<Vec<i64>>("aj", &vec![3, -4]), vec![3, -4]);
+            let f = parse_schema("af4").unwrap();
+            let xs = vec![1.5f32];
+            let total = xs.shm_size(&f) + 64;
+            let mut buf = vec![0u8; total];
+            let base = buf.as_mut_ptr();
+            TEST_BASE.with(|b| b.set(Some(base as usize)));
+            let mut cursor = base.add(f.width);
+            xs.write(base, &mut cursor, &f);
+            let r = std::panic::catch_unwind(|| <Vec<u32> as FromVoidstar>::read(&f, base, MorlocSpace::payload(base, total)));
+            TEST_BASE.with(|b| b.set(None));
+            assert!(r.is_err(), "a u32 vector read a float's bits");
+        }
+    }
+
+    /// A Bool byte other than 0 or 1 reads as false, element by element and
+    /// in bulk.
+    #[test]
+    fn bool_bytes_other_than_one_read_false() {
+        let s = parse_schema("b").unwrap();
+        let bytes = [0u8, 1, 2, 255];
+        let v = unsafe { <bool as FromVoidstar>::read_array(&s, bytes.as_ptr(), 4) }.unwrap();
+        assert_eq!(v, vec![false, true, false, false]);
+        let one = unsafe { <bool as FromVoidstar>::read(&s, [2u8].as_ptr(), MorlocSpace::SHM) };
+        assert!(!one);
+    }
+
+    /// The source of a bulk read need not be aligned for the element type.
+    #[test]
+    fn bulk_reads_accept_a_misaligned_source() {
+        let s = parse_schema("f8").unwrap();
+        let xs = [1.5f64, -2.0, 1e300];
+        let mut buf = vec![0u8; 8 * xs.len() + 1];
+        for (i, x) in xs.iter().enumerate() {
+            buf[1 + 8 * i..9 + 8 * i].copy_from_slice(&x.to_le_bytes());
+        }
+        let v = unsafe { <f64 as FromVoidstar>::read_array(&s, buf.as_ptr().add(1), xs.len()) }.unwrap();
+        assert_eq!(v, xs);
+    }
+
+    /// NaN payloads, signalling ones included, survive scalars and vectors
+    /// bit for bit.
+    #[test]
+    fn float_nan_payloads_are_bit_exact() {
+        let s32 = f32::from_bits(0x7f80_0001);
+        let q32 = f32::from_bits(0xffc0_1234);
+        let s64 = f64::from_bits(0x7ff0_0000_0000_0001);
+        let q64 = f64::from_bits(0xfff8_0000_dead_beef);
+        unsafe {
+            for x in [s32, q32] {
+                assert_eq!(roundtrip::<f32>("f4", &x).to_bits(), x.to_bits());
+                let v = roundtrip::<Vec<f32>>("af4", &vec![x, x]);
+                assert!(v.iter().all(|y| y.to_bits() == x.to_bits()));
+            }
+            for x in [s64, q64] {
+                assert_eq!(roundtrip::<f64>("f8", &x).to_bits(), x.to_bits());
+                let v = roundtrip::<Vec<f64>>("af8", &vec![x, x]);
+                assert!(v.iter().all(|y| y.to_bits() == x.to_bits()));
+            }
+        }
+    }
+
+    /// A VecDeque whose ring buffer has wrapped writes both halves in order.
+    #[test]
+    fn wrapped_deques_round_trip() {
+        let mut d: VecDeque<u16> = VecDeque::with_capacity(8);
+        for i in 0..6 {
+            d.push_back(i);
+        }
+        for _ in 0..4 {
+            d.pop_front();
+        }
+        for i in 6..11 {
+            d.push_back(i);
+        }
+        let (a, b) = d.as_slices();
+        assert!(!a.is_empty() && !b.is_empty(), "the deque did not wrap");
+        unsafe {
+            assert_eq!(roundtrip::<VecDeque<u16>>("au2", &d), d);
+            let bytes: Vec<u8> = d.iter().flat_map(|x| x.to_le_bytes()).collect();
+            assert_eq!(array_data("au2", &d, 64), bytes);
+        }
+    }
+
     #[test]
     fn options() {
         unsafe {
@@ -4602,6 +4961,54 @@ mod tests {
             ];
             assert_eq!(roundtrip::<Vec<LL>>(&format!("a{SCHEMA}"), &list), list);
         }
+    }
+
+    // Every owner of a deep shared chain drops it on its own small-stack
+    // thread at once. Whichever drop releases the last reference frees the
+    // chain, and it must do so through the drain, not one frame per level.
+    #[test]
+    fn deep_recursive_value_dropped_concurrently() {
+        const DEPTH: i64 = 300_000;
+        for _ in 0..4 {
+            let mut chain = LL { head: 0, tail: None };
+            for i in 1..=DEPTH {
+                chain = LL { head: i, tail: Some(RecBox::new(chain)) };
+            }
+            let tail = chain.tail.clone().unwrap();
+            drop(chain);
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let mine = tail.clone();
+                    let b = barrier.clone();
+                    std::thread::Builder::new()
+                        .stack_size(256 * 1024)
+                        .spawn(move || {
+                            b.wait();
+                            drop(mine);
+                        })
+                        .unwrap()
+                })
+                .collect();
+            drop(tail);
+            for h in handles {
+                h.join().expect("a concurrent drop overflowed its stack");
+            }
+        }
+    }
+
+    #[test]
+    fn a_drain_leaves_nothing_behind_on_its_thread() {
+        std::thread::spawn(|| {
+            let mut chain = LL { head: 0, tail: None };
+            for i in 1..=100 {
+                chain = LL { head: i, tail: Some(RecBox::new(chain)) };
+            }
+            drop(chain);
+            assert!(rec_drain::idle());
+        })
+        .join()
+        .expect("thread");
     }
 
     // A chain far deeper than a 2 MiB test thread's stack could walk one
@@ -4780,51 +5187,251 @@ mod tests {
 
     // --- function values -------------------------------------------------
 
+    use std::sync::atomic::{AtomicU32, Ordering as AtOrd};
+    use std::sync::Arc;
+
     fn origin_of(n: i64) -> ClosureOrigin {
         ("rust".to_string(), n, vec![vec![1u8]])
     }
 
+    fn assert_thread_safe<T: Send + Sync>(_: &T) {}
+
     #[test]
-    fn closure_calls_through_a_trait_object() {
-        let f: std::rc::Rc<dyn MorlocFn1<i64, i64>> = std::rc::Rc::new(Closure1::local(
-            (7i64,),
-            |c: &(i64,), a: &i64| c.0 + a,
-        ));
-        assert_eq!(f.call1(&5), 12);
-        // an Rc of a function value is a function value
-        let g: std::rc::Rc<dyn MorlocFn1<i64, i64>> = std::rc::Rc::new(f.clone());
-        assert_eq!(g.call1(&5), 12);
+    fn a_local_function_value_is_a_plain_closure_with_no_origin() {
+        let f = local1((7i64,), |c: &(i64,), a: &i64| c.0 + a);
+        let g: Arc<dyn Fn(&i64) -> i64 + Send + Sync> = f.clone();
+        assert_eq!(f(&5), 12);
+        assert_eq!(g(&5), 12);
+        assert!(reify(&f).is_none());
     }
 
     #[test]
-    fn a_local_closure_has_no_origin() {
-        let f = Closure0::local((), |_: &()| 1i64);
-        assert!(f.reify0().is_none());
-    }
-
-    #[test]
-    fn the_origin_is_built_once_and_cached() {
-        // `mk` is a plain fn pointer, so the count lives beside the captures
-        let f = Closure0::new(
-            (std::cell::Cell::new(0u32),),
-            |_: &(std::cell::Cell<u32>,)| 1i64,
-            |c: &(std::cell::Cell<u32>,)| {
-                c.0.set(c.0.get() + 1);
-                origin_of(42)
+    fn a_crossing_value_builds_its_origin_once() {
+        let count = Arc::new(AtomicU32::new(0));
+        let f = crossing0(
+            (count.clone(),),
+            |_: &(Arc<AtomicU32>,)| 1i64,
+            |c: &(Arc<AtomicU32>,)| {
+                c.0.fetch_add(1, AtOrd::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                origin_of(9)
             },
         );
-        assert_eq!(f.reify0(), Some(&origin_of(42)));
-        assert_eq!(f.reify0(), Some(&origin_of(42)));
-        assert_eq!(f.reify0(), Some(&origin_of(42)));
-        assert_eq!(f.caps.0.get(), 1, "the origin must be built exactly once");
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| assert_eq!(reify(&f), Some(origin_of(9))));
+            }
+        });
+        assert_eq!(count.load(AtOrd::SeqCst), 1, "the origin must be built exactly once");
+        assert_eq!(f(), 1);
+    }
+
+    #[test]
+    fn a_clone_keeps_the_origin_and_a_host_wrapper_has_none() {
+        let f = crossing1((2i64,), |c: &(i64,), a: &i64| c.0 * a, |_| origin_of(4));
+        let g = f.clone();
+        assert_eq!(reify(&g), Some(origin_of(4)));
+        let h: Arc<dyn Fn(&i64) -> i64 + Send + Sync> = Arc::new(move |x| f(x));
+        assert_eq!(h(&3), 6);
+        assert!(reify(&h).is_none());
     }
 
     #[test]
     fn a_proxy_answers_with_the_origin_it_arrived_with() {
         // a value crossing A -> B -> C must call back to A, not to B
-        let f = Closure1::proxy((), |_: &(), a: &i64| *a, origin_of(3));
-        assert_eq!(f.reify1(), Some(&origin_of(3)));
-        assert_eq!(f.reify1(), Some(&origin_of(3)));
+        let f = proxy1((), |_: &(), a: &i64| *a, origin_of(3));
+        assert_eq!(reify(&f), Some(origin_of(3)));
+        assert_eq!(reify(&f), Some(origin_of(3)));
     }
 
+    #[test]
+    fn a_partial_application_appends_its_argument_to_the_origin() {
+        let f = crossing2((), |_: &(), a: &i64, b: &i64| a * 10 + b, |_| origin_of(5));
+        let wired = pap2(&f, &7, Some(|x: &i64| x.to_le_bytes().to_vec()));
+        assert_eq!(wired(&3), 73);
+        let mut want = origin_of(5);
+        want.2.push(7i64.to_le_bytes().to_vec());
+        assert_eq!(reify(&wired), Some(want));
+        let plain = apply1_2(&f, &8);
+        assert_eq!(plain(&1), 81);
+        assert!(reify(&plain).is_none());
+    }
+
+    #[test]
+    fn a_staged_value_runs_its_step_and_crosses_as_its_flat_form() {
+        let flat = crossing2((), |_: &(), a: &i64, b: &i64| a + b, |_| origin_of(6));
+        let steps = Arc::new(AtomicU32::new(0));
+        let counted = steps.clone();
+        let step: Step2<i64, i64, i64> = Arc::new(move |a: &i64| {
+            counted.fetch_add(1, AtOrd::SeqCst);
+            let a = *a * 100;
+            Arc::new(move |b: &i64| a + b) as FnValue1<i64, i64>
+        });
+        let f = staged2(flat, step);
+        assert_eq!(f(&1, &2), 3);
+        assert_eq!(apply1_2(&f, &1)(&2), 102);
+        assert_eq!(steps.load(AtOrd::SeqCst), 1);
+        assert_eq!(reify(&f), Some(origin_of(6)));
+    }
+
+    #[test]
+    fn an_entry_goes_with_its_value() {
+        let before = fv::registered_count();
+        let fs: Vec<_> = (0..1000).map(|i| crossing1((i as i64,), |c: &(i64,), a: &i64| c.0 + a, |_| origin_of(1))).collect();
+        let during = fv::registered_count();
+        drop(fs);
+        let after = fv::registered_count();
+        assert!(during >= before + 1000 - 50, "{before} -> {during}");
+        assert!(during - after >= 1000 - 50, "{during} -> {after}");
+    }
+
+    #[test]
+    fn a_value_made_where_a_registered_one_was_has_no_entry() {
+        let f = crossing1((1u64,), |c: &(u64,), a: &i64| *a + c.0 as i64, |_| origin_of(2));
+        let key = Arc::as_ptr(&f) as *const () as usize;
+        drop(f);
+        // A local closure over one u64 is the size of a crossing one (a guard
+        // pointer), so the allocator hands back the freed block.
+        let mut reused = 0;
+        let mut held = Vec::new();
+        for _ in 0..1000 {
+            let g = local1((1u64,), |c: &(u64,), a: &i64| *a + c.0 as i64);
+            if Arc::as_ptr(&g) as *const () as usize == key {
+                reused += 1;
+                assert!(reify(&g).is_none(), "a stale entry answered for a new value");
+            }
+            held.push(g);
+        }
+        // glibc hands a thread its own freed block back; other allocators may not.
+        if cfg!(target_os = "linux") {
+            assert!(reused > 0, "the freed address was never reused, so nothing was checked");
+        }
+    }
+
+    #[test]
+    fn function_values_and_callbacks_are_called_from_other_threads() {
+        let caps = (String::from("p-"), vec![1i64, 2, 3]);
+        let f: FnValue1<String, String> =
+            local1(caps, |c: &(String, Vec<i64>), a: &String| format!("{}{}{}", c.0, a, c.1.len()));
+        let g = apply1_2(&local2((), |_: &(), a: &i64, b: &i64| a * b), &3);
+        let t = local0((5i64,), |c: &(i64,)| c.0);
+        let cb = IntoCallback1::into_callback(f.clone());
+        let direct = IntoCallback1::into_callback(|x: &String| x.len());
+        assert_thread_safe(&f);
+        assert_thread_safe(&g);
+        assert_thread_safe(&t);
+        assert_thread_safe(&cb);
+        assert_thread_safe(&RecBox::new(LL { head: 1, tail: None }));
+        let out: Vec<(String, i64, i64, usize)> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..4i64)
+                .map(|i| {
+                    let (f, g, t, cb, direct) = (&f, &g, &t, &cb, &direct);
+                    s.spawn(move || {
+                        let a = f(&i.to_string());
+                        assert_eq!(a, cb(&i.to_string()));
+                        (a, g(&i), t(), direct(&i.to_string()))
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(out[2], ("p-23".to_string(), 6, 5, 1));
+    }
+
+}
+
+#[cfg(test)]
+mod frame_stack_tests {
+    use super::*;
+
+    fn in_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::spawn(f).join().unwrap()
+    }
+
+    #[test]
+    fn a_boundary_takes_the_calls_above_its_depth_innermost_first_and_restores_it() {
+        in_thread(|| {
+            let outer = frame_enter();
+            frame_push("\n  at a");
+            let saved = frame_enter();
+            frame_push("\n  at b");
+            frame_push("\n  at c");
+            assert_eq!(frame_take(saved), "\n  at c\n  at b");
+            assert_eq!(frame_depth(), saved);
+            frame_pop();
+            assert_eq!(frame_depth(), outer);
+        })
+    }
+
+    #[test]
+    fn the_crash_report_names_the_innermost_recorded_call() {
+        in_thread(|| {
+            frame_enter();
+            frame_push("\n  at outer [rust] (mid=1)");
+            frame_push("\n  at inner [rust] (mid=2)");
+            let mut len = 0usize;
+            let p = unsafe { current_frame(&mut len) };
+            let name = unsafe { std::str::from_utf8(std::slice::from_raw_parts(p as *const u8, len)).unwrap() };
+            assert_eq!(name, "inner [rust] (mid=2)");
+        })
+    }
+
+    #[test]
+    fn a_closure_boundary_carries_the_calls_a_panic_unwound_and_restores_the_depth() {
+        in_thread(|| {
+            let saved = frame_enter();
+            frame_push("\n  at caller");
+            let inner = frame_depth();
+            let caught = std::panic::catch_unwind(|| {
+                let boundary = frame_enter();
+                match std::panic::catch_unwind(|| {
+                    frame_push("\n  at f");
+                    frame_push("\n  at g");
+                    panic!("boom");
+                }) {
+                    Ok(()) => (),
+                    Err(p) => closure_rethrow(boundary, p),
+                }
+            });
+            assert_eq!(frame_depth(), inner);
+            let payload = caught.unwrap_err();
+            let MorlocThrow(msg) = payload.downcast_ref::<MorlocThrow>().unwrap();
+            assert!(msg.ends_with("boom\n  at g\n  at f"), "{msg}");
+            frame_pop();
+            assert_eq!(frame_depth(), saved);
+        })
+    }
+
+    #[test]
+    fn a_closed_pipe_passes_a_closure_boundary_unchanged_and_restores_the_depth() {
+        in_thread(|| {
+            let saved = frame_enter();
+            let caught = std::panic::catch_unwind(|| {
+                let boundary = frame_enter();
+                match std::panic::catch_unwind(|| {
+                    frame_push("\n  at f");
+                    std::panic::resume_unwind(Box::new(MorlocPipeClosed));
+                }) {
+                    Ok(()) => (),
+                    Err(p) => closure_rethrow(boundary, p),
+                }
+            });
+            assert!(caught.unwrap_err().is::<MorlocPipeClosed>());
+            assert_eq!(frame_depth(), saved);
+        })
+    }
+
+    #[test]
+    fn each_thread_has_its_own_frame_stack() {
+        in_thread(|| {
+            frame_enter();
+            frame_push("\n  at here");
+            let other = in_thread(|| {
+                frame_enter();
+                frame_depth()
+            });
+            assert_eq!(other, 0);
+            assert_eq!(frame_depth(), 1);
+        })
+    }
 }

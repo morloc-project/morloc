@@ -8,8 +8,17 @@ i=0
 while [ ! -s port.txt ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 port=$(python3 -c 'import json; print(json.load(open("port.txt"))["http"])')
 for q in 'stream?render=all' 'twoSites?render=all'; do
-  curl -s -X POST "localhost:$port/call/$q" -d '["log.txt"]' |
-    python3 -c 'import json,sys; r=json.load(sys.stdin); print(r["status"], r.get("result", r.get("error")).strip())'
+  curl -s -X POST -w '\n%{http_code} %{content_type}' "localhost:$port/call/$q" -d '["log.txt"]' |
+    python3 -c '
+import json, sys
+body, _, tail = sys.stdin.read().rpartition("\n")
+code, ctype = tail.split(" ", 1)
+if ctype.startswith("application/json"):
+    r = json.loads(body)
+    print(r["status"], r.get("result", r.get("error")).strip())
+else:
+    print(code, ctype, body.strip())
+'
 done
 kill $daemon
 wait $daemon 2> /dev/null

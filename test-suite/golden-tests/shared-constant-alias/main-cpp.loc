@@ -1,0 +1,38 @@
+-- The aliases of main.loc in C++.
+
+module main (nullaryCtor, aliasLiteral, aliasList)
+
+import root-cpp
+
+data Box a = Empty | Full a
+
+none :: Box a
+none = Empty
+
+size :: Box a -> Int
+size | Empty = 0
+     | (Full _) = 1
+
+orFull :: a -> Box a -> Box a
+orFull x b = Full x
+
+nullaryCtor :: Int -> Int
+nullaryCtor n = size (orFull n none)
+
+lit :: Int
+lit = 3
+
+lit2 :: Int
+lit2 = lit
+
+aliasLiteral :: Int -> Int
+aliasLiteral n = lit2 + n
+
+xs :: [Int]
+xs = [1, 2, 3]
+
+xs2 :: [Int]
+xs2 = xs
+
+aliasList :: Int -> Int
+aliasList n = n + length xs2

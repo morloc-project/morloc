@@ -1,0 +1,37 @@
+-- Spec STATE-6: a suspension handed to sourced code is a boundary. Sourced
+-- code that discards its failure leaves the frame stack as it found it, a
+-- later failure's trace names only its own calls, and a suspension run on
+-- a thread of its own records its calls there.
+-- A Rust thread that panics outside a catch scope ends the pool (PANIC-7),
+-- so Rust runs only the succeeding case on a thread.
+module main (caught, caughtThenFails, threaded)
+
+import root-rust
+
+escapable effect Lazy
+
+source Rust from "f.rs" ("boom", "attempt", "on_thread" as onThread)
+
+boom :: Int -> Int
+attempt :: <Lazy> Int -> Int
+onThread :: <Lazy> Int -> Int
+
+ok :: Int -> Int
+ok n
+  ? n == 0 = 0
+  : 1 + ok (n - 1)
+
+bad :: Int -> Int
+bad n
+  ? n == 0 = boom n
+  : 1 + bad (n - 1)
+
+caught :: Int -> Int
+caught n = attempt (do bad n) + ok n
+
+caughtThenFails :: Int -> Int
+caughtThenFails n = attempt (do bad n) + bad 1
+
+threaded :: Int -> Int
+threaded n = onThread (do ok n)
+

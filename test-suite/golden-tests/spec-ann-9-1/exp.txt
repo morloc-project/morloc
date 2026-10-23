@@ -1,0 +1,32 @@
+"foo@worker(parent:1,parent:2)"
+jobs 1
+"tag@parent[foo@worker(parent:1,parent:2)]"
+jobs 2
+["worker:1","worker:2"]
+jobs 4
+"tag@parent[foo@worker(parent:1,parent:2)]"
+jobs 5
+["foo@worker(worker:1,worker:2)","foo@worker(worker:2,worker:3)"]
+jobs 7
+3
+jobs 8
+"tag@parent[worker:1c]"
+jobs 9
+"ctag@parent[worker:1]"
+jobs 10
+"tag@parent[worker:1r]"
+jobs 11
+"rtag@parent[worker:1]"
+jobs 12
+"tag@parent[worker:1rs]"
+jobs 13
+"rstag@parent[worker:1]"
+jobs 14
+"worker:1"
+jobs 15
+"worker:7|worker:7"
+jobs 17
+exit 1
+exit 1
+exit 1
+--mem=1G --time=0-00:05:00 --cpus-per-task=1

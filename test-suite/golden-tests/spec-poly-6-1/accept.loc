@@ -1,0 +1,7 @@
+-- Spec POLY-6: the twin of main.loc with the element type written.
+module main (f)
+
+import root-py
+
+f :: Int -> Int
+f x = length ([] :: [Int])

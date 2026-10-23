@@ -1,33 +1,25 @@
-//! Compression of sealed OStream sub-packets on background threads.
-//!
-//! When a compressed stream's write buffer fills, the writer seals it: the
-//! buffer is detached from the slot, a fresh one takes its place, and the
-//! sealed buffer is queued here. A service thread compacts the buffer and
-//! compresses it into one zstd frame. The writer commits a batch -- writes it
-//! and does the slot's bookkeeping -- only on its own thread, in seal order,
-//! at fixed points: when a seal leaves more than `depth` batches queued, and
-//! at every flush, close and dispatch end. Which call commits a batch, and so
-//! which call reports its I/O error, depends only on the data written.
-//!
-//! Service threads touch nothing but the job they run: never the registry
-//! slot, the process-local slot map, or the SHM allocator.
+//! Compression of written-stream batches on background threads, for the
+//! stream custodian (`custody`), which writes them in queue order.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 
-use morloc_runtime_types::compression::{CompressionLevel, FrameCompressor};
+use morloc_runtime_types::compression::{subpacket_frame_size, CompressionLevel, FrameCompressor};
 use morloc_runtime_types::packet::FrameEntry;
 use morloc_runtime_types::schema::Schema;
 
 use crate::error::MorlocError;
 use crate::shm::AbsPtr;
 
-/// Sealed batches a stream may have queued before a seal waits for the
-/// oldest one. Each is at most one 16 MiB frame.
-const DEFAULT_DEPTH: usize = 8;
+/// Batches a compressed stream may have outstanding before a writer waits
+/// for the oldest, by default. A batch's frames already compress in
+/// parallel, so a few batches keep the threads busy; each more holds a
+/// 16 MiB buffer.
+fn default_depth() -> usize {
+    morloc_runtime_types::compression::frame_workers().clamp(2, 4)
+}
 
-/// `MORLOC_WRITE_BEHIND_DEPTH` as the process started, or the default. 0
-/// compresses every sub-packet on the writing thread.
+/// `MORLOC_WRITE_BEHIND_DEPTH` as the process started, or the default.
 // FORK-9
 pub(crate) fn depth() -> usize {
     #[cfg(test)]
@@ -40,11 +32,41 @@ pub(crate) fn depth() -> usize {
     static DEPTH: morloc_runtime_types::publish_once::PublishOnce<usize> =
         morloc_runtime_types::publish_once::PublishOnce::new();
     *DEPTH.get_or_init(|| {
-        std::env::var("MORLOC_WRITE_BEHIND_DEPTH")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_DEPTH)
+        match std::env::var("MORLOC_WRITE_BEHIND_DEPTH").ok().and_then(|s| s.parse::<usize>().ok()) {
+            Some(d) if d > crate::custody::MAX_DEPTH => {
+                eprintln!(
+                    "morloc: MORLOC_WRITE_BEHIND_DEPTH={d} is above the most a stream can hold ({}); using {}",
+                    crate::custody::MAX_DEPTH,
+                    crate::custody::MAX_DEPTH
+                );
+                crate::custody::MAX_DEPTH
+            }
+            Some(d) => d,
+            None => default_depth(),
+        }
     })
+}
+
+const QUEUE_BYTES: usize = 1 << 30;
+
+// SLOT-32
+pub(crate) fn queue_bytes() -> usize {
+    #[cfg(test)]
+    {
+        let b = TEST_QUEUE_BYTES.load(std::sync::atomic::Ordering::SeqCst);
+        if b != usize::MAX {
+            return b;
+        }
+    }
+    QUEUE_BYTES
+}
+
+#[cfg(test)]
+static TEST_QUEUE_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+#[cfg(test)]
+pub(crate) fn set_test_queue_bytes(bytes: Option<usize>) {
+    TEST_QUEUE_BYTES.store(bytes.unwrap_or(usize::MAX), std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -56,37 +78,47 @@ pub(crate) fn set_test_depth(depth: Option<usize>) {
     TEST_DEPTH.store(depth.unwrap_or(usize::MAX), std::sync::atomic::Ordering::SeqCst);
 }
 
-/// What a job compresses.
-pub(crate) enum Input {
-    /// A sealed write buffer: `[Array hdr 16][cap * w index][data_used]`
-    /// holding `n` elements. The job compacts it in place first.
-    Buffer {
-        base: usize,
-        n: u64,
-        cap: u64,
-        data_used: u64,
-        elem: Schema,
-    },
-    /// A complete payload.
-    Owned(Vec<u8>),
+struct Sealed {
+    n: u64,
+    cap: u64,
+    data_used: u64,
+    elem: Schema,
 }
 
-/// A compressed payload: one zstd frame and its index entry.
+struct SplitInput {
+    base: usize,
+    len: usize,
+    sealed: Option<Sealed>,
+}
+
+struct FrameInput {
+    base: usize,
+    len: usize,
+}
+
+/// A compressed payload: its zstd frames and their index entries.
 pub(crate) struct Compressed {
     pub bytes: Vec<u8>,
     pub frames: Vec<FrameEntry>,
     pub uncompressed_len: usize,
 }
 
-struct Job {
-    input: Mutex<Option<Input>>,
+struct Job<I, R> {
+    input: Mutex<Option<I>>,
     level: CompressionLevel,
-    result: Mutex<Option<Result<Compressed, MorlocError>>>,
+    result: Mutex<Option<Result<R, MorlocError>>>,
     done: Condvar,
 }
 
-impl Job {
-    fn wait(&self) -> Result<Compressed, MorlocError> {
+type FrameJob = Job<FrameInput, Compressed>;
+type SplitJob = Job<SplitInput, Vec<Arc<FrameJob>>>;
+
+impl<I, R> Job<I, R> {
+    fn new(input: I, level: CompressionLevel) -> Arc<Self> {
+        Arc::new(Job { input: Mutex::new(Some(input)), level, result: Mutex::new(None), done: Condvar::new() })
+    }
+
+    fn wait(&self) -> Result<R, MorlocError> {
         let mut r = self.result.lock().unwrap();
         loop {
             if let Some(res) = r.take() {
@@ -96,13 +128,26 @@ impl Job {
         }
     }
 
-    /// Block until the job has run, discarding its result.
-    fn settle(&self) {
+    fn finish(&self, res: Result<R, MorlocError>) {
+        *self.result.lock().unwrap() = Some(res);
+        self.done.notify_all();
+    }
+
+    /// SLOT-24: withdraw a job no worker has started, or wait for it.
+    fn withdraw_or_wait(&self) {
+        if self.input.lock().unwrap().take().is_some() {
+            return;
+        }
         let mut r = self.result.lock().unwrap();
         while r.is_none() {
             r = self.done.wait(r).unwrap();
         }
     }
+}
+
+enum Task {
+    Split(Arc<SplitJob>),
+    Frame(Arc<FrameJob>),
 }
 
 struct Service {
@@ -111,7 +156,7 @@ struct Service {
 }
 
 struct ServiceQueue {
-    jobs: VecDeque<Arc<Job>>,
+    jobs: VecDeque<Task>,
     threads: usize,
     idle: usize,
 }
@@ -129,57 +174,106 @@ fn service() -> Arc<Service> {
     .clone()
 }
 
-fn submit(input: Input, level: CompressionLevel) -> Arc<Job> {
-    let job = Arc::new(Job {
-        input: Mutex::new(Some(input)),
-        level,
-        result: Mutex::new(None),
-        done: Condvar::new(),
-    });
+fn submit(task: Task) {
     let svc = service();
     let mut q = svc.queue.lock().unwrap();
-    q.jobs.push_back(job.clone());
-    if q.idle == 0 && q.threads < morloc_runtime_types::compression::frame_workers() {
+    q.jobs.push_back(task);
+    if q.jobs.len() > q.idle && q.threads < morloc_runtime_types::compression::frame_workers() {
         q.threads += 1;
         let s = svc.clone();
-        std::thread::Builder::new()
-            .name("morloc-compress".into())
-            .spawn(move || worker(s))
-            .expect("morloc-compress: thread spawn failed");
+        if std::thread::Builder::new().name("morloc-compress".into()).spawn(move || worker(s)).is_err() {
+            q.threads -= 1;
+            if q.threads == 0 {
+                // SLOT-24: with no thread to run it, the task runs here.
+                let task = q.jobs.pop_back();
+                drop(q);
+                if let Some(task) = task {
+                    run_task(&mut Vec::new(), task);
+                }
+                return;
+            }
+        }
     }
     drop(q);
     svc.ready.notify_one();
-    job
 }
+
+/// How long a compression thread keeps its zstd contexts with no work.
+const IDLE_RELEASE: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn worker(svc: Arc<Service>) {
     let mut compressors: Vec<(u8, FrameCompressor)> = Vec::new();
     loop {
-        let job = {
+        let task = {
             let mut q = svc.queue.lock().unwrap();
             loop {
-                if let Some(j) = q.jobs.pop_front() {
-                    break j;
+                if let Some(t) = q.jobs.pop_front() {
+                    break t;
                 }
                 q.idle += 1;
-                q = svc.ready.wait(q).unwrap();
-                q.idle -= 1;
+                if compressors.is_empty() {
+                    q = svc.ready.wait(q).unwrap();
+                    q.idle -= 1;
+                } else {
+                    let (g, waited) = svc.ready.wait_timeout(q, IDLE_RELEASE).unwrap();
+                    q = g;
+                    q.idle -= 1;
+                    if waited.timed_out() && q.jobs.is_empty() {
+                        compressors.clear();
+                    }
+                }
             }
         };
-        let input = job.input.lock().unwrap().take();
-        let res = match input {
-            Some(input) => run(&mut compressors, job.level, input),
-            None => Err(MorlocError::Other("stream compression job ran twice".into())),
-        };
-        *job.result.lock().unwrap() = Some(res);
-        job.done.notify_all();
+        run_task(&mut compressors, task);
     }
 }
 
-fn run(
+/// SLOT-24: a task withdrawn before it started is skipped.
+fn run_task(compressors: &mut Vec<(u8, FrameCompressor)>, task: Task) {
+    match task {
+        Task::Split(job) => {
+            let input = job.input.lock().unwrap().take();
+            if let Some(input) = input {
+                job.finish(split(input, job.level));
+            }
+        }
+        Task::Frame(job) => {
+            let input = job.input.lock().unwrap().take();
+            if let Some(input) = input {
+                job.finish(compress_frame(compressors, job.level, input));
+            }
+        }
+    }
+}
+
+fn split(input: SplitInput, level: CompressionLevel) -> Result<Vec<Arc<FrameJob>>, MorlocError> {
+    let (start, len) = match input.sealed {
+        Some(Sealed { n, cap, data_used, elem }) => {
+            compact_sealed_buffer(input.base as AbsPtr, n, cap, data_used, &elem)?
+        }
+        None => (0, input.len),
+    };
+    let base = input.base + start;
+    let frame = subpacket_frame_size(level);
+    let mut jobs = Vec::with_capacity(len.div_ceil(frame).max(1));
+    let mut at = 0;
+    loop {
+        let n = frame.min(len - at);
+        let job = FrameJob::new(FrameInput { base: base + at, len: n }, level);
+        jobs.push(job.clone());
+        submit(Task::Frame(job));
+        at += n;
+        if at >= len {
+            break;
+        }
+    }
+    Ok(jobs)
+}
+
+fn compress_frame(
     compressors: &mut Vec<(u8, FrameCompressor)>,
     level: CompressionLevel,
-    input: Input,
+    input: FrameInput,
 ) -> Result<Compressed, MorlocError> {
     let c = match compressors.iter().position(|(l, _)| *l == level.raw()) {
         Some(i) => i,
@@ -188,259 +282,209 @@ fn run(
             compressors.len() - 1
         }
     };
-    let payload: &[u8];
-    let owned;
-    match input {
-        Input::Buffer { base, n, cap, data_used, elem } => {
-            let len = compact_sealed_buffer(base as AbsPtr, n, cap, data_used, &elem)?;
-            // SAFETY: the sealed buffer is owned by this job until it
-            // completes and holds `len` bytes after compaction.
-            payload = unsafe { std::slice::from_raw_parts(base as *const u8, len) };
-        }
-        Input::Owned(v) => {
-            owned = v;
-            payload = &owned;
-        }
-    }
-    let (bytes, frames) = compressors[c].1.compress(payload)?;
+    // SAFETY: SLOT-24
+    let payload = unsafe { std::slice::from_raw_parts(input.base as *const u8, input.len) };
+    let (mut bytes, frames) = compressors[c].1.compress(payload)?;
+    bytes.shrink_to_fit();
     Ok(Compressed { bytes, frames, uncompressed_len: payload.len() })
+}
+
+/// # Safety
+/// `base` must hold `16 + n * elem.width + data_used` bytes laid out so.
+pub(crate) unsafe fn shift_records(
+    base: AbsPtr,
+    n: usize,
+    wasted: usize,
+    data_used: usize,
+    elem: &Schema,
+) -> Result<(), MorlocError> {
+    if wasted == 0 || data_used == 0 {
+        return Ok(());
+    }
+    let w = elem.width;
+    let res = crate::recur::Resolver::new(elem);
+    let shallow = crate::voidstar::shallow_array_slots(elem);
+    for i in 0..n {
+        crate::voidstar::shift_element_relptrs(
+            base, 16 + n * w + data_used, 16 + i * w, elem, -(wasted as isize), &res, shallow.as_deref(),
+        )?;
+    }
+    Ok(())
 }
 
 /// Close the gap between the used index slots and the data region of a
 /// write buffer, shifting relptrs to match, and write its Array header.
-/// Returns the payload length. Pure buffer arithmetic: safe off the
-/// writer's thread on a detached buffer.
+/// Returns the payload's offset in the buffer and its length.
 pub(crate) fn compact_sealed_buffer(
     buf: AbsPtr,
     n: u64,
     cap: u64,
     data_used: u64,
     elem: &Schema,
-) -> Result<usize, MorlocError> {
+) -> Result<(usize, usize), MorlocError> {
     let w = elem.width;
     let n = n as usize;
     let data_used = data_used as usize;
     let wasted = (cap as usize - n) * w;
+    let records_end = 16 + n * w;
+    let mut start = 0;
     if wasted > 0 && data_used > 0 {
-        let old_data_offset = 16 + cap as usize * w;
-        let new_data_offset = 16 + n * w;
-        unsafe {
-            std::ptr::copy(buf.add(old_data_offset), buf.add(new_data_offset), data_used);
+        if records_end < data_used {
+            unsafe { std::ptr::copy(buf, buf.add(wasted), records_end) };
+            start = wasted;
+        } else {
+            unsafe { std::ptr::copy(buf.add(16 + cap as usize * w), buf.add(records_end), data_used) };
         }
-        let res = crate::recur::Resolver::new(elem);
-        for i in 0..n {
-            let inline_off = 16 + i * w;
-            unsafe {
-                crate::voidstar::shift_buffer_relptrs_with(
-                    buf, new_data_offset + data_used, inline_off, elem, -(wasted as isize), &res,
-                )?;
-            }
-        }
+        unsafe { shift_records(buf.add(start), n, wasted, data_used, elem)? };
     }
     unsafe {
-        let hdr = buf as *mut morloc_runtime_types::shm_types::Array;
+        let hdr = buf.add(start) as *mut morloc_runtime_types::shm_types::Array;
         (*hdr).size = n;
         (*hdr).data = 16 as morloc_runtime_types::shm_types::RelPtr;
     }
-    Ok(16 + n * w + data_used)
+    Ok((start, records_end + data_used))
 }
 
-/// One sealed batch awaiting commit.
-pub(crate) struct Pending {
-    job: Arc<Job>,
-    pub elem_count: u64,
-    /// The sealed write buffer, returned to the stream once the job is done.
-    pub buffer: Option<AbsPtr>,
-}
+/// A batch being compressed: a split job and, once it has run, its frame
+/// jobs in payload order.
+pub(crate) struct Ticket(Arc<SplitJob>);
 
-// SAFETY: `buffer` is an SHM block owned by this entry; no other thread
-// dereferences it once the job has completed.
-unsafe impl Send for Pending {}
-
-impl Pending {
+impl Ticket {
+    /// The batch's frames, joined in payload order (SLOT-24).
     pub(crate) fn wait(&self) -> Result<Compressed, MorlocError> {
-        self.job.wait()
-    }
-}
-
-/// A stream's queue of sealed batches and the spare write buffers it may
-/// reuse. Lives in the stream's process-local slot, which a forked child
-/// inherits: the queue and buffers stay the parent's, so in any other
-/// process they are forgotten, never waited on or freed.
-#[derive(Default)]
-pub(crate) struct WriteBehind {
-    pending: VecDeque<Pending>,
-    pub spare: Vec<AbsPtr>,
-    owner: Option<u64>,
-}
-
-// SAFETY: see `Pending`; spare buffers are unreferenced SHM blocks.
-unsafe impl Send for WriteBehind {}
-
-impl WriteBehind {
-    /// Take ownership for this process, forgetting anything inherited
-    /// from a parent across a fork.
-    pub(crate) fn claim(&mut self) {
-        // FORK-14
-        let me = crate::fork_policy::generation();
-        if self.owner != Some(me) {
-            if self.owner.is_some() {
-                std::mem::forget(std::mem::take(&mut self.pending));
-                self.spare.clear();
-            }
-            self.owner = Some(me);
-        }
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.pending.len()
-    }
-
-    pub(crate) fn pop_front(&mut self) -> Option<Pending> {
-        self.pending.pop_front()
-    }
-
-    pub(crate) fn seal_buffer(
-        &mut self,
-        base: AbsPtr,
-        n: u64,
-        cap: u64,
-        data_used: u64,
-        elem: &Schema,
-        level: CompressionLevel,
-    ) {
-        self.claim();
-        let job = submit(
-            Input::Buffer { base: base as usize, n, cap, data_used, elem: elem.clone() },
-            level,
-        );
-        self.pending.push_back(Pending { job, elem_count: n, buffer: Some(base) });
-    }
-
-    pub(crate) fn seal_owned(&mut self, payload: Vec<u8>, elem_count: u64, level: CompressionLevel) {
-        self.claim();
-        let job = submit(Input::Owned(payload), level);
-        self.pending.push_back(Pending { job, elem_count, buffer: None });
-    }
-
-    /// A spare write buffer, if one is free.
-    pub(crate) fn take_spare(&mut self) -> Option<AbsPtr> {
-        self.claim();
-        self.spare.pop()
-    }
-
-    /// Return a committed batch's buffer for reuse, keeping at most `keep`.
-    pub(crate) fn recycle(&mut self, buffer: Option<AbsPtr>, keep: usize) {
-        if let Some(b) = buffer {
-            if self.spare.len() < keep {
-                self.spare.push(b);
-            } else {
-                let _ = crate::shm::shfree(b);
+        let jobs = self.0.wait()?;
+        let mut parts = Vec::with_capacity(jobs.len());
+        let mut failure = None;
+        for job in &jobs {
+            match job.wait() {
+                Ok(c) => parts.push(c),
+                Err(e) => {
+                    failure.get_or_insert(e);
+                }
             }
         }
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        let total = parts.iter().map(|c| c.bytes.len()).sum();
+        let mut out = Compressed { bytes: Vec::with_capacity(total), frames: Vec::new(), uncompressed_len: 0 };
+        for c in parts {
+            out.bytes.extend_from_slice(&c.bytes);
+            out.frames.extend(c.frames);
+            out.uncompressed_len += c.uncompressed_len;
+        }
+        Ok(out)
     }
 
-    /// Drop every queued batch unwritten, once its job has finished with its
-    /// buffer.
-    pub(crate) fn abandon(&mut self) {
-        self.claim();
-        for p in self.pending.drain(..) {
-            p.job.settle();
-            if let Some(b) = p.buffer {
-                let _ = crate::shm::shfree(b);
+    /// SLOT-24: discard the batch.
+    pub(crate) fn settle(&self) {
+        self.0.withdraw_or_wait();
+        let jobs = self.0.result.lock().unwrap().take();
+        if let Some(Ok(jobs)) = jobs {
+            for job in &jobs {
+                job.withdraw_or_wait();
             }
         }
     }
 }
 
-impl Drop for WriteBehind {
-    fn drop(&mut self) {
-        self.claim();
-        self.abandon();
-        for b in self.spare.drain(..) {
-            let _ = crate::shm::shfree(b);
-        }
-    }
+/// Compact a sealed write buffer of `n` elements and compress it, one job
+/// per frame of `subpacket_frame_size(level)` bytes.
+pub(crate) fn compress_buffer(
+    base: AbsPtr,
+    n: u64,
+    cap: u64,
+    data_used: u64,
+    elem: &Schema,
+    level: CompressionLevel,
+) -> Ticket {
+    let sealed = Sealed { n, cap, data_used, elem: elem.clone() };
+    let job = SplitJob::new(SplitInput { base: base as usize, len: 0, sealed: Some(sealed) }, level);
+    submit(Task::Split(job.clone()));
+    Ticket(job)
 }
 
-/// Streams this process holds sealed batches of, whichever thread sealed
-/// them: every point where another process may take over a stream drains
-/// them all.
-static SEALED: crate::fork_policy::Reset<Vec<i64>> = crate::fork_policy::Reset::new(Vec::new);
-
-thread_local! {
-    /// The subset this thread sealed: a failure to write one of these is the
-    /// error of the call running on this thread.
-    static THREAD_SEALED: std::cell::RefCell<Vec<i64>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-pub(crate) fn note_sealed(handle: i64) {
-    let mut all = SEALED.lock().unwrap();
-    if !all.contains(&handle) {
-        all.push(handle);
-    }
-    drop(all);
-    THREAD_SEALED.with(|h| {
-        let mut h = h.borrow_mut();
-        if !h.contains(&handle) {
-            h.push(handle);
-        }
-    });
-}
-
-pub(crate) fn sealed_handles() -> Vec<i64> {
-    SEALED.lock().unwrap().clone()
-}
-
-pub(crate) fn forget_sealed(handle: i64) {
-    SEALED.lock().unwrap().retain(|h| *h != handle);
-}
-
-pub(crate) fn take_thread_sealed() -> Vec<i64> {
-    THREAD_SEALED.with(|h| std::mem::take(&mut *h.borrow_mut()))
-}
-
-pub(crate) fn thread_sealed() -> Vec<i64> {
-    THREAD_SEALED.with(|h| h.borrow().clone())
+/// Compress the compact payload of `len` bytes at `base`.
+pub(crate) fn compress_slice(base: AbsPtr, len: usize, level: CompressionLevel) -> Ticket {
+    let job = SplitJob::new(SplitInput { base: base as usize, len, sealed: None }, level);
+    submit(Task::Split(job.clone()));
+    Ticket(job)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // What a forked child inherits belongs to its parent: dropping it in the
-    // child must neither wait on the parent's jobs nor free its buffers.
-    #[test]
-    fn a_copy_in_another_process_leaves_the_parents_buffers() {
-        let _shm = crate::own_test_registry();
-        let buf = crate::shm::shcalloc(1, 4096).unwrap();
-        let mut wb = WriteBehind::default();
-        wb.spare.push(buf);
-        wb.claim();
-        wb.owner = wb.owner.map(|g| g.wrapping_add(1));
-        drop(wb);
-        let rc = unsafe { crate::shm::reference_count(buf) };
-        assert_eq!(rc, Some(1), "a copy in another process freed the parent's buffer");
-        crate::shm::shfree(buf).unwrap();
+    /// A sealed buffer of `xs` with room for `cap` records, laid out as the
+    /// write path lays it out.
+    fn sealed(schema: &str, xs: &[String], cap: usize) -> (Vec<u64>, usize, Schema) {
+        let elem = morloc_runtime_types::schema::parse_schema(schema).unwrap();
+        let res = crate::recur::Resolver::new(&elem);
+        let w = elem.width;
+        let vs: Vec<AbsPtr> = xs.iter().map(|x| crate::json::read_json_with_schema(x, &elem).unwrap()).collect();
+        let flats: Vec<usize> =
+            vs.iter().map(|&v| crate::ffi::calc_voidstar_size_portable_with(v, &elem, &res).unwrap()).collect();
+        let total: usize = flats.iter().map(|f| (f - w).next_multiple_of(8)).sum();
+        let mut buf = vec![0xffu64; (16 + cap * w + total).div_ceil(8)];
+        let base = buf.as_mut_ptr() as *mut u8;
+        let mut used = 0;
+        for (i, (&v, &flat)) in vs.iter().zip(&flats).enumerate() {
+            let var = (flat - w).next_multiple_of(8);
+            unsafe {
+                crate::voidstar::flatten_portable_in_place(base, 16 + i * w, 16 + cap * w + used, w + var, v, &elem, &res)
+                    .unwrap();
+            }
+            crate::shm::shfree(v).unwrap();
+            used += var;
+        }
+        (buf, used, elem)
     }
 
-    #[cfg(target_os = "linux")]
+    /// Compaction gives the payload bytes of a buffer that had no room to
+    /// spare, whichever side it moves: the data (short records) or the
+    /// header and records (long ones).
     #[test]
-    fn a_descendant_with_its_ancestors_pid_leaves_the_ancestors_buffers() {
+    fn compaction_gives_the_same_bytes_whichever_side_moves() {
         let _shm = crate::own_test_registry();
-        let ran = crate::fork_policy::as_pid_one(|| {
-            let buf = crate::shm::shcalloc(1, 4096).unwrap();
-            let mut wb = WriteBehind::default();
-            wb.spare.push(buf);
-            wb.claim();
-            let wb = std::mem::ManuallyDrop::new(wb);
-            let dropped = crate::fork_policy::in_a_descendant_with_the_same_pid(move || {
-                drop(std::mem::ManuallyDrop::into_inner(wb));
-                true
-            });
-            let kept = unsafe { crate::shm::reference_count(buf) } == Some(1);
-            dropped && kept
-        });
-        assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid freed the ancestor's buffer");
+        let quote = |x: String| format!("{:?}", x);
+        let short: Vec<String> = (0..300).map(|i| quote("x".repeat(i % 3))).collect();
+        let long: Vec<String> = (0..5).map(|i| quote("y".repeat(1000 + i * 37))).collect();
+        let nested_short: Vec<String> =
+            (0..200).map(|i| format!("[{}]", vec![quote("z".repeat(i % 2)); i % 3].join(","))).collect();
+        let nested_long: Vec<String> =
+            (0..4).map(|i| format!("[{}]", vec![quote("w".repeat(700 + i)); 3].join(","))).collect();
+        for (schema, xs) in [("s", short), ("s", long), ("as", nested_short), ("as", nested_long)] {
+            let n = xs.len();
+            let (mut tight, used, elem) = sealed(schema, &xs, n);
+            let (s0, l0) =
+                compact_sealed_buffer(tight.as_mut_ptr() as AbsPtr, n as u64, n as u64, used as u64, &elem).unwrap();
+            let want = unsafe { std::slice::from_raw_parts((tight.as_ptr() as *const u8).add(s0), l0) }.to_vec();
+            let (mut loose, used2, _) = sealed(schema, &xs, n * 3 + 7);
+            let (s1, l1) =
+                compact_sealed_buffer(loose.as_mut_ptr() as AbsPtr, n as u64, (n * 3 + 7) as u64, used2 as u64, &elem)
+                    .unwrap();
+            let got = unsafe { std::slice::from_raw_parts((loose.as_ptr() as *const u8).add(s1), l1) }.to_vec();
+            assert_eq!(s0, 0);
+            assert_eq!(s1 != 0, 16 + n * elem.width < used2, "the larger side moved");
+            assert!(got == want, "{n} records: compaction changed the payload");
+        }
+    }
+
+    /// SLOT-24: a payload's frames join in payload order and decode to the
+    /// payload; settling a ticket returns once nothing reads the payload.
+    #[test]
+    fn frames_of_a_payload_join_in_order_and_settle_returns() {
+        let level = CompressionLevel::from_u8(3).unwrap();
+        let payload: Vec<u8> = (0..(5usize << 20) + 7).map(|i| (i * 31 % 253) as u8).collect();
+        let c = compress_slice(payload.as_ptr() as AbsPtr, payload.len(), level).wait().unwrap();
+        assert_eq!(c.frames.len(), 3);
+        assert_eq!(c.uncompressed_len, payload.len());
+        let mut out = vec![0u8; payload.len()];
+        morloc_runtime_types::compression::parallel_decompress_frames(&c.frames, &c.bytes, &mut out).unwrap();
+        assert!(out == payload);
+
+        for _ in 0..8 {
+            compress_slice(payload.as_ptr() as AbsPtr, payload.len(), level).settle();
+        }
     }
 }

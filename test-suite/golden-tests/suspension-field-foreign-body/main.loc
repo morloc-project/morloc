@@ -8,7 +8,7 @@
 -- suspension's manifold has a serial context argument and is left out of
 -- the closure table ('computeClosureSchemas', which keeps only closures
 -- whose whole signature is native). The record's serializer then finds no
--- origin to reify: Rust panics in `Ops::shm_size` on `reify0().unwrap()`
+-- origin to reify: Rust panics in `Ops::shm_size` on the missing origin
 -- when the record is captured by an enclosing suspension.
 
 module main (pyHost, rustHost)

@@ -1,0 +1,14 @@
+-- Spec NEWT-8: a list literal of a newtype that derives Packable, in a
+-- language where it has no form of its own, is its representation.
+module main (count)
+
+import root-py
+
+newtype Pairs a b = [(a, b)]
+  deriving (Packable)
+
+source Py from "main.py" ("count_pairs" as countPairs)
+countPairs :: Pairs Str Int -> Int
+
+count :: Int
+count = countPairs ([("a", 1), ("b", 2)] :: Pairs Str Int)

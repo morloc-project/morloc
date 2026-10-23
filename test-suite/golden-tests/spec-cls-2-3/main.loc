@@ -1,0 +1,21 @@
+-- Spec CLS-2: a literal is packed by the instance that covers its type.
+-- `Map Str Str` is covered by R's instance, so the literal builds in R;
+-- `Map Int Str` is covered in Python.
+module main (viaStr, viaInt)
+
+import root-r
+import root-py
+import map-r
+import map-py
+
+source R from "main.R" ("rshow")
+rshow :: Map Str Str -> Str
+
+source Py from "main.py" ("pshow")
+pshow :: Map Int Str -> Str
+
+viaStr :: Str
+viaStr = rshow ([("k", "a"), ("j", "b")] :: Map Str Str)
+
+viaInt :: Str
+viaInt = pshow ([(2, "a"), (5, "b")] :: Map Int Str)

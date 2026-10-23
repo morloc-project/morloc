@@ -1,0 +1,91 @@
+-- Spec OWN-5: reading a field at a record's last read moves the field out,
+-- also when the record's Rust struct has its own `Drop`, which Rust forbids
+-- moving a field out of directly. From a value a source returns, from
+-- inside a field that is itself such a record, and from a record a tail
+-- loop carries. A field read twice, or with a part of it, is copied for
+-- its other reads. A constructor field is taken the same way from an enum
+-- with its own `Drop`, and a loop walking a chain it was lent reads its
+-- `Copy` fields as values.
+module main (second, nested, twoParts, wholeAndPart, twice, inTuple, spin, boxedTail, walkSum, consume)
+
+import root-rust
+
+record Pair where
+  a :: Int
+  b :: [Int]
+record Rust => Pair = "Pair"
+
+record Outer where
+  p :: Pair
+  q :: Int
+record Rust => Outer = "Outer"
+
+data Chain = End | Link Int Chain
+data Rust => Chain = "Chain"
+
+source Rust from "pair.rs" ("mk_pair" as mkPair, "remake" as remake, "total" as total, "mk_outer" as mkOuter, "mk_chain" as mkChain, "chain_len" as chainLen, "again" as again)
+
+mkPair :: Int -> Pair
+remake :: [Int] -> Pair
+total :: [Int] -> Int
+mkOuter :: Int -> Outer
+mkChain :: Int -> Chain
+chainLen :: Chain -> Int
+again :: Chain -> Chain
+
+--' The second field of a fresh pair
+second :: Int -> [Int]
+second n = .b (mkPair n)
+
+--' The inner pair's second field and the outer count
+nested :: Int -> ([Int], Int)
+nested n = .(.p.b, .q) (mkOuter n)
+
+--' Two parts of the inner pair, around the outer count
+twoParts :: Int -> ([Int], Int, Int)
+twoParts n = .(.p.b, .q, .p.a) (mkOuter n)
+
+--' A part of the inner pair, then the whole of it
+wholeAndPart :: Int -> ([Int], Pair)
+wholeAndPart n = .(.p.b, .p) (mkOuter n)
+
+--' The outer count, twice
+twice :: Int -> (Int, Int)
+twice n = .(.q, .q) (mkOuter n)
+
+--' A field of a pair inside a tuple, and the tuple's other element
+inTuple :: Int -> ([Int], Int)
+inTuple n = .(.0.b, .1) (mkPair n, n)
+
+loop :: Int -> Pair -> Int
+loop k p
+  ? k == 0 = total (.b p)
+  : loop (k - 1) (remake (.b p))
+
+--' The sum of the second field after k rebuilds
+spin :: Int -> Int
+spin k = loop k (mkPair 3)
+
+--' The length of a fresh chain's tail
+boxedTail :: Int -> Int
+boxedTail n = match (mkChain n)
+  | End = 0
+  | (Link _ rest) = chainLen rest
+
+sumFrom :: Int -> Chain -> Int
+sumFrom acc c = match c
+  | End = acc
+  | (Link x rest) = sumFrom (acc + x) rest
+
+--' The links summed, walking a chain it was lent
+walkSum :: Int -> Int
+walkSum n = sumFrom 0 (mkChain n)
+
+eat :: Int -> Chain -> Int
+eat acc c = match c
+  | End = acc
+  | (Link x rest) = eat (acc + x) (again rest)
+
+--' The links summed by a loop that owns the chain it takes apart
+consume :: Int -> Int
+consume n = eat 0 (mkChain n)

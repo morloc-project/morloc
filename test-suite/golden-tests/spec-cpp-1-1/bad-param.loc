@@ -1,0 +1,10 @@
+-- CPP-1: a `T&` source given a parameter is rejected (see ok.loc).
+module badparam (badParam)
+
+import .common
+
+twiceRef :: [Int] -> Int
+twiceRef v = bumpRef v + sizeV v
+
+badParam :: Int -> Int
+badParam n = twiceRef (mk n)

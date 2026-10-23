@@ -1,0 +1,32 @@
+-- `@form list` reads a list of records from a headerless delimited file:
+-- one row per record, columns bound to fields by declaration position.
+-- Rows may be comma-, tab- or whitespace-separated, or one JSON object
+-- per line. Each record has two Str and two Int fields so a swap of
+-- same-typed columns shows up in the output. Rows whose cells do not
+-- fit the record are rejected before the command runs.
+module main (rows, opts)
+
+import root-py
+
+record Row = Row
+  { name :: Str
+  , tag :: Str
+  , x :: Int
+  , y :: Int
+  , w :: Real
+  , ok :: Bool
+  }
+
+record Opt = Opt { label :: Str, n :: ?Int }
+
+--' Return the rows as read
+rows ::
+  --' @form list
+  [Row] -> [Row]
+rows xs = xs
+
+--' Return the rows as read
+opts ::
+  --' @form list
+  [Opt] -> [Opt]
+opts xs = xs

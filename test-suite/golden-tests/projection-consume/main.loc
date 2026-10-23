@@ -1,0 +1,146 @@
+-- A constructor field read from a value the frame just built may take the
+-- payload instead of copying it, but only when nothing else can read that
+-- payload (consumableProjectionLets). Rust and C++ pools: a `@try` result
+-- projected once (taken), a subject matched twice (copied), a two-field arm
+-- (copied), and a projection inside a tail loop, where the subject is built
+-- again on every iteration. Each must compile and give the same values.
+--
+-- Rust's generated match consumes the subject variable where C++ takes one
+-- field, so Rust takes the field only when nothing names the subject after
+-- the projection: not a second
+-- `match` (secondMatchRust), not `@show` in a throw arm (showAfterRust), and
+-- not from inside a `@try` body the subject was bound outside of
+-- (tryBodyRust); a `data` type the user maps to their own Rust enum takes
+-- its field out of the plain Box (userRust). A throw arm that shows the subject
+-- after the projection reads the payload, so neither language may take it
+-- (showAfterRust, showAfterCpp with n = 2), nor when the projection is in an
+-- earlier let's right-hand side (showLetCpp). The two arms of an unwrap
+-- never both run, so each takes its own field (unwrapRust, unwrapCpp: the
+-- value and the error message), also when the match yields the vector
+-- itself (unwrapVecCpp), with the error message intact when the Err arm
+-- runs (failRustUnwrap, failCppUnwrap), when the other arm names the
+-- subject (otherArmCpp), and in a tail loop (loopUnwrapCpp). The last line counts the moves
+-- in the generated Rust and the next in the generated C++, so a projection
+-- that could move but copies shows.
+module main
+  ( onceRust, twiceRust, pairRust, loopRust
+  , userRust, secondMatchRust, showAfterRust, tryBodyRust, unwrapRust, failRustUnwrap
+  , onceCpp, twiceCpp, pairCpp, loopCpp, showAfterCpp, showLetCpp, unwrapCpp, unwrapVecCpp, failCppUnwrap, otherArmCpp, loopUnwrapCpp
+  )
+
+import root-rust
+import root-cpp
+
+data Two = Two [U8] [U8]
+
+data Holder a = Hollow | Hold a
+data Rust => (Holder a) = "MyHolder<$1>" a
+
+mkRust :: U64 -> [U8]
+lenRust :: [U8] -> U64
+addRust :: U64 -> U64 -> U64
+failRust :: U64 -> [U8]
+source Rust from "h.rs" ("mk" as mkRust, "len" as lenRust, "add" as addRust, "fail" as failRust)
+
+mkCpp :: U64 -> [U8]
+lenCpp :: [U8] -> U64
+addCpp :: U64 -> U64 -> U64
+failCpp :: U64 -> [U8]
+source Cpp from "h.hpp" ("mk" as mkCpp, "len" as lenCpp, "add" as addCpp, "fail" as failCpp)
+
+onceRust :: U64 -> U64
+onceRust n = match (@try (mkRust n)) | (Ok v) = lenRust v | (Err _) = 0
+
+twiceRust :: U64 -> U64
+twiceRust n =
+  let t = @try (mkRust n)
+  in addRust (match t | (Ok v) = lenRust v | (Err _) = 0)
+             (match t | (Ok w) = lenRust w | (Err _) = 0)
+
+pairRust :: U64 -> U64
+pairRust n = match (Two (mkRust n) (mkRust (addRust n 1))) | (Two a b) = addRust (lenRust a) (lenRust b)
+
+loopRust :: U64 -> U64 -> U64
+loopRust k acc
+  ? k == 0 = acc
+  : loopRust (k - 1) (addRust acc (match (@try (mkRust k)) | (Ok v) = lenRust v | (Err _) = 0))
+
+userRust :: U64 -> U64
+userRust n = match (Hold (mkRust n)) | (Hold v) = lenRust v | Hollow = 0
+
+secondMatchRust :: U64 -> U64
+secondMatchRust n =
+  let t = @try (mkRust n)
+  in addRust (match t | (Ok v) = lenRust v | (Err _) = 0)
+             (match t | (Err _) = 1 | (Ok _) = 0)
+
+showAfterRust :: U64 -> U64
+showAfterRust n =
+  let t = @try (mkRust n)
+  in match t
+     | (Ok v) = (? lenRust v > 3 = lenRust v : @throw (@show t))
+     | (Err _) = 0
+
+tryBodyRust :: U64 -> U64
+tryBodyRust n =
+  let t = @try (mkRust n)
+  in match (@try (lenRust (match t | (Ok v) = v | (Err _) = mkRust 0)))
+     | (Ok m) = m
+     | (Err _) = 0
+
+onceCpp :: U64 -> U64
+onceCpp n = match (@try (mkCpp n)) | (Ok v) = lenCpp v | (Err _) = 0
+
+twiceCpp :: U64 -> U64
+twiceCpp n =
+  let t = @try (mkCpp n)
+  in addCpp (match t | (Ok v) = lenCpp v | (Err _) = 0)
+            (match t | (Ok w) = lenCpp w | (Err _) = 0)
+
+pairCpp :: U64 -> U64
+pairCpp n = match (Two (mkCpp n) (mkCpp (addCpp n 1))) | (Two a b) = addCpp (lenCpp a) (lenCpp b)
+
+loopCpp :: U64 -> U64 -> U64
+loopCpp k acc
+  ? k == 0 = acc
+  : loopCpp (k - 1) (addCpp acc (match (@try (mkCpp k)) | (Ok v) = lenCpp v | (Err _) = 0))
+
+showAfterCpp :: U64 -> U64
+showAfterCpp n =
+  let t = @try (mkCpp n)
+  in match t
+     | (Ok v) = (? lenCpp v > 3 = lenCpp v : @throw (@show t))
+     | (Err _) = 0
+
+showLetCpp :: U64 -> U64
+showLetCpp n =
+  let t = @try (mkCpp n)
+  in let k = match t | (Ok v) = lenCpp v | (Err _) = lenCpp (mkCpp 0)
+     in (? k > 3 = k : @throw (@show t))
+
+unwrapRust :: U64 -> U64
+unwrapRust n = match (@try (mkRust n)) | (Ok v) = lenRust v | (Err e) = @throw e
+
+unwrapCpp :: U64 -> U64
+unwrapCpp n = match (@try (mkCpp n)) | (Ok v) = lenCpp v | (Err e) = @throw e
+
+unwrapVecCpp :: U64 -> U64
+unwrapVecCpp n = lenCpp (match (@try (mkCpp n)) | (Ok v) = v | (Err e) = @throw e)
+
+failRustUnwrap :: U64 -> U64
+failRustUnwrap n = match (@try (failRust n)) | (Ok v) = lenRust v | (Err e) = @throw e
+
+failCppUnwrap :: U64 -> U64
+failCppUnwrap n = match (@try (failCpp n)) | (Ok v) = lenCpp v | (Err e) = @throw e
+
+otherArmCpp :: U64 -> U64
+otherArmCpp n =
+  let t = @try (mkCpp n)
+  in match t
+     | (Ok v) = lenCpp v
+     | (Err _) = lenCpp (match t | (Ok w) = w | (Err _) = mkCpp 1)
+
+loopUnwrapCpp :: U64 -> U64 -> U64
+loopUnwrapCpp k acc
+  ? k == 0 = acc
+  : match (@try (mkCpp k)) | (Ok v) = loopUnwrapCpp (k - 1) (addCpp acc (lenCpp v)) | (Err e) = @throw e

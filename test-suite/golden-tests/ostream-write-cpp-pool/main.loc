@@ -27,8 +27,8 @@ testPoolWriteRoundtrip path = idcpp (do
   @write 0 s [10, 20, 30]
   @close s
   Ok r <- @open path :: <IO> (Try Str (IStream Int))
-  Ok _tailv63 <- @next r)
-  _tailv63
+  Ok _tailv63 <- @next r
+  _tailv63)
 
 -- Three @write calls inside a single Cpp manifold so the pool-side
 -- state mutation across calls is exercised (each call holds the
@@ -43,5 +43,5 @@ testPoolWriteMulti path = idcpp (do
   @write 0 s [8]
   @close s
   Ok f <- @open path :: <IO> (Try Str (IFile Int))
-  Ok _tailv64 <- @flen f)
-  _tailv64
+  Ok _tailv64 <- @flen f
+  _tailv64)

@@ -1,0 +1,86 @@
+-- A remote label wraps exactly one call of the labeled function in a job.
+-- The arguments are evaluated by the caller (ANN-9), so a job runs only the
+-- labeled function (and whatever its own body calls). Each export reports
+-- the node every function ran on; the Makefile prints the running job
+-- count. A labeled suspension is a job per run (ANN-10).
+module main (whole, mid, mapped, defined, definedMap, rec, pyToCpp, cppToPy, pyToR, rToPy, pyToRs, rsToPy, failing, effectful, heldSusp)
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+source Py from "where.py" ("here", "join2", "tag", "boom", "here_io", "both")
+source Cpp from "where.hpp" ("chere", "ctag")
+source R from "where.R" ("rhere", "rtag")
+source Rust from "where.rs" ("rshere", "rstag")
+
+here :: Int -> Str
+join2 :: Str -> Str -> Str
+tag :: Str -> Str
+boom :: Int -> Str
+here_io :: Int -> <IO> Str
+both :: <IO> Str -> <IO> Str
+chere :: Int -> Str
+ctag :: Str -> Str
+rhere :: Int -> Str
+rtag :: Str -> Str
+rshere :: I64 -> Str
+rstag :: Str -> Str
+
+foo :: Str -> Str -> Str
+foo a b = join2 a b
+
+bar :: Int -> Str
+bar x = join2 (here x) (here (x + 1))
+
+count :: [Int] -> Int
+count xs = ? length xs == 0 = 0 : 1 + count (.[1:] xs)
+
+whole :: Int -> Str
+whole x = r@join2 (here x) (here (x + 1))
+
+mid :: Int -> Str
+mid x = tag (r@join2 (here x) (here (x + 1)))
+
+mapped :: [Int] -> [Str]
+mapped xs = map r@here xs
+
+defined :: Int -> Str
+defined x = tag (r@foo (here x) (here (x + 1)))
+
+definedMap :: [Int] -> [Str]
+definedMap xs = map r@bar xs
+
+rec :: [Int] -> Int
+rec xs = r@count xs
+
+pyToCpp :: Int -> Str
+pyToCpp x = tag (r@chere x)
+
+cppToPy :: Int -> Str
+cppToPy x = ctag (r@here x)
+
+pyToR :: Int -> Str
+pyToR x = tag (r@rhere x)
+
+rToPy :: Int -> Str
+rToPy x = rtag (r@here x)
+
+pyToRs :: I64 -> Str
+pyToRs x = tag (r@rshere x)
+
+rsToPy :: Int -> Str
+rsToPy x = rstag (r@here x)
+
+failing :: Int -> Str
+failing x = tag (r@boom x)
+
+hereAct :: <IO> Str
+hereAct = here_io 7
+
+effectful :: Int -> <IO> Str
+effectful x = r@here_io x
+
+heldSusp :: Int -> <IO> Str
+heldSusp x = both (r@hereAct)

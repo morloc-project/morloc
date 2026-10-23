@@ -1,6 +1,6 @@
--- A function value chosen at run time cannot be specialized away, and a
--- closure value cannot be shared between threads in Rust, so passing it to
--- a sourced function that needs `Sync` is rejected at build time.
+-- A function value chosen at run time cannot be specialized away, so it
+-- reaches a sourced function that needs `Sync` as a function value, which
+-- must be shareable between threads.
 
 module dynamic (pick)
 

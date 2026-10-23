@@ -54,50 +54,10 @@ unsafe fn level_or_errmsg(
         .ok()
 }
 
-// ── mlc_save: serialize to msgpack file ────────────────────────────────────
-
-// `level` is accepted and range-checked for ABI uniformity with
-// mlc_save_voidstar, but otherwise unused here: the msgpack file is not a
-// morloc packet and has no header in which to record a compression
-// algorithm. Compressing the file as a whole is the deferred "compressed
-// JSON/MPK input" workstream.
-pub(crate) unsafe fn mlc_save(
-    data: *const c_void,
-    schema: *const CSchema,
-    level: i64,
-    path: *const c_char,
-    errmsg: *mut *mut c_char,
-) -> i32 {
-    clear_errmsg(errmsg);
-    if level_or_errmsg(level, errmsg).is_none() {
-        return 1;
-    }
-
-    use crate::ffi::pack_with_schema;
-    use crate::utility::write_atomic;
-
-    let mut err: *mut c_char = ptr::null_mut();
-    let mut mpk: *mut c_char = ptr::null_mut();
-    let mut mpk_size: usize = 0;
-
-    let rc = pack_with_schema(data, schema, &mut mpk, &mut mpk_size, &mut err);
-    if rc != 0 {
-        set_errmsg(errmsg, &take_reason(err));
-        return 1;
-    }
-
-    let wrc = write_atomic(path, mpk as *const u8, mpk_size, &mut err);
-    libc::free(mpk as *mut c_void);
-    if wrc != 0 {
-        set_errmsg(errmsg, &take_reason(err));
-        return 1;
-    }
-    0
-}
-
 // ── mlc_save_json: serialize to JSON file ──────────────────────────────────
 
-// `level` is range-checked but otherwise unused; see mlc_save.
+// `level` is range-checked but otherwise unused: a JSON file has no header
+// in which to record a compression algorithm.
 pub(crate) unsafe fn mlc_save_json(
     data: *const c_void,
     schema: *const CSchema,
@@ -183,7 +143,6 @@ unsafe fn build_voidstar_data_packet_parts(
     errmsg: *mut *mut c_char,
 ) -> Option<VoidstarDataPacketParts> {
     use crate::packet_ffi::flatten_voidstar_to_buffer;
-
 
     let mut blob: *mut u8 = ptr::null_mut();
     let mut blob_size: usize = 0;
@@ -352,12 +311,12 @@ fn forget_dispatches_for_test() {
 /// Source of dispatch identities for the temp registry.
 ///
 /// Deliberately NOT the stream registry's `call_id`. That one is random and
-/// unique across processes because it tags SHM slots a cross-process sweeper
+/// unique across processes because it tags SHM slots a call sweep
 /// reads; this registry lives in one process, so a plain counter suffices --
 /// and it costs an atomic increment rather than a read from /dev/urandom on
 /// every manifold dispatch. Borrowing the stream id would also start tagging
 /// every `@open` in a pool as belonging to a call, changing which slots the
-/// stream sweeper considers its own.
+/// call sweep considers its own.
 static TEMP_OWNER_COUNTER: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
@@ -496,7 +455,7 @@ pub(crate) unsafe fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
         path: std::path::PathBuf::from(&path),
     });
     match CString::new(path) {
-        Ok(cs) => cs.into_raw(),
+        Ok(cs) => crate::error::malloc_cstr(&cs),
         Err(_) => {
             set_errmsg(errmsg, &MorlocError::Other("mlc_tmpfile: path contained NUL".into()));
             ptr::null_mut()
@@ -706,9 +665,6 @@ pub(crate) unsafe fn mlc_load(
 ) -> *mut c_void {
     clear_errmsg(errmsg);
 
-    use crate::utility::read_binary_file;
-    use crate::cli::load_morloc_data_file;
-
     if path.is_null() {
         set_errmsg(errmsg, &MorlocError::NullPointer);
         return ptr::null_mut();
@@ -719,74 +675,13 @@ pub(crate) unsafe fn mlc_load(
         return ptr::null_mut();
     }
 
-    // Stream-packet path: a MORLOC_STREAM_PACKET file holds its `[a]`
-    // list value across many sub-packets (constant-memory gathers write
-    // one sub-packet per flush). The data-packet loaders below only
-    // understand single self-contained packets, so detect the stream
-    // shape first and materialise every sub-packet into one voidstar
-    // `[a]` list. Non-stream files fall through to the existing paths.
-    match crate::cli::peek_packet_header_via_pread(path) {
-        Some(h) if h.is_stream() => {
-            let path_str = CStr::from_ptr(path).to_string_lossy().into_owned();
-            let requested = (!schema.is_null()).then(|| CSchema::to_rust(schema));
-            match crate::stream::shared_load_stream_file_as_array(&path_str, requested.as_ref()) {
-                Ok(ptr) => return ptr as *mut c_void,
-                Err(e) => {
-                    set_errmsg(errmsg, &e);
-                    return ptr::null_mut();
-                }
-            }
-        }
-        _ => { /* not a stream packet; fall through */ }
-    }
-
-    // Layer 2 fast path: large MESG+VOIDSTAR packets `pread` straight
-    // into a fresh SHM allocation, skipping the libc::malloc + read +
-    // shmalloc + memcpy chain. On failure (e.g. schema mismatch), the
-    // error is propagated to the caller via errmsg, not swallowed to
-    // stderr -- @catch downstream needs the classified failure to
-    // intercept.
-    match crate::cli::try_load_voidstar_packet_via_mmap(path, schema) {
-        Ok(Some(ptr)) => return ptr as *mut c_void,
-        Ok(None) => { /* fall through */ }
+    match crate::cli::load_packet_file(path, schema) {
+        Ok(p) => p,
         Err(e) => {
             set_errmsg(errmsg, &e);
-            return ptr::null_mut();
+            ptr::null_mut()
         }
     }
-    // Compressed-VOIDSTAR fast path: stream-decompress a zstd frame
-    // directly into a fresh SHM allocation. Same memory shape as the
-    // uncompressed mmap path -- one X of the decompressed payload --
-    // and avoids the multi-Vec / libc::malloc round-trip the generic
-    // fallback below takes.
-    match crate::cli::try_load_compressed_voidstar_via_shm(path, schema) {
-        Ok(Some(ptr)) => return ptr as *mut c_void,
-        Ok(None) => { /* fall through */ }
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            return ptr::null_mut();
-        }
-    }
-
-    let mut err: *mut c_char = ptr::null_mut();
-    let mut file_size: usize = 0;
-    let data = read_binary_file(path, &mut file_size, &mut err);
-    if data.is_null() {
-        // Propagate the file-read error verbatim so the caller sees
-        // (for example) "no such file or directory" rather than a
-        // generic NULL return; @catch relies on this text.
-        set_errmsg(errmsg, &take_reason(err));
-        return ptr::null_mut();
-    }
-
-    // Decompression is now handled inside `load_morloc_data_file`,
-    // which is the single choke point all packet-load paths share.
-    // Any error message it sets flows through to the caller's errmsg.
-    let result = load_morloc_data_file(path, data, file_size, schema, &mut err);
-    if result.is_null() {
-        set_errmsg(errmsg, &take_reason(err));
-    }
-    result
 }
 
 // ── mlc_hash: hash voidstar data ───────────────────────────────────────────
@@ -807,10 +702,30 @@ pub(crate) unsafe fn mlc_hash(
 
     let hex = format!("{:016x}", hash);
     match CString::new(hex) {
-        Ok(cs) => cs.into_raw(),
+        Ok(cs) => crate::error::malloc_cstr(&cs),
         Err(_) => {
             set_errmsg(errmsg, &MorlocError::Other("CString error".into()));
             ptr::null_mut()
+        }
+    }
+}
+
+// -- mlc_compare: order two voidstar values --
+
+/// -1, 0 or 1 as `a` orders before, with or after `b` (INTR-7).
+pub(crate) unsafe fn mlc_compare(
+    a: *const c_void,
+    b: *const c_void,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> libc::c_int {
+    clear_errmsg(errmsg);
+    let rs = CSchema::to_rust(schema);
+    match crate::compare::compare_voidstar_values(a as *const u8, b as *const u8, &rs) {
+        Ok(o) => o as libc::c_int,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            0
         }
     }
 }
@@ -1054,12 +969,6 @@ pub(crate) unsafe fn mlc_open_channel(
     }
 }
 
-/// Whether `handle` is an open channel. A pool that sizes its workers by
-/// how many are blocked counts a channel read or write as blocking.
-pub(crate) fn mlc_is_channel(handle: i64) -> bool {
-    crate::stream::shared_is_channel(handle)
-}
-
 /// Settle a channel whose readers are done with it; see
 /// `shared_settle_channel`. On a failure a reader was handed, returns false
 /// with the producer's message, unchanged, in `errmsg`.
@@ -1069,7 +978,7 @@ pub(crate) unsafe fn mlc_settle(handle: i64, errmsg: *mut *mut c_char) -> bool {
         Ok(()) => true,
         Err(MorlocError::Other(msg)) => {
             match std::ffi::CString::new(msg.replace('\0', " ")) {
-                Ok(c) => *errmsg = libc::strdup(c.as_ptr()),
+                Ok(c) => *errmsg = crate::error::malloc_cstr(&c),
                 Err(_) => set_errmsg(errmsg, &MorlocError::Other("the stream's producer failed".into())),
             }
             false
@@ -1080,7 +989,6 @@ pub(crate) unsafe fn mlc_settle(handle: i64, errmsg: *mut *mut c_char) -> bool {
         }
     }
 }
-
 
 /// `@open path :: <IO> (IStream T)` -- typed open. Like `mlc_open_ostream`
 /// the codegen threads the element schema string for `T`. For a real file
@@ -1256,7 +1164,7 @@ pub(crate) unsafe fn mlc_fschema(
     };
     match crate::stream::read_schema_from_file(path_str) {
         Ok(schema) => match CString::new(schema) {
-            Ok(cs) => cs.into_raw(),
+            Ok(cs) => crate::error::malloc_cstr(&cs),
             Err(e) => {
                 set_errmsg(errmsg, &MorlocError::Other(format!(
                     "mlc_fschema: schema string contains NUL: {}", e
@@ -1361,6 +1269,38 @@ pub(crate) unsafe fn mlc_next(
         Err(e) => {
             set_errmsg(errmsg, &e);
             ptr::null_mut()
+        }
+    }
+}
+
+/// A pool's decoder for `mlc_next_with`: 0 when it decoded the batch,
+/// nonzero when it failed and kept its own error.
+pub type NextDecode = unsafe extern "C" fn(ctx: *mut c_void, data: *const c_void, space: crate::voidstar::MorlocSpace) -> i32;
+
+/// `@next` decoding the batch in place (SLOT-25): 0 when `decode` read it,
+/// 1 when `decode` failed (whatever the runtime did after), -1 with
+/// `errmsg` set when the runtime failed.
+pub(crate) unsafe fn mlc_next_with(
+    handle: i64,
+    decode: Option<NextDecode>,
+    ctx: *mut c_void,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    clear_errmsg(errmsg);
+    let Some(decode) = decode else {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_next_with: no decoder".into()));
+        return -1;
+    };
+    let mut rc = 0;
+    let res = crate::stream::shared_next_with(handle, &mut |data, space| {
+        rc = decode(ctx, data as *const c_void, space);
+    });
+    match res {
+        _ if rc != 0 => 1,
+        Ok(()) => 0,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
         }
     }
 }
@@ -1651,40 +1591,6 @@ pub(crate) unsafe fn mlc_ifile_length(
 // string owned by the caller. The caller frees with libc::free. Errors
 // return NULL and set errmsg.
 
-pub(crate) unsafe fn mlc_handle_pack_path(
-    handle: i64,
-    out_kind: *mut u8,
-    errmsg: *mut *mut c_char,
-) -> *mut c_char {
-    clear_errmsg(errmsg);
-    let kind = match crate::stream::shared_handle_kind(handle) {
-        Ok(k) => k,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            return ptr::null_mut();
-        }
-    };
-    let path = match crate::stream::shared_handle_path(handle) {
-        Ok(p) => p,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            return ptr::null_mut();
-        }
-    };
-    if !out_kind.is_null() {
-        *out_kind = kind;
-    }
-    match CString::new(path) {
-        Ok(cs) => libc::strdup(cs.as_ptr()),
-        Err(_) => {
-            set_errmsg(errmsg, &MorlocError::Other(
-                "mlc_handle_pack_path: path contains NUL byte".into(),
-            ));
-            ptr::null_mut()
-        }
-    }
-}
-
 // Suballoc-cost lookup for the per-language `get_shm_size` sizing pass on
 // embedded stream-handle fields. Since bridge codecs now uniformly emit
 // TAG_HANDLE (the intra-nexus fast path -- bare slot id in the inline
@@ -1699,41 +1605,6 @@ pub(crate) unsafe fn mlc_handle_path_len(
 ) -> i64 {
     clear_errmsg(errmsg);
     0
-}
-
-pub(crate) unsafe fn mlc_handle_unpack_path(
-    path: *const c_char,
-    kind: u8,
-    errmsg: *mut *mut c_char,
-) -> i64 {
-    clear_errmsg(errmsg);
-    if path.is_null() {
-        set_errmsg(errmsg, &MorlocError::Other(
-            "mlc_handle_unpack_path: null path".into(),
-        ));
-        return -1;
-    }
-    let path_str = match CStr::from_ptr(path).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_errmsg(errmsg, &MorlocError::Other(
-                "mlc_handle_unpack_path: path is not valid UTF-8".into(),
-            ));
-            return -1;
-        }
-    };
-    // Route through the shared-registry `open_dispatch`. The fresh
-    // slot's `call_id` is tagged from the thread-local set by the
-    // daemon dispatch loop, so the per-call sweeper cleans it up at
-    // scope exit. (Replaces the prior `eval_arena::record_slot_if_active`
-    // bookkeeping under the process-local registry.)
-    match crate::stream::open_dispatch(path_str, kind) {
-        Ok(handle) => handle,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            -1
-        }
-    }
 }
 
 // ── Voidstar wire-layout helpers for stream handles ───────────────────────
@@ -2056,7 +1927,7 @@ pub(crate) unsafe fn mlc_read_handle_voidstar(
 // ── stdio-server bridge FFI ────────────────────────────────────────────────
 
 /// Return the `STDIO_KIND_*` byte for a stdio-bound slot. Used by the
-/// nexus stdio server to route a `WRITE_STDIO` request to fd 1 or fd 2.
+/// nexus stdio server to route a write to fd 1 or fd 2.
 ///
 /// Returns 0 on success (kind byte written to `*kind_out`), -1 if the
 /// handle is not stdio-bound (no errmsg), or a positive error code
@@ -2076,7 +1947,7 @@ pub(crate) unsafe fn mlc_stdio_slot_kind(
 
 /// Build a MORLOC_STREAM_PACKET prefix (32-byte header + SCHEMA_STRING
 /// metadata block) from a stdio OStream slot's cached element schema.
-/// Used by the nexus stdio server on the first `WRITE_STDIO` per slot
+/// Used by the nexus stdio server on the first write per slot
 /// to emit the stream header before any sub-packet bytes flow.
 ///
 /// On success returns 0 and sets `*buf_out` to a libc::malloc-owned
@@ -2303,7 +2174,9 @@ mod tests {
         let mut err: *mut c_char = ptr::null_mut();
         let p = mlc_tmpfile(&mut err);
         assert!(!p.is_null());
-        CString::from_raw(p).into_string().unwrap()
+        let s = CStr::from_ptr(p).to_str().unwrap().to_owned();
+        libc::free(p as *mut libc::c_void);
+        s
     }
 
     #[test]
@@ -2438,15 +2311,13 @@ mod tests {
     }
 
     unsafe fn reason(err: *mut c_char) -> Option<String> {
-        (!err.is_null()).then(|| CString::from_raw(err).into_string().unwrap())
+        (!err.is_null()).then(|| {
+            let s = CStr::from_ptr(err).to_str().unwrap().to_owned();
+            libc::free(err as *mut libc::c_void);
+            s
+        })
     }
 
-    fn list_schema() -> *mut CSchema {
-        let mut err: *mut c_char = ptr::null_mut();
-        let s = unsafe { crate::ffi::parse_schema(c"as".as_ptr(), &mut err) };
-        assert!(!s.is_null());
-        s
-    }
 
     #[test]
     fn loading_a_missing_file_fails_with_a_reason() {
@@ -2508,6 +2379,67 @@ mod tests {
         unsafe { crate::ffi::free_schema(schema) };
     }
 
+    fn schema_of(code: &std::ffi::CStr) -> *mut CSchema {
+        let mut err: *mut c_char = ptr::null_mut();
+        let s = unsafe { crate::ffi::parse_schema(code.as_ptr(), &mut err) };
+        assert!(!s.is_null());
+        s
+    }
+
+    fn list_schema() -> *mut CSchema {
+        schema_of(c"as")
+    }
+
+    // A saved file loads only at the type it was saved with, by
+    // every load path: uncompressed or compressed, small or past the
+    // fast-path threshold, under a packet name or a `.json` name.
+    #[test]
+    fn a_saved_file_loads_only_at_its_own_type() {
+        let _shm = crate::init_test_shm();
+        let ints = schema_of(c"aj");
+        let reals = schema_of(c"af8");
+        // A pseudo-random sequence, so a large list stays large compressed.
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut noise = |n: usize| -> String {
+            let v: Vec<String> = (0..n).map(|_| {
+                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                (x >> 1).to_string()
+            }).collect();
+            format!("[{}]", v.join(","))
+        };
+        for (n, level, ext) in [(3usize, 0i64, "bin"), (3, 3, "bin"), (300_000, 0, "bin"),
+                                (300_000, 3, "bin"), (3, 0, "json"), (3, 3, "mpk")] {
+            let cjson = CString::new(noise(n)).unwrap();
+            let mut err: *mut c_char = ptr::null_mut();
+            let value = unsafe { mlc_read(cjson.as_ptr(), ints, &mut err) };
+            assert!(!value.is_null());
+            let path = std::env::temp_dir()
+                .join(format!("morloc-load-type-{}-{n}-{level}.{ext}", std::process::id()));
+            let cpath = CString::new(path.to_str().unwrap()).unwrap();
+            let rc = unsafe { mlc_save_voidstar(value, ints, level, cpath.as_ptr(), &mut err) };
+            assert_eq!(rc, 0, "{:?}", unsafe { reason(err) });
+            if n > 3 && level > 0 {
+                let size = std::fs::metadata(&path).unwrap().len();
+                assert!(size >= 1 << 20, "a large compressed file is {size} bytes, below the fast path");
+            }
+            let wrong = unsafe { mlc_load(cpath.as_ptr(), reals, &mut err) };
+            let refused = unsafe { reason(err) }.is_some();
+            err = ptr::null_mut();
+            let right = unsafe { mlc_load(cpath.as_ptr(), ints, &mut err) };
+            let _ = std::fs::remove_file(&path);
+            assert!(wrong.is_null() && refused, "n={n} level={level} .{ext} loaded at the wrong type");
+            assert!(!right.is_null(), "n={n} level={level} .{ext}: {:?}", unsafe { reason(err) });
+            unsafe {
+                let _ = crate::shm::shfree(value as *mut u8);
+                let _ = crate::shm::shfree(right as *mut u8);
+            }
+        }
+        unsafe {
+            crate::ffi::free_schema(ints);
+            crate::ffi::free_schema(reals);
+        }
+    }
+
     #[test]
     fn loading_malformed_json_keeps_the_json_reason() {
         let _shm = crate::init_test_shm();
@@ -2529,11 +2461,6 @@ mod c_abi {
     use super::*;
 
     #[no_mangle]
-    pub unsafe extern "C" fn mlc_save(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
-        super::mlc_save(data, schema, level, path, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
         super::mlc_save_json(data, schema, level, path, errmsg)
     }
@@ -2541,11 +2468,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn morloc_run_temp_root(run_dir: *const c_char, user_tmpdir: *const c_char) -> *mut c_char {
         super::morloc_run_temp_root(run_dir, user_tmpdir)
-    }
-
-    #[no_mangle]
-    pub extern "C" fn morloc_remove_own_temps() {
-        super::morloc_remove_own_temps()
     }
 
     #[no_mangle]
@@ -2584,13 +2506,13 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn mlc_read(json_str: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
-        super::mlc_read(json_str, schema, errmsg)
+    pub unsafe extern "C" fn mlc_compare(a: *const c_void, b: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> libc::c_int {
+        super::mlc_compare(a, b, schema, errmsg)
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn mlc_probe_packet(path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
-        super::mlc_probe_packet(path, errmsg)
+    pub unsafe extern "C" fn mlc_read(json_str: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void {
+        super::mlc_read(json_str, schema, errmsg)
     }
 
     #[no_mangle]
@@ -2606,11 +2528,6 @@ mod c_abi {
     #[no_mangle]
     pub unsafe extern "C" fn mlc_open_channel(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64 {
         super::mlc_open_channel(schema_str, errmsg)
-    }
-
-    #[no_mangle]
-    pub extern "C" fn mlc_is_channel(handle: i64) -> bool {
-        super::mlc_is_channel(handle)
     }
 
     #[no_mangle]
@@ -2664,6 +2581,11 @@ mod c_abi {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn mlc_next_with(handle: i64, decode: super::NextDecode, ctx: *mut c_void, errmsg: *mut *mut c_char) -> i32 {
+        super::mlc_next_with(handle, Some(decode), ctx, errmsg)
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn mlc_next_frame(handle: i64, eof: *mut i32, errmsg: *mut *mut c_char) -> *mut c_void {
         super::mlc_next_frame(handle, eof, errmsg)
     }
@@ -2709,18 +2631,8 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn mlc_handle_pack_path(handle: i64, out_kind: *mut u8, errmsg: *mut *mut c_char) -> *mut c_char {
-        super::mlc_handle_pack_path(handle, out_kind, errmsg)
-    }
-
-    #[no_mangle]
     pub unsafe extern "C" fn mlc_handle_path_len(_handle: i64, errmsg: *mut *mut c_char) -> i64 {
         super::mlc_handle_path_len(_handle, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn mlc_handle_unpack_path(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64 {
-        super::mlc_handle_unpack_path(path, kind, errmsg)
     }
 
     #[no_mangle]

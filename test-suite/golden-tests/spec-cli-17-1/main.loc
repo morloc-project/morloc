@@ -1,0 +1,35 @@
+-- Spec CLI-17: how a cell spells each type. Bool in any case; integers
+-- in range with no sign but `-`; an unbounded Int in a record list but a
+-- 64-bit Int in a Table; reals including nan and inf but not NaN, .5 or an
+-- overflowing spelling; enums by constructor name; Str verbatim.
+module main (rows, table)
+
+import root-py
+import table-py
+
+source Py from "src.py" ("py_id")
+py_id :: a -> a
+
+data Strand = Plus | Minus
+
+record Cells = Cells
+  { b :: Bool
+  , i :: I8
+  , n :: Int
+  , r :: Real
+  , f :: F32
+  , e :: Strand
+  , s :: Str
+  }
+
+--' Records as read, through a Python pool
+rows ::
+  --' @form table
+  [Cells] -> [Cells]
+rows xs = py_id xs
+
+--' A table as read, through a Python pool
+table ::
+  --' @form table
+  Table n {x=Int, y=Str} -> Table n {x=Int, y=Str}
+table t = py_id t

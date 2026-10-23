@@ -1,10 +1,9 @@
 -- @save / @load round-trip with @load at the tail position of the
 -- do-block (no intermediate `x <- @load path; x` binding). Covers all
--- three save formats: flat binary, MessagePack, and JSON.
+-- save formats: flat binary and JSON.
 
 module main
   ( roundTripBin
-  , roundTripMsg
   , roundTripJson
   )
 
@@ -18,12 +17,6 @@ roundTripBin x path = do
   @save 0 path (identity x)
   Ok _tailv25 <- @load path
   _tailv25
-
-roundTripMsg :: Int -> Str -> <IO> Int
-roundTripMsg x path = do
-  @savem path (identity x)
-  Ok _tailv26 <- @load path
-  _tailv26
 
 roundTripJson :: Int -> Str -> <IO> Int
 roundTripJson x path = do

@@ -110,6 +110,7 @@ import qualified Morloc.BaseTypes as BT
   'False'    { Located _ TokFalse _ }
   'type'     { Located _ TokType _ }
   'newtype'  { Located _ TokNewtype _ }
+  'deriving' { Located _ TokDeriving _ }
   'data'     { Located _ TokData _ }
   'record'   { Located _ TokRecord _ }
   'object'   { Located _ TokObject _ }
@@ -345,10 +346,10 @@ typedef_decl :: { Loc CstExpr }
       { at $1 (CTypE (CstTypeAlias Nothing (TV (getName $3), $4) ($7, False))) }
   | 'type' '(' UPPER typedef_params ')'
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
-  | 'newtype' UPPER typedef_params '=' type
-      { at $1 (CTypE (CstNewtype (TV (getName $2), $3) $5)) }
-  | 'newtype' '(' UPPER typedef_params ')' '=' type
-      { at $1 (CTypE (CstNewtype (TV (getName $3), $4) $7)) }
+  | 'newtype' UPPER typedef_params '=' type opt_deriving
+      { at $1 (CTypE (CstNewtype (TV (getName $2), $3) $5 $6)) }
+  | 'newtype' '(' UPPER typedef_params ')' '=' type opt_deriving
+      { at $1 (CTypE (CstNewtype (TV (getName $3), $4) $7 $8)) }
   -- @newtype X@ / @newtype (X a)@ with no RHS is a built-in primitive
   -- declaration: nominal, opaque, owns its per-language forms. Reuses
   -- 'CstTypeAliasForward' since the desugar is identical
@@ -361,10 +362,10 @@ typedef_decl :: { Loc CstExpr }
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
   -- A `data` declaration: a closed set of constructors, each with zero or
   -- more argument types.
-  | 'data' UPPER typedef_params data_ctors
-      { at $1 (CTypE (CstDataDef (TV (getName $2), $3) $4)) }
-  | 'data' '(' UPPER typedef_params ')' data_ctors
-      { at $1 (CTypE (CstDataDef (TV (getName $3), $4) $6)) }
+  | 'data' UPPER typedef_params data_ctors opt_deriving
+      { at $1 (CTypE (CstDataDef (TV (getName $2), $3) $4 $5)) }
+  | 'data' '(' UPPER typedef_params ')' data_ctors opt_deriving
+      { at $1 (CTypE (CstDataDef (TV (getName $3), $4) $6 $7)) }
   -- Bind the type to a native form the target language already has, the
   -- same way `type Lang => X = "..."` does.
   | 'data' UPPER '=>' typedef_term '=' concrete_rhs
@@ -372,7 +373,10 @@ typedef_decl :: { Loc CstExpr }
   | 'data' LOWER '=>' typedef_term '=' concrete_rhs
       { at $1 (CTypE (CstTypeAlias (Just $2) $4 $6)) }
   | nam_type typedef_term 'where' VLBRACE nam_entry_list_loc VRBRACE
-      {% checkRecordTypeKeys (fst $1) $5 >> return (at (fst $1) (CTypE (CstNamTypeWhere (snd $1) $2 $5))) }
+      {% checkRecordTypeKeys (fst $1) $5 >> return (at (fst $1) (CTypE (CstNamTypeWhere (snd $1) $2 $5 []))) }
+  -- A record's deriving clause precedes its field block.
+  | nam_type typedef_term deriving_clause 'where' VLBRACE nam_entry_list_loc VRBRACE
+      {% checkRecordTypeKeys (fst $1) $6 >> return (at (fst $1) (CTypE (CstNamTypeWhere (snd $1) $2 $6 $3))) }
   | nam_type typedef_term '=' nam_constructor opt_nam_entries
       {% checkRecordTypeKeys (fst $1) $5 >> return (at (fst $1) (CTypE (CstNamTypeLegacy Nothing (snd $1) $2 $4 $5))) }
   | nam_type UPPER '=>' typedef_term '=' nam_constructor opt_nam_entries
@@ -398,6 +402,19 @@ nam_constructor :: { (Text, Bool, [TypeU]) }
 -- Each constructor carries the `=` or `|` that introduces it: a docstring
 -- written above a constructor sits above that token, which is where the
 -- lexer attaches it.
+-- The classes a declaration derives (DERIV-1).
+opt_deriving :: { [(Located, Text)] }
+  : {- empty -}                       { [] }
+  | deriving_clause                   { $1 }
+
+deriving_clause :: { [(Located, Text)] }
+  : 'deriving' UPPER                  { [($2, getName $2)] }
+  | 'deriving' '(' deriving_list ')'  { $3 }
+
+deriving_list :: { [(Located, Text)] }
+  : UPPER                             { [($1, getName $1)] }
+  | deriving_list ',' UPPER           { $1 ++ [($3, getName $3)] }
+
 data_ctors :: { [(Located, Located, Text, [TypeU])] }
   : '=' data_ctor                 { [withLead $1 $2] }
   | data_ctors '|' data_ctor      { $1 ++ [withLead $2 $3] }

@@ -1,0 +1,7 @@
+module helper (h)
+  h :: Int -> Int
+  h x = x
+module lib (f)
+  import helper
+  f :: Int -> Int
+  f x = h x

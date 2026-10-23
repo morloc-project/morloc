@@ -1,0 +1,87 @@
+# Data crossing
+
+How each type's values cross between languages: wire form, round trip, copying and sharing. Prefix: WIRE.
+
+### WIRE-1 A value crosses between languages unchanged
+Intent: proposed
+Tests: spec-wire-1-1, spec-wire-1-2
+Code: conforms 2026-10-21
+
+A value of a serializable type that crosses from one language to another
+arrives equal to the value sent, and crossing back returns the original. The
+transport (inline, shared memory or temp file) and its thresholds never
+change the value delivered.
+
+### WIRE-2 `Int` arrives as the receiving language's default integer
+Intent: proposed
+Code: conforms 2026-10-21
+
+`[[Int]]_L` is NUM-1's. A program that needs one width everywhere uses a
+fixed-width type.
+
+### WIRE-3 An `Int` that does not fit the receiving language fails the crossing
+Intent: proposed
+Code: deviates (../runtime/issues/value-encoding.md)
+
+The crossing fails, naming the value and the receiving language; it never
+wraps or truncates (NUM-4).
+
+### WIRE-4 A Python `Vector n Int` is a numpy array of dtype object
+Intent: ruled 2026-10-07
+Code: conforms 2026-10-21
+
+`Int` is unbounded in Python, so its vectors keep Python integers. A vector
+of a fixed-width element type gets the matching native dtype: `I64` is
+`int64`.
+
+### WIRE-5 A suspension crosses as a callable of no arguments, never as its result
+Intent: ruled 2026-09-12
+Code: conforms 2026-10-21
+
+`<E> T` crossing between languages is a closure that runs its computation in
+its home language each time it is forced. It is never run by the crossing and
+never serialized under `T`'s schema (see `EFF`).
+
+### WIRE-6 A function crosses as a closure over its home language
+Intent: proposed
+Code: conforms 2026-10-21
+
+A function value passed to another language is called there as a native
+callable; each call runs the function in the language where it was built
+(see `EFF`).
+
+### WIRE-7 A float crosses bit for bit, NaN payloads included
+Intent: ruled 2026-10-14
+Code: deviates (../runtime/issues/value-encoding.md: Python and R `F32` scalars)
+
+An `F32` or `F64` value, alone or in a vector, arrives with the bits it was
+sent with when the receiving type has the same width, signalling NaNs
+included. A crossing between widths converts to the nearest value (NUM-4).
+
+### WIRE-8 A `Bool` byte is not validated on read
+Intent: ruled 2026-10-14
+Code: deviates (../runtime/issues/value-encoding.md)
+
+Writers write only 0 or 1. A reader may meet another byte only in corrupt
+data, and pays nothing to detect it: the value it reads is defined, but
+language-specific (C++ and Rust read it as false), never undefined
+behaviour.
+
+Why: a check on every `Bool` costs every program; corrupt data is caught by
+checks made for it, not by a coincidental `Bool`.
+
+### WIRE-9 A float in JSON is the shortest text that reads back as the same value
+Intent: ruled 2026-10-15
+Tests: spec-wire-9-1
+Code: conforms 2026-10-15
+
+A finite `F64` or `F32` is written in JSON with the fewest significant
+digits that read back as the same value of its type, laid out as C's
+`%.15g` (`%.7g` for `F32`) lays out digits: a normal `F64` that layout
+already wrote exactly is written as before. An `F32` is read from its
+decimal text with one rounding, never through an `F64`, and a decimal
+beyond the range of its type is an error, not an infinity. How a
+non-finite float is written is open (IFACE-9).
+
+Why: `%.15g` and `%.7g` lost digits, so no JSON interface round tripped,
+and `F64::MAX` was written as a number above it.

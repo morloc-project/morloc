@@ -1,3 +1,8 @@
+/// The liveness probe's path and its whole answer: every HTTP server answers
+/// `GET`/`HEAD` on it without a credential, and says nothing more.
+pub const LIVENESS_PATH: &str = "/health";
+pub const LIVENESS_BODY: &[u8] = br#"{"status":"ok"}"#;
+
 /// Whether an `Authorization` header value carries exactly `token` as a
 /// bearer token. The comparison takes the same time wherever the first
 /// mismatch is; only the length is compared first, and it is not secret.

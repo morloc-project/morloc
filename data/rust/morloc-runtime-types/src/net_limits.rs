@@ -1,4 +1,4 @@
-//! How long a remote client may take over a request (model/network.md NET-2).
+//! How long a remote client may take over a request (model/runtime/network.md NET-2).
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -15,6 +15,28 @@ pub fn body_limit(len: usize) -> Duration {
     BODY_BASE + Duration::from_secs(len as u64 / BODY_MIN_RATE)
 }
 
+/// How long a server reads and discards what a client still sends after a
+/// refusal, so the client can read it (NET-10).
+pub const LINGER: Duration = Duration::from_secs(2);
+
+/// Stop writing to `fd`, discard what the client still sends for up to
+/// `LINGER`, then close it (NET-10).
+///
+/// # Safety
+///
+/// `fd` must be an open socket the caller owns; it is closed.
+pub unsafe fn linger_close(fd: libc::c_int) {
+    libc::shutdown(fd, libc::SHUT_WR);
+    let until = Instant::now() + LINGER;
+    let mut buf = [0u8; 65536];
+    while let Ok(n) = recv_by(fd, buf.as_mut_ptr(), buf.len(), until) {
+        if n == 0 {
+            break;
+        }
+    }
+    libc::close(fd);
+}
+
 /// Read up to `len` bytes into `buf` from `fd`, giving up at `until`
 /// however the bytes trickle in. `Ok(0)` is end of file.
 ///
@@ -22,11 +44,24 @@ pub fn body_limit(len: usize) -> Duration {
 ///
 /// `buf` must be valid for `len` bytes of writes.
 pub unsafe fn recv_by(fd: libc::c_int, buf: *mut u8, len: usize, until: Instant) -> io::Result<usize> {
+    recv_flags_by(fd, buf, len, until, 0)
+}
+
+/// As `recv_by`, but the bytes stay queued on the socket.
+///
+/// # Safety
+///
+/// `buf` must be valid for `len` bytes of writes.
+pub unsafe fn peek_by(fd: libc::c_int, buf: *mut u8, len: usize, until: Instant) -> io::Result<usize> {
+    recv_flags_by(fd, buf, len, until, libc::MSG_PEEK)
+}
+
+unsafe fn recv_flags_by(fd: libc::c_int, buf: *mut u8, len: usize, until: Instant, flags: libc::c_int) -> io::Result<usize> {
     loop {
         if Instant::now() >= until {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "the client took too long to send its request"));
         }
-        let n = libc::recv(fd, buf as *mut libc::c_void, len, libc::MSG_DONTWAIT);
+        let n = libc::recv(fd, buf as *mut libc::c_void, len, libc::MSG_DONTWAIT | flags);
         if n >= 0 {
             return Ok(n as usize);
         }

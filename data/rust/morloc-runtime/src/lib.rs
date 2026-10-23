@@ -1,5 +1,5 @@
 #[cfg(not(panic = "unwind"))]
-compile_error!("morloc needs panic = \"unwind\" (model/panic.md PANIC-8)");
+compile_error!("morloc needs panic = \"unwind\" (model/runtime/panic.md PANIC-8)");
 // Modules that come entirely (error, hash, schema, cschema) or
 // partially (packet, null_check) from morloc-runtime-types live as
 // thin re-export shims in this crate so existing `crate::error::*`,
@@ -11,10 +11,15 @@ pub mod error;
 pub mod schema;
 pub mod recur;
 pub mod walk;
+pub mod compare;
 #[cfg(test)]
 pub mod deep_tests;
 #[cfg(test)]
+mod arena_ref_tests;
+#[cfg(test)]
 mod alloc_bench;
+#[cfg(test)]
+mod stream_bench;
 #[cfg(test)]
 mod layout_bench;
 #[cfg(test)]
@@ -59,20 +64,24 @@ mod c_abi_prototypes;
 pub mod eval_arena;
 pub mod eval_ffi;
 pub mod stream;
+mod stream_walk;
+mod stream_format;
 mod write_behind;
+pub mod custody;
 pub mod handle_scan;
 pub mod arrow_shm;
 pub mod lease;
 pub mod arrow_ffi;
 pub mod arrow_ipc_reader;
+pub mod delimited;
 pub mod pool_ffi;
+pub mod fork_pool;
 pub mod crash;
 pub mod daemon_ffi;
 pub mod panic_ffi;
 pub mod router_ffi;
 pub mod null_check;
 pub mod cli;
-pub mod config_ffi;
 pub mod log;
 pub mod run;
 pub mod lifeline;
@@ -84,11 +93,8 @@ pub mod debug;
 /// allocating in it: readers share the arena built by `init_test_shm`, while
 /// a test that drives `shinit`/`shclose` itself takes the exclusive guard.
 ///
-/// Readers are preferred: a reader waits only while a writer holds the lock,
-/// never for one that is queued. A test holding a read guard may therefore
-/// run work on another thread that takes its own read guard and join it;
-/// with a writer-preferring lock (std's `RwLock` on Linux) a writer queued
-/// between the two reads deadlocks all three.
+/// How readers and writers wait for each other is set by
+/// `test_arena_lock_tests`.
 #[cfg(test)]
 pub(crate) struct TestArenaLock {
     state: std::sync::Mutex<TestArenaState>,
@@ -100,11 +106,20 @@ pub(crate) struct TestArenaLock {
 struct TestArenaState {
     readers: usize,
     writer: bool,
+    writers_waiting: usize,
+}
+
+#[cfg(test)]
+const READER_PATIENCE: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[cfg(test)]
+thread_local! {
+    static READS_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 static SHM_TEST_ARENA: TestArenaLock = TestArenaLock {
-    state: std::sync::Mutex::new(TestArenaState { readers: 0, writer: false }),
+    state: std::sync::Mutex::new(TestArenaState { readers: 0, writer: false, writers_waiting: 0 }),
     turn: std::sync::Condvar::new(),
 };
 
@@ -114,18 +129,41 @@ impl TestArenaLock {
         self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn wait_until(&self, ready: impl Fn(&TestArenaState) -> bool) -> std::sync::MutexGuard<'_, TestArenaState> {
+    fn read(&self) {
+        let nested = READS_HELD.with(|n| n.get()) > 0;
+        let deadline = std::time::Instant::now() + READER_PATIENCE;
         let mut st = self.state();
-        while !ready(&st) {
+        loop {
+            let now = std::time::Instant::now();
+            let defer = !nested && st.writers_waiting > 0 && now < deadline;
+            if !st.writer && !defer {
+                break;
+            }
+            st = if st.writer {
+                self.turn.wait(st).unwrap_or_else(|poisoned| poisoned.into_inner())
+            } else {
+                self.turn.wait_timeout(st, deadline - now).unwrap_or_else(|poisoned| poisoned.into_inner()).0
+            };
+        }
+        st.readers += 1;
+        drop(st);
+        READS_HELD.with(|n| n.set(n.get() + 1));
+    }
+
+    fn write(&self) {
+        let mut st = self.state();
+        st.writers_waiting += 1;
+        while st.writer || st.readers > 0 {
             st = self.turn.wait(st).unwrap_or_else(|poisoned| poisoned.into_inner());
         }
-        st
+        st.writers_waiting -= 1;
+        st.writer = true;
     }
 }
 
 /// Shared hold on the test arena; see `TestArenaLock`.
 #[cfg(test)]
-pub(crate) struct ArenaShared(());
+pub(crate) struct ArenaShared(std::thread::ThreadId);
 
 /// Exclusive hold on the test arena; see `TestArenaLock`.
 #[cfg(test)]
@@ -134,6 +172,9 @@ pub(crate) struct ArenaOwned(());
 #[cfg(test)]
 impl Drop for ArenaShared {
     fn drop(&mut self) {
+        if self.0 == std::thread::current().id() {
+            READS_HELD.with(|n| n.set(n.get().saturating_sub(1)));
+        }
         SHM_TEST_ARENA.state().readers -= 1;
         SHM_TEST_ARENA.turn.notify_all();
     }
@@ -142,6 +183,16 @@ impl Drop for ArenaShared {
 #[cfg(test)]
 impl Drop for ArenaOwned {
     fn drop(&mut self) {
+        // SLOT-32: a writer left running takes a share of every later test's
+        // queue bytes.
+        if !std::thread::panicking() {
+            let left = stray_stream_writers();
+            if !left.is_empty() {
+                SHM_TEST_ARENA.state().writer = false;
+                SHM_TEST_ARENA.turn.notify_all();
+                panic!("a test left streams written: {left:?}");
+            }
+        }
         SHM_TEST_ARENA.state().writer = false;
         SHM_TEST_ARENA.turn.notify_all();
     }
@@ -153,12 +204,15 @@ mod source_rules;
 #[cfg(test)]
 mod test_arena_lock_tests {
     // A reader that joins a thread taking its own read guard must finish
-    // even with a writer queued in between.
+    // even with a writer queued in between. The bound runs from the outer
+    // read: taking it may wait on a writer elsewhere in the run.
     #[test]
     fn a_nested_reader_is_not_blocked_by_a_queued_writer() {
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let outer = crate::init_test_shm();
+            held_tx.send(()).unwrap();
             let (queued_tx, queued_rx) = std::sync::mpsc::channel();
             let writer = std::thread::spawn(move || {
                 queued_tx.send(()).unwrap();
@@ -167,14 +221,58 @@ mod test_arena_lock_tests {
             queued_rx.recv().unwrap();
             std::thread::sleep(std::time::Duration::from_millis(100));
             std::thread::spawn(|| drop(crate::init_test_shm())).join().unwrap();
+            done_tx.send(()).unwrap();
             drop(outer);
             writer.join().unwrap();
-            done_tx.send(()).unwrap();
         });
+        held_rx.recv().unwrap();
         done_rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("nested readers deadlocked behind a queued writer");
     }
+
+    // A reader whose thread already holds a read guard takes another at once,
+    // ahead of a queued writer.
+    #[test]
+    fn a_reader_nested_on_its_own_thread_does_not_wait_for_a_queued_writer() {
+        let outer = crate::init_test_shm();
+        let (queued_tx, queued_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            queued_tx.send(()).unwrap();
+            drop(crate::own_test_shm());
+        });
+        queued_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let began = std::time::Instant::now();
+        drop(crate::init_test_shm());
+        let took = began.elapsed();
+        drop(outer);
+        writer.join().unwrap();
+        assert!(took < super::READER_PATIENCE / 2, "a nested read on its own thread waited {took:?}");
+    }
+}
+
+/// The paths of the streams this process still writes, waiting a moment for
+/// writers that are finishing; any left are stopped.
+#[cfg(test)]
+fn stray_stream_writers() -> Vec<String> {
+    if shm::get_common_basename().is_empty() {
+        return Vec::new();
+    }
+    let began = std::time::Instant::now();
+    let mut left = custody::hosted_slots();
+    while !left.is_empty() && began.elapsed() < std::time::Duration::from_secs(2) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        left = custody::hosted_slots();
+    }
+    let paths: Vec<String> = left
+        .iter()
+        .map(|&(slot, gen)| stream::handle_path(stream::pack_handle(gen, slot)).unwrap_or_else(|e| e.to_string()))
+        .collect();
+    if !paths.is_empty() {
+        custody::stop_before_unmap();
+    }
+    paths
 }
 
 /// Shared test SHM initialization. Call from all test modules and hold the
@@ -182,18 +280,43 @@ mod test_arena_lock_tests {
 #[cfg(test)]
 #[must_use]
 pub(crate) fn init_test_shm() -> ArenaShared {
-    SHM_TEST_ARENA.wait_until(|st| !st.writer).readers += 1;
-    let guard = ArenaShared(());
+    SHM_TEST_ARENA.read();
+    let guard = ArenaShared(std::thread::current().id());
     ensure_test_arena();
     guard
+}
+
+#[cfg(test)]
+pub(crate) fn signal_test_child(pid: libc::pid_t, sig: libc::c_int) {
+    // A pid of 0 or -1 names a process group or every process, which on a CI
+    // runner includes the runner itself.
+    assert!(pid > 0 && pid != unsafe { libc::getpid() }, "refusing to signal pid {pid}");
+    unsafe { libc::kill(pid, sig) };
 }
 
 /// Exclusive access for tests that build and tear down their own arena.
 #[cfg(test)]
 #[must_use]
 pub(crate) fn own_test_shm() -> ArenaOwned {
-    SHM_TEST_ARENA.wait_until(|st| !st.writer && st.readers == 0).writer = true;
+    SHM_TEST_ARENA.write();
+    let left = stray_stream_writers();
+    if !left.is_empty() {
+        eprintln!("streams written by an earlier test were still open: {left:?}");
+    }
     ArenaOwned(())
+}
+
+/// Write an executable script from another process. A file this process
+/// opened for writing can be inherited by a test's forked child, and exec'ing
+/// it fails with ETXTBSY until that child exits.
+#[cfg(test)]
+pub(crate) fn write_test_executable(path: &std::path::Path, script: &str) {
+    let status = std::process::Command::new("sh")
+        .args(["-c", "printf '%s' \"$1\" > \"$2\" && chmod 755 \"$2\"", "sh", script])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "writing {} failed", path.display());
 }
 
 /// Exclusive access with the shared arena guaranteed live. For tests that
@@ -221,12 +344,13 @@ fn ensure_test_arena() {
         let _ = std::fs::create_dir_all(&test_dir);
         shm::shm_set_fallback_dir(test_dir.to_str().unwrap());
         let basename = format!("/morloc-{}-test-arena", std::process::id());
-        shm::shinit(&basename, shm::PRIMARY_VOLUME, 0x100000).unwrap(); // 1MB
+        shm::shinit(&basename, 0x100000).unwrap(); // 1MB
         static AT_EXIT: std::sync::Once = std::sync::Once::new();
         AT_EXIT.call_once(|| unsafe {
             libc::atexit(remove_test_arena);
         });
     }
+    crate::custody::test_host();
 }
 
 /// Remove this process's test arena at exit: statics are never dropped, so

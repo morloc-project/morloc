@@ -531,6 +531,7 @@ classifyWord "True" = TokTrue
 classifyWord "False" = TokFalse
 classifyWord "type" = TokType
 classifyWord "newtype" = TokNewtype
+classifyWord "deriving" = TokDeriving
 classifyWord "data" = TokData
 classifyWord "record" = TokRecord
 classifyWord "object" = TokObject
@@ -1121,7 +1122,8 @@ Algorithm (GHC-inspired):
   - For the top-level, the first declaration's column starts the context.
   - When the next token aligns with the context column, emit ;.
   - When the next token is left of the context column, emit } and pop.
-  - Explicit { after a layout keyword enters a non-indentation context.
+  - Explicit { after a layout keyword enters a non-indentation context,
+    except a { opening a record literal after 'do' (LEX-4).
 -}
 data LayoutContext
   = -- | virtual { at this column
@@ -1211,9 +1213,13 @@ insertLayout toks = beginTopLevel toks
         : Located (locPos t) TokVRBrace ""
         : emitToken ctxs t rest
     -- Explicit brace after layout keyword: skip virtual layout, let the
-    -- brace be handled as an explicit context by emitToken/process.
-    startLayoutCtx _ ctxs (t@(Located _ TokLBrace _) : rest) =
-      t : process (ExplicitCtx : ctxs) rest
+    -- brace be handled as an explicit context by emitToken/process. After
+    -- `do`, a brace followed by `name =` opens a record literal, the first
+    -- statement of an indented block: no statement begins with `name =`
+    -- (LEX-4).
+    startLayoutCtx kw ctxs (t@(Located _ TokLBrace _) : rest)
+      | not (kw == TokDo && recordLiteralAhead rest) =
+          t : process (ExplicitCtx : ctxs) rest
     startLayoutCtx kw ctxs (t : rest)
       | otherwise =
           let col = posCol (locPos t)
@@ -1226,6 +1232,9 @@ insertLayout toks = beginTopLevel toks
               -- (indentCheck would emit one since col == n). So we handle it
               -- specially, bypassing indentation checking.
               vopen : emitFirstToken newCtxs t rest
+
+    recordLiteralAhead (Located _ (TokLowerName _) _ : Located _ TokEquals _ : _) = True
+    recordLiteralAhead _ = False
 
     -- Emit the first token of a layout block. Like processToken but
     -- without indentation checking (the first token defines the column,

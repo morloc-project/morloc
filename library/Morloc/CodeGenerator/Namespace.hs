@@ -77,6 +77,7 @@ module Morloc.CodeGenerator.Namespace
   , NativeArg (..)
   , SerialExpr (..)
   , NativeExpr (..)
+  , VarRead (..)
   , LoopBody (..)
   , trimap
   , trimapM
@@ -424,7 +425,10 @@ instance Pretty SerialAST where
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
 data ExecutableExpressionPool
-  = SrcCallP Source -- source code
+  = SrcCallP (Maybe Int) Source
+  -- ^ A call of a sourced function, with the index of the source expression
+  -- it was linked from when a user term makes it; a call the compiler builds
+  -- itself has none.
   | PatCallP Pattern -- pattern function
   | LocalCallP Int -- a locally defined function
   | PapplyP Int
@@ -436,7 +440,7 @@ data ExecutableExpressionPool
   deriving (Show, Ord, Eq)
 
 instance Pretty ExecutableExpressionPool where
-  pretty (SrcCallP src) = pretty src
+  pretty (SrcCallP _ src) = pretty src
   pretty (PatCallP pat) = pretty pat
   pretty (LocalCallP i) = "x" <> pretty i
   pretty (PapplyP i) = "papply_x" <> pretty i
@@ -846,14 +850,19 @@ data SerialExpr
     -- the value-@if@ machinery.
   deriving (Show)
 
+-- | Whether a read of a let-bound native variable is its last on every path
+-- through the code around it, so the read may take the value (EVAL-7).
+data VarRead = KeptRead | LastRead
+  deriving (Show, Eq, Ord)
+
 data NativeExpr
   = ManN NativeManifold
   | AppExeN TypeF ExecutableExpressionPool [NativeArg]
   | ReturnN NativeExpr
   | SerialLetN Int SerialExpr NativeExpr
   | NativeLetN Int NativeExpr NativeExpr
-  | LetVarN TypeF Int
-  | BndVarN TypeF Int
+  | LetVarN TypeF Int VarRead
+  | BndVarN TypeF Int VarRead
   | DeserializeN TypeF SerialAST SerialExpr
   | ExeN TypeF ExecutableExpressionPool
   | -- data types
@@ -1004,8 +1013,8 @@ foldlNE f b (ManN_ x) = f b x
 foldlNE f b (ReturnN_ x) = f b x
 foldlNE f b (SerialLetN_ _ x1 x2) = foldl f b [x1, x2]
 foldlNE f b (NativeLetN_ _ x1 x2) = foldl f b [x1, x2]
-foldlNE _ b (LetVarN_ _ _) = b
-foldlNE _ b (BndVarN_ _ _) = b
+foldlNE _ b (LetVarN_ _ _ _) = b
+foldlNE _ b (BndVarN_ _ _ _) = b
 foldlNE f b (DeserializeN_ _ _ x) = f b x
 foldlNE _ b (ExeN_ _ _) = b
 foldlNE f b (ListN_ _ _ xs) = foldl f b xs
@@ -1132,8 +1141,8 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidNativeExpr' (ReturnN_ (req, ne)) = return (req, ReturnN ne)
     monoidNativeExpr' (SerialLetN_ i (req1, se) (req2, ne)) = return (mappend' req1 req2, SerialLetN i se ne)
     monoidNativeExpr' (NativeLetN_ i (req1, ne1) (req2, ne2)) = return (mappend' req1 req2, NativeLetN i ne1 ne2)
-    monoidNativeExpr' (LetVarN_ t i) = return (mempty', LetVarN t i)
-    monoidNativeExpr' (BndVarN_ t i) = return (mempty', BndVarN t i)
+    monoidNativeExpr' (LetVarN_ t i r) = return (mempty', LetVarN t i r)
+    monoidNativeExpr' (BndVarN_ t i r) = return (mempty', BndVarN t i r)
     monoidNativeExpr' (DeserializeN_ t s (req, e)) = return (req, DeserializeN t s e)
     monoidNativeExpr' (ExeN_ t exe) = return (mempty', ExeN t exe)
     monoidNativeExpr' (ListN_ v t xs) = return (foldl mappend' mempty' (map fst xs), ListN v t (map snd xs))
@@ -1289,8 +1298,8 @@ data NativeExpr_ nm se ne sr nr
   | ReturnN_ ne
   | SerialLetN_ Int se ne
   | NativeLetN_ Int ne ne
-  | LetVarN_ TypeF Int
-  | BndVarN_ TypeF Int
+  | LetVarN_ TypeF Int VarRead
+  | BndVarN_ TypeF Int VarRead
   | DeserializeN_ TypeF SerialAST se
   | ExeN_ TypeF ExecutableExpressionPool
   | -- data types
@@ -1487,8 +1496,8 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
       ne1' <- surroundFoldNativeExprM sfm fm ne1
       ne2' <- surroundFoldNativeExprM sfm fm ne2
       opFoldWithNativeExprM fm full (NativeLetN_ i ne1' ne2')
-    f full@(LetVarN t i) = opFoldWithNativeExprM fm full (LetVarN_ t i)
-    f full@(BndVarN t i) = opFoldWithNativeExprM fm full (BndVarN_ t i)
+    f full@(LetVarN t i r) = opFoldWithNativeExprM fm full (LetVarN_ t i r)
+    f full@(BndVarN t i r) = opFoldWithNativeExprM fm full (BndVarN_ t i r)
     f full@(DeserializeN t s se) = do
       se' <- surroundFoldSerialExprM sfm fm se
       opFoldWithNativeExprM fm full (DeserializeN_ t s se')
@@ -1551,8 +1560,8 @@ instance HasTypeF NativeExpr where
   typeFof (ReturnN e) = typeFof e
   typeFof (SerialLetN _ _ e) = typeFof e
   typeFof (NativeLetN _ _ e) = typeFof e
-  typeFof (LetVarN t _) = t
-  typeFof (BndVarN t _) = t
+  typeFof (LetVarN t _ _) = t
+  typeFof (BndVarN t _ _) = t
   typeFof (DeserializeN t _ _) = t
   typeFof (ExeN t _) = t
   typeFof (ListN v args _) = AppF (VarF v) args
@@ -1766,8 +1775,8 @@ instance MFunctor NativeExpr where
         (ReturnN ne) -> mapNativeExpr f $ ReturnN (mgatedMap g f ne)
         (SerialLetN i se ne) -> mapNativeExpr f $ SerialLetN i (mgatedMap g f se) (mgatedMap g f ne)
         (NativeLetN i ne1 ne2) -> mapNativeExpr f $ NativeLetN i (mgatedMap g f ne1) (mgatedMap g f ne2)
-        e@(LetVarN _ _) -> mapNativeExpr f e
-        e@(BndVarN _ _) -> mapNativeExpr f e
+        e@(LetVarN _ _ _) -> mapNativeExpr f e
+        e@(BndVarN _ _ _) -> mapNativeExpr f e
         (DeserializeN t s se) -> mapNativeExpr f $ DeserializeN t s (mgatedMap g f se)
         e@(ExeN _ _) -> mapNativeExpr f e
         (ListN v t nes) -> mapNativeExpr f $ ListN v t (map (mgatedMap g f) nes)
@@ -1840,7 +1849,7 @@ instance Pretty PolyExpr where
     "PolyDebugWrap<" <> pretty m <> ">" <+> parens (pretty e)
   pretty (PolyBndVar _ _) = "PolyBndVar"
   pretty (PolyLetVar _ _) = "PolyLetVar"
-  pretty (PolyExe _ (SrcCallP src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
+  pretty (PolyExe _ (SrcCallP _ src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
   pretty (PolyExe _ (PatCallP _)) = "PolyExe<pattern>"
   pretty (PolyExe _ (LocalCallP _)) = "PolyExe<local>"
   pretty (PolyExe _ (PapplyP _)) = "PolyExe<papply>"

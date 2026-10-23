@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Mock sacct: `sacct -j ID --format=State --noheader` prints the state the
+# mock sbatch recorded.
+cat "$MOCK_SLURM_DIR/state-$2"

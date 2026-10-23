@@ -1,0 +1,20 @@
+-- Spec NEWT-2: a newtype with no native form of its own takes its
+-- representation's, through a chain of newtypes, in every language.
+module main (shout, nameLen, pointSum, pointLit)
+
+import root-py
+import root-cpp
+
+newtype Name = Str
+newtype Label = Name
+newtype Point = (Int, Int)
+
+source Py from "wire.py" ("upper" as shout)
+source Cpp from "wire.hpp" ("str_len" as nameLen, "pair_sum" as pointSum)
+
+shout :: Label -> Label
+nameLen :: Name -> Int
+pointSum :: Point -> Int
+
+pointLit :: Int -> Int
+pointLit x = pointSum ((x, 4) :: Point)

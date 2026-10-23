@@ -5,7 +5,7 @@ module atomic (howBlob)
 
 import root-py
 
-newtype Blob
+newtype Blob = [Int]
 
 type Py => Blob = "dict"
 

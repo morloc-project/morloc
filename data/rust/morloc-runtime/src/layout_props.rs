@@ -504,8 +504,7 @@ fn stream_readers_preserve_pointer_layouts() {
 #[test]
 fn many_subpacket_round_trips() {
     let _shm = crate::own_test_registry();
-    let saved = std::env::var("MORLOC_WRITE_BUFFER_BYTES").ok();
-    std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
+    crate::stream::set_test_write_buffer_bytes(Some(4096));
     let dir = std::env::temp_dir().join(format!("morloc_layout_many_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("many.stream");
@@ -578,10 +577,7 @@ fn many_subpacket_round_trips() {
         }
         let _ = shared_discard_handle(f);
     }
-    match saved {
-        Some(v) => std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", v),
-        None => std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES"),
-    }
+    crate::stream::set_test_write_buffer_bytes(None);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

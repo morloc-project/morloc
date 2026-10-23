@@ -1,4 +1,4 @@
--- An internal error in an R pool ends the pool (model/panic.md PANIC-5):
+-- An internal error in an R pool ends the pool (model/runtime/panic.md PANIC-5):
 -- @try does not catch it, and the nexus reports the pool's end.
 module main (tryAbort)
 

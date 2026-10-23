@@ -19,7 +19,7 @@ all:
 	./nexus containerLenPy 5   >> obs.txt 2>> obs.err
 	# Native construction in the C++ pool (was blocked by the
 	# move-only optional<unique_ptr<T>> encoding for recursive ?T
-	# fields). Under the shared_ptr<T> + wrap_field encoding, these
+	# fields). Under the shared_ptr<const T> + wrap_field encoding, these
 	# compile and run end-to-end.
 	./nexus llBuild 3          >> obs.txt 2>> obs.err
 	./nexus treeBuild 2        >> obs.txt 2>> obs.err

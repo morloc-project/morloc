@@ -834,6 +834,23 @@ unsafe fn apply_bracket_slice(
     Ok(())
 }
 
+/// Put the value at `block` in `dest` (SHM-14).
+unsafe fn take_value(block: *mut u8, dest: *mut u8, schema: *const CSchema) -> Result<(), MorlocError> {
+    let rs = crate::cschema::CSchema::to_rust(schema);
+    if rs.serial_type == morloc_runtime_types::schema::SerialType::Table {
+        let _ = shm::shfree(block);
+        return Err(MorlocError::Other("voidstar::deep_copy: a table cannot be copied into a slot".into()));
+    }
+    if crate::eval_arena::keep_if_active(block) {
+        ptr::copy_nonoverlapping(block as *const u8, dest, rs.width);
+        return Ok(());
+    }
+    ptr::write_bytes(dest, 0, rs.width);
+    let copied = crate::voidstar::deep_copy(block as *const u8, dest, &rs);
+    let _ = shm::shfree(block);
+    copied
+}
+
 /// Recursively evaluate a morloc expression, writing results into SHM.
 ///
 /// # Safety
@@ -1192,7 +1209,7 @@ unsafe fn morloc_eval_r(
         MorlocExpressionType::Read => {
             // `read_json_with_schema` encodes internal relptrs relative
             // to an SHM-backed destination, so parse into a fresh SHM
-            // inner and deep-copy into `dest` (which may not be SHM).
+            // block and take its value into `dest`.
             let child = (*expr).expr.unary_expr;
             let child_result = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)?;
             let str_arr = &*(child_result as *const shm::Array);
@@ -1231,15 +1248,7 @@ unsafe fn morloc_eval_r(
                 return Err(MorlocError::UserThrow(msg));
             }
 
-            let inner_rs = crate::cschema::CSchema::to_rust(schema);
-            ptr::write_bytes(dest, 0, width);
-            let copy_result = crate::voidstar::deep_copy(
-                inner_abs as *const u8,
-                dest,
-                &inner_rs,
-            );
-            let _ = shm::shfree(inner_abs);
-            copy_result?;
+            take_value(inner_abs, dest, schema)?;
         }
 
         MorlocExpressionType::Hash => {
@@ -1270,13 +1279,36 @@ unsafe fn morloc_eval_r(
             ptr::copy_nonoverlapping(&arr as *const shm::Array as *const u8, dest, width);
         }
 
+        MorlocExpressionType::Equal | MorlocExpressionType::LessEq => {
+            // The child is the pair of values; compare its two fields.
+            let child = (*expr).expr.unary_expr;
+            let pair = CSchema::to_rust((*child).schema);
+            let pair_ptr = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)? as *const u8;
+            let (elem, offsets) = match (pair.parameters.first(), pair.offsets.as_slice()) {
+                (Some(e), [o1, o2]) => (e, (*o1, *o2)),
+                _ => {
+                    return Err(MorlocError::Other(
+                        "a comparison takes a pair of values".to_string(),
+                    ))
+                }
+            };
+            let o = crate::compare::compare_voidstar_values(pair_ptr.add(offsets.0), pair_ptr.add(offsets.1), elem)?;
+            let holds = match (*expr).etype {
+                MorlocExpressionType::Equal => o == std::cmp::Ordering::Equal,
+                _ => o != std::cmp::Ordering::Greater,
+            };
+            if !dest.is_null() {
+                *dest = u8::from(holds);
+            }
+        }
+
         MorlocExpressionType::Save => {
             // Save value to file at path
             let save = (*expr).expr.save_expr;
             let level_expr = (*save).level;
             let value_expr = (*save).value;
             let path_expr = (*save).path;
-            let fmt = CStr::from_ptr((*save).format).to_str().unwrap_or("voidstar");
+            let fmt = CStr::from_ptr((*save).format).to_str().unwrap_or("");
 
             let value_schema = (*value_expr).schema;
             // The level is a user Int; the save entry points range-check it.
@@ -1297,12 +1329,15 @@ unsafe fn morloc_eval_r(
             ptr::copy_nonoverlapping(path_abs, path_cstr as *mut u8, path_arr.size);
             *path_cstr.add(path_arr.size) = 0;
 
-            use crate::intrinsics::{mlc_save, mlc_save_json, mlc_save_voidstar};
+            use crate::intrinsics::{mlc_save_json, mlc_save_voidstar};
             let mut err: *mut c_char = ptr::null_mut();
             let rc = match fmt {
                 "json" => mlc_save_json(value_result as *const c_void, value_schema, level, path_cstr, &mut err),
-                "msgpack" => mlc_save(value_result as *const c_void, value_schema, level, path_cstr, &mut err),
-                _ => mlc_save_voidstar(value_result as *const c_void, value_schema, level, path_cstr, &mut err),
+                "voidstar" => mlc_save_voidstar(value_result as *const c_void, value_schema, level, path_cstr, &mut err),
+                other => {
+                    libc::free(path_cstr as *mut c_void);
+                    return Err(MorlocError::Other(format!("@save: unknown format '{other}' in the manifest")));
+                }
             };
             libc::free(path_cstr as *mut c_void);
             if rc != 0 {
@@ -1341,23 +1376,7 @@ unsafe fn morloc_eval_r(
             }
             libc::free(path_cstr as *mut c_void);
 
-            // mlc_load returns SHM but the layout depends on the file
-            // format: msgpack and voidstar pack the wrapper and nested
-            // data into a single block (relptrs reference addresses
-            // inside the block), JSON returns a multi-block tree. A
-            // straight bit-copy of the wrapper would alias the source
-            // block, and libc::free on SHM is undefined. Deep-copy
-            // directly into `dest`, then shfree the source block as one
-            // allocation.
-            let inner_rs = crate::cschema::CSchema::to_rust(schema);
-            ptr::write_bytes(dest, 0, width);
-            let copy_result = crate::voidstar::deep_copy(
-                loaded as *const u8,
-                dest,
-                &inner_rs,
-            );
-            let _ = shm::shfree(loaded as shm::AbsPtr);
-            copy_result?;
+            take_value(loaded as *mut u8, dest, schema)?;
         }
 
         MorlocExpressionType::Map => {
@@ -1575,9 +1594,7 @@ unsafe fn morloc_eval_r(
                 let msg = take_c_errmsg_or(err, "@next: mlc_next returned NULL");
                 return Err(MorlocError::UserThrow(msg));
             }
-            let result_rs = crate::cschema::CSchema::to_rust(schema);
-            crate::voidstar::deep_copy(voidstar as *const u8, dest, &result_rs)?;
-            let _ = shm::shfree(voidstar as shm::AbsPtr);
+            take_value(voidstar as *mut u8, dest, schema)?;
         }
 
         MorlocExpressionType::StreamLayout => {
@@ -1592,9 +1609,7 @@ unsafe fn morloc_eval_r(
                 let msg = take_c_errmsg_or(err, "@streamLayout: mlc_stream_layout returned NULL");
                 return Err(MorlocError::UserThrow(msg));
             }
-            let result_rs = crate::cschema::CSchema::to_rust(schema);
-            crate::voidstar::deep_copy(voidstar as *const u8, dest, &result_rs)?;
-            let _ = shm::shfree(voidstar as shm::AbsPtr);
+            take_value(voidstar as *mut u8, dest, schema)?;
         }
 
         MorlocExpressionType::Stream => {
@@ -1661,9 +1676,7 @@ unsafe fn morloc_eval_r(
                 let msg = take_c_errmsg_or(err, "@ifile_walk: returned NULL");
                 return Err(MorlocError::UserThrow(msg));
             }
-            let result_rs = crate::cschema::CSchema::to_rust(schema);
-            crate::voidstar::deep_copy(voidstar as *const u8, dest, &result_rs)?;
-            let _ = shm::shfree(voidstar as shm::AbsPtr);
+            take_value(voidstar as *mut u8, dest, schema)?;
         }
 
         MorlocExpressionType::OpenOStream => {
@@ -2043,6 +2056,14 @@ unsafe fn morloc_eval_r(
                 std::ptr::copy_nonoverlapping(field_ptr, dest, w);
             }
         }
+        MorlocExpressionType::ListLenTest => {
+            let le = (*expr).expr.list_len_test_expr;
+            let subject_ptr = morloc_eval_r((*le).subject, ptr::null_mut(), 0, bndvars)?;
+            let arr = &*(subject_ptr as *const shm::Array);
+            if !dest.is_null() {
+                *dest = u8::from(arr.size == (*le).length);
+            }
+        }
         MorlocExpressionType::If => {
             // Evaluate the condition (a Bool) into a fresh buffer and read
             // its byte (0 = false), then materialize the taken branch into
@@ -2204,6 +2225,89 @@ mod tests {
     use crate::cschema::CSchema;
     use morloc_runtime_types::schema::parse_schema;
 
+    fn count(p: shm::AbsPtr) -> u32 {
+        unsafe { shm::reference_count(p) }.unwrap()
+    }
+
+    unsafe fn ints(dest: *const u8) -> Vec<i64> {
+        let a = &*(dest as *const shm::Array);
+        let d = shm::rel2abs(a.data).unwrap() as *const i64;
+        (0..a.size).map(|i| *d.add(i)).collect()
+    }
+
+    // SHM-14: in an arena the value is kept, not copied, and released with
+    // the arena; a rollback releases one kept after its checkpoint.
+    #[test]
+    fn a_taken_value_is_kept_by_the_arena() {
+        let _shm = crate::init_test_shm();
+        let rs = parse_schema("ai8").unwrap();
+        let cs = CSchema::from_rust(&rs);
+        let mut dest = [0u8; 16];
+        let g = crate::eval_arena::enter().unwrap();
+        let kept = crate::json::read_json_with_schema("[1,2,3]", &rs).unwrap();
+        unsafe { shm::shincref(kept) }.unwrap();
+        unsafe { take_value(kept, dest.as_mut_ptr(), cs) }.unwrap();
+        let read = unsafe { ints(dest.as_ptr()) };
+        let held = crate::eval_arena::has_entry(kept);
+        let cp = crate::eval_arena::checkpoint();
+        let rolled = crate::json::read_json_with_schema("[4]", &rs).unwrap();
+        unsafe { shm::shincref(rolled) }.unwrap();
+        unsafe { take_value(rolled, dest.as_mut_ptr(), cs) }.unwrap();
+        crate::eval_arena::rollback_to(cp);
+        let after_rollback = (count(kept), count(rolled));
+        drop(g);
+        let after_end = count(kept);
+        shm::release(kept).unwrap();
+        shm::release(rolled).unwrap();
+        unsafe { CSchema::free(cs) };
+        assert_eq!(read, vec![1, 2, 3]);
+        assert!(held);
+        assert_eq!(after_rollback, (2, 1));
+        assert_eq!(after_end, 1);
+    }
+
+    // SHM-4: outside an arena the value is copied out and the block freed.
+    #[test]
+    fn a_value_taken_outside_an_arena_is_copied_and_freed() {
+        let _shm = crate::init_test_shm();
+        let rs = parse_schema("ai8").unwrap();
+        let cs = CSchema::from_rust(&rs);
+        let mut dest = [0xffu8; 16];
+        let block = crate::json::read_json_with_schema("[5,6]", &rs).unwrap();
+        unsafe { shm::shincref(block) }.unwrap();
+        unsafe { take_value(block, dest.as_mut_ptr(), cs) }.unwrap();
+        let left = count(block);
+        shm::release(block).unwrap();
+        let read = unsafe { ints(dest.as_ptr()) };
+        let copy = unsafe { shm::rel2abs((*(dest.as_ptr() as *const shm::Array)).data) }.unwrap();
+        shm::shfree(copy).unwrap();
+        unsafe { CSchema::free(cs) };
+        assert_eq!(left, 1);
+        assert_eq!(read, vec![5, 6]);
+    }
+
+    // A table has no slot to be taken into, in an arena or not.
+    #[test]
+    fn a_table_is_not_taken_into_a_slot() {
+        let _shm = crate::init_test_shm();
+        let cs = CSchema::from_rust(&parse_schema("T").unwrap());
+        let mut dest = [0u8; 16];
+        let outside = shm::shmalloc(64).unwrap();
+        unsafe { shm::shincref(outside) }.unwrap();
+        let refused_outside = unsafe { take_value(outside, dest.as_mut_ptr(), cs) }.is_err();
+        let g = crate::eval_arena::enter().unwrap();
+        let inside = shm::shmalloc(64).unwrap();
+        unsafe { shm::shincref(inside) }.unwrap();
+        let refused_inside = unsafe { take_value(inside, dest.as_mut_ptr(), cs) }.is_err();
+        drop(g);
+        let left = (count(outside), count(inside));
+        shm::release(outside).unwrap();
+        shm::release(inside).unwrap();
+        unsafe { CSchema::free(cs) };
+        assert!(refused_outside && refused_inside);
+        assert_eq!(left, (1, 1));
+    }
+
     /// A UInt64 above i64::MAX is an error, not a negative number that a
     /// bracket would read as counting from the end.
     #[test]
@@ -2221,26 +2325,6 @@ mod tests {
 
 mod c_abi {
     use super::*;
-
-    #[no_mangle]
-    pub unsafe extern "C" fn make_morloc_bound_var(schema_str: *const c_char, varname: *mut c_char, errmsg: *mut *mut c_char) -> *mut MorlocExpression {
-        super::make_morloc_bound_var(schema_str, varname, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn make_morloc_literal(schema_str: *const c_char, lit: Primitive, errmsg: *mut *mut c_char) -> *mut MorlocExpression {
-        super::make_morloc_literal(schema_str, lit, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn make_morloc_pattern(schema_str: *const c_char, pattern: *mut MorlocPattern, errmsg: *mut *mut c_char) -> *mut MorlocExpression {
-        super::make_morloc_pattern(schema_str, pattern, errmsg)
-    }
-
-    #[no_mangle]
-    pub extern "C" fn make_morloc_pattern_end() -> *mut MorlocPattern {
-        super::make_morloc_pattern_end()
-    }
 
     #[no_mangle]
     pub unsafe extern "C" fn morloc_eval(expr: *mut MorlocExpression, return_schema: *mut CSchema, arg_voidstar: *mut *mut u8, arg_schemas: *mut *mut CSchema, nargs: usize, errmsg: *mut *mut c_char) -> *mut c_void {

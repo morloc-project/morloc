@@ -1,0 +1,31 @@
+-- Spec BASE-3: `&&` and `||` do not evaluate their second operand when the
+-- first decides the result, whether the operand is a sourced call or an
+-- inline operator; used as values they are ordinary Bool functions.
+module main (andDiv, orDiv, andSrc, orSrc, prefix, folded, section)
+
+import root-r
+
+source R from "f.R" ("boom")
+
+boom :: Int -> Bool
+
+andDiv :: Int -> Bool
+andDiv x = x != 0 && 10 // x > 1
+
+orDiv :: Int -> Bool
+orDiv x = x == 0 || 10 // x > 1
+
+andSrc :: Int -> Bool
+andSrc x = x > 0 && boom x
+
+orSrc :: Int -> Bool
+orSrc x = x <= 0 || boom x
+
+prefix :: Int -> Bool
+prefix x = (&&) (x > 0) (boom x)
+
+folded :: [Bool] -> Bool
+folded xs = fold (&&) True xs
+
+section :: Bool -> Bool
+section x = (|| x) False

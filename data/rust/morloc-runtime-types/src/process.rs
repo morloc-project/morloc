@@ -155,24 +155,32 @@ pub fn pid_namespace() -> Option<String> {
 /// This process as one word: pid in the high half, the low bits of its start
 /// stamp in the low half, so a reused pid does not pass for it.
 pub fn token() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    make_token(std::process::id(), own_start_time())
+}
+
+/// This process's start stamp (`start_time` of its own pid), read once per
+/// fork generation; 0 when unknown.
+pub fn own_start_time() -> u64 {
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     static CACHED: AtomicU64 = AtomicU64::new(0);
     static CACHED_GENERATION: AtomicU64 = AtomicU64::new(u64::MAX);
-    // FORK-14: every writer in one generation stores the same token, before
-    // the generation that makes it visible; a token without a start stamp is
-    // never stored.
+    static CACHED_PID: AtomicU32 = AtomicU32::new(0);
+    // FORK-14: every writer in one generation stores the same stamp, before
+    // the generation that makes it visible; an unknown stamp is never stored.
+    // The pid also keys it, for a binary that forks without the handler
+    // that bumps the generation.
     let generation = crate::fork_generation::generation();
-    if CACHED_GENERATION.load(Ordering::Acquire) == generation {
+    let pid = std::process::id();
+    if CACHED_GENERATION.load(Ordering::Acquire) == generation && CACHED_PID.load(Ordering::Relaxed) == pid {
         return CACHED.load(Ordering::Relaxed);
     }
-    let pid = std::process::id();
     let start = start_time(pid);
-    let token = make_token(pid, start);
     if start != 0 {
-        CACHED.store(token, Ordering::Relaxed);
+        CACHED.store(start, Ordering::Relaxed);
+        CACHED_PID.store(pid, Ordering::Relaxed);
         CACHED_GENERATION.store(generation, Ordering::Release);
     }
-    token
+    start
 }
 
 fn make_token(pid: u32, start: u64) -> u64 {
@@ -366,10 +374,12 @@ mod tests {
         });
         let mut t = [0u8; 8];
         unsafe { libc::read(fds[0], t.as_mut_ptr() as *mut libc::c_void, 8) };
+        let child_start = start_time(child as u32);
         reap(child);
         let child_token = u64::from_le_bytes(t);
         assert_eq!(child_token >> 32, child as u64);
         assert_ne!(child_token, parent);
+        assert_eq!(child_token, make_token(child as u32, child_start), "the child kept its parent's start stamp");
     }
 
     #[test]

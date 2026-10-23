@@ -26,14 +26,22 @@ import LockFileTests (lockFileTests)
 import RustPoolBuildTests (rustPoolBuildTests)
 import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
+import SpecTests (specTests)
 import VariantMergeTests (variantMergeTests)
+import ValueArgsTests (valueArgsTests)
+import ManifoldNameTests (manifoldNameTests)
 import SystemConfigTests (systemConfigTests)
 import UnitTypeTests
+import LastReadTests (lastReadTests)
+import OwnershipCheckTests (ownershipCheckTests)
 import VersionConstraintTests (versionConstraintTests)
 
 unitTests :: [TestTree]
 unitTests =
-  [ unitTypeTests
+  [ specTests
+  , unitTypeTests
+  , lastReadTests
+  , ownershipCheckTests
   , recSolverTests
   , abiTests
   , buildParamsTests
@@ -57,6 +65,7 @@ unitTests =
   , typeIdentityTests
   , aliasExpansionTests
   , accessorInWhereTests
+  , anonymousRecordOrderTests
   , solvedKindCheckTests
   , substituteTVarTests
   , subtypeTests
@@ -82,6 +91,7 @@ unitTests =
   , letBindingTests
   , irrefutablePatternTests
   , aliasConstructorTests
+  , aliasTransparencyTests
   , newtypeTests
   , literalDispatchTests
   , recursiveRecordTests
@@ -99,10 +109,13 @@ unitTests =
   , typeRenderParenTests
   , sourceNameTests
   , suspensionLawTests
+  , datafileTests
   , morlocDepsTests
   , versionConstraintTests
   , sizeParseTests
   , variantMergeTests
+  , valueArgsTests
+  , manifoldNameTests
   , patternChainTests
   , irrefutablePatternLexerTests
   , refutablePatternTests

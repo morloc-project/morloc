@@ -1061,7 +1061,8 @@ unsafe fn release_arena(private_data: *mut c_void) {
     if !block.is_null() {
         LIVE_VIEW_BYTES.fetch_sub((*arena).block_bytes, Ordering::Relaxed);
         if crate::fork_policy::generation() == (*arena).owner_generation {
-            let _ = shm::shfree(block);
+            // SHM-7: the view's own reference.
+            let _ = shm::release(block);
         }
     }
     libc::free((*arena).bytes as *mut c_void);
@@ -1211,9 +1212,13 @@ unsafe fn shm_to_ffi_inner(
     let bytes = libc::calloc(1, len) as *mut u8;
     if bytes.is_null() {
         if owns != Some(false) && !block.is_null() {
-            let _ = shm::shfree(block);
+            let _ = shm::release(block);
         }
         return Err(err("out of memory importing arrow table"));
+    }
+    if owns == Some(false) {
+        // SHM-7: the view takes the caller's reference out of the arena.
+        crate::eval_arena::forget_if_active(header as *mut u8);
     }
     let arena = bytes as *mut ImportArena;
     ptr::write(

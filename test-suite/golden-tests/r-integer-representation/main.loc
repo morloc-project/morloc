@@ -1,0 +1,106 @@
+-- R gives one morloc integer type several R forms: R integer, double and
+-- bit64 integer64. Code inside R must work for every form; at the boundary
+-- a fraction truncates and a value outside the wire type is an error.
+module main
+  ( mapU64, mapI64, mapLitU64, mapLitI64, mapInt, eqI64, eqU64, sortI64
+  , negI64, bigLit, litI64, litU64, litInt, litI32, tryU64, tryInt, intoInt, listEq, narrowI32, narrowU8, truncI32, negU64, idU64, idInt
+  )
+
+import root-r
+
+source R from "f.R" ("as_i64", "i64_big", "neg_u64", "half", "ident" as identU64, "ident" as identInt)
+
+as_i64 :: I32 -> I32
+i64_big :: U8 -> U8
+neg_u64 :: U64 -> U64
+half :: I32 -> I32
+identU64 :: U64 -> U64
+identInt :: Int -> Int
+
+dblU :: U64 -> U64
+dblU x = x + x
+
+dblI :: I64 -> I64
+dblI x = x + x
+
+zeroU :: U64 -> U64
+zeroU x
+  ? x == 0 = 0
+  : x
+
+zeroI :: I64 -> I64
+zeroI x
+  ? x == 0 = 0
+  : x
+
+mapU64 :: [U64] -> [U64]
+mapU64 xs = map dblU xs
+
+mapI64 :: [I64] -> [I64]
+mapI64 xs = map dblI xs
+
+mapLitU64 :: [U64] -> [U64]
+mapLitU64 xs = map zeroU xs
+
+mapLitI64 :: [I64] -> [I64]
+mapLitI64 xs = map zeroI xs
+
+mapInt :: [Int] -> [Int]
+mapInt xs = map (\x -> x + 1) xs
+
+eqI64 :: I64 -> Bool
+eqI64 s = .0 (s + 5 - s, s) == 5
+
+eqU64 :: U64 -> Bool
+eqU64 x = x == 7
+
+sortI64 :: [I64] -> [I64]
+sortI64 xs = sort xs
+
+negI64 :: [I64] -> [I64]
+negI64 xs = map (\x -> 0 - x) xs
+
+bigLit :: Int -> I64
+bigLit x = 3000000000
+
+narrowI32 :: I32 -> I32
+narrowI32 x = as_i64 x
+
+narrowU8 :: U8 -> U8
+narrowU8 x = i64_big x
+
+truncI32 :: I32 -> I32
+truncI32 x = half x
+
+negU64 :: U64 -> U64
+negU64 x = neg_u64 x
+
+idU64 :: U64 -> U64
+idU64 x = identU64 x
+
+idInt :: Int -> Int
+idInt x = identInt x
+
+litI64 :: [I64] -> [I64]
+litI64 xs = map (\x -> x + 3000000000) xs
+
+litU64 :: [U64] -> [U64]
+litU64 xs = map (\x -> x + 3000000000) xs
+
+litInt :: [Int] -> [Bool]
+litInt xs = map (\x -> x == 3000000000) xs
+
+litI32 :: [I32] -> [I32]
+litI32 xs = map (\x -> x + 7) xs
+
+tryU64 :: I64 -> U64
+tryU64 x = tryInto x
+
+tryInt :: I64 -> Int
+tryInt x = tryInto x
+
+intoInt :: I32 -> Int
+intoInt x = into x
+
+listEq :: [Int] -> Bool
+listEq xs = map (\x -> x + 0) xs == [0, 1, 2]

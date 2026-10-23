@@ -1,0 +1,24 @@
+-- Spec CLI-12: --json-help carries the module's and each command's
+-- `@epilogue` blocks, one verbatim string per block.
+--' A toolbox
+--' @epilogue
+--' Examples:
+--'   main once
+--' @epilogue
+--' See also: the manual
+module main (once, plain)
+
+import root
+
+--' Numbers
+--' @epilogue
+--' Examples:
+--'
+--' # three numbers
+--'   once
+once :: [Int]
+once = [1,2,3]
+
+--' Numbers without an epilogue
+plain :: [Int]
+plain = [1,2,3]

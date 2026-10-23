@@ -1,0 +1,22 @@
+-- Spec NEWT-7: unwrapping a value that crosses languages. Vector's Python
+-- form is a numpy array; wherever the unwrap runs, a Python consumer of the
+-- representation receives a list and a C++ consumer receives the values.
+module main (viaPy, viaCpp)
+
+import root-py
+import root-cpp
+import vector-py
+import vector-cpp
+
+source Py from "main.py" ("make_vec" as makeVec, "list_sum" as pySum)
+makeVec :: Int -> Vector 3 Real
+pySum :: [Real] -> Real
+
+source Cpp from "main.hpp" ("cpp_sum" as cppSum)
+cppSum :: [Real] -> Real
+
+viaPy :: Int -> Real
+viaPy n = pySum (unpack (makeVec n))
+
+viaCpp :: Int -> Real
+viaCpp n = cppSum (unpack (makeVec n))

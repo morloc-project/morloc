@@ -1,0 +1,7 @@
+labeled-groups:
+  r:
+    remote:
+      threads: 1
+      memory: 1
+      time: "00:05:00"
+      gpus: 0

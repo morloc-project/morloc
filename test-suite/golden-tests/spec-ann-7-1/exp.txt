@@ -1,0 +1,61 @@
+--- letBody ---
+12
+ROW l quadLet py n=1
+--- guardBody ---
+12
+ROW l quadGuard py n=1
+--- matchBody ---
+6
+ROW l quadMatch py n=1
+--- opBody ---
+12
+ROW l quadOp py n=1
+--- recOuter ---
+5
+ROW l count cpp n=1
+--- recInner ---
+3
+ROW l countIn cpp n=3
+--- bindIO ---
+2
+ROW l run py n=1
+--- letIO ---
+2
+ROW l run py n=1
+--- bangIO ---
+3
+ROW l run py n=1
+--- finalIO ---
+2
+ROW l run py n=1
+--- whereHelper ---
+6
+ROW l double py n=2
+--- mapped ---
+[4,8,12]
+ROW l quadLet py n=3
+--- partial ---
+[2,3,4]
+ROW l add2 py n=3
+--- inTuple ---
+[4,4]
+ROW l double py n=1
+--- inBranch ---
+4
+ROW l double py n=1
+--- crossLang ---
+12
+ROW l triple py n=1
+--- lambdaBound ---
+4
+ROW l q py n=1
+--- letBound ---
+4
+ROW l g py n=1
+--- tailRec ---
+10
+ROW l go py n=4
+--- staged ---
+[11,12,13]
+ROW l st py n=3
+SLOW 1

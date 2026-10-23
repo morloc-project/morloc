@@ -1,0 +1,75 @@
+-- Copy-heavy C++ shapes timed by bench.py; each prints its result and the
+-- payload copies made. The shapes are those of golden copy-census-cpp.
+module main (nestedLoop, tupleStep, listLoop, closure, mixedLoop)
+
+import root
+import root-cpp
+
+source Cpp from "counted.hpp" ("mkL", "keyL", "applyF", "census")
+
+mkL :: Int -> [Int]
+keyL :: [Int] -> Int
+applyF :: (Int -> Int) -> Int -> Int
+census :: Int -> (Int, Int)
+
+data Chain = End | Link [Int] Chain
+
+build :: Int -> Chain -> Chain
+build k acc
+  ? k == 0 = acc
+  : build (k - 1) (Link (mkL k) acc)
+
+skip2 :: Int -> Chain -> Int
+skip2 acc c = match c
+  | (Link _ (Link ys rest)) = skip2 (acc + keyL ys) rest
+  | _ = acc
+
+rep :: Int -> Chain -> Int -> Int
+rep k c acc
+  ? k == 0 = acc
+  : rep (k - 1) c (acc + skip2 0 c)
+
+--' k walks of a chain of n, two links per step by a nested pattern
+nestedLoop :: Int -> Int -> (Int, Int)
+nestedLoop k n = census (rep k (build n End) 0)
+
+tupStep :: Int -> ([Int], Int) -> Int
+tupStep k t
+  ? k == 0 = keyL (.0 t) + .1 t
+  : tupStep (k - 1) (.0 t, k)
+
+--' k steps carrying a tuple rebuilt from its own projection
+tupleStep :: Int -> (Int, Int)
+tupleStep k = census (tupStep k (mkL 3, 0))
+
+lpLoop :: Int -> [[Int]] -> Int -> Int
+lpLoop k xss acc
+  ? k == 0 = acc
+  : lpLoop (k - 1) xss (acc + (match xss | [a, b] = keyL a + keyL b | _ = 0))
+
+--' k steps reading both elements of a carried two-list list by a list pattern
+listLoop :: Int -> (Int, Int)
+listLoop k = census (lpLoop k [mkL 1, mkL 2] 0)
+
+clLoop :: Int -> [Int] -> Int -> Int
+clLoop k ys acc
+  ? k == 0 = acc
+  : clLoop (k - 1) ys (acc + applyF (\x -> x + keyL ys) 1)
+
+--' k steps each calling a lambda that captures a carried list
+closure :: Int -> (Int, Int)
+closure k = census (clLoop k (mkL 3) 0)
+
+sumKeys :: Int -> Chain -> Int
+sumKeys acc c = match c
+  | End = acc
+  | (Link ys rest) = sumKeys (acc + keyL ys) rest
+
+eat :: Int -> Chain -> Int
+eat acc c = match c
+  | (Link ys rest) ? keyL ys > 2 = eat (acc + sumKeys 0 rest) (Link (mkL 0) rest) : eat (acc + keyL ys) rest
+  | End = acc
+
+--' A walk whose every step both reads the rest of the chain and builds onto it
+mixedLoop :: Int -> (Int, Int)
+mixedLoop n = census (eat 0 (build n End))

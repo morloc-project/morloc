@@ -1,0 +1,9 @@
+-- Spec NEWT-7: a newtype with both an explicit Packable instance and its
+-- representation cast is one instance, so `unpack` fixes its result type.
+-- Matrix's explicit instance and its cast name their variables differently.
+module main (flat)
+
+import tensor-py
+
+flat :: Matrix 2 3 Real -> Bool
+flat m = .1 (unpack m) == ([1, 2, 3, 4, 5, 6] :: Vector 6 Real)

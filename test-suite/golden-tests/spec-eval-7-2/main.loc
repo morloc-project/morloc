@@ -1,0 +1,35 @@
+-- Spec EVAL-7: a user type may release itself however it likes. Tail
+-- loops build and walk a chain whose Rust enum has its own `Drop`.
+module main (walk, walkMatch)
+
+import root-rust
+
+data Chain = End | Link Int Chain
+
+data Rust => Chain = "Chain"
+
+source Rust from "chain.rs" ("size")
+
+size :: Int -> Int
+
+build :: Int -> Chain -> Chain
+build n acc
+  ? n == 0 = acc
+  : build (n - 1) (Link n acc)
+
+count :: Int -> Chain -> Int
+count | acc (Link _ rest) = count (acc + 1) rest
+      | acc _ = acc
+
+countMatch :: Int -> Chain -> Int
+countMatch k c = match c
+  | End = k
+  | (Link _ rest) = countMatch (k + 1) rest
+
+--' The links counted
+walk :: Int -> Int
+walk n = count 0 (build (size n) End)
+
+--' The same, walking with the `match` form
+walkMatch :: Int -> Int
+walkMatch n = countMatch 0 (build (size n) End)

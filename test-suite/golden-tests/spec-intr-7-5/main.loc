@@ -1,0 +1,23 @@
+-- Spec INTR-7: @eq and @le compare wire values, the same in every
+-- language, here in the nexus: integers by value, strings by bytes, a
+-- constructor by its declaration order then its fields, an absent optional
+-- before a present one, and lists lexicographically.
+module main (results)
+
+import root
+
+data Shape = Circle Real | Rect Real Real | Dot
+
+results :: [Bool]
+results =
+  [ @le 2 10
+  , @le 10 2
+  , @eq "ab" "ab"
+  , @le "ab" "b"
+  , @eq 1.5 1.5
+  , @le (Circle 9.0) (Rect 1.0 1.0)
+  , @le (Rect 1.0 2.0) (Rect 1.0 1.0)
+  , @eq Dot Dot
+  , @le ([1, 2] :: [Int]) [1, 2, 0]
+  , @le (Null :: ?Int) (0 :: ?Int)
+  ]

@@ -1,7 +1,7 @@
 #[derive(Clone)]
 pub struct Ops {
-    pub inc: std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>>,
-    pub scale: std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>>,
+    pub inc: std::sync::Arc<dyn Fn(&i64) -> i64 + Send + Sync>,
+    pub scale: std::sync::Arc<dyn Fn(&i64) -> i64 + Send + Sync>,
 }
 
 pub fn ident<T: Clone>(x: &T) -> T {

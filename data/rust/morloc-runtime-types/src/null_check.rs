@@ -32,12 +32,12 @@ pub fn env_skip_null_check() -> bool {
 pub fn first_null_in_json_text(text: &str) -> Result<Option<String>, String> {
     let b = text.as_bytes();
     let mut pos = 0usize;
-    let mut path = String::new();
-    // Each open container: its element index (arrays only) and the path
-    // length to restore after each child.
+    // Each open container: an array's element index, or the span of the
+    // key of an object's current member. The path is built from these only
+    // when a NUL is found.
     enum Ctx {
-        Arr { i: usize, plen: usize },
-        Obj { plen: usize },
+        Arr(usize),
+        Obj(std::ops::Range<usize>),
     }
     let mut stack: Vec<Ctx> = Vec::new();
     let malformed = |pos: usize| format!("malformed JSON at byte {pos}");
@@ -54,6 +54,7 @@ pub fn first_null_in_json_text(text: &str) -> Result<Option<String>, String> {
         let mut i = start + 1;
         let mut has_nul = false;
         while i < b.len() {
+            i += memchr::memchr3(b'"', b'\\', 0, &b[i..])?;
             match b[i] {
                 b'"' => {
                     *pos = i + 1;
@@ -68,37 +69,62 @@ pub fn first_null_in_json_text(text: &str) -> Result<Option<String>, String> {
                     }
                     i += 2;
                 }
-                0 => {
+                _ => {
                     has_nul = true;
                     i += 1;
                 }
-                _ => i += 1,
             }
         }
         None
     }
-    // Position of the NUL inside the decoded string.
+    // Position of the NUL inside the decoded string, or, when the string
+    // holds a raw control byte and so does not decode, inside its raw text.
     fn nul_offset(slice: &str) -> Result<String, String> {
-        let s: String = serde_json::from_str(slice).map_err(|e| e.to_string())?;
-        let offset = s.as_bytes().iter().position(|&c| c == 0).ok_or_else(|| "no NUL".to_string())?;
-        Ok(format!(" (byte {} of {})", offset, s.len()))
+        match serde_json::from_str::<String>(slice) {
+            Ok(s) => {
+                let offset = s.as_bytes().iter().position(|&c| c == 0).ok_or_else(|| "no NUL".to_string())?;
+                Ok(format!(" (byte {} of {})", offset, s.len()))
+            }
+            Err(e) => {
+                let raw = &slice.as_bytes()[1..slice.len() - 1];
+                match raw.iter().position(|&c| c == 0) {
+                    Some(offset) => Ok(format!(" (raw byte {} of {})", offset, raw.len())),
+                    None => Err(e.to_string()),
+                }
+            }
+        }
     }
-    // Read the key of an object member at `pos` and append it to the path.
-    fn read_key(b: &[u8], text: &str, pos: &mut usize, path: &mut String) -> Result<(), String> {
+    // The key of an object member at `pos`, checked to be a JSON string.
+    fn read_key(b: &[u8], text: &str, pos: &mut usize) -> Result<std::ops::Range<usize>, String> {
         skip_ws(b, pos);
         if *pos >= b.len() || b[*pos] != b'"' {
             return Err(format!("malformed JSON at byte {}", *pos));
         }
         let (span, _) = scan_string(b, pos).ok_or_else(|| format!("malformed JSON at byte {}", *pos))?;
-        let key: String = serde_json::from_str(&text[span]).map_err(|e| e.to_string())?;
-        path.push('.');
-        path.push_str(&key);
+        let plain = b[span.start + 1..span.end - 1].iter().all(|&c| c >= 0x20 && c != b'\\');
+        if !plain {
+            serde_json::from_str::<String>(&text[span.clone()]).map_err(|e| e.to_string())?;
+        }
         skip_ws(b, pos);
         if *pos >= b.len() || b[*pos] != b':' {
             return Err(format!("malformed JSON at byte {}", *pos));
         }
         *pos += 1;
-        Ok(())
+        Ok(span)
+    }
+    fn path_of(stack: &[Ctx], text: &str) -> Result<String, String> {
+        let mut path = String::new();
+        for c in stack {
+            match c {
+                Ctx::Arr(i) => path.push_str(&format!("[{i}]")),
+                Ctx::Obj(key) => {
+                    let k: String = serde_json::from_str(&text[key.clone()]).map_err(|e| e.to_string())?;
+                    path.push('.');
+                    path.push_str(&k);
+                }
+            }
+        }
+        Ok(path)
     }
 
     loop {
@@ -110,32 +136,29 @@ pub fn first_null_in_json_text(text: &str) -> Result<Option<String>, String> {
         match b[pos] {
             b'[' => {
                 pos += 1;
-                let plen = path.len();
                 skip_ws(b, &mut pos);
                 if pos < b.len() && b[pos] == b']' {
                     pos += 1;
                 } else {
-                    stack.push(Ctx::Arr { i: 0, plen });
-                    path.push_str("[0]");
+                    stack.push(Ctx::Arr(0));
                     continue;
                 }
             }
             b'{' => {
                 pos += 1;
-                let plen = path.len();
                 skip_ws(b, &mut pos);
                 if pos < b.len() && b[pos] == b'}' {
                     pos += 1;
                 } else {
-                    stack.push(Ctx::Obj { plen });
-                    read_key(b, text, &mut pos, &mut path)?;
+                    let key = read_key(b, text, &mut pos)?;
+                    stack.push(Ctx::Obj(key));
                     continue;
                 }
             }
             b'"' => {
                 let (span, has_nul) = scan_string(b, &mut pos).ok_or_else(|| malformed(pos))?;
                 if has_nul {
-                    return Ok(Some(format!("{}{}", path, nul_offset(&text[span])?)));
+                    return Ok(Some(format!("{}{}", path_of(&stack, text)?, nul_offset(&text[span])?)));
                 }
             }
             _ => {
@@ -150,44 +173,35 @@ pub fn first_null_in_json_text(text: &str) -> Result<Option<String>, String> {
         }
         // After a value: close containers or move to the next sibling.
         loop {
+            skip_ws(b, &mut pos);
             match stack.last_mut() {
                 None => {
-                    skip_ws(b, &mut pos);
                     return if pos == b.len() { Ok(None) } else { Err(malformed(pos)) };
                 }
-                Some(Ctx::Arr { i, plen }) => {
-                    path.truncate(*plen);
-                    skip_ws(b, &mut pos);
-                    match b.get(pos) {
-                        Some(b',') => {
-                            pos += 1;
-                            *i += 1;
-                            path.push_str(&format!("[{}]", *i));
-                            break;
-                        }
-                        Some(b']') => {
-                            pos += 1;
-                            stack.pop();
-                        }
-                        _ => return Err(malformed(pos)),
+                Some(Ctx::Arr(i)) => match b.get(pos) {
+                    Some(b',') => {
+                        pos += 1;
+                        *i += 1;
+                        break;
                     }
-                }
-                Some(Ctx::Obj { plen }) => {
-                    path.truncate(*plen);
-                    skip_ws(b, &mut pos);
-                    match b.get(pos) {
-                        Some(b',') => {
-                            pos += 1;
-                            read_key(b, text, &mut pos, &mut path)?;
-                            break;
-                        }
-                        Some(b'}') => {
-                            pos += 1;
-                            stack.pop();
-                        }
-                        _ => return Err(malformed(pos)),
+                    Some(b']') => {
+                        pos += 1;
+                        stack.pop();
                     }
-                }
+                    _ => return Err(malformed(pos)),
+                },
+                Some(Ctx::Obj(key)) => match b.get(pos) {
+                    Some(b',') => {
+                        pos += 1;
+                        *key = read_key(b, text, &mut pos)?;
+                        break;
+                    }
+                    Some(b'}') => {
+                        pos += 1;
+                        stack.pop();
+                    }
+                    _ => return Err(malformed(pos)),
+                },
             }
         }
     }
@@ -222,6 +236,31 @@ mod tests {
         assert!(first_null_in_json_text("").is_err());
         assert!(first_null_in_json_text("[1] x").is_err());
         assert!(first_null_in_json_text("hello world").is_err());
+        assert!(first_null_in_json_text("{\"a\\x\": 1}").is_err());
+        assert!(first_null_in_json_text("{\"a\u{1}\": 1}").is_err());
+        assert!(first_null_in_json_text("{\"a\": 1, \"b\\q\": 2}").is_err());
+    }
+
+    #[test]
+    fn a_raw_nul_byte_is_found_not_skipped() {
+        assert_eq!(first_null_in_json_text("\"a\u{0}b\"").unwrap().as_deref(), Some(" (raw byte 1 of 3)"));
+        assert_eq!(first_null_in_json_text("[\"x\", \"\u{0}\"]").unwrap().as_deref(), Some("[1] (raw byte 0 of 1)"));
+    }
+
+    #[test]
+    fn nul_path_names_late_elements_and_escaped_keys() {
+        let mut items: Vec<String> = (0..1500).map(|i| format!("\"s{i}\"")).collect();
+        items[1234] = "\"ab\\u0000\"".to_string();
+        let text = format!("{{\"k\\\"ey\": 7, \"xs\": [{}]}}", items.join(","));
+        assert_eq!(
+            first_null_in_json_text(&text).unwrap().as_deref(),
+            Some(".xs[1234] (byte 2 of 3)")
+        );
+        let text = format!("{{\"k\\\"ey\": [{}]}}", items.join(","));
+        assert_eq!(
+            first_null_in_json_text(&text).unwrap().as_deref(),
+            Some(".k\"ey[1234] (byte 2 of 3)")
+        );
     }
 
     #[test]

@@ -1,0 +1,16 @@
+rejected arm
+rejected raw
+rejected visit
+rejected tail
+rejected mapped
+rejected rec
+rejected unique
+rejected recsrc
+43
+[4,3]
+4
+[5,4]
+2
+3
+{"Circle":[[1,1,9]]}
+5

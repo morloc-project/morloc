@@ -18,11 +18,22 @@ module Morloc.TypeEval
   , evaluateStep
   , pairEval
   , reduceType
+  , aliasChain
   , reduceTypeLeaves
   , expandHeadOnly
   , expandWireParent
   , wireParentRoot
   , expandLeavesOnce
+  , Whnf
+  , unWhnf
+  , flattenApp
+  , headName
+  , isTransparentAlias
+  , whnf
+  , dataHead
+  , dataCtors
+  , dataIsEnum
+  , enumCtors
   ) where
 
 import qualified Data.Set as Set
@@ -91,9 +102,7 @@ pairEval cscope gscope =
               | otherwise -> generalTransformType Set.empty id resolveFail cscope t
 
     isDataType :: Scope -> TypeU -> Bool
-    isDataType scope (VarU v) = maybe False (const True) (scopeEnumCtors scope v)
-    isDataType scope (AppU (VarU v) _) = maybe False (const True) (scopeEnumCtors scope v)
-    isDataType _ _ = False
+    isDataType scope = isJust . dataHead scope . whnf scope
 
     -- One-step body expansion for non-NamU newtypes. Returns Nothing
     -- for everything else (NamU newtypes are handled by the main walk
@@ -135,6 +144,10 @@ reduceType scope t0 =
   case evaluateStep scope t0 of
     (Just t1) -> if t1 == t0 then Nothing else Just t1
     Nothing -> Nothing
+
+-- | A type followed by each one-step reduction of it, until none applies.
+aliasChain :: Scope -> TypeU -> [TypeU]
+aliasChain scope t = t : maybe [] (aliasChain scope) (reduceType scope t)
 
 -- | Reduce aliases one step inside compound types. When the top-level
 -- constructor is not an alias (e.g., FunU), reduceType returns Nothing.
@@ -280,7 +293,14 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       -- plans/in-morloc-recursive-fields-* for context.
       let bnd' = Set.insert n' (Set.insert n bnd)
       ts' <- mapM (recurse bnd' . snd) rs
-      ps' <- mapM (recurse bnd') ps
+      -- A structural record form holds in its fields every parameter its
+      -- representation uses, so a parameter with no form here is phantom and
+      -- is kept as written (POLY-6). A template form ("Map<$1,$2>") spells
+      -- its parameters and needs each one.
+      ps' <-
+        if MT.isInfixOf "$" (unTVar n')
+          then mapM (recurse bnd') ps
+          else return [either (const p) id (recurse bnd' p) | p <- ps]
       return $ NamU o' n' ps' (zip (map fst rs) ts')
     -- Flatten nested AppU heads first. Substituting a partial-applied
     -- class head into a method's @f a@ signature produces @AppU (AppU H
@@ -818,3 +838,64 @@ expandLeavesOnce scope t0 =
       let (es', cs) = unzip (map (go bnd) es)
       in (LitU (LSet es'), or cs)
     descend _ t = (t, False)
+
+-- | A type whose head is not a transparent alias. Only 'whnf' builds one,
+-- so a lookup that takes a 'Whnf' cannot be handed an alias's name.
+newtype Whnf = Whnf TypeU
+  deriving (Show)
+
+unWhnf :: Whnf -> TypeU
+unWhnf (Whnf t) = t
+
+-- | Unfold transparent aliases at the head until the head is not one.
+-- Newtypes, primitives and `data` types stop the unfolding.
+whnf :: Scope -> TypeU -> Whnf
+whnf scope = Whnf . go Set.empty . flattenApp
+  where
+    go seen t = case headName t of
+      Just v
+        | Set.notMember v seen
+        , Just t' <- expandHeadOnly scope t -> go (Set.insert v seen) (flattenApp t')
+      _ -> t
+
+-- | An application whose head is itself an application, flattened:
+-- @AppU (AppU h a) b@ is @AppU h (a ++ b)@.
+flattenApp :: TypeU -> TypeU
+flattenApp (AppU (AppU h inner) outer) = flattenApp (AppU h (inner ++ outer))
+flattenApp t = t
+
+-- | The name heading a type, bare or applied.
+headName :: TypeU -> Maybe TVar
+headName (VarU v) = Just v
+headName (AppU (VarU v) _) = Just v
+headName _ = Nothing
+
+-- | True when a name is declared as a transparent `type` alias.
+isTransparentAlias :: Scope -> TVar -> Bool
+isTransparentAlias scope v = case Map.lookup v scope of
+  Just entries -> any (\(_, _, _, _, k) -> k == TypedefAlias) entries
+  Nothing -> False
+
+-- | The `data` type at the head of a type: its name, the arguments it is
+-- applied to, and its constructor table, fields as declared.
+dataHead :: Scope -> Whnf -> Maybe (TVar, [TypeU], [(MT.Text, [TypeU])])
+dataHead scope (Whnf t) = case t of
+  VarU v -> (\cs -> (v, [], cs)) <$> dataCtorsOfName scope v
+  AppU (VarU v) ts -> (\cs -> (v, ts, cs)) <$> dataCtorsOfName scope v
+  _ -> Nothing
+
+-- | The constructor table of the `data` type at the head.
+dataCtors :: Scope -> Whnf -> Maybe [(MT.Text, [TypeU])]
+dataCtors scope t = (\(_, _, cs) -> cs) <$> dataHead scope t
+
+-- | True when the head is a `data` type whose constructors all take no
+-- arguments. This is a property of the type, not of one constructor: an
+-- argument-free constructor beside a payload-bearing one is a variant with
+-- an empty payload.
+dataIsEnum :: Scope -> Whnf -> Bool
+dataIsEnum scope t = maybe False (all (null . snd)) (dataCtors scope t)
+
+-- | The constructor names of the `data` type at the head, in declaration
+-- order. A constructor's position here is its wire tag.
+enumCtors :: Scope -> Whnf -> Maybe [MT.Text]
+enumCtors scope t = map fst <$> dataCtors scope t

@@ -1,0 +1,19 @@
+-- The same record at instantiations whose fields differ cannot share one
+-- non-generic Rust struct; the build is rejected with a message, not a cargo
+-- error.
+module main (run)
+import root-rust
+
+record Box a where
+  v :: a
+
+record Rust => Box a = "Bx"
+
+source Rust from "g.rs" ("mki", "mks", "both")
+
+mki :: Int -> Box Int
+mks :: Int -> Box Real
+both :: Box Int -> Box Real -> Int
+
+run :: Int -> Int
+run x = both (mki x) (mks x)

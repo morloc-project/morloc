@@ -162,6 +162,21 @@ impl Schema {
         make_table_schema(params, keys)
     }
 
+    /// A list of `elem` with no fixed length (FMT-6).
+    pub fn array(elem: Schema) -> Self {
+        make_array_schema_with_dim(0, elem)
+    }
+
+    /// A tuple of `params` (FMT-6).
+    pub fn tuple(params: Vec<Schema>) -> Self {
+        make_tuple_schema(params)
+    }
+
+    /// A record of `params` named by `keys` (FMT-6).
+    pub fn record(params: Vec<Schema>, keys: Vec<String>) -> Self {
+        make_map_schema(params, keys)
+    }
+
     pub fn primitive(serial_type: SerialType) -> Self {
         use crate::shm_types as shm;
         let width = match serial_type {

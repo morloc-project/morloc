@@ -1,0 +1,48 @@
+-- Spec OWN-7 in C++: a function that keeps a value it is given takes it from
+-- the caller instead of copying it. A payload from `mkL k` is a list of
+-- 20000 + k ints, `keyL` reads which payload arrived, and every allocation
+-- of 64 KiB or more that `mkL` did not make is a copy of one. Each export
+-- prints its result and the copies made. A loop that starts from the list
+-- it was given and replaces it each step takes it; a caller that reads the
+-- list after the call copies it once, at the call; a function also used as
+-- a function value takes its arguments by reference, and still gives the
+-- right values; and a function that only passes the list on to one that
+-- takes it by value takes it by value too.
+module main (handed, readAfter, asValue, composed, partPassed)
+
+import root
+import root-cpp
+
+source Cpp from "counted.hpp" ("mkL", "keyL", "census")
+
+mkL :: Int -> [Int]
+keyL :: [Int] -> Int
+census :: Int -> (Int, Int)
+
+accL :: Int -> [Int] -> [Int]
+accL k acc
+  ? k == 0 = acc
+  : accL (k - 1) (mkL k)
+
+--' A list handed to a loop that gives it back
+handed :: Int -> (Int, Int)
+handed n = census (keyL (accL 3 (mkL n)))
+
+--' The same, with the list read again after the call
+readAfter :: Int -> (Int, Int)
+readAfter n = census (let ys = mkL n in let z = keyL (accL 3 ys) in z + keyL ys)
+
+--' The loop also applied as a function value
+asValue :: Int -> (Int, Int)
+asValue n = census (sum (map keyL (map (accL 1) [mkL n, mkL (n + 1)])))
+
+passOn :: [Int] -> [Int]
+passOn ys = accL 3 ys
+
+--' A list handed through a function that passes it on to the loop
+composed :: Int -> (Int, Int)
+composed n = census (keyL (passOn (mkL n)))
+
+--' A part of a pair handed through the same function, the pair read after
+partPassed :: Int -> (Int, Int)
+partPassed n = census (let p = (mkL n, mkL (n + 1)) in let a = .1 p in let b = keyL (passOn a) in b + keyL (.0 p))

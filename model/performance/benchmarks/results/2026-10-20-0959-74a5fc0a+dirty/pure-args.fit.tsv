@@ -1,0 +1,8 @@
+# pure-args 2026-10-20 09:59 load=0.79 morloc=0.109.0 commit=74a5fc0a+dirty cpu=AMD Ryzen 5 7535U with Radeon Graphics cores=12
+item	param	value	unit	note
+ENC-4	pure:Strs.json.c	-9.22408	ms	r2=0.9942
+ENC-4	pure:Strs.json.b	616.022	ns	r2=0.9942 per element
+ENC-4	pure:OptReals.json.c	4.4314	ms	r2=0.9971
+ENC-4	pure:OptReals.json.b	336.623	ns	r2=0.9971 per element
+ENC-4	pure:Nested.json.c	-1.81759	ms	r2=0.9973
+ENC-4	pure:Nested.json.b	639.496	ns	r2=0.9973 per element

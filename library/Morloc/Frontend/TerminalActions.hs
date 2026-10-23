@@ -105,7 +105,7 @@ visibleSigs dag = do
   result <- DAG.synthesizeNodes resolve dag
   case result of
     Just resolved -> return (Map.map (fst . fst) resolved)
-    Nothing -> MM.throwSystemError "Found cyclic module dependency"
+    Nothing -> MM.throwCompilerBug "the module graph has a cycle after loading"
 
 -- | A 'Desugar.DState' for this pass. Only the index counter, source map,
 -- warnings and stream element types carry live data.

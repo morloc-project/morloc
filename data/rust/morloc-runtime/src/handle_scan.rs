@@ -545,6 +545,7 @@ mod tests {
         let schema = parse_schema("&2LLm24headF4tail?^2LL").unwrap();
         assert!(schema_contains_kind(&schema, StreamFieldKind::IFile));
         crate::deep_tests::on_small_stack(|| {
+            let _shm = crate::init_test_shm();
             let schema = parse_schema("&2LLm24headF4tail?^2LL").unwrap();
             let depth = 20_000;
             let mut text = String::new();
@@ -557,6 +558,7 @@ mod tests {
             let payload = crate::voidstar::flatten_to_buffer(ptr, &schema).unwrap();
             let fields = collect_stream_fields(&payload, &schema).unwrap();
             assert_eq!(fields.len(), depth);
+            crate::shm::shfree(ptr).unwrap();
         });
     }
 

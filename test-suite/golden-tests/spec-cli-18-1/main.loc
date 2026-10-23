@@ -1,0 +1,31 @@
+-- Spec CLI-18: a quoted cell holds delimiters, line feeds and doubled
+-- quotes; a quote later in an unquoted cell is literal; text after a
+-- closing quote, an unclosed quote, a stray CR, a blank line and a short
+-- record are errors.
+module main (rows)
+
+import root-py
+import table-py
+
+source Py from "src.py" ("py_id")
+py_id :: a -> a
+
+record Row = Row { x :: Int, y :: Str }
+
+--' Records as read, through a Python pool
+rows ::
+  --' @form table
+  [Row] -> [Row]
+rows xs = py_id xs
+
+--' A table as read, through a Python pool
+table ::
+  --' @form table
+  Table n {x=Int, y=Str} -> Table n {x=Int, y=Str}
+table t = py_id t
+
+--' A table of any columns, through a Python pool
+open ::
+  --' @form table
+  Table n r -> Table n r
+open t = py_id t

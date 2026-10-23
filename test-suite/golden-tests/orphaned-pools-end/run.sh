@@ -2,9 +2,8 @@
 # Start a run with all three pools up, SIGKILL the nexus so it cannot clean
 # up, and report whether any process of the pools' groups outlives it.
 label=$1
-mode=$2
 rm -f started.txt
-MORLOC_PY_POOL=$mode ./nexus nest started.txt > /dev/null 2>&1 &
+./nexus nest started.txt > /dev/null 2>&1 &
 nx=$!
 i=0
 while [ ! -s started.txt ] && [ $i -lt 400 ]; do

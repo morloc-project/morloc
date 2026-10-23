@@ -1,0 +1,9 @@
+-- Spec POLY-6: a type variable that nothing determines and that a native
+-- representation needs is a located error. The element type of `[]` is
+-- fixed by nothing, and the list crosses into a pool.
+module main (f)
+
+import root-py
+
+f :: Int -> Int
+f x = length []

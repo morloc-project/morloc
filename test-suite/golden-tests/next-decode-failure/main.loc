@@ -1,0 +1,49 @@
+-- `@next` in a C++ or Rust pool decodes the batch where it lies, in a call
+-- back from the runtime (SLOT-25). A batch the pool cannot decode -- an
+-- `Int` too large for the pool's native integer -- makes that `@next`
+-- return `Err`, as when the batch was copied out first, without unwinding
+-- through the runtime, and the claim on the batch is released: the next
+-- `@next` reads the next batch. Each reader prints 30 for that `Err` (20 if
+-- the failure escaped as an exception, else the batch's size), plus the
+-- size of the batch after it.
+module main (writeBig, readCpp, readRust)
+
+import root-py
+import root-cpp
+import root-rust
+
+effect IO
+
+bigs :: Int -> [Int]
+source Py from "h.py" ("bigs")
+
+applyCpp :: (Int -> <IO> Int) -> Int -> <IO> Int
+source Cpp from "h.hpp" ("applyOnce" as applyCpp)
+
+applyRust :: (Int -> <IO> Int) -> Int -> <IO> Int
+source Rust from "h.rs" ("apply_once" as applyRust)
+
+writeBig :: Str -> <IO> Int
+writeBig p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream Int))
+  @write 0 o (bigs 0)
+  @flush o
+  @write 0 o (bigs 1)
+  @close o
+  0
+
+readCpp :: Str -> <IO> Int
+readCpp p = do
+  Ok s <- @open p :: <IO> (Try Str (IStream Int))
+  applyCpp (\x -> do
+    r <- @try (@next s)
+    Ok ys <- @next s
+    (match r | (Ok t) = (match t | (Ok xs) = length xs | (Err _) = 30) | (Err _) = 20) + length ys) 0
+
+readRust :: Str -> <IO> Int
+readRust p = do
+  Ok s <- @open p :: <IO> (Try Str (IStream Int))
+  applyRust (\x -> do
+    r <- @try (@next s)
+    Ok ys <- @next s
+    (match r | (Ok t) = (match t | (Ok xs) = length xs | (Err _) = 30) | (Err _) = 20) + length ys) 0

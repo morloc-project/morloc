@@ -1,3 +1,142 @@
+0.110.0 [2026-10-23]
+--------------------
+
+New features
+ * `@form table` reads a headed CSV, TSV, Arrow or Parquet file into records or
+   a Table, binding columns by name; the delimiter comes from the header, not
+   the file extension
+ * `tool-deps` in package.yaml declares external programs (conda/bioconda)
+   that a module runs; they are solved into the environment and put on PATH
+ * Daemon, MCP and front-end calls take arguments by name and fill defaults
+   exactly as the command line does
+ * Every interface selects output actions the same way: MCP can run every
+   action, a bare call runs `@default`, and `@render` output is raw bytes
+ * `@mime`-typed values are written as their bytes on the command line
+   unless `-f`/`-p` is given
+ * Labels (`lab@f`) wrap exactly one call or run, and SLURM dispatch works
+ * Command help lists output actions in their own section and marks the
+   `@default` one; `--json-help` carries `@epilogue` blocks
+ * Newtypes get `unpack` for free, `deriving (Packable)` adds `pack`, and
+   `deriving (Eq, Ord, Show, Hashable)` builds instances that agree in every
+   language
+
+Language and typing
+ * `|` clauses, `match` and refutable `<-` binds can match fixed-length lists:
+   `[]`, `[x]`, `[0, y]`
+ * Type aliases are fully interchangeable with their expansions (constructor
+   patterns, higher kinds, Nat slots, recursive aliases over data types)
+ * Alias declarations are checked: no free type variables, no duplicate
+   declarations, argument kinds and arity must match
+ * Dimension equations must have a natural-number solution (`m + 1 = 0` is an error)
+ * A type variable nothing determines is a located error, not a crash
+ * A term has one signature; a local signature for an imported name replaces
+   the imported term instead of mixing implementations
+ * Numeric literals inside lists, tuples and nested calls wait for their type
+   (`pair 7 (toR n)`, `pair [7] [half]`)
+ * Effect-polymorphic recursion works (a pure base case no longer closes the row)
+ * A record literal may be the first statement of a `do` block
+ * Rust host code holds morloc function values as plain
+   `Arc<dyn Fn(&A..) -> R + Send + Sync>`, so closures, partial applications
+   and recursive values can run on threads (breaking: `MorlocFnN` and
+   `.callN` are removed)
+ * `&&` and `||` short-circuit in every language and cannot be redefined
+ * A package's local imports resolve from the package itself, so an installed
+   package with submodules can be imported
+ * A record meets an anonymous record type only in the same field order
+   (fields were matched by key and silently swapped)
+ * Brackets index only lists, `IFile`s and types with an indexing instance
+   (a newtype over a list needs its own)
+ * Two commands may not share a name, even in different groups
+ * `@datafile` takes a literal path and resolves to the same absolute path
+   in the nexus and in pools
+ * Sourced names no longer collide with the pool's own names in Python, R
+   and Rust; names starting `__mm_` or `__morloc` are reserved
+
+Removed
+ * Julia support
+ * `@savem`; at an optional text type `@load` reads `null` as Null
+ * C++: a sourced function may not take an argument by non-const `T&`, and
+   every mapped type must be a value (no pointers, references or views)
+
+Errors
+ * A conflicting type declaration error shows every declaration in conflict
+ * Every error reply carries a class; a top-level `Err` fails the call on
+   every interface, and oversized requests get 413
+ * Error traces list only morloc functions, at their definitions, with
+   repeats collapsed; `--debug` frames name sourced functions and their call
+   sites
+
+Security and robustness
+ * A daemon serves eval, typecheck and bind only with `--eval`, and over HTTP
+   only with a token
+ * Malformed call bodies are rejected instead of running with no arguments
+ * Served calls cannot read the server's stdin; streaming to stdout over a
+   daemon or MCP fails instead of losing output
+ * `/health` needs no token
+ * Calls through the front end are no longer cut off after 60 s
+ * A caller no longer waits forever on a callee that died
+ * A closed stdout pipe ends the run with status 141, not "run failed"
+ * Python pools always use forked workers (`MORLOC_PY_POOL=thread` is gone);
+   Python and R share one pool scheduler
+ * Served calls refuse any path that reaches the server's stdio
+   (`/proc/<pid>/fd/1`, a link to `/dev/stdout`, ...)
+ * A C++ pool ends (status 70) when the machinery between pools fails, even
+   if user code catches `std::exception`
+
+Performance
+ * Connections into C++ and Rust pools are reused (Python -> C++ call 53 -> 32 us);
+   Python workers accept their own connections
+ * Idle pool workers stay for 60 s before retiring
+ * A starting pool is seen ready as soon as it answers
+ * Daemon HTTP requests parse in bulk (trivial request 840 -> 350 us)
+ * Output streams are written by one writer in the nexus; compression and
+   decompression run as parallel frames on every core, and `@next` decodes
+   batches in place
+ * Total memory queued by a process's output streams is bounded at 1 GiB
+ * Rust copies numeric vectors in bulk; the Python encoder is faster
+ * MCP over HTTP and the front end serve calls concurrently
+ * Rust no longer clones values unwrapped from a fresh `Try`, and `Ok`/`Err`
+   unwraps move instead of copy
+ * Recursion written in morloc reaches the language's own maximum depth in
+   C++, Rust and Python, and 80% of it in R (C++ 14x, Rust 11x, R 15x and
+   Python 2x deeper than before); failure traces no longer cost a handler
+   or an extra frame per call
+ * C++ and Rust pool workers get the main thread's stack (`ulimit -s`,
+   8 MiB by default), so sourced recursion goes 4x deeper
+ * Rust loops over user-mapped data types no longer copy the rest of the
+   value on every step
+ * A Rust tail loop that walks into a value it was given no longer copies
+   the value first, and a Rust function that keeps an argument takes it from
+   its caller instead of copying it, so deep values take no extra stack
+ * C++ data types hold their constructors in plain `std::shared_ptr<const T>`,
+   and a deep value morloc builds is still released in bounded stack;
+   `mlc::rec_ptr` is removed
+ * C++ and Rust move a value into what keeps it (a let, loop slot, record,
+   closure or by-value argument) at its last read instead of copying it
+ * Large list arguments to pure commands load in linear time (320k strings
+   7.5 -> 0.44 s)
+
+Fixes
+ * JSON floats round trip exactly; an out-of-range F32 is an error
+ * A host function sourced twice with different signatures is called by the
+   right one
+ * An alias of a top-level constant no longer crashes the compiler or calls itself
+ * Rust pools build online when the lock does not pin every crate
+   (`CARGO_NET_OFFLINE` still forces offline)
+ * A record with a phantom parameter mapped to one Rust struct builds
+ * A shared definition realized in another language no longer breaks its Python caller
+ * Class methods in record literal fields resolve their instance
+ * A Rust record field can be read from a struct with its own `Drop`; the
+   struct must hold exactly the record's fields
+ * A compressed packet under 1 MiB is checked against the requested type on
+   load, and a packet named `.json` or `.mpk` loads as a packet
+ * `view --pattern` group projections (`.[0:2].(.0;.1)`) read the right fields
+ * A pool keeping a large argument the daemon read no longer reads freed memory
+ * Rust pools build with typed tables, and merging pools keeps the
+   environment's Cargo lock consistent
+ * R: integers outside R's range fail at the boundary instead of corrupting;
+   the R shim builds against R 4.5+
+
 0.109.0 [2026-10-07]
 --------------------
 

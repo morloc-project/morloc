@@ -1,0 +1,10 @@
+-- Spec DIAG-2: a missing instance in a definition whose body is a bare
+-- reference is located at the body, not at the export list.
+module main (fromReal)
+
+import root-py
+
+newtype Celsius = Real
+
+fromReal :: Real -> Celsius
+fromReal = pack

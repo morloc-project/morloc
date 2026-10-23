@@ -7,7 +7,7 @@ module specialize (howInt, howStr)
 
 import root-py
 
-newtype Box a
+newtype Box a = [a]
 
 type Py => (Box a) = "dict" a
 

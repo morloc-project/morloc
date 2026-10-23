@@ -1,0 +1,13 @@
+-- Spec CLS-2: a literal is built by the instance that covers its type,
+-- including one whose head has a dimension. R's Vector form is a numeric
+-- vector, so a Vector literal in R is packed by vector-r's instance.
+module main (total)
+
+import root-r
+import vector-r
+
+source R from "main.R" ("rsum")
+rsum :: Vector 3 Int -> Int
+
+total :: Int
+total = rsum ([1, 2, 3] :: Vector 3 Int)

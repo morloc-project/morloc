@@ -18,9 +18,8 @@
 //! any command is evaluated: it saves the real stdout to a private high fd and
 //! aliases fd 1 onto fd 2, so every stray `print` / `std::cout` / `cat` lands on
 //! stderr. JSON-RPC is written only via raw `write(protocol_fd, ...)`, never
-//! `println!`. Commands whose types cannot be safely served (stream handles,
-//! `@stdin`) are excluded from the tool surface upstream in
-//! [`crate::json_help::build_tool_shapes`].
+//! `println!`. A command returning a file handle is left out of the tool
+//! surface ([`crate::json_help::build_tool_shapes`]).
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -29,7 +28,7 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::io::RawFd;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::value::RawValue;
@@ -42,10 +41,6 @@ type Raw = Box<RawValue>;
 
 /// A tool call's named arguments, in the order the client wrote them.
 type Args = indexmap::IndexMap<String, Raw>;
-
-fn raw_of(v: &Value) -> Raw {
-    RawValue::from_string(v.to_string()).expect("a serialized value is JSON")
-}
 
 /// A JSON-RPC message. The envelope is protocol-shaped and small; `params`
 /// stays text until the method that reads it decides how.
@@ -97,35 +92,103 @@ fn tool_call_params(msg: &RpcMessage) -> Result<(String, Args), &'static str> {
     let arguments = match p.arguments {
         None => Args::new(),
         Some(r) if r.get().trim_start().starts_with('{') => {
-            serde_json::from_str::<Args>(r.get()).map_err(|_| "invalid params")?
+            let members = morloc_runtime_types::call_body::members(r.get()).map_err(|_| "invalid params")?;
+            let mut args = Args::with_capacity(members.len());
+            for (k, v) in members {
+                if args.insert(k, v.to_owned()).is_some() {
+                    return Err("an argument is given twice");
+                }
+            }
+            args
         }
         Some(_) => return Err("'arguments' must be an object"),
     };
     Ok((name, arguments))
 }
 
-/// The string argument `key`, when present and a string.
-fn arg_str(args: &Args, key: &str) -> Option<String> {
-    serde_json::from_str::<String>(args.get(key)?.get()).ok()
+/// The string argument `key`: `Ok(None)` when absent, an error naming the
+/// argument when present but not a string (`null` included).
+fn arg_str(args: &Args, key: &str) -> Result<Option<String>, String> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(r) => serde_json::from_str::<String>(r.get())
+            .map(Some)
+            .map_err(|_| format!("argument '{}' must be a string", key)),
+    }
 }
 
-/// A daemon call request, with the args as the text they arrived in.
-#[derive(serde::Serialize)]
-struct CallRequest<'a> {
-    method: &'static str,
-    command: &'a str,
-    args: Vec<Raw>,
+/// The output selection a request carries, so its reply can be checked.
+enum Selection {
+    None,
+    Default,
+    Named(String),
 }
 
-fn call_request(command: &str, args: Vec<Raw>) -> String {
-    serde_json::to_string(&CallRequest { method: "call", command, args })
-        .expect("a request of raw JSON members serializes")
+impl Selection {
+    /// The request fields that carry it.
+    fn request_fields(&self) -> String {
+        match self {
+            Selection::None => String::new(),
+            Selection::Default => ",\"render_default\":true".into(),
+            Selection::Named(r) => format!(",\"render\":{}", Value::String(r.clone())),
+        }
+    }
+
+    /// Whether a reply that names `action` applied this selection: a daemon
+    /// that ignored the selection names no action.
+    fn applied_by(&self, action: Option<&str>) -> bool {
+        match (self, action) {
+            (Selection::None, _) => true,
+            (Selection::Default, Some(_)) => true,
+            (Selection::Named(r), Some(a)) => r == a,
+            _ => false,
+        }
+    }
+}
+
+/// The output selection of a `tools/call` on `shape`: `_render`
+/// when given, which must be `raw` or one of the tool's actions; otherwise
+/// the `@default` action of a tool that has actions.
+fn tool_selection(shape: &McpToolShape, args: &Args) -> Result<Selection, String> {
+    match arg_str(args, "_render")? {
+        Some(r) if r == "raw" || shape.actions.contains(&r) => Ok(Selection::Named(r)),
+        Some(r) => Err(format!("unknown output action '{}'", r)),
+        None if shape.actions.is_empty() => Ok(Selection::None),
+        None => Ok(Selection::Default),
+    }
+}
+
+/// A tool call's arguments as the call's named-argument object: every
+/// argument but the `_render` selector.
+fn named_args(arguments: &Args) -> String {
+    let mut out = String::from("{");
+    for (k, v) in arguments.iter().filter(|(k, _)| k.as_str() != "_render") {
+        if out.len() > 1 {
+            out.push(',');
+        }
+        out.push_str(&Value::String(k.clone()).to_string());
+        out.push(':');
+        out.push_str(v.get());
+    }
+    out.push('}');
+    out
+}
+
+/// A daemon call request, with its args (absent, or the text they arrived
+/// in).
+fn call_request(command: &str, args: Option<&str>, selection: &Selection) -> String {
+    format!(
+        "{{\"method\":\"call\",\"command\":{}{}{}}}",
+        Value::String(command.to_string()),
+        args.map(|a| format!(",\"args\":{}", a)).unwrap_or_default(),
+        selection.request_fields()
+    )
 }
 
 use morloc_manifest::Manifest;
 use morloc_runtime_types::daemon_socket::MorlocSocket;
 
-use crate::json_help::{build_tool_shapes, ArgSlot, McpToolShape};
+use crate::json_help::{build_tool_shapes, McpToolShape};
 use crate::process::{self, PoolSocket};
 
 /// The MCP protocol revision this server implements. Pinned so we never have to
@@ -137,10 +200,10 @@ const SERVER_PROTOCOL_VERSION: &str = "2025-06-18";
 /// 64 MiB cap would otherwise provide.
 const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
-/// Mirror of the daemon dispatch error kinds we care about
-/// (`daemon_ffi::DAEMON_ERROR_INTERNAL`). A dispatch that fails with this kind
-/// may mean a pool process died, so we probe + recover afterward.
-const DAEMON_ERROR_INTERNAL: i32 = 5;
+use morloc_runtime_types::daemon_error::{
+    BAD_REQUEST as DAEMON_ERROR_BAD_REQUEST, INTERNAL as DAEMON_ERROR_INTERNAL,
+    NOT_FOUND as DAEMON_ERROR_NOT_FOUND,
+};
 
 /// Heap ceiling for a forked `morloc eval`, written as a GHC RTS argument.
 ///
@@ -177,6 +240,8 @@ struct CDaemonResponse {
     result_bytes: *mut u8,
     result_len: usize,
     mime: *mut c_char,
+    action: *mut c_char,
+    result_text: bool,
 }
 
 extern "C" {
@@ -231,6 +296,7 @@ pub fn serve(
     manifest_payload: &str,
     manifest: &Manifest,
     protocol_fd: RawFd,
+    protocol_in: RawFd,
 ) -> ! {
     // Parse the manifest into the C-layout struct daemon_dispatch expects.
     let manifest_c = parse_c_manifest(manifest_payload);
@@ -243,10 +309,11 @@ pub fn serve(
         sockets_ptr: c_sockets.as_mut_ptr() as *mut c_void,
         n_pools: c_sockets.len(),
         shm: CString::new(shm_basename).unwrap(),
+        calls: CallSlots::new(1),
     };
 
-    // Precompute every servable tool's shape (forward inputSchema + inverse
-    // argument mapping). Excluded commands are dropped with a stderr note.
+    // Every servable tool's shape; excluded commands are dropped with a
+    // stderr note.
     let shapes: Vec<McpToolShape> = build_tool_shapes(manifest);
     let tools_list: Vec<Value> = shapes.iter().map(|s| s.tool.clone()).collect();
     let by_name: HashMap<&str, &McpToolShape> =
@@ -256,9 +323,11 @@ pub fn serve(
     let server_version = manifest.build.morloc_version.clone();
 
     let mut session = Session::new();
-    // `StdinLock` is itself a `BufRead`; the lock is process-local, so pools
-    // (separate processes sharing fd 0) can't contend on it.
-    let reader = std::io::stdin().lock();
+    // The requests arrive on the client's stdin, held at a private
+    // descriptor; fd 0 itself is /dev/null (DAEMON-15).
+    let reader = BufReader::new(unsafe {
+        <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(protocol_in)
+    });
 
     for line in read_lines_capped(reader) {
         let line = match line {
@@ -434,9 +503,9 @@ fn handle_message(
     }
 }
 
-/// Service one `tools/call`: validate arguments against the tool's inputSchema,
-/// invert the named `arguments` into the positional array `daemon_dispatch`
-/// wants, dispatch, and shape the result. Argument problems become JSON-RPC
+/// Service one `tools/call`: forward the named `arguments` to
+/// `daemon_dispatch`, which reads them as every interface does, and shape the
+/// result. Argument problems become JSON-RPC
 /// errors; execution problems become a normal result with `isError: true`.
 fn handle_tools_call(
     id: Value,
@@ -459,115 +528,23 @@ fn handle_tools_call(
         }
     };
 
-    // Validate + invert named arguments into the exact-arity positional array.
-    let positional = match resolve_arguments(shape, &arguments) {
-        Ok(p) => p,
+    let selection = match tool_selection(shape, &arguments) {
+        Ok(sel) => sel,
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
-
-    // Select the output projection. Commands with terminals expose a `_render`
-    // enum: "raw" (default) dispatches the command itself; a renderer name
-    // dispatches that projection's entry command and packages its result by the
-    // entry's media type. `_render` is not a pool argument, so `positional` is
-    // identical for the command and any of its projections.
-    let render_sel = arg_str(&arguments, "_render").unwrap_or_else(|| "raw".to_string());
-    let (dispatch_command, ret_mime, returns_object) = match shape.dispatch_for(&render_sel) {
-        Ok(target) => target,
-        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
-    };
-
-    // Dispatch through the shared execution backend. A media-typed projection is
-    // fetched as raw bytes (no JSON int-array), then base64'd into an MCP block.
-    let want_media = ret_mime.is_some();
-    match ctx.dispatch(&call_request(&dispatch_command, positional), want_media) {
-        Ok(DispatchOutcome::Media(content)) => {
-            result_response(id, media_result_object(content))
-        }
-        Ok(DispatchOutcome::Json(result_json)) => {
-            result_response(id, tool_result_object(&result_json, returns_object))
-        }
-        Err(message) => {
-            // Execution failure (pool error, @throw, recovering, internal):
-            // report as a tool result with isError, not a protocol error, so
-            // the model can read and react to the failure.
-            result_response(
-                id,
-                json!({
-                    "content": [ { "type": "text", "text": message } ],
-                    "isError": true,
-                }),
-            )
-        }
+    let args = named_args(&arguments);
+    match ctx.dispatch(&call_request(&shape.name, Some(&args), &selection), &shape.name) {
+        Ok(result) => result_response(id, result),
+        Err(DispatchError::Request(e)) => error_response(id, JSONRPC_INVALID_PARAMS, &e),
+        // Execution failure (pool error, @throw, recovering, internal):
+        // report as a tool result with isError, not a protocol error, so
+        // the model can read and react to the failure.
+        Err(DispatchError::Call(message)) => result_response(id, tool_error(&message)),
     }
 }
 
-/// Validate the client's named `arguments` against a tool's inputSchema and
-/// invert them into the exact-arity positional array `daemon_dispatch` expects.
-/// Pure (no FFI): rejects unknown/missing arguments and resolves each slot.
-fn resolve_arguments(shape: &McpToolShape, arguments: &Args) -> Result<Vec<Raw>, String> {
-    // Reject unknown argument names (inputSchema is additionalProperties:false).
-    for key in arguments.keys() {
-        if !shape.prop_names.contains(key) {
-            return Err(format!("unknown argument '{}'", key));
-        }
-    }
-    // Reject missing required arguments.
-    for req in &shape.required {
-        if !arguments.contains_key(req) {
-            return Err(format!("missing required argument '{}'", req));
-        }
-    }
-    // One resolved value per declared arg slot, in order.
-    let mut positional: Vec<Raw> = Vec::with_capacity(shape.slots.len());
-    for slot in &shape.slots {
-        positional.push(resolve_slot(slot, arguments)?);
-    }
-    Ok(positional)
-}
-
-/// Resolve one argument slot against the client's named `arguments`.
-fn resolve_slot(slot: &ArgSlot, args: &Args) -> Result<Raw, String> {
-    match slot {
-        // Required-ness was already enforced in `resolve_arguments`, so an
-        // absent key here is genuinely optional and falls back to `missing`.
-        ArgSlot::Value { key, missing } => {
-            Ok(args.get(key).cloned().unwrap_or_else(|| raw_of(missing)))
-        }
-        ArgSlot::Flag { key, default } => match args.get(key) {
-            Some(r) => match serde_json::from_str::<bool>(r.get()) {
-                Ok(_) => Ok(r.clone()),
-                Err(_) => Err(format!("argument '{}' must be a boolean", key)),
-            },
-            None => Ok(raw_of(&Value::Bool(*default))),
-        },
-        ArgSlot::Record { group_key, fields } => {
-            // Whole-object (group_opt) form: start from the object the client
-            // passed under the group key, if any. A non-object value is
-            // forwarded as-is for the pool to reject.
-            let mut obj: Args = match group_key.as_ref().and_then(|gk| args.get(gk)) {
-                Some(r) if r.get().trim_start().starts_with('{') => {
-                    serde_json::from_str(r.get()).map_err(|e| e.to_string())?
-                }
-                Some(other) => return Ok(other.clone()),
-                None => Args::new(),
-            };
-            // Fill every field still absent -- from its own flat argument key
-            // (the unrolled form) or its default. So BOTH record forms supply
-            // defaults for omitted fields rather than deferring a partial record
-            // to a pool error.
-            for f in fields {
-                if !obj.contains_key(&f.field) {
-                    let v = args
-                        .get(&f.field)
-                        .cloned()
-                        .unwrap_or_else(|| raw_of(&f.default));
-                    obj.insert(f.field.clone(), v);
-                }
-            }
-            let text = serde_json::to_string(&obj).map_err(|e| e.to_string())?;
-            RawValue::from_string(text).map_err(|e| e.to_string())
-        }
-    }
+fn tool_error(message: &str) -> Value {
+    json!({ "content": [ { "type": "text", "text": message } ], "isError": true })
 }
 
 /// Session-constant execution backend: the C manifest, socket array, pool count,
@@ -579,27 +556,61 @@ struct DispatchCtx {
     sockets_ptr: *mut c_void,
     n_pools: usize,
     shm: CString,
+    calls: CallSlots,
 }
 
-/// A successful dispatch's payload: either the JSON-serialized return value, or
-/// -- when `want_media` was requested for a media-typed (`@mime`) return -- the
-/// finished MCP content block built from the raw bytes (skips both the JSON
-/// int-array round-trip and an owning copy of the payload).
-enum DispatchOutcome {
-    Json(String),
-    Media(Value),
+// DAEMON-16
+unsafe impl Send for DispatchCtx {}
+unsafe impl Sync for DispatchCtx {}
+
+/// The calls a server runs at once (DAEMON-16); a call past them waits.
+struct CallSlots {
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+struct CallSlot<'a>(&'a CallSlots);
+
+impl Drop for CallSlot<'_> {
+    fn drop(&mut self) {
+        // PANIC-4
+        let mut free = self.0.free.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
+        *free += 1;
+        self.0.freed.notify_one();
+    }
+}
+
+impl CallSlots {
+    fn new(n: usize) -> Self {
+        CallSlots { free: Mutex::new(n), freed: Condvar::new() }
+    }
+
+    fn take(&self) -> CallSlot<'_> {
+        // PANIC-4
+        let free = self.free.lock().unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
+        let mut free = self.freed.wait_while(free, |n| *n == 0).unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
+        *free -= 1;
+        CallSlot(self)
+    }
+}
+
+/// Why a dispatch failed: the request itself (an unknown command or action,
+/// a bad argument), answered as invalid params; or the call.
+enum DispatchError {
+    Request(String),
+    Call(String),
 }
 
 impl DispatchCtx {
     /// Marshal a call-request JSON through `daemon_parse_request` +
-    /// `daemon_dispatch` and read the response: `Ok(outcome)` on success,
-    /// `Err(message)` on failure. `want_media` asks the backend for the raw
-    /// content bytes of a media-typed return (set only when the selected
-    /// projection has a `@mime`); otherwise the JSON form is returned. On an
-    /// INTERNAL failure a pool may have died, so probe liveness and run crash
-    /// recovery (a fast no-op when all pools are alive) before returning, so a
+    /// `daemon_dispatch` and build the MCP tool result from the response.
+    /// Raw output (a `@mime` value, a `@render` action) comes back as bytes
+    /// and becomes a content block without an owning copy. On an INTERNAL
+    /// failure a pool may have died, so probe liveness and run crash recovery
+    /// (a fast no-op when all pools are alive) before returning, so a
     /// subsequent call can succeed.
-    fn dispatch(&self, request_str: &str, want_media: bool) -> Result<DispatchOutcome, String> {
+    fn dispatch(&self, request_str: &str, command: &str) -> Result<Value, DispatchError> {
+        let _slot = self.calls.take();
         // SHM-8: a pool that ended since the last call is recovered first.
         process::mcp_recover_pools(self.n_pools);
         let req_c = CString::new(request_str).unwrap();
@@ -610,42 +621,33 @@ impl DispatchCtx {
         };
         if req.is_null() {
             let msg = process::take_c_errmsg(errmsg).unwrap_or_else(|| "unknown error".into());
-            return Err(format!("failed to build call request: {}", msg));
+            return Err(DispatchError::Request(format!("failed to build call request: {}", msg)));
         }
 
         // Request the raw-media response form for this one dispatch (same thread,
         // so the backend's thread-local sees it), then restore.
-        let prev = if want_media {
-            unsafe { daemon_set_output_media_bytes(true) }
-        } else {
-            false
-        };
+        let prev = unsafe { daemon_set_output_media_bytes(true) };
         let resp =
             unsafe { daemon_dispatch(self.manifest_c, req, self.sockets_ptr, self.shm.as_ptr()) };
-        if want_media {
-            unsafe { daemon_set_output_media_bytes(prev) };
-        }
+        unsafe { daemon_set_output_media_bytes(prev) };
         unsafe { daemon_free_request(req) };
 
         if resp.is_null() {
-            return Err("dispatch returned no response".into());
+            return Err(DispatchError::Call("dispatch returned no response".into()));
         }
 
         let outcome = unsafe {
             if (*resp).success {
-                // Prefer the raw-media bytes when the backend produced them;
-                // fall back to JSON otherwise (untyped return, or want_media off).
-                // Build the content block from the borrowed bytes here, before
-                // the response is freed below -- no owning copy of the payload.
-                if want_media && !(*resp).result_bytes.is_null() {
+                if !(*resp).result_bytes.is_null() {
                     let bytes =
                         std::slice::from_raw_parts((*resp).result_bytes, (*resp).result_len);
                     let mime = cstr_to_string((*resp).mime).unwrap_or_default();
-                    Ok(DispatchOutcome::Media(media_content_block(bytes, &mime)))
+                    let action = cstr_to_string((*resp).action).unwrap_or_else(|| "raw".into());
+                    media_result(bytes, &mime, (*resp).result_text, command, &action)
+                        .map_err(DispatchError::Call)
                 } else {
-                    Ok(DispatchOutcome::Json(
-                        cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string()),
-                    ))
+                    let json = cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string());
+                    tool_result_object(&json).map_err(DispatchError::Call)
                 }
             } else {
                 let kind = (*resp).error_kind;
@@ -654,7 +656,11 @@ impl DispatchCtx {
                 if kind == DAEMON_ERROR_INTERNAL {
                     process::mcp_recover_pools_after_failure(self.n_pools);
                 }
-                Err(msg)
+                if kind == DAEMON_ERROR_BAD_REQUEST || kind == DAEMON_ERROR_NOT_FOUND {
+                    Err(DispatchError::Request(msg))
+                } else {
+                    Err(DispatchError::Call(msg))
+                }
             }
         };
         unsafe { daemon_free_response(resp as *mut c_void) };
@@ -662,65 +668,96 @@ impl DispatchCtx {
     }
 }
 
-/// Build the MCP `result` object for a successful non-media call. `result_json`
-/// is the serialized return value; `structured` is true only for object returns.
-fn tool_result_object(result_json: &str, structured: bool) -> Value {
-    // Parse so we can (a) emit compact single-line text and (b) mirror an object
-    // return into structuredContent. Fall back to the raw string.
-    let parsed: Option<Value> = serde_json::from_str(result_json).ok();
+/// Bytes one JSON-RPC line may hold, outbound as inbound.
+const MAX_RESULT_LINE: usize = MAX_LINE_BYTES;
 
+/// The bytes `s` takes as the body of a JSON string.
+fn json_escaped_len(s: &[u8]) -> usize {
+    s.iter()
+        .map(|&b| match b {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
+            0..=0x1f => 6,
+            _ => 1,
+        })
+        .sum()
+}
+
+fn too_large(size: usize) -> String {
+    format!(
+        "the result needs {} bytes on the MCP line, past its cap of {}; \
+         run the command over HTTP or from the command line",
+        size, MAX_RESULT_LINE
+    )
+}
+
+/// Overhead the JSON-RPC envelope adds to a result's content.
+const ENVELOPE: usize = 4096;
+
+/// The MCP `result` object for a JSON value: compact text, mirrored into
+/// `structuredContent` when it is an object.
+fn tool_result_object(result_json: &str) -> Result<Value, String> {
+    let object = result_json.trim_start().starts_with('{');
+    let size = json_escaped_len(result_json.as_bytes())
+        + if object { result_json.len() } else { 0 }
+        + ENVELOPE;
+    if size > MAX_RESULT_LINE {
+        return Err(too_large(size));
+    }
+    let parsed: Option<Value> = serde_json::from_str(result_json).ok();
     let text = parsed
         .as_ref()
         .map(|v| v.to_string())
         .unwrap_or_else(|| result_json.to_string());
-
     let mut result = Map::new();
-    result.insert(
-        "content".into(),
-        json!([ { "type": "text", "text": text } ]),
-    );
-    if structured {
-        if let Some(Value::Object(_)) = parsed {
-            result.insert("structuredContent".into(), parsed.unwrap());
-        }
+    result.insert("content".into(), json!([ { "type": "text", "text": text } ]));
+    if let Some(Value::Object(_)) = parsed {
+        result.insert("structuredContent".into(), parsed.unwrap());
     }
     result.insert("isError".into(), Value::Bool(false));
-    Value::Object(result)
+    Ok(Value::Object(result))
 }
 
-/// Build the MCP `result` object wrapping a media content block (from
-/// `DispatchOutcome::Media`, built by `media_content_block`).
-fn media_result_object(content: Value) -> Value {
-    let mut result = Map::new();
-    result.insert("content".into(), json!([content]));
-    result.insert("isError".into(), Value::Bool(false));
-    Value::Object(result)
-}
-
-/// The MCP content block for `bytes` labeled `mime`. MCP carries binary only as
-/// base64: `image/*` and `audio/*` become their content block, `text/*` a text
-/// block (UTF-8), and any other binary an embedded resource `blob`.
-fn media_content_block(bytes: &[u8], mime: &str) -> Value {
-    let family = mime.split('/').next().unwrap_or("");
-    match family {
-        "image" | "audio" => json!({
-            "type": family,
+/// The MCP `result` object for raw output: raster images and
+/// audio as their content blocks; anything else as an embedded resource with
+/// its media type, its text when it is text, else its bytes in base64. The
+/// server declares no `resources` capability: a result's resource is never
+/// listed or read back.
+fn media_result(bytes: &[u8], mime: &str, text: bool, command: &str, action: &str) -> Result<Value, String> {
+    let essence = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let as_text = if text { std::str::from_utf8(bytes).ok() } else { None };
+    let size = match as_text {
+        Some(t) => json_escaped_len(t.as_bytes()),
+        None => bytes.len().div_ceil(3) * 4,
+    } + ENVELOPE;
+    if size > MAX_RESULT_LINE {
+        return Err(too_large(size));
+    }
+    let block = match essence.as_str() {
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" => json!({
+            "type": "image",
             "data": base64_encode(bytes),
-            "mimeType": mime,
+            "mimeType": essence,
         }),
-        "text" => json!({
-            "type": "text",
-            "text": String::from_utf8_lossy(bytes).into_owned(),
+        e if e.starts_with("audio/") => json!({
+            "type": "audio",
+            "data": base64_encode(bytes),
+            "mimeType": essence,
         }),
-        _ => json!({
-            "type": "resource",
-            "resource": {
-                "uri": "morloc://return",
-                "mimeType": mime,
-                "blob": base64_encode(bytes),
-            },
-        }),
-    }
+        _ => {
+            let uri = format!("morloc://result/{}/{}/{}", command, action, new_session_id());
+            match as_text {
+                Some(t) => json!({
+                    "type": "resource",
+                    "resource": { "uri": uri, "mimeType": mime, "text": t },
+                }),
+                None => json!({
+                    "type": "resource",
+                    "resource": { "uri": uri, "mimeType": mime, "blob": base64_encode(bytes) },
+                }),
+            }
+        }
+    };
+    Ok(json!({ "content": [block], "isError": false }))
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -924,7 +961,7 @@ fn read_lines_capped<R: BufRead>(mut reader: R) -> impl Iterator<Item = Result<S
 // Because the endpoint is network-reachable, request reads are bounded (header
 // and body size caps, total read deadlines, a cap on open connections) and
 // the session table is bounded (idle TTL + a hard cap), so a slow or abusive
-// client cannot exhaust memory or threads (model/network.md NET-2, NET-3).
+// client cannot exhaust memory or threads (model/runtime/network.md NET-2, NET-3).
 
 /// Cap on connections served at once; past it a connection is answered 503.
 const MAX_CONNECTIONS: usize = 128;
@@ -1008,33 +1045,79 @@ const SESSION_TTL: Duration = Duration::from_secs(3600);
 /// Hard cap on live sessions (backstop against initialize floods).
 const MAX_SESSIONS: usize = 10_000;
 
-/// One session's state: the handshake flag plus a last-seen stamp for TTL
-/// eviction.
+/// One session's state: the handshake flag, a last-seen stamp for TTL
+/// eviction, and the requests it has in progress.
 struct SessionInfo {
     initialized: bool,
     last_seen: Instant,
+    in_flight: usize,
 }
 
-/// Shared server state guarded by one mutex. The raw C pointers address the
-/// leaked (process-lifetime) manifest and socket array; they are only ever
-/// dereferenced while the mutex is held, so no dispatch interleaves with
-/// another (see `unsafe impl Send`).
-struct HttpState {
-    manifest_c: *mut c_void,
-    sockets_ptr: *mut c_void,
-    n_pools: usize,
-    shm: CString,
-    shapes: Vec<McpToolShape>,
+/// The MCP sessions of an HTTP server, bounded by TTL + MAX_SESSIONS
+/// (DAEMON-16).
+struct Sessions(Mutex<HashMap<String, SessionInfo>>);
+
+impl Sessions {
+    fn new() -> Self {
+        Sessions(Mutex::new(HashMap::new()))
+    }
+
+    /// Admit one request: the session it names, or a new one on `initialize`,
+    /// with its handshake flag; otherwise the reply refusing it.
+    fn begin(&self, method: &str, sid: Option<&str>, keep_alive: bool) -> Result<(String, bool), Vec<u8>> {
+        let now = Instant::now();
+        // PANIC-4
+        let Ok(mut sessions) = self.0.lock() else { return Err(poisoned_reply()) };
+        if method == "initialize" {
+            if !prune_sessions(&mut sessions, now) {
+                return Err(http_json(503, br#"{"error":"too many sessions"}"#, keep_alive));
+            }
+            let id = new_session_id();
+            sessions.insert(id.clone(), SessionInfo { initialized: false, last_seen: now, in_flight: 1 });
+            return Ok((id, false));
+        }
+        let Some(id) = sid else {
+            return Err(http_json(400, br#"{"error":"missing Mcp-Session-Id header"}"#, keep_alive));
+        };
+        match sessions.get_mut(id) {
+            Some(s) => {
+                s.in_flight += 1;
+                s.last_seen = now;
+                Ok((id.to_string(), s.initialized))
+            }
+            None => Err(http_json(404, br#"{"error":"unknown or expired session; re-initialize"}"#, keep_alive)),
+        }
+    }
+
+    /// End a request `begin` admitted; false if the table is poisoned.
+    fn end(&self, id: &str, initialized: bool) -> bool {
+        // PANIC-4
+        let Ok(mut sessions) = self.0.lock() else { return false };
+        if let Some(s) = sessions.get_mut(id) {
+            s.in_flight -= 1;
+            s.initialized |= initialized;
+            s.last_seen = Instant::now();
+        }
+        true
+    }
+
+    fn remove(&self, id: &str) -> bool {
+        // PANIC-4
+        let Ok(mut sessions) = self.0.lock() else { return false };
+        sessions.remove(id);
+        true
+    }
+}
+
+/// An MCP server over HTTP.
+struct HttpServer {
+    ctx: DispatchCtx,
+    by_name: HashMap<&'static str, &'static McpToolShape>,
     tools_list: Vec<Value>,
     server_name: String,
     server_version: String,
-    /// Session id -> handshake + last-seen state. Bounded by TTL + MAX_SESSIONS.
-    sessions: HashMap<String, SessionInfo>,
+    sessions: Sessions,
 }
-
-// Safe because every access to the raw pointers happens under the mutex, and
-// the pointed-to allocations live for the whole process (leaked in serve_http).
-unsafe impl Send for HttpState {}
 
 /// Serve the program's MCP tool surface over HTTP. Never returns.
 pub fn serve_http(
@@ -1059,20 +1142,23 @@ pub fn serve_http(
     std::mem::forget(boxed);
     std::mem::forget(keepalive);
 
-    let shapes: Vec<McpToolShape> = build_tool_shapes(manifest);
+    let shapes: &'static [McpToolShape] = Box::leak(build_tool_shapes(manifest).into_boxed_slice());
     let tools_list: Vec<Value> = shapes.iter().map(|s| s.tool.clone()).collect();
 
-    let state = Arc::new(Mutex::new(HttpState {
-        manifest_c,
-        sockets_ptr,
-        n_pools,
-        shm: CString::new(shm_basename).unwrap(),
-        shapes,
+    let state = Arc::new(HttpServer {
+        ctx: DispatchCtx {
+            manifest_c,
+            sockets_ptr,
+            n_pools,
+            shm: CString::new(shm_basename).unwrap(),
+            calls: CallSlots::new(morloc_runtime_types::daemon_socket::daemon_workers(n_pools)),
+        },
+        by_name: shapes.iter().map(|s| (s.name.as_str(), s)).collect(),
         tools_list,
         server_name: manifest.name.clone(),
         server_version: manifest.build.morloc_version.clone(),
-        sessions: HashMap::new(),
-    }));
+        sessions: Sessions::new(),
+    });
 
     let addr = format!("{}:{}", bind_host, port);
     let listener = match TcpListener::bind(&addr) {
@@ -1126,9 +1212,6 @@ pub fn serve_http(
     process::clean_exit(0);
 }
 
-/// One HTTP connection: read requests (keep-alive) and reply. Socket reads run
-/// off the mutex; only `build_response`'s dispatch section locks it, so a slow
-/// client never blocks others from executing.
 /// One keep-alive HTTP connection: read requests until EOF/timeout/`close` and
 /// reply, delegating each request to `respond`. Shared by the single-program
 /// MCP server and the multi-module front-end, which differ only in how they
@@ -1148,7 +1231,16 @@ where
         // NET-2: the wait for a request, its line and headers share one deadline.
         until.set(Instant::now() + HEAD_LIMIT);
         let req = match read_http_request(&mut reader, |len| until.set(Instant::now() + body_limit(len))) {
-            Ok(Some(r)) => r,
+            Ok(ReadOutcome::Request(r)) => r,
+            Ok(ReadOutcome::TooLarge(why)) => {
+                // NET-10
+                use morloc_runtime_types::daemon_error::{error_body, http_status, LIMIT};
+                let body = error_body(LIMIT, why);
+                let _ = writer.write_all(&http_json(http_status(LIMIT, false) as u16, body.as_bytes(), false));
+                let fd = std::os::unix::io::IntoRawFd::into_raw_fd(writer);
+                unsafe { morloc_runtime_types::net_limits::linger_close(fd) };
+                return;
+            }
             _ => break, // EOF, malformed, or IO error -> close
         };
         let keep_alive = header_get(&req.headers, "connection")
@@ -1169,6 +1261,7 @@ where
                 process::end_after_panic();
             }
         };
+        let resp = if req.method == "HEAD" { without_body(resp) } else { resp };
         if writer.write_all(&resp).is_err() {
             break;
         }
@@ -1189,33 +1282,43 @@ pub(crate) struct HttpRequest {
     body: Vec<u8>,
 }
 
-/// Read one request from the buffered connection. `Ok(None)` on a clean EOF, an
-/// over-long line/body, or too many headers (the connection is then closed by
-/// the caller). Every line is size-capped and the body is read incrementally up
+/// What one read of a connection gave.
+enum ReadOutcome {
+    Request(HttpRequest),
+    /// End of file, or a malformed request line.
+    Closed,
+    /// Refused for its size (NET-10): an over-long line or body, or too many
+    /// headers.
+    TooLarge(&'static str),
+}
+
+/// Read one request from the buffered connection. Every line is size-capped and the body is read incrementally up
 /// to Content-Length, so a hostile Content-Length or header flood cannot force
 /// a large up-front allocation.
-fn read_http_request<R: BufRead>(reader: &mut R, on_body: impl FnOnce(usize)) -> std::io::Result<Option<HttpRequest>> {
+fn read_http_request<R: BufRead>(reader: &mut R, on_body: impl FnOnce(usize)) -> std::io::Result<ReadOutcome> {
     let mut line = String::new();
     match read_capped_line(reader, &mut line)? {
-        LineRead::Eof | LineRead::TooLong => return Ok(None),
+        LineRead::Eof => return Ok(ReadOutcome::Closed),
+        LineRead::TooLong => return Ok(ReadOutcome::TooLarge("the request line is too long")),
         LineRead::Ok => {}
     }
     let mut it = line.trim_end().split_whitespace();
     let method = it.next().unwrap_or("").to_string();
     let path = it.next().unwrap_or("").to_string();
     if method.is_empty() {
-        return Ok(None);
+        return Ok(ReadOutcome::Closed);
     }
 
     let mut headers: Vec<(String, String)> = Vec::new();
     let mut content_length: usize = 0;
     loop {
         if headers.len() >= MAX_HEADERS {
-            return Ok(None); // header flood
+            return Ok(ReadOutcome::TooLarge("the request has too many headers"));
         }
         let mut h = String::new();
         match read_capped_line(reader, &mut h)? {
-            LineRead::Eof | LineRead::TooLong => return Ok(None),
+            LineRead::Eof => return Ok(ReadOutcome::Closed),
+            LineRead::TooLong => return Ok(ReadOutcome::TooLarge("a request header is too long")),
             LineRead::Ok => {}
         }
         let t = h.trim_end_matches(['\r', '\n']);
@@ -1236,14 +1339,14 @@ fn read_http_request<R: BufRead>(reader: &mut R, on_body: impl FnOnce(usize)) ->
     // stdio line cap provides). Read the body incrementally so the buffer grows
     // with the bytes actually received, not the client-declared length.
     if content_length > MAX_LINE_BYTES {
-        return Ok(None);
+        return Ok(ReadOutcome::TooLarge("the request body is larger than this server takes"));
     }
     let mut body = Vec::new();
     if content_length > 0 {
         on_body(content_length);
         reader.take(content_length as u64).read_to_end(&mut body)?;
     }
-    Ok(Some(HttpRequest {
+    Ok(ReadOutcome::Request(HttpRequest {
         method,
         path,
         headers,
@@ -1276,10 +1379,13 @@ fn read_capped_line<R: BufRead>(reader: &mut R, buf: &mut String) -> std::io::Re
 /// Auth-check, route on method+path, and produce the full HTTP response bytes.
 fn build_response(
     req: &HttpRequest,
-    state: &Arc<Mutex<HttpState>>,
+    state: &HttpServer,
     token: Option<&str>,
     keep_alive: bool,
 ) -> Vec<u8> {
+    if let Some(resp) = health_probe(req, keep_alive) {
+        return resp;
+    }
     if let Some(tok) = token {
         if !authorized(&req.headers, tok) {
             let extra = vec![("WWW-Authenticate".to_string(), "Bearer".to_string())];
@@ -1304,7 +1410,7 @@ fn build_response(
 /// notification). Session created on `initialize`, required on everything else.
 fn handle_http_post(
     req: &HttpRequest,
-    state: &Arc<Mutex<HttpState>>,
+    state: &HttpServer,
     keep_alive: bool,
 ) -> Vec<u8> {
     let msg = match RpcMessage::parse(&req.body) {
@@ -1317,77 +1423,24 @@ fn handle_http_post(
         }
     };
     let method = msg.method.as_deref().unwrap_or("");
-    let sid_hdr = header_get(&req.headers, "mcp-session-id").map(|s| s.to_string());
-
-    // PANIC-4
-    let Ok(mut guard) = state.lock() else { return poisoned_reply() };
-
-    // Resolve (or, on initialize, create) the session.
-    let now = Instant::now();
-    let (session_id, prior_init) = if method == "initialize" {
-        // Evict idle/overflow sessions before minting a new one so the table
-        // stays bounded even when clients never send DELETE.
-        prune_sessions(&mut guard.sessions, now);
-        let id = new_session_id();
-        guard.sessions.insert(
-            id.clone(),
-            SessionInfo { initialized: false, last_seen: now },
-        );
-        (id, false)
-    } else {
-        match sid_hdr {
-            None => {
-                return http_json(
-                    400,
-                    br#"{"error":"missing Mcp-Session-Id header"}"#,
-                    keep_alive,
-                );
-            }
-            Some(id) => match guard.sessions.get(&id) {
-                Some(s) => (id, s.initialized),
-                None => {
-                    return http_json(
-                        404,
-                        br#"{"error":"unknown or expired session; re-initialize"}"#,
-                        keep_alive,
-                    );
-                }
-            },
-        }
+    let sid_hdr = header_get(&req.headers, "mcp-session-id");
+    let (session_id, prior_init) = match state.sessions.begin(method, sid_hdr, keep_alive) {
+        Ok(admitted) => admitted,
+        Err(reply) => return reply,
     };
-
-    // Run the shared message core under the lock (serializes dispatch). The
-    // per-request name->shape map borrows the shared shapes (no name copies) and
-    // keeps the shapes owned by the state.
-    let (resp_opt, new_init) = {
-        let ctx = DispatchCtx {
-            manifest_c: guard.manifest_c,
-            sockets_ptr: guard.sockets_ptr,
-            n_pools: guard.n_pools,
-            shm: guard.shm.clone(),
-        };
-        let by_name: HashMap<&str, &McpToolShape> =
-            guard.shapes.iter().map(|s| (s.name.as_str(), s)).collect();
-        let mut sess = Session {
-            initialized: prior_init,
-        };
-        let r = handle_message(
-            &msg,
-            &mut sess,
-            &guard.tools_list,
-            &by_name,
-            &ctx,
-            &guard.server_name,
-            &guard.server_version,
-        );
-        (r, sess.initialized)
-    };
-    // Touch the session (refresh last_seen and persist the handshake flag).
-    guard.sessions.insert(
-        session_id.clone(),
-        SessionInfo { initialized: new_init, last_seen: now },
+    let mut sess = Session { initialized: prior_init };
+    let resp_opt = handle_message(
+        &msg,
+        &mut sess,
+        &state.tools_list,
+        &state.by_name,
+        &state.ctx,
+        &state.server_name,
+        &state.server_version,
     );
-    drop(guard);
+    if !state.sessions.end(&session_id, sess.initialized) {
+        return poisoned_reply();
+    }
 
     // A newly created session (only `initialize` mints one) is announced via the
     // Mcp-Session-Id header so the client echoes it on subsequent requests.
@@ -1406,16 +1459,12 @@ fn handle_http_post(
 /// A `DELETE /mcp`: end the named session.
 fn handle_http_delete(
     req: &HttpRequest,
-    state: &Arc<Mutex<HttpState>>,
+    state: &HttpServer,
     keep_alive: bool,
 ) -> Vec<u8> {
     match header_get(&req.headers, "mcp-session-id") {
-        Some(id) => {
-            // PANIC-4
-            let Ok(mut g) = state.lock() else { return poisoned_reply() };
-            g.sessions.remove(id);
-            http_json(200, br#"{"ok":true}"#, keep_alive)
-        }
+        Some(id) if state.sessions.remove(id) => http_json(200, br#"{"ok":true}"#, keep_alive),
+        Some(_) => poisoned_reply(),
         None => http_json(400, br#"{"error":"missing Mcp-Session-Id header"}"#, keep_alive),
     }
 }
@@ -1471,20 +1520,24 @@ fn new_session_id() -> String {
 /// the oldest until there is room for one more below `MAX_SESSIONS`. Called on
 /// `initialize` (before minting a new id), so a client that never sends
 /// `DELETE /mcp` cannot grow the table without limit.
-fn prune_sessions(sessions: &mut HashMap<String, SessionInfo>, now: Instant) {
-    sessions.retain(|_, s| now.duration_since(s.last_seen) < SESSION_TTL);
+/// False when no session can go because every one has a request in progress.
+fn prune_sessions(sessions: &mut HashMap<String, SessionInfo>, now: Instant) -> bool {
+    // DAEMON-16
+    sessions.retain(|_, s| s.in_flight > 0 || now.duration_since(s.last_seen) < SESSION_TTL);
     while sessions.len() >= MAX_SESSIONS {
         let oldest = sessions
             .iter()
+            .filter(|(_, s)| s.in_flight == 0)
             .min_by_key(|(_, s)| s.last_seen)
             .map(|(k, _)| k.clone());
         match oldest {
             Some(k) => {
                 sessions.remove(&k);
             }
-            None => break,
+            None => return false,
         }
     }
+    true
 }
 
 /// Assemble a complete HTTP/1.1 response. The body is always JSON (the only
@@ -1504,18 +1557,7 @@ fn http_head(
     keep_alive: bool,
     extra_headers: &[(String, String)],
 ) -> String {
-    let reason = match status {
-        200 => "OK",
-        202 => "Accepted",
-        204 => "No Content",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        500 => "Internal Server Error",
-        503 => "Service Unavailable",
-        _ => "OK",
-    };
+    let reason = morloc_runtime_types::http_query::reason_phrase(status as i32);
     let mut head = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\n{}",
         status,
@@ -1564,6 +1606,24 @@ pub(crate) fn http_json(status: u16, body: &[u8], keep_alive: bool) -> Vec<u8> {
     http_response(status, body, keep_alive, &[])
 }
 
+/// A response with its body removed and its headers, `Content-Length`
+/// included, kept: the answer to a `HEAD` (RFC 9110 9.3.2).
+fn without_body(mut resp: Vec<u8>) -> Vec<u8> {
+    if let Some(end) = resp.windows(4).position(|w| w == b"\r\n\r\n") {
+        resp.truncate(end + 4);
+    }
+    resp
+}
+
+/// The liveness probe: `GET`/`HEAD /health` answers that the
+/// server is up, before any credential is checked, and says nothing else.
+fn health_probe(req: &HttpRequest, keep_alive: bool) -> Option<Vec<u8>> {
+    use morloc_runtime_types::bearer::{LIVENESS_BODY, LIVENESS_PATH};
+    let path = req.path.split('?').next().unwrap_or("");
+    (path == LIVENESS_PATH && (req.method == "GET" || req.method == "HEAD"))
+        .then(|| http_json(200, LIVENESS_BODY, keep_alive))
+}
+
 /// A 405 with the `Allow` header naming the accepted method(s).
 fn method_not_allowed(allow: &str, keep_alive: bool) -> Vec<u8> {
     let extra = vec![("Allow".to_string(), allow.to_string())];
@@ -1593,9 +1653,7 @@ extern "C" {
     ) -> *mut CDaemonResponse;
 }
 
-/// Raw supervisor handle shared across connection threads. Mutations to a given
-/// program's child are serialized by `Frontend.locks[program]`; distinct
-/// programs are distinct memory; the program array is fixed after init.
+/// The router, as the front end's threads share it (DAEMON-16).
 struct RouterHandle(*mut c_void);
 unsafe impl Send for RouterHandle {}
 unsafe impl Sync for RouterHandle {}
@@ -1603,19 +1661,15 @@ unsafe impl Sync for RouterHandle {}
 /// Shared front-end state. Runs no morloc compute; every call is forwarded.
 struct Frontend {
     router: RouterHandle,
-    /// Per-module forward lock: `router_forward` mutates the child's
-    /// RouterProgram on crash-restart, so same-module forwards serialize while
-    /// different modules run in parallel. Keys fixed at construction.
-    locks: HashMap<String, Mutex<()>>,
     /// MCP tools/list (union across MCP modules; names `<module>__<command>`).
     mcp_tools: Vec<Value>,
     /// Namespaced tool name -> (module, shape). The shape keeps its bare command
-    /// name for dispatch/argument resolution.
+    /// name for dispatch.
     mcp_by_name: HashMap<String, (String, McpToolShape)>,
     /// Modules answering the `/call` JSON API.
     api_modules: std::collections::HashSet<String>,
     /// Per-API-module machine-readable help (`GET /discover/<module>`), keyed by
-    /// module. Describes positional-argument commands for the `/call` contract.
+    /// module: each command's arguments, by position and by name.
     api_help: HashMap<String, Value>,
     /// Whether the sandboxed eval capability is exposed (an `eval` MCP tool +
     /// `/eval` route). Off unless the operator exposed it.
@@ -1646,7 +1700,7 @@ struct Frontend {
     eval_timeout: i32,
     server_name: String,
     server_version: String,
-    sessions: Mutex<HashMap<String, SessionInfo>>,
+    sessions: Sessions,
 }
 unsafe impl Send for Frontend {}
 unsafe impl Sync for Frontend {}
@@ -1654,62 +1708,56 @@ unsafe impl Sync for Frontend {}
 /// A successful forward's payload (owned so the C response is freed at once).
 enum ForwardOk {
     Json(String),
-    /// A media-typed (`@mime`) return: raw content bytes + media type.
-    Media(Vec<u8>, String),
+    /// Raw output: content bytes, media type, whether the bytes are text, and
+    /// the action that produced them.
+    Media(Vec<u8>, String, bool, String),
 }
 
 impl Frontend {
-    /// Forward `request_json` to `module`'s child daemon. Holds the per-module
-    /// lock across `router_forward` (whose crash-detect mutates the child's
-    /// RouterProgram).
-    fn forward(&self, module: &str, request_str: &str) -> Result<ForwardOk, String> {
-        // Fail closed: every served module must have a per-module lock, since
-        // router_forward mutates the child's RouterProgram (waitpid + restart).
-        // Forwarding without the lock would be a silent unserialized race, so a
-        // missing entry is a bug -- error rather than skip the guard.
-        let lock = self.locks.get(module).ok_or_else(|| {
-            format!("internal error: no forward lock for module '{}'", module)
-        })?;
+    /// Forward `request_json` to `module`'s child daemon.
+    fn forward(&self, module: &str, request_str: &str, selection: &Selection) -> Result<ForwardOk, (i32, String)> {
+        use morloc_runtime_types::daemon_error::{BAD_REQUEST, INTERNAL};
         let req_c = CString::new(request_str)
-            .map_err(|_| "request contains a NUL byte".to_string())?;
+            .map_err(|_| (BAD_REQUEST, "request contains a NUL byte".to_string()))?;
         let mut errmsg: *mut c_char = ptr::null_mut();
         let req =
             unsafe { daemon_parse_request(req_c.as_ptr(), request_str.len(), &mut errmsg) };
         if req.is_null() {
             let msg = process::take_c_errmsg(errmsg).unwrap_or_else(|| "bad request".into());
-            return Err(format!("failed to build request: {}", msg));
+            return Err((BAD_REQUEST, format!("failed to build request: {}", msg)));
         }
         let module_c = CString::new(module).unwrap_or_default();
-        // Keep the guard alive across the forward (named binding, not `_`).
-        // PANIC-4
-        let Ok(_guard) = lock.lock() else {
-            unsafe { daemon_free_request(req) };
-            return Err("the server is shutting down after an internal error".into());
-        };
         let mut ferr: *mut c_char = ptr::null_mut();
         let resp = unsafe { router_forward(self.router.0, module_c.as_ptr(), req, &mut ferr) };
         unsafe { daemon_free_request(req) };
         if resp.is_null() {
             let msg = process::take_c_errmsg(ferr).unwrap_or_else(|| "forward failed".into());
-            return Err(msg);
+            return Err((INTERNAL, msg));
         }
         let out = unsafe {
-            if (*resp).success {
-                // A media (`@mime`) return arrives as raw bytes + mime (conveyed
-                // as base64 over the socket wire); otherwise a JSON value.
+            if (*resp).success && !selection.applied_by(cstr_to_string((*resp).action).as_deref()) {
+                Err((INTERNAL, format!(
+                    "the daemon serving '{}' did not apply the requested output selection; \
+                     it may be running another build of morloc",
+                    module
+                )))
+            } else if (*resp).success {
+                // Raw output arrives as bytes + mime (base64 over the socket
+                // wire); otherwise a JSON value.
                 if !(*resp).mime.is_null() && !(*resp).result_bytes.is_null() {
                     let bytes =
                         std::slice::from_raw_parts((*resp).result_bytes, (*resp).result_len).to_vec();
                     let mime = cstr_to_string((*resp).mime).unwrap_or_default();
-                    Ok(ForwardOk::Media(bytes, mime))
+                    let action = cstr_to_string((*resp).action).unwrap_or_else(|| "raw".into());
+                    Ok(ForwardOk::Media(bytes, mime, (*resp).result_text, action))
                 } else {
                     Ok(ForwardOk::Json(
                         cstr_to_string((*resp).result_json).unwrap_or_else(|| "null".to_string()),
                     ))
                 }
             } else {
-                Err(cstr_to_string((*resp).error)
-                    .unwrap_or_else(|| "dispatch failed".to_string()))
+                Err(((*resp).error_kind, cstr_to_string((*resp).error)
+                    .unwrap_or_else(|| "dispatch failed".to_string())))
             }
         };
         unsafe { daemon_free_response(resp as *mut c_void) };
@@ -1717,11 +1765,7 @@ impl Frontend {
     }
 }
 
-/// Why an exposed eval is refused, said the same way at both entry points.
-const EVAL_NEEDS_TOKEN: &str = "the eval capability is exposed but requires a bearer token: \
-     it compiles and runs expressions the caller writes, which costs seconds to tens of \
-     seconds of this container's CPU each time. Set MORLOC_MCP_TOKEN (or --auth-token), or \
-     waive the requirement with MORLOC_EVAL_ALLOW_NO_AUTH=1 (or --eval-allow-no-auth).";
+use morloc_runtime_types::daemon_error::EVAL_NEEDS_TOKEN;
 
 /// Check that a served module's pools can actually be spawned: every pool file
 /// present, every interpreter on PATH.
@@ -1874,17 +1918,12 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
         }));
     }
 
-    let mut locks: HashMap<String, Mutex<()>> = HashMap::new();
-    for m in &config.programs {
-        locks.insert(m.clone(), Mutex::new(()));
-    }
     let api_modules: std::collections::HashSet<String> =
         config.api_programs.iter().cloned().collect();
 
     // API discovery: per-module machine-readable help (the lossless `--json-help`
-    // view). It describes each command's POSITIONAL arguments, matching the
-    // `/call/<module>/<command>` positional-array contract. MCP clients discover
-    // via the protocol-native `tools/list` (named-argument inputSchema) instead.
+    // view): each command's arguments in order, with the names `/call` takes.
+    // MCP clients discover through `tools/list` instead.
     let mut api_help: HashMap<String, Value> = HashMap::new();
     for m in &config.api_programs {
         if let Some(manifest) = manifests.get(m) {
@@ -1952,7 +1991,6 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
 
     let fe = Arc::new(Frontend {
         router: RouterHandle(router),
-        locks,
         mcp_tools,
         mcp_by_name,
         api_modules,
@@ -1967,7 +2005,7 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
         } else {
             server_version
         },
-        sessions: Mutex::new(HashMap::new()),
+        sessions: Sessions::new(),
     });
     let token = Arc::new(auth_token);
     for incoming in listener.incoming() {
@@ -2006,7 +2044,7 @@ fn frontend_build_response(
     // request only if this 204 grants the method/headers.
     if req.method == "OPTIONS" {
         let extra = vec![
-            ("Access-Control-Allow-Methods".to_string(), "GET, POST, DELETE, OPTIONS".to_string()),
+            ("Access-Control-Allow-Methods".to_string(), "GET, HEAD, POST, DELETE, OPTIONS".to_string()),
             (
                 "Access-Control-Allow-Headers".to_string(),
                 "Authorization, Content-Type, Mcp-Session-Id".to_string(),
@@ -2016,12 +2054,9 @@ fn frontend_build_response(
         return http_response(204, b"", keep_alive, &extra);
     }
     let path = req.path.split('?').next().unwrap_or("");
-    // Liveness probe for container orchestrators (the deploy image's
-    // HEALTHCHECK). Answered BEFORE the auth gate: it reveals nothing and a
-    // token-protected serve must not 401 its own healthcheck (which curls with
-    // no token). The front-end is up if it can answer; child health is per-call.
-    if path == "/health" && (req.method == "GET" || req.method == "HEAD") {
-        return http_json(200, br#"{"status":"ok"}"#, keep_alive);
+    // The front end is up if it can answer; a child's health is per call.
+    if let Some(resp) = health_probe(req, keep_alive) {
+        return resp;
     }
     if let Some(tok) = token {
         if !authorized(&req.headers, tok) {
@@ -2042,13 +2077,8 @@ fn frontend_build_response(
         }
     } else if path == "/eval" {
         if fe.eval_needs_token {
-            return http_json(
-                403,
-                serde_json::json!({ "status": "error", "error": EVAL_NEEDS_TOKEN })
-                    .to_string()
-                    .as_bytes(),
-                keep_alive,
-            );
+            use morloc_runtime_types::daemon_error::{error_body, FORBIDDEN};
+            return http_json(403, error_body(FORBIDDEN, EVAL_NEEDS_TOKEN).as_bytes(), keep_alive);
         }
         match req.method.as_str() {
             "POST" => frontend_eval_api(req, fe, keep_alive),
@@ -2070,10 +2100,8 @@ fn frontend_build_response(
 }
 
 /// `GET /discover`: the API index. Lists the JSON-API-exposed modules (with the
-/// `/call` URL shape and a link to each module's positional-argument help) and
-/// points MCP clients at the protocol-native `tools/list`. This is the API-side
-/// counterpart to MCP discovery -- the two adapters branch here because `/call`
-/// takes positional args while MCP tools take a named-argument object.
+/// `/call` URL shape and a link to each module's argument help) and points MCP
+/// clients at the protocol-native `tools/list`.
 fn frontend_discover(fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
     let mut modules: Vec<&String> = fe.api_help.keys().collect();
     modules.sort();
@@ -2091,8 +2119,10 @@ fn frontend_discover(fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
         "api": {
             "modules": api_modules,
             "call": "/call/<module>/<command>",
-            "note": "POST positional args as a JSON array (or {\"args\":[...]}). \
-                     GET /discover/<module> for each command's ordered arguments.",
+            "note": "POST {\"args\": ...}: an array with one value per argument, or an \
+                     object keyed by argument name, which may leave out an argument \
+                     that has a default. GET /discover/<module> for each command's \
+                     arguments.",
         },
         "mcp": {
             "endpoint": "/mcp",
@@ -2113,7 +2143,7 @@ fn frontend_discover(fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
 }
 
 /// `GET /discover/<module>`: the machine-readable help for one API module (its
-/// commands and their positional arguments). 404 unless the module is exposed on
+/// commands and their arguments). 404 unless the module is exposed on
 /// the JSON API.
 fn frontend_discover_module(module: &str, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
     match fe.api_help.get(module) {
@@ -2214,7 +2244,7 @@ fn eval_failure_response(out: &std::process::Output, cpu_secs: i32) -> (u16, Str
 }
 
 /// A blocked eval spends no CPU, so its CPU limit is backed by a wall limit
-/// of this many times as long (model/daemon.md DAEMON-6).
+/// of this many times as long (model/runtime/daemon.md DAEMON-6).
 const EVAL_WALL_PER_CPU: u64 = 4;
 
 /// Process groups of running evals, killed when the front-end exits.
@@ -2305,7 +2335,8 @@ fn output_within(
 /// `{"expression":"..."}`, or a bare JSON string). 404 when eval is not exposed.
 fn frontend_eval_api(req: &HttpRequest, fe: &Frontend, keep_alive: bool) -> Vec<u8> {
     if !fe.eval_enabled {
-        return http_json(404, br#"{"error":"eval is not exposed"}"#, keep_alive);
+        use morloc_runtime_types::daemon_error::{error_body, EVAL_NOT_EXPOSED, NOT_FOUND};
+        return http_json(404, error_body(NOT_FOUND, EVAL_NOT_EXPOSED).as_bytes(), keep_alive);
     }
     let body = String::from_utf8_lossy(&req.body);
     let expr: Option<String> = if body.trim_start().starts_with('{') {
@@ -2326,14 +2357,14 @@ fn frontend_eval_api(req: &HttpRequest, fe: &Frontend, keep_alive: bool) -> Vec<
             http_json(200, body.as_bytes(), keep_alive)
         }
         Err((status, message)) => {
-            let body = json!({ "status": "error", "error": message }).to_string();
+            let class = morloc_runtime_types::daemon_error::class_of_status(status as i32);
+            let body = json!({ "status": "error", "class": class, "error": message }).to_string();
             http_json(status, body.as_bytes(), keep_alive)
         }
     }
 }
 
-/// `POST /mcp`: one JSON-RPC message. Session resolution locks briefly; the
-/// forward (dispatch) runs lock-free so modules execute in parallel.
+/// `POST /mcp`: one JSON-RPC message (DAEMON-16).
 fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
     let msg = match RpcMessage::parse(&req.body) {
         Some(m) => m,
@@ -2345,49 +2376,15 @@ fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) ->
         }
     };
     let method = msg.method.as_deref().unwrap_or("");
-    let sid_hdr = header_get(&req.headers, "mcp-session-id").map(|s| s.to_string());
-    let now = Instant::now();
-
-    let (session_id, prior_init) = {
-        // PANIC-4
-        let Ok(mut sessions) = fe.sessions.lock() else { return poisoned_reply() };
-        if method == "initialize" {
-            prune_sessions(&mut sessions, now);
-            let id = new_session_id();
-            sessions.insert(id.clone(), SessionInfo { initialized: false, last_seen: now });
-            (id, false)
-        } else {
-            match sid_hdr {
-                None => {
-                    return http_json(400, br#"{"error":"missing Mcp-Session-Id header"}"#, keep_alive)
-                }
-                Some(id) => match sessions.get(&id) {
-                    Some(s) => (id, s.initialized),
-                    None => {
-                        return http_json(
-                            404,
-                            br#"{"error":"unknown or expired session; re-initialize"}"#,
-                            keep_alive,
-                        )
-                    }
-                },
-            }
-        }
+    let sid_hdr = header_get(&req.headers, "mcp-session-id");
+    let (session_id, prior_init) = match fe.sessions.begin(method, sid_hdr, keep_alive) {
+        Ok(admitted) => admitted,
+        Err(reply) => return reply,
     };
-
     let mut session = Session { initialized: prior_init };
     let resp_opt = frontend_handle_message(&msg, &mut session, fe);
-    {
-        // Update in place only if the session still exists. A DELETE or prune
-        // that ran while the forward was in flight (lock-free) must not be
-        // undone by resurrecting the entry, and re-inserting would bypass the
-        // MAX_SESSIONS cap enforced at initialize.
-        // PANIC-4
-        let Ok(mut sessions) = fe.sessions.lock() else { return poisoned_reply() };
-        if let Some(s) = sessions.get_mut(&session_id) {
-            s.initialized = session.initialized;
-            s.last_seen = now;
-        }
+    if !fe.sessions.end(&session_id, session.initialized) {
+        return poisoned_reply();
     }
     let extra: Vec<(String, String)> = if method == "initialize" {
         vec![("Mcp-Session-Id".to_string(), session_id)]
@@ -2405,12 +2402,8 @@ fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) ->
 /// `DELETE /mcp`: end the named session.
 fn frontend_mcp_delete(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
     match header_get(&req.headers, "mcp-session-id") {
-        Some(id) => {
-            // PANIC-4
-            let Ok(mut sessions) = fe.sessions.lock() else { return poisoned_reply() };
-            sessions.remove(id);
-            http_json(200, br#"{"ok":true}"#, keep_alive)
-        }
+        Some(id) if fe.sessions.remove(id) => http_json(200, br#"{"ok":true}"#, keep_alive),
+        Some(_) => poisoned_reply(),
         None => http_json(400, br#"{"error":"missing Mcp-Session-Id header"}"#, keep_alive),
     }
 }
@@ -2502,8 +2495,9 @@ fn frontend_tools_call(id: Value, msg: &RpcMessage, fe: &Frontend) -> Value {
             return error_response(id, JSONRPC_INVALID_PARAMS, EVAL_NEEDS_TOKEN);
         }
         let expr = match arg_str(&arguments, "expression") {
-            Some(e) => e,
-            None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing 'expression'"),
+            Ok(Some(e)) => e,
+            Ok(None) => return error_response(id, JSONRPC_INVALID_PARAMS, "missing 'expression'"),
+            Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
         };
         return match frontend_eval(&expr, fe) {
             Ok(out) => result_response(id, json!({ "content": [ { "type": "text", "text": out } ] })),
@@ -2519,34 +2513,35 @@ fn frontend_tools_call(id: Value, msg: &RpcMessage, fe: &Frontend) -> Value {
             return error_response(id, JSONRPC_INVALID_PARAMS, &format!("unknown tool '{}'", name))
         }
     };
-    let positional = match resolve_arguments(shape, &arguments) {
-        Ok(p) => p,
+    let selection = match tool_selection(shape, &arguments) {
+        Ok(sel) => sel,
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
-    let render_sel = arg_str(&arguments, "_render").unwrap_or_else(|| "raw".to_string());
-    // A media (`@mime`) projection comes back from the child as raw bytes+mime
-    // (base64 over the wire) and is rendered as an MCP media block below; the
-    // JSON projection becomes a text/structured result.
-    let (dispatch_command, _ret_mime, returns_object) = match shape.dispatch_for(&render_sel) {
-        Ok(t) => t,
-        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
+    let args = named_args(&arguments);
+    let request = call_request(&shape.name, Some(&args), &selection);
+    let result = match fe.forward(module, &request, &selection) {
+        Ok(ForwardOk::Json(result_json)) => tool_result_object(&result_json),
+        Ok(ForwardOk::Media(bytes, mime, text, action)) => {
+            media_result(&bytes, &mime, text, &shape.name, &action)
+        }
+        Err((kind, message)) if kind == DAEMON_ERROR_BAD_REQUEST || kind == DAEMON_ERROR_NOT_FOUND => {
+            return error_response(id, JSONRPC_INVALID_PARAMS, &message)
+        }
+        // A request past a limit is the caller's, not a failed call.
+        Err((morloc_runtime_types::daemon_error::LIMIT, message)) => {
+            return error_response(id, JSONRPC_INVALID_REQUEST, &message)
+        }
+        Err((_, message)) => Err(message),
     };
-    match fe.forward(module, &call_request(&dispatch_command, positional)) {
-        Ok(ForwardOk::Json(result_json)) => {
-            result_response(id, tool_result_object(&result_json, returns_object))
-        }
-        Ok(ForwardOk::Media(bytes, mime)) => {
-            result_response(id, media_result_object(media_content_block(&bytes, &mime)))
-        }
-        Err(message) => result_response(
-            id,
-            json!({ "content": [ { "type": "text", "text": message } ], "isError": true }),
-        ),
+    match result {
+        Ok(r) => result_response(id, r),
+        Err(message) => result_response(id, tool_error(&message)),
     }
 }
 
-/// `POST /call/<module>/<command>`: JSON API adapter. Body is a positional-args
-/// JSON array or `{"args":[...]}`. Stateless (no session).
+/// `POST /call/<module>/<command>`: JSON API adapter. Body is the arguments
+/// array, or `{"args": ...}` holding the array or a named-argument object.
+/// Stateless (no session).
 fn frontend_call_api(
     rest: &str,
     req: &HttpRequest,
@@ -2557,51 +2552,48 @@ fn frontend_call_api(
     let module = it.next().unwrap_or("");
     let command = it.next().unwrap_or("");
     if module.is_empty() || command.is_empty() {
-        return http_json(400, br#"{"error":"expected /call/<module>/<command>"}"#, keep_alive);
+        use morloc_runtime_types::daemon_error::{error_body, BAD_REQUEST};
+        return http_json(400, error_body(BAD_REQUEST, "expected /call/<module>/<command>").as_bytes(), keep_alive);
     }
     if !fe.api_modules.contains(module) {
-        return http_json(404, br#"{"error":"module not exposed on the API"}"#, keep_alive);
+        use morloc_runtime_types::daemon_error::{error_body, NOT_FOUND};
+        return http_json(404, error_body(NOT_FOUND, "module not exposed on the API").as_bytes(), keep_alive);
     }
     // The args stay the text they arrived in.
-    let body = String::from_utf8_lossy(&req.body);
-    let trimmed = body.trim();
-    let args: Raw = if trimmed.is_empty() {
-        raw_of(&Value::Array(Vec::new()))
-    } else if trimmed.starts_with('[') {
-        match serde_json::from_str::<Raw>(trimmed) {
-            Ok(a) => a,
-            Err(_) => return http_json(400, br#"{"error":"invalid JSON body"}"#, keep_alive),
+    let args = match morloc_runtime_types::call_body::args_of(&req.body) {
+        Ok(a) => a,
+        Err(e) => {
+            use morloc_runtime_types::daemon_error::{error_body, BAD_REQUEST};
+            return http_json(400, error_body(BAD_REQUEST, &e).as_bytes(), keep_alive);
         }
-    } else if trimmed.starts_with('{') {
-        match serde_json::from_str::<HashMap<String, Raw>>(trimmed) {
-            Ok(o) => o.get("args").cloned().unwrap_or_else(|| raw_of(&Value::Array(Vec::new()))),
-            Err(_) => return http_json(400, br#"{"error":"invalid JSON body"}"#, keep_alive),
-        }
-    } else if serde_json::from_str::<&RawValue>(trimmed).is_ok() {
-        return http_json(
-            400,
-            br#"{"error":"body must be a JSON array or {\"args\":[...]}"}"#,
-            keep_alive,
-        );
-    } else {
-        return http_json(400, br#"{"error":"invalid JSON body"}"#, keep_alive);
     };
-    let request_str = format!(
-        "{{\"method\":\"call\",\"command\":{},\"args\":{}}}",
-        Value::String(command.to_string()),
-        args.get()
-    );
-    match fe.forward(module, &request_str) {
+    let query = req.path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let selection = match morloc_runtime_types::http_query::render_selection(query) {
+        Ok(Some(r)) => Selection::Named(r.to_string()),
+        Ok(None) => Selection::Default,
+        Err(e) => {
+            use morloc_runtime_types::daemon_error::{error_body, BAD_REQUEST};
+            return http_json(400, error_body(BAD_REQUEST, e).as_bytes(), keep_alive);
+        }
+    };
+    let request_str = call_request(command, args, &selection);
+    match fe.forward(module, &request_str, &selection) {
         Ok(ForwardOk::Json(result_json)) => {
             let body = format!("{{\"status\":\"ok\",\"result\":{}}}", result_json);
             http_json(200, body.as_bytes(), keep_alive)
         }
         // A media (`@mime`) return goes out as the raw content bytes with the
         // declared Content-Type (a real image/PDF/...), not a JSON envelope.
-        Ok(ForwardOk::Media(bytes, mime)) => http_binary_response(200, &mime, &bytes, keep_alive),
-        Err(message) => {
-            let body = json!({ "status": "error", "error": message }).to_string();
-            http_json(500, body.as_bytes(), keep_alive)
+        Ok(ForwardOk::Media(bytes, mime, _, _)) => http_binary_response(200, &mime, &bytes, keep_alive),
+        Err((kind, message)) => {
+            use morloc_runtime_types::daemon_error::{error_body, http_status, RECOVERING};
+            let body = error_body(kind, &message);
+            let extra: Vec<(String, String)> = if kind == RECOVERING {
+                vec![("Retry-After".to_string(), "1".to_string())]
+            } else {
+                Vec::new()
+            };
+            http_response(http_status(kind, false) as u16, body.as_bytes(), keep_alive, &extra)
         }
     }
 }
@@ -2635,21 +2627,13 @@ mod tests {
     }
 
     use super::*;
-    use crate::json_help::RecordField;
-    use std::collections::HashSet;
 
-    fn shape(slots: Vec<ArgSlot>, props: &[&str], required: &[&str], returns_object: bool) -> McpToolShape {
-        let prop_names: HashSet<String> = props.iter().map(|s| s.to_string()).collect();
-        McpToolShape {
-            name: "t".into(),
-            tool: json!({ "name": "t" }),
-            slots,
-            prop_names,
-            required: required.iter().map(|s| s.to_string()).collect(),
-            returns_object,
-            return_mime: None,
-            renders: Vec::new(),
-        }
+    fn raw_of(v: &Value) -> Raw {
+        RawValue::from_string(v.to_string()).expect("a serialized value is JSON")
+    }
+
+    fn shape() -> McpToolShape {
+        McpToolShape { name: "t".into(), tool: json!({ "name": "t" }), actions: Vec::new() }
     }
 
     fn args(v: Value) -> Args {
@@ -2659,9 +2643,42 @@ mod tests {
         }
     }
 
-    /// The resolved positional arguments as the JSON they would be sent as.
-    fn resolved(s: &McpToolShape, a: Value) -> Result<Vec<String>, String> {
-        resolve_arguments(s, &args(a)).map(|v| v.iter().map(|r| r.get().to_string()).collect())
+    #[test]
+    fn a_liveness_probe_needs_no_token_and_a_head_answer_has_no_body() {
+        let req = |method: &str, path: &str| HttpRequest {
+            method: method.into(),
+            path: path.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let state = test_server();
+        let get = build_response(&req("GET", "/health"), &state, Some("s3cret"), true);
+        let get = String::from_utf8(get).unwrap();
+        assert!(get.starts_with("HTTP/1.1 200"), "{get}");
+        assert!(get.ends_with("{\"status\":\"ok\"}\n"), "{get}");
+        let refused = build_response(&req("POST", "/mcp"), &state, Some("s3cret"), true);
+        assert!(String::from_utf8(refused).unwrap().starts_with("HTTP/1.1 401"));
+        let head = String::from_utf8(without_body(get.clone().into_bytes())).unwrap();
+        assert!(head.ends_with("\r\n\r\n"), "{head}");
+        assert_eq!(head, get[..get.find("\r\n\r\n").unwrap() + 4]);
+    }
+
+    #[test]
+    fn an_output_selection_is_raw_an_action_or_the_default() {
+        let mut with_actions = shape();
+        with_actions.actions = vec!["png".into()];
+        let plain = shape();
+        let sel = |s: &McpToolShape, a: Value| tool_selection(s, &args(a));
+        assert!(matches!(sel(&with_actions, json!({})).unwrap(), Selection::Default));
+        assert!(matches!(sel(&plain, json!({})).unwrap(), Selection::None));
+        assert!(matches!(sel(&with_actions, json!({ "_render": "png" })).unwrap(), Selection::Named(r) if r == "png"));
+        assert!(matches!(sel(&with_actions, json!({ "_render": "raw" })).unwrap(), Selection::Named(r) if r == "raw"));
+        assert!(sel(&with_actions, json!({ "_render": "gif" })).is_err());
+        assert!(sel(&with_actions, json!({ "_render": 5 })).is_err());
+        assert!(sel(&with_actions, json!({ "_render": null })).is_err());
+        assert!(sel(&with_actions, json!({ "_render": ["png"] })).is_err());
+        assert!(arg_str(&args(json!({ "expression": 1 })), "expression").is_err());
+        assert_eq!(arg_str(&args(json!({})), "expression").unwrap(), None);
     }
 
     /// A one-pool manifest written into a fresh directory, returned with the
@@ -2739,21 +2756,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn optional_omitted_uses_typed_default() {
-        let s = shape(
-            vec![ArgSlot::Value { key: "count".into(), missing: json!(5) }],
-            &["count"],
-            &[],
-            false,
-        );
-        assert_eq!(resolved(&s, json!({})).unwrap(), vec![json!(5).to_string()]);
-        assert_eq!(
-            resolved(&s, json!({ "count": 10 })).unwrap(),
-            vec![json!(10).to_string()]
-        );
-    }
-
     // A tool call's arguments reach the pool as the text the client sent:
     // a value nested past any tree parser's limit and an integer wider than
     // a double both pass through unchanged.
@@ -2768,20 +2770,16 @@ mod tests {
         assert_eq!(msg.method.as_deref(), Some("tools/call"));
         let (name, arguments) = tool_call_params(&msg).unwrap();
         assert_eq!(name, "t");
-        let s = shape(
-            vec![
-                ArgSlot::Value { key: "big".into(), missing: Value::Null },
-                ArgSlot::Value { key: "deep".into(), missing: Value::Null },
-            ],
-            &["big", "deep"],
-            &["big", "deep"],
-            false,
-        );
-        let positional = resolve_arguments(&s, &arguments).unwrap();
         assert_eq!(
-            call_request("t", positional),
-            format!("{{\"method\":\"call\",\"command\":\"t\",\"args\":[18446744073709551617,{deep}]}}")
+            call_request("t", Some(&named_args(&arguments)), &Selection::None),
+            format!("{{\"method\":\"call\",\"command\":\"t\",\"args\":{{\"big\":18446744073709551617,\"deep\":{deep}}}}}")
         );
+        let with_render = RpcMessage::parse(br#"{"method":"tools/call","params":{"name":"t","arguments":{"_render":"png","a":1}}}"#).unwrap();
+        assert_eq!(named_args(&tool_call_params(&with_render).unwrap().1), r#"{"a":1}"#);
+        let twice = RpcMessage::parse(br#"{"method":"tools/call","params":{"name":"t","arguments":{"a":1,"a":2}}}"#).unwrap();
+        assert_eq!(tool_call_params(&twice).unwrap_err(), "an argument is given twice");
+        assert!(call_request("t", Some("[]"), &Selection::Default).ends_with(",\"render_default\":true}"));
+        assert!(call_request("t", Some("[]"), &Selection::Named("png".into())).ends_with(",\"render\":\"png\"}"));
         // Arguments that are not an object are rejected, as is a message
         // without params.
         let bad = RpcMessage::parse(b"{\"method\":\"tools/call\",\"params\":{\"name\":\"t\",\"arguments\":[1]}}").unwrap();
@@ -2793,103 +2791,22 @@ mod tests {
         assert_eq!(nul.id, Some(Value::Null));
     }
 
-    #[test]
-    fn missing_required_is_error() {
-        let s = shape(
-            vec![ArgSlot::Value { key: "n".into(), missing: Value::Null }],
-            &["n"],
-            &["n"],
-            false,
-        );
-        assert!(resolved(&s, json!({})).is_err());
-        assert_eq!(resolved(&s, json!({ "n": 7 })).unwrap(), vec![json!(7).to_string()]);
-    }
-
-    #[test]
-    fn unknown_argument_is_error() {
-        let s = shape(
-            vec![ArgSlot::Value { key: "n".into(), missing: Value::Null }],
-            &["n"],
-            &[],
-            false,
-        );
-        assert!(resolved(&s, json!({ "bogus": 1 })).is_err());
-    }
-
-    #[test]
-    fn flag_default_and_type_check() {
-        let s = shape(
-            vec![ArgSlot::Flag { key: "v".into(), default: false }],
-            &["v"],
-            &[],
-            false,
-        );
-        assert_eq!(resolved(&s, json!({})).unwrap(), vec![json!(false).to_string()]);
-        assert_eq!(resolved(&s, json!({ "v": true })).unwrap(), vec![json!(true).to_string()]);
-        // Non-boolean flag value is rejected.
-        assert!(resolved(&s, json!({ "v": "yes" })).is_err());
-    }
-
-    #[test]
-    fn record_unrolled_assembles_object_from_fields() {
-        let s = shape(
-            vec![ArgSlot::Record {
-                group_key: None,
-                fields: vec![
-                    RecordField { field: "a".into(), default: json!(3) },
-                    RecordField { field: "b".into(), default: json!("hi") },
-                ],
-            }],
-            &["a", "b"],
-            &[],
-            false,
-        );
-        // Provided field overrides its default; omitted field uses it.
-        assert_eq!(
-            resolved(&s, json!({ "a": 10 })).unwrap(),
-            vec![json!({ "a": 10, "b": "hi" }).to_string()]
-        );
-    }
-
-    #[test]
-    fn record_group_opt_accepts_whole_object() {
-        let s = shape(
-            vec![ArgSlot::Record {
-                group_key: Some("cfg".into()),
-                fields: vec![RecordField { field: "a".into(), default: json!(3) }],
-            }],
-            &["cfg"],
-            &[],
-            false,
-        );
-        // Whole object passed under the group key is used verbatim.
-        assert_eq!(
-            resolved(&s, json!({ "cfg": { "a": 9 } })).unwrap(),
-            vec![json!({ "a": 9 }).to_string()]
-        );
-        // Omitted: assembled from field defaults.
-        assert_eq!(
-            resolved(&s, json!({})).unwrap(),
-            vec![json!({ "a": 3 }).to_string()]
-        );
-    }
-
     // A result keeps every digit of a wide integer in both the text and
     // the structured mirror, and a result nested past the tree parser's
     // limit is still delivered as text.
     #[test]
     fn result_text_is_exact() {
-        let r = tool_result_object("{\"n\":18446744073709551617}", true);
+        let r = tool_result_object("{\"n\":18446744073709551617}").unwrap();
         assert_eq!(r["content"][0]["text"], "{\"n\":18446744073709551617}");
         assert_eq!(r["structuredContent"].to_string(), "{\"n\":18446744073709551617}");
         let deep = format!("{}1{}", "[".repeat(400), "]".repeat(400));
-        let r = tool_result_object(&deep, false);
+        let r = tool_result_object(&deep).unwrap();
         assert_eq!(r["content"][0]["text"], deep);
     }
 
     #[test]
     fn scalar_result_has_text_only() {
-        let r = tool_result_object("42", false);
+        let r = tool_result_object("42").unwrap();
         assert_eq!(r["isError"], json!(false));
         assert_eq!(r["content"][0]["type"], "text");
         assert_eq!(r["content"][0]["text"], "42");
@@ -2897,27 +2814,18 @@ mod tests {
     }
 
     #[test]
-    fn object_result_has_structured_content() {
-        let r = tool_result_object("{\"a\":1}", true);
+    fn an_object_result_has_structured_content_and_an_array_does_not() {
+        let r = tool_result_object("{\"a\":1}").unwrap();
         assert_eq!(r["structuredContent"], json!({ "a": 1 }));
         assert_eq!(r["content"][0]["text"], "{\"a\":1}");
-    }
-
-    #[test]
-    fn structured_flag_ignored_for_non_object_result() {
-        // Even when the return type is declared object, an array/scalar body
-        // must not be placed in structuredContent (it must be a JSON object).
-        let r = tool_result_object("[1,2]", true);
+        let r = tool_result_object("[1,2]").unwrap();
         assert!(r.get("structuredContent").is_none());
         assert_eq!(r["content"][0]["text"], "[1,2]");
     }
 
     #[test]
-    fn image_mime_produces_base64_image_block() {
-        // A media-typed return arrives as raw bytes (from the backend's raw-media
-        // path); an image/* media type turns them into an MCP image block with
-        // base64 data -- not a giant JSON number array.
-        let r = media_result_object(media_content_block(&[137, 80, 78, 71], "image/png"));
+    fn a_raster_image_is_an_image_block_named_by_its_media_type() {
+        let r = media_result(&[137, 80, 78, 71], "IMAGE/PNG; x=1", false, "draw", "png").unwrap();
         assert_eq!(r["isError"], json!(false));
         assert_eq!(r["content"][0]["type"], "image");
         assert_eq!(r["content"][0]["mimeType"], "image/png");
@@ -2926,25 +2834,36 @@ mod tests {
     }
 
     #[test]
-    fn text_mime_produces_unquoted_text_block() {
-        // A text/* renderer returns `Str`; the raw bytes are surfaced as text.
-        let r = media_result_object(media_content_block(b"hi there", "text/plain"));
-        assert_eq!(r["content"][0]["type"], "text");
-        assert_eq!(r["content"][0]["text"], "hi there");
+    fn text_output_is_a_text_resource_keeping_its_media_type() {
+        let svg = b"<svg/>";
+        let r = media_result(svg, "image/svg+xml", true, "draw", "svg").unwrap();
+        assert_eq!(r["content"][0]["type"], "resource");
+        assert_eq!(r["content"][0]["resource"]["mimeType"], "image/svg+xml");
+        assert_eq!(r["content"][0]["resource"]["text"], "<svg/>");
+        let pdb = media_result(b"ATOM", "chemical/x-pdb", true, "s", "pdb").unwrap();
+        assert_eq!(pdb["content"][0]["resource"]["text"], "ATOM");
     }
 
     #[test]
-    fn other_binary_mime_produces_resource_blob() {
-        let r = media_result_object(media_content_block(&[1, 2, 3], "application/octet-stream"));
-        assert_eq!(r["content"][0]["type"], "resource");
-        assert_eq!(
-            r["content"][0]["resource"]["mimeType"],
-            "application/octet-stream"
-        );
-        assert_eq!(
-            r["content"][0]["resource"]["blob"],
-            base64_encode(&[1, 2, 3])
-        );
+    fn binary_output_is_a_blob_resource_with_a_uri_of_its_own() {
+        let a = media_result(&[1, 2, 3], "application/octet-stream", false, "f", "raw").unwrap();
+        let b = media_result(&[1, 2, 3], "application/octet-stream", false, "f", "raw").unwrap();
+        assert_eq!(a["content"][0]["type"], "resource");
+        assert_eq!(a["content"][0]["resource"]["blob"], base64_encode(&[1, 2, 3]));
+        let uri = a["content"][0]["resource"]["uri"].as_str().unwrap();
+        assert!(uri.starts_with("morloc://result/f/raw/"), "{uri}");
+        assert_ne!(a["content"][0]["resource"]["uri"], b["content"][0]["resource"]["uri"]);
+        // Bytes the daemon did not mark as text stay bytes.
+        let c = media_result(b"hi", "text/plain", false, "f", "raw").unwrap();
+        assert!(c["content"][0]["resource"].get("blob").is_some());
+    }
+
+    #[test]
+    fn the_escaped_length_counts_what_json_writes() {
+        assert_eq!(json_escaped_len(b"ab"), 2);
+        assert_eq!(json_escaped_len(b"\"\\\n"), 6);
+        assert_eq!(json_escaped_len(&[0x01]), 6);
+        assert_eq!(json_escaped_len(&[0x01]), serde_json::to_string("\u{1}").unwrap().len() - 2);
     }
 
     // -- handshake / dispatch of non-FFI methods -----------------------------
@@ -2957,12 +2876,13 @@ mod tests {
         let msg = RpcMessage::parse(msg.to_string().as_bytes()).expect("test messages are objects");
         // These tests exercise only non-FFI methods (initialize / tools/list /
         // ping / unknown), which never call `ctx.dispatch`, so a null-pointer
-        // context is never dereferenced.
+        // context is never dereferenced, and none waits for a call slot.
         let ctx = DispatchCtx {
             manifest_c: ptr::null_mut(),
             sockets_ptr: ptr::null_mut(),
             n_pools: 0,
             shm: CString::new("").unwrap(),
+            calls: CallSlots::new(0),
         };
         handle_message(&msg, session, tools, &empty_by_name(), &ctx, "prog", "1.2.3")
     }
@@ -3087,26 +3007,89 @@ mod tests {
             .collect()
     }
 
-    fn poisoned_state() -> Arc<Mutex<HttpState>> {
-        let state = Arc::new(Mutex::new(HttpState {
-            manifest_c: std::ptr::null_mut(),
-            sockets_ptr: std::ptr::null_mut(),
-            n_pools: 0,
-            shm: CString::new("x").unwrap(),
-            shapes: Vec::new(),
+    fn test_server() -> HttpServer {
+        HttpServer {
+            ctx: DispatchCtx {
+                manifest_c: std::ptr::null_mut(),
+                sockets_ptr: std::ptr::null_mut(),
+                n_pools: 0,
+                shm: CString::new("x").unwrap(),
+                calls: CallSlots::new(1),
+            },
+            by_name: HashMap::new(),
             tools_list: Vec::new(),
             server_name: String::new(),
             server_version: String::new(),
-            sessions: HashMap::new(),
-        }));
+            sessions: Sessions::new(),
+        }
+    }
+
+    fn poisoned_state() -> Arc<HttpServer> {
+        let state = Arc::new(test_server());
         let s = Arc::clone(&state);
         let _ = std::thread::spawn(move || {
-            let _g = s.lock().unwrap();
+            let _g = s.sessions.0.lock().unwrap();
             panic!("torn");
         })
         .join();
-        assert!(state.is_poisoned());
+        assert!(state.sessions.0.is_poisoned());
         state
+    }
+
+    #[test]
+    fn a_session_with_a_call_in_flight_survives_pruning_and_a_deleted_one_stays_deleted() {
+        let sessions = Sessions::new();
+        let (busy, _) = sessions.begin("initialize", None, false).unwrap();
+        let (idle, _) = sessions.begin("initialize", None, false).unwrap();
+        assert!(sessions.end(&idle, true));
+        let late = Instant::now() + SESSION_TTL + Duration::from_secs(1);
+        prune_sessions(&mut sessions.0.lock().unwrap(), late);
+        let held = sessions.0.lock().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(held, vec![busy.clone()], "pruning took a session with a call in flight");
+
+        let (again, init) = sessions.begin("tools/call", Some(&busy), false).unwrap();
+        assert!(!init);
+        assert!(sessions.end(&busy, true), "first request");
+        assert!(sessions.remove(&again));
+        assert!(sessions.end(&again, true));
+        assert!(sessions.0.lock().unwrap().is_empty(), "a call ending revived a deleted session");
+        let refused = sessions.begin("ping", Some(&again), false).unwrap_err();
+        assert!(String::from_utf8_lossy(&refused).starts_with("HTTP/1.1 404"));
+    }
+
+    #[test]
+    fn a_late_call_does_not_undo_a_finished_handshake() {
+        let sessions = Sessions::new();
+        let (id, _) = sessions.begin("initialize", None, false).unwrap();
+        assert!(sessions.end(&id, false));
+        let (_, before) = sessions.begin("tools/list", Some(&id), false).unwrap();
+        assert!(!before);
+        sessions.begin("notifications/initialized", Some(&id), false).unwrap();
+        assert!(sessions.end(&id, true));
+        assert!(sessions.end(&id, before));
+        assert!(sessions.0.lock().unwrap()[&id].initialized);
+    }
+
+    #[test]
+    fn call_slots_admit_at_most_their_count_at_once() {
+        let slots = Arc::new(CallSlots::new(2));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let now = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let threads: Vec<_> = (0..6)
+            .map(|_| {
+                let (slots, peak, now) = (Arc::clone(&slots), Arc::clone(&peak), Arc::clone(&now));
+                std::thread::spawn(move || {
+                    let _slot = slots.take();
+                    let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(n, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(50));
+                    now.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        threads.into_iter().for_each(|t| t.join().unwrap());
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert_eq!(*slots.free.lock().unwrap(), 2);
     }
 
     #[test]
@@ -3170,7 +3153,7 @@ mod tests {
         let until = std::rc::Rc::new(std::cell::Cell::new(start + Duration::from_millis(300)));
         let mut reader = BufReader::new(DeadlineReader { stream, until });
         let got = read_http_request(&mut reader, |_| {});
-        assert!(matches!(&got, Err(e) if e.kind() == std::io::ErrorKind::TimedOut), "{:?}", got.map(|r| r.is_some()));
+        assert!(matches!(&got, Err(e) if e.kind() == std::io::ErrorKind::TimedOut), "{:?}", got.map(|r| matches!(r, ReadOutcome::Request(_))));
         assert!(start.elapsed() < Duration::from_millis(800));
         drop(reader);
         dripper.join().unwrap();
@@ -3236,7 +3219,7 @@ mod tests {
         });
         let (stream, _) = listener.accept().unwrap();
         let mut reader = BufReader::new(stream);
-        let parsed = read_http_request(&mut reader, |_| {}).unwrap().unwrap();
+        let parsed = match read_http_request(&mut reader, |_| {}).unwrap() { ReadOutcome::Request(r) => r, _ => panic!("no request") };
         assert_eq!(parsed.method, "POST");
         assert_eq!(parsed.path, "/mcp?x=1");
         assert_eq!(header_get(&parsed.headers, "mcp-session-id"), Some("sid"));
@@ -3248,11 +3231,11 @@ mod tests {
 
     #[test]
     fn read_http_request_rejects_overlong_header_line() {
-        // One header line past MAX_HEADER_LINE_BYTES -> connection closed (None).
+        // One header line past MAX_HEADER_LINE_BYTES is refused for its size.
         let big = "a".repeat(MAX_HEADER_LINE_BYTES as usize + 1024);
         let raw = format!("GET /mcp HTTP/1.1\r\nX: {big}\r\n\r\n");
         let mut slice = raw.as_bytes();
-        assert!(read_http_request(&mut slice, |_| {}).unwrap().is_none());
+        assert!(matches!(read_http_request(&mut slice, |_| {}).unwrap(), ReadOutcome::TooLarge(_)));
     }
 
     #[test]
@@ -3264,7 +3247,7 @@ mod tests {
         }
         raw.push_str("\r\n");
         let mut slice = raw.as_bytes();
-        assert!(read_http_request(&mut slice, |_| {}).unwrap().is_none());
+        assert!(matches!(read_http_request(&mut slice, |_| {}).unwrap(), ReadOutcome::TooLarge(_)));
     }
 
     #[test]
@@ -3273,7 +3256,7 @@ mod tests {
         // next request) are left for the following read, not swallowed.
         let raw = b"POST /mcp HTTP/1.1\r\nContent-Length: 5\r\n\r\nHELLOEXTRA";
         let mut slice = &raw[..];
-        let parsed = read_http_request(&mut slice, |_| {}).unwrap().unwrap();
+        let parsed = match read_http_request(&mut slice, |_| {}).unwrap() { ReadOutcome::Request(r) => r, _ => panic!("no request") };
         assert_eq!(parsed.body, b"HELLO");
         assert_eq!(slice, b"EXTRA"); // remainder preserved
     }
@@ -3285,8 +3268,8 @@ mod tests {
         let base = Instant::now();
         let future = base + SESSION_TTL + Duration::from_secs(1);
         let mut m: HashMap<String, SessionInfo> = HashMap::new();
-        m.insert("old".into(), SessionInfo { initialized: true, last_seen: base });
-        m.insert("fresh".into(), SessionInfo { initialized: false, last_seen: future });
+        m.insert("old".into(), SessionInfo { initialized: true, last_seen: base, in_flight: 0 });
+        m.insert("fresh".into(), SessionInfo { initialized: false, last_seen: future, in_flight: 0 });
         prune_sessions(&mut m, future);
         assert!(!m.contains_key("old"), "idle session should be evicted");
         assert!(m.contains_key("fresh"), "current session should survive");
@@ -3294,10 +3277,19 @@ mod tests {
         // Hard cap: fill to MAX_SESSIONS (all current), prune makes room for one.
         let mut full: HashMap<String, SessionInfo> = HashMap::new();
         for i in 0..MAX_SESSIONS {
-            full.insert(format!("s{i}"), SessionInfo { initialized: false, last_seen: base });
+            full.insert(format!("s{i}"), SessionInfo { initialized: false, last_seen: base, in_flight: 0 });
         }
         prune_sessions(&mut full, base);
         assert!(full.len() < MAX_SESSIONS, "cap backstop should evict the oldest");
+
+        for s in full.values_mut() {
+            s.in_flight = 1;
+        }
+        while full.len() < MAX_SESSIONS {
+            full.insert(format!("t{}", full.len()), SessionInfo { initialized: false, last_seen: base, in_flight: 1 });
+        }
+        assert!(!prune_sessions(&mut full, base), "a full table of busy sessions made room");
+        assert_eq!(full.len(), MAX_SESSIONS);
     }
 
     #[test]

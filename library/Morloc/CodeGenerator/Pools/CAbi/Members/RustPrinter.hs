@@ -17,6 +17,9 @@ via 'toIType'), so this printer only unwraps the 'ITyNamed' carrier.
 -}
 module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   ( printExpr
+  , rustManifoldName
+  , putValueFn
+  , schemaRef
   , typeHead
   , printStmt
   , printDispatch
@@ -42,9 +45,9 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
 import qualified Data.Map as Map
 import qualified Data.Text as T
 import Text.Printf (printf)
-import Morloc.CodeGenerator.Grammars.Common (DispatchEntry (..), manNamer)
+import Morloc.CodeGenerator.Grammars.Common (DispatchEntry (..))
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-import Morloc.CodeGenerator.Namespace (MDoc, RealLit (..), Key (..))
+import Morloc.CodeGenerator.Namespace (Intrinsic (..), MDoc, RealLit (..), Key (..), SaveFormat (..))
 import Morloc.Data.Doc
 import Morloc.DataFiles as DF
 
@@ -95,11 +98,11 @@ printExpr (IRecordLit _ _ _) = error "RustPrinter: record literal outside an ass
 printExpr (IAccess e (IIdx i)) = printExpr e <> "." <> pretty i
 printExpr (IAccess e (IField f)) = printExpr e <> "." <> pretty f
 printExpr (IAccess e (IKey _)) = printExpr e
-printExpr (ISerCall sid e) = "rustmorloc::put_value(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
+printExpr (ISerCall sid e) = putValueFn <> "(&(" <> printExpr e <> "), " <> schemaRef sid <> ")"
 printExpr (IDesCall sid (Just t) _ e) =
-  "rustmorloc::get_value::<" <> rustType t <> ">(" <> printExpr e <> ", schema(" <> pretty sid <> "))"
+  "::rustmorloc::get_value::<" <> rustType t <> ">(" <> printExpr e <> ", " <> schemaRef sid <> ")"
 printExpr (IDesCall sid Nothing _ e) =
-  "rustmorloc::get_value(" <> printExpr e <> ", schema(" <> pretty sid <> "))"
+  "::rustmorloc::get_value(" <> printExpr e <> ", " <> schemaRef sid <> ")"
 printExpr (IPack packer e) = pretty packer <> parens (printExpr e)
 printExpr (ICall f Nothing argGroups) =
   pretty f <> hcat (map (tupled . map printExpr) argGroups)
@@ -111,100 +114,111 @@ printExpr (ILambda args body) =
 printExpr (IRawExpr d) = pretty d
 printExpr (IEval e) = parens (printExpr e) <> "()"
 printExpr (IIntrinsicShow sid e) =
-  "rustmorloc::show(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
+  "::rustmorloc::show(&(" <> printExpr e <> "), " <> schemaRef sid <> ")"
 printExpr (IIntrinsicRead sid (Just t) e) =
-  "rustmorloc::read::<" <> rustType t <> ">(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
+  "::rustmorloc::read::<" <> rustType t <> ">(&(" <> printExpr e <> "), " <> schemaRef sid <> ")"
 printExpr (IIntrinsicRead sid Nothing e) =
-  "rustmorloc::read(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
+  "::rustmorloc::read(&(" <> printExpr e <> "), " <> schemaRef sid <> ")"
 printExpr (IIntrinsicUnpack sid (Just t) e) =
-  "rustmorloc::unpack::<" <> rustType t <> ">(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
+  "::rustmorloc::unpack::<" <> rustType t <> ">(&(" <> printExpr e <> "), " <> schemaRef sid <> ")"
 printExpr (IIntrinsicUnpack sid Nothing e) =
-  "rustmorloc::unpack(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
+  "::rustmorloc::unpack(&(" <> printExpr e <> "), " <> schemaRef sid <> ")"
 -- A raise in a value position is typed as that value so the surrounding
 -- expression keeps its type: `!` would leave the statements after a
 -- throwing arm unreachable and give a serialized throw no `ToVoidstar`.
 printExpr (IIntrinsicThrow (Just t) msg) =
-  "rustmorloc::morloc_throw_as::<" <> rustType t <> ">(" <> printExpr msg <> ")"
-printExpr (IIntrinsicThrow Nothing msg) = "rustmorloc::morloc_throw(" <> printExpr msg <> ")"
+  "::rustmorloc::morloc_throw_as::<" <> rustType t <> ">(" <> printExpr msg <> ")"
+printExpr (IIntrinsicThrow Nothing msg) = "::rustmorloc::morloc_throw(" <> printExpr msg <> ")"
 -- File / stream / IO intrinsics. Each mirrors the C++ `_mlc_*` helper
 -- (CppPrinter.hs) but calls the corresponding thin `rustmorloc` shim. A value
 -- argument is borrowed (`&(..)`, the ToVoidstar shape); a handle is a bare
 -- `u64` value; a typed-result shim gets the `::<T>` turbofish so its return
 -- type resolves.
 printExpr (IIntrinsicHash sid e) =
-  "rustmorloc::hash(" <> refExpr e <> ", " <> schemaRef sid <> ")"
-printExpr (IIntrinsicSave fmt sid level e path)
-  | fmt == "json" = saveCall "save_json"
-  | fmt == "voidstar" = saveCall "save_voidstar"
-  | otherwise = saveCall "save"
+  "::rustmorloc::hash(" <> refExpr e <> ", " <> schemaRef sid <> ")"
+printExpr (IIntrinsicCompare intr sid a b) =
+  "(::rustmorloc::compare(" <> refExpr a <> ", " <> refExpr b <> ", " <> schemaRef sid <> ")"
+    <> (if intr == IntrEq then " == 0)" else " <= 0)")
+printExpr (IIntrinsicSave fmt sid level e path) = case fmt of
+  SaveJson -> saveCall "save_json"
+  SaveVoidstar -> saveCall "save"
   where
     saveCall f =
-      "rustmorloc::" <> f <> "(" <> refExpr e <> ", " <> schemaRef sid
+      "::rustmorloc::" <> f <> "(" <> refExpr e <> ", " <> schemaRef sid
         <> ", " <> printExpr level <> ", " <> refExpr path <> ")"
 printExpr (IIntrinsicLoad sid mt path) =
-  "rustmorloc::load" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> refExpr path <> ")"
+  "::rustmorloc::load" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> refExpr path <> ")"
 printExpr (IIntrinsicOpen kind path) =
-  "rustmorloc::open(" <> refExpr path <> ", " <> pretty kind <> ")"
-printExpr (IIntrinsicClose h) = "rustmorloc::close(" <> printExpr h <> ")"
-printExpr (IIntrinsicUnlinkTemp path) = "rustmorloc::unlink_tmp(" <> refExpr path <> ")"
-printExpr (IIntrinsicFSchema path) = "rustmorloc::fschema(" <> refExpr path <> ")"
-printExpr (IIntrinsicFLength h) = "rustmorloc::ifile_length(" <> printExpr h <> ")"
+  "::rustmorloc::open(" <> refExpr path <> ", " <> pretty kind <> ")"
+printExpr (IIntrinsicClose h) = "::rustmorloc::close(" <> printExpr h <> ")"
+printExpr (IIntrinsicUnlinkTemp path) = "::rustmorloc::unlink_tmp(" <> refExpr path <> ")"
+printExpr (IIntrinsicFSchema path) = "::rustmorloc::fschema(" <> refExpr path <> ")"
+printExpr (IIntrinsicFLength h) = "::rustmorloc::ifile_length(" <> printExpr h <> ")"
 printExpr (IIntrinsicNext sid mt h) =
-  "rustmorloc::next" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ")"
+  "::rustmorloc::next" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ")"
 printExpr (IIntrinsicStreamLayout sid mt h) =
-  "rustmorloc::stream_layout" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ")"
-printExpr (IIntrinsicStream h) = "rustmorloc::stream(" <> printExpr h <> ")"
+  "::rustmorloc::stream_layout" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ")"
+printExpr (IIntrinsicStream h) = "::rustmorloc::stream(" <> printExpr h <> ")"
 printExpr (IIntrinsicOpenOStream sid path) =
-  "rustmorloc::open_ostream(" <> schemaRef sid <> ", " <> refExpr path <> ")"
+  "::rustmorloc::open_ostream(" <> schemaRef sid <> ", " <> refExpr path <> ")"
 printExpr (IIntrinsicOpenIStream sid path) =
-  "rustmorloc::open_istream(" <> schemaRef sid <> ", " <> refExpr path <> ")"
+  "::rustmorloc::open_istream(" <> schemaRef sid <> ", " <> refExpr path <> ")"
 printExpr (IIntrinsicWrite sid level value handle) =
-  "rustmorloc::write(" <> schemaRef sid <> ", " <> printExpr level
+  "::rustmorloc::write(" <> schemaRef sid <> ", " <> printExpr level
     <> ", " <> refExpr value <> ", " <> printExpr handle <> ")"
 printExpr (IIntrinsicAppend sid path) =
-  "rustmorloc::append(" <> schemaRef sid <> ", " <> refExpr path <> ")"
+  "::rustmorloc::append(" <> schemaRef sid <> ", " <> refExpr path <> ")"
 printExpr (IIntrinsicConcat paths dest) =
-  "rustmorloc::concat(" <> refExpr paths <> ", " <> refExpr dest <> ")"
-printExpr (IIntrinsicFlush h) = "rustmorloc::flush(" <> printExpr h <> ")"
-printExpr IIntrinsicTell = "rustmorloc::tell()"
-printExpr IIntrinsicTmpfile = "rustmorloc::tmpfile()"
+  "::rustmorloc::concat(" <> refExpr paths <> ", " <> refExpr dest <> ")"
+printExpr (IIntrinsicFlush h) = "::rustmorloc::flush(" <> printExpr h <> ")"
+printExpr IIntrinsicTell = "::rustmorloc::tell()"
+printExpr IIntrinsicTmpfile = "::rustmorloc::tmpfile()"
 printExpr (IIntrinsicCellNew sid e) =
-  "rustmorloc::cell_new(" <> schemaRef sid <> ", " <> refExpr e <> ")"
+  "::rustmorloc::cell_new(" <> schemaRef sid <> ", " <> refExpr e <> ")"
 printExpr (IIntrinsicCellGet sid mt h) =
-  "rustmorloc::cell_get" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ")"
+  "::rustmorloc::cell_get" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ")"
 printExpr (IIntrinsicCellPut sid h e) =
-  "rustmorloc::cell_put(" <> schemaRef sid <> ", " <> printExpr h <> ", " <> refExpr e <> ")"
+  "::rustmorloc::cell_put(" <> schemaRef sid <> ", " <> printExpr h <> ", " <> refExpr e <> ")"
 printExpr (IIntrinsicCellReduce sid mt f h) =
   -- The accumulator type has to be given (it appears only in the return),
   -- but the combine's type is an anonymous closure type, so it is left to
   -- inference: a turbofish must name every parameter or none.
-  "rustmorloc::cell_reduce" <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", "
+  "::rustmorloc::cell_reduce" <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", "
     <> printExpr f <> ", " <> printExpr h <> ")"
 printExpr (IIntrinsicChannel sid) =
-  "rustmorloc::open_channel(" <> schemaRef sid <> ")"
+  "::rustmorloc::open_channel(" <> schemaRef sid <> ")"
 printExpr (IIntrinsicSpawn sid h f) =
-  "rustmorloc::spawn(&" <> printExpr f <> ", " <> printExpr h <> ", " <> schemaRef sid <> ")"
+  "::rustmorloc::spawn(&" <> printExpr f <> ", " <> printExpr h <> ", " <> schemaRef sid <> ")"
 printExpr (IIntrinsicSettle h) =
-  "rustmorloc::settle(" <> printExpr h <> ")"
+  "::rustmorloc::settle(" <> printExpr h <> ")"
 printExpr (IIntrinsicReplay sid mt h f) =
   -- As for cell_reduce: the element type is given, the function's closure
   -- type is left to inference.
-  "rustmorloc::replay" <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", "
+  "::rustmorloc::replay" <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", "
     <> printExpr h <> ", " <> printExpr f <> ")"
-printExpr (IIntrinsicStdin sid) = "rustmorloc::open_stdin(" <> schemaRef sid <> ")"
-printExpr (IIntrinsicStdout sid) = "rustmorloc::open_stdout(" <> schemaRef sid <> ")"
-printExpr (IIntrinsicStderr sid) = "rustmorloc::open_stderr(" <> schemaRef sid <> ")"
+printExpr (IIntrinsicStdin sid) = "::rustmorloc::open_stdin(" <> schemaRef sid <> ")"
+printExpr (IIntrinsicStdout sid) = "::rustmorloc::open_stdout(" <> schemaRef sid <> ")"
+printExpr (IIntrinsicStderr sid) = "::rustmorloc::open_stderr(" <> schemaRef sid <> ")"
 printExpr (IIntrinsicIFileWalk sid mt pathExpr h runtimeArgs) =
-  "rustmorloc::ifile_walk" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h
+  "::rustmorloc::ifile_walk" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h
     <> ", " <> refExpr pathExpr <> ", &[" <> argList <> "])"
   where
     argList = hcat (punctuate ", " (map printExpr runtimeArgs))
 printExpr _ = error "RustPrinter: this intrinsic/expression is unsupported in Rust v1"
 
--- | Reference into the pool's schema table: `schema(<id>)` returns a
--- `&'static Schema`, which coerces to the `&Schema` every shim expects.
+-- | The serializer a manifold's result goes through; 'rustReply' recognizes it.
+putValueFn :: MDoc
+putValueFn = "::rustmorloc::put_value"
+
+-- | The name of a manifold's function in a Rust pool.
+rustManifoldName :: Int -> MDoc
+rustManifoldName i = "__mm_" <> viaShow i
+
+-- | Reference into the pool's schema table: `__morloc_schema(<id>)` returns a
+-- `&'static Schema`, which coerces to the `&Schema` every shim expects. By
+-- path, so it resolves inside a scope that binds a local of that name.
 schemaRef :: Int -> MDoc
-schemaRef sid = "schema(" <> pretty sid <> ")"
+schemaRef sid = "crate::__morloc_schema(" <> pretty sid <> ")"
 
 -- | Borrow an expression (`&(e)`), the ToVoidstar/`&str` shape the value-in and
 -- path shims expect.
@@ -357,7 +371,7 @@ printStmt (IFunDef _ _ _ _) = error "RustPrinter: IFunDef unsupported"
 -- in one @unsafe@ block.
 printDispatch :: [DispatchEntry] -> [DispatchEntry] -> [Int] -> MDoc
 printDispatch locals remotes closureMids =
-  vsep [dispatchFn "local_dispatch" "local" (localCases ++ closureCases), "", dispatchFn "remote_dispatch" "remote" remoteCases]
+  vsep [dispatchFn "__morloc_local_dispatch" "local" (localCases ++ closureCases), "", dispatchFn "__morloc_remote_dispatch" "remote" remoteCases]
   where
     localCases = map (makeCase "") locals
     remoteCases = map (makeCase "_remote") remotes
@@ -365,29 +379,29 @@ printDispatch locals remotes closureMids =
     -- proxy calls back on the closure's manifold id, routed to its serial
     -- dispatch wrapper (which deserializes captured ++ bound and calls the body).
     closureCases =
-      [ pretty i <+> "=>" <+> "mlc_closure_dispatch_" <> pretty i <> "(args, nargs)," | i <- closureMids ]
+      [ pretty i <+> "=>" <+> "__morloc_closure_dispatch_" <> pretty i <> "(args, nargs)," | i <- closureMids ]
 
     makeCase :: MDoc -> DispatchEntry -> MDoc
     makeCase suffix (DispatchEntry i n _) =
-      pretty i <+> "=>" <+> manNamer i <> suffix
+      pretty i <+> "=>" <+> rustManifoldName i <> suffix
         <> tupled ["a(" <> pretty j <> ")" | j <- take n ([0 ..] :: [Int])] <> ","
 
     dispatchFn :: MDoc -> MDoc -> [MDoc] -> MDoc
     dispatchFn name kind cases =
       vsep
         [ "unsafe extern \"C\" fn" <+> name
-            <> "(mid: u32, args: *const *const u8, nargs: usize, _ctx: *mut c_void) -> *mut u8 {"
+            <> "(mid: u32, args: *const *const u8, nargs: usize, _ctx: *mut ::std::os::raw::c_void) -> *mut u8 {"
         , indent 4 $ vsep
-            [ "rustmorloc::dispatch_flush();"
-            , "let args = std::panic::AssertUnwindSafe(args);"
-            , "rustmorloc::dispatch_guard(move || {"
+            [ "::rustmorloc::dispatch_flush();"
+            , "let args = ::std::panic::AssertUnwindSafe(args);"
+            , "::rustmorloc::dispatch_guard(move || {"
             , indent 4 $ vsep
                 [ "let args = *args;"
-                , "let a = |i: usize| -> *const u8 { if i < nargs { unsafe { *args.add(i) } } else { std::ptr::null() } };"
+                , "let a = |i: usize| -> *const u8 { if i < nargs { unsafe { *args.add(i) } } else { ::std::ptr::null() } };"
                 , "unsafe { match mid {"
                 , indent 4 $ vsep
                     ( cases
-                        ++ ["_ => rustmorloc::fail_packet(&format!(\"Invalid " <> kind <> " manifold id: {mid}\")),"]
+                        ++ ["_ => ::rustmorloc::fail_packet(&format!(\"Invalid " <> kind <> " manifold id: {mid}\")),"]
                     )
                 , "} }"
                 ]
@@ -414,20 +428,20 @@ printProgram serialization signatures _extra prog =
     schemas = ipSchemaTable prog
     schemaSection =
       vsep
-        [ "static SCHEMA_STRS: &[&str] = &["
+        [ "static __MORLOC_SCHEMA_STRS: &[&str] = &["
         , indent 4 $ vsep [dquotes (pretty (rustEscape s)) <> "," | s <- schemas]
         , "];"
-        , "static SCHEMA_TABLE: OnceLock<Vec<Schema>> = OnceLock::new();"
-        , "fn init_schemas() {"
+        , "static __MORLOC_SCHEMA_TABLE: ::std::sync::OnceLock<Vec<::rustmorloc::Schema>> = ::std::sync::OnceLock::new();"
+        , "fn __morloc_init_schemas() {"
         , indent 4 $ vsep
-            [ "let table: Vec<Schema> = SCHEMA_STRS.iter()"
-            , indent 4 ".map(|s| parse_schema(s).expect(\"morloc: invalid embedded schema\")).collect();"
-            , "let _ = SCHEMA_TABLE.set(table);"
+            [ "let table: Vec<::rustmorloc::Schema> = __MORLOC_SCHEMA_STRS.iter()"
+            , indent 4 ".map(|s| ::rustmorloc::parse_schema(s).expect(\"morloc: invalid embedded schema\")).collect();"
+            , "let _ = __MORLOC_SCHEMA_TABLE.set(table);"
             ]
         , "}"
         , "#[inline]"
-        , "fn schema(id: usize) -> &'static Schema {"
-        , indent 4 "SCHEMA_TABLE.get().and_then(|t| t.get(id)).unwrap_or_else(|| rustmorloc::morloc_infra_abort(\"a manifold asked for a schema the pool does not have\"))"
+        , "fn __morloc_schema(id: usize) -> &'static ::rustmorloc::Schema {"
+        , indent 4 "__MORLOC_SCHEMA_TABLE.get().and_then(|t| t.get(id)).unwrap_or_else(|| ::rustmorloc::morloc_infra_abort(\"a manifold asked for a schema the pool does not have\"))"
         , "}"
         ]
 
@@ -553,9 +567,9 @@ printVariantImpls box name arms3 = vsep [toImpl, "", fromImpl]
 
     toImpl =
       vsep
-        [ "impl ToVoidstar for" <+> name <+> "{"
+        [ "impl ::rustmorloc::ToVoidstar for" <+> name <+> "{"
         , indent 4 $ vsep
-            [ "fn size_step(&self, w: &mut SizeWalk, schema: &Schema, _idx: usize) {"
+            [ "fn size_step(&self, w: &mut ::rustmorloc::SizeWalk, schema: &::rustmorloc::Schema, _idx: usize) {"
             , indent 4 $ vsep
                 [ "match self {"
                 , indent 4 $ vsep
@@ -571,13 +585,13 @@ printVariantImpls box name arms3 = vsep [toImpl, "", fromImpl]
                 , "}"
                 ]
             , "}"
-            , "unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, _idx: usize) {"
+            , "unsafe fn write_step(&self, w: &mut ::rustmorloc::WriteWalk, dest: *mut u8, schema: &::rustmorloc::Schema, _idx: usize) {"
             , indent 4 $ vsep
                 [ "match self {"
                 , indent 4 $ vsep
                     [ armPat c ts <+> "=>" <+>
                         (if null ts
-                           then "write_variant_nullary(dest, " <> pretty i <> "u8),"
+                           then "::rustmorloc::write_variant_nullary(dest, " <> pretty i <> "u8),"
                            else case mw of
                              Nothing -> "w.variant_payload(dest, &schema.parameters["
                                           <> pretty i <> "], " <> pretty i <> "u8, mlc_b),"
@@ -593,12 +607,12 @@ printVariantImpls box name arms3 = vsep [toImpl, "", fromImpl]
 
     fromImpl =
       vsep
-        [ "impl FromVoidstar for" <+> name <+> "{"
+        [ "impl ::rustmorloc::FromVoidstar for" <+> name <+> "{"
         , indent 4 $ vsep
-            [ "unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {"
+            [ "unsafe fn read_step(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8, _idx: usize) {"
             , indent 4 $ vsep
                 [ "w.push_finish::<Self>(schema, data);"
-                , "match read_variant_tag(data) {"
+                , "match ::rustmorloc::read_variant_tag(data) {"
                 , indent 4 $ vsep
                     ( [ pretty i <+> "=>" <+>
                           (if null ts
@@ -611,9 +625,9 @@ printVariantImpls box name arms3 = vsep [toImpl, "", fromImpl]
                 , "}"
                 ]
             , "}"
-            , "unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {"
+            , "unsafe fn read_finish(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8) -> Self {"
             , indent 4 $ vsep
-                [ "match read_variant_tag(data) {"
+                [ "match ::rustmorloc::read_variant_tag(data) {"
                 , indent 4 $ vsep
                     ( [ pretty i <+> "=>" <+>
                           (if null ts
@@ -640,13 +654,13 @@ printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
   where
     toImpl =
       vsep
-        [ "impl ToVoidstar for" <+> name <+> "{"
+        [ "impl ::rustmorloc::ToVoidstar for" <+> name <+> "{"
         , indent 4 $ vsep
             [ "const IS_LEAF: bool = true;"
-            , "fn shm_size(&self, schema: &Schema) -> usize {"
-            , indent 4 "resolve_recur(schema).width"
+            , "fn shm_size(&self, schema: &::rustmorloc::Schema) -> usize {"
+            , indent 4 "::rustmorloc::resolve_recur(schema).width"
             , "}"
-            , "unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {"
+            , "unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, _schema: &::rustmorloc::Schema) {"
             , indent 4 "*dest = *self as u8;"
             , "}"
             ]
@@ -654,10 +668,10 @@ printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
         ]
     fromImpl =
       vsep
-        [ "impl FromVoidstar for" <+> name <+> "{"
+        [ "impl ::rustmorloc::FromVoidstar for" <+> name <+> "{"
         , indent 4 $ vsep
             [ "const IS_LEAF: bool = true;"
-            , "unsafe fn read(_schema: &Schema, data: *const u8, _space: rustmorloc::MorlocSpace) -> Self {"
+            , "unsafe fn read(_schema: &::rustmorloc::Schema, data: *const u8, _space: ::rustmorloc::MorlocSpace) -> Self {"
             , indent 4 $ vsep
                 [ "match *data {"
                 , indent 4 $ vsep
@@ -676,11 +690,10 @@ printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
         ]
 
 -- | Per-field marshalling strategy for a record function field. A closure field
--- is stored natively as @Rc<dyn MorlocFnN>@ (no @ToVoidstar@), so it is reified
+-- is stored natively as a function value (no @ToVoidstar@), so it is reified
 -- to its @ClosureOrigin@ wire tuple on write/shm_size and reflected back on read.
-data ClosureMarshal = ClosureMarshal
-  { cmReify :: MDoc              -- ^ arity-indexed reify method, e.g. @reify1@
-  , cmReflect :: MDoc -> MDoc    -- ^ a @ClosureOrigin@ slot-read expression -> the reflected @Rc<dyn MorlocFnN>@
+newtype ClosureMarshal = ClosureMarshal
+  { cmReflect :: MDoc -> MDoc    -- ^ a @ClosureOrigin@ slot-read expression -> the reflected function value
   }
 
 -- | Whose field types a record's reader names: a generated struct's are the
@@ -716,28 +729,25 @@ printRecordImpls fieldTypes name params fields = vsep [toImpl, "", fromImpl]
     -- Hand a field to the walk: a plain field by reference; a closure field
     -- reifies to its ClosureOrigin wire tuple (which IS ToVoidstar), owned by
     -- the walk since the step's own frame does not outlive the call.
-    -- `reifyN` BORROWS the origin (`Option<&ClosureOrigin>`), so the two
-    -- callers (size, write) share it without cloning the captured packets
-    -- twice.
     sizeField (i, (f, _, _, Nothing)) =
       "w.child(&self." <> f <> ", " <> fieldSchema i <> ", true);"
-    sizeField (i, (f, _, _, Just cm)) =
-      "w.child_owned(rustmorloc::require_origin(self." <> f <> "." <> cmReify cm <> "()), "
+    sizeField (i, (f, _, _, Just _)) =
+      "w.child_owned(::rustmorloc::require_origin(::rustmorloc::reify(&self." <> f <> ")), "
         <> fieldSchema i <> ", true);"
     writeField (i, (f, _, _, Nothing)) =
       "w.child(&self." <> f <> ", " <> fieldSlot i <> ", " <> fieldSchema i <> ");"
-    writeField (i, (f, _, _, Just cm)) =
-      "w.child_owned(rustmorloc::require_origin(self." <> f <> "." <> cmReify cm <> "()), "
+    writeField (i, (f, _, _, Just _)) =
+      "w.child_owned(::rustmorloc::require_origin(::rustmorloc::reify(&self." <> f <> ")), "
         <> fieldSlot i <> ", " <> fieldSchema i <> ");"
 
     toImpl =
       vsep
-        [ "impl" <> boundedParams "ToVoidstar" <+> "ToVoidstar for" <+> ty <+> "{"
+        [ "impl" <> boundedParams "::rustmorloc::ToVoidstar" <+> "::rustmorloc::ToVoidstar for" <+> ty <+> "{"
         , indent 4 $ vsep
-            [ "fn size_step(&self, w: &mut SizeWalk, schema: &Schema, _idx: usize) {"
+            [ "fn size_step(&self, w: &mut ::rustmorloc::SizeWalk, schema: &::rustmorloc::Schema, _idx: usize) {"
             , indent 4 sizeBody
             , "}"
-            , "unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, _idx: usize) {"
+            , "unsafe fn write_step(&self, w: &mut ::rustmorloc::WriteWalk, dest: *mut u8, schema: &::rustmorloc::Schema, _idx: usize) {"
             , indent 4 (vsep (map writeField idx))
             , "}"
             ]
@@ -749,12 +759,12 @@ printRecordImpls fieldTypes name params fields = vsep [toImpl, "", fromImpl]
 
     fromImpl =
       vsep
-        [ "impl" <> boundedParams "FromVoidstar" <+> "FromVoidstar for" <+> ty <+> "{"
+        [ "impl" <> boundedParams "::rustmorloc::FromVoidstar" <+> "::rustmorloc::FromVoidstar for" <+> ty <+> "{"
         , indent 4 $ vsep
-            [ "unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {"
+            [ "unsafe fn read_step(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8, _idx: usize) {"
             , indent 4 $ vsep ("w.push_finish::<Self>(schema, data);" : map stepField idx)
             , "}"
-            , "unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {"
+            , "unsafe fn read_finish(w: &mut ::rustmorloc::ReadWalk, schema: &::rustmorloc::Schema, data: *const u8) -> Self {"
             , indent 4 $ vsep
                 [ "Self {"
                 , indent 4 $ vsep (map readField idx)
@@ -772,7 +782,7 @@ printRecordImpls fieldTypes name params fields = vsep [toImpl, "", fromImpl]
       StructFieldTypes ->
         "w.child_step_for(" <> fieldSchema i <> ", " <> fieldData i <> ", |x: &Self| &x." <> f <> ");"
     stepField (i, (_, _, _, Just _)) =
-      "w.child_step::<rustmorloc::ClosureOrigin>(" <> fieldSchema i <> ", " <> fieldData i <> ");"
+      "w.child_step::<::rustmorloc::ClosureOrigin>(" <> fieldSchema i <> ", " <> fieldData i <> ");"
     -- A plain field reads via the walk directly; a closure field reads its
     -- ClosureOrigin wire tuple off the slot and reflects it into a callable.
     readField (i, (f, t, _, Nothing)) = case fieldTypes of
@@ -782,5 +792,5 @@ printRecordImpls fieldTypes name params fields = vsep [toImpl, "", fromImpl]
         f <> ": w.child_read_for(" <> fieldSchema i <> ", " <> fieldData i <> ", |x: &Self| &x." <> f <> "),"
     readField (i, (f, _, _, Just cm)) =
       let slotRead =
-            "w.child_read::<rustmorloc::ClosureOrigin>(" <> fieldSchema i <> ", " <> fieldData i <> ")"
+            "w.child_read::<::rustmorloc::ClosureOrigin>(" <> fieldSchema i <> ", " <> fieldData i <> ")"
        in f <> ": " <> cmReflect cm slotRead <> ","

@@ -22,11 +22,11 @@ Float literal 1.0e100 overflows F32 (|x| > 3.4e38)
 1.5
 0
 -3.14
-1.79769313486232e+308
+1.7976931348623157e+308
 
 === S3: factorial overflow (the report's f 200 example) ===
 3628800
-7.25741561530799e+306
+7.257415615307994e+306
 "inf"
 "inf"
 

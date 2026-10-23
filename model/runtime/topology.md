@@ -1,0 +1,73 @@
+# Topology
+
+## Processes
+
+```
+nexus (one per program run, or one long-running daemon / MCP server)
+  |-- pool per language (C++, Python, R, Rust), fork+exec
+  |     |-- Python/R fork-mode workers, fork without exec
+  |     |-- sbatch and sacct for a remote label (SLURM), spawned and waited for
+  |     |-- user code may fork further (multiprocessing, mclapply, fork())
+  `-- `morloc eval` / `typecheck` children (daemon only), fork+exec
+```
+
+- The nexus creates the shared-memory namespace (volumes and the stream
+  registry) and is its only owner: only it unlinks the names while it
+  runs. Once a killed nexus's pools have ended, their reapers remove
+  them (DAEMON-13).
+- Every process maps the same volumes. A relative pointer names a block by
+  volume index and offset, so it means the same block in every process.
+- A pool exits when its nexus does: it watches a lifeline pipe whose write
+  end only the nexus holds.
+- A pool's workers end when its main process does: the nexus kills the
+  pool's group as it reaps the pool (DAEMON-14).
+
+## Threads
+
+- nexus/daemon: an accept thread (also runs pool-crash recovery), 4-32
+  request workers, a SIGCHLD handler that reaps every child, one writer
+  thread per open written stream (the custodian, SLOT-10) with its
+  compression jobs. The registry's 4096 slots bound how many there are;
+  an open stream costs about 75-130 KiB and an open plus first write
+  150-325 us (stream_bench_many_open, 1000 streams, 2026-10-12), so a
+  pool of writer threads is not worth its scheduling.
+- pool: dispatch workers (C++, Rust: a job queue in libmorloc; Python and
+  R: forked worker processes run by libmorloc's fork-pool scheduler,
+  NET-9). C++ and Rust pools watch the nexus's lifeline in their accept
+  loop, beside the listening socket; a fork pool's coordinator watches it
+  in its wait loop.
+
+## Worker scaling
+
+- Every pool starts with one worker.
+- Thread pools (C++, Rust) start a worker whenever a
+  call arrives and no worker is free; no upper bound. A C++ or Rust worker
+  stays with a kept connection, waiting for its next call, until the caller
+  closes it (NET-8).
+- Fork pools (Python, R) count the waits on another pool in progress (a
+  foreign call's round trip, a channel read or write that sleeps) and fork a
+  worker when that count reaches the live workers; a computing worker makes
+  calls queue. Idle workers accept on the pool's socket themselves (NET-9).
+- Surplus idle workers retire after 60 s (`MORLOC_POOL_IDLE_TIMEOUT_MS`);
+  R workers never retire (SHM-8).
+- Daemon request workers: number of pools + 4, clamped to [4, 32].
+
+## Communication
+
+- A unix-socket connection carries one request packet and then one reply
+  packet at a time. A caller thread keeps one per C++ or Rust pool for its
+  next call (NET-7); a call into Python or R takes a connection of its own.
+  Small values (at most the inline threshold, 64 KiB by default) travel
+  inline; large ones as a relative pointer into shared
+  memory, or, when shared memory is disabled, as the path of a temporary
+  file.
+- A command that calls no foreign function is pure: the nexus evaluates it
+  itself and starts no pool.
+- A one-shot CLI run starts only the pools its command can reach; the
+  daemon, MCP server and call-packet mode start every pool at startup.
+- Streams: a registry slot in shared memory names the file, its schema and
+  its cursor. A reading process keeps its own descriptor and mapping. A
+  written stream's elements go into the slot's shared buffer, and full
+  buffers onto a queue in shared memory that the nexus's writer for that
+  stream drains: only the nexus touches a written stream's file, stdout
+  and stderr included (SLOT-10, SLOT-16).

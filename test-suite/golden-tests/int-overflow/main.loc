@@ -9,7 +9,6 @@ module main (
   int32Id,
   int64Id,
   int8Id,
-  intId,
   uint8Id,
   uint16Id,
   uint32Id,
@@ -20,7 +19,6 @@ module main (
   pint32Dbl,
   pint64Dbl,
   pint8Dbl,
-  pintDbl,
   puint16Dbl,
   puint32Dbl,
   puint64Dbl,
@@ -31,7 +29,6 @@ module main (
   rint32Dbl,
   rint64Dbl,
   rint8Dbl,
-  rintDbl,
   ruint16Dbl,
   ruint32Dbl,
   ruint64Dbl,
@@ -54,7 +51,6 @@ module main (
   cint32Dbl,
   cint64Dbl,
   cint8Dbl,
-  cintDbl,
   cuint16Dbl,
   cuint32Dbl,
   cuint64Dbl,
@@ -200,10 +196,9 @@ rint64Dbl x = idr (x * 2)
 
 
 
--- R identity round-trips. R has only "integer" (32-bit signed) and
--- "numeric" (double, exact integers up to 2^53). I64 / U32 / U64
--- map to "numeric"; values beyond 2^53 are not exactly representable and
--- may silently lose precision.
+-- R identity round-trips. Int is R's 32-bit integer; I32 / U32 are doubles;
+-- I64 / U64 are bit64 integer64, which is signed, so a U64 >= 2^63 is an
+-- error at the R boundary.
 rintId :: Int -> Int
 rintId x = idr x
 

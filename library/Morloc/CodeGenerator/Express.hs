@@ -29,7 +29,7 @@ import qualified Data.Text as T
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.CodeGenerator.Grammars.Macro as Macro
 import Morloc.CodeGenerator.EffectBoundary (insertExportBoundaries)
-import Morloc.CodeGenerator.Grammars.Common (propagateManifoldLabel, hasManifoldLabel)
+import Morloc.CodeGenerator.Grammars.Common (hasManifoldLabel)
 import Morloc.CodeGenerator.IFile
   ( WalkStep (..)
   , selectorToWalkSteps
@@ -49,16 +49,14 @@ import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal (findPackableWireForm, unqualify)
+import Morloc.CodeGenerator.Serial (findCoveringPacker)
 
 mkIdx :: AnnoS g One (Indexed c, d) -> Type -> Indexed Type
 mkIdx (AnnoS _ (Idx i _, _) _) = Idx i
 
 -- | Smart constructor that classifies a PolyManifold by whether its midx
--- carries observability hooks. Currently the only hook is the log label;
--- when caching, remote dispatch, and debug-trace land, extend the
--- @observable@ predicate here -- downstream optimization passes (strip
--- sites in 'Serialize.hs', plus future passes) read the 'ManifoldKind'
--- field rather than re-checking config flags.
+-- carries a label, whose hooks need the manifold to stay a function of its
+-- own; later passes read the 'ManifoldKind' rather than the configuration.
 mkPolyManifold ::
   Lang -> Int -> ManifoldForm None (Maybe Type) -> PolyExpr -> MorlocMonad PolyExpr
 mkPolyManifold lang midx form body = do
@@ -87,38 +85,6 @@ assertRecordKeyOrder midx entries rs
       <+> "declared schema order (C3 invariant violated)."
       <+> "Literal keys:" <+> hsep (punctuate "," (map (pretty . fst) entries))
       <> "; declared keys:" <+> hsep (punctuate "," (map (pretty . fst) rs))
-
--- | Walk a manifold's body searching for a USER-LABELED source index and
--- attach its config to @midx@. Only inspects the manifold's HEAD chain:
--- the AnnoS' own outer idx, then for 'AppS' the head's outer idx (which
--- carries the labeled VarS' idx after 'Realize.removeVarS' unwraps the
--- wrapper). Does NOT recurse into arguments -- nested labeled calls each
--- have their own manifold midx and pick up their own label via their
--- own 'expressPolyExprWrap' / 'setManifoldConfig' pass.
-setManifoldConfig ::
-  Int ->
-  AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
-  MorlocMonad Bool
-setManifoldConfig midx (AnnoS (Idx outerIdx _) _ inner) = do
-  outerLinked <- propagateManifoldLabel midx outerIdx
-  if outerLinked
-    then return True
-    else case inner of
-      -- Spine walk: a labeled call site usually has its label on the
-      -- head VarE/ExeS or on a transparent wrapper (LamS, VarS, etc.)
-      -- enclosing it. Do NOT walk into compound spines (TupS, IfS,
-      -- LstS, NamS, LetS) -- a label found inside those belongs to
-      -- a nested call site that has its own surrounding manifold,
-      -- and copying it here would emit the wrap twice.
-      AppS (AnnoS (Idx fidx _) _ (VarS _ _)) _ -> propagateManifoldLabel midx fidx
-      AppS (AnnoS (Idx fidx _) _ (ExeS _)) _ -> propagateManifoldLabel midx fidx
-      AppS e _ -> setManifoldConfig midx e
-      LamS _ e -> setManifoldConfig midx e
-      DoBlockS e -> setManifoldConfig midx e
-      EvalS e -> setManifoldConfig midx e
-      CoerceS _ e -> setManifoldConfig midx e
-      VarS _ (One inner_anno) -> setManifoldConfig midx inner_anno
-      _ -> return False
 
 express :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 express e@(AnnoS (Idx midx t) (Idx cidx _, _) _) = do
@@ -155,48 +121,7 @@ express e@(AnnoS (Idx midx t) (Idx cidx _, _) _) = do
 -- through monomorphisation and serialization alongside the existing
 -- IR.
 addCacheWraps :: PolyHead -> MorlocMonad PolyHead
-addCacheWraps (PolyHead lang midx args body) = do
-  body' <- cacheWrapExpr body
-  -- The PolyHead's own midx can carry @cache: true@ for point-free
-  -- exports (e.g. @foo = a:sum@), where 'expressCore' emits a bare
-  -- @PolyApp@ body with no enclosing 'PolyManifold' for the inner
-  -- walker to match. Detect that case and wrap inside the
-  -- 'PolyReturn'. If 'cacheWrapExpr' already produced a
-  -- 'PolyCacheBody' for this midx (because the body did contain a
-  -- 'PolyManifold' at the same midx) we skip the head wrap to
-  -- avoid double-wrapping.
-  mLbl <- cacheLabelOfMidx midx
-  let body'' = case mLbl of
-        Just lbl
-          | not (hasCacheWrapAt midx body') ->
-              wrapHeadBody lbl midx args body'
-        _ -> body'
-  return $ PolyHead lang midx args body''
-  where
-    wrapHeadBody :: Text -> Int -> [Arg None] -> PolyExpr -> PolyExpr
-    wrapHeadBody lbl m as e = PolyCacheBody lbl m as e
-
-    hasCacheWrapAt :: Int -> PolyExpr -> Bool
-    hasCacheWrapAt m (PolyCacheBody _ m' _ _) | m == m' = True
-    hasCacheWrapAt m (PolyCacheBody _ _ _ inner) = hasCacheWrapAt m inner
-    hasCacheWrapAt m (PolyManifold _ _ _ _ inner) = hasCacheWrapAt m inner
-    hasCacheWrapAt m (PolyReturn e) = hasCacheWrapAt m e
-    hasCacheWrapAt m (PolyLet _ e1 e2) = hasCacheWrapAt m e1 || hasCacheWrapAt m e2
-    hasCacheWrapAt m (PolyApp h xs) = hasCacheWrapAt m h || any (hasCacheWrapAt m) xs
-    hasCacheWrapAt m (PolyDoBlock _ e) = hasCacheWrapAt m e
-    hasCacheWrapAt m (PolyEval _ e) = hasCacheWrapAt m e
-    hasCacheWrapAt m (PolyCoerce _ _ e) = hasCacheWrapAt m e
-    hasCacheWrapAt m (PolyIf a b c) = hasCacheWrapAt m a || hasCacheWrapAt m b || hasCacheWrapAt m c
-    -- Kept symmetric with 'cacheWrapExpr', which recurses into (and may insert a
-    -- PolyCacheBody within) each of these; missing one lets a same-midx wrap
-    -- hide from the head-wrap dedup and be double-memoized.
-    hasCacheWrapAt m (PolyList _ _ xs) = any (hasCacheWrapAt m) xs
-    hasCacheWrapAt m (PolyTuple _ xs) = any (hasCacheWrapAt m . snd) xs
-    hasCacheWrapAt m (PolyRecord _ _ _ rs) = any (hasCacheWrapAt m . snd . snd) rs
-    hasCacheWrapAt m (PolyIntrinsic _ _ xs) = any (hasCacheWrapAt m) xs
-    hasCacheWrapAt m (PolyRemoteInterface _ _ _ _ inner) = hasCacheWrapAt m inner
-    hasCacheWrapAt m (PolyDebugWrap _ _ inner) = hasCacheWrapAt m inner
-    hasCacheWrapAt _ _ = False
+addCacheWraps (PolyHead lang midx args body) = PolyHead lang midx args <$> cacheWrapExpr body
 
 -- | Replace each closure that only forwards to a function value it captures
 -- (@\\xs -> f xs@, the eta-abstraction a function value in a function slot
@@ -265,14 +190,12 @@ addNativeRecEntries phs = do
           -- separate, and this also carries the source position over so the
           -- frame that runs the body is the one diagnostics name.
           midx' <- MM.freshManifoldIndex midx
-          config <- MM.gets stateManifoldConfig
           name <- MM.gets stateName
           MM.modify $ \s ->
             s { stateNativeRecEntries = Map.insert midx midx' (stateNativeRecEntries s)
-              , stateManifoldConfig = maybe (stateManifoldConfig s)
-                  (\c -> Map.insert midx' c (stateManifoldConfig s)) (Map.lookup midx config)
               , stateName = maybe (stateName s)
                   (\n -> Map.insert midx' n (stateName s)) (Map.lookup midx name)
+              , stateNameSource = Map.insert midx' midx (stateNameSource s)
               }
           -- a body that is this manifold's own (same id) is what the native
           -- entry runs; left wrapped it would be emitted as a second
@@ -435,9 +358,7 @@ addLoopWraps ph@(PolyHead lang midx args body) = do
     -- would reject the continue). A continue stranded in a base (e.g. under a
     -- kept 'PolyManifold' wrapper) fails this and falls back to recursion. Guard
     -- conditions and let RHSs cannot themselves hold a continue ('rewriteLoopTail'
-    -- never rewrites those positions) but are checked for safety. Do-blocks
-    -- (effects) are treated as base leaves for now, so an @<IO>@ loop whose
-    -- continue sits under a do-block falls back -- A3 handles those.
+    -- never rewrites those positions) but are checked for safety.
     isLoopableBody :: PolyExpr -> Bool
     isLoopableBody = ok
       where
@@ -481,6 +402,9 @@ addLoopWraps ph@(PolyHead lang midx args body) = do
         -- own effect thunk) has no continue -- keep it whole and force it
         -- downstream.
         goT (PolyDoBlock ti x) = dropIfContinue (PolyDoBlock ti) x
+        -- A manifold carrying hooks (a label) is a call of its own: its
+        -- back-edge stays a call, so the recursion is not made a loop.
+        goT x@(PolyManifold _ _ _ Preserved _) = (x, False)
         goT (PolyManifold l m form k inner) = dropIfContinue (PolyManifold l m form k) inner
         -- A 'PolyEval' at the return position forces the (effectful) result; it
         -- is tail-transparent for loop purposes -- descend through it so an <IO>
@@ -493,10 +417,10 @@ addLoopWraps ph@(PolyHead lang midx args body) = do
         goT (PolyExe _ (RecCallP mid' _)) | mid' == mid = (PolyLoopContinue [], True)
         goT leaf = (PolyReturn leaf, False)
 
-        -- Rebuild the wrapper only when its rewritten inner has no continue.
+        -- A wrapper whose inner has no continue is a base leaf, kept whole.
         dropIfContinue rebuild inner =
           let (inner', c) = goT inner
-           in (if c then inner' else rebuild inner', c)
+           in if c then (inner', True) else (PolyReturn (rebuild inner), False)
 
 cacheWrapExpr :: PolyExpr -> MorlocMonad PolyExpr
 cacheWrapExpr (PolyManifold l m form k inner) = do
@@ -585,6 +509,9 @@ hasDebugWrapAt _ _ = False
 debugWrapExpr :: PolyExpr -> MorlocMonad PolyExpr
 debugWrapExpr (PolyManifold l m form k inner) = do
   inner' <- debugWrapExpr inner
+  case sourcedCallee inner of
+    Just v -> MM.modify (\s -> s {stateDebugCallee = Map.insert m v (stateDebugCallee s)})
+    Nothing -> return ()
   let argsList = collectArgs form
   return $ PolyManifold l m form k (PolyDebugWrap m argsList inner')
 debugWrapExpr (PolyApp head' args') =
@@ -612,6 +539,20 @@ debugWrapExpr (PolyIntrinsic ti intr xs) =
 debugWrapExpr (PolyRemoteInterface l ti is rf inner) =
   PolyRemoteInterface l ti is rf <$> debugWrapExpr inner
 debugWrapExpr leaf = return leaf
+
+-- | The user-written sourced function a manifold body ends in a call of,
+-- looking through the returns, bindings and wrappers around that call.
+sourcedCallee :: PolyExpr -> Maybe EVar
+sourcedCallee (PolyReturn e) = sourcedCallee e
+sourcedCallee (PolyLet _ _ e) = sourcedCallee e
+sourcedCallee (PolyDoBlock _ e) = sourcedCallee e
+sourcedCallee (PolyEval _ e) = sourcedCallee e
+sourcedCallee (PolyCoerce _ _ e) = sourcedCallee e
+sourcedCallee (PolyDebugWrap _ _ e) = sourcedCallee e
+sourcedCallee (PolyCacheBody _ _ _ e) = sourcedCallee e
+sourcedCallee (PolyApp (PolyExe _ (SrcCallP (Just _) src)) _) = Just (srcAlias src)
+sourcedCallee (PolyExe _ (SrcCallP (Just _) src)) = Just (srcAlias src)
+sourcedCallee _ = Nothing
 
 -- | Look up @midx@ in 'stateManifoldConfig'; return its label group
 -- when the manifold has @cache: true@ AND a label, otherwise
@@ -665,7 +606,7 @@ expressCore :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMona
 expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do
   ids <- MM.takeFromCounter (length inputs)
   exe' <- case exe of
-    (SrcCall src) -> checkRsizeArity midx src (length inputs) >> return (SrcCallP src)
+    (SrcCall src) -> checkRsizeArity midx src (length inputs) >> return (SrcCallP (Just cidx) src)
     (PatCall pat) -> return $ PatCallP pat
   let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
   return
@@ -694,8 +635,7 @@ expressCore (AnnoS (Idx midx c@(FunT inputs out)) (Idx cidx lang, _) (CallS v)) 
         . PolyHead lang midx headArgs
         . PolyReturn
         $ PolyApp (PolyExe (Idx midx c) (RecCallP mid crossLang)) lambdaVals
-expressCore (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ e@(AnnoS (Idx _ applicationType) (c, _) x))) = do
-  _ <- setManifoldConfig midx e
+expressCore (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ (AnnoS (Idx _ applicationType) (c, _) x))) =
   expressCore (AnnoS (Idx midx applicationType) (c, lambdaArgs) x)
 expressCore (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (LstS xs))
   | [t] <- filter (not . isKindTypeT) ts = do
@@ -778,27 +718,10 @@ expressPolyExprWrap ::
   Indexed Type ->
   AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
   MorlocMonad PolyExpr
--- Call setManifoldConfig on every manifold's body, regardless of whether
--- the body is wrapped in a 'LamS'. Pointfree top-level definitions
--- (e.g. @mapsumP = idpy . a_py:map b_py:sum@) don't have an outer LamS
--- by the time we get here, but their bodies still contain labeled call
--- sites that need to propagate.
-expressPolyExprWrap l t e@(AnnoS (Idx midx _) _ _) = do
-  _ <- setManifoldConfig midx e
-  expressPolyExprWrapCommon l t e
-
-expressPolyExprWrapCommon ::
-  Lang -> Indexed Type -> AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyExpr
-expressPolyExprWrapCommon l t e@(AnnoS _ _ (AppS (AnnoS (Idx gidxCall _) _ _) _)) = do
+expressPolyExprWrap l t e = do
   reg <- MM.gets stateLangRegistry
   bconf <- MM.gets stateBuildConfig
-  mconMap <- MM.gets stateManifoldConfig
-  expressPolyExpr (decideRemoteness reg bconf (Map.lookup gidxCall mconMap)) l t e
-expressPolyExprWrapCommon l t e@(AnnoS (Idx midx _) _ _) = do
-  reg <- MM.gets stateLangRegistry
-  bconf <- MM.gets stateBuildConfig
-  mconMap <- MM.gets stateManifoldConfig
-  expressPolyExpr (decideRemoteness reg bconf (Map.lookup midx mconMap)) l t e
+  expressPolyExpr (decideRemoteness reg bconf Nothing) l t e
 
 -- A call between two languages is a remote (socket) call unless they are
 -- co-located members of one pool (e.g. cpp and its guest futhark), in which
@@ -833,32 +756,6 @@ expressPolyArg parentLang pc@(Idx _ (EffectT _ _)) (AnnoS (Idx midx t@(EffectT _
   let e = PolyDoBlock (Idx cidx t) x'
   expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyArg l pc e = expressPolyExprWrap l pc e
-
--- | Look up the @Packable@ @pack@ source for a native type with outer
--- TVar @nativeTv@ in language @lang@. In @class Packable a b where
--- pack :: a -> b@, @a@ is the decomposed/directly-serialisable form
--- and @b@ is the wrapped form; @pack@ is the constructor direction
--- (build the wrapped @b@ from its decomposed @a@). Pack/unpack
--- compose recursively to marshal data toward the wire format. The
--- instance head is identified by @pack@'s output type (the wrapped
--- native). Returns @Nothing@ if no matching instance is present.
-findPackablePack :: Lang -> TVar -> MorlocMonad (Maybe Source)
-findPackablePack lang nativeTv = do
-  sigmap <- MM.gets stateTypeclasses
-  case Map.lookup (EV "pack") sigmap of
-    Nothing -> return Nothing
-    Just inst -> return $ listToMaybe
-      [ src
-      | TermTypes (Just et) cs _ <- instanceTerms inst
-      , termOutputHead et == nativeTv
-      , (_, Idx _ src) <- cs
-      , srcLang src == lang
-      ]
-  where
-    termOutputHead :: EType -> TVar
-    termOutputHead et = case snd (unqualify (etype et)) of
-      FunU _ out -> extractKey out
-      other      -> extractKey other
 
 -- | Look up the @IndexLike@ @__to_index__@ instance for an input type
 -- in language @lang@. In @class IndexLike i where __to_index__ :: i ->
@@ -959,15 +856,15 @@ expressBracketSlice callLang midx inputs out xsExpr =
             Nothing -> do
               getSliceSrc <- requireInstance midx
                 (firstJustM
-                  [ resolveInstanceForType findSliceableGetSlice    callLang rcvT
-                  , resolveInstanceForType findSliceableDimGetSliceDim callLang rcvT
+                  [ resolveInstanceForType findSliceableGetSlice midx callLang rcvT
+                  , resolveInstanceForType findSliceableDimGetSliceDim midx callLang rcvT
                   ])
                 callLang "Sliceable.__get_slice__ or SliceableDim.__get_slice_dim__" rcvT
               sW <- wrapBoundInToIndex callLang midx sT sE
               eW <- wrapBoundInToIndex callLang midx eT eE
               pW <- wrapBoundInToIndex callLang midx pT pE
               let fT = FunT [optI64T, optI64T, optI64T, rcvT] out
-              return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP getSliceSrc)) [sW, eW, pW, rcvE]
+              return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP Nothing getSliceSrc)) [sW, eW, pW, rcvE]
     _ -> MM.throwSourcedError midx "PatternBracketSlice expects 4 arguments"
 
 -- | Run a list of @Maybe@-returning monadic lookups in order, returning
@@ -1013,11 +910,11 @@ expressBracketIndex callLang midx inputs out xsExpr =
             Just p -> return p
             Nothing -> do
               accessSrc <- requireInstance midx
-                (resolveInstanceForType findIndexableAccessIndex callLang rcvT)
+                (resolveInstanceForType findIndexableAccessIndex midx callLang rcvT)
                 callLang "Indexable.__access_index__" rcvT
               iW <- wrapBoundInToIndex callLang midx iT iE
               let fT = FunT [optI64T, rcvT] out
-              return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP accessSrc)) [iW, rcvE]
+              return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP Nothing accessSrc)) [iW, rcvE]
     _ -> MM.throwSourcedError midx "PatternBracketIndex expects 2 arguments"
 
 -- | Walk the alias chain and check whether the receiver type's head
@@ -1027,13 +924,7 @@ expressBracketIndex callLang midx inputs out xsExpr =
 typeHeadIs :: TVar -> Type -> MorlocMonad Bool
 typeHeadIs target originalType = do
   scope <- MM.getGeneralScope
-  go scope (type2typeu originalType)
-  where
-    go scope t
-      | extractKey t == target = return True
-      | otherwise = case TE.reduceType scope t of
-          Just t' | t' /= t -> go scope t'
-          _ -> return False
+  return $ any ((== target) . extractKey) (TE.aliasChain scope (type2typeu originalType))
 
 -- | Emit a unified @IntrIFileWalk@ call for any pattern application
 -- on an IFile receiver. The walk-step chain (struct fields followed
@@ -1096,7 +987,7 @@ emitPatternAccessibleCall callLang midx out src steps rcvT bounds rcvE = do
       -- the wire level, matching the PolyStr argument.
       patternChainT = AppT (VarT BT.patternChainVar) [rcvT, out]
       fT           = FunT [patternChainT, argsListT, rcvT] out
-  return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP src))
+  return $ PolyApp (PolyExe (Idx midx fT) (SrcCallP Nothing src))
                    [pathPoly, argsListPoly, rcvE]
 
 -- | Try to dispatch a pattern-accessor call through a user-declared
@@ -1124,7 +1015,7 @@ tryPatternAccessible callLang midx out steps rcvT bounds rcvE = do
   if Map.notMember (EV BT.extractPatternMethod) sigmap
     then return Nothing
     else do
-      mSrc <- resolveInstanceForType findPatternAccessibleExtract callLang rcvT
+      mSrc <- resolveInstanceForType findPatternAccessibleExtract midx callLang rcvT
       case mSrc of
         Nothing -> return Nothing
         Just src -> Just <$>
@@ -1257,11 +1148,11 @@ wrapBoundInToIndex
   -> PolyExpr
   -> MorlocMonad PolyExpr
 wrapBoundInToIndex lang midx boundType expr = do
-  mSrc <- resolveInstanceForType findIndexLikeToIndex lang boundType
+  mSrc <- resolveInstanceForType findIndexLikeToIndex midx lang boundType
   case mSrc of
     Just src ->
       let wrapFT = FunT [boundType] optI64T
-      in return $ PolyApp (PolyExe (Idx midx wrapFT) (SrcCallP src)) [expr]
+      in return $ PolyApp (PolyExe (Idx midx wrapFT) (SrcCallP Nothing src)) [expr]
     Nothing -> MM.throwSourcedError midx $
       "No IndexLike.__to_index__ instance found for" <+> pretty boundType
       <+> "in language" <+> pretty lang
@@ -1332,10 +1223,20 @@ maybePackableWrap midx lang nativeT wireT = do
       wireTF   <- inferConcreteType lang (Idx midx wireT)
       let nativeRendered = renderConcreteForm nativeTF
           wireRendered   = renderConcreteForm wireTF
-      if nativeRendered == wireRendered
+          -- A form whose template has no placeholders (R's "list") renders
+          -- alike for every argument, so the arguments of a form the type
+          -- declares are compared too. A type with no form of its own here
+          -- has its representation's (NEWT-2).
+          typeArgs (AppF _ args) = Just (map renderConcreteForm (fst (partitionKindArgsF args)))
+          typeArgs _ = Nothing
+      ownForm <- Map.member nativeTv <$> MM.getConcreteScope lang
+      let argsAgree = case (typeArgs nativeTF, typeArgs wireTF) of
+            (Just as, Just bs) -> as == bs
+            _ -> True
+      if not ownForm || (nativeRendered == wireRendered && argsAgree)
         then return Nothing
         else do
-          maySrc <- findPackablePack lang nativeTv
+          maySrc <- findCoveringPacker lang midx nativeT
           case maySrc of
             Just src -> return (Just src)
             Nothing -> MM.throwSourcedError midx $
@@ -1400,7 +1301,7 @@ dispatchListLit midx cidx lang userT userTV userArgs xs' = do
         Just src ->
           let inner = PolyList (Idx cidx wireTV) (map (Idx cidx) wireArgs) xs'
               funT = FunT [AppT (VarT wireTV) wireArgs] userT
-          in return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP src)) [inner]
+          in return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP Nothing src)) [inner]
     _ -> MM.throwSourcedError midx "Expected a list type"
 
 -- | Emit a primitive literal at user-facing type @userT@ (whose outer
@@ -1430,7 +1331,7 @@ checkStringNul idx lang s
         "This string literal contains a NUL byte, which the"
         <+> pretty (ML.langName lang)
         <+> "pool cannot represent in its native string type."
-        <+> "Move the literal to a language that can (Python, C++, Julia, or the"
+        <+> "Move the literal to a language that can (Python, C++, or the"
         <+> "nexus itself), or remove the NUL byte."
         <+> "See the allow_string_null field in the language's lang.yaml."
 
@@ -1466,7 +1367,7 @@ dispatchPrimLit midx lang userT userTV mkLit = do
     Nothing -> return (mkLit userTV)
     Just src ->
       let funT = FunT [typeOf wireTU] userT
-      in return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP src)) [mkLit wireTV]
+      in return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP Nothing src)) [mkLit wireTV]
 
 expressPolyExpr ::
   (Lang -> Lang -> Maybe RemoteForm) ->
@@ -1474,6 +1375,35 @@ expressPolyExpr ::
   Indexed Type ->
   AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
   MorlocMonad PolyExpr
+-- A label: its configuration moves to this node's manifold. A labeled
+-- function value is wrapped like any function value passed on; a labeled call
+-- is a manifold of its own in the caller's language, taking the values it
+-- uses, so the hooks wrap that one call and nothing its arguments computed.
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (_, args) (LabelS k inner@(AnnoS _ ic ie))) = do
+  cfg <- MM.gets (Map.lookup k . stateManifoldConfig)
+  MM.modify $ \s -> s {stateManifoldConfig = maybe id (Map.insert midx) cfg (stateManifoldConfig s)}
+  reg <- MM.gets stateLangRegistry
+  bconf <- MM.gets stateBuildConfig
+  let findRemote = decideRemoteness reg bconf cfg
+      form = ManifoldFull (map unvalue args)
+  case t of
+    FunT _ _ -> expressPolyExpr findRemote parentLang pc (AnnoS (Idx midx t) ic ie)
+    _ -> do
+      body <- returnedPoly <$> expressPolyExprWrap parentLang (Idx midx t) inner
+      case findRemote parentLang parentLang of
+        Nothing -> mkPolyManifold parentLang midx form body
+        Just remote -> do
+          job <- MM.freshManifoldIndex midx
+          innerWrap <- mkPolyManifold parentLang job form body
+          let remoteApp =
+                PolyReturn $ PolyApp
+                  (PolyRemoteInterface parentLang pc [] remote innerWrap)
+                  [PolyBndVar (A parentLang) i | Arg i _ <- args]
+          mkPolyManifold parentLang midx form remoteApp
+  where
+    returnedPoly (PolyLet i e1 e2) = PolyLet i e1 (returnedPoly e2)
+    returnedPoly r@(PolyReturn _) = r
+    returnedPoly x = PolyReturn x
 expressPolyExpr
   findRemote
   parentLang
@@ -1613,10 +1543,8 @@ expressPolyExpr _ parentLang _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manif
   -- Callback-return force lifted to Poly-stage 'EffectBoundary'.
 
   mkPolyManifold lang midx (ManifoldPart contextArguments typeBoundArguments) (PolyReturn body')
--- Inline source call: emit directly as a subexpression, unless the call
--- site is user-labeled. A labeled call must be a manifold for the label
--- to attach to; using the AppS' outer index gives each call site its own
--- midx so per-call-site labels (@(a:foo x, a:foo y)@) stay distinct.
+-- Inline source call: emitted as a subexpression, unless it carries a label
+-- (a labeled partial application), which needs a manifold to attach to.
 expressPolyExpr
   findRemote
   parentLang
@@ -1629,10 +1557,6 @@ expressPolyExpr
     | srcInline src && isLocal = do
         checkRsizeArity midx src (length inputs)
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
-        -- 'setManifoldConfig' (called from 'expressPolyExprWrap') already
-        -- linked the head's label onto @midx@ if present; 'applyLambdas'
-        -- may also have linked it from a beta-reduced LamS head. Either
-        -- way, @midx@ carries the label by now.
         labeled <- hasManifoldLabel midx
         if labeled
           then do
@@ -1669,6 +1593,7 @@ expressPolyExpr
       (AppS f@(AnnoS (Idx _ ft@(FunT _ _)) (Idx cidxCall callLang, _) (ExeS (PatCall pat))) xs)
     )
     | isLocal = do
+        mapM_ requireBoundDetermined (bracketBounds pat xs)
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
         dispatchPatCall callLang midx cidxCall pat inputs out xsExpr
           (expressPolyApp parentLang f xsExpr >>= stripPolyReturn)
@@ -1687,6 +1612,7 @@ expressPolyExpr
     -- PolyRemoteInterface structure used by the generic not-isLocal
     -- handler.
     | not isLocal = do
+        mapM_ requireBoundDetermined (bracketBounds pat xs)
         let idxInputTypes = zipWith mkIdx xs inputs
         mayXs <- safeZipWithM (expressPolyArg callLang) idxInputTypes xs
         let xsExpr = fromJust mayXs
@@ -1722,6 +1648,13 @@ expressPolyExpr
       isLocal = isNothing remote
       stripPolyReturn (PolyReturn e) = return e
       stripPolyReturn e = return e
+      -- POLY-6 at the bound itself rather than at the bracket.
+      requireBoundDetermined (AnnoS (Idx i t) _ _) = requireDetermined i t
+      bracketBounds PatternBracketIndex as = take (length as - 1) as
+      bracketBounds PatternBracketSlice as = take (length as - 1) as
+      bracketBounds (PatternStruct sel) as
+        | length as == bracketArity sel + 1 = take (bracketArity sel) as
+      bracketBounds _ _ = []
 expressPolyExpr
   findRemote
   parentLang
@@ -1879,7 +1812,7 @@ expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (StrS x)) 
 expressPolyExpr findRemote parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (ConS _ n i xs))
   | Just v <- dataHeadTVar t = do
       scope <- MM.getGeneralScope
-      if scopeDataIsEnum scope v
+      if TE.dataIsEnum scope (TE.whnf scope (VarU v))
         then return $ PolyEnum (Idx cidx t) n i
         else do
           xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs
@@ -1958,25 +1891,20 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(VarT v)) (Idx cidx lang,
 -- type, and the result is wrapped with the @Packable@ @unpack@ source.
 -- This is the codegen counterpart to the typecheck-side tier-2 lookup
 -- in 'Morloc.Frontend.Typecheck.checkE'.
-expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT v) _)) (Idx cidx lang, args) (LstS xs)) = do
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT _) _)) (Idx cidx lang, args) (LstS xs)) = do
   mayWire <- findPackableWireForm (type2typeu userT)
   case mayWire of
     Just wireTU
       | AppT (VarT wireV) wireArgs <- typeOf wireTU
       , [elemT] <- filter (not . isKindTypeT) wireArgs -> do
           xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x elemT) x) xs
-          maySrc <- findPackablePack lang v
-          case maySrc of
-            Just src ->
-              let inner = PolyList (Idx cidx wireV) (map (Idx cidx) wireArgs) xs'
-                  funT = FunT [AppT (VarT wireV) wireArgs] userT
-              in expressContainer pc (Idx midx parentLang) (Idx cidx lang) args
-                   (PolyApp (PolyExe (Idx midx funT) (SrcCallP src)) [inner])
-            Nothing -> MM.throwSourcedError midx $
-              "Packable wire form for"
-              <+> squotes (pretty v)
-              <+> "is list-shaped but no 'unpack' source is declared for"
-              <+> pretty lang <> "."
+          let wireT = AppT (VarT wireV) wireArgs
+              inner = PolyList (Idx cidx wireV) (map (Idx cidx) wireArgs) xs'
+          maySrc <- maybePackableWrap midx lang userT wireT
+          expressContainer pc (Idx midx parentLang) (Idx cidx lang) args $ case maySrc of
+            Just src -> PolyApp (PolyExe (Idx midx (FunT [wireT] userT)) (SrcCallP Nothing src)) [inner]
+            -- the type's form here is its wire form's
+            Nothing -> inner
     _ -> tryReduceLstS userT
   where
     tryReduceLstS t = do
@@ -2031,12 +1959,12 @@ expressPolyExpr _ pl pc (AnnoS (Idx midx t) c@(Idx cidx lang, _) e@(TupS _)) = d
   case TE.expandWireParent scope (type2typeu t) of
     Just t' -> do
       let bodyT = typeOf t'
-      maySrc <- findPackablePack lang (extractKey (type2typeu t))
+      maySrc <- maybePackableWrap midx lang t bodyT
       case maySrc of
         Just src -> do
           inner <- expressPolyExprWrap lang (Idx cidx bodyT) (AnnoS (Idx midx bodyT) c e)
           let funT = FunT [bodyT] t
-          return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP src)) [inner]
+          return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP Nothing src)) [inner]
         Nothing -> expressPolyExprWrap pl pc (AnnoS (Idx midx bodyT) c e)
     Nothing -> MM.throwSourcedError midx "Expected a tuple type"
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do
@@ -2081,8 +2009,14 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (DoBlo
   x' <- expressPolyExprWrap lang (mkIdx x innerT) x
   let e = PolyDoBlock (Idx cidx t) x'
   expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
-expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _, _) (CoerceS coercion x)) = do
-  let innerType = unapplyCoercion coercion t
+-- A newtype cast runs in the language realization chose for it, where the
+-- newtype has no form of its own (NEWT-7); a crossing to it is the cast.
+expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (CoerceS coercion@(CoerceNewtype _ _) x)) = do
+  x' <- expressPolyExprWrap lang (mkIdx x (annoTypeOf x)) x
+  expressContainer pc (Idx midx parentLang) (Idx cidx lang) args (PolyCoerce coercion (Idx cidx t) x')
+  where
+    annoTypeOf (AnnoS (Idx _ tx) _ _) = tx
+expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _, _) (CoerceS coercion x@(AnnoS (Idx _ innerType) _ _))) = do
   x' <- expressPolyExprWrap parentLang (Idx cidx innerType) x
   return $ PolyCoerce coercion (Idx cidx t) x'
 expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _lang, _) (EvalS x@(AnnoS (Idx _ tx) _ _))) = do
@@ -2119,12 +2053,12 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (Intri
       let AnnoS (Idx _ listT) _ _ = listE
           AnnoS (Idx _ funcT) _ _ = funcE
       mapSrc <- requireInstance midx
-        (resolveInstanceForType findFunctorMap lang listT)
+        (resolveInstanceForType findFunctorMap midx lang listT)
         lang "Functor.map" listT
       funcExpr <- expressPolyExprWrap lang (mkIdx funcE funcT) funcE
       listExpr <- expressPolyExprWrap lang (mkIdx listE listT) listE
       let mapFunT = FunT [funcT, listT] t
-          e = PolyApp (PolyExe (Idx midx mapFunT) (SrcCallP mapSrc)) [funcExpr, listExpr]
+          e = PolyApp (PolyExe (Idx midx mapFunT) (SrcCallP Nothing mapSrc)) [funcExpr, listExpr]
       expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (IntrinsicS intr xs)) = do
   xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs
@@ -2207,11 +2141,11 @@ expressPolyApp ::
   AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
   [PolyExpr] ->
   MorlocMonad PolyExpr
-expressPolyApp _ (AnnoS g@(Idx gi (FunT inputs _)) _ (ExeS (SrcCall src))) xs = do
+expressPolyApp _ (AnnoS g@(Idx gi (FunT inputs _)) (Idx ci _, _) (ExeS (SrcCall src))) xs = do
   checkRsizeArity gi src (length inputs)
-  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP src)) xs
-expressPolyApp _ (AnnoS g _ (ExeS (SrcCall src))) xs =
-  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP src)) xs
+  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP (Just ci) src)) xs
+expressPolyApp _ (AnnoS g (Idx ci _, _) (ExeS (SrcCall src))) xs =
+  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP (Just ci) src)) xs
 -- Eta-expanded pattern call: fires when a pattern-typed expression
 -- (e.g. @firstOf f = .[0] f@) is used higher-order (e.g. @map firstOf
 -- fs@). The eta-expansion path in 'expressPolyExpr' delegates to
@@ -2321,6 +2255,7 @@ expressPolyApp _ (AnnoS (Idx i t) _ e) _ =
     tagExpr (LetS v _ _) = "LetS" <+> pretty v
     tagExpr (VarS v _) = "VarS" <+> pretty v
     tagExpr (IntrinsicS _ _) = "IntrinsicS"
+    tagExpr (LabelS _ _) = "LabelS"
 
 -- | Detect the desugar-emitted @IntrMap (\v -> .selector v) (.[s:e:p] f)@
 -- pattern where @f@ is IFile-typed, and emit a fused IFileWalk whose
@@ -2498,7 +2433,12 @@ lookupRecursiveTarget parentLang v = do
             Just tl | not (LR.coLocated reg parentLang tl) -> Just tl
             _ -> Nothing
       return (mid, crossLang)
-    Nothing -> MM.throwSystemError $ "Cannot resolve recursive call to" <+> pretty v
+    Nothing -> do
+      skipped <- MM.gets stateSkippedGeneric
+      case Map.lookup v skipped of
+        Just (i, t) -> rejectUndetermined i t
+        Nothing -> return ()
+      MM.throwSystemError $ "Cannot resolve recursive call to" <+> pretty v
 
 bindVarIds :: [Int] -> [Three Lang Type (Indexed Type)] -> [PolyExpr]
 bindVarIds [] [] = []

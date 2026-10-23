@@ -352,12 +352,10 @@ poolHealthTests env = testCase "Health reports pool status" $ do
 -- @stdout claim reclaim (wedge) tests
 -- ======================================================================
 
--- A pool-side @stdout claim that a call leaves open (an exception
--- unwinds past @collect's close) must be reclaimed at the end of that
--- call, so the daemon's next @stdout open succeeds instead of failing
--- "@stdout already open in this nexus". This reproduces -- in the only
--- mode where it can persist across calls, the daemon -- the wedge that a
--- one-shot golden cannot (each one-shot run gets a fresh registry).
+-- A daemon refuses every @stdout open (DAEMON-15). A refused open, or one
+-- a raising call leaves behind, must not persist in the daemon's shared
+-- registry: otherwise every later open would fail "@stdout already open in
+-- this nexus". Only a daemon reuses its registry across calls.
 stdioWedgeTests :: TestEnv -> TestTree
 stdioWedgeTests env = testCase "Daemon @stdout claim reclaim (wedge)" $ do
   dir <- compileDaemonProgram env "stdio-wedge.loc"
@@ -372,30 +370,37 @@ stdioWedgeTests env = testCase "Daemon @stdout claim reclaim (wedge)" $ do
             sockPath
             ("{\"method\":\"call\",\"command\":\"" ++ cmd ++ "\",\"args\":[]}")
 
-    -- Baseline: a clean pool-side @stdout stream succeeds.
+    -- A served call cannot stream to stdout (DAEMON-15): the call is refused.
     r0 <- call "useStdout"
-    assertJsonEq "baseline useStdout" r0 "status" "ok"
+    assertJsonEq "useStdout is refused" r0 "status" "error"
+    assertBool ("the refusal says the output streams: " ++ r0) ("streams" `isInfixOf` r0)
 
-    -- Leak the claim: the producer raises before @collect closes the
-    -- OStream, so this call fails and leaves @stdout claimed.
-    r1 <- call "leakStdout"
-    assertJsonEq "leakStdout reports an error" r1 "status" "error"
-
-    -- The pool-side per-call reclaim must release the leaked claim, so
-    -- the very next @stdout open succeeds. This is the wedge fix.
-    r2 <- call "useStdout"
-    assertBool
-      ("reuse after leak must not report 'already open': " ++ r2)
-      (not ("already open" `isInfixOf` r2))
-    assertJsonEq "reuse after leak succeeds" r2 "status" "ok"
-
-    -- Repeated leaks must not accumulate (no slot exhaustion, no wedge):
-    -- every interleaved reuse still works.
+    -- A refused open in the pool must leave no claim behind: every later
+    -- open is refused the same way, never as already open.
     mapM_
       ( \i -> do
-          _ <- call "leakStdout"
-          rr <- call "useStdout"
-          assertJsonEq ("reuse after repeated leak " ++ show i) rr "status" "ok"
+          rr <- call "rawStdout"
+          assertBool ("the pool refuses @stdout: " ++ rr) ("@stdout" `isInfixOf` rr)
+          assertBool
+            ("refusal " ++ show i ++ " must not report 'already open': " ++ rr)
+            (not ("already open" `isInfixOf` rr))
+          assertJsonEq ("rawStdout still refused " ++ show i) rr "status" "error"
+      )
+      [1 .. 3 :: Int]
+
+    -- A call that raises with @stderr open must not leave the claim set:
+    -- the per-call reclaim releases it, so the next open succeeds.
+    e0 <- call "useStderr"
+    assertJsonEq "baseline useStderr" e0 "status" "ok"
+    mapM_
+      ( \i -> do
+          el <- call "leakStderr"
+          assertJsonEq ("leakStderr reports an error " ++ show i) el "status" "error"
+          er <- call "useStderr"
+          assertBool
+            ("reuse of @stderr after leak " ++ show i ++ " must not report 'already open': " ++ er)
+            (not ("already open" `isInfixOf` er))
+          assertJsonEq ("useStderr after leak " ++ show i) er "status" "ok"
       )
       [1 .. 5 :: Int]
 

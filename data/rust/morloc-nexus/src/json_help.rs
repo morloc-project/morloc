@@ -191,10 +191,20 @@ fn with_null(mut v: Value) -> Value {
 
 /// True when a wire schema string denotes a top-level optional type.
 pub(crate) fn schema_is_optional(schema: Option<&str>) -> bool {
-    schema
-        .and_then(|s| parse_schema(s).ok())
-        .map(|p| p.serial_type == SerialType::Optional)
-        .unwrap_or(false)
+    morloc_manifest::call_args::schema_is_optional(schema)
+}
+
+/// A record field's wire schema in its record's schema.
+fn group_field_schema<'a>(map: Option<&'a Schema>, entry: &morloc_manifest::GroupEntry) -> Option<&'a Schema> {
+    map.and_then(|m| m.keys.iter().position(|k| k == &entry.key).and_then(|i| m.parameters.get(i)))
+}
+
+/// True when a record field must be given: it has no default and may not
+/// be null. `field` is the field's wire schema.
+fn group_field_required(entry: &morloc_manifest::GroupEntry, field: Option<&Schema>) -> bool {
+    entry.arg.default_val().is_none()
+        && !entry.arg.is_flag()
+        && field.is_some_and(|f| f.serial_type != SerialType::Optional)
 }
 
 /// The help line a `data` argument needs and its type name alone does not
@@ -270,6 +280,7 @@ pub fn build_json_help(m: &Manifest) -> Value {
         "program": {
             "name": m.name,
             "description": m.desc,
+            "epilogues": epilogues_json(&m.epilogues),
         },
         "groups": groups,
         "commands": commands,
@@ -399,7 +410,13 @@ fn command_to_json(cmd: &Command, manifest: &Manifest) -> Value {
             },
         },
         "terminals": terminals,
+        "epilogues": epilogues_json(&cmd.epilogues),
     })
+}
+
+/// One verbatim string per `@epilogue` block, its lines joined by newlines.
+fn epilogues_json(epilogues: &[Vec<String>]) -> Vec<String> {
+    epilogues.iter().map(|block| block.join("\n")).collect()
 }
 
 /// Render one manifest [`Arg`] to its lossless JSON object. `pos_index` is the
@@ -536,11 +553,13 @@ fn arg_fields_json(arg: &Arg, pos_index: usize) -> Value {
             let group_option = group_opt.as_ref().map(|g| {
                 json!({ "short": g.short_opt, "long": g.long_opt })
             });
+            let map = schema.as_deref().and_then(|s| parse_schema(s).ok());
+            let required = entries.iter().any(|e| group_field_required(e, group_field_schema(map.as_ref(), e)));
             json!({
                 "name": name,
                 "role": "group",
                 "metavar": metavar,
-                "required": true,
+                "required": required,
                 "description": desc,
                 "type": type_object(
                     schema.as_deref(),
@@ -661,21 +680,11 @@ fn input_object(
 }
 
 fn source_str(s: &SourceAtom) -> &'static str {
-    match s {
-        SourceAtom::Auto => "auto",
-        SourceAtom::Inline => "inline",
-        SourceAtom::File => "file",
-    }
+    morloc_manifest::cli_value::source_atom_name(*s)
 }
 
 fn form_str(f: &FormAtom) -> &'static str {
-    match f {
-        FormAtom::Auto => "auto",
-        FormAtom::Packet => "packet",
-        FormAtom::Bytes => "bytes",
-        FormAtom::BytesOnly => "bytes-only",
-        FormAtom::List => "list",
-    }
+    morloc_manifest::cli_value::form_atom_name(*f)
 }
 
 fn checks_json(checks: &[Check]) -> Value {
@@ -698,109 +707,22 @@ fn non_empty(s: &str) -> Option<&str> {
 }
 
 // ---------------------------------------------------------------------------
-// --mcp-tools: MCP tools/list payload + tools/call inverse mapping
+// --mcp-tools: MCP tools/list payload
 // ---------------------------------------------------------------------------
 //
-// One traversal per command builds BOTH the forward MCP `inputSchema` and the
-// inverse `ArgSlot` list that reconstructs the positional args array
-// `daemon_dispatch` requires. Keeping them in a single source of truth is what
-// guarantees the advertised property names and the reader agree.
+// A tool's properties are the names the runtime's argument resolver
+// (morloc_manifest::call_args) accepts, so a `tools/call` forwards its
+// arguments as they arrived.
 
-/// How one positional slot in the `daemon_dispatch` args array is recovered
-/// from the MCP named `arguments` object. There is exactly one slot per
-/// `Command::args` entry, in declaration order (Group / Flag / Optional /
-/// Positional each occupy one slot).
-#[derive(Debug, Clone)]
-pub enum ArgSlot {
-    /// A single value read from `arguments[key]`; when absent, `missing` is
-    /// substituted. (Required-ness is enforced once, up front, against
-    /// `McpToolShape::required` -- see `resolve_arguments` -- so it is not
-    /// repeated per slot here.)
-    Value {
-        key: String,
-        missing: Value,
-    },
-    /// A boolean flag read from `arguments[key]`; `default` when absent.
-    Flag { key: String, default: bool },
-    /// A record argument. In the unrolled form (`group_key` is None) each field
-    /// is read from `arguments[field.field]`. In the whole-object form
-    /// (`group_key` is Some) the client may instead pass the entire record
-    /// under that one key; when it is absent the record is assembled from the
-    /// per-field defaults.
-    Record {
-        group_key: Option<String>,
-        fields: Vec<RecordField>,
-    },
-}
-
-/// One field of a record `ArgSlot`, with the default used when the client
-/// omits it.
-#[derive(Debug, Clone)]
-pub struct RecordField {
-    pub field: String,
-    pub default: Value,
-}
-
-/// One selectable output projection of a command, exposed via the synthetic
-/// `render` enum. `"raw"` (the command's own typed value) is implicit and not
-/// listed here; each entry is a `@render`/`@with` terminal.
-pub struct RenderTarget {
-    /// The `render` enum value (the terminal's long flag name, e.g. `"png"`).
-    pub value: String,
-    /// The internal command dispatched when this projection is selected (the
-    /// terminal's mangled `entry`).
-    pub command: String,
-    /// Media type of that command's return, from its `@mime` type. Drives the
-    /// MCP content block (`image/*` -> image block, etc.). Filled by
-    /// [`build_tool_shapes`] from the manifest; `None` when untyped.
-    pub mime: Option<String>,
-    /// True when the projection's return is a Map/record.
-    pub returns_object: bool,
-}
-
-/// The complete MCP shape of one command: the `tools/list` entry plus the
-/// inverse mapping and validation metadata needed to service a `tools/call`.
+/// The MCP shape of one command: the `tools/list` entry and the output
+/// actions `_render` may select.
 pub struct McpToolShape {
     pub name: String,
     /// The MCP tool object for `tools/list`.
     pub tool: Value,
-    /// One slot per `Command::args`, in declaration order.
-    pub slots: Vec<ArgSlot>,
-    /// Every property name the `inputSchema` advertises (for
-    /// unknown-argument rejection).
-    pub prop_names: std::collections::HashSet<String>,
-    /// Property names that must be present (for missing-argument rejection).
-    pub required: Vec<String>,
-    /// True when the return type is a Map/record: only then do we emit
-    /// `structuredContent` + an object `outputSchema`.
-    pub returns_object: bool,
-    /// Media type of the command's own (`"raw"`) return, from its `@mime` type;
-    /// `None` when untyped. Used when no renderer is selected.
-    pub return_mime: Option<String>,
-    /// Output projections selectable via the `render` enum (empty when the
-    /// command has no terminals).
-    pub renders: Vec<RenderTarget>,
-}
-
-impl McpToolShape {
-    /// Resolve a `render` selection to the command to dispatch and how to
-    /// package its result: `"raw"` (the default) -> this command itself; a
-    /// renderer name -> that terminal's entry command (dispatched with the same
-    /// positional args). `Err` for an unknown renderer.
-    pub fn dispatch_for(&self, render: &str) -> Result<(&str, Option<&str>, bool), String> {
-        if render == "raw" {
-            return Ok((
-                self.name.as_str(),
-                self.return_mime.as_deref(),
-                self.returns_object,
-            ));
-        }
-        self.renders
-            .iter()
-            .find(|r| r.value == render)
-            .map(|t| (t.command.as_str(), t.mime.as_deref(), t.returns_object))
-            .ok_or_else(|| format!("unknown render '{}'", render))
-    }
+    /// The values `_render` may take besides `raw`: every output action's long
+    /// name (empty when the command has none).
+    pub actions: Vec<String>,
 }
 
 /// True when a return's parsed wire schema is a Map/record -- the single
@@ -831,104 +753,14 @@ fn schema_str_excluded(schema: Option<&str>) -> bool {
     schema.is_some_and(|s| parse_schema(s).map_or(true, |p| schema_tree_excluded(&p)))
 }
 
-/// Strip one layer of surrounding morloc string quotes from a CLI default
-/// (e.g. the manifest stores a `Str` default `/tmp` as the literal `"/tmp"`).
-fn strip_cli_quotes(s: &str) -> String {
-    let b = s.as_bytes();
-    if b.len() >= 2 && b[0] == b'"' && b[b.len() - 1] == b'"' {
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.to_string()
-    }
-}
-
-/// Convert a CLI-shaped default string into a typed JSON value guided by the
-/// value's wire schema. Manifest defaults are always CLI strings; the MCP
-/// dispatch path feeds typed JSON to `daemon_dispatch`, so `"1"` for an `Int`
-/// must become the number `1`, not the string `"1"`. Falls back to a JSON
-/// string when the schema is unknown or the parse fails.
-fn cli_default_to_json(default_val: Option<&str>, st: Option<&Schema>) -> Value {
-    use SerialType::*;
-    let raw = match default_val {
-        Some(s) if !s.is_empty() => s,
-        _ => return Value::Null,
-    };
-    // Peel one Optional layer so `?Int` defaults type against `Int`.
-    let eff = st.and_then(|s| {
-        if s.serial_type == Optional {
-            s.parameters.first()
-        } else {
-            Some(s)
-        }
-    });
-    match eff.map(|s| s.serial_type) {
-        Some(Bool) => match raw {
-            "true" => json!(true),
-            "false" => json!(false),
-            _ => Value::String(raw.to_string()),
-        },
-        // Parsed as a JSON number so a value beyond i64 keeps every digit;
-        // a float fallback would round it.
-        Some(Sint8 | Sint16 | Sint32 | Sint64 | Uint8 | Uint16 | Uint32 | Uint64 | Int) => raw
-            .parse::<serde_json::Number>()
-            .ok()
-            .filter(|n| !n.to_string().contains(['.', 'e', 'E']))
-            .map(Value::Number)
-            .unwrap_or_else(|| Value::String(raw.to_string())),
-        Some(Float32 | Float64) => raw
-            .parse::<f64>()
-            .map(|f| json!(f))
-            .unwrap_or_else(|_| Value::String(raw.to_string())),
-        Some(String) => Value::String(strip_cli_quotes(raw)),
-        Some(
-            Nil | Array | Tuple | Map | Optional | Table | Recur | IFile | OStream | IStream
-            | Variant | Enum,
-        )
-        | None => serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string())),
-    }
-}
-
-/// Build the record fields (name + typed default) for an [`Arg::Group`], using
-/// the group's Map schema to type each field's default. Shared by both the
-/// unrolled and whole-object group forms.
-fn group_record_fields(
-    entries: &[morloc_manifest::GroupEntry],
-    map: Option<&Schema>,
-) -> Vec<RecordField> {
-    entries
-        .iter()
-        .map(|entry| {
-            let field_schema = map.and_then(|m| {
-                m.keys
-                    .iter()
-                    .position(|k| k == &entry.key)
-                    .and_then(|i| m.parameters.get(i))
-            });
-            let default = match &entry.arg {
-                Arg::Flag { default_val, .. } => {
-                    Value::Bool(default_val.as_deref() == Some("true"))
-                }
-                Arg::Optional { default_val, .. } => {
-                    cli_default_to_json(default_val.as_deref(), field_schema)
-                }
-                _ => Value::Null,
-            };
-            RecordField {
-                field: entry.key.clone(),
-                default,
-            }
-        })
-        .collect()
-}
-
 fn build_mcp_tools(m: &Manifest) -> Value {
     let tools: Vec<Value> = build_tool_shapes(m).into_iter().map(|s| s.tool).collect();
     json!({ "tools": tools })
 }
 
 /// Non-internal commands servable over the JSON/packet wire, in manifest
-/// order. Applies the same exclusions as [`build_tool_shapes`] (`@stdin`,
-/// stream-handle types, unparseable schemas, property-name collisions) but emits
+/// order. Applies the same exclusions as [`build_tool_shapes`] (a stream-handle
+/// return, unparseable schemas, property-name collisions) but emits
 /// no stderr note, so the daemon/mcp `-h` help renderer can list the servable
 /// surface without printing exclusion warnings.
 pub fn servable_commands(m: &Manifest) -> Vec<&Command> {
@@ -940,7 +772,7 @@ pub fn servable_commands(m: &Manifest) -> Vec<&Command> {
 }
 
 /// Build the MCP shape of every servable command. Commands the MCP tool surface
-/// cannot serve (stream-handle types, unparseable schemas, `@stdin`, or a
+/// cannot serve (a stream-handle return, unparseable schemas, or a
 /// property-name collision) are dropped with a note on stderr.
 pub fn build_tool_shapes(m: &Manifest) -> Vec<McpToolShape> {
     m.commands
@@ -948,7 +780,7 @@ pub fn build_tool_shapes(m: &Manifest) -> Vec<McpToolShape> {
         .filter(|c| !c.internal)
         .filter_map(|c| match command_to_tool_shape(c) {
             Ok(mut shape) => {
-                fill_render_targets(&mut shape, m);
+                describe_actions(&mut shape, c, m);
                 Some(shape)
             }
             Err(reason) => {
@@ -965,14 +797,12 @@ pub fn build_tool_shapes(m: &Manifest) -> Vec<McpToolShape> {
 /// Build one command's [`McpToolShape`], or `Err(reason)` if it must be
 /// excluded from the MCP tool surface.
 fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
-    // Exclusion gate (also a correctness precondition: a leaked streaming
-    // command would write to a stdout fd the MCP loop has aliased away).
+    use morloc_manifest::call_args::required_off_cli;
+    // A file-handle return means nothing to a client. A file-path argument is
+    // served: it names a file on the server (IFACE-3).
     for arg in &cmd.args {
-        if let Arg::Positional { stdin: true, .. } = arg {
-            return Err("reads from @stdin".into());
-        }
-        if schema_str_excluded(arg.schema_str()) {
-            return Err("argument has a stream-handle type or a schema that does not parse".into());
+        if arg.schema_str().is_some_and(|s| parse_schema(s).is_err()) {
+            return Err("argument has a schema that does not parse".into());
         }
     }
     if schema_str_excluded(non_empty(&cmd.ret.schema)) {
@@ -981,11 +811,10 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
 
     let mut props = Map::new();
     let mut required: Vec<Value> = Vec::new();
-    let mut slots: Vec<ArgSlot> = Vec::with_capacity(cmd.args.len());
+    let unambiguous = morloc_manifest::call_args::unambiguous_names(cmd);
 
-    // Insert a property, failing closed on a name collision (the forward map
-    // would otherwise silently overwrite, letting two args collapse to one
-    // key with no inverse).
+    // Insert a property, failing closed on a name collision (two arguments
+    // under one name could not both be given).
     let insert_prop = |props: &mut Map<String, Value>, name: &str, prop: Value| -> Result<(), String> {
         if props.contains_key(name) {
             return Err(format!("property name collision on '{}'", name));
@@ -995,149 +824,65 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
     };
 
     for arg in &cmd.args {
+        let name = arg.key().to_string();
+        if required_off_cli(arg) {
+            required.push(Value::String(name.clone()));
+        }
         match arg {
-            Arg::Positional {
-                schema,
-                many,
-                stdin,
-                desc,
-                ..
-            } => {
-                // The key the compiler published: the explicit `@name`, else
-                // the reserved `_<1-based index>`. A metavar (FILE/INT/...) is
-                // a reused display placeholder and cannot serve as a key --
-                // one command may take two files. The leading `_` is reserved
-                // against author names, so the two can never collide.
-                let prop_name = arg.key().to_string();
+            Arg::Positional { schema, many, desc, .. } => {
                 let mut prop = mcp_type(schema.as_deref(), *many);
                 set_description(&mut prop, &with_ctor_notes(cmd, arg.type_desc_str(), desc), None);
-                let is_req = !schema_is_optional(schema.as_deref()) && !*stdin;
-                if is_req {
-                    required.push(Value::String(prop_name.clone()));
-                }
-                insert_prop(&mut props, &prop_name, prop)?;
-                slots.push(ArgSlot::Value {
-                    key: prop_name,
-                    missing: Value::Null,
-                });
+                insert_prop(&mut props, &name, prop)?;
             }
-            Arg::Optional {
-                schema,
-                many,
-                default_val,
-                desc,
-                ..
-            } => {
-                let name = arg.key().to_string();
+            Arg::Optional { schema, many, default_val, desc, .. } => {
                 let mut prop = mcp_type(schema.as_deref(), *many);
                 set_description(&mut prop, &with_ctor_notes(cmd, arg.type_desc_str(), desc), default_val.as_deref());
                 insert_prop(&mut props, &name, prop)?;
-                let st = schema.as_deref().and_then(|s| parse_schema(s).ok());
-                slots.push(ArgSlot::Value {
-                    key: name,
-                    missing: cli_default_to_json(default_val.as_deref(), st.as_ref()),
-                });
             }
-            Arg::Flag {
-                default_val,
-                desc,
-                ..
-            } => {
-                let name = arg.key().to_string();
+            Arg::Flag { default_val, desc, .. } => {
                 let mut prop = json!({ "type": "boolean" });
                 set_description(&mut prop, desc, default_val.as_deref());
                 insert_prop(&mut props, &name, prop)?;
-                slots.push(ArgSlot::Flag {
-                    key: name,
-                    default: default_val.as_deref() == Some("true"),
-                });
             }
-            Arg::Group {
-                schema,
-                group_opt,
-                entries,
-                desc,
-                ..
-            } => {
+            Arg::Group { schema, group_opt, entries, desc, .. } => {
                 let parsed = schema.as_deref().and_then(|s| parse_schema(s).ok());
-                let fields = group_record_fields(entries, parsed.as_ref());
+                // The whole record under the group's name, when the command
+                // line takes it whole; each field under its own name always.
+                // A field is required only when nothing else can fill it.
                 if group_opt.is_some() {
-                    // Whole record passed as one JSON object property. Not
-                    // marked required: an all-defaulted record may be omitted.
-                    let name = arg.key().to_string();
                     let mut prop = parsed
                         .as_ref()
                         .map(schema_to_json_schema)
                         .unwrap_or_else(|| json!({ "type": "object" }));
                     set_description(&mut prop, desc, None);
                     insert_prop(&mut props, &name, prop)?;
-                    slots.push(ArgSlot::Record {
-                        group_key: Some(name),
-                        fields,
-                    });
-                } else {
-                    // Unrolled: one property per field, keyed by field name. A
-                    // field is required only if it is non-optional AND carries
-                    // no default -- an unrolled field with a default (the usual
-                    // case: every non-bool field needs one, every flag has one)
-                    // is filled by the inverse when omitted, so advertising it
-                    // as required would wrongly force clients to supply it.
-                    if let Some(ref map) = parsed {
-                        for entry in entries {
-                            let field = map
-                                .keys
-                                .iter()
-                                .position(|k| k == &entry.key)
-                                .and_then(|i| map.parameters.get(i));
-                            let mut prop = field
-                                .map(schema_to_json_schema)
-                                .unwrap_or_else(|| json!({}));
-                            // Carry the field's docstring + default into the
-                            // property description, mirroring a top-level option.
-                            set_description(
-                                &mut prop,
-                                entry.arg.desc_lines(),
-                                entry.arg.default_val(),
-                            );
-                            let has_default = entry.arg.default_val().is_some();
-                            let is_req = !has_default
-                                && field
-                                    .map(|f| f.serial_type != SerialType::Optional)
-                                    .unwrap_or(false);
-                            if is_req {
-                                required.push(Value::String(entry.key.clone()));
-                            }
-                            insert_prop(&mut props, &entry.key, prop)?;
-                        }
+                }
+                for entry in entries {
+                    // A field whose name another argument shares is given
+                    // through the whole record.
+                    if group_opt.is_some() && !unambiguous.contains(&entry.key) {
+                        continue;
                     }
-                    slots.push(ArgSlot::Record {
-                        group_key: None,
-                        fields,
-                    });
+                    let field = group_field_schema(parsed.as_ref(), entry);
+                    let mut prop = if entry.arg.is_flag() {
+                        json!({ "type": "boolean" })
+                    } else {
+                        field.map(schema_to_json_schema).unwrap_or_else(|| json!({}))
+                    };
+                    set_description(&mut prop, entry.arg.desc_lines(), entry.arg.default_val());
+                    if group_opt.is_none() && group_field_required(entry, field) {
+                        required.push(Value::String(entry.key.clone()));
+                    }
+                    insert_prop(&mut props, &entry.key, prop)?;
                 }
             }
             // An unrolled `data` is one property holding the whole value: a
             // model writes the constructor JSON directly, the arms being a
-            // command-line convenience. Required when no arm may be omitted.
-            Arg::Alt {
-                schema,
-                required: is_req,
-                default_val,
-                desc,
-                ..
-            } => {
-                let name = arg.key().to_string();
+            // command-line convenience.
+            Arg::Alt { schema, default_val, desc, .. } => {
                 let mut prop = mcp_type(schema.as_deref(), false);
                 set_description(&mut prop, &with_ctor_notes(cmd, arg.type_desc_str(), desc), default_val.as_deref());
-                if *is_req {
-                    required.push(Value::String(name.clone()));
-                }
                 insert_prop(&mut props, &name, prop)?;
-                let st = schema.as_deref().and_then(|s| parse_schema(s).ok());
-                slots.push(ArgSlot::Value {
-                    key: name,
-                    missing: cli_default_to_json(default_val.as_deref(), st.as_ref()),
-                });
             }
         }
     }
@@ -1146,45 +891,32 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
     // exposes each projection through a synthetic `_render` enum on the parent
     // tool; `"raw"` (the default) returns the command's own typed value. The
     // per-target media type is filled from the manifest in `build_tool_shapes`.
-    // `_render` is a routing property, not a pool argument, so it gets NO
-    // `ArgSlot` and is never part of the inverted positional array. The leading
-    // `_` uses the same reserved namespace as positional keys (`_1`, ...), which
+    // `_render` is a routing property, not a pool argument, and is not
+    // forwarded with the arguments. The leading `_` uses the same reserved namespace as positional keys (`_1`, ...), which
     // an argument flag can never produce -- so it cannot collide with a real arg.
-    let mut renders: Vec<RenderTarget> = Vec::new();
-    if !cmd.terminals.is_empty() {
-        let mut enum_vals: Vec<Value> = vec![Value::String("raw".into())];
-        // A tool call runs one action on a fresh run of its command; an
-        // action with no such entry runs only on saved output, from the CLI.
-        for t in &cmd.terminals {
-            let Some(entry) = &t.entry else { continue };
-            enum_vals.push(Value::String(t.long.clone()));
-            renders.push(RenderTarget {
-                value: t.long.clone(),
-                command: entry.clone(),
-                mime: None,
-                returns_object: false,
-            });
-        }
-        // MCP intentionally defaults to "raw" (the structured value), NOT the
-        // CLI's `@default` renderer: an agent generally wants the typed data and
-        // opts into a renderer via this enum, so `Terminal::default` is
-        // deliberately not consulted here.
+    let actions: Vec<String> = cmd.terminals.iter().map(|t| t.long.clone()).collect();
+    if !actions.is_empty() {
+        let enum_vals: Vec<Value> = std::iter::once("raw".to_string())
+            .chain(actions.iter().cloned())
+            .map(Value::String)
+            .collect();
+        // A call that selects nothing gets the CLI's output.
+        let default = cmd
+            .terminals
+            .iter()
+            .find(|t| t.default)
+            .map(|t| t.long.clone())
+            .unwrap_or_else(|| "raw".to_string());
         let prop = json!({
             "type": "string",
             "enum": enum_vals,
-            "default": "raw",
+            "default": default,
             "description":
-                "Output projection: 'raw' returns the underlying typed value; a \
-                 renderer name returns that projection (e.g. an image)."
+                "Output action: 'raw' returns the command's own value; any other \
+                 value runs that output action, as its command-line flag does."
         });
         insert_prop(&mut props, "_render", prop)?;
     }
-
-    let prop_names: std::collections::HashSet<String> = props.keys().cloned().collect();
-    let required_names: Vec<String> = required
-        .iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .collect();
 
     let ret_parsed = parse_schema(&cmd.ret.schema).ok();
     let returns_object = ret_parsed.as_ref().map(schema_returns_object).unwrap_or(false);
@@ -1203,8 +935,10 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
     );
     // Output schema: emit ONLY for object (Map/record) returns. MCP
     // `structuredContent` must be a JSON object, so a scalar/array
-    // `outputSchema` would be invalid; those results ride in a text block.
-    if returns_object {
+    // `outputSchema` would be invalid; those results ride in a text block. A
+    // command with output actions declares none: an action's result need not
+    // match it.
+    if returns_object && actions.is_empty() {
         if let Some(ref parsed) = ret_parsed {
             tool.insert("outputSchema".into(), schema_to_json_schema(parsed));
         }
@@ -1213,28 +947,52 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
     Ok(McpToolShape {
         name: cmd.name.clone(),
         tool: Value::Object(tool),
-        slots,
-        prop_names,
-        required: required_names,
-        returns_object,
-        return_mime: cmd.ret.mime.clone(),
-        renders,
+        actions,
     })
 }
 
-/// Fill each render target's media type + object-ness by looking up its entry
-/// command in the manifest. Split from `command_to_tool_shape` (which sees only
-/// one command) so the shape builder stays manifest-free and unit-testable.
-fn fill_render_targets(shape: &mut McpToolShape, m: &Manifest) {
-    for rt in &mut shape.renders {
-        if let Some(entry) = m.command_by_name(&rt.command) {
-            rt.mime = entry.ret.mime.clone();
-            rt.returns_object = parse_schema(&entry.ret.schema)
-                .ok()
-                .as_ref()
-                .map(schema_returns_object)
-                .unwrap_or(false);
+/// Append the command's output actions to its tool description, one row per
+/// action as `-h` prints them (CLI-11): the action, its output's media type or
+/// type, `(raw bytes)` for a `@render` action, and `default`. Split from
+/// `command_to_tool_shape`, which sees one command, because an action's output
+/// type is its entry command's return.
+fn describe_actions(shape: &mut McpToolShape, cmd: &Command, m: &Manifest) {
+    if cmd.terminals.is_empty() {
+        return;
+    }
+    let streams = cmd.stream.is_some() || cmd.terminals.iter().any(|t| t.kind.of_streaming_command());
+    let raw = if streams {
+        "streams its output; runs only from the command line".to_string()
+    } else {
+        cmd.ret.type_desc.clone()
+    };
+    let mut rows = vec!["Output actions (`_render`):".to_string(), format!("  raw: {}", raw)];
+    for t in &cmd.terminals {
+        let entry = t.entry.as_deref().and_then(|e| m.command_by_name(e));
+        let out = match entry {
+            _ if t.kind == morloc_manifest::ActionKind::Stream => {
+                "streams its output; runs only from the command line".to_string()
+            }
+            Some(e) => e.ret.mime.clone().unwrap_or_else(|| e.ret.type_desc.clone()),
+            None => "runs only from the command line".to_string(),
+        };
+        let mut row = format!("  {}: {}", t.long, out);
+        if t.render {
+            row.push_str(" (raw bytes)");
         }
+        if t.default {
+            row.push_str(", default");
+        }
+        if !t.description.is_empty() {
+            row.push_str(&format!(" -- {}", t.description));
+        }
+        rows.push(row);
+    }
+    if let Some(Value::String(d)) = shape.tool.get_mut("description") {
+        if !d.is_empty() {
+            d.push_str("\n\n");
+        }
+        d.push_str(&rows.join("\n"));
     }
 }
 
@@ -1322,16 +1080,6 @@ mod tests {
 
     fn js(schema: &str) -> Value {
         schema_to_json_schema(&parse_schema(schema).unwrap())
-    }
-
-    /// An integer default beyond i64 keeps every digit; it is not rounded
-    /// through a float.
-    #[test]
-    fn wide_integer_defaults_are_exact() {
-        for (raw, schema) in [("123456789012345678901234567890", "j"), ("18446744073709551615", "u8")] {
-            let v = cli_default_to_json(Some(raw), Some(&parse_schema(schema).unwrap()));
-            assert_eq!(v.to_string(), raw, "schema {schema}");
-        }
     }
 
     #[test]
@@ -1428,134 +1176,111 @@ mod tests {
         assert_eq!(schema_to_json_schema(&s), json!({ "type": "object" }));
     }
 
-    // -- MCP tool-shape (forward inputSchema + inverse slots) ----------------
+    // -- MCP tool shape ------------------------------------------------------
 
     fn cmd_from_json(v: Value) -> Command {
         serde_json::from_value(v).expect("valid test command JSON")
     }
 
+    fn props(shape: &McpToolShape) -> Vec<String> {
+        shape.tool["inputSchema"]["properties"].as_object().unwrap().keys().cloned().collect()
+    }
+
+    fn required(shape: &McpToolShape) -> Vec<String> {
+        shape.tool["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
     #[test]
-    fn defaulted_optional_becomes_typed_default_slot() {
+    fn a_defaulted_option_is_an_optional_property() {
         let cmd = cmd_from_json(json!({
             "name": "inc", "type": "pure",
             "return": { "schema": "j" },
             "args": [ { "kind": "opt", "key": "count", "schema": "j", "long": "count", "default": "5" } ],
         }));
         let shape = command_to_tool_shape(&cmd).expect("servable");
-        // Forward: property present, optional (not required).
-        assert!(shape.prop_names.contains("count"));
-        assert!(shape.required.is_empty());
-        // Inverse: one slot; omitted -> the typed default 5 (number, not "5").
-        assert_eq!(shape.slots.len(), 1);
-        // Optional is never in `required`; the slot supplies the typed default.
-        assert!(shape.required.is_empty());
-        match &shape.slots[0] {
-            ArgSlot::Value { key, missing } => {
-                assert_eq!(key, "count");
-                assert_eq!(missing, &json!(5));
-            }
-            other => panic!("expected a Value slot, got {:?}", other),
-        }
-        // Scalar return -> no outputSchema.
-        assert!(!shape.returns_object);
+        assert_eq!(props(&shape), vec!["count"]);
+        assert!(required(&shape).is_empty());
         assert!(shape.tool.get("outputSchema").is_none());
     }
 
     #[test]
-    fn required_positional_is_required_indexed_key() {
+    fn positionals_are_keyed_by_name_or_index_and_required() {
         let cmd = cmd_from_json(json!({
             "name": "id", "type": "pure",
             "return": { "schema": "j" },
-            // Two positionals: the metavar is ignored; keys are `_1`, `_2`.
+            // Two positionals sharing a metavar: keys come from the manifest.
             "args": [
-                { "kind": "pos", "key": "_1", "schema": "j", "metavar": "N" },
-                { "kind": "pos", "key": "_2", "schema": "j" }
+                { "kind": "pos", "key": "records", "schema": "j", "metavar": "FILE" },
+                { "kind": "pos", "key": "_2", "schema": "j", "metavar": "FILE" },
+                { "kind": "pos", "key": "_3", "schema": "?j" }
             ],
         }));
         let shape = command_to_tool_shape(&cmd).expect("servable");
-        assert_eq!(shape.required, vec!["_1".to_string(), "_2".to_string()]);
-        match &shape.slots[0] {
-            ArgSlot::Value { key, missing } => {
-                assert_eq!(key, "_1");
-                assert_eq!(missing, &Value::Null);
-            }
-            other => panic!("expected a Value slot, got {:?}", other),
-        }
+        assert_eq!(props(&shape), vec!["records", "_2", "_3"]);
+        assert_eq!(required(&shape), vec!["records", "_2"]);
     }
 
     #[test]
-    fn named_positional_uses_at_name_not_index() {
-        // A positional carrying an explicit `@name` uses it as the property,
-        // the required-key, and the inverse slot key -- not the `_1` fallback.
+    fn file_path_and_stdin_arguments_are_served_and_stdin_is_required() {
         let cmd = cmd_from_json(json!({
-            "name": "revcomp", "type": "pure",
-            "return": { "schema": "j" },
-            "args": [ { "kind": "pos", "key": "records", "schema": "j", "name": "records" } ],
-        }));
-        let shape = command_to_tool_shape(&cmd).expect("servable");
-        assert!(shape.prop_names.contains("records"));
-        assert!(!shape.prop_names.contains("_1"));
-        assert_eq!(shape.required, vec!["records".to_string()]);
-        match &shape.slots[0] {
-            ArgSlot::Value { key, .. } => assert_eq!(key, "records"),
-            other => panic!("expected a Value slot, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn positionals_with_reused_metavar_no_longer_collide() {
-        // Two positionals sharing a metavar used to collapse to one key and
-        // exclude the command; indexed keys make them distinct + servable.
-        let cmd = cmd_from_json(json!({
-            "name": "cp", "type": "pure",
-            "return": { "schema": "j" },
+            "name": "cat", "type": "remote",
+            "return": { "schema": "s" },
             "args": [
-                { "kind": "pos", "key": "_1", "schema": "s", "metavar": "FILE" },
-                { "kind": "pos", "key": "_2", "schema": "s", "metavar": "FILE" }
+                { "kind": "pos", "key": "_1", "schema": "?s", "stdin": true },
+                { "kind": "pos", "key": "_2", "schema": "F" }
             ],
         }));
-        let shape = command_to_tool_shape(&cmd).expect("servable (no collision)");
-        assert!(shape.prop_names.contains("_1"));
-        assert!(shape.prop_names.contains("_2"));
+        let shape = command_to_tool_shape(&cmd).expect("servable");
+        assert_eq!(required(&shape), vec!["_1", "_2"]);
+        let handle_return = cmd_from_json(json!({
+            "name": "open", "type": "remote", "return": { "schema": "F" }, "args": [],
+        }));
+        assert!(command_to_tool_shape(&handle_return).is_err());
     }
 
     #[test]
-    fn record_unrolled_flatten_inverse() {
-        let cmd = cmd_from_json(json!({
+    fn a_record_is_named_by_its_fields_and_whole_when_the_cli_takes_it_whole() {
+        let group = |group_opt: Value| cmd_from_json(json!({
             "name": "conf", "type": "pure",
             "return": { "schema": "j" },
             "args": [ {
                 "kind": "grp", "key": "rec", "schema": "m21aj1bs", "type": "Rec",
+                "group_opt": group_opt,
                 "entries": [
                     { "key": "a", "arg": { "kind": "opt", "key": "a", "long": "a", "default": "3" } },
-                    { "key": "b", "arg": { "kind": "opt", "key": "b", "long": "b", "default": "\"hi\"" } }
+                    { "key": "b", "arg": { "kind": "opt", "key": "b", "long": "b" } }
                 ]
             } ],
         }));
+        let unrolled = command_to_tool_shape(&group(Value::Null)).expect("servable");
+        assert_eq!(props(&unrolled), vec!["a", "b"]);
+        assert_eq!(required(&unrolled), vec!["b"]);
+        let whole = command_to_tool_shape(&group(json!({ "long": "rec" }))).expect("servable");
+        assert_eq!(props(&whole), vec!["rec", "a", "b"]);
+        assert!(required(&whole).is_empty());
+    }
+
+    #[test]
+    fn a_record_field_sharing_a_name_is_given_through_the_whole_record() {
+        let cmd = cmd_from_json(json!({
+            "name": "conf", "type": "pure",
+            "return": { "schema": "j" },
+            "args": [
+                { "kind": "opt", "key": "a", "schema": "j", "long": "a", "default": "1" },
+                { "kind": "grp", "key": "rec", "schema": "m21aj1bs", "group_opt": { "long": "rec" },
+                  "entries": [
+                    { "key": "a", "arg": { "kind": "opt", "key": "a", "long": "ra", "default": "3" } },
+                    { "key": "b", "arg": { "kind": "opt", "key": "b", "long": "b", "default": "\"x\"" } }
+                  ] }
+            ],
+        }));
         let shape = command_to_tool_shape(&cmd).expect("servable");
-        // Forward: one property per field, keyed by field name.
-        assert!(shape.prop_names.contains("a"));
-        assert!(shape.prop_names.contains("b"));
-        // Defaulted unrolled fields must NOT be advertised as required (the
-        // inverse fills their defaults when omitted).
-        assert!(
-            shape.required.is_empty(),
-            "defaulted unrolled fields must not be required, got {:?}",
-            shape.required
-        );
-        // Inverse: a single Record slot assembled from the fields' defaults.
-        assert_eq!(shape.slots.len(), 1);
-        match &shape.slots[0] {
-            ArgSlot::Record { group_key, fields } => {
-                assert!(group_key.is_none());
-                assert_eq!(fields.len(), 2);
-                assert_eq!(fields[0].field, "a");
-                assert_eq!(fields[0].default, json!(3));
-                assert_eq!(fields[1].field, "b");
-                assert_eq!(fields[1].default, json!("hi"));
-            }
-            other => panic!("expected a Record slot, got {:?}", other),
-        }
+        assert_eq!(props(&shape), vec!["a", "rec", "b"]);
     }
 
     #[test]
@@ -1566,19 +1291,9 @@ mod tests {
             "args": [],
         }));
         let shape = command_to_tool_shape(&cmd).expect("servable");
-        assert!(shape.returns_object);
+        assert!(shape.tool.get("outputSchema").is_some());
         let out = shape.tool.get("outputSchema").expect("record return has outputSchema");
         assert_eq!(out["type"], "object");
-    }
-
-    #[test]
-    fn stdin_positional_is_excluded() {
-        let cmd = cmd_from_json(json!({
-            "name": "cat", "type": "remote",
-            "return": { "schema": "as" },
-            "args": [ { "kind": "pos", "key": "_1", "schema": "s", "metavar": "FILE", "stdin": true } ],
-        }));
-        assert!(command_to_tool_shape(&cmd).is_err());
     }
 
     #[test]

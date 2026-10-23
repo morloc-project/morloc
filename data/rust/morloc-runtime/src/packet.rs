@@ -13,25 +13,23 @@ use crate::error::MorlocError;
 // larger payloads are routed via SHM (RPTR) or, when SHM is disabled,
 // via a temp file (FILE).
 //
-// Mutated by `config::morloc_set_inline_threshold` (FFI) and by the
-// `MORLOC_INLINE_SIZE` env var (read once via `ensure_config_loaded`).
+// Set from the `MORLOC_INLINE_SIZE` env var (read once via
+// `ensure_config_loaded`).
 pub static INLINE_THRESHOLD: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(MORLOC_INLINE_THRESHOLD);
 
 // Runtime-tunable SHM enable flag. False = data over the inline
 // threshold is written to a temp file instead of shared memory.
 //
-// Mutated by `config::morloc_set_shm_enabled` (FFI) and by the
-// `MORLOC_NO_SHM` env var.
+// Set from the `MORLOC_NO_SHM` env var.
 pub static SHM_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
 
 /// Process-wide serialization gate for any test that mutates or
 /// observes [`INLINE_THRESHOLD`] / [`SHM_ENABLED`] / the file-packet
 /// tmpdir. Without it, `cargo test`'s default multi-threaded
-/// runner interleaves writes from `config_ffi::tests` with reads
-/// from `packet_ffi::auto_routing_tests`, producing nondeterministic
-/// failures.
+/// runner interleaves a test's writes with another's reads, producing
+/// nondeterministic failures.
 ///
 /// Each test acquires the lock at entry; the guard is dropped at
 /// the end of the test. Lock contention is irrelevant -- the

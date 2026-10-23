@@ -6,7 +6,8 @@
     "description": [
       "Exercises which named types the machine-readable help defines.",
       ""
-    ]
+    ],
+    "epilogues": []
   },
   "groups": [],
   "commands": [
@@ -72,7 +73,8 @@
           }
         }
       },
-      "terminals": []
+      "terminals": [],
+      "epilogues": []
     },
     {
       "name": "touch",
@@ -123,7 +125,8 @@
           }
         }
       },
-      "terminals": []
+      "terminals": [],
+      "epilogues": []
     },
     {
       "name": "showDb",
@@ -203,7 +206,8 @@
           }
         }
       },
-      "terminals": []
+      "terminals": [],
+      "epilogues": []
     }
   ],
   "types": [

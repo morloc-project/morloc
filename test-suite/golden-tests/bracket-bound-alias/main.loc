@@ -1,0 +1,29 @@
+-- A bracket bound whose type is an alias of an integer type is accepted
+-- in pure morloc (the nexus) as it is in a Python or C++ pool.
+module main (nexusIndex, nexusSlice, nexusOpt, pyIndex, cppIndex)
+
+import root-py
+import root-cpp
+
+source Py from "rev.py" ("rev")
+source Cpp from "rev.hpp" ("revcpp")
+
+rev :: [a] -> [a]
+revcpp :: [a] -> [a]
+
+type Ix = I64
+
+nexusIndex :: [Int] -> Ix -> Int
+nexusIndex xs i = .[i] xs
+
+nexusSlice :: [Int] -> Ix -> [Int]
+nexusSlice xs i = .[i:] xs
+
+nexusOpt :: [Int] -> ?Ix -> [Int]
+nexusOpt xs i = .[:i] xs
+
+pyIndex :: [Int] -> Ix -> Int
+pyIndex xs i = .[i] (rev xs)
+
+cppIndex :: [Int] -> Ix -> Int
+cppIndex xs i = .[i] (revcpp xs)

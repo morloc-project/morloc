@@ -1,0 +1,30 @@
+-- A Rust record mapped to one non-generic struct is used at two
+-- instantiations that differ only in a phantom parameter (no field uses
+-- it). Both instantiations are the same struct, so the pool has one
+-- marshalling impl for it, and values of both cross the pool boundary.
+module main (run, both)
+
+import root-rust
+
+type A
+type B
+type Rust => A = "i64"
+type Rust => B = "i64"
+
+record Loc k where
+  seqid :: Int
+  start :: Int
+
+record Rust => Loc k = "Loc"
+
+source Rust from "f.rs" ("mka", "mkb", "starts")
+
+mka :: Int -> Loc A
+mkb :: Int -> Loc B
+starts :: Loc A -> Loc B -> Int
+
+run :: Int -> Int
+run x = starts (mka x) (mkb x)
+
+both :: Int -> (Loc A, Loc B)
+both x = (mka x, mkb x)

@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{Condvar, LockResult, Mutex, MutexGuard, PoisonError};
+use std::sync::{LockResult, Mutex, MutexGuard, PoisonError};
 
 pub(crate) use morloc_runtime_types::fork_generation::generation;
 
@@ -95,15 +95,6 @@ impl<T> Held<T> {
         let bit = 1u64 << self.rank;
         HELD_RANKS.with(|r| r.set(r.get() | bit));
         Some(HeldGuard { guard: Some(guard), bit })
-    }
-}
-
-impl<T> HeldGuard<'_, T> {
-    pub(crate) fn wait(mut self, condvar: &Condvar) -> Self {
-        let guard = self.guard.take().unwrap();
-        let guard = condvar.wait(guard).unwrap_or_else(|_| morloc_runtime_types::panic::poisoned_lock());
-        self.guard = Some(guard);
-        self
     }
 }
 
@@ -210,12 +201,11 @@ pub(crate) fn inherited_dispatches() -> usize {
 
 struct ForkHeld {
     _pass: HeldGuard<'static, ()>,
-    map: HeldGuard<'static, Option<std::collections::HashMap<i64, crate::stream::LocalEntry>>>,
+    _map: HeldGuard<'static, Option<std::collections::HashMap<i64, crate::stream::HandleSlots>>>,
     locked_fds: HeldGuard<'static, Vec<libc::c_int>>,
     views: HeldGuard<'static, Vec<crate::arrow_shm::BorrowEntry>>,
     lease: Option<crate::lease::Staged>,
     lease_rels: Vec<crate::shm::RelPtr>,
-    _alloc: HeldGuard<'static, ()>,
     _volumes: HeldGuard<'static, crate::shm::VolumeTable>,
     _basename: HeldGuard<'static, [u8; crate::shm::MAX_FILENAME_SIZE]>,
     _registry: HeldGuard<'static, Option<crate::shm_companion::CompanionSegment>>,
@@ -237,6 +227,25 @@ struct ForkHeldSlot(std::cell::UnsafeCell<Option<ForkHeld>>);
 unsafe impl Sync for ForkHeldSlot {}
 
 static FORK_HELD: ForkHeldSlot = ForkHeldSlot(std::cell::UnsafeCell::new(None));
+
+// NET-7: odd from this process's prepare handler to its after-fork handler.
+static FORK_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// NET-7: the count once no fork of this process is in progress.
+pub(crate) fn fork_seq_settled() -> u64 {
+    loop {
+        let seq = FORK_SEQ.load(Ordering::SeqCst);
+        if seq % 2 == 0 {
+            return seq;
+        }
+        std::thread::yield_now();
+    }
+}
+
+// NET-7
+pub(crate) fn fork_seq() -> u64 {
+    FORK_SEQ.load(Ordering::SeqCst)
+}
 
 fn take_fork_held() -> Option<ForkHeld> {
     // SAFETY: FORK-5: called by the forking thread, which holds every held lock.
@@ -264,15 +273,13 @@ fn prepare_fork_body() {
         None
     };
     let pass = crate::stream::RELEASE_PASS.lock();
-    crate::stream::drain_before_fork();
     let held = ForkHeld {
         _pass: pass,
-        map: crate::stream::PROCESS_LOCAL_SLOTS.lock(),
+        _map: crate::stream::PROCESS_LOCAL_SLOTS.lock(),
         locked_fds: crate::stream::LOCKED_FDS.lock(),
         views: crate::arrow_shm::BORROWABLE.lock(),
         lease: None,
         lease_rels: Vec::new(),
-        _alloc: crate::shm::ALLOC_MUTEX.lock(),
         _volumes: crate::shm::VOLUMES.lock(),
         _registry: crate::stream::REGISTRY_SEGMENT.lock(),
         _stats: crate::shm_stats::SEGMENT.lock(),
@@ -299,6 +306,8 @@ fn prepare_fork_body() {
     }
     held.lease = staged;
     held.lease_rels = rels;
+    // NET-7: under every held lock, so forks move the count one at a time.
+    FORK_SEQ.fetch_add(1, Ordering::SeqCst);
     // SAFETY: FORK-5: this thread now holds every held lock.
     unsafe { *FORK_HELD.0.get() = Some(held) };
 }
@@ -309,6 +318,8 @@ extern "C" fn after_fork_in_parent() {
 }
 
 fn after_fork_in_parent_body() {
+    // NET-7: before the held locks are released.
+    FORK_SEQ.fetch_add(1, Ordering::SeqCst);
     crate::lease::note_forked();
     if let Some(mut held) = take_fork_held() {
         let (lease, rels) = (held.lease.take(), std::mem::take(&mut held.lease_rels));
@@ -327,14 +338,16 @@ extern "C" fn after_fork_in_child() {
 }
 
 fn after_fork_in_child_body() {
+    FORK_SEQ.fetch_add(1, Ordering::SeqCst);
     morloc_runtime_types::fork_generation::bump_in_child();
+    crate::ipc_ffi::after_fork_in_child();
     // FORK-16: the dispatches running anywhere in the parent, none of which
     // the child has.
     INHERITED_DISPATCHES.store(crate::intrinsics::dispatches_in_flight(), Ordering::Relaxed);
     crate::cell::after_fork_in_child();
     crate::shm::forget_held_references();
     if let Some(mut held) = take_fork_held() {
-        crate::stream::after_fork_in_child(&mut held.map, &mut held.locked_fds);
+        crate::stream::after_fork_in_child(&mut held.locked_fds);
         // FORK-15: the child keeps its lease locked for as long as it lives.
         let lease = held.lease.take();
         if let Some(l) = &lease {
@@ -588,6 +601,24 @@ pub(crate) fn in_a_descendant_with_the_same_pid(work: impl FnOnce() -> bool) -> 
     status == 0
 }
 
+// FORK-11: std::env::set_var would take the environment lock, which a child
+// of the test harness may have inherited held.
+#[cfg(test)]
+pub(crate) fn set_test_env(key: &str, value: Option<&std::ffi::OsStr>) {
+    use std::os::unix::ffi::OsStrExt;
+    let threads = thread_count();
+    assert!(!threads.is_some_and(|n| n > 1), "the environment was written with {threads:?} threads running");
+    let k = std::ffi::CString::new(key).unwrap();
+    let rc = match value {
+        Some(v) => {
+            let v = std::ffi::CString::new(v.as_bytes()).unwrap();
+            unsafe { libc::setenv(k.as_ptr(), v.as_ptr(), 1) }
+        }
+        None => unsafe { libc::unsetenv(k.as_ptr()) },
+    };
+    assert_eq!(rc, 0, "writing {key} failed");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,6 +659,14 @@ mod tests {
             }
             pid > 0 && wait_status(pid) == 7
         }));
+    }
+
+    // NET-7: a fork is in progress only between the handlers; afterwards
+    // neither side waits on it.
+    #[test]
+    fn neither_side_of_a_fork_waits_on_it_afterwards() {
+        assert!(exits_cleanly_in_a_forked_child(|| super::fork_seq_settled() % 2 == 0));
+        assert_eq!(super::fork_seq_settled() % 2, 0);
     }
 
     #[test]
@@ -772,7 +811,7 @@ mod tests {
         assert!(pid >= 0);
         if pid == 0 {
             unsafe { libc::alarm(5) };
-            let _alloc = crate::shm::ALLOC_MUTEX.lock();
+            let _volumes = crate::shm::VOLUMES.lock();
             let grandchild = unsafe { libc::fork() };
             unsafe { libc::_exit(if grandchild == 0 { 0 } else { 1 }) };
         }

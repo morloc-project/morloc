@@ -4,39 +4,39 @@ import root-py
 import root-cpp
 
 -- ===== EXPLICIT ALIAS ANNOTATIONS =====
--- Each alias supports different typeclasses:
+-- Deque is a newtype of List with its own instances:
 --   List:   Functor, Foldable, Indexed, Stack, Queue
 --   Deque:  Functor, Foldable, Stack, Queue
+-- Array is a transparent alias of List and has all of List's instances.
 
--- this is simple alias for list
 type Array a = List a
 
--- Functor (all aliases have it)
+-- Functor
 mapDeque :: Deque Int -> Deque Int
 mapDeque xs = map (\x -> x + 1) xs
 
 mapArray :: Array Int -> Array Int
 mapArray xs = map (\x -> x + 1) xs
 
--- Foldable (all aliases have it)
+-- Foldable
 foldDeque :: Deque Int -> Int
 foldDeque xs = fold (\a x -> a + x) 0 xs
 
 foldArray :: Array Int -> Int
 foldArray xs = fold (\a x -> a + x) 0 xs
 
--- Indexable (List, Array -- NOT Deque)
+-- Indexable (List and Array, not Deque)
 indexList :: [Int] -> Int
 indexList xs = .[0] xs
 
 indexArray :: Array Int -> Int
 indexArray xs = .[0] xs
 
--- Stack (List, Deque -- NOT Array)
+-- Stack
 consDeque :: Deque Int -> Deque Int
 consDeque xs = cons 0 xs
 
--- Queue (List, Deque -- NOT Array)
+-- Queue
 snocDeque :: Deque Int -> Deque Int
 snocDeque xs = snoc xs 99
 

@@ -1,0 +1,15 @@
+-- Spec NEWT-7: Bytes has a Python form of its own. Unwrapping it for a
+-- Python consumer needs a language where it has none, and a Python-only
+-- program has no such language, so the build is rejected.
+module main (asStr)
+
+import root-py
+
+newtype Bytes = Str
+type Py => Bytes = "bytes"
+
+source Py from "main.py" ("shout")
+shout :: Str -> Str
+
+asStr :: Bytes -> Str
+asStr b = shout (unpack b)

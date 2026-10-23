@@ -207,8 +207,8 @@ all:
 	./nexus rint64Id 9007199254740992 >> obs.txt   # 2^53 (was last losslessly representable under double; still round-trips)
 	./nexus rint64Id 9007199254740993 >> obs.txt 2>> obs.err || echo "OVERFLOW" >> obs.txt   # 2^53 + 1 (bit64 round-trips losslessly)
 	./nexus rint64Id 9223372036854775807 >> obs.txt 2>> obs.err || echo "OVERFLOW" >> obs.txt   # I64 max (bit64 round-trips losslessly)
-	./nexus rint64Id -9223372036854775808 >> obs.txt 2>> obs.err || echo "OVERFLOW" >> obs.txt  # I64 min (bit-identical even at NA_INTEGER64 collision; bytes survive the idr round-trip)
-	./nexus ruint64Id 18446744073709551615 >> obs.txt 2>> obs.err || echo "OVERFLOW" >> obs.txt # U64 max (carried as -1 in bit64's signed view; bits round-trip)
+	./nexus rint64Id -9223372036854775808 >> obs.txt 2>> obs.err || echo "OVERFLOW" >> obs.txt  # I64 min is bit64's NA, so it cannot enter R
+	./nexus ruint64Id 18446744073709551615 >> obs.txt 2>> obs.err || echo "OVERFLOW" >> obs.txt # U64 max: bit64 is signed, so U64 >= 2^63 cannot enter R
 	./nexus rintId 100000000000000000000000000000 >> obs.txt 2>> obs.err || echo "OVERFLOW" >> obs.txt
 	echo "" >> obs.txt
 	echo "=== S16: R NA rejection on integer pack ===" >> obs.txt

@@ -183,12 +183,12 @@ inline int use_pinned(Caller c, int x) {
 
 HOST_RS = '''#[derive(Clone)]
 pub struct Holder {
-    pub run: std::rc::Rc<dyn rustmorloc::MorlocFn0<i64>>,
+    pub run: std::sync::Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
 #[derive(Clone)]
 pub struct Caller {
-    pub inc: std::rc::Rc<dyn rustmorloc::MorlocFn1<i64, i64>>,
+    pub inc: std::sync::Arc<dyn Fn(&i64) -> i64 + Send + Sync>,
 }
 
 pub fn tick(path: &String) -> i64 {
@@ -210,34 +210,34 @@ pub fn ident(x: i64) -> i64 {
     x
 }
 
-pub fn take_thunk(t: impl rustmorloc::MorlocFn0<i64>) -> i64 {
-    t.call0();
-    t.call0();
-    t.call0()
+pub fn take_thunk(t: impl Fn() -> i64) -> i64 {
+    t();
+    t();
+    t()
 }
 
 pub fn use_record(h: &Holder) -> i64 {
-    h.run.call0();
-    h.run.call0();
-    h.run.call0()
+    (h.run)();
+    (h.run)();
+    (h.run)()
 }
 
-pub fn use_list(xs: &Vec<std::rc::Rc<dyn rustmorloc::MorlocFn0<i64>>>) -> i64 {
-    xs[0].call0();
-    xs[0].call0();
-    xs[0].call0()
+pub fn use_list(xs: &Vec<std::sync::Arc<dyn Fn() -> i64 + Send + Sync>>) -> i64 {
+    xs[0]();
+    xs[0]();
+    xs[0]()
 }
 
-pub fn use_callback(f: impl rustmorloc::MorlocFn1<i64, i64>, x: i64) -> i64 {
-    f.call1(&x);
-    f.call1(&x);
-    f.call1(&x)
+pub fn use_callback(f: impl Fn(&i64) -> i64, x: i64) -> i64 {
+    f(&x);
+    f(&x);
+    f(&x)
 }
 
 pub fn use_pinned(c: &Caller, x: i64) -> i64 {
-    c.inc.call1(&x);
-    c.inc.call1(&x);
-    c.inc.call1(&x)
+    (c.inc)(&x);
+    (c.inc)(&x);
+    (c.inc)(&x)
 }
 '''
 

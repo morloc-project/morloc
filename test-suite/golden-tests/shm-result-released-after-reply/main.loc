@@ -15,7 +15,7 @@ import root-r
 --
 -- Each case asks one pool for a large vector of integers, lets go of the
 -- caller's own reference, and reports how much shared memory the program
--- still holds. Python also runs with thread workers, its default on macOS.
+-- still holds.
 
 source Cpp from "big.hpp" ("big", "count", "heldAfterCount")
 source Rust from "big.rs" ("big_rust" as bigRust)

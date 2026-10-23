@@ -2,8 +2,7 @@ all:
 	rm -f *.err killed-dirs.txt
 	: > obs.txt
 	morloc make -o nexus main.loc 2> build.err
-	./run.sh default "" >> obs.txt 2>> obs.err
-	./run.sh thread thread >> obs.txt 2>> obs.err
+	./run.sh default >> obs.txt 2>> obs.err
 	./swept.sh >> obs.txt 2>> obs.err
 
 clean:

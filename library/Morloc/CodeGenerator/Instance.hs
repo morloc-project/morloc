@@ -13,11 +13,12 @@ module Morloc.CodeGenerator.Instance
   , resolveInstanceForType
   ) where
 
+import Morloc.CodeGenerator.Infer (requireDetermined)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import Morloc.Typecheck.Internal (unqualify)
+import Morloc.Typecheck.Internal (instanceArgHead)
 
 -- | Look up the per-language source binding of a class method whose
 -- receiver type head occupies a known argument position.
@@ -29,15 +30,10 @@ findInstanceByArgHead pos method lang containerTv = do
     Just inst -> return $ listToMaybe
       [ src
       | TermTypes (Just et) cs _ <- instanceTerms inst
-      , receiverHead et == Just containerTv
+      , instanceArgHead pos et == Just containerTv
       , (_, Idx _ src) <- cs
       , srcLang src == lang
       ]
-  where
-    receiverHead :: EType -> Maybe TVar
-    receiverHead et = case snd (unqualify (etype et)) of
-      FunU args _ | length args > pos -> Just (extractKey (args !! pos))
-      _                               -> Nothing
 
 -- | Look up the @Functor@ @map@ instance for a container type in
 -- language @lang@. The instance method signature is @(a -> b) -> f a
@@ -53,20 +49,18 @@ findFunctorMap lang receiverType =
 -- 'Nothing' if the chain is exhausted. This is the key mechanism by
 -- which @type Array a = List a@ inherits @instance Indexable List@:
 -- the call site type @Array Int@ misses on @Array@, reduces to
--- @List Int@, then hits.
+-- @List Int@, then hits. A type nothing determined selects no instance
+-- and is rejected at @i@ (POLY-6).
 resolveInstanceForType
   :: (Lang -> TypeU -> MorlocMonad (Maybe Source))
+  -> Int
   -> Lang
   -> Type
   -> MorlocMonad (Maybe Source)
-resolveInstanceForType perTypeLookup lang originalType = do
+resolveInstanceForType perTypeLookup i lang originalType = do
+  requireDetermined i originalType
   scope <- MM.getGeneralScope
-  go scope (type2typeu originalType)
+  go (TE.aliasChain scope (type2typeu originalType))
   where
-    go scope t = do
-      mSrc <- perTypeLookup lang t
-      case mSrc of
-        Just src -> return (Just src)
-        Nothing -> case TE.reduceType scope t of
-          Just t' | t' /= t -> go scope t'
-          _ -> return Nothing
+    go [] = return Nothing
+    go (t : ts) = perTypeLookup lang t >>= maybe (go ts) (return . Just)

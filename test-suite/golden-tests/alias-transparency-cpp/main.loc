@@ -1,0 +1,26 @@
+-- A transparent alias is fully substitutable with its right-hand side
+-- (manual: types-newtype.asc), in a C++ pool:
+--   leavesOf: constructor patterns on an alias of a data type
+--   sizeOf:   an alias under a constructor class (Foldable)
+module main (leavesOf, sizeOf)
+
+import root-cpp
+
+data Tree a = Leaf a | Node (Tree a) (Tree a)
+type IntTree = Tree Int
+
+mk :: Int -> IntTree
+mk x = Node (Leaf x) (Node (Leaf x) (Leaf x))
+
+leaves :: IntTree -> Int
+leaves t = match t
+  | (Leaf _) = 1
+  | (Node a b) = leaves a + leaves b
+
+leavesOf :: Int -> Int
+leavesOf x = leaves (mk x)
+
+type Model k v = [(k, v)]
+
+sizeOf :: Model Int Int -> Int
+sizeOf xs = length xs

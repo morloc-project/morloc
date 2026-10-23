@@ -1,0 +1,7 @@
+-- CPP-6: changing a generated arm in std::visit is rejected (see ok.loc).
+module badvisit (bad)
+
+import .badlib
+
+bad :: Int -> Int
+bad n = let b = Box (mk n) in boxSize (growVisit b) + boxSize b

@@ -1,0 +1,15 @@
+-- main.loc with the effectful signature declared first.
+
+module swapped (ioFirstIO, ioFirstPure)
+
+import root-py
+
+source Py from "lib.py" ("double_all" as doubleAll, "double_all" as doubleAllIO)
+doubleAllIO :: [Int] -> <IO> [Int]
+doubleAll :: [Int] -> [Int]
+
+ioFirstIO :: [Int] -> <IO> [Int]
+ioFirstIO xs = doubleAllIO xs
+
+ioFirstPure :: [Int] -> [Int]
+ioFirstPure xs = doubleAll xs

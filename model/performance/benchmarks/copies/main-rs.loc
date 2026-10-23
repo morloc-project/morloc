@@ -1,0 +1,59 @@
+-- Copy-heavy Rust shapes timed by bench.py; each prints its result and the
+-- links copied. The shapes are those of golden copy-census-rust.
+module main (nestedLoop, tlLoop, listLoop, closure)
+
+import root-rust
+
+data Chain = End | Link Int Chain
+data Rust => Chain = "Chain"
+
+source Rust from "chain.rs" ("clones", "mk_chain" as mkChain, "chain_len" as chainLen)
+
+clones :: Int -> (Int, Int)
+mkChain :: Int -> Chain
+chainLen :: Chain -> Int
+
+count :: Int -> Chain -> Int
+count | acc (Link _ rest) = count (acc + 1) rest
+      | acc _ = acc
+
+prepend :: Int -> Chain -> Chain
+prepend x c = Link x c
+
+tl :: Chain -> Chain
+tl c = match c
+  | End = End
+  | (Link _ rest) = rest
+
+skip2 :: Int -> Chain -> Int
+skip2 acc c = match c
+  | (Link _ (Link _ rest)) = skip2 (acc + 1) rest
+  | _ = acc
+
+--' A chain of n walked two links per step by a nested pattern
+nestedLoop :: Int -> (Int, Int)
+nestedLoop n = clones (skip2 0 (mkChain n))
+
+lenAfter :: Int -> Chain -> Int
+lenAfter k c
+  ? k == 0 = chainLen c
+  : lenAfter (k - 1) (tl c)
+
+--' k steps of tl down a chain of n
+tlLoop :: Int -> Int -> (Int, Int)
+tlLoop k n = clones (lenAfter k (mkChain n))
+
+lpLoop :: Int -> [Chain] -> Int -> Int
+lpLoop k xs acc
+  ? k == 0 = acc
+  : lpLoop (k - 1) xs (acc + (match xs | [a, b] = chainLen a + chainLen b | _ = 0))
+
+--' k steps reading both elements of a carried two-chain list by a list pattern
+listLoop :: Int -> Int -> (Int, Int)
+listLoop k n = clones (lpLoop k [mkChain n, mkChain n] 0)
+
+--' A lambda capturing a chain of n, mapped over k values, keeping the chain
+closure :: Int -> Int -> (Int, Int)
+closure k n = clones (sum (map (\j -> count 0 (prepend j c)) (range 0 k)))
+  where
+    c = mkChain n

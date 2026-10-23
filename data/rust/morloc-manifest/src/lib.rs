@@ -49,6 +49,8 @@
 //! compiler will still parse with an older nexus (modulo the version
 //! mismatch error in [`parse_manifest`]).
 
+pub mod call_args;
+pub mod cli_value;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -207,7 +209,7 @@ pub struct RunLog {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct Pool {
-    /// Language tag (e.g. `"py"`, `"cpp"`, `"r"`, `"julia"`).
+    /// Language tag (e.g. `"py"`, `"cpp"`, `"r"`, `"rust"`).
     pub lang: String,
     /// argv used to spawn the pool process (e.g. `["python3", "pool.py"]`).
     pub exec: Vec<String>,
@@ -704,6 +706,8 @@ pub enum FormAtom {
     Bytes,
     BytesOnly,
     List,
+    /// A headed table (CLI-13).
+    Table,
 }
 
 /// A value-invariant check carried alongside the argument. The compiler

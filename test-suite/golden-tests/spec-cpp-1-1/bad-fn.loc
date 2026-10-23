@@ -1,0 +1,10 @@
+-- CPP-1: a `T&` source given a function value is rejected (see ok.loc).
+module badfn (badFn)
+
+import .common
+
+useF :: (Int -> Int) -> Int
+useF f = applyFnRef f 1 + applyFnRef f 2
+
+badFn :: Int -> Int
+badFn n = useF (\x -> x + n)

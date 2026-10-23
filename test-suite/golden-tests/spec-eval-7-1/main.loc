@@ -1,0 +1,40 @@
+-- Spec EVAL-7: morloc makes as few copies of a value as it likes. A tail
+-- loop over a user-mapped Rust data type walks the chain it was lent
+-- through references (OWN-6), so walking a chain of n links copies none of
+-- it. The counting Clone is this test's instrument; a program's results
+-- never depend on such a count.
+module main (walk, walkMatch)
+
+import root-rust
+
+data Chain = End | Link Int Chain
+
+data Rust => Chain = "Chain"
+
+source Rust from "chain.rs" ("clones")
+
+clones :: Int -> (Int, Int)
+
+build :: Int -> Chain -> Chain
+build n acc
+  ? n == 0 = acc
+  : build (n - 1) (Link n acc)
+
+count :: Int -> Chain -> Int
+count | acc (Link _ rest) = count (acc + 1) rest
+      | acc _ = acc
+
+-- The same walk written with `match`, which binds the carried value to a
+-- local of its own before taking the tail.
+countMatch :: Int -> Chain -> Int
+countMatch k c = match c
+  | End = k
+  | (Link _ rest) = countMatch (k + 1) rest
+
+--' The links counted, then the links copied while counting
+walk :: Int -> (Int, Int)
+walk n = clones (count 0 (build n End))
+
+--' The same, walking with the `match` form
+walkMatch :: Int -> (Int, Int)
+walkMatch n = clones (countMatch 0 (build n End))

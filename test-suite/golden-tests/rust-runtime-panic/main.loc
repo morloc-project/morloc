@@ -1,5 +1,5 @@
 -- A panic raised inside the Rust pool's runtime is a runtime fault, not the
--- user's (model/panic.md PANIC-5, PANIC-9): it ends the pool with the
+-- user's (model/runtime/panic.md PANIC-5, PANIC-9): it ends the pool with the
 -- internal-error status, and no @try can catch it.
 module main (weave, safeWeave)
 

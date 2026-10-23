@@ -1,0 +1,12 @@
+module main (seqMap, parMap)
+
+import parallel.bench
+import parallel-rust
+
+source Rust from "benchcosts.rs"
+  ( "mlcparbench_spin" as spin
+  , "mlcparbench_spin_keep" as spinKeep
+  , "mlcparbench_spin_list" as spinList
+  , "mlcparbench_make_str" as makeStr
+  , "mlcparbench_str_cost" as strCost
+  )

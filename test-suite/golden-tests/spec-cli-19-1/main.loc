@@ -1,0 +1,25 @@
+-- Spec CLI-19: -f csv and -f tsv write a record list or a Table as a
+-- header and one line per record: null empty, the empty Str quoted, cells
+-- holding the delimiter, a quote or a line feed quoted. What is written
+-- reads back as an equal value.
+module main (rows, table)
+
+import root-py
+import table-py
+
+source Py from "src.py" ("py_id")
+py_id :: a -> a
+
+record Out = Out { s :: Str, n :: ?Int, r :: Real, b :: Bool }
+
+--' Records as read, through a Python pool
+rows ::
+  --' @form table
+  [Out] -> [Out]
+rows xs = py_id xs
+
+--' A table as read, through a Python pool
+table ::
+  --' @form table
+  Table n {s = Str, n = ?Int, r = Real, b = Bool} -> Table n {s = Str, n = ?Int, r = Real, b = Bool}
+table t = py_id t

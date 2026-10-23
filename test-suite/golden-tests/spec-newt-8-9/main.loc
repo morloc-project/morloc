@@ -1,0 +1,10 @@
+-- Spec NEWT-8: without deriving (Packable) a newtype has no pack; the
+-- rejection says so and does not ask for a signature that is present.
+module main (fromReal)
+
+import root-py
+
+newtype Celsius = Real
+
+fromReal :: Real -> Celsius
+fromReal x = pack x

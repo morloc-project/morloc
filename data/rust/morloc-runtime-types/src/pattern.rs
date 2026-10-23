@@ -457,34 +457,25 @@ pub fn check_pattern_against_schema(
     match path {
         Path::Linear(steps) => walk_steps(input, steps),
         Path::Group { prefix, children } => {
-            let mid = walk_steps(input, prefix)?;
-            // Post-slice group broadcast: `.[:].(.a;.b)` on `[T]` is
-            // `[T -> (T.a, T.b)]` per IntrMap desugar. When the prefix
-            // ends with a slice and the mid-type is a list, walk each
-            // child against the ELEMENT type and wrap the resulting
-            // tuple in a list.
-            let prefix_ends_with_slice = prefix
-                .last()
-                .map(|s| matches!(s, LinearStep::BracketSlice { .. }))
-                .unwrap_or(false);
-            if prefix_ends_with_slice
-                && mid.serial_type == SerialType::Array
-                && !mid.parameters.is_empty()
-            {
-                let elem = reroot_under(&mid, &mid.parameters[0]);
-                let child_schemas: Result<Vec<Schema>, _> = children
-                    .iter()
-                    .map(|c| check_pattern_against_schema(c, &elem))
-                    .collect();
-                let tuple = make_tuple(child_schemas?);
-                return Ok(array_of(tuple));
+            // A group after a slice applies to each element, as a linear
+            // tail after a slice does in `walk_steps`.
+            if let Some(j) = prefix.iter().position(|s| matches!(s, LinearStep::BracketSlice { .. })) {
+                let sliced = walk_steps(input, &prefix[..=j])?;
+                if sliced.serial_type == SerialType::Array && !sliced.parameters.is_empty() {
+                    let elem = reroot_under(&sliced, &sliced.parameters[0]);
+                    let rest = Path::Group {
+                        prefix: prefix[j + 1..].to_vec(),
+                        children: children.clone(),
+                    };
+                    return Ok(array_of(check_pattern_against_schema(&rest, &elem)?));
+                }
             }
+            let mid = walk_steps(input, prefix)?;
             let child_schemas: Result<Vec<Schema>, _> = children
                 .iter()
                 .map(|c| check_pattern_against_schema(c, &mid))
                 .collect();
-            let child_schemas = child_schemas?;
-            Ok(make_tuple(child_schemas))
+            Ok(make_tuple(child_schemas?))
         }
     }
 }
@@ -568,42 +559,16 @@ fn walk_step(schema: &Schema, step: &LinearStep) -> Result<Schema, WalkError> {
     }
 }
 
-/// Wrap `elem` in an `Array<T>` schema. Used by the walker's
-/// broadcast rule when a `.field`/`.N` step is applied to a list.
 fn array_of(elem: Schema) -> Schema {
-    Schema {
-        serial_type: SerialType::Array,
-        size: 1,
-        width: std::mem::size_of::<crate::shm_types::Array>(),
-        offsets: vec![0],
-        hint: None,
-        parameters: vec![elem],
-        keys: Vec::new(),
-        name: None,
-    }
+    Schema::array(elem)
 }
 
-fn make_tuple(children: Vec<Schema>) -> Schema {
-    // Single-child group is idempotent (unwrap the child).
-    if children.len() == 1 {
-        return children.into_iter().next().unwrap();
-    }
-    let width: usize = children.iter().map(|c| c.width).sum();
-    let mut offsets = Vec::with_capacity(children.len());
-    let mut off = 0usize;
-    for c in &children {
-        offsets.push(off);
-        off += c.width;
-    }
-    Schema {
-        serial_type: SerialType::Tuple,
-        size: children.len(),
-        width,
-        offsets,
-        hint: None,
-        parameters: children,
-        keys: Vec::new(),
-        name: None,
+// A one-child group is its child; an empty group is the unit value.
+fn make_tuple(mut children: Vec<Schema>) -> Schema {
+    match children.len() {
+        0 => Schema::primitive(SerialType::Nil),
+        1 => children.remove(0),
+        _ => Schema::tuple(children),
     }
 }
 
@@ -634,6 +599,10 @@ pub fn path_to_walker_input(path: &Path) -> (String, Vec<EncodedArg>) {
 fn encode_path(path: &Path, out: &mut String, args: &mut Vec<EncodedArg>) {
     match path {
         Path::Linear(steps) => encode_steps(steps, out, args),
+        Path::Group { prefix, children } if children.len() == 1 => {
+            encode_steps(prefix, out, args);
+            encode_path(&children[0], out, args);
+        }
         Path::Group { prefix, children } => {
             encode_steps(prefix, out, args);
             out.push('.');
@@ -931,45 +900,13 @@ mod tests {
     }
 
     fn tuple_of(children: Vec<Schema>) -> Schema {
-        let width: usize = children.iter().map(|c| c.width).sum();
-        let mut offsets = Vec::with_capacity(children.len());
-        let mut off = 0usize;
-        for c in &children {
-            offsets.push(off);
-            off += c.width;
-        }
-        Schema {
-            serial_type: SerialType::Tuple,
-            size: children.len(),
-            width,
-            offsets,
-            hint: None,
-            parameters: children,
-            keys: vec![],
-            name: None,
-        }
+        Schema::tuple(children)
     }
 
     fn record_of(fields: Vec<(&str, Schema)>) -> Schema {
         let keys: Vec<String> = fields.iter().map(|(k, _)| k.to_string()).collect();
         let params: Vec<Schema> = fields.into_iter().map(|(_, v)| v).collect();
-        let width: usize = params.iter().map(|c| c.width).sum();
-        let mut offsets = Vec::with_capacity(params.len());
-        let mut off = 0usize;
-        for c in &params {
-            offsets.push(off);
-            off += c.width;
-        }
-        Schema {
-            serial_type: SerialType::Map,
-            size: params.len(),
-            width,
-            offsets,
-            hint: None,
-            parameters: params,
-            keys,
-            name: None,
-        }
+        Schema::record(params, keys)
     }
 
     #[test]
@@ -1022,6 +959,49 @@ mod tests {
         assert_eq!(r.parameters.len(), 2);
         assert_eq!(r.parameters[0].serial_type, SerialType::String);
         assert_eq!(r.parameters[1].serial_type, SerialType::Sint64);
+    }
+
+    #[test]
+    fn group_result_has_the_fmt6_layout() {
+        let cases = [
+            ("at2i4s", ".[0:2].(.0;.1)"),
+            ("at2i4s", ".[0:2].(.1;.0)"),
+            ("at2u1i4", ".[0].(.0;.1)"),
+            ("at2f8i1", ".[0:2].(.1;.0)"),
+            ("am24names3agei4", ".[0:10].(.name;.age)"),
+        ];
+        for (schema, pattern) in cases {
+            let input = crate::schema::parse_schema(schema).unwrap();
+            let r = check_pattern_against_schema(&parse_pattern(pattern).unwrap(), &input).unwrap();
+            let tuple = if r.serial_type == SerialType::Array { &r.parameters[0] } else { &r };
+            let canonical =
+                crate::schema::parse_schema(&crate::schema::schema_to_string(tuple)).unwrap();
+            assert_eq!(
+                (tuple.width, &tuple.offsets),
+                (canonical.width, &canonical.offsets),
+                "{schema} {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn group_after_an_inner_slice_applies_per_element() {
+        let cases = [
+            ("am11pm21ai41bs", ".[0:2].p.(.a;.b)", "at2i4s"),
+            ("aat2i4s", ".[0:2].[0:1].(.1;.0)", "aat2si4"),
+        ];
+        for (schema, pattern, expected) in cases {
+            let input = crate::schema::parse_schema(schema).unwrap();
+            let r = check_pattern_against_schema(&parse_pattern(pattern).unwrap(), &input).unwrap();
+            assert_eq!(crate::schema::schema_to_string(&r), expected, "{schema} {pattern}");
+        }
+    }
+
+    #[test]
+    fn one_child_group_encodes_as_its_child() {
+        let (path, args) = path_to_walker_input(&parse_pattern(".[0:2].(.1)").unwrap());
+        assert_eq!(path, ".[:].1");
+        assert_eq!(args.len(), 3);
     }
 
     #[test]

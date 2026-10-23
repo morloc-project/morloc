@@ -1,0 +1,19 @@
+-- An ungrouped command named after a group: refused (CMD-4).
+
+module main
+  ( h
+  , --* group: math
+    --* Arithmetic
+    f
+  )
+
+import root-py
+
+--' Add one
+f :: Int -> Int
+f x = x + 1
+
+--' Double
+--' @name math
+h :: Int -> Int
+h x = x * 2

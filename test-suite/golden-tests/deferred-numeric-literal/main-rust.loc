@@ -1,0 +1,29 @@
+-- The program of main-py.loc in Rust.
+
+module main (x, y, z, inList, inTuple)
+
+import root-rust
+
+pair :: a -> a -> (a, a)
+pair a b = (a, b)
+
+wrap :: Int -> ?Int
+wrap q = q
+
+toR :: Int -> Real
+toR q = 1.5
+
+x :: Int -> (?Int, ?Int)
+x n = pair 7 (wrap n)
+
+y :: Int -> (Real, Real)
+y n = pair 7 (toR n)
+
+z :: Int -> (?Int, ?Int)
+z n = pair 7 Null
+
+inList :: Int -> [?Int]
+inList n = [7, wrap n]
+
+inTuple :: Int -> ((Real, Int), (Real, Int))
+inTuple n = pair (7, 1) (toR n, 2)

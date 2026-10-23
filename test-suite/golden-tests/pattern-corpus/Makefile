@@ -4,8 +4,8 @@ NEXUS := $(MHOME)/bin/morloc-nexus
 # Pattern-walker corpus: cross-check morloc's compile-time pattern
 # desugar against `morloc-nexus view --pattern`. Every case pipes the
 # original data (emitted as a data packet via `-f packet`) through
-# `view --pattern` and byte-compares the msgpack output against the
-# morloc-native extract that `@savem` produced inside the function.
+# `view --pattern` and compares its JSON with the JSON of the
+# morloc-native extract that `@save` wrote inside the function.
 # One line of obs.txt per case: `<fn> <pattern> OK|DIFFER`.
 #
 # Group separator note: morloc source uses `,` (`.(.a,.b)`) while the
@@ -14,9 +14,10 @@ NEXUS := $(MHOME)/bin/morloc-nexus
 
 # Helper: run one case. $(1) = function name; $(2) = --pattern string.
 define run_case
-	./prog -f packet -o orig-$(1).packet @ $(1) ref-$(1).mpk 2>> obs.err
-	cat orig-$(1).packet | $(NEXUS) view --pattern '$(2)' - -f mpk > obs-$(1).mpk 2>> obs.err
-	@if cmp -s ref-$(1).mpk obs-$(1).mpk; then \
+	./prog -f packet -o orig-$(1).packet @ $(1) ref-$(1).packet 2>> obs.err
+	$(NEXUS) view ref-$(1).packet -f json > ref-$(1).json 2>> obs.err
+	cat orig-$(1).packet | $(NEXUS) view --pattern '$(2)' - -f json > obs-$(1).json 2>> obs.err
+	@if cmp -s ref-$(1).json obs-$(1).json; then \
 	    printf '%-24s %-24s OK\n'     '$(1)' '$(2)' >> obs.txt; \
 	 else \
 	    printf '%-24s %-24s DIFFER\n' '$(1)' '$(2)' >> obs.txt; \
@@ -51,5 +52,5 @@ all:
 
 clean:
 	rm -rf prog pools __pycache__ *.err
-	rm -f ref-*.mpk orig-*.packet obs-*.mpk
+	rm -f ref-*.packet ref-*.json orig-*.packet obs-*.json
 	rm -rf *-build *build.tmp*

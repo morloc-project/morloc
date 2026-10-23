@@ -1,0 +1,21 @@
+-- Spec DIAG-5: a failure's trace lists the named morloc calls it passed
+-- through, innermost first; sub-expressions inlined into a caller are not
+-- listed. Generated ids are stripped before comparing.
+module main (deep, caught)
+
+import root-rust
+
+source Rust from "f.rs" ("boom")
+
+boom :: Int -> Int
+
+down :: Int -> Int
+down n
+  ? n == 0 = boom n
+  : 1 + down (n - 1)
+
+deep :: Int -> Int
+deep n = down n
+
+caught :: Int -> Try Str Int
+caught n = @try (down n)

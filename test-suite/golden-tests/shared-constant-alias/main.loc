@@ -1,0 +1,91 @@
+-- A top-level constant defined as another top-level name.
+--
+-- An alias `k2 = k` is a copy of `k2` whose definition is a copy of `k`.
+-- Each constant is evaluated once per command however it is reached, so
+-- reading both `k` and `k2` still evaluates `k` once, and an alias of an
+-- alias is no different. A nullary constructor is a top-level name too, so
+-- `none = Empty` is an alias. A command whose whole body is such a constant
+-- (`aliasCommand = flag`) must still call the functions inside it, not itself.
+--
+-- `tick` records each evaluation in `tick.log`; `ticks` reads the count
+-- after its argument is computed.
+
+module main
+  ( nullaryCtor
+  , aliasLiteral
+  , aliasList
+  , aliasCount
+  , aliasOfAliasCount
+  , aliasCommand
+  , aliasOfAliasCommand
+  )
+
+import root-py
+
+source Py from "helpers.py" ("tick", "ticks", "note")
+tick :: Int -> Int
+ticks :: a -> Int
+note :: Str -> (Int, Int) -> (Int, Int)
+
+data Box a = Empty | Full a
+
+none :: Box a
+none = Empty
+
+size :: Box a -> Int
+size | Empty = 0
+     | (Full _) = 1
+
+orFull :: a -> Box a -> Box a
+orFull x b = Full x
+
+nullaryCtor :: Int -> Int
+nullaryCtor n = size (orFull n none)
+
+lit :: Int
+lit = 3
+
+lit2 :: Int
+lit2 = lit
+
+aliasLiteral :: Int -> Int
+aliasLiteral n = lit2 + n
+
+xs :: [Int]
+xs = [1, 2, 3]
+
+xs2 :: [Int]
+xs2 = xs
+
+aliasList :: Int -> Int
+aliasList n = n + length xs2
+
+base :: Int
+base = tick 3
+
+base2 :: Int
+base2 = base
+
+base3 :: Int
+base3 = base2
+
+aliasCount :: Int -> Int
+aliasCount n = ticks (base + base2 + n)
+
+aliasOfAliasCount :: Int -> Int
+aliasOfAliasCount n = ticks (base + base3 + n)
+
+fin :: (Int, Int) -> Bool
+fin r = 0 == .0 r
+
+flag :: Bool
+flag = fin (note "g" (0, 0))
+
+flag2 :: Bool
+flag2 = flag
+
+aliasCommand :: Bool
+aliasCommand = flag
+
+aliasOfAliasCommand :: Bool
+aliasOfAliasCommand = flag2

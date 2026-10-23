@@ -154,7 +154,7 @@ if should_run "shape"; then
     assert_contains "unrolled default surfaced in description" "default" "$(jget "$TOOLS" "t('configFlat')['inputSchema']['properties'].get('numThreads',{}).get('description','')")"
 
     # -- record arg: -> whole-object property --------------------------------
-    assert_eq "group_opt -> single property" "1" "$(jget "$TOOLS" "len(t('configWhole')['inputSchema']['properties'])")"
+    assert_eq "group_opt -> the record and each field" "configwhole,numThreads,removeCaches,tmpDir" "$(jget "$TOOLS" "','.join(sorted(t('configWhole')['inputSchema']['properties']))")"
     assert_eq "group_opt property named for type" "object" "$(jget "$TOOLS" "t('configWhole')['inputSchema']['properties']['configwhole']['type']")"
     assert_contains "group_opt nests its fields" "tmpDir" "$(jget "$TOOLS" "sorted(t('configWhole')['inputSchema']['properties']['configwhole']['properties'].keys())")"
 
@@ -201,6 +201,8 @@ if should_run "call"; then
     assert_eq "configWhole whole-object -> string" '"/y:3:False"' "$(jget "$r" "d['content'][0]['text']")"
     r="$(mcp_call "$SHAPES" configWhole '{}')"
     assert_eq "configWhole{} -> defaults"        '"/tmp:1:False"' "$(jget "$r" "d['content'][0]['text']")"
+    r="$(mcp_call "$SHAPES" configWhole '{"configwhole":{"numThreads":3},"tmpDir":"/z"}')"
+    assert_eq "configWhole field over a partial record" '"/z:3:False"' "$(jget "$r" "d['content'][0]['text']")"
 
     # record return -> structuredContent mirrors the value
     r="$(mcp_call "$SHAPES" mkResult '{"_1":7}')"
@@ -338,7 +340,7 @@ if should_run "exclude"; then
     if compile_program "excluded.loc" "$EXCL_DIR"; then
         TOOLS="$(mcp_list "$EXCL_DIR/nexus")"
         assert_contains "control 'plainAdd' present"  "plainAdd"  "$TOOLS"
-        assert_not_contains "@stdin 'readStdin' excluded" "readStdin" "$TOOLS"
+        assert_eq "@stdin 'readStdin' served, its input required" "_1" "$(jget "$TOOLS" "','.join(t('readStdin')['inputSchema']['required'])")"
     else
         skip "excluded.loc failed to compile (@stdin group)"
         cat "$EXCL_DIR"/build-*.err 2>/dev/null | head -20

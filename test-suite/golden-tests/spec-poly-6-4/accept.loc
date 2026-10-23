@@ -1,0 +1,11 @@
+module main (f)
+
+import root-py
+
+count :: [a] -> Int
+count xs
+  ? length xs == 0 = 0
+  : 1 + count (.[1:] xs)
+
+f :: Int -> Int
+f x = count [x, x, x]

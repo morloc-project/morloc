@@ -1,0 +1,18 @@
+-- CPP-6: a mapped record whose recursive field is not const is rejected even
+-- when morloc never builds or marshals it (see ok.loc).
+module badrecsrc (bad)
+
+import root
+import root-cpp
+
+source Cpp from "bad-recsrc.hpp" ("mkNode", "nodeLen")
+
+record SNode where
+  head :: Int
+  tail :: ?SNode
+record Cpp => SNode = "snode_t"
+mkNode :: Int -> SNode
+nodeLen :: SNode -> Int
+
+bad :: Int -> Int
+bad n = nodeLen (mkNode n)

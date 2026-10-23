@@ -1,0 +1,19 @@
+-- Spec NEWT-7: a newtype with a representation can be unwrapped. Neither
+-- Vector nor Name has a C++ form of its own, so in C++ `unpack` is the
+-- identity.
+module main (toList, nameLen)
+
+import root-cpp
+import vector-cpp
+
+newtype Name = Str
+
+source Cpp from "main.hpp" ("str_len" as strLen, "list_sum" as listSum)
+strLen :: Str -> Int
+listSum :: [Int] -> Int
+
+toList :: Vector 3 Int -> Int
+toList v = listSum (unpack v)
+
+nameLen :: Name -> Int
+nameLen n = strLen (unpack n)

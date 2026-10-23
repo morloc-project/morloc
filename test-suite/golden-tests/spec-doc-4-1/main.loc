@@ -1,0 +1,16 @@
+-- Spec DOC-4: a term's docstring is never inherited on assignment; the
+-- docstrings of the types in the new term's signature still apply.
+module main (travel, travel2)
+
+import root-py
+
+--' Wind speed in m/s
+--' @arg -w/--wind
+--' @default 3
+type WindSpeed = Int
+
+--' Travel time
+travel :: WindSpeed -> Int
+travel w = w
+
+travel2 = travel

@@ -1,0 +1,10 @@
+-- Spec MOD-3: `(*)` exports imported terms as well as local ones.
+module foo (inc)
+  import root-py
+  inc :: Int -> Int
+  inc x = x + 1
+
+module main (*)
+  import foo
+  twice :: Int -> Int
+  twice x = inc (inc x)

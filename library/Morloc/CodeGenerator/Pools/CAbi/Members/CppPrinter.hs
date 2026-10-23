@@ -43,7 +43,7 @@ import qualified Data.Text as T
 import qualified Data.Map as Map
 import Morloc.CodeGenerator.Grammars.Common (DispatchEntry (..), manNamer)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-import Morloc.CodeGenerator.Namespace (MDoc, RealLit (..))
+import Morloc.CodeGenerator.Namespace (Intrinsic (..), MDoc, RealLit (..), SaveFormat (..))
 import Morloc.Data.Doc
 import Morloc.DataFiles as DF
 import Morloc.Quasi
@@ -107,10 +107,12 @@ printExpr (IRawExpr d) = pretty d
 printExpr (IEval e) = printExpr e <> "()"
 printExpr (IIntrinsicHash sid e) =
   [idoc|_mlc_hash(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
-printExpr (IIntrinsicSave fmt sid level e path)
-  | fmt == "json" = [idoc|_mlc_save_json(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr path})|]
-  | fmt == "voidstar" = [idoc|_mlc_save_voidstar(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr path})|]
-  | otherwise = [idoc|_mlc_save(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr path})|]
+printExpr (IIntrinsicCompare intr sid a b) =
+  [idoc|(_mlc_compare(#{printExpr a}, #{printExpr b}, mlc_schema_table[#{pretty sid}]) #{if intr == IntrEq then "==" else "<=" :: MDoc} 0)|]
+printExpr (IIntrinsicSave SaveJson sid level e path) =
+  [idoc|_mlc_save_json(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr path})|]
+printExpr (IIntrinsicSave SaveVoidstar sid level e path) =
+  [idoc|_mlc_save_voidstar(#{printExpr e}, mlc_schema_table[#{pretty sid}], #{printExpr level}, #{printExpr path})|]
 printExpr (IIntrinsicLoad sid (Just t) path) =
   [idoc|_mlc_load<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
 printExpr (IIntrinsicLoad sid Nothing path) =
@@ -374,10 +376,9 @@ printRecordTemplate ts = encloseSep "<" ">" "," ts
 --
 -- The wrapper is a struct rather than a bare alias so the type can be
 -- forward-declared: a recursive arm holds the wrapper by value behind the
--- variant's @mlc::rec_ptr@, and an alias to @std::variant<...>@ cannot be
--- named before its alternatives are complete. The pointer is a
--- @rec_ptr@ rather than a bare @std::shared_ptr@ so that releasing a deep
--- chain of arms runs iteratively instead of one destructor frame per level.
+-- variant's @std::shared_ptr@, and an alias to @std::variant<...>@ cannot be
+-- named before its alternatives are complete. Arms are made by
+-- @mlc::make_arm@, so releasing a deep chain takes bounded stack (STATE-8).
 -- | The marshalling node of a generated type: the @MlcNode@ specialization
 -- with its three walk steps declared.
 --
@@ -439,7 +440,7 @@ printCppVariantDecl name arms =
     [ vsep ["struct" <+> armName name c <> ";" | (c, _) <- arms]
     , "struct" <+> name <+> "{"
     , indent 4 ("std::variant<"
-                  <> hsep (punctuate "," ["mlc::rec_ptr<" <> armName name c <> ">" | (c, _) <- arms])
+                  <> hsep (punctuate "," ["std::shared_ptr<const " <> armName name c <> ">" | (c, _) <- arms])
                   <> "> v;")
     , "};"
     ]
@@ -483,7 +484,9 @@ printCppVariantSerializers name arms =
         [ "void MlcNode<" <> name <> ">::size_step(MlcSizeWalk& w, const Schema* schema, const"
             <+> name <> "& obj, size_t) {"
         , indent 4 $ vsep
-            [ "switch (obj.v.index()) {"
+            [ "static_assert(mlc::const_arms<decltype(obj.v)>::value,"
+            , indent 4 ("\"CPP-6: every arm of a data type is a std::shared_ptr<const T>\");")
+            , "switch (obj.v.index()) {"
             , indent 4 $ vsep
                 [ "case" <+> pretty i <> ":" <+>
                     (if null ts
@@ -523,8 +526,8 @@ printCppVariantSerializers name arms =
             , indent 4 $ vsep
                 [ "case" <+> pretty i <> ":" <+>
                     (if null ts
-                       then "out->v = std::make_shared<" <> armName name c <> ">(); break;"
-                       else "{ auto arm = std::make_shared<" <> armName name c
+                       then "out->v = mlc::make_arm<" <> armName name c <> ">(); break;"
+                       else "{ auto arm = mlc::make_arm<" <> armName name c
                               <> ">(); out->v = arm; w.variant_payload(schema->parameters["
                               <> pretty i <> "], data, arm.get()); break; }")
                 | (i, (c, ts)) <- idxArms ]
