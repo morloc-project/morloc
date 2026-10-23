@@ -719,7 +719,7 @@ optType =
   switch
     ( long "type"
         <> short 't'
-        <> help "Parse a typestring instread of an expression"
+        <> help "Parse a typestring instead of an expression"
     )
 
 optListKind :: Parser (Maybe ListKind)

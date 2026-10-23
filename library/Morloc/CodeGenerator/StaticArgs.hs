@@ -10,10 +10,9 @@ Maintainer  : z@morloc.io
 A recursive helper that takes a function argument and passes it unchanged to
 every recursive call (a static argument) receives that function as a value:
 a closure its manifold is handed at entry. A closure value is heavier than the
-function it names. It is a trait object in Rust, where it cannot be shared
-between threads, so a sourced function that runs it on several threads cannot
-take it; and it is a proxy that calls back into the pool when the helper is
-entered through its serial interface, one round trip per application.
+function it names: an allocated callable, called indirectly, and a proxy
+that calls back into the pool when the helper is entered through its serial
+interface, one round trip per application.
 
 When a call site passes a closed function (a sourced function, or a lambda
 with no free variables) at such a position, this pass gives the call its own

@@ -1919,7 +1919,7 @@ int32_t mlc_cell_put(int64_t handle, const Schema* schema,
 // folds to.
 int64_t mlc_cell_count(int64_t handle, ERRMSG);
 
-// Accumulator `index`, for the merge. Returns -1-free NULL on error.
+// Accumulator `index`, for the merge. Returns NULL on error.
 void* mlc_cell_slot(int64_t handle, int64_t index, const Schema* schema,
                     ERRMSG);
 
