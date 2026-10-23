@@ -12210,8 +12210,11 @@ mod write_behind_tests {
         for p in ["/dev/null", "/tmp/x", "-x", "data/-", "/proc/1234/status", "/proc/self/fdinfo/1"] {
             assert!(!names_server_stdio(p), "{p}");
         }
-        for p in ["/tmp/../proc/self/fd/1", "/proc/self/task/../fd/1", "/proc/self/root/proc/self/fd/1",
-                  "/dev/fd/../fd/1"] {
+        for p in ["/dev/fd/../fd/1", "/dev/../dev/fd/1"] {
+            assert!(names_server_stdio(p), "{p}");
+        }
+        #[cfg(target_os = "linux")]
+        for p in ["/tmp/../proc/self/fd/1", "/proc/self/task/../fd/1", "/proc/self/root/proc/self/fd/1"] {
             assert!(names_server_stdio(p), "{p}");
         }
         struct Gone(std::path::PathBuf);
@@ -12231,8 +12234,14 @@ mod write_behind_tests {
         let named = |p: &std::path::Path| names_server_stdio(p.to_str().unwrap());
         assert!(named(&link("out", "/dev/stdout")), "a link to /dev/stdout");
         assert!(named(&link("chain", "out")), "a relative link to a link to /dev/stdout");
-        assert!(named(&link("up", "../../proc/self/fd/1")), "a relative link through ..");
-        assert!(named(&link("fds", "/proc/self/fd").join("1")), "a path through a linked directory");
+        let to_root = "../".repeat(std::fs::canonicalize(&dir.0).unwrap().components().count() - 1);
+        assert!(named(&link("up", &format!("{to_root}dev/fd/1"))), "a relative link through ..");
+        assert!(named(&link("fds", "/dev/fd").join("1")), "a path through a linked directory");
+        #[cfg(target_os = "linux")]
+        {
+            assert!(named(&link("up-proc", &format!("{to_root}proc/self/fd/1"))), "a relative link into /proc");
+            assert!(named(&link("fds-proc", "/proc/self/fd").join("1")), "a path through a linked /proc directory");
+        }
         assert!(!named(&link("plain", "/tmp")), "a link to an ordinary directory");
         assert!(!named(&dir.0.join("new-file")), "a file that does not exist yet");
     }
