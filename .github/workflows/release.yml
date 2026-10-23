@@ -269,6 +269,18 @@ jobs:
         run: stack test --system-ghc --no-install-ghc morloc:morloc-integration-test
         timeout-minutes: 45
 
+      - name: Collect failing golden tests
+        if: failure()
+        run: ./test-suite/collect-golden-failures.sh golden-failures
+      - name: Upload test failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-failures-release-shard${{ matrix.shard }}
+          path: golden-failures/
+          if-no-files-found: ignore
+          retention-days: 7
+
       # The shipped compiler comes from the rust-binary job's static-build image
       # (Ubuntu 20.04, glibc >= 2.31 -- forward-compatible on any newer host),
       # NOT this job's stack build (ubuntu-latest, a much newer glibc floor). The
