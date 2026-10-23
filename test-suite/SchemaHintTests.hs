@@ -12,14 +12,30 @@ import Test.Tasty.HUnit
 import Morloc.CodeGenerator.Docstrings
   ( SchemaCat (..)
   , classifySchema
+  , listElementSchema
   , peelHint
+  , peelRecDecl
   )
+import qualified Data.Text as T
+import Morloc.CodeGenerator.Serial (encode64)
 
 schemaHintTests :: TestTree
 schemaHintTests = testGroup "CLI schema hint"
   [ peelHintTests
+  , peelRecDeclTests
   , classifySchemaTests
   ]
+
+-- The length prefix is the inverse of the encoder's, at every width.
+peelRecDeclTests :: TestTree
+peelRecDeclTests = testGroup "peelRecDecl" $
+  [ testCase ("name of length " <> show n) $
+      peelRecDecl ("&" <> T.pack (encode64 n) <> T.replicate n "x" <> "ai4") @?= "ai4"
+  | n <- [1, 4, 9, 10, 25, 36, 63, 64, 70, 200]
+  ]
+  <> [ testCase "list element skips a dimension" $
+         listElementSchema "a:3i4" @?= Just "i4"
+     ]
 
 peelHintTests :: TestTree
 peelHintTests = testGroup "peelHint"

@@ -1176,17 +1176,27 @@ peelHint t = case MT.uncons t of
       Just ('<', rest) -> skipBalanced rest (d + 1)
       Just (_, rest)   -> skipBalanced rest d
 
--- | Strip a leading `&<klen><name>` rec-decl prefix.
+-- | Strip a leading `&<klen><name>` rec-decl prefix, where @klen@ is the
+-- name's length in the encoding of 'Morloc.CodeGenerator.Serial.encode64'.
 peelRecDecl :: Text -> Text
 peelRecDecl t = case MT.uncons t of
-  Just ('&', tt) -> case MT.uncons tt of
-    Just (c, rest)
-      | c >= 'a' && c <= 'p' ->
-          let klen = fromEnum c - fromEnum 'a'
-              (_name, post) = MT.splitAt klen rest
-          in post
-    _ -> t
+  Just ('&', tt) | Just (klen, rest) <- decode64 tt -> MT.drop klen rest
   _ -> t
+  where
+    decode64 x = case MT.uncons x of
+      Just ('=', xs) -> do
+        (lo, xs') <- digit xs
+        (hi, xs'') <- decode64 xs'
+        return (lo + 64 * hi, xs'')
+      _ -> digit x
+    digit x = case MT.uncons x of
+      Just (c, xs)
+        | c >= '0' && c <= '9' -> Just (fromEnum c - fromEnum '0', xs)
+        | c >= 'a' && c <= 'z' -> Just (fromEnum c - fromEnum 'a' + 10, xs)
+        | c >= 'A' && c <= 'Z' -> Just (fromEnum c - fromEnum 'A' + 36, xs)
+        | c == '+' -> Just (62, xs)
+        | c == '/' -> Just (63, xs)
+      _ -> Nothing
 
 isStrWireSchema :: Text -> Bool
 isStrWireSchema s = peelHint (peelRecDecl s) == "s"
@@ -1204,10 +1214,15 @@ isArrayWireSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
   Just ('a', _) -> True
   _ -> False
 
+-- | The element schema of a list-shaped schema, past any `:N` dimension.
 listElementSchema :: Text -> Maybe Text
 listElementSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
-  Just ('a', rest) -> Just rest
+  Just ('a', rest) -> Just (skipDim rest)
   _ -> Nothing
+  where
+    skipDim t = case MT.uncons t of
+      Just (':', tt) -> MT.dropWhile (\c -> c >= '0' && c <= '9') tt
+      _ -> t
 
 isListOfStrWireSchema :: Text -> Bool
 isListOfStrWireSchema s = maybe False isStrWireSchema (listElementSchema s)

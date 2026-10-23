@@ -42,6 +42,14 @@ import qualified Data.Time.Format
 import qualified Data.Vector as V
 import qualified Morloc.BaseTypes as MBT
 import qualified Morloc.CodeGenerator.Docstrings as Docstrings
+import Morloc.CodeGenerator.Docstrings
+  ( isArrayWireSchema
+  , isListOfStrWireSchema
+  , isStrOrOptStrWireSchema
+  , listElementSchema
+  , peelHint
+  , peelRecDecl
+  )
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.LogTemplate (RenderedRunLog (..), renderRunLogTemplate)
 import Morloc.CodeGenerator.Namespace
@@ -1743,92 +1751,6 @@ isQuotedArg _literal mSource many mschema =
       | otherwise -> isStrOrOptStrWireSchema s || classifySchema s == CatIFile
 
 
--- | Strip a leading addHint decoration `<...>` if present. Hints
--- carry the concrete-type tag for newtypes / aliases over a built-in
--- primitive. The implementation drops the literal characters between
--- the angle brackets; brackets without a closing `>` are left in place
--- (defensive against malformed schemas).
-peelHint :: Text -> Text
-peelHint t = case MT.uncons t of
-  Just ('<', tt) -> case MT.span (/= '>') tt of
-    (_, post) -> case MT.uncons post of
-      Just ('>', after) -> peelHint after
-      _ -> t
-  _ -> t
-
--- | Strip a leading `&<klen><name>` rec-decl prefix if present. The
--- klen is a base64-encoded character count; for names of length < 64
--- (the practical case), klen is a single character we can decode by
--- table. Multi-character klens (encoding lengths >= 64, marked with
--- a leading `=`) are left in place -- recursive records with
--- 64+-character names never appear at the position the wire-shape
--- helpers below probe (primitive scalar / top-level array), so the
--- fallback is harmless.
-peelRecDecl :: Text -> Text
-peelRecDecl t = case MT.uncons t of
-  Just ('&', rest) -> case MT.uncons rest of
-    Just (c, body) | Just n <- decode1 c -> MT.drop n body
-    _ -> t
-  _ -> t
-  where
-    decode1 c
-      | c >= '0' && c <= '9' = Just (fromEnum c - fromEnum '0')
-      | c >= 'a' && c <= 'z' = Just (fromEnum c - fromEnum 'a' + 10)
-      | c >= 'A' && c <= 'Z' = Just (fromEnum c - fromEnum 'A' + 36)
-      | c == '+'             = Just 62
-      | c == '/'             = Just 63
-      | otherwise            = Nothing
-
--- | True iff the rendered wire schema reduces to the plain Str
--- primitive 's'. Peels rec-decl and addHint decorations but NOT the
--- optional `?` wrapper; 'isOptStrWireSchema' handles `?s` separately
--- so the `many + literal` validator can reject optional-element
--- lists (no token can express null in literal mode).
-isStrWireSchema :: Text -> Bool
-isStrWireSchema s0 = peelHint (peelRecDecl s0) == "s"
-
--- | True iff the schema reduces to `?s` (Optional Str primitive),
--- peeling the same outer decorations as 'isStrWireSchema' and a single
--- `?` wrapper before the primitive token.
-isOptStrWireSchema :: Text -> Bool
-isOptStrWireSchema s0 = case MT.uncons (peelHint (peelRecDecl s0)) of
-  Just ('?', rest) -> peelHint rest == "s"
-  _ -> False
-
--- | True iff the schema reduces to either Str or Optional Str. Used by
--- 'isQuotedArg' (the scalar literal:true gate) and by validateArgSpecs
--- when checking scalar literal:true.
-isStrOrOptStrWireSchema :: Text -> Bool
-isStrOrOptStrWireSchema s = isStrWireSchema s || isOptStrWireSchema s
-
--- | True iff the schema is array-shaped at the top level. Peels
--- rec-decl + addHint, expects `a`. Used by the `many: true` validator
--- in lieu of the surface-type 'isListType' check, so newtypes / aliases
--- whose wire form is `a<elem>` (but whose surface type isn't the
--- built-in `List` constructor) are also accepted.
-isArrayWireSchema :: Text -> Bool
-isArrayWireSchema s0 = case MT.uncons (peelHint (peelRecDecl s0)) of
-  Just ('a', _) -> True
-  _ -> False
-
--- | For a list-shape schema ('a' + optional dim + element schema),
--- return the element schema text. Returns Nothing if the schema is
--- not list-shaped at the top level.
-listElementSchema :: Text -> Maybe Text
-listElementSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
-  Just ('a', rest) -> Just (skipDim rest)
-  _ -> Nothing
-  where
-    skipDim t = case MT.uncons t of
-      Just (':', tt) -> MT.dropWhile (\c -> c >= '0' && c <= '9') tt
-      _ -> t
-
--- | True iff the schema is a list whose element wire schema is the
--- plain Str primitive 's' (NOT `?s`). Optional-element lists are
--- rejected so the `many + literal` validator can produce a focused
--- diagnostic.
-isListOfStrWireSchema :: Text -> Bool
-isListOfStrWireSchema s = maybe False isStrWireSchema (listElementSchema s)
 
 -- ======================================================================
 -- Argument spec validation (compile-time)
@@ -1847,6 +1769,11 @@ isListOfStrWireSchema s = maybe False isStrWireSchema (listElementSchema s)
 -- than re-rendering.
 validateArgSpecs :: Int -> [CmdArg] -> [SerialAST] -> [Text] -> MorlocMonad ()
 validateArgSpecs i cmdargs asts schemas = do
+  CM.when (length cmdargs /= length asts || length asts /= length schemas) $
+    MM.throwCompilerBug $
+      "command at index" <+> pretty i <+> "has" <+> pretty (length cmdargs)
+        <+> "documented arguments," <+> pretty (length asts) <+> "wire forms and"
+        <+> pretty (length schemas) <+> "schemas"
   loc <- Docstrings.argLocPrefix i
   CM.zipWithM_ (validateOne loc) (zip3 [(1::Int) ..] cmdargs schemas) asts
   where
@@ -3578,15 +3505,8 @@ buildManifest ManifestInputs{..} =
               gen = render (Serial.serialAstToGeneralSchema ast)
           in argToJson (Docstrings.argKey n a) (Just s) (Just gen) (Just s) entries a
                : walk (nextPos n a) rest ss as
-        walk n (a : rest) [] _ =
-          -- Defensive: more args than schemas. Emit with no schema so
-          -- we fail cleanly downstream rather than silently misaligning.
-          argToJson (Docstrings.argKey n a) Nothing Nothing Nothing [] a : walk (nextPos n a) rest [] []
-        walk n (a : rest) (s : ss) [] =
-          -- Defensive: validateArgSpecs should have caught this. Emit
-          -- with no per-entry schemas rather than crash. Without the
-          -- AST there is no general form to derive.
-          argToJson (Docstrings.argKey n a) (Just s) Nothing (Just s) [] a : walk (nextPos n a) rest ss []
+        walk _ (_ : _) _ _ =
+          error "argsJson: arguments, schemas and wire forms differ in length, which generate checks before rendering"
 
     -- Nested @return@ object replacing v1's flat @return_schema@ /
     -- @return_type@ / @return_desc@. Also carries @constraints@ and
@@ -3675,6 +3595,20 @@ generate cs rASTs helperRASTs = do
       replayEntries = Map.keysSet replayPlans
       fdata = map (stageReplayArgs replayEntries . inheritParentArgDocs parentArgMap) fdataRaw
       gasts = map (stageReplayArgs replayEntries . inheritParentArgDocs parentArgMap) gastsRaw
+
+  -- An inherited argument list must still align with the command's own
+  -- wire forms, which the manifest pairs it with.
+  let aligned :: Text -> [CmdArg] -> [Text] -> [SerialAST] -> MorlocMonad ()
+      aligned name args schemas asts =
+        CM.unless (length args == length schemas && length schemas == length asts) $
+          MM.throwCompilerBug $
+            "command" <+> pretty name <+> "has" <+> pretty (length args)
+              <+> "documented arguments," <+> pretty (length asts) <+> "wire forms and"
+              <+> pretty (length schemas) <+> "schemas"
+  CM.forM_ fdata $ \fd ->
+    aligned (fdataTermName fd) (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd) (fdataArgAsts fd)
+  CM.forM_ gasts $ \g ->
+    aligned (commandTermName g) (cmdDocArgs (commandDocs g)) (commandArgSchemas g) (commandArgAsts g)
 
   -- Every action has a replay plan, and every planned replay entry was
   -- emitted.
