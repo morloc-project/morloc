@@ -82,7 +82,7 @@ jobs:
   # Only the compiler binary is uploaded -- the platform-independent rust/
   # source is carried by the Linux jobs and merged at release time.
   compiler-macos:
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -97,8 +97,8 @@ jobs:
             ~/.stack/snapshots
             ~/.stack/setup-exe-cache
             .stack-work
-          key: stack-deps-release-macos-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
-          restore-keys: stack-deps-release-macos-
+          key: stack-deps-release-macos-15-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
+          restore-keys: stack-deps-release-macos-15-
       # The cache holds built snapshot packages but not ~/.stack/pantry, so
       # the Hackage index must be fetched before any unbuilt package is.
       - name: Update Hackage index
