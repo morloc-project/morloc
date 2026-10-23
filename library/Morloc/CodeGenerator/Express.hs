@@ -358,9 +358,7 @@ addLoopWraps ph@(PolyHead lang midx args body) = do
     -- would reject the continue). A continue stranded in a base (e.g. under a
     -- kept 'PolyManifold' wrapper) fails this and falls back to recursion. Guard
     -- conditions and let RHSs cannot themselves hold a continue ('rewriteLoopTail'
-    -- never rewrites those positions) but are checked for safety. Do-blocks
-    -- (effects) are treated as base leaves for now, so an @<IO>@ loop whose
-    -- continue sits under a do-block falls back -- A3 handles those.
+    -- never rewrites those positions) but are checked for safety.
     isLoopableBody :: PolyExpr -> Bool
     isLoopableBody = ok
       where
@@ -419,10 +417,10 @@ addLoopWraps ph@(PolyHead lang midx args body) = do
         goT (PolyExe _ (RecCallP mid' _)) | mid' == mid = (PolyLoopContinue [], True)
         goT leaf = (PolyReturn leaf, False)
 
-        -- Rebuild the wrapper only when its rewritten inner has no continue.
+        -- A wrapper whose inner has no continue is a base leaf, kept whole.
         dropIfContinue rebuild inner =
           let (inner', c) = goT inner
-           in (if c then inner' else rebuild inner', c)
+           in if c then (inner', True) else (PolyReturn (rebuild inner), False)
 
 cacheWrapExpr :: PolyExpr -> MorlocMonad PolyExpr
 cacheWrapExpr (PolyManifold l m form k inner) = do

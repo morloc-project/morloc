@@ -264,8 +264,6 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           condNe <- nativeExpr m cond
           LoopIf condNe <$> go thenB <*> go elseB
         go (MonoReturn e) = go e
-        -- Descend a do-block on the continue path: its inner binds (per-iteration
-        -- effects) become loop-body lets emitted before the continue reassignment.
         go (MonoLoopContinue args)
           | length args == length ids = LoopContinue <$> mapM (nativeExpr m) args
           | otherwise = error $
