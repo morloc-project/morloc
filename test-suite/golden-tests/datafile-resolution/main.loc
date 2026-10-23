@@ -1,0 +1,15 @@
+-- @datafile resolves a literal path against the program's source root at
+-- build time, to the same absolute path whether the nexus evaluates it (a
+-- pure command) or a pool does (passed through a Python function).
+module main (purePath, poolPath)
+
+import root-py
+
+source Py from "foo.py" ("ident")
+ident :: Str -> Str
+
+purePath :: Str
+purePath = @datafile "data.txt"
+
+poolPath :: Str
+poolPath = ident (@datafile "data.txt")

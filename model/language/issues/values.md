@@ -127,3 +127,8 @@ on 0.109.0 unless marked.
   `Int` arithmetic is pinned to one checked semantics; (c) the realizer
   may move `Int` arithmetic only between languages of equal width.
   Repro: /work/plans/model-audit-2026-10-21/repro/F/wire/re.loc.
+- **INTR-5 says a program that is not installed sees `p` unchanged.**
+  [reproduced, 2026-10-23] Pools and (since 2026-10-23) the nexus join a
+  literal `@datafile` path with the program's source root, installed or
+  not, so a built program reads its data file from any working directory.
+  The item's wording needs updating to that, or the code to the wording.

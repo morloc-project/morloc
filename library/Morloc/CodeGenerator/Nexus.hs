@@ -1215,8 +1215,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrTypeof [AnnoS (Idx _ argT) _ _])) =
       StrX <$> type2schema t <*> pure (render (pretty argT))
     -- @datafile path: resolve a literal path string against the install
-    -- directory. Mirrors Reduce.hs:68-78 for the pool side; a non-literal
-    -- path arg yields the same fallback sentinel as the pool path.
+    -- directory, as the pool side does.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrDatafile [pathExpr])) = do
       resolved <- resolveDatafilePath pathExpr
       StrX <$> type2schema t <*> pure resolved
@@ -1319,17 +1318,14 @@ resolveCompileTimeIntrinsic IntrCompiled = do
 resolveCompileTimeIntrinsic intr =
   MM.throwSystemError $ "Compiler bug: @" <> pretty (intrinsicName intr) <> " has no nexus-side handler"
 
--- Resolve a @datafile path expression in the nexus. Mirrors
--- Reduce.hs::reduceNativeExpr IntrDatafile: a literal Str argument is
--- joined with the source root (stateBuildRoot); anything else gets the
--- same sentinel string the pool side emits.
+-- Resolve a literal @datafile path in the nexus against the source root,
+-- where data files are mirrored, as the pools do.
 resolveDatafilePath :: AnnoS (Indexed Type) One () -> MorlocMonad Text
 resolveDatafilePath (AnnoS _ _ (StrS rel)) = do
-  -- Data files are mirrored beside sources at the ROOT, not inside the
-  -- nested build dir, so resolve against the source root.
-  mRoot <- MM.gets stateBuildRoot
-  return (resolveDatafileAgainstRoot mRoot rel)
-resolveDatafilePath _ = return "<datafile: could not resolve path>"
+  BuildDirs _ root _ <- resolveBuildDirs
+  return (resolveDatafileAgainstRoot (Just root) rel)
+resolveDatafilePath _ =
+  MM.throwCompilerBug "@datafile reached the nexus without a literal path"
 
 -- ======================================================================
 -- CLI argument serialization

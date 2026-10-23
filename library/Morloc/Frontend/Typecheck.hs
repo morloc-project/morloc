@@ -1888,11 +1888,21 @@ synthE _ g (IntrinsicS IntrNext [handleE]) = do
          )
 synthE i _ (IntrinsicS IntrNext args) =
   throwTypeError i $ "@next expects 1 arguments but got" <+> pretty (length args)
+synthE i _ (IntrinsicS IntrDatafile [pathE])
+  | not (isStaticStr pathE) =
+      MM.throwSourcedError i
+        "the argument of @datafile must be a string literal, since the path is resolved when the program is built"
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
   g'' <- checkIntrinsicArgs i g' intr argTypes
   let (g''', expectedType) = intrinsicTypeG g'' intr argTypes
   return (g''', expectedType, IntrinsicS intr args')
+
+-- | A string literal, possibly reached through a name bound to one.
+isStaticStr :: AnnoS g ManyPoly c -> Bool
+isStaticStr (AnnoS _ _ (StrS _)) = True
+isStaticStr (AnnoS _ _ (VarS _ (MonomorphicExpr _ [e]))) = isStaticStr e
+isStaticStr _ = False
 
 -- | Strip ForallU wrappers by instantiating bound variables as existentials.
 -- Follows the same pattern as `application` for ForallU.
@@ -2139,7 +2149,7 @@ checkIntrinsicArgs i g intr argTypes = do
         (IntrShow, [_]) -> return g
         -- @read: Str -> ?a (arg must be Str)
         (IntrRead, [strT]) -> subtype' i strT BT.strU g
-        -- @datafile: Str -> Str (path must be string literal)
+        -- @datafile: Str -> Str
         (IntrDatafile, [pathT]) -> subtype' i pathT BT.strU g
         -- @unpack: [U8] -> <IO> a
         (IntrUnpack, [bytesT]) -> subtype' i bytesT (BT.listU BT.u8U) g

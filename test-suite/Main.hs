@@ -109,6 +109,7 @@ unitTests =
   , typeRenderParenTests
   , sourceNameTests
   , suspensionLawTests
+  , datafileTests
   , morlocDepsTests
   , versionConstraintTests
   , sizeParseTests

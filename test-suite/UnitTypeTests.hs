@@ -70,6 +70,7 @@ module UnitTypeTests
   , typeRenderParenTests
   , sourceNameTests
   , suspensionLawTests
+  , datafileTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend, generatePools)
@@ -147,6 +148,32 @@ runEvalSandbox allow =
 -- `morloc eval`): eval mode on, but the sandbox gates are inert.
 runEvalTrusted :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
 runEvalTrusted = runFrontWith (\s -> s {stateEvalMode = True})
+
+-- | @datafile is resolved at build time, so its argument must be a string
+-- literal (directly, or through a name bound to one).
+datafileTests :: TestTree
+datafileTests =
+  testGroup "@datafile path argument"
+    [ expectPass "literal path"
+        [r|
+        module main (f)
+        f :: Str
+        f = @datafile "x.txt"
+        |]
+    , expectPass "where-bound literal path"
+        [r|
+        module main (f)
+        f :: Str
+        f = @datafile p where
+          p = "x.txt"
+        |]
+    , expectError "parameter as path"
+        [r|
+        module main (f)
+        f :: Str -> Str
+        f q = @datafile q
+        |]
+    ]
 
 -- | Gate 1 of the eval sandbox: a directly-written IO intrinsic is refused,
 -- while pure intrinsics and trusted (dev) eval are unaffected. The check runs

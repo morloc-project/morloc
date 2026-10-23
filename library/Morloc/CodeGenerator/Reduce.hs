@@ -8,9 +8,9 @@ License     : Apache-2.0
 Maintainer  : z@morloc.io
 
 Walks the SerialManifold tree after serialization and replaces compile-time
-intrinsics (@version, @compiled, @lang, @schema, @typeof, @datafile) with
-string literals. Runtime intrinsics (@save, @load, @hash) pass through
-unchanged to code generation.
+intrinsics (@version, @compiled, @lang, @datafile) with string literals.
+Runtime intrinsics (@save, @load, @hash) pass through unchanged to code
+generation.
 -}
 module Morloc.CodeGenerator.Reduce (reduce) where
 
@@ -20,6 +20,7 @@ import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (formatTime, defaultTimeLocale)
 import Control.Monad.State (gets)
 import Morloc.CodeGenerator.Namespace
+import Morloc.Monad (throwCompilerBug)
 import Morloc.ProgramBuilder.Paths (resolveDatafileAgainstRoot)
 import qualified Morloc.Version as V
 
@@ -83,8 +84,7 @@ reduceNativeExpr ver ts lang (IntrinsicN t IntrDatafile _ [pathArg]) = do
       -- the source root (shared with the nexus side via Paths).
       mRoot <- gets stateBuildRoot
       return $ makeStr t (resolveDatafileAgainstRoot mRoot relPath)
-    Nothing ->
-      return $ makeStr t "<datafile: could not resolve path>"
+    Nothing -> throwCompilerBug "@datafile reached code generation without a literal path"
 -- runtime intrinsics: recurse into children but keep the intrinsic node
 reduceNativeExpr ver ts lang (IntrinsicN t intr msch es) =
   IntrinsicN t intr msch <$> mapM (reduceNativeExpr ver ts lang) es
