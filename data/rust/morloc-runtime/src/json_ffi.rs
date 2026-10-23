@@ -67,7 +67,7 @@ pub(crate) unsafe fn voidstar_to_json_string(
     match crate::json::voidstar_to_json_string(data as *mut u8, &rs) {
         Ok(s) => {
             match CString::new(s) {
-                Ok(cs) => cs.into_raw(),
+                Ok(cs) => crate::error::malloc_cstr(&cs),
                 Err(_) => {
                     set_errmsg(errmsg, &MorlocError::Other("CString conversion failed".into()));
                     ptr::null_mut()
@@ -220,7 +220,7 @@ pub(crate) unsafe fn json_buf_finish(jb: *mut JsonBuf) -> *mut c_char {
     }
     let jb = Box::from_raw(jb);
     match CString::new(jb.buf) {
-        Ok(cs) => cs.into_raw(),
+        Ok(cs) => crate::error::malloc_cstr(&cs),
         Err(_) => ptr::null_mut(),
     }
 }

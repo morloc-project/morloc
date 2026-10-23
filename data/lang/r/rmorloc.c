@@ -79,24 +79,26 @@ static void raise_pipe_closed(void) {
 #define R_TRY(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
-        error("%s", child_errmsg_); \
+        morloc_error_take("", child_errmsg_); \
     }
 
 #define R_TRY_WITH(clean, fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
         clean; \
-        error("%s", child_errmsg_); \
+        morloc_error_take("", child_errmsg_); \
     }
 
 #define MORLOC_ERROR(msg, ...) error(msg, ##__VA_ARGS__);
 
 // Raise an R error from a heap-allocated message the runtime handed back,
 // freeing it first: error() does not return, so the text is copied into
-// this frame before the longjmp.
+// memory R releases itself before the longjmp.
 static void morloc_error_take(const char* prefix, char* heap_msg) {
-    char msg[1024];
-    snprintf(msg, sizeof(msg), "%s%s", prefix, heap_msg ? heap_msg : "");
+    const char* body = heap_msg ? heap_msg : "";
+    size_t n = strlen(prefix) + strlen(body) + 1;
+    char* msg = R_alloc(n, 1);
+    snprintf(msg, n, "%s%s", prefix, body);
     free(heap_msg);
     error("%s", msg);
 }
@@ -2185,7 +2187,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
 
         if (errmsg) {
             free_schema(schema);
-            MORLOC_ERROR("Arrow export failed: %s", errmsg);
+            morloc_error_take("Arrow export failed: ", errmsg);
         }
 
         // The block is this pool's own until the next dispatch releases it.

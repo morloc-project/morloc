@@ -68,7 +68,7 @@ unsafe fn resolve_data_dir(errmsg: *mut *mut c_char) -> *mut c_char {
         return ptr::null_mut();
     }
     match CString::new(dir.to_string_lossy().as_bytes()) {
-        Ok(cs) => cs.into_raw(),
+        Ok(cs) => crate::error::malloc_cstr(&cs),
         Err(_) => {
             set_errmsg(
                 errmsg,
@@ -193,7 +193,7 @@ pub(crate) unsafe fn morloc_cache_path(
         return ptr::null_mut();
     }
     match CString::new(dir.to_string_lossy().as_bytes()) {
-        Ok(cs) => cs.into_raw(),
+        Ok(cs) => crate::error::malloc_cstr(&cs),
         Err(_) => {
             set_errmsg(
                 errmsg,
@@ -965,7 +965,7 @@ pub(crate) unsafe fn make_cache_filename_ext(
     let extension = CStr::from_ptr(ext).to_string_lossy();
     let filename = format!("{}/{:016x}{}", path, key, extension);
     match CString::new(filename) {
-        Ok(cs) => cs.into_raw(),
+        Ok(cs) => crate::error::malloc_cstr(&cs),
         Err(_) => {
             set_errmsg(errmsg, &MorlocError::Other("CString conversion failed".into()));
             ptr::null_mut()

@@ -455,7 +455,7 @@ pub(crate) unsafe fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
         path: std::path::PathBuf::from(&path),
     });
     match CString::new(path) {
-        Ok(cs) => cs.into_raw(),
+        Ok(cs) => crate::error::malloc_cstr(&cs),
         Err(_) => {
             set_errmsg(errmsg, &MorlocError::Other("mlc_tmpfile: path contained NUL".into()));
             ptr::null_mut()
@@ -702,7 +702,7 @@ pub(crate) unsafe fn mlc_hash(
 
     let hex = format!("{:016x}", hash);
     match CString::new(hex) {
-        Ok(cs) => cs.into_raw(),
+        Ok(cs) => crate::error::malloc_cstr(&cs),
         Err(_) => {
             set_errmsg(errmsg, &MorlocError::Other("CString error".into()));
             ptr::null_mut()
@@ -978,7 +978,7 @@ pub(crate) unsafe fn mlc_settle(handle: i64, errmsg: *mut *mut c_char) -> bool {
         Ok(()) => true,
         Err(MorlocError::Other(msg)) => {
             match std::ffi::CString::new(msg.replace('\0', " ")) {
-                Ok(c) => *errmsg = libc::strdup(c.as_ptr()),
+                Ok(c) => *errmsg = crate::error::malloc_cstr(&c),
                 Err(_) => set_errmsg(errmsg, &MorlocError::Other("the stream's producer failed".into())),
             }
             false
@@ -1164,7 +1164,7 @@ pub(crate) unsafe fn mlc_fschema(
     };
     match crate::stream::read_schema_from_file(path_str) {
         Ok(schema) => match CString::new(schema) {
-            Ok(cs) => cs.into_raw(),
+            Ok(cs) => crate::error::malloc_cstr(&cs),
             Err(e) => {
                 set_errmsg(errmsg, &MorlocError::Other(format!(
                     "mlc_fschema: schema string contains NUL: {}", e
@@ -2174,7 +2174,9 @@ mod tests {
         let mut err: *mut c_char = ptr::null_mut();
         let p = mlc_tmpfile(&mut err);
         assert!(!p.is_null());
-        CString::from_raw(p).into_string().unwrap()
+        let s = CStr::from_ptr(p).to_str().unwrap().to_owned();
+        libc::free(p as *mut libc::c_void);
+        s
     }
 
     #[test]
@@ -2309,7 +2311,11 @@ mod tests {
     }
 
     unsafe fn reason(err: *mut c_char) -> Option<String> {
-        (!err.is_null()).then(|| CString::from_raw(err).into_string().unwrap())
+        (!err.is_null()).then(|| {
+            let s = CStr::from_ptr(err).to_str().unwrap().to_owned();
+            libc::free(err as *mut libc::c_void);
+            s
+        })
     }
 
 

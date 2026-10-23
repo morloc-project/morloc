@@ -199,6 +199,8 @@ char* get_prior_err(){
             PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_); \
             free(prior_err); \
         } \
+        free(child_errmsg_); \
+        child_errmsg_ = NULL; \
         goto error; \
     }
 
@@ -251,6 +253,8 @@ static PyObject* PyMorlocPipeClosed = NULL;
             PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_); \
             free(prior_err); \
         } \
+        free(child_errmsg_); \
+        child_errmsg_ = NULL; \
         goto error; \
     }
 
@@ -260,6 +264,8 @@ static PyObject* PyMorlocPipeClosed = NULL;
         PyErr_Format(PyMorlocInternalError, \
                      "morloc internal error (Py pool, %s:%d in %s):\n%s", \
                      __FILE__, __LINE__, __func__, child_errmsg_); \
+        free(child_errmsg_); \
+        child_errmsg_ = NULL; \
         goto error; \
     }
 
@@ -2438,6 +2444,8 @@ static PyObject*  pybinding__send_reply(PyObject* self, PyObject* args){ MAYFAIL
             PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
             free(prior_err);
         }
+        free(child_errmsg_);
+        child_errmsg_ = NULL;
         goto error;
     }
 
@@ -2466,6 +2474,8 @@ static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){
             PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
             free(prior_err);
         }
+        free(child_errmsg_);
+        child_errmsg_ = NULL;
         goto error;
     }
 
@@ -3249,6 +3259,8 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
             PyErr_Format(PyMorlocInternalError, "%s\nmorloc internal error (Py pool, %s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
             free(prior_err);
         }
+        free(child_errmsg_);
+        child_errmsg_ = NULL;
         goto error;
     }
     free(packet);

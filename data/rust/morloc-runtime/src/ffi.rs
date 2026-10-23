@@ -181,7 +181,7 @@ pub(crate) unsafe fn schema_to_string(schema: *const CSchema) -> *mut c_char {
     let rs = CSchema::to_rust(schema);
     let s = schema::schema_to_string(&rs);
     match CString::new(s) {
-        Ok(cs) => cs.into_raw(),
+        Ok(cs) => crate::error::malloc_cstr(&cs),
         Err(_) => ptr::null_mut(),
     }
 }

@@ -3028,7 +3028,7 @@ pub(crate) unsafe fn cli_token_to_json(
     }
     match crate::json::voidstar_to_json_string(loaded as shm::AbsPtr, &rs) {
         Ok(js) => match std::ffi::CString::new(js) {
-            Ok(c) => c.into_raw(),
+            Ok(c) => crate::error::malloc_cstr(&c),
             Err(_) => { set_errmsg(errmsg, &MorlocError::Other("value is not valid text".into())); ptr::null_mut() }
         },
         Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }

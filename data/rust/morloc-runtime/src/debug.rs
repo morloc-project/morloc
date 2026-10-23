@@ -434,7 +434,7 @@ pub(crate) unsafe fn morloc_debug_drain_frames() -> *mut c_char {
         );
     }
     CString::new(out)
-        .map(|c| c.into_raw())
+        .map(|c| crate::error::malloc_cstr(&c))
         .unwrap_or(ptr::null_mut())
 }
 

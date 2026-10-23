@@ -130,3 +130,11 @@
   `.owner.tmp` fails it returns Err after mkdtemp, leaving
   `/tmp/morloc.XXXXXX`; the startup sweep skips directories without
   `.owner` (process.rs:1760). Remove the directory on that path.
+- **Strings crossing two runtime-type copies.** [read, 2026-10-23]
+  rustmorloc statically links its own copy of morloc-runtime-types beside
+  the one in libmorloc.so. Strings and CSchema built by one copy and freed by
+  the other change allocator if a user's Rust pool sets a
+  `#[global_allocator]`. Strings the caller frees now come from `malloc`
+  (malloc_cstr), but a CSchema is Box/CString/Vec. Manifest expression
+  strings (manifest_ffi.rs ~815, ~1048, ~1277) are never freed (the nexus
+  is short-lived).
