@@ -39,6 +39,13 @@
 #  define MORLOC_FIND_IN_FRAME(rho, sym) findVarInFrame((rho), (sym))
 #endif
 
+// CLOENV left the C API in favor of R_ClosureEnv, added in 4.5.0.
+#if defined(R_VERSION) && R_VERSION >= R_Version(4, 5, 0)
+#  define MORLOC_CLOSURE_ENV(f) R_ClosureEnv(f)
+#else
+#  define MORLOC_CLOSURE_ENV(f) CLOENV(f)
+#endif
+
 #define MAYFAIL char* child_errmsg_ = NULL;
 
 // Set when a stream write found its reader gone during the current dispatch.
@@ -3998,7 +4005,7 @@ SEXP morloc_fork_pool_run_r(SEXP socket_path_r, SEXP tmpdir_r, SEXP shm_basename
     static r_fork_pool_ctx ctx;
     ctx.init = init_r;
     R_PreserveObject(init_r);
-    r_pool_env = CLOENV(init_r);
+    r_pool_env = MORLOC_CLOSURE_ENV(init_r);
     morloc_fork_pool_t cfg = {
         .lang = "R",
         .ctx = &ctx,
