@@ -27,3 +27,7 @@ fails loudly naming itself.
   closure running `PolyEval inner`, so `inner` (e.g. `f x`) is re-evaluated
   on every run. Run count is unchanged (EBND-3) but the pure work repeats.
   No item says whether a label may do this (ANN-10 covers placement only).
+- [speculative, 2026-10-23] A loop's base leaves are forced with
+  forceReturnPosition (EffectBoundary.hs goLoop), which descends into
+  lambda-form manifolds; forceValuePosition does not. A tail loop whose base
+  returns a closure with an effectful body may have that body forced.

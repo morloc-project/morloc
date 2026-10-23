@@ -12,7 +12,7 @@ The recursion is carried out in the language that realizes the terms.
 ### RECUR-2 Morloc owes tail-call optimization in every language
 Intent: ruled 2026-10-05
 Tests: spec-recur-2-1
-Code: conforms 2026-10-16
+Code: deviates (../compiler/issues/recursion-loops.md)
 
 A call in tail position does not grow the stack, in every target language,
 including languages that do not optimize tail calls themselves. Tail

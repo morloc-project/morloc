@@ -89,3 +89,7 @@
   `--debug` build may carry no trace (DIAG-5 requires one). Frames, the
   dump count and the overflow note are per thread, so a catch on a helper
   thread (C++ parallel stdlib) is never drained or reset. Needs repros.
+- **An unbound variable in a newtype's representation is reported as a
+  mismatch.** [reproduced, 2026-10-23] `newtype Bag = [a]` reports
+  `expected: [a] inferred: [a] Cannot compare types a and a@q0` instead of
+  naming the unbound `a`.

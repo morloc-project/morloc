@@ -34,8 +34,9 @@ reproduced]
   COST-2..COST-10 (proposed) have no code. `@wiresize`, `@dimension`,
   `@calls` and `@runtime` warn "docstring directive ... is not recognized"
   and are dropped; call and crossing costs are the integer tables in
-  data/lang/languages.yaml and each lang.yaml `cost:` (LangRegistry.hs:
-  145-150; Realize.hs:380-392, 792 `crossingPayloadCost _ = 0`, 805). No
+  data/lang/languages.yaml (lang.yaml `cost:` is never read, see
+  language-registry.md; Realize.hs:380-392, 792 `crossingPayloadCost _ = 0`,
+  805). No
   manual page covers the directives. Unbuilt design, not a regression.
 - **A bracket step through an instance is never placed in a pool.**
   [read, 2026-10-21] Realize gives a PatCall no language (Realize.hs:521),
@@ -51,3 +52,16 @@ reproduced]
   indexing (true of stdlib `Vector`). Needs a ruling: an instance on a
   list-represented newtype must agree with its representation, or such
   brackets must go to a pool.
+- **An argument computable in the caller is computed by a callback.**
+  [reproduced, 2026-10-23] A cut is a subtree (Express.hs, the cross-pool
+  AppS clause ~1674-1688, and PatCall ~1616, eta ~1714, expressContainer
+  ~2347): in `inc (dbl (inc x))` with `inc` in Python and `dbl` in C++, C++
+  calls back into Python for the inner `inc x`, two round trips where one
+  would do; `inc (add (inc x) (inc y))` takes three. A `where` value used
+  only inside the foreign argument is placed there too. EVAL-1/2 permit
+  hoisting each maximal caller-language argument subtree that is data (not
+  a function or suspension), has its free variables bound in the caller,
+  and is reached only through strict positions (no conditional arm, lambda
+  or `@try` region). Needs rulings: COST-3 should charge one latency per
+  call for its arguments and result together, and confirm EVAL-3 lets such a
+  value be computed in the caller's pool.

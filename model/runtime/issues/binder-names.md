@@ -57,3 +57,13 @@ may use.
   its namespace once, at install.
 - Python files are isolated: each sourced file is its own module and calls
   are qualified (`__morloc_src_<name>.f`).
+- [read, 2026-10-23] C++ declares no reserved prefixes or names in its
+  lang.yaml, so SRC-6's build-time check covers nothing for C++: manifolds
+  are `m<N>`/`m<N>_remote` (not the `__mm_` prefix), and the pool's macros
+  (`PROPAGATE_ERROR`, `PROPAGATE_INFRA_ERROR`, `PROPAGATE_FAIL_PACKET`,
+  `MLC_INTERNAL_ABORT`, `MLC_CATCH_FORCED_UNWIND`) expand a sourced function
+  of the same name. Clean part: rename C++ manifolds to `__mm_<N>`, list the
+  pool's prefixes and names, and extend ManifoldNameTests to C++ with a
+  check that every global the pool templates define is covered. The R list
+  misses `.morloc.source`, `.morloc.pooldir`, `.morloc.libdir` (`.morloc_`
+  does not match `.morloc.`).

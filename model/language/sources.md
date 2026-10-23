@@ -47,7 +47,7 @@ language allows; or (b) the failure is a run-time error naming the term.
 
 ### SRC-6 A source cannot take a name the pool reserves for itself
 Intent: proposed
-Code: conforms 2026-10-21
+Code: deviates (../runtime/issues/binder-names.md)
 
 A language reserves name prefixes for what its pool defines (lang.yaml
 `ldReservedPrefixes`: Python `__mm_`, `__morloc`; R `.__mm_`, `.__morloc`,
