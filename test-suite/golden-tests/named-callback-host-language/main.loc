@@ -1,0 +1,64 @@
+-- A named morloc function handed to a sourced host as a callback is a
+-- function value built where the host call is, so it lives in the host's
+-- pool, as an inline lambda does; a call its body makes into another
+-- language is an ordinary crossing. The same holds wherever a named function
+-- is a value rather than the head of a call: passed through a morloc
+-- function or taken from a list. Before the fix, a named step whose body
+-- was cheaper in Python than in its R host stopped the build with an
+-- internal error (model/compiler/issues/realization.md).
+module main (rEffect, rPure, rAlias, rLambda, pyEffect, rViaHof, rViaList)
+
+import root-r
+import root-py
+
+source R from "host.R" ("r_fold" as rFold, "r_tick" as rTick)
+source Py from "host.py" ("py_fold" as pyFold, "py_tick" as pyTick, "py_add" as pyAdd)
+
+rFold :: (Int -> Int -> <IO> Int) -> Int -> [Int] -> <IO> Int
+pyFold :: (Int -> Int -> <IO> Int) -> Int -> [Int] -> <IO> Int
+rTick :: Str -> <IO> ()
+pyTick :: Str -> <IO> ()
+pyAdd :: Int -> Int -> Int
+
+effectStep :: Int -> Int -> <IO> Int
+effectStep n x = do
+  pyTick "e"
+  n + x
+
+pureStep :: Int -> Int -> <IO> Int
+pureStep n x = do
+  pyAdd n x
+
+aliasStep :: Int -> Int -> <IO> Int
+aliasStep = effectStep
+
+rStep :: Int -> Int -> <IO> Int
+rStep n x = do
+  rTick "r"
+  n * x
+
+rEffect :: <IO> Int
+rEffect = rFold effectStep 0 [1, 2, 3]
+
+rPure :: <IO> Int
+rPure = rFold pureStep 10 [1, 2, 3]
+
+rAlias :: <IO> Int
+rAlias = rFold aliasStep 100 [1, 2, 3]
+
+rLambda :: <IO> Int
+rLambda = rFold (\n x -> do
+  pyTick "l"
+  n - x) 0 [1, 2, 3]
+
+pyEffect :: <IO> Int
+pyEffect = pyFold rStep 1 [2, 3, 4]
+
+foldAll :: (Int -> Int -> <IO> Int) -> [Int] -> <IO> Int
+foldAll f xs = rFold f 0 xs
+
+rViaHof :: <IO> Int
+rViaHof = foldAll effectStep [1, 2, 3]
+
+rViaList :: <IO> Int
+rViaList = rFold (.[0] [effectStep]) 0 [4, 5]

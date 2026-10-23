@@ -697,10 +697,30 @@ realizeWithRegistry registry tables seedLangs s0 = do
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
-    collapseAnnoS heads l1 (AnnoS gi@(Idx gidx gt) ci e) = do
-      l1' <- case (l1, heldTypes e gt) of
+    collapseAnnoS = collapseNode True
+
+    -- The head of an application is not a value: a lambda there is applied
+    -- in place, so a named one keeps its own choice.
+    collapseHead ::
+      [(EVar, Lang)] ->
+      Maybe Lang ->
+      AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
+      MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
+    collapseHead = collapseNode False
+
+    collapseNode ::
+      Bool ->
+      [(EVar, Lang)] ->
+      Maybe Lang ->
+      AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
+      MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
+    collapseNode isValue heads l1 (AnnoS gi@(Idx gidx gt) ci0 e0) = do
+      l1' <- case (l1, heldTypes e0 gt) of
         (Just l, Just ts) -> Just <$> holdingLang gidx ts l
         _ -> return l1
+      let AnnoS _ ci e = case l1' of
+            Just l | isValue -> pinNamedLambda l (AnnoS gi ci0 e0)
+            _ -> AnnoS gi ci0 e0
       (e', ci'') <- collapseExpr heads gt l1' (e, ci)
       -- moved away from its context, a language-free computation keeps the
       -- language it was moved to rather than inheriting its context's again
@@ -946,7 +966,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       -- A sourced function runs where it is sourced; only a call whose
       -- head is defined in morloc can follow a recursive head's language.
       lang <- if isSourcedMany f then chooseLanguage l1 ss else pickLanguage heads l1 (f : xs) ss
-      f' <- collapseAnnoS heads lang f
+      f' <- collapseHead heads lang f
       xs' <- mapM (if isSourceHead f' then collapseCarried heads lang else collapseAnnoS heads lang) xs
       return (AppS f' xs', Idx i lang)
     -- Propagate data
@@ -1059,6 +1079,30 @@ realizeWithRegistry registry tables seedLangs s0 = do
           AnnoS g (Idx i _) e' <- collapseAnnoS heads lang x
           return (AnnoS g (Idx i lang) e')
       | otherwise = collapseAnnoS heads lang x
+
+    -- A named function used as a value is a lambda reached through its
+    -- name, so like an inline lambda it is built in its parent's language;
+    -- only its body chooses. Its scores are cut to that language, priced as
+    -- its body's cheapest placement reached from there.
+    pinNamedLambda ::
+      Lang ->
+      AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
+      AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])
+    pinNamedLambda lang x@(AnnoS g (Idx i ss) e) = case e of
+      LamS _ _ -> AnnoS g (Idx i (pinScores ss)) e
+      VarS v (Many alts)
+        | any isNamedLambda alts ->
+            AnnoS g (Idx i (pinScores ss)) (VarS v (Many (map (pinNamedLambda lang) alts)))
+      _ -> x
+      where
+        pinScores ss0 = case minimumMay [cost (Just lang) l2 s2 | (l2, s2) <- ss0] of
+          Nothing -> ss0
+          Just s -> [(lang, s)]
+
+    isNamedLambda :: AnnoS g Many c -> Bool
+    isNamedLambda (AnnoS _ _ (LamS _ _)) = True
+    isNamedLambda (AnnoS _ _ (VarS _ (Many alts))) = any isNamedLambda alts
+    isNamedLambda _ = False
 
     -- The head of an application, before collapse, is a sourced function
     -- however it is named: every alternative of the term is a source call.
