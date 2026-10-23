@@ -93,3 +93,10 @@ failure (a fail packet). Several sites are misclassified.
   failed `shfree_cpp`, or an unresolved result, release or Arrow pointer,
   ending the C++ pool: reaching them needs corrupted shared memory, and
   the runtime has no fault-injection hook.
+- **A C++ `@read` failure does not name its input.** [reproduced,
+  2026-10-23] Violates MORLOC-CONVENTIONS G4 (an error names the value).
+  `@read "abc" :: Try Str I64` in a C++ pool gives `@read: serialization
+  error: JSON parse error: expected value at line 1 column 1`; before
+  79788394 it was `@read: parse failed on 'abc'`. pool.cpp:644 passes the
+  runtime's reason through without the string. Seen in
+  projects/mosm `make test` (`cut abc`, `cut 1:x`), red since then.
