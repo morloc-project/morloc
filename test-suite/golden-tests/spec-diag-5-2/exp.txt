@@ -1,6 +1,6 @@
 == boomP 0
 Error: run failed
-float division by zero
+pyThrowAtZero: n must be non-zero
 morloc trace [py pool]:
   at pyThrowAtZero (main.loc:23:17)
     arg[0] :: f8 -> dbg/inputs/H.pkt
@@ -27,7 +27,7 @@ morloc trace [r pool]:
 
 == ratio 1 0
 Error: run failed
-float division by zero
+pyDivide: b must be non-zero
 morloc trace [py pool]:
   at pyDivide (main.loc:32:19)
     arg[0] :: f8 -> dbg/inputs/H.pkt
