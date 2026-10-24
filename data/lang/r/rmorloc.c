@@ -51,6 +51,37 @@
 // Set when a stream write found its reader gone during the current dispatch.
 static int r_pipe_closed = 0;
 
+// SHM-16: the live table bytes above which the next collection runs in
+// this request, 0 for the budget
+static size_t r_gc_next = 0;
+
+// SHM-16: MORLOC_R_GC_BUDGET in bytes, 32 MiB by default, 0 for never
+static size_t r_gc_budget(void) {
+    static size_t budget = 0;
+    static int budget_read = 0;
+    if (!budget_read) {
+        const char* env = getenv("MORLOC_R_GC_BUDGET");
+        char* end = NULL;
+        budget = (size_t)32 * 1024 * 1024;
+        if (env && env[0] >= '0' && env[0] <= '9') {
+            errno = 0;
+            unsigned long long parsed = strtoull(env, &end, 10);
+            if (errno == 0 && *end == '\0') budget = (size_t)parsed;
+        }
+        budget_read = 1;
+    }
+    return budget;
+}
+
+// SHM-16
+static void r_collect_if_tables_pile_up(void) {
+    size_t budget = r_gc_budget();
+    if (budget == 0) return;
+    if (arrow_live_view_bytes() <= (r_gc_next > budget ? r_gc_next : budget)) return;
+    R_gc();
+    r_gc_next = 2 * arrow_live_view_bytes();
+}
+
 // The environment pool.R defines the pool's own names in: that of the
 // worker init function it passes to morloc_fork_pool_run_r.
 static SEXP r_pool_env = NULL;
@@ -3131,6 +3162,8 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
             morloc_error_take("Arrow import failed: ", arrow_err);
         }
 
+        r_collect_if_tables_pile_up();
+
         // Import via R arrow package: arrow::ImportRecordBatch(array_ptr, schema_ptr)
         SEXP arrow_ns = PROTECT(R_FindNamespace(mkString("arrow")));
         SEXP import_fn = PROTECT(MORLOC_FIND_IN_FRAME(arrow_ns, install("ImportRecordBatch")));
@@ -3870,30 +3903,8 @@ static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
     // this covers a previous request that ended without sending one.
     shm_tracker_flush();
 
-    // A table's block is held by the R object that reads it, and R's
-    // collector sizes that object by its R heap footprint -- a few hundred
-    // bytes for a batch over megabytes of shared memory. Left alone, a run
-    // that receives a table per request holds every one of them.
-    //
-    // Collecting on every request would pay for a full sweep of the R heap
-    // per table, which for small tables costs far more than it reclaims;
-    // so the sweep waits until the views hold more than a budget's worth,
-    // which is the case it exists for. MORLOC_R_GC_BUDGET overrides the
-    // budget in bytes, and 0 turns the sweep off.
-    {
-        static size_t budget = 0;
-        static int budget_read = 0;
-        if (!budget_read) {
-            const char* env = getenv("MORLOC_R_GC_BUDGET");
-            char* end = NULL;
-            budget = env ? (size_t)strtoull(env, &end, 10) : (size_t)32 * 1024 * 1024;
-            if (env && (end == env || *end != '\0')) budget = (size_t)32 * 1024 * 1024;
-            budget_read = 1;
-        }
-        if (budget > 0 && arrow_live_view_bytes() > budget) {
-            R_gc();
-        }
-    }
+    r_gc_next = 0;
+    r_collect_if_tables_pile_up();
 
     morloc_debug_flush_dispatch();
 

@@ -198,7 +198,7 @@ effect order, evaluates each statement once, keeps failure handling and
 reruns a suspension at each bind.
 
 ### COST-14 A recursive definition runs its body 1000 times per call
-Intent: proposed
+Intent: ruled 2026-10-24
 Tests: spec-cost-14-1
 Code: conforms 2026-10-24
 

@@ -3,3 +3,4 @@ viaPy holds-steady=yes
 viaR holds-steady=yes
 viaRust holds-steady=yes
 rustHosted holds-steady=yes
+rHosted holds-steady=yes

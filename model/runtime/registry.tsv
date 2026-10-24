@@ -30,13 +30,14 @@ data/lang/r/rmorloc.c::-::recur_env_stack	thread
 data/lang/r/rmorloc.c::-::recur_env_depth	thread		
 data/lang/r/rmorloc.c::-::recur_env_cap	thread		
 data/lang/r/rmorloc.c::-::r_pipe_closed	thread		
+data/lang/r/rmorloc.c::-::r_gc_next	thread		
 data/lang/r/rmorloc.c::-::r_pool_env	startup		
 data/lang/r/rmorloc.c::-::r_frames	thread		
 data/lang/r/rmorloc.c::-::r_frames_cap	thread		
 data/lang/r/rmorloc.c::-::daemon_creator_generation	fork-scoped		
 data/lang/r/rmorloc.c::mlc_trace_ipc::cached	thread		
-data/lang/r/rmorloc.c::run_job_c::budget	thread		
-data/lang/r/rmorloc.c::run_job_c::budget_read	thread		
+data/lang/r/rmorloc.c::r_gc_budget::budget	thread		
+data/lang/r/rmorloc.c::r_gc_budget::budget_read	thread		
 library/Morloc/CodeGenerator/Guest/Futhark.hs::-::cur	fork-scoped		
 library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::__MORLOC_SCHEMA_STRS	startup		
 library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::__MORLOC_SCHEMA_TABLE	startup		

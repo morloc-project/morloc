@@ -96,16 +96,3 @@ Changes here touch locks and ownership: model first.
   direction: stage speculatively and discard. tla/Lease.tla does not model
   the pre-check. Status stays `implemented` until fixed, since the Rust
   model check forbids a deviation that names tests.
-
-- **An R pool driving a loop keeps every Arrow batch it receives until its
-  garbage collector runs.** [reproduced, 2026-10-24] Golden
-  arrow-chunk-stream's header states that a run of chunks needs one or two
-  chunks of shared memory whichever language drives it. With `viaR` placed
-  so that R runs the `map` and calls C++ `mkChunk` from each iteration
-  (the placement the realizer chooses once a callback is priced at 1000
-  calls, COST-4; patch /work/plans/realization-cost-model/i0-callback-count.patch),
-  the run needs 254 MiB where the C++-driven placement needs 62: each
-  batch returned to R is released only by R's collector, and shared memory
-  does not count toward the allocation pressure that triggers it. A fix
-  changes when R releases a received value, so it is model-first work
-  (ownership and lifetime).

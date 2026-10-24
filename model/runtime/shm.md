@@ -205,3 +205,18 @@ are read into one block; one built from several values (a record unrolled
 from flags, an `@many` list) that does not lie in its root's block is
 copied into one before it is sent. A table below the root counts as
 another block, which such a copy refuses.
+
+### SHM-16 A pool that releases by collection collects before received tables pile up
+Status: implemented
+Checked by: golden:arrow-chunk-stream
+
+A pool whose language drops a received block only when its collector
+finalizes the value that holds it (R) runs its collector when the table
+views it holds exceed a budget (MORLOC_R_GC_BUDGET bytes, 32 MiB by
+default, 0 for never), checked as each request arrives and as each table
+is received, so a loop over received tables inside one request holds a
+bounded number of them. Within one request, after a collection the next
+one waits until the views exceed twice what it left live, or the budget if
+that is larger, so values the program keeps do not cost a collection on
+every table; each request starts again from the budget. What the collector
+frees is only what no value still reads (SHM-4).
