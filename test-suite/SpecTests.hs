@@ -1620,6 +1620,87 @@ lexTests =
         d :: Int -> <IO> Int
         d x = do { y = x; y }
         |]
+    , accept
+        "spec-cost-6-2"
+        [r|
+        module main (f)
+        source Py from "f.py" where
+          --' @selftime 2us + 10ns * 3
+          g
+        --' Add one
+        --' @selftime 10ns
+        g :: Int -> Int
+        f :: Int -> Int
+        f x = g x
+        |]
+    , reject
+        "spec-cost-6-3"
+        [r|
+        module main (f)
+        source Py from "f.py" ("g")
+        --' Add one
+        --' @selftime 10MB
+        g :: Int -> Int
+        f :: Int -> Int
+        f x = g x
+        |]
+    , reject
+        "spec-cost-6-4"
+        [r|
+        module main (f)
+        source Py from "f.py" ("g")
+        --' Add one
+        --' @selftime 10ns * n
+        g :: Int -> Int
+        f :: Int -> Int
+        f x = g x
+        |]
+    , reject
+        "spec-cost-6-5"
+        [r|
+        module main (f)
+        source Py from "f.py" where
+          --' @selftime 10 parsecs
+          g
+        g :: Int -> Int
+        f :: Int -> Int
+        f x = g x
+        |]
+    , reject
+        "spec-cost-6-6"
+        [r|
+        module main (f)
+        source Py from "f.py" where
+          --' @selftime 1us - 2us
+          g
+        g :: Int -> Int
+        f :: Int -> Int
+        f x = g x
+        |]
+    , reject
+        "spec-cost-6-7"
+        [r|
+        module main (f)
+        --' A number
+        --' @selftime 1ns
+        type Q = Int
+        g :: Q -> Int
+        f :: Int -> Int
+        f x = g x
+        |]
+    , reject
+        "spec-cost-6-8"
+        [r|
+        module main (f)
+        g :: Int -> Int
+        --' Defined here
+        --' @selftime 1ns
+        f :: Int -> Int
+        f x = g x
+        h :: Int -> Int
+        --' @selftime 1ns
+        h x = x
+        |]
     ]
 
 -- | An alias applied to itself 28 times, whose expansion has 2^28 leaves.

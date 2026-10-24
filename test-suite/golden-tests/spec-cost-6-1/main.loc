@@ -1,0 +1,63 @@
+-- `@selftime` states how long a function's own work takes (COST-6), which
+-- the realizer weighs instead of the 1 us default (COST-2). Above a
+-- signature it holds for every sourced implementation; above an item of a
+-- `source` block it holds for that implementation; above a class method's
+-- signature it holds for every instance's implementation. The additions are
+-- stated to take a nanosecond, so chains of them stay in Python beside the
+-- Python function that consumes the sum. `slow` sources another addition
+-- with nothing stated, and its chain runs in C++, which the default makes
+-- cheaper than three Python calls. The placement listing of
+-- `morloc typecheck --realize` is the output; the run checks the program
+-- still computes.
+
+--' Self time stated per signature and per implementation
+module main (bySignature, byItem, byMethod, slow)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("plus" as add, "show", "plus_slow" as addSlow)
+source Cpp from "f.hpp" ("plus" as add, "plus_item" as addItem, "plus_slow" as addSlow)
+
+source Py from "f.py" where
+  --' name: plus_item
+  --' @selftime 1ns
+  addItem
+
+--' Add two integers
+--' @selftime 1ns
+add :: Int -> Int -> Int
+
+--' Add two integers, with a self time stated for the Python one
+addItem :: Int -> Int -> Int
+
+--' Add two integers, with no self time stated
+addSlow :: Int -> Int -> Int
+
+--' Render an integer
+show :: Int -> Str
+
+--' Sum four integers with the self time stated on the signature
+bySignature :: Int -> Str
+bySignature x = show (add (add (add x 1) 2) 3)
+
+--' Sum four integers with the self time stated on the Python source
+byItem :: Int -> Str
+byItem x = show (addItem (addItem (addItem x 1) 2) 3)
+
+--' Sum four integers with default self times
+slow :: Int -> Str
+slow x = show (addSlow (addSlow (addSlow x 1) 2) 3)
+
+class Summable a where
+  --' Add two values
+  --' @selftime 1ns
+  combine :: a -> a -> a
+
+instance Summable Int where
+  source Py from "f.py" ("plus_class" as combine)
+  source Cpp from "f.hpp" ("plus_class" as combine)
+
+--' Sum four integers with the self time stated on a class method
+byMethod :: Int -> Str
+byMethod x = show (combine (combine (combine x 1) 2) 3)

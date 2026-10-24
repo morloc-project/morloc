@@ -94,11 +94,18 @@
   `expected: [a] inferred: [a] Cannot compare types a and a@q0` instead of
   naming the unbound `a`.
 - [read, 2026-10-24] Violates DOC-1. Docstrings that attach and are then
-  dropped: the preamble above a class method's signature
-  (Desugar.hs `desugarSigItem`, `ArgDocSig defaultValue ...`; per-argument
-  docs survive); everything above an item of a tuple-form `source` (`mkOldSource`
-  sets `srcNote = []` and never reads docs; only the block form does); and the
-  docs above a `%inline` item of a block-form `source`, keyed on the `%inline`
-  token but looked up at the name (Parser.y `'%inline' source_new_term`). No
-  warning in any case. Cost directives on class methods (COST-6) depend on
-  the first.
+  dropped: everything above an item of a tuple-form `source` (`mkOldSource`
+  sets `srcNote = []` and never reads docs; only the block form does), a
+  `@selftime` there included (COST-6); and the docs above a `%inline` item
+  of a block-form `source`, keyed on the `%inline` token but looked up at
+  the name (Parser.y `'%inline' source_new_term`). No warning in either
+  case.
+
+- **`SystemError` is documented as a compiler bug but carries user errors.**
+  [read, 2026-10-24] The constructor's comment (Namespace/State.hs,
+  `MorlocError`) says "Internal compiler error (bug)", yet every error with
+  a source position but no node index uses it: a syntax error, a malformed
+  docstring directive (Frontend/API.hs `readProgram`), an unresolved
+  concrete type. Its message prints plainly (no bug label; that is
+  `throwCompilerBug`), so users are not misled, but tests cannot tell a
+  user error at a position from a compiler bug (SpecTests `rejectUser`).

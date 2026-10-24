@@ -98,6 +98,7 @@ Sizes are language independent.
 
 ### COST-6 `@calls` and `@selftime` state counts and times
 Intent: ruled 2026-10-16
+Tests: spec-cost-6-1, spec-cost-6-2, spec-cost-6-3, spec-cost-6-4, spec-cost-6-5, spec-cost-6-6, spec-cost-6-7, spec-cost-6-8
 Code: deviates (../compiler/issues/realization.md)
 
 Above a function-typed or suspension-typed argument, `@calls <formula>`

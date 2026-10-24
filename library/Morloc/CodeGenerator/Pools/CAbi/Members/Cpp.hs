@@ -2745,7 +2745,7 @@ cppModuleIncludeDirs reg = fmap catMaybes . mapM dirOf . filter isCpp
   where
     isCpp s = LR.poolOf reg (srcLang s) == cppLang
 
-    dirOf (Source _ _ (Just p) _ _ _ _ _ _ _) =
+    dirOf Source {srcPath = Just p} =
       case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p)) of
         -- A bare header name resolves through the same search path the
         -- compiled sources use.
@@ -2776,7 +2776,7 @@ gccVersionFlag i
   | otherwise = "-std=c++" <> MT.show' i
 
 flagAndPath :: LR.LangRegistry -> Source -> MorlocMonad (Source, [String], Maybe Path)
-flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL == cppLang =
+flagAndPath reg src@Source {srcLang = srcL, srcPath = Just p} | LR.poolOf reg srcL == cppLang =
   case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p), MS.takeExtensions p) of
     (".", base, "") -> do
       header <- lookupHeader base
@@ -2839,7 +2839,7 @@ flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL 
           let rpathFlags = ["-Wl,-rpath," <> MS.shellQuote libdir | libdir /= moduleLibDir]
           return $ rpathFlags <> ["-L" <> MS.shellQuote libdir, "-l" <> libnamebase]
         [] -> return []
-flagAndPath reg src@(Source _ srcL Nothing _ _ _ _ _ _ _) | LR.poolOf reg srcL == cppLang = return (src, [], Nothing)
+flagAndPath reg src@Source {srcLang = srcL, srcPath = Nothing} | LR.poolOf reg srcL == cppLang = return (src, [], Nothing)
 flagAndPath _ _ = MM.throwSystemError $ "flagAndPath should only be called for C++ functions"
 
 getFile :: Path -> IO (Maybe Path)

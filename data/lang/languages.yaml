@@ -15,6 +15,20 @@ call_overhead_ns:
 # A language with no entry above.
 default_call_overhead_ns: 100
 
+# How long a function's own work takes in a language, against C at 10: a
+# call costs (c / 10) * its self time (COST-2), 1 us when nothing states
+# it. Python is ten times C.
+call_coefficient:
+  c: 10
+  cpp: 10
+  rust: 10
+  futhark: 10
+  py: 100
+  r: 100
+
+# A language with no entry above.
+default_call_coefficient: 100
+
 # A round trip between two pools (XL-1), keyed by the pools' languages
 # (a guest language crosses as its host). The most specific entry wins: the
 # exact pair, then (*, to), then (from, *), then (*, *). Languages that

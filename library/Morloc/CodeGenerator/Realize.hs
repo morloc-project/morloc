@@ -21,6 +21,8 @@ module Morloc.CodeGenerator.Realize
   ) where
 
 import Morloc.CodeGenerator.Serial (containsEffectT, containsFunT)
+import Morloc.Cost.Formula (Formula, evalFormula)
+import qualified Morloc.Data.GMap as GMap
 import Morloc.CodeGenerator.Value (etaParts, isValueWith)
 import Morloc.Frontend.Namespace (newIndex)
 import Morloc.Frontend.Rename (displayName)
@@ -93,6 +95,26 @@ placementLines = go 0 Nothing
     definition' (AnnoS _ _ (ExeS _)) = []
     definition' body = [body]
 
+-- | The `@selftime` of the signature each sourced function implements
+-- (COST-6).
+signatureSelftimes :: MorlocMonad (Map Source Formula)
+signatureSelftimes = do
+  sigs <- GMap.elems <$> MM.gets stateSignatures
+  return $
+    Map.fromList
+      [ (src, f)
+      | (e, srcs) <- concatMap implemented sigs
+      , Just f <- [termSelftime e]
+      , src <- srcs
+      ]
+  where
+    implemented (Monomorphic (TermTypes (Just e) srcs _)) = [(e, [s | (_, Idx _ s) <- srcs])]
+    implemented (Polymorphic _ _ e ts) = [(e, [s | t <- ts, (_, Idx _ s) <- termConcrete t])]
+    implemented _ = []
+    termSelftime e = case edocs e of
+      ArgDocSig d _ _ -> docSelftime d
+      _ -> Nothing
+
 realityCheck ::
   -- | one AST forest for each command exported from main
   [AnnoS (Indexed Type) Many Int] ->
@@ -107,11 +129,12 @@ realityCheck es = do
       (specs, roots) = List.partition isSpec es
   -- shared specializations first, each scored once, in the order their uses
   -- need them (a specialization's own shared references come before it)
-  (tables, finishers) <- foldM scoreSpec (Map.empty, Map.empty) specs
+  selftimes <- signatureSelftimes
+  (tables, finishers) <- foldM (scoreSpec selftimes) (Map.empty, Map.empty) specs
   -- select a single instance at each node of each exported tree, and
   -- separate unrealized (general) trees from realized ones
   (gASTs0, rASTs00) <-
-    mapM (\e -> realize tables e >>= \(_, finish) -> finish Nothing) roots
+    mapM (\e -> realize selftimes tables e >>= \(_, finish) -> finish Nothing) roots
       |>> partitionEithers
   rASTs0 <- realizeDemanded finishers rASTs00
   let takesFunction = Set.fromList [v | AnnoS (Idx _ (FunT ts _)) _ (VarS v _) <- specs, any containsFunT ts]
@@ -147,13 +170,14 @@ type Finisher =
 
 -- | Score a shared specialization once: its table serves every use.
 scoreSpec ::
+  Map Source Formula ->
   (Map EVar [(Lang, Score)], Map EVar Finisher) ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Map EVar [(Lang, Score)], Map EVar Finisher)
-scoreSpec (tables, finishers) spec@(AnnoS _ _ (VarS v _)) = do
-  (AnnoS _ (Idx _ scores) _, finish) <- realize tables spec
+scoreSpec selftimes (tables, finishers) spec@(AnnoS _ _ (VarS v _)) = do
+  (AnnoS _ (Idx _ scores) _, finish) <- realize selftimes tables spec
   return (Map.insert v scores tables, Map.insert v finish finishers)
-scoreSpec acc _ = return acc
+scoreSpec _ acc _ = return acc
 
 -- | Realize each shared specialization once per language its uses demand,
 -- and point each use at its copy. A use's language is the one its call was
@@ -422,10 +446,11 @@ also need benchmarking data from all the implementations and possibly
 statistical info describing inputs.
 -}
 realize ::
+  Map Source Formula ->
   Map EVar [(Lang, Score)] ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Scored, Finisher)
-realize tables s0 = do
+realize selftimes tables s0 = do
   registry <- MM.gets stateLangRegistry
   -- A term that calls nothing sourced has no language of its own and is
   -- evaluated by the nexus. That evaluator has no name to call a function
@@ -458,18 +483,19 @@ realize tables s0 = do
                 MM.throwCompilerBugAt i0 "a replay entry in a program with no pool language"
           ls -> return ls
       else return []
-  realizeWithRegistry registry tables langs s0
+  realizeWithRegistry registry selftimes tables langs s0
 
 -- | Score a tree, returning the scored tree and how to finish it: a shared
 -- specialization is scored once and finished once per language it is used in.
 -- @tables@ holds the score of each shared specialization a call may name.
 realizeWithRegistry ::
   LangRegistry ->
+  Map Source Formula ->
   Map EVar [(Lang, Score)] ->
   [Lang] ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Scored, Finisher)
-realizeWithRegistry registry tables seedLangs s0 = do
+realizeWithRegistry registry selftimes tables seedLangs s0 = do
   -- Normalize language-invariant (literal-lambda-head) redexes before scoring.
   let sp = stagePoints s0
   s0' <- normalizePop1 (`Map.lookup` sp) s0
@@ -986,10 +1012,26 @@ realizeWithRegistry registry tables seedLangs s0 = do
     cost (Just l1) l2 score = score <> boundary l1 l2
     cost _ _ score = score
 
-    -- The cost of one call of a sourced function: its language's call
-    -- overhead (COST-2, whose self-time term is not priced yet).
+    -- The cost of one call of a sourced function (COST-2): its language's
+    -- coefficient times its self time, plus the language's call overhead.
     callCost :: Source -> Integer
-    callCost src = picoseconds (LR.registryCallOverhead registry (langName (srcLang src)))
+    callCost src =
+      picoseconds (LR.registryCallCoefficient registry lang / 10 * selftimeNs)
+        + picoseconds (LR.registryCallOverhead registry lang)
+      where
+        lang = langName (srcLang src)
+        evaluated = (>>= evalFormula unboundName)
+        selftimeNs =
+          maybe defaultSelftimeNs (* 1e9) $
+            evaluated (srcSelftime src) <|> evaluated (Map.lookup src selftimes)
+
+    -- The value of a name no directive binds (COST-9).
+    unboundName :: MT.Text -> Double
+    unboundName _ = 10
+
+    -- The self time of a function that states none (COST-2), in nanoseconds.
+    defaultSelftimeNs :: Double
+    defaultSelftimeNs = 1000
 
     picoseconds :: Double -> Integer
     picoseconds ns = round (ns * 1000)

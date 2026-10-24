@@ -21,6 +21,7 @@ import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
 import ArgsBoundTests (argsBoundTests)
 import LangRegistryCostTests (langRegistryCostTests)
+import CostFormulaTests (costFormulaTests)
 import PropertyTests (propertyTests)
 import RecSolverTests (recSolverTests)
 import RefutablePatternTests (refutablePatternTests)
@@ -121,6 +122,7 @@ unitTests =
   , patternChainTests
   , argsBoundTests
   , langRegistryCostTests
+  , costFormulaTests
   , irrefutablePatternLexerTests
   , refutablePatternTests
   , rustPoolBuildTests

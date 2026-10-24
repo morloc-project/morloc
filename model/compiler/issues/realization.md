@@ -49,19 +49,19 @@ reproduced]
   depending on order. Affects any directive, cost directives included
   (COST-8 requires both sets kept).
 - **The cost model is partly implemented.** [read, 2026-10-24] Scores are
-  seconds: a call costs its language's measured overhead (COST-2 without
-  the self-time term), a crossing between pools its pair's latency
-  (COST-3 without the per-element and per-byte slopes), a recursive
-  definition its body times 1000 (COST-14), a function argument of a
-  sourced function 1000 calls of it (COST-4). Sizes (COST-5, COST-8,
-  COST-9), `@calls` and `@selftime` (COST-6) and formulas (COST-7) have no
-  code. A function value inside another type (an optional function, a
-  record or tuple of functions) handed to a sourced function is priced as
-  one call. `@wiresize`, `@dimension`, `@calls` and
-  `@selftime` warn "docstring directive ... is not recognized" and are
-  dropped; `crossingPayloadCost` is 0. Plan:
-  /work/plans/realization-cost-model.md and the implementation plan it
-  links.
+  seconds: a call costs its language's coefficient times its self time
+  (`@selftime` on its signature or `source` block item, else 1 us) plus
+  the language's overhead (COST-2), a crossing between pools its pair's
+  latency (COST-3 without the per-element and per-byte slopes), a
+  recursive definition its body times 1000 (COST-14), a function argument
+  of a sourced function 1000 calls of it (COST-4). Sizes (COST-5, COST-8,
+  COST-9), `@dimension`, `@wiresize` and `@calls` (COST-6) have no code;
+  a name in a `@selftime` formula is always 10 (COST-9's unbound value),
+  and none is checked against a `@dimension` (COST-7). `@selftime` on an
+  item of a tuple-form `source` list is dropped with the item's other
+  docstrings (language/issues/diagnostics-docs.md). A function value
+  inside another type handed to a sourced function is priced as one
+  call.
 - **A bracket step through an instance is never placed in a pool.**
   [read, 2026-10-21] Realize gives a PatCall no language (Realize.hs:521),
   so a pure `f m = .[0] m` on a receiver that is not a list on the wire

@@ -26,6 +26,7 @@ module Morloc.Frontend.Desugar
 
 import qualified Control.Monad.State.Strict as State
 import qualified Data.Map.Strict as Map
+import Morloc.Cost.Formula (Formula, dimOf, evalFormula, formulaNames, parseFormula, renderDim, time)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -352,7 +353,7 @@ argDocDirectiveKeys =
   , "arg", "true", "false", "return"
   , "source", "form", "check.<kind>"
   , "list.source", "list.form", "list.check.<kind>"
-  , "with", "render", "parse", "mime", "epilogue"
+  , "with", "render", "parse", "mime", "epilogue", "selftime"
   ]
 
 -- | Parse and lightly validate a media type (RFC 6838 `type/subtype`, e.g.
@@ -655,7 +656,7 @@ parseCheck kind raw = case kind of
 
 -- Known directive keys recognized on `source` declarations.
 sourceDocDirectiveKeys :: [Text]
-sourceDocDirectiveKeys = ["name", "rsize"]
+sourceDocDirectiveKeys = ["name", "rsize", "selftime"]
 
 -- | Warn only when the key looks like a misspelling of a directive rather
 -- than like prose. Every unrecognized line used to warn, which made ordinary
@@ -762,6 +763,9 @@ processArgDocLines = finalize . foldl step ([], [], defaultValue, Nothing)
         | otherwise -> (errs, ws, d {docLines = docLines d <> [v]})
       DocDirective k v -> case T.splitOn "." k of
         ["name"] -> (errs, ws, d {docName = Just v})
+        ["selftime"] -> case parseSelftime v of
+          Left e -> (errs <> [e], ws, d)
+          Right f -> (errs, ws, d {docSelftime = Just f})
         ["literal"] ->
           let parsed = parseDocBool v
               warn =
@@ -890,9 +894,27 @@ applySourceDocs lns src = foldl step ([], [], src) lns
         "rsize" -> case parseRsize v of
           Left e -> (errs <> [e], ws, s)
           Right ns -> (errs, ws, s {srcRsize = ns})
+        "selftime" -> case parseSelftime v of
+          Left e -> (errs <> [e], ws, s)
+          Right f -> (errs, ws, s {srcSelftime = Just f})
         _ ->
           let w = unknownDirectiveWarning sourceDocDirectiveKeys k line
            in (errs, ws <> w, s {srcNote = srcNote s <> [docDescLine line]})
+
+-- | Parse a `selftime` value: a formula whose dimension is a time (COST-7).
+-- No directive yet introduces a name (`@dimension`), so a name is an error,
+-- and the formula is a constant that must have a value.
+parseSelftime :: Text -> Either Text Formula
+parseSelftime v = do
+  f <- either (\e -> Left ("selftime: " <> e)) Right (parseFormula v)
+  d <- either (\e -> Left ("selftime: " <> e)) Right (dimOf f)
+  if d /= time
+    then Left ("selftime: the formula '" <> v <> "' is " <> renderDim d <> ", not a time")
+    else case formulaNames f of
+      (n : _) -> Left ("selftime: '" <> n <> "' is not introduced by a `@dimension` of the signature")
+      [] -> case evalFormula (const 0) f of
+        Nothing -> Left ("selftime: the formula '" <> v <> "' has no value (it is negative or infinite)")
+        Just _ -> Right f
 
 -- | Parse an `rsize` value: one or more positive integers separated by
 -- whitespace. Each is the size of a leading call group; the final group is
@@ -923,6 +945,17 @@ parseRsize v =
 -- malformed (e.g. a short-option char that isn't a letter).
 processArgDocLinesD :: Pos -> [Text] -> D ArgDocVars
 processArgDocLinesD pos ls = do
+  v <- processSigDocLinesD pos ls
+  case docSelftime v of
+    Nothing -> return v
+    Just _ ->
+      dfail pos
+        "`@selftime` states the self time of a sourced function: it is allowed only above a signature or an item of a `source` block (COST-6)"
+
+-- | 'processArgDocLinesD' for the preamble of a signature, the one
+-- docstring that may state `@selftime`.
+processSigDocLinesD :: Pos -> [Text] -> D ArgDocVars
+processSigDocLinesD pos ls = do
   let (errs, ws, v) = processArgDocLines ls
   dwarn ws
   case errs of
@@ -3166,7 +3199,7 @@ desugarTopLevel (Loc sp (CImpE imp)) = do
   return [e]
 desugarTopLevel (Loc sp (CSigE name sigType)) = do
   docs <- lookupDocsAt (startPos sp)
-  cmdDoc <- processArgDocLinesD (startPos sp) docs
+  cmdDoc <- processSigDocLinesD (startPos sp) docs
   captureSigDescLines name (docLines cmdDoc)
   (cs, argDocs, t) <- desugarSigType (startPos sp) sigType
   validateSigWith (startPos sp) (docWith cmdDoc) argDocs
@@ -3686,12 +3719,14 @@ desugarClassHead (CCHMultiConstrained cs headType) = do
   return (cs, cn, vs)
 
 desugarSigItem :: CstSigItem -> D Signature
-desugarSigItem (CstSigItem name sigType) = do
-  (cs, argDocs, t) <- desugarSigType (Pos 0 0 "") sigType
-  mapM_ (rejectDeclDirectivesHere (Pos 0 0 "") "a class method signature") argDocs
+desugarSigItem (CstSigItem pos name sigType) = do
+  docs <- lookupDocsAt pos
+  cmdDoc <- processSigDocLinesD pos docs
+  (cs, argDocs, t) <- desugarSigType pos sigType
+  mapM_ (rejectDeclDirectivesHere pos "a class method signature") argDocs
   let wrappedT = quantifyType t
       (labels, wrappedT') = extractLabels wrappedT
-      doc = ArgDocSig defaultValue (init argDocs) (last argDocs)
+      doc = ArgDocSig cmdDoc (init argDocs) (last argDocs)
       et = EType wrappedT' (Set.fromList cs) doc labels
   return (Signature name Nothing et)
 
@@ -3716,6 +3751,7 @@ mkOldSource sp lang path (isBacktick, name, mayAlias) = do
           , srcInline = False
           , srcOperator = isBacktick || isOperatorName name
           , srcBacktick = isBacktick
+          , srcSelftime = Nothing
           }
     )
 
@@ -3735,6 +3771,7 @@ mkNewSource sp lang path (isInline, isBacktick, name, nameTok) = do
           , srcInline = isInline
           , srcOperator = isOp
           , srcBacktick = isBacktick
+          , srcSelftime = Nothing
           }
   src <- applySourceDocsD (startPos sp) docLines' baseSrc
   freshExprSpan sp (SrcE src)

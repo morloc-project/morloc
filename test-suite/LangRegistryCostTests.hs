@@ -19,28 +19,35 @@ langRegistryCostTests =
     , testCase "(from, *) wins over (*, *)" $ latency "rust" "cpp" @?= Right 3
     , testCase "(*, *) wins over the default" $ latency "py" "cpp" @?= Right 4
     , testCase "the order of entries does not matter" $
-        (\reg -> LR.registryCrossingLatency reg "cpp" "py") <$> LR.parseLanguagesYaml (T.unlines (take 3 table <> reverse (drop 3 table))) @?= Right 1
+        (\reg -> LR.registryCrossingLatency reg "cpp" "py")
+          <$> LR.parseLanguagesYaml (T.unlines (defaults <> ["crossing_latency_ns:"] <> reverse entries))
+          @?= Right 1
     , testCase "a pair nothing matches costs the default" $
-        (\reg -> LR.registryCrossingLatency reg "py" "cpp")
-          <$> LR.parseLanguagesYaml (T.unlines ["default_call_overhead_ns: 7", "default_crossing_latency_ns: 9"])
-          @?= Right 9
+        (\reg -> LR.registryCrossingLatency reg "py" "cpp") <$> LR.parseLanguagesYaml (T.unlines defaults) @?= Right 9
     , testCase "a language with no overhead entry costs the default" $
         (\reg -> LR.registryCallOverhead reg "zig") <$> registry @?= Right 7
+    , testCase "a language with no coefficient entry takes the default" $
+        (\reg -> LR.registryCallCoefficient reg "zig") <$> registry @?= Right 10
     , testCase "the default crossing latency is required" $
-        assertBool "parsed" (isLeft (LR.parseLanguagesYaml "default_call_overhead_ns: 7"))
+        assertBool "parsed" (isLeft (LR.parseLanguagesYaml (T.unlines (without "default_crossing_latency_ns"))))
     , testCase "the default call overhead is required" $
-        assertBool "parsed" (isLeft (LR.parseLanguagesYaml "default_crossing_latency_ns: 9"))
+        assertBool "parsed" (isLeft (LR.parseLanguagesYaml (T.unlines (without "default_call_overhead_ns"))))
+    , testCase "the default call coefficient is required" $
+        assertBool "parsed" (isLeft (LR.parseLanguagesYaml (T.unlines (without "default_call_coefficient"))))
     ]
   where
-    table =
+    defaults =
       [ "default_call_overhead_ns: 7"
+      , "default_call_coefficient: 10"
       , "default_crossing_latency_ns: 9"
-      , "crossing_latency_ns:"
-      , "  - {from: \"*\", to: \"*\", ns: 4}"
+      ]
+    entries =
+      [ "  - {from: \"*\", to: \"*\", ns: 4}"
       , "  - {from: rust, to: \"*\", ns: 3}"
       , "  - {from: cpp, to: \"*\", ns: 5}"
       , "  - {from: \"*\", to: r, ns: 2}"
       , "  - {from: cpp, to: py, ns: 1}"
       ]
-    registry = LR.parseLanguagesYaml (T.unlines table)
+    without key = filter (not . T.isPrefixOf key) defaults
+    registry = LR.parseLanguagesYaml (T.unlines (defaults <> ["crossing_latency_ns:"] <> entries))
     latency from to = (\reg -> LR.registryCrossingLatency reg from to) <$> registry

@@ -567,7 +567,7 @@ sig_list :: { [CstSigItem] }
 
 signature :: { CstSigItem }
   : evar_or_op '::' sig_type
-      { CstSigItem (toEVar $1) $3 }
+      { CstSigItem (locPos $1) (toEVar $1) $3 }
 
 --------------------------------------------------------------------
 -- Instances
@@ -1093,11 +1093,13 @@ operator_name :: { Located }
   | '>'                       { $1 }
   | '/'                       { $1 }
 
+-- An operator name stands where its opening parenthesis does, which is
+-- where a docstring above it is filed.
 evar_or_op :: { Located }
   : LOWER                     { $1 }
-  | '(' operator_name ')'     { $2 }
-  | '(' '-' ')'               { $2 }
-  | '(' '.' ')'               { $2 }
+  | '(' operator_name ')'     { $2 { locPos = locPos $1 } }
+  | '(' '-' ')'               { $2 { locPos = locPos $1 } }
+  | '(' '.' ')'               { $2 { locPos = locPos $1 } }
 
 opt_where_decls :: { [Loc CstExpr] }
   : {- empty -}                               { [] }

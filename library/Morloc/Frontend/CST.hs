@@ -179,7 +179,9 @@ data CstClassHead
   | CCHMultiConstrained [Constraint] TypeU
   deriving (Show, Eq)
 
-data CstSigItem = CstSigItem EVar CstSigType
+-- | A class method signature: where its name stands (its docstring attaches
+-- there), the name and its type.
+data CstSigItem = CstSigItem Pos EVar CstSigType
   deriving (Show, Eq)
 
 data CstDoStmt

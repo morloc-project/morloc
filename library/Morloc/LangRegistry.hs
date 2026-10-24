@@ -23,6 +23,7 @@ module Morloc.LangRegistry
   , poolOf
   , coLocated
   , registryCallOverhead
+  , registryCallCoefficient
   , registryCrossingLatency
   , registrySerialType
   , registryIsCompiled
@@ -52,6 +53,10 @@ data LangRegistry = LangRegistry
   -- | A call in one pool, by language, in nanoseconds (COST-10).
   , lrCallOverhead :: Map Text Double
   , lrDefaultCallOverhead :: Double
+  -- | How long a function's own work takes, by language, against C at 10
+  -- (COST-2).
+  , lrCallCoefficient :: Map Text Double
+  , lrDefaultCallCoefficient :: Double
   -- | A round trip between pools, by (from, to) with "*" for any, in
   -- nanoseconds, and for a pair no entry matches.
   , lrCrossingLatency :: Map (Text, Text) Double
@@ -82,7 +87,7 @@ data LangRegistryEntry = LangRegistryEntry
 
 emptyRegistry :: LangRegistry
 -- | No languages and no costs, until languages.yaml is read.
-emptyRegistry = LangRegistry Map.empty Map.empty Map.empty 0 Map.empty 0
+emptyRegistry = LangRegistry Map.empty Map.empty Map.empty 0 Map.empty 0 Map.empty 0
 
 -- | Build the default registry from embedded lang.yaml files and languages.yaml
 buildDefaultRegistry :: [(String, Text)] -> Text -> Either String LangRegistry
@@ -143,6 +148,11 @@ poolOf reg l =
 -- | True when two languages compile into the same pool binary.
 coLocated :: LangRegistry -> Lang -> Lang -> Bool
 coLocated reg a b = poolOf reg a == poolOf reg b
+
+-- | How long a function's own work takes in this language, against C at
+-- 10.
+registryCallCoefficient :: LangRegistry -> Text -> Double
+registryCallCoefficient reg name = Map.findWithDefault (lrDefaultCallCoefficient reg) name (lrCallCoefficient reg)
 
 -- | A call in one pool of this language, in nanoseconds.
 registryCallOverhead :: LangRegistry -> Text -> Double
@@ -231,6 +241,8 @@ instance Aeson.FromJSON LangYamlMeta where
 data LanguagesYaml = LanguagesYaml
   { lysCallOverhead :: Map Text Double
   , lysDefaultCallOverhead :: Double
+  , lysCallCoefficient :: Map Text Double
+  , lysDefaultCallCoefficient :: Double
   , lysCrossingLatency :: [((Text, Text), Double)]
   , lysDefaultCrossingLatency :: Double
   }
@@ -240,10 +252,12 @@ instance Aeson.FromJSON LanguagesYaml where
   parseJSON = Aeson.withObject "LanguagesYaml" $ \o -> do
     overhead <- o .:? "call_overhead_ns" .!= Map.empty
     defOverhead <- o .: "default_call_overhead_ns"
+    coefficient <- o .:? "call_coefficient" .!= Map.empty
+    defCoefficient <- o .: "default_call_coefficient"
     latency <- o .:? "crossing_latency_ns" .!= []
     defLatency <- o .: "default_crossing_latency_ns"
     parsed <- mapM parseLatency latency
-    return $ LanguagesYaml overhead defOverhead parsed defLatency
+    return $ LanguagesYaml overhead defOverhead coefficient defCoefficient parsed defLatency
     where
       parseLatency = Aeson.withObject "CrossingLatency" $ \o -> do
         from <- o .: "from"
@@ -289,6 +303,8 @@ parseLanguagesYaml content =
           , lrAliases = Map.empty
           , lrCallOverhead = lysCallOverhead lys
           , lrDefaultCallOverhead = lysDefaultCallOverhead lys
+          , lrCallCoefficient = lysCallCoefficient lys
+          , lrDefaultCallCoefficient = lysDefaultCallCoefficient lys
           , lrCrossingLatency = Map.fromList (lysCrossingLatency lys)
           , lrDefaultCrossingLatency = lysDefaultCrossingLatency lys
           }

@@ -106,6 +106,7 @@ import GHC.Generics (Generic)
 import Morloc.Data.Doc
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
+import Morloc.Cost.Formula (Formula)
 
 ---- Source and config types
 
@@ -125,6 +126,8 @@ data Source
   -- bypass the language-descriptor pattern check in Treeify; the
   -- enclosed text is emitted verbatim between the two args.
   , srcBacktick :: !Bool
+  -- | The implementation's own self time, from its `@selftime` (COST-6).
+  , srcSelftime :: Maybe Formula
   }
   deriving (Ord, Eq, Show)
 
@@ -1404,7 +1407,7 @@ instance Pretty Expr where
   pretty (LogE x) = pretty x
   pretty (LetE bindings body) = vsep [pretty v <+> "=" <+> pretty e | (v, e) <- bindings] <+> "in" <+> pretty body
   pretty (AssE v e es) = pretty v <+> "=" <+> pretty e <+> "where" <+> (align . vsep . map pretty) es
-  pretty (SrcE (Source srcname lang file' alias _ rsizes _ _ _ _)) =
+  pretty (SrcE Source {srcName = srcname, srcLang = lang, srcPath = file', srcAlias = alias, srcRsize = rsizes}) =
     "source"
       <+> viaShow lang
       <> maybe "" (\f -> "from" <+> pretty f) file'
