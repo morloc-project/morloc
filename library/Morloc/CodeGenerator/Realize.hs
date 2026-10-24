@@ -265,6 +265,11 @@ scaleScore k (Score t c w)
   where
     sat n = fromInteger (min (10 ^ (15 :: Int)) (toInteger k * toInteger n))
 
+-- | How many times a function calls a function argument, when nothing says
+-- otherwise (COST-4).
+defaultCallbackCount :: Int
+defaultCallbackCount = 1000
+
 -- | The time of the "no realization" sentinel, above any placement's cost.
 unrealizable :: Integer
 unrealizable = 10 ^ (300 :: Int)
@@ -276,10 +281,11 @@ defaultRecursionCount = 1000
 
 -- | A scored child as its parent sees it: its type, whether code
 -- generation always builds it in its parent's language, and its table.
-data Kid = Kid Type Bool [(Lang, Score)]
+-- The count is how many times the parent uses it per evaluation.
+data Kid = Kid Type Bool Int [(Lang, Score)]
 
 kidTable :: Kid -> [(Lang, Score)]
-kidTable (Kid _ _ table) = table
+kidTable (Kid _ _ _ table) = table
 
 -- | A node collapse places in its parent's language whatever it costs:
 -- a constructor application, and a container of function values
@@ -586,7 +592,12 @@ realizeWithRegistry registry tables seedLangs s0 = do
       xs' <- mapM (scoreAnnoS rstat {rLangs = argLangs, rApplied = []}) xs
       let args = [(t, scoresOf x') | x'@(AnnoS (Idx _ t) _ _) <- xs']
           bound = boundArgs f
-          pairss = [kid x' | (k, x'@(AnnoS (Idx _ t) _ _)) <- zip [0 ..] xs', not (k < bound && isCallableType t)]
+          callsArgs = isSourcedMany f
+          pairss =
+            [ (if callsArgs then called else id) (kid x')
+            | (k, x'@(AnnoS (Idx _ t) _ _)) <- zip [0 ..] xs'
+            , not (k < bound && isCallableType t)
+            ]
       -- A head has no ambient language: it is placed by its own
       -- implementations. One with none (a call on a function parameter
       -- bound to no table, a recursive call) lives where the expression
@@ -623,12 +634,16 @@ realizeWithRegistry registry tables seedLangs s0 = do
       -- A data value is read where its let runs, or carried into a subtree
       -- in another pool as one of the free variables that subtree's single
       -- boundary passes (COST-3), so a reference to it adds nothing of its
-      -- own. A function value is priced by where its definition can run:
-      -- its cheapest home relative to the cheapest place overall, plus
-      -- reaching it; the RHS's own cost is counted once, at the LetS below.
+      -- own. A lambda costs nothing to build and its body on every call, so
+      -- a reference to it carries one call of its body and the let none. Any
+      -- other function value is priced by where its definition can run: its
+      -- cheapest home relative to the cheapest place overall, plus reaching
+      -- it; the RHS's own cost is counted once, at the LetS below.
       let rhs = scoresOf e1'
+          lambdaBound = isNamedLambda e1'
           refTable
             | null rhs = []
+            | lambdaBound = [(l, reachFrom l rhs) | l <- unique (map fst rhs <> rLangs rstat)]
             | otherwise =
                 let base = minimum (map snd rhs)
                     langs = unique (map fst rhs <> rLangs rstat)
@@ -641,7 +656,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       e2' <- scoreAnnoS rstat' e2
       -- Score the chain like an application: the binding's RHS and the body
       -- both contribute, with cross-language penalties applied per-lang.
-      let best = scoreApp [] [kid e1', kid e2']
+      let best = scoreApp [] (if lambdaBound then [kid e2'] else [kid e1', kid e2'])
       return (LetS v e1' e2', Idx i best)
     scoreExpr rstat (LetBndS v, i) =
       case Map.lookup v (rLetVars rstat) of
@@ -705,17 +720,24 @@ realizeWithRegistry registry tables seedLangs s0 = do
       where
         placed = filter (not . null . kidTable) kids
 
+    -- A function argument of a sourced function is called by it, by
+    -- default 'defaultCallbackCount' times per call (COST-4); a suspension
+    -- is run once.
+    called :: Kid -> Kid
+    called (Kid t@(FunT _ _) pinned _ table) = Kid t pinned defaultCallbackCount table
+    called k = k
+
     -- A child scored, for its parent to reach.
     kid :: AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) -> Kid
-    kid x@(AnnoS (Idx _ t) _ e) = Kid t (pinnedToParent e) (scoresOf x)
+    kid x@(AnnoS (Idx _ t) _ e) = Kid t (pinnedToParent e) 1 (scoresOf x)
 
     -- Reaching a child from its parent's language: from the cheapest
     -- language for it, across a boundary, unless it is always built in its
     -- parent's language and priced there.
     reachKid :: Lang -> Kid -> Score
-    reachKid l (Kid t pinned table)
-      | pinned, Just sc <- lookup l table = sc
-      | otherwise = reachWith (crossScore t) l table
+    reachKid l (Kid t pinned n table)
+      | pinned, Just sc <- lookup l table = scaleScore n sc
+      | otherwise = scaleScore n (reachWith (crossScore t) l table)
 
     updateRState :: [EVar] -> RState -> RState
     updateRState [] rstat = rstat

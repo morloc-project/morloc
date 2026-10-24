@@ -60,6 +60,7 @@ from COST-8.
 
 ### COST-4 A callback costs one call of it times its call count
 Intent: ruled 2026-10-16
+Tests: spec-cost-4-1
 Code: deviates (../compiler/issues/realization.md)
 
 A function value passed to a function `h` costs, per call of `h`, its call

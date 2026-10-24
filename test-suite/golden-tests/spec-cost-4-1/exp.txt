@@ -1,0 +1,7 @@
+placement:
+  total [py]
+    show [py]
+      fold [cpp] *
+        add [cpp]
+
+"10"

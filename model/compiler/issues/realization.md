@@ -52,9 +52,12 @@ reproduced]
   seconds: a call costs its language's measured overhead (COST-2 without
   the self-time term), a crossing between pools its pair's latency
   (COST-3 without the per-element and per-byte slopes), a recursive
-  definition its body times 1000 (COST-14). Sizes (COST-5, COST-8,
-  COST-9), `@calls` and `@selftime` (COST-6), formulas (COST-7) and
-  callback counts (COST-4) have no code. `@wiresize`, `@dimension`, `@calls` and
+  definition its body times 1000 (COST-14), a function argument of a
+  sourced function 1000 calls of it (COST-4). Sizes (COST-5, COST-8,
+  COST-9), `@calls` and `@selftime` (COST-6) and formulas (COST-7) have no
+  code. A function value inside another type (an optional function, a
+  record or tuple of functions) handed to a sourced function is priced as
+  one call. `@wiresize`, `@dimension`, `@calls` and
   `@selftime` warn "docstring directive ... is not recognized" and are
   dropped; `crossingPayloadCost` is 0. Plan:
   /work/plans/realization-cost-model.md and the implementation plan it
