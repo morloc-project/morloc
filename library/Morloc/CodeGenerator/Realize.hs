@@ -270,6 +270,21 @@ scaleScore k (Score t c w)
 defaultRecursionCount :: Int
 defaultRecursionCount = 1000
 
+-- | A scored child as its parent sees it: its type, whether code
+-- generation always builds it in its parent's language, and its table.
+data Kid = Kid Type Bool [(Lang, Score)]
+
+kidTable :: Kid -> [(Lang, Score)]
+kidTable (Kid _ _ table) = table
+
+-- | A node collapse places in its parent's language whatever it costs:
+-- a constructor application, and a container of function values
+-- ('collapseElement').
+pinnedToParent :: ExprS (Indexed Type) f a -> Bool
+pinnedToParent ConS {} = True
+pinnedToParent (LabelS _ (AnnoS _ _ e)) = pinnedToParent e
+pinnedToParent e = isFunctionalData e
+
 -- State for the realize scoring algorithm
 data RState = RState
   { rLangs :: [Lang]
@@ -550,13 +565,13 @@ realizeWithRegistry registry tables seedLangs s0 = do
       (ExprS (Indexed Type) Many Int, Int) ->
       MorlocMonad (ExprS (Indexed Type) Many (Indexed [(Lang, Score)]), Indexed [(Lang, Score)])
     scoreExpr rstat (LstS xs, i) = do
-      (xs', best) <- scoreComponents rstat xs
+      (xs', best) <- componentsOf (LstS xs) rstat xs
       return (LstS xs', orAmbient i rstat best)
     scoreExpr rstat (TupS xs, i) = do
-      (xs', best) <- scoreComponents rstat xs
+      (xs', best) <- componentsOf (TupS xs) rstat xs
       return (TupS xs', orAmbient i rstat best)
     scoreExpr rstat (NamS rs, i) = do
-      (xs, best) <- scoreComponents rstat (map snd rs)
+      (xs, best) <- componentsOf (NamS rs) rstat (map snd rs)
       return (NamS (zip (map fst rs) xs), orAmbient i rstat best)
     scoreExpr rstat (LamS vs x, i) = do
       x' <- scoreAnnoS (updateRState vs rstat) x
@@ -577,7 +592,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       xs' <- mapM (scoreAnnoS rstat {rLangs = argLangs, rApplied = []}) xs
       let args = [(t, scoresOf x') | x'@(AnnoS (Idx _ t) _ _) <- xs']
           bound = boundArgs f
-          pairss = [a | (k, a@(t, _)) <- zip [0 ..] args, not (k < bound && isCallableType t)]
+          pairss = [kid x' | (k, x'@(AnnoS (Idx _ t) _ _)) <- zip [0 ..] xs', not (k < bound && isCallableType t)]
       -- A head has no ambient language: it is placed by its own
       -- implementations. One with none (a call on a function parameter
       -- bound to no table, a recursive call) lives where the expression
@@ -588,8 +603,9 @@ realizeWithRegistry registry tables seedLangs s0 = do
             table -> table
       return (AppS f' xs', Idx i (scoreApp headTable pairss))
     -- non-recursive expressions
-    scoreExpr rstat (UniS, i) = return (UniS, zipLang i rstat)
-    scoreExpr rstat (NullS, i) = return (NullS, zipLang i rstat)
+    -- A literal is built wherever it is used (COST-11).
+    scoreExpr _ (UniS, i) = return (UniS, Idx i [])
+    scoreExpr _ (NullS, i) = return (NullS, Idx i [])
     scoreExpr rstat (VarS v (Many xs), i) = do
       (xs', best) <- scoreAlternatives v rstat xs
       return (VarS v (Many xs'), Idx i best)
@@ -601,12 +617,12 @@ realizeWithRegistry registry tables seedLangs s0 = do
         Nothing -> return (BndS v, Idx i [])
     scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, Score (callCost src) 0 0)])
     scoreExpr rstat (ExeS x@(PatCall _), i) = return (ExeS x, zipLang i rstat)
-    scoreExpr rstat (RealS si x, i) = return (RealS si x, zipLang i rstat)
-    scoreExpr rstat (IntS si x, i) = return (IntS si x, zipLang i rstat)
-    scoreExpr rstat (LogS x, i) = return (LogS x, zipLang i rstat)
-    scoreExpr rstat (StrS x, i) = return (StrS x, zipLang i rstat)
+    scoreExpr _ (RealS si x, i) = return (RealS si x, Idx i [])
+    scoreExpr _ (IntS si x, i) = return (IntS si x, Idx i [])
+    scoreExpr _ (LogS x, i) = return (LogS x, Idx i [])
+    scoreExpr _ (StrS x, i) = return (StrS x, Idx i [])
     scoreExpr rstat (ConS tv n j xs, i) = do
-      (xs', best) <- scoreComponents rstat xs
+      (xs', best) <- scorePinnedComponents rstat xs
       return (ConS tv n j xs', orAmbient i rstat best)
     scoreExpr rstat (LetS v e1 e2, i) = do
       e1' <- scoreAnnoS rstat {rApplied = []} e1
@@ -631,9 +647,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       e2' <- scoreAnnoS rstat' e2
       -- Score the chain like an application: the binding's RHS and the body
       -- both contribute, with cross-language penalties applied per-lang.
-      let best = scoreApp [] [ (annoType e1', minPairs (scoresOf e1'))
-                             , (annoType e2', minPairs (scoresOf e2'))
-                             ]
+      let best = scoreApp [] [kid e1', kid e2']
       return (LetS v e1' e2', Idx i best)
     scoreExpr rstat (LetBndS v, i) =
       case Map.lookup v (rLetVars rstat) of
@@ -655,10 +669,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       -- returns a parameter, score 0 in every language) mask the real cost of a
       -- heavy branch (e.g. a cross-pool recursive loop body), collapsing the
       -- manifold's language choice to an arbitrary tiebreak. Mirrors 'LetS'.
-      let best = scoreApp [] [ (annoType c', minPairs (scoresOf c'))
-                             , (annoType t', minPairs (scoresOf t'))
-                             , (annoType e', minPairs (scoresOf e'))
-                             ]
+      let best = scoreApp [] [kid c', kid t', kid e']
       return (IfS c' t' e', Idx i best)
     scoreExpr rstat (DoBlockS x, i) = do
       x' <- scoreAnnoS rstat x
@@ -672,7 +683,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       (candidates, allowed) <- castLangs (castHead dir target (annoType x')) (rLangs rstat <> map fst childScores)
       let best = case allowed of
             [] -> [(l, noScore) | l <- candidates]
-            _ -> scoreApp [(l, mempty) | l <- allowed] [(annoType x', childScores)]
+            _ -> scoreApp [(l, mempty) | l <- allowed] [kid x']
       return (CoerceS c x', Idx i best)
     scoreExpr rstat (CoerceS c x, i) = do
       x' <- scoreAnnoS rstat x
@@ -685,43 +696,32 @@ realizeWithRegistry registry tables seedLangs s0 = do
       let Idx _ langScores = zipLang i rstat
           best = case xs' of
             [] -> langScores
-            _ -> scoreApp [] [(annoType x', minPairs (scoresOf x')) | x' <- xs']
+            _ -> scoreApp [] (map kid xs')
       return (IntrinsicS intr xs', Idx i best)
 
-    -- calculate the score for an application based on the score of the function
-    -- and the scores of the arguments
-    scoreApp ::
-      [ ( Lang -- the language of the ith calling function implementation
-        , Score -- the score of the ith implementation
-        )
-      ] ->
-      [ ( Type -- the type of the kth argument, priced by 'crossingPayloadCost'
-        , [ ( Lang -- the language of the jth implementation of the kth argument
-            , Score -- the score of the jth implementation of the kth argument
-            )
-          ]
-        )
-      ] ->
-      [(Lang, Score)]
-    -- if nothing is known, nothing is returned
-    scoreApp [] (concatMap snd -> []) = []
-    -- if none of the arguments are language-specific, the scores are based only
-    -- on the functions
-    scoreApp scores (concatMap snd -> []) = scores
-    -- if the function is not language-specific, calculate the cost of calling
-    -- all arguments from each possible language context
-    scoreApp [] pairss =
-      let score = [(lang, mempty) | lang <- unique $ map fst (concatMap snd pairss)]
-       in scoreApp score pairss
-    -- if arguments and function have implementations, calculate cost relative to
-    -- each function implementation
-    scoreApp scores pairss =
-      -- An argument with no candidates carries no language information, so
-      -- it costs nothing and constrains nothing. It is NOT unrealizable: the
-      -- clause above says the same of a head with no candidates.
-      [ (l1, s1 <> mconcat [reachWith (crossScore t) l1 pairs | (t, pairs) <- pairss, not (null pairs)])
-      | (l1, s1) <- scores
-      ]
+    -- The cost of an application in each language of its head: the head's
+    -- own cost plus reaching each argument from there. An argument with no
+    -- candidates carries no language information, so it costs nothing and
+    -- constrains nothing; a head with none takes its arguments' languages.
+    scoreApp :: [(Lang, Score)] -> [Kid] -> [(Lang, Score)]
+    scoreApp scores kids
+      | null placed = scores
+      | null scores = scoreApp [(l, mempty) | l <- unique (concatMap (map fst . kidTable) placed)] kids
+      | otherwise = [(l1, s1 <> mconcat (map (reachKid l1) placed)) | (l1, s1) <- scores]
+      where
+        placed = filter (not . null . kidTable) kids
+
+    -- A child scored, for its parent to reach.
+    kid :: AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) -> Kid
+    kid x@(AnnoS (Idx _ t) _ e) = Kid t (pinnedToParent e) (scoresOf x)
+
+    -- Reaching a child from its parent's language: from the cheapest
+    -- language for it, across a boundary, unless it is always built in its
+    -- parent's language and priced there.
+    reachKid :: Lang -> Kid -> Score
+    reachKid l (Kid t pinned table)
+      | pinned, Just sc <- lookup l table = sc
+      | otherwise = reachWith (crossScore t) l table
 
     updateRState :: [EVar] -> RState -> RState
     updateRState [] rstat = rstat
@@ -801,9 +801,30 @@ realizeWithRegistry registry tables seedLangs s0 = do
       MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])], [(Lang, Score)])
     scoreComponents rstat xs0 = do
       xs1 <- mapM (scoreAnnoS rstat) xs0
-      let pairss = [(annoType x, scoresOf x) | x <- xs1]
-          langs' = unique (concatMap (map fst . snd) pairss)
-      return (xs1, scoreApp [(l, mempty) | l <- langs'] pairss)
+      return (xs1, scoreApp [] (map kid xs1))
+
+    -- The components of a constructor or of a container of function values,
+    -- which collapse builds in its parent's language: priced from every
+    -- language the parent may be in, so the parent finds its own.
+    scorePinnedComponents ::
+      RState ->
+      [AnnoS (Indexed Type) Many Int] ->
+      MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])], [(Lang, Score)])
+    scorePinnedComponents rstat xs0 = do
+      xs1 <- mapM (scoreAnnoS rstat) xs0
+      langs <- programLangs
+      let kids = map kid xs1
+          heads = unique (langs <> rLangs rstat <> concatMap (map fst . kidTable) kids)
+      return (xs1, if all (null . kidTable) kids then [] else scoreApp [(l, mempty) | l <- heads] kids)
+
+    componentsOf container
+      | isFunctionalData container = scorePinnedComponents
+      | otherwise = scoreComponents
+
+    programLangs :: MorlocMonad [Lang]
+    programLangs = do
+      scopes <- MM.gets stateConcreteTypedefs
+      return (unique (map (LR.poolOf registry) (Map.keys scopes)))
 
     -- The cheapest way to have a value from @table@ in language @l@.
     reachFrom :: Lang -> [(Lang, Score)] -> Score

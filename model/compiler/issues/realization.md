@@ -34,6 +34,15 @@ reproduced]
   priced only where the body calls it; one the body ignores, such as a
   partial application whose data arguments are expensive, is never priced
   even if code generation still builds it.
+- **Scoring and collapse decide separately which nodes stay in their
+  parent's language.** [read, 2026-10-24] COST-11 lists the nodes code
+  generation builds in their parent's language. Scoring prices as pinned
+  a constructor application, a container of function values and a label
+  around either (`pinnedToParent`); collapse pins those plus a lambda, a
+  function argument carried into a sourced call (`collapseCarried`), an
+  implementation that is functional data (`handleOne`) and the language of
+  a named lambda (`pinNamedLambda`), each by its own rule. One predicate
+  both consult would keep them from drifting apart.
 - **Merging two signatures keeps only the first one's docstrings.**
   `mergeEdocs x _ = x` (Frontend/Merge.hs ~83-84) and `weaveTermTypes`
   (~61-64): a directive on the second signature of one term is dropped,
@@ -48,14 +57,6 @@ reproduced]
   language-registry.md; Realize.hs `pairwiseCost`, `crossingPayloadCost _ =
   0`). Plan: /work/plans/realization-cost-model.md and the implementation
   plan it links. Unbuilt design, not a regression.
-- **A constructor is priced as if it could move to another language.**
-  [read, 2026-10-24] A constructor application's table is the sum of
-  reaching its arguments from each language (`scoreComponents`), and its
-  parent may reach it from another language, but collapse always places a
-  constructor in its parent's language, so the estimate can fall below the
-  cost of what is built (several arguments crossing where the estimate
-  counts one boundary). Needs nodes pinned to their parent's language in
-  the DP (COST-11).
 - **A bracket step through an instance is never placed in a pool.**
   [read, 2026-10-21] Realize gives a PatCall no language (Realize.hs:521),
   so a pure `f m = .[0] m` on a receiver that is not a list on the wire
