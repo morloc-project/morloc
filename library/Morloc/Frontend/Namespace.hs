@@ -134,6 +134,7 @@ copyState oldIdx newIdx = do
       , stateRecStages = stateRecStages s
       , stateSpecs = stateSpecs s
       , stateSpecNames = stateSpecNames s
+      , statePlacement = statePlacement s
       , stateNamedGasts = stateNamedGasts s
       , stateHostOriginClosures = stateHostOriginClosures s
       , stateArgTypes = stateArgTypes s

@@ -197,6 +197,17 @@ boundary (COST-3), with every value still in use crossing it. A split keeps
 effect order, evaluates each statement once, keeps failure handling and
 reruns a suspension at each bind.
 
+### COST-14 A recursive definition runs its body 1000 times per call
+Intent: proposed
+Tests: spec-cost-14-1
+Code: conforms 2026-10-24
+
+A call of a function whose definition calls itself costs its body's cost
+times 1000, the same default as a callback's count (COST-4): the body's
+calls, crossings and callbacks each happen once per level. Where the
+recursion's depth is known from its arguments no directive yet says so
+(COST-13).
+
 ### COST-13 What remains open
 Intent: open
 Code: unaudited

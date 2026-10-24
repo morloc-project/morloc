@@ -1,0 +1,24 @@
+-- A recursive definition runs its body many times per call, so the
+-- realizer prices a call of it as its body's cost times 1000 (COST-14).
+-- `count` is defined with operators available in Python and C++, and its
+-- caller hands the result to a Python function. Priced once, the body
+-- would stay in Python beside its caller; priced per level, it runs in
+-- C++, which costs one crossing into C++ and back. The placement listing
+-- of `morloc typecheck --realize` is the output; the run checks the
+-- program still computes.
+
+--' Recursion priced per level
+module main (countFrom)
+
+import root-py
+import root-cpp
+
+--' Count down to zero
+count :: Int -> Int
+count n
+  ? n == 0 = 0
+  : 1 + count (n - 1)
+
+--' Count down to zero and pass the count through Python
+countFrom :: Int -> Int
+countFrom n = idpy (count n)

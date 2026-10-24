@@ -290,6 +290,10 @@ data MorlocState = MorlocState
   , stateSpecs :: Specs
   -- | The names the uses of shared specializations call them by.
   , stateSpecNames :: Set.Set EVar
+  -- | The realizer's placement of each exported tree, one line per named
+  -- call, for `morloc typecheck --realize`; collected only when set to
+  -- @Just@ before realization.
+  , statePlacement :: Maybe [Text]
   -- | The copies of shared specializations the nexus calls by name, by the
   -- index of their root.
   , stateNamedGasts :: Map Int EVar
@@ -1082,6 +1086,7 @@ instance Defaultable MorlocState where
       , stateRecStages = Map.empty
       , stateSpecs = Specs []
       , stateSpecNames = Set.empty
+      , statePlacement = Nothing
       , stateNamedGasts = Map.empty
       , stateHostOriginClosures = Set.empty
       , stateArgTypes = Map.empty

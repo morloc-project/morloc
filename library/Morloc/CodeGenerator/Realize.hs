@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 
@@ -37,6 +38,61 @@ import qualified Morloc.TypeEval as TE
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.CodeGenerator.Infer as Infer
 
+-- | One line per named call of a realized tree, its arguments and body
+-- indented beneath it, with its language. @*@ marks a node in another
+-- language than its parent: a crossing. An unnamed node is listed only
+-- when it crosses, by its kind.
+placementLines :: AnnoS (Indexed Type) One (Indexed Lang) -> [MT.Text]
+placementLines = go 0 Nothing
+  where
+    go :: Int -> Maybe Lang -> AnnoS (Indexed Type) One (Indexed Lang) -> [MT.Text]
+    go depth parent (AnnoS _ (Idx _ lang) e) = case e of
+      AppS f xs | Just v <- callName f -> entry (name v) : below (definition f <> xs)
+      VarS v (One body) -> entry (name v) : below (definition' body)
+      ExeS (SrcCall src) -> [entry (name (srcAlias src))]
+      CallS v -> [entry ("call " <> name v)]
+      LetBndS v | moved -> [entry (name v)]
+      BndS v | moved -> [entry (name v)]
+      _ | moved -> entry ("(" <> kind e <> ")") : below (children e)
+      _ -> concatMap (go depth (Just lang)) (children e)
+      where
+        moved = maybe False (/= lang) parent
+        mark = if moved then " *" else ""
+        entry x = MT.replicate depth "  " <> x <> " [" <> render (pretty lang) <> "]" <> mark
+        below = concatMap (go (depth + 1) (Just lang))
+        name = unEVar . displayName
+
+    children = foldExprS (: [])
+
+    kind :: ExprS g f c -> MT.Text
+    kind e = case e of
+      AppS {} -> "application"
+      LamS {} -> "lambda"
+      LstS {} -> "list"
+      TupS {} -> "tuple"
+      NamS {} -> "record"
+      ConS _ n _ _ -> n
+      LetS {} -> "let"
+      IfS {} -> "if"
+      DoBlockS {} -> "do"
+      EvalS {} -> "eval"
+      CoerceS {} -> "cast"
+      IntrinsicS {} -> "intrinsic"
+      LabelS {} -> "label"
+      _ -> "value"
+
+    callName :: AnnoS g One c -> Maybe EVar
+    callName (AnnoS _ _ (VarS v _)) = Just v
+    callName (AnnoS _ _ (ExeS (SrcCall src))) = Just (srcAlias src)
+    callName (AnnoS _ _ (CallS v)) = Just (EV ("call " <> unEVar (displayName v)))
+    callName _ = Nothing
+
+    definition (AnnoS _ _ (VarS _ (One body))) = definition' body
+    definition _ = []
+
+    definition' (AnnoS _ _ (ExeS _)) = []
+    definition' body = [body]
+
 realityCheck ::
   -- | one AST forest for each command exported from main
   [AnnoS (Indexed Type) Many Int] ->
@@ -64,6 +120,12 @@ realityCheck es = do
   -- Extract non-exported recursive helpers into their own rASTs.
   -- This must happen before removeVarS so we can find the VarS wrappers.
   rASTs1 <- extractRecursiveHelpers rASTs0
+  wanted <- MM.gets statePlacement
+  case wanted of
+    Just _ -> do
+      let placement = concatMap placementLines rASTs1
+      sum (map MT.length placement) `seq` MM.modify (\st -> st {statePlacement = Just placement})
+    Nothing -> return ()
 
   -- Now dissolve remaining (non-recursive) VarS wrappers
   let gASTs = map removeVarS gASTs1
@@ -178,17 +240,35 @@ nexusDemanded finishers takesFunction trees0
       copies <- MM.liftIO (readIORef copiesRef)
       return (trees <> copies)
 
--- | The realize objective: @(accumulated cost, number of language switches)@,
--- compared lexicographically. Cost dominates; switch-count is a PURE tiebreaker
--- that only resolves genuine cost-ties (it never overrides a real cost
--- difference), keeping language-agnostic terms in the parent's language to avoid
--- gratuitous boundaries. The same objective is used in both scoring and collapse
--- (replacing the old backward-only @+1@ biasedCost).
-type Score = (Int, Int)
+-- | The realize objective (COST-1): estimated time, then the number of
+-- crossings between pools, then the number of language changes within a
+-- pool, compared lexicographically.
+data Score = Score
+  { scoreTime :: !Double
+  , scoreCrossings :: !Int
+  , scoreSwitches :: !Int
+  }
+  deriving (Eq, Ord, Show)
 
--- | Component-wise addition of two scores.
-addScore :: Score -> Score -> Score
-addScore (a, b) (c, d) = (a + c, b + d)
+instance Semigroup Score where
+  Score a b c <> Score x y z = Score (a + x) (b + y) (c + z)
+
+instance Monoid Score where
+  mempty = Score 0 0 0
+
+-- | A score repeated @k@ times, saturating below the "no realization"
+-- sentinel so that no placement's cost reaches it.
+scaleScore :: Int -> Score -> Score
+scaleScore k (Score t c w)
+  | t >= 1e300 = Score t c w
+  | otherwise = Score (min 1e290 (fromIntegral k * t)) (sat c) (sat w)
+  where
+    sat n = fromInteger (min (10 ^ (15 :: Int)) (toInteger k * toInteger n))
+
+-- | How many times a recursive definition runs its body per call, when
+-- nothing says otherwise (COST-14).
+defaultRecursionCount :: Int
+defaultRecursionCount = 1000
 
 -- State for the realize scoring algorithm
 data RState = RState
@@ -417,7 +497,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       able <- ableLangs i ts (map fst table)
       return $ case (able, [x | x@(l, _) <- table, l `elem` able]) of
         ([], _) -> table
-        (_, []) -> [(l, minimum [addScore sc (transScore l0 l) | (l0, sc) <- table]) | l <- able]
+        (_, []) -> [(l, reachFrom l table) | l <- able]
         (_, kept) -> kept
 
     -- The language a language-free computation placed in context @l@ runs
@@ -429,7 +509,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       return $ case able of
         _ | l `elem` able -> l
         [] -> l
-        _ -> snd (minimum [(transScore l l', l') | l' <- able])
+        _ -> snd (minimum [(boundary l l', l') | l' <- able])
 
     -- Of these languages and the program's pool languages, those in which
     -- codegen finds a concrete type for each of @ts@.
@@ -464,13 +544,13 @@ realizeWithRegistry registry tables seedLangs s0 = do
       (ExprS (Indexed Type) Many Int, Int) ->
       MorlocMonad (ExprS (Indexed Type) Many (Indexed [(Lang, Score)]), Indexed [(Lang, Score)])
     scoreExpr rstat (LstS xs, i) = do
-      (xs', best) <- scoreMany rstat xs
+      (xs', best) <- scoreComponents rstat xs
       return (LstS xs', Idx i best)
     scoreExpr rstat (TupS xs, i) = do
-      (xs', best) <- scoreMany rstat xs
+      (xs', best) <- scoreComponents rstat xs
       return (TupS xs', Idx i best)
     scoreExpr rstat (NamS rs, i) = do
-      (xs, best) <- scoreMany rstat (map snd rs)
+      (xs, best) <- scoreComponents rstat (map snd rs)
       return (NamS (zip (map fst rs) xs), Idx i best)
     scoreExpr rstat (LamS vs x, i) = do
       x' <- scoreAnnoS (updateRState vs rstat) x
@@ -509,7 +589,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
     scoreExpr rstat (UniS, i) = return (UniS, zipLang i rstat)
     scoreExpr rstat (NullS, i) = return (NullS, zipLang i rstat)
     scoreExpr rstat (VarS v (Many xs), i) = do
-      (xs', best) <- scoreMany rstat xs
+      (xs', best) <- scoreAlternatives v rstat xs
       return (VarS v (Many xs'), Idx i best)
     scoreExpr rstat (BndS v, i) = do
       case Map.lookup v (rBndVars rstat) of
@@ -517,7 +597,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
           scores <- scoreAnnoS rstat e |>> scoresOf
           return (BndS v, Idx i scores)
         _ -> return (BndS v, zipLang i rstat)
-    scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, (callCost src, 0))])
+    scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, Score (callCost src) 0 0)])
     scoreExpr rstat (ExeS x@(PatCall _), i) = return (ExeS x, zipLang i rstat)
     scoreExpr rstat (RealS si x, i) = return (RealS si x, zipLang i rstat)
     scoreExpr rstat (IntS si x, i) = return (IntS si x, zipLang i rstat)
@@ -538,9 +618,9 @@ realizeWithRegistry registry tables seedLangs s0 = do
             [] -> []
             _ ->
               let base = minimum (map snd rhs)
-                  rel (c, n) (bc, bn) = (c - bc, n - bn)
                   langs = unique (map fst rhs <> rLangs rstat)
-               in [ (l, minimum [addScore (rel sc base) (transScore h l) | (h, sc) <- rhs])
+                  above (Score t c w) (Score bt bc bw) = Score (t - bt) (max 0 (c - bc)) (max 0 (w - bw))
+               in [ (l, minimum [above sc base <> boundary h l | (h, sc) <- rhs])
                   | l <- langs
                   ]
           rstat' = rstat { rLetVars = Map.insert v refTable (rLetVars rstat) }
@@ -587,7 +667,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       (candidates, allowed) <- castLangs (castHead dir target (annoType x')) (rLangs rstat <> map fst childScores)
       let best = case allowed of
             [] -> [(l, noScore) | l <- candidates]
-            _ -> scoreApp [(l, (0, 0)) | l <- allowed] [(annoType x', childScores)]
+            _ -> scoreApp [(l, mempty) | l <- allowed] [(annoType x', childScores)]
       return (CoerceS c x', Idx i best)
     scoreExpr rstat (CoerceS c x, i) = do
       x' <- scoreAnnoS rstat x
@@ -626,25 +706,15 @@ realizeWithRegistry registry tables seedLangs s0 = do
     -- if the function is not language-specific, calculate the cost of calling
     -- all arguments from each possible language context
     scoreApp [] pairss =
-      let score = [(lang, (0, 0)) | lang <- unique $ map fst (concatMap snd pairss)]
+      let score = [(lang, mempty) | lang <- unique $ map fst (concatMap snd pairss)]
        in scoreApp score pairss
     -- if arguments and function have implementations, calculate cost relative to
     -- each function implementation
     scoreApp scores pairss =
-      [ ( l1
-        , foldl
-            addScore
-            s1
-            [ -- An argument with no candidates carries no language information,
-              -- so it costs nothing and constrains nothing. It is NOT
-              -- unrealizable: the clause above says the same of a head with no
-              -- candidates. Folding in the "no realization" sentinel instead
-              -- would swamp every real cross-language difference, after which
-              -- the enclosing choice is made by rounding error.
-              minimumDef (0, 0) [addScore s2 (crossScore t l1 l2) | (l2, s2) <- pairs]
-            | (t, pairs) <- pairss
-            ]
-        )
+      -- An argument with no candidates carries no language information, so
+      -- it costs nothing and constrains nothing. It is NOT unrealizable: the
+      -- clause above says the same of a head with no candidates.
+      [ (l1, s1 <> mconcat [reachWith (crossScore t) l1 pairs | (t, pairs) <- pairss, not (null pairs)])
       | (l1, s1) <- scores
       ]
 
@@ -656,38 +726,47 @@ realizeWithRegistry registry tables seedLangs s0 = do
         rstat {rApplied = ps, rBndVars = Map.insert v p bound}
 
     zipLang :: Int -> RState -> Indexed [(Lang, Score)]
-    zipLang i (rLangs -> langs) = Idx i (zip langs (repeat (0, 0)))
+    zipLang i (rLangs -> langs) = Idx i (zip langs (repeat mempty))
 
     scoresOf :: AnnoS a Many (Indexed [(Lang, Score)]) -> [(Lang, Score)]
     scoresOf (AnnoS _ (Idx _ xs) _) = minPairs xs
 
-    -- find the scores of all implementations from all possible language contexts
-    scoreMany ::
+    -- The implementations of term @v@: one is chosen, so each language costs
+    -- its cheapest implementation reached from there. A recursive
+    -- implementation runs its body many times per call (COST-14).
+    scoreAlternatives ::
+      EVar ->
       RState ->
       [AnnoS (Indexed Type) Many Int] ->
       MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])], [(Lang, Score)])
-    scoreMany rstat xs0 = do
-      xs1 <- mapM (scoreAnnoS rstat) xs0
-      return (xs1, scoreMany' xs1)
+    scoreAlternatives v rstat xs0 = do
+      xs1 <- mapM (fmap repeated . scoreAnnoS rstat) xs0
+      let pairs = minPairs (concat [xs' | (AnnoS _ (Idx _ xs') _) <- xs1])
+          langs' = unique (rLangs rstat <> map fst pairs)
+      return (xs1, [(l1, if null pairs then noScore else reachFrom l1 pairs) | l1 <- langs'])
       where
-        scoreMany' :: [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])] -> [(Lang, Score)]
-        scoreMany' xs =
-          let pairss = [(minPairs . concat) [xs' | (AnnoS _ (Idx _ xs') _) <- xs]]
-              langs' = unique (rLangs rstat <> concatMap (map fst) pairss)
-           in [ ( l1
-                , foldl
-                    addScore
-                    (0, 0)
-                    [ minimumDef
-                      noScore
-                      [ addScore score (transScore l1 l2)
-                      | (l2, score) <- pairs
-                      ]
-                    | pairs <- pairss
-                    ]
-                )
-              | l1 <- langs'
-              ]
+        repeated x@(AnnoS g (Idx j ss) e)
+          | containsCallS v x = AnnoS g (Idx j [(l, scaleScore defaultRecursionCount sc) | (l, sc) <- ss]) e
+          | otherwise = x
+
+    -- The components of a list, tuple or record: all of them are built, so
+    -- each is priced like an argument (COST-11).
+    scoreComponents ::
+      RState ->
+      [AnnoS (Indexed Type) Many Int] ->
+      MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])], [(Lang, Score)])
+    scoreComponents rstat xs0 = do
+      xs1 <- mapM (scoreAnnoS rstat) xs0
+      let pairss = [(annoType x, scoresOf x) | x <- xs1]
+          langs' = unique (rLangs rstat <> concatMap (map fst . snd) pairss)
+      return (xs1, scoreApp [(l, mempty) | l <- langs'] pairss)
+
+    -- The cheapest way to have a value from @table@ in language @l@.
+    reachFrom :: Lang -> [(Lang, Score)] -> Score
+    reachFrom = reachWith boundary
+
+    reachWith :: (Lang -> Lang -> Score) -> Lang -> [(Lang, Score)] -> Score
+    reachWith edge l table = minimum [sc <> edge l l2 | (l2, sc) <- table]
 
     -- The enclosing recursive heads, outermost first, each with the
     -- language it was placed in. A node with a back-edge to one of them
@@ -735,7 +814,12 @@ realizeWithRegistry registry tables seedLangs s0 = do
         "realize: node" <+> pretty idx
           <+> ("parent=" <> maybe "general" pretty l1)
           <+> ("chose=" <> maybe "general" pretty mlang)
+          <+> ("table=" <> tableDoc ci0)
       return (AnnoS gi ci' e')
+
+    tableDoc :: Indexed [(Lang, Score)] -> MDoc
+    tableDoc (Idx _ ss) =
+      list [pretty l <> ":" <> viaShow (scoreTime sc) <> "/" <> pretty (scoreCrossings sc) <> "/" <> pretty (scoreSwitches sc) | (l, sc) <- ss]
 
     -- The newtype a cast converts: the argument's type when unwrapping, the
     -- result's when wrapping.
@@ -753,30 +837,31 @@ realizeWithRegistry registry tables seedLangs s0 = do
       allowed <- filterM (\l -> not . Map.member n <$> MM.getConcreteScope l) candidates
       return (candidates, allowed)
 
-    -- Sentinel "no realization" score. Cost dominates, so the switch component
-    -- is irrelevant. Got 10 billion nodes in your AST? I didn't think so.
+    -- Sentinel "no realization" score, above any cost a placement can reach
+    -- ('scaleScore' saturates below it).
     noScore :: Score
-    noScore = (999999999, 999999999)
+    noScore = Score 1e300 0 0
 
-    -- Cost of moving a value from parent language l1 to l2: the pairwise
-    -- (transition/self) cost, plus one language switch when the languages differ.
-    -- The switch component is the pure lexicographic tiebreaker (see 'Score'):
-    -- among languages of equal cost it keeps the value in the parent's language,
-    -- the boundary-minimizing choice the old backward-only +1 biasedCost made.
     -- | The general type an annotated expression carries.
     annoType :: AnnoS (Indexed Type) f c -> Type
     annoType (AnnoS (Idx _ t) _ _) = t
 
-    transScore :: Lang -> Lang -> Score
-    transScore l1 l2 = (pairwiseCost l1 l2, if l1 == l2 then 0 else 1)
+    -- | What it costs to reach a child placed in @l2@ from a parent in @l1@
+    -- (COST-3): one crossing into @l2@'s pool, or nothing within one pool,
+    -- where a change of language only counts as a switch.
+    boundary :: Lang -> Lang -> Score
+    boundary l1 l2
+      | l1 == l2 = mempty
+      | LR.coLocated registry l1 l2 = Score 0 0 1
+      | otherwise = Score (fromIntegral (pairwiseCost l1 l2)) 1 0
 
     -- | What it costs to move a value of this type across a pool boundary,
     -- added to the cost of the language pair itself. Zero within a pool,
     -- where nothing is moved.
     crossScore :: Type -> Lang -> Lang -> Score
     crossScore t l1 l2
-      | l1 == l2 = transScore l1 l2
-      | otherwise = let (c, sw) = transScore l1 l2 in (c + crossingPayloadCost t, sw)
+      | LR.coLocated registry l1 l2 = boundary l1 l2
+      | otherwise = boundary l1 l2 <> Score (crossingPayloadCost t) 0 0
 
     -- | THE EXTENSION POINT for pricing a crossing by WHAT is moved rather
     -- than only by where it is going.
@@ -809,7 +894,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
     -- Any refinement must remain a pure function of the type: this runs before
     -- values exist. The type given is the general type at the crossing point,
     -- already monomorphized, so a cost may depend on type parameters.
-    crossingPayloadCost :: Type -> Int
+    crossingPayloadCost :: Type -> Double
     crossingPayloadCost _ = 0
 
     cost ::
@@ -817,13 +902,13 @@ realizeWithRegistry registry tables seedLangs s0 = do
       Lang -> -- child lang (should always be given if we are working from scored pairs)
       Score -> -- score
       Score
-    cost (Just l1) l2 score = addScore score (transScore l1 l2)
+    cost (Just l1) l2 score = score <> boundary l1 l2
     cost _ _ score = score
 
     -- FIXME: in the future, this function should be replaced by an estimate of
     -- the function runtime, for now I will just base it off languages.
-    callCost :: Source -> Int
-    callCost src = languageCost (srcLang src)
+    callCost :: Source -> Double
+    callCost src = fromIntegral (languageCost (srcLang src))
 
     collapseExpr ::
       [(EVar, Lang)] ->
@@ -840,7 +925,10 @@ realizeWithRegistry registry tables seedLangs s0 = do
       (x, lang) <- case minXs of
         [] -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
         [x] -> handleOne x
-        choices -> mapM handleOne choices >>= handleMany gt
+        choices ->
+          resolveInstances gt choices >>= \case
+            (y : _) -> handleOne y
+            [] -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
       return (VarS v (One x), Idx i lang)
       where
         handleOne ::
@@ -860,11 +948,13 @@ realizeWithRegistry registry tables seedLangs s0 = do
           x' <- collapseAnnoS heads' newLang x
           return (x', newLang)
 
-        handleMany ::
+        -- The implementations whose type matches the use best: the most
+        -- specific instance, at the nearest link of the use's alias chain.
+        resolveInstances ::
           Type ->
-          [(AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)] ->
-          MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
-        handleMany gt' xs' = do
+          [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])] ->
+          MorlocMonad [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])]
+        resolveInstances gt' xs' = do
           gscope <- MM.getGeneralScope
           -- gt' followed by each step of its alias chain toward the root
           -- type (C -> B -> A -> Str). A candidate matches at the first
@@ -874,7 +964,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
           let chain = gt' : List.unfoldr (fmap (\t -> (t, t)) . reduceStep gscope) gt'
               matched =
                 [ (lvl, type2typeu t, x)
-                | x@(AnnoS (Idx _ t) _ _, _) <- xs'
+                | x@(AnnoS (Idx _ t) _ _) <- xs'
                 , Just lvl <- [List.findIndex (`compatibleType` t) chain]
                 ]
               -- Instance heads are ordered by subsumption (UnkT lowers to
@@ -892,11 +982,11 @@ realizeWithRegistry registry tables seedLangs s0 = do
                 "No matching implementation found for" <+> squotes (pretty (displayName v))
                   <+> "at type" <+> pretty gt'
             -- one head, possibly sourced several times (duplicate imports)
-            ((h0, x) : rest) | all (equivalent h0 . fst) rest -> return x
+            ((h0, _) : rest) | all (equivalent h0 . fst) rest -> return (map snd nearest)
             -- The use site does not fix the type, so the overlap cannot be
             -- judged here. A generic export is dropped before code
             -- generation, so the pick below is never observed there.
-            ((_, x) : _) | containsUnk gt' -> return x
+            _ | containsUnk gt' -> return (map snd nearest)
             _ ->
               MM.throwSourcedError i $
                 "Ambiguous instances for" <+> squotes (pretty (displayName v))
@@ -1131,7 +1221,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
 
     chooseLanguage :: Maybe Lang -> [(Lang, Score)] -> MorlocMonad (Maybe Lang)
     chooseLanguage l1 ss =
-      case minBy snd [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
+      case minBy (\(l2, s2) -> (s2, l2)) [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
         Nothing -> return Nothing
         (Just (l3, _)) -> return (Just l3)
 
@@ -1156,7 +1246,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
         (l : _) -> return (Just (hostedWith l))
         [] -> chooseLanguage l1 ss
       where
-        hostedWith l = case minBy snd [(l2, s) | (l2, s) <- ss, LR.coLocated registry l l2] of
+        hostedWith l = case minBy (\(l2, s) -> (s, l2)) [(l2, s) | (l2, s) <- ss, LR.coLocated registry l l2] of
           Just (l2, _) -> l2
           Nothing -> l
 

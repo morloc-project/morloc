@@ -647,6 +647,7 @@ cmdTypecheck args _ config buildConfig = do
               -- tree; a typecheck never builds, so the tree is discarded
               -- whether or not the check passed.
               ( do
+                  MM.modify (\st -> st {statePlacement = Just []})
                   pools <- Build.withStagingCleanup (M.typecheck path code >>= (generatePools . snd))
                   Build.discardStagingDir
                   return pools
@@ -684,7 +685,11 @@ writeFrontendTypes st (AnnoS (Idx i t) _ _) =
 writeTypecheckOutput ::
   Int -> ((Either MorlocError [(Lang, [SerialManifold])], [MT.Text]), MorlocState) -> (Bool, MDoc)
 writeTypecheckOutput _ ((Left e, _), st) = (False, MM.makeMorlocError st e)
-writeTypecheckOutput _ ((Right pools, _), _) = (True, vsep $ map (uncurry writePool) pools)
+writeTypecheckOutput _ ((Right pools, _), st) =
+  (True, vsep $ writePlacement (fromMaybe [] (statePlacement st)) : map (uncurry writePool) pools)
+
+writePlacement :: [MT.Text] -> MDoc
+writePlacement ls = vsep ("placement:" : map (("  " <>) . pretty) ls) <> "\n"
 
 writePool :: Lang -> [SerialManifold] -> MDoc
 writePool lang manifolds = pretty lang <+> "pool:" <> "\n" <> vsep (map pseudocodeSerialManifold manifolds) <> "\n"

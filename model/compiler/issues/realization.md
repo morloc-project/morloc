@@ -5,24 +5,20 @@ found reviewing /work/plans/realization-cost-model.md. The objective is
 COST-1 (ruled); each entry is wrong under any reading of it. [read; not
 reproduced]
 
-- **A list, tuple or record is priced by its cheapest element.**
-  `scoreMany` (~665-682) builds one merged table of every element's scores
-  and takes the per-language minimum, which is right for alternatives of one
-  term (`VarS (Many ..)`, one is chosen) and wrong for the components of a
-  container (all must exist): in `[pyA, rustB]` placed in Rust, `pyA`'s
-  crossing costs nothing whenever `rustB` is cheaper. Sum the components.
 - **A use of a let-bound value is priced from where it was computed.**
   `refTable` (~529-557) prices a reference in language l as moving the value
   from its home h to l, but the value lives where the let runs; for a value
   computed in Rust, bound in a Python do-block and used in Rust, the second
   crossing costs nothing. lib/biolib rnaseq R36 is this shape.
-- **A parameter is free in every language.** A non-function `BndS` scores 0
-  everywhere (~514-519), so a value passed in and used in two pools is never
-  priced.
+- **A value read across a boundary moves for free.** A parameter or a
+  let-bound value read by a subtree in another pool rides that subtree's
+  one boundary latency (COST-3), but its per-element and per-byte cost is
+  never added: `crossingPayloadCost` is 0 and no node records the sizes of
+  the free variables it carries down.
 - **Collapse and scoring price an edge differently.** Collapse picks a
-  child's language with `transScore` (`cost`, ~776; `chooseLanguage`,
-  ~1037), scoring with `crossScore`; once the payload term is non-zero the
-  DP is no longer exact. `holding` (~420, ~432) also uses `transScore`.
+  child's language with `boundary` (`cost`, `chooseLanguage`, `holding`,
+  `holdingLang`), scoring arguments with `crossScore`; once the payload term
+  is non-zero the DP is no longer exact.
 - **A morloc-defined head prices its function arguments twice**, once
   inside its body (re-scoring through `rBndVars`, ~514-518) and again at the
   outer `scoreApp` (~502-505).
@@ -44,11 +40,6 @@ reproduced]
   2026-10-24] `scoreExpr` for `ConS` scores its children and returns
   `zipLang` (Realize.hs, the ConS case), so a constructor whose argument is
   computed in another pool is priced as if it moved nothing.
-- **Every edge in one language charges the language's call cost.** [read,
-  2026-10-24] `transScore l l` is `same_language_costs[l]`, added for every
-  child that has a language, so a deep expression in Python costs
-  more per node than the same expression placed in C++ even when nothing
-  moves; COST-2 charges a call cost per call, not per edge.
 - **A bracket step through an instance is never placed in a pool.**
   [read, 2026-10-21] Realize gives a PatCall no language (Realize.hs:521),
   so a pure `f m = .[0] m` on a receiver that is not a list on the wire
@@ -84,3 +75,16 @@ reproduced]
   trip per base case for no work (golden spec-cost-12-1, `loop`). The
   let-bound value is priced where it was computed rather than where it is
   used; boundary pricing (COST-3, COST-11) removes it.
+
+- **Cost chooses between instances before their types do.** [reproduced,
+  2026-10-24] Collapse keeps the cheapest implementations of a term
+  (`minsBy` in the `VarS` clause of `collapseExpr`) and only resolves
+  instances by type among ties (`resolveInstances`), so when an instance of
+  a less specific or incompatible type is cheaper it is taken without a
+  type check; COST-11 says instance resolution chooses first. Resolving
+  types first is blocked on `compatibleType`, which does not match
+  Nat-dimensioned types: with types first, golden tensor-comprehensive
+  fails "No matching implementation found for 'pack' at type ((Int, Int),
+  Vector 6 Real) -> Matrix 2 3 Real" (vector-comprehensive likewise). The
+  recursion count (COST-14) makes cost differences between instances
+  larger, not new.

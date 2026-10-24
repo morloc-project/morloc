@@ -1,0 +1,8 @@
+placement:
+  pick [py]
+    consume [py]
+      pyA [py]
+      cppB [cpp] *
+      cppC [cpp] *
+
+36

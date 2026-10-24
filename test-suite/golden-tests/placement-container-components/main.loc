@@ -1,0 +1,32 @@
+-- Every component of a list, tuple or record is built, so the realizer
+-- prices a container as the sum of its components (COST-11, which still
+-- deviates elsewhere: model/compiler/issues/realization.md), not as its
+-- cheapest one. With one Python and two C++ components, a consumer that
+-- exists in both languages runs where the components cost least in total.
+-- The placement listing of `morloc typecheck --realize` is the output; the
+-- run checks the program still computes.
+
+--' Container components priced together
+module main (pick)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("py_a" as pyA, "consume" as consume)
+source Cpp from "f.hpp" ("cpp_b" as cppB, "cpp_c" as cppC, "consume" as consume)
+
+--' Add one in Python
+pyA :: Int -> Int
+
+--' Add two in C++
+cppB :: Int -> Int
+
+--' Add three in C++
+cppC :: Int -> Int
+
+--' Sum a triple
+consume :: (Int, Int, Int) -> Int
+
+--' Sum three shifted copies of a number
+pick :: Int -> Int
+pick x = consume (pyA x, cppB x, cppC x)
