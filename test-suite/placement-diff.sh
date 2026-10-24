@@ -6,8 +6,8 @@
 #
 #   placement-diff.sh OUT [DIR...]
 #
-# DIR defaults to test-suite/golden-tests. A program is a main.loc, or the
-# only .loc file of its directory. Programs that fail to typecheck get a
+# DIR defaults to test-suite/golden-tests. A program is a main.loc, else
+# each main*.loc, else the only .loc file of its directory. Programs that fail to typecheck get a
 # file holding the first line of the error, so a new failure shows in the
 # diff too. GUARD, if set, prefixes each call (a memory or time limit,
 # e.g. GUARD="timeout 120").
@@ -34,10 +34,11 @@ for root in "$@"; do
     | sort \
     | while read -r loc; do
         dir=$(dirname "$loc")
-        if [ "$(basename "$loc")" != main.loc ]; then
-          [ -e "$dir/main.loc" ] && continue
-          [ "$(find "$dir" -maxdepth 1 -name '*.loc' | wc -l)" -eq 1 ] || continue
-        fi
+        case "$(basename "$loc")" in
+          main.loc) ;;
+          main*.loc) [ -e "$dir/main.loc" ] && continue ;;
+          *) [ "$(find "$dir" -maxdepth 1 -name '*.loc' | wc -l)" -eq 1 ] || continue ;;
+        esac
         name=$(basename "$(dirname "$root")")_$(echo "${loc#"$root"/}" | tr '/' '_')
         result=$(cd "$dir" && $GUARD morloc typecheck --realize "$(basename "$loc")" 2>&1 < /dev/null)
         listing=$(printf '%s\n' "$result" | sed -n '/^placement:$/,/^$/p')

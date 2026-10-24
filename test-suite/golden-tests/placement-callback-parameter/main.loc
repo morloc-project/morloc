@@ -1,0 +1,45 @@
+-- A lambda handed to a sourced function is built in that function's
+-- language, and a call the lambda makes on its own function parameter runs
+-- there too: the parameter is a value of that language, which cannot be
+-- sent elsewhere to be called. Here the C++ host passes a C++ function to
+-- the lambda, and the lambda applies it to a Python value; the application
+-- must stay in C++ (only the Python argument crosses), or the C++ function
+-- would be dragged into the Python pool. The same holds when the call's
+-- argument is a literal and its result goes to Python: `k 3` stays in C++
+-- and only its result crosses, and when the host reaches the lambda
+-- through a parameter of a morloc function. Only the placement listing of
+-- `morloc typecheck --realize` is checked.
+
+--' A call on a callback parameter stays with the callback
+module main (run, runLiteral, runThroughParameter)
+
+import root-py
+import root-cpp
+
+source Cpp from "f.hpp" ("with_inc" as withInc, "with_inc_from" as withIncFrom)
+source Py from "f.py" ("py_inc" as pyInc)
+
+--' Call a function with an incrementing function
+withInc :: ((Int -> Int) -> Int) -> Int
+
+--' Call a function with a function that adds a given amount
+withIncFrom :: Int -> ((Int -> Int) -> Int) -> Int
+
+--' Add one in Python
+pyInc :: Int -> Int
+
+--' Apply the host's function to a Python value
+run :: Int -> Int
+run x = withInc (\k -> k (pyInc x))
+
+--' Pass the host's function applied to a literal to Python
+runLiteral :: Int -> Int
+runLiteral x = withInc (\k -> pyInc (k 3))
+
+--' Hand a lambda to a host given as a parameter
+hof :: (((Int -> Int) -> Int) -> Int) -> Int -> Int
+hof h x = h (\k -> k (pyInc x))
+
+--' Apply a partially applied host through a morloc function
+runThroughParameter :: Int -> Int
+runThroughParameter x = hof (withIncFrom 1) x

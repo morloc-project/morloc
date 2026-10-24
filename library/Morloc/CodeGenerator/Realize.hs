@@ -273,8 +273,11 @@ defaultRecursionCount = 1000
 -- State for the realize scoring algorithm
 data RState = RState
   { rLangs :: [Lang]
-  , rApplied :: [AnnoS (Indexed Type) Many Int]
-  , rBndVars :: Map EVar (AnnoS (Indexed Type) Many Int)
+  -- | The arguments of the application whose head is being scored, each
+  -- with its type and table, for the head's lambda to bind.
+  , rApplied :: [(Type, [(Lang, Score)])]
+  -- | A lambda parameter bound to a function value: the table of that value.
+  , rBndVars :: Map EVar [(Lang, Score)]
   -- | A let-bound variable: the table of a reference to it when its value
   -- is or holds a function, 'Nothing' for data, whose references are free.
   , rLetVars :: Map EVar (Maybe [(Lang, Score)])
@@ -298,11 +301,10 @@ emptyRState =
 -- reindexing): this cannot bloat and needs no fresh indices. Multiply-used
 -- redexes are left for the post-collapse 'applyLambdas'.
 --
--- The point is tractability, not tidiness: a point-free composition chain
--- @id . id . ..@ desugars to nested singly-used literal-lambda redexes that
--- collapse here to a single @\\x -> x@. Removing them removes the input on which
--- the scorer re-scores function-typed bound variables, the source of the
--- exponential blow-up on composition depth.
+-- A point-free composition chain @id . id . ..@ desugars to nested
+-- singly-used literal-lambda redexes that collapse here to a single
+-- @\\x -> x@, so the scorer sees the chain's calls rather than its
+-- plumbing.
 normalizePop1 ::
   (EVar -> Maybe Int) ->
   AnnoS (Indexed Type) Many Int ->
@@ -443,8 +445,7 @@ realizeWithRegistry ::
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Scored, Finisher)
 realizeWithRegistry registry tables seedLangs s0 = do
-  -- Normalize language-invariant (literal-lambda-head) redexes before scoring so
-  -- the scorer is not fed composition chains it would re-score exponentially.
+  -- Normalize language-invariant (literal-lambda-head) redexes before scoring.
   let sp = stagePoints s0
   s0' <- normalizePop1 (`Map.lookup` sp) s0
   scored <- scoreAnnoS emptyRState {rLangs = seedLangs} s0'
@@ -479,7 +480,10 @@ realizeWithRegistry registry tables seedLangs s0 = do
       RState ->
       AnnoS (Indexed Type) Many Int ->
       MorlocMonad (AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]))
-    scoreAnnoS rstat (AnnoS gi@(Idx gidx t) ci e) = do
+    scoreAnnoS rstat0 (AnnoS gi@(Idx gidx t) ci e) = do
+      -- The arguments of an application reach only the lambdas its head
+      -- binds them with ('boundArgs' follows the same chain).
+      let rstat = if passesApplied e then rstat0 else rstat0 {rApplied = []}
       (e', Idx ci' table) <- scoreExpr rstat (e, ci)
       -- An operation that belongs to no language runs where its context
       -- puts it, but only in a language that can hold what it computes.
@@ -547,58 +551,54 @@ realizeWithRegistry registry tables seedLangs s0 = do
       MorlocMonad (ExprS (Indexed Type) Many (Indexed [(Lang, Score)]), Indexed [(Lang, Score)])
     scoreExpr rstat (LstS xs, i) = do
       (xs', best) <- scoreComponents rstat xs
-      return (LstS xs', Idx i best)
+      return (LstS xs', orAmbient i rstat best)
     scoreExpr rstat (TupS xs, i) = do
       (xs', best) <- scoreComponents rstat xs
-      return (TupS xs', Idx i best)
+      return (TupS xs', orAmbient i rstat best)
     scoreExpr rstat (NamS rs, i) = do
       (xs, best) <- scoreComponents rstat (map snd rs)
-      return (NamS (zip (map fst rs) xs), Idx i best)
+      return (NamS (zip (map fst rs) xs), orAmbient i rstat best)
     scoreExpr rstat (LamS vs x, i) = do
       x' <- scoreAnnoS (updateRState vs rstat) x
       return (LamS vs x', Idx i (scoresOf x'))
+    -- Each argument is scored once, before the head, so a lambda the head
+    -- binds it to refers to its table rather than scoring it again at every
+    -- use. A function argument the head's lambda binds is priced where the
+    -- body calls it (COST-4); every other argument is priced here. A lambda
+    -- handed to a function is built in that function's language, so the
+    -- arguments are scored in the head's languages when they are known (its
+    -- sources, or the function value a parameter or let holds): a call
+    -- there on a parameter the host supplies stays with the host.
     scoreExpr rstat (AppS f xs, i) = do
-      -- store all applied arguments
-      -- these may be bound to lambdas within f
-      -- they are required for resolving the application language
-      let rstat' = rstat {rLangs = [], rApplied = xs}
-
-      f0 <- scoreAnnoS rstat' f
-
-      -- A head with no language of its own is a function-typed parameter: the
-      -- caller supplies its value, so it lives wherever the expression holding
-      -- it lives. Clearing the ambient languages to derive the head's own
-      -- language leaves such a head with no candidate at all, and the
-      -- application's language is then decided entirely by its arguments --
-      -- which is how a call on a parameter gets placed in another pool and
-      -- drags the function value across the boundary with it.
-      f' <-
-        if null (scoresOf f0)
-          then scoreAnnoS (rstat {rApplied = xs}) f
-          else return f0
-
-      -- best scores for each language for f
-      let scores = scoresOf f'
-          rstat'' = emptyRState {rLangs = unique $ map fst scores}
-
-      xs' <- mapM (scoreAnnoS rstat'') xs
-
-      let pairss = [(t, minPairs pairs) | AnnoS (Idx _ t) (Idx _ pairs) _ <- xs']
-      let best = scoreApp scores pairss
-
-      return (AppS f' xs', Idx i best)
+      let argLangs = case f of
+            AnnoS _ _ (BndS v) | Just table <- Map.lookup v (rBndVars rstat) -> map fst table
+            AnnoS _ _ (LetBndS v) | Just (Just table) <- Map.lookup v (rLetVars rstat) -> map fst table
+            _ -> sourceLangs f
+      xs' <- mapM (scoreAnnoS rstat {rLangs = argLangs, rApplied = []}) xs
+      let args = [(t, scoresOf x') | x'@(AnnoS (Idx _ t) _ _) <- xs']
+          bound = boundArgs f
+          pairss = [a | (k, a@(t, _)) <- zip [0 ..] args, not (k < bound && isCallableType t)]
+      -- A head has no ambient language: it is placed by its own
+      -- implementations. One with none (a call on a function parameter
+      -- bound to no table, a recursive call) lives where the expression
+      -- holding it lives.
+      f' <- scoreAnnoS rstat {rLangs = [], rApplied = args} f
+      let headTable = case scoresOf f' of
+            [] -> [(l, mempty) | l <- rLangs rstat]
+            table -> table
+      return (AppS f' xs', Idx i (scoreApp headTable pairss))
     -- non-recursive expressions
     scoreExpr rstat (UniS, i) = return (UniS, zipLang i rstat)
     scoreExpr rstat (NullS, i) = return (NullS, zipLang i rstat)
     scoreExpr rstat (VarS v (Many xs), i) = do
       (xs', best) <- scoreAlternatives v rstat xs
       return (VarS v (Many xs'), Idx i best)
+    -- A parameter bound to no function value is data the caller passes
+    -- in, read wherever it is used (COST-3).
     scoreExpr rstat (BndS v, i) = do
       case Map.lookup v (rBndVars rstat) of
-        (Just e@(AnnoS (Idx _ (FunT _ _)) _ _)) -> do
-          scores <- scoreAnnoS rstat e |>> scoresOf
-          return (BndS v, Idx i scores)
-        _ -> return (BndS v, zipLang i rstat)
+        Just scores -> return (BndS v, Idx i scores)
+        Nothing -> return (BndS v, Idx i [])
     scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, Score (callCost src) 0 0)])
     scoreExpr rstat (ExeS x@(PatCall _), i) = return (ExeS x, zipLang i rstat)
     scoreExpr rstat (RealS si x, i) = return (RealS si x, zipLang i rstat)
@@ -606,10 +606,10 @@ realizeWithRegistry registry tables seedLangs s0 = do
     scoreExpr rstat (LogS x, i) = return (LogS x, zipLang i rstat)
     scoreExpr rstat (StrS x, i) = return (StrS x, zipLang i rstat)
     scoreExpr rstat (ConS tv n j xs, i) = do
-      xs' <- mapM (scoreAnnoS rstat) xs
-      return (ConS tv n j xs', zipLang i rstat)
+      (xs', best) <- scoreComponents rstat xs
+      return (ConS tv n j xs', orAmbient i rstat best)
     scoreExpr rstat (LetS v e1 e2, i) = do
-      e1' <- scoreAnnoS rstat e1
+      e1' <- scoreAnnoS rstat {rApplied = []} e1
       -- A data value is read where its let runs, or carried into a subtree
       -- in another pool as one of the free variables that subtree's single
       -- boundary passes (COST-3), so a reference to it adds nothing of its
@@ -725,10 +725,50 @@ realizeWithRegistry registry tables seedLangs s0 = do
 
     updateRState :: [EVar] -> RState -> RState
     updateRState [] rstat = rstat
-    updateRState _ rstat@(RState _ [] _ _) = rstat
-    updateRState (v : vs) rstat@(RState _ (p : ps) bound _) =
+    updateRState vs rstat@(RState _ [] bound _) =
+      rstat {rBndVars = foldr Map.delete bound vs}
+    updateRState (v : vs) rstat@(RState _ ((t, table) : ps) bound _) =
       updateRState vs $
-        rstat {rApplied = ps, rBndVars = Map.insert v p bound}
+        rstat
+          { rApplied = ps
+          , rBndVars = if isCallableType t then Map.insert v table bound else Map.delete v bound
+          }
+
+    -- How many leading arguments of an application its head's lambda binds:
+    -- the fewest any implementation binds, a sourced one binding none.
+    boundArgs :: AnnoS (Indexed Type) Many c -> Int
+    boundArgs (AnnoS _ _ e) = case e of
+      LamS vs body -> length vs + boundArgs body
+      VarS _ (Many ys@(_ : _)) -> minimum (map boundArgs ys)
+      LetS _ _ body -> boundArgs body
+      LabelS _ x -> boundArgs x
+      CoerceS _ x -> boundArgs x
+      _ -> 0
+
+    -- The nodes through which an application's arguments reach the lambdas
+    -- of its head.
+    passesApplied :: ExprS g f c -> Bool
+    passesApplied e = case e of
+      LamS {} -> True
+      VarS {} -> True
+      LetS {} -> True
+      LabelS {} -> True
+      CoerceS {} -> True
+      _ -> False
+
+    -- A table, or the ambient languages for a node that has none.
+    orAmbient :: Int -> RState -> [(Lang, Score)] -> Indexed [(Lang, Score)]
+    orAmbient i rstat [] = zipLang i rstat
+    orAmbient i _ table = Idx i table
+
+    -- The languages a head is sourced in.
+    sourceLangs :: AnnoS (Indexed Type) Many c -> [Lang]
+    sourceLangs (AnnoS _ _ e) = case e of
+      ExeS (SrcCall src) -> [srcLang src]
+      VarS _ (Many ys) -> unique (concatMap sourceLangs ys)
+      LabelS _ x -> sourceLangs x
+      CoerceS _ x -> sourceLangs x
+      _ -> []
 
     zipLang :: Int -> RState -> Indexed [(Lang, Score)]
     zipLang i (rLangs -> langs) = Idx i (zip langs (repeat mempty))
@@ -747,8 +787,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
     scoreAlternatives v rstat xs0 = do
       xs1 <- mapM (fmap repeated . scoreAnnoS rstat) xs0
       let pairs = minPairs (concat [xs' | (AnnoS _ (Idx _ xs') _) <- xs1])
-          langs' = unique (rLangs rstat <> map fst pairs)
-      return (xs1, [(l1, if null pairs then noScore else reachFrom l1 pairs) | l1 <- langs'])
+      return (xs1, [(l1, reachFrom l1 pairs) | l1 <- unique (map fst pairs)])
       where
         repeated x@(AnnoS g (Idx j ss) e)
           | containsCallS v x = AnnoS g (Idx j [(l, scaleScore defaultRecursionCount sc) | (l, sc) <- ss]) e
@@ -763,7 +802,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
     scoreComponents rstat xs0 = do
       xs1 <- mapM (scoreAnnoS rstat) xs0
       let pairss = [(annoType x, scoresOf x) | x <- xs1]
-          langs' = unique (rLangs rstat <> concatMap (map fst . snd) pairss)
+          langs' = unique (concatMap (map fst . snd) pairss)
       return (xs1, scoreApp [(l, mempty) | l <- langs'] pairss)
 
     -- The cheapest way to have a value from @table@ in language @l@.

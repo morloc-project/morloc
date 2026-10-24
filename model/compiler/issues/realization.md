@@ -20,9 +20,20 @@ reproduced]
   child's language with `boundary` (`cost`, `chooseLanguage`, `holding`,
   `holdingLang`), scoring arguments with `crossScore`; once the payload term
   is non-zero the DP is no longer exact.
-- **A morloc-defined head prices its function arguments twice**, once
-  inside its body (re-scoring through `rBndVars`, ~514-518) and again at the
-  outer `scoreApp` (~502-505).
+- **A function argument is priced by where it is called, so a term
+  with both morloc and sourced implementations prices it twice for the
+  morloc one.** [read, 2026-10-24] The `AppS` clause of `scoreExpr` leaves
+  out of the application's price only the function arguments every
+  implementation's lambda binds (`boundArgs`, the fewest over
+  alternatives); with one sourced alternative that is none, so the
+  argument is priced at the application and again inside the morloc
+  alternative's body. Each alternative needs its own argument pricing
+  (plan step e3b).
+- **Building a function value a morloc head never calls costs nothing.**
+  [read, 2026-10-24] A function argument bound by the head's lambda is
+  priced only where the body calls it; one the body ignores, such as a
+  partial application whose data arguments are expensive, is never priced
+  even if code generation still builds it.
 - **Merging two signatures keeps only the first one's docstrings.**
   `mergeEdocs x _ = x` (Frontend/Merge.hs ~83-84) and `weaveTermTypes`
   (~61-64): a directive on the second signature of one term is dropped,
@@ -37,10 +48,14 @@ reproduced]
   language-registry.md; Realize.hs `pairwiseCost`, `crossingPayloadCost _ =
   0`). Plan: /work/plans/realization-cost-model.md and the implementation
   plan it links. Unbuilt design, not a regression.
-- **A constructor's arguments are scored and then ignored.** [read,
-  2026-10-24] `scoreExpr` for `ConS` scores its children and returns
-  `zipLang` (Realize.hs, the ConS case), so a constructor whose argument is
-  computed in another pool is priced as if it moved nothing.
+- **A constructor is priced as if it could move to another language.**
+  [read, 2026-10-24] A constructor application's table is the sum of
+  reaching its arguments from each language (`scoreComponents`), and its
+  parent may reach it from another language, but collapse always places a
+  constructor in its parent's language, so the estimate can fall below the
+  cost of what is built (several arguments crossing where the estimate
+  counts one boundary). Needs nodes pinned to their parent's language in
+  the DP (COST-11).
 - **A bracket step through an instance is never placed in a pool.**
   [read, 2026-10-21] Realize gives a PatCall no language (Realize.hs:521),
   so a pure `f m = .[0] m` on a receiver that is not a list on the wire

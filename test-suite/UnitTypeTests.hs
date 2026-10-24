@@ -4917,7 +4917,30 @@ complexityRegressionTests =
         localOption (mkTimeout 20000000) $
           testCase "deep singly-used-parameter chain moves instead of cloning"
             (assertGenerates (singleUseChain 2000))
+      , -- The realizer's work is linear in a nest of higher-order calls: each
+        -- argument is scored once, and a lambda parameter bound to a
+        -- function value refers to that score.
+        localOption (mkTimeout 5000000) $
+          testCase "nested function arguments are scored once"
+            (assertGenerates (nestedComposeChain 25))
       ]
+
+-- | @(inc . inc . ... . inc) x@, @k@ compositions deep, with @(.)@ defined
+-- in morloc and @inc@ sourced in Python and C++ so the realizer has a
+-- choice at every call; every composition passes function values to a
+-- morloc head.
+nestedComposeChain :: Int -> MT.Text
+nestedComposeChain k =
+  "module main (run)\n"
+    <> "type Py => Int = \"int\"\n"
+    <> "type Cpp => Int = \"int\"\n"
+    <> "source Py from \"c.py\" (\"inc\")\n"
+    <> "source Cpp from \"c.hpp\" (\"inc\")\n"
+    <> "inc :: Int -> Int\n"
+    <> "(.) :: (b -> c) -> (a -> b) -> a -> c\n"
+    <> "(.) f g x = f (g x)\n"
+    <> "run :: Int -> Int\n"
+    <> "run x = (" <> MT.intercalate " . " (replicate k "inc") <> ") x\n"
 
 -- | @id . id . ... . id@ applied to an @Int@, @k@ compositions deep, with
 -- no tuple/destructuring anywhere. Used to catch a per-solve full scan of

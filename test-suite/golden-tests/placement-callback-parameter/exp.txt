@@ -1,0 +1,12 @@
+placement:
+  run [cpp]
+    withInc [cpp]
+      pyInc [py] *
+  runLiteral [cpp]
+    withInc [cpp]
+      pyInc [py] *
+  runThroughParameter [cpp]
+    hof [cpp]
+      pyInc [py] *
+      withIncFrom [cpp]
+
