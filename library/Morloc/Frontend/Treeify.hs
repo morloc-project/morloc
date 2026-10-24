@@ -761,9 +761,15 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       (namer1, e1') <- collectAnnoS namer e1
       let namer2 = updateRenamer LetBound v namer1
           v' = fst $ fromJust $ Map.lookup v (namerMap namer2)
-          innerBody = case rest of
-            [] -> body
-            _ -> ExprI (exprIIdx body) (LetE rest body)
+      -- Each remaining binding is a let node of its own, so it takes an
+      -- index of its own, placed at that binding: nodes sharing an index
+      -- share whatever is keyed by it, such as the name of the manifold a
+      -- node is emitted as.
+      innerBody <- case rest of
+        [] -> return body
+        ((_, ExprI k _) : _) -> do
+          j <- MM.getCounterWithPos k
+          return (ExprI j (LetE rest body))
       (inner, body') <- collectAnnoS namer2 innerBody
       return (namer {namerRecursive = namerRecursive inner, namerIndex = namerIndex inner}, LetS v' e1' body')
     f _ (LetE [] _) = error "Bug in collectExprS: empty let bindings"

@@ -244,7 +244,7 @@ nexusDemanded finishers takesFunction trees0
 -- crossings between pools, then the number of language changes within a
 -- pool, compared lexicographically.
 data Score = Score
-  { scoreTime :: !Double
+  { scoreTime :: !Integer -- ^ picoseconds, so equal costs compare equal
   , scoreCrossings :: !Int
   , scoreSwitches :: !Int
   }
@@ -260,10 +260,14 @@ instance Monoid Score where
 -- sentinel so that no placement's cost reaches it.
 scaleScore :: Int -> Score -> Score
 scaleScore k (Score t c w)
-  | t >= 1e300 = Score t c w
-  | otherwise = Score (min 1e290 (fromIntegral k * t)) (sat c) (sat w)
+  | t >= unrealizable = Score t c w
+  | otherwise = Score (min (unrealizable - 1) (toInteger k * t)) (sat c) (sat w)
   where
     sat n = fromInteger (min (10 ^ (15 :: Int)) (toInteger k * toInteger n))
+
+-- | The time of the "no realization" sentinel, above any placement's cost.
+unrealizable :: Integer
+unrealizable = 10 ^ (300 :: Int)
 
 -- | How many times a recursive definition runs its body per call, when
 -- nothing says otherwise (COST-14).
@@ -475,20 +479,6 @@ realizeWithRegistry registry tables seedLangs s0 = do
         (Idx _ Nothing, Nothing) -> makeGAST e |>> Left
         _ -> propagateDown e |>> Right
 
-    pairwiseCost :: Lang -> Lang -> Int
-    pairwiseCost l1 l2
-      | l1 == l2 = case Map.lookup (langName l2) (lrSameLangCosts registry) of
-          Nothing -> lrDefaultSameCost registry
-          (Just score) -> score
-      | otherwise = case Map.lookup (langName l1, langName l2) (lrOptimizedPairs registry) of
-          Nothing -> case Map.lookup (langName l2) (lrCrossLangCosts registry) of
-            Nothing -> lrDefaultCrossCost registry
-            (Just score) -> score
-          (Just score) -> score
-
-    languageCost :: Lang -> Int
-    languageCost lang = pairwiseCost lang lang
-
     -- \| Depth first pass calculating scores for each language. Alternates with
     -- scoresSExpr.
     scoreAnnoS ::
@@ -502,7 +492,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       (e', Idx ci' table) <- scoreExpr rstat (e, ci)
       -- An operation that belongs to no language runs where its context
       -- puts it, but only in a language that can hold what it computes.
-      table' <- maybe (return table) (\ts -> holding gidx ts table) (heldTypes e t)
+      table' <- maybe (return table) (\(j, ts) -> holding j ts table) (heldTypes gidx e t)
       return $ AnnoS gi (Idx ci' table') e'
 
     -- The languages of @table@ that can hold values of types @ts@ (codegen
@@ -541,8 +531,12 @@ realizeWithRegistry registry tables seedLangs s0 = do
       filterM (\l -> and <$> mapM (Infer.canHoldType True l i) ts) candidates
 
     -- The types a language-free computation works on, for one that is.
-    heldTypes :: ExprS (Indexed Type) f c -> Type -> Maybe [Type]
-    heldTypes e t = case e of
+    heldTypes :: Int -> ExprS (Indexed Type) f c -> Type -> Maybe (Int, [Type])
+    -- A function value a let binds is held natively where the let runs;
+    -- data can pass through a pool as a packet it never reads.
+    heldTypes _ (LetS _ (AnnoS (Idx j boundT) _ _) _) _
+      | holdsCallable boundT = Just (j, [boundT])
+    heldTypes gidx e t = (,) gidx <$> case e of
       ExeS (PatCall _) -> Just (componentTypes t)
       AppS (AnnoS (Idx _ ft) _ (ExeS (PatCall _))) _ -> Just (componentTypes ft)
       -- a call of a function value runs wherever it is placed
@@ -859,8 +853,8 @@ realizeWithRegistry registry tables seedLangs s0 = do
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
     collapseNode isValue heads l1 (AnnoS gi@(Idx gidx gt) ci0 e0) = do
-      l1' <- case (l1, heldTypes e0 gt) of
-        (Just l, Just ts) -> Just <$> holdingLang gidx ts l
+      l1' <- case (l1, heldTypes gidx e0 gt) of
+        (Just l, Just (j, ts)) -> Just <$> holdingLang j ts l
         _ -> return l1
       let AnnoS _ ci e = case l1' of
             Just l | isValue -> pinNamedLambda l (AnnoS gi ci0 e0)
@@ -884,7 +878,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
 
     tableDoc :: Indexed [(Lang, Score)] -> MDoc
     tableDoc (Idx _ ss) =
-      list [pretty l <> ":" <> viaShow (scoreTime sc) <> "/" <> pretty (scoreCrossings sc) <> "/" <> pretty (scoreSwitches sc) | (l, sc) <- ss]
+      list [pretty l <> ":" <> pretty (scoreTime sc) <> "ps/" <> pretty (scoreCrossings sc) <> "/" <> pretty (scoreSwitches sc) | (l, sc) <- ss]
 
     -- The newtype a cast converts: the argument's type when unwrapping, the
     -- result's when wrapping.
@@ -905,7 +899,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
     -- Sentinel "no realization" score, above any cost a placement can reach
     -- ('scaleScore' saturates below it).
     noScore :: Score
-    noScore = Score 1e300 0 0
+    noScore = Score unrealizable 0 0
 
     -- | The general type an annotated expression carries.
     annoType :: AnnoS (Indexed Type) f c -> Type
@@ -918,7 +912,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
     boundary l1 l2
       | l1 == l2 = mempty
       | LR.coLocated registry l1 l2 = Score 0 0 1
-      | otherwise = Score (fromIntegral (pairwiseCost l1 l2)) 1 0
+      | otherwise = Score (picoseconds (LR.registryCrossingLatency registry (poolName l1) (poolName l2))) 1 0
 
     -- | What it costs to move a value of this type across a pool boundary,
     -- added to the cost of the language pair itself. Zero within a pool,
@@ -959,7 +953,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
     -- Any refinement must remain a pure function of the type: this runs before
     -- values exist. The type given is the general type at the crossing point,
     -- already monomorphized, so a cost may depend on type parameters.
-    crossingPayloadCost :: Type -> Double
+    crossingPayloadCost :: Type -> Integer
     crossingPayloadCost _ = 0
 
     cost ::
@@ -970,10 +964,16 @@ realizeWithRegistry registry tables seedLangs s0 = do
     cost (Just l1) l2 score = score <> boundary l1 l2
     cost _ _ score = score
 
-    -- FIXME: in the future, this function should be replaced by an estimate of
-    -- the function runtime, for now I will just base it off languages.
-    callCost :: Source -> Double
-    callCost src = fromIntegral (languageCost (srcLang src))
+    -- The cost of one call of a sourced function: its language's call
+    -- overhead (COST-2, whose self-time term is not priced yet).
+    callCost :: Source -> Integer
+    callCost src = picoseconds (LR.registryCallOverhead registry (langName (srcLang src)))
+
+    picoseconds :: Double -> Integer
+    picoseconds ns = round (ns * 1000)
+
+    poolName :: Lang -> MT.Text
+    poolName = langName . LR.poolOf registry
 
     collapseExpr ::
       [(EVar, Lang)] ->
@@ -1348,7 +1348,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
           MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
         -- an inherited language, for a computation that can run there
         f lang (AnnoS g@(Idx gidx gt) (Idx i Nothing) e') = do
-          lang' <- maybe (return lang) (\ts -> holdingLang gidx ts lang) (heldTypes e' gt)
+          lang' <- maybe (return lang) (\(j, ts) -> holdingLang j ts lang) (heldTypes gidx e' gt)
           f lang' (AnnoS g (Idx i (Just lang')) e')
         f _ (AnnoS g (Idx i (Just lang)) e') = do
           e'' <- case e' of

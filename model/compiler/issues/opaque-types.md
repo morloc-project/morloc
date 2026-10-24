@@ -62,7 +62,9 @@ serialize unless a `Packable` instance gives it a wire form.
         v <- pyStep u
         unbox b2 + v
 
-  fails `Could not resolve type for variable 'Box'`: the realizer places
+  fails (`Could not resolve type for variable 'Box'`; with measured
+  crossing costs the placement changes and it reaches the internal
+  message of the entry above, `Cannot find constructor in VarF "Box"`): the realizer places
   the statements after `b <-` in Python, so `b` must cross into the Python
   pool and back, and it has no wire form. Nothing in the realizer refuses
   a boundary that carries a free variable whose type cannot cross

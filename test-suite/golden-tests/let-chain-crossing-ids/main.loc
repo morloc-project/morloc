@@ -1,0 +1,41 @@
+-- A `let` with several bindings, whose bindings alternate between C++ and
+-- Python, builds and runs: each binding is a let node of its own, and the
+-- realizer places several of them in each pool (morloc typecheck --realize
+-- lists the placement).
+
+--' Many bindings of one let crossing pools
+module main (chain)
+
+import root-cpp
+import root-py
+
+source Cpp from "stress.hpp" ("makeStr" as cppMakeStr, "strLen" as cppStrLen)
+source Py from "stress.py" ("makeStr" as pyMakeStr, "strLen" as pyStrLen)
+
+--' Make a string of a given length in C++
+cppMakeStr :: Int -> Str
+
+--' Measure a string in C++
+cppStrLen :: Str -> Int
+
+--' Make a string of a given length in Python
+pyMakeStr :: Int -> Str
+
+--' Measure a string in Python
+pyStrLen :: Str -> Int
+
+--' Pass a length back and forth between C++ and Python strings
+chain :: Int
+chain =
+    let s1 = cppMakeStr 10
+        n1 = pyStrLen s1
+        s2 = pyMakeStr n1
+        n2 = cppStrLen s2
+        s3 = cppMakeStr n2
+        n3 = pyStrLen s3
+        s4 = pyMakeStr n3
+        n4 = cppStrLen s4
+        s5 = cppMakeStr n4
+        n5 = pyStrLen s5
+        s6 = pyMakeStr n5
+    in pyStrLen s6

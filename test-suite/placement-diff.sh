@@ -6,11 +6,12 @@
 #
 #   placement-diff.sh OUT [DIR...]
 #
-# DIR defaults to test-suite/golden-tests. A program is a main.loc, else
-# each main*.loc, else the only .loc file of its directory. Programs that fail to typecheck get a
-# file holding the first line of the error, so a new failure shows in the
-# diff too. GUARD, if set, prefixes each call (a memory or time limit,
-# e.g. GUARD="timeout 120").
+# DIR defaults to test-suite/golden-tests. The programs of a directory are
+# the .loc files its Makefile passes to `morloc make`, else its main.loc,
+# else its main*.loc files, else its only .loc file. Programs that fail to typecheck get a file
+# holding the first line of the error, so a new failure shows in the diff
+# too. GUARD, if set, prefixes each call (a memory or time limit, e.g.
+# GUARD="timeout 120").
 
 set -u
 
@@ -28,24 +29,37 @@ fi
 mkdir -p "$out"
 GUARD=${GUARD:-}
 
+programs() {
+  local dir=$1 listed
+  listed=$(grep -o 'morloc make [^;&|>]*\.loc' "$dir/Makefile" 2>/dev/null \
+    | grep -o '[^ ]*\.loc$' | sort -u \
+    | while read -r loc; do [ -e "$dir/$loc" ] && echo "$loc"; done)
+  if [ -n "$listed" ]; then
+    echo "$listed"
+  elif [ -e "$dir/main.loc" ]; then
+    echo main.loc
+  elif ls "$dir"/main*.loc > /dev/null 2>&1; then
+    (cd "$dir" && ls main*.loc)
+  elif [ "$(find "$dir" -maxdepth 1 -name '*.loc' | wc -l)" -eq 1 ]; then
+    basename "$(find "$dir" -maxdepth 1 -name '*.loc')"
+  fi
+}
+
 for root in "$@"; do
   root=$(cd "$root" && pwd)
-  find "$root" -name '*.loc' -not -path '*-build/*' -not -path '*/pools/*' -print \
-    | sort \
-    | while read -r loc; do
-        dir=$(dirname "$loc")
-        case "$(basename "$loc")" in
-          main.loc) ;;
-          main*.loc) [ -e "$dir/main.loc" ] && continue ;;
-          *) [ "$(find "$dir" -maxdepth 1 -name '*.loc' | wc -l)" -eq 1 ] || continue ;;
-        esac
-        name=$(basename "$(dirname "$root")")_$(echo "${loc#"$root"/}" | tr '/' '_')
-        result=$(cd "$dir" && $GUARD morloc typecheck --realize "$(basename "$loc")" 2>&1 < /dev/null)
-        listing=$(printf '%s\n' "$result" | sed -n '/^placement:$/,/^$/p')
-        if [ -n "$listing" ]; then
-          printf '%s\n' "$listing" > "$out/$name"
-        else
-          printf 'FAILED %s\n' "$(printf '%s\n' "$result" | head -n 1)" > "$out/$name"
-        fi
+  find "$root" -name '*.loc' -not -path '*-build/*' -not -path '*/pools/*' -printf '%h\n' \
+    | sort -u \
+    | while read -r dir; do
+        programs "$dir" | while read -r loc; do
+          rel=${dir#"$root"}
+          name=$(basename "$root")$(echo "$rel/$loc" | tr '/' '_')
+          result=$(cd "$dir" && $GUARD morloc typecheck --realize "$loc" 2>&1 < /dev/null)
+          listing=$(printf '%s\n' "$result" | sed -n '/^placement:$/,/^$/p')
+          if [ -n "$listing" ]; then
+            printf '%s\n' "$listing" > "$out/$name"
+          else
+            printf 'FAILED %s\n' "$(printf '%s\n' "$result" | head -n 1)" > "$out/$name"
+          fi
+        done
       done
 done

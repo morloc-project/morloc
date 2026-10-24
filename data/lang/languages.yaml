@@ -1,37 +1,27 @@
-# Pairwise language costs for the morloc optimizer
-#
-# Same-language function overhead (intra-language call cost)
-same_language_costs:
-  c: 2
-  cpp: 2
-  rust: 2
-  futhark: 1
-  py: 20
-  r:  40
+# Coefficients of the realizer's cost model (model/language/cost.md, COST-10),
+# in nanoseconds, from the measurements of model/performance/cross-language.md.
 
-# Cost of calling INTO a language from a different language (IPC overhead)
-cross_language_costs:
-  c: 1001
-  cpp: 1000
-  rust: 1000
-  futhark: 999
-  py: 10000
-  r: 40000
+# A call in one pool: the language's own call plus the generated wrapper
+# (XL-2). R's figure is its wrapper alone; its measured loop is dominated by
+# 64-bit integer arithmetic.
+call_overhead_ns:
+  c: 0.73
+  cpp: 0.73
+  futhark: 0.73
+  rust: 0.88
+  py: 78.6
+  r: 850
 
-# Special optimized pairs (from -> to) that bypass normal IPC.
-# futhark is a co-located cpp member (in-process, no socket), so the
-# cpp<->futhark boundary is nearly free.
-optimized_pairs:
-  - from: cpp
-    to: c
-    cost: 1
-  - from: cpp
-    to: futhark
-    cost: 1
-  - from: futhark
-    to: cpp
-    cost: 1
+# A language with no entry above.
+default_call_overhead_ns: 100
 
-# Defaults for unknown/plugin languages
-default_same_language: 10
-default_cross_language: 10000
+# A round trip between two pools (XL-1), keyed by the pools' languages
+# (a guest language crosses as its host). The most specific entry wins: the
+# exact pair, then (*, to), then (from, *), then (*, *). Languages that
+# share a pool cross nothing.
+crossing_latency_ns:
+  - {from: "*", to: r, ns: 100000}
+  - {from: r, to: "*", ns: 100000}
+
+# A pair no entry matches.
+default_crossing_latency_ns: 20000

@@ -7,33 +7,31 @@ placement:
     (eval) [cpp] *
       cppStep [cpp]
     pyStep [py]
-  sharedPure [py]
-    pyPure [py]
-    (eval) [cpp] *
-      cppStep [cpp]
-    pyStep [py]
-    (eval) [cpp] *
-      cppStep [cpp]
-        + [cpp]
-  caught [py]
-    (eval) [cpp] *
-      cppStep [cpp]
-    pyFail [py]
-    (eval) [cpp] *
-      cppStep [cpp]
-    - [py]
+  sharedPure [cpp]
+    pyPure [py] *
+    cppStep [cpp]
+    (eval) [py] *
+      pyStep [py]
+    cppStep [cpp]
+      + [cpp]
+  caught [cpp]
+    cppStep [cpp]
+    (eval) [py] *
+      pyFail [py]
+    cppStep [cpp]
+    - [cpp]
   rustChain [py]
     pyStep [py]
     (eval) [rust] *
       rustStep [rust]
     pyStep [py]
-  loop [py]
-    pyStep [py]
-    (eval) [cpp] *
-      cppStep [cpp]
-    == [py]
-    call loop [py]
-      - [py]
+  loop [cpp]
+    (eval) [py] *
+      pyStep [py]
+    cppStep [cpp]
+    == [cpp]
+    call loop [cpp]
+      - [cpp]
   rustLoop [py]
     pyStep [py]
     (eval) [rust] *
@@ -41,13 +39,13 @@ placement:
     == [py]
     call rustLoop [py]
       - [py]
-  rerun [py]
-    cppStep [cpp] *
-    (eval) [cpp] *
-    pyStep [py]
-    (eval) [cpp] *
-    pyStep [py]
-      + [py]
+  rerun [cpp]
+    cppStep [cpp]
+    (eval) [py] *
+      pyStep [py]
+    (eval) [py] *
+      pyStep [py]
+        + [py]
 
 py 0
 cpp 1

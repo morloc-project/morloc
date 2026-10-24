@@ -24,8 +24,6 @@ Language.makeExecutableName's compiled list, Pool.memberFor). [read,
   yaml `name:` in discovery, so the two can disagree. No spec item, docs or
   test covers plugins.
 - **Dead registry fields and functions.** lang.yaml `cost:` is parsed
-  (lreCost) and never read: Realize prices from languages.yaml, and the two
-  disagree (py `cost: 3` vs 20). Also unused: registryLanguageCost,
-  registryPairwiseCost (Realize.hs reimplements it),
-  registryMakeExecutablePoolName, registryMakeSourcePoolName,
+  (lreCost) and never read: the realizer prices from languages.yaml
+  (COST-10). Also unused: registryMakeExecutablePoolName, registryMakeSourcePoolName,
   registryMakeExtension, registrySerialType, Monad.readLang.

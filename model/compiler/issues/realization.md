@@ -48,15 +48,17 @@ reproduced]
   (~61-64): a directive on the second signature of one term is dropped,
   depending on order. Affects any directive, cost directives included
   (COST-8 requires both sets kept).
-- **The cost model is not implemented.** [reproduced, 2026-10-21]
-  COST-1..COST-11 have no code (COST-12, split do-blocks, is today's
-  behaviour). `@wiresize`, `@dimension`, `@calls` and
+- **The cost model is partly implemented.** [read, 2026-10-24] Scores are
+  seconds: a call costs its language's measured overhead (COST-2 without
+  the self-time term), a crossing between pools its pair's latency
+  (COST-3 without the per-element and per-byte slopes), a recursive
+  definition its body times 1000 (COST-14). Sizes (COST-5, COST-8,
+  COST-9), `@calls` and `@selftime` (COST-6), formulas (COST-7) and
+  callback counts (COST-4) have no code. `@wiresize`, `@dimension`, `@calls` and
   `@selftime` warn "docstring directive ... is not recognized" and are
-  dropped; call and crossing costs are the integer tables in
-  data/lang/languages.yaml (lang.yaml `cost:` is never read, see
-  language-registry.md; Realize.hs `pairwiseCost`, `crossingPayloadCost _ =
-  0`). Plan: /work/plans/realization-cost-model.md and the implementation
-  plan it links. Unbuilt design, not a regression.
+  dropped; `crossingPayloadCost` is 0. Plan:
+  /work/plans/realization-cost-model.md and the implementation plan it
+  links.
 - **A bracket step through an instance is never placed in a pool.**
   [read, 2026-10-21] Realize gives a PatCall no language (Realize.hs:521),
   so a pure `f m = .[0] m` on a receiver that is not a list on the wire

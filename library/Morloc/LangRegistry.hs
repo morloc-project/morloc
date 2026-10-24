@@ -22,8 +22,8 @@ module Morloc.LangRegistry
   , buildLangMap
   , poolOf
   , coLocated
-  , registryPairwiseCost
-  , registryLanguageCost
+  , registryCallOverhead
+  , registryCrossingLatency
   , registrySerialType
   , registryIsCompiled
   , registryRunCommand
@@ -32,6 +32,7 @@ module Morloc.LangRegistry
   , registryMakeExecutablePoolName
   , registryMakeSourcePoolName
   , parseLangYamlFile
+  , parseLanguagesYaml
   ) where
 
 import Data.Aeson ((.!=), (.:), (.:?))
@@ -48,11 +49,13 @@ import Morloc.Language (Lang (..))
 data LangRegistry = LangRegistry
   { lrEntries :: Map Text LangRegistryEntry -- keyed by canonical name
   , lrAliases :: Map Text Text -- alias -> canonical name
-  , lrSameLangCosts :: Map Text Int
-  , lrCrossLangCosts :: Map Text Int
-  , lrOptimizedPairs :: Map (Text, Text) Int
-  , lrDefaultSameCost :: Int
-  , lrDefaultCrossCost :: Int
+  -- | A call in one pool, by language, in nanoseconds (COST-10).
+  , lrCallOverhead :: Map Text Double
+  , lrDefaultCallOverhead :: Double
+  -- | A round trip between pools, by (from, to) with "*" for any, in
+  -- nanoseconds, and for a pair no entry matches.
+  , lrCrossingLatency :: Map (Text, Text) Double
+  , lrDefaultCrossingLatency :: Double
   }
   deriving (Show)
 
@@ -78,7 +81,8 @@ data LangRegistryEntry = LangRegistryEntry
   deriving (Show)
 
 emptyRegistry :: LangRegistry
-emptyRegistry = LangRegistry Map.empty Map.empty Map.empty Map.empty Map.empty 10 10000
+-- | No languages and no costs, until languages.yaml is read.
+emptyRegistry = LangRegistry Map.empty Map.empty Map.empty 0 Map.empty 0
 
 -- | Build the default registry from embedded lang.yaml files and languages.yaml
 buildDefaultRegistry :: [(String, Text)] -> Text -> Either String LangRegistry
@@ -140,21 +144,20 @@ poolOf reg l =
 coLocated :: LangRegistry -> Lang -> Lang -> Bool
 coLocated reg a b = poolOf reg a == poolOf reg b
 
-registryPairwiseCost :: LangRegistry -> Text -> Text -> Int
-registryPairwiseCost reg from to
-  | from == to = case Map.lookup from (lrSameLangCosts reg) of
-      Just c -> c
-      Nothing -> lrDefaultSameCost reg
-  | otherwise = case Map.lookup (from, to) (lrOptimizedPairs reg) of
-      Just c -> c
-      Nothing -> case Map.lookup to (lrCrossLangCosts reg) of
-        Just c -> c
-        Nothing -> lrDefaultCrossCost reg
+-- | A call in one pool of this language, in nanoseconds.
+registryCallOverhead :: LangRegistry -> Text -> Double
+registryCallOverhead reg name = Map.findWithDefault (lrDefaultCallOverhead reg) name (lrCallOverhead reg)
 
-registryLanguageCost :: LangRegistry -> Text -> Int
-registryLanguageCost reg name = case Map.lookup name (lrEntries reg) of
-  Just entry -> lreCost entry
-  Nothing -> 5
+-- | A round trip from one pool to another, in nanoseconds: the most specific
+-- entry that matches, the exact pair before (*, to) before (from, *) before
+-- (*, *), else the default.
+registryCrossingLatency :: LangRegistry -> Text -> Text -> Double
+registryCrossingLatency reg from to =
+  case [ns | key <- [(from, to), ("*", to), (from, "*"), ("*", "*")], Just ns <- [Map.lookup key table]] of
+    (ns : _) -> ns
+    [] -> lrDefaultCrossingLatency reg
+  where
+    table = lrCrossingLatency reg
 
 registrySerialType :: LangRegistry -> Text -> Text
 registrySerialType reg name = case Map.lookup name (lrEntries reg) of
@@ -226,26 +229,27 @@ instance Aeson.FromJSON LangYamlMeta where
       <*> o .:? "host"
 
 data LanguagesYaml = LanguagesYaml
-  { lysSameLangCosts :: Map Text Int
-  , lysCrossLangCosts :: Map Text Int
-  , lysOptimizedPairs :: [(Text, Text, Int)]
-  , lysDefaultSame :: Int
-  , lysDefaultCross :: Int
+  { lysCallOverhead :: Map Text Double
+  , lysDefaultCallOverhead :: Double
+  , lysCrossingLatency :: [((Text, Text), Double)]
+  , lysDefaultCrossingLatency :: Double
   }
   deriving (Show)
 
 instance Aeson.FromJSON LanguagesYaml where
   parseJSON = Aeson.withObject "LanguagesYaml" $ \o -> do
-    same <- o .:? "same_language_costs" .!= Map.empty
-    cross <- o .:? "cross_language_costs" .!= Map.empty
-    pairs <- o .:? "optimized_pairs" .!= []
-    defSame <- o .:? "default_same_language" .!= 10
-    defCross <- o .:? "default_cross_language" .!= 10000
-    parsedPairs <- mapM parsePair pairs
-    return $ LanguagesYaml same cross parsedPairs defSame defCross
+    overhead <- o .:? "call_overhead_ns" .!= Map.empty
+    defOverhead <- o .: "default_call_overhead_ns"
+    latency <- o .:? "crossing_latency_ns" .!= []
+    defLatency <- o .: "default_crossing_latency_ns"
+    parsed <- mapM parseLatency latency
+    return $ LanguagesYaml overhead defOverhead parsed defLatency
     where
-      parsePair = Aeson.withObject "OptimizedPair" $ \o ->
-        (,,) <$> o .: "from" <*> o .: "to" <*> o .: "cost"
+      parseLatency = Aeson.withObject "CrossingLatency" $ \o -> do
+        from <- o .: "from"
+        to <- o .: "to"
+        ns <- o .: "ns"
+        return ((from, to), ns)
 
 entryFromYaml :: LangYamlMeta -> LangRegistryEntry
 entryFromYaml ly =
@@ -283,9 +287,8 @@ parseLanguagesYaml content =
         LangRegistry
           { lrEntries = Map.empty
           , lrAliases = Map.empty
-          , lrSameLangCosts = lysSameLangCosts lys
-          , lrCrossLangCosts = lysCrossLangCosts lys
-          , lrOptimizedPairs = Map.fromList [((f, t), c) | (f, t, c) <- lysOptimizedPairs lys]
-          , lrDefaultSameCost = lysDefaultSame lys
-          , lrDefaultCrossCost = lysDefaultCross lys
+          , lrCallOverhead = lysCallOverhead lys
+          , lrDefaultCallOverhead = lysDefaultCallOverhead lys
+          , lrCrossingLatency = Map.fromList (lysCrossingLatency lys)
+          , lrDefaultCrossingLatency = lysDefaultCrossingLatency lys
           }

@@ -218,4 +218,9 @@ a literal; how a parallel map's workers, and a stream read
 from another pool, are costed; size directives inside function, suspension
 and optional aliases, which are expanded before signatures are read;
 computing in the caller an argument that only the caller's language can
-compute; whether a label (ANN) wraps the same work when a do-block splits (../compiler/issues/realization.md).
+compute; whether a label (ANN) wraps the same work when a do-block splits;
+whether the 1 us default self time (COST-2) suits unannotated small
+functions: with measured coefficients a crossing costs about 20 us
+(model/performance XL-1), so a function that costs `coeff(L) * 1 us` in an
+interpreted language is cheaper called across a boundary in a compiled
+one, which would send every unannotated arithmetic call out of Python (../compiler/issues/realization.md).
