@@ -2,7 +2,7 @@
 
 Defects in how the realizer (CodeGenerator/Realize.hs) prices a placement,
 found reviewing /work/plans/realization-cost-model.md. The objective is
-COST-1 (proposed); each entry is wrong under any reading of it. [read; not
+COST-1 (ruled); each entry is wrong under any reading of it. [read; not
 reproduced]
 
 - **A list, tuple or record is priced by its cheapest element.**
@@ -27,17 +27,28 @@ reproduced]
   inside its body (re-scoring through `rBndVars`, ~514-518) and again at the
   outer `scoreApp` (~502-505).
 - **Merging two signatures keeps only the first one's docstrings.**
-  `mergeEdocs x _ = x` (Frontend/Merge.hs ~83-84): a directive on the second
-  signature of one term is dropped, depending on order. Affects any
-  directive, cost directives included.
+  `mergeEdocs x _ = x` (Frontend/Merge.hs ~83-84) and `weaveTermTypes`
+  (~61-64): a directive on the second signature of one term is dropped,
+  depending on order. Affects any directive, cost directives included
+  (COST-8 requires both sets kept).
 - **The cost model is not implemented.** [reproduced, 2026-10-21]
-  COST-2..COST-10 (proposed) have no code. `@wiresize`, `@dimension`,
-  `@calls` and `@runtime` warn "docstring directive ... is not recognized"
-  and are dropped; call and crossing costs are the integer tables in
+  COST-1..COST-11 have no code (COST-12, split do-blocks, is today's
+  behaviour). `@wiresize`, `@dimension`, `@calls` and
+  `@selftime` warn "docstring directive ... is not recognized" and are
+  dropped; call and crossing costs are the integer tables in
   data/lang/languages.yaml (lang.yaml `cost:` is never read, see
-  language-registry.md; Realize.hs:380-392, 792 `crossingPayloadCost _ = 0`,
-  805). No
-  manual page covers the directives. Unbuilt design, not a regression.
+  language-registry.md; Realize.hs `pairwiseCost`, `crossingPayloadCost _ =
+  0`). Plan: /work/plans/realization-cost-model.md and the implementation
+  plan it links. Unbuilt design, not a regression.
+- **A constructor's arguments are scored and then ignored.** [read,
+  2026-10-24] `scoreExpr` for `ConS` scores its children and returns
+  `zipLang` (Realize.hs, the ConS case), so a constructor whose argument is
+  computed in another pool is priced as if it moved nothing.
+- **Every edge in one language charges the language's call cost.** [read,
+  2026-10-24] `transScore l l` is `same_language_costs[l]`, added for every
+  child that has a language, so a deep expression in Python costs
+  more per node than the same expression placed in C++ even when nothing
+  moves; COST-2 charges a call cost per call, not per edge.
 - **A bracket step through an instance is never placed in a pool.**
   [read, 2026-10-21] Realize gives a PatCall no language (Realize.hs:521),
   so a pure `f m = .[0] m` on a receiver that is not a list on the wire
@@ -62,6 +73,5 @@ reproduced]
   hoisting each maximal caller-language argument subtree that is data (not
   a function or suspension), has its free variables bound in the caller,
   and is reached only through strict positions (no conditional arm, lambda
-  or `@try` region). Needs rulings: COST-3 should charge one latency per
-  call for its arguments and result together, and confirm EVAL-3 lets such a
-  value be computed in the caller's pool.
+  or `@try` region). Open in COST-13: whether EVAL-3 lets such a value be
+  computed in the caller's pool.

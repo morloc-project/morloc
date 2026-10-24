@@ -93,3 +93,12 @@
   mismatch.** [reproduced, 2026-10-23] `newtype Bag = [a]` reports
   `expected: [a] inferred: [a] Cannot compare types a and a@q0` instead of
   naming the unbound `a`.
+- [read, 2026-10-24] Violates DOC-1. Docstrings that attach and are then
+  dropped: the preamble above a class method's signature
+  (Desugar.hs `desugarSigItem`, `ArgDocSig defaultValue ...`; per-argument
+  docs survive); everything above an item of a tuple-form `source` (`mkOldSource`
+  sets `srcNote = []` and never reads docs; only the block form does); and the
+  docs above a `%inline` item of a block-form `source`, keyed on the `%inline`
+  token but looked up at the name (Parser.y `'%inline' source_new_term`). No
+  warning in any case. Cost directives on class methods (COST-6) depend on
+  the first.

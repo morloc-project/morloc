@@ -54,3 +54,13 @@ For compatibility, `--' Example: text` is read as the directive `Example`
 rather than as prose. Candidates: (a) keep the colon form as a synonym for
 `@keyword`; (b) retire it, so only `@` begins a directive and such lines are
 prose.
+
+### DOC-7 Cost directives state sizes, counts and times for the realizer
+Intent: ruled 2026-10-16
+Code: deviates (../compiler/issues/realization.md)
+
+`@wiresize`, `@dimension`, `@calls` and `@selftime` carry estimates the
+realizer uses to rank placements and implementations (cost.md: COST-5 to
+COST-7). They change only cost, and through it placement, which can decide
+whether a program builds (REAL-3) and how a value crosses (WIRE). Help does
+not show them.

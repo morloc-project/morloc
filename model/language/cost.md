@@ -3,105 +3,132 @@
 What the realizer minimizes when it chooses an implementation and a
 language for each call (REAL-2), and the docstring directives that inform
 it. Prefix: COST. Design and worked examples:
-/work/plans/realization-cost-model.md.
+/work/plans/realization-cost-model.md; implementation plan:
+/work/plans/realization-cost-model-implementation.md.
 
-The cost is an estimate used to rank placements of one program, not a
-prediction of its run time. Every quantity the program does not state takes
-a default.
+The cost is an estimate used to rank placements and implementations of one
+program, not a prediction of its run time. Every quantity the program does
+not state takes a default.
 
 ## The objective
 
 ### COST-1 The realizer minimizes estimated time
-Intent: proposed
+Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
 
 Of the placements REAL-2 allows, the realizer chooses one of least total
-cost, the sum of COST-2 over calls and COST-3 over crossings, in seconds.
-Ties are broken by fewer crossings, then deterministically. A placement no
-language can realize is excluded, never priced.
+cost, in seconds: the cost of each root's call, which is its own COST-2 plus
+the COST-3 boundaries and COST-4 callbacks of the calls it makes, each
+counted once; a callback's body is counted only through COST-4. Ties are
+broken by fewer crossings between pools, then fewer changes of language
+within one pool, then deterministically. A placement no language can realize
+is excluded, never priced. Starting a pool costs nothing: pools start once
+per run.
 
-### COST-2 A call costs its language's coefficient times its runtime, plus the language's call overhead
+### COST-2 A call costs its language's coefficient times its self time, plus the language's call overhead
+Intent: ruled 2026-10-16
+Code: deviates (../compiler/issues/realization.md)
+
+    call(f, L) = coeff(L) * selftime(f) + overhead(L)
+
+`selftime(f)` is the function's own time, excluding the functions it calls
+back (COST-4) and the values it moves (COST-3), evaluated at the sizes of
+its arguments: for a sourced implementation, its own `@selftime` (COST-6),
+else the `@selftime` of its signature, else 1 us. Implementations in one
+language may differ in self time; the cheaper is chosen at each call, from
+the sizes there. `coeff(L)` and `overhead(L)` are per language (COST-10). An
+implementation defined in morloc, a class default (CLS-8) included, costs
+the sum of its body; a signature's `@selftime` does not apply to it.
+Language-free code the nexus evaluates costs nothing.
+
+### COST-3 A crossing costs one round trip, plus encoding where a value is made and decoding where it is used
 Intent: proposed
 Code: deviates (../compiler/issues/realization.md)
 
-    call(f, L) = coeff(L) * runtime(f) + overhead(L)
+Generated code moves values hop by hop: a subtree placed in a pool other
+than its parent's becomes a foreign call that receives the subtree's free
+variables as arguments and returns its result. Each such boundary, from
+parent language A to child language B in different pools, costs one
+`latency(A, B)` per call, for its arguments and result together. A value
+made in pool P and decoded for native use in pool Q costs, for that pair,
+`slope_e(P, Q) * elements + slope_b(P, Q) * bytes`; a pool between them
+that only forwards the value keeps it serialized and adds only its
+boundaries' latencies. A value decoded natively in two pools is charged for
+each. Nothing is charged between languages that share a pool (one
+language, or a guest language in its host's pool). Elements and bytes come
+from COST-8.
 
-`runtime(f)` is the value of `f`'s `@runtime` (COST-6) at the sizes of its
-arguments, or a small constant without one. `coeff(L)` and `overhead(L)`
-are per language (COST-10). Language-free code evaluated by the nexus costs
-nothing. A function defined in morloc costs the sum of its body.
-
-### COST-3 A crossing costs a latency plus per-element and per-byte terms
-Intent: proposed
-Code: deviates (../compiler/issues/realization.md)
-
-A value that a call in language A produces and a call in language B
-consumes costs, when A and B are in different pools,
-
-    cross(A, B, v) = latency(A, B) + slope_e(A, B) * elements(v)
-                                   + slope_b(A, B) * wiresize(v)
-
-and nothing when they share a pool (one language, or a guest language in
-its host's pool). Each edge is priced once, at its consumer. Elements and
-wiresize come from COST-8.
-
-### COST-4 A callback costs its body times its call count
-Intent: proposed
+### COST-4 A callback costs one call of it times its call count
+Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
 
 A function value passed to a function `h` costs, per call of `h`, its call
 count times the cost of one call of it: its own call (COST-2) and every
-crossing its body and its arguments and result make (COST-3), with its
-argument sizes from `h`'s signature (COST-7). The count is `h`'s `@calls`
-for that argument (COST-6); a suspension argument is forced once; for a
-sourced `h` without `@calls` the count is 1000. For an `h` defined in
-morloc the count comes from its body, never from a default.
+crossing and callback its body makes (COST-3, COST-4), with its argument
+sizes from `h`'s signature (COST-5). The count is `h`'s `@calls` for that
+argument (COST-6); a suspension argument is forced once; for a sourced `h`
+without `@calls` the count is 1000. For an `h` defined in morloc the count
+comes from its body: each place the body calls the function counts once,
+times any count around it. A call of a function value whose cost is unknown
+(a closure a source returned, a container element, a function chosen by a
+conditional) costs one default call.
 
 ## Directives
 
 ### COST-5 `@wiresize` and `@dimension` state the size of a value
-Intent: proposed
+Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
 
-`@wiresize <bytes>` states a value's expected size on the wire.
-`@dimension <f1> ... <fk>` states its shape: factors whose product is its
-wiresize, each a number, a name (COST-7), or a type variable of the
-signature standing for the size of a value of that type; the last factor,
-if a number, is in bytes, and the others count elements. They are mutually
-exclusive on one position. Allowed above: an argument or the result in a
-signature; a type alias (applying wherever a signature writes the alias,
-nested positions included); a record field. Sizes are language
-independent.
+`@wiresize <bytes>` states a value's expected size on the wire; a number
+without a byte unit is an error. `@dimension <f1> ... <fk>` states its
+shape: factors whose product is its size, each a number, a name (COST-7),
+or a type variable of the signature standing for the size of one value of
+that type, in bytes. At most one factor is bytes; the product is bytes, the
+size, or a plain number, which counts elements of the innermost element
+type, each of its own size (one byte for a character of a `Str`; a tuple
+element is the sum of its fields). Any other product, and a type name as a
+factor, is an error. `@wiresize` and `@dimension` are mutually exclusive on
+one position; between an alias and the signature that writes it, the
+nearer wins (DOC-5). Allowed
+above: an argument or the result in a signature; a type alias (applying
+wherever a signature writes the alias, nested positions included; its names
+are renamed at each use, so two uses never share one); a record field.
+Sizes are language independent.
 
-### COST-6 `@calls` and `@runtime` state counts and times
-Intent: proposed
+### COST-6 `@calls` and `@selftime` state counts and times
+Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
 
-Above a function-typed argument, `@calls <formula>` states how many times
-the function calls it, and `@runtime <name>` binds the name to that
-argument's runtime (COST-2). Above a signature, `@runtime <formula>` states
-the function's runtime before its language's coefficient. `@runtime` on a
-term defined in morloc is an error: its cost is its body's.
+Above a function-typed or suspension-typed argument, `@calls <formula>`
+states how many times a sourced implementation calls it. Above a
+signature, `@selftime <formula>` states the self time (COST-2) of every
+sourced implementation that states none of its own. Above a line of a
+`source` block, `@selftime <formula>` states that implementation's self
+time, in the names of its term's signature. Neither applies to an
+implementation defined in morloc, whose counts and cost come from its body.
 
 ### COST-7 A formula is arithmetic over a signature's names, with units
-Intent: proposed
+Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
 
 A formula has numbers with units, names, `+ - * / ^`, `log` (natural),
 `log2` and parentheses. Units: `B KB MB GB TB` (powers of 1000), `KiB MiB
-GiB TiB` (powers of 1024), `ns us ms s`. A name is local to one signature
-and means one quantity everywhere in it, as a type variable does; a name
-in a type alias is renamed at each use, so two uses never share it. A
-name used in `@calls` or `@runtime` that no `@dimension` or `@runtime` of
-the signature introduces is an error. Units are checked: a size is in
-bytes, a count has none, a runtime is a time, and an exponent or a `log`
-argument has none. A value that is undefined, infinite or negative counts
-as the default (COST-9) for that position.
+GiB TiB` (powers of 1024), `ns us ms s`. A name is a plain number, local to
+one signature, meaning one quantity everywhere in it, as a type variable
+does. Only a literal carries a unit, and every formula has a dimension, a
+power of time and a power of bytes: the operands of `+` and `-` have one
+dimension (adding a time to a plain number is an error), the argument of
+`log` and `log2` and an exponent are plain numbers, and a base with a
+dimension takes only an integer literal exponent. `@selftime` is a time,
+`@wiresize` bytes, `@calls` a plain number. A name in `@calls` or
+`@selftime` that no `@dimension` of the signature introduces is an error. A
+value that is undefined, infinite or negative counts as the default (COST-9)
+for that position.
 
 ## Sizes
 
 ### COST-8 A value's size comes from what made it
-Intent: proposed
+Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
 
 The size of a value at an edge is, first that applies:
@@ -117,25 +144,26 @@ The size of a value at an edge is, first that applies:
 A name at a consumer's argument position binds, it does not claim: it takes
 its value from the value that arrives. When two arguments bind one name, a
 known value beats a default and the larger known value wins. Two term
-signatures merged into one keep both sets of directives; two that state
-different sizes for one position are an error.
+signatures merged into one keep both sets of cost directives; two that
+state different literal sizes for one position are an error.
 
 ### COST-9 Defaults follow the structure of the type
-Intent: proposed
+Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
 
 A fixed-width value is its width. A variable-width leaf (`Str`, a byte
-vector) is 4 KB. A list is n elements times its element, with n = 10. A
-record or tuple is the sum of its fields; a sum type its largest
-constructor; an optional its payload. A type that contains itself counts
-its inner occurrence as a variable-width leaf. A stream, an IFile and a
-function value are 64 B (a handle; their cost is in their use, COST-4).
-An unbound name is 10.
+vector) is 4 KB. A list is 10 elements times its element, or as many as a
+literal `Nat` in its type states. A record or tuple is the sum of its
+fields; a sum type its largest constructor; an optional its payload. A type
+that contains itself counts its inner occurrence as a variable-width leaf. A
+stream, an IFile, a function value and a suspension are 64 B (a handle or a
+callable, WIRE-5; their cost is in their use, COST-4). An unbound name is
+10.
 
 ## Coefficients and the scorer
 
 ### COST-10 Coefficients come from the performance model
-Intent: proposed
+Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
 
 `latency`, `slope_e` and `slope_b` per pair of pools, and `coeff` and
@@ -143,22 +171,39 @@ Code: deviates (../compiler/issues/realization.md)
 from the measurements of model/performance XL-1, XL-2 and XL-3. The table is
 the only place they are stated.
 
-### COST-11 Every place the realizer prices an edge prices it the same way
+### COST-11 The realizer prices what code generation builds
 Intent: proposed
 Code: deviates (../compiler/issues/realization.md)
 
-Choosing and scoring use one edge cost (COST-3). A use of a let-bound value
-or of a parameter is priced from the language the value lives in to the
-language of the use. The components of a list, tuple or record are all
-priced. A function argument of a function defined in morloc is priced once,
-in its body. Sizes are computed while scoring, in data-flow order.
+Choosing and scoring use one boundary cost (COST-3). A node that is always
+generated in its parent's language (a lambda, a constructor application, a
+container of functions, a function argument carried into a sourced call, a
+literal, a variable) is priced only in that language. The components of a
+list, tuple or record are all priced. Among implementations of one term
+whose types differ, instance resolution (CLS-2) chooses before cost does,
+so cost never hides an ambiguity. Sizes are computed while scoring, in
+data-flow order. The cost of the placement built equals the least cost
+found, except where a recursive call forces its language or a node moves
+to a language that can hold its type.
 
-### COST-12 What remains open
+### COST-12 The statements of a do-block may run in different languages
+Intent: proposed
+Code: conforms 2026-10-24
+
+A do-block's statements are placed one by one; placing a statement and
+everything after it in another pool than the statement before costs one
+boundary (COST-3), with every value still in use crossing it. Pending: the
+check that a split preserves effect order, evaluation of each statement
+once, failure handling and labels.
+
+### COST-13 What remains open
 Intent: open
 Code: unaudited
 
-Open: whether the statements of a do-block may be placed in different
-languages (each let is placed on its own today); a per-implementation
-`@runtime`; binding a name to an argument's value when the argument is a
-literal; how a parallel map's workers, and a stream read from another pool,
-are costed.
+Open: a per-instance `@calls` (a class method's count applies to every
+instance today); binding a name to an argument's value when the argument is
+a literal; how a parallel map's workers, and a stream read
+from another pool, are costed; size directives inside function, suspension
+and optional aliases, which are expanded before signatures are read;
+computing in the caller an argument that only the caller's language can
+compute (../compiler/issues/realization.md).

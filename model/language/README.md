@@ -92,7 +92,7 @@ split later.
 |---|---|---|
 | [sources.md](sources.md) | SRC | `source` declarations: files, names, signatures, the claims a source makes |
 | [realization.md](realization.md) | REAL | choosing an implementation and a language for each call; implementations are interchangeable |
-| [cost.md](cost.md) | COST | what the realizer minimizes; `@wiresize`, `@dimension`, `@calls`, `@runtime` |
+| [cost.md](cost.md) | COST | what the realizer minimizes; `@wiresize`, `@dimension`, `@calls`, `@selftime` |
 | [host-calls.md](host-calls.md) | HOST | how morloc and sourced code call each other: arguments, callbacks, suspensions |
 | [data-crossing.md](data-crossing.md) | WIRE | how each type's values cross between languages: wire form, round trip, copying and sharing |
 | [guest-languages.md](guest-languages.md) | GUEST | languages compiled into another language's pool |

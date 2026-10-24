@@ -31,5 +31,5 @@ Intent: open
 Code: unaudited
 
 Open: whether a program may pin a call to a language. What the choice
-minimizes is proposed in cost.md (COST-1).
+minimizes is cost.md (COST-1).
 A pin would make REAL-1 checkable by building both ways.
