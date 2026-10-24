@@ -269,15 +269,33 @@ jobs:
         run: stack test --system-ghc --no-install-ghc morloc:morloc-integration-test
         timeout-minutes: 45
 
-      - name: Collect failing golden tests
+      # As in the push workflow: golden-test stderr goes to the log, and the
+      # golden outputs are uploaded as an artifact.
+      - name: Dump failing golden-test stderr to log
         if: failure()
-        run: ./test-suite/collect-golden-failures.sh golden-failures
+        run: |
+          echo "=== non-empty golden-test stderr ==="
+          found=0
+          for f in $(find test-suite/golden-tests -name obs.err -o -name build.err -o -name make.err 2>/dev/null); do
+            if [ -s "$f" ]; then
+              found=1
+              echo "----- $f -----"
+              head -c 4000 "$f"
+              echo
+            fi
+          done
+          [ "$found" = 0 ] && echo "(no non-empty build.err/obs.err/make.err found)"
+          true
       - name: Upload test failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: golden-failures-release-shard${{ matrix.shard }}
-          path: golden-failures/
+          name: golden-test-errs-release-shard${{ matrix.shard }}
+          path: |
+            test-suite/golden-tests/**/build.err
+            test-suite/golden-tests/**/obs.err
+            test-suite/golden-tests/**/make.err
+            test-suite/golden-tests/**/obs.txt
           if-no-files-found: ignore
           retention-days: 7
 
