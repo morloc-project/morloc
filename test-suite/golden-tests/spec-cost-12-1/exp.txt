@@ -1,3 +1,54 @@
+placement:
+  chain [py]
+    pyStep [py]
+    (eval) [cpp] *
+      cppStep [cpp]
+    pyStep [py]
+    (eval) [cpp] *
+      cppStep [cpp]
+    pyStep [py]
+  sharedPure [py]
+    pyPure [py]
+    (eval) [cpp] *
+      cppStep [cpp]
+    pyStep [py]
+    (eval) [cpp] *
+      cppStep [cpp]
+        + [cpp]
+  caught [py]
+    (eval) [cpp] *
+      cppStep [cpp]
+    pyFail [py]
+    (eval) [cpp] *
+      cppStep [cpp]
+    - [py]
+  rustChain [py]
+    pyStep [py]
+    (eval) [rust] *
+      rustStep [rust]
+    pyStep [py]
+  loop [py]
+    pyStep [py]
+    (eval) [cpp] *
+      cppStep [cpp]
+    == [py]
+    call loop [py]
+      - [py]
+  rustLoop [py]
+    pyStep [py]
+    (eval) [rust] *
+      rustStep [rust]
+    == [py]
+    call rustLoop [py]
+      - [py]
+  rerun [py]
+    cppStep [cpp] *
+    (eval) [cpp] *
+    pyStep [py]
+    (eval) [cpp] *
+    pyStep [py]
+      + [py]
+
 py 0
 cpp 1
 py 2

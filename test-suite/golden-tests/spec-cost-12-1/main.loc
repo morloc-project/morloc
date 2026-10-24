@@ -7,7 +7,8 @@
 -- placed in another pool that returns its argument; and a suspension bound
 -- in one language runs again each time another language binds it (EFF-3).
 -- Each step prints to stderr, so the order of the lines is the order of the
--- effects.
+-- effects. The placement listing comes first: a base case that only names
+-- a value stays in its caller's language rather than crossing to return it.
 
 --' Do-blocks split across Python, C++ and Rust
 module main (chain, sharedPure, caught, rustChain, loop, rustLoop, rerun)

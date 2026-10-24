@@ -1,6 +1,7 @@
 all:
 	rm -f *.err obs.txt
-	morloc make -o nexus main.loc 2> build.err
+	morloc typecheck --realize main.loc 2> build.err | sed -n '/^placement:$$/,/^$$/p' > obs.txt
+	morloc make -o nexus main.loc 2>> build.err
 	./nexus chain 0 >> obs.txt 2>> obs.txt
 	./nexus sharedPure 1 >> obs.txt 2>> obs.txt
 	./nexus caught 5 >> obs.txt 2>> obs.txt

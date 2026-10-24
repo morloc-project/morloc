@@ -45,3 +45,28 @@ serialize unless a `Packable` instance gives it a wire form.
   nexus gives the same message located at the export list. It should say
   `Box` has no wire form and cannot cross from py to cpp. Repro:
   /work/plans/model-audit-2026-10-21/repro/B/t/n5/a.loc, b.loc.
+
+- **An opaque value bound in a do-block split across pools does not
+  build.** [reproduced, 2026-10-24, also before the boundary pricing of
+  e8aa73b0] With `type Box` / `type Cpp => Box = "Box"`, sourced
+  `mk :: Int -> <IO> Box`, `grow :: Box -> Int -> <IO> Box`,
+  `unbox :: Box -> Int` in C++ and `pyStep :: Int -> <IO> Int` in Python,
+
+      run x = do
+        b <- mk x
+        y <- pyStep 1
+        z <- pyStep y
+        w <- pyStep z
+        b2 <- grow b w
+        u <- pyStep w
+        v <- pyStep u
+        unbox b2 + v
+
+  fails `Could not resolve type for variable 'Box'`: the realizer places
+  the statements after `b <-` in Python, so `b` must cross into the Python
+  pool and back, and it has no wire form. Nothing in the realizer refuses
+  a boundary that carries a free variable whose type cannot cross
+  (COST-11 asks for placements code generation can build; REAL-3).
+  Since references to a let-bound data value became free, nothing in the
+  cost discourages such a split either.
+  Repro files: /work/plans/realization-cost-model/repro2.

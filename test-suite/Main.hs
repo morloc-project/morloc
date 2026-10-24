@@ -19,6 +19,7 @@ import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
 import LangSupportTests (langSupportTests)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
+import ArgsBoundTests (argsBoundTests)
 import PropertyTests (propertyTests)
 import RecSolverTests (recSolverTests)
 import RefutablePatternTests (refutablePatternTests)
@@ -117,6 +118,7 @@ unitTests =
   , valueArgsTests
   , manifoldNameTests
   , patternChainTests
+  , argsBoundTests
   , irrefutablePatternLexerTests
   , refutablePatternTests
   , rustPoolBuildTests

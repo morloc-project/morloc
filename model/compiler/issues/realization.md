@@ -5,11 +5,12 @@ found reviewing /work/plans/realization-cost-model.md. The objective is
 COST-1 (ruled); each entry is wrong under any reading of it. [read; not
 reproduced]
 
-- **A use of a let-bound value is priced from where it was computed.**
-  `refTable` (~529-557) prices a reference in language l as moving the value
-  from its home h to l, but the value lives where the let runs; for a value
-  computed in Rust, bound in a Python do-block and used in Rust, the second
-  crossing costs nothing. lib/biolib rnaseq R36 is this shape.
+- **A reference to a let-bound function value is priced from where its
+  definition is cheapest.** The `LetS` clause of `scoreExpr` prices a
+  reference in language l as reaching the right-hand side's cheapest home
+  from l, but a lambda is built in its parent's language (COST-11;
+  `pinNamedLambda` at collapse), so scoring and collapse disagree. Data
+  values are free at their references (COST-3).
 - **A value read across a boundary moves for free.** A parameter or a
   let-bound value read by a subtree in another pool rides that subtree's
   one boundary latency (COST-3), but its per-element and per-byte cost is
@@ -66,15 +67,6 @@ reproduced]
   and is reached only through strict positions (no conditional arm, lambda
   or `@try` region). Open in COST-13: whether EVAL-3 lets such a value be
   computed in the caller's pool.
-
-- **A statement that only names a value is placed in another pool.**
-  [reproduced, 2026-10-24] In a recursive do-block whose last bound value
-  `b` comes from C++ and whose base case is `do b`, with the block driven
-  from Python, the base case becomes a C++ manifold whose body returns its
-  argument: Python sends `b` to C++ and C++ sends a copy back, one round
-  trip per base case for no work (golden spec-cost-12-1, `loop`). The
-  let-bound value is priced where it was computed rather than where it is
-  used; boundary pricing (COST-3, COST-11) removes it.
 
 - **Cost chooses between instances before their types do.** [reproduced,
   2026-10-24] Collapse keeps the cheapest implementations of a term

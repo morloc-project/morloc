@@ -20,7 +20,7 @@ module Morloc.CodeGenerator.Realize
   , removeVarS
   ) where
 
-import Morloc.CodeGenerator.Serial (containsFunT)
+import Morloc.CodeGenerator.Serial (containsEffectT, containsFunT)
 import Morloc.CodeGenerator.Value (etaParts, isValueWith)
 import Morloc.Frontend.Namespace (newIndex)
 import Morloc.Frontend.Rename (displayName)
@@ -275,7 +275,9 @@ data RState = RState
   { rLangs :: [Lang]
   , rApplied :: [AnnoS (Indexed Type) Many Int]
   , rBndVars :: Map EVar (AnnoS (Indexed Type) Many Int)
-  , rLetVars :: Map EVar [(Lang, Score)] -- ^ let-bound variable -> RHS scores
+  -- | A let-bound variable: the table of a reference to it when its value
+  -- is or holds a function, 'Nothing' for data, whose references are free.
+  , rLetVars :: Map EVar (Maybe [(Lang, Score)])
   }
 
 emptyRState =
@@ -608,22 +610,24 @@ realizeWithRegistry registry tables seedLangs s0 = do
       return (ConS tv n j xs', zipLang i rstat)
     scoreExpr rstat (LetS v e1 e2, i) = do
       e1' <- scoreAnnoS rstat e1
-      -- A reference to the bound value costs what it takes to have the value
-      -- in the reference's language: computing it in its cheapest home
-      -- relative to the cheapest place overall, plus moving it. The RHS's own
-      -- cost is counted once, at the LetS below, not again at every
-      -- reference. An empty table leaves LetBndS to the calling context.
+      -- A data value is read where its let runs, or carried into a subtree
+      -- in another pool as one of the free variables that subtree's single
+      -- boundary passes (COST-3), so a reference to it adds nothing of its
+      -- own. A function value is priced by where its definition can run:
+      -- its cheapest home relative to the cheapest place overall, plus
+      -- reaching it; the RHS's own cost is counted once, at the LetS below.
       let rhs = scoresOf e1'
-          refTable = case rhs of
-            [] -> []
-            _ ->
-              let base = minimum (map snd rhs)
-                  langs = unique (map fst rhs <> rLangs rstat)
-                  above (Score t c w) (Score bt bc bw) = Score (t - bt) (max 0 (c - bc)) (max 0 (w - bw))
-               in [ (l, minimum [above sc base <> boundary h l | (h, sc) <- rhs])
-                  | l <- langs
-                  ]
-          rstat' = rstat { rLetVars = Map.insert v refTable (rLetVars rstat) }
+          refTable
+            | null rhs = []
+            | otherwise =
+                let base = minimum (map snd rhs)
+                    langs = unique (map fst rhs <> rLangs rstat)
+                    above (Score t c w) (Score bt bc bw) = Score (t - bt) (max 0 (c - bc)) (max 0 (w - bw))
+                 in [ (l, minimum [above sc base <> boundary h l | (h, sc) <- rhs])
+                    | l <- langs
+                    ]
+          ref = if holdsCallable (annoType e1') then Just refTable else Nothing
+          rstat' = rstat { rLetVars = Map.insert v ref (rLetVars rstat) }
       e2' <- scoreAnnoS rstat' e2
       -- Score the chain like an application: the binding's RHS and the body
       -- both contribute, with cross-language penalties applied per-lang.
@@ -633,7 +637,8 @@ realizeWithRegistry registry tables seedLangs s0 = do
       return (LetS v e1' e2', Idx i best)
     scoreExpr rstat (LetBndS v, i) =
       case Map.lookup v (rLetVars rstat) of
-        Just scs@(_ : _) -> return (LetBndS v, Idx i scs)
+        Just Nothing -> return (LetBndS v, Idx i [])
+        Just (Just scs@(_ : _)) -> return (LetBndS v, Idx i scs)
         _ -> return (LetBndS v, zipLang i rstat)
     scoreExpr rstat (CallS v, i) = case Map.lookup v tables of
       -- a shared specialization costs what it costs in each language
@@ -1165,7 +1170,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
     collapseCarried heads lang x@(AnnoS (Idx _ t) _ e)
-      | isClosureType t, not (isNewtypeCast e) = do
+      | isCallableType t, not (isNewtypeCast e) = do
           AnnoS g (Idx i _) e' <- collapseAnnoS heads lang x
           return (AnnoS g (Idx i lang) e')
       | otherwise = collapseAnnoS heads lang x
@@ -1214,10 +1219,6 @@ realizeWithRegistry registry tables seedLangs s0 = do
     isNewtypeCast (CoerceS (CoerceNewtype _ _) _) = True
     isNewtypeCast _ = False
 
-    isClosureType :: Type -> Bool
-    isClosureType (FunT _ _) = True
-    isClosureType (EffectT _ _) = True
-    isClosureType _ = False
 
     chooseLanguage :: Maybe Lang -> [(Lang, Score)] -> MorlocMonad (Maybe Lang)
     chooseLanguage l1 ss =
@@ -1859,9 +1860,15 @@ isFunctionalData (NamS (map snd -> xs)) = any isFunctionalDataAnnoS xs
 isFunctionalData _ = False
 
 isFunctionalDataAnnoS :: AnnoS (Indexed Type) f a -> Bool
-isFunctionalDataAnnoS (AnnoS (Idx _ t) _ e) = handleType t || isFunctionalData e
-  where
-    handleType :: Type -> Bool
-    handleType (FunT _ _) = True
-    handleType (EffectT _ _) = True
-    handleType _ = False
+isFunctionalDataAnnoS (AnnoS (Idx _ t) _ e) = isCallableType t || isFunctionalData e
+
+-- | A function or a suspension.
+isCallableType :: Type -> Bool
+isCallableType (FunT _ _) = True
+isCallableType (EffectT _ _) = True
+isCallableType _ = False
+
+-- | A value that is, or holds anywhere inside it, a function or a
+-- suspension, which crosses a pool as a proxy calling home.
+holdsCallable :: Type -> Bool
+holdsCallable t = containsFunT t || containsEffectT t

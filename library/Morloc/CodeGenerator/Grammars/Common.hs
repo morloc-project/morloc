@@ -16,6 +16,7 @@ helpers, and the fold framework ('FoldRules', 'foldWithSerialManifoldM').
 -}
 module Morloc.CodeGenerator.Grammars.Common
   ( invertSerialManifold
+  , serialManifoldArgsBound
   , sealLoop
   , D (..)
   , renameNE
