@@ -25,12 +25,19 @@ inline std::vector<int> makeBatch(int n) {
 
 inline long g_sum = 0;
 
+// A payload's contents escape to the optimizer, so an allocation a reader
+// reaches is never elided, even when only its size is read.
+inline const std::vector<int>& escape(const std::vector<int>& v) {
+    asm volatile("" : : "r"(v.data()) : "memory");
+    return v;
+}
+
 inline std::vector<int> makeExtra(int k) {
     return std::vector<int>(100000, k);
 }
 
 inline void recordBatch(const std::vector<int>& extra, const std::vector<int>& xs) {
-    g_sum += (long)extra.size() * (long)xs.size();
+    g_sum += (long)escape(extra).size() * (long)escape(xs).size();
 }
 
 inline int bigAllocs(int) {

@@ -25,7 +25,8 @@ struct PriceDistribution {
 // implementations, so libstdc++ (Linux) and libc++ (macOS) would diverge for
 // the same seed. Generate the standard-normal variate by hand (Box-Muller) from
 // mt19937's raw output, which IS portable, so the golden matches on both
-// platforms. Depends only on the portable PRNG plus IEEE sqrt/log/cos.
+// platforms. log, cos and exp are not correctly rounded in every libm, so
+// results can still differ in their last bits between C libraries.
 static inline double portable_uniform(std::mt19937& gen) {
     // mt19937::operator() yields a uint32 in [0, 2^32); map to (0,1).
     return (static_cast<double>(gen()) + 0.5) / 4294967296.0;
@@ -74,7 +75,8 @@ double priceCallOption(MarketParams params, std::vector<std::vector<double>> pat
     double avgPayoff = payoffSum / nPaths;
     double discountedPrice = avgPayoff * std::exp(-params.riskFreeRate * params.timeToMaturity);
 
-    return discountedPrice;
+    // Rounded so that last-bit libm differences do not reach the output
+    return std::round(discountedPrice * 1e10) / 1e10;
 }
 
 // Calculate standard error of a sample

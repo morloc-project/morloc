@@ -30,8 +30,15 @@ inline std::vector<int> mkL(int key) {
 
 inline std::vector<int> grow(const std::vector<int>&, int key) { return mkL(key); }
 
-inline int keyL(const std::vector<int>& v) { return (int)v.size() - BASE; }
-inline int keyV(std::vector<int> v) { return (int)v.size() - BASE; }
+// A payload's contents escape to the optimizer, so an allocation a reader
+// reaches is never elided, even when only its size is read.
+inline const std::vector<int>& escape(const std::vector<int>& v) {
+    asm volatile("" : : "r"(v.data()) : "memory");
+    return v;
+}
+
+inline int keyL(const std::vector<int>& v) { return (int)escape(v).size() - BASE; }
+inline int keyV(std::vector<int> v) { return (int)escape(v).size() - BASE; }
 
 inline int applyF(std::function<int(int)> f, int x) { return f(x); }
 inline int applyR(const std::function<int(int)>& f, int x) { return f(x); }
