@@ -188,13 +188,14 @@ to a language that can hold its type.
 
 ### COST-12 The statements of a do-block may run in different languages
 Intent: proposed
+Tests: spec-cost-12-1
 Code: conforms 2026-10-24
 
 A do-block's statements are placed one by one; placing a statement and
 everything after it in another pool than the statement before costs one
-boundary (COST-3), with every value still in use crossing it. Pending: the
-check that a split preserves effect order, evaluation of each statement
-once, failure handling and labels.
+boundary (COST-3), with every value still in use crossing it. A split keeps
+effect order, evaluates each statement once, keeps failure handling and
+reruns a suspension at each bind.
 
 ### COST-13 What remains open
 Intent: open
@@ -206,4 +207,4 @@ a literal; how a parallel map's workers, and a stream read
 from another pool, are costed; size directives inside function, suspension
 and optional aliases, which are expanded before signatures are read;
 computing in the caller an argument that only the caller's language can
-compute (../compiler/issues/realization.md).
+compute; whether a label (ANN) wraps the same work when a do-block splits (../compiler/issues/realization.md).

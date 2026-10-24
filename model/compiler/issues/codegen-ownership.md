@@ -124,3 +124,14 @@ same name sees what was taken.
   items name no language, are marked conforms, and Cpp.hs cites OWN-2/3/5/7.
   Either each item says it is Rust-only, or C++ is `deviates` against
   codegen-copies.md.
+
+- **A same-pool serial call's result is never released.** [read, 2026-10-24]
+  `isCallResult` (Translator/Imperative.hs) excludes `AppRecS` on the
+  premise that a callee may return an argument packet as it is. In C++ and
+  Rust a manifold that returns an argument now returns a copy
+  (`lcDupPacket`, tagged by `serialManifoldArgsBound` in
+  Grammars/Common.hs), so every serial manifold result there is a packet of
+  its own; the caller of an `AppRecS` never frees it, leaking the packet
+  bytes until the process ends and its shared memory until the dispatch's
+  flush. Needs a reproduction (a same-pool serial recursion in C++ whose
+  callee returns an argument) before changing who releases it.

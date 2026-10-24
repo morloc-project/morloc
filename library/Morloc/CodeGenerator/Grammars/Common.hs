@@ -491,9 +491,92 @@ renameDeps old new = map f where
   f (i, Left se) = (ri i, Left (renameSE old new se))
   f (i, Right ne) = (ri i, Right (renameNE old new ne))
 
+-- | Tag every serial variable that names one of its manifold's arguments as
+-- 'BndVarS'. A foreign call's body, and a trivial let renamed to an
+-- argument, refer to the argument as a 'LetVarS'; translators key on
+-- 'BndVarS' to copy an argument packet that is returned (see 'lcDupPacket').
+-- A serial let ('SerialLetS', 'SerialLetN', 'LoopSLet') of the same index
+-- hides the argument in its body.
+serialManifoldArgsBound :: SerialManifold -> SerialManifold
+serialManifoldArgsBound (SerialManifold m lang form headForm body) =
+  SerialManifold m lang form headForm (argsBoundS (formArgSet form) body)
+
+nativeManifoldArgsBound :: NativeManifold -> NativeManifold
+nativeManifoldArgsBound (NativeManifold m lang form body) =
+  NativeManifold m lang form (argsBoundN (formArgSet form) body)
+
+formArgSet :: ManifoldForm a b -> Set.Set Int
+formArgSet = Set.fromList . abilist const const
+
+argsBoundS :: Set.Set Int -> SerialExpr -> SerialExpr
+argsBoundS a e0 = case e0 of
+  ManS sm -> ManS (serialManifoldArgsBound sm)
+  AppPoolS t p sargs -> AppPoolS t p (map argS sargs)
+  AppRecS t m es -> AppRecS t m (map (argsBoundS a) es)
+  AppForeignRecS t m sock es -> AppForeignRecS t m sock (map (argsBoundS a) es)
+  CacheBodyS t resSa lbl m cargs body -> CacheBodyS t resSa lbl m cargs (argsBoundS a body)
+  DebugWrapS t m cargs body -> DebugWrapS t m cargs (argsBoundS a body)
+  ReturnS e -> ReturnS (argsBoundS a e)
+  SerialLetS i e1 e2 -> SerialLetS i (argsBoundS a e1) (argsBoundS (Set.delete i a) e2)
+  NativeLetS i ne e -> NativeLetS i (argsBoundN a ne) (argsBoundS a e)
+  LetVarS t i
+    | Set.member i a -> BndVarS t i
+    | otherwise -> e0
+  BndVarS _ _ -> e0
+  SerializeS sa ne -> SerializeS sa (argsBoundN a ne)
+  LoopS t ids body -> LoopS t ids (argsBoundLoop a argsBoundS body)
+  where
+    argS (SerialArgManifold sm) = SerialArgManifold (serialManifoldArgsBound sm)
+    argS (SerialArgExpr e) = SerialArgExpr (argsBoundS a e)
+
+argsBoundN :: Set.Set Int -> NativeExpr -> NativeExpr
+argsBoundN a e0 = case e0 of
+  AppExeN t exe xs -> AppExeN t exe (map argN xs)
+  ManN nm -> ManN (nativeManifoldArgsBound nm)
+  ReturnN e -> ReturnN (go e)
+  SerialLetN i se e -> SerialLetN i (argsBoundS a se) (argsBoundN (Set.delete i a) e)
+  NativeLetN i e1 e2 -> NativeLetN i (go e1) (go e2)
+  LetVarN {} -> e0
+  BndVarN {} -> e0
+  DeserializeN t sa se -> DeserializeN t sa (argsBoundS a se)
+  ExeN {} -> e0
+  ListN v t es -> ListN v t (map go es)
+  TupleN v es -> TupleN v (map go es)
+  RecordN o v ps rs -> RecordN o v ps (map (second go) rs)
+  LogN {} -> e0
+  RealN {} -> e0
+  IntN {} -> e0
+  StrN {} -> e0
+  EnumN {} -> e0
+  VariantN t n i es -> VariantN t n i (map go es)
+  NullN {} -> e0
+  DoBlockN t e -> DoBlockN t (go e)
+  EvalN t e -> EvalN t (go e)
+  CoerceN c t e -> CoerceN c t (go e)
+  IfN t c x y -> IfN t (go c) (go x) (go y)
+  IntrinsicN t intr msch es -> IntrinsicN t intr msch (map go es)
+  MapOptionalN t wt src e -> MapOptionalN t wt src (go e)
+  LoopN t starts body -> LoopN t (map (second go) starts) (argsBoundLoop a argsBoundN body)
+  where
+    go = argsBoundN a
+    argN (NativeArgManifold nm) = NativeArgManifold (nativeManifoldArgsBound nm)
+    argN (NativeArgExpr e) = NativeArgExpr (go e)
+
+argsBoundLoop ::
+  Set.Set Int ->
+  (Set.Set Int -> b -> b) ->
+  LoopBody NativeExpr SerialExpr b ->
+  LoopBody NativeExpr SerialExpr b
+argsBoundLoop a base body = case body of
+  LoopIf c x y -> LoopIf (argsBoundN a c) (argsBoundLoop a base x) (argsBoundLoop a base y)
+  LoopNLet i ne rest -> LoopNLet i (argsBoundN a ne) (argsBoundLoop a base rest)
+  LoopSLet i se rest -> LoopSLet i (argsBoundS a se) (argsBoundLoop (Set.delete i a) base rest)
+  LoopBase x -> LoopBase (base a x)
+  LoopContinue nes -> LoopContinue (map (argsBoundN a) nes)
+
 invertSerialManifold :: SerialManifold -> SerialManifold
 invertSerialManifold sm0 =
-  runIndex (maxIndex sm0) (unD <$> foldSerialManifoldM fm sm0)
+  serialManifoldArgsBound (runIndex (maxIndex sm0) (unD <$> foldSerialManifoldM fm sm0))
   where
     fm =
       FoldManifoldM

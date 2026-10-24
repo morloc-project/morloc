@@ -1,0 +1,94 @@
+-- A do-block whose statements call functions sourced in different
+-- languages may be split across pools (COST-12). A split must keep the
+-- block's meaning: its effects run once each, in written order (EVAL-2); a
+-- pure value used by statements on both sides is computed once (EVAL-3); a
+-- failure inside `@try` is caught there and the statements after it do not
+-- run (EVAL-4); a recursive block keeps its order, including a base case
+-- placed in another pool that returns its argument; and a suspension bound
+-- in one language runs again each time another language binds it (EFF-3).
+-- Each step prints to stderr, so the order of the lines is the order of the
+-- effects.
+
+--' Do-blocks split across Python, C++ and Rust
+module main (chain, sharedPure, caught, rustChain, loop, rustLoop, rerun)
+
+import root-py
+import root-cpp
+import root-rust
+
+source Py from "f.py" ("py_step" as pyStep, "py_pure" as pyPure, "py_fail" as pyFail)
+source Cpp from "f.hpp" ("cpp_step" as cppStep)
+source Rust from "f.rs" ("rust_step" as rustStep)
+
+--' Print and increment in Python
+pyStep :: Int -> <IO> Int
+
+--' Print and multiply by ten in Python
+pyPure :: Int -> Int
+
+--' Print and fail in Python
+pyFail :: Int -> <IO> Int
+
+--' Print and increment in C++
+cppStep :: Int -> <IO> Int
+
+--' Print and increment in Rust
+rustStep :: Int -> <IO> Int
+
+--' Alternate Python and C++ steps
+chain :: Int -> <IO> Int
+chain x = do
+  a <- pyStep x
+  b <- cppStep a
+  c <- pyStep b
+  d <- cppStep c
+  pyStep d
+
+--' Share one pure Python value across languages
+sharedPure :: Int -> <IO> Int
+sharedPure x = do
+  let y = pyPure x
+  a <- cppStep y
+  b <- pyStep y
+  cppStep (a + b)
+
+--' Catch a Python failure inside a split block
+caught :: Int -> <IO> Int
+caught x = do
+  r <- @try (do
+    a <- cppStep x
+    b <- pyFail a
+    cppStep b)
+  match r | (Ok v) = v | (Err _) = 0 - 1
+
+--' Alternate Python and Rust steps
+rustChain :: Int -> <IO> Int
+rustChain x = do
+  a <- pyStep x
+  b <- rustStep a
+  pyStep b
+
+--' Recurse through Python and C++ steps
+loop :: Int -> Int -> <IO> Int
+loop n x = do
+  a <- pyStep x
+  b <- cppStep a
+  ? n == 0 = do b
+  : loop (n - 1) b
+
+--' Recurse through Python and Rust steps
+rustLoop :: Int -> Int -> <IO> Int
+rustLoop n x = do
+  a <- pyStep x
+  b <- rustStep a
+  ? n == 0 = do b
+  : rustLoop (n - 1) b
+
+--' Run one C++ suspension twice around a Python step
+rerun :: Int -> <IO> Int
+rerun x = do
+  let s = cppStep x
+  a <- s
+  b <- pyStep a
+  c <- s
+  pyStep (b + c)

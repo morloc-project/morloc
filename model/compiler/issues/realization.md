@@ -75,3 +75,12 @@ reproduced]
   and is reached only through strict positions (no conditional arm, lambda
   or `@try` region). Open in COST-13: whether EVAL-3 lets such a value be
   computed in the caller's pool.
+
+- **A statement that only names a value is placed in another pool.**
+  [reproduced, 2026-10-24] In a recursive do-block whose last bound value
+  `b` comes from C++ and whose base case is `do b`, with the block driven
+  from Python, the base case becomes a C++ manifold whose body returns its
+  argument: Python sends `b` to C++ and C++ sends a copy back, one round
+  trip per base case for no work (golden spec-cost-12-1, `loop`). The
+  let-bound value is priced where it was computed rather than where it is
+  used; boundary pricing (COST-3, COST-11) removes it.

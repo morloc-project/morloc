@@ -1,0 +1,35 @@
+py 0
+cpp 1
+py 2
+cpp 3
+py 4
+5
+pure 1
+cpp 10
+py 10
+cpp 22
+23
+cpp 5
+fail 6
+-1
+py 0
+rust 1
+py 2
+3
+py 0
+cpp 1
+py 2
+cpp 3
+py 4
+cpp 5
+6
+py 0
+rust 1
+py 2
+rust 3
+4
+cpp 0
+py 1
+cpp 0
+py 3
+4

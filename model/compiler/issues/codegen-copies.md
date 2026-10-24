@@ -117,3 +117,10 @@ records and user-mapped types copy deeply.
   borrow although it keeps the value. C++ copies nothing here (`data`
   arms are shared).
 
+- **Under `--debug` a base case calls its own pool through the socket.**
+  [reproduced by review, 2026-10-24] Building golden spec-cost-12-1 with
+  `morloc make --debug`, the C++ base case of `loop` (`do b`) becomes a
+  closure that is reified to a packet, decoded, and invoked with
+  `foreign_call_v` into the C++ pool itself: one self round trip and two
+  encode/decode passes per base case. The output is correct; the cost is
+  not. The non-debug build calls nothing.
