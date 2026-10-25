@@ -174,9 +174,7 @@ The size of a value at an edge is, first that applies:
 
 A name at a consumer's argument position binds, it does not claim: it takes
 its value from the value that arrives. When two arguments bind one name, a
-known value beats a default and the larger known value wins. Two term
-signatures merged into one keep both sets of cost directives; two that
-state different literal sizes for one position are an error.
+known value beats a default and the larger known value wins.
 
 ### COST-9 Defaults follow the structure of the type
 Intent: ruled 2026-10-16

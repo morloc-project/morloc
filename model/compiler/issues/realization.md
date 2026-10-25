@@ -96,6 +96,22 @@ reproduced]
   (2026-10-25). A function value
   inside another type handed to a sourced function is priced as one
   call.
+- **A repetition count scales the tie-breakers too.** [read, 2026-10-25]
+  `scaleScore` multiplies a score's crossing and switch counts by the same
+  count as its time (a callback's 1000 calls, a recursion's 1000 levels),
+  so two placements whose times tie are compared by crossings counted a
+  thousand times over in one branch and once in another. COST-1 breaks ties
+  by the number of crossings; whether a repeated crossing counts once or per
+  repetition there is not stated.
+- **The realizer's placements are checked only against themselves.**
+  [read, 2026-10-25] COST-11. No test enumerates the placements of a small
+  tree to confirm the DP finds the least; no test compares the crossings
+  the placement listing shows with those code generation emits (the
+  PolyRemoteInterface calls after lowering); there are no unit tests that
+  pin a placement directly (PlacementTests.hs was planned). `@calls` on a
+  suspension argument and the largest-count rule across implementations
+  that state different counts have code but no test. The consistency check
+  of `typecheck -v --realize` runs in five goldens only, not over the suite.
 - **A bracket step through an instance is never placed in a pool.**
   [read, 2026-10-21] Realize gives a PatCall no language (Realize.hs:521),
   so a pure `f m = .[0] m` on a receiver that is not a list on the wire
