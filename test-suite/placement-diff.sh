@@ -40,15 +40,15 @@ programs() {
     echo main.loc
   elif ls "$dir"/main*.loc > /dev/null 2>&1; then
     (cd "$dir" && ls main*.loc)
-  elif [ "$(find "$dir" -maxdepth 1 -name '*.loc' | wc -l)" -eq 1 ]; then
+  elif [ "$(find "$dir" -maxdepth 1 -name '*.loc' | wc -l | tr -d ' ')" -eq 1 ]; then
     basename "$(find "$dir" -maxdepth 1 -name '*.loc')"
   fi
 }
 
 for root in "$@"; do
   root=$(cd "$root" && pwd)
-  find "$root" -name '*.loc' -not -path '*-build/*' -not -path '*/pools/*' -printf '%h\n' \
-    | sort -u \
+  find "$root" -name '*.loc' -not -path '*-build/*' -not -path '*/pools/*' \
+    | sed 's|/[^/]*$||' | sort -u \
     | while read -r dir; do
         programs "$dir" | while read -r loc; do
           rel=${dir#"$root"}
