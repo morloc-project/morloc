@@ -120,3 +120,11 @@
   `Map.insert`), overwriting a documented top-level term of the same name;
   help and `@with` lookups for that term then show the local docstring.
   Needs a repro.
+- **A term with no implementation is reported as a compiler bug.**
+  [reproduced, 2026-10-25] Violates DIAG-2. `morloc typecheck --realize`
+  on a module whose exported terms have signatures but no implementation
+  (golden-tests/infix-polyglot/ops/main.loc, scoping-13/foo/main.loc,
+  type-alias-transitive/types/main.loc) prints "Compiler bug, broken index
+  7 with attached error: No implementation found for '<*>'": the error is
+  raised at a node with no source location, so the user error is labelled a
+  compiler bug.

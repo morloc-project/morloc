@@ -8,3 +8,4 @@ placement:
       - [cpp]
 
 50
+OK: built placement costs the least

@@ -24,3 +24,4 @@ placement:
 "7"
 "7"
 "7"
+OK: built placement costs the least

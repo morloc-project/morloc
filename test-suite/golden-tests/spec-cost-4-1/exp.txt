@@ -5,3 +5,4 @@ placement:
         add [cpp]
 
 "10"
+OK: built placement costs the least

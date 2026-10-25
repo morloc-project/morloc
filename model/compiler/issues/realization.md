@@ -11,15 +11,14 @@ reproduced]
   from l, but a lambda is built in its parent's language (COST-11;
   `pinNamedLambda` at collapse), so scoring and collapse disagree. Data
   values are free at their references (COST-3).
-- **A value read across a boundary moves for free.** A parameter or a
-  let-bound value read by a subtree in another pool rides that subtree's
-  one boundary latency (COST-3), but its per-element and per-byte cost is
-  never added: `crossingPayloadCost` is 0 and no node records the sizes of
-  the free variables it carries down.
+- **A value read across a boundary is charged no per-element or per-byte
+  cost.** Deferred 2026-10-25 (COST-3): `crossingPayloadCost` is 0 and no
+  node records the sizes of the free variables a subtree carries down.
 - **Collapse and scoring price an edge differently.** Collapse picks a
   child's language with `boundary` (`cost`, `chooseLanguage`, `holding`,
-  `holdingLang`), scoring arguments with `crossScore`; once the payload term
-  is non-zero the DP is no longer exact.
+  `holdingLang`), scoring arguments with `crossScore`. The two agree while
+  a crossing costs its latency only; they part once COST-3's payload term
+  is built (deferred 2026-10-25).
 - **A function argument is priced by where it is called, so a term
   with both morloc and sourced implementations prices it twice for the
   morloc one.** [read, 2026-10-24] The `AppS` clause of `scoreExpr` leaves
@@ -43,11 +42,25 @@ reproduced]
   implementation that is functional data (`handleOne`) and the language of
   a named lambda (`pinNamedLambda`), each by its own rule. One predicate
   both consult would keep them from drifting apart.
-- **Merging two signatures keeps only the first one's docstrings.**
-  `mergeEdocs x _ = x` (Frontend/Merge.hs ~83-84) and `weaveTermTypes`
-  (~61-64): a directive on the second signature of one term is dropped,
-  depending on order. Affects any directive, cost directives included
-  (COST-8 requires both sets kept).
+- **The placement collapse builds does not always cost the least the scorer
+  found.** [reproduced, 2026-10-25] Violates COST-11. `morloc typecheck -v
+  --realize` rescores the built placement and lists a difference; 31 of
+  1335 golden programs differ. Seen: a lambda built in its parent's
+  language around a body in another (closure-conformance, deep-crosspool-
+  r-rust, let-captured-by-closure, recursion-crosspool-*, records-*,
+  string-encoding-utf8, uint8-cross-language), the extra crossings counted
+  at a callback's call count; function values in a container placed with
+  the container (functional-data-1: `funf`, `fung`); a sourced call left in
+  a lambda's language rather than the scorer's (nested-closure-crossing,
+  `pyHofRustArg`, 3 crossings built against 1); a recursive call forced to
+  its definition's language (recursion-crosspool-io-tuple, crosspool-
+  mutual-tail-loop), which COST-11 allows but the check does not yet
+  exempt; and a built placement cheaper than the least found
+  (recursion-crosspool-mutual, recursion-crosspool-mutual-list), where the
+  scorer overprices mutual recursion. Not yet classified: errors,
+  packets-interop, spec-eff-8-1,
+  py-numpy-view-lifetime, remote-streaming-consolidated,
+  shared-specialization (main-mixed), spec-cost-12-1, spec-newt-7-8.
 - **The cost model is partly implemented.** [read, 2026-10-24] Scores are
   seconds: a call costs its language's coefficient times its self time
   (`@selftime` on its signature or `source` block item, else 1 us) plus

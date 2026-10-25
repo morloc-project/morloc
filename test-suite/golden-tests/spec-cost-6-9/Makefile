@@ -6,6 +6,7 @@ all:
 	./nexus byPlain 1 >> obs.txt
 	./nexus byParen 1 >> obs.txt
 	./nexus byItem 1 >> obs.txt
+	if morloc typecheck -v --realize main.loc > check.err 2> /dev/null && ! grep -q 'cost check' check.err; then echo "OK: built placement costs the least" >> obs.txt; else echo "UNEXPECTED: built placement does not cost the least found" >> obs.txt; fi
 
 clean:
 	rm -rf nexus pools __pycache__

@@ -40,6 +40,29 @@ import qualified Morloc.TypeEval as TE
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.CodeGenerator.Infer as Infer
 
+-- | How the placement listing names a node that has no name of its own.
+nodeKind :: ExprS g f c -> MT.Text
+nodeKind e = case e of
+  AppS {} -> "application"
+  LamS {} -> "lambda"
+  LstS {} -> "list"
+  TupS {} -> "tuple"
+  NamS {} -> "record"
+  ConS _ n _ _ -> n
+  LetS {} -> "let"
+  IfS {} -> "if"
+  DoBlockS {} -> "do"
+  EvalS {} -> "eval"
+  CoerceS {} -> "cast"
+  IntrinsicS {} -> "intrinsic"
+  LabelS {} -> "label"
+  VarS v _ -> unEVar (displayName v)
+  BndS v -> unEVar (displayName v)
+  LetBndS v -> unEVar (displayName v)
+  CallS v -> "call " <> unEVar (displayName v)
+  ExeS (SrcCall src) -> unEVar (displayName (srcAlias src))
+  _ -> "value"
+
 -- | One line per named call of a realized tree, its arguments and body
 -- indented beneath it, with its language. @*@ marks a node in another
 -- language than its parent: a crossing. An unnamed node is listed only
@@ -55,7 +78,7 @@ placementLines = go 0 Nothing
       CallS v -> [entry ("call " <> name v)]
       LetBndS v | moved -> [entry (name v)]
       BndS v | moved -> [entry (name v)]
-      _ | moved -> entry ("(" <> kind e <> ")") : below (children e)
+      _ | moved -> entry ("(" <> nodeKind e <> ")") : below (children e)
       _ -> concatMap (go depth (Just lang)) (children e)
       where
         moved = maybe False (/= lang) parent
@@ -65,23 +88,6 @@ placementLines = go 0 Nothing
         name = unEVar . displayName
 
     children = foldExprS (: [])
-
-    kind :: ExprS g f c -> MT.Text
-    kind e = case e of
-      AppS {} -> "application"
-      LamS {} -> "lambda"
-      LstS {} -> "list"
-      TupS {} -> "tuple"
-      NamS {} -> "record"
-      ConS _ n _ _ -> n
-      LetS {} -> "let"
-      IfS {} -> "if"
-      DoBlockS {} -> "do"
-      EvalS {} -> "eval"
-      CoerceS {} -> "cast"
-      IntrinsicS {} -> "intrinsic"
-      LabelS {} -> "label"
-      _ -> "value"
 
     callName :: AnnoS g One c -> Maybe EVar
     callName (AnnoS _ _ (VarS v _)) = Just v
@@ -152,8 +158,8 @@ realityCheck es = do
   rASTs1 <- extractRecursiveHelpers rASTs0
   wanted <- MM.gets statePlacement
   case wanted of
-    Just _ -> do
-      let placement = concatMap placementLines rASTs1
+    Just checks -> do
+      let placement = concatMap placementLines rASTs1 <> checks
       sum (map MT.length placement) `seq` MM.modify (\st -> st {statePlacement = Just placement})
     Nothing -> return ()
 
@@ -337,6 +343,10 @@ data RState = RState
   -- | A let-bound variable: the table of a reference to it when its value
   -- is or holds a function, 'Nothing' for data, whose references are free.
   , rLetVars :: Map EVar (Maybe [(Lang, Score)])
+  -- | When rescoring a placement collapse built: the language of every node
+  -- it kept ('Nothing' for a language-free one), so each table is cut to
+  -- the choice made and each term to the implementation chosen.
+  , rForced :: Maybe (Map Int (Maybe Lang))
   }
 
 emptyRState =
@@ -345,6 +355,7 @@ emptyRState =
     , rApplied = []
     , rBndVars = Map.empty
     , rLetVars = Map.empty
+    , rForced = Nothing
     }
 
 
@@ -507,16 +518,66 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
   let sp = stagePoints s0
   s0' <- normalizePop1 (`Map.lookup` sp) s0
   scored <- scoreAnnoS emptyRState {rLangs = seedLangs} s0'
-  return (scored, finish scored)
+  return (scored, finish s0' scored)
   where
-    finish scored ctx = do
+    finish s0' scored ctx = do
       e@(AnnoS g li x) <- collapseAnnoS [] ctx scored
+      checkPlacement s0' scored ctx e
       case (li, ctx) of
         -- language-free code used from a pool runs in that pool, as it
         -- would inlined there
         (Idx i Nothing, Just l) -> propagateDown (AnnoS g (Idx i (Just l)) x) |>> Right
         (Idx _ Nothing, Nothing) -> makeGAST e |>> Left
         _ -> propagateDown e |>> Right
+
+    -- COST-11: the placement collapse built costs what the scorer found
+    -- least. When the placement listing is wanted with verbosity, the tree is
+    -- scored again with every node cut to its chosen language and
+    -- implementation, and a difference is listed with the placement.
+    checkPlacement s0' scored ctx e = do
+      wanted <- MM.gets statePlacement
+      verbosity <- MM.gets stateVerbosity
+      case wanted of
+        Just prior | verbosity > 0 -> do
+          -- a node collapsed at two sites into different languages is
+          -- left unforced
+          let kept = Map.fromListWith (\a b -> if a == b then a else Nothing) [(i, l) | Idx i l <- collectIdx e]
+          rescored <- scoreAnnoS emptyRState {rLangs = seedLangs, rForced = Just kept} s0'
+          let best tbl = case (ctx, tbl) of
+                (_, []) -> Nothing
+                (Just l, _) -> Just (reachFrom l tbl)
+                (Nothing, _) -> Just (minimum (map snd tbl))
+              optimum = best (scoresOf scored)
+              built = best (scoresOf rescored)
+              AnnoS _ _ rootExpr = s0'
+              site = nodeKind rootExpr <> maybe "" (\l -> " used from " <> render (pretty l)) ctx
+          when (optimum /= built) $
+            MM.modify $ \st ->
+              st { statePlacement = Just (prior <> ["cost check failed for " <> site
+                     <> ": built " <> renderScore built <> ", least " <> renderScore optimum
+                     <> offenders kept scored]) }
+        _ -> return ()
+
+    -- the nodes collapse put in a language their table does not offer
+    offenders :: Map Int (Maybe Lang) -> AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) -> MT.Text
+    offenders kept t = case take 3 (go t) of
+      [] -> ""
+      xs -> "; off-table: " <> MT.intercalate ", " xs
+      where
+        go :: AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) -> [MT.Text]
+        go (AnnoS _ (Idx i tbl) ex) =
+          [ nodeKind ex <> " in " <> render (pretty l) <> " not " <> render (pretty (map fst tbl))
+          | Just (Just l) <- [Map.lookup i kept], not (null tbl), l `notElem` map fst tbl
+          ] <> concat (foldExprS (\y -> [go y]) ex)
+
+    renderScore :: Maybe Score -> MT.Text
+    renderScore Nothing = "nothing"
+    renderScore (Just (Score t c w))
+      | t >= unrealizable = "unrealizable"
+      | otherwise = MT.pack (show t) <> " ps, " <> MT.pack (show c) <> " crossings, " <> MT.pack (show w) <> " switches"
+
+    collectIdx :: AnnoS g One c -> [c]
+    collectIdx (AnnoS _ c ex) = c : concat (foldExprS (\y -> [collectIdx y]) ex)
 
     -- \| Depth first pass calculating scores for each language. Alternates with
     -- scoresSExpr.
@@ -532,7 +593,19 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
       -- An operation that belongs to no language runs where its context
       -- puts it, but only in a language that can hold what it computes.
       table' <- maybe (return table) (\(j, ts) -> holding j ts table) (heldTypes gidx e t)
-      return $ AnnoS gi (Idx ci' table') e'
+      return $ AnnoS gi (Idx ci' (forcedTable rstat ci' table')) e'
+
+    -- A table cut to the language collapse chose for its node, when
+    -- rescoring. A choice the table does not offer (a lambda built in its
+    -- parent's language around a body placed elsewhere) costs reaching the
+    -- table from there.
+    forcedTable :: RState -> Int -> [(Lang, Score)] -> [(Lang, Score)]
+    forcedTable _ _ [] = []
+    forcedTable rstat i table = case rForced rstat >>= Map.lookup i of
+      Just (Just l) -> case [x | x@(l', _) <- table, l' == l] of
+        [] -> [(l, reachFrom l table)]
+        kept -> kept
+      _ -> table
 
     -- The languages of @table@ that can hold values of types @ts@ (codegen
     -- finds each a concrete type there). When none of them can, the
@@ -810,9 +883,9 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
 
     updateRState :: [EVar] -> RState -> RState
     updateRState [] rstat = rstat
-    updateRState vs rstat@(RState _ [] bound _) =
+    updateRState vs rstat@(RState _ [] bound _ _) =
       rstat {rBndVars = foldr Map.delete bound vs}
-    updateRState (v : vs) rstat@(RState _ ((t, table) : ps) bound _) =
+    updateRState (v : vs) rstat@(RState _ ((t, table) : ps) bound _ _) =
       updateRState vs $
         rstat
           { rApplied = ps
@@ -864,7 +937,13 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
       RState ->
       [AnnoS (Indexed Type) Many Int] ->
       MorlocMonad ([AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])], [(Lang, Score)])
-    scoreAlternatives v rstat xs0 = do
+    scoreAlternatives v rstat xs00 = do
+      -- rescoring a placement keeps only the implementation collapse chose
+      xs0 <- case rForced rstat of
+        Nothing -> return xs00
+        Just kept -> case [x | x@(AnnoS _ j _) <- xs00, Map.member j kept] of
+          [] -> MM.throwCompilerBug $ "rescoring a placement: no implementation of" <+> pretty v <+> "was built"
+          chosen -> return chosen
       xs1 <- mapM (fmap repeated . scoreAnnoS rstat) xs0
       let pairs = minPairs (concat [xs' | (AnnoS _ (Idx _ xs') _) <- xs1])
       return (xs1, [(l1, reachFrom l1 pairs) | l1 <- unique (map fst pairs)])
