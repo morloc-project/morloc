@@ -26,7 +26,7 @@ module Morloc.Frontend.Desugar
 
 import qualified Control.Monad.State.Strict as State
 import qualified Data.Map.Strict as Map
-import Morloc.Cost.Formula (Formula, dimOf, evalFormula, formulaNames, parseFormula, renderDim, time)
+import Morloc.Cost.Formula (Dim, Formula, dimOf, evalFormula, formulaNames, parseFormula, plain, renderDim, time)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -386,7 +386,7 @@ argDocDirectiveKeys =
   , "arg", "true", "false", "return"
   , "source", "form", "check.<kind>"
   , "list.source", "list.form", "list.check.<kind>"
-  , "with", "render", "parse", "mime", "epilogue", "selftime"
+  , "with", "render", "parse", "mime", "epilogue", "selftime", "calls"
   ]
 
 -- | Parse and lightly validate a media type (RFC 6838 `type/subtype`, e.g.
@@ -799,6 +799,9 @@ processArgDocLines = finalize . foldl step ([], [], defaultValue, Nothing)
         ["selftime"] -> case parseSelftime v of
           Left e -> (errs <> [e], ws, d)
           Right f -> (errs, ws, d {docSelftime = Just f})
+        ["calls"] -> case parseCalls v of
+          Left e -> (errs <> [e], ws, d)
+          Right f -> (errs, ws, d {docCalls = Just f})
         ["literal"] ->
           let parsed = parseDocBool v
               warn =
@@ -930,23 +933,39 @@ applySourceDocs lns src = foldl step ([], [], src) lns
         "selftime" -> case parseSelftime v of
           Left e -> (errs <> [e], ws, s)
           Right f -> (errs, ws, s {srcSelftime = Just f})
+        "calls" ->
+          ( errs
+              <> [ "`@calls` states how often a sourced function calls one of its arguments: "
+                     <> "it is allowed only above a function or suspension argument of a signature (COST-6)"
+                 ]
+          , ws
+          , s
+          )
         _ ->
           let w = unknownDirectiveWarning sourceDocDirectiveKeys k line
            in (errs, ws <> w, s {srcNote = srcNote s <> [docDescLine line]})
 
+-- | Parse a `calls` value: a formula that is a plain number (COST-7).
+parseCalls :: Text -> Either Text Formula
+parseCalls = parseConstFormula "calls" plain
+
 -- | Parse a `selftime` value: a formula whose dimension is a time (COST-7).
--- No directive yet introduces a name (`@dimension`), so a name is an error,
--- and the formula is a constant that must have a value.
 parseSelftime :: Text -> Either Text Formula
-parseSelftime v = do
-  f <- either (\e -> Left ("selftime: " <> e)) Right (parseFormula v)
-  d <- either (\e -> Left ("selftime: " <> e)) Right (dimOf f)
-  if d /= time
-    then Left ("selftime: the formula '" <> v <> "' is " <> renderDim d <> ", not a time")
+parseSelftime = parseConstFormula "selftime" time
+
+-- | A formula of the given dimension. No directive yet introduces a name
+-- (`@dimension`), so a name is an error, and the formula is a constant that
+-- must have a value.
+parseConstFormula :: Text -> Dim -> Text -> Either Text Formula
+parseConstFormula key want v = do
+  f <- either (\e -> Left (key <> ": " <> e)) Right (parseFormula v)
+  d <- either (\e -> Left (key <> ": " <> e)) Right (dimOf f)
+  if d /= want
+    then Left (key <> ": the formula '" <> v <> "' is " <> renderDim d <> ", not " <> renderDim want)
     else case formulaNames f of
-      (n : _) -> Left ("selftime: '" <> n <> "' is not introduced by a `@dimension` of the signature")
+      (n : _) -> Left (key <> ": '" <> n <> "' is not introduced by a `@dimension` of the signature")
       [] -> case evalFormula (const 0) f of
-        Nothing -> Left ("selftime: the formula '" <> v <> "' has no value (it is negative or infinite)")
+        Nothing -> Left (key <> ": the formula '" <> v <> "' has no value (it is negative or infinite)")
         Just _ -> Right f
 
 -- | Parse an `rsize` value: one or more positive integers separated by
@@ -978,7 +997,22 @@ parseRsize v =
 -- malformed (e.g. a short-option char that isn't a letter).
 processArgDocLinesD :: Pos -> [Text] -> D ArgDocVars
 processArgDocLinesD pos ls = do
-  v <- processSigDocLinesD pos ls
+  v <- processParamDocLinesD pos ls
+  rejectCallsHere pos v
+  return v
+
+
+rejectCallsHere :: Pos -> ArgDocVars -> D ()
+rejectCallsHere pos v = case docCalls v of
+  Nothing -> return ()
+  Just _ ->
+    dfail pos
+      "`@calls` states how often a sourced function calls one of its arguments: it is allowed only above a function or suspension argument of a signature (COST-6)"
+
+-- | Argument docstring lines, which may not state `@selftime`.
+processParamDocLinesD :: Pos -> [Text] -> D ArgDocVars
+processParamDocLinesD pos ls = do
+  v <- docLinesD pos ls
   case docSelftime v of
     Nothing -> return v
     Just _ ->
@@ -989,6 +1023,13 @@ processArgDocLinesD pos ls = do
 -- docstring that may state `@selftime`.
 processSigDocLinesD :: Pos -> [Text] -> D ArgDocVars
 processSigDocLinesD pos ls = do
+  v <- docLinesD pos ls
+  rejectCallsHere pos v
+  return v
+
+-- | Docstring lines, with no check of where a directive is allowed.
+docLinesD :: Pos -> [Text] -> D ArgDocVars
+docLinesD pos ls = do
   let (errs, ws, v) = processArgDocLines ls
   dwarn ws
   case errs of
@@ -1479,13 +1520,22 @@ argsToType ts = FunU (map snd (init ts)) (snd (last ts))
 desugarSigType :: Pos -> CstSigType -> D ([Constraint], [ArgDocVars], TypeU)
 desugarSigType _pos (CstSigType (Just constraintArgs) args) = do
   cs <- extractConstraints (argsToType constraintArgs)
-  argDocsWithPos <- mapM (\(p, _) -> (,) p <$> lookupDocsAt p) args
-  argDocVars <- mapM (\(p, ls) -> processArgDocLinesD p ls) argDocsWithPos
+  argDocVars <- sigArgDocs args
   return (cs, argDocVars, argsToType args)
 desugarSigType _pos (CstSigType Nothing args) = do
-  argDocsWithPos <- mapM (\(p, _) -> (,) p <$> lookupDocsAt p) args
-  argDocVars <- mapM (\(p, ls) -> processArgDocLinesD p ls) argDocsWithPos
+  argDocVars <- sigArgDocs args
   return ([], argDocVars, argsToType args)
+
+-- | The docstrings of a signature's arguments and, last, its result, which
+-- may not state `@calls`. Whether an argument's type allows `@calls` is
+-- checked once aliases are expanded (Restructure).
+sigArgDocs :: [(Pos, TypeU)] -> D [ArgDocVars]
+sigArgDocs args = do
+  let n = length args
+  sequence
+    [ lookupDocsAt p >>= if k == n then processArgDocLinesD p else processParamDocLinesD p
+    | (k, (p, _)) <- zip [1 :: Int ..] args
+    ]
 
 
 resolveSourceFile :: Maybe Path -> Maybe Text -> Maybe Path

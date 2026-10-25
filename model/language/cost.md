@@ -110,11 +110,15 @@ Sizes are language independent.
 
 ### COST-6 `@calls` and `@selftime` state counts and times
 Intent: ruled 2026-10-16
-Tests: spec-cost-6-1, spec-cost-6-2, spec-cost-6-3, spec-cost-6-4, spec-cost-6-5, spec-cost-6-6, spec-cost-6-7, spec-cost-6-8, spec-cost-6-9, spec-cost-6-10, spec-cost-6-11, spec-cost-6-12, spec-cost-6-13, spec-cost-6-14
+Tests: spec-cost-6-1, spec-cost-6-2, spec-cost-6-3, spec-cost-6-4, spec-cost-6-5, spec-cost-6-6, spec-cost-6-7, spec-cost-6-8, spec-cost-6-9, spec-cost-6-10, spec-cost-6-11, spec-cost-6-12, spec-cost-6-13, spec-cost-6-14, spec-cost-6-15, spec-cost-6-16, spec-cost-6-17, spec-cost-6-18, spec-cost-6-19, spec-cost-6-20, spec-cost-6-21, spec-cost-6-22, spec-cost-6-23, spec-cost-6-24, spec-cost-6-25, spec-cost-6-26, spec-cost-6-27
 Code: deviates (../compiler/issues/realization.md)
 
-Above a function-typed or suspension-typed argument, `@calls <formula>`
-states how many times a sourced implementation calls it. Above a
+Above a function-typed or suspension-typed argument of a signature,
+`@calls <formula>` states how many times a sourced implementation calls it
+per call, rounded up to a whole number; where a call's implementations
+differ, the largest count is used, one whose signature states none counting
+the default (COST-4). Anywhere else, and above an argument that is not a
+function or a suspension once aliases are expanded, it is an error. Above a
 signature, `@selftime <formula>` states the self time (COST-2) of every
 sourced implementation that states none of its own. Above an item of a
 `source` block or list (DOC-1), `@selftime <formula>` states that

@@ -1,0 +1,43 @@
+-- `@calls` above a function argument of a signature states how many times
+-- a sourced implementation calls it per call (COST-6), in place of the
+-- default 1000 (COST-4). The fold and the addition exist in Python and C++,
+-- and the sum goes to Python. `foldOften` states nothing, so its callback
+-- is priced as 1000 calls and the fold runs in C++ beside it; `foldOnce`
+-- states one call, so the fold stays in Python beside its consumer. The
+-- placement listing of `morloc typecheck --realize` is the output; the run
+-- checks the program still computes.
+
+--' Callback counts stated per argument
+module main (often, once)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("left_fold" as foldOften, "left_fold" as foldOnce, "plus" as add, "show")
+source Cpp from "f.hpp" ("left_fold" as foldOften, "left_fold" as foldOnce, "plus" as add)
+
+--' Combine a list from the left
+foldOften :: (b -> a -> b) -> b -> [a] -> b
+
+--' Combine a list from the left, calling the function once
+foldOnce ::
+  --' The combining function
+  --' @calls 1
+  (b -> a -> b) ->
+  b ->
+  [a] ->
+  b
+
+--' Add two integers
+add :: Int -> Int -> Int
+
+--' Render an integer
+show :: Int -> Str
+
+--' Sum a list with the default callback count
+often :: [Int] -> Str
+often xs = show (foldOften add 0 xs)
+
+--' Sum a list with a stated callback count
+once :: [Int] -> Str
+once xs = show (foldOnce add 0 xs)

@@ -195,7 +195,9 @@ expandStructuralTypes d = do
     expandModule sc e = do
       e' <- AST.mapTypeInExprI (expandStructuralAliases sc) (writtenAliasDocs sc e)
       checkExpandable sc e'
-      return (expandClassSigs sc e')
+      let e'' = expandClassSigs sc e'
+      checkCallsPositions e''
+      return e''
 
     -- DOC-3: a function, effect or optional alias carries its docstring
     -- where a signature names it, and the expansion drops the name.
@@ -245,6 +247,34 @@ expandStructuralTypes d = do
       et { etype = expandStructuralAliases sc (etype et)
          , econs = Set.map (AST.mapConstraint (expandStructuralAliases sc)) (econs et)
          }
+
+    -- COST-6: `@calls` is stated only above an argument that is a function or
+    -- a suspension, which an alias of one is by now.
+    checkCallsPositions :: ExprI -> MorlocMonad ()
+    checkCallsPositions = AST.checkExprI $ \e -> case e of
+      ExprI i (SigE (Signature v _ et)) -> checkSig i v et
+      ExprI i (ClsE (Typeclass _ _ _ sigs)) -> mapM_ (\(Signature v _ et) -> checkSig i v et) sigs
+      _ -> return ()
+      where
+        checkSig :: Int -> EVar -> EType -> MorlocMonad ()
+        checkSig i v et = case (edocs et, unforall (etype et)) of
+          (ArgDocSig _ args _, FunU ts _) ->
+            sequence_
+              [ MM.throwSourcedError i $
+                  "`@calls` is stated above argument" <+> pretty k <+> "of" <+> squotes (pretty v)
+                    <> ", whose type" <+> squotes (pretty t)
+                    <+> "is neither a function nor a suspension (COST-6)"
+              | (k, t, d) <- zip3 [1 :: Int ..] ts args
+              , isJust (docCalls d)
+              , not (callable t)
+              ]
+          (ArgDocSig _ args _, _) | any (isJust . docCalls) args ->
+            MM.throwCompilerBugAt i "argument docstrings on a signature with no arguments"
+          _ -> return ()
+        callable (FunU _ _) = True
+        callable (EffectU _ _) = True
+        callable (ForallU _ t) = callable t
+        callable _ = False
 
     -- An alias left in an expanded typedef names an arrow, effect or optional
     -- type through itself, which has no finite expansion.

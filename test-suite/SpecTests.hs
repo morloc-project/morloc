@@ -1767,6 +1767,229 @@ lexTests =
         f x = g (h x)
         |]
     , accept
+        "spec-cost-6-16"
+        [r|
+        module main (f)
+        source Py from "f.py" ("fold")
+        --' Fold a list
+        fold ::
+          --' The function
+          --' @calls 2 * 3
+          (Int -> Int -> Int) ->
+          Int ->
+          --' The list
+          [Int] ->
+          --' The result
+          Int
+        add :: Int -> Int -> Int
+        f :: [Int] -> Int
+        f xs = fold add 0 xs
+        |]
+    , reject
+        "spec-cost-6-17"
+        [r|
+        module main (f)
+        source Py from "f.py" ("fold")
+        --' Fold a list
+        fold ::
+          --' The function
+          --' @calls 1us
+          (Int -> Int -> Int) ->
+          Int ->
+          --' The list
+          [Int] ->
+          --' The result
+          Int
+        add :: Int -> Int -> Int
+        f :: [Int] -> Int
+        f xs = fold add 0 xs
+        |]
+    , reject
+        "spec-cost-6-18"
+        [r|
+        module main (f)
+        source Py from "f.py" ("fold")
+        --' Fold a list
+        fold ::
+          --' The function
+          --' @calls n
+          (Int -> Int -> Int) ->
+          Int ->
+          --' The list
+          [Int] ->
+          --' The result
+          Int
+        add :: Int -> Int -> Int
+        f :: [Int] -> Int
+        f xs = fold add 0 xs
+        |]
+    , reject
+        "spec-cost-6-19"
+        [r|
+        module main (f)
+        source Py from "f.py" ("fold")
+        --' Fold a list
+        fold ::
+          --' The function
+          --' @calls 1 - 2
+          (Int -> Int -> Int) ->
+          Int ->
+          --' The list
+          [Int] ->
+          --' The result
+          Int
+        add :: Int -> Int -> Int
+        f :: [Int] -> Int
+        f xs = fold add 0 xs
+        |]
+    , reject
+        "spec-cost-6-20"
+        [r|
+        module main (f)
+        source Py from "f.py" ("fold")
+        --' Fold a list
+        --' @calls 2
+        fold ::
+          --' The function
+          (Int -> Int -> Int) ->
+          Int ->
+          --' The list
+          [Int] ->
+          --' The result
+          Int
+        add :: Int -> Int -> Int
+        f :: [Int] -> Int
+        f xs = fold add 0 xs
+        |]
+    , reject
+        "spec-cost-6-21"
+        [r|
+        module main (f)
+        source Py from "f.py" ("fold")
+        --' Fold a list
+        fold ::
+          --' The function
+          (Int -> Int -> Int) ->
+          Int ->
+          --' The list
+          [Int] ->
+          --' The result
+          --' @calls 2
+          Int
+        add :: Int -> Int -> Int
+        f :: [Int] -> Int
+        f xs = fold add 0 xs
+        |]
+    , reject
+        "spec-cost-6-22"
+        [r|
+        module main (f)
+        source Py from "f.py" ("fold")
+        --' Fold a list
+        fold ::
+          --' The function
+          (Int -> Int -> Int) ->
+          Int ->
+          --' The list
+          --' @calls 2
+          [Int] ->
+          --' The result
+          Int
+        add :: Int -> Int -> Int
+        f :: [Int] -> Int
+        f xs = fold add 0 xs
+        |]
+    , accept
+        "spec-cost-6-23"
+        [r|
+        module main (f)
+        source Py from "f.py" ("fold")
+        type Seed = Int
+        type Step = Int -> Int -> Int
+        --' Fold a list
+        fold ::
+          (Int -> Int -> Int) ->
+          --' The seed or step
+          --' @calls 2
+          Step ->
+          [Int] ->
+          Int
+        add :: Int -> Int -> Int
+        f :: [Int] -> Int
+        f xs = 0
+        |]
+    , rejectUser
+        "spec-cost-6-24"
+        [r|
+        module main (f)
+        source Py from "f.py" ("fold")
+        type Seed = Int
+        type Step = Int -> Int -> Int
+        --' Fold a list
+        fold ::
+          (Int -> Int -> Int) ->
+          --' The seed or step
+          --' @calls 2
+          Seed ->
+          [Int] ->
+          Int
+        add :: Int -> Int -> Int
+        f :: [Int] -> Int
+        f xs = 0
+        |]
+    , rejectUser
+        "spec-cost-6-25"
+        [r|
+        module main (f)
+        source Py from "f.py" ("fold")
+        type Seed = Int
+        type Step = Int -> Int -> Int
+        --' Fold a list
+        fold ::
+          (Int -> Int -> Int) ->
+          --' The seed or step
+          --' @calls 2
+          Int ->
+          [Int] ->
+          Int
+        add :: Int -> Int -> Int
+        f :: [Int] -> Int
+        f xs = 0
+        |]
+    , rejectUser
+        "spec-cost-6-26"
+        [r|
+        module main (f)
+        source Py from "f.py" ("fold")
+        type Seed = Int
+        type Step = Int -> Int -> Int
+        --' Fold a list
+        fold ::
+          (Int -> Int -> Int) ->
+          --' The seed or step
+          --' @calls 2
+          a ->
+          [Int] ->
+          Int
+        add :: Int -> Int -> Int
+        f :: [Int] -> Int
+        f xs = 0
+        |]
+    , reject
+        "spec-cost-6-27"
+        [r|
+        module main (f)
+        source Py from "f.py"
+          ( "plus" as add
+          --' @calls 2
+          , "fold"
+          )
+        fold :: (Int -> Int -> Int) -> Int -> [Int] -> Int
+        add :: Int -> Int -> Int
+        f :: [Int] -> Int
+        f xs = fold add 0 xs
+        |]
+    , accept
         "spec-cost-6-10"
         [r|
         module main (f)

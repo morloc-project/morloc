@@ -857,6 +857,9 @@ data ArgDocVars = ArgDocVars
   , docSelftime :: Maybe Formula
     -- ^ `@selftime` above a signature: the self time of each sourced
     -- implementation that states none of its own (COST-6)
+  , docCalls :: Maybe Formula
+    -- ^ `@calls` above a function or suspension argument of a signature: how
+    -- many times a sourced implementation calls it (COST-6)
   }
   deriving (Show, Ord, Eq)
 
@@ -888,6 +891,7 @@ inheritArgDocVars r1 r2 =
     , docMime = docMime r1 <|> docMime r2
     , docEpilogues = if null (docEpilogues r1) then docEpilogues r2 else docEpilogues r1
     , docSelftime = docSelftime r1 <|> docSelftime r2
+    , docCalls = docCalls r1 <|> docCalls r2
     }
 
 data ArgDoc
@@ -956,6 +960,7 @@ instance Defaultable ArgDocVars where
       , docMime = Nothing
       , docEpilogues = []
       , docSelftime = Nothing
+      , docCalls = Nothing
       }
 
 instance Typelike Type where

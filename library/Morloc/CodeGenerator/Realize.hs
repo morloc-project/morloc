@@ -95,24 +95,31 @@ placementLines = go 0 Nothing
     definition' (AnnoS _ _ (ExeS _)) = []
     definition' body = [body]
 
--- | The `@selftime` of the signature each sourced function implements
--- (COST-6).
-signatureSelftimes :: MorlocMonad (Map Source Formula)
-signatureSelftimes = do
+-- | The cost directives of the signatures sourced functions implement
+-- (COST-6): each one's `@selftime`, and the `@calls` of each argument.
+data SigCosts = SigCosts
+  { sigSelftimes :: Map Source Formula
+  , sigCalls :: Map Source [Maybe Formula]
+  }
+
+signatureCosts :: MorlocMonad SigCosts
+signatureCosts = do
   sigs <- GMap.elems <$> MM.gets stateSignatures
+  let implemented' = concatMap implemented sigs
   return $
-    Map.fromList
-      [ (src, f)
-      | (e, srcs) <- concatMap implemented sigs
-      , Just f <- [termSelftime e]
-      , src <- srcs
-      ]
+    SigCosts
+      { sigSelftimes = Map.fromList [(src, f) | (e, srcs) <- implemented', Just f <- [termSelftime e], src <- srcs]
+      , sigCalls = Map.fromList [(src, cs) | (e, srcs) <- implemented', Just cs <- [termCalls e], src <- srcs]
+      }
   where
     implemented (Monomorphic (TermTypes (Just e) srcs _)) = [(e, [s | (_, Idx _ s) <- srcs])]
     implemented (Polymorphic _ _ e ts) = [(e, [s | t <- ts, (_, Idx _ s) <- termConcrete t])]
     implemented _ = []
     termSelftime e = case edocs e of
       ArgDocSig d _ _ -> docSelftime d
+      _ -> Nothing
+    termCalls e = case edocs e of
+      ArgDocSig _ args _ | any (isJust . docCalls) args -> Just (map docCalls args)
       _ -> Nothing
 
 realityCheck ::
@@ -129,12 +136,12 @@ realityCheck es = do
       (specs, roots) = List.partition isSpec es
   -- shared specializations first, each scored once, in the order their uses
   -- need them (a specialization's own shared references come before it)
-  selftimes <- signatureSelftimes
-  (tables, finishers) <- foldM (scoreSpec selftimes) (Map.empty, Map.empty) specs
+  costs <- signatureCosts
+  (tables, finishers) <- foldM (scoreSpec costs) (Map.empty, Map.empty) specs
   -- select a single instance at each node of each exported tree, and
   -- separate unrealized (general) trees from realized ones
   (gASTs0, rASTs00) <-
-    mapM (\e -> realize selftimes tables e >>= \(_, finish) -> finish Nothing) roots
+    mapM (\e -> realize costs tables e >>= \(_, finish) -> finish Nothing) roots
       |>> partitionEithers
   rASTs0 <- realizeDemanded finishers rASTs00
   let takesFunction = Set.fromList [v | AnnoS (Idx _ (FunT ts _)) _ (VarS v _) <- specs, any containsFunT ts]
@@ -170,12 +177,12 @@ type Finisher =
 
 -- | Score a shared specialization once: its table serves every use.
 scoreSpec ::
-  Map Source Formula ->
+  SigCosts ->
   (Map EVar [(Lang, Score)], Map EVar Finisher) ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Map EVar [(Lang, Score)], Map EVar Finisher)
-scoreSpec selftimes (tables, finishers) spec@(AnnoS _ _ (VarS v _)) = do
-  (AnnoS _ (Idx _ scores) _, finish) <- realize selftimes tables spec
+scoreSpec costs (tables, finishers) spec@(AnnoS _ _ (VarS v _)) = do
+  (AnnoS _ (Idx _ scores) _, finish) <- realize costs tables spec
   return (Map.insert v scores tables, Map.insert v finish finishers)
 scoreSpec _ acc _ = return acc
 
@@ -446,11 +453,11 @@ also need benchmarking data from all the implementations and possibly
 statistical info describing inputs.
 -}
 realize ::
-  Map Source Formula ->
+  SigCosts ->
   Map EVar [(Lang, Score)] ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Scored, Finisher)
-realize selftimes tables s0 = do
+realize costs tables s0 = do
   registry <- MM.gets stateLangRegistry
   -- A term that calls nothing sourced has no language of its own and is
   -- evaluated by the nexus. That evaluator has no name to call a function
@@ -483,19 +490,19 @@ realize selftimes tables s0 = do
                 MM.throwCompilerBugAt i0 "a replay entry in a program with no pool language"
           ls -> return ls
       else return []
-  realizeWithRegistry registry selftimes tables langs s0
+  realizeWithRegistry registry costs tables langs s0
 
 -- | Score a tree, returning the scored tree and how to finish it: a shared
 -- specialization is scored once and finished once per language it is used in.
 -- @tables@ holds the score of each shared specialization a call may name.
 realizeWithRegistry ::
   LangRegistry ->
-  Map Source Formula ->
+  SigCosts ->
   Map EVar [(Lang, Score)] ->
   [Lang] ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Scored, Finisher)
-realizeWithRegistry registry selftimes tables seedLangs s0 = do
+realizeWithRegistry registry costs tables seedLangs s0 = do
   -- Normalize language-invariant (literal-lambda-head) redexes before scoring.
   let sp = stagePoints s0
   s0' <- normalizePop1 (`Map.lookup` sp) s0
@@ -618,9 +625,9 @@ realizeWithRegistry registry selftimes tables seedLangs s0 = do
       xs' <- mapM (scoreAnnoS rstat {rLangs = argLangs, rApplied = []}) xs
       let args = [(t, scoresOf x') | x'@(AnnoS (Idx _ t) _ _) <- xs']
           bound = boundArgs f
-          callsArgs = isSourcedMany f
+          srcs = headSources f
           pairss =
-            [ (if callsArgs then called else id) (kid x')
+            [ (if sourcedHead f then callCount srcs k else id) (kid x')
             | (k, x'@(AnnoS (Idx _ t) _ _)) <- zip [0 ..] xs'
             , not (k < bound && isCallableType t)
             ]
@@ -746,12 +753,48 @@ realizeWithRegistry registry selftimes tables seedLangs s0 = do
       where
         placed = filter (not . null . kidTable) kids
 
-    -- A function argument of a sourced function is called by it, by
-    -- default 'defaultCallbackCount' times per call (COST-4); a suspension
-    -- is run once.
-    called :: Kid -> Kid
-    called (Kid t@(FunT _ _) pinned _ table) = Kid t pinned defaultCallbackCount table
-    called k = k
+    -- A function argument of a sourced function is called by it as many
+    -- times per call as its `@calls` states, by default
+    -- 'defaultCallbackCount' times (COST-4); a suspension is run once unless
+    -- its `@calls` says otherwise. Where the head's implementations differ,
+    -- the largest count is used, one that states none counting the default.
+    callCount :: [Source] -> Int -> Kid -> Kid
+    callCount srcs k (Kid t pinned _ table)
+      | Just dflt <- defaultCount t =
+          Kid t pinned (maximum (dflt `ifNone` map (stated dflt) srcs)) table
+      where
+        ifNone d [] = [d]
+        ifNone _ xs = xs
+        stated dflt src = fromMaybe dflt $ do
+          cs <- Map.lookup src (sigCalls costs)
+          fm <- join (lookup k (zip [0 ..] cs))
+          n <- evalFormula unboundName fm
+          return (ceiling (min 1e15 n))
+    callCount _ _ kd = kd
+
+    defaultCount :: Type -> Maybe Int
+    defaultCount (FunT _ _) = Just defaultCallbackCount
+    defaultCount (EffectT _ _) = Just 1
+    defaultCount _ = Nothing
+
+    -- The head of an application is sourced in every implementation, seen
+    -- through labels and casts.
+    sourcedHead :: AnnoS (Indexed Type) Many c -> Bool
+    sourcedHead (AnnoS _ _ e) = case e of
+      ExeS (SrcCall _) -> True
+      VarS _ (Many xs@(_ : _)) -> all sourcedHead xs
+      LabelS _ x -> sourcedHead x
+      CoerceS _ x -> sourcedHead x
+      _ -> False
+
+    -- The sources of a head's implementations.
+    headSources :: AnnoS (Indexed Type) Many c -> [Source]
+    headSources (AnnoS _ _ e) = case e of
+      ExeS (SrcCall src) -> [src]
+      VarS _ (Many ys) -> concatMap headSources ys
+      LabelS _ x -> headSources x
+      CoerceS _ x -> headSources x
+      _ -> []
 
     -- A child scored, for its parent to reach.
     kid :: AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) -> Kid
@@ -805,12 +848,7 @@ realizeWithRegistry registry selftimes tables seedLangs s0 = do
 
     -- The languages a head is sourced in.
     sourceLangs :: AnnoS (Indexed Type) Many c -> [Lang]
-    sourceLangs (AnnoS _ _ e) = case e of
-      ExeS (SrcCall src) -> [srcLang src]
-      VarS _ (Many ys) -> unique (concatMap sourceLangs ys)
-      LabelS _ x -> sourceLangs x
-      CoerceS _ x -> sourceLangs x
-      _ -> []
+    sourceLangs = unique . map srcLang . headSources
 
     zipLang :: Int -> RState -> Indexed [(Lang, Score)]
     zipLang i (rLangs -> langs) = Idx i (zip langs (repeat mempty))
@@ -1023,7 +1061,7 @@ realizeWithRegistry registry selftimes tables seedLangs s0 = do
         evaluated = (>>= evalFormula unboundName)
         selftimeNs =
           maybe defaultSelftimeNs (* 1e9) $
-            evaluated (srcSelftime src) <|> evaluated (Map.lookup src selftimes)
+            evaluated (srcSelftime src) <|> evaluated (Map.lookup src (sigSelftimes costs))
 
     -- The value of a name no directive binds (COST-9).
     unboundName :: MT.Text -> Double
