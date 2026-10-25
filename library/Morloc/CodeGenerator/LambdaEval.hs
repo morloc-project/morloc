@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 {- |
 Module      : Morloc.CodeGenerator.LambdaEval
@@ -122,7 +123,7 @@ import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 -- -}
 -- | Beta-reduce a tree, then give every function value the arity of its
 -- type (see 'saturate').
-applyLambdas :: Bool -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
+applyLambdas :: BuiltAt a => Bool -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
 applyLambdas ai e = reduceRoot ai e >>= saturateAt True ai
 
 -- | 'applyLambdas' for a tree that becomes a pool: each function passed to a
@@ -138,7 +139,7 @@ applyPoolLambdas e = applyLambdas False e >>= groupCallbacks
 -- the root, so work the body does before the function it returns runs once
 -- per call either way. The lambda keeps the root's index, by which the root
 -- is named, configured and called.
-reduceRoot :: Bool -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
+reduceRoot :: BuiltAt a => Bool -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
 reduceRoot ai n@(AnnoS g@(Idx gi (FunT ts r)) c e) = case e of
   ExeS _ -> reduce ai n
   CallS _ -> reduce ai n
@@ -174,10 +175,10 @@ reduceRoot ai n = reduce ai n
 -- function value is called with all of its type's arguments, so it takes
 -- them all: @\x -> e@ at @a -> b -> c@ becomes @\x w -> e w@. A lambda not at
 -- the root of its tree also gets a stage entry ('stateStageEntries').
-saturate :: Bool -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
+saturate :: BuiltAt a => Bool -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
 saturate = saturateAt False
 
-saturateAt :: Bool -> Bool -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
+saturateAt :: BuiltAt a => Bool -> Bool -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
 -- a lambda whose body is directly another lambda takes both parameter lists:
 -- nothing runs between them
 saturateAt top ai (AnnoS g c (LamS vs (AnnoS _ _ (LamS ws body)))) =
@@ -360,7 +361,7 @@ groupCallbacks = go
 
 -- | An argument to evaluate once: a value as it is, anything else reduced and
 -- bound to a fresh name, returned with its binding.
-bindArg :: Bool -> AnnoS (Indexed Type) One a -> MorlocMonad ([(EVar, AnnoS (Indexed Type) One a)], AnnoS (Indexed Type) One a)
+bindArg :: BuiltAt a => Bool -> AnnoS (Indexed Type) One a -> MorlocMonad ([(EVar, AnnoS (Indexed Type) One a)], AnnoS (Indexed Type) One a)
 bindArg ai x@(AnnoS (Idx xi xt) xc _)
   | isValue x = return ([], x)
   | otherwise = do
@@ -370,6 +371,7 @@ bindArg ai x@(AnnoS (Idx xi xt) xc _)
       return ([(v, x')], AnnoS (Idx ri xt) xc (LetBndS v))
 
 reduce ::
+  BuiltAt a =>
   -- | @alwaysInline@: on the nexus (gAST) path this is True. The pure nexus
   -- evaluator has no pool to hold a native closure and cannot serialize a
   -- function value, so every let-bound lambda MUST be inlined there,
@@ -434,11 +436,6 @@ reduce ai n@(AnnoS g c (LamS _ _))
       -- the application computes what the lambda did, and keeps its index
       -- (an export's root is named by it)
       reduce ai (AnnoS g c (AppS f pre))
-  where
-    isKnownLambda (AnnoS _ _ (LamS _ _)) = True
-    isKnownLambda (AnnoS _ _ (VarS _ (One x))) = isKnownLambda x
-    isKnownLambda (AnnoS _ _ (LabelS _ x)) = isKnownLambda x
-    isKnownLambda _ = False
 -- The same, with a function value held in a variable as the head: it is the
 -- partial application @f pre@, its arguments evaluated once, first; the pool
 -- runtime runs @f@'s stage entry when it has one ('PapplyP').
@@ -849,18 +846,50 @@ onFreeRef v act = f
 -- so callers need not branch on it. See the module header ("Substitution
 -- requires reindexing").
 substituteAnnoS ::
+  BuiltAt a =>
   EVar ->
   AnnoS (Indexed Type) One a ->
   AnnoS (Indexed Type) One a ->
   MorlocMonad (AnnoS (Indexed Type) One a)
 substituteAnnoS v r target = do
   reused <- MM.liftIO (newIORef False)
-  let place _ = do
+  let place (AnnoS _ ref _) = do
         seen <- MM.liftIO (readIORef reused)
-        if seen
+        builtAtRef ref <$> if seen
           then reindexAnnoS r
           else MM.liftIO (writeIORef reused True) >> return r
   onFreeRef v place target
+
+-- | The annotation of a value moved to a reference: its own, in the
+-- language of the reference (on a tree that has languages).
+class BuiltAt a where
+  inLanguageOf :: a -> a -> a
+
+instance BuiltAt () where
+  inLanguageOf _ _ = ()
+
+instance BuiltAt (IndexedGeneral Int Lang) where
+  inLanguageOf (Idx i _) (Idx _ l) = Idx i l
+
+-- | A lambda value is built where it appears (Realize pins it there), so one
+-- substituted at a reference takes the reference's language, as does a named
+-- function whose definition is a lambda. A source call keeps its language:
+-- it runs where it is sourced.
+builtAtRef :: BuiltAt a => a -> AnnoS g One a -> AnnoS g One a
+builtAtRef ref x@(AnnoS g c e)
+  | isKnownLambda x = AnnoS g (inLanguageOf c ref) (mapInner e)
+  | otherwise = x
+  where
+    mapInner (VarS v (One y)) = VarS v (One (builtAtRef ref y))
+    mapInner (LabelS k y) = LabelS k (builtAtRef ref y)
+    mapInner other = other
+
+-- | A lambda, possibly reached through the names and labels around it.
+isKnownLambda :: AnnoS g One c -> Bool
+isKnownLambda (AnnoS _ _ (LamS _ _)) = True
+isKnownLambda (AnnoS _ _ (VarS _ (One x))) = isKnownLambda x
+isKnownLambda (AnnoS _ _ (LabelS _ x)) = isKnownLambda x
+isKnownLambda _ = False
 
 -- | Rebind @v@ from lambda-form to let-form: rewrite each free reference to
 -- @LetBndS v@, keeping its index and type. Used by the 'reduce' share

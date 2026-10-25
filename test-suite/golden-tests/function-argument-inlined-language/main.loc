@@ -1,0 +1,54 @@
+-- A function value passed to a function defined in Morloc, and handed on
+-- from there to a Rust higher-order function, is built where it is finally
+-- used, inside the Rust call: directly, through a `let` between the helper's
+-- parameters, through a `let` alias of the argument, and as a branch of a
+-- conditional choosing between functions. `show` needs no pool of its own
+-- and every result goes to Python's `shout`; each helper's answer matches the
+-- same expression written without the helper.
+
+--' Function values forwarded through Morloc definitions
+module main (viaHelper, letBetween, letAlias, pick, direct)
+
+import parallel-rust
+import root-py
+
+source Py from "f.py" ("shout")
+
+--' Add an exclamation mark
+shout :: Str -> Str
+
+--' Render each element in parallel and concatenate
+renderAll :: ParOpts -> (a -> Str) -> [a] -> Str
+renderAll opts f xs = fold (<>) "" (pmapWith opts f xs)
+
+--' Render after a let between the parameters
+renderLet :: ParOpts -> (a -> Str) -> [a] -> Str
+renderLet opts = let sep = "" in \f xs -> fold (<>) sep (pmapWith opts f xs)
+
+--' Render through a let alias of the function
+renderAlias :: ParOpts -> (a -> Str) -> [a] -> Str
+renderAlias opts f xs = let g = f in fold (<>) "" (pmapWith opts g xs)
+
+--' Render with one of two functions
+renderPick :: Bool -> (a -> Str) -> (a -> Str) -> [a] -> Str
+renderPick b f h xs = fold (<>) "" (pmapWith defaultParOpts (? b = f : h) xs)
+
+--' Render a list through the helper
+viaHelper :: [Int] -> Str
+viaHelper xs = shout (renderAll defaultParOpts show xs)
+
+--' Render a list through the let helper
+letBetween :: [Int] -> Str
+letBetween xs = shout (renderLet defaultParOpts show xs)
+
+--' Render a list through the alias helper
+letAlias :: [Int] -> Str
+letAlias xs = shout (renderAlias defaultParOpts show xs)
+
+--' Render a list with a chosen function
+pick :: Bool -> [Int] -> Str
+pick b xs = shout (renderPick b show (\x -> shout (show x)) xs)
+
+--' Render a list directly
+direct :: [Int] -> Str
+direct xs = shout (fold (<>) "" (pmapWith defaultParOpts show xs))

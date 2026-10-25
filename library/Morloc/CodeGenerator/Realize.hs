@@ -75,7 +75,7 @@ placementLines = go 0 Nothing
     go depth parent (AnnoS _ (Idx _ appLang) e) = case e of
       -- a named call is listed in the language its implementation runs in
       AppS f@(AnnoS _ (Idx _ headLang) _) xs | Just v <- callName f ->
-        line headLang (name v) : concatMap (go (depth + 1) (Just headLang)) (definition f <> xs)
+        listed headLang (name v) : concatMap (go (depth + 1) (Just headLang)) (definition f <> xs)
       VarS v (One body) -> entry (name v) : below (definition' body)
       ExeS (SrcCall src) -> [entry (name (srcAlias src))]
       CallS v -> [entry ("call " <> name v)]
@@ -86,10 +86,10 @@ placementLines = go 0 Nothing
       where
         lang = appLang
         moved = maybe False (/= lang) parent
-        line l x =
+        listed l x =
           MT.replicate depth "  " <> x <> " [" <> render (pretty l) <> "]"
             <> (if maybe False (/= l) parent then " *" else "")
-        entry = line lang
+        entry = listed lang
         below = concatMap (go (depth + 1) (Just lang))
         name = unEVar . displayName
 
@@ -1608,6 +1608,13 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
+    -- a conditional choosing a function value: each branch is carried
+    collapseCarried heads lang (AnnoS g@(Idx _ t) (Idx i _) (IfS c a b))
+      | isCallableType t = do
+          c' <- collapseAnnoS heads lang c
+          a' <- collapseCarried heads lang a
+          b' <- collapseCarried heads lang b
+          return (AnnoS g (Idx i lang) (IfS c' a' b'))
     collapseCarried heads lang x@(AnnoS (Idx _ t) _ e)
       | isCallableType t, not (isNewtypeCast e) = do
           AnnoS g (Idx i _) e' <- collapseAnnoS heads lang x

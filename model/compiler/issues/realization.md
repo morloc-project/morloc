@@ -76,6 +76,11 @@ reproduced]
   (closure-conformance `mkE "abcde"`). Candidate fix: collapse an inlined
   argument at its reference site, and score a surviving closure's
   references per build language, memoized on the bound tables.
+  LambdaEval now moves a substituted lambda to its reference's language, so
+  the program builds, but the lambda's body keeps the placement collapse
+  chose for the old site: forwarded through a helper into a Rust callback,
+  `show` runs in Python with a crossing per element where the direct form
+  calls Rust's own `show`.
 - **The cost model is partly implemented.** [read, 2026-10-24] Scores are
   seconds: a call costs its language's coefficient times its self time
   (`@selftime` on its signature or `source` block item, else 1 us) plus
@@ -96,6 +101,32 @@ reproduced]
   (2026-10-25). A function value
   inside another type handed to a sourced function is priced as one
   call.
+- **UNSOUND: a function value chosen by a conditional and passed through
+  a Morloc function into a foreign host loses its free variables.**
+  [reproduced, 2026-10-25, also on v0.110.1] With `renderAll opts f xs =
+  fold (<>) "" (pmapWith opts f xs)` (`pmapWith` from `parallel-rust`),
+  `ifArg b xs = shout (renderAll defaultParOpts (? b = show : (\x -> shout
+  (show x))) xs)` builds, and `ifArg true [1,2]` fails at run time with
+  Python's "name 'n0' is not defined": the Rust closure calls a Python
+  function whose body tests `b`, which is never passed to it. The same
+  through a `let`-bound lambda fails alike. Written without the helper it
+  works.
+- **A suspension can be placed in another language than the lambda that
+  returns it.** [reproduced, 2026-10-25] Violates COST-11 (the built
+  placement must be one code generation can lower). Since e8aa73b08 the
+  stdlib `stream-r` and `stream-rust` suites fail to build: `collectSource
+  (loadSource p)` carries the partial application `loadSource p` into a
+  sourced `collectSource`; it is eta-expanded to `\sink -> loadSource p
+  sink`, the lambda is pinned to the host's language (R), and its body,
+  whose value is a suspension `<IO> ()` (itself a lambda), is collapsed in
+  Python, where it is cheaper. Code generation then meets a lambda value
+  realized in Python inside an R expression (Express "a lambda value is
+  realized in py inside an expression realized in r"). Before e8aa73b08 the
+  old constants placed the whole body in R. Needs a placement rule for where
+  a suspension value may be built (likely: in the language of the lambda or
+  expression that returns it, as for a lambda value), applied by both the
+  scorer and collapse. Repro: a module importing `stream-r` and `root-py`
+  with `f p = do { back <- collectSource (loadSource p); pylen back }`.
 - **A repetition count scales the tie-breakers too.** [read, 2026-10-25]
   `scaleScore` multiplies a score's crossing and switch counts by the same
   count as its time (a callback's 1000 calls, a recursion's 1000 levels),
