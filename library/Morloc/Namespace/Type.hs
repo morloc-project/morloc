@@ -860,6 +860,10 @@ data ArgDocVars = ArgDocVars
   , docCalls :: Maybe Formula
     -- ^ `@calls` above a function or suspension argument of a signature: how
     -- many times a sourced implementation calls it (COST-6)
+  , docDimension :: Maybe [Formula]
+    -- ^ `@dimension` above an argument or the result of a signature: the
+    -- element count of each list level, outermost first, each a whole number
+    -- or a name (COST-5)
   }
   deriving (Show, Ord, Eq)
 
@@ -892,6 +896,7 @@ inheritArgDocVars r1 r2 =
     , docEpilogues = if null (docEpilogues r1) then docEpilogues r2 else docEpilogues r1
     , docSelftime = docSelftime r1 <|> docSelftime r2
     , docCalls = docCalls r1 <|> docCalls r2
+    , docDimension = docDimension r1 <|> docDimension r2
     }
 
 data ArgDoc
@@ -961,6 +966,7 @@ instance Defaultable ArgDocVars where
       , docEpilogues = []
       , docSelftime = Nothing
       , docCalls = Nothing
+      , docDimension = Nothing
       }
 
 instance Typelike Type where

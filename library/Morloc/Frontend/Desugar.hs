@@ -26,7 +26,7 @@ module Morloc.Frontend.Desugar
 
 import qualified Control.Monad.State.Strict as State
 import qualified Data.Map.Strict as Map
-import Morloc.Cost.Formula (Dim, Formula, dimOf, evalFormula, formulaNames, parseFormula, plain, renderDim, time)
+import Morloc.Cost.Formula (Dim, Formula (..), dimOf, evalFormula, formulaNames, parseFormula, plain, renderDim, time)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -386,7 +386,7 @@ argDocDirectiveKeys =
   , "arg", "true", "false", "return"
   , "source", "form", "check.<kind>"
   , "list.source", "list.form", "list.check.<kind>"
-  , "with", "render", "parse", "mime", "epilogue", "selftime", "calls"
+  , "with", "render", "parse", "mime", "epilogue", "selftime", "calls", "dimension"
   ]
 
 -- | Parse and lightly validate a media type (RFC 6838 `type/subtype`, e.g.
@@ -802,6 +802,9 @@ processArgDocLines = finalize . foldl step ([], [], defaultValue, Nothing)
         ["calls"] -> case parseCalls v of
           Left e -> (errs <> [e], ws, d)
           Right f -> (errs, ws, d {docCalls = Just f})
+        ["dimension"] -> case parseDimension v of
+          Left e -> (errs <> [e], ws, d)
+          Right fs -> (errs, ws, d {docDimension = Just fs})
         ["literal"] ->
           let parsed = parseDocBool v
               warn =
@@ -941,6 +944,14 @@ applySourceDocs lns src = foldl step ([], [], src) lns
           , ws
           , s
           )
+        "dimension" ->
+          ( errs
+              <> [ "`@dimension` states the element counts of a value: "
+                     <> "it is allowed only above an argument or the result of a signature (COST-5)"
+                 ]
+          , ws
+          , s
+          )
         _ ->
           let w = unknownDirectiveWarning sourceDocDirectiveKeys k line
            in (errs, ws <> w, s {srcNote = srcNote s <> [docDescLine line]})
@@ -953,9 +964,9 @@ parseCalls = parseConstFormula "calls" plain
 parseSelftime :: Text -> Either Text Formula
 parseSelftime = parseConstFormula "selftime" time
 
--- | A formula of the given dimension. No directive yet introduces a name
--- (`@dimension`), so a name is an error, and the formula is a constant that
--- must have a value.
+-- | A formula of the given dimension. A formula without names is a constant
+-- that must have a value; whether each name is introduced by a `@dimension`
+-- of the signature is checked once the signature is whole (Restructure).
 parseConstFormula :: Text -> Dim -> Text -> Either Text Formula
 parseConstFormula key want v = do
   f <- either (\e -> Left (key <> ": " <> e)) Right (parseFormula v)
@@ -963,10 +974,23 @@ parseConstFormula key want v = do
   if d /= want
     then Left (key <> ": the formula '" <> v <> "' is " <> renderDim d <> ", not " <> renderDim want)
     else case formulaNames f of
-      (n : _) -> Left (key <> ": '" <> n <> "' is not introduced by a `@dimension` of the signature")
+      (_ : _) -> Right f
       [] -> case evalFormula (const 0) f of
         Nothing -> Left (key <> ": the formula '" <> v <> "' has no value (it is negative or infinite)")
         Just _ -> Right f
+
+-- | Parse a `dimension` value: the element count of each list level,
+-- outermost first, each a whole number or a name (COST-5).
+parseDimension :: Text -> Either Text [Formula]
+parseDimension v = case T.words v of
+  [] -> Left "dimension: expected one or more factors, each a whole number or a name"
+  ws -> mapM factor ws
+  where
+    factor w = case parseFormula w of
+      Right f@(Name _) -> Right f
+      Right f@(Lit x d)
+        | d == plain && x >= 0 && not (isInfinite x) && x == fromIntegral (round x :: Integer) -> Right f
+      _ -> Left ("dimension: the factor '" <> w <> "' is neither a whole number nor a name")
 
 -- | Parse an `rsize` value: one or more positive integers separated by
 -- whitespace. Each is the size of a leading call group; the final group is
@@ -997,9 +1021,24 @@ parseRsize v =
 -- malformed (e.g. a short-option char that isn't a letter).
 processArgDocLinesD :: Pos -> [Text] -> D ArgDocVars
 processArgDocLinesD pos ls = do
+  v <- processSigResultDocLinesD pos ls
+  rejectDimensionHere pos v
+  return v
+
+-- | The docstring of a signature's result, which may state `@dimension` but
+-- not `@calls`.
+processSigResultDocLinesD :: Pos -> [Text] -> D ArgDocVars
+processSigResultDocLinesD pos ls = do
   v <- processParamDocLinesD pos ls
   rejectCallsHere pos v
   return v
+
+rejectDimensionHere :: Pos -> ArgDocVars -> D ()
+rejectDimensionHere pos v = case docDimension v of
+  Nothing -> return ()
+  Just _ ->
+    dfail pos
+      "`@dimension` states the element counts of a value: it is allowed only above an argument or the result of a signature (COST-5)"
 
 
 rejectCallsHere :: Pos -> ArgDocVars -> D ()
@@ -1025,6 +1064,7 @@ processSigDocLinesD :: Pos -> [Text] -> D ArgDocVars
 processSigDocLinesD pos ls = do
   v <- docLinesD pos ls
   rejectCallsHere pos v
+  rejectDimensionHere pos v
   return v
 
 -- | Docstring lines, with no check of where a directive is allowed.
@@ -1533,7 +1573,7 @@ sigArgDocs :: [(Pos, TypeU)] -> D [ArgDocVars]
 sigArgDocs args = do
   let n = length args
   sequence
-    [ lookupDocsAt p >>= if k == n then processArgDocLinesD p else processParamDocLinesD p
+    [ lookupDocsAt p >>= if k == n then processSigResultDocLinesD p else processParamDocLinesD p
     | (k, (p, _)) <- zip [1 :: Int ..] args
     ]
 

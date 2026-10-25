@@ -1990,6 +1990,172 @@ lexTests =
         f xs = fold add 0 xs
         |]
     , accept
+        "spec-cost-5-2"
+        [r|
+        module main (f)
+        source Py from "f.py" ("step")
+        --' Step through a table
+        --' @selftime 10ns * n * m
+        step ::
+          --' The rows
+          --' @dimension n m
+          [[Int]] ->
+          --' The result
+          --' @dimension n
+          [Int]
+        f :: [[Int]] -> [Int]
+        f xs = step xs
+        |]
+    , rejectUser
+        "spec-cost-5-3"
+        [r|
+        module main (f)
+        source Py from "f.py" ("step")
+        --' Step through a table
+        --' @selftime 10ns * k
+        step ::
+          --' The rows
+          --' @dimension n
+          [[Int]] ->
+          --' The result
+          [Int]
+        f :: [[Int]] -> [Int]
+        f xs = step xs
+        |]
+    , rejectUser
+        "spec-cost-5-4"
+        [r|
+        module main (f)
+        source Py from "f.py" ("step")
+        --' Step through a table
+        --' @selftime 10ns * n
+        step ::
+          --' The rows
+          --' @dimension n m q
+          [[Int]] ->
+          --' The result
+          [Int]
+        f :: [[Int]] -> [Int]
+        f xs = step xs
+        |]
+    , reject
+        "spec-cost-5-5"
+        [r|
+        module main (f)
+        source Py from "f.py" ("step")
+        --' Step through a table
+        --' @selftime 10ns * n
+        step ::
+          --' The rows
+          --' @dimension 1.5
+          [[Int]] ->
+          --' The result
+          [Int]
+        f :: [[Int]] -> [Int]
+        f xs = step xs
+        |]
+    , reject
+        "spec-cost-5-6"
+        [r|
+        module main (f)
+        source Py from "f.py" ("step")
+        --' Step through a table
+        --' @selftime 10ns * n
+        step ::
+          --' The rows
+          --' @dimension n*m
+          [[Int]] ->
+          --' The result
+          [Int]
+        f :: [[Int]] -> [Int]
+        f xs = step xs
+        |]
+    , reject
+        "spec-cost-5-7"
+        [r|
+        module main (f)
+        source Py from "f.py" ("step")
+        --' Step through a table
+        --' @dimension n
+        step ::
+          --' The rows
+          [[Int]] ->
+          --' The result
+          [Int]
+        f :: [[Int]] -> [Int]
+        f xs = step xs
+        |]
+    , reject
+        "spec-cost-5-8"
+        [r|
+        module main (f)
+        source Py from "f.py" ("step")
+        --' A table
+        --' @dimension n
+        type Table = [[Int]]
+        --' Step through a table
+        step ::
+          --' The rows
+          Table ->
+          --' The result
+          [Int]
+        f :: [[Int]] -> [Int]
+        f xs = step xs
+        |]
+    , accept
+        "spec-cost-5-9"
+        [r|
+        module main (f)
+        source Py from "f.py" ("step")
+        type Table = [[Int]]
+        --' Step through a table
+        --' @selftime 10ns * m
+        step ::
+          --' The rows
+          --' @dimension n m
+          Table ->
+          --' The result
+          [Int]
+        f :: [[Int]] -> [Int]
+        f xs = step xs
+        |]
+    , accept
+        "spec-cost-7-1"
+        [r|
+        module main (f)
+        effect IO
+        source Py from "f.py" ("readNums", "keep")
+        --' Read numbers
+        --' @selftime 1ns * n
+        readNums ::
+          Str ->
+          --' @dimension n
+          <IO> [Int]
+        --' Keep some numbers
+        --' @selftime 2ns * m
+        keep ::
+          --' @dimension m
+          ?[Int] ->
+          [Int]
+        f :: Str -> <IO> [Int]
+        f p = readNums p
+        |]
+    , rejectUser
+        "spec-cost-7-2"
+        [r|
+        module main (f)
+        source Py from "f.py" ("fold")
+        fold ::
+          --' @calls n
+          (Int -> Int -> Int) ->
+          Int ->
+          [Int] ->
+          Int
+        add :: Int -> Int -> Int
+        f :: [Int] -> Int
+        f xs = fold add 0 xs
+        |]
+    , accept
         "spec-cost-6-10"
         [r|
         module main (f)

@@ -85,6 +85,7 @@ conditional) costs one default call.
 
 ### COST-5 `@wiresize` and `@dimension` state the size of a value
 Intent: ruled 2026-10-16
+Tests: spec-cost-5-1, spec-cost-5-2, spec-cost-5-3, spec-cost-5-4, spec-cost-5-5, spec-cost-5-6, spec-cost-5-7, spec-cost-5-8, spec-cost-5-9
 Code: deviates (../compiler/issues/realization.md)
 
 The cost of copying data across a boundary is deferred 2026-10-25 with
@@ -128,6 +129,7 @@ from its body.
 
 ### COST-7 A formula is arithmetic over a signature's names, with units
 Intent: ruled 2026-10-25
+Tests: spec-cost-7-1, spec-cost-7-2
 Code: deviates (../compiler/issues/realization.md)
 
 A formula has numbers with units, names, `+ - * / ^`, `log` (natural),
@@ -145,8 +147,7 @@ formula without names whose value is undefined, infinite or negative is an
 error; one with names that takes such a value at a call counts as the
 default (COST-9) for that position.
 
-Names are introduced only by `@dimension` (COST-5); until it is
-implemented a formula that has a name is an error.
+Names are introduced only by `@dimension` (COST-5).
 
 ## Sizes
 

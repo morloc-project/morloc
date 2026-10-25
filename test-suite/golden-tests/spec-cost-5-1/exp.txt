@@ -1,0 +1,18 @@
+placement:
+  small [py]
+    total [py]
+      incr [py]
+  large [py]
+    total [py]
+      incr [cpp] *
+        countUp [py] *
+  viaLet [py]
+    total [py]
+      countUp [py]
+      incr [cpp] *
+
+"9"
+"15"
+"15"
+OK: a self time in an unintroduced name rejected
+OK: built placement costs the least

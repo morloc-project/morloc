@@ -21,7 +21,8 @@ module Morloc.CodeGenerator.Realize
   ) where
 
 import Morloc.CodeGenerator.Serial (containsEffectT, containsFunT)
-import Morloc.Cost.Formula (Formula, evalFormula)
+import Morloc.Cost.Formula (Formula (..), evalFormula, formulaNames)
+import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.GMap as GMap
 import Morloc.CodeGenerator.Value (etaParts, isValueWith)
 import Morloc.Frontend.Namespace (newIndex)
@@ -64,15 +65,17 @@ nodeKind e = case e of
   _ -> "value"
 
 -- | One line per named call of a realized tree, its arguments and body
--- indented beneath it, with its language. @*@ marks a node in another
--- language than its parent: a crossing. An unnamed node is listed only
--- when it crosses, by its kind.
+-- indented beneath it, with the language its implementation runs in. @*@
+-- marks a node in another language than the line above it: a crossing. An
+-- unnamed node is listed only when it crosses, by its kind.
 placementLines :: AnnoS (Indexed Type) One (Indexed Lang) -> [MT.Text]
 placementLines = go 0 Nothing
   where
     go :: Int -> Maybe Lang -> AnnoS (Indexed Type) One (Indexed Lang) -> [MT.Text]
-    go depth parent (AnnoS _ (Idx _ lang) e) = case e of
-      AppS f xs | Just v <- callName f -> entry (name v) : below (definition f <> xs)
+    go depth parent (AnnoS _ (Idx _ appLang) e) = case e of
+      -- a named call is listed in the language its implementation runs in
+      AppS f@(AnnoS _ (Idx _ headLang) _) xs | Just v <- callName f ->
+        line headLang (name v) : concatMap (go (depth + 1) (Just headLang)) (definition f <> xs)
       VarS v (One body) -> entry (name v) : below (definition' body)
       ExeS (SrcCall src) -> [entry (name (srcAlias src))]
       CallS v -> [entry ("call " <> name v)]
@@ -81,9 +84,12 @@ placementLines = go 0 Nothing
       _ | moved -> entry ("(" <> nodeKind e <> ")") : below (children e)
       _ -> concatMap (go depth (Just lang)) (children e)
       where
+        lang = appLang
         moved = maybe False (/= lang) parent
-        mark = if moved then " *" else ""
-        entry x = MT.replicate depth "  " <> x <> " [" <> render (pretty lang) <> "]" <> mark
+        line l x =
+          MT.replicate depth "  " <> x <> " [" <> render (pretty l) <> "]"
+            <> (if maybe False (/= l) parent then " *" else "")
+        entry = line lang
         below = concatMap (go (depth + 1) (Just lang))
         name = unEVar . displayName
 
@@ -106,21 +112,45 @@ placementLines = go 0 Nothing
 data SigCosts = SigCosts
   { sigSelftimes :: Map Source Formula
   , sigCalls :: Map Source [Maybe Formula]
+  , sigDims :: Map Source ([Maybe [Formula]], Maybe [Formula])
+    -- ^ the `@dimension` of each argument and of the result (COST-5)
   }
 
 signatureCosts :: MorlocMonad SigCosts
 signatureCosts = do
   sigs <- GMap.elems <$> MM.gets stateSignatures
   let implemented' = concatMap implemented sigs
+      located = concatMap locatedSrcs sigs
+      dims = Map.fromList [(src, ds) | (e, srcs) <- implemented', Just ds <- [termDims e], src <- srcs]
+  -- COST-7: a source's own self time is written in its signature's names
+  sequence_
+    [ MM.throwSourcedError i $
+        "the self time of" <+> squotes (pretty (srcAlias src)) <+> "uses" <+> squotes (pretty n)
+          <> ", which no `@dimension` of its signature introduces (COST-7)"
+    | (_, isrcs) <- located
+    , (i, src) <- isrcs
+    , Just f <- [srcSelftime src]
+    , let known = maybe Set.empty dimNames (Map.lookup src dims)
+    , n <- formulaNames f
+    , not (Set.member n known)
+    ]
   return $
     SigCosts
       { sigSelftimes = Map.fromList [(src, f) | (e, srcs) <- implemented', Just f <- [termSelftime e], src <- srcs]
       , sigCalls = Map.fromList [(src, cs) | (e, srcs) <- implemented', Just cs <- [termCalls e], src <- srcs]
+      , sigDims = dims
       }
   where
+    dimNames (args, ret) = Set.fromList (concatMap formulaNames (concat (catMaybes (ret : args))))
+    termDims e = case edocs e of
+      ArgDocSig _ args ret | any (isJust . docDimension) (ret : args) -> Just (map docDimension args, docDimension ret)
+      _ -> Nothing
     implemented (Monomorphic (TermTypes (Just e) srcs _)) = [(e, [s | (_, Idx _ s) <- srcs])]
     implemented (Polymorphic _ _ e ts) = [(e, [s | t <- ts, (_, Idx _ s) <- termConcrete t])]
     implemented _ = []
+    locatedSrcs (Monomorphic (TermTypes (Just e) srcs _)) = [(e, [(i, s) | (_, Idx i s) <- srcs])]
+    locatedSrcs (Polymorphic _ _ e ts) = [(e, [(i, s) | t <- ts, (_, Idx i s) <- termConcrete t])]
+    locatedSrcs _ = []
     termSelftime e = case edocs e of
       ArgDocSig d _ _ -> docSelftime d
       _ -> Nothing
@@ -302,6 +332,55 @@ scaleScore k (Score t c w)
   where
     sat n = fromInteger (min (10 ^ (15 :: Int)) (toInteger k * toInteger n))
 
+-- | An element count, known from what made the value or a default (COST-8).
+data Count = Count {cntValue :: Double, cntKnown :: Bool}
+  deriving (Show, Eq)
+
+-- | The element count of each list level of a value, outermost first.
+type Shape = [Count]
+
+-- | Of two counts for one quantity, a known one beats a default and the
+-- larger wins (COST-8).
+mergeCount :: Count -> Count -> Count
+mergeCount a b = case (cntKnown a, cntKnown b) of
+  (True, False) -> a
+  (False, True) -> b
+  _ -> if cntValue a >= cntValue b then a else b
+
+mergeLevels :: Shape -> Shape -> Shape
+mergeLevels (a : as) (b : bs) = mergeCount a b : mergeLevels as bs
+mergeLevels as [] = as
+mergeLevels [] bs = bs
+
+-- | The count of a name nothing binds, and of a list level nothing states
+-- (COST-9).
+unboundCount :: Double
+unboundCount = 10
+
+-- | COST-9: each list level of the type is 10 elements and a string 4096
+-- characters; an effect or an optional counts its value's levels.
+defaultShape :: Type -> Shape
+defaultShape = go (32 :: Int)
+  where
+    go 0 _ = []
+    go n (AppT (VarT v) [x]) | v == BT.list = Count unboundCount False : go (n - 1) x
+    go _ (VarT v) | v == BT.str = [Count 4096 False]
+    go n (EffectT _ x) = go (n - 1) x
+    go n (OptionalT x) = go (n - 1) x
+    go _ _ = []
+
+-- | The names a call's arguments bind: each `@dimension` factor that is a
+-- name takes the count of its argument's list level (COST-8).
+bindNames :: Maybe ([Maybe [Formula]], Maybe [Formula]) -> [Shape] -> Map MT.Text Count
+bindNames Nothing _ = Map.empty
+bindNames (Just (argDims, _)) shapes =
+  Map.fromListWith
+    mergeCount
+    [ (n, c)
+    | (Just fs, sh) <- zip argDims shapes
+    , (Name n, c) <- zip fs sh
+    ]
+
 -- | How many times a function calls a function argument, when nothing says
 -- otherwise (COST-4).
 defaultCallbackCount :: Int
@@ -347,6 +426,13 @@ data RState = RState
   -- it kept ('Nothing' for a language-free one), so each table is cut to
   -- the choice made and each term to the implementation chosen.
   , rForced :: Maybe (Map Int (Maybe Lang))
+  -- | The element counts of every node (COST-8), computed once.
+  , rShapes :: Map Int Shape
+  -- | The element counts of the arguments of the head being scored, from
+  -- which each of its source calls binds its signature's names (COST-8).
+  , rArgShapes :: [Shape]
+  -- | When rescoring: every language the built placement uses.
+  , rForcedLangs :: [Lang]
   }
 
 emptyRState =
@@ -356,6 +442,9 @@ emptyRState =
     , rBndVars = Map.empty
     , rLetVars = Map.empty
     , rForced = Nothing
+    , rShapes = Map.empty
+    , rArgShapes = []
+    , rForcedLangs = []
     }
 
 
@@ -517,12 +606,13 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
   -- Normalize language-invariant (literal-lambda-head) redexes before scoring.
   let sp = stagePoints s0
   s0' <- normalizePop1 (`Map.lookup` sp) s0
-  scored <- scoreAnnoS emptyRState {rLangs = seedLangs} s0'
-  return (scored, finish s0' scored)
+  let shapes = shapesOf s0'
+  scored <- scoreAnnoS emptyRState {rLangs = seedLangs, rShapes = shapes} s0'
+  return (scored, finish shapes s0' scored)
   where
-    finish s0' scored ctx = do
+    finish shapes s0' scored ctx = do
       e@(AnnoS g li x) <- collapseAnnoS [] ctx scored
-      checkPlacement s0' scored ctx e
+      checkPlacement shapes s0' scored ctx e
       case (li, ctx) of
         -- language-free code used from a pool runs in that pool, as it
         -- would inlined there
@@ -534,7 +624,7 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
     -- least. When the placement listing is wanted with verbosity, the tree is
     -- scored again with every node cut to its chosen language and
     -- implementation, and a difference is listed with the placement.
-    checkPlacement s0' scored ctx e = do
+    checkPlacement shapes s0' scored ctx e = do
       wanted <- MM.gets statePlacement
       verbosity <- MM.gets stateVerbosity
       case wanted of
@@ -542,7 +632,7 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
           -- a node collapsed at two sites into different languages is
           -- left unforced
           let kept = Map.fromListWith (\a b -> if a == b then a else Nothing) [(i, l) | Idx i l <- collectIdx e]
-          rescored <- scoreAnnoS emptyRState {rLangs = seedLangs, rForced = Just kept} s0'
+          rescored <- scoreAnnoS emptyRState {rLangs = seedLangs, rForced = Just kept, rForcedLangs = unique (catMaybes (Map.elems kept)), rShapes = shapes} s0'
           let best tbl = case (ctx, tbl) of
                 (_, []) -> Nothing
                 (Just l, _) -> Just (reachFrom l tbl)
@@ -612,12 +702,19 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
     scoreAnnoS rstat0 (AnnoS gi@(Idx gidx t) ci e) = do
       -- The arguments of an application reach only the lambdas its head
       -- binds them with ('boundArgs' follows the same chain).
-      let rstat = if passesApplied e then rstat0 else rstat0 {rApplied = []}
+      let rstat1 = if passesApplied e then rstat0 else rstat0 {rApplied = []}
+          -- a sourced head's names reach its source calls and nothing else
+          rstat = if reachesSource e then rstat1 else rstat1 {rArgShapes = []}
       (e', Idx ci' table) <- scoreExpr rstat (e, ci)
       -- An operation that belongs to no language runs where its context
       -- puts it, but only in a language that can hold what it computes.
       table' <- maybe (return table) (\(j, ts) -> holding j ts table) (heldTypes gidx e t)
-      return $ AnnoS gi (Idx ci' (forcedTable rstat ci' table')) e'
+      -- a term's table holds, for each language, its chosen implementation
+      -- reached from there; only the implementation is forced
+      let forced = case e of
+            VarS {} -> table'
+            _ -> forcedTable rstat ci' table'
+      return $ AnnoS gi (Idx ci' forced) e'
 
     -- A table cut to the language collapse chose for its node, when
     -- rescoring. A choice the table does not offer (a lambda built in its
@@ -723,8 +820,9 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
       let args = [(t, scoresOf x') | x'@(AnnoS (Idx _ t) _ _) <- xs']
           bound = boundArgs f
           srcs = headSources f
+          argShapes = [shapeAt rstat x' | x' <- xs]
           pairss =
-            [ (if sourcedHead f then callCount srcs k else id) (kid x')
+            [ (if sourcedHead f then callCount argShapes srcs k else id) (kid x')
             | (k, x'@(AnnoS (Idx _ t) _ _)) <- zip [0 ..] xs'
             , not (k < bound && isCallableType t)
             ]
@@ -732,7 +830,7 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
       -- implementations. One with none (a call on a function parameter
       -- bound to no table, a recursive call) lives where the expression
       -- holding it lives.
-      f' <- scoreAnnoS rstat {rLangs = [], rApplied = args} f
+      f' <- scoreAnnoS rstat {rLangs = [], rApplied = args, rArgShapes = argShapes} f
       let headTable = case scoresOf f' of
             [] -> [(l, mempty) | l <- rLangs rstat]
             table -> table
@@ -750,7 +848,7 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
       case Map.lookup v (rBndVars rstat) of
         Just scores -> return (BndS v, Idx i scores)
         Nothing -> return (BndS v, Idx i [])
-    scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, Score (callCost src) 0 0)])
+    scoreExpr rstat (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, Score (callCost (envOf src (rArgShapes rstat)) src) 0 0)])
     scoreExpr rstat (ExeS x@(PatCall _), i) = return (ExeS x, zipLang i rstat)
     scoreExpr _ (RealS si x, i) = return (RealS si x, Idx i [])
     scoreExpr _ (IntS si x, i) = return (IntS si x, Idx i [])
@@ -855,8 +953,8 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
     -- 'defaultCallbackCount' times (COST-4); a suspension is run once unless
     -- its `@calls` says otherwise. Where the head's implementations differ,
     -- the largest count is used, one that states none counting the default.
-    callCount :: [Source] -> Int -> Kid -> Kid
-    callCount srcs k (Kid t pinned _ table)
+    callCount :: [Shape] -> [Source] -> Int -> Kid -> Kid
+    callCount argShapes srcs k (Kid t pinned _ table)
       | Just dflt <- defaultCount t =
           Kid t pinned (maximum (dflt `ifNone` map (stated dflt) srcs)) table
       where
@@ -865,9 +963,9 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
         stated dflt src = fromMaybe dflt $ do
           cs <- Map.lookup src (sigCalls costs)
           fm <- join (lookup k (zip [0 ..] cs))
-          n <- evalFormula unboundName fm
+          n <- evalFormula (named (envOf src argShapes)) fm
           return (ceiling (min 1e15 n))
-    callCount _ _ kd = kd
+    callCount _ _ _ kd = kd
 
     defaultCount :: Type -> Maybe Int
     defaultCount (FunT _ _) = Just defaultCallbackCount
@@ -907,9 +1005,9 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
 
     updateRState :: [EVar] -> RState -> RState
     updateRState [] rstat = rstat
-    updateRState vs rstat@(RState _ [] bound _ _) =
+    updateRState vs rstat@(RState _ [] bound _ _ _ _ _) =
       rstat {rBndVars = foldr Map.delete bound vs}
-    updateRState (v : vs) rstat@(RState _ ((t, table) : ps) bound _ _) =
+    updateRState (v : vs) rstat@(RState _ ((t, table) : ps) bound _ _ _ _ _) =
       updateRState vs $
         rstat
           { rApplied = ps
@@ -929,6 +1027,14 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
 
     -- The nodes through which an application's arguments reach the lambdas
     -- of its head.
+    reachesSource :: ExprS g f c -> Bool
+    reachesSource e = case e of
+      VarS {} -> True
+      LabelS {} -> True
+      CoerceS {} -> True
+      ExeS {} -> True
+      _ -> False
+
     passesApplied :: ExprS g f c -> Bool
     passesApplied e = case e of
       LamS {} -> True
@@ -970,7 +1076,10 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
           chosen -> return chosen
       xs1 <- mapM (fmap repeated . scoreAnnoS rstat) xs0
       let pairs = minPairs (concat [xs' | (AnnoS _ (Idx _ xs') _) <- xs1])
-      return (xs1, [(l1, reachFrom l1 pairs) | l1 <- unique (map fst pairs)])
+      -- rescoring keeps one implementation, but the term is still reached
+      -- from every language the placement uses
+      let langs = unique (map fst pairs <> rForcedLangs rstat)
+      return (xs1, [(l1, reachFrom l1 pairs) | not (null pairs), l1 <- langs])
       where
         repeated x@(AnnoS g (Idx j ss) e)
           | containsCallS v x = AnnoS g (Idx j [(l, scaleScore defaultRecursionCount sc) | (l, sc) <- ss]) e
@@ -1155,20 +1264,77 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
 
     -- The cost of one call of a sourced function (COST-2): its language's
     -- coefficient times its self time, plus the language's call overhead.
-    callCost :: Source -> Integer
-    callCost src =
+    callCost :: Map MT.Text Double -> Source -> Integer
+    callCost env src =
       picoseconds (LR.registryCallCoefficient registry lang / 10 * selftimeNs)
         + picoseconds (LR.registryCallOverhead registry lang)
       where
         lang = langName (srcLang src)
-        evaluated = (>>= evalFormula unboundName)
-        selftimeNs =
-          maybe defaultSelftimeNs (* 1e9) $
-            evaluated (srcSelftime src) <|> evaluated (Map.lookup src (sigSelftimes costs))
+        -- the source's own self time, else its signature's; a formula
+        -- without a value at this call counts the default (COST-7)
+        stated = srcSelftime src <|> Map.lookup src (sigSelftimes costs)
+        selftimeNs = maybe defaultSelftimeNs (* 1e9) (stated >>= evalFormula (named env))
 
-    -- The value of a name no directive binds (COST-9).
-    unboundName :: MT.Text -> Double
-    unboundName _ = 10
+    -- The value of a name: bound at the call, else COST-9's default.
+    named :: Map MT.Text Double -> MT.Text -> Double
+    named env n = Map.findWithDefault unboundCount n env
+
+    -- The element counts of a node, from the shapes computed before scoring.
+    shapeAt :: RState -> AnnoS (Indexed Type) Many Int -> Shape
+    shapeAt rstat (AnnoS (Idx _ t) i _) = Map.findWithDefault (defaultShape t) i (rShapes rstat)
+
+    -- COST-8: the element counts of every node, outermost level first: a
+    -- literal's own, a let variable's value's, a sourced call's from the
+    -- `@dimension` of its result evaluated with the names its arguments bind,
+    -- and COST-9's default for anything else.
+    shapesOf :: AnnoS (Indexed Type) Many Int -> Map Int Shape
+    shapesOf root = snd (go Map.empty root Map.empty)
+      where
+        -- the node's shape, with every node's shape below it added to @acc@
+        go :: Map EVar Shape -> AnnoS (Indexed Type) Many Int -> Map Int Shape -> (Shape, Map Int Shape)
+        go env (AnnoS (Idx _ t) i e) acc0 =
+          let many xs acc = foldr (\x (shs, a) -> let (sh', a') = go env x a in (sh' : shs, a')) ([], acc) xs
+              (sh, acc1) = case e of
+                LstS xs ->
+                  let (shs, a) = many xs acc0
+                      inner = case shs of
+                        [] -> drop 1 (defaultShape t)
+                        _ -> foldr1 mergeLevels shs
+                   in (Count (fromIntegral (length xs)) True : inner, a)
+                StrS x -> ([Count (fromIntegral (MT.length x)) True], acc0)
+                LetS v e1 e2 ->
+                  let (s1, a1) = go env e1 acc0
+                      (s2, a2) = go (Map.insert v s1 env) e2 a1
+                   in (s2, a2)
+                LetBndS v -> (Map.findWithDefault (defaultShape t) v env, acc0)
+                LamS vs body -> (defaultShape t, snd (go (foldr Map.delete env vs) body acc0))
+                -- a label, a cast or a term passes on its value's counts
+                LabelS _ x -> go env x acc0
+                CoerceS _ x -> go env x acc0
+                VarS _ (Many alts@(_ : _)) ->
+                  let (shs, a) = many alts acc0
+                   in (foldr1 mergeLevels shs, a)
+                AppS f xs ->
+                  let (shs, a1) = many xs acc0
+                      (_, a2) = go env f a1
+                      result = case headDims (headSources f) of
+                        Just ds@(_, Just fs) ->
+                          let bound = bindNames (Just ds) shs
+                              factor (Name n) = Map.findWithDefault (Count unboundCount False) n bound
+                              factor (Lit x _) = Count x True
+                              factor _ = Count unboundCount False
+                           in map factor fs <> drop (length fs) (defaultShape t)
+                        _ -> defaultShape t
+                   in (result, a2)
+                _ -> (defaultShape t, snd (many (foldExprS (: []) e) acc0))
+           in (sh, Map.insert i sh acc1)
+
+    headDims :: [Source] -> Maybe ([Maybe [Formula]], Maybe [Formula])
+    headDims srcs = listToMaybe [d | src <- srcs, Just d <- [Map.lookup src (sigDims costs)]]
+
+    -- the names a source's signature binds from these arguments
+    envOf :: Source -> [Shape] -> Map MT.Text Double
+    envOf src shapes = Map.map cntValue (bindNames (Map.lookup src (sigDims costs)) shapes)
 
     -- The self time of a function that states none (COST-2), in nanoseconds.
     defaultSelftimeNs :: Double

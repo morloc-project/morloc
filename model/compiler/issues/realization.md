@@ -44,10 +44,10 @@ reproduced]
   both consult would keep them from drifting apart.
 - **The placement collapse builds does not always cost the least the scorer
   found.** [reproduced, 2026-10-25] Violates COST-11. `morloc typecheck -v
-  --realize` rescores the built placement and lists a difference; 31 of
-  1335 golden programs differ. Seen: a lambda built in its parent's
-  language around a body in another (closure-conformance, deep-crosspool-
-  r-rust, let-captured-by-closure, recursion-crosspool-*, records-*,
+  --realize` rescores the built placement and lists a difference; 32 of
+  1336 golden programs differ. Seen: a lambda built in its parent's
+  language around a body in another (closure-conformance,
+  let-captured-by-closure, recursion-crosspool-*, records-*,
   string-encoding-utf8, uint8-cross-language), the extra crossings counted
   at a callback's call count; function values in a container placed with
   the container (functional-data-1: `funf`, `fung`); a sourced call left in
@@ -57,9 +57,11 @@ reproduced]
   mutual-tail-loop), which COST-11 allows but the check does not yet
   exempt; and a built placement cheaper than the least found
   (recursion-crosspool-mutual, recursion-crosspool-mutual-list), where the
-  scorer overprices mutual recursion. Not yet classified: errors,
-  packets-interop, spec-eff-8-1,
-  py-numpy-view-lifetime, remote-streaming-consolidated,
+  scorer overprices mutual recursion; a let whose value only one language
+  can hold placed in another (placement-representability topConstant and
+  whereBinding: a C++ record let in Python). Not yet classified:
+  binding-evaluation-count, errors,
+  packets-interop, spec-eff-8-1, remote-streaming-consolidated,
   shared-specialization (main-mixed), spec-cost-12-1, spec-newt-7-8.
 - **A function argument that LambdaEval inlines is placed for where it is
   built, not where it runs.** [read, 2026-10-25] Most of the COST-11
@@ -81,9 +83,17 @@ reproduced]
   latency (COST-3 without the per-element and per-byte slopes), a
   recursive definition its body times 1000 (COST-14), a function argument
   of a sourced function 1000 calls of it (COST-4). Sizes (COST-5, COST-8,
-  COST-9) and `@dimension` have no code, so a name in a `@selftime` or
-  `@calls` formula is rejected (COST-7); `@wiresize` and byte sizes are
-  deferred with COST-3's copy cost (2026-10-25). A function value
+  COST-9) are element counts only: `@dimension` above a signature's
+  argument or result binds names from a list literal's length, a let
+  variable's value, a sourced call's result `@dimension`, or COST-9's
+  default of 10 per level. Not yet: `@dimension` above a type alias or a
+  record field (rejected), a type variable as a factor (rejected), a
+  consumer's literal factor beating a default (COST-8 rule 3, ignored), a
+  parameter's size from its enclosing signature (COST-8 rule 1, default
+  used), a morloc-defined call's result size (default used), and a
+  literal `Nat` length in a type (`Vector 5 Int`) as the default count.
+  `@wiresize` and byte sizes are deferred with COST-3's copy cost
+  (2026-10-25). A function value
   inside another type handed to a sourced function is priced as one
   call.
 - **A bracket step through an instance is never placed in a pool.**
