@@ -61,6 +61,19 @@ reproduced]
   packets-interop, spec-eff-8-1,
   py-numpy-view-lifetime, remote-streaming-consolidated,
   shared-specialization (main-mixed), spec-cost-12-1, spec-newt-7-8.
+- **A function argument that LambdaEval inlines is placed for where it is
+  built, not where it runs.** [read, 2026-10-25] Most of the COST-11
+  differences above. A lambda argument is collapsed in its parent's
+  language, but `applyLambdas` (after collapse) substitutes an argument used
+  at most once at its reference, where the scorer priced it; a closure that
+  survives (used twice, forwarded to a recursion, put in a container) is
+  priced by the scorer as living where its body is cheapest, though it
+  lives where it is built. Reducing calls of single-lambda terms before
+  scoring (normalizePop1) cut the differences from 31 to 14 but broke
+  collapse's invariant that a lambda takes its builder's language
+  (closure-conformance `mkE "abcde"`). Candidate fix: collapse an inlined
+  argument at its reference site, and score a surviving closure's
+  references per build language, memoized on the bound tables.
 - **The cost model is partly implemented.** [read, 2026-10-24] Scores are
   seconds: a call costs its language's coefficient times its self time
   (`@selftime` on its signature or `source` block item, else 1 us) plus
@@ -68,9 +81,9 @@ reproduced]
   latency (COST-3 without the per-element and per-byte slopes), a
   recursive definition its body times 1000 (COST-14), a function argument
   of a sourced function 1000 calls of it (COST-4). Sizes (COST-5, COST-8,
-  COST-9), `@dimension` and `@wiresize` have no code (sizes deferred
-  2026-10-25); a name in a `@selftime` or `@calls` formula is rejected
-  until `@dimension` exists (COST-7). A function value
+  COST-9) and `@dimension` have no code, so a name in a `@selftime` or
+  `@calls` formula is rejected (COST-7); `@wiresize` and byte sizes are
+  deferred with COST-3's copy cost (2026-10-25). A function value
   inside another type handed to a sourced function is priced as one
   call.
 - **A bracket step through an instance is never placed in a pool.**

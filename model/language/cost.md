@@ -49,7 +49,8 @@ Deferred 2026-10-25: not implemented until a program needs it, one that
 moves a value no pools can share (an immutable Arrow table, and some
 tensors, are shared at no cost) and whose transfer costs far more than a
 crossing's fixed cost (about 20 to 40 us). Until then a crossing costs its
-latency only, and every size is unknown.
+latency only. Sizes that count elements (COST-5, COST-8) are not deferred:
+they bind the names of self times and call counts.
 
 Generated code moves values hop by hop: a subtree placed in a pool other
 than its parent's becomes a foreign call that receives the subtree's free
@@ -86,11 +87,10 @@ conditional) costs one default call.
 Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
 
-Deferred 2026-10-25: not implemented until a program needs it, one that
-moves a value no pools can share (an immutable Arrow table, and some
-tensors, are shared at no cost) and whose transfer costs far more than a
-crossing's fixed cost (about 20 to 40 us). Until then a crossing costs its
-latency only, and every size is unknown.
+The cost of copying data across a boundary is deferred 2026-10-25 with
+COST-3: `@wiresize` and sizes in bytes are not implemented until a program
+needs them. `@dimension` is in scope: its factors count elements and bind
+the names of `@selftime` and `@calls` formulas (COST-7).
 
 `@wiresize <bytes>` states a value's expected size on the wire; a number
 without a byte unit is an error. `@dimension <f1> ... <fk>` states its
@@ -145,8 +145,8 @@ formula without names whose value is undefined, infinite or negative is an
 error; one with names that takes such a value at a call counts as the
 default (COST-9) for that position.
 
-Names are introduced only by `@dimension` (COST-5), which is deferred;
-until it exists a formula that has a name is an error.
+Names are introduced only by `@dimension` (COST-5); until it is
+implemented a formula that has a name is an error.
 
 ## Sizes
 
@@ -154,11 +154,8 @@ until it exists a formula that has a name is an error.
 Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
 
-Deferred 2026-10-25: not implemented until a program needs it, one that
-moves a value no pools can share (an immutable Arrow table, and some
-tensors, are shared at no cost) and whose transfer costs far more than a
-crossing's fixed cost (about 20 to 40 us). Until then a crossing costs its
-latency only, and every size is unknown.
+Only element counts are computed until COST-3's copy cost is built
+(deferred 2026-10-25); they bind the names a formula uses.
 
 The size of a value at an edge is, first that applies:
 
@@ -180,11 +177,8 @@ state different literal sizes for one position are an error.
 Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
 
-Deferred 2026-10-25: not implemented until a program needs it, one that
-moves a value no pools can share (an immutable Arrow table, and some
-tensors, are shared at no cost) and whose transfer costs far more than a
-crossing's fixed cost (about 20 to 40 us). Until then a crossing costs its
-latency only, and every size is unknown.
+Element counts follow these defaults; byte sizes are deferred with COST-3
+(2026-10-25).
 
 A fixed-width value is its width. A variable-width leaf (`Str`, a byte
 vector) is 4 KB. A list is 10 elements times its element, or as many as a

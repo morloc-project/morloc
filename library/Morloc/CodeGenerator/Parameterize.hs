@@ -147,7 +147,8 @@ parameterize' args (AnnoS g c (IntrinsicS intr es)) = do
   return $ AnnoS g (c, args') (IntrinsicS intr es')
 parameterize' _ (AnnoS g c (CallS v)) = do
   return $ AnnoS g (c, []) (CallS v)
-parameterize' _ (AnnoS _ _ (VarS _ _)) = undefined
+parameterize' _ (AnnoS _ (Idx i _) (VarS v _)) =
+  MM.throwCompilerBugAt i $ "a reference to the term" <+> pretty v <+> "was not resolved before parameterization"
 
 pruneArgs :: [Arg a] -> [AnnoS c One (g, [Arg a])] -> [Arg a]
 pruneArgs args xs =

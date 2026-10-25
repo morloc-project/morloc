@@ -555,7 +555,7 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
             MM.modify $ \st ->
               st { statePlacement = Just (prior <> ["cost check failed for " <> site
                      <> ": built " <> renderScore built <> ", least " <> renderScore optimum
-                     <> offenders kept scored]) }
+                     <> offenders kept scored <> origins kept scored rescored]) }
         _ -> return ()
 
     -- the nodes collapse put in a language their table does not offer
@@ -569,6 +569,30 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
           [ nodeKind ex <> " in " <> render (pretty l) <> " not " <> render (pretty (map fst tbl))
           | Just (Just l) <- [Map.lookup i kept], not (null tbl), l `notElem` map fst tbl
           ] <> concat (foldExprS (\y -> [go y]) ex)
+
+    -- the deepest nodes whose cost in their chosen language changed when
+    -- rescored: where the difference starts
+    origins :: Map Int (Maybe Lang) -> Scored -> Scored -> MT.Text
+    origins kept a b =
+      let tabA = tables a
+          tabB = tables b
+          diffs =
+            [ (d, i, k, l, sa, sb)
+            | (i, (d, k, ta)) <- Map.toList tabA
+            , Just (Just l) <- [Map.lookup i kept]
+            , Just (_, _, tb) <- [Map.lookup i tabB]
+            , let sa = lookup l ta
+            , let sb = lookup l tb
+            , sa /= sb
+            ]
+          deepest = take 4 (reverse (List.sortOn (\(d, _, _, _, _, _) -> d) diffs))
+       in case deepest of
+            [] -> ""
+            xs -> "; origins: " <> MT.intercalate ", " [k <> "@" <> MT.pack (show i) <> " " <> render (pretty l) <> " " <> renderScore sa <> " -> " <> renderScore sb | (_, i, k, l, sa, sb) <- xs]
+      where
+        tables :: Scored -> Map Int (Int, MT.Text, [(Lang, Score)])
+        tables = Map.fromList . go (0 :: Int)
+        go d (AnnoS _ (Idx i tbl) ex) = (i, (d, nodeKind ex, tbl)) : concat (foldExprS (\y -> [go (d + 1) y]) ex)
 
     renderScore :: Maybe Score -> MT.Text
     renderScore Nothing = "nothing"
