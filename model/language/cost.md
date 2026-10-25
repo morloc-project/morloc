@@ -85,7 +85,7 @@ conditional) costs one default call.
 
 ### COST-5 `@wiresize` and `@dimension` state the size of a value
 Intent: ruled 2026-10-16
-Tests: spec-cost-5-1, spec-cost-5-2, spec-cost-5-3, spec-cost-5-4, spec-cost-5-5, spec-cost-5-6, spec-cost-5-7, spec-cost-5-8, spec-cost-5-9
+Tests: spec-cost-5-1, spec-cost-5-2, spec-cost-5-3, spec-cost-5-4, spec-cost-5-5, spec-cost-5-6, spec-cost-5-7, spec-cost-5-8, spec-cost-5-9, spec-cost-5-10, spec-cost-5-11, spec-cost-5-12, spec-cost-5-13
 Code: deviates (../compiler/issues/realization.md)
 
 The cost of copying data across a boundary is deferred 2026-10-25 with
@@ -101,7 +101,9 @@ that type, in bytes. At most one factor is bytes; the product is bytes, the
 size, or a plain number, which counts elements of the innermost element
 type, each of its own size (one byte for a character of a `Str`; a tuple
 element is the sum of its fields). Any other product, and a type name as a
-factor, is an error. `@wiresize` and `@dimension` are mutually exclusive on
+factor, is an error. A type variable applied to one element (`f a`) is a
+container of one level, whose count is known where the
+container is a list and is the default otherwise. `@wiresize` and `@dimension` are mutually exclusive on
 one position; between an alias and the signature that writes it, the
 nearer wins (DOC-5). Allowed
 above: an argument or the result in a signature; a type alias (applying

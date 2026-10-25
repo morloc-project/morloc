@@ -2156,6 +2156,67 @@ lexTests =
         f xs = fold add 0 xs
         |]
     , accept
+        "spec-cost-5-10"
+        [r|
+        module main (f)
+        class Mappable f where
+          --' Apply to each element
+          --' @selftime 2ns * n
+          mapEach ::
+            --' @calls n
+            (a -> b) ->
+            --' @dimension n
+            f a ->
+            --' @dimension n
+            f b
+        f :: Int -> Int
+        f x = x
+        |]
+    , rejectUser
+        "spec-cost-5-11"
+        [r|
+        module main (f)
+        class Mappable f where
+          mapEach ::
+            (a -> b) ->
+            --' @dimension n m
+            f a ->
+            f b
+        f :: Int -> Int
+        f x = x
+        |]
+    , accept
+        "spec-cost-5-12"
+        [r|
+        module main (f)
+        class Mappable f where
+          mapEach ::
+            (a -> b) ->
+            --' @dimension n m
+            f [a] ->
+            f b
+        --' @selftime 1ns * n
+        each ::
+          (a -> b) ->
+          --' @dimension n
+          g a ->
+          g b
+        f :: Int -> Int
+        f x = x
+        |]
+    , rejectUser
+        "spec-cost-5-13"
+        [r|
+        module main (f)
+        both ::
+          (a -> b) ->
+          --' @dimension n
+          p a c ->
+          p b c
+        f :: Int -> Int
+        f x = x
+        |]
+    , accept
         "spec-cost-6-10"
         [r|
         module main (f)

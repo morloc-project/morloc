@@ -19,6 +19,7 @@ type declarations, and collects type definitions and source mappings into
 module Morloc.Frontend.Restructure (restructure) where
 
 import qualified Control.Monad.State.Strict as St
+import Data.Char (isLower)
 import qualified Data.Graph as Graph
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -256,12 +257,13 @@ expandStructuralTypes d = do
     -- introduced (COST-7).
     checkCostDocs :: Scope -> ExprI -> MorlocMonad ()
     checkCostDocs sc = AST.checkExprI $ \e -> case e of
-      ExprI i (SigE (Signature v _ et)) -> checkSig i v et
-      ExprI i (ClsE (Typeclass _ _ _ sigs)) -> mapM_ (\(Signature v _ et) -> checkSig i v et) sigs
+      ExprI i (SigE (Signature v _ et)) -> checkSig Set.empty i v et
+      -- a class method's signature does not quantify the class's variables
+      ExprI i (ClsE (Typeclass _ _ cvs sigs)) -> mapM_ (\(Signature v _ et) -> checkSig (Set.fromList cvs) i v et) sigs
       _ -> return ()
       where
-        checkSig :: Int -> EVar -> EType -> MorlocMonad ()
-        checkSig i v et = case edocs et of
+        checkSig :: Set TVar -> Int -> EVar -> EType -> MorlocMonad ()
+        checkSig cvars i v et = case edocs et of
           ArgDocSig cmd args ret -> do
             let (ts, r) = case unforall (etype et) of
                   FunU ts' r' -> (ts', r')
@@ -285,7 +287,7 @@ expandStructuralTypes d = do
                     <+> "has" <+> pretty depth <+> "list levels (COST-5)"
               | (what, t, d) <- [("argument" <+> pretty k, t, d) | (k, t, d) <- zip3 [1 :: Int ..] ts args] <> [("the result", r, ret)]
               , Just fs <- [docDimension d]
-              , let depth = listDepth sc (32 :: Int) t
+              , let depth = listDepth sc cvars (32 :: Int) t
               , length fs > depth
               ]
             -- COST-7: every name a formula uses is introduced by a
@@ -301,17 +303,24 @@ expandStructuralTypes d = do
           _ -> return ()
         hasCostDocs d = isJust (docCalls d) || isJust (docDimension d)
         -- the list levels of a type, through its aliases, effects and
-        -- optionals; a string is a list of characters (as Realize's
-        -- defaultShape counts them)
-        listDepth :: Scope -> Int -> TypeU -> Int
-        listDepth _ 0 _ = 0
-        listDepth sc' n t = case t of
-          ForallU _ t' -> listDepth sc' n t'
-          EffectU _ t' -> listDepth sc' (n - 1) t'
-          OptionalU t' -> listDepth sc' (n - 1) t'
-          AppU (VarU l) [x] | l == BT.list -> 1 + listDepth sc' (n - 1) x
+        -- optionals; a string is a list of characters, and a type variable
+        -- applied to one element (`f a` in a Functor method) a container of
+        -- one level
+        -- a signature's own type variable: lowercase and not a type in scope
+        freeVar sc' l@(TV name) = case T.uncons name of
+          Just (c, _) -> isLower c && not (Map.member l sc')
+          Nothing -> False
+        listDepth :: Scope -> Set TVar -> Int -> TypeU -> Int
+        listDepth _ _ 0 _ = 0
+        listDepth sc' vars n t = case t of
+          ForallU tv t' -> listDepth sc' (Set.insert tv vars) n t'
+          EffectU _ t' -> listDepth sc' vars (n - 1) t'
+          OptionalU t' -> listDepth sc' vars (n - 1) t'
+          AppU (VarU l) [x] | l == BT.list -> 1 + listDepth sc' vars (n - 1) x
+          AppU (VarU l) [x] | Set.member l vars || freeVar sc' l -> 1 + listDepth sc' vars (n - 1) x
           VarU s' | s' == BT.str -> 1
-          _ -> maybe 0 (listDepth sc' (n - 1)) (TE.expandHeadOnly sc' t)
+          _ -> maybe 0 (listDepth sc' vars (n - 1)) (TE.expandHeadOnly sc' t)
+
         callable (FunU _ _) = True
         callable (EffectU _ _) = True
         callable (ForallU _ t) = callable t
