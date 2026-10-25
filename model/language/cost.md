@@ -45,6 +45,12 @@ Language-free code the nexus evaluates costs nothing.
 Intent: proposed
 Code: deviates (../compiler/issues/realization.md)
 
+Deferred 2026-10-25: not implemented until a program needs it, one that
+moves a value no pools can share (an immutable Arrow table, and some
+tensors, are shared at no cost) and whose transfer costs far more than a
+crossing's fixed cost (about 20 to 40 us). Until then a crossing costs its
+latency only, and every size is unknown.
+
 Generated code moves values hop by hop: a subtree placed in a pool other
 than its parent's becomes a foreign call that receives the subtree's free
 variables as arguments and returns its result. Each such boundary, from
@@ -79,6 +85,12 @@ conditional) costs one default call.
 ### COST-5 `@wiresize` and `@dimension` state the size of a value
 Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
+
+Deferred 2026-10-25: not implemented until a program needs it, one that
+moves a value no pools can share (an immutable Arrow table, and some
+tensors, are shared at no cost) and whose transfer costs far more than a
+crossing's fixed cost (about 20 to 40 us). Until then a crossing costs its
+latency only, and every size is unknown.
 
 `@wiresize <bytes>` states a value's expected size on the wire; a number
 without a byte unit is an error. `@dimension <f1> ... <fk>` states its
@@ -127,11 +139,20 @@ dimension takes only an integer literal exponent. `@selftime` is a time,
 value that is undefined, infinite or negative counts as the default (COST-9)
 for that position.
 
+Names are introduced only by `@dimension` (COST-5), which is deferred;
+until it exists a formula that has a name is an error.
+
 ## Sizes
 
 ### COST-8 A value's size comes from what made it
 Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
+
+Deferred 2026-10-25: not implemented until a program needs it, one that
+moves a value no pools can share (an immutable Arrow table, and some
+tensors, are shared at no cost) and whose transfer costs far more than a
+crossing's fixed cost (about 20 to 40 us). Until then a crossing costs its
+latency only, and every size is unknown.
 
 The size of a value at an edge is, first that applies:
 
@@ -152,6 +173,12 @@ state different literal sizes for one position are an error.
 ### COST-9 Defaults follow the structure of the type
 Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
+
+Deferred 2026-10-25: not implemented until a program needs it, one that
+moves a value no pools can share (an immutable Arrow table, and some
+tensors, are shared at no cost) and whose transfer costs far more than a
+crossing's fixed cost (about 20 to 40 us). Until then a crossing costs its
+latency only, and every size is unknown.
 
 A fixed-width value is its width. A variable-width leaf (`Str`, a byte
 vector) is 4 KB. A list is 10 elements times its element, or as many as a
@@ -220,9 +247,5 @@ a literal; how a parallel map's workers, and a stream read
 from another pool, are costed; size directives inside function, suspension
 and optional aliases, which are expanded before signatures are read;
 computing in the caller an argument that only the caller's language can
-compute; whether a label (ANN) wraps the same work when a do-block splits;
-whether the 1 us default self time (COST-2) suits unannotated small
-functions: with measured coefficients a crossing costs about 20 us
-(model/performance XL-1), so a function that costs `coeff(L) * 1 us` in an
-interpreted language is cheaper called across a boundary in a compiled
-one, which would send every unannotated arithmetic call out of Python (../compiler/issues/realization.md).
+compute; and whether a label (ANN) wraps the same work when a do-block
+splits (../compiler/issues/realization.md).
