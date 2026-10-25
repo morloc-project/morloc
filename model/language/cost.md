@@ -29,14 +29,16 @@ per run.
 Intent: ruled 2026-10-16
 Code: deviates (../compiler/issues/realization.md)
 
-    call(f, L) = coeff(L) * selftime(f) + overhead(L)
+    call(f, L) = (coeff(L) * selftime(f)) / 10 + overhead(L)
 
 `selftime(f)` is the function's own time, excluding the functions it calls
 back (COST-4) and the values it moves (COST-3), evaluated at the sizes of
 its arguments: for a sourced implementation, its own `@selftime` (COST-6),
 else the `@selftime` of its signature, else 1 us. Implementations in one
 language may differ in self time; the cheaper is chosen at each call, from
-the sizes there. `coeff(L)` and `overhead(L)` are per language (COST-10). An
+the sizes there. `coeff(L)` and `overhead(L)` are per language (COST-10);
+`coeff` is stated against C at 10, so the product is divided by 10, after
+the multiplication, so that no rounding precedes it. An
 implementation defined in morloc, a class default (CLS-8) included, costs
 the sum of its body; a signature's `@selftime` does not apply to it.
 Language-free code the nexus evaluates costs nothing.

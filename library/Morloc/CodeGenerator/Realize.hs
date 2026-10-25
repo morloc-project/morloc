@@ -1269,11 +1269,12 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
     cost (Just l1) l2 score = score <> boundary l1 l2
     cost _ _ score = score
 
-    -- The cost of one call of a sourced function (COST-2): its language's
-    -- coefficient times its self time, plus the language's call overhead.
+    -- The cost of one call of a sourced function (COST-2): (its language's
+    -- coefficient times its self time) / 10, plus the language's call
+    -- overhead.
     callCost :: Map MT.Text Double -> Source -> Integer
     callCost env src =
-      picoseconds (LR.registryCallCoefficient registry lang / 10 * selftimeNs)
+      picoseconds ((LR.registryCallCoefficient registry lang * selftimeNs) / 10)
         + picoseconds (LR.registryCallOverhead registry lang)
       where
         lang = langName (srcLang src)

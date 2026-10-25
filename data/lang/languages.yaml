@@ -16,7 +16,7 @@ call_overhead_ns:
 default_call_overhead_ns: 100
 
 # How long a function's own work takes in a language, against C at 10: a
-# call costs (c / 10) * its self time (COST-2), 1 us when nothing states
+# call costs (c * its self time) / 10 (COST-2), 1 us when nothing states
 # it. Python is ten times C.
 call_coefficient:
   c: 10
