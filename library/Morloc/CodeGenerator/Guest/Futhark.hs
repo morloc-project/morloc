@@ -55,6 +55,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc (pretty, render)
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Platform as P
+import Morloc.ProgramBuilder.Build (requireStrictToolchain)
 import qualified Morloc.System as MS
 
 -- ---------------------------------------------------------------------------
@@ -231,6 +232,7 @@ futharkBuild :: [GuestSource] -> BuildOpts -> MorlocMonad BuildProducts
 futharkBuild srcs opts = do
   let backend = fromMaybe "c" (boBackend opts)
       outDir = boOutDir opts
+  requireStrictToolchain CGuestToolchain
   triples <- mapM (buildOne backend outDir) srcs
   let (os, hs, jsons) = unzip3 triples
   pure

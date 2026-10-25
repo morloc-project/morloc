@@ -793,7 +793,7 @@ makeTheMaker flags includes = do
         SysRun . Code . render $
           [idoc|${CXX:-g++} -O2 -o #{outfile} #{src} #{hostSrc} #{hsep flags'} #{hsep incs}|]
 
-  return [cmd]
+  return [SysRequireToolchain CppPoolToolchain, cmd]
 
 -- | Forward declarations. Every manifold of the pool is declared, plus the
 -- native entry of any recursive manifold: a nested manifold is otherwise

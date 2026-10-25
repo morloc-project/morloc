@@ -1,6 +1,6 @@
 # Conda requirements for the cppmorloc binder. C++ has no versioned runtime (the
 # standard, not a package version), so there is no `runtime:` block.
 requires:
-  # Held below 2 for the same reason as the core toolchain: 2.x carries no
-  # compiler activation.
-  - { package: cxx-compiler, version: "<2", phase: build }
+  # Pinned with the core toolchain's c-compiler/cxx-compiler, for the same
+  # reason: 2.x carries no compiler activation.
+  - { package: cxx-compiler, version: "==1.11.0", phase: build }

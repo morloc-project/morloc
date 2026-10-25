@@ -16,12 +16,14 @@ toolchain:
   # activation chain, so keeping it in core guarantees $AR is always exported,
   # not only when a program happens to declare a cpp pool.
   #
-  # Both are held below 2: the 2.x metapackages depend on the bare `gcc`/`clang`
-  # packages instead of `gcc_linux-64`/`clang_osx-arm64`, so a 2.x solve has no
-  # compiler activation at all -- no activate.d, no $CC/$CXX/$AR, and on macOS no
-  # `bin/gcc` either. 1.x is the last line that carries the activation chain.
-  - { package: c-compiler,   version: "<2", phase: build }
-  - { package: cxx-compiler, version: "<2", phase: build }
+  # Both are pinned to one 1.x release: the 2.x metapackages depend on the bare
+  # `gcc`/`clang` packages instead of `gcc_linux-64`/`clang_osx-arm64`, so a 2.x
+  # solve has no compiler activation at all -- no activate.d, no $CC/$CXX/$AR,
+  # and on macOS no `bin/gcc` either. Within 1.x each release fixes the compiler
+  # line (1.11.0: gcc 14 on Linux, clang 19 on macOS), so a new release changes
+  # the toolchain only when this pin moves. Keep cpp/requirements.yaml equal.
+  - { package: c-compiler,   version: "==1.11.0", phase: build }
+  - { package: cxx-compiler, version: "==1.11.0", phase: build }
   - { package: make,         version: "*", phase: build }
   - { package: pkg-config,   version: "*", phase: build }
   # git is universal to the installation system: `morloc install` clones modules

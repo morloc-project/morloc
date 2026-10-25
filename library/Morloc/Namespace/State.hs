@@ -72,6 +72,7 @@ module Morloc.Namespace.State
 
     -- * System
   , SysCommand (..)
+  , PoolToolchain (..)
   , Script (..)
 
     -- * Language registry
@@ -1015,6 +1016,15 @@ data SysCommand
     -- the crates in @env@ and @pool@ that @base@ lacks (see
     -- "Morloc.Build.CargoLock").
     SysMergeCargoLock Path Path Path
+  | -- | In strict conda mode, refuse to go on if this build would run a
+    -- program from outside the environment (see
+    -- "Morloc.CodeGenerator.SystemConfig").
+    SysRequireToolchain PoolToolchain
+  deriving (Show, Ord, Eq)
+
+-- | The builds that run a conda toolchain at @morloc make@ time: a C++ pool, a
+-- Rust pool, and a C guest compile (Futhark's emitted C).
+data PoolToolchain = CppPoolToolchain | RustPoolToolchain | CGuestToolchain
   deriving (Show, Ord, Eq)
 
 data Script

@@ -2312,7 +2312,7 @@ makeTheMaker crateName locks = do
       -- Runs only after a successful build, so a failed resolution never
       -- writes anything into the environment lock.
       mergeCmd = SysMergeCargoLock (rlBase locks) (rlEnv locks) poolLock
-  return [buildCmd, mergeCmd, copyCmd]
+  return [SysRequireToolchain RustPoolToolchain, buildCmd, mergeCmd, copyCmd]
 
 -- | The lowering configuration. The core fields are real; the fields for
 -- closures/partial application, remote calls, caching, and pattern evaluation

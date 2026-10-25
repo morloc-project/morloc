@@ -19,6 +19,11 @@ module Morloc.CodeGenerator.SystemConfig
   , pathIsWithin
   , Incoherence (..)
   , compilerIncoherence
+  , BuildTool (..)
+  , PoolToolchain (..)
+  , ToolchainHost (..)
+  , toolsOutsidePrefix
+  , strictToolchainError
   ) where
 
 import qualified System.Info as SI
@@ -31,13 +36,14 @@ import qualified Morloc.System as MS
 import Morloc.Module (OverwriteProtocol (..))
 
 import qualified Data.List as DL
+import Data.Char (isSpace, toUpper)
 import qualified Data.Text.IO as TIO
 
 import Control.Exception (SomeException, bracket, catch, displayException, fromException, onException, try)
 import System.IO.Error (ioeGetErrorString)
-import System.Directory (canonicalizePath, copyFile, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameFile)
-import System.Environment (lookupEnv, setEnv)
-import System.FilePath (takeDirectory, takeFileName)
+import System.Directory (canonicalizePath, copyFile, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, executable, findExecutable, findExecutablesInDirectories, getHomeDirectory, getPermissions, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameFile)
+import System.Environment (getEnvironment, lookupEnv, setEnv)
+import System.FilePath (splitSearchPath, takeDirectory, takeFileName)
 import System.IO (hClose, hIsTerminalDevice, hPutStrLn, openTempFile, stderr)
 import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hLock, hTryLock)
 import System.Exit (ExitCode(..))
@@ -97,7 +103,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- (marker-driven) and build only what is missing. A bare @morloc init@ (flag
   -- unset) rebuilds everything, so it can never silently keep an ABI-stale runtime
   -- after a compiler upgrade.
-  incremental <- maybe False (`notElem` ["", "0", "false", "no"]) <$> lookupEnv "MORLOC_INIT_INCREMENTAL"
+  incremental <- envFlag "MORLOC_INIT_INCREMENTAL"
 
   -- Admission control FIRST, before any destructive step: a failed coherence
   -- check must abort before the runtime build and the force-clean below,
@@ -791,19 +797,204 @@ pathIsWithin parent child = (parent <> "/") `DL.isPrefixOf` (child <> "/")
 -- backend and the native CI -- so ordinary system-toolchain installs are
 -- unaffected. Errors if strict mode is requested without an active @CONDA_PREFIX@.
 strictCondaPrefix :: IO (Maybe FilePath)
-strictCondaPrefix = do
-  strict <- lookupEnv "MORLOC_STRICT_CONDA"
-  let enabled = maybe False (`notElem` ["", "0", "false", "no"]) strict
+strictCondaPrefix = strictMode >>= either (ioError . userError) return
+
+-- | 'strictCondaPrefix', with the error as a value.
+strictMode :: IO (Either String (Maybe FilePath))
+strictMode = do
+  enabled <- envFlag "MORLOC_STRICT_CONDA"
   if not enabled
-    then return Nothing
+    then return (Right Nothing)
     else do
       mPrefix <- lookupEnv "CONDA_PREFIX"
       case mPrefix of
-        Nothing ->
-          ioError . userError $
+        Just prefix | not (all isSpace prefix) -> Right . Just <$> canonicalizePath prefix
+        _ ->
+          return . Left $
             "MORLOC_STRICT_CONDA is set but CONDA_PREFIX is not: strict mode "
               <> "requires an active conda/pixi environment."
-        Just prefix -> Just <$> canonicalizePath prefix
+
+-- | Is an on/off environment variable on? Unset, empty, @0@, @false@, @no@ and
+-- @off@, in any case, are off.
+envFlag :: String -> IO Bool
+envFlag k = maybe False ((`notElem` ["", "0", "false", "no", "off"]) . map toLower) <$> lookupEnv k
+
+-- | A program a pool build runs, as the build resolves it: the variable that
+-- names it (Nothing for a default name looked up on PATH), that value, and the
+-- executable found.
+data BuildTool = BuildTool
+  { btRole :: String
+  , btLinker :: Bool
+  , btVar :: Maybe String
+  , btValue :: String
+  , btFound :: Maybe FilePath
+  }
+  deriving (Eq, Show)
+
+-- | What the check needs to know about the host.
+data ToolchainHost = ToolchainHost
+  { thSystemLinker :: Maybe FilePath
+  -- ^ a host program rustc may link with: on macOS @/usr/bin/cc@, which
+  -- conda's activation never replaces and which links Rust and libSystem only
+  , thTargetTriple :: FilePath -> IO (Maybe String)
+  -- ^ the host triple reported by the rustc at this path, which is the
+  -- prefix's
+  }
+
+-- | In strict mode, the error for a pool build that would run a program from
+-- outside @$CONDA_PREFIX@, or that names one that does not exist; Nothing when
+-- strict mode is off or every program is the environment's. This is the
+-- make-time half of 'checkCondaCoherence': it sees the environment cargo and
+-- the C++ compiler actually run in, which @morloc init@ never does.
+strictToolchainError :: PoolToolchain -> IO (Maybe String)
+strictToolchainError kind = do
+  mode <- strictMode
+  case mode of
+    Left err -> return (Just err)
+    Right Nothing -> return Nothing
+    Right (Just prefixAbs) -> do
+      vars <- getEnvironment
+      bad <- toolsOutsidePrefix host prefixAbs vars kind
+      return $ if null bad then Nothing else Just (report prefixAbs bad)
+  where
+    host =
+      ToolchainHost
+        { thSystemLinker = if SI.os == "darwin" then Just "/usr/bin/cc" else Nothing
+        , thTargetTriple = rustcHost
+        }
+    rustcHost rustc = do
+      result <- try (readProcessWithExitCode rustc ["-vV"] "")
+                  :: IO (Either SomeException (ExitCode, String, String))
+      return $ case result of
+        Right (ExitSuccess, out, _) ->
+          listToMaybe [h | l <- lines out, Just h <- [DL.stripPrefix "host: " l]]
+        _ -> Nothing
+    report prefixAbs bad =
+      unlines $
+        [ "This build would run programs that are missing, broken, or not the conda"
+        , "environment's (CONDA_PREFIX=" <> prefixAbs <> "):"
+        ]
+          ++ [ "  " <> btRole t <> ": " <> maybe "" (<> "=") (btVar t) <> btValue t
+                 <> maybe " (not found)" (" -> " <>) (btFound t)
+             | t <- bad
+             ]
+          ++ [ "In a mim environment, run `mim update` to record its toolchain again, and"
+             , "check that your shell startup files put no other compiler or Rust ahead"
+             , "of the environment on PATH."
+             ]
+
+-- | How a build reads a program from a variable's value.
+data Split
+  = Whole  -- ^ the value is one program (cargo's rustc and linker)
+  | CcRs   -- ^ the whole value if it is a file, else its words, behind a compiler cache
+  | Shell  -- ^ its words, as an unquoted shell expansion splits them
+
+-- | The programs a pool build would run that are missing or lie outside the
+-- (canonical) prefix, resolved against @vars@ (its @PATH@ included) the way the
+-- build resolves them. A C++ pool runs @${CXX:-g++}@ and a C guest compile
+-- @${CC:-cc}@. A Rust pool runs cargo and rustc, compiles C and C++ through
+-- cc-rs (@CC@, @CXX@ and @AR@, each in the form cc-rs reads for a native
+-- build) and links through cargo's linker. The cc-rs and linker forms are
+-- named by the target triple, which comes from rustc once it is known to be
+-- the prefix's; a prefix rustc that reports none is itself reported.
+toolsOutsidePrefix :: ToolchainHost -> FilePath -> [(String, String)] -> PoolToolchain -> IO [BuildTool]
+toolsOutsidePrefix host prefixAbs vars kind = do
+  (tools, broken) <- case kind of
+    CppPoolToolchain -> (\t -> ([t], [])) <$> fromVars "C++ compiler" Shell ["CXX"] "g++"
+    CGuestToolchain -> (\t -> ([t], [])) <$> fromVars "C compiler" Shell ["CC"] "cc"
+    RustPoolToolchain -> do
+      cargo <- fromVars "cargo" Whole [] "cargo"
+      rustc <- fromVars "rustc" Whole ["RUSTC", "CARGO_BUILD_RUSTC"] "rustc"
+      rustcInPrefix <- not <$> isOutside rustc
+      triple <-
+        if rustcInPrefix
+          then maybe (return Nothing) (thTargetTriple host) (btFound rustc)
+          else return Nothing
+      let ccRsVars base = maybe [] (\t -> [base <> "_" <> t, base <> "_" <> map underscore t]) triple ++ ["HOST_" <> base, base]
+      cc <- mapM (\(role, base, def) -> fromVars role CcRs (ccRsVars base) def)
+        [("C compiler for cc-rs", "CC", "cc"), ("C++ compiler for cc-rs", "CXX", "c++"), ("archiver for cc-rs", "AR", "ar")]
+      -- With no triple the linker variable is unknown: rustc itself is
+      -- reported, as a foreign rustc or as one that names no host.
+      case triple of
+        Just t -> do
+          linker <- fromVars "linker" Whole [linkerVar t] "cc"
+          return ([cargo, rustc] ++ cc ++ [linker {btLinker = True}], [])
+        Nothing
+          | rustcInPrefix -> return ([cargo] ++ cc, [rustc {btRole = "rustc, which reports no host triple"}])
+          | otherwise -> return ([cargo, rustc] ++ cc, [])
+  bad <- filterM isOutside tools
+  return (bad ++ broken)
+  where
+    var k = lookup k vars
+    pathDirs = maybe [] splitSearchPath (var "PATH")
+
+    -- The first variable set names the program; with none, or with a value the
+    -- build reads as none, the default name. cc-rs takes the first variable
+    -- set, even a blank one, and falls back when it trims to nothing; the
+    -- shell's @${X:-def}@ falls back only on an empty value; cargo is taken to
+    -- run any value set, so an empty one names nothing.
+    fromVars role how ks def =
+      case [(k, v) | k <- ks, Just v <- [var k], keeps how v] of
+        ((k, v) : _) | not (fallsBack how v) -> do
+          found <- locate how v
+          spaced <- case how of
+            Shell | length (shellWords v) > 1 -> isExecutableFile v
+            _ -> return False
+          let role' = if spaced then role <> " (the build's shell splits its path at the space)" else role
+          return (BuildTool role' False (Just k) v found)
+        _ -> BuildTool role False Nothing def <$> locate Whole def
+
+    keeps Shell v = not (null v)
+    keeps _ _ = True
+    fallsBack CcRs v = all isSpace v
+    fallsBack _ _ = False
+
+    underscore c = if c == '-' then '_' else c
+    linkerVar t = "CARGO_TARGET_" <> map (toUpper . underscore . dot) t <> "_LINKER"
+    dot c = if c == '.' then '_' else c
+
+    locate how value = case how of
+      Whole -> program value
+      Shell -> firstWord (shellWords value)
+      CcRs -> do
+        let trimmed = DL.dropWhileEnd isSpace (dropWhile isSpace value)
+        whole <- if '/' `elem` trimmed then isExecutableFile trimmed else return False
+        if whole then return (Just trimmed) else firstWord (words trimmed)
+
+    -- The default IFS: space, tab and newline.
+    shellWords str = case dropWhile ifs str of
+      "" -> []
+      rest -> let (w, more) = break ifs rest in w : shellWords more
+    ifs c = c `elem` (" \t\n" :: String)
+
+    -- A compiler cache in front of the compiler is not the compiler.
+    firstWord (w : prog : _) | takeFileName w `elem` compilerCaches = program prog
+    firstWord (prog : _) = program prog
+    firstWord [] = return Nothing
+
+    program p
+      | '/' `elem` p = (\ok -> if ok then Just p else Nothing) <$> isExecutableFile p
+      | otherwise = listToMaybe <$> findExecutablesInDirectories pathDirs p
+
+    -- The directory is canonicalized, not the file: see 'checkCondaCoherence'.
+    isOutside t = case btFound t of
+      Nothing -> return True
+      Just p -> do
+        systemLinker <- case thSystemLinker host of
+          Just sys | btLinker t -> (==) <$> canonicalizePath p <*> canonicalizePath sys
+          _ -> return False
+        if systemLinker
+          then return False
+          else not . pathIsWithin prefixAbs <$> canonicalizePath (takeDirectory p)
+
+    -- Wrappers that run the named compiler locally. Remote compilers (distcc,
+    -- icecc) are judged as themselves.
+    compilerCaches = ["ccache", "sccache", "cachepot", "buildcache"]
+
+isExecutableFile :: FilePath -> IO Bool
+isExecutableFile p = do
+  isFile <- doesFileExist p
+  if isFile then executable <$> getPermissions p else return False
 
 -- | ABI-bearing tools: compilers and language interpreters whose provenance
 -- determines the ABI of what they build/run. In strict mode these MUST come from

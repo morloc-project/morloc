@@ -35,3 +35,34 @@
   open: an owner per pin (`morloc-deps` entry with `github:`/`org:`, a
   snapshot column), an org per snapshot file, or a per-umbrella default
   org.
+
+- **`morloc init` and `morloc make` read a compiler variable differently.**
+  [read] Gap: no spec item says how a strict environment's toolchain is
+  checked. The init-time check (`resolveToolName`/`resolveToolLocation` in
+  library/Morloc/CodeGenerator/SystemConfig.hs) takes `$CC`/`$CXX` as one
+  program name, so `CC='ccache x86_64-conda-linux-gnu-cc'` or
+  `CXX='g++ -m64'` resolves to nothing: strict `toolAvailableInEnv` skips
+  the C++ shim and `exportArchiveTools` runs `$CC -print-prog-name=ar` on
+  the whole string. The make-time check (`toolsOutsidePrefix`) splits the
+  value as cc-rs and the shell do. Init should use the same resolver.
+
+- **The make-time strict check reads only environment variables.** [read]
+  `toolsOutsidePrefix` does not see cargo configuration
+  (`target.<triple>.linker`, `build.rustc`, `[env]` in a `config.toml`),
+  `-C linker=` in `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`, `RUSTC_WRAPPER`,
+  or `CARGO_BUILD_TARGET`, so a host linker or compiler chosen there passes.
+  Asking cargo (`cargo config get`, or the `cargo build -v` command lines)
+  would see what the build really runs.
+
+- **A prefix link to a host compiler passes the strict check.** [read]
+  `toolsOutsidePrefix` and `checkCondaCoherence` canonicalize a tool's
+  directory, not the tool, because pixi links `$CONDA_PREFIX/bin` entries
+  into a shared package store outside the prefix. A link
+  `$CONDA_PREFIX/bin/gcc -> /usr/bin/gcc` therefore counts as the
+  environment's. Telling the two apart needs the package store's location.
+
+- **The Futhark `ispc` backend may not build.** [speculative]
+  `futharkBackends` accepts `ispc`, whose output includes a `.kernels.ispc`
+  file, but `buildOne` (library/Morloc/CodeGenerator/Guest/Futhark.hs)
+  compiles only the emitted C, so the kernels may never be built or linked.
+  Needs a reproduction.

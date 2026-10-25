@@ -19,6 +19,7 @@ module Morloc.ProgramBuilder.Build
   , resolveBuildDirs
   , ensureStagingDir
   , stagingPoolsDir
+  , requireStrictToolchain
   , discardStagingDir
   , withStagingCleanup
   ) where
@@ -26,11 +27,13 @@ module Morloc.ProgramBuilder.Build
 import Control.Exception (IOException, try)
 import Control.Monad.Except (catchError, throwError)
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc ((<+>), line, vsep, pretty)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Build.CargoLock as CL
+import Morloc.CodeGenerator.SystemConfig (strictToolchainError)
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.ProgramBuilder.Paths (buildDirName, buildMarker)
@@ -209,9 +212,11 @@ buildProgram (manifest, wrappers, pools) = do
     -- files ever get written. Between the two, provision the program's
     -- declared dependencies (a no-op outside a managed environment), so the
     -- pool compiles find the required headers/libraries/interpreters.
+    -- The toolchain checks run once each, before any pool compiles.
     buildAll projectRoot ss = do
       mapM_ writeScript ss
       syncEnvDeps projectRoot
+      mapM_ requireStrictToolchain (Set.toList (Set.fromList [k | s <- ss, SysRequireToolchain k <- scriptMake s]))
       mapM_ runMakes ss
 
 -- | Provision a program's declared package dependencies before its pools are
@@ -378,7 +383,10 @@ writeScript s = do
       MM.throwSystemError (vsep msgs)
 
 runMakes :: Script -> MorlocMonad ()
-runMakes s = mapM_ runSysCommand (scriptMake s)
+runMakes s = mapM_ runSysCommand [c | c <- scriptMake s, not (isToolchainCheck c)]
+  where
+    isToolchainCheck (SysRequireToolchain _) = True
+    isToolchainCheck _ = False
 
 -- | Turn a directory-tree write failure into an actionable message.
 -- A directory occupying the output path is the common, recoverable
@@ -398,9 +406,16 @@ describeWriteFailure (Failed _ e) = do
       else "Failed to write generated file:" <+> pretty (show e)
 describeWriteFailure _ = return "Failed to write generated files."
 
+-- | In strict conda mode, fail if a build of this kind would run a program
+-- from outside the environment.
+requireStrictToolchain :: PoolToolchain -> MorlocMonad ()
+requireStrictToolchain kind =
+  liftIO (strictToolchainError kind) >>= maybe (return ()) (MM.throwSystemError . pretty)
+
 runSysCommand :: SysCommand -> MorlocMonad ()
 runSysCommand (SysExe path) = liftIO $ callProcess "chmod" ["755", path]
 runSysCommand (SysRun (Code cmd)) = MM.runCommand "runSysCommand" cmd
 runSysCommand (SysMergeCargoLock base envLock pool) = liftIO $ CL.mergeLockFiles base envLock pool
+runSysCommand (SysRequireToolchain kind) = requireStrictToolchain kind
 runSysCommand other =
   MM.throwSystemError $ "Unsupported SysCommand: " <> pretty (show other)
