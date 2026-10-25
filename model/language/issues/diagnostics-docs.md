@@ -113,12 +113,6 @@
   `Reader`. Building `stream` itself warns that these docstrings document
   nothing (stream/main.loc:58 and :64); importers are not warned. Same
   class as the COST-13 point on directives inside structural aliases.
-- **A constant formula with no value is rejected; COST-7 says it counts as
-  the default.** [read, 2026-10-25] Deviates from COST-7 (ruled):
-  `@selftime 1us - 2us` fails (Desugar.parseSelftime, test spec-cost-6-6)
-  where COST-7 says a negative value counts as the position's default.
-  Needs a ruling: an error suits a constant, the default suits a formula
-  whose names are bound only later.
 - **A where-local or instance-body definition's docstring replaces a
   top-level term's.** [read, 2026-10-25] Violates DOC-1. Local
   definitions go through desugarTopLevel, so captureDeclDocs files their

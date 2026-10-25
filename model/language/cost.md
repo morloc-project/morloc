@@ -123,7 +123,7 @@ applies to an implementation defined in morloc, whose counts and cost come
 from its body.
 
 ### COST-7 A formula is arithmetic over a signature's names, with units
-Intent: ruled 2026-10-16
+Intent: ruled 2026-10-25
 Code: deviates (../compiler/issues/realization.md)
 
 A formula has numbers with units, names, `+ - * / ^`, `log` (natural),
@@ -137,8 +137,9 @@ dimension (adding a time to a plain number is an error), the argument of
 dimension takes only an integer literal exponent. `@selftime` is a time,
 `@wiresize` bytes, `@calls` a plain number. A name in `@calls` or
 `@selftime` that no `@dimension` of the signature introduces is an error. A
-value that is undefined, infinite or negative counts as the default (COST-9)
-for that position.
+formula without names whose value is undefined, infinite or negative is an
+error; one with names that takes such a value at a call counts as the
+default (COST-9) for that position.
 
 Names are introduced only by `@dimension` (COST-5), which is deferred;
 until it exists a formula that has a name is an error.
