@@ -184,13 +184,14 @@ Element counts follow these defaults; byte sizes are deferred with COST-3
 (2026-10-25).
 
 A fixed-width value is its width. A variable-width leaf (`Str`, a byte
-vector) is 4 KB. A list is 10 elements times its element, or as many as a
+vector) is 4 KB. A list is 1000 elements times its element, or as many as a
 literal `Nat` in its type states. A record or tuple is the sum of its
 fields; a sum type its largest constructor; an optional its payload. A type
 that contains itself counts its inner occurrence as a variable-width leaf. A
 stream, an IFile, a function value and a suspension are 64 B (a handle or a
 callable, WIRE-5; their cost is in their use, COST-4). An unbound name is
-10.
+1000, the same default as a callback's count (COST-4) and a recursion's
+depth (COST-14), so the estimates agree (ruled 2026-10-25).
 
 ## Coefficients and the scorer
 

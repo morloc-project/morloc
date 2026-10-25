@@ -86,7 +86,7 @@ reproduced]
   COST-9) are element counts only: `@dimension` above a signature's
   argument or result binds names from a list literal's length, a let
   variable's value, a sourced call's result `@dimension`, or COST-9's
-  default of 10 per level. Not yet: `@dimension` above a type alias or a
+  default of 1000 per level. Not yet: `@dimension` above a type alias or a
   record field (rejected), a type variable as a factor (rejected), a
   consumer's literal factor beating a default (COST-8 rule 3, ignored), a
   parameter's size from its enclosing signature (COST-8 rule 1, default

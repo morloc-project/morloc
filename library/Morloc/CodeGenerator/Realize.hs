@@ -352,12 +352,19 @@ mergeLevels (a : as) (b : bs) = mergeCount a b : mergeLevels as bs
 mergeLevels as [] = as
 mergeLevels [] bs = bs
 
+-- | How many times something repeats when nothing says: a callback's calls
+-- (COST-4), a recursive body's levels (COST-14), the elements of a list
+-- level and the value of a name (COST-9). One number, so the estimates
+-- agree with each other.
+defaultRepeat :: Int
+defaultRepeat = 1000
+
 -- | The count of a name nothing binds, and of a list level nothing states
 -- (COST-9).
 unboundCount :: Double
-unboundCount = 10
+unboundCount = fromIntegral defaultRepeat
 
--- | COST-9: each list level of the type is 10 elements and a string 4096
+-- | COST-9: each list level of the type is 'unboundCount' elements and a string 4096
 -- characters; an effect or an optional counts its value's levels.
 defaultShape :: Type -> Shape
 defaultShape = go (32 :: Int)
@@ -384,7 +391,7 @@ bindNames (Just (argDims, _)) shapes =
 -- | How many times a function calls a function argument, when nothing says
 -- otherwise (COST-4).
 defaultCallbackCount :: Int
-defaultCallbackCount = 1000
+defaultCallbackCount = defaultRepeat
 
 -- | The time of the "no realization" sentinel, above any placement's cost.
 unrealizable :: Integer
@@ -393,7 +400,7 @@ unrealizable = 10 ^ (300 :: Int)
 -- | How many times a recursive definition runs its body per call, when
 -- nothing says otherwise (COST-14).
 defaultRecursionCount :: Int
-defaultRecursionCount = 1000
+defaultRecursionCount = defaultRepeat
 
 -- | A scored child as its parent sees it: its type, whether code
 -- generation always builds it in its parent's language, and its table.
