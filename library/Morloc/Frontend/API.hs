@@ -210,7 +210,13 @@ parse f (Code code) = do
 
         -- Load the <main>.yaml file associated with the main morloc package file
         moduleConfig <- Config.loadModuleConfig (Just importPath)
-        let newState = s {psModuleConfig = moduleConfig}
+        -- the package this module belongs to, absent for the program's own
+        let pkg = case Map.lookup importedModule rw of
+              Just _ -> Map.lookup mainModule pkgs
+              Nothing
+                | Mod.isLocalImport importedModule -> Map.lookup mainModule pkgs
+                | otherwise -> Just (importedModule, MS.takeDirectory importPath)
+            newState = s {psModuleConfig = moduleConfig, psOwnModule = isNothing pkg}
 
         Mod.loadModuleMetadata False importPath
         (childPath, code') <- openLocalModule importPath
@@ -222,11 +228,6 @@ parse f (Code code) = do
             -- import edge targets ".units"). Reconcile by renaming the DAG
             -- entry to match the import name.
             let d'' = reconcileModuleName importedModule d d'
-                pkg = case Map.lookup importedModule rw of
-                  Just _ -> Map.lookup mainModule pkgs
-                  Nothing
-                    | Mod.isLocalImport importedModule -> Map.lookup mainModule pkgs
-                    | otherwise -> Just (importedModule, MS.takeDirectory importPath)
                 (d3, renamed) = case pkg of
                   Just (p, root) -> renameLocalImports p root importedModule d''
                   Nothing -> (d'', [])

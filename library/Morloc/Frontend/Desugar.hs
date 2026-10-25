@@ -104,11 +104,14 @@ data DState = DState
   { dsExpIndex :: !Int
   , dsSourceMap :: !(Map.Map Int SrcLoc)
   , dsDocMap :: !(Map.Map Pos [Text])
+  , dsDocsRead :: !(Set.Set Pos)
+    -- ^ The 'dsDocMap' keys some reader looked up; the rest document nothing.
   , dsModulePath :: !(Maybe Path)
   , dsModuleConfig :: !ModuleConfig
   , dsSourceLines :: ![Text]
   , dsLangMap :: !(Map.Map Text Lang) -- alias -> Lang for all known languages
   , dsProjectRoot :: !(Maybe Path) -- project root (directory of entry-point file)
+  , dsOwnModule :: !Bool -- the program's own module, not one of an installed package
   , dsTermDocs :: !(Map.Map EVar [Text]) -- declaration-level docstrings
   , dsWarnings :: ![Text] -- accumulated docstring warnings, drained by the caller
   , dsModuleDoc :: ![Text] -- module-level description lines
@@ -213,8 +216,38 @@ posOfExprI (ExprI ident _) = do
 
 lookupDocsAt :: Pos -> D [Text]
 lookupDocsAt pos = do
+  State.modify (\s -> s {dsDocsRead = Set.insert pos (dsDocsRead s)})
   docMap <- State.gets dsDocMap
   return (Map.findWithDefault [] pos docMap)
+
+-- | The docstring of a class, instance or effect declaration is for readers
+-- of the source; nothing prints it.
+readerDocs :: Span -> D ()
+readerDocs sp = void (lookupDocsAt (startPos sp))
+
+-- | The docstring of an item, filed above the item or above one of the
+-- separators before it, with the position to report it at. Two blocks for
+-- one item are an error, since neither could be said to win.
+lookupItemDocs :: [Pos] -> Pos -> D (Pos, [Text])
+lookupItemDocs leads own = do
+  found <- mapM (\p -> (,) p <$> lookupDocsAt p) (leads <> [own])
+  case [x | x@(_, ls) <- found, not (null ls)] of
+    [] -> return (own, [])
+    [x] -> return x
+    ((p, _) : _) -> dfail p "two docstring blocks above one item; join them into one"
+
+-- Only the program's own modules are warned about: a user cannot fix an
+-- installed package, whose author sees the warnings when building it.
+warnUnreadDocs :: D ()
+warnUnreadDocs = do
+  docMap <- State.gets dsDocMap
+  readPos <- State.gets dsDocsRead
+  ownModule <- State.gets dsOwnModule
+  when ownModule $ dwarn
+    [ "warning: " <> T.pack (posFile p) <> ":" <> T.pack (show (posLine p)) <> ":" <> T.pack (show (posCol p))
+        <> ": the docstring above this token documents nothing and is ignored"
+    | p <- Map.keys (Map.withoutKeys docMap readPos)
+    ]
 
 -- | Capture declaration-level docstring lines, keyed by term name.
 -- Extracts only free description lines (the same way processArgDocLines
@@ -950,7 +983,7 @@ processArgDocLinesD pos ls = do
     Nothing -> return v
     Just _ ->
       dfail pos
-        "`@selftime` states the self time of a sourced function: it is allowed only above a signature or an item of a `source` block (COST-6)"
+        "`@selftime` states the self time of a sourced function: it is allowed only above a signature or an item of a `source` block or list (COST-6)"
 
 -- | 'processArgDocLinesD' for the preamble of a signature, the one
 -- docstring that may state `@selftime`.
@@ -1087,10 +1120,7 @@ dataTypeDocs declPos ctors = do
           -- The block sits above whichever token starts the constructor's
           -- line: the `=` or `|` in the usual layout, the name itself when
           -- the bar ends the previous line.
-          leadDocs <- lookupDocsAt (locPos lead)
-          (p, dl) <- if null leadDocs
-            then (,) (locPos tok) <$> lookupDocsAt (locPos tok)
-            else return (locPos lead, leadDocs)
+          (p, dl) <- lookupItemDocs [locPos lead] (locPos tok)
           vars <- processArgDocLinesD p dl
           rejectDirectivesOnCtor p name vars
           return (name, vars))
@@ -3246,15 +3276,18 @@ desugarTopLevel (Loc sp (CRefutAssE name clauses whereDecls)) = do
   return [e]
 desugarTopLevel (Loc sp (CTypE td)) = desugarTypeDef sp td
 desugarTopLevel (Loc sp (CClsE classHead sigs)) = do
+  readerDocs sp
   (cs, cn, vs) <- desugarClassHead classHead
   sigs' <- mapM desugarSigItem sigs
   e <- freshExprSpan sp (ClsE (Typeclass cs cn vs sigs'))
   return [e]
 desugarTopLevel (Loc sp (CIstE ctx cn types body)) = do
+  readerDocs sp
   bodyExprs <- concatMapM desugarTopLevel body
   e <- freshExprSpan sp (IstE Declared cn ctx (map quantifyType types) bodyExprs)
   return [e]
 desugarTopLevel (Loc sp (CEffE lbl esc)) = do
+  readerDocs sp
   e <- freshExprSpan sp (EffE lbl esc)
   return [e]
 desugarTopLevel (Loc sp (CFixE assoc prec ops)) = do
@@ -3264,12 +3297,12 @@ desugarTopLevel (Loc sp (CSrcOldE langTok srcFile items)) = do
   lang <- parseLang langTok
   modPath <- State.gets dsModulePath
   let path = resolveSourceFile modPath srcFile
-  mapM (mkOldSource sp lang path) items
+  mapM (mkSource sp lang path True) items
 desugarTopLevel (Loc sp (CSrcNewE langTok srcFile nameTuples)) = do
   lang <- parseLang langTok
   modPath <- State.gets dsModulePath
   let path = resolveSourceFile modPath srcFile
-  mapM (mkNewSource sp lang path) nameTuples
+  mapM (mkSource sp lang path False) nameTuples
 desugarTopLevel (Loc _ (CInlineE inner)) = do
   exprs <- desugarTopLevel inner
   return (map markSourceInline exprs)
@@ -3734,47 +3767,35 @@ desugarSigItem (CstSigItem pos name sigType) = do
 -- Source desugaring
 --------------------------------------------------------------------
 
-mkOldSource :: Span -> Lang -> Maybe Path -> (Bool, Text, Maybe Text) -> D ExprI
-mkOldSource sp lang path (isBacktick, name, mayAlias) = do
-  let alias = maybe name id mayAlias
-  freshExprSpan
-    sp
-    ( SrcE
-        Source
-          { srcName = SrcName name
-          , srcLang = lang
-          , srcPath = path
-          , srcAlias = EV alias
-          , srcLabel = Nothing
-          , srcRsize = []
-          , srcNote = []
-          , srcInline = False
-          , srcOperator = isBacktick || isOperatorName name
-          , srcBacktick = isBacktick
-          , srcSelftime = Nothing
-          }
-    )
-
-mkNewSource :: Span -> Lang -> Maybe Path -> (Bool, Bool, Text, Located) -> D ExprI
-mkNewSource sp lang path (isInline, isBacktick, name, nameTok) = do
-  docLines' <- lookupDocsAt (locPos nameTok)
-  let isOp = isBacktick || isOperatorName name
+-- | A sourced item. An item of a `source` list, and a backtick-quoted item,
+-- names its foreign function in the item itself, so `@name` may not rename
+-- it.
+mkSource :: Span -> Lang -> Maybe Path -> Bool -> CstSrcItem -> D ExprI
+mkSource sp lang path isList item = do
+  (docPos, docLines') <- lookupItemDocs (srcItemLeadPos item) (srcItemPos item)
+  let name = srcItemName item
       baseSrc =
         Source
           { srcName = SrcName name
           , srcLang = lang
           , srcPath = path
-          , srcAlias = EV name
+          , srcAlias = EV (fromMaybe name (srcItemAlias item))
           , srcLabel = Nothing
           , srcRsize = []
           , srcNote = []
-          , srcInline = isInline
-          , srcOperator = isOp
-          , srcBacktick = isBacktick
+          , srcInline = srcItemInline item
+          , srcOperator = False
+          , srcBacktick = srcItemBacktick item
           , srcSelftime = Nothing
           }
-  src <- applySourceDocsD (startPos sp) docLines' baseSrc
-  freshExprSpan sp (SrcE src)
+  src <- applySourceDocsD docPos docLines' baseSrc
+  let foreignName = unSrcName (srcName src)
+  when ((isList || srcItemBacktick item) && foreignName /= name) $
+    dfail docPos . T.unpack $
+      "`@name` cannot rename the foreign function '" <> name
+        <> "': an item of a `source` list, or a backtick-quoted item, already names it"
+  -- whether the call is infix follows the foreign name, which `@name` may set
+  freshExprSpan sp (SrcE src {srcOperator = srcItemBacktick item || isOperatorName foreignName})
 
 isOperatorName :: Text -> Bool
 isOperatorName t = case T.uncons t of
@@ -3794,6 +3815,7 @@ desugarProgram isImplicitMain cstNodes = do
   exprIs' <- if isImplicitMain
                then mkImplicitMain exprIs
                else return exprIs
+  warnUnreadDocs
   -- Terminal-action synthesis and @collect expansion run later, in
   -- 'Morloc.Frontend.TerminalActions'.
   return exprIs'

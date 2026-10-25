@@ -41,6 +41,10 @@
   to infer concrete universal type for lang cpp for type Foo ... missing a
   language-specific type definition", naming no term. Repro:
   /work/plans/model-audit-2026-10-21/repro/F/real/r3.loc.
+  [reproduced, 2026-10-25] When the type has no mapping in any language
+  (`Int` with no `type Py => Int`), the error points at the module's export
+  list (`module main (f)`, column of `f`) rather than at a call; which node
+  is blamed changes with the placement chosen.
 - **An R pool load failure is printed twice.** [reproduced, 2026-10-21]
   A sourced R file assigning `.__morloc` prints "failed to load pool
   sources: cannot change value of locked binding" bare and again after
@@ -93,14 +97,6 @@
   mismatch.** [reproduced, 2026-10-23] `newtype Bag = [a]` reports
   `expected: [a] inferred: [a] Cannot compare types a and a@q0` instead of
   naming the unbound `a`.
-- [read, 2026-10-24] Violates DOC-1. Docstrings that attach and are then
-  dropped: everything above an item of a tuple-form `source` (`mkOldSource`
-  sets `srcNote = []` and never reads docs; only the block form does), a
-  `@selftime` there included (COST-6); and the docs above a `%inline` item
-  of a block-form `source`, keyed on the `%inline` token but looked up at
-  the name (Parser.y `'%inline' source_new_term`). No warning in either
-  case.
-
 - **`SystemError` is documented as a compiler bug but carries user errors.**
   [read, 2026-10-24] The constructor's comment (Namespace/State.hs,
   `MorlocError`) says "Internal compiler error (bug)", yet every error with
@@ -109,3 +105,24 @@
   concrete type. Its message prints plainly (no bug label; that is
   `throwCompilerBug`), so users are not misled, but tests cannot tell a
   user error at a position from a compiler bug (SpecTests `rejectUser`).
+- **Docstrings inside a function-type alias are dropped.** [reproduced,
+  2026-10-25] Violates DOC-3. In the stdlib `stream` module, `type Reader a
+  = --' Input file / --' @check.path r / Str -> ...` (and `Writer`) attach
+  their argument docstrings to a type inside an alias body, which no reader
+  looks up, so the `@check.path` never reaches a signature that writes
+  `Reader`. Building `stream` itself warns that these docstrings document
+  nothing (stream/main.loc:58 and :64); importers are not warned. Same
+  class as the COST-13 point on directives inside structural aliases.
+- **A constant formula with no value is rejected; COST-7 says it counts as
+  the default.** [read, 2026-10-25] Deviates from COST-7 (ruled):
+  `@selftime 1us - 2us` fails (Desugar.parseSelftime, test spec-cost-6-6)
+  where COST-7 says a negative value counts as the position's default.
+  Needs a ruling: an error suits a constant, the default suits a formula
+  whose names are bound only later.
+- **A where-local or instance-body definition's docstring replaces a
+  top-level term's.** [read, 2026-10-25] Violates DOC-1. Local
+  definitions go through desugarTopLevel, so captureDeclDocs files their
+  docstring in dsTermDocs under the bare name (Desugar.hs captureDeclDocs,
+  `Map.insert`), overwriting a documented top-level term of the same name;
+  help and `@with` lookups for that term then show the local docstring.
+  Needs a repro.

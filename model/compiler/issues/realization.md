@@ -55,11 +55,9 @@ reproduced]
   latency (COST-3 without the per-element and per-byte slopes), a
   recursive definition its body times 1000 (COST-14), a function argument
   of a sourced function 1000 calls of it (COST-4). Sizes (COST-5, COST-8,
-  COST-9), `@dimension`, `@wiresize` and `@calls` (COST-6) have no code;
-  a name in a `@selftime` formula is always 10 (COST-9's unbound value),
-  and none is checked against a `@dimension` (COST-7). `@selftime` on an
-  item of a tuple-form `source` list is dropped with the item's other
-  docstrings (language/issues/diagnostics-docs.md). A function value
+  COST-9), `@dimension`, `@wiresize` and `@calls` (COST-6) have no code
+  (sizes deferred 2026-10-25); a name in a `@selftime` formula is
+  rejected until `@dimension` exists (COST-7). A function value
   inside another type handed to a sourced function is priced as one
   call.
 - **A bracket step through an instance is never placed in a pool.**

@@ -652,6 +652,7 @@ cmdTypecheck args _ config buildConfig = do
                   Build.discardStagingDir
                   return pools
               )
+              >>= reportWarnings
               |>> writeTypecheckOutput verbosity
           putDoc (result <> "\n")
           return passed
@@ -663,9 +664,13 @@ cmdTypecheck args _ config buildConfig = do
               config
               buildConfig
               (M.typecheckFrontend path code)
+              >>= reportWarnings
               |>> writeFrontendTypecheckOutput verbosity
           putDoc (result <> "\n")
           return passed
+
+reportWarnings :: ((a, [MT.Text]), MorlocState) -> IO ((a, [MT.Text]), MorlocState)
+reportWarnings r@((_, msgs), _) = MM.printWarnings msgs >> return r
 
 writeFrontendTypecheckOutput ::
   Int ->
@@ -698,7 +703,8 @@ cmdDump :: DumpCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
 cmdDump args _ config buildConfig = do
   (path, code) <- readScript (dumpExpression args) (dumpScript args)
   let verbosity = dumpVerbose args
-  ((x, _), st) <- MM.runMorlocMonad Nothing verbosity config buildConfig (F.parse path code)
+  ((x, msgs), st) <- MM.runMorlocMonad Nothing verbosity config buildConfig (F.parse path code)
+  MM.printWarnings msgs
   case x of
     (Left e) -> do
       putDoc $ MM.makeMorlocError st e

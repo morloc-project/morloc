@@ -1,0 +1,13 @@
+all:
+	rm -f *.err obs.txt
+	morloc typecheck --realize main.loc 2> build.err | sed -n '/^placement:$$/,/^$$/p' > obs.txt
+	morloc make -o nexus main.loc 2>> build.err
+	./nexus byComma 1 >> obs.txt
+	./nexus byPlain 1 >> obs.txt
+	./nexus byParen 1 >> obs.txt
+	./nexus byItem 1 >> obs.txt
+
+clean:
+	rm -rf nexus pools __pycache__
+	rm -rf *-build *build.tmp*
+	rm -f *.err

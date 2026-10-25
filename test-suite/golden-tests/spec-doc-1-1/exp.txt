@@ -1,0 +1,3 @@
+main.loc:17:3: the docstring above this token documents nothing and is ignored
+main.loc:21:3: the docstring above this token documents nothing and is ignored
+script.loc:4:1: the docstring above this token documents nothing and is ignored

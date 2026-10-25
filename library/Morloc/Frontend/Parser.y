@@ -632,7 +632,7 @@ operator_ref :: { EVar }
 
 source_decl :: { [Loc CstExpr] }
   : 'source' lang_token opt_from '(' source_items ')'
-      { [at $1 (CSrcOldE $2 $3 $5)] }
+      { [at $1 (CSrcOldE $2 $3 (leadItem (locPos $4) $5))] }
   | 'source' lang_token opt_from 'where' VLBRACE source_new_items VRBRACE
       { [at $1 (CSrcNewE $2 $3 $6)] }
 
@@ -640,46 +640,48 @@ opt_from :: { Maybe Text }
   : {- empty -}                    { Nothing }
   | 'from' STRING                  { Just (getString $2) }
 
-source_items :: { [(Bool, Text, Maybe Text)] }
+source_items :: { [CstSrcItem] }
   : source_item                          { [$1] }
-  | source_items ',' source_item         { $1 ++ [$3] }
+  | source_items ',' source_item         { $1 ++ leadItem (locPos $2) [$3] }
 
-source_item :: { (Bool, Text, Maybe Text) }
-  : STRING                              { (False, getString $1, Nothing) }
-  | STRING 'as' LOWER                   { (False, getString $1, Just (getName $3)) }
-  | STRING 'as' UPPER                   { (False, getString $1, Just (getName $3)) }
-  | STRING 'as' source_op               { (False, getString $1, Just $3) }
-  | source_op                           { (False, $1, Nothing) }
-  | source_op 'as' source_op            { (False, $1, Just $3) }
-  | source_op 'as' LOWER               { (False, $1, Just (getName $3)) }
-  | source_op 'as' UPPER               { (False, $1, Just (getName $3)) }
+-- An item's docstrings are filed above its first token or above the
+-- separator before it.
+source_item :: { CstSrcItem }
+  : STRING                              { listItem (locPos $1) False (getString $1) Nothing }
+  | STRING 'as' LOWER                   { listItem (locPos $1) False (getString $1) (Just (getName $3)) }
+  | STRING 'as' UPPER                   { listItem (locPos $1) False (getString $1) (Just (getName $3)) }
+  | STRING 'as' source_op               { listItem (locPos $1) False (getString $1) (Just (snd $3)) }
+  | source_op                           { listItem (fst $1) False (snd $1) Nothing }
+  | source_op 'as' source_op            { listItem (fst $1) False (snd $1) (Just (snd $3)) }
+  | source_op 'as' LOWER               { listItem (fst $1) False (snd $1) (Just (getName $3)) }
+  | source_op 'as' UPPER               { listItem (fst $1) False (snd $1) (Just (getName $3)) }
   -- Backtick-quoted foreign name: `text` forces the sourced binding to
   -- be treated as an infix operator whose emitted string is <text>.
   -- The alias is required (there is no useful "morloc-side name" for a
   -- keyword like `and`, so the user must supply e.g. `and` as (&&)).
-  | BACKTICK 'as' source_op             { (True, getBacktick $1, Just $3) }
-  | BACKTICK 'as' LOWER                 { (True, getBacktick $1, Just (getName $3)) }
-  | BACKTICK 'as' UPPER                 { (True, getBacktick $1, Just (getName $3)) }
+  | BACKTICK 'as' source_op             { listItem (locPos $1) True (getBacktick $1) (Just (snd $3)) }
+  | BACKTICK 'as' LOWER                 { listItem (locPos $1) True (getBacktick $1) (Just (getName $3)) }
+  | BACKTICK 'as' UPPER                 { listItem (locPos $1) True (getBacktick $1) (Just (getName $3)) }
 
-source_op :: { Text }
-  : '(' operator_name ')'              { getOp $2 }
-  | '(' '-' ')'                        { "-" }
-  | '(' '.' ')'                        { "." }
+source_op :: { (Pos, Text) }
+  : '(' operator_name ')'              { (locPos $1, getOp $2) }
+  | '(' '-' ')'                        { (locPos $1, "-") }
+  | '(' '.' ')'                        { (locPos $1, ".") }
 
-source_new_items :: { [(Bool, Bool, Text, Located)] }
+source_new_items :: { [CstSrcItem] }
   : source_new_item                          { [$1] }
   | source_new_items VSEMI source_new_item   { $1 ++ [$3] }
 
-source_new_item :: { (Bool, Bool, Text, Located) }
-  : '%inline' source_new_term         { let (b, n, t) = $2 in (True, b, n, t) }
-  | source_new_term                   { let (b, n, t) = $1 in (False, b, n, t) }
+source_new_item :: { CstSrcItem }
+  : '%inline' source_new_term         { let (b, n, p) = $2 in CstSrcItem [locPos $1] p True b n Nothing }
+  | source_new_term                   { let (b, n, p) = $1 in CstSrcItem [] p False b n Nothing }
 
-source_new_term :: { (Bool, Text, Located) }
-  : LOWER                             { (False, getName $1, $1) }
-  | '(' operator_name ')'            { (False, getOp $2, $2) }
-  | '(' '-' ')'                      { (False, "-", $2) }
-  | '(' '.' ')'                      { (False, ".", $2) }
-  | BACKTICK                          { (True, getBacktick $1, $1) }
+source_new_term :: { (Bool, Text, Pos) }
+  : LOWER                             { (False, getName $1, locPos $1) }
+  | '(' operator_name ')'            { (False, getOp $2, locPos $1) }
+  | '(' '-' ')'                      { (False, "-", locPos $1) }
+  | '(' '.' ')'                      { (False, ".", locPos $1) }
+  | BACKTICK                          { (True, getBacktick $1, locPos $1) }
 
 --------------------------------------------------------------------
 -- Expressions
@@ -1142,11 +1144,12 @@ data PState = PState
   , psModuleDoc   :: ![Text] -- module-level description
   , psModuleEpilogues :: ![[Text]] -- epilogue blocks
   , psStreamElems :: !(Map.Map EVar TypeU) -- @collect batch type per command
+  , psOwnModule :: !Bool -- the program's own module, not one of an installed package
   }
   deriving (Show)
 
 emptyPState :: PState
-emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] [] Map.empty
+emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] [] Map.empty True
 
 type P a = State.StateT PState (Either ParseError) a
 
@@ -1219,6 +1222,13 @@ mkConstraint "Member" [a, s] = CMember a s
 mkConstraint "Subset" [a, b] = CSubset a b
 mkConstraint "Disjoint" [a, b] = CDisjoint a b
 mkConstraint name ts = Constraint (ClassName name) ts
+
+listItem :: Pos -> Bool -> Text -> Maybe Text -> CstSrcItem
+listItem p isBacktick name alias = CstSrcItem [] p False isBacktick name alias
+
+leadItem :: Pos -> [CstSrcItem] -> [CstSrcItem]
+leadItem p (x : rest) = x {srcItemLeadPos = p : srcItemLeadPos x} : rest
+leadItem _ [] = []
 
 getOp :: Located -> Text
 getOp (Located _ (TokOperator t) _) = t
@@ -1361,11 +1371,13 @@ toDState ps = DState
   { dsExpIndex = psExpIndex ps
   , dsSourceMap = psSourceMap ps
   , dsDocMap = psDocMap ps
+  , dsDocsRead = Set.empty
   , dsModulePath = psModulePath ps
   , dsModuleConfig = psModuleConfig ps
   , dsSourceLines = psSourceLines ps
   , dsLangMap = psLangMap ps
   , dsProjectRoot = psProjectRoot ps
+  , dsOwnModule = psOwnModule ps
   , dsTermDocs = psTermDocs ps
   , dsWarnings = psWarnings ps
   , dsModuleDoc = psModuleDoc ps
@@ -1442,8 +1454,15 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
       -- Strategy 2: wrap in module, patch trailing expr as __expr__ assignment.
       let wrappedCode = "module main (*)\n" <> sourceCode
       in case lexMorloc filename wrappedCode of
-        Right (wrappedTokens, wrappedDocMap, wrappedGroupToks) ->
-          let pstate'' = pstate' { psDocMap = wrappedDocMap, psSourceLines = T.lines wrappedCode }
+        Right (wrappedTokens0, wrappedDocMap0, wrappedGroupToks0) ->
+          -- positions are moved back up the added header line, so that
+          -- they name lines of the file as written
+          let up pos = pos { posLine = max 1 (posLine pos - 1) }
+              upTok t = t { locPos = up (locPos t) }
+              wrappedTokens = map upTok wrappedTokens0
+              wrappedGroupToks = map upTok wrappedGroupToks0
+              wrappedDocMap = Map.mapKeys up wrappedDocMap0
+              pstate'' = pstate' { psDocMap = wrappedDocMap }
           in case parseAndDesugar pstate'' wrappedTokens of
             Right (result, finalState) ->
               let dag' = foldl addModule dag result

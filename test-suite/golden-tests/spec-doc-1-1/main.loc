@@ -1,0 +1,37 @@
+-- A docstring above something that takes none is ignored with a warning
+-- (DOC-1): here, above the closing parenthesis of a `source` list and
+-- above an `as`. One above a class declaration is not warned about.
+-- `morloc typecheck` prints the warnings; the output is the warned lines,
+-- then those of script.loc, which has no module header and whose lines are
+-- still counted as written.
+
+--' Docstrings that document nothing
+module main (f)
+
+type Py => Int = "int"
+
+source Py from "f.py"
+  ( "g"
+  , "h"
+  --' Stray, above the closing parenthesis
+  )
+
+source Py from "f.py" ("g"
+  --' Stray, above an as
+  as k)
+
+--' A class, documented for readers
+class Sized a where
+  --' Its size
+  size :: a -> Int
+
+--' Add one
+g :: Int -> Int
+--' Add two
+h :: Int -> Int
+--' Add three
+k :: Int -> Int
+
+--' Add six
+f :: Int -> Int
+f x = k (g (h x))

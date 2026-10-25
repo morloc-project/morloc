@@ -4,11 +4,18 @@
 
 ### DOC-1 A docstring attaches to what follows it
 Intent: proposed
+Tests: spec-doc-1-1, spec-doc-1-2, spec-doc-1-3
 Code: conforms 2026-10-21
 
-A `--'` block attaches to the next module header, signature, type inside a
-signature, `source` list item, `type`/`newtype`/`record` declaration, or
-record field. A line beginning `@keyword` is a directive, any other is prose;
+A `--'` block attaches to the next module header, signature (a class
+method's included), definition, type inside a signature, `source` item,
+`type`/`newtype`/`record`/`data` declaration, `data` constructor, record
+field, or `class`, `instance` or `effect` declaration (whose docstrings are
+for readers of the source). An item of a `source` list takes the blocks above it, above
+the comma before it, and above the list's opening parenthesis if it is the
+first, and two of these blocks for one item are an error; an item of a `source` block takes the block above it, `%inline`
+included. A block above anything else documents nothing and is ignored with
+a warning. A line beginning `@keyword` is a directive, any other is prose;
 prose lines join in order, `\@` escapes a leading `@`, and an unknown
 directive is kept as prose with a warning.
 

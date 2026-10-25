@@ -1701,6 +1701,201 @@ lexTests =
         --' @selftime 1ns
         h x = x
         |]
+    , accept
+        "spec-src-2-1"
+        [r|
+        module main (f)
+        source Py from "f.py" where
+          --' @name plus
+          add
+        add :: Int -> Int
+        f :: Int -> Int
+        f x = add x
+        |]
+    , reject
+        "spec-src-2-2"
+        [r|
+        module main (f)
+        source Py from "f.py"
+          ( "minus"
+          --' @name plus
+          , "minus" as add
+          )
+        add :: Int -> Int
+        minus :: Int -> Int
+        f :: Int -> Int
+        f x = add (minus x)
+        |]
+    , reject
+        "spec-src-2-3"
+        [r|
+        module main (f)
+        source Py from "f.py" where
+          --' @name plus
+          `and`
+        f :: Int -> Int
+        f x = x
+        |]
+    , accept
+        "spec-doc-1-2"
+        [r|
+        module main (f)
+        source Py from "f.py"
+          ( "h"
+          --' @selftime 1ns
+          , "g"
+          )
+        g :: Int -> Int
+        h :: Int -> Int
+        f :: Int -> Int
+        f x = g (h x)
+        |]
+    , reject
+        "spec-doc-1-3"
+        [r|
+        module main (f)
+        source Py from "f.py"
+          ( "h"
+          --' @selftime 1ns
+          ,
+          --' @selftime 2ns
+          "g"
+          )
+        g :: Int -> Int
+        h :: Int -> Int
+        f :: Int -> Int
+        f x = g (h x)
+        |]
+    , accept
+        "spec-cost-6-10"
+        [r|
+        module main (f)
+        source Py from "f.py"
+          ( "h"
+          --' @selftime 20ns
+          , "g"
+          --' @selftime 3ns
+          , (+.)
+          )
+        source Py from "f.py" where
+          k
+          --' @selftime 1ns
+          %inline m
+          --' @selftime 2ns
+          (-.)
+        g :: Int -> Int
+        h :: Int -> Int
+        k :: Int -> Int
+        m :: Int -> Int
+        (+.) :: Int -> Int -> Int
+        (-.) :: Int -> Int -> Int
+        f :: Int -> Int
+        f x = m (k (g (h x))) +. 1 -. 2
+        |]
+    , reject
+        "spec-cost-6-11"
+        [r|
+        module main (f)
+        source Py from "f.py"
+          ( "h"
+          --' @selftime 10MB
+          , "g"
+          --' @selftime 3ns
+          , (+.)
+          )
+        source Py from "f.py" where
+          k
+          --' @selftime 1ns
+          %inline m
+          --' @selftime 2ns
+          (-.)
+        g :: Int -> Int
+        h :: Int -> Int
+        k :: Int -> Int
+        m :: Int -> Int
+        (+.) :: Int -> Int -> Int
+        (-.) :: Int -> Int -> Int
+        f :: Int -> Int
+        f x = m (k (g (h x))) +. 1 -. 2
+        |]
+    , reject
+        "spec-cost-6-12"
+        [r|
+        module main (f)
+        source Py from "f.py"
+          ( "h"
+          --' @selftime 20ns
+          , "g"
+          --' @selftime 10MB
+          , (+.)
+          )
+        source Py from "f.py" where
+          k
+          --' @selftime 1ns
+          %inline m
+          --' @selftime 2ns
+          (-.)
+        g :: Int -> Int
+        h :: Int -> Int
+        k :: Int -> Int
+        m :: Int -> Int
+        (+.) :: Int -> Int -> Int
+        (-.) :: Int -> Int -> Int
+        f :: Int -> Int
+        f x = m (k (g (h x))) +. 1 -. 2
+        |]
+    , reject
+        "spec-cost-6-13"
+        [r|
+        module main (f)
+        source Py from "f.py"
+          ( "h"
+          --' @selftime 20ns
+          , "g"
+          --' @selftime 3ns
+          , (+.)
+          )
+        source Py from "f.py" where
+          k
+          --' @selftime 10MB
+          %inline m
+          --' @selftime 2ns
+          (-.)
+        g :: Int -> Int
+        h :: Int -> Int
+        k :: Int -> Int
+        m :: Int -> Int
+        (+.) :: Int -> Int -> Int
+        (-.) :: Int -> Int -> Int
+        f :: Int -> Int
+        f x = m (k (g (h x))) +. 1 -. 2
+        |]
+    , reject
+        "spec-cost-6-14"
+        [r|
+        module main (f)
+        source Py from "f.py"
+          ( "h"
+          --' @selftime 20ns
+          , "g"
+          --' @selftime 3ns
+          , (+.)
+          )
+        source Py from "f.py" where
+          k
+          --' @selftime 1ns
+          %inline m
+          --' @selftime 10MB
+          (-.)
+        g :: Int -> Int
+        h :: Int -> Int
+        k :: Int -> Int
+        m :: Int -> Int
+        (+.) :: Int -> Int -> Int
+        (-.) :: Int -> Int -> Int
+        f :: Int -> Int
+        f x = m (k (g (h x))) +. 1 -. 2
+        |]
     ]
 
 -- | An alias applied to itself 28 times, whose expansion has 2^28 leaves.

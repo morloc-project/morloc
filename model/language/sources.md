@@ -13,11 +13,14 @@ compiler.
 
 ### SRC-2 `as` and `--' name:` rename a sourced term, and are equivalent
 Intent: proposed
+Tests: spec-src-2-1, spec-src-2-2, spec-src-2-3
 Code: conforms 2026-10-21
 
 The parenthesized form with `as` and the block form with a `--' name:`
 docstring declare the same thing. Without either, the morloc name is the
-foreign name.
+foreign name. An item of the parenthesized form names its foreign function
+itself, as does a backtick-quoted item, so a `--' name:` above either is
+an error.
 
 ### SRC-3 A sourced signature is a claim the compiler does not check
 Intent: proposed

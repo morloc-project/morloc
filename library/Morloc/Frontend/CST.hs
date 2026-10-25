@@ -21,6 +21,7 @@ module Morloc.Frontend.CST
   , CstTypeDef (..)
   , CstClassHead (..)
   , CstSigItem (..)
+  , CstSrcItem (..)
   , CstDoStmt (..)
   , CstAccessorBody (..)
   , CstBracketAxis (..)
@@ -102,12 +103,10 @@ data CstExpr
   | CIstE [Constraint] ClassName [TypeU] [Loc CstExpr]
   | CEffE Text Bool  -- ^ effect declaration: label, isEscapable (True = escapable)
   | CFixE Associativity Int [EVar]
-  -- Source-item tuple: (isBacktick, foreign-name, morloc-alias).
-  -- isBacktick=True marks the name as `-quoted; it will bypass ldNamePattern/ldOperatorPattern
-  -- validation and be emitted verbatim as an infix operator.
-  | CSrcOldE Located (Maybe Text) [(Bool, Text, Maybe Text)]
-  -- Source-item tuple: (isInline, isBacktick, foreign-name, name-token).
-  | CSrcNewE Located (Maybe Text) [(Bool, Bool, Text, Located)]
+  -- A `source` list, whose items name their foreign function
+  | CSrcOldE Located (Maybe Text) [CstSrcItem]
+  -- A `source` block, whose items may rename theirs with `@name`
+  | CSrcNewE Located (Maybe Text) [CstSrcItem]
   | -- Expressions
     CAppE (Loc CstExpr) [Loc CstExpr]
   | CLamE [Loc CstExpr] (Loc CstExpr)
@@ -177,6 +176,22 @@ data CstClassHead
   = CCHSimple TypeU
   | CCHConstrained TypeU TypeU
   | CCHMultiConstrained [Constraint] TypeU
+  deriving (Show, Eq)
+
+-- | An item of a `source` list or block.
+data CstSrcItem = CstSrcItem
+  { srcItemLeadPos :: [Pos]
+  -- ^ separators before the item, whose docstrings are also its own
+  , srcItemPos :: Pos
+  -- ^ the item's first token
+  , srcItemInline :: Bool
+  , srcItemBacktick :: Bool
+  -- ^ a `-quoted name, emitted verbatim as an infix operator
+  , srcItemName :: Text
+  -- ^ the foreign name
+  , srcItemAlias :: Maybe Text
+  -- ^ the morloc name, when it differs
+  }
   deriving (Show, Eq)
 
 -- | A class method signature: where its name stands (its docstring attaches

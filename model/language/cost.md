@@ -110,16 +110,17 @@ Sizes are language independent.
 
 ### COST-6 `@calls` and `@selftime` state counts and times
 Intent: ruled 2026-10-16
-Tests: spec-cost-6-1, spec-cost-6-2, spec-cost-6-3, spec-cost-6-4, spec-cost-6-5, spec-cost-6-6, spec-cost-6-7, spec-cost-6-8
+Tests: spec-cost-6-1, spec-cost-6-2, spec-cost-6-3, spec-cost-6-4, spec-cost-6-5, spec-cost-6-6, spec-cost-6-7, spec-cost-6-8, spec-cost-6-9, spec-cost-6-10, spec-cost-6-11, spec-cost-6-12, spec-cost-6-13, spec-cost-6-14
 Code: deviates (../compiler/issues/realization.md)
 
 Above a function-typed or suspension-typed argument, `@calls <formula>`
 states how many times a sourced implementation calls it. Above a
 signature, `@selftime <formula>` states the self time (COST-2) of every
-sourced implementation that states none of its own. Above a line of a
-`source` block, `@selftime <formula>` states that implementation's self
-time, in the names of its term's signature. Neither applies to an
-implementation defined in morloc, whose counts and cost come from its body.
+sourced implementation that states none of its own. Above an item of a
+`source` block or list (DOC-1), `@selftime <formula>` states that
+implementation's self time, in the names of its term's signature. Neither
+applies to an implementation defined in morloc, whose counts and cost come
+from its body.
 
 ### COST-7 A formula is arithmetic over a signature's names, with units
 Intent: ruled 2026-10-16

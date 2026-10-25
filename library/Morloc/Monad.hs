@@ -22,6 +22,7 @@ module Morloc.Monad
   ( MorlocReturn
   , runMorlocMonad
   , writeMorlocReturn
+  , printWarnings
   , makeMorlocError
   , sourceAt
   , runCommand
@@ -219,6 +220,10 @@ setDepth i = do
   put $ s {stateDepth = i}
   return ()
 
+-- | Print a run's warnings to stderr.
+printWarnings :: [MT.Text] -> IO ()
+printWarnings msgs = unless (null msgs) $ MT.hPutStrLn stderr (MT.unlines msgs)
+
 -- | Print a compilation's accumulated messages and, on failure, its error.
 --
 -- Messages are written on both branches. They are warnings -- an
@@ -228,7 +233,7 @@ setDepth i = do
 -- silently different interface.
 writeMorlocReturn :: MorlocReturn a -> IO Bool
 writeMorlocReturn ((result, msgs), st) = do
-  unless (null msgs) $ MT.hPutStrLn stderr (MT.unlines msgs)
+  printWarnings msgs
   case result of
     Left err' -> do
       MT.hPutStrLn stderr (render $ makeMorlocError st err')

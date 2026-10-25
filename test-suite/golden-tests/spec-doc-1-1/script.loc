@@ -1,0 +1,8 @@
+import root-py
+
+--' Stray, above a fixity declaration
+infixl 6 +.
+
+f x = x + 1
+
+f 3
