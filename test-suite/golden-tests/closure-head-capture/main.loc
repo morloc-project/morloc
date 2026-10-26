@@ -1,0 +1,48 @@
+-- A lambda handed to a Rust higher-order function whose body applies a
+-- closure captured from outside it: the closure is shared (used twice), so
+-- it is bound by a let in Python, and the lambda's body runs in Python. The
+-- crossing into that body passes the closure along with the lambda's own
+-- arguments, whether the closure is the whole body's head, applied to two
+-- arguments, or applied to the result of another call.
+
+--' Closures captured by a callback's body
+module main (headOnly, headTwoArgs, headNested)
+
+import parallel-rust
+import root-py
+
+source Py from "f.py" ("shout", "join2")
+
+--' Add an exclamation mark
+shout :: Str -> Str
+
+--' Join two strings
+join2 :: Str -> Str -> Str
+
+--' Render each element in parallel and concatenate
+renderAll :: ParOpts -> (a -> Str) -> [a] -> Str
+renderAll opts f xs = fold (<>) "" (pmapWith opts f xs)
+
+--' Use a one-argument function on its own and in the callback
+viaOne :: (Str -> Str) -> [Int] -> Str
+viaOne g xs = g "" <> renderAll defaultParOpts (\x -> g (show x)) xs
+
+--' Use a two-argument function on its own and in the callback
+viaTwo :: (Str -> Str -> Str) -> [Int] -> Str
+viaTwo g xs = g "<" ">" <> renderAll defaultParOpts (\x -> g (show x) "-") xs
+
+--' Use a function on its own and around another call in the callback
+viaNested :: (Str -> Str) -> [Int] -> Str
+viaNested g xs = g "" <> renderAll defaultParOpts (\x -> g (shout (show x))) xs
+
+--' The captured function is the callback body's head
+headOnly :: [Int] -> Str
+headOnly xs = viaOne shout xs
+
+--' The captured function takes two arguments
+headTwoArgs :: [Int] -> Str
+headTwoArgs xs = viaTwo join2 xs
+
+--' The captured function is applied to another call's result
+headNested :: [Int] -> Str
+headNested xs = viaNested shout xs

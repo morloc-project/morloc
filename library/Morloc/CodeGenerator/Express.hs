@@ -1417,7 +1417,7 @@ expressPolyExpr
               _
               (Idx _ appLang, appArgs)
               ( AppS
-                  funExpr@(AnnoS (Idx _ (FunT callInputTypes _)) (Idx _ callLang, _) _)
+                  funExpr@(AnnoS (Idx _ (FunT callInputTypes _)) (Idx _ callLang, headArgs) _)
                   xs
                 )
             )
@@ -1446,7 +1446,10 @@ expressPolyExpr
         xsInfo <- mapM partialExpress xs
 
         let xs' = map (\(_, _, e) -> e) xsInfo
-            callArgs = unique (concatMap (\(rs, _, _) -> rs) xsInfo)
+            -- the foreign body evaluates the head too, so it receives the
+            -- values the head refers to (a captured closure it calls) along
+            -- with those of the arguments
+            callArgs = unique (concatMap (\(rs, _, _) -> rs) xsInfo <> [i | Arg i _ <- headArgs])
             args = [i | Arg i _ <- appArgs]
             allParentArgs = args <> [i | (_, Just (i, _), _) <- xsInfo]
             lets = [PolyLet i e | (_, Just (i, e), _) <- xsInfo]
