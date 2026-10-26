@@ -9,9 +9,11 @@ Maintainer  : z@morloc.io
 -}
 module Morloc.CodeGenerator.Segment
   ( segment
+  , checkScopes
   ) where
 
 import Morloc.CodeGenerator.Namespace
+import qualified Data.Set as Set
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
@@ -215,3 +217,57 @@ reindexRecShadows s = go
     go (MonoLoopContinue es) = MonoLoopContinue <$> mapM go es
     go (MonoIntrinsic t intr es) = MonoIntrinsic t intr <$> mapM go es
     go e = return e
+
+-- | Every variable a manifold's body refers to is bound in it: an argument of
+-- its head or of the nested manifold around it, a let, or a loop variable.
+-- A nested manifold's context arguments are themselves references. A
+-- reference to anything else would be an undefined name in the generated
+-- code, found only when it runs; it is a compiler bug, reported here.
+checkScopes :: MonoHead -> MorlocMonad MonoHead
+checkScopes h@(MonoHead lang m args _ body) = do
+  case go (Set.fromList (map ann args)) body of
+    [] -> return h
+    (problem : _) -> MM.throwCompilerBugAt m $ "manifold" <+> pretty m <+> "in" <+> pretty lang <+> problem
+  where
+    go :: Set.Set Int -> MonoExpr -> [MDoc]
+    go sc e = case e of
+      MonoManifold _ form _ x ->
+        missing (map ann (manifoldContext form))
+          <> go (Set.fromList (map ann (manifoldContext form) <> map ann (manifoldBound form))) x
+      -- a pool call names the values it passes and is applied to exactly that many
+      MonoApp (MonoPoolCall _ mid _ _ xs) es
+        | length xs /= length es ->
+            ["calls manifold" <+> pretty mid <+> "naming" <+> pretty (length xs) <+> "values but passing" <+> pretty (length es)]
+      MonoPoolCall _ _ _ _ xs -> missing (map ann xs)
+      MonoLet i e1 e2 -> go sc e1 <> go (Set.insert i sc) e2
+      MonoLetVar _ i -> missing [i]
+      MonoBndVar _ i -> missing [i]
+      MonoReturn x -> go sc x
+      MonoApp f xs -> go sc f <> concatMap (go sc) xs
+      MonoCacheBody _ _ xs x -> missing (map ann xs) <> go sc x
+      MonoDebugWrap _ xs x -> missing (map ann xs) <> go sc x
+      MonoExe _ (LocalCallP j) -> missing [j]
+      MonoExe _ (PapplyP j) -> missing [j]
+      MonoExe _ (SrcCallP _ _) -> []
+      MonoExe _ (PatCallP _) -> []
+      MonoExe _ (RecCallP _ _) -> []
+      MonoRecord _ _ _ fs -> concatMap (go sc . snd . snd) fs
+      MonoList _ _ xs -> concatMap (go sc) xs
+      MonoTuple _ xs -> concatMap (go sc . snd) xs
+      MonoVariant _ _ _ xs -> concatMap (go sc) xs
+      MonoDoBlock _ x -> go sc x
+      MonoEval _ x -> go sc x
+      MonoCoerce _ _ x -> go sc x
+      MonoIf c a b -> go sc c <> go sc a <> go sc b
+      MonoLoop _ vs x -> go (foldr Set.insert sc vs) x
+      MonoLoopContinue xs -> concatMap (go sc) xs
+      MonoIntrinsic _ _ xs -> concatMap (go sc) xs
+      MonoLog _ _ -> []
+      MonoReal _ _ -> []
+      MonoInt _ _ -> []
+      MonoStr _ _ -> []
+      MonoEnum _ _ _ -> []
+      MonoNull _ -> []
+      where
+        missing = map (\i -> "refers to variable" <+> pretty i <+> "which none of its arguments or bindings provide")
+          . filter (`Set.notMember` sc)

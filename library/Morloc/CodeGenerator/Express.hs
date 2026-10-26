@@ -2218,7 +2218,12 @@ expressPolyApp lang (AnnoS (Idx i t) (Idx cidx _, _) (DoBlockS x)) es = do
 -- 'IfS' through 'expressPolyExprWrap', as the 'AppS'-head case does) avoids the
 -- eta-abstraction clause, which would re-enter 'expressPolyApp' on the 'IfS'
 -- and loop.
-expressPolyApp _lang (AnnoS (Idx i t) (Idx cidx clang, _) (IfS cond thenE elseE)) es = do
+expressPolyApp lang (AnnoS (Idx i t) (Idx cidx clang, _) (IfS cond thenE elseE)) es = do
+  -- the branches are expressed in the conditional's language and the call
+  -- emitted in the caller's, with no crossing between them
+  when (clang /= lang) $
+    MM.throwCompilerBugAt i $
+      "a conditional function value applied in" <+> pretty lang <+> "is realized in" <+> pretty clang
   let boolType = VarT (TV "Bool")
   cond' <- expressPolyExprWrap clang (mkIdx cond boolType) cond
   thenE' <- expressPolyExprWrap clang (mkIdx thenE t) thenE
@@ -2419,7 +2424,15 @@ polyFreeVars = go
     -- dependent on every construction site remembering to keep them in
     -- step. The callee body is a separate scope and contributes nothing.
     go (PolyRemoteInterface _ _ is _ _) = Set.fromList is
-    go _ = Set.empty
+    go (PolyExe _ (SrcCallP _ _)) = Set.empty
+    go (PolyExe _ (PatCallP _)) = Set.empty
+    go (PolyExe _ (RecCallP _ _)) = Set.empty
+    go (PolyLog _ _) = Set.empty
+    go (PolyReal _ _) = Set.empty
+    go (PolyInt _ _) = Set.empty
+    go (PolyStr _ _) = Set.empty
+    go (PolyEnum {}) = Set.empty
+    go (PolyNull _) = Set.empty
 
 -- | Resolve a function name to its manifold ID and determine if the call is cross-language.
 -- Returns (manifold ID, Nothing) for same-pool calls, (manifold ID, Just targetLang) for foreign calls.

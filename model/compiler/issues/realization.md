@@ -101,32 +101,31 @@ reproduced]
   (2026-10-25). A function value
   inside another type handed to a sourced function is priced as one
   call.
-- **UNSOUND: a function value chosen by a conditional and passed through
-  a Morloc function into a foreign host loses its free variables.**
-  [reproduced, 2026-10-25, also on v0.110.1] With `renderAll opts f xs =
-  fold (<>) "" (pmapWith opts f xs)` (`pmapWith` from `parallel-rust`),
-  `ifArg b xs = shout (renderAll defaultParOpts (? b = show : (\x -> shout
-  (show x))) xs)` builds, and `ifArg true [1,2]` fails at run time with
-  Python's "name 'n0' is not defined": the Rust closure calls a Python
-  function whose body tests `b`, which is never passed to it. The same
-  through a `let`-bound lambda fails alike. Written without the helper it
-  works.
-- **A suspension can be placed in another language than the lambda that
-  returns it.** [reproduced, 2026-10-25] Violates COST-11 (the built
-  placement must be one code generation can lower). Since e8aa73b08 the
-  stdlib `stream-r` and `stream-rust` suites fail to build: `collectSource
-  (loadSource p)` carries the partial application `loadSource p` into a
-  sourced `collectSource`; it is eta-expanded to `\sink -> loadSource p
-  sink`, the lambda is pinned to the host's language (R), and its body,
-  whose value is a suspension `<IO> ()` (itself a lambda), is collapsed in
-  Python, where it is cheaper. Code generation then meets a lambda value
-  realized in Python inside an R expression (Express "a lambda value is
-  realized in py inside an expression realized in r"). Before e8aa73b08 the
-  old constants placed the whole body in R. Needs a placement rule for where
-  a suspension value may be built (likely: in the language of the lambda or
-  expression that returns it, as for a lambda value), applied by both the
-  scorer and collapse. Repro: a module importing `stream-r` and `root-py`
-  with `f p = do { back <- collectSource (loadSource p); pylen back }`.
+- **A function the host supplies can be used in a part placed in another
+  language.** [reproduced, 2026-10-26] Violates COST-11 (the placement
+  built must be one that runs). The stdlib `stream-r` suite builds and fails
+  at run time with "cannot reify a function that morloc did not create";
+  `stream-rust` fails to build (Express "a lambda value is realized in py
+  inside an expression realized in rust", stream/main.loc:210). In
+  `collectSource (loadSource p)` the lambda carried into the R source
+  receives the host's `sink`, and its body, placed in Python because it is
+  cheaper, passes `sink` to Python's `drainStream`: a function made by host
+  code has no identity to cross. Before e8aa73b08 the whole body was placed in
+  R. Fix belongs to the placement redesign
+  (/work/plans/realization-placement-after-normalization.md): uses of a
+  host-supplied function value are placed in its language. Repro: a module
+  importing `stream-r` and `root-py`, `roundTrip p = do { saveSource 3 p
+  (listSource [1, 2, 3, 4, 5]); back <- collectSource (loadSource p);
+  pylen back }` (kept for the redesign's tests).
+- **A foreign body may be lowered with the caller's language.** [read,
+  2026-10-26] Express, lambda whose body is one application with a head in
+  another language: `expressPolyApp parentLang funExpr xs'` lowers the head
+  in the caller's language though the body is emitted in the callee's
+  (also the PatCall fallback near it). Harmless for a recursive call (a
+  probe with the recursion in Python and the callback in Rust calls the
+  helper directly in the Python pool); a pattern call would pick the
+  caller's language's instances, which matters only for a newtype whose
+  indexing instances differ by language. No witness yet.
 - **A repetition count scales the tie-breakers too.** [read, 2026-10-25]
   `scaleScore` multiplies a score's crossing and switch counts by the same
   count as its time (a callback's 1000 calls, a recursion's 1000 levels),

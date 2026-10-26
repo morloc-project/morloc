@@ -42,7 +42,7 @@ import Morloc.CodeGenerator.Parameterize (parameterize)
 import Morloc.CodeGenerator.Guest.Pass (lowerGuests)
 import Morloc.CodeGenerator.Realize (realityCheck)
 import qualified Morloc.CodeGenerator.Infer as Infer
-import Morloc.CodeGenerator.Segment (segment)
+import Morloc.CodeGenerator.Segment (checkScopes, segment)
 import Morloc.CodeGenerator.Serial (checkPackerCoherence)
 import Morloc.CodeGenerator.Reduce (reduce)
 import Morloc.CodeGenerator.Serialize (serialize)
@@ -143,6 +143,8 @@ lowerPools rASTs = do
                  checkEffectBoundaries ph'
                  lowerSuspensions (etaReduceForwarders ph'))
     >>= mapM segment |>> concat
+    -- every variable a generated manifold refers to is bound in it
+    >>= mapM checkScopes
     >>= mapM serialize
     >>= mapM reduce
     >>= (\ms -> checkManifoldIds reg ms >> return (pool reg ms))
