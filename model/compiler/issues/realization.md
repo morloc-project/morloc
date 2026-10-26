@@ -101,23 +101,65 @@ reproduced]
   (2026-10-25). A function value
   inside another type handed to a sourced function is priced as one
   call.
-- **A function the host supplies can be used in a part placed in another
-  language.** [reproduced, 2026-10-26] Violates COST-11 (the placement
-  built must be one that runs). The stdlib `stream-r` and `stream-rust`
-  suites fail to build (Express "a lambda value is realized in py inside an
-  expression realized in r"/"rust"); relabeling the lambda to make them build
-  instead fails at run time with "cannot reify a function that morloc did
-  not create". In
-  `collectSource (loadSource p)` the lambda carried into the R source
-  receives the host's `sink`, and its body, placed in Python because it is
-  cheaper, passes `sink` to Python's `drainStream`: a function made by host
-  code has no identity to cross. Before e8aa73b08 the whole body was placed in
-  R. Fix belongs to the placement redesign
-  (/work/plans/realization-placement-after-normalization.md): uses of a
-  host-supplied function value are placed in its language. Repro: a module
-  importing `stream-r` and `root-py`, `roundTrip p = do { saveSource 3 p
-  (listSource [1, 2, 3, 4, 5]); back <- collectSource (loadSource p);
-  pylen back }` (kept for the redesign's tests).
+- **A recursive helper whose body crosses pools cannot take a function
+  made by host code.** [reproduced, 2026-10-26] Its manifold gets no native
+  entry (Express.hs `addNativeRecEntries`, the `crosses` gate in
+  `splittable`), so a self-call in the same pool passes every argument
+  serialized, and serializing a host-made function fails at run time
+  ("cannot reify a function that morloc did not create"). The same helper
+  with a body in one language works (native entry). Repro: R `feed <-
+  function(k) k(function(x) x * 2L)`, `total n g ? n == 0 = 0 : pyAdd (g n)
+  (total (pySub n 1) g)`, `recursive n = feed (\g -> total n g)` with the
+  helper placed in R. Also blocks stream-r (`pullSource` given R's `sink`).
+- **A crossing recursion given both a function made by host code and a
+  value its pool cannot hold is refused.** [reproduced, 2026-10-26] Such a
+  recursion keeps its serial entry (Express.hs `allHeld`: callers of a
+  native entry pass one value per argument and cannot pass the packet an
+  unheld value is carried as), so its self-calls would serialize the host
+  function; the build stops with "a function made by host code would be
+  serialized here". Supporting it needs native entries that take a packet
+  for an unheld argument. Repro: a C++ host `cpp_feed(k)` calling `k` with a
+  C++ function, `walk n g b ? n == 0 = b : pyBump (walk (cppSub n 1) g b) (g
+  n)` with `b` a record mapped only to Python, `run n = cppFeed (\g ->
+  pyBoxValue (walk n g (pyMkBox 0)))`; should print 60 for `run 3`.
+- **A function value made out of sight of co-location can be applied to a
+  host-made function in another pool.** [read, 2026-10-26] Co-location
+  (Realize.hs `colocateHostFunctions`) builds in the host's language every
+  function value it can see reach a host-made function: lambdas, and the
+  function-holding arguments of a copied recursive helper. A function value
+  that arrives through a parameter of an uncopied function, or as the result
+  of a sourced call, and is then applied to a host-made function, may live in
+  another pool; the call sends the host-made function (or a closure that
+  captures it) there and fails at run time with the reify error. The
+  compile-time refusal (Serialize.hs `refuseHostFunction`) catches only a
+  host-made parameter serialized directly. No witness yet.
+- **Co-location moves nodes into the host's language without checking that
+  it can hold their values.** [read, 2026-10-26] `colocateHostFunctions`
+  (`relang`, `relangAll`) places a node that uses a host-made function, a
+  copied helper's body, and a copy's function-holding arguments in the
+  host's language whatever their types; a value the host's language cannot
+  hold (a record mapped only to Python, in C++) then fails at the pool's
+  compile or later, instead of as a located refusal. Spec gap beside COST-11
+  and HOST-9: what a program must do when the host's language cannot hold a
+  value computed from a host-made function.
+- **Placement after normalization can abort a build that placement before
+  it accepted.** [read, 2026-10-26] `placeNormalized` scores each pool tree
+  again; it keeps the old placement when the new one cannot be built
+  (`finish` returns Left, or the root's language would change), but an error
+  raised while scoring the normalized shape stops the build. No witness yet.
+- **Under `--debug`, a label or a cache, a same-pool recursion serializes
+  its arguments.** [read, 2026-10-26] `splittable` (Express.hs
+  `addNativeRecEntries`) refuses a body under a PolyDebugWrap, PolyCacheBody
+  or Preserved manifold, so every self-call goes through AppRecS and
+  serializes each argument (Serialize.hs RecCallP); a function made by host
+  code among them fails at run time with the reify error, even when the
+  whole recursion is in one language. `addLoopWraps` is also off under
+  `--debug`.
+- **A recursion reached only through back-edges marked as crossing gets no
+  native entry.** [read, 2026-10-26] `addNativeRecEntries` keeps only
+  targets of `(mid, Nothing)` back-edges, but segmentation can move a marked
+  edge into its target's pool (Serialize.hs RecCallP comment), giving a
+  same-pool call that serializes every argument.
 - **A foreign body may be lowered with the caller's language.** [read,
   2026-10-26] Express, lambda whose body is one application with a head in
   another language: `expressPolyApp parentLang funExpr xs'` lowers the head

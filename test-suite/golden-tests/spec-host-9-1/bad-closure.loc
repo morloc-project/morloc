@@ -1,0 +1,25 @@
+-- A closure that captures a function made by R host code, bound by a let
+-- and passed to Python, would carry the function across pools: the build is
+-- refused.
+
+--' A closure capturing a host-made function cannot cross languages
+module bad-closure (badLet)
+
+import root-py
+import root-r
+
+source R from "f.R" ("feed")
+source Py from "f.py" ("py_apply" as pyApply, "py_add" as pyAdd)
+
+--' Call a function with an R function that doubles
+feed :: ((Int -> Int) -> Int) -> Int
+
+--' Apply a function to a value
+pyApply :: (Int -> Int) -> Int -> Int
+
+--' Add two numbers
+pyAdd :: Int -> Int -> Int
+
+--' Hand Python a closure over the R function, twice
+badLet :: Int -> Int
+badLet n = feed (\g -> let h = \x -> g (pyAdd x n) in pyAdd (pyApply h 1) (pyApply h 2))

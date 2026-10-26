@@ -1046,7 +1046,8 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     mergeTypes x _ = x
 
     serializeS :: MDoc -> Int -> NativeExpr -> MorlocMonad SerialExpr
-    serializeS _ m se =
+    serializeS _ m se = do
+      refuseHostFunction m se
       SerializeS <$> Serial.makeSerialAST m lang (typeFof se) <*> pure se
 
     inferState :: MonoExpr -> SerializationState
@@ -1220,10 +1221,12 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
     wireNativeManifold (NativeManifold_ m _ form (req, e)) = do
       -- A closure captures values, never packets: a capture is part of the
       -- closure's wire form (reified with it, handed back to its body by the
-      -- home pool's dispatch), and only a native value has one. A body that
-      -- needs the packet, for a call into another pool, serializes the value
-      -- when it runs ('letWrap'), once per run.
-      let form0 = if isClosureForm form then afirst (const nativeCapture) form else form
+      -- home pool's dispatch), and only a native value has one. A recursion's
+      -- native entry is called with one value per argument ('RecCallP'
+      -- below). A body that needs the packet, for a call into another pool,
+      -- serializes the value when it runs ('letWrap'), once per run.
+      nativeEntry <- elem m . Map.elems <$> MM.gets stateNativeRecEntries
+      let form0 = if isClosureForm form || nativeEntry then afirst (const nativeCapture) form else form
           form' = afirst (specialize req) form0
           req' = Map.map fst (manifoldToMap form')
       e' <- letWrap m form' req e
@@ -1490,7 +1493,8 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
         f (ManifoldPart xs ys) = Map.union (mapRequestFromXs xs) (mapRequestFromYs ys)
 
     serializeS :: MDoc -> Int -> TypeF -> NativeExpr -> MorlocMonad SerialExpr
-    serializeS _ m t se =
+    serializeS _ m t se = do
+      refuseHostFunction m se
       SerializeS <$> Serial.makeSerialAST m lang t <*> pure se
 
 data Request = SerialContent | NativeContent | NativeAndSerialContent
@@ -1538,3 +1542,13 @@ endsInReturn (MonoLet _ _ e2) = endsInReturn e2
 -- A loop's value is the manifold's result: every base leaf breaks out with it.
 endsInReturn (MonoLoop {}) = True
 endsInReturn _ = False
+
+-- | A function made by host code has no wire form: serializing one would
+-- fail when the program runs, so it is refused when it is built.
+refuseHostFunction :: Int -> NativeExpr -> MorlocMonad ()
+refuseHostFunction m (BndVarN _ i _) = do
+  hostArgs <- MM.gets stateHostFunctionArgs
+  CM.when (Set.member i hostArgs) $
+    MM.throwSourcedError m
+      "a function made by host code would be serialized here to be sent to another pool or entry point; a function made by host code cannot leave the pool that received it"
+refuseHostFunction _ _ = return ()

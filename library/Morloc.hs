@@ -40,7 +40,7 @@ import Morloc.CodeGenerator.Namespace (Arg, PolyHead (..), SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Morloc.CodeGenerator.Parameterize (parameterize)
 import Morloc.CodeGenerator.Guest.Pass (lowerGuests)
-import Morloc.CodeGenerator.Realize (realityCheck)
+import Morloc.CodeGenerator.Realize (placeNormalized, realityCheck)
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.Segment (checkScopes, segment)
 import Morloc.CodeGenerator.Serial (checkPackerCoherence)
@@ -111,7 +111,7 @@ typecheck path code =
 -- LamS"). A multiply-used lambda is kept as a shared native closure (rASTs
 -- become pools, not the pure nexus evaluator).
 generatePools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
-generatePools rASTs = mapM applyPoolLambdas rASTs >>= specializeStaticArgs >>= lowerPools
+generatePools rASTs = mapM applyPoolLambdas rASTs >>= placeNormalized >>= specializeStaticArgs >>= lowerPools
 
 -- | Lower realized pool trees to per-language serial manifolds. This is the
 -- whole path from parameterization to pool assembly, shared by 'writeProgram'
@@ -199,6 +199,8 @@ writeProgram translateFn path code =
     -- there (True); rASTs become pools, where a multiply-used lambda is kept
     -- as a shared native closure to avoid exponential inlining (False).
     >>= bimapM (mapM (applyLambdas True)) (mapM applyPoolLambdas)
+    -- Place languages again on the normalized pool trees.
+    >>= (\(g, r) -> (,) g <$> placeNormalized r)
     -- Give a recursive helper its own copy for each closed function it is
     -- passed at a position every recursion passes through unchanged, so the
     -- function is referenced directly rather than carried as a closure value.

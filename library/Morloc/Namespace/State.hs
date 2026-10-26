@@ -298,6 +298,11 @@ data MorlocState = MorlocState
   -- | The copies of shared specializations the nexus calls by name, by the
   -- index of their root.
   , stateNamedGasts :: Map Int EVar
+  , stateHostFunctionVars :: Set.Set EVar
+  -- ^ Parameters bound to a function made by host code (renamed apart by
+  -- 'Morloc.CodeGenerator.Realize.colocateHostFunctions').
+  , stateHostFunctionArgs :: Set.Set Int
+  -- ^ The argument ids of those parameters ('Morloc.CodeGenerator.Parameterize').
   , stateHostOriginClosures :: Set.Set Int
   -- ^ Manifolds that wrap a function value a HOST created (the adapter at
   -- a sourced call's result). Such a value has no identity of its own, so
@@ -1098,6 +1103,8 @@ instance Defaultable MorlocState where
       , stateSpecNames = Set.empty
       , statePlacement = Nothing
       , stateNamedGasts = Map.empty
+      , stateHostFunctionVars = Set.empty
+      , stateHostFunctionArgs = Set.empty
       , stateHostOriginClosures = Set.empty
       , stateArgTypes = Map.empty
       , stateManifoldEffects = Map.empty

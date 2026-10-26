@@ -181,7 +181,8 @@ addNativeRecEntries phs = do
 
     splitEntry :: Set.Set Int -> PolyHead -> MorlocMonad PolyHead
     splitEntry targets ph@(PolyHead lang midx args body) = do
-      if Set.member midx targets && splittable body
+      held <- allHeld lang args
+      if Set.member midx targets && splittable body && (held || isLoop body || not (crosses body))
         then splitHead
         else return ph
       where
@@ -205,29 +206,21 @@ addNativeRecEntries phs = do
                 _ -> body
           return $ PolyHead lang midx args (PolyManifold lang midx' (ManifoldFull args) Preserved native)
 
-    -- A body whose shape already commits the manifold to something else: an
-    -- observability hook (a label, a cache, a debug wrap) is keyed to the
-    -- manifold's own ID and would move with the body. A loop is split like
-    -- any other body: its serial entry serializes every argument, and a
-    -- function argument would then be applied through this pool's own
-    -- socket on every iteration.
-    splittable :: PolyExpr -> Bool
-    splittable e
-      | crosses e && not (isLoop e) = False
-      | otherwise = go e
-      where
-        go (PolyCacheBody {}) = False
-        go (PolyDebugWrap {}) = False
-        go (PolyManifold _ _ _ Preserved _) = False
-        go (PolyManifold _ _ _ _ x) = go x
-        go (PolyReturn x) = go x
-        go _ = True
+    -- A value the pool cannot hold is carried as the packet it arrived in,
+    -- which the native entry's callers, passing one value per argument,
+    -- cannot supply; a body that crosses with one keeps the serial entry.
+    -- A loop's native entry carries such a value as its packet.
+    allHeld :: Lang -> [Arg None] -> MorlocMonad Bool
+    allHeld lang as = do
+      argTypes <- MM.gets stateArgTypes
+      reg <- MM.gets stateLangRegistry
+      let compiled = LR.registryIsCompiled reg (langName lang)
+      and <$> mapM
+        (\(Arg i _) -> case Map.lookup i argTypes of
+            Just (Idx ti ty) -> canHoldType compiled lang ti ty
+            Nothing -> return False)
+        as
 
-    -- A body that reaches another pool serializes on that path, so at least
-    -- one of its arguments is wanted in both forms; the entry takes one
-    -- value per argument and could not supply both. A loop is exempt: its
-    -- native entry copies every argument into a native local and serializes
-    -- a local for a crossing where it is used, on every iteration.
     crosses :: PolyExpr -> Bool
     crosses (PolyRemoteInterface {}) = True
     crosses e = any crosses (polySubExprs e)
@@ -238,6 +231,20 @@ addNativeRecEntries phs = do
     isLoop (PolyManifold _ _ _ _ x) = isLoop x
     isLoop (PolyReturn x) = isLoop x
     isLoop _ = False
+
+    -- A body whose shape already commits the manifold to something else: an
+    -- observability hook (a label, a cache, a debug wrap) is keyed to the
+    -- manifold's own ID and would move with the body. A body that reaches
+    -- another pool is split like any other: its native entry takes values,
+    -- and an argument wanted as a packet for the crossing is serialized
+    -- where the body runs ('Morloc.CodeGenerator.Serialize').
+    splittable :: PolyExpr -> Bool
+    splittable (PolyCacheBody {}) = False
+    splittable (PolyDebugWrap {}) = False
+    splittable (PolyManifold _ _ _ Preserved _) = False
+    splittable (PolyManifold _ _ _ _ x) = splittable x
+    splittable (PolyReturn x) = splittable x
+    splittable _ = True
 
 -- | Whether a driver language can host a native tail-loop. Python/R lower via
 -- 'genericMakeLoop'; C++ and Rust via the member's 'lcMakeLoop' (non-const

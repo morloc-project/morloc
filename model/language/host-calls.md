@@ -89,3 +89,23 @@ value a recursive type holds, must be `Send + Sync`; otherwise the build
 fails, with a note naming this rule before rustc's report. A value a closure
 captures in its serialized form (a packet the pool does not decode) is only
 read by the closure's calls (STATE-3).
+
+### HOST-9 A function a sourced function passes in stays in that sourced function's pool
+Intent: proposed
+Tests: spec-host-9-1
+Code: deviates model/compiler/issues/realization.md
+
+A function-typed parameter of a lambda passed to a sourced function is a
+function made by host code, whatever the host passes, and so is the matching
+parameter of a recursive function that such a function is given. It has no
+identity outside the host's pool, so it never crosses a pool boundary:
+
+- an application of it runs in the host's language;
+- an argument computed from it for a sourced function of another language
+  is computed in the host's language, and only its value crosses;
+- a recursive function given it is built in the host's language, a copy per
+  host language and per set of argument positions that receive one, its
+  recursion included; a function value such a copy may apply to it is built
+  there too;
+- passing it, or a closure that captures it, to a function of another
+  language is a build error, as is any program that would serialize it.

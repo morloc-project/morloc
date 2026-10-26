@@ -38,3 +38,11 @@
     label ("Undefined label 'x'").
   - `()` is not a pattern (`f () = 1`: "expected a pattern"); PAT-1 is
     silent.
+
+- **A module name with a keyword after a hyphen does not parse.**
+  [reproduced, 2026-10-26] `module bad-let (badLet)` fails with
+  "unexpected 'let' ... expected identifier", though `stream-r` and other
+  hyphenated names parse; the lexer reads the segment after `-` as a
+  keyword. The spec (module-names.md) does not say which module names are
+  legal, so either the name is legal and the lexer is wrong, or the rule is
+  missing.

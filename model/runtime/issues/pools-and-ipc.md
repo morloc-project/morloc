@@ -66,3 +66,18 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   - `fdatasync` of the output stream file (6 ms);
   - the `/bin/sh` wrapper forks `dirname` before exec'ing the nexus.
   `-h`, which starts no pool, takes 25-48 ms.
+
+- Host state is not shared across a fork pool's workers. [reproduced
+  2026-10-26, cause read] The spec says nothing on whether state a sourced
+  function keeps in its process (an R environment, a Python module
+  global) persists from one call to the next. A Python or R pool forks a
+  worker when a call arrives while its workers are busy (a re-entrant call:
+  R calls Python, which calls R; NET-8), and a later call may reach either
+  worker, so state made in one after the fork is missing in the other.
+  The stdlib stream-r suite fails this way: its sorters live in an R
+  environment (`.morloc_sorters`, stream-r R/stream.R), and after the
+  earlier test groups make re-entrant calls, `pushSorter h2` reaches a
+  worker without sorter 2 ("no open sorter 2", group "Sorting", called from
+  Python's `mapE_`). Needs a ruling: per-pool affinity for stateful
+  sources, a declared statefulness that keeps them on one worker, or host
+  state ruled out.

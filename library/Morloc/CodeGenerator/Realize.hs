@@ -18,6 +18,7 @@ implementation.
 module Morloc.CodeGenerator.Realize
   ( realityCheck
   , removeVarS
+  , placeNormalized
   ) where
 
 import Morloc.CodeGenerator.Serial (containsEffectT, containsFunT)
@@ -25,6 +26,7 @@ import Morloc.Cost.Formula (Formula (..), evalFormula, formulaNames)
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.GMap as GMap
 import Morloc.CodeGenerator.Value (etaParts, isValueWith)
+import Morloc.CodeGenerator.LambdaEval (reindexTree)
 import Morloc.Frontend.Namespace (newIndex)
 import Morloc.Frontend.Rename (displayName)
 import Morloc.CodeGenerator.Namespace
@@ -34,6 +36,7 @@ import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
 import Data.IORef (modifyIORef, newIORef, readIORef)
 import qualified Data.Set as Set
+import Control.Monad.State (evalState, state)
 import qualified Data.List as List
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
@@ -671,8 +674,8 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
     -- rescored: where the difference starts
     origins :: Map Int (Maybe Lang) -> Scored -> Scored -> MT.Text
     origins kept a b =
-      let tabA = tables a
-          tabB = tables b
+      let tabA = nodeTables a
+          tabB = nodeTables b
           diffs =
             [ (d, i, k, l, sa, sb)
             | (i, (d, k, ta)) <- Map.toList tabA
@@ -687,8 +690,8 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
             [] -> ""
             xs -> "; origins: " <> MT.intercalate ", " [k <> "@" <> MT.pack (show i) <> " " <> render (pretty l) <> " " <> renderScore sa <> " -> " <> renderScore sb | (_, i, k, l, sa, sb) <- xs]
       where
-        tables :: Scored -> Map Int (Int, MT.Text, [(Lang, Score)])
-        tables = Map.fromList . go (0 :: Int)
+        nodeTables :: Scored -> Map Int (Int, MT.Text, [(Lang, Score)])
+        nodeTables = Map.fromList . go (0 :: Int)
         go d (AnnoS _ (Idx i tbl) ex) = (i, (d, nodeKind ex, tbl)) : concat (foldExprS (\y -> [go (d + 1) y]) ex)
 
     renderScore :: Maybe Score -> MT.Text
@@ -1615,6 +1618,9 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
           a' <- collapseCarried heads lang a
           b' <- collapseCarried heads lang b
           return (AnnoS g (Idx i lang) (IfS c' a' b'))
+    -- a sourced function exists only in its source's language
+    collapseCarried heads lang x
+      | isSourceLeaf x = collapseAnnoS heads lang x
     collapseCarried heads lang x@(AnnoS (Idx _ t) _ e)
       | isCallableType t, not (isNewtypeCast e) = do
           AnnoS g (Idx i _) e' <- collapseAnnoS heads lang x
@@ -1639,6 +1645,11 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
         pinScores ss0 = case minimumMay [cost (Just lang) l2 s2 | (l2, s2) <- ss0] of
           Nothing -> ss0
           Just s -> [(lang, s)]
+
+    isSourceLeaf :: AnnoS g Many c -> Bool
+    isSourceLeaf (AnnoS _ _ (ExeS (SrcCall _))) = True
+    isSourceLeaf (AnnoS _ _ (LabelS _ x)) = isSourceLeaf x
+    isSourceLeaf _ = False
 
     isNamedLambda :: AnnoS g Many c -> Bool
     isNamedLambda (AnnoS _ _ (LamS _ _)) = True
@@ -1788,6 +1799,362 @@ The idea could be elaborated into a full-fledged language.
 makeGAST ::
   AnnoS (Indexed Type) One (Indexed (Maybe Lang)) -> MorlocMonad (AnnoS (Indexed Type) One ())
 makeGAST = mapAnnoSCM (\(Idx _ _) -> return ())
+
+-- | Place languages on pool trees again after normalization (LambdaEval), so the placement is decided on the shape code
+-- generation lowers. Each tree is scored and collapsed again with the same
+-- cost model; its root keeps its language (the manifold's identity) and a
+-- sourced call its source's. A tree on a recursive cycle keeps the
+-- placement realization gave it, which keeps the cycle in one pool. A call
+-- of another tree costs what that tree's language does.
+placeNormalized :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [AnnoS (Indexed Type) One (Indexed Lang)]
+placeNormalized trees = do
+  costs <- signatureCosts
+  nameMap <- MM.gets stateName
+  recTargets <- MM.gets stateRecursionTargets
+  let rootLang = Map.fromList [(i, l) | AnnoS (Idx i _) (Idx _ l) _ <- trees]
+      byName = Map.fromList [(n, i) | (i, n) <- Map.toList nameMap, Map.member i rootLang]
+      target v = case Map.lookup v byName of
+        Just i -> Just i
+        Nothing -> case Map.lookup v recTargets of
+          Just i | Map.member i rootLang -> Just i
+          _ -> Nothing
+      calls t = unique [i | AnnoS _ _ (CallS v) <- annoNodes t, Just i <- [target v]]
+      callGraph = Map.fromList [(i, calls t) | t@(AnnoS (Idx i _) _ _) <- trees]
+      onCycle i = i `elem` reach Set.empty (Map.findWithDefault [] i callGraph)
+        where
+          reach _ [] = []
+          reach seen (j : js)
+            | Set.member j seen = reach seen js
+            | otherwise = j : reach (Set.insert j seen) (Map.findWithDefault [] j callGraph <> js)
+      callTables t =
+        Map.fromList
+          [ (v, [(l, mempty)])
+          | AnnoS _ _ (CallS v) <- annoNodes t
+          , Just i <- [target v]
+          , Just l <- [Map.lookup i rootLang]
+          ]
+      place t@(AnnoS (Idx i _) (Idx _ l0) _)
+        | onCycle i = return t
+        | otherwise = do
+            (_, finish) <- realize costs (callTables t) (unrealized t)
+            placed <- finish (Just l0)
+            return $ case placed of
+              Right t' | headLangs t' == headLangs t -> t'
+              _ -> t
+      -- a root lambda's manifold is built in its body's language
+      headLangs (AnnoS _ (Idx _ l) (LamS _ (AnnoS _ (Idx _ lb) _))) = [l, lb]
+      headLangs (AnnoS _ (Idx _ l) _) = [l]
+  -- the listing describes the realization the user wrote, not this pass
+  listing <- MM.gets statePlacement
+  placed <- mapM place trees
+  MM.modify (\st -> st {statePlacement = listing})
+  colocateHostFunctions target placed
+
+-- | A function made by host code -- a parameter of a lambda passed to a
+-- sourced function, which the host calls with its own functions -- has no
+-- identity to send across a pool boundary, so every use of it stays in the
+-- host's language. Top down, a node that refers to such a function takes
+-- that language; at a sourced call an argument holding one is placed there,
+-- so code generation evaluates it on the caller's side and only its value
+-- crosses; the function itself passed to a source of another language is
+-- refused. A recursive helper given such a function is copied into that
+-- language, keyed by the positions that receive it.
+colocateHostFunctions ::
+  (EVar -> Maybe Int) ->
+  [AnnoS (Indexed Type) One (Indexed Lang)] ->
+  MorlocMonad [AnnoS (Indexed Type) One (Indexed Lang)]
+colocateHostFunctions target trees0 = do
+  (trees1, demands) <- unzip <$> mapM (enforce Map.empty) trees0
+  copies <- copyLoop Set.empty (concat demands)
+  return (trees1 <> copies)
+  where
+    helperTree :: EVar -> Maybe (AnnoS (Indexed Type) One (Indexed Lang))
+    helperTree v = do
+      i <- target v
+      listToMaybe [t | t@(AnnoS (Idx j _) _ _) <- trees0, j == i]
+
+    copyName :: (EVar, Lang, [Int]) -> EVar
+    copyName (h, l, mask) = EV (unEVar h <> "@" <> langName l <> "@" <> MT.intercalate "-" (map (MT.pack . show) mask))
+
+    copyLoop _ [] = return []
+    copyLoop done (d@(h, l, mask) : ds)
+      | Set.member d done = copyLoop done ds
+      | otherwise = case helperTree h of
+          Nothing -> MM.throwCompilerBug $ "no tree for the recursive helper" <+> pretty h
+          Just t@(AnnoS (Idx source _) _ _) -> do
+            -- fresh indices on both sides; reindexTree carries stage entries
+            AnnoS g@(Idx gi ty) c e <-
+              relangAll l <$> (reindexTree t >>= mapAnnoSCM (\(Idx ci cl) -> (`Idx` cl) <$> newIndex ci))
+            (vs, b) <- case e of
+              LamS vs b -> return (vs, b)
+              _ -> MM.throwCompilerBug $ "the recursive helper" <+> pretty h <+> "is not a lambda"
+            let ins = case ty of
+                  FunT ts _ -> ts
+                  _ -> []
+                name = copyName d
+            (vs', b0, hosted) <- renameApart [v | (k, v, it) <- zip3 [0 :: Int ..] vs ins, k `elem` mask, isCallableType it] vs b
+            let taint = Map.fromList [(v, l) | v <- hosted]
+            MM.modify $ \st ->
+              st { stateName = Map.insert gi name (stateName st)
+                 , stateNameSource = Map.insert gi source (stateNameSource st)
+                 , stateRecursionTargets = Map.insert name gi (stateRecursionTargets st)
+                 }
+            (b', more) <- enforce taint b0
+            rest <- copyLoop (Set.insert d done) (ds <> more)
+            return (AnnoS g c (LamS vs' b') : rest)
+
+    -- the parameters bound to host-made functions, renamed apart from every
+    -- other binder and recorded, so later passes can tell them from a
+    -- parameter of the same name elsewhere
+    renameApart hostParams vs b = do
+      renames <-
+        mapM
+          ( \v ->
+              if v `elem` hostParams
+                then do
+                  k <- MM.getCounter
+                  return (v, EV (unEVar (displayName v) <> "`h" <> MT.show' k))
+                else return (v, v)
+          )
+          vs
+      let hosted = [n | (o, n) <- renames, o /= n]
+      MM.modify (\st -> st {stateHostFunctionVars = foldr Set.insert (stateHostFunctionVars st) hosted})
+      return (map snd renames, foldr (\(o, n) t -> if o == n then t else renameBound o n t) b renames, hosted)
+
+    renameBound :: EVar -> EVar -> AnnoS g One c -> AnnoS g One c
+    renameBound old new n@(AnnoS g c e) = case e of
+      BndS v | v == old -> AnnoS g c (BndS new)
+      LamS vs _ | old `elem` vs -> n
+      LetS v a b | v == old -> AnnoS g c (LetS v (renameBound old new a) b)
+      _ -> AnnoS g c (mapExprS (renameBound old new) e)
+
+    -- every node in the copy's language but sourced calls, which keep their
+    -- placement with their arguments
+    relangAll :: Lang -> AnnoS (Indexed Type) One (Indexed Lang) -> AnnoS (Indexed Type) One (Indexed Lang)
+    relangAll l n@(AnnoS g (Idx ci _) e) = case e of
+      AppS f _ | isJust (sourcedIn f) -> n
+      ExeS (SrcCall _) -> n
+      _ -> AnnoS g (Idx ci l) (mapExprS (relangAll l) e)
+
+    headLang (AnnoS _ (Idx _ hl) _) = hl
+
+    enforce ::
+      Map EVar Lang ->
+      AnnoS (Indexed Type) One (Indexed Lang) ->
+      MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang), [(EVar, Lang, [Int])])
+    enforce taint n@(AnnoS g c@(Idx ci l) e) = case e of
+      -- an argument computed from a host function of another language is
+      -- bound by a let in that language, so only its value crosses
+      AppS f xs | Just ls <- sourcedIn f -> do
+        results <- mapM (enforceSrcArg taint ls) xs
+        bound <- mapM (bindArg taint ls) (map fst results)
+        let app = AnnoS g c (AppS f (map fst bound))
+        wrapped <- foldM (\body (v, x) -> letIn v x body) app (reverse (concatMap snd bound))
+        return (wrapped, concatMap snd results)
+      AppS hd xs
+        | Just v <- refVar hd
+        , Just lb <- Map.lookup v taint -> do
+            sequence_ [crossError x w lw lb | x <- xs, Just w <- [refVar x], Just lw <- [Map.lookup w taint], lw /= lb]
+            results <- mapM (enforce taint) xs
+            return (AnnoS g (Idx ci lb) (AppS (relang lb hd) (map fst results)), concatMap snd results)
+      -- a recursive helper given a host function is copied into the host's
+      -- language; an argument only computed from one is let-bound there
+      AppS hd@(AnnoS fg (Idx fi _) (CallS h)) xs
+        | any (not . null . tainted taint) xs -> do
+            lb <- oneLang n (concatMap (tainted taint) xs)
+            let mask = [k | (k, x) <- zip [0 :: Int ..] xs, not (null (tainted taint x)), holdsFunction x]
+                d = (h, lb, mask)
+                local x = isNothing (refVar x) && (not (null (tainted taint x)) || holdsFunction x)
+            when (not (null mask) && isNothing (helperTree h)) $
+              MM.throwSourcedError (gIdx n) $
+                "a function made by host code in" <+> pretty lb <+> "is passed to" <+> squotes (pretty (displayName h))
+                  <> ", which cannot be built in" <+> pretty lb <+> "to receive it"
+            if null mask
+              then do
+                results <- mapM (\x -> if null (tainted taint x) || isJust (refVar x) then enforce taint x else enforce taint (relang lb x)) xs
+                bound <- mapM (bindArg taint l) (map fst results)
+                wrapped <- foldM (\body (v, x) -> letIn v x body) (AnnoS g c (AppS hd (map fst bound))) (reverse (concatMap snd bound))
+                return (wrapped, concatMap snd results)
+              else do
+                -- a function value the copy may apply to a host function is
+                -- made in the copy's language too
+                results <- mapM (\x -> if local x then enforce taint (relangAll lb x) else enforce taint x) xs
+                return
+                  ( AnnoS g (Idx ci lb) (AppS (AnnoS fg (Idx fi lb) (CallS (copyName d))) (map fst results))
+                  , d : concatMap snd results
+                  )
+      -- a function value applied to a host function is made where it is
+      AppS hd xs
+        | Nothing <- refVar hd
+        , isNothing (sourcedIn hd)
+        , (lb : _) <- concatMap (tainted taint) xs
+        , headLang hd /= lb ->
+            enforce taint (AnnoS g (Idx ci lb) (AppS (relangAll lb hd) xs))
+      _ -> case unique (tainted taint n) of
+        [lb] | lb /= l -> enforce taint (relang lb n)
+        (_ : _ : _) | LamS _ _ <- e -> oneLang n (tainted taint n) >> return (n, [])
+        _ -> do
+          let scoped = case e of
+                LamS vs _ -> foldr Map.delete taint vs
+                _ -> taint
+          results <- mapM (enforceChild scoped) (childList e)
+          return (AnnoS g c (rebuildChildren e (map fst results)), concatMap snd results)
+      where
+        enforceChild t x = case e of
+          LetS v a b | sameNode x b -> enforce (letTaint v a t) x
+          _ -> enforce t x
+
+    -- a let-bound value that holds a function computed from a host function
+    -- is one itself
+    letTaint v a t = case unique (tainted t a) of
+      [lb] | holdsFunction a -> Map.insert v lb t
+      _ -> Map.delete v t
+
+    holdsFunction (AnnoS (Idx _ xt) _ _) = containsFunT xt || isCallableType xt
+
+    -- an argument of a sourced call in language ls
+    enforceSrcArg taint ls x@(AnnoS (Idx xi xt) xc xe) = case xe of
+      LetS v a body -> do
+        (a', ds1) <- enforce taint a
+        (body', ds2) <- enforceSrcArg (letTaint v a taint) ls body
+        -- a let whose body uses a host function is evaluated where its body is
+        let Idx xci xl = xc
+            l' = if null (tainted (letTaint v a taint) body) then xl else headLang body'
+        return (AnnoS (Idx xi xt) (Idx xci l') (LetS v a' body'), ds1 <> ds2)
+      -- a lambda the host calls: its function parameters are the host's
+      LamS vs b
+        | params@(_ : _) <- [v | (v, it) <- zip vs (inputsOf xt), isCallableType it] -> do
+            let outer = foldr Map.delete taint vs
+            sequence_ [crossError x w lw ls | (w, lw) <- Map.toList outer, Set.member w (freeRefs x), lw /= ls]
+            (vs', b0, hosted) <- renameApart params vs b
+            (b', ds) <- enforce (Map.union (Map.fromList [(v, ls) | v <- hosted]) outer) b0
+            return (AnnoS (Idx xi xt) (Idx (cIdxOf x) ls) (LamS vs' b'), ds)
+      _ -> case unique (tainted taint x) of
+        [] -> enforce taint x
+        _
+          | containsFunT xt || isCallableType xt ->
+              sequence_ [crossError x w lw ls | w <- Set.toList (freeRefs x), Just lw <- [Map.lookup w taint], lw /= ls]
+                >> enforce taint x
+        [lb] | lb /= ls -> enforce taint (relangAll lb x)
+        _ -> enforce taint x
+      where
+        inputsOf (FunT ts _) = ts
+        inputsOf _ = []
+
+    bindArg taint ls x@(AnnoS (Idx xi xt) (Idx xci lx) xe)
+      | lx /= ls
+      , not (null (tainted taint x))
+      , not (isLam x)
+      , Nothing <- refVar x
+      , not (trivial xe) = do
+          k <- MM.getCounter
+          let v = EV ("hosted`c" <> MT.show' k)
+          ri <- newIndex xi
+          rci <- newIndex xci
+          return (AnnoS (Idx ri xt) (Idx rci ls) (LetBndS v), [(v, x)])
+      | otherwise = return (x, [])
+      where
+        trivial = \case
+          IntS _ _ -> True
+          RealS _ _ -> True
+          StrS _ -> True
+          LogS _ -> True
+          UniS -> True
+          NullS -> True
+          _ -> False
+
+    letIn v x@(AnnoS _ (Idx _ lx) _) body@(AnnoS (Idx bi bt) (Idx bci _) _) = do
+      li <- newIndex bi
+      lci <- newIndex bci
+      return (AnnoS (Idx li bt) (Idx lci lx) (LetS v x body))
+
+    crossError :: AnnoS (Indexed Type) One (Indexed Lang) -> EVar -> Lang -> Lang -> MorlocMonad ()
+    crossError x w lw l =
+      MM.throwSourcedError (gIdx x) $
+        "the function" <+> squotes (pretty (displayName w)) <> ", or a value holding it, would be passed into" <+> pretty l
+          <> "; it is, or captures, a function host code made in" <+> pretty lw
+          <> "; a function made by host code cannot cross into another language"
+
+    oneLang :: AnnoS (Indexed Type) One (Indexed Lang) -> [Lang] -> MorlocMonad Lang
+    oneLang n ls = case unique ls of
+      [lb] -> return lb
+      _ ->
+        MM.throwSourcedError (gIdx n) $
+          "this expression uses functions made by host code in" <+> hsep (punctuate "," (map pretty (unique ls)))
+            <> "; a function made by host code cannot cross into another language"
+
+    gIdx (AnnoS (Idx i _) _ _) = i
+    cIdxOf (AnnoS _ (Idx i _) _) = i
+    sameNode (AnnoS (Idx a _) (Idx b _) _) (AnnoS (Idx a' _) (Idx b' _) _) = a == a' && b == b'
+
+    isLam (AnnoS _ _ (LamS _ _)) = True
+    isLam _ = False
+
+    -- a node moved into a language takes the lambdas it builds along
+    relang :: Lang -> AnnoS (Indexed Type) One (Indexed Lang) -> AnnoS (Indexed Type) One (Indexed Lang)
+    relang l (AnnoS g (Idx ci _) e) = AnnoS g (Idx ci l) (mapExprS pin e)
+      where
+        pin x@(AnnoS _ _ (LamS _ _)) = relang l x
+        pin x = x
+
+    sourcedIn :: AnnoS g One (Indexed Lang) -> Maybe Lang
+    sourcedIn (AnnoS _ (Idx _ l) (ExeS (SrcCall _))) = Just l
+    sourcedIn (AnnoS _ _ (LabelS _ x)) = sourcedIn x
+    sourcedIn _ = Nothing
+
+    refVar (AnnoS _ _ (BndS v)) = Just v
+    refVar (AnnoS _ _ (LetBndS v)) = Just v
+    refVar _ = Nothing
+
+    -- the host languages of the host-made functions free in a node
+    tainted :: Map EVar Lang -> AnnoS g One c -> [Lang]
+    tainted taint x
+      | Map.null taint = []
+      | otherwise = [lb | v <- Set.toList (freeRefs x), Just lb <- [Map.lookup v taint]]
+
+    freeRefs :: AnnoS g One c -> Set.Set EVar
+    freeRefs (AnnoS _ _ e) = case e of
+      BndS v -> Set.singleton v
+      LetBndS v -> Set.singleton v
+      LamS vs b -> foldr Set.delete (freeRefs b) vs
+      LetS v a b -> Set.union (freeRefs a) (Set.delete v (freeRefs b))
+      _ -> Set.unions (foldExprS (\y -> [freeRefs y]) e)
+
+    childList :: ExprS g One c -> [AnnoS g One c]
+    childList = foldExprS (: [])
+
+    -- the node with its children replaced, in the order 'childList' gives
+    rebuildChildren :: ExprS g One c -> [AnnoS g One c] -> ExprS g One c
+    rebuildChildren e new = evalState (mapExprSM (\old -> state (\ys -> case ys of (y : rest) -> (y, rest); [] -> (old, []))) e) new
+
+-- | A realized tree as the scorer takes it: every term with its one
+-- implementation, no language.
+unrealized :: AnnoS (Indexed Type) One (Indexed Lang) -> AnnoS (Indexed Type) Many Int
+unrealized (AnnoS g (Idx i _) e) = AnnoS g i $ case e of
+  UniS -> UniS
+  NullS -> NullS
+  BndS v -> BndS v
+  VarS v (One x) -> VarS v (Many [unrealized x])
+  AppS f xs -> AppS (unrealized f) (map unrealized xs)
+  LamS vs x -> LamS vs (unrealized x)
+  LstS xs -> LstS (map unrealized xs)
+  TupS xs -> TupS (map unrealized xs)
+  NamS rs -> NamS [(k, unrealized x) | (k, x) <- rs]
+  RealS j x -> RealS j x
+  IntS j x -> IntS j x
+  LogS x -> LogS x
+  StrS x -> StrS x
+  ConS v n k xs -> ConS v n k (map unrealized xs)
+  ExeS x -> ExeS x
+  LetS v a b -> LetS v (unrealized a) (unrealized b)
+  LetBndS v -> LetBndS v
+  CallS v -> CallS v
+  IfS a b c -> IfS (unrealized a) (unrealized b) (unrealized c)
+  DoBlockS x -> DoBlockS (unrealized x)
+  EvalS x -> EvalS (unrealized x)
+  CoerceS co x -> CoerceS co (unrealized x)
+  IntrinsicS intr xs -> IntrinsicS intr (map unrealized xs)
+  LabelS k x -> LabelS k (unrealized x)
 
 removeVarS :: AnnoS g One c -> AnnoS g One c
 removeVarS (AnnoS g1 _ (VarS _ (One (AnnoS _ c2 x)))) = removeVarS (AnnoS g1 c2 x)

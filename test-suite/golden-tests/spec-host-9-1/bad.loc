@@ -1,0 +1,21 @@
+-- A function made by R host code passed straight to a Python function
+-- would have to cross pools, which it cannot: the build is refused.
+
+--' A host-made function cannot cross languages
+module bad (bad)
+
+import root-py
+import root-r
+
+source R from "f.R" ("feed")
+source Py from "f.py" ("py_apply" as pyApply)
+
+--' Call a function with an R function that doubles
+feed :: ((Int -> Int) -> Int) -> Int
+
+--' Apply a function to a value
+pyApply :: (Int -> Int) -> Int -> Int
+
+--' Hand the R function to Python
+bad :: Int -> Int
+bad n = feed (\g -> pyApply g n)

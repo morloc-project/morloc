@@ -22,6 +22,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 {- | Add arguments that are required for each term. Unneeded arguments are
 removed at each step.
@@ -34,6 +35,7 @@ parameterize (AnnoS m@(Idx midx (FunT inputs _)) c (LamS vs x)) = do
   ids <- MM.takeFromCounter (length inputs)
   recordArgTypes midx ids inputs
   let args0 = fromJust $ safeZipWith Arg ids vs
+  markHostArgs args0
   x' <- parameterize' args0 x
   return $ AnnoS m (c, args0) (LamS vs x')
 parameterize (AnnoS m@(Idx midx (FunT inputs _)) c@(Idx _ lang) (BndS v)) = do
@@ -46,6 +48,13 @@ parameterize (AnnoS m@(Idx midx (FunT inputs _)) c@(Idx _ lang) (BndS v)) = do
 parameterize x = do
   MM.sayVVV "Entering parameterize Other"
   parameterize' [] x
+
+-- | Record the ids of parameters bound to a function made by host code.
+markHostArgs :: [Arg EVar] -> MorlocMonad ()
+markHostArgs as = do
+  hostVars <- MM.gets stateHostFunctionVars
+  let js = [j | Arg j v <- as, Set.member v hostVars]
+  MM.modify (\s -> s {stateHostFunctionArgs = foldr Set.insert (stateHostFunctionArgs s) js})
 
 parameterize' ::
   [Arg EVar] -> -- arguments in parental scope (child needn't retain them)
@@ -94,6 +103,7 @@ parameterize' args (AnnoS g@(Idx midx (FunT inputs _)) c (LamS vs x)) = do
   recordArgTypes midx ids inputs
   let contextArgs = [r | r@(Arg _ v) <- args, v `notElem` vs] -- remove shadowed arguments
       boundArgs = fromJust $ safeZipWith Arg ids vs
+  markHostArgs boundArgs
   x' <- parameterize' (contextArgs <> boundArgs) x
   let contextArgs' = pruneArgs contextArgs [x']
   return $ AnnoS g (c, contextArgs' <> boundArgs) (LamS vs x')
