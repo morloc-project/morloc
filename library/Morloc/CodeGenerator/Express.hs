@@ -751,8 +751,9 @@ expressPolyArg ::
   Indexed Type ->
   AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
   MorlocMonad PolyExpr
-expressPolyArg parentLang pc@(Idx _ (EffectT _ _)) (AnnoS (Idx midx t@(EffectT _ _)) (Idx cidx lang, args) (DoBlockS x)) = do
-  x' <- expressPolyExprWrap lang (mkIdx x t) x
+expressPolyArg parentLang pc@(Idx _ (EffectT _ _)) (AnnoS (Idx midx t@(EffectT _ innerT)) (Idx cidx lang, args) (DoBlockS x)) = do
+  -- the block's body has the unwrapped type, as in 'expressPolyExpr'
+  x' <- expressPolyExprWrap lang (mkIdx x innerT) x
   let e = PolyDoBlock (Idx cidx t) x'
   expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyArg l pc e = expressPolyExprWrap l pc e

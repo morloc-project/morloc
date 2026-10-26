@@ -1,0 +1,60 @@
+-- A suspension written as a do-block and handed to a sourced function is
+-- built in that function's language, while the statements of its body may
+-- run elsewhere. The body is lowered at the suspension's inner type: lowered
+-- at the suspension's own type, its crossing returned a second suspension,
+-- which the host received in place of the value (a C++ or Rust build
+-- error, a Python type error, an R coercion error).
+
+--' A do-block suspension whose body runs in another language
+module main (inR, inCpp, inRust, inPy)
+
+import root-py
+import root-r
+import root-cpp
+import root-rust
+
+source Py from "home.py" ("tick", "ident")
+source R from "hosts.R" ("take_thunk" as takeR, "rtick", "rident")
+source Cpp from "hosts.hpp" ("take_thunk" as takeCpp)
+source Rust from "hosts.rs" ("take_thunk" as takeRust)
+source Py from "hosts.py" ("take_thunk" as takePy)
+
+--' Add one, as an effect
+tick :: Int -> <IO> Int
+
+--' Return the input
+ident :: Int -> Int
+
+--' Add one, as an effect, in R
+rtick :: Int -> <IO> Int
+
+--' Return the input, in R
+rident :: Int -> Int
+
+--' Run a suspension in R
+takeR :: <IO> Int -> <IO> Int
+
+--' Run a suspension in C++
+takeCpp :: <IO> Int -> <IO> Int
+
+--' Run a suspension in Rust
+takeRust :: <IO> Int -> <IO> Int
+
+--' Run a suspension in Python
+takePy :: <IO> Int -> <IO> Int
+
+--' Python statements suspended for R
+inR :: Int -> <IO> Int
+inR x = takeR (do { n <- tick x; ident (n + 1) })
+
+--' Python statements suspended for C++
+inCpp :: Int -> <IO> Int
+inCpp x = takeCpp (do { n <- tick x; ident (n + 1) })
+
+--' Python statements suspended for Rust
+inRust :: Int -> <IO> Int
+inRust x = takeRust (do { n <- tick x; ident (n + 1) })
+
+--' R statements suspended for Python
+inPy :: Int -> <IO> Int
+inPy x = takePy (do { n <- rtick x; rident (n + 1) })
