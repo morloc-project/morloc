@@ -1,0 +1,52 @@
+-- Each helper hands the one below two lambdas, one calling Python and one
+-- calling C++, so function evaluation leaves at every level a shared lambda
+-- used from both languages, each use getting its own copy (COST-15). The
+-- copies grow with the depth, not exponentially: depths 1 to 5 build, run,
+-- and cost the least the realizer found.
+
+--' A ladder of helpers sharing lambdas across languages
+module main (run1, run2, run3, run4, run5)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("py_f" as pyF, "py_map" as pyMap, "py_sum" as pySum)
+source Cpp from "f.hpp" ("cpp_f" as cppF)
+
+--' Add one
+pyF :: Int -> Int
+--' Double
+cppF :: Int -> Int
+--' Map in Python
+pyMap :: (Int -> Int) -> [Int] -> [Int]
+--' Sum in Python
+pySum :: [Int] -> Int
+
+k0 :: (Int -> Int) -> Int
+k0 g = pySum (pyMap g [1, 2])
+k1 :: (Int -> Int) -> Int
+k1 g = k0 (\x -> pyF (g x)) + k0 (\x -> cppF (g x))
+k2 :: (Int -> Int) -> Int
+k2 g = k1 (\x -> pyF (g x)) + k1 (\x -> cppF (g x))
+k3 :: (Int -> Int) -> Int
+k3 g = k2 (\x -> pyF (g x)) + k2 (\x -> cppF (g x))
+k4 :: (Int -> Int) -> Int
+k4 g = k3 (\x -> pyF (g x)) + k3 (\x -> cppF (g x))
+k5 :: (Int -> Int) -> Int
+k5 g = k4 (\x -> pyF (g x)) + k4 (\x -> cppF (g x))
+
+--' Depth 1
+run1 :: Int -> Int
+run1 n = k1 (\x -> x + n)
+--' Depth 2
+run2 :: Int -> Int
+run2 n = k2 (\x -> x + n)
+--' Depth 3
+run3 :: Int -> Int
+run3 n = k3 (\x -> x + n)
+--' Depth 4
+run4 :: Int -> Int
+run4 n = k4 (\x -> x + n)
+--' Depth 5
+run5 :: Int -> Int
+run5 n = k5 (\x -> x + n)

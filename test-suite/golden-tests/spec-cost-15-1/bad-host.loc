@@ -1,0 +1,18 @@
+module main (hostCopy)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("py_f" as pyF, "py_map" as pyMap, "py_sum" as pySum, "py_feed" as pyFeed)
+source Cpp from "f.hpp" ("cpp_f" as cppF, "cpp_map" as cppMap, "cpp_sum" as cppSum)
+
+pyF :: Int -> Int
+cppF :: Int -> Int
+pyMap :: (Int -> Int) -> [Int] -> [Int]
+cppMap :: (Int -> Int) -> [Int] -> [Int]
+pySum :: [Int] -> Int
+cppSum :: [Int] -> Int
+pyFeed :: ((Int -> Int) -> Int) -> Int
+
+hostCopy :: Int -> Int
+hostCopy n = pyFeed (\g -> let h = \x -> g x + n in pySum (pyMap (\x -> pyF (h x)) [1, 2]) + cppSum (cppMap (\x -> cppF (h x)) [1, 2]))

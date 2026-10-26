@@ -1,0 +1,6 @@
+17
+55
+173
+535
+1637
+OK: built placement costs the least

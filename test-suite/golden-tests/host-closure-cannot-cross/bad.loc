@@ -1,0 +1,17 @@
+module main (crossesPools)
+
+import root-py
+import root-cpp
+
+type Cpp => Int = "int"
+
+source Py from "hosts.py" ("mk_adder" as mkAdder)
+source Cpp from "hosts.hpp" ("use_pure" as usePureCpp)
+
+mkAdder :: Int -> <IO> (Int -> Int)
+usePureCpp :: (Int -> Int) -> Int -> Int
+
+crossesPools :: Int -> <IO> Int
+crossesPools k = do
+  f <- mkAdder k
+  usePureCpp f 2

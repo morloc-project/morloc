@@ -22,7 +22,7 @@ module Morloc.CodeGenerator.Realize
   ) where
 
 import Morloc.CodeGenerator.Serial (containsEffectT, containsFunT)
-import Morloc.CodeGenerator.Value (etaParts, isValueWith)
+import Morloc.CodeGenerator.Value (etaParts, isValue, isValueWith)
 import Morloc.CodeGenerator.LambdaEval (reindexTree)
 import Morloc.Frontend.Namespace (newIndex)
 import Morloc.Frontend.Rename (displayName)
@@ -31,7 +31,7 @@ import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
-import Data.IORef (modifyIORef, newIORef, readIORef)
+import Data.IORef (IORef, modifyIORef, newIORef, readIORef)
 import qualified Data.Set as Set
 import Data.Graph (SCC (..), stronglyConnComp)
 import Control.Monad.State (evalState, state)
@@ -302,15 +302,6 @@ deeper k sc
   | k <= 0 || null (scoreCrossings sc) = sc
   | otherwise = sc {scoreCrossings = replicate k 0 <> scoreCrossings sc}
 
--- | What a score has beyond a base, part by part, never below nothing.
-scoreAbove :: Score -> Score -> Score
-scoreAbove (Score u c w p z) (Score bu bc bw bp bz) =
-  Score (max 0 (u - bu)) (minus c bc) (max 0 (w - bw)) (minus p bp) (max 0 (z - bz))
-  where
-    minus (x : xs) (y : ys) = max 0 (x - y) : minus xs ys
-    minus xs [] = xs
-    minus [] _ = []
-
 -- | One call of a sourced function in a language (COST-1 rules 2 and 3).
 callScore :: LangRegistry -> Lang -> Score
 callScore registry l =
@@ -354,6 +345,11 @@ data RState = RState
   , rForcedLangs :: [Lang]
   -- | The names called beneath each node.
   , rBelow :: Map Int (Set.Set EVar)
+  -- | When rescoring: for each reference collapse gave a copy, the
+  -- languages of that copy's nodes.
+  , rCopies :: Map Int (Map Int (Maybe Lang))
+  -- | The definition of each let-bound name in scope.
+  , rLetDefs :: Map EVar (AnnoS (Indexed Type) Many Int)
   }
 
 emptyRState =
@@ -365,6 +361,8 @@ emptyRState =
     , rForced = Nothing
     , rForcedLangs = []
     , rBelow = Map.empty
+    , rCopies = Map.empty
+    , rLetDefs = Map.empty
     }
 
 
@@ -520,6 +518,18 @@ boundaryScore registry l1 l2
   | LR.coLocated registry l1 l2 = mempty {scoreSwitches = 1}
   | otherwise = mempty {scoreCrossings = [1]}
 
+-- | What collapse knows about the tree around a node: the enclosing
+-- recursive heads, outermost first, each with its language (see
+-- 'pickLanguage'), and the let-bound values in scope that a reference in
+-- another language gets its own copy of, each with its scored definition
+-- and the language its let was placed in; and, for each reference given a
+-- copy, the language collapse chose for each node of the definition there.
+data Ctx = Ctx
+  { ctxHeads :: [(EVar, Lang)]
+  , ctxCopies :: Map EVar (Scored, Lang)
+  , ctxCopyLog :: IORef (Map Int (Map Int (Maybe Lang)))
+  }
+
 -- | Languages a tree must keep when it is placed. @pinHeads@ are recursive
 -- functions, each with its language, a node calling one is placed in (see
 -- 'pickLanguage'); @pinWork@ is the language the root's manifold is built
@@ -540,7 +550,10 @@ realizeWithRegistry ::
   [Lang] ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Scored, Finisher)
-realizeWithRegistry registry tables pins seedLangs s0 = do
+realizeWithRegistry registry tables pins seedLangs s00 = do
+  -- a copy of a let-bound value (collapseCopy) is built where it is used,
+  -- so no binder between the let and the use may rebind a name it captures
+  s0 <- renameShadowing Map.empty s00
   -- Normalize language-invariant (literal-lambda-head) redexes before scoring.
   let sp = stagePoints s0
   s0' <- normalizePop1 (`Map.lookup` sp) s0
@@ -567,8 +580,10 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
 
     finish s0' scored0 ctx = do
       scored <- maybe (return scored0) (pinRoot scored0) (pinWork pins)
-      e@(AnnoS g li x) <- collapseAnnoS (pinHeads pins) ctx scored
-      checkPlacement s0' scored ctx e
+      copyLog <- MM.liftIO (newIORef Map.empty)
+      e@(AnnoS g li x) <- collapseAnnoS (Ctx (pinHeads pins) Map.empty copyLog) ctx scored
+      copies <- MM.liftIO (readIORef copyLog)
+      checkPlacement copies s0' scored ctx e
       case (li, ctx) of
         -- language-free code used from a pool runs in that pool, as it
         -- would inlined there
@@ -593,7 +608,7 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
     -- least. When the placement listing is wanted with verbosity, the tree is
     -- scored again with every node cut to its chosen language and
     -- implementation, and a difference is listed with the placement.
-    checkPlacement s0' scored ctx e = do
+    checkPlacement copies s0' scored ctx e = do
       wanted <- MM.gets statePlacement
       verbosity <- MM.gets stateVerbosity
       case (pinCheck pins, wanted) of
@@ -601,7 +616,7 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
           -- a node collapsed at two sites into different languages is
           -- left unforced
           let kept = Map.fromListWith (\a b -> if a == b then a else Nothing) [(i, l) | Idx i l <- collectIdx e]
-          rescored <- scoreAnnoS (rootState s0') {rForced = Just kept, rForcedLangs = unique (catMaybes (Map.elems kept))} s0'
+          rescored <- scoreAnnoS (rootState s0') {rForced = Just kept, rForcedLangs = unique (catMaybes (concatMap Map.elems (kept : Map.elems copies))), rCopies = copies} s0'
           let best tbl = case (ctx, tbl) of
                 (_, []) -> Nothing
                 (Just l, _) -> Just (reachFrom l tbl)
@@ -839,33 +854,51 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
       (xs', best) <- scorePinnedComponents rstat xs
       return (ConS tv n j xs', orAmbient i rstat best)
     scoreExpr rstat (LetS v e1 e2, i) = do
-      e1' <- scoreAnnoS rstat {rApplied = []} e1
+      e10 <- scoreAnnoS rstat {rApplied = []} e1
       -- A data value is read where its let runs, or carried into a subtree
       -- in another pool as one of the free variables that subtree's single
       -- boundary passes (COST-3), so a reference to it adds nothing of its
-      -- own. A lambda costs nothing to build and its body on every call, so
-      -- a reference to it carries one call of its body and the let none. Any
-      -- other function value is priced by where its definition can run: its
-      -- cheapest home relative to the cheapest place overall, plus reaching
-      -- it; the RHS's own cost is counted once, at the LetS below.
-      let rhs = scoresOf e1'
-          lambdaBound = isNamedLambda e1'
+      -- own. A value holding a function that computes nothing to build gets
+      -- its own copy in each language a reference is in ('collapseCopy'), so a
+      -- reference carries one use of the value from its own language and the
+      -- let nothing. Any other function value is built once, at its home (its
+      -- definition's least language), and every reference reaches it there.
+      let callable = holdsCallable (annoType e10)
+          copied = callable && copyable e10
+          -- COST-15: a function a sourced call returns was made by host code;
+          -- it is made by one of those sources and used only in that pool
+          host = if holdsFunctionType (annoType e10) then unique (map srcLang (madeBySources e10)) else []
+          candidates = [(l, sc) | (l, sc) <- scoresOf e10, null host || l `elem` host]
+          home = if callable && not copied then minBy (\(l, sc) -> (sc, preferred l)) candidates else Nothing
+          e1' = maybe e10 (\h -> withTable [h] e10) home
+          rhs = scoresOf e1'
+          langs = unique (map fst rhs <> rLangs rstat)
           refTable
+            | Just (h, _) <- home, not (null host) = [(h, mempty)]
+            | Just (h, _) <- home = [(l, boundaryScore registry l h) | l <- unique (h : langs)]
             | null rhs = []
-            | lambdaBound = [(l, reachFrom l rhs) | l <- unique (map fst rhs <> rLangs rstat)]
-            | otherwise =
-                let base = minimum (map snd rhs)
-                    langs = unique (map fst rhs <> rLangs rstat)
-                 in [ (l, minimum [scoreAbove sc base <> boundaryScore registry h l | (h, sc) <- rhs])
-                    | l <- langs
-                    ]
-          ref = if holdsCallable (annoType e1') then Just refTable else Nothing
-          rstat' = rstat { rLetVars = Map.insert v ref (rLetVars rstat) }
+            | otherwise = [(l, reachFrom l rhs) | l <- langs]
+          ref = if callable then Just refTable else Nothing
+          rstat' = rstat {rLetVars = Map.insert v ref (rLetVars rstat), rLetDefs = Map.insert v e1 (rLetDefs rstat)}
       e2' <- scoreAnnoS rstat' e2
       -- Score the chain like an application: the binding's RHS and the body
-      -- both contribute, with cross-language penalties applied per-lang.
-      let best = scoreApp [] (if lambdaBound then [kid e2'] else [kid e1', kid e2'])
+      -- both contribute, with cross-language penalties applied per-lang. A
+      -- function that is not copied lives where its let is, so the let is
+      -- placed at its home.
+      let best0 = scoreApp [] (if copied then [kid e2'] else [kid e1', kid e2'])
+          best = case home of
+            Nothing -> best0
+            Just (h, _) -> case [(l, sc) | (l, sc) <- best0, LR.coLocated registry l h] of
+              [] -> [(h, noScore)]
+              kept -> kept
       return (LetS v e1' e2', Idx i best)
+    -- when rescoring, a reference given a copy costs that copy as built
+    scoreExpr rstat (LetBndS v, i)
+      | Just chosen <- Map.lookup i (rCopies rstat)
+      , Just def <- Map.lookup v (rLetDefs rstat) = do
+          copy <- scoreAnnoS rstat {rForced = Just chosen, rApplied = []} def
+          let table = scoresOf copy
+          return (LetBndS v, Idx i [(l, reachFrom l table) | not (null table), l <- unique (map fst table <> rForcedLangs rstat)])
     scoreExpr rstat (LetBndS v, i) =
       case Map.lookup v (rLetVars rstat) of
         Just Nothing -> return (LetBndS v, Idx i [])
@@ -979,9 +1012,9 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
 
     updateRState :: [EVar] -> RState -> RState
     updateRState [] rstat = rstat
-    updateRState vs rstat@(RState _ [] bound _ _ _ _) =
+    updateRState vs rstat@(RState _ [] bound _ _ _ _ _ _) =
       rstat {rBndVars = foldr Map.delete bound vs}
-    updateRState (v : vs) rstat@(RState _ ((t, table) : ps) bound _ _ _ _) =
+    updateRState (v : vs) rstat@(RState _ ((t, table) : ps) bound _ _ _ _ _ _) =
       updateRState vs $
         rstat
           { rApplied = ps
@@ -1097,7 +1130,7 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
     -- language it was placed in. A node with a back-edge to one of them
     -- beneath it is placed in that head's language (see 'pickLanguage').
     collapseAnnoS ::
-      [(EVar, Lang)] ->
+      Ctx ->
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
@@ -1106,7 +1139,7 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
     -- The head of an application is not a value: a lambda there is applied
     -- in place, so a named one keeps its own choice.
     collapseHead ::
-      [(EVar, Lang)] ->
+      Ctx ->
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
@@ -1114,18 +1147,18 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
 
     collapseNode ::
       Bool ->
-      [(EVar, Lang)] ->
+      Ctx ->
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
-    collapseNode isValue heads l1 (AnnoS gi@(Idx gidx gt) ci0 e0) = do
+    collapseNode asValue heads l1 (AnnoS gi@(Idx gidx gt) ci0 e0) = do
       l1' <- case (l1, heldTypes gidx e0 gt) of
         (Just l, Just (j, ts)) -> Just <$> holdingLang j ts l
         _ -> return l1
       let AnnoS _ ci e = case l1' of
-            Just l | isValue -> pinNamedLambda l (AnnoS gi ci0 e0)
+            Just l | asValue -> pinNamedLambda l (AnnoS gi ci0 e0)
             _ -> AnnoS gi ci0 e0
-      (e', ci'') <- collapseExpr heads gt l1' (e, ci)
+      (e', ci'') <- collapseExpr heads gi l1' (e, ci)
       -- moved away from its context, a language-free computation keeps the
       -- language it was moved to rather than inheriting its context's again
       let ci' = case ci'' of
@@ -1179,8 +1212,8 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
     cost _ _ score = score
 
     collapseExpr ::
-      [(EVar, Lang)] ->
-      Type ->
+      Ctx ->
+      Indexed Type ->
       Maybe Lang -> -- the language of the parent expression (if Nothing, then this is a GAST)
       (ExprS (Indexed Type) Many (Indexed [(Lang, Score)]), Indexed [(Lang, Score)]) ->
       MorlocMonad (ExprS (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
@@ -1192,7 +1225,7 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
     -- type matches the use best; then the least by COST-1. Two different
     -- sources of one type still tied are an error; definitions in morloc
     -- that tie are interchangeable (REAL-1) and the first is taken.
-    collapseExpr heads gt l1 (VarS v (Many xs), Idx i _) = do
+    collapseExpr heads (Idx _ gt) l1 (VarS v (Many xs), Idx i _) = do
       typed <- case xs of
         (AnnoS (Idx _ t0) _ _ : _)
           | any (\(AnnoS (Idx _ t) _ _) -> t /= t0) xs -> resolveInstances gt xs
@@ -1236,7 +1269,7 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
           -- head: everything beneath it down to the back-edge follows its
           -- language.
           let heads' = case newLang of
-                Just l | containsCallS v x -> heads ++ [(v, l)]
+                Just l | containsCallS v x -> heads {ctxHeads = ctxHeads heads ++ [(v, l)]}
                 _ -> heads
           x' <- collapseAnnoS heads' newLang x
           return (x', newLang)
@@ -1345,13 +1378,28 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
         Nothing -> pickLanguage heads l1 [x] ss
       x' <- collapseAnnoS heads lang x
       return (LamS vs x', Idx i lang)
-    collapseExpr heads _ l1 (AppS f xs, Idx i ss) = do
+    collapseExpr heads (Idx gidx gt) l1 (AppS f xs, Idx i ss) = do
       -- A sourced function runs where it is sourced; only a call whose
       -- head is defined in morloc can follow a recursive head's language.
       lang <- if isSourcedMany f then chooseLanguage l1 ss else pickLanguage heads l1 (f : xs) ss
-      f' <- collapseHead heads lang f
-      xs' <- mapM (if isSourceHead f' then collapseCarried heads lang else collapseAnnoS heads lang) xs
-      return (AppS f' xs', Idx i lang)
+      case (f, lang) of
+        -- a copy that is called is bound to a name, then called: a lambda
+        -- applied in place is not lowered
+        (AnnoS fg (Idx fi _) (LetBndS v), Just l)
+          | Just (rhs, lv) <- Map.lookup v (ctxCopies heads)
+          , lv /= l -> do
+              copy <- collapseCopy heads fi l rhs
+              xs' <- mapM (collapseAnnoS heads lang) xs
+              v' <- (\k -> EV (unEVar (displayName v) <> "`c" <> MT.show' k)) <$> MM.getCounter
+              gk <- newIndex gidx
+              k <- newIndex i
+              let call = AnnoS (Idx gk gt) (Idx k lang) (AppS (AnnoS fg (Idx fi lang) (LetBndS v')) xs')
+              j <- newIndex i
+              return (LetS v' copy call, Idx j lang)
+        _ -> do
+          f' <- collapseHead heads lang f
+          xs' <- mapM (if isSourceHead f' then collapseCarried heads lang else collapseAnnoS heads lang) xs
+          return (AppS f' xs', Idx i lang)
     -- Propagate data
     collapseExpr heads _ l1 (e@(LstS xs), Idx i ss) = do
       lang <- if isFunctionalData e then return l1 else pickLanguage heads l1 xs ss
@@ -1381,8 +1429,17 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
     collapseExpr heads _ l1 (LetS v e1 e2, Idx i ss) = do
       lang <- pickLanguage heads l1 [e1, e2] ss
       e1' <- collapseAnnoS heads lang e1
-      e2' <- collapseAnnoS heads lang e2
+      let inner = case lang of
+            Just l | copyable e1 && holdsCallable (annoType e1) -> heads {ctxCopies = Map.insert v (e1, l) (ctxCopies heads)}
+            _ -> heads {ctxCopies = Map.delete v (ctxCopies heads)}
+      e2' <- collapseAnnoS inner lang e2
       return (LetS v e1' e2', Idx i lang)
+    -- a reference in another language than its let gets a copy built here
+    collapseExpr heads _ (Just lang) (LetBndS v, Idx ri _)
+      | Just (rhs, l) <- Map.lookup v (ctxCopies heads)
+      , l /= lang = do
+          AnnoS _ ci e <- collapseCopy heads ri lang rhs
+          return (e, ci)
     collapseExpr _ _ lang (LetBndS v, Idx i _) = return (LetBndS v, Idx i lang)
     collapseExpr _ _ lang (CallS v, Idx i _) = return (CallS v, Idx i lang)
     collapseExpr heads _ l1 (IfS c t e, Idx i ss) = do
@@ -1443,7 +1500,7 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
     -- A function value handed straight to a sourced function is carried the
     -- same way: the host's pool holds the callable it is given.
     collapseElement ::
-      [(EVar, Lang)] ->
+      Ctx ->
       ExprS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
@@ -1453,7 +1510,7 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
       | otherwise = collapseAnnoS heads lang x
 
     collapseCarried ::
-      [(EVar, Lang)] ->
+      Ctx ->
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
@@ -1496,6 +1553,33 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
     isSourceLeaf (AnnoS _ _ (ExeS (SrcCall _))) = True
     isSourceLeaf (AnnoS _ _ (LabelS _ x)) = isSourceLeaf x
     isSourceLeaf _ = False
+
+    -- A copy of a let-bound value for the reference at index @ref@ in
+    -- language @l@: its definition collapsed again as used from @l@, with
+    -- fresh indices. The languages chosen are logged for the COST-11 check.
+    collapseCopy ::
+      Ctx ->
+      Int ->
+      Lang ->
+      AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
+      MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
+    collapseCopy heads ref l rhs = do
+      copy <- collapseAnnoS heads (Just l) rhs
+      let chosen = Map.fromListWith (\a b -> if a == b then a else Nothing) [(i, cl) | Idx i cl <- collectIdx copy]
+      MM.liftIO (modifyIORef (ctxCopyLog heads) (Map.insert ref chosen))
+      reindexTree copy >>= mapAnnoSCM (\(Idx ci cl) -> (`Idx` cl) <$> newIndex ci)
+
+    -- A value that may be built again wherever it is used: evaluating it
+    -- computes nothing, and it carries no label, which names one manifold.
+    copyable :: AnnoS (Indexed Type) Many c -> Bool
+    copyable x = isValue x && not (hasLabel x)
+      where
+        hasLabel (AnnoS _ _ (LabelS _ _)) = True
+        hasLabel (AnnoS _ _ e) = any hasLabel (foldExprS (: []) e)
+
+    -- A node with its table replaced.
+    withTable :: [(Lang, Score)] -> AnnoS g f (Indexed [(Lang, Score)]) -> AnnoS g f (Indexed [(Lang, Score)])
+    withTable table (AnnoS g (Idx j _) e) = AnnoS g (Idx j table) e
 
     isNamedLambda :: AnnoS g Many c -> Bool
     isNamedLambda (AnnoS _ _ (LamS _ _)) = True
@@ -1540,13 +1624,13 @@ realizeWithRegistry registry tables pins seedLangs s0 = do
     -- pool serves as well as the head's own language. A scorer cannot
     -- decide this, since a back-edge scores nothing in every language.
     pickLanguage ::
-      [(EVar, Lang)] ->
+      Ctx ->
       Maybe Lang ->
       [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])] ->
       [(Lang, Score)] ->
       MorlocMonad (Maybe Lang)
     pickLanguage heads l1 xs ss =
-      case [l | (w, l) <- heads, any (containsCallS w) xs] of
+      case [l | (w, l) <- ctxHeads heads, any (containsCallS w) xs] of
         (l : _) -> return (Just (hostedWith l))
         [] -> chooseLanguage l1 ss
       where
@@ -1712,6 +1796,26 @@ treeName names recs i = case [v | (v, j) <- Map.toList recs, j == i] of
   (v : _) -> Just v
   [] -> Map.lookup i names
 
+-- | Give every binder that rebinds a name already in scope a fresh name,
+-- through its scope, so that no name is bound twice on any path from the
+-- root. One pass: @names@ maps each name in scope to what it is now called.
+renameShadowing :: Map EVar EVar -> AnnoS g Many c -> MorlocMonad (AnnoS g Many c)
+renameShadowing names (AnnoS g c e) = AnnoS g c <$> case e of
+  BndS v -> return (BndS (Map.findWithDefault v v names))
+  LetBndS v -> return (LetBndS (Map.findWithDefault v v names))
+  LamS vs b -> do
+    vs' <- mapM fresh vs
+    LamS vs' <$> renameShadowing (foldr (uncurry Map.insert) names (zip vs vs')) b
+  LetS v a b -> do
+    a' <- renameShadowing names a
+    v' <- fresh v
+    LetS v' a' <$> renameShadowing (Map.insert v v' names) b
+  _ -> mapExprSM (renameShadowing names) e
+  where
+    fresh v
+      | Map.member v names = (\k -> EV (unEVar (displayName v) <> "`r" <> MT.show' k)) <$> MM.getCounter
+      | otherwise = return v
+
 -- | A function made by host code -- a parameter of a lambda passed to a
 -- sourced function, which the host calls with its own functions -- has no
 -- identity to send across a pool boundary, so every use of it stays in the
@@ -1866,13 +1970,14 @@ colocateHostFunctions target trees0 = do
           LetS v a b | sameNode x b -> enforce (letTaint v a t) x
           _ -> enforce t x
 
-    -- a let-bound value that holds a function computed from a host function
-    -- is one itself
+    -- a let-bound value that holds a function computed from a host
+    -- function is one itself, as is a function a sourced call returns
     letTaint v a t = case unique (tainted t a) of
       [lb] | holdsFunction a -> Map.insert v lb t
+      _ | holdsFunction a, (src : _) <- madeBySources a -> Map.insert v (srcLang src) t
       _ -> Map.delete v t
 
-    holdsFunction (AnnoS (Idx _ xt) _ _) = containsFunT xt || isCallableType xt
+    holdsFunction (AnnoS (Idx _ xt) _ _) = holdsFunctionType xt
 
     -- an argument of a sourced call in language ls
     enforceSrcArg taint ls x@(AnnoS (Idx xi xt) xc xe) = case xe of
@@ -2545,5 +2650,32 @@ isCallableType _ = False
 
 -- | A value that is, or holds anywhere inside it, a function or a
 -- suspension, which crosses a pool as a proxy calling home.
+-- | A type whose values hold a function (HOST-9).
+holdsFunctionType :: Type -> Bool
+holdsFunctionType t = containsFunT t || isCallableType t
+
+-- | The sources whose call makes a value (HOST-9): a call that runs, so not
+-- one that only builds a suspension (morloc makes that), seen through
+-- forcing, labels and casts; a term counts if every implementation is
+-- sourced.
+madeBySources :: (Foldable f) => AnnoS (Indexed Type) f c -> [Source]
+madeBySources (AnnoS (Idx _ t) _ e) = case e of
+  AppS f _ | not (isSuspension t) -> sourcesOf f
+  EvalS (AnnoS _ _ (AppS f _)) -> sourcesOf f
+  EvalS y -> madeBySources y
+  LabelS _ y -> madeBySources y
+  CoerceS _ y -> madeBySources y
+  _ -> []
+  where
+    sourcesOf (AnnoS _ _ h) = case h of
+      ExeS (SrcCall src) -> [src]
+      VarS _ alts
+        | ss <- map sourcesOf (foldr (:) [] alts), not (null ss), all (not . null) ss -> concat ss
+      LabelS _ x -> sourcesOf x
+      CoerceS _ x -> sourcesOf x
+      _ -> []
+    isSuspension (EffectT _ _) = True
+    isSuspension _ = False
+
 holdsCallable :: Type -> Bool
 holdsCallable t = containsFunT t || containsEffectT t

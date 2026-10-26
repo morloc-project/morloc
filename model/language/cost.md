@@ -115,6 +115,7 @@ Replaced by COST-16: no per-language or per-pair costs are stated.
 
 ### COST-15 Only placements that run are compared
 Intent: proposed
+Tests: spec-cost-15-1, spec-cost-15-2
 Code: deviates (../compiler/issues/realization.md)
 
 Whether a program runs never depends on a comparison. Before COST-1
@@ -126,7 +127,18 @@ compares anything, a node's candidate languages are limited to those where:
 4. the functions on one recursion cycle run in one pool;
 5. a pool tree keeps the language its manifold is built in once fixed;
 6. instance resolution (CLS-2) has chosen among implementations whose
-   types differ.
+   types differ;
+7. a function a sourced call returns, and its binding, stay in that
+   source's pool (HOST-9).
+
+A let-bound value that holds a function and computes nothing to build (a
+lambda, or a record, tuple or list of such values; not one carrying a
+label) is built again in each language that uses it: a use in another
+language than the let calls its own copy, placed as the realizer priced it.
+Any other let-bound function value (one computed, or one carrying a label)
+is built once, with its let, at its home: its definition's least language
+(COST-16 breaking ties), and every use reaches it there. A function a
+sourced call returns has its home among that term's sources.
 
 The same limits apply when the placement is built, so the placement built
 is the least placement found (COST-11).
@@ -143,6 +155,7 @@ the same crossings at every level (COST-1).
 
 ### COST-11 The realizer places what code generation builds
 Intent: proposed
+Tests: spec-cost-11-1
 Code: deviates (../compiler/issues/realization.md)
 
 Choosing and building use one count of crossings (COST-3) and one set of

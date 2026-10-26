@@ -92,14 +92,16 @@ read by the closure's calls (STATE-3).
 
 ### HOST-9 A function a sourced function passes in stays in that sourced function's pool
 Intent: proposed
-Tests: spec-host-9-1
+Tests: spec-host-9-1, spec-host-9-2
 Code: deviates model/compiler/issues/realization.md
 
 A function-typed parameter of a lambda passed to a sourced function is a
 function made by host code, whatever the host passes, and so is the matching
-parameter of a recursive function that such a function is given. It has no
-identity outside the host's pool, so it never crosses a pool boundary:
+parameter of a recursive function that such a function is given, and a
+function a sourced call returns. It has no identity outside the host's pool,
+so it never crosses a pool boundary:
 
+- the binding of one a sourced call returns is placed in that pool;
 - an application of it runs in the host's language;
 - an argument computed from it for a sourced function of another language
   is computed in the host's language, and only its value crosses;

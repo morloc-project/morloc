@@ -1,17 +1,10 @@
 all:
-	: > obs.txt
-	rm -f *.err
-	if morloc make -o nexus main.loc 2> build.err; then \
-	  ./nexus localOk 5 >> obs.txt 2>> obs.err; \
-	  if ./nexus crossesPools 5 >> obs.txt 2>> obs.err; then \
-	    echo "UNEXPECTED: a host-created closure crossed a pool" >> obs.txt; \
-	  else \
-	    echo "OK refused at run time" >> obs.txt; \
-	  fi; \
-	else \
-	  echo "OK refused at build time" >> obs.txt; \
-	fi
+	rm -f *.err obs.txt
+	morloc make -o nexus main.loc 2> build.err
+	./nexus localOk 5 >> obs.txt 2>> obs.err
+	morloc make -o bad bad.loc 2> bad.err || true
+	if grep -q "would be passed into cpp" bad.err; then echo "OK refused at build time" >> obs.txt; else echo "UNEXPECTED: a host-created closure was not refused" >> obs.txt; fi
 
 clean:
-	rm -rf nexus __pycache__ *.err
+	rm -rf nexus bad __pycache__ *.err
 	rm -rf *-build *build.tmp*

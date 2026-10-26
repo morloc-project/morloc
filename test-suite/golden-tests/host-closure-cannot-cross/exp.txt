@@ -1,2 +1,2 @@
 7
-OK refused at run time
+OK refused at build time

@@ -5,12 +5,6 @@ found reviewing /work/plans/realization-cost-model.md and since. The
 objective is COST-1 (crossings by loop level, then language preference,
 then size).
 
-- **A reference to a let-bound function value is priced from where its
-  definition is cheapest.** The `LetS` clause of `scoreExpr` prices a
-  reference in language l as reaching the right-hand side's cheapest home
-  from l, but a lambda is built in its parent's language (COST-11;
-  `pinNamedLambda` at collapse), so scoring and collapse disagree. Data
-  values are free at their references (COST-3).
 - **A function argument is priced by where it is called, so a term
   with both morloc and sourced implementations prices it twice for the
   morloc one.** [read, 2026-10-24] The `AppS` clause of `scoreExpr` leaves
@@ -34,16 +28,6 @@ then size).
   implementation that is functional data (`handleOne`) and the language of
   a named lambda (`pinNamedLambda`), each by its own rule. One predicate
   both consult would keep them from drifting apart.
-- **The placement collapse builds does not always cost the least the scorer
-  found.** [reproduced, 2026-10-26] Violates COST-11. `morloc typecheck -v
-  --realize` rescores each pool tree as placed after normalization, before
-  co-location of host-made functions (whose moves and copies are forced and
-  not checked), and lists a difference; 7 golden `main*.loc` programs
-  differ (closure-conformance main-home-*/main-away-*, shared-specialization
-  main-mixed: "lambda in py not [cpp]"). All are nested lambdas that
-  evaluation threaded through shared specializations: a function argument
-  applied inside a lambda built in its parent's language is placed apart
-  from where it is bound, and the scorer does not see the extra crossing.
 - **A function argument that LambdaEval inlines is placed for where it is
   built, not where it runs.** [read, 2026-10-25] Most of the COST-11
   differences above. A lambda argument is collapsed in its parent's
@@ -73,13 +57,12 @@ then size).
   pyBoxValue (walk n g (pyMkBox 0)))`; should print 60 for `run 3`.
 - **A function value made out of sight of co-location can be applied to a
   host-made function in another pool.** [read, 2026-10-26] Co-location
-  (Realize.hs `colocateHostFunctions`) builds in the host's language every
-  function value it can see reach a host-made function: lambdas, and the
-  function-holding arguments of a copied recursive helper. A function value
-  that arrives through a parameter of an uncopied function, or as the result
-  of a sourced call, and is then applied to a host-made function, may live in
-  another pool; the call sends the host-made function (or a closure that
-  captures it) there and fails at run time with the reify error. The
+  (Realize.hs `colocateHostFunctions`) follows host-made functions it can
+  see: parameters of lambdas passed to sourced functions, functions a
+  sourced call returns (HOST-9), and the lambdas and recursive helpers they
+  reach. A function value that arrives through a parameter of a function
+  that is not copied, and is then applied to a host-made function, may live
+  in another pool; the call would send the host-made function there. The
   compile-time refusal (Serialize.hs `refuseHostFunction`) catches only a
   host-made parameter serialized directly. No witness yet.
 - **Co-location moves nodes into the host's language without checking that
@@ -127,8 +110,8 @@ then size).
   the placement listing shows with those code generation emits (the
   PolyRemoteInterface calls after lowering); there are no unit tests that
   pin a placement directly (PlacementTests.hs was planned). The consistency
-  check of `typecheck -v --realize` runs in a few goldens only, not over the
-  suite.
+  check of `typecheck -v --realize` runs over every golden program
+  (spec-cost-11-1).
 - **A bracket step through an instance is never placed in a pool.**
   [read, 2026-10-21] Realize gives a PatCall no language (Realize.hs:521),
   so a pure `f m = .[0] m` on a receiver that is not a list on the wire
@@ -164,3 +147,18 @@ then size).
   for 'pack' at type ((Int, Int), Vector 6 Real) -> Matrix 2 3 Real"
   (vector-comprehensive likewise). Implementations of differing
   Nat-dimensioned types would hit the same failure.
+- **The run-time refusal to send a host-made function has no test.**
+  [read, 2026-10-26] HOST-9 now refuses at build every program the goldens
+  used to reach it with (host-closure-cannot-cross,
+  py-host-function-manifold-name), so the pool-side guards (Python
+  `_mlc_manifold_id`, R pool.R, Rust rustmorloc fv.rs) are exercised by no
+  test. They stay as a guard for function values co-location cannot see
+  (the entry above). A test needs a way to reach them without the compiler,
+  for instance a pool-level unit test of the Python and R reify functions.
+- **A function a sourced term with several languages returns is made by its
+  least source, whatever its uses need.** [read, 2026-10-26] The realizer
+  fixes the home of such a function (Realize.hs `LetS` clause, `home`) by
+  its definition's own table before scoring its uses, so a program whose
+  uses could run with the term's other source is refused at build (HOST-9).
+  Choosing the source by its uses needs the let's body scored once per
+  candidate source. No witness yet.
