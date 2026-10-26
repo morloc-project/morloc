@@ -1,0 +1,10 @@
+--' Return a Python adder from an export
+module main (giveAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+--' Hand a Python adder to the caller
+giveAway :: Int -> <IO> (Int -> Int)
+giveAway n = mkPy n

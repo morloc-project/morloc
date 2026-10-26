@@ -2,8 +2,8 @@
 -- Sync>`, and host code names no morloc type: it returns an `impl Fn`,
 -- stores values in its own struct fields, calls them as `f(&x)` on other
 -- threads, takes a stored value as a `'static` callback, and hands back the
--- values it was given, reordered in a new list: each keeps its identity, so
--- it can still cross to Python.
+-- values it was given, reordered in a new list: its type `[a] -> [a]` says
+-- so, and each keeps its identity, so it can still cross to Python (HOST-9).
 -- A panic in host code inside a function value is the call's failure. A
 -- function value must be thread-safe, so host code that builds one holding
 -- a value that is not (an `Rc`, in unshareable.loc) fails to build, with a
@@ -25,7 +25,7 @@ source Rust from "host.rs"
   , "checked"
   )
 useOps :: Ops -> Int -> Int
-relay :: [Int -> Int] -> [Int -> Int]
+relay :: [a] -> [a]
 onThreadR :: (Int -> Int) -> Int -> Int
 applyTwice :: (Int -> Int) -> Int -> Int
 checked :: Int -> Int

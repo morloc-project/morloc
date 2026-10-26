@@ -1,0 +1,21 @@
+--' A C++ adder's use inside the value of a Python adder's binding
+module main (dataAcross)
+
+import root-py
+import root-cpp
+import .helpers
+
+source Py from "f.py" ("py_make_adder" as mkPy)
+source Cpp from "f.hpp" ("cpp_make_adder" as mkCpp)
+
+--' Make an adder in Python
+mkPy :: Int -> <IO> (Int -> Int)
+--' Make an adder in C++
+mkCpp :: Int -> <IO> (Int -> Int)
+
+--' Use a C++ adder to compute a value for a Python adder used in Python
+dataAcross :: Int -> <IO> Int
+dataAcross n = do
+  h <- mkCpp n
+  g <- mkPy (cppSum (cppMap (\x -> cppF (h x)) [1]))
+  pySum (pyMap (\x -> pyF (g x)) [1])

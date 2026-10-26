@@ -28,7 +28,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Morloc.BaseTypes as BT
 import qualified Morloc.CodeGenerator.Grammars.Macro as Macro
-import Morloc.CodeGenerator.EffectBoundary (insertExportBoundaries)
+import Morloc.CodeGenerator.EffectBoundary (insertExportBoundaries, polyOuterType)
 import Morloc.CodeGenerator.Grammars.Common (hasManifoldLabel)
 import Morloc.CodeGenerator.IFile
   ( WalkStep (..)
@@ -49,7 +49,7 @@ import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal (findPackableWireForm, unqualify)
-import Morloc.CodeGenerator.Serial (findCoveringPacker)
+import Morloc.CodeGenerator.Serial (containsFunT, findCoveringPacker)
 
 mkIdx :: AnnoS g One (Indexed c, d) -> Type -> Indexed Type
 mkIdx (AnnoS _ (Idx i _, _) _) = Idx i
@@ -485,7 +485,7 @@ addDebugWraps (PolyHead lang midx args body) = do
       -- that basis, the calling pool would have no wrap to catch the
       -- foreign-call exception. Args the typemap can't resolve are
       -- silently dropped in 'lowerDebugWrap' (best-effort by design).
-      let body'' = if hasDebugWrapAt midx body'
+      let body'' = if hasDebugWrapAt midx body' || returnsFunction body'
                     then body'
                     else PolyDebugWrap midx args body'
       return $ PolyHead lang midx args body''
@@ -513,7 +513,21 @@ hasDebugWrapAt m (PolyIntrinsic _ _ xs) = any (hasDebugWrapAt m) xs
 hasDebugWrapAt m (PolyRemoteInterface _ _ _ _ inner) = hasDebugWrapAt m inner
 hasDebugWrapAt _ _ = False
 
+-- | A wrap passes its body's value through the wire form, which a function
+-- made by host code does not have (HOST-9), so a body returning a function
+-- is left unwrapped; tracing is best-effort.
+returnsFunction :: PolyExpr -> Bool
+returnsFunction e = case polyOuterType e of
+  Just t -> holds t
+  Nothing -> False
+  where
+    holds FunT {} = True
+    holds (EffectT _ t) = holds t
+    holds t = containsFunT t
+
 debugWrapExpr :: PolyExpr -> MorlocMonad PolyExpr
+debugWrapExpr (PolyManifold l m form k inner)
+  | returnsFunction inner = PolyManifold l m form k <$> debugWrapExpr inner
 debugWrapExpr (PolyManifold l m form k inner) = do
   inner' <- debugWrapExpr inner
   case sourcedCallee inner of

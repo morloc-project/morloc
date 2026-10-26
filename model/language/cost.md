@@ -33,7 +33,7 @@ are refused before placement, naming both; sources in different languages
 differ in preference unless neither language is in the order, and two
 sources of one type still tied after rule 4 are an error at build naming
 both. Either
-way the program removes one from scope (imports, namespaces). Definitions
+way the program removes one from scope by importing fewer modules. Definitions
 in morloc that tie are interchangeable (REAL-1), and a fixed one is used.
 Starting a pool costs nothing.
 
@@ -122,14 +122,13 @@ Whether a program runs never depends on a comparison. Before COST-1
 compares anything, a node's candidate languages are limited to those where:
 
 1. every value the node makes or receives has a form (REAL-3);
-2. a function made by host code stays in its host's language (HOST-9);
+2. an expression holding or receiving a function made by host code, and
+   the expression consuming it, run in that host's language (HOST-9);
 3. a lambda is built in the language of the expression that builds it;
 4. the functions on one recursion cycle run in one pool;
 5. a pool tree keeps the language its manifold is built in once fixed;
 6. instance resolution (CLS-2) has chosen among implementations whose
-   types differ;
-7. a function a sourced call returns, and its binding, stay in that
-   source's pool (HOST-9).
+   types differ.
 
 A let-bound value that holds a function and computes nothing to build (a
 lambda, or a record, tuple or list of such values; not one carrying a
@@ -138,7 +137,8 @@ language than the let calls its own copy, placed as the realizer priced it.
 Any other let-bound function value (one computed, or one carrying a label)
 is built once, with its let, at its home: its definition's least language
 (COST-16 breaking ties), and every use reaches it there. A function a
-sourced call returns has its home among that term's sources.
+sourced call makes is made by the source chosen for the call alone; its
+uses do not choose it (HOST-9).
 
 The same limits apply when the placement is built, so the placement built
 is the least placement found (COST-11).

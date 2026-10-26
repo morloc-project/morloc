@@ -1,0 +1,5 @@
+--' The signature both adder implementations share
+module adder (mkAdder)
+
+--' Make an adder, printing which language made it
+mkAdder :: Int -> <IO> (Int -> Int)

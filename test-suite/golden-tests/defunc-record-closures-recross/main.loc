@@ -16,7 +16,9 @@
 --
 -- `forward` (Rust) genuinely reflects the incoming list into
 -- `Vec<Arc<dyn Fn>>` and returns it, so the closure round-trips THROUGH the
--- Rust pool. Capture `a` is a runtime CLI arg (not constant folded).
+-- Rust pool; its type `[a] -> [a]` says it returns what it was given, which
+-- keeps its identity (HOST-9). Capture `a` is a runtime CLI arg (not
+-- constant folded).
 
 module main (recrossPRC, recrossCRP)
 
@@ -37,7 +39,7 @@ applyPy :: [Int -> Int] -> Int -> Int
 tickCpp :: <IO> Int
 addCpp :: Int -> Int -> Int
 applyCpp :: [Int -> Int] -> Int -> Int
-forward :: [Int -> Int] -> [Int -> Int]
+forward :: [a] -> [a]
 
 -- closure home = Python (add lives only in Python)
 mkPy :: Int -> <IO> [Int -> Int]

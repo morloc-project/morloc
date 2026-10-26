@@ -26,7 +26,11 @@ Code: deviates (issues/host-calls.md)
 
 `--' rsize: n1 n2 ...` gives the sizes of the leading call groups; the last
 group takes the rest. Each size is at least 1 and leaves at least one
-argument for the group after it, or the build is rejected.
+argument for the group after it, or the build is rejected. An effect ends
+a call: in `mk :: Int -> <IO> (Int -> Int)` the source is called with one
+argument when the suspension is forced, and the function it returns is a
+value of its own; `rsize` counts only the arguments before the first
+effect.
 
 ### HOST-4 Whether parentheses in a sourced function's own type set its call groups
 Intent: open
@@ -83,31 +87,48 @@ A sourced function's parameter that is itself a function is generic, any
 `F: Fn(&A1, ..) -> B`; a function inside a parameter (a field, an element)
 has the stored spelling. A sourced function may return a function as any
 `impl Fn(&A1, ..) -> B + Send + Sync + 'static`, or return a stored value it
-was given, which keeps its identity. Host code names no morloc type. Everything a
+was given, which keeps its identity when its signature says so (HOST-9). Host code names no morloc type. Everything a
 function value holds, and so every value a morloc closure captures and every
 value a recursive type holds, must be `Send + Sync`; otherwise the build
 fails, with a note naming this rule before rustc's report. A value a closure
 captures in its serialized form (a packet the pool does not decode) is only
 read by the closure's calls (STATE-3).
 
-### HOST-9 A function a sourced function passes in stays in that sourced function's pool
-Intent: proposed
-Tests: spec-host-9-1, spec-host-9-2
-Code: deviates model/compiler/issues/realization.md
+### HOST-9 A function made by host code stays in the pool that made it
+Intent: ruled 2026-10-26
+Tests: spec-host-9-1, spec-host-9-2, spec-host-9-3, spec-host-9-4, spec-host-9-5
+Code: conforms 2026-10-26
 
-A function-typed parameter of a lambda passed to a sourced function is a
-function made by host code, whatever the host passes, and so is the matching
-parameter of a recursive function that such a function is given, and a
-function a sourced call returns. It has no identity outside the host's pool,
-so it never crosses a pool boundary:
+A function made by host code has no identity outside the pool that made
+it, so it never crosses a pool boundary and is never serialized. Morloc
+follows where each function value was made, at every position of its type
+(a function's result, an effect's value, a container's elements, a
+record's fields), through every construct and every call between pool
+trees:
 
-- the binding of one a sourced call returns is placed in that pool;
-- an application of it runs in the host's language;
-- an argument computed from it for a sourced function of another language
-  is computed in the host's language, and only its value crosses;
-- a recursive function given it is built in the host's language, a copy per
-  host language and per set of argument positions that receive one, its
-  recursion included; a function value such a copy may apply to it is built
-  there too;
-- passing it, or a closure that captures it, to a function of another
-  language is a build error, as is any program that would serialize it.
+- a sourced call makes every function in its result, except at a position
+  whose type in the source's signature is a type variable that a parameter
+  also holds: there the result is what the arguments hold
+  (`relay :: a -> a` returns what it was given; `relay :: (Int -> Int) ->
+  (Int -> Int)` returns a function it made);
+- a call that stops at a call group boundary (HOST-3) returns a function
+  the host made;
+- a function-typed parameter of a function passed to a sourced function
+  holds functions the host made (the host calls it with its own);
+- a lambda, a partial application and a suspension morloc builds are
+  morloc's, and hold what they capture.
+
+Every expression that holds or receives a function made by host code, and
+the expression that consumes it, runs in that host's language (COST-15);
+an argument computed from one is computed there and only its value
+crosses. A recursive function given one is copied per pattern of what it
+is given and built in that language. A source chosen for a call that makes
+such a function is chosen for the call alone (COST-1); a use that needs
+another pool is refused with advice to import only the module that sources
+it in the language needed. A call given such a function, whose term has a
+source with the same call groups in the host's language, may use that
+source instead of the one placement first chose. A program that would carry one across pools
+(into a callback of another language, through another pool's scope, out of
+an export, into a conditional that may hold functions of two pools) or
+serialize one (an intrinsic, a label that caches or logs) is refused at
+build.

@@ -126,6 +126,7 @@ parameterize' args (AnnoS g c (LetS v e1@(AnnoS (Idx e1i e1t) _ _) e2)) = do
   recordArgTypes e1i [idx] [e1t]
   let letArg = Arg idx v
       bodyArgs = letArg : [r | r@(Arg _ v') <- args, v' /= v]
+  markHostArgs [letArg]
   e2' <- parameterize' bodyArgs e2
   let args' = pruneArgs args [e1', e2']
   return $ AnnoS g (c, args') (LetS v e1' e2')

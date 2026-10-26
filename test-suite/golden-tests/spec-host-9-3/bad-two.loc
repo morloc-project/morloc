@@ -1,0 +1,15 @@
+--' Adders of two pools in one scope
+module main (twoPools)
+
+import root-py
+import root-cpp
+import .helpers
+import .pyadder
+import .cppadder
+
+--' Use an adder made in Python and one made in C++
+twoPools :: Int -> <IO> Int
+twoPools n = do
+  h <- mkAdder (pyF n)
+  g <- mkAdder (cppF n)
+  pySum (pyMap (\x -> pyF (h x)) [1]) + cppSum (cppMap (\x -> cppF (g x)) [1])

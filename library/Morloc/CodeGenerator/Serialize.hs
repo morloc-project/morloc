@@ -1543,12 +1543,30 @@ endsInReturn (MonoLet _ _ e2) = endsInReturn e2
 endsInReturn (MonoLoop {}) = True
 endsInReturn _ = False
 
--- | A function made by host code has no wire form: serializing one would
--- fail when the program runs, so it is refused when it is built.
+-- | A function made by host code has no wire form, and placement keeps it in
+-- its pool (HOST-9); serializing one here is a fault of the compiler.
 refuseHostFunction :: Int -> NativeExpr -> MorlocMonad ()
-refuseHostFunction m (BndVarN _ i _) = do
+refuseHostFunction m e = case e of
+  BndVarN _ i _ -> refuseHostVar m i
+  LetVarN _ i _ -> refuseHostVar m i
+  TupleN _ xs -> mapM_ (refuseHostFunction m) xs
+  ListN _ _ xs -> mapM_ (refuseHostFunction m) xs
+  RecordN _ _ _ rs -> mapM_ (refuseHostFunction m . snd) rs
+  VariantN _ _ _ xs -> mapM_ (refuseHostFunction m) xs
+  IfN _ _ a b -> refuseHostFunction m a >> refuseHostFunction m b
+  CoerceN _ _ x -> refuseHostFunction m x
+  EvalN _ x -> refuseHostFunction m x
+  NativeLetN _ _ x -> refuseHostFunction m x
+  SerialLetN _ _ x -> refuseHostFunction m x
+  ReturnN x -> refuseHostFunction m x
+  DoBlockN _ x -> refuseHostFunction m x
+  MapOptionalN _ _ _ x -> refuseHostFunction m x
+  IntrinsicN _ _ _ xs -> mapM_ (refuseHostFunction m) xs
+  _ -> return ()
+
+refuseHostVar :: Int -> Int -> MorlocMonad ()
+refuseHostVar m i = do
   hostArgs <- MM.gets stateHostFunctionArgs
   CM.when (Set.member i hostArgs) $
-    MM.throwSourcedError m
-      "a function made by host code would be serialized here to be sent to another pool or entry point; a function made by host code cannot leave the pool that received it"
-refuseHostFunction _ _ = return ()
+    MM.throwCompilerBugAt m
+      "a function made by host code would be serialized here; placement keeps such a function in its pool (HOST-9)"

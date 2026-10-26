@@ -1,0 +1,70 @@
+-- A function a sourced call returns is made by host code (HOST-9) however
+-- the call is written: chosen by a conditional, run in a nested do-block,
+-- held as a suspension and forced later, or reached through a definition
+-- in morloc. Each export here uses it where it was made, in Python, and
+-- runs; each bad-*.loc uses the same shape from C++ and is refused at
+-- build, never failing when run. bad-data.loc uses a C++ adder inside the
+-- value of a Python adder's binding, so one of them would have to pass
+-- through the other's pool. `relayedAway` uses from C++ a function that a
+-- Python source hands back after being given it: the source's type
+-- `a -> <IO> a` says it returns what it was given, which morloc made, so it
+-- keeps its identity and may cross; bad-relayed.loc declares the same source
+-- `(Int -> Int) -> <IO> (Int -> Int)`, which says the host made the function
+-- it returns, and is refused (HOST-9). bad-branches.loc makes a function in
+-- Python or in C++ by branch; bad-suspended-two.loc forces a Python
+-- suspension in a scope using a C++ adder; bad-unrelated.loc names an
+-- unrelated C++ term of the same name, which the refusal does not offer as
+-- another source.
+
+--' Functions sources make, used where they were made
+module main (chosenHome, doHome, suspendedHome, aliasHome, relayedAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+source Py from "f.py" ("py_make_adder" as mkPy, "py_relay" as relayPy)
+source Cpp from "f.hpp" ("cpp_make_adder" as mkCpp)
+
+--' Make an adder in Python
+mkPy :: Int -> <IO> (Int -> Int)
+--' Make an adder in C++
+mkCpp :: Int -> <IO> (Int -> Int)
+--' Hand back the value given
+relayPy :: a -> <IO> a
+
+--' Choose between two Python adders and use it in Python
+chosenHome :: Bool -> Int -> <IO> Int
+chosenHome b n = do
+  h <- ? b = mkPy n : mkPy (n + 1)
+  pySum (pyMap (\x -> pyF (h x)) [1])
+
+--' Make an adder in a nested do-block and use it in Python
+doHome :: Int -> <IO> Int
+doHome n = do
+  h <- do
+    mkPy n
+  pySum (pyMap h [1, 2])
+
+--' Make an adder by forcing a bound suspension and apply it with the result going to C++
+suspendedHome :: Int -> <IO> Int
+suspendedHome n = do
+  let s = mkPy n
+  g <- s
+  cppF (g 1)
+
+--' A morloc name for the Python adder
+adder :: Int -> <IO> (Int -> Int)
+adder k = mkPy k
+
+--' Make an adder through a morloc name and use it in Python
+aliasHome :: Int -> <IO> Int
+aliasHome n = do
+  h <- adder n
+  pySum (pyMap (\x -> pyF (h x)) [1])
+
+--' Use from C++ a function a Python source hands back
+relayedAway :: Int -> <IO> Int
+relayedAway n = do
+  h <- relayPy (\x -> x + n)
+  cppSum (cppMap (\x -> cppF (h x)) [1, 2])

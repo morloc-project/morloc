@@ -1,0 +1,12 @@
+--' Apply in Python a function C++ made
+module main (latentAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+--' Apply in Python the function a recursive morloc function returns
+latentAway :: Int -> <IO> Int
+latentAway n = do
+  h <- mkNth 2 n
+  pyApply h 1

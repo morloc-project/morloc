@@ -1,0 +1,83 @@
+-- Where a function was made is followed through every construct (HOST-9):
+-- a recursive morloc function whose call returns a function C++ made
+-- (`latentHome`), a function a C++ call stops at a call group boundary
+-- to return (`groupHome`),
+-- a function inside a tuple a C++ call returns (`pairHome`), a binding of
+-- a host-made function the rest of the block never uses (`unusedHome`), a
+-- recursive function given a Python function, a C++ function and a morloc
+-- one (`helperPy`, `helperCpp`, `helperMorloc`, one copy each), and a
+-- let-bound function a Python source calls with its own function
+-- (`feedLet`). `reopened` maps a Python adder with `mapBoth`, which has a
+-- Python and a C++ source: its argument and its consumer are in C++, so the
+-- C++ source would cross least, but the adder can only be applied in
+-- Python, so the Python source is used. Each export uses what it is given where it was made. Each
+-- bad-*.loc moves one of them into the other language, or serializes one,
+-- and is refused at build.
+
+--' Functions used where host code made them
+module main (latentHome, groupHome, pairHome, unusedHome, helperPy, helperCpp, helperMorloc, feedLet, reopened, pickHome, siblings)
+
+import root-py
+import root-cpp
+import .helpers
+
+--' Apply in C++ the function a recursive morloc function returns
+latentHome :: Int -> <IO> Int
+latentHome n = do
+  h <- mkNth 2 n
+  cppApply h 1
+
+--' Bind and apply in C++ a function C++ returns after one argument
+groupHome :: Int -> Int
+groupHome n =
+  let h = cppAdd n
+  in cppApply h 1 + cppApply h 2
+
+--' Apply in C++ the function a C++ call returns in a tuple
+pairHome :: Int -> Int
+pairHome n = pyF (cppApply (.0 (cppPair n)) 3)
+
+--' Make an adder in Python and use none of it
+unusedHome :: Int -> <IO> Int
+unusedHome n = do
+  h <- mkPy n
+  cppF 1
+
+--' Total a Python adder
+helperPy :: Int -> <IO> Int
+helperPy n = do
+  h <- mkPy n
+  total 3 h
+
+--' Total a C++ adder
+helperCpp :: Int -> <IO> Int
+helperCpp n = do
+  h <- mkCpp n
+  total 3 h
+
+--' Total a morloc adder
+helperMorloc :: Int -> Int
+helperMorloc n = total 3 (\x -> x + n)
+
+--' Hand a let-bound function to a Python source that calls it with its own
+feedLet :: Int -> Int
+feedLet n =
+  let g = \f -> f n + 1
+  in pyFeed g
+
+--' Map a Python adder over numbers made in C++ and sum them in C++
+reopened :: Int -> <IO> Int
+reopened n = do
+  h <- mkPy n
+  cppSum (mapBoth h (cppRange 3))
+
+--' Apply in Python the adder a recursive function hands back
+pickHome :: Int -> <IO> Int
+pickHome n = do
+  h <- mkPy n
+  f <- pick 2 h
+  pyApply f 1
+
+--' Use one function with a function Python passes and with a morloc one
+siblings :: Int -> Int
+siblings n = pyFeed (\g -> twice g n) + cppF (twice (\x -> x + 1) n)

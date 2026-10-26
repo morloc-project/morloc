@@ -299,8 +299,8 @@ data MorlocState = MorlocState
   -- index of their root.
   , stateNamedGasts :: Map Int EVar
   , stateHostFunctionVars :: Set.Set EVar
-  -- ^ Parameters bound to a function made by host code (renamed apart by
-  -- 'Morloc.CodeGenerator.Realize.colocateHostFunctions').
+  -- ^ Binders of a function made by host code (renamed apart by
+  -- 'Morloc.CodeGenerator.HostProvenance.planHostFunctions').
   , stateHostFunctionArgs :: Set.Set Int
   -- ^ The argument ids of those parameters ('Morloc.CodeGenerator.Parameterize').
   , stateHostOriginClosures :: Set.Set Int

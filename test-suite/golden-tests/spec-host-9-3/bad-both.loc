@@ -1,0 +1,14 @@
+--' An adder used in Python and C++
+module main (useInBoth)
+
+import root-py
+import root-cpp
+import .helpers
+import .pyadder
+import .cppadder
+
+--' Use one adder in a Python and a C++ callback
+useInBoth :: Int -> <IO> Int
+useInBoth n = do
+  h <- mkAdder n
+  pySum (pyMap (\x -> pyF (h x)) [1, 2]) + cppSum (cppMap (\x -> cppF (h x)) [1, 2])

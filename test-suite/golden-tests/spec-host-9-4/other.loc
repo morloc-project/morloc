@@ -1,0 +1,9 @@
+--' A C++ function that shares a name with the Python adder maker
+module other (mkPy)
+
+import root-cpp
+
+source Cpp from "f.hpp" ("cpp_unrelated" as mkPy)
+
+--' Return the input
+mkPy :: Int -> Int

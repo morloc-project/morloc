@@ -1,0 +1,64 @@
+-- A function a sourced call returns is made by host code and used only in
+-- the pool of the source that made it (HOST-9). `mkAdder` has a Python and
+-- a C++ source (pyadder.loc, cppadder.loc); which one makes an adder is
+-- chosen for the call alone (COST-1): where its argument is computed, else
+-- the language order (COST-16). The exports here use each adder where it
+-- was made. A use that needs the other source is refused, with advice to
+-- choose a source explicitly (bad-cpp, bad-py, bad-both); adders of two
+-- pools used in one scope are refused (bad-two); and following the advice,
+-- by importing only the C++ module, builds (explicit.loc).
+
+--' Adders made where the call puts them
+module main (madeInPy, madeInCpp, atRoot, passedToCpp, labeled, fiveInPy, chosenAtCall)
+
+import root-py
+import root-cpp
+import .helpers
+import .pyadder
+import .cppadder
+
+--' Make an adder from a Python value and use it in Python
+madeInPy :: Int -> <IO> Int
+madeInPy n = do
+  h <- mkAdder (pyF n)
+  pySum (pyMap (\x -> pyF (h x)) [1, 2])
+
+--' Make an adder from a C++ value and use it in C++
+madeInCpp :: Int -> <IO> Int
+madeInCpp n = do
+  h <- mkAdder (cppF n)
+  cppSum (cppMap (\x -> cppF (h x)) [1, 2])
+
+--' Make an adder where either source could and apply it there
+atRoot :: Int -> <IO> Int
+atRoot n = do
+  h <- mkAdder n
+  h n
+
+--' Make an adder where either source could and hand it to C++
+passedToCpp :: Int -> <IO> Int
+passedToCpp n = do
+  h <- mkAdder n
+  cppSum (cppMap h [1, 2])
+
+--' Make an adder by a labeled call and use it in C++
+labeled :: Int -> <IO> Int
+labeled n = do
+  h <- made@mkAdder (cppF n)
+  cppSum (cppMap (\x -> cppF (h x)) [1, 2])
+
+--' Make five adders in Python and use them all there
+fiveInPy :: Int -> <IO> Int
+fiveInPy n = do
+  a <- mkAdder (pyF n)
+  b <- mkAdder (pyF (a 1))
+  c <- mkAdder (pyF (b 1))
+  d <- mkAdder (pyF (c 1))
+  e <- mkAdder (pyF (d 1))
+  pySum (pyMap (\x -> pyF (e x)) [1])
+
+--' Choose between two adders and use the one chosen in C++
+chosenAtCall :: Bool -> Int -> <IO> Int
+chosenAtCall b n = do
+  h <- ? b = mkAdder (cppF n) : mkAdder (cppF (n + 1))
+  cppSum (cppMap (\x -> cppF (h x)) [1, 2])

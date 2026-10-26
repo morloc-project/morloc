@@ -55,25 +55,15 @@ then size).
   C++ function, `walk n g b ? n == 0 = b : pyBump (walk (cppSub n 1) g b) (g
   n)` with `b` a record mapped only to Python, `run n = cppFeed (\g ->
   pyBoxValue (walk n g (pyMkBox 0)))`; should print 60 for `run 3`.
-- **A function value made out of sight of co-location can be applied to a
-  host-made function in another pool.** [read, 2026-10-26] Co-location
-  (Realize.hs `colocateHostFunctions`) follows host-made functions it can
-  see: parameters of lambdas passed to sourced functions, functions a
-  sourced call returns (HOST-9), and the lambdas and recursive helpers they
-  reach. A function value that arrives through a parameter of a function
-  that is not copied, and is then applied to a host-made function, may live
-  in another pool; the call would send the host-made function there. The
-  compile-time refusal (Serialize.hs `refuseHostFunction`) catches only a
-  host-made parameter serialized directly. No witness yet.
-- **Co-location moves nodes into the host's language without checking that
-  it can hold their values.** [read, 2026-10-26] `colocateHostFunctions`
-  (`relang`, `relangAll`) places a node that uses a host-made function, a
-  copied helper's body, and a copy's function-holding arguments in the
-  host's language whatever their types; a value the host's language cannot
-  hold (a record mapped only to Python, in C++) then fails at the pool's
-  compile or later, instead of as a located refusal. Spec gap beside COST-11
-  and HOST-9: what a program must do when the host's language cannot hold a
-  value computed from a host-made function.
+- **A copy of a recursive function given a host-made function is built in
+  the host's language without checking that it can hold its values.**
+  [read, 2026-10-26] HostProvenance.hs `makeCopy` (`relangRoot`) sets the
+  copy's manifold to the host's language; a parameter or body value of a
+  type the host's language cannot hold (a record mapped only to Python, in
+  C++) then fails at the pool's compile or as a compiler bug at `pinTable`,
+  instead of as a located refusal. Spec gap beside COST-11 and HOST-9: what
+  a program must do when the host's language cannot hold a value computed
+  from a host-made function.
 - **Placement after normalization can abort a build that placement before
   it accepted.** [read, 2026-10-26] `placeNormalized` scores and collapses
   every pool tree again and keeps no earlier placement, so an error raised
@@ -148,17 +138,29 @@ then size).
   (vector-comprehensive likewise). Implementations of differing
   Nat-dimensioned types would hit the same failure.
 - **The run-time refusal to send a host-made function has no test.**
-  [read, 2026-10-26] HOST-9 now refuses at build every program the goldens
-  used to reach it with (host-closure-cannot-cross,
-  py-host-function-manifold-name), so the pool-side guards (Python
-  `_mlc_manifold_id`, R pool.R, Rust rustmorloc fv.rs) are exercised by no
-  test. They stay as a guard for function values co-location cannot see
-  (the entry above). A test needs a way to reach them without the compiler,
-  for instance a pool-level unit test of the Python and R reify functions.
-- **A function a sourced term with several languages returns is made by its
-  least source, whatever its uses need.** [read, 2026-10-26] The realizer
-  fixes the home of such a function (Realize.hs `LetS` clause, `home`) by
-  its definition's own table before scoring its uses, so a program whose
-  uses could run with the term's other source is refused at build (HOST-9).
-  Choosing the source by its uses needs the let's body scored once per
-  candidate source. No witness yet.
+  [read, 2026-10-26] Placement keeps every host-made function in its pool
+  (HostProvenance.hs), and serialization treats one reaching it as a
+  compiler bug (Serialize.hs `refuseHostFunction`). The pool-side guards
+  (Python `_mlc_manifold_id`, R pool.R, Rust rustmorloc fv.rs) remain as the
+  last line and are exercised by no test; a test needs to reach them
+  without the compiler, for instance a pool-level unit test of the Python
+  and R reify functions.
+- **Under `--debug`, a manifold inlined into a debug-wrapped caller names
+  its serialized arguments.** [reproduced, 2026-10-26; HEAD not checked]
+  `morloc make --debug` of `run n = do { h <- mkCpp n; cppApply h 1 }`
+  (C++ only: `mkCpp :: Int -> <IO> (Int -> Int)`, `cppApply :: (Int ->
+  Int) -> Int -> Int`) fails to compile the pool: the wrap's argument dump
+  reads `s1` (`const uint8_t* __morloc_dpk_1[1] = { s1 }`) inside a body
+  whose argument is native `n1`. The same appears for a recursive copy
+  given a host-made function and a recursion returning one (spec-host-9-5
+  `helperCpp`, `latentHome`). Likely the class of cache.md's `cache: true`
+  under `--debug` unbound argument.
+- **A recursive function returning a function, called partially, emits two
+  manifolds with one id.** [reproduced, 2026-10-26, with and without the
+  host-function pass] `pick :: Int -> (Int -> Int) -> (Int -> Int)`,
+  `pick n g ? n == 0 = g : pick (n - 1) g`, and `run n = pyApply (pick 2
+  (\x -> x + n)) 1` (Python): `morloc typecheck --realize` stops with
+  "Compiler bug at Emit.hs: two different manifolds in one pool share the
+  id". The stage entry for the two-argument call nests the tree's manifold
+  in a shape (`let x = if ..; x b`) different from the tree's own root
+  (the application pushed into each branch), under the same id.

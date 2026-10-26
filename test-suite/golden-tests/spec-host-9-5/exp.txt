@@ -1,0 +1,19 @@
+8
+13
+13
+2
+12
+12
+12
+7
+9
+6
+26
+OK: bad-latent refused
+OK: bad-pair refused
+OK: bad-helper refused
+OK: bad-feed refused
+OK: bad-cache refused
+OK: bad-hash refused
+OK: bad-pick refused
+OK: bad-export refused

@@ -5,7 +5,7 @@ all:
 	grep -c made made.err >> obs.txt
 	./nexus madeDirect 3 >> obs.txt 2>> obs.err
 	morloc make -o bad bad.loc 2> bad.err || true
-	if grep -q "would be passed into cpp" bad.err; then echo "OK: a function made by Python is not sent to C++" >> obs.txt; else echo "UNEXPECTED: bad.loc was not refused" >> obs.txt; fi
+	if grep -q "cannot leave the pool that made it" bad.err; then echo "OK: a function made by Python is not sent to C++" >> obs.txt; else echo "UNEXPECTED: bad.loc was not refused" >> obs.txt; fi
 
 clean:
 	rm -rf nexus bad pools __pycache__

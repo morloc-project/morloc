@@ -1,0 +1,75 @@
+--' Host functions in Python and C++ that make, take and apply functions
+module helpers (*)
+
+import root-py
+import root-cpp
+
+source Py from "f.py"
+  ( "py_f" as pyF
+  , "py_apply" as pyApply
+  , "py_feed" as pyFeed
+  , "py_make_adder" as mkPy
+  , "py_map" as mapBoth
+  )
+source Cpp from "f.hpp"
+  ( "cpp_f" as cppF
+  , "cpp_apply" as cppApply
+  , "cpp_make_adder" as mkCpp
+  , "cpp_pair" as cppPair
+  , "cpp_map" as mapBoth
+  , "cpp_range" as cppRange
+  , "cpp_sum" as cppSum
+  )
+
+-- `cppAdd k` returns a function C++ made: its call group ends after `k`
+source Cpp from "f.hpp" where
+  --' name: cpp_add
+  --' @rsize 1
+  cppAdd
+
+--' Add one
+pyF :: Int -> Int
+--' Double
+cppF :: Int -> Int
+--' Apply a function in Python
+pyApply :: (Int -> Int) -> Int -> Int
+--' Apply a function in C++
+cppApply :: (Int -> Int) -> Int -> Int
+--' Call a function with a Python function that triples
+pyFeed :: ((Int -> Int) -> Int) -> Int
+--' Make an adder in Python
+mkPy :: Int -> <IO> (Int -> Int)
+--' Make an adder in C++
+mkCpp :: Int -> <IO> (Int -> Int)
+--' Add, in C++, in two calls
+cppAdd :: Int -> Int -> Int
+--' Map, in Python or C++
+mapBoth :: (Int -> Int) -> [Int] -> [Int]
+--' The numbers 1 to n, in C++
+cppRange :: Int -> [Int]
+--' Sum, in C++
+cppSum :: [Int] -> Int
+--' A multiplier made in C++ and its factor
+cppPair :: Int -> (Int -> Int, Int)
+
+--' An adder C++ makes after n steps of recursion
+mkNth :: Int -> Int -> <IO> (Int -> Int)
+mkNth n k
+  ? n == 0 = mkCpp k
+  : mkNth (n - 1) (k + 1)
+
+--' Sum g n + g (n-1) + ... + g 1, each plus one, in Python
+total :: Int -> (Int -> Int) -> Int
+total n g
+  ? n == 0 = 0
+  : pyF (g n) + total (n - 1) g
+
+--' The function given, after n steps of recursion
+pick :: Int -> (Int -> Int) -> <IO> (Int -> Int)
+pick n g
+  ? n == 0 = do g
+  : pick (n - 1) g
+
+--' Apply a function twice
+twice :: (Int -> Int) -> Int -> Int
+twice f x = f (f x)

@@ -1,0 +1,18 @@
+--' Give a C++ adder to a function applying it in Python
+module main (helperAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+--' Sum the applications of g in Python
+applyIn :: Int -> (Int -> Int) -> Int
+applyIn n g
+  ? n == 0 = 0
+  : pyApply g n + applyIn (n - 1) g
+
+--' Apply a C++ adder in Python
+helperAway :: Int -> <IO> Int
+helperAway n = do
+  h <- mkCpp n
+  applyIn 3 h

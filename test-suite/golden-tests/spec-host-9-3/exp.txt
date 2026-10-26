@@ -1,0 +1,27 @@
+9
+made in py
+14
+made in cpp
+2
+made in cpp
+5
+made in cpp
+14
+made in cpp
+12
+made in py
+made in py
+made in py
+made in py
+made in py
+14
+made in cpp
+22
+made in cpp
+OK: built placement costs the least
+OK: bad-cpp refused
+OK: bad-py refused
+OK: bad-both refused
+OK: bad-two refused
+14
+made in cpp

@@ -22,7 +22,7 @@ all:
 	$(RUN) hostDirect 1 >> obs.txt 2>> obs.err
 	if morloc typecheck -v --realize main.loc > check.err 2> /dev/null && ! grep -q 'cost check' check.err; then echo "OK: built placement costs the least" >> obs.txt; else echo "UNEXPECTED: built placement does not cost the least found" >> obs.txt; fi
 	morloc make -o bad bad-host.loc 2> bad-host.err || true
-	if grep -q "would be passed into cpp" bad-host.err; then echo "OK: a C++ callback does not call a host function" >> obs.txt; else echo "UNEXPECTED: bad-host.loc was not refused" >> obs.txt; fi
+	if grep -q "cannot leave the pool that made it" bad-host.err; then echo "OK: a C++ callback does not call a host function" >> obs.txt; else echo "UNEXPECTED: bad-host.loc was not refused" >> obs.txt; fi
 
 clean:
 	rm -rf nexus bad pools __pycache__ cache
