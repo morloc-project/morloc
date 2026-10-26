@@ -36,6 +36,7 @@ import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
 import Data.IORef (modifyIORef, newIORef, readIORef)
 import qualified Data.Set as Set
+import Data.Graph (SCC (..), stronglyConnComp)
 import Control.Monad.State (evalState, state)
 import qualified Data.List as List
 import qualified Morloc.Data.Text as MT
@@ -180,7 +181,7 @@ realityCheck es = do
   -- select a single instance at each node of each exported tree, and
   -- separate unrealized (general) trees from realized ones
   (gASTs0, rASTs00) <-
-    mapM (\e -> realize costs tables e >>= \(_, finish) -> finish Nothing) roots
+    mapM (\e -> realize costs tables noPins e >>= \(_, finish) -> finish Nothing) roots
       |>> partitionEithers
   rASTs0 <- realizeDemanded finishers rASTs00
   let takesFunction = Set.fromList [v | AnnoS (Idx _ (FunT ts _)) _ (VarS v _) <- specs, any containsFunT ts]
@@ -221,7 +222,7 @@ scoreSpec ::
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Map EVar [(Lang, Score)], Map EVar Finisher)
 scoreSpec costs (tables, finishers) spec@(AnnoS _ _ (VarS v _)) = do
-  (AnnoS _ (Idx _ scores) _, finish) <- realize costs tables spec
+  (AnnoS _ (Idx _ scores) _, finish) <- realize costs tables noPins spec
   return (Map.insert v scores tables, Map.insert v finish finishers)
 scoreSpec _ acc _ = return acc
 
@@ -565,9 +566,10 @@ statistical info describing inputs.
 realize ::
   SigCosts ->
   Map EVar [(Lang, Score)] ->
+  Pins ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Scored, Finisher)
-realize costs tables s0 = do
+realize costs tables pins s0 = do
   registry <- MM.gets stateLangRegistry
   -- A term that calls nothing sourced has no language of its own and is
   -- evaluated by the nexus. That evaluator has no name to call a function
@@ -600,7 +602,29 @@ realize costs tables s0 = do
                 MM.throwCompilerBugAt i0 "a replay entry in a program with no pool language"
           ls -> return ls
       else return []
-  realizeWithRegistry registry costs tables langs s0
+  realizeWithRegistry registry costs tables pins langs s0
+
+-- | What a boundary from one language to another costs: nothing within a
+-- language, a switch within a pool, a crossing's latency between pools.
+boundaryScore :: LangRegistry -> Lang -> Lang -> Score
+boundaryScore registry l1 l2
+  | l1 == l2 = mempty
+  | LR.coLocated registry l1 l2 = Score 0 0 1
+  | otherwise = Score (picoseconds (LR.registryCrossingLatency registry (poolName l1) (poolName l2))) 1 0
+  where
+    poolName = langName . LR.poolOf registry
+
+picoseconds :: Double -> Integer
+picoseconds ns = round (ns * 1000)
+
+-- | Languages a tree must keep when it is placed. @pinHeads@ are recursive
+-- functions, each with its language, a node calling one is placed in (see
+-- 'pickLanguage'); @pinWork@ is the language the root's manifold is built
+-- in: a root lambda's body's, else the root's own.
+data Pins = Pins {pinHeads :: [(EVar, Lang)], pinWork :: Maybe Lang}
+
+noPins :: Pins
+noPins = Pins [] Nothing
 
 -- | Score a tree, returning the scored tree and how to finish it: a shared
 -- specialization is scored once and finished once per language it is used in.
@@ -609,10 +633,11 @@ realizeWithRegistry ::
   LangRegistry ->
   SigCosts ->
   Map EVar [(Lang, Score)] ->
+  Pins ->
   [Lang] ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Scored, Finisher)
-realizeWithRegistry registry costs tables seedLangs s0 = do
+realizeWithRegistry registry costs tables pins seedLangs s0 = do
   -- Normalize language-invariant (literal-lambda-head) redexes before scoring.
   let sp = stagePoints s0
   s0' <- normalizePop1 (`Map.lookup` sp) s0
@@ -620,8 +645,9 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
   scored <- scoreAnnoS emptyRState {rLangs = seedLangs, rShapes = shapes} s0'
   return (scored, finish shapes s0' scored)
   where
-    finish shapes s0' scored ctx = do
-      e@(AnnoS g li x) <- collapseAnnoS [] ctx scored
+    finish shapes s0' scored0 ctx = do
+      scored <- maybe (return scored0) (pinRoot scored0) (pinWork pins)
+      e@(AnnoS g li x) <- collapseAnnoS (pinHeads pins) ctx scored
       checkPlacement shapes s0' scored ctx e
       case (li, ctx) of
         -- language-free code used from a pool runs in that pool, as it
@@ -629,6 +655,19 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
         (Idx i Nothing, Just l) -> propagateDown (AnnoS g (Idx i (Just l)) x) |>> Right
         (Idx _ Nothing, Nothing) -> makeGAST e |>> Left
         _ -> propagateDown e |>> Right
+
+    -- the root's manifold is built in the given language
+    pinRoot :: Scored -> Lang -> MorlocMonad Scored
+    pinRoot (AnnoS g c (LamS vs body)) l = AnnoS g c . LamS vs <$> pinTable body l
+    pinRoot root l = pinTable root l
+
+    pinTable :: Scored -> Lang -> MorlocMonad Scored
+    pinTable (AnnoS g (Idx j ss) e) l =
+      case [(l', sc) | (l', sc) <- ss, l' == l] of
+        -- language-free code costs nothing anywhere
+        [] | null ss -> return (AnnoS g (Idx j [(l, mempty)]) e)
+        [] -> MM.throwCompilerBugAt j $ "a pool tree's manifold cannot be placed in" <+> pretty l <> ", where it is built; it can be placed in" <+> list (map (pretty . fst) ss)
+        ss' -> return (AnnoS g (Idx j ss') e)
 
     -- COST-11: the placement collapse built costs what the scorer found
     -- least. When the placement listing is wanted with verbosity, the tree is
@@ -763,7 +802,7 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
       return $ case able of
         _ | l `elem` able -> l
         [] -> l
-        _ -> snd (minimum [(boundary l l', l') | l' <- able])
+        _ -> snd (minimum [(boundaryScore registry l l', l') | l' <- able])
 
     -- Of these languages and the program's pool languages, those in which
     -- codegen finds a concrete type for each of @ts@.
@@ -886,7 +925,7 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
                 let base = minimum (map snd rhs)
                     langs = unique (map fst rhs <> rLangs rstat)
                     above (Score t c w) (Score bt bc bw) = Score (t - bt) (max 0 (c - bc)) (max 0 (w - bw))
-                 in [ (l, minimum [above sc base <> boundary h l | (h, sc) <- rhs])
+                 in [ (l, minimum [above sc base <> boundaryScore registry h l | (h, sc) <- rhs])
                     | l <- langs
                     ]
           ref = if holdsCallable (annoType e1') then Just refTable else Nothing
@@ -1130,7 +1169,7 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
 
     -- The cheapest way to have a value from @table@ in language @l@.
     reachFrom :: Lang -> [(Lang, Score)] -> Score
-    reachFrom = reachWith boundary
+    reachFrom = reachWith (boundaryScore registry)
 
     reachWith :: (Lang -> Lang -> Score) -> Lang -> [(Lang, Score)] -> Score
     reachWith edge l table = minimum [sc <> edge l l2 | (l2, sc) <- table]
@@ -1216,19 +1255,14 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
     -- | What it costs to reach a child placed in @l2@ from a parent in @l1@
     -- (COST-3): one crossing into @l2@'s pool, or nothing within one pool,
     -- where a change of language only counts as a switch.
-    boundary :: Lang -> Lang -> Score
-    boundary l1 l2
-      | l1 == l2 = mempty
-      | LR.coLocated registry l1 l2 = Score 0 0 1
-      | otherwise = Score (picoseconds (LR.registryCrossingLatency registry (poolName l1) (poolName l2))) 1 0
 
     -- | What it costs to move a value of this type across a pool boundary,
     -- added to the cost of the language pair itself. Zero within a pool,
     -- where nothing is moved.
     crossScore :: Type -> Lang -> Lang -> Score
     crossScore t l1 l2
-      | LR.coLocated registry l1 l2 = boundary l1 l2
-      | otherwise = boundary l1 l2 <> Score (crossingPayloadCost t) 0 0
+      | LR.coLocated registry l1 l2 = boundaryScore registry l1 l2
+      | otherwise = boundaryScore registry l1 l2 <> Score (crossingPayloadCost t) 0 0
 
     -- | THE EXTENSION POINT for pricing a crossing by WHAT is moved rather
     -- than only by where it is going.
@@ -1269,7 +1303,7 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
       Lang -> -- child lang (should always be given if we are working from scored pairs)
       Score -> -- score
       Score
-    cost (Just l1) l2 score = score <> boundary l1 l2
+    cost (Just l1) l2 score = score <> boundaryScore registry l1 l2
     cost _ _ score = score
 
     -- The cost of one call of a sourced function (COST-2): (its language's
@@ -1350,12 +1384,6 @@ realizeWithRegistry registry costs tables seedLangs s0 = do
     -- The self time of a function that states none (COST-2), in nanoseconds.
     defaultSelftimeNs :: Double
     defaultSelftimeNs = 1000
-
-    picoseconds :: Double -> Integer
-    picoseconds ns = round (ns * 1000)
-
-    poolName :: Lang -> MT.Text
-    poolName = langName . LR.poolOf registry
 
     collapseExpr ::
       [(EVar, Lang)] ->
@@ -1802,13 +1830,14 @@ makeGAST = mapAnnoSCM (\(Idx _ _) -> return ())
 
 -- | Place languages on pool trees again after normalization (LambdaEval), so the placement is decided on the shape code
 -- generation lowers. Each tree is scored and collapsed again with the same
--- cost model; its root keeps its language (the manifold's identity) and a
--- sourced call its source's. A tree on a recursive cycle keeps the
--- placement realization gave it, which keeps the cycle in one pool. A call
--- of another tree costs what that tree's language does.
+-- cost model; its root keeps its language (the manifold's identity), a root
+-- lambda's body the language its manifold is built in, and a sourced call
+-- its source's. The trees on one recursion cycle are placed in one pool. A
+-- call of another tree costs what that tree's language does.
 placeNormalized :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [AnnoS (Indexed Type) One (Indexed Lang)]
 placeNormalized trees = do
   costs <- signatureCosts
+  registry <- MM.gets stateLangRegistry
   nameMap <- MM.gets stateName
   recTargets <- MM.gets stateRecursionTargets
   let rootLang = Map.fromList [(i, l) | AnnoS (Idx i _) (Idx _ l) _ <- trees]
@@ -1818,32 +1847,32 @@ placeNormalized trees = do
         Nothing -> case Map.lookup v recTargets of
           Just i | Map.member i rootLang -> Just i
           _ -> Nothing
-      calls t = unique [i | AnnoS _ _ (CallS v) <- annoNodes t, Just i <- [target v]]
-      callGraph = Map.fromList [(i, calls t) | t@(AnnoS (Idx i _) _ _) <- trees]
-      onCycle i = i `elem` reach Set.empty (Map.findWithDefault [] i callGraph)
-        where
-          reach _ [] = []
-          reach seen (j : js)
-            | Set.member j seen = reach seen js
-            | otherwise = j : reach (Set.insert j seen) (Map.findWithDefault [] j callGraph <> js)
-      callTables t =
+      calledNames = [(i, unique [(v, j) | AnnoS _ _ (CallS v) <- annoNodes t, Just j <- [target v]]) | t@(AnnoS (Idx i _) _ _) <- trees]
+      -- a node calling a function on a recursion cycle through its tree is
+      -- placed in the tree's language, so the back-edge stays in its pool
+      namesOnCycle =
         Map.fromList
-          [ (v, [(l, mempty)])
-          | AnnoS _ _ (CallS v) <- annoNodes t
-          , Just i <- [target v]
-          , Just l <- [Map.lookup i rootLang]
+          [ (i, names)
+          | CyclicSCC members <- stronglyConnComp [(i, i, unique (map snd vs)) | (i, vs) <- calledNames]
+          , let names = unique [v | (_, vs) <- calledNames, (v, j) <- vs, j `elem` members]
+          , i <- members
           ]
-      place t@(AnnoS (Idx i _) (Idx _ l0) _)
-        | onCycle i = return t
-        | otherwise = do
-            (_, finish) <- realize costs (callTables t) (unrealized t)
-            placed <- finish (Just l0)
-            return $ case placed of
-              Right t' | headLangs t' == headLangs t -> t'
-              _ -> t
-      -- a root lambda's manifold is built in its body's language
-      headLangs (AnnoS _ (Idx _ l) (LamS _ (AnnoS _ (Idx _ lb) _))) = [l, lb]
-      headLangs (AnnoS _ (Idx _ l) _) = [l]
+      cycleHeads i l = [(v, l) | v <- Map.findWithDefault [] i namesOnCycle]
+      -- a call of another tree is a call of its manifold, from any pool
+      langs = unique [l | t <- trees, AnnoS _ (Idx _ l) _ <- annoNodes t]
+      callTable =
+        Map.fromList
+          [ (v, [(l, boundaryScore registry l lt) | l <- langs])
+          | (_, vs) <- calledNames
+          , (v, j) <- vs
+          , Just lt <- [Map.lookup j rootLang]
+          ]
+      place t@(AnnoS (Idx i _) (Idx _ l0) e) = do
+        let work = case e of
+              LamS _ (AnnoS _ (Idx _ lb) _) -> lb
+              _ -> l0
+        (_, finish) <- realize costs callTable (Pins (cycleHeads i work) (Just work)) (unrealized t)
+        finish (Just l0) >>= either (const (MM.throwCompilerBugAt i "a pool tree was placed in no language")) return
   -- the listing describes the realization the user wrote, not this pass
   listing <- MM.gets statePlacement
   placed <- mapM place trees

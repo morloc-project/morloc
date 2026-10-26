@@ -28,6 +28,17 @@ reproduced]
   argument is priced at the application and again inside the morloc
   alternative's body. Each alternative needs its own argument pricing
   (plan step e3b).
+- **A shared specialization taking a function is placed away from its
+  callback's pool.** [reproduced, 2026-10-26] In the stdlib stream-r suite
+  (`morloc typecheck --realize test.loc`, stream/test/main.loc
+  `testSorter`), `mapE_ (pushSorter h2) (pieces 30 xs)` is placed in
+  Python (`call mapE_ [py]`) with the R `pushSorter` as its callback, so
+  every element crosses back into R, where staying in R crosses once. The
+  call of a shared specialization is priced from its table without its
+  function argument's calls (COST-4). This placement makes the call
+  re-entrant and exposes the fork-pool host-state issue
+  (model/runtime/issues/pools-and-ipc.md); before the cost model, `mapE_`
+  was placed in R and the suite passed.
 - **Building a function value a morloc head never calls costs nothing.**
   [read, 2026-10-24] A function argument bound by the head's lambda is
   priced only where the body calls it; one the body ignores, such as a
@@ -76,11 +87,9 @@ reproduced]
   (closure-conformance `mkE "abcde"`). Candidate fix: collapse an inlined
   argument at its reference site, and score a surviving closure's
   references per build language, memoized on the bound tables.
-  LambdaEval now moves a substituted lambda to its reference's language, so
-  the program builds, but the lambda's body keeps the placement collapse
-  chose for the old site: forwarded through a helper into a Rust callback,
-  `show` runs in Python with a crossing per element where the direct form
-  calls Rust's own `show`.
+  Placement after normalization (Realize.hs `placeNormalized`) places the
+  inlined argument where it runs; the choice of implementation is still
+  made at the build site.
 - **The cost model is partly implemented.** [read, 2026-10-24] Scores are
   seconds: a call costs its language's coefficient times its self time
   (`@selftime` on its signature or `source` block item, else 1 us) plus
@@ -101,16 +110,6 @@ reproduced]
   (2026-10-25). A function value
   inside another type handed to a sourced function is priced as one
   call.
-- **A recursive helper whose body crosses pools cannot take a function
-  made by host code.** [reproduced, 2026-10-26] Its manifold gets no native
-  entry (Express.hs `addNativeRecEntries`, the `crosses` gate in
-  `splittable`), so a self-call in the same pool passes every argument
-  serialized, and serializing a host-made function fails at run time
-  ("cannot reify a function that morloc did not create"). The same helper
-  with a body in one language works (native entry). Repro: R `feed <-
-  function(k) k(function(x) x * 2L)`, `total n g ? n == 0 = 0 : pyAdd (g n)
-  (total (pySub n 1) g)`, `recursive n = feed (\g -> total n g)` with the
-  helper placed in R. Also blocks stream-r (`pullSource` given R's `sink`).
 - **A crossing recursion given both a function made by host code and a
   value its pool cannot hold is refused.** [reproduced, 2026-10-26] Such a
   recursion keeps its serial entry (Express.hs `allHeld`: callers of a
@@ -143,10 +142,13 @@ reproduced]
   and HOST-9: what a program must do when the host's language cannot hold a
   value computed from a host-made function.
 - **Placement after normalization can abort a build that placement before
-  it accepted.** [read, 2026-10-26] `placeNormalized` scores each pool tree
-  again; it keeps the old placement when the new one cannot be built
-  (`finish` returns Left, or the root's language would change), but an error
-  raised while scoring the normalized shape stops the build. No witness yet.
+  it accepted.** [read, 2026-10-26] `placeNormalized` scores and collapses
+  every pool tree again and keeps no earlier placement, so an error raised
+  while scoring or collapsing the normalized shape stops the build, as does
+  a manifold language its tree's table does not offer (Realize.hs
+  `pinTable`). `pickLanguage` can also return a recursion head's language
+  that the node's table lacks (its `hostedWith` fallback), which collapse
+  then cannot build. No witness yet.
 - **Under `--debug`, a label or a cache, a same-pool recursion serializes
   its arguments.** [read, 2026-10-26] `splittable` (Express.hs
   `addNativeRecEntries`) refuses a body under a PolyDebugWrap, PolyCacheBody

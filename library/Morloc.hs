@@ -111,7 +111,7 @@ typecheck path code =
 -- LamS"). A multiply-used lambda is kept as a shared native closure (rASTs
 -- become pools, not the pure nexus evaluator).
 generatePools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
-generatePools rASTs = mapM applyPoolLambdas rASTs >>= placeNormalized >>= specializeStaticArgs >>= lowerPools
+generatePools rASTs = mapM applyPoolLambdas rASTs >>= specializeStaticArgs >>= placeNormalized >>= lowerPools
 
 -- | Lower realized pool trees to per-language serial manifolds. This is the
 -- whole path from parameterization to pool assembly, shared by 'writeProgram'
@@ -199,14 +199,14 @@ writeProgram translateFn path code =
     -- there (True); rASTs become pools, where a multiply-used lambda is kept
     -- as a shared native closure to avoid exponential inlining (False).
     >>= bimapM (mapM (applyLambdas True)) (mapM applyPoolLambdas)
-    -- Place languages again on the normalized pool trees.
-    >>= (\(g, r) -> (,) g <$> placeNormalized r)
     -- Give a recursive helper its own copy for each closed function it is
     -- passed at a position every recursion passes through unchanged, so the
     -- function is referenced directly rather than carried as a closure value.
     -- It creates trees, so it runs before the nexus sees the pool trees and
     -- before the counter is reused for code generation.
     >>= (\(g, r) -> (,) g <$> specializeStaticArgs r)
+    -- Place languages again on the normalized pool trees.
+    >>= (\(g, r) -> (,) g <$> placeNormalized r)
     -- process docstrings to determine how to build CLI
     >>= bimapM (mapM processDocstrings) (mapM processDocstrings)
     -- generate nexus and pools

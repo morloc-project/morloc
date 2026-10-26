@@ -1,0 +1,35 @@
+-- A function value forwarded through a Morloc definition into a Rust
+-- higher-order function, from inside a recursive function: the value is built
+-- where it is finally used, inside the Rust call, for a self-recursive
+-- function and for a pair of mutually recursive ones.
+
+--' Function values forwarded from recursive definitions
+module main (repeatShow, repeatShout, alternate)
+
+import parallel-rust
+import root-py
+
+source Py from "f.py" ("shout")
+
+--' Add an exclamation mark
+shout :: Str -> Str
+
+--' Render each element in parallel and concatenate
+renderAll :: ParOpts -> (a -> Str) -> [a] -> Str
+renderAll opts f xs = fold (<>) "" (pmapWith opts f xs)
+
+--' Render a list n times with show
+repeatShow :: Int -> [Int] -> Str
+repeatShow n xs = ? n <= 0 = "" : shout (renderAll defaultParOpts show xs) <> repeatShow (n - 1) xs
+
+--' Render a list n times with a lambda
+repeatShout :: Int -> [Int] -> Str
+repeatShout n xs = ? n <= 0 = "" : shout (renderAll defaultParOpts (\x -> shout (show x)) xs) <> repeatShout (n - 1) xs
+
+--' Render a list n times, alternating functions
+alternate :: Int -> [Int] -> Str
+alternate n xs = ? n <= 0 = "" : renderAll defaultParOpts show xs <> alternateOdd (n - 1) xs
+
+--' The odd steps of alternate
+alternateOdd :: Int -> [Int] -> Str
+alternateOdd n xs = ? n <= 0 = "" : shout (renderAll defaultParOpts (\x -> shout (show x)) xs) <> alternate (n - 1) xs

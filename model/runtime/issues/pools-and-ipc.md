@@ -78,6 +78,8 @@ Details and evidence: /work/plans/runtime-audit-2026-10-10/C-processes.md.
   environment (`.morloc_sorters`, stream-r R/stream.R), and after the
   earlier test groups make re-entrant calls, `pushSorter h2` reaches a
   worker without sorter 2 ("no open sorter 2", group "Sorting", called from
-  Python's `mapE_`). Needs a ruling: per-pool affinity for stateful
+  Python's `mapE_`). The suite passed on 2026-10-23, when `mapE_` was
+  placed in R; the placement that makes the call re-entrant is recorded in
+  model/compiler/issues/realization.md. Needs a ruling: per-pool affinity for stateful
   sources, a declared statefulness that keeps them on one worker, or host
   state ruled out.
