@@ -8,7 +8,6 @@ aliases: ["python", "python3"]
 is_compiled: false
 run_command: ["python3"]
 serial_type: "str"
-cost: 3
 # Python's str natively supports interior NUL bytes.
 allow_string_null: true
 preamble:

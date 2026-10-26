@@ -32,13 +32,13 @@ placement:
     == [cpp]
     call loop [cpp]
       - [cpp]
-  rustLoop [py]
-    pyStep [py]
-    (eval) [rust] *
-      rustStep [rust]
-    == [py]
-    call rustLoop [py]
-      - [py]
+  rustLoop [rust]
+    (eval) [py] *
+      pyStep [py]
+    rustStep [rust]
+    == [rust]
+    call rustLoop [rust]
+      - [rust]
   rerun [cpp]
     cppStep [cpp]
     (eval) [py] *

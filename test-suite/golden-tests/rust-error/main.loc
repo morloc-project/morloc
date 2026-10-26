@@ -31,9 +31,8 @@ catchBare = match (@try (@throw "boom")) | (Ok _cv) = _cv | (Err _) = 42
 safeCheck :: [Int] -> Int
 safeCheck xs = match (@try (checkLen xs)) | (Ok _cv) = _cv | (Err _) = 0
 
--- cross-pool: the rust throw crosses into the py-hosted caller; the traceback
--- carries frames from BOTH pools.
+-- cross-pool: the rust throw crosses into the py-hosted caller (two Python
+-- calls around it keep the caller in Python); the traceback carries frames
+-- from BOTH pools.
 crossThrow :: [Int] -> Int
-crossThrow xs =
-  let n = checkLen xs
-  in pyId n
+crossThrow xs = pyId (pyId (checkLen xs))

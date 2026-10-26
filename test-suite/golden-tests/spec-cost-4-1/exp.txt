@@ -1,8 +1,9 @@
 placement:
-  total [py]
-    show [py]
-      fold [cpp] *
-        add [cpp]
+  total [cpp]
+    totalOf [cpp]
+      mapEach [py] *
+        step [py]
+        upto [cpp] *
 
-"10"
+20
 OK: built placement costs the least

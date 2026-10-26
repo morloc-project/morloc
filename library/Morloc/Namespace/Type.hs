@@ -171,7 +171,6 @@ module Morloc.Namespace.Type
   ) where
 
 import qualified Data.List as DL
-import Morloc.Cost.Formula (Formula)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.PartialOrd as P
@@ -854,16 +853,6 @@ data ArgDocVars = ArgDocVars
   , docEpilogues :: [[Text]]
     -- ^ `@epilogue` blocks: verbatim lines printed at the foot of the
     -- command's help, after its argument and return blocks
-  , docSelftime :: Maybe Formula
-    -- ^ `@selftime` above a signature: the self time of each sourced
-    -- implementation that states none of its own (COST-6)
-  , docCalls :: Maybe Formula
-    -- ^ `@calls` above a function or suspension argument of a signature: how
-    -- many times a sourced implementation calls it (COST-6)
-  , docDimension :: Maybe [Formula]
-    -- ^ `@dimension` above an argument or the result of a signature: the
-    -- element count of each list level, outermost first, each a whole number
-    -- or a name (COST-5)
   }
   deriving (Show, Ord, Eq)
 
@@ -894,9 +883,6 @@ inheritArgDocVars r1 r2 =
     , docParse = docParse r1
     , docMime = docMime r1 <|> docMime r2
     , docEpilogues = if null (docEpilogues r1) then docEpilogues r2 else docEpilogues r1
-    , docSelftime = docSelftime r1 <|> docSelftime r2
-    , docCalls = docCalls r1 <|> docCalls r2
-    , docDimension = docDimension r1 <|> docDimension r2
     }
 
 data ArgDoc
@@ -964,9 +950,6 @@ instance Defaultable ArgDocVars where
       , docParse = []
       , docMime = Nothing
       , docEpilogues = []
-      , docSelftime = Nothing
-      , docCalls = Nothing
-      , docDimension = Nothing
       }
 
 instance Typelike Type where

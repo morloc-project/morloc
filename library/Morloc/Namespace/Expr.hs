@@ -106,7 +106,6 @@ import GHC.Generics (Generic)
 import Morloc.Data.Doc
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
-import Morloc.Cost.Formula (Formula)
 
 ---- Source and config types
 
@@ -126,8 +125,6 @@ data Source
   -- bypass the language-descriptor pattern check in Treeify; the
   -- enclosed text is emitted verbatim between the two args.
   , srcBacktick :: !Bool
-  -- | The implementation's own self time, from its `@selftime` (COST-6).
-  , srcSelftime :: Maybe Formula
   }
   deriving (Ord, Eq, Show)
 

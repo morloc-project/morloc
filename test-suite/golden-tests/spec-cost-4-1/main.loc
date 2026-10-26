@@ -1,29 +1,33 @@
--- A function handed to a sourced function is called by it many times, by
--- default 1000 per call (COST-4). Here a fold and the addition it calls
--- both exist in Python and C++, and the sum goes to Python. Priced as one
--- call, the fold would stay in Python beside its consumer; priced as 1000
--- calls, it runs in C++ with its callback, crossing once. The placement
--- listing of `morloc typecheck --realize` is the output; the run checks
--- the program still computes.
+-- A function handed to a sourced function may be called many times, so its
+-- crossings count one deeper than the call (COST-4). Here the
+-- list comes from C++ and its sum goes back to C++, `mapEach` exists in Python
+-- and C++, and the function it applies exists only in Python. Mapping in
+-- C++ crosses once per element; mapping in Python crosses twice in all, the
+-- list in and the result out. The realizer maps in Python. The placement
+-- listing of `morloc typecheck --realize` is the output; the run checks the
+-- program still computes.
 
---' Callbacks priced by their call count
+--' Callbacks counted one deeper
 module main (total)
 
 import root-py
 import root-cpp
 
-source Py from "f.py" ("left_fold" as fold, "plus" as add, "show")
-source Cpp from "f.hpp" ("left_fold" as fold, "plus" as add)
+source Py from "f.py" ("py_map" as mapEach, "step")
+source Cpp from "f.hpp" ("cpp_map" as mapEach, "upto", "total_of" as totalOf)
 
---' Combine a list from the left
-fold :: (b -> a -> b) -> b -> [a] -> b
+--' Apply a function to each element
+mapEach :: (a -> b) -> [a] -> [b]
 
---' Add two integers
-add :: Int -> Int -> Int
+--' Double an integer
+step :: Int -> Int
 
---' Render an integer
-show :: Int -> Str
+--' The integers from 1 to n
+upto :: Int -> [Int]
 
---' Sum a list and render the sum
-total :: [Int] -> Str
-total xs = show (fold add 0 xs)
+--' Sum a list
+totalOf :: [Int] -> Int
+
+--' Sum the doubles of 1 to n
+total :: Int -> Int
+total n = totalOf (mapEach step (upto n))

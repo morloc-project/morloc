@@ -1,0 +1,9 @@
+placement:
+  doubled [cpp]
+    twice [cpp]
+  shown [py]
+    showInt [py]
+      twice [py]
+
+6
+"6"

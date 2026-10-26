@@ -22,9 +22,7 @@ module Morloc.LangRegistry
   , buildLangMap
   , poolOf
   , coLocated
-  , registryCallOverhead
-  , registryCallCoefficient
-  , registryCrossingLatency
+  , registryPreference
   , registrySerialType
   , registryIsCompiled
   , registryRunCommand
@@ -50,17 +48,8 @@ import Morloc.Language (Lang (..))
 data LangRegistry = LangRegistry
   { lrEntries :: Map Text LangRegistryEntry -- keyed by canonical name
   , lrAliases :: Map Text Text -- alias -> canonical name
-  -- | A call in one pool, by language, in nanoseconds (COST-10).
-  , lrCallOverhead :: Map Text Double
-  , lrDefaultCallOverhead :: Double
-  -- | How long a function's own work takes, by language, against C at 10
-  -- (COST-2).
-  , lrCallCoefficient :: Map Text Double
-  , lrDefaultCallCoefficient :: Double
-  -- | A round trip between pools, by (from, to) with "*" for any, in
-  -- nanoseconds, and for a pair no entry matches.
-  , lrCrossingLatency :: Map (Text, Text) Double
-  , lrDefaultCrossingLatency :: Double
+  -- | The realizer's language preference, most preferred first (COST-16).
+  , lrLanguageOrder :: [Text]
   }
   deriving (Show)
 
@@ -69,7 +58,6 @@ data LangRegistryEntry = LangRegistryEntry
   , lreIsCompiled :: !Bool
   , lreRunCommand :: ![Text]
   , lreSerialType :: !Text
-  , lreCost :: !Int
   , lrePreamble :: ![Text]
   -- | Whether the language can carry a Str with interior NUL bytes.
   -- False means the morloc runtime rejects NUL-bearing Strs at the
@@ -86,20 +74,20 @@ data LangRegistryEntry = LangRegistryEntry
   deriving (Show)
 
 emptyRegistry :: LangRegistry
--- | No languages and no costs, until languages.yaml is read.
-emptyRegistry = LangRegistry Map.empty Map.empty Map.empty 0 Map.empty 0 Map.empty 0
+-- | No languages and no preference, until languages.yaml is read.
+emptyRegistry = LangRegistry Map.empty Map.empty []
 
 -- | Build the default registry from embedded lang.yaml files and languages.yaml
 buildDefaultRegistry :: [(String, Text)] -> Text -> Either String LangRegistry
 buildDefaultRegistry langFiles languagesText = do
   langs <- mapM parseLangYaml langFiles
-  costs <- parseLanguagesYaml languagesText
+  order <- parseLanguagesYaml languagesText
   let entries = Map.fromList [(lymName ly, entryFromYaml ly) | ly <- langs]
       aliases =
         Map.fromList $
           concatMap (\ly -> [(a, lymName ly) | a <- lymAliases ly] ++ [(lymName ly, lymName ly)]) langs
   return
-    costs
+    order
       { lrEntries = entries
       , lrAliases = aliases
       }
@@ -149,25 +137,10 @@ poolOf reg l =
 coLocated :: LangRegistry -> Lang -> Lang -> Bool
 coLocated reg a b = poolOf reg a == poolOf reg b
 
--- | How long a function's own work takes in this language, against C at
--- 10.
-registryCallCoefficient :: LangRegistry -> Text -> Double
-registryCallCoefficient reg name = Map.findWithDefault (lrDefaultCallCoefficient reg) name (lrCallCoefficient reg)
-
--- | A call in one pool of this language, in nanoseconds.
-registryCallOverhead :: LangRegistry -> Text -> Double
-registryCallOverhead reg name = Map.findWithDefault (lrDefaultCallOverhead reg) name (lrCallOverhead reg)
-
--- | A round trip from one pool to another, in nanoseconds: the most specific
--- entry that matches, the exact pair before (*, to) before (from, *) before
--- (*, *), else the default.
-registryCrossingLatency :: LangRegistry -> Text -> Text -> Double
-registryCrossingLatency reg from to =
-  case [ns | key <- [(from, to), ("*", to), (from, "*"), ("*", "*")], Just ns <- [Map.lookup key table]] of
-    (ns : _) -> ns
-    [] -> lrDefaultCrossingLatency reg
-  where
-    table = lrCrossingLatency reg
+-- | A language's place in the preference order, 0 most preferred; a
+-- language not listed comes after every listed one (COST-16).
+registryPreference :: LangRegistry -> Text -> Int
+registryPreference reg name = length (takeWhile (/= name) (lrLanguageOrder reg))
 
 registrySerialType :: LangRegistry -> Text -> Text
 registrySerialType reg name = case Map.lookup name (lrEntries reg) of
@@ -217,7 +190,6 @@ data LangYamlMeta = LangYamlMeta
   , lymIsCompiled :: Bool
   , lymRunCommand :: [Text]
   , lymSerialType :: Text
-  , lymCost :: Int
   , lymPreamble :: [Text]
   , lymAllowStringNull :: Bool
   , lymHost :: Maybe Text
@@ -233,37 +205,15 @@ instance Aeson.FromJSON LangYamlMeta where
       <*> o .:? "is_compiled" .!= False
       <*> o .:? "run_command" .!= []
       <*> o .:? "serial_type" .!= "bytes"
-      <*> o .:? "cost" .!= 5
       <*> o .:? "preamble" .!= []
       <*> o .:? "allow_string_null" .!= True
       <*> o .:? "host"
 
-data LanguagesYaml = LanguagesYaml
-  { lysCallOverhead :: Map Text Double
-  , lysDefaultCallOverhead :: Double
-  , lysCallCoefficient :: Map Text Double
-  , lysDefaultCallCoefficient :: Double
-  , lysCrossingLatency :: [((Text, Text), Double)]
-  , lysDefaultCrossingLatency :: Double
-  }
+newtype LanguagesYaml = LanguagesYaml {lysLanguageOrder :: [Text]}
   deriving (Show)
 
 instance Aeson.FromJSON LanguagesYaml where
-  parseJSON = Aeson.withObject "LanguagesYaml" $ \o -> do
-    overhead <- o .:? "call_overhead_ns" .!= Map.empty
-    defOverhead <- o .: "default_call_overhead_ns"
-    coefficient <- o .:? "call_coefficient" .!= Map.empty
-    defCoefficient <- o .: "default_call_coefficient"
-    latency <- o .:? "crossing_latency_ns" .!= []
-    defLatency <- o .: "default_crossing_latency_ns"
-    parsed <- mapM parseLatency latency
-    return $ LanguagesYaml overhead defOverhead coefficient defCoefficient parsed defLatency
-    where
-      parseLatency = Aeson.withObject "CrossingLatency" $ \o -> do
-        from <- o .: "from"
-        to <- o .: "to"
-        ns <- o .: "ns"
-        return ((from, to), ns)
+  parseJSON = Aeson.withObject "LanguagesYaml" $ \o -> LanguagesYaml <$> o .: "language_order"
 
 entryFromYaml :: LangYamlMeta -> LangRegistryEntry
 entryFromYaml ly =
@@ -272,7 +222,6 @@ entryFromYaml ly =
     , lreIsCompiled = lymIsCompiled ly
     , lreRunCommand = lymRunCommand ly
     , lreSerialType = lymSerialType ly
-    , lreCost = lymCost ly
     , lrePreamble = lymPreamble ly
     , lreAllowStringNull = lymAllowStringNull ly
     , lreHost = lymHost ly
@@ -301,10 +250,5 @@ parseLanguagesYaml content =
         LangRegistry
           { lrEntries = Map.empty
           , lrAliases = Map.empty
-          , lrCallOverhead = lysCallOverhead lys
-          , lrDefaultCallOverhead = lysDefaultCallOverhead lys
-          , lrCallCoefficient = lysCallCoefficient lys
-          , lrDefaultCallCoefficient = lysDefaultCallCoefficient lys
-          , lrCrossingLatency = Map.fromList (lysCrossingLatency lys)
-          , lrDefaultCrossingLatency = lysDefaultCrossingLatency lys
+          , lrLanguageOrder = lysLanguageOrder lys
           }

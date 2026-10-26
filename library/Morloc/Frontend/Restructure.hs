@@ -19,14 +19,11 @@ type declarations, and collects type definitions and source mappings into
 module Morloc.Frontend.Restructure (restructure) where
 
 import qualified Control.Monad.State.Strict as St
-import Data.Char (isLower)
 import qualified Data.Graph as Graph
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Morloc.BaseTypes as BT
-import Morloc.Cost.Formula (formulaNames)
 import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -199,7 +196,6 @@ expandStructuralTypes d = do
       e' <- AST.mapTypeInExprI (expandStructuralAliases sc) (writtenAliasDocs sc e)
       checkExpandable sc e'
       let e'' = expandClassSigs sc e'
-      checkCostDocs sc e''
       return e''
 
     -- DOC-3: a function, effect or optional alias carries its docstring
@@ -250,81 +246,6 @@ expandStructuralTypes d = do
       et { etype = expandStructuralAliases sc (etype et)
          , econs = Set.map (AST.mapConstraint (expandStructuralAliases sc)) (econs et)
          }
-
-    -- The cost directives of a signature, checked once its aliases are
-    -- expanded: `@calls` above a function or suspension (COST-6), as many
-    -- `@dimension` factors as list levels (COST-5), and every formula name
-    -- introduced (COST-7).
-    checkCostDocs :: Scope -> ExprI -> MorlocMonad ()
-    checkCostDocs sc = AST.checkExprI $ \e -> case e of
-      ExprI i (SigE (Signature v _ et)) -> checkSig Set.empty i v et
-      -- a class method's signature does not quantify the class's variables
-      ExprI i (ClsE (Typeclass _ _ cvs sigs)) -> mapM_ (\(Signature v _ et) -> checkSig (Set.fromList cvs) i v et) sigs
-      _ -> return ()
-      where
-        checkSig :: Set TVar -> Int -> EVar -> EType -> MorlocMonad ()
-        checkSig cvars i v et = case edocs et of
-          ArgDocSig cmd args ret -> do
-            let (ts, r) = case unforall (etype et) of
-                  FunU ts' r' -> (ts', r')
-                  t -> ([], t)
-            when (length ts /= length args && any hasCostDocs args) $
-              MM.throwCompilerBugAt i "argument docstrings that do not match the signature's arguments"
-            sequence_
-              [ MM.throwSourcedError i $
-                  "`@calls` is stated above argument" <+> pretty k <+> "of" <+> squotes (pretty v)
-                    <> ", whose type" <+> squotes (pretty t)
-                    <+> "is neither a function nor a suspension (COST-6)"
-              | (k, t, d) <- zip3 [1 :: Int ..] ts args
-              , isJust (docCalls d)
-              , not (callable t)
-              ]
-            -- COST-5: one factor per list level of the position
-            sequence_
-              [ MM.throwSourcedError i $
-                  "`@dimension` states" <+> pretty (length fs) <+> "element counts for" <+> what
-                    <+> "of" <+> squotes (pretty v) <> ", whose type" <+> squotes (pretty t)
-                    <+> "has" <+> pretty depth <+> "list levels (COST-5)"
-              | (what, t, d) <- [("argument" <+> pretty k, t, d) | (k, t, d) <- zip3 [1 :: Int ..] ts args] <> [("the result", r, ret)]
-              , Just fs <- [docDimension d]
-              , let depth = listDepth sc cvars (32 :: Int) t
-              , length fs > depth
-              ]
-            -- COST-7: every name a formula uses is introduced by a
-            -- `@dimension` of the signature
-            let introduced = Set.fromList [n | d <- ret : args, Just fs <- [docDimension d], n <- concatMap formulaNames fs]
-                used = concatMap formulaNames (maybe [] pure (docSelftime cmd) <> [f | d <- args, Just f <- [docCalls d]])
-            case [n | n <- used, not (Set.member n introduced)] of
-              [] -> return ()
-              (n : _) ->
-                MM.throwSourcedError i $
-                  squotes (pretty n) <+> "in a cost formula of" <+> squotes (pretty v)
-                    <+> "is not introduced by a `@dimension` of its signature (COST-7)"
-          _ -> return ()
-        hasCostDocs d = isJust (docCalls d) || isJust (docDimension d)
-        -- the list levels of a type, through its aliases, effects and
-        -- optionals; a string is a list of characters, and a type variable
-        -- applied to one element (`f a` in a Functor method) a container of
-        -- one level
-        -- a signature's own type variable: lowercase and not a type in scope
-        freeVar sc' l@(TV name) = case T.uncons name of
-          Just (c, _) -> isLower c && not (Map.member l sc')
-          Nothing -> False
-        listDepth :: Scope -> Set TVar -> Int -> TypeU -> Int
-        listDepth _ _ 0 _ = 0
-        listDepth sc' vars n t = case t of
-          ForallU tv t' -> listDepth sc' (Set.insert tv vars) n t'
-          EffectU _ t' -> listDepth sc' vars (n - 1) t'
-          OptionalU t' -> listDepth sc' vars (n - 1) t'
-          AppU (VarU l) [x] | l == BT.list -> 1 + listDepth sc' vars (n - 1) x
-          AppU (VarU l) [x] | Set.member l vars || freeVar sc' l -> 1 + listDepth sc' vars (n - 1) x
-          VarU s' | s' == BT.str -> 1
-          _ -> maybe 0 (listDepth sc' vars (n - 1)) (TE.expandHeadOnly sc' t)
-
-        callable (FunU _ _) = True
-        callable (EffectU _ _) = True
-        callable (ForallU _ t) = callable t
-        callable _ = False
 
     -- An alias left in an expanded typedef names an arrow, effect or optional
     -- type through itself, which has no finite expansion.

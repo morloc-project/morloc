@@ -1,12 +1,13 @@
 placement:
   countFrom [py]
-    idpy [py]
-      call count [cpp] *
+    showInt [py]
+      call count [py]
+        parseInt [py]
   count [cpp]
     == [cpp]
     + [cpp]
       call count [cpp]
-        - [cpp]
+        dec [cpp]
 
-50
+"50"
 OK: built placement costs the least

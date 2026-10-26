@@ -22,9 +22,6 @@ module Morloc.CodeGenerator.Realize
   ) where
 
 import Morloc.CodeGenerator.Serial (containsEffectT, containsFunT)
-import Morloc.Cost.Formula (Formula (..), evalFormula, formulaNames)
-import qualified Morloc.BaseTypes as BT
-import qualified Morloc.Data.GMap as GMap
 import Morloc.CodeGenerator.Value (etaParts, isValueWith)
 import Morloc.CodeGenerator.LambdaEval (reindexTree)
 import Morloc.Frontend.Namespace (newIndex)
@@ -119,57 +116,6 @@ placementLinesAt = go
     definition' (AnnoS _ _ (ExeS _)) = []
     definition' body = [body]
 
--- | The cost directives of the signatures sourced functions implement
--- (COST-6): each one's `@selftime`, and the `@calls` of each argument.
-data SigCosts = SigCosts
-  { sigSelftimes :: Map Source Formula
-  , sigCalls :: Map Source [Maybe Formula]
-  , sigDims :: Map Source ([Maybe [Formula]], Maybe [Formula])
-    -- ^ the `@dimension` of each argument and of the result (COST-5)
-  }
-
-signatureCosts :: MorlocMonad SigCosts
-signatureCosts = do
-  sigs <- GMap.elems <$> MM.gets stateSignatures
-  let implemented' = concatMap implemented sigs
-      located = concatMap locatedSrcs sigs
-      dims = Map.fromList [(src, ds) | (e, srcs) <- implemented', Just ds <- [termDims e], src <- srcs]
-  -- COST-7: a source's own self time is written in its signature's names
-  sequence_
-    [ MM.throwSourcedError i $
-        "the self time of" <+> squotes (pretty (srcAlias src)) <+> "uses" <+> squotes (pretty n)
-          <> ", which no `@dimension` of its signature introduces (COST-7)"
-    | (_, isrcs) <- located
-    , (i, src) <- isrcs
-    , Just f <- [srcSelftime src]
-    , let known = maybe Set.empty dimNames (Map.lookup src dims)
-    , n <- formulaNames f
-    , not (Set.member n known)
-    ]
-  return $
-    SigCosts
-      { sigSelftimes = Map.fromList [(src, f) | (e, srcs) <- implemented', Just f <- [termSelftime e], src <- srcs]
-      , sigCalls = Map.fromList [(src, cs) | (e, srcs) <- implemented', Just cs <- [termCalls e], src <- srcs]
-      , sigDims = dims
-      }
-  where
-    dimNames (args, ret) = Set.fromList (concatMap formulaNames (concat (catMaybes (ret : args))))
-    termDims e = case edocs e of
-      ArgDocSig _ args ret | any (isJust . docDimension) (ret : args) -> Just (map docDimension args, docDimension ret)
-      _ -> Nothing
-    implemented (Monomorphic (TermTypes (Just e) srcs _)) = [(e, [s | (_, Idx _ s) <- srcs])]
-    implemented (Polymorphic _ _ e ts) = [(e, [s | t <- ts, (_, Idx _ s) <- termConcrete t])]
-    implemented _ = []
-    locatedSrcs (Monomorphic (TermTypes (Just e) srcs _)) = [(e, [(i, s) | (_, Idx i s) <- srcs])]
-    locatedSrcs (Polymorphic _ _ e ts) = [(e, [(i, s) | t <- ts, (_, Idx i s) <- termConcrete t])]
-    locatedSrcs _ = []
-    termSelftime e = case edocs e of
-      ArgDocSig d _ _ -> docSelftime d
-      _ -> Nothing
-    termCalls e = case edocs e of
-      ArgDocSig _ args _ | any (isJust . docCalls) args -> Just (map docCalls args)
-      _ -> Nothing
-
 realityCheck ::
   -- | one AST forest for each command exported from main
   [AnnoS (Indexed Type) Many Int] ->
@@ -184,12 +130,11 @@ realityCheck es = do
       (specs, roots) = List.partition isSpec es
   -- shared specializations first, each scored once, in the order their uses
   -- need them (a specialization's own shared references come before it)
-  costs <- signatureCosts
-  (tables, finishers) <- foldM (scoreSpec costs) (Map.empty, Map.empty) specs
+  (tables, finishers) <- foldM scoreSpec (Map.empty, Map.empty) specs
   -- select a single instance at each node of each exported tree, and
   -- separate unrealized (general) trees from realized ones
   (gASTs0, rASTs00) <-
-    mapM (\e -> realize costs tables noPins e >>= \(_, finish) -> finish Nothing) roots
+    mapM (\e -> realize tables noPins e >>= \(_, finish) -> finish Nothing) roots
       |>> partitionEithers
   rASTs0 <- realizeDemanded finishers rASTs00
   let takesFunction = Set.fromList [v | AnnoS (Idx _ (FunT ts _)) _ (VarS v _) <- specs, any containsFunT ts]
@@ -219,14 +164,13 @@ type Finisher =
 
 -- | Score a shared specialization once: its table serves every use.
 scoreSpec ::
-  SigCosts ->
   (Map EVar [(Lang, Score)], Map EVar Finisher) ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Map EVar [(Lang, Score)], Map EVar Finisher)
-scoreSpec costs (tables, finishers) spec@(AnnoS _ _ (VarS v _)) = do
-  (AnnoS _ (Idx _ scores) _, finish) <- realize costs tables noPins spec
+scoreSpec (tables, finishers) spec@(AnnoS _ _ (VarS v _)) = do
+  (AnnoS _ (Idx _ scores) _, finish) <- realize tables noPins spec
   return (Map.insert v scores tables, Map.insert v finish finishers)
-scoreSpec _ acc _ = return acc
+scoreSpec acc _ = return acc
 
 -- | Realize each shared specialization once per language its uses demand,
 -- and point each use at its copy. A use's language is the one its call was
@@ -313,104 +257,71 @@ nexusDemanded finishers takesFunction trees0
       copies <- MM.liftIO (readIORef copiesRef)
       return (trees <> copies)
 
--- | The realize objective (COST-1): estimated time, then the number of
--- crossings between pools, then the number of language changes within a
--- pool, compared lexicographically.
+-- | The realize objective (COST-1), compared lexicographically: whether any
+-- part is unrealizable; crossings between pools at each depth, the
+-- deepest first (COST-4); changes of language within one pool; calls in each
+-- language by preference rank, the least preferred first (COST-16); and the
+-- number of calls, so a sourced implementation beats a definition that makes
+-- several. The lists are indexed from 0.
 data Score = Score
-  { scoreTime :: !Integer -- ^ picoseconds, so equal costs compare equal
-  , scoreCrossings :: !Int
+  { scoreUnrealizable :: !Int
+  , scoreCrossings :: ![Int] -- ^ by depth, depth 0 first
   , scoreSwitches :: !Int
+  , scorePreference :: ![Int] -- ^ calls by preference rank, most preferred first
+  , scoreSize :: !Int
   }
-  deriving (Eq, Ord, Show)
+  deriving (Show)
+
+instance Eq Score where
+  a == b = compare a b == EQ
+
+instance Ord Score where
+  compare (Score u1 c1 w1 p1 z1) (Score u2 c2 w2 p2 z2) =
+    compare u1 u2 <> lastFirst c1 c2 <> compare w1 w2 <> lastFirst p1 p2 <> compare z1 z2
+    where
+      lastFirst xs ys =
+        let n = max (length xs) (length ys)
+            pad zs = reverse (zs <> replicate (n - length zs) 0)
+         in compare (pad xs) (pad ys)
 
 instance Semigroup Score where
-  Score a b c <> Score x y z = Score (a + x) (b + y) (c + z)
+  Score u1 c1 w1 p1 z1 <> Score u2 c2 w2 p2 z2 =
+    Score (u1 + u2) (addLevels c1 c2) (w1 + w2) (addLevels p1 p2) (z1 + z2)
 
 instance Monoid Score where
-  mempty = Score 0 0 0
+  mempty = Score 0 [] 0 [] 0
 
--- | A score repeated @k@ times, saturating below the "no realization"
--- sentinel so that no placement's cost reaches it.
-scaleScore :: Int -> Score -> Score
-scaleScore k (Score t c w)
-  | t >= unrealizable = Score t c w
-  | otherwise = Score (min (unrealizable - 1) (toInteger k * t)) (sat c) (sat w)
+addLevels :: [Int] -> [Int] -> [Int]
+addLevels (x : xs) (y : ys) = x + y : addLevels xs ys
+addLevels xs [] = xs
+addLevels [] ys = ys
+
+-- | A score counted @k@ deeper: only its crossings move.
+deeper :: Int -> Score -> Score
+deeper k sc
+  | k <= 0 || null (scoreCrossings sc) = sc
+  | otherwise = sc {scoreCrossings = replicate k 0 <> scoreCrossings sc}
+
+-- | What a score has beyond a base, part by part, never below nothing.
+scoreAbove :: Score -> Score -> Score
+scoreAbove (Score u c w p z) (Score bu bc bw bp bz) =
+  Score (max 0 (u - bu)) (minus c bc) (max 0 (w - bw)) (minus p bp) (max 0 (z - bz))
   where
-    sat n = fromInteger (min (10 ^ (15 :: Int)) (toInteger k * toInteger n))
+    minus (x : xs) (y : ys) = max 0 (x - y) : minus xs ys
+    minus xs [] = xs
+    minus [] _ = []
 
--- | An element count, known from what made the value or a default (COST-8).
-data Count = Count {cntValue :: Double, cntKnown :: Bool}
-  deriving (Show, Eq)
-
--- | The element count of each list level of a value, outermost first.
-type Shape = [Count]
-
--- | Of two counts for one quantity, a known one beats a default and the
--- larger wins (COST-8).
-mergeCount :: Count -> Count -> Count
-mergeCount a b = case (cntKnown a, cntKnown b) of
-  (True, False) -> a
-  (False, True) -> b
-  _ -> if cntValue a >= cntValue b then a else b
-
-mergeLevels :: Shape -> Shape -> Shape
-mergeLevels (a : as) (b : bs) = mergeCount a b : mergeLevels as bs
-mergeLevels as [] = as
-mergeLevels [] bs = bs
-
--- | How many times something repeats when nothing says: a callback's calls
--- (COST-4), a recursive body's levels (COST-14), the elements of a list
--- level and the value of a name (COST-9). One number, so the estimates
--- agree with each other.
-defaultRepeat :: Int
-defaultRepeat = 1000
-
--- | The count of a name nothing binds, and of a list level nothing states
--- (COST-9).
-unboundCount :: Double
-unboundCount = fromIntegral defaultRepeat
-
--- | COST-9: each list level of the type is 'unboundCount' elements and a string 4096
--- characters; an effect or an optional counts its value's levels.
-defaultShape :: Type -> Shape
-defaultShape = go (32 :: Int)
-  where
-    go 0 _ = []
-    go n (AppT (VarT v) [x]) | v == BT.list = Count unboundCount False : go (n - 1) x
-    go _ (VarT v) | v == BT.str = [Count 4096 False]
-    go n (EffectT _ x) = go (n - 1) x
-    go n (OptionalT x) = go (n - 1) x
-    go _ _ = []
-
--- | The names a call's arguments bind: each `@dimension` factor that is a
--- name takes the count of its argument's list level (COST-8).
-bindNames :: Maybe ([Maybe [Formula]], Maybe [Formula]) -> [Shape] -> Map MT.Text Count
-bindNames Nothing _ = Map.empty
-bindNames (Just (argDims, _)) shapes =
-  Map.fromListWith
-    mergeCount
-    [ (n, c)
-    | (Just fs, sh) <- zip argDims shapes
-    , (Name n, c) <- zip fs sh
-    ]
-
--- | How many times a function calls a function argument, when nothing says
--- otherwise (COST-4).
-defaultCallbackCount :: Int
-defaultCallbackCount = defaultRepeat
-
--- | The time of the "no realization" sentinel, above any placement's cost.
-unrealizable :: Integer
-unrealizable = 10 ^ (300 :: Int)
-
--- | How many times a recursive definition runs its body per call, when
--- nothing says otherwise (COST-14).
-defaultRecursionCount :: Int
-defaultRecursionCount = defaultRepeat
+-- | One call of a sourced function in a language (COST-1 rules 2 and 3).
+callScore :: LangRegistry -> Lang -> Score
+callScore registry l =
+  mempty
+    { scorePreference = replicate (LR.registryPreference registry (langName l)) 0 <> [1]
+    , scoreSize = 1
+    }
 
 -- | A scored child as its parent sees it: its type, whether code
--- generation always builds it in its parent's language, and its table.
--- The count is how many times the parent uses it per evaluation.
+-- generation always builds it in its parent's language, how much deeper
+-- than its parent it is (COST-4), and its table.
 data Kid = Kid Type Bool Int [(Lang, Score)]
 
 kidTable :: Kid -> [(Lang, Score)]
@@ -439,13 +350,10 @@ data RState = RState
   -- it kept ('Nothing' for a language-free one), so each table is cut to
   -- the choice made and each term to the implementation chosen.
   , rForced :: Maybe (Map Int (Maybe Lang))
-  -- | The element counts of every node (COST-8), computed once.
-  , rShapes :: Map Int Shape
-  -- | The element counts of the arguments of the head being scored, from
-  -- which each of its source calls binds its signature's names (COST-8).
-  , rArgShapes :: [Shape]
   -- | When rescoring: every language the built placement uses.
   , rForcedLangs :: [Lang]
+  -- | The names called beneath each node.
+  , rBelow :: Map Int (Set.Set EVar)
   }
 
 emptyRState =
@@ -455,9 +363,8 @@ emptyRState =
     , rBndVars = Map.empty
     , rLetVars = Map.empty
     , rForced = Nothing
-    , rShapes = Map.empty
-    , rArgShapes = []
     , rForcedLangs = []
+    , rBelow = Map.empty
     }
 
 
@@ -566,12 +473,11 @@ also need benchmarking data from all the implementations and possibly
 statistical info describing inputs.
 -}
 realize ::
-  SigCosts ->
   Map EVar [(Lang, Score)] ->
   Pins ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Scored, Finisher)
-realize costs tables pins s0 = do
+realize tables pins s0 = do
   registry <- MM.gets stateLangRegistry
   -- A term that calls nothing sourced has no language of its own and is
   -- evaluated by the nexus. That evaluator has no name to call a function
@@ -604,20 +510,15 @@ realize costs tables pins s0 = do
                 MM.throwCompilerBugAt i0 "a replay entry in a program with no pool language"
           ls -> return ls
       else return []
-  realizeWithRegistry registry costs tables pins langs s0
+  realizeWithRegistry registry tables pins langs s0
 
 -- | What a boundary from one language to another costs: nothing within a
--- language, a switch within a pool, a crossing's latency between pools.
+-- language, a switch within a pool, one crossing between pools (COST-3).
 boundaryScore :: LangRegistry -> Lang -> Lang -> Score
 boundaryScore registry l1 l2
   | l1 == l2 = mempty
-  | LR.coLocated registry l1 l2 = Score 0 0 1
-  | otherwise = Score (picoseconds (LR.registryCrossingLatency registry (poolName l1) (poolName l2))) 1 0
-  where
-    poolName = langName . LR.poolOf registry
-
-picoseconds :: Double -> Integer
-picoseconds ns = round (ns * 1000)
+  | LR.coLocated registry l1 l2 = mempty {scoreSwitches = 1}
+  | otherwise = mempty {scoreCrossings = [1]}
 
 -- | Languages a tree must keep when it is placed. @pinHeads@ are recursive
 -- functions, each with its language, a node calling one is placed in (see
@@ -634,24 +535,40 @@ noPins = Pins [] Nothing Nothing
 -- @tables@ holds the score of each shared specialization a call may name.
 realizeWithRegistry ::
   LangRegistry ->
-  SigCosts ->
   Map EVar [(Lang, Score)] ->
   Pins ->
   [Lang] ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (Scored, Finisher)
-realizeWithRegistry registry costs tables pins seedLangs s0 = do
+realizeWithRegistry registry tables pins seedLangs s0 = do
   -- Normalize language-invariant (literal-lambda-head) redexes before scoring.
   let sp = stagePoints s0
   s0' <- normalizePop1 (`Map.lookup` sp) s0
-  let shapes = shapesOf s0'
-  scored <- scoreAnnoS emptyRState {rLangs = seedLangs, rShapes = shapes} s0'
-  return (scored, finish shapes s0' scored)
+  scored <- scoreAnnoS (rootState s0') s0'
+  return (scored, finish s0' scored)
   where
-    finish shapes s0' scored0 ctx = do
+    -- the names called beneath each node, for 'onCycle'
+    callsBelow :: AnnoS (Indexed Type) Many Int -> Map Int (Set.Set EVar)
+    callsBelow = snd . go
+      where
+        go (AnnoS _ i e) =
+          let kids = map go (foldExprS (: []) e)
+              own = case e of
+                CallS v -> Set.singleton v
+                _ -> Set.empty
+              names = Set.unions (own : map fst kids)
+           in (names, Map.insert i names (Map.unions (map snd kids)))
+
+    -- the function parameters of a pool tree's root lambda are values of
+    -- the language its manifold is built in, where a call of one runs
+    rootState s = emptyRState {rLangs = seedLangs, rApplied = rootParams s, rBelow = callsBelow s}
+    rootParams (AnnoS (Idx _ (FunT ts _)) _ (LamS _ _)) | Just l <- pinWork pins = [(t, [(l, mempty)]) | t <- ts]
+    rootParams _ = []
+
+    finish s0' scored0 ctx = do
       scored <- maybe (return scored0) (pinRoot scored0) (pinWork pins)
       e@(AnnoS g li x) <- collapseAnnoS (pinHeads pins) ctx scored
-      checkPlacement shapes s0' scored ctx e
+      checkPlacement s0' scored ctx e
       case (li, ctx) of
         -- language-free code used from a pool runs in that pool, as it
         -- would inlined there
@@ -676,7 +593,7 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
     -- least. When the placement listing is wanted with verbosity, the tree is
     -- scored again with every node cut to its chosen language and
     -- implementation, and a difference is listed with the placement.
-    checkPlacement shapes s0' scored ctx e = do
+    checkPlacement s0' scored ctx e = do
       wanted <- MM.gets statePlacement
       verbosity <- MM.gets stateVerbosity
       case (pinCheck pins, wanted) of
@@ -684,7 +601,7 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
           -- a node collapsed at two sites into different languages is
           -- left unforced
           let kept = Map.fromListWith (\a b -> if a == b then a else Nothing) [(i, l) | Idx i l <- collectIdx e]
-          rescored <- scoreAnnoS emptyRState {rLangs = seedLangs, rForced = Just kept, rForcedLangs = unique (catMaybes (Map.elems kept)), rShapes = shapes} s0'
+          rescored <- scoreAnnoS (rootState s0') {rForced = Just kept, rForcedLangs = unique (catMaybes (Map.elems kept))} s0'
           let best tbl = case (ctx, tbl) of
                 (_, []) -> Nothing
                 (Just l, _) -> Just (reachFrom l tbl)
@@ -737,9 +654,11 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
 
     renderScore :: Maybe Score -> MT.Text
     renderScore Nothing = "nothing"
-    renderScore (Just (Score t c w))
-      | t >= unrealizable = "unrealizable"
-      | otherwise = MT.pack (show t) <> " ps, " <> MT.pack (show c) <> " crossings, " <> MT.pack (show w) <> " switches"
+    renderScore (Just (Score u c w p z))
+      | u > 0 = "unrealizable"
+      | otherwise =
+          "crossings " <> MT.pack (show c) <> ", switches " <> MT.pack (show w)
+            <> ", calls by preference " <> MT.pack (show p) <> ", size " <> MT.pack (show z)
 
     collectIdx :: AnnoS g One c -> [c]
     collectIdx (AnnoS _ c ex) = c : concat (foldExprS (\y -> [collectIdx y]) ex)
@@ -753,19 +672,30 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
     scoreAnnoS rstat0 (AnnoS gi@(Idx gidx t) ci e) = do
       -- The arguments of an application reach only the lambdas its head
       -- binds them with ('boundArgs' follows the same chain).
-      let rstat1 = if passesApplied e then rstat0 else rstat0 {rApplied = []}
-          -- a sourced head's names reach its source calls and nothing else
-          rstat = if reachesSource e then rstat1 else rstat1 {rArgShapes = []}
+      let rstat = if passesApplied e then rstat0 else rstat0 {rApplied = []}
       (e', Idx ci' table) <- scoreExpr rstat (e, ci)
       -- An operation that belongs to no language runs where its context
       -- puts it, but only in a language that can hold what it computes.
-      table' <- maybe (return table) (\(j, ts) -> holding j ts table) (heldTypes gidx e t)
+      held <- maybe (return table) (\(j, ts) -> holding j ts table) (heldTypes gidx e t)
+      let table' = onCycle (rBelow rstat) ci e held
       -- a term's table holds, for each language, its chosen implementation
       -- reached from there; only the implementation is forced
       let forced = case e of
             VarS {} -> table'
             _ -> forcedTable rstat ci' table'
       return $ AnnoS gi (Idx ci' forced) e'
+
+    -- COST-15: a node that calls a function on a recursion cycle around it
+    -- runs in that cycle's pool, as collapse places it ('pickLanguage').
+    -- An application of a sourced head is placed by its sources instead.
+    onCycle :: Map Int (Set.Set EVar) -> Int -> ExprS (Indexed Type) Many Int -> [(Lang, Score)] -> [(Lang, Score)]
+    onCycle _ _ (AppS f _) table | isSourcedMany f = table
+    onCycle below i _ table = case [l | (w, l) <- pinHeads pins, Set.member w (Map.findWithDefault Set.empty i below)] of
+      [] -> table
+      (l : _) -> case [(l', sc) | (l', sc) <- table, LR.coLocated registry l l'] of
+        [] | null table -> table
+        [] -> [(l, noScore)]
+        kept -> kept
 
     -- A table cut to the language collapse chose for its node, when
     -- rescoring. A choice the table does not offer (a lambda built in its
@@ -804,7 +734,7 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
       return $ case able of
         _ | l `elem` able -> l
         [] -> l
-        _ -> snd (minimum [(boundaryScore registry l l', l') | l' <- able])
+        _ -> snd (snd (minimum [(boundaryScore registry l l', preferred l') | l' <- able]))
 
     -- Of these languages and the program's pool languages, those in which
     -- codegen finds a concrete type for each of @ts@.
@@ -870,10 +800,8 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
       xs' <- mapM (scoreAnnoS rstat {rLangs = argLangs, rApplied = []}) xs
       let args = [(t, scoresOf x') | x'@(AnnoS (Idx _ t) _ _) <- xs']
           bound = boundArgs f
-          srcs = headSources f
-          argShapes = [shapeAt rstat x' | x' <- xs]
           pairss =
-            [ (if sourcedHead f then callCount argShapes srcs k else id) (kid x')
+            [ (if loopsOver f then runsDeeper else id) (kid x')
             | (k, x'@(AnnoS (Idx _ t) _ _)) <- zip [0 ..] xs'
             , not (k < bound && isCallableType t)
             ]
@@ -881,7 +809,7 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
       -- implementations. One with none (a call on a function parameter
       -- bound to no table, a recursive call) lives where the expression
       -- holding it lives.
-      f' <- scoreAnnoS rstat {rLangs = [], rApplied = args, rArgShapes = argShapes} f
+      f' <- scoreAnnoS rstat {rLangs = [], rApplied = args} f
       let headTable = case scoresOf f' of
             [] -> [(l, mempty) | l <- rLangs rstat]
             table -> table
@@ -899,12 +827,14 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
       case Map.lookup v (rBndVars rstat) of
         Just scores -> return (BndS v, Idx i scores)
         Nothing -> return (BndS v, Idx i [])
-    scoreExpr rstat (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, Score (callCost (envOf src (rArgShapes rstat)) src) 0 0)])
+    scoreExpr _ (ExeS x@(SrcCall src), i) = return (ExeS x, Idx i [(srcLang src, callScore registry (srcLang src))])
     scoreExpr rstat (ExeS x@(PatCall _), i) = return (ExeS x, zipLang i rstat)
     scoreExpr _ (RealS si x, i) = return (RealS si x, Idx i [])
     scoreExpr _ (IntS si x, i) = return (IntS si x, Idx i [])
     scoreExpr _ (LogS x, i) = return (LogS x, Idx i [])
     scoreExpr _ (StrS x, i) = return (StrS x, Idx i [])
+    -- a constructor with no fields is built wherever it is used, at no cost
+    scoreExpr _ (ConS tv n j [], i) = return (ConS tv n j [], Idx i [])
     scoreExpr rstat (ConS tv n j xs, i) = do
       (xs', best) <- scorePinnedComponents rstat xs
       return (ConS tv n j xs', orAmbient i rstat best)
@@ -926,8 +856,7 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
             | otherwise =
                 let base = minimum (map snd rhs)
                     langs = unique (map fst rhs <> rLangs rstat)
-                    above (Score t c w) (Score bt bc bw) = Score (t - bt) (max 0 (c - bc)) (max 0 (w - bw))
-                 in [ (l, minimum [above sc base <> boundaryScore registry h l | (h, sc) <- rhs])
+                 in [ (l, minimum [scoreAbove sc base <> boundaryScore registry h l | (h, sc) <- rhs])
                     | l <- langs
                     ]
           ref = if holdsCallable (annoType e1') then Just refTable else Nothing
@@ -999,29 +928,23 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
       where
         placed = filter (not . null . kidTable) kids
 
-    -- A function argument of a sourced function is called by it as many
-    -- times per call as its `@calls` states, by default
-    -- 'defaultCallbackCount' times (COST-4); a suspension is run once unless
-    -- its `@calls` says otherwise. Where the head's implementations differ,
-    -- the largest count is used, one that states none counting the default.
-    callCount :: [Shape] -> [Source] -> Int -> Kid -> Kid
-    callCount argShapes srcs k (Kid t pinned _ table)
-      | Just dflt <- defaultCount t =
-          Kid t pinned (maximum (dflt `ifNone` map (stated dflt) srcs)) table
+    -- A function or suspension passed to a sourced function, or to a shared
+    -- specialization whose body is placed on its own, may be called many
+    -- times per call: it is one deeper (COST-4).
+    runsDeeper :: Kid -> Kid
+    runsDeeper (Kid t pinned n table)
+      | isCallableType t || isEffect t = Kid t pinned (n + 1) table
       where
-        ifNone d [] = [d]
-        ifNone _ xs = xs
-        stated dflt src = fromMaybe dflt $ do
-          cs <- Map.lookup src (sigCalls costs)
-          fm <- join (lookup k (zip [0 ..] cs))
-          n <- evalFormula (named (envOf src argShapes)) fm
-          return (ceiling (min 1e15 n))
-    callCount _ _ _ kd = kd
+        isEffect (EffectT _ _) = True
+        isEffect _ = False
+    runsDeeper kd = kd
 
-    defaultCount :: Type -> Maybe Int
-    defaultCount (FunT _ _) = Just defaultCallbackCount
-    defaultCount (EffectT _ _) = Just 1
-    defaultCount _ = Nothing
+    loopsOver :: AnnoS (Indexed Type) Many c -> Bool
+    loopsOver f = sourcedHead f || callHead f
+      where
+        callHead (AnnoS _ _ (CallS _)) = True
+        callHead (AnnoS _ _ (LabelS _ x)) = callHead x
+        callHead _ = False
 
     -- The head of an application is sourced in every implementation, seen
     -- through labels and casts.
@@ -1044,21 +967,21 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
 
     -- A child scored, for its parent to reach.
     kid :: AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) -> Kid
-    kid x@(AnnoS (Idx _ t) _ e) = Kid t (pinnedToParent e) 1 (scoresOf x)
+    kid x@(AnnoS (Idx _ t) _ e) = Kid t (pinnedToParent e) 0 (scoresOf x)
 
     -- Reaching a child from its parent's language: from the cheapest
     -- language for it, across a boundary, unless it is always built in its
     -- parent's language and priced there.
     reachKid :: Lang -> Kid -> Score
-    reachKid l (Kid t pinned n table)
-      | pinned, Just sc <- lookup l table = scaleScore n sc
-      | otherwise = scaleScore n (reachWith (crossScore t) l table)
+    reachKid l (Kid _ pinned n table)
+      | pinned, Just sc <- lookup l table = deeper n sc
+      | otherwise = deeper n (reachFrom l table)
 
     updateRState :: [EVar] -> RState -> RState
     updateRState [] rstat = rstat
-    updateRState vs rstat@(RState _ [] bound _ _ _ _ _) =
+    updateRState vs rstat@(RState _ [] bound _ _ _ _) =
       rstat {rBndVars = foldr Map.delete bound vs}
-    updateRState (v : vs) rstat@(RState _ ((t, table) : ps) bound _ _ _ _ _) =
+    updateRState (v : vs) rstat@(RState _ ((t, table) : ps) bound _ _ _ _) =
       updateRState vs $
         rstat
           { rApplied = ps
@@ -1078,14 +1001,6 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
 
     -- The nodes through which an application's arguments reach the lambdas
     -- of its head.
-    reachesSource :: ExprS g f c -> Bool
-    reachesSource e = case e of
-      VarS {} -> True
-      LabelS {} -> True
-      CoerceS {} -> True
-      ExeS {} -> True
-      _ -> False
-
     passesApplied :: ExprS g f c -> Bool
     passesApplied e = case e of
       LamS {} -> True
@@ -1133,7 +1048,7 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
       return (xs1, [(l1, reachFrom l1 pairs) | not (null pairs), l1 <- langs])
       where
         repeated x@(AnnoS g (Idx j ss) e)
-          | containsCallS v x = AnnoS g (Idx j [(l, scaleScore defaultRecursionCount sc) | (l, sc) <- ss]) e
+          | containsCallS v x = AnnoS g (Idx j [(l, deeper 1 sc) | (l, sc) <- ss]) e
           | otherwise = x
 
     -- The components of a list, tuple or record: all of them are built, so
@@ -1171,10 +1086,12 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
 
     -- The cheapest way to have a value from @table@ in language @l@.
     reachFrom :: Lang -> [(Lang, Score)] -> Score
-    reachFrom = reachWith (boundaryScore registry)
+    reachFrom l table = minimum [sc <> boundaryScore registry l l2 | (l2, sc) <- table]
 
-    reachWith :: (Lang -> Lang -> Score) -> Lang -> [(Lang, Score)] -> Score
-    reachWith edge l table = minimum [sc <> edge l l2 | (l2, sc) <- table]
+    -- COST-16: a language's place in the preference order, then the
+    -- language itself, for ties between equal scores
+    preferred :: Lang -> (Int, Lang)
+    preferred l = (LR.registryPreference registry (langName l), l)
 
     -- The enclosing recursive heads, outermost first, each with the
     -- language it was placed in. A node with a back-edge to one of them
@@ -1227,7 +1144,7 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
 
     tableDoc :: Indexed [(Lang, Score)] -> MDoc
     tableDoc (Idx _ ss) =
-      list [pretty l <> ":" <> pretty (scoreTime sc) <> "ps/" <> pretty (scoreCrossings sc) <> "/" <> pretty (scoreSwitches sc) | (l, sc) <- ss]
+      list [pretty l <> ":" <> pretty (renderScore (Just sc)) | (l, sc) <- ss]
 
     -- The newtype a cast converts: the argument's type when unwrapping, the
     -- result's when wrapping.
@@ -1245,60 +1162,13 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
       allowed <- filterM (\l -> not . Map.member n <$> MM.getConcreteScope l) candidates
       return (candidates, allowed)
 
-    -- Sentinel "no realization" score, above any cost a placement can reach
-    -- ('scaleScore' saturates below it).
+    -- A placement that cannot be realized, above every one that can.
     noScore :: Score
-    noScore = Score unrealizable 0 0
+    noScore = mempty {scoreUnrealizable = 1}
 
     -- | The general type an annotated expression carries.
     annoType :: AnnoS (Indexed Type) f c -> Type
     annoType (AnnoS (Idx _ t) _ _) = t
-
-    -- | What it costs to reach a child placed in @l2@ from a parent in @l1@
-    -- (COST-3): one crossing into @l2@'s pool, or nothing within one pool,
-    -- where a change of language only counts as a switch.
-
-    -- | What it costs to move a value of this type across a pool boundary,
-    -- added to the cost of the language pair itself. Zero within a pool,
-    -- where nothing is moved.
-    crossScore :: Type -> Lang -> Lang -> Score
-    crossScore t l1 l2
-      | LR.coLocated registry l1 l2 = boundaryScore registry l1 l2
-      | otherwise = boundaryScore registry l1 l2 <> Score (crossingPayloadCost t) 0 0
-
-    -- | THE EXTENSION POINT for pricing a crossing by WHAT is moved rather
-    -- than only by where it is going.
-    --
-    -- It answers zero for every type, which is exactly the historical
-    -- behaviour: a crossing costs what the language pair costs, whether it
-    -- carries a byte or a gigabyte. Every alternative is a research question,
-    -- so the choice is named and given one home rather than being spread
-    -- through the scorer.
-    --
-    -- Three types are mispriced by the flat answer, in rough order of how
-    -- badly:
-    --
-    --   * A FUNCTION value is not moved at all. It is replaced by a proxy
-    --     that calls home on every application, so its real cost is
-    --     (number of applications) x (round trip) -- unbounded, and not
-    --     knowable from the type. Anything finite here understates it.
-    --   * A variable-width aggregate costs its serialized size, which is a
-    --     property of the value rather than of the type. A type-level answer
-    --     can only be a prior on size.
-    --   * A fixed-width primitive is very nearly free, and is the one case
-    --     the flat answer overcharges relative to the others.
-    --
-    -- The smallest useful refinement is a constant: zero for primitives and
-    -- fixed-width containers of them, one for everything else. Richer answers
-    -- (size priors from a type, amortizing a function value over an estimated
-    -- call count, letting a backend declare its own table) all fit here
-    -- without touching the scorer.
-    --
-    -- Any refinement must remain a pure function of the type: this runs before
-    -- values exist. The type given is the general type at the crossing point,
-    -- already monomorphized, so a cost may depend on type parameters.
-    crossingPayloadCost :: Type -> Integer
-    crossingPayloadCost _ = 0
 
     cost ::
       Maybe Lang -> -- parent language (if given)
@@ -1307,85 +1177,6 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
       Score
     cost (Just l1) l2 score = score <> boundaryScore registry l1 l2
     cost _ _ score = score
-
-    -- The cost of one call of a sourced function (COST-2): (its language's
-    -- coefficient times its self time) / 10, plus the language's call
-    -- overhead.
-    callCost :: Map MT.Text Double -> Source -> Integer
-    callCost env src =
-      picoseconds ((LR.registryCallCoefficient registry lang * selftimeNs) / 10)
-        + picoseconds (LR.registryCallOverhead registry lang)
-      where
-        lang = langName (srcLang src)
-        -- the source's own self time, else its signature's; a formula
-        -- without a value at this call counts the default (COST-7)
-        stated = srcSelftime src <|> Map.lookup src (sigSelftimes costs)
-        selftimeNs = maybe defaultSelftimeNs (* 1e9) (stated >>= evalFormula (named env))
-
-    -- The value of a name: bound at the call, else COST-9's default.
-    named :: Map MT.Text Double -> MT.Text -> Double
-    named env n = Map.findWithDefault unboundCount n env
-
-    -- The element counts of a node, from the shapes computed before scoring.
-    shapeAt :: RState -> AnnoS (Indexed Type) Many Int -> Shape
-    shapeAt rstat (AnnoS (Idx _ t) i _) = Map.findWithDefault (defaultShape t) i (rShapes rstat)
-
-    -- COST-8: the element counts of every node, outermost level first: a
-    -- literal's own, a let variable's value's, a sourced call's from the
-    -- `@dimension` of its result evaluated with the names its arguments bind,
-    -- and COST-9's default for anything else.
-    shapesOf :: AnnoS (Indexed Type) Many Int -> Map Int Shape
-    shapesOf root = snd (go Map.empty root Map.empty)
-      where
-        -- the node's shape, with every node's shape below it added to @acc@
-        go :: Map EVar Shape -> AnnoS (Indexed Type) Many Int -> Map Int Shape -> (Shape, Map Int Shape)
-        go env (AnnoS (Idx _ t) i e) acc0 =
-          let many xs acc = foldr (\x (shs, a) -> let (sh', a') = go env x a in (sh' : shs, a')) ([], acc) xs
-              (sh, acc1) = case e of
-                LstS xs ->
-                  let (shs, a) = many xs acc0
-                      inner = case shs of
-                        [] -> drop 1 (defaultShape t)
-                        _ -> foldr1 mergeLevels shs
-                   in (Count (fromIntegral (length xs)) True : inner, a)
-                StrS x -> ([Count (fromIntegral (MT.length x)) True], acc0)
-                LetS v e1 e2 ->
-                  let (s1, a1) = go env e1 acc0
-                      (s2, a2) = go (Map.insert v s1 env) e2 a1
-                   in (s2, a2)
-                LetBndS v -> (Map.findWithDefault (defaultShape t) v env, acc0)
-                LamS vs body -> (defaultShape t, snd (go (foldr Map.delete env vs) body acc0))
-                -- a label, a cast or a term passes on its value's counts
-                LabelS _ x -> go env x acc0
-                CoerceS _ x -> go env x acc0
-                VarS _ (Many alts@(_ : _)) ->
-                  let (shs, a) = many alts acc0
-                   in (foldr1 mergeLevels shs, a)
-                AppS f xs ->
-                  let (shs, a1) = many xs acc0
-                      (_, a2) = go env f a1
-                      result = case headDims (headSources f) of
-                        Just ds@(_, Just fs) ->
-                          let bound = bindNames (Just ds) shs
-                              factor (Name n) = Map.findWithDefault (Count unboundCount False) n bound
-                              factor (Lit x _) = Count x True
-                              factor _ = Count unboundCount False
-                           in map factor fs <> drop (length fs) (defaultShape t)
-                        _ -> defaultShape t
-                   in (result, a2)
-                _ -> (defaultShape t, snd (many (foldExprS (: []) e) acc0))
-           in (sh, Map.insert i sh acc1)
-
-    headDims :: [Source] -> Maybe ([Maybe [Formula]], Maybe [Formula])
-    headDims srcs = listToMaybe [d | src <- srcs, Just d <- [Map.lookup src (sigDims costs)]]
-
-    -- the names a source's signature binds from these arguments
-    envOf :: Source -> [Shape] -> Map MT.Text Double
-    envOf src shapes = Map.map cntValue (bindNames (Map.lookup src (sigDims costs)) shapes)
-
-    -- The self time of a function that states none (COST-2), in nanoseconds.
-    defaultSelftimeNs :: Double
-    defaultSelftimeNs = 1000
 
     collapseExpr ::
       [(EVar, Lang)] ->
@@ -1397,17 +1188,42 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
     collapseExpr _ _ _ (VarS v (Many []), Idx i _) =
       MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
     -- Select one implementation for the given term
+    -- CLS-2 first, where the implementations' types differ: those whose
+    -- type matches the use best; then the least by COST-1. Two different
+    -- sources of one type still tied are an error; definitions in morloc
+    -- that tie are interchangeable (REAL-1) and the first is taken.
     collapseExpr heads gt l1 (VarS v (Many xs), Idx i _) = do
-      let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) xs
+      typed <- case xs of
+        (AnnoS (Idx _ t0) _ _ : _)
+          | any (\(AnnoS (Idx _ t) _ _) -> t /= t0) xs -> resolveInstances gt xs
+        _ -> return xs
+      let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) typed
       (x, lang) <- case minXs of
         [] -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
-        [x] -> handleOne x
-        choices ->
-          resolveInstances gt choices >>= \case
-            (y : _) -> handleOne y
-            [] -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
+        (y@(AnnoS (Idx _ ty) _ _) : _)
+          | length (List.nubBy sameImplementation (mapMaybe sourceOf minXs)) <= 1 -> handleOne y
+          -- implementations of different types are instance resolution's
+          -- to separate, and a type left open is reported where it is used
+          | any (\(AnnoS (Idx _ t) _ _) -> t /= ty) minXs -> handleOne y
+          | otherwise ->
+              MM.throwSourcedError i $
+                "Ambiguous implementations of" <+> squotes (pretty (displayName v)) <> ":"
+                  <> "\n" <> indent 2 (vsep (map describe (List.nubBy sameImplementation (mapMaybe sourceOf minXs))))
+                  <> "\nEach is placed equally well (COST-1). Remove all but one from scope,"
+                  <+> "by importing fewer modules or importing under a namespace."
       return (VarS v (One x), Idx i lang)
       where
+        sameImplementation :: Source -> Source -> Bool
+        sameImplementation sa sb = srcLang sa == srcLang sb && srcPath sa == srcPath sb && srcName sa == srcName sb
+
+        sourceOf :: AnnoS g f c -> Maybe Source
+        sourceOf (AnnoS _ _ (ExeS (SrcCall src))) = Just src
+        sourceOf (AnnoS _ _ (LabelS _ y)) = sourceOf y
+        sourceOf _ = Nothing
+
+        describe :: Source -> MDoc
+        describe src = pretty (srcLang src) <+> pretty (srcName src) <+> maybe "" (\pth -> "from" <+> pretty pth) (srcPath src)
+
         handleOne ::
           AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
           MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
@@ -1709,7 +1525,7 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
 
     chooseLanguage :: Maybe Lang -> [(Lang, Score)] -> MorlocMonad (Maybe Lang)
     chooseLanguage l1 ss =
-      case minBy (\(l2, s2) -> (s2, l2)) [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
+      case minBy (\(l2, s2) -> (s2, preferred l2)) [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
         Nothing -> return Nothing
         (Just (l3, _)) -> return (Just l3)
 
@@ -1734,7 +1550,7 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
         (l : _) -> return (Just (hostedWith l))
         [] -> chooseLanguage l1 ss
       where
-        hostedWith l = case minBy (\(l2, s) -> (s, l2)) [(l2, s) | (l2, s) <- ss, LR.coLocated registry l l2] of
+        hostedWith l = case minBy (\(l2, s) -> (s, preferred l2)) [(l2, s) | (l2, s) <- ss, LR.coLocated registry l l2] of
           Just (l2, _) -> l2
           Nothing -> l
 
@@ -1838,7 +1654,6 @@ makeGAST = mapAnnoSCM (\(Idx _ _) -> return ())
 -- call of another tree costs what that tree's language does.
 placeNormalized :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [AnnoS (Indexed Type) One (Indexed Lang)]
 placeNormalized trees = do
-  costs <- signatureCosts
   registry <- MM.gets stateLangRegistry
   nameMap <- MM.gets stateName
   recTargets <- MM.gets stateRecursionTargets
@@ -1874,7 +1689,7 @@ placeNormalized trees = do
               LamS _ (AnnoS _ (Idx _ lb) _) -> lb
               _ -> l0
             label = maybe ("tree " <> MT.show' i) (unEVar . displayName) (treeName nameMap recTargets i)
-        (_, finish) <- realize costs callTable (Pins (cycleHeads i work) (Just work) (Just label)) (unrealized t)
+        (_, finish) <- realize callTable (Pins (cycleHeads i work) (Just work) (Just label)) (unrealized t)
         finish (Just l0) >>= either (const (MM.throwCompilerBugAt i "a pool tree was placed in no language")) return
   -- the checks cover each tree as placed here; the moves and copies
   -- co-location makes afterwards are forced, so they are not checked

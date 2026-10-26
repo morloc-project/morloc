@@ -1,0 +1,8 @@
+module main (f)
+
+import root-py
+import .viaf
+import .viag
+
+f :: Int -> Int
+f x = twice x

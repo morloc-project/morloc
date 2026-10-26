@@ -26,7 +26,6 @@ module Morloc.Frontend.Desugar
 
 import qualified Control.Monad.State.Strict as State
 import qualified Data.Map.Strict as Map
-import Morloc.Cost.Formula (Dim, Formula (..), dimOf, evalFormula, formulaNames, parseFormula, plain, renderDim, time)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -273,7 +272,7 @@ captureSigDescLines name descs = State.modify $ \s ->
 captureDeclDocs :: Pos -> EVar -> D ()
 captureDeclDocs pos name = do
   docs <- lookupDocsAt pos
-  vars <- processArgDocLinesD pos docs
+  vars <- docLinesD pos docs
   case docWith vars of
     (s : _) -> dfail pos . T.unpack $
       "`@with` requires an explicit signature above the definition. "
@@ -386,7 +385,7 @@ argDocDirectiveKeys =
   , "arg", "true", "false", "return"
   , "source", "form", "check.<kind>"
   , "list.source", "list.form", "list.check.<kind>"
-  , "with", "render", "parse", "mime", "epilogue", "selftime", "calls", "dimension"
+  , "with", "render", "parse", "mime", "epilogue"
   ]
 
 -- | Parse and lightly validate a media type (RFC 6838 `type/subtype`, e.g.
@@ -689,7 +688,7 @@ parseCheck kind raw = case kind of
 
 -- Known directive keys recognized on `source` declarations.
 sourceDocDirectiveKeys :: [Text]
-sourceDocDirectiveKeys = ["name", "rsize", "selftime"]
+sourceDocDirectiveKeys = ["name", "rsize"]
 
 -- | Warn only when the key looks like a misspelling of a directive rather
 -- than like prose. Every unrecognized line used to warn, which made ordinary
@@ -796,15 +795,6 @@ processArgDocLines = finalize . foldl step ([], [], defaultValue, Nothing)
         | otherwise -> (errs, ws, d {docLines = docLines d <> [v]})
       DocDirective k v -> case T.splitOn "." k of
         ["name"] -> (errs, ws, d {docName = Just v})
-        ["selftime"] -> case parseSelftime v of
-          Left e -> (errs <> [e], ws, d)
-          Right f -> (errs, ws, d {docSelftime = Just f})
-        ["calls"] -> case parseCalls v of
-          Left e -> (errs <> [e], ws, d)
-          Right f -> (errs, ws, d {docCalls = Just f})
-        ["dimension"] -> case parseDimension v of
-          Left e -> (errs <> [e], ws, d)
-          Right fs -> (errs, ws, d {docDimension = Just fs})
         ["literal"] ->
           let parsed = parseDocBool v
               warn =
@@ -933,64 +923,9 @@ applySourceDocs lns src = foldl step ([], [], src) lns
         "rsize" -> case parseRsize v of
           Left e -> (errs <> [e], ws, s)
           Right ns -> (errs, ws, s {srcRsize = ns})
-        "selftime" -> case parseSelftime v of
-          Left e -> (errs <> [e], ws, s)
-          Right f -> (errs, ws, s {srcSelftime = Just f})
-        "calls" ->
-          ( errs
-              <> [ "`@calls` states how often a sourced function calls one of its arguments: "
-                     <> "it is allowed only above a function or suspension argument of a signature (COST-6)"
-                 ]
-          , ws
-          , s
-          )
-        "dimension" ->
-          ( errs
-              <> [ "`@dimension` states the element counts of a value: "
-                     <> "it is allowed only above an argument or the result of a signature (COST-5)"
-                 ]
-          , ws
-          , s
-          )
         _ ->
           let w = unknownDirectiveWarning sourceDocDirectiveKeys k line
            in (errs, ws <> w, s {srcNote = srcNote s <> [docDescLine line]})
-
--- | Parse a `calls` value: a formula that is a plain number (COST-7).
-parseCalls :: Text -> Either Text Formula
-parseCalls = parseConstFormula "calls" plain
-
--- | Parse a `selftime` value: a formula whose dimension is a time (COST-7).
-parseSelftime :: Text -> Either Text Formula
-parseSelftime = parseConstFormula "selftime" time
-
--- | A formula of the given dimension. A formula without names is a constant
--- that must have a value; whether each name is introduced by a `@dimension`
--- of the signature is checked once the signature is whole (Restructure).
-parseConstFormula :: Text -> Dim -> Text -> Either Text Formula
-parseConstFormula key want v = do
-  f <- either (\e -> Left (key <> ": " <> e)) Right (parseFormula v)
-  d <- either (\e -> Left (key <> ": " <> e)) Right (dimOf f)
-  if d /= want
-    then Left (key <> ": the formula '" <> v <> "' is " <> renderDim d <> ", not " <> renderDim want)
-    else case formulaNames f of
-      (_ : _) -> Right f
-      [] -> case evalFormula (const 0) f of
-        Nothing -> Left (key <> ": the formula '" <> v <> "' has no value (it is negative or infinite)")
-        Just _ -> Right f
-
--- | Parse a `dimension` value: the element count of each list level,
--- outermost first, each a whole number or a name (COST-5).
-parseDimension :: Text -> Either Text [Formula]
-parseDimension v = case T.words v of
-  [] -> Left "dimension: expected one or more factors, each a whole number or a name"
-  ws -> mapM factor ws
-  where
-    factor w = case parseFormula w of
-      Right f@(Name _) -> Right f
-      Right f@(Lit x d)
-        | d == plain && x >= 0 && not (isInfinite x) && x == fromIntegral (round x :: Integer) -> Right f
-      _ -> Left ("dimension: the factor '" <> w <> "' is neither a whole number nor a name")
 
 -- | Parse an `rsize` value: one or more positive integers separated by
 -- whitespace. Each is the size of a leading call group; the final group is
@@ -1015,59 +950,8 @@ parseRsize v =
             <> "'. The value is a whitespace-separated list of call-group"
             <> " sizes, e.g. `@rsize 1` or `@rsize 1 1`."
 
--- | D-monad wrapper: parse argument docstring lines, accumulate
--- warnings into 'dsWarnings' for the caller to drain, and fail
--- the compile with a 'dfail' at `pos` when any directive value is
--- malformed (e.g. a short-option char that isn't a letter).
-processArgDocLinesD :: Pos -> [Text] -> D ArgDocVars
-processArgDocLinesD pos ls = do
-  v <- processSigResultDocLinesD pos ls
-  rejectDimensionHere pos v
-  return v
-
--- | The docstring of a signature's result, which may state `@dimension` but
--- not `@calls`.
-processSigResultDocLinesD :: Pos -> [Text] -> D ArgDocVars
-processSigResultDocLinesD pos ls = do
-  v <- processParamDocLinesD pos ls
-  rejectCallsHere pos v
-  return v
-
-rejectDimensionHere :: Pos -> ArgDocVars -> D ()
-rejectDimensionHere pos v = case docDimension v of
-  Nothing -> return ()
-  Just _ ->
-    dfail pos
-      "`@dimension` states the element counts of a value: it is allowed only above an argument or the result of a signature (COST-5)"
-
-
-rejectCallsHere :: Pos -> ArgDocVars -> D ()
-rejectCallsHere pos v = case docCalls v of
-  Nothing -> return ()
-  Just _ ->
-    dfail pos
-      "`@calls` states how often a sourced function calls one of its arguments: it is allowed only above a function or suspension argument of a signature (COST-6)"
-
--- | Argument docstring lines, which may not state `@selftime`.
-processParamDocLinesD :: Pos -> [Text] -> D ArgDocVars
-processParamDocLinesD pos ls = do
-  v <- docLinesD pos ls
-  case docSelftime v of
-    Nothing -> return v
-    Just _ ->
-      dfail pos
-        "`@selftime` states the self time of a sourced function: it is allowed only above a signature or an item of a `source` block or list (COST-6)"
-
--- | 'processArgDocLinesD' for the preamble of a signature, the one
--- docstring that may state `@selftime`.
-processSigDocLinesD :: Pos -> [Text] -> D ArgDocVars
-processSigDocLinesD pos ls = do
-  v <- docLinesD pos ls
-  rejectCallsHere pos v
-  rejectDimensionHere pos v
-  return v
-
--- | Docstring lines, with no check of where a directive is allowed.
+-- | Parse docstring lines, passing warnings on to the caller and failing
+-- the compile at @pos@ when a directive value is malformed.
 docLinesD :: Pos -> [Text] -> D ArgDocVars
 docLinesD pos ls = do
   let (errs, ws, v) = processArgDocLines ls
@@ -1173,14 +1057,14 @@ firstDuplicate = go Set.empty
 namTypeDocs :: Pos -> [(Located, Key, TypeU)] -> D ArgDoc
 namTypeDocs declPos locEntries = do
   recDocs <- lookupDocsAt declPos
-  recDocVars <- processArgDocLinesD declPos recDocs
+  recDocVars <- docLinesD declPos recDocs
   rejectDeclDirectivesHere declPos "a record declaration" recDocVars
   fieldDocs <-
     mapM
       (\(loc, _, _) -> do
           let p = locPos loc
           dl <- lookupDocsAt p
-          fieldDoc <- processArgDocLinesD p dl
+          fieldDoc <- docLinesD p dl
           rejectDeclDirectivesHere p "a record field" fieldDoc
           return fieldDoc)
       locEntries
@@ -1193,7 +1077,7 @@ namTypeDocs declPos locEntries = do
 dataTypeDocs :: Pos -> [(Located, Located, Text, [TypeU])] -> D ArgDoc
 dataTypeDocs declPos ctors = do
   typeDocs <- lookupDocsAt declPos
-  typeVars <- processArgDocLinesD declPos typeDocs
+  typeVars <- docLinesD declPos typeDocs
   rejectDeclDirectivesHere declPos "a data declaration" typeVars
   ctorDocs <-
     mapM
@@ -1202,7 +1086,7 @@ dataTypeDocs declPos ctors = do
           -- line: the `=` or `|` in the usual layout, the name itself when
           -- the bar ends the previous line.
           (p, dl) <- lookupItemDocs [locPos lead] (locPos tok)
-          vars <- processArgDocLinesD p dl
+          vars <- docLinesD p dl
           rejectDirectivesOnCtor p name vars
           return (name, vars))
       ctors
@@ -1566,16 +1450,9 @@ desugarSigType _pos (CstSigType Nothing args) = do
   argDocVars <- sigArgDocs args
   return ([], argDocVars, argsToType args)
 
--- | The docstrings of a signature's arguments and, last, its result, which
--- may not state `@calls`. Whether an argument's type allows `@calls` is
--- checked once aliases are expanded (Restructure).
+-- | The docstrings of a signature's arguments and, last, its result.
 sigArgDocs :: [(Pos, TypeU)] -> D [ArgDocVars]
-sigArgDocs args = do
-  let n = length args
-  sequence
-    [ lookupDocsAt p >>= if k == n then processSigResultDocLinesD p else processParamDocLinesD p
-    | (k, (p, _)) <- zip [1 :: Int ..] args
-    ]
+sigArgDocs args = mapM (\(p, _) -> lookupDocsAt p >>= docLinesD p) args
 
 
 resolveSourceFile :: Maybe Path -> Maybe Text -> Maybe Path
@@ -3319,7 +3196,7 @@ desugarTopLevel (Loc sp (CImpE imp)) = do
   return [e]
 desugarTopLevel (Loc sp (CSigE name sigType)) = do
   docs <- lookupDocsAt (startPos sp)
-  cmdDoc <- processSigDocLinesD (startPos sp) docs
+  cmdDoc <- docLinesD (startPos sp) docs
   captureSigDescLines name (docLines cmdDoc)
   (cs, argDocs, t) <- desugarSigType (startPos sp) sigType
   validateSigWith (startPos sp) (docWith cmdDoc) argDocs
@@ -3680,7 +3557,7 @@ desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
       l <- parseLang tok
       return (Just (l, isTerminal))
   docs <- lookupDocsAt (startPos sp)
-  docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
+  docVars <- if null docs then return defaultValue else docLinesD (startPos sp) docs
   rejectDeclDirectivesHere (startPos sp) "a type alias" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars) TypedefAlias))
   return [e]
@@ -3690,7 +3567,7 @@ desugarTypeDef sp (CstNewtype (v, vs) t ders) = do
       "Newtype '" ++ T.unpack (unTVar v) ++
       "' has a vacuous body: it reduces to a self-reference with no payload"
   docs <- lookupDocsAt (startPos sp)
-  docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
+  docVars <- if null docs then return defaultValue else docLinesD (startPos sp) docs
   rejectDeclDirectivesHere (startPos sp) "a newtype declaration" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefNewtype))
   withPack <- newtypeDerives v vs t ders
@@ -3705,7 +3582,7 @@ desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
   -- table still has a uniform shape.
   let t = if null vs then VarU v else AppU (VarU v) (map (either (VarU . fst) id) vs)
   docs <- lookupDocsAt (startPos sp)
-  docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
+  docVars <- if null docs then return defaultValue else docLinesD (startPos sp) docs
   rejectDeclDirectivesHere (startPos sp) "a primitive type declaration" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefPrimitive))
   return [e]
@@ -3844,7 +3721,7 @@ desugarClassHead (CCHMultiConstrained cs headType) = do
 desugarSigItem :: CstSigItem -> D Signature
 desugarSigItem (CstSigItem pos name sigType) = do
   docs <- lookupDocsAt pos
-  cmdDoc <- processSigDocLinesD pos docs
+  cmdDoc <- docLinesD pos docs
   (cs, argDocs, t) <- desugarSigType pos sigType
   mapM_ (rejectDeclDirectivesHere pos "a class method signature") argDocs
   let wrappedT = quantifyType t
@@ -3876,7 +3753,6 @@ mkSource sp lang path isList item = do
           , srcInline = srcItemInline item
           , srcOperator = False
           , srcBacktick = srcItemBacktick item
-          , srcSelftime = Nothing
           }
   src <- applySourceDocsD docPos docLines' baseSrc
   let foreignName = unSrcName (srcName src)

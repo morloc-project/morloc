@@ -1,9 +1,9 @@
 # Realization
 
 Defects in how the realizer (CodeGenerator/Realize.hs) prices a placement,
-found reviewing /work/plans/realization-cost-model.md. The objective is
-COST-1 (ruled); each entry is wrong under any reading of it. [read; not
-reproduced]
+found reviewing /work/plans/realization-cost-model.md and since. The
+objective is COST-1 (crossings by loop level, then language preference,
+then size).
 
 - **A reference to a let-bound function value is priced from where its
   definition is cheapest.** The `LetS` clause of `scoreExpr` prices a
@@ -11,14 +11,6 @@ reproduced]
   from l, but a lambda is built in its parent's language (COST-11;
   `pinNamedLambda` at collapse), so scoring and collapse disagree. Data
   values are free at their references (COST-3).
-- **A value read across a boundary is charged no per-element or per-byte
-  cost.** Deferred 2026-10-25 (COST-3): `crossingPayloadCost` is 0 and no
-  node records the sizes of the free variables a subtree carries down.
-- **Collapse and scoring price an edge differently.** Collapse picks a
-  child's language with `boundary` (`cost`, `chooseLanguage`, `holding`,
-  `holdingLang`), scoring arguments with `crossScore`. The two agree while
-  a crossing costs its latency only; they part once COST-3's payload term
-  is built (deferred 2026-10-25).
 - **A function argument is priced by where it is called, so a term
   with both morloc and sourced implementations prices it twice for the
   morloc one.** [read, 2026-10-24] The `AppS` clause of `scoreExpr` leaves
@@ -28,17 +20,6 @@ reproduced]
   argument is priced at the application and again inside the morloc
   alternative's body. Each alternative needs its own argument pricing
   (plan step e3b).
-- **A shared specialization taking a function is placed away from its
-  callback's pool.** [reproduced, 2026-10-26] In the stdlib stream-r suite
-  (`morloc typecheck --realize test.loc`, stream/test/main.loc
-  `testSorter`), `mapE_ (pushSorter h2) (pieces 30 xs)` is placed in
-  Python (`call mapE_ [py]`) with the R `pushSorter` as its callback, so
-  every element crosses back into R, where staying in R crosses once. The
-  call of a shared specialization is priced from its table without its
-  function argument's calls (COST-4). This placement makes the call
-  re-entrant and exposes the fork-pool host-state issue
-  (model/runtime/issues/pools-and-ipc.md); before the cost model, `mapE_`
-  was placed in R and the suite passed.
 - **Building a function value a morloc head never calls costs nothing.**
   [read, 2026-10-24] A function argument bound by the head's lambda is
   priced only where the body calls it; one the body ignores, such as a
@@ -57,17 +38,12 @@ reproduced]
   found.** [reproduced, 2026-10-26] Violates COST-11. `morloc typecheck -v
   --realize` rescores each pool tree as placed after normalization, before
   co-location of host-made functions (whose moves and copies are forced and
-  not checked), and lists a difference; 12 golden `main*.loc` programs
-  differ. Seen: a lambda built in
-  its parent's language around a body the scorer would place elsewhere
-  (closure-conformance main-home-*/main-away-*, shared-specialization
-  main-mixed: "lambda in py not [cpp]"), the extra crossings counted at a
-  callback's call count; nullary constructors and a record built in Rust
-  whose table offers only Python (function-argument-inlined-language,
-  function-argument-inlined-recursion: `ShrinkingChunks`, `InputOrder`);
-  and a recursive call forced to its cycle's language (crosspool-mutual-
-  tail-loop, recursion-crosspool-mutual, recursion-crosspool-mutual-list),
-  which COST-11 allows but the check does not yet exempt.
+  not checked), and lists a difference; 7 golden `main*.loc` programs
+  differ (closure-conformance main-home-*/main-away-*, shared-specialization
+  main-mixed: "lambda in py not [cpp]"). All are nested lambdas that
+  evaluation threaded through shared specializations: a function argument
+  applied inside a lambda built in its parent's language is placed apart
+  from where it is bound, and the scorer does not see the extra crossing.
 - **A function argument that LambdaEval inlines is placed for where it is
   built, not where it runs.** [read, 2026-10-25] Most of the COST-11
   differences above. A lambda argument is collapsed in its parent's
@@ -84,26 +60,6 @@ reproduced]
   Placement after normalization (Realize.hs `placeNormalized`) places the
   inlined argument where it runs; the choice of implementation is still
   made at the build site.
-- **The cost model is partly implemented.** [read, 2026-10-24] Scores are
-  seconds: a call costs its language's coefficient times its self time
-  (`@selftime` on its signature or `source` block item, else 1 us) plus
-  the language's overhead (COST-2), a crossing between pools its pair's
-  latency (COST-3 without the per-element and per-byte slopes), a
-  recursive definition its body times 1000 (COST-14), a function argument
-  of a sourced function 1000 calls of it (COST-4). Sizes (COST-5, COST-8,
-  COST-9) are element counts only: `@dimension` above a signature's
-  argument or result binds names from a list literal's length, a let
-  variable's value, a sourced call's result `@dimension`, or COST-9's
-  default of 1000 per level. Not yet: `@dimension` above a type alias or a
-  record field (rejected), a type variable as a factor (rejected), a
-  consumer's literal factor beating a default (COST-8 rule 3, ignored), a
-  parameter's size from its enclosing signature (COST-8 rule 1, default
-  used), a morloc-defined call's result size (default used), and a
-  literal `Nat` length in a type (`Vector 5 Int`) as the default count.
-  `@wiresize` and byte sizes are deferred with COST-3's copy cost
-  (2026-10-25). A function value
-  inside another type handed to a sourced function is priced as one
-  call.
 - **A crossing recursion given both a function made by host code and a
   value its pool cannot hold is refused.** [reproduced, 2026-10-26] Such a
   recursion keeps its serial entry (Express.hs `allHeld`: callers of a
@@ -165,22 +121,14 @@ reproduced]
   helper directly in the Python pool); a pattern call would pick the
   caller's language's instances, which matters only for a newtype whose
   indexing instances differ by language. No witness yet.
-- **A repetition count scales the tie-breakers too.** [read, 2026-10-25]
-  `scaleScore` multiplies a score's crossing and switch counts by the same
-  count as its time (a callback's 1000 calls, a recursion's 1000 levels),
-  so two placements whose times tie are compared by crossings counted a
-  thousand times over in one branch and once in another. COST-1 breaks ties
-  by the number of crossings; whether a repeated crossing counts once or per
-  repetition there is not stated.
 - **The realizer's placements are checked only against themselves.**
   [read, 2026-10-25] COST-11. No test enumerates the placements of a small
   tree to confirm the DP finds the least; no test compares the crossings
   the placement listing shows with those code generation emits (the
   PolyRemoteInterface calls after lowering); there are no unit tests that
-  pin a placement directly (PlacementTests.hs was planned). `@calls` on a
-  suspension argument and the largest-count rule across implementations
-  that state different counts have code but no test. The consistency check
-  of `typecheck -v --realize` runs in five goldens only, not over the suite.
+  pin a placement directly (PlacementTests.hs was planned). The consistency
+  check of `typecheck -v --realize` runs in a few goldens only, not over the
+  suite.
 - **A bracket step through an instance is never placed in a pool.**
   [read, 2026-10-21] Realize gives a PatCall no language (Realize.hs:521),
   so a pure `f m = .[0] m` on a receiver that is not a list on the wire
@@ -208,15 +156,11 @@ reproduced]
   or `@try` region). Open in COST-13: whether EVAL-3 lets such a value be
   computed in the caller's pool.
 
-- **Cost chooses between instances before their types do.** [reproduced,
-  2026-10-24] Collapse keeps the cheapest implementations of a term
-  (`minsBy` in the `VarS` clause of `collapseExpr`) and only resolves
-  instances by type among ties (`resolveInstances`), so when an instance of
-  a less specific or incompatible type is cheaper it is taken without a
-  type check; COST-11 says instance resolution chooses first. Resolving
-  types first is blocked on `compatibleType`, which does not match
-  Nat-dimensioned types: with types first, golden tensor-comprehensive
-  fails "No matching implementation found for 'pack' at type ((Int, Int),
-  Vector 6 Real) -> Matrix 2 3 Real" (vector-comprehensive likewise). The
-  recursion count (COST-14) makes cost differences between instances
-  larger, not new.
+- **Instance resolution cannot compare Nat-dimensioned types.** [reproduced,
+  2026-10-24] Collapse resolves instances by type before cost (COST-15)
+  only when a term's implementations differ in type, because
+  `compatibleType` does not match Nat-dimensioned types: resolving `pack`
+  in golden tensor-comprehensive fails "No matching implementation found
+  for 'pack' at type ((Int, Int), Vector 6 Real) -> Matrix 2 3 Real"
+  (vector-comprehensive likewise). Implementations of differing
+  Nat-dimensioned types would hit the same failure.

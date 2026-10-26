@@ -1,0 +1,5 @@
+--' The signature both implementations share
+module sig (twice)
+
+--' Double an integer
+twice :: Int -> Int

@@ -63,11 +63,7 @@ rather than as prose. Candidates: (a) keep the colon form as a synonym for
 prose.
 
 ### DOC-7 Cost directives state sizes, counts and times for the realizer
-Intent: ruled 2026-10-16
-Code: deviates (../compiler/issues/realization.md)
+Intent: retired 2026-10-26
+Code: unaudited
 
-`@wiresize`, `@dimension`, `@calls` and `@selftime` carry estimates the
-realizer uses to rank placements and implementations (cost.md: COST-5 to
-COST-7). They change only cost, and through it placement, which can decide
-whether a program builds (REAL-3) and how a value crosses (WIRE). Help does
-not show them.
+The realizer reads no directives (cost.md: COST-1).

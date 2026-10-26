@@ -1,0 +1,28 @@
+-- Placements that cross equally often are decided by the language order,
+-- C++ before Python (COST-16). `twice` has a Python and a C++
+-- implementation and its caller has no language of its own, so it runs in
+-- C++; under a Python caller it stays in Python, since moving it would
+-- cross.
+
+--' Ties broken by the language order
+module main (doubled, shown)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("twice", "show_int" as showInt)
+source Cpp from "f.hpp" ("twice")
+
+--' Double an integer
+twice :: Int -> Int
+
+--' Render an integer
+showInt :: Int -> Str
+
+--' Double an integer
+doubled :: Int -> Int
+doubled x = twice x
+
+--' Double an integer and render it
+shown :: Int -> Str
+shown x = showInt (twice x)

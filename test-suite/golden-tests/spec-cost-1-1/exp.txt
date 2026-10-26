@@ -1,0 +1,10 @@
+placement:
+  doubled [cpp]
+    twice [cpp]
+  quadrupled [py]
+    showInt [py]
+      quad [py]
+
+6
+"12"
+OK: tied sources refused
