@@ -1,13 +1,14 @@
 -- A function value passed to a function defined in Morloc, and handed on
 -- from there to a Rust higher-order function, is built where it is finally
 -- used, inside the Rust call: directly, through a `let` between the helper's
--- parameters, through a `let` alias of the argument, and as a branch of a
--- conditional choosing between functions. `show` needs no pool of its own
--- and every result goes to Python's `shout`; each helper's answer matches the
--- same expression written without the helper.
+-- parameters, through a `let` alias of the argument, as a branch of a
+-- conditional choosing between functions inside the helper, and as a
+-- conditional written at the call, alone or around a `let`. `show` needs no
+-- pool of its own and every result goes to Python's `shout`; each helper's
+-- answer matches the same expression written without the helper.
 
 --' Function values forwarded through Morloc definitions
-module main (viaHelper, letBetween, letAlias, pick, direct)
+module main (viaHelper, letBetween, letAlias, pick, pickAtCall, pickLetAtCall, direct)
 
 import parallel-rust
 import root-py
@@ -48,6 +49,14 @@ letAlias xs = shout (renderAlias defaultParOpts show xs)
 --' Render a list with a chosen function
 pick :: Bool -> [Int] -> Str
 pick b xs = shout (renderPick b show (\x -> shout (show x)) xs)
+
+--' Render a list with a function chosen at the call
+pickAtCall :: Bool -> [Int] -> Str
+pickAtCall b xs = shout (renderAll defaultParOpts (? b = show : (\x -> shout (show x))) xs)
+
+--' Render a list with a function chosen at the call around a let
+pickLetAtCall :: Bool -> [Int] -> Str
+pickLetAtCall b xs = shout (renderAll defaultParOpts (let g = (\x -> shout (show x)) in ? b = g : show) xs)
 
 --' Render a list directly
 direct :: [Int] -> Str

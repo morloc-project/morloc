@@ -6,6 +6,10 @@ all:
 	./nexus letAlias '[1,2,3]' >> obs.txt 2>> obs.err
 	./nexus pick true '[1,2,3]' >> obs.txt 2>> obs.err
 	./nexus pick false '[1,2,3]' >> obs.txt 2>> obs.err
+	./nexus pickAtCall true '[1,2,3]' >> obs.txt 2>> obs.err
+	./nexus pickAtCall false '[1,2,3]' >> obs.txt 2>> obs.err
+	./nexus pickLetAtCall true '[1,2,3]' >> obs.txt 2>> obs.err
+	./nexus pickLetAtCall false '[1,2,3]' >> obs.txt 2>> obs.err
 	./nexus direct '[1,2,3]' >> obs.txt 2>> obs.err
 
 clean:

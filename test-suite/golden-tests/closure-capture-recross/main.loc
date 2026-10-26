@@ -1,0 +1,31 @@
+-- A function value chosen by a conditional, one branch a closure bound by a
+-- let, is handed to Rust, returned from it, and applied in Python: the
+-- value crosses to Rust with what it captures (the condition and the
+-- closure) and back again.
+
+--' A capturing function value crossing to Rust and back
+module main (roundTrip)
+
+import root-py
+import root-rust
+
+source Py from "f.py" ("shout", "apply_py" as applyPy)
+source Rust from "relay.rs" where
+  --' @name forward_fn
+  --' @rsize 1
+  forwardFn
+
+--' Add an exclamation mark
+shout :: Str -> Str
+
+--' Apply a function in Python
+applyPy :: (Int -> Str) -> Int -> Str
+
+--' Return the function it is given
+forwardFn :: (Int -> Str) -> (Int -> Str)
+
+--' Choose a function, send it through Rust, apply it in Python
+roundTrip :: Bool -> Int -> Str
+roundTrip b x =
+  let g = (\y -> shout (show y))
+   in applyPy (forwardFn (? b = g : show)) x

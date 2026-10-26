@@ -1718,18 +1718,26 @@ expressPolyExpr
             lambdaTypedArgs = map (`Arg` Nothing) ids
             callVals = bindVarIds ids (map (C . Idx cidx) callInputs)
         retapp <- expressEtaApp callLang e callVals
-        innerWrap <- mkPolyManifold callLang midx (ManifoldFull lambdaArgs) retapp
+        -- The values the wrapped value closes over (a conditional's
+        -- condition, a captured closure) are captured here, as in the local
+        -- case above, and passed across with the arguments.
+        let ctxIds = Set.toList (polyFreeVars retapp `Set.difference` Set.fromList ids)
+            ctxArgs = [Arg i None | i <- ctxIds]
+        innerWrap <- mkPolyManifold callLang midx (ManifoldFull (ctxArgs <> lambdaArgs)) retapp
         let remoteApp =
               PolyReturn $ PolyApp
-                ( PolyRemoteInterface callLang (Idx cidx poutput) (map ann lambdaArgs) (fromJust remote)
+                ( PolyRemoteInterface callLang (Idx cidx poutput) (ctxIds <> map ann lambdaArgs) (fromJust remote)
                     innerWrap
                 )
-                ( fromJust
-                  $ safeZipWith (PolyBndVar . C) (map (Idx cidx) pinputs) (map ann lambdaArgs)
+                ( [PolyBndVar (A parentLang) i | i <- ctxIds]
+                    <> fromJust (safeZipWith (PolyBndVar . C) (map (Idx cidx) pinputs) (map ann lambdaArgs))
                 )
+            outerForm = case ctxIds of
+              [] -> ManifoldPass lambdaTypedArgs
+              _ -> ManifoldPart ctxArgs lambdaTypedArgs
             -- Cross-language eta-abstraction: force lifted to
             -- Poly-stage 'EffectBoundary'.
-        mkPolyManifold parentLang midx (ManifoldPass lambdaTypedArgs) remoteApp
+        mkPolyManifold parentLang midx outerForm remoteApp
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
