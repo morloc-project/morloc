@@ -103,10 +103,11 @@ reproduced]
   call.
 - **A function the host supplies can be used in a part placed in another
   language.** [reproduced, 2026-10-26] Violates COST-11 (the placement
-  built must be one that runs). The stdlib `stream-r` suite builds and fails
-  at run time with "cannot reify a function that morloc did not create";
-  `stream-rust` fails to build (Express "a lambda value is realized in py
-  inside an expression realized in rust", stream/main.loc:210). In
+  built must be one that runs). The stdlib `stream-r` and `stream-rust`
+  suites fail to build (Express "a lambda value is realized in py inside an
+  expression realized in r"/"rust"); relabeling the lambda to make them build
+  instead fails at run time with "cannot reify a function that morloc did
+  not create". In
   `collectSource (loadSource p)` the lambda carried into the R source
   receives the host's `sink`, and its body, placed in Python because it is
   cheaper, passes `sink` to Python's `drainStream`: a function made by host
