@@ -54,26 +54,20 @@ reproduced]
   a named lambda (`pinNamedLambda`), each by its own rule. One predicate
   both consult would keep them from drifting apart.
 - **The placement collapse builds does not always cost the least the scorer
-  found.** [reproduced, 2026-10-25] Violates COST-11. `morloc typecheck -v
-  --realize` rescores the built placement and lists a difference; 32 of
-  1336 golden programs differ. Seen: a lambda built in its parent's
-  language around a body in another (closure-conformance,
-  let-captured-by-closure, recursion-crosspool-*, records-*,
-  string-encoding-utf8, uint8-cross-language), the extra crossings counted
-  at a callback's call count; function values in a container placed with
-  the container (functional-data-1: `funf`, `fung`); a sourced call left in
-  a lambda's language rather than the scorer's (nested-closure-crossing,
-  `pyHofRustArg`, 3 crossings built against 1); a recursive call forced to
-  its definition's language (recursion-crosspool-io-tuple, crosspool-
-  mutual-tail-loop), which COST-11 allows but the check does not yet
-  exempt; and a built placement cheaper than the least found
-  (recursion-crosspool-mutual, recursion-crosspool-mutual-list), where the
-  scorer overprices mutual recursion; a let whose value only one language
-  can hold placed in another (placement-representability topConstant and
-  whereBinding: a C++ record let in Python). Not yet classified:
-  binding-evaluation-count, errors,
-  packets-interop, spec-eff-8-1, remote-streaming-consolidated,
-  shared-specialization (main-mixed), spec-cost-12-1, spec-newt-7-8.
+  found.** [reproduced, 2026-10-26] Violates COST-11. `morloc typecheck -v
+  --realize` rescores each pool tree as placed after normalization, before
+  co-location of host-made functions (whose moves and copies are forced and
+  not checked), and lists a difference; 12 golden `main*.loc` programs
+  differ. Seen: a lambda built in
+  its parent's language around a body the scorer would place elsewhere
+  (closure-conformance main-home-*/main-away-*, shared-specialization
+  main-mixed: "lambda in py not [cpp]"), the extra crossings counted at a
+  callback's call count; nullary constructors and a record built in Rust
+  whose table offers only Python (function-argument-inlined-language,
+  function-argument-inlined-recursion: `ShrinkingChunks`, `InputOrder`);
+  and a recursive call forced to its cycle's language (crosspool-mutual-
+  tail-loop, recursion-crosspool-mutual, recursion-crosspool-mutual-list),
+  which COST-11 allows but the check does not yet exempt.
 - **A function argument that LambdaEval inlines is placed for where it is
   built, not where it runs.** [read, 2026-10-25] Most of the COST-11
   differences above. A lambda argument is collapsed in its parent's

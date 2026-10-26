@@ -6,7 +6,6 @@ placement:
     withInc [cpp]
       pyInc [py] *
   runThroughParameter [cpp]
-    hof [cpp]
+    withIncFrom [cpp]
       pyInc [py] *
-      withIncFrom [cpp]
 

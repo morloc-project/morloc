@@ -72,8 +72,18 @@ nodeKind e = case e of
 -- indented beneath it, with the language its implementation runs in. @*@
 -- marks a node in another language than the line above it: a crossing. An
 -- unnamed node is listed only when it crosses, by its kind.
-placementLines :: AnnoS (Indexed Type) One (Indexed Lang) -> [MT.Text]
-placementLines = go 0 Nothing
+placementLines :: Maybe EVar -> AnnoS (Indexed Type) One (Indexed Lang) -> [MT.Text]
+placementLines (Just root) t@(AnnoS _ (Idx _ l) _) = listedAt 0 Nothing l (unEVar (displayName root)) : placementLinesAt 1 (Just l) t
+placementLines Nothing t = placementLinesAt 0 Nothing t
+
+-- | A listing line: a name and its language, marked when it crosses.
+listedAt :: Int -> Maybe Lang -> Lang -> MT.Text -> MT.Text
+listedAt depth parent l x =
+  MT.replicate depth "  " <> x <> " [" <> render (pretty l) <> "]"
+    <> (if maybe False (/= l) parent then " *" else "")
+
+placementLinesAt :: Int -> Maybe Lang -> AnnoS (Indexed Type) One (Indexed Lang) -> [MT.Text]
+placementLinesAt = go
   where
     go :: Int -> Maybe Lang -> AnnoS (Indexed Type) One (Indexed Lang) -> [MT.Text]
     go depth parent (AnnoS _ (Idx _ appLang) e) = case e of
@@ -90,9 +100,7 @@ placementLines = go 0 Nothing
       where
         lang = appLang
         moved = maybe False (/= lang) parent
-        listed l x =
-          MT.replicate depth "  " <> x <> " [" <> render (pretty l) <> "]"
-            <> (if maybe False (/= l) parent then " *" else "")
+        listed = listedAt depth parent
         entry = listed lang
         below = concatMap (go (depth + 1) (Just lang))
         name = unEVar . displayName
@@ -190,12 +198,6 @@ realityCheck es = do
   -- Extract non-exported recursive helpers into their own rASTs.
   -- This must happen before removeVarS so we can find the VarS wrappers.
   rASTs1 <- extractRecursiveHelpers rASTs0
-  wanted <- MM.gets statePlacement
-  case wanted of
-    Just checks -> do
-      let placement = concatMap placementLines rASTs1 <> checks
-      sum (map MT.length placement) `seq` MM.modify (\st -> st {statePlacement = Just placement})
-    Nothing -> return ()
 
   -- Now dissolve remaining (non-recursive) VarS wrappers
   let gASTs = map removeVarS gASTs1
@@ -620,11 +622,12 @@ picoseconds ns = round (ns * 1000)
 -- | Languages a tree must keep when it is placed. @pinHeads@ are recursive
 -- functions, each with its language, a node calling one is placed in (see
 -- 'pickLanguage'); @pinWork@ is the language the root's manifold is built
--- in: a root lambda's body's, else the root's own.
-data Pins = Pins {pinHeads :: [(EVar, Lang)], pinWork :: Maybe Lang}
+-- in: a root lambda's body's, else the root's own. @pinCheck@ names the
+-- tree in a COST-11 check of its placement; without it there is no check.
+data Pins = Pins {pinHeads :: [(EVar, Lang)], pinWork :: Maybe Lang, pinCheck :: Maybe MT.Text}
 
 noPins :: Pins
-noPins = Pins [] Nothing
+noPins = Pins [] Nothing Nothing
 
 -- | Score a tree, returning the scored tree and how to finish it: a shared
 -- specialization is scored once and finished once per language it is used in.
@@ -676,8 +679,8 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
     checkPlacement shapes s0' scored ctx e = do
       wanted <- MM.gets statePlacement
       verbosity <- MM.gets stateVerbosity
-      case wanted of
-        Just prior | verbosity > 0 -> do
+      case (pinCheck pins, wanted) of
+        (Just label, Just prior) | verbosity > 0 -> do
           -- a node collapsed at two sites into different languages is
           -- left unforced
           let kept = Map.fromListWith (\a b -> if a == b then a else Nothing) [(i, l) | Idx i l <- collectIdx e]
@@ -688,8 +691,7 @@ realizeWithRegistry registry costs tables pins seedLangs s0 = do
                 (Nothing, _) -> Just (minimum (map snd tbl))
               optimum = best (scoresOf scored)
               built = best (scoresOf rescored)
-              AnnoS _ _ rootExpr = s0'
-              site = nodeKind rootExpr <> maybe "" (\l -> " used from " <> render (pretty l)) ctx
+              site = label <> maybe "" (\l -> " used from " <> render (pretty l)) ctx
           when (optimum /= built) $
             MM.modify $ \st ->
               st { statePlacement = Just (prior <> ["cost check failed for " <> site
@@ -1871,13 +1873,29 @@ placeNormalized trees = do
         let work = case e of
               LamS _ (AnnoS _ (Idx _ lb) _) -> lb
               _ -> l0
-        (_, finish) <- realize costs callTable (Pins (cycleHeads i work) (Just work)) (unrealized t)
+            label = maybe ("tree " <> MT.show' i) (unEVar . displayName) (treeName nameMap recTargets i)
+        (_, finish) <- realize costs callTable (Pins (cycleHeads i work) (Just work) (Just label)) (unrealized t)
         finish (Just l0) >>= either (const (MM.throwCompilerBugAt i "a pool tree was placed in no language")) return
-  -- the listing describes the realization the user wrote, not this pass
-  listing <- MM.gets statePlacement
-  placed <- mapM place trees
-  MM.modify (\st -> st {statePlacement = listing})
-  colocateHostFunctions target placed
+  -- the checks cover each tree as placed here; the moves and copies
+  -- co-location makes afterwards are forced, so they are not checked
+  final <- mapM place trees >>= colocateHostFunctions target
+  checks <- MM.gets statePlacement
+  case checks of
+    Just cs -> do
+      names <- MM.gets stateName
+      recs <- MM.gets stateRecursionTargets
+      let listed t@(AnnoS (Idx i _) _ _) = placementLines (treeName names recs i) t
+          listing = concatMap listed final <> cs
+      sum (map MT.length listing) `seq` MM.modify (\st -> st {statePlacement = Just listing})
+    Nothing -> return ()
+  return final
+
+-- | The name a pool tree is called by: a shared specialization's copy or a
+-- recursive helper by the name its callers use, else its term's name.
+treeName :: Map Int EVar -> Map EVar Int -> Int -> Maybe EVar
+treeName names recs i = case [v | (v, j) <- Map.toList recs, j == i] of
+  (v : _) -> Just v
+  [] -> Map.lookup i names
 
 -- | A function made by host code -- a parameter of a lambda passed to a
 -- sourced function, which the host calls with its own functions -- has no
