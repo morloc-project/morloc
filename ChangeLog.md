@@ -1,3 +1,41 @@
+0.111.1 [2026-10-27]
+--------------------
+
+New features
+ * The realizer places calls minimize crosses between language pools; ties
+   prefer C++, Rust, Futhark, Python, R
+ * `morloc typecheck --realize` lists where each call is placed
+
+Changed
+ * Functions passed to or returned by foreign functions are called with all
+   their arguments at once, however parenthesized; only `rsize` splits calls
+ * A function made by foreign code stays in its language; sending one to
+   another language is refused at build
+ * Retire the old `<field>:` style docstring syntax
+
+Docstrings and diagnostics
+ * Docstrings above items of a `source (...)` list, above `%inline` items
+   and above operator items are read instead of silently dropped
+ * A docstring that documents nothing is warned about (in your own modules)
+ * `@name` above an item that already names its foreign function, or two
+   docstring blocks above one item, is an error
+ * `morloc typecheck` and `morloc dump` print warnings
+ * Scripts without a module header report errors at the right line
+
+Fixes
+ * A function passed through a Morloc function into another language's
+   higher-order function (e.g. `pmapWith` in parallel-rust) no longer fails
+   to compile with a compiler bug
+ * A C++ or Rust function that returns one of its arguments no longer fails
+   to compile (C++) or frees it twice (Rust) when the argument is reached
+   through a let or a foreign call
+ * An R pool that receives many tables within one request collects them as
+   they pile up (`MORLOC_R_GC_BUDGET`)
+ * In strict conda mode, `morloc make` refuses a compiler or cargo from
+   outside the environment, naming it, instead of failing deep in a build
+ * Recursive functions returning functions, Rust closures returned after an
+   effect, and some `--debug` and cache builds no longer hit compiler bugs
+
 0.110.1 [2026-10-23]
 --------------------
 
