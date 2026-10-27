@@ -42,11 +42,11 @@ measure | (Circle r) = r
         | Dot = 0.0
 
 --' Mixing options
---' unroll: true
+--' @unroll true
 record Mix where
   --' The base color
-  --' arg: --base
-  --' default: "Red"
+  --' @arg --base
+  --' @default "Red"
   base :: Color
 
 --' Mix from a base color

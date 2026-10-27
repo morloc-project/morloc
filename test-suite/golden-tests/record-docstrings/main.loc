@@ -24,42 +24,42 @@ module main (
 import root-py
 
 --' System configuration
---' metavar: SYS_CONFIG
---' unroll: true
---' arg: --sys-config
+--' @metavar SYS_CONFIG
+--' @unroll true
+--' @arg --sys-config
 record SysConfig where
   --' tmp directory
-  --' arg: --tmp-dir
-  --' metavar: FILE
-  --' default: "/tmp"
+  --' @arg --tmp-dir
+  --' @metavar FILE
+  --' @default "/tmp"
   tmpDir :: Str
 
   --' number of threads to use
-  --' arg: -t/--threads
-  --' metavar: INT
-  --' default: 1
+  --' @arg -t/--threads
+  --' @metavar INT
+  --' @default 1
   numThreads :: Int
 
   --' clean out caches before running?
-  --' true:  --clean
-  --' false: --no-clean
-  --' default: false
+  --' @true --clean
+  --' @false --no-clean
+  --' @default false
   removeCaches :: Bool
 
 
 --' Algorithm configuration
---' metavar: ALG_CONFIG
---' unroll: true
---' arg: --alg-config
+--' @metavar ALG_CONFIG
+--' @unroll true
+--' @arg --alg-config
 record AlgConfig where
   --' some hyper parameter
-  --' arg: -m
-  --' default: 0
+  --' @arg -m
+  --' @default 0
   m :: Int
 
   --' some other hyper parameter
-  --' arg: -n/--nosy
-  --' default: 0
+  --' @arg -n/--nosy
+  --' @default 0
   n :: Int
 
 record Py => SysConfig = "dict"
@@ -71,14 +71,14 @@ bif :: SysConfig -> Str
 --'
 --' Lalala more info
 --'
---' name: foo
+--' @name foo
 fooFun ::
     AlgConfig ->
     --' large vector of integers
-    --' metavar: DATA
+    --' @metavar DATA
     [Int] ->
     --' the final metric thingy we wanted
-    --' metavar: RESULT
+    --' @metavar RESULT
     Int
 
 --' Do some bar stuff
@@ -86,19 +86,19 @@ fooFun ::
 --' details details details
 --' more details details
 --'
---' name: bar
+--' @name bar
 barFun ::
     SysConfig ->
     AlgConfig ->
     --' the lone parameters
-    --' arg: -y/--yolo
-    --' default: "yolo"
+    --' @arg -y/--yolo
+    --' @default "yolo"
     Str ->
     --' larger vector of integers
-    --' metavar: DATA
+    --' @metavar DATA
     [Int] ->
     --' the final metric thingy we wanted
-    --' metavar: RESULT
+    --' @metavar RESULT
     Int
 
 source Py from "foo.py" ("fooFun", "barFun", "travelTime", "bif")
@@ -113,8 +113,8 @@ baz x = [x,x]
 
 
 --' Speed of wind [m/s]
---' arg: -w/--wind-speed
---' default: 0
+--' @arg -w/--wind-speed
+--' @default 0
 type WindSpeed = Real
 
 --' Speed under ideal conditions on flat surface [m/s]
@@ -127,13 +127,13 @@ type Distance = Real
 type Seconds = Real
 
 --' Calculate travel time
---' return: Number of seconds in the air
+--' @return Number of seconds in the air
 travelTime ::
   --' add five to the result
-  --' true: --add-five
+  --' @true --add-five
   Bool ->
-  --' arg: --nothin
-  --' default: 0
+  --' @arg --nothin
+  --' @default 0
   Int ->
   WindSpeed ->
   BaseSpeed ->

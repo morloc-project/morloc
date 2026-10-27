@@ -34,14 +34,14 @@ oneStep sleepTime board = updateGame (doSleep (drawGame board) sleepTime)
 --' This function creates a small 20x10 board and runs one update cycle.
 --' Returns just the board state without drawing (for testing).
 --'
---' name: testStep
+--' @name testStep
 testStep ::
   --' Random seed for board initialization
-  --' arg: --seed
-  --' metavar: SEED
-  --' default: 42
+  --' @arg --seed
+  --' @metavar SEED
+  --' @default 42
   Int ->
-  --' return: The board state after one update
+  --' @return The board state after one update
   [[Int]]
 testStep seed = updateGame (initGame seed 20 10)
 
@@ -51,23 +51,23 @@ testStep seed = updateGame (initGame seed 20 10)
 --' The board is initialized with random cells based on the seed.
 --' C++ handles the game logic while Python manages display and timing.
 --'
---' name: play
+--' @name play
 playGame ::
   --' Random seed for initial board state
-  --' arg: -s/--seed
-  --' metavar: SEED
-  --' default: 12345
+  --' @arg -s/--seed
+  --' @metavar SEED
+  --' @default 12345
   Int ->
   --' Sleep duration in seconds between frames
-  --' arg: -t/--time
-  --' metavar: SECONDS
-  --' default: 0.5
+  --' @arg -t/--time
+  --' @metavar SECONDS
+  --' @default 0.5
   Real ->
   --' Number of simulation steps to run
-  --' arg: -n/--steps
-  --' metavar: STEPS
-  --' default: 50
+  --' @arg -n/--steps
+  --' @metavar STEPS
+  --' @default 50
   Int ->
-  --' return: Final board state
+  --' @return Final board state
   [[Int]]
 playGame seed sleepTime steps = gameLoop (initGame seed 40 20) updateGame sleepTime steps

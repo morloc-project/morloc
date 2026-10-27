@@ -1,7 +1,7 @@
 -- Spec HOST-4: parentheses never set a sourced function's call groups; only
 -- `rsize` does. `scale` and `mk3` are written with parentheses and called
 -- with every argument at once; `scaleR` and `mkR` are written the same way
--- with `rsize: 1`, so the host is called with the first argument and the
+-- with `@rsize 1`, so the host is called with the first argument and the
 -- function it returns with the rest.
 module main (runPy, runCpp, runR, runRust)
 
@@ -11,51 +11,51 @@ import root-r
 import root-rust
 
 source Py from "f.py" where
-  --' name: scale
+  --' @name scale
   pyScale
-  --' name: scale_r
-  --' rsize: 1
+  --' @name scale_r
+  --' @rsize 1
   pyScaleR
-  --' name: mk3
+  --' @name mk3
   pyMk3
-  --' name: mk_r
-  --' rsize: 1
+  --' @name mk_r
+  --' @rsize 1
   pyMkR
 
 source Cpp from "f.hpp" where
-  --' name: scale
+  --' @name scale
   cppScale
-  --' name: scale_r
-  --' rsize: 1
+  --' @name scale_r
+  --' @rsize 1
   cppScaleR
-  --' name: mk3
+  --' @name mk3
   cppMk3
-  --' name: mk_r
-  --' rsize: 1
+  --' @name mk_r
+  --' @rsize 1
   cppMkR
 
 source R from "f.R" where
-  --' name: scale
+  --' @name scale
   rScale
-  --' name: scale_r
-  --' rsize: 1
+  --' @name scale_r
+  --' @rsize 1
   rScaleR
-  --' name: mk3
+  --' @name mk3
   rMk3
-  --' name: mk_r
-  --' rsize: 1
+  --' @name mk_r
+  --' @rsize 1
   rMkR
 
 source Rust from "f.rs" where
-  --' name: scale
+  --' @name scale
   rustScale
-  --' name: scale_r
-  --' rsize: 1
+  --' @name scale_r
+  --' @rsize 1
   rustScaleR
-  --' name: mk3
+  --' @name mk3
   rustMk3
-  --' name: mk_r
-  --' rsize: 1
+  --' @name mk_r
+  --' @rsize 1
   rustMkR
 
 --' Scale numbers by k

@@ -314,7 +314,7 @@ pub fn quoted(s: &str) -> String {
     escaped
 }
 
-/// Build the per-element argument_t's for a `many: true` slot and
+/// Build the per-element argument_t's for a `@many` slot and
 /// invoke the C-side list assembler. `literal == true` JSON-quotes
 /// each token so the per-element classifier treats it as inline
 /// content rather than a file path. Holds the CStrings in a local
@@ -438,14 +438,14 @@ pub fn dispatch_command_parsed(
 ///   substitution. The user should use `w` for stdout output.)
 /// * `rw` -> `None` (ambiguous; stdin vs stdout can't both be it).
 ///
-/// A `source: file` argument is read by the runtime rather than checked,
+/// A `@source file` argument is read by the runtime rather than checked,
 /// and it is read, never written, so it maps to `/dev/stdin`. Without
 /// this the token reaches the loader verbatim and `fopen("-")` fails --
 /// the auto classifier, which resolves `-` itself, is bypassed whenever
 /// the source is declared.
 ///
 /// The two directives are mutually exclusive (`check.path` cannot be
-/// combined with `source: file`), so their order here does not matter.
+/// combined with `@source file`), so their order here does not matter.
 pub fn substitute_stdio_dash(
     argv: &str,
     checks: &[Check],
@@ -592,8 +592,8 @@ fn check_parent_writable(argv: &str, mode: &str) -> Result<(), String> {
     }
 }
 
-/// `-` -> `/dev/stdio` substitution, `check.path:` validation, and
-/// the `literal: true` quoting shim -- the pre-wrap pipeline every
+/// `-` -> `/dev/stdio` substitution, `@check.path` validation, and
+/// the `@literal` quoting shim -- the pre-wrap pipeline every
 /// user-supplied argv token flows through before reaching the runtime.
 /// Errors abort via `die_with_error` with the caller-supplied prefix.
 pub fn preprocess_cli_value(
@@ -654,7 +654,7 @@ pub enum ArgValue {
     AsParent { value: Box<ArgValue>, parent: usize, arg: usize },
     /// Variadic argument: the user supplied N tokens that the C-side
     /// `parse_cli_data_argument_list` will assemble into a single
-    /// list packet. `literal` is the `literal: true` flag -- when
+    /// list packet. `literal` is the `@literal` flag -- when
     /// set, each token is JSON-quoted in Rust before reaching C so
     /// the per-element classifier treats it as inline content rather
     /// than a file path.
@@ -699,7 +699,7 @@ pub fn cli_token_to_json(token: &str, schema: &str) -> Result<String, String> {
 
 /// Route a single positional value through the C-side parser. Picks
 /// the shape-aware FFI when the arg has any non-default
-/// `source:` / `form:` / `list.*` configuration; otherwise falls back
+/// `@source` / `@form` / `list.*` configuration; otherwise falls back
 /// to the default `parse_cli_data_argument` path. Returns the C-owned
 /// packet pointer (null on error -- caller drains `errmsg`).
 unsafe fn dispatch_one_arg(
@@ -1068,7 +1068,7 @@ fn build_arg_packet(
         let c_schema = morloc_runtime_types::cschema::CSchema::from_rust(&schema);
         let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
 
-        // Variadic args (many: true): compile-time validation rejects
+        // Variadic args (`@many`): compile-time validation rejects
         // every form/source modifier; only the IEEE 754 special-value
         // wrap runs per token.
         let mut many_override: Option<(Vec<String>, bool)> = None;
@@ -1223,7 +1223,7 @@ fn build_arg_packet(
                 // An absent argument carries no argv token, and the
                 // source/form/check vocabulary describes how to read a token.
                 // Applying it to the stand-in `null` would ask the runtime to
-                // open a file of that name for a `source: file` argument, so a
+                // open a file of that name for a `@source file` argument, so a
                 // null is dispatched shapeless.
                 let (raw_str, shape) = match arg_val {
                     ArgValue::Value(s) => (s.clone(), ArgShape::from_arg(arg_def)),
@@ -1905,7 +1905,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
         // as Null at the pure path -- pure morloc expressions cannot
         // currently consume record-unrolled args (the schema covers
         // the whole record; group plumbing lives in the remote path).
-        // Variadic args (many: true): compile-time validation rejects
+        // Variadic args (`@many`): compile-time validation rejects
         // every form/source modifier; only the IEEE 754 special-value
         // wrap runs per token.
         let mut many_override: Option<(Vec<String>, bool)> = None;
@@ -2193,7 +2193,7 @@ mod tests {
 
     #[test]
     fn substitute_stdio_dash_maps_declared_file_source() {
-        // `source: file` bypasses the auto classifier, so the dash has
+        // `@source file` bypasses the auto classifier, so the dash has
         // to be resolved here or `fopen("-")` fails downstream. The
         // argument is read, never written, so it is always stdin.
         let none: Vec<Check> = vec![];

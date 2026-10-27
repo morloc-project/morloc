@@ -42,7 +42,7 @@ impl<'a> ArgShape<'a> {
     /// carries the same semantics as the existing
     /// `parse_cli_data_argument` path, so the caller can skip the
     /// shape-aware route entirely.
-    /// `source: inline` with a bytes form: the token's escapes are decoded
+    /// `@source inline` with a bytes form: the token's escapes are decoded
     /// and it is sent as a JSON list of bytes, unshaped.
     pub fn is_inline_bytes(&self) -> bool {
         self.source == SourceAtom::Inline
@@ -259,7 +259,7 @@ pub fn form_atom_name(atom: FormAtom) -> &'static str {
 }
 
 /// The text the runtime parses for `raw` under `shape`: `raw` itself, or for
-/// `source: inline` with a bytes form, its escapes decoded and written as a
+/// `@source inline` with a bytes form, its escapes decoded and written as a
 /// JSON list of bytes.
 pub fn shape_argv(raw: String, shape: Option<&ArgShape>) -> Result<String, String> {
     let shape = match shape {

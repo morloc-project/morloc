@@ -53,14 +53,11 @@ signature, else the docstring of the alias named there, else that of the next
 alias down its chain, field by field. A `newtype` does not inherit its
 representation's docstring.
 
-### DOC-6 Prose lines whose first word ends in a colon
-Intent: open
+### DOC-6 Directive form
+Intent: retired 2026-10-27
 Code: unaudited
 
-For compatibility, `--' Example: text` is read as the directive `Example`
-rather than as prose. Candidates: (a) keep the colon form as a synonym for
-`@keyword`; (b) retire it, so only `@` begins a directive and such lines are
-prose.
+Directives are written `@keyword` (DOC-1).
 
 ### DOC-7 Cost directives state sizes, counts and times for the realizer
 Intent: retired 2026-10-26

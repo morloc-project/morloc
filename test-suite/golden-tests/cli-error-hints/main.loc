@@ -5,5 +5,5 @@ import map-py (Map)
 source Py from "helpers.py" ("tally")
 
 tally ::
-  --' form: list
+  --' @form list
   Map Str Int -> Int

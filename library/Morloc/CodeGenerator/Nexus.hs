@@ -78,11 +78,11 @@ cLang = Lang "c" "c"
 data FData = FData
   { fdataSocket :: Socket
   , fdataSubcommand :: Text
-    -- ^ CLI subcommand name (post `--' name:` rename if any).
+    -- ^ CLI subcommand name (post `--' @name` rename if any).
   , fdataTermName :: Text
     -- ^ Original term name at the Haskell/morloc source level.
     -- Distinct from 'fdataSubcommand' when the user wrote a
-    -- `--' name:` docstring atom to expose a different name on the
+    -- `--' @name` docstring atom to expose a different name on the
     -- CLI. Terminal-action mangling (`mangleTerminalName`) at
     -- desugar time uses the ORIGINAL term name, so downstream
     -- consumers (manifest terminals emission, parent-arg-doc
@@ -111,7 +111,7 @@ data FData = FData
 
 data GastData = GastData
   { commandName :: Text
-    -- ^ CLI subcommand name (post `--' name:` rename if any).
+    -- ^ CLI subcommand name (post `--' @name` rename if any).
   , commandTermName :: Text
     -- ^ Original term name. Same rationale as 'fdataTermName'.
   , commandMid :: Int
@@ -178,10 +178,10 @@ stageReplayArgs replayEntries x
       | classifySchema schema /= CatIFile = CmdArgPos r { argPosDocSource = Just SourceFile }
     stage a _ = a
 
--- | Map from each compiler-synthesized `--' with:` internal command
+-- | Map from each compiler-synthesized `--' @with` internal command
 -- name (the mangled `mlcp_<parent>_<long>`) to the parent's inherit
 -- slice. Keying uses the ORIGINAL term name: 'synthWithBinding'
--- mangles pre-rename, so a parent with @--' name:@ still exposes its
+-- mangles pre-rename, so a parent renamed by its name directive still exposes its
 -- child as @mlcp_<termname>_<long>@.
 buildTerminalParentArgMap :: [FData] -> [GastData] -> Map.Map EVar ParentDocSlice
 buildTerminalParentArgMap fdata gasts =
@@ -1361,10 +1361,10 @@ checkJson (CheckPath (PathPerm p)) =
 
 -- | Resolve the outer source field to emit. `auto` is the internal
 -- sentinel meaning "use the runtime classifier"; it is never written
--- by users (the parser rejects `source: auto`) but the manifest uses
+-- by users (the parser rejects `@source auto`) but the manifest uses
 -- it as the default for list / compound types where the classifier
--- handles inline-or-file dispatch. `literal: true` is the deprecated
--- alias for `source: inline`.
+-- handles inline-or-file dispatch. `@literal` is the deprecated
+-- alias for `@source inline`.
 resolvedSourceJson :: Maybe Bool -> Maybe SourceAtom -> Maybe Text -> Text
 resolvedSourceJson _ (Just a) _ = sourceAtomJson a
 resolvedSourceJson mLit Nothing mschema
@@ -1428,8 +1428,8 @@ ioShapeFields mschema many mLit mSrc mForm cks mLSrc mLForm lcks =
   ]
 
 -- | One-line user-facing "Format:" hint describing how to type input
--- for an argument that uses a non-default `source:` / `form:` /
--- `check.*:` / `list.*:` configuration. Returns 'Nothing' when the
+-- for an argument that uses a non-default `@source` / `@form` /
+-- `@check.*` / `@list.*` configuration. Returns 'Nothing' when the
 -- default contract applies (the type line is then enough).
 renderFormatHint :: Maybe Text -> Bool
                  -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
@@ -1475,7 +1475,7 @@ pathCheckHint p = case MT.unpack p of
   _    -> "must satisfy path mode `" <> p <> "`"
 
 -- | Format hint for a list argument. Considers the outer
--- `form:` / `source:` / `check.*:` first, then per-element overrides.
+-- `@form` / `@source` / `@check.*` first, then per-element overrides.
 listFormatHint :: Text -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
                -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
                -> Maybe Text
@@ -1494,8 +1494,8 @@ listFormatHint elemSchema mSrc mForm _cks mLSrc mLForm lcks =
 -- | Internal enum for the three bytes-family display variants.
 data BytesVariant = Hybrid | Raw | Packet
 
--- | Format hint for `form: bytes` / `bytes-only` / `packet`.
--- The inline-bytes shortcut (`source: inline + form: bytes/bytes-only`
+-- | Format hint for `@form bytes` / `bytes-only` / `packet`.
+-- The inline-bytes shortcut (`@source inline + form: bytes/bytes-only`
 -- on `[UInt8]`) is its own case.
 bytesHint :: Text -> Maybe SourceAtom -> BytesVariant -> Text
 bytesHint elemSchema mSrc variant
@@ -1523,7 +1523,7 @@ packedDescr "f8" = "packed f64"
 packedDescr "b"  = "packet booleans (0/1)"
 packedDescr _    = "packed bytes"
 
--- | Format hint for `form: list`: file with newline-delimited
+-- | Format hint for `@form list`: file with newline-delimited
 -- elements, optionally with per-element overrides.
 formListHint :: Text -> Maybe SourceAtom -> Maybe FormAtom -> [Check] -> Text
 formListHint elemSchema mLSrc mLForm lcks =
@@ -1738,7 +1738,7 @@ schemaField (Just s) mGen =
 -- the runtime, so a bare Str like `Joe Dirt` becomes `"Joe Dirt"` for
 -- the JSON parser. The flag fires only when the wire schema reduces
 -- to the Str primitive `s` AND the argv is going to be interpreted as
--- an inline literal: with `source: file` the argv is a path and the
+-- an inline literal: with `@source file` the argv is a path and the
 -- runtime's File branch must see it unquoted. An IFile's argv is the
 -- path its handle names, so it is quoted the same way.
 isQuotedArg :: Maybe Bool -> Maybe SourceAtom -> Bool -> Maybe Text -> Bool
@@ -1850,7 +1850,7 @@ tableFormProblem ast = case ast of
       _               -> False
 
 -- | Wire-schema category. Drives the per-shape rules: each category
--- has its own narrow vocabulary for `source:` / `form:` / `list.*:`.
+-- has its own narrow vocabulary for `@source` / `@form` / `@list.*`.
 -- Lists carry their element schema so per-element validation can
 -- recurse into the element's category.
 data SchemaCat
@@ -1894,7 +1894,7 @@ isScalarPrimCore c = c `elem`
   , "f4", "f8"
   ]
 
--- | `many: true` requires an array wire type.
+-- | `@many` requires an array wire type.
 checkManyWire :: MDoc -> Bool -> Text -> MorlocMonad ()
 checkManyWire _   False _      = return ()
 checkManyWire loc True  schema
@@ -3204,7 +3204,7 @@ data ManifestInputs = ManifestInputs
   , miCapabilities        :: ![Text]
   , miTermDocs            :: !(Map.Map EVar [Text])
     -- ^ Term-level docstrings by term name. Used to look up the
-    -- description shown against a `--' with:` flag in `--help`
+    -- description shown against a `--' @with` flag in `--help`
     -- (the referenced term's own docstring becomes the flag's help
     -- text).
   , miReplayPlans         :: !(Map.Map EVar ReplayPlan)
@@ -3316,7 +3316,7 @@ buildManifest ManifestInputs{..} =
     -- string "null" used to require a custom deserializer that has
     -- since been dropped.
     -- Look up by manifold ID rather than subcommand name, since the
-    -- subcommand may be renamed via --' name: docstrings.
+    -- subcommand may be renamed via --' @name docstrings.
     cmdGroupField :: Int -> (Text, Text)
     cmdGroupField mid = case Map.lookup mid miIndexToGroup of
       Just gname -> ("group", jsonStr gname)
@@ -3371,7 +3371,7 @@ buildManifest ManifestInputs{..} =
         -- emitted `entry` field points at the actual synthesized
         -- `mlcp_<termname>_<long>` command (`Frontend/Desugar`
         -- mangles pre-rename). Using the display name would emit
-        -- dead pointers whenever the parent has a `--' name:`.
+        -- dead pointers whenever the parent has a `--' @name`.
         , ("terminals", terminalsJson (fdataTermName fd) (cmdDocTerminals (fdataCmdDocSet fd)))
         , ("named_types", namedTypesJson
             (packedConstructors (fdataReturnAst fd : fdataArgAsts fd))

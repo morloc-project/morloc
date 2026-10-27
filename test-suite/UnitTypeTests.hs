@@ -9979,7 +9979,7 @@ parseDocstringTests =
       , "count xs = size xs"
       ]
 
--- | Frontend validation of `--' with:` docstring atoms (terminal
+-- | Frontend validation of `--' @with` docstring atoms (terminal
 -- actions on CLI-exported commands). One positive sanity check plus
 -- coverage of the rejection paths in Frontend/Desugar.hs. Type-level
 -- shape is verified by the golden test-suite; here we only care that
@@ -10068,7 +10068,7 @@ withDocstringTests =
         stream = @collect produce
           |]
 
-        -- Sanity: a legal single-atom `with:` composes cleanly.
+        -- Sanity: a legal single-atom `@with` composes cleanly.
       , expectPass
           "single with: on effectful command with matching formatter"
           [r|
@@ -10076,12 +10076,12 @@ withDocstringTests =
         effect IO
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -l/--lines=fmt
+        --' @with -l/--lines=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
 
-        -- Multiple `with:` lines with distinct short/long are legal.
+        -- Multiple `@with` lines with distinct short/long are legal.
       , expectPass
           "two with: lines with distinct short and long"
           [r|
@@ -10091,8 +10091,8 @@ withDocstringTests =
         fmt x = fmt x
         alt :: Int -> <IO> ()
         alt x = alt x
-        --' with: -l/--lines=fmt
-        --' with: -a/--alt=alt
+        --' @with -l/--lines=fmt
+        --' @with -a/--alt=alt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10107,7 +10107,7 @@ withDocstringTests =
         effect IO
         showInt :: Int -> Str
         showInt x = showInt x
-        --' with: -s/--show=showInt
+        --' @with -s/--show=showInt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10120,7 +10120,7 @@ withDocstringTests =
         module main (foo)
         showInt :: Int -> Str
         showInt x = showInt x
-        --' with: -s/--show=showInt
+        --' @with -s/--show=showInt
         foo :: Int -> Int
         foo x = x
           |]
@@ -10134,7 +10134,7 @@ withDocstringTests =
         module main (foo)
         drop :: Int -> ()
         drop x = ()
-        --' with: -d/--drop=drop
+        --' @with -d/--drop=drop
         foo :: Int -> Int
         foo x = x
           |]
@@ -10146,8 +10146,8 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -l/--lines=fmt
-        --' with: -a/--lines=fmt
+        --' @with -l/--lines=fmt
+        --' @with -a/--lines=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10159,8 +10159,8 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -l/--lines=fmt
-        --' with: -l/--alt=fmt
+        --' @with -l/--lines=fmt
+        --' @with -l/--alt=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10172,7 +10172,7 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -l=fmt
+        --' @with -l=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10184,7 +10184,7 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: --help=fmt
+        --' @with --help=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10196,12 +10196,12 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -h/--halt=fmt
+        --' @with -h/--halt=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
 
-        -- `with:` on argument-level docstring -> reject (command-only).
+        -- `@with` on argument-level docstring -> reject (command-only).
       , expectError
           "with: on argument-level docstring is rejected"
           [r|
@@ -10209,20 +10209,20 @@ withDocstringTests =
         fmt :: Int -> <IO> ()
         fmt x = fmt x
         foo ::
-          --' with: -l/--lines=fmt
+          --' @with -l/--lines=fmt
           Int ->
           <IO> Int
         foo x = x
           |]
 
-        -- `with:` on export without a signature -> reject.
+        -- `@with` on export without a signature -> reject.
       , expectError
           "with: on export without signature is rejected"
           [r|
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -l/--lines=fmt
+        --' @with -l/--lines=fmt
         foo = 42
           |]
 
@@ -10233,7 +10233,7 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -l/--lines fmt
+        --' @with -l/--lines fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10243,7 +10243,7 @@ withDocstringTests =
           "with: empty term name is rejected"
           [r|
         module main (foo)
-        --' with: -l/--lines=
+        --' @with -l/--lines=
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10255,7 +10255,7 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: --Lines=fmt
+        --' @with --Lines=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10267,12 +10267,12 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -1/--lines=fmt
+        --' @with -1/--lines=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
 
-        -- `with:` long clashes with an argument-declared long. Both
+        -- `@with` long clashes with an argument-declared long. Both
         -- would land on the same clap Command; clap panics at build
         -- time. Frontend must reject first.
       , expectError
@@ -10281,9 +10281,9 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: --lines=fmt
+        --' @with --lines=fmt
         foo ::
-          --' arg: --lines
+          --' @arg --lines
           Int ->
           <IO> Int
         foo x = x
@@ -10296,15 +10296,15 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: -x/--lines=fmt
+        --' @with -x/--lines=fmt
         foo ::
-          --' arg: -x/--count
+          --' @arg -x/--count
           Int ->
           <IO> Int
         foo x = x
           |]
 
-        -- Two `with:` long flags that mangle to the same internal name
+        -- Two `@with` long flags that mangle to the same internal name
         -- (hyphen -> underscore collapse) must be caught, or the
         -- synthesized bindings would clash silently.
       , expectError
@@ -10313,8 +10313,8 @@ withDocstringTests =
         module main (foo)
         fmt :: Int -> <IO> ()
         fmt x = fmt x
-        --' with: --bar-baz=fmt
-        --' with: --bar_baz=fmt
+        --' @with --bar-baz=fmt
+        --' @with --bar_baz=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10329,7 +10329,7 @@ withDocstringTests =
         fmt x = fmt x
         mlcp_foo_lines :: Int -> Int
         mlcp_foo_lines n = n
-        --' with: -l/--lines=fmt
+        --' @with -l/--lines=fmt
         foo :: Int -> <IO> Int
         foo x = do x
           |]
@@ -10410,8 +10410,8 @@ withDocstringTests =
           [r|
         module main (foo)
         foo ::
-          --' arg: --_hidden
-          --' default: 0
+          --' @arg --_hidden
+          --' @default 0
           Int ->
           Int
         foo x = x

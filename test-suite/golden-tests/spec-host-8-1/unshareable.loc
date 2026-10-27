@@ -7,7 +7,7 @@ module unshareable (addAll)
 import root-rust
 
 source Rust from "unshareable.rs" where
-  --' name: make_counter
+  --' @name make_counter
   --' @rsize 1
   makeCounter
 

@@ -23,13 +23,13 @@ py_keys_sorted_joined :: Map Str Int -> Str
 --' fallback engages on the list-of-tuple element shape after the
 --' outer `<Map>` hint is peeled by the CLI schema classifier.
 map_size_tsv ::
-  --' form: list
+  --' @form list
   Map Str Int -> Int
 map_size_tsv m = py_size_map m
 
 --' Same schema, JSON-array-per-line variant. `["a",1]` per line.
 map_size_json ::
-  --' form: list
+  --' @form list
   Map Str Int -> Int
 map_size_json m = py_size_map m
 
@@ -37,13 +37,13 @@ map_size_json m = py_size_map m
 --' Confirms the keys and values landed at their intended positions
 --' rather than being swapped.
 map_values_sum ::
-  --' form: list
+  --' @form list
   Map Str Int -> Int
 map_values_sum m = py_sum_values m
 
 --' Round-trip check: keys read from the table match what we expect.
 --' Sorted+joined so output is order-independent.
 map_keys_joined ::
-  --' form: list
+  --' @form list
   Map Str Int -> Str
 map_keys_joined m = py_keys_sorted_joined m

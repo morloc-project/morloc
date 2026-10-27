@@ -2,12 +2,12 @@ module main (foo)
 
 import root
 
--- `list.form: list` is forbidden: nested list files (a file whose
+-- `@list.form list` is forbidden: nested list files (a file whose
 -- lines each name a file whose lines are elements) are not supported.
 foo ::
-  --' form: list
-  --' list.source: file
-  --' list.form: list
+  --' @form list
+  --' @list.source file
+  --' @list.form list
   [[I32]] ->
   Int
 foo x = 0

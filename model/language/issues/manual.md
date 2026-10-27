@@ -17,10 +17,6 @@ Waiting on a ruling:
   any two-argument infix operator, against SRC-1's name check.
 - CLI-4 open: cli-reference.asc:56 documents `@default <json>`;
   cli-parameterization.asc:275 writes `@default dot` for a `data` argument.
-- CLI-2 spells shape fields `form: list`, `source: file`; the manual and
-  the compiler use `@form list`, but the compiler's header hint
-  (cli-shape.asc:253) still says `form: list`. CLI-2's spelling and the hint
-  are stale.
 - STRM-3 open: runs-streaming.asc:13 types `IFile a` as the data in the file
   while :43 opens an `IFile [Person]`.
 - ANN-6 open: runs-logging.asc:82 says `{lang}` is "the pool language"; its

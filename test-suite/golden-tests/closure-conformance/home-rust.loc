@@ -21,6 +21,6 @@ source Rust from "hosts.rs"
 
 -- a curried host: `mk(k)` returns a callable, so the call is `mk(k)(x)`
 source Rust from "hosts.rs" where
-  --' name: home_mk
+  --' @name home_mk
   --' @rsize 1
   mkHome

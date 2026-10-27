@@ -171,7 +171,7 @@ fn is_json_literal_shape(s: &str) -> bool {
 ///      doesn't shadow the JSON keyword.
 ///   3. `file_exists(token)` (File).
 ///   4. Path-shaped but missing -> `Err("file '...' not found")`.
-///   5. Anything else -> error pointing the user at `source: file` in
+///   5. Anything else -> error pointing the user at `@source file` in
 ///      the argument's docstring.
 pub unsafe fn classify_arg_source(arg: *const c_char) -> Result<Classified, MorlocError> {
     use crate::utility::file_exists;
@@ -201,8 +201,8 @@ pub unsafe fn classify_arg_source(arg: *const c_char) -> Result<Classified, Morl
     Err(MorlocError::Other(format!(
         "argument '{}' is not inline JSON (would have to start with \", {{, [, a digit, \
          -digit, or be the bare keyword null/true/false) and is not an existing file path. \
-         If the argument is always a path, set `source: file` in its docstring; if it is \
-         always a literal, set `source: inline`.",
+         If the argument is always a path, set `@source file` in its docstring; if it is \
+         always a literal, set `@source inline`.",
         arg_str
     )))
 }
@@ -1410,7 +1410,7 @@ fn split_whitespace_rows(
 /// row as either a JSON array (tuple) or a JSON object (record) using
 /// `row_schema.keys`.
 ///
-/// `form: list` is **headerless by convention**: rows are raw
+/// `@form list` is **headerless by convention**: rows are raw
 /// tuples, not table records, so there is no meaningful place for a
 /// column-name row. If a user wants a full-featured table with
 /// column names, they should declare the argument as `Table` (which
@@ -1497,7 +1497,7 @@ fn parse_delimited_rows(
 /// split on `\r?\n`, format each line as an element-level JSON value,
 /// and feed the resulting JSON array through `read_json_with_schema`.
 /// See `try_list_with_config` for the underlying implementation that
-/// honors `list.source:` / `list.check.*:` overrides.
+/// honors `@list.source` / `@list.check.*` overrides.
 pub(crate) unsafe fn try_list(
     data: *mut u8,
     data_size: usize,
@@ -1507,8 +1507,8 @@ pub(crate) unsafe fn try_list(
     try_list_with_config(data, data_size, schema, &ListConfig::default(), errmsg)
 }
 
-/// Implementation of `form: list` with the per-element configuration
-/// (`list.source:` / `list.form:` / `list.check.*:`) plumbed in. For
+/// Implementation of `@form list` with the per-element configuration
+/// (`@list.source` / `@list.form` / `@list.check.*`) plumbed in. For
 /// `Str` elements the line content is JSON-escaped; for everything
 /// else the line is treated as JSON for that element type (bare
 /// numbers, booleans, or JSON-shaped composite values).
@@ -1647,7 +1647,7 @@ unsafe fn try_list_with_config(
     // are not JSON-shaped is treated as the raw element bytes: the line
     // `hello` becomes `[104,101,108,108,111]`. The schema unambiguously
     // identifies this case; the user doesn't need to write a separate
-    // `list.form: bytes`.
+    // `@list.form bytes`.
     let is_au1_element = elem_serial == SerialType::Array
         && !rs.parameters[0].parameters.is_empty()
         && rs.parameters[0].parameters[0].serial_type == SerialType::Uint8;
@@ -1867,7 +1867,7 @@ unsafe fn try_list_with_config(
         )
     });
     // Very common user mistake: the first line is a column-name
-    // header. `form: list` is headerless by convention (see
+    // header. `@form list` is headerless by convention (see
     // `parse_delimited_rows`); detect the shape and append a hint.
     let hinted = augment_with_header_hint(final_err, &lines, row_schema);
     set_errmsg(errmsg, &hinted);
@@ -1926,7 +1926,7 @@ fn augment_with_header_hint(
     }
     MorlocError::Other(format!(
         "{}\n  hint: the first row (`{}`) looks like a column-name \
-         header. `form: list` is headerless -- remove the header row, \
+         header. `@form list` is headerless -- remove the header row, \
          or read the file with `@form table`, which binds columns by name.",
         err, first,
     ))
@@ -1948,7 +1948,7 @@ fn is_numeric_serial(t: &crate::schema::SerialType) -> bool {
 }
 
 /// True iff the element type is a numeric scalar eligible for
-/// `form: bytes` / `form: bytes-only`. `Schema::is_fixed_width` also
+/// `@form bytes` / `@form bytes-only`. `Schema::is_fixed_width` also
 /// admits `Nil` (width 0) and `Tuple` of fixed-width leaves; we want
 /// strictly the numeric scalars in v1.
 fn is_fixed_width_scalar(elem: &crate::schema::SerialType) -> bool {
@@ -1972,7 +1972,7 @@ fn fixed_width_scalar_name(elem: &crate::schema::SerialType) -> &'static str {
     }
 }
 
-/// Raw-bytes form (`form: bytes-only`): copy `data` into a freshly-
+/// Raw-bytes form (`@form bytes-only`): copy `data` into a freshly-
 /// allocated array voidstar. The schema must be `a<scalar>` where
 /// `<scalar>` is a fixed-width scalar (Bool, sized Int/UInt, sized
 /// Float). The total byte count must be a multiple of the element
@@ -2065,7 +2065,7 @@ unsafe fn try_bytes_only(
     base as *mut c_void
 }
 
-/// Hybrid bytes form (`form: bytes`): sniff packet magic; if present,
+/// Hybrid bytes form (`@form bytes`): sniff packet magic; if present,
 /// decode as a packet. Otherwise fall back to `try_bytes_only`. This is
 /// the friendly default for binary file input; the user's
 /// `bytes-only` opts out of the sniff.
@@ -2335,7 +2335,7 @@ pub(crate) unsafe fn load_morloc_data_file(
     // Primitive parsing rule for `Str` (and `?Str`). When the schema
     // reduces to the bare string primitive and the bytes don't start
     // with a JSON-string opening quote, treat the bytes as the literal
-    // Str value. Without this, `source: file` on a Str arg would fail
+    // Str value. Without this, `@source file` on a Str arg would fail
     // because file contents like `hello world` aren't JSON-shaped.
     if !schema.is_null() && data_size > 0 {
         use crate::schema::SerialType;
@@ -2751,7 +2751,7 @@ unsafe fn open_stdin_stream() -> *mut libc::FILE {
 }
 
 /// Body of [`parse_cli_data_argument_singular`] for callers that already
-/// know the source classification (e.g. the `form: list` per-line
+/// know the source classification (e.g. the `@form list` per-line
 /// dispatcher, which forces `File` mode without going through the auto
 /// classifier).
 unsafe fn parse_cli_data_argument_classified(
@@ -3250,9 +3250,9 @@ unsafe fn parse_cli_data_argument_unrolled(
 // ── parse_cli_data_argument_list ─────────────────────────────────────────────
 
 /// Assemble a single list-typed packet from N CLI arguments. Used by
-/// the nexus when a manifest arg is marked `many: true`. Each input
+/// the nexus when a manifest arg is marked `@many`. Each input
 /// `argument_t` carries one CLI token (or whitespace-quoted literal,
-/// already JSON-wrapped for `literal: true` cases). Per-element source
+/// already JSON-wrapped for `@literal` cases). Per-element source
 /// resolution goes through the same `parse_cli_data_argument_singular`
 /// path as scalars, so every supported wire format (inline JSON, file
 /// JSON, mpack file, morloc voidstar binary file, RPTR packet file,
@@ -3386,7 +3386,7 @@ pub(crate) unsafe fn parse_cli_data_argument_list(
 /// libc-malloc'd buffer. For Inline source, copies the argv string's
 /// bytes into a libc-malloc'd buffer. Returns the buffer plus the
 /// resolved source kind so callers can fast-fail forms whose semantics
-/// require a specific source (e.g. `form: list` insists on
+/// require a specific source (e.g. `@form list` insists on
 /// File/Stdin). The caller is responsible for freeing the returned
 /// buffer.
 /// Open a NUL-terminated path, read the whole file into a libc-malloc
@@ -3542,9 +3542,9 @@ unsafe fn packet_of(
     }
 }
 
-/// Per-element source vocabulary for `form: list`. Plumbed through
+/// Per-element source vocabulary for `@form list`. Plumbed through
 /// the shaped FFI as a JSON string so the runtime can switch on
-/// `list.source:` without growing the FFI signature.
+/// `@list.source` without growing the FFI signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ListElemSource {
@@ -3634,7 +3634,7 @@ unsafe fn dispatch_shape_core(
     list_cfg: &ListConfig,
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
-    // `form: auto` delegates to the existing classified pipeline,
+    // `@form auto` delegates to the existing classified pipeline,
     // which handles inline JSON literals (NUL-terminated argv strings
     // fed to `read_json_with_schema`), file reads, and stdin -- no
     // need to round-trip through `load_morloc_data_file` on a
@@ -3695,13 +3695,13 @@ unsafe fn dispatch_shape_core(
         return ptr::null_mut();
     }
 
-    // `form: list` + inline argv: route through the JSON path when
+    // `@form list` + inline argv: route through the JSON path when
     // the argv looks like a JSON array (`[...]`). No overlap with
     // realistic filenames: files whose first byte is `[` are not
     // production-realistic. A user hitting the weird edge case can
-    // spell the file source explicitly with `source: file` or `-`.
+    // spell the file source explicitly with `@source file` or `-`.
     //
-    // Non-JSON inline input on `form: list` (a bare token like
+    // Non-JSON inline input on `@form list` (a bare token like
     // `foo`, missing the `[` prefix) still errors, since there's no
     // sensible way to parse a scalar token into a list.
     if form_code == 3 && source_kind == ArgSource::Inline {

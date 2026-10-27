@@ -545,20 +545,20 @@ data Intrinsic
                     -- effects pass through.
   | IntrTell        -- ^ @tell :: <IO> U64@ -- the number of elements written
                     -- to the process's @stdout OStream so far (its
-                    -- element_count). Used by the offset-aware `with:`/
-                    -- `render:` synthesis to thread the per-batch element
+                    -- element_count). Used by the offset-aware `@with`/
+                    -- `@render` synthesis to thread the per-batch element
                     -- offset into a handler; also user-callable.
   | IntrCollect     -- ^ @collect :: (([a] -> <IO,e> ()) -> <IO,e> ()) -> <IO,e> ()@
                     -- Provide the default stdout sink to a producer body and
                     -- manage its lifecycle. Desugar-expands to
                     -- `do { o <- @stdout; body (@write 0 o); @close o }`. The
                     -- sink type `[a] -> ...` carries the stream element type,
-                    -- which the `with:`/`render:` handler synthesis reads off
+                    -- which the `@with`/`@render` handler synthesis reads off
                     -- to type the flag handlers.
   | IntrTmpfile     -- ^ @tmpfile :: <IO> Str@ -- create a fresh empty file in
                     -- the morloc tmpdir, register it for removal when the pool
                     -- call ends, and return its path. NOT user-facing;
-                    -- synthesized by the whole-form `with:`/`render:` handler
+                    -- synthesized by the whole-form `@with`/`@render` handler
                     -- to gather a stream to disk before applying the handler.
   | IntrCellNew     -- ^ @cellnew :: b -> <IO> (Cell b)@ -- create a fold
                     -- accumulator seeded with the given value. NOT

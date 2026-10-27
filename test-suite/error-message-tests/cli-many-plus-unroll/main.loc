@@ -1,4 +1,4 @@
--- `many: true` (collect N tokens into one list) and `unroll: true`
+-- `@many` (collect N tokens into one list) and `@unroll`
 -- (explode a record into per-field flags) are mutually exclusive --
 -- they describe incompatible CLI shapes for the same argument slot.
 module main (f)
@@ -8,8 +8,8 @@ record Config where
   beta :: Int
 
 f ::
-  --' many: true
-  --' unroll: true
+  --' @many true
+  --' @unroll true
   Config ->
   Int
 f c = 0

@@ -37,7 +37,7 @@ record Rust => Fns = "Fns"
 source Rust from "lib.rs" ("par_map" as parMap)
 
 source Rust from "lib.rs" where
-  --' name: make_adder
+  --' @name make_adder
   --' @rsize 1
   makeAdder
 parMap :: (a -> b) -> [a] -> [b]

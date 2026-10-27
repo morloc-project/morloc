@@ -14,14 +14,14 @@ shout :: [Int] -> Str
 shout _ = "shout"
 
 --' Numbers
---' return: Three small integers
+--' @return Three small integers
 --' @render -a/--shout=shout @default
 --' @with -c/--count=count
 once :: [Int]
 once = [1,2,3]
 
 --' Numbers
---' return: Three small integers
+--' @return Three small integers
 --' @render -a/--shout=shout
 --' @with -c/--count=count
 plain :: [Int]

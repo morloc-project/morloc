@@ -585,13 +585,13 @@ pub fn build_root(manifest: &Manifest, prog_name: &str, level: u8) -> ClapComman
 /// Render the `Return:` help block for a command.
 ///
 /// With no terminal-action flags this is the single line
-/// `Return: <type>` (followed by any `--' return:` description lines),
+/// `Return: <type>` (followed by any `--' @return` description lines),
 /// preserving the historical layout.
 ///
-/// When the command carries `--' with:`/`render:` terminal actions,
+/// When the command carries `--' @with`/`@render` terminal actions,
 /// each flag selects a different output formatter with its own return
 /// type, so the block becomes a small table listing the return type
-/// per formatter -- `default:` for the bare command plus one aligned
+/// per formatter -- `@default` for the bare command plus one aligned
 /// row per flag. Each terminal's return type is read from its
 /// synthesized `entry` command (resolved by name against the manifest).
 /// The return descriptor shown in help. A media-typed return (a `@mime` type,
@@ -735,7 +735,7 @@ fn build_command_args(
                 // (above, via `after_help`) so clap's bracketed
                 // `<argN>` default doesn't appear in help. They still
                 // need `required`/`index` here for clap to parse them.
-                // A `stdin: true` positional is optional (the compiler
+                // A `@stdin` positional is optional (the compiler
                 // guarantees it is the last positional, so an optional
                 // trailing positional is unambiguous for clap); when
                 // omitted the nexus injects the `/dev/stdin` sentinel.
@@ -843,7 +843,7 @@ fn build_command_args(
                     }
                 }
                 // Flags have no value type, but a declared default
-                // (`--' default: true`) is still useful context.
+                // (`--' @default true`) is still useful context.
                 fwd = fwd.help(leak(&render_arg_help(
                     desc,
                     Some("Bool"),
@@ -978,7 +978,7 @@ fn build_command_args(
     cmd
 }
 
-/// Register each `--' with:` terminal-action flag on `cmd` as a
+/// Register each `--' @with` terminal-action flag on `cmd` as a
 /// boolean flag under the "General Options" heading. All siblings
 /// are grouped into a single mutually-exclusive `ArgGroup`, so clap
 /// rejects two terminal flags in one invocation with its own
@@ -1215,9 +1215,9 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
             } => {
                 // Distinguish "user typed the flag" from "clap
                 // supplied the default" so manifest-stored defaults
-                // pass through verbatim. Defaults for `literal: true`
+                // pass through verbatim. Defaults for `@literal`
                 // strings are already JSON-quoted in the manifest
-                // (e.g. the directive `default: "yolo"` produces the
+                // (e.g. the directive `@default "yolo"` produces the
                 // 6-character text `"yolo"`); routing them through
                 // `quoted()` again would double-encode and the pool
                 // would receive `"yolo"` (with quotes) instead of
@@ -1638,7 +1638,7 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
     }
     let idx_width = positionals.len().to_string().len();
     // Label each slot with its index and, when the author supplied a
-    // `--' metavar:`, the name they chose: `1: PATTERN`. Labels are
+    // `--' @metavar`, the name they chose: `1: PATTERN`. Labels are
     // padded to a common width so the description column lines up
     // whether or not a given positional has a metavar. With no
     // metavars anywhere the labels are just `1:`, `2:`, unchanged.
@@ -2150,7 +2150,7 @@ mod tests {
         }
     }
 
-    /// Quoted-positional manifest: the `--' literal: true` declaration
+    /// Quoted-positional manifest: the `--' @literal` declaration
     /// instructs the nexus to JSON-quote the value before passing it
     /// to the pool. parse_command_args wraps in JSON quotes; the
     /// phase-2 builder must do the same.
@@ -2194,7 +2194,7 @@ mod tests {
     }
 
     /// A single-command manifest exporting `bar` with one
-    /// `literal: true` Optional whose default value is the
+    /// `@literal` Optional whose default value is the
     /// already-JSON-quoted string `"yolo"` (6 characters). When the
     /// user omits the flag, the pool must receive the exact 6-byte
     /// value from the manifest; routing it through `quoted()` a

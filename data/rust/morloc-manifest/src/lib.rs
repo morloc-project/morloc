@@ -258,7 +258,7 @@ pub enum CmdType {
 #[allow(dead_code)]
 pub struct Command {
     /// CLI subcommand name (defaults to the morloc function name; can
-    /// be overridden via a `--' name:` docstring directive).
+    /// be overridden via a `--' @name` docstring directive).
     pub name: String,
     /// Discriminator: [`CmdType::Remote`] (dispatch to a pool) or
     /// [`CmdType::Pure`] (evaluate inline via the manifest's `expr`
@@ -347,19 +347,19 @@ pub struct Command {
     #[serde(default)]
     pub group: Option<String>,
 
-    /// True for compiler-synthesized entry points (e.g. `--' with:`
+    /// True for compiler-synthesized entry points (e.g. `--' @with`
     /// terminal-action wrappers). These are dispatchable by cmd_index
     /// but must be filtered out of top-level command listings.
     #[serde(default)]
     pub internal: bool,
 
     /// Terminal-action declarations attached to this command via
-    /// `--' with: -x/--long=<term>` docstring atoms. Each entry
+    /// `--' @with -x/--long=<term>` docstring atoms. Each entry
     /// registers a command-scoped short/long flag that dispatches to
     /// the compiler-synthesized `entry` (an internal command whose
     /// body composes the referenced term with this command's head
     /// manifold). Empty for internal entries and for commands with no
-    /// `--' with:` atoms.
+    /// `--' @with` atoms.
     #[serde(default)]
     pub terminals: Vec<Terminal>,
 
@@ -601,7 +601,7 @@ pub struct Return {
     /// because `type` is a reserved keyword.
     #[serde(default, rename = "type")]
     pub type_desc: String,
-    /// Description lines for the return value, parsed from `--' return:`
+    /// Description lines for the return value, parsed from `--' @return`
     /// docstrings.
     #[serde(default)]
     pub desc: Vec<String>,
@@ -676,7 +676,7 @@ pub struct Constraint {
 ///
 /// `Auto` is the runtime sentinel for "use the classifier"
 /// (stdin-marker / JSON-shape sniff / file-exists). It is never
-/// emitted by an explicit user-written `source:` field; the compiler
+/// emitted by an explicit user-written `@source` field; the compiler
 /// emits it only as the default for list / compound types where the
 /// classifier handles inline-or-file dispatch. `Inline` takes the
 /// argv string verbatim. `File` reads the argv string as a path
@@ -789,24 +789,24 @@ pub enum Arg {
         #[serde(default)]
         name: Option<String>,
         /// Display placeholder shown in help (e.g. `"FILE"`), from the
-        /// argument's `--' metavar:` directive. The help labels the slot
+        /// argument's `--' @metavar` directive. The help labels the slot
         /// `<index>: <metavar>`; with no metavar the label is the bare
         /// `<index>:`.
         #[serde(default)]
         metavar: Option<String>,
         /// If true, the user's CLI value is JSON-wrapped before being
         /// passed to the pool. Used for `Str`-typed positionals
-        /// declared with `--' literal: true`.
+        /// declared with `--' @literal`.
         #[serde(default)]
         quoted: bool,
-        /// If true, the positional is variadic (`--' many: true`):
+        /// If true, the positional is variadic (`--' @many`):
         /// it consumes ALL remaining CLI tokens and the nexus assembles
         /// them into a single list value. Only legal as the last
         /// positional in a subcommand. Implies a `[a]`-typed argument
         /// in the morloc signature.
         #[serde(default)]
         many: bool,
-        /// If true, the positional is optional (`--' stdin: true`) and
+        /// If true, the positional is optional (`--' @stdin`) and
         /// reads from stdin when omitted: the nexus injects the
         /// `/dev/stdin` sentinel as its value. At most one per command,
         /// must be the last positional.
@@ -845,8 +845,8 @@ pub enum Arg {
         #[serde(default)]
         list_checks: Vec<Check>,
         /// User-facing one-line "Format:" hint, populated only when
-        /// the argument uses a non-default `source:` / `form:` /
-        /// `check.*:` / `list.*:` configuration.
+        /// the argument uses a non-default `@source` / `@form` /
+        /// `@check.*` / `@list.*` configuration.
         #[serde(default)]
         format: Option<String>,
         /// `@parse` formats. A value with a format prefix or a declared
@@ -882,7 +882,7 @@ pub enum Arg {
         /// JSON-wrap flag for `Str`-typed literal options.
         #[serde(default)]
         quoted: bool,
-        /// If true, the option is variadic (`--' many: true`): it
+        /// If true, the option is variadic (`--' @many`): it
         /// accepts multiple values that the nexus assembles into a
         /// single list value. Implies a `[a]`-typed argument.
         #[serde(default)]
@@ -894,7 +894,7 @@ pub enum Arg {
         #[serde(default, rename = "long")]
         long_opt: Option<String>,
         /// Default value used when the user does not pass the option.
-        /// Always present (declared via `--' default:` docstring).
+        /// Always present (declared via `--' @default` docstring).
         #[serde(default, rename = "default")]
         default_val: Option<String>,
         /// Description lines.
@@ -1229,7 +1229,7 @@ impl Arg {
 
     /// True if the user's CLI value should be JSON-wrapped before
     /// being passed to the pool. Used for `Str`-typed arguments
-    /// declared with `--' literal: true`. Always false for flags and
+    /// declared with `--' @literal`. Always false for flags and
     /// groups.
     pub fn is_quoted(&self) -> bool {
         match self {
@@ -1238,7 +1238,7 @@ impl Arg {
         }
     }
 
-    /// True if this arg is variadic (`--' many: true`): it accepts
+    /// True if this arg is variadic (`--' @many`): it accepts
     /// multiple CLI tokens that the nexus assembles into a single
     /// list value at dispatch time. Always false for flags and groups.
     pub fn is_many(&self) -> bool {

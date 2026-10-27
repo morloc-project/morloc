@@ -26,7 +26,7 @@ source Cpp from "f.hpp"
 
 -- `cppAdd k` returns a function C++ made: its call group ends after `k`
 source Cpp from "f.hpp" where
-  --' name: cpp_add
+  --' @name cpp_add
   --' @rsize 1
   cppAdd
 

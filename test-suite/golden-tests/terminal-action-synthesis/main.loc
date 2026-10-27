@@ -12,7 +12,7 @@ module main
   , nestedImported
   )
 
--- A terminal action (`--' with:` / `@with` / `@render`) composes a handler
+-- A terminal action (`--' @with` / `@with` / `@render`) composes a handler
 -- onto a command's result, or onto each batch a streaming (`@collect`)
 -- command emits. It needs the command's arguments, whether its result is a
 -- suspension, and the types of the producer and handler, however they are
@@ -39,23 +39,23 @@ renderAll :: [Int] -> Str
 renderRows :: [[Int]] -> Str
 
 -- "ab"; -y gives "AB"
---' with: -y/--shout=shout
+--' @with -y/--shout=shout
 flat :: Int -> Int -> Str
 flat i j = "ab"
 
 -- "ab"; -y gives "AB"; -t gives "2:ab"
---' with: -y/--shout=shout
---' with: -t/--tag=tagWith($2)
+--' @with -y/--shout=shout
+--' @with -t/--tag=tagWith($2)
 grouped :: Int -> (Int -> Str)
 grouped i j = "ab"
 
 -- "ef"; -y gives "EF"
---' with: -y/--shout=shout
+--' @with -y/--shout=shout
 effectAlias :: Int -> Act Str
 effectAlias i = readEf i
 
 -- "ab"; -y gives "AB"
---' with: -y/--shout=shout
+--' @with -y/--shout=shout
 fnAlias :: Pair2
 fnAlias i j = "ab"
 

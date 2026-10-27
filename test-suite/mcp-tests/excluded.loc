@@ -20,8 +20,8 @@ plainAdd x y = add2 x y
 
 --' Reads integers from a file OR stdin
 readStdin ::
-  --' stdin: true
-  --' metavar: FILE
+  --' @stdin true
+  --' @metavar FILE
   Str ->
   <IO> [Int]
 readStdin f = do

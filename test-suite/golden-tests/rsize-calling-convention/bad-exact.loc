@@ -3,7 +3,7 @@ module main (r)
 import root-py
 
 source Py from "lib.py" where
-  --' rsize: 2
+  --' @rsize 2
   shift
 
 shift :: Real -> [Real] -> [Real]

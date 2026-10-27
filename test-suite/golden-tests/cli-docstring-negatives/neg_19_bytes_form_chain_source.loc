@@ -2,12 +2,12 @@ module main (foo)
 
 import root
 
--- `form: bytes` requires a single-atom source chain. Once the bytes
+-- `@form bytes` requires a single-atom source chain. Once the bytes
 -- are read, there is no way to distinguish a literal buffer from a
 -- file's contents after the fact.
 foo ::
-  --' source: file|inline
-  --' form: bytes
+  --' @source file|inline
+  --' @form bytes
   [U8] ->
   Int
 foo x = 0

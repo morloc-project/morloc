@@ -4,7 +4,7 @@
 //!
 //! * [`print_json_help`] -- a lossless, morloc-native JSON view of the same
 //!   information the human `--help` renders: positional/option/flag/group
-//!   roles, metavars, the `source:`/`form:`/`check.*`/`list.*` CLI-shape
+//!   roles, metavars, the `@source`/`@form`/`check.*`/`list.*` CLI-shape
 //!   grammar, variadic/stdin/quoted, defaults, terminal-action formatter
 //!   flags, morloc type strings + wire schemas, record/table field layouts,
 //!   return info, and module/command docstrings. "morloc help, but
@@ -658,7 +658,7 @@ fn parse_json(p: &morloc_manifest::ArgParse) -> Value {
     })
 }
 
-/// The `source:`/`form:`/`check.*`/`list.*` CLI-shape grammar as JSON.
+/// The `@source`/`@form`/`check.*`/`list.*` CLI-shape grammar as JSON.
 fn input_object(
     source: &SourceAtom,
     form: &FormAtom,

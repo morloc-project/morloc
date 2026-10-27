@@ -6,7 +6,7 @@
 module main (f)
 
 f ::
-  --' many: true
+  --' @many true
   [Int] ->
   Str ->
   Int

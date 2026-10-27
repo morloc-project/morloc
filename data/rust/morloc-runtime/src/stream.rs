@@ -493,7 +493,7 @@ pub(crate) fn stdio_claim_slot(
 
 /// Element count of the process's @stdout OStream (its cumulative
 /// `element_count`), or 0 if no @stdout is open. Read by @tell so the
-/// offset-aware `with:`/`render:` synthesis can pass the per-batch element
+/// offset-aware `@with`/`@render` synthesis can pass the per-batch element
 /// offset to a handler. The count is already maintained for the stream
 /// footers, so this is a plain field read.
 pub fn stdout_element_count() -> u64 {

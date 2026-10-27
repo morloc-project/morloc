@@ -7,7 +7,7 @@ import root
 -- The new grammar accepts only {r, w, x, rw}, so `rwc` must be
 -- rejected at parse time.
 foo ::
-  --' check.path: rwc
+  --' @check.path rwc
   Str ->
   Int
 foo _ = 0

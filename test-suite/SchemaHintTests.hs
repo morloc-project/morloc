@@ -50,7 +50,7 @@ peelHintTests = testGroup "peelHint"
 
     -- Regression: `<std::map<$1,$2>>at2sj` used to peel only through the
     -- inner `>`, leaving `>at2sj` and misrouting Map to CatOtherCompound.
-    -- That rejected `form: list` on `Map Str Int` under map-cpp.
+    -- That rejected `@form list` on `Map Str Int` under map-cpp.
   , testCase "cpp map hint with nested angle brackets" $
       peelHint "<std::map<$1,$2>>at2sj" @?= "at2sj"
 

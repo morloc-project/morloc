@@ -9,24 +9,24 @@ source Py from "named.py" ("shift_by" as shiftBy, "opts_summary" as optsSummary)
 --' Shift a number by a gap, negated on request
 shift ::
   Int ->
-  --' arg: --gap
-  --' default: 5
+  --' @arg --gap
+  --' @default 5
   Int ->
-  --' true: --neg
+  --' @true --neg
   Bool ->
   Int
 shift x g n = shiftBy x g n
 
 --' Options taken whole or field by field
---' unroll: true
---' arg: --opts
+--' @unroll true
+--' @arg --opts
 record Opts where
-  --' arg: --label
-  --' default: "none"
+  --' @arg --label
+  --' @default "none"
   label :: Str
 
-  --' arg: --count
-  --' default: 1
+  --' @arg --count
+  --' @default 1
   count :: Int
 
 record Py => Opts = "dict"

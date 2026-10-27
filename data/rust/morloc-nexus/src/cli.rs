@@ -1465,7 +1465,7 @@ pub struct CapabilityValues {
 /// Collect the set of declared subcommand and group names from a
 /// manifest, filtered to those the splitter should recognize as a
 /// zone boundary in multi-export mode. Compiler-synthesized internal
-/// commands (`--' with:` terminal-action wrappers) are excluded --
+/// commands (`--' @with` terminal-action wrappers) are excluded --
 /// they participate in dispatch only via terminal-flag redirect and
 /// must never appear directly on argv. Returns `None` in
 /// single-export mode (one visible command, no groups) so the

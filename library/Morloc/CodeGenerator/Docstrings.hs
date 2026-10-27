@@ -306,7 +306,7 @@ processArgDoc i t r = do
 -- | Reject argument-only directives that appear at the command /
 -- function level (i.e. on the docstring lines above `name ::`
 -- instead of inside the signature next to a specific type). Without
--- this check the directive is silently dropped: `literal: true`
+-- this check the directive is silently dropped: `@literal`
 -- above a function only affects the command's metadata record,
 -- never any argument, so the user's intent never reaches the
 -- manifest.
@@ -467,7 +467,7 @@ resolveArgDocVars loc rs t r
       MM.throwSystemError $ loc <> " has `@parse`, but an `@unroll` argument cannot be parsed."
   | not (null (docParse r)) && t == VarT MBT.bool =
       MM.throwSystemError $ loc <> " has `@parse`, but a Bool argument cannot be parsed."
-  -- `stdin: true` marks an optional positional that reads stdin when
+  -- `@stdin` marks an optional positional that reads stdin when
   -- omitted. It is positional-only and cannot double as an option/flag
   -- or carry a default; those combinations are rejected here so the
   -- error points at the directive rather than a downstream shape clash.
@@ -488,7 +488,7 @@ resolveArgDocVars loc rs t r
       MM.throwSystemError $
         loc <> " has `@stdin` on a Bool argument; a stdin positional"
           <> " reads a path or the stdin sentinel and must be Str-shaped."
-  -- `default:` only makes sense on a flag (true:/false:) or an
+  -- `@default` only makes sense on a flag (true:/false:) or an
   -- option (arg:). On a bare positional it is rejected. An
   -- unrolled record group is exempt: each field carries its own
   -- directives.
@@ -501,9 +501,9 @@ resolveArgDocVars loc rs t r
         loc
           <> " is given a default value, but a positional argument takes"
           <> " its value from the command line and cannot take defaults."
-          <> " Either remove the 'default:' line, or move the argument off"
-          <> " the command line by adding an 'arg:' docstring entry"
-          <> " (e.g. \"arg: -f/--flag\")."
+          <> " Either remove the `@default` line, or move the argument off"
+          <> " the command line by adding an `@arg` docstring entry"
+          <> " (e.g. `@arg -f/--flag`)."
   -- list-of-elements (many) and per-field unroll describe
   -- incompatible CLI shapes for the same slot.
   | docMany r == Just True && docUnroll r == Just True =
@@ -512,8 +512,8 @@ resolveArgDocVars loc rs t r
   | docUnroll r == Just False = resolvePos t r |>> CmdArgPos
   | length rs > 0 && docUnroll r == Just True = resolveGrp loc t r rs
   | t == VarT MBT.bool = resolveFlagCmdArg loc r
-  -- Any non-Bool typed argument with `arg:` becomes an option;
-  -- `resolveOpt` errors if no `default:` accompanies it.
+  -- Any non-Bool typed argument with `@arg` becomes an option;
+  -- `resolveOpt` errors if no `@default` accompanies it.
   | isJust (docArg r) = resolveOpt loc t r |>> CmdArgOpt
   | otherwise = resolvePos t r |>> CmdArgPos
   where
@@ -616,15 +616,15 @@ resolveGrp loc _ _ _ = MM.throwSystemError $
 -- resolve a boolean into either a flag option or a positional
 resolveFlag :: MDoc -> ArgDocVars -> MorlocMonad (Either ArgPosDocSet ArgFlagDocSet)
 resolveFlag loc r = do
-  -- `metavar:` only makes sense on something with a value. A Bool
+  -- `@metavar` only makes sense on something with a value. A Bool
   -- positional carries an implicit BOOL metavar; an actual flag
   -- carries none. Reject the latter before constructing the flag.
   when (isJust (docMetavar r) && hasAnyFlagDirective) $
     MM.throwSystemError $
       loc <> ": `@metavar` is not allowed on a Bool flag because flags have no value."
         <> " Remove the `@metavar` directive."
-  -- A Bool flag's CLI shape is encoded by `true:` / `false:`, not
-  -- `arg:`. Reject before the (Nothing, Nothing, Nothing) case
+  -- A Bool flag's CLI shape is encoded by `@true` / `@false`, not
+  -- `@arg`. Reject before the (Nothing, Nothing, Nothing) case
   -- below silently produces a Bool positional and drops the
   -- directive.
   when (isJust (docArg r) && isNothing (docTrue r) && isNothing (docFalse r)) $
@@ -723,7 +723,7 @@ resolveOpt loc t r = do
       | isLiteralOptStr && def /= "null" ->
           MM.throwSystemError $
             loc <> ": optional argument " <> pretty (makeArg opt)
-            <> " has type ?Str with literal: true, so default must be null (got \""
+            <> " has type ?Str with @literal, so default must be null (got \""
             <> pretty def <> "\")"
       | otherwise -> do
           def' <- canonicalCtorDefault t def
@@ -809,7 +809,7 @@ resolvePos t r = do
   let many = docMany r == Just True
       stdin = docStdin r == Just True
       -- A stdin positional reads a path (or the stdin sentinel); it is a
-      -- readable file, so imply `check.path: r` when the user gave no explicit
+      -- readable file, so imply `@check.path r` when the user gave no explicit
       -- path check. An explicit user check wins. The Str-shape requirement is
       -- enforced by the check.path validation.
       hasPathCheck = any isPathCheck (docChecks r)
@@ -840,7 +840,7 @@ resolvePos t r = do
     isPathCheck (CheckPath _) = True
 
 -- Validate that within a function's argument list, at most one
--- positional carries `many: true`, and it is the LAST positional
+-- positional carries `@many`, and it is the LAST positional
 -- (options and flags may follow without issue, but no second
 -- positional may appear after it -- clap requires variadic
 -- positionals to occupy the final positional slot).
@@ -861,7 +861,7 @@ validateManyOrdering loc = go False
     go seenMany (_ : rest) = go seenMany rest
 
 -- Validate that within a function's argument list, at most one
--- positional carries `stdin: true`, and it is the LAST positional
+-- positional carries `@stdin`, and it is the LAST positional
 -- (options and flags may follow). clap forbids an optional positional
 -- preceding a required one, and the stdin sentinel is injected only for
 -- a trailing omission, so a stdin positional must occupy the final
@@ -907,7 +907,7 @@ validateOptionalOrdering loc = go False
               <> " An optional argument may be omitted, and an omitted argument"
               <> " is necessarily the last, so every positional after one must"
               <> " be optional too. Either reorder the arguments, or give this"
-              <> " one an 'arg:' docstring entry to make it an option."
+              <> " one an `@arg` docstring entry to make it an option."
       | otherwise = go (seen || droppable r) rest
     go seen (_ : rest) = go seen rest
 
@@ -1032,8 +1032,8 @@ validatePositionalNames loc cmdargs = do
 
 -- Reject collisions between option / flag long-form names within a
 -- single subcommand. Without this check, two flags that happen to
--- share a long name (e.g. one's `false: --no-foo` matches another's
--- `arg: --no-foo`) fail downstream in clap with an opaque
+-- share a long name (e.g. one's `@false --no-foo` matches another's
+-- `@arg --no-foo`) fail downstream in clap with an opaque
 -- duplicate-argument message instead of pointing at the source.
 validateFlagRevCollisions :: MDoc -> [CmdArg] -> MorlocMonad ()
 validateFlagRevCollisions loc cmdargs = do
@@ -1049,22 +1049,22 @@ validateFlagRevCollisions loc cmdargs = do
           <> ". Long-form names must be unique within a subcommand."
   where
     collect :: CmdArg -> [(Text, Text)]
-    collect (CmdArgOpt r)  = [(n, "arg:") | n <- longOf (argOptDocArg r)]
+    collect (CmdArgOpt r)  = [(n, "@arg") | n <- longOf (argOptDocArg r)]
     collect (CmdArgFlag r) =
          [(n, mainSrc r) | n <- longOf (argFlagDocOpt r)]
       ++ [(n, revSrc r)  | rev <- maybe [] (:[]) (argFlagDocOptRev r), n <- longOf rev]
     collect (CmdArgGrp r) =
          concatMap (collect . CmdArgOpt)  [opt | (_, Right opt) <- recDocEntries r]
       ++ concatMap (collect . CmdArgFlag) [fl  | (_, Left  fl)  <- recDocEntries r]
-    collect (CmdArgAlt r) = [(altArmLong arm, "unroll:") | arm <- altDocArms r]
+    collect (CmdArgAlt r) = [(altArmLong arm, "@unroll") | arm <- altDocArms r]
     collect (CmdArgPos _)  = []
 
-    -- The main and reverse halves of a flag come from `true:` or
-    -- `false:` depending on which side of the default the user
+    -- The main and reverse halves of a flag come from `@true` or
+    -- `@false` depending on which side of the default the user
     -- declared first. Naming the directive in the error keeps
     -- diagnostics actionable.
-    mainSrc r = if argFlagDocDefault r == "true" then "false:" else "true:"
-    revSrc  r = if argFlagDocDefault r == "true" then "true:"  else "false:"
+    mainSrc r = if argFlagDocDefault r == "true" then "@false" else "@true"
+    revSrc  r = if argFlagDocDefault r == "true" then "@true"  else "@false"
 
     longOf :: CliOpt -> [Text]
     longOf (CliOptShort _)   = []
@@ -1092,24 +1092,24 @@ data SchemaCat
   | CatOtherCompound
   deriving (Eq, Show)
 
--- | Bytes-family form atoms (`form: bytes`, `form: bytes-only`,
--- `form: packet`) on a fixed-width-scalar array.
+-- | Bytes-family form atoms (`@form bytes`, `@form bytes-only`,
+-- `@form packet`) on a fixed-width-scalar array.
 data BytesVariant = Bytes | BytesOnly | Packet
   deriving (Eq, Show)
 
--- | The two variants legal for the `source: inline + form:` ASCII
+-- | The two variants legal for the `@source inline + form:` ASCII
 -- shortcut on `[UInt8]`. `Packet` is excluded by construction.
 data InlineBytesVariant = IbBytes | IbBytesOnly
   deriving (Eq, Show)
 
--- | Per-line dispatch under `form: list + list.source: file`.
+-- | Per-line dispatch under `@form list + list.source: file`.
 data LineFileMode
   = LfmAuto                       -- ^ list.form: auto (default)
   | LfmPacket                     -- ^ list.form: packet (strict)
   | LfmBytes InlineBytesVariant   -- ^ list.form: bytes / bytes-only
   deriving (Eq, Show)
 
--- | Per-line interpretation under `form: list`.
+-- | Per-line interpretation under `@form list`.
 data ListPipeline
   = LpInlineBare                  -- ^ each line is the bare element value
   | LpInlineCheck PathPerm        -- ^ each line is a Str path; perms checked
@@ -1137,18 +1137,18 @@ data ArgShape
       -- ^ List type, no modifiers: JSON inline OR auto-classified
       --   file path.
   | AsListMany
-      -- ^ `many: true` on a list. Multiple argv tokens, each parsed
+      -- ^ `@many` on a list. Multiple argv tokens, each parsed
       --   as the element type. Mutex with every shape modifier.
   | AsListBytes BytesVariant
-      -- ^ Fixed-width-scalar array with `form: bytes`/`bytes-only`/
+      -- ^ Fixed-width-scalar array with `@form bytes`/`bytes-only`/
       --   `packet`. Always file-borne.
   | AsListInlineBytes InlineBytesVariant
-      -- ^ `[UInt8]` with `source: inline + form: bytes`/`bytes-only`.
+      -- ^ `[UInt8]` with `@source inline + form: bytes`/`bytes-only`.
       --   The ASCII byte-sequence shortcut.
   | AsListLines ListPipeline
-      -- ^ `form: list` with per-line dispatch.
+      -- ^ `@form list` with per-line dispatch.
   | AsTable
-      -- ^ `form: table` on a `Table` or a list of records: a headed
+      -- ^ `@form table` on a `Table` or a list of records: a headed
       --   table read from a file or stdin (CLI-13). The element types
       --   are checked against the 'SerialAST'.
   deriving (Eq, Show)
@@ -1242,7 +1242,7 @@ isScalarPrimCore c = c `elem`
   ]
 
 -- | True iff the schema is a fixed-width numeric scalar eligible for
--- `form: bytes` / `form: bytes-only` / `form: packet` element types.
+-- `@form bytes` / `@form bytes-only` / `@form packet` element types.
 -- `j` (`Int`, arbitrary-precision) and `z` (`Null`) are excluded.
 isFixedWidthScalar :: Text -> Bool
 isFixedWidthScalar s =
@@ -1273,7 +1273,7 @@ classifySchema s0 =
 -- against its wire-schema text. Returns the validated 'ArgShape' or
 -- a one-sentence error describing the rejected configuration.
 --
--- `literal: true` is silently treated as the implicit default
+-- `@literal` is silently treated as the implicit default
 -- (source: inline on Str, ignored elsewhere); the field is preserved
 -- in 'ArgDocVars' only for backward-compatible parsing.
 validateArgShape :: Text -> Bool -> ArgDocVars -> Either Text ArgShape
@@ -1297,7 +1297,7 @@ validateMany schema docs = do
       banIf (not (null (docChecks docs)))    "`@check.*`"
       banIf (docListSource docs /= Nothing)  "`@list.source`"
       banIf (docListForm docs /= Nothing)    "`@list.form`"
-      banIf (not (null (docListChecks docs))) "`list.check.*`"
+      banIf (not (null (docListChecks docs))) "`@list.check.*`"
       Right AsListMany
 
 -- | Non-Str scalars accept no shape modifiers.
@@ -1306,15 +1306,15 @@ validateScalarPrim schema docs = do
   let banIf b name = if b then Left
         ("`" <> name <> "` is not allowed on a non-`Str` scalar primitive"
          <> " (wire schema `" <> schema <> "`).") else Right ()
-  banIf (docSource docs /= Nothing)       "source:"
-  banIf (docForm docs /= Nothing)         "form:"
-  banIf (not (null (docChecks docs)))     "check.*"
-  banIf (docListSource docs /= Nothing)   "list.source:"
-  banIf (docListForm docs /= Nothing)     "list.form:"
-  banIf (not (null (docListChecks docs))) "list.check.*"
+  banIf (docSource docs /= Nothing)       "@source"
+  banIf (docForm docs /= Nothing)         "@form"
+  banIf (not (null (docChecks docs)))     "@check.*"
+  banIf (docListSource docs /= Nothing)   "@list.source"
+  banIf (docListForm docs /= Nothing)     "@list.form"
+  banIf (not (null (docListChecks docs))) "@list.check.*"
   Right AsScalarPrim
 
--- | Str: default inline, or `source: file`, or `check.path: <perm>`.
+-- | Str: default inline, or `@source file`, or `@check.path <perm>`.
 -- The three are mutually exclusive.
 validateStr :: ArgDocVars -> Either Text ArgShape
 validateStr docs = do
@@ -1327,7 +1327,7 @@ validateStr docs = do
   when' (docListForm docs /= Nothing) $
     "`@list.form` is not allowed on a `Str` argument."
   when' (not (null (docListChecks docs))) $
-    "`list.check.*` is not allowed on a `Str` argument."
+    "`@list.check.*` is not allowed on a `Str` argument."
   case (docSource docs, docChecks docs) of
     (Nothing,           [])             -> Right (AsStr StrDefault)
     (Just SourceInline, [])             -> Right (AsStr StrDefault)
@@ -1340,7 +1340,7 @@ validateStr docs = do
       "multiple `@check.*` fields on one argument are not supported in v1."
 
 -- | List arguments: a JSON / file default, a bytes-family form, the
--- ASCII inline shortcut on `[UInt8]`, or `form: list`.
+-- ASCII inline shortcut on `[UInt8]`, or `@form list`.
 validateList :: Text -> Text -> ArgDocVars -> Either Text ArgShape
 validateList schema elemS docs = do
   when' (not (null (docChecks docs))) $
@@ -1399,7 +1399,7 @@ showVariant Bytes      = "bytes"
 showVariant BytesOnly  = "bytes-only"
 showVariant Packet     = "packet"
 
--- | Validate the per-line pipeline under `form: list`. Returns the
+-- | Validate the per-line pipeline under `@form list`. Returns the
 -- 'ListPipeline' or a one-sentence error.
 validateLinesPipeline :: Text -> ArgDocVars -> Either Text ListPipeline
 validateLinesPipeline elemS docs =
@@ -1439,7 +1439,7 @@ validateLinesPipeline elemS docs =
           "`@list.form bytes`/`bytes-only` requires every leaf to be a fixed-width scalar; got element wire schema `"
           <> es <> "`."
 
--- | `form: table`: a file or stdin, never inline, with no other shape
+-- | `@form table`: a file or stdin, never inline, with no other shape
 -- modifier.
 tableArm :: ArgDocVars -> Either Text ArgShape
 tableArm docs = do
@@ -1455,7 +1455,7 @@ isTableWireSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
   _ -> False
 
 -- | Tuples, records, maps: no shape modifiers. A `Table` may take
--- `form: table`.
+-- `@form table`.
 validateOtherCompound :: Text -> ArgDocVars -> Either Text ArgShape
 validateOtherCompound schema docs
   | docForm docs == Just FormTable && isTableWireSchema schema = tableArm docs
@@ -1463,12 +1463,12 @@ validateOtherCompound schema docs
   let banIf b name = if b then Left
         ("`" <> name <> "` is not allowed on this compound type (wire schema `"
          <> schema <> "`).") else Right ()
-  banIf (docSource docs /= Nothing)       "source:"
-  banIf (docForm docs /= Nothing)         "form:"
-  banIf (not (null (docChecks docs)))     "check.*"
-  banIf (docListSource docs /= Nothing)   "list.source:"
-  banIf (docListForm docs /= Nothing)     "list.form:"
-  banIf (not (null (docListChecks docs))) "list.check.*"
+  banIf (docSource docs /= Nothing)       "@source"
+  banIf (docForm docs /= Nothing)         "@form"
+  banIf (not (null (docChecks docs)))     "@check.*"
+  banIf (docListSource docs /= Nothing)   "@list.source"
+  banIf (docListForm docs /= Nothing)     "@list.form"
+  banIf (not (null (docListChecks docs))) "@list.check.*"
   Right AsOtherCompound
 
 -- ── Internal helpers ──────────────────────────────────────────────

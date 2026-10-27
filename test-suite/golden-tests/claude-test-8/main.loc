@@ -73,14 +73,14 @@ wordDiversity :: [Str] -> Real
 --'
 --' Creates a document from sample text and tokenizes it.
 --'
---' name: analyze
+--' @name analyze
 analyzeText ::
   --' Sample text ID (1-5)
-  --' arg: --sample
-  --' metavar: ID
-  --' default: 1
+  --' @arg --sample
+  --' @metavar ID
+  --' @default 1
   Int ->
-  --' return: Document with tokens
+  --' @return Document with tokens
   Document
 analyzeText sampleId = createDocument "doc1" text where
   text = getSampleText sampleId
@@ -89,14 +89,14 @@ analyzeText sampleId = createDocument "doc1" text where
 --'
 --' Tokenizes text and finds the most common words using C++.
 --'
---' name: topWords
+--' @name topWords
 findTopWords ::
   --' Sample text ID
-  --' arg: --sample
-  --' metavar: ID
-  --' default: 1
+  --' @arg --sample
+  --' @metavar ID
+  --' @default 1
   Int ->
-  --' return: List of word frequencies
+  --' @return List of word frequencies
   [WordFreq]
 findTopWords sampleId = countWords tokens where
   text = getSampleText sampleId
@@ -106,14 +106,14 @@ findTopWords sampleId = countWords tokens where
 --'
 --' Analyzes the sentiment of sample text using R.
 --'
---' name: sentiment
+--' @name sentiment
 analyzeSentiment ::
   --' Sample text ID
-  --' arg: --sample
-  --' metavar: ID
-  --' default: 2
+  --' @arg --sample
+  --' @metavar ID
+  --' @default 2
   Int ->
-  --' return: Sentiment scores
+  --' @return Sentiment scores
   Sentiment
 analyzeSentiment sampleId = computeSentiment tokens where
   text = getSampleText sampleId

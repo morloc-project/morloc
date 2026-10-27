@@ -69,19 +69,19 @@ computeColorStats :: [[Real]] -> ColorStats
 --' Creates a test image and applies Gaussian blur using C++.
 --' Returns the filtered result with metadata and statistics.
 --'
---' name: blur
+--' @name blur
 applyBlur ::
   --' Image width in pixels
-  --' arg: --width
-  --' metavar: WIDTH
-  --' default: 10
+  --' @arg --width
+  --' @metavar WIDTH
+  --' @default 10
   Int ->
   --' Image height in pixels
-  --' arg: --height
-  --' metavar: HEIGHT
-  --' default: 10
+  --' @arg --height
+  --' @metavar HEIGHT
+  --' @default 10
   Int ->
-  --' return: Filtered image with metadata
+  --' @return Filtered image with metadata
   FilteredResult
 applyBlur width height = pixelsToDict blurred metadata stats where
   pixels = createTestImage width height
@@ -93,19 +93,19 @@ applyBlur width height = pixelsToDict blurred metadata stats where
 --'
 --' Creates a test image and applies edge detection using C++.
 --'
---' name: edges
+--' @name edges
 detectEdges ::
   --' Image width in pixels
-  --' arg: --width
-  --' metavar: WIDTH
-  --' default: 10
+  --' @arg --width
+  --' @metavar WIDTH
+  --' @default 10
   Int ->
   --' Image height in pixels
-  --' arg: --height
-  --' metavar: HEIGHT
-  --' default: 10
+  --' @arg --height
+  --' @metavar HEIGHT
+  --' @default 10
   Int ->
-  --' return: Edge-detected image with metadata
+  --' @return Edge-detected image with metadata
   FilteredResult
 detectEdges width height = pixelsToDict edges metadata stats where
   pixels = createTestImage width height
@@ -117,19 +117,19 @@ detectEdges width height = pixelsToDict edges metadata stats where
 --'
 --' Creates a test image and computes color channel statistics using R.
 --'
---' name: analyze
+--' @name analyze
 analyzeImage ::
   --' Image width in pixels
-  --' arg: --width
-  --' metavar: WIDTH
-  --' default: 8
+  --' @arg --width
+  --' @metavar WIDTH
+  --' @default 8
   Int ->
   --' Image height in pixels
-  --' arg: --height
-  --' metavar: HEIGHT
-  --' default: 8
+  --' @arg --height
+  --' @metavar HEIGHT
+  --' @default 8
   Int ->
-  --' return: Image statistics
+  --' @return Image statistics
   ColorStats
 analyzeImage width height = computeColorStats pixels where
   pixels = createTestImage width height

@@ -31,7 +31,7 @@ applyTwice :: (Int -> Int) -> Int -> Int
 checked :: Int -> Int
 
 source Rust from "host.rs" where
-  --' name: make_adder
+  --' @name make_adder
   --' @rsize 1
   makeAdder
 

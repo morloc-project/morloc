@@ -64,14 +64,14 @@ correlationAnalysis :: [Real] -> [Real] -> Real
 --'
 --' Generates sales data and computes total revenue using C++.
 --'
---' name: analyze
+--' @name analyze
 analyzeSales ::
   --' Number of sales records to generate
-  --' arg: -n/--records
-  --' metavar: COUNT
-  --' default: 100
+  --' @arg -n/--records
+  --' @metavar COUNT
+  --' @default 100
   Int ->
-  --' return: Total revenue
+  --' @return Total revenue
   Real
 analyzeSales n = calculateRevenue sales where
   sales = generateSalesData n
@@ -80,14 +80,14 @@ analyzeSales n = calculateRevenue sales where
 --'
 --' Generates sales data, extracts prices, and computes statistics using R.
 --'
---' name: summary
+--' @name summary
 summarizeStats ::
   --' Number of records to analyze
-  --' arg: -n/--records
-  --' metavar: COUNT
-  --' default: 50
+  --' @arg -n/--records
+  --' @metavar COUNT
+  --' @default 50
   Int ->
-  --' return: Statistical summary
+  --' @return Statistical summary
   Summary
 summarizeStats n = computeSummary prices where
   sales = generateSalesData n
@@ -97,14 +97,14 @@ summarizeStats n = computeSummary prices where
 --'
 --' Groups sales data by category using C++ and formats a report with Python.
 --'
---' name: groupBy
+--' @name groupBy
 groupByCategory ::
   --' Number of records to analyze
-  --' arg: -n/--records
-  --' metavar: COUNT
-  --' default: 100
+  --' @arg -n/--records
+  --' @metavar COUNT
+  --' @default 100
   Int ->
-  --' return: Formatted report
+  --' @return Formatted report
   Str
 groupByCategory n = formatReport grouped where
   sales = generateSalesData n

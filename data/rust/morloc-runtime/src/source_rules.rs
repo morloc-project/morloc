@@ -98,7 +98,7 @@ fn last_ident(s: &str) -> Option<String> {
     (!name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit())).then(|| name.to_string())
 }
 
-// The `:` of a Rust `name: Type` declaration: one that is not half of `::`.
+// The `:` of a Rust `@name Type` declaration: one that is not half of `::`.
 fn type_colon(s: &str) -> Option<usize> {
     let b = s.as_bytes();
     (0..b.len()).find(|&i| b[i] == b':' && b.get(i + 1) != Some(&b':') && (i == 0 || b[i - 1] != b':'))

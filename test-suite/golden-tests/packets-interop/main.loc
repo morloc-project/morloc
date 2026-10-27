@@ -16,16 +16,16 @@ pid :: Str -> Str
 rid :: Str -> Str
 
 cfoo ::
-  --' source:file
+  --' @source file
   Str -> Str
 cfoo = cid . pid . cid
 
 pfoo ::
-  --' source:file
+  --' @source file
   Str -> Str
 pfoo = pid . cid . pid
 
 rfoo ::
-  --' source:file
+  --' @source file
   Str -> Str
 rfoo = rid . pid . rid

@@ -10,7 +10,7 @@ echo ::
   --' the first number (a normal required positional)
   Int ->
   --' the second number
-  --' default: 42
+  --' @default 42
   Int ->
   Int
 echo x y = add x y

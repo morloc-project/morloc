@@ -635,17 +635,17 @@ data CliOpt
   deriving (Show, Ord, Eq)
 
 -- | Where the bytes for an argument come from. The implicit default
--- (no `source:` field) is category-driven: scalar primitives and `Str`
+-- (no `@source` field) is category-driven: scalar primitives and `Str`
 -- parse the argv string directly (inline), lists/tuples/records use the
 -- runtime auto-classifier (JSON inline OR file). `SourceAuto` is not a
--- writable value; users opt into a non-default by writing `source: file`
--- or `source: inline` (the only meaningful inline case is `[UInt8]`
--- with `form: bytes`/`form: bytes-only`).
+-- writable value; users opt into a non-default by writing `@source file`
+-- or `@source inline` (the only meaningful inline case is `[UInt8]`
+-- with `@form bytes`/`@form bytes-only`).
 data SourceAtom = SourceInline | SourceFile
   deriving (Show, Ord, Eq)
 
 -- | How to interpret the bytes once they are resolved. Only meaningful
--- on lists. The implicit default (no `form:`) is the structured-format
+-- on lists. The implicit default (no `@form`) is the structured-format
 -- classifier (JSON / MsgPack / packet / Arrow / ...); it never falls
 -- through to raw bytes, so raw-byte interpretation is opt-in via
 -- `FormBytes` (sniff packet -> raw bytes, the friendly path) or
@@ -659,7 +659,7 @@ data FormAtom = FormPacket | FormBytes | FormBytesOnly | FormList | FormTable
 newtype PathPerm = PathPerm Text
   deriving (Show, Ord, Eq)
 
--- | A single value-invariant for the new `check.<kind>:` namespace.
+-- | A single value-invariant for the new `@check.<kind>` namespace.
 -- Initially only the `path` check kind is supported; future kinds slot in
 -- as additional constructors without changing the docstring grammar.
 data Check
@@ -733,7 +733,7 @@ data ParseSpec = ParseSpec
   deriving (Show, Ord, Eq)
 
 -- | Compose a mangled entry-point name from an export's name and one
--- of its `--' with:` long flags. Shared between the frontend (which
+-- of its `--' @with` long flags. Shared between the frontend (which
 -- synthesizes the AssE) and the nexus manifest emitter (which reads
 -- the same prefix to mark the emitted Command as `internal: true`).
 --

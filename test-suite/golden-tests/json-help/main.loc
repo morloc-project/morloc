@@ -34,14 +34,14 @@ joinSemi      :: [Str] -> Str
 
 --' Add one to an integer
 addOne ::
-  --' metavar: N
+  --' @metavar N
   Int ->
   Int
 addOne x = x
 
 --' Sum a list of integers
 sumMany ::
-  --' many: true
+  --' @many true
   [Int] ->
   Int
 sumMany xs = sumInts xs
@@ -64,26 +64,26 @@ pairFiles ::
 pairFiles a b = joinSemi [a, b]
 
 --' System configuration passed as a flattened flag group
---' metavar: SYS_CONFIG
---' unroll: true
---' arg: --sys-config
+--' @metavar SYS_CONFIG
+--' @unroll true
+--' @arg --sys-config
 record SysConfig where
   --' Directory for scratch files
-  --' arg: --tmp-dir
-  --' metavar: FILE
-  --' default: "/tmp"
+  --' @arg --tmp-dir
+  --' @metavar FILE
+  --' @default "/tmp"
   tmpDir :: Str
 
   --' Worker thread count
-  --' arg: -t/--threads
-  --' metavar: INT
-  --' default: 1
+  --' @arg -t/--threads
+  --' @metavar INT
+  --' @default 1
   numThreads :: Int
 
   --' Whether to purge caches on exit
-  --' true:  --clean
-  --' false: --no-clean
-  --' default: false
+  --' @true --clean
+  --' @false --no-clean
+  --' @default false
   removeCaches :: Bool
 
 record Py => SysConfig = "dict"
@@ -100,14 +100,14 @@ maybeDouble x = x
 
 --' Count whitespace-separated words given as tokens
 countWords ::
-  --' many: true
+  --' @many true
   [Str] ->
   Int
 countWords xs = countWords_ xs
 
 --' Count the entries of a string-to-int map read from a two-column table
 mapSize ::
-  --' form: list
+  --' @form list
   Map Str Int ->
   Int
 mapSize m = mapSizePy m
@@ -121,11 +121,11 @@ summarize :: [Str] -> <IO> Str
 summarize xs = do (joinSemi xs)
 
 --' Read the lines of a file
---' with: -l/--lines=formatLines
---' with: -s/--sum=summarize
+--' @with -l/--lines=formatLines
+--' @with -s/--sum=summarize
 fileHead ::
-  --' check.path: r
-  --' metavar: FILE
+  --' @check.path r
+  --' @metavar FILE
   Str ->
   <IO> [Str]
 fileHead path = readLines path

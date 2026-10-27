@@ -36,6 +36,6 @@ source Py from "hosts.py"
 
 -- also curried: `pass_through(f)` returns the callable, applied as `(f)(x)`
 source Py from "hosts.py" where
-  --' name: away_pass_through
+  --' @name away_pass_through
   --' @rsize 1
   passAway

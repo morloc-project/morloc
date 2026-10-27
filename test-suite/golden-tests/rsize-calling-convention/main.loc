@@ -4,25 +4,25 @@
 -- implicit. Without it Morloc emits a single flat call, which a curried Python
 -- function rejects with "takes 1 positional argument but 2 were given".
 --
--- Covered here: a one-argument group (`rsize: 1`), a two-argument group
--- (`rsize: 2`), successive single groups (`rsize: 1 1`), a flat function
+-- Covered here: a one-argument group (`@rsize 1`), a two-argument group
+-- (`@rsize 2`), successive single groups (`@rsize 1 1`), a flat function
 -- declared in the same block to show the directive binds only to the term
 -- below it, partial application through a curried source, and the source-level
--- `name:` directive. The rejection paths are exercised by the sibling
+-- `@name` directive. The rejection paths are exercised by the sibling
 -- bad-*.loc files, which the Makefile expects to fail.
 module main (scaled, shifted, doubler, ranged, clamped, added)
 
 import root-py
 
 source Py from "lib.py" where
-  --' rsize: 1
+  --' @rsize 1
   scale
   shift
-  --' rsize: 1 1
+  --' @rsize 1 1
   between
-  --' rsize: 2
+  --' @rsize 2
   clamp_lo_hi
-  --' name: native_name_add
+  --' @name native_name_add
   add
 
 scale :: Real -> [Real] -> [Real]

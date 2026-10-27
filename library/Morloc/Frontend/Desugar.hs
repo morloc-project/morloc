@@ -29,7 +29,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Char (isAlpha, isAsciiLower, isAsciiUpper)
+import Data.Char (isAlpha, isAsciiLower, isAsciiUpper, isSpace)
 import qualified Morloc.BaseTypes as BT
 import Morloc.Frontend.CST
 import Morloc.Frontend.Token hiding (startPos)
@@ -250,11 +250,11 @@ warnUnreadDocs = do
 
 -- | Capture declaration-level docstring lines, keyed by term name.
 -- Extracts only free description lines (the same way processArgDocLines
--- does via docLines); key-value entries like metavar:, arg:, etc. are
+-- does via docLines); directives like `@metavar` and `@arg` are
 -- intentionally ignored at the declaration level since those describe
 -- type-signature interface details.
 -- | Register free description lines from a signature preamble under
--- the term name so lookups by name (e.g., resolving a `--' with:`
+-- the term name so lookups by name (e.g., resolving a `--' @with`
 -- referenced term to its docstring) can find them. Preserves any
 -- existing declaration-level entry, since declaration docs take
 -- precedence over signature docs elsewhere in the pipeline.
@@ -293,7 +293,7 @@ captureDeclDocs pos name = do
 
 -- | Result of classifying a single docstring line.
 data ParsedDocLine
-  = DocDirective !Text !Text  -- recognized `<key>: <value>` shape (key not yet validated against an allowlist)
+  = DocDirective !Text !Text  -- `@<key> <value>` (key not yet validated against an allowlist)
   | DocDesc !Text             -- free-form description line (possibly empty)
   deriving (Show)
 
@@ -305,11 +305,10 @@ data ParsedDocLine
 --    spaces. Trailing whitespace is stripped.
 --  * A leading backslash (after stripping surrounding whitespace) is an
 --    escape: it is consumed and the rest of the line becomes a description
---    line with no directive parsing. Literal `\foo:` therefore needs
---    `\\foo:` (standard backslash-doubling convention).
---  * Otherwise, if the line starts with `<word>:` (no spaces in `<word>`)
---    it is returned as a DocDirective. Validation against the allowlist
---    of known directive names is done by the caller.
+--    line with no directive parsing, so `\@foo` is the prose `@foo`.
+--  * A line starting `@<keyword>` is a directive; validation against the
+--    allowlist of known directive names is done by the caller. Any other
+--    line is prose (DOC-1).
 -- | What a docstring line reads as when it is not a directive. Shared with
 -- 'parseDocKV' so a line the directive handler does not recognize can be
 -- kept exactly as the author wrote it.
@@ -328,22 +327,14 @@ parseDocKV txt =
           -- `@keyword [args...]` directive (the closed docstring grammar). The
           -- keyword is the first whitespace-delimited token; the rest is its
           -- value. A lone `@` is prose (`\@` escapes a literal leading `@`).
-          let (kw, valRest) = T.break (== ' ') rest
+          let (kw, valRest) = T.break isSpace rest
           in if T.null kw
                then DocDesc descLine
                else DocDirective kw (T.strip valRest)
-        _ -> case T.breakOn ":" stripped of
-          -- Legacy `key: value` directive (transitional; removed once every
-          -- docstring is migrated to the `@keyword` form).
-          (key, colonRest)
-            | not (T.null colonRest)
-            , not (T.null key)
-            , not (T.any (== ' ') key) ->
-                DocDirective key (T.strip (T.drop 1 colonRest))
-          _ -> DocDesc descLine
+        _ -> DocDesc descLine
 
 -- | Outcome of attempting to parse a CLI-option directive value
--- (the right-hand side of `arg:`, `true:`, `false:`).
+-- (the right-hand side of `@arg`, `@true`, `@false`).
 data CliOptParse
   = CliOptOk CliOpt
   | -- | The shape matched a short-option form but the option
@@ -402,7 +393,7 @@ parseMediaType raw =
           [a, b] | not (T.null a) && not (T.null b) -> Right v
           _ -> Left "expected a media type of the form `type/subtype` (e.g. image/png)"
 
--- | Parse the value of a `source:` field. OR-chains (`a|b`) are
+-- | Parse the value of a `@source` field. OR-chains (`a|b`) are
 -- rejected with a targeted error so the user can find the redundant
 -- syntax. `auto` was the implicit default in earlier designs and is
 -- never written explicitly.
@@ -420,7 +411,7 @@ parseSourceAtom raw = case T.strip raw of
         Left $ "unknown source value '" <> s
             <> "'; expected one of: inline, file."
 
--- | Parse the value of a `form:` field. The meaningful atoms are
+-- | Parse the value of a `@form` field. The meaningful atoms are
 -- `list`, `table`, `bytes`, `bytes-only`, and `packet`. OR-chains are
 -- rejected.
 parseFormAtom :: Text -> Either Text FormAtom
@@ -690,24 +681,12 @@ parseCheck kind raw = case kind of
 sourceDocDirectiveKeys :: [Text]
 sourceDocDirectiveKeys = ["name", "rsize"]
 
--- | Warn only when the key looks like a misspelling of a directive rather
--- than like prose. Every unrecognized line used to warn, which made ordinary
--- English -- any line whose first word ends in a colon, and any `@word` --
--- noisy enough that authors were told to escape all prose. A key within one
--- edit of a real directive is a typo worth reporting; anything further away
--- is a sentence.
-unknownDirectiveWarning :: [Text] -> Text -> Text -> [Text]
-unknownDirectiveWarning knownKeys k line
-  | closedForm || not (null near) = [msg]
-  | otherwise = []
+-- | An unrecognized `@keyword` is a mistake: demoting it to prose without
+-- saying so leaves the interface quietly different from the one the author
+-- wrote.
+unknownDirectiveWarning :: [Text] -> Text -> [Text]
+unknownDirectiveWarning knownKeys k = [msg]
   where
-    -- `@word` is the closed grammar. An unrecognized keyword there is a
-    -- mistake, and demoting it to prose without saying so leaves the
-    -- interface quietly different from the one the author wrote. The legacy
-    -- `key:` form is the one ordinary English collides with -- any sentence
-    -- whose first word ends in a colon -- so there a warning is reserved for
-    -- a key that looks like a misspelling.
-    closedForm = T.isPrefixOf "@" (T.stripStart line)
     near = [n | n <- knownKeys, withinOneEdit k n]
     msg =
       "warning: docstring directive '" <> k <> "' is not recognized"
@@ -740,7 +719,7 @@ withinOneEdit a b = go (T.unpack (T.toLower a)) (T.unpack (T.toLower b))
 -- | Parse a single CLI-option directive value into the
 -- [`ArgDocVars`] slot, recording an error when the value matched a
 -- recognized short-flag shape but used a forbidden character.
--- A completely unrecognized shape (e.g. `arg: foobar`) is silently
+-- A completely unrecognized shape (e.g. `@arg foobar`) is silently
 -- preserved as `Nothing` -- the user's intent is ambiguous and the
 -- existing pipeline treats absence as the default.
 applyCliOptDirective ::
@@ -751,7 +730,7 @@ applyCliOptDirective k v = case parseCliOpt v of
   CliOptOk o
     | Just l <- cliOptLongName o, "_" `T.isPrefixOf` l ->
         let msg =
-              "invalid long flag name in '" <> k <> ": " <> v <> "': `--" <> l
+              "invalid long flag name in `@" <> k <> " " <> v <> "`: `--" <> l
               <> "` may not begin with an underscore; leading-underscore names "
               <> "are reserved for compiler-generated argument identifiers."
          in ([msg], Nothing)
@@ -759,7 +738,7 @@ applyCliOptDirective k v = case parseCliOpt v of
   CliOptShapeUnknown -> ([], Nothing)
   CliOptShortCharInvalid c ->
     let msg =
-          "invalid short option character in '" <> k <> ": " <> v <> "': "
+          "invalid short option character in `@" <> k <> " " <> v <> "`: "
           <> "got '" <> T.singleton c <> "'. "
           <> "Short options must use a single ASCII letter "
           <> "(a-z, A-Z); digits are forbidden because they collide "
@@ -829,7 +808,7 @@ processArgDocLines = finalize . foldl step ([], [], defaultValue, Nothing)
           Left e  -> (errs <> ["in `@form " <> v <> "`: " <> e], ws, d)
         ["check", kind] -> case parseCheck kind v of
           Right c -> (errs, ws, d {docChecks = docChecks d <> [c]})
-          Left e  -> (errs <> ["in `check." <> kind <> ": " <> v <> "`: " <> e], ws, d)
+          Left e  -> (errs <> ["in `@check." <> kind <> " " <> v <> "`: " <> e], ws, d)
         ["list", "source"] -> case parseSourceAtom v of
           Right a -> (errs, ws, d {docListSource = Just a})
           Left e  -> (errs <> ["in `@list.source " <> v <> "`: " <> e], ws, d)
@@ -838,7 +817,7 @@ processArgDocLines = finalize . foldl step ([], [], defaultValue, Nothing)
           Left e  -> (errs <> ["in `@list.form " <> v <> "`: " <> e], ws, d)
         ["list", "check", kind] -> case parseCheck kind v of
           Right c -> (errs, ws, d {docListChecks = docListChecks d <> [c]})
-          Left e  -> (errs <> ["in `list.check." <> kind <> ": " <> v <> "`: " <> e], ws, d)
+          Left e  -> (errs <> ["in `@list.check." <> kind <> " " <> v <> "`: " <> e], ws, d)
         ["with"] -> withCase errs ws d False "with" v
         ["render"] -> withCase errs ws d True "render" v
         ["with", "buffer"] -> (errs <> [retiredBufferMsg "with"], ws, d)
@@ -852,7 +831,7 @@ processArgDocLines = finalize . foldl step ([], [], defaultValue, Nothing)
         ("table" : _ : _) ->
           (errs <> ["`@" <> k <> "`: the `@table.` directives are reserved, and none is defined yet"], ws, d)
         _ ->
-          let w = unknownDirectiveWarning argDocDirectiveKeys k line
+          let w = unknownDirectiveWarning argDocDirectiveKeys k
            in (errs, ws <> w, d {docLines = docLines d <> [docDescLine line]})
 
     -- Parse one `with`/`render` directive into a WithSpec, appending it to
@@ -860,24 +839,24 @@ processArgDocLines = finalize . foldl step ([], [], defaultValue, Nothing)
     withCase errs ws d render kw v =
       case parseWithSpec render v of
         Right ws' -> (errs, ws, d {docWith = docWith d <> [ws']})
-        Left e -> (errs <> ["in `" <> kw <> ": " <> v <> "`: " <> e], ws, d)
+        Left e -> (errs <> ["in `@" <> kw <> " " <> v <> "`: " <> e], ws, d)
 
     -- The `.buffer` suffix is retired; streaming is now the `@stream` modifier.
     retiredBufferMsg kw =
-      "`" <> kw <> ".buffer:` is retired; write `" <> kw
-      <> ": <flag>=<handler> @stream` (the `@stream` modifier selects per-batch "
+      "`@" <> kw <> ".buffer` is retired; write `@" <> kw
+      <> " <flag>=<handler> @stream` (the `@stream` modifier selects per-batch "
       <> "streaming; its absence means whole-list gather)."
 
 parseDocBool :: Text -> Bool
 parseDocBool v = v == "true" || v == "True"
 
 -- | Value of a boolean flag directive. A bare `@many` (no value) is True by
--- presence; the legacy `many: true`/`many: false` still parses its value.
+-- presence; `@many` and `@many false` parse their value.
 flagValue :: Text -> Bool
 flagValue v = T.null (T.strip v) || parseDocBool v
 
 processModuleDocLines :: [Text] -> ([Text], [Text], [[Text]])
-processModuleDocLines = finalize . foldl step ([], Nothing, [])
+processModuleDocLines lns = finalize (foldl step ([], Nothing, []) lns)
   where
     step (desc, curEpi, epis) line = case parseDocKV line of
       DocDesc v -> case curEpi of
@@ -899,14 +878,21 @@ processModuleDocLines = finalize . foldl step ([], Nothing, [])
       let epis' = case curEpi of
             Nothing -> epis
             Just epi -> epis <> [epi]
-      in ([], desc, epis')
+      in (warns, desc, epis')
+
+    -- an unknown keyword outside an epilogue, which keeps lines verbatim
+    warns = concat (snd (mapAccumL warnLine False lns))
+    warnLine inEpi l = case parseDocKV l of
+      DocDirective "epilogue" _ -> (True, [])
+      DocDirective k _ | not inEpi -> (inEpi, unknownDirectiveWarning ["epilogue"] k)
+      _ -> (inEpi, [])
 
 -- | Apply `source`-level docstring directives, returning (errors, warnings,
 -- source). Errors are fatal and reported by 'applySourceDocsD'.
 --
 -- `rsize` values are validated here rather than silently coerced. An
 -- unparseable word used to be dropped by 'mapMaybe', so a typo
--- (@rsize: to@) left the directive empty and the function was called flat --
+-- (@\@rsize to@) left the directive empty and the function was called flat --
 -- silently producing the very calling convention the directive existed to
 -- override. A non-positive value parsed fine and then emitted an empty call
 -- group, which failed at run time inside the pool. Both are rejected at the
@@ -924,7 +910,7 @@ applySourceDocs lns src = foldl step ([], [], src) lns
           Left e -> (errs <> [e], ws, s)
           Right ns -> (errs, ws, s {srcRsize = ns})
         _ ->
-          let w = unknownDirectiveWarning sourceDocDirectiveKeys k line
+          let w = unknownDirectiveWarning sourceDocDirectiveKeys k
            in (errs, ws <> w, s {srcNote = srcNote s <> [docDescLine line]})
 
 -- | Parse an `rsize` value: one or more positive integers separated by
@@ -933,7 +919,7 @@ applySourceDocs lns src = foldl step ([], [], src) lns
 parseRsize :: Text -> Either Text [Int]
 parseRsize v =
   case T.words v of
-    [] -> Left "rsize: expected one or more positive integers, got nothing"
+    [] -> Left "`@rsize`: expected one or more positive integers, got nothing"
     ws -> mapM parseOne ws
   where
     parseOne w = case reads (T.unpack w) :: [(Int, String)] of
@@ -941,12 +927,12 @@ parseRsize v =
         | n >= 1 -> Right n
         | otherwise ->
             Left $
-              "rsize: call-group sizes must be at least 1, got '" <> w
+              "`@rsize`: call-group sizes must be at least 1, got '" <> w
                 <> "'. Each value is the number of arguments in one call; a"
                 <> " group of zero arguments would emit an empty call."
       _ ->
         Left $
-          "rsize: expected a positive integer, got '" <> w
+          "`@rsize`: expected a positive integer, got '" <> w
             <> "'. The value is a whitespace-separated list of call-group"
             <> " sizes, e.g. `@rsize 1` or `@rsize 1 1`."
 
@@ -968,11 +954,11 @@ reservedActionLongs =
   , ("raw", "`raw` names the command's own value when an action is selected by name (HTTP `?render=`, MCP `_render`)")
   ]
 
--- | Validate signature-preamble `with:` specs: reject duplicate short/
+-- | Validate signature-preamble `@with` specs: reject duplicate short/
 -- long names within one export, reject collisions with reserved
 -- command-scope flags (`-h`, `--help`), and reject collisions with the
 -- signature's own argument-declared CLI names. The last is important
--- because the nexus registers `with:` flags on the same clap Command
+-- because the nexus registers `@with` flags on the same clap Command
 -- as the arg-declared ones; a collision would abort the clap builder.
 validateSigWith :: Pos -> [WithSpec] -> [ArgDocVars] -> D ()
 validateSigWith pos specs argDocs = do
@@ -1025,7 +1011,7 @@ reportIfJust _ Nothing _ = return ()
 reportIfJust pos (Just x) f = dfail pos (T.unpack (f x))
 
 -- | Extract every long/short CLI name declared by an argument's docstring.
--- Handles the `arg:`, `true:`, `false:` fields (each of which can encode
+-- Handles the `@arg`, `@true`, `@false` fields (each of which can encode
 -- a short-only / long-only / both spec).
 collectArgCliNames :: [ArgDocVars] -> ([Text], [Char])
 collectArgCliNames vs =
@@ -1047,9 +1033,9 @@ firstDuplicate = go Set.empty
       | Set.member x seen = Just x
       | otherwise = go (Set.insert x seen) xs
 
--- | Reject any `with:` atom that appears somewhere other than a
+-- | Reject any `@with` atom that appears somewhere other than a
 -- signature preamble. Used for per-argument docstrings, record-field
--- docstrings, type-alias docstrings, etc. `with:` is command-only.
+-- docstrings, type-alias docstrings, etc. `@with` is command-only.
 -- | Collect the docstrings attached to a named-type declaration: the block
 -- above the declaration keyword, and the block above each field. Both record
 -- spellings go through here, so `record X where` and `record X = X { .. }`
@@ -3027,7 +3013,7 @@ etaExpandIntrinsic sp intr args = do
 -- >    @close o
 --
 -- Runs AFTER 'injectTerminalActionsWithSigs' so the synthesis can rewrite the
--- @collect argument (the producer) per `--' with:` flag before it is
+-- @collect argument (the producer) per `--' @with` flag before it is
 -- expanded. Fully recursive over 'Expr' so a @collect nested inside a
 -- guarded do-block (the mosm idiom) is still reached. The @stdout element
 -- type is left to inference (fixed by the body's sink parameter type).
@@ -3177,7 +3163,8 @@ desugarTopLevel (Loc sp (CModE maybeName export body)) = do
         _ -> dfail (startPos sp) "nameless module requires a file path and project root"
   -- capture module-level docstrings (--' lines before module keyword)
   docs <- lookupDocsAt (startPos sp)
-  let (_warns, desc, epis) = processModuleDocLines docs
+  let (warns, desc, epis) = processModuleDocLines docs
+  dwarn warns
   State.modify $ \s -> s
     { dsModuleDoc = desc
     , dsModuleEpilogues = epis
@@ -3787,17 +3774,17 @@ desugarProgram isImplicitMain cstNodes = do
   return exprIs'
 
 --------------------------------------------------------------------
--- Terminal-action synthesis (`--' with:` docstring atom)
+-- Terminal-action synthesis (`--' @with` docstring atom)
 --
 -- For each Signature `foo :: ... -> <E>? T` whose docstring preamble
--- carries `--' with: <flag>=<term>` atoms, synthesize an internal
+-- carries `--' @with <flag>=<term>` atoms, synthesize an internal
 -- top-level binding `mlcp_foo_<long> = \x .. -> <term> (foo x ..)`
 -- (or a do-block if `foo` is effectful) and add it to the module's
 -- export list. Downstream typechecking, effect merging, and pool
 -- codegen handle the composed binding as an ordinary export.
 --------------------------------------------------------------------
 
--- | Synthesize `--' with:` terminal-action commands for one module, given
+-- | Synthesize `--' @with` terminal-action commands for one module, given
 -- every term signature visible to it.
 injectTerminalActionsWithSigs :: Map.Map EVar TypeU -> ExprI -> D ExprI
 injectTerminalActionsWithSigs visibleSigs (ExprI i (ModE mv body)) = do
@@ -3816,7 +3803,7 @@ recordCompanions (parent, roles) = State.modify $ \st -> st
 -- with the reserved `mlcp_` prefix. That prefix is compiler-owned
 -- (see 'mangleTerminalName'): 'Frontend/Desugar.synthWithBinding'
 -- synthesizes `mlcp_<parent>_<long>` internal commands from
--- @--' with:@ atoms, and 'CodeGenerator/Nexus.isInternalTerminalName'
+-- @--' @with@ atoms, and 'CodeGenerator/Nexus.isInternalTerminalName'
 -- flips a manifest entry to `internal: true` on that prefix alone.
 -- Allowing user code to shadow the prefix would let a user-declared
 -- term silently disappear from the CLI-visible surface (marked
@@ -3852,7 +3839,7 @@ rejectReservedMlcpPrefix body =
 -- | Record the batch type of every streaming command in the module.
 --
 -- Runs over the whole module body rather than only over commands
--- carrying a `--' with:` directive, because a bare `@collect` command
+-- carrying a `--' @with` directive, because a bare `@collect` command
 -- with no output actions still writes a stream to standard output and
 -- still has to be able to say what it writes. Commands whose producer
 -- has no reachable signature are simply absent from the map.
@@ -3895,13 +3882,13 @@ expandWithBindings visibleSigs body =
 
 -- | Reject synthesized-name collisions before any AssE is emitted.
 -- Two conditions:
---   1. Two `with:` declarations produce the same mangled name (e.g.
+--   1. Two `@with` declarations produce the same mangled name (e.g.
 --      `foo_bar` + `--baz` collides with `foo` + `--bar-baz` after
 --      hyphen -> underscore normalization).
 --   2. A synthesized name matches an existing top-level user
 --      identifier in the same module (any SigE or AssE binder).
 -- Either would corrupt the module scope; fail with a caret on the
--- offending `--' with:` line's own signature so the user can locate it.
+-- offending `--' @with` line's own signature so the user can locate it.
 checkMangledCollisions ::
   [ExprI] ->
   [(EVar, WithSpec, EVar, ExprI)] ->
@@ -3963,7 +3950,7 @@ collectWithSpecs = foldr pick []
 emitFor :: Map.Map EVar ExprI -> Map.Map EVar TypeU -> (ExprI, EVar, [WithSpec]) -> D [ExprI]
 emitFor assMap sigMap (sigExprI, parentName, specs) = do
   sp <- posOfExprI sigExprI
-  pt <- maybe (dfail (startPos sp) "internal: a `--' with:` parent has no visible signature") return
+  pt <- maybe (dfail (startPos sp) "internal: a `@with` parent has no visible signature") return
           (Map.lookup parentName sigMap)
   let arity = sigArity pt
       isEff = returnIsEffectful pt
@@ -4360,7 +4347,7 @@ streamTypeOfProducer sigs arg = do
     firstParamOf (FunU (t : _) _) = Just t
     firstParamOf _ = Nothing
 
--- | Synthesize a `--' with:` flag command for a streaming (@collect) parent.
+-- | Synthesize a `--' @with` flag command for a streaming (@collect) parent.
 -- Reuses the parent's body (re-indexed with fresh ids to avoid annotation
 -- collisions), rewriting every @collect node per flag:
 --
@@ -4854,7 +4841,7 @@ mkEmitWrite singletonWrap ref oVar value = do
   bodyE <- freshExprFrom ref (LetE [(dVar, forceWrite)] unitE)
   freshExprFrom ref (DoBlockE bodyE)
 
--- | Synthesize the composed internal command for one `--' with:`
+-- | Synthesize the composed internal command for one `--' @with`
 -- atom on a parent signature. Emits only an @AssE@; parent per-arg
 -- docstrings are re-injected downstream in
 -- 'CodeGenerator/Nexus.inheritParentArgDocs'. A @SigE@ here would

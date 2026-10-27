@@ -6,7 +6,7 @@ import root
 -- to align with Python `open()` and C11 fopen modes. The parser must
 -- reject the retired letter with a clear error.
 foo ::
-  --' check.path: c
+  --' @check.path c
   Str ->
   Int
 foo _ = 0

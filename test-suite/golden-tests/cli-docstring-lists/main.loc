@@ -53,63 +53,63 @@ mk_tup x = py_id x
 
 --' Count Int packets listed in the per-element-packet manifest file.
 size_ints_packets ::
-  --' form: list
-  --' list.source: file
-  --' list.form: packet
+  --' @form list
+  --' @list.source file
+  --' @list.form packet
   [Int] -> Int
 size_ints_packets xs = py_size xs
 
 --' Sum Int packets via strict per-element packet decoding.
 sum_ints_packets ::
-  --' form: list
-  --' list.source: file
-  --' list.form: packet
+  --' @form list
+  --' @list.source file
+  --' @list.form packet
   [Int] -> Int
 sum_ints_packets xs = py_sum_int xs
 
 --' Sum Int packets via the per-element auto-classifier (no strictness).
 sum_ints_auto ::
-  --' form: list
-  --' list.source: file
+  --' @form list
+  --' @list.source file
   [Int] -> Int
 sum_ints_auto xs = py_sum_int xs
 
 --' Sum F64 packets via strict per-element packet decoding.
 sum_reals_packets ::
-  --' form: list
-  --' list.source: file
-  --' list.form: packet
+  --' @form list
+  --' @list.source file
+  --' @list.form packet
   [F64] -> F64
 sum_reals_packets xs = py_sum_real xs
 
 --' Count Str packets listed in the per-element-packet manifest file.
 size_strs_packets ::
-  --' form: list
-  --' list.source: file
-  --' list.form: packet
+  --' @form list
+  --' @list.source file
+  --' @list.form packet
   [Str] -> Int
 size_strs_packets xs = py_size xs
 
 --' Count (Int, Str) tuple packets via per-element packet decoding.
 size_tups_packets ::
-  --' form: list
-  --' list.source: file
-  --' list.form: packet
+  --' @form list
+  --' @list.source file
+  --' @list.form packet
   [(Int, Str)] -> Int
 size_tups_packets xs = py_size xs
 
 --' Count raw-binary files listed in the manifest (per-line bytes).
 size_byte_files ::
-  --' form: list
-  --' list.source: file
-  --' list.form: bytes
+  --' @form list
+  --' @list.source file
+  --' @list.form bytes
   [[U8]] -> Int
 size_byte_files xss = py_size xss
 
 --' Sum total bytes across the raw-binary files in the manifest.
 total_byte_files ::
-  --' form: list
-  --' list.source: file
-  --' list.form: bytes
+  --' @form list
+  --' @list.source file
+  --' @list.form bytes
   [[U8]] -> Int
 total_byte_files xss = py_total_bytes xss

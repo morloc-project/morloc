@@ -1653,7 +1653,7 @@ argument_t* initialize_positional(char* value);
 argument_t* initialize_unrolled(size_t size, char* default_value, char** fields, char** default_fields);
 void free_argument_t(argument_t* arg);
 uint8_t* parse_cli_data_argument(uint8_t* dest, const argument_t* arg, const Schema* schema, ERRMSG);
-// Variadic-list assembly entry point (matches `--' many: true` in the
+// Variadic-list assembly entry point (matches `--' @many` in the
 // nexus manifest). Parses N CLI argument_t's into a single packet
 // wrapping a morloc list whose element schema is the list schema's
 // inner type. Each element goes through the same source classifier

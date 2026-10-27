@@ -5,8 +5,8 @@
 module main (f)
 
 f ::
-  --' arg: -i
-  --' default: not_json
+  --' @arg -i
+  --' @default not_json
   Int ->
   Int
 f x = x

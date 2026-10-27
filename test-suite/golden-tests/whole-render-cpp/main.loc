@@ -1,6 +1,6 @@
 module main (stream)
 
--- Exercises the whole-form `render:` quadrant (gather the complete stream,
+-- Exercises the whole-form `@render` quadrant (gather the complete stream,
 -- then apply the handler once and emit its result verbatim). Covers both a
 -- text render (`[Int] -> Str`) and a BINARY render (`[Int] -> Vector U8`,
 -- emitted as raw bytes with no framing). The `with`/`with.buffer`/
@@ -25,7 +25,7 @@ produce sink = do
   sink (mk 1)
 
 --' Stream integer batches
---' render: -j/--joined=joinAll
---' render: -b/--bytes=toBytes
+--' @render -j/--joined=joinAll
+--' @render -b/--bytes=toBytes
 stream :: <IO> ()
 stream = @collect produce

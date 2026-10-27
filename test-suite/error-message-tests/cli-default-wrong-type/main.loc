@@ -5,8 +5,8 @@
 module main (f)
 
 f ::
-  --' arg: -i
-  --' default: "abc"
+  --' @arg -i
+  --' @default "abc"
   Int ->
   Int
 f x = x

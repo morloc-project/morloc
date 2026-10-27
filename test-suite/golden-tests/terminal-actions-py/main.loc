@@ -1,4 +1,4 @@
--- Positive coverage for `--' with:` terminal-action declarations.
+-- Positive coverage for `--' @with` terminal-action declarations.
 --
 --   -l/--lines  formatter, B = () (sink -- prints then returns Null)
 --   -c/--csv    formatter, B = () (a second sibling flag)
@@ -47,12 +47,12 @@ sumPure :: [Str] -> Str
 sumPure xs = joinSemi xs
 
 --' Read the head from a file
---' with: -l/--lines=formatLines
---' with: -c/--csv=formatCsv
---' with: -s/--sum=summarize
---' with: -p/--plain=sumPure
+--' @with -l/--lines=formatLines
+--' @with -c/--csv=formatCsv
+--' @with -s/--sum=summarize
+--' @with -p/--plain=sumPure
 fhead ::
-  --' check.path: r
+  --' @check.path r
   Str ->
   <IO> [Str]
 fhead path = readlines path
@@ -61,6 +61,6 @@ fhead path = readlines path
 sayInt :: Int -> <IO> ()
 sayInt n = printEach [describeInt n]
 
---' with: --say=sayInt
+--' @with --say=sayInt
 describe :: Int -> Int
 describe n = n

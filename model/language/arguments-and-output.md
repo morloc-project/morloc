@@ -18,8 +18,8 @@ form, not the type's name: a type that packs to `[(a, b)]` reads as one.
 Intent: proposed
 Code: deviates (issues/programs.md)
 
-`source: inline|file`, `form: list|table|bytes|bytes-only|packet` and `check.path`
-each take one value, and the `list.` forms do the same per element. No field
+`@source inline|file`, `@form list|table|bytes|bytes-only|packet` and `@check.path`
+each take one value, and the `@list.` forms do the same per element. No field
 takes an OR chain, and `auto` cannot be written. A combination the wire type
 does not allow is a build error at the docstring line that wrote it.
 

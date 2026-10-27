@@ -30,7 +30,7 @@ defined.
 Intent: proposed
 Code: deviates (issues/host-calls.md)
 
-`--' rsize: n1 n2 ...` gives the sizes of the leading call groups; the last
+`--' @rsize n1 n2 ...` gives the sizes of the leading call groups; the last
 group takes the rest. Each size is at least 1 and leaves at least one
 argument for the group after it, or the build is rejected. An effect ends
 a call: in `mk :: Int -> <IO> (Int -> Int)` the source is called with one

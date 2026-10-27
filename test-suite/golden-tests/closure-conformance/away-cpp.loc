@@ -36,6 +36,6 @@ source Cpp from "hosts.hpp"
 
 -- also curried: `pass_through(f)` returns the callable, applied as `(f)(x)`
 source Cpp from "hosts.hpp" where
-  --' name: away_pass_through
+  --' @name away_pass_through
   --' @rsize 1
   passAway

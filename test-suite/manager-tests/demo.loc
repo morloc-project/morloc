@@ -23,16 +23,16 @@ addPy :: Real -> Real -> Real
 
 --' Greet a person by name
 greet ::
-  --' metavar: NAME
+  --' @metavar NAME
   Str ->
   Str
 greet name = greetPy name
 
 --' Add two numbers
 add ::
-  --' metavar: X
+  --' @metavar X
   Real ->
-  --' metavar: Y
+  --' @metavar Y
   Real ->
   Real
 add x y = addPy x y

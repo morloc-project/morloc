@@ -2001,9 +2001,9 @@ data CmdDocSet = CmdDocSet
     -- labeled downstream (MCP content blocks, HTTP Content-Type). Nothing when
     -- the return type carries no media type.
   , cmdDocTerminals :: [WithSpec]
-    -- terminal-action declarations (`--' with:`) attached to this command.
+    -- terminal-action declarations (`--' @with`) attached to this command.
     -- Empty for internal / synthesized entries and for commands without any
-    -- `--' with:` atom. Populated verbatim from the signature preamble.
+    -- `--' @with` atom. Populated verbatim from the signature preamble.
   , cmdDocEpilogues :: [[Text]]
     -- `@epilogue` blocks from the signature preamble, rendered verbatim at
     -- the foot of this command's help.

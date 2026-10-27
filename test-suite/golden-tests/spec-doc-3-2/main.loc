@@ -10,7 +10,7 @@ import root-py
 type WindSpeed = Int
 
 --' Minutes until the storm
---' return: minutes from the alias
+--' @return minutes from the alias
 type Foo = WindSpeed -> Int
 
 foo :: Foo

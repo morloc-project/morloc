@@ -13,7 +13,7 @@ import root-py
 
 -- Python-backed: many on [Int], inline + JSON files + mixed.
 sumInts ::
-  --' many: true
+  --' @many true
   [Int] ->
   Int
 
@@ -21,7 +21,7 @@ sumInts ::
 -- for type mappings; the body is a bare identity, so the nexus runs
 -- this through morloc_eval rather than a pool.
 passList ::
-  --' many: true
+  --' @many true
   [Int] ->
   [Int]
 passList xs = xs
@@ -31,15 +31,15 @@ passList xs = xs
 -- literal-mode JSON-quoting (both paths). Returned value is the count
 -- of input tokens.
 countLits ::
-  --' many: true
+  --' @many true
   [Str] ->
   Int
 
 -- Pure morloc: option-form many with the compiler-supplied default of
 -- "[]". When -x is omitted, the list arrives empty.
 concatLists ::
-  --' arg: -x/--xs
-  --' many: true
+  --' @arg -x/--xs
+  --' @many true
   [Int] ->
   [Int]
 concatLists xs = xs
@@ -47,8 +47,8 @@ concatLists xs = xs
 -- Python-backed: scalar literal: true on Str. Argument is taken as a
 -- literal string regardless of whether a file by that name exists.
 greet ::
-  --' arg: -y/--yolo
-  --' default: "yolo"
+  --' @arg -y/--yolo
+  --' @default "yolo"
   Str ->
   Int
 
@@ -56,8 +56,8 @@ greet ::
 -- validator accepts a typed default at compile time AND the value
 -- arrives at the pool.
 defaults ::
-  --' arg: -i
-  --' default: 42
+  --' @arg -i
+  --' @default 42
   Int ->
   Int
 
@@ -78,8 +78,8 @@ record Tree where
   children :: [Tree]
 
 recParam ::
-  --' arg: -t/--tree
-  --' default: {"val":1,"children":[{"val":2,"children":[]}]}
+  --' @arg -t/--tree
+  --' @default {"val":1,"children":[{"val":2,"children":[]}]}
   Tree ->
   Int
 recParam t = .val t
