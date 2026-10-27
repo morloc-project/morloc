@@ -221,3 +221,11 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   *a@q2": root's `(++) :: f m a -> f n a -> f (m+n) a` admits only sized
   containers, so plain lists have no `++`. Gap in collections.md: no item
   says how lists are appended.
+
+- **An application through a type variable that stands for a function is
+  rejected.** [reproduced, 2026-10-27] Gap in APP (`a -> b -> c` and `a ->
+  (b -> c)` are one type). `first2 :: [Int -> Int -> c] -> Int -> c` and
+  `d3 :: Int -> Int -> Int -> Int`: `first2 [d3] x 7` is refused with
+  "Invalid function application of type: [Int -> Int -> a] -> Int -> a",
+  while `apply1 (first2 [d3] x) 7` builds and runs. With `c = Int -> Int`
+  the three-argument application is well typed.

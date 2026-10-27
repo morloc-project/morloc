@@ -19,6 +19,9 @@ source Cpp from "f.hpp"
   , "cpp_map" as mapBoth
   , "cpp_range" as cppRange
   , "cpp_sum" as cppSum
+  , "cpp_ops" as cppOps
+  , "cpp_ops_list" as cppOpsList
+  , "cpp_make_adder" as mkAdder
   )
 
 -- `cppAdd k` returns a function C++ made: its call group ends after `k`
@@ -26,6 +29,17 @@ source Cpp from "f.hpp" where
   --' name: cpp_add
   --' @rsize 1
   cppAdd
+
+--' A multiplier and its factor
+record Ops where
+  --' Multiply by the factor
+  run :: Int -> Int
+  --' The factor
+  k :: Int
+record Cpp => Ops = "Ops"
+
+--' A function of one number
+type Adder = Int -> Int
 
 --' Add one
 pyF :: Int -> Int
@@ -73,3 +87,10 @@ pick n g
 --' Apply a function twice
 twice :: (Int -> Int) -> Int -> Int
 twice f x = f (f x)
+
+--' A multiplier made in C++, in a record
+cppOps :: Int -> <IO> Ops
+--' Multipliers by 1 to n made in C++
+cppOpsList :: Int -> <IO> [Ops]
+--' Make an adder in C++, named by an alias
+mkAdder :: Int -> <IO> Adder

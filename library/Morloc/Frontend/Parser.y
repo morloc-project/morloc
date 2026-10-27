@@ -944,19 +944,15 @@ interp_body :: { ([Loc CstExpr], [Text]) }
 --------------------------------------------------------------------
 
 type :: { TypeU }
-  : arrow_rest               { fst $1 }
+  : arrow_rest               { $1 }
 
--- An arrow chain is one parameter list; a parenthesized arrow after it stays
--- nested. Morloc does not distinguish the two, but a source's signature says
--- with it how the source calls a function it is passed.
+-- An arrow chain is one parameter list, parenthesized or not (HOST-4).
 fun_type :: { TypeU }
   : non_fun_type '->' arrow_rest   { mkArrow $1 $3 }
 
--- a type, and whether it is an unparenthesized arrow (after an arrow, one
--- continues the chain)
-arrow_rest :: { (TypeU, Bool) }
-  : fun_type                 { ($1, True) }
-  | non_fun_type             { ($1, False) }
+arrow_rest :: { TypeU }
+  : fun_type                 { $1 }
+  | non_fun_type             { $1 }
 
 non_fun_type :: { TypeU }
   : '<' effect_row '>' add_type  {% mkEffectRow $1 $2 >>= \es -> return (mkEffectU es $4) }
@@ -1646,11 +1642,11 @@ findExportSymbolPositions = findModule
     scanExports depth (_ : rest) = scanExports depth rest
     scanExports _ [] = []
 
--- | An arrow from a parameter to what follows it: an unparenthesized arrow
--- continues the parameter list, a parenthesized one is the result.
-mkArrow :: TypeU -> (TypeU, Bool) -> TypeU
-mkArrow a (FunU args ret, True) = FunU (a : args) ret
-mkArrow a (t, _) = FunU [a] t
+-- | An arrow from a parameter to what follows it: @a -> (b -> c)@ is
+-- @a -> b -> c@.
+mkArrow :: TypeU -> TypeU -> TypeU
+mkArrow a (FunU args@(_ : _) ret) = FunU (a : args) ret
+mkArrow a t = FunU [a] t
 
 buildMembership :: [(T.Text, [T.Text], Pos)] -> [(T.Text, Pos)] -> Map.Map T.Text T.Text
 buildMembership groupHeaders exportSyms = Map.fromList

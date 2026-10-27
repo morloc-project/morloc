@@ -1539,6 +1539,7 @@ data SerializationState = Serialized | Unserialized
 endsInReturn :: MonoExpr -> Bool
 endsInReturn (MonoReturn _) = True
 endsInReturn (MonoLet _ _ e2) = endsInReturn e2
+endsInReturn (MonoDebugWrap _ _ e) = endsInReturn e
 -- A loop's value is the manifold's result: every base leaf breaks out with it.
 endsInReturn (MonoLoop {}) = True
 endsInReturn _ = False

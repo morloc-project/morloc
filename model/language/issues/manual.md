@@ -15,9 +15,6 @@ Waiting on a ruling:
   record literal currently needs them (records.md).
 - SRC-4 open: features-source.asc says backtick names are emitted verbatim,
   any two-argument infix operator, against SRC-1's name check.
-- HOST-4 open: features-source.asc says outer parentheses in a sourced
-  signature are ignored (only `rsize` counts) while a callback's parentheses
-  are honored.
 - CLI-4 open: cli-reference.asc:56 documents `@default <json>`;
   cli-parameterization.asc:275 writes `@default dot` for a `data` argument.
 - CLI-2 spells shape fields `form: list`, `source: file`; the manual and

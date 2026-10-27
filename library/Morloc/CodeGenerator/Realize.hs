@@ -729,7 +729,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
       -- An operation that belongs to no language runs where its context
       -- puts it, but only in a language that can hold what it computes.
       held <- maybe (return table) (\(j, ts) -> holding j ts table) (heldTypes gidx e t)
-      let table' = onHost ci (onCycle (rBelow rstat) ci e held)
+      table' <- onHost ci gidx t e (onCycle (rBelow rstat) ci e held)
       -- a term's table holds, for each language, its chosen implementation
       -- reached from there; only the implementation is forced
       let forced = case e of
@@ -750,14 +750,32 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
         kept -> kept
 
     -- COST-15: a node holding or receiving a function made by host code
-    -- runs in that host's language (HOST-9).
-    onHost :: Int -> [(Lang, Score)] -> [(Lang, Score)]
-    onHost i table = case Map.lookup i (pinHost pins) of
-      Nothing -> table
+    -- runs in that host's language (HOST-9). A node that only combines its
+    -- children (a let, a conditional, a container) can run there whatever
+    -- its children's languages, reaching them across boundaries; a call
+    -- runs where its function does.
+    onHost :: Int -> Int -> Type -> ExprS (Indexed Type) Many Int -> [(Lang, Score)] -> MorlocMonad [(Lang, Score)]
+    onHost i gidx t e table = case Map.lookup i (pinHost pins) of
+      Nothing -> return table
       Just (HostLimit l _) -> case [x | x@(l', _) <- table, l' == l] of
-        [] | null table -> table
-        [] -> [(l, noScore)]
-        kept -> kept
+        [] | null table -> return table
+        []
+          | combines e -> do
+              canHold <- maybe (return True) (\(j, ts) -> elem l . map fst <$> holding j ts [(l, mempty)]) (heldTypes gidx e t)
+              return [(l, if canHold then reachFrom l table else noScore)]
+        [] -> return [(l, noScore)]
+        kept -> return kept
+      where
+        -- a let binding a function lives at its home; a newtype cast is
+        -- placed by the languages that can convert it
+        combines x = case x of
+          LetS _ (AnnoS (Idx _ bt) _ _) _ -> not (holdsCallable bt)
+          IfS {} -> True
+          LstS {} -> True
+          TupS {} -> True
+          NamS {} -> True
+          DoBlockS {} -> True
+          _ -> False
 
     -- A table cut to the language collapse chose for its node, when
     -- rescoring. A choice the table does not offer (a lambda built in its

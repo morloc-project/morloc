@@ -1,7 +1,6 @@
 -- A function that returns a function, defined in morloc, is passed to a
 -- higher-order source whose parameter is written `(Int -> (Int -> Int))`: the
--- source calls it with one argument and applies the closure that returns.
--- roundtrip 4 -> 16.
+-- source calls it with both arguments at once (HOST-2). roundtrip 4 -> 16.
 
 module main (roundtrip)
 

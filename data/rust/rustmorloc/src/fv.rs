@@ -182,7 +182,7 @@ pub fn fn_ptr0<R>(f: fn() -> R) -> fn() -> R {
 // ---- per arity -----------------------------------------------------------------
 
 macro_rules! fv_arity {
-    ($value:ident, $local:ident, $crossing:ident, $proxy:ident, $cb:ident, $invoke:ident, ($($A:ident $a:ident),*)) => {
+    ($value:ident, $local:ident, $crossing:ident, $proxy:ident, $cb:ident, $invoke:ident, $fv:ident, ($($A:ident $a:ident),*)) => {
         pub type $value<$($A,)* R> = Arc<dyn Fn($(&$A),*) -> R + Send + Sync>;
 
         /// A function value that cannot cross pools.
@@ -233,6 +233,24 @@ macro_rules! fv_arity {
             #[inline]
             fn into_callback(self) -> impl Fn($(&$A),*) -> R + Send + Sync + 'static {
                 move |$($a: &$A),*| self($($a),*)
+            }
+        }
+
+        /// A function a sourced function returns, as morloc holds it: a
+        /// closure becomes a function value; a function value is kept.
+        pub trait $fv<$($A,)* R> {
+            fn into_fn_value(self) -> $value<$($A,)* R>;
+        }
+        impl<$($A,)* R, F: Fn($(&$A),*) -> R + Send + Sync + 'static> $fv<$($A,)* R> for F {
+            #[inline]
+            fn into_fn_value(self) -> $value<$($A,)* R> {
+                Arc::new(self)
+            }
+        }
+        impl<$($A: 'static,)* R: 'static> $fv<$($A,)* R> for $value<$($A,)* R> {
+            #[inline]
+            fn into_fn_value(self) -> $value<$($A,)* R> {
+                self
             }
         }
 
@@ -343,15 +361,15 @@ macro_rules! fv_apply {
     };
 }
 
-fv_arity!(FnValue0, local0, crossing0, proxy0, IntoCallback0, Invoke0, ());
-fv_arity!(FnValue1, local1, crossing1, proxy1, IntoCallback1, Invoke1, (A1 a1));
-fv_arity!(FnValue2, local2, crossing2, proxy2, IntoCallback2, Invoke2, (A1 a1, A2 a2));
-fv_arity!(FnValue3, local3, crossing3, proxy3, IntoCallback3, Invoke3, (A1 a1, A2 a2, A3 a3));
-fv_arity!(FnValue4, local4, crossing4, proxy4, IntoCallback4, Invoke4, (A1 a1, A2 a2, A3 a3, A4 a4));
-fv_arity!(FnValue5, local5, crossing5, proxy5, IntoCallback5, Invoke5, (A1 a1, A2 a2, A3 a3, A4 a4, A5 a5));
-fv_arity!(FnValue6, local6, crossing6, proxy6, IntoCallback6, Invoke6, (A1 a1, A2 a2, A3 a3, A4 a4, A5 a5, A6 a6));
-fv_arity!(FnValue7, local7, crossing7, proxy7, IntoCallback7, Invoke7, (A1 a1, A2 a2, A3 a3, A4 a4, A5 a5, A6 a6, A7 a7));
-fv_arity!(FnValue8, local8, crossing8, proxy8, IntoCallback8, Invoke8, (A1 a1, A2 a2, A3 a3, A4 a4, A5 a5, A6 a6, A7 a7, A8 a8));
+fv_arity!(FnValue0, local0, crossing0, proxy0, IntoCallback0, Invoke0, IntoFnValue0, ());
+fv_arity!(FnValue1, local1, crossing1, proxy1, IntoCallback1, Invoke1, IntoFnValue1, (A1 a1));
+fv_arity!(FnValue2, local2, crossing2, proxy2, IntoCallback2, Invoke2, IntoFnValue2, (A1 a1, A2 a2));
+fv_arity!(FnValue3, local3, crossing3, proxy3, IntoCallback3, Invoke3, IntoFnValue3, (A1 a1, A2 a2, A3 a3));
+fv_arity!(FnValue4, local4, crossing4, proxy4, IntoCallback4, Invoke4, IntoFnValue4, (A1 a1, A2 a2, A3 a3, A4 a4));
+fv_arity!(FnValue5, local5, crossing5, proxy5, IntoCallback5, Invoke5, IntoFnValue5, (A1 a1, A2 a2, A3 a3, A4 a4, A5 a5));
+fv_arity!(FnValue6, local6, crossing6, proxy6, IntoCallback6, Invoke6, IntoFnValue6, (A1 a1, A2 a2, A3 a3, A4 a4, A5 a5, A6 a6));
+fv_arity!(FnValue7, local7, crossing7, proxy7, IntoCallback7, Invoke7, IntoFnValue7, (A1 a1, A2 a2, A3 a3, A4 a4, A5 a5, A6 a6, A7 a7));
+fv_arity!(FnValue8, local8, crossing8, proxy8, IntoCallback8, Invoke8, IntoFnValue8, (A1 a1, A2 a2, A3 a3, A4 a4, A5 a5, A6 a6, A7 a7, A8 a8));
 
 fv_apply!(FnValue1, FnValue0, Step1, pap1, staged1, apply1_1, fn_ptr1, (A1 a1));
 fv_apply!(FnValue2, FnValue1, Step2, pap2, staged2, apply1_2, fn_ptr2, (A1 a1), (A2 a2));
@@ -365,4 +383,31 @@ fv_apply!(FnValue8, FnValue7, Step8, pap8, staged8, apply1_8, fn_ptr8, (A1 a1), 
 #[cfg(test)]
 pub(crate) fn registered_count() -> usize {
     REGISTRY.iter().map(|s| s.read().unwrap_or_else(PoisonError::into_inner).len()).sum()
+}
+
+#[cfg(test)]
+mod reify_tests {
+    use super::*;
+
+    #[test]
+    fn a_host_function_has_no_origin() {
+        let f: Arc<dyn Fn(&i64) -> i64 + Send + Sync> = Arc::new(|x: &i64| x + 1);
+        assert!(reify(&f).is_none());
+    }
+
+    #[test]
+    fn a_returned_function_is_held_once() {
+        let f: FnValue1<i64, i64> = IntoFnValue1::into_fn_value(|x: &i64| x + 1);
+        let g: FnValue1<i64, i64> = IntoFnValue1::into_fn_value(f.clone());
+        assert!(Arc::ptr_eq(&f, &g));
+        assert_eq!(g(&2), 3);
+    }
+
+    #[test]
+    fn sending_a_host_function_throws() {
+        let r = std::panic::catch_unwind(|| require_origin(None));
+        let p = r.expect_err("a function with no origin was sent");
+        let msg = &p.downcast_ref::<crate::MorlocThrow>().expect("not a morloc throw").0;
+        assert!(msg.contains("did not create"));
+    }
 }

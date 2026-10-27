@@ -10,15 +10,21 @@ The number of arguments passed in each call to a sourced function follows its
 source signature. On the morloc side `a -> b -> c` and `a -> (b -> c)` are
 one type (see `APP`).
 
-### HOST-2 A sourced function calls a callback by the callback's type as written
-Intent: ruled 2026-09-24
-Tests: spec-host-2-1
-Code: conforms 2026-10-21
+### HOST-2 A function crossing into or out of host code is called with every argument at once
+Intent: ruled 2026-10-27
+Tests: spec-host-2-1, spec-host-2-2
+Code: conforms 2026-10-27
 
-A callback parameter written `(a -> b -> c)` in the source signature is
-called with both arguments at once; one written `(a -> (b -> c))` is called
-with one argument and returns a function. Morloc passes any function of that
-type in that grouping, however it was defined.
+A function a source is given, a function it returns, and a function inside
+either (a field, an element) are called with all of their arguments in one
+call. `(a -> b -> c)` and `(a -> (b -> c))` are one type here as everywhere
+(HOST-1), so a callback of either spelling is called with two arguments.
+Only two things end the arguments of such a call: an effect, and a type
+variable of the source's signature. `(a -> <IO> (b -> c))` is called with
+one argument and returns a suspension (HOST-5). A parameter `(a -> b -> c)`
+is called with two arguments and returns `c`, even where `c` is a function.
+Morloc passes any function of the type in that grouping, however it was
+defined.
 
 ### HOST-3 `rsize` declares the call groups of a curried foreign function
 Intent: proposed
@@ -32,14 +38,14 @@ argument when the suspension is forced, and the function it returns is a
 value of its own; `rsize` counts only the arguments before the first
 effect.
 
-### HOST-4 Whether parentheses in a sourced function's own type set its call groups
-Intent: open
-Code: unaudited
+### HOST-4 Parentheses never set call groups
+Intent: ruled 2026-10-27
+Tests: spec-host-4-1
+Code: conforms 2026-10-27
 
-HOST-2 honors parentheses in a callback's type, but the manual says writing
-`f :: Real -> ([Real] -> [Real])` does not change how `f` is called; only
-`rsize` does. Either (a) the outer type's parentheses set the groups too,
-replacing `rsize`; or (b) only `rsize` does, and the asymmetry is the rule.
+`f :: Real -> ([Real] -> [Real])` is called as `f :: Real -> [Real] ->
+[Real]` is: with both arguments at once. Only `rsize` splits a sourced
+function's calls (HOST-3), and nothing splits a callback's (HOST-2).
 
 ### HOST-5 A suspension at a host boundary is a callable of no arguments
 Intent: proposed
@@ -116,7 +122,10 @@ trees:
 - a function-typed parameter of a function passed to a sourced function
   holds functions the host made (the host calls it with its own);
 - a lambda, a partial application and a suspension morloc builds are
-  morloc's, and hold what they capture.
+  morloc's, and hold what they capture;
+- a function passed to a sourced function returns what it returns where
+  that host calls it, so a function another pool makes cannot come back
+  out of it.
 
 Every expression that holds or receives a function made by host code, and
 the expression that consumes it, runs in that host's language (COST-15);

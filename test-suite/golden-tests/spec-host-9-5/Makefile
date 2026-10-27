@@ -15,6 +15,9 @@ all:
 	./nexus reopened 1 >> obs.txt 2>> obs.err
 	./nexus pickHome 5 >> obs.txt 2>> obs.err
 	./nexus siblings 2 >> obs.txt 2>> obs.err
+	./nexus recordHome 3 >> obs.txt 2>> obs.err
+	./nexus listHome 3 >> obs.txt 2>> obs.err
+	./nexus aliasHome 5 >> obs.txt 2>> obs.err
 	$(call REFUSED,bad-latent,cannot leave the pool that made it)
 	$(call REFUSED,bad-pair,cannot leave the pool that made it)
 	$(call REFUSED,bad-helper,cannot leave the pool that made it)
@@ -23,6 +26,11 @@ all:
 	$(call REFUSED,bad-hash,a value an intrinsic)
 	$(call REFUSED,bad-pick,cannot leave the pool that made it)
 	$(call REFUSED,bad-export,cannot leave the pool that made it)
+	$(call REFUSED,bad-record,cannot leave the pool that made it)
+	$(call REFUSED,bad-list,cannot leave the pool that made it)
+	$(call REFUSED,bad-alias,cannot leave the pool that made it)
+	$(call REFUSED,bad-returned,cannot leave the pool that made it)
+	$(call REFUSED,bad-box,cannot leave the pool that made it)
 
 clean:
 	rm -rf nexus bad pools __pycache__

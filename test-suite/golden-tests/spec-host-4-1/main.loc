@@ -1,0 +1,111 @@
+-- Spec HOST-4: parentheses never set a sourced function's call groups; only
+-- `rsize` does. `scale` and `mk3` are written with parentheses and called
+-- with every argument at once; `scaleR` and `mkR` are written the same way
+-- with `rsize: 1`, so the host is called with the first argument and the
+-- function it returns with the rest.
+module main (runPy, runCpp, runR, runRust)
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+source Py from "f.py" where
+  --' name: scale
+  pyScale
+  --' name: scale_r
+  --' rsize: 1
+  pyScaleR
+  --' name: mk3
+  pyMk3
+  --' name: mk_r
+  --' rsize: 1
+  pyMkR
+
+source Cpp from "f.hpp" where
+  --' name: scale
+  cppScale
+  --' name: scale_r
+  --' rsize: 1
+  cppScaleR
+  --' name: mk3
+  cppMk3
+  --' name: mk_r
+  --' rsize: 1
+  cppMkR
+
+source R from "f.R" where
+  --' name: scale
+  rScale
+  --' name: scale_r
+  --' rsize: 1
+  rScaleR
+  --' name: mk3
+  rMk3
+  --' name: mk_r
+  --' rsize: 1
+  rMkR
+
+source Rust from "f.rs" where
+  --' name: scale
+  rustScale
+  --' name: scale_r
+  --' rsize: 1
+  rustScaleR
+  --' name: mk3
+  rustMk3
+  --' name: mk_r
+  --' rsize: 1
+  rustMkR
+
+--' Scale numbers by k
+pyScale :: Int -> ([Int] -> [Int])
+--' Scale numbers by k, one argument at a time
+pyScaleR :: Int -> ([Int] -> [Int])
+--' Join three digits
+pyMk3 :: Int -> (Int -> (Int -> Int))
+--' Join three digits past a thousand, one argument at a time
+pyMkR :: Int -> (Int -> (Int -> Int))
+
+--' Scale numbers by k
+cppScale :: Int -> ([Int] -> [Int])
+--' Scale numbers by k, one argument at a time
+cppScaleR :: Int -> ([Int] -> [Int])
+--' Join three digits
+cppMk3 :: Int -> (Int -> (Int -> Int))
+--' Join three digits past a thousand, one argument at a time
+cppMkR :: Int -> (Int -> (Int -> Int))
+
+--' Scale numbers by k
+rScale :: Int -> ([Int] -> [Int])
+--' Scale numbers by k, one argument at a time
+rScaleR :: Int -> ([Int] -> [Int])
+--' Join three digits
+rMk3 :: Int -> (Int -> (Int -> Int))
+--' Join three digits past a thousand, one argument at a time
+rMkR :: Int -> (Int -> (Int -> Int))
+
+--' Scale numbers by k
+rustScale :: Int -> ([Int] -> [Int])
+--' Scale numbers by k, one argument at a time
+rustScaleR :: Int -> ([Int] -> [Int])
+--' Join three digits
+rustMk3 :: Int -> (Int -> (Int -> Int))
+--' Join three digits past a thousand, one argument at a time
+rustMkR :: Int -> (Int -> (Int -> Int))
+
+--' Each grouping in Python
+runPy :: Int -> ([Int], [Int], Int, Int)
+runPy n = (pyScale n [1, 2], pyScaleR n [3, 4], pyMk3 n 3 4, pyMkR n 3 4)
+
+--' Each grouping in C++
+runCpp :: Int -> ([Int], [Int], Int, Int)
+runCpp n = (cppScale n [1, 2], cppScaleR n [3, 4], cppMk3 n 3 4, cppMkR n 3 4)
+
+--' Each grouping in R
+runR :: Int -> ([Int], [Int], Int, Int)
+runR n = (rScale n [1, 2], rScaleR n [3, 4], rMk3 n 3 4, rMkR n 3 4)
+
+--' Each grouping in Rust
+runRust :: Int -> ([Int], [Int], Int, Int)
+runRust n = (rustScale n [1, 2], rustScaleR n [3, 4], rustMk3 n 3 4, rustMkR n 3 4)

@@ -9,6 +9,9 @@
 9
 6
 26
+13
+5
+8
 OK: bad-latent refused
 OK: bad-pair refused
 OK: bad-helper refused
@@ -17,3 +20,8 @@ OK: bad-cache refused
 OK: bad-hash refused
 OK: bad-pick refused
 OK: bad-export refused
+OK: bad-record refused
+OK: bad-list refused
+OK: bad-alias refused
+OK: bad-returned refused
+OK: bad-box refused

@@ -10,12 +10,17 @@
 -- (`feedLet`). `reopened` maps a Python adder with `mapBoth`, which has a
 -- Python and a C++ source: its argument and its consumer are in C++, so the
 -- C++ source would cross least, but the adder can only be applied in
--- Python, so the Python source is used. Each export uses what it is given where it was made. Each
+-- Python, so the Python source is used. A function C++ made is followed into a record
+-- (`recordHome`), a list of records (`listHome`) and through a type alias
+-- (`aliasHome`): each is applied in C++ and only the number it computes
+-- goes to Python. Each export uses what it is given where it was made. A
+-- function the host calls returns into the host's pool too: bad-returned
+-- hands Python a C++ maker. Each
 -- bad-*.loc moves one of them into the other language, or serializes one,
 -- and is refused at build.
 
 --' Functions used where host code made them
-module main (latentHome, groupHome, pairHome, unusedHome, helperPy, helperCpp, helperMorloc, feedLet, reopened, pickHome, siblings)
+module main (latentHome, groupHome, pairHome, unusedHome, helperPy, helperCpp, helperMorloc, feedLet, reopened, pickHome, siblings, recordHome, listHome, aliasHome)
 
 import root-py
 import root-cpp
@@ -81,3 +86,21 @@ pickHome n = do
 --' Use one function with a function Python passes and with a morloc one
 siblings :: Int -> Int
 siblings n = pyFeed (\g -> twice g n) + cppF (twice (\x -> x + 1) n)
+
+--' Apply in C++ the multiplier a C++ record holds
+recordHome :: Int -> <IO> Int
+recordHome n = do
+  ops <- cppOps n
+  pyF ((.run ops) 4)
+
+--' Apply in C++ a multiplier from a list of C++ records
+listHome :: Int -> <IO> Int
+listHome n = do
+  os <- cppOpsList n
+  pyF ((.run (.[1] os)) 2)
+
+--' Apply in C++ an adder whose type is an alias
+aliasHome :: Int -> <IO> Int
+aliasHome n = do
+  h <- mkAdder n
+  pyF (cppApply h 2)

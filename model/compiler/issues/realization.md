@@ -72,28 +72,6 @@ then size).
   `pinTable`). `pickLanguage` can also return a recursion head's language
   that the node's table lacks (its `hostedWith` fallback), which collapse
   then cannot build. No witness yet.
-- **Under `--debug`, a label or a cache, a same-pool recursion serializes
-  its arguments.** [read, 2026-10-26] `splittable` (Express.hs
-  `addNativeRecEntries`) refuses a body under a PolyDebugWrap, PolyCacheBody
-  or Preserved manifold, so every self-call goes through AppRecS and
-  serializes each argument (Serialize.hs RecCallP); a function made by host
-  code among them fails at run time with the reify error, even when the
-  whole recursion is in one language. `addLoopWraps` is also off under
-  `--debug`.
-- **A recursion reached only through back-edges marked as crossing gets no
-  native entry.** [read, 2026-10-26] `addNativeRecEntries` keeps only
-  targets of `(mid, Nothing)` back-edges, but segmentation can move a marked
-  edge into its target's pool (Serialize.hs RecCallP comment), giving a
-  same-pool call that serializes every argument.
-- **A foreign body may be lowered with the caller's language.** [read,
-  2026-10-26] Express, lambda whose body is one application with a head in
-  another language: `expressPolyApp parentLang funExpr xs'` lowers the head
-  in the caller's language though the body is emitted in the callee's
-  (also the PatCall fallback near it). Harmless for a recursive call (a
-  probe with the recursion in Python and the callback in Rust calls the
-  helper directly in the Python pool); a pattern call would pick the
-  caller's language's instances, which matters only for a newtype whose
-  indexing instances differ by language. No witness yet.
 - **The realizer's placements are checked only against themselves.**
   [read, 2026-10-25] COST-11. No test enumerates the placements of a small
   tree to confirm the DP finds the least; no test compares the crossings
@@ -137,24 +115,6 @@ then size).
   for 'pack' at type ((Int, Int), Vector 6 Real) -> Matrix 2 3 Real"
   (vector-comprehensive likewise). Implementations of differing
   Nat-dimensioned types would hit the same failure.
-- **The run-time refusal to send a host-made function has no test.**
-  [read, 2026-10-26] Placement keeps every host-made function in its pool
-  (HostProvenance.hs), and serialization treats one reaching it as a
-  compiler bug (Serialize.hs `refuseHostFunction`). The pool-side guards
-  (Python `_mlc_manifold_id`, R pool.R, Rust rustmorloc fv.rs) remain as the
-  last line and are exercised by no test; a test needs to reach them
-  without the compiler, for instance a pool-level unit test of the Python
-  and R reify functions.
-- **Under `--debug`, a manifold inlined into a debug-wrapped caller names
-  its serialized arguments.** [reproduced, 2026-10-26; HEAD not checked]
-  `morloc make --debug` of `run n = do { h <- mkCpp n; cppApply h 1 }`
-  (C++ only: `mkCpp :: Int -> <IO> (Int -> Int)`, `cppApply :: (Int ->
-  Int) -> Int -> Int`) fails to compile the pool: the wrap's argument dump
-  reads `s1` (`const uint8_t* __morloc_dpk_1[1] = { s1 }`) inside a body
-  whose argument is native `n1`. The same appears for a recursive copy
-  given a host-made function and a recursion returning one (spec-host-9-5
-  `helperCpp`, `latentHome`). Likely the class of cache.md's `cache: true`
-  under `--debug` unbound argument.
 - **A recursive function returning a function, called partially, emits two
   manifolds with one id.** [reproduced, 2026-10-26, with and without the
   host-function pass] `pick :: Int -> (Int -> Int) -> (Int -> Int)`,

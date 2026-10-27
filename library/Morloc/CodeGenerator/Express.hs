@@ -128,15 +128,18 @@ addCacheWraps (PolyHead lang midx args body) = PolyHead lang midx args <$> cache
 -- is given) by that function value. The wrapper carries no adaptation of its
 -- own (one that did would have a different body), and keeping it hides the
 -- value's identity: a function passed along a loop would gain one wrapper
--- per iteration, and a staged closure would lose its stage entry.
+-- per iteration, and a staged closure would lose its stage entry. A closure
+-- passing fewer arguments than the function takes is a partial application
+-- with an arity of its own (HOST-2), and stays.
 etaReduceForwarders :: PolyHead -> PolyHead
 etaReduceForwarders (PolyHead lang m args body) = PolyHead lang m args (go body)
   where
     go e = case mapPolySubExprs go e of
       PolyManifold _ _ (ManifoldPart [Arg j _] bound) k
-        (PolyReturn (PolyApp (PolyExe t (LocalCallP j')) xs))
+        (PolyReturn (PolyApp (PolyExe t@(Idx _ (FunT ins _)) (LocalCallP j')) xs))
           | j == j'
           , k /= Preserved
+          , length ins == length xs
           , map bndId xs == map (Just . ann) bound ->
               PolyBndVar (C t) j
       e' -> e'
@@ -162,21 +165,22 @@ etaReduceForwarders (PolyHead lang m args body) = PolyHead lang m args (go body)
 -- dispatch table are unaffected. Which callers use which entry is settled
 -- during serialization, where a call's pool is finally known.
 --
--- A manifold that carries observability hooks (a label, a cache, a debug
--- wrap) is left alone: its hooks are keyed to its ID, and moving its body
--- would move them with it.
+-- A manifold that carries a label or a cache is left alone: its hooks are
+-- keyed to its ID, and moving its body would move them with it. A debug wrap
+-- moves into the native entry, so every level of the recursion still runs
+-- under it, named for the manifold it traces.
 addNativeRecEntries :: [PolyHead] -> MorlocMonad [PolyHead]
 addNativeRecEntries phs = do
-  let targets = Set.fromList [mid | ph <- phs, (mid, Nothing) <- recTargets ph]
+  let targets = Set.fromList [mid | ph <- phs, mid <- recTargets ph]
   mapM (splitEntry targets) phs
   where
-    -- Every manifold a back-edge in this head names, with the crossing the
-    -- expression records. The mark is provisional (segmentation can move a
-    -- call), so it is used only to skip a head no same-pool caller reaches.
-    recTargets :: PolyHead -> [(Int, Maybe Lang)]
+    -- Every manifold a back-edge in this head names. A back-edge marked as
+    -- crossing may still land in its target's pool (segmentation can move
+    -- a call), so the mark does not decide.
+    recTargets :: PolyHead -> [Int]
     recTargets (PolyHead _ _ _ body) = go body
       where
-        go (PolyExe _ (RecCallP mid cl)) = [(mid, cl)]
+        go (PolyExe _ (RecCallP mid _)) = [mid]
         go e = concatMap go (polySubExprs e)
 
     splitEntry :: Set.Set Int -> PolyHead -> MorlocMonad PolyHead
@@ -232,15 +236,15 @@ addNativeRecEntries phs = do
     isLoop (PolyReturn x) = isLoop x
     isLoop _ = False
 
-    -- A body whose shape already commits the manifold to something else: an
-    -- observability hook (a label, a cache, a debug wrap) is keyed to the
-    -- manifold's own ID and would move with the body. A body that reaches
-    -- another pool is split like any other: its native entry takes values,
-    -- and an argument wanted as a packet for the crossing is serialized
-    -- where the body runs ('Morloc.CodeGenerator.Serialize').
+    -- A body whose shape already commits the manifold to something else: a
+    -- label or a cache is keyed to the manifold's own ID and would move with
+    -- the body. A body that reaches another pool is split like any other:
+    -- its native entry takes values, and an argument wanted as a packet for
+    -- the crossing is serialized where the body runs
+    -- ('Morloc.CodeGenerator.Serialize').
     splittable :: PolyExpr -> Bool
     splittable (PolyCacheBody {}) = False
-    splittable (PolyDebugWrap {}) = False
+    splittable (PolyDebugWrap _ _ x) = splittable x
     splittable (PolyManifold _ _ _ Preserved _) = False
     splittable (PolyManifold _ _ _ _ x) = splittable x
     splittable (PolyReturn x) = splittable x
@@ -1461,7 +1465,7 @@ expressPolyExpr
 
         xs' <- fromJust <$> safeZipWithM (expressPolyExprWrap appLang) (zipWith mkIdx xs callInputTypes) xs
 
-        call <- expressPolyApp parentLang funExpr xs'
+        call <- expressPolyApp callLang funExpr xs'
         -- Callback-return force lifted to Poly-stage 'EffectBoundary'.
         mkPolyManifold parentLang midx (ManifoldPart contextArgs typedLambdaArgs) call
     | not isLocal = do
@@ -1500,7 +1504,7 @@ expressPolyExpr
 
             foreignForm = ManifoldFull [Arg i None | i <- passedParentArgs]
 
-        call <- expressPolyApp parentLang funExpr xs'
+        call <- expressPolyApp callLang funExpr xs'
 
         innerWrap <- mkPolyManifold callLang midx foreignForm call
         let remoteApp =
@@ -1585,9 +1589,9 @@ expressPolyExpr
         labeled <- hasManifoldLabel midx
         if labeled
           then do
-            func <- expressPolyApp parentLang f xsExpr
+            func <- expressPolyApp callLang f xsExpr
             mkPolyManifold callLang midx (ManifoldFull (map unvalue outerArgs)) func
-          else expressPolyApp parentLang f xsExpr >>= stripPolyReturn
+          else expressPolyApp callLang f xsExpr >>= stripPolyReturn
     where
       remote = findRemote parentLang callLang
       isLocal = isNothing remote
@@ -1621,7 +1625,7 @@ expressPolyExpr
         mapM_ requireBoundDetermined (bracketBounds pat xs)
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
         dispatchPatCall callLang midx cidxCall pat inputs out xsExpr
-          (expressPolyApp parentLang f xsExpr >>= stripPolyReturn)
+          (expressPolyApp callLang f xsExpr >>= stripPolyReturn)
     -- Cross-pool bracket: receiver lives in one pool, surrounding
     -- expression in another. Without this branch, the not-isLocal
     -- generic AppS handler at the next clause would call
@@ -1658,9 +1662,9 @@ expressPolyExpr
             -- Same unified dispatch as the isLocal branch, with a
             -- PolyReturn wrapper for the cross-pool PolyManifold body.
             dispatchPatternStruct callLang midx cidxCall sel inputs out xsExpr
-              (expressPolyApp parentLang f xsExpr) >>= (return . PolyReturn)
+              (expressPolyApp callLang f xsExpr) >>= (return . PolyReturn)
           _ ->
-            expressPolyApp parentLang f xsExpr
+            expressPolyApp callLang f xsExpr
         innerWrap <- mkPolyManifold callLang midx (ManifoldFull (map unvalue outerArgs)) bracketCall
         let remoteApp =
               PolyReturn $ PolyApp
@@ -1692,12 +1696,12 @@ expressPolyExpr
     | isLocal = do
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
 
-        func <- expressPolyApp parentLang f xsExpr
+        func <- expressPolyApp callLang f xsExpr
         mkPolyManifold callLang midx (ManifoldFull (map unvalue args)) func
     | not isLocal = do
         let idxInputTypes = zipWith mkIdx xs inputs
         mayXs <- safeZipWithM (expressPolyArg callLang) idxInputTypes xs
-        func <- expressPolyApp parentLang f (fromJust mayXs)
+        func <- expressPolyApp callLang f (fromJust mayXs)
         innerWrap <- mkPolyManifold callLang midx (ManifoldFull (map unvalue args)) func
         let remoteApp =
               PolyReturn $ PolyApp
@@ -2105,7 +2109,7 @@ expressPolyExpr
   pc
   f@(AnnoS (Idx midx _) (Idx _ callLang, args) (ExeS _))
     | isLocal = do
-        call <- expressPolyApp parentLang f []
+        call <- expressPolyApp callLang f []
         mkPolyManifold callLang midx (ManifoldFull (map unvalue args)) call
     | otherwise = do
         call <- expressPolyApp callLang f []
@@ -2251,8 +2255,8 @@ expressPolyApp lang (AnnoS (Idx i t) (Idx cidx clang, _) (IfS cond thenE elseE))
   thenE' <- expressPolyExprWrap clang (mkIdx thenE t) thenE
   elseE' <- expressPolyExprWrap clang (mkIdx elseE t) elseE
   return $ bindThenCall i (Idx cidx t) (PolyIf cond' thenE' elseE') es
-expressPolyApp parentLang (AnnoS (Idx i t) _ (CallS v)) xs = do
-  (mid, crossLang) <- lookupRecursiveTarget parentLang v
+expressPolyApp lang (AnnoS (Idx i t) _ (CallS v)) xs = do
+  (mid, crossLang) <- lookupRecursiveTarget lang v
   -- Serial manifolds force thunks before serializing, so strip EffectT from the
   -- return type and wrap in PolyDoBlock to reconstruct the thunk after deserializing.
   case t of

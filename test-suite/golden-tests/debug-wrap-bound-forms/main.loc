@@ -1,0 +1,68 @@
+-- A debug or cache wrap names each argument of its manifold in the form it
+-- is bound in where the wrap ends up. Under `--debug`, a manifold written in
+-- place in its caller's body reads the caller's variables: a host-made
+-- adder bound in the caller (`applyCpp`, `applyPy`), and the argument of a
+-- labeled call that caches (`cached`, whose `cached 0` fails in Python and
+-- must report that failure). A recursion given a host-made adder
+-- (`totalCpp`, `totalPy`) calls itself in its pool with the adder as a
+-- value, never serialized, with its debug wrap kept on every level.
+
+--' Wraps under --debug
+module main (applyCpp, applyPy, totalCpp, totalPy, cached)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("py_make_adder" as mkPy, "py_apply" as pyApply, "py_inv" as pyInv)
+source Cpp from "f.hpp" ("cpp_make_adder" as mkCpp, "cpp_apply" as cppApply)
+
+--' Make an adder in Python
+mkPy :: Int -> <IO> (Int -> Int)
+--' Make an adder in C++
+mkCpp :: Int -> <IO> (Int -> Int)
+--' Apply a function in Python
+pyApply :: (Int -> Int) -> Int -> Int
+--' Apply a function in C++
+cppApply :: (Int -> Int) -> Int -> Int
+--' Divide ten by a number
+pyInv :: Int -> Int
+
+--' Sum an adder's results in C++
+totalC :: Int -> (Int -> Int) -> Int
+totalC n g
+  ? n == 0 = 0
+  : cppApply g n + totalC (n - 1) g
+
+--' Sum an adder's results in Python
+totalP :: Int -> (Int -> Int) -> Int
+totalP n g
+  ? n == 0 = 0
+  : pyApply g n + totalP (n - 1) g
+
+--' Apply a C++ adder once
+applyCpp :: Int -> <IO> Int
+applyCpp n = do
+  h <- mkCpp n
+  cppApply h 1
+
+--' Apply a Python adder once
+applyPy :: Int -> <IO> Int
+applyPy n = do
+  h <- mkPy n
+  pyApply h 1
+
+--' Sum a C++ adder over three numbers
+totalCpp :: Int -> <IO> Int
+totalCpp n = do
+  h <- mkCpp n
+  totalC 3 h
+
+--' Sum a Python adder over three numbers
+totalPy :: Int -> <IO> Int
+totalPy n = do
+  h <- mkPy n
+  totalP 3 h
+
+--' Divide ten in a cached call
+cached :: Int -> Int
+cached n = pyApply (\x -> x + 1) (big@pyInv n)

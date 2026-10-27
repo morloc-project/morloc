@@ -1,0 +1,12 @@
+--' Apply in Python a function from a list of C++ records
+module main (listAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+--' Apply in Python a multiplier from a list of C++ records
+listAway :: Int -> <IO> Int
+listAway n = do
+  os <- cppOpsList n
+  pyApply (.run (.[0] os)) 2

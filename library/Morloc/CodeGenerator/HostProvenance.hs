@@ -25,7 +25,7 @@ module Morloc.CodeGenerator.HostProvenance
 import Control.Monad.State (State, evalStateT, get, gets, lift, modify, put, runState)
 import qualified Data.List as List
 import qualified Data.Set as Set
-import Morloc.CodeGenerator.EffectBoundary (sourceSignature)
+import Morloc.CodeGenerator.EffectBoundary (expandT, sourceSignature)
 import Morloc.CodeGenerator.LambdaEval (reindexTree)
 import Morloc.CodeGenerator.Serial (containsFunT)
 import Morloc.CodeGenerator.Namespace
@@ -218,8 +218,9 @@ sourcedResult host sig args = top (resultU <$> sig)
     boundVars (ForallU v u) = Set.insert v (boundVars u)
     boundVars _ = Set.empty
 
-    flatU (FunU ps (FunU qs r)) = flatU (FunU (ps <> qs) r)
-    flatU u = u
+    flatU u = case uncurryU u of
+      (ps@(_ : _), r) -> FunU ps r
+      _ -> u
 
 -- | What the analysis records about a tree, keyed by node.
 data Found = Found
@@ -463,7 +464,10 @@ analyze cx env dm (AnnoS (Idx gi t) (Idx ci _) e) = case e of
             | k < m = (PFun (joinsO (map (held . iProv) is)) (m - k) full, Portable)
             | otherwise = applyP (afterCall ft m) full (map iProv (drop m is))
       labeled f is r
-      done' through (fit t r) (frees (fi : is)) (fi : is)
+      -- the host calls the functions it is given and forces what they
+      -- return, so what they return is used where the call runs
+      let latent = joinsO (map (deep . iProv) is)
+      done' (joinO through latent) (fit t r) (frees (fi : is)) (fi : is)
 
     treeApp f j xs = do
       before <- get
@@ -590,12 +594,68 @@ planHostFunctions ::
   (EVar -> Maybe Int) ->
   [Tree] ->
   MorlocMonad ([Tree], Map Int (Map Int HostLimit))
-planHostFunctions target trees00
-  | not (any hasFunction trees00) = return (trees00, Map.empty)
+planHostFunctions target trees00 = do
+  scope <- MM.getGeneralScope
+  planWith (expandTree scope) target trees00
+
+-- | A tree with record and alias names in its types expanded, so that a
+-- function inside a record is seen where its value goes. The analysis reads
+-- this view; what it finds is keyed by node, so the trees it rewrites keep
+-- their own types.
+expandTree :: Scope -> Tree -> Tree
+expandTree scope = go
+  where
+    go (AnnoS (Idx gi t) c e) = AnnoS (Idx gi (expandDeep scope t)) c (mapExprS go e)
+
+-- | A type with every record and alias name expanded. A name met again
+-- inside its own expansion is cut there to a suspension when the type holds
+-- a function: provenance at a suspension keeps every origin it is given, so
+-- what a value of it may hold is never lost.
+expandDeep :: Scope -> Type -> Type
+expandDeep scope = go Set.empty
+  where
+    go seen t = case nameOf t of
+      Just v
+        | Set.member v seen -> if holdsFun Set.empty t then EffectT Set.empty (VarT v) else t
+        | t' <- expandT scope t, t' /= t -> descend (Set.insert v seen) t'
+      _ -> descend seen t
+    descend seen t = case t of
+      FunT as r -> FunT (map (go seen) as) (go seen r)
+      AppT h ks -> AppT h (map (go seen) ks)
+      NamT o v ps fs -> NamT o v (map (go seen) ps) [(k, go seen x) | (k, x) <- fs]
+      EffectT es x -> EffectT es (go seen x)
+      OptionalT x -> OptionalT (go seen x)
+      _ -> t
+    holdsFun seen t = case nameOf t of
+      Just v
+        | Set.member v seen -> False
+        | t' <- expandT scope t, t' /= t -> holdsIn (Set.insert v seen) t'
+      _ -> holdsIn seen t
+    holdsIn seen t = case t of
+      FunT _ _ -> True
+      EffectT _ _ -> True
+      AppT _ ks -> any (holdsFun seen) ks
+      NamT _ _ ps fs -> any (holdsFun seen) (ps <> map snd fs)
+      OptionalT x -> holdsFun seen x
+      _ -> False
+    nameOf t = case t of
+      VarT v -> Just v
+      AppT (VarT v) _ -> Just v
+      NamT _ v _ _ -> Just v
+      _ -> Nothing
+
+planWith ::
+  (Tree -> Tree) ->
+  (EVar -> Maybe Int) ->
+  [Tree] ->
+  MorlocMonad ([Tree], Map Int (Map Int HostLimit))
+planWith view target trees00
+  | not (any hasFunction views00) = return (trees00, Map.empty)
   | otherwise = do
       trees0 <- mapM uniqueBinders trees00
       let byRoot = Map.fromList [(rootIdx t, t) | t <- trees0]
-          paramTypes j = case Map.lookup j byRoot of
+          viewRoot = Map.map view byRoot
+          paramTypes j = case Map.lookup j viewRoot of
             Just (AnnoS (Idx _ (FunT ts _)) _ (LamS vs _)) -> take (length vs) ts
             _ -> []
           rootKeys = [(rootIdx t, map portable (paramTypes (rootIdx t))) | t <- trees0]
@@ -614,9 +674,9 @@ planHostFunctions target trees00
               , cxParamType = paramTypes
               , cxSerializes = serializes
               }
-      sums <- settle byRoot rootKeys ctxWith
+      sums <- settle viewRoot rootKeys ctxWith
       let cx = ctxWith sums
-          reachable = reach byRoot cx (Set.fromList rootKeys) rootKeys
+          reachable = reach viewRoot cx (Set.fromList rootKeys) rootKeys
           copied = [key | key <- Set.toList reachable, key `notElem` rootKeys]
       names <- Map.fromList <$> mapM (\key -> (,) key <$> copyName key) copied
       copies <- mapM (\key -> (,) key <$> makeCopy byRoot names key) copied
@@ -628,6 +688,7 @@ planHostFunctions target trees00
       limits <- mapM (\(key, t) -> (,) (rootIdx t) <$> limitsOf cxCopies exports key t) rewritten
       return (map snd rewritten, Map.fromList limits)
   where
+    views00 = map view trees00
     hasFunction = any (\(AnnoS (Idx _ t) _ _) -> containsFunT t || isCallable t) . nodes
     nodes n@(AnnoS _ _ e) = n : foldExprS nodes e
     rootIdx (AnnoS (Idx i _) _ _) = i
@@ -648,7 +709,7 @@ planHostFunctions target trees00
           demands = [Map.findWithDefault Portable v (fDemand found) | v <- vs]
        in (found {fBinders = foldr (\(v, p) -> if held p == Portable then id else Map.insert v (held p)) (fBinders found) (zip vs pat)}, fit ret (iProv info), demands)
 
-    analyzeKey byRoot cx (j, pat) = case Map.lookup j byRoot of
+    analyzeKey viewRoot cx (j, pat) = case Map.lookup j viewRoot of
       Just t -> analyzeTree cx pat t
       Nothing -> (emptyFound, PData Portable [], [])
 
@@ -701,7 +762,7 @@ planHostFunctions target trees00
     -- calls of copies, arguments let-bound, and host-made binders renamed
     -- apart and recorded, so serialization can tell them from others
     rewrite cx names (_, pat) t = do
-      let (found, _, _) = analyzeTree cx pat t
+      let (found, _, _) = analyzeTree cx pat (view t)
       renames <- Map.fromList <$> mapM (\v -> (,) v <$> hostName v) (Map.keys (fBinders found))
       MM.modify (\st -> st {stateHostFunctionVars = foldr Set.insert (stateHostFunctionVars st) (Map.elems renames)})
       let ren v = Map.findWithDefault v v renames
@@ -752,7 +813,7 @@ planHostFunctions target trees00
 
     -- the limits of one rewritten tree, refusing what cannot be placed
     limitsOf cx exports (_, pat) t = do
-      let (found, ret, _) = analyzeTree cx pat t
+      let (found, ret, _) = analyzeTree cx pat (view t)
       case fSinks found of
         ((i, o, what) : _) -> refuse i o ("a function" <+> describe o <+> "would be serialized here, as" <+> what)
         [] -> return ()

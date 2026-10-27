@@ -1,0 +1,16 @@
+module main (passed)
+
+import root-py
+
+-- The source passes a function to the function it is given; morloc calls it
+-- with both arguments at once (HOST-2), whatever parentheses its type is
+-- written with.
+
+source Py from "helpers.py" ("pass_flat" as passFlat)
+passFlat :: ((Int -> (Int -> Int)) -> Int) -> Int
+
+useIt :: (Int -> Int -> Int) -> Int
+useIt f = f 1 2
+
+passed :: Int
+passed = passFlat useIt

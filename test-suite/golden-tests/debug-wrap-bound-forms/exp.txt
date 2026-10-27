@@ -1,0 +1,6 @@
+6
+6
+9
+9
+6
+OK: cached 0 reports the division

@@ -1,13 +1,5 @@
 # Host calls
 
-- **A function a host returns keeps its declared grouping only when an
-  effect forces an adapter.** [read] Gap in HOST-4. A source `mk :: Int ->
-  (Int -> (Int -> Int))` whose result is called with two arguments: with no
-  effect in the result, `needsAdapt` (CodeGenerator/EffectBoundary.hs) is
-  False and nothing regroups the call, so morloc calls the host's
-  one-argument function with two. With an effect in the tail the inbound
-  adapter splits at the declared grouping (`calledAs`). Not reproduced.
-
 - **A point-free reader built from a Rust function fails when a Python
   caller both collects it and writes it.** [reproduced] Violates WIRE-6.
   With bio-rust installed, `readE = mapReader gffEntries readGff3` (no
@@ -52,3 +44,14 @@
   `--' @rsize 1`, and the parse error suggests `@rsize 1`
   (Desugar.hs:918). Both build; no item names the canonical form (same for
   `name:`/`@name`).
+
+- **A call that stops at an `rsize` group boundary with more than one group
+  left is called flat.** [read, 2026-10-27] Violates HOST-3. With `--' rsize:
+  1 1` on `f :: Int -> Int -> Int -> Int`, `let h = f 1 in h 2 3` calls the
+  function the host returns once with both 2 and 3 (Python: TypeError);
+  the host returns a function taking one argument that returns another.
+  Provenance (HostProvenance `sourcedApp`), the call site and Rust
+  `lcSourcedResult` (`IntoFnValueN` with N = the arguments left, not the
+  next group's size) all read the arguments left as one group. A wrapper
+  applying the groups in turn needs the curried host type in the typed
+  pools.

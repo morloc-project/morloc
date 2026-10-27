@@ -1068,6 +1068,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     { lcSrcName = \src -> pretty (srcName src)
     , lcOperator = infixOperator
     , lcApplySrcGroup = \f as -> f <+> tupled as
+    , lcSourcedResult = \_ _ _ x -> x
     , lcSourcedArg = \_ _ _ x -> x
     , lcConstArg = cppConstArg
     , lcOwnership = \_ -> return Owned

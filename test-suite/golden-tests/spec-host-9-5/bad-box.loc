@@ -1,0 +1,23 @@
+--' Put a C++ adder in a record only Python can hold
+module main (boxAway)
+
+import root-py
+import root-cpp
+import .helpers
+
+source Py from "f.py" ("py_use_box" as pyUseBox)
+
+--' A function in a record
+record PyBox where
+  --' The function
+  f :: Int -> Int
+record Py => PyBox = "dict"
+
+--' Apply the function in a record, in Python
+pyUseBox :: PyBox -> Int
+
+--' Box a C++ adder for Python
+boxAway :: Int -> <IO> Int
+boxAway n = do
+  h <- mkCpp n
+  pyUseBox {f = h}

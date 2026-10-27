@@ -490,6 +490,10 @@ data LowerConfig m = LowerConfig
   -- call itself; each later group applies the function value the previous
   -- group returned. Default is juxtaposition, which is how a host language
   -- with first-class callables spells it.
+  , lcSourcedResult :: Source -> Int -> TypeF -> MDoc -> MDoc
+  -- ^ The value a source call given this many arguments returns, of this
+  -- type, as morloc holds it. Default is identity; Rust stores a function
+  -- the host made ('impl Fn') as a function value (HOST-8).
   , lcSourcedArg :: ArgSite -> IOwnership -> TypeM -> MDoc -> MDoc
   -- ^ How to pass one argument at a call, given the call kind ('ArgSite'), the
   -- argument's ownership ('IOwnership'), its 'TypeM', and its rendered
@@ -2372,7 +2376,7 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es0@[_, _])
   | srcOperator src =
       let operands = map snd (constArgs cfg (Just (map fst es0)) origExpr es0)
        in return $ mergePoolDocs (\xs -> case xs of [l, r] -> lcOperator cfg src l r; _ -> error "binary operator requires exactly 2 args") operands
-lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es1) = do
+lowerNativeExprRaw cfg origExpr (AppExeN_ resT (SrcCallP _ src) es1) = do
   es <- bindCallArgs cfg origExpr (constArgs cfg Nothing origExpr es1)
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst es
@@ -2388,7 +2392,7 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP _ src) es1) = do
         case provideClosure src (zipWith (\(i, t, own) e -> lcSourcedArg cfg (site i) own t e) (zip3 [0 ..] argTypes owns) exprs) of
           [] -> lcSrcName cfg src
           (g0 : gs) -> foldl (lcApplySrcGroup cfg) (lcSrcName cfg src <> (if null g0 then tupled g0 else tupledNoFold g0)) gs
-  return $ mergePoolDocs handleFunctionArgs (map snd es)
+  return $ mergePoolDocs (lcSourcedResult cfg src (length es) resT . handleFunctionArgs) (map snd es)
 lowerNativeExprRaw cfg origExpr (AppExeN_ t (PatCallP p) xs) = do
   es <- case (p, origExpr, map snd xs) of
     -- A setter's new values are stored in the rebuilt record, an owned sink.

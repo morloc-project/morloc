@@ -271,8 +271,8 @@ scored = ("a", \s -> 9)
 useScored :: Str -> Int
 useScored s = (.1 scored) s
 
--- a sourced function whose callback parameter is a function alias, grouped
--- as written: 6
+-- a sourced function whose callback parameter is a function alias, called
+-- with both arguments at once (HOST-2): 6
 type Grouped = Int -> (Int -> Int)
 
 source Py from "helpers.py" ("applyGrouped" as applyTwice)
