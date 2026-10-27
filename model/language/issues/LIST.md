@@ -21,3 +21,4 @@ it is solved, and a file when it is empty.
 - [syntax.md](syntax.md): blocks opened mid-line are not closed by `,` `;` `:` `where`; a missing `let` in `do { y = 1; ... }` is reported as a record; interpolated triple-quoted strings not dedented (LIT-5), lexical gaps (`deriving` keyword, `+--`, `12abc`, `-NaN`, infix definitions, `()` pattern)
 - [effects.md](effects.md): suspension in a record rejected (EFF-2), `do` tail run by expected type (EFF-4), `!` outside a do-block (EFF-7 vs manual), effect rules with no item, malformed foreign `Try` decoded silently
 - [guests.md](guests.md): Futhark check takes any applied type as a scalar (GUEST-2/3), an unsourced `bool` entry breaks its file, unnamed rejections
+- [evaluation.md](evaluation.md): no item says how often the work a function does before the function it returns runs (staging)

@@ -223,8 +223,9 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   says how lists are appended.
 
 - **An application through a type variable that stands for a function is
-  rejected.** [reproduced, 2026-10-27] Gap in APP (`a -> b -> c` and `a ->
-  (b -> c)` are one type). `first2 :: [Int -> Int -> c] -> Int -> c` and
+  rejected.** [reproduced, 2026-10-27] Awaits APP-4 (open): under its
+  candidate (a), with APP-1 (`a -> b -> c` and `a -> (b -> c)` are one
+  type), it is well typed. `first2 :: [Int -> Int -> c] -> Int -> c` and
   `d3 :: Int -> Int -> Int -> Int`: `first2 [d3] x 7` is refused with
   "Invalid function application of type: [Int -> Int -> a] -> Int -> a",
   while `apply1 (first2 [d3] x) 7` builds and runs. With `c = Int -> Int`

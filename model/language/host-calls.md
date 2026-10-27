@@ -23,7 +23,7 @@ Only two things end the arguments of such a call: an effect, and a type
 variable of the source's signature. `(a -> <IO> (b -> c))` is called with
 one argument and returns a suspension (HOST-5). A parameter `(a -> b -> c)`
 is called with two arguments and returns `c`, even where `c` is a function.
-Morloc passes any function of the type in that grouping, however it was
+Morloc passes any function of the type called that way, however it was
 defined.
 
 ### HOST-3 `rsize` declares the call groups of a curried foreign function
@@ -45,7 +45,8 @@ Code: conforms 2026-10-27
 
 `f :: Real -> ([Real] -> [Real])` is called as `f :: Real -> [Real] ->
 [Real]` is: with both arguments at once. Only `rsize` splits a sourced
-function's calls (HOST-3), and nothing splits a callback's (HOST-2).
+function's calls (HOST-3), and only an effect or a type variable of the
+signature splits a callback's (HOST-2).
 
 ### HOST-5 A suspension at a host boundary is a callable of no arguments
 Intent: proposed
