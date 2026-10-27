@@ -1727,7 +1727,7 @@ fn err(msg: &str) -> MorlocError { MorlocError::Serialization(msg.into()) }
 
 fn is_null(text: &str) -> bool { text.trim() == "null" }
 
-fn truncate_for_msg(s: &str) -> String {
+pub(crate) fn truncate_for_msg(s: &str) -> String {
     let t = s.trim();
     if t.len() <= 80 { return t.to_string(); }
     let mut end = 77;

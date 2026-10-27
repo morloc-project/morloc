@@ -3783,9 +3783,9 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
     }
     if (voidstar == NULL) {
         if (PyMorlocException != NULL) {
-            PyErr_SetString(PyMorlocException, read_err);
+            PyErr_Format(PyMorlocException, "@read: %s", read_err);
         } else {
-            PyErr_SetString(PyExc_RuntimeError, read_err);
+            PyErr_Format(PyExc_RuntimeError, "@read: %s", read_err);
         }
         if (read_err != NULL) free(read_err);
         free_schema(schema);

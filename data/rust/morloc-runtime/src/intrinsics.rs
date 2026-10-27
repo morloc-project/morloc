@@ -769,7 +769,9 @@ pub(crate) unsafe fn mlc_read(
     let result = read_json_with_schema(ptr::null_mut(), json_copy, schema, &mut err);
     libc::free(json_copy as *mut c_void);
     if result.is_null() {
-        set_errmsg(errmsg, &take_reason(err));
+        let input = crate::json::truncate_for_msg(&CStr::from_ptr(json_str).to_string_lossy());
+        let reason = take_reason(err);
+        set_errmsg(errmsg, &MorlocError::Other(format!("parse failed on '{input}': {reason}")));
     }
     result as *mut c_void
 }
@@ -2352,6 +2354,25 @@ mod tests {
             assert!(v.is_null(), "{text:?} parsed as a list of strings");
             assert!(unsafe { reason(err) }.is_some(), "{text:?} failed without a reason");
         }
+        unsafe { crate::ffi::free_schema(schema) };
+    }
+
+    #[test]
+    fn a_failed_read_names_its_input() {
+        let _shm = crate::init_test_shm();
+        let schema = list_schema();
+        let mut err: *mut c_char = ptr::null_mut();
+        let v = unsafe { mlc_read(c"abc".as_ptr(), schema, &mut err) };
+        assert!(v.is_null());
+        let msg = unsafe { reason(err) }.unwrap();
+        assert!(msg.starts_with("parse failed on 'abc': "), "{msg}");
+
+        let long = CString::new("x".repeat(1000)).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let v = unsafe { mlc_read(long.as_ptr(), schema, &mut err) };
+        assert!(v.is_null());
+        let msg = unsafe { reason(err) }.unwrap();
+        assert!(msg.len() < 300 && msg.contains("xxx..."), "{msg}");
         unsafe { crate::ffi::free_schema(schema) };
     }
 

@@ -1,0 +1,32 @@
+-- A failed @read names its input, in every pool language, so the caller
+-- can tell which value was malformed (MORLOC-CONVENTIONS G4). Each
+-- command passes its input through an identity sourced in one language,
+-- so the @read runs in that language's pool.
+module main (readCpp, readPy, readR, readRust)
+
+import root-cpp
+import root-py
+import root-r
+import root-rust
+
+source Cpp from "lib.hpp" ("id_str" as idCpp)
+source Py from "lib.py" ("id_str" as idPy)
+source R from "lib.R" ("id_str" as idR)
+source Rust from "lib.rs" ("id_str" as idRust)
+
+idCpp :: Str -> Str
+idPy :: Str -> Str
+idR :: Str -> Str
+idRust :: Str -> Str
+
+readCpp :: Str -> Str
+readCpp s = match (@read (idCpp s) :: Try Str Int) | (Ok _) = "parsed" | (Err e) = idCpp e
+
+readPy :: Str -> Str
+readPy s = match (@read (idPy s) :: Try Str Int) | (Ok _) = "parsed" | (Err e) = idPy e
+
+readR :: Str -> Str
+readR s = match (@read (idR s) :: Try Str Int) | (Ok _) = "parsed" | (Err e) = idR e
+
+readRust :: Str -> Str
+readRust s = match (@read (idRust s) :: Try Str Int) | (Ok _) = "parsed" | (Err e) = idRust e
