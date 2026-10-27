@@ -1,0 +1,28 @@
+-- The staged function of main-py.loc, built in Python (where `tick` is) and
+-- called twice by a C++ host: building it still ticks n + 1 times.
+module main (value, pickTicks, localTicks)
+
+import root-py
+import root-cpp
+
+source Py from "helpers.py" ("tick", "ticks")
+source Cpp from "helpers.hpp" ("apply2")
+
+apply2 :: (Int -> Int) -> Int -> Int
+tick :: Int -> Int
+ticks :: Int -> Int
+
+pick :: Int -> (Int -> Int) -> (Int -> Int)
+pick n g
+  ? tick n == 0 = g
+  : pick (n - 1) g
+
+value :: Int -> Int
+value n = apply2 (pick 2 (\x -> x + n)) 1
+
+pickTicks :: Int -> Int
+pickTicks n = ticks (apply2 (pick 2 (\x -> x + n)) 1)
+
+localTicks :: Int -> Int
+localTicks n = ticks (f 1 + f 10) where
+  f = pick 2 (\x -> x + n)

@@ -64,6 +64,16 @@ then size).
   instead of as a located refusal. Spec gap beside COST-11 and HOST-9: what
   a program must do when the host's language cannot hold a value computed
   from a host-made function.
+- **A stage entry's body is expressed under the stage entry's own id.**
+  [read, 2026-10-27] Express.hs `expressCore` gives a root lambda's id to
+  its body. A recursive function returning a function, called partially,
+  has a stage entry (Realize.hs `addStageEntries`) whose body has a function
+  type; if that body reaches the eta clause of `expressPolyExpr` (any form
+  that is not a value and not in `isComputedValue`, e.g. a newtype
+  coercion of a function), it is wrapped in a closure manifold under the
+  same id, and the build stops with "two different manifolds in one pool
+  share the id". A conditional, the common case, is a computed value. No
+  witness for the remaining forms.
 - **Placement after normalization can abort a build that placement before
   it accepted.** [read, 2026-10-26] `placeNormalized` scores and collapses
   every pool tree again and keeps no earlier placement, so an error raised
@@ -115,12 +125,3 @@ then size).
   for 'pack' at type ((Int, Int), Vector 6 Real) -> Matrix 2 3 Real"
   (vector-comprehensive likewise). Implementations of differing
   Nat-dimensioned types would hit the same failure.
-- **A recursive function returning a function, called partially, emits two
-  manifolds with one id.** [reproduced, 2026-10-26, with and without the
-  host-function pass] `pick :: Int -> (Int -> Int) -> (Int -> Int)`,
-  `pick n g ? n == 0 = g : pick (n - 1) g`, and `run n = pyApply (pick 2
-  (\x -> x + n)) 1` (Python): `morloc typecheck --realize` stops with
-  "Compiler bug at Emit.hs: two different manifolds in one pool share the
-  id". The stage entry for the two-argument call nests the tree's manifold
-  in a shape (`let x = if ..; x b`) different from the tree's own root
-  (the application pushed into each branch), under the same id.

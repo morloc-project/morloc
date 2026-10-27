@@ -1744,9 +1744,9 @@ expressPolyExpr
             lambdaTypedArgs = map (`Arg` Nothing) ids
             callVals = bindVarIds ids (map (C . Idx cidx) callInputs)
         retapp <- expressEtaApp callLang e callVals
-        -- The values the wrapped value closes over (a conditional's
-        -- condition, a captured closure) are captured here, as in the local
-        -- case above, and passed across with the arguments.
+        -- The values the wrapped value closes over (a captured closure) are
+        -- captured here, as in the local case above, and passed across with
+        -- the arguments.
         let ctxIds = Set.toList (polyFreeVars retapp `Set.difference` Set.fromList ids)
             ctxArgs = [Arg i None | i <- ctxIds]
         innerWrap <- mkPolyManifold callLang midx (ManifoldFull (ctxArgs <> lambdaArgs)) retapp
@@ -2240,10 +2240,7 @@ expressPolyApp lang (AnnoS (Idx i t) (Idx cidx _, _) (DoBlockS x)) es = do
 -- let-bound @? c = f : g@ inlined at its single call site). Express each branch
 -- as a function value, bind the resulting conditional closure, and call it via
 -- 'PolyLetVar' -> 'LocalCallP', mirroring the 'EvalS' / 'DoBlockS' clauses
--- above. Expressing the branches individually (rather than routing the whole
--- 'IfS' through 'expressPolyExprWrap', as the 'AppS'-head case does) avoids the
--- eta-abstraction clause, which would re-enter 'expressPolyApp' on the 'IfS'
--- and loop.
+-- above.
 expressPolyApp lang (AnnoS (Idx i t) (Idx cidx clang, _) (IfS cond thenE elseE)) es = do
   -- the branches are expressed in the conditional's language and the call
   -- emitted in the caller's, with no crossing between them
@@ -2515,12 +2512,13 @@ isLocalPartial (AppS (AnnoS g _ h) xs)
 isLocalPartial _ = False
 
 -- A computed function value that produces its result through evaluation rather
--- than being a bare callable: a let, a forced thunk, an inline effectful
--- block, or an intrinsic (a constructor's field, a throw). Such values are
--- bound and applied via 'LocalCallP', never eta-abstracted (see the eta
--- clause in 'expressPolyExpr').
+-- than being a bare callable: a let, a conditional, a forced thunk, an inline
+-- effectful block, or an intrinsic (a constructor's field, a throw). Such
+-- values are bound and applied via 'LocalCallP', never eta-abstracted (see the
+-- eta clause in 'expressPolyExpr'), so their work runs once.
 isComputedValue :: ExprS g One c -> Bool
 isComputedValue (LetS {}) = True
+isComputedValue (IfS {}) = True
 isComputedValue (EvalS {}) = True
 isComputedValue (DoBlockS {}) = True
 isComputedValue (IntrinsicS {}) = True
