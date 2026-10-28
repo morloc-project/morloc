@@ -2102,6 +2102,8 @@ intrinsicType IntrCollect =
 -- it never appears as a user-facing intrinsic so no type rule is needed.
 intrinsicType IntrIFileWalk =
   error "intrinsicType: IntrIFileWalk is synthesized post-typecheck and carries its result type from the originating pattern application"
+intrinsicType IntrConform =
+  error "intrinsicType: IntrConform is synthesized post-typecheck and carries the type of the literal it builds"
 
 -- intrinsicArity is defined in Morloc.Namespace.Expr
 

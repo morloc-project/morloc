@@ -1284,6 +1284,28 @@ maybePackableWrap midx lang nativeT wireT = do
               <+> "..."
               <+> "(... as pack, ... as unpack)'."
 
+-- | Build a literal at @userT@ from its wire form @inner@ (at @wireT@) with
+-- the Packable packer @src@. A Python value whose form is a numpy array and
+-- whose wire form is a list is built by the decoder, not by a packer, when it
+-- is received; a literal of that type is built the same way (@conform@), so
+-- the two cannot differ (NATIVE-7).
+packLiteral :: Int -> Lang -> Type -> Type -> Source -> PolyExpr -> MorlocMonad PolyExpr
+packLiteral midx lang wireT userT src inner = do
+  decoded <- decoderBuilds
+  return $
+    if decoded
+      then PolyIntrinsic (Idx midx userT) IntrConform [inner]
+      else PolyApp (PolyExe (Idx midx (FunT [wireT] userT)) (SrcCallP Nothing src)) [inner]
+  where
+    decoderBuilds
+      -- a value holding a function has no schema to decode it by
+      | ML.langName lang /= "py" || containsFunT userT = return False
+      | AppT (VarT v) _ <- wireT, v == BT.list = numpyForm
+      | otherwise = return False
+    numpyForm = do
+      form <- inferConcreteType lang (Idx midx userT)
+      return $ T.takeWhile (/= '<') (renderConcreteForm form) == "numpy.ndarray"
+
 -- | LstS dispatch counterpart to 'dispatchPrimLit'. Computes the
 -- wire-parent root of @userT@, expects it to be list-shaped, and either
 -- emits a natural PolyList or wraps it with the @Packable@ @unpack@
@@ -1325,9 +1347,8 @@ dispatchListLit midx cidx lang userT userTV userArgs xs' = do
           | otherwise ->
               return $ PolyList (Idx cidx userTV) (map (Idx cidx) userArgs) xs'
         Just src ->
-          let inner = PolyList (Idx cidx wireTV) (map (Idx cidx) wireArgs) xs'
-              funT = FunT [AppT (VarT wireTV) wireArgs] userT
-          in return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP Nothing src)) [inner]
+          packLiteral midx lang (AppT (VarT wireTV) wireArgs) userT src $
+            PolyList (Idx cidx wireTV) (map (Idx cidx) wireArgs) xs'
     _ -> MM.throwSourcedError midx "Expected a list type"
 
 -- | Emit a primitive literal at user-facing type @userT@ (whose outer
@@ -1391,9 +1412,7 @@ dispatchPrimLit midx lang userT userTV mkLit = do
   maySrc <- maybePackableWrap midx lang userT (typeOf wireTU)
   case maySrc of
     Nothing -> return (mkLit userTV)
-    Just src ->
-      let funT = FunT [typeOf wireTU] userT
-      in return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP Nothing src)) [mkLit wireTV]
+    Just src -> packLiteral midx lang (typeOf wireTU) userT src (mkLit wireTV)
 
 expressPolyExpr ::
   (Lang -> Lang -> Maybe RemoteForm) ->
@@ -1911,10 +1930,11 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT _) _)) (Idx c
           let wireT = AppT (VarT wireV) wireArgs
               inner = PolyList (Idx cidx wireV) (map (Idx cidx) wireArgs) xs'
           maySrc <- maybePackableWrap midx lang userT wireT
-          expressContainer pc (Idx midx parentLang) (Idx cidx lang) args $ case maySrc of
-            Just src -> PolyApp (PolyExe (Idx midx (FunT [wireT] userT)) (SrcCallP Nothing src)) [inner]
+          built <- case maySrc of
+            Just src -> packLiteral midx lang wireT userT src inner
             -- the type's form here is its wire form's
-            Nothing -> inner
+            Nothing -> return inner
+          expressContainer pc (Idx midx parentLang) (Idx cidx lang) args built
     _ -> tryReduceLstS userT
   where
     tryReduceLstS t = do
@@ -1972,9 +1992,8 @@ expressPolyExpr _ pl pc (AnnoS (Idx midx t) c@(Idx cidx lang, _) e@(TupS _)) = d
       maySrc <- maybePackableWrap midx lang t bodyT
       case maySrc of
         Just src -> do
-          inner <- expressPolyExprWrap lang (Idx cidx bodyT) (AnnoS (Idx midx bodyT) c e)
-          let funT = FunT [bodyT] t
-          return $ PolyApp (PolyExe (Idx midx funT) (SrcCallP Nothing src)) [inner]
+          expressPolyExprWrap lang (Idx cidx bodyT) (AnnoS (Idx midx bodyT) c e)
+            >>= packLiteral midx lang bodyT t src
         Nothing -> expressPolyExprWrap pl pc (AnnoS (Idx midx bodyT) c e)
     Nothing -> MM.throwSourcedError midx "Expected a tuple type"
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entries)) = do

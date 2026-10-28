@@ -768,6 +768,10 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrUnpack tf _ = do
       ast <- Serial.makeSerialAST m lang tf
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    -- @conform gives a literal the form the decoder gives this type.
+    intrinsicSchema m IntrConform tf _ = do
+      ast <- Serial.makeSerialAST m lang tf
+      return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrIFileWalk tf _ = do
       -- The schema describes the result type the walker materializes
       -- (the per-language wrapper deserializes the voidstar via

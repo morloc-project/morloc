@@ -204,6 +204,9 @@ printExpr (IIntrinsicIFileWalk sid mt pathExpr h runtimeArgs) =
     <> ", " <> refExpr pathExpr <> ", &[" <> argList <> "])"
   where
     argList = hcat (punctuate ", " (map printExpr runtimeArgs))
+-- A Rust value is decoded into its declared type, so a literal already has
+-- the decoder's form.
+printExpr (IIntrinsicConform _ e) = printExpr e
 printExpr _ = error "RustPrinter: this intrinsic/expression is unsupported in Rust v1"
 
 -- | The serializer a manifold's result goes through; 'rustReply' recognizes it.

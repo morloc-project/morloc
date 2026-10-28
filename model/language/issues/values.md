@@ -8,14 +8,30 @@ on 0.109.0 unless marked.
   source Py from "native.py" ("kind" as pathKind); pathKind :: Path -> Str`
   with `def kind(x): return type(x).__name__` builds without a warning;
   `./prog pathKind notes/report.txt` prints `"str"`.
-- **A Python `Vector n` literal ignores the element width.** [reproduced,
-  2026-10-28] Violates NATIVE-7. vector-py builds a literal with numpy's
-  default dtype, so `Vector n U8` and `Vector n D` literals (D a nullary
-  `data`) are int64 arrays in the pool that built them, while the same
-  types received from another language are uint8 (vector-py vector.py
-  `morloc_unpackVector`). Repro: a Python source `kind` reporting
-  `xs.dtype`, called on `[1, 2, 3] :: Vector n U8` and on the result of a
-  C++ identity over it.
+- **A decoded value builds only its outermost Packable.** [reproduced,
+  2026-10-28] Spec gap: no item says a decoded value has the native form of
+  its type at every level (NATIVE-1). In Python `kind (unwrap (@read
+  "[[1,2],[3]]"))` with `kind :: [Set Int] -> Str` reporting element types
+  prints `list list list`, and `@read` at `Map Str (Set Int)` gives a dict of
+  lists. The intrinsic result packer (library/Morloc/CodeGenerator/
+  Serialize.hs, `loadResultPacker`) runs the outer type's packer only; a
+  value received as an argument is built at every level (Imperative.hs,
+  `wireToNative`). Affects `@load`, `@read`, `@unpack` and the cell readers.
+- **An R literal does not have a received value's native form.**
+  [reproduced, 2026-10-28] Spec gap: NATIVE-7 rules this for Python only.
+  rmorloc picks an array's R form by element type (U8 `raw`, I64
+  `integer64`, enum factor), but a literal is emitted as `c(...)`: with
+  vector-r, `[1, 2, 3] :: Vector 3 U8` is `integer` when built in R and `raw`
+  when received from C++. Python solves this by giving a Packable literal the
+  decoder's form (`mlc_conform`); R would need its own.
+- **A Python Vector built by library code has numpy's default dtype.**
+  [read, 2026-10-28] Violates NATIVE-7, which makes a `Vector n U8` uint8
+  however the program builds it. vector-py's `map`
+  (`morloc_vec_map`) and an explicit `pack` of a list (`morloc_unpackVector`)
+  call `np.asarray`, so a `Vector n U8` result is int64 and a `Vector n Int`
+  is int64 rather than object; the functions are never given the element
+  type. Open question: pass such functions the target schema, or narrow
+  NATIVE-7 to literals.
 - **A native form for an applied type is not passed to the decoder.**
   [reproduced, 2026-10-28] Violates NATIVE-1. A schema hint is taken from
   the head's general mapping, so a form declared for an applied type

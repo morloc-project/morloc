@@ -437,6 +437,14 @@ static int schema_to_npy_type(morloc_serial_type type) {
     }
 }
 
+// The dtype of a "numpy.ndarray" whose elements have this schema: a
+// fixed-width primitive's own, otherwise dtype=object, which keeps a Vector a
+// NumPy array whatever its elements.
+static int numpy_type_of(const Schema* element_schema) {
+    int t = schema_to_npy_type(element_schema->type);
+    return t < 0 ? NPY_OBJECT : t;
+}
+
 // How a numpy array becomes the data of a list of `elem`.
 //   NPY_ROUTE_BULK: its bytes already are the wire layout; copy them.
 //   NPY_ROUTE_CAST: numpy widens it to that layout without loss; cast, copy.
@@ -1905,27 +1913,8 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             // asString ([1,2,3] :: Vector 3 Int)` stays a NumPy ndarray on
             // both sides, the dtype just shifts from int64 to object.
             int numpy_type_num = -1;
-            bool numpy_hint = (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0);
-            if (numpy_hint) {
-                switch (element_schema->type) {
-                    case MORLOC_BOOL:    numpy_type_num = NPY_BOOL; break;
-                    case MORLOC_SINT8:   numpy_type_num = NPY_INT8; break;
-                    case MORLOC_SINT16:  numpy_type_num = NPY_INT16; break;
-                    case MORLOC_SINT32:  numpy_type_num = NPY_INT32; break;
-                    case MORLOC_SINT64:  numpy_type_num = NPY_INT64; break;
-                    case MORLOC_UINT8:   numpy_type_num = NPY_UINT8; break;
-                    // A Vector of DNA is a compact uint8 buffer. Falling to the
-                    // NPY_OBJECT path below would build one Python object
-                    // per element, which is exactly what the one-byte form
-                    // exists to avoid.
-                    case MORLOC_ENUM:    numpy_type_num = NPY_UINT8; break;
-                    case MORLOC_UINT16:  numpy_type_num = NPY_UINT16; break;
-                    case MORLOC_UINT32:  numpy_type_num = NPY_UINT32; break;
-                    case MORLOC_UINT64:  numpy_type_num = NPY_UINT64; break;
-                    case MORLOC_FLOAT32: numpy_type_num = NPY_FLOAT32; break;
-                    case MORLOC_FLOAT64: numpy_type_num = NPY_FLOAT64; break;
-                    default: numpy_type_num = NPY_OBJECT; break;  // boxed dtype=object path below
-                }
+            if (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0) {
+                numpy_type_num = numpy_type_of(element_schema);
             }
             unsigned char elem_slot_kind = PY_SLOT_LIST;
             if (numpy_type_num == NPY_OBJECT) {
@@ -3808,6 +3797,63 @@ error:
     return NULL;
 }
 
+// A literal built in this pool, given the native form the decoder gives a
+// value received at the same schema (NATIVE-7). Only a "numpy.ndarray" form is
+// chosen by the decoder; any other value is returned as it is, for the type's
+// packer to build. Elements are checked as the encoder checks them.
+static PyObject* pybinding__mlc_conform(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* obj;
+    const char* schema_str;
+    Schema* schema = NULL;
+    PyObject* items = NULL;
+    PyObject* result = NULL;
+    py_walk_t w;
+    py_walk_init(&w, NULL);
+
+    PARSE_ARGS_OR_ABORT(args, "Os", &obj, &schema_str);
+
+    schema = PyTRY(parse_schema, schema_str);
+
+    if (schema->type != MORLOC_ARRAY || schema->hint == NULL
+        || strcmp(schema->hint, "numpy.ndarray") != 0) {
+        free_schema(schema);
+        Py_INCREF(obj);
+        return obj;
+    }
+    if (import_numpy() != 0) goto error;
+    items = PySequence_Fast(obj, "a Vector literal must be a sequence");
+    if (items == NULL) goto error;
+    {
+        // A back-reference names a compound type, which is boxed.
+        const Schema* element_schema = schema->parameters[0];
+        int type_num = numpy_type_of(element_schema);
+        Py_ssize_t n = PySequence_Fast_GET_SIZE(items);
+        npy_intp dims[] = {n};
+        result = PyArray_SimpleNew(1, dims, type_num);
+        if (result == NULL) goto error;
+        for (Py_ssize_t i = 0; i < n; i++) {
+            PyObject* item = PySequence_Fast_GET_ITEM(items, i);
+            void* slot = PyArray_GETPTR1((PyArrayObject*)result, i);
+            if (type_num == NPY_OBJECT) {
+                if (PyArray_SETITEM((PyArrayObject*)result, slot, item) < 0) goto error;
+            } else if (py_write_step(&w, element_schema, slot, item, 0) != 0) {
+                goto error;
+            }
+        }
+    }
+    Py_DECREF(items);
+    free_schema(schema);
+    py_walk_free(&w);
+    return result;
+
+error:
+    Py_XDECREF(items);
+    Py_XDECREF(result);
+    free_schema(schema);
+    py_walk_free(&w);
+    return NULL;
+}
+
 static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     const char* path;
@@ -4624,6 +4670,7 @@ static PyMethodDef Methods[] = {
     {"mlc_load", pybinding__mlc_load, METH_VARARGS, "Load a value from file"},
     {"mlc_show", pybinding__mlc_show, METH_VARARGS, "Serialize a value to JSON string"},
     {"mlc_read", pybinding__mlc_read, METH_VARARGS, "Deserialize a JSON string to a value"},
+    {"mlc_conform", pybinding__mlc_conform, METH_VARARGS, "Give a literal the native form of a received value"},
     {"mlc_unpack", pybinding__mlc_unpack, METH_VARARGS, "Decode a packet held as bytes"},
     {"mlc_open", pybinding__mlc_open, METH_VARARGS, "Open a stream/file as IFile/IStream/OStream handle"},
     {"mlc_close", pybinding__mlc_close, METH_VARARGS, "Close any stream/file handle"},

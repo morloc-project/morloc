@@ -188,6 +188,7 @@ data IExpr
   | IIntrinsicShow Int IExpr -- schemaId, data -> JSON string
   | IIntrinsicRead Int (Maybe IType) IExpr -- schemaId, returnType, json_string -> typed data (nullable)
   | IIntrinsicUnpack Int (Maybe IType) IExpr -- schemaId, returnType, packet bytes -> typed data
+  | IIntrinsicConform Int IExpr -- schemaId, wire-form literal -> the form the decoder gives the schema
   | IIntrinsicOpen Word8 IExpr -- kind byte (IFile=0, IStream=1, OStream=2), path -> handle
   | IIntrinsicClose IExpr -- handle -> ()
   | IIntrinsicUnlinkTemp IExpr
@@ -2695,6 +2696,9 @@ lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs])
   -- pass the resolved type so `_mlc_read<T>` gets its template arg.
   innerType <- lcTypeOf cfg (typeFof origExpr)
   return $ strDocs {poolExpr = lcPrintExpr cfg (IIntrinsicRead sid innerType (IRawExpr (render (poolExpr strDocs))))}
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrConform (Just schema) [dataDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  return $ dataDocs {poolExpr = lcPrintExpr cfg (IIntrinsicConform sid (IRawExpr (render (poolExpr dataDocs))))}
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrUnpack (Just schema) [bytesDocs]) = do
   sid <- lcRegisterSchema cfg schema
   innerType <- lcTypeOf cfg (typeFof origExpr)

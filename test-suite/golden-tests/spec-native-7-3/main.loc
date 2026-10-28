@@ -1,0 +1,84 @@
+-- Spec NATIVE-7: in Python a `Vector n U8` or `Vector n D` (D a nullary
+-- `data`) is a numpy uint8 array both when the program builds it and when it
+-- arrives from another language. The other element types follow the same
+-- rule: a literal has the dtype a received value has.
+module main
+  ( litU8, cppU8
+  , litDirs, cppDirs
+  , litI32, cppI32
+  , litF32, cppF32
+  , litInt, cppInt
+  , varU8
+  , nested
+  , poly
+  , overU8
+  , litMatrix
+  )
+
+import root-py
+import root-cpp
+import vector
+import vector-py
+import vector-cpp
+import map
+import map-py
+import tensor
+import tensor-py
+
+data Dir = North | South
+
+source Py from "kind.py" ("kind", "kind_map" as kindMap, "kind_matrix" as kindMatrix)
+kind :: Vector n a -> Str
+kindMap :: Map Str (Vector 2 U8) -> Str
+kindMatrix :: Matrix 2 2 I32 -> Str
+
+source Cpp from "echo.hpp" ("echo")
+echo :: Vector n a -> Vector n a
+
+litU8 :: Str
+litU8 = kind ([1, 2, 3] :: Vector 3 U8)
+
+cppU8 :: Str
+cppU8 = kind (echo ([1, 2, 3] :: Vector 3 U8))
+
+litDirs :: Str
+litDirs = kind ([North, South] :: Vector 2 Dir)
+
+cppDirs :: Str
+cppDirs = kind (echo ([North, South] :: Vector 2 Dir))
+
+litI32 :: Str
+litI32 = kind ([1, 2] :: Vector 2 I32)
+
+cppI32 :: Str
+cppI32 = kind (echo ([1, 2] :: Vector 2 I32))
+
+litF32 :: Str
+litF32 = kind ([1.5, 2.5] :: Vector 2 F32)
+
+cppF32 :: Str
+cppF32 = kind (echo ([1.5, 2.5] :: Vector 2 F32))
+
+litInt :: Str
+litInt = kind ([1, 2] :: Vector 2 Int)
+
+cppInt :: Str
+cppInt = kind (echo ([1, 2] :: Vector 2 Int))
+
+varU8 :: U8 -> Str
+varU8 x = kind ([x, x] :: Vector 2 U8)
+
+nested :: Str
+nested = kindMap ([("a", [1, 2])] :: Map Str (Vector 2 U8))
+
+single :: a -> Vector 1 a
+single x = [x]
+
+poly :: Str
+poly = kind (single (5 :: I16))
+
+overU8 :: U8 -> Str
+overU8 x = kind ([x + 250] :: Vector 1 U8)
+
+litMatrix :: Str
+litMatrix = kindMatrix (((2, 2), [1, 2, 3, 4]) :: Matrix 2 2 I32)
