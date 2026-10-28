@@ -17,14 +17,14 @@ on 0.109.0 unless marked.
   Serialize.hs, `loadResultPacker`) runs the outer type's packer only; a
   value received as an argument is built at every level (Imperative.hs,
   `wireToNative`). Affects `@load`, `@read`, `@unpack` and the cell readers.
-- **A received newtype over a list ignores its Python form.** [reproduced,
-  2026-10-28] Violates NATIVE-9, NEWT-4 and NATIVE-1. `newtype Frozen a = [a]; type Py =>
-  (Frozen a) = "tuple" a`, with Packable pack in Python: a literal is a tuple
-  (CLS-2), but a `Frozen Int` returned by a C++ function reaches Python as a
-  list, so a Python source checking for a tuple fails. A newtype whose body
-  is a list serializes as the list (library/Morloc/CodeGenerator/Serial.hs,
-  `AliasIsList`) and the decoder leaves a "tuple" hint on an array as a list,
-  so the pack is never applied.
+- **A received newtype with no Packable instance ignores its form.**
+  [reproduced, 2026-10-28] Violates NEWT-4 and NATIVE-9. `newtype Frozen a =
+  [a]; type Py => (Frozen a) = "tuple" a` with no Packable instance builds; a
+  `Frozen Int` returned by a C++ function reaches Python as a list, while a
+  Frozen literal is refused for want of an instance. Repro:
+  /tmp/claude-1000/-work/b22ec8aa-199c-401c-8f03-0b140cbccdb1/scratchpad/n10/noinst2.loc.
+  NEWT-4 asks which forms a binding can build without an instance; nothing
+  records that today.
 - **A Python Vector built by library code has numpy's default dtype.**
   [read, 2026-10-28] Violates NATIVE-7, which makes a `Vector n U8` uint8
   however the program builds it. vector-py's `map`

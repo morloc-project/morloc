@@ -86,3 +86,16 @@ storage and element checks. The form is a function of T's schema, hints
 included, and of nothing else. In Python a numpy array a literal builds or
 a pool receives is read-only. In R a `Vector n U8` and a `Vector n D` (D a nullary
 `data`) are `raw`, and a `[D]` is a factor.
+
+### NATIVE-10 A Packable instance gives a language both methods or neither
+Intent: ruled 2026-10-28
+Tests: spec-native-10-1, spec-native-10-2, spec-native-10-3, spec-native-10-4
+Code: conforms 2026-10-28
+
+A `Packable` instance gives a language both `pack` and `unpack` for a type
+with a form of its own in that language, or neither, else the program does
+not build. The instance is every declaration of it (CLS-2), and a method
+written in Morloc serves every language. A value that language receives is built by `pack` and one it sends is
+taken apart by `unpack`, so with only one of them a received value and a
+literal would differ (NATIVE-9). Where the type has no form of its own in a
+language, its `unpack` there is free (NEWT-7).

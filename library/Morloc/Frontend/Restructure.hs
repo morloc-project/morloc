@@ -1309,6 +1309,9 @@ checkTypeInvariants dag = do
   -- DERIV-5: a type does not both derive a class and implement it by hand.
   checkDerivedConflicts dag gscope
 
+  -- NATIVE-10: a Packable instance gives a language both methods or neither.
+  checkPackableSides dag cscopes
+
 -- | The head of every @Packable@ instance has a representation, and the
 -- instance's wire type is that representation at the head's arguments.
 -- The compiler's reserved types are exempt; a record or data type, which has
@@ -1318,15 +1321,10 @@ checkPackableRepresentations dag gscope =
   mapM_ check
     [ (i, stripForall w, stripForall n)
     | (_, (e, _)) <- Map.toList dag
-    , ExprI i (IstE _ (ClassName "Packable") _ [w, n] _) <- instancesIn e
+    , ExprI i (IstE _ (ClassName "Packable") _ [w, n] _) <- instanceExprs e
     ]
   where
-    instancesIn x@(ExprI _ (IstE {})) = [x]
-    instancesIn (ExprI _ (ModE _ es)) = concatMap instancesIn es
-    instancesIn _ = []
-
-    stripForall (ForallU _ t) = stripForall t
-    stripForall t = t
+    stripForall = stripForallU
 
     check :: (Int, TypeU, TypeU) -> MorlocMonad ()
     check (i, w, n) =
@@ -1361,6 +1359,59 @@ checkPackableRepresentations dag gscope =
     isRecordBody NamU {} = True
     isRecordBody _ = False
 
+-- | A Packable instance gives a language both @pack@ and @unpack@ or
+-- neither (NATIVE-10), where the type has a form of its own in that
+-- language: a value that language receives is built by @pack@ and one it
+-- sends is taken apart by @unpack@, so with only one of them a received value
+-- and a literal would differ. An instance is every declaration of it, in any
+-- module (CLS-2); a method written in Morloc serves every language. A
+-- derived or automatic method is the identity cast, which serves only where
+-- the type has no form of its own (NEWT-7), so it does not count here.
+checkPackableSides :: DAG MVar a ExprI -> Map.Map Lang Scope -> MorlocMonad ()
+checkPackableSides dag cscopes =
+  case [ (i, lang, h, method)
+       | (h, decls) <- Map.toList byHead
+       , lang <- nub [l | (_, ms) <- decls, (Just l, _) <- ms]
+       , ownForm lang h
+       , let given m = any (\(_, ms) -> any (\(l, m') -> m' == m && maybe True (== lang) l) ms) decls
+       , (method, missing) <- [("pack", "unpack"), ("unpack", "pack")]
+       , given method && not (given missing)
+       , i <- take 1 [i' | (i', ms) <- decls, (l, m') <- ms, m' == method, maybe True (== lang) l]
+       ] of
+    [] -> return ()
+    ((i, lang, h, method) : _) ->
+      MM.throwSourcedError i $
+        "This Packable instance gives" <+> pretty lang <+> "a" <+> squotes (pretty method)
+          <+> "for" <+> squotes (pretty h) <+> "but no"
+          <+> squotes (if method == ("pack" :: Text) then "unpack" else "pack") <> "."
+          <+> "A type with a" <+> pretty lang <+> "form of its own needs both there."
+  where
+    -- The methods each declaration gives, by head type: a sourced one in
+    -- its language, a Morloc one (Nothing) in all.
+    byHead :: Map.Map TVar [(Int, [(Maybe Lang, Text)])]
+    byHead = Map.fromListWith (++)
+      [ (extractKey (stripForallU n), [(i, concatMap methodsOf es)])
+      | (_, (e, _)) <- Map.toList dag
+      , ExprI i (IstE Declared (ClassName "Packable") _ [_, n] es) <- instanceExprs e
+      ]
+    methodsOf (ExprI _ (SrcE src))
+      | srcAlias src == EV "pack" = [(Just (srcLang src), "pack")]
+      | srcAlias src == EV "unpack" = [(Just (srcLang src), "unpack")]
+    methodsOf (ExprI _ (AssE (EV "pack") _ _)) = [(Nothing, "pack")]
+    methodsOf (ExprI _ (AssE (EV "unpack") _ _)) = [(Nothing, "unpack")]
+    methodsOf _ = []
+    ownForm lang h = maybe False (Map.member h) (Map.lookup lang cscopes)
+
+-- | The instance declarations in a module expression.
+instanceExprs :: ExprI -> [ExprI]
+instanceExprs x@(ExprI _ (IstE {})) = [x]
+instanceExprs (ExprI _ (ModE _ es)) = concatMap instanceExprs es
+instanceExprs _ = []
+
+stripForallU :: TypeU -> TypeU
+stripForallU (ForallU _ t) = stripForallU t
+stripForallU t = t
+
 -- | A @deriving@ clause and a hand-written instance of the same class for
 -- the same type conflict (DERIV-5). A newtype's automatic @unpack@ is not a
 -- clause: an explicit Packable instance beside it is an alternative.
@@ -1382,13 +1433,9 @@ checkDerivedConflicts dag gscope =
     instances =
       [ (i, origin, cls, stripForall (last ts), es)
       | (_, (e, _)) <- Map.toList dag
-      , ExprI i (IstE origin cls _ ts@(_ : _) es) <- instancesIn e
+      , ExprI i (IstE origin cls _ ts@(_ : _) es) <- instanceExprs e
       ]
-    instancesIn x@(ExprI _ (IstE {})) = [x]
-    instancesIn (ExprI _ (ModE _ es)) = concatMap instancesIn es
-    instancesIn _ = []
-    stripForall (ForallU _ t) = stripForall t
-    stripForall t = t
+    stripForall = stripForallU
     isPackDef (ExprI _ (AssE (EV "pack") _ _)) = True
     isPackDef _ = False
 

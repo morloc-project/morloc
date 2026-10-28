@@ -1029,7 +1029,48 @@ newtTests :: TestTree
 newtTests =
   testGroup
     "NEWT"
-    [ accept
+    [ rejectUser
+        "spec-native-10-2"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Frozen a = [a]
+        type Py => (Frozen a) = "tuple" a
+        instance Packable [a] (Frozen a) where
+          source Py from "frozen.py" ("freeze" as pack)
+        f :: Frozen Int -> Int
+        |]
+    , rejectUser
+        "spec-native-10-3"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Frozen a = [a]
+        type Py => (Frozen a) = "tuple" a
+        instance Packable [a] (Frozen a) where
+          source Py from "frozen.py" ("thaw" as unpack)
+        f :: Frozen Int -> Int
+        |]
+    , accept
+        "spec-native-10-4"
+        [r|
+        module main (f)
+        class Packable a b where
+          pack :: a -> b
+          unpack :: b -> a
+        newtype Frozen a = [a]
+        type Py => (Frozen a) = "tuple" a
+        instance Packable [a] (Frozen a) where
+          source Py from "frozen.py" ("freeze" as pack)
+        instance Packable [a] (Frozen a) where
+          source Py from "frozen.py" ("thaw" as unpack)
+        f :: Frozen Int -> Int
+        |]
+    , accept
         "spec-newt-3-1"
         [r|
         module main (f)
