@@ -1,0 +1,7 @@
+-- Spec NATIVE-7: the twin of main.loc without the declaration.
+module main (f)
+
+import root-py
+
+f :: [U8] -> Int
+f xs = length xs

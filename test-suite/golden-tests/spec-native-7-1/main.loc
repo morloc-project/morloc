@@ -1,0 +1,32 @@
+-- Spec NATIVE-7: in Python a list is a Python list whatever its elements,
+-- so a [U8] or a list of an enum is a list both when the program builds it
+-- and when it arrives from another language.
+module main (litBytes, cppBytes, litDirs, cppDirs, roundTrip)
+
+import root-py
+import root-cpp
+
+data Dir = North | South
+
+source Py from "kind.py" ("kind", "kind_dirs" as kindDirs)
+kind :: [U8] -> Str
+kindDirs :: [Dir] -> Str
+
+source Cpp from "make.hpp" ("cpp_bytes" as cppMake, "cpp_dirs" as cppEcho)
+cppMake :: Int -> [U8]
+cppEcho :: [Dir] -> [Dir]
+
+litBytes :: Str
+litBytes = kind [1, 2, 3]
+
+cppBytes :: Int -> Str
+cppBytes n = kind (cppMake n)
+
+litDirs :: Str
+litDirs = kindDirs [North, South, North]
+
+cppDirs :: Str
+cppDirs = kindDirs (cppEcho [North, South, North])
+
+roundTrip :: Int -> [U8]
+roundTrip n = cppMake n

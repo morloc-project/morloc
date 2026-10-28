@@ -36,10 +36,10 @@ import root ((.))
 --
 -- Native representations:
 --
---   Python   bytes
---      `bytes` stores 1 byte per element, immutable. A Python `list of
---      int` would cost ~28 bytes per element (PyLong header overhead),
---      so `bytes` is also the only sane choice for performance.
+--   Python   list
+--      A morloc list is a Python list whatever its elements (NATIVE-7), so
+--      a [U8] is a list of ints, and compact bytes are spelled
+--      `Vector n U8` (a numpy uint8 array).
 --
 --   C++      std::vector<uint8_t>
 --      A packed 1-byte-per-element buffer. A `std::string` would be
@@ -66,7 +66,7 @@ import root ((.))
 
 type Py  => Str   = "str"
 type Py  => U8 = "int"
-type Py  => (List U8) = "bytes" U8
+type Py  => (List a) = "list" a
 
 type Cpp => Str   = "std::string"
 type Cpp => U8 = "uint8_t"

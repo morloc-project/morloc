@@ -34,6 +34,7 @@ import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Frontend.Rename (renameLocals)
+import Morloc.Language (langName)
 import Morloc.Frontend.TerminalActions (synthesizeTerminalActions)
 import Morloc.Frontend.TypeNames (isReservedTypeName, resolveTypeNames)
 import Morloc.Typecheck.Internal (expandStructuralAliases, expandTransparentAliases, isSubtypeOf2, mapTypeUChildren, structuralAliasHead, structuralAliasesIn, traverseTypeUChildren, typeUChildren)
@@ -1287,6 +1288,9 @@ checkTypeInvariants dag = do
   -- per language. Per-language overrides belong to newtypes or primitives.
   checkAliasLanguageFormConflict dag gscope cscopes
 
+  -- NATIVE-7: in Python a list is a list whatever its elements.
+  checkPythonListForms dag
+
   -- Invariant 2: a `newtype` wire-parent chain must not contain a cycle.
   checkNewtypeCycles gscope
 
@@ -1445,6 +1449,30 @@ checkAliasLanguageFormConflict dag gscope cscopes =
           | otherwise = []
         go (ExprI _ (ModE _ es)) = concatMap go es
         go _ = []
+
+-- | NATIVE-7: a Python form for a list (`type Py => (List U8) = "bytes" U8`)
+-- other than `list` is refused where it is declared. A list the program
+-- builds is always a Python list, so another form could not hold for it.
+checkPythonListForms :: DAG MVar a ExprI -> MorlocMonad ()
+checkPythonListForms dag =
+  case [(i, t) | (_, (e, _)) <- Map.toList dag, (i, t) <- listForms e] of
+    [] -> return ()
+    ((i, t) : _) ->
+      MM.throwSourcedError i $
+        "In Python a list is always a Python `list`, but this gives it the form"
+          <+> squotes (pretty t) <> "."
+          <> line
+          <> "Use `Vector n a` (a numpy array) for a compact buffer."
+  where
+    listForms (ExprI i (TypE (ExprTypeE (Just (lang, _)) v _ body _ _)))
+      | langName lang == "py" && v == TV "List" =
+          [(i, h) | Just h <- [formHead body], h /= "list"]
+    listForms (ExprI _ (ModE _ es)) = concatMap listForms es
+    listForms _ = []
+    formHead (VarU (TV h)) = Just h
+    formHead (AppU (VarU (TV h)) _) = Just h
+    formHead (ForallU _ t) = formHead t
+    formHead _ = Nothing
 
 -- | Enforce Invariant 2: the wire-parent edges between newtypes must form
 -- a DAG. A cycle (e.g. @newtype A = B; newtype B = A@) is rejected at the

@@ -8,13 +8,21 @@ on 0.109.0 unless marked.
   source Py from "native.py" ("kind" as pathKind); pathKind :: Path -> Str`
   with `def kind(x): return type(x).__name__` builds without a warning;
   `./prog pathKind notes/report.txt` prints `"str"`.
-- **A Python `[U8]` built in morloc is a list, not bytes.** [reproduced,
-  2026-10-27] Violates NATIVE-1 (root-py maps `List U8` to `bytes`).
-  `source Py from "t.py" ("kind"); kind :: [U8] -> Str` with `def kind(x):
-  return type(x).__name__`: `kind [1, 2, 3]` and `kind ([1, 2] <> [3])`
-  print `"list"`, while a `[U8]` received from another pool is `bytes`, so
-  a Python native sees two forms of one type. root-py's `mempty = []` is
-  the same list at `[U8]`.
+- **A Python `Vector n` literal ignores the element width.** [reproduced,
+  2026-10-28] Violates NATIVE-7. vector-py builds a literal with numpy's
+  default dtype, so `Vector n U8` and `Vector n D` literals (D a nullary
+  `data`) are int64 arrays in the pool that built them, while the same
+  types received from another language are uint8 (vector-py vector.py
+  `morloc_unpackVector`). Repro: a Python source `kind` reporting
+  `xs.dtype`, called on `[1, 2, 3] :: Vector n U8` and on the result of a
+  C++ identity over it.
+- **A native form for an applied type is not passed to the decoder.**
+  [reproduced, 2026-10-28] Violates NATIVE-1. A schema hint is taken from
+  the head's general mapping, so a form declared for an applied type
+  (`type L => (T X) = "..." X` beside `type L => (T a) = "..." a`) never
+  reaches the decoder. Seen with Python `List U8 = "bytes"`, now refused by
+  NATIVE-7; R's `List U8 = "raw"` works only because rmorloc routes every
+  U8 array to raw.
 - **A literal of a newtype over a Packable type is rejected.** [reproduced,
   2026-10-18] `import root-py; import map-py; newtype Holder = Map Str Int`;
   `[("a", 1)] :: Holder` fails "Cannot construct a value of 'Holder' from a

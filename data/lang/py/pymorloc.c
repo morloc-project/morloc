@@ -1791,7 +1791,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             break;
         // The runtime hands back the ordinal and the generated pool code
         // wraps it in the enum class. Keeping the Python class out of the
-        // C runtime is what lets a bare [DNA] stay a raw buffer.
+        // C runtime is what lets a Vector of an enum stay a uint8 array.
         case MORLOC_ENUM:
             obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
             break;
@@ -1914,7 +1914,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                     case MORLOC_SINT32:  numpy_type_num = NPY_INT32; break;
                     case MORLOC_SINT64:  numpy_type_num = NPY_INT64; break;
                     case MORLOC_UINT8:   numpy_type_num = NPY_UINT8; break;
-                    // A [DNA] stays a compact uint8 buffer. Falling to the
+                    // A Vector of DNA is a compact uint8 buffer. Falling to the
                     // NPY_OBJECT path below would build one Python object
                     // per element, which is exactly what the one-byte form
                     // exists to avoid.
@@ -1987,12 +1987,6 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 // Note that we do not want to give ownership to Python.
                 break;
             } else if (schema->hint != NULL && strcmp(schema->hint, "list") == 0) {
-                // Explicit "list" hint takes precedence over the UInt8 fast-path
-                // below: the user declared `type Py => (List a) = "list" a`
-                // (or similar), so honour that representation even for UInt8
-                // elements. Without this, a [UInt8] packet would silently
-                // arrive as `bytes` and mismatch a Python-pool list literal
-                // of the same morloc type.
                 obj = PyList_New(array->size);
                 if(obj == NULL){
                     PyINTERNAL_ABORT("Failed to allocate list");
@@ -2012,20 +2006,14 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 // Note: Similar to the numpy case, we don't want to give ownership to Python.
                 // The bytearray is created from a copy of the data, so no additional handling is needed.
                 break;
-            } else if (element_schema->type == MORLOC_UINT8
-                       || element_schema->type == MORLOC_ENUM) {
-                // Default for UInt8 arrays when hint is "bytes" or absent.
-                //
-                // An enum array takes the same path: its elements are tag
-                // bytes, so the wire buffer is already the right shape. The
-                // alternative -- one Python object per element -- is what
-                // the one-byte form exists to avoid, and over a genomic
-                // [DNA] it is the difference between usable and not. The
-                // caller sees ordinals; the generated pool code is where an
-                // enum identity is reattached if one is wanted.
+            } else if (schema->hint != NULL && strcmp(schema->hint, "bytes") == 0
+                       && bytes_fit_elements(element_schema)) {
+                // A newtype whose Python form is bytes. Any other "bytes"
+                // hint is the post-pack form of a Packable outer type, and
+                // its wire array is read as a list below.
                 obj = PyBytes_FromStringAndSize((const char*)absptr, array->size);
                 if (obj == NULL) {
-                    PyRAISE("Failed to one bytes")
+                    PyRAISE("Failed to create bytes")
                 }
                 break;
             } else {

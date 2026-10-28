@@ -1,5 +1,7 @@
 -- The representation claim, asserted rather than assumed: a nullary `data`
--- costs one byte, and `[DNA]` is byte-for-byte a `[U8]` in shared memory.
+-- costs one byte, and `Vector n DNA` is byte-for-byte a `Vector n U8`. In
+-- Python a list is a list whatever its elements (NATIVE-7), so the compact
+-- form is spelled `Vector`, a numpy uint8 array for both.
 --
 -- This is the whole reason the enum tier exists. A four-letter alphabet
 -- should cost what a byte costs -- strictly better than Python's 24-byte
@@ -7,13 +9,13 @@
 -- at once:
 --
 --   * the schema's width is 1 and `is_fixed_width()` is true, so
---   * `array_data_is_flat()` is true for `[DNA]`, so the array takes the
+--   * `array_data_is_flat()` is true for `Vector n DNA`, so the array takes the
 --     bulk-memcpy path and the 64-byte-aligned data buffer that primitive
 --     numerics get, rather than the per-element walk, and
 --   * nothing in the pool materializes one object per base.
 --
 -- `sizeParity` is the load-bearing assertion: the same data measured as
--- [DNA] and as [U8] must occupy the same number of bytes. If the enum ever
+-- `Vector n DNA` and as `Vector n U8` must occupy the same number of bytes. If the enum ever
 -- becomes boxed, or picks up a per-element indirection the way Optional
 -- has, this is the test that says so -- the other exports would all still
 -- pass.
@@ -32,6 +34,8 @@ module main
   )
 
 import root-py
+import vector
+import vector-py
 
 data DNA = A | C | G | T
 
@@ -43,17 +47,17 @@ source Py from "density.py"
   , "identity"       as idBases
   )
 
-sizeAsEnum  :: [DNA] -> Int
-sizeAsBytes :: [U8] -> Int
-countPurines :: [DNA] -> Int
-decodeHead :: [DNA] -> DNA
-idBases :: [DNA] -> [DNA]
+sizeAsEnum  :: Vector n DNA -> Int
+sizeAsBytes :: Vector n U8 -> Int
+countPurines :: Vector n DNA -> Int
+decodeHead :: Vector n DNA -> DNA
+idBases :: Vector n DNA -> Vector n DNA
 
 -- Both sides measure the same four values, once through the enum schema
 -- and once through the plain byte schema. Equal by construction if the
 -- enum is a byte; unequal the moment it is not.
-sizeParity :: [DNA] -> [U8] -> Bool
+sizeParity :: Vector n DNA -> Vector m U8 -> Bool
 sizeParity xs ys = sizeAsEnum xs == sizeAsBytes ys
 
-roundTripLength :: [DNA] -> Int
+roundTripLength :: Vector n DNA -> Int
 roundTripLength xs = length (idBases xs)

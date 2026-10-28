@@ -48,3 +48,14 @@ Code: unaudited
 
 If two modules in a program give `T` different forms in `L`, is that a load
 error, or does the form in scope where the type is declared win (MOD-14)?
+
+### NATIVE-7 A Python list is a list whatever its elements
+Intent: ruled 2026-10-28
+Tests: spec-native-7-1, spec-native-7-2
+Code: deviates (issues/values.md)
+
+In Python, `[[T]]_Py` is a `list` for every `T`, `U8` and nullary `data`
+included, whether the program builds the value or receives it from another
+language. A compact buffer of one-byte values is `Vector n U8`, or
+`Vector n D` for a nullary `data` `D`: a numpy `uint8` array whose bytes must
+be valid values of the element type.

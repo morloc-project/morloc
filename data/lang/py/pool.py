@@ -355,6 +355,8 @@ def mlc_reflect_from_tuple(tup, arg_codecs, res_codec):
     # decodes the result. Used when the closure is nested in an aggregate
     # whose enclosing get_value has already parsed the tuple.
     home_lang, mid, captured = tup
+    # A [U8] decodes as a list (NATIVE-7); foreign_call takes packets as bytes.
+    captured = [bytes(p) for p in captured]
     sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
     def _call(*args):
         own = [mlc_encode(a, s) for a, s in zip(args, arg_codecs)]
