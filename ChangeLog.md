@@ -44,6 +44,8 @@ Fixes
    for U8 and `integer64` for I64; an element out of range is an error
  * A list field marked `@many` in an `@unroll` record takes several values
    after one flag (`--lang r py`) or a repeated flag
+ * An `@unroll` record passed to a function written only in Morloc no longer
+   fails with "record source must be a JSON object"
 
 0.110.1 [2026-10-23]
 --------------------

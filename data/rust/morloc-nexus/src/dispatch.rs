@@ -382,7 +382,7 @@ pub fn dispatch_command_parsed(
 
     // Execute the command
     if cmd.is_pure() {
-        run_pure_command(cmd, &parsed_args, config);
+        run_pure_command(cmd, &parsed_args, config, manifest);
     } else {
         // NUL-in-Str guard. If the target pool's language opts out of
         // interior-NUL strings (e.g. R), scan every parsed arg for an
@@ -1760,7 +1760,7 @@ pub(crate) fn print_result_c(
 }
 
 /// Execute a pure command by evaluating the expression via C library.
-fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
+fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, manifest: &Manifest) {
     use morloc_runtime_types::schema::parse_schema;
 
     // Open a per-eval SHM arena. Every shm::shmalloc that fires while
@@ -1900,11 +1900,8 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
         let c_schema = morloc_runtime_types::cschema::CSchema::from_rust(&schema);
 
         // Many-args go through the dedicated list-assembly C entry
-        // point; everything else (Value / Null / Group) goes through
-        // the scalar parse_cli_data_argument path. Group is treated
-        // as Null at the pure path -- pure morloc expressions cannot
-        // currently consume record-unrolled args (the schema covers
-        // the whole record; group plumbing lives in the remote path).
+        // point and an unrolled record is assembled as for a pool; Value
+        // and Null go through the scalar parse_cli_data_argument path.
         // Variadic args (`@many`): compile-time validation rejects
         // every form/source modifier; only the IEEE 754 special-value
         // wrap runs per token.
@@ -1935,15 +1932,15 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
                     initialize_positional, free_argument_t, parse_cli_data_argument_list,
                 )
             },
+            ArgValue::Group { .. } => build_arg_packet(i, arg_val, arg_def, manifest),
             _ => {
                 // See the sibling branch above: a null has no token, so it is
                 // dispatched without the arg's source/form/check shape.
                 let (raw_str, shape) = match arg_val {
                     ArgValue::Value(s) => (s.clone(), ArgShape::from_arg(arg_def)),
                     ArgValue::Null => ("null".to_string(), None),
-                    ArgValue::Group { .. } => ("null".to_string(), None),
                     ArgValue::Json(text) => (text.clone(), None),
-                    ArgValue::Many { .. } => unreachable!(),
+                    ArgValue::Many { .. } | ArgValue::Group { .. } => unreachable!(),
                     // A `@parse` entry always runs in a pool: the compiler
                     // rejects one that would be evaluated here.
                     ArgValue::Parsed { .. } | ArgValue::Embed { .. } | ArgValue::AsParent { .. } => unreachable!(),
