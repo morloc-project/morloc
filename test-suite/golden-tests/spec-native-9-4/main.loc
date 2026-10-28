@@ -195,4 +195,7 @@ report x =
   , same "varOpt:py" (x :: ?U8) (echoPy (x :: ?U8))
   , same "varOpt:r" (x :: ?U8) (echoR (x :: ?U8))
   , same "varOpt:cpp" (x :: ?U8) (echoCpp (x :: ?U8))
+  , same "readVecU8" ([1, 2] :: Vector 2 U8) (unwrap (@read "[1,2]") :: Vector 2 U8)
+  , same "readListU8" ([1, 2] :: [U8]) (unwrap (@read "[1,2]") :: [U8])
+  , same "readListI64" ([1, 2] :: [I64]) (unwrap (@read "[1,2]") :: [I64])
   ]

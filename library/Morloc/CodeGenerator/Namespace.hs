@@ -902,6 +902,12 @@ data NativeExpr
   -- that expandSerialize\/expandDeserialize do for SerialPack inside
   -- SerialOptional. Used by Serialize.hs to wrap intrinsic results
   -- (@load) whose user-facing optional type wraps a Packable inner.
+  | WireToNativeN TypeF SerialAST Intrinsic Text [NativeExpr]
+  -- ^ A runtime intrinsic that decodes a value (@read, @load, @unpack,
+  -- @cellget), called with its schema and arguments, and the decoded value
+  -- given its native form as a received argument is: decoded into the form
+  -- the language decodes that serial AST into, then the packers applied at
+  -- every level. The TypeF is the native result.
   | LoopN TypeF [(Int, NativeExpr)] (LoopBody NativeExpr SerialExpr NativeExpr)
     -- ^ A native tail-loop: the entry of a loop called from its own pool,
     -- taking and returning native values. Fields: result type; each
@@ -1033,6 +1039,7 @@ foldlNE f b (CoerceN_ _ _ x) = f b x
 foldlNE f b (IfN_ _ c t e) = foldl f b [c, t, e]
 foldlNE f b (IntrinsicN_ _ _ _ xs) = foldl f b xs
 foldlNE f b (MapOptionalN_ _ _ _ x) = f b x
+foldlNE f b (WireToNativeN_ _ _ _ _ xs) = foldl f b xs
 foldlNE f b (LoopN_ _ starts body) = foldl f b (map snd starts <> loopBodyLeaves body)
 
 -- | Direct 'PolyExpr' children, for structural traversal. 'PolyExpr' has no
@@ -1168,6 +1175,8 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidNativeExpr' (IntrinsicN_ t intr msch (unzip -> (reqs, es))) =
       return (foldl mappend' mempty' reqs, IntrinsicN t intr msch es)
     monoidNativeExpr' (MapOptionalN_ t wt src (a, ne)) = return (a, MapOptionalN t wt src ne)
+    monoidNativeExpr' (WireToNativeN_ t s intr sch (unzip -> (reqs, es))) =
+      return (foldl mappend' mempty' reqs, WireToNativeN t s intr sch es)
     monoidNativeExpr' (LoopN_ t starts body) =
       let reqs = map (fst . snd) starts <> loopBodyLeaves (trimap fst fst fst body)
        in return (foldl mappend' mempty' reqs, LoopN t (map (second snd) starts) (trimap snd snd snd body))
@@ -1320,6 +1329,7 @@ data NativeExpr_ nm se ne sr nr
   | IfN_ TypeF ne ne ne
   | IntrinsicN_ TypeF Intrinsic (Maybe Text) [ne]
   | MapOptionalN_ TypeF TypeF Source ne
+  | WireToNativeN_ TypeF SerialAST Intrinsic Text [ne]
   | LoopN_ TypeF [(Int, ne)] (LoopBody ne se ne)
 
 manifoldFoldToFoldWith :: FoldManifoldM m sm nm se ne sr nr -> FoldWithManifoldM m sm nm se ne sr nr
@@ -1543,6 +1553,9 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
     f full@(MapOptionalN t wt src ne) = do
       ne' <- surroundFoldNativeExprM sfm fm ne
       opFoldWithNativeExprM fm full (MapOptionalN_ t wt src ne')
+    f full@(WireToNativeN t sa intr sch nes) = do
+      nes' <- mapM (surroundFoldNativeExprM sfm fm) nes
+      opFoldWithNativeExprM fm full (WireToNativeN_ t sa intr sch nes')
     f full@(LoopN t starts body) = do
       starts' <- mapM (\(i, e) -> (,) i <$> surroundFoldNativeExprM sfm fm e) starts
       body' <- trimapM (surroundFoldNativeExprM sfm fm) (surroundFoldSerialExprM sfm fm) (surroundFoldNativeExprM sfm fm) body
@@ -1582,6 +1595,7 @@ instance HasTypeF NativeExpr where
   typeFof (IfN t _ _ _) = t
   typeFof (IntrinsicN t _ _ _) = t
   typeFof (MapOptionalN t _ _ _) = t
+  typeFof (WireToNativeN t _ _ _ _) = t
   typeFof (LoopN t _ _) = t
 
 class HasTypeM e where
@@ -1795,6 +1809,7 @@ instance MFunctor NativeExpr where
         (IfN t c thenE elseE) -> mapNativeExpr f $ IfN t (mgatedMap g f c) (mgatedMap g f thenE) (mgatedMap g f elseE)
         (IntrinsicN t intr msch nes) -> mapNativeExpr f $ IntrinsicN t intr msch (map (mgatedMap g f) nes)
         (MapOptionalN t wt src ne) -> mapNativeExpr f $ MapOptionalN t wt src (mgatedMap g f ne)
+        (WireToNativeN t s intr sch nes) -> mapNativeExpr f $ WireToNativeN t s intr sch (map (mgatedMap g f) nes)
         (LoopN t starts body) -> mapNativeExpr f $ LoopN t (map (second (mgatedMap g f)) starts) (trimap (mgatedMap g f) (mgatedMap g f) (mgatedMap g f) body)
     | otherwise = mapNativeExpr f ne0
 

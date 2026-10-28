@@ -8,15 +8,6 @@ on 0.109.0 unless marked.
   source Py from "native.py" ("kind" as pathKind); pathKind :: Path -> Str`
   with `def kind(x): return type(x).__name__` builds without a warning;
   `./prog pathKind notes/report.txt` prints `"str"`.
-- **A decoded value builds only its outermost Packable.** [reproduced,
-  2026-10-28] Spec gap: no item says a decoded value has the native form of
-  its type at every level (NATIVE-1). In Python `kind (unwrap (@read
-  "[[1,2],[3]]"))` with `kind :: [Set Int] -> Str` reporting element types
-  prints `list list list`, and `@read` at `Map Str (Set Int)` gives a dict of
-  lists. The intrinsic result packer (library/Morloc/CodeGenerator/
-  Serialize.hs, `loadResultPacker`) runs the outer type's packer only; a
-  value received as an argument is built at every level (Imperative.hs,
-  `wireToNative`). Affects `@load`, `@read`, `@unpack` and the cell readers.
 - **A received newtype with no Packable instance ignores its form.**
   [reproduced, 2026-10-28] Violates NEWT-4 and NATIVE-9. `newtype Frozen a =
   [a]; type Py => (Frozen a) = "tuple" a` with no Packable instance builds; a
@@ -25,6 +16,28 @@ on 0.109.0 unless marked.
   /tmp/claude-1000/-work/b22ec8aa-199c-401c-8f03-0b140cbccdb1/scratchpad/n10/noinst2.loc.
   NEWT-4 asks which forms a binding can build without an instance; nothing
   records that today.
+- **A value a writer intrinsic sends is unpacked only at its outer level.**
+  [reproduced, 2026-10-28] Spec gap: no item says a value a writer
+  intrinsic sends is taken apart at every level, as a sent argument is.
+  `@show`, `@hash`, `@eq`, `@le`, `@save`, `@savej`, `@cellnew` and
+  `@cellput` unpack their argument with the outer type's packer only
+  (library/Morloc/CodeGenerator/Serialize.hs, `packDataArg`), so a Packable
+  nested in it reaches the runtime in its native form: in C++ `@show` of a
+  `[Set Int]` fails at run time "no marshaller for a value of this C++ type
+  (schema type 14)". The readers build every level (`WireToNativeN`); the
+  writers need the mirror.
+- **`@cellreduce` hands its combine function wire-form values.** [read,
+  2026-10-28] Violates NATIVE-9. The runtime reducer passes each slot, and the
+  running accumulator, to the user's combine in wire form, and only the
+  result is packed: for a cell of `Set Int` in C++ the combine taking
+  `std::set<int>` is given `std::vector<int>`, which does not compile; in
+  Python it is given lists. Each slot needs its packer before the combine,
+  and the result after.
+- **A recursive record with a Packable field is rebuilt at its top level
+  only.** [read, 2026-10-28] Violates NATIVE-9. A back-reference
+  (`SerialRec`) counts as serializable, so `record Tree where tags :: Set
+  Int; kids :: [Tree]` received or read is rebuilt at its top level and its
+  `kids` are decoded straight into their type, with no packer for `tags`.
 - **A Python Vector built by library code has numpy's default dtype.**
   [read, 2026-10-28] Violates NATIVE-7, which makes a `Vector n U8` uint8
   however the program builds it. vector-py's `map`

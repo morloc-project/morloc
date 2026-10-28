@@ -1339,6 +1339,7 @@ rnodeChildren (RN e) = case e of
   IfN _ c t f -> [RN c, RN t, RN f]
   IntrinsicN _ _ _ xs -> map RN xs
   MapOptionalN _ _ _ x -> [RN x]
+  WireToNativeN _ _ _ _ xs -> map RN xs
   LoopN _ starts body -> map (RN . snd) starts <> [RLN body]
   where
     nativeArg (NativeArgManifold nm) = RNM nm
@@ -2027,6 +2028,7 @@ scanNE (IntrinsicN _ IntrTagTest _ (LetVarN _ _ _ : rest)) = mconcat (map scanNE
 scanNE (IntrinsicN _ IntrTagTest _ (BndVarN _ _ _ : rest)) = mconcat (map scanNE rest)
 scanNE (IntrinsicN _ _ _ es) = mconcat (map scanNE es)
 scanNE (MapOptionalN _ _ _ e) = scanNE e
+scanNE (WireToNativeN _ _ _ _ es) = mconcat (map scanNE es)
 
 eitherArm :: ConsumeScan -> ConsumeScan -> ConsumeScan
 eitherArm a b =
@@ -3047,6 +3049,28 @@ lowerNativeExprRaw cfg origExpr (MapOptionalN_ _ wireTf src innerDocs) = do
   return $ innerDocs
     { poolPriorLines = poolPriorLines innerDocs ++ [lcPrintStmt cfg ifStmt]
     , poolExpr = pretty v'
+    }
+
+-- A decoding intrinsic, its value decoded into the form a received argument
+-- is decoded into and given its native form the same way.
+lowerNativeExprRaw cfg _ (WireToNativeN_ _ s intr schema argDocs) = do
+  sid <- lcRegisterSchema cfg schema
+  rawType <- lcRawDeserialAstType cfg s
+  let arg d = IRawExpr (render (poolExpr d))
+  call <- case (intr, argDocs) of
+    (IntrLoad, [p]) -> return $ IIntrinsicLoad sid rawType (arg p)
+    (IntrRead, [x]) -> return $ IIntrinsicRead sid rawType (arg x)
+    (IntrUnpack, [x]) -> return $ IIntrinsicUnpack sid rawType (arg x)
+    (IntrCellGet, [h]) -> return $ IIntrinsicCellGet sid rawType (arg h)
+    _ -> error ("morloc bug: WireToNativeN over " <> show intr)
+  idx <- lcNewIndex cfg
+  let v = helperNamer idx
+  (x, stmts) <- wireToNative cfg v s
+  let merged = mergePoolDocs (const "") argDocs
+  return $ merged
+    { poolPriorLines = poolPriorLines merged
+        ++ map (lcPrintStmt cfg) (IAssign (render v) rawType call : stmts)
+    , poolExpr = lcPrintExpr cfg x
     }
 
 {- | Lower a serial manifold to PoolDocs.

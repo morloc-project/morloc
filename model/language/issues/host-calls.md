@@ -37,8 +37,12 @@
 - **An invalid `rsize` is accepted until the term is called.**
   [reproduced, 2026-10-21] Violates HOST-3. `--' @rsize 2` on `shift ::
   Real -> [Real] -> [Real]` builds when `shift` is never called;
-  Express.hs:561-581 checks at the call site, though the arity is known
-  from the signature. Repro: /work/plans/model-audit-2026-10-21/repro/F/host/h3b.loc.
+  Express.hs:614 `checkRsizeArity` checks at the call site, though the arity
+  is known from the signature. When it does fire (`h = shift`, export `h`),
+  the error is located at the export list, not the `@rsize` line.
+  [reproduced, 2026-10-28] Repro: /work/plans/model-audit-2026-10-21/repro/F/host/h3b.loc
+  (the brittleness copy, repros/lang/m/rsize, writes `rsize: 2` without `@`,
+  which is prose, so it tests nothing).
 
 - **A call that stops at an `rsize` group boundary with more than one group
   left is called flat.** [read, 2026-10-27] Violates HOST-3. With `--' @rsize 

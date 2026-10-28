@@ -6,6 +6,12 @@ struct P {
     double py;
 };
 
+#include <set>
+struct Q {
+    std::set<int> qs;
+    int qn;
+};
+
 // Both arguments have one static type, which is their native form.
 template <class T>
 std::string same(const std::string& name, const T& a, const T& b) {

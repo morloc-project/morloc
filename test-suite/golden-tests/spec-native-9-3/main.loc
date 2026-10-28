@@ -30,6 +30,11 @@ record P where
 record Cpp => P = "P"
 record Rust => P = "P"
 
+record Q where
+  qs :: Set Int
+  qn :: Int
+record Cpp => Q = "Q"
+
 source Cpp from "form.hpp" ("same")
 same :: Str -> a -> a -> Str
 
@@ -189,6 +194,10 @@ report x =
   , same "set:r" ([1, 2] :: Set Int) (echoR ([1, 2] :: Set Int))
   , same "mapVec:py" ([("a", [1, 2])] :: Map Str (Vector 2 U8)) (echoPy ([("a", [1, 2])] :: Map Str (Vector 2 U8)))
   , same "mapVec:r" ([("a", [1, 2])] :: Map Str (Vector 2 U8)) (echoR ([("a", [1, 2])] :: Map Str (Vector 2 U8)))
+  , same "recordSet:py" ({ qs = [1, 2], qn = 3 } :: Q) (echoPy ({ qs = [1, 2], qn = 3 } :: Q))
+  , same "recordSet:r" ({ qs = [1, 2], qn = 3 } :: Q) (echoR ({ qs = [1, 2], qn = 3 } :: Q))
+  , same "listRecordSet:py" ([{ qs = [1], qn = 3 }] :: [Q]) (echoPy ([{ qs = [1], qn = 3 }] :: [Q]))
+  , same "listRecordSet:r" ([{ qs = [1], qn = 3 }] :: [Q]) (echoR ([{ qs = [1], qn = 3 }] :: [Q]))
   , same "varListU8:py" ([x, x] :: [U8]) (echoPy ([x, x] :: [U8]))
   , same "varListU8:r" ([x, x] :: [U8]) (echoR ([x, x] :: [U8]))
   , same "varListU8:rust" ([x, x] :: [U8]) (echoRust ([x, x] :: [U8]))
@@ -201,4 +210,12 @@ report x =
   , same "varOpt:py" (x :: ?U8) (echoPy (x :: ?U8))
   , same "varOpt:r" (x :: ?U8) (echoR (x :: ?U8))
   , same "varOpt:rust" (x :: ?U8) (echoRust (x :: ?U8))
+  , same "readListSet" ([[1, 2], [3]] :: [Set Int]) (unwrap (@read "[[1,2],[3]]") :: [Set Int])
+  , same "readMapSet" ([("a", [1, 2])] :: Map Str (Set Int)) (unwrap (@read "[[\"a\",[1,2]]]") :: Map Str (Set Int))
+  , same "readSet" ([1, 2] :: Set Int) (unwrap (@read "[1,2]") :: Set Int)
+  , same "readVecU8" ([1, 2] :: Vector 2 U8) (unwrap (@read "[1,2]") :: Vector 2 U8)
+  , same "readListU8" ([1, 2] :: [U8]) (unwrap (@read "[1,2]") :: [U8])
+  , same "readListI64" ([1, 2] :: [I64]) (unwrap (@read "[1,2]") :: [I64])
+  , same "readRecordSet" ({ qs = [1, 2], qn = 3 } :: Q) (unwrap (@read "{\"qs\":[1,2],\"qn\":3}") :: Q)
+  , same "readListRecordSet" ([{ qs = [1], qn = 3 }] :: [Q]) (unwrap (@read "[{\"qs\":[1],\"qn\":3}]") :: [Q])
   ]

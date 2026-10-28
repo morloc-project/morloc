@@ -80,7 +80,8 @@ Tests: spec-native-9-1, spec-native-9-2, spec-native-9-3, spec-native-9-4, spec-
 Code: deviates (issues/values.md)
 
 In every language L and for every type T with a schema, a value of T built
-in L by a literal, whatever its elements, has the native form of a T that L
+in L by a literal, whatever its elements, or decoded in L by `@read`,
+`@load`, `@unpack` or `@cellget`, has the native form of a T that L
 receives from any language, L included: the same class, attributes, element
 storage and element checks. The form is a function of T's schema, hints
 included, and of nothing else. In Python a numpy array a literal builds or

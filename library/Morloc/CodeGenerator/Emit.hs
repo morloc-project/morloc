@@ -89,6 +89,7 @@ findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
     nativeExprSrcs (AppExeN_ _ (SrcCallP _ src) xss) = return (src : concat xss)
     nativeExprSrcs (ExeN_ _ (SrcCallP _ src)) = return [src]
     nativeExprSrcs (DeserializeN_ _ s xs) = return $ serialASTsources s <> xs
+    nativeExprSrcs (WireToNativeN_ _ s _ _ xss) = return $ serialASTsources s <> concat xss
     nativeExprSrcs e = return $ foldlNE (<>) [] e
 
     serialExprSrcs (SerializeS_ s xs) = return $ serialASTsources s <> xs

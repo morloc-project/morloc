@@ -300,6 +300,7 @@ walkN env s e = case e of
   EvalN _ x -> walkN env s x
   CoerceN _ _ x -> keepPart env s x
   MapOptionalN _ _ _ x -> walkN env s x
+  WireToNativeN _ _ _ _ xs -> parts xs
   ManN nm -> nativeFrame env s nm
   LoopN _ starts body ->
     keeps (map snd starts) `andThen` \s' -> loop env s' (map fst starts) body (\env' s'' b -> endValue env' s'' (map fst starts) b)

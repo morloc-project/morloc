@@ -75,6 +75,7 @@ import Morloc.CodeGenerator.Serial
   , containsEffectT
   , serialAstToMsgpackSchema
   , shallowType
+  , isSerializable
   )
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -1398,7 +1399,7 @@ PROPAGATE_ERROR(errmsg)|]
           SerialClosure ins out -> cppClosureProxyLambda tup ins out
           _ -> error "lcReflectClosureParsed: expected SerialClosure"
     -- A variant's generated marshaller converts its own closures.
-    , lcDivertNestedClosure = not . null . serialClosuresOutsideVariants
+    , lcDivertNestedClosure = cppDivertsClosure
     , lcMakeFunction = \callIndex mname args manifoldType priorLines body headForm isClosure -> do
         state <- CMS.get
         let alreadyDone = case headForm of
@@ -1589,17 +1590,44 @@ PROPAGATE_ERROR(errmsg)|]
               return (if moves then "std::move(" <> argNamer a <> ")" else argNamer a)
         capture a = return (argNamer a)
 
-    -- For serialization, records become tuples (that's what _put_value/to_voidstar expects)
-    -- Serialize/raw-deserialize types use the WIRE form: a closure nested in an
-    -- aggregate travels as its reified wire tuple, so the closure slot is typed
-    -- as that tuple ('cppClosureWireLeaf'), not the native std::function.
+    -- The wire-side type of a value being taken apart for sending or rebuilt
+    -- after receiving: a record that is taken apart or rebuilt (it holds a
+    -- packed or closure field, at any depth) is a tuple of its fields, which
+    -- _put_value/to_voidstar and the rebuild read by position; anything else
+    -- is its wire type, where a closure travels as its reified wire tuple
+    -- ('cppClosureWireLeaf').
     serializeTypeOf :: SerialAST -> CppTranslator (Maybe IType)
-    serializeTypeOf (SerialObject _ _ _ rs) = Just . toIType <$> recordToCppTuple (map snd rs)
-    serializeTypeOf s = Just . toIType <$> cppTypeOf (wireSerialAstToType cppClosureWireLeaf s)
+    serializeTypeOf = rawTypeOf
 
     rawTypeOf :: SerialAST -> CppTranslator (Maybe IType)
-    rawTypeOf (SerialObject _ _ _ rs) = Just . toIType <$> recordToCppTuple (map snd rs)
-    rawTypeOf s = Just . toIType <$> cppTypeOf (wireSerialAstToType cppClosureWireLeaf s)
+    rawTypeOf s = Just . toIType <$> rawDoc s
+
+    rawDoc :: SerialAST -> CppTranslator MDoc
+    rawDoc s | cppIsLeaf s = cppTypeOf (wireSerialAstToType cppClosureWireLeaf s)
+    rawDoc (SerialObject _ _ _ rs) = do
+      ds <- mapM (rawDoc . snd) rs
+      return $ "std::tuple" <> encloseSep "<" ">" "," ds
+    rawDoc (SerialPack _ (_, s)) = rawDoc s
+    rawDoc (SerialList v d e) = do
+      inner <- rawDoc e
+      cppTypeOf (AppF (VarF v) (maybe [] pure d ++ [rendered inner]))
+    rawDoc (SerialTuple v es) = do
+      inners <- mapM rawDoc es
+      cppTypeOf (AppF (VarF v) (map rendered inners))
+    rawDoc (SerialOptional _ e) = do
+      inner <- rawDoc e
+      cppTypeOf (OptionalF (rendered inner))
+    rawDoc s = cppTypeOf (wireSerialAstToType cppClosureWireLeaf s)
+
+    -- Decoded straight into its type, as wireToNative leaves it.
+    cppIsLeaf :: SerialAST -> Bool
+    cppIsLeaf s = isSerializable s && not (cppDivertsClosure s)
+
+    cppDivertsClosure :: SerialAST -> Bool
+    cppDivertsClosure = not . null . serialClosuresOutsideVariants
+
+    rendered :: MDoc -> TypeF
+    rendered d = VarF (FV (TV "raw") (CV (render d)))
 
     -- | Escape a log-template string for embedding in a C++ double-quoted
     -- literal. Reuses the canonical 'Morloc.Data.Doc.escapeStringLit'
@@ -2092,11 +2120,6 @@ typeMToF (Native t) = t
 typeMToF (Serial t) = t
 typeMToF (Function ins out) = FunF (map typeMToF ins) (typeMToF out)
 typeMToF Passthrough = error "unreachable: a passthrough value is never a native argument"
-
-recordToCppTuple :: [SerialAST] -> CppTranslator MDoc
-recordToCppTuple ts = do
-  tsDocs <- mapM (cppTypeOf . wireSerialAstToType cppClosureWireLeaf) ts
-  return $ "std::tuple" <> encloseSep "<" ">" "," tsDocs
 
 translateSegment :: ClosureGen -> SerialManifold -> CppTranslator MDoc
 translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do

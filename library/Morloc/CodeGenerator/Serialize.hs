@@ -631,19 +631,22 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           -- @try produces the Try itself, so it keeps the variant type and
           -- takes no result packer: whatever packing its body needed has
           -- already happened inside the body.
-          mPacker <- if intr == IntrTry
-                       then return Nothing
-                       else loadResultPacker m intr payloadTf
+          mAst <- if intr == IntrTry
+                    then return Nothing
+                    else resultSerialAst m intr payloadTf
+          mPacker <- if intr == IntrCellReduce
+                       then cellReducePacker m payloadTf
+                       else return Nothing
           let rawInnerTf
                 | intr == IntrTry = innerTf
-                | otherwise = case mPacker of
-                    Just (_, wireTf) -> wireTf
-                    Nothing -> payloadTf
-              raw = IntrinsicN rawInnerTf intr msch es''
-          packed <- case mPacker of
-            Just (packerSrc, _) ->
-              return $ AppExeN payloadTf (SrcCallP Nothing packerSrc) [NativeArgExpr raw]
-            Nothing -> return raw
+                | otherwise = maybe payloadTf snd mPacker
+              packed = case (mAst, msch) of
+                (Just ast, Just sch) -> WireToNativeN payloadTf ast intr sch es''
+                _ -> case mPacker of
+                  Just (packerSrc, _) ->
+                    AppExeN payloadTf (SrcCallP Nothing packerSrc)
+                      [NativeArgExpr (IntrinsicN rawInnerTf intr msch es'')]
+                  Nothing -> IntrinsicN rawInnerTf intr msch es''
           -- Reuse @try rather than a bespoke wrap: converting a raised
           -- failure into an Ok/Err value is exactly what it does, and
           -- routing through it keeps one lowering (and one per-language
@@ -659,15 +662,10 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       es' <- mapM (nativeExpr m) es
       es'' <- unpackDataArgIfNeeded m intr es'
       msch <- intrinsicSchema m intr tf es''
-      mPacker <- loadResultPacker m intr tf
-      let rawTf = case mPacker of
-            Just (_, wireTf) -> wireTf
-            Nothing -> tf
-          raw = IntrinsicN rawTf intr msch es''
-      case mPacker of
-        Just (packerSrc, _) ->
-          return $ AppExeN tf (SrcCallP Nothing packerSrc) [NativeArgExpr raw]
-        Nothing -> return raw
+      mAst <- resultSerialAst m intr tf
+      return $ case (mAst, msch) of
+        (Just ast, Just sch) -> WireToNativeN tf ast intr sch es''
+        _ -> IntrinsicN tf intr msch es''
 
     -- An R literal takes the form the R decoder gives its type (NATIVE-9):
     -- the runtime builder decides it from the schema, as the decoder does.
@@ -759,26 +757,25 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           return [AppExeN unpackedType (SrcCallP Nothing unpackerSrc) [NativeArgExpr dataArg]]
         _ -> return [dataArg]
 
-    -- Symmetric to unpackDataArgIfNeeded: @load and @read return the wire
-    -- form of the user's type. When the user-facing inner type has a
-    -- Packable instance, expandDeserialize's SerialPack arm inserts the
-    -- packer; we mirror that here for the intrinsic result. Returns the
-    -- packer source + the wire-form type so the caller can both rebuild
-    -- the intrinsic's type with the wire form (so the runtime call uses
-    -- the wire-side template) and wrap the result with the packer.
-    loadResultPacker ::
-      Int -> Intrinsic -> TypeF -> MorlocMonad (Maybe (Source, TypeF))
-    loadResultPacker m intr resultTf
-      -- The cell readers are the same shape: the runtime holds the wire
-      -- form and hands it back, so a Packable accumulator needs its packer
-      -- on the way out just as @load's result does.
-      | intr `elem` [IntrLoad, IntrRead, IntrUnpack, IntrCellGet, IntrCellReduce] = do
+    -- @load, @read, @unpack and @cellget return their value in its wire
+    -- form, as the runtime decodes it. Where a packer builds the native form
+    -- at any level, the serial AST is returned so the value is finished as a
+    -- received argument is.
+    resultSerialAst :: Int -> Intrinsic -> TypeF -> MorlocMonad (Maybe SerialAST)
+    resultSerialAst m intr resultTf
+      | intr `elem` [IntrLoad, IntrRead, IntrUnpack, IntrCellGet] = do
           ast <- Serial.makeSerialAST m lang resultTf
-          case ast of
-            SerialPack _ (packer, _) ->
-              return $ Just (typePackerForward packer, typePackerUnpacked packer)
-            _ -> return Nothing
+          return $ if Serial.isSerializable ast then Nothing else Just ast
       | otherwise = return Nothing
+
+    -- @cellreduce's result is packed by the outer type's packer, the
+    -- runtime call typed at its unpacked type.
+    cellReducePacker :: Int -> TypeF -> MorlocMonad (Maybe (Source, TypeF))
+    cellReducePacker m resultTf = do
+      ast <- Serial.makeSerialAST m lang resultTf
+      return $ case ast of
+        SerialPack _ (packer, _) -> Just (typePackerForward packer, typePackerUnpacked packer)
+        _ -> Nothing
 
     -- Compute the msgpack schema string for runtime intrinsics
     intrinsicSchema :: Int -> Intrinsic -> TypeF -> [NativeExpr] -> MorlocMonad (Maybe Text)

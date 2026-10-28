@@ -67,6 +67,8 @@ SHAPES = [
     ("map", "Map Str Int", '[("a", 1), ("b", 2)]', ["rust"]),
     ("set", "Set Int", "[1, 2]", ["rust"]),
     ("mapVec", "Map Str (Vector 2 U8)", '[("a", [1, 2])]', ["rust"]),
+    ("recordSet", "Q", "{ qs = [1, 2], qn = 3 }", ["rust"]),
+    ("listRecordSet", "[Q]", "[{ qs = [1], qn = 3 }]", ["rust"]),
 ]
 
 # Shapes whose elements are the program's argument rather than constants.
@@ -75,6 +77,19 @@ VAR_SHAPES = [
     ("varVecU8", "Vector 2 U8", "[x, x]"),
     ("varTuple", "(U8, U8)", "(x, x)"),
     ("varOpt", "?U8", "x"),
+]
+
+# Shapes read from JSON by @read in the pool under test: a decoded value has
+# the form of a literal, packers applied at every level.
+READ_SHAPES = [
+    ("readListSet", "[Set Int]", "[[1, 2], [3]]", '[[1,2],[3]]', ["rust"]),
+    ("readMapSet", "Map Str (Set Int)", '[("a", [1, 2])]', '[[\\"a\\",[1,2]]]', ["rust"]),
+    ("readSet", "Set Int", "[1, 2]", '[1,2]', ["rust"]),
+    ("readVecU8", "Vector 2 U8", "[1, 2]", '[1,2]', []),
+    ("readListU8", "[U8]", "[1, 2]", '[1,2]', []),
+    ("readListI64", "[I64]", "[1, 2]", '[1,2]', []),
+    ("readRecordSet", "Q", "{ qs = [1, 2], qn = 3 }", '{\\"qs\\":[1,2],\\"qn\\":3}', ["rust"]),
+    ("readListRecordSet", "[Q]", "[{ qs = [1], qn = 3 }]", '[{\\"qs\\":[1],\\"qn\\":3}]', ["rust"]),
 ]
 
 FORM = {
@@ -140,6 +155,12 @@ struct P {
     double py;
 };
 
+#include <set>
+struct Q {
+    std::set<int> qs;
+    int qn;
+};
+
 // Both arguments have one static type, which is their native form.
 template <class T>
 std::string same(const std::string& name, const T& a, const T& b) {
@@ -200,6 +221,13 @@ def program(lang):
         "record Cpp => P = \"P\"",
         "record Rust => P = \"P\"",
         "",
+    ] + ([
+        "record Q where",
+        "  qs :: Set Int",
+        "  qn :: Int",
+        "record Cpp => Q = \"Q\"",
+        "",
+    ] if lang != "rust" else []) + [
         'source %s from "%s" ("same")' % (LANG_NAME[lang], FORM_FILE[lang]),
         "same :: Str -> a -> a -> Str",
         "",
@@ -221,6 +249,11 @@ def program(lang):
         for m in others:
             cases.append('same "%s:%s" (%s :: %s) (echo%s (%s :: %s))'
                          % (name, m, lit, ty, LANG_NAME[m], lit, ty))
+    for (name, ty, lit, js, missing) in READ_SHAPES:
+        if lang in missing:
+            continue
+        cases.append('same "%s" (%s :: %s) (unwrap (@read "%s") :: %s)'
+                     % (name, lit, ty, js, ty))
     lines.append("  [ " + "\n  , ".join(cases) + "\n  ]")
     return "\n".join(lines) + "\n", [c.split('"')[1] for c in cases]
 
