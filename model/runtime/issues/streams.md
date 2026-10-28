@@ -47,6 +47,14 @@ here touch locks and ownership: model first.
   without, 4.3 s before the custodian (2026-10-10). Chosen for now (not
   ruled): no wait.
   Should pools' raw stdout go to stderr while a command streams to stdout?
+- **Pool prints reach stdout out of call order.** [reproduced, 2026-10-28]
+  Gap: no item orders raw text that pools print. In
+  /work/tests/sumtypes/04-graphics-csg-sdf/core, `prog-cpp test` (unittest
+  harness sourced in Python) prints each `printGroup` header after the PASS
+  lines of its group, though the header's result feeds those checks; with
+  `PYTHONUNBUFFERED=1` the order is right, so two writers flush separately
+  buffered stdout. Which second writer (a forked Python worker is the
+  suspect) is speculative.
 - Open question (`@tell`): intrinsics.md gives `@tell` no failure value and
   it returns 0 when this process has no `@stdout` open, so a pool other
   than the one that opened the run's stdout reports 0 while elements have

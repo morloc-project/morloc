@@ -58,6 +58,15 @@ on 0.109.0 unless marked.
   `maybePackableWrap`) looks for an instance of the outer newtype only and
   does not compose the one of the type it wraps. Gap: no item says how a
   literal reaches a type through several representations.
+- **An R `I64` literal is a 32-bit integer.** [reproduced, 2026-10-28]
+  Gap beside NATIVE-8, which covers literals over lists only: rmorloc
+  decodes an `I64` as `integer64`, but a scalar `I64` literal is emitted as
+  `100000L`, so arithmetic on it overflows R's 32-bit integers to `NA`.
+  `import root-r; lcg :: I64 -> I64; lcg x = (x * 48271) % 2147483647;
+  viaLit :: I64; viaLit = lcg 100000` fails "Cannot pack NA or NaN into
+  int64_t" (pool.R: `n1 <- (100000L * 48271L)`), while the same call on an
+  argument (`n0 * 48271L`, n0 an integer64) gives 532132706. Seen in
+  /work/tests/sumtypes/02-phylogenetics-pruning/core (prog-r `caterpillar`).
 - **Comparison on `data` with fields.** [reproduced] Violates SUM-5.
   `data Shape = Circle Real | Rect Real Real | Dot`, `lt a b = a < b`,
   `eq a b = a == b`. Python is correct. R: `==` works, `<` fails at run
