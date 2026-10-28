@@ -566,7 +566,7 @@ crossPool lang m (PolyRemoteInterface l (Idx ri t) ids rf inner0) xs0 = do
                 i' <- MM.getCounter
                 let wireA = hostType (view Set.empty fromHere) Nothing ta
                 adapted <- adapt Inbound il im (view argThere fromHere) Nothing ta (PolyBndVar (C (Idx im wireA)) i)
-                MM.modify $ \st -> st {stateArgTypes =
+                MM.modify' $ \st -> st {stateArgTypes =
                   Map.insert i (Idx im wireA) (Map.insert i' (Idx im ta) (stateArgTypes st))}
                 return $ PolyManifold il im form k (PolyLet i' adapted (substBndVar i i' ta body))
               _ -> MM.throwCompilerBug "crossPool: an argument to convert has no parameter in the callee"
@@ -657,7 +657,7 @@ adaptCallbackParams lang m hv ds (PolyManifold l mi (ManifoldPart ctx bnd) k bod
           i' <- MM.getCounter
           let hostT = hostType hv d t
           adapted <- adapt Inbound lang m hv d t (PolyBndVar (C (Idx m hostT)) i)
-          MM.modify $ \st -> st {stateArgTypes =
+          MM.modify' $ \st -> st {stateArgTypes =
             Map.insert i (Idx m hostT) (Map.insert i' (Idx m t) (stateArgTypes st))}
           let bs' = [if j == i then Arg j (Just hostT) else a | a@(Arg j _) <- bs]
           return (bs', PolyLet i' adapted (substBndVar i i' t b))
@@ -1023,7 +1023,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
           aThere = case dir of Outbound -> hostType hv da a; Inbound -> a
       y <- MM.getCounter
       m <- MM.freshManifoldIndex g
-      MM.modify $ \st -> st {stateArgTypes = Map.insert y (Idx g aHere) (stateArgTypes st)}
+      MM.modify' $ \st -> st {stateArgTypes = Map.insert y (Idx g aHere) (stateArgTypes st)}
       x <- adapt dir lang g hv da a (PolyBndVar (C (Idx g aHere)) y)
       return (PolyManifold lang m (ManifoldPart [] [Arg y (Just aHere)]) Transparent (PolyReturn x), aThere)
 
@@ -1098,7 +1098,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
             | otherwise =
                 PolyLet w body0
                   (PolyApp (PolyExe (Idx g r) (LocalCallP w)) [PolyBndVar (C (Idx g a)) i | (i, a) <- zip restIds rest])
-      MM.modify $ \st -> st
+      MM.modify' $ \st -> st
         { stateArgTypes =
             foldr (\(i, ty) -> Map.insert i (Idx g ty)) (stateArgTypes st)
               ((v, calleeT) : (w, r) : [(i, slotT da a) | (i, da, a) <- zip3 ids das as] <> zip restIds rest)

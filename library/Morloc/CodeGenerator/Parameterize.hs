@@ -54,7 +54,7 @@ markHostArgs :: [Arg EVar] -> MorlocMonad ()
 markHostArgs as = do
   hostVars <- MM.gets stateHostFunctionVars
   let js = [j | Arg j v <- as, Set.member v hostVars]
-  MM.modify (\s -> s {stateHostFunctionArgs = foldr Set.insert (stateHostFunctionArgs s) js})
+  MM.modify' (\s -> s {stateHostFunctionArgs = foldr Set.insert (stateHostFunctionArgs s) js})
 
 parameterize' ::
   [Arg EVar] -> -- arguments in parental scope (child needn't retain them)
@@ -182,4 +182,4 @@ freshVarsAZ exclude =
 -- | Remember each minted argument's declared type (see 'stateArgTypes').
 recordArgTypes :: Int -> [Int] -> [Type] -> MorlocMonad ()
 recordArgTypes midx ids ts =
-  MM.modify (\st -> st {stateArgTypes = foldr (\(i, t) -> Map.insert i (Idx midx t)) (stateArgTypes st) (zip ids ts)})
+  MM.modify' (\st -> st {stateArgTypes = foldr (\(i, t) -> Map.insert i (Idx midx t)) (stateArgTypes st) (zip ids ts)})

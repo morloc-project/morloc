@@ -288,7 +288,7 @@ stagedValue gi c v stageV k caps ts r = do
 -- @stage@.
 recordStage :: Int -> Int -> Int -> MorlocMonad ()
 recordStage flat k stage =
-  MM.modify (\st -> st { stateStageEntries = Map.insert flat (k, stage) (stateStageEntries st) })
+  MM.modify' (\st -> st { stateStageEntries = Map.insert flat (k, stage) (stateStageEntries st) })
 
 -- | Hand each function a source is passed in the grouping the source calls it
 -- with: every argument of the parameter's type at once (HOST-2), where only
@@ -481,7 +481,7 @@ reduce ai
     -- The application of a named function is a call of it: the value it
     -- reduces to keeps the application's index, which takes the function's
     -- name for the failure trace (DIAG-5).
-    MM.modify $ \st -> case Map.lookup i2 (stateName st) of
+    MM.modify' $ \st -> case Map.lookup i2 (stateName st) of
       Just name | Map.notMember i1n (stateName st) ->
         st { stateName = Map.insert i1n name (stateName st)
            , stateNameSource = Map.insert i1n i2 (stateNameSource st)
@@ -752,7 +752,7 @@ reindexTree t0 = do
           , Just (k, s) <- [Map.lookup gi entries]
           , Just s' <- [Map.lookup s renamed]
           ]
-  MM.modify (\st -> st {stateStageEntries = Map.union copied (stateStageEntries st)})
+  MM.modify' (\st -> st {stateStageEntries = Map.union copied (stateStageEntries st)})
   return t'
 
 -- | A fresh let-name for the closure a function-typed argument computes.

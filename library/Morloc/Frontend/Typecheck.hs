@@ -1508,11 +1508,11 @@ synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
       -- like `mempty :: Str` on the usage site must not constrain checking
       -- of each instance implementation (e.g. the List instance's `[]`).
       implAnn <- MM.gets (Map.lookup implGi . stateAnnotations)
-      MM.modify (\s -> s { stateAnnotations = Map.delete implGi (stateAnnotations s) })
+      MM.modify' (\s -> s { stateAnnotations = Map.delete implGi (stateAnnotations s) })
       (g11, _, e') <- checkG g10 e t
       -- Restore
       case implAnn of
-        Just ann' -> MM.modify (\s -> s { stateAnnotations = Map.insert implGi ann' (stateAnnotations s) })
+        Just ann' -> MM.modify' (\s -> s { stateAnnotations = Map.insert implGi ann' (stateAnnotations s) })
         Nothing -> return ()
 
       -- check all the remaining implementations

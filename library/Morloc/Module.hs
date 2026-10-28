@@ -54,10 +54,10 @@ module Morloc.Module
 
 import Control.Applicative (optional)
 import Control.Exception (IOException, catch, finally, onException)
-import Control.Monad.Except (runExceptT, throwError)
-import Control.Monad.Reader (ask, runReaderT)
-import Control.Monad.State (get, put, runStateT)
-import Control.Monad.Writer (runWriterT, tell)
+import Control.Monad.Except (throwError)
+import Control.Monad.Reader (ask)
+import Control.Monad.State (get, put)
+import Control.Monad.Writer (tell)
 import GHC.IO.Handle.Lock (LockMode(ExclusiveLock), hLock, hTryLock)
 import Text.Parsec (Parsec, try, parse, many, many1)
 import Text.Parsec.Char (char, string, alphaNum, digit, satisfy)
@@ -223,7 +223,7 @@ withModuleLock fdbDir name action = do
   cfg <- ask
   st <- get
   ((r, logs), st') <-
-    liftIO $ runStateT (runWriterT (runExceptT (runReaderT action cfg))) st `finally` hClose h
+    liftIO $ MM.runMorlocStack cfg st action `finally` hClose h
   put st'
   tell logs
   either throwError return r

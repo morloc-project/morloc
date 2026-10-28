@@ -745,7 +745,7 @@ planWith view target trees00
     makeCopy byRoot names key@(j, pat) = case (Map.lookup j byRoot, Map.lookup key names) of
       (Just t, Just name) -> do
         AnnoS g@(Idx gi _) c e <- reindexTree t >>= mapAnnoSCM (\(Idx ci cl) -> (`Idx` cl) <$> newIndex ci)
-        MM.modify $ \st ->
+        MM.modify' $ \st ->
           st { stateName = Map.insert gi name (stateName st)
              , stateNameSource = Map.insert gi j (stateNameSource st)
              , stateRecursionTargets = Map.insert name gi (stateRecursionTargets st)
@@ -764,7 +764,7 @@ planWith view target trees00
     rewrite cx names (_, pat) t = do
       let (found, _, _) = analyzeTree cx pat (view t)
       renames <- Map.fromList <$> mapM (\v -> (,) v <$> hostName v) (Map.keys (fBinders found))
-      MM.modify (\st -> st {stateHostFunctionVars = foldr Set.insert (stateHostFunctionVars st) (Map.elems renames)})
+      MM.modify' (\st -> st {stateHostFunctionVars = foldr Set.insert (stateHostFunctionVars st) (Map.elems renames)})
       let ren v = Map.findWithDefault v v renames
           go (AnnoS g c@(Idx ci cl) e) = case e of
             CallS _

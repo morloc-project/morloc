@@ -150,7 +150,7 @@ treeify d
             -- - Add the export name to state. Failing to do so here, will lose
             --   the name of terms that are exported but not defined, this leads
             --   to cryptic error messages.
-            MM.modify
+            MM.modify'
               ( \s ->
                   s
                     { stateExports = map fst exports'
@@ -499,7 +499,7 @@ linkAndRemoveAnnotations = f
       --     ^                ^-- this one is connected to the given types
       --     '-- this index disappears with the lost annotation node
       s <- MM.get
-      MM.put $ s {stateAnnotations = Map.insert i t (stateAnnotations s)}
+      MM.put $! s {stateAnnotations = Map.insert i t (stateAnnotations s)}
       f e -- notice the topology change
       -- everything below is boilerplate (this is why I need recursion schemes)
     f (ExprI i (ModE v es)) = ExprI i <$> (ModE v <$> mapM f es)
@@ -633,7 +633,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
           (namer', e) <- f namer (VarE defaultValue v)
           inner <- newIndex gi0
           k <- MM.getCounter
-          MM.modify $ \st ->
+          MM.modify' $ \st ->
             st { stateManifoldConfig = Map.insert k cfg {manifoldConfigLabelIdx = Just gi0} (stateManifoldConfig st)
                , stateName = Map.insertWith (\_ old -> old) gi0 (displayName v) (stateName st)
                }
@@ -723,7 +723,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
               -- renamed by Realize.
               exports <- MM.gets stateExports
               when (gi0 `elem` exports) $
-                MM.modify (\st -> st {stateRecursionTargets = Map.insert token gi0 (stateRecursionTargets st)})
+                MM.modify' (\st -> st {stateRecursionTargets = Map.insert token gi0 (stateRecursionTargets st)})
               return token
           | otherwise = return v
 

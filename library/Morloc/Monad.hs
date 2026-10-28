@@ -21,6 +21,7 @@ wrappers, and an independent 'Index' monad for local re-indexing passes.
 module Morloc.Monad
   ( MorlocReturn
   , runMorlocMonad
+  , runMorlocStack
   , writeMorlocReturn
   , printWarnings
   , makeMorlocError
@@ -93,8 +94,10 @@ import Control.Monad.Except
 import Control.Monad.Identity
 import Control.Monad.Reader
 import Control.Monad.State
+import qualified Control.Monad.State.Strict as SS
 import Control.Monad.Trans
 import Control.Monad.Writer
+import qualified Control.Monad.Trans.Writer.CPS as SW
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Morloc.Data.Doc
@@ -128,7 +131,12 @@ runMorlocMonad outfile v config buildConfig ev = do
           { stateBuildConfig = buildConfig
           , stateLangRegistry = registry
           }
-  runStateT (runWriterT (runExceptT (runReaderT ev config))) state1
+  runMorlocStack config state1 ev
+
+-- | Run a 'MorlocMonad' action from a given config and state
+runMorlocStack :: Config -> MorlocState -> MorlocMonad a -> IO (MorlocReturn a)
+runMorlocStack config st ev =
+  SS.runStateT (SW.runWriterT (runExceptT (runReaderT ev config))) st
 
 emptyState :: Maybe Path -> Int -> MorlocState
 emptyState path v =
@@ -144,7 +152,7 @@ startCounter :: MorlocMonad ()
 startCounter = do
   seedManifoldCounter
   s <- get
-  put $ s {stateCounter = 0}
+  put $! s {stateCounter = 0}
 
 -- | Move the manifold allocator past every expression index handed out
 -- so far, so a manifold created by code generation never shares an index
@@ -152,7 +160,7 @@ startCounter = do
 seedManifoldCounter :: MorlocMonad ()
 seedManifoldCounter = do
   s <- get
-  put $ s {stateManifoldCounter = max (stateManifoldCounter s) (stateCounter s + 1)}
+  put $! s {stateManifoldCounter = max (stateManifoldCounter s) (stateCounter s + 1)}
 
 -- | A fresh manifold index, carrying the source position of a parent
 -- index so diagnostics can locate the manifold.
@@ -164,15 +172,15 @@ freshManifoldIndex parentIdx = do
       srcs = case Map.lookup parentIdx (stateSourceMap s) of
         Just loc -> Map.insert i loc (stateSourceMap s)
         Nothing -> stateSourceMap s
-  put $ s {stateManifoldCounter = i + 1, stateSourceMap = srcs}
-  return i
+  put $! s {stateManifoldCounter = i + 1, stateSourceMap = srcs}
+  return $! i
 
 getCounter :: MorlocMonad Int
 getCounter = do
   s <- get
   let i = stateCounter s
-  put $ s {stateCounter = stateCounter s + 1}
-  return i
+  put $! s {stateCounter = i + 1}
+  return $! i
 
 -- | Create a new index that inherits the source position of a parent index
 getCounterWithPos :: Int -> MorlocMonad Int
@@ -180,7 +188,7 @@ getCounterWithPos parentIdx = do
   i <- getCounter
   s <- get
   case Map.lookup parentIdx (stateSourceMap s) of
-    Just loc -> put $ s {stateSourceMap = Map.insert i loc (stateSourceMap s)}
+    Just loc -> put $! s {stateSourceMap = Map.insert i loc (stateSourceMap s)}
     Nothing -> return ()
   return i
 
@@ -194,14 +202,14 @@ takeFromCounter i = do
 setCounter :: Int -> MorlocMonad ()
 setCounter i = do
   s <- get
-  put $ s {stateCounter = i}
+  put $! s {stateCounter = i}
   return ()
 
 incDepth :: MorlocMonad Int
 incDepth = do
   s <- get
   let i = stateDepth s + 1
-  put $ s {stateDepth = i}
+  put $! s {stateDepth = i}
   return i
 
 getDepth :: MorlocMonad Int
@@ -211,13 +219,13 @@ decDepth :: MorlocMonad Int
 decDepth = do
   s <- get
   let i = stateDepth s - 1
-  put $ s {stateDepth = i}
+  put $! s {stateDepth = i}
   return i
 
 setDepth :: Int -> MorlocMonad ()
 setDepth i = do
   s <- get
-  put $ s {stateDepth = i}
+  put $! s {stateDepth = i}
   return ()
 
 -- | Print a run's warnings to stderr.
@@ -627,7 +635,7 @@ newIndex :: Index Int
 newIndex = do
   s <- get
   let i = index s
-  put $ s {index = index s + 1}
+  put $! s {index = index s + 1}
   return i
 
 getIndex :: Index Int
@@ -636,7 +644,7 @@ getIndex = gets index
 setIndex :: Int -> Index ()
 setIndex i = do
   s <- get
-  put $ s {index = i}
+  put $! s {index = i}
   return ()
 
 registerSchemaIndex :: Text -> Index Int
@@ -646,7 +654,7 @@ registerSchemaIndex schema = do
     Just sid -> return sid
     Nothing -> do
       let sid = Map.size (indexSchemas s)
-      put $ s {indexSchemas = Map.insert schema sid (indexSchemas s)}
+      put $! s {indexSchemas = Map.insert schema sid (indexSchemas s)}
       return sid
 
 getSchemaTable :: Index [Text]

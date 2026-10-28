@@ -99,7 +99,7 @@ markConstants e0@(ExprI _ (ModE _ es)) = do
     topLevel _ = return ()
 
     mark :: ExprI -> MorlocMonad ()
-    mark (ExprI k _) = MM.modify (\st -> st {stateConstantOrigin = Map.insert k k (stateConstantOrigin st)})
+    mark (ExprI k _) = MM.modify' (\st -> st {stateConstantOrigin = Map.insert k k (stateConstantOrigin st)})
 
     constant locals x = computes x && not (isLambda x) && not (effectful x) && Set.null (freeLocals locals x)
 
@@ -185,7 +185,7 @@ expandStructuralTypes d = do
   scope <- MM.getGeneralScope
   let expandEntry (ps, body, doc, terminal, kind) =
         (map (fmap (expandStructuralAliases scope)) ps, expandStructuralAliases scope body, doc, terminal, kind)
-  MM.modify $ \st -> st
+  MM.modify' $ \st -> st
     { stateGeneralTypedefs = Map.map (map expandEntry) (stateGeneralTypedefs st)
     , stateConcreteTypedefs = Map.map (Map.map (map expandEntry)) (stateConcreteTypedefs st)
     }
@@ -1208,7 +1208,7 @@ collectTypes fullDag = do
   checkConflictingForms modules Nothing general
   checkReservedDeclarations general
   mapM_ (\(lang, sc) -> checkConflictingForms modules (Just lang) sc) (Map.toList concrete)
-  MM.modify $ \s -> s {stateGeneralTypedefs = general, stateConcreteTypedefs = concrete}
+  MM.modify' $ \s -> s {stateGeneralTypedefs = general, stateConcreteTypedefs = concrete}
 
 -- | Two declarations of one type, or two forms of it in one language, that
 -- apply to the same parameters but say different things.

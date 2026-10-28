@@ -85,7 +85,7 @@ specializeExport spec (gi, v) = do
             if back
               then do
                 let tok = recName v k0
-                MM.modify (\st -> st {stateRecursionTargets = Map.insert tok gi (stateRecursionTargets st)})
+                MM.modify' (\st -> st {stateRecursionTargets = Map.insert tok gi (stateRecursionTargets st)})
                 return (AnnoS (Idx gt t) c (VarS tok alts'))
               else return (AnnoS (Idx gt t) c (VarS name alts'))
       _ -> do
@@ -362,7 +362,7 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
                     let (sourced, defined) = List.partition isSourced alts'
                     root <- AnnoS <$> (Idx <$> plainIndex gi <*> pure t) <*> plainIndex ci <*> pure (VarS tok (Many defined))
                     liftIO (modifyIORef' (specShared spec) (Map.insert (k, key) tok))
-                    MM.modify (\st -> let Specs xs = stateSpecs st in st {stateSpecs = Specs (xs <> [root]), stateSpecNames = Set.insert tok (stateSpecNames st)})
+                    MM.modify' (\st -> let Specs xs = stateSpecs st in st {stateSpecs = Specs (xs <> [root]), stateSpecNames = Set.insert tok (stateSpecNames st)})
                     callAt tok name sourced
                   else do
                     when closed $
@@ -509,5 +509,5 @@ instantiate e0 = do
 plainIndex :: Int -> MorlocMonad Int
 plainIndex parent = do
   i <- newIndex parent
-  MM.modify (\s -> s {stateExports = filter (/= i) (stateExports s)})
+  MM.modify' (\s -> s {stateExports = filter (/= i) (stateExports s)})
   return i

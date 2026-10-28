@@ -70,7 +70,7 @@ typecheckFrontend path code = do
   evalMode <- MM.gets stateEvalMode
   if evalMode then checkEvalRestrictions dag else return ()
   case DAG.roots dag of
-    (r : _) -> MM.modify (\s -> s {stateModuleName = Just r})
+    (r : _) -> MM.modify' (\s -> s {stateModuleName = Just r})
     _ -> return ()
   (checks, exports) <- restructure dag >>= treeify
   F.validate (validationTrees checks) (validationInstances checks)
@@ -121,7 +121,7 @@ lowerPools rASTs = do
   paramRASTs <- mapM parameterize rASTs
   let langMap = Map.fromList
         [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]
-  MM.modify (\s -> s { stateManifoldLang = langMap })
+  MM.modify' (\s -> s { stateManifoldLang = langMap })
   reg <- MM.gets stateLangRegistry
   mapM (\r -> expressRoot r >>= checkHeadLang langMap) paramRASTs
     -- Wrap each cache:true manifold's body in a 'PolyCacheBody'.
@@ -228,7 +228,7 @@ writeProgram translateFn path code =
         mapM_ (warnSkip . fst) genericRASTs
         let skippedEntry (AnnoS (Idx i t) _ _) = fmap (\v -> (v, (i, t))) <$> MM.metaName i
         skipped <- (<>) <$> mapM (skippedEntry . fst) genericGASTs <*> mapM (skippedEntry . fst) genericRASTs
-        MM.modify (\st -> st {stateSkippedGeneric = Map.fromListWith (\_ old -> old) (catMaybes skipped)})
+        MM.modify' (\st -> st {stateSkippedGeneric = Map.fromListWith (\_ old -> old) (catMaybes skipped)})
         -- Only exports become commands, but helper rASTs also flow to
         -- 'Nexus.generate' so it can see their languages for pool
         -- enumeration -- the export tree ends at a bare 'CallS' back-edge

@@ -280,7 +280,7 @@ specialize h hp fixedArgs = do
   -- A substituted lambda the body applies is a new redex; reduce the copy as
   -- every tree was reduced before this pass.
   tree <- applyPoolLambdas (AnnoS (Idx gi (dropInputs dropped t)) c (LamS (dropAt dropped params) body'))
-  MM.modify $ \s ->
+  MM.modify' $ \s ->
     s { stateName = Map.insert gi name (stateName s)
       , stateNameSource = Map.insert gi source (stateNameSource s)
       , stateRecursionTargets = Map.insert name gi (stateRecursionTargets s)

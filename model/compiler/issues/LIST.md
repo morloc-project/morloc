@@ -16,3 +16,4 @@ it is solved, and a file when it is empty.
 - [language-registry.md](language-registry.md): no single language object; plugin languages half work (needs a ruling: supported or deleted); dead registry fields (lang.yaml `cost:`) and functions
 - [recursion-loops.md](recursion-loops.md): RECUR-2 tail calls kept as calls under `--debug`, on a labeled call, with a non-tail self-call beside them, or bound by `where`; dead effectful-loop gate
 - [internal-checks.md](internal-checks.md): ~340 plain `zip`s truncate on a length mismatch instead of failing
+- [compiler-state.md](compiler-state.md): `withModuleLock` drops state changes when its action throws; nothing bounds the compiler's heap residency

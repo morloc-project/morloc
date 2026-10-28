@@ -201,7 +201,7 @@ realizeDemanded finishers trees0
                 let name = EV (unEVar v <> "@" <> langName l')
                     firstCopy = not (any ((== v) . fst) (Map.keys landed))
                 copy@(AnnoS (Idx gi _) _ _) <- renameRoot name <$> if firstCopy then return tree else reindexOne tree
-                MM.modify (\st -> st {stateRecursionTargets = Map.insert name gi (stateRecursionTargets st)})
+                MM.modify' (\st -> st {stateRecursionTargets = Map.insert name gi (stateRecursionTargets st)})
                 loop (Map.insert d name named) (Map.insert (v, l') name landed) (copies <> [copy]) (ds <> demands copy)
     renameUses named = go
       where
@@ -249,7 +249,7 @@ nexusDemanded finishers takesFunction trees0
                           MM.liftIO (modifyIORef namedRef (Map.insert v name))
                           -- a copy of its own: a pool may hold another
                           copy@(AnnoS (Idx ri _) _ _) <- renameRoot name <$> (pure' v >>= rewrite)
-                          MM.modify (\st -> st {stateNamedGasts = Map.insert ri name (stateNamedGasts st)})
+                          MM.modify' (\st -> st {stateNamedGasts = Map.insert ri name (stateNamedGasts st)})
                           MM.liftIO (modifyIORef copiesRef (<> [copy]))
                           return (AnnoS g c (CallS name))
             _ -> AnnoS g c <$> mapExprSM rewrite e
@@ -662,7 +662,7 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
               built = best (scoresOf rescored)
               site = label <> maybe "" (\l -> " used from " <> render (pretty l)) ctx
           when (optimum /= built) $
-            MM.modify $ \st ->
+            MM.modify' $ \st ->
               st { statePlacement = Just (prior <> ["cost check failed for " <> site
                      <> ": built " <> renderScore built <> ", least " <> renderScore optimum
                      <> offenders kept scored <> origins kept scored rescored]) }
@@ -1849,7 +1849,7 @@ placeNormalized trees0 = do
       recs <- MM.gets stateRecursionTargets
       let listed t@(AnnoS (Idx i _) _ _) = placementLines (treeName names recs i) t
           listing = concatMap listed final <> cs
-      sum (map MT.length listing) `seq` MM.modify (\st -> st {statePlacement = Just listing})
+      sum (map MT.length listing) `seq` MM.modify' (\st -> st {statePlacement = Just listing})
     Nothing -> return ()
   return final
 
@@ -1980,7 +1980,7 @@ processTree exportSet tree = do
   (modifiedE, helpersE) <- extractFromRoot exportSet tree
   (modified0, helpers0) <- addStageEntries modifiedE helpersE
   let captureMap = closeFreeVars helpers0
-  MM.modify (\st -> st {stateRecStages = Map.mapWithKey
+  MM.modify' (\st -> st {stateRecStages = Map.mapWithKey
     (\v (k, sv, n) -> (k, sv, maybe n length (Map.lookup v captureMap))) (stateRecStages st)})
   modified1 <- rewriteCalls captureMap modified0
   -- a let-bound value a helper captures becomes one of its parameters
@@ -2028,7 +2028,7 @@ addStageEntries modified helpers = do
             stageT = FunT (take k ts) (FunT (drop k ts) r)
         AnnoS (Idx gi' _) c' e' <- reindexOne t
         let AnnoS (Idx source _) _ _ = t
-        MM.modify (\st -> st
+        MM.modify' (\st -> st
           { stateName = Map.insert gi' stageV (stateName st)
           , stateNameSource = Map.insert gi' source (stateNameSource st)
           })
@@ -2038,7 +2038,7 @@ addStageEntries modified helpers = do
     , k < length ts
     , not (isLamBody body)
     ]
-  MM.modify (\st -> st {stateRecStages = Map.union (Map.fromList [(v, (k, sv, 0)) | (v, sv, k, _, _) <- staged]) (stateRecStages st)})
+  MM.modify' (\st -> st {stateRecStages = Map.union (Map.fromList [(v, (k, sv, 0)) | (v, sv, k, _, _) <- staged]) (stateRecStages st)})
   let rewriteAll x = foldr (\(v, sv, k, st, _) acc -> rewritePartialCalls v sv k st acc) x staged
       helpers' = [(v, rewriteAll t) | (v, t) <- helpers]
       stages = [(sv, rewriteAll t) | (_, sv, _, _, t) <- staged]
@@ -2145,7 +2145,7 @@ extractExpr exports (VarS v (One child@(AnnoS (Idx midx _) _ _)))
       -- recursion), so its back-edges are renamed with this one's
       let renamedChild = renameCallS v newV child'
           innerHelpers' = [(w, renameCallS v newV h) | (w, h) <- innerHelpers]
-      MM.modify (\s -> s { stateName = Map.insert midx newV (stateName s) })
+      MM.modify' (\s -> s { stateName = Map.insert midx newV (stateName s) })
       return (CallS newV, (newV, renamedChild) : innerHelpers')
 extractExpr exports (VarS v (One child)) = do
   (child', helpers) <- extractFromTree exports child

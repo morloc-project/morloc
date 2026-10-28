@@ -1,3 +1,4 @@
+{-# LANGUAGE StrictData #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- |
@@ -82,8 +83,8 @@ module Morloc.Namespace.State
 
 import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
-import Control.Monad.State (StateT)
-import Control.Monad.Writer (WriterT)
+import Control.Monad.State.Strict (StateT)
+import Control.Monad.Writer.CPS (WriterT)
 import Data.Aeson (FromJSON (..), (.!=), (.:), (.:?))
 import qualified Data.Aeson as Aeson
 import Data.Int (Int64)

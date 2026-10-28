@@ -62,23 +62,23 @@ parse f (Code code) = do
   autoInstall <- MM.gets stateAutoInstall
   when autoInstall $ do
     snapshot <- Mod.loadSnapshot
-    MM.modify (\st -> st {stateSnapshot = snapshot})
+    MM.modify' (\st -> st {stateSnapshot = snapshot})
 
   -- The main module's @log-template@ becomes the program-wide default
   -- log message template. Per-label overrides win over this; the
   -- built-in defaults in 'Morloc.CodeGenerator.LogTemplate' fill any
   -- subfield neither this nor the per-label config supplies.
-  MM.modify (\st -> st {stateLogTemplate = moduleConfigLogTemplate moduleConfig})
+  MM.modify' (\st -> st {stateLogTemplate = moduleConfigLogTemplate moduleConfig})
 
   -- Likewise the program-wide @benchmark-template@: one row shape for the
   -- end-of-run summary the nexus renders from every label's timings.
-  MM.modify (\st -> st {stateBenchTemplate = moduleConfigBenchTemplate moduleConfig})
+  MM.modify' (\st -> st {stateBenchTemplate = moduleConfigBenchTemplate moduleConfig})
 
   -- The main module's run-scope @prologue@ / @epilogue@ templates are
   -- rendered by the nexus at run boundaries. Sub-modules cannot
   -- contribute to these (a workflow has exactly one entry-point, so
   -- run-scope events have exactly one source of truth).
-  MM.modify
+  MM.modify'
     ( \st -> st
         { stateRunLog =
             case (moduleConfigPrologue moduleConfig, moduleConfigEpilogue moduleConfig) of
@@ -107,7 +107,7 @@ parse f (Code code) = do
       case projectRoot of
         Just root -> do
           paths <- MM.liftIO $ Install.resolveIncludePatterns root patterns
-          MM.modify (\st -> st {stateHashIncludePaths = paths})
+          MM.modify' (\st -> st {stateHashIncludePaths = paths})
         Nothing -> return ()
     _ -> return ()
 
@@ -121,7 +121,7 @@ parse f (Code code) = do
   -- store source text, project root, and load package metadata for the main file
   case f of
     Just path -> do
-      MM.modify (\st -> st
+      MM.modify' (\st -> st
         { stateSourceText = Map.insert path code (stateSourceText st)
         , stateProjectRoot = projectRoot
         })
@@ -132,7 +132,7 @@ parse f (Code code) = do
     (Left e) -> MM.throwSystemError $ pretty e
     (Right (mainDag, mainState)) -> do
       -- capture module-level docs from the main module before imports overwrite them
-      MM.modify (\st -> st
+      MM.modify' (\st -> st
         { stateModuleDoc = psModuleDoc mainState
         , stateModuleEpilogues = psModuleEpilogues mainState
         })
@@ -183,7 +183,7 @@ parse f (Code code) = do
     parseImports entryPath d s m pkgs rw = case unimported of
       [] -> do
         -- transfer source positions from parser state into MorlocState
-        MM.modify (\st -> st
+        MM.modify' (\st -> st
           { stateSourceMap = psSourceMap s <> stateSourceMap st
           , stateTermDocs = psTermDocs s <> stateTermDocs st
           , stateStreamElems = psStreamElems s <> stateStreamElems st
@@ -292,7 +292,7 @@ parse f (Code code) = do
 openLocalModule :: Path -> MorlocMonad (Maybe Path, Text)
 openLocalModule filename = do
   code <- liftIO $ MT.readFile filename
-  MM.modify (\st -> st {stateSourceText = Map.insert filename code (stateSourceText st)})
+  MM.modify' (\st -> st {stateSourceText = Map.insert filename code (stateSourceText st)})
   return (Just filename, code)
 
 {- | Build a map from language aliases to Lang values, combining the

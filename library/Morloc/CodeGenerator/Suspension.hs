@@ -116,7 +116,7 @@ moveLabelIntoSuspension lang m body = do
         ms -> return (ms, onSuspension (cacheRun cacheLbl) inner)
       case cfg of
         Just c | measured, not (null closures) ->
-          MM.modify $ \s -> s { stateManifoldConfig =
+          MM.modify' $ \s -> s { stateManifoldConfig =
             Map.insert m c { manifoldConfigLog = Nothing, manifoldConfigBenchmark = Nothing }
               (foldr (\m' -> Map.insert m' c { manifoldConfigCache = Nothing }) (stateManifoldConfig s) closures) }
         _ -> return ()

@@ -72,7 +72,7 @@ synthesizeTerminalActions dag = do
       MM.throwSystemError . pretty $ Desugar.showParseError label err'
     Right (results, dsFinal) -> do
       MM.setCounter (Desugar.dsExpIndex dsFinal)
-      MM.modify (\st -> st
+      MM.modify' (\st -> st
         { stateSourceMap = Desugar.dsSourceMap dsFinal
         , stateModuleCommands = Map.fromList (map snd results)
         , stateErrorNotes = Map.map pretty (Desugar.dsErrorNotes dsFinal) <> stateErrorNotes st

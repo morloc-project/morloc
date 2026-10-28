@@ -240,7 +240,7 @@ addLocalState m0 e0 s0 = do
           sigmap' = Map.insert sigIndex sigset sigmap
       -- update state with the signature, the signature index will be linked to by
       -- all future terms of this type (even after they have been aliased)
-      MM.modify (\s -> s {stateSignatures = GMap idmap sigmap'})
+      MM.modify' (\s -> s {stateSignatures = GMap idmap sigmap'})
       -- update the map between term names and signature indices
       return $ lstate {linkTerms = Map.insert v sigIndex (linkTerms lstate)}
     -- create new entries for class definitions and type signatures
@@ -258,7 +258,7 @@ addLocalState m0 e0 s0 = do
       tmap' <- foldlM (\m (k, v) -> insertWithCheck k v m) tmap xs
 
       -- update morloc state
-      MM.modify
+      MM.modify'
         ( \s ->
             s
               { stateSignatures = GMap idmap sigmap'
@@ -283,7 +283,7 @@ addLocalState m0 e0 s0 = do
               MM.throwSystemError $
                 "Conflicting effect declarations for" <+> squotes (pretty lbl)
                   <> ": declared both as escapable and inescapable"
-        _ -> MM.modify (\s -> s {stateEffects = Map.insert lbl esc (stateEffects s)})
+        _ -> MM.modify' (\s -> s {stateEffects = Map.insert lbl esc (stateEffects s)})
       return lstate
     -- We only search for definitions at the top level. This may be the top-level
     -- inside of a where statement.
@@ -314,7 +314,7 @@ addLocalState m0 e0 s0 = do
           let sigset = Monomorphic (TermTypes Nothing [] [])
               sigmap' = Map.insert idx sigset sigmap
               terms' = Set.insert v terms
-          MM.modify (\s -> s {stateSignatures = GMap idmap sigmap'})
+          MM.modify' (\s -> s {stateSignatures = GMap idmap sigmap'})
           let lstate' = lstate {linkTerms = Map.insert v idx (linkTerms lstate)}
           return (terms', lstate')
     findFreeDefs (ExprI _ (LetE bindings body)) s = do
@@ -354,7 +354,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
             _ -> (bnds, c)
       c'' <- foldrM (addLocalState m0) c' (e : es)
       let owned = [ w | ExprI _ (AssE w _ _) <- es ]
-      MM.modify $ \ms -> ms
+      MM.modify' $ \ms -> ms
         { stateWhereOwner = foldr
             (\w m -> maybe m (\wi -> Map.insert wi ownerIdx m) (Map.lookup w (linkTerms c'')))
             (stateWhereOwner ms)
@@ -388,7 +388,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                   tt' = tt {termConcrete = srcTerm : termConcrete tt}
                   sigmap' = Map.insert termIdx (Monomorphic tt') sigmap
                   idmap' = Map.insert i termIdx idmap
-              MM.modify (\s -> s
+              MM.modify' (\s -> s
                 { stateSignatures = GMap idmap' sigmap'
                 , stateDefinitionSite = Map.insertWith (\_ old -> old) termIdx i (stateDefinitionSite s)
                 })
@@ -416,7 +416,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
               let tt' = tt {termDecl = e : termDecl tt}
                   sigmap' = Map.insert termIdx (Monomorphic tt') sigmap
                   idmap' = Map.insert i termIdx idmap
-              MM.modify (\ms -> ms
+              MM.modify' (\ms -> ms
                 { stateSignatures = GMap idmap' sigmap'
                 , stateDefinitionSite = Map.insert termIdx i (stateDefinitionSite ms)
                 })
@@ -564,7 +564,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
     updateSigLinks v termIdx sigIdx = do
       (GMap idmap sigmap) <- MM.gets stateSignatures
       let idmap' = Map.insert termIdx sigIdx idmap
-      MM.modify
+      MM.modify'
         ( \ms ->
             ms
               { stateSignatures = GMap idmap' sigmap
@@ -573,7 +573,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
         )
 
     updateName :: Int -> EVar -> MorlocMonad ()
-    updateName i v = MM.modify (\s -> s {stateName = Map.insert i v (stateName s)})
+    updateName i v = MM.modify' (\s -> s {stateName = Map.insert i v (stateName s)})
 
 -- Register a source-less instance: for each method in the typeclass, create a
 -- TermTypes with the specialized general type but no concrete implementations.
@@ -610,7 +610,7 @@ linkEmptyInstance _ cls0 params0 sigs emap = mapM_ go sigs
                 (Just inst) ->
                   return $ inst {instanceTerms = weaveTermTypes tt (instanceTerms inst)}
               let tcls' = Map.insert v newInstance tcls
-              MM.modify (\ms -> ms {stateSignatures = GMap idmap sigmap', stateTypeclasses = tcls'})
+              MM.modify' (\ms -> ms {stateSignatures = GMap idmap sigmap', stateTypeclasses = tcls'})
 
 -- Goal:
 --   for each term in [Signature], add a TermTypes instance to the correct
@@ -639,7 +639,7 @@ linkInstance origin linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
       (Signature _ _ et, stateIdx) <- lookupInfo v
       -- a derived body is not a definition anyone wrote
       when (origin == Declared) $
-        MM.modify (\ms -> ms {stateDefinitionSite = Map.insert stateIdx ai (stateDefinitionSite ms)})
+        MM.modify' (\ms -> ms {stateDefinitionSite = Map.insert stateIdx ai (stateDefinitionSite ms)})
       linker stateIdx e es
       t <- substituteInstanceTypes params0 (etype et)
       let et' = et {etype = t}
@@ -674,7 +674,7 @@ linkInstance origin linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
             (Just inst) -> do
               return $ inst {instanceTerms = weaveTermTypes tt (instanceTerms inst)}
           let tcls' = Map.insert v newInstance tcls
-          MM.modify (\ms -> ms {stateSignatures = GMap idmap sigmap', stateTypeclasses = tcls'})
+          MM.modify' (\ms -> ms {stateSignatures = GMap idmap sigmap', stateTypeclasses = tcls'})
 
 {- Substitute the instance types into the class function definition
 

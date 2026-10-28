@@ -422,7 +422,7 @@ freshName _ = do
 plainIndex :: Int -> MorlocMonad Int
 plainIndex parent = do
   i <- newIndex parent
-  MM.modify (\s -> s {stateExports = filter (/= i) (stateExports s)})
+  MM.modify' (\s -> s {stateExports = filter (/= i) (stateExports s)})
   return i
 
 -- | A copy of a subtree with fresh indices, for a right-hand side served in

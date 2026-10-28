@@ -65,8 +65,8 @@ mkPolyManifold lang midx form body = do
   -- context arguments, so the runtime can call it with the captured values
   staged <- Map.member midx <$> MM.gets stateStageEntries
   when staged $ case form of
-    ManifoldPart ctx _ -> MM.modify (\st -> st {stateStageContext = Map.insert midx (length ctx) (stateStageContext st)})
-    ManifoldPass _ -> MM.modify (\st -> st {stateStageContext = Map.insert midx 0 (stateStageContext st)})
+    ManifoldPart ctx _ -> MM.modify' (\st -> st {stateStageContext = Map.insert midx (length ctx) (stateStageContext st)})
+    ManifoldPass _ -> MM.modify' (\st -> st {stateStageContext = Map.insert midx 0 (stateStageContext st)})
     _ -> return ()
   let kind = if observable then Preserved else Transparent
   return $ PolyManifold lang midx form kind body
@@ -92,7 +92,7 @@ express e@(AnnoS (Idx midx t) (Idx cidx _, _) _) = do
   -- effect-label tracking in CppTranslator etc.); the labels are
   -- stripped from the type by 'insertExportBoundaries'.
   let retEffects = extractReturnEffects t
-  MM.modify (\s -> s { stateManifoldEffects = Map.insert midx retEffects (stateManifoldEffects s) })
+  MM.modify' (\s -> s { stateManifoldEffects = Map.insert midx retEffects (stateManifoldEffects s) })
   -- A command's arguments come from the program's caller as values; a
   -- helper's arrive from another manifold, a suspension among them as a
   -- closure. Only a command adapts its arguments.
@@ -196,7 +196,7 @@ addNativeRecEntries phs = do
           -- frame that runs the body is the one diagnostics name.
           midx' <- MM.freshManifoldIndex midx
           name <- MM.gets stateName
-          MM.modify $ \s ->
+          MM.modify' $ \s ->
             s { stateNativeRecEntries = Map.insert midx midx' (stateNativeRecEntries s)
               , stateName = maybe (stateName s)
                   (\n -> Map.insert midx' n (stateName s)) (Map.lookup midx name)
@@ -535,7 +535,7 @@ debugWrapExpr (PolyManifold l m form k inner)
 debugWrapExpr (PolyManifold l m form k inner) = do
   inner' <- debugWrapExpr inner
   case sourcedCallee inner of
-    Just v -> MM.modify (\s -> s {stateDebugCallee = Map.insert m v (stateDebugCallee s)})
+    Just v -> MM.modify' (\s -> s {stateDebugCallee = Map.insert m v (stateDebugCallee s)})
     Nothing -> return ()
   let argsList = collectArgs form
   return $ PolyManifold l m form k (PolyDebugWrap m argsList inner')
@@ -1460,7 +1460,7 @@ expressPolyExpr ::
 -- uses, so the hooks wrap that one call and nothing its arguments computed.
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (_, args) (LabelS k inner@(AnnoS _ ic ie))) = do
   cfg <- MM.gets (Map.lookup k . stateManifoldConfig)
-  MM.modify $ \s -> s {stateManifoldConfig = maybe id (Map.insert midx) cfg (stateManifoldConfig s)}
+  MM.modify' $ \s -> s {stateManifoldConfig = maybe id (Map.insert midx) cfg (stateManifoldConfig s)}
   reg <- MM.gets stateLangRegistry
   bconf <- MM.gets stateBuildConfig
   let findRemote = decideRemoteness reg bconf cfg

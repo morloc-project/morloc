@@ -89,7 +89,7 @@ resolveBuildDirs = do
             cwd <- liftIO SD.getCurrentDirectory
             liftIO $ SD.makeAbsolute (fromMaybe cwd (stateBuildParentDir st))
       let buildDir = root </> buildDirName dirKey
-      MM.modify (\s -> s {stateInstallDir = Just buildDir, stateBuildRoot = Just root})
+      MM.modify' (\s -> s {stateInstallDir = Just buildDir, stateBuildRoot = Just root})
       return (BuildDirs dirKey root buildDir)
 
 -- | The unit 'buildProgram' atomically swaps into place. For install it is the
@@ -127,7 +127,7 @@ ensureStagingDir = do
       liftIO $ removeDirIfExists staging
       liftIO $ SD.createDirectoryIfMissing True staging
       liftIO $ MT.writeFile (staging </> buildMarker) ""
-      MM.modify (\s -> s {stateStagingDir = Just staging})
+      MM.modify' (\s -> s {stateStagingDir = Just staging})
       return staging
   dst <- stagingDst staging
   liftIO $ SD.createDirectoryIfMissing True dst
@@ -159,7 +159,7 @@ discardStagingDir = do
     Nothing -> return ()
     Just staging -> do
       liftIO $ removeDirIfExists staging
-      MM.modify (\s -> s {stateStagingDir = Nothing})
+      MM.modify' (\s -> s {stateStagingDir = Nothing})
 
 -- | Run an action, discarding the staging directory if it fails.
 withStagingCleanup :: MorlocMonad a -> MorlocMonad a
@@ -195,7 +195,7 @@ buildProgram (manifest, wrappers, pools) = do
       buildAll projectRoot (manifest : pools)
       liftIO $ SD.setCurrentDirectory origDir
       liftIO $ swapIn staging swapTarget
-      MM.modify (\s -> s {stateStagingDir = Nothing})
+      MM.modify' (\s -> s {stateStagingDir = Nothing})
     ) `catchError` \e -> do
       liftIO $ SD.setCurrentDirectory origDir
       discardStagingDir
