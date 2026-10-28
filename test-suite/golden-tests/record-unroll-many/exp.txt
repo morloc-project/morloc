@@ -1,0 +1,12 @@
+--- defaults ---
+"lang=[] name='x' size=[7]"
+--- several-after-one-flag ---
+"lang=['r', 'py'] name='x' size=[7]"
+--- repeated-flag ---
+"lang=['r', 'py'] name='x' size=[7]"
+--- string-tokens-stay-strings ---
+"lang=['1', 'true', '\"q\"'] name='x' size=[7]"
+--- typed-elements-then-other-flags ---
+"lang=['cpp'] name='y' size=[1, 2, 3]"
+--- bad-element-refused ---
+OK

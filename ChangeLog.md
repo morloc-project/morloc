@@ -42,6 +42,8 @@ Fixes
  * A Vector literal built in Python or R has the form a received Vector has:
    in Python its exact numpy dtype (uint8, int32, float32, ...), in R `raw`
    for U8 and `integer64` for I64; an element out of range is an error
+ * A list field marked `@many` in an `@unroll` record takes several values
+   after one flag (`--lang r py`) or a repeated flag
 
 0.110.1 [2026-10-23]
 --------------------

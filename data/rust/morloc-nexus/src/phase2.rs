@@ -1038,6 +1038,7 @@ fn add_group_entry_arg(
             type_desc,
             desc,
             format,
+            many,
             ..
         } => {
             let mut a = ClapArg::new(id).action(ArgAction::Set);
@@ -1054,6 +1055,9 @@ fn add_group_entry_arg(
             }
             if let Some(d) = default_val {
                 a = a.default_value(leak(&shown_default(d, ctor_line.is_some())));
+            }
+            if *many {
+                a = a.num_args(1..).action(ArgAction::Append);
             }
             a = a.help(leak(&render_arg_help(
                 desc,
@@ -1152,6 +1156,24 @@ fn token_value(
     };
     crate::parse_arg::note_unparsed_token(&raw);
     ArgValue::Value(preprocess_cli_value(raw, checks, source, quoted, &label))
+}
+
+/// The JSON list a `@many` record field's tokens stand for. A string element
+/// is taken as written; any other element must be a JSON value of its type,
+/// since a record field is read as one value and has no per-element source.
+fn many_field_json(tokens: &[String], literal: bool, key: &str) -> String {
+    let items: Vec<String> = tokens.iter().map(|t| {
+        if literal {
+            return crate::dispatch::quoted(t);
+        }
+        let t = morloc_manifest::cli_value::maybe_float_special_to_json(t).unwrap_or_else(|| t.clone());
+        if serde_json::from_str::<serde_json::Value>(&t).is_err() {
+            crate::runlog::die_with_error(&format!(
+                "record entry '{}': '{}' is not a value of the element type", key, t));
+        }
+        t
+    }).collect();
+    format!("[{}]", items.join(","))
 }
 
 fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> {
@@ -1319,10 +1341,17 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                                 None
                             }
                         }
-                        ManifestArg::Optional { quoted: q, checks, source, .. } => {
+                        ManifestArg::Optional { quoted: q, checks, source, many, .. } => {
                             let from_cli = matches.value_source(&eid)
                                 == Some(ValueSource::CommandLine);
-                            if from_cli {
+                            if from_cli && *many {
+                                let toks: Vec<String> = matches
+                                    .get_many::<String>(&eid)
+                                    .map(|it| it.cloned().collect())
+                                    .unwrap_or_default();
+                                toks.iter().for_each(|t| crate::parse_arg::note_unparsed_token(t));
+                                Some(many_field_json(&toks, *q, &entry.key))
+                            } else if from_cli {
                                 matches.get_one::<String>(&eid).cloned().map(|v|
                                     preprocess_cli_value(v, checks, *source, *q,
                                         &format!("record entry '{}'", entry.key))
