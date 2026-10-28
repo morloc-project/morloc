@@ -17,13 +17,23 @@ on 0.109.0 unless marked.
   Serialize.hs, `loadResultPacker`) runs the outer type's packer only; a
   value received as an argument is built at every level (Imperative.hs,
   `wireToNative`). Affects `@load`, `@read`, `@unpack` and the cell readers.
-- **An R literal does not have a received value's native form.**
-  [reproduced, 2026-10-28] Spec gap: NATIVE-7 rules this for Python only.
-  rmorloc picks an array's R form by element type (U8 `raw`, I64
-  `integer64`, enum factor), but a literal is emitted as `c(...)`: with
-  vector-r, `[1, 2, 3] :: Vector 3 U8` is `integer` when built in R and `raw`
-  when received from C++. Python solves this by giving a Packable literal the
-  decoder's form (`mlc_conform`); R would need its own.
+- **An R list literal does not have a received list's native form.**
+  [reproduced, 2026-10-28] Violates NATIVE-8 for `Vector n D` (D a nullary
+  `data`); a gap for plain lists. rmorloc builds an array of scalars as the
+  atomic vector its element type takes (U8 `raw`, I64 `integer64`, I8
+  `integer`, F32 `double`, an enum a factor), but an R list literal is an R
+  `list` for every element type: `[1, 2, 3] :: [U8]` is `list` built in R
+  and `raw` received from C++, against the R ruling that U8 lists are raw.
+  `Vector n D` takes this path because vector-r's catch-all form for Vector
+  is `list`, the same as the wire form, so no Packable conversion runs.
+- **A received newtype over a list ignores its Python form.** [reproduced,
+  2026-10-28] Violates NEWT-4 / NATIVE-1. `newtype Frozen a = [a]; type Py =>
+  (Frozen a) = "tuple" a`, with Packable pack in Python: a literal is a tuple
+  (CLS-2), but a `Frozen Int` returned by a C++ function reaches Python as a
+  list, so a Python source checking for a tuple fails. A newtype whose body
+  is a list serializes as the list (library/Morloc/CodeGenerator/Serial.hs,
+  `AliasIsList`) and the decoder leaves a "tuple" hint on an array as a list,
+  so the pack is never applied.
 - **A Python Vector built by library code has numpy's default dtype.**
   [read, 2026-10-28] Violates NATIVE-7, which makes a `Vector n U8` uint8
   however the program builds it. vector-py's `map`

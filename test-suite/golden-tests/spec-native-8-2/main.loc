@@ -1,4 +1,4 @@
--- Spec NATIVE-7: in Python a `Vector n U8` or `Vector n D` (D a nullary
+-- Spec NATIVE-8: in Python a `Vector n U8` or `Vector n D` (D a nullary
 -- `data`) is a numpy uint8 array both when the program builds it and when it
 -- arrives from another language. The other element types follow the same
 -- rule: a literal has the dtype a received value has.

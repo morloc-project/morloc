@@ -3798,7 +3798,7 @@ error:
 }
 
 // A literal built in this pool, given the native form the decoder gives a
-// value received at the same schema (NATIVE-7). Only a "numpy.ndarray" form is
+// value received at the same schema (NATIVE-8). Only a "numpy.ndarray" form is
 // chosen by the decoder; any other value is returned as it is, for the type's
 // packer to build. Elements are checked as the encoder checks them.
 static PyObject* pybinding__mlc_conform(PyObject* self, PyObject* args) { MAYFAIL

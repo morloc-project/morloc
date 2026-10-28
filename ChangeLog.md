@@ -12,6 +12,10 @@ Changed
  * A function made by foreign code stays in its language; sending one to
    another language is refused at build
  * Retire the old `<field>:` style docstring syntax
+ * In Python a list is always a Python `list`, `[U8]` and lists of
+   constructors without fields included, whether built or received; a
+   compact byte buffer is `Vector n U8` (a numpy uint8 array). Declaring
+   another Python form for a list is an error
 
 Docstrings and diagnostics
  * Docstrings above items of a `source (...)` list, above `%inline` items
@@ -35,6 +39,9 @@ Fixes
    outside the environment, naming it, instead of failing deep in a build
  * Recursive functions returning functions, Rust closures returned after an
    effect, and some `--debug` and cache builds no longer hit compiler bugs
+ * A Vector literal built in Python or R has the form a received Vector has:
+   in Python its exact numpy dtype (uint8, int32, float32, ...), in R `raw`
+   for U8 and `integer64` for I64; an element out of range is an error
 
 0.110.1 [2026-10-23]
 --------------------

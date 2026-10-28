@@ -2580,6 +2580,31 @@ SEXP morloc_mlc_read(SEXP schema_str_r, SEXP json_str_r) { MAYFAIL
     return obj;
 }
 
+// A literal built in this pool, given the form the decoder gives a value
+// received at the same schema (NATIVE-8): a list of scalars becomes the atomic
+// vector the decoder builds for its element type (U8 raw, I64 integer64, an
+// enum a factor). Elements are checked as the encoder checks them.
+SEXP morloc_mlc_conform(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_conform: schema must be a single string");
+    }
+    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
+    free(schema_str);
+
+    size_t total_size = get_shm_size(schema, obj_r);
+    void* voidstar = R_TRY_WITH(free_schema(schema), shmalloc, total_size);
+    // The tracker owns the block and schema before the write pass, which
+    // raises an R error on an element out of range; the next request's flush
+    // then releases them.
+    shm_tracker_push((absptr_t)voidstar, schema);
+    void* cursor = (void*)((char*)voidstar + schema->width);
+    to_voidstar_inner(voidstar, &cursor, obj_r, schema);
+    SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
+    shm_tracker_release_one((absptr_t)voidstar);
+    return obj;
+}
+
 // Helper: R bound -> (has_X, value) pair for one mlc_ifile_walk arg.
 // NULL / NA / NA_integer_ / NA_real_ -> absent (has=0); else use the
 // integer / real / integer64 value.
@@ -4305,6 +4330,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_compare", (DL_FUNC) &morloc_mlc_compare, 3},
         {"morloc_mlc_load", (DL_FUNC) &morloc_mlc_load, 2},
         {"morloc_mlc_read", (DL_FUNC) &morloc_mlc_read, 2},
+        {"morloc_mlc_conform", (DL_FUNC) &morloc_mlc_conform, 2},
         {NULL, NULL, 0}
     };
 

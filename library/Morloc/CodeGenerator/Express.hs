@@ -49,7 +49,7 @@ import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal (findPackableWireForm, unqualify)
-import Morloc.CodeGenerator.Serial (containsFunT, findCoveringPacker)
+import Morloc.CodeGenerator.Serial (containsFunT, findCoveringPacker, makeSerialAST)
 
 mkIdx :: AnnoS g One (Indexed c, d) -> Type -> Indexed Type
 mkIdx (AnnoS _ (Idx i _, _) _) = Idx i
@@ -1285,26 +1285,60 @@ maybePackableWrap midx lang nativeT wireT = do
               <+> "(... as pack, ... as unpack)'."
 
 -- | Build a literal at @userT@ from its wire form @inner@ (at @wireT@) with
--- the Packable packer @src@. A Python value whose form is a numpy array and
--- whose wire form is a list is built by the decoder, not by a packer, when it
--- is received; a literal of that type is built the same way (@conform@), so
--- the two cannot differ (NATIVE-7).
+-- the Packable packer @src@, the way a received value of that type is built,
+-- so the two cannot differ (NATIVE-8). A received value whose wire form is a
+-- list is first built by the pool's decoder (@conform@ gives a literal the
+-- decoder's form):
+--
+--   * Python: where the form is a numpy array the decoder builds the value
+--     itself, and no packer runs;
+--   * R: the decoder builds a list of scalars as the atomic vector its
+--     element type takes, and then the packer runs.
+--
+-- A value holding a function has no schema to decode it by.
 packLiteral :: Int -> Lang -> Type -> Type -> Source -> PolyExpr -> MorlocMonad PolyExpr
-packLiteral midx lang wireT userT src inner = do
-  decoded <- decoderBuilds
-  return $
-    if decoded
-      then PolyIntrinsic (Idx midx userT) IntrConform [inner]
-      else PolyApp (PolyExe (Idx midx (FunT [wireT] userT)) (SrcCallP Nothing src)) [inner]
-  where
-    decoderBuilds
-      -- a value holding a function has no schema to decode it by
-      | ML.langName lang /= "py" || containsFunT userT = return False
-      | AppT (VarT v) _ <- wireT, v == BT.list = numpyForm
-      | otherwise = return False
-    numpyForm = do
+packLiteral midx lang wireT userT src inner
+  | containsFunT userT || not wireIsList = return packed
+  | langName' == "py" = do
       form <- inferConcreteType lang (Idx midx userT)
-      return $ T.takeWhile (/= '<') (renderConcreteForm form) == "numpy.ndarray"
+      return $
+        if T.takeWhile (/= '<') (renderConcreteForm form) == "numpy.ndarray"
+          then PolyIntrinsic (Idx midx userT) IntrConform [inner]
+          else packed
+  | langName' == "r" = do
+      ast <- inferConcreteType lang (Idx midx wireT) >>= makeSerialAST midx lang
+      return $
+        if scalarList ast
+          then pack (PolyIntrinsic (Idx midx wireT) IntrConform [inner])
+          else packed
+  | otherwise = return packed
+  where
+    langName' = ML.langName lang
+    wireIsList = case wireT of
+      AppT (VarT v) _ -> v == BT.list
+      _ -> False
+    pack x = PolyApp (PolyExe (Idx midx (FunT [wireT] userT)) (SrcCallP Nothing src)) [x]
+    packed = pack inner
+    scalarList (SerialList _ _ e) = scalar e
+    scalarList _ = False
+    scalar e = case e of
+      SerialReal _ -> True
+      SerialFloat32 _ -> True
+      SerialFloat64 _ -> True
+      SerialInt _ -> True
+      SerialInt8 _ -> True
+      SerialInt16 _ -> True
+      SerialInt32 _ -> True
+      SerialInt64 _ -> True
+      SerialUInt _ -> True
+      SerialUInt8 _ -> True
+      SerialUInt16 _ -> True
+      SerialUInt32 _ -> True
+      SerialUInt64 _ -> True
+      SerialBool _ -> True
+      SerialString _ -> True
+      SerialEnum {} -> True
+      _ -> False
 
 -- | LstS dispatch counterpart to 'dispatchPrimLit'. Computes the
 -- wire-parent root of @userT@, expects it to be list-shaped, and either

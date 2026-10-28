@@ -1,0 +1,74 @@
+-- Spec NATIVE-8: in R a Vector literal has the form a Vector received from
+-- another language has: U8 is raw, I64 is integer64, Bool logical, Str
+-- character.
+module main
+  ( litU8, cppU8
+  , litI64, cppI64
+  , litI32, cppI32
+  , litF32, cppF32
+  , litBool, cppBool
+  , litStr, cppStr
+  , varU8
+  , poly
+  , overU8
+  )
+
+import root-r
+import root-cpp
+import vector
+import vector-r
+import vector-cpp
+
+source R from "kind.R" ("kind")
+kind :: Vector n a -> Str
+
+source Cpp from "echo.hpp" ("echo")
+echo :: Vector n a -> Vector n a
+
+litU8 :: Str
+litU8 = kind ([1, 2, 3] :: Vector 3 U8)
+
+cppU8 :: Str
+cppU8 = kind (echo ([1, 2, 3] :: Vector 3 U8))
+
+litI64 :: Str
+litI64 = kind ([1, 2] :: Vector 2 I64)
+
+cppI64 :: Str
+cppI64 = kind (echo ([1, 2] :: Vector 2 I64))
+
+litI32 :: Str
+litI32 = kind ([1, 2] :: Vector 2 I32)
+
+cppI32 :: Str
+cppI32 = kind (echo ([1, 2] :: Vector 2 I32))
+
+litF32 :: Str
+litF32 = kind ([1.5, 2.5] :: Vector 2 F32)
+
+cppF32 :: Str
+cppF32 = kind (echo ([1.5, 2.5] :: Vector 2 F32))
+
+varU8 :: U8 -> Str
+varU8 x = kind ([x, x] :: Vector 2 U8)
+
+overU8 :: U8 -> Str
+overU8 x = kind ([x + 250] :: Vector 1 U8)
+
+litBool :: Str
+litBool = kind ([True, False] :: Vector 2 Bool)
+
+cppBool :: Str
+cppBool = kind (echo ([True, False] :: Vector 2 Bool))
+
+litStr :: Str
+litStr = kind (["a", "b"] :: Vector 2 Str)
+
+cppStr :: Str
+cppStr = kind (echo (["a", "b"] :: Vector 2 Str))
+
+single :: a -> Vector 1 a
+single x = [x]
+
+poly :: Str
+poly = kind (single (5 :: U8))

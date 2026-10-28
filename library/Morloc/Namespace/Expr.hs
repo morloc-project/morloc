@@ -592,9 +592,8 @@ data Intrinsic
                     -- a reader was handed is raised again here.
   | IntrConform     -- ^ internal @conform :: a -> a, synthesized by Express.hs
                     -- around the wire form of a Packable literal: gives it
-                    -- the native form the pool's decoder gives a received
-                    -- value of the literal's type, where the decoder chooses
-                    -- one (NATIVE-7). Python only.
+                    -- the form the pool's decoder gives a received value of
+                    -- its schema (NATIVE-8). Python and R only.
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
