@@ -40,7 +40,7 @@ effect.
 
 ### HOST-4 Parentheses never set call groups
 Intent: ruled 2026-10-27
-Tests: spec-host-4-1
+Tests: spec-host-4-1, spec-host-4-2
 Code: conforms 2026-10-27
 
 `f :: Real -> ([Real] -> [Real])` is called as `f :: Real -> [Real] ->

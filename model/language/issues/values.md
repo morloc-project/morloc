@@ -8,6 +8,13 @@ on 0.109.0 unless marked.
   source Py from "native.py" ("kind" as pathKind); pathKind :: Path -> Str`
   with `def kind(x): return type(x).__name__` builds without a warning;
   `./prog pathKind notes/report.txt` prints `"str"`.
+- **A Python `[U8]` built in morloc is a list, not bytes.** [reproduced,
+  2026-10-27] Violates NATIVE-1 (root-py maps `List U8` to `bytes`).
+  `source Py from "t.py" ("kind"); kind :: [U8] -> Str` with `def kind(x):
+  return type(x).__name__`: `kind [1, 2, 3]` and `kind ([1, 2] <> [3])`
+  print `"list"`, while a `[U8]` received from another pool is `bytes`, so
+  a Python native sees two forms of one type. root-py's `mempty = []` is
+  the same list at `[U8]`.
 - **A literal of a newtype over a Packable type is rejected.** [reproduced,
   2026-10-18] `import root-py; import map-py; newtype Holder = Map Str Int`;
   `[("a", 1)] :: Holder` fails "Cannot construct a value of 'Holder' from a
@@ -89,6 +96,18 @@ on 0.109.0 unless marked.
   std::optional<int>&)` fails to compile: the pool passes
   `std::optional<std::optional<int>>`. Python and R collapse. Repro:
   /work/plans/model-audit-2026-10-21/repro/C/opt/n.loc. Related: tables-tensors.md `?(?Int)` column.
+  A collapse only in morloc's types was tried and reverted 2026-10-27.
+  Collapsing needs, together: every `OptionalU` construction collapsing,
+  `apply` and `subtype` included (else `find absent xs` at `[?Int]` is
+  typed `??Int` and rejected, and `dflt :: a -> ?a -> a` at `?Int` fails);
+  the structural walks (Infer `structuralCompound`) and `weaveTypeF` at
+  unequal depths; and an adapter at the native call boundary, since a C++
+  template or Rust generic instantiated at `a = ?T` returns
+  `optional<optional<T>>` (golden optional-cpp's natives take nested
+  optionals and need rewriting). Languages also disagree on a value:
+  `fromNull :: a -> ?a -> a` at `a = ?Int` with `state2 :: ?(?Int) -> Str`,
+  `state2 (fromNull (Null :: ?Int) Null)` is present-with-inner-absent in
+  C++ and Rust and absent in Python.
 - **NUM-3's text is stale.** [reproduced, 2026-10-21] NUM-3 (ruled
   2026-10-04) says R holds `I64`/`U64` as doubles exact below 2^53; the
   2026-10-16 ruling and the code use bit64 `integer64` (`cI64 5` has class

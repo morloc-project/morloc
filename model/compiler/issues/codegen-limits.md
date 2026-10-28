@@ -95,23 +95,3 @@ Generated code that a language's own tools refuse.
   data/lang/py/lang.yaml `ldErrorWrapOpen`/`ldErrorWrapClose`, applied by
   Grammars/Translator/Generic.hs `lcMakeFunction` `wrapError`.
   spec-emit-3-1 covers only C++ and Rust. Repro: /work/plans/model-audit-2026-10-21/repro/H/rec/.
-- **A sourced function whose signature ends in a function-type alias does
-  not build when partially applied.** [reproduced, 2026-10-22] Gap: no
-  item says an alias in a sourced signature generates the same code as its
-  expansion (ALIAS items cover typing, not codegen). With `type Reader a =
-  Str -> Sink a -> <IO> ()`, `feed :: Int -> Reader Int` sourced from C++
-  and used as `run (feed 1 p)` fails `conversion from 'void' to
-  non-scalar type 'std::function<mlc::Unit()>'`: the call is emitted as
-  returning a suspension. Written flat (`feed :: Int -> Str -> Sink Int ->
-  <IO> ()`) it builds and runs. Rust fails the same way (`expected
-  function, found ()`, and the sink passed as `&Arc<dyn Fn>` to an `S: Fn`
-  parameter). With no leading argument (`feed :: Reader Int`) both forms
-  build. Repro: /work/plans/biolib-convert-repro/alias-signature/
-  (alias2.loc fails, flat2.loc builds).
-- **`Null` in a field of a parameterized record literal is not given a
-  type.** [reproduced, 2026-10-22] Violates OPT-1 (`Null` has type `?T`).
-  With `record Outer t c` holding `inner :: ?(Inner c)`, the top-level
-  value `xs :: [Outer Str Str]; xs = [{ann = "a", inner = {...}}, {ann =
-  "b", inner = Null}]` fails in Express.hs "Cannot infer type for Null
-  literal of type ?(Inner Str)". An annotation `(Null :: ?(Inner Str))`
-  fails the same way. Repro: /work/plans/biolib-convert-repro/null-in-record/.

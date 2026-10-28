@@ -1858,44 +1858,17 @@ expressPolyExpr findRemote parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (Con
     _ = (findRemote, parentLang)
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) UniS) =
   dispatchPrimLit midx lang t v (\tv -> PolyNull (Idx cidx (VarT tv)))
--- Null carries the full type it stands in for. Earlier this was just
--- a @TVar@ extracted via @innerNullVar@, but a bare constructor name
--- loses the arg list of parameterised aliases. For
--- @Null :: ?(BTree Int)@, peeling Optional and discarding the @[Int]@
--- yielded just @BTree@, whose downstream @inferConcreteVar@ chain
--- resolved to an @FV BTree "tuple"@ FVar that the typeFof of the
--- enclosing tuple/record/if surfaced as a bare-args VarF -- which
--- @makeSerialAST@'s @dispatchVarF@ then could not interpret.
---
--- Now @innerNullType@ returns the full inner @Type@ (still peeling
--- Optional wrappers for nested @?(?T)@ idempotence). Downstream
--- consumers run @inferConcreteType@ on the stored type and surface
--- the proper @TypeF@ at typeFof time.
+-- Null carries the full type it stands in for, arguments included, so the
+-- native form inferred from it at typeFof time keeps a parameterised
+-- payload's arguments.
 expressPolyExpr _ _ _ (AnnoS (Idx midx t) (Idx cidx _, _) NullS) =
-  case canonNullType t of
-    Just t' -> return $ PolyNull (Idx cidx t')
-    Nothing -> MM.throwSourcedError midx $
-      "Cannot infer type for Null literal of type"
-      <+> dquotes (pretty t) <> "."
-      <+> "This usually means an unsolved generic term escaped typechecking."
-  where
-    -- Require the outermost to be @OptionalT@ (which the typecheck
-    -- always supplies for @NullS@ via @synthE NullS@'s
-    -- @OptionalU v@). Then collapse nested Optionals (idempotence:
-    -- ?(?T) == ?T) and require a concrete head underneath. The stored
-    -- type is the canonical @?T@ where @T@ is @VarT@ or
-    -- @AppT (VarT _) _@, so downstream typeFof presents a single
-    -- Optional layer matching the slot's expected shape.
-    canonNullType (OptionalT inner) = OptionalT <$> peelOpt inner
-    canonNullType _                 = Nothing
-    peelOpt (OptionalT inner)       = peelOpt inner
-    peelOpt t'@(VarT _)             = Just t'
-    peelOpt t'@(AppT (VarT _) _)    = Just t'
-    -- An absent suspension or function value: the payload type is spelled
-    -- by its own constructor, so it passes through whole.
-    peelOpt t'@(EffectT _ _)        = Just t'
-    peelOpt t'@(FunT _ _)           = Just t'
-    peelOpt _                       = Nothing
+  case t of
+    -- The type is kept whole, nested Optionals included, so the absent value
+    -- has the native form of the slot it fills. An undetermined payload is
+    -- refused where its native form is inferred (POLY-6).
+    OptionalT _ -> return $ PolyNull (Idx cidx t)
+    _ -> MM.throwSystemError $
+      "Null literal" <+> pretty midx <+> "typed" <+> dquotes (pretty t) <+> "rather than as an optional"
 -- A list literal at type `Foo a1 ... an` has exactly one element-type arg
 -- (the rest, if any, are Nat-kinded phantom dims, e.g. for Vector n a).
 -- Extract the single non-Nat arg for typing children, but PRESERVE the
@@ -2015,7 +1988,7 @@ expressPolyExpr _ pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
   scope <- MM.getGeneralScope
   case reduceType scope t of
     (Just t') -> expressPolyExprWrap pl pc (AnnoS (Idx i t') c e)
-    Nothing -> error "Expected a record type"
+    Nothing -> MM.throwSourcedError i $ "Record literal typed" <+> dquotes (pretty t) <+> "rather than as a record"
 -- Recursive call used as a value (not applied via AppS)
 expressPolyExpr _ parentLang _ (AnnoS (Idx i c) (Idx _cidx _, _) (CallS v)) = do
   (mid, crossLang) <- lookupRecursiveTarget parentLang v

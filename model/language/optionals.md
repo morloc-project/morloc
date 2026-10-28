@@ -4,7 +4,7 @@
 
 ### OPT-1 `?T` is a `T` or `Null`
 Intent: proposed
-Code: conforms 2026-10-21
+Code: deviates (issues/values.md)
 
 `?` applies to any type. `Null` is the only absent value and has type `?T`
 for every `T`.

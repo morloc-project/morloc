@@ -2590,13 +2590,10 @@ lowerNativeExprRaw cfg origExpr (VariantN_ t n i xs)
 lowerNativeExprRaw cfg _ (NullN_ t)
   | isUnitTypeF t = return $ defaultValue {poolExpr = lcPrintExpr cfg IUnitLit}
 lowerNativeExprRaw cfg _ (NullN_ t) = do
-  -- NullN_ now carries the full @TypeF@ of the Null's type slot
-  -- (e.g. @?(BTree Int)@), not just the underlying constructor's
-  -- @FVar@. Pass it through @lcTypeOf@ to get the IType the printer
-  -- uses for the null literal -- though most language printers
-  -- ignore this IType (Python emits "None", C++ emits "std::nullopt"
-  -- unconditionally), threading it preserves the option for languages
-  -- that do type-tagged null forms.
+  -- NullN_ carries the full @TypeF@ of the Null's slot (e.g.
+  -- @?(BTree Int)@, nested Optionals included). The C++ and Rust printers
+  -- spell the absent value at that type (@T{}@, @<T>::None@); Python and R
+  -- ignore it.
   mayT <- lcTypeOf cfg t
   return $ defaultValue {poolExpr = lcPrintExpr cfg (INullLit mayT)}
 -- A thunk's result leaves the thunk by value, so it is an owned sink like a

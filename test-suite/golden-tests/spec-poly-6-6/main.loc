@@ -1,0 +1,8 @@
+-- Spec POLY-6: the payload of a Null is fixed by nothing, and the list
+-- crosses into a pool.
+module main (f)
+
+import root-py
+
+f :: Int -> Int
+f x = length [Null, Null]

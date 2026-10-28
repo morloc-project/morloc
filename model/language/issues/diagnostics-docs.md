@@ -45,6 +45,12 @@
   (`Int` with no `type Py => Int`), the error points at the module's export
   list (`module main (f)`, column of `f`) rather than at a call; which node
   is blamed changes with the placement chosen.
+- **A record literal in a generic slot gets wrong advice.** [reproduced,
+  2026-10-28] Anonymous records are ruled unsupported, but `import root-py;
+  lenn :: [a] -> Int; na x = lenn [{ann = "a", x = inc x}]` is refused
+  with "No concrete py type for 'Record'... or import a module that
+  provides one (e.g. root-py)", naming a module already imported
+  (Express.hs record fallback; C++ names root-cpp the same way).
 - **An R pool load failure is printed twice.** [reproduced, 2026-10-21]
   A sourced R file assigning `.__morloc` prints "failed to load pool
   sources: cannot change value of locked binding" bare and again after

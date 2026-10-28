@@ -19,6 +19,14 @@
   unspecified. Only printed types, CLI metadata of unannotated exports and
   docstrings at inferred positions (ALIAS-13, open) depend on it; deciding
   ALIAS-13 first narrows the choice.
+- **A record literal's fields are checked at the record's full
+  unfolding.** [read] Violates ALIAS-10. `checkE (NamS rs)`
+  (Frontend/Typecheck.hs, "C3: Record literal") checks each field against
+  `TE.evaluateType` of the whole record type and returns that unfolding, so
+  `?(Inner Str)` in a field is spelled as the expanded record. The TupS case
+  beside it reduces one step and returns the written type. Reachable
+  effect: printed types and CLI metadata of record values; codegen accepts
+  either spelling (null-record-payload).
 - ALIAS-14 is open, and the unit test "mutually recursive aliases are
   rejected" (`type A = [B]; type B = [A]`, test-suite/UnitTypeTests.hs)
   asserts one answer. If the ruling makes such recursion legal under

@@ -1,0 +1,18 @@
+-- Spec HOST-4: a sourced effectful function, partially applied, whose
+-- signature has its tail in parentheses, is called with all its arguments at
+-- once; Rust.
+module main (total)
+import root-rust
+
+type Sink a = [a] -> <IO> ()
+type Reader a = Str -> Sink a -> <IO> ()
+
+source Rust from "f.rs" ("feed", "put")
+feed :: Int -> (Str -> Sink Int -> <IO> ())
+put :: [Int] -> <IO> ()
+
+run :: (Sink Int -> <IO> ()) -> <IO> ()
+run src = src put
+
+total :: Str -> <IO> ()
+total p = run (feed 1 p)
