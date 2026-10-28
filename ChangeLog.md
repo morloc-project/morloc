@@ -16,6 +16,12 @@ Changed
    constructors without fields included, whether built or received; a
    compact byte buffer is `Vector n U8` (a numpy uint8 array). Declaring
    another Python form for a list is an error
+ * In Python a numpy array that a literal builds or a pool receives is
+   read-only; call `.copy()` to change one
+ * In R a `Vector n D` of constructors without fields is `raw`, like
+   `Vector n U8`; `[D]` stays a factor
+ * A Packable instance gives a language both `pack` and `unpack`, or
+   neither, where the type has a form of its own there
 
 Docstrings and diagnostics
  * Docstrings above items of a `source (...)` list, above `%inline` items
@@ -39,9 +45,14 @@ Fixes
    outside the environment, naming it, instead of failing deep in a build
  * Recursive functions returning functions, Rust closures returned after an
    effect, and some `--debug` and cache builds no longer hit compiler bugs
- * A Vector literal built in Python or R has the form a received Vector has:
-   in Python its exact numpy dtype (uint8, int32, float32, ...), in R `raw`
-   for U8 and `integer64` for I64; an element out of range is an error
+ * A literal has exactly the form of the same value received from another
+   language: in Python a Vector has its exact numpy dtype (uint8, int32,
+   float32, ...), and in R a list of scalars is an atomic vector (U8 `raw`,
+   I64 `integer64`, ...) where it was an R list; an element out of range is
+   an error
+ * `@read`, `@load` and `@unpack` give a nested Packable value its form at
+   every level (`[Set Int]` reads as a list of sets), and C++ compiles lists
+   of records holding a Packable field
  * A list field marked `@many` in an `@unroll` record takes several values
    after one flag (`--lang r py`) or a repeated flag
  * An `@unroll` record passed to a function written only in Morloc no longer
