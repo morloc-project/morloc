@@ -1927,6 +1927,9 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 if (obj == NULL) {
                     PyINTERNAL_ABORT("Failed to allocate numpy object array");
                 }
+                // Every numpy array is read-only (NATIVE-9); the slots are
+                // filled through PyArray_SETITEM.
+                PyArray_CLEARFLAGS((PyArrayObject*)obj, NPY_ARRAY_WRITEABLE);
                 elem_slot_kind = PY_SLOT_NPY;
             } else if (numpy_type_num >= 0) {
                 if (import_numpy() != 0) goto error;
@@ -1965,14 +1968,12 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                         Py_DECREF(owner);
                         goto error;
                     }
-                    // The view aliases shared memory that other pools may be
-                    // reading, and morloc values are immutable, so the array
-                    // is read-only. A kernel that needs to modify it calls
-                    // .copy() and pays for its own buffer. Without this a
-                    // write through the view corrupts another pool's data
-                    // with no error and no way to trace it.
-                    PyArray_CLEARFLAGS((PyArrayObject*)obj, NPY_ARRAY_WRITEABLE);
                 }
+                // Every numpy array is read-only, owned copy or view of shared
+                // memory alike (NATIVE-9): a view aliases memory other pools
+                // may be reading, and a write through it would corrupt their
+                // data. A kernel that needs to modify it calls .copy().
+                PyArray_CLEARFLAGS((PyArrayObject*)obj, NPY_ARRAY_WRITEABLE);
                 // Note that we do not want to give ownership to Python.
                 break;
             } else if (schema->hint != NULL && strcmp(schema->hint, "list") == 0) {
@@ -3844,6 +3845,7 @@ static PyObject* pybinding__mlc_conform(PyObject* self, PyObject* args) { MAYFAI
     Py_DECREF(items);
     free_schema(schema);
     py_walk_free(&w);
+    PyArray_CLEARFLAGS((PyArrayObject*)result, NPY_ARRAY_WRITEABLE);
     return result;
 
 error:

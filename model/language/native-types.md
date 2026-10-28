@@ -76,13 +76,13 @@ Its elements are checked as values sent to another language are.
 
 ### NATIVE-9 One native form per type
 Intent: ruled 2026-10-28
-Tests: spec-native-9-1, spec-native-9-2, spec-native-9-3, spec-native-9-4, spec-native-9-5
+Tests: spec-native-9-1, spec-native-9-2, spec-native-9-3, spec-native-9-4, spec-native-9-5, spec-native-9-6
 Code: deviates (issues/values.md)
 
 In every language L and for every type T with a schema, a value of T built
 in L by a literal, whatever its elements, has the native form of a T that L
 receives from any language, L included: the same class, attributes, element
 storage and element checks. The form is a function of T's schema, hints
-included, and of nothing else. In Python every numpy array is read-only,
-built or received. In R a `Vector n U8` and a `Vector n D` (D a nullary
+included, and of nothing else. In Python a numpy array a literal builds or
+a pool receives is read-only. In R a `Vector n U8` and a `Vector n D` (D a nullary
 `data`) are `raw`, and a `[D]` is a factor.

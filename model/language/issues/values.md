@@ -17,14 +17,8 @@ on 0.109.0 unless marked.
   Serialize.hs, `loadResultPacker`) runs the outer type's packer only; a
   value received as an argument is built at every level (Imperative.hs,
   `wireToNative`). Affects `@load`, `@read`, `@unpack` and the cell readers.
-- **A Python numpy array's writability depends on its size.** [read,
-  2026-10-28] Violates NATIVE-9 (ruled: every numpy array is read-only). A
-  received array that arrived inline in the packet is an owned, writable
-  copy, one from shared memory a read-only view (data/lang/py/pymorloc.c,
-  numpy branch of the array decoder), and a literal built by `mlc_conform`
-  is writable.
 - **A received newtype over a list ignores its Python form.** [reproduced,
-  2026-10-28] Violates NEWT-4 / NATIVE-1. `newtype Frozen a = [a]; type Py =>
+  2026-10-28] Violates NATIVE-9, NEWT-4 and NATIVE-1. `newtype Frozen a = [a]; type Py =>
   (Frozen a) = "tuple" a`, with Packable pack in Python: a literal is a tuple
   (CLS-2), but a `Frozen Int` returned by a C++ function reaches Python as a
   list, so a Python source checking for a tuple fails. A newtype whose body
@@ -37,8 +31,16 @@ on 0.109.0 unless marked.
   (`morloc_vec_map`) and an explicit `pack` of a list (`morloc_unpackVector`)
   call `np.asarray`, so a `Vector n U8` result is int64 and a `Vector n Int`
   is int64 rather than object; the functions are never given the element
-  type. Open question: pass such functions the target schema, or narrow
-  NATIVE-7 to literals.
+  type, and such an array is writable where a literal or received one is
+  read-only (NATIVE-9 covers only those). Open question: pass such functions
+  the target schema, or narrow NATIVE-7 to literals.
+- **A C++ source returning a nested Vector does not build.** [reproduced,
+  2026-10-28] `makeN :: Int -> Vector n (Vector 2 Real)` sourced from C++
+  (`std::vector<std::vector<double>>`), with root-cpp, vector, vector-cpp:
+  `morloc make` stops with "Recursive type alias `Vector` has no concrete
+  C++ mapping" (library/Morloc/CodeGenerator/Pools/CAbi/Members/Cpp.hs,
+  leakError), though nothing is recursive. Repro:
+  /tmp/claude-1000/-work/b22ec8aa-199c-401c-8f03-0b140cbccdb1/scratchpad/n96/.
 - **A native form for an applied type is not passed to the decoder.**
   [reproduced, 2026-10-28] Violates NATIVE-1. A schema hint is taken from
   the head's general mapping, so a form declared for an applied type
