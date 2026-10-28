@@ -950,6 +950,15 @@ static size_t get_shm_size(const Schema* schema, SEXP obj) {
 // of that conversion live here and nowhere else, because an off-by-one
 // between them corrupts silently -- every value still decodes, just to the
 // neighbouring constructor.
+static void attach_levels(SEXP obj, const Schema* schema) {
+    SEXP levels = PROTECT(allocVector(STRSXP, (R_xlen_t)schema->size));
+    for (size_t i = 0; i < schema->size; i++) {
+        SET_STRING_ELT(levels, (R_xlen_t)i, mkChar(schema->keys[i]));
+    }
+    setAttrib(obj, R_LevelsSymbol, levels);
+    UNPROTECT(1);
+}
+
 static void attach_factor_levels(SEXP obj, const Schema* schema) {
     SEXP levels = PROTECT(allocVector(STRSXP, (R_xlen_t)schema->size));
     for (size_t i = 0; i < schema->size; i++) {
@@ -1379,7 +1388,15 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                     }
                     break;
                 case RAWSXP:  // Raw vectors
-                    if (element_schema->type != MORLOC_UINT8) {
+                    if (element_schema->type == MORLOC_ENUM) {
+                        // A Vector of a nullary data type holds its tags.
+                        for (size_t i = 0; i < array->size; i++) {
+                            if ((size_t)RAW(obj)[i] >= element_schema->size) {
+                                MORLOC_ERROR("enum tag %d is out of range; the type has %zu constructors",
+                                             (int)RAW(obj)[i], element_schema->size);
+                            }
+                        }
+                    } else if (element_schema->type != MORLOC_UINT8) {
                         MORLOC_ERROR("Expected MORLOC_UINT8 for raw vector");
                     }
                     absptr_t tmp_ptr = R_TRY(rel2abs, array->data);
@@ -1605,6 +1622,149 @@ static void r_store(r_walk_t* w, unsigned char slot_kind, SEXP parent, R_xlen_t 
     SET_VECTOR_ELT(parent, slot, obj);
 }
 
+// How an R value holds an array, decided by its element type and, for a
+// Vector of a nullary data type, the "vector" form: one decision for the
+// decoder and the literal builder (NATIVE-9).
+typedef enum {
+    RF_LOGICAL, RF_INTEGER, RF_DOUBLE, RF_INT64, RF_RAW, RF_FACTOR,
+    RF_CHARACTER, RF_LIST
+} r_array_form_t;
+
+static r_array_form_t r_array_form(const Schema* array_schema, const Schema* element_schema) {
+    switch (element_schema->type) {
+        case MORLOC_BOOL:    return RF_LOGICAL;
+        case MORLOC_SINT8:
+        case MORLOC_SINT16:
+        case MORLOC_UINT16:
+        case MORLOC_INT:     return RF_INTEGER;
+        case MORLOC_SINT32:
+        case MORLOC_UINT32:
+        case MORLOC_FLOAT32:
+        case MORLOC_FLOAT64: return RF_DOUBLE;
+        case MORLOC_SINT64:
+        case MORLOC_UINT64:  return RF_INT64;
+        case MORLOC_UINT8:   return RF_RAW;
+        case MORLOC_ENUM:
+            return (array_schema->hint != NULL && strcmp(array_schema->hint, "vector") == 0)
+                ? RF_RAW : RF_FACTOR;
+        case MORLOC_STRING:  return RF_CHARACTER;
+        default:             return RF_LIST;
+    }
+}
+
+// The atomic vector of `n` fixed-width elements at `start` (wire layout),
+// in `form`.
+static SEXP r_atomic_from_bytes(r_array_form_t form, const Schema* element_schema, const char* start, size_t n) {
+    MAYFAIL
+    SEXP obj;
+    switch (element_schema->type) {
+        case MORLOC_BOOL:
+            obj = PROTECT(allocVector(LGLSXP, n));
+            for (size_t i = 0; i < n; i++) LOGICAL(obj)[i] = start[i] ? TRUE : FALSE;
+            break;
+        case MORLOC_SINT8:
+            obj = PROTECT(allocVector(INTSXP, n));
+            for (size_t i = 0; i < n; i++) INTEGER(obj)[i] = ((const int8_t*)start)[i];
+            break;
+        case MORLOC_SINT16:
+            obj = PROTECT(allocVector(INTSXP, n));
+            for (size_t i = 0; i < n; i++) INTEGER(obj)[i] = ((const int16_t*)start)[i];
+            break;
+        case MORLOC_UINT16:
+            obj = PROTECT(allocVector(INTSXP, n));
+            for (size_t i = 0; i < n; i++) INTEGER(obj)[i] = ((const uint16_t*)start)[i];
+            break;
+        // INT32_MIN is NA_integer_ in R, so an I32 array is double; a double
+        // holds every int32 and uint32 exactly.
+        case MORLOC_SINT32:
+            obj = PROTECT(allocVector(REALSXP, n));
+            for (size_t i = 0; i < n; i++) REAL(obj)[i] = ((const int32_t*)start)[i];
+            break;
+        case MORLOC_UINT32:
+            obj = PROTECT(allocVector(REALSXP, n));
+            for (size_t i = 0; i < n; i++) REAL(obj)[i] = ((const uint32_t*)start)[i];
+            break;
+        // bit64::integer64 storage is bit-identical to an int64_t array.
+        case MORLOC_SINT64:
+            for (size_t i = 0; i < n; i++) {
+                if (((const int64_t*)start)[i] == INT64_MIN) {
+                    MORLOC_ERROR("Int64 value at index %zu is bit64's NA (-2^63) and does not fit in R's integer64", i);
+                }
+            }
+            obj = PROTECT(alloc_integer64(n));
+            if (n > 0) memcpy(REAL(obj), start, n * sizeof(int64_t));
+            break;
+        case MORLOC_UINT64:
+            for (size_t i = 0; i < n; i++) {
+                uint64_t u = ((const uint64_t*)start)[i];
+                if (u > (uint64_t)INT64_MAX) {
+                    MORLOC_ERROR("UInt64 value %llu at index %zu does not fit in R's integer64 (max 2^63-1)",
+                                 (unsigned long long)u, i);
+                }
+            }
+            obj = PROTECT(alloc_integer64(n));
+            if (n > 0) memcpy(REAL(obj), start, n * sizeof(uint64_t));
+            break;
+        case MORLOC_UINT8:
+            obj = PROTECT(allocVector(RAWSXP, n));
+            if (n > 0) memcpy(RAW(obj), start, n);
+            break;
+        // A factor's storage is 1-based codes; the raw form holds the tags
+        // and names the constructors in a levels attribute.
+        case MORLOC_ENUM:
+            if (form == RF_RAW) {
+                obj = PROTECT(allocVector(RAWSXP, n));
+                if (n > 0) memcpy(RAW(obj), start, n);
+                attach_levels(obj, element_schema);
+            } else {
+                obj = PROTECT(allocVector(INTSXP, n));
+                for (size_t i = 0; i < n; i++) INTEGER(obj)[i] = (int)((const uint8_t*)start)[i] + 1;
+                attach_factor_levels(obj, element_schema);
+            }
+            break;
+        case MORLOC_FLOAT32:
+            obj = PROTECT(allocVector(REALSXP, n));
+            for (size_t i = 0; i < n; i++) REAL(obj)[i] = ((const float*)start)[i];
+            break;
+        case MORLOC_FLOAT64:
+            obj = PROTECT(allocVector(REALSXP, n));
+            if (n > 0) memcpy(REAL(obj), start, n * sizeof(double));
+            break;
+        // Inline BigInt elements: [size:i64, value:i64]. Int is R's 32-bit
+        // integer.
+        case MORLOC_INT: {
+            size_t elem_w = element_schema->width;
+            for (size_t i = 0; i < n; i++) {
+                const int64_t* f = (const int64_t*)(start + i * elem_w);
+                if (f[0] > 1) {
+                    MORLOC_ERROR(
+                        "Integer overflow at array index %zu: %lld-limb BigInt"
+                        " does not fit in R's numeric type"
+                        " (max 2^53 = 9007199254740992 for integer precision).",
+                        i, (long long)f[0]);
+                }
+                int64_t val = (f[0] == 0) ? 0 : f[1];
+                if (val <= INT32_MIN || val > INT32_MAX) {
+                    MORLOC_ERROR(
+                        "Integer overflow at array index %zu: Int value %lld"
+                        " does not fit in R's integer (-2147483647 to 2147483647).",
+                        i, (long long)val);
+                }
+            }
+            obj = PROTECT(allocVector(INTSXP, n));
+            for (size_t i = 0; i < n; i++) {
+                const int64_t* f = (const int64_t*)(start + i * elem_w);
+                INTEGER(obj)[i] = (int)((f[0] == 0) ? 0 : f[1]);
+            }
+            break;
+        }
+        default:
+            MORLOC_INTERNAL_ABORT("r_atomic_from_bytes: no atomic form for this element type");
+    }
+    UNPROTECT(1);
+    return obj;
+}
+
 static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, size_t idx, unsigned char slot_kind, SEXP parent, R_xlen_t slot);
 
 // Read a child into its parent's slot: a leaf now, a compound node by call
@@ -1785,260 +1945,57 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
             {
                 Array* array = (Array*)data;
                 const Schema* element_schema = r_resolve(schema->parameters[0]);
-                char* start;
-
-                switch(element_schema->type){
-                    case MORLOC_BOOL:
-                        obj = PROTECT(allocVector(LGLSXP, array->size));
-                        if(array->size == 0) {
-                            UNPROTECT(1);
-                            break;
-                        }
-                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
+                r_array_form_t form = r_array_form(schema, element_schema);
+                if (form == RF_LIST) {
+                    // A list of compound values: store it, then fill its
+                    // elements in place.
+                    obj = PROTECT(allocVector(VECSXP, array->size));
+                    r_store(w, slot_kind, parent, slot, obj);
+                    UNPROTECT(1);
+                    if (array->size == 0) {
+                        return;
+                    }
+                    char* start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
+                    size_t width = element_schema->width;
+                    if (r_flat(w, element_schema)) {
                         for (size_t i = 0; i < array->size; i++) {
-                            LOGICAL(obj)[i] = (bool)*(uint8_t*)(start + i) ? TRUE : FALSE;
+                            r_read_child(w, element_schema, start + width * i, R_SLOT_LIST, obj, (R_xlen_t)i);
                         }
-                        UNPROTECT(1);
-                        break;
-                    case MORLOC_SINT8:
-                        obj = PROTECT(allocVector(INTSXP, array->size));
-                        if(array->size == 0) {
-                            UNPROTECT(1);
-                            break;
-                        }
-                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
+                        return;
+                    }
+                    // One compound element per visit, starting here; later
+                    // visits find the container in `parent`.
+                    w->cur.obj = obj;
+                    w->cur.slot_kind = R_SLOT_LIST;
+                    if (array->size > 1) r_resume(w, 1, start);
+                    r_read_child(w, element_schema, start, R_SLOT_LIST, obj, 0);
+                    return;
+                }
+                if (form == RF_CHARACTER) {
+                    obj = PROTECT(allocVector(STRSXP, array->size));
+                    if (array->size > 0) {
+                        char* start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
+                        size_t width = element_schema->width;
                         for (size_t i = 0; i < array->size; i++) {
-                            INTEGER(obj)[i] = (int)(*(int8_t*)(start + i * sizeof(int8_t)));
-                        }
-                        UNPROTECT(1);
-                        break;
-                    case MORLOC_SINT16:
-                        obj = PROTECT(allocVector(INTSXP, array->size));
-                        if(array->size == 0) {
-                            UNPROTECT(1);
-                            break;
-                        }
-                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
-                        for (size_t i = 0; i < array->size; i++) {
-                            INTEGER(obj)[i] = (int)(*(int16_t*)(start + i * sizeof(int16_t)));
-                        }
-                        UNPROTECT(1);
-                        break;
-                    case MORLOC_SINT32:
-                        // INT32_MIN clashes with NA_integer_ in R, so store
-                        // the array as REALSXP (double). Doubles represent
-                        // every int32 exactly.
-                        obj = PROTECT(allocVector(REALSXP, array->size));
-                        if(array->size == 0) {
-                            UNPROTECT(1);
-                            break;
-                        }
-                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
-                        for (size_t i = 0; i < array->size; i++) {
-                            REAL(obj)[i] = (double)(*(int32_t*)(start + i * sizeof(int32_t)));
-                        }
-                        UNPROTECT(1);
-                        break;
-                    case MORLOC_SINT64:
-                        // bit64::integer64 vector. The REALSXP storage
-                        // is bit-identical to a C int64_t array, so we
-                        // memcpy the whole element block.
-                        obj = PROTECT(alloc_integer64(array->size));
-                        if(array->size == 0) {
-                            UNPROTECT(1);
-                            break;
-                        }
-                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
-                        for (size_t i = 0; i < array->size; i++) {
-                            if (((const int64_t*)start)[i] == INT64_MIN) {
-                                MORLOC_ERROR("Int64 value at index %zu is bit64's NA (-2^63) and does not fit in R's integer64", i);
-                            }
-                        }
-                        memcpy(REAL(obj), start, array->size * sizeof(int64_t));
-                        UNPROTECT(1);
-                        break;
-                    // Interpret the uint8 as a raw vector
-                    case MORLOC_UINT8:
-                        obj = PROTECT(allocVector(RAWSXP, array->size));
-                        if(array->size == 0) {
-                            UNPROTECT(1);
-                            break;
-                        }
-                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
-                        memcpy(RAW(obj), start, array->size * sizeof(uint8_t));
-                        UNPROTECT(1);
-                        break;
-                    // A factor's storage is an integer vector, so an enum
-                    // array widens to INTSXP here and the wrapper attaches
-                    // the levels. This costs R 4 bytes per element; that is
-                    // R's floor for a factor, not a property of the wire.
-                    case MORLOC_ENUM:
-                        obj = PROTECT(allocVector(INTSXP, array->size));
-                        if(array->size == 0) {
-                            attach_factor_levels(obj, element_schema);
-                            UNPROTECT(1);
-                            break;
-                        }
-                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
-                        for (size_t i = 0; i < array->size; i++) {
-                            INTEGER(obj)[i] = (int)(*(uint8_t*)(start + i)) + 1;
-                        }
-                        attach_factor_levels(obj, element_schema);
-                        UNPROTECT(1);
-                        break;
-                    case MORLOC_UINT16:
-                        obj = PROTECT(allocVector(INTSXP, array->size));
-                        if(array->size == 0) {
-                            UNPROTECT(1);
-                            break;
-                        }
-                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
-                        for (size_t i = 0; i < array->size; i++) {
-                            INTEGER(obj)[i] = (int)(*(uint16_t*)(start + i * sizeof(uint16_t)));
-                        }
-                        UNPROTECT(1);
-                        break;
-                    case MORLOC_UINT32:
-                        obj = PROTECT(allocVector(REALSXP, array->size));
-                        if(array->size == 0) {
-                            UNPROTECT(1);
-                            break;
-                        }
-                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
-                        for (size_t i = 0; i < array->size; i++) {
-                            REAL(obj)[i] = (double)(*(uint32_t*)(start + i * sizeof(uint32_t)));
-                        }
-                        UNPROTECT(1);
-                        break;
-                    case MORLOC_UINT64:
-                        // bit64::integer64 vector (bit64 is signed but
-                        // we keep the wire bytes verbatim; the high bit
-                        // surfaces as a negative integer64 in R, which
-                        // matches bit64's documented behaviour).
-                        obj = PROTECT(alloc_integer64(array->size));
-                        if(array->size == 0) {
-                            UNPROTECT(1);
-                            break;
-                        }
-                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
-                        for (size_t i = 0; i < array->size; i++) {
-                            uint64_t u = ((const uint64_t*)start)[i];
-                            if (u > (uint64_t)INT64_MAX) {
-                                MORLOC_ERROR("UInt64 value %llu at index %zu does not fit in R's integer64 (max 2^63-1)",
-                                             (unsigned long long)u, i);
-                            }
-                        }
-                        memcpy(REAL(obj), start, array->size * sizeof(uint64_t));
-                        UNPROTECT(1);
-                        break;
-                    case MORLOC_FLOAT32:
-                        obj = PROTECT(allocVector(REALSXP, array->size));
-                        if(array->size == 0) {
-                            UNPROTECT(1);
-                            break;
-                        }
-                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
-                        for (size_t i = 0; i < array->size; i++) {
-                            REAL(obj)[i] = (double)(*(float*)(start + i * sizeof(float)));
-                        }
-                        UNPROTECT(1);
-                        break;
-                    case MORLOC_FLOAT64:
-                        obj = PROTECT(allocVector(REALSXP, array->size));
-                        if(array->size == 0) {
-                            UNPROTECT(1);
-                            break;
-                        }
-                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
-                        memcpy(REAL(obj), start, array->size * sizeof(double));
-                        UNPROTECT(1);
-                        break;
-                    case MORLOC_STRING:
-                        {
-                            obj = PROTECT(allocVector(STRSXP, array->size));
-                            if(array->size == 0) {
-                                UNPROTECT(1);
-                                break;
-                            }
-                            start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
-                            size_t width = schema->width;
-                            for (size_t i = 0; i < array->size; i++) {
-                                Array* str_array = (Array*)(start + i * width);
-                                SEXP item;
-                                if(str_array->size == 0){
-                                    item = PROTECT(mkCharLen("", 0));
-                                } else {
-                                    void* str_ptr = R_TRY_WITH(UNPROTECT(1), resolve_array, str_array->data, str_array->size, 1, space);
-                                    item = PROTECT(mkCharLen(str_ptr, str_array->size));
-                                }
-                                UNPROTECT(1);
-                                SET_STRING_ELT(obj, i, item);
+                            Array* str_array = (Array*)(start + i * width);
+                            SEXP item;
+                            if (str_array->size == 0) {
+                                item = PROTECT(mkCharLen("", 0));
+                            } else {
+                                void* str_ptr = R_TRY_WITH(UNPROTECT(1), resolve_array, str_array->data, str_array->size, 1, space);
+                                item = PROTECT(mkCharLen(str_ptr, str_array->size));
                             }
                             UNPROTECT(1);
+                            SET_STRING_ELT(obj, i, item);
                         }
-                        break;
-                    case MORLOC_INT:
-                        {
-                            // Inline BigInt array: each element is [size:i64, value_or_relptr:i64].
-                            // Int is R's 32-bit integer; validate every element before allocating.
-                            size_t elem_w = element_schema->width; // 16
-                            if (array->size > 0) {
-                                start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
-                                for (size_t i = 0; i < array->size; i++) {
-                                    const int64_t* f = (const int64_t*)(start + i * elem_w);
-                                    int64_t bigint_size = f[0];
-                                    if (bigint_size > 1) {
-                                        MORLOC_ERROR(
-                                            "Integer overflow at array index %zu: %lld-limb BigInt"
-                                            " does not fit in R's numeric type"
-                                            " (max 2^53 = 9007199254740992 for integer precision).",
-                                            i, (long long)bigint_size);
-                                    }
-                                    int64_t val = (bigint_size == 0) ? 0 : f[1];
-                                    if (val <= INT32_MIN || val > INT32_MAX) {
-                                        MORLOC_ERROR(
-                                            "Integer overflow at array index %zu: Int value %lld"
-                                            " does not fit in R's integer (-2147483647 to 2147483647).",
-                                            i, (long long)val);
-                                    }
-                                }
-                            }
-                            obj = PROTECT(allocVector(INTSXP, array->size));
-                            if (array->size > 0) {
-                                for (size_t i = 0; i < array->size; i++) {
-                                    const int64_t* f = (const int64_t*)(start + i * elem_w);
-                                    INTEGER(obj)[i] = (int)((f[0] == 0) ? 0 : f[1]);
-                                }
-                            }
-                            UNPROTECT(1);
-                        }
-                        break;
-                    default:
-                        {
-                            // A list of compound values: store it, then fill
-                            // its elements in place.
-                            obj = PROTECT(allocVector(VECSXP, array->size));
-                            r_store(w, slot_kind, parent, slot, obj);
-                            UNPROTECT(1);
-                            if(array->size == 0) {
-                                return;
-                            }
-                            start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
-                            size_t width = element_schema->width;
-                            if (r_flat(w, element_schema)) {
-                                for (size_t i = 0; i < array->size; i++) {
-                                    r_read_child(w, element_schema, start + width * i, R_SLOT_LIST, obj, (R_xlen_t)i);
-                                }
-                                return;
-                            }
-                            // One compound element per visit, starting here;
-                            // later visits find the container in `parent`.
-                            w->cur.obj = obj;
-                            w->cur.slot_kind = R_SLOT_LIST;
-                            if (array->size > 1) r_resume(w, 1, start);
-                            r_read_child(w, element_schema, start, R_SLOT_LIST, obj, 0);
-                            return;
-                        }
+                    }
+                    UNPROTECT(1);
+                } else {
+                    const char* start = NULL;
+                    if (array->size > 0) {
+                        start = (const char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
+                    }
+                    obj = r_atomic_from_bytes(form, element_schema, start, array->size);
                 }
             }
             break;
@@ -2580,29 +2537,135 @@ SEXP morloc_mlc_read(SEXP schema_str_r, SEXP json_str_r) { MAYFAIL
     return obj;
 }
 
-// A literal built in this pool, given the form the decoder gives a value
-// received at the same schema (NATIVE-8): a list of scalars becomes the atomic
-// vector the decoder builds for its element type (U8 raw, I64 integer64, an
-// enum a factor). Elements are checked as the encoder checks them.
+// Element `i` of a literal: a list item, or a length-one copy of an atomic
+// element keeping the class and levels that say what it is (a factor, an
+// integer64, a raw tag vector).
+static SEXP r_literal_elt(SEXP x, size_t i) {
+    if (isNewList(x)) return VECTOR_ELT(x, (R_xlen_t)i);
+    SEXP levels = getAttrib(x, R_LevelsSymbol);
+    if (TYPEOF(x) == RAWSXP && levels != R_NilValue) {
+        // A raw tag vector: the element as the factor it stands for.
+        SEXP e = PROTECT(ScalarInteger((int)RAW(x)[i] + 1));
+        SEXP klass = PROTECT(allocVector(STRSXP, 2));
+        SET_STRING_ELT(klass, 0, mkChar("ordered"));
+        SET_STRING_ELT(klass, 1, mkChar("factor"));
+        setAttrib(e, R_LevelsSymbol, levels);
+        setAttrib(e, R_ClassSymbol, klass);
+        UNPROTECT(2);
+        return e;
+    }
+    SEXP e = PROTECT(r_atomic_elt(x, i));
+    setAttrib(e, R_ClassSymbol, getAttrib(x, R_ClassSymbol));
+    setAttrib(e, R_LevelsSymbol, levels);
+    UNPROTECT(1);
+    return e;
+}
+
+// Parsed literal schemas, keyed by the schema table's interned string.
+typedef struct { SEXP key; Schema* schema; } r_literal_schema_t;
+static r_literal_schema_t* r_literal_schemas = NULL;
+static size_t r_literal_schemas_len = 0;
+static size_t r_literal_schemas_cap = 0;
+
+static Schema* r_literal_schema(SEXP schema_str_r) {
+    MAYFAIL
+    SEXP key = STRING_ELT(schema_str_r, 0);
+    for (size_t i = 0; i < r_literal_schemas_len; i++) {
+        if (r_literal_schemas[i].key == key) return r_literal_schemas[i].schema;
+    }
+    char* schema_str = strdup(CHAR(key));
+    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
+    free(schema_str);
+    if (r_literal_schemas_len == r_literal_schemas_cap) {
+        size_t cap = r_literal_schemas_cap ? r_literal_schemas_cap * 2 : 16;
+        r_literal_schema_t* grown = (r_literal_schema_t*)realloc(r_literal_schemas, cap * sizeof(r_literal_schema_t));
+        if (grown == NULL) {
+            free_schema(schema);
+            MORLOC_INTERNAL_ABORT("out of memory caching a literal schema");
+        }
+        r_literal_schemas = grown;
+        r_literal_schemas_cap = cap;
+    }
+    R_PreserveObject(key);
+    r_literal_schemas[r_literal_schemas_len].key = key;
+    r_literal_schemas[r_literal_schemas_len].schema = schema;
+    r_literal_schemas_len++;
+    return schema;
+}
+
+// A literal built in this pool, given the form the decoder gives a value of
+// its schema (NATIVE-9). A list literal is written element by element with
+// the encoder's checks and filled by the decoder's own construction; an I64
+// or U64 scalar becomes integer64. Anything else already has its form.
 SEXP morloc_mlc_conform(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("mlc_conform: schema must be a single string");
     }
-    char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
-    Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
-    free(schema_str);
-
-    size_t total_size = get_shm_size(schema, obj_r);
-    void* voidstar = R_TRY_WITH(free_schema(schema), shmalloc, total_size);
-    // The tracker owns the block and schema before the write pass, which
-    // raises an R error on an element out of range; the next request's flush
-    // then releases them.
-    shm_tracker_push((absptr_t)voidstar, schema);
-    void* cursor = (void*)((char*)voidstar + schema->width);
-    to_voidstar_inner(voidstar, &cursor, obj_r, schema);
-    SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
-    shm_tracker_release_one((absptr_t)voidstar);
-    return obj;
+    const Schema* schema = r_literal_schema(schema_str_r);
+    r_walk_t w;
+    if (schema->type == MORLOC_SINT64 || schema->type == MORLOC_UINT64) {
+        int64_t v = 0;
+        if (isString(obj_r) && LENGTH(obj_r) == 1) {
+            // A literal too wide for a double is written as its digits.
+            const char* text = CHAR(STRING_ELT(obj_r, 0));
+            char* end = NULL;
+            errno = 0;
+            if (schema->type == MORLOC_SINT64) {
+                long long x = strtoll(text, &end, 10);
+                v = (int64_t)x;
+            } else {
+                unsigned long long x = strtoull(text, &end, 10);
+                if (text[0] == '-') errno = ERANGE;
+                memcpy(&v, &x, sizeof v);
+            }
+            if (errno != 0 || end == text || *end != '\0') {
+                MORLOC_ERROR("integer literal %s is out of range", text);
+            }
+        } else {
+            r_walk_init(&w, schema);
+            r_write_step(&w, schema, &v, obj_r, 0);
+        }
+        return r_atomic_from_bytes(RF_INT64, schema, (const char*)&v, 1);
+    }
+    if (schema->type != MORLOC_ARRAY) {
+        return obj_r;
+    }
+    const Schema* element_schema = schema->parameters[0];
+    if (element_schema->type == MORLOC_RECUR) {
+        return obj_r;
+    }
+    r_array_form_t form = r_array_form(schema, element_schema);
+    if (form == RF_LIST) {
+        return obj_r;
+    }
+    // An empty literal may be R's NULL.
+    R_xlen_t n = obj_r == R_NilValue ? 0 : XLENGTH(obj_r);
+    if (form == RF_CHARACTER) {
+        SEXP out = PROTECT(allocVector(STRSXP, n));
+        for (R_xlen_t i = 0; i < n; i++) {
+            SEXP item = isString(obj_r) ? STRING_ELT(obj_r, i) : R_NilValue;
+            if (item == R_NilValue) {
+                SEXP boxed = isNewList(obj_r) ? VECTOR_ELT(obj_r, i) : R_NilValue;
+                if (!isString(boxed) || LENGTH(boxed) != 1) {
+                    MORLOC_ERROR("Expected character of length 1");
+                }
+                item = STRING_ELT(boxed, 0);
+            }
+            // The encoder writes NA as the text "NA".
+            SET_STRING_ELT(out, i, item == NA_STRING ? mkChar("NA") : item);
+        }
+        UNPROTECT(1);
+        return out;
+    }
+    size_t width = element_schema->width;
+    char* buf = n > 0 ? R_alloc((size_t)n, (int)width) : NULL;
+    r_walk_init(&w, element_schema);
+    for (R_xlen_t i = 0; i < n; i++) {
+        SEXP item = PROTECT(r_literal_elt(obj_r, (size_t)i));
+        r_write_step(&w, element_schema, buf + (size_t)i * width, item, (size_t)i);
+        UNPROTECT(1);
+    }
+    return r_atomic_from_bytes(form, element_schema, buf, (size_t)n);
 }
 
 // Helper: R bound -> (has_X, value) pair for one mlc_ifile_walk arg.

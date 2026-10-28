@@ -17,15 +17,12 @@ on 0.109.0 unless marked.
   Serialize.hs, `loadResultPacker`) runs the outer type's packer only; a
   value received as an argument is built at every level (Imperative.hs,
   `wireToNative`). Affects `@load`, `@read`, `@unpack` and the cell readers.
-- **An R list literal does not have a received list's native form.**
-  [reproduced, 2026-10-28] Violates NATIVE-8 for `Vector n D` (D a nullary
-  `data`); a gap for plain lists. rmorloc builds an array of scalars as the
-  atomic vector its element type takes (U8 `raw`, I64 `integer64`, I8
-  `integer`, F32 `double`, an enum a factor), but an R list literal is an R
-  `list` for every element type: `[1, 2, 3] :: [U8]` is `list` built in R
-  and `raw` received from C++, against the R ruling that U8 lists are raw.
-  `Vector n D` takes this path because vector-r's catch-all form for Vector
-  is `list`, the same as the wire form, so no Packable conversion runs.
+- **A Python numpy array's writability depends on its size.** [read,
+  2026-10-28] Violates NATIVE-9 (ruled: every numpy array is read-only). A
+  received array that arrived inline in the packet is an owned, writable
+  copy, one from shared memory a read-only view (data/lang/py/pymorloc.c,
+  numpy branch of the array decoder), and a literal built by `mlc_conform`
+  is writable.
 - **A received newtype over a list ignores its Python form.** [reproduced,
   2026-10-28] Violates NEWT-4 / NATIVE-1. `newtype Frozen a = [a]; type Py =>
   (Frozen a) = "tuple" a`, with Packable pack in Python: a literal is a tuple

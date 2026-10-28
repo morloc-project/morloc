@@ -1,0 +1,52 @@
+-- Spec NATIVE-9: the ruled R forms, built and received: [U8], Vector n U8
+-- and Vector n D are raw, [D] is a factor, I64 and U64 are integer64 (a U64
+-- literal wider than a double stays exact), and the elements of a Vector of
+-- a nullary data type are its factor values.
+module main
+  ( listU8, listDir, vecU8, vecDir, i64, u64Wide, vecDirElems, vecDirAt
+  , recvVecDir, recvListDir
+  )
+
+import root-r
+import root-cpp
+import vector
+import vector-r
+import vector-cpp
+
+data Dir = North | South
+
+source R from "form.R" ("form")
+form :: a -> Str
+
+source Cpp from "echo.hpp" ("echo")
+echo :: a -> a
+
+listU8 :: Str
+listU8 = form ([1, 2] :: [U8])
+
+listDir :: Str
+listDir = form [North, South]
+
+vecU8 :: Str
+vecU8 = form ([1, 2] :: Vector 2 U8)
+
+vecDir :: Str
+vecDir = form ([North, South] :: Vector 2 Dir)
+
+i64 :: Str
+i64 = form (100000 :: I64)
+
+u64Wide :: Str
+u64Wide = form (9000000000000000001 :: U64)
+
+vecDirElems :: Str
+vecDirElems = form (map (\d -> d) ([South, North] :: Vector 2 Dir))
+
+vecDirAt :: Str
+vecDirAt = form (.[1] ([North, South] :: Vector 2 Dir))
+
+recvVecDir :: Str
+recvVecDir = form (echo ([North, South] :: Vector 2 Dir))
+
+recvListDir :: Str
+recvListDir = form (echo [North, South])

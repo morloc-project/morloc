@@ -1286,16 +1286,11 @@ maybePackableWrap midx lang nativeT wireT = do
 
 -- | Build a literal at @userT@ from its wire form @inner@ (at @wireT@) with
 -- the Packable packer @src@, the way a received value of that type is built,
--- so the two cannot differ (NATIVE-8). A received value whose wire form is a
--- list is first built by the pool's decoder (@conform@ gives a literal the
--- decoder's form):
---
---   * Python: where the form is a numpy array the decoder builds the value
---     itself, and no packer runs;
---   * R: the decoder builds a list of scalars as the atomic vector its
---     element type takes, and then the packer runs.
---
--- A value holding a function has no schema to decode it by.
+-- so the two cannot differ (NATIVE-9). In Python a value whose form is a
+-- numpy array is built by the decoder when received, and no packer runs;
+-- @conform@ builds a literal the same way. R builds every list literal by
+-- its decoder's rule in serialization. A value holding a function has no
+-- schema to decode it by.
 packLiteral :: Int -> Lang -> Type -> Type -> Source -> PolyExpr -> MorlocMonad PolyExpr
 packLiteral midx lang wireT userT src inner
   | containsFunT userT || not wireIsList = return packed
@@ -1305,40 +1300,23 @@ packLiteral midx lang wireT userT src inner
         if T.takeWhile (/= '<') (renderConcreteForm form) == "numpy.ndarray"
           then PolyIntrinsic (Idx midx userT) IntrConform [inner]
           else packed
-  | langName' == "r" = do
-      ast <- inferConcreteType lang (Idx midx wireT) >>= makeSerialAST midx lang
-      return $
-        if scalarList ast
-          then pack (PolyIntrinsic (Idx midx wireT) IntrConform [inner])
-          else packed
+  -- An R value whose serial form is no Packable is decoded at its own type
+  -- and not packed when received, so its literal is the list at that type,
+  -- which serialization builds by the decoder's rule.
+  | langName' == "r"
+  , PolyList (Idx c _) _ xs <- inner
+  , AppT (VarT userTV) userArgs <- userT = do
+      ast <- inferConcreteType lang (Idx midx userT) >>= makeSerialAST midx lang
+      return $ case ast of
+        SerialPack {} -> packed
+        _ -> PolyList (Idx c userTV) (map (Idx c) userArgs) xs
   | otherwise = return packed
   where
     langName' = ML.langName lang
     wireIsList = case wireT of
       AppT (VarT v) _ -> v == BT.list
       _ -> False
-    pack x = PolyApp (PolyExe (Idx midx (FunT [wireT] userT)) (SrcCallP Nothing src)) [x]
-    packed = pack inner
-    scalarList (SerialList _ _ e) = scalar e
-    scalarList _ = False
-    scalar e = case e of
-      SerialReal _ -> True
-      SerialFloat32 _ -> True
-      SerialFloat64 _ -> True
-      SerialInt _ -> True
-      SerialInt8 _ -> True
-      SerialInt16 _ -> True
-      SerialInt32 _ -> True
-      SerialInt64 _ -> True
-      SerialUInt _ -> True
-      SerialUInt8 _ -> True
-      SerialUInt16 _ -> True
-      SerialUInt32 _ -> True
-      SerialUInt64 _ -> True
-      SerialBool _ -> True
-      SerialString _ -> True
-      SerialEnum {} -> True
-      _ -> False
+    packed = PolyApp (PolyExe (Idx midx (FunT [wireT] userT)) (SrcCallP Nothing src)) [inner]
 
 -- | LstS dispatch counterpart to 'dispatchPrimLit'. Computes the
 -- wire-parent root of @userT@, expects it to be list-shaped, and either

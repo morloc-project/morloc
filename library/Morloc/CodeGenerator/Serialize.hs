@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.Serialize
   ) where
 
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
@@ -491,7 +492,14 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
             VarF fv -> (fv, [])
             AppF (VarF fv) ts -> (fv, ts)
             _ -> error "MonoList head must resolve to VarF or AppF (VarF _)"
-      ListN headFV argTfs <$> mapM (nativeExpr m) es
+      lit <- ListN headFV argTfs <$> mapM (nativeExpr m) es
+      if langName lang /= "r" || Serial.containsFunF fullTf
+        then return lit
+        else do
+          ast <- Serial.makeSerialAST m lang fullTf
+          return $ case ast of
+            SerialList _ _ e | scalarElement e -> builtLiteral ast fullTf lit
+            _ -> lit
     nativeExpr m (MonoTuple v rs) =
       TupleN
         <$> inferVar v
@@ -503,7 +511,18 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         <*> mapM (secondM (nativeExpr m . snd)) rs
     nativeExpr _ (MonoLog v x) = LogN <$> inferVar v <*> pure x
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
-    nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
+    nativeExpr m (MonoInt v@(Idx vIdx vTv) x)
+      | langName lang /= "r" = IntN <$> inferVar v <*> pure x
+      | otherwise = do
+          tf <- inferType (Idx vIdx (VarT vTv))
+          ast <- Serial.makeSerialAST m lang tf
+          -- an R double cannot hold every 64-bit integer, so the builder
+          -- reads the digits
+          let digits = StrN <$> inferVar (Idx vIdx BT.str) <*> pure (T.pack (show x))
+          case ast of
+            SerialInt64 _ -> builtLiteral ast tf <$> digits
+            SerialUInt64 _ -> builtLiteral ast tf <$> digits
+            _ -> IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
     -- The complete type comes from the declaration, not from the arm being
     -- built: a constructor names one arm, but the value's wire form
@@ -649,6 +668,35 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         Just (packerSrc, _) ->
           return $ AppExeN tf (SrcCallP Nothing packerSrc) [NativeArgExpr raw]
         Nothing -> return raw
+
+    -- An R literal takes the form the R decoder gives its type (NATIVE-9):
+    -- the runtime builder decides it from the schema, as the decoder does.
+    -- A list of scalars and an I64/U64 scalar go through it; R's own literal
+    -- syntax already gives the decoder's form for other scalars and for
+    -- lists of compound values (an R list), which spec-native-9-2 checks.
+    builtLiteral :: SerialAST -> TypeF -> NativeExpr -> NativeExpr
+    builtLiteral ast tf lit =
+      IntrinsicN tf IntrConform (Just (render (Serial.serialAstToMsgpackSchema ast))) [lit]
+
+    scalarElement :: SerialAST -> Bool
+    scalarElement e = case e of
+      SerialReal _ -> True
+      SerialFloat32 _ -> True
+      SerialFloat64 _ -> True
+      SerialInt _ -> True
+      SerialInt8 _ -> True
+      SerialInt16 _ -> True
+      SerialInt32 _ -> True
+      SerialInt64 _ -> True
+      SerialUInt _ -> True
+      SerialUInt8 _ -> True
+      SerialUInt16 _ -> True
+      SerialUInt32 _ -> True
+      SerialUInt64 _ -> True
+      SerialBool _ -> True
+      SerialString _ -> True
+      SerialEnum {} -> True
+      _ -> False
 
     -- For data-bearing runtime intrinsics (@save/@savej/@show/@hash),
     -- the runtime expects the value in *wire form*. The normal cross-pool

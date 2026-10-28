@@ -73,3 +73,16 @@ received one. In R a literal over a list of scalars is the atomic vector the
 decoder builds for the element type: `raw` for `U8`, `integer64` for `I64`,
 `logical` for `Bool`, `character` for `Str`, a factor for a nullary `data`.
 Its elements are checked as values sent to another language are.
+
+### NATIVE-9 One native form per type
+Intent: ruled 2026-10-28
+Tests: spec-native-9-1, spec-native-9-2, spec-native-9-3, spec-native-9-4, spec-native-9-5
+Code: deviates (issues/values.md)
+
+In every language L and for every type T with a schema, a value of T built
+in L by a literal, whatever its elements, has the native form of a T that L
+receives from any language, L included: the same class, attributes, element
+storage and element checks. The form is a function of T's schema, hints
+included, and of nothing else. In Python every numpy array is read-only,
+built or received. In R a `Vector n U8` and a `Vector n D` (D a nullary
+`data`) are `raw`, and a `[D]` is a factor.
