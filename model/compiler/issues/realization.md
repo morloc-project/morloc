@@ -5,6 +5,15 @@ found reviewing /work/plans/realization-cost-model.md and since. The
 objective is COST-1 (crossings by loop level, then language preference,
 then size).
 
+- **A 4-tuple built in a do-block is refused at realization.** [reproduced,
+  2026-10-28] Regression after 0.109.0, where the test passed. biolib's
+  convert test (convert/test/main.loc:243, `let gRows = map (\g -> (.id g,
+  .name g, .biotype g, .txs g)) (geneRows roots)` compared with `@show` to a
+  literal) fails `morloc typecheck --realize` with "Could not resolve type
+  applied variable 'Tuple4'" (TypeEval.hs) in convert-cpp and convert-rust,
+  although root-cpp and root-rust map Tuple4. A small program with the same
+  lambda and comparison realizes. Repro: `cd lib/biolib/convert-cpp &&
+  morloc typecheck --realize test.loc` with convert installed.
 - **A function argument is priced by where it is called, so a term
   with both morloc and sourced implementations prices it twice for the
   morloc one.** [read, 2026-10-24] The `AppS` clause of `scoreExpr` leaves
