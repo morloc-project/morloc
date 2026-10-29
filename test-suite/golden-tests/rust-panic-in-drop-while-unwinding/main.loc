@@ -1,0 +1,9 @@
+-- A sourced Rust function whose local's destructor panics while its own
+-- panic unwinds ends the Rust pool with the panic status, 70 (PANIC-1).
+module main (twice)
+
+import root-rust
+
+source Rust from "s.rs" ("twice")
+
+twice :: Int -> Int

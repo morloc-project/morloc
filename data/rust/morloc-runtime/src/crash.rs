@@ -186,6 +186,10 @@ extern "C" fn fatal(sig: c_int, _info: *mut libc::siginfo_t, _ctx: *mut c_void) 
         let n = unsafe { libc::backtrace(frames.as_mut_ptr(), frames.len() as c_int) };
         unsafe { libc::backtrace_symbols_fd(frames.as_ptr(), n, 2) };
 
+        if sig == libc::SIGABRT && morloc_runtime_types::panic::unwinding() {
+            morloc_runtime_types::panic::exit_nested_in_signal_frame();
+        }
+
         // The signal is masked while this handler runs and its disposition is
         // already the default, so the copy raised here is delivered on return
         // and ends the process, whether the original was a fault the kernel

@@ -3218,8 +3218,14 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     // file, a captured value carried inline).
     if (schema->type == MORLOC_TABLE) {
         bool materialized = (source != PACKET_SOURCE_RPTR);
-        uint8_t* arrow_ptr = R_TRY_WITH_INFRA(free_schema(schema),
-            get_morloc_data_packet_value, packet, schema);
+        // PANIC-13: a value read from a file or carried inline is input;
+        // PANIC-14: one another pool built is not.
+        uint8_t* arrow_ptr = NULL;
+        if (materialized) {
+            arrow_ptr = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+        } else {
+            arrow_ptr = R_TRY_WITH_INFRA(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+        }
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)arrow_ptr;
 
         char* validate_err = NULL;
@@ -3420,7 +3426,13 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     // unpack_with_schema for MESG msgpack args).
     bool is_rptr = (source == PACKET_SOURCE_RPTR);
     bool tracked = false;
-    uint8_t* voidstar = R_TRY_WITH_INFRA(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+    // PANIC-13, PANIC-14
+    uint8_t* voidstar = NULL;
+    if (is_rptr) {
+        voidstar = R_TRY_WITH_INFRA(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+    } else {
+        voidstar = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+    }
 
     if (is_rptr) {
         // The value is read under a reference of this pool's own. Whoever

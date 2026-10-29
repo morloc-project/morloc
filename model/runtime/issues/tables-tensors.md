@@ -36,3 +36,8 @@ CSV input to a `Table` argument (reader: arrow_ipc_reader.rs
 - **A packet without schema metadata skips the schema check.** [read]
   cli.rs ~2036 decodes it under the requested schema; a record packet with
   swapped same-typed fields would bind wrong.
+- **A bad table cell fails the call after the command starts.** [reproduced
+  2026-10-29] CLI-20 asks for the error before the command runs; a `Table`
+  is read by the pool that holds it, so the nexus checks only the header and
+  the cell error comes back as the call's failure (golden
+  bad-table-cell-fails-the-call).

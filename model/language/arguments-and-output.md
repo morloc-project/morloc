@@ -143,7 +143,7 @@ for a `Table` whose undeclared columns are `Str`.
 
 ### CLI-20 A table read error names where it is
 Intent: proposed
-Code: deviates model/runtime/issues/failure-classification.md
+Code: deviates (../runtime/issues/tables-tensors.md)
 
 A rejected table names the line (or row, for a columnar file), the column,
 the cell and the type it is not, and is reported before the command runs.

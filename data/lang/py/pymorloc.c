@@ -2814,7 +2814,13 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     // it twice.
     if (schema->type == MORLOC_TABLE) {
         bool materialized = (source != PACKET_SOURCE_RPTR);
-        voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+        // PANIC-13: a value read from a file or carried inline is input;
+        // PANIC-14: one another pool built is not.
+        if (materialized) {
+            voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+        } else {
+            voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+        }
 
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)voidstar;
 
@@ -2975,7 +2981,12 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     // SHM paths (RPTR or MESG+MSGPACK)
     bool is_rptr = (source == PACKET_SOURCE_RPTR);
 
-    voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+    // PANIC-13, PANIC-14
+    if (is_rptr) {
+        voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+    } else {
+        voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+    }
 
     // A value that arrived by reference is read under a reference of this
     // pool's own. Whoever handed over the packet keeps it alive meanwhile --
@@ -3254,7 +3265,7 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
             (const uint8_t*)result, &fail_check_err);
         if (fail_check_err != NULL) { free(fail_check_err); }
         if (fail_msg != NULL) {
-            PyErr_Format(morloc_packet_is_pipe_closed((const uint8_t*)result) ? PyMorlocPipeClosed : PyExc_RuntimeError,
+            PyErr_Format(morloc_packet_is_pipe_closed((const uint8_t*)result) ? PyMorlocPipeClosed : PyMorlocException,
                          "%s", fail_msg);
             free(fail_msg);
             free(result);

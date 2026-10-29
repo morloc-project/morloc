@@ -1533,9 +1533,14 @@ unsafe fn morloc_eval_r(
             } else {
                 let handle_i = read_int_as_i64(handle_ptr, handle_schema)?;
                 let rc = mlc_close(handle_i, &mut err);
+                if rc == morloc_runtime_types::MLC_RESULT_PIPE_CLOSED {
+                    return Err(MorlocError::PipeClosed);
+                }
+                if rc != 0 && err.is_null() {
+                    return Err(MorlocError::Other("mlc_close failed without a reason".into()));
+                }
                 if rc != 0 {
-                    let msg = take_c_errmsg_or(err, "mlc_close returned non-zero with no error message");
-                    return Err(MorlocError::Other(msg));
+                    return Err(MorlocError::UserThrow(take_c_errmsg_or(err, "")));
                 }
             }
             // Return unit (zero-fill dest).
@@ -1734,6 +1739,9 @@ unsafe fn morloc_eval_r(
             let value_voidstar = morloc_eval_r(value_expr, ptr::null_mut(), 0, bndvars)?;
             let mut err: *mut c_char = ptr::null_mut();
             let rc = mlc_write(level_i, handle_i, value_voidstar as *const c_void, &mut err);
+            if rc == morloc_runtime_types::MLC_RESULT_PIPE_CLOSED {
+                return Err(MorlocError::PipeClosed);
+            }
             if rc != 0 {
                 let msg = take_c_errmsg_or(err, "@write: mlc_write returned non-zero without errmsg");
                 return Err(MorlocError::UserThrow(msg));
@@ -1863,6 +1871,9 @@ unsafe fn morloc_eval_r(
             let handle_i = read_int_as_i64(handle_ptr, handle_schema)?;
             let mut err: *mut c_char = ptr::null_mut();
             let rc = mlc_flush(handle_i, &mut err);
+            if rc == morloc_runtime_types::MLC_RESULT_PIPE_CLOSED {
+                return Err(MorlocError::PipeClosed);
+            }
             if rc != 0 {
                 let msg = take_c_errmsg_or(err, "@flush: mlc_flush returned non-zero with no error message");
                 return Err(MorlocError::UserThrow(msg));
@@ -2113,12 +2124,7 @@ unsafe fn morloc_eval_r(
     Ok(dest)
 }
 
-/// Predicate: is this error interceptable by @catch?
-/// Distinguishes user-visible failures (a direct `@throw`, or a fail
-/// packet returned from a foreign pool whose function was annotated
-/// `<Err>`) from internal-invariant failures (compiler bug, allocation
-/// fault, corrupt manifest). The user promised catchability via the
-/// `<Err>` effect only for the former.
+// FAIL-4, PANIC-13: a throw, or a failed check of input bytes.
 fn is_user_throw(e: &MorlocError) -> bool {
     matches!(e, MorlocError::UserThrow(_) | MorlocError::Packet(_))
 }

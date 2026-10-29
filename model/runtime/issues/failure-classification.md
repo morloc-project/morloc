@@ -3,27 +3,36 @@
 Runtime library errors are a bare message with no class; each binding
 decides at the call site whether a failure is infrastructure
 (`*_TRY_INFRA`, `PROPAGATE_INFRA_ERROR`: the worker ends) or the call's own
-failure (a fail packet). Several sites are misclassified.
+failure (a fail packet). An argument decoded from a file or an inline
+packet is an input check (PANIC-13); one another pool built and passed by
+reference is not (PANIC-14).
 
-- **Peer death exits 70.** [reproduced] Violates PANIC intro ("a peer that
-  died ... never raised as a panic"; 70 only for panics). A pool whose
-  callee dies aborts with "morloc internal error" and exit 70: C++
-  `cpp_local_dispatch` -> `MLC_INTERNAL_ABORT` (data/lang/cpp/pool.cpp);
-  Python `PyMorlocInternalError` from `pybinding__foreign_call`. Repro:
-  Python `die(x): os._exit(9)`, C++ `cdbl`, `safedie x = @try (cdbl (die
-  x))`; and C++ `ccrash` calling `std::abort()`, `g x = @try (pinc (ccrash
-  (pinc x)))`. CLI exits 1. Open: FAIL-6 (catchable or not). Code already
-  answers "not catchable"; the status and message are wrong either way. A
-  fix needs the error class asked about in the next entry: a binding sees
-  a bare message and cannot tell a dead callee from an internal error.
-- **User data decode is classified infrastructure.** [reproduced for tables]
-  Violates PANIC-6 / FAIL-4: decoding an argument
-  (`get_morloc_data_packet_value`) is wrapped INFRA in pymorloc.c:2769,
-  rmorloc.c:3318 and :3518, pool.cpp:391, so a bad CSV cell (`zz` in a
-  declared Int column) kills the pool instead of failing the call; CLI-20
-  deviates on this. Probably
-  also a wrong-length tensor (unconfirmed). Open: should the C ABI report an
-  error class with every message?
+- **A resource failure while materializing an input argument is catchable.**
+  [read, 2026-10-29] The bindings classify an argument decode by the
+  packet's source, so a failure of the runtime itself while reading a file
+  or inline packet (shared memory exhausted, an allocation) fails only the
+  call, where PANIC-5 would end the pool; whether running out of shared
+  memory is recoverable is the open question below. Telling the two apart
+  needs the failure's class from libmorloc with its message, an ABI change
+  to make with the peer-death status.
+
+- **Peer death exits 70.** [reproduced] Violates FAIL-6 and the PANIC
+  intro (70 only for panics). A pool whose callee dies aborts with "morloc
+  internal error" and exit 70 (C++, R and Rust `foreign_call` treat a failed
+  send or receive as infrastructure; Python raises `MorlocInternalError`).
+  Repro: Python `die(x): os._exit(9)`, C++ `cdbl`, `safedie x = @try (cdbl
+  (die x))`. The CLI exits 1. An exception class cannot make the failure
+  uncatchable, since every language's catch-all holds any class (see the
+  closed-pipe entry below). Proposed, awaiting an OK because it adds a
+  packet status and so an ABI version: `send_and_receive_over_socket`
+  classifies "connection lost before a whole reply" (connect failed, a send
+  on a fresh connection failed, a read I/O error) as peer death and bumps a
+  process-wide counter; `send_reply_to_foreign_server` replaces the reply
+  of a dispatch that saw the counter move with a new
+  `PACKET_STATUS_PEER_DIED`, which callers raise again as they do
+  PIPE_CLOSED and the nexus maps to exit 1. The binding raises only to
+  unwind and no longer aborts with 70. This also closes the exit-0 entry
+  below for every pool kind, including fork workers the nexus never reaps.
 - **A reply wait checks the listener, not the worker.** [read] NET-5
   applies to a reply wait through the connected socket's peer, which is
   the process that listened. In a Python or R fork pool that is the
@@ -49,13 +58,6 @@ failure (a fail packet). Several sites are misclassified.
   (cppmorloc.hpp:306, :319), `parse_schema_cpp`, `shmalloc_cpp` and
   `frame_init`'s `bad_alloc` throw catchable exceptions; whether running
   out of shared memory is recoverable needs a ruling (PANIC-5, PANIC-13).
-- **A panic during a user panic's unwinding in a Rust pool aborts with
-  SIGABRT.** [reproduced, 2026-10-21] Violates PANIC-1 (exits 70). A
-  source `twice` whose local's `Drop` panics after `panic!("first")`
-  prints "thread caused non-unwinding panic. aborting." and "Pool process
-  crashed with signal 6"; neither message is reported. Cause:
-  morloc-runtime-types/src/panic.rs:156-160 returns UnwindQuietly for a
-  nested panic in SCOPE_HOST. Repro: /work/plans/model-audit-2026-10-21/repro/I2/p1/.
 - **Requests queued at daemon shutdown are closed unanswered.** [read,
   2026-10-21] Violates DAEMON-6 (refusals answered 503). daemon_run pops
   every queued job and `close`s it (daemon_ffi.rs:3666-3671); workers stop

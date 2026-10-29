@@ -28,7 +28,7 @@ pub(crate) unsafe fn read_morloc_packet_header(
 ) -> *mut PacketHeader {
     clear_errmsg(errmsg);
     if msg.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("Cannot make packet from NULL pointer".into()));
+        set_errmsg(errmsg, &MorlocError::Other("Cannot make packet from NULL pointer".into()));
         return ptr::null_mut();
     }
     // Validate magic
@@ -179,7 +179,7 @@ pub(crate) unsafe fn return_ping(
     if size == 0 { return ptr::null_mut(); }
     let buf = libc::calloc(size, 1) as *mut u8;
     if buf.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("Failed to allocate ping response".into()));
+        set_errmsg(errmsg, &MorlocError::Other("Failed to allocate ping response".into()));
         return ptr::null_mut();
     }
     ptr::copy_nonoverlapping(packet, buf, size);
@@ -558,7 +558,7 @@ pub(crate) unsafe fn get_morloc_data_packet_error_message(
         let payload_len = (*header).length as usize;
         let buf = libc::calloc(payload_len + 1, 1) as *mut c_char;
         if buf.is_null() {
-            set_errmsg(errmsg, &MorlocError::Packet("Failed to allocate error message".into()));
+            set_errmsg(errmsg, &MorlocError::Other("Failed to allocate error message".into()));
             return ptr::null_mut();
         }
         ptr::copy_nonoverlapping(data.add(payload_start), buf as *mut u8, payload_len);
@@ -814,7 +814,7 @@ unsafe fn make_call_packet_gen(
     let total = 32 + data_length;
     let packet = libc::calloc(total, 1) as *mut u8;
     if packet.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("Failed to allocate call packet".into()));
+        set_errmsg(errmsg, &MorlocError::Other("Failed to allocate call packet".into()));
         return ptr::null_mut();
     }
 
@@ -880,7 +880,7 @@ pub(crate) unsafe fn read_morloc_call_packet(
 
     let call = libc::calloc(1, std::mem::size_of::<MorlocCall>()) as *mut MorlocCall;
     if call.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("calloc failed".into()));
+        set_errmsg(errmsg, &MorlocError::Other("calloc failed".into()));
         return ptr::null_mut();
     }
 
@@ -918,7 +918,7 @@ pub(crate) unsafe fn read_morloc_call_packet(
     // Allocate args array
     (*call).args = libc::calloc((*call).nargs, std::mem::size_of::<*mut u8>()) as *mut *mut u8;
     if (*call).args.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("calloc failed for args".into()));
+        set_errmsg(errmsg, &MorlocError::Other("calloc failed for args".into()));
         libc::free(call as *mut c_void);
         return ptr::null_mut();
     }
@@ -983,7 +983,7 @@ pub(crate) unsafe fn flatten_voidstar_to_buffer(
             let len = buf.len();
             let c_buf = libc::malloc(len) as *mut u8;
             if c_buf.is_null() {
-                set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
+                set_errmsg(errmsg, &MorlocError::Other("malloc failed".into()));
                 return 1;
             }
             ptr::copy_nonoverlapping(buf.as_ptr(), c_buf, len);
@@ -1090,7 +1090,7 @@ pub(crate) unsafe fn make_inline_data_packet(
                 PACKET_STATUS_PASS,
             );
             if packet.is_null() {
-                set_errmsg(errmsg, &MorlocError::Packet("Failed to create inline data packet".into()));
+                set_errmsg(errmsg, &MorlocError::Other("Failed to create inline data packet".into()));
             }
             packet
         }
@@ -1260,7 +1260,7 @@ pub(crate) unsafe fn normalize_data_packet_for_output(
     let total = 32 + new_metadata_size + final_payload.len();
     let mem = libc::malloc(total) as *mut u8;
     if mem.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
+        set_errmsg(errmsg, &MorlocError::Other("malloc failed".into()));
         return 1;
     }
 
@@ -2047,7 +2047,7 @@ unsafe fn alloc_out(
 ) -> i32 {
     let mem = libc::malloc(len) as *mut u8;
     if mem.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("malloc failed".into()));
+        set_errmsg(errmsg, &MorlocError::Other("malloc failed".into()));
         return 1;
     }
     if len > 0 {
@@ -2112,7 +2112,7 @@ unsafe fn make_file_data_packet_voidstar(
     let path_str = match path.to_str() {
         Some(s) => s,
         None => {
-            set_errmsg(errmsg, &MorlocError::Packet("Non-UTF8 temp path for file packet".into()));
+            set_errmsg(errmsg, &MorlocError::Other("Non-UTF8 temp path for file packet".into()));
             let _ = std::fs::remove_file(&path);
             return ptr::null_mut();
         }
@@ -2120,7 +2120,7 @@ unsafe fn make_file_data_packet_voidstar(
     let path_cstr = match std::ffi::CString::new(path_str) {
         Ok(c) => c,
         Err(_) => {
-            set_errmsg(errmsg, &MorlocError::Packet("Embedded NUL in temp path for file packet".into()));
+            set_errmsg(errmsg, &MorlocError::Other("Embedded NUL in temp path for file packet".into()));
             let _ = std::fs::remove_file(&path);
             return ptr::null_mut();
         }
@@ -2128,7 +2128,7 @@ unsafe fn make_file_data_packet_voidstar(
 
     let packet = make_mpk_data_packet(path_cstr.as_ptr(), schema);
     if packet.is_null() {
-        set_errmsg(errmsg, &MorlocError::Packet("Failed to create FILE data packet".into()));
+        set_errmsg(errmsg, &MorlocError::Other("Failed to create FILE data packet".into()));
         let _ = std::fs::remove_file(&path);
         return ptr::null_mut();
     }

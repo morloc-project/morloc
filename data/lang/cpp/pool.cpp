@@ -378,6 +378,9 @@ T _get_value(const uint8_t* packet, Schema* schema){
         bool materialized = (source != PACKET_SOURCE_RPTR);
         char* errmsg = nullptr;
         uint8_t* raw = get_morloc_data_packet_value(packet, schema, &errmsg);
+        // PANIC-13: a value read from a file or carried inline is input;
+        // PANIC-14: one another pool built is not.
+        if (errmsg && materialized) { PROPAGATE_ERROR(errmsg); }
         if (errmsg) { PROPAGATE_INFRA_ERROR(errmsg); }
         // A materialized block is released here unless the tracker takes
         // it; a referenced one belongs to its sender until acquired.
@@ -400,6 +403,8 @@ T _get_value(const uint8_t* packet, Schema* schema){
         struct ArrowArray aa;
         char* aerr = nullptr;
         if (arrow_from_shm_owned(hdr, materialized ? 0 : 1, &as, &aa, &aerr) != 0) {
+            // PANIC-13, PANIC-14
+            if (aerr && materialized) { PROPAGATE_ERROR(aerr); }
             PROPAGATE_INFRA_ERROR(aerr);
         }
         owned.ptr = nullptr;
@@ -504,7 +509,11 @@ T _get_value(const uint8_t* packet, Schema* schema){
 
         char* errmsg = NULL;
         uint8_t* voidstar = get_morloc_data_packet_value(packet, schema, &errmsg);
-        if(errmsg != NULL) {
+        // PANIC-13, PANIC-14
+        if (errmsg != NULL && !is_rptr) {
+            PROPAGATE_ERROR(errmsg)
+        }
+        if (errmsg != NULL) {
             PROPAGATE_INFRA_ERROR(errmsg)
         }
 

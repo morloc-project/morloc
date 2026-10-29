@@ -27,8 +27,6 @@ Waiting on a ruling:
   agrees; typecheck.md).
 - INTR-6 open: features-intrinsics.asc presents `@lang`, whose value depends
   on the realization, against REAL's interchangeable implementations.
-- FAIL-6 open: features-intrinsics.asc "Caveats" states FAIL-6 (a) (a killed
-  pool is not catchable).
 - SUM-4 vs ALIAS-7: features-sum-types.asc:396-425 says records or aliases
   alone never close a cycle; a guarded self-recursive alias or record builds
   (records.md).

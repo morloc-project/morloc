@@ -44,10 +44,11 @@ Code: conforms 2026-10-21
 A recoverable failure raised in a call realized in another language than the
 `@try` is caught as if it were raised in the same language.
 
-### FAIL-6 A pool that dies
-Intent: open
-Code: unaudited
+### FAIL-6 A pool that dies is not a recoverable failure
+Intent: ruled 2026-10-28
+Code: deviates (../runtime/issues/failure-classification.md)
 
-When the process running a call is killed (out of memory, an external
-kill), is that (a) not recoverable and bypasses `@try`, like an interrupt,
-or (b) a recoverable failure that `@try` turns into `Err`?
+When the process running a call ends during it (out of memory, an external
+kill, a crash), the failure is not recoverable: it bypasses `@try`, like an
+interrupt, and the run fails with the call-failure status. A pool whose
+callee died reports that death, not an internal error of its own.

@@ -427,7 +427,7 @@ pub(crate) unsafe fn try_table_file_packet(
     }
     let packet = crate::packet_ffi::make_table_file_packet(effective, schema);
     if packet.is_null() {
-        return Err(MorlocError::Packet("could not build the table argument packet".into()));
+        return Err(MorlocError::Other("could not build the table argument packet".into()));
     }
     Ok(TableArg::ByName(packet))
 }

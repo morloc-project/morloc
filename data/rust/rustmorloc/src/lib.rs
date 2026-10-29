@@ -3073,6 +3073,11 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         let mut err: *mut c_char = std::ptr::null_mut();
         let block = get_morloc_data_packet_value(packet, cs, &mut err);
         if block.is_null() || !err.is_null() {
+            // PANIC-13: a value read from a file or carried inline is input;
+            // PANIC-14: one another pool built is not.
+            if !materialized {
+                morloc_infra_abort(&reason_or_abort(err, "reading a table argument"));
+            }
             morloc_throw(reason_or_abort(err, "reading a table argument"));
         }
         // A materialized block is released here unless the tracker takes
@@ -3127,6 +3132,10 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     let mut err: *mut c_char = std::ptr::null_mut();
     let voidstar = get_morloc_data_packet_value(packet, cs, &mut err);
     if voidstar.is_null() || !err.is_null() {
+        // PANIC-13, PANIC-14
+        if source == PKT_SOURCE_RPTR {
+            morloc_infra_abort(&reason_or_abort(err, "reading an argument"));
+        }
         morloc_throw(reason_or_abort(err, "reading an argument"));
     }
     if source == PKT_SOURCE_RPTR {

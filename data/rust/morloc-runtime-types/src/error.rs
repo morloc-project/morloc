@@ -18,20 +18,11 @@ pub enum MorlocError {
     NullPointer,
     #[error("{0}")]
     Other(String),
-    /// Downstream reader closed the pipe. Not really an error to report to
-    /// the user -- the caller should stop emitting and exit with the
-    /// conventional SIGPIPE status (141). Kept as a distinct variant so
-    /// upstream policy can react without string-matching an Io error.
+    /// The downstream reader closed the pipe (PANIC-13).
     #[error("broken pipe")]
     PipeClosed,
-    /// User-raised error from @throw. Distinct from Other so @catch can
-    /// intercept ONLY user-thrown errors and let internal-invariant
-    /// failures (compiler bugs, allocation faults, corrupt manifests)
-    /// propagate. Message text is the user-supplied @throw argument.
-    /// The eval_ffi Catch handler treats this variant AND `Packet`
-    /// (cross-pool fail packet) as the interceptable class -- both are
-    /// user-visible failures that a caller declared catchable via the
-    /// `<Err>` effect.
+    /// A failure `@try` catches (FAIL-4): a throw, or a failed input
+    /// check other than of packet bytes, which are `Packet` (PANIC-13).
     #[error("{0}")]
     UserThrow(String),
 }
