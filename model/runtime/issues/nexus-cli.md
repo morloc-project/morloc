@@ -86,3 +86,21 @@
   RPTR+ARROW one, and a FILE-source one, unchanged; the file names memory
   or a temporary file gone after the run, and reading it back is refused.
   Needs the Arrow IPC bytes written in place of the reference.
+
+- **Output-path defects found reading dispatch.rs.** [read, 2026-10-29]
+  - `print_result_c`'s `-f voidstar` branch passes an empty `full_packet`
+    (a caller holding only a voidstar) to `print_morloc_data_packet` and
+    the hex dump; the `-f packet` branch guards the same case.
+  - `run_pure_command` passes `is_arrow = false` whatever the return type,
+    so a pool-free command returning a `Table` may print wrongly
+    (speculative).
+  - `run_remote_command` neither checks nor frees the errmsg
+    `morloc_packet_size` sets, and the MessagePack output branch drops its
+    errmsg on failure.
+- **Stream output can fail after writing part of a packet.** [read,
+  2026-10-29] voidstar.rs `normalize_data_packet_to_fd` lets a FILE+ARROW
+  or FILE+DATA packet onto the streaming path, whose payload readers refuse
+  anything but MessagePack, after the header has been written to the fd.
+  `estimate_payload_size` bounds a value by its one block's size; a value
+  spread over several blocks can exceed it, and a compressed stream then
+  fails "frame index exceeds reserved space" (speculative).

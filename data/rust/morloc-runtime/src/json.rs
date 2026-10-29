@@ -1,12 +1,4 @@
 //! JSON <-> Voidstar conversion.
-//!
-//! # Safety model
-//!
-//! All SHM pointer operations are encapsulated in `ShmWriter` (write) and
-//! `ShmReader` (read). Each has a single `unsafe fn new()` constructor;
-//! all subsequent reads/writes through the handle are safe methods.
-//! The only remaining `unsafe` blocks construct readers/writers at
-//! known-valid offsets.
 
 // A value crossing this module is user data: a narrowing or sign change
 // goes through a checked conversion or a named helper, never `as`.
@@ -91,8 +83,7 @@ impl ShmReader {
         }
     }
 
-    /// Raw bytes with no UTF-8 validation -- for `Vector U8` / `[U8]` bodies,
-    /// which may be arbitrary binary (a `render` handler's raw output).
+    /// Raw bytes with no UTF-8 validation, for `Vector U8` / `[U8]` bodies.
     fn read_bytes(&self, offset: usize, len: usize) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr.add(offset), len) }
     }
@@ -126,12 +117,6 @@ pub fn bare_ctor_names(schema: &Schema) -> Option<Vec<&str>> {
 }
 
 /// The constructor a bare token names, matched without regard to case.
-///
-/// A bare token is what a person types; the constructor's spelling is the
-/// author's convention, and the typist should not have to reproduce it. A
-/// quoted string is machine text and never reaches here, so JSON stays
-/// case-strict. Two constructors differing only in case are rejected at
-/// declaration, so a fold either finds one name or none.
 pub fn match_ctor_name<'a>(names: &[&'a str], token: &str) -> Option<&'a str> {
     let want = token.to_lowercase();
     names.iter().find(|k| k.to_lowercase() == want).copied()
@@ -153,9 +138,7 @@ pub fn read_json_with_schema(json_str: &str, schema: &Schema) -> Result<AbsPtr, 
 pub fn read_json_with_schema_dest(
     dest: Option<AbsPtr>, json_str: &str, schema: &Schema,
 ) -> Result<AbsPtr, MorlocError> {
-    // Parse to RawValue (preserves the raw text of every leaf). Avoids
-    // serde_json's f64 fallback for numbers that exceed i64/u64, which
-    // silently corrupts BigInt (`Int`) values.
+    // RawValue keeps each leaf's text, so an Int beyond i64/u64 is not read as f64.
     let rv: Box<RawValue> = match serde_json::from_str(json_str) {
         Ok(v) => v,
         Err(e) => {
@@ -164,8 +147,6 @@ pub fn read_json_with_schema_dest(
             // own. Quoting it on the retry is unambiguous BECAUSE the first
             // attempt already succeeded for every JSON literal: `null`,
             // numbers and quoted strings all parse, so only a bare word
-            // reaches here. That is what keeps `?DNA` able to say `null`
-            // for absent while still accepting `G` for present.
             let token = json_str.trim();
             let word_shaped = !token.is_empty()
                 && token.chars().all(|c| c.is_alphanumeric() || c == '_');
@@ -205,10 +186,6 @@ pub fn read_json_with_schema_dest(
 /// Array form must be complete: positional encoding has no notion of
 /// "missing" and a shorter array is ambiguous between "drop the last
 /// field" and "drop a middle one". Length mismatch is an error.
-///
-/// Callers own the returned `AbsPtr`s and must arrange for them to be
-/// either consumed into a larger record or released. The CLI
-/// dispatcher (`parse_cli_data_argument_unrolled`) handles both.
 pub fn load_record_fields_from_json(
     json_str: &str,
     schema: &Schema,
@@ -333,11 +310,6 @@ fn load_value(
         }
         (SerialType::Array, Some(d)) => d,
         _ => {
-            // A leaf takes the whole text. Every leaf that suballocates
-            // writes a root value into one block, so `parts` is normally
-            // empty here; it is collected and consolidated anyway, because
-            // the caller of a root read frees one pointer and a leaf that
-            // forgot would otherwise strand what it took.
             let span = lx.value_span()?;
             let mut parts: Vec<AbsPtr> = Vec::new();
             let leaf = match write_leaf(span, schema, dest, &mut parts) {
@@ -362,8 +334,6 @@ fn load_value(
     let single_block = dest.is_none() && schema.serial_type == SerialType::Array;
     st.enter(schema, root, if single_block { 1 } else { 0 });
     if let Err(e) = walk::run(&mut w, &mut st) {
-        // A load that gave up partway still took blocks; give them back
-        // rather than leave them for the process to end with.
         for p in w.parts.drain(..) {
             let _ = shm::shfree(p);
         }
@@ -373,12 +343,8 @@ fn load_value(
         return Err(e);
     }
     if w.parts.is_empty() || dest.is_some() {
-        // Nothing below the root took a block of its own, or the caller
-        // owns the root slot and will release what it built.
         return Ok(root);
     }
-    // The value exists but as a graph. Its caller frees one pointer, so
-    // copy it into one block and give the graph back.
     let parts = std::mem::take(&mut w.parts);
     // SAFETY: `parts` is every block the walk took below `root`, `root`
     // is laid out as `schema` describes, and nothing else points into them.
@@ -438,9 +404,7 @@ fn count_containers(text: &[u8]) -> Vec<usize> {
     counts
 }
 
-/// A cursor over well-formed JSON text. Only token boundaries are found
-/// here; leaves are decoded by the same parsers as before from the token's
-/// text.
+/// A cursor over well-formed JSON text. It finds token boundaries only.
 struct Lexer<'t> {
     s: &'t [u8],
     pos: usize,
@@ -589,10 +553,8 @@ fn write_leaf(
         SerialType::Sint32 => { let w = alloc(dest, 4)?; w.write_val::<i32>(0, parse_int::<i32>(text)?); Ok(w.as_ptr()) }
         SerialType::Sint64 => { let w = alloc(dest, 8)?; w.write_val::<i64>(0, parse_int::<i64>(text)?); Ok(w.as_ptr()) }
         SerialType::Uint8  => { let w = alloc(dest, 1)?; w.write_val::<u8>(0,  parse_int::<u8>(text)?);  Ok(w.as_ptr()) }
-        // JSON is the human- and LLM-facing format, so an enum reads and
-        // writes as its constructor NAME. Only a declared name is accepted,
-        // and a rejection names the whole legal set -- which is possible
-        // precisely because the schema carries the constructor list.
+        // An enum reads as its constructor name; a rejection lists the declared
+        // names.
         SerialType::Enum => {
             let t = text.trim();
             let name = t.strip_prefix('"').and_then(|x| x.strip_suffix('"')).ok_or_else(|| {
@@ -623,10 +585,6 @@ fn write_leaf(
         SerialType::Float64 => { let w = alloc(dest, 8)?; w.write_val::<f64>(0, parse_float(text, "F64")?);        Ok(w.as_ptr()) }
 
         SerialType::Int => {
-            // Variable-width integer (BigInt): hand the raw digit string
-            // straight to decimal_to_limbs. RawValue preserves the input
-            // text exactly, so values beyond i64/u64 round-trip without
-            // f64 corruption.
             let digits = extract_bigint_digits(text)?;
             let limbs = crate::eval_ffi::decimal_to_limbs(digits)?;
             let nlimbs = limbs.len();
@@ -651,10 +609,8 @@ fn write_leaf(
                 w.write_val::<shm::RelPtr>(8, shm::abs2rel(abs)?);
                 Ok(w.as_ptr())
             } else {
-                // A root Int carries its limbs in the same block, the way a
-                // root String carries its bytes: the caller of a root read
-                // frees one pointer. The limbs land 16 bytes into an
-                // 8-aligned block, so they stay 8-aligned.
+                // A root Int carries its limbs in its own block, 16 bytes in, so they
+                // stay 8-aligned.
                 let w = alloc(None, 16 + limb_bytes)?;
                 w.write_bytes(16, limb_src);
                 // SAFETY: the limbs are 16 bytes into the same shmalloc block
@@ -666,7 +622,6 @@ fn write_leaf(
         }
 
         SerialType::String => {
-            // serde_json::from_str::<String> decodes JSON escapes (\n, \uXXXX, etc.)
             let s: String = serde_json::from_str(text)
                 .map_err(|e| err(&format!("expected string: {}", e)))?;
             let bytes = s.as_bytes();
@@ -693,9 +648,7 @@ fn write_leaf(
         }
 
         SerialType::IFile | SerialType::OStream | SerialType::IStream => {
-            // JSON value is the file path. Lay it down as a tagged
-            // stream-handle field (TAG_PATH) so the codec primitives can
-            // pick it up uniformly.
+            // The JSON value is the file path, stored as a TAG_PATH stream-handle field.
             use morloc_runtime_types::stream_handle as sh;
             let s: String = serde_json::from_str(text)
                 .map_err(|e| err(&format!("expected string: {}", e)))?;
@@ -754,8 +707,7 @@ struct LoadWalk<'a, 'r, 't> {
     /// Every block taken for a part of the value below its root. The
     /// loader cannot size its result before parsing it, so it builds the
     /// value as a graph and `consolidate` copies it into the one block a
-    /// pool can release; this is the list that copy gives back. It also
-    /// makes the error path releasable, which it was not.
+    /// pool can release; this is the list that copy gives back.
     parts: Vec<AbsPtr>,
 }
 
@@ -892,11 +844,8 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                 //
                 //  - Object form `{"key": val, ...}`, in any member order.
                 //    Every field must be present; a missing one raises an
-                //    error here. The partial-load entry point
-                //    `load_record_fields_from_json` is the path for callers
-                //    (the unrolled CLI dispatcher) that accept partial bundles
-                //    and fill missing fields from elsewhere. A key the record
-                //    does not have is skipped; a key given twice is an error.
+                //    error. A key the record does not have is skipped; a key given
+                //    twice is an error.
                 //
                 //  - Array form `[v0, v1, ...]`, positional. Length must equal
                 //    the field count exactly -- positional encoding has no
@@ -1013,8 +962,6 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
             }
             // A variant is externally tagged: `{"Circle": [1.0]}` for an arm
             // with fields, and the bare name `"Dot"` for one without. The
-            // single-key-object form is unambiguous and is what serde and
-            // most hand-written encoders already produce.
             SerialType::Variant => {
                 if f.idx > 0 {
                     // The payload has been read; the object closes here.
@@ -1063,8 +1010,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                 if arm.size == 0 {
                     w.write_val::<RelPtr>(8, RELNULL);
                     if has_payload {
-                        // A payload given to a constructor without fields is
-                        // ignored, as it always was.
+                        // A payload given to a constructor without fields is ignored.
                         self.lx.skip_value()?;
                         return self.lx.expect(b'}');
                     }
@@ -1089,10 +1035,6 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                 Ok(())
             }
             SerialType::Table => {
-                // JSON-to-Table is conceptually meaningful (read records from
-                // a JSON array and build an Arrow buffer) but is not the
-                // standard JSON-load path; CSV/JSON-to-Arrow lives in the
-                // dedicated arrow_ipc_reader module.
                 Err(err("Cannot load a Table from generic JSON; use the Arrow CSV/JSON reader path"))
             }
             SerialType::Recur => unreachable!("a back-reference resolves before it is stepped"),
@@ -1107,8 +1049,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
 
 // ── Voidstar -> JSON ───────────────────────────────────────────────────────
 
-/// 64 KiB matches the default Linux pipe buffer; sized so writes fill a
-/// downstream `read` in one syscall.
+/// 64 KiB, the default Linux pipe buffer.
 const BUFWRITER_CAPACITY: usize = 64 * 1024;
 
 /// `None` = flat, `Some(depth)` = pretty at that indent depth. Threaded
@@ -1116,7 +1057,7 @@ const BUFWRITER_CAPACITY: usize = 64 * 1024;
 /// indentation; scalars ignore it.
 type Pretty = Option<usize>;
 
-/// The value as indented JSON, as `pretty_print_voidstar` prints it.
+/// The value as indented JSON.
 #[cfg(test)]
 pub(crate) fn pretty_json_string(ptr: AbsPtr, schema: &Schema) -> Result<String, MorlocError> {
     let mut buf: Vec<u8> = Vec::new();
@@ -1124,15 +1065,12 @@ pub(crate) fn pretty_json_string(ptr: AbsPtr, schema: &Schema) -> Result<String,
     Ok(String::from_utf8(buf).expect("JSON output is UTF-8"))
 }
 
-/// Streaming JSON writer. Emits directly into `w` -- peak memory is the
-/// caller's buffer (typically 64 KiB), not the size of the output.
+/// Streaming JSON writer: emits into `w` without building the output.
 pub fn write_json(ptr: AbsPtr, schema: &Schema, w: &mut dyn Write) -> Result<(), MorlocError> {
     to_json(ptr, schema, w, None)
 }
 
-/// Buffered variant for callers that need an owned String (daemon
-/// discovery JSON, cli logging, intrinsics, tests). The walker only ever
-/// emits valid UTF-8, so from_utf8 is defensive.
+/// The value as an owned JSON String.
 pub fn voidstar_to_json_string(ptr: AbsPtr, schema: &Schema) -> Result<String, MorlocError> {
     let mut buf: Vec<u8> = Vec::new();
     write_json(ptr, schema, &mut buf)?;
@@ -1215,9 +1153,7 @@ fn write_str_body<W: io::Write>(r: &ShmReader, w: &mut W) -> Result<(), MorlocEr
     Ok(())
 }
 
-/// Write the raw bytes of a `Vector U8` / `[U8]` voidstar (an `Array<u8>`),
-/// with no interpretation -- the bytes are emitted exactly, so a `render`
-/// handler can produce arbitrary binary output.
+/// Write the raw bytes of a `Vector U8` / `[U8]` voidstar unchanged.
 fn write_u8_array_body<W: io::Write>(r: &ShmReader, w: &mut W) -> Result<(), MorlocError> {
     let arr = r.read_array(0);
     if arr.size > 0 && arr.data != RELNULL {
@@ -1304,9 +1240,7 @@ pub fn voidstar_raw_to_bytes(ptr: AbsPtr, schema: &Schema) -> Result<Vec<u8>, Mo
 ///
 /// `ptr` must point to a live voidstar value of `schema`.
 pub unsafe fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
-    // Top-level String renders as the unescaped body (terminal convenience
-    // for `--print`). Other single-scalar returns fall through to the
-    // streaming walker.
+    // A top-level String prints as its unescaped body.
     if let SerialType::String = schema.serial_type {
         if !keep_null && is_top_null(ptr, schema) { return Ok(()); }
         let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
@@ -1333,10 +1267,8 @@ fn write_to_stdout(ptr: AbsPtr, schema: &Schema, keep_null: bool, pretty: Pretty
     map_io(w.flush())
 }
 
-/// Distinguishes "downstream closed the pipe" (fast-exit with 141 at
-/// the FFI boundary) from a genuine serialization error. Other io kinds
-/// are downgraded to Serialization since the walker has no way to
-/// communicate transient io problems.
+/// Map a broken pipe to `PipeClosed` and any other io error to
+/// `Serialization`.
 #[inline]
 fn map_io<T>(r: io::Result<T>) -> Result<T, MorlocError> {
     match r {
@@ -1528,8 +1460,6 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
                 } else if size == 1 {
                     map_io(write!(w, "{}", r.read_val::<i64>(8)))?;
                 } else {
-                    // Overflow: relptr to limb array. Per-value bounded alloc
-                    // (~19 chars per limb), not O(output).
                     let relptr = r.read_val::<shm::RelPtr>(8);
                     let data_ptr = shm::rel2abs(relptr)?;
                     let limbs: Vec<u64> = (0..size)
@@ -1550,9 +1480,7 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
                 }
             }
             SerialType::IFile | SerialType::OStream | SerialType::IStream => {
-                // TAG_PATH renders the file path straight into JSON; TAG_HANDLE
-                // looks up the path via the local SHM registry so the on-disk
-                // JSON always carries a path string.
+                // A stream handle field is written as its file path.
                 use morloc_runtime_types::stream_handle as sh;
                 let field_ptr = r.as_ptr();
                 let tag = unsafe { sh::read_tag(field_ptr) };
@@ -1683,9 +1611,7 @@ fn write_indent(w: &mut dyn Write, depth: usize) -> Result<(), MorlocError> {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 fn json_escape(s: &str, w: &mut dyn Write) -> Result<(), MorlocError> {
-    // Batch consecutive "safe" characters into a single write to keep the
-    // per-scalar overhead close to the C printf version. Only escape the
-    // JSON-reserved / control-range codepoints.
+    // Write runs of characters that need no escape in one call.
     map_io(w.write_all(b"\""))?;
     let bytes = s.as_bytes();
     let mut safe_start = 0usize;
@@ -1732,8 +1658,8 @@ pub(crate) fn truncate_for_msg(s: &str) -> String {
     format!("{}...", &t[..end])
 }
 
-/// Strip optional surrounding double-quotes (JSON string form) and reject
-/// any non-integer sigils. Returns the digit body for `decimal_to_limbs`.
+/// Strip optional surrounding double-quotes and reject a fraction or
+/// exponent. Returns the digit body for `decimal_to_limbs`.
 fn extract_bigint_digits(text: &str) -> Result<&str, MorlocError> {
     let t = text.trim();
     let body = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
@@ -1827,10 +1753,7 @@ fn parse_f32(text: &str) -> Result<f32, MorlocError> {
     Ok(f)
 }
 
-// Recognise the canonical non-finite wire tokens. Case-sensitive,
-// matching the writer (which emits exactly `"inf"` / `"-inf"` /
-// `"nan"`). Any other spelling is rejected so the caller surfaces a
-// clear parse error.
+// The non-finite tokens the writer emits.
 fn parse_nonfinite(s: &str) -> Option<f64> {
     match s {
         "nan" => Some(f64::NAN),
@@ -1992,12 +1915,6 @@ mod tests {
     }
 
     /// A value read from JSON is one self-contained block.
-    ///
-    /// Its caller frees one pointer -- that is the contract `load_value`
-    /// states and the reason it consolidates the walk path -- so anything
-    /// the read suballocates has to live inside the block it returns. A
-    /// root leaf is the easy case to get wrong, because it never reaches
-    /// the walk: it is written directly and returned.
     #[test]
     fn a_value_read_from_json_is_one_block() {
         let _shm = crate::own_test_registry();
@@ -2175,9 +2092,6 @@ mod tests {
     }
 
     // A Write impl that returns BrokenPipe after `n` successful bytes.
-    // Used to verify the walker propagates MorlocError::PipeClosed
-    // rather than a generic Io error, and that no output is buffered
-    // beyond the point of failure.
     struct PipeAfter {
         remaining: usize,
         written: Vec<u8>,
@@ -2207,10 +2121,6 @@ mod tests {
     #[test]
     fn test_write_json_streams_without_buffering() {
         let _shm = setup();
-        // A 100-element array: write_json should feed the sink one chunk
-        // at a time. We just care that the produced bytes match the
-        // buffered voidstar_to_json_string form -- if it does, the
-        // streaming walker is emitting the same JSON as the batched one.
         let s = parse_schema("ai4").unwrap();
         let raw = "[".to_string() + &(0..100).map(|i| i.to_string()).collect::<Vec<_>>().join(",") + "]";
         let p = read_json_with_schema(&raw, &s).unwrap();
@@ -2224,8 +2134,6 @@ mod tests {
     #[test]
     fn test_write_json_maps_broken_pipe_to_pipe_closed() {
         let _shm = setup();
-        // Fail on the very first write to prove the walker doesn't
-        // silently swallow the error.
         let s = parse_schema("ai4").unwrap();
         let p = read_json_with_schema("[1,2,3,4,5]", &s).unwrap();
         let mut sink = PipeAfter { remaining: 0, written: Vec::new() };
@@ -2239,9 +2147,7 @@ mod tests {
     #[test]
     fn test_write_json_pipe_closed_partway() {
         let _shm = setup();
-        // Accept a few bytes, then fail. The walker must still surface
-        // PipeClosed (not Io / Serialization) -- upstream policy relies
-        // on this distinction to pick exit code 141 vs 1.
+        // Accept a few bytes, then fail: the error must still be PipeClosed.
         let s = parse_schema("ai4").unwrap();
         let p = read_json_with_schema("[100,200,300,400,500,600]", &s).unwrap();
         let mut sink = PipeAfter { remaining: 4, written: Vec::new() };
@@ -2250,9 +2156,6 @@ mod tests {
             matches!(r, Err(MorlocError::PipeClosed)),
             "expected PipeClosed after partial write, got {:?}", r,
         );
-        // And we did emit at least the bytes the sink accepted before
-        // failing -- the walker isn't buffering the whole JSON in memory
-        // before writing the first byte.
         assert!(!sink.written.is_empty(), "walker held back all output before first failure");
     }
 

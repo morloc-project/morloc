@@ -1,22 +1,6 @@
-//! Manifest-driven CLI parse for the trailing argv slice of a
-//! `morloc-nexus run` (or `daemon`) invocation.
-//!
-//! The top-level parse in [`crate::cli`] consumes the mode and the
-//! always-on flags. This module walks the manifest's `commands`
-//! list and synthesizes a per-program `clap::Command` whose
-//! subcommands and arguments mirror the user's morloc
-//! declarations. Running the trailing argv through that command
-//! gives:
-//!
-//! * Auto-generated help that matches the rest of clap's output.
-//! * Unknown-flag rejection (no more silent typos).
-//! * Per-subcommand help for free, at the tier `-h`/`-hh`/`-hhh` asks for.
-//! * Late-binding of nexus-level flags the user wrote after the
-//!   wrapper target (e.g. `./prog --log-dir X cmd`), which would
-//!   otherwise be swallowed by the top-level `trailing_var_arg`.
-//!
-//! The output is a `(cmd_index, Vec<ArgValue>)` tuple consumed by
-//! [`crate::dispatch::dispatch_command_parsed`].
+//! Manifest-driven parse of a program's command line: a `clap::Command`
+//! built from the manifest's commands and arguments, whose matches become
+//! the [`ArgValue`]s that [`crate::dispatch::dispatch_command_parsed`] runs.
 
 use clap::{Arg as ClapArg, ArgAction, ArgGroup, ArgMatches, Command as ClapCommand};
 
@@ -24,17 +8,12 @@ use crate::dispatch::{preprocess_cli_value, ArgValue};
 use morloc_runtime_types::schema::{parse_schema, SerialType};
 use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest, Return};
 
-/// Leak a string into a `&'static str` for clap's static-only
-/// builder API. The nexus is a short-lived dispatcher (one
-/// invocation per command), so the per-arg leaks bounded by the
-/// process lifetime are acceptable. Daemons reuse their built clap
-/// commands across requests instead of rebuilding, so the leak there
-/// is also bounded.
+/// Leak a string into a `&'static str` for clap's builder API.
 pub(crate) fn leak(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
 }
 
-/// Result of parsing a phase-2 invocation.
+/// A parsed command line.
 pub struct ParsedCommand {
     /// Index into [`Manifest::commands`] of the dispatched command, before
     /// any `@parse` redirect (see `parse_arg::redirect`).
@@ -42,9 +21,8 @@ pub struct ParsedCommand {
     /// Per-arg parsed values of the parent, index-aligned with its `args`.
     /// A terminal entry takes the same arguments as its parent.
     pub values: Vec<ArgValue>,
-    /// True when a `render` terminal flag was chosen: the dispatcher forces
-    /// the streamed-stdout output format to `raw` (verbatim). `render`
-    /// handlers emit the final bytes, so `-f` does not apply.
+    /// A `render` terminal was chosen: its bytes are written raw and `-f`
+    /// does not apply.
     pub render: bool,
     /// The command the user named, before any terminal redirect.
     pub parent_index: usize,
@@ -125,23 +103,15 @@ pub struct Action {
     pub dest: Dest,
 }
 
-/// Prefix used on clap arg-ids for terminal-action flags. Distinct
-/// from the numeric `arg{N}` ids so the two families never collide.
+/// Prefix of the clap ids of terminal-action flags.
 const TERMINAL_ID_PREFIX: &str = "term_";
 /// Clap id of `--no-stdout`, present on commands with terminal actions.
 const NO_STDOUT_ID: &str = "no_stdout";
 /// The value of an action flag given without `=PATH`: standard output.
 const STDOUT_DEST: &str = "-";
 
-/// Parse the trailing `rest` from a `Run` mode invocation against the
-/// manifest. Builds a root `clap::Command` whose structure matches
-/// the manifest's command + group layout, runs clap on `rest`, then
-/// projects the resulting [`ArgMatches`] back onto the manifest arg
-/// list to produce [`ArgValue`]s.
-///
-/// On clap parse error (unknown flag, missing positional, bad
-/// `-h`/`--help` path), clap prints its diagnostic and the process
-/// exits with the clap-recommended status code.
+/// Parse a program's command line `user_zone` against the manifest. A
+/// parse error, or a help request, ends the process with clap's output.
 pub fn parse_run(
     manifest: &Manifest,
     user_zone: &[String],
@@ -150,9 +120,6 @@ pub fn parse_run(
     output_path: Option<&str>,
 ) -> ParsedCommand {
     let root = build_root(manifest, prog_name, help_level(user_zone));
-    // Internal (compiler-synthesized) commands never surface at the
-    // top level; they participate in dispatch only via terminal-flag
-    // redirect. Compute single vs multi mode from the visible slice.
     let visible: Vec<(usize, &ManifestCommand)> = manifest
         .commands
         .iter()
@@ -161,11 +128,7 @@ pub fn parse_run(
         .collect();
     let single = visible.len() == 1 && manifest.groups.is_empty();
 
-    // In single-command mode the user may optionally include the
-    // command name as a positional (so both `./prog 5 7` and
-    // `./prog mycmd 5 7` dispatch the same way). Strip the prefix
-    // when present so clap's positional binding sees only the
-    // function arguments.
+    // In single-command mode the command name may be given or left out.
     let trimmed: Vec<String> = if single
         && !user_zone.is_empty()
         && user_zone[0] == visible[0].1.name
@@ -182,8 +145,6 @@ pub fn parse_run(
     let matches = match root.try_get_matches_from(argv) {
         Ok(m) => m,
         Err(e) => {
-            // Append a placement hint when the rejected token is a
-            // known nexus flag misplaced in the command zone.
             if let Some(hint) = nexus_flag_hint_for_error(&e) {
                 eprint!("{}", e);
                 eprintln!("{}", hint);
@@ -199,13 +160,10 @@ pub fn parse_run(
         return finish_parse(manifest, cmd_index0, cmd, &matches, values, format_explicit, output_path);
     }
 
-    // Walk down through the optional group layer to reach the
-    // command-level matches.
     let (cmd_name, sub_matches) =
         matches.subcommand().expect("clap guarantees subcommand");
     let (chosen_name, chosen_matches) =
         if manifest.groups.iter().any(|g| g.name == cmd_name) {
-            // Two-level: <group> <cmd>
             let inner = sub_matches
                 .subcommand()
                 .expect("clap guarantees inner subcommand");
@@ -225,10 +183,9 @@ pub fn parse_run(
 }
 
 /// Resolve the parsed parent and its terminal actions into the command to
-/// dispatch. A run keeps today's path -- one fresh run of the parent, or of
-/// one terminal's entry -- unless it names an action with a path, gives
-/// `--no-stdout`, or sends to stdout an action that runs only on the staged
-/// output; then it is `staged`.
+/// dispatch. A run is `staged` when it names an action with a path, gives
+/// `--no-stdout`, or sends to stdout an action with no entry of its own;
+/// otherwise it is one run of the parent, or of one terminal's entry.
 fn finish_parse(
     manifest: &Manifest,
     parent_index: usize,
@@ -409,8 +366,7 @@ pub(crate) fn resolve_target(p: &str) -> FileTarget {
 ///
 /// Every `h` in a short cluster (`-h`, `-hh`, `-qhh`) and every `--help`
 /// counts one; the sum is clamped to the three tiers. A token after `--`
-/// is a positional and never counts. Returns 1 when no help was asked
-/// for at all, which callers never render.
+/// never counts. Returns 1 when no help was asked for.
 ///
 /// 1. `-h`: the synopsis line, the arguments with their types and
 ///    formats, the return type.
@@ -431,10 +387,7 @@ pub fn help_level(user_zone: &[String]) -> u8 {
     n.clamp(1, 3) as u8
 }
 
-/// One-line "did you mean to place this left of `@`" hint when a
-/// clap-manifest error rejects a token that matches a known long
-/// nexus flag. Short flags aren't hinted -- their palettes overlap
-/// between nexus and user programs by design.
+/// A placement hint when clap rejects a token that is a long nexus flag.
 fn nexus_flag_hint_for_error(err: &clap::Error) -> Option<String> {
     use clap::error::{ContextKind, ContextValue, ErrorKind};
 
@@ -461,22 +414,15 @@ fn nexus_flag_hint_for_error(err: &clap::Error) -> Option<String> {
     ))
 }
 
-/// Build the root `clap::Command` for a Run-mode invocation. In
-/// single-command mode, the only command's args live directly on the
-/// root (so users can type `./prog 5 7` not `./prog mycmd 5 7`); in
-/// multi-command mode, each manifest [`Command`] becomes a subcommand
-/// (nested under a group-subcommand layer when the manifest declares
-/// `groups`).
+/// The program's root `clap::Command`. With one visible command and no
+/// groups, its args live on the root; otherwise each command is a
+/// subcommand, under its group's subcommand if it has one.
 ///
-/// `level` is the help tier the tree is built for (see [`help_level`]):
-/// every page is rendered by clap's short help, and the tier decides
-/// what the tree carries before clap sees it.
+/// `level` is the help tier the tree is built for (see [`help_level`]).
 pub fn build_root(manifest: &Manifest, prog_name: &str, level: u8) -> ClapCommand {
     let visible_count = manifest.commands.iter().filter(|c| !c.internal).count();
     let single = visible_count == 1 && manifest.groups.is_empty();
 
-    // `--' @epilogue` blocks above `module` render at the foot of
-    // top-level help, in either layout.
     let epilogue = render_epilogues(&manifest.epilogues);
 
     if single {
@@ -485,9 +431,8 @@ pub fn build_root(manifest: &Manifest, prog_name: &str, level: u8) -> ClapComman
             .iter()
             .find(|c| !c.internal)
             .expect("visible_count == 1 implies at least one non-internal command");
-        // add_general_options runs first so the "General Options"
-        // section sorts before the command's positional/optional args
-        // (clap orders sections by first-arg-added).
+        // First, so "General Options" sorts before the command's args
+        // (clap orders sections by first arg added).
         let root = crate::help::add_general_options(ClapCommand::new(leak(prog_name)));
         // The root is the program and the command at once, so both
         // docstrings describe it and `build_command_args` sees only one of
@@ -516,8 +461,6 @@ pub fn build_root(manifest: &Manifest, prog_name: &str, level: u8) -> ClapComman
     }
     root = crate::help::finalize(root, crate::help::usage_multi_root(prog_name));
 
-    // Each CmdGroup becomes its own clap subcommand; its members
-    // (commands carrying that group) become subcommands beneath it.
     for grp in &manifest.groups {
         let mut grp_cmd = ClapCommand::new(leak(&grp.name))
             .subcommand_required(true)
@@ -582,34 +525,14 @@ pub fn build_root(manifest: &Manifest, prog_name: &str, level: u8) -> ClapComman
 }
 
 
-/// Render the `Return:` help block for a command.
-///
-/// With no terminal-action flags this is the single line
-/// `Return: <type>` (followed by any `--' @return` description lines),
-/// preserving the historical layout.
-///
-/// When the command carries `--' @with`/`@render` terminal actions,
-/// each flag selects a different output formatter with its own return
-/// type, so the block becomes a small table listing the return type
-/// per formatter -- `@default` for the bare command plus one aligned
-/// row per flag. Each terminal's return type is read from its
-/// synthesized `entry` command (resolved by name against the manifest).
-/// The return descriptor shown in help. A media-typed return (a `@mime` type,
-/// e.g. a `--png` renderer) shows its media type -- the informative fact for a
-/// byte-emitting formatter, where the morloc type is just `Vector U8` -- and
-/// otherwise the morloc type name.
+/// The return descriptor shown in help: a `@mime` media type if there is
+/// one, else the morloc type name.
 fn ret_display(ret: &Return) -> String {
     ret.mime.clone().unwrap_or_else(|| ret.type_desc.clone())
 }
 
-/// What a command puts on standard output, which is not always what it
-/// returns.
-///
-/// A streaming command returns `()` and writes its data through a sink,
-/// so reporting the return type would tell a caller the command produces
-/// nothing. When the compiler recorded a batch type, that is the answer;
-/// otherwise fall back to the return type, which is correct for every
-/// non-streaming command.
+/// What a command puts on standard output: its stream's type when it
+/// streams (and so returns `()`), else its return type.
 fn stdout_display(cmd: &ManifestCommand) -> String {
     match &cmd.stream {
         Some(st) if !st.type_desc.is_empty() => st.type_desc.clone(),
@@ -617,6 +540,8 @@ fn stdout_display(cmd: &ManifestCommand) -> String {
     }
 }
 
+/// The `Return:` help block: the type and its description, and with
+/// terminal actions, one row per action.
 fn render_return_block(mcmd: &ManifestCommand, manifest: &Manifest) -> String {
     if mcmd.terminals.is_empty() {
         if mcmd.ret.type_desc.is_empty() {
@@ -636,10 +561,8 @@ fn render_return_block(mcmd: &ManifestCommand, manifest: &Manifest) -> String {
     }
     block.push_str("\n  actions:");
 
-    // One row per action: flag, return type, `(raw bytes)` for a `render`
-    // action (`-f` does not apply to it), `default` for the `@default` one.
-    // A terminal whose entry can't be resolved (a malformed manifest) keeps
-    // its row with an empty type, so the row still documents the flag.
+    // A terminal whose entry can't be resolved keeps its row, with an empty
+    // type.
     let rows: Vec<[String; 4]> = mcmd
         .terminals
         .iter()
@@ -669,17 +592,10 @@ fn render_return_block(mcmd: &ManifestCommand, manifest: &Manifest) -> String {
     block
 }
 
-/// Add every manifest [`Arg`] to a [`ClapCommand`] under stable ids
-/// (`arg<index>` plus `<arg_id>_neg` for flag negations and
-/// `<arg_id>_grpopt`/`<arg_id>_entry<j>` for groups). Returns the
-/// command with all args attached.
-///
-/// Sets `allow_negative_numbers(true)` so positional and option
-/// values like `-5` or `-3.14` are accepted as values rather than
-/// rejected as unknown short flags. POSIX short flags begin with
-/// a letter; the compiler is expected to reject digit-prefixed
-/// short flag declarations in user docstrings, making this
-/// unambiguous.
+/// Add every manifest `Arg` to `cmd` under stable ids: `arg<index>`, with
+/// `<id>_neg` for a flag's reverse spelling, `<id>_grpopt`/`<id>_entry<j>`
+/// for a record and `<id>_arm<j>` for a constructor choice. Values such as
+/// `-5` are taken as values, not short flags.
 fn build_command_args(
     mut cmd: ClapCommand,
     mcmd: &ManifestCommand,
@@ -688,19 +604,11 @@ fn build_command_args(
 ) -> ClapCommand {
     cmd = cmd
         .allow_negative_numbers(true)
-        // User-declared flag-style args inherit this heading;
-        // positional args are hidden from clap's auto-render below
-        // and re-emitted by `render_positional_block` under a
-        // "Positional arguments:" header in `after_help`.
         .next_help_heading("Optional arguments");
     cmd = with_description(cmd, &mcmd.desc, level);
 
-    // Record / Table Schemas block: the schema-walking renderer
-    // reconstructs named-type layouts from each typed arg's schema
-    // string. Goes into clap's `after_help` so the block sits
-    // beneath the args list under `<sub> -hhh`. The Return line
-    // also lives here so it stays attached to the command (clap has
-    // no first-class slot for return-type metadata).
+    // Positionals, the return block and (from -hhh) the schemas are
+    // rendered here, beneath clap's argument list.
     let mut after = String::new();
     let pos_block = render_positional_block(mcmd);
     if !pos_block.is_empty() {
@@ -725,44 +633,26 @@ fn build_command_args(
         cmd = cmd.after_help(leak(&after));
     }
 
-    // Positional indices are 1-based in clap; track them across args.
     let mut pos_idx: u8 = 1;
     for (i, marg) in mcmd.args.iter().enumerate() {
         let id: &'static str = leak(&format!("arg{}", i));
         match marg {
             ManifestArg::Positional { many, stdin, schema, metavar, key, .. } => {
-                // Positionals are rendered by `render_positional_block`
-                // (above, via `after_help`) so clap's bracketed
-                // `<argN>` default doesn't appear in help. They still
-                // need `required`/`index` here for clap to parse them.
-                // A `@stdin` positional is optional (the compiler
-                // guarantees it is the last positional, so an optional
-                // trailing positional is unambiguous for clap); when
-                // omitted the nexus injects the `/dev/stdin` sentinel.
-                //
-                // An optional argument may be left out, and omitting it means
-                // null. That convention is not something `?T` says by itself --
-                // the type is a claim about the value, not about the slot -- it
-                // is adopted so the parser agrees with `--json-help` and the MCP
-                // tool shapes, which have always reported an optional argument
-                // as not required. The compiler guarantees such a positional is
-                // trailing.
+                // Hidden here and shown by `render_positional_block`. A
+                // `@stdin` positional may be omitted to read stdin, and a `?T`
+                // one to give null, as `--json-help` and MCP report them.
                 let optional = crate::json_help::schema_is_optional(schema.as_deref());
                 let mut a = ClapArg::new(id)
                     .required(!stdin && !optional)
                     .index(pos_idx as usize)
                     .hide(true);
-                // Name the slot in clap's own diagnostics. The rendered help
-                // uses `render_positional_block`, but a parse error comes from
-                // clap and would otherwise read `<arg0>`.
+                // Names the slot in clap's parse errors, which would otherwise
+                // read `<arg0>`.
                 if let Some(m) = metavar {
                     a = a.value_name(leak(m));
                 } else if !key.is_empty() {
                     a = a.value_name(leak(key));
                 }
-                // Variadic positional: accept one or more tokens.
-                // The compiler guarantees a `many` positional is the
-                // last positional, which is clap's requirement too.
                 if *many {
                     a = a.num_args(1..).action(ArgAction::Append);
                 }
@@ -798,9 +688,8 @@ fn build_command_args(
                     a = a.default_value(leak(&shown_default(d, ctor_typed)));
                 }
                 if *many {
-                    // Variadic option: collect every value supplied
-                    // across the option's occurrences AND every value
-                    // passed after a single occurrence (`--xs 1 2 3`).
+                    // Every occurrence's values, and several after one
+                    // (`--xs 1 2 3`).
                     a = a.num_args(1..).action(ArgAction::Append);
                 }
                 let mut help = render_arg_help(
@@ -828,11 +717,8 @@ fn build_command_args(
                 desc,
                 ..
             } => {
-                // Forward (--flag) sets true; reverse (--no-flag)
-                // sets false. They share the manifest slot id so
-                // either spelling lands in the same place at
-                // extraction time. Mutually overrides each other so
-                // clap takes the last one on the command line.
+                // The forward spelling sets true and the reverse false; the
+                // last one given wins.
                 let mut fwd = ClapArg::new(id).action(ArgAction::SetTrue);
                 if let Some(l) = long_opt {
                     fwd = fwd.long(leak(l));
@@ -842,8 +728,6 @@ fn build_command_args(
                         fwd = fwd.short(c);
                     }
                 }
-                // Flags have no value type, but a declared default
-                // (`--' @default true`) is still useful context.
                 fwd = fwd.help(leak(&render_arg_help(
                     desc,
                     Some("Bool"),
@@ -853,10 +737,6 @@ fn build_command_args(
                 )));
                 cmd = cmd.arg(fwd);
 
-                // The reverse spelling is a flag the author declared, so
-                // it carries whichever names they wrote and appears in
-                // help like any other. Hiding it left `--quiet`
-                // reachable only by reading the source.
                 if long_rev.is_some() || short_rev.is_some() {
                     let neg_id: &'static str = leak(&format!("{}_neg", id));
                     let mut neg = ClapArg::new(neg_id)
@@ -886,7 +766,6 @@ fn build_command_args(
                 schema,
                 ..
             } => {
-                // The optional whole-record JSON option.
                 if let Some(go) = group_opt {
                     let opt_id: &'static str = leak(&format!("{}_grpopt", id));
                     let mut a = ClapArg::new(opt_id).action(ArgAction::Set);
@@ -912,7 +791,6 @@ fn build_command_args(
                     )));
                     cmd = cmd.arg(a);
                 }
-                // Per-field entries.
                 for (j, entry) in entries.iter().enumerate() {
                     let eid: &'static str = leak(&format!("{}_entry{}", id, j));
                     let ctor_line = crate::json_help::group_entry_constructor_line(
@@ -949,9 +827,6 @@ fn build_command_args(
                         .filter(|d| !d.trim().is_empty())
                         .cloned()
                         .collect();
-                    // What the arm is one of, and what happens when none is
-                    // given: the choice is required, or falls to a default,
-                    // or the argument is left null.
                     let standing = match (required, default_val) {
                         (true, _) => "one is required".to_string(),
                         (false, Some(d)) => format!("default: {}", shown_default(d, true)),
@@ -978,12 +853,8 @@ fn build_command_args(
     cmd
 }
 
-/// Register each `--' @with` terminal-action flag on `cmd` as a
-/// boolean flag under the "General Options" heading. All siblings
-/// are grouped into a single mutually-exclusive `ArgGroup`, so clap
-/// rejects two terminal flags in one invocation with its own
-/// diagnostic. Description comes verbatim from the referenced term's
-/// docstring (emitted by the Haskell manifest builder).
+/// Add each terminal action's flag, and `--no-stdout`, to `cmd` under
+/// "General Options".
 fn add_terminal_flags(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapCommand {
     if mcmd.terminals.is_empty() {
         return cmd;
@@ -1022,7 +893,7 @@ fn add_terminal_flags(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
 }
 
 /// Add a clap arg representing one group entry (which is itself an
-/// Optional or Flag manifest [`Arg`]).
+/// Optional or Flag manifest `Arg`).
 fn add_group_entry_arg(
     mut cmd: ClapCommand,
     id: &'static str,
@@ -1115,8 +986,6 @@ fn add_group_entry_arg(
             }
         }
         _ => {
-            // Manifest schema guarantees group entries are Optional
-            // or Flag; anything else is a compiler bug.
             eprintln!(
                 "Internal error: group entry of unexpected kind ({:?})",
                 std::mem::discriminant(marg)
@@ -1127,9 +996,6 @@ fn add_group_entry_arg(
     cmd
 }
 
-/// Project an [`ArgMatches`] for the chosen command back onto the
-/// manifest arg list, producing one [`ArgValue`] per manifest slot in
-/// declaration order.
 /// Read one argv token of argument `i`. An argument with `@parse` formats is
 /// first checked for a format prefix or extension; a token that selects a
 /// format is a path its handler reads, so none of the value's shape applies.
@@ -1176,6 +1042,8 @@ fn many_field_json(tokens: &[String], literal: bool, key: &str) -> String {
     format!("[{}]", items.join(","))
 }
 
+/// One [`ArgValue`] per manifest arg of `cmd`, in declaration order, from
+/// clap's matches.
 fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> {
     let mut out = Vec::with_capacity(cmd.args.len());
     for (i, marg) in cmd.args.iter().enumerate() {
@@ -1183,12 +1051,6 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
         match marg {
             ManifestArg::Positional { quoted: q, many, checks, stdin, source, .. } => {
                 if *many {
-                    // Variadic positional: clap collects 1..N tokens
-                    // via Append action; pull them all and forward as
-                    // ArgValue::Many for list-packet assembly in
-                    // dispatch. clap's `required(true)` guarantees at
-                    // least one token, so an empty vec here is a clap
-                    // bug.
                     let toks: Vec<String> = matches
                         .get_many::<String>(&id)
                         .map(|it| it.cloned().collect())
@@ -1196,12 +1058,8 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                     toks.iter().for_each(|t| crate::parse_arg::note_unparsed_token(t));
                     out.push(ArgValue::Many { tokens: toks, literal: *q });
                 } else if *stdin {
-                    // Optional stdin positional. A supplied value (a path or
-                    // an explicit `-`) is used directly; when omitted the
-                    // source is stdin, injected as the `/dev/stdin` sentinel.
-                    // Refuse to hang on an interactive terminal: with no value
-                    // and stdin a TTY there is nothing to read, so error
-                    // rather than block forever.
+                    // Omitted, it reads stdin, unless stdin is a terminal,
+                    // where reading would block.
                     let raw = match matches.get_one::<String>(&id).cloned() {
                         Some(val) => val,
                         None => {
@@ -1217,10 +1075,6 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                     };
                     out.push(token_value(raw, marg, checks, *source, *q, i));
                 } else {
-                    // A value is guaranteed for a required positional; an
-                    // optional one may be absent, and absent means null. The
-                    // null is pushed bare: with no argv token there is nothing
-                    // for the checks or the source/form shape to act on.
                     match matches.get_one::<String>(&id).cloned() {
                         Some(val) => out.push(token_value(val, marg, checks, *source, *q, i)),
                         None => out.push(ArgValue::Null),
@@ -1235,23 +1089,12 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                 source,
                 ..
             } => {
-                // Distinguish "user typed the flag" from "clap
-                // supplied the default" so manifest-stored defaults
-                // pass through verbatim. Defaults for `@literal`
-                // strings are already JSON-quoted in the manifest
-                // (e.g. the directive `@default "yolo"` produces the
-                // 6-character text `"yolo"`); routing them through
-                // `quoted()` again would double-encode and the pool
-                // would receive `"yolo"` (with quotes) instead of
-                // `yolo`.
+                // A default is passed as the manifest stores it, never
+                // quoted again.
                 use clap::parser::ValueSource;
                 let from_cli = matches.value_source(&id)
                     == Some(ValueSource::CommandLine);
                 if *many {
-                    // Variadic option: collect all CLI tokens (if any)
-                    // and forward as ArgValue::Many. If the user did
-                    // not pass the option at all, fall back to the
-                    // compiler-supplied default (typically `"[]"`).
                     if from_cli {
                         let toks: Vec<String> = matches
                             .get_many::<String>(&id)
@@ -1286,10 +1129,6 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                 let neg_id = format!("{}_neg", id);
                 let has_rev = long_rev.is_some() || short_rev.is_some();
                 let neg_set = has_rev && matches.get_flag(&neg_id);
-                // Clap's `overrides_with` ensures only one of the two
-                // ends up true if both spellings were given (last
-                // wins). Recover the original "true"/"false" string
-                // shape the dispatch layer expects.
                 let bool_val = if fwd_set {
                     true
                 } else if neg_set {
@@ -1311,16 +1150,9 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_one::<String>(&format!("{}_grpopt", id))
                         .cloned()
                 });
-                // For each record field, `fields[j]` is `Some(v)`
-                // *only* when the user actually typed the flag on
-                // the command line; `None` means "fall back to the
-                // group JSON (if any) or to `defaults[j]`." The
-                // distinction is required because the C-side
-                // `initialize_unrolled` layer treats every non-NULL
-                // slot as an explicit user override and will use it
-                // in preference to the JSON-loaded record; filling
-                // `fields[j]` with the manifest default would block
-                // `--alg-config=algconf.json` from taking effect.
+                // `fields[j]` is set only for a field given on the command
+                // line: a set field overrides the whole-record value, so a
+                // default there would mask it.
                 use clap::parser::ValueSource;
                 let mut fields = Vec::with_capacity(entries.len());
                 let mut defaults = Vec::with_capacity(entries.len());
@@ -1372,13 +1204,9 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                 });
             }
             ManifestArg::Alt { arms, default_val, .. } => {
-                // The chosen arm becomes the JSON the type's wire form reads:
-                // the bare name for an argument-free constructor, the name
-                // keyed to its values otherwise. Each value is read the way
-                // any argument of its type is, then rendered back to JSON,
-                // so a file, a bare constructor or a string token all land
-                // in the right form. No arm given means the default, or
-                // null for an argument that may be omitted.
+                // The chosen arm as JSON: the bare name for an argument-free
+                // constructor, else the name keyed to its values, each read
+                // as an argument of its type would be.
                 let mut chosen: Option<String> = None;
                 for (j, arm) in arms.iter().enumerate() {
                     let aid = format!("{}_arm{}", id, j);
@@ -1425,7 +1253,6 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
     out
 }
 
-/// First non-empty description line (used as clap's `about` text).
 /// Join the manifest's epilogue blocks into one help footer: lines within a
 /// block as written, a blank line between blocks. Empty blocks drop out.
 fn render_epilogues(epilogues: &[Vec<String>]) -> String {
@@ -1461,18 +1288,8 @@ fn append_after_help(cmd: ClapCommand, block: &str) -> ClapCommand {
     cmd.after_help(leak(&merged))
 }
 
-/// The description of a program whose args live on the root.
-///
-/// Two docstrings can describe it: the module's, which says what the program
-/// is, and the sole command's, which says what the one thing it does does. In
-/// the multi-command layout these have separate homes -- the module's heads
-/// the help, the command's sits in the command list and in its own subcommand
-/// help. Here there is one slot, and dropping either loses text its author had
-/// no other way to write.
-///
-/// The module's comes first, since it describes the program a reader is
-/// asking about. Where only one exists it is used alone, which is why a
-/// program described only at the command level reads exactly as before.
+/// The description of a program whose args live on the root: the module's
+/// docstring, then the sole command's, either alone when the other is empty.
 fn single_root_desc(module_desc: &[String], cmd_desc: &[String]) -> Vec<String> {
     if module_desc.is_empty() {
         return cmd_desc.to_vec();
@@ -1496,14 +1313,9 @@ fn reverse_flag_help(long_opt: Option<&str>, short_opt: Option<&str>) -> String 
     }
 }
 
-/// Give a command its description as the help tier shows it.
-///
-/// `about` is always the first line: clap prints it both at the head
-/// of the command's own page and beside the name in its parent's
-/// command list, and the list wants one line whatever the tier. From
-/// the second tier up the page itself shows every line, which is done
-/// by replacing the template's `{about-with-newline}` slot with the
-/// full text, leaving the parent's list untouched.
+/// Give a command its description as the help tier shows it. `about`, which
+/// the parent's command list also shows, is always the first line; from
+/// the second tier up the command's own page shows every line.
 fn with_description(cmd: ClapCommand, desc: &[String], level: u8) -> ClapCommand {
     let first = first_desc(desc);
     if first.is_empty() {
@@ -1523,6 +1335,7 @@ fn with_description(cmd: ClapCommand, desc: &[String], level: u8) -> ClapCommand
     )))
 }
 
+/// The first non-empty description line.
 pub(crate) fn first_desc(desc: &[String]) -> &str {
     desc.iter()
         .find(|d| !d.trim().is_empty())
@@ -1556,11 +1369,8 @@ fn arm_field_token(tok: &str, schema: &str) -> String {
     }
 }
 
-/// The default as the command line shows and accepts it. The manifest
-/// stores a constructor default as the JSON string the machine views need;
-/// on the command line a constructor is a bare word, so that is the form
-/// clap is given -- it is both what help prints and what is parsed when the
-/// option is absent.
+/// The default as the command line shows and accepts it: a constructor
+/// default, stored as a JSON string, unquoted to the bare word.
 fn shown_default(default_val: &str, ctor_typed: bool) -> String {
     let d = default_val.trim();
     let is_quoted = d.len() >= 2 && d.starts_with('"') && d.ends_with('"');
@@ -1571,13 +1381,8 @@ fn shown_default(default_val: &str, ctor_typed: bool) -> String {
     }
 }
 
-/// Render the help block for a manifest arg: the user's docstring
-/// description, followed on indented continuation lines by the arg's
-/// morloc type and, for flags with a declared default, the default
-/// value. When the docstring is empty the type/format/default lines
-/// move up to fill the first slot, so help reads as a compact list
-/// of facts rather than padded with a placeholder. clap's renderer
-/// wraps continuation lines under the same column as the first line.
+/// The help text of a manifest arg: its description lines, then its type,
+/// constructors, format and default, each on its own line.
 fn render_arg_help(
     desc: &[String],
     type_desc: Option<&str>,
@@ -1607,9 +1412,6 @@ fn render_arg_help(
     }
     if let Some(d) = default_val {
         if !d.trim().is_empty() {
-            // A constructor is typed bare on the command line, so its
-            // default is shown the way it is typed, not as the JSON string
-            // the manifest stores it as.
             let shown = if is_ctor_typed {
                 d.trim().trim_matches('"')
             } else {
@@ -1641,11 +1443,7 @@ fn formats_line(parse: Option<&crate::manifest::ArgParse>) -> Option<String> {
     Some(format!("formats: {}", items.join(", ")))
 }
 
-/// Render the "Positional arguments:" block for a command's
-/// positional args, replacing clap's `<argN>` bracketed default with
-/// a numbered list (`1:`, `2:`, ...). Indices are right-aligned and
-/// the type line collapses up into the index line when no docstring
-/// is supplied, producing:
+/// The "Positional arguments:" help block, a numbered list:
 ///
 /// ```text
 /// Positional arguments:
@@ -1667,11 +1465,6 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
         return String::new();
     }
     let idx_width = positionals.len().to_string().len();
-    // Label each slot with its index and, when the author supplied a
-    // `--' @metavar`, the name they chose: `1: PATTERN`. Labels are
-    // padded to a common width so the description column lines up
-    // whether or not a given positional has a metavar. With no
-    // metavars anywhere the labels are just `1:`, `2:`, unchanged.
     let labels: Vec<String> = positionals
         .iter()
         .enumerate()
@@ -1711,8 +1504,6 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
                 lines.push(format!("type: {}", td));
             }
         }
-        // A `data` type's name says nothing about which words are legal
-        // here, and this slot is where a person is about to type one.
         if let Some(l) = crate::json_help::schema_constructor_line(schema) {
             lines.push(l);
         }
@@ -1724,15 +1515,11 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
         if let Some(l) = formats_line(marg.parse()) {
             lines.push(l);
         }
-        // Say that a slot may be left out. The type line shows `?T`, which
-        // states that the value may be null but not that the argument may be
-        // dropped; this is the only place on a terminal that says so.
+        // `?T` says the value may be null, not that the slot may be omitted.
         if !stdin && crate::json_help::schema_is_optional(schema) {
             lines.push(String::from("optional: omit for null"));
         }
         if lines.is_empty() {
-            // Nothing to say beyond the index marker; emit just that
-            // so the slot still appears in help.
             out.push_str(&format!("\n{}", prefix.trim_end()));
         } else {
             for (li, line) in lines.iter().enumerate() {
@@ -1788,9 +1575,7 @@ mod tests {
     }
     use morloc_manifest::parse_manifest;
 
-    /// Build a manifest JSON payload that wraps one or more
-    /// commands. Synthesizes the required version/build fields so
-    /// fixtures stay short.
+    /// A manifest JSON payload around `commands_json` and `groups_json`.
     fn wrap_manifest(commands_json: &str, groups_json: &str) -> String {
         let v = env!("CARGO_PKG_VERSION");
         format!(
@@ -1841,7 +1626,6 @@ mod tests {
 
     #[test]
     fn arg_help_blocks_emit_description_then_type_then_default() {
-        // Standard arg with description + type.
         let h = render_arg_help(
             &["Take the first integer".into()],
             Some("Int"),
@@ -1851,14 +1635,9 @@ mod tests {
         );
         assert_eq!(h, "Take the first integer\ntype: Int");
 
-        // Empty description: the type line becomes the first line
-        // so help reads as a compact list of facts without a
-        // placeholder "missing description" line above the type.
         let h = render_arg_help(&[], Some("Real"), None, None, None);
         assert_eq!(h, "type: Real");
 
-        // Multi-line description preserves every non-empty line in
-        // order; the type line is appended after.
         let h = render_arg_help(
             &["first".into(), "second".into()],
             Some("Str"),
@@ -1868,7 +1647,6 @@ mod tests {
         );
         assert_eq!(h, "first\nsecond\ntype: Str");
 
-        // Default value appears as a final line; used for flags.
         let h = render_arg_help(
             &["Verbose output".into()],
             Some("Bool"),
@@ -1878,12 +1656,9 @@ mod tests {
         );
         assert_eq!(h, "Verbose output\ntype: Bool\ndefault: false");
 
-        // Empty type_desc / default are suppressed (no trailing
-        // blank lines in the rendered help).
         let h = render_arg_help(&["just a desc".into()], None, None, None, None);
         assert_eq!(h, "just a desc");
 
-        // Format hint slots in between type and default.
         let h = render_arg_help(
             &["readable file path".into()],
             Some("Str"),
@@ -1901,8 +1676,6 @@ mod tests {
     fn arg_help_names_a_data_types_constructors() {
         use crate::json_help::{group_entry_constructor_line, schema_constructor_line};
 
-        // An argument-free constructor is the value a person types, so
-        // the closed set is listed as values.
         let h = render_arg_help(
             &[],
             Some("Color"),
@@ -1922,15 +1695,11 @@ mod tests {
             Some("values: Red, Green, Blue")
         );
 
-        // A payload-bearing constructor is a shape rather than a word, so
-        // it is listed with the number of fields it takes.
         assert_eq!(
             schema_constructor_line(Some("v36Circle1f84Rect2f8f83Dot0")).as_deref(),
             Some("constructors: Circle/1, Rect/2, Dot")
         );
 
-        // A record the CLI destructured into options: the entry's own
-        // schema is the parameter under its key.
         assert_eq!(
             group_entry_constructor_line(Some("m14basee33Red5Green4Blue"), "base").as_deref(),
             Some("values: Red, Green, Blue")
@@ -1947,11 +1716,6 @@ mod tests {
 
     #[test]
     fn positional_block_collapses_type_into_index_when_no_desc() {
-        // fixture_single_add's two positionals have empty `desc`, so
-        // the type line takes the first slot beside the index marker
-        // rather than sitting on a continuation line under a
-        // placeholder. Indices are 1-based, and each carries the
-        // author's metavar.
         let m = fixture_single_add();
         let block = render_positional_block(&m.commands[0]);
         assert_eq!(
@@ -1962,8 +1726,6 @@ mod tests {
 
     #[test]
     fn positional_block_omits_absent_metavar_and_keeps_columns_aligned() {
-        // One positional has a metavar and one does not. The labels pad
-        // to a common width so the description column lines up.
         let json = wrap_manifest(
             r#"[
                 {
@@ -2015,11 +1777,6 @@ mod tests {
         }
     }
 
-    /// Negative-number values must be accepted as positionals
-    /// rather than rejected as short flags. POSIX short flags
-    /// begin with a letter; the manifest-driven clap commands
-    /// enable `allow_negative_numbers(true)` so `-5` and similar
-    /// reach the user's Int-typed args.
     #[test]
     fn single_command_accepts_negative_number_positional() {
         let m = fixture_single_add();
@@ -2035,9 +1792,7 @@ mod tests {
         }
     }
 
-    /// In single-command mode the user may type the command name
-    /// explicitly (`./prog add 3 5`) or omit it (`./prog 3 5`);
-    /// both forms must produce identical results.
+    /// In single-command mode `./prog add 3 5` and `./prog 3 5` parse alike.
     #[test]
     fn single_command_accepts_explicit_command_name_prefix() {
         let m = fixture_single_add();
@@ -2180,10 +1935,7 @@ mod tests {
         }
     }
 
-    /// Quoted-positional manifest: the `--' @literal` declaration
-    /// instructs the nexus to JSON-quote the value before passing it
-    /// to the pool. parse_command_args wraps in JSON quotes; the
-    /// phase-2 builder must do the same.
+    /// One `@literal` Str positional.
     fn fixture_quoted_positional() -> Manifest {
         let json = wrap_manifest(
             r#"[
@@ -2214,8 +1966,6 @@ mod tests {
         let parsed = parse_run(&m, &[r#"hello "world""#.into()], "echo", false, None);
         match &parsed.values[0] {
             ArgValue::Value(v) => {
-                // Whatever clap and serde_json produce must round-trip through
-                // serde_json::from_str back to the original.
                 let decoded: String = serde_json::from_str(v).unwrap();
                 assert_eq!(decoded, r#"hello "world""#);
             }
@@ -2223,14 +1973,8 @@ mod tests {
         }
     }
 
-    /// A single-command manifest exporting `bar` with one
-    /// `@literal` Optional whose default value is the
-    /// already-JSON-quoted string `"yolo"` (6 characters). When the
-    /// user omits the flag, the pool must receive the exact 6-byte
-    /// value from the manifest; routing it through `quoted()` a
-    /// second time would double-encode to `"\"yolo\""` and the
-    /// pool would parse it as the 6-char `"yolo"` rather than the
-    /// 4-char `yolo`.
+    /// `bar` with one `@literal` Optional whose manifest default is the
+    /// JSON string `"yolo"`.
     fn fixture_literal_optional_with_default() -> Manifest {
         let json = wrap_manifest(
             r#"[
@@ -2267,8 +2011,6 @@ mod tests {
 
     #[test]
     fn literal_optional_cli_value_is_json_quoted() {
-        // When the user types `-y a`, the value is JSON-quoted on
-        // the way to the pool so the string survives transport.
         let m = fixture_literal_optional_with_default();
         let parsed = parse_run(&m, &["-y".into(), "a".into()], "bar", false, None);
         match &parsed.values[0] {
@@ -2277,12 +2019,8 @@ mod tests {
         }
     }
 
-    /// Single-command manifest exporting `foo` whose only argument
-    /// is a record `AlgConfig` exposing the whole-record JSON option
-    /// `--alg-config` plus per-field `-m` and `-n` flags with
-    /// non-empty manifest defaults. Models the `record-docstrings`
-    /// golden test's failing line:
-    /// `./nexus foo --alg-config=algconf.json [1,2,3]`.
+    /// `foo` taking one record with a whole-record option `--alg-config`
+    /// and per-field `-m` and `-n` options that have defaults.
     fn fixture_record_group_with_grpopt() -> Manifest {
         let json = wrap_manifest(
             r#"[
@@ -2323,11 +2061,6 @@ mod tests {
 
     #[test]
     fn group_entry_default_does_not_block_grpopt() {
-        // No per-field flags were typed -> fields[*] must be None so
-        // the C-side initialize_unrolled layer falls back to the
-        // group JSON. If we instead pushed the manifest defaults
-        // ("0", "0") into fields, the JSON would never get loaded
-        // and the pool would see m=0, n=0.
         let m = fixture_record_group_with_grpopt();
         let parsed = parse_run(
             &m,

@@ -5,8 +5,7 @@
 use crate::{Arg, Check, FormAtom, SourceAtom};
 use morloc_runtime_types::schema::{Schema, SerialType};
 
-/// CLI-shape directives pulled out of a manifest arg. Single-atom
-/// fields under the simplified grammar (no OR-chains).
+/// CLI-shape directives pulled out of a manifest arg.
 #[derive(Debug, Clone)]
 pub struct ArgShape<'a> {
     pub source: SourceAtom,
@@ -37,12 +36,6 @@ impl<'a> ArgShape<'a> {
         }
     }
 
-    /// True when every field is at its compiler-emitted default
-    /// (`source = Auto`, `form = Auto`, no checks, `list_source =
-    /// Inline`, `list_form = Auto`, no list_checks). The default shape
-    /// carries the same semantics as the existing
-    /// `parse_cli_data_argument` path, so the caller can skip the
-    /// shape-aware route entirely.
     /// `@source inline` with a bytes form: the token's escapes are decoded
     /// and it is sent as a JSON list of bytes, unshaped.
     pub fn is_inline_bytes(&self) -> bool {
@@ -79,14 +72,9 @@ pub fn is_float_list(schema: &Schema) -> bool {
     schema.serial_type == SerialType::Array && schema.parameters.first().is_some_and(is_float_scalar)
 }
 
-/// If the argv string is a recognized IEEE 754 special-value literal,
-/// return its JSON-quoted form (`"inf"`, `"-inf"`, `"nan"`). The morloc
-/// JSON wire layer accepts these quoted lowercase variants per the
-/// non-finite-Real convention; this helper lets a user type
-/// `inf` / `nan` / `\-inf` on the command line. `\-inf` is the
-/// shell-safe spelling of `-inf` -- the leading backslash bypasses
-/// clap's flag-cluster interpretation of the bare `-i`/`-n`/`-f`
-/// sequence.
+/// The JSON-quoted form (`"inf"`, `"-inf"`, `"nan"`) of an argv IEEE 754
+/// special, or `None`. One leading backslash is dropped, so `\-inf` spells
+/// `-inf` without being read as a flag.
 pub fn maybe_float_special_to_json(argv: &str) -> Option<String> {
     let trimmed = argv.trim();
     let stripped = trimmed.strip_prefix('\\').unwrap_or(trimmed);
@@ -99,21 +87,14 @@ pub fn maybe_float_special_to_json(argv: &str) -> Option<String> {
     Some(format!("\"{}\"", inner))
 }
 
-/// Process inline byte-string escape sequences. The default mapping is
-/// "argv char -> UTF-8 bytes"; the recognized escapes let users encode
-/// arbitrary byte values that wouldn't otherwise survive the shell or
-/// argv layer.
-///
-/// Recognized escapes (errors on anything else):
+/// Decode inline byte-string escapes; other characters become their UTF-8
+/// bytes. Recognized escapes (errors on anything else):
 ///   `\\`  literal backslash
 ///   `\n`  byte 0x0A
 ///   `\t`  byte 0x09
 ///   `\r`  byte 0x0D
 ///   `\0`  byte 0x00
 ///   `\xNN` byte with the given two-digit hex value
-///
-/// A `\0` escape produces a real NUL byte in the output buffer even
-/// though argv itself cannot contain NUL.
 pub fn process_inline_bytes_escapes(argv: &str) -> Result<Vec<u8>, String> {
     let mut out: Vec<u8> = Vec::with_capacity(argv.len());
     let mut chars = argv.chars().peekable();
@@ -159,11 +140,9 @@ pub fn process_inline_bytes_escapes(argv: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Return the `(source_code, form_code)` pair to pass through the
-/// shape-aware FFI, or `None` when the runtime can use the cheaper
-/// default path. The default case includes the `source: inline +
-/// form: bytes/bytes-only` shortcut on `[UInt8]`, which is already
-/// JSON-encoded by `shape_argv`.
+/// The `(source_code, form_code)` pair for the runtime's shaped parser, or
+/// `None` when the value is parsed unshaped: a default shape, or inline
+/// bytes, which `shape_argv` has already written as JSON.
 pub fn shaped_dispatch_codes(shape: &ArgShape) -> Option<(u8, u8)> {
     if shape.is_default() || shape.is_inline_bytes() {
         return None;
@@ -171,10 +150,9 @@ pub fn shaped_dispatch_codes(shape: &ArgShape) -> Option<(u8, u8)> {
     Some((source_atom_code(shape.source), form_atom_code(shape.form)))
 }
 
-/// Serialize the per-element shape portion of an ArgShape into the
-/// JSON the runtime's `parse_cli_data_argument_shaped` expects.
-/// Returns `None` when every per-element field is at its default, so
-/// the runtime can skip the per-element pipeline entirely.
+/// The per-element shape of an ArgShape as the JSON the runtime's
+/// `parse_cli_data_argument_shaped` takes, or `None` when every
+/// per-element field is at its default.
 pub fn build_list_config_json(shape: &ArgShape) -> Option<String> {
     let list_source_is_default = shape.list_source == SourceAtom::Inline;
     let list_form_is_default = shape.list_form == FormAtom::Auto;
@@ -201,8 +179,7 @@ pub fn build_list_config_json(shape: &ArgShape) -> Option<String> {
     ))
 }
 
-/// Wire-stable u8 code for a source atom. Must match the dispatch
-/// arms in the runtime.
+/// Wire-stable u8 code for a source atom; must match the runtime.
 pub fn source_atom_code(atom: SourceAtom) -> u8 {
     match atom {
         SourceAtom::Auto => 0,
@@ -211,8 +188,7 @@ pub fn source_atom_code(atom: SourceAtom) -> u8 {
     }
 }
 
-/// Wire-stable u8 code for a form atom. Must match the dispatch arms
-/// in `parse_cli_data_argument_shaped` (morloc-runtime).
+/// Wire-stable u8 code for a form atom; must match the runtime.
 pub fn form_atom_code(atom: FormAtom) -> u8 {
     match atom {
         FormAtom::Auto => 0,

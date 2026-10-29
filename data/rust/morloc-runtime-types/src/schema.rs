@@ -41,55 +41,18 @@ serial_types! {
                     // constraints on the buffer's actual schema; the binary
                     // layout is fully described by the Arrow buffer itself.
     Recur = 20,     // Back-reference to a named schema declared by `&<klen><name>`
-                    // earlier on the path. Carries the referenced name in the
-                    // Schema's `name` field. Recursive records (e.g. Tree with a
-                    // `[Tree]` field) terminate descent here; consumers resolve
-                    // the cycle by walking up to the matching named declaration.
     IFile = 21,     // Random-access stream-file handle (read-only).
     OStream = 22,   // Sequential stream-file writer handle.
     IStream = 23,   // Sequential stream-file reader handle.
-    // The three stream-handle variants share one wire layout: a 16-byte
-    // tagged union.
-    //   bytes 0..8  : tag in low byte; remaining bits reserved (zero).
-    //   bytes 8..16 : payload (u64).
-    // Tag values:
-    //   0 = path-form: payload is a relptr to an Array<u8> carrying the
-    //       file path. Receiver opens locally via `mlc_open(path, kind)`
-    //       and binds a fresh slot in its own registry.
-    //   1 = handle-form: payload is a bare `uint64_t` slot id meaningful
-    //       in the receiver's shared SHM registry (intra-nexus only).
-    //   2+ : reserved (future: content hash, URI, inline blob, ...).
-    // `kind` for the receiver's open call is determined by the schema
-    // code (`F` -> IFILE, `O` -> OSTREAM, `I` -> ISTREAM).
     Variant = 26,   // A `data` type with at least one constructor that takes
                     // arguments. Sixteen bytes: a tag byte, padding, and a
                     // relative pointer to the payload.
-                    //
-                    // The payload is reached through a pointer rather than
-                    // stored inline, so the slot's width does not depend on
-                    // any arm's width. That is what makes the width equation
-                    // for a recursive type terminate -- the same reason
-                    // Optional carries a pointer -- and it is why a value of
-                    // `data Tree = Leaf | Node Tree Tree` has a fixed size
-                    // however deep the tree goes.
-                    //
-                    // An arm's payload is a tuple of its fields, including
-                    // the empty tuple for an argument-free arm, whose pointer
-                    // is RELNULL and which allocates nothing. A one-field arm
-                    // costs nothing for the uniformity: a tuple has no header,
-                    // so a 1-tuple is byte-identical to the bare field.
-                    //
                     // Tag == declaration ordinal, as for Enum.
     Enum = 25,      // A `data` type whose constructors take no arguments. One
                     // byte: the constructor's 0-based position in the
-                    // declaration, which is the wire tag. Constructor names
-                    // travel in `keys` so JSON can render the name rather than
-                    // the ordinal, `--json-help` can advertise a closed set,
-                    // and an out-of-range tag can be rejected by name.
+                    // declaration, which is the wire tag.
                     //
-                    // Slot 12 is deliberately NOT reused here: it once held
-                    // MORLOC_TENSOR, and an old packet carrying a 12 would be
-                    // silently reinterpreted rather than rejected.
+                    // Tag 12 is retired and must not be reused.
                     //
                     // Declaration order is part of the type's wire contract:
                     // appending a constructor keeps every existing value
@@ -97,9 +60,7 @@ serial_types! {
 }
 
 impl SerialType {
-    /// The kind a C schema's `u32` tag names, or `None` for a tag that names
-    /// no kind -- never a transmute, which would make an unknown tag
-    /// undefined behaviour.
+    /// The kind a C schema's `u32` tag names, or `None` for an unknown tag.
     pub fn from_u32(tag: u32) -> Option<SerialType> {
         SerialType::ALL.iter().copied().find(|k| *k as u32 == tag)
     }
@@ -128,30 +89,20 @@ const SCHEMA_VARIANT: u8 = b'v';
 #[derive(Debug, Clone)]
 pub struct Schema {
     pub serial_type: SerialType,
-    /// Number of parameters (e.g., array has 1, tuple has N).
+    /// Number of parameters, or of constructors for an enum.
     pub size: usize,
-    /// Byte width when stored in a fixed-width array.
+    /// Inline byte width of a value of this type.
     pub width: usize,
-    /// Field offsets for tuples/records.
+    /// Field offsets of a tuple or record; an array's fixed length, if any.
     pub offsets: Vec<usize>,
     /// Optional type hint string.
     pub hint: Option<String>,
     /// Child schemas (element type for arrays, field types for tuples, etc.).
     pub parameters: Vec<Schema>,
-    /// Field names for records (None for non-record types).
+    /// Record field, table column or constructor names.
     pub keys: Vec<String>,
-    /// Named-schema declaration / back-reference name.
-    ///
-    /// Set in two cases by `parse_schema`:
-    ///   * On the outer schema of a `&<klen><name>X` declaration, carrying
-    ///     the declared name. The body itself is otherwise a normal schema.
-    ///   * On every `Recur` node, carrying the back-referenced name. The
-    ///     name was previously declared on an enclosing schema.
-    ///
-    /// All non-recursive schemas leave this `None`; round-trip preservation
-    /// requires the renderer to emit `&<klen><n>` only when the carrying
-    /// schema is the declaration site (i.e., the named schema's outer
-    /// node), and to emit `^<klen><n>` for `Recur` nodes.
+    /// The declared name on the outer node of a `&<klen><name>` declaration,
+    /// or the referenced name on a `Recur` node; otherwise `None`.
     pub name: Option<String>,
 }
 
@@ -226,46 +177,22 @@ impl Schema {
             | SerialType::Uint64
             | SerialType::Float32
             | SerialType::Float64 => true,
-            // A record is laid out exactly as the tuple of its field types:
-            // both go through `calculate_tuple_layout`, and the field names
-            // live in the schema rather than the buffer. So the same rule
-            // applies -- fixed-width when every field is, which is what lets
-            // an array of them be bulk-copied instead of walked.
-            //
-            // Answering true here means the bytes BETWEEN fields are read as
-            // part of the value: bulk copy moves them, and the hash path
-            // folds them in. That is sound only because free memory is
-            // zeroed -- a fresh volume from the OS, and `shm::shfree`
-            // scrubbing a block before republishing it -- so alignment
-            // padding reads as zero rather than as whatever the block last
-            // held. Were that scrub ever dropped, a hash over a padded
-            // record or tuple would stop being reproducible.
+            // Records share tuple layout. Treating them as fixed-width means the
+            // padding between fields is copied and hashed with the value, which
+            // relies on SHM-6 (a new block reads as zero).
             SerialType::Tuple | SerialType::Map => {
                 self.parameters.iter().all(|p| p.is_fixed_width())
             }
-            // One byte, no payload: fixed-width, so `[Enum]` takes the flat
-            // bulk-copy path rather than a per-element walk.
             SerialType::Enum => true,
             SerialType::Optional => false,
-            // A Recur back-references a record whose layout includes
-            // variable-length payload; never fixed-width.
             SerialType::Recur => false,
             SerialType::String | SerialType::Array | SerialType::Int | SerialType::Table | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant => false,
         }
     }
 
-    /// True when this String/Array schema's data region is one contiguous flat
-    /// blob (`arr.size * elem_width` bytes, no sub-allocations), so it can be
-    /// bulk sized/copied/hashed instead of walked element by element. A
-    /// `String`'s bytes are always flat; an `Array`'s data is flat exactly when
-    /// its element is fixed-width.
-    ///
-    /// This is the element-level question the Array walks need, and is NOT
-    /// `is_fixed_width()`: that asks whether the WHOLE value has a
-    /// compile-time-fixed byte width, which is always false for a
-    /// variable-length Array. Testing `is_fixed_width()` on an Array node
-    /// compiles and runs but silently forces the O(bytes) per-element path --
-    /// use this predicate for the bulk-vs-walk decision.
+    /// True when this String/Array schema's data is one contiguous block of
+    /// `size * elem_width` bytes that can be copied or hashed in bulk.
+    /// Not `is_fixed_width()`, which is false for every Array.
     pub fn array_data_is_flat(&self) -> bool {
         match self.serial_type {
             SerialType::String => true,
@@ -278,8 +205,6 @@ impl Schema {
     pub fn alignment(&self) -> usize {
         match self.serial_type {
             SerialType::Nil => 1,
-            // An enum is a single tag byte, so it aligns like a u8. This is
-            // what lets it pack into an array with no padding.
             SerialType::Bool | SerialType::Sint8 | SerialType::Uint8 | SerialType::Enum => 1,
             SerialType::Sint16 | SerialType::Uint16 => 2,
             SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => 4,
@@ -287,14 +212,8 @@ impl Schema {
             SerialType::String | SerialType::Array | SerialType::Map
             | SerialType::Int | SerialType::Table | SerialType::IFile
             | SerialType::OStream | SerialType::IStream => {
-                // Table values live in SHM as a single relative pointer
-                // to an Arrow buffer; same pointer-sized alignment as
-                // other indirect types. F/O/I are wire-shaped as a 16-byte
-                // tagged union (tag + payload) sharing the same
-                // pointer-sized alignment.
                 std::mem::size_of::<usize>() // pointer-sized alignment
             }
-            // A back-ref ultimately resolves to a Map, which is pointer-aligned.
             SerialType::Recur => std::mem::size_of::<usize>(),
             SerialType::Tuple => {
                 self.parameters
@@ -304,15 +223,12 @@ impl Schema {
                     .unwrap_or(1)
             }
             SerialType::Optional | SerialType::Variant => {
-                // Pointer-aligned: the slot holds a relptr (Variant also a
-                // tag byte, which does not raise the requirement).
                 std::mem::size_of::<usize>()
             }
         }
     }
 
-    /// True if this schema is a primitive numeric type. Used to decide whether
-    /// Array data buffers should be SIMD/BLAS-aligned.
+    /// True if this schema is a primitive numeric type.
     pub fn is_primitive_numeric(&self) -> bool {
         matches!(
             self.serial_type,
@@ -322,10 +238,8 @@ impl Schema {
         )
     }
 
-    /// Alignment for an Array's element data buffer in SHM. For primitive
-    /// numerics, bumped to MORLOC_ARRAY_DATA_ALIGN (64 bytes -- SIMD/BLAS); for
-    /// other element types, the natural alignment. Fixed constant in the wire
-    /// format spec, architecture-independent.
+    /// Alignment of an Array's element data buffer: 64 bytes for primitive
+    /// numerics, otherwise the natural alignment.
     pub fn array_data_alignment(&self) -> usize {
         const MORLOC_ARRAY_DATA_ALIGN: usize = 64;
         let natural = self.alignment();
@@ -339,14 +253,23 @@ impl Schema {
 
 /// Parse a schema string into a Schema tree.
 ///
-/// Positional format (no parentheses/commas):
-/// - `z` -> Nil, `b` -> Bool, `s` -> String
-/// - `i4` -> Sint32, `u8` -> Uint64, `f8` -> Float64
-/// - `ai4` -> Array of Sint32
-/// - `t2i4s` -> Tuple of (Sint32, String)
-/// - `m24namesi4` -> Map with keys "name"->String, "i4"  (base-62 field count, then key-len + key + value for each)
-/// - `?i4` -> Optional Sint32
-/// - `<hint>i4` -> Sint32 with hint annotation
+/// Grammar (positional, no separators):
+/// - `z` Nil, `b` Bool, `s` String, `j` Int (arbitrary width)
+/// - `i<n>`, `u<n>` signed, unsigned integer of n bytes (1, 2, 4, 8); `f4`, `f8`
+/// - `a<s>` array of `s`; `a:<n><s>` with fixed length n (decimal)
+/// - `?<s>` optional
+/// - `t<c><s>...` tuple of c fields
+/// - `m<c>(<k><key><s>)...` record of c named fields
+/// - `e<c>(<k><name>)...` enum of c constructors
+/// - `v<c>(<k><name><a><s>...)...` variant of c arms, each of arity a
+/// - `T` table with no declared columns; `T:<c>(<k><key><s>)...` with c
+/// - `F`, `O`, `I` IFile, OStream, IStream handles
+/// - `&<k><name><s>` declares `name` for `s`; `^<k><name>` refers back to it
+/// - `<hint><s>` attaches a language type hint
+///
+/// Counts c, a and key lengths k are one digit from `0-9a-zA-Z+/` (0-63), or
+/// an escape for 64 or more (see `read_count`). Key lengths count UTF-8 bytes.
+/// Example: `m24names1xi4` is a record {name: String, x: Sint32}.
 pub fn parse_schema(input: &str) -> Result<Schema, MorlocError> {
     let bytes = input.as_bytes();
     let mut declared: Vec<String> = Vec::new();
@@ -360,24 +283,14 @@ pub fn parse_schema(input: &str) -> Result<Schema, MorlocError> {
 }
 
 /// Deepest nesting a schema string may have. Every walk over a schema
-/// (parsing, width calculation, conversion to the C form, dropping) uses one
-/// machine frame per level, so the wire form is bounded here, once, on the
-/// way in. The parser's own frame is several kilobytes in a debug build, so
-/// the cap is sized for a 512 KiB thread; generated schemas are a few levels
-/// deep.
+/// recurses once per level, so the depth is bounded on the way in.
 pub const MAX_SCHEMA_DEPTH: usize = 128;
 
-/// Recursive schema parser matching the C `parse_schema_r` format exactly.
+/// `declared` holds the names of the enclosing `&` declarations, so a
+/// back-reference can name only an enclosing declaration.
 ///
-/// `declared` is the stack of names declared via `&<klen><name>` on the
-/// path from the root to this point: a name is pushed when its declaration
-/// is entered and popped when the body ends, so a back-reference can only
-/// name an enclosing declaration, never a sibling. `depth` counts nesting
-/// levels against `MAX_SCHEMA_DEPTH`.
-///
-/// The container arms live in their own non-inlined functions so that one
-/// nesting level costs this dispatcher's frame plus the frame of the single
-/// arm being parsed, rather than the sum of every arm's temporaries.
+/// The container arms are `#[inline(never)]` so that one nesting level
+/// costs this frame plus one arm's frame, not every arm's temporaries.
 fn parse_schema_r(
     bytes: &[u8],
     pos: usize,
@@ -424,8 +337,6 @@ fn parse_schema_r(
     }
 }
 
-/// String schema has one parameter (uint8) for array compatibility,
-/// matching the C string_schema() constructor.
 fn make_string_schema() -> Schema {
     Schema {
         serial_type: SerialType::String,
@@ -439,10 +350,6 @@ fn make_string_schema() -> Schema {
     }
 }
 
-/// F/O/I share one wire layout: a 16-byte tagged union (tag in the low byte
-/// of the first 8 bytes, payload u64 in the second 8). `parameters[0]`
-/// carries `Uint8` so walkers that descend into String-shaped fields keep
-/// working without special-casing the outer schema.
 fn make_stream_handle_schema(st: SerialType) -> Schema {
     Schema {
         serial_type: st,
@@ -470,17 +377,9 @@ fn parse_hint_arm(
     Ok((schema, end))
 }
 
-/// Named-schema declaration: `&<klen><name>X`. Reads the name, pushes it
-/// on the declaration stack, parses the body and tags the body's outer
-/// schema with the name. The body may contain `^<klen><name>`
-/// back-references to the name.
-///
-/// After parsing, every Recur(name) node inside the body is patched so its
-/// `width` matches the declaration's width. The placeholder width set in
-/// `make_recur_schema` is correct for schema-tree shape but wrong for
-/// runtime layout: the wire form lays out an `Array<Recur(T)>` element as
-/// a full `T`-shaped record, so iterators must step by the named schema's
-/// width, not by a fixed pointer size.
+/// Named-schema declaration: `&<klen><name>X`. Every `^<klen><name>`
+/// back-reference in the body gets the declaration's width, since an
+/// array of `Recur(T)` strides by T's width.
 #[inline(never)]
 fn parse_declaration_arm(
     bytes: &[u8],
@@ -493,25 +392,17 @@ fn parse_declaration_arm(
     let parsed = parse_schema_r(bytes, after_name, declared, depth + 1);
     declared.pop();
     let (mut body, end) = parsed?;
-    // A back-reference reachable from the declaration through
-    // tuple/record fields alone would put the value inside itself:
-    // no finite layout exists and a walker over such a value would
-    // never terminate. Arrays, optionals and variant payloads sit
-    // behind a pointer and are fine.
+    // A back-reference reachable through tuple/record fields alone would put
+    // the value inside itself. Arrays, optionals and variant payloads sit
+    // behind a pointer.
     if reaches_inline_recur(&body, &name) {
         return Err(MorlocError::Schema(format!(
             "declaration '{name}' contains itself inline (a back-reference \
              reachable through tuple or record fields only)"
         )));
     }
-    // Patch Recur widths and re-flow Tuple/Map widths bottom-up.
-    // A Tuple/Map enclosing a Recur (e.g. `[(Str, X)]`) computed its
-    // width using the placeholder Recur width; after patching, those
-    // widths must be recalculated or Array iteration strides over
-    // partial elements and corrupts inner relptr fields. The
-    // declaration's own width never depends on its back-references
-    // (they are all behind a pointer), so one round patches and a
-    // second confirms.
+    // Enclosing Tuple/Map widths depend on the patched Recur widths; repeat
+    // until the declaration's width settles.
     for _ in 0..16 {
         let prev = body.width;
         patch_recur_widths_in(&mut body, &name, prev);
@@ -522,9 +413,7 @@ fn parse_declaration_arm(
     Ok((body, end))
 }
 
-/// Back-reference: `^<klen><name>`. The name must have been declared by an
-/// enclosing `&<klen><name>` on this walk; a dangling back-reference is a
-/// clean schema error.
+/// Back-reference: `^<klen><name>`, naming an enclosing declaration.
 #[inline(never)]
 fn parse_back_reference_arm(
     bytes: &[u8],
@@ -573,7 +462,7 @@ fn parse_optional_arm(
     Ok((make_optional_schema(child), end))
 }
 
-/// Tuple: base-62 size char, then N child schemas.
+/// Tuple: count, then N child schemas.
 #[inline(never)]
 fn parse_tuple_arm(
     bytes: &[u8],
@@ -594,8 +483,8 @@ fn parse_tuple_arm(
     Ok((make_tuple_schema(params), p))
 }
 
-/// Read a base-62 length-prefixed key at `p`, returning it and the
-/// position just past it. `what` names the key kind in error messages.
+/// Read a count-prefixed key at `p`, returning it and the position just
+/// past it. `what` names the key kind in error messages.
 fn read_prefixed_key(bytes: &[u8], p: usize, what: &str) -> Result<(String, usize), MorlocError> {
     if p >= bytes.len() {
         return Err(MorlocError::Schema(format!("expected {what} length")));
@@ -610,8 +499,7 @@ fn read_prefixed_key(bytes: &[u8], p: usize, what: &str) -> Result<(String, usiz
     Ok((key, kp + klen))
 }
 
-/// Map/record: base-62 size char, then N (key_len_char + key_bytes +
-/// value_schema).
+/// Map/record: count, then N (key length, key bytes, value schema).
 #[inline(never)]
 fn parse_map_arm(
     bytes: &[u8],
@@ -690,20 +578,9 @@ fn parse_variant_arm(
     Ok((make_variant_schema(params, keys), p))
 }
 
-/// Table primitive (Arrow IPC).
-///
-/// Two surface forms:
-///   `T`            -- bare token; no declared columns. The buffer's Arrow
-///                     schema is opaque to morloc; any value is accepted.
-///   `T:K<entries>` -- K declared columns of declared types, parsed
-///                     identically to `m`'s entries (one base-62 length
-///                     char + key bytes + child schema). Open semantics:
-///                     these are minimum constraints; the buffer may carry
-///                     extra columns.
-///
-/// The colon disambiguates bare `T` from `T:0` (zero declared columns).
-/// Bare `T` means "schema unspecified"; `T:0` means "exactly zero columns
-/// required" (rare but legal).
+/// Table (Arrow IPC): bare `T` declares no columns and accepts any buffer;
+/// `T:K<entries>` declares K columns, with entries as in `m`. Declared
+/// columns are minimum constraints; the buffer may carry more.
 #[inline(never)]
 fn parse_table_arm(
     bytes: &[u8],
@@ -732,7 +609,6 @@ fn parse_table_arm(
     }
 }
 
-/// Parse hint with nested angle bracket support: `<std::vector<$1>>` etc.
 /// Parse a `<klen><name>` length-prefixed identifier, the same syntax used
 /// for record keys but in the slots after `&` and `^` markers. Returns the
 /// name string and the position just past its last byte.
@@ -782,7 +658,6 @@ fn parse_sized_int(
     if pos >= bytes.len() {
         return Err(MorlocError::Schema("expected size after 'i'/'u'".into()));
     }
-    // Size is a SINGLE base-62 character, not a multi-digit number
     let size = decode_base62(bytes[pos])?;
     let next = pos + 1;
     let st = match (signed, size) {
@@ -803,7 +678,6 @@ fn parse_sized_float(bytes: &[u8], pos: usize) -> Result<(Schema, usize), Morloc
     if pos >= bytes.len() {
         return Err(MorlocError::Schema("expected size after 'f'".into()));
     }
-    // Size is a SINGLE base-62 character, not a multi-digit number
     let size = decode_base62(bytes[pos])?;
     let next = pos + 1;
     let st = match size {
@@ -837,9 +711,6 @@ fn encode_base62(n: usize) -> char {
         36..=61 => (b'A' + (n - 36) as u8) as char,
         62 => '+',
         63 => '/',
-        // Unreachable: every caller goes through `write_count`, which
-        // splits a value of 64 or more into single-digit limbs before
-        // reaching here. A bare digit cannot represent it.
         _ => unreachable!("base-62 digit out of range: {n}"),
     }
 }
@@ -934,16 +805,8 @@ fn make_array_schema_with_dim(expected_len: Option<usize>, child: Schema) -> Sch
 }
 
 fn make_optional_schema(child: Schema) -> Schema {
-    // Optional's voidstar slot is a single relative pointer: RELNULL
-    // for absent, otherwise the pointer to T's body elsewhere in the
-    // buffer. This is what makes Optional<Recur(T)> work -- the slot
-    // width no longer depends on T.width, so the recursive width
-    // equation has a finite fixed point.
-    //
-    // Trade-off: dense-mostly-present numeric Optionals carry one
-    // indirection per element. The right primitive for that case is a
-    // validity-bitmap-bearing column type (e.g. through Table), not
-    // per-element Optional.
+    // One relative pointer, RELNULL when absent, so the slot width does not
+    // depend on the child's and recursive widths terminate.
     Schema {
         serial_type: SerialType::Optional,
         size: 1,
@@ -986,25 +849,8 @@ fn make_map_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
     }
 }
 
-/// Construct a Table schema from its open column constraints.
-///
-/// The morloc Table primitive carries an Arrow IPC buffer whose binary
-/// layout is fully self-describing; this Schema only records the
-/// declared columns (if any) for runtime constraint checking and for
-/// driving CSV/JSON parsing into typed Arrow fields. Empty `params` /
-/// `keys` correspond to the bare `T` wire form -- no declared columns,
-/// any Arrow buffer accepted. Non-empty entries are open constraints
-/// (the buffer may carry additional columns beyond these).
-///
-/// Width is the size of the SHM relative pointer that owns the Arrow
-/// buffer; the column entries themselves do not contribute to in-memory
-/// layout because the data lives outside the schema-described region.
-/// Construct an Enum schema from its constructor names.
-///
-/// One byte wide and fixed-width, which is the whole point of the form:
-/// `array_data_is_flat` is then true for `[Enum]`, so an array of them is
-/// bulk-copied and gets the 64-byte-aligned data buffer that primitive
-/// numerics get. A `[DNA]` is byte-for-byte a `[U8]` in shared memory.
+/// Construct an Enum schema from its constructor names: one byte,
+/// fixed-width.
 fn make_enum_schema(keys: Vec<String>) -> Schema {
     Schema {
         serial_type: SerialType::Enum,
@@ -1018,11 +864,8 @@ fn make_enum_schema(keys: Vec<String>) -> Schema {
     }
 }
 
-/// Construct a Variant schema from its arm payloads and names.
-///
-/// Sixteen bytes regardless of the arms: a tag byte, padding, and a relptr,
-/// matching the tagged union in `stream_handle`. The payload lives behind
-/// the pointer, so nothing about an arm's size reaches this slot.
+/// Construct a Variant schema: a tag byte, padding and a relptr to the
+/// payload, whatever the arms hold.
 fn make_variant_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
     Schema {
         serial_type: SerialType::Variant,
@@ -1049,15 +892,8 @@ fn make_table_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
     }
 }
 
-/// Build a Recur back-reference Schema for the given declared name.
-///
-/// A Recur node is structurally minimal: it carries no parameters or
-/// keys, only the back-referenced name. Width is set to a placeholder
-/// here; `parse_schema` patches it to the resolved declaration's width
-/// once the named schema's body is fully parsed (see
-/// `patch_recur_widths_in`). The placeholder is pointer-sized so the
-/// shape of intermediate width calculations stays sane if patching is
-/// somehow skipped.
+/// A `Recur` node naming `name`. Its width is a placeholder until
+/// `parse_declaration_arm` patches it to the declaration's width.
 fn make_recur_schema(name: String) -> Schema {
     Schema {
         serial_type: SerialType::Recur,
@@ -1087,13 +923,9 @@ fn reaches_inline_recur(schema: &Schema, name: &str) -> bool {
     }
 }
 
-/// Walk a parsed schema sub-tree and patch every `Recur(name)` node's
-/// `width` to the supplied value. Called once per `&<name>X`
-/// declaration so the back-reference's runtime layout (used by Array
-/// iteration, Optional indirection, and the C++ allocator) matches the
-/// declaration's own width. A nested declaration of the same name owns
-/// the back-references under it (they resolve to the nearest enclosing
-/// declaration), so the walk does not descend into it.
+/// Set the width of every `Recur(name)` under `schema`, not descending
+/// into a nested declaration of the same name, which owns its own
+/// back-references.
 fn patch_recur_widths_in(schema: &mut Schema, name: &str, width: usize) {
     for p in &mut schema.parameters {
         match p.serial_type {
@@ -1108,10 +940,7 @@ fn patch_recur_widths_in(schema: &mut Schema, name: &str, width: usize) {
     }
 }
 
-/// Recompute Tuple and Map widths/offsets bottom-up from current parameter
-/// widths. Used after `patch_recur_widths_in` to propagate the resolved
-/// Recur width into enclosing Tuple/Map layouts. Array and Optional widths
-/// are fixed and need no update; primitives have no children.
+/// Recompute Tuple and Map widths and offsets bottom-up.
 fn recalculate_container_widths(schema: &mut Schema) {
     for p in &mut schema.parameters {
         recalculate_container_widths(p);
@@ -1132,13 +961,11 @@ fn calculate_tuple_layout(params: &[Schema]) -> (usize, Vec<usize>) {
     for param in params {
         let align = param.alignment();
         max_align = std::cmp::max(max_align, align);
-        // Align the offset
         offset = (offset + align - 1) & !(align - 1);
         offsets.push(offset);
         offset += param.width;
     }
 
-    // Total width padded to max alignment
     let width = (offset + max_align - 1) & !(max_align - 1);
     (width, offsets)
 }
@@ -1150,10 +977,8 @@ pub fn schema_to_string(schema: &Schema) -> String {
     buf
 }
 
-/// Structural compatibility with a wildcard rule for Array length:
-/// two Array schemas match if their lengths are equal or if either is
-/// `0` (unconstrained). Everything else -- serial type, size, keys,
-/// sub-schemas, declared/recur names -- must match exactly.
+/// Structural compatibility: equality, except that an array with no fixed
+/// length matches one of any length. Hints are ignored.
 pub fn schemas_compatible(a: &Schema, b: &Schema) -> bool {
     if a.serial_type != b.serial_type
         || a.size != b.size
@@ -1163,7 +988,6 @@ pub fn schemas_compatible(a: &Schema, b: &Schema) -> bool {
     {
         return false;
     }
-    // An array without a fixed length is compatible with any length.
     if a.serial_type == SerialType::Array {
         if let (Some(la), Some(lb)) = (a.array_dim(), b.array_dim()) {
             if la != lb {
@@ -1177,20 +1001,8 @@ pub fn schemas_compatible(a: &Schema, b: &Schema) -> bool {
         .all(|(pa, pb)| schemas_compatible(pa, pb))
 }
 
-/// Canonical form of a schema string: parsed, then re-rendered. This
-/// drops the `<hint>` prefixes that a compiler-generated pool schema
-/// carries, because `schema_to_string` does not emit them.
-///
-/// Every packet writer stores this form (`make_standard_data_packet`,
-/// `make_mesg_data_packet`, `make_stream_header_block`), so it is the
-/// only form that may be persisted or compared. An entry point that
-/// takes a schema string from a caller normalizes with this rather than
-/// trusting the caller to have done it: the nexus evaluator normalized
-/// and the pools did not, which is how the two came to disagree at
-/// `@append`.
-///
-/// An unparseable string is returned unchanged, so the caller's own
-/// parse produces the diagnostic rather than this function inventing one.
+/// Canonical form of a schema string: parsed and re-rendered, which drops
+/// `<hint>` prefixes. An unparseable string is returned unchanged.
 pub fn canonicalize_schema_str(s: &str) -> String {
     match parse_schema(s) {
         Ok(parsed) => schema_to_string(&parsed),
@@ -1198,33 +1010,17 @@ pub fn canonicalize_schema_str(s: &str) -> String {
     }
 }
 
-/// String-form entry point for the wire-boundary comparator. Parses both
-/// operands via `parse_schema` and structurally compares. Returns true iff
-/// the two schemas describe compatible wire forms under the gradual-typing
-/// subtype rule (see `schemas_compatible`).
+/// `schemas_compatible` on two schema strings.
 pub fn schema_strings_compatible(stored: &str, requested: &str) -> bool {
     match (parse_schema(stored), parse_schema(requested)) {
         (Ok(a), Ok(b)) => schemas_compatible(&a, &b),
-        // If either side fails to parse, fall back to strict string equality.
-        // This preserves the previous behavior for malformed schemas rather
-        // than silently accepting them as compatible.
+        // Unparseable schemas are compatible only when identical.
         _ => stored == requested,
     }
 }
 
 fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
-    // `<hint>` prefixes are deliberately NOT emitted: hints are
-    // compile-time state for pool-side native dispatch (numpy /
-    // std::vector / list) and don't belong on the wire. Pools get
-    // hints from parsing the compiler-generated schema strings baked
-    // into pool.cpp / pymorloc, not from any wire round-trip. So
-    // `schema_to_string(parse_schema(s))` is intentionally NOT
-    // identity when `s` contains a hint.
-
-    // Emit `&<klen><n>` for a named-schema declaration. Only the
-    // declaration site carries `name` on a non-Recur node; `Recur`
-    // nodes also carry `name` (the back-ref target) but are emitted as
-    // `^<klen><n>` in their own arm below.
+    // A non-Recur node with a name is a declaration site.
     if schema.serial_type != SerialType::Recur {
         if let Some(ref n) = schema.name {
             buf.push('&');
@@ -1310,10 +1106,6 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
             schema_to_string_inner(&schema.parameters[0], buf);
         }
         SerialType::Table => {
-            // Round-trip with the parser: bare `T` for empty constraint
-            // list, `T:K<entries>` otherwise. Any parsed hint is
-            // dropped on the way out (see the header comment on
-            // schema_to_string_inner).
             buf.push('T');
             if schema.size > 0 {
                 buf.push(':');
@@ -1329,8 +1121,6 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
             }
         }
         SerialType::Recur => {
-            // Back-reference: emit `^<klen><name>`. The referenced name is
-            // guaranteed present by the parser (dangling refs are rejected).
             buf.push('^');
             if let Some(ref n) = schema.name {
                 write_count(buf, n.len());
@@ -1344,8 +1134,7 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
 /// `parent`'s declaration with `parent` itself. A field schema handed to a
 /// reader on its own has no enclosing declaration to resolve against; with
 /// the parent spliced in, the parent's own back-references then sit under
-/// the declaration they need. The parent's widths are already patched, so
-/// the clone is complete as it stands.
+/// the declaration they need.
 pub fn reroot_under(parent: &Schema, child: &Schema) -> Schema {
     match (parent.serial_type, parent.name.as_deref()) {
         (SerialType::Recur, _) | (_, None) => child.clone(),
@@ -1447,18 +1236,12 @@ mod tests {
         assert_eq!(s.hint.as_deref(), Some("std::vector<$1>"));
     }
 
-    // A pool's schema string carries the language's concrete form as a
-    // `<hint>` prefix; every packet writer stores the hint-free form
-    // (schema_to_string drops hints by design). The two describe one wire
-    // type, so any comparison at a wire boundary must ignore the hint.
     #[test]
     fn canonicalize_drops_hints_and_is_idempotent() {
         assert_eq!(canonicalize_schema_str("a<dict>m24kinds2idj"), "am24kinds2idj");
         assert_eq!(canonicalize_schema_str("a<str>s"), "as");
         assert_eq!(canonicalize_schema_str("<std::vector<$1>>ai4"), "ai4");
-        // already canonical
         assert_eq!(canonicalize_schema_str("am24kinds2idj"), "am24kinds2idj");
-        // idempotent
         let once = canonicalize_schema_str("a<dict>m21x<int>j1yj");
         assert_eq!(canonicalize_schema_str(&once), once);
         // dims survive; they are part of the type, not a hint
@@ -1482,23 +1265,14 @@ mod tests {
     // Ignoring hints must not make the check vacuous.
     #[test]
     fn compatible_rejects_genuinely_different_types() {
-        // different record keys
         assert!(!schema_strings_compatible("am24kinds2idj", "a<dict>m25alphas4betaj"));
-        // different leaf type
         assert!(!schema_strings_compatible("aj", "as"));
-        // different shape
         assert!(!schema_strings_compatible("aj", "j"));
-        // tuple field order
         assert!(!schema_strings_compatible("t2js", "t2sj"));
-        // different arity
         assert!(!schema_strings_compatible("t2js", "t3jss"));
     }
 
-    // An unconstrained array length (0) is a wildcard against a
-    // constrained one. This is deliberate: `make_array_schema_with_dim`
-    // gives both the same width and `is_fixed_width` is false for every
-    // Array, so the dim is a validation constraint (enforced on the JSON
-    // ingestion path) rather than a layout difference.
+    // An array with no fixed length matches any fixed length.
     #[test]
     fn compatible_treats_array_length_zero_as_wildcard() {
         assert!(schema_strings_compatible("a:5j", "aj"));
@@ -1526,17 +1300,9 @@ mod tests {
         assert_eq!(rendered, input);
     }
 
-    // Recursive schemas: a record that references itself through a list
-    // or optional field. The wire form gets two new tokens,
-    // `&<klen><name>` (declare) and `^<klen><name>` (back-ref). For a
-    // recursive Tree {value::Int, children::[Tree]} the form reads
-    //   &4Treem25valuej8childrena^4Tree
-    //
-    // The parser does NOT materialize the cycle: a `Recur` node carries
-    // the back-referenced name and consumers walk up to the declaration
-    // when they need the body. This keeps the structure finite (no
-    // unbounded expansion at parse time) and round-trip preserves bytes
-    // since each declaration appears exactly once.
+    // Recursive schemas: `&<klen><name>` declares, `^<klen><name>` refers
+    // back. The parser does not expand the cycle, so the form round-trips
+    // byte-for-byte.
 
     #[test]
     fn test_parse_recursive_tree_list() {
@@ -1546,9 +1312,6 @@ mod tests {
         assert_eq!(s.size, 2);
         assert_eq!(s.keys, vec!["value", "children"]);
         assert_eq!(s.name.as_deref(), Some("Tree"));
-        // The "children" field is an array whose element schema is a
-        // back-reference to "Tree". The Recur node carries the target
-        // name; consumers resolve it by walking the enclosing path.
         let children_arr = &s.parameters[1];
         assert_eq!(children_arr.serial_type, SerialType::Array);
         let elem = &children_arr.parameters[0];
@@ -1573,23 +1336,14 @@ mod tests {
 
     #[test]
     fn test_roundtrip_recursive_tree() {
-        // Without materialization the wire form round-trips byte-for-byte.
         let input = "&4Treem25valuej8childrena^4Tree";
         let schema = parse_schema(input).unwrap();
         let rendered = schema_to_string(&schema);
         assert_eq!(rendered, input, "byte-exact round-trip");
     }
 
-    // A sum type recursing through its own constructor arguments. This is
-    // the shape the boxed payload exists for: the slot is a tag plus a
-    // relative pointer whatever the arms hold, so the width equation has a
-    // finite fixed point where an inline payload would have none.
-    //
     //   data Tree = Leaf | Node Tree Tree
     //     -> &4Treev24Leaf04Node2^4Tree^4Tree
-    //
-    // Each arm is a tuple of its fields, so a nullary arm is the empty
-    // tuple and carries no payload allocation.
     #[test]
     fn test_parse_recursive_variant() {
         let s = parse_schema("&4Treev24Leaf04Node2^4Tree^4Tree").unwrap();
@@ -1617,9 +1371,7 @@ mod tests {
 
     #[test]
     fn test_recursive_variant_recur_width_patched() {
-        // A back-reference parses with a placeholder width; the declaration
-        // patches it so an arm's payload is allocated and strided at the
-        // declared type's real width rather than a bare pointer's.
+        // Back-references take the declaration's width.
         let s = parse_schema("&4Treev24Leaf04Node2^4Tree^4Tree").unwrap();
         let node = &s.parameters[1];
         for field in &node.parameters {
@@ -1637,15 +1389,12 @@ mod tests {
 
     #[test]
     fn test_recursive_variant_without_declaration_is_rejected() {
-        // The same body with no `&` declaration is a dangling back-reference.
-        // It must fail rather than parse into a Recur nothing resolves.
         let err = parse_schema("v24Leaf04Node2^4Tree^4Tree");
         assert!(err.is_err(), "dangling back-reference must be refused");
     }
 
     #[test]
     fn test_roundtrip_recursive_ll() {
-        // Optional-guarded recursion also round-trips byte-exactly.
         let input = "&2LLm24headj4tail?^2LL";
         let schema = parse_schema(input).unwrap();
         let rendered = schema_to_string(&schema);
@@ -1654,25 +1403,14 @@ mod tests {
 
     #[test]
     fn test_parse_dangling_backref_rejected() {
-        // A back-ref to an undeclared name must fail cleanly, not
-        // panic or dereference into garbage.
         let result = parse_schema("^4Tree");
         assert!(result.is_err(), "dangling back-ref must be rejected");
     }
 
     // --- Wide-schema counts (>= 64) ------------------------------------
     //
-    // The compiler encodes counts and key lengths with an escape for
-    // values that do not fit one base-62 digit
-    // (`Morloc.CodeGenerator.Serial.encode64`):
-    //
-    //     encode64 i | i < 64     = <one base-62 digit>
-    //                | otherwise  = '=' : encode64 (i `mod` 64)
-    //                                  ++ encode64 (i `div` 64)
-    //
-    // `hs_encode64` is an independent transcription of that function, used
-    // here as an oracle so these tests describe the wire format rather
-    // than whatever this module happens to implement.
+    // `hs_encode64` transcribes `Morloc.CodeGenerator.Serial.encode64` as
+    // an oracle, so these tests describe the compiler's encoding.
 
     fn hs_encode64(i: usize) -> String {
         match i {
@@ -1770,11 +1508,6 @@ mod tests {
 
     #[test]
     fn test_record_of_fixed_fields_is_fixed_width() {
-        // A record's voidstar layout IS a tuple's -- `make_map_schema` and
-        // `make_tuple_schema` both call `calculate_tuple_layout`, and the
-        // field names live in the schema, not the buffer. So a record whose
-        // fields are all fixed-width has a fixed total width and no
-        // out-of-line data, exactly as the matching tuple does.
         let rec = parse_schema("m21xi41yi4").unwrap();
         let tup = parse_schema("t2i4i4").unwrap();
         assert_eq!(rec.serial_type, SerialType::Map);
@@ -1788,8 +1521,6 @@ mod tests {
 
     #[test]
     fn test_record_with_variable_field_is_not_fixed_width() {
-        // One variable-length field is enough to disqualify the whole
-        // record, the same rule Tuple applies.
         for schema_str in ["m21xi41ys", "m21xi41yai4", "m21xi41y?i4"] {
             let s = parse_schema(schema_str).unwrap();
             assert!(
@@ -1801,8 +1532,6 @@ mod tests {
 
     #[test]
     fn test_array_of_fixed_records_is_flat() {
-        // The payoff: an array of fixed-field records can be bulk-copied
-        // rather than walked element by element.
         let arr = parse_schema("am21xi41yi4").unwrap();
         assert!(
             arr.array_data_is_flat(),
@@ -1823,8 +1552,6 @@ mod tests {
         assert_eq!(s.serial_type, SerialType::Variant);
         assert_eq!(s.size, 3);
         assert_eq!(s.keys, vec!["Circle", "Rect", "Dot"]);
-        // Each arm's payload is a tuple of its fields, so the arity is
-        // visible as the tuple's own size -- including the empty arm.
         assert_eq!(s.parameters.len(), 3);
         assert_eq!(s.parameters[0].serial_type, SerialType::Tuple);
         assert_eq!(s.parameters[0].size, 1);
@@ -1834,9 +1561,6 @@ mod tests {
 
     #[test]
     fn test_variant_slot_is_tag_plus_pointer() {
-        // The payload is reached through a pointer, so the slot width does
-        // not depend on any arm's width. That is what gives a recursive
-        // type a finite width, and it is why this is not fixed-width.
         let s = parse_schema("v36Circle1f84Rect2f8f83Dot0").unwrap();
         assert_eq!(s.width, 16, "tag byte plus padding plus a relptr");
         assert_eq!(s.alignment(), 8, "pointer-aligned");
@@ -1849,10 +1573,7 @@ mod tests {
 
     #[test]
     fn test_single_field_arm_is_byte_identical_to_its_field() {
-        // A one-field payload is stored as a 1-tuple. A tuple carries no
-        // header, so that costs nothing: the field sits at offset 0 and the
-        // tuple's width is the field's width. Uniformity is free, and it
-        // lets a payload field always be reached positionally.
+        // A tuple has no header, so a 1-tuple is laid out as its field.
         let one = parse_schema("t1f8").unwrap();
         let bare = parse_schema("f8").unwrap();
         assert_eq!(one.width, bare.width);
@@ -1896,8 +1617,6 @@ mod tests {
 
     #[test]
     fn test_enum_is_one_byte_and_flat() {
-        // The representation claim: one byte, fixed-width, so an array of
-        // them is bulk-copied exactly as a [U8] is.
         let s = parse_schema("e41A1C1G1T").unwrap();
         assert_eq!(s.width, 1, "enum width");
         assert_eq!(s.alignment(), 1, "enum alignment");
@@ -1964,9 +1683,7 @@ mod tests {
 
     #[test]
     fn test_inline_self_reference_is_rejected() {
-        // A record whose field holds the record itself with no pointer in
-        // between has no finite layout; a walker over such a value would
-        // never terminate.
+        // A record holding itself with no pointer in between has no finite layout.
         let err = parse_schema("&1Am11a^1A").unwrap_err().to_string();
         assert!(err.contains("inline"), "{err}");
         // The same through a tuple field.
@@ -1976,8 +1693,7 @@ mod tests {
 
     #[test]
     fn test_guarded_self_references_parse() {
-        // Array elements, Optional and Variant payloads all sit behind a
-        // relative pointer, so the recursion is finite.
+        // Array, Optional and Variant payloads sit behind a pointer.
         assert!(parse_schema("&1Am11aa^1A").is_ok());
         assert!(parse_schema("&1Am11a?^1A").is_ok());
         assert!(parse_schema("&1Av21N01C1^1A").is_ok());
@@ -2026,11 +1742,6 @@ mod compat_tests {
 
     #[test]
     fn test_schema_compat_with_c() {
-        // Root-level metadata for representative schemas. Optional's
-        // slot is a single relative pointer (width = sizeof(RelPtr)
-        // = 8) regardless of inner type -- see
-        // [`make_optional_schema`] for the reasoning around
-        // recursive Optionals.
         let cases = vec![
             ("s", "type=13 size=1 width=16"),
             ("ai4", "type=14 size=1 width=16"),
@@ -2044,20 +1755,14 @@ mod compat_tests {
             assert_eq!(&got, *expected_root, "Schema '{}' mismatch", input);
         }
 
-        // Verify tuple offsets
         let t = parse_schema("t2i4s").unwrap();
         assert_eq!(t.offsets, vec![0, 8], "t2i4s offsets");
 
-        // Optional schemas use a single relative-pointer slot at the
-        // root with no internal offset table (the inner value lives
-        // elsewhere in the buffer and the relptr addresses it).
-        // See [`make_optional_schema`] for details.
         let o = parse_schema("?i4").unwrap();
         assert!(o.offsets.is_empty(), "?i4 offsets");
         let os = parse_schema("?s").unwrap();
         assert!(os.offsets.is_empty(), "?s offsets");
 
-        // Verify string has uint8 parameter
         let s = parse_schema("s").unwrap();
         assert_eq!(s.parameters.len(), 1);
         assert_eq!(s.parameters[0].serial_type, SerialType::Uint8);

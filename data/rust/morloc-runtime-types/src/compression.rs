@@ -8,33 +8,15 @@
 //! * `PACKET_COMPRESSION_NONE` payloads are one contiguous uncompressed
 //!   region of `header.length` bytes.
 //! * `PACKET_COMPRESSION_ZSTD` payloads are a concatenation of
-//!   independent zstd frames, each capped at `FRAME_CHUNK_SIZE` of
-//!   uncompressed input. The packet's metadata block carries a
+//!   independent zstd frames, each of at most `FRAME_CHUNK_SIZE`
+//!   uncompressed bytes. The metadata block carries a
 //!   `METADATA_TYPE_FRAME_INDEX` entry listing per-frame
-//!   `(uncompressed_size, compressed_size)`; decoders use it to
-//!   `shmalloc` the total uncompressed size up front and dispatch
-//!   per-frame decompression in parallel.
+//!   `(uncompressed_size, compressed_size)`.
 //! * On compression, `header.length` is the sum of per-frame compressed
 //!   sizes; on decompression it is restored to the sum of per-frame
 //!   uncompressed sizes.
 //!
 //! User-facing level 0-9 maps to zstd presets (see `CompressionLevel`).
-//! Compression is parallel across frames (one libzstd encoder per
-//! frame; the encoder buffers a frame's worth of uncompressed bytes,
-//! sets `pledgedSrcSize` exactly, then emits a self-contained frame).
-//! Decompression is per-frame, on `frame_workers()` threads
-//! (`parallel_decompress_frames`). `FrameCompressor` compresses one
-//! frame with a context its thread reuses.
-//!
-//! Public surface:
-//! * `CompressionLevel::from_int` / `from_u8` / `zstd_level` / `use_long` / `is_none`
-//! * `FRAME_CHUNK_SIZE`, `MultiFrameEncoder`, `FrameCompressor`, `max_frames_for`,
-//!   `frame_index_entry_max_bytes`
-//! * `compress_payload_zstd` / `decompress_payload_zstd_into` (raw bytes)
-//! * `compress_packet`       / `decompress_packet`           (full packets)
-//! * `stream_encode_with`    / `stream_encode_reader`        (streaming)
-//! * `decompress_packet_if_needed` (no-op for non-packets and
-//!   uncompressed packets; used by `mlc_load`)
 
 use std::borrow::Cow;
 use std::io::{Read, Write};
@@ -49,13 +31,8 @@ use crate::packet::{
 
 // ── Multi-frame chunking ──────────────────────────────────────────────────
 
-/// Target uncompressed bytes per zstd frame in multi-frame output.
-/// Each frame is independent (its own header, FCS, and content), so
-/// frames can be decompressed in parallel. 16 MiB is the sweet spot:
-/// large enough to amortize the per-frame header + still keep
-/// compression ratio close to the single-frame baseline; small enough
-/// that ~150 frames cover a multi-GiB payload, saturating a typical
-/// worker count with comfortable per-worker memory.
+/// Target uncompressed bytes per zstd frame. Frames are independent, so
+/// they can be decompressed in parallel.
 pub const FRAME_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
 /// The size of the frames a compressed stream sub-packet is cut into: a
@@ -71,22 +48,15 @@ pub fn subpacket_frame_size(lvl: CompressionLevel) -> usize {
     }
 }
 
-/// Worst-case bytes the metadata-entry payload occupies for an index
-/// covering up to `max_frames` frames. The streaming encoder reserves
-/// this many bytes upfront, then patches the actual index in after
-/// the payload streams out.
+/// Worst-case bytes of a frame-index metadata entry for up to
+/// `max_frames` frames.
 pub const fn frame_index_entry_max_bytes(max_frames: usize) -> usize {
     FRAME_INDEX_HEADER_BYTES + max_frames * FRAME_ENTRY_BYTES
 }
 
-/// Compute the worst-case frame count for a payload of
-/// `estimated_uncompressed_bytes`. Used by the streaming encoder to
-/// reserve metadata space for the frame index before the actual
-/// frame count is known.
+/// Worst-case frame count for a payload of
+/// `estimated_uncompressed_bytes`; at least 1.
 pub fn max_frames_for(estimated_uncompressed_bytes: usize) -> usize {
-    // `ceil(bytes / chunk_size)`, with a floor of 1 -- even an empty
-    // payload still produces one (empty) frame so readers can rely on
-    // `frame_count > 0` for compressed packets.
     if estimated_uncompressed_bytes == 0 {
         1
     } else {
@@ -94,22 +64,12 @@ pub fn max_frames_for(estimated_uncompressed_bytes: usize) -> usize {
     }
 }
 
-/// Construct a `zstd::bulk::Decompressor` configured for our window
-/// sizes. Returned ready to be reused across many frames -- the `DCtx`
-/// retains its internal state between calls, avoiding the per-frame
-/// allocation cost of `zstd::stream::Decoder::new` (~5-10% of decode
-/// wall time at 16 MiB chunks).
 fn make_bulk_decompressor<'a>() -> std::io::Result<zstd::bulk::Decompressor<'a>> {
     let mut d = zstd::bulk::Decompressor::new()?;
     d.window_log_max(DECODER_WINDOW_LOG_MAX)?;
     Ok(d)
 }
 
-/// Construct a `zstd::bulk::Compressor` at the given level, ready to
-/// be reused across many frames. Each frame sets its own
-/// `pledgedSrcSize` via the underlying CCtx before
-/// `compress_to_buffer`; the compressor itself retains its `CCtx`
-/// state between calls.
 fn make_bulk_compressor<'a>(
     lvl: CompressionLevel,
 ) -> std::io::Result<zstd::bulk::Compressor<'a>> {
@@ -120,15 +80,8 @@ fn make_bulk_compressor<'a>(
     Ok(c)
 }
 
-/// Compress a single chunk into one complete zstd frame with
-/// `pledgedSrcSize = raw.len()`, reusing the caller-supplied
-/// compressor's `CCtx`. The output is written into `out`, which is
-/// resized to `compress_bound(raw.len())` and then truncated to the
-/// actual compressed size -- callers may pass a previously-used `Vec`
-/// to amortize the allocation across many calls. Frames are
-/// independent (no cross-frame dictionary), so concatenating them
-/// yields a valid multi-frame stream that workers can decode in
-/// parallel.
+/// Compress `raw` into one independent zstd frame with its size pledged,
+/// writing the frame into `out`.
 fn compress_one_frame_into(
     compressor: &mut zstd::bulk::Compressor<'_>,
     raw: &[u8],
@@ -150,11 +103,6 @@ fn compress_one_frame_into(
     Ok(())
 }
 
-/// Single-shot wrapper around `compress_one_frame_into` for callers
-/// that don't keep their own compressor around. Less efficient than
-/// reusing the compressor across frames; intended for the
-/// `finish()`-time single-chunk fast path and the empty-input
-/// invariant frame.
 fn compress_one_frame(
     raw: &[u8],
     lvl: CompressionLevel,
@@ -195,39 +143,16 @@ impl FrameCompressor {
     }
 }
 
-/// Streaming sink that splits writes into `chunk_size`-byte chunks
-/// and compresses each chunk into an independent zstd frame using a
-/// background worker pool. Returns the per-frame `[uncompressed_size,
-/// compressed_size]` index from `finish()`, which callers stamp into
-/// the packet's `METADATA_TYPE_FRAME_INDEX` entry.
-///
-/// The pipeline is asynchronous: chunks are dispatched to workers
-/// over per-worker channels (round-robin), workers compress and push
-/// results back on a single result channel, and the caller's writer
-/// thread drains the result channel between writes, emitting frames
-/// in original chunk order via a small reorder buffer. The walker
-/// never blocks on a worker except for backpressure when every
-/// worker's input queue is full (default depth 2, so ~`2 * n_workers`
-/// chunks may be in flight before the walker has to wait).
-///
-/// `n_workers` defaults to `frame_workers()` (currently
-/// `available_parallelism()` capped at `MAX_FRAME_WORKERS`).
-/// Lazily-allocated worker pool state. Held in an `Option` on the
-/// encoder so single-chunk payloads (the common case for small
-/// packets) never pay the thread-spawn cost: the pool is built on the
-/// first chunk that's dispatched to a worker, and small payloads that
-/// finish in one chunk go through an inline `compress_one_frame` path
-/// in `finish()`.
 struct EncoderPool {
     worker_txs: Vec<std::sync::mpsc::SyncSender<(usize, Vec<u8>)>>,
     result_rx: std::sync::mpsc::Receiver<(usize, std::io::Result<Vec<u8>>)>,
     worker_handles: Vec<std::thread::JoinHandle<()>>,
 }
 
+/// A writer that compresses its input into independent zstd frames of
+/// `chunk_size` uncompressed bytes, in input order. `finish()` returns the
+/// frame index.
 pub struct MultiFrameEncoder<W: Write> {
-    // `writer` is held in an Option so `finish()` can move it out
-    // via `take()` without conflicting with the Drop impl that does
-    // worker-thread cleanup.
     writer: Option<W>,
     pending: Vec<u8>,
     chunk_size: usize,
@@ -246,10 +171,7 @@ impl<W: Write> MultiFrameEncoder<W> {
         Self::with_n_workers(writer, lvl, chunk_size, frame_workers())
     }
 
-    /// Construct an encoder with an explicit worker count. Tests use
-    /// `n_workers = 1` to force fully-serial behavior. Worker threads
-    /// are NOT spawned here -- they're spawned lazily on the first
-    /// dispatch so single-chunk payloads pay no thread-spawn cost.
+    /// Construct an encoder with an explicit worker count.
     pub fn with_n_workers(
         writer: W,
         lvl: CompressionLevel,
@@ -271,8 +193,7 @@ impl<W: Write> MultiFrameEncoder<W> {
         }
     }
 
-    /// Shorthand for the inner writer reference. Panics if called
-    /// after `finish()` -- the encoder is consumed at that point.
+    /// Panics if called after `finish()`.
     fn writer_mut(&mut self) -> &mut W {
         self.writer
             .as_mut()
@@ -284,12 +205,6 @@ impl<W: Write> MultiFrameEncoder<W> {
         if self.pool.is_some() {
             return self.pool.as_mut().unwrap();
         }
-        // Bounded per-worker queue depth. Four slots lets the walker
-        // queue several chunks ahead while the worker is busy on the
-        // current one, smoothing out tail-latency stalls (page-fault
-        // bursts, allocator hiccups). With 12 workers and 16 MiB
-        // chunks this caps in-flight memory at ~768 MiB of
-        // uncompressed buffers, comfortably below the SHM destination.
         const WORKER_QUEUE_DEPTH: usize = 4;
         let lvl = self.lvl;
         let n = self.n_workers;
@@ -301,15 +216,9 @@ impl<W: Write> MultiFrameEncoder<W> {
             let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Vec<u8>)>(WORKER_QUEUE_DEPTH);
             let result_tx = result_tx.clone();
             let h = std::thread::spawn(move || {
-                // One bulk compressor per worker, reused across every
-                // chunk this worker pulls. Holding the `CCtx` across
-                // calls avoids per-frame zstd context allocation and
-                // its window-buffer setup.
                 let mut compressor = match make_bulk_compressor(lvl) {
                     Ok(c) => c,
                     Err(e) => {
-                        // Best-effort signal: send the error on the
-                        // first chunk we receive, then exit.
                         if let Ok((seq, _chunk)) = rx.recv() {
                             let _ = result_tx.send((seq, Err(e)));
                         }
@@ -326,7 +235,6 @@ impl<W: Write> MultiFrameEncoder<W> {
                     .map(|()| std::mem::take(&mut out_buf))
                     .map_err(|e| std::io::Error::other(e.to_string()));
                     if result_tx.send((seq, result)).is_err() {
-                        // Receiver dropped (encoder dropped mid-flight).
                         return;
                     }
                 }
@@ -342,14 +250,9 @@ impl<W: Write> MultiFrameEncoder<W> {
         self.pool.as_mut().unwrap()
     }
 
-    /// Drain any ready results and write the ones whose sequence
-    /// numbers are next in line. Non-blocking: stops when `try_recv`
-    /// would block. No-op when the pool hasn't been spawned yet.
+    /// Write any results that are ready, without blocking.
     fn drain_ready_results(&mut self) -> std::io::Result<()> {
         loop {
-            // Scoped borrow of the pool so we can call `write_in_order`
-            // (which needs `&mut self`) after extracting the next ready
-            // result.
             let item = match self.pool.as_ref() {
                 Some(pool) => pool.result_rx.try_recv(),
                 None => return Ok(()),
@@ -366,10 +269,8 @@ impl<W: Write> MultiFrameEncoder<W> {
         }
     }
 
-    /// Block until at least one result arrives (and any later
-    /// in-order results queued behind it). Returns Ok(true) on
-    /// progress, Ok(false) if the channel is closed (no workers
-    /// alive), Err on writer or worker failure.
+    /// Block until one result arrives and write what is in order. Returns
+    /// `Ok(false)` when no worker is left.
     fn await_one_result(&mut self) -> std::io::Result<bool> {
         let item = match self.pool.as_ref() {
             Some(pool) => pool.result_rx.recv(),
@@ -387,10 +288,7 @@ impl<W: Write> MultiFrameEncoder<W> {
         }
     }
 
-    /// Emit any frames in the reorder buffer whose sequence number is
-    /// next in line, advancing `write_next_seq`. Frees the per-seq
-    /// uncompressed-size and compressed-bytes entries as they're
-    /// written.
+    /// Write the frames in the reorder buffer that are next in sequence.
     fn write_in_order(&mut self) -> std::io::Result<()> {
         while let Some(bytes) = self.reorder_buf.remove(&self.write_next_seq) {
             let uncompressed_size = self
@@ -399,7 +297,6 @@ impl<W: Write> MultiFrameEncoder<W> {
                 .expect("seq_uncompressed_size missing entry");
             let compressed_size = bytes.len();
             self.writer_mut().write_all(&bytes)?;
-            // bytes drops here, freeing the per-chunk compressed Vec
             self.frames.push(FrameEntry {
                 uncompressed_size: uncompressed_size as u64,
                 compressed_size: compressed_size as u64,
@@ -409,11 +306,7 @@ impl<W: Write> MultiFrameEncoder<W> {
         Ok(())
     }
 
-    /// Take the current `pending` chunk and hand it to a worker.
-    /// Round-robins on the worker index; spawns the worker pool on
-    /// first call. Blocks only if every worker's queue is full --
-    /// backpressure that keeps the in-flight budget bounded at
-    /// `n_workers * WORKER_QUEUE_DEPTH` chunks.
+    /// Hand the `pending` chunk to a worker, spawning the pool on first use.
     fn dispatch_pending(&mut self) -> std::io::Result<()> {
         if self.pending.is_empty() {
             return Ok(());
@@ -425,13 +318,10 @@ impl<W: Write> MultiFrameEncoder<W> {
         let seq = self.next_seq;
         self.next_seq += 1;
         self.seq_uncompressed_size.insert(seq, chunk.len());
-        // Spawn pool on first dispatch (no-op on subsequent calls).
         self.ensure_pool();
         // Drain ready results first so the writer doesn't fall too
         // far behind and so the reorder buffer doesn't grow unbounded.
         self.drain_ready_results()?;
-        // Round-robin dispatch to per-worker queues. `pool` is Some
-        // because we just called ensure_pool above.
         let pool = self.pool.as_ref().expect("pool just spawned");
         let worker_idx = seq % pool.worker_txs.len();
         if let Err(e) = pool.worker_txs[worker_idx].send((seq, chunk)) {
@@ -442,16 +332,10 @@ impl<W: Write> MultiFrameEncoder<W> {
         Ok(())
     }
 
-    /// Flush any pending bytes as a final frame and return the inner
-    /// writer plus the per-frame index. When the entire input fits in
-    /// one chunk (the common case for small packets) no worker pool
-    /// is ever spawned -- the pending chunk is compressed inline.
-    /// Otherwise the worker pool is drained in order and joined.
+    /// Flush pending bytes as a final frame; return the inner writer and the
+    /// frame index.
     pub fn finish(mut self) -> Result<(W, Vec<FrameEntry>), MorlocError> {
-        // Common-case fast path: no chunks dispatched yet means the
-        // whole input fits in `pending`. Compress it inline without
-        // spawning workers. Handles both single-chunk payloads and
-        // truly empty input (one zero-byte frame for the invariant).
+        // No chunk dispatched yet: compress inline, one frame even for empty input.
         if self.next_seq == 0 {
             let pending = std::mem::take(&mut self.pending);
             let compressed = compress_one_frame(&pending, self.lvl)?;
@@ -468,10 +352,6 @@ impl<W: Write> MultiFrameEncoder<W> {
             return Ok((writer, frames));
         }
 
-        // Multi-chunk path: dispatch the final partial chunk, close
-        // worker channels (so workers drain and exit), then loop
-        // collecting results in order until every dispatched chunk
-        // has been written.
         if !self.pending.is_empty() {
             self.dispatch_pending().map_err(MorlocError::Io)?;
         }
@@ -489,7 +369,6 @@ impl<W: Write> MultiFrameEncoder<W> {
             for h in pool.worker_handles.drain(..) {
                 let _ = h.join();
             }
-            // pool drops here, releasing the channels.
         }
         let writer = self.writer.take().expect("writer present");
         let frames = std::mem::take(&mut self.frames);
@@ -498,11 +377,6 @@ impl<W: Write> MultiFrameEncoder<W> {
 }
 
 impl<W: Write> Drop for MultiFrameEncoder<W> {
-    /// Clean teardown when the encoder is dropped without `finish()`
-    /// (e.g. early-return on a write error, panic in the walker).
-    /// Closing the worker input channels causes workers to exit after
-    /// they drain whatever they've already pulled; we then join their
-    /// handles so no thread state is left dangling.
     fn drop(&mut self) {
         if let Some(mut pool) = self.pool.take() {
             pool.worker_txs.clear();
@@ -530,20 +404,16 @@ impl<W: Write> Write for MultiFrameEncoder<W> {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        // Intentionally a no-op: emitting a frame on every flush call
-        // (e.g. from an upstream BufWriter draining its buffer mid-
-        // payload) would fragment the output into tiny frames. The
-        // final partial frame is flushed by `finish()`.
+        // A frame per flush would fragment the output; `finish()` emits the
+        // final partial frame.
         Ok(())
     }
 }
 
 // ── Compression level (0-9 user-facing, mapped to zstd 1-22) ──────────────
 
-/// User-facing compression preset. 0 disables compression; 1-9 select a
-/// zstd level + long-mode combination. Constructed via `from_int` or
-/// `from_u8`, which reject out-of-range values before any compression work
-/// starts.
+/// User-facing compression preset: 0 disables compression, 1-9 select a
+/// zstd level and long mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionLevel(u8);
 
@@ -589,9 +459,7 @@ impl CompressionLevel {
         }
     }
 
-    /// Whether to enable zstd long-range mode (~128 MB window). Beneficial
-    /// for very large redundant payloads (genomic data with repeats across
-    /// far distances); kicks in at the ultra levels.
+    /// Whether to enable zstd long-range mode.
     pub fn use_long(self) -> bool {
         self.0 >= 7
     }
@@ -607,28 +475,18 @@ pub const LONG_WINDOW_LOG: u32 = 27;
 /// 31 == 2 GiB, the maximum zstd permits.
 const DECODER_WINDOW_LOG_MAX: u32 = 31;
 
-/// Buffer between the byte-producing walker (e.g. voidstar flatten) and
-/// the encoder. Sized to fit comfortably in L2 cache while still being
-/// big enough to amortize per-call dispatch over thousands of small
-/// struct-slot writes. 256 KiB is a good compromise on modern CPUs.
+/// Buffer between the byte-producing walker and the encoder.
 const STREAM_INPUT_BUFFER: usize = 256 * 1024;
 
 // ── Raw-payload compress / decompress ─────────────────────────────────────
 
-/// Compress raw bytes with zstd. Single entry point for every
-/// compression site in the runtime: takes a user-facing level (0..=9)
-/// and compresses frames on `frame_workers()` threads. Long-mode
-/// kicks in for preset 7+. Level 0 returns a clean copy of `raw`
-/// (no zstd frame), so callers don't have to special-case it.
+/// Compress raw bytes into zstd frames, returning them with their index.
+/// Level 0 returns a copy of `raw` and an empty index.
 pub fn compress_payload_zstd(
     raw: &[u8],
     lvl: CompressionLevel,
 ) -> Result<(Vec<u8>, Vec<FrameEntry>), MorlocError> {
     if lvl.is_none() {
-        // Level 0 passes through unchanged with no frame index.
-        // Uncompressed payloads are stored as a single contiguous
-        // region; downstream readers detect compression == NONE in
-        // the packet header and skip the frame-index lookup.
         return Ok((raw.to_vec(), Vec::new()));
     }
     let mut encoder = MultiFrameEncoder::new(Vec::new(), lvl, FRAME_CHUNK_SIZE);
@@ -636,13 +494,8 @@ pub fn compress_payload_zstd(
     encoder.finish()
 }
 
-/// Decompress a single zstd frame from `reader` directly into `dest`.
-/// Each frame in a multi-frame stream carries its own exact
-/// `pledgedSrcSize`, so the caller can size `dest` to the frame's
-/// uncompressed-size entry from the packet's frame-index metadata.
-/// Returns the number of bytes actually written. This is the
-/// zero-intermediate-buffer path used to land per-frame compressed
-/// bytes directly into SHM.
+/// Decompress one zstd frame from `reader` into `dest`; returns the number
+/// of bytes written.
 pub fn decompress_payload_zstd_into<R: Read>(
     reader: R,
     dest: &mut [u8],
@@ -664,16 +517,12 @@ pub fn decompress_payload_zstd_into<R: Read>(
 
 // ── Parallel frame decompression ──────────────────────────────────────────
 
-/// Default upper bound on worker threads for the parallel paths. The
-/// encoder + decoder both honor `MORLOC_FRAME_WORKERS` (positive
-/// integer) to override; absent that, they use
-/// `available_parallelism().min(MAX_FRAME_WORKERS)`.
+/// Upper bound on frame worker threads, including a
+/// `MORLOC_FRAME_WORKERS` override.
 pub const MAX_FRAME_WORKERS: usize = 16;
 
-/// Read the worker count from `MORLOC_FRAME_WORKERS` or fall back to
-/// `min(available_parallelism, MAX_FRAME_WORKERS)`. Returns at least 1.
-/// Cached on first call (matches the `MORLOC_TRACE` / `MORLOC_QUIET`
-/// pattern), so subsequent calls are a single atomic load.
+/// The worker count: `MORLOC_FRAME_WORKERS` if positive, else the available
+/// parallelism, capped at `MAX_FRAME_WORKERS`; at least 1. Read once.
 pub fn frame_workers() -> usize {
     static CACHED: crate::publish_once::PublishOnce<usize> = crate::publish_once::PublishOnce::new();
     *CACHED.get_or_init(|| {
@@ -692,16 +541,8 @@ pub fn frame_workers() -> usize {
     })
 }
 
-/// Decompress every frame in `frames` from `compressed` into the
-/// non-overlapping slices of `dest` they index into. Compressed and
-/// uncompressed offsets are computed from the prefix sums of
-/// `compressed_size` and `uncompressed_size`; the caller has already
-/// ensured `compressed.len()` and `dest.len()` match the totals.
-///
-/// Each frame is independent (its own header, FCS, content), so this
-/// dispatches them to a small scoped worker pool with no
-/// inter-worker synchronization on the destination -- workers each
-/// own a disjoint slice of `dest` by construction.
+/// Decompress every frame in `frames` from `compressed` into its slice of
+/// `dest`. The index totals must equal the two buffer lengths.
 pub fn parallel_decompress_frames(
     frames: &[FrameEntry],
     compressed: &[u8],
@@ -728,9 +569,6 @@ pub fn parallel_decompress_frames(
         )));
     }
 
-    // Per-frame (comp_offset, comp_len, unc_offset, unc_len). Built
-    // here so workers index into the original buffers by offset
-    // rather than holding slice references they would have to split.
     let mut work: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(frames.len());
     let (mut comp_off, mut unc_off) = (0usize, 0usize);
     for f in frames {
@@ -741,7 +579,6 @@ pub fn parallel_decompress_frames(
         unc_off += us;
     }
 
-    // Single frame: skip the thread pool dance entirely.
     if frames.len() == 1 {
         let (comp_off, cs, unc_off, us) = work[0];
         let mut decoder = make_bulk_decompressor()?;
@@ -761,15 +598,7 @@ pub fn parallel_decompress_frames(
     }
 
     let n_workers = frame_workers().min(frames.len());
-    // Atomic work-stealing index: each worker fetches the next frame
-    // index and processes it until none remain. Cheaper than an mpsc
-    // channel and lets us share `&work` immutably across the scope.
     let next_idx = std::sync::atomic::AtomicUsize::new(0);
-    // `*mut u8` is `!Send`, so we move the pointer as a `usize` and
-    // reconstruct inside each worker. Soundness: each worker only
-    // ever derefs the per-frame subrange `(unc_off, us)`, which the
-    // prefix-sum construction guarantees is disjoint from every other
-    // worker's subrange.
     let dest_ptr_addr = dest.as_mut_ptr() as usize;
 
     std::thread::scope(|s| -> Result<(), MorlocError> {
@@ -779,11 +608,6 @@ pub fn parallel_decompress_frames(
             let compressed_ref = compressed;
             let next_idx_ref = &next_idx;
             let h = s.spawn(move || -> Result<(), MorlocError> {
-                // One bulk decompressor per worker, reused across
-                // every frame this worker pulls. The `DCtx` keeps its
-                // ~64 KiB internal state allocated; without reuse
-                // we'd construct + tear it down per frame, which can
-                // cost ~5-10% of decode wall time at our chunk size.
                 let mut decoder = make_bulk_decompressor()
                     .map_err(MorlocError::Io)?;
                 loop {
@@ -943,21 +767,15 @@ pub fn parallel_decompress_frame_sets(sets: &mut [FrameSet<'_>]) -> Result<(), M
 
 // ── Streaming encoders (no intermediate Vec for the compressed bytes) ────
 
-/// Stream-compress everything pulled from `reader` into `writer` as a
-/// multi-frame zstd stream chunked at `FRAME_CHUNK_SIZE` boundaries.
-/// Returns the frame index the caller stamps into the packet's
-/// `METADATA_TYPE_FRAME_INDEX` entry. At compression level 0, copies
-/// through unchanged and returns an empty frame index (decoders use
-/// the packet header's compression byte to decide whether to consult
-/// the index at all).
+/// Compress everything read from `reader` into `writer` as frames of
+/// `FRAME_CHUNK_SIZE` bytes, returning the frame index. Level 0 copies
+/// unchanged and returns an empty index.
 pub fn stream_encode_reader<W: Write, R: Read>(
     writer: W,
     reader: &mut R,
     lvl: CompressionLevel,
 ) -> Result<(W, Vec<FrameEntry>), MorlocError> {
     if lvl.is_none() {
-        // std::io::copy uses its own 8 KiB ping-pong buffer, so a
-        // BufWriter here would just double-buffer; route directly.
         let mut w = writer;
         std::io::copy(reader, &mut w).map_err(MorlocError::Io)?;
         return Ok((w, Vec::new()));
@@ -967,15 +785,9 @@ pub fn stream_encode_reader<W: Write, R: Read>(
     encoder.finish()
 }
 
-/// Run a writer-producing closure with optional zstd compression
-/// applied to its output. Used by streaming paths that need to
-/// hand a `&mut dyn Write` sink to a flatten-and-emit routine but
-/// also want compression wrapped transparently around the sink.
-/// At level 0 the closure writes directly to `writer`; at level
-/// 1-9 it writes to a `MultiFrameEncoder` that chunks output into
-/// independent zstd frames of up to `FRAME_CHUNK_SIZE` bytes.
-/// Returns the per-frame index for the caller to stamp into the
-/// packet's `METADATA_TYPE_FRAME_INDEX` entry.
+/// Run `body` against `writer`, compressed into frames of
+/// `FRAME_CHUNK_SIZE` bytes unless `lvl` is `None` or 0. Returns the frame
+/// index, empty when uncompressed.
 pub fn stream_encode_with<W, F>(
     writer: W,
     lvl: Option<CompressionLevel>,
@@ -1011,22 +823,16 @@ where
 
 // ── Packet-level compress / decompress ────────────────────────────────────
 
-/// Result of `compress_packet`. `Compressed` carries the new packet
-/// bytes; `NoOp` indicates the input was returned unchanged (only DATA
-/// packets with source MESG are eligible).
+/// Result of `compress_packet`: the new packet, or `NoOp` when the input
+/// is left as it is.
 pub enum CompressOutcome {
     Compressed(Vec<u8>),
     NoOp,
 }
 
-/// Compress the payload region of a complete morloc packet. The 32-byte
-/// header and metadata block are passed through; the header's
-/// `compression` byte is set to `PACKET_COMPRESSION_ZSTD` and `length`
-/// is updated to the compressed size. Returns `NoOp` for command types
-/// that should not be compressed (CALL/PING, or DATA packets whose source
-/// is FILE/RPTR rather than MESG -- a FILE payload is a path, RPTR is a
-/// shared-memory offset, neither benefits from compression and the
-/// downstream consumer would not know how to interpret the result).
+/// Compress the payload of a DATA packet with source MESG, appending a
+/// frame-index metadata entry and setting the compression byte and
+/// length. Returns `NoOp` at level 0 and for any other packet.
 pub fn compress_packet(
     packet: &[u8],
     lvl: CompressionLevel,
@@ -1044,7 +850,6 @@ pub fn compress_packet(
     hdr_buf.copy_from_slice(&packet[..32]);
     let header = PacketHeader::from_bytes(&hdr_buf)?;
 
-    // Only DATA + MESG packets are eligible; everything else passes through.
     if !header.is_data() {
         return Ok(CompressOutcome::NoOp);
     }
@@ -1074,9 +879,6 @@ pub fn compress_packet(
     let (compressed, frame_index) =
         compress_payload_zstd(&packet[payload_start..payload_end], lvl)?;
 
-    // Splice the frame-index entry into the existing metadata block;
-    // the helper handles "place after last valid entry, pad to
-    // METADATA_BLOCK_ALIGNMENT".
     let frame_index_body = encode_frame_index_entry(&frame_index);
     let new_meta = crate::packet::append_metadata_entry(
         &packet[32..payload_start],
@@ -1085,7 +887,6 @@ pub fn compress_packet(
     );
 
     let mut new_header = header;
-    // Writing a union field is safe in Rust (only reads require unsafe).
     new_header.command.data.compression = PACKET_COMPRESSION_ZSTD;
     new_header.offset = new_meta.len() as u32;
     let mut new_hdr_bytes = new_header.to_bytes();
@@ -1098,12 +899,8 @@ pub fn compress_packet(
     Ok(CompressOutcome::Compressed(out))
 }
 
-/// Inverse of `compress_packet`. If the header's compression byte is
-/// PACKET_COMPRESSION_NONE returns the input unchanged (as a cloned Vec
-/// to keep the return type uniform). If PACKET_COMPRESSION_ZSTD
-/// decompresses the payload and emits a new packet with compression
-/// byte cleared and length restored. Unknown compression bytes are an
-/// error.
+/// Inverse of `compress_packet`. A packet that is not a compressed DATA
+/// packet is returned as a copy; an unknown compression byte is an error.
 pub fn decompress_packet(packet: &[u8]) -> Result<Vec<u8>, MorlocError> {
     if packet.len() < 32 {
         return Err(MorlocError::Packet(format!(
@@ -1134,19 +931,11 @@ pub fn decompress_packet(packet: &[u8]) -> Result<Vec<u8>, MorlocError> {
                 ));
             }
 
-            // Frame index is mandatory under the multi-frame format.
-            // A compressed packet without an index is rejected (the
-            // hard cutover: old single-frame packets are no longer
-            // readable by this decoder).
             let frames = crate::packet::read_frame_index_from_meta(packet)?
                 .ok_or_else(|| MorlocError::Packet(
                     "compressed packet missing METADATA_TYPE_FRAME_INDEX entry".into(),
                 ))?;
 
-            // Total uncompressed size = sum of per-frame uncompressed
-            // sizes. Each frame's compressed bytes live consecutively
-            // in the payload region; we compute prefix sums of
-            // compressed_size to find frame boundaries.
             let (total_uncompressed, total_compressed) = crate::packet::frame_totals(&frames)?;
             if total_compressed != length {
                 return Err(MorlocError::Packet(format!(
@@ -1155,13 +944,8 @@ pub fn decompress_packet(packet: &[u8]) -> Result<Vec<u8>, MorlocError> {
                 )));
             }
 
-            // Rebuild the metadata block without the frame-index entry
-            // (the decompressed packet has no compression and the index
-            // is meaningless). Pad to 32 bytes so the payload alignment
-            // matches what `make_mesg_data_packet` produces for a fresh
-            // uncompressed packet -- preserving byte-equality on a
-            // compress/decompress round-trip from an originally-padded
-            // input.
+            // Drop the frame-index entry and pad to 32 bytes, as
+            // `make_mesg_data_packet` pads, so a round trip is byte-exact.
             let mut new_meta = Vec::new();
             for (kind, data) in iter_packet_metadata(packet)? {
                 if kind == METADATA_TYPE_FRAME_INDEX {
@@ -1177,7 +961,6 @@ pub fn decompress_packet(packet: &[u8]) -> Result<Vec<u8>, MorlocError> {
 
             let new_meta_size = new_meta.len();
             let mut new_header = header;
-            // Writing a union field is safe (only reads require unsafe).
             new_header.command.data.compression = PACKET_COMPRESSION_NONE;
             new_header.offset = new_meta_size as u32;
             let mut new_hdr_bytes = new_header.to_bytes();
@@ -1189,8 +972,6 @@ pub fn decompress_packet(packet: &[u8]) -> Result<Vec<u8>, MorlocError> {
             out[32..32 + new_meta_size].copy_from_slice(&new_meta);
             let out_payload_start = 32 + new_meta_size;
 
-            // Decompress all frames in parallel into disjoint slices
-            // of the output payload region.
             let compressed = &packet[payload_start..payload_start + length];
             parallel_decompress_frames(
                 &frames,
@@ -1206,13 +987,9 @@ pub fn decompress_packet(packet: &[u8]) -> Result<Vec<u8>, MorlocError> {
     }
 }
 
-/// Best-effort decompress used by `mlc_load` and `--call-packet` ingest.
-/// Detects whether the bytes are a morloc packet at all (by magic check)
-/// and, if so, applies `decompress_packet`. Non-packet inputs (raw JSON,
-/// raw msgpack) are passed through verbatim; the downstream format
-/// detector handles them. Returns `Cow::Borrowed` on every pass-through
-/// path so callers do not pay a full copy on the common case where the
-/// input was not compressed.
+/// Decompress `bytes` if they are a compressed DATA packet. Anything else,
+/// including non-packets and truncated packets, is returned borrowed and
+/// unchanged.
 pub fn decompress_packet_if_needed(bytes: &[u8]) -> Result<Cow<'_, [u8]>, MorlocError> {
     if bytes.len() < 4 {
         return Ok(Cow::Borrowed(bytes));
@@ -1222,8 +999,6 @@ pub fn decompress_packet_if_needed(bytes: &[u8]) -> Result<Cow<'_, [u8]>, Morloc
         return Ok(Cow::Borrowed(bytes));
     }
     if bytes.len() < 32 {
-        // Looks like a packet by magic but is truncated -- let the
-        // downstream packet validator surface the error rather than us.
         return Ok(Cow::Borrowed(bytes));
     }
     let mut hdr_buf = [0u8; 32];
@@ -1258,20 +1033,15 @@ mod tests {
         }
     }
 
-    /// A msgpack-shaped payload that compresses cleanly: a repeating byte
-    /// pattern guarantees high redundancy regardless of zstd level.
+    /// A packet with a highly redundant payload.
     fn synthetic_packet(payload_len: usize) -> Vec<u8> {
         let payload: Vec<u8> = (0..payload_len).map(|i| (i & 0x07) as u8).collect();
         let schema = parse_schema("au1").unwrap();
-        // make_mesg_data_packet expects valid msgpack-ish bytes but only
-        // wraps them; it does not parse. Reuse it so the metadata + header
-        // construction matches the real path.
         make_mesg_data_packet(&payload, &schema)
     }
 
     #[test]
     fn roundtrip_each_level() {
-        // ~1 MiB so multithreading kicks in for at least one level.
         let original = synthetic_packet(1 << 20);
         for n in 1u8..=9 {
             let lvl = CompressionLevel::from_u8(n).unwrap();
@@ -1298,18 +1068,12 @@ mod tests {
 
     #[test]
     fn parallel_encode_decode_matches_serial() {
-        // The parallel encoder is order-preserving: dispatch a batch
-        // of chunks to workers, sort results by chunk index, then emit
-        // frames in order. The compressed bytes should be identical to
-        // what a `batch_size = 1` (effectively serial) encoder
-        // produces from the same input, since each frame is
-        // independent and zstd compression is deterministic.
+        // Output must not depend on the worker count.
         let raw: Vec<u8> = (0..(FRAME_CHUNK_SIZE * 3 + 1234))
             .map(|i| (i & 0xFF) as u8)
             .collect();
         let lvl = CompressionLevel::from_u8(3).unwrap();
 
-        // Serial encoding (batch_size = 1).
         let mut serial_out = Vec::new();
         let mut enc = MultiFrameEncoder::with_n_workers(
             &mut serial_out,
@@ -1320,7 +1084,6 @@ mod tests {
         enc.write_all(&raw).unwrap();
         let (_w, serial_frames) = enc.finish().unwrap();
 
-        // Parallel encoding (batch_size = 8 workers).
         let mut par_out = Vec::new();
         let mut enc = MultiFrameEncoder::with_n_workers(
             &mut par_out,
@@ -1334,7 +1097,6 @@ mod tests {
         assert_eq!(serial_frames, par_frames, "frame index drifted across batch sizes");
         assert_eq!(serial_out, par_out, "compressed bytes drifted across batch sizes");
 
-        // Parallel decode round-trip.
         let mut decoded = vec![0u8; raw.len()];
         parallel_decompress_frames(&par_frames, &par_out, &mut decoded).unwrap();
         assert_eq!(decoded, raw);
@@ -1342,11 +1104,7 @@ mod tests {
 
     #[test]
     fn single_chunk_payload_does_not_spawn_workers() {
-        // Small payloads that fit in one chunk should compress inline
-        // in `finish()` without spawning a worker pool. We can't
-        // observe thread spawning directly, but we can verify the
-        // encoder produces a one-frame index for any payload <=
-        // FRAME_CHUNK_SIZE and that finish() returns successfully.
+        // A payload within one chunk yields a one-frame index.
         let raw = vec![0xAB; 4096]; // far smaller than FRAME_CHUNK_SIZE
         let lvl = CompressionLevel::from_u8(3).unwrap();
         let mut out = Vec::new();
@@ -1359,12 +1117,8 @@ mod tests {
 
     #[test]
     fn dropping_without_finish_cleans_up_workers() {
-        // Construct an encoder, dispatch enough bytes to spawn the
-        // worker pool, then drop without calling finish(). The Drop
-        // impl must close the worker input channels and join all
-        // worker threads, leaving no dangling threads. We verify by
-        // dropping inside a thread::scope: if any worker survived
-        // the encoder's Drop, the scope wouldn't be able to join.
+        // Dropping an encoder with a live worker pool, without finish(), must
+        // not hang or panic.
         let raw = vec![0u8; FRAME_CHUNK_SIZE * 2];
         let lvl = CompressionLevel::from_u8(1).unwrap();
         std::thread::scope(|s| {
@@ -1372,11 +1126,7 @@ mod tests {
                 let mut sink = Vec::new();
                 let mut enc =
                     MultiFrameEncoder::with_n_workers(&mut sink, lvl, FRAME_CHUNK_SIZE, 4);
-                // Write enough to spawn the pool (the first
-                // dispatch_pending fires once `pending` hits one
-                // chunk).
                 enc.write_all(&raw).unwrap();
-                // Drop without finish().
                 drop(enc);
             });
             h.join().unwrap();
@@ -1447,9 +1197,6 @@ mod tests {
 
     #[test]
     fn level_zero_payload_is_clean_copy() {
-        // compress_payload_zstd at level 0 must return the input bytes
-        // verbatim -- no zstd frame, no frame index -- so callers can
-        // rely on it as a uniform pass-through.
         let raw = vec![0xAB; 1024];
         let lvl = CompressionLevel::from_u8(0).unwrap();
         let (bytes, frames) = compress_payload_zstd(&raw, lvl).unwrap();
@@ -1459,8 +1206,6 @@ mod tests {
 
     #[test]
     fn empty_payload_roundtrip() {
-        // Empty payload must compress (to a small empty frame) and
-        // decompress back to empty without error.
         let original = synthetic_packet(0);
         let lvl = CompressionLevel::from_u8(3).unwrap();
         let compressed = match compress_packet(&original, lvl).unwrap() {
@@ -1473,17 +1218,12 @@ mod tests {
 
     #[test]
     fn stream_encode_reader_roundtrip() {
-        // Reader-driven streaming encode produces a multi-frame zstd
-        // stream that the legacy single-frame decoder still consumes
-        // (concatenated independent frames are a valid zstd stream).
-        // Use 4 MiB so chunking actually fires.
         let original: Vec<u8> = (0..(4 << 20)).map(|i| (i & 0x0F) as u8).collect();
         let lvl = CompressionLevel::from_u8(3).unwrap();
         let mut src: &[u8] = &original;
         let mut compressed: Vec<u8> = Vec::new();
         let (_w, frames) =
             stream_encode_reader(&mut compressed, &mut src, lvl).unwrap();
-        // Round-trip via the per-frame decoder used by `decompress_packet`.
         let mut decoded = vec![0u8; original.len()];
         let mut comp_cur = 0usize;
         let mut unc_cur = 0usize;
@@ -1503,9 +1243,7 @@ mod tests {
 
     #[test]
     fn compressed_packet_carries_frame_index() {
-        // Every multi-frame compressed packet emitted by compress_packet
-        // carries a METADATA_TYPE_FRAME_INDEX entry. The decoder relies
-        // on this entry; without it, decompress_packet rejects the packet.
+        // compress_packet always writes a frame index.
         for &size in &[1usize, 1024, 1 << 20] {
             let original = synthetic_packet(size);
             let lvl = CompressionLevel::from_u8(3).unwrap();
@@ -1518,12 +1256,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("size={size}: frame index entry missing"));
             assert!(!frames.is_empty(), "size={size}: frame index has no entries");
             let total_unc: u64 = frames.iter().map(|f| f.uncompressed_size).sum();
-            // synthetic_packet wraps `size` payload bytes; the frame
-            // index sums to exactly that payload length.
             let unwrapped = decompress_packet(&compressed).unwrap();
             assert_eq!(unwrapped, original, "size={size}");
-            // Total uncompressed across frames matches the recovered
-            // payload's length field.
             let recovered_payload_len = u64::from_le_bytes(
                 unwrapped[24..32].try_into().unwrap(),
             );
@@ -1533,8 +1267,6 @@ mod tests {
 
     #[test]
     fn multiframe_roundtrip_across_chunk_boundary() {
-        // FRAME_CHUNK_SIZE is 16 MiB; pick sizes that straddle the
-        // boundary so the encoder emits multiple frames.
         let chunk = FRAME_CHUNK_SIZE;
         for &size in &[
             chunk,             // exactly one chunk
@@ -1557,7 +1289,6 @@ mod tests {
             let total_comp: u64 = frames.iter().map(|f| f.compressed_size).sum();
             assert_eq!(total_unc as usize, size);
             assert_eq!(total_comp as usize, bytes.len());
-            // Decompress each frame and reassemble.
             let mut decoded = vec![0u8; size];
             let mut comp_cur = 0usize;
             let mut unc_cur = 0usize;
@@ -1578,9 +1309,7 @@ mod tests {
 
     #[test]
     fn decompress_packet_rejects_compressed_without_frame_index() {
-        // Hard cutover: a compressed packet MUST carry the frame index
-        // metadata entry. Construct a packet with the ZSTD compression
-        // byte but only a schema entry, and confirm rejection.
+        // A ZSTD packet with no frame-index entry is rejected.
         let raw = vec![0u8; 1024];
         let schema_bytes = b"au1\0";
         let mut meta = Vec::new();
@@ -1593,7 +1322,6 @@ mod tests {
             raw.len() as u64,
         );
         hdr.offset = meta.len() as u32;
-        // Patch compression byte to ZSTD.
         let mut hdr_bytes = hdr.to_bytes();
         hdr_bytes[15] = PACKET_COMPRESSION_ZSTD;
         let mut packet = hdr_bytes.to_vec();
@@ -1608,9 +1336,6 @@ mod tests {
 
     #[test]
     fn streamed_output_carries_frame_index() {
-        // stream_encode_with -- the streaming-emit path used by
-        // stream_packet_to_fd -- must produce a parseable multi-frame
-        // stream with a non-empty frame index.
         let raw: Vec<u8> = (0..(4 << 20)).map(|i| (i & 0xFF) as u8).collect();
         let lvl = CompressionLevel::from_u8(3).unwrap();
         let frame_buf: Vec<u8> = Vec::new();

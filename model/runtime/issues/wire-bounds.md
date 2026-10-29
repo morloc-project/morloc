@@ -25,3 +25,5 @@ morloc-runtime-types/src/packet.rs, FFI = morloc-runtime/src/packet_ffi.rs.
 - [read] `PacketHeader::total_size()` (morloc-runtime-types packet.rs)
   returns `offset + length` without the 32-byte header; a caller taking it
   for the packet's size is 32 bytes short.
+- [read] morloc-runtime-types `subpacket_elem_count`: `off + 32` and
+  `start + length` are unchecked sums.

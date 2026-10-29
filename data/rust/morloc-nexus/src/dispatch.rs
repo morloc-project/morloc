@@ -1,16 +1,6 @@
-//! Command dispatch: routing parsed CLI args to language pools.
-//!
-//! Argument parsing lives in [`crate::cli`] (top-level mode + always-
-//! on flags) and [`crate::phase2`] (manifest-driven per-program flags
-//! + capability gates). This module owns the execution backend: take
-//! a fully-parsed [`Vec<ArgValue>`], optionally spawn pool daemons,
-//! and either dispatch the call packet over a Unix socket (remote
-//! command) or evaluate the embedded NexusExpr tree in-process (pure
-//! command).
-//!
-//! Links against `libmorloc.so` for packet construction (call-packet
-//! builder, schema parser, pool send/receive) and for evaluating
-//! pure commands via `morloc_eval`.
+//! Command dispatch: run a parsed command, by sending a call packet to its
+//! pool (remote command) or by evaluating its expression in-process (pure
+//! command), and print the result.
 
 use crate::manifest::{Check, Command, Manifest, SourceAtom};
 pub use morloc_manifest::cli_value::{
@@ -19,35 +9,28 @@ pub use morloc_manifest::cli_value::{
 };
 use crate::process::{self, PoolSocket};
 
-/// Output format enum.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OutputFormat {
     Json,
-    /// JSON-lines: one element per line. For list-shaped inputs the
-    /// list is streamed element-by-element; on scalars a single line
-    /// is emitted. Reachable from `morloc-nexus view -f jsonl`.
+    /// JSON-lines: one line per list element (per row of a table); a
+    /// scalar is one line.
     Jsonl,
     MessagePack,
     VoidStar,
     Packet,
-    /// Apache Arrow IPC file format (file with ARROW1 magic). Only valid
-    /// for commands whose return type is a Table.
+    /// Apache Arrow IPC file. Table results only.
     Arrow,
-    /// Apache Parquet file. Only valid for commands whose return type is a
-    /// Table.
+    /// Apache Parquet file. Table results only.
     Parquet,
-    /// Tab-separated values. Same writer as Csv with a different
-    /// delimiter. Only valid for commands whose return type is a Table.
+    /// Tab-separated values: a table, or a list of records (CLI-17).
     Tsv,
-    /// CSV (comma-separated). Header row from the column schema. Only
-    /// valid for commands whose return type is a Table.
+    /// Comma-separated values: a table, or a list of records (CLI-17).
     Csv,
-    /// Verbatim bytes: `Str`/`[Str]` element bodies emitted with no framing
-    /// or JSON quoting. The default output format for `render` terminals.
+    /// Verbatim bytes: string or byte-vector bodies with no framing or JSON
+    /// quoting.
     Raw,
 }
 
-/// Nexus configuration parsed from CLI options.
 #[derive(Debug, Clone)]
 pub struct NexusConfig {
     pub print_flag: bool,
@@ -57,73 +40,52 @@ pub struct NexusConfig {
     pub output_path: Option<String>,
     pub output_format: OutputFormat,
     pub daemon_flag: bool,
-    /// When true, serve the program as a native MCP server over stdio
-    /// (the `mcp` subcommand). Mutually exclusive with daemon/router.
+    /// Serve the program as an MCP server (the `mcp` subcommand).
     pub mcp_flag: bool,
     pub router_flag: bool,
     pub unix_socket_path: Option<String>,
     pub tcp_port: Option<i32>,
     pub http_port: Option<i32>,
-    /// Bind address for MCP-over-HTTP (`mcp --http-port`). `None` => 127.0.0.1
-    /// (loopback). Set to `0.0.0.0` to accept remote/other-container clients.
+    /// Bind address for MCP-over-HTTP; `None` is loopback.
     pub mcp_http_host: Option<String>,
-    /// Bearer token required on every MCP-over-HTTP request. `None` => the
-    /// endpoint is unauthenticated.
+    /// Bearer token required on every MCP-over-HTTP request, if any.
     pub mcp_auth_token: Option<String>,
-    /// Permit a non-loopback MCP-over-HTTP bind with no token (the manager
-    /// sets this for a loopback-only publish). Otherwise such a bind is
-    /// refused.
+    /// Permit a non-loopback MCP-over-HTTP bind with no token.
     pub mcp_allow_no_auth: bool,
     pub port_file_path: Option<String>,
     pub fdb_path: Option<String>,
     pub eval_timeout: i32,
-    /// Eval sandbox: true for served eval (daemon/router), which always
-    /// forbids directly-written IO intrinsics and restricts imports to
-    /// `eval_allowed_modules`. False for run/mcp configs that do not serve eval.
+    /// Sandbox served eval: no IO intrinsics, imports limited to
+    /// `eval_allowed_modules`.
     pub eval_sandbox: bool,
-    /// Module allow-list for served (sandboxed) eval (`None` => no imports,
-    /// only pure module-free expressions). Passed to the forked `morloc eval`
-    /// as `--eval-allowed-modules`.
+    /// Modules sandboxed eval may import (`--eval-allowed-modules`).
     pub eval_allowed_modules: Option<String>,
-    /// Front-end: whether the eval CAPABILITY is exposed (an `eval` MCP tool +
-    /// `/eval` route). Off by default; enabled only when the operator exposes it.
-    /// Distinct from `eval_sandbox` (which is always on for served eval).
+    /// Expose eval as a capability (an `eval` MCP tool and `/eval` route).
     pub eval_enabled: bool,
-    /// Serve eval without a bearer token (see `RouterArgs::eval_allow_no_auth`).
-    /// Only meaningful when `eval_enabled`.
+    /// Serve eval without a bearer token.
     pub eval_allow_no_auth: bool,
-    /// Base directory under which a per-run subdir (named by run_id)
-    /// is materialized. Activates rundir creation, log tee, and
-    /// `summary.json`. Falls back to the `MORLOC_LOG_DIR` env var.
-    /// `None` => no rundir, no tee, no default summary.
+    /// `--log-dir`: base directory of the per-run directory, log tee and
+    /// `summary.json`; published as `MORLOC_LOG_DIR`.
     pub log_dir: Option<String>,
-    /// Explicit `summary.json` output path. When set the summary file
-    /// goes here regardless of whether `log_dir` is set. Falls back
-    /// to the `MORLOC_SUMMARY` env var.
+    /// `--summary`: the `summary.json` path, with or without `log_dir`;
+    /// published as `MORLOC_SUMMARY`.
     pub summary_path: Option<String>,
-    /// When true, suppress every nexus-and-pool-emitted log line
-    /// (prologue, epilogue, per-label start/done). Drives the
-    /// `MORLOC_QUIET` env var that the runtime's log emitter checks.
+    /// Suppress morloc's own log lines; published as `MORLOC_QUIET`.
     pub quiet: bool,
-    /// Cap on disk writes per dispatch when `--debug` is compiled in.
-    /// `None` = use the runtime default (1). 0 = no cap.
+    /// Cap on debug-cache disk writes per dispatch; `None` is the runtime
+    /// default, 0 is no cap.
     pub debug_cache_depth: Option<u64>,
-    /// Per-arg msgpack-byte cap. Args exceeding the cap record their
-    /// hash but skip the disk write. `None` = unlimited.
+    /// Per-argument byte cap on debug-cache writes.
     pub debug_cache_max: Option<u64>,
-    /// Per-midx cap on catch fires before further entries are dropped
-    /// for that midx. `None` = use the runtime default (3). 0 = no cap.
+    /// Per-midx cap on debug-cache entries; `None` is the runtime default,
+    /// 0 is no cap.
     pub debug_recursion_cap: Option<u32>,
-    /// zstd compression preset for packets written to --output-file
-    /// (output-form packet). 0 = no compression.
+    /// zstd level for packet output; 0 is no compression.
     pub compression_level: u8,
-    /// `-z` as given, or `None` when it was not. A stream written to
-    /// stdout is compressed by the pool at its `@write` level unless this
-    /// overrides it; published to pools as `MORLOC_STDOUT_COMPRESSION_LEVEL`.
+    /// `-z` as given, if it was; published to pools as
+    /// `MORLOC_STDOUT_COMPRESSION_LEVEL`.
     pub stdout_compression: Option<u8>,
-    /// Front-end serving: the UNION of all served modules (the supervisor spawns
-    /// one child per entry). Empty + `serve_all` = serve everything under fdb;
-    /// empty + !serve_all = error (which modules to serve is a decision).
+    /// Every served module: the union of `mcp_programs` and `api_programs`.
     pub programs: Vec<String>,
     /// Modules exposed over the MCP adapter (/mcp). Subset of `programs`.
     pub mcp_programs: Vec<String>,
@@ -134,8 +96,7 @@ pub struct NexusConfig {
 }
 
 /// The part a nexus process plays in a multi-output run (see
-/// `orchestrate`). A child writes where its parent pointed it and ignores
-/// `-o`, whose file it already holds as fd 1.
+/// `orchestrate`).
 #[derive(Clone, Debug, Default)]
 pub enum ChildMode {
     #[default]
@@ -215,7 +176,6 @@ fn collapse_duplicate_lines(msg: &str) -> String {
 
 const STDOUT_BUF_CAPACITY: usize = 64 * 1024;
 
-/// Hex dump: 16 lowercase 2-digit bytes per row, single space between bytes.
 fn write_hex_dump(bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut w = std::io::BufWriter::with_capacity(STDOUT_BUF_CAPACITY, std::io::stdout().lock());
@@ -227,8 +187,6 @@ fn write_hex_dump(bytes: &[u8]) -> std::io::Result<()> {
     w.flush()
 }
 
-/// Grouped hex dump: 2-digit uppercase, 4-byte groups joined by single
-/// space, six groups per line.
 fn write_hex_dump_grouped(bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut w = std::io::BufWriter::with_capacity(STDOUT_BUF_CAPACITY, std::io::stdout().lock());
@@ -242,51 +200,27 @@ fn write_hex_dump_grouped(bytes: &[u8]) -> std::io::Result<()> {
     w.flush()
 }
 
-/// Emit a uniform error when pool communication fails, then exit.
-///
-/// The pool's stderr was inherited by the nexus, so any traceback the pool
-/// printed before dying is already on the user's terminal. This helper
-/// reports the communication error plus the pool's exit status (if it has
-/// been reaped) so the user can correlate the two.
-///
-/// Race condition: the pool process may still be writing its error output
-/// (traceback, panic message, etc.) to stderr when the nexus detects the
-/// broken connection. If we call clean_exit immediately, it sends SIGTERM
-/// to the pool process group, which can kill the pool before its stderr
-/// buffer is flushed. We insert a brief drain window to let any in-flight
-/// stderr from the dying pool reach the terminal before tearing everything
-/// down. This is best-effort: a pool killed by SIGKILL (OOM killer, etc.)
-/// won't have pending output, and a pool stuck in a blocking syscall won't
-/// flush within the window. But for the common case of a Python exception
-/// traceback, this is enough.
+/// Report a failed pool communication, with the pool's exit status when
+/// known, and exit.
 fn die_with_pool_error(
     socket: &PoolSocket,
     pool_index: usize,
     context: &str,
     comm_err: &std::io::Error,
 ) -> ! {
-    // A pool connection that drops while the nexus is already tearing down
-    // is the teardown itself -- clean_exit SIGTERMs every pool process
-    // group -- not a pool fault. Reporting it would race the exiting
-    // thread and, whenever it won, replace the real outcome (a downstream
-    // consumer closing the pipe exits 141) with a spurious "pool crashed"
-    // line on stderr and in summary.json.
+    // A connection dropped by the teardown is not a pool fault; reporting
+    // it would replace the run's real outcome (e.g. exit 141 for a closed
+    // stdout) with a spurious "pool crashed".
     if process::teardown_in_progress() {
         process::park_until_exit();
     }
 
-    // Give the dying pool process time to flush its stderr/stdout before
-    // we tear down the process group. Without this, a Python traceback or
-    // error message that is still in a pipe buffer gets lost when
-    // clean_exit sends SIGTERM/SIGKILL to the pool's process group.
+    // Best effort: let a dying pool's traceback reach stderr before the
+    // teardown kills it.
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    // Translate opaque kernel-level IO failures into actionable text.
-    // `read_exact` returns UnexpectedEof with the std-lib message "failed
-    // to fill whole buffer" whenever the peer closes the socket -- which,
-    // in our case, is exactly what happens when the pool crashes. Most
-    // users have never seen that phrase and cannot act on it. BrokenPipe
-    // is the same situation on the write side.
+    // The peer closing the socket surfaces as UnexpectedEof ("failed to
+    // fill whole buffer") or BrokenPipe; say what that means instead.
     let comm_msg: String = match comm_err.kind() {
         std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe => format!(
             "pool '{}' closed the connection before sending a response \
@@ -307,19 +241,14 @@ fn die_with_pool_error(
 }
 
 
-/// Wrap a string in JSON quotes (for literal string arguments).
+/// `s` as a JSON string.
 pub fn quoted(s: &str) -> String {
-    // JSON-escape the string
     let escaped = serde_json::to_string(s).unwrap_or_else(|_| format!("\"{}\"", s));
     escaped
 }
 
-/// Build the per-element argument_t's for a `@many` slot and
-/// invoke the C-side list assembler. `literal == true` JSON-quotes
-/// each token so the per-element classifier treats it as inline
-/// content rather than a file path. Holds the CStrings in a local
-/// `keepalive` vec for the duration of the call (the C side only
-/// strdup's its inputs).
+/// The list packet for a `@many` slot's tokens. `literal` JSON-quotes each
+/// token so it is read as inline content rather than as a file path.
 unsafe fn assemble_many_packet(
     tokens: &[String],
     literal: bool,
@@ -356,9 +285,7 @@ unsafe fn assemble_many_packet(
     pkt
 }
 
-/// Run pre-parsed args through dispatch. Separated from any
-/// particular parser frontend so the daemon-spawn + NUL-check +
-/// run_remote/run_pure backend stays parser-agnostic.
+/// Run a command on its parsed arguments.
 pub fn dispatch_command_parsed(
     parsed_args: Vec<ArgValue>,
     config: &NexusConfig,
@@ -366,13 +293,9 @@ pub fn dispatch_command_parsed(
     cmd: &Command,
     sockets: &mut [PoolSocket],
 ) {
-    // Bind `{name}` for the run-scope log before emitting the
-    // prologue; clean_exit fires the matching epilogue at process
-    // exit.
     crate::runlog::record_command(&cmd.name);
     crate::runlog::emit_prologue();
 
-    // Start daemons for remote commands
     if !cmd.is_pure() {
         if let Err(e) = process::start_daemons(sockets, &cmd.needed_pools) {
             eprintln!("Error: {}", e);
@@ -380,16 +303,9 @@ pub fn dispatch_command_parsed(
         }
     }
 
-    // Execute the command
     if cmd.is_pure() {
         run_pure_command(cmd, &parsed_args, config, manifest);
     } else {
-        // NUL-in-Str guard. If the target pool's language opts out of
-        // interior-NUL strings (e.g. R), scan every parsed arg for an
-        // embedded NUL and fail fast with a clean morloc-level
-        // diagnostic before invoking the pool. Bypassed when the
-        // program-level --unsafe-skip-null-check was set or when the
-        // env var MORLOC_SKIP_NULL_CHECK=1 is in effect.
         let target_pool = &manifest.pools[cmd.pool_index];
         let skip = manifest.unsafe_skip_null_check
             || morloc_runtime_types::null_check::env_skip_null_check();
@@ -404,10 +320,8 @@ pub fn dispatch_command_parsed(
                     _ => None,
                 };
                 if let Some(s) = payload {
-                    // The CLI ArgValue holds JSON text (a string arrives
-                    // quoted, so a NUL is a `\u0000` escape). A value
-                    // that is not JSON is a bare word the shell handed
-                    // over, which cannot carry a NUL, and is skipped.
+                    // A value that is not JSON is a bare word, which
+                    // cannot carry a NUL.
                     if let Ok(Some(p)) = morloc_runtime_types::null_check::first_null_in_json_text(s) {
                         eprintln!(
                             "Error: {} does not support embedded NUL bytes in strings (at args[{}]{})",
@@ -422,30 +336,11 @@ pub fn dispatch_command_parsed(
     }
 }
 
-/// If `argv` is the Unix stdin/stdout shorthand `-` and the arg
-/// names a file, return the OS path that selects the corresponding
-/// standard stream (so the pool's `fopen` etc. can open it as a regular
-/// file). Returns `None` when no substitution applies; the caller should
-/// keep the original value.
-///
-/// Two directives make an argument name a file, and `-` has to mean
-/// stdin under both. A `check.path` argument carries the path through to
-/// the callee, so the mode picks the stream:
-/// * `r`  -> `/dev/stdin`
-/// * `w`  -> `/dev/stdout`
-/// * `x`  -> `None` (exclusive-create against stdout is nonsensical --
-///   `/dev/stdout` already exists, so the check would fail after
-///   substitution. The user should use `w` for stdout output.)
-/// * `rw` -> `None` (ambiguous; stdin vs stdout can't both be it).
-///
-/// A `@source file` argument is read by the runtime rather than checked,
-/// and it is read, never written, so it maps to `/dev/stdin`. Without
-/// this the token reaches the loader verbatim and `fopen("-")` fails --
-/// the auto classifier, which resolves `-` itself, is bypassed whenever
-/// the source is declared.
-///
-/// The two directives are mutually exclusive (`check.path` cannot be
-/// combined with `@source file`), so their order here does not matter.
+/// The device path an argv `-` stands for in an argument that names a file,
+/// or `None` to keep the token. Under `check.path`, `r` gives `/dev/stdin`
+/// and `w` gives `/dev/stdout`; `x` (which `/dev/stdout` would fail) and
+/// `rw` (ambiguous) give `None`. A `@source file` argument, which the auto
+/// classifier does not see, gives `/dev/stdin`.
 pub fn substitute_stdio_dash(
     argv: &str,
     checks: &[Check],
@@ -471,12 +366,8 @@ pub fn substitute_stdio_dash(
     None
 }
 
-/// Apply value-invariant checks against the raw argv token. Returns
-/// `Err` on the first failing check; the error message identifies the
-/// check kind so the user can locate the docstring field.
-///
-/// Path modes follow the Python `open()` convention adapted to a
-/// pre-open filesystem predicate:
+/// Check the raw argv token against `checks`, failing on the first that
+/// does not hold. Path modes:
 ///
 ///   r  = exists and readable
 ///   w  = (exists and writable) OR (does not exist and parent writable)
@@ -536,18 +427,14 @@ fn check_w_existing(argv: &str) -> Result<(), String> {
     }
 }
 
-/// `w`: path is writable-or-creatable. Passes when the path exists and
-/// is writable, or when it does not exist and the parent directory is
-/// writable. Matches Python `open(_, 'w')` semantics.
 fn check_w(argv: &str) -> Result<(), String> {
     let cp = c_path_of(argv)?;
     let rc = unsafe { libc::access(cp.as_ptr(), libc::W_OK) };
     if rc == 0 {
         return Ok(());
     }
-    // Fall through to the create case only for the "does not exist"
-    // errno. If the file exists but is unwritable, report that;
-    // don't mask a permission error as a creatable-path check.
+    // Only a missing path may pass as creatable; any other failure is
+    // reported as is.
     let err = std::io::Error::last_os_error();
     if err.raw_os_error() != Some(libc::ENOENT) {
         return Err(format!(
@@ -558,9 +445,6 @@ fn check_w(argv: &str) -> Result<(), String> {
     check_parent_writable(argv, "w")
 }
 
-/// `x`: exclusive create. Path must not exist and the parent directory
-/// must be writable. Matches Python `open(_, 'x')` and
-/// `open(O_CREAT|O_EXCL)` semantics.
 fn check_x(argv: &str) -> Result<(), String> {
     if std::path::Path::new(argv).exists() {
         return Err(format!(
@@ -592,10 +476,9 @@ fn check_parent_writable(argv: &str, mode: &str) -> Result<(), String> {
     }
 }
 
-/// `-` -> `/dev/stdio` substitution, `@check.path` validation, and
-/// the `@literal` quoting shim -- the pre-wrap pipeline every
-/// user-supplied argv token flows through before reaching the runtime.
-/// Errors abort via `die_with_error` with the caller-supplied prefix.
+/// An argv token after `-` substitution, `@check.path` validation and
+/// `@literal` quoting. A failed check ends the run, prefixed by
+/// `error_prefix`.
 pub fn preprocess_cli_value(
     val: String,
     checks: &[Check],
@@ -604,10 +487,8 @@ pub fn preprocess_cli_value(
     error_prefix: &str,
 ) -> String {
     let v = substitute_stdio_dash(&val, checks, source).unwrap_or(val);
-    // The stdio sentinels are opened by the runtime (stdin via the nexus
-    // RPC channel, stdout as a device); "read from stdin" is not
-    // "validate a user-named path", and `access("/dev/stdin", R_OK)` can
-    // spuriously fail, so skip the value-invariant checks on them.
+    // A substituted stream is not a user-named path, and access() on it
+    // can fail spuriously.
     let is_stdio_sentinel = v == "/dev/stdin" || v == "/dev/stdout";
     if !is_stdio_sentinel {
         if let Err(e) = apply_checks(&v, checks) {
@@ -626,14 +507,12 @@ pub fn apply_shape_to_argv(raw: String, shape: Option<&ArgShape>, i: usize) -> S
     }
 }
 
-/// Parsed CLI argument value for a manifest arg slot.
+/// The parsed CLI value of one manifest arg slot.
 #[derive(Debug)]
 pub enum ArgValue {
-    /// A value string (already quoted if needed).
     Value(String),
-    /// Null/absent value.
     Null,
-    /// Group argument with per-entry values.
+    /// A record argument: its whole value, each field, each field's default.
     Group {
         grp_val: Option<String>,
         fields: Vec<Option<String>>,
@@ -652,21 +531,14 @@ pub enum ArgValue {
     /// An argument of a `@parse` entry read as argument `arg` of command
     /// `parent`, whose definition carries its source, form and checks.
     AsParent { value: Box<ArgValue>, parent: usize, arg: usize },
-    /// Variadic argument: the user supplied N tokens that the C-side
-    /// `parse_cli_data_argument_list` will assemble into a single
-    /// list packet. `literal` is the `@literal` flag -- when
-    /// set, each token is JSON-quoted in Rust before reaching C so
-    /// the per-element classifier treats it as inline content rather
-    /// than a file path.
+    /// A `@many` argument's tokens, read as one list; `literal` is the
+    /// `@literal` flag.
     Many { tokens: Vec<String>, literal: bool },
 }
 
 
-/// Read one command-line token as a value of the given wire schema and
-/// render it back as JSON. This is how a constructor's field values are
-/// folded into the constructor's JSON: a token is read exactly as an
-/// argument of that type would be (a file, a bare constructor, a string),
-/// so the assembled value is the one the type's reader accepts.
+/// One command-line token, read as an argument of wire schema `schema`
+/// would be, rendered as JSON.
 pub fn cli_token_to_json(token: &str, schema: &str) -> Result<String, String> {
     extern "C" {
         fn cli_token_to_json(
@@ -697,11 +569,8 @@ pub fn cli_token_to_json(token: &str, schema: &str) -> Result<String, String> {
     }
 }
 
-/// Route a single positional value through the C-side parser. Picks
-/// the shape-aware FFI when the arg has any non-default
-/// `@source` / `@form` / `list.*` configuration; otherwise falls back
-/// to the default `parse_cli_data_argument` path. Returns the C-owned
-/// packet pointer (null on error -- caller drains `errmsg`).
+/// Parse one value with the runtime, shaped when `shaped_dispatch_codes`
+/// gives codes. Returns null with `errmsg` set on error.
 unsafe fn dispatch_one_arg(
     shape: Option<&ArgShape>,
     c_arg: *mut std::ffi::c_void,
@@ -744,7 +613,6 @@ unsafe fn dispatch_one_arg(
 
 // -- Command execution ------------------------------------------------------
 
-/// Execute a remote command by sending a call packet to the pool.
 fn run_remote_command(
     cmd: &Command,
     args: &[ArgValue],
@@ -757,9 +625,6 @@ fn run_remote_command(
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
-    // C library functions from libmorloc.so. Per-arg parsing
-    // (`parse_cli_data_argument` / `..._shaped`) is encapsulated in
-    // `dispatch_one_arg`.
     extern "C" {
         fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut std::ffi::c_char) -> usize;
         fn make_morloc_local_call_packet(
@@ -775,7 +640,6 @@ fn run_remote_command(
 
     let socket = &sockets[cmd.pool_index];
 
-    // Parse return schema
     let return_schema = match parse_schema(&cmd.ret.schema) {
         Ok(s) => s,
         Err(e) => {
@@ -784,15 +648,6 @@ fn run_remote_command(
         }
     };
 
-    // The parsed `args` list and `cmd.args` are index-aligned 1:1 in
-    // declaration order: parse_command_args pushes one ArgValue for
-    // EVERY arg (including flags). The Haskell compiler emits one
-    // schema per arg position too. Walk both lists in lockstep; for
-    // flags, schema_str() returns None and the flag's ArgValue is
-    // already a ready-to-send "true"/"false" string that doesn't need
-    // packet conversion -- but the original v1 dispatch path still
-    // ran flags through parse_cli_data_argument with the flag's bool
-    // schema, so we mirror that to keep the wire format consistent.
     let mut arg_packets: Vec<(*mut u8, usize)> = Vec::new();
     for (i, (arg_val, arg_def)) in args.iter().zip(cmd.args.iter()).enumerate() {
         let c_pkt = build_arg_packet(i, arg_val, arg_def, manifest);
@@ -804,7 +659,6 @@ fn run_remote_command(
         arg_packets.push((c_pkt, pkt_size));
     }
 
-    // Build call packet via C library
     let arg_ptrs: Vec<*const u8> = arg_packets.iter().map(|(p, _)| *p as *const u8).collect();
     let mut errmsg_call: *mut std::ffi::c_char = std::ptr::null_mut();
     let c_call = unsafe {
@@ -825,7 +679,6 @@ fn run_remote_command(
     };
     let call_slice: &[u8] = unsafe { std::slice::from_raw_parts(c_call, call_size) };
 
-    // Send to pool and receive response
     let mut stream = match UnixStream::connect(&socket.socket_path) {
         Ok(s) => s,
         Err(e) => {
@@ -850,7 +703,6 @@ fn run_remote_command(
     }
     unsafe { libc::free(c_call as *mut std::ffi::c_void) };
 
-    // Read response header, then the rest directly into the final buffer.
     let mut hdr = [0u8; 32];
     if let Err(e) = stream.read_exact(&mut hdr) {
         die_with_pool_error(
@@ -896,7 +748,6 @@ fn run_remote_command(
     if reply_is_pipe_closed(&full_packet) {
         process::exit_broken_pipe();
     }
-    // Check for error
     match packet::get_error_message(&full_packet) {
         Ok(Some(err_msg)) => {
             if let Some(report) = crate::parse_arg::failure_report(&err_msg) {
@@ -904,9 +755,7 @@ fn run_remote_command(
                 eprintln!("{}", report);
                 process::clean_exit(1);
             }
-            // The "run failed\n" prefix is stripped from the recorded
-            // form -- consumers want the foreign traceback in summary
-            // .json's `error` field, not the morloc-level wrapper.
+            // summary.json records the message without the "run failed" line.
             let collapsed = collapse_duplicate_lines(&err_msg);
             crate::runlog::record_error(&collapsed);
             eprintln!("Error: run failed\n{}", collapsed);
@@ -919,7 +768,6 @@ fn run_remote_command(
         }
     }
 
-    // Extract and print via C library for correct voidstar handling
     let c_schema = morloc_runtime_types::cschema::CSchema::from_rust(&return_schema);
     let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
     let result_ptr = unsafe {
@@ -939,20 +787,8 @@ fn run_remote_command(
     // (a reference, or a file a cached result was read back from).
     let is_arrow = return_schema.serial_type == morloc_runtime_types::schema::SerialType::Table;
 
-    // Print using the C library for correct output. Top-level null-ish
-    // suppression (Unit and Optional-None producing empty stdout) is
-    // applied uniformly: JSON drops the output; `-f packet` skips its
-    // trailing DATA_PACKET emission so a program that streams through
-    // `@stdout` and returns Unit doesn't get a phantom packet appended
-    // past its stream footer. `--keep-null` overrides in both cases.
     print_result_c(result_ptr, c_schema, &full_packet, is_arrow, config);
 
-    // A result that arrived in shared memory came with a reference taken on
-    // this process's behalf, and one extracted from an inline packet was
-    // materialized here; either way the block is ours once it has been
-    // rendered. The process exits shortly after, so this reclaims little --
-    // but a receiver that keeps what it was handed is the contract every
-    // other consumer follows.
     unsafe {
         let mut ferr: *mut std::ffi::c_char = std::ptr::null_mut();
         shfree(result_ptr as *mut std::ffi::c_void, &mut ferr);
@@ -963,8 +799,6 @@ fn run_remote_command(
     unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
 }
 
-/// Build argument `i`'s packet from its CLI value, reading the value as
-/// `arg_def` describes. Exits with a diagnostic when the value cannot be read.
 /// Save parent argument `i` (0-based) when it is an `IFile` given by path,
 /// as a link to the file (see `stage::link_parent_arg`). Returns whether it
 /// was one.
@@ -1017,6 +851,8 @@ fn save_parent_packet(arg: usize, pkt: *mut u8) {
     crate::stage::save_parent_arg(arg, pkt, size);
 }
 
+/// Build argument `i`'s packet from its CLI value, reading the value as
+/// `arg_def` describes. Exits with a diagnostic when the value cannot be read.
 fn build_arg_packet(
     i: usize,
     arg_val: &ArgValue,
@@ -1042,9 +878,7 @@ fn build_arg_packet(
         ) -> *mut u8;
     }
     // Read as the parent command's argument, whose definition carries the
-    // shape; the entry's own slot names the same type.
-    // Either way the parent's own packet is built, and saved at the parent's
-    // position for an action that refers to it.
+    // shape, and saved at the parent's position for an action to refer to.
     if let ArgValue::AsParent { value, parent, arg } = arg_val {
         let parent_def = &manifest.commands[*parent].args[*arg];
         let pkt = build_arg_packet(i, value, parent_def, manifest);
@@ -1068,9 +902,6 @@ fn build_arg_packet(
         let c_schema = morloc_runtime_types::cschema::CSchema::from_rust(&schema);
         let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
 
-        // Variadic args (`@many`): compile-time validation rejects
-        // every form/source modifier; only the IEEE 754 special-value
-        // wrap runs per token.
         let mut many_override: Option<(Vec<String>, bool)> = None;
         if let ArgValue::Many { tokens, literal } = arg_val {
             let elem_is_float = is_float_list(&schema);
@@ -1087,8 +918,8 @@ fn build_arg_packet(
         let c_pkt = match arg_val {
             ArgValue::Json(text) => unsafe { json_arg_packet(text, c_schema, &mut errmsg) },
             ArgValue::Embed { value, parent, arg } => {
-                // The argument is loaded exactly as the parent command loads
-                // it, and its packet travels as a `[U8]` for the entry to decode.
+                // Loaded as the parent command loads it; its packet travels
+                // as a `[U8]` for the entry to decode.
                 let parent_def = &manifest.commands[*parent].args[*arg];
                 let inner = build_arg_packet(i, value, parent_def, manifest);
                 if !link_ifile_arg(*arg, value, parent_def) {
@@ -1146,9 +977,6 @@ fn build_arg_packet(
                     .map(|sh| !sh.is_default())
                     .unwrap_or(false));
 
-                // Hold every CString until after the C call so its
-                // strdup'd copy inside argument_t is the only owner
-                // that lives past this scope.
                 let grp_val_keep: Option<std::ffi::CString> =
                     grp_val.as_ref().map(|s| std::ffi::CString::new(s.as_str()).unwrap());
                 let fields_keep: Vec<Option<std::ffi::CString>> = fields.iter().enumerate()
@@ -1217,11 +1045,8 @@ fn build_arg_packet(
                 pkt
             }
             ArgValue::Value(_) | ArgValue::Null => {
-                // An absent argument carries no argv token, and the
-                // source/form/check vocabulary describes how to read a token.
-                // Applying it to the stand-in `null` would ask the runtime to
-                // open a file of that name for a `@source file` argument, so a
-                // null is dispatched shapeless.
+                // A null has no token, so it is read without the arg's shape;
+                // under `@source file` the shape would open a file named `null`.
                 let (raw_str, shape) = match arg_val {
                     ArgValue::Value(s) => (s.clone(), ArgShape::from_arg(arg_def)),
                     ArgValue::Null => ("null".to_string(), None),
@@ -1278,8 +1103,8 @@ fn msgpack_u8_array(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A packet for JSON text read with no shape: the value is already what the
-/// pool receives, so no check, quoting or source classification applies.
+/// A packet for JSON text read with no shape, check, quoting or source
+/// classification.
 unsafe fn json_arg_packet(
     text: &str,
     c_schema: *mut morloc_runtime_types::cschema::CSchema,
@@ -1296,14 +1121,8 @@ unsafe fn json_arg_packet(
     pkt
 }
 
-/// A top-level `Err` arm is a failed run, not a successful result that
-/// happens to describe a failure. Without this the process prints the Err
-/// value and exits 0, which breaks `set -e`, shell pipelines and CI for
-/// every fallible export.
-///
-/// The whole value is rendered rather than just the payload: an arm may
-/// carry anything, and the JSON form is the one every other morloc surface
-/// already shows.
+/// End the run as failed, printing the whole value as JSON, when the result
+/// is a top-level `Err` arm.
 fn die_on_top_level_err(
     result_ptr: *mut u8,
     c_schema: *const morloc_runtime_types::cschema::CSchema,
@@ -1329,7 +1148,7 @@ fn die_on_top_level_err(
     process::clean_exit(1);
 }
 
-/// Print using the C library functions for correct voidstar handling.
+/// Print a result in the configured output format.
 pub(crate) fn print_result_c(
     ptr: *mut u8,
     schema: *const morloc_runtime_types::cschema::CSchema,
@@ -1464,11 +1283,6 @@ pub(crate) fn print_result_c(
             }
         }
         OutputFormat::VoidStar => {
-            // A top-level Unit/None return carries no data. Suppress it
-            // (as JSON and Packet already do) so a command that streams
-            // its output through @stdout and returns () doesn't get a
-            // trailing Unit packet appended past the stream. --keep-null
-            // opts back in.
             if !config.keep_null
                 && unsafe { morloc_runtime_types::is_top_null(schema, ptr) }
             {
@@ -1532,11 +1346,8 @@ pub(crate) fn print_result_c(
             }
         }
         OutputFormat::Packet => {
-            // Top-level Unit/Optional-None suppression: a program that
-            // returns `<IO> ()` after streaming its output through
-            // `@stdout` would otherwise get a trailing Unit DATA_PACKET
-            // appended past the stream footer, clobbering the tail
-            // magic. `--keep-null` opts back in.
+            // A trailing Unit packet would land past a stream written to
+            // stdout.
             if !config.keep_null
                 && unsafe { morloc_runtime_types::is_top_null(schema, ptr) }
             {
@@ -1547,10 +1358,7 @@ pub(crate) fn print_result_c(
             let lock = stdout.lock();
             let fd = lock.as_raw_fd();
             let mut nerr: *mut std::ffi::c_char = std::ptr::null_mut();
-            // Empty full_packet means the caller has only a voidstar
-            // (e.g. `view --pattern`, or a stream input walked via IFile);
-            // build a fresh DATA_PACKET from it. Passing `&[]` through
-            // `normalize_data_packet_to_fd` reads a dangling pointer.
+            // An empty `full_packet` means the caller has only a voidstar.
             let n = if full_packet.is_empty() {
                 extern "C" {
                     fn mlc_write_voidstar_data_packet_to_fd(
@@ -1602,10 +1410,6 @@ pub(crate) fn print_result_c(
             }
         }
         OutputFormat::Jsonl => {
-            // A table is row-shaped, so JSON-lines is its natural form:
-            // one row object per line. Without this the generic voidstar
-            // printer is handed a table and reports that it cannot render
-            // one to JSON.
             if is_arrow {
                 let rc = unsafe { print_arrow_as_jsonl(ptr as *const std::ffi::c_void, &mut errmsg) };
                 match rc {
@@ -1620,20 +1424,11 @@ pub(crate) fn print_result_c(
                 }
                 return;
             }
-            // A top-level Unit/None return carries no data. Suppress it
-            // (as JSON and Packet already do) so a command that streams
-            // its output through @stdout and returns () doesn't get a
-            // spurious `null` line appended after the streamed jsonl.
-            // --keep-null opts back in.
             if !config.keep_null
                 && unsafe { morloc_runtime_types::is_top_null(schema, ptr) }
             {
                 return;
             }
-            // JSON-lines: one element per line for list schemas, one
-            // line total for scalars. Streams element-by-element via
-            // the runtime's `print_voidstar_jsonl` -- peak memory is
-            // one element's JSON body, not the whole list.
             extern "C" {
                 fn print_voidstar_jsonl(
                     data: *const std::ffi::c_void,
@@ -1660,12 +1455,6 @@ pub(crate) fn print_result_c(
             }
         }
         OutputFormat::Raw => {
-            // Verbatim bytes: emit a Str / [Str] / Vector U8 / [Vector U8] body
-            // with no framing -- the output path for `render` handlers.
-            // `render.buffer` streams its output and returns (); suppress that
-            // top-level Unit so it isn't fed to print_voidstar_raw (which would
-            // reject it). Whole-list `render` returns a real Str/Vector U8 value
-            // and prints normally. --keep-null opts back in.
             if !config.keep_null
                 && unsafe { morloc_runtime_types::is_top_null(schema, ptr) }
             {
@@ -1789,31 +1578,6 @@ fn write_stdout_or_exit(bytes: &[u8], what: &str) {
 fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, manifest: &Manifest) {
     use morloc_runtime_types::schema::parse_schema;
 
-    // Open a per-eval SHM arena. Every shm::shmalloc that fires while
-    // this guard is alive (CLI arg ingress via msgpack/voidstar unpack,
-    // morloc_eval intermediates, the result tree) is tracked and
-    // released when the guard drops at the end of this function. Result
-    // serialization (print_result_c -> voidstar_to_json_string) reads
-    // SHM and writes a libc-allocated JSON string, which survives the
-    // drop. For one-shot CLI this is functionally a no-op (the process
-    // exits and atexit's shclose unlinks the volumes anyway), but the
-    // explicit lifetime keeps nexus and daemon symmetric and protects
-    // any future repeated-call use of run_pure_command.
-    //
-    // The arena lives in libmorloc.so's `thread_local! ARENA`. We
-    // cannot call `eval_arena::enter()` Rust-side because the nexus no
-    // longer links morloc-runtime as an rlib -- and even if it did,
-    // that path would touch the nexus's own copy of ARENA, missing
-    // every SHM block tracked by libmorloc.so's morloc_eval. The C-ABI
-    // begin/end pair routes us through libmorloc.so's single arena;
-    // EvalArenaGuard below wraps the handle in RAII so the
-    // exit-on-Drop pattern carries through.
-    //
-    // Note: error branches below call process::clean_exit(1) which does
-    // NOT run Rust destructors; the arena guard's drop is skipped on
-    // those paths. That's acceptable here because clean_exit also tears
-    // down the whole process via atexit shclose. No additional handling
-    // is needed.
     extern "C" {
         fn morloc_eval_arena_enter(
             errmsg: *mut *mut std::ffi::c_char,
@@ -1875,7 +1639,6 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
         fn abs2rel(ptr: *mut std::ffi::c_void, errmsg: *mut *mut std::ffi::c_char) -> isize;
     }
 
-    // Build expression tree from manifest JSON
     let expr_json = match &cmd.expr {
         Some(v) => serde_json::to_string(v).unwrap_or_default(),
         None => {
@@ -1892,7 +1655,6 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
         process::clean_exit(1);
     }
 
-    // Parse return schema
     let return_schema = match parse_schema(&cmd.ret.schema) {
         Ok(s) => s,
         Err(e) => {
@@ -1902,12 +1664,6 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
     };
     let c_return_schema = morloc_runtime_types::cschema::CSchema::from_rust(&return_schema);
 
-    // The parsed `args` list and `cmd.args` are index-aligned 1:1 in
-    // declaration order: parse_command_args pushes one ArgValue for
-    // EVERY arg (including flags). The Haskell compiler emits one
-    // schema per arg position too. Walk both lists in lockstep; for
-    // flags, the schema_str() accessor returns None and we fall back
-    // to the bool schema "b" so the wire format stays consistent.
     let mut c_arg_schemas: Vec<*const morloc_runtime_types::cschema::CSchema> = Vec::new();
     let mut c_arg_voidstars: Vec<*mut u8> = Vec::new();
 
@@ -1925,12 +1681,6 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
         };
         let c_schema = morloc_runtime_types::cschema::CSchema::from_rust(&schema);
 
-        // Many-args go through the dedicated list-assembly C entry
-        // point and an unrolled record is assembled as for a pool; Value
-        // and Null go through the scalar parse_cli_data_argument path.
-        // Variadic args (`@many`): compile-time validation rejects
-        // every form/source modifier; only the IEEE 754 special-value
-        // wrap runs per token.
         let mut many_override: Option<(Vec<String>, bool)> = None;
         if let ArgValue::Many { tokens, literal } = arg_val {
             let elem_is_float = is_float_list(&schema);
@@ -1957,15 +1707,11 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
             },
             ArgValue::Group { .. } => build_arg_packet(i, arg_val, arg_def, manifest),
             _ => {
-                // See the sibling branch above: a null has no token, so it is
-                // dispatched without the arg's source/form/check shape.
                 let (raw_str, shape) = match arg_val {
                     ArgValue::Value(s) => (s.clone(), ArgShape::from_arg(arg_def)),
                     ArgValue::Null => ("null".to_string(), None),
                     ArgValue::Json(text) => (text.clone(), None),
                     ArgValue::Many { .. } | ArgValue::Group { .. } => unreachable!(),
-                    // A `@parse` entry always runs in a pool: the compiler
-                    // rejects one that would be evaluated here.
                     ArgValue::Parsed { .. } | ArgValue::Embed { .. } | ArgValue::AsParent { .. } => unreachable!(),
                 };
                 let raw_str = if is_float_scalar(&schema) {
@@ -2013,7 +1759,6 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
         c_arg_voidstars.push(voidstar);
     }
 
-    // Call morloc_eval
     let result = unsafe {
         morloc_eval(
             expr,
@@ -2030,7 +1775,6 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
         crate::runlog::die_with_error(&format!("evaluation failed: {}", msg));
     }
 
-    // Convert result to relptr and make a data packet for printing
     let result_relptr = unsafe { abs2rel(result, &mut errmsg) };
     let result_packet = unsafe { make_standard_data_packet(result_relptr, c_return_schema) };
 
@@ -2039,14 +1783,12 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
         process::clean_exit(1);
     }
 
-    // Get packet as bytes for print_result_c
     extern "C" {
         fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut std::ffi::c_char) -> usize;
     }
     let pkt_size = unsafe { morloc_packet_size(result_packet, &mut errmsg) };
     let pkt_bytes = unsafe { std::slice::from_raw_parts(result_packet, pkt_size).to_vec() };
 
-    // Extract voidstar value from the result packet
     let result_ptr = unsafe { get_morloc_data_packet_value(pkt_bytes.as_ptr(), c_return_schema, &mut errmsg) };
     if result_ptr.is_null() {
         let msg = process::take_c_errmsg(errmsg)
@@ -2058,7 +1800,6 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
     die_on_top_level_err(result_ptr, c_return_schema);
     print_result_c(result_ptr, c_return_schema, &pkt_bytes, false, config);
 
-    // Cleanup
     for cs in &c_arg_schemas {
         unsafe { morloc_runtime_types::cschema::CSchema::free(*cs as *mut morloc_runtime_types::cschema::CSchema) };
     }
@@ -2161,16 +1902,12 @@ mod tests {
 
     #[test]
     fn apply_checks_path_rejects_missing_file() {
-        // Sanity guard: a non-`-` path that does not exist still
-        // fails the readability probe.
         let checks = vec![Check::Path("r".into())];
         assert!(apply_checks("/no/such/path/should/exist/x", &checks).is_err());
     }
 
     #[test]
     fn substitute_stdio_dash_maps_to_dev_stdio() {
-        // r -> /dev/stdin, w -> /dev/stdout; the substitution lets
-        // the callee `fopen` the standard stream as a regular file.
         let r = vec![Check::Path("r".into())];
         assert_eq!(
             substitute_stdio_dash("-", &r, SourceAtom::Auto).as_deref(),
@@ -2185,16 +1922,12 @@ mod tests {
 
     #[test]
     fn substitute_stdio_dash_skips_exclusive_create() {
-        // `x` requires the path to not exist; /dev/stdout does exist,
-        // so substitution would immediately fail the check. Better to
-        // leave `-` alone and let the check report the real problem.
         let x = vec![Check::Path("x".into())];
         assert!(substitute_stdio_dash("-", &x, SourceAtom::Auto).is_none());
     }
 
     #[test]
     fn substitute_stdio_dash_leaves_non_dash_untouched() {
-        // Anything other than the literal `-` is a real path; leave it.
         let r = vec![Check::Path("r".into())];
         assert!(substitute_stdio_dash("foo.txt", &r, SourceAtom::Auto).is_none());
         assert!(substitute_stdio_dash("/dev/stdin", &r, SourceAtom::Auto).is_none());
@@ -2203,8 +1936,6 @@ mod tests {
 
     #[test]
     fn substitute_stdio_dash_skips_mixed_and_unchecked() {
-        // `rw` is ambiguous (stdin or stdout?); no substitution.
-        // No check.path at all also means no substitution.
         let rw = vec![Check::Path("rw".into())];
         assert!(substitute_stdio_dash("-", &rw, SourceAtom::Auto).is_none());
         let none: Vec<Check> = vec![];
@@ -2213,26 +1944,17 @@ mod tests {
 
     #[test]
     fn substitute_stdio_dash_maps_declared_file_source() {
-        // `@source file` bypasses the auto classifier, so the dash has
-        // to be resolved here or `fopen("-")` fails downstream. The
-        // argument is read, never written, so it is always stdin.
         let none: Vec<Check> = vec![];
         assert_eq!(
             substitute_stdio_dash("-", &none, SourceAtom::File).as_deref(),
             Some("/dev/stdin"),
         );
-        // A real path under the same declaration is left alone.
         assert!(substitute_stdio_dash("in.txt", &none, SourceAtom::File).is_none());
-        // An inline-declared argument names no file; `-` is its value.
         assert!(substitute_stdio_dash("-", &none, SourceAtom::Inline).is_none());
     }
 
     #[test]
     fn apply_checks_w_accepts_creatable_path() {
-        // Python-style `w`: (exists AND writable) OR
-        // (does not exist AND parent writable). A fresh path under
-        // /tmp should pass because /tmp is writable, even though the
-        // path itself does not exist yet.
         let unique = format!(
             "/tmp/morloc_apply_checks_w_{}_{}.tmp",
             std::process::id(),
@@ -2241,7 +1963,6 @@ mod tests {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0),
         );
-        // Guard: the path must not exist for the test to be meaningful.
         let _ = std::fs::remove_file(&unique);
         let checks = vec![Check::Path("w".into())];
         let res = apply_checks(&unique, &checks);
@@ -2250,21 +1971,15 @@ mod tests {
 
     #[test]
     fn apply_checks_x_rejects_existing_path() {
-        // `x` demands non-existence. A path that clearly exists
-        // (this very source file's parent) must fail.
         let checks = vec![Check::Path("x".into())];
         assert!(apply_checks("/tmp", &checks).is_err());
     }
 
     #[test]
     fn apply_checks_rejects_unknown_mode() {
-        // The old `c` letter was renamed to `x`; ensure the runtime
-        // rejects the retired name with a clear error instead of
-        // silently no-oping.
         let checks = vec![Check::Path("c".into())];
         let res = apply_checks("/tmp/anything", &checks);
         assert!(res.is_err());
-        // And any unsatisfiable combo from the old grammar must also fail.
         let checks = vec![Check::Path("rwc".into())];
         assert!(apply_checks("/tmp/anything", &checks).is_err());
     }

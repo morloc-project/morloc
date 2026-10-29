@@ -79,3 +79,8 @@
   each fast path, the read) and reads the header three times; one read of
   header and metadata could choose the path. A FIFO path is opened and
   closed by the peek before the real read.
+- [read, 2026-10-29] schema.rs `alignment()` gives a Map pointer alignment
+  but a Tuple the largest field alignment, though both are laid out by the
+  same offsets. `test_enum_roundtrips_through_render` skips any case that
+  does not parse (`if let Ok`), so its `e1` and
+  `e21Aa_long_constructor_name` cases test nothing.

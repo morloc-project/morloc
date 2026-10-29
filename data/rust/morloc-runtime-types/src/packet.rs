@@ -1,11 +1,5 @@
 //! Stateless half of the packet protocol: header layout, constants,
 //! pure parsers, and pure constructors.
-//!
-//! The runtime-tunable config statics (`INLINE_THRESHOLD`,
-//! `SHM_ENABLED`, `TMPDIR`, `CONFIG_INIT`) and the SHM-touching
-//! payload helpers (`get_data_value`, `read_voidstar_binary`) live in
-//! `morloc-runtime::packet` so they are not duplicated across the
-//! nexus and libmorloc.so processes.
 
 use crate::error::MorlocError;
 use crate::schema::Schema;
@@ -32,19 +26,10 @@ pub const PACKET_TYPE_PING: u8 = 2;
 pub const PACKET_TYPE_STREAM: u8 = 3;
 pub const PACKET_TYPE_FOOTER: u8 = 4;
 
-// Stream packet length-field sentinel. Streams are append-only and have
-// no global content length; the header's `length` field is always set to
-// `u64::MAX`. Future versions may interpret a non-sentinel value as a
-// declared maximum stream length, but no current writer or reader uses
-// that semantics.
+// The `length` of every stream header: a stream has no global content length.
 pub const STREAM_LENGTH_SENTINEL: u64 = u64::MAX;
 
 // ── Stream/file handle kinds ───────────────────────────────────────────────
-//
-// `mlc_open` takes a `kind` byte selecting which handle type to create.
-// The registry stores the kind alongside each entry so subsequent
-// operations (`mlc_close`, `mlc_eval_pattern`, etc.) can dispatch
-// internally without the caller having to specify the kind.
 
 pub const MLC_KIND_IFILE: u8 = 0;
 pub const MLC_KIND_ISTREAM: u8 = 1;
@@ -97,11 +82,6 @@ pub const PACKET_ENTRYPOINT_LOCAL: u8 = 0x00;
 pub const PACKET_ENTRYPOINT_REMOTE_SFS: u8 = 0x01;
 
 // ── Lower-case display names for the packet-byte constants above. ──────────
-//
-// Single source of truth for the strings used by `morloc-nexus file`,
-// FFI error messages, and any future tooling. Returns `"unknown"`
-// for unrecognized bytes rather than panicking — these are derived
-// from on-disk packets that may carry future / corrupt values.
 
 pub const fn packet_type_name(t: u8) -> &'static str {
     match t {
@@ -153,39 +133,16 @@ pub const fn packet_entrypoint_name(e: u8) -> &'static str {
 
 // ── Inline-threshold default ───────────────────────────────────────────────
 
-// Compile-time default for the inline threshold. The effective runtime
-// value (an `AtomicUsize` initialised from this constant, env vars, and
-// FFI setters) lives in `morloc-runtime::packet` because it is process
-// global state. The constant itself is safe to share.
 pub const MORLOC_INLINE_THRESHOLD: usize = 64 * 1024;
 
 // ── Metadata ───────────────────────────────────────────────────────────────
 
 // ── Stream EOF tail ────────────────────────────────────────────────────────
 //
-// Stream files (`PACKET_TYPE_STREAM`) optionally end with a
-// `PACKET_TYPE_FOOTER` packet, followed by a fixed 8-byte tail at the
-// end of the file. The tail lets a reader detect footer presence in a
-// single `pread` of the last 8 bytes, without scanning the body.
-//
-// Tail layout (8 bytes total):
-//   bytes 0..4: footer_length  (u32 LE) -- byte size of the footer packet
-//                                          *not* including this tail
-//   bytes 4..8: footer_magic   ([u8; 4]) -- PACKET_MAGIC written
-//                                          with bytes reversed
-//                                          (07 07 f8 6d), so it cannot
-//                                          collide with a packet header
-//                                          start (which is the same
-//                                          bytes in LE: 6d f8 07 07).
-//
-// A reader that sees `STREAM_TAIL_MAGIC` at `file_size - 4` walks back
-// `footer_length + 8` bytes to the footer packet's first byte. The
-// reader then re-validates the candidate footer (`PACKET_MAGIC` + a
-// `PACKET_TYPE_FOOTER` command-type byte) before trusting it -- the
-// 4-byte tail magic plus a 32-byte well-formed footer header give
-// sufficient defence against accidental data-look-alikes. Footer
-// absence (writer crashed, stream in-progress) is the case where the
-// tail magic does not match.
+// A stream file may end with a FOOTER packet followed by an 8-byte tail:
+//   bytes 0..4: footer_length (u32 LE), the footer packet's size, excluding the tail
+//   bytes 4..8: STREAM_TAIL_MAGIC
+// The footer packet starts `footer_length + 8` bytes before EOF.
 
 pub const STREAM_TAIL_SIZE: usize = 8;
 /// PACKET_MAGIC (0x0707_f86d) with its bytes reversed.
@@ -212,73 +169,35 @@ pub fn decode_stream_tail(tail: &[u8; STREAM_TAIL_SIZE]) -> Option<u32> {
 
 pub const METADATA_TYPE_SCHEMA_STRING: u8 = 0x01;
 pub const METADATA_TYPE_XXHASH: u8 = 0x02;
-/// Layer 3 vol_idx hint: the producer of an on-disk MESG+VOIDSTAR
-/// packet has encoded a 15-bit volume index into the high bits of
-/// every relptr in the payload. The reader that mmaps this file can
-/// (a) register the payload at that slot if it's free in the reader's
-/// VOLUMES table -- the relptrs decode correctly with no walk -- or
-/// (b) register at a different slot and run `remap_volume_indices`
-/// to XOR-rewrite the high bits. The 16-bit body is a little-endian
-/// u16 carrying the producer's chosen index; the high bit is reserved.
+/// On a MESG+VOIDSTAR packet: the 15-bit volume index the producer encoded
+/// in the high bits of every relptr in the payload, as a little-endian u16.
 pub const METADATA_TYPE_VOL_INDEX: u8 = 0x03;
-/// Frame index for multi-frame compressed payloads. The entry body is
+/// Frame index of a compressed payload. The entry body is
 /// `[frame_count: u32 LE, [(uncompressed_size: u64 LE, compressed_size: u64 LE); frame_count]]`.
-/// Every `PACKET_COMPRESSION_ZSTD` payload carries this index so
-/// decoders can `shmalloc(total_uncompressed_size)` once, slice the
-/// destination per frame, and dispatch frame decoding to a worker
-/// pool. The frame index is mandatory on compressed packets under the
-/// multi-frame format -- a compressed packet that arrives without an
-/// index is rejected by the decoder.
+/// Every `PACKET_COMPRESSION_ZSTD` payload must carry one.
 ///
-/// The entry's metadata `size` field may exceed
-/// `4 + 16 * frame_count`: streaming encoders reserve worst-case room
-/// up front (from `ceil(estimated_payload_bytes / FRAME_CHUNK_SIZE)`)
-/// and patch the actual data in after the payload streams out, so
-/// trailing slots may be zero. Decoders use the `frame_count` field
-/// inside the entry body, not the entry's metadata size, to know how
-/// many frames to consume.
+/// The entry's metadata `size` may exceed `4 + 16 * frame_count`, since
+/// encoders may reserve room up front; trailing slots may be zero.
+/// Decoders read `frame_count`, not the entry size.
 pub const METADATA_TYPE_FRAME_INDEX: u8 = 0x04;
 
 // ── Stream-footer metadata block types ────────────────────────────────────
 //
-// These types appear in the body of a `PACKET_TYPE_FOOTER` packet that
-// terminates a `PACKET_TYPE_STREAM` file.
-//
-// Layout commitments:
-//   - `SUBPACKET_INDEX` (`0x05`) appears only in the *final* footer (the
-//     one written by `@close` / implicit-close-on-exit). Body is
-//     `u64 count` followed by `count * (u64 offset, u64 elem_count)`
-//     pairs (offset of each sub-packet header within the file, relative
-//     to file start; plus its element count). The element count lets a
-//     reader answer "which sub-packet holds global index i?" via a
-//     `partition_point` binary search over cumulative counts, with zero
-//     sub-packet decompression.
-//   - `STREAM_DIAG` (`0x06`) is a fixed-size `StreamDiag` struct (see
-//     below) carrying running counters + tail window. Appears in both
-//     temp and final footers. The temp footer's whole purpose is this
-//     block.
-//   - `FOOTER_FINAL` (`0x07`) is presence-only (zero-length body). Set in
-//     the final footer; absent in temp footers. A reader uses this to
-//     distinguish "writer crashed mid-stream" (temp footer only) from
-//     "writer closed cleanly" (final footer).
-//   - `FOOTER_STATUS` (`0x08`) is a one-byte body recording WHY the final
-//     footer was written. See `FOOTER_STATUS_*` constants below. Absent
-//     in temp footers and in legacy final footers; readers default to
-//     `FOOTER_STATUS_CLOSED` when the block is missing.
+// Blocks in the body of a `PACKET_TYPE_FOOTER` packet:
+//   - `SUBPACKET_INDEX` (`0x05`), final footer only: `u64 count` followed
+//     by `count * (u64 offset, u64 elem_count)`, the offset of each
+//     sub-packet header from file start and its element count.
+//   - `STREAM_DIAG` (`0x06`), temp and final footers: a `StreamDiag`.
+//   - `FOOTER_FINAL` (`0x07`), final footer only: empty body. Its absence
+//     means the writer did not finish the stream.
+//   - `FOOTER_STATUS` (`0x08`), final footer only: one byte, a
+//     `FOOTER_STATUS_*` value.
 pub const METADATA_TYPE_SUBPACKET_INDEX: u8 = 0x05;
 pub const METADATA_TYPE_STREAM_DIAG: u8 = 0x06;
 pub const METADATA_TYPE_FOOTER_FINAL: u8 = 0x07;
 pub const METADATA_TYPE_FOOTER_STATUS: u8 = 0x08;
 
-/// Final-footer status enum values (the body of `METADATA_TYPE_FOOTER_STATUS`).
-///
-/// `CLOSED` is the explicit `@close` path -- the writer reached the end of
-/// its work and finalised the file on purpose. `PAUSED` is the auto-close
-/// path taken when a remote child dispatch returns an OStream without an
-/// explicit `@close`; the file is well-formed and safe to `@append` to.
-/// `FAILED` / `REPAIRED` are reserved for future use: a writer that
-/// detected an internal inconsistency at close time and a `morloc-nexus`
-/// repair pass that reconstructed a final footer from a temp-footer file.
+/// Final-footer status values (the body of `METADATA_TYPE_FOOTER_STATUS`).
 pub const FOOTER_STATUS_CLOSED: u8 = 0;
 pub const FOOTER_STATUS_PAUSED: u8 = 1;
 pub const FOOTER_STATUS_FAILED: u8 = 2;
@@ -288,12 +207,8 @@ pub const METADATA_HEADER_MAGIC: [u8; 3] = *b"mmh";
 
 // ── Subpacket-index helpers ────────────────────────────────────────────────
 
-/// One entry in the SUBPACKET_INDEX (0x05) block: byte offset of a
-/// sub-packet's header in the stream file, plus that sub-packet's
-/// element count. Element count comes from the sub-packet's `Array`
-/// header (`arr.size`) and lets readers binary-search over cumulative
-/// counts to answer "which sub-packet holds global index i?" without
-/// decompressing anything.
+/// One SUBPACKET_INDEX entry: the byte offset of a sub-packet's header in
+/// the stream file, and that sub-packet's element count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubpacketEntry {
     pub offset: u64,
@@ -332,20 +247,15 @@ pub fn frame_totals(frames: &[FrameEntry]) -> Result<(usize, usize), MorlocError
     })
 }
 
-/// Bytes per frame slot inside the frame-index entry payload
-/// (`u64` uncompressed_size + `u64` compressed_size). Encoders use
-/// this to size the worst-case reservation: an entry covering
-/// `n` frames is `FRAME_INDEX_HEADER_BYTES + n * FRAME_ENTRY_BYTES`.
+/// Bytes per frame slot in the frame-index entry payload
+/// (`u64` uncompressed_size + `u64` compressed_size).
 pub const FRAME_ENTRY_BYTES: usize = 16;
 
 /// Bytes before the per-frame array in the entry payload (the
 /// `frame_count: u32 LE` prefix).
 pub const FRAME_INDEX_HEADER_BYTES: usize = 4;
 
-/// Encode a frame-index entry payload (excluding the 8-byte
-/// `mmh + type + size` metadata-entry header). The returned bytes are
-/// what an encoder writes into the body of a
-/// `METADATA_TYPE_FRAME_INDEX` entry.
+/// Encode a frame-index entry body (without the 8-byte metadata-entry header).
 pub fn encode_frame_index_entry(frames: &[FrameEntry]) -> Vec<u8> {
     let mut out = Vec::with_capacity(
         FRAME_INDEX_HEADER_BYTES + frames.len() * FRAME_ENTRY_BYTES,
@@ -358,12 +268,8 @@ pub fn encode_frame_index_entry(frames: &[FrameEntry]) -> Vec<u8> {
     out
 }
 
-/// Decode a frame-index entry payload (the body of a
-/// `METADATA_TYPE_FRAME_INDEX` entry, not the 8-byte entry header).
-/// Returns `Err` on truncation or a `frame_count` that exceeds the
-/// available data. Trailing bytes after `frame_count * FRAME_ENTRY_BYTES`
-/// are ignored (encoder may reserve more than needed; padding stays
-/// zero).
+/// Decode a frame-index entry body (without the 8-byte entry header).
+/// Bytes past `frame_count` slots are ignored.
 pub fn decode_frame_index_entry(data: &[u8]) -> Result<Vec<FrameEntry>, MorlocError> {
     if data.len() < FRAME_INDEX_HEADER_BYTES {
         return Err(MorlocError::Packet(format!(
@@ -400,10 +306,7 @@ pub fn decode_frame_index_entry(data: &[u8]) -> Result<Vec<FrameEntry>, MorlocEr
     Ok(frames)
 }
 
-/// Read the multi-frame index from a packet's metadata block, if
-/// present. Returns `Ok(None)` when the packet has no frame index
-/// entry (the legal shape for uncompressed packets); returns
-/// `Ok(Some(frames))` when the entry is present and parses cleanly.
+/// The frame index in a packet's metadata, or `None` when it has none.
 pub fn read_frame_index_from_meta(
     packet: &[u8],
 ) -> Result<Option<Vec<FrameEntry>>, MorlocError> {
@@ -417,8 +320,6 @@ pub fn read_frame_index_from_meta(
 
 // ── Packed structs matching the C binary layout ────────────────────────────
 
-/// 8-byte command union. We represent each variant as its own struct and
-/// transmute at the boundary.
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
 pub struct CommandType {
@@ -497,12 +398,8 @@ pub struct PacketHeader {
 }
 
 /// Byte offsets of a data command's fields within the 32-byte packet
-/// header, derived from the structs rather than written down, so they
-/// cannot drift from the layout they describe. Anything that reads a
-/// packet's bytes directly -- a language binding, a test, a writer
-/// patching a field in place -- must use these rather than re-deriving
-/// them; three independent copies of these numbers existed before, and
-/// one of them was wrong.
+/// header, derived from the structs. Code that reads or patches packet
+/// bytes directly uses these.
 pub const PKT_HEADER_SIZE: usize = 32;
 pub const PKT_CMD_OFF: usize = std::mem::offset_of!(PacketHeader, command);
 pub const PKT_CMD_TYPE_OFF: usize = PKT_CMD_OFF + std::mem::offset_of!(CommandData, cmd_type);
@@ -556,7 +453,6 @@ impl PacketHeader {
         }
     }
 
-    /// Create a ping packet (no payload).
     pub fn ping() -> Self {
         Self::new(
             PacketCommand {
@@ -570,7 +466,6 @@ impl PacketHeader {
         )
     }
 
-    /// Create a local call packet header.
     pub fn local_call(midx: u32, payload_len: u64) -> Self {
         Self::new(
             PacketCommand {
@@ -586,7 +481,6 @@ impl PacketHeader {
         )
     }
 
-    /// Create a remote call packet header.
     pub fn remote_call(midx: u32, payload_len: u64) -> Self {
         Self::new(
             PacketCommand {
@@ -640,11 +534,8 @@ impl PacketHeader {
         )
     }
 
-    /// Create a stream packet header. Length is fixed at
-    /// `STREAM_LENGTH_SENTINEL` (`u64::MAX`); writers never touch the
-    /// header after creation. Metadata blocks (e.g. the element schema)
-    /// live between the header and the first sub-packet; the caller
-    /// sets `offset` directly after construction to the metadata size.
+/// A stream header: `length` is `STREAM_LENGTH_SENTINEL`, and the caller
+/// sets `offset` to the metadata size.
     pub fn stream() -> Self {
         Self::new(
             PacketCommand {
@@ -658,10 +549,7 @@ impl PacketHeader {
         )
     }
 
-    /// Create a footer packet header. `length` is the byte size of the
-    /// footer's tagged-block payload (analogous to a data packet's
-    /// payload). Metadata blocks before the payload are optional;
-    /// callers may set `offset` after construction if needed.
+/// A footer header; `length` is the byte size of its tagged blocks.
     pub fn footer(payload_len: u64) -> Self {
         Self::new(
             PacketCommand {
@@ -675,7 +563,6 @@ impl PacketHeader {
         )
     }
 
-    /// Create a fail packet with an error message.
     pub fn fail(error_msg_len: u64) -> Self {
         Self::new(
             PacketCommand {
@@ -694,17 +581,14 @@ impl PacketHeader {
         )
     }
 
-    /// Total packet size (header + payload).
     pub fn total_size(&self) -> u64 {
         self.offset as u64 + self.length
     }
 
-    /// Check if this is a valid morloc packet.
     pub fn is_valid(&self) -> bool {
         self.magic == PACKET_MAGIC
     }
 
-    /// Get the command type.
     pub fn command_type(&self) -> u8 {
         unsafe { self.command.cmd_type.cmd_type }
     }
@@ -745,12 +629,10 @@ impl PacketHeader {
         self.is_data() && unsafe { self.command.data.status } == PACKET_STATUS_PIPE_CLOSED
     }
 
-    /// Serialize the header to bytes.
     pub fn to_bytes(&self) -> [u8; 32] {
         unsafe { std::mem::transmute(*self) }
     }
 
-    /// Deserialize a header from bytes.
     pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, MorlocError> {
         let header: PacketHeader = unsafe { std::mem::transmute(*bytes) };
         if !header.is_valid() {
@@ -769,19 +651,9 @@ pub const NOT_A_PACKET: &str =
 
 // ── Full-packet validity check ──────────────────────────────────────────────
 
-/// Confirm that a byte slice is a structurally complete morloc packet:
-/// a valid 32-byte header, with body length matching exactly
-/// `header.offset + header.length`. Intended for use on bytes that
-/// just came from disk (or any other untrusted source) before any
-/// downstream code dereferences offsets into the buffer. Inter-pool
-/// UDS-stream paths do NOT need to call this -- they ingest bytes
-/// produced by morloc itself one process away, so the cost is not
-/// worth paying on the hot path.
-///
-/// Returns the parsed header on success; on any structural problem
-/// returns a `MorlocError::Packet` with a single-sentence
-/// machine-and-human-readable summary that callers can surface
-/// directly via `set_errmsg`.
+/// Confirm that `bytes` is one complete packet: a valid header and exactly
+/// `32 + offset + length` bytes. For bytes from an untrusted source, before
+/// any offset into them is followed.
 pub fn validate_packet(bytes: &[u8]) -> Result<PacketHeader, MorlocError> {
     if bytes.len() < 32 {
         return Err(MorlocError::Packet(format!(
@@ -816,25 +688,21 @@ pub fn make_standard_data_packet(relptr: RelPtr, schema: &Schema) -> Vec<u8> {
     let schema_bytes = schema_str.as_bytes();
     let schema_len = schema_bytes.len() + 1; // +1 for null terminator
 
-    // Metadata: header (8 bytes) + schema string (null-terminated), padded to 32-byte boundary
     let meta_header_size = std::mem::size_of::<MetadataHeader>();
     let raw_meta_len = meta_header_size + schema_len;
     let padded_meta_len = ((raw_meta_len + 31) / 32) * 32;
 
-    // Payload: relptr
     let payload_len = std::mem::size_of::<RelPtr>();
 
     let total = 32 + padded_meta_len + payload_len;
     let mut packet = vec![0u8; total];
 
-    // Write header
     let header = PacketHeader::data_rptr(PACKET_FORMAT_VOIDSTAR, payload_len as u64);
     let mut hdr = header;
     hdr.offset = padded_meta_len as u32;
     let hdr_bytes = hdr.to_bytes();
     packet[..32].copy_from_slice(&hdr_bytes);
 
-    // Write metadata header
     let meta_start = 32;
     packet[meta_start] = b'm';
     packet[meta_start + 1] = b'm';
@@ -843,12 +711,9 @@ pub fn make_standard_data_packet(relptr: RelPtr, schema: &Schema) -> Vec<u8> {
     let meta_size_bytes = (schema_len as u32).to_le_bytes();
     packet[meta_start + 4..meta_start + 8].copy_from_slice(&meta_size_bytes);
 
-    // Write schema string (null-terminated)
     let schema_data_start = meta_start + meta_header_size;
     packet[schema_data_start..schema_data_start + schema_bytes.len()].copy_from_slice(schema_bytes);
-    // Null terminator already there from vec![0u8]
 
-    // Write relptr payload
     let payload_start = 32 + padded_meta_len;
     let relptr_bytes = relptr.to_ne_bytes();
     packet[payload_start..payload_start + relptr_bytes.len()].copy_from_slice(&relptr_bytes);
@@ -869,13 +734,11 @@ pub fn make_mesg_data_packet(mpk_data: &[u8], schema: &Schema) -> Vec<u8> {
     let total = 32 + padded_meta_len + mpk_data.len();
     let mut packet = vec![0u8; total];
 
-    // Write header
     let mut header = PacketHeader::data_mesg(PACKET_FORMAT_MSGPACK, mpk_data.len() as u64);
     header.offset = padded_meta_len as u32;
     let hdr_bytes = header.to_bytes();
     packet[..32].copy_from_slice(&hdr_bytes);
 
-    // Write metadata header
     let meta_start = 32;
     packet[meta_start] = b'm';
     packet[meta_start + 1] = b'm';
@@ -884,11 +747,9 @@ pub fn make_mesg_data_packet(mpk_data: &[u8], schema: &Schema) -> Vec<u8> {
     let meta_size_bytes = (schema_len as u32).to_le_bytes();
     packet[meta_start + 4..meta_start + 8].copy_from_slice(&meta_size_bytes);
 
-    // Write schema string
     let schema_data_start = meta_start + meta_header_size;
     packet[schema_data_start..schema_data_start + schema_bytes.len()].copy_from_slice(schema_bytes);
 
-    // Write msgpack payload
     let payload_start = 32 + padded_meta_len;
     packet[payload_start..payload_start + mpk_data.len()].copy_from_slice(mpk_data);
 
@@ -901,12 +762,10 @@ pub fn make_local_call_packet(midx: u32, arg_packets: &[Vec<u8>]) -> Vec<u8> {
     let total = 32 + data_length;
     let mut packet = vec![0u8; total];
 
-    // Write call header
     let header = PacketHeader::local_call(midx, data_length as u64);
     let hdr_bytes = header.to_bytes();
     packet[..32].copy_from_slice(&hdr_bytes);
 
-    // Concatenate argument packets
     let mut pos = 32;
     for arg in arg_packets {
         packet[pos..pos + arg.len()].copy_from_slice(arg);
@@ -916,18 +775,11 @@ pub fn make_local_call_packet(midx: u32, arg_packets: &[Vec<u8>]) -> Vec<u8> {
     packet
 }
 
-/// Build a stream-file prefix: the 32-byte STREAM header plus a
-/// metadata block carrying the value schema `[a]`.
+/// The opening bytes of a stream file: the STREAM header and a metadata
+/// block carrying the list schema `[a]`. Sub-packets follow it, then
+/// optionally a FOOTER packet and the EOF tail.
 ///
-/// The result is *not* a complete packet -- it is the opening bytes of
-/// a stream file. A writer appends one or more full DATA sub-packets
-/// after this prefix, then optionally a FOOTER packet plus the
-/// `STREAM_TAIL_SIZE`-byte EOF tail. The STREAM header's `length` field
-/// is `STREAM_LENGTH_SENTINEL` (writers never touch the header again),
-/// and `offset` is the byte size of the metadata block.
-///
-/// Debug-assert: callers must pass an Array schema (streams are
-/// list-shaped). Enforced at every entry via `reject_non_list_stream_schema`.
+/// `schema` must be an Array schema.
 pub fn make_stream_header_block(schema: &Schema) -> Vec<u8> {
     debug_assert!(
         schema.serial_type == crate::schema::SerialType::Array,
@@ -946,13 +798,11 @@ pub fn make_stream_header_block(schema: &Schema) -> Vec<u8> {
     let total = 32 + padded_meta_len;
     let mut out = vec![0u8; total];
 
-    // Write header
     let mut hdr = PacketHeader::stream();
     hdr.offset = padded_meta_len as u32;
     let hdr_bytes = hdr.to_bytes();
     out[..32].copy_from_slice(&hdr_bytes);
 
-    // Write the schema metadata entry
     let meta_start = 32;
     out[meta_start..meta_start + 3].copy_from_slice(&METADATA_HEADER_MAGIC);
     out[meta_start + 3] = METADATA_TYPE_SCHEMA_STRING;
@@ -961,16 +811,11 @@ pub fn make_stream_header_block(schema: &Schema) -> Vec<u8> {
     let schema_data_start = meta_start + meta_header_size;
     out[schema_data_start..schema_data_start + schema_bytes.len()]
         .copy_from_slice(schema_bytes);
-    // Null terminator already there from the zero-initialised vec.
 
     out
 }
 
-/// Build a FOOTER packet from a sequence of tagged metadata blocks.
-/// The payload is exactly `metadata_entries_end(...)`-style entries,
-/// not padded (the FOOTER's `length` field gives the exact byte
-/// count). Passing an empty `blocks` slice yields a header-only footer,
-/// useful as a clean-close marker even when no cached indices exist.
+/// A FOOTER packet holding `blocks` as unpadded metadata entries.
 pub fn make_footer_packet(blocks: &[(u8, &[u8])]) -> Vec<u8> {
     let payload_len: usize = blocks
         .iter()
@@ -980,11 +825,8 @@ pub fn make_footer_packet(blocks: &[(u8, &[u8])]) -> Vec<u8> {
     let total = 32 + payload_len;
     let mut out = vec![0u8; total];
 
-    // The footer's metadata blocks sit directly after the 32-byte header.
-    // `iter_packet_metadata` keys off `header.offset` to find the metadata
-    // range (see iter_packet_metadata: meta_end = 32 + offset), so the
-    // offset field must be set to the blocks' total byte length even
-    // though footer packets have no separate post-metadata payload.
+// `iter_packet_metadata` reads entries from `32..32 + offset`, so `offset`
+// covers the blocks even though they are also the payload.
     let mut hdr = PacketHeader::footer(payload_len as u64);
     hdr.offset = payload_len as u32;
     let hdr_bytes = hdr.to_bytes();
@@ -1006,49 +848,26 @@ pub fn make_footer_packet(blocks: &[(u8, &[u8])]) -> Vec<u8> {
 
 // ── Stream diagnostic block (StreamDiag) ──────────────────────────────────
 //
-// Fixed-size diagnostic block carried inside every stream footer (both
-// temp and final). The temp footer's whole purpose is this block; it
-// rewritten on every `@write` flush, so its size MUST stay constant.
-//
-// Field order is chosen so each u64 is on a natural 8-byte boundary
-// without padding. Total payload = 160 bytes
-// (16 B header lane + 8 B reserved + 72 B totals/timing + 64 B tail).
+// Carried in every stream footer, temp and final. Its size is fixed, so a
+// temp footer is always `STREAM_TEMP_FOOTER_BYTES` long.
 
-/// Current StreamDiag struct version. Bump when adding new trailing
-/// fields. Older tooling reads only what it understands; newer fields
-/// are appended at the end of the struct (via `_reserved` budget).
+/// Current StreamDiag struct version; bump when adding fields.
 pub const STREAM_DIAG_VERSION: u32 = 1;
 
-/// Capacity of the StreamDiag tail-window array. The diag's `tail_len`
-/// field indicates how many entries are populated; entries beyond
-/// `tail_len` are uninitialised and MUST NOT be consulted.
+/// Capacity of the StreamDiag tail window; only `tail[0..tail_len]` is meaningful.
 pub const STREAM_DIAG_TAIL_MAX: usize = 8;
 
-/// Wire layout of the diagnostic block carried inside `METADATA_TYPE_
-/// STREAM_DIAG`. Packed `#[repr(C)]` so every host-language tool can
-/// read this directly from the on-disk bytes without going through a
-/// parser.
-///
-/// Byte-counter semantics (locked in):
-///   - `bytes_uncompressed_total` is the sum of each sub-packet's
-///     uncompressed PAYLOAD size (not headers / metadata / footer).
-///   - `bytes_compressed_total` is the sum of each sub-packet's on-disk
-///     PAYLOAD size (not headers / metadata / footer).
-///   - The ratio `bytes_uncompressed_total / bytes_compressed_total` is
-///     therefore a clean payload-only compression ratio.
+/// Wire layout of the `METADATA_TYPE_STREAM_DIAG` body.
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
 pub struct StreamDiag {
-    // ── Header lane: four u32s, two natural u64-aligned slots (16 B) ──
     pub diag_version:                u32,
     pub writer_pid:                  u32,
     pub n_oversize_subpackets:       u32,
     pub tail_len:                    u32,
 
-    // ── Reserved (8 B) for future-extensible fields ───────────────────
     pub _reserved:                   u64,
 
-    // ── Identification + running totals (80 B) ────────────────────────
     pub writer_start_time:           u64, // unix-epoch microseconds at @open
     pub subpacket_count:             u64,
     pub element_count:               u64,
@@ -1059,20 +878,13 @@ pub struct StreamDiag {
     pub first_flush_time:            u64,
     pub last_flush_time:             u64,
 
-    // ── Tail window (STREAM_DIAG_TAIL_MAX * 8 = 64 B) ─────────────────
-    // tail[0..tail_len] holds the byte offsets of the most-recent
-    // tail_len sub-packets in chronological order (oldest at index 0).
-    // Slots beyond tail_len are uninitialised; readers MUST only
-    // consult tail[0..tail_len].
+    // Byte offsets of the most recent `tail_len` sub-packets, oldest first.
     pub tail: [u64; STREAM_DIAG_TAIL_MAX],
 }
 
 const _: () = assert!(std::mem::size_of::<StreamDiag>() == 160);
 
 impl StreamDiag {
-    /// Construct a zero-initialised StreamDiag with `diag_version` set.
-    /// Other fields are left zero; the caller populates them as it
-    /// accumulates sub-packet flushes.
     pub fn new() -> Self {
         StreamDiag {
             diag_version: STREAM_DIAG_VERSION,
@@ -1093,9 +905,6 @@ impl StreamDiag {
         }
     }
 
-    /// View the in-memory struct as its raw on-disk bytes. Safe because
-    /// `StreamDiag` is `#[repr(C, packed)]` with no relptrs and no
-    /// padding (asserted at compile time).
     pub fn as_bytes(&self) -> [u8; 160] {
         let mut out = [0u8; 160];
         unsafe {
@@ -1108,10 +917,7 @@ impl StreamDiag {
         out
     }
 
-    /// Reconstitute a StreamDiag from its on-disk bytes. Returns Err if
-    /// `data` is shorter than `size_of::<StreamDiag>()`. Extra trailing
-    /// bytes are ignored (future tooling may extend the struct; older
-    /// readers must continue to parse the prefix they understand).
+/// Parse the first 160 bytes of `data`; trailing bytes are ignored.
     pub fn from_bytes(data: &[u8]) -> Result<Self, MorlocError> {
         if data.len() < 160 {
             return Err(MorlocError::Packet(format!(
@@ -1133,11 +939,7 @@ impl Default for StreamDiag {
     }
 }
 
-/// Aligned, owned mirror of `StreamDiag`. Consumers that just want to
-/// read the fields (renderers, JSON encoders) work through this instead
-/// of poking at the packed struct directly. `tail` holds only the
-/// populated slice (`tail[0..tail_len]`); slots beyond that in the raw
-/// struct are uninitialised and are dropped here.
+/// Aligned copy of a `StreamDiag`, with `tail` cut to `tail_len` entries.
 #[derive(Debug, Clone)]
 pub struct StreamDiagView {
     pub diag_version: u32,
@@ -1178,17 +980,12 @@ impl StreamDiag {
     }
 }
 
-/// Total bytes a temp footer occupies on disk: footer packet header
-/// (32 B) + one metadata block header (8 B) + StreamDiag payload
-/// (160 B) + EOF tail (8 B). This number is exposed so OStream writers
-/// can pwrite a fixed-size buffer of this exact length on every flush.
+/// Bytes of a temp footer on disk: footer packet header (32 B) + one
+/// metadata block header (8 B) + StreamDiag (160 B) + EOF tail (8 B).
 pub const STREAM_TEMP_FOOTER_BYTES: usize = 32 + 8 + 160 + STREAM_TAIL_SIZE;
 
-/// Encode the bytes of a `temp` footer (no SUBPACKET_INDEX, no
-/// FOOTER_FINAL). The returned vector is exactly `STREAM_TEMP_FOOTER_
-/// BYTES` long: footer packet + EOF tail. Callers pwrite this in one
-/// shot at the end of the data region and the new EOF tail offset
-/// becomes `data_end + STREAM_TEMP_FOOTER_BYTES`.
+/// A temp footer (STREAM_DIAG only) and its EOF tail, exactly
+/// `STREAM_TEMP_FOOTER_BYTES` long.
 pub fn make_temp_footer_packet(diag: &StreamDiag) -> Vec<u8> {
     let diag_bytes = diag.as_bytes();
     let footer_packet = make_footer_packet(&[
@@ -1203,17 +1000,13 @@ pub fn make_temp_footer_packet(diag: &StreamDiag) -> Vec<u8> {
     out
 }
 
-/// Encode the bytes of a `final` footer (with full SUBPACKET_INDEX,
-/// the StreamDiag block, the FOOTER_FINAL flag, and a FOOTER_STATUS
-/// byte). The returned vector is `footer_packet + 8B tail`; size
-/// depends on the index length but is always written once, at `@close`.
+/// A final footer (STREAM_DIAG, SUBPACKET_INDEX, FOOTER_FINAL and
+/// FOOTER_STATUS) and its EOF tail.
 pub fn make_final_footer_packet(
     diag: &StreamDiag,
     subpacket_entries: &[SubpacketEntry],
     status: u8,
 ) -> Vec<u8> {
-    // Build the subpacket-index body: u64 count followed by
-    // (u64 offset, u64 elem_count) pairs.
     let mut idx_body = Vec::with_capacity(
         SUBPACKET_INDEX_HEADER_BYTES + subpacket_entries.len() * SUBPACKET_ENTRY_BYTES,
     );
@@ -1238,9 +1031,7 @@ pub fn make_final_footer_packet(
     out
 }
 
-/// Parse the FOOTER_STATUS entry body (a single byte). Returns
-/// `FOOTER_STATUS_CLOSED` when the entry is malformed or absent so
-/// readers can default safely on legacy footers that predate this block.
+/// The status in a FOOTER_STATUS body; an empty body reads as `FOOTER_STATUS_CLOSED`.
 pub fn decode_footer_status(data: &[u8]) -> u8 {
     if data.is_empty() {
         FOOTER_STATUS_CLOSED
@@ -1249,9 +1040,7 @@ pub fn decode_footer_status(data: &[u8]) -> u8 {
     }
 }
 
-/// Parse the SUBPACKET_INDEX entry payload (without the 8-byte mmh-
-/// type-size header). Body is `u64 count` followed by
-/// `count * (u64 offset, u64 elem_count)` pairs.
+/// Parse a SUBPACKET_INDEX body (without the 8-byte entry header).
 pub fn decode_subpacket_index(data: &[u8]) -> Result<Vec<SubpacketEntry>, MorlocError> {
     if data.len() < SUBPACKET_INDEX_HEADER_BYTES {
         return Err(MorlocError::Packet(format!(
@@ -1323,13 +1112,12 @@ pub fn get_error_message(packet: &[u8]) -> Result<Option<String>, MorlocError> {
     Ok(Some(String::from_utf8_lossy(payload).into_owned()))
 }
 
-/// Iterator over the entries of a metadata block. Each entry is
-/// `(metadata_type, data)` — the type byte from the entry header and
-/// a borrow of the entry's payload bytes. Iteration stops on the
-/// first non-`mmh` magic or on size overflow past `meta`'s end.
+/// Iterator over the entries of a metadata block, yielding
+/// `(metadata_type, data)`. It stops at the first non-`mmh` magic or at an
+/// entry that runs past the block's end.
 ///
-/// The input is the metadata block ALONE (not a full packet); for a
-/// full packet the caller slices `&packet[32..32 + header.offset]`.
+/// The input is the metadata block alone; for a full packet slice
+/// `&packet[32..32 + header.offset]`.
 pub struct MetadataIter<'a> {
     meta: &'a [u8],
     pos: usize,
@@ -1368,16 +1156,9 @@ pub fn iter_metadata(meta: &[u8]) -> MetadataIter<'_> {
     MetadataIter { meta, pos: 0 }
 }
 
-/// Return the byte length of the valid entries at the start of `meta`,
-/// i.e. the offset of the first byte that is no longer a `mmh`-magic
-/// metadata entry header. Padding bytes after the last valid entry
-/// (e.g. the zero-pad that `make_mesg_data_packet` inserts to round
-/// the block up to 32 bytes) lie past the returned offset.
-///
-/// Used by encoders that need to splice an additional entry into an
-/// existing metadata block: the new entry must sit immediately after
-/// the last valid entry, since the metadata iterator stops at the
-/// first non-`mmh` byte and would not otherwise see the splice.
+/// The byte length of the valid entries at the start of `meta`; padding
+/// after the last entry lies past it. A new entry must be spliced in here,
+/// since iteration stops at the first non-`mmh` byte.
 pub fn metadata_entries_end(meta: &[u8]) -> usize {
     let mut cur = 0usize;
     while cur + 8 <= meta.len() {
@@ -1402,21 +1183,11 @@ pub fn metadata_entries_end(meta: &[u8]) -> usize {
     cur
 }
 
-/// Width to which metadata blocks are padded so the payload starts on a
-/// well-known alignment boundary. Matches `make_mesg_data_packet`'s
-/// 32-byte rounding.
+/// Width to which metadata blocks are padded, so the payload starts aligned.
 pub const METADATA_BLOCK_ALIGNMENT: usize = 32;
 
-/// Build a new metadata block by appending a single entry `(kind, body)`
-/// to the valid entries at the start of `existing`. Any trailing
-/// padding in `existing` (zero bytes past `metadata_entries_end`) is
-/// discarded; the result is padded back up to `METADATA_BLOCK_ALIGNMENT`
-/// so the payload retains its alignment.
-///
-/// Encoders that need to insert a `METADATA_TYPE_FRAME_INDEX` entry into
-/// the metadata block of an existing packet (`compress_packet`,
-/// `normalize_data_packet_for_output`, etc.) use this helper instead of
-/// hand-stitching the entry header + body + padding.
+/// A new metadata block: the valid entries at the start of `existing`,
+/// then the entry `(kind, body)`, padded to `METADATA_BLOCK_ALIGNMENT`.
 pub fn append_metadata_entry(existing: &[u8], kind: u8, body: &[u8]) -> Vec<u8> {
     let entries_end = metadata_entries_end(existing);
     let mut out = Vec::with_capacity(
@@ -1432,11 +1203,8 @@ pub fn append_metadata_entry(existing: &[u8], kind: u8, body: &[u8]) -> Vec<u8> 
     out
 }
 
-/// Build a new metadata block by concatenating the valid entries at the
-/// start of `existing` with `prepended` entries that should appear
-/// before them (e.g. a freshly-computed `METADATA_TYPE_VOL_INDEX` entry
-/// the streaming encoder writes before the passed-through metadata).
-/// The result is padded to `METADATA_BLOCK_ALIGNMENT`.
+/// A new metadata block: `prepended`, then the valid entries at the start
+/// of `existing`, padded to `METADATA_BLOCK_ALIGNMENT`.
 pub fn prepend_metadata_entries(prepended: &[u8], existing: &[u8]) -> Vec<u8> {
     let entries_end = metadata_entries_end(existing);
     let mut out =
@@ -1464,15 +1232,13 @@ pub fn iter_packet_metadata(packet: &[u8]) -> Result<MetadataIter<'_>, MorlocErr
     Ok(iter_metadata(&packet[32..meta_end]))
 }
 
-/// Decode a null-terminated UTF-8 (lossy) string from the payload of
-/// a `METADATA_TYPE_SCHEMA_STRING` entry. Re-used by every metadata
-/// scanner that needs the schema text.
+/// Decode a null-terminated UTF-8 (lossy) `METADATA_TYPE_SCHEMA_STRING` body.
 pub fn decode_schema_entry(data: &[u8]) -> String {
     let len = data.iter().position(|&b| b == 0).unwrap_or(data.len());
     String::from_utf8_lossy(&data[..len]).into_owned()
 }
 
-/// Read the Layer 3 vol_idx hint from packet metadata, if present.
+/// The `METADATA_TYPE_VOL_INDEX` hint in a packet's metadata, if present.
 pub fn read_vol_index_from_meta(packet: &[u8]) -> Result<Option<u16>, MorlocError> {
     for (kind, data) in iter_packet_metadata(packet)? {
         if kind == METADATA_TYPE_VOL_INDEX && data.len() >= 2 {
@@ -1494,51 +1260,27 @@ pub fn read_schema_from_meta(packet: &[u8]) -> Result<Option<String>, MorlocErro
 
 // ── Forward-scan recovery ─────────────────────────────────────────────────
 
-/// Result of forward-scanning a footer-less MORLOC_STREAM_PACKET file
-/// to recover its sub-packet index and element count.
+/// What a forward scan over a stream file's sub-packets recovers.
 #[derive(Debug, Clone, Default)]
 pub struct ForwardScan {
     /// Byte offsets (from file start) of each intact sub-packet header.
     pub subpacket_offsets: Vec<u64>,
-    /// Total element count across all *uncounted-eligible* sub-packets.
-    /// Uncompressed sub-packets contribute their array size prefix
-    /// (`u64` at the start of the payload). Compressed sub-packets
-    /// are skipped for count (would require decompression) -- see
-    /// `compressed_uncounted` and the compression-aware companion in
-    /// `crate::compression::forward_scan_subpackets_with_counts`.
+    /// Sum of the array-size prefixes of the uncompressed voidstar
+    /// sub-packets.
     pub element_count: u64,
-    /// Bytes consumed from `body_start` through the last intact
-    /// sub-packet (exclusive of any partial trailing sub-packet).
+    /// Bytes from `body_start` through the last intact sub-packet.
     pub bytes_scanned: u64,
-    /// True iff the scan stopped at a truncated last sub-packet whose
-    /// bytes were incomplete on disk. That sub-packet is not in
-    /// `subpacket_offsets`; upstream tools can report "partial".
+    /// True iff the scan stopped at a truncated sub-packet, which is not in
+    /// `subpacket_offsets`.
     pub partial: bool,
-    /// Count of sub-packets whose compressed payload was skipped for
-    /// element counting. When nonzero, `element_count` covers only
-    /// the uncompressed sub-packets; use the compression-aware
-    /// walker for an exact total.
+    /// Sub-packets left out of `element_count`.
     pub compressed_uncounted: u64,
-    /// True iff the scan stopped early because it hit its sub-packet
-    /// count cap. Callers with real read budgets (`morloc-nexus file`)
-    /// use this to keep the classification tool fast on pathological
-    /// inputs; callers who need the full walk (runtime IStream open)
-    /// pass `u64::MAX` and never see this set.
+    /// True iff the scan stopped at its sub-packet cap.
     pub scan_capped: bool,
 }
 
-/// Walk sub-packet headers starting at `body_start` and stop at the
-/// first non-data packet (the footer, if any), a corrupt header, or
-/// EOF. Used for footer-less recovery of MORLOC_STREAM_PACKET files.
-/// Equivalent to `forward_scan_subpackets_capped(mmap, body_start,
-/// u64::MAX)` -- unbounded, for callers who need the full walk
-/// (runtime IStream / IFile open).
-///
-/// Element counts are taken from the array size prefix at the start
-/// of each uncompressed sub-packet's payload. Compressed sub-packets
-/// are recorded in the offsets list but their element count is
-/// deferred: they contribute to `compressed_uncounted` and the caller
-/// can use the compression-aware companion walker to fill in the count.
+/// Walk the sub-packet headers from `body_start` until the first non-data
+/// packet, a corrupt header, or EOF, with no cap.
 pub fn forward_scan_subpackets(
     mmap: &[u8],
     body_start: u64,
@@ -1546,11 +1288,7 @@ pub fn forward_scan_subpackets(
     forward_scan_subpackets_capped(mmap, body_start, u64::MAX)
 }
 
-/// Same as `forward_scan_subpackets` but stops after `cap` sub-packets
-/// and sets `scan_capped=true` on the result. Callers with a read
-/// budget (`morloc-nexus file` for its fast-classification contract)
-/// use this to avoid unbounded work on inputs that flush after every
-/// element.
+/// `forward_scan_subpackets`, stopping after `cap` sub-packets with `scan_capped` set.
 pub fn forward_scan_subpackets_capped(
     mmap: &[u8],
     body_start: u64,
@@ -1594,15 +1332,11 @@ pub fn forward_scan_subpackets_capped(
                 "forward_scan: sub-packet total-size overflow".into(),
             ))?;
         if cur + total > size {
-            // Trailing partial sub-packet (crashed mid-write).
             out.partial = true;
             break;
         }
 
-        // Count elements from the array size prefix when uncompressed
-        // AND voidstar. Msgpack sub-packets (per the current design,
-        // rejected at IFile open time) do not have the array-length
-        // prefix; skip them for count.
+        // Only an uncompressed voidstar payload starts with the array-size prefix.
         let data = unsafe { header.command.data };
         let is_voidstar = data.format == PACKET_FORMAT_VOIDSTAR;
         let is_uncompressed = data.compression == PACKET_COMPRESSION_NONE;
@@ -1709,8 +1443,6 @@ mod tests {
 
     #[test]
     fn frame_index_entry_empty_roundtrip() {
-        // Zero-frame index is legal (an encoder reserves space for the
-        // worst case and may emit zero frames if the input was empty).
         let encoded = encode_frame_index_entry(&[]);
         assert_eq!(encoded.len(), FRAME_INDEX_HEADER_BYTES);
         let decoded = decode_frame_index_entry(&encoded).unwrap();
@@ -1719,10 +1451,6 @@ mod tests {
 
     #[test]
     fn frame_index_entry_tolerates_trailing_padding() {
-        // Streaming encoders reserve max-N slots and may patch in
-        // fewer than max-N actual frames. Trailing zero padding past
-        // `frame_count * FRAME_ENTRY_BYTES` must be ignored by the
-        // decoder, which keys off the frame_count field.
         let frames = vec![FrameEntry {
             uncompressed_size: 16 << 20,
             compressed_size: 5 << 20,
@@ -1750,9 +1478,6 @@ mod tests {
 
     #[test]
     fn read_frame_index_from_meta_returns_none_when_absent() {
-        // Build a minimal MESG+VOIDSTAR packet with only the schema
-        // metadata entry. `read_frame_index_from_meta` should report
-        // no frame index without erroring.
         let payload = vec![0u8; 32];
         let schema_str = "u4"; // any short schema is fine
         let packet = make_mesg_data_packet(&payload, schema_str);
@@ -1898,12 +1623,10 @@ mod tests {
         let schema = crate::schema::parse_schema("u4").unwrap();
         let file = build_stream_file(&schema, "u4", 5);
 
-        // 1. EOF tail says footer is present.
         let tail_off = file.len() - STREAM_TAIL_SIZE;
         let tail: &[u8; STREAM_TAIL_SIZE] = file[tail_off..].try_into().unwrap();
         let footer_len = decode_stream_tail(tail).expect("footer should be present");
 
-        // 2. Footer packet sits at `file_size - tail - footer_len`.
         let footer_off = tail_off - footer_len as usize;
         let footer_hdr = PacketHeader::from_bytes(
             file[footer_off..footer_off + 32].try_into().unwrap(),
@@ -1911,7 +1634,6 @@ mod tests {
         .unwrap();
         assert!(footer_hdr.is_footer());
 
-        // 3. Stream header is at file[0..]. Schema metadata recovers.
         let stream_hdr = PacketHeader::from_bytes(file[..32].try_into().unwrap()).unwrap();
         assert!(stream_hdr.is_stream());
         let stream_hdr_len = { stream_hdr.length };
@@ -1923,7 +1645,6 @@ mod tests {
         // bare element `u4`.
         assert_eq!(recovered_schema, crate::schema::schema_to_string(&list_schema(&schema)));
 
-        // 4. Sub-packets enumerable; payloads contain 0..5 in u32 LE.
         let ranges = enumerate_subpackets(&file);
         assert_eq!(ranges.len(), 5);
         for (i, &(start, end)) in ranges.iter().enumerate() {
@@ -1937,20 +1658,17 @@ mod tests {
 
     #[test]
     fn stream_file_roundtrip_without_footer() {
-        // Simulate a writer that crashed (or in-progress stream): all
-        // sub-packets written, but no footer and no EOF tail.
+        // No footer and no EOF tail.
         let schema = crate::schema::parse_schema("u4").unwrap();
         let mut file = make_stream_header_block(&list_schema(&schema));
         for sp in build_subpackets("u4", 3) {
             file.extend_from_slice(&sp);
         }
 
-        // EOF tail check: last 16 bytes should NOT match the magic.
         let tail_off = file.len() - STREAM_TAIL_SIZE;
         let tail: &[u8; STREAM_TAIL_SIZE] = file[tail_off..].try_into().unwrap();
         assert!(decode_stream_tail(tail).is_none());
 
-        // Forward-scan still recovers all 3 sub-packets.
         let ranges = enumerate_subpackets(&file);
         assert_eq!(ranges.len(), 3);
     }
@@ -1963,20 +1681,17 @@ mod tests {
         // order.
         let schema = crate::schema::parse_schema("u4").unwrap();
 
-        // Stream A: 3 sub-packets carrying 0, 1, 2.
         let mut a = make_stream_header_block(&list_schema(&schema));
         for sp in build_subpackets("u4", 3) {
             a.extend_from_slice(&sp);
         }
 
-        // Stream B: 2 sub-packets, renumber to 10, 11.
         let mut b = make_stream_header_block(&list_schema(&schema));
         for v in &[10u32, 11] {
             let pkt = make_mesg_data_packet(&v.to_le_bytes(), "u4");
             b.extend_from_slice(&pkt);
         }
 
-        // Concat: keep A's header+metadata, append B's body only.
         let a_header_len = 32 + PacketHeader::from_bytes(a[..32].try_into().unwrap())
             .unwrap()
             .offset as usize;
@@ -1986,10 +1701,8 @@ mod tests {
         let mut merged = a.clone();
         merged.extend_from_slice(&b[b_header_len..]);
 
-        // Sanity: the merged file's header is unchanged.
         assert_eq!(&merged[..a_header_len], &a[..a_header_len]);
 
-        // Forward-scan recovers all 5 sub-packets in order.
         let ranges = enumerate_subpackets(&merged);
         assert_eq!(ranges.len(), 5);
         let expected = [0u32, 1, 2, 10, 11];
@@ -2002,9 +1715,6 @@ mod tests {
 
     #[test]
     fn footer_packet_carries_tagged_blocks() {
-        // The footer is meant to be an extensible tagged-block payload.
-        // Verify we can encode N blocks and decode them via the existing
-        // metadata iterator.
         let block_a: &[u8] = b"hello";
         let block_b: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8];
         let footer = make_footer_packet(&[
@@ -2014,10 +1724,7 @@ mod tests {
         let hdr = PacketHeader::from_bytes(footer[..32].try_into().unwrap()).unwrap();
         assert!(hdr.is_footer());
 
-        // Footer metadata blocks sit between offset 32 and 32+offset
-        // -- the standard `iter_packet_metadata` layout. Footers have
-        // no separate post-metadata payload, so `header.offset ==
-        // header.length`. Both fields point at the same byte boundary.
+        // Footers have no post-metadata payload, so `offset == length`.
         let off = { hdr.offset } as usize;
         let len = { hdr.length } as usize;
         assert_eq!(off, len);
@@ -2033,9 +1740,6 @@ mod tests {
 
     #[test]
     fn stream_type_distinguishable_from_data() {
-        // A reader inspecting the first byte of the command field must
-        // be able to tell a STREAM file apart from a DATA file without
-        // any additional context. Verify the discriminants do not collide.
         let stream = PacketHeader::stream();
         let data = PacketHeader::data_mesg(PACKET_FORMAT_MSGPACK, 0);
         assert_ne!(stream.command_type(), data.command_type());
@@ -2043,9 +1747,6 @@ mod tests {
 
     #[test]
     fn read_frame_index_from_meta_returns_entries_when_present() {
-        // Construct a packet by hand with both a schema and a
-        // frame-index metadata entry, then verify the reader returns
-        // the frames in order.
         let schema_bytes = b"au1\0";
         let schema_entry_size = schema_bytes.len();
         let frames = vec![
@@ -2055,21 +1756,16 @@ mod tests {
         let index_entry = encode_frame_index_entry(&frames);
         let meta_bytes = {
             let mut m = Vec::new();
-            // schema entry
             m.extend_from_slice(&METADATA_HEADER_MAGIC);
             m.push(METADATA_TYPE_SCHEMA_STRING);
             m.extend_from_slice(&(schema_entry_size as u32).to_le_bytes());
             m.extend_from_slice(schema_bytes);
-            // frame index entry
             m.extend_from_slice(&METADATA_HEADER_MAGIC);
             m.push(METADATA_TYPE_FRAME_INDEX);
             m.extend_from_slice(&(index_entry.len() as u32).to_le_bytes());
             m.extend_from_slice(&index_entry);
             m
         };
-        // Wrap in a packet header. We only need the offset field to
-        // point past the metadata; iteration stops when meta is
-        // exhausted.
         let mut hdr = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, 0);
         hdr.offset = meta_bytes.len() as u32;
         let mut packet = hdr.to_bytes().to_vec();
@@ -2098,9 +1794,6 @@ mod tests {
 
     #[test]
     fn stream_diag_size_is_160() {
-        // Locks in the wire format: any future field addition must
-        // bump STREAM_DIAG_VERSION and either fit in the _reserved
-        // u64 or extend the struct deliberately.
         assert_eq!(std::mem::size_of::<StreamDiag>(), 160);
     }
 
@@ -2146,8 +1839,6 @@ mod tests {
 
     #[test]
     fn stream_diag_from_bytes_tolerates_trailing_bytes() {
-        // Forward-compat: a future writer extends the struct; older
-        // readers should still parse the prefix they know.
         let diag = StreamDiag::new();
         let mut padded = diag.as_bytes().to_vec();
         padded.extend_from_slice(&[0xAB; 32]);
@@ -2157,8 +1848,6 @@ mod tests {
 
     #[test]
     fn temp_footer_packet_has_fixed_size() {
-        // The headline performance commitment for OStream: temp footer
-        // rewrite is a fixed-size pwrite regardless of file size.
         let mut diag = StreamDiag::new();
         diag.writer_pid = 1;
         diag.subpacket_count = 1_000_000;
@@ -2179,14 +1868,11 @@ mod tests {
         diag.tail[0] = 256;
         let bytes = make_temp_footer_packet(&diag);
 
-        // Parse the footer packet header (skip the 8-byte EOF tail).
         let footer_packet_len = bytes.len() - STREAM_TAIL_SIZE;
         let footer = &bytes[..footer_packet_len];
         let hdr = PacketHeader::from_bytes(footer[..32].try_into().unwrap()).unwrap();
         assert!(hdr.is_footer());
 
-        // Iterate metadata. Should find STREAM_DIAG only (no
-        // FOOTER_FINAL, no SUBPACKET_INDEX in temp footers).
         let meta = iter_packet_metadata(footer).unwrap();
         let mut saw_diag = false;
         let mut saw_final = false;
@@ -2209,7 +1895,6 @@ mod tests {
         assert!(!saw_final, "temp footer must NOT carry FOOTER_FINAL");
         assert!(!saw_index, "temp footer must NOT carry SUBPACKET_INDEX");
 
-        // EOF tail decodes to the footer-packet length.
         let tail: [u8; STREAM_TAIL_SIZE] =
             bytes[footer_packet_len..].try_into().unwrap();
         let recovered_len = decode_stream_tail(&tail).unwrap();
@@ -2260,9 +1945,6 @@ mod tests {
 
     #[test]
     fn decode_footer_status_defaults_on_missing_body() {
-        // A reader of a legacy final footer that predates the FOOTER_STATUS
-        // block sees an empty body slice; the helper must surface that as
-        // CLOSED so a clean @close stays the historical default.
         assert_eq!(decode_footer_status(&[]), FOOTER_STATUS_CLOSED);
         assert_eq!(decode_footer_status(&[FOOTER_STATUS_PAUSED]), FOOTER_STATUS_PAUSED);
         assert_eq!(decode_footer_status(&[FOOTER_STATUS_REPAIRED]), FOOTER_STATUS_REPAIRED);
@@ -2280,8 +1962,6 @@ mod tests {
 
     #[test]
     fn subpacket_index_empty_roundtrip() {
-        // Zero sub-packets is legal (writer crashed before first flush);
-        // decoder must handle the count=0 case.
         let body = 0u64.to_le_bytes();
         let recovered = decode_subpacket_index(&body).unwrap();
         assert!(recovered.is_empty());
@@ -2289,8 +1969,6 @@ mod tests {
 
     #[test]
     fn subpacket_index_pair_roundtrip() {
-        // Encode a few (offset, elem_count) pairs directly and confirm
-        // the decoder recovers both fields in order.
         let mut body = 3u64.to_le_bytes().to_vec();
         for &(off, n) in &[(0u64, 100u64), (1024, 250), (2048, 175)] {
             body.extend_from_slice(&off.to_le_bytes());
@@ -2326,7 +2004,6 @@ mod tests {
 
     #[test]
     fn subpacket_index_decode_rejects_short_header() {
-        // Body shorter than the 8-byte count prefix must fail.
         let bad = [0u8; 4];
         assert!(decode_subpacket_index(&bad).is_err());
     }
@@ -2334,7 +2011,6 @@ mod tests {
     /// Build a synthetic uncompressed sub-packet header + payload with a
     /// given array-size prefix, for exercising forward_scan_subpackets.
     fn build_uncompressed_subpacket(elem_count: u64, payload_extra: usize) -> Vec<u8> {
-        // Payload is: [u64 size prefix] + [zero-filled tail]
         let payload_len = 8 + payload_extra;
         let mut hdr = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, payload_len as u64);
         hdr.offset = 0; // no metadata between header and payload
@@ -2347,7 +2023,6 @@ mod tests {
 
     #[test]
     fn forward_scan_empty_body() {
-        // body_start == size: nothing to scan.
         let mmap = vec![0u8; 32]; // any 32-byte prelude
         let scan = forward_scan_subpackets(&mmap, 32).unwrap();
         assert!(scan.subpacket_offsets.is_empty());
@@ -2359,9 +2034,6 @@ mod tests {
 
     #[test]
     fn forward_scan_two_uncompressed_subpackets() {
-        // Stream file skeleton: 32-byte fake "stream header" + N sub-
-        // packets. forward_scan_subpackets does not care what precedes
-        // body_start; it just walks from body_start onward.
         let mut mmap = vec![0u8; 32];
         mmap.extend_from_slice(&build_uncompressed_subpacket(100, 0));
         let off1 = mmap.len() as u64;
@@ -2376,8 +2048,6 @@ mod tests {
 
     #[test]
     fn forward_scan_stops_at_footer() {
-        // Two data sub-packets + a footer packet -> only the two data
-        // sub-packets are recovered; footer terminates the walk.
         let mut mmap = vec![0u8; 32];
         mmap.extend_from_slice(&build_uncompressed_subpacket(10, 0));
         mmap.extend_from_slice(&build_uncompressed_subpacket(20, 0));
@@ -2391,16 +2061,12 @@ mod tests {
 
     #[test]
     fn forward_scan_marks_partial_on_truncation() {
-        // Two intact sub-packets + a truncated third header.
         let mut mmap = vec![0u8; 32];
         mmap.extend_from_slice(&build_uncompressed_subpacket(3, 0));
         mmap.extend_from_slice(&build_uncompressed_subpacket(4, 0));
-        // Truncated third packet: full header claiming a large payload,
-        // but the file ends before the payload does.
         let mut trunc = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, 4096);
         trunc.offset = 0;
         mmap.extend_from_slice(&trunc.to_bytes());
-        // No payload bytes for the third packet.
         let scan = forward_scan_subpackets(&mmap, 32).unwrap();
         assert_eq!(scan.subpacket_offsets.len(), 2);
         assert_eq!(scan.element_count, 7);

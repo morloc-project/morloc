@@ -47,7 +47,6 @@ pub fn malloc_cstr(s: &CStr) -> *mut c_char {
 /// The caller frees the string with `libc::free`.
 pub unsafe fn set_errmsg(errmsg: *mut *mut c_char, err: &MorlocError) {
     if !errmsg.is_null() {
-        // An interior NUL is substituted so the message still propagates.
         let cleaned: String = err.to_string().chars().map(|c| if c == '\0' { '?' } else { c }).collect();
         let cstr = CString::new(cleaned).expect("NUL bytes were substituted");
         *errmsg = malloc_cstr(&cstr);

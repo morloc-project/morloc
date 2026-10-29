@@ -1,5 +1,4 @@
 //! Expression evaluator and constructor functions.
-//! Replaces eval.c. Uses HashMap instead of linked-list dict_t.
 
 // A value crossing this module is user data: a narrowing or sign change
 // goes through a checked conversion or a named helper, never `as`.
@@ -15,9 +14,7 @@ use crate::manifest_ffi::*;
 use crate::shm::{self, AbsPtr, RelPtr};
 use morloc_runtime_types::{slice, width};
 
-/// Consume a C errmsg pointer, return its text (freeing the C string)
-/// or a fallback if it's null. Used by every intrinsic handler that
-/// turns an errmsg outparam into a `MorlocError::UserThrow` message.
+/// Consume a C errmsg pointer and return its text, or `fallback` if it is null.
 unsafe fn take_c_errmsg_or(err: *mut c_char, fallback: &str) -> String {
     if err.is_null() {
         return fallback.to_string();
@@ -27,7 +24,7 @@ unsafe fn take_c_errmsg_or(err: *mut c_char, fallback: &str) -> String {
     m
 }
 
-// ── Constructor functions (called by manifest_ffi.rs and daemon.c) ───────────
+// -- Constructor functions --
 
 pub(crate) unsafe fn make_morloc_bound_var(
     schema_str: *const c_char,
@@ -115,23 +112,13 @@ pub(crate) fn make_morloc_pattern_end() -> *mut MorlocPattern {
     }
 }
 
-// Varargs constructors (make_morloc_container, make_morloc_app,
-// make_morloc_lambda, make_morloc_interpolation, make_morloc_pattern_idx,
-// make_morloc_pattern_key) are only used by generated C++ pool code.
-// They cannot be implemented in stable Rust due to C-variadic ABI.
-// The C-gcc build path (morloc init) provides them from the original eval.c.
-// The Rust hybrid build does not call them (only morloc_eval and the
-// non-varargs constructors are needed).
-
 // ── BigInt helpers ───────────────────────────────────────────────────────────
 
 /// Convert a decimal string (possibly with leading '-') to a Vec of uint64
 /// limbs in little-endian order using two's complement for negative values.
 /// For values that fit in i64 (the common case), produces exactly 1 limb.
 ///
-/// Strict: every non-sign byte must be an ASCII digit. The empty string and
-/// `-` alone are rejected. Callers that want lenient parsing should
-/// pre-strip whitespace/quotes themselves.
+/// Surrounding whitespace is trimmed; every other non-sign byte must be a digit.
 pub fn decimal_to_limbs(s: &str) -> Result<Vec<u64>, MorlocError> {
     let s = s.trim();
     if s.is_empty() {
@@ -156,7 +143,6 @@ pub fn decimal_to_limbs(s: &str) -> Result<Vec<u64>, MorlocError> {
         )));
     }
 
-    // Parse magnitude into limbs (base 2^64, little-endian)
     let mut limbs: Vec<u64> = vec![0];
     for &b in digits.as_bytes() {
         let d = (b - b'0') as u64;
@@ -171,7 +157,6 @@ pub fn decimal_to_limbs(s: &str) -> Result<Vec<u64>, MorlocError> {
     }
 
     if negative {
-        // Two's complement: invert all bits, then add 1
         let mut carry: u64 = 1;
         for limb in limbs.iter_mut() {
             *limb = !*limb;
@@ -179,12 +164,11 @@ pub fn decimal_to_limbs(s: &str) -> Result<Vec<u64>, MorlocError> {
             *limb = sum;
             carry = if c { 1 } else { 0 };
         }
-        // For negative numbers, extend with 0xFFFF... if high bit is not set
         if limbs.last().map_or(false, |&l| l >> 63 == 0) {
             limbs.push(u64::MAX);
         }
     } else {
-        // For positive numbers, extend with 0 if high bit is set (would look negative)
+        // A set high bit would read as negative.
         if limbs.last().map_or(false, |&l| l >> 63 != 0) {
             limbs.push(0);
         }
@@ -216,12 +200,9 @@ pub fn limbs_to_decimal(limbs: &[u64]) -> String {
         return "0".to_string();
     }
 
-    // Check sign via high bit of most significant limb
     let negative = limbs.last().map_or(false, |&l| l >> 63 != 0);
 
-    // Get magnitude limbs
     let mag = if negative {
-        // Negate: invert + add 1
         let mut m: Vec<u64> = limbs.iter().map(|&l| !l).collect();
         let mut carry: u64 = 1;
         for limb in m.iter_mut() {
@@ -234,11 +215,9 @@ pub fn limbs_to_decimal(limbs: &[u64]) -> String {
         limbs.to_vec()
     };
 
-    // Convert to decimal by repeated division by 10
     let mut digits: Vec<u8> = Vec::new();
     let mut work = mag;
     loop {
-        // Strip leading zero limbs
         while work.len() > 1 && *work.last().unwrap() == 0 {
             work.pop();
         }
@@ -271,14 +250,6 @@ type BndVars<'a> = HashMap<&'a str, AbsPtr>;
 
 /// Convert key-based pattern selectors to index-based using the schema's key names.
 ///
-/// Walks top-down so that each child pattern is recursed with the schema
-/// it actually corresponds to (`schema.parameters[converted_index]`),
-/// rather than with the schema parameter at the *pattern's* positional
-/// index. The latter was the pre-fix behaviour and silently mismatched
-/// child schemas in chained nested patterns like `.a.b r`, dereferencing
-/// a null `keys` pointer when the wrong child schema was a primitive
-/// (e.g. Str) whose `keys` field is null.
-///
 /// # Safety
 /// `pattern` and `schema` must be valid, non-null pointers to C-allocated structures.
 /// `schema` keys array must have `schema.size` entries.
@@ -289,8 +260,6 @@ unsafe fn convert_keys_to_indices(
     let pat = &mut *pattern;
     let n_params = (*schema).size;
 
-    // Convert THIS level's keys to indices first, so child recursion below
-    // can pick the correct child schema from `schema.parameters`.
     if pat.ptype == MorlocPatternType::ByKey {
         let indices = libc::calloc(pat.size, std::mem::size_of::<usize>()) as *mut usize;
         for i in 0..pat.size {
@@ -315,9 +284,6 @@ unsafe fn convert_keys_to_indices(
         pat.fields.indices = indices;
     }
 
-    // Now recurse into each child using the *converted* index to pick
-    // the right child schema (instead of `parameters.add(i)`, which would
-    // index by pattern position).
     if pat.ptype == MorlocPatternType::ByIndex {
         for i in 0..pat.size {
             let idx = *pat.fields.indices.add(i);
@@ -349,9 +315,7 @@ unsafe fn count_pattern_terminals(pattern: *mut MorlocPattern) -> usize {
             }
             total
         }
-        // Bracket-index in chain mode (size=1, with sub) counts the
-        // sub's terminals; in leaf mode (size=0, standalone) it is
-        // not part of a getter walk and contributes 0.
+        // A leaf-mode (size 0) bracket index is not part of a getter walk.
         MorlocPatternType::BracketIndex => {
             if pat.size > 0 {
                 count_pattern_terminals(*pat.selectors.add(0))
@@ -359,8 +323,6 @@ unsafe fn count_pattern_terminals(pattern: *mut MorlocPattern) -> usize {
                 0
             }
         }
-        // Bracket-slice is terminal (returns a list); contributes 1
-        // terminal whether in chain mode or as a standalone App leaf.
         MorlocPatternType::BracketSlice => 1,
     }
 }
@@ -398,11 +360,7 @@ unsafe fn count_bracket_arity(pattern: *mut MorlocPattern) -> usize {
 /// reaches a 'BracketIndex' node with size=1 (chain mode) or
 /// 'BracketSlice' (always terminal), the walker consumes 1 (index)
 /// or 3 (start, stop, step) runtime args from `bracket_args` /
-/// `bracket_schemas` in DFS order via `bracket_cursor`. Leaf-mode
-/// bracket patterns (PatternBracketIndex / PatternBracketSlice used
-/// as standalone App functions) reach this walker via the App
-/// dispatch which passes them empty bracket-args; a leaf bracket
-/// encountered here is an upstream error.
+/// `bracket_schemas` in DFS order via `bracket_cursor`.
 ///
 /// # Safety
 /// All pointer arguments must be valid and point to correctly-typed C structures.
@@ -457,10 +415,6 @@ unsafe fn apply_getter(
             ptr::copy_nonoverlapping(value, element_dest, element_width);
         }
         MorlocPatternType::BracketIndex => {
-            // Chain-mode bracket-index step: consume the next runtime arg
-            // (the index), bounds-check, resolve the array's data and
-            // compute the element source, then recurse on selectors[0]
-            // with the element as the new value.
             if pat.size != 1 || pat.selectors.is_null() {
                 return Err(MorlocError::Other(
                     "BracketIndex chain step requires exactly one sub-selector \
@@ -495,11 +449,6 @@ unsafe fn apply_getter(
             );
         }
         MorlocPatternType::BracketSlice => {
-            // Terminal bracket-slice step: consume three runtime args
-            // and write the resulting Array directly into the (multi-
-            // terminal slot or whole) dest. The slice walker is the
-            // same as the standalone PatternBracketSlice dispatcher;
-            // we just re-use it.
             if *bracket_cursor + 3 > bracket_args.len() {
                 return Err(MorlocError::Other(
                     "apply_getter: bracket-slice step needs 3 runtime args".into(),
@@ -633,10 +582,8 @@ unsafe fn apply_setter_set(
     Ok(())
 }
 
-/// Read an integer value from a typed buffer, casting to i64. Returns
-/// an error for non-integer schemas. BigInt values whose decimal does
-/// not fit in i64 (more than 1 limb) also error -- bracket indices
-/// have no semantically valid representation beyond i64 range.
+/// Read an integer, or a stream handle field's local handle, as i64.
+/// An `Int` needing more than one limb is an error.
 unsafe fn read_int_as_i64(
     ptr: AbsPtr,
     schema: *const CSchema,
@@ -693,16 +640,8 @@ unsafe fn read_int_as_i64(
     Ok(handle)
 }
 
-/// Write an i64 into a destination slot whose schema is one of the
-/// fixed-width integer types or the inline BigInt `Int`. For the
-/// BigInt layout, we emit `[size=1, value=n]` (16 bytes) when n is
-/// non-zero, or `[size=0, 0]` when n is zero -- both fit the inline
-/// shape, no overflow relptr needed.
-///
-/// Used by intrinsic eval handlers (currently `@flen`) whose runtime
-/// return type is the user-facing `Int` -- writing only the low 8
-/// bytes would leave the high 8 bytes interpreted as a relptr to
-/// overflow limbs and the JSON encoder would dereference garbage.
+/// Write `n` into an integer slot of `schema`'s type; an `Int` is written
+/// inline as one limb.
 unsafe fn write_int_to_dest(
     dest: AbsPtr,
     schema: *const CSchema,
@@ -784,9 +723,6 @@ unsafe fn apply_bracket_index(
 /// Bracket-slice evaluator: `arr[start:stop:step]`. Each bound is
 /// optional; defaults are decided by step sign (Python semantics).
 /// Negative bounds wrap from the end. Step 0 is a runtime error.
-/// Allocates a fresh output Array of `n_out * elem_width` bytes,
-/// deep-copying each selected element, and writes the Array header
-/// (size+relptr) into `dest`.
 unsafe fn apply_bracket_slice(
     dest: AbsPtr,
     width: usize,
@@ -872,14 +808,8 @@ unsafe fn morloc_eval_r(
         let d = shm::shcalloc(1, w)?;
         (d, w)
     } else {
-        // A @throw node never writes to `dest` -- it always raises -- and
-        // carries the width-0 "z" sentinel as its schema, so its width
-        // legitimately differs from a caller's value-sized dest. This happens
-        // when @throw is the body of a PURE command that takes an argument and
-        // returns a non-Unit type: the lambda application passes the result
-        // width down to the body. Exempt @throw from the consistency check
-        // rather than making every caller special-case the sentinel (cf.
-        // @catch / If, which pass the callee's own width for the same reason).
+        // A @throw node never writes `dest` and has the width-0 "z" schema, so it
+        // is exempt from the width check.
         if (*expr).etype != MorlocExpressionType::Throw && width != (*schema).width {
             return Err(MorlocError::Other("Unexpected data size".into()));
         }
@@ -895,11 +825,7 @@ unsafe fn morloc_eval_r(
 
             let stype = (*schema).serial_type;
             if stype == crate::schema::SerialType::String as u32 {
-                // String: allocate in SHM. Str literals are stored in the
-                // length-aware `str` field of Primitive so that interior
-                // NUL bytes survive (strlen would truncate at the first
-                // NUL). The BigInt "j" path still uses `s` as a C-string;
-                // see the Int branch below.
+                // Str literals are length-aware so interior NUL bytes survive.
                 let ms = std::mem::ManuallyDrop::into_inner(
                     ptr::read(&(*data).data.lit_val)
                 ).str;
@@ -947,10 +873,6 @@ unsafe fn morloc_eval_r(
                 }
             } else if stype == crate::schema::SerialType::Optional as u32 {
                 // Optional is a single relptr (RELNULL = Nothing).
-                //   tuple_val == null  -> Nothing: write RELNULL into slot.
-                //   tuple_val != null  -> Just: allocate inner T in SHM,
-                //                         recurse to populate it, store the
-                //                         resulting relptr in the slot.
                 let tv = (*data).data.tuple_val;
                 let slot = dest as *mut shm::RelPtr;
                 if tv.is_null() {
@@ -965,7 +887,6 @@ unsafe fn morloc_eval_r(
                     *slot = shm::abs2rel(inner_abs)?;
                 }
             } else if stype == crate::schema::SerialType::Int as u32 {
-                // Variable-width integer: parse decimal string into inline BigInt
                 let s = std::mem::ManuallyDrop::into_inner(ptr::read(&(*data).data.lit_val)).s;
                 let decimal = if s.is_null() { "0" } else {
                     std::ffi::CStr::from_ptr(s).to_str().map_err(|_| {
@@ -986,7 +907,6 @@ unsafe fn morloc_eval_r(
                     *(dest.add(std::mem::size_of::<usize>()) as *mut RelPtr) = shm::abs2rel(abs)?;
                 }
             } else {
-                // All primitives: just copy width bytes from the union
                 ptr::copy_nonoverlapping(
                     &(*data).data as *const DataUnion as *const u8,
                     dest,
@@ -999,7 +919,6 @@ unsafe fn morloc_eval_r(
             let app = (*expr).expr.app_expr;
             let nargs = (*app).nargs;
 
-            // Evaluate all arguments
             let mut arg_results: Vec<AbsPtr> = Vec::with_capacity(nargs);
             for i in 0..nargs {
                 let r = morloc_eval_r(*(*app).args.add(i), ptr::null_mut(), 0, bndvars)?;
@@ -1037,19 +956,8 @@ unsafe fn morloc_eval_r(
                             )?;
                         }
                         _ => {
-                            // PatternStruct dispatch. The unified
-                            // Selector can carry bracket steps (chain
-                            // mode); 'count_bracket_arity' counts how
-                            // many runtime args the selector will
-                            // consume. With nargs == 1 + bracket_arity
-                            // (and arity > 0), the args are
-                            // [bracket_bounds..., receiver]; with
-                            // nargs == 1 and arity == 0, it's a plain
-                            // getter; with nargs > 1 and arity == 0,
-                            // it's a setter.
                             let bracket_arity = count_bracket_arity(pattern);
                             if nargs == 1 + bracket_arity && bracket_arity > 0 {
-                                // Unified bracket-in-Selector getter.
                                 let receiver_ix = nargs - 1;
                                 let receiver = arg_results[receiver_ix];
                                 let receiver_schema = (*(*(*app).args.add(receiver_ix))).schema;
@@ -1126,9 +1034,7 @@ unsafe fn morloc_eval_r(
                 }
 
                 MorlocAppExpressionType::Format => {
-                    // Literal pieces are length-aware MorlocStrings so
-                    // interior NULs survive. Previously this branch used
-                    // libc::strlen, which truncated literals like "a\0b".
+                    // Literal pieces are length-aware so interior NULs survive.
                     let strings = (*app).function.fmt;
                     let mut result_size: usize = 0;
                     for i in 0..=nargs {
@@ -1179,7 +1085,6 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Show => {
-            // Serialize child to JSON string
             let child = (*expr).expr.unary_expr;
             let child_schema = (*child).schema;
             let child_result = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)?;
@@ -1252,7 +1157,6 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Hash => {
-            // Hash child data and return hex string
             let child = (*expr).expr.unary_expr;
             let child_schema = (*child).schema;
             let child_result = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)?;
@@ -1303,7 +1207,6 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Save => {
-            // Save value to file at path
             let save = (*expr).expr.save_expr;
             let level_expr = (*save).level;
             let value_expr = (*save).value;
@@ -1319,7 +1222,6 @@ unsafe fn morloc_eval_r(
             let value_result = morloc_eval_r(value_expr, ptr::null_mut(), 0, bndvars)?;
             let path_result = morloc_eval_r(path_expr, ptr::null_mut(), 0, bndvars)?;
 
-            // Extract path string from voidstar Array
             let path_arr = &*(path_result as *const shm::Array);
             let path_abs = shm::rel2abs(path_arr.data)?;
             let path_cstr = libc::malloc(path_arr.size + 1) as *mut c_char;
@@ -1344,7 +1246,6 @@ unsafe fn morloc_eval_r(
                 let fb = format!("@save({fmt}): failed with rc={rc}");
                 return Err(MorlocError::UserThrow(take_c_errmsg_or(err, &fb)));
             }
-            // Return unit (zero-fill dest)
             ptr::write_bytes(dest, 0, width);
         }
 
@@ -1352,7 +1253,6 @@ unsafe fn morloc_eval_r(
             let child = (*expr).expr.unary_expr;
             let child_result = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)?;
 
-            // Extract path string from voidstar Array
             let path_arr = &*(child_result as *const shm::Array);
             let path_abs = shm::rel2abs(path_arr.data)?;
             let path_cstr = libc::malloc(path_arr.size + 1) as *mut c_char;
@@ -1380,27 +1280,17 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Map => {
-            // Pure-morloc list map. Apply `func` (a one-parameter lambda)
-            // to each element of `list`, producing a fresh Array. The
-            // output element stride is fixed by the output schema's
-            // element width: variable-width content inside each element
-            // (Array data buffers, Optional inner T, BigInt limbs) lives
-            // out-of-line via relptrs allocated by the per-element
-            // recursive eval, mirroring the array-literal path above.
             let me = (*expr).expr.map_expr;
             let func_expr = (*me).func;
             let list_expr = (*me).list;
 
-            // Output element schema/width from the surrounding Map node's schema.
             let b_schema = *(*schema).parameters;
             let b_width = (*b_schema).width;
 
-            // Input element width from the list expression's own schema.
             let list_csch = (*list_expr).schema;
             let a_schema = *(*list_csch).parameters;
             let a_width = (*a_schema).width;
 
-            // Evaluate the list. The result is a fresh AbsPtr to an Array header.
             let in_ptr = morloc_eval_r(list_expr, ptr::null_mut(), 0, bndvars)?;
             let in_arr = &*(in_ptr as *const shm::Array);
             let n = in_arr.size;
@@ -1453,12 +1343,6 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Open => {
-            // IFile eager-validates the packet header (mlc_probe_packet);
-            // the pool re-opens locally from TAG_PATH. IStream opens
-            // through the runtime so the cursor stays stable across the
-            // enclosing nexus scope. OStream routes through
-            // MorlocExpressionType::OpenOStream (needs the schema at
-            // open time). Unknown kind is a codegen invariant violation.
             let open = (*expr).expr.open_expr;
             let kind = (*open).kind;
             let path_expr = (*open).path;
@@ -1520,8 +1404,7 @@ unsafe fn morloc_eval_r(
             let handle_schema = (*handle_expr).schema;
             let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
             let mut err: *mut c_char = ptr::null_mut();
-            // A Str argument is a registered-temp-file unlink (same as the pool
-            // path via mlc_unlink_tmp); a handle argument closes the stream/file.
+            // A Str argument unlinks a registered temp file; a handle is closed.
             if (*handle_schema).serial_type == crate::schema::SerialType::String as u32 {
                 let path_cstr = path_voidstar_to_cstr(handle_ptr, "@close")?;
                 let rc = mlc_unlink_tmp(path_cstr, &mut err);
@@ -1543,7 +1426,6 @@ unsafe fn morloc_eval_r(
                     return Err(MorlocError::UserThrow(take_c_errmsg_or(err, "")));
                 }
             }
-            // Return unit (zero-fill dest).
             ptr::write_bytes(dest, 0, width);
         }
 
@@ -1559,8 +1441,6 @@ unsafe fn morloc_eval_r(
                 let msg = take_c_errmsg_or(err, "@fschema: mlc_fschema returned NULL with no error message");
                 return Err(MorlocError::UserThrow(msg));
             }
-            // Materialise the returned string into a voidstar Str
-            // (Array of u8) in SHM, then write the Array header into dest.
             let len = libc::strlen(s);
             let data_abs = shm::shmemcpy(s as *const u8, len)?;
             libc::free(s as *mut c_void);
@@ -1644,8 +1524,6 @@ unsafe fn morloc_eval_r(
             let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
             let handle_i = read_int_as_i64(handle_ptr, handle_schema)?;
 
-            // Evaluate each runtime arg into an ?Int64 -> presence flag +
-            // value pair. The C ABI expects a packed array of IFileWalkArg.
             let args_storage: Vec<crate::intrinsics::IFileWalkArg> = if n_args == 0 {
                 Vec::new()
             } else {
@@ -1685,13 +1563,6 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::OpenOStream => {
-            // Typed OStream open: schema (parsed CSchema sitting in
-            // expr.schema) + path expression on open_expr. Serialise
-            // the schema back to its canonical string for the runtime
-            // entry, then store the returned handle in dest as a
-            // TAG_HANDLE stream-handle field so downstream reads go
-            // through mlc_read_stream_field uniformly with the IFile
-            // TAG_PATH / IStream TAG_HANDLE cases.
             use crate::intrinsics::mlc_open_ostream;
             use crate::ffi::schema_to_string;
             use morloc_runtime_types::stream_handle as sh;
@@ -1746,7 +1617,6 @@ unsafe fn morloc_eval_r(
                 let msg = take_c_errmsg_or(err, "@write: mlc_write returned non-zero without errmsg");
                 return Err(MorlocError::UserThrow(msg));
             }
-            // Return unit (zero-fill dest).
             ptr::write_bytes(dest, 0, width);
         }
 
@@ -1792,8 +1662,6 @@ unsafe fn morloc_eval_r(
             let dest_result = morloc_eval_r(dest_expr, ptr::null_mut(), 0, bndvars)?;
             let dest_cstr = path_voidstar_to_cstr(dest_result, "@concat dest")?;
 
-            // Unpack the `[Str]` voidstar at paths_result. Each element
-            // is an Array<u8> path. Build a Vec<CString> + Vec<*const c_char>.
             let paths_arr = &*(paths_result as *const shm::Array);
             let n = paths_arr.size;
             let mut owned: Vec<*mut c_char> = Vec::with_capacity(n);
@@ -1828,7 +1696,6 @@ unsafe fn morloc_eval_r(
                 let msg = take_c_errmsg_or(err, "@concat: mlc_concat returned non-zero without errmsg");
                 return Err(MorlocError::UserThrow(msg));
             }
-            // Return unit.
             ptr::write_bytes(dest, 0, width);
         }
 
@@ -1840,9 +1707,7 @@ unsafe fn morloc_eval_r(
             use crate::intrinsics::mlc_open_stderr;
             use crate::ffi::schema_to_string;
             use morloc_runtime_types::stream_handle as sh;
-            // No isatty gate on @stdin: programs may want the handle
-            // before any read (e.g. to test the CAS uniqueness guard).
-            // Read-time failures surface at @next, which is `<IO, Err>`.
+            // No isatty gate on @stdin: a read failure surfaces at @next.
             let schema_cstr = schema_to_string(schema);
             if schema_cstr.is_null() {
                 return Err(MorlocError::Other(
@@ -1938,10 +1803,6 @@ unsafe fn morloc_eval_r(
                 ));
             }
 
-            // The body writes straight into the Ok arm's single field, so a
-            // success costs no copy. A user throw rolls the arena back to
-            // before the attempt, which releases whatever the body had
-            // allocated on its way to failing.
             let cp = crate::eval_arena::checkpoint();
             let ok_payload = shm::shmalloc((*ok_arm).width)?;
             ptr::write_bytes(ok_payload, 0, (*ok_arm).width);
@@ -1980,12 +1841,7 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::TagTest => {
-            // A constructor-pattern tag test. The value's voidstar form
-            // begins with its tag byte for both tiers -- an argument-free
-            // `data` is that byte alone, a payload-bearing one is the byte
-            // then a pointer -- so the test reads one byte and compares it
-            // against the tag the pattern named. No pool dispatch, which is
-            // why matching inside a pure morloc function stays in the nexus.
+            // Every variant value begins with its tag byte.
             let te = (*expr).expr.tag_test_expr;
             let subject_ptr = morloc_eval_r((*te).subject, ptr::null_mut(), 0, bndvars)?;
             let same = *(subject_ptr as *const u8) == (*te).tag;
@@ -1994,10 +1850,6 @@ unsafe fn morloc_eval_r(
             }
         }
         MorlocExpressionType::CtorMake => {
-            // Build a payload-bearing `data` value: the tag, determined
-            // padding, and the arm's fields written out of line as a tuple.
-            // A nullary arm is handled as a plain tag literal upstream and
-            // never reaches here with fields.
             let me = (*expr).expr.ctor_make_expr;
             let vschema = (*expr).schema;
             let tag = (*me).tag as usize;
@@ -2013,17 +1865,12 @@ unsafe fn morloc_eval_r(
                 if (*me).nfields == 0 {
                     *(dest.add(8) as *mut shm::RelPtr) = shm::RELNULL;
                 } else {
-                    // The payload is its own allocation, so each field is
-                    // materialized at its offset within the arm's tuple.
                     let payload = shm::shmalloc((*arm).width)?;
                     std::ptr::write_bytes(payload, 0, (*arm).width);
                     for i in 0..(*me).nfields {
                         let fexpr = *(*me).fields.add(i);
                         let foff = *(*arm).offsets.add(i);
-                        // The width must be the FIELD's, not zero: a
-                        // non-null dest is checked against its schema's
-                        // width, and a mismatch is refused rather than
-                        // silently writing the wrong number of bytes.
+                        // A non-null dest must match its schema's width, so pass the field's.
                         let fwidth = (*(*(*arm).parameters.add(i))).width;
                         morloc_eval_r(fexpr, payload.add(foff), fwidth, bndvars)?;
                     }
@@ -2032,10 +1879,6 @@ unsafe fn morloc_eval_r(
             }
         }
         MorlocExpressionType::CtorField => {
-            // Read one field out of a value whose arm a guarding tag test has
-            // already established. The slot is a tag then a relative pointer
-            // to the arm's fields, so this follows the pointer and hands back
-            // the field at its offset within the arm's tuple.
             let fe = (*expr).expr.ctor_field_expr;
             let subject_ptr = morloc_eval_r((*fe).subject, ptr::null_mut(), 0, bndvars)?;
             let vschema = (*(*fe).subject).schema;
@@ -2045,8 +1888,6 @@ unsafe fn morloc_eval_r(
                     "constructor field: tag {tag} is out of range for this type"
                 )));
             }
-            // The arm's schema describes the out-of-line payload as a tuple
-            // of its fields, so the field's offset is that tuple's.
             let arm = *(*vschema).parameters.add(tag);
             let idx = (*fe).index as usize;
             if idx >= (*arm).size {
@@ -2076,9 +1917,6 @@ unsafe fn morloc_eval_r(
             }
         }
         MorlocExpressionType::If => {
-            // Evaluate the condition (a Bool) into a fresh buffer and read
-            // its byte (0 = false), then materialize the taken branch into
-            // the caller's dest.
             let ifx = (*expr).expr.if_expr;
             let cond_ptr = morloc_eval_r((*ifx).cond, ptr::null_mut(), 0, bndvars)?;
             let taken = if *(cond_ptr as *const u8) != 0 {
@@ -2086,12 +1924,7 @@ unsafe fn morloc_eval_r(
             } else {
                 (*ifx).else_branch
             };
-            // Pass the taken arm's OWN schema width to the recursive eval's
-            // dest/width consistency check (cf. @catch): an @throw arm carries
-            // a Unit "z" sentinel schema (width 0), not the result width, and
-            // never writes to dest anyway (it always raises). A value arm has
-            // the same width as the If node (same type), so dest is fully
-            // populated and taken_width == width for the copy below.
+            // An @throw arm has a width-0 schema, so check against the arm's own width.
             let taken_width = (*(*taken).schema).width;
             let src = morloc_eval_r(taken, dest, taken_width, bndvars)?;
             // Some handlers return a pointer other than dest (e.g. a voidstar
@@ -2102,13 +1935,6 @@ unsafe fn morloc_eval_r(
         }
 
         other => {
-            // Catch-all: the manifest carried an expression type that
-            // this eval handler doesn't recognise. Include the
-            // numeric tag and the variant name so the diagnostic
-            // points at the missing case (typically: new JSON tag was
-            // added on the codegen side, MorlocExpressionType variant
-            // was added on the runtime side, but the eval_ffi match
-            // arm wasn't wired -- this is the symptom).
             return Err(MorlocError::Other(format!(
                 "eval_ffi: no handler for MorlocExpressionType::{:?} \
                  (numeric tag {}). The manifest references an \
@@ -2129,10 +1955,7 @@ fn is_user_throw(e: &MorlocError) -> bool {
     matches!(e, MorlocError::UserThrow(_) | MorlocError::Packet(_))
 }
 
-/// Extract a NUL-terminated path C-string from a voidstar Str
-/// (an `Array<u8>` of UTF-8 bytes). Used by IFile-family eval cases
-/// that pass paths through to libmorloc.so. The returned buffer is
-/// libc-malloc'd and the caller is responsible for `libc::free`-ing it.
+/// Copy a voidstar Str into a NUL-terminated C string.
 unsafe fn path_voidstar_to_cstr(
     path_voidstar: AbsPtr,
     intrinsic_name: &str,
@@ -2169,7 +1992,6 @@ pub(crate) unsafe fn morloc_eval(
 
     let eval_expr = match (*expr).etype {
         MorlocExpressionType::Lam | MorlocExpressionType::Pat => {
-            // Wrap CLI args as voidstar data expressions and apply
             let arg_exprs = libc::calloc(nargs, std::mem::size_of::<*mut MorlocExpression>()) as *mut *mut MorlocExpression;
             allocated_wrappers.push(arg_exprs as *mut c_void);
 
@@ -2211,7 +2033,6 @@ pub(crate) unsafe fn morloc_eval(
 
     let result = morloc_eval_r(eval_expr, ptr::null_mut(), 0, &mut bndvars);
 
-    // Free wrapper nodes
     for p in &allocated_wrappers {
         libc::free(*p);
     }
