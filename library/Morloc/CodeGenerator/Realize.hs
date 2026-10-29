@@ -1343,23 +1343,17 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
           MorlocMonad [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])]
         resolveInstances gt' xs' = do
           gscope <- MM.getGeneralScope
-          -- gt' followed by each step of its alias chain toward the root
-          -- type (C -> B -> A -> Str). A candidate matches at the first
-          -- link its head is compatible with, so an instance on a nearer
-          -- alias is preferred over one on a farther alias, and a sibling
-          -- alias never matches at all.
+          -- A candidate matches at the first link of the alias chain its
+          -- head is compatible with, so a nearer alias wins and a sibling
+          -- alias never matches.
           let chain = gt' : List.unfoldr (fmap (\t -> (t, t)) . reduceStep gscope) gt'
               matched =
                 [ (lvl, type2typeu t, x)
                 | x@(AnnoS (Idx _ t) _ _) <- xs'
                 , Just lvl <- [List.findIndex (`compatibleType` t) chain]
                 ]
-              -- Instance heads are ordered by subsumption (UnkT lowers to
-              -- a per-leaf forall), so a well-formed set of matches has a
-              -- unique greatest element: the most specific instance. Heads
-              -- that tie on specificity (distinct aliases of one type) are
-              -- separated by chain position; incomparable maxima mean the
-              -- heads overlap without either specializing the other.
+              -- Equally specific heads are separated by the chain link they
+              -- matched; incomparable maxima overlap.
               maxima = mostSpecific [h | (_, h, _) <- matched]
               best = [(lvl, h, x) | (lvl, h, x) <- matched, any (equivalent h) maxima]
               nearest = [(h, x) | (lvl, h, x) <- best, lvl == minimum [l | (l, _, _) <- best]]
@@ -1370,9 +1364,8 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
                   <+> "at type" <+> pretty gt'
             -- one head, possibly sourced several times (duplicate imports)
             ((h0, _) : rest) | all (equivalent h0 . fst) rest -> return (map snd nearest)
-            -- The use site does not fix the type, so the overlap cannot be
-            -- judged here. A generic export is dropped before code
-            -- generation, so the pick below is never observed there.
+            -- The use's type holds an unsolved variable, so the overlap is
+            -- not judged and the nearest candidates are kept.
             _ | containsUnk gt' -> return (map snd nearest)
             _ ->
               MM.throwSourcedError i $
@@ -1383,17 +1376,12 @@ realizeWithRegistry registry tables pins seedLangs s00 = do
                   <> "\nDeclare an instance for their common specialization to"
                   <+> "disambiguate, or remove one of them."
 
-        -- One alias-reduction step: the top-level constructor first, then
-        -- (when aliases sit inside a compound type, e.g. Celsius -> Celsius
-        -- with type Celsius = Int) the leaves.
+        -- One alias-reduction step: the head first, else the leaves.
         reduceStep :: Scope -> Type -> Maybe Type
         reduceStep gscope t =
           typeOf <$> (TE.reduceType gscope (type2typeu t) <|> TE.reduceTypeLeaves gscope (type2typeu t))
 
-        -- Structural type equality with UnkT as wildcard.
-        -- UnkT arises from unsolved generics (e.g., mempty :: List (UnkT a)).
-        -- This allows List Int to match List (UnkT a) without matching
-        -- Deque (UnkT a) or accepting sibling aliases in function types.
+        -- Structural equality with UnkT (an unsolved generic) as wildcard.
         compatibleType :: Type -> Type -> Bool
         compatibleType (UnkT _) _ = True
         compatibleType _ (UnkT _) = True

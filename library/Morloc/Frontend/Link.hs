@@ -479,9 +479,6 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
               checkSuperclassConstraints i cls (zip vs ts) superConstraints
               if null es
                 then
-                  -- Source-less instance: register each method with its
-                  -- specialized general type but no implementations.
-                  -- This enables typechecking without requiring sources.
                   linkEmptyInstance m0 cls (zip vs ts) sigs emap
                 else
                   mapM_ (linkInstance origin (linkScoped bnds c) m0 cls (zip vs ts) sigs emap) es
@@ -575,9 +572,8 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
     updateName :: Int -> EVar -> MorlocMonad ()
     updateName i v = MM.modify' (\s -> s {stateName = Map.insert i v (stateName s)})
 
--- Register a source-less instance: for each method in the typeclass, create a
--- TermTypes with the specialized general type but no concrete implementations.
--- This allows typechecking to succeed even without language-specific sources.
+-- | Register each method of a source-less instance with its specialized type
+-- and no implementations, so that it typechecks.
 linkEmptyInstance ::
   MVar ->
   ClassName ->
@@ -599,9 +595,8 @@ linkEmptyInstance _ cls0 params0 sigs emap = mapM_ go sigs
           case Map.lookup stateIdx sigmap of
             Nothing -> return ()
             (Just sigset) -> do
-              -- Use the general class type (et) for the Polymorphic wrapper,
-              -- matching linkInstance. The specialized type (et') is only
-              -- inside the TermTypes.
+              -- The Polymorphic wrapper carries the class type, as in
+              -- linkInstance; only the TermTypes carry the specialized one.
               sigset' <- mergeSignatureSet sigset (Polymorphic cls0 v et [tt])
               let sigmap' = Map.insert stateIdx sigset' sigmap
               newInstance <- case Map.lookup v tcls of
@@ -612,10 +607,8 @@ linkEmptyInstance _ cls0 params0 sigs emap = mapM_ go sigs
               let tcls' = Map.insert v newInstance tcls
               MM.modify' (\ms -> ms {stateSignatures = GMap idmap sigmap', stateTypeclasses = tcls'})
 
--- Goal:
---   for each term in [Signature], add a TermTypes instance to the correct
---   SignatureSet in stateSignatures. This will be a polymorphic case.
---     Polymorphic ClassName EVar EType [TermTypes]
+-- | Add one sourced or defined instance method to its signature set and to
+-- 'stateTypeclasses'.
 linkInstance ::
   InstanceOrigin ->
   (Int -> ExprI -> [ExprI] -> MorlocMonad ()) ->
@@ -647,7 +640,7 @@ linkInstance origin linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
       linkTermTypes v et tt stateIdx
     linkExpr _ =
       error
-        "Unreachable, instances may only contain sources and instances -- this should have been caught in the parser."
+        "linkInstance: unexpected declaration in an instance body"
 
     lookupInfo :: EVar -> MorlocMonad (Signature, Int)
     lookupInfo v = case ([sig | sig@(Signature v' _ _) <- sigs0, v == v'], Map.lookup v emap0) of
@@ -753,8 +746,9 @@ substituteInstanceTypes (unzip -> (clsVars, instanceParameters)) clsType = do
     substituteQualifiers (ForallU v t) (r : rs) = substituteQualifiers (substituteTVar v r t) rs
     substituteQualifiers t _ = t
 
--- Check that all superclass constraints are satisfied for an instance declaration.
--- For example, if `class Eq a => Ord a`, then `instance Ord Int` requires `instance Eq Int`.
+-- | For each superclass of an instance's class, require that some instance of
+-- the superclass with at least one method has been registered. The
+-- instance's type arguments are not compared.
 checkSuperclassConstraints :: Int -> ClassName -> [(TVar, TypeU)] -> [Constraint] -> MorlocMonad ()
 checkSuperclassConstraints _ _ _ [] = return ()
 checkSuperclassConstraints i cls params constraints = do
@@ -762,9 +756,7 @@ checkSuperclassConstraints i cls params constraints = do
   mapM_ (checkOne classDefs) constraints
   where
     checkOne :: Map ClassName [Constraint] -> Constraint -> MorlocMonad ()
-    -- Primitive constraints (CMember / CSubset / CDisjoint) are not
-    -- superclass constraints; they are typecheck-time constraints over
-    -- kind-level structural relationships. Skip them here.
+    -- Primitive constraints are checked by the typechecker, not here.
     checkOne _ (CMember _ _) = return ()
     checkOne _ (CSubset _ _) = return ()
     checkOne _ (CDisjoint _ _) = return ()

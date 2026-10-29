@@ -646,10 +646,11 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       sigs@(GMap idmap _) <- MM.gets stateSignatures
       let termId = Map.lookup gi0 idmap
       case (termId, GMap.lookup gi0 sigs) of
-        -- Collecting for specialization: a class method is used by its
-        -- instances' types alone, and the instance a use resolves to is
-        -- elaborated at the use's type. Within a method's own expansion a
-        -- use of it is not a back-edge: it may resolve to another instance.
+        -- Shallow collection for specialization: a class method is left as
+        -- its instances' types, to be elaborated at the use's type. Here a
+        -- use of a method inside its own expansion is not a back-edge, since
+        -- it may resolve to another instance; in full collection the next
+        -- case makes it one.
         (Just k, GMapJust (Polymorphic cls clsName t ts))
           | Just _ <- namerShallowOnly namer
           , Just r <- namerShallow namer
