@@ -1,0 +1,12 @@
+-- An `@stdin` positional reads stdin when omitted, so it is never null:
+-- one on an optional type is refused at build (CLI-3).
+module main (count)
+
+import root
+
+--' Count characters
+count ::
+  --' Text to count
+  --' @stdin
+  ?Str -> Int
+count x = 0

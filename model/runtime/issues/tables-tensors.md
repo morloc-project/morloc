@@ -33,9 +33,6 @@ CSV input to a `Table` argument (reader: arrow_ipc_reader.rs
   MorlocInternalError in pybinding__get_value and ends the pool. Under
   `@form table` the nexus checks the header first, so only cell errors
   reach the pool. This is CLI-20's deviation.
-- **A packet without schema metadata skips the schema check.** [read]
-  cli.rs ~2036 decodes it under the requested schema; a record packet with
-  swapped same-typed fields would bind wrong.
 - **A bad table cell fails the call after the command starts.** [reproduced
   2026-10-29] CLI-20 asks for the error before the command runs; a `Table`
   is read by the pool that holds it, so the nexus checks only the header and

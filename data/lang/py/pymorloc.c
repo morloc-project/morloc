@@ -215,10 +215,9 @@ char* get_prior_err(){
     goto error; \
     }
 
-// PyMorlocException extends RuntimeError; `_mlc_catch`'s `except
-// Exception:` intercepts it. PyMorlocInternalError inherits from
-// BaseException so `_mlc_catch` naturally skips it and the error
-// terminates the pool. Both set in PyInit_pymorloc.
+// MorlocException, a RuntimeError, is a call's failure: `@try` and user
+// code catch it (PANIC-6). MorlocInternalError derives from BaseException,
+// so `except Exception` and `@try` pass it and it ends the pool (PANIC-5).
 static PyObject* PyMorlocException = NULL;
 static PyObject* PyMorlocInternalError = NULL;
 static PyObject* PyMorlocPipeClosed = NULL;
@@ -232,12 +231,6 @@ static PyObject* PyMorlocPipeClosed = NULL;
     goto error; \
     }
 
-// PyTRY for the machinery that carries values between pools: IPC, packet
-// construction and decode. These failures are not attributable to user data
-// or foreign-function behavior and leave the pool unable to continue, so
-// they raise PyMorlocInternalError -- which derives from BaseException and
-// so passes straight through `_mlc_catch`'s `except Exception:` -- rather
-// than the catchable RuntimeError that PyTRY raises.
 // PyTRY with the GIL released around the call, for a libmorloc call that
 // may wait on another worker (a channel read or write). `out` receives the
 // result.
@@ -258,6 +251,8 @@ static PyObject* PyMorlocPipeClosed = NULL;
         goto error; \
     }
 
+// PANIC-5: a failure of the machinery that carries values between pools
+// ends the pool.
 #define PyTRY_INFRA(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
@@ -3765,8 +3760,7 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
 
     voidstar = mlc_read(json_str, schema, &read_err);
 
-    // @read :: Str -> <Err> a -- parse failure raises MorlocException
-    // so _mlc_catch can intercept.
+    // PANIC-13
     if (voidstar == NULL && read_err == NULL) {
         PyINTERNAL_ABORT("@read: the runtime failed without giving a reason");
     }
@@ -3880,8 +3874,7 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
 
     voidstar = mlc_load(path, schema, &load_err);
 
-    // @load :: Str -> <IO, Err> a -- missing file / decode failure
-    // raises MorlocException so _mlc_catch can intercept.
+    // PANIC-13
     if (voidstar == NULL && load_err == NULL) {
         PyINTERNAL_ABORT("@load: the runtime failed without giving a reason");
     }
@@ -4757,7 +4750,6 @@ PyMODINIT_FUNC PyInit_pymorloc(void) {
         Py_DECREF(m);
         return NULL;
     }
-    // BaseException-derived so `_mlc_catch`'s `except Exception:` skips it.
     PyMorlocInternalError = PyErr_NewException(
         "pymorloc.MorlocInternalError", PyExc_BaseException, NULL);
     if (PyMorlocInternalError == NULL) {

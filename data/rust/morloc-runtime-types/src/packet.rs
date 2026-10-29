@@ -1269,14 +1269,18 @@ pub fn decode_subpacket_index(data: &[u8]) -> Result<Vec<SubpacketEntry>, Morloc
             "SUBPACKET_INDEX entry truncated: {} bytes", data.len()
         )));
     }
-    let count = u64::from_le_bytes(data[..8].try_into().unwrap()) as usize;
-    let needed = SUBPACKET_INDEX_HEADER_BYTES + count * SUBPACKET_ENTRY_BYTES;
-    if data.len() < needed {
+    let count = u64::from_le_bytes(data[..8].try_into().unwrap());
+    let needed = usize::try_from(count)
+        .ok()
+        .and_then(|n| n.checked_mul(SUBPACKET_ENTRY_BYTES))
+        .and_then(|n| n.checked_add(SUBPACKET_INDEX_HEADER_BYTES));
+    if needed.map_or(true, |needed| data.len() < needed) {
         return Err(MorlocError::Packet(format!(
             "SUBPACKET_INDEX claims {} entries but payload has {} bytes",
             count, data.len()
         )));
     }
+    let count = count as usize;
     let mut out = Vec::with_capacity(count);
     let mut cur = SUBPACKET_INDEX_HEADER_BYTES;
     for _ in 0..count {
@@ -1308,14 +1312,13 @@ pub fn get_data_payload(packet: &[u8]) -> Result<&[u8], MorlocError> {
         return Err(MorlocError::Packet("packet too small".into()));
     }
     let header = PacketHeader::from_bytes(packet[..32].try_into().unwrap())?;
-    let offset = { header.offset } as usize;
-    let length = { header.length } as usize;
-    let start = 32 + offset;
-    let end = start + length;
-    if end > packet.len() {
-        return Err(MorlocError::Packet("payload extends past packet end".into()));
+    let start = 32 + { header.offset } as usize;
+    let length = header.length;
+    let end = usize::try_from(length).ok().and_then(|n| n.checked_add(start));
+    match end {
+        Some(end) if end <= packet.len() => Ok(&packet[start..end]),
+        _ => Err(MorlocError::Packet("payload extends past packet end".into())),
     }
-    Ok(&packet[start..end])
 }
 
 /// Extract error message from a fail packet.
@@ -2310,6 +2313,26 @@ mod tests {
             SubpacketEntry { offset: 1024, elem_count: 250 },
             SubpacketEntry { offset: 2048, elem_count: 175 },
         ]);
+    }
+
+    /// A count whose entries would not fit the address space is refused,
+    /// not wrapped into a small one.
+    #[test]
+    fn subpacket_index_decode_rejects_a_count_past_the_address_space() {
+        for count in [u64::MAX, u64::MAX / 16 + 1, 1u64 << 60] {
+            let mut body = count.to_le_bytes().to_vec();
+            body.extend_from_slice(&[0u8; 32]);
+            assert!(decode_subpacket_index(&body).is_err(), "{count}");
+        }
+    }
+
+    #[test]
+    fn a_payload_length_past_the_address_space_is_refused() {
+        let mut header = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, u64::MAX - 8);
+        header.offset = 0;
+        let mut packet = header.to_bytes().to_vec();
+        packet.extend_from_slice(&[0u8; 16]);
+        assert!(get_data_payload(&packet).is_err());
     }
 
     #[test]

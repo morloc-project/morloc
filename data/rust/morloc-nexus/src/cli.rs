@@ -1163,9 +1163,17 @@ fn value_taking_run_flags() -> ValueTakingFlags {
     let run_cmd = nexus_cmd
         .find_subcommand("run")
         .expect("Nexus declares a 'run' subcommand");
-    let mut flags = collect_value_taking(run_cmd);
-    // Capability flags are advertised per-manifest, but a flag's
-    // value-taking-ness is manifest-independent, so fold them all in here.
+    with_capability_flags(collect_value_taking(run_cmd))
+}
+
+/// The daemon's own value-taking flags, and the capability flags it also takes.
+fn value_taking_daemon_flags() -> ValueTakingFlags {
+    with_capability_flags(value_taking_flags_of("daemon"))
+}
+
+// Capability flags are advertised per-manifest, but a flag's
+// value-taking-ness is manifest-independent, so fold them all in.
+fn with_capability_flags(mut flags: ValueTakingFlags) -> ValueTakingFlags {
     for spec in CAPABILITY_FLAGS {
         if spec.takes_value() {
             flags.longs.insert(format!("--{}", spec.long));
@@ -1661,7 +1669,7 @@ fn parse_run_or_daemon(argv: &[String], is_run: bool) -> ParsedInvocation {
         .cloned()
         .unwrap_or_else(|| "morloc-nexus".to_string());
     let mode_token = if is_run { "run" } else { "daemon" };
-    let flags = ValueTakingFlags::from_nexus();
+    let flags = if is_run { ValueTakingFlags::from_nexus() } else { value_taking_daemon_flags() };
     let raw_tail: &[String] = &argv[2..];
 
     // Resolve the wrapper target from the raw tail so we can load
@@ -2369,6 +2377,20 @@ mod tests {
             find_wrapper_target(&[s("-h")], &flags),
             None
         );
+    }
+
+    /// The target is found past the daemon's own value-taking options,
+    /// whose values are not the program.
+    #[test]
+    fn find_target_past_daemon_listener_options() {
+        let flags = value_taking_daemon_flags();
+        for opt in ["--http-port", "--port", "--socket", "--debug-cache-depth"] {
+            assert_eq!(
+                find_wrapper_target(&[s(opt), s("18731"), s("./prog")], &flags),
+                Some("./prog"),
+                "{opt}"
+            );
+        }
     }
 
     #[test]

@@ -4235,12 +4235,12 @@ fn claim_next_subpacket(
     if !header.is_data() {
         return Ok(None);
     }
-    let size = 32 + header.offset as u64 + header.length;
-    if cursor + size > end {
+    let size = header.length.checked_add(32 + header.offset as u64);
+    let Some(size) = size.filter(|&size| size <= end - cursor) else {
         return Err(MorlocError::Packet(format!(
             "stream handle {:#x}: a sub-packet runs past the end of the stream", handle,
         )));
-    }
+    };
     // SLOT-23: the cursor moves under the lock, so another reader claims
     // the next sub-packet.
     slot.cursor.set(cursor + size);

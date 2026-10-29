@@ -57,6 +57,8 @@ import Morloc.Frontend.Treeify (treeify, Validation (..))
 import Morloc.Frontend.Share (shareBindings)
 import Morloc.Frontend.Specialize (specialize)
 import qualified Morloc.Data.PoolHash as PoolHash
+import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.Version
 import qualified Morloc.Monad as MM
 import Morloc.ProgramBuilder.Build (buildProgram, withStagingCleanup)
 
@@ -267,7 +269,10 @@ writeProgram translateFn path code =
         let buildSalt
               | null guestObjects = BP.renderSalt params
               | otherwise = BP.renderSalt params <> "|obj:" <> PoolHash.poolHashHex objHash
-        poolHashes <- MM.liftIO $ PoolHash.computePoolHashes buildSalt hashIncludes pools
+        sources <- MM.gets (concat . GMap.elems . stateSources)
+        let sourcedFiles lang = Set.toAscList (Set.fromList [p | s <- sources, srcLang s == lang, Just p <- [srcPath s]])
+            salt = buildSalt <> "|morloc:" <> T.pack Morloc.Version.versionStr
+        poolHashes <- MM.liftIO $ PoolHash.computePoolHashes salt hashIncludes sourcedFiles pools
         let nexusPatched = PoolHash.patchManifestPoolHashes poolHashes nexus
         -- The envspec Script carries no make commands; it is written to the
         -- build dir alongside manifest.json and the pool sources.

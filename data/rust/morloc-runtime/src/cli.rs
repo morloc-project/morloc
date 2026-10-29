@@ -332,10 +332,7 @@ pub(crate) unsafe fn peek_packet_header_via_pread(
     packet::PacketHeader::from_bytes(&header_bytes).ok()
 }
 
-/// C ABI shim over `peek_packet_header_via_pread`. Returns 1 iff `path`
-/// is a `PACKET_TYPE_STREAM` file, 0 otherwise. Language runtimes call
-/// this from their FILE+DATA unwrap branches to choose between the
-/// legacy data-indirection path and the stream-ingest loop.
+/// 1 iff `path` is a `PACKET_TYPE_STREAM` file, else 0.
 pub(crate) unsafe fn file_is_stream_packet(path: *const c_char) -> i32 {
     match peek_packet_header_via_pread(path) {
         Some(header) if header.is_stream() => 1,
@@ -568,8 +565,7 @@ pub fn remove_spooled_inputs() {
 /// Nexus-side fast path for stream-packet CLI file arguments. Dispatches
 /// on the receiver schema: `Array` → FILE+DATA indirection (pool iterates
 /// chunk-by-chunk), `IStream` → pre-opened `TAG_HANDLE` field, other →
-/// targeted error. Returns `Ok(None)` when the file is not a stream so
-/// callers can fall through to the legacy loader chain.
+/// targeted error. `Ok(None)` when the file is not a stream.
 pub(crate) unsafe fn try_load_stream_packet_file(
     path: *const c_char,
     schema: *const CSchema,
@@ -651,35 +647,14 @@ pub(crate) unsafe fn try_load_stream_packet_file(
     }
 }
 
-// ── Layer 2/3: try_load_voidstar_packet_via_mmap ──────────────────────────
+// -- try_load_voidstar_packet_via_mmap --
 
-/// Layer 2/3 fast path. For inputs that are regular files containing a
-/// large uncompressed MESG+VOIDSTAR morloc packet, allocate SHM for the
-/// payload, `pread` the payload directly into the SHM region (skipping
-/// the wasted libc::malloc + read + memcpy round-trip the legacy path
-/// does), and rewrite the embedded relptrs in place so they resolve in
-/// the consumer's VOLUMES table.
+/// A large uncompressed MESG+VOIDSTAR packet file, read straight into
+/// shared memory and relocated there. A producer's volume-index hint
+/// (`METADATA_TYPE_VOL_INDEX`) is cancelled by the relocation delta.
 ///
-/// Cross-process correctness: the returned pointer lives in real
-/// `/dev/shm` (or the file-backed fallback). A peer process that
-/// receives a relptr into this payload can `shm_open` the segment via
-/// the relptr's encoded volume index -- the foundation Layer 1 added.
-///
-/// Layer 3 interaction: if the on-disk packet carries
-/// `METADATA_TYPE_VOL_INDEX` (a producer hint), the relptrs in the
-/// payload have that hint already baked into their high bits; the
-/// relptr walk uses a delta of `dest_rel - encode_relptr(hint, 0)` so
-/// the hint bits cancel and the consumer's slot/offset is added in
-/// the same single pass. Hint = 0 collapses to the legacy
-/// "buffer-relative -> SHM-relative" add walk.
-///
-/// Returns:
-/// * `Ok(Some(ptr))` -- fast path took, `ptr` is the payload in SHM
-/// * `Ok(None)`     -- file isn't eligible (too small, not a packet,
-///                     wrong format, open/fstat failed). Caller should
-///                     fall back to the read+process path.
-/// * `Err(e)`        -- the file IS eligible but allocation or the
-///                     in-place relptr walk failed.
+/// `Ok(None)` when the file is not eligible (small, not such a packet);
+/// `Err` when it is and reading it failed.
 pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
     path: *const c_char,
     schema: *const CSchema,
@@ -747,8 +722,6 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
         return Ok(None);
     }
     if compression != 0 {
-        // Compressed payloads need a separate decompressed buffer; the
-        // legacy path handles them.
         libc::close(fd);
         return Ok(None);
     }
@@ -760,36 +733,23 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
         return Ok(None);
     }
 
-    // Pull the metadata block out so we can check for a vol_idx hint
-    // AND validate the packet's stored schema against the caller's
-    // requested schema without a full mmap. Falls back to hint = 0
-    // (legacy Layer 2) if metadata is absent, malformed, or doesn't
-    // include the block. Schema mismatch surfaces as UserThrow (via
-    // libmorloc's errmsg convention -- see check_packet_schema_matches).
-    let vol_idx_hint: u16 = if metadata_size > 0 {
-        let mut meta = vec![0u8; metadata_size];
-        let nm = libc::pread(
-            fd,
-            meta.as_mut_ptr() as *mut libc::c_void,
-            metadata_size,
-            32,
-        );
+    let mut meta = vec![0u8; metadata_size];
+    if metadata_size > 0 {
+        let nm = libc::pread(fd, meta.as_mut_ptr() as *mut libc::c_void, metadata_size, 32);
         if usize::try_from(nm).ok() != Some(metadata_size) {
             libc::close(fd);
             return Ok(None);
         }
-        let path_str = CStr::from_ptr(path).to_string_lossy();
-        if let Err(e) = check_packet_schema_matches(&meta, schema, &path_str) {
-            libc::close(fd);
-            return Err(e);
-        }
-        let mut full = Vec::with_capacity(32 + metadata_size);
-        full.extend_from_slice(&header_bytes);
-        full.extend_from_slice(&meta);
-        packet::read_vol_index_from_meta(&full).ok().flatten().unwrap_or(0)
-    } else {
-        0
-    };
+    }
+    let path_str = CStr::from_ptr(path).to_string_lossy();
+    if let Err(e) = check_packet_schema_matches(&meta, schema, &path_str) {
+        libc::close(fd);
+        return Err(e);
+    }
+    let mut full = Vec::with_capacity(32 + metadata_size);
+    full.extend_from_slice(&header_bytes);
+    full.extend_from_slice(&meta);
+    let vol_idx_hint = packet::read_vol_index_from_meta(&full).ok().flatten().unwrap_or(0);
 
     // Land the file's payload region straight in SHM, then relocate it.
     let landing = match crate::voidstar::Landing::new(payload_size) {
@@ -826,28 +786,13 @@ unsafe fn pread_exact(fd: libc::c_int, dst: *mut u8, len: usize, offset: usize) 
 
 // ── try_load_compressed_voidstar_via_shm ──────────────────────────────────
 
-/// Compressed analogue of [`try_load_voidstar_packet_via_mmap`]. For
-/// files containing a large MESG+VOIDSTAR packet whose payload is a
-/// single zstd frame carrying `pledgedSrcSize` in its header, allocates
-/// SHM at the *decompressed* size and stream-decompresses straight into
-/// the SHM region -- skipping the legacy chain's libc::malloc read
-/// buffer, the growing-Vec decoder output, the `Vec`-rebuild inside
-/// `decompress_packet`, and the malloc->SHM memcpy in
-/// `read_voidstar_binary_with_hint`. Peak resident set is one X of the
-/// decompressed payload (the SHM region) plus the BufReader window and
-/// libzstd's internal buffers.
-///
-/// Returns `Ok(None)` -- triggering the caller's fall-through to the
-/// legacy path -- when any of the eligibility checks fail (wrong magic,
-/// not MESG+VOIDSTAR, not zstd-compressed, frame missing
-/// `pledgedSrcSize`, file too small, fstat/pread failures).
+/// Compressed analogue of [`try_load_voidstar_packet_via_mmap`]: a
+/// large zstd MESG+VOIDSTAR packet file decompressed straight into shared
+/// memory, frame by frame. `Ok(None)` when the file is not eligible.
 pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     path: *const c_char,
     schema: *const CSchema,
 ) -> Result<Option<*mut u8>, MorlocError> {
-    // Same crossover as the uncompressed fast path: below this size the
-    // legacy buffered chain is competitive and the syscall overhead of
-    // the streaming path is not amortized.
     const FAST_PATH_THRESHOLD: usize = 1024 * 1024;
 
     if path.is_null() {
@@ -946,15 +891,10 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     full_header_and_meta.extend_from_slice(&header_bytes);
     full_header_and_meta.extend_from_slice(&metadata_bytes);
 
-    // Validate the packet's stored schema against the caller's
-    // requested schema before committing to the (expensive)
-    // decompression + rebase path.
-    if metadata_size > 0 {
-        let path_str = CStr::from_ptr(path).to_string_lossy();
-        if let Err(e) = check_packet_schema_matches(&metadata_bytes, schema, &path_str) {
-            libc::close(fd);
-            return Err(e);
-        }
+    let path_str = CStr::from_ptr(path).to_string_lossy();
+    if let Err(e) = check_packet_schema_matches(&metadata_bytes, schema, &path_str) {
+        libc::close(fd);
+        return Err(e);
     }
 
     let vol_idx_hint: u16 = packet::read_vol_index_from_meta(&full_header_and_meta)
@@ -962,9 +902,8 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
         .flatten()
         .unwrap_or(0);
 
-    // The frame index is mandatory under the multi-frame format. A
-    // compressed packet without one is not the new format -- skip and
-    // let the legacy path raise the hard error.
+    // A compressed packet without a frame index is refused by the
+    // general loader.
     let frames = match packet::read_frame_index_from_meta(&full_header_and_meta) {
         Ok(Some(f)) if !f.is_empty() => f,
         _ => {
@@ -973,10 +912,6 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
         }
     };
 
-    // From here we will return Err on failure rather than Ok(None) --
-    // we've committed to the fast path and the file is genuinely
-    // eligible; a downstream failure is a real error, not "try the
-    // legacy path".
 
     let (total_uncompressed, total_compressed) = match packet::frame_totals(&frames) {
         Ok(t) => t,
@@ -1046,22 +981,9 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
 
 // ── try_decompress_voidstar_bytes_to_shm ──────────────────────────────────
 
-/// In-memory analogue of [`try_load_compressed_voidstar_via_shm`]. For
-/// callers (stdin ingest, `--call-packet`, `try_packet_strict`) that
-/// have already pulled the compressed bytes off the wire, this lands a
-/// MESG+VOIDSTAR+ZSTD payload directly into a fresh SHM allocation
-/// without the legacy chain's `Vec`+libc::malloc round-trip.
-///
-/// Reads from `data` (borrowed, not owned -- caller still owns the
-/// buffer on every return path). On `Ok(Some(_))` the SHM region holds
-/// the decompressed, relptr-adjusted voidstar; the caller should free
-/// its compressed buffer.
-///
-/// Returns `Ok(None)` -- triggering fall-through to the legacy path --
-/// when the header is not MESG+VOIDSTAR+ZSTD or otherwise ineligible.
-/// When `pledgedSrcSize` is absent the helper still wins versus the
-/// legacy chain by skipping the libc::malloc round-trip (decompress
-/// into a Vec, then `shmalloc + memcpy`, drop the Vec immediately).
+/// In-memory analogue of [`try_load_compressed_voidstar_via_shm`], for
+/// bytes already read. `data` stays the caller's. `Ok(None)` when the
+/// bytes are not a MESG+VOIDSTAR+ZSTD packet with a frame index.
 unsafe fn try_decompress_voidstar_bytes_to_shm(
     data: *const u8,
     data_size: usize,
@@ -1111,10 +1033,6 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
         .flatten()
         .unwrap_or(0);
 
-    // Frame index is mandatory under the multi-frame format. Without
-    // one we have no way to know per-frame sizes; bail to the legacy
-    // path (which will raise a hard error -- old single-frame packets
-    // are no longer readable under the cutover).
     let frames = match packet::read_frame_index_from_meta(full_meta) {
         Ok(Some(f)) if !f.is_empty() => f,
         _ => return Ok(None),
@@ -1125,17 +1043,7 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
 
 // ── read_voidstar_binary ───────────────────────────────────────────────────
 
-/// Legacy C ABI: reads a VOIDSTAR payload assuming the producer encoded
-/// relptrs with vol_idx = 0 (no Layer-3 hint). Forwards to
-/// `read_voidstar_binary_with_hint` with hint = 0. Kept for ABI
-/// stability with C callers that don't know about the Layer-3 metadata.
-///
-/// **Callers reading a payload extracted from a morloc packet should
-/// prefer `read_voidstar_binary_with_hint` and pass the vol_idx hint
-/// recovered from `METADATA_TYPE_VOL_INDEX`** -- otherwise relptrs
-/// produced by the Layer-3 emitter (`stream_packet_to_fd` for
-/// uncompressed RPTR+VOIDSTAR) will carry stale vol_idx bits that this
-/// reader cannot cancel.
+/// [`read_voidstar_binary_with_hint`] with no volume-index hint.
 pub(crate) unsafe fn read_voidstar_binary(
     blob: *const u8,
     blob_size: usize,
@@ -1145,14 +1053,8 @@ pub(crate) unsafe fn read_voidstar_binary(
     read_voidstar_binary_with_hint(blob, blob_size, schema, 0, errmsg)
 }
 
-/// Read a VOIDSTAR payload into SHM, accounting for an optional Layer-3
-/// `vol_idx_hint` baked into the producer's relptr high bits.
-///
-/// Delta computation matches the fast-path mmap loader's:
-///     delta = abs2rel(dest) - encode_relptr(hint, 0)
-/// so for `hint = 0` this reduces to the legacy "buffer-relative ->
-/// SHM-relative" add walk, and for `hint > 0` the hint bits cancel
-/// against the consumer's slot in a single pass.
+/// A VOIDSTAR payload copied into shared memory and relocated; the
+/// producer's volume-index hint is cancelled by the relocation delta.
 pub(crate) unsafe fn read_voidstar_binary_with_hint(
     blob: *const u8,
     blob_size: usize,
@@ -2089,22 +1991,8 @@ unsafe fn try_bytes_hybrid(
 
 // ── Schema-check helper for packet loads ──────────────────────────────────
 
-/// Compare the schema string embedded in a morloc packet's metadata
-/// block to the caller's requested schema. Returns `Ok(())` on match
-/// or when there's nothing to compare against (missing metadata entry,
-/// null requested schema). Returns `Err(MorlocError::UserThrow(_))`
-/// on mismatch so `@catch` can intercept.
-///
-/// Without this check, `load_morloc_data_file`'s format-specific
-/// decoders would silently reinterpret payload bytes under the wrong
-/// schema (e.g. reading a Str-packet's Array header as an Int64),
-/// producing garbage instead of a catchable failure.
-///
-/// Comparison is byte-for-byte on the canonical `schema_to_string`
-/// form. Both sides go through the same renderer, which no longer
-/// emits language-specific `<hint>` prefixes (hints are pool-local
-/// codegen state, not wire data), so cross-language save/load pairs
-/// compare equal for identical wire types.
+/// The packet's stored schema, compared structurally with the one it is
+/// read as. A packet with no stored schema is refused.
 unsafe fn check_packet_schema_matches(
     meta_bytes: &[u8],
     requested_schema: *const CSchema,
@@ -2124,14 +2012,15 @@ unsafe fn check_packet_schema_matches(
             }
         });
 
-    let stored = match stored {
-        Some(s) => s,
-        None => return Ok(()), // no schema entry to compare against
-    };
-
     if requested_schema.is_null() {
         return Ok(());
     }
+    let Some(stored) = stored else {
+        return Err(MorlocError::Packet(format!(
+            "the packet{} carries no schema, so it cannot be checked against the type it is read as",
+            if path_hint.is_empty() { String::new() } else { format!(" in '{}'", path_hint) },
+        )));
+    };
 
     let requested_rs = CSchema::to_rust(requested_schema);
     let requested = schema_to_string(&requested_rs);
@@ -2263,13 +2152,9 @@ pub(crate) unsafe fn load_morloc_data_file(
         return ptr::null_mut();
     }
 
-    // SHM-direct path for compressed MESG+VOIDSTAR packets. When the
-    // bytes carry a header marking them as MESG+VOIDSTAR+ZSTD we can
-    // decompress straight into a fresh SHM allocation and return early,
-    // skipping the legacy chain's Vec + libc::malloc + memcpy round-trip
-    // entirely. The helper is a no-op (returns Ok(None)) for anything
-    // else, so other compressed formats (JSON/msgpack/Arrow) still flow
-    // through the generic decompression below.
+    // A compressed MESG+VOIDSTAR packet decompresses straight into shared
+    // memory; other compressed formats go through the general
+    // decompression below.
     // Callers that resolved bytes without a path (e.g. `try_packet_strict`
     // on a per-line list element) pass a null `path` pointer; they get no
     // extension-based dispatch below.
@@ -2587,26 +2472,27 @@ pub(crate) unsafe fn load_morloc_data_file(
                     return ptr::null_mut();
                 }
                 let offset = { header.offset } as usize;
-                let length = width::usize_from_u64(header.length);
-                // Compare the packet's stored schema descriptor to the
-                // caller's requested schema. Mismatch is user-attributable
-                // (loading the wrong type from a file) so surface as
-                // UserThrow via errmsg; @catch intercepts.
-                if offset > 0 {
-                    let meta_slice = std::slice::from_raw_parts(data.add(32), offset);
-                    if let Err(e) = check_packet_schema_matches(meta_slice, schema, &path_str) {
-                        libc::free(data as *mut c_void);
-                        set_errmsg(errmsg, &e);
-                        return ptr::null_mut();
-                    }
+                let length = { header.length };
+                let end = usize::try_from(length).ok().and_then(|n| n.checked_add(32 + offset));
+                if end.map_or(true, |end| end > data_size) {
+                    libc::free(data as *mut c_void);
+                    set_errmsg(errmsg, &MorlocError::Packet(format!(
+                        "the packet in '{}' claims {} bytes of metadata and {} of payload, but the file holds {}",
+                        path_str, offset, length, data_size
+                    )));
+                    return ptr::null_mut();
+                }
+                let length = length as usize;
+                let meta_slice = std::slice::from_raw_parts(data.add(32), offset);
+                if let Err(e) = check_packet_schema_matches(meta_slice, schema, &path_str) {
+                    libc::free(data as *mut c_void);
+                    set_errmsg(errmsg, &e);
+                    return ptr::null_mut();
                 }
                 let payload = data.add(32 + offset);
                 let format = { header.command.data.format };
 
                 if format == packet::PACKET_FORMAT_VOIDSTAR {
-                    // Pull the Layer-3 vol_idx hint out of the metadata
-                    // block if present; the legacy reader otherwise
-                    // miscounts the producer's high bits.
                     let packet_slice = std::slice::from_raw_parts(data, data_size);
                     let hint = packet::read_vol_index_from_meta(packet_slice)
                         .ok().flatten().unwrap_or(0);
@@ -2783,10 +2669,6 @@ unsafe fn parse_cli_data_argument_classified(
             }
         }
         ArgSource::File => {
-            // Layer 2 fast path: if the file is a regular file holding
-            // a large MESG+VOIDSTAR morloc packet, pread its payload
-            // straight into a fresh SHM allocation and skip the
-            // libc::malloc + read + shmalloc + memcpy chain.
             match try_load_voidstar_packet_via_mmap(effective, schema) {
                 Ok(Some(payload_ptr)) => return payload_ptr,
                 Ok(None) => { /* fall through */ }
@@ -4264,6 +4146,52 @@ mod tests {
             libc::free(err as *mut c_void);
             assert!(msg.contains("shared-memory reference"), "{msg}");
             crate::cschema::CSchema::free(cschema);
+        }
+    }
+
+    unsafe fn load_bytes(bytes: &[u8], schema: &str) -> Result<*mut c_void, String> {
+        let rs = crate::schema::parse_schema(schema).unwrap();
+        let cs = crate::cschema::CSchema::from_rust(&rs);
+        let data = libc::malloc(bytes.len().max(1)) as *mut u8;
+        ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
+        let path = std::ffi::CString::new("x.pkt").unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let got = load_morloc_data_file(path.as_ptr(), data, bytes.len(), cs, &mut err);
+        crate::cschema::CSchema::free(cs);
+        if got.is_null() {
+            assert!(!err.is_null());
+            let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+            libc::free(err as *mut c_void);
+            Err(msg)
+        } else {
+            Ok(got)
+        }
+    }
+
+    /// A packet file is checked against the type it is read as, so one
+    /// without a schema cannot be read.
+    #[test]
+    fn a_packet_file_without_a_schema_is_refused() {
+        let _shm = crate::init_test_shm();
+        let header = packet::PacketHeader::data_mesg(packet::PACKET_FORMAT_VOIDSTAR, 8);
+        let mut bytes = header.to_bytes().to_vec();
+        bytes.extend_from_slice(&5i64.to_le_bytes());
+        let msg = unsafe { load_bytes(&bytes, "i8") }.unwrap_err();
+        assert!(msg.contains("carries no schema"), "{msg}");
+    }
+
+    /// A header that claims more bytes than the file holds is refused
+    /// before anything past the file is read.
+    #[test]
+    fn a_packet_file_shorter_than_its_header_claims_is_refused() {
+        let _shm = crate::init_test_shm();
+        for (offset, length) in [(0u32, 1u64 << 40), (1u32 << 30, 8), (8, u64::MAX - 16)] {
+            let mut header = packet::PacketHeader::data_mesg(packet::PACKET_FORMAT_VOIDSTAR, length);
+            header.offset = offset;
+            let mut bytes = header.to_bytes().to_vec();
+            bytes.extend_from_slice(&[0u8; 16]);
+            let msg = unsafe { load_bytes(&bytes, "i8") }.unwrap_err();
+            assert!(msg.contains("the file holds"), "{offset} {length}: {msg}");
         }
     }
 

@@ -57,10 +57,6 @@ Reproduced on 0.109.0 unless marked.
   MCP tools and the CLI each find a command by name alone (IFACE-1). This
   is CMD-4 (a) widened to the whole program; the other answer, names
   scoped by group, needs the serving interfaces to carry the group.
-- **`@stdin` is accepted on `?Str`.** [reproduced, 2026-10-21] Violates
-  CLI-3. It builds; the value can never be null (`f null` -> "check.path:
-  r requires path 'null' to exist"); omitted it is `"/dev/stdin"`. CLI-3
-  should also state the omitted value. Repro: /work/plans/model-audit-2026-10-21/repro/G/args/s3.loc.
 - **CLI-2 errors are not at the docstring line.** [reproduced, 2026-10-21]
   `@form list|table`, `@form auto`, `@source auto`, `@check.path r|w` are
   reported at the type line; `@form table`/`@form bytes`/`@stdin` on `Int`

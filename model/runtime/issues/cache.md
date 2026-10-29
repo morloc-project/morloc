@@ -2,13 +2,11 @@
 
 There is no cache spec yet; these are gaps until one is written.
 
-- **Stale result after editing a sourced file.** [reproduced] `foo x =
-  a@bump x`, label `a: {cache: true}`, foo.py `def bump(x): return x + 1.0`.
-  `./prog foo 7` -> 8; change to `x + 100.0`, rebuild, `./prog foo 7` -> 8
-  (stale), `./prog foo 8` -> 108. The key's fingerprint hashes the generated
-  pool source (library/Morloc/Data/PoolHash.hs:52-104), which only imports
-  foo.py. Library sources and the runtime version are not in the key
-  either. Open: what the key must cover.
+- **A cached result is keyed by what the pool sources, not by what those
+  files import.** [read, 2026-10-29] The key covers the pool's source text,
+  the files its language sources, `hash-include` files and the compiler
+  version; a header or module those files load in turn is covered only when
+  it is listed under `hash-include`.
 - **Unverified 64-bit keys.** [read] Neither key nor data hash is checked on
   a hit; a data-hash collision skips the write (cache.rs:579-585); an empty
   pool hash is 0, so programs sharing a label share keys (cache.rs:109-117).

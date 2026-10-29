@@ -1756,6 +1756,7 @@ validateArgSpecs i cmdargs asts schemas = do
       let argLoc = loc <> "argument #" <> pretty n
       case arg of
         CmdArgPos r -> do
+          checkStdinWire argLoc (argPosDocStdin r) ast
           checkManyWire argLoc (argPosDocMany r) ast schemaText
           checkArgShape argLoc ast schemaText arg
           checkTableForm argLoc (argPosDocForm r) ast
@@ -1822,6 +1823,14 @@ tableFormProblem ast = case ast of
       SerialFloat64 _ -> True
       SerialEnum {}   -> enumOk
       _               -> False
+
+-- | CLI-3: an `@stdin` argument is a `Str`.
+checkStdinWire :: MDoc -> Bool -> SerialAST -> MorlocMonad ()
+checkStdinWire loc True ast
+  | wireShape ast /= WStr = MM.throwSystemError $
+      loc <> ": `@stdin` is only for a `Str` argument; this one is"
+        <+> pretty (Docstrings.shapeName (wireShape ast)) <> "."
+checkStdinWire _ _ _ = return ()
 
 -- | `@many` requires an array wire type.
 checkManyWire :: MDoc -> Bool -> SerialAST -> Text -> MorlocMonad ()

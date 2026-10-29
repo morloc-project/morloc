@@ -8,8 +8,9 @@ License     : Apache-2.0
 Maintainer  : z@morloc.io
 
 Per-pool source fingerprint plumbing for the runtime cache. The hash
-covers the pool's emitted source text and the contents of any files
-listed under the program YAML's @hash-include@ field. The result is
+covers the pool's emitted source text, the contents of every file the
+pool's language sources, and the contents of any files listed under the
+program YAML's @hash-include@ field. The result is
 stored as a 16-character lowercase hex string in the manifest's
 @pool_hash@ slot and then exported to the running pool via
 @MORLOC_POOL_HASH@ so it can be mixed into every cache key.
@@ -33,6 +34,10 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word64)
+import Control.Monad (filterM)
+import Data.List (sort)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, pathIsSymbolicLink)
+import System.FilePath ((</>))
 import System.Directory.Tree (AnchoredDirTree ((:/)), DirTree (Dir, File))
 import Text.Printf (printf)
 
@@ -86,12 +91,13 @@ poolHashHex = T.pack . printf "%016x"
 -- flags) invalidate the cache even when the emitted pool source is unchanged,
 -- so a pool built one way never serves results cached from a build built
 -- another way.
-computePoolHashes :: T.Text -> [FilePath] -> [Script] -> IO (Map Lang Word64)
-computePoolHashes salt includes pools =
+computePoolHashes :: T.Text -> [FilePath] -> (Lang -> [FilePath]) -> [Script] -> IO (Map Lang Word64)
+computePoolHashes salt includes sourcedFiles pools =
   Map.fromList <$> mapM go pools
   where
     go p = do
-      h <- poolHash (salt <> extractSource p) includes
+      sourced <- concat <$> mapM filesUnder (sourcedFiles (scriptLang p))
+      h <- poolHash (salt <> extractSource p) (sourced <> includes)
       return (scriptLang p, h)
 
     -- A 'Script' may emit a directory tree with files at any depth.
@@ -103,6 +109,21 @@ computePoolHashes salt includes pools =
         walk (File _ (Code t)) = [t]
         walk (Dir _ children) = concatMap walk children
         walk _ = []
+
+-- | A file, or every file under a directory in a fixed order. A link to a
+-- directory is not followed, so a link cycle cannot loop.
+filesUnder :: FilePath -> IO [FilePath]
+filesUnder path = do
+  isDir <- doesDirectoryExist path
+  if not isDir
+    then filterM doesFileExist [path]
+    else do
+      isLink <- pathIsSymbolicLink path
+      if isLink
+        then return []
+        else do
+          entries <- sort <$> listDirectory path
+          concat <$> mapM (filesUnder . (path </>)) entries
 
 -- | Replace the @<MORLOC_POOL_HASH:lang>@ placeholders that
 -- 'Morloc.CodeGenerator.Nexus.buildManifest' wrote into the manifest's

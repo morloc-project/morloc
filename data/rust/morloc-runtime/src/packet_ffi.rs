@@ -37,6 +37,13 @@ pub(crate) unsafe fn read_morloc_packet_header(
         set_errmsg(errmsg, &MorlocError::Packet("Malformed morloc packet".into()));
         return ptr::null_mut();
     }
+    let length = header.length;
+    if length > (isize::MAX as u64) - 32 - u64::from(u32::MAX) {
+        set_errmsg(errmsg, &MorlocError::Packet(format!(
+            "a packet header claims a {length}-byte payload, more than any packet can hold"
+        )));
+        return ptr::null_mut();
+    }
     msg as *mut PacketHeader
 }
 
@@ -603,7 +610,7 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
     // for compressed data).
     let compression = (*header).command.data.compression;
     if compression == morloc_runtime_types::packet::PACKET_COMPRESSION_ZSTD {
-        let packet_size = 32 + (*header).offset as usize + (*header).length as usize;
+        let packet_size = morloc_packet_size_from_header(header);
         let packet_bytes = std::slice::from_raw_parts(data, packet_size);
         let decompressed = match morloc_runtime_types::compression::decompress_packet(packet_bytes) {
             Ok(v) => v,
@@ -646,8 +653,17 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
             }
         }
         PACKET_SOURCE_FILE => {
-            let filename_bytes = std::slice::from_raw_parts(data.add(payload_start), payload_len.min(4096));
-            let filename = std::str::from_utf8(filename_bytes).unwrap_or("");
+            if payload_len > 4096 {
+                set_errmsg(errmsg, &MorlocError::Packet(format!(
+                    "a file packet's path is {payload_len} bytes; at most 4096 are read"
+                )));
+                return ptr::null_mut();
+            }
+            let filename_bytes = std::slice::from_raw_parts(data.add(payload_start), payload_len);
+            let Ok(filename) = std::str::from_utf8(filename_bytes) else {
+                set_errmsg(errmsg, &MorlocError::Packet("a file packet's path is not UTF-8".into()));
+                return ptr::null_mut();
+            };
             let filename = filename.trim_end_matches('\0');
             if format == PACKET_FORMAT_MSGPACK {
                 match std::fs::read(filename) {
@@ -709,7 +725,12 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
             }
         }
         PACKET_SOURCE_RPTR => {
-            if format == PACKET_FORMAT_VOIDSTAR || format == PACKET_FORMAT_ARROW {
+            if payload_len < 8 {
+                set_errmsg(errmsg, &MorlocError::Packet(format!(
+                    "a shared-memory reference packet carries {payload_len} payload bytes, not 8"
+                )));
+                ptr::null_mut()
+            } else if format == PACKET_FORMAT_VOIDSTAR || format == PACKET_FORMAT_ARROW {
                 match checked_rptr_block(data, data.add(payload_start)) {
                     Ok(abs) => abs,
                     Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
@@ -901,13 +922,22 @@ pub(crate) unsafe fn read_morloc_call_packet(
     (*call).owns_args = 0; // borrowing pointers into packet
 
     let start_pos = 32 + (*header).offset as usize;
-    let end_pos = start_pos + (*header).length as usize;
+    let end_pos = morloc_packet_size_from_header(header);
 
-    // First pass: count args
+    // First pass: count args, each wholly inside the call packet.
     let mut pos = start_pos;
     while pos < end_pos {
-        let arg_size = morloc_packet_size(packet.add(pos), errmsg);
-        if arg_size == 0 {
+        let arg_size = if end_pos - pos < 32 {
+            0
+        } else {
+            morloc_packet_size(packet.add(pos), errmsg)
+        };
+        if arg_size == 0 || arg_size > end_pos - pos {
+            if !errmsg.is_null() && (*errmsg).is_null() {
+                set_errmsg(errmsg, &MorlocError::Packet(format!(
+                    "argument #{} of a call packet runs past the packet's end", (*call).nargs
+                )));
+            }
             free_morloc_call(call);
             return ptr::null_mut();
         }
@@ -1342,7 +1372,7 @@ unsafe fn read_rptr_payload(
         PACKET_FORMAT_VOIDSTAR => {
             let schema_ptr = read_schema_from_packet_meta(packet, errmsg);
             if schema_ptr.is_null() {
-                if (*errmsg).is_null() {
+                if !errmsg.is_null() && (*errmsg).is_null() {
                     set_errmsg(errmsg, &MorlocError::Packet(
                         "RPTR+VOIDSTAR packet missing schema metadata".into()
                     ));
@@ -2198,6 +2228,7 @@ pub(crate) unsafe fn print_morloc_data_packet(
                     };
 
                     let mut new_header = *header;
+                    new_header.command.data.source = PACKET_SOURCE_MESG;
                     new_header.command.data.format = PACKET_FORMAT_VOIDSTAR;
                     // Safely set length (packed struct)
                     let new_hdr_ptr = &mut new_header as *mut PacketHeader as *mut u8;
@@ -2818,5 +2849,55 @@ mod generation_tests {
         }
         assert!(err.is_null());
         assert_eq!(got, abs as *mut u8);
+    }
+}
+
+#[cfg(test)]
+mod call_packet_bounds_tests {
+    use super::*;
+
+    unsafe fn call_with_one_arg() -> Vec<u8> {
+        let arg = make_fail_packet(c"x".as_ptr());
+        let args = [arg as *const u8];
+        let mut err: *mut c_char = ptr::null_mut();
+        let call = make_morloc_local_call_packet(7, args.as_ptr(), 1, &mut err);
+        assert!(err.is_null());
+        let size = morloc_packet_size(call, &mut err);
+        let bytes = std::slice::from_raw_parts(call, size).to_vec();
+        libc::free(call as *mut c_void);
+        libc::free(arg as *mut c_void);
+        bytes
+    }
+
+    unsafe fn read_call(bytes: &[u8]) -> Result<usize, String> {
+        let mut err: *mut c_char = ptr::null_mut();
+        let call = read_morloc_call_packet(bytes.as_ptr(), &mut err);
+        if call.is_null() {
+            let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+            libc::free(err as *mut c_void);
+            return Err(msg);
+        }
+        let n = (*call).nargs;
+        free_morloc_call(call);
+        Ok(n)
+    }
+
+    #[test]
+    fn a_well_formed_call_packet_reads_its_arguments() {
+        unsafe { assert_eq!(read_call(&call_with_one_arg()), Ok(1)) };
+    }
+
+    /// An argument whose own header claims more bytes than the call packet
+    /// holds is refused before anything past the packet is read.
+    #[test]
+    fn an_argument_past_the_call_packets_end_is_refused() {
+        unsafe {
+            let mut bytes = call_with_one_arg();
+            let arg_start = 32 + u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;
+            let arg_length_at = arg_start + 24;
+            bytes[arg_length_at..arg_length_at + 8].copy_from_slice(&(1u64 << 20).to_le_bytes());
+            let msg = read_call(&bytes).unwrap_err();
+            assert!(msg.contains("runs past the packet's end"), "{msg}");
+        }
     }
 }

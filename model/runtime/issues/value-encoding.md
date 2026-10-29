@@ -74,8 +74,7 @@
   `CheckedSchema` value only the check can make would close that.
   `packet::get_data_value` (pool IPC) and cache.rs's reads of cached
   packets land without comparing schemas; a cache file is not trusted
-  input. The check passes a packet with no schema entry: no item says
-  whether such a packet is accepted.
+  input. A packet with no schema entry is refused.
   `load_packet_file` opens a small file up to four times (header peek,
   each fast path, the read) and reads the header three times; one read of
   header and metadata could choose the path. A FIFO path is opened and

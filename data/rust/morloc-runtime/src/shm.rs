@@ -1168,6 +1168,9 @@ pub(crate) fn forget_held_references() {
 /// hook fires here unconditionally on success; callers outside the arena
 /// see no behavioral difference.
 pub fn shmalloc(size: usize) -> Result<AbsPtr, MorlocError> {
+    if size > isize::MAX as usize {
+        return Err(MorlocError::Shm(format!("cannot allocate {size} bytes of shared memory")));
+    }
     let size = if size == 0 { BLOCK_ALIGN } else { align_up(size, BLOCK_ALIGN) };
     let ptr = match shmalloc_unlocked(size) {
         Ok(p) => p,
@@ -3208,6 +3211,14 @@ pub(crate) mod tests {
             shfree(p).unwrap();
         }
         shclose().unwrap();
+    }
+
+    #[test]
+    fn a_size_past_the_address_space_is_refused() {
+        let _shm = crate::init_test_shm();
+        for size in [usize::MAX, usize::MAX - 7, isize::MAX as usize + 1] {
+            assert!(shmalloc(size).is_err(), "{size}");
+        }
     }
 
     #[test]

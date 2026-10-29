@@ -59,7 +59,7 @@
 - **A stream refuses a second compression level.** [reproduced,
   2026-10-21] Gap in STRM-2. `@write 3 o [1,2,3]` then `@write 0 o [4,5]`
   fails "@write level mismatch ... All sub-packets must share a level";
-  the buffered `[1,2,3]` is lost and the file has no footer. No item says
-  a stream has one level, and `@write` takes one per call. Either the
-  level belongs on the open, or it is per sub-packet. The failed write
-  losing earlier data is a bug either way.
+  the buffered `[1,2,3]`, never flushed, is dropped when the failed run
+  ends, as SLOT-13 says. No item says a stream has one level, and `@write`
+  takes one per call. Either the level belongs on the open, or it is per
+  sub-packet: needs a ruling.
