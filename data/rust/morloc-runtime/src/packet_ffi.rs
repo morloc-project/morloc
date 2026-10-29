@@ -2215,7 +2215,7 @@ pub(crate) unsafe fn print_morloc_data_packet(
             match format {
                 PACKET_FORMAT_VOIDSTAR => {
                     let payload_start = 32 + (*header).offset as usize;
-                    let relptr = *(packet.add(payload_start) as *const RelPtr);
+                    let relptr = std::ptr::read_unaligned(packet.add(payload_start) as *const RelPtr);
                     let voidstar_ptr = match shm::rel2abs(relptr) {
                         Ok(p) => p,
                         Err(e) => { set_errmsg(errmsg, &e); return 1; }
@@ -2230,9 +2230,7 @@ pub(crate) unsafe fn print_morloc_data_packet(
                     let mut new_header = *header;
                     new_header.command.data.source = PACKET_SOURCE_MESG;
                     new_header.command.data.format = PACKET_FORMAT_VOIDSTAR;
-                    // Safely set length (packed struct)
-                    let new_hdr_ptr = &mut new_header as *mut PacketHeader as *mut u8;
-                    *(new_hdr_ptr.add(24) as *mut u64) = flat_size as u64;
+                    new_header.length = flat_size as u64;
 
                     // Print header
                     let rc = print_binary(&new_header as *const PacketHeader as *const u8, 32, errmsg);

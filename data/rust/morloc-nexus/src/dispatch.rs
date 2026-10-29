@@ -1443,7 +1443,36 @@ pub(crate) fn print_result_c(
                 eprintln!("Error: msgpack serialization failed");
                 process::clean_exit(1);
             }
-            if config.print_flag {
+            if full_packet.is_empty() {
+                // The caller holds only a voidstar.
+                extern "C" {
+                    fn mlc_write_voidstar_data_packet_to_fd(
+                        data: *const std::ffi::c_void,
+                        schema: *const morloc_runtime_types::cschema::CSchema,
+                        level: u8,
+                        fd: libc::c_int,
+                        errmsg: *mut *mut std::ffi::c_char,
+                    ) -> i64;
+                }
+                if config.print_flag {
+                    eprintln!("Error: a hex dump of `-f voidstar` output needs the result packet");
+                    process::clean_exit(1);
+                }
+                use std::io::Write;
+                let _ = std::io::stdout().lock().flush();
+                let mut verr: *mut std::ffi::c_char = std::ptr::null_mut();
+                let n = unsafe {
+                    mlc_write_voidstar_data_packet_to_fd(ptr as *const std::ffi::c_void, schema, 0, libc::STDOUT_FILENO, &mut verr)
+                };
+                if n == morloc_runtime_types::PACKET_TO_FD_PIPE_CLOSED {
+                    process::exit_broken_pipe();
+                }
+                if n < 0 {
+                    let msg = process::take_c_errmsg(verr).unwrap_or_else(|| "unknown error".into());
+                    eprintln!("Error: voidstar output failed: {}", msg);
+                    process::clean_exit(1);
+                }
+            } else if config.print_flag {
                 let bytes = unsafe { std::slice::from_raw_parts(mpk_ptr as *const u8, mpk_size) };
                 if let Err(e) = write_hex_dump(bytes) {
                     if e.kind() == std::io::ErrorKind::BrokenPipe {
@@ -1456,21 +1485,8 @@ pub(crate) fn print_result_c(
                     process::clean_exit(1);
                 }
             } else {
-                use std::io::Write;
                 let bytes = unsafe { std::slice::from_raw_parts(mpk_ptr as *const u8, mpk_size) };
-                match std::io::stdout().lock().write_all(bytes) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-                        if !mpk_ptr.is_null() {
-                            unsafe { libc::free(mpk_ptr as *mut std::ffi::c_void) };
-                        }
-                        process::exit_broken_pipe();
-                    }
-                    Err(e) => {
-                        eprintln!("Error: msgpack write failed: {}", e);
-                        process::clean_exit(1);
-                    }
-                }
+                write_stdout_or_exit(bytes, "msgpack");
             }
             if !mpk_ptr.is_null() {
                 unsafe { libc::free(mpk_ptr as *mut std::ffi::c_void) };
@@ -1747,16 +1763,29 @@ pub(crate) fn print_result_c(
                 eprintln!("Error: {}", msg);
                 process::clean_exit(1);
             }
-            use std::io::Write;
             let bytes = unsafe { std::slice::from_raw_parts(buf, len) };
-            let _ = std::io::stdout().lock().write_all(bytes);
+            write_stdout_or_exit(bytes, "table");
             unsafe { libc::free(buf as *mut std::ffi::c_void) };
         }
     }
     process::clean_exit(0);
 }
 
-/// Execute a pure command by evaluating the expression via C library.
+/// Write `bytes` to stdout and flush; a closed pipe ends the run with its
+/// status, any other failure with 1.
+fn write_stdout_or_exit(bytes: &[u8], what: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match out.write_all(bytes).and_then(|_| out.flush()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => process::exit_broken_pipe(),
+        Err(e) => {
+            eprintln!("Error: writing the {what} output failed: {e}");
+            process::clean_exit(1);
+        }
+    }
+}
+
 fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, manifest: &Manifest) {
     use morloc_runtime_types::schema::parse_schema;
 

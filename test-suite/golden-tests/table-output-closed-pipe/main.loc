@@ -1,0 +1,20 @@
+-- A table written to a pipe whose reader has closed ends the run with the
+-- closed-pipe status, 141, as CSV or TSV; a full disk fails it.
+module main (rows, size)
+
+import root-py
+
+source Py from "src.py" ("mk")
+
+record Row = Row { x :: Int, y :: Str }
+record Py => Row = "dict"
+
+mk :: Int -> [Row]
+
+--' Rows to print
+rows :: Int -> [Row]
+rows n = mk n
+
+--' How many rows
+size :: [Row] -> Int
+size xs = length xs

@@ -830,13 +830,7 @@ pub fn make_standard_data_packet(relptr: RelPtr, schema: &Schema) -> Vec<u8> {
     // Write header
     let header = PacketHeader::data_rptr(PACKET_FORMAT_VOIDSTAR, payload_len as u64);
     let mut hdr = header;
-    // Override offset to include metadata
-    unsafe {
-        let hdr_ptr = &mut hdr as *mut PacketHeader as *mut u8;
-        // Set offset field (at byte 20 in packed struct)
-        let offset_ptr = hdr_ptr.add(20) as *mut u32;
-        *offset_ptr = padded_meta_len as u32;
-    }
+    hdr.offset = padded_meta_len as u32;
     let hdr_bytes = hdr.to_bytes();
     packet[..32].copy_from_slice(&hdr_bytes);
 
@@ -877,12 +871,7 @@ pub fn make_mesg_data_packet(mpk_data: &[u8], schema: &Schema) -> Vec<u8> {
 
     // Write header
     let mut header = PacketHeader::data_mesg(PACKET_FORMAT_MSGPACK, mpk_data.len() as u64);
-    // Set offset to metadata size
-    unsafe {
-        let hdr_ptr = &mut header as *mut PacketHeader as *mut u8;
-        let offset_ptr = hdr_ptr.add(20) as *mut u32;
-        *offset_ptr = padded_meta_len as u32;
-    }
+    header.offset = padded_meta_len as u32;
     let hdr_bytes = header.to_bytes();
     packet[..32].copy_from_slice(&hdr_bytes);
 
