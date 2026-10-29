@@ -626,11 +626,14 @@ unsafe fn read_int_as_i64(
         | SerialType::Optional | SerialType::Table | SerialType::Recur | SerialType::Variant
         | SerialType::Enum => return Err(not_integer()),
     };
+    let rust_schema = CSchema::to_rust(schema);
+    let storage = morloc_runtime_types::schema::handle_storage(&rust_schema).unwrap_or("");
     let mut err: *mut c_char = ptr::null_mut();
     let handle = crate::intrinsics::mlc_read_stream_field(
         ptr as *const std::ffi::c_void,
         crate::voidstar::MorlocSpace::SHM,
         handle_kind,
+        storage,
         &mut err,
     );
     if handle < 0 {
@@ -1343,57 +1346,33 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Open => {
+            use morloc_runtime_types::stream_handle as sh;
             let open = (*expr).expr.open_expr;
             let kind = (*open).kind;
-            let path_expr = (*open).path;
-            let path_result = morloc_eval_r(path_expr, ptr::null_mut(), 0, bndvars)?;
+            let handle_schema = CSchema::to_rust((*expr).schema);
+            let storage = morloc_runtime_types::schema::handle_storage(&handle_schema)
+                .unwrap_or("")
+                .to_string();
+            let path_result = morloc_eval_r((*open).path, ptr::null_mut(), 0, bndvars)?;
             let path_cstr = path_voidstar_to_cstr(path_result, "@open")?;
-
-            match kind {
-                0 => {
-                    use crate::intrinsics::mlc_probe_packet;
-                    use morloc_runtime_types::stream_handle as sh;
-                    let mut err: *mut c_char = ptr::null_mut();
-                    let probe_rc = mlc_probe_packet(path_cstr, &mut err);
-                    if probe_rc != 0 {
-                        let fb = {
-                            let p = CStr::from_ptr(path_cstr).to_string_lossy().into_owned();
-                            format!("@open probe: '{p}' is not a valid morloc packet")
-                        };
-                        libc::free(path_cstr as *mut c_void);
-                        return Err(MorlocError::UserThrow(take_c_errmsg_or(err, &fb)));
-                    }
-                    let path_len = libc::strlen(path_cstr);
-                    let payload = if path_len == 0 {
-                        sh::RELNULL_PAYLOAD
-                    } else {
-                        let block = shm::shmalloc(sh::path_suballoc_size(path_len))?;
-                        sh::write_path_suballoc(
-                            block,
-                            std::slice::from_raw_parts(path_cstr as *const u8, path_len),
-                        );
-                        sh::path_payload(shm::abs2rel(block)?)
-                    };
-                    sh::write_field(dest, sh::TAG_PATH, payload);
-                    libc::free(path_cstr as *mut c_void);
-                }
-                1 => {
-                    use crate::intrinsics::mlc_open;
-                    use morloc_runtime_types::stream_handle as sh;
-                    let mut err: *mut c_char = ptr::null_mut();
-                    let handle = mlc_open(path_cstr, kind, &mut err);
-                    libc::free(path_cstr as *mut c_void);
-                    if handle < 0 {
-                        let msg = take_c_errmsg_or(err, "@open IStream: mlc_open returned -1 without errmsg");
-                        return Err(MorlocError::UserThrow(msg));
-                    }
-                    sh::write_field(dest, sh::TAG_HANDLE, sh::handle_payload(handle));
-                }
-                other => {
-                    libc::free(path_cstr as *mut c_void);
-                    panic!("compiler bug: @open received unknown kind byte {other} \
-                            (expected 0=IFile or 1=IStream; OStream routes through OpenOStream)");
-                }
+            let path = CStr::from_ptr(path_cstr).to_string_lossy().into_owned();
+            libc::free(path_cstr as *mut c_void);
+            if kind == morloc_runtime_types::packet::MLC_KIND_IFILE {
+                crate::stream::check_ifile_path(&path, &storage)
+                    .map_err(|e| MorlocError::UserThrow(e.to_string()))?;
+                let block = shm::shmalloc(sh::path_suballoc_size(path.len()))?;
+                sh::write_path_suballoc(block, path.as_bytes());
+                sh::write_field(dest, sh::TAG_PATH, sh::path_payload(shm::abs2rel(block)?));
+            } else {
+                // The nexus has no pool to serve stdin to an IStream it
+                // holds; the untyped open refuses that with the reason.
+                let opened = if crate::stream::is_stdin_device(&path) {
+                    crate::stream::open_dispatch(&path, kind)
+                } else {
+                    crate::stream::open_typed(&path, kind, &storage)
+                };
+                let handle = opened.map_err(|e| MorlocError::UserThrow(e.to_string()))?;
+                sh::write_field(dest, sh::TAG_HANDLE, sh::handle_payload(handle));
             }
         }
 

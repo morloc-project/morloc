@@ -191,7 +191,7 @@ data IExpr
   | IIntrinsicConform Int IExpr -- schemaId, wire-form literal -> the form the decoder gives the schema
   | IIntrinsicCellSlots Int (Maybe IType) IExpr -- element schemaId, list type, handle -> every accumulator
   | IIntrinsicReduceList IExpr IExpr -- combine, non-empty list -> the list folded with combine
-  | IIntrinsicOpen Word8 IExpr -- kind byte (IFile=0, IStream=1, OStream=2), path -> handle
+  | IIntrinsicOpenIFile Int IExpr -- schema id of what the file stores, path -> handle
   | IIntrinsicClose IExpr -- handle -> ()
   | IIntrinsicUnlinkTemp IExpr
       -- ^ @close given a Str path: unlink a registered temp file (created
@@ -2717,19 +2717,14 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrSchema (Just s) [dataDocs]) =
   return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit Nothing s)}
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTypeof (Just s) [dataDocs]) =
   return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit Nothing s)}
--- @open: dispatch on the resolved handle type. IFile/IStream go through
--- the generic kind-byte runtime entry; OStream needs the element schema
--- threaded so the runtime can write the stream header at open time.
+-- @open: every handle kind opens with the schema its file stores, which
+-- the runtime checks the file against (an OStream writes it instead).
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrOpen maySchema [pathDocs]) = do
   let unwrapHead (AppF (VarF (FV v _)) _) = Just v
       unwrapHead (VarF (FV v _)) = Just v
       unwrapHead _ = Nothing
   let headVar = unwrapHead (typeFof origExpr)
       rawPath = IRawExpr (render (poolExpr pathDocs))
-      -- Typed open (OStream/IStream): thread the ascribed `[a]` schema through
-      -- lcRegisterSchema into the given IExpr constructor. OStream needs it to
-      -- write the stream header; IStream to open the stdin sentinel and guard
-      -- the incoming stream.
       openTyped mkExpr what = do
         schemaText <- case maySchema of
           Just s  -> return s
@@ -2739,10 +2734,7 @@ lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrOpen maySchema [pathDocs]) = 
   case headVar of
     Just v | v == BT.ostreamVar -> openTyped IIntrinsicOpenOStream "OStream"
     Just v | v == BT.istreamVar -> openTyped IIntrinsicOpenIStream "IStream"
-    Just v | v == BT.ifileVar ->
-      -- IFile reads its schema off disk (no ascription schema needed); an
-      -- IFile open of the stdin sentinel is a catchable runtime error.
-      return pathDocs { poolExpr = lcPrintExpr cfg (IIntrinsicOpen BT.mlcKindIFile rawPath) }
+    Just v | v == BT.ifileVar -> openTyped IIntrinsicOpenIFile "IFile"
     Just (TV t) ->
       error $ "@open: result type must be IFile/IStream/OStream, got " <> T.unpack t
     Nothing ->

@@ -2912,7 +2912,7 @@ fn stdio_decode_packet(handle: i64, packet_abs: crate::shm::AbsPtr)
 /// through the nexus RPC channel (the pool does not own fd 0) and rejects
 /// IFile (a pipe is not seekable). The nexus only ever emits the
 /// `/dev/stdin` sentinel, but a user may type any alias, so recognize all.
-fn is_stdin_device(path: &str) -> bool {
+pub(crate) fn is_stdin_device(path: &str) -> bool {
     matches!(path, "/dev/stdin" | "/dev/fd/0" | "/proc/self/fd/0")
 }
 
@@ -7273,13 +7273,6 @@ fn slice_bulk_pack_str(
     Ok(block)
 }
 
-/// Dispatch entry point used by the FFI shim in `intrinsics.rs`.
-///
-/// OSTREAM is intentionally NOT dispatched here -- the writer needs the
-/// element schema in hand at open time, which the typed entry point
-/// `mlc_open_ostream(schema_str, path)` provides. Routing OSTREAM
-/// through `mlc_open(path, kind)` would create a Nil-schema header on
-/// disk, breaking the receiving IStream/IFile reader's schema parse.
 pub fn open_dispatch(path: &str, kind: u8) -> Result<i64, MorlocError> {
     if served_stdio_path(path) {
         return Err(served_stdio_error(path));
@@ -7326,43 +7319,125 @@ pub fn open_dispatch(path: &str, kind: u8) -> Result<i64, MorlocError> {
     }
 }
 
-/// Dispatch entry for the typed `mlc_open_istream(schema_str, path)`.
-///
-/// A real file seeds its element schema from the on-disk stream header
-/// (the `schema_str` arg is consulted only for the stdin sentinel). The
-/// stdin sentinel routes to the nexus stdin channel via `open_stdio`,
-/// declaring the ascribed `[a]` schema so the nexus can guard the
-/// incoming stream against the opener's type.
+// FMT-9
 pub fn open_dispatch_istream(path: &str, schema_str: &str) -> Result<i64, MorlocError> {
+    if schema_str.is_empty() {
+        return Err(no_element_type("IStream", path));
+    }
     if served_stdio_path(path) {
         return Err(served_stdio_error(path));
     }
     if is_stdin_device(path) {
         return open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, schema_str);
     }
-    // A stream file is self-describing, so the reader decodes from the
-    // file's own schema and needs no argument. The ascribed type still
-    // matters: the pool walks the resulting voidstar with its
-    // compile-time schema, so a mismatch is a structural walk of a
-    // buffer that schema does not describe. Both strings are in hand
-    // here, so check once at open rather than producing garbage later.
     let handle = shared_open_istream(path)?;
-    if !schema_str.is_empty() {
-        let stored = shared_handle_schema_str(handle)?;
-        let requested =
-            morloc_runtime_types::schema::canonicalize_schema_str(schema_str);
-        if !morloc_runtime_types::schema::schema_strings_compatible(
-            &stored, &requested,
-        ) {
-            let _ = shared_close_handle(handle);
-            return Err(MorlocError::Other(format!(
-                "@open IStream: schema mismatch on '{}': \
-                 file has '{}', open requested '{}'",
-                path, stored, requested
-            )));
-        }
+    check_stored_schema(handle, "IStream", path, schema_str)
+}
+
+// FMT-9
+pub fn open_dispatch_ifile(path: &str, schema_str: &str) -> Result<i64, MorlocError> {
+    if schema_str.is_empty() {
+        return Err(no_element_type("IFile", path));
     }
-    Ok(handle)
+    let handle = open_dispatch(path, MLC_KIND_IFILE)?;
+    check_stored_schema(handle, "IFile", path, schema_str)
+}
+
+// FMT-9
+pub fn open_typed(path: &str, kind: u8, storage: &str) -> Result<i64, MorlocError> {
+    if kind == MLC_KIND_IFILE {
+        open_dispatch_ifile(path, storage)
+    } else if kind == MLC_KIND_ISTREAM {
+        open_dispatch_istream(path, storage)
+    } else {
+        open_dispatch(path, kind)
+    }
+}
+
+// FMT-9: the nexus holds an IFile by path; each reopen checks it again.
+pub fn check_ifile_path(path: &str, schema_str: &str) -> Result<(), MorlocError> {
+    if schema_str.is_empty() {
+        return Err(no_element_type("IFile", path));
+    }
+    if served_stdio_path(path) || is_stdin_device(path) {
+        return open_dispatch(path, MLC_KIND_IFILE).map(|_| ());
+    }
+    let stored = read_schema_from_file(path)
+        .map_err(|e| MorlocError::UserThrow(format!("@open IFile '{path}': {e}")))?;
+    if morloc_runtime_types::schema::schema_strings_compatible(&stored, schema_str) {
+        return Ok(());
+    }
+    Err(MorlocError::Other(format!(
+        "@open IFile: schema mismatch on '{path}': file has '{stored}', open requested '{}'",
+        morloc_runtime_types::schema::canonicalize_schema_str(schema_str)
+    )))
+}
+
+fn schemas_match_cached(stored: &str, requested: &str) -> bool {
+    thread_local! {
+        static SEEN: std::cell::RefCell<Vec<(String, String, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    if stored == requested {
+        return true;
+    }
+    if let Some(hit) = SEEN.with(|s| s.borrow().iter().find(|(a, b, _)| a == stored && b == requested).map(|e| e.2)) {
+        return hit;
+    }
+    let ok = morloc_runtime_types::schema::schema_strings_compatible(stored, requested);
+    SEEN.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.len() >= 16 {
+            s.clear();
+        }
+        s.push((stored.to_string(), requested.to_string(), ok));
+    });
+    ok
+}
+
+fn no_element_type(what: &str, path: &str) -> MorlocError {
+    MorlocError::Other(format!(
+        "@open {what} '{path}': no element type was given to check the file against"
+    ))
+}
+
+fn check_stored_schema(handle: i64, what: &str, path: &str, requested: &str) -> Result<i64, MorlocError> {
+    let stored = match shared_handle_schema_str(handle) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = shared_close_handle(handle);
+            return Err(e);
+        }
+    };
+    if morloc_runtime_types::schema::schema_strings_compatible(&stored, requested) {
+        return Ok(handle);
+    }
+    let _ = shared_close_handle(handle);
+    Err(MorlocError::Other(format!(
+        "@open {what}: schema mismatch on '{path}': file has '{stored}', open requested '{}'",
+        morloc_runtime_types::schema::canonicalize_schema_str(requested)
+    )))
+}
+
+// FMT-9
+pub fn check_handle_type(handle: i64, kind: u8, storage: &str) -> Result<(), MorlocError> {
+    let slot_kind = shared_handle_kind(handle)?;
+    let kind_ok = slot_kind == kind
+        || (slot_kind == MLC_KIND_CHANNEL && (kind == MLC_KIND_ISTREAM || kind == MLC_KIND_OSTREAM));
+    if !kind_ok {
+        return Err(MorlocError::Other(format!(
+            "a {} handle was passed where {} is expected",
+            handle_kind_name(slot_kind), handle_kind_name(kind),
+        )));
+    }
+    let stored = shared_handle_schema_str(handle)?;
+    if schemas_match_cached(&stored, storage) {
+        Ok(())
+    } else {
+        Err(MorlocError::Other(format!(
+            "a handle to '{stored}' was passed where '{}' is expected",
+            morloc_runtime_types::schema::canonicalize_schema_str(storage)
+        )))
+    }
 }
 
 // ── `morloc-nexus view` conversion helpers ────────────────────────────────

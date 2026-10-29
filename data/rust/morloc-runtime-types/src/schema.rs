@@ -316,9 +316,9 @@ fn parse_schema_r(
         SCHEMA_NIL => Ok((Schema::primitive(SerialType::Nil), cur)),
         SCHEMA_BOOL => Ok((Schema::primitive(SerialType::Bool), cur)),
         SCHEMA_STRING => Ok((make_string_schema(), cur)),
-        SCHEMA_IFILE => Ok((make_stream_handle_schema(SerialType::IFile), cur)),
-        SCHEMA_OSTREAM => Ok((make_stream_handle_schema(SerialType::OStream), cur)),
-        SCHEMA_ISTREAM => Ok((make_stream_handle_schema(SerialType::IStream), cur)),
+        SCHEMA_IFILE => parse_stream_handle_arm(bytes, cur, SerialType::IFile, depth),
+        SCHEMA_OSTREAM => parse_stream_handle_arm(bytes, cur, SerialType::OStream, depth),
+        SCHEMA_ISTREAM => parse_stream_handle_arm(bytes, cur, SerialType::IStream, depth),
         SCHEMA_SINT => parse_sized_int(bytes, cur, true),
         SCHEMA_UINT => parse_sized_int(bytes, cur, false),
         SCHEMA_FLOAT => parse_sized_float(bytes, cur),
@@ -350,7 +350,8 @@ fn make_string_schema() -> Schema {
     }
 }
 
-fn make_stream_handle_schema(st: SerialType) -> Schema {
+/// A handle's one key is the canonical schema of what its file stores.
+fn make_stream_handle_schema(st: SerialType, storage: String) -> Schema {
     Schema {
         serial_type: st,
         size: 1,
@@ -358,9 +359,40 @@ fn make_stream_handle_schema(st: SerialType) -> Schema {
         offsets: Vec::new(),
         hint: None,
         parameters: vec![Schema::primitive(SerialType::Uint8)],
-        keys: Vec::new(),
+        keys: vec![storage],
         name: None,
     }
+}
+
+/// `F`, `O` or `I`, then the counted schema the handle's file stores. That
+/// schema is closed: it is parsed on its own, with no enclosing declarations.
+#[inline(never)]
+fn parse_stream_handle_arm(
+    bytes: &[u8],
+    cur: usize,
+    st: SerialType,
+    depth: usize,
+) -> Result<(Schema, usize), MorlocError> {
+    let (storage, end) = parse_named_key(bytes, cur).map_err(|e| {
+        MorlocError::Schema(format!("a stream handle schema must name what its file stores: {e}"))
+    })?;
+    let mut declared: Vec<String> = Vec::new();
+    let (parsed, used) = parse_schema_r(storage.as_bytes(), 0, &mut declared, depth + 1)?;
+    if used != storage.len() {
+        return Err(MorlocError::Schema(format!(
+            "trailing characters in stream handle storage schema '{storage}'"
+        )));
+    }
+    Ok((make_stream_handle_schema(st, schema_to_string(&parsed)), end))
+}
+
+/// The canonical schema a handle's file stores, or None for a schema that
+/// is not a handle.
+pub fn handle_storage(schema: &Schema) -> Option<&str> {
+    let is_handle = schema.serial_type == SerialType::IFile
+        || schema.serial_type == SerialType::OStream
+        || schema.serial_type == SerialType::IStream;
+    if is_handle { schema.keys.first().map(String::as_str) } else { None }
 }
 
 /// Hint: `<...>` with nesting support, then the actual type.
@@ -617,10 +649,10 @@ fn parse_named_key(bytes: &[u8], pos: usize) -> Result<(String, usize), MorlocEr
         return Err(MorlocError::Schema("expected name length".into()));
     }
     let (klen, start) = read_count(bytes, pos)?;
-    let end = start + klen;
-    if end > bytes.len() {
-        return Err(MorlocError::Schema("schema name extends past end".into()));
-    }
+    let end = match start.checked_add(klen) {
+        Some(end) if end <= bytes.len() => end,
+        _ => return Err(MorlocError::Schema("schema name extends past end".into())),
+    };
     let name = std::str::from_utf8(&bytes[start..end])
         .map_err(|_| MorlocError::Schema("invalid UTF-8 in schema name".into()))?
         .to_string();
@@ -982,10 +1014,15 @@ pub fn schema_to_string(schema: &Schema) -> String {
 pub fn schemas_compatible(a: &Schema, b: &Schema) -> bool {
     if a.serial_type != b.serial_type
         || a.size != b.size
-        || a.keys != b.keys
         || a.name != b.name
         || a.parameters.len() != b.parameters.len()
     {
+        return false;
+    }
+    if let (Some(sa), Some(sb)) = (handle_storage(a), handle_storage(b)) {
+        return schema_strings_compatible(sa, sb);
+    }
+    if a.keys != b.keys {
         return false;
     }
     if a.serial_type == SerialType::Array {
@@ -1012,6 +1049,9 @@ pub fn canonicalize_schema_str(s: &str) -> String {
 
 /// `schemas_compatible` on two schema strings.
 pub fn schema_strings_compatible(stored: &str, requested: &str) -> bool {
+    if stored == requested {
+        return true;
+    }
     match (parse_schema(stored), parse_schema(requested)) {
         (Ok(a), Ok(b)) => schemas_compatible(&a, &b),
         // Unparseable schemas are compatible only when identical.
@@ -1043,9 +1083,19 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
         SerialType::Float32 => buf.push_str("f4"),
         SerialType::Float64 => buf.push_str("f8"),
         SerialType::String => buf.push('s'),
-        SerialType::IFile => buf.push('F'),
-        SerialType::OStream => buf.push('O'),
-        SerialType::IStream => buf.push('I'),
+        SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+            let code = if schema.serial_type == SerialType::IFile {
+                'F'
+            } else if schema.serial_type == SerialType::OStream {
+                'O'
+            } else {
+                'I'
+            };
+            buf.push(code);
+            let storage = schema.keys.first().map(String::as_str).unwrap_or("");
+            write_count(buf, storage.len());
+            buf.push_str(storage);
+        }
         SerialType::Array => {
             buf.push('a');
             if let Some(expected) = schema.array_dim() {

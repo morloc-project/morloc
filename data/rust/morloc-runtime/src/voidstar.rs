@@ -2769,7 +2769,7 @@ mod flatten_size_tests {
     fn handle_path_after_odd_string_flattens() {
         let _g = crate::init_test_shm();
         for s in ["x", "abc", "abcdefg", "abcdefgh"] {
-            let schema = parse_schema("t2sF").unwrap();
+            let schema = parse_schema("t2sF2aj").unwrap();
             let v = read_json_with_schema(&format!(r#"["{s}", "/tmp/some/path.stream"]"#), &schema).unwrap();
             let flat = flatten_to_buffer(v, &schema)
                 .unwrap_or_else(|e| panic!("string {s:?}: {e}"));

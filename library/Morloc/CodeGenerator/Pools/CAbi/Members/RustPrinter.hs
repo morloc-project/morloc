@@ -148,8 +148,8 @@ printExpr (IIntrinsicSave fmt sid level e path) = case fmt of
         <> ", " <> printExpr level <> ", " <> refExpr path <> ")"
 printExpr (IIntrinsicLoad sid mt path) =
   "::rustmorloc::load" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> refExpr path <> ")"
-printExpr (IIntrinsicOpen kind path) =
-  "::rustmorloc::open(" <> refExpr path <> ", " <> pretty kind <> ")"
+printExpr (IIntrinsicOpenIFile sid path) =
+  "::rustmorloc::open_ifile(" <> schemaRef sid <> ", " <> refExpr path <> ")"
 printExpr (IIntrinsicClose h) = "::rustmorloc::close(" <> printExpr h <> ")"
 printExpr (IIntrinsicUnlinkTemp path) = "::rustmorloc::unlink_tmp(" <> refExpr path <> ")"
 printExpr (IIntrinsicFSchema path) = "::rustmorloc::fschema(" <> refExpr path <> ")"

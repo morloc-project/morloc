@@ -665,7 +665,7 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
                 break;
             case MORLOC_NIL: case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_TUPLE:
             case MORLOC_MAP: case MORLOC_OPTIONAL: case MORLOC_TABLE: case MORLOC_RECUR:
-            case MORLOC_CLOSURE: case MORLOC_VARIANT:
+            case MORLOC_VARIANT:
                 throw std::runtime_error("cannot write a number where the schema holds a non-numeric type");
         }
     }
@@ -714,8 +714,9 @@ T mlc_leaf_read(const Schema* schema, const void* data, morloc_space_t space) {
                 uint8_t kind = (schema->type == MORLOC_IFILE)   ? MLC_KIND_IFILE
                              : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
                              :                                    MLC_KIND_ISTREAM;
+                const char* storage = schema->keys ? schema->keys[0] : NULL;
                 int64_t handle = mlc_read_handle_voidstar(
-                    data, space, kind, &err);
+                    data, space, kind, storage, storage ? strlen(storage) : 0, &err);
                 if (err || handle < 0) {
                     if (err == NULL) mlc_runtime_defect("mlc_read_handle_voidstar failed without a reason");
                     std::string msg(err);
@@ -778,7 +779,7 @@ T mlc_leaf_read(const Schema* schema, const void* data, morloc_space_t space) {
             case MORLOC_ENUM: return static_cast<T>(*(const uint8_t*)data);
             case MORLOC_NIL: case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_TUPLE:
             case MORLOC_MAP: case MORLOC_OPTIONAL: case MORLOC_TABLE: case MORLOC_RECUR:
-            case MORLOC_CLOSURE: case MORLOC_VARIANT:
+            case MORLOC_VARIANT:
                 break;
         }
         throw std::runtime_error("cannot read a number where the schema holds a non-numeric type");

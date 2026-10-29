@@ -1911,8 +1911,10 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
             uint8_t kind = (schema->type == MORLOC_IFILE)   ? MLC_KIND_IFILE
                          : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
                          :                                    MLC_KIND_ISTREAM;
+            const char* storage = schema->keys ? schema->keys[0] : NULL;
             int64_t handle = R_TRY(mlc_read_handle_voidstar,
-                                   data, space, kind);
+                                   data, space, kind,
+                                   storage, storage ? strlen(storage) : 0);
             obj = make_integer64_scalar(handle);
             break;
         }
@@ -2254,27 +2256,6 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
 
 
 // -- Stream-handle bindings -----------------------------------------------
-
-// @open: returns a 64-bit handle. R has no native int64 SEXP type, so
-// we marshal via a length-1 numeric vector (double) which preserves
-// the 48 generation bits + 16 slot bits without precision loss for any
-// realistic morloc program.
-SEXP morloc_mlc_open(SEXP path_r, SEXP kind_r) { MAYFAIL
-    if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
-        error("mlc_open: path must be a single string");
-    }
-    if ((TYPEOF(kind_r) != INTSXP && TYPEOF(kind_r) != REALSXP) || LENGTH(kind_r) != 1) {
-        MORLOC_INTERNAL_ABORT("mlc_open: kind must be a single integer");
-    }
-    const char* path = CHAR(STRING_ELT(path_r, 0));
-    int kind_i = (TYPEOF(kind_r) == INTSXP) ? INTEGER(kind_r)[0] : (int)REAL(kind_r)[0];
-    int64_t handle = R_TRY(mlc_open, path, (uint8_t)kind_i);
-    // IFile handles use the full UInt64 range (48 generation bits + 16
-    // slot bits + per-process salt). Returning as bit64::integer64
-    // preserves the bit pattern losslessly across R user code, which
-    // would otherwise silently round high generations to nearby doubles.
-    return make_integer64_scalar(handle);
-}
 
 SEXP morloc_mlc_close(SEXP handle_r) { MAYFAIL
     if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
@@ -2879,6 +2860,19 @@ SEXP morloc_mlc_open_ostream(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     return make_integer64_scalar(h);
 }
 
+SEXP morloc_mlc_open_ifile(SEXP schema_str_r, SEXP path_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_open_ifile: schema must be a single string");
+    }
+    if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
+        error("mlc_open_ifile: path must be a single string");
+    }
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    const char* path = CHAR(STRING_ELT(path_r, 0));
+    int64_t h = R_TRY(mlc_open_ifile, schema_str, path);
+    return make_integer64_scalar(h);
+}
+
 SEXP morloc_mlc_open_istream(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("mlc_open_istream: schema must be a single string");
@@ -3335,10 +3329,15 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         path[payload_len] = '\0';
         if (file_is_stream_packet(path)) {
             char* open_err = NULL;
-            int64_t handle = mlc_open(path, MLC_KIND_ISTREAM, &open_err);
+            char* list_schema = schema_to_string(schema);
+            if (list_schema == NULL) {
+                MORLOC_INTERNAL_ABORT("stream ingest: schema_to_string returned NULL");
+            }
+            int64_t handle = mlc_open_istream(list_schema, path, &open_err);
+            free(list_schema);
             if (open_err) {
                 char msg[512];
-                snprintf(msg, sizeof(msg), "stream ingest: mlc_open failed: %s", open_err);
+                snprintf(msg, sizeof(msg), "stream ingest: %s", open_err);
                 free(open_err);
                 free_schema(schema);
                 MORLOC_ERROR("%s", msg);
@@ -4376,7 +4375,7 @@ static void _r_init_impl(DllInfo *info) {
         {"r_morloc_cache_record_hit", (DL_FUNC) &morloc_cache_record_hit_r, 0},
         {"r_morloc_cache_record_miss", (DL_FUNC) &morloc_cache_record_miss_r, 0},
         {"r_morloc_cache_record_store", (DL_FUNC) &morloc_cache_record_store_r, 0},
-        {"morloc_mlc_open", (DL_FUNC) &morloc_mlc_open, 2},
+        {"morloc_mlc_open_ifile", (DL_FUNC) &morloc_mlc_open_ifile, 2},
         {"morloc_mlc_close", (DL_FUNC) &morloc_mlc_close, 1},
         {"morloc_mlc_tmpfile", (DL_FUNC) &morloc_mlc_tmpfile, 0},
         {"morloc_mlc_unlink_tmp", (DL_FUNC) &morloc_mlc_unlink_tmp, 1},

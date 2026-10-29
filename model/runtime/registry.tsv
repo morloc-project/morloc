@@ -321,6 +321,7 @@ morloc-runtime/stream.rs::-::TEST_IFILE_CACHE_BYTES	test-only
 morloc-runtime/shm.rs::-::SEGMENTS_CLOSED	lazy		
 morloc-runtime/stream.rs::-::REGISTRY_TORN_DOWN	lazy		
 morloc-runtime/stream.rs::-::AheadJob.blocks	instance		
+morloc-runtime/stream.rs::schemas_match_cached::SEEN	thread		
 morloc-runtime/shm.rs::-::EXITING	lazy		
 morloc-runtime/fork_pool.rs::-::WORKER	fork-scoped		
 morloc-runtime/fork_pool.rs::-::COORDINATOR	fork-scoped		

@@ -115,7 +115,7 @@ extern "C" {
     fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_load(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
-    fn mlc_open(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_open_ifile(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_close(handle: i64, errmsg: *mut *mut c_char) -> i32;
     fn mlc_unlink_tmp(path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_fschema(path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
@@ -159,7 +159,7 @@ extern "C" {
     // can re-resolve the slot. These marshal that field; `cursor` advances past
     // any path suballoc; `space` is where a read's relptrs lead.
     fn mlc_write_handle_voidstar(handle: i64, dest: *mut c_void, cursor: *mut *mut c_void, errmsg: *mut *mut c_char) -> i32;
-    fn mlc_read_handle_voidstar(field: *const c_void, space: MorlocSpace, kind: u8, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_read_handle_voidstar(field: *const c_void, space: MorlocSpace, kind: u8, storage: *const c_char, storage_len: usize, errmsg: *mut *mut c_char) -> i64;
     // Remote (SLURM/nexus-dispatched) call. Builds the remote packet, resolves
     // the `_remote` cache dir, rewrites args to self-contained form, and
     // dispatches to the nexus. Renamed via link_name so the wrapper below can
@@ -2155,10 +2155,13 @@ macro_rules! int_impl {
                     // which would read the tag byte at offset 0.
                     SerialType::IFile | SerialType::OStream | SerialType::IStream => {
                         let mut err: *mut c_char = std::ptr::null_mut();
+                        let storage = morloc_runtime_types::schema::handle_storage(schema).unwrap_or("");
                         let handle = mlc_read_handle_voidstar(
                             data as *const c_void,
                             space,
                             handle_kind(schema.serial_type),
+                            storage.as_ptr() as *const c_char,
+                            storage.len(),
                             &mut err,
                         );
                         if !err.is_null() || handle < 0 {
@@ -3555,11 +3558,11 @@ pub unsafe fn load<T: FromVoidstar>(schema: &Schema, path: &str) -> T {
     read_voidstar(voidstar, err, schema, "@load")
 }
 
-/// @open (IFile): open a file as a handle of the given kind byte.
-pub unsafe fn open(path: &str, kind: u8) -> u64 {
+/// @open (IFile): the file must store what `schema` describes.
+pub unsafe fn open_ifile(schema: &Schema, path: &str) -> u64 {
     let path_c = cstr_arg(path, "@open");
     let mut err: *mut c_char = std::ptr::null_mut();
-    let h = mlc_open(path_c.as_ptr(), kind, &mut err);
+    let h = with_schema_str(schema, |s| mlc_open_ifile(s, path_c.as_ptr(), &mut err));
     handle_or_throw(h, err, "@open")
 }
 

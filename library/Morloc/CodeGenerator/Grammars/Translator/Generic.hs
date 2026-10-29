@@ -1251,9 +1251,10 @@ genericPrintExpr desc = go
     go (IIntrinsicConform sid e) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_conform(" <> go e <> ", " <> schemaRef sid <> ")"
-    go (IIntrinsicOpen kind path) =
+    go (IIntrinsicOpenIFile sid path) =
       let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_open(" <> go path <> ", " <> pretty kind <> ")"
+       in pretty prefix <> "mlc_open_ifile("
+            <> schemaRef sid <> ", " <> go path <> ")"
     go (IIntrinsicClose h) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_close(" <> go h <> ")"

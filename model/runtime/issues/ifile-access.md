@@ -25,33 +25,6 @@
   message carries neither the path nor the operation, so a program that
   throws it reports an unplaceable error. Gap in model/runtime/streams.md:
   no item says what an `@open` error states.
-- **UNSOUND: `@open` of an IFile never checks the element schema, nor
-  does an IStream opened in the nexus.** [reproduced, 2026-10-21] Violates
-  STRM-1. After writing an `OStream Int`, `@open path :: <IO> (Try Str
-  (IStream Real))` in the nexus reads `[5e-324,...]`; an `IFile [Real]`
-  open in the nexus or a Python pool reads the Int bits as doubles. A
-  pool IStream open does fail "schema mismatch". Causes: the nexus `open`
-  node carries only the handle schema (CodeGenerator/Nexus.hs:1115-1135,
-  manifest `"schema": "I"`) and eval_ffi.rs:1452-1500 calls
-  `mlc_probe_packet`/`mlc_open` with no element schema, so the check in
-  stream.rs:7295-7323 never runs; pools lower IFile to `IIntrinsicOpen`
-  with no schema (Translator/Imperative.hs:2742-2745). Repro:
-  /work/plans/model-audit-2026-10-21/repro/E/strm/main.loc, b.loc.
-  DEFERRED 2026-10-21, design reviewed: checking at `@open` is not enough.
-  An IFile crosses pools as a path (handle_scan.rs:271) and the receiver
-  reopens it in `mlc_read_stream_field` (intrinsics.rs:1844-1899) with only
-  a kind, so every path-to-handle point must check against the static
-  type it knows, or a program can open `p`, rewrite it, and hand it on. One
-  entry `mlc_open_typed(path, kind, schema)` for `@open` (nexus and pools)
-  and the field reopen, comparing the whole stored schema of the IFile's
-  argument (`IFile [Real]` -> `af8`; stream files store `[a]`) read from
-  the handle (`shared_handle_schema_str`), not re-read from the path; an
-  empty schema is an error, including in `open_dispatch_istream`
-  (stream.rs:7359), which skips the check today. Needs: IR and the three
-  printers, bindings in pymorloc.c, rmorloc.c/pool.R, pool.cpp,
-  rustmorloc, morloc.h (decide whether a new symbol bumps the ABI
-  version), the nexus open node's schema, and a test that a file written
-  in one language opens in another at the same type.
 - **`@stdin` checks the element schema at the first `@next`.**
   [reproduced, 2026-10-21] Gap in STRM-1, which says a mismatch is an
   `Err` at open; for a pipe the schema arrives with the bytes. STRM-1 needs
@@ -63,3 +36,17 @@
   ends, as SLOT-13 says. No item says a stream has one level, and `@write`
   takes one per call. Either the level belongs on the open, or it is per
   sub-packet: needs a ruling.
+- **An OStream in path form cannot be decoded.** [read, 2026-10-29] A
+  handle crossing a cache, a remote call or another nexus is rewritten to
+  its path (handle_scan.rs), and a CLI or JSON OStream argument arrives as
+  a path, but `open_typed` sends OSTREAM to `open_dispatch`, which refuses
+  it, so the call always fails. The storage schema is now at hand (FMT-9);
+  what reopening a writer means (create, truncate, append, a value decoded
+  twice) has no rule. Gap in STRM-1.
+- **Files written before FMT-9 that hold a handle schema no longer
+  parse.** [read, 2026-10-29] A saved packet or stream whose schema has a
+  bare `F`, `O` or `I` (a record with an IFile field) fails with "a stream
+  handle schema must name what its file stores". The ABI version moved
+  with the change; no item says whether data files outlive an ABI version.
+  The untyped `mlc_open` stays exported, unchecked, for `morloc-nexus
+  view`, which reads a file at its own schema.

@@ -433,7 +433,12 @@ T _get_value(const uint8_t* packet, Schema* schema){
             if (file_is_stream_packet(path)) {
                 if constexpr (is_std_vector<T>::value) {
                     char* open_err = nullptr;
-                    int64_t handle = mlc_open(path, MLC_KIND_ISTREAM, &open_err);
+                    char* list_schema = schema_to_string(schema);
+                    if (list_schema == NULL) {
+                        MLC_INTERNAL_ABORT("stream ingest: schema_to_string returned NULL");
+                    }
+                    int64_t handle = mlc_open_istream(list_schema, path, &open_err);
+                    free(list_schema);
                     if (open_err) { PROPAGATE_ERROR(open_err); }
                     // Preallocate via the stream's element_count (from
                     // StreamDiag) so vector::insert never reallocates.
@@ -693,13 +698,6 @@ T _mlc_load(Schema* schema, const std::string& path) {
 }
 
 // ── Stream-handle wrappers ───────────────────────────────────────────────
-// @open: returns a 64-bit handle (kind = MLC_KIND_{IFILE|ISTREAM|OSTREAM}).
-inline int64_t _mlc_open(const std::string& path, uint8_t kind) {
-    char* errmsg = NULL;
-    int64_t handle = mlc_open(path.c_str(), kind, &errmsg);
-    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    return handle;
-}
 // @close: returns void; the runtime bumps generation and frees the slot.
 inline void _mlc_close(int64_t handle) {
     char* errmsg = NULL;
@@ -904,20 +902,26 @@ inline int64_t _mlc_open_ostream(Schema* schema, const std::string& path) {
     return h;
 }
 
-// Typed IStream open. The element schema declares the opener's type so
-// the runtime can route the /dev/stdin sentinel through the nexus stdin
-// channel (guarding the incoming stream); for a real file it is read off
-// disk.
-inline int64_t _mlc_open_istream(Schema* schema, const std::string& path) {
+// Typed opens: the file must store what `schema` describes.
+inline int64_t _mlc_open_typed(
+    int64_t (*open)(const char*, const char*, char**),
+    Schema* schema, const std::string& path
+) {
     char* errmsg = NULL;
     char* s = schema_to_string(schema);
     if (s == NULL) {
-        MLC_INTERNAL_ABORT("_mlc_open_istream: schema_to_string returned NULL (invalid compile-time schema table entry)");
+        MLC_INTERNAL_ABORT("_mlc_open_typed: schema_to_string returned NULL (invalid compile-time schema table entry)");
     }
-    int64_t h = mlc_open_istream(s, path.c_str(), &errmsg);
+    int64_t h = open(s, path.c_str(), &errmsg);
     free(s);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     return h;
+}
+inline int64_t _mlc_open_istream(Schema* schema, const std::string& path) {
+    return _mlc_open_typed(mlc_open_istream, schema, path);
+}
+inline int64_t _mlc_open_ifile(Schema* schema, const std::string& path) {
+    return _mlc_open_typed(mlc_open_ifile, schema, path);
 }
 
 // @stdin / @stdout / @stderr: nullary intrinsics. Element schema is

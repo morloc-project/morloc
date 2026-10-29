@@ -40,7 +40,7 @@ testWriteMulti path = do
   @flush s
   @write 0 s [8]
   @close s
-  Ok f <- @open path :: <IO> (Try Str (IFile Int))
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
   Ok _tailv7 <- @flen f
   _tailv7
 
@@ -67,7 +67,7 @@ testAppendThenLength path = do
   Ok o2 <- @append path :: <IO> (Try Str (OStream Int))
   @write 0 o2 [4, 5]
   @close o2
-  Ok f <- @open path :: <IO> (Try Str (IFile Int))
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
   Ok _tailv9 <- @flen f
   _tailv9
 
@@ -81,6 +81,6 @@ testConcatTwo a b dest = do
   @write 0 ob [44, 55]
   @close ob
   @concat [a, b] dest
-  Ok f <- @open dest :: <IO> (Try Str (IFile Int))
+  Ok f <- @open dest :: <IO> (Try Str (IFile [Int]))
   Ok _tailv10 <- @flen f
   _tailv10

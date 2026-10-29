@@ -7,6 +7,7 @@ Stream types, file-backed streams, `@collect`, `@fold`. Prefix: STRM.
 ### STRM-1 A stream's element type is fixed at open and checked against the file
 Intent: proposed
 Code: deviates (../runtime/issues/ifile-access.md)
+Tests: spec-strm-1-1
 
 `@open`, `@append`, `@stdin`, `@stdout` and `@stderr` take their element type
 from an inline ascription. Opening a file whose recorded schema differs is an

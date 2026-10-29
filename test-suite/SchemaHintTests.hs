@@ -106,7 +106,12 @@ handWritten =
       , ("Empty", []) ]
   , SerialObject NamTable (fv "Table") [] []
   , SerialObject NamTable (fv "Table") [] [(Key "gr\252n", SerialInt (fv "Int")), (Key "b", SerialString (fv "Str"))]
-  , SerialTuple (fv "Tuple3") [SerialIFile (fv "IFile"), SerialOStream (fv "OStream"), SerialIStream (fv "IStream")]
+  , SerialTuple (fv "Tuple3")
+      [ SerialIFile (fv "IFile") (SerialList (fv "List") Nothing (SerialReal (fv "Real")))
+      , SerialOStream (fv "OStream") (SerialList (fv "List") Nothing (SerialInt (fv "Int")))
+      , SerialIStream (fv "IStream") (SerialList (fv "List") Nothing (tree "Tree")) ]
+  , SerialIFile (fv "IFile") (SerialList (fv "List") Nothing
+      (SerialIFile (fv "IFile") (SerialObject NamRecord (fv "Gr\252n") [] [(Key "\26085", SerialString (fv "Str"))])))
   , SerialObject NamRecord (fv "Wide") [] [(Key (T.pack ("k" <> show i)), SerialBool (fv "Bool")) | i <- [1 .. 70 :: Int]]
   , SerialObject NamRecord (fv "Long") [] [(Key (T.replicate 100 "\252"), SerialNull (fv "Unit"))]
   ]
@@ -142,7 +147,8 @@ gen depth s0 =
     6 -> (SerialInt64 (fv "I64"), s1)
     7 -> (SerialNull (fv "Unit"), s1)
     8 -> (SerialUInt (fv "UInt"), s1)
-    9 -> (SerialIFile (fv "IFile"), s1)
+    9 | depth <= 0 -> (SerialIFile (fv "IFile") (SerialList (fv "List") Nothing (SerialInt (fv "Int"))), s1)
+      | otherwise -> let (e, s2) = gen (depth - 1) s1 in (SerialIFile (fv "IFile") e, s2)
     10 -> let (n, s2) = pick (length keys) s1 in (SerialEnum (fv "E") [] (take (n + 1) keys), s2)
     11 -> (SerialInt16 (fv "I16"), s1)
     12 -> let (h, s2) = pick (length hints) s1

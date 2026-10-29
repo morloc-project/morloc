@@ -154,8 +154,8 @@ printExpr (IIntrinsicUnpack sid Nothing e) =
 -- A C++ value is decoded into its declared type, so a literal already has
 -- the decoder's form.
 printExpr (IIntrinsicConform _ e) = printExpr e
-printExpr (IIntrinsicOpen kind path) =
-  [idoc|_mlc_open(#{printExpr path}, #{pretty kind})|]
+printExpr (IIntrinsicOpenIFile sid path) =
+  [idoc|_mlc_open_ifile(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
 -- @close and the temp-file unlink return void in the runtime, but their
 -- morloc type is `()`, and a call can land anywhere a value is consumed: a
 -- branch arm, a let, the tail of a manifold that returns `mlc::Unit`. Only

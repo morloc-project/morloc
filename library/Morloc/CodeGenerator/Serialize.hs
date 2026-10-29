@@ -874,15 +874,11 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       | intr `elem` [IntrCellGet, IntrCellReduce] = do
           ast <- Serial.makeSerialAST m lang tf
           Just <$> Serial.schemaOfHeld m lang ast
-    -- @open on IFile reads its schema off disk; codegen routes through the
-    -- generic `_mlc_open(path, kind)` entry so we return Nothing. @open on
-    -- OStream/IStream needs the storage schema at open time (the typed
-    -- `_mlc_open_ostream`/`_mlc_open_istream` entries): OStream to write the
-    -- stream header, IStream to declare the schema for the stdin sentinel.
+    -- @open names what the file stores: an OStream writes it into the
+    -- header, and an IFile or IStream checks the file against it.
     intrinsicSchema m IntrOpen tf _ = case unwrapHandleHead tf of
-      Just (v, a) | v == BT.ostreamVar || v == BT.istreamVar ->
-        Just <$> renderStorageSchema m v a
-      _ -> return Nothing
+      Just (v, a) -> Just <$> renderStorageSchema m v a
+      Nothing -> return Nothing
     intrinsicSchema m IntrAppend tf _ = case unwrapHandleHead tf of
       Just (v, a) -> Just <$> renderStorageSchema m v a
       Nothing     -> return Nothing

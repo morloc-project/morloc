@@ -803,8 +803,8 @@ fn run_remote_command(
 /// as a link to the file (see `stage::link_parent_arg`). Returns whether it
 /// was one.
 fn link_ifile_arg(i: usize, arg_val: &ArgValue, arg_def: &crate::manifest::Arg) -> bool {
-    match (arg_val, arg_def.general_schema_str()) {
-        (ArgValue::Value(token), Some("F")) => {
+    match (arg_val, arg_def.general_schema_str().filter(|s| is_ifile_schema(s))) {
+        (ArgValue::Value(token), Some(_)) => {
             // A quoted argument holds its path as a JSON string.
             let path = serde_json::from_str::<String>(token).unwrap_or_else(|_| token.clone());
             crate::stage::link_parent_arg(i, &path);
@@ -814,11 +814,15 @@ fn link_ifile_arg(i: usize, arg_val: &ArgValue, arg_def: &crate::manifest::Arg) 
     }
 }
 
+fn is_ifile_schema(schema: &str) -> bool {
+    schema.starts_with('F')
+}
+
 /// An `IFile` argument given by path must name an existing file. It is
 /// opened only when the command runs, where an error no longer says which
 /// argument or path it came from.
 fn check_ifile_arg(arg_val: &ArgValue, arg_def: &crate::manifest::Arg) -> Result<(), String> {
-    let (ArgValue::Value(token), Some("F")) = (arg_val, arg_def.general_schema_str()) else {
+    let (ArgValue::Value(token), Some(_)) = (arg_val, arg_def.general_schema_str().filter(|s| is_ifile_schema(s))) else {
         return Ok(());
     };
     let path = serde_json::from_str::<String>(token).unwrap_or_else(|_| token.clone());
@@ -1842,17 +1846,17 @@ mod tests {
 
     #[test]
     fn ifile_arg_from_stdin_is_refused() {
-        let err = check_ifile_arg(&ArgValue::Value("-".into()), &positional("F")).unwrap_err();
+        let err = check_ifile_arg(&ArgValue::Value("-".into()), &positional("F3af8")).unwrap_err();
         assert!(err.contains("stdin"), "{}", err);
     }
 
     #[test]
     fn ifile_arg_missing_file_names_the_path() {
         let path = "/no/such/dir/missing.mlc";
-        let err = check_ifile_arg(&ArgValue::Value(path.into()), &positional("F")).unwrap_err();
+        let err = check_ifile_arg(&ArgValue::Value(path.into()), &positional("F3af8")).unwrap_err();
         assert!(err.contains(path), "{}", err);
         let quoted = serde_json::to_string(path).unwrap();
-        let err = check_ifile_arg(&ArgValue::Value(quoted), &positional("F")).unwrap_err();
+        let err = check_ifile_arg(&ArgValue::Value(quoted), &positional("F3af8")).unwrap_err();
         assert!(err.contains(&format!("'{}'", path)), "{}", err);
     }
 
@@ -1860,7 +1864,7 @@ mod tests {
     fn ifile_arg_existing_file_passes() {
         let file = std::env::temp_dir().join(format!("ifile_arg_{}", std::process::id()));
         std::fs::write(&file, b"").unwrap();
-        let ok = check_ifile_arg(&ArgValue::Value(file.to_string_lossy().into()), &positional("F"));
+        let ok = check_ifile_arg(&ArgValue::Value(file.to_string_lossy().into()), &positional("F3af8"));
         std::fs::remove_file(&file).unwrap();
         assert!(ok.is_ok(), "{:?}", ok);
     }
@@ -1868,7 +1872,7 @@ mod tests {
     #[test]
     fn non_ifile_arg_is_not_checked() {
         assert!(check_ifile_arg(&ArgValue::Value("-".into()), &positional("s")).is_ok());
-        assert!(check_ifile_arg(&ArgValue::Json("\"-\"".into()), &positional("F")).is_ok());
+        assert!(check_ifile_arg(&ArgValue::Json("\"-\"".into()), &positional("F3af8")).is_ok());
     }
 
     #[test]

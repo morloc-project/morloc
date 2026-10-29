@@ -331,16 +331,13 @@ data SerialAST
   | SerialUInt64 FVar
   | SerialBool FVar
   | SerialString FVar
-  -- | Cross-pool stream handles. In-language native form is uint64_t
-  -- (the local slot id). The wire form is a 16-byte tagged union:
-  -- `TAG_PATH` carries the file path so the receiving pool can open a
-  -- fresh handle, `TAG_HANDLE` carries the raw slot id for the
-  -- intra-nexus shared-registry case. See SCHEMA_IFILE / SCHEMA_OSTREAM
-  -- / SCHEMA_ISTREAM in data/morloc/morloc.h and
-  -- morloc-runtime-types::stream_handle for the wire layout.
-  | SerialIFile FVar
-  | SerialOStream FVar
-  | SerialIStream FVar
+  -- | Stream handles. The second field is the general (hint-free) form of
+  -- what the handle's file stores: `a` for `IFile a`, `[a]` for the
+  -- streams. It is printed as a closed schema of its own and is never
+  -- walked as part of the value.
+  | SerialIFile FVar SerialAST
+  | SerialOStream FVar SerialAST
+  | SerialIStream FVar SerialAST
   -- A function value. Carries the signature (argument schemas and the
   -- result schema) so the native type is a callable of the right shape;
   -- the wire form is signature-independent -- home language, manifold id,
@@ -412,9 +409,9 @@ instance Pretty SerialAST where
   pretty (SerialUInt64 v) = parens ("SerialUInt64" <+> pretty v)
   pretty (SerialBool v) = parens ("SerialBool" <+> pretty v)
   pretty (SerialString v) = parens ("SerialString" <+> pretty v)
-  pretty (SerialIFile v) = parens ("SerialIFile" <+> pretty v)
-  pretty (SerialOStream v) = parens ("SerialOStream" <+> pretty v)
-  pretty (SerialIStream v) = parens ("SerialIStream" <+> pretty v)
+  pretty (SerialIFile v s) = parens ("SerialIFile" <+> pretty v <+> pretty s)
+  pretty (SerialOStream v s) = parens ("SerialOStream" <+> pretty v <+> pretty s)
+  pretty (SerialIStream v s) = parens ("SerialIStream" <+> pretty v <+> pretty s)
   pretty (SerialClosure ins out) = parens ("SerialClosure" <+> list (map pretty ins) <+> pretty out)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)

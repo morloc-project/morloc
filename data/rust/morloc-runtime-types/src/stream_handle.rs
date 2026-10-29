@@ -19,8 +19,9 @@
 //!
 //! - `TAG_PATH` (`0`): payload is a relptr into the suballoc region
 //!   pointing at a `PathSuballoc` (`{ size: u64, bytes... }`). The
-//!   receiving pool opens the path locally via `mlc_open(path, kind)`
-//!   and binds a fresh handle in its own SHM registry.
+//!   receiving pool opens the path locally, checking the file against
+//!   the handle schema's storage (FMT-9), and binds a fresh handle in its
+//!   own SHM registry.
 //! - `TAG_HANDLE` (`1`): payload is a bare `uint64_t` slot id meaningful
 //!   in the receiver's shared SHM registry. Only valid when sender and
 //!   receiver share that registry (i.e. intra-nexus cross-pool). A

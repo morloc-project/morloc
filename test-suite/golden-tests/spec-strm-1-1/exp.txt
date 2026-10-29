@@ -1,0 +1,20 @@
+openNexus: "refused"
+openPy: -1
+openCpp: -1
+openR: -1
+openRust: -1
+streamNexus: "refused"
+streamPy: -1
+argNexus: exit 1
+argPy: exit 1
+argCpp: exit 1
+argR: exit 1
+argRust: exit 1
+listPy: exit 1
+listCpp: exit 1
+listR: exit 1
+listRust: exit 1
+lieCpp: exit 1
+[1,2,3]
+6
+bad: build_rejected

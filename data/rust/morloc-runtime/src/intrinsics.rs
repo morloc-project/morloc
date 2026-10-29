@@ -818,58 +818,6 @@ unsafe fn _write_voidstar_binary_rust(
 // entry point `mlc_open_ostream(schema_str, path)` because the writer
 // needs the element schema at open time.
 
-/// Probe a file for a valid morloc packet header without allocating
-/// SHM or setting up any cursor state. Returns 0 if the file exists,
-/// is readable, and starts with a well-formed morloc packet header.
-/// Returns non-zero (with errmsg set) on any failure: missing file,
-/// permission denied, short read, magic mismatch. Used by @open's
-/// IFile branch for eager packet-format validation.
-pub(crate) unsafe fn mlc_probe_packet(
-    path: *const c_char,
-    errmsg: *mut *mut c_char,
-) -> i32 {
-    clear_errmsg(errmsg);
-    if path.is_null() {
-        set_errmsg(errmsg, &MorlocError::Other("mlc_probe_packet: null path".into()));
-        return -1;
-    }
-    let path_str = match CStr::from_ptr(path).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_errmsg(errmsg, &MorlocError::Other(
-                "mlc_probe_packet: path is not valid UTF-8".into(),
-            ));
-            return -1;
-        }
-    };
-    use std::io::Read;
-    let mut file = match std::fs::File::open(path_str) {
-        Ok(f) => f,
-        Err(e) => {
-            set_errmsg(errmsg, &MorlocError::UserThrow(format!(
-                "@open probe: cannot open '{path_str}': {e}"
-            )));
-            return -1;
-        }
-    };
-    let mut hdr_buf = [0u8; 32];
-    if let Err(e) = file.read_exact(&mut hdr_buf) {
-        set_errmsg(errmsg, &MorlocError::UserThrow(format!(
-            "@open probe: '{path_str}' is not a valid morloc packet (short read: {e})"
-        )));
-        return -1;
-    }
-    match morloc_runtime_types::packet::PacketHeader::from_bytes(&hdr_buf) {
-        Ok(_) => 0,
-        Err(e) => {
-            set_errmsg(errmsg, &MorlocError::UserThrow(format!(
-                "@open probe: '{path_str}' is not a valid morloc packet: {e}"
-            )));
-            -1
-        }
-    }
-}
-
 pub(crate) unsafe fn mlc_open(
     path: *const c_char,
     kind: u8,
@@ -1028,6 +976,34 @@ pub(crate) unsafe fn mlc_open_istream(
         }
     };
     match crate::stream::open_dispatch_istream(path_str, s_str) {
+        Ok(h) => h,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
+/// `@open path :: <IO> (IFile a)`: `schema_str` is the schema of `a`, which
+/// the file's stored schema must match.
+pub(crate) unsafe fn mlc_open_ifile(
+    schema_str: *const c_char,
+    path: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    if path.is_null() || schema_str.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_open_ifile: null path or schema".into()));
+        return -1;
+    }
+    let (path_str, s_str) = match (CStr::from_ptr(path).to_str(), CStr::from_ptr(schema_str).to_str()) {
+        (Ok(p), Ok(s)) => (p, s),
+        _ => {
+            set_errmsg(errmsg, &MorlocError::Other("mlc_open_ifile: path or schema is not valid UTF-8".into()));
+            return -1;
+        }
+    };
+    match crate::stream::open_dispatch_ifile(path_str, s_str) {
         Ok(h) => h,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -1807,6 +1783,7 @@ pub(crate) unsafe fn mlc_read_stream_field(
     field_ptr: *const c_void,
     space: crate::voidstar::MorlocSpace,
     kind: u8,
+    storage: &str,
     errmsg: *mut *mut c_char,
 ) -> i64 {
     use morloc_runtime_types::stream_handle as sh;
@@ -1860,7 +1837,7 @@ pub(crate) unsafe fn mlc_read_stream_field(
                     return -1;
                 }
             };
-            match crate::stream::open_dispatch(path_str, kind) {
+            match crate::stream::open_typed(path_str, kind, storage) {
                 Ok(handle) => {
                     crate::eval_arena::record_slot_if_active(handle);
                     handle
@@ -1902,6 +1879,10 @@ pub(crate) unsafe fn mlc_read_stream_field(
                 )));
                 return -1;
             }
+            if let Err(e) = crate::stream::check_handle_type(handle, kind, storage) {
+                set_errmsg(errmsg, &e);
+                return -1;
+            }
             handle
         }
         _ => {
@@ -1921,9 +1902,23 @@ pub(crate) unsafe fn mlc_read_handle_voidstar(
     arr: *const c_void,
     space: crate::voidstar::MorlocSpace,
     kind: u8,
+    storage: *const c_char,
+    storage_len: usize,
     errmsg: *mut *mut c_char,
 ) -> i64 {
-    mlc_read_stream_field(arr, space, kind, errmsg)
+    clear_errmsg(errmsg);
+    let storage = if storage.is_null() { "" } else {
+        match std::str::from_utf8(std::slice::from_raw_parts(storage as *const u8, storage_len)) {
+            Ok(s) => s,
+            Err(_) => {
+                set_errmsg(errmsg, &MorlocError::Other(
+                    "mlc_read_handle_voidstar: storage schema is not valid UTF-8".into(),
+                ));
+                return -1;
+            }
+        }
+    };
+    mlc_read_stream_field(arr, space, kind, storage, errmsg)
 }
 
 // ── stdio-server bridge FFI ────────────────────────────────────────────────
@@ -2562,6 +2557,11 @@ mod c_abi {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn mlc_open_ifile(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_open_ifile(schema_str, path, errmsg)
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn mlc_open_stdin(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64 {
         super::mlc_open_stdin(schema_str, errmsg)
     }
@@ -2677,13 +2677,8 @@ mod c_abi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn mlc_read_stream_field(field_ptr: *const c_void, space: crate::voidstar::MorlocSpace, kind: u8, errmsg: *mut *mut c_char) -> i64 {
-        super::mlc_read_stream_field(field_ptr, space, kind, errmsg)
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn mlc_read_handle_voidstar(arr: *const c_void, space: crate::voidstar::MorlocSpace, kind: u8, errmsg: *mut *mut c_char) -> i64 {
-        super::mlc_read_handle_voidstar(arr, space, kind, errmsg)
+    pub unsafe extern "C" fn mlc_read_handle_voidstar(arr: *const c_void, space: crate::voidstar::MorlocSpace, kind: u8, storage: *const c_char, storage_len: usize, errmsg: *mut *mut c_char) -> i64 {
+        super::mlc_read_handle_voidstar(arr, space, kind, storage, storage_len, errmsg)
     }
 
     #[no_mangle]

@@ -1838,8 +1838,10 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             uint8_t kind = (schema->type == MORLOC_IFILE)   ? MLC_KIND_IFILE
                          : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
                          :                                    MLC_KIND_ISTREAM;
+            const char* storage = schema->keys ? schema->keys[0] : NULL;
             int64_t handle = PyTRY(mlc_read_handle_voidstar,
-                                   data, space, kind);
+                                   data, space, kind,
+                                   storage, storage ? strlen(storage) : 0);
             obj = PyLong_FromLongLong((long long)handle);
             if (!obj) {
                 PyINTERNAL_ABORT("Failed to wrap stream handle as PyLong");
@@ -2923,7 +2925,12 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         if (file_is_stream_packet(path)) {
             char* stream_err = NULL;
             PyObject* result = NULL;
-            int64_t handle = mlc_open(path, MLC_KIND_ISTREAM, &stream_err);
+            char* list_schema = schema_to_string(schema);
+            if (list_schema == NULL) {
+                PyINTERNAL_ABORT("stream ingest: schema_to_string returned NULL");
+            }
+            int64_t handle = mlc_open_istream(list_schema, path, &stream_err);
+            free(list_schema);
             if (stream_err) goto stream_error;
             result = PyList_New(0);
             if (!result) goto stream_error;
@@ -3921,11 +3928,12 @@ error:
 
 // -- Stream-handle bindings ----------------------------------------------
 
-static PyObject* pybinding__mlc_open(PyObject* self, PyObject* args) { MAYFAIL
+// _mlc_open_ifile(schema_str, path) -> handle
+static PyObject* pybinding__mlc_open_ifile(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
     const char* path;
-    int kind_i;
-    PARSE_ARGS_OR_ABORT(args, "si", &path, &kind_i);
-    int64_t handle = PyTRY(mlc_open, path, (uint8_t)kind_i);
+    PARSE_ARGS_OR_ABORT(args, "ss", &schema_str, &path);
+    int64_t handle = PyTRY(mlc_open_ifile, schema_str, path);
     return PyLong_FromLongLong((long long)handle);
 error:
     return NULL;
@@ -4688,7 +4696,7 @@ static PyMethodDef Methods[] = {
     {"mlc_read", pybinding__mlc_read, METH_VARARGS, "Deserialize a JSON string to a value"},
     {"mlc_conform", pybinding__mlc_conform, METH_VARARGS, "Give a literal the native form of a received value"},
     {"mlc_unpack", pybinding__mlc_unpack, METH_VARARGS, "Decode a packet held as bytes"},
-    {"mlc_open", pybinding__mlc_open, METH_VARARGS, "Open a stream/file as IFile/IStream/OStream handle"},
+    {"mlc_open_ifile", pybinding__mlc_open_ifile, METH_VARARGS, "Open an IFile handle for the given schema + path"},
     {"mlc_close", pybinding__mlc_close, METH_VARARGS, "Close any stream/file handle"},
     {"mlc_fschema", pybinding__mlc_fschema, METH_VARARGS, "Read a file's element schema without typed open"},
     {"mlc_ifile_walk", pybinding__mlc_ifile_walk, METH_VARARGS, "Unified IFile pattern walker"},

@@ -7,6 +7,12 @@ There is no cache spec yet; these are gaps until one is written.
   the files its language sources, `hash-include` files and the compiler
   version; a header or module those files load in turn is covered only when
   it is listed under `hash-include`.
+- **A stream handle argument is keyed by its path, not its file.** [read]
+  cache.rs ~730 folds the path bytes of an `IFile`/`IStream` argument into
+  the key, so a file rewritten in place at the same path returns the
+  result computed from its old contents. Gap in model/runtime/cache.md:
+  no item says what a handle contributes to a key (path, content hash, or
+  path plus size and mtime).
 - **Unverified 64-bit keys.** [read] Neither key nor data hash is checked on
   a hit; a data-hash collision skips the write (cache.rs:579-585); an empty
   pool hash is 0, so programs sharing a label share keys (cache.rs:109-117).

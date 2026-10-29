@@ -243,7 +243,7 @@ mod layout_field_tests {
         for s in [
             "b", "u1", "i2", "i4", "f4", "i8", "f8", "j", "s", "z", "?b", "?i4", "e22E02E1",
             "m11ab", "m21ab1bu1", "t2bb", "t2b?b", "t2si4", "v21A1b1B0", "v21A2b?b1B0",
-            "ab", "a?i4", "at2b?b", "F", "at2u1f8", "&4Treev24Leaf04Node3i8^4Tree^4Tree",
+            "ab", "a?i4", "at2b?b", "F2aj", "at2u1f8", "&4Treev24Leaf04Node3i8^4Tree^4Tree",
         ] {
             let rs = parse_schema(s).unwrap();
             let cs = CSchema::from_rust(&rs);

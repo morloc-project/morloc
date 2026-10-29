@@ -1,0 +1,14 @@
+module main (count)
+
+import root
+import root-py
+
+record Tree where
+  kids :: [Tree]
+  log :: IFile [Tree]
+
+source Py from "lib.py" ("relabel" as countPy)
+countPy :: Tree -> Int
+
+count :: Tree -> Int
+count t = countPy t

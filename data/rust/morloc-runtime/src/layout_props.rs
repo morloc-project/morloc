@@ -125,7 +125,7 @@ fn schema_str(g: &G) -> String {
         G::F64 => "f8".into(),
         G::Big => "j".into(),
         G::Str => "s".into(),
-        G::Handle => "F".into(),
+        G::Handle => "F2aj".into(),
         G::Enum(n) => {
             let mut s = format!("e{n}");
             for i in 0..*n {
@@ -606,8 +606,8 @@ fn handle_paths_are_written_in_place() {
 
     // 200 records (name, handle); the handles go in by slot id.
     let n = 200usize;
-    let list = parse_schema("at2sF").unwrap();
-    let elem = parse_schema("t2sF").unwrap();
+    let list = parse_schema("at2sF3ai8").unwrap();
+    let elem = parse_schema("t2sF3ai8").unwrap();
     let json = format!("[{}]", (0..n).map(|k| format!(r#"["n{k}", "{}"]"#, targets[k % 2])).collect::<Vec<_>>().join(","));
     let value = read_json_with_schema(&json, &list).unwrap();
     unsafe {
@@ -619,7 +619,7 @@ fn handle_paths_are_written_in_place() {
     }
     let path = dir.join("records.stream");
     let path = path.to_str().unwrap();
-    let out = shared_open_ostream_with_schema(path, "at2sF").unwrap();
+    let out = shared_open_ostream_with_schema(path, "at2sF3ai8").unwrap();
     shared_write_subpacket(out, crate::compression::CompressionLevel::NONE, value).unwrap();
     shared_close_handle(out).unwrap();
     let _ = shm::shfree(value);
