@@ -32,7 +32,7 @@ Code: conforms 2026-10-21
 `C => T`, where the constraint names a class but no type, is rejected.
 
 ### CLS-5 Superclasses and instance contexts are obligations
-Intent: proposed
+Intent: ruled 2026-10-29
 Code: deviates (issues/typeclasses.md)
 
 `class C a => D a` requires an instance `C T` for every instance `D T`, and
@@ -145,3 +145,41 @@ to derive instances, to serialize) is declared in `internal`: `Packable`,
 `Eq`, `Ord`, `Show`, `Hashable` and the indexing classes. The operators
 defined from a class's methods (`<`, `!=`, ...) may stay in `root`.
 
+### CLS-16 The most specific matching instance is selected
+Intent: ruled 2026-10-29
+Code: deviates (issues/typeclasses.md)
+
+Instances may overlap. At a use at type `T`, the instances whose heads match
+`T` are candidates, and the one whose head is at least as specific as every
+other candidate's is selected. Candidates with equal heads are one instance
+for this rule (CLS-2, CLS-6). Two candidates with neither more specific than
+the other are a compile error at the use. Which implementations a selected
+instance has for a method it omits is CLS-12.
+
+### CLS-17 An instance is selected by its head alone
+Intent: ruled 2026-10-29
+Code: deviates (issues/typeclasses.md)
+
+A head matches `T` when it instantiates to `T`. No coercion (OPT-1's
+`T` to `?T`, effect widening) is applied to make a head match; a coercion
+applies to a selected method's value as to any other term.
+
+### CLS-18 A constraint nothing determines is a compile error
+Intent: ruled 2026-10-29
+Code: deviates (issues/typecheck.md)
+
+A constrained type variable that does not occur in the signature's type
+outside its constraints is an error at the signature. One that occurs but
+that nothing at a use determines is an error at the use. Neither is
+defaulted.
+
+### CLS-19 A sourced constrained term runs the selected instance
+Intent: ruled 2026-10-29
+Code: deviates (issues/typeclasses.md)
+
+A sourced implementation of a term whose signature has a class constraint
+uses the host language's own operations, not the instance (root's `sort`
+uses the host's comparison). It is a candidate only at a use whose
+constraints all select an instance at a primitive type, whose host
+operation is the instance. Elsewhere the term runs a morloc implementation
+that calls the selected instance's methods (`sort` as `sortBy (<=)`).

@@ -25,17 +25,21 @@ Intent: proposed
 Code: unaudited
 
 `+ - * /` on `Nat` are evaluated whenever both operands are ground; `/`
-truncates. A check on an expression with a free variable waits until the
-variable is solved.
+truncates. A check on an expression with an inferred variable waits until
+the variable is solved; one with a rigid variable (POLY-7) is decided by
+DIM-7.
 
-### KIND-4 A negative Nat
-Intent: open
-Code: unaudited
+### KIND-4 A Nat is never negative
+Intent: ruled 2026-10-29
+Code: deviates (issues/typecheck.md, issues/kinds-dimensions.md)
 
-`3 - 10` reduces to `-7`, and a signature with a negative dimension is
-accepted though no call can satisfy it. Candidates: (a) a `Nat` that reduces
-below zero is a type error where it is reduced; (b) subtraction clamps at 0;
-(c) negative values are legal.
+A `Nat` expression that reduces below zero is a type error where it
+occurs. One over rigid variables (POLY-7) is an error when it is negative for
+some value of them (`n - 1` with `n` rigid); one over inferred variables
+needs a solution that keeps it non-negative (DIM-6, DIM-7). Every signature
+is checked, whether or not its term is used.
+
+Why: a signed quantity would be a separate kind.
 
 ### KIND-5 Missing non-`Type` arguments are filled gradually
 Intent: proposed

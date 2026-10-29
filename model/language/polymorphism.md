@@ -50,3 +50,12 @@ A type variable that nothing in the program determines, and that a native
 representation needs (POLY-2), is rejected at the term where it occurs, and
 the error names the variable. One that no representation needs, such as a
 phantom parameter of an argument-free `data` type, is not an error.
+
+### POLY-7 Nat variables in a signature are rigid
+Intent: ruled 2026-10-29
+Code: deviates (issues/kinds-dimensions.md)
+
+A `Nat` variable in a signature is universally quantified, as a `Type`
+variable is (POLY-1). The body must typecheck for every natural value of it:
+`f :: Vector n Int -> Int` may not pass its argument where `Vector (m + 1)
+Int` is required. Equations over rigid variables are decided by DIM-7.

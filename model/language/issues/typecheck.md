@@ -44,7 +44,7 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   negative"), and a list or record table column (`t :: Table 2 {xs =
   [Int]}`, accepted by typecheck, refused by make), point at
   `main.loc:1:14`. See model/compiler/issues/typecheck-output.md.
-- [reproduced] KIND-4 open: an unexported, unused
+- [reproduced] Violates KIND-4: an unexported, unused
   `f :: Buffer (3 - 10) Int -> Int` is accepted silently; exported or
   called, it is rejected.
 - **Exported method error.** [reproduced] Violates MOD-2 and MOD-10 in
@@ -196,13 +196,10 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   generalized and works. POLY-4 also names `let` signatures, which do not
   parse ("unexpected '::'"). Repro: /work/plans/model-audit-2026-10-21/repro/D/poly4c, poly4d, poly5.
 - **Literal defaulting exports a constrained generic at Int.**
-  [reproduced, 2026-10-21] Gap in SIG-5 and POLY-6. `f :: Integral a => a
-  -> a; f x = x + x` is skipped with a warning (SIG-5), but `f x = x + 1`
-  is exported at Int with no warning: `f 1.5` fails "expected integer for
-  Int", while `g y = f y` at Real gives 2.5. Candidates: (a) a constrained
-  export is skipped or rejected regardless of literals; (b) class
-  variables default (Integral -> Int, Numeric -> Real) and SIG-5/POLY-6
-  say so. Repro: /work/plans/model-audit-2026-10-21/repro/D/sig5b, sig5c.
+  [reproduced, 2026-10-21] Violates SIG-5 and CLS-18 (no defaulting).
+  `f :: Integral a => a -> a; f x = x + x` is skipped with a warning, but
+  `f x = x + 1` is exported at Int with no warning: `f 1.5` fails
+  "expected integer for Int", while `g y = f y` at Real gives 2.5. Repro: /work/plans/model-audit-2026-10-21/repro/D/sig5b, sig5c.
 - **SIG-4's premise is stale.** [reproduced, 2026-10-21] It says
   inference fails for a point-free use of class methods; `g = (+)` and
   `concatTo = fold (<>)` build and run unsigned. Only constructor matching

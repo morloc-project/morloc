@@ -2,8 +2,8 @@
 
 - **Signature inside an instance body crashes the compiler.** [reproduced]
   Violates DIAG-1. The grammar accepts `m :: T` in an instance body; Link
-  has no case for it and calls `error` (Frontend/Link.hs:546, "Unreachable,
-  instances may only contain sources and instances"). Repro:
+  has no case for it and calls `error` (Frontend/Link.hs linkInstance,
+  "linkInstance: unexpected declaration in an instance body"). Repro:
   `class Foo a where foo :: a -> a` and
   `instance Foo Int where foo :: Int -> Int; foo x = x`, then use `foo`.
   Open: is the signature legal (checked against the instance type) or a
@@ -74,7 +74,7 @@
   declared in stdlib `root`, so a replacement prelude without them breaks
   code generation.
 - **A sourced function with a class constraint ignores the instance.**
-  [reproduced] Violates CLS-2 / DERIV-2. root's `sort :: Ord a => [a] ->
+  [reproduced] Violates CLS-19. root's `sort :: Ord a => [a] ->
   [a]` is sourced in every root-* as `morloc_sort`, which uses the native
   comparison, not the selected `Ord` instance. With
   `newtype Z = Real deriving (Eq, Ord)`, Python `sort [0.0, -0.0]` gives
@@ -87,3 +87,30 @@
   [reproduced, 2026-10-21] `instance Foo Int` gives `m` but not `n`; using
   `n` at Int says "No instance found for Foo::n at type Int -> Int". It
   should say the instance lacks `n` (CLS-5). Repro: /work/plans/model-audit-2026-10-21/repro/D/cls/c14.
+- **Every type has `Eq` and `Ord` through a catch-all host-operator
+  instance.** [reproduced] Violates DERIV-6. root-py, root-cpp, root-r and
+  root-rust declare `instance Eq a` and `instance Ord a` mapped to the host
+  `==` and `<=`. The typechecker therefore grants `Eq T` for every `T`,
+  including functions, and `==` on a `data` type typechecks and then fails
+  in g++ (`no match for operator==`, root-cpp core.hpp). No `Eq`/`Ord`
+  constraint or instance context can be unmet. Repro:
+  /work/plans/brittleness-2026-10-23/repros/lang/m/datacmp.
+- **Instance selection matches through a coercion.** [read] Violates
+  CLS-17. Typecheck.resolveInstances accepts a candidate when
+  `tryCoerce` turns its method type into the use's
+  (Frontend/Typecheck.hs, `isCompatible`), so a value-like method of
+  `instance C T` (`mempty :: T`) can serve a use at `?T`, wrapped in a
+  present optional.
+- **Instances are matched four ways.** [read] Violates CLS-16 (one rule).
+  Typecheck.resolveInstances keeps every subtype-or-coercion match after
+  alias filtering; Realize.collapseExpr picks among them with its own
+  `compatibleType` (UnkT a wildcard); Typecheck.validate's `covers` uses
+  `matchTypeU` with no alias chain; CodeGenerator/Instance.hs, used for
+  calls the compiler builds (`__get_slice__`, `__access_index__`,
+  `__to_index__`, `map` across effects), takes the first sourced match,
+  with no specificity and blind to an instance whose body is morloc.
+- **An ambiguous use is resolved silently in realization.** [read]
+  Violates CLS-16 and CLS-18. When a use's type holds an unsolved Type
+  variable (an open `mempty` inside a body), Realize.collapseExpr keeps the
+  nearest of several incomparable instances instead of rejecting the use
+  (`containsUnk` case of its resolveInstances).

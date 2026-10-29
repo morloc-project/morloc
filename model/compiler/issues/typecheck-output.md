@@ -23,3 +23,15 @@ model/language/issues/typecheck.md.
 - **`morloc typecheck` drops class constraints from signed exports.**
   [reproduced, 2026-10-21] `f :: Integral a => a -> a` and `s ::
   Semigroup a => a -> a` print as `f :: a -> a`, `s :: a -> a`.
+- **Two erasures to `Type` disagree.** [read] Namespace/Type.hs `typeOf`
+  and `unresolvedType2type`: an existential becomes a record or `UnkT` in
+  one and an `error` in the other; `a -> (b -> c)` is flattened by
+  `typeOf` only (APP-1), yet
+  EffectBoundary and Rust.hs call `unresolvedType2type`; a row literal
+  becomes a record in one and `NatVoidT` in the other.
+- **Two declared-kind lookups disagree.** [read]
+  CodeGenerator/ValueArgs.hs `declaredKinds` picks the scope entry whose
+  arity matches; Infer.hs `typeChildren` takes the first entry and pads
+  with `Type`. A head with entries of different arity gets different kinds
+  from each.
+

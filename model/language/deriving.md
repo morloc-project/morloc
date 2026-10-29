@@ -53,3 +53,19 @@ Code: conforms 2026-10-18
 A deriving clause and a hand-written instance of the same class for the
 same type are a compile error. A newtype's own `unpack` (NEWT-7) is not a
 deriving clause.
+
+### DERIV-6 `Eq` and `Ord` are derived where no instance is given
+Intent: ruled 2026-10-29
+Code: deviates (issues/typeclasses.md)
+
+A type with no `Eq` instance has the derived one (DERIV-2), as if it had a
+deriving clause. A type with no `Ord` instance has the derived one only if
+its `Eq` is derived too, so that `==` and `<=` agree; a type with a
+hand-written `Eq` and no `Ord` has no `Ord`. A type whose values cannot
+cross between languages (a function, a suspension) has neither. A
+hand-written instance replaces the derived one, and is how a type gets a
+faster comparison; it is not a DERIV-5 conflict. The primitive types have
+hand-written instances that are the host operators (CLS-19).
+
+Why: a catch-all host-operator instance claimed `Eq` for every type, and
+was wrong wherever the host operator was.

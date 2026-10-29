@@ -1,17 +1,14 @@
 # Kinds and dimensions
 
-- **Signature Nat variables are not rigid.** [reproduced] Spec gap: POLY-1
-  (proposed) says signature variables are universal; for Nat variables the
-  code solves them like existentials. `h :: Vector (m + 1) Int -> Int`,
+- **Signature Nat variables are not rigid.** [reproduced] Violates POLY-7
+  and DIM-7. The code solves signature Nat variables like existentials. `h :: Vector (m + 1) Int -> Int`,
   `f :: Vector n Int -> Int; f x = h x` is accepted and `morloc typecheck`
   reports `f :: Vector (1 + a) Int -> Int`; `f :: Vector (n - 1) Int` is
   reported as `Vector a Int`. The DIM-6 check likewise treats every Nat
   variable as existential: `f :: Vector (n * n) Int` calling `h` above is
-  accepted (witness n=1, m=0) though n=0 has no m. Design question: (a)
-  rigid, as Type variables, making these type errors (the DIM-6 check must
-  then quantify them universally: decidable for linear equations, not in
-  general); (b) existential, with a spec item saying so and the inferred
-  type reported.
+  accepted (witness n=1, m=0) though n=0 has no m. A Nat subtraction over
+  a rigid variable (`Vector (n - 1)`) is accepted though KIND-4 rejects
+  it.
 - [read] Violates DIM-6 ("at the term that produced it"). A Nat equation
   deferred during instance resolution (after synthesis) has no recorded
   term; the error falls back to the export (Frontend/Typecheck.hs, the
