@@ -634,19 +634,13 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           mAst <- if intr == IntrTry
                     then return Nothing
                     else resultSerialAst m intr payloadTf
-          mPacker <- if intr == IntrCellReduce
-                       then cellReducePacker m payloadTf
-                       else return Nothing
-          let rawInnerTf
-                | intr == IntrTry = innerTf
-                | otherwise = maybe payloadTf snd mPacker
-              packed = case (mAst, msch) of
-                (Just ast, Just sch) -> WireToNativeN payloadTf ast intr sch es''
-                _ -> case mPacker of
-                  Just (packerSrc, _) ->
-                    AppExeN payloadTf (SrcCallP Nothing packerSrc)
-                      [NativeArgExpr (IntrinsicN rawInnerTf intr msch es'')]
-                  Nothing -> IntrinsicN rawInnerTf intr msch es''
+          mSlots <- if intr == IntrCellReduce
+                      then cellReduceSlots m payloadTf msch es''
+                      else return Nothing
+          let packed = case (mSlots, mAst, msch) of
+                (Just reduced, _, _) -> reduced
+                (_, Just ast, Just sch) -> WireToNativeN payloadTf ast intr sch es''
+                _ -> IntrinsicN (if intr == IntrTry then innerTf else payloadTf) intr msch es''
           -- Reuse @try rather than a bespoke wrap: converting a raised
           -- failure into an Ok/Err value is exactly what it does, and
           -- routing through it keeps one lowering (and one per-language
@@ -751,11 +745,19 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     packDataArg m dataArg = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       case ast of
-        SerialPack _ (packer, _) -> do
-          let unpackerSrc = typePackerReverse packer
-              unpackedType = typePackerUnpacked packer
-          return [AppExeN unpackedType (SrcCallP Nothing unpackerSrc) [NativeArgExpr dataArg]]
-        _ -> return [dataArg]
+        _ | Serial.isSerializable ast -> return [dataArg]
+          -- C++ marshals a sum type holding a packed field arm by arm, with
+          -- the sum type's own serializer, so only its outer type is taken
+          -- apart here.
+          | langName lang == "cpp" && packedVariant ast -> case ast of
+              SerialPack _ (packer, _) ->
+                return [AppExeN (typePackerUnpacked packer) (SrcCallP Nothing (typePackerReverse packer)) [NativeArgExpr dataArg]]
+              _ -> return [dataArg]
+          | otherwise -> return [NativeToWireN (Serial.serialAstToType ast) ast dataArg]
+
+    packedVariant :: SerialAST -> Bool
+    packedVariant a@(SerialVariant {}) = not (Serial.isSerializable a)
+    packedVariant a = any packedVariant (Serial.serialKids a)
 
     -- @load, @read, @unpack and @cellget return their value in its wire
     -- form, as the runtime decodes it. Where a packer builds the native form
@@ -768,14 +770,19 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           return $ if Serial.isSerializable ast then Nothing else Just ast
       | otherwise = return Nothing
 
-    -- @cellreduce's result is packed by the outer type's packer, the
-    -- runtime call typed at its unpacked type.
-    cellReducePacker :: Int -> TypeF -> MorlocMonad (Maybe (Source, TypeF))
-    cellReducePacker m resultTf = do
-      ast <- Serial.makeSerialAST m lang resultTf
-      return $ case ast of
-        SerialPack _ (packer, _) -> Just (typePackerForward packer, typePackerUnpacked packer)
-        _ -> Nothing
+    -- @cellreduce: the slots are read as one list, given their native form
+    -- as @cellget's value is, and folded by the user's combine, which so
+    -- sees only native values.
+    cellReduceSlots :: Int -> TypeF -> Maybe Text -> [NativeExpr] -> MorlocMonad (Maybe NativeExpr)
+    cellReduceSlots m accTf (Just sch) [combine, handle] = do
+      listFv <- inferConcreteVar lang (Idx m BT.list)
+      let listTf = AppF (VarF listFv) [accTf]
+      listAst <- Serial.makeSerialAST m lang listTf
+      let slots
+            | Serial.isSerializable listAst = IntrinsicN listTf IntrCellSlots (Just sch) [handle]
+            | otherwise = WireToNativeN listTf listAst IntrCellSlots sch [handle]
+      return . Just $ IntrinsicN accTf IntrReduceList Nothing [combine, slots]
+    cellReduceSlots _ _ _ _ = return Nothing
 
     -- Compute the msgpack schema string for runtime intrinsics
     intrinsicSchema :: Int -> Intrinsic -> TypeF -> [NativeExpr] -> MorlocMonad (Maybe Text)
@@ -1612,6 +1619,7 @@ refuseHostFunction m e = case e of
   DoBlockN _ x -> refuseHostFunction m x
   MapOptionalN _ _ _ x -> refuseHostFunction m x
   IntrinsicN _ _ _ xs -> mapM_ (refuseHostFunction m) xs
+  NativeToWireN _ _ x -> refuseHostFunction m x
   _ -> return ()
 
 refuseHostVar :: Int -> Int -> MorlocMonad ()

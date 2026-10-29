@@ -2104,6 +2104,10 @@ intrinsicType IntrIFileWalk =
   error "intrinsicType: IntrIFileWalk is synthesized post-typecheck and carries its result type from the originating pattern application"
 intrinsicType IntrConform =
   error "intrinsicType: IntrConform is synthesized post-typecheck and carries the type of the literal it builds"
+intrinsicType IntrCellSlots =
+  error "intrinsicType: IntrCellSlots is synthesized post-typecheck"
+intrinsicType IntrReduceList =
+  error "intrinsicType: IntrReduceList is synthesized post-typecheck"
 
 -- intrinsicArity is defined in Morloc.Namespace.Expr
 

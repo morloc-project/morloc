@@ -4443,8 +4443,8 @@ error:
 }
 
 // -- Fold accumulators (the `@fold` stream-handler form) ------------------
-// One accumulator per thread that folds into it; the pool-side
-// _mlc_cell_reduce merges them with the handler's `combine`.
+// One accumulator per thread that folds into it; @cellreduce reads them all
+// (mlc_cell_slots) and merges them with the handler's `combine`.
 
 // mlc_cell_new(schema, init) -> handle
 static PyObject* pybinding__mlc_cell_new(PyObject* self, PyObject* args) { MAYFAIL
@@ -4574,57 +4574,67 @@ error:
     return NULL;
 }
 
-// mlc_cell_reduce(schema, combine, handle) -> value. Fold every accumulator
-// into one with `combine`, then release the cell. The count is never zero --
-// an untouched cell answers with its seed -- so there is always a value.
-static PyObject* pybinding__mlc_cell_reduce(PyObject* self, PyObject* args) { MAYFAIL
+// mlc_cell_slots(schema, handle) -> list. Every accumulator of a cell, in
+// its wire form; with mlc_reduce_list it runs @cellreduce.
+static PyObject* pybinding__mlc_cell_slots(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
-    PyObject* combine;
-    // Initialized because the argument parse below can jump to `error`,
-    // where the cell is released.
     long long handle_ll = -1;
     Schema* schema = NULL;
-    PyObject* acc = NULL;
-    PARSE_ARGS_OR_ABORT(args, "sOL", &schema_str, &combine, &handle_ll);
+    PyObject* xs = NULL;
+    PARSE_ARGS_OR_ABORT(args, "sL", &schema_str, &handle_ll);
     int64_t n = PyTRY(mlc_cell_count, (int64_t)handle_ll);
     if (n < 1) {
-        PyINTERNAL_ABORT("mlc_cell_reduce: fold accumulator holds nothing to merge");
+        PyINTERNAL_ABORT("mlc_cell_slots: fold accumulator holds nothing to merge");
     }
+    xs = PyList_New(0);
+    if (xs == NULL) { goto error; }
     for (int64_t i = 0; i < n; i++) {
-        // One schema per accumulator: from_voidstar may hand back a numpy
-        // view over the block, so its release is deferred to the tracker --
-        // and the tracker frees the schema of every entry it holds.
         schema = PyTRY(parse_schema, schema_str);
         void* voidstar = PyTRY(mlc_cell_slot, (int64_t)handle_ll, i, schema);
-        // Takes the schema either way: to the tracker on success, freed
-        // on failure.
         PyObject* v = cell_value_to_py(schema, voidstar);
         schema = NULL;
         if (v == NULL) { goto error; }
-        if (acc == NULL) {
-            acc = v;
-        } else {
-            PyObject* merged = PyObject_CallFunctionObjArgs(combine, acc, v, NULL);
-            Py_DECREF(acc);
-            Py_DECREF(v);
-            acc = merged;
-            if (acc == NULL) { goto error; }
-        }
+        int r = PyList_Append(xs, v);
+        Py_DECREF(v);
+        if (r != 0) { goto error; }
     }
     PyTRY(mlc_cell_free, (int64_t)handle_ll);
-    return acc;
+    return xs;
 error:
     {
-        // The sweep at end of dispatch would reclaim this, but a @try-wrapped
-        // fold that fails and retries inside one dispatch would strand a cell
-        // per attempt.
         char* free_errmsg = NULL;
         mlc_cell_free((int64_t)handle_ll, &free_errmsg);
         free(free_errmsg);
     }
-    Py_XDECREF(acc);
+    Py_XDECREF(xs);
     free_schema(schema);
     return NULL;
+}
+
+// mlc_reduce_list(combine, xs) -> value. A non-empty list folded with
+// `combine`.
+static PyObject* pybinding__mlc_reduce_list(PyObject* self, PyObject* args) {
+    PyObject* combine;
+    PyObject* xs;
+    if (!PyArg_ParseTuple(args, "OO", &combine, &xs)) return NULL;
+    PyObject* items = PySequence_Fast(xs, "mlc_reduce_list: not a sequence");
+    if (items == NULL) return NULL;
+    Py_ssize_t n = PySequence_Fast_GET_SIZE(items);
+    if (n < 1) {
+        Py_DECREF(items);
+        PyErr_SetString(PyExc_RuntimeError, "mlc_reduce_list: nothing to reduce");
+        return NULL;
+    }
+    PyObject* acc = PySequence_Fast_GET_ITEM(items, 0);
+    Py_INCREF(acc);
+    for (Py_ssize_t i = 1; i < n; i++) {
+        PyObject* merged = PyObject_CallFunctionObjArgs(combine, acc, PySequence_Fast_GET_ITEM(items, i), NULL);
+        Py_DECREF(acc);
+        acc = merged;
+        if (acc == NULL) break;
+    }
+    Py_DECREF(items);
+    return acc;
 }
 
 static PyMethodDef Methods[] = {
@@ -4700,7 +4710,8 @@ static PyMethodDef Methods[] = {
     {"mlc_cell_new", pybinding__mlc_cell_new, METH_VARARGS, "Create a fold accumulator"},
     {"mlc_cell_get", pybinding__mlc_cell_get, METH_VARARGS, "Read this thread's fold accumulator"},
     {"mlc_cell_put", pybinding__mlc_cell_put, METH_VARARGS, "Replace this thread's fold accumulator"},
-    {"mlc_cell_reduce", pybinding__mlc_cell_reduce, METH_VARARGS, "Merge the fold accumulators and release the cell"},
+    {"mlc_cell_slots", pybinding__mlc_cell_slots, METH_VARARGS, "Every fold accumulator, and the cell released"},
+    {"mlc_reduce_list", pybinding__mlc_reduce_list, METH_VARARGS, "Fold a non-empty list with a function"},
     {"mlc_replay", pybinding__mlc_replay, METH_VARARGS, "Call a function on every element of an IStream"},
     {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
     {"mlc_try", pybinding__mlc_try, METH_VARARGS, "Evaluate body; wrap the value with ok, or a caught message with err"},

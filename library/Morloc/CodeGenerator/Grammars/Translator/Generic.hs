@@ -1328,10 +1328,12 @@ genericPrintExpr desc = go
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_cell_put("
             <> go handle <> ", " <> schemaRef sid <> ", " <> go value <> ")"
-    go (IIntrinsicCellReduce sid _ combine handle) =
+    go (IIntrinsicCellSlots sid _ handle) =
       let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_cell_reduce("
-            <> schemaRef sid <> ", " <> go combine <> ", " <> go handle <> ")"
+       in pretty prefix <> "mlc_cell_slots(" <> schemaRef sid <> ", " <> go handle <> ")"
+    go (IIntrinsicReduceList combine xs) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_reduce_list(" <> go combine <> ", " <> go xs <> ")"
     go (IIntrinsicReplay sid _ handle fn) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_replay("

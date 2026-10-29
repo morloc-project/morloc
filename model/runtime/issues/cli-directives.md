@@ -8,6 +8,11 @@
   fold accumulator", exit 1; `--sum=out.txt` (replay path) gives `c=15`.
   Cells live in one pool process (morloc-runtime/src/cell.rs:68-80) but
   realization can split `@cellnew` and `@cellreduce` across pools.
+  The other direction aborts too [reproduced, 2026-10-29]: a C++
+  `produceParallel` calling its sink from four threads, with the `@fold`,
+  `@init` and `@combine` functions in Python (or R), kills the C++ pool with
+  "mlc_cell_get: no such fold accumulator; the handle is stale or was
+  already released", whatever the accumulator type (an `Int` is enough).
 - **@render return type unchecked.** [reproduced] Violates CLI-8. A
   handler returning `Int` builds and fails after the command ran ("-f raw
   requires Str, [Str], Vector U8, or [Vector U8]"). `@mime` has the check

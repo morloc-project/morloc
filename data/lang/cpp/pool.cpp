@@ -1036,7 +1036,8 @@ inline void _mlc_unlink_tmp(const std::string& path) {
 
 // -- Fold-accumulator wrappers ------------------------------------------
 // A folding stream handler carries one accumulator per thread that folds
-// into it; `_mlc_cell_reduce` merges them and releases the cell.
+// into it; @cellreduce reads them all (`_mlc_cell_slots`) and merges them
+// with the handler's `combine` (`_mlc_reduce_list`).
 
 // @cellnew: create an accumulator seeded with `init`.
 template <typename B>
@@ -1098,15 +1099,30 @@ struct MlcCellGuard {
     }
 };
 
-template <typename B, typename F>
-B _mlc_cell_reduce(Schema* schema, F combine, int64_t handle) {
+// Every accumulator of a cell, in its wire form; with _mlc_reduce_list it
+// runs @cellreduce.
+template <typename L>
+L _mlc_cell_slots(Schema* schema, int64_t handle) {
     MlcCellGuard guard{handle};
     char* errmsg = NULL;
     int64_t n = mlc_cell_count(handle, &errmsg);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
-    B acc = _mlc_cell_slot<B>(schema, handle, 0);
-    for (int64_t i = 1; i < n; i++) {
-        acc = combine(acc, _mlc_cell_slot<B>(schema, handle, i));
+    if (n < 1) { PROPAGATE_ERROR(strdup("@fold: the accumulator holds nothing to merge")) }
+    L xs;
+    xs.reserve((size_t)n);
+    for (int64_t i = 0; i < n; i++) {
+        xs.push_back(_mlc_cell_slot<typename L::value_type>(schema, handle, i));
+    }
+    return xs;
+}
+
+// A non-empty list folded with `combine`.
+template <typename F, typename L>
+typename L::value_type _mlc_reduce_list(F combine, L xs) {
+    if (xs.empty()) { PROPAGATE_ERROR(strdup("@fold: nothing to merge")) }
+    typename L::value_type acc = std::move(xs[0]);
+    for (size_t i = 1; i < xs.size(); i++) {
+        acc = combine(acc, xs[i]);
     }
     return acc;
 }

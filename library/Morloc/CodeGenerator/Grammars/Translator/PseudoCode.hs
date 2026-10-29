@@ -105,6 +105,7 @@ prettyFoldManifold =
     makeNativeExpr _ (DeserializeN_ _ _ e) = return $ e {poolExpr = "DeserializeN" <> parens (poolExpr e)}
     makeNativeExpr _ (WireToNativeN_ _ _ intr _ es) =
       return $ (mergePoolDocs (const "") es) {poolExpr = "WireToNativeN" <> parens (pretty (intrinsicName intr) <> tupled (map poolExpr es))}
+    makeNativeExpr _ (NativeToWireN_ _ _ e) = return $ e {poolExpr = "NativeToWireN" <> parens (poolExpr e)}
     makeNativeExpr _ (ExeN_ _ (SrcCallP _ src)) = return $ defaultValue {poolExpr = pretty (srcName src)}
     makeNativeExpr _ (ExeN_ _ (PatCallP pat)) = return $ defaultValue {poolExpr = pretty pat}
     makeNativeExpr _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = letNamerN idx}

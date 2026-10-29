@@ -28,6 +28,7 @@ module Morloc.CodeGenerator.Serial
   , checkWriteDataType
   , containsFunF
   , serialAstHasString
+  , serialKids
   , chooseSerializationCycle
   , isSerializable
   , prettySerialOne

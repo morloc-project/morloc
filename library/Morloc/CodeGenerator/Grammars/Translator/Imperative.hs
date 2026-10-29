@@ -189,6 +189,8 @@ data IExpr
   | IIntrinsicRead Int (Maybe IType) IExpr -- schemaId, returnType, json_string -> typed data (nullable)
   | IIntrinsicUnpack Int (Maybe IType) IExpr -- schemaId, returnType, packet bytes -> typed data
   | IIntrinsicConform Int IExpr -- schemaId, wire-form literal -> the form the decoder gives the schema
+  | IIntrinsicCellSlots Int (Maybe IType) IExpr -- element schemaId, list type, handle -> every accumulator
+  | IIntrinsicReduceList IExpr IExpr -- combine, non-empty list -> the list folded with combine
   | IIntrinsicOpen Word8 IExpr -- kind byte (IFile=0, IStream=1, OStream=2), path -> handle
   | IIntrinsicClose IExpr -- handle -> ()
   | IIntrinsicUnlinkTemp IExpr
@@ -257,7 +259,6 @@ data IExpr
       --   given rather than deduced (as for @load).
   | IIntrinsicCellPut Int IExpr IExpr
       -- ^ @cellput: schemaId, handle, value.
-  | IIntrinsicCellReduce Int (Maybe IType) IExpr IExpr
   | IIntrinsicReplay Int (Maybe IType) IExpr IExpr
       -- ^ @replay: schemaId of one frame (the list `[a]`), element type
       --   `a`, stream handle, function. The per-language helper reads the
@@ -1340,6 +1341,7 @@ rnodeChildren (RN e) = case e of
   IntrinsicN _ _ _ xs -> map RN xs
   MapOptionalN _ _ _ x -> [RN x]
   WireToNativeN _ _ _ _ xs -> map RN xs
+  NativeToWireN _ _ x -> [RN x]
   LoopN _ starts body -> map (RN . snd) starts <> [RLN body]
   where
     nativeArg (NativeArgManifold nm) = RNM nm
@@ -2029,6 +2031,7 @@ scanNE (IntrinsicN _ IntrTagTest _ (BndVarN _ _ _ : rest)) = mconcat (map scanNE
 scanNE (IntrinsicN _ _ _ es) = mconcat (map scanNE es)
 scanNE (MapOptionalN _ _ _ e) = scanNE e
 scanNE (WireToNativeN _ _ _ _ es) = mconcat (map scanNE es)
+scanNE (NativeToWireN _ _ e) = scanNE e
 
 eitherArm :: ConsumeScan -> ConsumeScan -> ConsumeScan
 eitherArm a b =
@@ -2936,13 +2939,20 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, valueE]) (IntrinsicN_ _ IntrCellPut
   let raw d = IRawExpr (render (poolExpr d))
       putExpr = IIntrinsicCellPut sid (raw handleDocs) (raw valueDocs')
   return $ mergePoolDocs (const $ lcPrintExpr cfg putExpr) [handleDocs, valueDocs']
-lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrCellReduce (Just schema)
-                                  [combineDocs, handleDocs]) = do
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrCellSlots (Just schema) [handleDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  innerType <- lcTypeOf cfg (typeFof origExpr)
+  listType <- lcTypeOf cfg (typeFof origExpr)
+  idx <- lcNewIndex cfg
+  -- Bound with its type, which is the only place a language that infers the
+  -- element type can read it.
+  let v = render (helperNamer idx)
+      call = IIntrinsicCellSlots sid listType (IRawExpr (render (poolExpr handleDocs)))
+  return $ handleDocs
+    { poolPriorLines = poolPriorLines handleDocs ++ [lcPrintStmt cfg (IAssign v listType call)]
+    , poolExpr = pretty v }
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrReduceList _ [combineDocs, listDocs]) = do
   let raw d = IRawExpr (render (poolExpr d))
-      reduceExpr = IIntrinsicCellReduce sid innerType (raw combineDocs) (raw handleDocs)
-  return $ mergePoolDocs (const $ lcPrintExpr cfg reduceExpr) [combineDocs, handleDocs]
+  return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicReduceList (raw combineDocs) (raw listDocs))) [combineDocs, listDocs]
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [handleE, _]) (IntrinsicN_ _ IntrReplay (Just schema)
                                   [handleDocs, fnDocs]) = do
   sid <- lcRegisterSchema cfg schema
@@ -3062,6 +3072,7 @@ lowerNativeExprRaw cfg _ (WireToNativeN_ _ s intr schema argDocs) = do
     (IntrRead, [x]) -> return $ IIntrinsicRead sid rawType (arg x)
     (IntrUnpack, [x]) -> return $ IIntrinsicUnpack sid rawType (arg x)
     (IntrCellGet, [h]) -> return $ IIntrinsicCellGet sid rawType (arg h)
+    (IntrCellSlots, [h]) -> return $ IIntrinsicCellSlots sid rawType (arg h)
     _ -> error ("morloc bug: WireToNativeN over " <> show intr)
   idx <- lcNewIndex cfg
   let v = helperNamer idx
@@ -3070,6 +3081,23 @@ lowerNativeExprRaw cfg _ (WireToNativeN_ _ s intr schema argDocs) = do
   return $ merged
     { poolPriorLines = poolPriorLines merged
         ++ map (lcPrintStmt cfg) (IAssign (render v) rawType call : stmts)
+    , poolExpr = lcPrintExpr cfg x
+    }
+
+-- A native value taken apart into its wire form, as a sent argument is, for
+-- a runtime intrinsic that writes it. It is bound as an owned value, as the
+-- elements of a value taken apart for sending are, since the walk consumes it.
+lowerNativeExprRaw cfg origExpr (NativeToWireN_ _ s innerDocs) = do
+  inner <- case origExpr of
+    NativeToWireN _ _ e -> return e
+    _ -> error "morloc bug: NativeToWireN lowered without its original expression"
+  docs <- adaptOwnedElem cfg inner innerDocs
+  idx <- lcNewIndex cfg
+  let v = helperNamer idx
+      binding = [IAssign (render v) Nothing (IRawExpr (render (poolExpr docs)))]
+  (stmts, x) <- nativeToWire cfg v s
+  return $ docs
+    { poolPriorLines = poolPriorLines docs ++ map (lcPrintStmt cfg) (binding ++ stmts)
     , poolExpr = lcPrintExpr cfg x
     }
 

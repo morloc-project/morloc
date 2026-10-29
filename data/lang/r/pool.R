@@ -138,17 +138,18 @@ morloc_mlc_flush                     <- function(...){ .Call("morloc_mlc_flush",
 morloc_mlc_open_channel              <- function(...){ .Call("morloc_mlc_open_channel",              ...) }
 morloc_mlc_settle                    <- function(...){ .Call("morloc_mlc_settle",                    ...) }
 morloc_mlc_spawn                     <- function(...){ .Call("morloc_mlc_spawn",                     ...) }
-# Merge every fold accumulator with the handler's `combine`, then release
-# the cell. The count is never zero -- an untouched cell answers with its
-# seed -- so this always has a value to return.
-morloc_mlc_cell_reduce <- function(schema, combine, handle) {
+# Every accumulator of a cell, in its wire form; with morloc_mlc_reduce_list
+# it runs @cellreduce.
+morloc_mlc_cell_slots <- function(schema, handle) {
   on.exit(try(morloc_mlc_cell_free(handle), silent = TRUE), add = TRUE)
   n <- morloc_mlc_cell_count(handle)
-  acc <- morloc_mlc_cell_slot(handle, 0, schema)
-  for (i in seq_len(n - 1)) {
-    acc <- combine(acc, morloc_mlc_cell_slot(handle, i, schema))
-  }
-  acc
+  if (n < 1) stop("@fold: the accumulator holds nothing to merge")
+  lapply(seq_len(n) - 1, function(i) morloc_mlc_cell_slot(handle, i, schema))
+}
+
+# A non-empty list folded with `combine`.
+morloc_mlc_reduce_list <- function(combine, xs) {
+  Reduce(combine, xs)
 }
 
 # @replay: call `fn` on every frame (sub-packet) of the stream, in order,

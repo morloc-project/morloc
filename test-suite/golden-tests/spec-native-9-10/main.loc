@@ -1,0 +1,36 @@
+-- Spec NATIVE-9: in Rust a folding handler's accumulators reach its combine
+-- and its output in their native form, here a set; @show and @hash take a
+-- list of them apart and leave it for later use.
+module main (stream, writeBags)
+
+import root-rust
+
+newtype Bag = [Int]
+type Rust => Bag = "std::collections::BTreeSet<i64>"
+
+instance Packable [Int] Bag where
+  source Rust from "bag.rs" ("bag_pack" as pack, "bag_unpack" as unpack)
+
+source Rust from "bag.rs" ("mk", "mk_bags" as mkBags, "count_bags" as countBags, "zero_acc" as zeroAcc, "add_batch" as addBatch, "merge_acc" as mergeAcc, "show_acc" as showAcc)
+mk :: Int -> [Int]
+mkBags :: Int -> [Bag]
+countBags :: [Bag] -> Int
+zeroAcc :: Bag
+addBatch :: Bag -> [Int] -> Bag
+mergeAcc :: Bag -> Bag -> Bag
+showAcc :: Bag -> Str
+
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = do
+  _ <- sink (mk 0)
+  sink (mk 1)
+
+--' Stream integer batches
+--' @render -f/--folded=showAcc @fold=addBatch @init=zeroAcc @combine=mergeAcc
+stream :: <IO> ()
+stream = @collect produce
+
+writeBags :: Int -> (Str, Str, Int)
+writeBags n =
+  let xs = mkBags n
+  in (@show xs, @hash xs, countBags xs)

@@ -3760,27 +3760,10 @@ pub unsafe fn cell_put<T: ToVoidstar>(schema: &Schema, handle: u64, value: &T) {
     }
 }
 
-/// @cellreduce: merge every accumulator with `combine` and release the cell.
-///
-/// The count is never zero -- an untouched cell answers with its seed -- so
-/// this always has a value to return.
-/// The combine may be an inline closure or a function value.
-pub unsafe fn cell_reduce<T: FromVoidstar, F: Invoke2<T, T, T>>(
-    schema: &Schema,
-    combine: F,
-    handle: u64,
-) -> T {
+/// Every accumulator of a cell, in its wire form; with `reduce_list` it
+/// runs @cellreduce.
+pub unsafe fn cell_slots<T: FromVoidstar>(schema: &Schema, handle: u64) -> Vec<T> {
     let mut err: *mut c_char = std::ptr::null_mut();
-    let n = mlc_cell_count(handle as i64, &mut err);
-    check_err(err);
-    if n < 1 {
-        failed_without_reason("@fold");
-    }
-    let slot = |i: i64| -> T {
-        let mut serr: *mut c_char = std::ptr::null_mut();
-        let vs = mlc_cell_slot(handle as i64, i, cschema_of(schema), &mut serr);
-        read_runtime_voidstar(vs, serr, schema, "@fold")
-    };
     struct FreeOnUnwind(i64);
     impl Drop for FreeOnUnwind {
         fn drop(&mut self) {
@@ -3792,14 +3775,34 @@ pub unsafe fn cell_reduce<T: FromVoidstar, F: Invoke2<T, T, T>>(
         }
     }
     let guard = FreeOnUnwind(handle as i64);
-    let mut acc = slot(0);
-    for i in 1..n {
-        acc = combine.invoke(&acc, &slot(i));
+    let n = mlc_cell_count(handle as i64, &mut err);
+    check_err(err);
+    if n < 1 {
+        failed_without_reason("@fold");
+    }
+    let mut xs = Vec::with_capacity(n.max(0) as usize);
+    for i in 0..n {
+        let mut serr: *mut c_char = std::ptr::null_mut();
+        let vs = mlc_cell_slot(handle as i64, i, cschema_of(schema), &mut serr);
+        xs.push(read_runtime_voidstar(vs, serr, schema, "@fold"));
     }
     std::mem::forget(guard);
     let mut ferr: *mut c_char = std::ptr::null_mut();
     mlc_cell_free(handle as i64, &mut ferr);
     check_err(ferr);
+    xs
+}
+
+/// A non-empty list folded with `combine`.
+pub fn reduce_list<T, F: Invoke2<T, T, T>>(combine: F, xs: Vec<T>) -> T {
+    let mut items = xs.into_iter();
+    let mut acc = match items.next() {
+        Some(first) => first,
+        None => failed_without_reason("@fold"),
+    };
+    for x in items {
+        acc = combine.invoke(&acc, &x);
+    }
     acc
 }
 

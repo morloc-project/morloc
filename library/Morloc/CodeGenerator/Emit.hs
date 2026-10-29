@@ -16,6 +16,7 @@ module Morloc.CodeGenerator.Emit
   ) where
 
 import Morloc.CodeGenerator.Grammars.Common (invertSerialManifold)
+import Morloc.CodeGenerator.Serial (serialKids)
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.LangRegistry as LR
@@ -90,17 +91,17 @@ findSources ms = unique <$> concatMapM (foldSerialManifoldM fm) ms
     nativeExprSrcs (ExeN_ _ (SrcCallP _ src)) = return [src]
     nativeExprSrcs (DeserializeN_ _ s xs) = return $ serialASTsources s <> xs
     nativeExprSrcs (WireToNativeN_ _ s _ _ xss) = return $ serialASTsources s <> concat xss
+    nativeExprSrcs (NativeToWireN_ _ s xs) = return $ serialASTsources s <> xs
     nativeExprSrcs e = return $ foldlNE (<>) [] e
 
     serialExprSrcs (SerializeS_ s xs) = return $ serialASTsources s <> xs
     serialExprSrcs e = return $ foldlSE (<>) [] e
 
     serialASTsources :: SerialAST -> [Source]
-    serialASTsources (SerialPack _ (p, s)) = [typePackerForward p, typePackerReverse p] <> serialASTsources s
-    serialASTsources (SerialList _ _ s) = serialASTsources s
-    serialASTsources (SerialTuple _ ss) = concatMap serialASTsources ss
-    serialASTsources (SerialObject _ _ _ (map snd -> ss)) = concatMap serialASTsources ss
-    serialASTsources _ = []
+    serialASTsources s = here s <> concatMap serialASTsources (serialKids s)
+      where
+        here (SerialPack _ (p, _)) = [typePackerForward p, typePackerReverse p]
+        here _ = []
 
     nativeManifoldSrcs (NativeManifold_ m lang _ e) = (<>) e <$> lookupConstructors lang m
     nativeSerialSrcs (SerialManifold_ m lang _ _ e) = (<>) e <$> lookupConstructors lang m

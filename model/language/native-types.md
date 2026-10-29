@@ -76,13 +76,15 @@ Its elements are checked as values sent to another language are.
 
 ### NATIVE-9 One native form per type
 Intent: ruled 2026-10-28
-Tests: spec-native-9-1, spec-native-9-2, spec-native-9-3, spec-native-9-4, spec-native-9-5, spec-native-9-6
+Tests: spec-native-9-1, spec-native-9-2, spec-native-9-3, spec-native-9-4, spec-native-9-5, spec-native-9-6, spec-native-9-7, spec-native-9-8, spec-native-9-9, spec-native-9-10
 Code: deviates (issues/values.md)
 
 In every language L and for every type T with a schema, a value of T built
 in L by a literal, whatever its elements, or decoded in L by `@read`,
-`@load`, `@unpack` or `@cellget`, has the native form of a T that L
-receives from any language, L included: the same class, attributes, element
+`@load`, `@unpack` or `@cellget`, or handed to a folding handler's
+combine, has the native form of a T that L receives from any language, L
+included, and a T that `@show`, `@hash`, `@save` or `@cellput` writes is
+taken apart as a T that L sends is: the same class, attributes, element
 storage and element checks. The form is a function of T's schema, hints
 included, and of nothing else. In Python a numpy array a literal builds or
 a pool receives is read-only. In R a `Vector n U8` and a `Vector n D` (D a nullary

@@ -2955,8 +2955,9 @@ SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle
 }
 
 // -- Fold accumulators (the `@fold` stream-handler form) ------------------
-// One accumulator per thread that folds into it; morloc_mlc_cell_reduce in
-// pool.R merges them with the handler's `combine`.
+// One accumulator per thread that folds into it; @cellreduce reads them all
+// (morloc_mlc_cell_slots in pool.R) and merges them with the handler's
+// `combine`.
 
 SEXP morloc_mlc_cell_new(SEXP schema_str_r, SEXP init_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {

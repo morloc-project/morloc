@@ -434,6 +434,7 @@ renameNE old new = go where
   go (IntrinsicN t intr msch nes) = IntrinsicN t intr msch (map go nes)
   go (MapOptionalN t wt src ne) = MapOptionalN t wt src (go ne)
   go (WireToNativeN t s intr sch nes) = WireToNativeN t s intr sch (map go nes)
+  go (NativeToWireN t s ne) = NativeToWireN t s (go ne)
   go (LoopN t starts body) = LoopN t (map (\(i, e) -> (ri i, go e)) starts) (trimap go (renameSE old new) go body)
   goA (NativeArgManifold nm) = NativeArgManifold (renameNM old new nm)
   goA (NativeArgExpr ne) = NativeArgExpr (go ne)
@@ -559,6 +560,7 @@ argsBoundN a e0 = case e0 of
   IntrinsicN t intr msch es -> IntrinsicN t intr msch (map go es)
   MapOptionalN t wt src e -> MapOptionalN t wt src (go e)
   WireToNativeN t s intr sch es -> WireToNativeN t s intr sch (map go es)
+  NativeToWireN t s e -> NativeToWireN t s (go e)
   LoopN t starts body -> LoopN t (map (second go) starts) (argsBoundLoop a argsBoundN body)
   where
     go = argsBoundN a
@@ -624,6 +626,7 @@ wrapArgForms = goSM Map.empty
       IntrinsicN t intr msch es -> IntrinsicN t intr msch (map (goN env) es)
       MapOptionalN t wt src e -> MapOptionalN t wt src (goN env e)
       WireToNativeN t s intr sch es -> WireToNativeN t s intr sch (map (goN env) es)
+      NativeToWireN t s e -> NativeToWireN t s (goN env e)
       LoopN t starts body -> LoopN t (map (second (goN env)) starts) (goLoop (natives (map fst starts) env) goN body)
       _ -> e0
 
@@ -809,6 +812,8 @@ invertSerialManifold sm0 =
       atomize (MapOptionalN t wt src ne) lets
     invertNativeExprM (WireToNativeN_ t s intr sch nes) =
       atomize (WireToNativeN t s intr sch (map unD nes)) (concatMap getDeps nes)
+    invertNativeExprM (NativeToWireN_ t s (D ne lets)) =
+      atomize (NativeToWireN t s ne) lets
     -- A native loop is sealed like a serial one (see 'LoopS_'): per-iteration
     -- work stays inside its leaves. Its initializers run once, before the
     -- loop, so their dependencies go outward.
@@ -1171,6 +1176,7 @@ allSerialASTs = runIdentity . surroundFoldSerialManifoldM defaultValue fw
             return $ case folded of
               DeserializeN_ _ s child -> s : child
               WireToNativeN_ _ s _ _ children -> s : concat children
+              NativeToWireN_ _ s child -> s : child
               _ -> foldlNE (<>) mempty folded
         }
 

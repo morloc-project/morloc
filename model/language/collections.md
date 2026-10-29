@@ -43,3 +43,15 @@ Code: unaudited
 arriving as pairs repeats a key, is the result (a) the first pair,
 (b) the last pair, or (c) a failure? The answer must not depend on the
 language that builds the map.
+
+### COLL-6 A set has no order
+Intent: ruled 2026-10-29
+Tests: spec-coll-6-1
+Code: deviates (issues/values.md)
+
+`Set a` has no order. The order of its elements, in any form and in any
+language, is unspecified: it may differ between languages, runs, versions
+and ways of building the same set, and no program may depend on it. Equal
+sets nonetheless hash (`@hash`) and compare (`@eq`, `@le`) the same in every
+language, so a set's wire form lists its elements sorted, whatever the
+order of its native form.

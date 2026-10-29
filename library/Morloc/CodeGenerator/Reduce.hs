@@ -114,6 +114,8 @@ reduceNativeExpr ver ts lang (MapOptionalN t wt src ne) =
   MapOptionalN t wt src <$> reduceNativeExpr ver ts lang ne
 reduceNativeExpr ver ts lang (WireToNativeN t s intr sch nes) =
   WireToNativeN t s intr sch <$> mapM (reduceNativeExpr ver ts lang) nes
+reduceNativeExpr ver ts lang (NativeToWireN t s ne) =
+  NativeToWireN t s <$> reduceNativeExpr ver ts lang ne
 reduceNativeExpr ver ts lang (LoopN t starts body) =
   LoopN t
     <$> mapM (\(i, e) -> (,) i <$> reduceNativeExpr ver ts lang e) starts

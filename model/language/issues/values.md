@@ -16,23 +16,25 @@ on 0.109.0 unless marked.
   /tmp/claude-1000/-work/b22ec8aa-199c-401c-8f03-0b140cbccdb1/scratchpad/n10/noinst2.loc.
   NEWT-4 asks which forms a binding can build without an instance; nothing
   records that today.
-- **A value a writer intrinsic sends is unpacked only at its outer level.**
-  [reproduced, 2026-10-28] Spec gap: no item says a value a writer
-  intrinsic sends is taken apart at every level, as a sent argument is.
-  `@show`, `@hash`, `@eq`, `@le`, `@save`, `@savej`, `@cellnew` and
-  `@cellput` unpack their argument with the outer type's packer only
-  (library/Morloc/CodeGenerator/Serialize.hs, `packDataArg`), so a Packable
-  nested in it reaches the runtime in its native form: in C++ `@show` of a
-  `[Set Int]` fails at run time "no marshaller for a value of this C++ type
-  (schema type 14)". The readers build every level (`WireToNativeN`); the
-  writers need the mirror.
-- **`@cellreduce` hands its combine function wire-form values.** [read,
-  2026-10-28] Violates NATIVE-9. The runtime reducer passes each slot, and the
-  running accumulator, to the user's combine in wire form, and only the
-  result is packed: for a cell of `Set Int` in C++ the combine taking
-  `std::set<int>` is given `std::vector<int>`, which does not compile; in
-  Python it is given lists. Each slot needs its packer before the combine,
-  and the result after.
+- **C++ cannot send or receive a sum type whose arm holds a Packable.**
+  [reproduced, 2026-10-29] Violates NATIVE-9. `mk :: Int -> Try Str (Set
+  Int)` from Python into a C++ `size :: Try Str (Set Int) -> Int` does not
+  build: "the `data` type Try_7b5513 is used with two field types for its
+  constructor Ok: (std::set<int>) and (std::vector<int>)". The wire form of
+  the variant is given the native variant's name
+  (library/Morloc/CodeGenerator/Pools/CAbi/Members/Cpp.hs, `rawDoc` and
+  `collectCppVariants`), so the decoded and native forms collide. Writer
+  intrinsics avoid this by leaving such a value to the variant's own
+  marshaller, which unpacks only its outer type, so in C++ `@show`,
+  `@hash` or `@save` of a value holding such a sum type below its top
+  (`[Try Str (Set Int)]`, a record with a `Try Str (Set Int)` field) still
+  reaches the runtime in native form and fails "no marshaller for a value of
+  this C++ type". Python and R take it apart at every level.
+- **An R set of compound elements is not sorted.** [read, 2026-10-29]
+  Violates COLL-6. set-r sorts a set of scalars before it is sent, but
+  leaves a set of tuples or records in the order it was built, since R has
+  no ordering of them that matches C++ and Python, so `@hash` and `@eq` of
+  equal `Set (Int, Str)` values built in different orders can differ.
 - **A recursive record with a Packable field is rebuilt at its top level
   only.** [read, 2026-10-28] Violates NATIVE-9. A back-reference
   (`SerialRec`) counts as serializable, so `record Tree where tags :: Set

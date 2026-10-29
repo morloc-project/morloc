@@ -594,6 +594,12 @@ data Intrinsic
                     -- around the wire form of a Packable literal: gives it
                     -- the form the pool's decoder gives a received value of
                     -- its schema (NATIVE-8). Python and R only.
+  | IntrCellSlots   -- ^ internal @cellslots :: Cell b -> <IO> [b]: every
+                    -- accumulator of a cell, in its wire form, and the cell
+                    -- released. With IntrReduceList it is how @cellreduce
+                    -- runs when a packer builds the accumulator's native form.
+  | IntrReduceList  -- ^ internal @reducelist :: (b -> b -> b) -> [b] -> b,
+                    -- over a non-empty list.
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
@@ -659,6 +665,8 @@ intrinsicName IntrSpawn = "spawn"
 intrinsicName IntrSettle = "settle"
 intrinsicName IntrIFileWalk = "ifile_walk"
 intrinsicName IntrConform = "conform"
+intrinsicName IntrCellSlots = "cellslots"
+intrinsicName IntrReduceList = "reducelist"
 
 -- | Does this intrinsic perform IO? True iff its type carries an `IO` effect
 -- (see 'Morloc.Frontend.Typecheck.intrinsicType'/'intrinsicTypeG'). Used by the
@@ -692,6 +700,8 @@ intrinsicIsIO IntrCollect = True
 -- Synthesized post-typecheck (never user-written); IO by nature.
 intrinsicIsIO IntrIFileWalk = True
 intrinsicIsIO IntrConform = False
+intrinsicIsIO IntrCellSlots = True
+intrinsicIsIO IntrReduceList = False
 -- Synthesized by the `@fold` handler form; all touch runtime-owned state.
 intrinsicIsIO IntrCellNew = True
 intrinsicIsIO IntrCellGet = True
@@ -817,6 +827,8 @@ intrinsicArity IntrChannel = 0
 intrinsicArity IntrSpawn = 2
 intrinsicArity IntrSettle = 1
 intrinsicArity IntrConform = 1
+intrinsicArity IntrCellSlots = 1
+intrinsicArity IntrReduceList = 2
 intrinsicArity IntrIFileWalk =
   error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 
