@@ -1228,7 +1228,7 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         let s = unsafe { std::ffi::CStr::from_ptr(run_err) }.to_string_lossy().into_owned();
         unsafe { libc::free(run_err as *mut c_void) };
         eprintln!("Error: run failed: {}", s);
-        process::report_dead_pools(false);
+        process::report_dead_pools(crate::dispatch::reply_is_peer_died(unsafe { std::slice::from_raw_parts(result_packet, 32) }));
         process::clean_exit(1);
     }
 

@@ -313,6 +313,7 @@ typedef struct __attribute__((packed)) packet_command_call_s {
 #define PACKET_STATUS_PASS 0x00
 #define PACKET_STATUS_FAIL 0x01
 #define PACKET_STATUS_PIPE_CLOSED 0x02
+#define PACKET_STATUS_PEER_DIED 0x03
 
 // The reader closed the pipe: mlc_write / mlc_flush / mlc_close return it
 // with no errmsg.

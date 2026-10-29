@@ -93,6 +93,9 @@ pub const PRINT_RESULT_ERR: i32 = 1;
 /// mirrors it as MLC_RESULT_PIPE_CLOSED.
 pub const MLC_RESULT_PIPE_CLOSED: i32 = 2;
 
+/// The exit status of a pool process that ran out of shared memory (SHM-17).
+pub const EXIT_OUT_OF_SHARED_MEMORY: i32 = 71;
+
 /// Back-compat alias for the print path.
 pub const PRINT_RESULT_PIPE_CLOSED: i32 = MLC_RESULT_PIPE_CLOSED;
 

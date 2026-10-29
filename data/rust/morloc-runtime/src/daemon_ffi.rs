@@ -2576,10 +2576,19 @@ unsafe fn dispatch_request(
                     send_and_receive_over_socket(socket_path, call_packet, &mut err);
                 libc::free(call_packet as *mut c_void);
 
+                let peer_died = err.is_null()
+                    && (*(result_packet as *const morloc_runtime_types::packet::PacketHeader)).is_peer_died();
                 if !err.is_null() {
                     (*resp).success = false;
                     (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                     (*resp).error = err;
+                } else if peer_died {
+                    // LIFE-5: a pool died, which the daemon recovers from.
+                    (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+                    (*resp).error = get_morloc_data_packet_error_message(result_packet, &mut err);
+                    if !err.is_null() { libc::free(err as *mut c_void); }
+                    libc::free(result_packet as *mut c_void);
                 } else {
                     let _reply = reply_reference(result_packet);
 

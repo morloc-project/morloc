@@ -220,3 +220,21 @@ one waits until the views exceed twice what it left live, or the budget if
 that is larger, so values the program keeps do not cost a collection on
 every table; each request starts again from the budget. What the collector
 frees is only what no value still reads (SHM-4).
+
+### SHM-17 Running out of shared memory ends every pool
+Status: implemented
+Checked by: a_pool_that_runs_out_of_shared_memory_exits_with_its_own_status, outside_a_pool_running_out_is_an_ordinary_error, a_pool_failure_that_is_not_lack_of_space_is_an_ordinary_error
+
+When the allocator fails in a pool process, after releasing what gone
+children still leased (FORK-15), the process writes the size it asked for
+and the reason to stderr and exits with status 71, without unwinding: no
+`@try`, catch-all or binding sees the failure. A job spans pools and any of
+them may hold the memory, so every pool ends and every volume goes: a
+one-shot run fails with 1 (LIFE-3), and its teardown ends the other pools
+and removes the volumes; a daemon runs the recovery it runs for any pool
+death, which ends every pool, removes the namespace and starts it anew. In
+the nexus or a daemon process itself the failure is an error of its
+request or run. Only lack of space counts: the file system behind the
+volumes refusing a volume (after a volume of the exact size was tried) or
+the volume table being full. A request larger than that file system, and
+every other allocator failure, is an ordinary error everywhere.

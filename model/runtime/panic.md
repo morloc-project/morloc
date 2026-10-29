@@ -98,7 +98,7 @@ rule for locks shared between processes.
 
 ### PANIC-5 A pool never answers a panic
 Status: implemented
-Checked by: golden:py-systemexit-ends-pool, golden:r-internal-error-ends-pool, golden:cpp-catch-cannot-hold-pool-death, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_holding_a_runtime_lock_inside_a_format_library_call_ends_the_process, tla:PanicExit_continue_after_catch.bug
+Checked by: golden:py-systemexit-ends-pool, golden:r-internal-error-ends-pool, a_libmorloc_panic_on_a_thread_outside_any_catch_scope_exits_with_the_internal_error_status, a_panic_holding_a_runtime_lock_inside_a_format_library_call_ends_the_process, tla:PanicExit_continue_after_catch.bug
 
 A panic in a pool's runtime code -- a Rust panic outside user code, a C++
 infrastructure error -- ends the pool by PANIC-1. It is never turned into

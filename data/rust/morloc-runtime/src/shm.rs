@@ -1172,17 +1172,52 @@ pub fn shmalloc(size: usize) -> Result<AbsPtr, MorlocError> {
         return Err(MorlocError::Shm(format!("cannot allocate {size} bytes of shared memory")));
     }
     let size = if size == 0 { BLOCK_ALIGN } else { align_up(size, BLOCK_ALIGN) };
+    OUT_OF_SPACE.with(|f| f.set(false));
     let ptr = match shmalloc_unlocked(size) {
         Ok(p) => p,
         // FORK-15: blocks only gone children still lease may be released.
         Err(e) if crate::lease::any_created() && crate::lease::reclaim() > 0 => {
-            shmalloc_unlocked(size).map_err(|_| e)?
+            match shmalloc_unlocked(size) {
+                Ok(p) => p,
+                Err(_) => return Err(out_of_shared_memory(size, e)),
+            }
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(out_of_shared_memory(size, e)),
     };
     take_on_reference();
     crate::eval_arena::record_if_active(ptr);
     Ok(ptr)
+}
+
+thread_local! {
+    // SHM-17
+    static OUT_OF_SPACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// SHM-17
+fn out_of_shared_memory(size: usize, e: MorlocError) -> MorlocError {
+    let out_of_space = OUT_OF_SPACE.with(|f| f.replace(false));
+    if !out_of_space || !crate::ipc_ffi::is_pool_process() || size > fallback_capacity() {
+        return e;
+    }
+    let msg = format!(
+        "morloc pool: out of shared memory: cannot allocate {size} bytes ({e}); every pool ends\n"
+    );
+    unsafe {
+        libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
+        libc::_exit(morloc_runtime_types::EXIT_OUT_OF_SHARED_MEMORY);
+    }
+}
+
+// SHM-17: a request no volume could ever hold is not exhaustion.
+fn fallback_capacity() -> usize {
+    let Some(dir) = get_fallback_dir() else { return usize::MAX };
+    let Ok(path) = std::ffi::CString::new(dir) else { return usize::MAX };
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(path.as_ptr(), &mut st) } != 0 {
+        return usize::MAX;
+    }
+    (st.f_blocks as usize).saturating_mul(st.f_frsize as usize)
 }
 
 /// Copy data into a new SHM allocation.
@@ -1739,6 +1774,7 @@ fn create_file_segment_behind_stub(
 /// why it could not be a shared-memory object.
 fn create_file_segment(name: &str, full_size: usize, why: &str) -> Result<Option<Segment>, MorlocError> {
     let fallback = get_fallback_dir().ok_or_else(|| {
+        OUT_OF_SPACE.with(|f| f.set(true));
         MorlocError::Shm(format!(
             "Failed to allocate SHM '{}' ({} bytes): no shared-memory object ({}) and no fallback directory is set",
             name,
@@ -1768,6 +1804,9 @@ fn create_file_segment(name: &str, full_size: usize, why: &str) -> Result<Option
     unsafe {
         let rc = preallocate_fd(fd, size);
         if rc != 0 {
+            if rc == libc::ENOSPC || rc == libc::EDQUOT {
+                OUT_OF_SPACE.with(|f| f.set(true));
+            }
             libc::close(fd);
             libc::unlink(path_cstr.as_ptr());
             return Err(MorlocError::Shm(format!(
@@ -2021,6 +2060,7 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
     loop {
         let idx = header.next_index.load(Ordering::Acquire) as usize;
         if idx >= MAX_VOLUME_NUMBER {
+            OUT_OF_SPACE.with(|f| f.set(true));
             return Err(MorlocError::Shm(format!(
                 "Could not find suitable block for {} bytes: all {} volume numbers are used",
                 size, MAX_VOLUME_NUMBER
@@ -2029,7 +2069,15 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
         let name = volume_name(&basename, idx);
         // SHM-12: a name that exists was made by a creator that died before
         // counting it: used if initialised, skipped otherwise, never removed.
-        let shm = match create_and_register(&name, idx, new_size)? {
+        let minimal = size.saturating_add(std::mem::size_of::<BlockHeader>());
+        let created = match create_and_register(&name, idx, new_size) {
+            Err(_) if new_size > minimal => {
+                OUT_OF_SPACE.with(|f| f.set(false));
+                create_and_register(&name, idx, minimal)
+            }
+            r => r,
+        };
+        let shm = match created? {
             Some(shm) => Some(shm),
             None => open_and_register(&name, idx).ok().and_then(|r| r.ok()),
         };
@@ -3312,5 +3360,68 @@ mod c_abi {
     #[no_mangle]
     pub extern "C" fn morloc_refuse_new_segments() {
         super::morloc_refuse_new_segments()
+    }
+}
+
+#[cfg(test)]
+mod out_of_shared_memory_tests {
+    use super::*;
+
+    const CHILD_ENV: &str = "MORLOC_SHM17_CHILD";
+
+    #[test]
+    fn outside_a_pool_running_out_is_an_ordinary_error() {
+        OUT_OF_SPACE.with(|f| f.set(true));
+        let e = out_of_shared_memory(64, MorlocError::Shm("full".into()));
+        assert!(matches!(e, MorlocError::Shm(ref m) if m == "full"), "{e}");
+    }
+
+    #[test]
+    fn a_pool_that_runs_out_of_shared_memory_exits_with_its_own_status() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["shm::out_of_shared_memory_tests::child_pool_runs_out", "--exact", "--ignored", "--test-threads=1"])
+            .env(CHILD_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(morloc_runtime_types::EXIT_OUT_OF_SHARED_MEMORY));
+    }
+
+    #[test]
+    fn a_pool_failure_that_is_not_lack_of_space_is_an_ordinary_error() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["shm::out_of_shared_memory_tests::child_pool_fails_otherwise", "--exact", "--ignored", "--test-threads=1"])
+            .env(CHILD_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(3));
+    }
+
+    #[test]
+    #[ignore]
+    fn child_pool_fails_otherwise() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        let socket = std::ffi::CString::new("/tmp/morloc-shm17-test.sock").unwrap();
+        unsafe { crate::ipc_ffi::mlc_set_self_socket(socket.as_ptr()) };
+        let _ = out_of_shared_memory(64, MorlocError::Shm("too many open files".into()));
+        unsafe { libc::_exit(3) };
+    }
+
+    #[test]
+    #[ignore]
+    fn child_pool_runs_out() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        let socket = std::ffi::CString::new("/tmp/morloc-shm17-test.sock").unwrap();
+        unsafe { crate::ipc_ffi::mlc_set_self_socket(socket.as_ptr()) };
+        OUT_OF_SPACE.with(|f| f.set(true));
+        let _ = out_of_shared_memory(64, MorlocError::Shm("full".into()));
+        unsafe { libc::_exit(3) };
     }
 }

@@ -748,6 +748,9 @@ fn run_remote_command(
     if reply_is_pipe_closed(&full_packet) {
         process::exit_broken_pipe();
     }
+    if reply_is_peer_died(&full_packet) {
+        process::report_dead_pools(true);
+    }
     match packet::get_error_message(&full_packet) {
         Ok(Some(err_msg)) => {
             if let Some(report) = crate::parse_arg::failure_report(&err_msg) {
@@ -1819,6 +1822,11 @@ pub(crate) fn reply_is_pipe_closed(packet: &[u8]) -> bool {
     let Some(header) = packet.get(..32) else { return false };
     let header: &[u8; 32] = header.try_into().expect("32 bytes");
     morloc_runtime_types::packet::PacketHeader::from_bytes(header).map_or(false, |h| h.is_pipe_closed())
+}
+
+pub(crate) fn reply_is_peer_died(packet: &[u8]) -> bool {
+    let Some(header) = packet.get(..32).and_then(|h| <&[u8; 32]>::try_from(h).ok()) else { return false };
+    morloc_runtime_types::packet::PacketHeader::from_bytes(header).map_or(false, |h| h.is_peer_died())
 }
 
 #[cfg(test)]

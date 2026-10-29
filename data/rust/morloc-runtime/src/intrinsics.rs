@@ -590,6 +590,7 @@ pub(crate) unsafe fn mlc_save_voidstar(
         libc::close(fd);
         libc::unlink(tmp_buf.as_ptr() as *const c_char);
         if n == morloc_runtime_types::PACKET_TO_FD_PIPE_CLOSED {
+            crate::ipc_ffi::note_pipe_closed();
             set_errmsg(errmsg, &MorlocError::PipeClosed);
         }
         return 1;
@@ -1114,7 +1115,7 @@ pub(crate) unsafe fn mlc_close(
         Ok(()) => 0,
         // A broken pipe while flushing the final footer is an <IO> condition,
         // not a recoverable error (see mlc_write): reserved code, no errmsg.
-        Err(MorlocError::PipeClosed) => morloc_runtime_types::MLC_RESULT_PIPE_CLOSED,
+        Err(MorlocError::PipeClosed) => crate::ipc_ffi::note_pipe_closed(),
         Err(e) => {
             set_errmsg(errmsg, &e);
             1
@@ -1383,7 +1384,7 @@ pub(crate) unsafe fn mlc_write(
         // Broken pipe is an <IO> condition, not a recoverable error: return
         // the reserved code with NO errmsg so the C++ shim throws a distinct
         // MorlocPipeClosed that @catch does not swallow.
-        Err(MorlocError::PipeClosed) => morloc_runtime_types::MLC_RESULT_PIPE_CLOSED,
+        Err(MorlocError::PipeClosed) => crate::ipc_ffi::note_pipe_closed(),
         Err(e) => {
             set_errmsg(errmsg, &e);
             1
@@ -1404,7 +1405,7 @@ pub(crate) unsafe fn mlc_flush(
     match crate::stream::shared_flush_buffer(handle) {
         Ok(()) => 0,
         // See mlc_write: broken pipe surfaces as the reserved code (no errmsg).
-        Err(MorlocError::PipeClosed) => morloc_runtime_types::MLC_RESULT_PIPE_CLOSED,
+        Err(MorlocError::PipeClosed) => crate::ipc_ffi::note_pipe_closed(),
         Err(e) => {
             set_errmsg(errmsg, &e);
             1

@@ -1515,7 +1515,11 @@ pub fn pool_death_info(pool_index: usize) -> Option<String> {
         Some(format!("Pool process crashed with signal {sig}"))
     } else if libc::WIFEXITED(st) {
         let code = libc::WEXITSTATUS(st);
-        Some(format!("Pool process exited with status {code}"))
+        if code == morloc_runtime_types::EXIT_OUT_OF_SHARED_MEMORY {
+            Some(format!("Pool process ran out of shared memory (status {code})"))
+        } else {
+            Some(format!("Pool process exited with status {code}"))
+        }
     } else {
         Some("Pool process died unexpectedly".into())
     }

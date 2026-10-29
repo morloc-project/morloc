@@ -75,6 +75,8 @@ pub const PACKET_STATUS_PASS: u8 = 0x00;
 pub const PACKET_STATUS_FAIL: u8 = 0x01;
 /// A failure because the call's downstream reader closed its pipe.
 pub const PACKET_STATUS_PIPE_CLOSED: u8 = 0x02;
+/// A failure because a pool the call depended on ended (LIFE-5).
+pub const PACKET_STATUS_PEER_DIED: u8 = 0x03;
 
 // ── Entrypoint ─────────────────────────────────────────────────────────────
 
@@ -622,7 +624,14 @@ impl PacketHeader {
     }
 
     pub fn is_fail(&self) -> bool {
-        self.is_data() && matches!(unsafe { self.command.data.status }, PACKET_STATUS_FAIL | PACKET_STATUS_PIPE_CLOSED)
+        self.is_data() && matches!(
+            unsafe { self.command.data.status },
+            PACKET_STATUS_FAIL | PACKET_STATUS_PIPE_CLOSED | PACKET_STATUS_PEER_DIED
+        )
+    }
+
+    pub fn is_peer_died(&self) -> bool {
+        self.is_data() && unsafe { self.command.data.status } == PACKET_STATUS_PEER_DIED
     }
 
     pub fn is_pipe_closed(&self) -> bool {

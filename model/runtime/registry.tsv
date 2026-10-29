@@ -142,6 +142,10 @@ morloc-runtime/ipc_ffi.rs::-::HELD	test-only
 morloc-runtime/ipc_ffi.rs::-::PEER	test-only		
 morloc-runtime/ipc_ffi.rs::-::SEEN_COUNT	test-only		
 morloc-runtime/ipc_ffi.rs::-::PEER_HAD_DATA	test-only		
+morloc-runtime/ipc_ffi.rs::-::PEER_DEATHS	counter		
+morloc-runtime/ipc_ffi.rs::-::PIPE_CLOSES	counter		
+morloc-runtime/ipc_ffi.rs::-::LAST_PEER_DEATH	thread		
+morloc-runtime/ipc_ffi.rs::-::IS_POOL	startup		
 morloc-runtime/lib.rs::-::TestArenaLock.state	test-only		
 morloc-runtime/lib.rs::-::TestArenaLock.turn	test-only		
 morloc-runtime/lib.rs::ensure_test_arena::INIT	test-only		
@@ -323,6 +327,7 @@ morloc-runtime/stream.rs::-::REGISTRY_TORN_DOWN	lazy
 morloc-runtime/stream.rs::-::AheadJob.blocks	instance		
 morloc-runtime/stream.rs::schemas_match_cached::SEEN	thread		
 morloc-runtime/shm.rs::-::EXITING	lazy		
+morloc-runtime/shm.rs::-::OUT_OF_SPACE	thread		
 morloc-runtime/fork_pool.rs::-::WORKER	fork-scoped		
 morloc-runtime/fork_pool.rs::-::COORDINATOR	fork-scoped		
 morloc-runtime/fork_pool.rs::-::COORDINATOR_WAKE	fork-scoped		

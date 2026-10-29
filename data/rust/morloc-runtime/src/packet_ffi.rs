@@ -486,18 +486,7 @@ pub(crate) unsafe fn make_fail_packet(
     failure_message: *const c_char,
 ) -> *mut u8 {
     if failure_message.is_null() { return ptr::null_mut(); }
-    let msg = CStr::from_ptr(failure_message).to_bytes();
-    make_data_packet_raw(
-        msg.as_ptr(),
-        msg.len(),
-        ptr::null(),
-        0,
-        PACKET_SOURCE_MESG,
-        PACKET_FORMAT_TEXT,
-        PACKET_COMPRESSION_NONE,
-        PACKET_ENCRYPTION_NONE,
-        PACKET_STATUS_FAIL,
-    )
+    make_status_packet(CStr::from_ptr(failure_message).to_bytes(), PACKET_STATUS_FAIL)
 }
 
 /// A fail packet saying the call ended because its downstream reader
@@ -506,18 +495,32 @@ pub(crate) unsafe fn make_pipe_closed_packet(
     failure_message: *const c_char,
 ) -> *mut u8 {
     if failure_message.is_null() { return ptr::null_mut(); }
-    let msg = CStr::from_ptr(failure_message).to_bytes();
-    make_data_packet_raw(
-        msg.as_ptr(),
-        msg.len(),
-        ptr::null(),
-        0,
-        PACKET_SOURCE_MESG,
-        PACKET_FORMAT_TEXT,
-        PACKET_COMPRESSION_NONE,
-        PACKET_ENCRYPTION_NONE,
+    make_status_packet(
+        CStr::from_ptr(failure_message).to_bytes(),
         morloc_runtime_types::packet::PACKET_STATUS_PIPE_CLOSED,
     )
+}
+
+/// A fail packet saying a pool the call depended on ended (LIFE-5).
+pub(crate) fn make_peer_died_packet(failure_message: &str) -> *mut u8 {
+    make_status_packet(failure_message.as_bytes(), morloc_runtime_types::packet::PACKET_STATUS_PEER_DIED)
+}
+
+/// A text packet carrying `msg` with failure `status`.
+fn make_status_packet(msg: &[u8], status: u8) -> *mut u8 {
+    unsafe {
+        make_data_packet_raw(
+            msg.as_ptr(),
+            msg.len(),
+            ptr::null(),
+            0,
+            PACKET_SOURCE_MESG,
+            PACKET_FORMAT_TEXT,
+            PACKET_COMPRESSION_NONE,
+            PACKET_ENCRYPTION_NONE,
+            status,
+        )
+    }
 }
 
 pub(crate) unsafe fn morloc_packet_is_pipe_closed(packet: *const u8) -> bool {
@@ -2030,7 +2033,7 @@ pub(crate) unsafe fn print_morloc_data_packet(
                         Ok(_) => {}
                         Err(e) => {
                             set_errmsg(errmsg, &e);
-                            return if matches!(e, MorlocError::PipeClosed) { morloc_runtime_types::MLC_RESULT_PIPE_CLOSED } else { 1 };
+                            return if matches!(e, MorlocError::PipeClosed) { crate::ipc_ffi::note_pipe_closed() } else { 1 };
                         }
                     }
                 }
