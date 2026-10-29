@@ -1497,7 +1497,7 @@ printProgram desc prog =
     -- interpreted templates place inside a deferred post-fork loader, (3)
     -- manifolds, (4) dispatch.
     sections =
-      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit, closureTableInit, stageTableInit])
+      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit, closureSchemaInit, closureTableInit, stageTableInit])
       , vsep (map pretty (ipIncludes prog))
       , vsep (map pretty (ipManifolds prog) ++ logRebindings)
       , templateDispatch
@@ -1604,6 +1604,10 @@ printProgram desc prog =
     -- empty as "skip the per-label tee".
     quoteString :: Text -> MDoc
     quoteString t = dquotes (pretty (escapeQuotes "\"" "\\\"" (escapeStringLit t)))
+
+    closureSchemaInit
+      | T.null (ldClosureRegisterEntry desc) = mempty
+      | otherwise = "mlc_closure_schema" <+> pretty (ldAssignOp desc) <+> dquotes (pretty Serial.closureWireSchema)
 
     schemaTableInit
       | null (ipSchemaTable prog) = mempty

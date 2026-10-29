@@ -42,14 +42,7 @@ import qualified Data.Time.Format
 import qualified Data.Vector as V
 import qualified Morloc.BaseTypes as MBT
 import qualified Morloc.CodeGenerator.Docstrings as Docstrings
-import Morloc.CodeGenerator.Docstrings
-  ( isArrayWireSchema
-  , isListOfStrWireSchema
-  , isStrOrOptStrWireSchema
-  , listElementSchema
-  , peelHint
-  , peelRecDecl
-  )
+import Morloc.CodeGenerator.Docstrings (underOptional)
 import qualified Morloc.CodeGenerator.Infer as Infer
 import Morloc.CodeGenerator.LogTemplate (RenderedRunLog (..), renderRunLogTemplate)
 import Morloc.CodeGenerator.Namespace
@@ -57,6 +50,7 @@ import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.IFile as IFile
 import qualified Morloc.CodeGenerator.NumericLiteral as NL
 import qualified Morloc.CodeGenerator.Serial as Serial
+import Morloc.CodeGenerator.Serial (WireScalar (..), WireShape (..), wireShape)
 import qualified Morloc.Config as MC
 import Morloc.Data.Doc (concatWith, hardline, indent, line, pretty, render, squotes, vcat, (<+>))
 import Morloc.Data.Json
@@ -94,8 +88,6 @@ data FData = FData
   , fdataArgSchemas :: [Text]
   , fdataArgAsts :: [SerialAST]
     -- ^ Per-arg SerialAST, index-aligned with 'fdataArgSchemas'.
-    -- Consumed at emit time to derive per-entry wire schemas for
-    -- group args (see 'groupEntryWireSchemas').
   , fdataReturnAst :: SerialAST
     -- ^ The return's SerialAST. Says which constructors this command
     -- actually packs, which the type glossary needs and cannot get from
@@ -125,7 +117,6 @@ data GastData = GastData
   , commandArgSchemas :: [Text]
   , commandArgAsts :: [SerialAST]
     -- ^ Per-arg SerialAST, index-aligned with 'commandArgSchemas'.
-    -- Same role as 'fdataArgAsts'; see 'groupEntryWireSchemas'.
   , commandReturnAst :: SerialAST
     -- ^ Same role as 'fdataReturnAst'.
   }
@@ -149,19 +140,19 @@ class HasCmdDocSet a where
   termNameOf   :: a -> EVar
   docSetOf     :: a -> CmdDocSet
   setDocSet    :: CmdDocSet -> a -> a
-  argSchemasOf :: a -> [Text]
+  argAstsOf    :: a -> [SerialAST]
 
 instance HasCmdDocSet FData where
   termNameOf = EV . fdataTermName
   docSetOf = fdataCmdDocSet
   setDocSet ds fd = fd { fdataCmdDocSet = ds }
-  argSchemasOf = fdataArgSchemas
+  argAstsOf = fdataArgAsts
 
 instance HasCmdDocSet GastData where
   termNameOf = EV . commandTermName
   docSetOf = commandDocs
   setDocSet ds g = g { commandDocs = ds }
-  argSchemasOf = commandArgSchemas
+  argAstsOf = commandArgAsts
 
 -- | A replay entry ('mangleReplayName') reads files the stage of a
 -- multi-output run wrote: every argument is a packet file to load, except
@@ -170,12 +161,12 @@ stageReplayArgs :: HasCmdDocSet a => Set.Set EVar -> a -> a
 stageReplayArgs replayEntries x
   | Set.member (termNameOf x) replayEntries =
       let ds = docSetOf x
-          args' = zipWith stage (cmdDocArgs ds) (map Just (argSchemasOf x) ++ repeat Nothing)
+          args' = zipWith stage (cmdDocArgs ds) (map Just (argAstsOf x) ++ repeat Nothing)
        in setDocSet ds { cmdDocArgs = args' } x
   | otherwise = x
   where
-    stage (CmdArgPos r) (Just schema)
-      | classifySchema schema /= CatIFile = CmdArgPos r { argPosDocSource = Just SourceFile }
+    stage (CmdArgPos r) (Just ast)
+      | underOptional (wireShape ast) /= WIFile = CmdArgPos r { argPosDocSource = Just SourceFile }
     stage a _ = a
 
 -- | Map from each compiler-synthesized `--' @with` internal command
@@ -849,9 +840,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- instance, in a pool.
     requireListReceiver (AnnoS (Idx ri rt) _ _) = do
       Infer.requireDetermined ri rt
-      sch <- type2schema rt
-      case (MT.isPrefixOf "?" (peelHint (peelRecDecl sch)), classifySchema sch) of
-        (False, CatList _) -> return ()
+      ast <- generalTypeToSerialAST i rt
+      case wireShape ast of
+        WList _ -> return ()
         _ -> MM.throwSourcedError ri $
           "A bracket step on" <+> pretty rt
             <+> "needs its instance, which no language here can call"
@@ -1365,20 +1356,20 @@ checkJson (CheckPath (PathPerm p)) =
 -- it as the default for list / compound types where the classifier
 -- handles inline-or-file dispatch. `@literal` is the deprecated
 -- alias for `@source inline`.
-resolvedSourceJson :: Maybe Bool -> Maybe SourceAtom -> Maybe Text -> Text
+resolvedSourceJson :: Maybe Bool -> Maybe SourceAtom -> Maybe WireShape -> Text
 resolvedSourceJson _ (Just a) _ = sourceAtomJson a
-resolvedSourceJson mLit Nothing mschema
+resolvedSourceJson mLit Nothing mshape
   | mLit == Just True = sourceAtomJson SourceInline
-  | otherwise = case fmap classifySchema mschema of
-      Just CatScalarPrim    -> sourceAtomJson SourceInline
-      Just CatStr           -> sourceAtomJson SourceInline
+  | otherwise = case fmap underOptional mshape of
+      Just (WScalar _) -> sourceAtomJson SourceInline
+      Just WStr        -> sourceAtomJson SourceInline
       -- An IFile's command-line form is the path the pool opens, never
       -- the file's contents.
-      Just CatIFile         -> sourceAtomJson SourceInline
+      Just WIFile      -> sourceAtomJson SourceInline
       -- A constructor is always written literally on the command line;
       -- there is no reading under which `A` names a file.
-      Just CatEnum          -> sourceAtomJson SourceInline
-      _                     -> jsonStr "auto"
+      Just WEnum       -> sourceAtomJson SourceInline
+      _                -> jsonStr "auto"
 
 -- | Emit the outer form atom, or `"auto"` when none is set. `auto` is
 -- the runtime sentinel for "use the classifier"; it is never written
@@ -1405,7 +1396,7 @@ checksJson cs = jsonArr (map checkJson cs)
 -- wire schema (when known) drives the default source: scalar
 -- primitives and Str default to `"inline"`, everything else defaults
 -- to the classifier sentinel `"auto"`.
-ioShapeFields :: Maybe Text
+ioShapeFields :: Maybe WireShape
               -> Bool
               -> Maybe Bool
               -> Maybe SourceAtom
@@ -1431,7 +1422,7 @@ ioShapeFields mschema many mLit mSrc mForm cks mLSrc mLForm lcks =
 -- for an argument that uses a non-default `@source` / `@form` /
 -- `@check.*` / `@list.*` configuration. Returns 'Nothing' when the
 -- default contract applies (the type line is then enough).
-renderFormatHint :: Maybe Text -> Bool
+renderFormatHint :: Maybe WireShape -> Bool
                  -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
                  -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
                  -> Maybe Text
@@ -1439,17 +1430,16 @@ renderFormatHint mschema many mSrc mForm cks mLSrc mLForm lcks
   | many = Just "one or more argv tokens, each parsed as the element type"
   | mForm == Just FormTable = Just
       "path to a table whose header row names its columns (CSV or TSV), Arrow IPC, Parquet or a morloc packet; `-` reads stdin"
-  | otherwise = case mschema of
+  | otherwise = case fmap underOptional mschema of
       Nothing -> Nothing
-      Just s -> case classifySchema s of
-        CatScalarPrim    -> Nothing
+      Just s -> case s of
         -- The legal values are already listed in the argument's own
         -- help text, so a format hint would only repeat them.
-        CatEnum          -> Nothing
-        CatStr           -> strFormatHint mSrc cks
-        CatIFile         -> Just "path to a morloc data or stream file"
-        CatList elemS    -> listFormatHint elemS mSrc mForm cks mLSrc mLForm lcks
-        CatOtherCompound -> Nothing
+        WEnum   -> Nothing
+        WStr    -> strFormatHint mSrc cks
+        WIFile  -> Just "path to a morloc data or stream file"
+        WList e -> listFormatHint e mSrc mForm cks mLSrc mLForm lcks
+        _       -> Nothing
 
 -- | Format hint for `Str` arguments. Always produces a hint: `Str` is
 -- the one type where argv is genuinely ambiguous (is this the value or
@@ -1476,7 +1466,7 @@ pathCheckHint p = case MT.unpack p of
 
 -- | Format hint for a list argument. Considers the outer
 -- `@form` / `@source` / `@check.*` first, then per-element overrides.
-listFormatHint :: Text -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
+listFormatHint :: WireShape -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
                -> Maybe SourceAtom -> Maybe FormAtom -> [Check]
                -> Maybe Text
 listFormatHint elemSchema mSrc mForm _cks mLSrc mLForm lcks =
@@ -1497,9 +1487,9 @@ data BytesVariant = Hybrid | Raw | Packet
 -- | Format hint for `@form bytes` / `bytes-only` / `packet`.
 -- The inline-bytes shortcut (`@source inline + form: bytes/bytes-only`
 -- on `[UInt8]`) is its own case.
-bytesHint :: Text -> Maybe SourceAtom -> BytesVariant -> Text
+bytesHint :: WireShape -> Maybe SourceAtom -> BytesVariant -> Text
 bytesHint elemSchema mSrc variant
-  | mSrc == Just SourceInline && elemSchema == "u1" =
+  | mSrc == Just SourceInline && elemSchema == WScalar (WUInt 1) =
       "literal byte sequence with escapes allowed"
   | otherwise = case variant of
       Hybrid -> "path to readable file (morloc packet or " <> packedDescr elemSchema <> ")"
@@ -1507,25 +1497,18 @@ bytesHint elemSchema mSrc variant
       Packet -> "path to morloc packet"
 
 
--- | A short phrase describing the binary layout for a fixed-width
--- scalar element schema.
-packedDescr :: Text -> Text
-packedDescr "u1" = "raw binary"
-packedDescr "i1" = "packed int8"
-packedDescr "u2" = "packed uint16"
-packedDescr "i2" = "packed int16"
-packedDescr "u4" = "packed uint32"
-packedDescr "i4" = "packed int32"
-packedDescr "u8" = "packed uint64"
-packedDescr "i8" = "packed int64"
-packedDescr "f4" = "packed f32"
-packedDescr "f8" = "packed f64"
-packedDescr "b"  = "packet booleans (0/1)"
-packedDescr _    = "packed bytes"
+-- | A short phrase describing the binary layout of a fixed-width scalar.
+packedDescr :: WireShape -> Text
+packedDescr (WScalar (WUInt 1)) = "raw binary"
+packedDescr (WScalar (WSInt n)) = "packed int" <> MT.pack (show (8 * n))
+packedDescr (WScalar (WUInt n)) = "packed uint" <> MT.pack (show (8 * n))
+packedDescr (WScalar (WFloat n)) = "packed f" <> MT.pack (show (8 * n))
+packedDescr (WScalar WBool) = "packed booleans (0/1)"
+packedDescr _ = "packed bytes"
 
 -- | Format hint for `@form list`: file with newline-delimited
 -- elements, optionally with per-element overrides.
-formListHint :: Text -> Maybe SourceAtom -> Maybe FormAtom -> [Check] -> Text
+formListHint :: WireShape -> Maybe SourceAtom -> Maybe FormAtom -> [Check] -> Text
 formListHint elemSchema mLSrc mLForm lcks =
   let base = baseLine elemSchema mLSrc mLForm
       checkSuffix = case lcks of
@@ -1545,32 +1528,24 @@ formListHint elemSchema mLSrc mLForm lcks =
           "path to a text file; each line is one value"
         _ -> defaultPerLine es
 
-    defaultPerLine es = case classifySchema es of
-      CatStr           -> "path to text file with one string per line"
-      CatIFile         -> "path to text file with one file path per line"
-      CatEnum          -> "path to text file with one constructor name per line"
-      CatScalarPrim    -> "path to text file with one value per line"
-      CatList _        -> "path to text file with one JSON array per line"
-      CatOtherCompound -> "path to file with one row per line: JSON, or cells without a header"
+    defaultPerLine es = case underOptional es of
+      WStr      -> "path to text file with one string per line"
+      WIFile    -> "path to text file with one file path per line"
+      WEnum     -> "path to text file with one constructor name per line"
+      WScalar _ -> "path to text file with one value per line"
+      WList _   -> "path to text file with one JSON array per line"
+      _         -> "path to file with one row per line: JSON, or cells without a header"
 
     -- For `[[UInt8]]` etc., the bytes-family description uses the
     -- innermost element width.
-    innerOrSelf es = case classifySchema es of
-      CatList inner -> inner
-      _             -> es
+    innerOrSelf es = case underOptional es of
+      WList inner -> inner
+      _           -> es
 
--- | Peel any Packable wrappers off a group's SerialAST and return the
--- inner record's per-entry wire schemas, keyed by field name. Non-
--- record SerialASTs (which shouldn't reach a group arg in a well-typed
--- manifest) return the empty list; the caller falls back to @Nothing@
--- per entry, matching the pre-split behavior for that entry.
-groupEntryWireSchemas :: SerialAST -> [(Key, Text)]
-groupEntryWireSchemas ast0 = case peelPack ast0 of
-    -- An entry of a recursive record refers back to the record; sliced out
-    -- on its own it would name a declaration it no longer sits under, so
-    -- it is re-rooted first.
-    rec@(SerialObject _ _ _ kids) ->
-      [(k, render (Serial.serialAstToMsgpackSchema (Serial.rerootUnder rec child))) | (k, child) <- kids]
+-- | The wire shape of each field of an unrolled record, keyed by field name.
+groupEntryShapes :: SerialAST -> [(Key, WireShape)]
+groupEntryShapes ast0 = case peelPack ast0 of
+    SerialObject _ _ _ kids -> [(k, wireShape child) | (k, child) <- kids]
     _ -> []
   where
     peelPack (SerialPack _ (_, inner)) = peelPack inner
@@ -1600,16 +1575,15 @@ parseFields ps t =
 --   * @mEmit@         written into the "schema" field. 'Nothing' skips
 --                     the field entirely (group entries pass 'Nothing'
 --                     because the group's schema is authoritative).
---   * @mShape@        consulted by 'classifySchema' for shape defaults
---                     (source, quoted, format hint). Distinct from
---                     @mEmit@ so a group entry can resolve defaults
---                     against its own wire schema without emitting one.
+--   * @mShape@        the wire shape that picks the defaults (source,
+--                     quoted, format hint). A group entry has one but
+--                     emits no schema.
 --   * @mGeneral@      hint-stripped form of @mEmit@, emitted alongside
 --                     it as "general_schema".
---   * @entrySchemas@  per-entry wire schemas for 'CmdArgGrp'; unused
---                     for pos/opt/flag.
-argToJson :: Text -> Maybe Text -> Maybe Text -> Maybe Text -> [(Key, Text)] -> CmdArg -> Text
-argToJson key mEmit mGeneral mShape _ (CmdArgPos r) =
+--   * @armSchemas@    per-field wire schemas of a 'CmdArgAlt''s arms.
+--   * @entryShapes@   per-entry wire shapes of a 'CmdArgGrp'.
+argToJson :: Text -> Maybe Text -> Maybe Text -> Maybe WireShape -> [(Key, Text)] -> [(Key, WireShape)] -> CmdArg -> Text
+argToJson key mEmit mGeneral mShape _ _ (CmdArgPos r) =
   jsonObj $
     [ ("kind", jsonStr "pos"), ("key", jsonStr key) ]
     ++ schemaField mEmit mGeneral
@@ -1628,7 +1602,7 @@ argToJson key mEmit mGeneral mShape _ (CmdArgPos r) =
          (argPosDocSource r) (argPosDocForm r) (argPosDocChecks r)
          (argPosDocListSource r) (argPosDocListForm r) (argPosDocListChecks r)
     ++ parseFields (argPosDocParse r) (argPosDocType r)
-argToJson key mEmit mGeneral mShape _ (CmdArgOpt r) =
+argToJson key mEmit mGeneral mShape _ _ (CmdArgOpt r) =
   jsonObj $
     [ ("kind", jsonStr "opt"), ("key", jsonStr key) ]
     ++ schemaField mEmit mGeneral
@@ -1648,7 +1622,7 @@ argToJson key mEmit mGeneral mShape _ (CmdArgOpt r) =
          (argOptDocSource r) (argOptDocForm r) (argOptDocChecks r)
          (argOptDocListSource r) (argOptDocListForm r) (argOptDocListChecks r)
     ++ parseFields (argOptDocParse r) (argOptDocType r)
-argToJson key _ _ _ _ (CmdArgFlag r) =
+argToJson key _ _ _ _ _ (CmdArgFlag r) =
   jsonObj
     [ ("kind", jsonStr "flag")
     , ("key", jsonStr key)
@@ -1660,7 +1634,7 @@ argToJson key _ _ _ _ (CmdArgFlag r) =
     , ("desc", jsonStrArr (argFlagDocDesc r))
     , ("metadata", metadataEmpty)
     ]
-argToJson key mEmit mGeneral _ entrySchemas (CmdArgAlt r) =
+argToJson key mEmit mGeneral _ armSchemas _ (CmdArgAlt r) =
   jsonObj $
     [ ("kind", jsonStr "alt"), ("key", jsonStr key) ]
     ++ schemaField mEmit mGeneral
@@ -1683,12 +1657,12 @@ argToJson key mEmit mGeneral _ entrySchemas (CmdArgAlt r) =
             [ jsonObj
                 [ ("type", jsonStr (typeDescStr ft))
                 , ("schema", maybe jsonNull jsonStr
-                    (lookup (Key (altArmCtor arm <> "/" <> MT.pack (show i))) entrySchemas))
+                    (lookup (Key (altArmCtor arm <> "/" <> MT.pack (show i))) armSchemas))
                 ]
             | (i, ft) <- zip [(0 :: Int) ..] (altArmFields arm)
             ])
         ]
-argToJson key mEmit mGeneral _ entrySchemas (CmdArgGrp r) =
+argToJson key mEmit mGeneral _ _ entryShapes (CmdArgGrp r) =
   jsonObj $
     [ ("kind", jsonStr "grp"), ("key", jsonStr key) ]
     ++ schemaField mEmit mGeneral
@@ -1708,15 +1682,15 @@ argToJson key mEmit mGeneral _ entrySchemas (CmdArgGrp r) =
         , ("long", cliOptLongJson opt)
         ]
 
-    -- No emit-schema (group's schema is authoritative); per-entry
-    -- shape schema so Str/scalar entries pick the correct defaults.
-    -- An unrolled field is addressed by its record field name, so that is
-    -- both the entry's key and the published key of the option backing it.
+    -- The group's schema covers its entries; each entry's shape still
+    -- picks its own defaults. An unrolled field is addressed by its record
+    -- field name, so that is both the entry's key and the published key of
+    -- the option backing it.
     grpEntryJson fieldKey entry =
       jsonObj
         [ ("key", jsonStr (unKey fieldKey))
         , ("arg", argToJson (unKey fieldKey) Nothing Nothing
-                    (lookup fieldKey entrySchemas) []
+                    (lookup fieldKey entryShapes) [] []
                     (either CmdArgFlag CmdArgOpt entry))
         ]
 
@@ -1736,19 +1710,19 @@ schemaField (Just s) mGen =
 -- | Compute the `quoted` flag emitted for a typed CLI arg. The flag
 -- tells the nexus to JSON-wrap the argv string before handing it to
 -- the runtime, so a bare Str like `Joe Dirt` becomes `"Joe Dirt"` for
--- the JSON parser. The flag fires only when the wire schema reduces
--- to the Str primitive `s` AND the argv is going to be interpreted as
--- an inline literal: with `@source file` the argv is a path and the
--- runtime's File branch must see it unquoted. An IFile's argv is the
--- path its handle names, so it is quoted the same way.
-isQuotedArg :: Maybe Bool -> Maybe SourceAtom -> Bool -> Maybe Text -> Bool
-isQuotedArg _literal mSource many mschema =
-  case mschema of
+-- the JSON parser. With `@source file` the argv is a path, read
+-- unquoted. An IFile's argv is the path its handle names, so it is
+-- quoted the same way as a Str.
+isQuotedArg :: Maybe Bool -> Maybe SourceAtom -> Bool -> Maybe WireShape -> Bool
+isQuotedArg _literal mSource many mshape =
+  case mshape of
     Nothing -> False
     Just s
       | mSource == Just SourceFile -> False
-      | many -> isListOfStrWireSchema s || fmap classifySchema (listElementSchema s) == Just CatIFile
-      | otherwise -> isStrOrOptStrWireSchema s || classifySchema s == CatIFile
+      | many -> case s of
+          WList e -> e == WStr || underOptional e == WIFile
+          _ -> False
+      | otherwise -> underOptional s `elem` [WStr, WIFile]
 
 
 
@@ -1782,13 +1756,13 @@ validateArgSpecs i cmdargs asts schemas = do
       let argLoc = loc <> "argument #" <> pretty n
       case arg of
         CmdArgPos r -> do
-          checkManyWire argLoc (argPosDocMany r) schemaText
-          checkArgShape argLoc schemaText arg
+          checkManyWire argLoc (argPosDocMany r) ast schemaText
+          checkArgShape argLoc ast schemaText arg
           checkTableForm argLoc (argPosDocForm r) ast
         CmdArgOpt r -> do
-          checkManyWire argLoc (argOptDocMany r) schemaText
+          checkManyWire argLoc (argOptDocMany r) ast schemaText
           checkDefault  argLoc ast (argOptDocDefault r)
-          checkArgShape argLoc schemaText arg
+          checkArgShape argLoc ast schemaText arg
           checkTableOption argLoc (argOptDocForm r)
         CmdArgFlag _ -> return ()
         CmdArgGrp r  -> validateGroup argLoc r ast
@@ -1806,9 +1780,9 @@ validateArgSpecs i cmdargs asts schemas = do
       <> " `@default` is JSON, which a table argument does not read"
     checkTableOption _ _ = return ()
 
-    checkArgShape :: MDoc -> Text -> CmdArg -> MorlocMonad ()
-    checkArgShape argLoc schemaText arg =
-      case Docstrings.validateCmdArg schemaText arg of
+    checkArgShape :: MDoc -> SerialAST -> Text -> CmdArg -> MorlocMonad ()
+    checkArgShape argLoc ast schemaText arg =
+      case Docstrings.validateCmdArg (wireShape ast) schemaText arg of
         Right _ -> return ()
         Left e  -> MM.throwSystemError $ argLoc <> ": " <> pretty e
 
@@ -1849,56 +1823,11 @@ tableFormProblem ast = case ast of
       SerialEnum {}   -> enumOk
       _               -> False
 
--- | Wire-schema category. Drives the per-shape rules: each category
--- has its own narrow vocabulary for `@source` / `@form` / `@list.*`.
--- Lists carry their element schema so per-element validation can
--- recurse into the element's category.
-data SchemaCat
-  = CatScalarPrim       -- Bool, Int, Real, UInt*, Float*, Null, etc.
-  | CatStr              -- Str (`s`)
-  | CatIFile            -- IFile (`F`)
-  | CatEnum             -- a `data` type with argument-free constructors (`e`)
-  | CatList Text        -- `a<elem>` for any elem schema
-  | CatOtherCompound    -- tuples, records, maps, tables
-  deriving (Eq, Show)
-
--- | Classify the wire schema. The hint/recursive-decl prefix and outer
--- `?` are peeled before classification so optional and aliased forms
--- inherit the underlying category.
-classifySchema :: Text -> SchemaCat
-classifySchema s0 =
-  let peeled = peelHint (peelRecDecl s0)
-      core = case MT.uncons peeled of
-        Just ('?', rest) -> peelHint rest
-        _ -> peeled
-  in if core == "s"
-       then CatStr
-       else if core == "F"
-       then CatIFile
-       else if isScalarPrimCore core
-              then CatScalarPrim
-              else case MT.uncons core of
-                Just ('a', rest) -> CatList rest
-                -- An enum is a scalar whose surface form is a bare
-                -- identifier. Its schema is variable-length (the
-                -- constructor names follow), so it cannot join
-                -- 'isScalarPrimCore', which matches whole cores.
-                Just ('e', _)    -> CatEnum
-                _                -> CatOtherCompound
-
-isScalarPrimCore :: Text -> Bool
-isScalarPrimCore c = c `elem`
-  [ "b", "j", "z"
-  , "i1", "i2", "i4", "i8"
-  , "u1", "u2", "u4", "u8"
-  , "f4", "f8"
-  ]
-
 -- | `@many` requires an array wire type.
-checkManyWire :: MDoc -> Bool -> Text -> MorlocMonad ()
-checkManyWire _   False _      = return ()
-checkManyWire loc True  schema
-  | isArrayWireSchema schema = return ()
+checkManyWire :: MDoc -> Bool -> SerialAST -> Text -> MorlocMonad ()
+checkManyWire _   False _ _ = return ()
+checkManyWire loc True ast schema
+  | WList _ <- wireShape ast = return ()
   | otherwise = MM.throwSystemError $
       loc <> ": `@many` requires a list-typed argument (wire schema"
         <> " starting with `a`); got `" <> pretty schema <> "`. Remove"
@@ -1974,11 +1903,11 @@ validateGroup loc r ast = case peelGroupAst ast of
         Just subAst -> case entry of
           Right opt -> do
             let subSchema = render (Serial.serialAstToMsgpackSchema subAst)
-            checkManyWire entryLoc (argOptDocMany opt) subSchema
+            checkManyWire entryLoc (argOptDocMany opt) subAst subSchema
             checkDefault entryLoc subAst (argOptDocDefault opt)
             when (argOptDocForm opt == Just FormTable) $ MM.throwSystemError $
               entryLoc <> ": `@form table` is only for a positional argument, not a field of an unrolled record"
-            case Docstrings.validateCmdArg subSchema (CmdArgOpt opt) of
+            case Docstrings.validateCmdArg (wireShape subAst) subSchema (CmdArgOpt opt) of
               Right _ -> return ()
               Left e  -> MM.throwSystemError $ entryLoc <> ": " <> pretty e
           Left _flag -> return ()
@@ -3493,17 +3422,19 @@ buildManifest ManifestInputs{..} =
         walk _ [] _ _ = []
         -- Flags consume a schema slot but emit no `schema` field.
         walk n (a@(CmdArgFlag _) : rest) (_ : ss) (_ : as) =
-          argToJson (Docstrings.argKey n a) Nothing Nothing Nothing [] a : walk (nextPos n a) rest ss as
+          argToJson (Docstrings.argKey n a) Nothing Nothing Nothing [] [] a : walk (nextPos n a) rest ss as
         walk n (a : rest) (s : ss) (ast : as) =
-          let entries = case a of
-                          CmdArgGrp _ -> groupEntryWireSchemas ast
-                          CmdArgAlt _ ->
-                            [ (Key (arm <> "/" <> MT.pack (show i)), fs)
-                            | (arm, fss) <- altArmFieldSchemas ast
-                            , (i, fs) <- zip [(0 :: Int) ..] fss ]
-                          _           -> []
+          let armSchemas = case a of
+                CmdArgAlt _ ->
+                  [ (Key (arm <> "/" <> MT.pack (show i)), fs)
+                  | (arm, fss) <- altArmFieldSchemas ast
+                  , (i, fs) <- zip [(0 :: Int) ..] fss ]
+                _ -> []
+              entryShapes = case a of
+                CmdArgGrp _ -> groupEntryShapes ast
+                _ -> []
               gen = render (Serial.serialAstToGeneralSchema ast)
-          in argToJson (Docstrings.argKey n a) (Just s) (Just gen) (Just s) entries a
+          in argToJson (Docstrings.argKey n a) (Just s) (Just gen) (Just (wireShape ast)) armSchemas entryShapes a
                : walk (nextPos n a) rest ss as
         walk _ (_ : _) _ _ =
           error "argsJson: arguments, schemas and wire forms differ in length, which generate checks before rendering"

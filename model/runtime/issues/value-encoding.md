@@ -6,11 +6,6 @@
   literal as a plain double, so one above 2^53 is rounded. Mapping U64 to
   "bit64" instead makes a U64 list literal `c(5L, bit64::as.integer64(..))`,
   whose `c` dispatches on its first argument and strips the class.
-- **Non-ASCII names break the schema.** [reproduced] Violates FMT-7 (name
-  lengths are bytes). `encodeKey` (library/Morloc/CodeGenerator/Serial.hs:390)
-  writes a character count; morloc-runtime-types/src/schema.rs:575-586 reads
-  bytes. A record field whose name has one non-ASCII letter (U+00FC) gives
-  `m24...j1bj` and fails at run time: "unknown schema character 'r'".
 - **Missing record keys accepted.** [read] Violates REC-2. R
   (rmorloc.c:743-746, 1407-1410) skips a missing key: a number becomes 0,
   an optional becomes pointer 0 (volume 0) instead of null. (Python raises
@@ -19,9 +14,6 @@
   json.rs:1537 reads them as `*const u64`.
 - [read] mpack.rs:388-400: a 0- or 8-byte `bin` Int stores a pointer that is
   read back as the inline value.
-- [read] Serial.hs:376 emits schema `*`, which schema.rs:396 rejects.
-  Reachability unknown.
-- [read] schema.rs:1141-1147, 1230-1233: `a:0` means "any length".
 - [read] voidstar.rs:381-392: rebase turns an empty array's null into
   `shift - 1`; empty arrays lose a canonical form.
 - **Python and R quiet signalling NaNs in `F32` scalars.** [read] Breaks

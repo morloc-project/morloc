@@ -293,10 +293,6 @@ global_state <- new.env(parent = emptyenv())
 MLC_MANIFOLD_PREFIX <- ".__mm_"
 MLC_HOME_LANG <- "r"
 
-# The schema of every closure's wire tuple (home, manifold id, captured
-# packets); must equal the one Morloc.CodeGenerator.Serial emits.
-MLC_CLOSURE_SCHEMA <- "t3sjaau1"
-
 mlc_is_closure_codec <- function(codec) inherits(codec, "mlc_closure_codec")
 
 # Serialize a native value by its codec: a closure is reified first.
@@ -378,7 +374,7 @@ mlc_call_released <- function(sock, mid, packets, own, res_codec) {
   })
   res <- morloc_foreign_call(sock, as.integer(mid), packets)
   if (is.null(res_codec)) {
-    morloc_get_value(res, MLC_CLOSURE_SCHEMA)
+    morloc_get_value(res, mlc_closure_schema)
   } else {
     mlc_decode(res, res_codec)
   }

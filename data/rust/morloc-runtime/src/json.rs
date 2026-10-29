@@ -839,10 +839,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                         return Err(err(&format!("expected JSON array, got {}", truncate_for_msg(span))));
                     }
                     let n = self.lx.open(b'[')?;
-                    // Validate array length against the schema constraint
-                    // (offsets[0]; 0 = unconstrained).
-                    let expected = schema.offsets.first().copied().unwrap_or(0);
-                    if expected > 0 && n != expected {
+                    if let Some(expected) = schema.array_dim().filter(|&e| e != n) {
                         return Err(MorlocError::Other(format!(
                             "Array length mismatch: expected {}, got {}", expected, n
                         )));

@@ -40,11 +40,19 @@ module Morloc.CodeGenerator.Serial
   , serialOuterName
   , serialAstToGeneralSchema
   , encode64
+  , closureWireSchema
+  , schemaOfHeld
+  , WireShape (..)
+  , WireScalar (..)
+  , wireShape
+  , isFixedWidthShape
   ) where
 
 import qualified Data.Char as C
 import qualified Data.Set as Set
+import qualified Data.ByteString as BS
 import qualified Data.Text as DT
+import qualified Data.Text.Encoding as DTE
 import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
@@ -357,24 +365,7 @@ serialAstToSchemaWith renderHint ast = emit [] ast
     emit _ (SerialIFile v) = renderHint v <> "F"
     emit _ (SerialOStream v) = renderHint v <> "O"
     emit _ (SerialIStream v) = renderHint v <> "I"
-    -- A defunctionalized closure travels as a fixed-shape tuple, independent of
-    -- the closure's signature: (home_language:str, manifold_id:int,
-    -- captured_arg_packets:[bytes]). The language is a string (its lang name)
-    -- so the receiver builds the callback socket "pipe-<name>" directly, with
-    -- no integer language enum synchronized across pools. Captured packets are
-    -- opaque pre-serialized bytes (an array of uint8 arrays). Reified/reflected
-    -- by the pool at the serialize boundary; the reified value IS this tuple, so
-    -- the existing generic tuple/string/int/array codec carries it with no
-    -- runtime changes.
-    -- This literal MUST equal the schema of the wire tuple
-    -- (String, Int, [[UInt8]]) as the other 'emit' clauses would render it:
-    -- tuple-of-3 ("t" <> encode64D 3), then String ("s"), Int ("j"), and a
-    -- variable-length list-of-list-of-UInt8 ("a" <> "a" <> "u1", empty dims).
-    -- The pool reifies a real such tuple through the generic codec, so this
-    -- string and the runtime bytes must stay in lockstep; keep it in sync if
-    -- any tuple/list/leaf code below changes.
-    emit _ (SerialClosure _ _) =
-      "t" <> encode64D (3 :: Int) <> "s" <> "j" <> "a" <> "a" <> "u1"
+    emit _ (SerialClosure _ _) = pretty closureWireSchema
     emit _ (SerialNull v) = renderHint v <> "z"
     emit path (SerialOptional v s) = renderHint v <> "?" <> emit path s
     emit _ (SerialUnknown v) = renderHint v <> "*"
@@ -391,8 +382,65 @@ serialAstToSchemaWith renderHint ast = emit [] ast
           wire = declWireName path'
       in (if refersTo path' wire node then "&" <> encodeKey wire else "") <> body path'
 
+-- | A function value crosses as (home language, manifold id, captured
+-- argument packets), whatever its signature.
+closureWireSchema :: DT.Text
+closureWireSchema = render . serialAstToGeneralSchema $
+  SerialTuple v [SerialString v, SerialInt v, SerialList v Nothing (SerialList v Nothing (SerialUInt8 v))]
+  where
+    v = FV (TV "") (CV "")
+
+-- | The length prefix counts UTF-8 bytes: the runtime parser slices bytes.
 encodeKey :: DT.Text -> MDoc
-encodeKey k = (encode64D . DT.length $ k) <> pretty k
+encodeKey k = (encode64D . BS.length . DTE.encodeUtf8 $ k) <> pretty k
+
+-- | What a value is, as the command line and the manifest see it.
+data WireShape
+  = WScalar WireScalar
+  | WStr
+  | WIFile
+  | WEnum
+  | WList WireShape
+  | WTable
+  -- | Tuples, records, variants, stream handles and functions.
+  | WCompound
+  | WOptional WireShape
+  deriving (Eq, Show)
+
+-- | Sized numbers carry their width in bytes.
+data WireScalar = WBool | WBigInt | WNull | WSInt Int | WUInt Int | WFloat Int
+  deriving (Eq, Show)
+
+wireShape :: SerialAST -> WireShape
+wireShape (SerialPack _ (_, s)) = wireShape s
+wireShape (SerialList _ _ s) = WList (wireShape s)
+wireShape (SerialObject NamTable _ _ _) = WTable
+wireShape (SerialOptional _ s) = WOptional (wireShape s)
+wireShape (SerialEnum {}) = WEnum
+wireShape (SerialString _) = WStr
+wireShape (SerialIFile _) = WIFile
+wireShape (SerialBool _) = WScalar WBool
+wireShape (SerialInt _) = WScalar WBigInt
+wireShape (SerialNull _) = WScalar WNull
+wireShape (SerialInt8 _) = WScalar (WSInt 1)
+wireShape (SerialInt16 _) = WScalar (WSInt 2)
+wireShape (SerialInt32 _) = WScalar (WSInt 4)
+wireShape (SerialInt64 _) = WScalar (WSInt 8)
+wireShape (SerialUInt _) = WScalar (WUInt 8)
+wireShape (SerialUInt8 _) = WScalar (WUInt 1)
+wireShape (SerialUInt16 _) = WScalar (WUInt 2)
+wireShape (SerialUInt32 _) = WScalar (WUInt 4)
+wireShape (SerialUInt64 _) = WScalar (WUInt 8)
+wireShape (SerialFloat32 _) = WScalar (WFloat 4)
+wireShape (SerialFloat64 _) = WScalar (WFloat 8)
+wireShape (SerialReal _) = WScalar (WFloat 8)
+wireShape _ = WCompound
+
+isFixedWidthShape :: WireShape -> Bool
+isFixedWidthShape (WScalar WBigInt) = False
+isFixedWidthShape (WScalar WNull) = False
+isFixedWidthShape (WScalar _) = True
+isFixedWidthShape _ = False
 
 -- | The container nodes enclosing the node being emitted, innermost
 -- first: each entry is a node's type name, the arguments it was
@@ -795,18 +843,38 @@ isArrowColumn _ = False
 -- walkers would treat it as holding no pointer). Until support lands, such a
 -- type is refused here with one clear message. Nested tables are meant to
 -- be legal; this check goes when they are implemented.
-checkNoNestedTable :: Int -> SerialAST -> MorlocMonad ()
-checkNoNestedTable m ast =
-  when (any holdsTable (serialKids (unpack ast))) $
-    MM.throwSourcedError m $
-      "Tables nested inside other values are not supported yet (support is coming soon):"
-        <+> "the value here holds a Table inside a list, tuple, record, optional or constructor."
-        <+> "For now a Table can cross between languages only as a whole argument or result."
+-- | A Table, or a type with no wire form, is allowed only as the whole value:
+-- an unknown type at the root is passed through untouched.
+checkNested :: Int -> Lang -> SerialAST -> MorlocMonad ()
+checkNested m lang ast = case concatMap nested (serialKids (unpack ast)) of
+  [] -> return ()
+  (Left () : _) -> MM.throwSourcedError m $
+    "Tables nested inside other values are not supported yet (support is coming soon):"
+      <+> "the value here holds a Table inside a list, tuple, record, optional or constructor."
+      <+> "For now a Table can cross between languages only as a whole argument or result."
+  (Right v : _) -> noWireForm m lang v
   where
     unpack (SerialPack _ (_, s)) = unpack s
     unpack s = s
-    holdsTable (SerialObject NamTable _ _ _) = True
-    holdsTable s = any holdsTable (serialKids s)
+    nested (SerialObject NamTable _ _ _) = [Left ()]
+    nested (SerialUnknown (FV v _)) = [Right v]
+    nested s = concatMap nested (serialKids s)
+
+noWireForm :: Int -> Lang -> TVar -> MorlocMonad a
+noWireForm m lang v = MM.throwSourcedError m $
+  "The type" <+> squotes (pretty v) <+> "has no" <+> pretty lang
+    <+> "form, so a value that holds it cannot be passed between languages."
+    <+> "Map it to a" <+> pretty lang <+> "type."
+
+-- | The schema of a value this pool must read or write itself, which a
+-- passed-through value of unknown type cannot be.
+schemaOfHeld :: Int -> Lang -> SerialAST -> MorlocMonad DT.Text
+schemaOfHeld m lang ast = case unpack ast of
+  SerialUnknown (FV v _) -> noWireForm m lang v
+  _ -> return (render (serialAstToMsgpackSchema ast))
+  where
+    unpack (SerialPack _ (_, s)) = unpack s
+    unpack s = s
 
 makeSerialAST :: Int -> Lang -> TypeF -> MorlocMonad SerialAST
 makeSerialAST m lang t0 = do
@@ -825,7 +893,7 @@ makeSerialAST m lang t0 = do
           ]
 
   ast <- makeSerialAST' gscope typepackers Set.empty t0
-  checkNoNestedTable m ast
+  checkNested m lang ast
   return ast
   where
     -- The @Set TypeF@ is the types on the path above this one, and it is

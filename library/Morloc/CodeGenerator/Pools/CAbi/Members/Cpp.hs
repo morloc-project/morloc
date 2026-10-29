@@ -1995,8 +1995,7 @@ deserialize varname0 typestr0 s0 = do
       return (schemaVar, map CP.printStmt stmts ++ [final])
 
 -- The C++ concrete type of a defunctionalized closure's wire tuple:
--- @(home_language, manifold_id, captured_packets)@. MUST match '_mlc_reify' in
--- pool.cpp and the t3sjaau1 schema.
+-- @(home_language, manifold_id, captured_packets)@, as in 'Serial.closureWireSchema'.
 cppClosureWireTupleName :: Text
 cppClosureWireTupleName = "std::tuple<std::string, int64_t, std::vector<std::vector<uint8_t>>>"
 

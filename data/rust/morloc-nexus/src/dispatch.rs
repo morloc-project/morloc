@@ -14,7 +14,7 @@
 
 use crate::manifest::{Check, Command, Manifest, SourceAtom};
 pub use morloc_manifest::cli_value::{
-    build_list_config_json, element_schema_str, maybe_float_special_to_json, schema_is_float_scalar,
+    build_list_config_json, is_float_list, is_float_scalar, maybe_float_special_to_json,
     shaped_dispatch_codes, ArgShape,
 };
 use crate::process::{self, PoolSocket};
@@ -1073,10 +1073,7 @@ fn build_arg_packet(
         // wrap runs per token.
         let mut many_override: Option<(Vec<String>, bool)> = None;
         if let ArgValue::Many { tokens, literal } = arg_val {
-            let elem_is_float = element_schema_str(schema_str)
-                .as_deref()
-                .map(schema_is_float_scalar)
-                .unwrap_or(false);
+            let elem_is_float = is_float_list(&schema);
             if elem_is_float {
                 let rewritten: Vec<String> = tokens
                     .iter()
@@ -1230,7 +1227,7 @@ fn build_arg_packet(
                     ArgValue::Null => ("null".to_string(), None),
                     _ => unreachable!(),
                 };
-                let raw_str = if schema_is_float_scalar(schema_str) {
+                let raw_str = if is_float_scalar(&schema) {
                     maybe_float_special_to_json(&raw_str).unwrap_or(raw_str)
                 } else {
                     raw_str
@@ -1907,10 +1904,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
         // wrap runs per token.
         let mut many_override: Option<(Vec<String>, bool)> = None;
         if let ArgValue::Many { tokens, literal } = arg_val {
-            let elem_is_float = element_schema_str(schema_str)
-                .as_deref()
-                .map(schema_is_float_scalar)
-                .unwrap_or(false);
+            let elem_is_float = is_float_list(&schema);
             if elem_is_float {
                 let rewritten: Vec<String> = tokens
                     .iter()
@@ -1945,7 +1939,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
                     // rejects one that would be evaluated here.
                     ArgValue::Parsed { .. } | ArgValue::Embed { .. } | ArgValue::AsParent { .. } => unreachable!(),
                 };
-                let raw_str = if schema_is_float_scalar(schema_str) {
+                let raw_str = if is_float_scalar(&schema) {
                     maybe_float_special_to_json(&raw_str).unwrap_or(raw_str)
                 } else {
                     raw_str

@@ -789,17 +789,17 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- @save's data is the third positional arg (after the level and path).
     intrinsicSchema m IntrSave _ (_levelArg : _pathArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     -- @savej/@cellput's data is the second positional arg (after the
     -- path or handle).
     intrinsicSchema m intr _ (_pathArg : dataArg : _)
       | intr `elem` [IntrSaveJ, IntrCellPut] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
-          return . Just . render $ Serial.serialAstToMsgpackSchema ast
+          Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema m intr _ (dataArg:_)
       | intr `elem` [IntrHash, IntrShow, IntrSchema, IntrCellNew, IntrEq, IntrLe] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
-          return . Just . render $ Serial.serialAstToMsgpackSchema ast
+          Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema _ IntrTypeof _ (dataArg:_) =
       -- @typeof yields the user-facing type name as a compile-time constant
       -- string. The string is stored in the Intrinsic node's schema slot and
@@ -809,21 +809,21 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- For @load, the result type is Try Str a; the schema is for a.
       let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema m IntrRead tf _ = do
       -- For @read, the result type is Try Str a; the schema is for a.
       let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     -- @unpack's result is the decoded value itself, which may be any type,
     -- a user Try included, so nothing is stripped.
     intrinsicSchema m IntrUnpack tf _ = do
       ast <- Serial.makeSerialAST m lang tf
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     -- @conform gives a literal the form the decoder gives this type.
     intrinsicSchema m IntrConform tf _ = do
       ast <- Serial.makeSerialAST m lang tf
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema m IntrIFileWalk tf _ = do
       -- The schema describes the result type the walker materializes
       -- (the per-language wrapper deserializes the voidstar via
@@ -832,13 +832,13 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- Either way, the result type carries the right shape.
       let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema m IntrNext tf _ = do
       -- @next yields the sub-packet as `[a]`; the list type is serialised so
       -- the per-language from_voidstar call materialises it correctly.
       let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     -- @replay reads the stream a sub-packet at a time, each as the list its
     -- storage schema describes.
     intrinsicSchema m IntrReplay _ (handleArg : _)
@@ -853,27 +853,27 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrSpawn _ [_, fnArg]
       | FunF [ostreamT] _ <- typeFof fnArg = do
           ast <- Serial.makeSerialAST m lang ostreamT
-          return . Just . render $ Serial.serialAstToMsgpackSchema ast
+          Just <$> Serial.schemaOfHeld m lang ast
     intrinsicSchema m IntrStreamLayout tf _ = do
       -- @streamLayout yields `[(U64,U64,U64)]`; the list-of-triple type is
       -- serialised so the per-language from_voidstar call materialises it
       -- (an ordinary composite, as for @next).
       let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     -- @write's data arg (at index 2, after level Int and handle) carries `[a]`;
     -- schema describes that list type so to_voidstar produces the right
     -- voidstar layout for the runtime's flatten_to_buffer.
     intrinsicSchema m IntrWrite _ (_levelArg : _handleArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
-      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+      Just <$> Serial.schemaOfHeld m lang ast
     -- The accumulator's schema, from the result type. @cellnew and @cellput
     -- take theirs from their value argument, above; both name the same type,
     -- which is the point of parameterising the handle.
     intrinsicSchema m intr tf _
       | intr `elem` [IntrCellGet, IntrCellReduce] = do
           ast <- Serial.makeSerialAST m lang tf
-          return . Just . render $ Serial.serialAstToMsgpackSchema ast
+          Just <$> Serial.schemaOfHeld m lang ast
     -- @open on IFile reads its schema off disk; codegen routes through the
     -- generic `_mlc_open(path, kind)` entry so we return Nothing. @open on
     -- OStream/IStream needs the storage schema at open time (the typed
@@ -904,7 +904,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     renderStorageSchema :: Int -> TVar -> TypeF -> MorlocMonad Text
     renderStorageSchema m v a = do
       ast <- Serial.makeSerialAST m lang (BT.handleStorageTypeF v a)
-      return . render $ Serial.serialAstToMsgpackSchema ast
+      Serial.schemaOfHeld m lang ast
 
     -- The payload of a Try's Ok arm, or the type unchanged when it is not
     -- one. Intrinsics that report failure as data wrap their result, but

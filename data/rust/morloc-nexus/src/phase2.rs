@@ -1535,12 +1535,13 @@ pub(crate) fn first_desc(desc: &[String]) -> &str {
 /// the string itself, the way a `Str` positional is quoted, and a real
 /// field takes `inf`/`nan` spellings.
 fn arm_field_token(tok: &str, schema: &str) -> String {
-    if crate::dispatch::schema_is_float_scalar(schema) {
+    let parsed = parse_schema(schema).ok();
+    if parsed.as_ref().is_some_and(crate::dispatch::is_float_scalar) {
         if let Some(js) = crate::dispatch::maybe_float_special_to_json(tok) {
             return js;
         }
     }
-    let is_str = parse_schema(schema).ok().map_or(false, |s| match s.serial_type {
+    let is_str = parsed.map_or(false, |s| match s.serial_type {
         SerialType::String => true,
         SerialType::Optional => s
             .parameters

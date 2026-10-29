@@ -162,9 +162,18 @@ impl Schema {
         make_table_schema(params, keys)
     }
 
+    /// The fixed length of an array schema (`a:<n>`), if it has one.
+    pub fn array_dim(&self) -> Option<usize> {
+        if self.serial_type == SerialType::Array {
+            self.offsets.first().copied()
+        } else {
+            None
+        }
+    }
+
     /// A list of `elem` with no fixed length (FMT-6).
     pub fn array(elem: Schema) -> Self {
-        make_array_schema_with_dim(0, elem)
+        make_array_schema_with_dim(None, elem)
     }
 
     /// A tuple of `params` (FMT-6).
@@ -544,9 +553,9 @@ fn parse_array_arm(
         cur += 1;
         let (n, after) = parse_decimal(bytes, cur)?;
         cur = after;
-        n
+        Some(n)
     } else {
-        0 // unconstrained
+        None
     };
     let (child, end) = parse_schema_r(bytes, cur, declared, depth + 1)?;
     Ok((make_array_schema_with_dim(expected_len, child), end))
@@ -910,12 +919,13 @@ fn parse_decimal(bytes: &[u8], pos: usize) -> Result<(usize, usize), MorlocError
 
 // ── Schema constructors ────────────────────────────────────────────────────
 
-fn make_array_schema_with_dim(expected_len: usize, child: Schema) -> Schema {
+/// An array's fixed length, if it has one, is its only offset.
+fn make_array_schema_with_dim(expected_len: Option<usize>, child: Schema) -> Schema {
     Schema {
         serial_type: SerialType::Array,
         size: 1,
         width: std::mem::size_of::<crate::shm_types::Array>(),
-        offsets: vec![expected_len],
+        offsets: expected_len.into_iter().collect(),
         hint: None,
         parameters: vec![child],
         keys: Vec::new(),
@@ -1153,12 +1163,12 @@ pub fn schemas_compatible(a: &Schema, b: &Schema) -> bool {
     {
         return false;
     }
-    // Array length compatibility: zero is wildcard on either side.
+    // An array without a fixed length is compatible with any length.
     if a.serial_type == SerialType::Array {
-        let la = a.offsets.first().copied().unwrap_or(0);
-        let lb = b.offsets.first().copied().unwrap_or(0);
-        if la != 0 && lb != 0 && la != lb {
-            return false;
+        if let (Some(la), Some(lb)) = (a.array_dim(), b.array_dim()) {
+            if la != lb {
+                return false;
+            }
         }
     } else if a.offsets != b.offsets {
         return false;
@@ -1242,8 +1252,7 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
         SerialType::IStream => buf.push('I'),
         SerialType::Array => {
             buf.push('a');
-            let expected = schema.offsets.first().copied().unwrap_or(0);
-            if expected > 0 {
+            if let Some(expected) = schema.array_dim() {
                 buf.push(':');
                 buf.push_str(&expected.to_string());
             }

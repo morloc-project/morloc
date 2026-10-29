@@ -3,6 +3,7 @@
 //! value is parsed, and the codes the runtime's shaped parser takes.
 
 use crate::{Arg, Check, FormAtom, SourceAtom};
+use morloc_runtime_types::schema::{Schema, SerialType};
 
 /// CLI-shape directives pulled out of a manifest arg. Single-atom
 /// fields under the simplified grammar (no OR-chains).
@@ -59,39 +60,23 @@ impl<'a> ArgShape<'a> {
     }
 }
 
-/// If the wire schema is a list (`aT` or `aT:<dim>`), return its
-/// element schema as a string. Returns `None` for non-list schemas.
-pub fn element_schema_str(schema_str: &str) -> Option<String> {
-    let mut s = schema_str.trim();
-    if let Some(rest) = s.strip_prefix('<') {
-        if let Some(end) = rest.find('>') {
-            s = &rest[end + 1..];
+/// A `Float32` or `Float64`, looking through one optional: the types whose
+/// argv may spell an IEEE 754 special (`inf`, `-inf`, `nan`).
+pub fn is_float_scalar(schema: &Schema) -> bool {
+    let s = if schema.serial_type == SerialType::Optional {
+        match schema.parameters.first() {
+            Some(inner) => inner,
+            None => return false,
         }
-    }
-    let rest = s.strip_prefix('a')?;
-    let rest = if let Some(after_colon) = rest.strip_prefix(':') {
-        after_colon.trim_start_matches(|c: char| c.is_ascii_digit())
     } else {
-        rest
+        schema
     };
-    Some(rest.to_string())
+    s.serial_type == SerialType::Float32 || s.serial_type == SerialType::Float64
 }
 
-/// True if the rendered wire schema reduces to a scalar `Float32`
-/// (`f4`) or `Float64` (`f8`) primitive (with optional `?` and hint
-/// wrapping). Used to decide whether an argv token like `inf`,
-/// `-inf`, or `nan` should be reinterpreted as an IEEE 754 special.
-pub fn schema_is_float_scalar(schema_str: &str) -> bool {
-    let mut s = schema_str.trim();
-    if let Some(rest) = s.strip_prefix('?') {
-        s = rest;
-    }
-    if let Some(rest) = s.strip_prefix('<') {
-        if let Some(end) = rest.find('>') {
-            s = &rest[end + 1..];
-        }
-    }
-    s == "f4" || s == "f8"
+/// A list whose elements satisfy [`is_float_scalar`].
+pub fn is_float_list(schema: &Schema) -> bool {
+    schema.serial_type == SerialType::Array && schema.parameters.first().is_some_and(is_float_scalar)
 }
 
 /// If the argv string is a recognized IEEE 754 special-value literal,
@@ -290,11 +275,20 @@ mod tests {
 
     #[test]
     fn schemas_and_float_specials_are_read_as_the_command_line_reads_them() {
-        assert_eq!(element_schema_str("af8").as_deref(), Some("f8"));
-        assert_eq!(element_schema_str("a:3i4").as_deref(), Some("i4"));
-        assert_eq!(element_schema_str("i4"), None);
-        assert!(schema_is_float_scalar("?<double>f8"));
-        assert!(!schema_is_float_scalar("af8"));
+        use morloc_runtime_types::schema::parse_schema;
+        let p = |s: &str| parse_schema(s).unwrap();
+        assert!(is_float_scalar(&p("f8")));
+        assert!(is_float_scalar(&p("?<double>f8")));
+        assert!(is_float_scalar(&p("<opt>?f4")));
+        assert!(is_float_scalar(&p("<units::q<double>>f8")));
+        assert!(!is_float_scalar(&p("af8")));
+        assert!(!is_float_scalar(&p("i8")));
+        assert!(is_float_list(&p("af8")));
+        assert!(is_float_list(&p("a:3f4")));
+        assert!(is_float_list(&p("<std::vector<$1>>a<double>f8")));
+        assert!(is_float_list(&p("a?f8")));
+        assert!(!is_float_list(&p("<std::map<$1,$2>>at2sj")));
+        assert!(!is_float_list(&p("f8")));
         assert_eq!(maybe_float_special_to_json("\\-inf").as_deref(), Some("\"-inf\""));
         assert_eq!(maybe_float_special_to_json("1.5"), None);
     }

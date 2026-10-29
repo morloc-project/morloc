@@ -27,20 +27,9 @@ module Morloc.CodeGenerator.Docstrings
   , InlineBytesVariant (..)
   , validateArgShape
   , validateCmdArg
-  -- * Schema-text predicates (used by emit helpers in Nexus.hs)
-  , peelHint
   , resolveNestedTypes
-  , peelRecDecl
-  , isStrWireSchema
-  , isOptStrWireSchema
-  , isStrOrOptStrWireSchema
-  , isArrayWireSchema
-  , listElementSchema
-  , isListOfStrWireSchema
-  , isTabularRowWireSchema
-  , isFixedWidthScalar
-  , SchemaCat (..)
-  , classifySchema
+  , shapeName
+  , underOptional
   ) where
 
 import qualified Data.Map as Map
@@ -48,6 +37,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Morloc.BaseTypes as MBT
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Serial (WireScalar (..), WireShape (..), isFixedWidthShape)
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Text as MT
@@ -1082,16 +1072,6 @@ validateFlagRevCollisions loc cmdargs = do
 -- configuration, so downstream emit code does not need to re-check
 -- coherence.
 
--- | Wire-schema category. The hint and recursive-decl prefixes are
--- stripped before classification; the outer `?` of an optional is
--- also peeled so optional types inherit their underlying category.
-data SchemaCat
-  = CatScalarPrim
-  | CatStr
-  | CatList Text  -- ^ element schema text
-  | CatOtherCompound
-  deriving (Eq, Show)
-
 -- | Bytes-family form atoms (`@form bytes`, `@form bytes-only`,
 -- `@form packet`) on a fixed-width-scalar array.
 data BytesVariant = Bytes | BytesOnly | Packet
@@ -1153,141 +1133,44 @@ data ArgShape
       --   are checked against the 'SerialAST'.
   deriving (Eq, Show)
 
--- ── Schema-text utilities ─────────────────────────────────────────
+-- | A type's name as an error message gives it, from its wire shape.
+shapeName :: WireShape -> Text
+shapeName (WScalar WBool) = "Bool"
+shapeName (WScalar WBigInt) = "Int"
+shapeName (WScalar WNull) = "Null"
+shapeName (WScalar (WSInt n)) = "I" <> MT.show' (8 * n)
+shapeName (WScalar (WUInt n)) = "U" <> MT.show' (8 * n)
+shapeName (WScalar (WFloat 8)) = "Real"
+shapeName (WScalar (WFloat n)) = "F" <> MT.show' (8 * n)
+shapeName WStr = "Str"
+shapeName WIFile = "IFile"
+shapeName WEnum = "an enum"
+shapeName (WList s) = "a list of " <> shapeName s
+shapeName WTable = "Table"
+shapeName WCompound = "a tuple, record or constructor"
+shapeName (WOptional s) = "an optional " <> shapeName s
 
--- | Strip a leading `<...>` hint decoration. Hints carry the
--- concrete-type tag for newtypes / aliases over a built-in primitive.
--- The hint payload can itself contain angle brackets (e.g. the C++
--- template parameters in `<std::map<$1,$2>>`), so we track angle-bracket
--- depth to find the matching close instead of stopping at the first `>`.
-peelHint :: Text -> Text
-peelHint t = case MT.uncons t of
-  Just ('<', tt) -> case skipBalanced tt 1 of
-    Just after -> peelHint after
-    Nothing    -> t
-  _ -> t
-  where
-    skipBalanced :: Text -> Int -> Maybe Text
-    skipBalanced s d = case MT.uncons s of
-      Nothing -> Nothing
-      Just ('>', rest)
-        | d == 1    -> Just rest
-        | otherwise -> skipBalanced rest (d - 1)
-      Just ('<', rest) -> skipBalanced rest (d + 1)
-      Just (_, rest)   -> skipBalanced rest d
-
--- | Strip a leading `&<klen><name>` rec-decl prefix, where @klen@ is the
--- name's length in the encoding of 'Morloc.CodeGenerator.Serial.encode64'.
-peelRecDecl :: Text -> Text
-peelRecDecl t = case MT.uncons t of
-  Just ('&', tt) | Just (klen, rest) <- decode64 tt -> MT.drop klen rest
-  _ -> t
-  where
-    decode64 x = case MT.uncons x of
-      Just ('=', xs) -> do
-        (lo, xs') <- digit xs
-        (hi, xs'') <- decode64 xs'
-        return (lo + 64 * hi, xs'')
-      _ -> digit x
-    digit x = case MT.uncons x of
-      Just (c, xs)
-        | c >= '0' && c <= '9' -> Just (fromEnum c - fromEnum '0', xs)
-        | c >= 'a' && c <= 'z' -> Just (fromEnum c - fromEnum 'a' + 10, xs)
-        | c >= 'A' && c <= 'Z' -> Just (fromEnum c - fromEnum 'A' + 36, xs)
-        | c == '+' -> Just (62, xs)
-        | c == '/' -> Just (63, xs)
-      _ -> Nothing
-
-isStrWireSchema :: Text -> Bool
-isStrWireSchema s = peelHint (peelRecDecl s) == "s"
-
-isOptStrWireSchema :: Text -> Bool
-isOptStrWireSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
-  Just ('?', rest) -> peelHint rest == "s"
-  _ -> False
-
-isStrOrOptStrWireSchema :: Text -> Bool
-isStrOrOptStrWireSchema s = isStrWireSchema s || isOptStrWireSchema s
-
-isArrayWireSchema :: Text -> Bool
-isArrayWireSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
-  Just ('a', _) -> True
-  _ -> False
-
--- | The element schema of a list-shaped schema, past any `:N` dimension.
-listElementSchema :: Text -> Maybe Text
-listElementSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
-  Just ('a', rest) -> Just (skipDim rest)
-  _ -> Nothing
-  where
-    skipDim t = case MT.uncons t of
-      Just (':', tt) -> MT.dropWhile (\c -> c >= '0' && c <= '9') tt
-      _ -> t
-
-isListOfStrWireSchema :: Text -> Bool
-isListOfStrWireSchema s = maybe False isStrWireSchema (listElementSchema s)
-
-isTabularRowWireSchema :: Text -> Bool
-isTabularRowWireSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
-  Just ('t', _) -> True
-  Just ('m', _) -> True
-  _ -> False
-
-isScalarPrimCore :: Text -> Bool
-isScalarPrimCore c = c `elem`
-  [ "b", "j", "z"
-  , "i1", "i2", "i4", "i8"
-  , "u1", "u2", "u4", "u8"
-  , "f4", "f8"
-  ]
-
--- | True iff the schema is a fixed-width numeric scalar eligible for
--- `@form bytes` / `@form bytes-only` / `@form packet` element types.
--- `j` (`Int`, arbitrary-precision) and `z` (`Null`) are excluded.
-isFixedWidthScalar :: Text -> Bool
-isFixedWidthScalar s =
-  peelHint s `elem`
-    [ "b"
-    , "i1", "i2", "i4", "i8"
-    , "u1", "u2", "u4", "u8"
-    , "f4", "f8"
-    ]
-
-classifySchema :: Text -> SchemaCat
-classifySchema s0 =
-  let peeled = peelHint (peelRecDecl s0)
-      core = case MT.uncons peeled of
-        Just ('?', rest) -> peelHint rest
-        _ -> peeled
-  in if core == "s"
-       then CatStr
-       else if isScalarPrimCore core
-              then CatScalarPrim
-              else case MT.uncons core of
-                Just ('a', rest) -> CatList rest
-                _                -> CatOtherCompound
+-- | Optional types take the rules of what they hold.
+underOptional :: WireShape -> WireShape
+underOptional (WOptional s) = s
+underOptional s = s
 
 -- ── Validation ────────────────────────────────────────────────────
 
--- | Validate the docstring fields on a positional or optional arg
--- against its wire-schema text. Returns the validated 'ArgShape' or
--- a one-sentence error describing the rejected configuration.
---
--- `@literal` is silently treated as the implicit default
--- (source: inline on Str, ignored elsewhere); the field is preserved
--- in 'ArgDocVars' only for backward-compatible parsing.
-validateArgShape :: Text -> Bool -> ArgDocVars -> Either Text ArgShape
-validateArgShape schema many docs
-  | many = validateMany schema docs
-  | otherwise = case classifySchema schema of
-      CatScalarPrim    -> validateScalarPrim schema docs
-      CatStr           -> validateStr docs
-      CatList elemS    -> validateList schema elemS docs
-      CatOtherCompound -> validateOtherCompound schema docs
+-- | Validate the docstring fields on a positional or optional arg against
+-- its wire shape. The schema text appears only in error messages.
+validateArgShape :: WireShape -> Text -> Bool -> ArgDocVars -> Either Text ArgShape
+validateArgShape shape schema many docs
+  | many = validateMany shape schema docs
+  | otherwise = case underOptional shape of
+      WScalar _ -> validateScalarPrim schema docs
+      WStr      -> validateStr docs
+      WList e   -> validateList schema e docs
+      _         -> validateOtherCompound shape schema docs
 
-validateMany :: Text -> ArgDocVars -> Either Text ArgShape
-validateMany schema docs = do
-  if not (isArrayWireSchema schema)
+validateMany :: WireShape -> Text -> ArgDocVars -> Either Text ArgShape
+validateMany shape schema docs = do
+  if not (isList shape)
     then Left $ "`@many` requires a list-typed argument (wire schema"
               <> " starting with `a`); got `" <> schema <> "`."
     else do
@@ -1341,7 +1224,7 @@ validateStr docs = do
 
 -- | List arguments: a JSON / file default, a bytes-family form, the
 -- ASCII inline shortcut on `[UInt8]`, or `@form list`.
-validateList :: Text -> Text -> ArgDocVars -> Either Text ArgShape
+validateList :: Text -> WireShape -> ArgDocVars -> Either Text ArgShape
 validateList schema elemS docs = do
   when' (not (null (docChecks docs))) $
     "`@check.path` requires a `Str` argument; got wire schema `" <> schema <> "`."
@@ -1359,40 +1242,40 @@ validateList schema elemS docs = do
     (_, Just FormTable) -> tableArm docs
     (_, Just FormList) ->
       AsListLines <$> validateLinesPipeline elemS docs
-    (mSrc, Just FormBytes)     -> bytesArm schema elemS mSrc Bytes docs
-    (mSrc, Just FormBytesOnly) -> bytesArm schema elemS mSrc BytesOnly docs
-    (mSrc, Just FormPacket)    -> bytesArm schema elemS mSrc Packet docs
+    (mSrc, Just FormBytes)     -> bytesArm elemS mSrc Bytes docs
+    (mSrc, Just FormBytesOnly) -> bytesArm elemS mSrc BytesOnly docs
+    (mSrc, Just FormPacket)    -> bytesArm elemS mSrc Packet docs
     (Just SourceFile, Nothing) -> Left $
       "`@source file` on a list argument requires an explicit `@form`"
       <> " (`@form list`, `@form bytes`, `@form bytes-only`, or `@form packet`)."
 
 bytesArm
-  :: Text -> Text -> Maybe SourceAtom -> BytesVariant -> ArgDocVars
+  :: WireShape -> Maybe SourceAtom -> BytesVariant -> ArgDocVars
   -> Either Text ArgShape
-bytesArm schema elemS mSrc variant docs = do
+bytesArm elemS mSrc variant docs = do
   when' (hasAnyListField docs) $
     "`@list.*` fields are only meaningful when `@form list` is set."
   case (mSrc, variant) of
     (Just SourceInline, Bytes)     ->
-      requireUInt8 schema elemS *> Right (AsListInlineBytes IbBytes)
+      requireUInt8 elemS *> Right (AsListInlineBytes IbBytes)
     (Just SourceInline, BytesOnly) ->
-      requireUInt8 schema elemS *> Right (AsListInlineBytes IbBytesOnly)
+      requireUInt8 elemS *> Right (AsListInlineBytes IbBytesOnly)
     (Just SourceInline, Packet)    -> Left
       "`@source inline` is not compatible with `@form packet`; packets are always file-borne."
     (_, _) ->
-      if isFixedWidthScalar elemS
+      if isFixedWidthShape elemS
         then Right (AsListBytes variant)
         else Left $
           "`@form " <> showVariant variant <> "` requires every list element"
           <> " to be a fixed-width scalar (Bool, sized Int/UInt, sized Float)."
-          <> " Element wire schema `" <> elemS <> "` is not fixed-width."
+          <> " The elements here are " <> shapeName elemS <> "."
   where
-    requireUInt8 _ es =
-      if es == "u1"
+    requireUInt8 es =
+      if es == WScalar (WUInt 1)
         then Right ()
         else Left $
           "`@source inline + @form " <> showVariant variant <> "` is only"
-          <> " allowed on `[UInt8]`; got element wire schema `" <> es <> "`."
+          <> " allowed on `[UInt8]`; the elements here are " <> shapeName es <> "."
 
 showVariant :: BytesVariant -> Text
 showVariant Bytes      = "bytes"
@@ -1401,7 +1284,7 @@ showVariant Packet     = "packet"
 
 -- | Validate the per-line pipeline under `@form list`. Returns the
 -- 'ListPipeline' or a one-sentence error.
-validateLinesPipeline :: Text -> ArgDocVars -> Either Text ListPipeline
+validateLinesPipeline :: WireShape -> ArgDocVars -> Either Text ListPipeline
 validateLinesPipeline elemS docs =
   case (docListSource docs, docListForm docs, docListChecks docs) of
     (Nothing,           Nothing,            [])             -> defaultPipeline elemS docs
@@ -1428,16 +1311,17 @@ validateLinesPipeline elemS docs =
   where
     defaultPipeline _ _ = Right LpInlineBare
     inlineCheck es p
-      | es == "s"  = Right (LpInlineCheck p)
+      | es == WStr = Right (LpInlineCheck p)
       | otherwise  = Left $
-          "`@list.check.path` requires a list-of-`Str` element type; got element wire schema `"
-          <> es <> "`."
+          "`@list.check.path` requires a list-of-`Str` element type; the elements here are "
+          <> shapeName es <> "."
     bytesLineFile es variant
-      | maybe (isFixedWidthScalar es) isFixedWidthScalar (listElementSchema es) = Right (LpFile (LfmBytes variant))
-      | isFixedWidthScalar es = Right (LpFile (LfmBytes variant))
+      | isFixedWidthShape (leaf es) = Right (LpFile (LfmBytes variant))
       | otherwise = Left $
-          "`@list.form bytes`/`bytes-only` requires every leaf to be a fixed-width scalar; got element wire schema `"
-          <> es <> "`."
+          "`@list.form bytes`/`bytes-only` requires every leaf to be a fixed-width scalar; the elements here are "
+          <> shapeName es <> "."
+    leaf (WList x) = x
+    leaf x = x
 
 -- | `@form table`: a file or stdin, never inline, with no other shape
 -- modifier.
@@ -1449,16 +1333,11 @@ tableArm docs = do
   when' (hasAnyListField docs) "`@list.*` fields are not allowed with `@form table`."
   Right AsTable
 
-isTableWireSchema :: Text -> Bool
-isTableWireSchema s = case MT.uncons (peelHint (peelRecDecl s)) of
-  Just ('T', _) -> True
-  _ -> False
-
 -- | Tuples, records, maps: no shape modifiers. A `Table` may take
 -- `@form table`.
-validateOtherCompound :: Text -> ArgDocVars -> Either Text ArgShape
-validateOtherCompound schema docs
-  | docForm docs == Just FormTable && isTableWireSchema schema = tableArm docs
+validateOtherCompound :: WireShape -> Text -> ArgDocVars -> Either Text ArgShape
+validateOtherCompound shape schema docs
+  | docForm docs == Just FormTable && shape == WTable = tableArm docs
   | otherwise = do
   let banIf b name = if b then Left
         ("`" <> name <> "` is not allowed on this compound type (wire schema `"
@@ -1473,6 +1352,10 @@ validateOtherCompound schema docs
 
 -- ── Internal helpers ──────────────────────────────────────────────
 
+isList :: WireShape -> Bool
+isList (WList _) = True
+isList _ = False
+
 when' :: Bool -> Text -> Either Text ()
 when' True  msg = Left msg
 when' False _   = Right ()
@@ -1483,17 +1366,15 @@ hasAnyListField docs =
   || docListForm docs /= Nothing
   || not (null (docListChecks docs))
 
--- | Validate a single 'CmdArg' against its rendered wire-schema text.
--- Flag arguments have no shape (they are pure booleans); group
--- arguments delegate to their entries' shapes at emit time.
-validateCmdArg :: Text -> CmdArg -> Either Text (Maybe ArgShape)
-validateCmdArg schema (CmdArgPos r) =
-  Just <$> validateArgShape schema (argPosDocMany r) (argDocVarsFromPos r)
-validateCmdArg schema (CmdArgOpt r) =
-  Just <$> validateArgShape schema (argOptDocMany r) (argDocVarsFromOpt r)
-validateCmdArg _ (CmdArgFlag _) = Right Nothing
-validateCmdArg _ (CmdArgGrp _)  = Right Nothing
-validateCmdArg _ (CmdArgAlt _)  = Right Nothing
+-- | Flags, groups and unrolled `data` arguments have no shape of their own.
+validateCmdArg :: WireShape -> Text -> CmdArg -> Either Text (Maybe ArgShape)
+validateCmdArg shape schema (CmdArgPos r) =
+  Just <$> validateArgShape shape schema (argPosDocMany r) (argDocVarsFromPos r)
+validateCmdArg shape schema (CmdArgOpt r) =
+  Just <$> validateArgShape shape schema (argOptDocMany r) (argDocVarsFromOpt r)
+validateCmdArg _ _ (CmdArgFlag _) = Right Nothing
+validateCmdArg _ _ (CmdArgGrp _)  = Right Nothing
+validateCmdArg _ _ (CmdArgAlt _)  = Right Nothing
 
 -- | Project the shape-relevant docstring fields out of an
 -- 'ArgPosDocSet'. The other fields (metavar, description, etc.) are
