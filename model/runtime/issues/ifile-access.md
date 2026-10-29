@@ -34,8 +34,8 @@
   fails "@write level mismatch ... All sub-packets must share a level";
   the buffered `[1,2,3]`, never flushed, is dropped when the failed run
   ends, as SLOT-13 says. No item says a stream has one level, and `@write`
-  takes one per call. Either the level belongs on the open, or it is per
-  sub-packet: needs a ruling.
+  takes one per call. Ruled 2026-10-29: one level per output stream. Not
+  yet in STRM-2 or the code; held for a session on compression as a whole.
 - **An OStream in path form cannot be decoded.** [read, 2026-10-29] A
   handle crossing a cache, a remote call or another nexus is rewritten to
   its path (handle_scan.rs), and a CLI or JSON OStream argument arrives as

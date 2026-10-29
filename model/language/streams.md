@@ -21,15 +21,17 @@ Compression level, `@flush` and buffer size change sub-packet boundaries,
 never the elements. An `IStream` yields them in order, one batch per `@next`,
 and `Ok []` at the end.
 
-### STRM-3 The type parameter of `IFile` versus `IStream` and `OStream`
-Intent: open
-Code: unaudited
+### STRM-3 `IFile a` is a file holding one value of type `a`
+Intent: ruled 2026-10-29
+Code: conforms 2026-10-29
+Tests: spec-strm-3-1
 
-`IStream a` and `OStream a` are parameterized by the element type, but
-`IFile` is written `IFile [a]` (`@stream :: IFile [a] -> <IO> (IStream a)`).
-Either (a) `IFile` takes the element type like the other two; or (b) the
-difference is intended and the rule states what `IFile a` with non-list `a`
-means.
+`IStream a` and `OStream a` are parameterized by the element type; `IFile`
+is parameterized by the type of the whole value its file holds. A file
+written as an `OStream a` holds `[a]` and opens as `IFile [a]`, the type
+`@stream :: IFile [a] -> <IO> (IStream a)` takes; a file `@save`d from a
+record `R` opens as `IFile R`. The file's stored schema must match `a`
+(STRM-1); an `IFile Int` over a stream of `Int` is refused.
 
 ## Collect
 

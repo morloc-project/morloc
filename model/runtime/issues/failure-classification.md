@@ -67,3 +67,24 @@ reference is not (PANIC-14).
   of space to check that the allocator reaches it and that the run and
   daemon then end every pool. A full tmpfs spills to file-backed volumes,
   so a real test needs a full disk or a fault-injection hook.
+- **A reference into a skipped volume reads as lost shared memory.**
+  [read, 2026-10-29] The allocator counts a volume slot it had to skip
+  (SHM-12: a name left by a creator that died), so a corrupt reference into
+  that slot is tagged lost shared memory (exit 71) where PANIC-14 calls it
+  a defect (70). Every pool ends either way; only the report is wrong.
+- **PANIC-14 in the C++, Python and R pools has no end-to-end test.**
+  [read, 2026-10-29] Their by-reference flag is checked only by reading the
+  code: a test needs a by-reference value with a corrupt inner reference,
+  and the runtime has no fault-injection hook.
+- **PANIC-14 does not yet cover every value a pool did not build.**
+  [read, 2026-10-29] A failed structural check stays a catchable error, not
+  the end of the pool, in: a table passed by reference (the Arrow
+  validation in the Rust and Python pools); the variant-tag check that
+  generated C++ and Rust read code makes (C++ throws, Rust panics as a user
+  call failure); and stream frames and `@read` or `@load` results in the
+  C++, Python and R pools, which only the Rust pool reads as runtime-built.
+- **`@unpack` refusing by-reference bytes has no test.** [read,
+  2026-10-29] `@unpack` is generated only for `@parse` commands, so a test
+  needs a parser that emits a crafted by-reference header. The R check
+  reads the header's source byte by position (byte 14, value 2) rather
+  than from morloc.h.

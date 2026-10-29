@@ -39,6 +39,9 @@ typedef struct {
 
 static __thread shm_view_ctx_t shm_view_ctx = { NULL, NULL };
 
+// PANIC-14: set while a value another pool built is read.
+static __thread int reading_runtime_value = 0;
+
 static void shm_view_owner_release(PyObject* capsule) {
     shm_view_owner_t* o = (shm_view_owner_t*)PyCapsule_GetPointer(capsule, "morloc.shm_view");
     if (o == NULL) {
@@ -256,9 +259,34 @@ static PyObject* PyMorlocPipeClosed = NULL;
 #define PyTRY_INFRA(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
+        morloc_exit_if_shared_memory_lost(child_errmsg_); \
         PyErr_Format(PyMorlocInternalError, \
                      "morloc internal error (Py pool, %s:%d in %s):\n%s", \
                      __FILE__, __LINE__, __func__, child_errmsg_); \
+        free(child_errmsg_); \
+        child_errmsg_ = NULL; \
+        goto error; \
+    }
+
+// PyTRY for a structural read: a defect inside a value another pool built.
+#define PyTRY_READ(fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL && reading_runtime_value){ \
+        morloc_exit_if_shared_memory_lost(child_errmsg_); \
+        PyErr_Format(PyMorlocInternalError, "morloc internal error (Py pool, %s:%d in %s):\n%s", \
+                     __FILE__, __LINE__, __func__, child_errmsg_); \
+        free(child_errmsg_); \
+        child_errmsg_ = NULL; \
+        goto error; \
+    } \
+    if(child_errmsg_ != NULL){ \
+        char* prior_err = get_prior_err(); \
+        if(prior_err == NULL){ \
+            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
+        } else { \
+            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_); \
+            free(prior_err); \
+        } \
         free(child_errmsg_); \
         child_errmsg_ = NULL; \
         goto error; \
@@ -1823,7 +1851,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 obj = PyLong_FromLongLong(val);
             } else {
                 // Overflow: second field is relptr to limb array
-                void* limb_ptr = PyTRY(resolve_array, *(relptr_t*)&fields[1], (size_t)bigint_size, sizeof(uint64_t), space);
+                void* limb_ptr = PyTRY_READ(resolve_array, *(relptr_t*)&fields[1], (size_t)bigint_size, sizeof(uint64_t), space);
                 obj = _PyLong_FromByteArray(
                     (const unsigned char*)limb_ptr,
                     bigint_size * sizeof(uint64_t),
@@ -1853,7 +1881,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             void* tmp_ptr = NULL;
 
             if (str_array->size != 0) {
-                tmp_ptr = PyTRY(resolve_array, str_array->data, str_array->size, 1, space);
+                tmp_ptr = PyTRY_READ(resolve_array, str_array->data, str_array->size, 1, space);
             }
 
             if (schema->hint != NULL && strcmp(schema->hint, "bytes") == 0) {
@@ -1898,7 +1926,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             size_t width = element_schema->width;
             void* absptr = NULL;
             if (array->size != 0) {
-                absptr = PyTRY(resolve_array, array->data, array->size, width, space);
+                absptr = PyTRY_READ(resolve_array, array->data, array->size, width, space);
             }
             // The "numpy.ndarray" hint is authoritative: the user wants a
             // NumPy array, regardless of element type. For fixed-width
@@ -2064,7 +2092,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             // this is a documented interim form, not the intended end state.
             uint8_t tag = *(const uint8_t*)data;
             if ((size_t)tag >= schema->size) {
-                PyErr_Format(PyExc_RuntimeError,
+                PyErr_Format(reading_runtime_value ? PyMorlocInternalError : PyExc_RuntimeError,
                     "variant tag %u is out of range; the type has %zu arms",
                     (unsigned)tag, schema->size);
                 goto error;
@@ -2088,7 +2116,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 PyTuple_SET_ITEM(pair, 1, fields);
                 return 0;
             }
-            const void* payload = PyTRY(resolve_region, vrelptr, arm->width, space);
+            const void* payload = PyTRY_READ(resolve_region, vrelptr, arm->width, space);
             // The arm's schema describes its fields as a tuple, so the walk
             // over that shape builds the field sequence.
             return py_read_child(w, arm, payload, PY_SLOT_TUPLE, pair, 1, NULL);
@@ -2104,7 +2132,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             }
             const Schema* inner = py_resolve(schema->parameters[0]);
             if (inner == NULL) goto error;
-            const void* inner_abs = PyTRY(resolve_region, relptr, inner->width, space);
+            const void* inner_abs = PyTRY_READ(resolve_region, relptr, inner->width, space);
             return py_read_child(w, schema->parameters[0], inner_abs, slot_kind, parent, slot, key);
         }
         default:
@@ -3006,7 +3034,9 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         }
     }
 
+    reading_runtime_value = is_rptr;
     obj = from_voidstar_owned(schema, voidstar);
+    reading_runtime_value = 0;
     {
         char* free_err = NULL;
         shfree((absptr_t)voidstar, &free_err);
@@ -3243,6 +3273,7 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     result = send_and_receive_over_socket(socket_path, packet, &child_errmsg_);
     Py_END_ALLOW_THREADS
     if (child_errmsg_ != NULL) {
+        morloc_exit_if_shared_memory_lost(child_errmsg_);
         char* prior_err = get_prior_err();
         if (prior_err == NULL) {
             PyErr_Format(PyMorlocInternalError, "morloc internal error (Py pool, %s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
@@ -3742,6 +3773,12 @@ static PyObject* pybinding__mlc_unpack(PyObject* self, PyObject* args) {
     if ((size_t)PyBytes_GET_SIZE(packet) < sizeof(morloc_packet_header_t)) {
         Py_DECREF(packet);
         PyErr_SetString(PyExc_RuntimeError, "@unpack: packet is shorter than its header");
+        return NULL;
+    }
+    // PANIC-14: only a pool passes a value by reference.
+    if (((const morloc_packet_header_t*)PyBytes_AS_STRING(packet))->command.data.source == PACKET_SOURCE_RPTR) {
+        Py_DECREF(packet);
+        PyErr_SetString(PyExc_RuntimeError, "@unpack: the bytes are a reference into shared memory, not a value");
         return NULL;
     }
     PyObject* inner = Py_BuildValue("(Os)", packet, schema_str);
@@ -4397,6 +4434,7 @@ static PyObject* pybinding__mlc_spawn(PyObject* self, PyObject* args) { MAYFAIL
     }
     free(arg_packets);
     if (child_errmsg_ != NULL) {
+        morloc_exit_if_shared_memory_lost(child_errmsg_);
         PyErr_Format(PyMorlocInternalError, "morloc internal error (Py pool, %s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
         free(child_errmsg_);
         return NULL;

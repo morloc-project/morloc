@@ -107,7 +107,14 @@ morloc_mlc_hash                      <- function(...){ .Call("morloc_mlc_hash", 
 morloc_mlc_compare                   <- function(...){ .Call("morloc_mlc_compare",                   ...) }
 morloc_mlc_read                      <- function(...){ .Call("morloc_mlc_read",                      ...) }
 morloc_mlc_conform                   <- function(...){ .Call("morloc_mlc_conform",                   ...) }
-morloc_mlc_unpack                    <- function(schema, packet){ morloc_get_value(as.raw(packet), schema) }
+morloc_mlc_unpack                    <- function(schema, packet){
+  packet <- as.raw(packet)
+  # PANIC-14: only a pool passes a value by reference; byte 14 is the source.
+  if (length(packet) >= 32 && as.integer(packet[14]) == 2L) {
+    stop("@unpack: the bytes are a reference into shared memory, not a value")
+  }
+  morloc_get_value(packet, schema)
+}
 morloc_mlc_open_ifile                <- function(...){ .Call("morloc_mlc_open_ifile",                ...) }
 morloc_mlc_close                     <- function(...){ .Call("morloc_mlc_close",                     ...) }
 morloc_mlc_tmpfile                   <- function(...){ .Call("morloc_mlc_tmpfile",                   ...) }

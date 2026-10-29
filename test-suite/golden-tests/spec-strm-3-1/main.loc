@@ -1,0 +1,40 @@
+-- STRM-3: `IFile a` is a file holding one value of type `a`. A stream of
+-- `Int` holds `[Int]`, so it opens as `IFile [Int]` and is refused as
+-- `IFile Int`; a saved record opens as `IFile` of that record.
+module main (writeInts, asScalar, asList, saveHere, asRecord)
+
+import root
+
+record Loc = Loc
+  { name :: Str
+  , x :: Int
+  }
+
+here :: Loc
+here = { name = "a", x = 3 }
+
+writeInts :: Str -> <IO> ()
+writeInts path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  @write 0 o [1, 2, 3]
+  @close o
+
+asScalar :: Str -> <IO> Str
+asScalar path = do
+  r <- @open path :: <IO> (Try Str (IFile Int))
+  match r
+    | (Ok f) = (do "opened")
+    | (Err e) = (do "refused")
+
+asList :: Str -> <IO> [Int]
+asList path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  .[0:3] f
+
+saveHere :: Str -> <IO> (Try Str ())
+saveHere path = @save 0 path here
+
+asRecord :: Str -> <IO> Int
+asRecord path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile Loc))
+  .x f

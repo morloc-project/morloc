@@ -116,6 +116,7 @@ extern "C" {
     fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_load(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_open_ifile(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
+    fn morloc_exit_if_shared_memory_lost(msg: *const c_char);
     fn mlc_close(handle: i64, errmsg: *mut *mut c_char) -> i32;
     fn mlc_unlink_tmp(path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_fschema(path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
@@ -588,6 +589,9 @@ pub fn morloc_throw_as<T>(msg: impl Into<String>) -> T {
 /// packet is what keeps them fatal across pools: a caller's socket read fails,
 /// which it classifies as infrastructure in turn.
 pub fn morloc_infra_abort(msg: impl AsRef<str>) -> ! {
+    if let Ok(c) = std::ffi::CString::new(msg.as_ref().replace('\0', " ")) {
+        unsafe { morloc_exit_if_shared_memory_lost(c.as_ptr()) };
+    }
     eprintln!("morloc internal error (Rust pool): {}", msg.as_ref());
     // PANIC-5
     unsafe { libc::_exit(morloc_runtime_types::panic::PANIC_EXIT_STATUS) }
@@ -3158,6 +3162,8 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     // read out: every read copies (a table, read in place, is handled above).
     // The guard also drops it when the read throws.
     let _held = ShmGuard::new(voidstar as *mut c_void);
+    // PANIC-14
+    let _built = (source == PKT_SOURCE_RPTR).then(RuntimeValueRead::enter);
     <T as FromVoidstar>::read(schema, voidstar, MorlocSpace::SHM)
 }
 
@@ -3399,6 +3405,10 @@ pub unsafe fn show<T: ToVoidstar>(value: &T, schema: &Schema) -> String {
 pub unsafe fn unpack<T: FromVoidstar>(packet: &[u8], schema: &Schema) -> T {
     if packet.len() < PKT_HEADER_SIZE {
         morloc_throw("@unpack: packet is shorter than its header");
+    }
+    // PANIC-14: only a pool passes a value by reference.
+    if packet[PKT_SOURCE_OFF] == PKT_SOURCE_RPTR {
+        morloc_throw("@unpack: the bytes are a reference into shared memory, not a value");
     }
     get_value::<T>(packet.as_ptr(), schema)
 }

@@ -296,6 +296,15 @@ relptr_t abs2rel_cpp(absptr_t ptr);
 // Ends the pool with the reason a runtime call gave, and frees it.
 [[noreturn]] void mlc_defect_take(char* errmsg);
 
+// PANIC-14: set while a value another pool built is read.
+static thread_local bool mlc_reading_runtime_value = false;
+
+struct MlcRuntimeValueRead {
+    bool prev;
+    explicit MlcRuntimeValueRead(bool on) : prev(mlc_reading_runtime_value) { mlc_reading_runtime_value = on; }
+    ~MlcRuntimeValueRead() { mlc_reading_runtime_value = prev; }
+};
+
 // Resolve `relptr` to `extent` readable bytes in `space`, throwing when the
 // region is not there (see resolve_region in morloc.h).
 static inline void* resolve_region_cpp(relptr_t relptr, size_t extent, morloc_space_t space) {
@@ -305,6 +314,7 @@ static inline void* resolve_region_cpp(relptr_t relptr, size_t extent, morloc_sp
         if (err == NULL) mlc_runtime_defect("relptr did not resolve, and the runtime gave no reason");
         std::string msg(err);
         free(err);
+        if (mlc_reading_runtime_value) mlc_runtime_defect(msg);
         throw std::runtime_error(msg);
     }
     return p;
@@ -318,6 +328,7 @@ static inline void* resolve_array_cpp(relptr_t relptr, size_t n, size_t width, m
         if (err == NULL) mlc_runtime_defect("relptr did not resolve, and the runtime gave no reason");
         std::string msg(err);
         free(err);
+        if (mlc_reading_runtime_value) mlc_runtime_defect(msg);
         throw std::runtime_error(msg);
     }
     return p;

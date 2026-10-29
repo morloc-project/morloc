@@ -93,8 +93,13 @@ pub const PRINT_RESULT_ERR: i32 = 1;
 /// mirrors it as MLC_RESULT_PIPE_CLOSED.
 pub const MLC_RESULT_PIPE_CLOSED: i32 = 2;
 
-/// The exit status of a pool process that ran out of shared memory (SHM-17).
-pub const EXIT_OUT_OF_SHARED_MEMORY: i32 = 71;
+/// The tag on an error that says this process lost shared memory (SHM-17,
+/// PANIC-14).
+pub const SHARED_MEMORY_LOST: &str = "[SHM-17] shared memory lost: ";
+
+/// The exit status of a pool process that lost its shared memory: it ran out
+/// of space (SHM-17) or could not map a volume it reads from (PANIC-14).
+pub const EXIT_SHARED_MEMORY_LOST: i32 = 71;
 
 /// Back-compat alias for the print path.
 pub const PRINT_RESULT_PIPE_CLOSED: i32 = MLC_RESULT_PIPE_CLOSED;

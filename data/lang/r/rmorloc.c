@@ -113,6 +113,25 @@ static void raise_pipe_closed(void) {
         morloc_error_take("", child_errmsg_); \
     }
 
+// PANIC-14: set while a value another pool built is read.
+static __thread int reading_runtime_value = 0;
+
+// R_TRY for a structural read: a defect inside a value another pool built.
+#define R_TRY_READ(fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL){ \
+        if (reading_runtime_value) { MORLOC_INTERNAL_ABORT("%s", child_errmsg_); } \
+        morloc_error_take("", child_errmsg_); \
+    }
+
+#define R_TRY_WITH_READ(clean, fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL){ \
+        if (reading_runtime_value) { MORLOC_INTERNAL_ABORT("%s", child_errmsg_); } \
+        clean; \
+        morloc_error_take("", child_errmsg_); \
+    }
+
 #define R_TRY_WITH(clean, fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
@@ -167,6 +186,7 @@ static void __attribute__((noinline, noreturn)) morloc_internal_abort_impl(
     va_start(ap, fmt);
     vsnprintf(_msg, sizeof(_msg), fmt, ap);
     va_end(ap);
+    morloc_exit_if_shared_memory_lost(_msg);
     fprintf(stderr, "morloc internal error (R pool, %s:%d in %s): %s\n", file, line, func, _msg);
     fflush(stderr);
     // PANIC-5
@@ -1922,7 +1942,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                 if (schema->hint != NULL && strcmp(schema->hint, "raw") == 0){
                     Array* raw_array = (Array*)data;
                     if(raw_array->size > 0){
-                        void* tmp_ptr = R_TRY(resolve_array, raw_array->data, raw_array->size, 1, space);
+                        void* tmp_ptr = R_TRY_READ(resolve_array, raw_array->data, raw_array->size, 1, space);
                         obj = PROTECT(allocVector(RAWSXP, raw_array->size));
                         memcpy(RAW(obj), tmp_ptr, raw_array->size);
                     } else {
@@ -1932,7 +1952,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                 } else {
                     Array* str_array = (Array*)data;
                     if(str_array->size > 0){
-                        void* tmp_ptr = R_TRY(resolve_array, str_array->data, str_array->size, 1, space);
+                        void* tmp_ptr = R_TRY_READ(resolve_array, str_array->data, str_array->size, 1, space);
                         SEXP chr = PROTECT(mkCharLen(tmp_ptr, str_array->size));
                         obj = PROTECT(ScalarString(chr));
                     } else {
@@ -1957,7 +1977,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                     if (array->size == 0) {
                         return;
                     }
-                    char* start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
+                    char* start = (char*)R_TRY_READ(resolve_array, array->data, array->size, element_schema->width, space);
                     size_t width = element_schema->width;
                     if (r_flat(w, element_schema)) {
                         for (size_t i = 0; i < array->size; i++) {
@@ -1976,7 +1996,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                 if (form == RF_CHARACTER) {
                     obj = PROTECT(allocVector(STRSXP, array->size));
                     if (array->size > 0) {
-                        char* start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
+                        char* start = (char*)R_TRY_READ(resolve_array, array->data, array->size, element_schema->width, space);
                         size_t width = element_schema->width;
                         for (size_t i = 0; i < array->size; i++) {
                             Array* str_array = (Array*)(start + i * width);
@@ -1984,7 +2004,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             if (str_array->size == 0) {
                                 item = PROTECT(mkCharLen("", 0));
                             } else {
-                                void* str_ptr = R_TRY_WITH(UNPROTECT(1), resolve_array, str_array->data, str_array->size, 1, space);
+                                void* str_ptr = R_TRY_WITH_READ(UNPROTECT(1), resolve_array, str_array->data, str_array->size, 1, space);
                                 item = PROTECT(mkCharLen(str_ptr, str_array->size));
                             }
                             UNPROTECT(1);
@@ -1995,7 +2015,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                 } else {
                     const char* start = NULL;
                     if (array->size > 0) {
-                        start = (const char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
+                        start = (const char*)R_TRY_READ(resolve_array, array->data, array->size, element_schema->width, space);
                     }
                     obj = r_atomic_from_bytes(form, element_schema, start, array->size);
                 }
@@ -2037,6 +2057,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
             // the code generator.
             uint8_t vtag = *(const uint8_t*)data;
             if ((size_t)vtag >= schema->size) {
+                if (reading_runtime_value) { MORLOC_INTERNAL_ABORT("variant tag is out of range for this type"); }
                 MORLOC_ERROR("variant tag is out of range for this type");
             }
             const Schema* varm = schema->parameters[vtag];
@@ -2049,7 +2070,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                 SET_VECTOR_ELT(pair, 1, allocVector(VECSXP, 0));
                 return;
             }
-            const void* payload = R_TRY(resolve_region, vrel, varm->width, space);
+            const void* payload = R_TRY_READ(resolve_region, vrel, varm->width, space);
             r_read_child(w, varm, payload, R_SLOT_LIST, pair, 1);
             return;
         }
@@ -2062,7 +2083,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                 break;
             }
             const Schema* inner = r_resolve(schema->parameters[0]);
-            const void* inner_abs = R_TRY(resolve_region, relptr, inner->width, space);
+            const void* inner_abs = R_TRY_READ(resolve_region, relptr, inner->width, space);
             r_read_child(w, schema->parameters[0], inner_abs, slot_kind, parent, slot);
             return;
         }
@@ -3178,6 +3199,19 @@ SEXP morloc_mlc_show(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 // type contains a Str. R cannot hold one, so the byte has to be caught here,
 // at the boundary, rather than deeper inside base R where it surfaces as
 // "embedded nul in string" with no indication of where it came from.
+typedef struct { const void* data; const Schema* schema; } r_value_read_t;
+
+static SEXP r_read_value(void* p) {
+    r_value_read_t* a = (r_value_read_t*)p;
+    return from_voidstar(a->data, a->schema, morloc_shm_space());
+}
+
+// PANIC-14
+static void r_end_value_read(void* p) {
+    (void)p;
+    reading_runtime_value = 0;
+}
+
 SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYFAIL
     if (TYPEOF(packet_r) != RAWSXP) {
         MORLOC_ERROR("packet must be a raw vector");
@@ -3454,7 +3488,14 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
 
     MORLOC_REJECT_NUL(check_nul, voidstar, schema, morloc_shm_space(), { if (!tracked) free_schema(schema); });
 
-    SEXP obj_r = from_voidstar(voidstar, schema, morloc_shm_space());
+    r_value_read_t value_read = { voidstar, schema };
+    SEXP obj_r;
+    if (is_rptr) {
+        reading_runtime_value = 1;
+        obj_r = R_ExecWithCleanup(r_read_value, &value_read, r_end_value_read, NULL);
+    } else {
+        obj_r = r_read_value(&value_read);
+    }
     if (obj_r == NULL) {
         if (!is_rptr) {
             char* free_err = NULL;

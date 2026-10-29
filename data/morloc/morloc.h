@@ -1676,6 +1676,9 @@ void* mlc_read(const char* json_str, const Schema* schema, ERRMSG);
 // Open `path` as an IFile whose file must store `schema_str`. Returns the
 // handle, or -1 with errmsg set.
 int64_t mlc_open_ifile(const char* schema_str, const char* path, ERRMSG);
+// A pool's defect exit calls this first: when `msg` says shared memory was
+// lost, the process ends with status 71 instead (SHM-17, PANIC-14).
+void morloc_exit_if_shared_memory_lost(const char* msg);
 // Close any open handle, bumping its registry slot's generation.
 // Returns 0 on success, non-zero on failure.
 int32_t mlc_close(int64_t handle, ERRMSG);

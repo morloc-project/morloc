@@ -542,6 +542,7 @@ T _get_value(const uint8_t* packet, Schema* schema){
         ShmOwned owned((void*)voidstar);
 
         T* dummy = nullptr;
+        MlcRuntimeValueRead reading(is_rptr);
         return from_voidstar(schema, (void*)voidstar, dummy);
     }
 }
@@ -672,6 +673,10 @@ template <typename T>
 T _mlc_unpack(Schema* schema, const std::vector<uint8_t>& packet) {
     if (packet.size() < sizeof(morloc_packet_header_t)) {
         throw MorlocException("@unpack: packet is shorter than its header");
+    }
+    // PANIC-14: only a pool passes a value by reference.
+    if (((const morloc_packet_header_t*)packet.data())->command.data.source == PACKET_SOURCE_RPTR) {
+        throw MorlocException("@unpack: the bytes are a reference into shared memory, not a value");
     }
     return _get_value<T>(packet.data(), schema);
 }

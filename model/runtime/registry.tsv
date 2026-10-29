@@ -8,6 +8,7 @@ data/lang/cpp/cppmorloc.cpp::-::arm_jobs_	thread
 data/lang/cpp/cppmorloc.cpp::-::arm_jobs_key_	lazy		
 data/lang/cpp/cppmorloc.cpp::-::arm_jobs_key_once_	lazy		
 data/lang/cpp/cppmorloc.hpp::recur_env::stack	thread		
+data/lang/cpp/cppmorloc.hpp::-::mlc_reading_runtime_value	thread		
 data/lang/cpp/pool.cpp::-::_shm_tracker_store	thread		
 data/lang/py/pymorloc.c::-::shm_view_ctx	thread		
 data/lang/py/pymorloc.c::-::shm_tracker	thread		
@@ -22,6 +23,7 @@ data/lang/py/pymorloc.c::-::recur_env_depth	thread
 data/lang/py/pymorloc.c::-::recur_env_cap	thread		
 data/lang/py/pymorloc.c::-::Methods	startup		
 data/lang/py/pymorloc.c::-::pymorloc	startup		
+data/lang/py/pymorloc.c::-::reading_runtime_value	thread		
 data/lang/r/rmorloc.c::-::shm_tracker	fork-scoped		
 data/lang/r/rmorloc.c::-::shm_tracker_count	fork-scoped		
 data/lang/r/rmorloc.c::-::shm_tracker_cap	fork-scoped		
@@ -333,5 +335,6 @@ morloc-runtime/fork_pool.rs::-::COORDINATOR	fork-scoped
 morloc-runtime/fork_pool.rs::-::COORDINATOR_WAKE	fork-scoped		
 morloc-runtime/fork_pool.rs::-::DEPTH	thread		
 data/lang/r/rmorloc.c::morloc_fork_pool_run_r::ctx	startup		
+data/lang/r/rmorloc.c::-::reading_runtime_value	thread		
 rustmorloc/fv.rs::-::REGISTRY	exec-only		
 rustmorloc/fv.rs::-::STAGED_LIVE	exec-only		
