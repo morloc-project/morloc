@@ -1443,36 +1443,7 @@ pub(crate) fn print_result_c(
                 eprintln!("Error: msgpack serialization failed");
                 process::clean_exit(1);
             }
-            if full_packet.is_empty() {
-                // The caller holds only a voidstar.
-                extern "C" {
-                    fn mlc_write_voidstar_data_packet_to_fd(
-                        data: *const std::ffi::c_void,
-                        schema: *const morloc_runtime_types::cschema::CSchema,
-                        level: u8,
-                        fd: libc::c_int,
-                        errmsg: *mut *mut std::ffi::c_char,
-                    ) -> i64;
-                }
-                if config.print_flag {
-                    eprintln!("Error: a hex dump of `-f voidstar` output needs the result packet");
-                    process::clean_exit(1);
-                }
-                use std::io::Write;
-                let _ = std::io::stdout().lock().flush();
-                let mut verr: *mut std::ffi::c_char = std::ptr::null_mut();
-                let n = unsafe {
-                    mlc_write_voidstar_data_packet_to_fd(ptr as *const std::ffi::c_void, schema, 0, libc::STDOUT_FILENO, &mut verr)
-                };
-                if n == morloc_runtime_types::PACKET_TO_FD_PIPE_CLOSED {
-                    process::exit_broken_pipe();
-                }
-                if n < 0 {
-                    let msg = process::take_c_errmsg(verr).unwrap_or_else(|| "unknown error".into());
-                    eprintln!("Error: voidstar output failed: {}", msg);
-                    process::clean_exit(1);
-                }
-            } else if config.print_flag {
+            if config.print_flag {
                 let bytes = unsafe { std::slice::from_raw_parts(mpk_ptr as *const u8, mpk_size) };
                 if let Err(e) = write_hex_dump(bytes) {
                     if e.kind() == std::io::ErrorKind::BrokenPipe {
@@ -1510,7 +1481,36 @@ pub(crate) fn print_result_c(
                     errmsg: *mut *mut std::ffi::c_char,
                 ) -> i32;
             }
-            if config.print_flag {
+            if full_packet.is_empty() {
+                // The caller holds only a voidstar.
+                extern "C" {
+                    fn mlc_write_voidstar_data_packet_to_fd(
+                        data: *const std::ffi::c_void,
+                        schema: *const morloc_runtime_types::cschema::CSchema,
+                        level: u8,
+                        fd: libc::c_int,
+                        errmsg: *mut *mut std::ffi::c_char,
+                    ) -> i64;
+                }
+                if config.print_flag {
+                    eprintln!("Error: a hex dump of `-f voidstar` output needs the result packet");
+                    process::clean_exit(1);
+                }
+                use std::io::Write;
+                let _ = std::io::stdout().lock().flush();
+                let mut verr: *mut std::ffi::c_char = std::ptr::null_mut();
+                let n = unsafe {
+                    mlc_write_voidstar_data_packet_to_fd(ptr as *const std::ffi::c_void, schema, 0, libc::STDOUT_FILENO, &mut verr)
+                };
+                if n == morloc_runtime_types::PACKET_TO_FD_PIPE_CLOSED {
+                    process::exit_broken_pipe();
+                }
+                if n < 0 {
+                    let msg = process::take_c_errmsg(verr).unwrap_or_else(|| "unknown error".into());
+                    eprintln!("Error: voidstar output failed: {}", msg);
+                    process::clean_exit(1);
+                }
+            } else if config.print_flag {
                 if let Err(e) = write_hex_dump_grouped(&full_packet) {
                     if e.kind() == std::io::ErrorKind::BrokenPipe {
                         process::exit_broken_pipe();
