@@ -17,13 +17,13 @@ which adds that side condition.
 
 Inferred variables are first eliminated where an equation defines one as a
 polynomial over the rest. The conditions left are split into groups that
-share no variable, and each group is decided on its own. A group is decided
-exactly when it has no variables, when it is one condition over rigid
-variables without division (an equation by polynomial identity, a linear
-inequality by its coefficients), and when it is one linear equation or
-inequality over inferred variables without division. Otherwise a group holds when a short list of
-candidate witnesses proves it, is refuted by a bounded search for a
-counterexample, and is 'Unknown' when neither succeeds.
+share no variable, and each group is decided on its own (DIM-7 lists when
+that is exact). An inequality is proven by its coefficients or by cases on
+small values of a variable; a group over one variable is decided exactly,
+by an interval when linear and by the values up to its roots' bound when
+not. Otherwise a group holds when a short list of candidate witnesses
+proves it, is refuted by a bounded search for a counterexample, and is
+'Unknown' when neither succeeds.
 -}
 module Morloc.Typecheck.NatDecide
   ( Condition (..)
@@ -180,7 +180,7 @@ discharged asm0 c0 = proven c || any (sameAs c) asm || ineq
     combos =
       [scaleSOP k a | a <- lower, k <- [1, 2, 3]]
         <> [addSOPs a b | (i, a) <- zip [0 :: Int ..] lower, (j, b) <- zip [0 ..] lower, i < j]
-    nonNegative x = not (hasOpaqueDivision x) && all ((>= 0) . npCoeff) (unNatSOP x)
+    nonNegative x = not (hasOpaqueDivision x) && nonNegativeByCases 2 x
     scaleSOP k (NatSOP ps) = NatSOP [p {npCoeff = k * npCoeff p} | p <- ps]
     addSOPs (NatSOP a) (NatSOP b) = normalize (NatAdd (sopToNatExpr (NatSOP a)) (sopToNatExpr (NatSOP b)))
     subtractSOP x y = normalize (NatSub (sopToNatExpr x) (sopToNatExpr y))
@@ -334,14 +334,12 @@ nonNegativeByCases :: Int -> NatSOP -> Bool
 nonNegativeByCases depth sop@(NatSOP ps)
   | all ((>= 0) . npCoeff) ps = True
   | depth <= 0 = False
-  | otherwise = case [v | p <- ps, npCoeff p < 0, v <- Map.keys (npVars p)] of
-      (x : _) -> any (splitAt x) [1, 2, 3]
-      [] -> False
+  | otherwise = any byCases (Set.toList (Set.fromList [v | p <- ps, npCoeff p < 0, v <- Map.keys (npVars p)]))
   where
     at x e = normalize (substituteNat (Map.singleton x e) (sopToNatExpr sop))
-    splitAt x k =
-      all (\j -> nonNegativeByCases (depth - 1) (at x (NatLit j))) [0 .. k - 1]
-        && nonNegativeByCases (depth - 1) (at x (NatAdd (NatVar x) (NatLit k)))
+    byCases x =
+      let lows = map (\j -> nonNegativeByCases (depth - 1) (at x (NatLit j))) [0 .. 2]
+       in or [and (take k lows) && nonNegativeByCases (depth - 1) (at x (NatAdd (NatVar x) (NatLit (fromIntegral k)))) | k <- [1 .. 3 :: Int]]
 
 condSOP :: Condition -> NatSOP
 condSOP (NatEq a b) = normalize (NatSub a b)
@@ -454,9 +452,9 @@ searchBudget = 20000
 
 -- | Whether some natural assignment satisfies every condition, with the
 -- assignment when a search found one (empty when only shown to exist).
--- Exact for one linear equation or inequality without division,
--- division, and when a condition without variables fails; otherwise a
--- bounded search.
+-- Exact without division for one linear condition, one linear equation
+-- with lower bounds on single variables, a group over one variable, and a
+-- group with a condition unsatisfiable alone; otherwise a bounded search.
 satisfiable :: Integer -> [Condition] -> Satisfiable
 satisfiable budget conds
   | any (\c -> Set.null (condVars [c]) && holdsAt Map.empty c /= Just True) conds = Unsat
@@ -466,7 +464,7 @@ satisfiable budget conds
   -- Polynomial conditions on one variable: past the largest root of any of
   -- them each keeps the sign of its leading coefficient, so the values up
   -- to that bound decide the conjunction exactly.
-  | [x] <- vs, all partialFree conds, not (all linearCond conds), Just b <- rootBound x, b <= 100000 =
+  | [x] <- vs, all partialFree conds, not (all linearCond conds), Just b <- rootBound x, b <= budget =
       case [env | v <- [0 .. b + 1], let env = Map.singleton x v, holdsAll env] of
         (env : _) -> Sat env
         [] -> Unsat
@@ -503,13 +501,13 @@ satisfiable budget conds
       where
         bound c =
           let ps = unNatSOP (condSOP c)
-              coeff k = sum [npCoeff p | p <- ps, Map.findWithDefault 0 x (npVars p) == k, Map.keysSet (npVars p) `Set.isSubsetOf` Set.singleton x]
+              coeff k = sum [npCoeff p | p <- ps, Map.findWithDefault 0 x (npVars p) == k]
               n = maximum (0 : [Map.findWithDefault 0 x (npVars p) | p <- ps])
               lead = coeff n
            in if any (\p -> not (Map.keysSet (npVars p) `Set.isSubsetOf` Set.singleton x)) ps
                 then Nothing
                 else
-                  if n == 0 || lead == 0
+                  if n == 0
                     then Just 0
                     else Just (1 + maximum (0 : [(abs (coeff k) + abs lead - 1) `div` abs lead | k <- [0 .. n - 1]]))
     -- The values of @x@ that every condition allows, as a least value and

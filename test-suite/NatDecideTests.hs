@@ -144,7 +144,9 @@ examples =
       assertBool "" (isRefuted (decide Set.empty [NatEq (NatMul (v "m") (v "m")) (lit 7)]))
   , testCase "not every n is a square" $
       case decide (rigid ["n"]) [NatEq (v "n") (NatMul (v "m") (v "m"))] of
-        Refuted env -> assertBool (show env) (Map.lookup (tv "n") env `notElem` map Just [0, 1, 4, 9])
+        Refuted env -> case Map.lookup (tv "n") env of
+          Just n -> assertBool (show env) (n >= 0 && all (\m -> m * m /= n) [0 .. n])
+          Nothing -> assertFailure ("the counterexample names no n: " <> show env)
         d -> assertFailure (show d)
   , testCase "a rigid variable is not at least a larger one" $
       assertBool "" (isRefuted (decide (rigid ["a", "b"]) [NatGe (v "a") (v "b")]))
