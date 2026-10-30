@@ -150,7 +150,7 @@ emptyGamma =
     , gammaSolved = Map.empty, gammaDeferred = [], gammaDeferredAt = Map.empty, gammaKindSubs = Map.empty
     , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
-    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaScoped = Map.empty, gammaScopedNats = Map.empty, gammaUnfolded = Set.empty
+    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaScoped = Map.empty, gammaUnfolded = Set.empty
     }
 
 -- | The type constructor at the head of a type, if it has one.

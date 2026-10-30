@@ -26,12 +26,18 @@ declaration gives kind `K`. In a signature, `x@Int` binds an `Int`, `x@Str`
 a `Str` and `x@[Str]` a `List` to the value of that argument.
 
 ### POLY-4 Type variables in a local signature
-Intent: open
-Code: unaudited
+Intent: ruled 2026-10-30
+Tests: spec-poly-4-1, spec-poly-4-2, spec-poly-4-3, spec-poly-4-4
+Code: deviates (issues/kinds-dimensions.md)
 
-In a `where` or `let` signature, does a type variable that also occurs in
-the enclosing signature (a) denote the enclosing variable, or (b) a fresh
-variable quantified over the local signature alone?
+A variable in a `where` signature, of any kind (type, Nat, Int, effect), is
+quantified over that signature alone, even where an enclosing signature
+writes the same name, as in Haskell. Each use of the local definition
+instantiates its signature afresh, constraints included. Checking a body
+against its signature (POLY-7), a local signature's variables are rigid in
+its own body and its constraints are given to it. This item does not cover
+an annotation in a body (`(x :: a)`), which still means the enclosing
+signature's variable.
 
 ### POLY-5 Generalization of local definitions
 Intent: open
@@ -53,7 +59,7 @@ phantom parameter of an argument-free `data` type, is not an error.
 
 ### POLY-7 Nat and Int variables in a signature are rigid
 Intent: ruled 2026-10-29
-Tests: spec-poly-7-1, spec-poly-7-2, spec-poly-7-3, spec-poly-7-4, spec-poly-7-5, spec-poly-7-6, spec-poly-7-7, spec-poly-7-8, spec-poly-7-9, spec-poly-7-10, spec-poly-7-11, spec-poly-7-12, spec-poly-7-13, spec-poly-7-14, spec-poly-7-15, spec-poly-7-16, spec-poly-7-17, spec-poly-7-18, spec-poly-7-19
+Tests: spec-poly-7-1, spec-poly-7-2, spec-poly-7-3, spec-poly-7-4, spec-poly-7-5, spec-poly-7-6, spec-poly-7-7, spec-poly-7-8, spec-poly-7-9, spec-poly-7-10, spec-poly-7-11, spec-poly-7-12, spec-poly-7-13, spec-poly-7-14, spec-poly-7-15, spec-poly-7-16, spec-poly-7-18, spec-poly-7-19
 Code: deviates (issues/kinds-dimensions.md)
 
 A `Nat` or `Int` variable in a signature is universally quantified, as a

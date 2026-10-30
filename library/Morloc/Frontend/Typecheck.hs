@@ -1144,26 +1144,18 @@ synthE _ g0 (VarS v (MonomorphicExpr (Just t0) []))
       let (g1, t0') = renameEType g0 t0
           (g2, t2) = instantiateObligations g1 (etype t0') (Set.toList (econs t0'))
       return (g2, t2, VarS v (MonomorphicExpr (Just t0) []))
-synthE vi g0 (VarS v (MonomorphicExpr (Just t0sig) xs0)) = do
-  -- A local signature's type variables named by an enclosing signature are
-  -- that signature's variables.
-  let enclosing = if isLocalName v then gammaScoped g0 else Map.empty
-      t0 = scopeEType (isJust (gammaRigid g0)) enclosing t0sig
+-- A signature's variables are its own, quantified over it alone, even where
+-- an enclosing signature writes the same name (POLY-4).
+synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
   -- The type and its constraints are renamed together. The outermost VarS
   -- is the definition being checked: its constraints become the body's
   -- assumptions. It is the only VarS that finds gammaAssumedConstraints
   -- Nothing; after it the slot is Just, even for an empty list.
   let (g1, t0') = renameEType g0 t0
-      -- A local signature writing a Nat or Int variable of an enclosing one
-      -- means that variable, as for its type variables.
-      enclosingNats = if isLocalName v then gammaScopedNats g0 else Map.empty
-      freshNats = Map.fromList (zip (List.nub (collectNatVarNames (etype t0))) (List.nub (collectNatVarNames (etype t0'))))
-      scopedNats = Map.fromList [(n', enc) | (n, n') <- Map.toList freshNats, Just enc <- [Map.lookup n enclosingNats]]
-      t1 = renameKindedVars scopedNats Map.empty Map.empty Map.empty Map.empty (etype t0')
+      t1 = etype t0'
       newCs = Set.toList (econs t0')
-      inScope = Map.union (Map.fromList (zip (fst (unqualify (etype t0))) (fst (unqualify t1)))) enclosing
-      natRen = Map.map (\n' -> Map.findWithDefault n' n' scopedNats) freshNats
-      inScopeNats = Map.union natRen enclosingNats
+      inScope = Map.union (Map.fromList (zip (fst (unqualify (etype t0))) (fst (unqualify t1)))) (gammaScoped g0)
+      natRen = Map.fromList (zip (List.nub (collectNatVarNames (etype t0))) (List.nub (collectNatVarNames t1)))
       -- A label whose Nat occurs nowhere else in the type still names one.
       labelVars = Map.fromList
         [ (x, Map.findWithDefault (TV (unTVar lv <> "@" <> unEVar v)) lv natRen)
@@ -1178,15 +1170,19 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0sig) xs0)) = do
     Nothing -> return newCs
   let outermost = isNothing (gammaAssumedConstraints g1)
       contract = isJust (gammaRigid g1)
-      sigNats = [n | n <- List.nub (collectNatVarNames t1 <> Map.elems labelVars), n `notElem` Map.elems scopedNats]
+      sigNats = List.nub (collectNatVarNames t1 <> Map.elems labelVars)
+      -- Checking against a signature, at any depth, its effect variables
+      -- are rigid and its constraints are given to its body. Both stay in
+      -- gamma after the body, over names no other signature uses.
       g1Base = g1
         { gammaConstraints = gammaConstraints g1 ++ newCs
         , gammaAssumedConstraints = case gammaAssumedConstraints g1 of
             Nothing -> Just given
-            Just _  -> gammaAssumedConstraints g1
-        -- Against a signature, its effect variables are rigid too.
+            Just old
+              | contract -> Just (old <> given)
+              | otherwise -> gammaAssumedConstraints g1
         , gammaRigid = case gammaRigid g1 of
-            Just rigid | outermost -> Just (Set.union rigid (Set.fromList (typeEffectVars t1)))
+            Just rigid -> Just (Set.union rigid (Set.fromList (typeEffectVars t1)))
             r -> r
         }
       -- Every signature checked as a contract, at any depth, adds its Nat
@@ -1198,21 +1194,20 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0sig) xs0)) = do
             , gammaLabelVars = Map.union labelVars (gammaLabelVars g1)
             }
         | otherwise = g1Base
-      g1' = (g1Cs ++> [AnnG v t1]) {gammaScoped = inScope, gammaScopedNats = inScopeNats}
+      g1' = (g1Cs ++> [AnnG v t1]) {gammaScoped = inScope}
   (g2scoped, t2, xs1) <- foldCheck g1' xs0 t1
-  let g2 = g2scoped {gammaScoped = gammaScoped g0, gammaScopedNats = gammaScopedNats g0}
+  let g2 = g2scoped {gammaScoped = gammaScoped g0}
   -- EFF-10: catches forces such as `f = !rint`, which subtyping cannot
   -- see since EvalS strips the effect. Reported at the body's index ci.
   mapM_ (\x@(AnnoS _ ci _) -> checkEffectCoverage ci (apply g2 t1) x) xs1
   let xs2 = applyCon g2 $ VarS v (MonomorphicExpr (Just t0) xs1)
-      -- A local signed definition is checked as a contract with its Nat
-      -- and Int variables rigid, but this node is also its use, which
-      -- takes those variables afresh (POLY-7); the rest of its type is as
-      -- the check left it.
+      -- A local signed definition is checked as a contract with its
+      -- variables rigid, but this node is also its use, which instantiates
+      -- the signature afresh, constraints included (POLY-4).
       (g3, tUse)
         | contract && not outermost =
-            let (ga, fresh) = statefulMap (\g' (TV s) -> tvarname g' (s <> "@u")) g2 sigNats
-             in (ga, renameKindedVars (Map.fromList (zip sigNats fresh)) Map.empty Map.empty Map.empty Map.empty t2)
+            let (ga, t0'') = renameEType g2 t0
+             in instantiateObligations ga (etype t0'') (Set.toList (econs t0''))
         | otherwise = (g2, t2)
   return (g3, tUse, xs2)
 synthE _ g (VarS v (MonomorphicExpr Nothing (x : xs))) = do
@@ -3314,17 +3309,15 @@ checkRigidNats i g bodyTypes
       NS.NatSub x y -> parens (prettyNat x <+> "-" <+> prettyNat y)
       NS.NatMul x y -> parens (prettyNat x <+> "*" <+> prettyNat y)
       NS.NatDiv x y -> parens (prettyNat x <+> "/" <+> prettyNat y)
+    -- A signature's variable by the name it wrote, numbered where two
+    -- signatures write the same name; an inferred one marked with '?'.
     natName v@(TV t)
-      | Set.member v rigid = pretty (MT.takeWhile (/= '@') t)
-      | otherwise = "?" <> pretty (MT.takeWhile (/= '@') t <> MT.filter (`elem` ['0' .. '9']) (MT.dropWhile (/= '@') t))
-
--- | A name the renamer gave a local binding: its first renamed segment is a
--- number (a recursion token alone is not local).
-isLocalName :: EVar -> Bool
-isLocalName (EV v) = case MT.breakOn "`" v of
-  (_, rest) -> case MT.uncons (MT.drop 1 rest) of
-    Just (c, _) -> c >= '0' && c <= '9'
-    Nothing -> False
+      | Set.member v rigid, Set.notMember (base t) sharedBases = pretty (base t)
+      | Set.member v rigid = pretty (numbered t)
+      | otherwise = "?" <> pretty (numbered t)
+    base = MT.takeWhile (/= '@')
+    numbered t = base t <> MT.filter (`elem` ['0' .. '9']) (MT.dropWhile (/= '@') t)
+    sharedBases = Set.fromList [b | (b, k) <- Map.toList (Map.fromListWith (+) [(base t, 1 :: Int) | TV t <- Set.toList rigid]), k > 1]
 
 -- | A type whose head quantifiers over names in scope are dropped, those
 -- names meaning the variables they are in scope as: rigid variables when
@@ -3340,14 +3333,6 @@ scopeType rigid m t
       | Map.member v m = strip x
       | otherwise = ForallU v (strip x)
     strip x = x
-
-scopeEType :: Bool -> Map.Map TVar TVar -> EType -> EType
-scopeEType rigid m et
-  | Map.null m = et
-  | otherwise = et {etype = scopeType rigid m (etype et), econs = Set.map sub (econs et)}
-  where
-    sub (Constraint cls ts) = Constraint cls (map (scopeType rigid m) ts)
-    sub c = c
 
 -- | The effect-row variables of a type.
 typeEffectVars :: TypeU -> [TVar]

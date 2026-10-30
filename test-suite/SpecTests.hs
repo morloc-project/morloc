@@ -2335,7 +2335,48 @@ poly7Tests =
         f x = len (take3 x)
         |]
     , accept
-        "spec-poly-7-17"
+        "spec-poly-4-1"
+        [r|
+        module main (f)
+        class Dbl a where
+          dbl :: a -> a
+        instance Dbl Int where
+          dbl x = x
+        f :: Int -> Int
+        f x = g x
+          where
+            g :: Dbl a => a -> a
+            g y = dbl y
+        |]
+    , accept
+        "spec-poly-4-2"
+        [r|
+        module main (f, h)
+        f :: Int -> Int
+        f x = g x
+          where
+            g :: a -> a
+            g y = y
+        h :: a -> Int
+        h x = k x
+          where
+            k :: a -> Int
+            k y = 1
+        |]
+    , reject
+        "spec-poly-4-4"
+        [r|
+        module main (f)
+        apply :: (Int -> <e> Int) -> Int -> <e> Int
+        f :: (Int -> <e> Int) -> Int -> <e> Int
+        f k x = g x
+          where
+            g :: Int -> <e> Int
+            g y = apply k y
+        |]
+    , rejectAtLine
+        "spec-poly-4-3"
+        9
         [r|
         module main (f)
         newtype Vector (n :: Nat) a = List a

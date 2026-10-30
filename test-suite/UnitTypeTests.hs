@@ -454,7 +454,6 @@ listToGamma gs =
     , gammaRigid = Nothing
     , gammaRigidNats = Set.empty
     , gammaRigidDomain = []
-    , gammaScopedNats = Map.empty
     , gammaLabelVars = Map.empty
     , gammaScoped = Map.empty
 
@@ -1794,8 +1793,8 @@ f x = g x
     g :: b -> [b]
     g y = pair y x
 |]
-      , expectPass
-          "a local signature's type variable is the enclosing signature's"
+      , expectError
+          "a local signature's type variable is its own, whatever its name (POLY-4)"
           [r|
 module main (f)
 pair :: a -> a -> [a]

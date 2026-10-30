@@ -176,12 +176,16 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   (Bar n) = n` with no signature fails "'Foo' is not a constructor of
   *x`1560@1_x1" (SUM-6 (b) promises a request for a signature). Repro:
   /work/plans/model-audit-2026-10-21/repro/C/rec/getbad.loc, /work/plans/model-audit-2026-10-21/repro/C/sum/sum6.loc.
-- **A type variable in a local signature can never be instantiated.**
-  [reproduced, 2026-10-21] Violates POLY-1. `f :: Int -> Int; f x = g x
-  where { g :: a -> a; g y = y }` fails "expected: a, inferred: Int ...
-  Cannot compare types Int and a@q0" at `g x`. Without its signature `g` is
-  generalized and works. POLY-4 also names `let` signatures, which do not
-  parse ("unexpected '::'"). Repro: /work/plans/model-audit-2026-10-21/repro/D/poly4c, poly4d, poly5.
+- **A class obligation through a type alias is not covered.**
+  [reproduced, 2026-10-30, not bisected] With `type Model k v = [(k, v)]`,
+  `modelStep :: Ord k => ... ; ... without k xs <> [(k, v)] ...` fails
+  "This definition needs Semigroup (Model k Int) but its signature does
+  not declare it", though `[a]` has a Semigroup instance. Repro:
+  /work/tests/sumtypes/07-persistent-redblack/core/rbtree/main.loc:265.
+- **`let` signatures do not parse.** [reproduced, 2026-10-21] Gap in
+  POLY-4, which rules `where` signatures: `let g :: a -> a` fails
+  "unexpected '::'".
+  Repro: /work/plans/model-audit-2026-10-21/repro/D/poly4d.
 - **Literal defaulting exports a constrained generic at Int.**
   [reproduced, 2026-10-21] Violates SIG-5 and CLS-18 (no defaulting).
   `f :: Integral a => a -> a; f x = x + x` is skipped with a warning, but

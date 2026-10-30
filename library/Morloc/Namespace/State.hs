@@ -984,11 +984,10 @@ data Gamma = Gamma
   -- label binds to an Int, with that Int (POLY-3).
   , gammaLabelVars :: Map.Map EVar TVar
   -- | The type variables of the signatures being checked around this point,
-  -- by the name the signature wrote to the name the check gave it. A local
-  -- signature or annotation writing one of these names means that variable.
+  -- by the name the signature wrote to the name the check gave it. An
+  -- annotation writing one of these names means that variable; a local
+  -- signature's are its own (POLY-4).
   , gammaScoped :: Map TVar TVar
-  -- | The same for the Nat and Int variables of those signatures.
-  , gammaScopedNats :: Map TVar TVar
   }
 
 -- | Compile-time constant values tracked during typechecking for nat / str

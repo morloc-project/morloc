@@ -27,7 +27,17 @@
   rigid is not proven (Typecheck/NatDecide.hs decideAssuming), so a body
   needing it is rejected as undecided, unless the condition is settled
   before the split (every Int at an even power).
-- [read] Violates POLY-7. Only a signed top-level definition of the root
+- [reproduced, 2026-10-30] Messages about a local signature's variables,
+  checking against signatures: an effect variable it fixes is reported at
+  the enclosing definition and by its internal name (`fixes the effect
+  variable 'e@e0'`), and a constraint the enclosing body lacks is reported
+  with the local signature's constraints listed as given, because they
+  stay among the givens after the local body (Frontend/Typecheck.hs,
+  validate). The verdicts are right (POLY-4).
+- [read] Gap in POLY-4: an annotation in a body (`(x :: a)`) still means
+  the enclosing signature's variable, while a `where` signature's `a` is
+  its own.
+- [read] Violates POLY-7 and POLY-4. Only a signed top-level definition of the root
   module is checked against its signature (Frontend/Treeify.hs
   Validation); a `where` signature inside an unsigned definition, or in an
   imported module, never has its Nat and Int variables held rigid, so
@@ -36,15 +46,6 @@
 - [read] The POLY-7 check locates a refutation at the innermost condition
   that conflicts with the body's equations; when the equations conflict
   only together it falls back to the definition.
-- [reproduced, 2026-10-30] Checking a definition against its signature
-  (validate), a polymorphic `where` signature cannot be used at a concrete
-  type: `f :: Int -> Int; f x = g x where g :: Dbl a => a -> a; g y = dbl
-  y` fails "expected: a, inferred: Int" at `g x`. The node that checks the
-  local body is also its use and hands the use the type with the body's
-  rigid variables (Frontend/Typecheck.hs, synthE on a signed VarS); only
-  its Nat and Int variables are taken afresh. Related, [read]: a local
-  signature's effect variables are rigid only when outermost, and its
-  constraints are not givens for its own body. Gap in POLY-4 (open).
 - [read] Violates DIM-6 ("at the term that produced it"). A Nat equation
   deferred during instance resolution (after synthesis) has no recorded
   term; the error falls back to the export (Frontend/Typecheck.hs, the
