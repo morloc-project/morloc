@@ -1,0 +1,56 @@
+--- shared length, json ---
+[1,2]
+exit: 0
+Error: dimension mismatch in 'same': n is 2 from the length of argument #0, but the length of argument #1 is 1
+exit: 1
+--- shared length, msgpack and voidstar files ---
+Error: dimension mismatch in 'dot': n is 3 from the length of argument #0, but the length of argument #1 is 2
+exit: 1
+3
+exit: 0
+--- label in a condition ---
+[3,5]
+exit: 0
+Error: dimension mismatch in 'roll': n - w + 1 >= 0 does not hold, with w = 5 (the value of argument #0), n = 3 (the length of argument #1)
+exit: 1
+Error: dimension mismatch in 'roll': n - w + 1 >= 0 does not hold, with w = 5 (the value of argument #0), n = 3 (the length of argument #1)
+exit: 1
+--- negative label in a length ---
+[]
+exit: 0
+Error: dimension mismatch in 'rep': n >= 0 does not hold, with n = -1 (the value of argument #0)
+exit: 1
+--- every element of a list ---
+2
+exit: 0
+Error: dimension mismatch in 'pairLen': n is 2 from the length of argument #0.0, but the length of argument #0.1[1] is 1
+exit: 1
+0
+exit: 0
+--- optional ---
+0
+exit: 0
+Error: dimension mismatch in 'firstOpt': n is 1 from the length of argument #0.0, but the length of argument #0.1 is 2
+exit: 1
+--- unrolled record ---
+2
+exit: 0
+Error: dimension mismatch in 'opts': n is 2 from the length of --left (argument #0), but the length of --right (argument #0) is 1
+exit: 1
+--- records in a list ---
+1
+exit: 0
+Error: dimension mismatch in 'deep': n is 1 from the length of argument #0[0].a, but the length of argument #0[1].a is 2
+exit: 1
+2
+exit: 0
+--- a length that is an expression ---
+3
+exit: 0
+Error: dimension mismatch in 'grow': the length of argument #1 is 1, but its type requires n + 1 = 3, with n = 2 (the length of argument #0)
+exit: 1
+--- a label on a string ---
+11
+exit: 0
+Error: dimension mismatch in 'named': n is 2 from the length of argument #1, but the length of argument #2 is 1
+exit: 1

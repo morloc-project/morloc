@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Nexus
   ) where
 
 import qualified Control.Monad as CM
+import Morloc.CodeGenerator.DimContract (dimConstraints)
 import Morloc.System (shellQuote)
 import qualified Control.Monad.State as CMS
 import qualified Data.Aeson as Aeson
@@ -99,6 +100,7 @@ data FData = FData
     -- uses; this is what the interface publishes, so it does not move
     -- when the implementation language does.
   , fdataCmdDocSet :: CmdDocSet
+  , fdataDims :: [Text]
   }
 
 data GastData = GastData
@@ -107,6 +109,8 @@ data GastData = GastData
   , commandTermName :: Text
     -- ^ Original term name. Same rationale as 'fdataTermName'.
   , commandMid :: Int
+  , commandDims :: [Text]
+    -- ^ The @dims@ constraints of its input (DIM-3).
   , commandType :: Type
   , commandDocs :: CmdDocSet
   , commandExpr :: NexusExpr
@@ -365,6 +369,7 @@ getFData (t, i, lang, doc, sockets) = do
   -- here so the validator never re-renders.
   validateArgSpecs i (cmdDocArgs doc) argAsts argSchemas
   validateReturnMime i (cmdDocRetMime doc) returnAst
+  dims <- dimConstraints i
   registry <- MM.gets stateLangRegistry
   let socket = MC.setupServerAndSocket registry lang
   return $
@@ -373,6 +378,7 @@ getFData (t, i, lang, doc, sockets) = do
       , fdataSubcommand = maybe (unEVar name') id (cmdDocName doc)
       , fdataTermName = unEVar name'
       , fdataMid = i
+      , fdataDims = dims
       , fdataType = t
       , fdataSubSockets = sockets
       , fdataArgSchemas = argSchemas
@@ -523,6 +529,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       argSchemas    = map (render . Serial.serialAstToMsgpackSchema) argAsts
   validateArgSpecs i (cmdDocArgs docs) argAsts argSchemas
   validateReturnMime i (cmdDocRetMime docs) retAst
+  dims <- dimConstraints i
   expr <- toNexusExpr x0
 
   return $
@@ -530,6 +537,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       { commandName = maybe (unEVar gname) id (cmdDocName docs)
       , commandTermName = unEVar gname
       , commandMid = i
+      , commandDims = dims
       , commandType = gtype
       , commandDocs = docs
       , commandExpr = expr
@@ -3021,7 +3029,7 @@ buildManifest ManifestInputs{..} =
         , ("epilogues", jsonArr (map jsonStrArr (cmdDocEpilogues (fdataCmdDocSet fd))))
         , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd) (fdataArgAsts fd))
         , ("return", returnJson (fdataReturnSchema fd) (fdataReturnGeneralSchema fd) (fst (cmdDocRet (fdataCmdDocSet fd))) (snd (cmdDocRet (fdataCmdDocSet fd))) (cmdDocRetMime (fdataCmdDocSet fd)))
-        , ("constraints", jsonArr [])
+        , ("constraints", jsonArr (fdataDims fd))
         , ("internal", jsonBool (isInternalTerminalName (fdataTermName fd)))
         -- Terminals array must use the ORIGINAL term name so the
         -- emitted `entry` field points at the actual synthesized
@@ -3051,7 +3059,7 @@ buildManifest ManifestInputs{..} =
         , ("args", argsJson (cmdDocArgs (commandDocs g)) (commandArgSchemas g) (commandArgAsts g))
         , ("return", returnJson (commandReturnSchema g) (commandReturnGeneralSchema g) (fst (cmdDocRet (commandDocs g))) (snd (cmdDocRet (commandDocs g))) (cmdDocRetMime (commandDocs g)))
         , ("expr", exprToJson (commandExpr g))
-        , ("constraints", jsonArr [])
+        , ("constraints", jsonArr (commandDims g))
         , ("internal", jsonBool (isInternalTerminalName (commandTermName g)))
         -- Same term-name-for-mangling rationale as `remoteCmdJson`.
         , ("terminals", terminalsJson (commandTermName g) (cmdDocTerminals (commandDocs g)))

@@ -32,6 +32,7 @@ pub mod spawn;
 pub mod child_group;
 pub mod owner_word;
 pub mod schema;
+pub mod dims;
 pub mod cschema;
 pub mod null_check;
 pub mod packet;

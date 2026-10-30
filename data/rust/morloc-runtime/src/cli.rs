@@ -3750,7 +3750,9 @@ pub(crate) unsafe fn make_call_packet(
     mid: u32,
     args: &[morloc_manifest::call_args::CallArg],
     arg_schema_strs: *mut *mut c_char, // NULL-terminated
-) -> Result<*mut u8, String> {
+    dims: Option<&morloc_runtime_types::dims::Dims>,
+) -> Result<*mut u8, morloc_runtime_types::dims::DimsError> {
+    use morloc_runtime_types::dims::DimsError;
     let mut err: *mut c_char = ptr::null_mut();
     let take = |err: &mut *mut c_char| {
         let msg = CStr::from_ptr(*err).to_string_lossy().into_owned();
@@ -3760,29 +3762,94 @@ pub(crate) unsafe fn make_call_packet(
     };
     let mut schemas: Vec<*mut CSchema> = Vec::with_capacity(args.len());
     let mut packets: Vec<*const u8> = Vec::with_capacity(args.len());
-    let result = (|| {
+    let result = (|| -> Result<*mut u8, DimsError> {
         for (i, arg) in args.iter().enumerate() {
             let s = *arg_schema_strs.add(i);
             if s.is_null() {
-                return Err(format!("argument {} has no schema", i + 1));
+                return Err(DimsError::Input(format!("argument {} has no schema", i + 1)));
             }
             let schema = crate::ffi::parse_schema(s, &mut err);
             if !err.is_null() {
-                return Err(take(&mut err));
+                return Err(DimsError::Input(take(&mut err)));
             }
             schemas.push(schema);
-            let packet = call_arg_packet(arg, schema).map_err(|e| format!("argument {}: {}", i + 1, e))?;
+            let packet = call_arg_packet(arg, schema).map_err(|e| DimsError::Input(format!("argument {}: {}", i + 1, e)))?;
             packets.push(packet as *const u8);
+        }
+        if let Some(d) = dims {
+            let mut values: Vec<*const u8> = vec![ptr::null(); packets.len()];
+            for i in d.args() {
+                if i < packets.len() && values[i].is_null() {
+                    let v = crate::packet_ffi::get_morloc_data_packet_value(packets[i], schemas[i], &mut err);
+                    if !err.is_null() {
+                        return Err(DimsError::Input(format!("argument {}: {}", i + 1, take(&mut err))));
+                    }
+                    values[i] = v;
+                }
+            }
+            let cs: Vec<*const CSchema> = schemas.iter().map(|s| *s as *const CSchema).collect();
+            check_dims(d, &values, &cs)?;
         }
         let call = crate::packet_ffi::make_morloc_local_call_packet(mid, packets.as_ptr(), packets.len(), &mut err);
         if !err.is_null() {
-            return Err(take(&mut err));
+            return Err(DimsError::Input(take(&mut err)));
         }
         Ok(call)
     })();
     for p in &packets { libc::free(*p as *mut c_void); }
     for s in &schemas { CSchema::free(*s); }
     result
+}
+
+/// Check a command's dimension relations (DIM-3) on its decoded
+/// arguments; `values[i]` is null for an argument they do not read.
+pub(crate) unsafe fn check_dims(
+    d: &morloc_runtime_types::dims::Dims,
+    values: &[*const u8],
+    schemas: &[*const CSchema],
+) -> Result<(), morloc_runtime_types::dims::DimsError> {
+    let mut rs: Vec<Option<crate::schema::Schema>> = (0..values.len()).map(|_| None).collect();
+    for i in d.args() {
+        match (values.get(i), schemas.get(i)) {
+            (Some(v), Some(s)) if !v.is_null() && !s.is_null() => {
+                if rs[i].is_none() {
+                    rs[i] = Some(CSchema::to_rust(*s));
+                }
+            }
+            _ => {
+                return Err(morloc_runtime_types::dims::DimsError::Internal(format!(
+                    "internal error: argument {} was not decoded",
+                    i + 1
+                )))
+            }
+        }
+    }
+    let vals: Vec<Option<(*const u8, &crate::schema::Schema)>> =
+        rs.iter().zip(values.iter()).map(|(s, v)| s.as_ref().map(|s| (*v, s))).collect();
+    let label = |i: usize, _: Option<&str>| (format!("argument {}", i + 1), String::new());
+    let resolve = |rel: crate::shm::RelPtr| crate::shm::rel2abs(rel).map(|p| p as *const u8).map_err(|e| e.to_string());
+    d.check(&vals, &label, &resolve)
+}
+
+/// The command's `dims` constraint, if it has one.
+pub(crate) unsafe fn dims_of(
+    cmd: &crate::manifest_ffi::ManifestCommand,
+) -> Result<Option<morloc_runtime_types::dims::Dims>, String> {
+    let name = if cmd.name.is_null() { String::new() } else { CStr::from_ptr(cmd.name).to_string_lossy().into_owned() };
+    for i in 0..cmd.n_constraints {
+        let c = &*cmd.constraints.add(i);
+        if c.ctype.is_null() || CStr::from_ptr(c.ctype).to_bytes() != b"dims" {
+            continue;
+        }
+        let bad = || format!("malformed dims constraint in command '{}'", name);
+        if c.value_json.is_null() {
+            return Err(bad());
+        }
+        let v: serde_json::Value =
+            serde_json::from_slice(CStr::from_ptr(c.value_json).to_bytes()).map_err(|_| bad())?;
+        return morloc_runtime_types::dims::Dims::parse(&v, &name).map(Some);
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

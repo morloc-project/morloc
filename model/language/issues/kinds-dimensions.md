@@ -8,12 +8,47 @@
   not compared with `m` and `n` (golden nat-dim-runtime-remote accepts a
   header that contradicts the type when the data length fits). A Table's
   row count never reaches the schema (Serial.hs:317).
-- **A label known only at run time is not checked.** [read] Violates DIM-3
-  and KIND-4. `main w = roll w src`, with `roll :: w@Int -> Vector n Real ->
-  Vector (n - w + 1) Real` and `w` read from the command line, leaves `w`
-  inferred and is accepted; no check stops `w = 12` against a 10-element
-  `src`. A generated check must divide as KIND-3 does
-  (toward zero), unlike Python `//` and R `%/%`.
+- **A label known only at run time is not checked inside a body.** [read]
+  Violates DIM-3 and KIND-4. A command's own signature is checked at entry
+  (the nexus and daemon read its `dims` constraint), but `main w = roll w
+  src`, with `roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real`
+  and `w` and `src` given to `main`, leaves `w` inferred and is accepted;
+  no check stops `w = 12` against a 10-element `src`. Needs a quantifier
+  for a variable a run-time value observes.
+- [read] Gap in DIM-3: a command's dimension relations are checked only on
+  its arguments at entry. A value a pool reads from a file (`@open`, a load
+  function) and a `Matrix` header are not checked.
+- [read] Gap in DIM-3: a `@default` that violates a command's dimension
+  relations is reported only when the command runs with it, not at
+  compile time.
+- [read] Gap in DIM-3: an exported term without a signature gets no entry
+  check. The contract is read from the signature (CodeGenerator/
+  DimContract.hs dimConstraints); the command's own type has its Nat
+  variables erased, so `g xs ys = dot xs ys` exported unsigned accepts
+  `[1,2] [3]`.
+- [read] Gap in DIM-3: a length expression whose variables no other slot
+  binds is not checked. `f :: Vector (n + 1) Int -> Int` accepts an empty
+  vector (`n = -1`); checking it needs the expression solved for its one
+  unbound variable.
+- [read] Cost of the DIM-3 entry check (cost ruled out of scope for now,
+  2026-10-30): on a remote command the nexus decodes in full each argument
+  a relation reads (data/rust/morloc-nexus/src/dispatch.rs
+  check_dims_of_packets), so a file argument is read twice and a streamed
+  file is loaded whole into the nexus's shared memory, doubling its peak;
+  the daemon parses each command's relations on every request
+  (morloc-runtime/src/cli.rs dims_of). Reading only the array headers a
+  relation needs, and parsing at manifest load, would remove both.
+- [read] The entry check refuses a label value beyond 128 bits ("too
+  large to check its dimensions", morloc-runtime-types/src/dims.rs
+  int_value) even where its relations would hold.
+- [reproduced, 2026-10-30] Gap in records.md: `record Entry n where a ::
+  Vector n Int` is rejected ("'n' has kind Nat, but a type that classifies
+  a value has kind Type"); `record Entry (n :: Nat)` is accepted. A record
+  parameter's kind is not inferred from its fields.
+- [reproduced, 2026-10-30] Gap in records.md: a record field may name a Nat
+  variable the record does not take (`record TwoOpts where left :: Vector
+  n Int; right :: Vector n Int`); all fields share it, which no item
+  states. Golden spec-dim-3-2 relies on it.
 - [read] Solving a Nat equation (NatSolver solveSOP) keeps only solutions
   whose coefficients are non-negative, so `k ~ n - w + 1` is deferred
   rather than solved; KIND-3 allows the solution, since the position

@@ -659,6 +659,8 @@ fn run_remote_command(
         arg_packets.push((c_pkt, pkt_size));
     }
 
+    check_dims_of_packets(cmd, &arg_packets);
+
     let arg_ptrs: Vec<*const u8> = arg_packets.iter().map(|(p, _)| *p as *const u8).collect();
     let mut errmsg_call: *mut std::ffi::c_char = std::ptr::null_mut();
     let c_call = unsafe {
@@ -856,6 +858,72 @@ fn save_parent_packet(arg: usize, pkt: *mut u8) {
         crate::runlog::die_with_error(&format!("saving argument {}: {}", arg + 1, msg));
     }
     crate::stage::save_parent_arg(arg, pkt, size);
+}
+
+/// Check a command's dimension relations (DIM-3) on its argument
+/// packets, decoding only the arguments the relations read. The decoded
+/// copies are released with the arena they were made in.
+fn check_dims_of_packets(cmd: &Command, packets: &[(*mut u8, usize)]) {
+    use morloc_runtime_types::cschema::CSchema;
+    use morloc_runtime_types::schema::{parse_schema, Schema};
+    extern "C" {
+        fn morloc_eval_arena_enter(errmsg: *mut *mut std::ffi::c_char) -> *mut std::ffi::c_void;
+        fn morloc_eval_arena_exit(handle: *mut std::ffi::c_void);
+        fn get_morloc_data_packet_value(
+            data: *const u8, schema: *const CSchema,
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> *mut u8;
+    }
+    let d = match crate::dims::of(cmd) {
+        Err(e) => crate::runlog::die_with_error(&e),
+        Ok(None) => return,
+        Ok(Some(d)) => d,
+    };
+    let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+    let arena = unsafe { morloc_eval_arena_enter(&mut err) };
+    if arena.is_null() {
+        let msg = process::take_c_errmsg(err).unwrap_or_else(|| "unknown error".into());
+        crate::runlog::die_with_error(&format!("eval arena could not be opened: {}", msg));
+    }
+    let mut schemas: Vec<Option<Schema>> = (0..packets.len()).map(|_| None).collect();
+    let mut ptrs: Vec<*const u8> = vec![std::ptr::null(); packets.len()];
+    let mut failure: Option<String> = None;
+    for i in d.args() {
+        if failure.is_some() || i >= packets.len() || schemas[i].is_some() {
+            continue;
+        }
+        let schema = match cmd.args.get(i).and_then(|a| a.schema_str()).map(parse_schema) {
+            Some(Ok(s)) => s,
+            _ => {
+                failure = Some(format!("failed to parse arg schema #{}", i));
+                continue;
+            }
+        };
+        let c_schema = CSchema::from_rust(&schema);
+        let mut e: *mut std::ffi::c_char = std::ptr::null_mut();
+        let v = unsafe { get_morloc_data_packet_value(packets[i].0, c_schema, &mut e) };
+        unsafe { CSchema::free(c_schema) };
+        if v.is_null() {
+            let msg = process::take_c_errmsg(e).unwrap_or_else(|| "unknown error".into());
+            failure = Some(format!("failed to parse argument #{}: {}", i, msg));
+            continue;
+        }
+        ptrs[i] = v;
+        schemas[i] = Some(schema);
+    }
+    if failure.is_none() {
+        let vals: Vec<Option<(*const u8, &Schema)>> = schemas
+            .iter()
+            .zip(ptrs.iter())
+            .map(|(s, p)| s.as_ref().map(|s| (*p, s)))
+            .collect();
+        // SAFETY: each pointer was decoded against its schema.
+        failure = unsafe { crate::dims::check(&d, cmd, &vals) }.err();
+    }
+    unsafe { morloc_eval_arena_exit(arena) };
+    if let Some(e) = failure {
+        crate::runlog::die_with_error(&e);
+    }
 }
 
 /// Build argument `i`'s packet from its CLI value, reading the value as
@@ -1673,6 +1741,7 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
 
     let mut c_arg_schemas: Vec<*const morloc_runtime_types::cschema::CSchema> = Vec::new();
     let mut c_arg_voidstars: Vec<*mut u8> = Vec::new();
+    let mut arg_schemas: Vec<morloc_runtime_types::schema::Schema> = Vec::new();
 
     for (i, (arg_val, arg_def)) in args.iter().zip(cmd.args.iter()).enumerate() {
         if let Err(msg) = check_ifile_arg(arg_val, arg_def) {
@@ -1764,6 +1833,23 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig, mani
 
         c_arg_schemas.push(c_schema);
         c_arg_voidstars.push(voidstar);
+        arg_schemas.push(schema);
+    }
+
+    match crate::dims::of(cmd) {
+        Err(e) => crate::runlog::die_with_error(&e),
+        Ok(None) => {}
+        Ok(Some(d)) => {
+            let vals: Vec<Option<(*const u8, &morloc_runtime_types::schema::Schema)>> = c_arg_voidstars
+                .iter()
+                .zip(arg_schemas.iter())
+                .map(|(p, s)| Some((*p as *const u8, s)))
+                .collect();
+            // SAFETY: each voidstar was decoded against its schema.
+            if let Err(e) = unsafe { crate::dims::check(&d, cmd, &vals) } {
+                crate::runlog::die_with_error(&e);
+            }
+        }
     }
 
     let result = unsafe {

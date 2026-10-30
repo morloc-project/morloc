@@ -2444,6 +2444,16 @@ unsafe fn dispatch_request(
                     *arg_voidstars.add(i) = checked(|e| get_morloc_data_packet_value(*arg_packets.add(i), *arg_schemas_arr.add(i), e))
                         .map_err(bad_request)?;
                 }
+                let c_msg = |m: String| libc::strdup(CString::new(m).unwrap_or_default().as_ptr());
+                if let Some(d) = crate::cli::dims_of(cmd).map_err(|m| internal(c_msg(m)))? {
+                    use morloc_runtime_types::dims::DimsError;
+                    let values: Vec<*const u8> = (0..nargs).map(|i| *arg_voidstars.add(i) as *const u8).collect();
+                    let schemas: Vec<*const CSchema> = (0..nargs).map(|i| *arg_schemas_arr.add(i) as *const CSchema).collect();
+                    crate::cli::check_dims(&d, &values, &schemas).map_err(|e| match e {
+                        DimsError::Input(m) => bad_request(c_msg(m)),
+                        DimsError::Internal(m) => internal(c_msg(m)),
+                    })?;
+                }
                 let owned = OwnedSchema(checked(|e| parse_schema(cmd.ret.schema, e)).map_err(internal)?);
                 let return_schema = owned.0;
                 let result_abs = checked(|e| morloc_eval(cmd.expr, return_schema, arg_voidstars, arg_schemas_arr, nargs, e))
@@ -2564,12 +2574,19 @@ unsafe fn dispatch_request(
                 }
             };
             let arg_schemas_flat = cmd.build_arg_schemas_array();
-            let call_packet = make_call_packet(cmd.mid, &args, arg_schemas_flat);
+            use morloc_runtime_types::dims::DimsError;
+            let call_packet = match crate::cli::dims_of(cmd) {
+                Ok(dims) => make_call_packet(cmd.mid, &args, arg_schemas_flat, dims.as_ref()),
+                Err(e) => Err(DimsError::Internal(e)),
+            };
             libc::free(arg_schemas_flat as *mut c_void);
-            if let Err(msg) = &call_packet {
+            if let Err(e) = &call_packet {
                 (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-                (*resp).error = libc::strdup(CString::new(msg.as_str()).unwrap_or_default().as_ptr());
+                (*resp).error_kind = match e {
+                    DimsError::Input(_) => DAEMON_ERROR_BAD_REQUEST,
+                    DimsError::Internal(_) => DAEMON_ERROR_INTERNAL,
+                };
+                (*resp).error = libc::strdup(CString::new(e.to_string()).unwrap_or_default().as_ptr());
             } else if let Ok(call_packet) = call_packet {
                 let socket_path = (*sockets.add(cmd.pool_index)).socket_filename;
                 let result_packet =

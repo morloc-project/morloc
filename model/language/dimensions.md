@@ -20,14 +20,24 @@ slot are a type error. A check on an inferred variable waits until it is
 solved; one on a rigid variable (POLY-7) is decided by DIM-7.
 
 ### DIM-3 A dimension the compiler cannot see is checked at run time
-Intent: ruled 2026-09-26
-Tests: spec-dim-3-1
+Intent: ruled 2026-10-30
+Tests: spec-dim-3-1, spec-dim-3-2
 Code: deviates (issues/kinds-dimensions.md)
 
-Where a value whose length is not known statically (returned by sourced
-code, or read from input) flows into a slot whose Nat is concrete or shared
-with another slot, its length is checked against the slot at run time, and
-a mismatch is a failure.
+Where a value whose length the compiler cannot see flows into a slot whose
+Nat is concrete or shared with another slot, its length is checked against
+the slot at run time, at one of two levels:
+
+- **Data**: a value from outside the program (a command's input, a file
+  it reads, a label value given on the command line). A mismatch is bad
+  data, reported as an error in the input. These checks always run.
+- **Code**: a value one part of the program hands another (a sourced
+  function's result, a value passed between pools or between calls). A
+  mismatch is a defect in the program. These checks are off by default and
+  run in a debug build (`morloc make --debug`).
+
+A check the compiler cannot place is a type error at the term that needs
+it (DIM-7).
 
 ### DIM-4 Omitted Nat arguments are gradual
 Intent: proposed

@@ -8,6 +8,7 @@
 compile_error!("morloc needs panic = \"unwind\" (model/runtime/panic.md PANIC-8)");
 mod cli;
 mod convert;
+mod dims;
 mod dispatch;
 mod file;
 mod help;
