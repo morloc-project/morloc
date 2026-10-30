@@ -83,6 +83,8 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import qualified Morloc.Typecheck.Internal as MTI
 import qualified Morloc.Typecheck.NatSolver as NS
+import qualified Morloc.Typecheck.NatDecide as ND
+import qualified Data.Set as DSet
 import qualified System.Directory as SD
 import Text.RawString.QQ
 
@@ -7004,23 +7006,24 @@ natArithTests =
           Right subs -> assertEqual "" Map.empty subs
           other -> assertFailure $ "Expected success, got: " ++ show other
     , testCase "an open linear equation with large constants is decided: n + m ~ 400" $
-        assertEqual "" (Just True)
-          (NS.naturalSolution [(NS.NatAdd (NS.NatVar (TV "n")) (NS.NatVar (TV "m")), NS.NatLit 400)])
+        assertBool "" (holds (ND.decide DSet.empty [ND.NatEq (NS.NatAdd (NS.NatVar (TV "n")) (NS.NatVar (TV "m"))) (NS.NatLit 400)]))
     , testCase "a linear equation off the coefficients' lattice has no solution: 2n + 4m ~ 7" $
-        assertEqual "" (Just False)
-          (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 2) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 4) (NS.NatVar (TV "m"))), NS.NatLit 7)])
+        assertBool "" (refuted (ND.decide DSet.empty [ND.NatEq (NS.NatAdd (NS.NatMul (NS.NatLit 2) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 4) (NS.NatVar (TV "m")))) (NS.NatLit 7)]))
     , testCase "the coin problem below its bound: 3n + 5m ~ 7 has no solution" $
-        assertEqual "" (Just False)
-          (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 3) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 5) (NS.NatVar (TV "m"))), NS.NatLit 7)])
+        assertBool "" (refuted (ND.decide DSet.empty [ND.NatEq (NS.NatAdd (NS.NatMul (NS.NatLit 3) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 5) (NS.NatVar (TV "m")))) (NS.NatLit 7)]))
     , testCase "the coin problem with large coefficients is decided quickly: 1000n + 999m ~ 998001" $
-        assertEqual "" (Just True)
-          (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 1000) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 999) (NS.NatVar (TV "m"))), NS.NatLit 998001)])
+        assertBool "" (holds (ND.decide DSet.empty [ND.NatEq (NS.NatAdd (NS.NatMul (NS.NatLit 1000) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 999) (NS.NatVar (TV "m")))) (NS.NatLit 998001)]))
+    , testCase "a large linear equation with a lower bound is decided: 1000n + 999m ~ 998001, m >= 1" $
+        assertBool "" (holds (ND.decide DSet.empty
+          [ ND.NatEq (NS.NatAdd (NS.NatMul (NS.NatLit 1000) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 999) (NS.NatVar (TV "m")))) (NS.NatLit 998001)
+          , ND.NatGe (NS.NatSub (NS.NatVar (TV "m")) (NS.NatLit 1)) (NS.NatLit 0) ]))
     , testCase "a part of a Nat may be negative: (3 - n) * (3 - n) ~ 16 at n = 7" $
         let d = NS.NatSub (NS.NatLit 3) (NS.NatVar (TV "n"))
-        in NS.naturalSolution [(NS.NatMul d d, NS.NatLit 16)] @?= Just True
+        in assertBool "" (holds (ND.decide DSet.empty [ND.NatEq (NS.NatMul d d) (NS.NatLit 16)]))
     , testCase "a witness keeps each side non-negative: n - 4 ~ -(m + 1)" $
         let rhs = NS.NatSub (NS.NatLit 0) (NS.NatAdd (NS.NatVar (TV "m")) (NS.NatLit 1))
-        in assertBool "" (NS.naturalSolution [(NS.NatSub (NS.NatVar (TV "n")) (NS.NatLit 4), rhs)] /= Just True)
+            lhs = NS.NatSub (NS.NatVar (TV "n")) (NS.NatLit 4)
+        in assertBool "" (refuted (ND.decide DSet.empty [ND.NatEq lhs rhs, ND.NatGe lhs (NS.NatLit 0), ND.NatGe rhs (NS.NatLit 0)]))
     , testCase "a solved Nat is never negative: m + 1 ~ 0" $
         case NS.solveNat (NS.NatAdd (NS.NatVar (TV "m")) (NS.NatLit 1)) (NS.NatLit 0) of
           Left NS.Contradiction -> return ()
@@ -11972,3 +11975,9 @@ aliasTransparencyTests =
               |]
           ]
       ]
+
+holds, refuted :: ND.Decision -> Bool
+holds (ND.Holds _) = True
+holds _ = False
+refuted (ND.Refuted _) = True
+refuted _ = False

@@ -2184,6 +2184,24 @@ poly7Tests =
         x k = make k 0
         |]
     , reject
+        "spec-kind-4-14"
+        [r|
+        module main (x)
+        newtype Vector (n :: Nat) a = List a
+        sq :: Vector (m * m) Int -> Vector (m - 3) Int
+        v :: Vector 4 Int
+        x = sq v
+        |]
+    , accept
+        "spec-kind-4-15"
+        [r|
+        module main (x)
+        newtype Vector (n :: Nat) a = List a
+        sq :: Vector (m * m) Int -> Vector (m - 1) Int
+        v :: Vector 4 Int
+        x = sq v
+        |]
+    , reject
         "spec-kind-4-10"
         [r|
         module main (x)

@@ -24,7 +24,7 @@ module Morloc.Typecheck.NatSolver
   , isGround
   , freeNatVars
   , sopToNatExpr
-  , naturalSolution
+  , linearEquation
   , hasOpaqueDivision
   , evalNat
   , splitIntVars
@@ -275,52 +275,17 @@ extractLinearVarPoly fixed prods =
       , all (\p -> npCoeff p `mod` c == 0 && (signedKey v || negate (npCoeff p) `div` c >= 0)) others
       ]
 
--- | Whether the equations @a = b@ have a common solution in the naturals:
--- @Just True@ when one is found, @Just False@ when there is none, @Nothing@
--- when neither is shown. A single linear equation is decided exactly; other
--- systems are searched for a small witness, at which each side must be
--- non-negative (KIND-4).
-naturalSolution :: [(NatExpr, NatExpr)] -> Maybe Bool
-naturalSolution eqs0
-  | any signed sops = Just False
-  | [NatSOP ps] <- sops, Just answer <- linear ps = Just answer
-  | any holds candidates = Just True
+-- | Whether a linear equation @a = b@ over Nat variables, without division,
+-- has a solution with every variable a natural, read from its normal form;
+-- Nothing when it is not linear.
+linearEquation :: NatExpr -> NatExpr -> Maybe Bool
+linearEquation a b
+  | hasOpaqueDivision sop = Nothing
+  | all (\p -> Map.size (npVars p) <= 1 && all (== 1) (Map.elems (npVars p))) ps =
+      linearNatural [npCoeff p | p <- ps, not (Map.null (npVars p))] (negate (sum [npCoeff p | p <- ps, Map.null (npVars p)]))
   | otherwise = Nothing
   where
-    eqs = [(splitIntVars a, splitIntVars b) | (a, b) <- eqs0]
-    sops = [normalize (NatSub a b) | (a, b) <- eqs]
-    vs = Set.toList (Set.unions [freeNatVars a <> freeNatVars b | (a, b) <- eqs])
-    bound = 1 + maximum (0 : [abs (npCoeff p) | NatSOP ps <- sops, p <- ps])
-    width = last (0 : takeWhile (\w -> (w + 1) ^ length vs <= (40000 :: Integer)) [1 .. bound])
-    candidates = [Map.fromList (zip vs xs) | xs <- mapM (const [0 .. width]) vs]
-    holds env = all (\(a, b) -> maybe False (>= 0) (evalNat env a) && evalNat env a == evalNat env b) eqs
-    -- every product of naturals is non-negative, so a sum of terms whose
-    -- coefficients share one sign and include a nonzero constant is never 0;
-    -- a quotient of an expression with subtraction may be negative, so an
-    -- equation holding one says nothing
-    signed (NatSOP ps)
-      | hasOpaqueDivision (NatSOP ps) = False
-      | otherwise =
-          let constant = sum [npCoeff p | p <- ps, Map.null (npVars p)]
-              varCoeffs = [npCoeff p | p <- ps, not (Map.null (npVars p))]
-          in (constant > 0 && all (> 0) varCoeffs) || (constant < 0 && all (< 0) varCoeffs)
-    -- the equation came from expressions without subtraction, so its
-    -- normal form is the whole constraint
-    noSubtraction = not (any (\(a, b) -> hasSub a || hasSub b) eqs)
-    hasSub e = case e of
-      NatSub _ _ -> True
-      NatAdd a b -> hasSub a || hasSub b
-      NatMul a b -> hasSub a || hasSub b
-      NatDiv a b -> hasSub a || hasSub b
-      _ -> False
-    linear ps
-      | noSubtraction
-      , not (hasOpaqueDivision (NatSOP ps))
-      , all (\p -> Map.size (npVars p) <= 1 && all (== 1) (Map.elems (npVars p))) ps =
-          let k = negate (sum [npCoeff p | p <- ps, Map.null (npVars p)])
-              cs = [npCoeff p | p <- ps, not (Map.null (npVars p))]
-          in linearNatural cs k
-      | otherwise = Nothing
+    sop@(NatSOP ps) = normalize (NatSub a b)
 
 -- | Whether @sum (zipWith (*) cs xs) == k@ has a solution with every
 -- @xs@ a natural. With coefficients of both signs it has one exactly when

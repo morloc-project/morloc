@@ -36,7 +36,7 @@ variable (POLY-7) is decided by DIM-7.
 
 ### KIND-4 A Nat is never negative
 Intent: ruled 2026-10-30
-Tests: spec-kind-4-1, spec-kind-4-2, spec-kind-4-3, spec-kind-4-4, spec-kind-4-5, spec-kind-4-6, spec-kind-4-7, spec-kind-4-8, spec-kind-4-9, spec-kind-4-10, spec-kind-4-11, spec-kind-4-12
+Tests: spec-kind-4-1, spec-kind-4-2, spec-kind-4-3, spec-kind-4-4, spec-kind-4-5, spec-kind-4-6, spec-kind-4-7, spec-kind-4-8, spec-kind-4-9, spec-kind-4-10, spec-kind-4-11, spec-kind-4-12, spec-kind-4-14, spec-kind-4-15
 Code: deviates (issues/kinds-dimensions.md)
 
 A Nat variable is a natural, and so is the whole expression that fills a

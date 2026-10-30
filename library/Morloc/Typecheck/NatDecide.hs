@@ -441,7 +441,23 @@ satisfiable :: Integer -> [Condition] -> Satisfiable
 satisfiable budget conds
   | any (\c -> Set.null (condVars [c]) && holdsAt Map.empty c /= Just True) conds = Unsat
   | (env : _) <- filter holdsAll candidates = Sat env
-  | [c@(NatEq a b)] <- conds, partialFree c, linearCond c, Just answer <- naturalSolution [(a, b)] =
+  -- A conjunction is unsatisfiable when one of its conditions is alone.
+  | length conds > 1, any (\c -> satisfiable budget [c] == Unsat) conds = Unsat
+  -- Linear conditions on one variable: intersect the intervals they allow.
+  | [x] <- vs, all partialFree conds, all linearCond conds, Just (lo, hi) <- interval x =
+      case hi of
+        Just h | h < lo -> Unsat
+        _ -> Sat (Map.singleton x lo)
+  | [c@(NatEq a b)] <- conds, partialFree c, linearCond c, Just answer <- linearEquation a b =
+      if answer then Sat Map.empty else Unsat
+  -- One linear equation with lower bounds on single variables: shifting
+  -- each bounded variable past its bound leaves the equation alone.
+  | [NatEq a b] <- [c | c@(NatEq _ _) <- conds]
+  , all partialFree conds
+  , all linearCond conds
+  , Just bounds <- mapM lowerBound [c | c@(NatGe _ _) <- conds]
+  , let shift = substituteNat (Map.fromList [(v, NatAdd (NatVar v) (NatLit k)) | (v, k) <- Map.toList (Map.fromListWith max bounds)])
+  , Just answer <- linearEquation (shift a) (shift b) =
       if answer then Sat Map.empty else Unsat
   | [c@(NatGe _ _)] <- conds, partialFree c, linearCond c =
       let NatSOP ps = condSOP c
@@ -454,6 +470,36 @@ satisfiable budget conds
     holdsAll env = all ((== Just True) . holdsAt env) conds
     candidates = assignments vs (searchWidth budget (length vs) conds)
     vs = Set.toList (condVars conds)
+    -- The values of @x@ that every condition allows, as a least value and
+    -- perhaps a greatest; Nothing when an equation fixes no integer.
+    interval x = foldr meet (Just (0, Nothing)) conds
+      where
+        meet c acc = do
+          (lo, hi) <- acc
+          let ps = unNatSOP (condSOP c)
+              k = sum [npCoeff p | p <- ps, Map.null (npVars p)]
+              a = sum [npCoeff p | p <- ps, Map.keys (npVars p) == [x]]
+              upper h = Just (maybe h (min h) hi)
+          case c of
+            NatEq _ _
+              | a == 0 -> if k == 0 then Just (lo, hi) else Just (1, Just 0)
+              | negate k `mod` a /= 0 -> Just (1, Just 0)
+              | otherwise -> let v = negate k `div` a in Just (max lo v, upper v)
+            NatGe _ _
+              | a > 0 -> Just (max lo ((negate k + a - 1) `div` a), hi)
+              | a < 0 -> Just (lo, upper (k `div` negate a))
+              | k >= 0 -> Just (lo, hi)
+              | otherwise -> Just (1, Just 0)
+    -- @c*x + k >= 0@ with @c > 0@ as @x >= ceil(-k / c)@.
+    lowerBound cond = case unNatSOP (condSOP cond) of
+      ps
+        | [(x, c)] <- [(x, npCoeff p) | p <- ps, [(x, 1)] <- [Map.toList (npVars p)]]
+        , c > 0
+        , all (\p -> Map.null (npVars p) || Map.keys (npVars p) == [x]) ps
+        , length [() | p <- ps, not (Map.null (npVars p))] == 1 ->
+            let k = sum [npCoeff p | p <- ps, Map.null (npVars p)]
+             in Just (x, max 0 ((negate k + c - 1) `div` c))
+      _ -> Nothing
 
 -- | A value of the rigid variables, accepted by @admit@, at which a group
 -- has no solution, from a bounded search over a few rigid samples. A sample

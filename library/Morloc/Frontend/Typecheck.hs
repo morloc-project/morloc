@@ -207,8 +207,10 @@ typecheckWith expected = run
       (g2, e3) <- resolveInstances g1 e2
       let g3 = apply g2 g2
 
-      -- Re-check deferred kind constraints now that existentials are solved,
-      -- each one reported at the term where it arose (DIM-6).
+      -- Decide the Nat and Int conditions left open now that existentials
+      -- are solved: the deferred equations, each at the term where it
+      -- arose, and the non-negativity of every Nat position still open, at
+      -- the term whose type holds it (DIM-6, KIND-4, DIM-7).
       let rootIndex = case e0 of AnnoS gi _ _ -> gi
           site p = Map.findWithDefault rootIndex p (gammaDeferredAt g3)
           natEquation p@(t1, t2) = case (typeUToNatExpr (apply g3 t1), typeUToNatExpr (apply g3 t2)) of
@@ -216,19 +218,43 @@ typecheckWith expected = run
             _ -> Nothing
           natEquations = mapMaybe natEquation (gammaDeferred g3)
           trivial (a, b) = NS.normalize (NS.NatSub a b) == NS.NatSOP []
-      forM_ (natComponents [eq | eq@(_, _, ab) <- reverse natEquations, not (trivial ab)]) $ \eqs ->
-        case (NS.naturalSolution [ab | (_, _, ab) <- eqs], eqs) of
-          (Just True, _) -> return ()
-          (_, []) -> return ()
-          (answer, (i, _, _) : _) ->
-            MM.throwSourcedError i $ vsep
-              [ case answer of
-                  Just False -> "These kind-level equations have no solution in the natural numbers:"
-                  _ -> "The compiler cannot decide whether these kind-level equations have a solution in the natural numbers:"
-              , vsep [ let (d1, d2) = prettyTypeUPair (apply g3 t1) (apply g3 t2)
-                       in "  " <> d1 <+> "~" <+> d2
-                     | (_, (t1, t2), _) <- eqs ]
+          -- Both sides of an equation fill Nat positions, so each is a
+          -- natural too.
+          conditions = firstOfEach $
+            concat
+              [ [ (i, ND.NatEq a b, d1 <+> "~" <+> d2)
+                , (i, ND.NatGe a (NS.NatLit 0), d1 <+> ">= 0")
+                , (i, ND.NatGe b (NS.NatLit 0), d2 <+> ">= 0")
+                ]
+              | (i, (t1, t2), ab@(a, b)) <- reverse natEquations
+              , not (trivial ab)
+              , let (d1, d2) = prettyTypeUPair (apply g3 t1) (apply g3 t2)
               ]
+              <> [ (j, ND.NatGe e (NS.NatLit 0), prettyTypeU pos <+> ">= 0")
+                 | AnnoS (Idx j t) _ _ <- annoNodes e3
+                 , pos <- natPositions (apply g3 t)
+                 , Just e <- [typeUToNatExpr pos]
+                 , not (NS.isGround e)
+                 ]
+          -- Each condition once, at its first term.
+          firstOfEach cs = go Set.empty cs
+            where
+              go _ [] = []
+              go seen (x@(_, c, _) : rest)
+                | Set.member c seen = go seen rest
+                | otherwise = x : go (Set.insert c seen) rest
+      forM_ (conditionGroups conditions) $ \grp ->
+        case ND.decide Set.empty [c | (_, c, _) <- grp] of
+          ND.Holds _ -> return ()
+          answer -> case grp of
+            [] -> return ()
+            ((i, _, _) : _) ->
+              MM.throwSourcedError i $ vsep
+                [ case answer of
+                    ND.Refuted _ -> "These kind-level conditions have no solution:"
+                    _ -> "The compiler cannot decide whether these kind-level conditions have a solution:"
+                , vsep ["  " <> d | (_, _, d) <- grp]
+                ]
       let natPairs = [p | (_, p, _) <- natEquations]
       remaining <- fmap concat . flip mapM (filter (`notElem` natPairs) (gammaDeferred g3)) $ \p ->
         case recheckDeferred g3 { gammaDeferred = [p] } of
@@ -2645,13 +2671,13 @@ subtype' i a b g = do
         ) (newlyDeferred g g')
       return (locateDeferred i g g')
 
--- | Group Nat equations that share a variable. Each group starts with its
--- equation that comes first in the input.
-natComponents :: [(Int, (TypeU, TypeU), (NS.NatExpr, NS.NatExpr))] -> [[(Int, (TypeU, TypeU), (NS.NatExpr, NS.NatExpr))]]
-natComponents = foldr insert []
+-- | Conditions grouped so that no two groups share a variable, each group
+-- in input order.
+conditionGroups :: [(Int, ND.Condition, MDoc)] -> [[(Int, ND.Condition, MDoc)]]
+conditionGroups xs = map (map snd . List.sortOn fst) (foldl insert [] (zip [0 :: Int ..] xs))
   where
-    vars (_, _, (a, b)) = NS.freeNatVars a <> NS.freeNatVars b
-    insert x groups =
+    vars (_, (_, c, _)) = ND.condVars [c]
+    insert groups x =
       let (linked, apart) = List.partition (any (not . Set.null . Set.intersection (vars x) . vars)) groups
       in (x : concat linked) : apart
 

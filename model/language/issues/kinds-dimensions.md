@@ -6,11 +6,6 @@
   inferred and is accepted; no check stops `w = 12` against a 10-element
   `src`. A generated check must divide as KIND-3 does
   (toward zero), unlike Python `//` and R `%/%`.
-- [read] KIND-4 over inferred variables alone: a Nat position whose
-  variables are all inferred, and not connected to a signature's rigid
-  ones, is checked only when it becomes ground (Frontend/Typecheck.hs
-  checkFinalType); one left open is not checked for a non-negative
-  solution.
 - [read] Solving a Nat equation (NatSolver solveSOP) keeps only solutions
   whose coefficients are non-negative, so `k ~ n - w + 1` is deferred
   rather than solved; KIND-3 allows the solution, since the position
@@ -27,10 +22,6 @@
   type error (Frontend/Typecheck.hs checkRigidNats, the DIM-6 check after
   inference) where DIM-7 makes it a run-time check with a warning. Waits
   on the DIM-3 run-time checks.
-- [read] The DIM-6 check after inference (NatSolver naturalSolution)
-  splits Int variables before its exact linear case, so an equation over
-  an Int label (`n + k = 12`) is decided only by its bounded search; a
-  large constant gives "cannot decide". The one-decider step removes it.
 - [read] DIM-7 decides an Int variable as the difference of two naturals,
   which hides facts its coefficients showed: `h * h >= 0` with `h@Int`
   rigid is not proven (Typecheck/NatDecide.hs decideAssuming), so a body
