@@ -58,7 +58,7 @@ compiler cannot decide, is a type error at the term that produced it.
 
 ### DIM-7 One procedure decides Nat equations
 Intent: ruled 2026-10-30
-Tests: spec-dim-7-1, spec-dim-7-2, spec-dim-7-3
+Tests: spec-dim-7-1, spec-dim-7-2, spec-dim-7-3, spec-dim-7-4, spec-dim-7-5, spec-dim-7-6
 Code: deviates (issues/kinds-dimensions.md)
 
 Every Nat equation and every non-negativity condition (KIND-4) is decided
@@ -79,8 +79,12 @@ equation by polynomial identity with `*`, up to a bound on its degree and
 variable count); and when it is one linear equation or inequality over
 inferred variables without division. A condition also holds when it is an
 assumption, when it is a quotient's non-negativity and its dividend's
-holds, or when it exceeds a small multiple of one assumption, or the sum of
-two, by a polynomial with non-negative coefficients. Any other group holds when a
+holds, when it exceeds a small multiple of one assumption, or the sum of
+two, by a polynomial with non-negative coefficients, or when it is proven
+by cases on small values of a variable and the rest shifted past them. A
+group over a single variable is decided exactly: linear conditions by the
+interval they allow, polynomial ones by the values up to the bound past
+which no condition changes sign. Any other group holds when a
 small set of candidate witnesses proves it, and is refuted by a bounded
 search for a counterexample inside the assumptions. Unknown is not an
 error: the condition is checked at run time at the term that produced it

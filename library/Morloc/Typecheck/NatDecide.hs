@@ -315,13 +315,33 @@ definition rigid a b
       , sopToNatExpr (NatSOP [NatProduct (negate (npCoeff q)) (npVars q) | q <- qs, npCoeff q < 0])
       )
 
--- | A condition proven for every value of its variables by its normal form.
+-- | A condition proven for every value of its variables by its normal form:
+-- an equation whose sides normalize alike, or an inequality whose normal
+-- form is non-negative by 'nonNegativeByCases'.
 proven :: Condition -> Bool
 proven c = case c of
   NatEq _ _ -> not (hasOpaqueDivision d) && null (unNatSOP d)
-  NatGe _ _ -> not (hasOpaqueDivision d) && all ((>= 0) . npCoeff) (unNatSOP d)
+  NatGe _ _ -> not (hasOpaqueDivision d) && nonNegativeByCases 2 d
   where
     d = condSOP c
+
+-- | Whether a normal form is non-negative for every natural value of its
+-- variables. Every coefficient non-negative proves it; otherwise a variable
+-- of a negative term is split into the values below a shift @k@, each
+-- proven alone, and the rest written @x = y + k@ (up to @depth@ splits).
+-- @(n - 1) * (n - 1)@ is proven at @n = 0@ and as @y * y@ at @n = y + 1@.
+nonNegativeByCases :: Int -> NatSOP -> Bool
+nonNegativeByCases depth sop@(NatSOP ps)
+  | all ((>= 0) . npCoeff) ps = True
+  | depth <= 0 = False
+  | otherwise = case [v | p <- ps, npCoeff p < 0, v <- Map.keys (npVars p)] of
+      (x : _) -> any (splitAt x) [1, 2, 3]
+      [] -> False
+  where
+    at x e = normalize (substituteNat (Map.singleton x e) (sopToNatExpr sop))
+    splitAt x k =
+      all (\j -> nonNegativeByCases (depth - 1) (at x (NatLit j))) [0 .. k - 1]
+        && nonNegativeByCases (depth - 1) (at x (NatAdd (NatVar x) (NatLit k)))
 
 condSOP :: Condition -> NatSOP
 condSOP (NatEq a b) = normalize (NatSub a b)
@@ -443,6 +463,13 @@ satisfiable budget conds
   | (env : _) <- filter holdsAll candidates = Sat env
   -- A conjunction is unsatisfiable when one of its conditions is alone.
   | length conds > 1, any (\c -> satisfiable budget [c] == Unsat) conds = Unsat
+  -- Polynomial conditions on one variable: past the largest root of any of
+  -- them each keeps the sign of its leading coefficient, so the values up
+  -- to that bound decide the conjunction exactly.
+  | [x] <- vs, all partialFree conds, not (all linearCond conds), Just b <- rootBound x, b <= 100000 =
+      case [env | v <- [0 .. b + 1], let env = Map.singleton x v, holdsAll env] of
+        (env : _) -> Sat env
+        [] -> Unsat
   -- Linear conditions on one variable: intersect the intervals they allow.
   | [x] <- vs, all partialFree conds, all linearCond conds, Just (lo, hi) <- interval x =
       case hi of
@@ -470,6 +497,21 @@ satisfiable budget conds
     holdsAll env = all ((== Just True) . holdsAt env) conds
     candidates = assignments vs (searchWidth budget (length vs) conds)
     vs = Set.toList (condVars conds)
+    -- The largest Cauchy bound on the roots of the conditions' normal forms,
+    -- each a polynomial in @x@ alone.
+    rootBound x = maximum . (0 :) <$> mapM bound conds
+      where
+        bound c =
+          let ps = unNatSOP (condSOP c)
+              coeff k = sum [npCoeff p | p <- ps, Map.findWithDefault 0 x (npVars p) == k, Map.keysSet (npVars p) `Set.isSubsetOf` Set.singleton x]
+              n = maximum (0 : [Map.findWithDefault 0 x (npVars p) | p <- ps])
+              lead = coeff n
+           in if any (\p -> not (Map.keysSet (npVars p) `Set.isSubsetOf` Set.singleton x)) ps
+                then Nothing
+                else
+                  if n == 0 || lead == 0
+                    then Just 0
+                    else Just (1 + maximum (0 : [(abs (coeff k) + abs lead - 1) `div` abs lead | k <- [0 .. n - 1]]))
     -- The values of @x@ that every condition allows, as a least value and
     -- perhaps a greatest; Nothing when an equation fixes no integer.
     interval x = foldr meet (Just (0, Nothing)) conds

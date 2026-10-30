@@ -2035,7 +2035,42 @@ dim7Tests :: TestTree
 dim7Tests =
   testGroup
     "DIM-7"
-    [ testCase "spec-dim-7-1" $
+    [ accept
+        "spec-dim-7-4"
+        [r|
+        module main (f, g)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector m Int -> Int
+        sq :: Vector n Int -> Vector (n * n - 2 * n + 1) Int
+        pairs :: Vector n Int -> Vector (n * (n - 1) / 2) Int
+        f :: Vector n Int -> Int
+        f x = h (sq x)
+        g :: Vector n Int -> Int
+        g x = h (pairs x)
+        |]
+    , rejectNaming
+        "spec-dim-7-5"
+        ["solution"]
+        ["decide"]
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        sq :: Vector (m * m) Int -> Int
+        f :: Vector n Int -> Int
+        f x = sq x
+        |]
+    , rejectNaming
+        "spec-dim-7-6"
+        ["solution"]
+        ["decide"]
+        [r|
+        module main (x)
+        newtype Vector (n :: Nat) a = List a
+        sq :: Vector (m * m) Int -> Vector (m - 3) Int
+        v :: Vector 4 Int
+        x = sq v
+        |]
+    , testCase "spec-dim-7-1" $
         decide (DS.fromList [n]) [NatGe (NatSub (NatVar n) (NatLit 1)) (NatLit 0)]
           @?= Refuted (DM.fromList [(n, 0)])
     , testCase "spec-dim-7-2" $

@@ -135,6 +135,17 @@ examples =
       case decide (rigid ["h"]) [NatEq (v "m") (IntVar (tv "h"))] of
         Refuted env -> Map.lookup (tv "h") env @?= Just (-1)
         d -> assertFailure (show d)
+  , testCase "a square of a difference is proven by cases: (n - 1) * (n - 1) >= 0" $
+      let d = NatSub (v "n") (lit 1)
+       in assertBool "" (isHolds (decide (rigid ["n"]) [NatGe (NatMul d d) (lit 0)]))
+  , testCase "a count of pairs is proven by cases: n * (n - 1) / 2 >= 0" $
+      assertBool "" (isHolds (decide (rigid ["n"]) [NatGe (NatDiv (NatMul (v "n") (NatSub (v "n") (lit 1))) (lit 2)) (lit 0)]))
+  , testCase "no square is 7" $
+      assertBool "" (isRefuted (decide Set.empty [NatEq (NatMul (v "m") (v "m")) (lit 7)]))
+  , testCase "not every n is a square" $
+      case decide (rigid ["n"]) [NatEq (v "n") (NatMul (v "m") (v "m"))] of
+        Refuted env -> assertBool (show env) (Map.lookup (tv "n") env `notElem` map Just [0, 1, 4, 9])
+        d -> assertFailure (show d)
   , testCase "a rigid variable is not at least a larger one" $
       assertBool "" (isRefuted (decide (rigid ["a", "b"]) [NatGe (v "a") (v "b")]))
   ]

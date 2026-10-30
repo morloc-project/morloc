@@ -23,6 +23,12 @@
   type error (Frontend/Typecheck.hs checkRigidNats, the DIM-6 check after
   inference) where DIM-7 makes it a run-time check with a warning. Waits
   on the DIM-3 run-time checks.
+- [read] DIM-7 has no complete procedure for linear arithmetic: a group
+  of linear conditions over several inferred variables, beyond one
+  equation with lower bounds, is decided by a bounded search, so a
+  satisfiable group with only large solutions is reported undecided
+  (Typecheck/NatDecide.hs satisfiable). The Omega test would make every
+  linear group exact.
 - [read] DIM-7 decides an Int variable as the difference of two naturals,
   which hides facts its coefficients showed: `h * h >= 0` with `h@Int`
   rigid is not proven (Typecheck/NatDecide.hs decideAssuming), so a body
