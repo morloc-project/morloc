@@ -88,3 +88,11 @@ reference is not (PANIC-14).
   needs a parser that emits a crafted by-reference header. The R check
   reads the header's source byte by position (byte 14, value 2) rather
   than from morloc.h.
+- **A runtime panic inside a user generic reads as the user's in a release
+  build.** [reproduced, 2026-10-30] Violates PANIC-9. The rustmorloc test
+  `a_std_panic_raised_by_runtime_code_inside_a_user_generic_is_the_runtimes`
+  passes under `cargo test` and fails under `cargo test --release` (exit 10,
+  the user's verdict, where 11 is expected): with optimization the panic's
+  location is the user's file. Pools are built in release. Repro:
+  `cargo test --release -p rustmorloc --lib a_std_panic_raised` from
+  data/rust with `LD_LIBRARY_PATH=/opt/morloc/lib`.
