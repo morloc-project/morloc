@@ -40,6 +40,7 @@ specTests =
     , localOption (mkTimeout 2000000) instanceAnnotationTests
     , localOption (mkTimeout 5000000) dimTests
     , localOption (mkTimeout 2000000) dim7Tests
+    , localOption (mkTimeout 2000000) cls16Tests
     , localOption (mkTimeout 2000000) patTests
     , localOption (mkTimeout 2000000) lexTests
     , localOption (mkTimeout 2000000) sigTests
@@ -835,6 +836,148 @@ kindTests =
         newtype Vector (n :: Nat) a = List a
         type V (n :: Nat) a = Vector n a
         f :: V Int -> Int
+        |]
+    , reject
+        "spec-kind-2-1"
+        [r|
+        module main (f)
+        type R = Singleton "x" Int
+        f :: R -> Int
+        f x = 1
+        |]
+    , accept
+        "spec-kind-2-2"
+        [r|
+        module main (f)
+        type R = {x = Int}
+        f :: R -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-2-3"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        f :: Vector -> Int
+        f x = 1
+        |]
+    , accept
+        "spec-kind-2-4"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        f :: Vector Int -> Int
+        f x = 1
+        |]
+    , accept
+        "spec-kind-2-5"
+        [r|
+        module main (f)
+        type P a = {x = a}
+        f :: P Int -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-2-6"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        f :: [Vector] -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-2-7"
+        [r|
+        module main (f)
+        f :: {x = Singleton "y" Int} -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-2-8"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        type V = Vector
+        f :: V -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-2-9"
+        [r|
+        module main (f)
+        class Sh a where
+          sh :: a -> Singleton "x" Int
+        f :: Int -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-5-4"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        type X = Tbl Int
+        f :: X -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-5-1"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        f :: Tbl 3 4 -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-5-2"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        f :: Tbl Int -> Int
+        f x = 1
+        |]
+    , accept
+        "spec-kind-5-3"
+        [r|
+        module main (f)
+        newtype Tbl (n :: Nat) (r :: Rec) = Int
+        f :: Tbl 3 {x = Int} -> Int
+        f x = 1
+        |]
+    , reject
+        "spec-kind-4-1"
+        [r|
+        module main (g)
+        newtype Buffer (n :: Nat) a = List a
+        f :: Buffer (3 - 10) Int -> Int
+        g :: Int -> Int
+        g x = x
+        |]
+    , reject
+        "spec-tab-3-1"
+        [r|
+        module main (oops)
+        newtype Table (n :: Nat) (r :: Rec) = Int
+        getCol :: f@Str -> Table n r -> [ProjectField r f]
+        mk :: Table 2 {x = Int, y = Str}
+        oops = getCol "z" mk
+        |]
+    , accept
+        "spec-tab-3-2"
+        [r|
+        module main (ok)
+        newtype Table (n :: Nat) (r :: Rec) = Int
+        getCol :: f@Str -> Table n r -> [ProjectField r f]
+        mk :: Table 2 {x = Int, y = Str}
+        ok = getCol "x" mk
+        |]
+    , accept
+        "spec-kind-4-2"
+        [r|
+        module main (g)
+        newtype Buffer (n :: Nat) a = List a
+        f :: Buffer (10 - 3) Int -> Int
+        g :: Int -> Int
+        g x = x
         |]
     ]
 
@@ -1836,4 +1979,47 @@ dim7Tests =
   where
     n = TV "n"
     m = TV "m"
+
+cls16Tests :: TestTree
+cls16Tests =
+  testGroup
+    "CLS-16"
+    [ testCase "spec-cls-16-1" $
+        ( mostSpecific [general, vec (NatLitU 3) int]
+        , mostSpecific [vec (NatLitU 3) int, general]
+        , mostSpecific [general, ForallU m (vec (KVarU (m, KindNat)) int)] )
+          @?= ([vec (NatLitU 3) int], [vec (NatLitU 3) int], [ForallU m (vec (KVarU (m, KindNat)) int)])
+    , testCase "spec-cls-16-2" $
+        ( length (mostSpecific [ForallU a (vec n (vec n (VarU a))), vec (NatLitU 3) (vec (NatLitU 4) int)])
+        , mostSpecific [ForallU a (vec n (vec n (VarU a))), vec (NatLitU 3) (vec (NatLitU 3) int)] )
+          @?= (2, [vec (NatLitU 3) (vec (NatLitU 3) int)])
+    , accept
+        "spec-cls-16-5"
+        [r|
+        module main (f)
+        class C a where
+          c1 :: a -> Str
+          c2 :: a -> Str
+        instance C (a, Str) where
+          c1 x = "b1"
+          c2 x = "b2"
+        f :: (Int, Str) -> Str
+        f x = c2 x
+        |]
+    , testCase "spec-cls-16-3" $
+        ( isSubtypeOf (ForallU a (ForallU b (pair (VarU a) (VarU b)))) (ForallU c (pair (VarU c) int))
+        , isSubtypeOf (ForallU c (pair (VarU c) int)) (ForallU a (ForallU b (pair (VarU a) (VarU b))))
+        , isSubtypeOf (vec n int) (vec (VarU a) int) )
+          @?= (True, False, False)
+    ]
+  where
+    a = TV "a"
+    b = TV "b"
+    c = TV "c"
+    m = TV "m"
+    n = NatVarU (TV "n")
+    int = VarU (TV "Int")
+    vec x y = AppU (VarU (TV "Vec")) [x, y]
+    pair x y = AppU (VarU (TV "T")) [x, y]
+    general = ForallU a (vec n (VarU a))
 

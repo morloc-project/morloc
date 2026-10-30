@@ -108,8 +108,9 @@ instance more general than `T`) does. Is `m` at `T` (a) owned by `C T`
 alone, so it has only the default, or no implementation (REAL-3) if there
 is none, or (b) resolved through the more general instance, and if so,
 does the general instance's implementation join `C T`'s default as an
-alternative or replace it? Today the answer depends on whether
-`instance C T` has a body (issues/typeclasses.md).
+alternative or replace it? Today it is (b), replacing, whether or not
+`instance C T` has a body; root's bodiless `instance Eq (List a)` depends
+on it (issues/typeclasses.md).
 
 ### CLS-13 Defaults that call each other
 Intent: open
@@ -147,6 +148,7 @@ defined from a class's methods (`<`, `!=`, ...) may stay in `root`.
 
 ### CLS-16 The most specific matching instance is selected
 Intent: ruled 2026-10-29
+Tests: spec-cls-16-1, spec-cls-16-2, spec-cls-16-3, spec-cls-16-5
 Code: deviates (issues/typeclasses.md)
 
 Instances may overlap. At a use at type `T`, the instances whose heads match

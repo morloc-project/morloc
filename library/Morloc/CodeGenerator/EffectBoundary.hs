@@ -603,7 +603,7 @@ declaredSignature origin src = do
   return $ case sig of
     Just e ->
       let (vs, t) = unqualify (etype e)
-       in (Set.fromList vs, Just (unresolvedType2type t))
+       in (Set.fromList vs, Just (typeOf t))
     Nothing -> (Set.empty, Nothing)
 
 -- | The signature of the term a source call names. A call a user term makes
@@ -710,10 +710,10 @@ expandT scope t = go (64 :: Int) (type2typeu t)
     -- Only the head is resolved: the walks above expand each part as they
     -- reach it, and a type that recurs through an alias (@type Pat =
     -- [Pat]@) has no full expansion.
-    go 0 u = unresolvedType2type u
+    go 0 u = typeOf u
     go n u = case TE.reduceType scope u of
       Just u' -> go (n - 1) u'
-      Nothing -> unresolvedType2type u
+      Nothing -> typeOf u
 
 -- | A declared type with every arrow whose result is a function, through
 -- aliases, merged into one parameter list: @Int -> K@ with @type K = Int ->
@@ -1043,7 +1043,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
         ((_, headArgs, wireU, (packSrc, unpackSrc)) : _) -> do
           let instantiate args = foldr
                 (\(p, a) w -> case p of VarU pv -> substituteTVar pv a w; _ -> w)
-                (unresolvedType2type wireU)
+                (typeOf wireU)
                 (zip headArgs args)
               wireT = instantiate ts
               dWire = case declArgs hv (length ts) d of

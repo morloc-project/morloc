@@ -284,7 +284,24 @@ typecheckWith expected = run
           MM.throwSourcedError i $
             "Columns cannot be combined because both sides have: "
               <> hcat (punctuate ", " (map pretty ks))
-        [] -> return ix
+        [] -> case missingFields t of
+          ((k, ks) : _) ->
+            MM.throwSourcedError i $
+              "There is no field" <+> squotes (pretty k) <+> "among"
+                <+> hsep (punctuate "," (map (squotes . pretty) ks))
+          [] -> return ix
+
+    -- A field projected from a known row that lacks it.
+    missingFields :: TypeU -> [(Text, [Text])]
+    missingFields t0 =
+      [ (k, ks)
+      | ProjectFieldU r (StrLitU k) <- universeU t0
+      , Just ks <- [groundRowKeys r]
+      , k `notElem` ks
+      ]
+
+    universeU :: TypeU -> [TypeU]
+    universeU t0 = t0 : concatMap universeU (typeUChildren t0)
 
     -- A union of two known rows that share a key; 'reduceRecUnion' leaves
     -- it symbolic, so nothing else reports it.
@@ -415,7 +432,15 @@ resolveInstances g (AnnoS gi@(Idx _ gt) ci e0) = do
           rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
           -- Sibling aliases do not share instances: @instance Qux A@ does
           -- not match @A'@ though both evaluate to the same type.
-          rssSubtypes = filterByAliasChain scope gt rssCompat
+          rssMatching = filterByAliasChain scope gt rssCompat
+          -- An instance that gives no implementation of the method leaves
+          -- it to the most specific more general instance that does: answer
+          -- (b) of the open CLS-12.
+          implementedMoreGeneral h =
+            let general = [et | (t, rs) <- rssMatching, not (null rs), let et = etype t, generalizes True et h]
+             in mostSpecific general
+          hasFallback h = not (null (implementedMoreGeneral h))
+          rssSubtypes = [x | x@(t, rs) <- rssMatching, not (null rs && hasFallback (etype t))]
 
 
       -- Every most specific candidate is kept; Morloc.CodeGenerator.Realize

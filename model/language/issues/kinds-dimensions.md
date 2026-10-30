@@ -15,10 +15,6 @@
   deferred recheck after resolveInstances).
 - [reproduced] Kind-equation diagnostics print renamed variables:
   `4 ~ ((5 + a) + b)` for a signature written with `n` and `m`.
-- **Newtype and primitive applications are not kind-checked.** [reproduced]
-  Violates KIND-5 and KIND-2. `newtype Tbl (n :: Nat) (r :: Rec) = Int`:
-  `f :: Tbl Int -> Int` and `f :: Tbl 3 4 -> Int` both typecheck. Aliases
-  are checked (ALIAS-3, ALIAS-8). Repro: `/work/plans/issues/164/repro/s5-fill/`.
 - [reproduced] Violates KIND-6. A reserved type used without its declaring
   module has no parameter kinds: with only `import root`,
   `type MyTable n = Table n {x = Int, y = Bool}; g :: MyTable -> Int` fails
@@ -57,7 +53,8 @@
   manual's conv example then returns 7 elements typed `Vector 6`. No item
   types a slice of `Vector n a` (COLL-3 covers `[T]`). Repro: /work/plans/model-audit-2026-10-21/repro/C/dim/sl.loc,
   conv.loc.
-- **A Rec alias used as a term's type fails at code generation.**
-  [reproduced, 2026-10-21] Violates KIND-2. The types-kinds.asc recdef
-  example (a `type` alias of kind Rec used to type a term) passes typecheck
-  and fails at make with an internal message instead of a kind error.
+- [read] Two KIND-4 checks disagree on a negative intermediate. Restructure
+  rejects `(3 - 10) + 20` written in a signature (natural subtraction, as
+  in DIM-7), while Typecheck's final-type check normalizes the whole
+  expression to 13 and accepts it when it arises in inference.
+

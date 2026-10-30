@@ -1419,7 +1419,7 @@ fromSourceSignatures f0 = do
   GMap _ sigmap <- MM.gets stateSignatures
   tcls <- MM.gets stateTypeclasses
   scope <- MM.getGeneralScope
-  let f qs t = f0 scope qs (unresolvedType2type t)
+  let f qs t = f0 scope qs (typeOf t)
   return . concatMap (fromSig f tcls) . Map.elems $ sigmap
   where
     fromSig f _ (Monomorphic (TermTypes (Just et) srcs _)) =

@@ -12,7 +12,8 @@ unannotated parameter has kind `Type`, except an alias parameter (ALIAS-8). Any 
 
 ### KIND-2 Only a `Type`-kinded type classifies values
 Intent: proposed
-Code: deviates (issues/typecheck.md)
+Tests: spec-kind-2-1, spec-kind-2-2, spec-kind-2-3, spec-kind-2-4, spec-kind-2-5, spec-kind-2-6, spec-kind-2-7, spec-kind-2-8, spec-kind-2-9
+Code: conforms 2026-10-30
 
 `Nat`, `Str`, `Rec`, `List` and `Set` expressions exist only in the type
 system and are erased before anything runs. A type that classifies a term
@@ -31,7 +32,8 @@ DIM-7.
 
 ### KIND-4 A Nat is never negative
 Intent: ruled 2026-10-29
-Code: deviates (issues/typecheck.md, issues/kinds-dimensions.md)
+Tests: spec-kind-4-1, spec-kind-4-2
+Code: deviates (issues/kinds-dimensions.md)
 
 A `Nat` expression that reduces below zero is a type error where it
 occurs. One over rigid variables (POLY-7) is an error when it is negative for
@@ -43,7 +45,8 @@ Why: a signed quantity would be a separate kind.
 
 ### KIND-5 Missing non-`Type` arguments are filled gradually
 Intent: proposed
-Code: deviates (issues/typecheck.md)
+Tests: spec-kind-5-1, spec-kind-5-2, spec-kind-5-3, spec-kind-5-4
+Code: deviates (issues/kinds-dimensions.md)
 
 A type constructor given fewer arguments than it declares has its missing
 non-`Type` positions filled, left to right within each kind, with

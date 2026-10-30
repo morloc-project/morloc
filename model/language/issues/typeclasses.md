@@ -9,14 +9,13 @@
   Open: is the signature legal (checked against the instance type) or a
   located rejection?
 
-- **Whether an omitted method falls through to a catch-all instance depends
-  on whether the instance has a body.** [reproduced] Spec gap: CLS-12.
-  With `instance C a` sourcing `f` and `g`: `instance C Int where f x = ...`
-  makes `g` at Int run the catch-all; bodiless `instance C Int` makes `g`
-  at Int fail with "No implementation found for 'g'". Cause: a bodiless
-  instance registers an empty implementation set for every method
-  (Link.hs linkEmptyInstance), a bodied one only for the methods it writes
-  (Link.hs linkInstance).
+- **An omitted method falls through to a more general instance.** [read]
+  Spec gap: CLS-12 (open). Typecheck.resolveInstances chooses the most
+  specific instance among those that give an implementation of the method,
+  so `instance C Int` without `g` runs `g` from `instance C a`, whether or
+  not `instance C Int` has a body. root's bodiless `instance Eq (List a)`
+  relies on this for `==` on lists. Option (a) of CLS-12 would make these
+  uses errors.
 
 - **A class constraint is never checked unless a method of the class is
   used.** [reproduced] Violates CLS-5's obligation reading.
@@ -114,3 +113,27 @@
   variable (an open `mempty` inside a body), Realize.collapseExpr keeps the
   nearest of several incomparable instances instead of rejecting the use
   (`containsUnk` case of its resolveInstances).
+- **Realization cannot order a Nat-kinded instance head against a literal
+  one.** [read] Violates CLS-16. Realize.collapseExpr orders heads after
+  erasure, where a Nat variable is a placeholder that matches any Nat in
+  both directions, so `Vec n Int` and `Vec 3 Int` are equivalent there and
+  the choice falls to the alias chain. The typechecker orders them
+  correctly; realization should use its choice (C3 in the brittleness plan).
+- **Instances are chosen per method, not whole.** [reproduced] Violates
+  CLS-16. A bodied instance registers only the methods it writes, so a use
+  of a method sees only the instances that write it. With `class C a`
+  (`c1`, `c2`), `instance C (Int, b)` writing only `c1` and `instance C (a,
+  Str)` writing both, `f :: (Int, Str) -> Str; f x = c2 x` builds and runs
+  the second instance, while `c1` at the same type is rejected as
+  ambiguous.
+- **A field of a Rec alias used as a record type cannot be read.**
+  [reproduced] Violates KIND-2's record-type reading (ALIAS-11). `type R =
+  {x = Int}; f :: R -> Int; f r = .x r` passes the kind check and fails at
+  make "Subtype error: {x=Int} <: a [] [(x, b)]"; the inline `f :: {x =
+  Int} -> Int` and `f :: R -> R; f r = r` work.
+- **A Nat-omitting Packable instance head fails NEWT-9.** [reproduced]
+  `newtype Vec (n :: Nat) a = [a]; instance Packable [a] (Vec a)` is
+  rejected "The Packable instance for 'Vec a' packs from '[a]', but the
+  representation of 'Vec a' is '[a]'"; `Vec n a` builds. The head seems to
+  be compared before its Nat is filled (KIND-5).
+

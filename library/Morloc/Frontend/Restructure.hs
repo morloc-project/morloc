@@ -24,6 +24,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Morloc.BaseTypes as BT
 import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -1302,6 +1303,10 @@ checkTypeInvariants dag = do
   -- Invariant 4: a transparent alias is applied to all of its parameters.
   checkAliasApplications dag gscope
 
+  -- KIND-5, KIND-2, KIND-4: every argument has its parameter's kind, a type
+  -- that classifies a value is Type-kinded, and no Nat is negative.
+  checkTypeApplications dag gscope
+
   -- NEWT-9: a type with a Packable instance has a representation, and the
   -- instance packs from it.
   checkPackableRepresentations dag gscope
@@ -2386,7 +2391,7 @@ evidentKindWith aliasBody = go Set.empty
       LitU (LRec _) -> Just KindRec
       LitU (LList _) -> Just (KindList KindStr)
       LitU (LSet _) -> Just (KindSet KindStr)
-      OpU op args -> opKind seen op args
+      OpU op args -> operatorKind seen op args
       FunU _ _ -> Just KindType
       OptionalU _ -> Just KindType
       EffectU _ _ -> Just KindType
@@ -2398,7 +2403,7 @@ evidentKindWith aliasBody = go Set.empty
           | Just body <- aliasBody v -> go (Set.insert v seen) body
           | otherwise -> Just KindType
         [] -> Nothing
-    opKind seen op args
+    operatorKind seen op args
       | op `elem` [OpNatAdd, OpNatSub, OpNatMul, OpNatDiv] = arithmeticKindWith (go seen) op args
       | op == OpStrConcat = Just KindStr
       | op `elem` rowOps = Just KindRec
@@ -2516,6 +2521,157 @@ checkAliasApplications dag scope = do
       , Just n <- [arity v]
       , n /= length args
       ]
+
+-- | KIND-5: an argument of any declared type whose kind is evident has its
+-- parameter's kind (aliases are 'checkAliasApplications'). KIND-2: a type
+-- that classifies a value (a signature, an annotation, and every argument
+-- or field of one that classifies a value) is Type-kinded and applied to
+-- every parameter; a ground row there is a record type. KIND-4: a ground
+-- Nat expression written anywhere is not negative.
+checkTypeApplications :: DAG MVar a ExprI -> Scope -> MorlocMonad ()
+checkTypeApplications dag scope = do
+  case wrongKind of
+    [] -> return ()
+    ((i, v, p, pk, a, ak) : _) ->
+      MM.throwSourcedError i $
+        squotes (pretty v) <+> "takes a parameter" <+> squotes (pretty p) <+> "of kind" <+> pretty pk
+          <> ", but is given" <+> squotes (pretty a) <> ", of kind" <+> pretty ak
+  case [(i, t, k) | (i, t) <- valueTypes, Just k <- [kindIn t], k /= KindType, not (isRecordType t)] of
+    [] -> return ()
+    ((i, t, k) : _) ->
+      MM.throwSourcedError i $
+        squotes (pretty t) <+> "has kind" <+> pretty k
+          <> ", but a type that classifies a value has kind Type"
+  case [(i, v, ns, length args) | (i, v, args) <- valueHeads <> bodyApplications, Just ns <- [arities v], length args `notElem` ns] of
+    [] -> return ()
+    ((i, v, ns, k) : _) ->
+      MM.throwSourcedError i $
+        squotes (pretty v) <+> "takes" <+> hsep (punctuate " or" (map pretty ns))
+          <+> "arguments, but is applied to" <+> pretty k
+  case [(i, e, n) | (_, (m, _)) <- Map.toList dag, (i, t) <- writtenTypes m, (e, n) <- negativeNats t] of
+    [] -> return ()
+    ((i, e, n) : _) ->
+      MM.throwSourcedError i $
+        "The Nat" <+> squotes (pretty e) <+> "reduces to" <+> pretty n <> ", but a Nat is never negative"
+  where
+    applied =
+      [ (i, v, args)
+      | (_, (m, _)) <- Map.toList dag
+      , (i, t) <- writtenTypes m
+      , (v, args) <- typeApplications t
+      ]
+    wrongKind =
+      [ (i, v, p, pk, a, ak)
+      | (i, v, args) <- applied
+      , Just entries <- [Map.lookup v scope]
+      , not (any (\(_, _, _, _, k) -> k == TypedefAlias) entries)
+      , (ps : _) <- [[ps | (ps, _, _, _, _) <- entries, length ps == length args]]
+      , (Left (p, pk), a) <- zip ps args
+      , not (isVariable a)
+      , Just ak <- [kindIn a]
+      , ak /= pk
+      , not (pk == KindType && ak == KindRec && isRecordType a)
+      ]
+    kindIn = evidentKindWith aliasBody . rewriteCrossKindBuiltins
+    aliasBody v = case Map.lookup v scope of
+      Just ((ps, b, _, _, TypedefAlias) : _) | all isLeft ps -> Just (rewriteCrossKindBuiltins b)
+      _ -> Nothing
+    isVariable t = case t of
+      VarU (TV n) -> isTypeVariableName n
+      KVarU _ -> True
+      _ -> False
+    arities v = case Map.lookup v scope of
+      Just entries@(_ : _) | not (any (\(_, _, _, _, k) -> k == TypedefAlias) entries) ->
+        Just [length ps | (ps, _, _, _, _) <- entries]
+      _ -> Nothing
+    -- The application at the head of a type, for the arity check.
+    headApplication t = case TE.flattenApp t of
+      AppU (VarU v) args -> [(v, args)]
+      VarU v@(TV n) | not (isTypeVariableName n) -> [(v, [])]
+      _ -> []
+    isRecordType t = case t of
+      LitU (LRec _) -> True
+      RecExtendU {} -> isNothing (kindOfU t)
+      _ -> case headApplication t of
+        [(v, _)] | Just ((_, b, _, _, TypedefAlias) : _) <- Map.lookup v scope -> isRecordType b
+        _ -> False
+    valueHeads = [(i, v', args') | (i, t) <- valueTypes, (v, args) <- headApplication t, (v', args') <- [throughAliases (64 :: Int) v args]]
+    -- The head an alias application stands for, for the arity check.
+    throughAliases 0 v args = (v, args)
+    throughAliases k v args = case Map.lookup v scope of
+      Just ((ps, b, _, _, TypedefAlias) : _)
+        | length ps == length args
+        , [(v', bargs)] <- headApplication b ->
+            throughAliases (k - 1) v' bargs
+      _ -> (v, args)
+    -- An applied type in a declaration's body; a bare one there may name a
+    -- constructor, as an alias of `List` does.
+    bodyApplications =
+      [ (i, v, args)
+      | (_, (m, _)) <- Map.toList dag
+      , ExprI i (TypE (ExprTypeE Nothing _ _ body _ _)) <- everyExpr m
+      , (v, args@(_ : _)) <- typeApplications body
+      ]
+    valueTypes =
+      [ (i, u)
+      | (_, (m, _)) <- Map.toList dag
+      , (i, t) <- signedTypes m
+      , u <- valuePositions t
+      ]
+    -- A type and every part of it that classifies a value.
+    valuePositions t = case t of
+      ForallU _ x -> valuePositions x
+      FunU ts r -> concatMap valuePositions (ts <> [r])
+      EffectU _ x -> valuePositions x
+      _ -> t : case t of
+        OptionalU x -> valuePositions x
+        NamU _ _ _ rs -> concatMap (valuePositions . snd) rs
+        LitU (LRec fs) -> concatMap (valuePositions . snd) fs
+        RecExtendU _ x rest | isRecordType t -> valuePositions x <> fieldPositions rest
+        _ -> case TE.flattenApp t of
+          AppU (VarU v@(TV n)) args
+            | Just entries <- Map.lookup v scope ->
+                case [ps | (ps, _, _, _, _) <- entries, length ps == length args] of
+                  (ps : _) -> concat [valuePositions a | (Left (_, KindType), a) <- zip ps args]
+                  [] -> []
+            | v == BT.list || (T.isPrefixOf "Tuple" n && v == BT.tuple (length args)) -> concatMap valuePositions args
+          _ -> []
+    fieldPositions r = case r of
+      RecExtendU _ x rest -> valuePositions x <> fieldPositions rest
+      _ -> []
+    signedTypes m =
+      [ (i, t)
+      | ExprI i e <- everyExpr m
+      , t <- case e of
+          SigE (Signature _ _ et) -> [etype et]
+          AnnE _ t' -> [t']
+          ClsE (Typeclass _ _ _ sigs) -> [etype et | Signature _ _ et <- sigs]
+          _ -> []
+      ]
+    everyExpr x@(ExprI _ e) = x : concatMap everyExpr children
+      where
+        children = case e of
+          ModE _ es -> es
+          AssE _ y ys -> y : ys
+          IstE _ _ _ _ ys -> ys
+          _ -> AST.exprIChildren e
+    negativeNats t =
+      [ (sub', n)
+      | sub'@(OpU OpNatSub [_, _]) <- universe t
+      , Just n <- [groundNat sub']
+      , n < 0
+      ]
+    universe t = t : concatMap universe (typeUChildren t)
+    groundNat t = case t of
+      LitU (LNat n) -> Just n
+      OpU OpNatAdd [a, b] -> (+) <$> groundNat a <*> groundNat b
+      OpU OpNatSub [a, b] -> (-) <$> groundNat a <*> groundNat b
+      OpU OpNatMul [a, b] -> (*) <$> groundNat a <*> groundNat b
+      OpU OpNatDiv [a, b] -> do
+        x <- groundNat a
+        y <- groundNat b
+        if y == 0 then Nothing else Just (x `div` y)
+      _ -> Nothing
 
 -- | Give each parameter of a transparent alias the kind of the slots it
 -- fills in the alias's body: in @type Image h w = Tensor3 h w 3 U8@, @h@

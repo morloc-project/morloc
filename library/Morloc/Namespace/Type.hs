@@ -67,7 +67,6 @@ module Morloc.Namespace.Type
   , type2typeu
   , splitFunAt
   , EType (..)
-  , unresolvedType2type
 
     -- * Smart constructors for kind operators
   , opArity
@@ -166,9 +165,8 @@ module Morloc.Namespace.Type
   , equivalent
   , mostGeneral
   , mostSpecific
+  , generalizes
   , mostSpecificSubtypes
-  , substituteFirst
-  , findFirst
   , dataCtorsOfName
   , dataBodyCtors
   ) where
@@ -1160,115 +1158,97 @@ instance Typelike TypeU where
 ----- Partial order logic
 
 instance P.PartialOrd TypeU where
-  (<=) (VarU v1) (VarU v2) = v1 == v2
-  (<=) (NatVarU v1) (NatVarU v2) = v1 == v2
-  (<=) (ExistU v1 (ts1, _) (rs1, _)) (ExistU v2 (ts2, _) (rs2, _)) =
-    v1 == v2
-      && length ts1 == length ts2
-      && and (zipWith (P.<=) ts1 ts2)
-      && and [maybe False (t1 P.<=) (lookup k rs2) | (k, t1) <- rs1]
-  (<=) (ForallU v t1) t2
-    | (P.==) (ForallU v t1) t2 = True
-    | otherwise = (P.<=) (substituteFirst v t1 t2) t2
-  (<=) (FunU (t11 : rs1) t12) (FunU (t21 : rs2) t22) = t11 P.<= t21 && FunU rs1 t12 P.<= FunU rs2 t22
-  (<=) (FunU [] t12) (FunU [] t22) = t12 P.<= t22
-  (<=) (AppU t1 (t11 : rs1)) (AppU t2 (t21 : rs2)) = t11 P.<= t21 && AppU t1 rs1 P.<= AppU t2 rs2
-  (<=) (AppU t1 []) (AppU t2 []) = t1 P.<= t2
-  (<=) (NamU o1 n1 ps1 ((k1, e1) : rs1)) (NamU o2 n2 ps2 es2) =
-    case DL.partition ((== k1) . fst) es2 of
-      ([(_, e2)], rs2) -> e1 P.<= e2 && NamU o1 n1 ps1 rs1 P.<= NamU o2 n2 ps2 rs2
-      _ -> False
-  (<=) (NamU o1 n1 ps1 []) (NamU o2 n2 ps2 []) =
-    o1 == o2 && n1 == n2 && length ps1 == length ps2
-  (<=) (EffectU e1 t1) (EffectU e2 t2) = e1 == e2 && t1 P.<= t2
-  (<=) (OptionalU t1) (OptionalU t2) = t1 P.<= t2
-  -- NatVoid is a wildcard for any Nat.
-  (<=) NatVoidU (NatVarU _) = True
-  (<=) (NatVarU _) NatVoidU = True
-  (<=) NatVoidU NatVoidU = True
-  (<=) (OpU op1 args1) (OpU op2 args2) =
-    op1 == op2
-      && length args1 == length args2
-      && and (zipWith (P.<=) args1 args2)
-  (<=) (LitU l1) (LitU l2) = l1 == l2
-  (<=) NatVoidU (OpU op _) = isNatOpTag op
-  (<=) (OpU op _) NatVoidU = isNatOpTag op
-  (<=) NatVoidU (LitU (LNat _)) = True
-  (<=) (LitU (LNat _)) NatVoidU = True
-  (<=) (LabeledU _ t1) t2 = t1 P.<= t2
-  (<=) t1 (LabeledU _ t2) = t1 P.<= t2
-  (<=) _ _ = False
+  (<=) = generalizes False
 
   -- Alpha-equivalence: binding the same variables in a different order
   -- gives an equal type.
   (==) = alphaEq
 
-substituteFirst :: TVar -> TypeU -> TypeU -> TypeU
-substituteFirst v t1 t2 = case findFirst v t1 t2 of
-  (Just t) -> substituteTVar v t t1
-  Nothing -> t1
-
-findFirst :: TVar -> TypeU -> TypeU -> Maybe TypeU
-findFirst v = f
+-- | Whether the first type instantiates to the second. Its forall-bound
+-- variables may each take one value, and so may its free kind variables
+-- when @kinds@ is set (they are implicitly quantified in an instance head);
+-- every variable of the second type is fixed. An erased Nat placeholder
+-- matches any Nat either way.
+generalizes :: Bool -> TypeU -> TypeU -> Bool
+generalizes kinds t1 t2 = isJust (match flex0 t1 t2 Map.empty)
   where
-    f (VarU v') t2
-      | v == v' = Just t2
-      | otherwise = Nothing
-    f (NatVarU v') t2
-      | v == v' = Just t2
-      | otherwise = Nothing
-    f (StrVarU v') t2
-      | v == v' = Just t2
-      | otherwise = Nothing
-    f (RecVarU v') t2
-      | v == v' = Just t2
-      | otherwise = Nothing
-    f (ListVarU v') t2
-      | v == v' = Just t2
-      | otherwise = Nothing
-    f (SetVarU v') t2
-      | v == v' = Just t2
-      | otherwise = Nothing
-    f (ForallU v1 t1) (ForallU v2 t2)
-      | v == v1 = Nothing
-      | otherwise = f t1 (substituteTVar v2 (VarU v1) t2)
-    f (ForallU v1 t1) t2
-      | v == v1 = Nothing
-      | otherwise = f (substituteTVar v1 (VarU v1) t1) t2
-    f (FunU ts1 t1) (FunU ts2 t2) =
-      foldl firstOf Nothing (zipWith f (ts1 <> [t1]) (ts2 <> [t2]))
-    f (AppU t1 ts1) (AppU t2 ts2) =
-      foldl firstOf Nothing (zipWith f (t1 : ts1) (t2 : ts2))
-    f (NamU o1 n1 ps1 ((k1, e1) : rs1)) (NamU o2 n2 ps2 es2) =
-      case DL.partition ((== k1) . fst) es2 of
-        ([(_, e2)], rs2) -> firstOf (f e1 e2) (f (NamU o1 n1 ps1 rs1) (NamU o2 n2 ps2 rs2))
-        _ -> Nothing
-    f (EffectU _ t1) (EffectU _ t2) = f t1 t2
-    f (OptionalU t1) (OptionalU t2) = f t1 t2
-    f (OpU op1 args1) (OpU op2 args2)
-      | op1 == op2 && length args1 == length args2 =
-          foldl firstOf Nothing (zipWith f args1 args2)
-      | otherwise = Nothing
-    f (LitU (LRec fs1)) (LitU (LRec fs2))
-      | map fst fs1 == map fst fs2 =
-          foldl firstOf Nothing (zipWith f (map snd fs1) (map snd fs2))
-      | otherwise = Nothing
-    f (LitU (LList es1)) (LitU (LList es2))
-      | length es1 == length es2 =
-          foldl firstOf Nothing (zipWith f es1 es2)
-      | otherwise = Nothing
-    f (LitU (LSet es1)) (LitU (LSet es2))
-      | length es1 == length es2 =
-          foldl firstOf Nothing (zipWith f es1 es2)
-      | otherwise = Nothing
-    f (LabeledU _ t1) t2 = f t1 t2
-    f t1 (LabeledU _ t2) = f t1 t2
-    f _ _ = Nothing
+    flex0 = Set.fromList [v | kinds, (v, form) <- varForms t1, isKindForm form]
+    isKindForm VarPlain = False
+    isKindForm _ = True
 
-    firstOf :: Maybe a -> Maybe a -> Maybe a
-    firstOf (Just x) _ = Just x
-    firstOf _ (Just x) = Just x
-    firstOf _ _ = Nothing
+    match :: Set.Set TVar -> TypeU -> TypeU -> Map TVar TypeU -> Maybe (Map TVar TypeU)
+    match flex a b s = case (a, b) of
+      (LabeledU _ x, _) -> match flex x b s
+      (_, LabeledU _ y) -> match flex a y s
+      (ForallU v x, _) -> match (Set.insert v flex) x b s
+      _ | Just (v, ok) <- flexible flex a -> if ok b then bind v b s else Nothing
+      (_, ForallU w y) ->
+        let w' = rigidName flex w
+            form = maybe VarPlain id (lookup w (varForms y))
+         in match flex a (substituteTVar w (rebuildVar form w') y) s
+      (VarU v, VarU w) -> guard (v == w) s
+      (KVarU v, KVarU w) -> guard (v == w) s
+      (ListVarU v, ListVarU w) -> guard (v == w) s
+      (SetVarU v, SetVarU w) -> guard (v == w) s
+      (ExistU v (ts1, _) (rs1, _), ExistU w (ts2, _) (rs2, _))
+        | v == w, length ts1 == length ts2 ->
+            pairs flex (zip ts1 ts2) s
+              >>= \s' -> pairs flex [(x, y) | (k, x) <- rs1, Just y <- [lookup k rs2]] s'
+              >>= \s'' -> guard (all (\(k, _) -> isJust (lookup k rs2)) rs1) s''
+      (FunU ts1 r1, FunU ts2 r2) | length ts1 == length ts2 -> pairs flex (zip (r1 : ts1) (r2 : ts2)) s
+      (AppU h1 as1, AppU h2 as2) | length as1 == length as2 -> pairs flex (zip (h1 : as1) (h2 : as2)) s
+      (NamU o1 n1 ps1 rs1, NamU o2 n2 ps2 rs2)
+        | o1 == o2, n1 == n2, length ps1 == length ps2, DL.sort (map fst rs1) == DL.sort (map fst rs2) ->
+            pairs flex (zip ps1 ps2 <> [(x, y) | (k, x) <- rs1, Just y <- [lookup k rs2]]) s
+      (EffectU e1 x, EffectU e2 y) | e1 == e2 -> match flex x y s
+      (OptionalU x, OptionalU y) -> match flex x y s
+      (OpU op1 as1, OpU op2 as2) | op1 == op2, length as1 == length as2 -> pairs flex (zip as1 as2) s
+      (LitU (LRec fs1), LitU (LRec fs2)) | map fst fs1 == map fst fs2 -> pairs flex (zip (map snd fs1) (map snd fs2)) s
+      (LitU (LList es1), LitU (LList es2)) | length es1 == length es2 -> pairs flex (zip es1 es2) s
+      (LitU (LSet es1), LitU (LSet es2)) | length es1 == length es2 -> pairs flex (zip es1 es2) s
+      (LitU l1, LitU l2) -> guard (l1 == l2) s
+      (NatVoidU, y) | natLike y -> Just s
+      (x, NatVoidU) | natLike x -> Just s
+      (VoidU k1, VoidU k2) -> guard (k1 == k2) s
+      (ListVoidU, ListVoidU) -> Just s
+      (SetVoidU, SetVoidU) -> Just s
+      _ -> Nothing
+
+    -- A bound variable of the second type, renamed apart from the first's.
+    rigidName flex (TV w) = head [v | k <- [0 :: Int ..], let v = TV (w <> "~" <> DT.pack (show k)), not (Set.member v flex)]
+
+    pairs flex xys s = foldM (\s' (x, y) -> match flex x y s') s xys
+
+    bind v b s = case Map.lookup v s of
+      Just b0
+        | alphaEq b0 b -> Just s
+        | b0 == NatVoidU, natLike b -> Just (Map.insert v b s)
+        | b == NatVoidU, natLike b0 -> Just s
+        | otherwise -> Nothing
+      Nothing -> Just (Map.insert v b s)
+
+    guard True s = Just s
+    guard False _ = Nothing
+
+    -- A flexible variable, and what it may stand for.
+    flexible flex t = case t of
+      VarU v | Set.member v flex -> Just (v, \b -> isNothing (kindOfU b))
+      KVarU (v, k) | Set.member v flex -> Just (v, \b -> kindOfU b == Just k || k == KindRec && isRow b)
+      ListVarU v | Set.member v flex -> Just (v, \b -> kindOfU b == Just (KindList KindStr))
+      SetVarU v | Set.member v flex -> Just (v, \b -> kindOfU b == Just (KindSet KindStr))
+      _ -> Nothing
+
+    isRow b = case b of
+      LitU (LRec _) -> True
+      RecExtendU {} -> True
+      _ -> False
+
+    natLike x = case x of
+      NatVarU _ -> True
+      NatVoidU -> True
+      LitU (LNat _) -> True
+      OpU op _ -> isNatOpTag op
+      _ -> False
 
 -- | The carrier a type variable occurs in. A variable must be replaced by a
 -- value of its own kind, so a renaming has to rebuild the carrier it found.
@@ -1495,15 +1475,19 @@ equivalent t1 t2 = isSubtypeOf t1 t2 && isSubtypeOf t2 t1
 
 -- | find the most specific subtypes
 mostSpecificSubtypes :: TypeU -> [TypeU] -> [TypeU]
-mostSpecificSubtypes t ts = mostSpecific $ filter (`isSubtypeOf` t) ts
+mostSpecificSubtypes t ts = mostSpecific $ filter (\x -> generalizes True x t) ts
 
--- | find all types that are not greater than any other type
+-- | The instance heads no other head is strictly more general than. A kind
+-- variable in a head is implicitly quantified, so it is flexible here.
 mostGeneral :: [TypeU] -> [TypeU]
-mostGeneral = P.minima
+mostGeneral ts = [t | t <- ts, not (any (`strictlyMoreGeneral` t) ts)]
 
--- | find all types that are not less than any other type
+-- | The instance heads no other head is strictly more specific than (CLS-16).
 mostSpecific :: [TypeU] -> [TypeU]
-mostSpecific = P.maxima
+mostSpecific ts = [t | t <- ts, not (any (strictlyMoreGeneral t) ts)]
+
+strictlyMoreGeneral :: TypeU -> TypeU -> Bool
+strictlyMoreGeneral a b = generalizes True a b && not (generalizes True b a)
 
 ---- Utility functions
 
@@ -1666,39 +1650,6 @@ splitFunAt n (FunT ins out)
   | length ins > n = (take n ins, FunT (drop n ins) out)
   | otherwise = (ins, out)
 splitFunAt _ t = ([], t)
-
-unresolvedType2type :: TypeU -> Type
-unresolvedType2type (VarU v) = VarT v
-unresolvedType2type ExistU {} = error "Cannot cast existential type to Type"
--- An undetermined variable is carried as 'UnkT', whose 'TypeU' form is a
--- variable quantified over itself ('type2typeu').
-unresolvedType2type (ForallU v (VarU v')) | v == v' = UnkT v
-unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
-unresolvedType2type (FunU ts t) = FunT (map unresolvedType2type ts) (unresolvedType2type t)
-unresolvedType2type (AppU v ts) = AppT (unresolvedType2type v) (map unresolvedType2type ts)
-unresolvedType2type (NamU t n ps rs) = NamT t n (map unresolvedType2type ps) [(k, unresolvedType2type e) | (k, e) <- rs]
-unresolvedType2type (EffectU effs t) = mkEffectT (resolveEffectSet effs) (unresolvedType2type t)
-unresolvedType2type (OptionalU t) = OptionalT (unresolvedType2type t)
-unresolvedType2type (KVarU (_, k)) = VoidT k
-unresolvedType2type (VoidU k) = VoidT k
-unresolvedType2type (ListVarU _) = VoidT (KindList KindStr)
-unresolvedType2type ListVoidU = VoidT (KindList KindStr)
-unresolvedType2type (SetVarU _) = VoidT (KindSet KindStr)
-unresolvedType2type SetVoidU = VoidT (KindSet KindStr)
-unresolvedType2type (OpU OpNatAdd [a, b]) = NatAddT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (OpU OpNatSub [a, b]) = NatSubT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (OpU OpNatMul [a, b]) = NatMulT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (OpU OpNatDiv [a, b]) = NatDivT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (OpU OpStrConcat [a, b]) = StrConcatT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (OpU op _) = case opKind op of
-  KindType -> NatVoidT
-  k -> VoidT k
-unresolvedType2type (LitU (LNat n)) = NatLitT n
-unresolvedType2type (LitU (LStr s)) = StrLitT s
-unresolvedType2type (LitU (LRec _)) = VoidT KindRec
-unresolvedType2type (LitU (LList _)) = VoidT (KindList KindStr)
-unresolvedType2type (LitU (LSet _)) = VoidT (KindSet KindStr)
-unresolvedType2type (LabeledU _ t) = unresolvedType2type t
 
 -- | A variable name used in neither type.
 newVariable :: TypeU -> TypeU -> TVar

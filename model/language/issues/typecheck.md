@@ -3,15 +3,6 @@
 Programs that typecheck and fail later, rejections with no location, and
 literal and record gaps. Reproduced on 0.109.0 unless marked.
 
-- **Non-`Type` signature passes typecheck.** [reproduced] Violates KIND-2.
-  `import root-py; type R = Singleton "x" Int; f :: R -> Int; f x = 1`:
-  typecheck prints `f :: R -> Int`; make fails "cannot serialize type
-  Singleton "x" Int -- no per-language alias resolution for Singleton",
-  located at the export list.
-- **Bare `Vector` passes typecheck.** [reproduced] Violates KIND-5.
-  `import vector-py; a :: Vector -> Str; a t = "x"`: typecheck accepts;
-  make fails "cannot serialize parameterised pure morloc type: Vector" at
-  the export list.
 - **Unreduced Rec expression not equal to itself.** [reproduced] Violates
   TEQ-4. `newtype Frame (r :: Rec); select, mySelect :: l@[Str] -> Frame r
   -> Frame (Restrict r l); mySelect l t = select l t` fails "Cannot compare
@@ -39,14 +30,10 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   (`f :: (Member "q" (Keys r)) => Frame r -> Int` at `Frame {x = Int}`),
   `Disjoint: shared element(s) 'x'`. An overlap through `+` is located.
 - **Rejections located at the export list.** [reproduced] Violates DIAG-2
-  (location of the construct): every make-time failure above, and an
-  exported `g :: Buffer (3 - 10) Int -> Int` ("A dimension may not be
-  negative"), and a list or record table column (`t :: Table 2 {xs =
+  (location of the construct): every make-time failure above, and a list
+  or record table column (`t :: Table 2 {xs =
   [Int]}`, accepted by typecheck, refused by make), point at
   `main.loc:1:14`. See model/compiler/issues/typecheck-output.md.
-- [reproduced] Violates KIND-4: an unexported, unused
-  `f :: Buffer (3 - 10) Int -> Int` is accepted silently; exported or
-  called, it is rejected.
 - **Exported method error.** [reproduced] Violates MOD-2 and MOD-10 in
   spirit. A module whose export list is `(Pretty, exclaim, pretty)`, with
   `pretty` a method of `Pretty`: importing it fails "Module '.numops' does
