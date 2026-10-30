@@ -72,7 +72,7 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , toIType
   )
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.ValueArgs (appValueArgs, valueArgsF)
+import Morloc.CodeGenerator.ValueArgs (appValueArgs, appMacroArgs, macroArgsF, valueArgsF)
 import Morloc.CodeGenerator.Ownership
 import Morloc.Build.CargoLock (mergeCargoLocks)
 import qualified Morloc.Build.Params as BP
@@ -226,9 +226,10 @@ rustTypeOf = f
     -- the name itself otherwise -- a generated type is monomorphic per
     -- instantiation and spells nothing of its arguments. The arguments are
     -- stored positions, so a function among them boxes ('rustFieldType').
-    nominalTypeName x ps
+    nominalTypeName gv x ps
       | T.any (== '$') x = do
-          let (typeTs, kindCount) = partitionKindArgsF ps
+          gscope <- CMS.gets rsGScope
+          let (typeTs, kindCount) = macroArgsF gscope gv ps
           ts' <- mapM rustFieldType typeTs
           return . pretty $ expandMacro x (map render ts') kindCount
       | otherwise = return (pretty (nativeTypeName x))
@@ -239,13 +240,14 @@ rustTypeOf = f
     -- An enum lowers to its concrete name; the `#[repr(u8)] enum` that
     -- name refers to is either generated for this pool or supplied by the
     -- user through a `data Rust => X = "..."` mapping.
-    f (EnumF (FV _ (CV x)) ps _) = nominalTypeName x ps
+    f (EnumF (FV gv (CV x)) ps _) = nominalTypeName gv x ps
     -- A variant lowers to its concrete name; the `enum` carrying the arms
     -- is generated for this pool or supplied by a `data Rust => X = "..."`.
-    f (VariantF (FV _ (CV x)) ps _) = nominalTypeName x ps
+    f (VariantF (FV gv (CV x)) ps _) = nominalTypeName gv x ps
     f (AppF t ts) = do
       t' <- f t
-      let (typeTs, kindCount) = partitionKindArgsF ts
+      gscope <- CMS.gets rsGScope
+      let (typeTs, kindCount) = appMacroArgs gscope t ts
       -- Type arguments are STORED positions (a Vec element, a tuple slot): a
       -- function leaf among them must box to `Arc<dyn Fn>` (a bare
       -- `impl Fn` is illegal in a container), which is exactly 'rustFieldType'.
@@ -262,9 +264,8 @@ rustTypeOf = f
       t' <- rustFieldType t
       return $ "::std::option::Option<" <> t' <> ">"
     f (NatLitF _) = return mempty
-    f NatVoidF = return mempty
+    f (VoidF _) = return mempty
     f (StrLitF _) = return mempty
-    f StrVoidF = return mempty
     -- A function value inside a type (a field, an element, a payload, the
     -- result of a function) is a trait object; only a manifold's own
     -- parameters and return are `impl` ('rustArgType', 'rustReturnType').
@@ -283,7 +284,7 @@ rustTypeOf = f
         Nothing -> error $ "Rust: record missing from recmap: " <> show v
     -- User-mapped record: the concrete struct name is the CVar text, or the
     -- template it holds instantiated with this occurrence's arguments.
-    f (NamF _ (FV _ (CV s)) ps _) = nominalTypeName s ps
+    f (NamF _ (FV gv (CV s)) ps _) = nominalTypeName gv s ps
     -- Back-reference to a recursive record: resolve the concrete struct name
     -- via the concrete scope (the CVar slot is unreliable after weave).
     -- A record the compiler would generate cannot refer to itself: its
@@ -327,7 +328,7 @@ rustIsCopy (OptionalF t) = rustIsCopy t
 -- shape 'printRustEnum' emits.
 rustIsCopy (EnumF _ _ _) = True
 rustIsCopy (AppF (VarF (FV (TV gv) _)) ts)
-  | T.isPrefixOf "Tuple" gv = all rustIsCopy (fst (partitionKindArgsF ts))
+  | T.isPrefixOf "Tuple" gv = all rustIsCopy (fst (partitionKindArgs kindOfF ts))
 -- An applied type whose Rust spelling is a Copy scalar: its arguments are
 -- phantom (no `$n` in the mapping), so it is that scalar. The stream and
 -- cell handles (`IFile a`, `IStream a`, `OStream a`, `Cell a`) are all `u64`
@@ -576,7 +577,7 @@ rustTakeGetter t0 sel0 subj0
     opens t = isJust (tupleArgs t)
 
     tupleArgs (AppF (VarF (FV (TV gv) _)) ts)
-      | T.isPrefixOf "Tuple" gv = Just (fst (partitionKindArgsF ts))
+      | T.isPrefixOf "Tuple" gv = Just (fst (partitionKindArgs kindOfF ts))
     tupleArgs _ = Nothing
 
     -- The value @v@ is owned; each path is a result index and the steps
@@ -2100,7 +2101,7 @@ generateRustStructs closureAsts es = do
 isVarWidthF :: TypeF -> Bool
 isVarWidthF (VarF (FV (TV gv) _)) = gv == "Str"
 isVarWidthF (AppF (VarF (FV (TV gv) _)) ts)
-  | T.isPrefixOf "Tuple" gv = any isVarWidthF (fst (partitionKindArgsF ts))
+  | T.isPrefixOf "Tuple" gv = any isVarWidthF (fst (partitionKindArgs kindOfF ts))
 isVarWidthF _ = True
 
 -- | Lower a manifold body in its own ownership scope: 'oeCurrent' becomes the

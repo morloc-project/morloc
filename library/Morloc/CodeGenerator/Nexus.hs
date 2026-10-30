@@ -2041,8 +2041,8 @@ renderCliType = render . pretty . cliDisplayType
 --     @Rec@ would be rewritten too; that name already collides with the
 --     compiler's anonymous row.
 --
---   * Phantom Nat and Str slots ('NatVoidT' / 'StrVoidT') are erased
---     measurements carrying no runtime content. They print as @_@ and
+--   * Placeholders of a non-Type kind ('VoidT') are erased and carry no
+--     runtime content. They print as @_@ and
 --     are dropped from an application's arguments; a literal dimension
 --     (@Vector 4 Int@) is real information and is kept.
 --
@@ -2065,8 +2065,7 @@ cliDisplayType t0 = case t0 of
   OptionalT t -> OptionalT (cliDisplayType t)
   _ -> t0
   where
-    isPhantomSlot NatVoidT = True
-    isPhantomSlot StrVoidT = True
+    isPhantomSlot (VoidT _) = True
     isPhantomSlot _ = False
 
 -- | Strip outer wrappers that don't change a type's "name kind" identity

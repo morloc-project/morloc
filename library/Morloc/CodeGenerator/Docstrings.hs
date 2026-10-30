@@ -789,10 +789,15 @@ makeOptMeta (NatAddT _ _) = "NAT"
 makeOptMeta (NatMulT _ _) = "NAT"
 makeOptMeta (NatSubT _ _) = "NAT"
 makeOptMeta (NatDivT _ _) = "NAT"
-makeOptMeta NatVoidT = "NAT"
+makeOptMeta (VoidT k) = case k of
+  KindNat -> "NAT"
+  KindStr -> "STR"
+  KindRec -> "REC"
+  KindList _ -> "LIST"
+  KindSet _ -> "SET"
+  KindType -> "TYPE"
 makeOptMeta (StrLitT _) = "STR"
 makeOptMeta (StrConcatT _ _) = "STR"
-makeOptMeta StrVoidT = "STR"
 
 resolvePos :: Type -> ArgDocVars -> MorlocMonad ArgPosDocSet
 resolvePos t r = do

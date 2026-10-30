@@ -28,10 +28,4 @@ model/language/issues/typecheck.md.
   one and an `error` in the other; `a -> (b -> c)` is flattened by
   `typeOf` only (APP-1), yet
   EffectBoundary and Rust.hs call `unresolvedType2type`; a row literal
-  becomes a record in one and `NatVoidT` in the other.
-- **Two declared-kind lookups disagree.** [read]
-  CodeGenerator/ValueArgs.hs `declaredKinds` picks the scope entry whose
-  arity matches; Infer.hs `typeChildren` takes the first entry and pads
-  with `Type`. A head with entries of different arity gets different kinds
-  from each.
-
+  becomes a record in one and a Rec placeholder in the other.

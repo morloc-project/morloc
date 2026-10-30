@@ -43,6 +43,7 @@ import Morloc.CodeGenerator.LanguageDescriptor (ldAllowStringNull, loadLangDescr
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.ValueArgs (appMacroArgs)
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.LangRegistry as LR
@@ -663,7 +664,7 @@ expressCore (AnnoS (Idx midx c@(FunT inputs out)) (Idx cidx lang, _) (CallS v)) 
 expressCore (AnnoS (Idx midx _) (_, lambdaArgs) (LamS _ (AnnoS (Idx _ applicationType) (c, _) x))) =
   expressCore (AnnoS (Idx midx applicationType) (c, lambdaArgs) x)
 expressCore (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (LstS xs))
-  | [t] <- filter (not . isKindTypeT) ts = do
+  | [t] <- filter (isNothing . kindOfT) ts = do
       xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x t) x) xs
       -- Preserve the FULL applied type args (kind positions included)
       -- so downstream language code generators can see phantom dims at
@@ -1201,26 +1202,25 @@ wrapBoundInToIndex lang midx boundType expr = do
 -- This reuses 'Macro.expandMacro' so the rendering logic stays in
 -- one place. The result is for comparison only; the codegen
 -- elsewhere uses its own language-specific renderers.
-renderConcreteForm :: TypeF -> Text
-renderConcreteForm (VarF (FV _ cv)) = unCVar cv
-renderConcreteForm (AppF (VarF (FV _ cv)) args) =
-  let (typeArgs, kindCount) = partitionKindArgsF args
-  in Macro.expandMacro (unCVar cv) (map renderConcreteForm typeArgs) kindCount
-renderConcreteForm (NamF _ (FV _ cv) _ _) = unCVar cv
-renderConcreteForm (NatLitF n) = T.pack (show n)
-renderConcreteForm NatVoidF = "_"
-renderConcreteForm (StrLitF s) = s
-renderConcreteForm StrVoidF = "_"
-renderConcreteForm (RecF (FV _ cv)) = unCVar cv
-renderConcreteForm (EnumF (FV _ cv) _ _) = unCVar cv
-renderConcreteForm (VariantF (FV _ cv) _ _) = unCVar cv
-renderConcreteForm (OptionalF t) = "?" <> renderConcreteForm t
-renderConcreteForm (FunF ts t) =
-  "(" <> T.intercalate "," (map renderConcreteForm ts) <> ")->" <> renderConcreteForm t
-renderConcreteForm (UnkF (FV _ cv)) = unCVar cv
-renderConcreteForm (AppF h args) =
-  let (typeArgs, _) = partitionKindArgsF args
-  in renderConcreteForm h <> "<" <> T.intercalate "," (map renderConcreteForm typeArgs) <> ">"
+renderConcreteForm :: Scope -> TypeF -> Text
+renderConcreteForm _ (VarF (FV _ cv)) = unCVar cv
+renderConcreteForm gscope (AppF h@(VarF (FV _ cv)) args) =
+  let (typeArgs, kindCount) = appMacroArgs gscope h args
+  in Macro.expandMacro (unCVar cv) (map (renderConcreteForm gscope) typeArgs) kindCount
+renderConcreteForm _ (NamF _ (FV _ cv) _ _) = unCVar cv
+renderConcreteForm _ (NatLitF n) = T.pack (show n)
+renderConcreteForm _ (VoidF _) = "_"
+renderConcreteForm _ (StrLitF s) = s
+renderConcreteForm _ (RecF (FV _ cv)) = unCVar cv
+renderConcreteForm _ (EnumF (FV _ cv) _ _) = unCVar cv
+renderConcreteForm _ (VariantF (FV _ cv) _ _) = unCVar cv
+renderConcreteForm gscope (OptionalF t) = "?" <> renderConcreteForm gscope t
+renderConcreteForm gscope (FunF ts t) =
+  "(" <> T.intercalate "," (map (renderConcreteForm gscope) ts) <> ")->" <> renderConcreteForm gscope t
+renderConcreteForm _ (UnkF (FV _ cv)) = unCVar cv
+renderConcreteForm gscope (AppF h args) =
+  let (typeArgs, _) = appMacroArgs gscope h args
+  in renderConcreteForm gscope h <> "<" <> T.intercalate "," (map (renderConcreteForm gscope) typeArgs) <> ">"
 
 -- | Decide whether a literal at native type with outer TVar @nativeTv@
 -- and wire-form outer TVar @wireTv@ needs a @Packable@ wrap in language
@@ -1247,13 +1247,14 @@ maybePackableWrap midx lang nativeT wireT = do
       -- chose to swap argument positions.
       nativeTF <- inferConcreteType lang (Idx midx nativeT)
       wireTF   <- inferConcreteType lang (Idx midx wireT)
-      let nativeRendered = renderConcreteForm nativeTF
-          wireRendered   = renderConcreteForm wireTF
+      gscope <- MM.getGeneralScope
+      let nativeRendered = renderConcreteForm gscope nativeTF
+          wireRendered   = renderConcreteForm gscope wireTF
           -- A form whose template has no placeholders (R's "list") renders
           -- alike for every argument, so the arguments of a form the type
           -- declares are compared too. A type with no form of its own here
           -- has its representation's (NEWT-2).
-          typeArgs (AppF _ args) = Just (map renderConcreteForm (fst (partitionKindArgsF args)))
+          typeArgs (AppF h args) = Just (map (renderConcreteForm gscope) (fst (appMacroArgs gscope h args)))
           typeArgs _ = Nothing
       ownForm <- Map.member nativeTv <$> MM.getConcreteScope lang
       let argsAgree = case (typeArgs nativeTF, typeArgs wireTF) of
@@ -1296,8 +1297,9 @@ packLiteral midx lang wireT userT src inner
   | containsFunT userT || not wireIsList = return packed
   | langName' == "py" = do
       form <- inferConcreteType lang (Idx midx userT)
+      gscope <- MM.getGeneralScope
       return $
-        if T.takeWhile (/= '<') (renderConcreteForm form) == "numpy.ndarray"
+        if T.takeWhile (/= '<') (renderConcreteForm gscope form) == "numpy.ndarray"
           then PolyIntrinsic (Idx midx userT) IntrConform [inner]
           else packed
   -- An R value whose serial form is no Packable is decoded at its own type
@@ -1906,7 +1908,7 @@ expressPolyExpr _ _ _ (AnnoS (Idx midx t) (Idx cidx _, _) NullS) =
 -- full args list in PolyList so phantom dims survive into language code
 -- generators (Nat positions render as mempty in macro expansion).
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT v) ts)) (Idx cidx lang, args) (LstS xs))
-  | [tElem] <- filter (not . isKindTypeT) ts = do
+  | [tElem] <- filter (isNothing . kindOfT) ts = do
       xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x tElem) x) xs
       e <- dispatchListLit midx cidx lang userT v ts xs'
       expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
@@ -1920,7 +1922,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(VarT v)) (Idx cidx lang,
   let wireT = typeOf (TE.wireParentRoot scope (type2typeu userT))
   case wireT of
     AppT (VarT _) wireArgs
-      | [elemT] <- filter (not . isKindTypeT) wireArgs -> do
+      | [elemT] <- filter (isNothing . kindOfT) wireArgs -> do
           xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x elemT) x) xs
           e <- dispatchListLit midx cidx lang userT v [] xs'
           expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
@@ -1937,7 +1939,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT _) _)) (Idx c
   case mayWire of
     Just wireTU
       | AppT (VarT wireV) wireArgs <- typeOf wireTU
-      , [elemT] <- filter (not . isKindTypeT) wireArgs -> do
+      , [elemT] <- filter (isNothing . kindOfT) wireArgs -> do
           xs' <- mapM (\x -> expressPolyExprWrap lang (mkIdx x elemT) x) xs
           let wireT = AppT (VarT wireV) wireArgs
               inner = PolyList (Idx cidx wireV) (map (Idx cidx) wireArgs) xs'

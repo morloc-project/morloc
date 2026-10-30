@@ -642,7 +642,7 @@ data LowerConfig m = LowerConfig
   , lcListConstructor :: FVar -> [TypeF] -> [MDoc] -> MDoc
   -- ^ Build a list literal from rendered elements. R needs FVar to choose c() vs list().
   -- The [TypeF] is the FULL applied-type arg list (kind positions included).
-  -- Use 'partitionKindArgsF' to extract type-args only when needed.
+  -- Use 'partitionKindArgs' to extract type-args only when needed.
   , lcTupleConstructor :: FVar -> [TypeF] -> [MDoc] -> MDoc
   -- ^ Build a tuple literal. The [TypeF] is the per-slot type list
   -- (one entry per element). C++ codegen will use these to dispatch

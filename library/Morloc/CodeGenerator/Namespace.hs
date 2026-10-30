@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -24,23 +25,15 @@ module Morloc.CodeGenerator.Namespace
 
     -- ** Types used in final translations
   , TypeM (..)
-  , TypeF (..)
+  , TypeF (.., NatVoidF, StrVoidF)
   , TypeS (..)
   , FVar (..)
 
-    -- ** Kind-kinded type helpers
+    -- ** Kinds of type arguments
     --
-    -- Kind-kinded args are positional type-args whose kind is NOT
-    -- @KindType@ (currently @KindNat@ and @KindStr@). They appear as
-    -- structural metadata in @TypeF@/@Type@ arg lists but are skipped
-    -- by macro substitution -- the @$N@ index in a per-language form
-    -- counts TYPE args only, not kind args.
-  , isKindTypeF
-  , isKindTypeT
-  , isKindTypeU
-  , partitionKindArgsF
-  , partitionKindArgsT
-  , partitionKindArgsU
+    -- The @$N@ index in a per-language form counts Type-kinded arguments
+    -- only.
+  , kindOfF
 
     -- ** Typeclasses
   , HasTypeF (..)
@@ -214,71 +207,23 @@ data TypeF
   | VariantF FVar [TypeF] [(T.Text, [TypeF])]
   | OptionalF TypeF
   | NatLitF Integer
-  -- | Erased phantom Nat slot. See NatVoidU in 'Morloc.Namespace.Type'
-  -- for the rationale.
-  | NatVoidF
-  | StrLitF Text -- ^ Type-level Str literal at the codegen level (kind-Str ground form)
-  | StrVoidF -- ^ Erased phantom Str slot. Mirrors NatVoidF.
+  | VoidF Kind -- ^ An erased placeholder of a non-Type kind
+  | StrLitF Text
   deriving (Show, Ord, Eq)
 
+pattern NatVoidF :: TypeF
+pattern NatVoidF = VoidF KindNat
 
--- | True iff a TypeF entry is kind-kinded (Nat or Str): a kind literal
--- or the erased-phantom sentinel. These positions are structural
--- metadata; macros never index them.
-isKindTypeF :: TypeF -> Bool
-isKindTypeF (NatLitF _) = True
-isKindTypeF NatVoidF = True
-isKindTypeF (StrLitF _) = True
-isKindTypeF StrVoidF = True
-isKindTypeF _ = False
+pattern StrVoidF :: TypeF
+pattern StrVoidF = VoidF KindStr
 
--- | True iff a Type entry is kind-kinded. Mirrors 'isKindTypeF',
--- including Nat arithmetic (which is a kind-Nat expression).
-isKindTypeT :: Type -> Bool
-isKindTypeT (NatLitT _) = True
-isKindTypeT (NatAddT _ _) = True
-isKindTypeT (NatMulT _ _) = True
-isKindTypeT (NatSubT _ _) = True
-isKindTypeT (NatDivT _ _) = True
-isKindTypeT NatVoidT = True
-isKindTypeT _ = False
-
--- | TypeU-level kind predicate. Includes nat variables and arithmetic
--- (which are kind-Nat expressions before reduction).
-isKindTypeU :: TypeU -> Bool
-isKindTypeU (NatLitU _) = True
-isKindTypeU (NatVarU _) = True
-isKindTypeU (NatAddU _ _) = True
-isKindTypeU (NatMulU _ _) = True
-isKindTypeU (NatSubU _ _) = True
-isKindTypeU (NatDivU _ _) = True
-isKindTypeU NatVoidU = True
-isKindTypeU (StrLitU _) = True
-isKindTypeU (StrVarU _) = True
-isKindTypeU (StrConcatU _ _) = True
-isKindTypeU StrVoidU = True
-isKindTypeU _ = False
-
--- | Split a positional arg list into (type-args, count-of-kind-args).
--- Used by every macro-substitution caller: pre-filtering at the
--- @TypeF@ level keeps the indexing convention uniform (\"$N indexes
--- the Nth type arg\") and threads the count for error-message hints.
-partitionKindArgsF :: [TypeF] -> ([TypeF], Int)
-partitionKindArgsF ts =
-  let types = filter (not . isKindTypeF) ts
-  in (types, length ts - length types)
-
--- | Type-level companion to 'partitionKindArgsF'.
-partitionKindArgsT :: [Type] -> ([Type], Int)
-partitionKindArgsT ts =
-  let types = filter (not . isKindTypeT) ts
-  in (types, length ts - length types)
-
--- | TypeU-level companion to 'partitionKindArgsF'.
-partitionKindArgsU :: [TypeU] -> ([TypeU], Int)
-partitionKindArgsU ts =
-  let types = filter (not . isKindTypeU) ts
-  in (types, length ts - length types)
+-- | 'kindOfT' for a concrete type.
+kindOfF :: TypeF -> Maybe Kind
+kindOfF t = case t of
+  NatLitF _ -> Just KindNat
+  StrLitF _ -> Just KindStr
+  VoidF k -> Just k
+  _ -> Nothing
 data TypeM
   = -- | serialized data that is not deserialized (and may not be representable) in this segment
     Passthrough
@@ -671,7 +616,7 @@ data PolyExpr
     -- The [Indexed Type] is the FULL list of positional type args of
     -- the list head (Vector / List / Deque / etc.), preserving Nat-kinded
     -- entries as NatLitT so phantom dimensions survive into language
-    -- code generators. Use 'partitionKindArgsT' to split into type-args
+    -- code generators. Use 'partitionKindArgs' to split into type-args
     -- and kind-arg count when feeding macro substitution; the wire-side
     -- @applyDimsToList@ consumes the kind positions directly.
     PolyList (Indexed TVar) [Indexed Type] [PolyExpr]
@@ -1842,9 +1787,8 @@ instance Pretty TypeF where
       <+> encloseSep "{" "}" " | " [pretty n <+> hsep (map pretty ts) | (n, ts) <- as]
   pretty (OptionalF t) = "?" <> pretty t
   pretty (NatLitF n) = pretty n
-  pretty NatVoidF = "_"
+  pretty (VoidF _) = "_"
   pretty (StrLitF s) = dquotes (pretty s)
-  pretty StrVoidF = "_"
 
 instance Pretty TypeM where
   pretty Passthrough = "Passthrough"

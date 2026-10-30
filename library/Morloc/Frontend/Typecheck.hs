@@ -618,35 +618,18 @@ compatibleTypeU = go Set.empty Set.empty
     nominal (NamU _ n ps _) = AppU (VarU n) ps
     nominal t = t
 
-    isNatExprT :: TypeU -> Bool
-    isNatExprT (NatLitU _) = True
-    isNatExprT (NatVarU _) = True
-    isNatExprT (NatAddU _ _) = True
-    isNatExprT (NatMulU _ _) = True
-    isNatExprT (NatSubU _ _) = True
-    isNatExprT (NatDivU _ _) = True
-    isNatExprT NatVoidU = True
-    isNatExprT _ = False
+    isNatExprT t = kindOfU t == Just KindNat
 
 -- | Result type of slicing a container. A leading Nat parameter becomes
 -- 'NatVoidU', which matches any Nat. A fresh existential would never be
 -- solved and would reach later stages as a quantified variable.
 bracketSliceResultType :: Gamma -> TypeU -> (Gamma, TypeU)
 bracketSliceResultType g t@(AppU h args) = case args of
-  (a : rest) | isKindTypeU' a ->
+  (a : rest) | kindOfU a == Just KindNat ->
     (g, AppU h (NatVoidU : rest))
   _ -> (g, t)
 bracketSliceResultType g t = (g, t)
 
-isKindTypeU' :: TypeU -> Bool
-isKindTypeU' (NatLitU _) = True
-isKindTypeU' (NatVarU _) = True
-isKindTypeU' (NatAddU _ _) = True
-isKindTypeU' (NatMulU _ _) = True
-isKindTypeU' (NatSubU _ _) = True
-isKindTypeU' (NatDivU _ _) = True
-isKindTypeU' NatVoidU = True
-isKindTypeU' _ = False
 
 -- | The advice for a method with no instance at a type. A signature can only
 -- help while the type is still undetermined; a bodied newtype that lacks

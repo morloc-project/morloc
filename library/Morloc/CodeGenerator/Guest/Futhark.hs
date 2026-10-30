@@ -448,9 +448,11 @@ data MShape = MArr Text Int | MTup [TypeU] | MOther
 classifyMorloc :: TypeU -> MShape
 classifyMorloc (EffectU _ t) = classifyMorloc t
 classifyMorloc (AppU (VarU (TV nm)) args)
-  | isTupleName nm = MTup (fst (partitionKindArgsU args))
-  | otherwise = case partitionKindArgsU args of
-      ([VarU (TV e)], r) -> MArr e r
+  | isTupleName nm = MTup (fst (partitionKindArgs kindOfU args))
+  | otherwise = case fst (partitionKindArgs kindOfU args) of
+      [VarU (TV e)]
+        | all (`elem` [Nothing, Just KindNat]) (map kindOfU args) ->
+            MArr e (length [a | a <- args, kindOfU a == Just KindNat])
       _ -> MOther
 classifyMorloc (VarU (TV e)) = MArr e 0
 classifyMorloc _ = MOther

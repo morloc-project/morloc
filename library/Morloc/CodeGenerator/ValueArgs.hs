@@ -16,9 +16,12 @@ module Morloc.CodeGenerator.ValueArgs
   , valueArgsT
   , appValueArgs
   , appValueArgsT
+  , macroArgsF
+  , appMacroArgs
   ) where
 
 import qualified Data.Map as Map
+import Data.Maybe (isJust, isNothing)
 import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Namespace
 
@@ -41,7 +44,7 @@ declaredKinds gscope v n = case [ps | (ps, _, _, _, _) <- Map.findWithDefault []
 -- when the name declares a Rec-kinded parameter. A row under a table head
 -- is dropped whatever the declaration says.
 valueArgsF :: Scope -> TVar -> [TypeF] -> [TypeF]
-valueArgsF gscope v = filterArgs gscope v isKindTypeF isRow
+valueArgsF gscope v = filterArgs gscope v (isJust . kindOfF) isRow
   where
     isRow (NamF NamRecord (FV r _) [] _) = r == anonRecordVar
     isRow _ = False
@@ -52,19 +55,26 @@ isRowT _ = False
 
 -- | 'valueArgsF' for 'Type'.
 valueArgsT :: Scope -> TVar -> [Type] -> [Type]
-valueArgsT gscope v = filterArgs gscope v isKind isRowT
-  where
-    isKind a = isKindTypeT a || isStr a
-    isStr (StrLitT _) = True
-    isStr StrVoidT = True
-    isStr (StrConcatT _ _) = True
-    isStr _ = False
+valueArgsT gscope v = filterArgs gscope v (isJust . kindOfT) isRowT
 
 -- | The value arguments of an application, by its head; an application
 -- whose head is not a type name keeps every argument.
 appValueArgs :: Scope -> TypeF -> [TypeF] -> [TypeF]
 appValueArgs gscope (VarF (FV v _)) ts = valueArgsF gscope v ts
 appValueArgs _ _ ts = ts
+
+-- | The arguments a per-language form's @$N@ counts, and the number it
+-- skips: no argument whose form fixes a non-Type kind, and no ground row
+-- that fills a Rec parameter.
+macroArgsF :: Scope -> TVar -> [TypeF] -> ([TypeF], Int)
+macroArgsF gscope v ts = counted ts (valueArgsF gscope v ts)
+
+-- | 'macroArgsF' by the head of an application.
+appMacroArgs :: Scope -> TypeF -> [TypeF] -> ([TypeF], Int)
+appMacroArgs gscope h ts = counted ts (appValueArgs gscope h ts)
+
+counted :: [TypeF] -> [TypeF] -> ([TypeF], Int)
+counted ts vs = let kept = [a | a <- vs, isNothing (kindOfF a)] in (kept, length ts - length kept)
 
 -- | 'appValueArgs' for 'Type'.
 appValueArgsT :: Scope -> Type -> [Type] -> [Type]

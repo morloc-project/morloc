@@ -939,9 +939,8 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         go (FunF args ret) = FunT (map go args) (go ret)
         go (OptionalF t) = OptionalT (go t)
         go (NatLitF n) = NatLitT n
-        go NatVoidF = NatVoidT
+        go (VoidF k) = VoidT k
         go (StrLitF s) = StrLitT s
-        go StrVoidF = StrVoidT
 
     lowerCacheBody ::
       SerializationState ->

@@ -21,7 +21,7 @@ means t1 is at least as general as t2 (t1 instantiates to t2), so
 module Morloc.Namespace.Type
   ( -- * Types
     NamType (..)
-  , Type (..)
+  , Type (.., NatVoidT, StrVoidT)
     -- Pattern synonyms bundled so that @TypeU (..)@ imports them.
   , TypeU
       ( ..
@@ -130,6 +130,10 @@ module Morloc.Namespace.Type
   , ReplayPlan (..)
   , replayPlanKind
   , anonRecordVar
+  , opKind
+  , kindOfT
+  , kindOfU
+  , partitionKindArgs
   , isInternalTerminalName
   , ArgDoc (..)
   , ArgDocVars (..)
@@ -350,11 +354,18 @@ data Type
   | NatMulT Type Type
   | NatSubT Type Type
   | NatDivT Type Type
-  | NatVoidT  -- ^ Erased phantom Nat slot, distinct from @NatLitT 0@.
+  | -- | An erased placeholder of a non-Type kind, distinct from a literal
+    -- of that kind (@NatLitT 0@).
+    VoidT Kind
   | StrLitT Text
   | StrConcatT Type Type
-  | StrVoidT -- ^ Erased phantom Str slot
   deriving (Show, Ord, Eq)
+
+pattern NatVoidT :: Type
+pattern NatVoidT = VoidT KindNat
+
+pattern StrVoidT :: Type
+pattern StrVoidT = VoidT KindStr
 
 data OpenOrClosed = Open | Closed
   deriving (Show, Ord, Eq)
@@ -715,6 +726,74 @@ mangleWithPrefix prefix (EV parent) long =
 anonRecordVar :: TVar
 anonRecordVar = TV "@REC"
 
+-- | The kind of the value of a type-level operator.
+opKind :: OpTag -> Kind
+opKind op = case op of
+  OpNatAdd -> KindNat
+  OpNatSub -> KindNat
+  OpNatMul -> KindNat
+  OpNatDiv -> KindNat
+  OpSize -> KindNat
+  OpStrConcat -> KindStr
+  OpRecExtend -> KindRec
+  OpRecUnion -> KindRec
+  OpRecIntersect -> KindRec
+  OpRecRestrict -> KindRec
+  OpRecDiffList -> KindRec
+  OpRecSingleton -> KindRec
+  OpListApp -> KindList KindStr
+  OpSetUnion -> KindSet KindStr
+  OpSetInter -> KindSet KindStr
+  OpSetDiff -> KindSet KindStr
+  OpKeys -> KindSet KindStr
+  OpListToSet -> KindSet KindStr
+  OpProjectField -> KindType
+
+-- | The kind of a type argument whose form fixes it: a literal, an
+-- operator, a placeholder or a kinded variable. Nothing for a Type-kinded
+-- form and for a ground row, which is a Rec argument or a record type
+-- depending on the parameter it fills (see
+-- 'Morloc.CodeGenerator.ValueArgs').
+kindOfU :: TypeU -> Maybe Kind
+kindOfU t = case t of
+  KVarU (_, k) -> Just k
+  VoidU k -> Just k
+  ListVarU _ -> Just (KindList KindStr)
+  ListVoidU -> Just (KindList KindStr)
+  SetVarU _ -> Just (KindSet KindStr)
+  SetVoidU -> Just (KindSet KindStr)
+  LitU (LNat _) -> Just KindNat
+  LitU (LStr _) -> Just KindStr
+  LitU (LList _) -> Just (KindList KindStr)
+  LitU (LSet _) -> Just (KindSet KindStr)
+  LitU (LRec _) -> Nothing
+  r@(RecExtendU _ _ _) -> maybe (Just KindRec) (const Nothing) (groundRecFields r)
+  OpU op _ -> case opKind op of
+    KindType -> Nothing
+    k -> Just k
+  LabeledU _ x -> kindOfU x
+  _ -> Nothing
+
+-- | 'kindOfU' for an erased type.
+kindOfT :: Type -> Maybe Kind
+kindOfT t = case t of
+  NatLitT _ -> Just KindNat
+  NatAddT _ _ -> Just KindNat
+  NatMulT _ _ -> Just KindNat
+  NatSubT _ _ -> Just KindNat
+  NatDivT _ _ -> Just KindNat
+  StrLitT _ -> Just KindStr
+  StrConcatT _ _ -> Just KindStr
+  VoidT k -> Just k
+  _ -> Nothing
+
+-- | The arguments whose kind is not fixed by their form, and the number of
+-- the others.
+partitionKindArgs :: (a -> Maybe Kind) -> [a] -> ([a], Int)
+partitionKindArgs kindOf ts =
+  let types = [x | x <- ts, isNothing (kindOf x)]
+   in (types, length ts - length types)
+
 -- | Recognizes the compiler-internal name prefix produced by
 -- 'mangleTerminalName'. The nexus filters these out of the top-level
 -- command menu but keeps them dispatchable via each parent command's
@@ -884,10 +963,9 @@ instance Typelike Type where
       sub (NatMulT a b) = NatMulT (sub a) (sub b)
       sub (NatSubT a b) = NatSubT (sub a) (sub b)
       sub (NatDivT a b) = NatDivT (sub a) (sub b)
-      sub t@NatVoidT = t
+      sub t@(VoidT _) = t
       sub t@(StrLitT _) = t
       sub (StrConcatT a b) = StrConcatT (sub a) (sub b)
-      sub t@StrVoidT = t
 
   free (UnkT _) = Set.empty
   free v@(VarT _) = Set.singleton v
@@ -901,10 +979,9 @@ instance Typelike Type where
   free (NatMulT a b) = Set.union (free a) (free b)
   free (NatSubT a b) = Set.union (free a) (free b)
   free (NatDivT a b) = Set.union (free a) (free b)
-  free NatVoidT = Set.empty
+  free (VoidT _) = Set.empty
   free (StrLitT _) = Set.empty
   free (StrConcatT a b) = Set.union (free a) (free b)
-  free StrVoidT = Set.empty
 
   normalizeType (FunT ts1 (FunT ts2 ft)) = normalizeType $ FunT (ts1 <> ts2) ft
   normalizeType (AppT (AppT h innerArgs) outerArgs) =
@@ -933,7 +1010,6 @@ uncurryU t = ([], t)
 
 instance Typelike TypeU where
   typeOf (VarU v) = VarT v
-  typeOf (NatVarU _) = NatVoidT
   typeOf (ExistU _ (ps, _) (rs@(_ : _), _)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs)
   typeOf (ExistU v _ _) = typeOf (ForallU v (VarU v))
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
@@ -947,36 +1023,30 @@ instance Typelike TypeU where
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
   typeOf (EffectU effs t) = mkEffectT (resolveEffectSet effs) (typeOf t)
   typeOf (OptionalU t) = OptionalT (typeOf t)
-  typeOf NatVoidU = NatVoidT
-  typeOf (StrVarU _) = StrVoidT
-  typeOf StrVoidU = StrVoidT
+  typeOf (KVarU (_, k)) = VoidT k
+  typeOf (VoidU k) = VoidT k
   -- A ground Rec chain lowers to a record so its column schema survives
   -- (Arrow tables); a row-polymorphic one erases.
-  typeOf (RecVarU _) = NatVoidT
   typeOf r@(RecExtendU _ _ _) = case groundRecFields r of
     Just fs -> NamT NamRecord anonRecordVar [] [(Key k, typeOf t) | (k, t) <- fs]
-    Nothing -> NatVoidT
-  typeOf RecVoidU = NatVoidT
-  -- Type has no List, Set or Rec kinds; they erase to NatVoidT.
-  typeOf (ListVarU _) = NatVoidT
-  typeOf ListVoidU = NatVoidT
-  typeOf (SetVarU _) = NatVoidT
-  typeOf SetVoidU = NatVoidT
-  typeOf (KVarU (_, KindStr)) = StrVoidT
-  typeOf (KVarU _) = NatVoidT
-  typeOf (VoidU KindStr) = StrVoidT
-  typeOf (VoidU _) = NatVoidT
+    Nothing -> VoidT KindRec
+  typeOf (ListVarU _) = VoidT (KindList KindStr)
+  typeOf ListVoidU = VoidT (KindList KindStr)
+  typeOf (SetVarU _) = VoidT (KindSet KindStr)
+  typeOf SetVoidU = VoidT (KindSet KindStr)
   typeOf (OpU OpNatAdd [a, b]) = NatAddT (typeOf a) (typeOf b)
   typeOf (OpU OpNatSub [a, b]) = NatSubT (typeOf a) (typeOf b)
   typeOf (OpU OpNatMul [a, b]) = NatMulT (typeOf a) (typeOf b)
   typeOf (OpU OpNatDiv [a, b]) = NatDivT (typeOf a) (typeOf b)
   typeOf (OpU OpStrConcat [a, b]) = StrConcatT (typeOf a) (typeOf b)
-  typeOf (OpU _ _) = NatVoidT
+  typeOf (OpU op _) = case opKind op of
+    KindType -> NatVoidT
+    k -> VoidT k
   typeOf (LitU (LNat n)) = NatLitT n
   typeOf (LitU (LStr s)) = StrLitT s
   typeOf (LitU (LRec fs)) = NamT NamRecord anonRecordVar [] [(Key k, typeOf t) | (k, t) <- fs]
-  typeOf (LitU (LList _)) = NatVoidT
-  typeOf (LitU (LSet _)) = NatVoidT
+  typeOf (LitU (LList _)) = VoidT (KindList KindStr)
+  typeOf (LitU (LSet _)) = VoidT (KindSet KindStr)
   typeOf (LabeledU _ t) = typeOf t
 
   free v@(VarU _) = Set.singleton v
@@ -1581,10 +1651,11 @@ type2typeu (NatAddT a b) = NatAddU (type2typeu a) (type2typeu b)
 type2typeu (NatMulT a b) = NatMulU (type2typeu a) (type2typeu b)
 type2typeu (NatSubT a b) = NatSubU (type2typeu a) (type2typeu b)
 type2typeu (NatDivT a b) = NatDivU (type2typeu a) (type2typeu b)
-type2typeu NatVoidT = NatVoidU
+type2typeu (VoidT (KindList _)) = ListVoidU
+type2typeu (VoidT (KindSet _)) = SetVoidU
+type2typeu (VoidT k) = VoidU k
 type2typeu (StrLitT s) = StrLitU s
 type2typeu (StrConcatT a b) = StrConcatU (type2typeu a) (type2typeu b)
-type2typeu StrVoidT = StrVoidU
 
 -- | The first @n@ inputs of a function type and the type left once they are
 -- consumed. Types are flattened (@a -> (b -> c)@ is @a -> b -> c@), so a
@@ -1598,7 +1669,6 @@ splitFunAt _ t = ([], t)
 
 unresolvedType2type :: TypeU -> Type
 unresolvedType2type (VarU v) = VarT v
-unresolvedType2type (NatVarU _) = NatVoidT
 unresolvedType2type ExistU {} = error "Cannot cast existential type to Type"
 -- An undetermined variable is carried as 'UnkT', whose 'TypeU' form is a
 -- variable quantified over itself ('type2typeu').
@@ -1609,31 +1679,25 @@ unresolvedType2type (AppU v ts) = AppT (unresolvedType2type v) (map unresolvedTy
 unresolvedType2type (NamU t n ps rs) = NamT t n (map unresolvedType2type ps) [(k, unresolvedType2type e) | (k, e) <- rs]
 unresolvedType2type (EffectU effs t) = mkEffectT (resolveEffectSet effs) (unresolvedType2type t)
 unresolvedType2type (OptionalU t) = OptionalT (unresolvedType2type t)
-unresolvedType2type NatVoidU = NatVoidT
-unresolvedType2type (StrVarU _) = StrVoidT
-unresolvedType2type StrVoidU = StrVoidT
--- Type has no Rec, List or Set kinds; they erase to NatVoidT.
-unresolvedType2type (RecVarU _) = NatVoidT
-unresolvedType2type RecVoidU = NatVoidT
-unresolvedType2type (ListVarU _) = NatVoidT
-unresolvedType2type ListVoidU = NatVoidT
-unresolvedType2type (SetVarU _) = NatVoidT
-unresolvedType2type SetVoidU = NatVoidT
-unresolvedType2type (KVarU (_, KindStr)) = StrVoidT
-unresolvedType2type (KVarU _) = NatVoidT
-unresolvedType2type (VoidU KindStr) = StrVoidT
-unresolvedType2type (VoidU _) = NatVoidT
+unresolvedType2type (KVarU (_, k)) = VoidT k
+unresolvedType2type (VoidU k) = VoidT k
+unresolvedType2type (ListVarU _) = VoidT (KindList KindStr)
+unresolvedType2type ListVoidU = VoidT (KindList KindStr)
+unresolvedType2type (SetVarU _) = VoidT (KindSet KindStr)
+unresolvedType2type SetVoidU = VoidT (KindSet KindStr)
 unresolvedType2type (OpU OpNatAdd [a, b]) = NatAddT (unresolvedType2type a) (unresolvedType2type b)
 unresolvedType2type (OpU OpNatSub [a, b]) = NatSubT (unresolvedType2type a) (unresolvedType2type b)
 unresolvedType2type (OpU OpNatMul [a, b]) = NatMulT (unresolvedType2type a) (unresolvedType2type b)
 unresolvedType2type (OpU OpNatDiv [a, b]) = NatDivT (unresolvedType2type a) (unresolvedType2type b)
 unresolvedType2type (OpU OpStrConcat [a, b]) = StrConcatT (unresolvedType2type a) (unresolvedType2type b)
-unresolvedType2type (OpU _ _) = NatVoidT
+unresolvedType2type (OpU op _) = case opKind op of
+  KindType -> NatVoidT
+  k -> VoidT k
 unresolvedType2type (LitU (LNat n)) = NatLitT n
 unresolvedType2type (LitU (LStr s)) = StrLitT s
-unresolvedType2type (LitU (LRec _)) = NatVoidT
-unresolvedType2type (LitU (LList _)) = NatVoidT
-unresolvedType2type (LitU (LSet _)) = NatVoidT
+unresolvedType2type (LitU (LRec _)) = VoidT KindRec
+unresolvedType2type (LitU (LList _)) = VoidT (KindList KindStr)
+unresolvedType2type (LitU (LSet _)) = VoidT (KindSet KindStr)
 unresolvedType2type (LabeledU _ t) = unresolvedType2type t
 
 -- | A variable name used in neither type.
@@ -1679,10 +1743,9 @@ containsUnk (NatAddT a b) = containsUnk a || containsUnk b
 containsUnk (NatMulT a b) = containsUnk a || containsUnk b
 containsUnk (NatSubT a b) = containsUnk a || containsUnk b
 containsUnk (NatDivT a b) = containsUnk a || containsUnk b
-containsUnk NatVoidT = False
+containsUnk (VoidT _) = False
 containsUnk (StrLitT _) = False
 containsUnk (StrConcatT a b) = containsUnk a || containsUnk b
-containsUnk StrVoidT = False
 
 ----- Pretty instances -------------------------------------------------------
 
@@ -1716,10 +1779,9 @@ instance Pretty Type where
       f _ (NatMulT a b) = "(" <> f True a <+> "*" <+> f True b <> ")"
       f _ (NatSubT a b) = "(" <> f True a <+> "-" <+> f True b <> ")"
       f _ (NatDivT a b) = "(" <> f True a <+> "/" <+> f True b <> ")"
-      f _ NatVoidT = "_"
+      f _ (VoidT _) = "_"
       f _ (StrLitT s) = dquotes (pretty s)
       f _ (StrConcatT a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
-      f _ StrVoidT = "_"
       -- A named type without parameters is a single token and never needs
       -- parentheses, whatever position it sits in.
       f _ (NamT _ n [] _) = pretty n

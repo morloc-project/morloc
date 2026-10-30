@@ -1290,7 +1290,7 @@ makeSerialAST m lang t0 = do
         bodyHoldsArgs = case (generalType, evaluatedType) of
           (_, Nothing) -> True
           (AppU _ args, Just (AppU _ bodyArgs)) ->
-            filter (not . isKindTypeU) bodyArgs == filter (not . isKindTypeU) args
+            filter (isNothing . kindOfU) bodyArgs == filter (isNothing . kindOfU) args
           _ -> False
         -- Classify the outer alias body's wire shape. Empty when the type
         -- is its own head (no aliasing); otherwise tagged by the body's
@@ -1309,9 +1309,9 @@ makeSerialAST m lang t0 = do
               Just expanded@(AppU (VarU h) bodyArgs)
                 | h == generalTypeName -> AliasIsNone   -- alias reduced to itself
                 | h == BT.list
-                , [elemU] <- filter (not . isKindTypeU) bodyArgs ->
+                , [elemU] <- filter (isNothing . kindOfU) bodyArgs ->
                     AliasIsList elemU
-                | let bodyRT = filter (not . isKindTypeU) bodyArgs
+                | let bodyRT = filter (isNothing . kindOfU) bodyArgs
                 , h == BT.tuple (length bodyRT) ->
                     AliasIsTuple bodyRT
                 | otherwise -> AliasIsOther expanded
@@ -1361,15 +1361,11 @@ makeSerialAST m lang t0 = do
             (Right packer) -> Right (piHead pin, packer)
             (Left reason) -> Left (piHead pin, reason)
 
-        -- Extract dimension constraints from kind-kinded type args.
-        -- Every Nat position is reified (including NatLitF 0, a valid empty
-        -- dimension, and NatVoidF for polymorphic-dim sites like @Vector n a@).
-        -- These feed @applyDimsToList@ to annotate each SerialList nesting
-        -- level with its size constraint; the wire schema encodes them
-        -- via @encodeDim@. Macro indices are independent (they count type
-        -- args only via 'partitionKindArgsF').
+        -- One dimension per Nat argument, in order, including NatLitF 0 (a
+        -- real empty dimension) and NatVoidF (@Vector n a@); each annotates
+        -- one SerialList nesting level.
         dims :: [Maybe TypeF]
-        dims = [Just t | t <- ts0, isKindTypeF t]
+        dims = [Just t | t <- ts0, kindOfF t == Just KindNat]
 
         -- Apply dimension constraints to nested SerialList nodes.
         -- Each dim in the list is consumed by one nesting level.
@@ -1377,7 +1373,7 @@ makeSerialAST m lang t0 = do
         applyDimsToList (d:ds) (SerialList v _ inner) = SerialList v d (applyDimsToList ds inner)
         applyDimsToList _ ast = ast
 
-        runtimeTs = filter (not . isKindTypeF) ts0
+        runtimeTs = filter (isNothing . kindOfF) ts0
 
         basevar :: TypeU -> Maybe TVar
         basevar (VarU v) = Just v
@@ -1720,9 +1716,8 @@ unweaveTypeF (VariantF (FV gv cv) _ _) = (VarU gv, VarU (cv2tv cv))
 
 -- Nat / Str types have no concrete/general distinction; duplicate as-is
 unweaveTypeF (NatLitF n) = (NatLitU n, NatLitU n)
-unweaveTypeF NatVoidF = (NatVoidU, NatVoidU)
+unweaveTypeF (VoidF k) = let u = type2typeu (VoidT k) in (u, u)
 unweaveTypeF (StrLitF s) = (StrLitU s, StrLitU s)
-unweaveTypeF StrVoidF = (StrVoidU, StrVoidU)
 
 weaveTypeF :: TypeU -> TypeU -> TypeF
 weaveTypeF (VarU gv) (VarU cv) = VarF (FV gv (tv2cv cv))
@@ -1760,38 +1755,51 @@ weaveTypeF nat@(NatAddU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
 weaveTypeF nat@(NatMulU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
 weaveTypeF nat@(NatSubU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
 weaveTypeF nat@(NatDivU _ _) _ = maybe NatVoidF NatLitF (reduceNat nat)
+weaveTypeF g _ | Just k <- kindOfU g, k /= KindNat = kindArgF k g
 weaveTypeF (LabeledU _ gt) ct = weaveTypeF gt ct
 weaveTypeF gt (LabeledU _ ct) = weaveTypeF gt ct
 weaveTypeF gt ct = error . show $ (gt, ct)
 
 -- | Weave two arg lists, allowing the concrete list to be SHORTER
--- than the general list when the missing positions are kind-kinded
--- (the body's per-language form may have dropped them during
--- newtype expansion). Each general kind arg consumes a concrete
--- kind head if present, otherwise produces the erased sentinel
--- without advancing the concrete cursor.
+-- than the general list when the missing positions are kind arguments
+-- (the body's per-language form may have dropped them during newtype
+-- expansion). Each general kind argument consumes a concrete head of the
+-- same kind if there is one.
 weaveTypeFArgs :: [TypeU] -> [TypeU] -> [TypeF]
 weaveTypeFArgs [] _ = []
-weaveTypeFArgs (NatLitU n : gs) cs = NatLitF n : weaveTypeFArgs gs (dropKindHeadU cs)
-weaveTypeFArgs (NatVoidU : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU cs)
-weaveTypeFArgs (NatVarU _ : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU cs)
+weaveTypeFArgs (NatLitU n : gs) cs = NatLitF n : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
+weaveTypeFArgs (NatVoidU : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
+weaveTypeFArgs (NatVarU _ : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
 weaveTypeFArgs (nat@(NatAddU _ _) : gs) cs =
-  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU cs)
+  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
 weaveTypeFArgs (nat@(NatMulU _ _) : gs) cs =
-  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU cs)
+  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
 weaveTypeFArgs (nat@(NatSubU _ _) : gs) cs =
-  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU cs)
+  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
 weaveTypeFArgs (nat@(NatDivU _ _) : gs) cs =
-  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU cs)
+  maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
+weaveTypeFArgs (g : gs) cs
+  | Just k <- kindOfU g = kindArgF k g : weaveTypeFArgs gs (dropKindHeadU k cs)
 weaveTypeFArgs (g : gs) (c : cs) = weaveTypeF g c : weaveTypeFArgs gs cs
 weaveTypeFArgs gs [] =
   error $ "weaveTypeFArgs: concrete arg list exhausted with non-kind general args remaining: " <> show gs
 
--- | Drop a leading kind-kinded arg from the concrete cursor, if
--- present. Non-kind heads leave the cursor alone.
-dropKindHeadU :: [TypeU] -> [TypeU]
-dropKindHeadU (c : cs) | isKindTypeU c = cs
-dropKindHeadU cs = cs
+-- | Drop a leading concrete argument of kind @k@, if there is one.
+dropKindHeadU :: Kind -> [TypeU] -> [TypeU]
+dropKindHeadU k (c : cs) | kindOfU c == Just k = cs
+dropKindHeadU _ cs = cs
+
+-- | The concrete form of a general kind argument that has no reducible
+-- value of its own.
+kindArgF :: Kind -> TypeU -> TypeF
+kindArgF k g = maybe (VoidF k) StrLitF (groundStr g)
+
+-- | The value of a ground Str expression.
+groundStr :: TypeU -> Maybe DT.Text
+groundStr (StrLitU s) = Just s
+groundStr (StrConcatU a b) = (<>) <$> groundStr a <*> groundStr b
+groundStr (LabeledU _ t) = groundStr t
+groundStr _ = Nothing
 
 -- Recursively evaluate a Nat expression to an Integer. Returns Nothing if
 -- the expression contains an unresolvable leaf (NatVar / NatVoid / non-Nat
@@ -2044,9 +2052,8 @@ keyTypeF (NamT o v ps rs) = NamF o (FV v (CV "")) (map keyTypeF ps) [(k, keyType
 keyTypeF (EffectT _ t) = keyTypeF t
 keyTypeF (OptionalT t) = OptionalF (keyTypeF t)
 keyTypeF (NatLitT n) = NatLitF n
-keyTypeF NatVoidT = NatVoidF
+keyTypeF (VoidT k) = VoidF k
 keyTypeF (StrLitT t) = StrLitF t
-keyTypeF StrVoidT = StrVoidF
 -- Unevaluated kind arithmetic has no codegen form; it never reaches a
 -- serializable type, and as a key any fixed value keeps equal types equal.
 keyTypeF t@NatAddT{} = UnkF (FV (TV (DT.pack (show t))) (CV ""))
