@@ -22,7 +22,7 @@ Intent: proposed
 Code: conforms 2026-10-21
 
 An unannotated type parameter has kind `Type`. `(n :: K)` in a type
-declaration gives kind `K`. In a signature, `x@Int` binds a `Nat`, `x@Str`
+declaration gives kind `K`. In a signature, `x@Int` binds an `Int`, `x@Str`
 a `Str` and `x@[Str]` a `List` to the value of that argument.
 
 ### POLY-4 Type variables in a local signature
@@ -51,13 +51,13 @@ representation needs (POLY-2), is rejected at the term where it occurs, and
 the error names the variable. One that no representation needs, such as a
 phantom parameter of an argument-free `data` type, is not an error.
 
-### POLY-7 Nat variables in a signature are rigid
+### POLY-7 Nat and Int variables in a signature are rigid
 Intent: ruled 2026-10-29
-Tests: spec-poly-7-1, spec-poly-7-2, spec-poly-7-3, spec-poly-7-4, spec-poly-7-5, spec-poly-7-6, spec-poly-7-7, spec-poly-7-8
+Tests: spec-poly-7-1, spec-poly-7-2, spec-poly-7-3, spec-poly-7-4, spec-poly-7-5, spec-poly-7-6, spec-poly-7-7, spec-poly-7-8, spec-poly-7-9, spec-poly-7-10, spec-poly-7-11, spec-poly-7-12
 Code: deviates (issues/kinds-dimensions.md)
 
-A `Nat` variable in a signature is universally quantified, as a `Type`
-variable is (POLY-1), over the signature's domain (KIND-4). The body must
+A `Nat` or `Int` variable in a signature is universally quantified, as a
+`Type` variable is (POLY-1), over the signature's domain (KIND-4). The body must
 typecheck for every value of it there: `f :: Vector n Int -> Int` may not
 pass its argument where `Vector (m + 1) Int` is required, while `f :: Vector
 n Int -> Vector (n - 1) Int` may, since its domain has `n >= 1`. A label

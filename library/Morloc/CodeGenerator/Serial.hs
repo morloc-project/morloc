@@ -1379,6 +1379,7 @@ makeSerialAST m lang t0 = do
         basevar :: TypeU -> Maybe TVar
         basevar (VarU v) = Just v
         basevar (NatVarU _) = Nothing
+        basevar (IntVarU _) = Nothing
         basevar (ExistU _ _ _) = Nothing
         basevar (ForallU _ _) = Nothing
         basevar (FunU _ _) = Nothing
@@ -1749,6 +1750,7 @@ weaveTypeF (NatLitU n) (NatLitU _) = NatLitF n
 weaveTypeF (NatLitU n) _ = NatLitF n  -- Nat params may be erased in concrete type
 weaveTypeF NatVoidU _ = NatVoidF
 weaveTypeF (NatVarU _) _ = NatVoidF  -- Nat vars erased in concrete type
+weaveTypeF (IntVarU _) _ = NatVoidF  -- an Int fills only Nat positions
 -- Nat arithmetic: try to reduce to a ground Integer. If every leaf is a
 -- NatLit, produce a NatLitF; otherwise produce the NatVoidF sentinel
 -- (the dimension is symbolic / unresolvable at this site, not 0).
@@ -1771,6 +1773,7 @@ weaveTypeFArgs [] _ = []
 weaveTypeFArgs (NatLitU n : gs) cs = NatLitF n : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
 weaveTypeFArgs (NatVoidU : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
 weaveTypeFArgs (NatVarU _ : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
+weaveTypeFArgs (IntVarU _ : gs) cs = NatVoidF : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
 weaveTypeFArgs (nat@(NatAddU _ _) : gs) cs =
   maybe NatVoidF NatLitF (reduceNat nat) : weaveTypeFArgs gs (dropKindHeadU KindNat cs)
 weaveTypeFArgs (nat@(NatMulU _ _) : gs) cs =
@@ -1787,7 +1790,7 @@ weaveTypeFArgs gs [] =
 
 -- | Drop a leading concrete argument of kind @k@, if there is one.
 dropKindHeadU :: Kind -> [TypeU] -> [TypeU]
-dropKindHeadU k (c : cs) | kindOfU c == Just k = cs
+dropKindHeadU k (c : cs) | kindOfU c == Just k || k == KindNat && maybe False fillsNat (kindOfU c) = cs
 dropKindHeadU _ cs = cs
 
 -- | The concrete form of a general kind argument that has no reducible

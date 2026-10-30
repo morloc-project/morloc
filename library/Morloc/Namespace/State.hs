@@ -981,7 +981,7 @@ data Gamma = Gamma
   -- may assume (KIND-4).
   , gammaRigidDomain :: [TypeU]
   -- | The parameters of the definitions being checked as contracts that a
-  -- label binds to a Nat, with that Nat (POLY-3).
+  -- label binds to an Int, with that Int (POLY-3).
   , gammaLabelVars :: Map.Map EVar TVar
   -- | The type variables of the signatures being checked around this point,
   -- by the name the signature wrote to the name the check gave it. A local

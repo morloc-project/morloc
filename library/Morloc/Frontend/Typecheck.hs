@@ -292,8 +292,7 @@ typecheckWith expected = run
     checkFinalType' ix@(Idx i t) = case negativeNats t of
       (n : _) ->
         MM.throwSourcedError i $
-          "A dimension may not be negative, but this one is " <> pretty n
-            <> ", so check the arithmetic in the signature."
+          "A dimension may not be negative, but this one is " <> pretty n <> "."
       [] -> case collidingUnions t of
         (ks : _) ->
           MM.throwSourcedError i $
@@ -658,14 +657,14 @@ compatibleTypeU = go Set.empty Set.empty
     nominal (NamU _ n ps _) = AppU (VarU n) ps
     nominal t = t
 
-    isNatExprT t = kindOfU t == Just KindNat
+    isNatExprT t = maybe False fillsNat (kindOfU t)
 
 -- | Result type of slicing a container. A leading Nat parameter becomes
 -- 'NatVoidU', which matches any Nat. A fresh existential would never be
 -- solved and would reach later stages as a quantified variable.
 bracketSliceResultType :: Gamma -> TypeU -> (Gamma, TypeU)
 bracketSliceResultType g t@(AppU h args) = case args of
-  (a : rest) | kindOfU a == Just KindNat ->
+  (a : rest) | maybe False fillsNat (kindOfU a) ->
     (g, AppU h (NatVoidU : rest))
   _ -> (g, t)
 bracketSliceResultType g t = (g, t)
@@ -1059,8 +1058,7 @@ synthE _ g (AppS f []) = do
 synthE i g0 (AppS f xs0) = do
   (g1, funType0, funExpr0) <- synthG g0 f
 
-  -- Integer literal arguments solve labeled Nat parameters (m@Int).
-  checkNatLabelValues f xs0 g1
+  -- Literal arguments solve the variables their labels bind (m@Int).
   let g1' = resolveNatLabels f funType0 xs0 g1
 
   etaExpandSynthE i g1' funType0 funExpr0 f xs0
@@ -2398,7 +2396,6 @@ checkE i g0 e@(AppS _ _) t@(OptionalU _) = checkEFallback i g0 e t
 -- case take the synth-and-subtype path.
 checkE i g0 (AppS f xs) t = do
   (g1, funType0, funExpr0) <- synthG g0 f
-  checkNatLabelValues f xs g1
   let g1' = resolveNatLabels f funType0 xs g1
       (g2, funType1) = stripForallU g1' (normalizeType funType0)
       -- Finish from the head already synthesized: synthesizing it again
@@ -3050,27 +3047,11 @@ tryEvalStrList g e = case tryEvalConst g e of
 tryExtractStrListPre :: Gamma -> AnnoS Int ManyPoly Int -> Maybe [Text]
 tryExtractStrListPre g (AnnoS _ _ e) = tryEvalStrList g e
 
--- | A literal argument that a label binds to a Nat is never negative
--- (KIND-4).
-checkNatLabelValues :: AnnoS Int ManyPoly Int -> [AnnoS Int ManyPoly Int] -> Gamma -> MorlocMonad ()
-checkNatLabelValues (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) args g =
-  case [ (ai, v, n)
-       | (v, a@(AnnoS ai _ _)) <- labelArguments et args
-       , not (Set.member v (strLabelVars (etype et)))
-       , Just n <- [tryExtractIntPre g a]
-       , n < 0
-       ] of
-    [] -> return ()
-    ((ai, v, n) : _) ->
-      MM.throwSourcedError ai $
-        "This argument sets the Nat" <+> squotes (pretty v) <+> "to" <+> pretty n <> ", but a Nat is never negative"
-checkNatLabelValues _ _ _ = return ()
-
 -- | Each label of a signature with the argument it binds, where given.
 labelArguments :: EType -> [a] -> [(TVar, a)]
 labelArguments et args = [(v, a) | (v, idx) <- Map.toList (enatLabels et), a <- take 1 (drop idx args)]
 
--- | The labels that bind a Str or a list of Str rather than a Nat.
+-- | The labels that bind a Str or a list of Str rather than an Int.
 strLabelVars :: TypeU -> Set.Set TVar
 strLabelVars t = Set.fromList (collectStrVarNames t <> collectListVarNames t)
 
@@ -3084,7 +3065,7 @@ resolveNatLabels ::
   Gamma -> Gamma
 resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args g
   | not (Map.null labels) =
-    let -- Nat labels: match each original NatVarU name to its renamed counterpart
+    let -- Nat and Int variables: each original name to its renamed one
         origNvs = nub (collectNatVarNames (etype et))
         renamedNvs = nub (collectNatVarNames funType)
         natRenMap = Map.fromList (zip origNvs renamedNvs)
@@ -3114,18 +3095,21 @@ resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args
           ]
         keyed k = Map.mapKeys (\v -> (v, k))
         combined = Map.unions
-          [ keyed KindNat natSolutions
+          [ Map.fromList [((v, natKind v), t) | (v, t) <- Map.toList natSolutions]
           , keyed KindStr strSolutions
           , keyed (KindList KindStr) listSolutions
           ]
     in g { gammaKindSubs = Map.union combined (gammaKindSubs g) }
   where
     labels = enatLabels et
+    intLabels = Set.fromList [w | IntVarU w <- universeT funType]
+    natKind v = if Set.member v intLabels then KindInt else KindNat
+    universeT t = t : concatMap universeT (typeUChildren t)
     -- A literal, or a parameter that the enclosing signature's label binds
-    -- to a Nat.
+    -- to an Int.
     labelValue a@(AnnoS _ _ e) = case (tryExtractIntPre g a, e) of
       (Just n, _) -> Just (NatLitU n)
-      (_, BndS x) -> NatVarU <$> Map.lookup x (gammaLabelVars g)
+      (_, BndS x) -> IntVarU <$> Map.lookup x (gammaLabelVars g)
       _ -> Nothing
 resolveNatLabels _ _ _ g = g
 
@@ -3214,7 +3198,7 @@ checkRigidNats i g bodyTypes
         ND.Holds _ -> return ()
         ND.Refuted env ->
           MM.throwSourcedError (failingTerm env) $ vsep
-            [ "The body does not hold for every value of the Nat variables of its signature (POLY-7)."
+            [ "The body does not hold for every value of the Nat and Int variables of its signature (POLY-7)."
             , if Map.null env
                 then "These conditions have no solution:"
                 else
@@ -3225,7 +3209,7 @@ checkRigidNats i g bodyTypes
         ND.Unknown ->
           MM.throwSourcedError i $ vsep
             [ "The compiler cannot decide whether these conditions hold for every value"
-                <+> "of the Nat variables of the signature (POLY-7, DIM-7):"
+                <+> "of the Nat and Int variables of the signature (POLY-7, DIM-7):"
             , vsep ["  " <> prettyCond c | c <- conds]
             ]
   where
@@ -3233,8 +3217,9 @@ checkRigidNats i g bodyTypes
     nonNegative ts = [ND.NatGe e (NS.NatLit 0) | t <- ts, Just e <- [typeUToNatExpr t]]
     domain = nonNegative (gammaRigidDomain g)
     solved =
-      [ ND.NatEq (NS.NatVar v) e
-      | ((v, KindNat), t) <- Map.toList (gammaKindSubs g)
+      [ ND.NatEq (if k == KindInt then NS.IntVar v else NS.NatVar v) e
+      | ((v, k), t) <- Map.toList (gammaKindSubs g)
+      , fillsNat k
       , Just e <- [typeUToNatExpr (apply g t)]
       ]
     deferred =
@@ -3256,8 +3241,15 @@ checkRigidNats i g bodyTypes
         (j : _) -> j
         [] -> i
     definitions = Map.fromList
-      ( [(v, e) | ND.NatEq (NS.NatVar v) e <- reaching, not (Set.member v rigid)]
-          <> [(v, e) | ND.NatEq e (NS.NatVar v) <- reaching, not (Set.member v rigid)] )
+      [ (v, e)
+      | ND.NatEq x y <- reaching
+      , (var, e) <- [(x, y), (y, x)]
+      , v <- case var of
+          NS.NatVar w -> [w]
+          NS.IntVar w -> [w]
+          _ -> []
+      , not (Set.member v rigid)
+      ]
     resolve 0 c = c
     resolve k (ND.NatGe a b) = resolve (k - 1) (ND.NatGe (NS.substituteNat definitions a) (NS.substituteNat definitions b))
     resolve _ c = c
@@ -3268,6 +3260,7 @@ checkRigidNats i g bodyTypes
     prettyNat e = case e of
       NS.NatLit n -> pretty n
       NS.NatVar v -> natName v
+      NS.IntVar v -> natName v
       NS.NatAdd x y -> parens (prettyNat x <+> "+" <+> prettyNat y)
       NS.NatSub x y -> parens (prettyNat x <+> "-" <+> prettyNat y)
       NS.NatMul x y -> parens (prettyNat x <+> "*" <+> prettyNat y)

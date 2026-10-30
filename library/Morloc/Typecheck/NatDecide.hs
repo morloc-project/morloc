@@ -5,9 +5,11 @@ Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
-'decide' answers whether a set of Nat conditions holds: for every natural
-value of the rigid variables (POLY-7), some natural value of the other
-variables satisfies every condition (DIM-6). 'decideAssuming' quantifies the
+'decide' answers whether a set of Nat conditions holds: for every value of
+the rigid variables (POLY-7), some value of the other variables satisfies
+every condition (DIM-6). A Nat variable takes natural values and an Int
+variable integer ones; each Int variable is decided as the difference of two
+natural ones. 'decideAssuming' quantifies the
 rigid variables only over the values that satisfy its assumptions. The
 arithmetic is integer arithmetic (KIND-3): a difference may be negative, and
 a division truncates toward zero and is defined only for a positive divisor,
@@ -73,7 +75,57 @@ decide rigid = decideAssuming rigid []
 -- gives a value of every rigid variable of its group, and that value
 -- satisfies the assumptions.
 decideAssuming :: Set TVar -> [Condition] -> [Condition] -> Decision
-decideAssuming rigid asm0 conds0
+decideAssuming rigid asm conds0
+  | Set.null ints = case decideNatural rigid asm conds of
+      Holds w -> Holds (withDefs w)
+      d -> d
+  | otherwise = case decideNatural rigid' (map split asm) (map split conds) of
+      Holds w
+        -- A witness is kept only when it names both halves of every Int it
+        -- names one of, so that the values it gives stay consistent.
+        | all (\i -> all (`Map.member` w) (pair i) || not (any (`Map.member` w) (pair i))) (Set.toList ints)
+        , let joined = Map.union (Map.mapMaybe id (Map.fromList [(i, joinW w i) | i <- Set.toList ints])) (Map.withoutKeys w halvesSet)
+        , all (Set.disjoint halvesSet . freeNatVars) (Map.elems joined) ->
+            Holds (withDefs joined)
+        | otherwise -> Holds Map.empty
+      Refuted env -> Refuted (Map.union (Map.fromList [(i, joinE env i) | i <- Set.toList ints, any (`Map.member` env) (pair i)]) (Map.withoutKeys env halvesSet))
+      Unknown -> Unknown
+  where
+    (defs, conds1) = defineFirst conds0
+    -- A definition may name variables the witness gives values to.
+    withDefs w = Map.union w (Map.map (substituteNat w) defs)
+    -- A condition without division that holds for every integer value of
+    -- its Int variables (an even power, as in @h * h >= 0@) is settled
+    -- before the split hides the sign of each.
+    conds = filter (not . settled) conds1
+    settled c@(NatGe a b) = null (sideConditions c) && nonNegativeEverywhere (NatSub a b)
+    settled _ = False
+    ints = Set.unions [intVars a <> intVars b | c <- asm <> conds, let (a, b) = sides c]
+    halves = intHalves
+    pair i = let (p, n) = halves i in [p, n]
+    halvesSet = Set.fromList (concatMap pair (Set.toList ints))
+    rigid' = Set.union (Set.difference rigid ints) (Set.fromList (concatMap pair (Set.toList (Set.intersection rigid ints))))
+    split = substCond splitIntVars
+    joinE env i = let (p, n) = halves i in Map.findWithDefault 0 p env - Map.findWithDefault 0 n env
+    joinW w i = let (p, n) = halves i in NatSub <$> Map.lookup p w <*> Map.lookup n w
+
+    -- An inferred Nat written equal to an expression (@v = e@) is replaced
+    -- by it, leaving @e >= 0@, before the split, so that this condition is
+    -- still read with its Int variables whole.
+    defineFirst cs = case [(v, e, c) | c@(NatEq x y) <- cs, (NatVar v, e) <- [(x, y), (y, x)], not (Set.member v rigid), not (Set.member v (freeNatVars e))] of
+      ((v, e, c) : _) ->
+        let sub = substituteNat (Map.singleton v e)
+            (ds, rest) = defineFirst (NatGe e (NatLit 0) : [substCond sub c' | c' <- cs, c' /= c])
+         in (Map.insert v (substituteNat ds e) ds, rest)
+      [] -> (Map.empty, cs)
+
+sides :: Condition -> (NatExpr, NatExpr)
+sides (NatEq a b) = (a, b)
+sides (NatGe a b) = (a, b)
+
+-- | 'decideAssuming' over Nat variables alone.
+decideNatural :: Set TVar -> [Condition] -> [Condition] -> Decision
+decideNatural rigid asm0 conds0
   | any (\a -> Set.null (condVars [a]) && holdsAt Map.empty a /= Just True) asm = Holds Map.empty
   | otherwise = case eliminate rigid (withSides conds0) of
     Left counter
@@ -194,6 +246,7 @@ exprSides :: NatExpr -> [Condition]
 exprSides e = case e of
   NatLit _ -> []
   NatVar _ -> []
+  IntVar _ -> []
   NatAdd a b -> exprSides a <> exprSides b
   NatMul a b -> exprSides a <> exprSides b
   NatSub a b -> exprSides a <> exprSides b
@@ -282,6 +335,7 @@ partialFree c = case c of
     free e = case e of
       NatLit _ -> True
       NatVar _ -> True
+      IntVar _ -> True
       NatAdd x y -> free x && free y
       NatMul x y -> free x && free y
       NatSub x y -> free x && free y

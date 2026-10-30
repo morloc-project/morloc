@@ -1729,6 +1729,15 @@ refineKinds dag = do
       ExprI i (AssE v (promoteLabelKindsExpr e) (map promoteLabelKindsExpr es))
     promoteLabelKindsExpr (ExprI i (IstE o c ctx ts es)) =
       ExprI i (IstE o c ctx ts (map promoteLabelKindsExpr es))
+    promoteLabelKindsExpr (ExprI i (ClsE (Typeclass cs cls vs sigs))) =
+      ExprI i (ClsE (Typeclass cs cls vs [promoteSig s | s <- sigs]))
+      where
+        promoteSig (Signature v lng et) =
+          let kindedVars = labelDerivedKinds (enatLabels et) (etype et)
+           in Signature v lng et
+                { etype = promoteKindedVarsR kindedVars (etype et)
+                , econs = Set.map (AST.mapConstraint (promoteKindedVarsR kindedVars)) (econs et)
+                }
     promoteLabelKindsExpr e = e
 
     -- | Given the @enatLabels@ map (var -> arg index) and the function
@@ -1749,7 +1758,7 @@ refineKinds dag = do
 
         kindOfLabelInner :: TypeU -> Maybe Kind
         kindOfLabelInner (VarU (TV "Str")) = Just KindStr
-        kindOfLabelInner (VarU (TV "Int")) = Just KindNat
+        kindOfLabelInner (VarU (TV "Int")) = Just KindInt
         kindOfLabelInner (AppU (VarU (TV "List")) [_]) = Just (KindList KindStr)
         kindOfLabelInner _ = Nothing
 
@@ -1889,6 +1898,7 @@ refineKinds dag = do
         inferArgKind (LitU (LRec _))   = KindRec
         inferArgKind (LitU (LList _))  = KindList KindStr
         inferArgKind (LitU (LSet _))   = KindSet KindStr
+        inferArgKind (KVarU (_, KindInt)) = KindNat
         inferArgKind (KVarU (_, k))    = k
         inferArgKind (VoidU k)         = k
         inferArgKind (ListVarU _)      = KindList KindStr
@@ -1950,6 +1960,7 @@ refineKinds dag = do
         -- kinded; the key is Str-kinded) are dispatched recursively.
         goSlot :: Kind -> TypeU -> Map TVar Kind
         goSlot KindNat = goNat
+        goSlot KindInt = goNat
         goSlot KindStr = goStr
         goSlot KindRec = goRec
         goSlot KindType = go
@@ -2081,37 +2092,50 @@ refineKinds dag = do
       where
         go (VarU v) = case Map.lookup v kindedVars of
           Just KindNat -> NatVarU v
+          Just KindInt -> IntVarU v
           Just KindStr -> StrVarU v
           Just KindRec -> RecVarU v
           Just (KindList _) -> ListVarU v
           Just (KindSet _) -> SetVarU v
           _ -> VarU v
         go (NatVarU v) = case Map.lookup v kindedVars of
+          Just KindInt -> IntVarU v
           Just KindStr -> StrVarU v
           Just KindRec -> RecVarU v
           Just (KindList _) -> ListVarU v
           Just (KindSet _) -> SetVarU v
           _ -> NatVarU v
+        -- An Int keeps its kind where it fills a Nat slot (KIND-4).
+        go (IntVarU v) = case Map.lookup v kindedVars of
+          Just KindStr -> StrVarU v
+          Just KindRec -> RecVarU v
+          Just (KindList _) -> ListVarU v
+          Just (KindSet _) -> SetVarU v
+          _ -> IntVarU v
         go (StrVarU v) = case Map.lookup v kindedVars of
           Just KindNat -> NatVarU v
+          Just KindInt -> IntVarU v
           Just KindRec -> RecVarU v
           Just (KindList _) -> ListVarU v
           Just (KindSet _) -> SetVarU v
           _ -> StrVarU v
         go (RecVarU v) = case Map.lookup v kindedVars of
           Just KindNat -> NatVarU v
+          Just KindInt -> IntVarU v
           Just KindStr -> StrVarU v
           Just (KindList _) -> ListVarU v
           Just (KindSet _) -> SetVarU v
           _ -> RecVarU v
         go (ListVarU v) = case Map.lookup v kindedVars of
           Just KindNat -> NatVarU v
+          Just KindInt -> IntVarU v
           Just KindStr -> StrVarU v
           Just KindRec -> RecVarU v
           Just (KindSet _) -> SetVarU v
           _ -> ListVarU v
         go (SetVarU v) = case Map.lookup v kindedVars of
           Just KindNat -> NatVarU v
+          Just KindInt -> IntVarU v
           Just KindStr -> StrVarU v
           Just KindRec -> RecVarU v
           Just (KindList _) -> ListVarU v
@@ -2226,6 +2250,7 @@ rename sourceName localAlias = f
     f (EffectU effs t) = EffectU effs (f t)
     f (OptionalU t) = OptionalU (f t)
     f t@(NatVarU _) = t
+    f t@(IntVarU _) = t
     f t@(NatLitU _) = t
     f (NatAddU a b) = NatAddU (f a) (f b)
     f (NatMulU a b) = NatMulU (f a) (f b)
@@ -2427,7 +2452,7 @@ arithmeticKindWith kindOf op args
   | op == OpNatSub, [_, LitU (LList _)] <- args = Just KindRec
   | (k : _) <- [k | k@(KindList _) <- kinds] = Just k
   | (k : _) <- [k | k@(KindSet _) <- kinds] = Just k
-  | KindNat `elem` kinds = Just KindNat
+  | any fillsNat kinds = Just KindNat
   | otherwise = Nothing
   where
     kinds = [k | Just k <- map kindOf args]

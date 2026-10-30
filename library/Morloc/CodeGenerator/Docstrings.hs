@@ -791,6 +791,7 @@ makeOptMeta (NatSubT _ _) = "NAT"
 makeOptMeta (NatDivT _ _) = "NAT"
 makeOptMeta (VoidT k) = case k of
   KindNat -> "NAT"
+  KindInt -> "INT"
   KindStr -> "STR"
   KindRec -> "REC"
   KindList _ -> "LIST"

@@ -127,6 +127,14 @@ examples =
         d -> assertFailure (show d)
   , testCase "a quotient inside a sum is a natural" $
       assertBool "" (isHolds (decide (rigid ["n"]) [NatGe (NatAdd (NatDiv (v "n") (lit 2)) (v "n")) (lit 0)]))
+  , testCase "an Int variable may be negative" $
+      decide (rigid ["i"]) [NatGe (IntVar (tv "i")) (lit 0)] @?= Refuted (Map.fromList [(tv "i", -1)])
+  , testCase "a Nat plus an Int is checked as a whole" $
+      assertBool "" (isHolds (decideAssuming (rigid ["n", "k"]) [NatGe (NatAdd (v "n") (IntVar (tv "k"))) (lit 0)] [NatGe (NatAdd (NatAdd (v "n") (IntVar (tv "k"))) (lit 1)) (lit 0)]))
+  , testCase "an inferred Nat equal to a rigid Int needs it non-negative" $
+      case decide (rigid ["h"]) [NatEq (v "m") (IntVar (tv "h"))] of
+        Refuted env -> Map.lookup (tv "h") env @?= Just (-1)
+        d -> assertFailure (show d)
   , testCase "a rigid variable is not at least a larger one" $
       assertBool "" (isRefuted (decide (rigid ["a", "b"]) [NatGe (v "a") (v "b")]))
   ]
@@ -139,6 +147,8 @@ properties =
   , testProperty "a refutation has no solution at its counterexample" prop_refuted_sound
   , testProperty "under assumptions, a holds verdict is satisfied inside them" prop_assuming_holds_sound
   , testProperty "under assumptions, a refutation lies inside them" prop_assuming_refuted_sound
+  , testProperty "with Int variables, a holds verdict is satisfied" prop_int_holds_sound
+  , testProperty "with Int variables, a refutation has no solution" prop_int_refuted_sound
   ]
 
 names :: [String]
@@ -317,6 +327,75 @@ prop_assuming_refuted_sound =
                           && not (any (\inf -> all (holdsAtEnv inf) cs) (completions env Map.empty inferred))
                       )
           _ -> property True
+  where
+    vars (NatEq a b) = freeNatVars a <> freeNatVars b
+    vars (NatGe a b) = freeNatVars a <> freeNatVars b
+
+-- | Expressions over the Nat variables of 'names' and the Int variables
+-- "i" and "j", with small literals, so that the values a condition needs
+-- stay inside the window 'intCompletions' searches.
+genIntExpr :: Int -> Gen NatExpr
+genIntExpr n
+  | n <= 0 = leafI
+  | otherwise =
+      frequency
+        [ (3, leafI)
+        , (3, NatAdd <$> sub <*> sub)
+        , (2, NatMul <$> sub <*> sub)
+        , (2, NatSub <$> sub <*> sub)
+        , (1, NatDiv <$> sub <*> sub)
+        ]
+  where
+    sub = genIntExpr (n `div` 2)
+    leafI = oneof [lit <$> choose (0, 2), v <$> elements names, IntVar . tv <$> elements ["i", "j"]]
+
+genIntRigid :: Gen (Set.Set TVar)
+genIntRigid = Set.fromList . map tv <$> sublistOf (names <> ["i", "j"])
+
+-- | Values of the rigid variables: naturals for Nat ones, integers for Int.
+intSamples :: [TVar] -> [Map TVar Integer]
+intSamples rs = [Map.fromList (zip rs xs) | xs <- mapM range rs]
+  where
+    range r = if r `elem` [tv "i", tv "j"] then [-3 .. 3] else [0 .. 3]
+
+-- | Assignments of the inferred variables at a sample: Nat ones natural,
+-- Int ones any integer in a window.
+intCompletions :: Map TVar Integer -> Map TVar NatExpr -> [TVar] -> [Map TVar Integer]
+intCompletions env witness inferred =
+  let free = [x | x <- inferred, not (Map.member x witness)]
+      range x = if x `elem` [tv "i", tv "j"] then [-16 .. 16] else [0 .. 16]
+   in [ full
+      | xs <- mapM range free
+      , let base = Map.union env (Map.fromList (zip free xs))
+      , let full = Map.union base (Map.mapMaybe (evalNat base) witness)
+      , and [x >= 0 | (k, x) <- Map.toList full, k `notElem` [tv "i", tv "j"]]
+      ]
+
+prop_int_holds_sound :: Property
+prop_int_holds_sound =
+  forAll genIntRigid $ \rs ->
+    forAll (listOf1 (genCondition ((,) <$> resize 4 (sized genIntExpr) <*> resize 4 (sized genIntExpr)))) $ \cs ->
+      case decide rs cs of
+        Holds witness ->
+          let inferred = Set.toList (Set.unions [vars c | c <- cs] `Set.difference` rs)
+           in if length inferred > 2 then property True else conjoin
+                [ counterexample (show env) (any (\inf -> all (holdsAtEnv inf) cs) (intCompletions env witness inferred))
+                | env <- intSamples (Set.toList rs)
+                ]
+        _ -> property True
+  where
+    vars (NatEq a b) = freeNatVars a <> freeNatVars b
+    vars (NatGe a b) = freeNatVars a <> freeNatVars b
+
+prop_int_refuted_sound :: Property
+prop_int_refuted_sound =
+  forAll genIntRigid $ \rs ->
+    forAll (listOf1 (genCondition ((,) <$> resize 4 (sized genIntExpr) <*> resize 4 (sized genIntExpr)))) $ \cs ->
+      case decide rs cs of
+        Refuted env ->
+          let inferred = Set.toList (Set.unions [vars c | c <- cs] `Set.difference` Map.keysSet env)
+           in if length inferred > 2 then property True else counterexample (show env) (not (any (\inf -> all (holdsAtEnv inf) cs) (intCompletions env Map.empty inferred)))
+        _ -> property True
   where
     vars (NatEq a b) = freeNatVars a <> freeNatVars b
     vars (NatGe a b) = freeNatVars a <> freeNatVars b

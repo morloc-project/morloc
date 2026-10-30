@@ -558,6 +558,9 @@ instance Applicable TypeU where
   apply g (NatVarU v) = case Map.lookup (v, KindNat) (gammaKindSubs g) of
     Just t -> t
     Nothing -> NatVarU v
+  apply g (IntVarU v) = case Map.lookup (v, KindInt) (gammaKindSubs g) of
+    Just t -> t
+    Nothing -> IntVarU v
   -- [G](A->B) = ([G]A -> [G]B)
   apply g (FunU ts t) = FunU (map (apply g) ts) (apply g t)
   apply g (AppU t ts) = case apply g t of
@@ -852,6 +855,7 @@ subtypeEffRows scope e1 e2 i1 i2 g =
 -- Nat expression helpers for SOP-based comparison
 isNatExpr :: TypeU -> Bool
 isNatExpr (NatVarU _) = True
+isNatExpr (IntVarU _) = True
 isNatExpr (NatLitU _) = True
 isNatExpr (NatAddU _ _) = True
 isNatExpr (NatMulU _ _) = True
@@ -862,6 +866,7 @@ isNatExpr _ = False
 
 typeUToNatExpr :: TypeU -> Maybe NS.NatExpr
 typeUToNatExpr (NatVarU v) = Just (NS.NatVar v)
+typeUToNatExpr (IntVarU v) = Just (NS.IntVar v)
 typeUToNatExpr (NatLitU n) = Just (NS.NatLit n)
 typeUToNatExpr (NatAddU a b) = NS.NatAdd <$> typeUToNatExpr a <*> typeUToNatExpr b
 typeUToNatExpr (NatMulU a b) = NS.NatMul <$> typeUToNatExpr a <*> typeUToNatExpr b
@@ -876,11 +881,14 @@ typeUToNatExpr _ = Nothing
 natPositions :: TypeU -> [TypeU]
 natPositions t = case t of
   OpU op _ | op `elem` [OpNatAdd, OpNatSub, OpNatMul, OpNatDiv] -> [t]
+  -- An Int fills only a Nat position, so it must be a natural there.
+  IntVarU _ -> [t]
   _ -> concatMap natPositions (typeUChildren t)
 
 natExprToTypeU :: NS.NatExpr -> TypeU
 natExprToTypeU (NS.NatLit n) = NatLitU n
 natExprToTypeU (NS.NatVar v) = NatVarU v
+natExprToTypeU (NS.IntVar v) = IntVarU v
 natExprToTypeU (NS.NatAdd a b) = NatAddU (natExprToTypeU a) (natExprToTypeU b)
 natExprToTypeU (NS.NatMul a b) = NatMulU (natExprToTypeU a) (natExprToTypeU b)
 natExprToTypeU (NS.NatSub a b) = NatSubU (natExprToTypeU a) (natExprToTypeU b)
@@ -1018,17 +1026,20 @@ applySetSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
     insertSub g (v, se) =
       g { gammaKindSubs = Map.insert (v, KindSet KindStr) (setExprToTypeU se) (gammaKindSubs g) }
 
-applyNatSolutions :: Map.Map TVar NS.NatExpr -> Gamma -> Either MDoc Gamma
-applyNatSolutions subs g0 = foldM applySub g0 (Map.toList subs)
+-- | Record solutions of Nat equations; @ints@ names the variables of the
+-- equations that are Int-kinded.
+applyNatSolutions :: Set.Set TVar -> Map.Map TVar NS.NatExpr -> Gamma -> Either MDoc Gamma
+applyNatSolutions ints subs g0 = foldM applySub g0 (Map.toList subs)
   where
     applySub g (v, ne) =
       let t = natExprToTypeU ne
-      -- Try solving as existential first; fall back to a NatVarU solution
-      -- in the kind-tagged gamma map.
+          k = if Set.member v ints then KindInt else KindNat
+      -- Try solving as existential first; fall back to a kind-tagged
+      -- variable's solution in the gamma map.
       in case solveExist v t g of
            Right (Just g') -> Right g'
            Right Nothing ->
-             Right g { gammaKindSubs = Map.insert (v, KindNat) t (gammaKindSubs g) }
+             Right g { gammaKindSubs = Map.insert (v, k) t (gammaKindSubs g) }
            Left err -> Left err
 
 -- | Re-check deferred kind constraints after all existentials are solved.
@@ -1138,6 +1149,8 @@ subtype scope t1 t2 g | isNamOrExist t2, Just fs <- asClosedRec t1 = subtype sco
 subtype scope t1 t2 g | isNamOrExist t1, Just fs <- asClosedRec t2 = subtype scope t1 (closedRecToNamU fs) g
 -- NatVarU: identical nat variables are equal; different ones fall to isNatExpr path
 subtype _ (NatVarU v1) (NatVarU v2) g
+  | v1 == v2 = return g
+subtype _ (IntVarU v1) (IntVarU v2) g
   | v1 == v2 = return g
 -- A transparent alias is its expansion (ALIAS-1). When the heads differ and
 -- one is an alias, unfold it a step before any rule below takes the types
@@ -1405,7 +1418,7 @@ subtype _ t1 t2 g
              case NS.solveNat ne1 ne2 of
                Right subs
                  | Map.null subs -> return g
-                 | otherwise -> applyNatSolutions subs g
+                 | otherwise -> applyNatSolutions (NS.intVars ne1 <> NS.intVars ne2) subs g
                Left NS.Contradiction -> subtypeError t1 t2 "Nat constraint mismatch"
                Left (NS.Deferred _) -> return g { gammaDeferred = (t1', t2') : gammaDeferred g }
            _ -> subtypeError t1 t2 "Cannot compare Nat expressions"
@@ -2177,6 +2190,7 @@ solve v t
     occursIn :: TVar -> TypeU -> Bool
     occursIn v' (VarU v'') = v' == v''
     occursIn _ (NatVarU _) = False
+    occursIn _ (IntVarU _) = False
     occursIn v' (ExistU v'' (ps, _) (rs, _)) = v' == v'' || any (occursIn v') ps || any (occursIn v' . snd) rs
     occursIn v' (ForallU _ t') = occursIn v' t'
     occursIn v' (FunU ts t') = any (occursIn v') ts || occursIn v' t'
@@ -2639,6 +2653,7 @@ renameKindedVars natM strM recM listM effM = go
     goEff (EffectVar v) = EffectVar (renE v)
     goEff (EffectUnion a b) = EffectUnion (goEff a) (goEff b)
     go (NatVarU v) = NatVarU (renN v)
+    go (IntVarU v) = IntVarU (renN v)
     go (StrVarU v) = StrVarU (renS v)
     go (RecVarU v) = RecVarU (renR v)
     go (VarU v) = VarU v
@@ -2719,6 +2734,7 @@ simplifyNats = go
     go (EffectU e t) = EffectU e (go t)
     go (OptionalU t) = OptionalU (go t)
     go t@(NatVarU _) = t
+    go t@(IntVarU _) = t
     go (LabeledU n t) = LabeledU n (go t)
     go t = t
 
@@ -2740,6 +2756,7 @@ collectExistVars = go
   where
     go (VarU _) = []
     go (NatVarU _) = []
+    go (IntVarU _) = []
     go (ExistU v (ts, _) (rs, _)) = v : concatMap go ts ++ concatMap (go . snd) rs
     go (ForallU _ t) = go t
     go (FunU ts t) = concatMap go (t : ts)
@@ -2789,6 +2806,7 @@ collectNatVarNames :: TypeU -> [TVar]
 collectNatVarNames = go
   where
     go (NatVarU v) = [v]
+    go (IntVarU v) = [v]
     go (VarU _) = []
     go (ExistU _ (ts, _) (rs, _)) = concatMap go ts ++ concatMap (go . snd) rs
     go (ForallU _ t) = go t
@@ -2843,6 +2861,7 @@ collectStrVarNames = go
     go (StrVarU v) = [v]
     go (VarU _) = []
     go (NatVarU _) = []
+    go (IntVarU _) = []
     go (ExistU _ (ts, _) (rs, _)) = concatMap go ts ++ concatMap (go . snd) rs
     go (ForallU _ t) = go t
     go (FunU ts t) = concatMap go (t : ts)
@@ -2893,6 +2912,7 @@ collectRecVarNames = go
     go (RecVarU v) = [v]
     go (VarU _) = []
     go (NatVarU _) = []
+    go (IntVarU _) = []
     go (StrVarU _) = []
     go (ExistU _ (ts, _) (rs, _)) = concatMap go ts ++ concatMap (go . snd) rs
     go (ForallU _ t) = go t
@@ -2945,6 +2965,7 @@ collectListVarNames = go
     go (ListVarU v) = [v]
     go (VarU _) = []
     go (NatVarU _) = []
+    go (IntVarU _) = []
     go (StrVarU _) = []
     go (RecVarU _) = []
     go (SetVarU _) = []
@@ -2997,6 +3018,7 @@ collectEffVarNames = go
     go (EffectU effs t) = effectSetVars effs ++ go t
     go (VarU _) = []
     go (NatVarU _) = []
+    go (IntVarU _) = []
     go (StrVarU _) = []
     go (RecVarU _) = []
     go (ListVarU _) = []
@@ -3085,6 +3107,7 @@ collectFixedNames generics = go
       | Set.member v generics = Set.empty
       | otherwise = Set.singleton (unTVar v)
     go (NatVarU _) = Set.empty
+    go (IntVarU _) = Set.empty
     go (ExistU _ (ts, _) (rs, _)) = Set.unions (map go ts ++ map (go . snd) rs)
     go (ForallU _ t) = go t
     go (FunU ts t) = Set.unions $ map go (t : ts)
@@ -3136,6 +3159,7 @@ applyVarRenaming m = go
     ren v = Map.findWithDefault v v m
     go (VarU v) = VarU (ren v)
     go (NatVarU v) = NatVarU (ren v)
+    go (IntVarU v) = IntVarU (ren v)
     go (ExistU v (ts, tc) (rs, rc)) =
       ExistU (ren v) (map go ts, tc) ([(k, go t) | (k, t) <- rs], rc)
     go (ForallU v t) = ForallU (ren v) (go t)
@@ -3209,6 +3233,7 @@ argDoc t = if isAtomicType t then prettyTypeU t else parens (prettyTypeU t)
 isAtomicType :: TypeU -> Bool
 isAtomicType (VarU _) = True
 isAtomicType (NatVarU _) = True
+isAtomicType (IntVarU _) = True
 isAtomicType (StrVarU _) = True
 isAtomicType (RecVarU _) = True
 isAtomicType (ListVarU _) = True
@@ -3234,6 +3259,7 @@ prettyTypeU = renderClean . cleanTypeName
 
     f _ (VarU v) = tv v
     f _ (NatVarU v) = tv v
+    f _ (IntVarU v) = tv v
     -- 'prettyTypeU' is the clean generalized-signature renderer used by
     -- `morloc typecheck`. The existential/generic distinction is not
     -- reliable here (an unsolved existential in a generalized signature

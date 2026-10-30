@@ -451,8 +451,8 @@ classifyMorloc (AppU (VarU (TV nm)) args)
   | isTupleName nm = MTup (fst (partitionKindArgs kindOfU args))
   | otherwise = case fst (partitionKindArgs kindOfU args) of
       [VarU (TV e)]
-        | all (`elem` [Nothing, Just KindNat]) (map kindOfU args) ->
-            MArr e (length [a | a <- args, kindOfU a == Just KindNat])
+        | all (maybe True fillsNat . kindOfU) args ->
+            MArr e (length [a | a <- args, maybe False fillsNat (kindOfU a)])
       _ -> MOther
 classifyMorloc (VarU (TV e)) = MArr e 0
 classifyMorloc _ = MOther

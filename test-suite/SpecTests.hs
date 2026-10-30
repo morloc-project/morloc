@@ -999,7 +999,7 @@ kindTests =
         src :: Vector 10 Real
         bad = roll 12 src
         |]
-    , reject
+    , accept
         "spec-kind-4-5"
         [r|
         module main (bad)
@@ -2172,13 +2172,85 @@ poly7Tests =
     , reject
         "spec-kind-4-10"
         [r|
-        module main (y)
+        module main (x)
+        newtype T1 (d :: Nat) a = List a
+        offset :: k@Int -> T1 n Real -> T1 (n + k) Real
+        src :: T1 10 Real
+        x = offset (-11) src
+        |]
+    , accept
+        "spec-kind-4-12"
+        [r|
+        module main (x)
+        newtype T1 (d :: Nat) a = List a
+        offset :: k@Int -> T1 n Real -> T1 (n + k) Real
+        src :: T1 10 Real
+        x = offset (-4) src
+        |]
+    , reject
+        "spec-poly-7-9"
+        [r|
+        module main (f)
         newtype Vector (n :: Nat) a = List a
         mk :: n@Int -> Vector n Real
         len :: Vector k Real -> Int
         f :: k@Int -> Int
         f k = len (mk k)
-        y = f (-3)
+        |]
+    , accept
+        "spec-poly-7-10"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        mk :: n@Int -> Vector n Real
+        len :: Vector k Real -> Int
+        f :: k@Int -> Vector k Real -> Int
+        f k v = len (mk k)
+        |]
+    , reject
+        "spec-poly-7-11"
+        [r|
+        module main (foo)
+        newtype T1 (d :: Nat) a = List a
+        bar :: T1 (n + 10) Real -> Int
+        foo :: h@Int -> T1 (h + 10) Real -> Int
+        foo h x = bar x
+        |]
+    , accept
+        "spec-poly-7-12"
+        [r|
+        module main (f, h)
+        newtype Vector (n :: Nat) a = List a
+        square :: n@Int -> Vector (n * n) Real
+        len :: Vector k Real -> Int
+        f :: n@Int -> Int
+        f n = len (square n)
+        outer :: Vector n Real -> Vector m Real -> Vector (n * m) Real
+        h :: k@Int -> Vector k Real -> Vector (k * k) Real
+        h k v = outer v v
+        |]
+    , accept
+        "spec-kind-1-1"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        class C a where
+          c :: a -> Str
+        instance C (Vector n a) where
+          c x = "v"
+        f :: k@Int -> Vector k Real -> Str
+        f k v = c v
+        |]
+    , accept
+        "spec-kind-1-2"
+        [r|
+        module main (y)
+        newtype Vector (n :: Nat) a = List a
+        class Mk a where
+          mk :: n@Int -> Vector (n + 5) a
+        instance Mk Real where
+          mk n = mk n
+        y = (mk (-3) :: Vector 2 Real)
         |]
     , reject
         "spec-poly-7-7"

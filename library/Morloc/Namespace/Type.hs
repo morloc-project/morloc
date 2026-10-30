@@ -26,6 +26,7 @@ module Morloc.Namespace.Type
   , TypeU
       ( ..
       , NatVarU
+      , IntVarU
       , StrVarU
       , RecVarU
       , NatVoidU
@@ -132,6 +133,7 @@ module Morloc.Namespace.Type
   , opKind
   , kindOfT
   , kindOfU
+  , fillsNat
   , partitionKindArgs
   , isInternalTerminalName
   , ArgDoc (..)
@@ -429,6 +431,9 @@ data TypeU
 pattern NatVarU :: TVar -> TypeU
 pattern NatVarU v = KVarU (v, KindNat)
 
+pattern IntVarU :: TVar -> TypeU
+pattern IntVarU v = KVarU (v, KindInt)
+
 pattern StrVarU :: TVar -> TypeU
 pattern StrVarU v = KVarU (v, KindStr)
 
@@ -534,7 +539,7 @@ pattern RecSingletonU :: TypeU -> TypeU -> TypeU
 pattern RecSingletonU k v = OpU OpRecSingleton [k, v]
 
 {-# COMPLETE
-    VarU, NatVarU, ExistU, ForallU, FunU, AppU, NamU, EffectU, OptionalU,
+    VarU, NatVarU, IntVarU, ExistU, ForallU, FunU, AppU, NamU, EffectU, OptionalU,
     NatVoidU, StrVarU, StrVoidU, RecVarU, RecVoidU,
     ListVarU, ListVoidU, SetVarU, SetVoidU, LabeledU,
     NatLitU, NatAddU, NatSubU, NatMulU, NatDivU,
@@ -746,6 +751,11 @@ opKind op = case op of
   OpKeys -> KindSet KindStr
   OpListToSet -> KindSet KindStr
   OpProjectField -> KindType
+
+-- | A kind that may fill a Nat position: Nat, or Int, which no parameter
+-- declares and which fills only Nat positions (KIND-1).
+fillsNat :: Kind -> Bool
+fillsNat k = k == KindNat || k == KindInt
 
 -- | The kind of a type argument whose form fixes it: a literal, an
 -- operator, a placeholder or a kinded variable. Nothing for a Type-kinded
@@ -1021,6 +1031,7 @@ instance Typelike TypeU where
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
   typeOf (EffectU effs t) = mkEffectT (resolveEffectSet effs) (typeOf t)
   typeOf (OptionalU t) = OptionalT (typeOf t)
+  typeOf (KVarU (_, KindInt)) = NatVoidT
   typeOf (KVarU (_, k)) = VoidT k
   typeOf (VoidU k) = VoidT k
   -- A ground Rec chain lowers to a record so its column schema survives
@@ -1049,6 +1060,7 @@ instance Typelike TypeU where
 
   free v@(VarU _) = Set.singleton v
   free (NatVarU _) = Set.empty
+  free (IntVarU _) = Set.empty
   free v@(ExistU _ ([], _) (rs, _)) = Set.unions $ Set.singleton v : map (free . snd) rs
   free (ExistU v (ts, _) _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
   free (ForallU v t) = Set.delete (VarU v) (free t)
@@ -1094,6 +1106,9 @@ instance Typelike TypeU where
       -- Kind-tagged variables are substituted by name; the caller must pass
       -- a replacement of matching kind.
       sub t@(NatVarU v)
+        | v0 == v = r0
+        | otherwise = t
+      sub t@(IntVarU v)
         | v0 == v = r0
         | otherwise = t
       sub t@(StrVarU v)
@@ -1147,6 +1162,7 @@ instance Typelike TypeU where
   normalizeType (EffectU effs t) = mkEffectU effs (normalizeType t)
   normalizeType (OptionalU t) = OptionalU (normalizeType t)
   normalizeType t@(NatVarU _) = t
+  normalizeType t@(IntVarU _) = t
   normalizeType (OpU op args) = OpU op (map normalizeType args)
   normalizeType (LitU (LRec fs)) = LitU (LRec [(k, normalizeType t) | (k, t) <- fs])
   normalizeType (LitU (LList es)) = LitU (LList (map normalizeType es))
@@ -1233,7 +1249,7 @@ generalizes kinds t1 t2 = isJust (match flex0 t1 t2 Map.empty)
     -- A flexible variable, and what it may stand for.
     flexible flex t = case t of
       VarU v | Set.member v flex -> Just (v, \b -> isNothing (kindOfU b))
-      KVarU (v, k) | Set.member v flex -> Just (v, \b -> kindOfU b == Just k || k == KindRec && isRow b)
+      KVarU (v, k) | Set.member v flex -> Just (v, \b -> kindOfU b == Just k || k == KindNat && maybe False fillsNat (kindOfU b) || k == KindRec && isRow b)
       ListVarU v | Set.member v flex -> Just (v, \b -> kindOfU b == Just (KindList KindStr))
       SetVarU v | Set.member v flex -> Just (v, \b -> kindOfU b == Just (KindSet KindStr))
       _ -> Nothing
@@ -1245,6 +1261,7 @@ generalizes kinds t1 t2 = isJust (match flex0 t1 t2 Map.empty)
 
     natLike x = case x of
       NatVarU _ -> True
+      IntVarU _ -> True
       NatVoidU -> True
       LitU (LNat _) -> True
       OpU op _ -> isNatOpTag op
@@ -1500,6 +1517,7 @@ groundRecFields _ = Nothing
 extractKey :: TypeU -> TVar
 extractKey (VarU v) = v
 extractKey (NatVarU v) = v
+extractKey (IntVarU v) = v
 extractKey (ForallU _ t) = extractKey t
 extractKey (AppU t _) = extractKey t
 extractKey (NamU _ v _ _) = v
@@ -1668,6 +1686,7 @@ newVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
     allVars :: TypeU -> Set.Set TypeU
     allVars (ForallU v t) = Set.union (Set.singleton (VarU v)) (allVars t)
     allVars (NatVarU v) = Set.singleton (NatVarU v)
+    allVars (IntVarU v) = Set.singleton (IntVarU v)
     allVars (EffectU _ t) = allVars t
     allVars (OptionalU t) = allVars t
     -- Recurse with allVars, not free, to collect nested bound variables.
@@ -1774,6 +1793,7 @@ instance Pretty TypeU where
     where
       f _ (VarU v) = pretty v
       f _ (NatVarU v) = pretty v
+      f _ (IntVarU v) = pretty v
       f _ (ExistU v ([], _) ([], _)) = "*" <> pretty v
       f _ (AppU (VarU (TV "List")) [t]) = "[" <> f True t <> "]"
       f _ (AppU (VarU (TV n)) ts) | isTupleName n = "(" <> hcat (punctuate ", " (map (f True) ts)) <> ")"

@@ -291,6 +291,7 @@ renameExistentials = snd . f (0 :: Int, Map.empty)
       let (s', t') = f s t
        in (s', ForallU v t')
     f s t@(NatVarU _) = (s, t)
+    f s t@(IntVarU _) = (s, t)
     f s (FunU ts t) =
       let (s', ts') = statefulMap f s ts
           (s'', t') = f s' t
@@ -351,6 +352,7 @@ closeExistentials = f
     f (ExistU v (ts, _) (rs, _)) = ExistU v (map f ts, Closed) (map (second f) rs, Closed)
     f t@(VarU _) = t
     f t@(NatVarU _) = t
+    f t@(IntVarU _) = t
     f (ForallU v t) = ForallU v (f t)
     f (FunU ts t) = FunU (map f ts) (f t)
     f (AppU t ts) = AppU (f t) (map f ts)

@@ -2,13 +2,16 @@
 
 Kinds of types (types, naturals, strings, constructors) and kind checking. Prefix: KIND.
 
-### KIND-1 The kinds are `Type`, `Nat`, `Str`, `Rec`, `List` and `Set`
+### KIND-1 The kinds are `Type`, `Nat`, `Int`, `Str`, `Rec`, `List` and `Set`
 Intent: proposed
+Tests: spec-kind-1-1, spec-kind-1-2
 Code: unaudited
 
 A parameter is given a kind as `(n :: K)` in its type's declaration; an
 unannotated parameter has kind `Type`, except an alias parameter (ALIAS-8). Any other kind name is a parse error.
-`List` and `Set` hold `Str` elements.
+`List` and `Set` hold `Str` elements. `Int` is the kind of the value a
+label `x@Int` binds (POLY-3), a signed integer; no parameter is declared
+with it, and it fills a `Nat` position (KIND-4).
 
 ### KIND-2 Only a `Type`-kinded type classifies values
 Intent: proposed
@@ -25,7 +28,7 @@ that kind.
 Intent: proposed
 Code: unaudited
 
-`+ - * /` on `Nat` are integer operations: a part of an expression may be
+`+ - * /` on `Nat` and `Int` are integer operations: a part of an expression may be
 negative (`(3 - 10) + 20` is 13), and `/` truncates toward zero. They are
 evaluated whenever both operands are ground. A check on an expression with
 an inferred variable waits until the variable is solved; one with a rigid
@@ -33,22 +36,23 @@ variable (POLY-7) is decided by DIM-7.
 
 ### KIND-4 A Nat is never negative
 Intent: ruled 2026-10-30
-Tests: spec-kind-4-1, spec-kind-4-2, spec-kind-4-3, spec-kind-4-4, spec-kind-4-5, spec-kind-4-6, spec-kind-4-7, spec-kind-4-8, spec-kind-4-9, spec-kind-4-10, spec-kind-4-11
+Tests: spec-kind-4-1, spec-kind-4-2, spec-kind-4-3, spec-kind-4-4, spec-kind-4-5, spec-kind-4-6, spec-kind-4-7, spec-kind-4-8, spec-kind-4-9, spec-kind-4-10, spec-kind-4-11, spec-kind-4-12
 Code: deviates (issues/kinds-dimensions.md)
 
 A Nat variable is a natural, and so is the whole expression that fills a
-Nat position of a type, though its parts need not be (KIND-3): `Vector (n -
-w + 1)` requires `n + 1 >= w`. A divisor is positive. These conditions over a
-signature's Nat variables are its domain. A signature is a type error where
+Nat position of a type, though its parts need not be (KIND-3); an Int
+variable is any integer: `Vector (n - w + 1)` requires `n + 1 >= w`, and
+`Vector (n + k)` with `k@Int` requires `n + k >= 0`. A divisor is positive.
+These conditions over a signature's Nat and Int variables are its domain. A signature is a type error where
 it is written when it holds a ground expression that breaks them, or when no
 value of its variables satisfies them all (`Vector (n - (n + 1))`); otherwise
 it is accepted as written. Each use of a term must lie in the domain of its
-signature, at the values the use gives its variables: a literal that a label
-binds (POLY-3), or a position that reduces below zero, is a type error at the
-use. The body of a signed definition may assume its own domain (POLY-7). A
+signature, at the values the use gives its variables: a position that
+reduces below zero, or a divisor that is not positive, is a type error at
+the use. The body of a signed definition may assume its own domain (POLY-7). A
 label whose value is known only at run time is checked then (DIM-3).
 
-Why: a signed quantity would be a separate kind. A subtraction in a
+Why: a signed quantity is a separate kind, `Int`. A subtraction in a
 signature states what its callers must satisfy, not something to hold for
 every natural.
 

@@ -92,6 +92,7 @@ import Text.Read (readMaybe)
 --
 -- - 'KindType' - proper type variable (the default)
 -- - 'KindNat' - natural number (for dimensions, e.g. Vector n a)
+-- - 'KindInt' - integer: the value a label @x\@Int@ binds (POLY-3)
 -- - 'KindStr' - string literal at the type level (for column names, e.g. f@Str
 --               in the Stage 2 tables refactor). See plans/tables/04-str-solver-scope.md.
 -- - 'KindRec' - row-polymorphic record schema (for column maps, e.g. r@Rec in
@@ -103,6 +104,7 @@ import Text.Read (readMaybe)
 data Kind
   = KindType
   | KindNat
+  | KindInt
   | KindStr
   | KindRec
   | KindList Kind
@@ -331,6 +333,7 @@ parseHMS hms = case splitOn ":" hms of
 instance Pretty Kind where
   pretty KindType = "Type"
   pretty KindNat = "Nat"
+  pretty KindInt = "Int"
   pretty KindStr = "Str"
   pretty KindRec = "Rec"
   pretty (KindList k) = "List " <> pretty k

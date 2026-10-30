@@ -110,6 +110,7 @@ findTypeTerms (VarU v@(TV x))
   | otherwise = [v]
 findTypeTerms (ExistU _ (ps1, _) (rs2, _)) = concatMap findTypeTerms (ps1 ++ map snd rs2)
 findTypeTerms (NatVarU _) = []
+findTypeTerms (IntVarU _) = []
 findTypeTerms (ForallU _ e) = findTypeTerms e
 findTypeTerms (FunU ts t) = concatMap findTypeTerms ts <> findTypeTerms t
 findTypeTerms (AppU t ts) = findTypeTerms t <> concatMap findTypeTerms ts

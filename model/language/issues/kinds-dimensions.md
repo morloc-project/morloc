@@ -4,7 +4,7 @@
   and KIND-4. `main w = roll w src`, with `roll :: w@Int -> Vector n Real ->
   Vector (n - w + 1) Real` and `w` read from the command line, leaves `w`
   inferred and is accepted; no check stops `w = 12` against a 10-element
-  `src`, nor a negative `w`. A generated check must divide as KIND-3 does
+  `src`. A generated check must divide as KIND-3 does
   (toward zero), unlike Python `//` and R `%/%`.
 - [read] KIND-4 over inferred variables alone: a Nat position whose
   variables are all inferred, and not connected to a signature's rigid
@@ -26,6 +26,19 @@
   (Typecheck/Internal.hs typeUToNatExpr: a size, an alias application) is
   skipped by every KIND-4 check (Restructure checkTypeApplications,
   Typecheck checkFinalType and checkRigidNats).
+- [read] Violates DIM-7 (ruled 2026-10-30): an undecided condition is a
+  type error (Frontend/Typecheck.hs checkRigidNats, the DIM-6 check after
+  inference) where DIM-7 makes it a run-time check with a warning. Waits
+  on the DIM-3 run-time checks.
+- [read] The DIM-6 check after inference (NatSolver naturalSolution)
+  splits Int variables before its exact linear case, so an equation over
+  an Int label (`n + k = 12`) is decided only by its bounded search; a
+  large constant gives "cannot decide". The one-decider step removes it.
+- [read] DIM-7 decides an Int variable as the difference of two naturals,
+  which hides facts its coefficients showed: `h * h >= 0` with `h@Int`
+  rigid is not proven (Typecheck/NatDecide.hs decideAssuming), so a body
+  needing it is rejected as undecided, unless the condition is settled
+  before the split (every Int at an even power).
 - [read] POLY-7 covers only the outermost signature of a definition;
   a `where` signature's Nat variables are solved as inferred ones.
 - [read] Violates DIM-6 ("at the term that produced it"). A Nat equation

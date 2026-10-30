@@ -420,6 +420,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
     f bnd (EffectU effs t) = EffectU effs <$> recurse bnd t
     f bnd (OptionalU t) = OptionalU <$> recurse bnd t
     f _ t@(NatVarU _) = return t  -- nat vars are not type aliases
+    f _ t@(IntVarU _) = return t
     f _ t@NatVoidU = return t
     f _ t@(StrVarU _) = return t
     f _ t@StrVoidU = return t
@@ -462,6 +463,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       in NamU o v <$> mapM (recurse bnd') ts <*> mapM (secondM (recurse bnd')) rs
     terminate _ (VarU v) = return (VarU v)
     terminate _ t@(NatVarU _) = return t
+    terminate _ t@(IntVarU _) = return t
     terminate bnd (EffectU effs t) = EffectU effs <$> recurse bnd t
     terminate bnd (OptionalU t) = OptionalU <$> recurse bnd t
     terminate _ t@NatVoidU = return t
@@ -631,6 +633,9 @@ parsub (v, t2) t1@(VarU v0)
 -- Vector (n + m) Int`) would expand to a body that still references the
 -- unbound NatVarU, leaving the Nat solver unable to reduce the result.
 parsub (v, t2) t1@(NatVarU v0)
+  | v0 == v = t2
+  | otherwise = t1
+parsub (v, t2) t1@(IntVarU v0)
   | v0 == v = t2
   | otherwise = t1
 parsub (v, t2) t1@(StrVarU v0)

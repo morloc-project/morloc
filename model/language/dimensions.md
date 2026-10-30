@@ -7,7 +7,8 @@ Intent: proposed
 Code: conforms 2026-10-21
 
 A `(n :: Nat)` parameter is part of the type and is erased before anything
-runs. `n@Int` declares an `Int` argument and binds the Nat `n` to its value.
+runs. `n@Int` declares an `Int` argument and binds the Int `n` (KIND-1) to
+its value.
 
 ### DIM-2 Dimensions are checked statically
 Intent: proposed
@@ -56,13 +57,14 @@ variables need no value (POLY-6). An equation with no solution, or one the
 compiler cannot decide, is a type error at the term that produced it.
 
 ### DIM-7 One procedure decides Nat equations
-Intent: ruled 2026-10-29
+Intent: ruled 2026-10-30
 Tests: spec-dim-7-1, spec-dim-7-2, spec-dim-7-3
 Code: deviates (issues/kinds-dimensions.md)
 
 Every Nat equation and every non-negativity condition (KIND-4) is decided
-by one procedure, over the integer arithmetic of KIND-3 with every variable
-a natural. A condition holds when, for every value of its rigid variables
+by one procedure, over the integer arithmetic of KIND-3, with every Nat
+variable a natural and every Int variable an integer, decided as the
+difference of two naturals. A condition holds when, for every value of its rigid variables
 (POLY-7) that satisfies the assumptions (a signature's domain, KIND-4), some
 value of its inferred variables satisfies it (DIM-6); with no inferred
 variables this is validity, with no rigid ones satisfiability. A division
@@ -80,5 +82,9 @@ assumption, when it is a quotient's non-negativity and its dividend's
 holds, or when it exceeds a small multiple of one assumption, or the sum of
 two, by a polynomial with non-negative coefficients. Any other group holds when a
 small set of candidate witnesses proves it, and is refuted by a bounded
-search for a counterexample inside the assumptions. Unknown is a type error at the term
-that produced the condition, naming it.
+search for a counterexample inside the assumptions. Unknown is not an
+error: the condition is checked at run time at the term that produced it
+(DIM-3), and the compiler warns, naming the condition and the term. A
+condition with a variable that has no value at run time (one that only an
+equation defines, such as `m` in `Vector (m * m)`) cannot be checked then,
+and an Unknown one is a type error at that term.

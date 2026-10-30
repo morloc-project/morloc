@@ -720,6 +720,7 @@ weave gscope = w Set.empty
     w _ (NatSubU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
     w _ (NatDivU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
     w _ (NatVarU _) _ = return NatVoidF  -- Nat variable erased in concrete type
+    w _ (IntVarU _) _ = return NatVoidF  -- an Int fills only Nat positions
     w _ g _ | Just k <- kindOfU g, k /= KindNat = return (kindArg k g)
     w anc (LabeledU _ t1) t2 = w anc t1 t2
     w _ (ForallU v (VarU v')) _ | v == v' = return NatVoidF  -- Unresolved variable (UnkT pattern)
@@ -750,6 +751,7 @@ weave gscope = w Set.empty
     weaveArgs anc (NatDivU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
     -- Unresolved nat dimension variable (opaque output dims): treat as erased
     weaveArgs anc (NatVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
+    weaveArgs anc (IntVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
     weaveArgs anc (ForallU v (VarU v') : gs) cs | v == v' = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
     weaveArgs anc (g : gs) cs
       | Just k <- kindOfU g = (kindArg k g :) <$> weaveArgs anc gs (dropKindHead k cs)
@@ -758,7 +760,7 @@ weave gscope = w Set.empty
 
     -- Drop a leading concrete argument of kind @k@, if there is one.
     dropKindHead :: Kind -> [TypeU] -> [TypeU]
-    dropKindHead k (c : cs) | kindOfU c == Just k = cs
+    dropKindHead k (c : cs) | kindOfU c == Just k || k == KindNat && maybe False fillsNat (kindOfU c) = cs
     dropKindHead _ cs = cs
 
     kindArg k g = maybe (VoidF k) StrLitF (groundStr g)
