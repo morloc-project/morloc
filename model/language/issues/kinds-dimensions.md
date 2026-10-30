@@ -16,12 +16,9 @@
   rather than solved; KIND-3 allows the solution, since the position
   carries its own condition.
 - [read] Violates DIM-7 ("at the term that produced the condition"). The
-  POLY-7 body check reports an undecided group at the definition, and a
-  refuted one at the definition unless a body term's own Nat position is
-  negative at the counterexample (Frontend/Typecheck.hs checkRigidNats);
-  conditions carry no term of origin. The check also runs after inference,
-  which solves signature Nat variables like inferred ones; a skolem Nat in
-  the solver, with each condition recording its term, would locate both.
+  POLY-7 body check (Frontend/Typecheck.hs checkRigidNats) reports an
+  undecided group at the innermost term holding any of its conditions,
+  not one that is undecided; a solved inferred variable records no term.
 - [read] A Nat position holding a node that has no Nat expression form
   (Typecheck/Internal.hs typeUToNatExpr: a size, an alias application) is
   skipped by every KIND-4 check (Restructure checkTypeApplications,
@@ -39,8 +36,24 @@
   rigid is not proven (Typecheck/NatDecide.hs decideAssuming), so a body
   needing it is rejected as undecided, unless the condition is settled
   before the split (every Int at an even power).
-- [read] POLY-7 covers only the outermost signature of a definition;
-  a `where` signature's Nat variables are solved as inferred ones.
+- [read] Violates POLY-7. Only a signed top-level definition of the root
+  module is checked against its signature (Frontend/Treeify.hs
+  Validation); a `where` signature inside an unsigned definition, or in an
+  imported module, never has its Nat and Int variables held rigid, so
+  `f x = g x where g :: Vector k Int -> Int; g y = h y` with `h ::
+  Vector (m + 1) Int -> Int` is accepted.
+- [read] The POLY-7 check locates a refutation at the innermost condition
+  that conflicts with the body's equations; when the equations conflict
+  only together it falls back to the definition.
+- [reproduced, 2026-10-30] Checking a definition against its signature
+  (validate), a polymorphic `where` signature cannot be used at a concrete
+  type: `f :: Int -> Int; f x = g x where g :: Dbl a => a -> a; g y = dbl
+  y` fails "expected: a, inferred: Int" at `g x`. The node that checks the
+  local body is also its use and hands the use the type with the body's
+  rigid variables (Frontend/Typecheck.hs, synthE on a signed VarS); only
+  its Nat and Int variables are taken afresh. Related, [read]: a local
+  signature's effect variables are rigid only when outermost, and its
+  constraints are not givens for its own body. Gap in POLY-4 (open).
 - [read] Violates DIM-6 ("at the term that produced it"). A Nat equation
   deferred during instance resolution (after synthesis) has no recorded
   term; the error falls back to the export (Frontend/Typecheck.hs, the

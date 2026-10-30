@@ -1118,7 +1118,7 @@ synthE _ g0 (VarS v (MonomorphicExpr (Just t0) []))
       let (g1, t0') = renameEType g0 t0
           (g2, t2) = instantiateObligations g1 (etype t0') (Set.toList (econs t0'))
       return (g2, t2, VarS v (MonomorphicExpr (Just t0) []))
-synthE _ g0 (VarS v (MonomorphicExpr (Just t0sig) xs0)) = do
+synthE vi g0 (VarS v (MonomorphicExpr (Just t0sig) xs0)) = do
   -- A local signature's type variables named by an enclosing signature are
   -- that signature's variables.
   let enclosing = if isLocalName v then gammaScoped g0 else Map.empty
@@ -1128,10 +1128,16 @@ synthE _ g0 (VarS v (MonomorphicExpr (Just t0sig) xs0)) = do
   -- assumptions. It is the only VarS that finds gammaAssumedConstraints
   -- Nothing; after it the slot is Just, even for an empty list.
   let (g1, t0') = renameEType g0 t0
-      t1 = etype t0'
+      -- A local signature writing a Nat or Int variable of an enclosing one
+      -- means that variable, as for its type variables.
+      enclosingNats = if isLocalName v then gammaScopedNats g0 else Map.empty
+      freshNats = Map.fromList (zip (List.nub (collectNatVarNames (etype t0))) (List.nub (collectNatVarNames (etype t0'))))
+      scopedNats = Map.fromList [(n', enc) | (n, n') <- Map.toList freshNats, Just enc <- [Map.lookup n enclosingNats]]
+      t1 = renameKindedVars scopedNats Map.empty Map.empty Map.empty Map.empty (etype t0')
       newCs = Set.toList (econs t0')
       inScope = Map.union (Map.fromList (zip (fst (unqualify (etype t0))) (fst (unqualify t1)))) enclosing
-      natRen = Map.fromList (zip (List.nub (collectNatVarNames (etype t0))) (List.nub (collectNatVarNames t1)))
+      natRen = Map.map (\n' -> Map.findWithDefault n' n' scopedNats) freshNats
+      inScopeNats = Map.union natRen enclosingNats
       -- A label whose Nat occurs nowhere else in the type still names one.
       labelVars = Map.fromList
         [ (x, Map.findWithDefault (TV (unTVar lv <> "@" <> unEVar v)) lv natRen)
@@ -1145,7 +1151,9 @@ synthE _ g0 (VarS v (MonomorphicExpr (Just t0sig) xs0)) = do
     Just _ -> superclassClosure newCs
     Nothing -> return newCs
   let outermost = isNothing (gammaAssumedConstraints g1)
-      g1Cs = g1
+      contract = isJust (gammaRigid g1)
+      sigNats = [n | n <- List.nub (collectNatVarNames t1 <> Map.elems labelVars), n `notElem` Map.elems scopedNats]
+      g1Base = g1
         { gammaConstraints = gammaConstraints g1 ++ newCs
         , gammaAssumedConstraints = case gammaAssumedConstraints g1 of
             Nothing -> Just given
@@ -1154,24 +1162,33 @@ synthE _ g0 (VarS v (MonomorphicExpr (Just t0sig) xs0)) = do
         , gammaRigid = case gammaRigid g1 of
             Just rigid | outermost -> Just (Set.union rigid (Set.fromList (typeEffectVars t1)))
             r -> r
-        , gammaRigidNats = case gammaRigid g1 of
-            Just _ | outermost -> Set.fromList (collectNatVarNames t1 <> Map.elems labelVars)
-            _ -> gammaRigidNats g1
-        , gammaRigidDomain = case gammaRigid g1 of
-            Just _ | outermost -> natPositions t1
-            _ -> gammaRigidDomain g1
-        , gammaLabelVars = case gammaRigid g1 of
-            Just _ | outermost -> labelVars
-            _ -> gammaLabelVars g1
         }
-      g1' = (g1Cs ++> [AnnG v t1]) {gammaScoped = inScope}
+      -- Every signature checked as a contract, at any depth, adds its Nat
+      -- and Int variables and its domain (POLY-7, KIND-4).
+      g1Cs
+        | contract = g1Base
+            { gammaRigidNats = Set.union (gammaRigidNats g1) (Set.fromList sigNats)
+            , gammaRigidDomain = gammaRigidDomain g1 <> [(vi, p) | p <- natPositions t1]
+            , gammaLabelVars = Map.union labelVars (gammaLabelVars g1)
+            }
+        | otherwise = g1Base
+      g1' = (g1Cs ++> [AnnG v t1]) {gammaScoped = inScope, gammaScopedNats = inScopeNats}
   (g2scoped, t2, xs1) <- foldCheck g1' xs0 t1
-  let g2 = g2scoped {gammaScoped = gammaScoped g0}
+  let g2 = g2scoped {gammaScoped = gammaScoped g0, gammaScopedNats = gammaScopedNats g0}
   -- EFF-10: catches forces such as `f = !rint`, which subtyping cannot
   -- see since EvalS strips the effect. Reported at the body's index ci.
   mapM_ (\x@(AnnoS _ ci _) -> checkEffectCoverage ci (apply g2 t1) x) xs1
   let xs2 = applyCon g2 $ VarS v (MonomorphicExpr (Just t0) xs1)
-  return (g2, t2, xs2)
+      -- A local signed definition is checked as a contract with its Nat
+      -- and Int variables rigid, but this node is also its use, which
+      -- takes those variables afresh (POLY-7); the rest of its type is as
+      -- the check left it.
+      (g3, tUse)
+        | contract && not outermost =
+            let (ga, fresh) = statefulMap (\g' (TV s) -> tvarname g' (s <> "@u")) g2 sigNats
+             in (ga, renameKindedVars (Map.fromList (zip sigNats fresh)) Map.empty Map.empty Map.empty Map.empty t2)
+        | otherwise = (g2, t2)
+  return (g3, tUse, xs2)
 synthE _ g (VarS v (MonomorphicExpr Nothing (x : xs))) = do
   let (g0', freshT) = newvar (unEVar v <> "_rec") g
       g0'' = g0' ++> [AnnG v freshT]
@@ -3192,6 +3209,9 @@ validate trees instances = do
 checkRigidNats :: Int -> Gamma -> [(Int, TypeU)] -> MorlocMonad ()
 checkRigidNats i g bodyTypes
   | Set.null rigid = return ()
+  | (j : _) <- [j | (j, ps) <- bySignature, ND.Refuted _ <- [ND.decide Set.empty (nonNegative ps)]] =
+      MM.throwSourcedError j
+        "No value of the Nat and Int variables of this signature makes every Nat position in it non-negative (KIND-4)"
   | otherwise = case reaching of
       [] -> return ()
       conds -> case ND.decideAssuming rigid domain conds of
@@ -3207,7 +3227,7 @@ checkRigidNats i g bodyTypes
             , vsep ["  " <> prettyCond c | c <- conds]
             ]
         ND.Unknown ->
-          MM.throwSourcedError i $ vsep
+          MM.throwSourcedError (firstTagged conds) $ vsep
             [ "The compiler cannot decide whether these conditions hold for every value"
                 <+> "of the Nat and Int variables of the signature (POLY-7, DIM-7):"
             , vsep ["  " <> prettyCond c | c <- conds]
@@ -3215,44 +3235,47 @@ checkRigidNats i g bodyTypes
   where
     rigid = gammaRigidNats g
     nonNegative ts = [ND.NatGe e (NS.NatLit 0) | t <- ts, Just e <- [typeUToNatExpr t]]
-    domain = nonNegative (gammaRigidDomain g)
+    domain = nonNegative (map snd (gammaRigidDomain g))
+    bySignature = Map.toList (Map.fromListWith (flip (<>)) [(j, [p]) | (j, p) <- gammaRigidDomain g])
     solved =
       [ ND.NatEq (if k == KindInt then NS.IntVar v else NS.NatVar v) e
       | ((v, k), t) <- Map.toList (gammaKindSubs g)
       , fillsNat k
       , Just e <- [typeUToNatExpr (apply g t)]
       ]
-    deferred =
-      [ ND.NatEq a b
-      | (t1, t2) <- gammaDeferred g
+    -- Each deferred equation at the term where it arose, and each Nat
+    -- position at the term whose type holds it.
+    deferredAt =
+      [ (Map.findWithDefault i p (gammaDeferredAt g), ND.NatEq a b)
+      | p@(t1, t2) <- gammaDeferred g
       , Just a <- [typeUToNatExpr (apply g t1)]
       , Just b <- [typeUToNatExpr (apply g t2)]
       ]
+    deferred = map snd deferredAt
     located = [(j, c) | (j, t) <- bodyTypes, c <- nonNegative (natPositions (apply g t))]
     positions = map snd located
+    tagged = deferredAt <> located
     reaching = ND.reaching rigid (Set.toList (Set.fromList (filter (not . trivial) (solved <> deferred <> positions))))
     trivial (ND.NatEq a b) = a == b
     trivial _ = False
-    -- The innermost term whose own Nat position is negative at the
-    -- counterexample, reading inferred variables through the equations
-    -- that define them, or else the definition.
+    -- The innermost term with a condition that, beside the body's
+    -- equations, has no solution at the counterexample (when the
+    -- equations alone have one), or else the definition.
     failingTerm env =
-      case [j | (j, c) <- reverse located, ND.holdsAt env (resolve (3 :: Int) c) == Just False] of
-        (j : _) -> j
-        [] -> i
-    definitions = Map.fromList
-      [ (v, e)
-      | ND.NatEq x y <- reaching
-      , (var, e) <- [(x, y), (y, x)]
-      , v <- case var of
-          NS.NatVar w -> [w]
-          NS.IntVar w -> [w]
-          _ -> []
-      , not (Set.member v rigid)
-      ]
-    resolve 0 c = c
-    resolve k (ND.NatGe a b) = resolve (k - 1) (ND.NatGe (NS.substituteNat definitions a) (NS.substituteNat definitions b))
-    resolve _ c = c
+      let pinned = map (pin env)
+          equations = [c | c@(ND.NatEq _ _) <- reaching]
+          base = if refuted (pinned equations) then [] else pinned equations
+       in case [j | (j, c) <- reverse tagged, refuted (pin env c : base)] of
+            (j : _) -> j
+            [] -> i
+    refuted cs = case ND.decide Set.empty cs of
+      ND.Refuted _ -> True
+      _ -> False
+    pin env = ND.substCond (NS.substituteNat (Map.map NS.NatLit env))
+    -- The innermost term holding one of the conditions, or the definition.
+    firstTagged conds = case [j | (j, c) <- reverse tagged, c `elem` conds] of
+      (j : _) -> j
+      [] -> i
     prettyCond (ND.NatEq a b) = prettyNat a <+> "=" <+> prettyNat b
     prettyCond (ND.NatGe a b) = prettyNat a <+> ">=" <+> prettyNat b
     -- One name per variable across every condition: a signature's own as

@@ -30,6 +30,7 @@ module Morloc.Typecheck.NatDecide
   , Decision (..)
   , decide
   , decideAssuming
+  , substCond
   , reaching
   , condVars
   , holdsAt

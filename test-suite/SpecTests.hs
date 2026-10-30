@@ -1989,17 +1989,31 @@ rejectNaming name named unnamed code =
     diagnosticText (UnificationError _ _ _ d) = render d
     diagnosticText (SystemError d) = render d
 
+-- | A rejection reported at the given line of the source (counting the
+-- empty line that opens a quasiquote as line 1).
+rejectAtLine :: String -> Int -> MT.Text -> TestTree
+rejectAtLine name line code =
+  testCase name $ do
+    (x, st) <- runFrontWithState code
+    case x of
+      Right _ -> assertFailure "expected rejection"
+      Left (SourcedError i _) -> fmap srcLocLine (DM.lookup i (stateSourceMap st)) @?= Just line
+      Left e -> assertFailure ("expected a located error, got " <> show e)
+
 runFront :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
-runFront code = do
+runFront code = fst <$> runFrontWithState code
+
+runFrontWithState :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int], MorlocState)
+runFrontWithState code = do
   config <- emptyConfig
-  ((x, _), _) <-
+  ((x, _), st) <-
     MM.runMorlocMonad
       Nothing
       0
       config
       defaultValue
       (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
-  return x
+  return (x, st)
 
 emptyConfig :: IO Config
 emptyConfig = do
@@ -2251,6 +2265,89 @@ poly7Tests =
         instance Mk Real where
           mk n = mk n
         y = (mk (-3) :: Vector 2 Real)
+        |]
+    , rejectAtLine
+        "spec-poly-7-13"
+        9
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector (m + 1) Int -> Int
+        f :: Vector n Int -> Int
+        f x = g x
+          where
+            g :: Vector k Int -> Int
+            g y = h y
+        |]
+    , rejectAtLine
+        "spec-poly-7-14"
+        6
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector (m + 1) Int -> Int
+        f :: Vector n Int -> Int
+        f x = g x
+          where
+            g :: Vector (k + 1) Int -> Int
+            g y = h y
+        |]
+    , accept
+        "spec-poly-7-15"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        len :: Vector k Int -> Int
+        add :: Int -> Int -> Int
+        f :: Vector n Int -> Vector 3 Int -> Int
+        f x z = add (g x) (g z)
+          where
+            g :: Vector k Int -> Int
+            g y = len y
+        |]
+    , rejectAtLine
+        "spec-poly-7-16"
+        7
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        take3 :: Vector n Int -> Vector (n - 3) Int
+        len :: Vector k Int -> Int
+        f :: Vector n Int -> Int
+        f x = len (take3 x)
+        |]
+    , accept
+        "spec-poly-7-17"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        dot :: Vector m Int -> Vector m Int -> Int
+        f :: Vector n Int -> Vector n Int -> Int
+        f x z = g z
+          where
+            g :: Vector n Int -> Int
+            g y = dot x y
+        |]
+    , reject
+        "spec-poly-7-18"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        f :: k@Int -> Vector k Int -> Vector 3 Int
+        f k v = v
+        |]
+    , rejectAtLine
+        "spec-poly-7-19"
+        8
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        len :: Vector m Int -> Int
+        f :: Vector n Int -> Int
+        f x = len x
+          where
+            g :: Vector (k - (k + 1)) Int -> Int
+            g y = len y
         |]
     , reject
         "spec-poly-7-7"

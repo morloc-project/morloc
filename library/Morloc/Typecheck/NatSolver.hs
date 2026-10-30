@@ -19,6 +19,7 @@ module Morloc.Typecheck.NatSolver
   , normalize
   , natEqual
   , solveNat
+  , solveNatFixing
   , substituteNat
   , isGround
   , freeNatVars
@@ -121,11 +122,12 @@ natEqual e1 e2 = normalize e1 == normalize e2
 
 -- | Solve the constraint e1 ~ e2, returning variable substitutions
 solveNat :: NatExpr -> NatExpr -> Either NatError (Map TVar NatExpr)
-solveNat e1 e2 =
-  let sop1 = normalize e1
-      sop2 = normalize e2
-      diff = subSOP sop1 sop2
-  in solveSOP diff
+solveNat = solveNatFixing Set.empty
+
+-- | 'solveNat' without solving any variable in @fixed@: an equation that
+-- only a fixed variable could satisfy is deferred.
+solveNatFixing :: Set.Set TVar -> NatExpr -> NatExpr -> Either NatError (Map TVar NatExpr)
+solveNatFixing fixed e1 e2 = solveSOP fixed (subSOP (normalize e1) (normalize e2))
 
 -- | Subtract two SOPs: sop1 - sop2
 subSOP :: NatSOP -> NatSOP -> NatSOP
@@ -226,25 +228,25 @@ splitIntVars = go
       _ -> e
 
 -- | Solve sop = 0
-solveSOP :: NatSOP -> Either NatError (Map TVar NatExpr)
-solveSOP sop@(NatSOP ps)
+solveSOP :: Set.Set TVar -> NatSOP -> Either NatError (Map TVar NatExpr)
+solveSOP _ sop@(NatSOP ps)
   | any (any isDivVar . Map.keys . npVars) ps = Left (Deferred sop)
-solveSOP (NatSOP []) = Right Map.empty  -- 0 = 0
-solveSOP (NatSOP [NatProduct c vs])
+solveSOP _ (NatSOP []) = Right Map.empty  -- 0 = 0
+solveSOP fixed (NatSOP [NatProduct c vs])
   | Map.null vs && c /= 0 = Left Contradiction  -- c = 0 where c /= 0
   | Map.null vs           = Right Map.empty      -- 0 = 0
-  | Map.size vs == 1, [(v, 1)] <- Map.toList vs =
+  | Map.size vs == 1, [(v, 1)] <- Map.toList vs, not (Set.member (keyVar v) fixed) =
       -- c*v = 0, only solution is v = 0 (but only if c divides 0, which it does)
       if c == 0
         then Right Map.empty
         else Right (Map.singleton (keyVar v) (NatLit 0))
   | otherwise = Left (Deferred (NatSOP [NatProduct c vs]))
-solveSOP (NatSOP prods)
-  | Just (v, a, b) <- extractLinearVar prods =
+solveSOP fixed (NatSOP prods)
+  | Just (v, a, b) <- extractLinearVar fixed prods =
       if b `mod` a == 0 && (signedKey v || negate b `div` a >= 0)
         then Right (Map.singleton (keyVar v) (NatLit (negate b `div` a)))
         else Left Contradiction
-  | Just (v, e) <- extractLinearVarPoly prods =
+  | Just (v, e) <- extractLinearVarPoly fixed prods =
       Right (Map.singleton (keyVar v) e)
   | otherwise = Left (Deferred (NatSOP prods))
 
@@ -254,8 +256,8 @@ solveSOP (NatSOP prods)
 -- variables; an Int among them can still make it negative, which the
 -- non-negativity of the positions holding @v@ catches (KIND-4). Distinct
 -- from 'extractLinearVar', which requires @P@ to be a constant.
-extractLinearVarPoly :: [NatProduct] -> Maybe (TVar, NatExpr)
-extractLinearVarPoly prods =
+extractLinearVarPoly :: Set.Set TVar -> [NatProduct] -> Maybe (TVar, NatExpr)
+extractLinearVarPoly fixed prods =
   case candidates of
     ((v, c, others) : _) ->
       Just (v, sopToNatExpr (NatSOP [NatProduct (negate (npCoeff p) `div` c) (npVars p) | p <- others]))
@@ -265,6 +267,7 @@ extractLinearVarPoly prods =
       [ (v, c, others)
       | p0 <- prods
       , [(v, 1)] <- [Map.toList (npVars p0)]
+      , not (Set.member (keyVar v) fixed)
       , let c = npCoeff p0
       , c /= 0
       , length [() | p <- prods, Map.member v (npVars p)] == 1
@@ -357,13 +360,14 @@ hasOpaqueDivision (NatSOP ps) = any (any isDivVar . Map.keys . npVars) ps
 
 -- | Find a variable that appears linearly (exponent 1, alone in its product)
 -- Returns (variable, coefficient, sum of constant terms)
-extractLinearVar :: [NatProduct] -> Maybe (TVar, Integer, Integer)
-extractLinearVar prods =
+extractLinearVar :: Set.Set TVar -> [NatProduct] -> Maybe (TVar, Integer, Integer)
+extractLinearVar fixed prods =
   let -- Find products with exactly one variable at exponent 1
       linearSingles = [ (v, npCoeff p)
                        | p <- prods
                        , Map.size (npVars p) == 1
                        , [(v, 1)] <- [Map.toList (npVars p)]
+                       , not (Set.member (keyVar v) fixed)
                        ]
       -- Check which linear variables appear only once AND all other
       -- products are constant (no other variables). Without this guard,

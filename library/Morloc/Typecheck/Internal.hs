@@ -48,6 +48,7 @@ module Morloc.Typecheck.Internal
   , substitute
   , rename
   , renameEType
+  , renameKindedVars
   , renameWithMap
   , cleanTypeName
   , prettyTypeU
@@ -149,7 +150,7 @@ emptyGamma =
     , gammaSolved = Map.empty, gammaDeferred = [], gammaDeferredAt = Map.empty, gammaKindSubs = Map.empty
     , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
-    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaScoped = Map.empty, gammaUnfolded = Set.empty
+    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaScoped = Map.empty, gammaScopedNats = Map.empty, gammaUnfolded = Set.empty
     }
 
 -- | The type constructor at the head of a type, if it has one.
@@ -1413,9 +1414,15 @@ subtype _ t1 t2 g
   | isNatExpr t1 && isNatExpr t2 =
       let t1' = apply g t1
           t2' = apply g t2
+          -- Checking a body against its signature, the signature's Nat and
+          -- Int variables stand for every value and are never solved
+          -- (POLY-7); an equation only they could satisfy is deferred.
+          fixed = case gammaRigid g of
+            Just _ -> gammaRigidNats g
+            Nothing -> Set.empty
       in case (typeUToNatExpr t1', typeUToNatExpr t2') of
            (Just ne1, Just ne2) ->
-             case NS.solveNat ne1 ne2 of
+             case NS.solveNatFixing fixed ne1 ne2 of
                Right subs
                  | Map.null subs -> return g
                  | otherwise -> applyNatSolutions (NS.intVars ne1 <> NS.intVars ne2) subs g

@@ -452,6 +452,7 @@ listToGamma gs =
     , gammaRigid = Nothing
     , gammaRigidNats = Set.empty
     , gammaRigidDomain = []
+    , gammaScopedNats = Map.empty
     , gammaLabelVars = Map.empty
     , gammaScoped = Map.empty
 

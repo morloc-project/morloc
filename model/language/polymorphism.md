@@ -53,7 +53,7 @@ phantom parameter of an argument-free `data` type, is not an error.
 
 ### POLY-7 Nat and Int variables in a signature are rigid
 Intent: ruled 2026-10-29
-Tests: spec-poly-7-1, spec-poly-7-2, spec-poly-7-3, spec-poly-7-4, spec-poly-7-5, spec-poly-7-6, spec-poly-7-7, spec-poly-7-8, spec-poly-7-9, spec-poly-7-10, spec-poly-7-11, spec-poly-7-12
+Tests: spec-poly-7-1, spec-poly-7-2, spec-poly-7-3, spec-poly-7-4, spec-poly-7-5, spec-poly-7-6, spec-poly-7-7, spec-poly-7-8, spec-poly-7-9, spec-poly-7-10, spec-poly-7-11, spec-poly-7-12, spec-poly-7-13, spec-poly-7-14, spec-poly-7-15, spec-poly-7-16, spec-poly-7-17, spec-poly-7-18, spec-poly-7-19
 Code: deviates (issues/kinds-dimensions.md)
 
 A `Nat` or `Int` variable in a signature is universally quantified, as a
