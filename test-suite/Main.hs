@@ -23,6 +23,7 @@ import ArgsBoundTests (argsBoundTests)
 import LangRegistryCostTests (langRegistryCostTests)
 import PropertyTests (propertyTests)
 import RecSolverTests (recSolverTests)
+import NatDecideTests (natDecideTests)
 import RefutablePatternTests (refutablePatternTests)
 import LockFileTests (lockFileTests)
 import RustPoolBuildTests (rustPoolBuildTests)
@@ -117,6 +118,7 @@ unitTests =
   , sizeParseTests
   , variantMergeTests
   , valueArgsTests
+  , natDecideTests
   , manifoldNameTests
   , patternChainTests
   , argsBoundTests

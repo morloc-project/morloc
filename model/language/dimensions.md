@@ -57,15 +57,24 @@ compiler cannot decide, is a type error at the term that produced it.
 
 ### DIM-7 One procedure decides Nat equations
 Intent: ruled 2026-10-29
+Tests: spec-dim-7-1, spec-dim-7-2, spec-dim-7-3
 Code: deviates (issues/kinds-dimensions.md)
 
 Every Nat equation and every non-negativity condition (KIND-4) is decided
 by one procedure. A condition holds when, for every value of its rigid
 variables (POLY-7), some value of its inferred variables satisfies it
 (DIM-6); with no inferred variables this is validity, with no rigid ones
-satisfiability. The procedure answers holds (with a witness for the
-inferred variables), refuted, or unknown. It decides at least: equality of polynomials over
-rigid variables (with `*`), linear arithmetic with constant multipliers and
-truncating division by constants (Presburger), and nonlinear equations
-whose solutions a ground side bounds. Unknown is a type error at the term
-that produced the equation, naming it.
+satisfiability. Natural subtraction and truncating division add the
+conditions under which they are defined. The procedure answers holds,
+refuted (with a value of the rigid variables that has no solution), or
+unknown. An inferred variable that an equation defines over the others is
+eliminated first; the conditions left are split into groups that share no
+variable, each decided on its own. A group is decided exactly when it has
+no variables; when it is one condition over rigid variables with neither
+subtraction nor division (a linear inequality by its coefficients, an
+equation by polynomial identity with `*`, up to a bound on its degree and
+variable count); and when it is one linear equation or inequality over
+inferred variables with neither subtraction nor division. Any other group
+holds when a small set of candidate witnesses proves it, and is refuted by
+a bounded search for a counterexample. Unknown is a type error at the term
+that produced the condition, naming it.

@@ -23,6 +23,10 @@ import System.Process (readProcessWithExitCode)
 import Test.Tasty (TestTree, localOption, mkTimeout, testGroup)
 import Test.Tasty.HUnit
 import Text.RawString.QQ
+import qualified Data.Map.Strict as DM
+import qualified Data.Set as DS
+import Morloc.Typecheck.NatDecide (Condition (..), Decision (..), decide)
+import Morloc.Typecheck.NatSolver (NatExpr (..))
 
 specTests :: TestTree
 specTests =
@@ -35,6 +39,7 @@ specTests =
     , localOption (mkTimeout 2000000) derivTests
     , localOption (mkTimeout 2000000) instanceAnnotationTests
     , localOption (mkTimeout 5000000) dimTests
+    , localOption (mkTimeout 2000000) dim7Tests
     , localOption (mkTimeout 2000000) patTests
     , localOption (mkTimeout 2000000) lexTests
     , localOption (mkTimeout 2000000) sigTests
@@ -1812,3 +1817,23 @@ emptyConfig = do
       , configLangOverrides = mempty
       , configRegistry = Nothing
       }
+
+dim7Tests :: TestTree
+dim7Tests =
+  testGroup
+    "DIM-7"
+    [ testCase "spec-dim-7-1" $
+        decide (DS.fromList [n]) [NatGe (NatSub (NatVar n) (NatLit 1)) (NatLit 0)]
+          @?= Refuted (DM.fromList [(n, 0)])
+    , testCase "spec-dim-7-2" $
+        case decide (DS.fromList [m, n]) [NatEq (NatMul (NatVar m) (NatVar n)) (NatMul (NatVar n) (NatVar m))] of
+          Holds _ -> return ()
+          d -> assertFailure (show d)
+    , testCase "spec-dim-7-3" $
+        decide (DS.fromList [n]) [NatEq (NatVar n) (NatAdd (NatVar m) (NatLit 1))]
+          @?= Refuted (DM.fromList [(n, 0)])
+    ]
+  where
+    n = TV "n"
+    m = TV "m"
+
