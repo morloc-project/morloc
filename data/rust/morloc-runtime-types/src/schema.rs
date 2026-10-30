@@ -122,6 +122,17 @@ impl Schema {
         }
     }
 
+    /// An array of `n` elements against this schema's fixed length, if any
+    /// (DIM-3): every decoder of input checks it.
+    pub fn check_len(&self, n: usize) -> Result<(), crate::error::MorlocError> {
+        match self.array_dim() {
+            Some(d) if d != n => Err(crate::error::MorlocError::Other(format!(
+                "Array length mismatch: expected {}, got {}", d, n
+            ))),
+            _ => Ok(()),
+        }
+    }
+
     /// A list of `elem` with no fixed length (FMT-6).
     pub fn array(elem: Schema) -> Self {
         make_array_schema_with_dim(None, elem)

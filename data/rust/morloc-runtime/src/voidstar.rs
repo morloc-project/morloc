@@ -210,11 +210,29 @@ pub unsafe fn adjust_records_within(
     base_rel: RelPtr,
     window: RelWindow,
 ) -> Result<(), MorlocError> {
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { adjust_records_checking(first, n, schema, base_rel, window, false) }
+}
+
+/// [`adjust_records_within`], also checking every array's fixed length when
+/// `dims` (the value is input being decoded, DIM-3).
+///
+/// # Safety
+/// As for [`adjust_records_within`].
+unsafe fn adjust_records_checking(
+    first: AbsPtr,
+    n: usize,
+    schema: &Schema,
+    base_rel: RelPtr,
+    window: RelWindow,
+    dims: bool,
+) -> Result<(), MorlocError> {
     let res = Resolver::new(schema);
     let mut w = RebaseWalk {
         res: &res,
         mode: Rebase::Shm(base_rel),
         window: Some(window),
+        dims,
     };
     let mut st = Stack::new();
     for k in 0..n {
@@ -350,7 +368,7 @@ pub unsafe fn shift_buffer_relptrs_with(
     res: &Resolver<'_>,
 ) -> Result<(), MorlocError> {
     let window = Some(window_of(0, buf_len)?);
-    let mut w = RebaseWalk { res, mode: Rebase::Buffer { buf_base, delta }, window };
+    let mut w = RebaseWalk { res, mode: Rebase::Buffer { buf_base, delta }, window, dims: false };
     let mut st = Stack::new();
     st.enter(schema, buf_base.add(field_offset), ());
     walk::run(&mut w, &mut st)
@@ -374,6 +392,9 @@ struct RebaseWalk<'a, 'r> {
     /// When set, the relptr range every rebased pointer and the bytes it
     /// addresses must fall inside.
     window: Option<RelWindow>,
+    /// Whether the value is input being decoded, so that every array meets
+    /// its schema's fixed length (DIM-3).
+    dims: bool,
 }
 
 impl<'a, 'r> RebaseWalk<'a, 'r> {
@@ -428,7 +449,7 @@ impl<'a, 'r> RebaseWalk<'a, 'r> {
     ///
     /// # Safety
     /// `first` points at `n` headers, as `step`'s `data` points at one.
-    unsafe fn headers(&self, first: *mut Array, n: usize, elem_w: usize) -> Result<(), MorlocError> {
+    unsafe fn headers(&self, first: *mut Array, n: usize, elem_w: usize, dim: Option<usize>) -> Result<(), MorlocError> {
         let Some(RelWindow { lo, hi }) = self.window else {
             return Err(MorlocError::Shm("a run of headers is rebased only inside a window".into()));
         };
@@ -438,6 +459,9 @@ impl<'a, 'r> RebaseWalk<'a, 'r> {
         for i in 0..n {
             // SAFETY: the caller's `n` headers.
             let arr = unsafe { &mut *first.add(i) };
+            if let Some(d) = dim.filter(|&d| d != arr.size) {
+                return Err(MorlocError::Other(format!("Array length mismatch: expected {}, got {}", d, arr.size)));
+            }
             if arr.size == 0 {
                 if !(buffer || checking) {
                     arr.data = lo;
@@ -500,6 +524,9 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                 SerialType::String | SerialType::Array => {
                     let arr = &mut *(data as *mut Array);
                     if f.idx == 0 {
+                        if self.dims {
+                            s.check_len(arr.size)?;
+                        }
                         if matches!(self.mode, Rebase::Buffer { .. }) && (arr.size == 0 || arr.data <= 0) {
                             return Ok(());
                         }
@@ -530,8 +557,10 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                     let data_rel = if matches!(self.mode, Rebase::Check { .. }) { arr.data + shift } else { arr.data };
                     let elems = self.target(data_rel)?;
                     if self.window.is_some() && w == std::mem::size_of::<Array>() {
-                        if let Some(ew) = header_elem_width(self.res.resolve(elem_schema)?) {
-                            return self.headers(elems.add(f.idx * w) as *mut Array, arr.size - f.idx, ew);
+                        let inner = self.res.resolve(elem_schema)?;
+                        if let Some(ew) = header_elem_width(inner) {
+                            let dim = if self.dims { inner.array_dim() } else { None };
+                            return self.headers(elems.add(f.idx * w) as *mut Array, arr.size - f.idx, ew, dim);
                         }
                     }
                     let flat_elem = self.res.flat(elem_schema);
@@ -710,10 +739,10 @@ pub unsafe fn relocate_landed(block: AbsPtr, len: usize, schema: &Schema, vol_id
     let window = RelWindow::of_block(block, len)?;
     // SAFETY: the caller's block holds `len` bytes, at least one root wide;
     // every pointer the rebase follows is checked against it.
-    if let Some(r) = unsafe { walk_root_array_parallel(RebaseMode::Shm(delta), window, block, schema) } {
+    if let Some(r) = unsafe { walk_root_array_parallel(RebaseMode::Shm(delta), window, block, schema, true) } {
         return r;
     }
-    unsafe { adjust_relptrs_within(block, schema, delta, window) }
+    unsafe { adjust_records_checking(block, 1, schema, delta, window, true) }
 }
 
 /// The mode of a parallel walk, rebuilt on each worker.
@@ -750,6 +779,7 @@ unsafe fn walk_root_array_parallel(
     window: RelWindow,
     data: *mut u8,
     schema: &Schema,
+    dims: bool,
 ) -> Option<Result<(), MorlocError>> {
     let workers = crate::compression::frame_workers();
     if workers < 2 {
@@ -768,9 +798,14 @@ unsafe fn walk_root_array_parallel(
     if arr.size < 2 || window.hi - window.lo < PARALLEL_WALK_MIN_BYTES {
         return None;
     }
+    if dims {
+        if let Err(e) = s.check_len(arr.size) {
+            return Some(Err(e));
+        }
+    }
     let elem_schema = &s.parameters[0];
     let width = elem_schema.width;
-    let w = RebaseWalk { res: &res, mode: mode.rebase(), window: Some(window) };
+    let w = RebaseWalk { res: &res, mode: mode.rebase(), window: Some(window), dims };
     let rel = unsafe { w.moved(std::ptr::addr_of_mut!(arr.data)) };
     if let Err(e) = w.check(rel, arr.size.checked_mul(width)) {
         return Some(Err(e));
@@ -786,11 +821,10 @@ unsafe fn walk_root_array_parallel(
     let failed: std::sync::Mutex<Option<MorlocError>> = std::sync::Mutex::new(None);
     let work = || {
         let res = Resolver::new(schema);
-        let mut w = RebaseWalk { res: &res, mode: mode.rebase(), window: Some(window) };
+        let mut w = RebaseWalk { res: &res, mode: mode.rebase(), window: Some(window), dims };
         let mut st = Stack::new();
-        let header_w = res
-            .resolve(elem_schema)
-            .ok()
+        let inner = res.resolve(elem_schema).ok();
+        let header_w = inner
             .and_then(header_elem_width)
             .filter(|_| width == std::mem::size_of::<Array>());
         loop {
@@ -798,12 +832,13 @@ unsafe fn walk_root_array_parallel(
             if start >= n {
                 return;
             }
-            if let Some(ew) = header_w {
+            if let (Some(ew), Some(inner)) = (header_w, inner) {
+                let dim = if dims { inner.array_dim() } else { None };
                 let end = (start + chunk).min(n);
                 // SAFETY: elements start..end lie inside the region the
                 // header check admitted.
                 let first = unsafe { (elems as *mut u8).add(start * width) } as *mut Array;
-                if let Err(e) = unsafe { w.headers(first, end - start, ew) } {
+                if let Err(e) = unsafe { w.headers(first, end - start, ew, dim) } {
                     failed.lock().unwrap_or_else(|p| p.into_inner()).get_or_insert(e);
                     next.store(n, std::sync::atomic::Ordering::Relaxed);
                     return;
@@ -842,7 +877,7 @@ unsafe fn walk_root_array_parallel(
 /// would, writing nothing: every pointer and the bytes it addresses lie
 /// inside `bytes`, every variant tag names an arm.
 pub fn check_in_place(bytes: &[u8], schema: &Schema, vol_idx_hint: u16) -> Result<(), MorlocError> {
-    check_window(bytes, schema, -shm::encode_relptr(vol_idx_hint as usize, 0))
+    check_window(bytes, schema, -shm::encode_relptr(vol_idx_hint as usize, 0), true)
 }
 
 /// Whether the value of `schema` at the start of `block` lies wholly inside
@@ -857,11 +892,11 @@ pub unsafe fn within_its_block(block: AbsPtr, schema: &Schema) -> bool {
     let (Some(len), Ok(rel)) = (shm::shm_block_size(block), shm::abs2rel(block)) else {
         return false;
     };
-    check_window(std::slice::from_raw_parts(block, len), schema, -rel).is_ok()
+    check_window(std::slice::from_raw_parts(block, len), schema, -rel, false).is_ok()
 }
 
 /// [`check_in_place`] for relptrs that `shift` turns into offsets into `bytes`.
-fn check_window(bytes: &[u8], schema: &Schema, shift: RelPtr) -> Result<(), MorlocError> {
+fn check_window(bytes: &[u8], schema: &Schema, shift: RelPtr, dims: bool) -> Result<(), MorlocError> {
     if bytes.len() < schema.width {
         return Err(MorlocError::Serialization(format!(
             "a voidstar value of {} bytes is shorter than its {}-byte root", bytes.len(), schema.width
@@ -872,7 +907,7 @@ fn check_window(bytes: &[u8], schema: &Schema, shift: RelPtr) -> Result<(), Morl
     let window = RelWindow { lo: 0, hi };
     // SAFETY: checking writes nothing; `bytes` holds at least one root.
     let mode = RebaseMode::Check { base: bytes.as_ptr() as usize, shift };
-    if let Some(r) = unsafe { walk_root_array_parallel(mode, window, bytes.as_ptr() as *mut u8, schema) } {
+    if let Some(r) = unsafe { walk_root_array_parallel(mode, window, bytes.as_ptr() as *mut u8, schema, dims) } {
         return r;
     }
     let res = Resolver::new(schema);
@@ -880,6 +915,7 @@ fn check_window(bytes: &[u8], schema: &Schema, shift: RelPtr) -> Result<(), Morl
         res: &res,
         mode: Rebase::Check { base: bytes.as_ptr(), shift },
         window: Some(window),
+        dims,
     };
     let mut st = Stack::new();
     st.enter(schema, bytes.as_ptr(), ());

@@ -1,0 +1,45 @@
+-- Input is length-checked in every format (DIM-3): a vector of the wrong
+-- length, at the top or nested under a list, tuple, record or optional,
+-- written as msgpack or voidstar (small, or large enough for the mapped
+-- fast path), is rejected where a fixed length is expected, as JSON is.
+module main (mk3, mk2, mkList, mkRows, mkPair, mkRec, mkOpt, bigRows, len2, rows2, pair2, rec2, opt2)
+
+import root-py
+import vector-py
+
+record R3 where
+  xs :: [Int]
+
+record R2 where
+  xs :: Vector 2 Int
+
+source Py from "src.py" ("size" as len2, "size" as rows2, "first" as pair2, "fieldlen" as rec2, "optlen" as opt2, "big_rows" as bigRows)
+
+mk3 :: Vector 3 Int
+mk3 = [1, 2, 3]
+
+mk2 :: Vector 2 Int
+mk2 = [1, 2]
+
+mkList :: [Int]
+mkList = [1, 2, 3]
+
+mkRows :: [[Int]]
+mkRows = [[1, 2], [1, 2, 3]]
+
+mkPair :: ([Int], Int)
+mkPair = ([1, 2, 3], 4)
+
+mkRec :: R3
+mkRec = {xs = [1, 2, 3]}
+
+mkOpt :: ?[Int]
+mkOpt = [1, 2, 3]
+
+bigRows :: Int -> [[Int]]
+
+len2 :: Vector 2 Int -> Int
+rows2 :: [Vector 2 Int] -> Int
+pair2 :: (Vector 2 Int, Int) -> Int
+rec2 :: R2 -> Int
+opt2 :: ?(Vector 2 Int) -> Int

@@ -791,11 +791,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                         return Err(err(&format!("expected JSON array, got {}", truncate_for_msg(span))));
                     }
                     let n = self.lx.open(b'[')?;
-                    if let Some(expected) = schema.array_dim().filter(|&e| e != n) {
-                        return Err(MorlocError::Other(format!(
-                            "Array length mismatch: expected {}, got {}", expected, n
-                        )));
-                    }
+                    schema.check_len(n)?;
                     n
                 } else {
                     unsafe { (*(f.data as *const Array)).size }

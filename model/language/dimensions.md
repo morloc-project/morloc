@@ -21,6 +21,7 @@ solved; one on a rigid variable (POLY-7) is decided by DIM-7.
 
 ### DIM-3 A dimension the compiler cannot see is checked at run time
 Intent: ruled 2026-09-26
+Tests: spec-dim-3-1
 Code: deviates (issues/kinds-dimensions.md)
 
 Where a value whose length is not known statically (returned by sourced

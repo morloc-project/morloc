@@ -755,6 +755,7 @@ impl<'r, 'd> Walker<bool> for SizeWalk<'r, 'd> {
                 let n = rmp::decode::read_array_len(&mut self.reader)
                     .map_err(|e| MorlocError::Serialization(format!("size calc array: {}", e)))?
                     as usize;
+                s.check_len(n)?;
                 let elem_schema = &s.parameters[0];
                 // Alignment padding (bumps to 64 for primitive numerics for SIMD/BLAS)
                 let head = shm::align_up(std::mem::size_of::<Array>(), elem_schema.array_data_alignment());

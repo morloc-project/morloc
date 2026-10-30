@@ -1,10 +1,10 @@
 # Kinds and dimensions
 
-- **Input dimensions are checked only for JSON.**
-  [read, 2026-10-30] Violates DIM-3. The run-time length check is in the
-  JSON decoder alone (data/rust/morloc-runtime/src/json.rs:794); msgpack,
-  voidstar and Arrow input are not checked (packet.rs:144-151,
-  cli.rs:2505-2536). A `Matrix`'s `(Int, Int)` header in its wire form is
+- **Some dimensions are not checked.** [read, 2026-10-30] Violates DIM-3.
+  Input decoders check a schema's fixed array lengths (the JSON reader,
+  the msgpack decoder, voidstar landing and in-place checks), but a value a
+  sourced function returns is never checked (each binding writes it with
+  no length check, and a by-reference packet is not walked), and a `Matrix`'s `(Int, Int)` header in its wire form is
   not compared with `m` and `n` (golden nat-dim-runtime-remote accepts a
   header that contradicts the type when the data length fits). A Table's
   row count never reaches the schema (Serial.hs:317).
