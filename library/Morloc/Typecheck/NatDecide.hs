@@ -7,19 +7,19 @@ Maintainer  : z@morloc.io
 
 'decide' answers whether a set of Nat conditions holds: for every natural
 value of the rigid variables (POLY-7), some natural value of the other
-variables satisfies every condition (DIM-6). A subtraction is natural
-subtraction, defined only when it does not go below zero (KIND-4), and a
-division is truncating, defined only for a nonzero divisor; each adds its
-side condition.
+variables satisfies every condition (DIM-6). 'decideAssuming' quantifies the
+rigid variables only over the values that satisfy its assumptions. The
+arithmetic is integer arithmetic (KIND-3): a difference may be negative, and
+a division truncates toward zero and is defined only for a positive divisor,
+which adds that side condition.
 
 Inferred variables are first eliminated where an equation defines one as a
 polynomial over the rest. The conditions left are split into groups that
 share no variable, and each group is decided on its own. A group is decided
 exactly when it has no variables, when it is one condition over rigid
-variables with neither subtraction nor division (an equation by polynomial
-identity, a linear inequality by its coefficients), and when it is one
-linear equation or inequality over inferred variables with neither
-subtraction nor division. Otherwise a group holds when a short list of
+variables without division (an equation by polynomial identity, a linear
+inequality by its coefficients), and when it is one linear equation or
+inequality over inferred variables without division. Otherwise a group holds when a short list of
 candidate witnesses proves it, is refuted by a bounded search for a
 counterexample, and is 'Unknown' when neither succeeds.
 -}
@@ -27,15 +27,21 @@ module Morloc.Typecheck.NatDecide
   ( Condition (..)
   , Decision (..)
   , decide
+  , decideAssuming
+  , reaching
+  , condVars
+  , holdsAt
   , evalNat
   , sideConditions
   ) where
 
+import Control.Applicative ((<|>))
 import Data.List (partition)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe, mapMaybe)
 import qualified Data.Set as Set
+import qualified Data.Text as T
 import Data.Set (Set)
 import Morloc.Namespace.Prim (TVar (..))
 import Morloc.Typecheck.NatSolver
@@ -60,11 +66,109 @@ data Decision
 -- | Decide @conditions@ with @rigid@ universally quantified and every other
 -- variable existentially quantified.
 decide :: Set TVar -> [Condition] -> Decision
-decide rigid conds0 =
-  case eliminate rigid (withSides conds0) of
-    Left counter -> Refuted counter
+decide rigid = decideAssuming rigid []
+
+-- | Decide @conditions@ for the values of @rigid@ that satisfy
+-- @assumptions@, which are over rigid variables only. A refutation then
+-- gives a value of every rigid variable of its group, and that value
+-- satisfies the assumptions.
+decideAssuming :: Set TVar -> [Condition] -> [Condition] -> Decision
+decideAssuming rigid asm0 conds0
+  | any (\a -> Set.null (condVars [a]) && holdsAt Map.empty a /= Just True) asm = Holds Map.empty
+  | otherwise = case eliminate rigid (withSides conds0) of
+    Left counter
+      | null asm -> Refuted counter
+      | otherwise -> maybe Unknown Refuted (inDomain asm counter)
     Right (solved, conds) ->
-      combine solved (map (decideGroup rigid) (groups (filter (not . proven) conds)))
+      combine solved [decideGroup rigid a cs | (a, cs) <- groupsWith asm (filter (not . discharged asm) conds)]
+  where
+    asm = withSides asm0
+
+-- | An assignment of the assumptions' variables, extending @env@, at which
+-- every assumption holds, from a bounded search.
+inDomain :: [Condition] -> Map TVar Integer -> Maybe (Map TVar Integer)
+inDomain asm env =
+  listToMaybe
+    [ Map.union env found
+    | found <- assignments free (searchWidth 4096 (length free) asm)
+    , all ((== Just True) . holdsAt (Map.union env found)) asm
+    ]
+  where
+    free = Set.toList (condVars asm `Set.difference` Map.keysSet env)
+
+-- | The conditions connected to @vs@ through shared variables.
+reaching :: Set TVar -> [Condition] -> [Condition]
+reaching vs cs =
+  let (near, far) = partition (\c -> not (Set.disjoint vs (condVars [c]))) cs
+   in if null near then [] else near <> reaching (Set.union vs (condVars near)) far
+
+-- | A condition that follows from the assumptions: its normal form is
+-- 'proven' or is an assumption's; it is a quotient's non-negativity that
+-- follows from its dividend's (a quotient truncates toward zero, and its
+-- divisor is positive by its side condition); or it is an inequality whose
+-- normal form exceeds a small multiple of one assumption, or the sum of
+-- two, by a polynomial with non-negative coefficients.
+discharged :: [Condition] -> Condition -> Bool
+discharged asm0 c0 = proven c || any (sameAs c) asm || ineq
+  where
+    c = abstractQuotients asm0 c0
+    asm = map (abstractQuotients asm0) asm0
+    sameAs (NatGe _ _) a@(NatGe _ _) = condSOP a == d
+    sameAs (NatEq _ _) a@(NatEq _ _) = condSOP a == d || condSOP a == negateSOP' d
+    sameAs _ _ = False
+    negateSOP' (NatSOP ps) = NatSOP [p {npCoeff = negate (npCoeff p)} | p <- ps]
+    ineq = case c of
+      NatGe _ _ ->
+        not (hasOpaqueDivision d)
+          && any (\a -> nonNegative (subtractSOP d a)) combos
+      NatEq _ _ -> False
+    d = condSOP c
+    lower = [condSOP a | a@(NatGe _ _) <- asm]
+    combos =
+      [scaleSOP k a | a <- lower, k <- [1, 2, 3]]
+        <> [addSOPs a b | (i, a) <- zip [0 :: Int ..] lower, (j, b) <- zip [0 ..] lower, i < j]
+    nonNegative x = not (hasOpaqueDivision x) && all ((>= 0) . npCoeff) (unNatSOP x)
+    scaleSOP k (NatSOP ps) = NatSOP [p {npCoeff = k * npCoeff p} | p <- ps]
+    addSOPs (NatSOP a) (NatSOP b) = normalize (NatAdd (sopToNatExpr (NatSOP a)) (sopToNatExpr (NatSOP b)))
+    subtractSOP x y = normalize (NatSub (sopToNatExpr x) (sopToNatExpr y))
+
+-- | Each quotient whose dividend is non-negative under the assumptions
+-- becomes a variable named for it: it is then a natural, since the quotient
+-- truncates toward zero and its divisor is positive by its side condition.
+abstractQuotients :: [Condition] -> Condition -> Condition
+abstractQuotients asm c = case c of
+  NatEq a b -> NatEq (go a) (go b)
+  NatGe a b -> NatGe (go a) (go b)
+  where
+    go e = case e of
+      NatAdd x y -> NatAdd (go x) (go y)
+      NatSub x y -> NatSub (go x) (go y)
+      NatMul x y -> NatMul (go x) (go y)
+      NatDiv x y
+        | discharged asm (NatGe x (NatLit 0)) -> NatVar (TV (T.pack ("(" <> show (go x, go y) <> ")")))
+        | otherwise -> NatDiv (go x) (go y)
+      _ -> e
+
+-- | Conditions grouped so that no two groups share a variable, with the
+-- assumptions joining the groups whose variables they connect; each group
+-- carries the assumptions over its variables. A condition without variables
+-- is a group of its own.
+groupsWith :: [Condition] -> [Condition] -> [([Condition], [Condition])]
+groupsWith asm conds =
+  [ ([a | Right a <- g], cs)
+  | g <- tagged
+  , let cs = [c | Left c <- g]
+  , not (null cs)
+  ]
+  where
+    tagged = groupBy' (map Left conds <> map Right asm)
+    groupBy' [] = []
+    groupBy' (x : xs) = let (g, rest) = grow [x] xs in g : groupBy' rest
+    grow g pool =
+      let vs = condVars (map untag g)
+          (joined, rest) = partition (\x -> not (Set.null vs) && not (Set.disjoint vs (condVars [untag x]))) pool
+       in if null joined then (g, rest) else grow (g <> joined) rest
+    untag = either id id
 
 combine :: Map TVar NatExpr -> [Decision] -> Decision
 combine solved ds = case [env | Refuted env <- ds] of
@@ -81,8 +185,7 @@ combine solved ds = case [env | Refuted env <- ds] of
 withSides :: [Condition] -> [Condition]
 withSides cs = Set.toList (Set.fromList (cs <> concatMap sideConditions cs))
 
--- | The conditions under which every subtraction and division in a
--- condition is defined.
+-- | The conditions under which every division in a condition is defined.
 sideConditions :: Condition -> [Condition]
 sideConditions (NatEq a b) = exprSides a <> exprSides b
 sideConditions (NatGe a b) = exprSides a <> exprSides b
@@ -93,7 +196,7 @@ exprSides e = case e of
   NatVar _ -> []
   NatAdd a b -> exprSides a <> exprSides b
   NatMul a b -> exprSides a <> exprSides b
-  NatSub a b -> NatGe a b : exprSides a <> exprSides b
+  NatSub a b -> exprSides a <> exprSides b
   NatDiv a b -> NatGe b (NatLit 1) : exprSides a <> exprSides b
 
 condVars :: [Condition] -> Set TVar
@@ -102,24 +205,14 @@ condVars = Set.unions . map vars
     vars (NatEq a b) = freeNatVars a <> freeNatVars b
     vars (NatGe a b) = freeNatVars a <> freeNatVars b
 
--- | Conditions grouped so that no two groups share a variable; each
--- condition without variables is a group of its own.
-groups :: [Condition] -> [[Condition]]
-groups [] = []
-groups (c : cs) = let (g, rest) = grow [c] cs in g : groups rest
-  where
-    grow g pool =
-      let vs = condVars g
-          (joined, rest) = partition (\x -> not (Set.null vs) && not (Set.disjoint vs (condVars [x]))) pool
-       in if null joined then (g, rest) else grow (g <> joined) rest
-
 -- | Solve inferred variables from equations that define them, substituting
 -- each into the rest. A definition @v := p - n@ adds @p >= n@, since @v@ is
--- a natural. A ground condition that is false refutes at once.
+-- a natural; one written @v = e@ adds @e >= 0@. A ground condition that is
+-- false refutes at once.
 eliminate :: Set TVar -> [Condition] -> Either (Map TVar Integer) (Map TVar NatExpr, [Condition])
 eliminate rigid = go Map.empty
   where
-    go solved cs = case [(v, d, c) | c@(NatEq a b) <- cs, Just (v, d) <- [definition rigid a b]] of
+    go solved cs = case [(v, d, c) | c@(NatEq a b) <- cs, Just (v, d) <- [literal a b <|> literal b a <|> definition rigid a b]] of
       ((v, (pos, neg), c) : _) ->
         let e = case neg of
               NatLit 0 -> pos
@@ -132,6 +225,11 @@ eliminate rigid = go Map.empty
         | any groundFalse cs -> Left Map.empty
         | otherwise -> Right (solved, cs)
     groundFalse c = Set.null (condVars [c]) && holdsAt Map.empty c /= Just True
+    -- @v = e@ as written defines an inferred @v@ not in @e@ exactly, even
+    -- where @e@ divides.
+    literal (NatVar v) e
+      | not (Set.member v rigid), not (Set.member v (freeNatVars e)) = Just (v, (e, NatLit 0))
+    literal _ _ = Nothing
 
 substCond :: (NatExpr -> NatExpr) -> Condition -> Condition
 substCond f (NatEq a b) = NatEq (f a) (f b)
@@ -175,7 +273,7 @@ condSOP :: Condition -> NatSOP
 condSOP (NatEq a b) = normalize (NatSub a b)
 condSOP (NatGe a b) = normalize (NatSub a b)
 
--- | No subtraction or division, so the normal form is the whole condition.
+-- | No division, so the normal form is the whole condition.
 partialFree :: Condition -> Bool
 partialFree c = case c of
   NatEq a b -> free a && free b
@@ -186,16 +284,17 @@ partialFree c = case c of
       NatVar _ -> True
       NatAdd x y -> free x && free y
       NatMul x y -> free x && free y
-      NatSub _ _ -> False
+      NatSub x y -> free x && free y
       NatDiv _ _ -> False
 
 linearCond :: Condition -> Bool
 linearCond c = all (\p -> sum (Map.elems (npVars p)) <= 1) (unNatSOP (condSOP c))
 
--- | Decide one group of unproven conditions that shares no variable with
--- any other group.
-decideGroup :: Set TVar -> [Condition] -> Decision
-decideGroup rigid conds
+-- | Decide one group of unproven conditions, with the assumptions over its
+-- variables, that shares no variable with any other group.
+decideGroup :: Set TVar -> [Condition] -> [Condition] -> Decision
+decideGroup rigid asm conds
+  | not (null asm) = assuming
   | Set.null vs = if all ((== Just True) . holdsAt Map.empty) conds then Holds Map.empty else Refuted Map.empty
   | Set.null inferred = case mapMaybe counterexample conds of
       (env : _) -> Refuted env
@@ -204,7 +303,7 @@ decideGroup rigid conds
       Sat found -> Holds (Map.map NatLit found)
       Unsat -> Refuted Map.empty
       Undecided -> Unknown
-  | Just w <- witness rs (Set.toList inferred) conds = Holds w
+  | Just w <- witness (const False) rs (Set.toList inferred) conds = Holds w
   | otherwise = case [env | c <- conds, Set.null (condVars [c] `Set.difference` rigid), Just env <- [counterexample c]] of
       (env : _) -> Refuted env
       [] -> searched
@@ -212,7 +311,22 @@ decideGroup rigid conds
     vs = condVars conds
     rs = Set.toList (Set.intersection rigid vs)
     inferred = vs `Set.difference` rigid
-    searched = maybe Unknown Refuted (searchRigid rs conds)
+    searched = maybe Unknown Refuted (searchRigid (const True) rs conds)
+    -- Every refutation must lie inside the assumptions, so an exact
+    -- counterexample counts only when it does.
+    allRs = Set.toList (Set.intersection rigid (vs <> condVars asm))
+    inAsm env = all ((== Just True) . holdsAt env) asm
+    exact =
+      [ env'
+      | c <- conds
+      , Set.null (condVars [c] `Set.difference` rigid)
+      , Just env <- [counterexample c]
+      , Just env' <- [inDomain asm env]
+      ]
+    assuming
+      | not (Set.null inferred), Just w <- witness (discharged asm) rs (Set.toList inferred) conds = Holds w
+      | (env : _) <- exact = Refuted env
+      | otherwise = maybe Unknown Refuted (searchRigid inAsm allRs (conds <> asm))
 
 -- | A counterexample to an unproven condition over rigid variables, by an
 -- exact method: a linear inequality @c0 + sum ci xi >= 0@ fails at zero when
@@ -241,11 +355,13 @@ counterexample c
 
 -- | Witnesses tried for the inferred variables of a group that also has
 -- rigid ones: small constants, each rigid variable times one or two, and
--- their sum. A witness counts only if every condition is then 'proven'.
-witness :: [TVar] -> [TVar] -> [Condition] -> Maybe (Map TVar NatExpr)
-witness rs inferred conds
+-- their sum. A witness counts only if every condition is then 'proven' or
+-- follows by @follows@.
+witness :: (Condition -> Bool) -> [TVar] -> [TVar] -> [Condition] -> Maybe (Map TVar NatExpr)
+witness follows rs inferred conds
   | length inferred > 3 = Nothing
-  | otherwise = listToMaybe [w | w <- choices, all (proven . substCond (substituteNat w)) conds]
+  | null rs = Nothing
+  | otherwise = listToMaybe [w | w <- choices, all ((\c -> proven c || follows c) . substCond (substituteNat w)) conds]
   where
     sumRigid = foldr1 NatAdd (map NatVar rs)
     candidates =
@@ -263,7 +379,7 @@ searchBudget = 20000
 
 -- | Whether some natural assignment satisfies every condition, with the
 -- assignment when a search found one (empty when only shown to exist).
--- Exact for one linear equation or inequality without subtraction or
+-- Exact for one linear equation or inequality without division,
 -- division, and when a condition without variables fails; otherwise a
 -- bounded search.
 satisfiable :: Integer -> [Condition] -> Satisfiable
@@ -284,14 +400,15 @@ satisfiable budget conds
     candidates = assignments vs (searchWidth budget (length vs) conds)
     vs = Set.toList (condVars conds)
 
--- | A value of the rigid variables at which a group has no solution, from a
--- bounded search over a few rigid samples. A sample whose instance is
--- undecided is skipped.
-searchRigid :: [TVar] -> [Condition] -> Maybe (Map TVar Integer)
-searchRigid rs conds =
+-- | A value of the rigid variables, accepted by @admit@, at which a group
+-- has no solution, from a bounded search over a few rigid samples. A sample
+-- whose instance is undecided is skipped.
+searchRigid :: (Map TVar Integer -> Bool) -> [TVar] -> [Condition] -> Maybe (Map TVar Integer)
+searchRigid admit rs conds =
   listToMaybe
     [ env
     | env <- assignments rs (searchWidth 64 (length rs) conds)
+    , admit env
     , satisfiable 2000 (map (substCond (substituteNat (Map.map NatLit env))) conds) == Unsat
     ]
 
@@ -311,20 +428,3 @@ holdsAt :: Map TVar Integer -> Condition -> Maybe Bool
 holdsAt env c = case c of
   NatEq a b -> (==) <$> evalNat env a <*> evalNat env b
   NatGe a b -> (>=) <$> evalNat env a <*> evalNat env b
-
--- | Evaluate with natural subtraction and truncating division; Nothing where
--- either is undefined or a variable is unassigned.
-evalNat :: Map TVar Integer -> NatExpr -> Maybe Integer
-evalNat env e = case e of
-  NatLit n -> Just n
-  NatVar v -> Map.lookup v env
-  NatAdd a b -> (+) <$> evalNat env a <*> evalNat env b
-  NatMul a b -> (*) <$> evalNat env a <*> evalNat env b
-  NatSub a b -> do
-    x <- evalNat env a
-    y <- evalNat env b
-    if x >= y then Just (x - y) else Nothing
-  NatDiv a b -> do
-    x <- evalNat env a
-    y <- evalNat env b
-    if y /= 0 then Just (x `div` y) else Nothing

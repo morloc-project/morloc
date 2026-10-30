@@ -61,7 +61,8 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import Morloc.Typecheck.Internal (apply, emptyGamma, isSubtypeOf2, mapTypeUChildren, qualify, substitute, subtype, typeUChildren, unqualify)
+import Morloc.Typecheck.Internal (apply, emptyGamma, isSubtypeOf2, mapTypeUChildren, qualify, substitute, subtype, typeUChildren, typeUToNatExpr, unqualify)
+import qualified Morloc.Typecheck.NatSolver as NS
 import qualified Data.List as List
 import Morloc.Frontend.TypeNames (isReservedTypeName)
 
@@ -1801,20 +1802,10 @@ groundStr (StrConcatU a b) = (<>) <$> groundStr a <*> groundStr b
 groundStr (LabeledU _ t) = groundStr t
 groundStr _ = Nothing
 
--- Recursively evaluate a Nat expression to an Integer. Returns Nothing if
--- the expression contains an unresolvable leaf (NatVar / NatVoid / non-Nat
--- shape). Callers turn Nothing into the NatVoidF sentinel rather than
--- collapsing to a fake 0 value.
+-- The value of a ground Nat expression; Nothing for one with an unresolved
+-- leaf, which callers turn into the NatVoidF sentinel rather than a fake 0.
 reduceNat :: TypeU -> Maybe Integer
-reduceNat (NatLitU n) = Just n
-reduceNat (NatAddU a b) = (+) <$> reduceNat a <*> reduceNat b
-reduceNat (NatMulU a b) = (*) <$> reduceNat a <*> reduceNat b
-reduceNat (NatSubU a b) = (-) <$> reduceNat a <*> reduceNat b
-reduceNat (NatDivU a b) = do
-  x <- reduceNat a
-  y <- reduceNat b
-  if y == 0 then Nothing else Just (x `div` y)
-reduceNat _ = Nothing
+reduceNat t = typeUToNatExpr t >>= NS.evalNat Map.empty
 
 {- | Given a list of possible ways to (de)serialize data between two languages,
 choose one (or none if the list is empty). Currently I just take the first

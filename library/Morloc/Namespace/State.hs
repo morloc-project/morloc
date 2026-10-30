@@ -974,6 +974,15 @@ data Gamma = Gamma
   -- contracts: a signature's type variables are then rigid (skolems), and
   -- the set holds those introduced so far. 'Nothing' in ordinary inference.
   , gammaRigid :: Maybe (Set.Set TVar)
+  -- | The Nat variables of the outermost signature being checked as a
+  -- contract (POLY-7).
+  , gammaRigidNats :: Set.Set TVar
+  -- | The Nat positions of that signature, whose non-negativity the body
+  -- may assume (KIND-4).
+  , gammaRigidDomain :: [TypeU]
+  -- | The parameters of the definitions being checked as contracts that a
+  -- label binds to a Nat, with that Nat (POLY-3).
+  , gammaLabelVars :: Map.Map EVar TVar
   -- | The type variables of the signatures being checked around this point,
   -- by the name the signature wrote to the name the check gave it. A local
   -- signature or annotation writing one of these names means that variable.

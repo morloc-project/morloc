@@ -28,7 +28,7 @@ makeYR :: Int -> Table n {y=Str}
 mvp :: Int -> Table n r
 mvp n = makeT_r n
 
-rbound :: Int -> Table m {x=Int, y=Str}
+rbound :: Int -> Table {x=Int, y=Str}
 rbound n =
   let t = makeT_r n
   in rbind t t

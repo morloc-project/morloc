@@ -85,6 +85,8 @@ module Morloc.Typecheck.Internal
   , isSubtypeOfOpen
   , recheckDeferred
   , typeUToNatExpr
+  , natExprToTypeU
+  , natPositions
 
     -- * primitive constraint discharge (Stage 9 of the tables refactor)
   , reduceConstraint
@@ -147,7 +149,7 @@ emptyGamma =
     , gammaSolved = Map.empty, gammaDeferred = [], gammaDeferredAt = Map.empty, gammaKindSubs = Map.empty
     , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
-    , gammaRigid = Nothing, gammaScoped = Map.empty, gammaUnfolded = Set.empty
+    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaScoped = Map.empty, gammaUnfolded = Set.empty
     }
 
 -- | The type constructor at the head of a type, if it has one.
@@ -868,6 +870,13 @@ typeUToNatExpr (NatDivU a b) = NS.NatDiv <$> typeUToNatExpr a <*> typeUToNatExpr
 typeUToNatExpr (VarU v) = Just (NS.NatVar v)
 typeUToNatExpr (ExistU v _ _) = Just (NS.NatVar v)
 typeUToNatExpr _ = Nothing
+
+-- | The Nat expressions that fill a position of a type: each arithmetic
+-- node whose parent is not arithmetic.
+natPositions :: TypeU -> [TypeU]
+natPositions t = case t of
+  OpU op _ | op `elem` [OpNatAdd, OpNatSub, OpNatMul, OpNatDiv] -> [t]
+  _ -> concatMap natPositions (typeUChildren t)
 
 natExprToTypeU :: NS.NatExpr -> TypeU
 natExprToTypeU (NS.NatLit n) = NatLitU n

@@ -448,6 +448,9 @@ listToGamma gs =
     , gammaUnfolded = Set.empty
     , gammaPendingNumLits = []
     , gammaRigid = Nothing
+    , gammaRigidNats = Set.empty
+    , gammaRigidDomain = []
+    , gammaLabelVars = Map.empty
     , gammaScoped = Map.empty
 
     , gammaPositionalReceivers = Set.empty
@@ -6709,11 +6712,11 @@ natDimTests =
         case result of
           Right _ -> return ()
           Left e -> assertFailure $ "Expected success, got: " <> show e
-    , testCase "infer nat dimensions from list literal" $ do
+    , testCase "nat dimensions are checked against a list literal" $ do
         result <- runFrontRaw [r|
           module main (foo)
           newtype Matrix (m :: Nat) (n :: Nat) a = [[a]]
-          foo :: Matrix m n Int
+          foo :: Matrix 2 3 Int
           foo = [[1,2,3],[4,5,6]]
             |]
         case result of
@@ -6724,6 +6727,16 @@ natDimTests =
               _ -> assertFailure $ "Expected Matrix 2 3 Int, got: " <> show t
           Right _ -> assertFailure "Expected exactly one export"
           Left e -> assertFailure $ "Expected success, got: " <> show e
+    , testCase "a list literal is not every size (POLY-7)" $ do
+        result <- runFrontRaw [r|
+          module main (foo)
+          newtype Matrix (m :: Nat) (n :: Nat) a = [[a]]
+          foo :: Matrix m n Int
+          foo = [[1,2,3],[4,5,6]]
+            |]
+        case result of
+          Left _ -> return ()
+          Right _ -> assertFailure "Expected a rejection"
     ]
 
 gradualDesugarTests :: TestTree
@@ -6999,9 +7012,12 @@ natArithTests =
     , testCase "the coin problem with large coefficients is decided quickly: 1000n + 999m ~ 998001" $
         assertEqual "" (Just True)
           (NS.naturalSolution [(NS.NatAdd (NS.NatMul (NS.NatLit 1000) (NS.NatVar (TV "n"))) (NS.NatMul (NS.NatLit 999) (NS.NatVar (TV "m"))), NS.NatLit 998001)])
-    , testCase "a witness never passes through a negative difference: (3 - n) * (3 - n) ~ 16" $
+    , testCase "a part of a Nat may be negative: (3 - n) * (3 - n) ~ 16 at n = 7" $
         let d = NS.NatSub (NS.NatLit 3) (NS.NatVar (TV "n"))
-        in assertBool "" (NS.naturalSolution [(NS.NatMul d d, NS.NatLit 16)] /= Just True)
+        in NS.naturalSolution [(NS.NatMul d d, NS.NatLit 16)] @?= Just True
+    , testCase "a witness keeps each side non-negative: n - 4 ~ -(m + 1)" $
+        let rhs = NS.NatSub (NS.NatLit 0) (NS.NatAdd (NS.NatVar (TV "m")) (NS.NatLit 1))
+        in assertBool "" (NS.naturalSolution [(NS.NatSub (NS.NatVar (TV "n")) (NS.NatLit 4), rhs)] /= Just True)
     , testCase "a solved Nat is never negative: m + 1 ~ 0" $
         case NS.solveNat (NS.NatAdd (NS.NatVar (TV "m")) (NS.NatLit 1)) (NS.NatLit 0) of
           Left NS.Contradiction -> return ()

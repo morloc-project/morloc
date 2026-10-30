@@ -25,23 +25,32 @@ that kind.
 Intent: proposed
 Code: unaudited
 
-`+ - * /` on `Nat` are evaluated whenever both operands are ground; `/`
-truncates. A check on an expression with an inferred variable waits until
-the variable is solved; one with a rigid variable (POLY-7) is decided by
-DIM-7.
+`+ - * /` on `Nat` are integer operations: a part of an expression may be
+negative (`(3 - 10) + 20` is 13), and `/` truncates toward zero. They are
+evaluated whenever both operands are ground. A check on an expression with
+an inferred variable waits until the variable is solved; one with a rigid
+variable (POLY-7) is decided by DIM-7.
 
 ### KIND-4 A Nat is never negative
-Intent: ruled 2026-10-29
-Tests: spec-kind-4-1, spec-kind-4-2
+Intent: ruled 2026-10-30
+Tests: spec-kind-4-1, spec-kind-4-2, spec-kind-4-3, spec-kind-4-4, spec-kind-4-5, spec-kind-4-6, spec-kind-4-7, spec-kind-4-8, spec-kind-4-9, spec-kind-4-10, spec-kind-4-11
 Code: deviates (issues/kinds-dimensions.md)
 
-A `Nat` expression that reduces below zero is a type error where it
-occurs. One over rigid variables (POLY-7) is an error when it is negative for
-some value of them (`n - 1` with `n` rigid); one over inferred variables
-needs a solution that keeps it non-negative (DIM-6, DIM-7). Every signature
-is checked, whether or not its term is used.
+A Nat variable is a natural, and so is the whole expression that fills a
+Nat position of a type, though its parts need not be (KIND-3): `Vector (n -
+w + 1)` requires `n + 1 >= w`. A divisor is positive. These conditions over a
+signature's Nat variables are its domain. A signature is a type error where
+it is written when it holds a ground expression that breaks them, or when no
+value of its variables satisfies them all (`Vector (n - (n + 1))`); otherwise
+it is accepted as written. Each use of a term must lie in the domain of its
+signature, at the values the use gives its variables: a literal that a label
+binds (POLY-3), or a position that reduces below zero, is a type error at the
+use. The body of a signed definition may assume its own domain (POLY-7). A
+label whose value is known only at run time is checked then (DIM-3).
 
-Why: a signed quantity would be a separate kind.
+Why: a signed quantity would be a separate kind. A subtraction in a
+signature states what its callers must satisfy, not something to hold for
+every natural.
 
 ### KIND-5 Missing non-`Type` arguments are filled gradually
 Intent: proposed

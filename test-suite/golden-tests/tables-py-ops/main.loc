@@ -51,7 +51,7 @@ reversed_ n =
   in pickRows (pack (.[::-1] (range 0 (nrow t))) :: Vector n Int) t
 
 -- rbind: doubled row count via Nat addition; pyarrow concat_arrays.
-rbound :: Int -> Table m {x=Int, y=Str}
+rbound :: Int -> Table {x=Int, y=Str}
 rbound n =
   let t = makeXY n
   in rbind t t

@@ -25,6 +25,7 @@ module Morloc.Typecheck.NatSolver
   , sopToNatExpr
   , naturalSolution
   , hasOpaqueDivision
+  , evalNat
   ) where
 
 import Data.Map.Strict (Map)
@@ -35,7 +36,6 @@ import Data.Ord (comparing)
 import Data.Function (on)
 import Morloc.Namespace.Prim (TVar(..))
 import qualified Data.Text as T
-import Data.Maybe (isJust)
 
 -- | A type-level natural number expression
 data NatExpr
@@ -139,7 +139,7 @@ negateSOP (NatSOP ps) = NatSOP (map negateProduct ps)
 -- Otherwise: return the original forms unchanged (will be Deferred by solver).
 divSOP :: NatSOP -> NatSOP -> NatSOP
 divSOP (NatSOP ps1) (NatSOP [NatProduct d vs2])
-  | Map.null vs2, d /= 0
+  | Map.null vs2, d > 0
   , all (\p -> npCoeff p `mod` d == 0) ps1
   = NatSOP (mergeLikeTerms [NatProduct (npCoeff p `div` d) (npVars p) | p <- ps1])
 divSOP (NatSOP ps1) (NatSOP ps2)
@@ -148,7 +148,7 @@ divSOP (NatSOP ps1) (NatSOP ps2)
   , all (\p -> Map.null (npVars p)) ps2
   , let n = sum (map npCoeff ps1)
   , let d = sum (map npCoeff ps2)
-  , d /= 0
+  , d > 0
   = NatSOP (mergeLikeTerms [NatProduct (n `quot` d) Map.empty])
   -- Cannot simplify: an opaque variable named for the operands, so that
   -- equal quotients are equal and the solver never solves one.
@@ -211,8 +211,8 @@ extractLinearVarPoly prods =
 -- | Whether the equations @a = b@ have a common solution in the naturals:
 -- @Just True@ when one is found, @Just False@ when there is none, @Nothing@
 -- when neither is shown. A single linear equation is decided exactly; other
--- systems are searched for a small witness. A difference that goes below
--- zero is not a natural (KIND-4), so a witness never passes through one.
+-- systems are searched for a small witness, at which each side must be
+-- non-negative (KIND-4).
 naturalSolution :: [(NatExpr, NatExpr)] -> Maybe Bool
 naturalSolution eqs
   | any signed sops = Just False
@@ -225,18 +225,7 @@ naturalSolution eqs
     bound = 1 + maximum (0 : [abs (npCoeff p) | NatSOP ps <- sops, p <- ps])
     width = last (0 : takeWhile (\w -> (w + 1) ^ length vs <= (40000 :: Integer)) [1 .. bound])
     candidates = [Map.fromList (zip vs xs) | xs <- mapM (const [0 .. width]) vs]
-    holds env = all (\(a, b) -> isJust (eval env a) && eval env a == eval env b) eqs
-    eval env e = case e of
-      NatLit n -> Just n
-      NatVar v -> Map.lookup v env
-      NatAdd a b -> (+) <$> eval env a <*> eval env b
-      NatMul a b -> (*) <$> eval env a <*> eval env b
-      NatSub a b -> case (-) <$> eval env a <*> eval env b of
-        Just x | x >= 0 -> Just x
-        _ -> Nothing
-      NatDiv a b -> case (eval env a, eval env b) of
-        (Just x, Just y) | y /= 0 -> Just (x `quot` y)
-        _ -> Nothing
+    holds env = all (\(a, b) -> maybe False (>= 0) (evalNat env a) && evalNat env a == evalNat env b) eqs
     -- every product of naturals is non-negative, so a sum of terms whose
     -- coefficients share one sign and include a nonzero constant is never 0;
     -- a quotient of an expression with subtraction may be negative, so an
@@ -324,6 +313,20 @@ extractLinearVar prods =
   in case candidates of
        ((v, c, s) : _) -> Just (v, c, s)
        [] -> Nothing
+
+-- | Evaluate in the integers, with division truncating toward zero (KIND-3);
+-- Nothing when a variable is unassigned or a divisor is not positive.
+evalNat :: Map TVar Integer -> NatExpr -> Maybe Integer
+evalNat env e = case e of
+  NatLit n -> Just n
+  NatVar v -> Map.lookup v env
+  NatAdd a b -> (+) <$> evalNat env a <*> evalNat env b
+  NatMul a b -> (*) <$> evalNat env a <*> evalNat env b
+  NatSub a b -> (-) <$> evalNat env a <*> evalNat env b
+  NatDiv a b -> do
+    x <- evalNat env a
+    y <- evalNat env b
+    if y > 0 then Just (x `quot` y) else Nothing
 
 -- | Apply substitutions to a NatExpr
 substituteNat :: Map TVar NatExpr -> NatExpr -> NatExpr

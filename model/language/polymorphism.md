@@ -53,9 +53,15 @@ phantom parameter of an argument-free `data` type, is not an error.
 
 ### POLY-7 Nat variables in a signature are rigid
 Intent: ruled 2026-10-29
+Tests: spec-poly-7-1, spec-poly-7-2, spec-poly-7-3, spec-poly-7-4, spec-poly-7-5, spec-poly-7-6, spec-poly-7-7, spec-poly-7-8
 Code: deviates (issues/kinds-dimensions.md)
 
 A `Nat` variable in a signature is universally quantified, as a `Type`
-variable is (POLY-1). The body must typecheck for every natural value of it:
-`f :: Vector n Int -> Int` may not pass its argument where `Vector (m + 1)
-Int` is required. Equations over rigid variables are decided by DIM-7.
+variable is (POLY-1), over the signature's domain (KIND-4). The body must
+typecheck for every value of it there: `f :: Vector n Int -> Int` may not
+pass its argument where `Vector (m + 1) Int` is required, while `f :: Vector
+n Int -> Vector (n - 1) Int` may, since its domain has `n >= 1`. A label
+(`w@Int`) names such a variable whether or not it occurs elsewhere in the
+type, and a body that passes the labeled argument to another label passes
+that variable. Every Nat position in the body's types must be non-negative
+there too. These conditions are decided by DIM-7.

@@ -41,6 +41,7 @@ specTests =
     , localOption (mkTimeout 5000000) dimTests
     , localOption (mkTimeout 2000000) dim7Tests
     , localOption (mkTimeout 2000000) cls16Tests
+    , localOption (mkTimeout 5000000) poly7Tests
     , localOption (mkTimeout 2000000) patTests
     , localOption (mkTimeout 2000000) lexTests
     , localOption (mkTimeout 2000000) sigTests
@@ -976,6 +977,61 @@ kindTests =
         module main (g)
         newtype Buffer (n :: Nat) a = List a
         f :: Buffer (10 - 3) Int -> Int
+        g :: Int -> Int
+        g x = x
+        |]
+    , accept
+        "spec-kind-4-3"
+        [r|
+        module main (ok, empty)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+        src :: Vector 10 Real
+        ok = roll 3 src
+        empty = roll 11 src
+        |]
+    , reject
+        "spec-kind-4-4"
+        [r|
+        module main (bad)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+        src :: Vector 10 Real
+        bad = roll 12 src
+        |]
+    , reject
+        "spec-kind-4-5"
+        [r|
+        module main (bad)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+        src :: Vector 10 Real
+        bad = roll (-2) src
+        |]
+    , reject
+        "spec-kind-4-6"
+        [r|
+        module main (g)
+        newtype Vector (n :: Nat) a = List a
+        f :: Vector (n - (n + 1)) Int -> Int
+        g :: Int -> Int
+        g x = x
+        |]
+    , accept
+        "spec-kind-4-7"
+        [r|
+        module main (g)
+        newtype Buffer (n :: Nat) a = List a
+        f :: Buffer ((3 - 10) + 20) Int -> Int
+        g :: Int -> Int
+        g x = x
+        |]
+    , reject
+        "spec-kind-4-8"
+        [r|
+        module main (g)
+        newtype Buffer (n :: Nat) a = List a
+        f :: Buffer (7 / 0) Int -> Int
         g :: Int -> Int
         g x = x
         |]
@@ -2023,3 +2079,115 @@ cls16Tests =
     pair x y = AppU (VarU (TV "T")) [x, y]
     general = ForallU a (vec n (VarU a))
 
+poly7Tests :: TestTree
+poly7Tests =
+  testGroup
+    "POLY-7"
+    [ reject
+        "spec-poly-7-1"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector (m + 1) Int -> Int
+        f :: Vector n Int -> Int
+        f x = h x
+        |]
+    , accept
+        "spec-poly-7-2"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector (m + 1) Int -> Int
+        f :: Vector (n + 1) Int -> Int
+        f x = h x
+        |]
+    , reject
+        "spec-poly-7-3"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        h :: Vector (m + 1) Int -> Int
+        f :: Vector (n * n) Int -> Int
+        f x = h x
+        |]
+    , accept
+        "spec-poly-7-4"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        g :: Vector (m + 1) Int -> Vector m Int
+        f :: Vector n Int -> Vector (n - 1) Int
+        f x = g x
+        |]
+    , reject
+        "spec-poly-7-5"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        take3 :: Vector n Int -> Vector (n - 3) Int
+        len :: Vector k Int -> Int
+        f :: Vector n Int -> Int
+        f x = len (take3 x)
+        |]
+    , accept
+        "spec-poly-7-6"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+        f :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+        f w v = roll w v
+        |]
+    , accept
+        "spec-poly-7-8"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        half :: Vector n Int -> Vector (n / 2) Int
+        len :: Vector k Int -> Int
+        f :: Vector n Int -> Vector (n / 2) Int
+        f x = half x
+        g :: Vector n Int -> Int
+        g x = len (half x)
+        append :: Vector a Int -> Vector b Int -> Vector (a + b) Int
+        h :: Vector n Int -> Int
+        h x = len (append (half x) x)
+        |]
+    , reject
+        "spec-kind-4-9"
+        [r|
+        module main (x)
+        newtype T1 (d :: Nat) a = List a
+        make :: n@Int -> d@Int -> T1 (n / d) Real
+        x = make 12 0
+        |]
+    , reject
+        "spec-kind-4-11"
+        [r|
+        module main (x)
+        newtype T1 (d :: Nat) a = List a
+        make :: n@Int -> d@Int -> T1 (n / d) Real
+        x k = make k 0
+        |]
+    , reject
+        "spec-kind-4-10"
+        [r|
+        module main (y)
+        newtype Vector (n :: Nat) a = List a
+        mk :: n@Int -> Vector n Real
+        len :: Vector k Real -> Int
+        f :: k@Int -> Int
+        f k = len (mk k)
+        y = f (-3)
+        |]
+    , reject
+        "spec-poly-7-7"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+        len :: Vector k Real -> Int
+        f :: w@Int -> Vector n Real -> Int
+        f w v = len (roll w v)
+        |]
+    ]

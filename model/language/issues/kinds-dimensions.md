@@ -1,14 +1,33 @@
 # Kinds and dimensions
 
-- **Signature Nat variables are not rigid.** [reproduced] Violates POLY-7
-  and DIM-7. The code solves signature Nat variables like existentials. `h :: Vector (m + 1) Int -> Int`,
-  `f :: Vector n Int -> Int; f x = h x` is accepted and `morloc typecheck`
-  reports `f :: Vector (1 + a) Int -> Int`; `f :: Vector (n - 1) Int` is
-  reported as `Vector a Int`. The DIM-6 check likewise treats every Nat
-  variable as existential: `f :: Vector (n * n) Int` calling `h` above is
-  accepted (witness n=1, m=0) though n=0 has no m. A Nat subtraction over
-  a rigid variable (`Vector (n - 1)`) is accepted though KIND-4 rejects
-  it.
+- **A label known only at run time is not checked.** [read] Violates DIM-3
+  and KIND-4. `main w = roll w src`, with `roll :: w@Int -> Vector n Real ->
+  Vector (n - w + 1) Real` and `w` read from the command line, leaves `w`
+  inferred and is accepted; no check stops `w = 12` against a 10-element
+  `src`, nor a negative `w`. A generated check must divide as KIND-3 does
+  (toward zero), unlike Python `//` and R `%/%`.
+- [read] KIND-4 over inferred variables alone: a Nat position whose
+  variables are all inferred, and not connected to a signature's rigid
+  ones, is checked only when it becomes ground (Frontend/Typecheck.hs
+  checkFinalType); one left open is not checked for a non-negative
+  solution.
+- [read] Solving a Nat equation (NatSolver solveSOP) keeps only solutions
+  whose coefficients are non-negative, so `k ~ n - w + 1` is deferred
+  rather than solved; KIND-3 allows the solution, since the position
+  carries its own condition.
+- [read] Violates DIM-7 ("at the term that produced the condition"). The
+  POLY-7 body check reports an undecided group at the definition, and a
+  refuted one at the definition unless a body term's own Nat position is
+  negative at the counterexample (Frontend/Typecheck.hs checkRigidNats);
+  conditions carry no term of origin. The check also runs after inference,
+  which solves signature Nat variables like inferred ones; a skolem Nat in
+  the solver, with each condition recording its term, would locate both.
+- [read] A Nat position holding a node that has no Nat expression form
+  (Typecheck/Internal.hs typeUToNatExpr: a size, an alias application) is
+  skipped by every KIND-4 check (Restructure checkTypeApplications,
+  Typecheck checkFinalType and checkRigidNats).
+- [read] POLY-7 covers only the outermost signature of a definition;
+  a `where` signature's Nat variables are solved as inferred ones.
 - [read] Violates DIM-6 ("at the term that produced it"). A Nat equation
   deferred during instance resolution (after synthesis) has no recorded
   term; the error falls back to the export (Frontend/Typecheck.hs, the
@@ -30,10 +49,6 @@
   reads an under-applied kinded head three ways: collectKindedVarsFromScope
   matches arguments to parameters by position, fillMissingKindArgs by kind
   bucket, and alias kind inference treats every argument as Type.
-- **Division by zero at the Nat level is not reported as such.**
-  [reproduced, 2026-10-21] Gap in KIND-3. `g :: Buf (7 / 0) -> Int` against
-  `Buf 3` fails "cannot decide whether these kind-level equations have a
-  solution". Candidates: a located type error where reduced; undefined.
 - **Recursive newtypes through a container.** [reproduced, 2026-10-21] Gap
   in NEWT-6. `newtype T = [T]` and `newtype T = (Int, ?T)` are accepted
   (the latter round-trips `[1,[2,null]]`), but `newtype A = [B]; newtype
@@ -53,8 +68,4 @@
   manual's conv example then returns 7 elements typed `Vector 6`. No item
   types a slice of `Vector n a` (COLL-3 covers `[T]`). Repro: /work/plans/model-audit-2026-10-21/repro/C/dim/sl.loc,
   conv.loc.
-- [read] Two KIND-4 checks disagree on a negative intermediate. Restructure
-  rejects `(3 - 10) + 20` written in a signature (natural subtraction, as
-  in DIM-7), while Typecheck's final-type check normalizes the whole
-  expression to 13 and accepts it when it arises in inference.
 

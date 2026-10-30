@@ -37,7 +37,9 @@ import qualified Morloc.TypeEval as TE
 import Morloc.Frontend.Rename (renameLocals)
 import Morloc.Frontend.TerminalActions (synthesizeTerminalActions)
 import Morloc.Frontend.TypeNames (isReservedTypeName, resolveTypeNames)
-import Morloc.Typecheck.Internal (expandStructuralAliases, expandTransparentAliases, isSubtypeOf2, mapTypeUChildren, structuralAliasHead, structuralAliasesIn, traverseTypeUChildren, typeUChildren)
+import Morloc.Typecheck.Internal (expandStructuralAliases, expandTransparentAliases, isSubtypeOf2, mapTypeUChildren, structuralAliasHead, structuralAliasesIn, traverseTypeUChildren, typeUChildren, typeUToNatExpr, natPositions)
+import qualified Morloc.Typecheck.NatDecide as ND
+import qualified Morloc.Typecheck.NatSolver as NS
 
 -- | Resolve type aliases, term aliases and import/exports
 restructure ::
@@ -2553,6 +2555,17 @@ checkTypeApplications dag scope = do
     ((i, e, n) : _) ->
       MM.throwSourcedError i $
         "The Nat" <+> squotes (pretty e) <+> "reduces to" <+> pretty n <> ", but a Nat is never negative"
+  case [(i, e) | (_, (m, _)) <- Map.toList dag, (i, t) <- writtenTypes m, e <- badDivisors t] of
+    [] -> return ()
+    ((i, e) : _) ->
+      MM.throwSourcedError i $
+        "The Nat" <+> squotes (pretty e) <+> "divides by a number that is not positive"
+  case [(i, slots) | (_, (m, _)) <- Map.toList dag, (i, t) <- writtenTypes m, slots <- emptyDomain t] of
+    [] -> return ()
+    ((i, slots) : _) ->
+      MM.throwSourcedError i $
+        "No value of the Nat variables makes every Nat here non-negative:"
+          <+> hsep (punctuate "," (map (squotes . pretty) slots))
   where
     applied =
       [ (i, v, args)
@@ -2655,23 +2668,31 @@ checkTypeApplications dag scope = do
           AssE _ y ys -> y : ys
           IstE _ _ _ _ ys -> ys
           _ -> AST.exprIChildren e
+    -- KIND-4 holds of the whole expression that fills a Nat position; its
+    -- parts may be negative (KIND-3).
     negativeNats t =
-      [ (sub', n)
-      | sub'@(OpU OpNatSub [_, _]) <- universe t
-      , Just n <- [groundNat sub']
+      [ (slot, n)
+      | slot <- natPositions t
+      , Just e <- [typeUToNatExpr slot]
+      , Just n <- [NS.evalNat Map.empty e]
       , n < 0
       ]
+    badDivisors t =
+      [ d
+      | d@(OpU OpNatDiv [_, b]) <- concatMap universe (natPositions t)
+      , Just e <- [typeUToNatExpr b]
+      , Just k <- [NS.evalNat Map.empty e]
+      , k <= 0
+      ]
     universe t = t : concatMap universe (typeUChildren t)
-    groundNat t = case t of
-      LitU (LNat n) -> Just n
-      OpU OpNatAdd [a, b] -> (+) <$> groundNat a <*> groundNat b
-      OpU OpNatSub [a, b] -> (-) <$> groundNat a <*> groundNat b
-      OpU OpNatMul [a, b] -> (*) <$> groundNat a <*> groundNat b
-      OpU OpNatDiv [a, b] -> do
-        x <- groundNat a
-        y <- groundNat b
-        if y == 0 then Nothing else Just (x `div` y)
-      _ -> Nothing
+    -- A signature is rejected only when no value of its Nat variables
+    -- makes every Nat position defined and non-negative; each use is
+    -- checked against the values it gives them (KIND-4).
+    emptyDomain t =
+      let slots = [(slot, e) | slot <- natPositions t, Just e <- [typeUToNatExpr slot], not (NS.isGround e)]
+       in case ND.decide Set.empty [ND.NatGe e (NS.NatLit 0) | (_, e) <- slots] of
+            ND.Refuted _ -> [map fst slots]
+            _ -> []
 
 -- | Give each parameter of a transparent alias the kind of the slots it
 -- fills in the alias's body: in @type Image h w = Tensor3 h w 3 U8@, @h@

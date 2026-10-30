@@ -61,20 +61,24 @@ Tests: spec-dim-7-1, spec-dim-7-2, spec-dim-7-3
 Code: deviates (issues/kinds-dimensions.md)
 
 Every Nat equation and every non-negativity condition (KIND-4) is decided
-by one procedure. A condition holds when, for every value of its rigid
-variables (POLY-7), some value of its inferred variables satisfies it
-(DIM-6); with no inferred variables this is validity, with no rigid ones
-satisfiability. Natural subtraction and truncating division add the
-conditions under which they are defined. The procedure answers holds,
-refuted (with a value of the rigid variables that has no solution), or
-unknown. An inferred variable that an equation defines over the others is
-eliminated first; the conditions left are split into groups that share no
+by one procedure, over the integer arithmetic of KIND-3 with every variable
+a natural. A condition holds when, for every value of its rigid variables
+(POLY-7) that satisfies the assumptions (a signature's domain, KIND-4), some
+value of its inferred variables satisfies it (DIM-6); with no inferred
+variables this is validity, with no rigid ones satisfiability. A division
+adds the condition that its divisor is positive. The procedure answers
+holds, refuted (with a value of the rigid variables, inside the
+assumptions, that has no solution), or unknown. An inferred variable that an equation defines over the others, as
+written (`v = e`) or by its normal form, is eliminated first; the conditions left are split into groups that share no
 variable, each decided on its own. A group is decided exactly when it has
-no variables; when it is one condition over rigid variables with neither
-subtraction nor division (a linear inequality by its coefficients, an
+no variables; when it has no assumptions and is one condition over rigid
+variables without division (a linear inequality by its coefficients, an
 equation by polynomial identity with `*`, up to a bound on its degree and
 variable count); and when it is one linear equation or inequality over
-inferred variables with neither subtraction nor division. Any other group
-holds when a small set of candidate witnesses proves it, and is refuted by
-a bounded search for a counterexample. Unknown is a type error at the term
+inferred variables without division. A condition also holds when it is an
+assumption, when it is a quotient's non-negativity and its dividend's
+holds, or when it exceeds a small multiple of one assumption, or the sum of
+two, by a polynomial with non-negative coefficients. Any other group holds when a
+small set of candidate witnesses proves it, and is refuted by a bounded
+search for a counterexample inside the assumptions. Unknown is a type error at the term
 that produced the condition, naming it.

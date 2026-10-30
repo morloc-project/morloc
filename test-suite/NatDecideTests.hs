@@ -6,7 +6,8 @@ The properties compare every verdict of 'decide' with evaluation: a
 condition with no variables is decided exactly, a verdict of holds is
 checked at sampled values of the rigid variables through its witness, and a
 refutation is checked by searching the other variables at its
-counterexample.
+counterexample. Under assumptions the samples are those that satisfy them,
+and a counterexample must satisfy them too.
 -}
 module NatDecideTests (natDecideTests) where
 
@@ -105,6 +106,27 @@ examples =
       assertBool "" (isHolds (decide (rigid ["r"]) [NatGe (v "x") (v "r")]))
   , localOption (mkTimeout 2000000) $ testCase "a large rigid product is decided quickly" $
       assertBool "" (not (isHolds (decide (rigid (map (: []) ['a' .. 'v'])) [NatEq (foldr1 NatMul (map (v . (: [])) ['a' .. 'v'])) (lit 0)])))
+  , testCase "an inferred variable written equal to a quotient is eliminated" $
+      assertBool "" (isHolds (decide (rigid ["n"]) [NatEq (v "k") (NatDiv (v "n") (lit 2)), NatGe (NatDiv (v "n") (lit 2)) (lit 0)]))
+  , testCase "a condition that is an assumption holds" $
+      let slot = NatAdd (NatSub (v "n") (v "w")) (lit 1)
+       in assertBool "" (isHolds (decideAssuming (rigid ["n", "w"]) [NatGe slot (lit 0)] [NatGe slot (lit 0)]))
+  , testCase "an assumed n - 1 >= 0 lets m = n - 1 be natural (POLY-7)" $
+      assertBool "" (isHolds (decideAssuming (rigid ["n"]) [NatGe (NatSub (v "n") (lit 1)) (lit 0)] [NatEq (v "n") (NatAdd (v "m") (lit 1))]))
+  , testCase "without the assumption, m = n - 1 is refuted at n = 0" $
+      decide (rigid ["n"]) [NatEq (v "n") (NatAdd (v "m") (lit 1))] @?= Refuted (Map.fromList [(tv "n", 0)])
+  , testCase "a sum of two assumptions discharges their sum" $
+      let a1 = NatSub (v "n") (v "w")
+          a2 = NatSub (v "m") (v "u")
+       in assertBool "" (isHolds (decideAssuming (rigid ["n", "w", "m", "u"]) [NatGe a1 (lit 0), NatGe a2 (lit 0)] [NatGe (NatAdd a1 a2) (lit 0)]))
+  , testCase "an empty domain makes every condition hold" $
+      assertBool "" (isHolds (decideAssuming (rigid ["n"]) [NatGe (NatSub (lit 0) (lit 3)) (lit 0)] [NatEq (v "n") (lit 5)]))
+  , testCase "a refutation under an assumption satisfies it" $
+      case decideAssuming (rigid ["n"]) [NatGe (NatSub (v "n") (lit 2)) (lit 0)] [NatGe (lit 4) (v "n")] of
+        Refuted env -> assertBool (show env) (maybe False (\x -> x >= 2 && x > 4) (Map.lookup (tv "n") env))
+        d -> assertFailure (show d)
+  , testCase "a quotient inside a sum is a natural" $
+      assertBool "" (isHolds (decide (rigid ["n"]) [NatGe (NatAdd (NatDiv (v "n") (lit 2)) (v "n")) (lit 0)]))
   , testCase "a rigid variable is not at least a larger one" $
       assertBool "" (isRefuted (decide (rigid ["a", "b"]) [NatGe (v "a") (v "b")]))
   ]
@@ -115,6 +137,8 @@ properties =
   , testProperty "a ring identity holds over rigid variables" prop_identity
   , testProperty "a holds verdict is satisfied through its witness" prop_holds_sound
   , testProperty "a refutation has no solution at its counterexample" prop_refuted_sound
+  , testProperty "under assumptions, a holds verdict is satisfied inside them" prop_assuming_holds_sound
+  , testProperty "under assumptions, a refutation lies inside them" prop_assuming_refuted_sound
   ]
 
 names :: [String]
@@ -217,14 +241,16 @@ prop_holds_sound =
     vars (NatEq a b) = freeNatVars a <> freeNatVars b
     vars (NatGe a b) = freeNatVars a <> freeNatVars b
 
--- | Assignments of the inferred variables at a rigid sample: those with a
--- witness take its value, the rest are searched.
+-- | Natural assignments of the inferred variables at a rigid sample: those
+-- with a witness take its value, the rest are searched.
 completions :: Map TVar Integer -> Map TVar NatExpr -> [TVar] -> [Map TVar Integer]
 completions env witness inferred =
   let free = [x | x <- inferred, not (Map.member x witness)]
-   in [ Map.union base (Map.mapMaybe (evalNat base) witness)
+   in [ full
       | xs <- mapM (const [0 .. 12]) free
       , let base = Map.union env (Map.fromList (zip free xs))
+      , let full = Map.union base (Map.mapMaybe (evalNat base) witness)
+      , all (>= 0) (Map.elems full)
       ]
 
 prop_refuted_sound :: Property
@@ -236,6 +262,61 @@ prop_refuted_sound =
           let inferred = Set.toList (Set.unions [vars c | c <- cs] `Set.difference` Map.keysSet env)
            in not (any (\inf -> all (holdsAtEnv inf) cs) (completions env Map.empty inferred))
         _ -> True
+  where
+    vars (NatEq a b) = freeNatVars a <> freeNatVars b
+    vars (NatGe a b) = freeNatVars a <> freeNatVars b
+
+-- | Assumptions over the rigid variables: inequalities whose sides may
+-- subtract, as a signature's Nat positions do.
+genAssumptions :: [TVar] -> Gen [Condition]
+genAssumptions rs
+  | null rs = return []
+  | otherwise = resize 2 (listOf (NatGe <$> resize 4 (sized rigidExpr) <*> pure (lit 0)))
+  where
+    rigidExpr n
+      | n <= 0 = oneof [lit <$> choose (0, 4), NatVar <$> elements rs]
+      | otherwise =
+          frequency
+            [ (2, oneof [lit <$> choose (0, 4), NatVar <$> elements rs])
+            , (2, NatAdd <$> rigidExpr (n `div` 2) <*> rigidExpr (n `div` 2))
+            , (2, NatSub <$> rigidExpr (n `div` 2) <*> rigidExpr (n `div` 2))
+            , (1, NatMul <$> rigidExpr (n `div` 2) <*> rigidExpr (n `div` 2))
+            ]
+
+prop_assuming_holds_sound :: Property
+prop_assuming_holds_sound =
+  forAll genRigid $ \rs ->
+    forAll (genAssumptions (Set.toList rs)) $ \asm ->
+      forAll (listOf1 (genCondition ((,) <$> resize 4 (sized (genExpr True)) <*> resize 4 (sized (genExpr True))))) $ \cs ->
+        case decideAssuming rs asm cs of
+          Holds witness ->
+            let inferred = Set.toList (Set.unions [vars c | c <- cs] `Set.difference` rs)
+             in conjoin
+                  [ counterexample (show env) (any (\inf -> all (holdsAtEnv inf) cs) (completions env witness inferred))
+                  | env <- samples (Set.toList rs)
+                  , all (holdsAtEnv env) asm
+                  ]
+          _ -> property True
+  where
+    vars (NatEq a b) = freeNatVars a <> freeNatVars b
+    vars (NatGe a b) = freeNatVars a <> freeNatVars b
+
+prop_assuming_refuted_sound :: Property
+prop_assuming_refuted_sound =
+  forAll genRigid $ \rs ->
+    forAll (genAssumptions (Set.toList rs)) $ \asm ->
+      forAll (listOf1 (genCondition ((,) <$> resize 4 (sized (genExpr True)) <*> resize 4 (sized (genExpr True))))) $ \cs ->
+        case decideAssuming rs asm cs of
+          Refuted env
+            | not (null asm) ->
+                let inferred = Set.toList (Set.unions [vars c | c <- cs] `Set.difference` Map.keysSet env)
+                    -- an assumption over the assigned variables holds there
+                    relevant = [a | a <- asm, vars a `Set.isSubsetOf` Map.keysSet env]
+                 in counterexample (show env)
+                      ( all (holdsAtEnv env) relevant
+                          && not (any (\inf -> all (holdsAtEnv inf) cs) (completions env Map.empty inferred))
+                      )
+          _ -> property True
   where
     vars (NatEq a b) = freeNatVars a <> freeNatVars b
     vars (NatGe a b) = freeNatVars a <> freeNatVars b

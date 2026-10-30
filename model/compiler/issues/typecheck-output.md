@@ -15,6 +15,11 @@ model/language/issues/typecheck.md.
   diagnostic raised after the typechecker names the construct that caused
   it (DIAG-2). Every code-generation rejection above is reported at the
   module's export list (`main.loc:1:14`).
+- **`morloc typecheck` prints a signed export's inferred type.**
+  [reproduced, 2026-10-30] `f :: Vector n Int -> Vector (n - 1) Int`
+  prints as `f :: Vector (1 + a) Int -> Vector a Int`, and `f :: w@Int ->
+  Vector n Real -> Vector (n - w + 1) Real` as `... -> Vector ((1 + a) +
+  (-1 * b)) Real`: the normal form, with renamed variables and no label.
 - **`morloc typecheck` drops class constraints from signed exports.**
   [reproduced, 2026-10-21] `f :: Integral a => a -> a` and `s ::
   Semigroup a => a -> a` print as `f :: a -> a`, `s :: a -> a`.
