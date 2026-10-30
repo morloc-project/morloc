@@ -416,24 +416,7 @@ hostRoot t = t
 makeSerialAST :: Int -> Lang -> Type -> MorlocMonad SerialAST
 makeSerialAST mid lang t = do
   ft <- Infer.inferConcreteTypeUniversal lang mid t
-  ast <- Serial.makeSerialAST mid lang ft
-  -- Apply nat dimension constraints from the original type to the SerialAST.
-  -- The TypeF may have lost nat params during alias expansion, but the
-  -- original Type still has them.
-  return $ applyNatDimsFromType t ast
-
--- | Extract nat dimension constraints from a Type and apply them to a SerialAST.
--- For example, Matrix 2 3 Int has NatLitT args [2, 3]. After alias expansion,
--- the SerialAST is SerialList(SerialList(SerialInt)). This function annotates
--- each nesting level with the corresponding dimension constraint.
-applyNatDimsFromType :: Type -> SerialAST -> SerialAST
-applyNatDimsFromType (AppT _ args) ast =
-  let dims = [Just (NatLitF n) | NatLitT n <- args, n > 0]
-  in applyDims dims ast
-  where
-    applyDims (d:ds) (SerialList v _ inner) = SerialList v d (applyDims ds inner)
-    applyDims _ s = s
-applyNatDimsFromType _ ast = ast
+  Serial.makeSerialAST mid lang ft
 
 -- | SerialASTs for a pure (gast) function's return + argument types.
 -- The 'FunT' input puts the return type first, then arguments. The
@@ -442,12 +425,12 @@ applyNatDimsFromType _ ast = ast
 -- the export rather than surfacing as an unlocalized SystemError.
 makeGastSerialASTs :: Int -> Type -> MorlocMonad (SerialAST, [SerialAST])
 makeGastSerialASTs i (FunT ts t) = do
-  serialAsts <- zipWith applyNatDimsFromType (t : ts) <$> mapM (generalTypeToSerialAST i) (t : ts)
+  serialAsts <- mapM (generalTypeToSerialAST i) (t : ts)
   case serialAsts of
     (s : ss) -> return (s, ss)
     [] -> error "makeGastSerialASTs: FunT produced empty serial AST list"
 makeGastSerialASTs i t = do
-  s <- applyNatDimsFromType t <$> generalTypeToSerialAST i t
+  s <- generalTypeToSerialAST i t
   return (s, [])
 
 -- | Reject main-module exports whose type carries a function in argument or

@@ -39,7 +39,8 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
 import qualified Morloc.TypeEval as T
-import Morloc.Typecheck.Internal (typeUChildren)
+import Morloc.Typecheck.Internal (typeUChildren, typeUToNatExpr)
+import qualified Morloc.Typecheck.NatSolver as NS
 import Numeric (showHex)
 import Data.Char (isDigit)
 
@@ -715,10 +716,10 @@ weave gscope = w Set.empty
     w _ (NatLitU n) (NatLitU _) = return $ NatLitF n
     w _ (NatLitU n) _ = return $ NatLitF n  -- Nat params may be erased in concrete type
     w _ NatVoidU _ = return NatVoidF  -- Erased phantom Nat slot
-    w _ (NatAddU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w _ (NatMulU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w _ (NatSubU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w _ (NatDivU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w _ t@(NatAddU _ _) _ = return (groundNatF t)
+    w _ t@(NatMulU _ _) _ = return (groundNatF t)
+    w _ t@(NatSubU _ _) _ = return (groundNatF t)
+    w _ t@(NatDivU _ _) _ = return (groundNatF t)
     w _ (NatVarU _) _ = return NatVoidF  -- Nat variable erased in concrete type
     w _ (IntVarU _) _ = return NatVoidF  -- an Int fills only Nat positions
     w _ g _ | Just k <- kindOfU g, k /= KindNat = return (kindArg k g)
@@ -745,10 +746,10 @@ weave gscope = w Set.empty
       | otherwise = Left "concrete type has more non-Nat args than general type in weave"
     weaveArgs anc (NatLitU n : gs) cs = (NatLitF n :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
     weaveArgs anc (NatVoidU : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
-    weaveArgs anc (NatAddU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
-    weaveArgs anc (NatMulU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
-    weaveArgs anc (NatSubU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
-    weaveArgs anc (NatDivU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
+    weaveArgs anc (g@(NatAddU _ _) : gs) cs = (groundNatF g :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
+    weaveArgs anc (g@(NatMulU _ _) : gs) cs = (groundNatF g :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
+    weaveArgs anc (g@(NatSubU _ _) : gs) cs = (groundNatF g :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
+    weaveArgs anc (g@(NatDivU _ _) : gs) cs = (groundNatF g :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
     -- Unresolved nat dimension variable (opaque output dims): treat as erased
     weaveArgs anc (NatVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
     weaveArgs anc (IntVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropKindHead KindNat cs)
@@ -915,3 +916,9 @@ concreteNameOf :: Scope -> TVar -> MT.Text
 concreteNameOf cscope v = case Map.lookup v cscope of
   Just entries | (n : _) <- [n' | (_, body, _, _, _) <- entries, Just n' <- [bodyNameOf body]] -> n
   _ -> unTVar v
+
+-- | A Nat expression in a concrete type: its value when ground, so that a
+-- Vector's computed length is still checked (DIM-8), and the unknown
+-- placeholder otherwise.
+groundNatF :: TypeU -> TypeF
+groundNatF t = maybe NatVoidF NatLitF (typeUToNatExpr t >>= NS.evalNat Map.empty)

@@ -92,3 +92,15 @@ error: the condition is checked at run time at the term that produced it
 condition with a variable that has no value at run time (one that only an
 equation defines, such as `m` in `Vector (m * m)`) cannot be checked then,
 and an Unknown one is a type error at that term.
+
+### DIM-8 A Nat is a length only through Vector or a Table's rows
+Intent: proposed
+Tests: spec-dim-8-1
+Code: deviates (issues/kinds-dimensions.md)
+
+The first parameter of `Vector n a` is the length of its list, and the
+`n` of `Table n r` is its row count. A Nat parameter of any other type is
+a length only where its representation passes it to one of these (`Matrix
+m n a`, whose wire form holds `Vector (m * n) a`); otherwise it is a
+phantom (NEWT-3), and no run-time check reads it. Every DIM-3 check of a
+length follows this rule.

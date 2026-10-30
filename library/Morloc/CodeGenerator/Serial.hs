@@ -1224,7 +1224,7 @@ makeSerialAST m lang t0 = do
               AliasIsList elemU -> do
                 elemTf <- inferConcreteType lang (Idx m (typeOf elemU))
                 elemAST <- withAncestor anc (\anc' -> makeSerialAST' gscope typepackers anc' elemTf)
-                return $ applyDimsToList dims (SerialList fv Nothing elemAST)
+                return $ applyDimsToList dim (SerialList fv Nothing elemAST)
 
               -- Outer alias body is tuple-shaped (`type Pair a b = (a, b)`).
               -- Same pattern as list: outer fv on the SerialTuple, recurse on
@@ -1248,22 +1248,22 @@ makeSerialAST m lang t0 = do
                 let ast' = if Map.member generalTypeName cscope
                              then setSerialHead fv ast
                              else ast
-                return $ applyDimsToList dims ast'
+                return $ applyDimsToList dim ast'
 
               -- No outer aliasing: the type is its own head. Dispatch on it
               -- directly: list / tuple / Packable lookup.
               --
               -- When the outer type is in @typepackers@ but its wire
               -- form is list-shaped (e.g. @Vector n a@ with a Packable
-              -- bridge whose wire is @List a@), use 'applyDimsToList'
-              -- to re-attach the phantom Nat slots so the wire schema
-              -- carries the dim. Macro indices are unaffected (they
-              -- count type args only).
+              -- bridge whose wire is @List a@), 'applyDimsToList' puts
+              -- Vector's length on that list so the wire schema carries
+              -- it (DIM-8). Macro indices are unaffected (they count
+              -- type args only).
               AliasIsNone
                 | finalVar == Just BT.list -> do
                     serves <- shapeServes BT.list
                     if serves
-                      then applyDimsToList dims . SerialList fv Nothing <$> makeSerialAST' gscope typepackers anc (head runtimeTs)
+                      then applyDimsToList dim . SerialList fv Nothing <$> makeSerialAST' gscope typepackers anc (head runtimeTs)
                       else packableFallback
                 | finalVar == Just (BT.tuple (length runtimeTs)) -> do
                     serves <- shapeServes (BT.tuple (length runtimeTs))
@@ -1362,16 +1362,18 @@ makeSerialAST m lang t0 = do
             (Right packer) -> Right (piHead pin, packer)
             (Left reason) -> Left (piHead pin, reason)
 
-        -- One dimension per Nat argument, in order, including NatLitF 0 (a
-        -- real empty dimension) and NatVoidF (@Vector n a@); each annotates
-        -- one SerialList nesting level.
-        dims :: [Maybe TypeF]
-        dims = [Just t | t <- ts0, kindOfF t == Just KindNat]
+        -- A Nat is a length only as Vector's first parameter (DIM-8): it
+        -- annotates the list Vector is, including NatLitF 0 (a real empty
+        -- dimension) and NatVoidF (no check). Any other type's Nats are
+        -- phantoms, or reach a Vector through its representation, which
+        -- carries them itself.
+        dim :: Maybe TypeF
+        dim
+          | generalTypeName == BT.vector = listToMaybe [t | t <- ts0, kindOfF t == Just KindNat]
+          | otherwise = Nothing
 
-        -- Apply dimension constraints to nested SerialList nodes.
-        -- Each dim in the list is consumed by one nesting level.
-        applyDimsToList :: [Maybe TypeF] -> SerialAST -> SerialAST
-        applyDimsToList (d:ds) (SerialList v _ inner) = SerialList v d (applyDimsToList ds inner)
+        applyDimsToList :: Maybe TypeF -> SerialAST -> SerialAST
+        applyDimsToList d@(Just _) (SerialList v _ inner) = SerialList v d inner
         applyDimsToList _ ast = ast
 
         runtimeTs = filter (isNothing . kindOfF) ts0
@@ -1994,6 +1996,13 @@ generalTypeToSerialAST' i anc t0@(AppT (VarT v) [t])
   | v == BT.ostreamVar = SerialOStream (FV v (CV "")) <$> handleStorage i anc v t
   | v == BT.istreamVar = SerialIStream (FV v (CV "")) <$> handleStorage i anc v t
   | otherwise = appliedTypeToSerialAST i anc t0 v [t]
+-- A Vector's literal length annotates the list it lowers to (DIM-8).
+generalTypeToSerialAST' i anc t0@(AppT (VarT v) [n, a])
+  | v == BT.vector, not (Set.member t0 anc) = do
+      ast <- appliedTypeToSerialAST i anc t0 v [n, a]
+      return $ case (reduceNat (type2typeu n), ast) of
+        (Just k, SerialList x _ inner) -> SerialList x (Just (NatLitF k)) inner
+        _ -> ast
 generalTypeToSerialAST' i anc t0@(AppT (VarT v) ts)
   | Set.member t0 anc = return $ SerialRec (FV v (CV "")) (map keyTypeF ts)
   | v == (BT.tuple (length ts)) =
@@ -2117,8 +2126,10 @@ resolveAliasApp i anc t0 v ts = do
       case Map.lookup v scope of
         _ | Just unfolded <- aliasOfData scope t0 -> generalTypeToSerialAST' i anc unfolded
         (Just [(params, body, _, False, _)]) -> do
+          -- Substituted before erasure, so that a Nat argument reaches the
+          -- Vector it sizes (DIM-8); the erased body has none left to fill.
           let tvars = [tv | Left (tv, _) <- params]
-              resolved = foldl (\acc (tv, arg) -> substituteTVar tv arg acc) (typeOf body) (zip tvars ts)
+              resolved = typeOf (foldl (\acc (tv, arg) -> substituteTVar tv (type2typeu arg) acc) body (zip tvars ts))
           anc' <- descendT i t0 anc
           inner <- generalTypeToSerialAST' i anc' resolved
           -- The expanded body's outer constructor is the alias's
