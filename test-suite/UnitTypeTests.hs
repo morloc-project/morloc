@@ -453,6 +453,7 @@ listToGamma gs =
     , gammaPendingNumLits = []
     , gammaRigid = Nothing
     , gammaRigidNats = Set.empty
+    , gammaRigidRows = Set.empty
     , gammaRigidDomain = []
     , gammaLabelVars = Map.empty
     , gammaScoped = Map.empty

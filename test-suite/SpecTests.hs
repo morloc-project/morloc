@@ -2202,6 +2202,54 @@ poly7Tests =
         x = sq v
         |]
     , reject
+        "spec-kind-4-16"
+        [r|
+        module main (g)
+        newtype Vector (n :: Nat) a = List a
+        newtype Tbl (r :: Rec) = Int
+        cols1 :: Tbl r -> Vector (Size r - 1) Int
+        len :: Vector k Int -> Int
+        g :: Tbl r -> Int
+        g t = len (cols1 t)
+        |]
+    , accept
+        "spec-kind-4-17"
+        [r|
+        module main (g, h)
+        newtype Vector (n :: Nat) a = List a
+        newtype Tbl (r :: Rec) = Int
+        cols1 :: Tbl r -> Vector (Size r - 1) Int
+        grow :: Tbl r -> Vector (Size r + 1) Int
+        len :: Vector k Int -> Int
+        mk :: Tbl {x = Int, y = Str}
+        h = len (cols1 mk)
+        g :: Tbl r -> Int
+        g t = len (grow t)
+        |]
+    , accept
+        "spec-kind-4-18"
+        [r|
+        module main (prim, cols1, h)
+        newtype Vector (n :: Nat) a = List a
+        newtype Tbl (r :: Rec) = Int
+        prim :: Tbl r -> Vector (Size r - 1) Int
+        len :: Vector k Int -> Int
+        cols1 :: Tbl r -> Vector (Size r - 1) Int
+        cols1 t = prim t
+        h t = len (prim t)
+        |]
+    , accept
+        "spec-kind-4-19"
+        [r|
+        module main (cols1)
+        newtype Vector (n :: Nat) a = List a
+        newtype Tbl (r :: Rec) = Int
+        allCols :: Tbl r -> Vector (Size r) Int
+        dropOne :: Vector (n + 1) Int -> Vector n Int
+        cols1 :: Tbl r -> Vector (Size r - 1) Int
+        cols1 t = dropOne (allCols t)
+        |]
+    , reject
         "spec-kind-4-10"
         [r|
         module main (x)

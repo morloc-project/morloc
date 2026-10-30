@@ -213,7 +213,7 @@ typecheckWith expected = run
       -- the term whose type holds it (DIM-6, KIND-4, DIM-7).
       let rootIndex = case e0 of AnnoS gi _ _ -> gi
           site p = Map.findWithDefault rootIndex p (gammaDeferredAt g3)
-          natEquation p@(t1, t2) = case (typeUToNatExpr (apply g3 t1), typeUToNatExpr (apply g3 t2)) of
+          natEquation p@(t1, t2) = case (natPositionExpr (apply g3 t1), natPositionExpr (apply g3 t2)) of
             (Just a, Just b) -> Just (site p, p, (a, b))
             _ -> Nothing
           natEquations = mapMaybe natEquation (gammaDeferred g3)
@@ -233,7 +233,7 @@ typecheckWith expected = run
               <> [ (j, ND.NatGe e (NS.NatLit 0), prettyTypeU pos <+> ">= 0")
                  | AnnoS (Idx j t) _ _ <- annoNodes e3
                  , pos <- natPositions (apply g3 t)
-                 , Just e <- [typeUToNatExpr pos]
+                 , Just e <- [natPositionExpr pos]
                  , not (NS.isGround e)
                  ]
           -- Each condition once, at its first term.
@@ -1190,6 +1190,7 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
       g1Cs
         | contract = g1Base
             { gammaRigidNats = Set.union (gammaRigidNats g1) (Set.fromList sigNats)
+            , gammaRigidRows = Set.union (gammaRigidRows g1) (Set.fromList (collectRecVarNames t1))
             , gammaRigidDomain = gammaRigidDomain g1 <> [(vi, p) | p <- natPositions t1]
             , gammaLabelVars = Map.union labelVars (gammaLabelVars g1)
             }
@@ -3229,13 +3230,13 @@ validate trees instances = do
 -- (DIM-7).
 checkRigidNats :: Int -> Gamma -> [(Int, TypeU)] -> MorlocMonad ()
 checkRigidNats i g bodyTypes
-  | Set.null rigid = return ()
+  | Set.null rigidAll = return ()
   | (j : _) <- [j | (j, ps) <- bySignature, ND.Refuted _ <- [ND.decide Set.empty (nonNegative ps)]] =
       MM.throwSourcedError j
         "No value of the Nat and Int variables of this signature makes every Nat position in it non-negative (KIND-4)"
   | otherwise = case reaching of
       [] -> return ()
-      conds -> case ND.decideAssuming rigid domain conds of
+      conds -> case ND.decideAssuming rigidAll domain conds of
         ND.Holds _ -> return ()
         ND.Refuted env ->
           MM.throwSourcedError (failingTerm env) $ vsep
@@ -3255,28 +3256,38 @@ checkRigidNats i g bodyTypes
             ]
   where
     rigid = gammaRigidNats g
-    nonNegative ts = [ND.NatGe e (NS.NatLit 0) | t <- ts, Just e <- [typeUToNatExpr t]]
+    -- A size over the signature's own rows stands for every value too.
+    sizes = opaqueSizes (map (apply g . snd) bodyTypes <> map snd (gammaRigidDomain g) <> map (apply g) (Map.elems (gammaKindSubs g)))
+    rigidSizes = Set.fromList
+      [ name
+      | (name, SizeU r) <- Map.toList sizes
+      , let rows = Set.fromList (collectRecVarNames r)
+      , not (Set.null rows)
+      , rows `Set.isSubsetOf` gammaRigidRows g
+      ]
+    rigidAll = Set.union rigid rigidSizes
+    nonNegative ts = [ND.NatGe e (NS.NatLit 0) | t <- ts, Just e <- [natPositionExpr t]]
     domain = nonNegative (map snd (gammaRigidDomain g))
     bySignature = Map.toList (Map.fromListWith (flip (<>)) [(j, [p]) | (j, p) <- gammaRigidDomain g])
     solved =
       [ ND.NatEq (if k == KindInt then NS.IntVar v else NS.NatVar v) e
       | ((v, k), t) <- Map.toList (gammaKindSubs g)
       , fillsNat k
-      , Just e <- [typeUToNatExpr (apply g t)]
+      , Just e <- [natPositionExpr (apply g t)]
       ]
     -- Each deferred equation at the term where it arose, and each Nat
     -- position at the term whose type holds it.
     deferredAt =
       [ (Map.findWithDefault i p (gammaDeferredAt g), ND.NatEq a b)
       | p@(t1, t2) <- gammaDeferred g
-      , Just a <- [typeUToNatExpr (apply g t1)]
-      , Just b <- [typeUToNatExpr (apply g t2)]
+      , Just a <- [natPositionExpr (apply g t1)]
+      , Just b <- [natPositionExpr (apply g t2)]
       ]
     deferred = map snd deferredAt
     located = [(j, c) | (j, t) <- bodyTypes, c <- nonNegative (natPositions (apply g t))]
     positions = map snd located
     tagged = deferredAt <> located
-    reaching = ND.reaching rigid (Set.toList (Set.fromList (filter (not . trivial) (solved <> deferred <> positions))))
+    reaching = ND.reaching rigidAll (Set.toList (Set.fromList (filter (not . trivial) (solved <> deferred <> positions))))
     trivial (ND.NatEq a b) = a == b
     trivial _ = False
     -- The innermost term with a condition that, beside the body's
@@ -3312,6 +3323,7 @@ checkRigidNats i g bodyTypes
     -- A signature's variable by the name it wrote, numbered where two
     -- signatures write the same name; an inferred one marked with '?'.
     natName v@(TV t)
+      | Just s <- Map.lookup v sizes = prettyTypeU s
       | Set.member v rigid, Set.notMember (base t) sharedBases = pretty (base t)
       | Set.member v rigid = pretty (numbered t)
       | otherwise = "?" <> pretty (numbered t)

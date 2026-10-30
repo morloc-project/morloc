@@ -88,6 +88,9 @@ module Morloc.Typecheck.Internal
   , typeUToNatExpr
   , natExprToTypeU
   , natPositions
+  , natPositionExpr
+  , opaqueNats
+  , opaqueSizes
 
     -- * primitive constraint discharge (Stage 9 of the tables refactor)
   , reduceConstraint
@@ -150,7 +153,7 @@ emptyGamma =
     , gammaSolved = Map.empty, gammaDeferred = [], gammaDeferredAt = Map.empty, gammaKindSubs = Map.empty
     , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
-    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaScoped = Map.empty, gammaUnfolded = Set.empty
+    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidRows = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaScoped = Map.empty, gammaUnfolded = Set.empty
     }
 
 -- | The type constructor at the head of a type, if it has one.
@@ -886,6 +889,41 @@ natPositions t = case t of
   IntVarU _ -> [t]
   _ -> concatMap natPositions (typeUChildren t)
 
+-- | A Nat position as an expression for its KIND-4 check: like
+-- 'typeUToNatExpr', but a size (@Size r@), which has no arithmetic form, is
+-- an opaque natural named for it, so that the position is still checked.
+natPositionExpr :: TypeU -> Maybe NS.NatExpr
+natPositionExpr t = case t of
+  SizeU _ -> Just (NS.NatVar (TV (opaquePrefix <> MT.pack (show t))))
+  NatAddU a b -> NS.NatAdd <$> natPositionExpr a <*> natPositionExpr b
+  NatMulU a b -> NS.NatMul <$> natPositionExpr a <*> natPositionExpr b
+  NatSubU a b -> NS.NatSub <$> natPositionExpr a <*> natPositionExpr b
+  NatDivU a b -> NS.NatDiv <$> natPositionExpr a <*> natPositionExpr b
+  _ -> typeUToNatExpr t
+
+-- | The opaque naturals of an expression from 'natPositionExpr'. They stand
+-- for any value, so a check holds them rigid.
+opaqueNats :: NS.NatExpr -> Set.Set TVar
+opaqueNats = Set.filter (\(TV v) -> opaquePrefix `MT.isPrefixOf` v) . NS.freeNatVars
+
+opaquePrefix :: MT.Text
+opaquePrefix = "#opaque "
+
+-- | The sizes within @ts@ by the name of the opaque natural each stands as.
+opaqueSizes :: [TypeU] -> Map.Map TVar TypeU
+opaqueSizes ts = Map.fromList [(TV (opaquePrefix <> MT.pack (show s)), s) | t <- ts, s@(SizeU _) <- universe t]
+  where
+    universe t = t : concatMap universe (typeUChildren t)
+
+-- | Replace each opaque natural named for a size within @ts@ by that size.
+restoreOpaque :: [TypeU] -> TypeU -> TypeU
+restoreOpaque ts = go
+  where
+    sizes = opaqueSizes ts
+    go t = case t of
+      NatVarU v | Just s <- Map.lookup v sizes -> s
+      _ -> mapTypeUChildren go t
+
 natExprToTypeU :: NS.NatExpr -> TypeU
 natExprToTypeU (NS.NatLit n) = NatLitU n
 natExprToTypeU (NS.NatVar v) = NatVarU v
@@ -1028,12 +1066,13 @@ applySetSolutions subs g0 = foldl insertSub g0 (Map.toList subs)
       g { gammaKindSubs = Map.insert (v, KindSet KindStr) (setExprToTypeU se) (gammaKindSubs g) }
 
 -- | Record solutions of Nat equations; @ints@ names the variables of the
--- equations that are Int-kinded.
-applyNatSolutions :: Set.Set TVar -> Map.Map TVar NS.NatExpr -> Gamma -> Either MDoc Gamma
-applyNatSolutions ints subs g0 = foldM applySub g0 (Map.toList subs)
+-- equations that are Int-kinded, and @restore@ turns the opaque naturals
+-- of 'natPositionExpr' back into the types they stand for.
+applyNatSolutions :: Set.Set TVar -> (TypeU -> TypeU) -> Map.Map TVar NS.NatExpr -> Gamma -> Either MDoc Gamma
+applyNatSolutions ints restore subs g0 = foldM applySub g0 (Map.toList subs)
   where
     applySub g (v, ne) =
-      let t = natExprToTypeU ne
+      let t = restore (natExprToTypeU ne)
           k = if Set.member v ints then KindInt else KindNat
       -- Try solving as existential first; fall back to a kind-tagged
       -- variable's solution in the gamma map.
@@ -1056,9 +1095,9 @@ recheckDeferred g = foldM check [] (gammaDeferred g)
     check acc (t1, t2) =
       let t1' = apply g t1
           t2' = apply g t2
-      in case (typeUToNatExpr t1', typeUToNatExpr t2') of
+      in case (natPositionExpr t1', natPositionExpr t2') of
            (Just ne1, Just ne2) ->
-             case NS.solveNat ne1 ne2 of
+             case NS.solveNatFixing (opaqueNats ne1 <> opaqueNats ne2) ne1 ne2 of
                Right _ -> Right acc
                Left NS.Contradiction ->
                  let (d1, d2) = prettyTypeUPair t1' t2'
@@ -1411,24 +1450,40 @@ subtype _ t NatVoidU g | isNatExpr t = return g
 -- Nat expressions: compare via SOP normalization (handles commutativity,
 -- associativity, and cross-form equality like 2+3 ~ 5)
 subtype _ t1 t2 g
-  | isNatExpr t1 && isNatExpr t2 =
+  | isNatExpr t1 && isNatExpr t2 || sizeAgainstNat =
       let t1' = apply g t1
           t2' = apply g t2
           -- Checking a body against its signature, the signature's Nat and
           -- Int variables stand for every value and are never solved
           -- (POLY-7); an equation only they could satisfy is deferred.
-          fixed = case gammaRigid g of
-            Just _ -> gammaRigidNats g
-            Nothing -> Set.empty
-      in case (typeUToNatExpr t1', typeUToNatExpr t2') of
+          -- A size is an opaque natural: never solved, and restored in
+          -- any solution that names it.
+          fixed opaque = case gammaRigid g of
+            Just _ -> gammaRigidNats g <> opaque
+            Nothing -> opaque
+      in case (natPositionExpr t1', natPositionExpr t2') of
            (Just ne1, Just ne2) ->
-             case NS.solveNatFixing fixed ne1 ne2 of
+             let opaque = opaqueNats ne1 <> opaqueNats ne2
+              in case NS.solveNatFixing (fixed opaque) ne1 ne2 of
                Right subs
                  | Map.null subs -> return g
-                 | otherwise -> applyNatSolutions (NS.intVars ne1 <> NS.intVars ne2) subs g
+                 | otherwise -> applyNatSolutions (NS.intVars ne1 <> NS.intVars ne2) (restoreOpaque [t1', t2']) subs g
                Left NS.Contradiction -> subtypeError t1 t2 "Nat constraint mismatch"
                Left (NS.Deferred _) -> return g { gammaDeferred = (t1', t2') : gammaDeferred g }
            _ -> subtypeError t1 t2 "Cannot compare Nat expressions"
+  where
+    -- A size met with Nat arithmetic or a Nat variable is compared as an
+    -- opaque natural; a size met with a literal or a size keeps its own
+    -- rules, which constrain the row.
+    sizeAgainstNat = case (t1, t2) of
+      (SizeU _, x) -> natFormed x
+      (x, SizeU _) -> natFormed x
+      _ -> False
+    natFormed x = case x of
+      NatVarU _ -> True
+      IntVarU _ -> True
+      OpU op _ -> op `elem` [OpNatAdd, OpNatSub, OpNatMul, OpNatDiv]
+      _ -> False
 -- StrVoidU is the erased phantom Str slot; it is compatible with any Str
 -- expression. Mirrors the NatVoidU rule above.
 subtype _ StrVoidU t g | isStrExpr t = return g

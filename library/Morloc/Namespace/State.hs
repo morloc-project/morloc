@@ -977,6 +977,8 @@ data Gamma = Gamma
   -- | The Nat and Int variables of the signatures being checked as
   -- contracts, at every depth (POLY-7).
   , gammaRigidNats :: Set.Set TVar
+  -- | The row variables of those signatures; a size over them is rigid.
+  , gammaRigidRows :: Set.Set TVar
   -- | The Nat positions of those signatures, whose non-negativity their
   -- bodies may assume (KIND-4).
   , gammaRigidDomain :: [(Int, TypeU)]

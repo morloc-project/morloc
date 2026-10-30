@@ -14,10 +14,11 @@
   POLY-7 body check (Frontend/Typecheck.hs checkRigidNats) reports an
   undecided group at the innermost term holding any of its conditions,
   not one that is undecided; a solved inferred variable records no term.
-- [read] A Nat position holding a node that has no Nat expression form
-  (Typecheck/Internal.hs typeUToNatExpr: a size, an alias application) is
-  skipped by every KIND-4 check (Restructure checkTypeApplications,
-  Typecheck checkFinalType and checkRigidNats).
+- [read] A Nat position whose arithmetic holds a node with no expression
+  form (Typecheck/Internal.hs natPositionExpr: an unknown dimension `_`, an
+  unexpanded alias application) is skipped by the KIND-4 checks. For `_`
+  this is a gap in DIM-4: whether a gradual dimension inside arithmetic is
+  checked at run time (DIM-3) is not ruled.
 - [read] Violates DIM-7 (ruled 2026-10-30): an undecided condition is a
   type error (Frontend/Typecheck.hs checkRigidNats, the DIM-6 check after
   inference) where DIM-7 makes it a run-time check with a warning. Waits

@@ -37,7 +37,7 @@ import qualified Morloc.TypeEval as TE
 import Morloc.Frontend.Rename (renameLocals)
 import Morloc.Frontend.TerminalActions (synthesizeTerminalActions)
 import Morloc.Frontend.TypeNames (isReservedTypeName, resolveTypeNames)
-import Morloc.Typecheck.Internal (expandStructuralAliases, expandTransparentAliases, isSubtypeOf2, mapTypeUChildren, structuralAliasHead, structuralAliasesIn, traverseTypeUChildren, typeUChildren, typeUToNatExpr, natPositions)
+import Morloc.Typecheck.Internal (expandStructuralAliases, expandTransparentAliases, isSubtypeOf2, mapTypeUChildren, structuralAliasHead, structuralAliasesIn, traverseTypeUChildren, typeUChildren, typeUToNatExpr, natPositions, natPositionExpr)
 import qualified Morloc.Typecheck.NatDecide as ND
 import qualified Morloc.Typecheck.NatSolver as NS
 
@@ -2698,7 +2698,7 @@ checkTypeApplications dag scope = do
     negativeNats t =
       [ (slot, n)
       | slot <- natPositions t
-      , Just e <- [typeUToNatExpr slot]
+      , Just e <- [natPositionExpr slot]
       , Just n <- [NS.evalNat Map.empty e]
       , n < 0
       ]
@@ -2714,7 +2714,7 @@ checkTypeApplications dag scope = do
     -- makes every Nat position defined and non-negative; each use is
     -- checked against the values it gives them (KIND-4).
     emptyDomain t =
-      let slots = [(slot, e) | slot <- natPositions t, Just e <- [typeUToNatExpr slot], not (NS.isGround e)]
+      let slots = [(slot, e) | slot <- natPositions t, Just e <- [natPositionExpr slot], not (NS.isGround e)]
        in case ND.decide Set.empty [ND.NatGe e (NS.NatLit 0) | (_, e) <- slots] of
             ND.Refuted _ -> [map fst slots]
             _ -> []
