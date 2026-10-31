@@ -16,13 +16,10 @@
   ','" at the ';', since after `do` a `{` followed by `name =` opens a
   record literal (LEX-4); the message no longer points at the missing
   `let`.
-- **A triple-quoted string with an interpolation is not dedented.**
-  [reproduced, 2026-10-21] Violates LIT-5. `a x = """` / `    hi #{x}` /
-  `      there` / `    """` gives `"\n    hi yo\n      there\n    "` for
-  `a yo` (expected `"hi yo\n  there"`); same for `'''`. Lexer.hs:720
-  `processMultilineString` runs only on the no-interpolation path; the
-  `#{` branch (:728) emits raw segments. Repro: /work/plans/model-audit-2026-10-21/repro/A/docs/strs2.loc.
 - **Lexical gaps.** [read/reproduced, 2026-10-21]
+  - LIT-5 lists the escapes `\n \t \r \0 \\ \"`, but a `"""` or `'''`
+    string also accepts `\'` (Lexer.hs `lexStringLit`). Candidates: add
+    `\'` to LIT-5 for every string, or for triple-quoted ones only.
   - LEX-3's keyword list omits `deriving` (Lexer.hs:541 reserves it).
   - LEX-1 says `--` always opens a comment, but an operator run spans it:
     `(+--)` is an operator, `1 +-- note` is not a comment. Candidates: `--`

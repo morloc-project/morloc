@@ -41,12 +41,15 @@ realized at.
 
 ### LIT-5 String literals
 Intent: proposed
+Tests: spec-lit-5-1
 Code: deviates (issues/syntax.md)
 
 A string is double-quoted. The escapes are `\n \t \r \0 \\ \"` and any other
 is a lexical error. In a `"""` or `'''` string, leading spaces through the
 first newline and trailing spaces through the last are dropped, then the
-smallest common indentation is removed from every line. `#{e}` splices `e`
+smallest common indentation is removed from every source line, an
+interpolation counting as one character of content; escapes are decoded
+after. `#{e}` splices `e`
 into the string, and requires `G |- e : Str`.
 
 ### LIT-6 Container literals

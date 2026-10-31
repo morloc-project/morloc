@@ -1948,7 +1948,14 @@ lexTests :: TestTree
 lexTests =
   testGroup
     "LEX"
-    [ accept
+    [ reject
+        "spec-lit-5-1"
+        [r|
+        module main (g)
+        g :: Str
+        g = "x""
+        |]
+    , accept
         "spec-lex-4-1"
         [r|
         module main (a, b, c, d, e)

@@ -10,6 +10,10 @@ all:
 	./nexus trpR   Alice Bob 2>> obs.err >> obs.txt
 	./nexus trpPy  Alice Bob 2>> obs.err >> obs.txt
 	./nexus trpCpp Alice Bob 2>> obs.err >> obs.txt
+	./nexus braces yo 2>> obs.err >> obs.txt
+	./nexus braceStr yo 2>> obs.err >> obs.txt
+	./nexus afterEsc 2>> obs.err >> obs.txt
+	./nexus sliced '[1,2,3,4]' 2>> obs.err >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__

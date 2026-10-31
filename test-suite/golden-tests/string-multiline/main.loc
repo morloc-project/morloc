@@ -1,4 +1,6 @@
-module main (s1, s2, s3, s4, s5, s6, s7, s8, s9, s10)
+module main (s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, i1, i2, i3, i4, i5, i6, e1, e2, w1)
+
+import root-py
 
 s1 =
   """
@@ -34,3 +36,59 @@ s9 = """   hello   """
 
 -- mixed-quote variant of s9
 s10 = '''   hello   '''
+
+-- An interpolated string is dedented as a whole; each hole is content
+i1 :: Str -> Str
+i1 x = """
+    hi #{x}
+      there
+    """
+
+i2 :: Str -> Str
+i2 x = """
+    #{x} first
+    """
+
+i3 :: Str -> Str
+i3 x = """
+    a #{
+  x}
+    b
+    """
+
+i4 :: Str -> Str
+i4 x = """
+      #{x}
+    tail #{x}
+    """
+
+i5 :: Str -> Str
+i5 x = '''
+    q #{x}
+    '''
+
+i6 :: Str -> Str
+i6 x = """
+    a #{x}\tb\n    c
+    """
+
+-- Escapes are decoded after dedenting: an escaped newline does not start a
+-- source line
+e1 :: Str
+e1 = """
+  a\n  b
+  """
+
+e2 :: Str
+e2 = """
+  \n  x
+  """
+
+-- A hole's lines do not take part in the layout around the string
+w1 :: Str -> Str
+w1 x = y
+  where
+    y = """
+      a #{
+x}
+      """

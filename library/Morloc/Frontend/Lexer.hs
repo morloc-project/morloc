@@ -19,6 +19,8 @@ module Morloc.Frontend.Lexer
   ) where
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isHexDigit, isLower, isOctDigit, isUpper)
+import Data.List (find)
+import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
 import Data.Scientific (Scientific)
 import Data.Text (Text)
@@ -99,8 +101,7 @@ distinguishGetterDots :: [Located] -> [Located]
 distinguishGetterDots [] = []
 distinguishGetterDots [x] = [x]
 distinguishGetterDots (prev : cur@(Located curPos TokGetterDot _) : rest)
-  | posLine (locPos prev) == posLine curPos
-  , posCol (locPos prev) + T.length (locText prev) == posCol curPos
+  | tokenEnd prev == curPos
   = prev : distinguishGetterDots (cur { locToken = TokGetterDotChain } : rest)
   | otherwise = prev : distinguishGetterDots (cur : rest)
 distinguishGetterDots (x : rest) = x : distinguishGetterDots rest
@@ -203,8 +204,8 @@ lexOne st@(LexState input pos toks _) = case input of
         let (_, rest') = span (/= '\n') rest
          in Right st {lsInput = rest', lsPos = advanceCol pos (2 + length (takeWhile (/= '\n') rest))}
   -- Triple-quoted strings
-  '\'' : '\'' : '\'' : rest -> lexMultilineString pos "'''" rest st
-  '"' : '"' : '"' : rest -> lexMultilineString pos "\"\"\"" rest st
+  '\'' : '\'' : '\'' : rest -> lexStringLit pos (Quote "'''" True) rest st
+  '"' : '"' : '"' : rest -> lexStringLit pos (Quote "\"\"\"" True) rest st
   -- Backtick-quoted name: `text` -- lexed as a single TokBacktickName
   -- carrying the enclosed text verbatim. Only meaningful in source-item
   -- positions (source declarations); the parser rejects it elsewhere.
@@ -236,7 +237,7 @@ lexOne st@(LexState input pos toks _) = case input of
      in Right st { lsInput = rest', lsPos = advanceCol pos len
                  , lsTokens = Located pos (TokTickName name) (T.cons '\'' name) : toks }
   -- Double-quoted strings (with interpolation support)
-  '"' : rest -> lexDoubleString pos rest st
+  '"' : rest -> lexStringLit pos (Quote "\"" False) rest st
   -- Numbers: try hex, octal, binary first, then decimal/float
   '0' : 'x' : rest -> lexHexNumber pos rest st
   '0' : 'X' : rest -> lexHexNumber pos rest st
@@ -586,227 +587,103 @@ classifyOp t = TokOperator t
 isOperatorChar :: Char -> Bool
 isOperatorChar c = c `elem` (":!$%&*+./<=>?@\\^|-~#" :: String)
 
--- | Lex a double-quoted string, handling interpolation
-lexDoubleString :: Pos -> String -> LexState -> Either LexError LexState
-lexDoubleString start input st = go (advanceCol start 1) input []
+-- | A string literal's closing delimiter: @"@, @"""@ or @'''@.
+data Quote = Quote
+  { quoteText :: String
+  , quoteMultiline :: Bool
+  }
+
+-- | A literal segment between holes: its position and source text.
+data Segment = Segment Pos String
+
+-- | Lex a string literal after its opening delimiter. Segments are kept as
+-- source text, escapes validated but not decoded; each @#{...}@ hole is
+-- lexed as tokens until the brace that closes it. At the closing delimiter
+-- a multiline literal is dedented as source text (LIT-5), each hole one
+-- character of content, and the escapes are decoded after.
+lexStringLit :: Pos -> Quote -> String -> LexState -> Either LexError LexState
+lexStringLit start quote input0 st0 = segment (advanceCol start (length delim)) input0 [] []
   where
-    go pos ('"' : rest) acc =
-      let txt = T.pack (reverse acc)
-          fullTxt = "\"" <> txt <> "\""
-       in Right
-            st
-              { lsInput = rest
-              , lsPos = advanceCol pos 1
-              , lsTokens = Located start (TokString txt) fullTxt : lsTokens st
-              }
-    go pos ('#' : '{' : rest) acc =
-      -- start of interpolation
-      let prefix = T.pack (reverse acc)
-          tok =
-            if null (lsTokens st) || not (isStringContinuation (lsTokens st))
-              then TokStringStart prefix
-              else TokStringMid prefix
-          prefixTxt = "\"" <> prefix <> "#{"
-       in lexInterpBody
-            (advanceCol pos 2)
-            rest
-            1
-            st
-              { lsTokens = Located (advanceCol pos 0) TokInterpOpen "#{" : Located start tok prefixTxt : lsTokens st
-              }
-            start
-    go pos ('\\' : c : rest) acc = case c of
-      'n'  -> go (advanceCol pos 2) rest ('\n' : acc)
-      't'  -> go (advanceCol pos 2) rest ('\t' : acc)
-      'r'  -> go (advanceCol pos 2) rest ('\r' : acc)
-      '0'  -> go (advanceCol pos 2) rest ('\0' : acc)
-      '\\' -> go (advanceCol pos 2) rest ('\\' : acc)
-      '"'  -> go (advanceCol pos 2) rest ('"'  : acc)
-      _    -> Left (LexError pos ("invalid escape sequence \\" ++ [c]))
-    go pos ('\n' : _) _ = Left (LexError pos "unterminated string literal (use triple quotes for multi-line strings)")
-    go pos (c : rest) acc = go (advanceCol pos 1) rest (c : acc)
-    go pos [] _ = Left (LexError pos "unterminated string literal")
+    delim = quoteText quote
 
-    isStringContinuation (Located _ (TokStringStart _) _ : _) = True
-    isStringContinuation (Located _ (TokStringMid _) _ : _) = True
-    isStringContinuation _ = False
+    -- @done@: the segments and holes so far, newest first
+    segment :: Pos -> String -> String -> [(Segment, [Located])] -> Either LexError LexState
+    segment p s acc done
+      | closes s = finish (advanceCol p (length delim)) (drop (length delim) s) (reverse ((Segment p (reverse acc), []) : done))
+    segment p ('#' : '{' : rest) acc done = do
+      let open = Located p TokInterpOpen "#{"
+          inner = st0 {lsInput = rest, lsPos = advanceCol p 2, lsTokens = [open], lsBracketStack = False : lsBracketStack st0}
+      (p', rest', hole) <- splice (0 :: Int) inner
+      segment p' rest' [] ((Segment p (reverse acc), hole) : done)
+    segment p ('\\' : c : rest) acc done
+      | c `elem` escapes = segment (advanceCol p 2) rest (c : '\\' : acc) done
+      | otherwise = Left (LexError p ("invalid escape sequence \\" ++ [c]))
+    segment p ('\n' : rest) acc done
+      | quoteMultiline quote = segment (nextLine p) rest ('\n' : acc) done
+      | otherwise = Left (LexError p "unterminated string literal (use triple quotes for multi-line strings)")
+    segment p (c : rest) acc done = segment (advanceCol p 1) rest (c : acc) done
+    segment p [] _ _
+      | quoteMultiline quote = Left (LexError p "unterminated multiline string literal")
+      | otherwise = Left (LexError p "unterminated string literal")
 
--- | Lex the body of an interpolation #{...}, tracking brace depth
-lexInterpBody :: Pos -> String -> Int -> LexState -> Pos -> Either LexError LexState
-lexInterpBody pos ('}' : rest) 1 st stringStartPos =
-  -- end of interpolation, resume string lexing
-  let st' = st {lsTokens = Located pos TokInterpClose "}" : lsTokens st}
-   in lexStringAfterInterp (advanceCol pos 1) rest st' stringStartPos
-lexInterpBody pos ('}' : rest) depth st strPos =
-  lexInterpBody (advanceCol pos 1) rest (depth - 1) st strPos
-lexInterpBody pos ('{' : rest) depth st strPos =
-  lexInterpBody (advanceCol pos 1) rest (depth + 1) st strPos
-lexInterpBody pos input _ st _ = do
-  -- lex one token from the interpolated expression
-  st' <- lexOne st {lsInput = input, lsPos = pos}
-  -- continue lexing the interpolation body
-  case lsInput st' of
-    [] -> Left (LexError pos "unterminated string interpolation")
-    _ -> case lsTokens st' of
-      (Located _ TokEOF _ : _) -> Left (LexError pos "unterminated string interpolation")
-      _ -> do
-        -- figure out remaining brace depth from what was consumed
-        let consumed = length input - length (lsInput st')
-            braceChange = countBraces (take consumed input)
-        lexInterpBody (lsPos st') (lsInput st') (1 + braceChange) st' (Pos 0 0 "")
+    -- in a multiline string, a run of more delimiter characters than the
+    -- delimiter closes at its end
+    closes s
+      | quoteMultiline quote = take (length delim) s == delim && take 1 (drop (length delim) s) /= take 1 delim
+      | otherwise = take 1 s == delim
+
+    escapes :: String
+    escapes = "nrt0\\\"" <> (if quoteMultiline quote then "'" else "")
+
+    -- the hole's tokens, newest first, ending with its closing brace
+    splice :: Int -> LexState -> Either LexError (Pos, String, [Located])
+    splice depth st = do
+      st' <- lexOne st
+      let new = takeNew (lsTokens st') (lsTokens st)
+      case new of
+        [Located q TokRBrace _]
+          | depth == 0 -> return (lsPos st', lsInput st', Located q TokInterpClose "}" : drop 1 (lsTokens st'))
+        _
+          | any ((== TokEOF) . locToken) new || null (lsInput st') ->
+              Left (LexError (lsPos st) "unterminated string interpolation")
+          | otherwise -> splice (depth + sum (map (braceStep . locToken) new)) st'
+
+    -- the tokens of @after@ above the head of @before@
+    takeNew after before = case before of
+      (b : _) -> takeWhile (\t -> locPos t /= locPos b || locToken t /= locToken b) after
+      [] -> after
+
+    braceStep TokLBrace = 1
+    braceStep TokRBrace = -1
+    braceStep _ = 0
+
+    finish :: Pos -> String -> [(Segment, [Located])] -> Either LexError LexState
+    finish p rest parts =
+      let raws = [T.pack r | (Segment _ r, _) <- parts]
+          texts = map decodeEscapes (if quoteMultiline quote then dedentSegments raws else raws)
+          d = T.pack delim
+          lastPart = length parts - 1
+          toks = case zip parts texts of
+            [((Segment _ r, _), t)] -> [Located start (TokString t) (d <> T.pack r <> d)]
+            pts -> concat (reverse (zipWith emit [0 :: Int ..] pts))
+          emit i ((Segment q r, hole), t)
+            | i == 0 = hole <> [Located start (TokStringStart t) (d <> T.pack r)]
+            | i == lastPart = hole <> [Located q (TokStringEnd t) (T.pack r <> d)]
+            | otherwise = hole <> [Located q (TokStringMid t) (T.pack r)]
+       in Right st0 {lsInput = rest, lsPos = p, lsTokens = toks <> lsTokens st0}
+
+-- | Decode the escapes of a segment already checked by 'lexStringLit'.
+decodeEscapes :: Text -> Text
+decodeEscapes = T.pack . go . T.unpack
   where
-    countBraces = foldl (\n c -> case c of '{' -> n + 1; '}' -> n - 1; _ -> n) 0
-
--- | After interpolation closes, resume lexing the string
-lexStringAfterInterp :: Pos -> String -> LexState -> Pos -> Either LexError LexState
-lexStringAfterInterp pos ('"' : rest) st _ =
-  let txt = T.empty
-   in Right
-        st
-          { lsInput = rest
-          , lsPos = advanceCol pos 1
-          , lsTokens = Located pos (TokStringEnd txt) "\"" : lsTokens st
-          }
-lexStringAfterInterp pos ('#' : '{' : rest) st strStartPos =
-  -- another interpolation immediately
-  let tok = TokStringMid T.empty
-   in lexInterpBody
-        (advanceCol pos 2)
-        rest
-        1
-        st {lsTokens = Located pos TokInterpOpen "#{" : Located pos tok "" : lsTokens st}
-        strStartPos
-lexStringAfterInterp pos input st _ = go pos input []
-  where
-    go p ('"' : rest) acc =
-      let txt = T.pack (reverse acc)
-       in Right
-            st
-              { lsInput = rest
-              , lsPos = advanceCol p 1
-              , lsTokens = Located pos (TokStringEnd txt) ("" <> txt <> "\"") : lsTokens st
-              }
-    go p ('#' : '{' : rest) acc =
-      let txt = T.pack (reverse acc)
-       in lexInterpBody
-            (advanceCol p 2)
-            rest
-            1
-            st {lsTokens = Located p TokInterpOpen "#{" : Located pos (TokStringMid txt) "" : lsTokens st}
-            pos
-    go p ('\\' : c : rest) acc = case c of
-      'n'  -> go (advanceCol p 2) rest ('\n' : acc)
-      't'  -> go (advanceCol p 2) rest ('\t' : acc)
-      'r'  -> go (advanceCol p 2) rest ('\r' : acc)
-      '0'  -> go (advanceCol p 2) rest ('\0' : acc)
-      '\\' -> go (advanceCol p 2) rest ('\\' : acc)
-      '"'  -> go (advanceCol p 2) rest ('"'  : acc)
-      _    -> Left (LexError p ("invalid escape sequence \\" ++ [c]))
-    go p ('\n' : _) _ = Left (LexError p "unterminated string literal")
-    go p (c : rest) acc = go (advanceCol p 1) rest (c : acc)
-    go p [] _ = Left (LexError p "unterminated string literal")
-
--- | Lex a multiline (triple-quoted) string with interpolation
-lexMultilineString :: Pos -> String -> String -> LexState -> Either LexError LexState
-lexMultilineString start delim input st = go (advanceCol start 3) input []
-  where
-    delimLen = length delim
-    delimChar = head delim
-
-    go pos s acc
-      | take delimLen s == delim
-      , let rest = drop delimLen s
-      , null rest || head rest /= delimChar =
-          let rawTxt = T.pack (reverse acc)
-              txt = processMultilineString rawTxt
-              fullTxt = T.pack delim <> rawTxt <> T.pack delim
-           in Right
-                st
-                  { lsInput = drop delimLen s
-                  , lsPos = advanceCol pos delimLen
-                  , lsTokens = Located start (TokString txt) fullTxt : lsTokens st
-                  }
-    go pos ('#' : '{' : rest) acc =
-      -- interpolation inside multiline string
-      let prefix = T.pack (reverse acc)
-          tok = TokStringStart prefix
-       in lexMultilineInterpBody
-            (advanceCol pos 2)
-            rest
-            1
-            st {lsTokens = Located pos TokInterpOpen "#{" : Located start tok "" : lsTokens st}
-            start
-            delim
-    go pos ('\\' : c : rest) acc = case c of
-      'n'  -> go (advanceCol pos 2) rest ('\n' : acc)
-      't'  -> go (advanceCol pos 2) rest ('\t' : acc)
-      'r'  -> go (advanceCol pos 2) rest ('\r' : acc)
-      '0'  -> go (advanceCol pos 2) rest ('\0' : acc)
-      '\\' -> go (advanceCol pos 2) rest ('\\' : acc)
-      '\'' -> go (advanceCol pos 2) rest ('\'' : acc)
-      '"'  -> go (advanceCol pos 2) rest ('"'  : acc)
-      _    -> Left (LexError pos ("invalid escape sequence \\" ++ [c]))
-    go pos ('\n' : rest) acc = go (nextLine pos) rest ('\n' : acc)
-    go pos (c : rest) acc = go (advanceCol pos 1) rest (c : acc)
-    go pos [] _ = Left (LexError pos "unterminated multiline string literal")
-
--- | Lex interpolation body inside a multiline string. Mirrors
--- 'lexInterpBody': tracks brace depth so nested @{...}@ inside the splice
--- does not close it prematurely, and threads the original string start
--- position and delimiter through every recursive call so
--- 'lexMultilineAfterInterp' can still find the matching @"""@ / @'''@.
-lexMultilineInterpBody ::
-  Pos -> String -> Int -> LexState -> Pos -> String -> Either LexError LexState
-lexMultilineInterpBody pos ('}' : rest) 1 st strStartPos delim =
-  -- end of interpolation, resume multiline string
-  let st' = st {lsTokens = Located pos TokInterpClose "}" : lsTokens st}
-   in lexMultilineAfterInterp (advanceCol pos 1) rest st' strStartPos delim
-lexMultilineInterpBody pos ('}' : rest) depth st strStartPos delim =
-  lexMultilineInterpBody (advanceCol pos 1) rest (depth - 1) st strStartPos delim
-lexMultilineInterpBody pos ('{' : rest) depth st strStartPos delim =
-  lexMultilineInterpBody (advanceCol pos 1) rest (depth + 1) st strStartPos delim
-lexMultilineInterpBody pos input depth st strStartPos delim = do
-  st' <- lexOne st {lsInput = input, lsPos = pos}
-  case lsInput st' of
-    [] -> Left (LexError pos "unterminated string interpolation")
-    _ -> case lsTokens st' of
-      (Located _ TokEOF _ : _) -> Left (LexError pos "unterminated string interpolation")
-      _ ->
-        let consumed = length input - length (lsInput st')
-            braceChange =
-              foldl (\n c -> case c of '{' -> n + 1; '}' -> n - 1; _ -> n) 0 (take consumed input)
-         in lexMultilineInterpBody (lsPos st') (lsInput st') (depth + braceChange) st' strStartPos delim
-
--- | Resume multiline string after interpolation
-lexMultilineAfterInterp :: Pos -> String -> LexState -> Pos -> String -> Either LexError LexState
-lexMultilineAfterInterp pos input st _ delim = go pos input []
-  where
-    delimLen = length delim
-    delimChar = if null delim then '\0' else head delim
-
-    go p s acc
-      | delimLen > 0 && take delimLen s == delim
-      , let rest' = drop delimLen s
-      , null rest' || head rest' /= delimChar =
-          let txt = T.pack (reverse acc)
-           in Right
-                st
-                  { lsInput = drop delimLen s
-                  , lsPos = advanceCol p delimLen
-                  , lsTokens = Located pos (TokStringEnd txt) "" : lsTokens st
-                  }
-    go p ('#' : '{' : rest) acc =
-      let txt = T.pack (reverse acc)
-       in lexMultilineInterpBody
-            (advanceCol p 2)
-            rest
-            1
-            st {lsTokens = Located p TokInterpOpen "#{" : Located pos (TokStringMid txt) "" : lsTokens st}
-            pos
-            delim
-    go p ('\n' : rest) acc = go (nextLine p) rest ('\n' : acc)
-    go p (c : rest) acc = go (advanceCol p 1) rest (c : acc)
-    go p [] _ = Left (LexError p "unterminated multiline string literal")
+    go ('\\' : c : rest) = decode c : go rest
+    go (c : rest) = c : go rest
+    go [] = []
+    decode 'n' = '\n'
+    decode 't' = '\t'
+    decode 'r' = '\r'
+    decode '0' = '\0'
+    decode c = c
 
 -- | True when the next char in @input@ would extend an identifier (i.e. the
 -- previous keyword/identifier match is not yet at a word boundary). Used to
@@ -838,8 +715,11 @@ prevSignificantToken :: [Located] -> Maybe (Token, Pos)
 prevSignificantToken [] = Nothing
 prevSignificantToken (Located _ TokDocLine{} _ : rest) = prevSignificantToken rest
 prevSignificantToken (Located _ TokGroupLine{} _ : rest) = prevSignificantToken rest
-prevSignificantToken (Located p tok txt : _) =
-  Just (tok, advanceCol p (T.length txt))
+prevSignificantToken (t@(Located _ tok _) : _) = Just (tok, tokenEnd t)
+
+-- | The position just after a token's source text.
+tokenEnd :: Located -> Pos
+tokenEnd (Located p _ txt) = T.foldl (\q c -> if c == '\n' then nextLine q else advanceCol q 1) p txt
 
 -- | True for tokens that finish an operand (a complete sub-expression). After
 -- such a token, a '-' with no preceding whitespace is binary subtraction.
@@ -1098,6 +978,13 @@ processMultilineString txt
             minSpaces = if null spaces then 0 else minimum spaces
          in T.intercalate "\n" (map (T.drop minSpaces) ls)
 
+-- | 'processMultilineString' over the literal segments around a string's
+-- holes, each hole standing for one character absent from every segment.
+dedentSegments :: [Text] -> [Text]
+dedentSegments segs = T.splitOn (T.singleton hole) (processMultilineString (T.intercalate (T.singleton hole) segs))
+  where
+    hole = fromMaybe '\xE000' (find (\c -> not (any (T.any (== c)) segs)) ['\xE000' ..])
+
 -- Position helpers
 advanceCol :: Pos -> Int -> Pos
 advanceCol (Pos l c f) n = Pos l (c + n) f
@@ -1262,8 +1149,18 @@ insertLayout toks = beginTopLevel toks
       | (locToken tok == TokRParen || locToken tok == TokRBracket)
           && ParenCtx `elem` ctxs =
           closeToParen ctxs tok rest
+      -- The rest of a string after a hole continues it; the hole is laid
+      -- out as an explicit block
+      | locToken tok == TokInterpClose = closeToExplicit ctxs tok rest
+      | continuesString (locToken tok) = emitToken ctxs tok rest
       -- Regular token: check indentation first (may emit VSEMI/VRBRACE)
       | otherwise = indentCheck ctxs tok rest
+
+    continuesString t = case t of
+      TokInterpOpen -> True
+      TokStringMid _ -> True
+      TokStringEnd _ -> True
+      _ -> False
 
     -- Check indentation of a regular token against the context stack
     indentCheck :: [LayoutContext] -> Located -> [Located] -> [Located]
@@ -1322,7 +1219,7 @@ insertLayout toks = beginTopLevel toks
       | isLayoutKeyword (locToken tok) =
           tok : startLayoutCtx (locToken tok) ctxs rest
       -- Explicit open brace
-      | locToken tok == TokLBrace =
+      | locToken tok == TokLBrace || locToken tok == TokInterpOpen =
           tok : process (ExplicitCtx : ctxs) rest
       -- Explicit close brace
       | locToken tok == TokRBrace =
