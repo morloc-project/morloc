@@ -19,6 +19,7 @@ module Morloc.Frontend.API
   , Typecheck.validate
   , Typecheck.resolveTypes
   , Valuecheck.valuecheck
+  , Valuecheck.checkRecursion
   ) where
 
 import qualified Data.Set as Set

@@ -79,6 +79,12 @@ typecheckFrontend path code = do
   checkRsize
   F.validate (validationTrees checks) (validationInstances checks)
   es <- specialize checks exports
+  specNames <- MM.gets stateSpecNames
+  Specs specTrees <- MM.gets stateSpecs
+  GMap idmap _ <- MM.gets stateSignatures
+  owners <- MM.gets stateWhereOwner
+  sites <- MM.gets stateDefinitionSite
+  mapM_ (F.checkRecursion specNames (`Map.lookup` idmap) owners sites) (es <> specTrees)
   MM.modify' (\s -> s {stateExportTypes = Map.fromList [(i, t) | AnnoS (Idx i t) _ _ <- es]})
   return es
 

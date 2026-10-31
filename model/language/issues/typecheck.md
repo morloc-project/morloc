@@ -144,16 +144,6 @@ literal and record gaps. Reproduced on 0.109.0 unless marked.
   2026-10-21] Violates PAT-1. `part :: (Int, Int, Int) -> Int;
   part = \(a, b) -> a + b` builds; `part [1,2,3]` prints 3. Repro:
   /work/plans/model-audit-2026-10-21/repro/A/pat/rt.loc.
-- **Mutually recursive `where` functions are accepted; value cycles crash
-  `make`.** [reproduced, 2026-10-21] Violates BIND-2. `f x = ev x where
-  ev n = ? n == 0 = True : od (n - 1); od n = ? n == 0 = False : ev (n - 1)`
-  builds and `f 4` prints `true` (/work/plans/model-audit-2026-10-21/repro/A/bind/b9.loc). `f x = a where a = b +
-  1; b = a + 1` passes typecheck and `make` dies "This step should be
-  unreachable" (CodeGenerator/Serialize.hs:308; /work/plans/model-audit-2026-10-21/repro/A/bind/b2.loc). A
-  top-level cycle `a = b + 1; b = a + 1; f = a` dies "Can represent MonoSrc
-  as SerialExpr" (Serialize.hs:241; /work/plans/model-audit-2026-10-21/repro/A/lex/x3.loc) instead of the cyclic
-  binding error. Either BIND-2 or the code must move for functions; value
-  cycles need a located rejection either way.
 - **A newtype over a `type` alias reports a phantom instance.** [reproduced,
   2026-10-21] `type Meters = Int; newtype Wrapped = Meters` fails "Cannot
   declare instance on transparent alias 'Meters'" though no instance is

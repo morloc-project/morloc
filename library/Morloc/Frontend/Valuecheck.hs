@@ -25,11 +25,14 @@ sequential, so `let { x = 1 ; x = 2 } in x` is the layout-free spelling of
 `let x = 1 in let x = 2 in x` and shadows to 2. Where-clauses are
 order-invariant, so duplicates there are real ambiguity errors.
 -}
-module Morloc.Frontend.Valuecheck (valuecheck, checkPair) where
+module Morloc.Frontend.Valuecheck (valuecheck, checkPair, checkRecursion) where
 
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as DT
+import Morloc.CodeGenerator.Value (etaParts, isLambda)
 import Morloc.Data.Doc
+import Morloc.Frontend.Rename (displayName)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 
@@ -111,6 +114,131 @@ typeOfE (EvalP (Idx _ t) _) = t
 typeOfE (CoerceP _ (Idx _ t) _) = t
 typeOfE (IntrinsicP (Idx _ t) _ _) = t
 
+-- | BIND-7. A 'CallS' back-edge closes the cycle of the open 'VarS'
+-- alternatives above it, up to the 'VarS' of its name; a call of a shared
+-- specialization is not a back-edge. On the way down, each member records
+-- the demand on it of the member enclosing it, as a function of the demand
+-- on that one.
+checkRecursion ::
+  Set.Set EVar -> (Int -> Maybe Int) -> Map.Map Int Int -> Map.Map Int Int -> AnnoS g Many Int -> MorlocMonad ()
+checkRecursion specs termOf owners sites = go [] id
+  where
+    go :: [Member g] -> (Demand -> Demand) -> AnnoS g Many Int -> MorlocMonad ()
+    go open here node@(AnnoS _ c e) = case e of
+      VarS v (Many alts) ->
+        mapM_ (\alt -> go (Member v (termOf c) alt here : open) id alt) alts
+      CallS v
+        | not (Set.member v specs)
+        , (inner, target : _) <- break ((== v) . memberName) open ->
+            checkCycle (target : reverse inner) here
+      _ -> mapM_ (\(step, child) -> go open (step . here) child) (children node)
+
+    -- the demand of each member on the next, and of the last on the first
+    checkCycle :: [Member g] -> (Demand -> Demand) -> MorlocMonad ()
+    checkCycle members final =
+      let ring = zip members (map memberIncoming (drop 1 members) <> [final])
+          rotations = take (length ring) (iterate rotate ring)
+          rotate xs = drop 1 xs <> take 1 xs
+       in case [m | r@((m, _) : _) <- rotations, needsItself m r] of
+            (Member w k (AnnoS _ i _) _ : _) ->
+              MM.throwSourcedError (fromMaybe i (k >>= (`Map.lookup` sites))) $
+                "The bindings" <+> hsep (punctuate " ->" (names <> take 1 names))
+                  <+> "form a cycle, and computing" <+> squotes (pretty (displayName w))
+                  <+> "needs the value of" <+> squotes (pretty (displayName w)) <+> "itself"
+              where
+                names = [squotes (pretty (displayName (memberName m))) | m <- members]
+            [] -> return ()
+
+    -- computing the first member, as a value, comes round to demand it,
+    -- unless a call on the way of a lambda holding it computes it anew
+    needsItself start = walk (Applied 0)
+      where
+        walk Unforced _ = False
+        walk _ [] = True
+        walk d ((m, next) : rest)
+          | runsBody d m && holds m = False
+          | otherwise = walk (next d) rest
+        holds (Member _ k _ _) = maybe False (`elem` ownerChain' start) k
+
+    runsBody d (Member _ _ alt0 _) = go' alt0
+      where
+        go' alt@(AnnoS _ _ x) = case x of
+          LamS vs _
+            | isLambda alt -> case d of
+                Called -> True
+                Applied n -> n >= length vs
+                Unforced -> False
+          LabelS _ y -> go' y
+          CoerceS _ y -> go' y
+          _ -> False
+
+    ownerChain' (Member _ k _ _) = maybe [] ownerChain k
+    ownerChain k = case Map.lookup k owners of
+      Just o | o /= k -> o : ownerChain o
+      _ -> []
+
+    children :: AnnoS g Many Int -> [(Demand -> Demand, AnnoS g Many Int)]
+    children n@(AnnoS _ _ x) = case x of
+      LamS vs b
+        | Just (f, pre) <- etaParts n ->
+            (etaHead (length pre) (length vs), f) : [(called, y) | y <- pre]
+        | otherwise -> [(enter (length vs), b)]
+      DoBlockS b -> [(force, b)]
+      AppS f xs -> (supply (length xs), f) : [(called, y) | y <- xs]
+      IfS cond t f -> [(evaluated, cond), (id, t), (id, f)]
+      LetS _ y z -> [(called, y), (id, z)]
+      LabelS _ y -> [(id, y)]
+      CoerceS _ y -> [(id, y)]
+      _ -> [(called, y) | y <- foldExprS (: []) x]
+
+-- | How far evaluating an expression goes into a part of it: not at all, to
+-- its value applied to some number of arguments (none: just its value), or
+-- applied to any number of them.
+data Demand = Unforced | Applied Int | Called
+  deriving (Eq)
+
+-- | The body of a lambda of @k@ parameters.
+enter :: Int -> Demand -> Demand
+enter k (Applied n)
+  | n >= k = Applied (n - k)
+  | otherwise = Unforced
+enter _ d = d
+
+-- | The head of an application of @k@ arguments.
+supply :: Int -> Demand -> Demand
+supply k (Applied n) = Applied (n + k)
+supply _ d = d
+
+-- | The head of an eta-expanded partial application holding @held@
+-- arguments, waiting for @waiting@ more.
+etaHead :: Int -> Int -> Demand -> Demand
+etaHead held waiting (Applied n)
+  | n >= waiting = Applied (held + n)
+  | otherwise = Applied held
+etaHead _ _ d = d
+
+-- | The body of a do-block, which runs only when it is forced.
+force :: Demand -> Demand
+force Called = Called
+force _ = Unforced
+
+evaluated :: Demand -> Demand
+evaluated Unforced = Unforced
+evaluated _ = Applied 0
+
+called :: Demand -> Demand
+called Unforced = Unforced
+called _ = Called
+
+-- | An open alternative of a term on the path to a back-edge, with the
+-- demand on it of the alternative that encloses it.
+data Member g = Member
+  { memberName :: EVar
+  , _memberTerm :: Maybe Int
+  , _memberAlt :: AnnoS g Many Int
+  , memberIncoming :: Demand -> Demand
+  }
+
 -- Check the harmony of typed implementations.
 --
 -- A naive implementation of this functions (and mine is naive as heck) will run
@@ -118,43 +246,8 @@ typeOfE (IntrinsicP (Idx _ t) _ _) = t
 -- memoization. But I will leave that as an exercise for my user (PR's accepted).
 valuecheck :: AnnoS (Indexed Type) Many Int -> MorlocMonad (AnnoS (Indexed Type) Many Int)
 valuecheck e0 = do
-  specs <- MM.gets stateSpecNames
-  groundCheck specs e0
   check (toE e0)
   return e0
-
--- A term whose every alternative is just a back-edge to itself (or to other
--- such terms) has no concrete implementation. Treeify already detects these
--- recursive references and emits CallS, but lets them through to codegen
--- where they fail at runtime in the target language. Here we walk the tree
--- and reject any VarS whose alternatives all lack ground content. Walks
--- children first so the deepest culprit is reported.
---
--- Catches both `omega = omega` and mutual cycles like `a = b; b = a` when
--- none of the participants has a concrete source.
-groundCheck :: Set.Set EVar -> AnnoS (Indexed Type) Many Int -> MorlocMonad ()
-groundCheck specs (AnnoS _ _ (VarS v (Many es))) = do
-  mapM_ (groundCheck specs) es
-  if any (hasGround specs) es
-    then return ()
-    else case es of
-      (AnnoS (Idx i _) _ _ : _) ->
-        MM.throwSourcedError i $
-          "Self-referential or cyclic binding:" <+> squotes (pretty v)
-            <> "; the term is defined only by reference to itself"
-      [] -> return () -- typechecker would have rejected an alternative-less term
-groundCheck specs (AnnoS _ _ e) = mapM_ (groundCheck specs) (foldExprS (\a -> [a]) e)
-
--- True if the AnnoS contains any substantive content (not just BndS/CallS
--- references; a call of a shared specialization is its implementation).
--- VarS forwards to its alternatives.
-hasGround :: Set.Set EVar -> AnnoS (Indexed Type) Many Int -> Bool
-hasGround specs (AnnoS _ _ e) = case e of
-  BndS _ -> False
-  CallS v -> Set.member v specs
-  LetBndS _ -> False
-  VarS _ (Many es) -> any (hasGround specs) es
-  _ -> True
 
 -- walk through a tree
 -- find the sets of implementations in VarS expressions

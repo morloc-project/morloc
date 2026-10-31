@@ -16,6 +16,7 @@ module Morloc.CodeGenerator.Value
   ( isValue
   , isValueWith
   , etaParts
+  , isLambda
   , isSuspension
   , ValueType
   ) where
@@ -105,6 +106,14 @@ etaParts (AnnoS _ _ (LamS vs (AnnoS _ _ (AppS f xs))))
     bndName (AnnoS _ _ (BndS v)) = Just v
     bndName _ = Nothing
 etaParts _ = Nothing
+
+-- | A lambda, not counting a partial application the typechecker wrote as
+-- one ('etaParts'): that computes its function when evaluated.
+isLambda :: Foldable f => AnnoS g f c -> Bool
+isLambda n@(AnnoS _ _ (LamS _ _)) = case etaParts n of
+  Just _ -> False
+  Nothing -> True
+isLambda _ = False
 
 -- | The variables referenced in a tree.
 boundNames :: Foldable f => AnnoS g f c -> [EVar]
