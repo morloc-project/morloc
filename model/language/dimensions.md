@@ -66,6 +66,7 @@ A Nat equation still open when inference ends, such as `n + m = 4` with
 naturals: dimensions are erased before anything runs (KIND-2), so the free
 variables need no value (POLY-6). An equation with no solution, or one the
 compiler cannot decide, is a type error at the term that produced it.
+A variable a run-time value gives is not free: DIM-10.
 
 ### DIM-7 One procedure decides Nat equations
 Intent: ruled 2026-10-30
@@ -135,3 +136,20 @@ one under a list, optional or record, one naming no `(v :: Nat)` parameter, one 
 a type other than `Int`, `I8` to `I64`, `UInt` and `U8` to `U64`, two
 naming the same parameter, and one inside a signature's argument rather
 than on the whole argument (POLY-3).
+
+### DIM-10 A length or label known only at run time stands for every value
+Intent: ruled 2026-10-31
+Tests: spec-dim-10-1, spec-dim-10-2, spec-dim-10-3
+Code: deviates (issues/kinds-dimensions.md)
+
+A label's value at a call is known before run time when its argument is a
+literal or the enclosing signature's own label. Any other label argument,
+and the length of any Vector a run-time value gives (a command's input, a
+sourced function's result), is observed: no equation solves it, and every
+condition over it must hold for each value it may take, given the
+command's own domain, which its input is checked against (DIM-3). A
+condition that does not is a type error at its term, since no check can be
+placed for it there (DIM-3). A signature that labels the value and states
+the relation moves the check to the command's input:
+`h :: w@Int -> Vector (m + w - 1) Int -> Int` may call `roll w`, and its
+input is checked for `m >= 0`.

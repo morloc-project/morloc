@@ -39,6 +39,12 @@ struct Cond {
     /// The variable a length binds that must equal `expr`; with none,
     /// `expr` must be non-negative.
     len: Option<usize>,
+    /// A number the variable `len` names must be a multiple of, in place
+    /// of `expr`.
+    multiple: Option<i128>,
+    /// A variable no slot binds, whose value is the one that makes `expr`
+    /// equal `len`'s value; `expr` never decreases as it grows.
+    root: Option<usize>,
 }
 
 /// Why a check failed: the input breaks a relation, or the program does
@@ -125,7 +131,15 @@ impl Dims {
                 None => None,
                 Some(x) => Some(x.as_u64().map(|k| k as usize).filter(|k| *k < vars.len()).ok_or_else(bad)?),
             };
-            conds.push(Cond { expr, text, len });
+            let multiple = match c.get("multiple") {
+                None => None,
+                Some(x) => Some(x.as_i64().filter(|m| *m > 0 && len.is_some()).ok_or_else(bad)? as i128),
+            };
+            let root = match c.get("root") {
+                None => None,
+                Some(x) => Some(x.as_u64().map(|k| k as usize).filter(|k| *k < vars.len() && len.is_some()).ok_or_else(bad)?),
+            };
+            conds.push(Cond { expr, text, len, multiple, root });
         }
         let name = v.get("name").and_then(|x| x.as_str()).unwrap_or(cmd).to_string();
         Ok(Dims { name, vars, bind, conds })
@@ -203,6 +217,35 @@ impl Dims {
             if c.len.is_some() && length.is_none() {
                 continue;
             }
+            if let (Some(r), Some((l, loc))) = (c.root, length) {
+                let (l, loc) = (*l, loc.clone());
+                match root_of(&c.expr, r, l, &mut found) {
+                    Root::Found(u) => found[r] = Some((u, format!("from {}", loc))),
+                    Root::Unknown => {}
+                    Root::None => {
+                        return Err(DimsError::Input(format!(
+                            "dimension mismatch in '{}': {} is {}, but its type requires {} for some {}, and no {} gives {}",
+                            self.name,
+                            loc,
+                            l,
+                            c.text,
+                            self.var_name(r),
+                            self.var_name(r),
+                            l
+                        )))
+                    }
+                }
+                continue;
+            }
+            if let (Some(m), Some((l, loc))) = (c.multiple, length) {
+                if l % m != 0 {
+                    return Err(DimsError::Input(format!(
+                        "dimension mismatch in '{}': {} is {}, but its type requires {}, a multiple of {}",
+                        self.name, loc, l, c.text, m
+                    )));
+                }
+                continue;
+            }
             match eval(&c.expr, &found) {
                 Eval::Value(x) if length.map_or(x >= 0, |(l, _)| *l == x) => {}
                 Eval::Unbound => {}
@@ -254,6 +297,41 @@ impl Dims {
         }
         Ok(())
     }
+}
+
+enum Root {
+    Found(i128),
+    /// No natural gives the target.
+    None,
+    /// The search cannot run: another variable has no value, or the
+    /// target is negative, which a condition of its own reports.
+    Unknown,
+}
+
+/// The natural `u` for which `expr`, with variable `r` set to `u`, is
+/// `target`, found by bisection over `0..=target`, which holds it when
+/// `expr` never decreases in `u` and is at least `u`.
+fn root_of(expr: &[String], r: usize, target: i128, found: &mut [Option<(i128, String)>]) -> Root {
+    if target < 0 {
+        return Root::Unknown;
+    }
+    let mut at = |u: i128, found: &mut [Option<(i128, String)>]| {
+        found[r] = Some((u, String::new()));
+        let v = eval(expr, found);
+        found[r] = None;
+        v
+    };
+    let (mut lo, mut hi) = (0i128, target);
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        match at(mid, found) {
+            Eval::Value(x) if x == target => return Root::Found(mid),
+            Eval::Value(x) if x < target => lo = mid + 1,
+            Eval::Value(_) | Eval::Overflow => hi = mid - 1,
+            Eval::Unbound | Eval::DivZero => return Root::Unknown,
+        }
+    }
+    Root::None
 }
 
 enum Eval {
@@ -562,5 +640,45 @@ mod tests {
         assert!(run(&d, &[(block.as_ptr(), &t), (p(&a), &s)]).is_ok());
         let e = run(&d, &[(block.as_ptr(), &t), (p(&b), &s)]).unwrap_err();
         assert!(e.contains("n is 2 from the row count of #0, but the length of #1 is 1"), "{e}");
+    }
+
+    #[test]
+    fn a_length_must_be_a_multiple() {
+        // f :: Vector (2 * n) Int -> Int
+        let d = dims(r##"{"vars":["#2 * n"],"bind":[{"var":0,"arg":0,"path":[],"of":"length"}],"conds":[{"len":0,"multiple":2,"expr":[],"text":"2 * n"}]}"##);
+        let s = parse_schema("ai8").unwrap();
+        let (a, _ka) = array(&[1, 2]);
+        let (b, _kb) = array(&[1, 2, 3]);
+        let p = |x: &Array| x as *const Array as *const u8;
+        assert!(run(&d, &[(p(&a), &s)]).is_ok());
+        let e = run(&d, &[(p(&b), &s)]).unwrap_err();
+        assert!(e.ends_with("the length of #0 is 3, but its type requires 2 * n, a multiple of 2"), "{e}");
+    }
+
+    #[test]
+    fn a_length_finds_the_variable_it_needs() {
+        // f :: Vector (n * n) Int -> Int
+        let d = dims(r##"{"vars":["#n * n","n"],"bind":[{"var":0,"arg":0,"path":[],"of":"length"}],"conds":[{"len":0,"root":1,"expr":["v1","v1","*"],"text":"n * n"}]}"##);
+        let s = parse_schema("ai8").unwrap();
+        let (a, _ka) = array(&[1, 2, 3, 4]);
+        let (b, _kb) = array(&[1, 2, 3]);
+        let (c, _kc) = array(&[]);
+        let p = |x: &Array| x as *const Array as *const u8;
+        assert!(run(&d, &[(p(&a), &s)]).is_ok());
+        assert!(run(&d, &[(p(&c), &s)]).is_ok());
+        let e = run(&d, &[(p(&b), &s)]).unwrap_err();
+        assert!(e.ends_with("the length of #0 is 3, but its type requires n * n for some n, and no n gives 3"), "{e}");
+    }
+
+    #[test]
+    fn a_search_waits_for_its_other_variables() {
+        // f :: Vector (n * n + m) Int -> [Vector m Int] -> Int, the list empty
+        let d = dims(r##"{"vars":["#n * n + m","m","n"],"bind":[{"var":0,"arg":0,"path":[],"of":"length"},{"var":1,"arg":1,"path":["*"],"of":"length"}],"conds":[{"len":0,"root":2,"expr":["v2","v2","*","v1","+"],"text":"n * n + m"}]}"##);
+        let s = parse_schema("ai8").unwrap();
+        let ls = parse_schema("aai8").unwrap();
+        let (a, _ka) = array(&[1, 2, 3]);
+        let empty = Array { size: 0, data: RELNULL };
+        let p = |x: &Array| x as *const Array as *const u8;
+        assert!(run(&d, &[(p(&a), &s), (p(&empty), &ls)]).is_ok());
     }
 }

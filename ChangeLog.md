@@ -1,3 +1,26 @@
+Unreleased
+----------
+
+New features
+ * A command's input is checked against the dimensions its type states
+   before the command runs: shared vector lengths, label values, lengths
+   written as expressions (`Vector (n + 1) a`), matrix and tensor headers
+   and table row counts. A mismatch is bad input naming the argument (exit
+   1 on the command line, HTTP 400 over the API)
+ * A newtype's representation may label its header integers with its Nat
+   parameters: `newtype Matrix (m :: Nat) (n :: Nat) a = ((m@Int, n@Int),
+   Vector (m * n) a)`
+ * `morloc make --debug` also checks the lengths of values passed between
+   pools; other builds no longer do
+
+Changed
+ * A label inside a type other than a whole signature argument or a newtype
+   header is an error; it was silently ignored
+ * The length of a run-time value, or a label whose argument is not a
+   literal or the caller's own label, must meet every condition a body puts
+   on it for all its values; state the relation in a signature, e.g.
+   `w@Int -> Vector (m + w - 1) Int`, and the input is checked for it
+
 0.111.1 [2026-10-27]
 --------------------
 

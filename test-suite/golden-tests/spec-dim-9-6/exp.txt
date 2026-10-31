@@ -27,3 +27,7 @@ Error: dimension mismatch in 'drop1': the length of argument #0.1 is 3, but its 
 exit: 1
 Error: dimension mismatch in 'drop1': m >= 0 does not hold, with m + 1 = 0 (the value of m in the M header of argument #0)
 exit: 1
+1
+exit: 0
+Error: dimension mismatch in 'tied': the value of m in the M header of argument #0 is 3, but its type requires m + 1 = 2, with m = 1 (the length of argument #1)
+exit: 1

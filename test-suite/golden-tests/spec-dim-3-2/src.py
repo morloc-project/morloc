@@ -33,3 +33,21 @@ def rows(t, v):
 
 def three(t):
     return t.num_rows
+
+def plus1(v):
+    return len(v)
+
+def twice(v):
+    return len(v)
+
+def square(v, w):
+    return len(v)
+
+def square1(v):
+    return len(v)
+
+def pair1(a, b):
+    return len(b)
+
+def down(v):
+    return len(v)

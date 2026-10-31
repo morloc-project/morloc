@@ -243,17 +243,50 @@ typecheckWith expected = run
               go seen (x@(_, c, _) : rest)
                 | Set.member c seen = go seen rest
                 | otherwise = x : go (Set.insert c seen) rest
-      forM_ (conditionGroups conditions) $ \grp ->
-        case ND.decide Set.empty [c | (_, c, _) <- grp] of
+      -- A label value known only at run time, and the length of a
+      -- command's input, stand for every value they may take, given the
+      -- part of the command's domain its input is checked against: the
+      -- Nat positions over what the input gives (DIM-10, DIM-3, KIND-4).
+      let rootType = case e3 of AnnoS (Idx _ t) _ _ -> apply g3 t
+          inputs = case rootType of
+            FunU as _ -> as
+            _ -> []
+          given = Set.union
+            (runTimeVars inputs)
+            (Set.fromList [v | IntVarU v <- everyType rootType, Set.notMember v (gammaObserved g3)])
+          runTime = Set.union (gammaObserved g3) (runTimeVars inputs)
+          entryDomain =
+            [ ND.NatGe e (NS.NatLit 0)
+            | pos <- natPositions rootType
+            , Just e <- [natPositionExpr pos]
+            , all (`Set.member` given) (NS.freeNatVars e)
+            ]
+          everyType t = t : concatMap everyType (typeUChildren t)
+      forM_ (conditionGroups conditions) $ \grp -> do
+        let cs = [c | (_, c, _) <- grp]
+            observed = Set.intersection runTime (ND.condVars cs)
+            answer
+              | Set.null observed = ND.decide Set.empty cs
+              | otherwise = ND.decideAssuming observed entryDomain cs
+            unsolvable = case ND.decide Set.empty cs of
+              ND.Refuted _ -> True
+              _ -> False
+        case answer of
           ND.Holds _ -> return ()
-          answer -> case grp of
+          _ -> case grp of
             [] -> return ()
             ((i, _, _) : _) ->
               MM.throwSourcedError i $ vsep
                 [ case answer of
+                    _ | unsolvable -> "These kind-level conditions have no solution:"
+                    _ | not (Set.null observed) ->
+                      "These kind-level conditions do not hold for every length and label value the input may give:"
                     ND.Refuted _ -> "These kind-level conditions have no solution:"
                     _ -> "The compiler cannot decide whether these kind-level conditions have a solution:"
                 , vsep ["  " <> d | (_, _, d) <- grp]
+                , if Set.null observed || unsolvable
+                    then mempty
+                    else "  A length or label known only at run time is checked only where a signature states it; give the enclosing function a signature that labels the value and states the relation (DIM-3)."
                 ]
       let natPairs = [p | (_, p, _) <- natEquations]
       remaining <- fmap concat . flip mapM (filter (`notElem` natPairs) (gammaDeferred g3)) $ \p ->
@@ -1194,7 +1227,7 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
             , gammaRigidDomain = gammaRigidDomain g1 <> [(vi, p) | p <- natPositions t1]
             , gammaLabelVars = Map.union labelVars (gammaLabelVars g1)
             }
-        | otherwise = g1Base
+        | otherwise = g1Base {gammaLabelVars = Map.union labelVars (gammaLabelVars g1)}
       g1' = (g1Cs ++> [AnnG v t1]) {gammaScoped = inScope}
   (g2scoped, t2, xs1) <- foldCheck g1' xs0 t1
   let g2 = g2scoped {gammaScoped = gammaScoped g0}
@@ -3138,7 +3171,17 @@ resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args
           , keyed KindStr strSolutions
           , keyed (KindList KindStr) listSolutions
           ]
-    in g { gammaKindSubs = Map.union combined (gammaKindSubs g) }
+        -- A label given no value before run time stands for every value.
+        observed = Set.fromList
+          [ renamedVar
+          | (origVar, arg) <- labelArguments et args
+          , Set.notMember origVar (strLabelVars (etype et))
+          , Just renamedVar <- [Map.lookup origVar natRenMap]
+          , Nothing <- [labelValue arg]
+          ]
+    in g { gammaKindSubs = Map.union combined (gammaKindSubs g)
+         , gammaObserved = Set.union observed (gammaObserved g)
+         }
   where
     labels = enatLabels et
     intLabels = Set.fromList [w | IntVarU w <- universeT funType]
@@ -3151,6 +3194,20 @@ resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args
       (_, BndS x) -> IntVarU <$> Map.lookup x (gammaLabelVars g)
       _ -> Nothing
 resolveNatLabels _ _ _ g = g
+
+-- | The Nat and Int variables of types that a run-time value gives: a
+-- Vector's length and a label's value.
+runTimeVars :: [TypeU] -> Set.Set TVar
+runTimeVars = Set.fromList . concatMap go
+  where
+    go t = case t of
+      AppU (VarU v) [n, a] | v == BT.vector -> bare n <> go a
+      IntVarU v -> [v]
+      _ -> concatMap go (typeUChildren t)
+    bare n = case typeUToNatExpr n of
+      Just (NS.NatVar x) -> [x]
+      Just (NS.IntVar x) -> [x]
+      _ -> []
 
 peakSExpr :: ExprS Int ManyPoly Int -> MDoc
 peakSExpr UniS = "UniS"
@@ -3265,7 +3322,7 @@ checkRigidNats i g bodyTypes
       , not (Set.null rows)
       , rows `Set.isSubsetOf` gammaRigidRows g
       ]
-    rigidAll = Set.union rigid rigidSizes
+    rigidAll = Set.unions [rigid, rigidSizes, gammaObserved g]
     nonNegative ts = [ND.NatGe e (NS.NatLit 0) | t <- ts, Just e <- [natPositionExpr t]]
     domain = nonNegative (map snd (gammaRigidDomain g))
     bySignature = Map.toList (Map.fromListWith (flip (<>)) [(j, [p]) | (j, p) <- gammaRigidDomain g])

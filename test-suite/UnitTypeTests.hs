@@ -456,6 +456,7 @@ listToGamma gs =
     , gammaRigidRows = Set.empty
     , gammaRigidDomain = []
     , gammaLabelVars = Map.empty
+    , gammaObserved = Set.empty
     , gammaScoped = Map.empty
 
     , gammaPositionalReceivers = Set.empty

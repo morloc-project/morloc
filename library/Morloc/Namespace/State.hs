@@ -159,6 +159,9 @@ data MorlocState = MorlocState
   , stateNewtypeHeaders :: Map.Map TVar [(TVar, [Int])]
   -- ^ Each newtype's header labels (DIM-9): the parameter and the tuple
   -- fields that reach its integer in the representation.
+  , stateExportTypes :: Map.Map Int TypeU
+  -- ^ Each export's inferred general type, by its index, with its Nat
+  -- variables: the contract of an export without a signature (DIM-3).
   , stateSources :: GMap Int MVar [Source]
   , stateAnnotations :: Map Int TypeU
   , stateOutfile :: Maybe Path
@@ -988,6 +991,10 @@ data Gamma = Gamma
   -- | The parameters of the definitions being checked as contracts that a
   -- label binds to an Int, with that Int (POLY-3).
   , gammaLabelVars :: Map.Map EVar TVar
+  -- | The label variables of calls whose label argument has no value
+  -- known before run time (DIM-3): never solved by an equation, and every
+  -- condition over one must hold for each of its values.
+  , gammaObserved :: Set.Set TVar
   -- | The type variables of the signatures being checked around this point,
   -- by the name the signature wrote to the name the check gave it. An
   -- annotation writing one of these names means that variable; a local
@@ -1072,6 +1079,7 @@ instance Defaultable MorlocState where
       , stateConcreteTypedefs = Map.empty
       , stateGeneralTypedefs = Map.empty
       , stateNewtypeHeaders = Map.empty
+      , stateExportTypes = Map.empty
       , stateSources = GMap Map.empty Map.empty
       , stateAnnotations = Map.empty
       , stateOutfile = Nothing

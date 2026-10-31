@@ -23,7 +23,9 @@ Code: conforms 2026-10-21
 
 An unannotated type parameter has kind `Type`. `(n :: K)` in a type
 declaration gives kind `K`. In a signature, `x@Int` binds an `Int`, `x@Str`
-a `Str` and `x@[Str]` a `List` to the value of that argument.
+a `Str` and `x@[Str]` a `List` to the value of that argument. A label
+labels a whole argument; elsewhere in a type it is an error, except in a
+newtype's representation (DIM-9).
 
 ### POLY-4 Type variables in a local signature
 Intent: ruled 2026-10-30

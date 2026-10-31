@@ -24,30 +24,44 @@
   arm), checked against the parent's schema; the entry decodes it as a
   value the program built. If the entry's schema could differ from the
   parent's, its fixed lengths would never be checked. Not reproduced.
-- **A label known only at run time is not checked inside a body.** [read]
-  Violates DIM-3 and KIND-4. A command's own signature is checked at entry
-  (the nexus and daemon read its `dims` constraint), but `main w = roll w
-  src`, with `roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real`
-  and `w` and `src` given to `main`, leaves `w` inferred and is accepted;
-  no check stops `w = 12` against a 10-element `src`. Needs a quantifier
-  for a variable a run-time value observes.
+- **A result length is unified, not observed.** [read, 2026-10-31]
+  Violates DIM-10. Only labels are held fixed in solving
+  (Typecheck/Internal.hs, `gammaObserved`); a Nat that only a sourced
+  function's result has, such as `m` in stdlib table's `sliceRows ::
+  start@Int -> end@Int -> Table n r -> Table m r` or a `filter` returning
+  `Vector m a`, is still solved by unification, so `addCol "x" v5
+  (sliceRows 0 2 t)` sets `m = 5` with no check. A Table's row count is not
+  among the lengths taken as run-time values either (Frontend/Typecheck.hs
+  `runTimeVars`). Measured 2026-10-31 by holding them fixed (and adding
+  Table rows): 11 golden and stdlib files are rejected (tables-py-ops,
+  tables-r, specialize-open-kind-key, the four stdlib table test modules,
+  ...), each because POLY-7 reads a Nat only a signature's result has
+  (`sliced :: Int -> Table m r`) as "for every m", which a body returning a
+  made length cannot meet. Open question for a ruling (gap in POLY-7 and
+  DIM-10): does such a variable mean "some m the function chooses", which
+  is how a sourced function's result must be read?
+- [read, 2026-10-31] Gap in DIM-10: a `f@Str` or `l@[Str]` label whose
+  argument is not a literal leaves its variable to the Str and Rec solvers
+  (`getCol name t`), which may solve it; only Int labels are observed.
+- [read, 2026-10-31] DIM-10 rejects a call whose label argument is a
+  computed expression even when it is arithmetic over literals and labels
+  (`roll (w + 1) src`), and a label call through a lambda or let-bound
+  alias (`let r = roll in r 3 src`): label values are read only from a
+  direct call of a monomorphic sourced or declared function
+  (Frontend/Typecheck.hs resolveNatLabels).
 - [read] Gap in DIM-3: a command's dimension relations are checked only on
   its arguments at entry. A value a pool reads from a file (`@open`, a load
   function) is not checked.
 - [read] Gap in DIM-3: a `@default` that violates a command's dimension
   relations is reported only when the command runs with it, not at
   compile time.
-- [read] Gap in DIM-3: an exported term without a signature gets no entry
-  check. The contract is read from the signature (CodeGenerator/
-  DimContract.hs dimConstraints); the command's own type has its Nat
-  variables erased, so `g xs ys = dot xs ys` exported unsigned accepts
-  `[1,2] [3]`.
-- [read] Gap in DIM-3: a length expression whose variables no other slot
-  binds is not checked. `f :: Vector (n + 1) Int -> Int` accepts an empty
-  vector (`n = -1`); checking it needs the expression solved for its one
-  unbound variable. A header (DIM-9) is solved only when its expression is
-  `v + c` or `v - c` (CodeGenerator/DimContract.hs `invert`), so a header
-  `m * 2` leaves `m` unchecked.
+- [read] Gap in DIM-3: a length or header expression whose variables no
+  other slot binds is checked when it is `v + c`, `v - c`, `c - v` or
+  `c * v` (solved, CodeGenerator/DimContract.hs `invert`) or any other
+  expression of `+` and `*` in one such variable (searched). One with
+  another `-` or `/` around the variable (`Vector (n * n - 1) Int`), or with
+  two unbound variables (`Vector (2 * n * m) Int` needs an even length), is
+  not checked.
 - [read] Cost of the DIM-3 entry check (cost ruled out of scope for now,
   2026-10-30): on a remote command the nexus decodes in full each argument
   a relation reads (data/rust/morloc-nexus/src/dispatch.rs

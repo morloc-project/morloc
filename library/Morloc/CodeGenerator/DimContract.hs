@@ -24,6 +24,7 @@ module Morloc.CodeGenerator.DimContract
 
 import qualified Data.List as List
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Morloc.BaseTypes as MBT
 import Morloc.CodeGenerator.Namespace
@@ -60,34 +61,36 @@ dimConstraints i = do
   scope <- MM.gets stateGeneralTypedefs
   headers <- MM.gets stateNewtypeHeaders
   name <- MM.metaName i
+  inferred <- MM.gets (Map.lookup i . stateExportTypes)
+  -- An export without a signature is held to the type inferred for it.
   let ets = case GMap.lookup i sgmap of
-        GMapJust (Monomorphic (TermTypes (Just et) _ _)) -> [et]
-        GMapJust (Polymorphic _ _ et _) -> [et]
-        _ -> []
+        GMapJust (Monomorphic (TermTypes (Just et) _ _)) -> [(etype et, enatLabels et)]
+        GMapJust (Polymorphic _ _ et _) -> [(etype et, enatLabels et)]
+        _ -> [(t, Map.empty) | Just t <- [inferred]]
   return $ concatMap (contract scope headers (maybe "" unEVar name)) ets
 
-contract :: Scope -> Headers -> Text -> EType -> [Text]
-contract scope headers name et
-  | null conds && null eqs && not (any shared vars) = []
+contract :: Scope -> Headers -> Text -> (TypeU, Map.Map TVar Int) -> [Text]
+contract scope headers name (et, labels)
+  | null conds && null eqs && null multiples && null roots && not (any shared vars) = []
   | otherwise =
       [ jsonObj
           [ ("type", jsonStr "dims")
           , ( "value"
             , jsonObj
-                [ ("vars", jsonArr [jsonStr (display v) | v <- vars])
+                [ ("vars", jsonArr [jsonStr (display v) | v <- allVars])
                 , ("bind", jsonArr (map bindJson binds))
-                , ("conds", jsonArr (map condJson conds <> map eqJson eqs))
+                , ("conds", jsonArr (map rootJson roots <> map condJson conds <> map eqJson eqs <> map multipleJson multiples))
                 , ("name", jsonStr name)
                 ]
             )
           ]
       ]
   where
-    t = snd (unqualify (etype et))
+    t = snd (unqualify et)
     args = case t of
       FunU as _ -> as
       _ -> []
-    labelArgs = Map.fromList [(k, v) | (v, k) <- Map.toList (enatLabels et)]
+    labelArgs = Map.fromList [(k, v) | (v, k) <- Map.toList labels]
     binds =
       concat
         [ case Map.lookup k labelArgs of
@@ -96,37 +99,86 @@ contract scope headers name et
         | (k, a) <- zip [0 ..] args
         ]
     vars = List.nub (map bindVar binds)
-    -- A header that holds an expression gives that expression a value, so
-    -- it stands for the expression wherever the expression occurs.
-    known = [(e, NS.NatVar v) | Binding v _ _ True (Just e) (Just _) <- binds, not (NS.isGround e)]
-    -- A variable such a header alone determines, as `v + c` or `v - c`,
-    -- is solved from it.
-    solved =
+    -- A length or header that is an expression with a variable no slot
+    -- binds gives that expression a value, so it stands for the expression
+    -- wherever the expression occurs.
+    known =
       List.nub
-        [ (v, x')
-        | (e, x) <- known
-        , Just (v, x') <- [invert e x]
-        , v `notElem` vars
+        [ (e, NS.NatVar v)
+        | Binding v _ _ _ (Just e) _ <- binds
+        , not (NS.isGround e)
+        , not (all (`elem` vars) (NS.freeNatVars e))
         ]
-    invert e x = case e of
-      NS.NatAdd (NS.NatVar v) (NS.NatLit c) -> Just (v, NS.NatSub x (NS.NatLit c))
-      NS.NatAdd (NS.NatLit c) (NS.NatVar v) -> Just (v, NS.NatSub x (NS.NatLit c))
-      NS.NatSub (NS.NatVar v) (NS.NatLit c) -> Just (v, NS.NatAdd x (NS.NatLit c))
+    -- A variable an expression alone determines is solved from the first
+    -- such expression: `v + c`, `c - v`, `v - c` and `c * v` (which also
+    -- needs a multiple of `c`) directly, and any other of `+` and `*` in
+    -- that variable by the checker's search, since such an expression
+    -- never decreases as the variable grows. Any other expression in the
+    -- variable is then checked as an equation.
+    -- Each solution can leave another expression with one variable to
+    -- solve, so they are taken one at a time until none is left.
+    chosen = choose vars known
+    choose given pending =
+      case [ (v, w, e, inv)
+           | (e, x@(NS.NatVar w)) <- pending
+           , [v] <- [filter (`notElem` given) (Set.toList (NS.freeNatVars e))]
+           , let inv = invert v e x
+           , isJust inv || monotone e
+           ] of
+        [] -> []
+        (c@(v, w, _, _) : _) -> c : choose (v : given) [k | k@(_, x) <- pending, x /= NS.NatVar w]
+    solved = [(v, x') | (v, _, _, Just (x', _)) <- chosen]
+    -- The variables of the expressions a variable was solved from: their
+    -- equations hold by construction.
+    solving = [w | (_, w, _, _) <- chosen]
+    roots = [(w, v, e) | (v, w, e, Nothing) <- chosen]
+    monotone e = case e of
+      NS.NatAdd a b -> monotone a && monotone b
+      NS.NatMul a b -> monotone a && monotone b
+      NS.NatLit c -> c >= 0
+      NS.NatVar _ -> True
+      _ -> False
+    allVars = vars <> List.nub [v | (_, v, _) <- roots]
+    multiples = [(w, c, e) | (_, w, e, Just (_, Just c)) <- chosen]
+    -- `e = x` solved for `v`, its one variable no slot binds, when `e` is
+    -- linear in `v`; a division by a number needs `x` a multiple of it.
+    invert v e x = case e of
+      NS.NatVar u | u == v -> Just (x, Nothing)
+      NS.NatAdd a b
+        | has a && not (has b) -> fst' (invert v a (NS.NatSub x b))
+        | has b && not (has a) -> fst' (invert v b (NS.NatSub x a))
+      NS.NatSub a b
+        | has a && not (has b) -> fst' (invert v a (NS.NatAdd x b))
+        | has b && not (has a) -> fst' (invert v b (NS.NatSub a x))
+      NS.NatMul (NS.NatLit c) a | c > 0, NS.NatVar u <- a, u == v -> Just (NS.NatDiv x (NS.NatLit c), Just c)
+      NS.NatMul a (NS.NatLit c) | c > 0, NS.NatVar u <- a, u == v -> Just (NS.NatDiv x (NS.NatLit c), Just c)
       _ -> Nothing
-    sub e = case lookup e known of
+      where
+        has y = Set.member v (NS.freeNatVars y)
+        -- A multiple is checked only of a length or header itself.
+        fst' r = case r of
+          Just (y, Nothing) -> Just (y, Nothing)
+          _ -> Nothing
+    sub = subExcept Nothing
+    -- The substitution for the binding of `self`, which its own
+    -- expression does not stand for.
+    subExcept self e = case lookup e [k | k@(_, x) <- known, Just x /= self] of
       Just x -> x
       Nothing -> case e of
-        NS.NatVar v | Just x <- lookup v solved -> x
-        NS.NatAdd a b -> NS.NatAdd (sub a) (sub b)
-        NS.NatSub a b -> NS.NatSub (sub a) (sub b)
-        NS.NatMul a b -> NS.NatMul (sub a) (sub b)
-        NS.NatDiv a b -> NS.NatDiv (sub a) (sub b)
+        NS.NatVar v | Just x <- lookup v solved -> subExcept self x
+        NS.NatAdd a b -> NS.NatAdd (subExcept self a) (subExcept self b)
+        NS.NatSub a b -> NS.NatSub (subExcept self a) (subExcept self b)
+        NS.NatMul a b -> NS.NatMul (subExcept self a) (subExcept self b)
+        NS.NatDiv a b -> NS.NatDiv (subExcept self a) (subExcept self b)
         _ -> e
     eqs =
       List.nub
         [ (v, e')
-        | Binding v _ _ _ (Just e) _ <- binds
-        , let e' = sub e
+        | b <- binds
+        , Just e <- [bindEq b]
+        , let v = bindVar b
+        , v `notElem` solving
+        , let e' = subExcept (Just (NS.NatVar v)) e
         , e' /= NS.NatVar v
         , bound e'
         ]
@@ -136,11 +188,11 @@ contract scope headers name et
         [ NS.NatVar v
         | Binding v _ _ True eq (Just _) <- binds
         , maybe True (not . NS.isGround) eq
-        , Map.notMember v (enatLabels et)
+        , Map.notMember v labels
         ]
-    index v = maybe 0 id (List.elemIndex v vars)
+    index v = maybe 0 id (List.elemIndex v allVars)
     shared v = length [() | b <- binds, bindVar b == v] > 1
-    bound e = all (`elem` vars) (NS.freeNatVars e)
+    bound e = all (`elem` allVars) (NS.freeNatVars e)
     -- Each Nat position whose variables the input binds and which is not
     -- non-negative for every value, and each divisor in one.
     conds =
@@ -177,6 +229,20 @@ contract scope headers name et
         , ("expr", jsonArr (map jsonStr (postfix e)))
         , ("text", jsonStr (natText e))
         ]
+    rootJson (w, v, e) =
+      jsonObj
+        [ ("len", jsonInt (index w))
+        , ("root", jsonInt (index v))
+        , ("expr", jsonArr (map jsonStr (postfix (subExcept (Just (NS.NatVar w)) e))))
+        , ("text", jsonStr (natText e))
+        ]
+    multipleJson (w, c, e) =
+      jsonObj
+        [ ("len", jsonInt (index w))
+        , ("multiple", jsonInt (fromIntegral c))
+        , ("expr", jsonArr [])
+        , ("text", jsonStr (natText e))
+        ]
     condJson e =
       jsonObj
         [ ("expr", jsonArr (map jsonStr (postfix e)))
@@ -206,9 +272,10 @@ display :: TVar -> Text
 display (TV v) = MT.takeWhile (/= '@') v
 
 -- | A Nat expression as a user would write it: the terms of a sum with a
--- positive coefficient first, then those subtracted, then the constant.
+-- positive coefficient first, then those subtracted, then the constant;
+-- with no positive term, the constant comes first.
 natText :: NS.NatExpr -> Text
-natText e0 = case vars' <> negs <> lit of
+natText e0 = case vars' <> (if null vars' then lit <> negs else negs <> lit) of
   [] -> "0"
   ((s, x) : rest) -> (if s then x else "-" <> x) <> mconcat [(if s' then " + " else " - ") <> y | (s', y) <- rest]
   where

@@ -1,6 +1,6 @@
 -- Spec DIM-9: a newtype's header labels give its dimensions run-time
 -- values, which a command's input is checked against.
-module main (mm, sq, two, sq2, drop1)
+module main (mm, sq, two, sq2, drop1, tied)
 
 import root-py
 import vector-py
@@ -29,3 +29,7 @@ sq2 x = first x
 --' First entry of a matrix with at least one row
 drop1 :: M (m + 1) n Int -> Int
 drop1 x = first x
+
+--' First entry of a matrix with one row more than a vector's length
+tied :: M (m + 1) n Int -> Vector m Int -> Int
+tied x v = first x

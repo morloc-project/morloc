@@ -76,7 +76,9 @@ typecheckFrontend path code = do
     _ -> return ()
   (checks, exports) <- restructure dag >>= treeify
   F.validate (validationTrees checks) (validationInstances checks)
-  specialize checks exports
+  es <- specialize checks exports
+  MM.modify' (\s -> s {stateExportTypes = Map.fromList [(i, t) | AnnoS (Idx i t) _ _ <- es]})
+  return es
 
 -- | Check general types and also resolve implementations
 typecheck ::

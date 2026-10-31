@@ -156,7 +156,7 @@ emptyGamma =
     , gammaSolved = Map.empty, gammaDeferred = [], gammaDeferredAt = Map.empty, gammaKindSubs = Map.empty
     , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
     , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
-    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidRows = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaScoped = Map.empty, gammaUnfolded = Set.empty
+    , gammaRigid = Nothing, gammaRigidNats = Set.empty, gammaRigidRows = Set.empty, gammaRigidDomain = [], gammaLabelVars = Map.empty, gammaObserved = Set.empty, gammaScoped = Map.empty, gammaUnfolded = Set.empty
     }
 
 -- | The type constructor at the head of a type, if it has one.
@@ -1460,10 +1460,11 @@ subtype _ t1 t2 g
           -- Int variables stand for every value and are never solved
           -- (POLY-7); an equation only they could satisfy is deferred.
           -- A size is an opaque natural: never solved, and restored in
-          -- any solution that names it.
+          -- any solution that names it. A label whose value is known only
+          -- at run time is never solved either (DIM-3).
           fixed opaque = case gammaRigid g of
-            Just _ -> gammaRigidNats g <> opaque
-            Nothing -> opaque
+            Just _ -> gammaRigidNats g <> gammaObserved g <> opaque
+            Nothing -> gammaObserved g <> opaque
       in case (natPositionExpr t1', natPositionExpr t2') of
            (Just ne1, Just ne2) ->
              let opaque = opaqueNats ne1 <> opaqueNats ne2

@@ -44,6 +44,27 @@ all:
 	./nexus rows t.csv '[5]' >> obs.txt $(RUN) >> obs.txt
 	./nexus three t3.csv >> obs.txt $(RUN) >> obs.txt
 	./nexus three t.csv >> obs.txt $(RUN) >> obs.txt
+	echo "--- a length that alone determines its variable ---" >> obs.txt
+	./nexus plus1 '[1]' >> obs.txt $(RUN) >> obs.txt
+	./nexus plus1 '[]' >> obs.txt $(RUN) >> obs.txt
+	./nexus twice '[1,2]' >> obs.txt $(RUN) >> obs.txt
+	./nexus twice '[1,2,3]' >> obs.txt $(RUN) >> obs.txt
+	./nexus square '[1,2,3,4]' '[7,8]' >> obs.txt $(RUN) >> obs.txt
+	./nexus square '[1,2,3]' '[7,8]' >> obs.txt $(RUN) >> obs.txt
+	./nexus square '[1,2,3,4]' '[7]' >> obs.txt $(RUN) >> obs.txt
+	./nexus square1 '[1,2,3,4]' >> obs.txt $(RUN) >> obs.txt
+	./nexus square1 '[1,2,3]' >> obs.txt $(RUN) >> obs.txt
+	./nexus pair1 '[1]' '[1,2]' >> obs.txt $(RUN) >> obs.txt
+	./nexus pair1 '[1]' '[1,2,3]' >> obs.txt $(RUN) >> obs.txt
+	./nexus down '[1,2]' >> obs.txt $(RUN) >> obs.txt
+	./nexus down '[1,2,3,4,5,6,7,8,9,10,11]' >> obs.txt $(RUN) >> obs.txt
+	echo "--- an export without a signature ---" >> obs.txt
+	./nexus unsigned '[1,2]' '[3,4]' >> obs.txt $(RUN) >> obs.txt
+	./nexus unsigned '[1,2]' '[3]' >> obs.txt $(RUN) >> obs.txt
+	echo "--- a relation the body needs, stated in the signature ---" >> obs.txt
+	./nexus stated 2 '[1,2,3]' >> obs.txt $(RUN) >> obs.txt
+	./nexus stated 4 '[1,2,3]' >> obs.txt $(RUN) >> obs.txt
+	./nexus stated 5 '[1,2,3]' >> obs.txt $(RUN) >> obs.txt
 
 clean:
 	rm -rf nexus pools *err __pycache__ *.mpk *.vs

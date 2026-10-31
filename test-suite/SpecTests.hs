@@ -1156,6 +1156,33 @@ dimTests =
         newtype M (m :: Nat) a = ({k = m@Int}, Vector m a)
         f :: M 2 Int -> Int
         |]
+    , rejectUser
+        "spec-dim-10-1"
+        [r|
+        module main (h)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Int -> Vector (n - w + 1) Int
+        total :: Vector k Int -> Int
+        h w src = total (roll w src)
+        |]
+    , accept
+        "spec-dim-10-2"
+        [r|
+        module main (h)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Int -> Vector (n - w + 1) Int
+        total :: Vector k Int -> Int
+        h :: w@Int -> Vector (m + w - 1) Int -> Int
+        h w src = total (roll w src)
+        |]
+    , rejectUser
+        "spec-dim-10-3"
+        [r|
+        module main (h)
+        newtype Vector (n :: Nat) a = List a
+        roll :: w@Int -> Vector n Int -> Vector (n - w + 1) Int
+        h w src = roll w src
+        |]
     ]
 
 teqTests :: TestTree

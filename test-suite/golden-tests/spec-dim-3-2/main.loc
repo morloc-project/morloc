@@ -1,4 +1,4 @@
-module main (mk, same, dot, roll, rep, pairLen, firstOpt, opts, deep, grow, named, rows, three)
+module main (mk, same, dot, roll, rep, pairLen, firstOpt, opts, deep, grow, named, rows, three, plus1, twice, square, square1, pair1, down, unsigned, stated)
 
 import root-py
 import vector-py
@@ -17,6 +17,12 @@ source Py from "src.py"
   , "named" as named
   , "rows" as rows
   , "three" as three
+  , "plus1" as plus1
+  , "twice" as twice
+  , "square" as square
+  , "square1" as square1
+  , "pair1" as pair1
+  , "down" as down
   )
 
 --' Count up from zero
@@ -97,3 +103,28 @@ three ::
   --' @form table
   Table 3 {x = Int} ->
   Int
+
+--' Length of a vector with at least one element
+plus1 :: Vector (n + 1) Int -> Int
+
+--' Length of a vector of even length
+twice :: Vector (2 * n) Int -> Int
+
+--' Length of a vector whose length is a square
+square :: Vector (n * n) Int -> Vector n Int -> Int
+
+--' Length of a vector whose length is a square, on its own
+square1 :: Vector (n * n) Int -> Int
+
+--' Lengths of two vectors one apart
+pair1 :: Vector (n + 1) Int -> Vector (n + 2) Int -> Int
+
+--' Length of a vector of at most ten elements
+down :: Vector (10 - n) Int -> Int
+
+-- An export without a signature is held to its inferred type.
+unsigned xs ys = dot xs ys
+
+--' Window sums totalled, for an input at least as long as the window
+stated :: w@Int -> Vector (m + w - 1) Int -> Int
+stated w src = dot (roll w src) (roll w src)

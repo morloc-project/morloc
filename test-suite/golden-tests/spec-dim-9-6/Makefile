@@ -20,6 +20,8 @@ all:
 	./nexus drop1 '[[2,2],[1,2,3,4]]' >> obs.txt $(RUN) >> obs.txt
 	./nexus drop1 '[[5,3],[1,2,3]]' >> obs.txt $(RUN) >> obs.txt
 	./nexus drop1 '[[0,3],[]]' >> obs.txt $(RUN) >> obs.txt
+	./nexus tied '[[2,1],[1,2]]' '[5]' >> obs.txt $(RUN) >> obs.txt
+	./nexus tied '[[3,1],[1,2,3]]' '[5]' >> obs.txt $(RUN) >> obs.txt
 
 clean:
 	rm -rf nexus pools *err __pycache__
