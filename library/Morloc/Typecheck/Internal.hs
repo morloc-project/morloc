@@ -81,6 +81,9 @@ module Morloc.Typecheck.Internal
   , structuralAliasHead
   , typeUChildren
   , mapTypeUChildren
+  , unlabelU
+  , headerLabels
+  , labelsIn
   , traverseTypeUChildren
   , isSubtypeOf2
   , isSubtypeOfOpen
@@ -1746,6 +1749,28 @@ traverseTypeUChildren f t = case t of
   LitU (LSet es) -> LitU . LSet <$> traverse f es
   LabeledU v x -> LabeledU v <$> f x
   _ -> pure t
+
+-- | The labels a newtype's representation holds in header position
+-- (DIM-9), reached through tuple fields alone: each label, the fields that
+-- reach it, and the type it labels.
+headerLabels :: TypeU -> [(TVar, [Int], TypeU)]
+headerLabels = go []
+  where
+    go path t = case t of
+      LabeledU l x -> [(l, path, x)]
+      AppU (VarU h) ts
+        | h == BT.tuple (length ts) -> concat [go (path <> [j]) x | (j, x) <- zip [0 ..] ts]
+      _ -> []
+
+-- | Every label in a type.
+labelsIn :: TypeU -> [TVar]
+labelsIn (LabeledU l x) = l : labelsIn x
+labelsIn t = concatMap labelsIn (typeUChildren t)
+
+-- | A type with its labels removed.
+unlabelU :: TypeU -> TypeU
+unlabelU (LabeledU _ t) = unlabelU t
+unlabelU t = mapTypeUChildren unlabelU t
 
 mapTypeUChildren :: (TypeU -> TypeU) -> TypeU -> TypeU
 mapTypeUChildren f = runIdentity . traverseTypeUChildren (Identity . f)

@@ -1099,6 +1099,63 @@ dimTests =
         f :: Vector 1 Int -> Int
         f x = h x
         |]
+    , accept
+        "spec-dim-9-1"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        newtype M (m :: Nat) (n :: Nat) a = ((m@Int, n@I64), Vector (m * n) a)
+        h :: M m k Int -> M k n Int -> Int
+        f :: M 2 3 Int -> M 3 1 Int -> Int
+        f x y = h x y
+        |]
+    , reject
+        "spec-dim-9-2"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        f :: (n@Int, Int) -> Vector n Int
+        |]
+    , reject
+        "spec-dim-9-3"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        newtype M (m :: Nat) a = ((k@Int, Int), Vector m a)
+        f :: M 2 Int -> Int
+        |]
+    , reject
+        "spec-dim-9-4"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        newtype M (m :: Nat) a = ((m@Real, Int), Vector m a)
+        f :: M 2 Int -> Int
+        |]
+    , reject
+        "spec-dim-9-5"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        newtype M (m :: Nat) a = ([m@Int], Vector m a)
+        f :: M 2 Int -> Int
+        |]
+    , reject
+        "spec-dim-9-7"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        newtype M (m :: Nat) a = ((m@Int, m@Int), Vector m a)
+        f :: M 2 Int -> Int
+        |]
+    , reject
+        "spec-dim-9-8"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        newtype M (m :: Nat) a = ({k = m@Int}, Vector m a)
+        f :: M 2 Int -> Int
+        |]
     ]
 
 teqTests :: TestTree

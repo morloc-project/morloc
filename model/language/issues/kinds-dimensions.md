@@ -4,10 +4,9 @@
   Input decoders check a schema's fixed array lengths (the JSON reader,
   the msgpack decoder, voidstar landing and in-place checks), but a value a
   sourced function returns is never checked (each binding writes it with
-  no length check, and a by-reference packet is not walked), and a `Matrix`'s `(Int, Int)` header in its wire form is
-  not compared with `m` and `n` (golden nat-dim-runtime-remote accepts a
-  header that contradicts the type when the data length fits). A Table's
-  row count never reaches the schema (Serial.hs:317).
+  no length check, and a by-reference packet is not walked). A header
+  (DIM-9) and a Table's row count are checked only by the command-entry
+  check, not by the decoders (no schema carries them).
 - **A label known only at run time is not checked inside a body.** [read]
   Violates DIM-3 and KIND-4. A command's own signature is checked at entry
   (the nexus and daemon read its `dims` constraint), but `main w = roll w
@@ -17,7 +16,7 @@
   for a variable a run-time value observes.
 - [read] Gap in DIM-3: a command's dimension relations are checked only on
   its arguments at entry. A value a pool reads from a file (`@open`, a load
-  function) and a `Matrix` header are not checked.
+  function) is not checked.
 - [read] Gap in DIM-3: a `@default` that violates a command's dimension
   relations is reported only when the command runs with it, not at
   compile time.
@@ -29,7 +28,9 @@
 - [read] Gap in DIM-3: a length expression whose variables no other slot
   binds is not checked. `f :: Vector (n + 1) Int -> Int` accepts an empty
   vector (`n = -1`); checking it needs the expression solved for its one
-  unbound variable.
+  unbound variable. A header (DIM-9) is solved only when its expression is
+  `v + c` or `v - c` (CodeGenerator/DimContract.hs `invert`), so a header
+  `m * 2` leaves `m` unchecked.
 - [read] Cost of the DIM-3 entry check (cost ruled out of scope for now,
   2026-10-30): on a remote command the nexus decodes in full each argument
   a relation reads (data/rust/morloc-nexus/src/dispatch.rs

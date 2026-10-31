@@ -36,6 +36,7 @@ import Morloc.Frontend.Token hiding (startPos)
 import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
+import Morloc.Typecheck.Internal (headerLabels, labelsIn, unlabelU)
 import System.FilePath (combine, dropExtension, makeRelative, splitDirectories, takeDirectory)
 
 --------------------------------------------------------------------
@@ -3498,6 +3499,23 @@ newtypeDerives v vs t ders = or <$> mapM one ders
                   ++ intercalate ", " ["'" ++ T.unpack (unTVar p) ++ "'" | p <- ps]
     one _ = return False
 
+-- | A label in a newtype's representation (DIM-9) sits on an integer
+-- reached through tuple fields alone and names a Nat parameter, each at
+-- most once.
+checkHeaderLabels :: Pos -> TVar -> [Either (TVar, Kind) TypeU] -> TypeU -> D ()
+checkHeaderLabels pos (TV n) vs t = do
+  let hs = headerLabels t
+      placed = [l | (l, _, _) <- hs]
+  mapM_ (\l -> bad l "is not in a tuple field") [l | l <- labelsIn t, l `notElem` placed]
+  mapM_ (\l -> bad l ("names no '(" ++ T.unpack (unTVar l) ++ " :: Nat)' parameter")) [l | l <- placed, l `notElem` natParams]
+  mapM_ (\(l, _, _) -> bad l "is not on an integer type") [h | h@(_, _, x) <- hs, not (integral x)]
+  mapM_ (\l -> bad l "labels more than one field") (take 1 [l | (l, k) <- zip placed [0 :: Int ..], l `elem` drop (k + 1) placed])
+  where
+    natParams = [p | Left (p, KindNat) <- vs]
+    bad l msg = dfail pos ("in the representation of '" ++ T.unpack n ++ "': the label '" ++ T.unpack (unTVar l) ++ "@' " ++ msg)
+    integral (VarU x) = x `elem` [BT.int, BT.i8, BT.i16, BT.i32, BT.i64, BT.uint, BT.u8, BT.u16, BT.u32, BT.u64]
+    integral _ = False
+
 notDerivable :: Located -> Text -> D a
 notDerivable tok cls =
   dfail (locPos tok) ("cannot derive '" ++ T.unpack cls ++ "'; a declaration may derive Eq, Ord, Show and Hashable, and a newtype also Packable")
@@ -3557,9 +3575,10 @@ desugarTypeDef sp (CstNewtype (v, vs) t ders) = do
   docs <- lookupDocsAt (startPos sp)
   docVars <- if null docs then return defaultValue else docLinesD (startPos sp) docs
   rejectDeclDirectivesHere (startPos sp) "a newtype declaration" docVars
+  checkHeaderLabels (startPos sp) v vs t
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefNewtype))
-  withPack <- newtypeDerives v vs t ders
-  derived <- derivedPackable sp v vs t withPack
+  withPack <- newtypeDerives v vs (unlabelU t) ders
+  derived <- derivedPackable sp v vs (unlabelU t) withPack
   wire <- derivedWireInstances sp v vs ders
   return (e : derived <> wire)
 desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do

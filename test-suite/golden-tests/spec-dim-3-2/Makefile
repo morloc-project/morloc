@@ -39,6 +39,11 @@ all:
 	echo "--- a label on a string ---" >> obs.txt
 	./nexus named x '[1,2]' '[3,4]' >> obs.txt $(RUN) >> obs.txt
 	./nexus named x '[1,2]' '[3]' >> obs.txt $(RUN) >> obs.txt
+	echo "--- a table's rows ---" >> obs.txt
+	./nexus rows t.csv '[5,6]' >> obs.txt $(RUN) >> obs.txt
+	./nexus rows t.csv '[5]' >> obs.txt $(RUN) >> obs.txt
+	./nexus three t3.csv >> obs.txt $(RUN) >> obs.txt
+	./nexus three t.csv >> obs.txt $(RUN) >> obs.txt
 
 clean:
 	rm -rf nexus pools *err __pycache__ *.mpk *.vs

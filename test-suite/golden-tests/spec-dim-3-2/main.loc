@@ -1,7 +1,8 @@
-module main (mk, same, dot, roll, rep, pairLen, firstOpt, opts, deep, grow, named)
+module main (mk, same, dot, roll, rep, pairLen, firstOpt, opts, deep, grow, named, rows, three)
 
 import root-py
 import vector-py
+import table-py
 
 source Py from "src.py"
   ( "mk" as mk
@@ -14,6 +15,8 @@ source Py from "src.py"
   , "deep" as deep
   , "grow" as grow
   , "named" as named
+  , "rows" as rows
+  , "three" as three
   )
 
 --' Count up from zero
@@ -78,3 +81,19 @@ type Name = Str
 
 --' Dot product under a name
 named :: s@Name -> Vector n Int -> Vector n Int -> Int
+
+--' Count a table's rows against a vector's length
+rows ::
+  --' Table
+  --' @form table
+  Table n {x = Int} ->
+  --' One value per row
+  Vector n Int ->
+  Int
+
+--' Count a table of three rows
+three ::
+  --' Table
+  --' @form table
+  Table 3 {x = Int} ->
+  Int

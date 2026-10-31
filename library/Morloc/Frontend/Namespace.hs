@@ -88,6 +88,7 @@ copyState oldIdx newIdx = do
       , stateTypeclasses = stateTypeclasses s
       , stateConcreteTypedefs = stateConcreteTypedefs s
       , stateGeneralTypedefs = stateGeneralTypedefs s
+      , stateNewtypeHeaders = stateNewtypeHeaders s
       , stateSources = updateGMap (stateSources s)
       , stateAnnotations = updateMap (stateAnnotations s)
       , stateOutfile = stateOutfile s

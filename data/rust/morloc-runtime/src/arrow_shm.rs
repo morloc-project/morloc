@@ -57,6 +57,11 @@ pub const ARROW_FLAG_DICTIONARY_ORDERED: i64 = 1;
 pub const ARROW_FLAG_NULLABLE: i64 = 2;
 pub const ARROW_FLAG_MAP_KEYS_SORTED: i64 = 4;
 
+const _: () = assert!(
+    ARROW_SHM_MAGIC == morloc_runtime_types::dims::TABLE_MAGIC
+        && std::mem::offset_of!(ArrowShmHeader, n_rows) == morloc_runtime_types::dims::TABLE_ROWS_AT
+);
+
 pub fn align_up(x: usize) -> usize {
     (x + ARROW_BUFFER_ALIGN - 1) & !(ARROW_BUFFER_ALIGN - 1)
 }

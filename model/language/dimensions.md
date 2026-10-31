@@ -114,4 +114,24 @@ The first parameter of `Vector n a` is the length of its list, and the
 a length only where its representation passes it to one of these (`Matrix
 m n a`, whose wire form holds `Vector (m * n) a`); otherwise it is a
 phantom (NEWT-3), and no run-time check reads it. Every DIM-3 check of a
-length follows this rule.
+length follows this rule. A header label (DIM-9) also gives a run-time
+value to the Nat it names.
+
+### DIM-9 A label in a newtype's representation names a header
+Intent: ruled 2026-10-31
+Tests: spec-dim-9-1, spec-dim-9-2, spec-dim-9-3, spec-dim-9-4, spec-dim-9-5, spec-dim-9-6, spec-dim-9-7, spec-dim-9-8
+Code: conforms 2026-10-31
+
+In `newtype N vs = T`, a label `v@I` on an integer type `I`, at a position
+of `T` reached through tuple fields alone, says that the integer there is
+the value of the Nat parameter `v`. `newtype Matrix (m :: Nat) (n :: Nat)
+a = ((m@Int, n@Int), Vector (m * n) a)` ties its header to its dimensions:
+the DIM-3 checks read `m` and `n` from the header, check each against the
+type and against every other slot that shares it, require each to be
+non-negative (KIND-4), and check the data's length against `m * n`. The
+label adds nothing else: `T` with its labels removed is the
+representation (NEWT-9). A label anywhere else inside a type is an error:
+one under a list, optional or record, one naming no `(v :: Nat)` parameter, one on
+a type other than `Int`, `I8` to `I64`, `UInt` and `U8` to `U64`, two
+naming the same parameter, and one inside a signature's argument rather
+than on the whole argument (POLY-3).

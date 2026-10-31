@@ -27,3 +27,9 @@ def grow(a, b):
 
 def named(s, a, b):
     return sum(x * y for x, y in zip(a, b))
+
+def rows(t, v):
+    return len(v)
+
+def three(t):
+    return t.num_rows

@@ -5,6 +5,11 @@
 use crate::schema::{Schema, SerialType};
 use crate::shm_types::{Array, RelPtr, RELNULL};
 
+/// The magic number heading a table's Arrow block, and where in the block
+/// its row count is; the runtime asserts both against its block header.
+pub const TABLE_MAGIC: u32 = 0xA770DA7A;
+pub const TABLE_ROWS_AT: usize = 16;
+
 /// Resolves a relative pointer to the address it names.
 pub type Resolve<'a> = &'a dyn Fn(RelPtr) -> Result<*const u8, String>;
 
@@ -23,6 +28,9 @@ struct Bind {
     arg: usize,
     path: Vec<Step>,
     value: bool,
+    /// For a newtype header's value (DIM-9): what the value is, and the
+    /// number of trailing path steps inside the header.
+    header: Option<(String, usize)>,
 }
 
 struct Cond {
@@ -84,11 +92,23 @@ impl Dims {
             if var >= vars.len() {
                 return Err(bad());
             }
+            let header = match b.get("header") {
+                None => None,
+                Some(h) => {
+                    let desc = h.get("desc").and_then(|x| x.as_str()).ok_or_else(bad)?;
+                    let depth = h.get("depth").and_then(|x| x.as_u64()).ok_or_else(bad)? as usize;
+                    if depth > path.len() {
+                        return Err(bad());
+                    }
+                    Some((desc.to_string(), depth))
+                }
+            };
             bind.push(Bind {
                 var,
                 arg: num("arg")?,
                 path,
                 value: b.get("of").and_then(|x| x.as_str()) == Some("value"),
+                header,
             });
         }
         let mut conds = Vec::new();
@@ -149,7 +169,20 @@ impl Dims {
                 _ => None,
             };
             for (v, at) in out {
-                let what = if b.value { "the value of" } else { "the length of" };
+                let (what, at) = match &b.header {
+                    Some((desc, depth)) => {
+                        let mut at = at.as_str();
+                        for _ in 0..*depth {
+                            at = at.rsplit_once('.').map_or(at, |(a, _)| a);
+                        }
+                        (format!("the value of {} of", desc), at.to_string())
+                    }
+                    None if b.value => ("the value of".to_string(), at),
+                    None if b.path.is_empty() && schema.serial_type == SerialType::Table => {
+                        ("the row count of".to_string(), at)
+                    }
+                    None => ("the length of".to_string(), at),
+                };
                 let (name, said) = label(b.arg, field);
                 let loc = format!("{} {}{}", what, name, at.strip_prefix(said.as_str()).unwrap_or(&at));
                 let var = self.var_name(b.var);
@@ -192,31 +225,28 @@ impl Dims {
                         Eval::Overflow => " (its value is out of range)",
                         _ => "",
                     };
+                    let with = if given.is_empty() { String::new() } else { format!(", with {}", given.join(", ")) };
                     return Err(DimsError::Input(match (length, r) {
+                        (Some((l, loc)), Eval::Value(_)) if used.is_empty() => format!(
+                            "dimension mismatch in '{}': {} is {}, but its type requires {}",
+                            self.name, loc, l, c.text
+                        ),
                         (Some((l, loc)), Eval::Value(x)) => format!(
-                            "dimension mismatch in '{}': {} is {}, but its type requires {} = {}, with {}",
+                            "dimension mismatch in '{}': {} is {}, but its type requires {} = {}{}",
                             self.name,
                             loc,
                             l,
                             c.text,
                             x,
-                            given.join(", ")
+                            with
                         ),
                         (Some((l, loc)), _) => format!(
-                            "dimension mismatch in '{}': {} is {}, but its type requires {}{}, with {}",
-                            self.name,
-                            loc,
-                            l,
-                            c.text,
-                            why,
-                            given.join(", ")
+                            "dimension mismatch in '{}': {} is {}, but its type requires {}{}{}",
+                            self.name, loc, l, c.text, why, with
                         ),
                         _ => format!(
-                            "dimension mismatch in '{}': {} >= 0 does not hold{}, with {}",
-                            self.name,
-                            c.text,
-                            why,
-                            given.join(", ")
+                            "dimension mismatch in '{}': {} >= 0 does not hold{}{}",
+                            self.name, c.text, why, with
                         ),
                     }));
                 }
@@ -282,6 +312,12 @@ unsafe fn read(
     let mismatch = || DimsError::Internal("internal error: a dims path does not match its argument's schema".into());
     match path.split_first() {
         None if value => out.push((int_value(ptr, s, resolve)?, at)),
+        None if s.serial_type == SerialType::Table => {
+            if std::ptr::read_unaligned(ptr as *const u32) != TABLE_MAGIC {
+                return Err(DimsError::Internal("internal error: a table argument is not an Arrow block".into()));
+            }
+            out.push((std::ptr::read_unaligned(ptr.add(TABLE_ROWS_AT) as *const u64) as i128, at));
+        }
         None => {
             if s.serial_type != SerialType::Array {
                 return Err(mismatch());
@@ -468,5 +504,63 @@ mod tests {
         assert!(e.contains("the length of #0[1] is 1"), "{e}");
         let empty = Array { size: 0, data: RELNULL };
         assert!(run(&d, &[(&empty as *const Array as *const u8, &s)]).is_ok());
+    }
+
+    #[test]
+    fn a_header_value_binds_its_dimension() {
+        // f :: M m k Real -> M k n Real -> Int, with M's header ((m@Int, n@Int), ...)
+        #[repr(C)]
+        struct Hdr {
+            m: i64,
+            n: i64,
+            xs: Array,
+        }
+        let d = dims(r##"{"vars":["m","k","#m * k"],"bind":[
+            {"var":0,"arg":0,"path":["f0","f0"],"of":"value","header":{"desc":"m in the M header","depth":2}},
+            {"var":1,"arg":0,"path":["f0","f1"],"of":"value","header":{"desc":"n in the M header","depth":2}},
+            {"var":2,"arg":0,"path":["f1"],"of":"length"},
+            {"var":1,"arg":1,"path":["f0","f0"],"of":"value","header":{"desc":"m in the M header","depth":2}}],
+            "conds":[{"expr":["v0"],"text":"m"},{"len":2,"expr":["v0","v1","*"],"text":"m * k"}]}"##);
+        let s = parse_schema("t2t2i8i8ai8").unwrap();
+        let (xs, _k) = array(&[1, 2, 3, 4, 5, 6]);
+        let a = Hdr { m: 2, n: 3, xs };
+        let (ys, _k2) = array(&[1, 2, 3]);
+        let b = Hdr { m: 3, n: 1, xs: ys };
+        let c = Hdr { m: 2, n: 1, xs: Array { size: 2, data: b.xs.data } };
+        let p = |x: &Hdr| x as *const Hdr as *const u8;
+        assert!(run(&d, &[(p(&a), &s), (p(&b), &s)]).is_ok());
+        let e = run(&d, &[(p(&a), &s), (p(&c), &s)]).unwrap_err();
+        assert!(e.contains("k is 3 from the value of n in the M header of #0, but the value of m in the M header of #1 is 2"), "{e}");
+        let short = Hdr { m: 2, n: 3, xs: Array { size: 5, data: a.xs.data } };
+        let e = run(&d, &[(p(&short), &s), (p(&b), &s)]).unwrap_err();
+        assert!(e.contains("the length of #0.1 is 5, but its type requires m * k = 6"), "{e}");
+        let neg = Hdr { m: -1, n: 3, xs: Array { size: 0, data: RELNULL } };
+        let e = run(&d, &[(p(&neg), &s), (p(&b), &s)]).unwrap_err();
+        assert!(e.contains("m >= 0 does not hold, with m = -1"), "{e}");
+    }
+
+    #[test]
+    fn a_literal_dimension_names_only_itself() {
+        let d = dims(r##"{"vars":["#2"],"bind":[{"var":0,"arg":0,"path":[],"of":"value"}],"conds":[{"len":0,"expr":["2"],"text":"2"}]}"##);
+        let s = parse_schema("i8").unwrap();
+        let w: i64 = 3;
+        let e = run(&d, &[(&w as *const i64 as *const u8, &s)]).unwrap_err();
+        assert!(e.ends_with("the value of #0 is 3, but its type requires 2"), "{e}");
+    }
+
+    #[test]
+    fn a_table_binds_its_row_count() {
+        let d = dims(r#"{"vars":["n"],"bind":[{"var":0,"arg":0,"path":[],"of":"length"},{"var":0,"arg":1,"path":[],"of":"length"}],"conds":[]}"#);
+        let t = parse_schema("T").unwrap();
+        let s = parse_schema("ai8").unwrap();
+        let mut block = [0u8; 64];
+        block[..4].copy_from_slice(&TABLE_MAGIC.to_ne_bytes());
+        block[TABLE_ROWS_AT..TABLE_ROWS_AT + 8].copy_from_slice(&2u64.to_ne_bytes());
+        let (a, _ka) = array(&[1, 2]);
+        let (b, _kb) = array(&[1]);
+        let p = |x: &Array| x as *const Array as *const u8;
+        assert!(run(&d, &[(block.as_ptr(), &t), (p(&a), &s)]).is_ok());
+        let e = run(&d, &[(block.as_ptr(), &t), (p(&b), &s)]).unwrap_err();
+        assert!(e.contains("n is 2 from the row count of #0, but the length of #1 is 1"), "{e}");
     }
 }

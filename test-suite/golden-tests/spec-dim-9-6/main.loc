@@ -1,0 +1,31 @@
+-- Spec DIM-9: a newtype's header labels give its dimensions run-time
+-- values, which a command's input is checked against.
+module main (mm, sq, two, sq2, drop1)
+
+import root-py
+import vector-py
+
+--' A matrix whose header holds its dimensions
+newtype M (m :: Nat) (n :: Nat) a = ((m@Int, n@Int), Vector (m * n) a)
+
+source Py from "src.py" ("mm", "sq", "first")
+
+--' Multiply two matrices
+mm :: M m k Int -> M k n Int -> M m n Int
+
+--' Size of a square matrix
+sq :: M m m Int -> Int
+
+first :: M m n Int -> Int
+
+--' First entry of a 2 by 3 matrix
+two :: M 2 3 Int -> Int
+two x = first x
+
+--' First entry of a 2 by 2 matrix
+sq2 :: M 2 2 Int -> Int
+sq2 x = first x
+
+--' First entry of a matrix with at least one row
+drop1 :: M (m + 1) n Int -> Int
+drop1 x = first x

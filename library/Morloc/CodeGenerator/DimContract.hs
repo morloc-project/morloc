@@ -47,6 +47,9 @@ data Binding = Binding
   , bindPath :: [Step]
   , bindValue :: Bool
   , bindEq :: Maybe NS.NatExpr
+  , bindHeader :: Maybe (Text, Int)
+  -- ^ For a newtype header's value: what it is, and how many trailing
+  -- steps of the path lie inside the header
   }
 
 -- | The @dims@ constraint of the command exported as the term at @i@, if
@@ -55,15 +58,16 @@ dimConstraints :: Int -> MorlocMonad [Text]
 dimConstraints i = do
   sgmap <- MM.gets stateSignatures
   scope <- MM.gets stateGeneralTypedefs
+  headers <- MM.gets stateNewtypeHeaders
   name <- MM.metaName i
   let ets = case GMap.lookup i sgmap of
         GMapJust (Monomorphic (TermTypes (Just et) _ _)) -> [et]
         GMapJust (Polymorphic _ _ et _) -> [et]
         _ -> []
-  return $ concatMap (contract scope (maybe "" unEVar name)) ets
+  return $ concatMap (contract scope headers (maybe "" unEVar name)) ets
 
-contract :: Scope -> Text -> EType -> [Text]
-contract scope name et
+contract :: Scope -> Headers -> Text -> EType -> [Text]
+contract scope headers name et
   | null conds && null eqs && not (any shared vars) = []
   | otherwise =
       [ jsonObj
@@ -87,12 +91,53 @@ contract scope name et
     binds =
       concat
         [ case Map.lookup k labelArgs of
-            Just v | intLabel a -> [Binding v k [] True Nothing]
-            _ -> lengths scope k [] a
+            Just v | intLabel a -> [Binding v k [] True Nothing Nothing]
+            _ -> lengths scope headers k [] a
         | (k, a) <- zip [0 ..] args
         ]
     vars = List.nub (map bindVar binds)
-    eqs = List.nub [(bindVar b, e) | b <- binds, Just e <- [bindEq b], bound e]
+    -- A header that holds an expression gives that expression a value, so
+    -- it stands for the expression wherever the expression occurs.
+    known = [(e, NS.NatVar v) | Binding v _ _ True (Just e) (Just _) <- binds, not (NS.isGround e)]
+    -- A variable such a header alone determines, as `v + c` or `v - c`,
+    -- is solved from it.
+    solved =
+      List.nub
+        [ (v, x')
+        | (e, x) <- known
+        , Just (v, x') <- [invert e x]
+        , v `notElem` vars
+        ]
+    invert e x = case e of
+      NS.NatAdd (NS.NatVar v) (NS.NatLit c) -> Just (v, NS.NatSub x (NS.NatLit c))
+      NS.NatAdd (NS.NatLit c) (NS.NatVar v) -> Just (v, NS.NatSub x (NS.NatLit c))
+      NS.NatSub (NS.NatVar v) (NS.NatLit c) -> Just (v, NS.NatAdd x (NS.NatLit c))
+      _ -> Nothing
+    sub e = case lookup e known of
+      Just x -> x
+      Nothing -> case e of
+        NS.NatVar v | Just x <- lookup v solved -> x
+        NS.NatAdd a b -> NS.NatAdd (sub a) (sub b)
+        NS.NatSub a b -> NS.NatSub (sub a) (sub b)
+        NS.NatMul a b -> NS.NatMul (sub a) (sub b)
+        NS.NatDiv a b -> NS.NatDiv (sub a) (sub b)
+        _ -> e
+    eqs =
+      List.nub
+        [ (v, e')
+        | Binding v _ _ _ (Just e) _ <- binds
+        , let e' = sub e
+        , e' /= NS.NatVar v
+        , bound e'
+        ]
+    -- A header value is a Nat, which is never negative (KIND-4).
+    headerNats =
+      List.nub
+        [ NS.NatVar v
+        | Binding v _ _ True eq (Just _) <- binds
+        , maybe True (not . NS.isGround) eq
+        , Map.notMember v (enatLabels et)
+        ]
     index v = maybe 0 id (List.elemIndex v vars)
     shared v = length [() | b <- binds, bindVar b == v] > 1
     bound e = all (`elem` vars) (NS.freeNatVars e)
@@ -102,12 +147,14 @@ contract scope name et
       List.nub
         [ e
         | p <- natPositions t
-        , Just e0 <- [typeUToNatExpr p]
+        , Just e0 <- [sub <$> typeUToNatExpr p]
         , e <- e0 : divisors e0
         , bound e
         , not (NS.isGround e)
         , not (NS.nonNegativeEverywhere e)
         ]
+        <> headerNats
+        <> map snd solved
     divisors e = case e of
       NS.NatDiv a b -> NS.NatSub b (NS.NatLit 1) : divisors a <> divisors b
       NS.NatAdd a b -> divisors a <> divisors b
@@ -115,12 +162,15 @@ contract scope name et
       NS.NatMul a b -> divisors a <> divisors b
       _ -> []
     bindJson b =
-      jsonObj
+      jsonObj $
         [ ("var", jsonInt (index (bindVar b)))
         , ("arg", jsonInt (bindArg b))
         , ("path", jsonArr (map (jsonStr . stepText) (bindPath b)))
         , ("of", jsonStr (if bindValue b then "value" else "length"))
         ]
+          <> [ ("header", jsonObj [("desc", jsonStr d), ("depth", jsonInt n)])
+             | Just (d, n) <- [bindHeader b]
+             ]
     eqJson (v, e) =
       jsonObj
         [ ("len", jsonInt (index v))
@@ -130,7 +180,7 @@ contract scope name et
     condJson e =
       jsonObj
         [ ("expr", jsonArr (map jsonStr (postfix e)))
-        , ("text", jsonStr (natText e))
+        , ("text", jsonStr (maybe (natText e) display (lookup e [(x, v) | (v, x) <- solved])))
         ]
     postfix e = case e of
       NS.NatLit n -> [MT.show' n]
@@ -150,6 +200,8 @@ contract scope name et
         Just a' | a' /= a -> integral (fuel - 1) a'
         _ -> False
 
+-- | A variable as the signature writes it. One that stands for an
+-- expression is named for it.
 display :: TVar -> Text
 display (TV v) = MT.takeWhile (/= '@') v
 
@@ -177,26 +229,66 @@ natText e0 = case vars' <> negs <> lit of
       _ -> [(s, e)]
     atom e = case e of
       NS.NatLit n -> MT.show' n
-      NS.NatVar v -> display v
-      NS.IntVar v -> display v
+      NS.NatVar v -> named v
+      NS.IntVar v -> named v
       NS.NatMul a b -> factor a <> " * " <> factor b
       NS.NatDiv a b -> factor a <> " / " <> factor b
       _ -> natText e
+    named v = case MT.uncons (display v) of
+      Just ('#', x) -> "(" <> x <> ")"
+      _ -> display v
     factor e = case e of
       NS.NatAdd _ _ -> "(" <> natText e <> ")"
       NS.NatSub _ _ -> "(" <> natText e <> ")"
       NS.NatLit n | n < 0 -> "(" <> MT.show' n <> ")"
       _ -> atom e
 
+-- | A newtype's representation at the given arguments, with each header
+-- label's description, the tuple fields that reach it and the argument it
+-- holds.
+representation :: Scope -> Headers -> TypeU -> Maybe ([(Text, [Int], TypeU)], TypeU)
+representation scope headers t = case t of
+  AppU (VarU v) ts -> at v ts
+  VarU v -> at v []
+  _ -> Nothing
+  where
+    at v ts = case Map.lookup v scope of
+      Just ((ps, body, _, _, TypedefNewtype) : _)
+        | NamU{} <- body -> Nothing
+        | params <- [p | Left (p, _) <- ps]
+        , length params == length ps
+        , length params == length ts ->
+            let args = zip params ts
+                hs =
+                  [ (display l <> " in the " <> unTVar v <> " header", fields, n)
+                  | (l, fields) <- Map.findWithDefault [] v headers
+                  , Just n <- [lookup l args]
+                  ]
+             in Just (hs, TE.parsubAll args body)
+      _ -> Nothing
+
+-- | The variable a length or value that is an expression binds. One that
+-- is a number gets a variable of its own slot, so that two slots holding
+-- the same number are not taken to share it.
+synthetic :: Int -> [Step] -> NS.NatExpr -> TVar
+synthetic k path e
+  | NS.isGround e = TV ("#" <> natText e <> "@" <> MT.show' k <> mconcat (map stepText path))
+  | otherwise = TV ("#" <> natText e)
+
 stepText :: Step -> Text
 stepText Each = "*"
 stepText (Field k) = "f" <> MT.show' k
 stepText Some = "?"
 
--- | The Vector lengths a value of a type binds, by path from the value.
--- A literal length is left to the decoders.
-lengths :: Scope -> Int -> [Step] -> TypeU -> [Binding]
-lengths scope = go (8 :: Int)
+-- | Each newtype's header labels: the parameter and the tuple fields that
+-- reach its integer.
+type Headers = Map.Map TVar [(TVar, [Int])]
+
+-- | The Vector lengths and header values a value of a type binds, by path
+-- from the value. A literal length is left to the decoders; a literal
+-- header value is not, since no decoder reads it.
+lengths :: Scope -> Headers -> Int -> [Step] -> TypeU -> [Binding]
+lengths scope headers = go (8 :: Int)
   where
     go 0 _ _ _ = []
     go fuel k path t = case t of
@@ -208,14 +300,32 @@ lengths scope = go (8 :: Int)
         | v == MBT.list -> go fuel k (path <> [Each]) a
       AppU (VarU v) ts
         | v == MBT.tuple (length ts) -> concat [go fuel k (path <> [Field j]) x | (j, x) <- zip [0 ..] ts]
+      AppU (VarU v) [n, _]
+        | MBT.isTableVar v -> rowsOf k path n
       NamU _ _ _ rs -> concat [go fuel k (path <> [Field j]) x | (j, (_, x)) <- zip [0 ..] rs]
       OptionalU a -> go fuel k (path <> [Some]) a
-      _ -> case TE.evaluateStep scope t of
-        Just t' | t' /= t -> go (fuel - 1) k path t'
-        _ -> []
+      _ -> case representation scope headers t of
+        Just (hs, body) -> concatMap (header k path) hs <> go (fuel - 1) k path body
+        Nothing -> case TE.evaluateStep scope t of
+          Just t' | t' /= t -> go (fuel - 1) k path t'
+          _ -> []
+    header k path (desc, fields, n) =
+      let at = path <> map Field fields
+          h = Just (desc, length fields)
+       in case n of
+            NatVarU v -> [Binding v k at True Nothing h]
+            IntVarU v -> [Binding v k at True Nothing h]
+            _ -> case typeUToNatExpr n of
+              Just e -> [Binding (synthetic k at e) k at True (Just e) h]
+              Nothing -> []
+    -- No decoder reads a table's row count, so a literal one is checked
+    -- here too.
+    rowsOf k path n = case typeUToNatExpr n of
+      Just e | NS.isGround e -> [Binding (synthetic k path e) k path False (Just e) Nothing]
+      _ -> lengthOf k path n
     lengthOf k path n = case n of
-      NatVarU v -> [Binding v k path False Nothing]
-      IntVarU v -> [Binding v k path False Nothing]
+      NatVarU v -> [Binding v k path False Nothing Nothing]
+      IntVarU v -> [Binding v k path False Nothing Nothing]
       _ -> case typeUToNatExpr n of
-        Just e | not (NS.isGround e) -> [Binding (TV ("#" <> natText e)) k path False (Just e)]
+        Just e | not (NS.isGround e) -> [Binding (synthetic k path e) k path False (Just e) Nothing]
         _ -> []

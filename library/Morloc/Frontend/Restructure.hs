@@ -37,7 +37,7 @@ import qualified Morloc.TypeEval as TE
 import Morloc.Frontend.Rename (renameLocals)
 import Morloc.Frontend.TerminalActions (synthesizeTerminalActions)
 import Morloc.Frontend.TypeNames (isReservedTypeName, resolveTypeNames)
-import Morloc.Typecheck.Internal (expandStructuralAliases, expandTransparentAliases, isSubtypeOf2, mapTypeUChildren, structuralAliasHead, structuralAliasesIn, traverseTypeUChildren, typeUChildren, typeUToNatExpr, natPositions, natPositionExpr)
+import Morloc.Typecheck.Internal (expandStructuralAliases, expandTransparentAliases, isSubtypeOf2, mapTypeUChildren, unlabelU, headerLabels, structuralAliasHead, structuralAliasesIn, traverseTypeUChildren, typeUChildren, typeUToNatExpr, natPositions, natPositionExpr)
 import qualified Morloc.Typecheck.NatDecide as ND
 import qualified Morloc.Typecheck.NatSolver as NS
 
@@ -1203,7 +1203,17 @@ declaration and one table serves every module.
 collectTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTypes fullDag = do
   let found = map (AST.findTypedefs . fst) (Map.elems fullDag)
-      general = Map.unionsWith mergeEntries (map fst found)
+      labeled = Map.unionsWith mergeEntries (map fst found)
+      -- A newtype's header labels (DIM-9) are kept apart from its
+      -- representation, which is an ordinary type.
+      general = Map.map (map (\(ps, b, d, term, k) -> (ps, unlabelU b, d, term, k))) labeled
+      headers =
+        Map.fromList
+          [ (v, hs)
+          | (v, (_, b, _, _, TypedefNewtype) : _) <- Map.toList labeled
+          , let hs = [(l, fields) | (l, fields, _) <- headerLabels b]
+          , not (null hs)
+          ]
       concrete =
         Map.map (completeRecords general) $
           Map.unionsWith (Map.unionWith mergeEntries) (map snd found)
@@ -1211,7 +1221,7 @@ collectTypes fullDag = do
   checkConflictingForms modules Nothing general
   checkReservedDeclarations general
   mapM_ (\(lang, sc) -> checkConflictingForms modules (Just lang) sc) (Map.toList concrete)
-  MM.modify' $ \s -> s {stateGeneralTypedefs = general, stateConcreteTypedefs = concrete}
+  MM.modify' $ \s -> s {stateGeneralTypedefs = general, stateConcreteTypedefs = concrete, stateNewtypeHeaders = headers}
 
 -- | Two declarations of one type, or two forms of it in one language, that
 -- apply to the same parameters but say different things.
@@ -2286,7 +2296,7 @@ rename sourceName localAlias = f
     f (SizeU c) = SizeU (f c)
     f (ProjectFieldU r fld) = ProjectFieldU (f r) (f fld)
     f (RecSingletonU k v) = RecSingletonU (f k) (f v)
-    f (LabeledU n t) = LabeledU n (f t)
+    f (LabeledU n t) = LabeledU (if n == sourceName then localAlias else n) (f t)
 
 -- | Every type declaration in a module, with its index.
 typedefsIn :: ExprI -> [(Int, ExprTypeE)]

@@ -156,6 +156,9 @@ data MorlocState = MorlocState
   , stateTypeclasses :: Map.Map EVar Instance
   , stateConcreteTypedefs :: Map Lang Scope
   , stateGeneralTypedefs :: Scope
+  , stateNewtypeHeaders :: Map.Map TVar [(TVar, [Int])]
+  -- ^ Each newtype's header labels (DIM-9): the parameter and the tuple
+  -- fields that reach its integer in the representation.
   , stateSources :: GMap Int MVar [Source]
   , stateAnnotations :: Map Int TypeU
   , stateOutfile :: Maybe Path
@@ -1068,6 +1071,7 @@ instance Defaultable MorlocState where
       , stateTypeclasses = Map.empty
       , stateConcreteTypedefs = Map.empty
       , stateGeneralTypedefs = Map.empty
+      , stateNewtypeHeaders = Map.empty
       , stateSources = GMap Map.empty Map.empty
       , stateAnnotations = Map.empty
       , stateOutfile = Nothing

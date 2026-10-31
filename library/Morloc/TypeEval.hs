@@ -22,6 +22,8 @@ module Morloc.TypeEval
   , reduceTypeLeaves
   , expandHeadOnly
   , expandWireParent
+  , parsub
+  , parsubAll
   , wireParentRoot
   , expandLeavesOnce
   , Whnf
@@ -121,7 +123,7 @@ pairEval cscope gscope =
           | length paramKinds == length ts ->
               let params = [p | Left (p, _) <- paramKinds]
               in if length params == length ts
-                   then Just (foldr parsub body (zip params ts))
+                   then Just (parsubAll (zip params ts) body)
                    else Nothing
           | otherwise -> Nothing
       _ -> Nothing
@@ -339,7 +341,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                 -- general name into generated code.
                 (Just (vs, newType, _, isTerminal, kind)) ->
                   let bnd' = if isSelfRecursive v newType then Set.insert v bnd else bnd
-                      substituted = foldr parsub newType (zip vs ts)
+                      substituted = parsubAll (zip vs ts) newType
                   in case (kind, isTerminal) of
                        -- Newtype and primitive are nominal for typeclass
                        -- instance lookup, but a record newtype's per-language
@@ -620,6 +622,14 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       length ts1 == length ts2
         && all (\(x, y) -> either (const True) (\ytype -> isSubtypeOf ytype x) y) (zip ts1 ts2)
 
+-- | Replace several type variables at once: an argument that names another
+-- parameter is not substituted again.
+parsubAll :: [(TVar, TypeU)] -> TypeU -> TypeU
+parsubAll pairs body =
+  let fresh = [TV ("#" <> MT.show' j) | j <- [0 .. length pairs - 1]]
+      named = foldr parsub body (zip (map fst pairs) (map VarU fresh))
+   in foldr parsub named (zip fresh (map snd pairs))
+
 -- Replace a type variable with an expression. For example:
 -- parsub ("a", "Int") -> "Map a b" -> "Map Int b"
 parsub :: (TVar, TypeU) -> TypeU -> TypeU
@@ -722,7 +732,7 @@ expandHeadWith stopAt scope (AppU (VarU v) args) =
       | length paramKinds == length args ->
           let params = [p | Left (p, _) <- paramKinds]
           in if length params == length args
-             then Just $ foldr parsub body (zip params args)
+             then Just $ parsubAll (zip params args) body
              else Nothing
       | length args < length paramKinds ->
           -- Kind-based realignment: bind type-kinded params from `args`
@@ -734,10 +744,11 @@ expandHeadWith stopAt scope (AppU (VarU v) args) =
               natParams  = [p | Left (p, KindNat)  <- paramKinds]
               strParams  = [p | Left (p, KindStr)  <- paramKinds]
           in if length typeParams == length args
-             then Just $ foldr parsub body
+             then Just $ parsubAll
                     (zip typeParams args
                       ++ [(p, NatVoidU) | p <- natParams]
                       ++ [(p, StrVoidU) | p <- strParams])
+                    body
              else Nothing
       | otherwise -> Nothing
     _ -> Nothing

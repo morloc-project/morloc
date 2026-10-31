@@ -346,10 +346,10 @@ typedef_decl :: { Loc CstExpr }
       { at $1 (CTypE (CstTypeAlias Nothing (TV (getName $3), $4) ($7, False))) }
   | 'type' '(' UPPER typedef_params ')'
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
-  | 'newtype' UPPER typedef_params '=' type opt_deriving
-      { at $1 (CTypE (CstNewtype (TV (getName $2), $3) $5 $6)) }
-  | 'newtype' '(' UPPER typedef_params ')' '=' type opt_deriving
-      { at $1 (CTypE (CstNewtype (TV (getName $3), $4) $7 $8)) }
+  | 'newtype' UPPER typedef_params '=' rep_open type opt_deriving
+      {% repClose >> return (at $1 (CTypE (CstNewtype (TV (getName $2), $3) $6 $7))) }
+  | 'newtype' '(' UPPER typedef_params ')' '=' rep_open type opt_deriving
+      {% repClose >> return (at $1 (CTypE (CstNewtype (TV (getName $3), $4) $8 $9))) }
   -- @newtype X@ / @newtype (X a)@ with no RHS is a built-in primitive
   -- declaration: nominal, opaque, owns its per-language forms. Reuses
   -- 'CstTypeAliasForward' since the desugar is identical
@@ -402,6 +402,11 @@ nam_constructor :: { (Text, Bool, [TypeU]) }
 -- Each constructor carries the `=` or `|` that introduces it: a docstring
 -- written above a constructor sits above that token, which is where the
 -- lexer attaches it.
+-- Labels in a newtype's representation are kept (DIM-9); anywhere else
+-- inside a type they are an error.
+rep_open :: { () }
+  : {- empty -}                       {% State.modify (\st -> st { psInRep = True }) }
+
 -- The classes a declaration derives (DERIV-1).
 opt_deriving :: { [(Located, Text)] }
   : {- empty -}                       { [] }
@@ -992,7 +997,7 @@ atom_type :: { TypeU }
   -- out the ambiguity.
   | '[' tick_list1 ']'        { ListLitU $2 }
   | UPPER                     { VarU (TV (getName $1)) }
-  | LOWER '@' non_fun_type   { $3 }
+  | LOWER '@' non_fun_type   {% nestedLabel $1 $3 }
   | LOWER                     { VarU (TV (getName $1)) }
   | STRING                    { StrLitU (getString $1) }
   | INTEGER                   { NatLitU (getInt $1) }
@@ -1141,11 +1146,12 @@ data PState = PState
   , psModuleEpilogues :: ![[Text]] -- epilogue blocks
   , psStreamElems :: !(Map.Map EVar TypeU) -- @collect batch type per command
   , psOwnModule :: !Bool -- the program's own module, not one of an installed package
+  , psInRep :: !Bool -- inside a newtype's representation
   }
   deriving (Show)
 
 emptyPState :: PState
-emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] [] Map.empty True
+emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] [] Map.empty True False
 
 type P a = State.StateT PState (Either ParseError) a
 
@@ -1329,6 +1335,23 @@ checkRecordTypeKeys _ = go Set.empty
           State.lift (Left (ParseError (locPos tok)
             ("duplicate field in record type declaration: " ++ T.unpack (unKey k)) [] srcLines))
       | otherwise = go (Set.insert k seen) rest
+
+repClose :: P ()
+repClose = State.modify (\st -> st { psInRep = False })
+
+-- | A label inside a type: in a newtype's representation it names the
+-- parameter that integer holds (DIM-9); elsewhere only a whole signature
+-- argument may carry one (POLY-3).
+nestedLabel :: Located -> TypeU -> P TypeU
+nestedLabel tok t = do
+  inRep <- State.gets psInRep
+  if inRep
+    then return (LabeledU (TV (getName tok)) t)
+    else do
+      srcLines <- State.gets psSourceLines
+      let msg = "the label '" ++ T.unpack (getName tok) ++ "@' binds nothing here: a label names a whole"
+             ++ " argument of a signature, or a header field of a newtype's representation"
+      State.lift (Left (ParseError (locPos tok) msg [] srcLines))
 
 -- Reject `{x :: T}` inside type-level record literals. The literal form
 -- binds fields with `=` (mirroring morloc's term-level `{x = 3}` record

@@ -425,7 +425,7 @@ data TypeU
   -- 'opArity'.
   | OpU OpTag [TypeU]
   | LitU TyLit
-  | LabeledU TVar TypeU -- ^ m@Int; stripped in desugar
+  | LabeledU TVar TypeU -- ^ m@Int: a signature argument's label, or a newtype header's (DIM-9)
   deriving (Show, Ord, Eq)
 
 pattern NatVarU :: TVar -> TypeU
