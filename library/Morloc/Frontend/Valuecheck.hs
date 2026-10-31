@@ -3,27 +3,14 @@
 
 {- |
 Module      : Morloc.Frontend.Valuecheck
-Description : Detect contradictions between alternative implementations
+Description : Check recursive bindings and alternative implementations
 Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
-When a term has multiple implementations (e.g. a declaration and a source,
-or multiple sources), this module checks that they are not provably
-contradictory. For instance, two constant expressions that return different
-literal values for the same type are flagged as errors.
-
-Note: pure scope/binding-sanity checks (the same name appearing twice in
-the same syntactic scope) live earlier in the pipeline because the
-relevant syntactic shape is gone by the time the value-checker runs:
-
-  * duplicate fields in a record literal/type   -> Parser.y  checkRecordKeys
-  * duplicate where-bindings, where vs. param   -> Desugar.hs checkWhereScope
-
-Let-blocks are intentionally NOT checked here: morloc's let is non-recursive
-sequential, so `let { x = 1 ; x = 2 } in x` is the layout-free spelling of
-`let x = 1 in let x = 2 in x` and shadows to 2. Where-clauses are
-order-invariant, so duplicates there are real ambiguity errors.
+Two checks on typed trees: that no binding needs its own value (BIND-7), and
+that the alternative implementations of a term are not provably
+contradictory, such as two constants of one type with different values.
 -}
 module Morloc.Frontend.Valuecheck (valuecheck, checkPair, checkRecursion) where
 
@@ -47,12 +34,8 @@ toE (AnnoS g _ (LamS vs e)) = LamP g vs (toE e)
 toE (AnnoS g _ (LstS es)) = LstP g (map toE es)
 toE (AnnoS g _ (TupS es)) = TupP g (map toE es)
 toE (AnnoS g _ (NamS rs)) = NamP g (map (second toE) rs)
--- For numeric literals carry the literal's own source index (si) rather
--- than the wrapping AnnoS index. When a top-level term body is inlined
--- via Treeify.termExprToAnnoS, the wrapping AnnoS holds the export
--- reference's index (gi0), so the literal's own position would otherwise
--- be lost. Using si here lets value-conflict diagnostics caret on the
--- literal that triggered the conflict, not on the export list.
+-- A literal carries its own source index: an inlined term's wrapping index
+-- is that of the reference to it.
 toE (AnnoS (Idx _ t) _ (RealS si x)) = LitP (Idx si t) (MNum x)
 toE (AnnoS (Idx _ t) _ (IntS si x)) = LitP (Idx si t) (MInt x)
 toE (AnnoS g _ (LogS x)) = LitP g (MLog x)
@@ -239,34 +222,20 @@ data Member g = Member
   , memberIncoming :: Demand -> Demand
   }
 
--- Check the harmony of typed implementations.
---
--- A naive implementation of this functions (and mine is naive as heck) will run
--- in exponential time in some cases. This can be avoided with a touch of
--- memoization. But I will leave that as an exercise for my user (PR's accepted).
+-- | Reject provably contradictory implementations. Exponential in the
+-- worst case; nothing is memoized.
 valuecheck :: AnnoS (Indexed Type) Many Int -> MorlocMonad (AnnoS (Indexed Type) Many Int)
 valuecheck e0 = do
   check (toE e0)
   return e0
 
--- walk through a tree
--- find the sets of implementations in VarS expressions
--- compare all pairs of implementations
 check :: E -> MorlocMonad ()
 check (VarP (Idx i _) _ es) = do
-  -- Alternatives reach the same VarP via polymorphic resolution
-  -- (Typecheck.resolveInstances). When the call site's general type is
-  -- unbound (e.g. a top-level export `sum :: Integral a => [a] -> a`),
-  -- every matching instance survives into a single Many. Only one instance
-  -- is selected per runtime call site, so alternatives with distinct ground
-  -- types are never co-applicable and must not be value-equated.
+  -- alternatives of different types are instances, never both applied
   let typedPairs = [(a, b) | (a, b) <- pairwise es, typeOfE a == typeOfE b]
   mapM_ (uncurry (checkPair i)) typedPairs
-  -- recurse into each alternative so nested VarPs (e.g. non-export terms
-  -- referenced from the export, or where-bound terms) are also checked
   mapM_ check es
   where
-    -- find all unique pairs
     pairwise :: [a] -> [(a, a)]
     pairwise xs = [(xs !! i', xs !! j') | i' <- [0 .. length xs - 1], j' <- [0 .. length xs - 1], j' > i']
 check (AppP _ e es) = mapM_ check (e : es)
@@ -281,69 +250,36 @@ check (CoerceP _ _ e) = check e
 check (IntrinsicP _ _ es) = mapM_ check es
 check _ = return ()
 
--- check for contradictions in one pair of expressions
+-- | Contradictions between two implementations. Lambdas are compared
+-- after their parameters are renamed alike, so @\x y -> (x, y)@ agrees with
+-- @\a b -> (a, b)@ and not with @\a b -> (b, a)@.
 checkPair :: Int -> E -> E -> MorlocMonad ()
--- These pass
---   foo x y = (x, y)
---   foo a b = (a, b)
---
--- These do not except in the special case where a=b
---   foo x y = (x, y)
---   foo a b = (b, a)
---
--- This requires unified names (see LamS case)
 checkPair i e1@(BndP _ v1) e2@(BndP _ v2)
   | v1 == v2 = return ()
   | otherwise = valueError i e1 e2 "Non-equivalent variable patterns"
 checkPair _ e1@(VarP g v1 es1) (VarP _ v2 es2)
-  -- Same term, so es1 and es2 must be identical
   | v1 == v2 = check e1
-  -- If the terms are different all the instances must still be the same and the
-  -- type will be the same, so we can simply combine them.
   | otherwise = check (VarP g v1 (es1 <> es2))
--- evaluate all applications of lambdas
---  case #1 remove an empty lambda
+-- beta-reduce an applied lambda, one argument at a time
 checkPair i (AppP _ (LamP _ [] e1) _) e2 = checkPair i e1 e2
---  case #2 remove an empty application
 checkPair i (AppP _ f@LamP {} []) e2 = checkPair i f e2
---  case #3 substitute on argument into the lambda
 checkPair i (AppP g1 (LamP g2 (v : vs) e1) (x : xs)) e2 =
   let e1' = substituteExpr v x e1
    in checkPair i (AppP g1 (LamP g2 vs e1') xs) e2
---  if there is an applied lambda on the other side, reverse
 checkPair i e1 e2@(AppP _ LamP {} _) = checkPair i e2 e1
--- No value checking is possible between applications
---
--- If the function applied is not the same in both terms, we can
--- say nothing without source analysis.
---
--- If the function applied is the same, we also need more information to make
--- any decisions. For example:
---
--- foo x y
--- foo y x
---
--- Here the applied function is the same, but the arguments are switched. But
--- whether this causes the terms to be non-equal depends on whether the function
--- commutes. For example, `add x y` == `add y x`.
---
--- In general, a function is free to map different inputs to the same
--- output. Without further information, we can conclude nothing. So all
--- applications must pass.
+-- Two applications are never contradictory: a function may map different
+-- arguments to one value (@add x y@ and @add y x@).
 checkPair _ AppP {} AppP {} = return ()
 checkPair i e1@AppP {} e2 = valueError i e1 e2 "Cannot check beyond source boundary"
 checkPair i e1 e2@AppP {} = valueError i e1 e2 "Cannot check beyond source boundary"
--- Not that SrcP is something sourced, not necessarily a function, it may be a
--- constant.
+-- A source may be a constant as well as a function.
 checkPair i (SrcP (Idx _ t) src1) (SrcP _ src2) = compareForeignFunctions i t src1 src2
 checkPair i e1@(SrcP _ _) e2 = checkPair i e2 e1
 checkPair i e1 e2@SrcP {}
   | isSimple e1 = valueError i e1 e2 "Cannot compare source value to non-source expression"
   | otherwise = return ()
   where
-    -- For VarP, simplicity of ANY instance indicates an error
     isSimple (VarP _ _ es) = any isSimple es
-    -- For other expressions, only simplicity of ALL elements is error
     isSimple (LstP _ es) = all isSimple es
     isSimple (TupP _ es) = all isSimple es
     isSimple (NamP _ (map snd -> es)) = all isSimple es
@@ -361,27 +297,6 @@ checkPair i e1 e2@SrcP {}
     isSimple (CoerceP _ _ e) = isSimple e
     isSimple (IntrinsicP _ _ _) = False
 
--- reduce empty lambdas
---
--- -- initial
--- \x y -> (\a b -> bar b a) x y
--- \k j -> bar k j
---
--- -- unify terms
--- \m n -> (\a b -> bar b a) m n
--- \m n -> bar m n
---
--- -- apply if not in canonical form
--- \m n -> bar n m
--- \m n -> bar m n
---
--- -- compare calls
--- bar
--- bar -- same function is called, so their arguments must be the comparable
---
--- -- compare arguments, starting with first
--- n
--- m
 checkPair i (LamP _ vs1 s1) (LamP _ vs2 s2) = checkPair i s1' s2'
   where
     used =
@@ -391,7 +306,6 @@ checkPair i (LamP _ vs1 s1) (LamP _ vs2 s2) = checkPair i s1' s2'
         , Set.fromList (vs1 <> vs2)
         ]
 
-    -- list of original variable names
     newvars =
       filter
         (\v -> not $ Set.member v used)
@@ -401,25 +315,19 @@ checkPair i (LamP _ vs1 s1) (LamP _ vs2 s2) = checkPair i s1' s2'
     s2' = foldr (\(v, r) s -> substituteEVar v r s) s2 (zip vs2 newvars)
 checkPair _ _ (LamP {}) = error "Illegal empty lambda"
 checkPair _ (LamP {}) _ = error "Illegal empty lambda"
--- check all container elements
---  * their sizes must agree
---  * their pairwise elements must agree
 checkPair i e1@(LstP _ xs) e2@(LstP _ ys)
   | length xs /= length ys = valueError i e1 e2 "Containers of unequal length"
   | otherwise = mapM_ (uncurry (checkPair i)) (zip xs ys)
 checkPair i (TupP _ xs) (TupP _ ys) =
   mapM_ (uncurry (checkPair i)) (zip xs ys)
--- check records, no assumption of order
 checkPair _ (NamP _ []) (NamP _ _) = return ()
 checkPair i (NamP g1 ((k, x) : rs1)) (NamP g2 rs2) =
   case lookup k rs2 of
     (Just y) -> checkPair i x y >> checkPair i (NamP g1 rs1) (NamP g2 rs2)
     Nothing -> error "Unreachable if typechecker has passed"
--- The same intrinsic over pairwise-equivalent arguments
 checkPair i e1@(IntrinsicP _ a xs) e2@(IntrinsicP _ b ys)
   | a == b && length xs == length ys = mapM_ (uncurry (checkPair i)) (zip xs ys)
   | otherwise = valueError i e1 e2 "Non-equivalent intrinsics"
--- Primitives must be equal
 checkPair i e1@(LitP _ x) e2@(LitP _ y)
   | x == y = return ()
   | otherwise =
@@ -427,23 +335,11 @@ checkPair i e1@(LitP _ x) e2@(LitP _ y)
         "Cannot equate non-equal primitives (the two operands disagree):" <> line
           <> "a:" <+> pretty x <> line
           <> "b:" <+> pretty y
--- All other cases should fail.
---
--- Actually, all other cases should already have failed while typechecking.
---
--- It should not be possible to reach this case, should it?
 checkPair i e1 e2 = valueError i e1 e2 "Non-equivalent forms"
 
--- Compare two sourced declarations bound to the same morloc name at the
--- same specialized type.
---
--- We cannot inspect the foreign code to prove behavioural equivalence, but
--- we can refuse the unambiguous bug: two source declarations of the same
--- target language disagreeing on srcName/srcPath give the realizer no rule
--- to choose between them, so the result would silently depend on
--- declaration order. Different source languages are legitimate alternatives
--- (e.g. mempty from root-py and root-cpp) - the language-cost optimizer
--- picks per call site - so they pass through here unchanged.
+-- | Two sources of one name and type in one language leave the realizer no
+-- rule to choose between them; sources in different languages are
+-- alternatives.
 compareForeignFunctions :: Int -> Type -> Source -> Source -> MorlocMonad ()
 compareForeignFunctions i _ src1 src2
   | src1 == src2 = return ()
@@ -463,7 +359,6 @@ substituteEVar oldVar newVar e0
   | oldVar == newVar = e0
   | otherwise = f usedVars 0 e0
   where
-    -- list of free term variables
     usedVars = Set.union (freeTerms e0) (Set.fromList [oldVar, newVar])
 
     f :: Set.Set EVar -> Int -> E -> E
