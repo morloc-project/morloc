@@ -151,11 +151,11 @@ needed gscope = go Set.empty
               else concatMap (go (Set.insert key seen)) (fields name args)
       _ -> concatMap (go seen) (typeChildren gscope t)
     fields name args =
-      let params = case Map.lookup name gscope of
-            Just ((ps, _, _, _, _) : _) -> [tv | Left (tv, _) <- ps]
-            _ -> []
-          inst f = foldl (\acc (tv, a) -> substituteTVar tv a acc) f (zip params args)
-      in [inst f | Just cs <- [dataCtorsOfName gscope name], (_, fs) <- cs, f <- fs]
+      [ instantiateParams (zip params args) f
+      | Just (params, cs) <- [dataDeclOfName gscope name]
+      , (_, fs) <- cs
+      , f <- fs
+      ]
 
 -- | Reject a type holding a variable nothing determines that a native form
 -- needs and that occurs in a term of the program (POLY-6).
@@ -257,12 +257,8 @@ inferVariantArms lang i gscope vG vC targs = do
     Nothing -> return []
   -- Instantiate the declaration's parameters with the applied arguments.
   -- Empty for a bare `data`, in which case this is the identity.
-  let params = case Map.lookup vG gscope of
-        Just ((ps, _, _, _, _) : _) -> [tv | Left (tv, _) <- ps]
-        _ -> []
-      inst t = foldl (\acc (tv, arg) -> substituteTVar tv arg acc)
-                     t (zip params targs)
-      arms = [(n, map inst ts) | (n, ts) <- arms0]
+  let params = maybe [] fst (dataDeclOfName gscope vG)
+      arms = [(n, map (instantiateParams (zip params targs)) ts) | (n, ts) <- arms0]
   -- The applied arguments, resolved to this language, travel on the type:
   -- a user's per-language form may be a template, and these are what it is
   -- instantiated with. They are resolved before the arms so a self-reference

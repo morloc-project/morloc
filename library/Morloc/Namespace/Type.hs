@@ -170,6 +170,8 @@ module Morloc.Namespace.Type
   , generalizes
   , mostSpecificSubtypes
   , dataCtorsOfName
+  , dataDeclOfName
+  , instantiateParams
   , dataBodyCtors
   ) where
 
@@ -179,6 +181,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.PartialOrd as P
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Data.Char as C
 import qualified Data.Text as DT
 import Morloc.Data.Doc
@@ -315,9 +318,27 @@ type Scope =
 --
 -- Keyed by name, so it cannot see through an alias; use 'TypeEval.dataHead'.
 dataCtorsOfName :: Scope -> TVar -> Maybe [(Text, [TypeU])]
-dataCtorsOfName scope v = do
+dataCtorsOfName scope v = snd <$> dataDeclOfName scope v
+
+-- | A `data` declaration's type parameters and constructors, read from one
+-- declaration.
+dataDeclOfName :: Scope -> TVar -> Maybe ([TVar], [(Text, [TypeU])])
+dataDeclOfName scope v = do
   entries <- Map.lookup v scope
-  listToMaybe [cs | (_, body, _, _, TypedefEnum) <- entries, Just cs <- [dataBodyCtors body]]
+  listToMaybe
+    [ ([p | Left (p, _) <- ps], cs)
+    | (ps, body, _, _, TypedefEnum) <- entries
+    , Just cs <- [dataBodyCtors body]
+    ]
+
+-- | Set each parameter to its argument at once: an argument that names a
+-- parameter is not substituted again, and a binder shadowing a parameter
+-- is respected.
+instantiateParams :: Typelike a => [(TVar, a)] -> a -> a
+instantiateParams pairs t =
+  let held = [TV (T.pack ("#" <> show i)) | i <- [0 .. length pairs - 1 :: Int]]
+      named = foldl (\acc ((p, _), h) -> substituteTVar p (tvar h) acc) t (zip pairs held)
+   in foldl (\acc ((_, a), h) -> substituteTVar h a acc) named (zip pairs held)
 
 -- | Decode a `data` declaration's body: a list of constructors, each a list
 -- of its name followed by its argument types.
@@ -917,6 +938,9 @@ class Typelike a where
 
   substituteTVar :: TVar -> a -> a -> a
 
+  -- | A type that is just this variable.
+  tvar :: TVar -> a
+
   nargs :: a -> Int
   nargs (typeOf -> FunT ts _) = length ts
   nargs _ = 0
@@ -953,6 +977,8 @@ instance Defaultable ArgDocVars where
       }
 
 instance Typelike Type where
+  tvar = VarT
+
   typeOf = id
 
   substituteTVar v0 r0 t0 = sub t0
@@ -1017,6 +1043,8 @@ uncurryU (FunU ts r) = case uncurryU r of
 uncurryU t = ([], t)
 
 instance Typelike TypeU where
+  tvar = VarU
+
   typeOf (VarU v) = VarT v
   typeOf (ExistU _ (ps, _) (rs@(_ : _), _)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs)
   typeOf (ExistU v _ _) = typeOf (ForallU v (VarU v))

@@ -2410,8 +2410,15 @@ unitTypeTests =
   localOption (mkTimeout 1000000) $ -- 1 second timeout
     testGroup
       "Typechecker unit tests"
+      -- instantiating a data type's parameters
+      [ testCase "parameters are set to their arguments at once" $
+          map (instantiateParams [(TV "a", VarU (TV "b")), (TV "b", int)]) [VarU (TV "a"), VarU (TV "b")]
+            @?= [VarU (TV "b"), int]
+      , testCase "a binder shadowing a parameter is respected" $
+          instantiateParams [(TV "a", int)] (ForallU (TV "a") (VarU (TV "a")))
+            @?= ForallU (TV "a") (VarU (TV "a"))
       -- comments
-      [ assertGeneralType "block comments (1)" "{- -} 42" int
+      , assertGeneralType "block comments (1)" "{- -} 42" int
       , assertGeneralType "block comments (2)" " {--} 42{-   foo -} " int
       , assertGeneralType "line comments (3)" "-- foo\n 42" int
       , -- reals versus integers

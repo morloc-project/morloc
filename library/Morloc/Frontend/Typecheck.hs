@@ -847,20 +847,11 @@ checkCtorBelongs :: Int -> Gamma -> TypeU -> Text -> MorlocMonad [TypeU]
 checkCtorBelongs i g subjectT n = do
   scope <- MM.getGeneralScope
   let resolved = apply g subjectT
-  case TE.dataHead scope (TE.whnf scope resolved) of
-    Just (tv, args, ctors)
-      | Just fs <- lookup n ctors ->
-          let params = [p | (p, _) <- typeParamsOf scope tv]
-              inst t = foldr (\(p, a) acc -> substituteTVar p a acc) t (zip params args)
-           in return (map inst fs)
+  case lookup n =<< TE.dataCtorsAt scope (TE.whnf scope resolved) of
+    Just fs -> return fs
     _ ->
       MM.throwSourcedError i $
         squotes (pretty n) <+> "is not a constructor of" <+> pretty resolved
-
-typeParamsOf :: Scope -> TVar -> [(TVar, Kind)]
-typeParamsOf scope v = case Map.lookup v scope of
-  Just ((ps, _, _, _, _) : _) -> [pk | Left pk <- ps]
-  _ -> []
 
 synthE ::
   Int ->
@@ -884,15 +875,13 @@ synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 -- the result, tying `Some x :: Opt a` to the `a` of `x`.
 synthE i g0 (ConS tv n ord xs) = do
   scope <- MM.getGeneralScope
-  let params = [p | (p, _) <- typeParamsOf scope tv]
+  let params = TE.dataParams scope tv
       (g1, freshArgs) = statefulMap (\g _ -> newvar (unTVar tv <> "_") g) g0 params
-      sub = zip params freshArgs
-      inst = foldr (\(p, fresh) t -> substituteTVar p fresh t) `flip` sub
       resultT = case freshArgs of
         [] -> VarU tv
         _ -> AppU (VarU tv) freshArgs
-  declaredArgs <- case lookup n =<< TE.dataCtors scope (TE.whnf scope (VarU tv)) of
-    Just as -> return (map inst as)
+  declaredArgs <- case lookup n =<< TE.dataCtorsOf scope tv freshArgs of
+    Just as -> return as
     Nothing ->
       MM.throwSourcedError i $
         "Constructor" <+> squotes (pretty n) <+> "is not a constructor of type"

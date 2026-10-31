@@ -35,6 +35,8 @@ module Morloc.TypeEval
   , dataHead
   , dataCtors
   , dataCtorsAt
+  , dataCtorsOf
+  , dataParams
   , dataIsEnum
   , enumCtors
   ) where
@@ -904,20 +906,22 @@ dataHead scope (Whnf t) = case t of
 -- | The constructor table of the `data` type at the head, its fields with the
 -- type's parameters set to the arguments it is applied to.
 dataCtorsAt :: Scope -> Whnf -> Maybe [(MT.Text, [TypeU])]
-dataCtorsAt scope (Whnf t) = do
-  (v, args) <- case t of
-    VarU v -> Just (v, [])
-    AppU (VarU v) ts -> Just (v, ts)
-    _ -> Nothing
-  entries <- Map.lookup v scope
-  (params, cs) <-
-    listToMaybe
-      [ ([p | Left (p, _) <- ps], cs)
-      | (ps, body, _, _, TypedefEnum) <- entries
-      , Just cs <- [dataBodyCtors body]
-      ]
-  let inst = parsubAll (zip params args)
+dataCtorsAt scope (Whnf t) = case t of
+  VarU v -> dataCtorsOf scope v []
+  AppU (VarU v) ts -> dataCtorsOf scope v ts
+  _ -> Nothing
+
+-- | The constructors of the `data` type of this name applied to these
+-- arguments.
+dataCtorsOf :: Scope -> TVar -> [TypeU] -> Maybe [(MT.Text, [TypeU])]
+dataCtorsOf scope v args = do
+  (params, cs) <- dataDeclOfName scope v
+  let inst = instantiateParams (zip params args)
   return [(c, map inst fs) | (c, fs) <- cs]
+
+-- | The type parameters of a `data` declaration.
+dataParams :: Scope -> TVar -> [TVar]
+dataParams scope v = maybe [] fst (dataDeclOfName scope v)
 
 -- | The constructor table of the `data` type at the head.
 dataCtors :: Scope -> Whnf -> Maybe [(MT.Text, [TypeU])]

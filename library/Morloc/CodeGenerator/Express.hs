@@ -599,19 +599,8 @@ cacheLabelOfMidx midx = do
 collectArgs :: ManifoldForm None (Maybe Type) -> [Arg None]
 collectArgs = abilist (\i _ -> Arg i None) (\i _ -> Arg i None)
 
--- | Reject an `rsize` declaration that cannot describe a call of this arity.
---
--- `rsize` names the sizes of the leading call groups of a curried foreign
--- function; the final group is implicit and is never written. Every declared
--- group must therefore leave at least one argument for the group after it.
--- Sizes that consume every argument would emit a trailing empty call, which
--- fails inside the pool with an error naming neither the directive nor the
--- function.
---
--- Individual values are already known to be positive integers: the parser
--- rejects a non-integer or non-positive word at the declaration itself. Only
--- the relationship to the function's arity is unknowable there, so it is
--- checked here, where the source meets its type.
+-- | HOST-3 at a call, for a source whose signature 'Link.checkRsize' could
+-- not evaluate where it is declared.
 checkRsizeArity :: Int -> Source -> Int -> MorlocMonad ()
 checkRsizeArity idx src arity = case srcRsize src of
   [] -> return ()
@@ -620,13 +609,9 @@ checkRsizeArity idx src arity = case srcRsize src of
     | otherwise ->
         MM.throwSourcedError idx $
           "The rsize declaration on" <+> squotes (pretty (unEVar (srcAlias src)))
-          <+> "cannot describe a call of" <+> pretty arity
-          <+> (if arity == 1 then "argument" else "arguments") <> ":"
-          <+> "the declared group sizes" <+> hsep (punctuate comma (map pretty ns))
-          <+> "total" <+> pretty (sum ns) <> "."
-          <+> "Each value is the number of arguments in one call, and the final"
-          <+> "group is implicit, so the sizes must total at most"
-          <+> pretty (arity - 1) <> "."
+            <+> "declares groups of" <+> hsep (punctuate comma (map pretty ns))
+            <+> "arguments, but a call of it takes" <+> pretty arity
+            <> "; the declared groups must leave at least one argument for the last group"
 
 expressCore :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do

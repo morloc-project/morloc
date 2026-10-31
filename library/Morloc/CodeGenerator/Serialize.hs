@@ -239,7 +239,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       t' <- inferType t
       LoopS t' ids <$> buildLoopBody m ids (\base -> nativeExpr m base >>= serializeS "loop base" m) body
     serialExpr _ (MonoLoopContinue {}) = error "morloc: MonoLoopContinue reached serialExpr outside MonoLoop extraction"
-    serialExpr _ (MonoExe _ _) = error "Can represent MonoSrc as SerialExpr"
+    serialExpr _ (MonoExe _ _) = error "Cannot represent MonoExe as a SerialExpr"
     serialExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to a SerialExpr"
     serialExpr _ (MonoApp MonoManifold {} _) = error "Illegal?"
     serialExpr m e = nativeExpr m e >>= serializeS "serialE e" m
@@ -291,7 +291,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         _ -> error "Unreachable?"
     serialArg _ MonoPoolCall {} = error "This step should be unreachable"
     serialArg _ (MonoExe _ _) = error "This step should be unreachable"
-    serialArg _ (MonoReturn _) = error "Return should not happen hear (really I should remove this term completely)"
+    serialArg _ (MonoReturn _) = error "A return cannot appear as a serialized argument"
     serialArg m e = SerialArgExpr <$> serialExpr m e
 
     nativeArg ::

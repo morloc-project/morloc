@@ -2103,11 +2103,8 @@ appliedTypeToSerialAST i anc t0 v ts = do
     Just ctors
       | all (null . snd) ctors -> return $ SerialEnum (FV v (CV "")) [] (map fst ctors)
     Just arms -> do
-                let params = case Map.lookup v scope of
-                      Just ((ps, _, _, _, _) : _) -> [tv | Left (tv, _) <- ps]
-                      _ -> []
-                    inst t = foldl (\acc (tv, arg) -> substituteTVar tv arg acc)
-                                   t (zip params ts)
+                let params = maybe [] fst (dataDeclOfName scope v)
+                    inst = instantiateParams (zip params ts)
                 anc' <- descendT i t0 anc
                 arms' <- mapM
                   (\(n, fts) ->
