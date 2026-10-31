@@ -24,22 +24,10 @@
   arm), checked against the parent's schema; the entry decodes it as a
   value the program built. If the entry's schema could differ from the
   parent's, its fixed lengths would never be checked. Not reproduced.
-- **A result length is unified, not observed.** [read, 2026-10-31]
-  Violates DIM-10. Only labels are held fixed in solving
-  (Typecheck/Internal.hs, `gammaObserved`); a Nat that only a sourced
-  function's result has, such as `m` in stdlib table's `sliceRows ::
-  start@Int -> end@Int -> Table n r -> Table m r` or a `filter` returning
-  `Vector m a`, is still solved by unification, so `addCol "x" v5
-  (sliceRows 0 2 t)` sets `m = 5` with no check. A Table's row count is not
-  among the lengths taken as run-time values either (Frontend/Typecheck.hs
-  `runTimeVars`). Measured 2026-10-31 by holding them fixed (and adding
-  Table rows): 11 golden and stdlib files are rejected (tables-py-ops,
-  tables-r, specialize-open-kind-key, the four stdlib table test modules,
-  ...), each because POLY-7 reads a Nat only a signature's result has
-  (`sliced :: Int -> Table m r`) as "for every m", which a body returning a
-  made length cannot meet. Open question for a ruling (gap in POLY-7 and
-  DIM-10): does such a variable mean "some m the function chooses", which
-  is how a sourced function's result must be read?
+- [read, 2026-10-31] Gap in DIM-10: a Table's row count is not among the
+  lengths a command's input gives (Frontend/Typecheck.hs `runTimeVars`
+  matches only Vector), so the main pass of an unsigned export may solve
+  it rather than hold it for every value.
 - [read, 2026-10-31] Gap in DIM-10: a `f@Str` or `l@[Str]` label whose
   argument is not a literal leaves its variable to the Str and Rec solvers
   (`getCol name t`), which may solve it; only Int labels are observed.

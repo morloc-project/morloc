@@ -16,26 +16,26 @@ type Cpp => (Table (n :: Nat) (r :: Rec)) = "arrow" n r
 source Py from "src.py" ("mk")
 source Cpp from "src.hpp" ("dbl")
 
-mk :: Int -> Table n {x = Int}
+mk :: n@U64 -> Table n {x = Int}
 dbl :: Table n {x = Int} -> Vector n Real
 
 -- The crossing expression as the whole body.
-width :: Int -> Int
+width :: n@U64 -> Int
 width n = ncol (addCol "y" (dbl (mk n)) (mk n))
 
 -- The same expression inside a larger one.
-widthPlus :: Int -> Int
+widthPlus :: n@U64 -> Int
 widthPlus n = ncol (addCol "y" (dbl (mk n)) (mk n)) + 1
 
 -- Twice over, in a tuple.
-bothWidths :: Int -> (Int, Int)
+bothWidths :: n@U64 -> (Int, Int)
 bothWidths n =
   ( nrow (addCol "y" (dbl (mk n)) (mk n))
   , ncol (addCol "y" (dbl (mk n)) (mk n))
   )
 
 -- And over a shared binding rather than two separate calls.
-viaLet :: Int -> (Int, Int)
+viaLet :: n@U64 -> (Int, Int)
 viaLet n =
   let t = mk n
   in (ncol t, ncol (addCol "y" (dbl t) t))

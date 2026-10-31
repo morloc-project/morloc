@@ -139,7 +139,7 @@ than on the whole argument (POLY-3).
 
 ### DIM-10 A length or label known only at run time stands for every value
 Intent: ruled 2026-10-31
-Tests: spec-dim-10-1, spec-dim-10-2, spec-dim-10-3
+Tests: spec-dim-10-1, spec-dim-10-2, spec-dim-10-3, spec-dim-10-4, spec-dim-10-5, spec-dim-10-6
 Code: deviates (issues/kinds-dimensions.md)
 
 A label's value at a call is known before run time when its argument is a

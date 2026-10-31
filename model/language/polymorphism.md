@@ -61,7 +61,7 @@ phantom parameter of an argument-free `data` type, is not an error.
 
 ### POLY-7 Nat and Int variables in a signature are rigid
 Intent: ruled 2026-10-29
-Tests: spec-poly-7-1, spec-poly-7-2, spec-poly-7-3, spec-poly-7-4, spec-poly-7-5, spec-poly-7-6, spec-poly-7-7, spec-poly-7-8, spec-poly-7-9, spec-poly-7-10, spec-poly-7-11, spec-poly-7-12, spec-poly-7-13, spec-poly-7-14, spec-poly-7-15, spec-poly-7-16, spec-poly-7-18, spec-poly-7-19
+Tests: spec-poly-7-1, spec-poly-7-2, spec-poly-7-3, spec-poly-7-4, spec-poly-7-5, spec-poly-7-6, spec-poly-7-7, spec-poly-7-8, spec-poly-7-9, spec-poly-7-10, spec-poly-7-11, spec-poly-7-12, spec-poly-7-13, spec-poly-7-14, spec-poly-7-15, spec-poly-7-16, spec-poly-7-18, spec-poly-7-19, spec-poly-7-20
 Code: deviates (issues/kinds-dimensions.md)
 
 A `Nat` or `Int` variable in a signature is universally quantified, as a
@@ -71,5 +71,10 @@ pass its argument where `Vector (m + 1) Int` is required, while `f :: Vector
 n Int -> Vector (n - 1) Int` may, since its domain has `n >= 1`. A label
 (`w@Int`) names such a variable whether or not it occurs elsewhere in the
 type, and a body that passes the labeled argument to another label passes
-that variable. Every Nat position in the body's types must be non-negative
-there too. These conditions are decided by DIM-7.
+that variable. A label on an unsigned type (`UInt`, `U8` to `U64`) adds
+its variable's non-negativity to the domain. A Nat that only the
+signature's result has, and that no label names, is one the function
+chooses, not one it is given: it is not rigid in the body, and at each call
+it is observed (DIM-10), so `sliceRows :: start@Int -> end@Int -> Table n r
+-> Table m r` returns a length no equation may fix. Every Nat position in the
+body's types must be non-negative there too. These conditions are decided by DIM-7.

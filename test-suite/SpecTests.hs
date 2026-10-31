@@ -1183,6 +1183,37 @@ dimTests =
         roll :: w@Int -> Vector n Int -> Vector (n - w + 1) Int
         h w src = roll w src
         |]
+    , reject
+        "spec-dim-10-4"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        mk :: Int -> Vector n Real
+        dot :: Vector n Real -> Vector n Real -> Real
+        f :: Int -> Real
+        f k = dot (mk k) (mk k)
+        |]
+    , accept
+        "spec-dim-10-5"
+        [r|
+        module main (f, g)
+        newtype Vector (n :: Nat) a = List a
+        keep :: Vector n Real -> Vector m Real
+        len :: Vector k Real -> Int
+        f :: Vector n Real -> Vector m Real
+        f v = keep (keep v)
+        g :: Vector n Real -> Int
+        g v = len (keep v)
+        |]
+    , reject
+        "spec-dim-10-6"
+        [r|
+        module main (f)
+        newtype Vector (n :: Nat) a = List a
+        keep :: Vector n Real -> Vector m Real
+        f :: Vector n Real -> Vector n Real
+        f v = keep v
+        |]
     ]
 
 teqTests :: TestTree
@@ -2574,6 +2605,19 @@ poly7Tests =
           where
             g :: Vector (k - (k + 1)) Int -> Int
             g y = len y
+        |]
+    , accept
+        "spec-poly-7-20"
+        [r|
+        module main (f, g)
+        newtype Vector (n :: Nat) a = List a
+        mk :: n@U64 -> Vector n Real
+        len :: Vector k Real -> Int
+        f :: k@U64 -> Int
+        f k = len (mk k)
+        mk8 :: n@U8 -> Vector n Real
+        g :: k@U8 -> Int
+        g k = len (mk8 k)
         |]
     , reject
         "spec-poly-7-7"

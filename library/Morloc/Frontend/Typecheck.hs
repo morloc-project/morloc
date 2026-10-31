@@ -1118,7 +1118,7 @@ synthE i g0 (AppS f xs0) = do
   (g1, funType0, funExpr0) <- synthG g0 f
 
   -- Literal arguments solve the variables their labels bind (m@Int).
-  let g1' = resolveNatLabels f funType0 xs0 g1
+  let g1' = observeResultNats f funType0 (resolveNatLabels f funType0 xs0 g1)
 
   etaExpandSynthE i g1' funType0 funExpr0 f xs0
 
@@ -1190,12 +1190,20 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
       inScope = Map.union (Map.fromList (zip (fst (unqualify (etype t0))) (fst (unqualify t1)))) (gammaScoped g0)
       natRen = Map.fromList (zip (List.nub (collectNatVarNames (etype t0))) (List.nub (collectNatVarNames t1)))
       -- A label whose Nat occurs nowhere else in the type still names one.
-      labelVars = Map.fromList
-        [ (x, Map.findWithDefault (TV (unTVar lv <> "@" <> unEVar v)) lv natRen)
+      labels =
+        [ (x, Map.findWithDefault (TV (unTVar lv <> "@" <> unEVar v)) lv natRen, idx)
         | AnnoS _ _ (LamS vs _) <- xs0
         , (lv, idx) <- Map.toList (enatLabels t0)
         , not (Set.member lv (strLabelVars (etype t0)))
         , x <- take 1 (drop idx vs)
+        ]
+      labelVars = Map.fromList [(x, lv) | (x, lv, _) <- labels]
+      -- A label on an unsigned type cannot be negative (KIND-4).
+      unsignedLabels =
+        [ IntVarU lv
+        | (_, lv, idx) <- labels
+        , VarU a <- take 1 (drop idx (fst (uncurryU t1)))
+        , a `elem` [BT.u8, BT.u16, BT.u32, BT.u64, BT.uint]
         ]
   -- Against a signature, the body may also use the superclasses.
   given <- case gammaRigid g1 of
@@ -1203,7 +1211,9 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
     Nothing -> return newCs
   let outermost = isNothing (gammaAssumedConstraints g1)
       contract = isJust (gammaRigid g1)
-      sigNats = List.nub (collectNatVarNames t1 <> Map.elems labelVars)
+      -- A Nat only the result has is one the function chooses (DIM-10), so
+      -- it is not rigid in its body.
+      sigNats = List.nub (collectNatVarNames t1 <> Map.elems labelVars) List.\\ resultOnlyNats t1 (Map.elems labelVars)
       -- Checking against a signature, at any depth, its effect variables
       -- are rigid and its constraints are given to its body. Both stay in
       -- gamma after the body, over names no other signature uses.
@@ -1224,7 +1234,7 @@ synthE vi g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
         | contract = g1Base
             { gammaRigidNats = Set.union (gammaRigidNats g1) (Set.fromList sigNats)
             , gammaRigidRows = Set.union (gammaRigidRows g1) (Set.fromList (collectRecVarNames t1))
-            , gammaRigidDomain = gammaRigidDomain g1 <> [(vi, p) | p <- natPositions t1]
+            , gammaRigidDomain = gammaRigidDomain g1 <> [(vi, p) | p <- natPositions t1 <> unsignedLabels]
             , gammaLabelVars = Map.union labelVars (gammaLabelVars g1)
             }
         | otherwise = g1Base {gammaLabelVars = Map.union labelVars (gammaLabelVars g1)}
@@ -2468,7 +2478,7 @@ checkE i g0 e@(AppS _ _) t@(OptionalU _) = checkEFallback i g0 e t
 -- case take the synth-and-subtype path.
 checkE i g0 (AppS f xs) t = do
   (g1, funType0, funExpr0) <- synthG g0 f
-  let g1' = resolveNatLabels f funType0 xs g1
+  let g1' = observeResultNats f funType0 (resolveNatLabels f funType0 xs g1)
       (g2, funType1) = stripForallU g1' (normalizeType funType0)
       -- Finish from the head already synthesized: synthesizing it again
       -- would compound once per level of nesting. A nullary application
@@ -3194,6 +3204,24 @@ resolveNatLabels (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType args
       (_, BndS x) -> IntVarU <$> Map.lookup x (gammaLabelVars g)
       _ -> Nothing
 resolveNatLabels _ _ _ g = g
+
+-- | The Nats of a function type that only its result has, other than the
+-- given label variables: lengths the function chooses (DIM-10).
+resultOnlyNats :: TypeU -> [TVar] -> [TVar]
+resultOnlyNats t labelled = case t of
+  FunU args ret ->
+    let inArgs = concatMap collectNatVarNames args
+     in List.nub [v | v <- collectNatVarNames ret, v `notElem` inArgs, v `notElem` labelled]
+  _ -> List.nub [v | v <- collectNatVarNames t, v `notElem` labelled]
+
+-- | At a call, a Nat the called function chooses is a value known only at
+-- run time (DIM-10).
+observeResultNats :: AnnoS Int ManyPoly Int -> TypeU -> Gamma -> Gamma
+observeResultNats (AnnoS _ _ (VarS _ (MonomorphicExpr (Just et) _))) funType g =
+  let renamed = Map.fromList (zip (List.nub (collectNatVarNames (etype et))) (List.nub (collectNatVarNames funType)))
+      labelled = [r | v <- Map.keys (enatLabels et), Just r <- [Map.lookup v renamed]]
+   in g {gammaObserved = Set.union (Set.fromList (resultOnlyNats funType labelled)) (gammaObserved g)}
+observeResultNats _ _ g = g
 
 -- | The Nat and Int variables of types that a run-time value gives: a
 -- Vector's length and a label's value.

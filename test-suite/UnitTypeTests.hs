@@ -6737,8 +6737,8 @@ natDimTests =
         result <- runFrontRaw [r|
           module main (foo)
           newtype Matrix (m :: Nat) (n :: Nat) a = [[a]]
-          foo :: Matrix m n Int
-          foo = [[1,2,3],[4,5,6]]
+          foo :: Matrix m n Int -> Matrix m n Int
+          foo _ = [[1,2,3],[4,5,6]]
             |]
         case result of
           Left _ -> return ()

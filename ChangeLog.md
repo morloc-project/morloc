@@ -20,6 +20,11 @@ Changed
    literal or the caller's own label, must meet every condition a body puts
    on it for all its values; state the relation in a signature, e.g.
    `w@Int -> Vector (m + w - 1) Int`, and the input is checked for it
+ * A dimension that only a signature's result names (`sliceRows :: ... ->
+   Table n r -> Table m r`) is one the function chooses: two calls no
+   longer share it, and a body may not claim it equals another length
+ * A label on an unsigned type (`n@U64`) is known to be non-negative, so
+   `width :: n@U64 -> Int` may pass `n` where a dimension is expected
 
 0.111.1 [2026-10-27]
 --------------------
