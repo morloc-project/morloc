@@ -463,6 +463,14 @@ fn main() {
     if let Some(n) = config.debug_recursion_cap {
         crate::process::set_startup_env("MORLOC_DEBUG_RECURSION_CAP", n.to_string());
     }
+    // A debug build checks the values the program builds, in the nexus and
+    // in every pool it starts; a release build does not, whatever it
+    // inherits.
+    if manifest.capabilities.iter().any(|c| c == "code_checks") {
+        crate::process::set_startup_env("MORLOC_CODE_CHECKS", "1");
+    } else {
+        crate::process::remove_startup_env("MORLOC_CODE_CHECKS");
+    }
 
     // Resolve the per-run identity now so pools inherit a fully-published
     // env (MORLOC_RUN_DIR / MORLOC_RUN_BASE / MORLOC_RUN_PARENT_PID).

@@ -274,13 +274,24 @@ impl<'r, 'b> Walker<()> for PackWalk<'r, 'b> {
 
 // ── MessagePack -> Voidstar ────────────────────────────────────────────────
 
-/// Deserialize MessagePack bytes into voidstar format in SHM.
+/// Deserialize MessagePack bytes from outside the program into voidstar
+/// format in SHM.
 pub fn unpack_with_schema(
     data: &[u8],
     schema: &Schema,
 ) -> Result<AbsPtr, MorlocError> {
+    unpack_from(data, schema, crate::origin::Origin::Outside)
+}
+
+/// [`unpack_with_schema`] for bytes of the given origin, which decides
+/// whether fixed lengths are checked.
+pub fn unpack_from(
+    data: &[u8],
+    schema: &Schema,
+    origin: crate::origin::Origin,
+) -> Result<AbsPtr, MorlocError> {
     // Two-pass: first calculate size, then deserialize
-    let size = calc_unpack_size(data, schema)?;
+    let size = size_of_unpacked(data, schema, origin.checked())?;
     let base = shm::shmalloc(size)?;
     // SAFETY: base is freshly allocated with `size` bytes.
     unsafe { std::ptr::write_bytes(base, 0, size) };
@@ -661,8 +672,13 @@ fn read_be_u64(reader: &mut &[u8]) -> Result<u64, MorlocError> {
 
 // ── Size calculation for unpack ────────────────────────────────────────────
 
+#[cfg(test)]
 pub(crate) fn calc_unpack_size(data: &[u8], schema: &Schema) -> Result<usize, MorlocError> {
-    let mut w = SizeWalk { res: Resolver::new(schema), reader: data, total: 0 };
+    size_of_unpacked(data, schema, Some(crate::origin::Origin::Outside))
+}
+
+fn size_of_unpacked(data: &[u8], schema: &Schema, dims: Option<crate::origin::Origin>) -> Result<usize, MorlocError> {
+    let mut w = SizeWalk { res: Resolver::new(schema), reader: data, total: 0, dims };
     let mut st = Stack::new();
     st.enter(schema, std::ptr::null(), true);
     walk::run(&mut w, &mut st)?;
@@ -677,6 +693,8 @@ struct SizeWalk<'r, 'd> {
     res: Resolver<'r>,
     reader: &'d [u8],
     total: usize,
+    /// The origin of the bytes, when their fixed lengths are checked.
+    dims: Option<crate::origin::Origin>,
 }
 
 impl<'r, 'd> SizeWalk<'r, 'd> {
@@ -755,7 +773,9 @@ impl<'r, 'd> Walker<bool> for SizeWalk<'r, 'd> {
                 let n = rmp::decode::read_array_len(&mut self.reader)
                     .map_err(|e| MorlocError::Serialization(format!("size calc array: {}", e)))?
                     as usize;
-                s.check_len(n)?;
+                if let Some(o) = self.dims {
+                    s.check_len(n).map_err(|e| o.length_failure(e))?;
+                }
                 let elem_schema = &s.parameters[0];
                 // Alignment padding (bumps to 64 for primitive numerics for SIMD/BLAS)
                 let head = shm::align_up(std::mem::size_of::<Array>(), elem_schema.array_data_alignment());

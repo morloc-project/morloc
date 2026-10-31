@@ -3365,9 +3365,10 @@ generate cs rASTs helperRASTs = do
   -- groups keyed off these strings; a binary without a capability
   -- literally cannot accept (or display) the corresponding flags.
   -- @log@ is always present; @debug_trace@ is set when @morloc make
-  -- --debug@ was used. Future strings (@slurm@, @sanitizer@,
-  -- @profile@) accumulate the same way.
-  let capabilities = "log" : ["debug_trace" | debugTrace]
+  -- --debug@ was used, and so is @code_checks@, which turns on the
+  -- code-level dimension checks (DIM-3). Future strings (@slurm@,
+  -- @sanitizer@, @profile@) accumulate the same way.
+  let capabilities = "log" : concat [["debug_trace", "code_checks"] | debugTrace]
   termDocs <- MM.gets stateTermDocs
   streamElemTypes <- MM.gets stateStreamElems
   -- Resolve each streaming command's batch type to the pair the manifest

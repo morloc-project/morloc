@@ -182,6 +182,10 @@ pub const METADATA_TYPE_VOL_INDEX: u8 = 0x03;
 /// encoders may reserve room up front; trailing slots may be zero.
 /// Decoders read `frame_count`, not the entry size.
 pub const METADATA_TYPE_FRAME_INDEX: u8 = 0x04;
+/// On a file-reference packet: the file was written by this program (its
+/// cache, or a value one pool hands another), so it is not outside data.
+/// The entry body is empty.
+pub const METADATA_TYPE_PROGRAM_FILE: u8 = 0x09;
 
 // ── Stream-footer metadata block types ────────────────────────────────────
 //
@@ -1245,6 +1249,12 @@ pub fn iter_packet_metadata(packet: &[u8]) -> Result<MetadataIter<'_>, MorlocErr
 pub fn decode_schema_entry(data: &[u8]) -> String {
     let len = data.iter().position(|&b| b == 0).unwrap_or(data.len());
     String::from_utf8_lossy(&data[..len]).into_owned()
+}
+
+/// Whether a packet's metadata block marks the file it names as the
+/// program's own (`METADATA_TYPE_PROGRAM_FILE`).
+pub fn marks_program_file(meta: &[u8]) -> bool {
+    iter_metadata(meta).any(|(kind, _)| kind == METADATA_TYPE_PROGRAM_FILE)
 }
 
 /// The `METADATA_TYPE_VOL_INDEX` hint in a packet's metadata, if present.

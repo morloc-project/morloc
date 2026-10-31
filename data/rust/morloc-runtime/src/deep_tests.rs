@@ -448,7 +448,7 @@ mod tests {
                 let mut w7: Vec<u8> = Vec::new();
                 crate::voidstar::write_flat_to_writer_with_vol_idx(&mut w7, root, &schema, 7).unwrap();
                 assert_eq!(w7.len(), n);
-                let back = crate::voidstar::read_binary_with_hint(&w7, &schema, 7).unwrap();
+                let back = crate::voidstar::read_binary_with_hint(&w7, &schema, 7, crate::origin::Origin::Outside).unwrap();
                 assert_eq!(crate::voidstar::flatten_to_buffer(back, &schema).unwrap(), flat);
                 shm::shfree(back).unwrap();
             }
@@ -495,7 +495,7 @@ mod tests {
                     if vol == 0 {
                         assert_eq!(&flat[..n], &w[..], "{schema_str}: {text}");
                     }
-                    let back = crate::voidstar::read_binary_with_hint(&w, &schema, vol).unwrap();
+                    let back = crate::voidstar::read_binary_with_hint(&w, &schema, vol, crate::origin::Origin::Outside).unwrap();
                     assert_eq!(crate::json::voidstar_to_json_string(back, &schema).unwrap(), printed, "{schema_str}: {text} at vol {vol}");
                     shm::shfree(back).unwrap();
                 }

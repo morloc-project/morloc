@@ -2876,7 +2876,7 @@ fn stdio_decode_packet(handle: i64, packet_abs: crate::shm::AbsPtr)
         ))?;
     use crate::ffi::parse_schema;
     use crate::ffi::free_schema;
-    use crate::packet_ffi::get_morloc_data_packet_value;
+    use crate::packet_ffi::get_morloc_data_packet_value_from;
     unsafe {
         let mut err: *mut std::os::raw::c_char = std::ptr::null_mut();
         let schema = parse_schema(c_schema.as_ptr(), &mut err);
@@ -2890,8 +2890,8 @@ fn stdio_decode_packet(handle: i64, packet_abs: crate::shm::AbsPtr)
             };
             return Err(MorlocError::Other(msg));
         }
-        let voidstar = get_morloc_data_packet_value(
-            packet_abs as *const u8, schema, &mut err,
+        let voidstar = get_morloc_data_packet_value_from(
+            packet_abs as *const u8, schema, &mut err, Some(crate::origin::Origin::Outside),
         );
         free_schema(schema);
         if voidstar.is_null() {
@@ -3654,7 +3654,7 @@ fn flush_write_buffer(
         crate::write_behind::shift_records(dst, n as usize, (cap - n as usize) * w, data_used, elem)?;
     }
     debug_assert_portable(unsafe { std::slice::from_raw_parts(dst as *const u8, len) }, &local.value_schema)?;
-    let arr = landing.relocate(&array_schema(elem), 0)?;
+    let arr = landing.relocate(&array_schema(elem), 0, crate::origin::Origin::Program)?;
     channel_push(slot, arr)?;
     slot.write_buffer_index_count.set(0);
     slot.write_buffer_data_used.set(0);
@@ -3862,7 +3862,7 @@ fn append_one_element(
         }
         let landing = voidstar::Landing::new(oversize_len)?;
         fill(landing.as_mut_ptr())?;
-        let arr = landing.relocate(&array_schema(&local.elem_schema), 0)?;
+        let arr = landing.relocate(&array_schema(&local.elem_schema), 0, crate::origin::Origin::Program)?;
         return channel_push(slot, arr);
     }
 
@@ -4187,7 +4187,7 @@ pub fn shared_next_with(
             &SubpacketSrc::File { payload_base, payload_len, vol_idx_hint, .. } => {
                 // SLOT-25: checked as the copy into shared memory checks it.
                 let bytes = unsafe { std::slice::from_raw_parts(payload_base as *const u8, payload_len as usize) };
-                voidstar::check_in_place(bytes, &array_schema(&local.elem_schema), vol_idx_hint)?;
+                voidstar::check_in_place(bytes, &array_schema(&local.elem_schema), vol_idx_hint, crate::origin::Origin::Outside)?;
                 decode(
                     payload_base as *const u8,
                     voidstar::MorlocSpace { base: payload_base as *const u8, len: payload_len as usize },
@@ -4500,7 +4500,7 @@ fn ahead_schedule(local: &mut ProcessLocalSlot, from: u64, end: u64) {
             for (k, (_, _, _, len, hint, _)) in inputs.iter().enumerate() {
                 if let Some((block, _)) = blocks[k] {
                     // SAFETY: as above; the block now holds its landed bytes.
-                    let ok = unsafe { voidstar::relocate_landed(block as AbsPtr, *len, &schema, *hint) }.is_ok();
+                    let ok = unsafe { voidstar::relocate_landed(block as AbsPtr, *len, &schema, *hint, crate::origin::Origin::Outside) }.is_ok();
                     blocks[k] = Some((block, ok));
                 }
             }
@@ -4677,7 +4677,7 @@ fn payload_into_shm(
     elem_schema: &Schema,
     vol_idx_hint: u16,
 ) -> Result<AbsPtr, MorlocError> {
-    voidstar::read_binary_with_hint(bytes, &array_schema(elem_schema), vol_idx_hint)
+    voidstar::read_binary_with_hint(bytes, &array_schema(elem_schema), vol_idx_hint, crate::origin::Origin::Outside)
 }
 
 /// Allocate and return a SHM `Array` of size 0, the EOF return value
@@ -6379,6 +6379,7 @@ fn compressed_payload_into_shm(
         &packet[payload_start..payload_end],
         &array_schema(elem_schema),
         vol_idx_hint,
+        crate::origin::Origin::Outside,
     )
 }
 
@@ -10917,13 +10918,13 @@ mod tests {
         let v = crate::json::read_json_with_schema(&rows, &schema).unwrap();
         let bytes = crate::voidstar::flatten_to_buffer(v, &schema).unwrap();
         shm::shfree(v).unwrap();
-        crate::voidstar::check_in_place(&bytes, &schema, 0).unwrap();
+        crate::voidstar::check_in_place(&bytes, &schema, 0, crate::origin::Origin::Outside).unwrap();
         let mut bad = bytes.clone();
         // the data pointer of element n - 3, a String header after the root
         let elem = std::mem::size_of::<shm_types_crate::Array>() + (n - 3) * std::mem::size_of::<shm_types_crate::Array>();
         let at = elem + std::mem::size_of::<usize>();
         bad[at..at + 8].copy_from_slice(&(bytes.len() as i64 + 64).to_le_bytes());
-        assert!(crate::voidstar::check_in_place(&bad, &schema, 0).is_err(), "a pointer past the payload passed the check");
+        assert!(crate::voidstar::check_in_place(&bad, &schema, 0, crate::origin::Origin::Outside).is_err(), "a pointer past the payload passed the check");
     }
 
     /// DATA_PACKET file: a single voidstar packet (no STREAM header,

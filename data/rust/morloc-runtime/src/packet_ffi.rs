@@ -371,25 +371,6 @@ unsafe fn checked_rptr_block(packet: *const u8, payload: *const u8) -> Result<Ab
 
 // ── Msgpack packets ──────────────────────────────────────────────────────────
 
-pub(crate) unsafe fn make_mpk_data_packet(
-    mpk_filename: *const c_char,
-    schema: *const CSchema,
-) -> *mut u8 {
-    if mpk_filename.is_null() { return ptr::null_mut(); }
-    let filename = CStr::from_ptr(mpk_filename);
-    let bytes = filename.to_bytes();
-    make_data_packet_with_schema(
-        bytes.as_ptr(),
-        bytes.len(),
-        schema,
-        PACKET_SOURCE_FILE,
-        PACKET_FORMAT_MSGPACK,
-        PACKET_COMPRESSION_NONE,
-        PACKET_ENCRYPTION_NONE,
-        PACKET_STATUS_PASS,
-    )
-}
-
 /// FILE-source indirection whose referenced file is itself a morloc
 /// data packet (`PACKET_FORMAT_DATA`). The outer packet's `compression`
 /// byte refers to the filename bytes (always NONE); the referenced
@@ -407,6 +388,39 @@ pub(crate) unsafe fn make_data_indirection_packet(
         schema,
         PACKET_SOURCE_FILE,
         PACKET_FORMAT_DATA,
+        PACKET_COMPRESSION_NONE,
+        PACKET_ENCRYPTION_NONE,
+        PACKET_STATUS_PASS,
+    )
+}
+
+/// A packet naming a file this program wrote: its cache, or a value one
+/// pool hands another. Its metadata marks the file as the program's own, so
+/// a reader treats it as a value the program built.
+pub(crate) unsafe fn make_program_file_packet(
+    filename: *const c_char,
+    schema: *const CSchema,
+    fmt: u8,
+) -> *mut u8 {
+    if filename.is_null() { return ptr::null_mut(); }
+    let bytes = CStr::from_ptr(filename).to_bytes();
+    let (metadata, metadata_length) = build_schema_metadata(schema);
+    let existing: &[u8] = if metadata.is_null() { &[] } else { std::slice::from_raw_parts(metadata, metadata_length) };
+    let meta = morloc_runtime_types::packet::append_metadata_entry(
+        existing,
+        morloc_runtime_types::packet::METADATA_TYPE_PROGRAM_FILE,
+        &[],
+    );
+    if !metadata.is_null() {
+        libc::free(metadata as *mut c_void);
+    }
+    make_data_packet_raw(
+        bytes.as_ptr(),
+        bytes.len(),
+        meta.as_ptr(),
+        meta.len(),
+        PACKET_SOURCE_FILE,
+        fmt,
         PACKET_COMPRESSION_NONE,
         PACKET_ENCRYPTION_NONE,
         PACKET_STATUS_PASS,
@@ -563,6 +577,21 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
+    get_morloc_data_packet_value_from(data, schema, errmsg, None)
+}
+
+/// [`get_morloc_data_packet_value`] for a packet of a known origin. With
+/// none, a value carried inline or by reference is taken as one the program
+/// built, and a file the packet names as outside data unless the packet
+/// marks it as the program's own (FMT-3). A packet file is always outside
+/// data.
+pub(crate) unsafe fn get_morloc_data_packet_value_from(
+    data: *const u8,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+    origin: Option<crate::origin::Origin>,
+) -> *mut u8 {
+    use crate::origin::Origin;
     clear_errmsg(errmsg);
     let header = read_morloc_packet_header(data, errmsg);
     if header.is_null() { return ptr::null_mut(); }
@@ -589,7 +618,7 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
             Ok(v) => v,
             Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
         };
-        return get_morloc_data_packet_value(decompressed.as_ptr(), schema, errmsg);
+        return get_morloc_data_packet_value_from(decompressed.as_ptr(), schema, errmsg, origin);
     }
 
     let rs = CSchema::to_rust(schema);
@@ -602,13 +631,15 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
         PACKET_SOURCE_MESG => {
             if format == PACKET_FORMAT_MSGPACK {
                 let payload = std::slice::from_raw_parts(data.add(payload_start), payload_len);
-                match crate::mpack::unpack_with_schema(payload, &rs) {
+                match crate::mpack::unpack_from(payload, &rs, origin.unwrap_or(Origin::Program)) {
                     Ok(abs) => abs,
                     Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                 }
             } else if format == PACKET_FORMAT_VOIDSTAR {
                 let payload = std::slice::from_raw_parts(data.add(payload_start), payload_len);
-                match crate::voidstar::read_binary(payload, &rs) {
+                let packet = std::slice::from_raw_parts(data, payload_start + payload_len);
+                let hint = morloc_runtime_types::packet::read_vol_index_from_meta(packet).ok().flatten().unwrap_or(0);
+                match crate::voidstar::read_binary_with_hint(payload, &rs, hint, origin.unwrap_or(Origin::Program)) {
                     Ok(abs) => abs,
                     Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                 }
@@ -626,6 +657,10 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
             }
         }
         PACKET_SOURCE_FILE => {
+            let origin = origin.unwrap_or_else(|| {
+                let meta = std::slice::from_raw_parts(data.add(32), (*header).offset as usize);
+                if morloc_runtime_types::packet::marks_program_file(meta) { Origin::Program } else { Origin::Outside }
+            });
             if payload_len > 4096 {
                 set_errmsg(errmsg, &MorlocError::Packet(format!(
                     "a file packet's path is {payload_len} bytes; at most 4096 are read"
@@ -641,7 +676,7 @@ pub(crate) unsafe fn get_morloc_data_packet_value(
             if format == PACKET_FORMAT_MSGPACK {
                 match std::fs::read(filename) {
                     Ok(file_data) => {
-                        match crate::mpack::unpack_with_schema(&file_data, &rs) {
+                        match crate::mpack::unpack_from(&file_data, &rs, origin) {
                             Ok(abs) => abs,
                             Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                         }
@@ -1946,7 +1981,7 @@ unsafe fn make_file_data_packet_voidstar(
         }
     };
 
-    let packet = make_mpk_data_packet(path_cstr.as_ptr(), schema);
+    let packet = make_program_file_packet(path_cstr.as_ptr(), schema, PACKET_FORMAT_MSGPACK);
     if packet.is_null() {
         set_errmsg(errmsg, &MorlocError::Other("Failed to create FILE data packet".into()));
         let _ = std::fs::remove_file(&path);

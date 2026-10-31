@@ -725,7 +725,7 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
     let read = pread_exact(fd, landing.as_mut_ptr(), payload_size, payload_offset);
     libc::close(fd);
     read?;
-    Ok(Some(landing.relocate(&CSchema::to_rust(schema), vol_idx_hint)?))
+    Ok(Some(landing.relocate(&CSchema::to_rust(schema), vol_idx_hint, crate::origin::Origin::Outside)?))
 }
 
 /// Read exactly `len` bytes of `fd` at `offset` into `dst`.
@@ -917,7 +917,7 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     );
 
     let t_relptr = std::time::Instant::now();
-    let dest = landing.relocate(&CSchema::to_rust(schema), vol_idx_hint)?;
+    let dest = landing.relocate(&CSchema::to_rust(schema), vol_idx_hint, crate::origin::Origin::Outside)?;
     crate::morloc_trace!("[fastpath] relocation took {:.2?}", t_relptr.elapsed());
     crate::morloc_trace!("[fastpath] total ingest: {:.2?}", t0.elapsed());
 
@@ -982,7 +982,7 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
         Ok(Some(f)) if !f.is_empty() => f,
         _ => return Ok(None),
     };
-    let landed = crate::voidstar::land_compressed_frames(&frames, compressed, &CSchema::to_rust(schema), hint)?;
+    let landed = crate::voidstar::land_compressed_frames(&frames, compressed, &CSchema::to_rust(schema), hint, crate::origin::Origin::Outside)?;
     Ok(Some(landed as *mut c_void))
 }
 
@@ -1009,7 +1009,7 @@ pub(crate) unsafe fn read_voidstar_binary_with_hint(
 ) -> *mut c_void {
     clear_errmsg(errmsg);
     let blob = std::slice::from_raw_parts(blob, blob_size);
-    match crate::voidstar::read_binary_with_hint(blob, &CSchema::to_rust(schema), vol_idx_hint) {
+    match crate::voidstar::read_binary_with_hint(blob, &CSchema::to_rust(schema), vol_idx_hint, crate::origin::Origin::Outside) {
         Ok(base) => base as *mut c_void,
         Err(e) => {
             set_errmsg(errmsg, &e);

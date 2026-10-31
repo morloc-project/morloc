@@ -7,6 +7,23 @@
   no length check, and a by-reference packet is not walked). A header
   (DIM-9) and a Table's row count are checked only by the command-entry
   check, not by the decoders (no schema carries them).
+- [read, 2026-10-31] Gap in DIM-3 (code level): a debug build checks a
+  value one pool hands another only where it is decoded into shared memory
+  (a file the program wrote, a msgpack packet). Every pool reads an inline
+  voidstar packet in place, with no fixed-length check: C++
+  (lang/cpp/cppmorloc.hpp mlc_read_inline_packet), Python (pymorloc.c
+  from_voidstar on the payload), R (rmorloc.c) and Rust (rustmorloc
+  lib.rs, MorlocSpace::payload). A value passed by reference is not walked
+  either.
+- [read, 2026-10-31] A debug build's `MORLOC_CODE_CHECKS=1`
+  (data/rust/morloc-runtime/src/origin.rs) is inherited by any morloc
+  program a sourced function starts, which then runs code-level checks
+  although it was built for release. Cost only; nothing goes unchecked.
+- [speculative, 2026-10-31] An `@unpack` argument is built by the nexus as
+  the parent command loads it (morloc-nexus/src/dispatch.rs, the Embed
+  arm), checked against the parent's schema; the entry decodes it as a
+  value the program built. If the entry's schema could differ from the
+  parent's, its fixed lengths would never be checked. Not reproduced.
 - **A label known only at run time is not checked inside a body.** [read]
   Violates DIM-3 and KIND-4. A command's own signature is checked at entry
   (the nexus and daemon read its `dims` constraint), but `main w = roll w

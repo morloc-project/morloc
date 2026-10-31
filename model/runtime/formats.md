@@ -22,7 +22,10 @@ status 17.
 Status: draft
 Region zero-padded to a multiple of 32. Kinds 1 schema, 3 volume index,
 4 frame index, 5 subpacket index, 6 stream diag, 7 final footer, 8 footer
-status. (2 xxhash: defined, unused.)
+status, 9 program file (empty body: the file a file-reference packet names
+was written by this program, its cache or a value one pool hands another,
+so a reader takes it as a value the program built, PANIC-14). (2 xxhash:
+defined, unused.)
 
 ### FMT-4 A relative pointer is volume index (bits 62-48) and offset (47-0); -1 is null
 Status: draft

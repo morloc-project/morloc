@@ -1,6 +1,7 @@
 //! Voidstar operations: relptr rebasing, deep copy, flattening and
 //! bounds-checked walks over values in the morloc voidstar format.
 
+use crate::origin::Origin;
 use crate::error::MorlocError;
 use crate::recur::Resolver;
 use crate::schema::{Schema, SerialType};
@@ -211,11 +212,11 @@ pub unsafe fn adjust_records_within(
     window: RelWindow,
 ) -> Result<(), MorlocError> {
     // SAFETY: forwarded from this function's own contract.
-    unsafe { adjust_records_checking(first, n, schema, base_rel, window, false) }
+    unsafe { adjust_records_checking(first, n, schema, base_rel, window, None) }
 }
 
-/// [`adjust_records_within`], also checking every array's fixed length when
-/// `dims` (the value is input being decoded, DIM-3).
+/// [`adjust_records_within`], also checking every array's fixed length for
+/// a value of the origin `dims` names.
 ///
 /// # Safety
 /// As for [`adjust_records_within`].
@@ -225,7 +226,7 @@ unsafe fn adjust_records_checking(
     schema: &Schema,
     base_rel: RelPtr,
     window: RelWindow,
-    dims: bool,
+    dims: Option<Origin>,
 ) -> Result<(), MorlocError> {
     let res = Resolver::new(schema);
     let mut w = RebaseWalk {
@@ -368,7 +369,7 @@ pub unsafe fn shift_buffer_relptrs_with(
     res: &Resolver<'_>,
 ) -> Result<(), MorlocError> {
     let window = Some(window_of(0, buf_len)?);
-    let mut w = RebaseWalk { res, mode: Rebase::Buffer { buf_base, delta }, window, dims: false };
+    let mut w = RebaseWalk { res, mode: Rebase::Buffer { buf_base, delta }, window, dims: None };
     let mut st = Stack::new();
     st.enter(schema, buf_base.add(field_offset), ());
     walk::run(&mut w, &mut st)
@@ -392,9 +393,9 @@ struct RebaseWalk<'a, 'r> {
     /// When set, the relptr range every rebased pointer and the bytes it
     /// addresses must fall inside.
     window: Option<RelWindow>,
-    /// Whether the value is input being decoded, so that every array meets
-    /// its schema's fixed length (DIM-3).
-    dims: bool,
+    /// The origin of a value being decoded whose arrays must each meet
+    /// their schema's fixed length, if that check runs.
+    dims: Option<Origin>,
 }
 
 impl<'a, 'r> RebaseWalk<'a, 'r> {
@@ -449,7 +450,7 @@ impl<'a, 'r> RebaseWalk<'a, 'r> {
     ///
     /// # Safety
     /// `first` points at `n` headers, as `step`'s `data` points at one.
-    unsafe fn headers(&self, first: *mut Array, n: usize, elem_w: usize, dim: Option<usize>) -> Result<(), MorlocError> {
+    unsafe fn headers(&self, first: *mut Array, n: usize, elem_w: usize, dim: Option<(usize, Origin)>) -> Result<(), MorlocError> {
         let Some(RelWindow { lo, hi }) = self.window else {
             return Err(MorlocError::Shm("a run of headers is rebased only inside a window".into()));
         };
@@ -459,8 +460,11 @@ impl<'a, 'r> RebaseWalk<'a, 'r> {
         for i in 0..n {
             // SAFETY: the caller's `n` headers.
             let arr = unsafe { &mut *first.add(i) };
-            if let Some(d) = dim.filter(|&d| d != arr.size) {
-                return Err(MorlocError::Other(format!("Array length mismatch: expected {}, got {}", d, arr.size)));
+            if let Some((d, o)) = dim.filter(|&(d, _)| d != arr.size) {
+                return Err(o.length_failure(MorlocError::Other(format!(
+                    "Array length mismatch: expected {}, got {}",
+                    d, arr.size
+                ))));
             }
             if arr.size == 0 {
                 if !(buffer || checking) {
@@ -524,8 +528,8 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                 SerialType::String | SerialType::Array => {
                     let arr = &mut *(data as *mut Array);
                     if f.idx == 0 {
-                        if self.dims {
-                            s.check_len(arr.size)?;
+                        if let Some(o) = self.dims {
+                            s.check_len(arr.size).map_err(|e| o.length_failure(e))?;
                         }
                         if matches!(self.mode, Rebase::Buffer { .. }) && (arr.size == 0 || arr.data <= 0) {
                             return Ok(());
@@ -559,7 +563,7 @@ impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
                     if self.window.is_some() && w == std::mem::size_of::<Array>() {
                         let inner = self.res.resolve(elem_schema)?;
                         if let Some(ew) = header_elem_width(inner) {
-                            let dim = if self.dims { inner.array_dim() } else { None };
+                            let dim = self.dims.and_then(|o| inner.array_dim().map(|d| (d, o)));
                             return self.headers(elems.add(f.idx * w) as *mut Array, arr.size - f.idx, ew, dim);
                         }
                     }
@@ -654,10 +658,11 @@ fn header_elem_width(s: &Schema) -> Option<usize> {
 
 // ── read_voidstar_binary ───────────────────────────────────────────────────
 
-/// Read a flat voidstar binary blob into SHM, adjusting relptrs. The blob's
-/// relptrs must be buffer-relative (vol_idx 0); see `read_binary_with_hint`.
+/// Read a flat voidstar binary blob from outside the program into SHM,
+/// adjusting relptrs. The blob's relptrs must be buffer-relative (vol_idx
+/// 0); see `read_binary_with_hint`.
 pub fn read_binary(blob: &[u8], schema: &Schema) -> Result<AbsPtr, MorlocError> {
-    read_binary_with_hint(blob, schema, 0)
+    read_binary_with_hint(blob, schema, 0, Origin::Outside)
 }
 
 /// Read a flat voidstar binary blob into SHM, accounting for a
@@ -666,11 +671,12 @@ pub fn read_binary_with_hint(
     blob: &[u8],
     schema: &Schema,
     vol_idx_hint: u16,
+    origin: Origin,
 ) -> Result<AbsPtr, MorlocError> {
     let landing = Landing::new(blob.len())?;
     // SAFETY: the landing's block is fresh and blob.len() bytes long.
     unsafe { std::ptr::copy_nonoverlapping(blob.as_ptr(), landing.as_mut_ptr(), blob.len()) };
-    landing.relocate(schema, vol_idx_hint)
+    landing.relocate(schema, vol_idx_hint, origin)
 }
 
 /// Bytes brought into a fresh SHM block from outside -- a file, a buffer, a
@@ -711,10 +717,11 @@ impl Landing {
     /// Relocate the landed value of `schema` from the producer's frame: its
     /// relptrs are offsets from the value's start, carrying `vol_idx_hint` in
     /// their volume bits (0 for plain buffer-relative offsets). Every rebased
-    /// pointer and the bytes it addresses must lie inside the block.
-    pub fn relocate(self, schema: &Schema, vol_idx_hint: u16) -> Result<AbsPtr, MorlocError> {
+    /// pointer and the bytes it addresses must lie inside the block, and
+    /// fixed lengths are checked as `origin` asks.
+    pub fn relocate(self, schema: &Schema, vol_idx_hint: u16, origin: Origin) -> Result<AbsPtr, MorlocError> {
         // SAFETY: the landing's block holds `len` landed bytes.
-        unsafe { relocate_landed(self.block, self.len, schema, vol_idx_hint) }?;
+        unsafe { relocate_landed(self.block, self.len, schema, vol_idx_hint, origin) }?;
         let block = self.block;
         std::mem::forget(self);
         Ok(block)
@@ -727,7 +734,7 @@ impl Landing {
 /// # Safety
 /// `block` must be a live SHM block holding `len` landed bytes that nothing
 /// else reads or writes during the call.
-pub unsafe fn relocate_landed(block: AbsPtr, len: usize, schema: &Schema, vol_idx_hint: u16) -> Result<(), MorlocError> {
+pub unsafe fn relocate_landed(block: AbsPtr, len: usize, schema: &Schema, vol_idx_hint: u16, origin: Origin) -> Result<(), MorlocError> {
     if len < schema.width {
         return Err(MorlocError::Serialization(format!(
             "a voidstar value of {} bytes is shorter than its {}-byte root", len, schema.width
@@ -739,10 +746,11 @@ pub unsafe fn relocate_landed(block: AbsPtr, len: usize, schema: &Schema, vol_id
     let window = RelWindow::of_block(block, len)?;
     // SAFETY: the caller's block holds `len` bytes, at least one root wide;
     // every pointer the rebase follows is checked against it.
-    if let Some(r) = unsafe { walk_root_array_parallel(RebaseMode::Shm(delta), window, block, schema, true) } {
+    let dims = origin.checked();
+    if let Some(r) = unsafe { walk_root_array_parallel(RebaseMode::Shm(delta), window, block, schema, dims) } {
         return r;
     }
-    unsafe { adjust_records_checking(block, 1, schema, delta, window, true) }
+    unsafe { adjust_records_checking(block, 1, schema, delta, window, dims) }
 }
 
 /// The mode of a parallel walk, rebuilt on each worker.
@@ -779,7 +787,7 @@ unsafe fn walk_root_array_parallel(
     window: RelWindow,
     data: *mut u8,
     schema: &Schema,
-    dims: bool,
+    dims: Option<Origin>,
 ) -> Option<Result<(), MorlocError>> {
     let workers = crate::compression::frame_workers();
     if workers < 2 {
@@ -798,9 +806,9 @@ unsafe fn walk_root_array_parallel(
     if arr.size < 2 || window.hi - window.lo < PARALLEL_WALK_MIN_BYTES {
         return None;
     }
-    if dims {
+    if let Some(o) = dims {
         if let Err(e) = s.check_len(arr.size) {
-            return Some(Err(e));
+            return Some(Err(o.length_failure(e)));
         }
     }
     let elem_schema = &s.parameters[0];
@@ -833,7 +841,7 @@ unsafe fn walk_root_array_parallel(
                 return;
             }
             if let (Some(ew), Some(inner)) = (header_w, inner) {
-                let dim = if dims { inner.array_dim() } else { None };
+                let dim = dims.and_then(|o| inner.array_dim().map(|d| (d, o)));
                 let end = (start + chunk).min(n);
                 // SAFETY: elements start..end lie inside the region the
                 // header check admitted.
@@ -876,8 +884,8 @@ unsafe fn walk_root_array_parallel(
 /// the producer's frame, relptrs carrying `vol_idx_hint`) as `relocate`
 /// would, writing nothing: every pointer and the bytes it addresses lie
 /// inside `bytes`, every variant tag names an arm.
-pub fn check_in_place(bytes: &[u8], schema: &Schema, vol_idx_hint: u16) -> Result<(), MorlocError> {
-    check_window(bytes, schema, -shm::encode_relptr(vol_idx_hint as usize, 0), true)
+pub fn check_in_place(bytes: &[u8], schema: &Schema, vol_idx_hint: u16, origin: Origin) -> Result<(), MorlocError> {
+    check_window(bytes, schema, -shm::encode_relptr(vol_idx_hint as usize, 0), origin.checked())
 }
 
 /// Whether the value of `schema` at the start of `block` lies wholly inside
@@ -892,11 +900,11 @@ pub unsafe fn within_its_block(block: AbsPtr, schema: &Schema) -> bool {
     let (Some(len), Ok(rel)) = (shm::shm_block_size(block), shm::abs2rel(block)) else {
         return false;
     };
-    check_window(std::slice::from_raw_parts(block, len), schema, -rel, false).is_ok()
+    check_window(std::slice::from_raw_parts(block, len), schema, -rel, None).is_ok()
 }
 
 /// [`check_in_place`] for relptrs that `shift` turns into offsets into `bytes`.
-fn check_window(bytes: &[u8], schema: &Schema, shift: RelPtr, dims: bool) -> Result<(), MorlocError> {
+fn check_window(bytes: &[u8], schema: &Schema, shift: RelPtr, dims: Option<Origin>) -> Result<(), MorlocError> {
     if bytes.len() < schema.width {
         return Err(MorlocError::Serialization(format!(
             "a voidstar value of {} bytes is shorter than its {}-byte root", bytes.len(), schema.width
@@ -930,6 +938,7 @@ pub fn land_compressed_frames(
     compressed: &[u8],
     schema: &Schema,
     vol_idx_hint: u16,
+    origin: Origin,
 ) -> Result<AbsPtr, MorlocError> {
     let (uncompressed, compressed_total) = morloc_runtime_types::packet::frame_totals(frames)?;
     if compressed_total != compressed.len() {
@@ -943,7 +952,7 @@ pub fn land_compressed_frames(
     // SAFETY: the landing's block is fresh and `uncompressed` bytes long.
     let dest = unsafe { std::slice::from_raw_parts_mut(landing.as_mut_ptr(), uncompressed) };
     crate::compression::parallel_decompress_frames(frames, compressed, dest)?;
-    landing.relocate(schema, vol_idx_hint)
+    landing.relocate(schema, vol_idx_hint, origin)
 }
 
 impl Drop for Landing {
@@ -2351,7 +2360,7 @@ mod flat_writer_tests {
         let mut buf: Vec<u8> = Vec::new();
         write_flat_to_writer_with_vol_idx(&mut buf, original_abs, &schema, hint).unwrap();
 
-        let recovered_abs = read_binary_with_hint(&buf, &schema, hint).unwrap();
+        let recovered_abs = read_binary_with_hint(&buf, &schema, hint, Origin::Outside).unwrap();
         let recovered_json = voidstar_to_json_string(recovered_abs, &schema).unwrap();
         assert_eq!(
             original_json, recovered_json,
@@ -2384,7 +2393,7 @@ mod flat_writer_tests {
         let mut buf: Vec<u8> = Vec::new();
         write_flat_to_writer(&mut buf, original, &schema).unwrap();
         let a = read_binary(&buf, &schema).unwrap();
-        let b = read_binary_with_hint(&buf, &schema, 0).unwrap();
+        let b = read_binary_with_hint(&buf, &schema, 0, Origin::Outside).unwrap();
         use crate::json::voidstar_to_json_string;
         assert_eq!(
             voidstar_to_json_string(a, &schema).unwrap(),
@@ -2936,8 +2945,8 @@ mod header_run_tests {
         let tups = parse_schema("at1s").unwrap();
         for (n, bad) in cases() {
             let src = blob(n, 0, bad, None);
-            let ra = check_in_place(&src, &strs, 0).map_err(|e| e.to_string());
-            let rb = check_in_place(&src, &tups, 0).map_err(|e| e.to_string());
+            let ra = check_in_place(&src, &strs, 0, Origin::Outside).map_err(|e| e.to_string());
+            let rb = check_in_place(&src, &tups, 0, Origin::Outside).map_err(|e| e.to_string());
             assert_eq!(ra, rb, "n {n} bad {bad:?}");
             assert_eq!(ra.is_err(), bad.is_some(), "n {n} bad {bad:?}");
         }

@@ -1,0 +1,21 @@
+-- Spec DIM-3: a value one pool hands another is checked against its type
+-- only in a debug build (the code level), while a command's input always is.
+module main (pass)
+
+import root-py
+import root-cpp
+import vector-py
+import vector-cpp
+
+source Py from "src.py" ("short")
+source Cpp from "src.hpp" ("count")
+
+--' A vector its type says has three elements, but that has two
+short :: Int -> Vector 3 Int
+
+--' The number of elements
+count :: Vector 3 Int -> Int
+
+--' Hand a vector from Python to C++
+pass :: Int -> Int
+pass x = count (short x)
