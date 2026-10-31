@@ -48,6 +48,9 @@ module Morloc.Namespace.Expr
   , saveFormatName
   , intrinsicName
   , intrinsicArity
+  , InternalApp (..)
+  , InternalView (..)
+  , viewInternal
   , intrinsicIsIO
   , parseIntrinsic
   , Expr (..)
@@ -776,6 +779,38 @@ parseIntrinsic "try" = Just IntrTry
 parseIntrinsic "tell" = Just IntrTell
 parseIntrinsic "collect" = Just IntrCollect
 parseIntrinsic _ = Nothing
+
+-- | An intrinsic only the compiler writes, with its fixed arguments; a
+-- literal argument a consumer rebuilds is kept beside its value.
+data InternalApp e
+  = TagTest e e Text
+  | CtorField e e Text e Int
+  | ListLenTest e e Int
+  | ListElem e e
+
+-- | What an intrinsic application is, as an internal intrinsic.
+data InternalView e
+  = NotInternal
+  | Malformed
+  | Internal (InternalApp e)
+
+-- | Read an internal intrinsic's fixed arguments.
+viewInternal :: Intrinsic -> [AnnoS g f c] -> InternalView (AnnoS g f c)
+viewInternal intr args = case intr of
+  IntrTagTest -> case args of
+    [s, n@(AnnoS _ _ (StrS t))] -> Internal (TagTest s n t)
+    _ -> Malformed
+  IntrCtorField -> case args of
+    [s, n@(AnnoS _ _ (StrS t)), k@(AnnoS _ _ (IntS _ i))]
+      | i >= 0 -> Internal (CtorField s n t k (fromIntegral i))
+    _ -> Malformed
+  IntrListLenTest -> case args of
+    [s, k@(AnnoS _ _ (IntS _ i))] | i >= 0 -> Internal (ListLenTest s k (fromIntegral i))
+    _ -> Malformed
+  IntrListElem -> case args of
+    [s, k@(AnnoS _ _ (IntS _ i))] | i >= 0 -> Internal (ListElem s k)
+    _ -> Malformed
+  _ -> NotInternal
 
 -- | Expected number of arguments for each intrinsic
 intrinsicArity :: Intrinsic -> Int

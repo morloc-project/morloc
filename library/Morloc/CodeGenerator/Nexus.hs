@@ -489,15 +489,6 @@ checkExportedHigherOrder i name t = case findOffender t of
     nestedSuspension :: Type -> Bool
     nestedSuspension = Serial.containsEffectT . hostRoot
 
--- | The text of a literal string argument in a nexus-bound expression.
-nexusLiteralStr :: AnnoS (Indexed Type) One () -> Maybe Text
-nexusLiteralStr (AnnoS _ _ (StrS t)) = Just t
-nexusLiteralStr _ = Nothing
-
--- | The value of a literal integer argument.
-nexusLiteralInt :: AnnoS (Indexed Type) One () -> Maybe Int
-nexusLiteralInt (AnnoS _ _ (IntS _ i)) = Just (fromIntegral i)
-nexusLiteralInt _ = Nothing
 
 -- | A constructor's tag: its position in its type's declaration order,
 -- read off the subject's own type. The typechecker has already resolved
@@ -507,8 +498,8 @@ nexusCtorTag (AnnoS (Idx i t) _ _) n = do
   scope <- MM.gets stateGeneralTypedefs
   case TE.enumCtors scope (TE.whnf scope (type2typeu t)) of
     Just names | (k : _) <- [k' | (k', m) <- zip [0 ..] names, m == n] -> return k
-    _ -> MM.throwSourcedError i $
-      "compiler bug: no tag for constructor" <+> squotes (pretty n)
+    _ -> MM.throwCompilerBugAt i $
+      "no tag for constructor" <+> squotes (pretty n)
 
 -- ======================================================================
 -- Pure expression extraction
@@ -777,40 +768,32 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- without any pool dispatch.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrMap [funcE, listE])) =
       MapX <$> type2schema t <*> toNexusExpr funcE <*> toNexusExpr listE
-    -- The constructor arrives as a NAME. Its tag is its position in the
-    -- type's declaration order, which the subject's own schema carries, so
-    -- the test needs no second value to materialize -- and could not
-    -- materialize one for a payload arm, whose constructor is a function.
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrTagTest [subjE, nameE]))
-      | Just n <- nexusLiteralStr nameE = do
-          sch <- type2schema t
-          subj <- toNexusExpr subjE
-          tag <- nexusCtorTag subjE n
-          return (TagTestX sch subj tag)
-    -- Reading one field out of a value whose arm a guarding tag test has
-    -- established. Like the tag test, the arm travels as data: there is no
-    -- constructor value to apply, and the field's own schema comes from the
-    -- arm the tag selects.
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrCtorField [subjE, nameE, idxE]))
-      | Just n <- nexusLiteralStr nameE
-      , Just idx <- nexusLiteralInt idxE = do
-          sch <- type2schema t
-          subj <- toNexusExpr subjE
-          tag <- nexusCtorTag subjE n
-          return (CtorFieldX sch subj tag idx)
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrListLenTest [subjE, lenE]))
-      | Just n <- nexusLiteralInt lenE = do
-          sch <- type2schema t
-          subj <- toNexusExpr subjE
-          return (ListLenTestX sch subj n)
-    -- A list-pattern element read is a bracket index the guarding length
-    -- test has put in range, so it reuses the nexus's native bracket index.
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrListElem [subjE, idxE]))
-      | Just _ <- nexusLiteralInt idxE = do
-          sch <- type2schema t
-          idx <- toNexusExpr idxE
-          subj <- toNexusExpr subjE
-          return (AppX sch (PatX sch PatternBracketIndex) [idx, subj])
+    -- An intrinsic only the compiler writes ('viewInternal'). A constructor
+    -- arrives as a NAME, its tag the position in its type's declaration
+    -- order, which the subject's schema carries; a list element read is a
+    -- bracket index the guarding length test has put in range.
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS intr args))
+      | Malformed <- viewInternal intr args =
+          MM.throwCompilerBugAt ix $ "malformed" <+> pretty (show intr) <+> "intrinsic"
+      | Internal app <- viewInternal intr args = case app of
+          TagTest subjE _ n -> do
+            sch <- type2schema t
+            subj <- toNexusExpr subjE
+            TagTestX sch subj <$> nexusCtorTag subjE n
+          CtorField subjE _ n _ idx -> do
+            sch <- type2schema t
+            subj <- toNexusExpr subjE
+            tag <- nexusCtorTag subjE n
+            return (CtorFieldX sch subj tag idx)
+          ListLenTest subjE _ n -> do
+            sch <- type2schema t
+            subj <- toNexusExpr subjE
+            return (ListLenTestX sch subj n)
+          ListElem subjE idxE -> do
+            sch <- type2schema t
+            idx <- toNexusExpr idxE
+            subj <- toNexusExpr subjE
+            return (AppX sch (PatX sch PatternBracketIndex) [idx, subj])
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
       ShowX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrRead [arg])) =
@@ -917,10 +900,10 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- IFile-receiver detection (see toNexusExpr cases above); this
     -- handler exists to support any future site that synthesises the
     -- IntrinsicS form directly.
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrIFileWalk (pathExpr : handle : runtimeArgs))) = do
+    toNexusExpr (AnnoS (Idx walkIdx t) _ (IntrinsicS IntrIFileWalk (pathExpr : handle : runtimeArgs))) = do
       pathText <- case pathExpr of
         AnnoS _ _ (StrS s) -> return s
-        _ -> error "IntrIFileWalk's first arg must be a string literal (compiler bug)"
+        _ -> MM.throwCompilerBugAt walkIdx "the path of an IFile walk is not a string literal"
       IFileWalkX
         <$> type2schema t
         <*> toNexusExpr handle

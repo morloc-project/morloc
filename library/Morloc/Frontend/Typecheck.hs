@@ -831,15 +831,6 @@ synthG g (AnnoS gi ci e) = do
     Nothing -> return ()
   return (g', t, annotatedBody)
 
--- | The constructor-pattern lowering always puts a string literal here, so
--- Nothing is a compiler bug, not a user error.
-literalStr :: AnnoS Int ManyPoly Int -> Maybe Text
-literalStr (AnnoS _ _ (StrS t)) = Just t
-literalStr _ = Nothing
-
-unAnnoSE :: AnnoS Int ManyPoly Int -> ExprS Int ManyPoly Int
-unAnnoSE (AnnoS _ _ e) = e
-
 -- | The field types of a constructor of the scrutinee's `data` type, with
 -- its parameters instantiated. Rejecting a constructor of another type
 -- keeps a clause set from mixing two `data` types.
@@ -1457,63 +1448,44 @@ synthE _ _ (IntrinsicS IntrNewtypeUnwrap args) =
   error $ "IntrNewtypeUnwrap expects one argument, got " <> show (length args)
 synthE i _ (IntrinsicS IntrNewtypeWrap _) =
   MM.throwSourcedError i "A newtype wrap needs the newtype it builds from its context."
--- IntrTagTest: the constructor-pattern tag test.
+-- The intrinsics only the compiler writes ('viewInternal').
 --
--- The second argument is the constructor's NAME, carried as data by the
--- desugar rather than as a reference to the term the declaration bound. A
--- payload constructor is a function into its type (@Circle :: Real ->
--- Shape@), so it could never be checked as a value of the type being
--- tested. Validating the name against the scrutinee's own constructor
--- table works for both tiers and rejects a constructor borrowed from
--- another type just as firmly as the value check it replaces.
-synthE i g (IntrinsicS IntrTagTest [subjectE, nameE])
-  | Just n <- literalStr nameE = do
-      (g1, subjectT, subjectE') <- synthG g subjectE
-      _ <- checkCtorBelongs i g1 subjectT n
-      (g2, _, nameE') <- synthG g1 nameE
-      return (g2, BT.boolU, IntrinsicS IntrTagTest [subjectE', nameE'])
-synthE _ _ (IntrinsicS IntrTagTest args) =
-  error $ "IntrTagTest expects (subject, constructor name), got " <> show (length args)
--- IntrCtorField: read one field out of a value whose constructor a guarding
--- tag test has already established. The result is the constructor's declared
--- field type with the owning type's parameters instantiated against the
--- scrutinee -- the same table 'ConS' reads to CHECK arguments going in, read
--- here to synthesize one coming out.
-synthE i g (IntrinsicS IntrCtorField [subjectE, nameE, idxE])
-  | Just n <- literalStr nameE
-  , IntS _ idx <- unAnnoSE idxE = do
-      (g1, subjectT, subjectE') <- synthG g subjectE
-      fieldTs <- checkCtorBelongs i g1 subjectT n
-      (g2, _, nameE') <- synthG g1 nameE
-      (g3, _, idxE') <- synthG g2 idxE
-      case drop (fromIntegral idx) fieldTs of
-        (t : _) ->
-          return (g3, apply g3 t, IntrinsicS IntrCtorField [subjectE', nameE', idxE'])
-        [] ->
-          MM.throwSourcedError i $
-            "constructor" <+> squotes (pretty n) <+> "has no field"
-              <+> pretty (show idx)
-synthE _ _ (IntrinsicS IntrCtorField args) =
-  error $ "IntrCtorField expects (subject, constructor name, index), got " <> show (length args)
--- IntrListLenTest and IntrListElem: the list-pattern length test and element
--- read. The subject is checked against @List a@ itself, not a fresh
--- container, so a list pattern rejects every other container.
-synthE _ g (IntrinsicS IntrListLenTest [subjectE, lenE])
-  | IntS _ _ <- unAnnoSE lenE = do
-      let (g1, a) = newvar "listpat_elem_" g
-      (g2, _, subjectE') <- checkG g1 subjectE (BT.listU a)
-      (g3, _, lenE') <- synthG g2 lenE
-      return (g3, BT.boolU, IntrinsicS IntrListLenTest [subjectE', lenE'])
-synthE _ _ (IntrinsicS IntrListLenTest args) =
-  error $ "IntrListLenTest expects (subject, literal length), got " <> show (length args)
-synthE _ g (IntrinsicS IntrListElem [subjectE, idxE])
-  | IntS _ _ <- unAnnoSE idxE = do
-      let (g1, a) = newvar "listpat_elem_" g
-      (g2, _, subjectE') <- checkG g1 subjectE (BT.listU a)
-      (g3, _, idxE') <- synthG g2 idxE
-      return (g3, apply g3 a, IntrinsicS IntrListElem [subjectE', idxE'])
-synthE _ _ (IntrinsicS IntrListElem args) =
-  error $ "IntrListElem expects (subject, literal index), got " <> show (length args)
+-- A tag test carries the constructor's NAME, not a reference to the term the
+-- declaration bound: a payload constructor is a function into its type, so it
+-- could never be checked as a value of the type being tested. The name is
+-- checked against the scrutinee's own constructor table instead. A field read
+-- follows a tag test that fixed the constructor; a list element read follows
+-- a length test, and both check the subject against @List a@ itself, so a list
+-- pattern rejects every other container.
+synthE i g (IntrinsicS intr args)
+  | Malformed <- viewInternal intr args =
+      MM.throwCompilerBugAt i $ "malformed" <+> pretty (show intr) <+> "intrinsic"
+  | Internal app <- viewInternal intr args = case app of
+      TagTest subjectE nameE n -> do
+        (g1, subjectT, subjectE') <- synthG g subjectE
+        _ <- checkCtorBelongs i g1 subjectT n
+        (g2, _, nameE') <- synthG g1 nameE
+        return (g2, BT.boolU, IntrinsicS intr [subjectE', nameE'])
+      CtorField subjectE nameE n idxE idx -> do
+        (g1, subjectT, subjectE') <- synthG g subjectE
+        fieldTs <- checkCtorBelongs i g1 subjectT n
+        (g2, _, nameE') <- synthG g1 nameE
+        (g3, _, idxE') <- synthG g2 idxE
+        case drop idx fieldTs of
+          (t : _) -> return (g3, apply g3 t, IntrinsicS intr [subjectE', nameE', idxE'])
+          [] ->
+            MM.throwSourcedError i $
+              "constructor" <+> squotes (pretty n) <+> "has no field" <+> pretty (show idx)
+      ListLenTest subjectE lenE _ -> do
+        let (g1, a) = newvar "listpat_elem_" g
+        (g2, _, subjectE') <- checkG g1 subjectE (BT.listU a)
+        (g3, _, lenE') <- synthG g2 lenE
+        return (g3, BT.boolU, IntrinsicS intr [subjectE', lenE'])
+      ListElem subjectE idxE -> do
+        let (g1, a) = newvar "listpat_elem_" g
+        (g2, _, subjectE') <- checkG g1 subjectE (BT.listU a)
+        (g3, _, idxE') <- synthG g2 idxE
+        return (g3, apply g3 a, IntrinsicS intr [subjectE', idxE'])
 -- IntrWrite: @Int -> OStream a -> [a] -> <IO> Try Str ()@. The handle is
 -- checked before the list, so that in @write 0 (o :: OStream UInt64) [1]@
 -- the literal can be a UInt64 rather than synthesize Int.
@@ -1641,8 +1613,9 @@ synthE i _ (IntrinsicS IntrDatafile [pathE])
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
   g'' <- checkIntrinsicArgs i g' intr argTypes
-  let (g''', expectedType) = intrinsicTypeG g'' intr argTypes
-  return (g''', expectedType, IntrinsicS intr args')
+  case intrinsicTypeG g'' intr argTypes of
+    Just (g''', expectedType) -> return (g''', expectedType, IntrinsicS intr args')
+    Nothing -> MM.throwCompilerBugAt i $ pretty (show intr) <+> "reached the generic intrinsic rule"
 
 -- | A string literal, possibly reached through a name bound to one.
 isStaticStr :: AnnoS g ManyPoly c -> Bool
@@ -1677,45 +1650,45 @@ peelForallU t = t
 
 -- | Return type of a fully applied intrinsic, threading Gamma for fresh
 -- existentials.
-intrinsicTypeG :: Gamma -> Intrinsic -> [TypeU] -> (Gamma, TypeU)
+intrinsicTypeG :: Gamma -> Intrinsic -> [TypeU] -> Maybe (Gamma, TypeU)
 -- @load :: Str -> <IO> (Try Str a)
 intrinsicTypeG g IntrLoad _ =
   let (g', loadType) = newvar "load_" g
-  in (g', EffectU ioEffectSet (BT.tryU BT.strU loadType))
+  in Just (g', EffectU ioEffectSet (BT.tryU BT.strU loadType))
 -- @read :: Str -> Try Str a. A JSON parse touches nothing, so with
 -- failure carried in the result it is pure and composes in `map`.
 intrinsicTypeG g IntrRead _ =
   let (g', readType) = newvar "read_" g
-  in (g', BT.tryU BT.strU readType)
+  in Just (g', BT.tryU BT.strU readType)
 -- @open: the return type comes from an ascription
 -- (`@open path :: IFile Sequence`).
 intrinsicTypeG g IntrOpen _ =
   let (g', openType) = newvar "open_" g
-  in (g', EffectU ioEffectSet (BT.tryU BT.strU openType))
+  in Just (g', EffectU ioEffectSet (BT.tryU BT.strU openType))
 -- @unpack: the decoded type is resolved by the synthesized ascription.
 intrinsicTypeG g IntrUnpack _ =
   let (g', unpackType) = newvar "unpack_" g
-  in (g', EffectU ioEffectSet unpackType)
-intrinsicTypeG g IntrClose _ = (g, EffectU ioEffectSet BT.unitU)
+  in Just (g', EffectU ioEffectSet unpackType)
+intrinsicTypeG g IntrClose _ = Just (g, EffectU ioEffectSet BT.unitU)
 -- @append: the return type comes from an ascription, as for @open.
 intrinsicTypeG g IntrAppend _ =
   let (g', appendType) = newvar "append_" g
-  in (g', EffectU ioEffectSet (BT.tryU BT.strU appendType))
+  in Just (g', EffectU ioEffectSet (BT.tryU BT.strU appendType))
 -- @stdin can fail (a second open); @stdout and @stderr cannot.
 intrinsicTypeG g IntrStdin _ =
   let (g', a) = newvar "stdin_a" g in
-  (g', EffectU ioEffectSet (BT.tryU BT.strU (AppU (VarU BT.istreamVar) [a])))
+  Just (g', EffectU ioEffectSet (BT.tryU BT.strU (AppU (VarU BT.istreamVar) [a])))
 intrinsicTypeG g IntrStdout _ =
   let (g', a) = newvar "stdout_a" g in
-  (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
+  Just (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
 intrinsicTypeG g IntrStderr _ =
   let (g', a) = newvar "stderr_a" g in
-  (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
+  Just (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
 -- @throw :: Str -> a. A bottom, not a tracked effect.
 intrinsicTypeG g IntrThrow _ =
   let (g', a) = newvar "throw_" g
-  in (g', a)
-intrinsicTypeG g intr _ = (g, intrinsicType intr)
+  in Just (g', a)
+intrinsicTypeG g intr _ = (,) g <$> intrinsicType intr
 
 -- | Check a @Cell b@ handle and return @b@. Called before a cell
 -- intrinsic's other arguments are checked, as for IntrWrite.
@@ -1728,100 +1701,66 @@ checkCellHandle g handleE = do
   (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.cellVar) [b])
   return (g2, apply g2 b, handleE')
 
--- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
-intrinsicType :: Intrinsic -> TypeU
-intrinsicType IntrSave = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
-intrinsicType IntrSaveJ = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
-intrinsicType IntrLoad = EffectU ioEffectSet (BT.tryU BT.strU (ExistU (TV "load_a") ([], Open) ([], Open)))
-intrinsicType IntrHash = BT.strU
-intrinsicType IntrEq = error "intrinsicType: IntrEq must be typed via synthE's dedicated clause"
-intrinsicType IntrLe = error "intrinsicType: IntrLe must be typed via synthE's dedicated clause"
-intrinsicType IntrVersion = BT.strU
-intrinsicType IntrCompiled = BT.strU
-intrinsicType IntrLang = BT.strU
-intrinsicType IntrSchema = BT.strU
-intrinsicType IntrTypeof = BT.strU
-intrinsicType IntrShow = BT.strU
-intrinsicType IntrRead = BT.tryU BT.strU (ExistU (TV "read_a") ([], Open) ([], Open))
-intrinsicType IntrDatafile = BT.strU
-intrinsicType IntrUnpack =
-  error "intrinsicType: IntrUnpack must be typed via intrinsicTypeG"
-intrinsicType IntrOpen =
-  error "intrinsicType: IntrOpen must be typed via intrinsicTypeG"
-intrinsicType IntrClose =
-  error "intrinsicType: IntrClose must be typed via intrinsicTypeG"
-intrinsicType IntrFSchema = EffectU ioEffectSet (BT.tryU BT.strU BT.strU)
-intrinsicType IntrFLength = EffectU ioEffectSet (BT.tryU BT.strU BT.intU)
-intrinsicType IntrStreamLayout =
-  EffectU ioEffectSet (BT.tryU BT.strU (BT.listU (BT.tupleU [BT.u64U, BT.u64U, BT.u64U])))
-intrinsicType IntrTell = EffectU ioEffectSet BT.u64U
-intrinsicType IntrTmpfile = EffectU ioEffectSet (BT.tryU BT.strU BT.strU)
-intrinsicType IntrNext =
-  error "intrinsicType: IntrNext is typed in synthE (its element type comes from the receiver)"
-intrinsicType IntrStream =
-  error "intrinsicType: IntrStream is typed in synthE (its element type comes from the receiver)"
-intrinsicType IntrWrite = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
+-- | The type of a fully applied intrinsic that needs no fresh variables;
+-- Nothing for one typed by its own rule.
+intrinsicType :: Intrinsic -> Maybe TypeU
+intrinsicType IntrSave = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.unitU))
+intrinsicType IntrSaveJ = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.unitU))
+intrinsicType IntrLoad = Nothing
+intrinsicType IntrHash = Just (BT.strU)
+intrinsicType IntrEq = Nothing
+intrinsicType IntrLe = Nothing
+intrinsicType IntrVersion = Just (BT.strU)
+intrinsicType IntrCompiled = Just (BT.strU)
+intrinsicType IntrLang = Just (BT.strU)
+intrinsicType IntrSchema = Just (BT.strU)
+intrinsicType IntrTypeof = Just (BT.strU)
+intrinsicType IntrShow = Just (BT.strU)
+intrinsicType IntrRead = Nothing
+intrinsicType IntrDatafile = Just (BT.strU)
+intrinsicType IntrUnpack = Nothing
+intrinsicType IntrOpen = Nothing
+intrinsicType IntrClose = Nothing
+intrinsicType IntrFSchema = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.strU))
+intrinsicType IntrFLength = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.intU))
+intrinsicType IntrStreamLayout = Just (EffectU ioEffectSet (BT.tryU BT.strU (BT.listU (BT.tupleU [BT.u64U, BT.u64U, BT.u64U]))))
+intrinsicType IntrTell = Just (EffectU ioEffectSet BT.u64U)
+intrinsicType IntrTmpfile = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.strU))
+intrinsicType IntrNext = Nothing
+intrinsicType IntrStream = Nothing
+intrinsicType IntrWrite = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.unitU))
 -- One clause each, not a guard over a list: this match is exhaustive on
 -- purpose, so that a new Intrinsic constructor fails the build here rather
 -- than falling through to a runtime error.
-intrinsicType IntrCellNew =
-  error "intrinsicType: IntrCellNew must be typed via synthE's dedicated clause"
-intrinsicType IntrCellGet =
-  error "intrinsicType: IntrCellGet must be typed via synthE's dedicated clause"
-intrinsicType IntrCellPut =
-  error "intrinsicType: IntrCellPut must be typed via synthE's dedicated clause"
-intrinsicType IntrCellReduce =
-  error "intrinsicType: IntrCellReduce must be typed via synthE's dedicated clause"
-intrinsicType IntrReplay =
-  error "intrinsicType: IntrReplay must be typed via synthE's dedicated clause"
-intrinsicType IntrChannel =
-  error "intrinsicType: IntrChannel must be typed via synthE's dedicated clause"
-intrinsicType IntrSpawn =
-  error "intrinsicType: IntrSpawn must be typed via synthE's dedicated clause"
-intrinsicType IntrSettle =
-  error "intrinsicType: IntrSettle must be typed via synthE's dedicated clause"
-intrinsicType IntrAppend =
-  error "intrinsicType: IntrAppend must be typed via intrinsicTypeG (polymorphic return)"
-intrinsicType IntrConcat = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
-intrinsicType IntrFlush = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
-intrinsicType IntrMap =
-  error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
-intrinsicType IntrMapOptional =
-  error "intrinsicType: IntrMapOptional is emitted after typechecking"
-intrinsicType IntrTagTest =
-  error "intrinsicType: IntrTagTest must be typed via synthE's dedicated clause"
-intrinsicType IntrNewtypeUnwrap =
-  error "intrinsicType: IntrNewtypeUnwrap must be typed via synthE's dedicated clause"
-intrinsicType IntrNewtypeWrap =
-  error "intrinsicType: IntrNewtypeWrap must be typed via checkE's dedicated clause"
-intrinsicType IntrCtorField =
-  error "intrinsicType: IntrCtorField must be typed via synthE's dedicated clause"
-intrinsicType IntrListLenTest =
-  error "intrinsicType: IntrListLenTest must be typed via synthE's dedicated clause"
-intrinsicType IntrListElem =
-  error "intrinsicType: IntrListElem must be typed via synthE's dedicated clause"
-intrinsicType IntrStdin =
-  error "intrinsicType: IntrStdin must be typed via intrinsicTypeG (polymorphic element type)"
-intrinsicType IntrStdout =
-  error "intrinsicType: IntrStdout must be typed via intrinsicTypeG (polymorphic element type)"
-intrinsicType IntrStderr =
-  error "intrinsicType: IntrStderr must be typed via intrinsicTypeG (polymorphic element type)"
-intrinsicType IntrThrow =
-  error "intrinsicType: IntrThrow must be typed via intrinsicTypeG (polymorphic return type)"
-intrinsicType IntrTry =
-  error "intrinsicType: IntrTry must be typed via synthE's dedicated clause"
-intrinsicType IntrCollect =
-  error "intrinsicType: IntrCollect is expanded at desugar and never reaches typecheck"
-intrinsicType IntrIFileWalk =
-  error "intrinsicType: IntrIFileWalk is synthesized post-typecheck and carries its result type from the originating pattern application"
-intrinsicType IntrConform =
-  error "intrinsicType: IntrConform is synthesized post-typecheck and carries the type of the literal it builds"
-intrinsicType IntrCellSlots =
-  error "intrinsicType: IntrCellSlots is synthesized post-typecheck"
-intrinsicType IntrReduceList =
-  error "intrinsicType: IntrReduceList is synthesized post-typecheck"
-
--- intrinsicArity is defined in Morloc.Namespace.Expr
+intrinsicType IntrCellNew = Nothing
+intrinsicType IntrCellGet = Nothing
+intrinsicType IntrCellPut = Nothing
+intrinsicType IntrCellReduce = Nothing
+intrinsicType IntrReplay = Nothing
+intrinsicType IntrChannel = Nothing
+intrinsicType IntrSpawn = Nothing
+intrinsicType IntrSettle = Nothing
+intrinsicType IntrAppend = Nothing
+intrinsicType IntrConcat = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.unitU))
+intrinsicType IntrFlush = Just (EffectU ioEffectSet (BT.tryU BT.strU BT.unitU))
+intrinsicType IntrMap = Nothing
+intrinsicType IntrMapOptional = Nothing
+intrinsicType IntrTagTest = Nothing
+intrinsicType IntrNewtypeUnwrap = Nothing
+intrinsicType IntrNewtypeWrap = Nothing
+intrinsicType IntrCtorField = Nothing
+intrinsicType IntrListLenTest = Nothing
+intrinsicType IntrListElem = Nothing
+intrinsicType IntrStdin = Nothing
+intrinsicType IntrStdout = Nothing
+intrinsicType IntrStderr = Nothing
+intrinsicType IntrThrow = Nothing
+intrinsicType IntrTry = Nothing
+intrinsicType IntrCollect = Nothing
+intrinsicType IntrIFileWalk = Nothing
+intrinsicType IntrConform = Nothing
+intrinsicType IntrCellSlots = Nothing
+intrinsicType IntrReduceList = Nothing
 
 -- | Synthesize types for a list of arguments
 synthArgs ::
