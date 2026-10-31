@@ -28,6 +28,7 @@ defined.
 
 ### HOST-3 `rsize` declares the call groups of a curried foreign function
 Intent: proposed
+Tests: spec-host-3-1, spec-host-3-2, spec-host-3-3, spec-host-3-4
 Code: deviates (issues/host-calls.md)
 
 `--' @rsize n1 n2 ...` gives the sizes of the leading call groups; the last

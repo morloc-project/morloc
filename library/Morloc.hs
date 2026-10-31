@@ -53,6 +53,7 @@ import Morloc.Frontend.Labels (checkLabels)
 import Morloc.Frontend.AutoRequire (autoRequire)
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Restructure (restructure)
+import Morloc.Frontend.Link (checkRsize)
 import Morloc.Frontend.Treeify (treeify, Validation (..))
 import Morloc.Frontend.Share (shareBindings)
 import Morloc.Frontend.Specialize (specialize)
@@ -75,6 +76,7 @@ typecheckFrontend path code = do
     (r : _) -> MM.modify' (\s -> s {stateModuleName = Just r})
     _ -> return ()
   (checks, exports) <- restructure dag >>= treeify
+  checkRsize
   F.validate (validationTrees checks) (validationInstances checks)
   es <- specialize checks exports
   MM.modify' (\s -> s {stateExportTypes = Map.fromList [(i, t) | AnnoS (Idx i t) _ _ <- es]})

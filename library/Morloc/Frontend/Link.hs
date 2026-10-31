@@ -13,7 +13,7 @@ Walks the module DAG bottom-up and populates 'MorlocState' with signatures
 mappings ('stateName'). This is the bridge between the parsed AST and the
 state-based representation consumed by 'Treeify'.
 -}
-module Morloc.Frontend.Link (link) where
+module Morloc.Frontend.Link (link, checkRsize) where
 
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -26,6 +26,7 @@ import qualified Morloc.Data.Text as DT
 import Morloc.Frontend.Merge (mergeSignatureSet, weaveTermTypes)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
+import qualified Morloc.TypeEval as TE
 import Morloc.Typecheck.Internal (qualify, unqualify)
 
 -- The following terms are modified in morloc state
@@ -788,3 +789,34 @@ checkSuperclassConstraints i cls params constraints = do
 
     matchesSuperInstance :: [TypeU] -> Instance -> Bool
     matchesSuperInstance _ inst = not (null (instanceTerms inst))
+
+-- | HOST-3: the call groups an @rsize@ declares leave at least one argument
+-- for the last group, counting the arguments of the signature, aliases
+-- expanded, up to its first effect.
+checkRsize :: MorlocMonad ()
+checkRsize = do
+  GMap _ sigmap <- MM.gets stateSignatures
+  scope <- MM.getGeneralScope
+  sequence_
+    [ case TE.evaluateType scope (etype et) of
+        -- a signature that does not evaluate is reported where it is used
+        Left _ -> return ()
+        Right t
+          | sum ns < arity t -> return ()
+          | otherwise ->
+              MM.throwSourcedError i $
+                "The rsize declaration on" <+> squotes (pretty (srcAlias src))
+                  <+> "declares groups of" <+> hsep (punctuate comma (map pretty ns))
+                  <+> "arguments, but its signature takes" <+> pretty (arity t)
+                  <+> "before its first effect; the declared groups must leave at least one"
+                  <+> "argument for the last group"
+    | tt <- concatMap termTypes (Map.elems sigmap)
+    , Just et <- [termGeneral tt]
+    , (_, Idx i src@Source {srcRsize = ns@(_ : _)}) <- termConcrete tt
+    ]
+  where
+    termTypes (Monomorphic tt) = [tt]
+    termTypes (Polymorphic _ _ _ tts) = tts
+    arity (ForallU _ t) = arity t
+    arity (FunU ts r) = length ts + arity r
+    arity _ = 0
