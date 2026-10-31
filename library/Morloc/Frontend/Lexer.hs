@@ -594,7 +594,7 @@ lexStringLit start quote input0 st0 = segment (advanceCol start (length delim)) 
       | otherwise = take 1 s == delim
 
     escapes :: String
-    escapes = "nrt0\\\"" <> (if quoteMultiline quote then "'" else "")
+    escapes = "nrt0\\\"'"
 
     -- the hole's tokens, newest first, ending with its closing brace
     splice :: Int -> LexState -> Either LexError (Pos, String, [Located])

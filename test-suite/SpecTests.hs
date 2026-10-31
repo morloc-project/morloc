@@ -2464,7 +2464,18 @@ lexTests :: TestTree
 lexTests =
   testGroup
     "LEX"
-    [ reject
+    [ accept
+        "spec-lit-5-2"
+        [r|
+        module main (a, b, c)
+        a :: Str
+        a = "it\'s \"quoted\""
+        b :: Str
+        b = '''it\'s'''
+        c :: Str
+        c = """say \"hi\" and \'bye\'"""
+        |]
+    , reject
         "spec-lit-5-1"
         [r|
         module main (g)

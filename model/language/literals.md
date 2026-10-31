@@ -41,11 +41,11 @@ realized at.
 
 ### LIT-5 String literals
 Intent: proposed
-Tests: spec-lit-5-1
-Code: deviates (issues/syntax.md)
+Tests: spec-lit-5-1, spec-lit-5-2
+Code: conforms 2026-10-31
 
-A string is double-quoted. The escapes are `\n \t \r \0 \\ \"` and any other
-is a lexical error. In a `"""` or `'''` string, leading spaces through the
+A string is double-quoted. The escapes are `\n \t \r \0 \\ \" \'` and any
+other is a lexical error. In a `"""` or `'''` string, leading spaces through the
 first newline and trailing spaces through the last are dropped, then the
 smallest common indentation is removed from every source line, an
 interpolation counting as one character of content; escapes are decoded
