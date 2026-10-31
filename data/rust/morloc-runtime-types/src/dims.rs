@@ -315,7 +315,7 @@ fn root_of(expr: &[String], r: usize, target: i128, found: &mut [Option<(i128, S
     if target < 0 {
         return Root::Unknown;
     }
-    let mut at = |u: i128, found: &mut [Option<(i128, String)>]| {
+    let at = |u: i128, found: &mut [Option<(i128, String)>]| {
         found[r] = Some((u, String::new()));
         let v = eval(expr, found);
         found[r] = None;
