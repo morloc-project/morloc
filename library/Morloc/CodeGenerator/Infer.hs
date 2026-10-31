@@ -59,7 +59,8 @@ inferConcreteTypeU lang (Idx i t0) = do
   attemptT <- inferConcreteTypeU' t0 <$> getScope lang
   case attemptT of
     (Right t') -> return t'
-    (Left (SystemError e2)) -> MM.throwSourcedError i e2
+    (Left (Rejected Unplaced e2)) -> MM.throwSourcedError i e2
+    (Left (Fault Nothing e2)) -> MM.throwError (Fault (Just (AtNode i)) e2)
     (Left e2) -> MM.throwError e2
 
 inferConcreteTypeU' :: TypeU -> (Scope, Scope) -> Either MorlocError TypeU
@@ -508,7 +509,7 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c
     cscopeUni <- MM.getConcreteScope lang
     if Map.member vG cscopeUni
       then
-        MM.throwSystemError $
+        MM.throwRejected $
           "The" <+> pretty lang <+> "form of" <+> squotes (pretty vG)
             <+> "takes no arguments, but" <+> squotes (pretty vG)
             <+> "has" <+> pretty (length ts) <> "."
@@ -538,7 +539,7 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c
           case inheritedForm cscopeUni gscopeUni g of
             Just parent -> inferConcreteTypeUniversal lang i (typeOf parent)
             Nothing ->
-              MM.throwSystemError $
+              MM.throwRejected $
                 "Failed to infer concrete type for" <+> pretty t
                   <> ": Could not reduce type in broadest scope"
 
@@ -653,8 +654,8 @@ inferConcreteTypeUUniversal lang generalType = do
   let attemptUni = inferConcreteTypeU' generalType (cscopeUni, gscopeUni)
   case attemptUni of
     (Right t) -> return t
-    (Left (SystemError e2)) ->
-      MM.throwSystemError $
+    (Left (Rejected Unplaced e2)) ->
+      MM.throwRejected $
         "Failed to infer concrete universal type for lang"
           <+> pretty lang
           <+> "for type"
@@ -799,7 +800,7 @@ canHoldType' declaredRecords lang i t = do
         then and <$> mapM (declared gscope) (recordNames gscope t)
         else return True
     )
-    `catchError` (\_ -> CMS.put st0 >> return False)
+    `MM.recoverRejected` (CMS.put st0 >> return False)
   where
     declared gscope v = do
       cscope <- MM.getConcreteScope lang

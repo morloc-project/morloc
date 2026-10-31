@@ -140,7 +140,7 @@ realiasLinkState m1 (m2, ss, s) = do
       missing -> error $ "Undefined " <> msg <> " imports:" <> show missing <> "\n  ss = " <> show ss
 
 throwInheritanceError :: MVar -> MDoc -> MorlocMonad a
-throwInheritanceError m msg = MM.throwSystemError $ "In module" <+> squotes (pretty m) <> ":" <+> msg
+throwInheritanceError m msg = MM.throwRejected $ "In module" <+> squotes (pretty m) <> ":" <+> msg
 
 -- All LinkState objects whould have already been renamed by realiasLinkState.
 --
@@ -281,7 +281,7 @@ addLocalState m0 e0 s0 = do
       case Map.lookup lbl effs of
         Just esc'
           | esc' /= esc ->
-              MM.throwSystemError $
+              MM.throwRejected $
                 "Conflicting effect declarations for" <+> squotes (pretty lbl)
                   <> ": declared both as escapable and inescapable"
         _ -> MM.modify' (\s -> s {stateEffects = Map.insert lbl esc (stateEffects s)})

@@ -33,6 +33,7 @@ import qualified Morloc.Data.Text as MT
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Parser (PState (..), emptyPState)
 import qualified Morloc.Frontend.Parser as Parser
+import Morloc.Frontend.Token (posSrcLoc)
 import qualified Morloc.Frontend.Typecheck as Typecheck
 import qualified Morloc.Frontend.Valuecheck as Valuecheck
 import qualified Morloc.LangRegistry as LR
@@ -130,7 +131,7 @@ parse f (Code code) = do
     Nothing -> return ()
 
   case Parser.readProgram Nothing f code parserState mempty of
-    (Left e) -> MM.throwSystemError $ pretty e
+    (Left (pos, e)) -> MM.throwRejectedSource (posSrcLoc pos) (pretty e)
     (Right (mainDag, mainState)) -> do
       -- capture module-level docs from the main module before imports overwrite them
       MM.modify' (\st -> st
@@ -196,7 +197,7 @@ parse f (Code code) = do
           ws -> MM.tell ws
         case MDD.findCycle d of
           Nothing -> return d
-          Just cyc -> MM.throwSystemError $
+          Just cyc -> MM.throwRejected $
             "Import cycle:" <+> hsep (punctuate " ->" (map pretty cyc))
       ((mainModule, importedModule) : _) -> do
         importPath <- case Map.lookup importedModule rw of
@@ -206,7 +207,7 @@ parse f (Code code) = do
         -- Every loaded module is reached from the entry file, so importing
         -- the entry file closes a cycle.
         canonPath <- MM.liftIO $ canonicalizePath importPath
-        when (Just canonPath == entryPath) . MM.throwSystemError $
+        when (Just canonPath == entryPath) . MM.throwRejected $
           "Import cycle: module" <+> pretty mainModule <+> "imports the entry file"
             <+> pretty importPath <+> "as" <+> pretty importedModule
 
@@ -223,7 +224,7 @@ parse f (Code code) = do
         Mod.loadModuleMetadata False importPath
         (childPath, code') <- openLocalModule importPath
         case Parser.readProgram (Just importedModule) childPath code' newState d of
-          (Left e) -> MM.throwSystemError $ pretty e
+          (Left (pos, e)) -> MM.throwRejectedSource (posSrcLoc pos) (pretty e)
           (Right (d', s')) ->
             -- The parsed module may have a different internal name than the
             -- import edge target (e.g., file declares "module units" but
@@ -237,7 +238,7 @@ parse f (Code code) = do
                 rw' = Map.union rw (Map.fromList renamed)
             in if Map.member importedModule d3
                  then parseImports entryPath d3 s' (maybe m (\v -> Map.insert importedModule v m) childPath) pkgs' rw'
-                 else MM.throwSystemError $
+                 else MM.throwRejected $
                    "Loading" <+> pretty importPath <+> "for the import of" <+> pretty importedModule
                      <+> "defined no module of that name;"
                      <+> case newModules d d' of

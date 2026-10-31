@@ -80,7 +80,7 @@ resolvePendingNumLits g0 entries = do
       in case resolved of
            ExistU vEnd _ _ ->
              case solveExist vEnd defaultT g of
-               Left err        -> MM.throwSystemError err
+               Left err        -> MM.throwSourcedError i err
                Right Nothing   -> return g
                Right (Just g') -> return g'
            t -> do
@@ -308,7 +308,7 @@ typecheckWith expected = run
       -- one that the signature's assumptions do not subsume. Class-form
       -- constraints still in gamma are dropped by the filter below.
       case dischargeConstraints scope g3 of
-        Left err -> MM.throwSystemError ("Constraint violation: " <> err)
+        Left err -> MM.throwRejected ("Constraint violation: " <> err)
         Right g3' ->
           case filter isPrimitiveConstraint (gammaConstraints g3') of
             [] -> return ()
@@ -320,7 +320,7 @@ typecheckWith expected = run
                   prefix = case fnName of
                     Just n -> "Unsolved constraint(s) on " <> dquotes (pretty n) <> "; add to its signature: "
                     Nothing -> "Unsolved constraint(s); add to the function signature: "
-              in MM.throwSystemError $
+              in MM.throwRejected $
                 prefix <> hcat (punctuate ", " displayed)
 
       -- Substitution can leave nested AppU (@AppU (AppU H [n]) [a]@);
@@ -3012,7 +3012,8 @@ evaluateAnnoSTypes = mapAnnoSGM resolve
     resolve (Idx m t) = do
       scope <- MM.getGeneralScope
       case TE.evaluateType scope t of
-        (Left (SystemError e)) -> MM.throwSourcedError m e
+        (Left (Rejected Unplaced e)) -> MM.throwSourcedError m e
+        (Left (Fault Nothing e)) -> MM.throwError (Fault (Just (AtNode m)) e)
         (Left e) -> MM.throwError e
         (Right tu) -> return (Idx m tu)
 

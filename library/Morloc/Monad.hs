@@ -69,8 +69,12 @@ module Morloc.Monad
   , sayVVV
 
     -- * throwing errors
-  , throwSystemError
   , throwSourcedError
+  , throwRejected
+  , throwRejectedSource
+  , recoverRejected
+  , isDefect
+  , throwFailed
   , throwUnificationError
   , throwCompilerBug
   , throwCompilerBugAt
@@ -260,29 +264,35 @@ warnAt i msg = do
     ]
 
 makeMorlocError :: MorlocState -> MorlocError -> MDoc
-makeMorlocError st (SourcedError i msg0) =
-  case Map.lookup i (stateSourceMap st) of
-    Just loc -> pretty loc <> ": error:" <> line <> msg <> snippet st loc
-    Nothing -> "Compiler bug, broken index" <+> pretty i <+> "with attached error:" <+> msg
-  where
-    msg = maybe msg0 (\note -> note <> line <> msg0) (Map.lookup i (stateErrorNotes st))
-makeMorlocError _ (SystemError msg) = msg
-makeMorlocError st (UnificationError lhs rhs context msg) =
-  case (Map.lookup lhs srcMap, Map.lookup rhs srcMap, Map.lookup context srcMap) of
-    (Just lhsLoc, rhsLoc, contextLoc) ->
-      maybe mempty (<> line) note
-        <> "Unification error:" <+> msg
-        <> line
-        <> "Found while unifying" <+> maybe mempty pretty contextLoc
-        <> line
-        <> "With values"
-        <> line
-        <> snippet st lhsLoc
-        <> maybe mempty (\l -> "and" <> line <> snippet st l) rhsLoc
-    _ -> "Compiler bug, broken indices" <+> pretty (lhs, rhs, context) <+> "with attached error:" <+> msg
+makeMorlocError st e = case e of
+  Rejected loc msg -> located loc msg
+  EnvFailed msg -> msg
+  Fault Nothing msg -> msg
+  Fault (Just loc) msg -> located loc msg
   where
     srcMap = stateSourceMap st
-    note = listToMaybe (mapMaybe (`Map.lookup` stateErrorNotes st) [lhs, rhs, context])
+    noteAt i msg = maybe msg (\note -> note <> line <> msg) (Map.lookup i (stateErrorNotes st))
+    located (AtNode i) msg = case Map.lookup i srcMap of
+      Just loc -> pretty loc <> ": error:" <> line <> noteAt i msg <> snippet st loc
+      Nothing -> "Compiler bug, broken index" <+> pretty i <+> "with attached error:" <+> msg
+    located (AtUnification lhs rhs context) msg =
+      case (Map.lookup lhs srcMap, Map.lookup rhs srcMap, Map.lookup context srcMap) of
+        (Just lhsLoc, rhsLoc, contextLoc) ->
+          maybe mempty (<> line) note
+            <> "Unification error:" <+> msg
+            <> line
+            <> "Found while unifying" <+> maybe mempty pretty contextLoc
+            <> line
+            <> "With values"
+            <> line
+            <> snippet st lhsLoc
+            <> maybe mempty (\l -> "and" <> line <> snippet st l) rhsLoc
+        _ -> "Compiler bug, broken indices" <+> pretty (lhs, rhs, context) <+> "with attached error:" <+> msg
+      where
+        note = listToMaybe (mapMaybe (`Map.lookup` stateErrorNotes st) [lhs, rhs, context])
+    -- a parse error is rendered with its snippet where it is raised
+    located (AtSource _) msg = msg
+    located Unplaced msg = msg
 
 -- | The source location of an index followed by its snippet, for naming a
 -- second site in an error.
@@ -383,26 +393,52 @@ snippet st (SrcLoc path ln col endLn endCol) =
             <> renderEndPointer
             <> line
 
-throwSystemError :: (MonadError MorlocError m) => MDoc -> m a
-throwSystemError = throwError . SystemError
-
 throwSourcedError :: (MonadError MorlocError m) => Int -> MDoc -> m a
-throwSourcedError i = throwError . SourcedError i
+throwSourcedError i = throwError . Rejected (AtNode i)
 
 throwUnificationError :: (MonadError MorlocError m) => Int -> Int -> Int -> MDoc -> m a
-throwUnificationError lhs rhs context msg = throwError $ UnificationError lhs rhs context msg
+throwUnificationError lhs rhs context = throwError . Rejected (AtUnification lhs rhs context)
+
+-- | A user error with no position in the program.
+throwRejected :: (MonadError MorlocError m) => MDoc -> m a
+throwRejected = throwError . Rejected Unplaced
+
+-- | A user error at a source position, its message already showing it.
+throwRejectedSource :: (MonadError MorlocError m) => SrcLoc -> MDoc -> m a
+throwRejectedSource loc = throwError . Rejected (AtSource loc)
+
+-- | Run an action, and recover from a rejection of the program only: an
+-- environment failure or a compiler fault still propagates.
+recoverRejected :: MorlocMonad a -> MorlocMonad a -> MorlocMonad a
+recoverRejected act recover =
+  act `catchError` \e -> case e of
+    Rejected _ _ -> recover
+    _ -> throwError e
+
+-- | True for an error that is the compiler's: a fault, or a rejection whose
+-- position was never recorded.
+isDefect :: MorlocState -> MorlocError -> Bool
+isDefect st e = case e of
+  Fault _ _ -> True
+  Rejected (AtNode i) _ -> Map.notMember i (stateSourceMap st)
+  Rejected (AtUnification lhs _ _) _ -> Map.notMember lhs (stateSourceMap st)
+  _ -> False
+
+-- | The environment failed: a file, a process, an installation.
+throwFailed :: (MonadError MorlocError m) => MDoc -> m a
+throwFailed = throwError . EnvFailed
 
 -- | Raise an internal-compiler-error ("this should never happen") with the real
 -- source location of the throw site and a pointer to the issue
 -- tracker. 'HasCallStack' supplies the accurate, non-rotting location
 -- automatically.
 throwCompilerBug :: (HasCallStack, MonadError MorlocError m) => MDoc -> m a
-throwCompilerBug = throwError . SystemError . compilerBugMsg callStack
+throwCompilerBug = throwError . Fault Nothing . compilerBugMsg callStack
 
 -- | As 'throwCompilerBug', but tied to an AST node index so the user
 -- still sees the offending source snippet.
 throwCompilerBugAt :: (HasCallStack, MonadError MorlocError m) => Int -> MDoc -> m a
-throwCompilerBugAt i = throwError . SourcedError i . compilerBugMsg callStack
+throwCompilerBugAt i = throwError . Fault (Just (AtNode i)) . compilerBugMsg callStack
 
 compilerBugMsg :: CallStack -> MDoc -> MDoc
 compilerBugMsg cs msg =
@@ -418,7 +454,7 @@ compilerBugMsg cs msg =
 
 systemCallError :: Text -> Text -> String -> MorlocMonad a
 systemCallError cmd loc msg =
-  throwSystemError $
+  throwFailed $
     maybe mempty (<> "\n\n") (buildFailureNote cmd msg)
       <> "System call failed at ("
       <> pretty loc
@@ -538,7 +574,7 @@ readLang langStr = do
   reg <- gets stateLangRegistry
   case LR.lookupByAlias langStr reg of
     Just (name, entry) -> return (ML.makeLang name (LR.lreExtension entry))
-    Nothing -> throwSystemError $ "Unknown language" <> squotes (pretty langStr)
+    Nothing -> throwRejected $ "Unknown language" <> squotes (pretty langStr)
 
 {- | Return sources for constructing an object. These are used by `NamE NamObject`
 expressions. Sources here includes some that are not linked to signatures, such

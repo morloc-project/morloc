@@ -156,7 +156,7 @@ findFixityMap (ExprI _ (ModE _ es)) = do
       (EVar, (Associativity, Int)) ->
       MorlocMonad (Map.Map EVar (Associativity, Int))
     tryAddTerm m (k, v)
-      | Map.member k m = MM.throwSystemError $ "Conflicting fixity definitions for" <+> pretty k
+      | Map.member k m = MM.throwRejected $ "Conflicting fixity definitions for" <+> pretty k
       | otherwise = return $ Map.insert k v m
 findFixityMap _ = return Map.empty
 

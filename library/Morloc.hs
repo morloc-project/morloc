@@ -342,5 +342,5 @@ checkEvalRestrictions dag = do
     checkImport :: Set.Set MVar -> (MVar, Import) -> MorlocMonad ()
     checkImport allowed (childMV, _)
       | Set.member childMV allowed = return ()
-      | otherwise = MM.throwSystemError $
+      | otherwise = MM.throwRejected $
           "module" <+> squotes (pretty childMV) <+> "is not in the eval allow-list"

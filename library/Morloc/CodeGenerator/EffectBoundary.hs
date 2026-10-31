@@ -1154,7 +1154,7 @@ hostRecords lang g ts = do
           return $ case c of
             NamF _ (FV _ (CV cv)) _ _ | cv /= "struct" -> Just v
             _ -> Nothing
-        ) `catchError` (\_ -> CMS.put st0 >> return Nothing)
+        ) `MM.recoverRejected` (CMS.put st0 >> return Nothing)
 
 -- | Refuse a value that cannot be adapted where it crosses to a host.
 refuseCrossing :: Lang -> Int -> Type -> MDoc -> MorlocMonad a

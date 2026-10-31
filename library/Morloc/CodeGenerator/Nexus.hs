@@ -1042,7 +1042,7 @@ resolveCompileTimeIntrinsic IntrCompiled = do
 -- That is a compiler bug, not a user error: every Intrinsic constructor
 -- should be resolved either inline in toNexusExpr or here.
 resolveCompileTimeIntrinsic intr =
-  MM.throwSystemError $ "Compiler bug: @" <> pretty (intrinsicName intr) <> " has no nexus-side handler"
+  MM.throwCompilerBug $ "@" <> pretty (intrinsicName intr) <> " has no nexus-side handler"
 
 -- Resolve a literal @datafile path in the nexus against the source root,
 -- where data files are mirrored, as the pools do.
@@ -1499,11 +1499,11 @@ validateArgSpecs i cmdargs asts schemas = do
     checkTableForm :: MDoc -> Maybe FormAtom -> SerialAST -> MorlocMonad ()
     checkTableForm argLoc (Just FormTable) ast = case tableFormProblem ast of
       Nothing -> return ()
-      Just e  -> MM.throwSystemError $ argLoc <> ": " <> pretty e
+      Just e  -> MM.throwRejected $ argLoc <> ": " <> pretty e
     checkTableForm _ _ _ = return ()
 
     checkTableOption :: MDoc -> Maybe FormAtom -> MorlocMonad ()
-    checkTableOption argLoc (Just FormTable) = MM.throwSystemError $ argLoc
+    checkTableOption argLoc (Just FormTable) = MM.throwRejected $ argLoc
       <> ": `@form table` is only for a positional argument; an option's"
       <> " `@default` is JSON, which a table argument does not read"
     checkTableOption _ _ = return ()
@@ -1512,7 +1512,7 @@ validateArgSpecs i cmdargs asts schemas = do
     checkArgShape argLoc ast schemaText arg =
       case Docstrings.validateCmdArg (wireShape ast) schemaText arg of
         Right _ -> return ()
-        Left e  -> MM.throwSystemError $ argLoc <> ": " <> pretty e
+        Left e  -> MM.throwRejected $ argLoc <> ": " <> pretty e
 
 -- | Why `@form table` cannot read a value of this type, if it cannot
 -- (CLI-13): it reads a `Table`, or a list of records whose fields are
@@ -1554,7 +1554,7 @@ tableFormProblem ast = case ast of
 -- | CLI-3: an `@stdin` argument is a `Str`.
 checkStdinWire :: MDoc -> Bool -> SerialAST -> MorlocMonad ()
 checkStdinWire loc True ast
-  | wireShape ast /= WStr = MM.throwSystemError $
+  | wireShape ast /= WStr = MM.throwRejected $
       loc <> ": `@stdin` is only for a `Str` argument; this one is"
         <+> pretty (Docstrings.shapeName (wireShape ast)) <> "."
 checkStdinWire _ _ _ = return ()
@@ -1564,7 +1564,7 @@ checkManyWire :: MDoc -> Bool -> SerialAST -> Text -> MorlocMonad ()
 checkManyWire _   False _ _ = return ()
 checkManyWire loc True ast schema
   | WList _ <- wireShape ast = return ()
-  | otherwise = MM.throwSystemError $
+  | otherwise = MM.throwRejected $
       loc <> ": `@many` requires a list-typed argument (wire schema"
         <> " starting with `a`); got `" <> pretty schema <> "`. Remove"
         <> " `@many` or change the type to a list."
@@ -1577,7 +1577,7 @@ checkManyWire loc True ast schema
 checkDefault :: MDoc -> SerialAST -> Text -> MorlocMonad ()
 checkDefault loc ast defaultText =
   case Aeson.eitherDecodeStrict (TE.encodeUtf8 defaultText) of
-    Left e -> MM.throwSystemError $ formatBlock
+    Left e -> MM.throwRejected $ formatBlock
       [ loc <> ": default value is not valid JSON, parser message:"
       , pretty (MT.pack e)
       , "Default text:"
@@ -1594,11 +1594,11 @@ validateAlt :: MDoc -> AltDocSet -> SerialAST -> MorlocMonad ()
 validateAlt loc r ast = do
   wireArms <- case altVariantArms ast of
     Just as -> return as
-    Nothing -> MM.throwSystemError $
+    Nothing -> MM.throwRejected $
       loc <> ": `@unroll` needs a `data`-typed argument, but the wire form is not one"
   let declared = [(altArmCtor a, length (altArmFields a)) | a <- altDocArms r]
   when (declared /= [(n, length fs) | (n, fs) <- wireArms]) $
-    MM.throwSystemError $
+    MM.throwCompilerBug $
       loc <> ": the constructors of the unrolled `data` disagree with its wire form"
   CM.forM_ (altDocDefault r) (checkDefault loc ast)
 
@@ -1634,18 +1634,18 @@ validateGroup loc r ast = case peelGroupAst ast of
     CM.forM_ entries $ \(k, entry) -> do
       let entryLoc = loc <> "/field " <> pretty (unKey k)
       case lookup k asts of
-        Nothing -> MM.throwSystemError $
+        Nothing -> MM.throwCompilerBug $
           entryLoc <> ": no schema field for unrolled record entry"
         Just subAst -> case entry of
           Right opt -> do
             let subSchema = render (Serial.serialAstToMsgpackSchema subAst)
             checkManyWire entryLoc (argOptDocMany opt) subAst subSchema
             checkDefault entryLoc subAst (argOptDocDefault opt)
-            when (argOptDocForm opt == Just FormTable) $ MM.throwSystemError $
+            when (argOptDocForm opt == Just FormTable) $ MM.throwRejected $
               entryLoc <> ": `@form table` is only for a positional argument, not a field of an unrolled record"
             case Docstrings.validateCmdArg (wireShape subAst) subSchema (CmdArgOpt opt) of
               Right _ -> return ()
-              Left e  -> MM.throwSystemError $ entryLoc <> ": " <> pretty e
+              Left e  -> MM.throwRejected $ entryLoc <> ": " <> pretty e
           Left _flag -> return ()
   _ -> return ()
   where
@@ -1737,7 +1737,7 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
   (SerialList _ dim elemAst, Aeson.Array arr) -> do
     case dim of
       Just (NatLitF n) | fromIntegral (V.length arr) /= n ->
-        MM.throwSystemError $ formatBlock
+        MM.throwRejected $ formatBlock
           [ loc <> ": default" <> pathAt path <> " is an array of length "
               <> pretty (V.length arr) <> ", expected length "
               <> pretty n <> "."
@@ -1753,7 +1753,7 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
   -- Tuples: array of exactly the right length.
   (SerialTuple _ subs, Aeson.Array arr)
     | length subs /= V.length arr ->
-        MM.throwSystemError $ formatBlock
+        MM.throwRejected $ formatBlock
           [ loc <> ": default" <> pathAt path <> " is an array of length "
               <> pretty (V.length arr) <> ", expected tuple of length "
               <> pretty (length subs) <> "."
@@ -1779,7 +1779,7 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
           Just fv -> validateValueAgainstAST loc env
                        (path <> "." <> pretty (unKey k)) fieldAst fv
           Nothing -> return ()
-      ks  -> MM.throwSystemError $ formatBlock
+      ks  -> MM.throwRejected $ formatBlock
         [ loc <> ": default" <> pathAt path
             <> (if length ks == 1
                 then " is missing required key "
@@ -1805,8 +1805,8 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
 
     backRef v = case Map.lookup v env of
       Just bound -> validateValueAgainstAST loc env path bound value
-      Nothing -> MM.throwSystemError $
-        loc <> ": compiler bug: unbound back-reference `" <> pretty (unTVar v)
+      Nothing -> MM.throwCompilerBug $
+        loc <> ": unbound back-reference `" <> pretty (unTVar v)
           <> "` reached default-value validator" <> pathAt path
 
 -- | Mismatch reporter. Describes the offending JSON value's kind
@@ -1817,7 +1817,7 @@ validateValueAgainstAST loc env0 path ast value = case (ast, value) of
 -- separated by blank lines so the terminal-wrap doesn't smear them.
 typeMismatch :: MDoc -> JsonPath -> SerialAST -> Aeson.Value -> MorlocMonad ()
 typeMismatch loc path expectedAst value =
-  MM.throwSystemError $ formatBlock
+  MM.throwRejected $ formatBlock
     [ loc <> ": default" <> pathAt path <> " has the wrong shape."
     , "Expected: " <> pretty (expectedJsonShape expectedAst)
     , "Got " <> pretty (jsonKind value) <> ": "
@@ -1983,7 +1983,7 @@ checkBoundedInt loc path ast (lo, hi) v =
 -- 'expectedJsonShape'.
 rangeMismatch :: MDoc -> JsonPath -> SerialAST -> Aeson.Value -> MorlocMonad ()
 rangeMismatch loc path ast value =
-  MM.throwSystemError $ formatBlock
+  MM.throwRejected $ formatBlock
     [ loc <> ": default" <> pathAt path <> " is out of range."
     , "Expected: " <> pretty (expectedRange ast)
     , "Got: " <> pretty (truncateForMsg (jsonGotDisplay value))
@@ -3465,7 +3465,7 @@ generate cs rASTs helperRASTs = do
   -- program's dependency closure (pool languages + DAG-wide package metadata).
   -- It lands beside manifest.json and is consumed by environment backends.
   envspec <-
-    either (MM.throwSystemError . pretty)
+    either (MM.throwRejected . pretty)
            return
            (ES.buildEnvSpec Morloc.Version.versionStr (map fst daemonSets) (statePackageMeta st))
   -- Record the pool languages so the build's provisioning hook fires for a

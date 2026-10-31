@@ -94,7 +94,7 @@ treeify d
   | Map.size d == 0 = return (Validation [] [] Map.empty, [])
   | otherwise = case DAG.roots d of
       -- if no parentless element exists, then the graph must be empty or cyclic
-      [] -> MM.throwSystemError "cyclic import dependency in treeify"
+      [] -> MM.throwCompilerBug "cyclic import dependency in treeify"
       -- else if exactly one module name key (k) is found
       [k] -> do
         case DAG.lookupNode k d of

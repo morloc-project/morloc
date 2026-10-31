@@ -329,7 +329,7 @@ loadManifest path = do
   eres <- liftIO (eitherDecodeFileStrict' path)
   case eres of
     Left err ->
-      MM.throwSystemError ("Futhark: could not read manifest " <> pretty path <> ": " <> pretty err)
+      MM.throwFailed ("Futhark: could not read manifest " <> pretty path <> ": " <> pretty err)
     Right (Manifest raws types) -> Map.traverseWithKey (convert types) raws
 
 convert :: Map Text RawType -> Text -> RawEntry -> MorlocMonad FutharkEntry
@@ -360,21 +360,21 @@ resolveType name reg s =
         else
           if rank == 0
             then resolveOpaque name reg s
-            else MM.throwSystemError (badFut name <> "arrays of tuples are not supported")
+            else MM.throwRejected (badFut name <> "arrays of tuples are not supported")
 
 resolveOpaque :: Text -> Map Text RawType -> Text -> MorlocMonad FutharkType
 resolveOpaque name reg key = case Map.lookup key reg of
-  Nothing -> MM.throwSystemError (badFut name <> "unknown opaque type " <> pretty key)
+  Nothing -> MM.throwRejected (badFut name <> "unknown opaque type " <> pretty key)
   Just rt
-    | rtRecordArray rt -> MM.throwSystemError (badFut name <> "arrays of tuples are not supported")
+    | rtRecordArray rt -> MM.throwRejected (badFut name <> "arrays of tuples are not supported")
     | rtKind rt /= "opaque" ->
-        MM.throwSystemError (badFut name <> "unsupported opaque kind " <> pretty (rtKind rt))
+        MM.throwRejected (badFut name <> "unsupported opaque kind " <> pretty (rtKind rt))
     | otherwise -> case (rtRecord rt, rtCtype rt, rtFree rt) of
         (Just (RawRecord newFn fields), Just ct, Just freeFn) -> do
           zipWithM_ (checkFieldLabel name) [0 ..] fields
           fts <- mapM (resolveField name reg) fields
           pure (FTTuple (Just (TupleInfo ct newFn freeFn [p | RawField _ p _ <- fields])) fts)
-        _ -> MM.throwSystemError (badFut name <> "opaque type " <> pretty key <> " is not a supported tuple")
+        _ -> MM.throwRejected (badFut name <> "opaque type " <> pretty key <> " is not a supported tuple")
 
 -- Futhark labels tuple fields "0","1",...; codegen binds morloc field k to the
 -- field labelled (show k). Verify the labels are positional so a future
@@ -382,14 +382,14 @@ resolveOpaque name reg key = case Map.lookup key reg of
 checkFieldLabel :: Text -> Int -> RawField -> MorlocMonad ()
 checkFieldLabel name i (RawField lbl _ _) =
   unless (lbl == tshow i) $
-    MM.throwSystemError
+    MM.throwRejected
       (badFut name <> "unexpected Futhark tuple field order (field " <> pretty i <> " labelled " <> pretty lbl <> ")")
 
 resolveField :: Text -> Map Text RawType -> RawField -> MorlocMonad FutharkType
 resolveField name reg (RawField _ _ fty) = do
   ft <- resolveType name reg fty
   case ft of
-    FTTuple{} -> MM.throwSystemError (badFut name <> "nested tuples are not supported")
+    FTTuple{} -> MM.throwRejected (badFut name <> "nested tuples are not supported")
     _ -> pure ft
 
 checkOne :: Map Text FutharkEntry -> SourcedSig -> MorlocMonad (SourcedSig, FutharkEntry)
@@ -398,10 +398,10 @@ checkOne entries sig = do
   entry <- case Map.lookup entryName entries of
     Just e -> pure e
     Nothing ->
-      MM.throwSystemError ("Futhark: no entry point named " <> pretty entryName <> " in the manifest")
+      MM.throwRejected ("Futhark: no entry point named " <> pretty entryName <> " in the manifest")
   (argTs, retT) <- decomposeSig (ssType sig)
   unless (length argTs == length (feInputs entry)) $
-    MM.throwSystemError
+    MM.throwRejected
       ( "Futhark entry " <> pretty entryName <> ": morloc signature has "
           <> pretty (length argTs) <> " arguments but the entry takes "
           <> pretty (length (feInputs entry))
@@ -413,7 +413,7 @@ checkOne entries sig = do
 compareFT :: Text -> FutharkType -> FutharkType -> MorlocMonad ()
 compareFT name expected actual =
   unless (sameShape expected actual) $
-    MM.throwSystemError
+    MM.throwRejected
       ( "Futhark entry " <> pretty name <> ": morloc signature implies "
           <> showFT expected <> " but the entry has " <> showFT actual
       )
@@ -474,7 +474,7 @@ morlocToFTField t = case classifyMorloc t of
 
 unsupportedType :: TypeU -> MorlocMonad a
 unsupportedType t =
-  MM.throwSystemError
+  MM.throwRejected
     ( "Futhark: unsupported type "
         <> pretty t
         <> " (only fixed-width numeric scalars, Vector/Matrix of them, and non-nested tuples of those are allowed)"
@@ -482,7 +482,7 @@ unsupportedType t =
 
 unsupported :: TypeU -> Text -> MorlocMonad a
 unsupported t msg =
-  MM.throwSystemError ("Futhark: " <> pretty msg <> " (in type " <> pretty t <> ")")
+  MM.throwRejected ("Futhark: " <> pretty msg <> " (in type " <> pretty t <> ")")
 
 -- ---------------------------------------------------------------------------
 -- Host (C++) type rendering -- the pass calls this to fill GlueEntry.

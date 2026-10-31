@@ -2603,40 +2603,42 @@ accept name code =
       Right _ -> return ()
       Left e -> assertFailure $ "expected acceptance, got: " <> show e
 
--- Passes on any error. Its accept twin, which differs only in the rule's
--- subject, shows that the rule is what rejects it.
+-- Passes on any rejection of the program. Its accept twin, which differs only
+-- in the rule's subject, shows that the rule is what rejects it.
 reject :: String -> MT.Text -> TestTree
 reject name code =
   testCase name $
-    runFront code >>= \case
-      Right _ -> assertFailure "expected rejection"
-      Left _ -> return ()
+    runFrontWithState code >>= \case
+      (Right _, _) -> assertFailure "expected rejection"
+      (Left e, st) | MM.isDefect st e -> assertFailure $ "expected a user error, got a compiler error: " <> show e
+      (Left _, _) -> return ()
 
 -- | A rejection reported as the user's error, not as a compiler fault.
 rejectUser :: String -> MT.Text -> TestTree
 rejectUser name code =
   testCase name $
-    runFront code >>= \case
-      Right _ -> assertFailure "expected rejection"
-      Left (SystemError e) -> assertFailure $ "expected a user error, got a compiler error: " <> show e
-      Left _ -> return ()
+    runFrontWithState code >>= \case
+      (Right _, _) -> assertFailure "expected rejection"
+      (Left e, st) | MM.isDefect st e -> assertFailure $ "expected a user error, got a compiler error: " <> show e
+      (Left e@(EnvFailed _), _) -> assertFailure $ "expected a user error, got an environment failure: " <> show e
+      (Left _, _) -> return ()
 
 -- | A rejection whose diagnostic names each type in @named@ and none in
 -- @unnamed@, as whole words. Nothing else about its text is checked.
 rejectNaming :: String -> [MT.Text] -> [MT.Text] -> MT.Text -> TestTree
 rejectNaming name named unnamed code =
   testCase name $
-    runFront code >>= \case
-      Right _ -> assertFailure "expected rejection"
-      Left (SystemError e) -> assertFailure $ "expected a user error, got a compiler error: " <> show e
-      Left err -> do
+    runFrontWithState code >>= \case
+      (Right _, _) -> assertFailure "expected rejection"
+      (Left e, st) | MM.isDefect st e -> assertFailure $ "expected a user error, got a compiler error: " <> show e
+      (Left err, _) -> do
         let ws = MT.split (\c -> not (DC.isAlphaNum c || c == '_')) (diagnosticText err)
         mapM_ (\n -> assertBool ("diagnostic does not name " <> MT.unpack n) (n `elem` ws)) named
         mapM_ (\n -> assertBool ("diagnostic names " <> MT.unpack n) (n `notElem` ws)) unnamed
   where
-    diagnosticText (SourcedError _ d) = render d
-    diagnosticText (UnificationError _ _ _ d) = render d
-    diagnosticText (SystemError d) = render d
+    diagnosticText (Rejected _ d) = render d
+    diagnosticText (EnvFailed d) = render d
+    diagnosticText (Fault _ d) = render d
 
 -- | A rejection reported at the given line of the source (counting the
 -- empty line that opens a quasiquote as line 1).
@@ -2646,7 +2648,7 @@ rejectAtLine name line code =
     (x, st) <- runFrontWithState code
     case x of
       Right _ -> assertFailure "expected rejection"
-      Left (SourcedError i _) -> fmap srcLocLine (DM.lookup i (stateSourceMap st)) @?= Just line
+      Left (Rejected (AtNode i) _) -> fmap srcLocLine (DM.lookup i (stateSourceMap st)) @?= Just line
       Left e -> assertFailure ("expected a located error, got " <> show e)
 
 -- | Acceptance with a warning that contains @needle@.

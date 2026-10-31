@@ -1900,7 +1900,7 @@ expressPolyExpr _ _ _ (AnnoS (Idx midx t) (Idx cidx _, _) NullS) =
     -- has the native form of the slot it fills. An undetermined payload is
     -- refused where its native form is inferred (POLY-6).
     OptionalT _ -> return $ PolyNull (Idx cidx t)
-    _ -> MM.throwSystemError $
+    _ -> MM.throwCompilerBug $
       "Null literal" <+> pretty midx <+> "typed" <+> dquotes (pretty t) <+> "rather than as an optional"
 -- A list literal at type `Foo a1 ... an` has exactly one element-type arg
 -- (the rest, if any, are Nat-kinded phantom dims, e.g. for Vector n a).
@@ -2491,7 +2491,7 @@ lookupRecursiveTarget parentLang v = do
       case Map.lookup v skipped of
         Just (i, t) -> rejectUndetermined i t
         Nothing -> return ()
-      MM.throwSystemError $ "Cannot resolve recursive call to" <+> pretty v
+      MM.throwCompilerBug $ "Cannot resolve recursive call to" <+> pretty v
 
 bindVarIds :: [Int] -> [Three Lang Type (Indexed Type)] -> [PolyExpr]
 bindVarIds [] [] = []

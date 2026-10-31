@@ -111,6 +111,19 @@ runFront code = do
       (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
   return x
 
+-- | 'runFront' with the final state, to tell a rejection from a defect.
+runFrontState :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int], MorlocState)
+runFrontState code = do
+  config <- emptyConfig
+  ((x, _), st) <-
+    MM.runMorlocMonad
+      Nothing
+      0
+      config
+      defaultValue
+      (typecheckFrontend Nothing (Code code) >>= mapM evaluateAnnoSTypes)
+  return (x, st)
+
 -- | Like runFront but without type alias evaluation, so nat dimensions are preserved.
 runFrontRaw :: MT.Text -> IO (Either MorlocError [AnnoS (Indexed TypeU) Many Int])
 runFrontRaw code = do
@@ -491,9 +504,10 @@ valuecheckPass msg code =
 expectError :: String -> MT.Text -> TestTree
 expectError msg code =
   testCase msg $ do
-    result <- runFront code
+    (result, st) <- runFrontState code
     case result of
       (Right _) -> assertFailure . MT.unpack $ "Expected failure"
+      (Left e) | MM.isDefect st e -> assertFailure $ "Expected a user error, got a compiler error: " <> show e
       (Left _) -> return ()
 
 -- Asserts the frontend pipeline (parse, restructure, typecheck, alias
@@ -878,7 +892,7 @@ typeAliasTests =
             runFront
               "module main (f)\nnewtype Foo = Int\ntype Py => Foo = \"int\"\ntype Py => Foo = \"float\"\nf :: Foo -> Foo\n"
           case result of
-            Left (SourcedError _ d) ->
+            Left (Rejected (AtNode _) d) ->
               assertBool (MT.unpack (render d)) (":3:1" `MT.isInfixOf` render d)
             Left e -> assertFailure $ "expected a sourced error, got " <> show e
             Right _ -> assertFailure "expected failure"
@@ -11633,15 +11647,16 @@ sourceNameTests =
         matchNamePattern "a(::a)*" "a::" @?= Right False
     ]
 
--- | Like 'expectError', but a compiler bug ('SystemError') does not count:
+-- | Like 'expectError', and also refusing an environment failure:
 -- the program must be rejected as a user error.
 expectUserError :: String -> MT.Text -> TestTree
 expectUserError msg code =
   testCase msg $ do
-    result <- runFront code
+    (result, st) <- runFrontState code
     case result of
       (Right _) -> assertFailure "Expected failure"
-      (Left (SystemError e)) -> assertFailure $ "Expected a user error, got a compiler error: " <> show e
+      (Left e) | MM.isDefect st e -> assertFailure $ "Expected a user error, got a compiler error: " <> show e
+      (Left e@(EnvFailed _)) -> assertFailure $ "Expected a user error, got an environment failure: " <> show e
       (Left _) -> return ()
 
 -- | The general type of the single export, with aliases as inference left
@@ -11651,7 +11666,7 @@ rawGeneralType code = do
   result <- runFrontRaw code
   return $ case result of
     Right [x] -> Right (closeExistentials . MTI.cleanTypeName . renameExistentials . gtypeof $ x)
-    Right _ -> Left (SystemError "expected exactly one export")
+    Right _ -> Left (Fault Nothing "expected exactly one export")
     Left e -> Left e
 
 -- | A program written with a transparent alias and the same program with the

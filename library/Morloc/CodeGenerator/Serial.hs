@@ -691,7 +691,7 @@ checkPackerCoherence = do
     checkPair a b
       | wireFormsAgree (parts a) (parts b) = return ()
       | otherwise =
-          MM.throwSystemError $
+          MM.throwRejected $
             "Packable instances disagree on the wire form of"
               <+> squotes (pretty (extractKey (piHead a))) <> ":"
               <> "\n" <> indent 2 (pretty (piHead a) <+> "->" <+> pretty (piWire a))

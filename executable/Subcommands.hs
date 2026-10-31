@@ -155,7 +155,7 @@ typecheckModuleFn mainFile = do
   -- Save current state, run typecheck in a clean sub-state
   savedState <- MM.get
   result <-
-    MM.catchError
+    MM.recoverRejected
       ( do
           xs <- M.typecheckFrontend (Just mainFile) (Code code)
           st <- MM.get
@@ -165,7 +165,7 @@ typecheckModuleFn mainFile = do
             , Just v <- [Map.lookup i (stateName st)]
             ]
       )
-      (\_ -> return [])
+      (return [])
   -- Restore state so module typechecking doesn't pollute the parent state
   MM.put savedState
   return result

@@ -164,7 +164,7 @@ loadModuleConfig (Just configFile) = do
       result <- liftIO $ Y.decodeFileEither moduleConfigFile
       case result of
         Left errMsg ->
-          MM.throwSystemError $
+          MM.throwRejected $
             "Failed to parse module config file '"
               <> pretty configFile
               <> "': "
@@ -185,7 +185,7 @@ validateLabels path mc = do
   case bad of
     [] -> return mc
     xs ->
-      MM.throwSystemError $
+      MM.throwRejected $
         "Invalid label name(s) in '" <> pretty path <> "': "
           <> hsep (punctuate "," (map (dquotes . pretty) xs))
           <> ". Labels must match [A-Za-z0-9_-]+."

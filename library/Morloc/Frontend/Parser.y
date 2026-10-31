@@ -16,7 +16,7 @@ import qualified Data.Scientific as DS
 import Data.List (sortBy, foldl')
 import qualified Control.Monad.State.Strict as State
 import Morloc.Frontend.Token
-import Morloc.Frontend.Lexer (lexMorloc, showLexError)
+import Morloc.Frontend.Lexer (LexError (..), lexMorloc, showLexError)
 import Morloc.Frontend.CST
 import qualified Morloc.Frontend.CST as CST
 import Morloc.Frontend.Desugar (DState(..), D, ParseError(..), showParseError, desugarProgram, desugarExpr)
@@ -1267,7 +1267,11 @@ applyType f x = AppU f [x]
 parseError :: ([Located], [String]) -> P a
 parseError ([], expected) = do
   srcLines <- State.gets psSourceLines
-  State.lift (Left (ParseError (Pos 0 0 "") "unexpected end of input" expected srcLines))
+  path <- State.gets psModulePath
+  let endLine = max 1 (length srcLines)
+      endCol = 1 + maybe 0 T.length (lastMaybe srcLines)
+      lastMaybe xs = if null xs then Nothing else Just (last xs)
+  State.lift (Left (ParseError (Pos endLine endCol (maybe "" id path)) "unexpected end of input" expected srcLines))
 parseError (Located pos tok _ : _, expected) = do
   srcLines <- State.gets psSourceLines
   State.lift (Left (ParseError pos ("unexpected " ++ showToken tok) expected srcLines))
@@ -1458,11 +1462,11 @@ readProgram ::
   Text ->
   PState ->
   DAG MVar Import ExprI ->
-  Either String (DAG MVar Import ExprI, PState)
+  Either (Pos, String) (DAG MVar Import ExprI, PState)
 readProgram _moduleName modulePath sourceCode pstate dag = do
   let filename = maybe "<expr>" id modulePath
   (tokens, docMap, groupToks) <- case lexMorloc filename sourceCode of
-    Left err -> Left (showLexError err)
+    Left err@(LexError pos _) -> Left (pos, showLexError err)
     Right r -> Right r
   let srcLines = T.lines sourceCode
       pstate' = pstate { psModulePath = modulePath, psDocMap = docMap, psSourceLines = srcLines }
@@ -1519,7 +1523,7 @@ readProgram _moduleName modulePath sourceCode pstate dag = do
               dag'' = Map.insert (MV "main") (modI, []) dag'
           return (dag'', finalState)
         Left _ ->
-          Left (showParseError filename' origErr)
+          Left (pePos origErr, showParseError filename' origErr)
 
     addModule d e@(ExprI _ (ModE n es)) =
       let imports = [(importModuleName i', i') | (ExprI _ (ImpE i')) <- es]

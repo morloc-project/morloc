@@ -564,11 +564,11 @@ translate srcs es = do
         }
       pool = planPool cppCaps es
       (code, stEnd) = CMS.runState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
-  mapM_ (MM.throwSystemError . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)
+  mapM_ (MM.throwRejected . ("C++ pool:" <+>) . pretty) (translatorErrors stEnd)
   when checkOn $
     case concatMap (checkOne pool) (translatorLowered stEnd) of
       [] -> return ()
-      vs -> MM.throwSystemError ("C++ pool: ownership check failed (OWN-1):" <+> vsep (map pretty vs))
+      vs -> MM.throwCompilerBug ("C++ pool: ownership check failed (OWN-1):" <+> vsep (map pretty vs))
 
   maker <- makeTheMaker cxxFlags includeDirs
 
@@ -2812,7 +2812,7 @@ flagAndPath reg src@Source {srcLang = srcL, srcPath = Just p} | LR.poolOf reg sr
       absDir <- liftIO $ MS.canonicalizePath dir
       absPath <- liftIO $ MS.canonicalizePath p
       exists <- liftIO $ MS.doesFileExist absPath
-      unless exists . MM.throwSystemError $
+      unless exists . MM.throwRejected $
         "Source file not found:" <+> pretty absPath
       incPath <- poolRelative absPath
       return (src {srcPath = Just incPath}, libFlags, Just absDir)
@@ -2840,7 +2840,7 @@ flagAndPath reg src@Source {srcLang = srcL, srcPath = Just p} | LR.poolOf reg sr
       existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
       case existingPaths of
         (x : _) -> liftIO $ MS.canonicalizePath x
-        [] -> MM.throwSystemError $ "Header file " <> pretty base <> ".* not found"
+        [] -> MM.throwRejected $ "Header file " <> pretty base <> ".* not found"
 
     lookupLib :: String -> MorlocMonad [String]
     lookupLib base = do
@@ -2865,7 +2865,7 @@ flagAndPath reg src@Source {srcLang = srcL, srcPath = Just p} | LR.poolOf reg sr
           return $ rpathFlags <> ["-L" <> MS.shellQuote libdir, "-l" <> libnamebase]
         [] -> return []
 flagAndPath reg src@Source {srcLang = srcL, srcPath = Nothing} | LR.poolOf reg srcL == cppLang = return (src, [], Nothing)
-flagAndPath _ _ = MM.throwSystemError $ "flagAndPath should only be called for C++ functions"
+flagAndPath _ _ = MM.throwCompilerBug $ "flagAndPath should only be called for C++ functions"
 
 getFile :: Path -> IO (Maybe Path)
 getFile x = do

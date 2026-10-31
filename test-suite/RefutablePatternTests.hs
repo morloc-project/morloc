@@ -32,7 +32,7 @@ lex' src = case lexMorloc "<test>" src of
 -- unit. A `|`-definition is well-formed here even though its synthesized
 -- '==' tests are only resolved later during typechecking.
 parseMod :: Text -> Either String ()
-parseMod src = () <$ readProgram Nothing Nothing src emptyPState mempty
+parseMod src = either (Left . snd) (const (Right ())) (readProgram Nothing Nothing src emptyPState mempty)
 
 refutablePatternTests :: TestTree
 refutablePatternTests = testGroup "Refutable patterns (`|`-clauses)"

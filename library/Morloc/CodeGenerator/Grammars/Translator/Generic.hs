@@ -207,7 +207,7 @@ translateExternal cmd lang desc srcs es = do
 
   case exitCode of
     Exit.ExitFailure code' ->
-      MM.throwSystemError $
+      MM.throwFailed $
         "External codegen '"
           <> pretty cmd
           <> "' failed with exit code "
@@ -219,7 +219,7 @@ translateExternal cmd lang desc srcs es = do
       let manifest = Aeson.decodeStrict (TE.encodeUtf8 (T.pack stdoutStr)) :: Maybe CodegenManifest
       case manifest of
         Nothing ->
-          MM.throwSystemError $
+          MM.throwFailed $
             "External codegen '"
               <> pretty cmd
               <> "' produced invalid manifest on stdout"
@@ -279,7 +279,7 @@ loadDescriptorForLang lang = do
       case lookup (T.unpack name) [(n, DF.embededFileText ef) | (n, ef) <- DF.langRegistryFiles] of
         Just yamlText -> case loadLangDescriptorFromText yamlText of
           Left err ->
-            MM.throwSystemError $
+            MM.throwCompilerBug $
               "Failed to parse embedded lang.yaml for " <> pretty name <> ": " <> pretty err
           Right desc -> return desc
         Nothing -> do
@@ -289,7 +289,7 @@ loadDescriptorForLang lang = do
           result <- liftIO $ loadLangDescriptor descPath
           case result of
             Left err ->
-              MM.throwSystemError $
+              MM.throwFailed $
                 "Failed to load language descriptor for " <> pretty name <> ": " <> pretty err
             Right desc -> return desc
 
@@ -328,7 +328,7 @@ translateSource desc p = do
   -- Without this, a missing source surfaces as a confusing runtime
   -- ImportError / module-not-found inside the pool.
   exists <- liftIO $ Dir.doesFileExist p
-  unless exists . MM.throwSystemError $
+  unless exists . MM.throwRejected $
     "Source file not found:" <+> pretty p
   let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
   if ldQualifiedImports desc

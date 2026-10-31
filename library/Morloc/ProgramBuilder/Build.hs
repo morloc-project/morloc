@@ -188,7 +188,7 @@ buildProgram (manifest, wrappers, pools) = do
         when dirExists $ do
           contents <- liftIO $ SD.listDirectory swapTarget
           when (not (null contents) && not force) $
-            MM.throwSystemError $ "Install directory already exists: " <> pretty swapTarget
+            MM.throwFailed $ "Install directory already exists: " <> pretty swapTarget
               <> ". Use --force to overwrite."
       (staging, dst) <- ensureStagingDir
       liftIO $ SD.setCurrentDirectory dst
@@ -289,15 +289,15 @@ syncEnvDeps projectRoot = do
           result <- liftIO (runHook hook self installed key root)
           case result of
             Left e ->
-              MM.throwSystemError $ "could not run " <> pretty hook <> ": " <> pretty (show e)
+              MM.throwFailed $ "could not run " <> pretty hook <> ": " <> pretty (show e)
             Right ExitSuccess -> return ()
             Right (ExitFailure _) ->
-              MM.throwSystemError
+              MM.throwFailed
                 "environment dependency provisioning failed (see the output above)."
         -- MORLOC_ENV is set (a managed env that expects provisioning) but no build
         -- hook is named.
         _ | requireHook ->
-              MM.throwSystemError . vsep $
+              MM.throwFailed . vsep $
                 [ "This program declares package dependencies and MORLOC_ENV is set, but"
                 , "MORLOC_BUILD_HOOK names no provisioning program. A managed environment"
                 , "must export MORLOC_BUILD_HOOK (the dependency agent, e.g. mim) so"
@@ -380,7 +380,7 @@ writeScript s = do
     [] -> return ()
     errs -> do
       msgs <- liftIO (mapM describeWriteFailure errs)
-      MM.throwSystemError (vsep msgs)
+      MM.throwFailed (vsep msgs)
 
 runMakes :: Script -> MorlocMonad ()
 runMakes s = mapM_ runSysCommand [c | c <- scriptMake s, not (isToolchainCheck c)]
@@ -410,7 +410,7 @@ describeWriteFailure _ = return "Failed to write generated files."
 -- from outside the environment.
 requireStrictToolchain :: PoolToolchain -> MorlocMonad ()
 requireStrictToolchain kind =
-  liftIO (strictToolchainError kind) >>= maybe (return ()) (MM.throwSystemError . pretty)
+  liftIO (strictToolchainError kind) >>= maybe (return ()) (MM.throwFailed . pretty)
 
 runSysCommand :: SysCommand -> MorlocMonad ()
 runSysCommand (SysExe path) = liftIO $ callProcess "chmod" ["755", path]
@@ -418,4 +418,4 @@ runSysCommand (SysRun (Code cmd)) = MM.runCommand "runSysCommand" cmd
 runSysCommand (SysMergeCargoLock base envLock pool) = liftIO $ CL.mergeLockFiles base envLock pool
 runSysCommand (SysRequireToolchain kind) = requireStrictToolchain kind
 runSysCommand other =
-  MM.throwSystemError $ "Unsupported SysCommand: " <> pretty (show other)
+  MM.throwCompilerBug $ "Unsupported SysCommand: " <> pretty (show other)

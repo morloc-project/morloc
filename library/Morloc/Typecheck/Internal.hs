@@ -2523,12 +2523,12 @@ weaveSelectors (s0 : ss0) = foldrM weavePair s0 ss0
       xs <- mapM (secondM weaveSelectors) (groupSort ((s1 : ss1) <> (s2 : ss2)))
       return $ SelectorKey (head xs) (tail xs)
     weavePair x@(SelectorKey _ _) y@(SelectorIdx _ _) = weavePair y x
-    weavePair (SelectorIdx _ _) (SelectorKey _ _) = MM.throwSystemError "Bad pattern, cannot merge index and keyword patterns"
+    weavePair (SelectorIdx _ _) (SelectorKey _ _) = MM.throwCompilerBug "Bad pattern, cannot merge index and keyword patterns"
     -- Bracket selectors cannot be merged with field selectors at the
     -- same position: a value is either a tuple/record or an array,
     -- not both. The desugar only ever weaves siblings of the same
     -- kind, so reaching this branch means a malformed selector.
-    weavePair _ _ = MM.throwSystemError "Bad pattern, cannot merge bracket selectors with field selectors at the same position"
+    weavePair _ _ = MM.throwCompilerBug "Bad pattern, cannot merge bracket selectors with field selectors at the same position"
 
 selectorGetter :: TypeU -> Selector -> [TypeU]
 selectorGetter t SelectorEnd = [t]

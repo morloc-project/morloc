@@ -34,6 +34,7 @@ module Morloc.Namespace.State
 
     -- * Error handling
   , MorlocError (..)
+  , Location (..)
 
     -- * Configuration
   , Config (..)
@@ -461,14 +462,21 @@ data TermTypes = TermTypes
 
 ---- Error types
 
--- | All compiler errors
+-- | Why a compilation stopped: the program is wrong, the environment failed,
+-- or the compiler is wrong (DIAG-1: a 'Fault' is a defect).
 data MorlocError
-  = -- | Error tied to a specific AST node index
-    SourcedError Int MDoc
-  | -- | Internal compiler error (bug)
-    SystemError MDoc
-  | -- | Type unification failure
-    UnificationError Int Int Int MDoc
+  = Rejected Location MDoc
+  | EnvFailed MDoc
+  | Fault (Maybe Location) MDoc
+  deriving (Show)
+
+-- | Where in the program an error is. 'Unplaced' marks a rejection that does
+-- not yet name its source (DIAG-2).
+data Location
+  = AtNode Int
+  | AtSource SrcLoc
+  | AtUnification Int Int Int
+  | Unplaced
   deriving (Show)
 
 ---- Configuration

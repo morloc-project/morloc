@@ -65,7 +65,7 @@ lowerFuthark asts futSrcs = do
   guestSources <- dedupSources futSrcs
   langParams <- MM.gets stateLangParams
   (backend, device) <- case resolveFutharkBuild langParams of
-    Left msg -> MM.throwSystemError (pretty msg)
+    Left msg -> MM.throwRejected (pretty msg)
     Right bd -> return bd
   products <- guestBuild futharkGuest guestSources (BuildOpts backend device outDir)
   let sigs = [SourcedSig src t | (src, t) <- futSrcs]

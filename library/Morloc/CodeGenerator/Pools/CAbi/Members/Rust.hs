@@ -1469,13 +1469,13 @@ translate srcs es0 = do
   stageTable <- stageTableEntries
   let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsGScope = generalScope, rsSrcTypeVarMask = srcTypeVarMask, rsSrcMakers = srcMakers, rsLogTemplates = logTemplates, rsStageTable = stageTable, rsPool = planPool rustCaps es, rsBuilds = lastBuilds Map.empty Set.empty (rustSeeds (planPool rustCaps es) es0) es0}
       (code, stEnd) = CMS.runState (runReaderT (makeRustCode includeDocs closureAsts closureTable es) emptyOwnEnv) st0
-  mapM_ (MM.throwSystemError . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
+  mapM_ (MM.throwRejected . ("Rust pool:" <+>) . pretty) (rsErrors stEnd)
 
   home <- MM.asks configHome
   deps <- rustDepsUnion
   localCrates <- rustLocalDeps
   installDir <- MM.gets stateInstallDir
-  profile <- MM.gets stateLangParams >>= either (MM.throwSystemError . pretty) return . resolveRustProfile
+  profile <- MM.gets stateLangParams >>= either (MM.throwRejected . pretty) return . resolveRustProfile
   -- The pool crate/bin name is derived from the build LOCATION (unique per
   -- program/build-dir, stable across edits of one program). With a shared cargo
   -- --target-dir (used to cache rustmorloc/deps across builds), this keeps one
@@ -1548,7 +1548,7 @@ readRustLock lockPath = do
   if exists
     then liftIO (MT.readFile lockPath)
     else
-      MM.throwSystemError $
+      MM.throwFailed $
         "missing Rust workspace lock at " <> squotes (pretty lockPath)
           <> "; run `morloc init -f` to persist the Rust runtime source"
 
@@ -2180,7 +2180,7 @@ rustDepsUnion = do
     ( \acc (crate, ver) -> case Map.lookup crate acc of
         Just v
           | v /= ver ->
-              MM.throwSystemError $
+              MM.throwRejected $
                 "conflicting rust-deps versions for crate "
                   <> squotes (pretty crate)
                   <> ": "
@@ -2306,7 +2306,7 @@ makeTheMaker crateName locks = do
   case cargoAvail of
     Just _ -> return ()
     Nothing ->
-      MM.throwSystemError
+      MM.throwFailed
         "building a Rust pool requires `cargo` on PATH (install Rust: https://rustup.rs)"
   home <- MM.asks configHome
   state <- MM.asks configState

@@ -26,7 +26,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Frontend.Desugar as Desugar
-import Morloc.Frontend.Token (Pos (..))
+import Morloc.Frontend.Token (Pos (..), posSrcLoc)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import Morloc.Typecheck.Internal (expandTransparentAliases)
@@ -69,7 +69,7 @@ synthesizeTerminalActions dag = do
             Just txt | null (Desugar.peSourceLines err) -> err {Desugar.peSourceLines = T.lines txt}
             _ -> err
           label = if null file then "<terminal-action synthesis>" else file
-      MM.throwSystemError . pretty $ Desugar.showParseError label err'
+      MM.throwRejectedSource (posSrcLoc (Desugar.pePos err')) . pretty $ Desugar.showParseError label err'
     Right (results, dsFinal) -> do
       MM.setCounter (Desugar.dsExpIndex dsFinal)
       MM.modify' (\st -> st

@@ -243,11 +243,11 @@ resolveFail ::
   TypeU ->
   Either MorlocError TypeU
 resolveFail _ _ (AppU (VarU v) _) =
-  MM.throwSystemError $
+  MM.throwRejected $
     "Could not resolve type applied variable" <+> squotes (pretty v)
       <> ". You may be missing a language-specific type definition."
 resolveFail _ _ (VarU v) =
-  MM.throwSystemError $
+  MM.throwRejected $
     "Could not resolve type for variable" <+> squotes (pretty v)
       <> ". You may be missing a language-specific type definition."
 resolveFail _ _ _ = MM.throwCompilerBug "resolveFail reached an unexpected branch"
@@ -365,7 +365,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                        (TypedefAlias, True) -> terminate bnd' substituted
                        (TypedefAlias, False) -> recurse bnd' substituted
                 Nothing ->
-                  MM.throwSystemError $
+                  MM.throwRejected $
                     "No matching alias found for" <+> pretty t0
                       <> "\n  Available aliases have"
                       <+> pretty (length ts') <+> "entries, none match the given arguments"
@@ -414,7 +414,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                        | isTerminal -> terminate bnd' t2
                        | otherwise -> recurse bnd' t2
               Nothing ->
-                MM.throwSystemError $
+                MM.throwRejected $
                   "No matching alias found for" <+> pretty t0
                     <> "\n  Available aliases have"
                     <+> pretty (length ts1) <+> "entries, none match"
@@ -585,7 +585,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
       , kind1 == TypedefAlias && kind2 == TypedefAlias =
           return (Just a)
       | otherwise =
-          MM.throwSystemError $
+          MM.throwRejected $
             "Cannot merge conflicting type aliases:"
               <> "\n  t1:" <+> pretty t1
               <> "\n  t2:" <+> pretty t2

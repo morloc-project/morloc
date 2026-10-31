@@ -136,7 +136,7 @@ addPin pinMap depth declaredBy depName depHash =
       | pinDepth existing == depth ->
           if hashEq (pinHash existing) depHash
             then return pinMap
-            else MM.throwSystemError $
+            else MM.throwRejected $
                    "Conflicting pins for module" <+> squotes (pretty depName)
                    <+> "at depth" <+> pretty depth <> ":"
                    <+> "hash" <+> squotes (pretty (pinHash existing))
@@ -189,7 +189,7 @@ pinSource (Just h) (ModuleSourceRemoteGit r)
 pinSource _ src = src
 
 moduleInstallError :: MDoc -> MorlocMonad a
-moduleInstallError msg = MM.throwSystemError $ "Failed to install module:" <+> msg
+moduleInstallError msg = MM.throwFailed $ "Failed to install module:" <+> msg
 
 -- | Recursively remove the install target if it exists. Used both as the
 -- onException handler on the initial fetch IO and to roll back when a
@@ -376,7 +376,7 @@ findLocalModule :: MVar -> MVar -> MorlocMonad Path
 findLocalModule currentModule importModule = do
   allowLocal <- MM.gets stateAllowLocalModules
   if not allowLocal
-    then MM.throwSystemError $
+    then MM.throwRejected $
       "Within module" <+> squotes (pretty currentModule)
         <> "," <+> "local import" <+> squotes (pretty importModule)
         <+> "is not permitted in eval mode."
@@ -384,7 +384,7 @@ findLocalModule currentModule importModule = do
     else return ()
   projectRoot <- MM.gets stateProjectRoot
   case projectRoot of
-    Nothing -> MM.throwSystemError $
+    Nothing -> MM.throwRejected $
       "Cannot resolve local import" <+> squotes (pretty importModule)
         <+> "without a project root (are you reading from stdin?)"
     Just root -> findLocalModuleAt currentModule root importModule
@@ -402,7 +402,7 @@ findLocalModuleAt currentModule root importModule = do
       existingPaths <- liftIO . fmap catMaybes . mapM getFile $ candidates
       case existingPaths of
         (x : _) -> return x
-        [] -> MM.throwSystemError $
+        [] -> MM.throwRejected $
           "Within module" <+> squotes (pretty currentModule)
             <> "," <+> "failed to import local module" <+> squotes (pretty importModule)
             <> "\nThe following paths were searched:\n"
@@ -496,7 +496,7 @@ findBareModule currentModule importModule = do
   existingLocal <- liftIO . fmap catMaybes . mapM getFile $ localPaths
   case (existingSystem, existingLocal) of
     (s:_, l:_) ->
-      MM.throwSystemError $
+      MM.throwRejected $
         "Ambiguous import" <+> squotes (pretty importModule)
           <+> "from module" <+> squotes (pretty currentModule)
           <> "\nFound in system:" <+> pretty s
@@ -533,7 +533,7 @@ findBareModule currentModule importModule = do
                       <+> pretty found
                       <+> pretty expected
             [] -> mempty
-      MM.throwSystemError $
+      MM.throwRejected $
         "Within module" <+> squotes (pretty currentModule)
           <> ","
             <+> "failed to import module"
@@ -619,7 +619,7 @@ loadSnapshot = do
       case Map.lookup name acc of
         Just h
           | not (hashEq h hash) ->
-              MM.throwSystemError $
+              MM.throwFailed $
                 "Conflicting snapshot pins for module" <+> squotes (pretty name)
                 <> ":" <+> pretty h <+> "vs" <+> pretty hash
                 <+> "(in" <+> pretty path <> ")"
@@ -845,8 +845,8 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
     _ -> installModuleClassic fdbDir
   where
     installModuleClassic fdbDir = case parse (moduleInstallParser (MT.pack coreorg)) "" modstr of
-      (Left errstr) -> moduleInstallError (pretty . show $ errstr)
-      (Right (Left errstr)) -> moduleInstallError $ pretty errstr
+      (Left errstr) -> MM.throwRejected $ "Failed to install module:" <+> pretty (show errstr)
+      (Right (Left errstr)) -> MM.throwRejected $ "Failed to install module:" <+> pretty errstr
       (Right (Right source)) -> do
         rawName <- case source of
               ModuleSourceLocal path _ ->
@@ -854,7 +854,7 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
               ModuleSourceRemoteGit remote -> return $ gitReponame remote
               ModuleSourceRegistry _ n -> return n
         name <- case validateModuleName modstr rawName of
-          Left err -> moduleInstallError $ pretty err
+          Left err -> MM.throwRejected $ "Failed to install module:" <+> pretty err
           Right n -> return n
         -- Make the FETCH honor the authoritative pin (snapshot, else package
         -- pin) for a bare install string, so an explicit `morloc install foo`
@@ -891,7 +891,7 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
           -- hash. A snapshot/pin that disagrees with what is installed is a
           -- hard error unless an explicit --force (ForceOverwrite) sanctions
           -- the migration.
-          when (coherenceMismatch && overwrite /= ForceOverwrite) . MM.throwSystemError $
+          when (coherenceMismatch && overwrite /= ForceOverwrite) . MM.throwFailed $
             "Environment coherence violation for module" <+> squotes (pretty name) <> "."
             <> "\n  installed:" <+> pretty (fromMaybe "?" installedHash)
             <> "\n  required :" <+> pretty (fromMaybe "?" expectedHash)
@@ -905,7 +905,7 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
           -- on every machine.
           clash <- liftIO $ caseClash targetDir
           case clash of
-            Just other -> MM.throwSystemError $
+            Just other -> MM.throwFailed $
               "Module" <+> squotes (pretty name) <+> "cannot be installed beside"
                 <+> squotes (pretty other) <> ": their names differ only in case,"
                 <+> "which a case-insensitive filesystem does not distinguish"

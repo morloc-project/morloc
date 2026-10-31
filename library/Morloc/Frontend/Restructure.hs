@@ -561,7 +561,7 @@ resolveImports d0 =
                     exportCtorsWithTypes allSymbols resolved (resolveExplicitSymbols allSymbols ungroupedExports)
                   return $ AST.setExport (ExportMany resolvedUngrouped resolvedGroups) e
                 else
-                  MM.throwSystemError $
+                  MM.throwRejected $
                     "Module"
                       <+> squotes (pretty m)
                       <+> "does not export the following terms or types:"
@@ -750,7 +750,7 @@ resolveImports d0 =
     throwMissingImportError :: MVar -> MVar -> [Text] -> MorlocMonad a
     throwMissingImportError m1 m2 missing =
       let (methods, notExported) = partitionMissing missing
-       in MM.throwSystemError $ vsep (methodSection methods m1 m2 ++ notExportedSection notExported m1 m2)
+       in MM.throwRejected $ vsep (methodSection methods m1 m2 ++ notExportedSection notExported m1 m2)
 
     methodSection :: [(Text, ClassName)] -> MVar -> MVar -> [MDoc]
     methodSection [] _ _ = []
@@ -895,7 +895,7 @@ handleBinops d0 = do
       (Just v') ->
         if v == v'
           then return m
-          else MM.throwSystemError $ "Conflicting fixity definitions for" <+> pretty k
+          else MM.throwRejected $ "Conflicting fixity definitions for" <+> pretty k
 
     updateBinopExprs :: Map EVar (Associativity, Int) -> ExprI -> MorlocMonad ExprI
     updateBinopExprs m0 = f
@@ -1246,7 +1246,7 @@ checkConflictingForms modules lang scope =
                   <> vsep ["Also declared at" <+> s | s <- sites]
                   <> line
                   <> "and here:"
-            [] -> MM.throwSystemError msg
+            [] -> MM.throwRejected msg
   where
     what = maybe "declarations" (\l -> pretty l <+> "forms") lang
     -- A general alias is declared once (ALIAS-9): it has no parameter
@@ -1284,7 +1284,7 @@ checkReservedDeclarations scope =
   case [v | (v@(TV n), _ : _ : _) <- Map.toList scope, isReservedTypeName n] of
     [] -> return ()
     vs ->
-      MM.throwSystemError $
+      MM.throwRejected $
         "The built-in type" <> (if length vs > 1 then "s" else "")
           <+> hsep (punctuate "," (map (squotes . pretty) vs))
           <+> "cannot be declared again with a different definition"
@@ -1486,7 +1486,7 @@ checkAliasLanguageFormConflict dag gscope cscopes =
                 let whereClause = case mMod of
                       Just m  -> line <> "Declared in module" <+> squotes (pretty (unMVar m)) <> "."
                       Nothing -> mempty
-                in MM.throwSystemError (header <> whereClause <> line <> advice)
+                in MM.throwRejected (header <> whereClause <> line <> advice)
   where
     -- Walk the per-module AST to find the per-language typedef
     -- declaration for (lang, v). Returns the declaration's AST index
