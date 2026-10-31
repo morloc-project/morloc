@@ -133,10 +133,9 @@ data LexState = LexState
                               -- context), False = list literal / type bracket
   }
 
--- | True when the current bracket context is a slice bracket. Inside a slice
--- bracket every ':' must lex as a single TokColon rather than coalescing into
--- longer operator tokens like '::', '::-', or ':-'. This is required so
--- Python-style slice syntax such as .[::-1] and .[:-1] tokenizes correctly.
+-- | True directly inside a slice bracket, where every ':' is a TokColon, so
+-- that @.[::-1]@ is not read as the operator @::-@. Any other delimiter
+-- opened inside it restores the ordinary operator lexer.
 inSliceBracket :: LexState -> Bool
 inSliceBracket st = case lsBracketStack st of
   (True : _) -> True
@@ -193,10 +192,7 @@ lexOne st@(LexState input pos toks _) = case input of
             , lsPos = advanceCol pos len
             , lsTokens = Located pos (TokDocLine txt) (T.pack ("--'" ++ line)) : toks
             }
-  -- Line comments: -- always starts a comment, no matter what follows.
-  -- Some "--"-prefixed sequences have special internal meaning (--' for
-  -- docstrings handled earlier, --* for doc groups handled earlier,
-  -- --^ reserved and rejected below). Operators cannot begin with "--".
+  -- `--` at the start of a token opens a line comment; `--^` is reserved
   '-' : '-' : rest
     | not (null rest) && head rest `elem` ['\'', '^'] ->
         Left (LexError pos "unexpected docstring marker")
@@ -246,13 +242,7 @@ lexOne st@(LexState input pos toks _) = case input of
   '0' : 'b' : rest -> lexBinaryNumber pos rest st
   '0' : 'B' : rest -> lexBinaryNumber pos rest st
   c : _ | isDigit c -> lexDecNumber pos input st
-  -- Delimiters and punctuation. lsBracketStack tracks every open delimiter
-  -- so the lexer knows when it is in slice-axis position. Inside a slice
-  -- bracket the slice-colon rule splits every ':' into a single TokColon; the
-  -- moment any nested delimiter ('(', '{', or a non-slice '[') opens, the
-  -- shielding pushes False, restoring the regular operator lexer so '::',
-  -- ':-', user-defined colon operators, etc., tokenize normally inside the
-  -- nested expression. The original context resumes on the matching close.
+  -- Delimiters, each pushed on lsBracketStack ('inSliceBracket')
   '(' : rest ->
     Right
       st
@@ -385,12 +375,7 @@ lexOne st@(LexState input pos toks _) = case input of
     | null rest || not (isAlphaNum (head rest) || head rest == '_' || head rest == '\'') ->
         Right st { lsInput = rest, lsPos = advanceCol pos 7
                  , lsTokens = Located pos TokPragmaInline "%inline" : toks }
-  -- As-pattern '@': emitted when '@' is glued to an operand-finishing
-  -- token (identifier, ')', etc.) with no intervening whitespace. In
-  -- that position an intrinsic reference would be nonsensical anyway
-  -- (you can't apply an intrinsic without a delimiter), so grabbing
-  -- '@' as TokAt is unambiguous. Precedes the intrinsic rule so that
-  -- 'x@lst' lexes as x, @, lst rather than x, @lst.
+  -- '@' glued to the end of an operand is an as-pattern: `x@lst` is x, @, lst
   '@' : rest | isAsPatPosition pos toks ->
     emit1 TokAt "@" rest
   -- Intrinsics: @name (@ followed by lowercase letter, at token-start
@@ -401,26 +386,12 @@ lexOne st@(LexState input pos toks _) = case input of
         len = 1 + length word
      in Right st { lsInput = rest', lsPos = advanceCol pos len
                  , lsTokens = Located pos (TokIntrinsic name) (T.cons '@' name) : toks }
-  -- Negative numeric literal: '-' immediately followed by a digit, in unary
-  -- position. Unary position means: no previous token (start of input), or the
-  -- previous significant token is non-operand-finishing (e.g., '(', '[', ',',
-  -- '=', operator, keyword), or there is whitespace between the previous token
-  -- and this dash. Examples that lex as a single negative number token:
-  --   -1            (start of input)
-  --   f -1          (whitespace before dash)
-  --   1 + -2        (operator before, whitespace separated)
-  --   (-1) [-1,-2]  (open delimiter or comma before)
-  -- Examples that fall through to TokMinus (binary or section context):
-  --   f-1   x-1     (operand-finishing prev, no whitespace before dash)
-  --   f - 1         (whitespace AFTER dash, so next char isn't a digit)
+  -- Negative numeric literal: '-' then a digit, unless glued to the end of
+  -- an operand (`f-1` subtracts, `f -1` applies)
   '-' : c : rest
     | isDigit c, isUnaryDashPosition pos toks ->
         lexNegativeNumber pos (c : rest) st
-  -- Atomic non-finite literals: `-Inf` / `-NaN` in unary dash position
-  -- behave like `-1.5` -- a single token rather than `negate(Inf)`. This
-  -- keeps non-finite literals usable from pure morloc, where `negate` is
-  -- not in scope. NaN sign is collapsed (our wire format has a single
-  -- "nan" form), so `-NaN` produces TokNaN identical to bare `NaN`.
+  -- `-Inf` and `-NaN` in the same position are literals too; NaN has no sign
   '-' : 'I' : 'n' : 'f' : rest
     | isUnaryDashPosition pos toks
     , not (isIdentBodyChar rest) ->
@@ -437,15 +408,7 @@ lexOne st@(LexState input pos toks _) = case input of
           , lsPos = advanceCol pos 4
           , lsTokens = Located pos TokNaN "-NaN" : toks
           }
-  -- Slice-axis position (top of lsBracketStack is True): force every ':' to
-  -- lex as a single TokColon. This prevents the operator lexer from
-  -- coalescing '::', '::-', ':-', ':>', etc. into multi-char operator tokens,
-  -- so Python-style slice syntax like .[::-1], .[:-1], .[::2], .[i::k]
-  -- tokenizes as intended. Nested '(', '{', or non-slice '[' shield their
-  -- contents from this rule -- so an annotation '(k :: Int)', a labeled term
-  -- '(lbl:k)', or any user-defined colon operator can still appear inside a
-  -- slice bracket as long as it is wrapped in parens or another shielding
-  -- delimiter.
+  -- 'inSliceBracket'
   ':' : rest | inSliceBracket st ->
     Right
       st
@@ -578,8 +541,6 @@ classifyOp ":" = TokColon
 classifyOp "*" = TokStar
 classifyOp "-" = TokMinus
 classifyOp "|" = TokPipe
--- < and > are also operators but we need them as angle brackets in some contexts
--- The parser handles disambiguation
 classifyOp "<" = TokLAngle
 classifyOp ">" = TokRAngle
 classifyOp t = TokOperator t
